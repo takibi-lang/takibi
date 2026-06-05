@@ -1,0 +1,22 @@
+let g_int = 1;
+let g_char: char = 0;
+
+fn foo(c: int) {
+  return 1;
+}
+
+fn bar(a: int, b: int): int {
+  let r = 0;
+
+  if (2 * a + 1 > b) {
+    while (r != 0) {
+      r = foo(a);
+    }
+
+    return r;
+  } else {
+    r = g_int;
+  }
+
+  return r;
+}

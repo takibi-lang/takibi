@@ -1,0 +1,15 @@
+(library
+ (name takibi)
+ (public_name takibi)
+ (modules ast lexer parser typechecker codegen llvm_gen)
+ (libraries menhirLib llvm llvm.analysis llvm.target llvm.all_backends)
+ (preprocess
+  (pps ppx_deriving.show)))
+
+(menhir
+ (modules parser))
+
+(rule
+ (targets lexer.ml)
+ (deps    lexer.mll)
+ (action  (run ocamllex -o lexer.ml lexer.mll)))
