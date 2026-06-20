@@ -3,6 +3,13 @@
   "features": {
     "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
   },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ocamllabs.ocaml-platform"
+      ]
+    }
+  },
   "mounts": [
     "source=claude-code-config,target=/home/opam/.claude,type=volume"
   ],
