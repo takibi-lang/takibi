@@ -1,0 +1,13 @@
+{
+  "image": "ocaml/opam:debian-12-ocaml-5.2",
+  "features": {
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+  },
+  "mounts": [
+    "source=claude-code-config,target=/home/opam/.claude,type=volume"
+  ],
+  "postCreateCommand": "opam update && opam install -y dune menhir ppx_deriving llvm",
+  "containerEnv": {
+    "OPAMYES": "true"
+  }
+}
