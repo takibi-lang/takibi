@@ -30,6 +30,14 @@ let rec infer_expr tyenv fenv (e : Ast.expr) : ty =
            (* both operands must have the same type *)
            unify_at e.loc t1 t2;
            TInt)
+  | Deref e1 ->
+      let inner = fresh () in
+      let t1 = infer_expr tyenv fenv e1 in
+      unify_at e1.loc t1 (TPtr inner);
+      inner
+  | AddrOf name ->
+      let t = lookup e.loc name tyenv in
+      TPtr t
   | Call (fname, args) ->
       (match List.assoc_opt fname fenv with
        | None ->
@@ -67,6 +75,13 @@ let rec infer_stmt tyenv fenv ret_ty local_types (s : Ast.stmt) : tyenv =
       let vty = lookup s.loc name tyenv in
       let ety = infer_expr tyenv fenv e in
       unify_at e.loc vty ety;
+      tyenv
+  | AssignDeref (ptr_expr, val_expr) ->
+      let inner = fresh () in
+      let pt = infer_expr tyenv fenv ptr_expr in
+      unify_at ptr_expr.loc pt (TPtr inner);
+      let vt = infer_expr tyenv fenv val_expr in
+      unify_at val_expr.loc vt inner;
       tyenv
   | Let (name, ty_opt, expr_opt) ->
       let ty = of_ast_opt ty_opt in

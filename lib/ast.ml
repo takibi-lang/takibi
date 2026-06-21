@@ -15,18 +15,21 @@ type binop =
   | Lt | Gt | Le | Ge | Eq | Ne
 [@@deriving show]
 
+type type_expr =
+  | TypeInt
+  | TypeChar
+  | TypeVoid
+  | TypePtr of type_expr   (* *T *)
+[@@deriving show]
+
 type expr = expr_desc located
 and expr_desc =
   | IntLit of int
   | Var of ident
   | Call of ident * expr list
   | BinOp of binop * expr * expr
-[@@deriving show]
-
-type type_expr =
-  | TypeInt
-  | TypeChar
-  | TypeVoid
+  | Deref of expr           (* *expr  — read through pointer *)
+  | AddrOf of ident         (* &ident — take address of a local *)
 [@@deriving show]
 
 type stmt = stmt_desc located
@@ -34,6 +37,7 @@ and stmt_desc =
   | Return of expr
   | Expr of expr
   | Assign of ident * expr
+  | AssignDeref of expr * expr   (* *lhs = rhs — write through pointer *)
   | Block of stmt list
   | Let of ident * type_expr option * expr option
   | If of expr * stmt list * stmt list

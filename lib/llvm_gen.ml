@@ -8,8 +8,12 @@ let the_module = create_module context "takibi_module"
 let builder = builder context
 
 (* Global tables — populated during gen_program *)
-let global_vars : (string, lltype * llvalue) Hashtbl.t = Hashtbl.create 16
+(* Stores (ast_type, llvalue) for global variables *)
+let global_vars : (string, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 16
+(* Stores (function_lltype, llvalue) for declared functions *)
 let functions   : (string, lltype * llvalue) Hashtbl.t = Hashtbl.create 16
+(* Stores the return AST type for each function (needed when typing Call results) *)
+let func_ret_ast_types : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 16
 
 let setup_target () =
   let _ = Llvm_all_backends.initialize () in
@@ -28,43 +32,52 @@ let emit_object machine output_path =
     output_path
     machine
 
+(* ── Type helpers ──────────────────────────────────────────────────────── *)
+
 let ltype_of_ast = function
-  | TypeInt  -> i32_type context
-  | TypeChar -> i8_type  context
+  | TypeInt      -> i32_type context
+  | TypeChar     -> i8_type  context
+  | TypeVoid     -> void_type context
+  | TypePtr _    -> pointer_type context   (* LLVM 19: all pointers are opaque ptr *)
+
+let ltype_of_ret_ast = function
   | TypeVoid -> void_type context
+  | t        -> ltype_of_ast t
 
-(* Variable / parameter types: unspecified defaults to i32 *)
-let ltype_of_ast_opt = function
-  | Some t -> ltype_of_ast t
-  | None   -> i32_type context
+(* Coerce an llvalue to match a destination AST type.
+   Handles: i1/i8 → i32 widening, i32 → i8 truncation,
+            and integer → pointer conversion (inttoptr) for MMIO addresses. *)
+let coerce v (dst : Ast.type_expr) =
+  let vty    = type_of v in
+  let dst_ll = ltype_of_ast dst in
+  if vty = dst_ll then v
+  else match dst with
+  | TypePtr _ ->
+      (* integer literal used as a memory-mapped address *)
+      let v64 =
+        if   vty = i64_type context then v
+        else build_zext v (i64_type context) "zext64" builder
+      in
+      build_inttoptr v64 (pointer_type context) "inttoptr" builder
+  | TypeChar ->
+      if vty = i32_type context then build_trunc v dst_ll "trunc" builder else v
+  | TypeInt ->
+      build_zext v dst_ll "zext" builder
+  | TypeVoid -> v
 
-(* Return types: unspecified defaults to i32, matching codegen.ml behaviour *)
-let ret_ltype_of_ast_opt = function
-  | Some TypeVoid -> void_type context
-  | Some t        -> ltype_of_ast t
-  | None          -> i32_type context
-
-(* Widen an integer value to i32 so arithmetic is uniform *)
+(* Widen an integer value to i32 so arithmetic stays uniform.
+   Does NOT touch pointer values. *)
 let to_i32 v =
   let ty = type_of v in
-  if ty = i32_type context then v
+  if ty = i32_type context || ty = pointer_type context then v
   else build_zext v (i32_type context) "zext" builder
 
-(* Make a branch condition: comparisons already yield i1; integers are != 0 *)
+(* Build an i1 condition from an integer or comparison result *)
 let as_cond v =
   if type_of v = i1_type context then v
   else build_icmp Icmp.Ne v (const_int (i32_type context) 0) "tobool" builder
 
-(* Truncate/extend v so it matches the target alloca type ty *)
-let coerce v ty =
-  let vty = type_of v in
-  if vty = ty then v
-  else if ty = i8_type context  && vty = i32_type context then build_trunc v ty "trunc" builder
-  else if ty = i32_type context && vty = i1_type  context then build_zext  v ty "zext"  builder
-  else if ty = i32_type context && vty = i8_type  context then build_zext  v ty "zext"  builder
-  else v
-
-(* Pre-scan all Let bindings in a statement list so we can alloca them upfront *)
+(* Pre-scan all Let bindings so we can alloca them up-front in the entry block *)
 let rec collect_lets stmts =
   List.concat_map (fun s ->
     match s.desc with
@@ -75,90 +88,170 @@ let rec collect_lets stmts =
     | _                     -> []
   ) stmts
 
-(* ── Expression codegen ────────────────────────────────────────────────── *)
+(* ── resolve helpers: map AST annotation → Ast.type_expr using HM results ── *)
 
-let rec gen_expr locals e =
+let resolve_local_ast (pt : Types.program_types option) fname name ty_opt =
+  let fallback = match ty_opt with Some t -> t | None -> TypeInt in
+  match pt with
+  | None -> fallback
+  | Some pt ->
+      match Hashtbl.find_opt pt.Types.functions fname with
+      | None -> fallback
+      | Some fi ->
+          (match List.assoc_opt name fi.Types.param_types with
+           | Some t -> t
+           | None ->
+               match Hashtbl.find_opt fi.Types.local_types name with
+               | Some t -> t
+               | None   -> fallback)
+
+let resolve_ret_ast (pt : Types.program_types option) fname ty_opt =
+  let fallback = match ty_opt with Some t -> t | None -> TypeInt in
+  match pt with
+  | None -> fallback
+  | Some pt ->
+      match Hashtbl.find_opt pt.Types.functions fname with
+      | None    -> fallback
+      | Some fi -> fi.Types.ret_type
+
+(* ── Expression codegen ─────────────────────────────────────────────────── *)
+(* Returns (ast_type, llvalue).  ast_type is needed for Deref to know
+   the element type when emitting a load instruction (LLVM 19 opaque ptrs). *)
+
+let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
   match e.desc with
-  | IntLit i -> const_int (i32_type context) i
+  | IntLit i ->
+      (TypeInt, const_int (i32_type context) i)
+
   | Var name ->
+      let (ast_ty, ptr) =
+        match Hashtbl.find_opt locals name with
+        | Some x -> x
+        | None ->
+            match Hashtbl.find_opt global_vars name with
+            | Some x -> x
+            | None -> raise (Error (Printf.sprintf "Undefined variable: %s" name))
+      in
+      let v = build_load (ltype_of_ast ast_ty) ptr name builder in
+      (* widen int/char to i32; leave pointers as-is *)
+      let v' = match ast_ty with
+        | TypeInt | TypeChar -> to_i32 v
+        | _                  -> v
+      in
+      (ast_ty, v')
+
+  | Deref e1 ->
+      let (ty1, v1) = gen_expr locals e1 in
+      (match ty1 with
+       | TypePtr inner_ty ->
+           let inst = build_load (ltype_of_ast inner_ty) v1 "deref" builder in
+           (* volatile: MMIO reads must not be optimised away *)
+           set_volatile true inst;
+           (inner_ty, inst)
+       | _ -> raise (Error "dereference of non-pointer type"))
+
+  | AddrOf name ->
       (match Hashtbl.find_opt locals name with
-       | Some (ty, ptr) -> to_i32 (build_load ty ptr name builder)
-       | None ->
-           match Hashtbl.find_opt global_vars name with
-           | Some (ty, gvar) -> to_i32 (build_load ty gvar name builder)
-           | None -> raise (Error (Printf.sprintf "Undefined variable: %s" name)))
+       | Some (ast_ty, alloca) -> (TypePtr ast_ty, alloca)
+       | None -> raise (Error (Printf.sprintf "cannot take address of '%s'" name)))
+
   | BinOp (op, e1, e2) ->
-      let v1 = gen_expr locals e1 in
-      let v2 = gen_expr locals e2 in
-      (match op with
-       | Add -> build_add  v1 v2 "addtmp" builder
-       | Sub -> build_sub  v1 v2 "subtmp" builder
-       | Mul -> build_mul  v1 v2 "multmp" builder
-       | Div -> build_sdiv v1 v2 "divtmp" builder
-       | Lt  -> build_icmp Icmp.Slt v1 v2 "lttmp" builder
-       | Gt  -> build_icmp Icmp.Sgt v1 v2 "gttmp" builder
-       | Le  -> build_icmp Icmp.Sle v1 v2 "letmp" builder
-       | Ge  -> build_icmp Icmp.Sge v1 v2 "getmp" builder
-       | Eq  -> build_icmp Icmp.Eq  v1 v2 "eqtmp" builder
-       | Ne  -> build_icmp Icmp.Ne  v1 v2 "netmp" builder)
+      let (_, v1) = gen_expr locals e1 in
+      let (_, v2) = gen_expr locals e2 in
+      let result = match op with
+        | Add -> build_add  v1 v2 "addtmp" builder
+        | Sub -> build_sub  v1 v2 "subtmp" builder
+        | Mul -> build_mul  v1 v2 "multmp" builder
+        | Div -> build_sdiv v1 v2 "divtmp" builder
+        | Lt  -> build_icmp Icmp.Slt v1 v2 "lttmp" builder
+        | Gt  -> build_icmp Icmp.Sgt v1 v2 "gttmp" builder
+        | Le  -> build_icmp Icmp.Sle v1 v2 "letmp" builder
+        | Ge  -> build_icmp Icmp.Sge v1 v2 "getmp" builder
+        | Eq  -> build_icmp Icmp.Eq  v1 v2 "eqtmp" builder
+        | Ne  -> build_icmp Icmp.Ne  v1 v2 "netmp" builder
+      in
+      (TypeInt, result)
+
   | Call (fname, args) ->
       (match Hashtbl.find_opt functions fname with
        | None -> raise (Error (Printf.sprintf "Undefined function: %s" fname))
        | Some (ft, callee) ->
-           let arg_vals = List.map (gen_expr locals) args |> Array.of_list in
-           let ret_ty   = return_type ft in
-           let name     = if ret_ty = void_type context then "" else "calltmp" in
-           build_call ft callee arg_vals name builder)
+           let arg_vals =
+             List.map (fun a -> snd (gen_expr locals a)) args |> Array.of_list
+           in
+           let ret_lty = return_type ft in
+           let name    = if ret_lty = void_type context then "" else "calltmp" in
+           let v       = build_call ft callee arg_vals name builder in
+           let ast_ret = match Hashtbl.find_opt func_ret_ast_types fname with
+             | Some t -> t
+             | None   -> TypeInt
+           in
+           (ast_ret, v))
 
 (* ── Statement codegen ─────────────────────────────────────────────────── *)
 
-let rec gen_stmt locals func s =
-  (* Skip dead code that follows a terminator in the current block *)
+let rec gen_stmt locals func ret_ast_ty (s : Ast.stmt) =
+  (* Skip dead code after a terminator *)
   if block_terminator (insertion_block builder) <> None then ()
   else
   match s.desc with
   | Return e ->
-      let v = gen_expr locals e in
-      ignore (build_ret v builder)
+      let (_, v) = gen_expr locals e in
+      ignore (build_ret (coerce v ret_ast_ty) builder)
+
   | Expr e ->
       ignore (gen_expr locals e)
+
   | Assign (name, e) ->
-      let v = gen_expr locals e in
+      let (_, v) = gen_expr locals e in
       (match Hashtbl.find_opt locals name with
-       | Some (ty, ptr)  -> ignore (build_store (coerce v ty) ptr   builder)
+       | Some (ast_ty, ptr) ->
+           ignore (build_store (coerce v ast_ty) ptr builder)
        | None ->
            match Hashtbl.find_opt global_vars name with
-           | Some (ty, gvar) -> ignore (build_store (coerce v ty) gvar builder)
+           | Some (ast_ty, gvar) ->
+               ignore (build_store (coerce v ast_ty) gvar builder)
            | None -> raise (Error (Printf.sprintf "Undefined variable: %s" name)))
+
+  | AssignDeref (ptr_expr, val_expr) ->
+      let (_, ptr_v) = gen_expr locals ptr_expr in
+      let (_, val_v) = gen_expr locals val_expr in
+      (* volatile: MMIO writes must not be optimised away *)
+      let inst = build_store val_v ptr_v builder in
+      set_volatile true inst
+
   | Let (name, _, expr_opt) ->
       (match Hashtbl.find_opt locals name with
        | None -> raise (Error (Printf.sprintf "BUG: no alloca for %s" name))
-       | Some (ty, ptr) ->
-           (match expr_opt with
-            | None -> ()
-            | Some e ->
-                let v = gen_expr locals e in
-                ignore (build_store (coerce v ty) ptr builder)))
+       | Some (ast_ty, ptr) ->
+           match expr_opt with
+           | None -> ()
+           | Some e ->
+               let (_, v) = gen_expr locals e in
+               ignore (build_store (coerce v ast_ty) ptr builder))
+
   | Block stmts ->
-      List.iter (gen_stmt locals func) stmts
+      List.iter (gen_stmt locals func ret_ast_ty) stmts
+
   | If (cond, then_stmts, else_stmts) ->
-      let cond_v   = as_cond (gen_expr locals cond) in
+      let cond_v   = as_cond (snd (gen_expr locals cond)) in
       let then_bb  = append_block context "then"  func in
       let else_bb  = append_block context "else"  func in
       let merge_bb = append_block context "merge" func in
       ignore (build_cond_br cond_v then_bb else_bb builder);
 
       position_at_end then_bb builder;
-      List.iter (gen_stmt locals func) then_stmts;
+      List.iter (gen_stmt locals func ret_ast_ty) then_stmts;
       if block_terminator (insertion_block builder) = None then
         ignore (build_br merge_bb builder);
 
       position_at_end else_bb builder;
-      List.iter (gen_stmt locals func) else_stmts;
+      List.iter (gen_stmt locals func ret_ast_ty) else_stmts;
       if block_terminator (insertion_block builder) = None then
         ignore (build_br merge_bb builder);
 
       position_at_end merge_bb builder
+
   | While (cond, body) ->
       let cond_bb  = append_block context "while_cond"  func in
       let body_bb  = append_block context "while_body"  func in
@@ -166,11 +259,11 @@ let rec gen_stmt locals func s =
       ignore (build_br cond_bb builder);
 
       position_at_end cond_bb builder;
-      let cond_v = as_cond (gen_expr locals cond) in
+      let cond_v = as_cond (snd (gen_expr locals cond)) in
       ignore (build_cond_br cond_v body_bb after_bb builder);
 
       position_at_end body_bb builder;
-      List.iter (gen_stmt locals func) body;
+      List.iter (gen_stmt locals func ret_ast_ty) body;
       if block_terminator (insertion_block builder) = None then
         ignore (build_br cond_bb builder);
 
@@ -178,76 +271,58 @@ let rec gen_stmt locals func s =
 
 (* ── Function codegen ──────────────────────────────────────────────────── *)
 
-(* Look up the inferred type for a variable in a specific function.
-   Falls back to the AST annotation (or i32) when not available. *)
-let resolve_local (pt : Types.program_types option) fname name ty_opt =
-  match pt with
-  | None -> ltype_of_ast_opt ty_opt
-  | Some pt ->
-      match Hashtbl.find_opt pt.Types.functions fname with
-      | None -> ltype_of_ast_opt ty_opt
-      | Some fi ->
-          (match List.assoc_opt name fi.Types.param_types with
-           | Some t -> ltype_of_ast t
-           | None ->
-               match Hashtbl.find_opt fi.Types.local_types name with
-               | Some t -> ltype_of_ast t
-               | None   -> ltype_of_ast_opt ty_opt)
-
-let resolve_ret (pt : Types.program_types option) fname ty_opt =
-  match pt with
-  | None -> ret_ltype_of_ast_opt ty_opt
-  | Some pt ->
-      match Hashtbl.find_opt pt.Types.functions fname with
-      | None    -> ret_ltype_of_ast_opt ty_opt
-      | Some fi -> ltype_of_ast fi.Types.ret_type
-
 let gen_func ?prog_types fdef =
-  let res  name ty_opt = resolve_local prog_types fdef.name name ty_opt in
-  let (ft, f) =
+  let res name ty_opt = resolve_local_ast prog_types fdef.name name ty_opt in
+
+  let (_, f) =
     match Hashtbl.find_opt functions fdef.name with
     | Some x -> x
     | None ->
-        let param_types =
-          List.map (fun (name, t_opt) -> res name t_opt) fdef.params
-          |> Array.of_list
-        in
-        let ret_ty = resolve_ret prog_types fdef.name fdef.ret_type in
-        let ft     = function_type ret_ty param_types in
-        let f      = declare_function fdef.name ft the_module in
+        let param_ast = List.map (fun (n, t) -> res n t) fdef.params in
+        let param_lls = List.map ltype_of_ast param_ast |> Array.of_list in
+        let ret_ast   = resolve_ret_ast prog_types fdef.name fdef.ret_type in
+        let ret_ll    = ltype_of_ret_ast ret_ast in
+        let ft        = function_type ret_ll param_lls in
+        let f         = declare_function fdef.name ft the_module in
         Hashtbl.add functions fdef.name (ft, f);
+        Hashtbl.add func_ret_ast_types fdef.name ret_ast;
         (ft, f)
+  in
+
+  let ret_ast = match Hashtbl.find_opt func_ret_ast_types fdef.name with
+    | Some t -> t
+    | None   -> TypeInt
   in
 
   let entry_bb = append_block context "entry" f in
   position_at_end entry_bb builder;
 
-  let locals : (string, lltype * llvalue) Hashtbl.t = Hashtbl.create 16 in
+  (* locals maps name → (ast_type, alloca_ptr) *)
+  let locals : (string, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 16 in
 
   (* Alloca + store for every parameter *)
   List.iteri (fun i (name, ty_opt) ->
-    let ty  = res name ty_opt in
-    let ptr = build_alloca ty name builder in
+    let ast_ty = res name ty_opt in
+    let ptr    = build_alloca (ltype_of_ast ast_ty) name builder in
     ignore (build_store (param f i) ptr builder);
-    Hashtbl.add locals name (ty, ptr)
+    Hashtbl.add locals name (ast_ty, ptr)
   ) fdef.params;
 
-  (* Pre-alloca every local variable declared in the body *)
+  (* Pre-alloca every local Let declared in the body *)
   List.iter (fun (name, ty_opt) ->
     if not (Hashtbl.mem locals name) then begin
-      let ty  = res name ty_opt in
-      let ptr = build_alloca ty name builder in
-      Hashtbl.add locals name (ty, ptr)
+      let ast_ty = res name ty_opt in
+      let ptr    = build_alloca (ltype_of_ast ast_ty) name builder in
+      Hashtbl.add locals name (ast_ty, ptr)
     end
   ) (collect_lets fdef.body);
 
-  List.iter (gen_stmt locals f) fdef.body;
+  List.iter (gen_stmt locals f ret_ast) fdef.body;
 
-  (* Ensure every exit block has a terminator *)
+  (* Ensure the exit block has a terminator *)
   if block_terminator (insertion_block builder) = None then begin
-    let ret_ty = return_type ft in
-    if ret_ty = void_type context then ignore (build_ret_void builder)
-    else ignore (build_ret (const_int ret_ty 0) builder)
+    if ret_ast = TypeVoid then ignore (build_ret_void builder)
+    else ignore (build_ret (const_int (ltype_of_ast ret_ast) 0) builder)
   end;
 
   Llvm_analysis.assert_valid_function f;
@@ -256,32 +331,41 @@ let gen_func ?prog_types fdef =
 (* ── Top-level codegen ─────────────────────────────────────────────────── *)
 
 let gen_global ?prog_types name ty_opt expr_opt =
-  let ty = match prog_types with
-    | None -> ltype_of_ast_opt ty_opt
+  let ast_ty = match prog_types with
+    | None -> (match ty_opt with Some t -> t | None -> TypeInt)
     | Some (pt : Types.program_types) ->
         match Hashtbl.find_opt pt.Types.globals name with
-        | Some t -> ltype_of_ast t
-        | None   -> ltype_of_ast_opt ty_opt
+        | Some t -> t
+        | None   -> (match ty_opt with Some t -> t | None -> TypeInt)
   in
+  let llty = ltype_of_ast ast_ty in
   let init = match expr_opt with
-    | Some { desc = IntLit i; _ } -> const_int ty i
-    | None                        -> const_int ty 0
+    | Some { desc = IntLit i; _ } ->
+        (match ast_ty with
+         | TypePtr _ ->
+             let i64v = const_int (i64_type context) i in
+             const_inttoptr i64v (pointer_type context)
+         | _ -> const_int llty i)
+    | None ->
+        (match ast_ty with
+         | TypePtr _ -> const_null (pointer_type context)
+         | _         -> const_int llty 0)
     | _ -> raise (Error "Global initializer must be a constant integer")
   in
   let gvar = define_global name init the_module in
-  Hashtbl.add global_vars name (ty, gvar)
+  Hashtbl.add global_vars name (ast_ty, gvar)
 
 let declare_func ?prog_types fdef =
   if not (Hashtbl.mem functions fdef.name) then begin
-    let param_types =
-      List.map (fun (name, t_opt) ->
-        resolve_local prog_types fdef.name name t_opt
-      ) fdef.params |> Array.of_list
-    in
-    let ret_ty = resolve_ret prog_types fdef.name fdef.ret_type in
-    let ft     = function_type ret_ty param_types in
-    let f      = declare_function fdef.name ft the_module in
-    Hashtbl.add functions fdef.name (ft, f)
+    let res name ty_opt = resolve_local_ast prog_types fdef.name name ty_opt in
+    let param_ast = List.map (fun (n, t) -> res n t) fdef.params in
+    let param_lls = List.map ltype_of_ast param_ast |> Array.of_list in
+    let ret_ast   = resolve_ret_ast prog_types fdef.name fdef.ret_type in
+    let ret_ll    = ltype_of_ret_ast ret_ast in
+    let ft        = function_type ret_ll param_lls in
+    let f         = declare_function fdef.name ft the_module in
+    Hashtbl.add functions fdef.name (ft, f);
+    Hashtbl.add func_ret_ast_types fdef.name ret_ast
   end
 
 let gen_program ?prog_types prog =

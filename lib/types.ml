@@ -6,6 +6,7 @@ type ty =
   | TVoid
   | TFun of ty list * ty  (* param types, return type *)
   | TVar of tv ref
+  | TPtr of ty            (* pointer type *)
 
 and tv =
   | Unbound of int  (* unresolved unification variable *)
@@ -32,6 +33,7 @@ let rec to_string t =
   | TInt  -> "int"
   | TChar -> "char"
   | TVoid -> "void"
+  | TPtr t -> Printf.sprintf "*%s" (to_string t)
   | TFun (ps, r) ->
       Printf.sprintf "(%s) -> %s"
         (String.concat ", " (List.map to_string ps)) (to_string r)
@@ -46,11 +48,13 @@ let rec occurs rv = function
   | TVar { contents = Link t } -> occurs rv t
   | TVar r                     -> r == rv
   | TFun (ps, r)               -> List.exists (occurs rv) ps || occurs rv r
+  | TPtr t                     -> occurs rv t
   | _                          -> false
 
 let rec unify t1 t2 =
   match repr t1, repr t2 with
   | TInt,  TInt  | TChar, TChar | TVoid, TVoid -> ()
+  | TPtr t1, TPtr t2 -> unify t1 t2
   | TFun (ps1, r1), TFun (ps2, r2) ->
       if List.length ps1 <> List.length ps2 then
         raise (Unify_error "argument count mismatch");
@@ -71,10 +75,11 @@ let rec unify t1 t2 =
 
 (* ── Conversion to/from Ast types ───────────────────────────────────────── *)
 
-let of_ast = function
-  | Ast.TypeInt  -> TInt
-  | Ast.TypeChar -> TChar
-  | Ast.TypeVoid -> TVoid
+let rec of_ast = function
+  | Ast.TypeInt      -> TInt
+  | Ast.TypeChar     -> TChar
+  | Ast.TypeVoid     -> TVoid
+  | Ast.TypePtr t    -> TPtr (of_ast t)
 
 (* None → fresh unification variable *)
 let of_ast_opt = function
@@ -89,11 +94,12 @@ let ret_of_ast_opt = function
 
 (* After unification, collapse to a concrete Ast type.
    Unbound variables default to int (unconstrained integer) *)
-let to_ast t =
+let rec to_ast t =
   match repr t with
   | TInt  -> Ast.TypeInt
   | TChar -> Ast.TypeChar
   | TVoid -> Ast.TypeVoid
+  | TPtr t -> Ast.TypePtr (to_ast t)
   | TFun _                        -> Ast.TypeVoid
   | TVar { contents = Unbound _ } -> Ast.TypeInt
   | TVar { contents = Link _ }    -> assert false

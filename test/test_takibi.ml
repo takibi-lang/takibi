@@ -11,15 +11,14 @@ let infer src =
 
 (* Custom Alcotest testables *)
 
+let rec show_type = function
+  | Ast.TypeInt   -> "int"
+  | Ast.TypeChar  -> "char"
+  | Ast.TypeVoid  -> "void"
+  | Ast.TypePtr t -> "*" ^ show_type t
+
 let type_t : Ast.type_expr Alcotest.testable =
-  Alcotest.testable
-    (fun fmt t ->
-      Format.pp_print_string fmt
-        (match t with
-         | Ast.TypeInt  -> "int"
-         | Ast.TypeChar -> "char"
-         | Ast.TypeVoid -> "void"))
-    (=)
+  Alcotest.testable (fun fmt t -> Format.pp_print_string fmt (show_type t)) (=)
 
 let binop_t : Ast.binop Alcotest.testable =
   Alcotest.testable
@@ -182,6 +181,60 @@ let parser_tests = [
      | _ -> Alcotest.fail "second item should be FuncDef f")
   );
 
+  (* ── Pointer / address-of tests ────────────────────────────── *)
+
+  Alcotest.test_case "pointer type in function param" `Quick (fun () ->
+    match parse "fn f(p: *int): void {}" with
+    | [Ast.FuncDef { params = [(_, Some t)]; _ }] ->
+        Alcotest.check type_t "param type is *int" (Ast.TypePtr Ast.TypeInt) t
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "pointer-to-pointer type" `Quick (fun () ->
+    match parse "fn f(p: **int): void {}" with
+    | [Ast.FuncDef { params = [(_, Some t)]; _ }] ->
+        Alcotest.check type_t "param type is **int"
+          (Ast.TypePtr (Ast.TypePtr Ast.TypeInt)) t
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "deref expression" `Quick (fun () ->
+    match parse "fn f(p: *int): int { return *p; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.Deref { desc = Ast.Var "p"; _ }; _ } -> ()
+         | _ -> Alcotest.fail "expected Return(Deref(Var p))")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "addrof expression" `Quick (fun () ->
+    match parse "fn f(): void { let x = 0; let p = &x; }" with
+    | [Ast.FuncDef { body = [_; s]; _ }] ->
+        (match s.desc with
+         | Ast.Let (_, _, Some { desc = Ast.AddrOf "x"; _ }) -> ()
+         | _ -> Alcotest.fail "expected Let(p, AddrOf x)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "assign through pointer" `Quick (fun () ->
+    match parse "fn f(p: *int): void { *p = 42; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.AssignDeref ({ desc = Ast.Var "p"; _ },
+                             { desc = Ast.IntLit 42; _ }) -> ()
+         | _ -> Alcotest.fail "expected AssignDeref(Var p, IntLit 42)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "hex integer literal" `Quick (fun () ->
+    match parse "fn f(): int { return 0xff; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.IntLit 255; _ } -> ()
+         | _ -> Alcotest.fail "expected Return(IntLit 255)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
 ]
 
 (* ── Type inference tests ────────────────────────────────────────────────── *)
@@ -260,6 +313,29 @@ let infer_tests = [
   Alcotest.test_case "arithmetic operand type mismatch" `Quick
     (expect_type_error "cannot unify"
        "fn f(a: int, b: char): int { return a + b; }");
+
+  (* ── ポインタ型推論 ──────────────────────────────────────── *)
+
+  Alcotest.test_case "local pointer annotation type-checks" `Quick
+    (expect_ok "fn f(): void { let p: *int = 0x09000000; *p = 1; }");
+
+  Alcotest.test_case "deref yields element type" `Quick (fun () ->
+    let pt = infer "fn f(p: *int): int { return *p; }" in
+    let fi = Hashtbl.find pt.Types.functions "f" in
+    Alcotest.check type_t "return type is int" Ast.TypeInt fi.Types.ret_type
+  );
+
+  Alcotest.test_case "addrof yields pointer type" `Quick (fun () ->
+    let pt = infer "fn f(): void { let x: int = 0; let p = &x; }" in
+    let fi = Hashtbl.find pt.Types.functions "f" in
+    Alcotest.check type_t "p has type *int"
+      (Ast.TypePtr Ast.TypeInt)
+      (Hashtbl.find fi.Types.local_types "p")
+  );
+
+  Alcotest.test_case "deref non-pointer is a type error" `Quick
+    (expect_type_error "cannot unify"
+       "fn f(x: int): void { *x = 1; }");
 
 ]
 
