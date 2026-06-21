@@ -34,10 +34,7 @@ let () =
     print_endline c_code;
 
     (* LLVM IR *)
-    List.iter (function
-        | Ast.FuncDef fdef -> ignore (Llvm_gen.gen_func fdef)
-        | _ -> ()
-      ) prog;
+    Llvm_gen.gen_program prog;
     Llvm.dump_module Llvm_gen.the_module;
 
     close_in chan

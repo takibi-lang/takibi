@@ -28,3 +28,6 @@ takibi.opam
 
 # Local OPAM switch
 _opam/
+
+# AI
+.claude/
