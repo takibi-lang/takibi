@@ -13,9 +13,20 @@ let functions   : (string, lltype * llvalue) Hashtbl.t = Hashtbl.create 16
 
 let setup_target () =
   let _ = Llvm_all_backends.initialize () in
-  let triple = "arm-none-eabi" in
+  let triple = Llvm_target.Target.default_triple () in
   set_target_triple triple the_module;
-  ()
+  let target  = Llvm_target.Target.by_triple triple in
+  let machine = Llvm_target.TargetMachine.create ~triple target in
+  let layout  = Llvm_target.TargetMachine.data_layout machine in
+  set_data_layout (Llvm_target.DataLayout.as_string layout) the_module;
+  machine
+
+let emit_object machine output_path =
+  Llvm_target.TargetMachine.emit_to_file
+    the_module
+    Llvm_target.CodeGenFileType.ObjectFile
+    output_path
+    machine
 
 let ltype_of_ast = function
   | TypeInt  -> i32_type context

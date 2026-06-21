@@ -7,16 +7,34 @@ let report_error pos msg =
   Printf.eprintf "File \"%s\", line %d, character %d: %s\n" file line col msg
 
 let () =
-  if Array.length Sys.argv < 2 then (
-    Printf.eprintf "Usage: %s <filename>\n" Sys.argv.(0);
+  (* Parse arguments: takibi <input> [-o <output.o>] *)
+  let input_file  = ref "" in
+  let output_file = ref "" in
+  let i = ref 1 in
+  while !i < Array.length Sys.argv do
+    (match Sys.argv.(!i) with
+     | "-o" ->
+         incr i;
+         if !i >= Array.length Sys.argv then (
+           Printf.eprintf "Error: -o requires an argument\n"; exit 1
+         );
+         output_file := Sys.argv.(!i)
+     | arg ->
+         if !input_file = "" then input_file := arg
+         else (Printf.eprintf "Unexpected argument: %s\n" arg; exit 1));
+    incr i
+  done;
+
+  if !input_file = "" then (
+    Printf.eprintf "Usage: %s <filename> [-o <output.o>]\n" Sys.argv.(0);
     exit 1
   );
 
-  let filename = Sys.argv.(1) in
-  let chan = open_in filename in
-  let lexbuf = Lexing.from_channel chan in
+  let machine = Llvm_gen.setup_target () in
 
-  Lexing.set_filename lexbuf filename;
+  let chan   = open_in !input_file in
+  let lexbuf = Lexing.from_channel chan in
+  Lexing.set_filename lexbuf !input_file;
 
   try
     let prog =
@@ -28,10 +46,15 @@ let () =
     in
 
     Typechecker.check_toplevels prog;
-
-    (* LLVM IR *)
     Llvm_gen.gen_program prog;
-    Llvm.dump_module Llvm_gen.the_module;
+
+    if !output_file <> "" then
+      Llvm_gen.emit_object machine !output_file
+    else begin
+      let c_code = Codegen.string_of_program prog in
+      print_endline c_code;
+      Llvm.dump_module Llvm_gen.the_module
+    end;
 
     close_in chan
   with
