@@ -9,7 +9,7 @@ CC     := gcc
 TAKIBI := dune exec takibi --
 
 # ── Targets ──────────────────────────────────────────────────────────────────
-.PHONY: all build ir run clean
+.PHONY: all build ir run test clean
 
 .DEFAULT_GOAL := all
 
@@ -36,6 +36,10 @@ $(BIN): $(OBJ) $(MAIN_C)
 ## run: ビルドしてそのまま実行
 run: $(BIN)
 	$<
+
+## test: テスト実行
+test:
+	dune test
 
 ## clean: dune の生成物 + リンク成果物を削除
 clean:
