@@ -45,8 +45,10 @@ let () =
           exit 1
     in
 
-    Typechecker.check_toplevels prog;
-    Llvm_gen.gen_program prog;
+    (* HM type inference — catches type errors and produces resolved types *)
+    let prog_types = Typechecker.infer_program prog in
+
+    Llvm_gen.gen_program ~prog_types prog;
 
     if !output_file <> "" then
       Llvm_gen.emit_object machine !output_file

@@ -178,16 +178,41 @@ let rec gen_stmt locals func s =
 
 (* ── Function codegen ──────────────────────────────────────────────────── *)
 
-let gen_func fdef =
+(* Look up the inferred type for a variable in a specific function.
+   Falls back to the AST annotation (or i32) when not available. *)
+let resolve_local (pt : Types.program_types option) fname name ty_opt =
+  match pt with
+  | None -> ltype_of_ast_opt ty_opt
+  | Some pt ->
+      match Hashtbl.find_opt pt.Types.functions fname with
+      | None -> ltype_of_ast_opt ty_opt
+      | Some fi ->
+          (match List.assoc_opt name fi.Types.param_types with
+           | Some t -> ltype_of_ast t
+           | None ->
+               match Hashtbl.find_opt fi.Types.local_types name with
+               | Some t -> ltype_of_ast t
+               | None   -> ltype_of_ast_opt ty_opt)
+
+let resolve_ret (pt : Types.program_types option) fname ty_opt =
+  match pt with
+  | None -> ret_ltype_of_ast_opt ty_opt
+  | Some pt ->
+      match Hashtbl.find_opt pt.Types.functions fname with
+      | None    -> ret_ltype_of_ast_opt ty_opt
+      | Some fi -> ltype_of_ast fi.Types.ret_type
+
+let gen_func ?prog_types fdef =
+  let res  name ty_opt = resolve_local prog_types fdef.name name ty_opt in
   let (ft, f) =
     match Hashtbl.find_opt functions fdef.name with
     | Some x -> x
     | None ->
         let param_types =
-          List.map (fun (_, t_opt) -> ltype_of_ast_opt t_opt) fdef.params
+          List.map (fun (name, t_opt) -> res name t_opt) fdef.params
           |> Array.of_list
         in
-        let ret_ty = ret_ltype_of_ast_opt fdef.ret_type in
+        let ret_ty = resolve_ret prog_types fdef.name fdef.ret_type in
         let ft     = function_type ret_ty param_types in
         let f      = declare_function fdef.name ft the_module in
         Hashtbl.add functions fdef.name (ft, f);
@@ -201,7 +226,7 @@ let gen_func fdef =
 
   (* Alloca + store for every parameter *)
   List.iteri (fun i (name, ty_opt) ->
-    let ty  = ltype_of_ast_opt ty_opt in
+    let ty  = res name ty_opt in
     let ptr = build_alloca ty name builder in
     ignore (build_store (param f i) ptr builder);
     Hashtbl.add locals name (ty, ptr)
@@ -210,7 +235,7 @@ let gen_func fdef =
   (* Pre-alloca every local variable declared in the body *)
   List.iter (fun (name, ty_opt) ->
     if not (Hashtbl.mem locals name) then begin
-      let ty  = ltype_of_ast_opt ty_opt in
+      let ty  = res name ty_opt in
       let ptr = build_alloca ty name builder in
       Hashtbl.add locals name (ty, ptr)
     end
@@ -230,8 +255,14 @@ let gen_func fdef =
 
 (* ── Top-level codegen ─────────────────────────────────────────────────── *)
 
-let gen_global name ty_opt expr_opt =
-  let ty   = ltype_of_ast_opt ty_opt in
+let gen_global ?prog_types name ty_opt expr_opt =
+  let ty = match prog_types with
+    | None -> ltype_of_ast_opt ty_opt
+    | Some (pt : Types.program_types) ->
+        match Hashtbl.find_opt pt.Types.globals name with
+        | Some t -> ltype_of_ast t
+        | None   -> ltype_of_ast_opt ty_opt
+  in
   let init = match expr_opt with
     | Some { desc = IntLit i; _ } -> const_int ty i
     | None                        -> const_int ty 0
@@ -240,26 +271,27 @@ let gen_global name ty_opt expr_opt =
   let gvar = define_global name init the_module in
   Hashtbl.add global_vars name (ty, gvar)
 
-let declare_func fdef =
+let declare_func ?prog_types fdef =
   if not (Hashtbl.mem functions fdef.name) then begin
     let param_types =
-      List.map (fun (_, t_opt) -> ltype_of_ast_opt t_opt) fdef.params
-      |> Array.of_list
+      List.map (fun (name, t_opt) ->
+        resolve_local prog_types fdef.name name t_opt
+      ) fdef.params |> Array.of_list
     in
-    let ret_ty = ret_ltype_of_ast_opt fdef.ret_type in
+    let ret_ty = resolve_ret prog_types fdef.name fdef.ret_type in
     let ft     = function_type ret_ty param_types in
     let f      = declare_function fdef.name ft the_module in
     Hashtbl.add functions fdef.name (ft, f)
   end
 
-let gen_program prog =
+let gen_program ?prog_types prog =
   (* Pass 1: register all globals and function signatures *)
   List.iter (function
-    | FuncDef fdef                    -> declare_func fdef
-    | LetDef (name, ty_opt, expr_opt) -> gen_global name ty_opt expr_opt
+    | FuncDef fdef                    -> declare_func ?prog_types fdef
+    | LetDef (name, ty_opt, expr_opt) -> gen_global ?prog_types name ty_opt expr_opt
   ) prog;
   (* Pass 2: generate function bodies *)
   List.iter (function
-    | FuncDef fdef -> ignore (gen_func fdef)
+    | FuncDef fdef -> ignore (gen_func ?prog_types fdef)
     | LetDef _     -> ()
   ) prog
