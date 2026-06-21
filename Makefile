@@ -5,31 +5,41 @@ BIN    := examples/start.exe
 MAIN_C := examples/main.c
 CC     := gcc
 
+AARCH64_TARGET := aarch64-none-elf
+AARCH64_OBJ    := examples/start-aarch64.o
+
 # dune exec は実行前に OCaml ソースの変更を検知して再ビルドする
 TAKIBI := dune exec takibi --
 
 # ── Targets ──────────────────────────────────────────────────────────────────
-.PHONY: all build ir run test clean
+.PHONY: all build ir ir-aarch64 run test clean
 
 .DEFAULT_GOAL := all
 
-## all: OCamlビルド → .o生成 → リンク
+## all: OCamlビルド → .o生成 → リンク (ホスト向け)
 all: build $(BIN)
 
 ## build: OCamlコンパイラ(dune)のみビルド
 build:
 	dune build
 
-## ir: LLVM IR と C コードを標準出力にダンプ
+## ir: ホスト向け LLVM IR をダンプ
 ir: build
 	$(TAKIBI) $(SRC)
 
-## $(OBJ): .takibi を機械語オブジェクトに変換
-##   dune exec が OCaml 側の変更も自動的に面倒を見る
+## ir-aarch64: AArch64 ベアメタル向け LLVM IR をダンプ
+ir-aarch64: build
+	$(TAKIBI) $(SRC) --target $(AARCH64_TARGET)
+
+## $(OBJ): ホスト向け機械語オブジェクト
 $(OBJ): $(SRC)
 	$(TAKIBI) $(SRC) -o $@
 
-## $(BIN): C の main とリンクして実行ファイルを生成
+## $(AARCH64_OBJ): AArch64 ベアメタル向け機械語オブジェクト
+$(AARCH64_OBJ): $(SRC)
+	$(TAKIBI) $(SRC) --target $(AARCH64_TARGET) -o $@
+
+## $(BIN): C の main とリンクして実行ファイルを生成 (ホスト向け)
 $(BIN): $(OBJ) $(MAIN_C)
 	$(CC) -o $@ $(MAIN_C) $(OBJ)
 
@@ -44,4 +54,4 @@ test:
 ## clean: dune の生成物 + リンク成果物を削除
 clean:
 	dune clean
-	rm -f $(OBJ) $(BIN)
+	rm -f $(OBJ) $(BIN) $(AARCH64_OBJ)

@@ -15,9 +15,9 @@ let functions   : (string, lltype * llvalue) Hashtbl.t = Hashtbl.create 16
 (* Stores the return AST type for each function (needed when typing Call results) *)
 let func_ret_ast_types : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 16
 
-let setup_target () =
+let setup_target ?(triple = "") () =
   let _ = Llvm_all_backends.initialize () in
-  let triple = Llvm_target.Target.default_triple () in
+  let triple = if triple = "" then Llvm_target.Target.default_triple () else triple in
   set_target_triple triple the_module;
   let target  = Llvm_target.Target.by_triple triple in
   let machine = Llvm_target.TargetMachine.create ~triple target in
