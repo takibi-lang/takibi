@@ -29,10 +29,6 @@ let () =
 
     Typechecker.check_toplevels prog;
 
-    (* C Code *)
-    let c_code = Codegen.string_of_program prog in
-    print_endline c_code;
-
     (* LLVM IR *)
     Llvm_gen.gen_program prog;
     Llvm.dump_module Llvm_gen.the_module;
