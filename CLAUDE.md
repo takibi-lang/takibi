@@ -80,6 +80,7 @@ val infer_stmt : tyenv -> ty StringMap.t -> ty -> ty StringMap.t -> Ast.stmt
 - OCaml は慣用的なスタイルを優先する。`Hashtbl` より `Map.Make(String)` を使う
 - `base` パッケージは使わない（LLVM バインディングとの境界で摩擦が生じるため）
 - ユーザーは OCaml 初心者のため、コードの変更理由を「なぜこう書くのか」の観点で説明する
+- **`~/.claude` へのメモリ保存は行わない**。プロジェクト固有の情報はこのファイルに集約する（環境をまたいで共有できないため）
 
 ## 依存ツール
 
