@@ -52,11 +52,8 @@ let () =
 
     if !output_file <> "" then
       Llvm_gen.emit_object machine !output_file
-    else begin
-      let c_code = Codegen.string_of_program prog in
-      print_endline c_code;
-      Llvm.dump_module Llvm_gen.the_module
-    end;
+    else
+      Llvm.dump_module Llvm_gen.the_module;
 
     close_in chan
   with
