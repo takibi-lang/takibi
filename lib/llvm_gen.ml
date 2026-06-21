@@ -7,6 +7,9 @@ let context = global_context ()
 let the_module = create_module context "takibi_module"
 let builder = builder context
 
+(* Counter for unique string literal global names *)
+let str_counter = ref 0
+
 (* Global tables — populated during gen_program *)
 (* Stores (ast_type, llvalue) for global variables *)
 let global_vars : (string, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 16
@@ -123,6 +126,24 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
   | IntLit i ->
       (TypeInt, const_int (i32_type context) i)
 
+  | StringLit s ->
+      (* ヌル終端バイト列をグローバル定数配列として配置し、先頭へのポインタを返す *)
+      incr str_counter;
+      let name   = Printf.sprintf ".str%d" !str_counter in
+      let len    = String.length s in
+      let arr_ty = array_type (i8_type context) (len + 1) in
+      let bytes  = Array.init (len + 1) (fun i ->
+        if i < len then const_int (i8_type context) (Char.code s.[i])
+        else             const_int (i8_type context) 0)
+      in
+      let arr    = const_array (i8_type context) bytes in
+      let g      = define_global name arr the_module in
+      set_global_constant true g;
+      set_linkage Linkage.Private g;
+      let zero   = const_int (i32_type context) 0 in
+      let ptr    = build_in_bounds_gep arr_ty g [|zero; zero|] "strptr" builder in
+      (TypePtr TypeChar, ptr)
+
   | Var name ->
       let (ast_ty, ptr) =
         match Hashtbl.find_opt locals name with
@@ -145,9 +166,13 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (match ty1 with
        | TypePtr inner_ty ->
            let inst = build_load (ltype_of_ast inner_ty) v1 "deref" builder in
-           (* volatile: MMIO reads must not be optimised away *)
            set_volatile true inst;
-           (inner_ty, inst)
+           (* Var と同様に i8/i32 を i32 に揃える（比較・演算で型が合うように） *)
+           let v' = match inner_ty with
+             | TypeInt | TypeChar -> to_i32 inst
+             | _                  -> inst
+           in
+           (inner_ty, v')
        | _ -> raise (Error "dereference of non-pointer type"))
 
   | AddrOf name ->
@@ -156,28 +181,47 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | None -> raise (Error (Printf.sprintf "cannot take address of '%s'" name)))
 
   | BinOp (op, e1, e2) ->
-      let (_, v1) = gen_expr locals e1 in
-      let (_, v2) = gen_expr locals e2 in
-      let result = match op with
-        | Add -> build_add  v1 v2 "addtmp" builder
-        | Sub -> build_sub  v1 v2 "subtmp" builder
-        | Mul -> build_mul  v1 v2 "multmp" builder
-        | Div -> build_sdiv v1 v2 "divtmp" builder
-        | Lt  -> build_icmp Icmp.Slt v1 v2 "lttmp" builder
-        | Gt  -> build_icmp Icmp.Sgt v1 v2 "gttmp" builder
-        | Le  -> build_icmp Icmp.Sle v1 v2 "letmp" builder
-        | Ge  -> build_icmp Icmp.Sge v1 v2 "getmp" builder
-        | Eq  -> build_icmp Icmp.Eq  v1 v2 "eqtmp" builder
-        | Ne  -> build_icmp Icmp.Ne  v1 v2 "netmp" builder
-      in
-      (TypeInt, result)
+      let (ty1, v1) = gen_expr locals e1 in
+      let (ty2, v2) = gen_expr locals e2 in
+      (match op with
+       | Add ->
+           (* ポインタ算術: ptr + int → GEP。整数同士は通常の加算 *)
+           (match ty1 with
+            | TypePtr inner ->
+                (ty1, build_gep (ltype_of_ast inner) v1 [|v2|] "ptradd" builder)
+            | _ ->
+                (match ty2 with
+                 | TypePtr inner ->
+                     (ty2, build_gep (ltype_of_ast inner) v2 [|v1|] "ptradd" builder)
+                 | _ ->
+                     (TypeInt, build_add v1 v2 "addtmp" builder)))
+       | Sub -> (TypeInt, build_sub  v1 v2 "subtmp" builder)
+       | Mul -> (TypeInt, build_mul  v1 v2 "multmp" builder)
+       | Div -> (TypeInt, build_sdiv v1 v2 "divtmp" builder)
+       | Lt  -> (TypeInt, build_icmp Icmp.Slt v1 v2 "lttmp" builder)
+       | Gt  -> (TypeInt, build_icmp Icmp.Sgt v1 v2 "gttmp" builder)
+       | Le  -> (TypeInt, build_icmp Icmp.Sle v1 v2 "letmp" builder)
+       | Ge  -> (TypeInt, build_icmp Icmp.Sge v1 v2 "getmp" builder)
+       | Eq  -> (TypeInt, build_icmp Icmp.Eq  v1 v2 "eqtmp" builder)
+       | Ne  -> (TypeInt, build_icmp Icmp.Ne  v1 v2 "netmp" builder))
 
   | Call (fname, args) ->
       (match Hashtbl.find_opt functions fname with
        | None -> raise (Error (Printf.sprintf "Undefined function: %s" fname))
        | Some (ft, callee) ->
+           let param_lltys = Array.to_list (param_types ft) in
            let arg_vals =
-             List.map (fun a -> snd (gen_expr locals a)) args |> Array.of_list
+             List.map2 (fun a lty ->
+               let v   = snd (gen_expr locals a) in
+               let src = type_of v in
+               (* i32↔i8 の変換: Var/Deref が i32 に揃えるため関数引数で戻す *)
+               if src = lty then v
+               else if lty = i8_type  context && src = i32_type context then
+                 build_trunc v lty "arg_trunc" builder
+               else if lty = i32_type context && src = i8_type  context then
+                 build_zext  v lty "arg_ext"   builder
+               else v
+             ) args param_lltys |> Array.of_list
            in
            let ret_lty = return_type ft in
            let name    = if ret_lty = void_type context then "" else "calltmp" in

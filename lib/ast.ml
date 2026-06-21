@@ -25,6 +25,7 @@ type type_expr =
 type expr = expr_desc located
 and expr_desc =
   | IntLit of int
+  | StringLit of string     (* "..."  — null-terminated *char constant *)
   | Var of ident
   | Call of ident * expr list
   | BinOp of binop * expr * expr

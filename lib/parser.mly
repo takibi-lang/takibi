@@ -4,6 +4,7 @@ open Ast
 
 %token <int> INT
 %token <string> IDENT
+%token <string> STRING
 %token FN RETURN LET
 %token LBRACE RBRACE LPAREN RPAREN COMMA SEMI
 %token ASSIGN
@@ -92,7 +93,8 @@ expr:
   | expr NE expr   { { desc = BinOp (Ne, $1, $3); loc = $symbolstartpos } }
   | TIMES e = expr %prec UNARY { { desc = Deref e;    loc = $symbolstartpos } }
   | AMP   id = IDENT              { { desc = AddrOf id; loc = $symbolstartpos } }
-  | INT { { desc = IntLit $1; loc = $symbolstartpos } }
+  | INT    { { desc = IntLit $1;    loc = $symbolstartpos } }
+  | STRING { { desc = StringLit $1; loc = $symbolstartpos } }
   | IDENT { { desc = Var $1; loc = $symbolstartpos } }
   | IDENT LPAREN args RPAREN { { desc = Call ($1, $3); loc = $symbolstartpos } }
   | LPAREN e = expr RPAREN { e }

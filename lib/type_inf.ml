@@ -16,13 +16,23 @@ let unify_at loc t1 t2 =
 
 let rec infer_expr tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
-  | IntLit _ -> fresh ()  (* polymorphic: unifies with int or char via context *)
+  | IntLit _    -> fresh ()  (* polymorphic: unifies with int or char via context *)
+  | StringLit _ -> TPtr TChar
   | Var name -> lookup e.loc name tyenv
   | BinOp (op, e1, e2) ->
       let t1 = infer_expr tyenv fenv e1 in
       let t2 = infer_expr tyenv fenv e2 in
       (match op with
-       | Add | Sub | Mul | Div ->
+       | Add ->
+           (* ポインタ算術: ptr + int → 同じポインタ型を返す *)
+           (match repr t1, repr t2 with
+            | TPtr _, _ -> t1
+            | _, TPtr _ -> t2
+            | _ ->
+                unify_at e1.loc t1 TInt;
+                unify_at e2.loc t2 TInt;
+                TInt)
+       | Sub | Mul | Div ->
            unify_at e1.loc t1 TInt;
            unify_at e2.loc t2 TInt;
            TInt

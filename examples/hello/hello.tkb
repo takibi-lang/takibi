@@ -1,21 +1,15 @@
-fn uart_putc(c: int): void {
-    let dr: *int = 0x09000000;
+fn uart_putc(c: char): void {
+    let dr: *char = 0x09000000;
     *dr = c;
 }
 
+fn uart_puts(s: *char): void {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
 fn main(): void {
-    uart_putc(72);
-    uart_putc(101);
-    uart_putc(108);
-    uart_putc(108);
-    uart_putc(111);
-    uart_putc(44);
-    uart_putc(32);
-    uart_putc(87);
-    uart_putc(111);
-    uart_putc(114);
-    uart_putc(108);
-    uart_putc(100);
-    uart_putc(33);
-    uart_putc(10);
+    uart_puts("Hello, World!\n");
 }

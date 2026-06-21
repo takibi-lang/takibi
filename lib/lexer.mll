@@ -45,4 +45,15 @@ rule read = parse
   | ['a'-'z' 'A'-'Z' '_' ] ['a'-'z' 'A'-'Z' '0'-'9' '_' ]* as id
     { IDENT id }
 
+  | '"' { read_string (Buffer.create 32) lexbuf }
+
   | eof { EOF }
+
+and read_string buf = parse
+  | '"'        { STRING (Buffer.contents buf) }
+  | '\\' 'n'  { Buffer.add_char buf '\n'; read_string buf lexbuf }
+  | '\\' 't'  { Buffer.add_char buf '\t'; read_string buf lexbuf }
+  | '\\' '\\' { Buffer.add_char buf '\\'; read_string buf lexbuf }
+  | '\\' '"'  { Buffer.add_char buf '"';  read_string buf lexbuf }
+  | _ as c    { Buffer.add_char buf c;    read_string buf lexbuf }
+  | eof       { failwith "unterminated string literal" }
