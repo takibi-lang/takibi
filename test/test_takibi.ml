@@ -248,26 +248,26 @@ let infer_tests = [
 
   Alcotest.test_case "infer local let from literal" `Quick (fun () ->
     let pt = infer "fn f(): int { let x = 1; return x; }" in
-    let fi = Hashtbl.find pt.Types.functions "f" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "x inferred as int" Ast.TypeInt
-      (Hashtbl.find fi.Types.local_types "x")
+      (Types.StringMap.find "x" fi.Types.local_types)
   );
 
   Alcotest.test_case "char annotation on global let" `Quick (fun () ->
     let pt = infer "let g: char = 0;" in
     Alcotest.check type_t "g is char" Ast.TypeChar
-      (Hashtbl.find pt.Types.globals "g")
+      (Types.StringMap.find "g" pt.Types.globals)
   );
 
   Alcotest.test_case "infer return type from return stmt" `Quick (fun () ->
     let pt = infer "fn f() { return 1; }" in
-    let fi = Hashtbl.find pt.Types.functions "f" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "return type inferred as int" Ast.TypeInt fi.Types.ret_type
   );
 
   Alcotest.test_case "infer param type used in arithmetic" `Quick (fun () ->
     let pt = infer "fn f(a: int, b: int): int { return a + b; }" in
-    let fi = Hashtbl.find pt.Types.functions "f" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "a: int" Ast.TypeInt
       (List.assoc "a" fi.Types.param_types);
     Alcotest.check type_t "b: int" Ast.TypeInt
@@ -321,16 +321,16 @@ let infer_tests = [
 
   Alcotest.test_case "deref yields element type" `Quick (fun () ->
     let pt = infer "fn f(p: *int): int { return *p; }" in
-    let fi = Hashtbl.find pt.Types.functions "f" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "return type is int" Ast.TypeInt fi.Types.ret_type
   );
 
   Alcotest.test_case "addrof yields pointer type" `Quick (fun () ->
     let pt = infer "fn f(): void { let x: int = 0; let p = &x; }" in
-    let fi = Hashtbl.find pt.Types.functions "f" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "p has type *int"
       (Ast.TypePtr Ast.TypeInt)
-      (Hashtbl.find fi.Types.local_types "p")
+      (Types.StringMap.find "p" fi.Types.local_types)
   );
 
   Alcotest.test_case "deref non-pointer is a type error" `Quick

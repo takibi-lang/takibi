@@ -1,10 +1,10 @@
 open Types
 
-(* Type environment: association list, innermost binding first *)
-type tyenv = (string * ty) list
+(* Type environment: immutable map from variable name to internal type *)
+type tyenv = ty StringMap.t
 
 let lookup loc name env =
-  match List.assoc_opt name env with
+  match StringMap.find_opt name env with
   | Some t -> t
   | None   -> raise (TypeError (loc, Printf.sprintf "Unbound variable: %s" name))
 
@@ -27,7 +27,6 @@ let rec infer_expr tyenv fenv (e : Ast.expr) : ty =
            unify_at e2.loc t2 TInt;
            TInt
        | Lt | Gt | Le | Ge | Eq | Ne ->
-           (* both operands must have the same type *)
            unify_at e.loc t1 t2;
            TInt)
   | Deref e1 ->
@@ -39,7 +38,7 @@ let rec infer_expr tyenv fenv (e : Ast.expr) : ty =
       let t = lookup e.loc name tyenv in
       TPtr t
   | Call (fname, args) ->
-      (match List.assoc_opt fname fenv with
+      (match StringMap.find_opt fname fenv with
        | None ->
            raise (TypeError (e.loc,
              Printf.sprintf "Undefined function: %s" fname))
@@ -59,30 +58,33 @@ let rec infer_expr tyenv fenv (e : Ast.expr) : ty =
            ret_ty)
 
 (* ── Statement inference ─────────────────────────────────────────────────── *)
-(* Returns the updated type environment (extended by Let bindings).
-   local_types accumulates the resolved types of Let bindings for codegen. *)
+(* Returns (updated_tyenv, updated_raw_locals).
+   tyenv grows with each Let in the current scope.
+   raw_locals accumulates every Let type seen (including inside blocks/if/while)
+   so that codegen can pre-allocate all locals at function entry. *)
 
-let rec infer_stmt tyenv fenv ret_ty local_types (s : Ast.stmt) : tyenv =
+let rec infer_stmt tyenv fenv ret_ty raw_locals (s : Ast.stmt)
+    : tyenv * ty StringMap.t =
   match s.desc with
   | Return e ->
       let t = infer_expr tyenv fenv e in
       unify_at e.loc t ret_ty;
-      tyenv
+      (tyenv, raw_locals)
   | Expr e ->
       ignore (infer_expr tyenv fenv e);
-      tyenv
+      (tyenv, raw_locals)
   | Assign (name, e) ->
       let vty = lookup s.loc name tyenv in
       let ety = infer_expr tyenv fenv e in
       unify_at e.loc vty ety;
-      tyenv
+      (tyenv, raw_locals)
   | AssignDeref (ptr_expr, val_expr) ->
       let inner = fresh () in
       let pt = infer_expr tyenv fenv ptr_expr in
       unify_at ptr_expr.loc pt (TPtr inner);
       let vt = infer_expr tyenv fenv val_expr in
       unify_at val_expr.loc vt inner;
-      tyenv
+      (tyenv, raw_locals)
   | Let (name, ty_opt, expr_opt) ->
       let ty = of_ast_opt ty_opt in
       (match expr_opt with
@@ -90,70 +92,76 @@ let rec infer_stmt tyenv fenv ret_ty local_types (s : Ast.stmt) : tyenv =
        | Some e ->
            let et = infer_expr tyenv fenv e in
            unify_at e.loc ty et);
-      Hashtbl.replace local_types name ty;
-      (name, ty) :: tyenv
+      ( StringMap.add name ty tyenv,
+        StringMap.add name ty raw_locals )
   | Block stmts ->
-      (* Inner block: bindings do not escape, but types are recorded *)
-      ignore (List.fold_left
-        (fun env s -> infer_stmt env fenv ret_ty local_types s) tyenv stmts);
-      tyenv
+      (* Let bindings extend the inner env but do not escape the block *)
+      let (_, raw_locals') = List.fold_left
+        (fun (env, locs) s -> infer_stmt env fenv ret_ty locs s)
+        (tyenv, raw_locals) stmts
+      in
+      (tyenv, raw_locals')
   | If (cond, then_s, else_s) ->
       let ct = infer_expr tyenv fenv cond in
       unify_at cond.loc ct TInt;
-      ignore (List.fold_left
-        (fun env s -> infer_stmt env fenv ret_ty local_types s) tyenv then_s);
-      ignore (List.fold_left
-        (fun env s -> infer_stmt env fenv ret_ty local_types s) tyenv else_s);
-      tyenv
+      let (_, rl1) = List.fold_left
+        (fun (env, locs) s -> infer_stmt env fenv ret_ty locs s)
+        (tyenv, raw_locals) then_s
+      in
+      let (_, rl2) = List.fold_left
+        (fun (env, locs) s -> infer_stmt env fenv ret_ty locs s)
+        (tyenv, rl1) else_s
+      in
+      (tyenv, rl2)
   | While (cond, body) ->
       let ct = infer_expr tyenv fenv cond in
       unify_at cond.loc ct TInt;
-      ignore (List.fold_left
-        (fun env s -> infer_stmt env fenv ret_ty local_types s) tyenv body);
-      tyenv
+      let (_, raw_locals') = List.fold_left
+        (fun (env, locs) s -> infer_stmt env fenv ret_ty locs s)
+        (tyenv, raw_locals) body
+      in
+      (tyenv, raw_locals')
 
 (* ── Function inference ──────────────────────────────────────────────────── *)
 
 let infer_func fenv genv (fdef : Ast.func) : func_info =
   let param_tys = List.map (fun (_, ty_opt) -> of_ast_opt ty_opt) fdef.params in
   let ret_ty    = ret_of_ast_opt fdef.ret_type in
-  let param_env = List.map2 (fun (name, _) ty -> (name, ty)) fdef.params param_tys in
-  let init_env  = param_env @ genv in
-  (* local_types collects the ty for each Let binding (resolved after inference) *)
-  let raw_locals : (string, ty) Hashtbl.t = Hashtbl.create 8 in
-  ignore (List.fold_left
-    (fun env s -> infer_stmt env fenv ret_ty raw_locals s)
-    init_env fdef.body);
-  (* Resolve all types now that unification is complete *)
-  let local_types = Hashtbl.create 8 in
-  Hashtbl.iter (fun k v -> Hashtbl.replace local_types k (to_ast v)) raw_locals;
+  (* Start with globals visible, then shadow them with params *)
+  let init_env  = List.fold_left2
+    (fun m (name, _) ty -> StringMap.add name ty m)
+    genv fdef.params param_tys
+  in
+  let (_, raw_locals) = List.fold_left
+    (fun (env, locs) s -> infer_stmt env fenv ret_ty locs s)
+    (init_env, StringMap.empty) fdef.body
+  in
   {
     ret_type    = to_ast ret_ty;
     param_types = List.map2 (fun (name, _) ty -> (name, to_ast ty))
                     fdef.params param_tys;
-    local_types;
+    local_types = StringMap.map to_ast raw_locals;
   }
 
 (* ── Whole-program inference ─────────────────────────────────────────────── *)
 
 let infer_program (prog : Ast.toplevel list) : program_types =
-  (* Pass 1: build function-type env and global-variable env *)
-  let func_tbl : (string, ty) Hashtbl.t = Hashtbl.create 8 in
-  let glob_tbl : (string, ty) Hashtbl.t = Hashtbl.create 8 in
-  List.iter (function
+  (* Pass 1: collect function signatures and global variable types *)
+  let fenv = List.fold_left (fun m -> function
     | Ast.FuncDef fdef ->
         let pts = List.map (fun (_, t) -> of_ast_opt t) fdef.params in
         let rt  = ret_of_ast_opt fdef.ret_type in
-        Hashtbl.replace func_tbl fdef.name (TFun (pts, rt))
-    | Ast.LetDef (name, ty_opt, _) ->
-        Hashtbl.replace glob_tbl name (of_ast_opt ty_opt)
-  ) prog;
-  let fenv = Hashtbl.fold (fun k v a -> (k, v) :: a) func_tbl [] in
-  let genv = Hashtbl.fold (fun k v a -> (k, v) :: a) glob_tbl [] in
-  (* Pass 2: infer global initializers *)
+        StringMap.add fdef.name (TFun (pts, rt)) m
+    | Ast.LetDef _ -> m
+  ) StringMap.empty prog in
+  let genv = List.fold_left (fun m -> function
+    | Ast.LetDef (name, ty_opt, _) -> StringMap.add name (of_ast_opt ty_opt) m
+    | Ast.FuncDef _                -> m
+  ) StringMap.empty prog in
+  (* Pass 2: check global initializers *)
   List.iter (function
     | Ast.LetDef (name, _, expr_opt) ->
-        let ty = Hashtbl.find glob_tbl name in
+        let ty = StringMap.find name genv in
         (match expr_opt with
          | None -> ()
          | Some e ->
@@ -163,13 +171,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> ()
   ) prog;
   (* Pass 3: infer function bodies *)
-  let functions = Hashtbl.create 8 in
-  List.iter (function
+  let functions = List.fold_left (fun m -> function
     | Ast.FuncDef fdef ->
-        Hashtbl.replace functions fdef.name (infer_func fenv genv fdef)
-    | _ -> ()
-  ) prog;
-  (* Resolve global types *)
-  let globals = Hashtbl.create 8 in
-  Hashtbl.iter (fun k v -> Hashtbl.replace globals k (to_ast v)) glob_tbl;
-  { globals; functions }
+        StringMap.add fdef.name (infer_func fenv genv fdef) m
+    | _ -> m
+  ) StringMap.empty prog in
+  {
+    globals   = StringMap.map to_ast genv;
+    functions;
+  }

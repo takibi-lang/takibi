@@ -95,13 +95,13 @@ let resolve_local_ast (pt : Types.program_types option) fname name ty_opt =
   match pt with
   | None -> fallback
   | Some pt ->
-      match Hashtbl.find_opt pt.Types.functions fname with
+      match Types.StringMap.find_opt fname pt.Types.functions with
       | None -> fallback
       | Some fi ->
           (match List.assoc_opt name fi.Types.param_types with
            | Some t -> t
            | None ->
-               match Hashtbl.find_opt fi.Types.local_types name with
+               match Types.StringMap.find_opt name fi.Types.local_types with
                | Some t -> t
                | None   -> fallback)
 
@@ -110,7 +110,7 @@ let resolve_ret_ast (pt : Types.program_types option) fname ty_opt =
   match pt with
   | None -> fallback
   | Some pt ->
-      match Hashtbl.find_opt pt.Types.functions fname with
+      match Types.StringMap.find_opt fname pt.Types.functions with
       | None    -> fallback
       | Some fi -> fi.Types.ret_type
 
@@ -334,7 +334,7 @@ let gen_global ?prog_types name ty_opt expr_opt =
   let ast_ty = match prog_types with
     | None -> (match ty_opt with Some t -> t | None -> TypeInt)
     | Some (pt : Types.program_types) ->
-        match Hashtbl.find_opt pt.Types.globals name with
+        match Types.StringMap.find_opt name pt.Types.globals with
         | Some t -> t
         | None   -> (match ty_opt with Some t -> t | None -> TypeInt)
   in

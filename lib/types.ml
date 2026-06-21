@@ -106,13 +106,15 @@ let rec to_ast t =
 
 (* ── Output structs passed to codegen ───────────────────────────────────── *)
 
+module StringMap = Map.Make(String)
+
 type func_info = {
   ret_type    : Ast.type_expr;
   param_types : (string * Ast.type_expr) list;
-  local_types : (string, Ast.type_expr) Hashtbl.t;
+  local_types : Ast.type_expr StringMap.t;
 }
 
 type program_types = {
-  globals   : (string, Ast.type_expr) Hashtbl.t;
-  functions : (string, func_info) Hashtbl.t;
+  globals   : Ast.type_expr StringMap.t;
+  functions : func_info StringMap.t;
 }
