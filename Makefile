@@ -63,7 +63,7 @@ run: $(BIN)
 test:
 	dune test
 
-## $(HELLO_OBJ): hello.tk を AArch64 オブジェクトにコンパイル
+## $(HELLO_OBJ): hello.tkb を AArch64 オブジェクトにコンパイル
 $(HELLO_OBJ): $(HELLO_SRC) build
 	$(TAKIBI) $< --target $(AARCH64_TARGET) -o $@
 
