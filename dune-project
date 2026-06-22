@@ -7,9 +7,9 @@
 (source
  (github takibi-lang/takibi))
 
-(authors "Kiwamu Okabe <kiwamu@gmail.com>")
+(authors "Kiwamu Okabe <kiwamu@metasepi.org>")
 
-(maintainers "Kiwamu Okabe <kiwamu@gmail.com>")
+(maintainers "Kiwamu Okabe <kiwamu@metasepi.org>")
 
 (license LICENSE)
 
