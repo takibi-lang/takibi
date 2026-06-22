@@ -347,7 +347,7 @@ let infer_tests = [
   Alcotest.test_case "global let used inside function" `Quick
     (expect_ok "let g = 1; fn f() int { return g; }");
 
-  Alcotest.test_case "let mut allows reassignment" `Quick
+  Alcotest.test_case "let mut in while loop" `Quick
     (expect_ok "fn f() int { let mut r = 0;
                               while (r != 0) { r = 1; }
                               return r; }");
@@ -429,6 +429,9 @@ let infer_tests = [
   Alcotest.test_case "deref non-pointer is a type error" `Quick
     (expect_type_error "cannot unify"
        "fn f(x: int) { *x = 1; }");
+
+  Alcotest.test_case "write through immutable pointer variable is allowed" `Quick
+    (expect_ok "fn f() { let p: *int = 0x09000000; *p = 1; }");
 
 ]
 
