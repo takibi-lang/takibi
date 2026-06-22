@@ -26,12 +26,12 @@ fn main() {
         uart_putc(c);
         if (c == '\r') {
             uart_putc('\n');
-        } else {}
+        }
         if (prev == 'q') {
             if (c == '\n' || c == '\r') {
                 running = 0;
-            } else {}
-        } else {}
+            }
+        }
         prev = c;
     }
     uart_puts("bye\r\n");

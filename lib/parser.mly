@@ -86,6 +86,7 @@ else_part:
   | ELSE LBRACE e = stmts RBRACE { e }
   | ELSE IF LPAREN c = expr RPAREN LBRACE t = stmts RBRACE p = else_part
     { [{ desc = If(c, t, p); loc = $symbolstartpos }] }
+  | (* empty *) { [] }
 
 expr:
   | expr OR expr    { { desc = BinOp (Or, $1, $3); loc = $symbolstartpos } }

@@ -267,6 +267,15 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  Alcotest.test_case "if without else" `Quick (fun () ->
+    match parse "fn f(x: int) { if (x == 0) { x = 1; } }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.If (_, [_], []) -> ()
+         | _ -> Alcotest.fail "expected If with empty else")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
   Alcotest.test_case "else if chain" `Quick (fun () ->
     match parse "fn f(x: int) int {
       if (x == 1) { return 1; }
