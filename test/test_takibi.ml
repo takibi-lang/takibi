@@ -343,6 +343,13 @@ let infer_tests = [
                                while (r != 0) { r = 1; }
                                return r; }");
 
+  Alcotest.test_case "logical OR of two comparisons" `Quick
+    (expect_ok "fn f(x: int) int { return x == 1 || x == 2; }");
+
+  Alcotest.test_case "logical OR type error: char operand" `Quick
+    (expect_type_error "cannot unify"
+       "fn f(a: int, b: char) int { return a == 1 || b; }");
+
   Alcotest.test_case "if/else branches both valid" `Quick
     (expect_ok "fn abs(x: int) int {
                   if (x > 0) { return x; } else { return 0; } }");

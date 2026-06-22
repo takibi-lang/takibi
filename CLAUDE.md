@@ -7,16 +7,27 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
 
 - ファイル拡張子: `.tkb`
 - 型: `int`, `char`, `void`, `*T`（ポインタ型、ネスト可）
-- 文: `let`, `if/else`, `while`, `return`, 代入 (`x = e`)、ポインタ経由代入 (`*p = v`)
-- 式: 整数リテラル（10進・16進 `0x...`）、算術/比較演算、関数呼び出し、`*expr`（デリファレンス）、`&ident`（アドレス取得）
+- 文:
+  - `let`, `while`, `return`, 代入 (`x = e`)、ポインタ経由代入 (`*p = v`)
+  - `if (cond) { ... }` — `else` は省略可
+  - `if (cond) { ... } else { ... }` — 通常の if/else
+  - `if (cond) { ... } else if (cond) { ... } else { ... }` — else if チェーン
+- 式:
+  - 整数リテラル（10進・16進 `0x...`）
+  - 文字リテラル（`'a'`、`'\n'`、`'\r'`、`'\t'`、`'\0'`、`'\\'`）— `IntLit (Char.code c)` に脱糖
+  - 文字列リテラル（`"..."` — `\n` `\r` `\t` `\\` `\"` エスケープ対応）
+  - 算術演算（`+` `-` `*` `/`）、比較演算（`<` `>` `<=` `>=` `==` `!=`）
+  - 論理 OR（`||`）
+  - 関数呼び出し、`*expr`（デリファレンス）、`&ident`（アドレス取得）
 - MMIO: volatile store/load として emit される（`set_volatile true`）
 
 ## ビルドコマンド
 
 ```bash
 dune build          # コンパイラ (takibi) のビルド
-dune test           # テスト実行（37件）
+dune test           # テスト実行（42件）
 make qemu           # QEMU virt (AArch64) でベアメタル Hello World を実行
+make qemu-echo      # QEMU virt (AArch64) で echo サーバを実行（q+Enter で終了）
 make ir             # ホスト向け LLVM IR をダンプ
 make ir-aarch64     # AArch64 向け LLVM IR をダンプ
 ```
@@ -41,6 +52,11 @@ examples/
     startup.S     — _start → main、BSS ゼロクリア、AArch64 semihosting exit
     link.ld       — リンカスクリプト（ロードアドレス 0x40000000）
     kernel.elf    — リンク成果物（make qemu で生成）
+  echo/
+    echo.tkb      — UART echo サーバ（q+Enter で終了、char リテラル・|| を使用）
+    startup.S     — hello/ と同一
+    link.ld       — hello/ と同一
+    kernel.elf    — リンク成果物（make qemu-echo で生成）
 test/
   test_takibi.ml  — Alcotest による parser / type_inf テスト
 ```
@@ -59,6 +75,14 @@ val infer_stmt : tyenv -> ty StringMap.t -> ty -> ty StringMap.t -> Ast.stmt
                -> tyenv * ty StringMap.t
 ```
 戻り値の第2要素 `raw_locals` が codegen 用の Let バインディング型マップ。
+
+### binop を追加するときは3ファイルを更新する
+`Ast.binop` に新しいコンストラクタを追加する場合、以下の3ファイルを必ず更新する必要がある。
+OCaml の網羅性チェック（exhaustive match）がコンパイルエラーで漏れを教えてくれる。
+
+1. `lib/ast.ml` — コンストラクタ定義
+2. `lib/type_inf.ml` — `BinOp` の match に型推論ルールを追加
+3. `lib/llvm_gen.ml` — `BinOp` の match に LLVM IR 生成を追加
 
 ### Integer literal → pointer coercion
 `let dr: *int = 0x09000000;` は整数リテラルをポインタ型変数に代入する。
