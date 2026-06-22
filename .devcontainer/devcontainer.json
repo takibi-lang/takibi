@@ -13,7 +13,7 @@
   "mounts": [
     "source=claude-code-config,target=/home/vscode/.claude,type=volume"
   ],
-  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude && sudo apt-get update && sudo apt-get install -y cmake llvm-19-dev libzstd-dev && opam update && opam install -y ppx_deriving llvm",
+  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude && sudo apt-get update && sudo apt-get install -y cmake llvm-19-dev libzstd-dev lld-19 qemu-system-arm && opam update && opam install -y ppx_deriving llvm",
   "containerEnv": {
     "OPAMYES": "true"
   }
