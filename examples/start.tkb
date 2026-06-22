@@ -1,7 +1,7 @@
 let g_int = 1;
 let g_char: char = 0;
 
-fn foo(c: int) {
+fn foo(c: int): int {
   return 1;
 }
 

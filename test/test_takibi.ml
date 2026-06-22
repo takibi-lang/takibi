@@ -184,14 +184,14 @@ let parser_tests = [
   (* ── Pointer / address-of tests ────────────────────────────── *)
 
   Alcotest.test_case "pointer type in function param" `Quick (fun () ->
-    match parse "fn f(p: *int): void {}" with
+    match parse "fn f(p: *int) {}" with
     | [Ast.FuncDef { params = [(_, Some t)]; _ }] ->
         Alcotest.check type_t "param type is *int" (Ast.TypePtr Ast.TypeInt) t
     | _ -> Alcotest.fail "unexpected structure"
   );
 
   Alcotest.test_case "pointer-to-pointer type" `Quick (fun () ->
-    match parse "fn f(p: **int): void {}" with
+    match parse "fn f(p: **int) {}" with
     | [Ast.FuncDef { params = [(_, Some t)]; _ }] ->
         Alcotest.check type_t "param type is **int"
           (Ast.TypePtr (Ast.TypePtr Ast.TypeInt)) t
@@ -208,7 +208,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "addrof expression" `Quick (fun () ->
-    match parse "fn f(): void { let x = 0; let p = &x; }" with
+    match parse "fn f() { let x = 0; let p = &x; }" with
     | [Ast.FuncDef { body = [_; s]; _ }] ->
         (match s.desc with
          | Ast.Let (_, _, Some { desc = Ast.AddrOf "x"; _ }) -> ()
@@ -217,7 +217,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "assign through pointer" `Quick (fun () ->
-    match parse "fn f(p: *int): void { *p = 42; }" with
+    match parse "fn f(p: *int) { *p = 42; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.AssignDeref ({ desc = Ast.Var "p"; _ },
@@ -259,10 +259,10 @@ let infer_tests = [
       (Types.StringMap.find "g" pt.Types.globals)
   );
 
-  Alcotest.test_case "infer return type from return stmt" `Quick (fun () ->
-    let pt = infer "fn f() { return 1; }" in
+  Alcotest.test_case "annotated return type preserved" `Quick (fun () ->
+    let pt = infer "fn f(): int { return 1; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
-    Alcotest.check type_t "return type inferred as int" Ast.TypeInt fi.Types.ret_type
+    Alcotest.check type_t "return type is int" Ast.TypeInt fi.Types.ret_type
   );
 
   Alcotest.test_case "infer param type used in arithmetic" `Quick (fun () ->
@@ -317,7 +317,7 @@ let infer_tests = [
   (* ── ポインタ型推論 ──────────────────────────────────────── *)
 
   Alcotest.test_case "local pointer annotation type-checks" `Quick
-    (expect_ok "fn f(): void { let p: *int = 0x09000000; *p = 1; }");
+    (expect_ok "fn f() { let p: *int = 0x09000000; *p = 1; }");
 
   Alcotest.test_case "deref yields element type" `Quick (fun () ->
     let pt = infer "fn f(p: *int): int { return *p; }" in
@@ -326,7 +326,7 @@ let infer_tests = [
   );
 
   Alcotest.test_case "addrof yields pointer type" `Quick (fun () ->
-    let pt = infer "fn f(): void { let x: int = 0; let p = &x; }" in
+    let pt = infer "fn f() { let x: int = 0; let p = &x; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "p has type *int"
       (Ast.TypePtr Ast.TypeInt)
@@ -335,7 +335,7 @@ let infer_tests = [
 
   Alcotest.test_case "deref non-pointer is a type error" `Quick
     (expect_type_error "cannot unify"
-       "fn f(x: int): void { *x = 1; }");
+       "fn f(x: int) { *x = 1; }");
 
 ]
 

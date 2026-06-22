@@ -86,11 +86,10 @@ let of_ast_opt = function
   | Some t -> of_ast t
   | None   -> fresh ()
 
-(* Return type: None defaults to fresh var (not void) *)
+(* Return type: None means void; annotation required for non-void returns *)
 let ret_of_ast_opt = function
-  | Some Ast.TypeVoid -> TVoid
-  | Some t            -> of_ast t
-  | None              -> fresh ()
+  | Some t -> of_ast t
+  | None   -> TVoid
 
 (* After unification, collapse to a concrete Ast type.
    Unbound variables default to int (unconstrained integer) *)

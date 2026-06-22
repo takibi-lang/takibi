@@ -109,7 +109,7 @@ let resolve_local_ast (pt : Types.program_types option) fname name ty_opt =
                | None   -> fallback)
 
 let resolve_ret_ast (pt : Types.program_types option) fname ty_opt =
-  let fallback = match ty_opt with Some t -> t | None -> TypeInt in
+  let fallback = match ty_opt with Some t -> t | None -> TypeVoid in
   match pt with
   | None -> fallback
   | Some pt ->

@@ -21,7 +21,7 @@ open Ast
 %left TIMES DIV
 %nonassoc UNARY   (* highest: unary * (deref) and & (addrof) *)
 
-%token INT_TYPE CHAR_TYPE VOID_TYPE
+%token INT_TYPE CHAR_TYPE
 %token COLON
 
 %start <Ast.toplevel list> program
@@ -116,5 +116,4 @@ let_rhs:
 type_expr:
   | INT_TYPE  { TypeInt }
   | CHAR_TYPE { TypeChar }
-  | VOID_TYPE { TypeVoid }
   | TIMES type_expr { TypePtr $2 }

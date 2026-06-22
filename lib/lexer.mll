@@ -36,7 +36,6 @@ rule read = parse
 
   | "int"  { INT_TYPE }
   | "char" { CHAR_TYPE }
-  | "void" { VOID_TYPE }
   | ':' { COLON }
 
   | "0x" ['0'-'9' 'a'-'f' 'A'-'F']+ as h { INT (int_of_string h) }

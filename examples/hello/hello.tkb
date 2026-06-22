@@ -1,15 +1,15 @@
-fn uart_putc(c: char): void {
+fn uart_putc(c: char) {
     let dr: *char = 0x09000000;
     *dr = c;
 }
 
-fn uart_puts(s: *char): void {
+fn uart_puts(s: *char) {
     while (*s != 0) {
         uart_putc(*s);
         s = s + 1;
     }
 }
 
-fn main(): void {
+fn main() {
     uart_puts("Hello, World!\n");
 }
