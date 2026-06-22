@@ -61,7 +61,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "function with typed params and return" `Quick (fun () ->
-    match parse "fn add(a: int, b: int): int { return a; }" with
+    match parse "fn add(a: int, b: int) int { return a; }" with
     | [Ast.FuncDef f] ->
         Alcotest.(check string) "name" "add" f.name;
         Alcotest.(check int)    "param count" 2 (List.length f.params);
@@ -96,7 +96,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "return statement" `Quick (fun () ->
-    match parse "fn f(): int { return 42; }" with
+    match parse "fn f() int { return 42; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.IntLit 42; _ } -> ()
@@ -141,7 +141,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "arithmetic BinOp" `Quick (fun () ->
-    match parse "fn f(): int { return 1 + 2 * 3; }" with
+    match parse "fn f() int { return 1 + 2 * 3; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
@@ -151,7 +151,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "comparison BinOp" `Quick (fun () ->
-    match parse "fn f(): int { return 1 != 2; }" with
+    match parse "fn f() int { return 1 != 2; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
@@ -161,7 +161,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "function call expression" `Quick (fun () ->
-    match parse "fn f(): int { return g(1, 2); }" with
+    match parse "fn f() int { return g(1, 2); }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.Call ("g", args); _ } ->
@@ -171,7 +171,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "multiple top-level items" `Quick (fun () ->
-    let prog = parse "let x = 0; fn f() {} fn g(): int { return 1; }" in
+    let prog = parse "let x = 0; fn f() {} fn g() int { return 1; }" in
     Alcotest.(check int) "item count" 3 (List.length prog);
     (match List.nth prog 0 with
      | Ast.LetDef ("x", _, _) -> ()
@@ -199,7 +199,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "deref expression" `Quick (fun () ->
-    match parse "fn f(p: *int): int { return *p; }" with
+    match parse "fn f(p: *int) int { return *p; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.Deref { desc = Ast.Var "p"; _ }; _ } -> ()
@@ -227,7 +227,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "hex integer literal" `Quick (fun () ->
-    match parse "fn f(): int { return 0xff; }" with
+    match parse "fn f() int { return 0xff; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.IntLit 255; _ } -> ()
@@ -244,10 +244,10 @@ let infer_tests = [
   (* ── 成功ケース ─────────────────────────────────────────────── *)
 
   Alcotest.test_case "fully annotated function passes" `Quick
-    (expect_ok "fn add(a: int, b: int): int { return a; }");
+    (expect_ok "fn add(a: int, b: int) int { return a; }");
 
   Alcotest.test_case "infer local let from literal" `Quick (fun () ->
-    let pt = infer "fn f(): int { let x = 1; return x; }" in
+    let pt = infer "fn f() int { let x = 1; return x; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "x inferred as int" Ast.TypeInt
       (Types.StringMap.find "x" fi.Types.local_types)
@@ -260,13 +260,13 @@ let infer_tests = [
   );
 
   Alcotest.test_case "annotated return type preserved" `Quick (fun () ->
-    let pt = infer "fn f(): int { return 1; }" in
+    let pt = infer "fn f() int { return 1; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "return type is int" Ast.TypeInt fi.Types.ret_type
   );
 
   Alcotest.test_case "infer param type used in arithmetic" `Quick (fun () ->
-    let pt = infer "fn f(a: int, b: int): int { return a + b; }" in
+    let pt = infer "fn f(a: int, b: int) int { return a + b; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "a: int" Ast.TypeInt
       (List.assoc "a" fi.Types.param_types);
@@ -275,44 +275,44 @@ let infer_tests = [
   );
 
   Alcotest.test_case "cross-function call type-checks" `Quick
-    (expect_ok "fn id(x: int): int { return x; }
-                fn caller(): int { return id(5); }");
+    (expect_ok "fn id(x: int) int { return x; }
+                fn caller() int { return id(5); }");
 
   Alcotest.test_case "global let used inside function" `Quick
-    (expect_ok "let g = 1; fn f(): int { return g; }");
+    (expect_ok "let g = 1; fn f() int { return g; }");
 
   Alcotest.test_case "comparison result used in while" `Quick
-    (expect_ok "fn f(): int { let r = 0;
+    (expect_ok "fn f() int { let r = 0;
                                while (r != 0) { r = 1; }
                                return r; }");
 
   Alcotest.test_case "if/else branches both valid" `Quick
-    (expect_ok "fn abs(x: int): int {
+    (expect_ok "fn abs(x: int) int {
                   if (x > 0) { return x; } else { return 0; } }");
 
   (* ── エラーケース ───────────────────────────────────────────── *)
 
   Alcotest.test_case "undefined variable" `Quick
     (expect_type_error "Unbound variable"
-       "fn f(): int { return z; }");
+       "fn f() int { return z; }");
 
   Alcotest.test_case "undefined function" `Quick
     (expect_type_error "Undefined function"
-       "fn f(): int { return noexist(1); }");
+       "fn f() int { return noexist(1); }");
 
   Alcotest.test_case "too many arguments" `Quick
     (expect_type_error "expects 1 argument"
-       "fn id(x: int): int { return x; }
-        fn f(): int { return id(1, 2); }");
+       "fn id(x: int) int { return x; }
+        fn f() int { return id(1, 2); }");
 
   Alcotest.test_case "too few arguments" `Quick
     (expect_type_error "expects 2 argument"
-       "fn add(a: int, b: int): int { return a; }
-        fn f(): int { return add(1); }");
+       "fn add(a: int, b: int) int { return a; }
+        fn f() int { return add(1); }");
 
   Alcotest.test_case "arithmetic operand type mismatch" `Quick
     (expect_type_error "cannot unify"
-       "fn f(a: int, b: char): int { return a + b; }");
+       "fn f(a: int, b: char) int { return a + b; }");
 
   (* ── ポインタ型推論 ──────────────────────────────────────── *)
 
@@ -320,7 +320,7 @@ let infer_tests = [
     (expect_ok "fn f() { let p: *int = 0x09000000; *p = 1; }");
 
   Alcotest.test_case "deref yields element type" `Quick (fun () ->
-    let pt = infer "fn f(p: *int): int { return *p; }" in
+    let pt = infer "fn f(p: *int) int { return *p; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "return type is int" Ast.TypeInt fi.Types.ret_type
   );

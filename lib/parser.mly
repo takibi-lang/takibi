@@ -59,7 +59,7 @@ rest_params:
 
 ret_type_opt:
   | /* empty */ { None }
-  | COLON type_expr { Some $2 }
+  | type_expr { Some $1 }
 
 stmts:
   | /* empty */ { [] }
