@@ -5,7 +5,7 @@ open Ast
 %token <int> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN RETURN LET
+%token FN RETURN LET MUT
 %token LBRACE RBRACE LPAREN RPAREN COMMA SEMI
 %token ASSIGN
 %token IF ELSE WHILE
@@ -71,7 +71,9 @@ stmt:
   | RETURN e = expr SEMI { { desc = Return e; loc = $symbolstartpos } }
   | e = expr SEMI { { desc = Expr e; loc = $symbolstartpos } }
   | LET id = IDENT rhs = let_rhs SEMI
-    { { desc = Let (id, fst rhs, snd rhs); loc = $symbolstartpos } }
+    { { desc = Let (false, id, fst rhs, snd rhs); loc = $symbolstartpos } }
+  | LET MUT id = IDENT rhs = let_rhs SEMI
+    { { desc = Let (true, id, fst rhs, snd rhs); loc = $symbolstartpos } }
   | LBRACE s = stmts RBRACE { { desc = Block s; loc = $symbolstartpos } }
   | IF LPAREN c = expr RPAREN LBRACE t = stmts RBRACE p = else_part
     { { desc = If(c, t, p); loc = $symbolstartpos } }

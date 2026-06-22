@@ -41,7 +41,7 @@ and stmt_desc =
   | Assign of ident * expr
   | AssignDeref of expr * expr   (* *lhs = rhs — write through pointer *)
   | Block of stmt list
-  | Let of ident * type_expr option * expr option
+  | Let of bool * ident * type_expr option * expr option  (* is_mutable, name, type, init *)
   | If of expr * stmt list * stmt list
   | While of expr * stmt list
 [@@deriving show]

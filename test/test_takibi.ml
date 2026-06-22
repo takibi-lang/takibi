@@ -104,12 +104,21 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  Alcotest.test_case "let statement with initializer" `Quick (fun () ->
+  Alcotest.test_case "let statement (immutable) with initializer" `Quick (fun () ->
     match parse "fn f() { let x = 5; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Let ("x", None, Some { desc = Ast.IntLit 5; _ }) -> ()
-         | _ -> Alcotest.fail "expected Let(x, None, IntLit 5)")
+         | Ast.Let (false, "x", None, Some { desc = Ast.IntLit 5; _ }) -> ()
+         | _ -> Alcotest.fail "expected Let(false, x, None, IntLit 5)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "let mut statement (mutable) with initializer" `Quick (fun () ->
+    match parse "fn f() { let mut x = 5; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Let (true, "x", None, Some { desc = Ast.IntLit 5; _ }) -> ()
+         | _ -> Alcotest.fail "expected Let(true, x, None, IntLit 5)")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -207,12 +216,12 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  Alcotest.test_case "addrof expression" `Quick (fun () ->
-    match parse "fn f() { let x = 0; let p = &x; }" with
+  Alcotest.test_case "addrof expression (let mut required)" `Quick (fun () ->
+    match parse "fn f() { let mut x = 0; let p = &x; }" with
     | [Ast.FuncDef { body = [_; s]; _ }] ->
         (match s.desc with
-         | Ast.Let (_, _, Some { desc = Ast.AddrOf "x"; _ }) -> ()
-         | _ -> Alcotest.fail "expected Let(p, AddrOf x)")
+         | Ast.Let (_, _, _, Some { desc = Ast.AddrOf "x"; _ }) -> ()
+         | _ -> Alcotest.fail "expected Let(_, AddrOf x)")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -249,7 +258,7 @@ let parser_tests = [
     | [Ast.FuncDef { body = [s1; s2; s3]; _ }] ->
         let check name expected s =
           match s.Ast.desc with
-          | Ast.Let (_, _, Some { desc = Ast.IntLit n; _ }) ->
+          | Ast.Let (_, _, _, Some { desc = Ast.IntLit n; _ }) ->
               Alcotest.(check int) name expected n
           | _ -> Alcotest.failf "%s: expected Let with IntLit" name
         in
@@ -338,10 +347,10 @@ let infer_tests = [
   Alcotest.test_case "global let used inside function" `Quick
     (expect_ok "let g = 1; fn f() int { return g; }");
 
-  Alcotest.test_case "comparison result used in while" `Quick
-    (expect_ok "fn f() int { let r = 0;
-                               while (r != 0) { r = 1; }
-                               return r; }");
+  Alcotest.test_case "let mut allows reassignment" `Quick
+    (expect_ok "fn f() int { let mut r = 0;
+                              while (r != 0) { r = 1; }
+                              return r; }");
 
   Alcotest.test_case "logical OR of two comparisons" `Quick
     (expect_ok "fn f(x: int) int { return x == 1 || x == 2; }");
@@ -353,6 +362,26 @@ let infer_tests = [
   Alcotest.test_case "if/else branches both valid" `Quick
     (expect_ok "fn abs(x: int) int {
                   if (x > 0) { return x; } else { return 0; } }");
+
+  (* ── 不変性チェック ─────────────────────────────────────────── *)
+
+  Alcotest.test_case "assign to immutable variable is a type error" `Quick
+    (expect_type_error "cannot assign to immutable"
+       "fn f() { let x = 0; x = 1; }");
+
+  Alcotest.test_case "let mut allows reassignment" `Quick
+    (expect_ok "fn f() { let mut x = 0; x = 1; }");
+
+  Alcotest.test_case "addrof immutable variable is a type error" `Quick
+    (expect_type_error "cannot take address of immutable"
+       "fn f() { let x = 0; let p = &x; }");
+
+  Alcotest.test_case "addrof mutable variable succeeds" `Quick
+    (expect_ok "fn f() { let mut x: int = 0; let p = &x; }");
+
+  Alcotest.test_case "immutable let without initializer is a type error" `Quick
+    (expect_type_error "must have an initializer"
+       "fn f() { let x: int; }");
 
   (* ── エラーケース ───────────────────────────────────────────── *)
 
@@ -390,7 +419,7 @@ let infer_tests = [
   );
 
   Alcotest.test_case "addrof yields pointer type" `Quick (fun () ->
-    let pt = infer "fn f() { let x: int = 0; let p = &x; }" in
+    let pt = infer "fn f() { let mut x: int = 0; let p = &x; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "p has type *int"
       (Ast.TypePtr Ast.TypeInt)

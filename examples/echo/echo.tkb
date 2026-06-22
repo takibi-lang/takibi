@@ -19,8 +19,8 @@ fn uart_getc() char {
 
 fn main() {
     uart_puts("echo ready\r\n");
-    let running: int = 1;
-    let prev: char = 0;
+    let mut running: int = 1;
+    let mut prev: char = 0;
     while (running != 0) {
         let c: char = uart_getc();
         uart_putc(c);

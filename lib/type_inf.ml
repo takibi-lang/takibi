@@ -1,12 +1,14 @@
 open Types
 
-(* Type environment: immutable map from variable name to internal type *)
-type tyenv = ty StringMap.t
+(* Type environment: immutable map from variable name to (type, is_mutable) *)
+type tyenv = (ty * bool) StringMap.t
 
-let lookup loc name env =
+let lookup_binding loc name env =
   match StringMap.find_opt name env with
-  | Some t -> t
+  | Some b -> b
   | None   -> raise (TypeError (loc, Printf.sprintf "Unbound variable: %s" name))
+
+let lookup loc name env = fst (lookup_binding loc name env)
 
 let unify_at loc t1 t2 =
   try unify t1 t2
@@ -49,7 +51,10 @@ let rec infer_expr tyenv fenv (e : Ast.expr) : ty =
       unify_at e1.loc t1 (TPtr inner);
       inner
   | AddrOf name ->
-      let t = lookup e.loc name tyenv in
+      let (t, is_mut) = lookup_binding e.loc name tyenv in
+      if not is_mut then
+        raise (TypeError (e.loc,
+          Printf.sprintf "cannot take address of immutable variable '%s'" name));
       TPtr t
   | Call (fname, args) ->
       (match StringMap.find_opt fname fenv with
@@ -75,7 +80,7 @@ let rec infer_expr tyenv fenv (e : Ast.expr) : ty =
 (* Returns (updated_tyenv, updated_raw_locals).
    tyenv grows with each Let in the current scope.
    raw_locals accumulates every Let type seen (including inside blocks/if/while)
-   so that codegen can pre-allocate all locals at function entry. *)
+   so that codegen can pre-allocate mutable locals at function entry. *)
 
 let rec infer_stmt tyenv fenv ret_ty raw_locals (s : Ast.stmt)
     : tyenv * ty StringMap.t =
@@ -88,7 +93,10 @@ let rec infer_stmt tyenv fenv ret_ty raw_locals (s : Ast.stmt)
       ignore (infer_expr tyenv fenv e);
       (tyenv, raw_locals)
   | Assign (name, e) ->
-      let vty = lookup s.loc name tyenv in
+      let (vty, is_mut) = lookup_binding s.loc name tyenv in
+      if not is_mut then
+        raise (TypeError (s.loc,
+          Printf.sprintf "cannot assign to immutable variable '%s'; use 'let mut'" name));
       let ety = infer_expr tyenv fenv e in
       unify_at e.loc vty ety;
       (tyenv, raw_locals)
@@ -99,14 +107,17 @@ let rec infer_stmt tyenv fenv ret_ty raw_locals (s : Ast.stmt)
       let vt = infer_expr tyenv fenv val_expr in
       unify_at val_expr.loc vt inner;
       (tyenv, raw_locals)
-  | Let (name, ty_opt, expr_opt) ->
+  | Let (is_mut, name, ty_opt, expr_opt) ->
       let ty = of_ast_opt ty_opt in
       (match expr_opt with
-       | None -> ()
+       | None ->
+           if not is_mut then
+             raise (TypeError (s.loc,
+               Printf.sprintf "immutable variable '%s' must have an initializer" name))
        | Some e ->
            let et = infer_expr tyenv fenv e in
            unify_at e.loc ty et);
-      ( StringMap.add name ty tyenv,
+      ( StringMap.add name (ty, is_mut) tyenv,
         StringMap.add name ty raw_locals )
   | Block stmts ->
       (* Let bindings extend the inner env but do not escape the block *)
@@ -141,9 +152,9 @@ let rec infer_stmt tyenv fenv ret_ty raw_locals (s : Ast.stmt)
 let infer_func fenv genv (fdef : Ast.func) : func_info =
   let param_tys = List.map (fun (_, ty_opt) -> of_ast_opt ty_opt) fdef.params in
   let ret_ty    = ret_of_ast_opt fdef.ret_type in
-  (* Start with globals visible, then shadow them with params *)
+  (* Start with globals visible, then shadow them with params (params are mutable) *)
   let init_env  = List.fold_left2
-    (fun m (name, _) ty -> StringMap.add name ty m)
+    (fun m (name, _) ty -> StringMap.add name (ty, true) m)
     genv fdef.params param_tys
   in
   let (_, raw_locals) = List.fold_left
@@ -168,14 +179,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add fdef.name (TFun (pts, rt)) m
     | Ast.LetDef _ -> m
   ) StringMap.empty prog in
+  (* Global variables are always mutable (true) *)
   let genv = List.fold_left (fun m -> function
-    | Ast.LetDef (name, ty_opt, _) -> StringMap.add name (of_ast_opt ty_opt) m
+    | Ast.LetDef (name, ty_opt, _) -> StringMap.add name (of_ast_opt ty_opt, true) m
     | Ast.FuncDef _                -> m
   ) StringMap.empty prog in
   (* Pass 2: check global initializers *)
   List.iter (function
     | Ast.LetDef (name, _, expr_opt) ->
-        let ty = StringMap.find name genv in
+        let (ty, _) = StringMap.find name genv in
         (match expr_opt with
          | None -> ()
          | Some e ->
@@ -191,6 +203,6 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> m
   ) StringMap.empty prog in
   {
-    globals   = StringMap.map to_ast genv;
+    globals   = StringMap.map (fun (ty, _) -> to_ast ty) genv;
     functions;
   }

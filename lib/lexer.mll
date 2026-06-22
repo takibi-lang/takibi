@@ -9,6 +9,7 @@ rule read = parse
   | "fn"      { FN }
   | "return"  { RETURN }
   | "let"     { LET }
+  | "mut"     { MUT }
   | "if"      { IF }
   | "else"    { ELSE }
   | "while"   { WHILE }

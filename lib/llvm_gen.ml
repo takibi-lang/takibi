@@ -18,6 +18,11 @@ let functions   : (string, lltype * llvalue) Hashtbl.t = Hashtbl.create 16
 (* Stores the return AST type for each function (needed when typing Call results) *)
 let func_ret_ast_types : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 16
 
+(* Locals are either immutable SSA values or mutable alloca pointers *)
+type local_binding =
+  | Imm of Ast.type_expr * llvalue  (* direct SSA value — no alloca *)
+  | Mut of Ast.type_expr * llvalue  (* alloca pointer — load/store *)
+
 let setup_target ?(triple = "") () =
   let _ = Llvm_all_backends.initialize () in
   let triple = if triple = "" then Llvm_target.Target.default_triple () else triple in
@@ -80,15 +85,15 @@ let as_cond v =
   if type_of v = i1_type context then v
   else build_icmp Icmp.Ne v (const_int (i32_type context) 0) "tobool" builder
 
-(* Pre-scan all Let bindings so we can alloca them up-front in the entry block *)
+(* Pre-scan only mutable Let bindings — immutable ones need no alloca *)
 let rec collect_lets stmts =
   List.concat_map (fun s ->
     match s.desc with
-    | Let (name, ty_opt, _) -> [(name, ty_opt)]
-    | Block ss              -> collect_lets ss
-    | If (_, t, e)          -> collect_lets t @ collect_lets e
-    | While (_, b)          -> collect_lets b
-    | _                     -> []
+    | Let (true, name, ty_opt, _) -> [(name, ty_opt)]
+    | Block ss                    -> collect_lets ss
+    | If (_, t, e)                -> collect_lets t @ collect_lets e
+    | While (_, b)                -> collect_lets b
+    | _                           -> []
   ) stmts
 
 (* ── resolve helpers: map AST annotation → Ast.type_expr using HM results ── *)
@@ -145,21 +150,28 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (TypePtr TypeChar, ptr)
 
   | Var name ->
-      let (ast_ty, ptr) =
+      let binding =
         match Hashtbl.find_opt locals name with
-        | Some x -> x
+        | Some b -> b
         | None ->
             match Hashtbl.find_opt global_vars name with
-            | Some x -> x
+            | Some (ast_ty, ptr) -> Mut (ast_ty, ptr)
             | None -> raise (Error (Printf.sprintf "Undefined variable: %s" name))
       in
-      let v = build_load (ltype_of_ast ast_ty) ptr name builder in
-      (* widen int/char to i32; leave pointers as-is *)
-      let v' = match ast_ty with
-        | TypeInt | TypeChar -> to_i32 v
-        | _                  -> v
-      in
-      (ast_ty, v')
+      (match binding with
+       | Imm (ast_ty, v) ->
+           let v' = match ast_ty with
+             | TypeInt | TypeChar -> to_i32 v
+             | _                  -> v
+           in
+           (ast_ty, v')
+       | Mut (ast_ty, ptr) ->
+           let v  = build_load (ltype_of_ast ast_ty) ptr name builder in
+           let v' = match ast_ty with
+             | TypeInt | TypeChar -> to_i32 v
+             | _                  -> v
+           in
+           (ast_ty, v'))
 
   | Deref e1 ->
       let (ty1, v1) = gen_expr locals e1 in
@@ -167,7 +179,6 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | TypePtr inner_ty ->
            let inst = build_load (ltype_of_ast inner_ty) v1 "deref" builder in
            set_volatile true inst;
-           (* Var と同様に i8/i32 を i32 に揃える（比較・演算で型が合うように） *)
            let v' = match inner_ty with
              | TypeInt | TypeChar -> to_i32 inst
              | _                  -> inst
@@ -177,7 +188,9 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
   | AddrOf name ->
       (match Hashtbl.find_opt locals name with
-       | Some (ast_ty, alloca) -> (TypePtr ast_ty, alloca)
+       | Some (Mut (ast_ty, alloca)) -> (TypePtr ast_ty, alloca)
+       | Some (Imm _) ->
+           raise (Error (Printf.sprintf "BUG: addrof immutable '%s' (should be caught by type_inf)" name))
        | None -> raise (Error (Printf.sprintf "cannot take address of '%s'" name)))
 
   | BinOp (op, e1, e2) ->
@@ -215,7 +228,6 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
              List.map2 (fun a lty ->
                let v   = snd (gen_expr locals a) in
                let src = type_of v in
-               (* i32↔i8 の変換: Var/Deref が i32 に揃えるため関数引数で戻す *)
                if src = lty then v
                else if lty = i8_type  context && src = i32_type context then
                  build_trunc v lty "arg_trunc" builder
@@ -232,87 +244,6 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
              | None   -> TypeInt
            in
            (ast_ret, v))
-
-(* ── Statement codegen ─────────────────────────────────────────────────── *)
-
-let rec gen_stmt locals func ret_ast_ty (s : Ast.stmt) =
-  (* Skip dead code after a terminator *)
-  if block_terminator (insertion_block builder) <> None then ()
-  else
-  match s.desc with
-  | Return e ->
-      let (_, v) = gen_expr locals e in
-      ignore (build_ret (coerce v ret_ast_ty) builder)
-
-  | Expr e ->
-      ignore (gen_expr locals e)
-
-  | Assign (name, e) ->
-      let (_, v) = gen_expr locals e in
-      (match Hashtbl.find_opt locals name with
-       | Some (ast_ty, ptr) ->
-           ignore (build_store (coerce v ast_ty) ptr builder)
-       | None ->
-           match Hashtbl.find_opt global_vars name with
-           | Some (ast_ty, gvar) ->
-               ignore (build_store (coerce v ast_ty) gvar builder)
-           | None -> raise (Error (Printf.sprintf "Undefined variable: %s" name)))
-
-  | AssignDeref (ptr_expr, val_expr) ->
-      let (_, ptr_v) = gen_expr locals ptr_expr in
-      let (_, val_v) = gen_expr locals val_expr in
-      (* volatile: MMIO writes must not be optimised away *)
-      let inst = build_store val_v ptr_v builder in
-      set_volatile true inst
-
-  | Let (name, _, expr_opt) ->
-      (match Hashtbl.find_opt locals name with
-       | None -> raise (Error (Printf.sprintf "BUG: no alloca for %s" name))
-       | Some (ast_ty, ptr) ->
-           match expr_opt with
-           | None -> ()
-           | Some e ->
-               let (_, v) = gen_expr locals e in
-               ignore (build_store (coerce v ast_ty) ptr builder))
-
-  | Block stmts ->
-      List.iter (gen_stmt locals func ret_ast_ty) stmts
-
-  | If (cond, then_stmts, else_stmts) ->
-      let cond_v   = as_cond (snd (gen_expr locals cond)) in
-      let then_bb  = append_block context "then"  func in
-      let else_bb  = append_block context "else"  func in
-      let merge_bb = append_block context "merge" func in
-      ignore (build_cond_br cond_v then_bb else_bb builder);
-
-      position_at_end then_bb builder;
-      List.iter (gen_stmt locals func ret_ast_ty) then_stmts;
-      if block_terminator (insertion_block builder) = None then
-        ignore (build_br merge_bb builder);
-
-      position_at_end else_bb builder;
-      List.iter (gen_stmt locals func ret_ast_ty) else_stmts;
-      if block_terminator (insertion_block builder) = None then
-        ignore (build_br merge_bb builder);
-
-      position_at_end merge_bb builder
-
-  | While (cond, body) ->
-      let cond_bb  = append_block context "while_cond"  func in
-      let body_bb  = append_block context "while_body"  func in
-      let after_bb = append_block context "while_after" func in
-      ignore (build_br cond_bb builder);
-
-      position_at_end cond_bb builder;
-      let cond_v = as_cond (snd (gen_expr locals cond)) in
-      ignore (build_cond_br cond_v body_bb after_bb builder);
-
-      position_at_end body_bb builder;
-      List.iter (gen_stmt locals func ret_ast_ty) body;
-      if block_terminator (insertion_block builder) = None then
-        ignore (build_br cond_bb builder);
-
-      position_at_end after_bb builder
 
 (* ── Function codegen ──────────────────────────────────────────────────── *)
 
@@ -342,27 +273,123 @@ let gen_func ?prog_types fdef =
   let entry_bb = append_block context "entry" f in
   position_at_end entry_bb builder;
 
-  (* locals maps name → (ast_type, alloca_ptr) *)
-  let locals : (string, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 16 in
+  (* locals maps name → local_binding *)
+  let locals : (string, local_binding) Hashtbl.t = Hashtbl.create 16 in
 
-  (* Alloca + store for every parameter *)
+  (* Alloca + store for every parameter (params are always mutable) *)
   List.iteri (fun i (name, ty_opt) ->
     let ast_ty = res name ty_opt in
     let ptr    = build_alloca (ltype_of_ast ast_ty) name builder in
     ignore (build_store (param f i) ptr builder);
-    Hashtbl.add locals name (ast_ty, ptr)
+    Hashtbl.add locals name (Mut (ast_ty, ptr))
   ) fdef.params;
 
-  (* Pre-alloca every local Let declared in the body *)
+  (* Pre-alloca every mutable Let declared in the body *)
   List.iter (fun (name, ty_opt) ->
     if not (Hashtbl.mem locals name) then begin
       let ast_ty = res name ty_opt in
       let ptr    = build_alloca (ltype_of_ast ast_ty) name builder in
-      Hashtbl.add locals name (ast_ty, ptr)
+      Hashtbl.add locals name (Mut (ast_ty, ptr))
     end
   ) (collect_lets fdef.body);
 
-  List.iter (gen_stmt locals f ret_ast) fdef.body;
+  (* ── Statement codegen (defined here to access `res` for immutable lets) ── *)
+  let rec gen_stmt (s : Ast.stmt) =
+    (* Skip dead code after a terminator *)
+    if block_terminator (insertion_block builder) <> None then ()
+    else
+    match s.desc with
+    | Return e ->
+        let (_, v) = gen_expr locals e in
+        ignore (build_ret (coerce v ret_ast) builder)
+
+    | Expr e ->
+        ignore (gen_expr locals e)
+
+    | Assign (name, e) ->
+        let (_, v) = gen_expr locals e in
+        (match Hashtbl.find_opt locals name with
+         | Some (Mut (ast_ty, ptr)) ->
+             ignore (build_store (coerce v ast_ty) ptr builder)
+         | Some (Imm _) ->
+             raise (Error (Printf.sprintf "BUG: assign to immutable '%s'" name))
+         | None ->
+             match Hashtbl.find_opt global_vars name with
+             | Some (ast_ty, gvar) ->
+                 ignore (build_store (coerce v ast_ty) gvar builder)
+             | None -> raise (Error (Printf.sprintf "Undefined variable: %s" name)))
+
+    | AssignDeref (ptr_expr, val_expr) ->
+        let (_, ptr_v) = gen_expr locals ptr_expr in
+        let (_, val_v) = gen_expr locals val_expr in
+        (* volatile: MMIO writes must not be optimised away *)
+        let inst = build_store val_v ptr_v builder in
+        set_volatile true inst
+
+    | Let (true, name, _, expr_opt) ->
+        (* Mutable: alloca was pre-allocated; just store the initial value *)
+        (match Hashtbl.find_opt locals name with
+         | None -> raise (Error (Printf.sprintf "BUG: no alloca for %s" name))
+         | Some (Mut (ast_ty, ptr)) ->
+             (match expr_opt with
+              | None -> ()
+              | Some e ->
+                  let (_, v) = gen_expr locals e in
+                  ignore (build_store (coerce v ast_ty) ptr builder))
+         | Some (Imm _) ->
+             raise (Error (Printf.sprintf "BUG: %s marked mutable but stored as Imm" name)))
+
+    | Let (false, name, ty_opt, expr_opt) ->
+        (* Immutable: evaluate the init expr and store the SSA value directly *)
+        (match expr_opt with
+         | None ->
+             raise (Error (Printf.sprintf "BUG: immutable '%s' has no initializer" name))
+         | Some e ->
+             let ast_ty = res name ty_opt in
+             let (_, v) = gen_expr locals e in
+             Hashtbl.add locals name (Imm (ast_ty, coerce v ast_ty)))
+
+    | Block stmts ->
+        List.iter gen_stmt stmts
+
+    | If (cond, then_stmts, else_stmts) ->
+        let cond_v   = as_cond (snd (gen_expr locals cond)) in
+        let then_bb  = append_block context "then"  f in
+        let else_bb  = append_block context "else"  f in
+        let merge_bb = append_block context "merge" f in
+        ignore (build_cond_br cond_v then_bb else_bb builder);
+
+        position_at_end then_bb builder;
+        List.iter gen_stmt then_stmts;
+        if block_terminator (insertion_block builder) = None then
+          ignore (build_br merge_bb builder);
+
+        position_at_end else_bb builder;
+        List.iter gen_stmt else_stmts;
+        if block_terminator (insertion_block builder) = None then
+          ignore (build_br merge_bb builder);
+
+        position_at_end merge_bb builder
+
+    | While (cond, body) ->
+        let cond_bb  = append_block context "while_cond"  f in
+        let body_bb  = append_block context "while_body"  f in
+        let after_bb = append_block context "while_after" f in
+        ignore (build_br cond_bb builder);
+
+        position_at_end cond_bb builder;
+        let cond_v = as_cond (snd (gen_expr locals cond)) in
+        ignore (build_cond_br cond_v body_bb after_bb builder);
+
+        position_at_end body_bb builder;
+        List.iter gen_stmt body;
+        if block_terminator (insertion_block builder) = None then
+          ignore (build_br cond_bb builder);
+
+        position_at_end after_bb builder
+  in
+
+  List.iter gen_stmt fdef.body;
 
   (* Ensure the exit block has a terminator *)
   if block_terminator (insertion_block builder) = None then begin
