@@ -12,6 +12,14 @@ AARCH64_OBJ    := examples/start-aarch64.o
 TAKIBI := dune exec takibi --
 
 # ── Hello World (QEMU virt / AArch64 bare-metal) ─────────────────────────────
+ECHO_DIR        := examples/echo
+ECHO_SRC        := $(ECHO_DIR)/echo.tkb
+ECHO_OBJ        := $(ECHO_DIR)/echo.o
+ECHO_STARTUP_S  := $(ECHO_DIR)/startup.S
+ECHO_STARTUP_O  := $(ECHO_DIR)/startup.o
+ECHO_KERNEL_ELF := $(ECHO_DIR)/kernel.elf
+ECHO_LINK_LD    := $(ECHO_DIR)/link.ld
+
 HELLO_DIR   := examples/hello
 HELLO_SRC   := $(HELLO_DIR)/hello.tkb
 HELLO_OBJ   := $(HELLO_DIR)/hello.o
@@ -81,8 +89,26 @@ qemu: $(KERNEL_ELF)
 		-semihosting-config enable=on,target=native \
 		-kernel $(KERNEL_ELF)
 
+## echo オブジェクト・カーネルビルド
+$(ECHO_OBJ): $(ECHO_SRC) build
+	$(TAKIBI) $< --target $(AARCH64_TARGET) -o $@
+
+$(ECHO_STARTUP_O): $(ECHO_STARTUP_S)
+	$(LLVM_MC) --triple=aarch64-none-elf --filetype=obj $< -o $@
+
+$(ECHO_KERNEL_ELF): $(ECHO_STARTUP_O) $(ECHO_OBJ) $(ECHO_LINK_LD)
+	$(LLD) -T $(ECHO_LINK_LD) $(ECHO_STARTUP_O) $(ECHO_OBJ) -o $@
+
+## qemu-echo: QEMU virt で echo サーバを実行 (Ctrl-A X で終了)
+.PHONY: qemu-echo
+qemu-echo: $(ECHO_KERNEL_ELF)
+	$(QEMU) -machine virt -cpu cortex-a53 -nographic \
+		-semihosting-config enable=on,target=native \
+		-kernel $(ECHO_KERNEL_ELF)
+
 ## clean: dune の生成物 + リンク成果物を削除
 clean:
 	dune clean
 	rm -f $(OBJ) $(BIN) $(AARCH64_OBJ) \
-	      $(HELLO_OBJ) $(STARTUP_OBJ) $(KERNEL_ELF)
+	      $(HELLO_OBJ) $(STARTUP_OBJ) $(KERNEL_ELF) \
+	      $(ECHO_OBJ) $(ECHO_STARTUP_O) $(ECHO_KERNEL_ELF)

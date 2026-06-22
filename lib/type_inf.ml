@@ -38,6 +38,10 @@ let rec infer_expr tyenv fenv (e : Ast.expr) : ty =
            TInt
        | Lt | Gt | Le | Ge | Eq | Ne ->
            unify_at e.loc t1 t2;
+           TInt
+       | Or ->
+           unify_at e1.loc t1 TInt;
+           unify_at e2.loc t2 TInt;
            TInt)
   | Deref e1 ->
       let inner = fresh () in

@@ -33,6 +33,7 @@ rule read = parse
   | ">=" { GE }
   | "==" { EQ }
   | "!=" { NE }
+  | "||" { OR }
 
   | "int"  { INT_TYPE }
   | "char" { CHAR_TYPE }
@@ -40,6 +41,13 @@ rule read = parse
 
   | "0x" ['0'-'9' 'a'-'f' 'A'-'F']+ as h { INT (int_of_string h) }
   | ['0'-'9']+ as i { INT (int_of_string i) }
+
+  | '\'' '\\' 'n'  '\'' { INT 10 }
+  | '\'' '\\' 'r'  '\'' { INT 13 }
+  | '\'' '\\' 't'  '\'' { INT  9 }
+  | '\'' '\\' '0'  '\'' { INT  0 }
+  | '\'' '\\' '\\' '\'' { INT 92 }
+  | '\'' ([^ '\'' '\\' '\n'] as c) '\'' { INT (Char.code c) }
 
   | ['a'-'z' 'A'-'Z' '_' ] ['a'-'z' 'A'-'Z' '0'-'9' '_' ]* as id
     { IDENT id }
@@ -51,6 +59,7 @@ rule read = parse
 and read_string buf = parse
   | '"'        { STRING (Buffer.contents buf) }
   | '\\' 'n'  { Buffer.add_char buf '\n'; read_string buf lexbuf }
+  | '\\' 'r'  { Buffer.add_char buf '\r'; read_string buf lexbuf }
   | '\\' 't'  { Buffer.add_char buf '\t'; read_string buf lexbuf }
   | '\\' '\\' { Buffer.add_char buf '\\'; read_string buf lexbuf }
   | '\\' '"'  { Buffer.add_char buf '"';  read_string buf lexbuf }

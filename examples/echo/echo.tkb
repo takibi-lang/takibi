@@ -1,0 +1,38 @@
+fn uart_putc(c: char) {
+    let dr: *char = 0x09000000;
+    *dr = c;
+}
+
+fn uart_puts(s: *char) {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
+fn uart_getc() char {
+    let fr: *int = 0x09000018;
+    while (*fr == 144) {}
+    let dr: *char = 0x09000000;
+    return *dr;
+}
+
+fn main() {
+    uart_puts("echo ready\r\n");
+    let running: int = 1;
+    let prev: char = 0;
+    while (running != 0) {
+        let c: char = uart_getc();
+        uart_putc(c);
+        if (c == '\r') {
+            uart_putc('\n');
+        } else {}
+        if (prev == 'q') {
+            if (c == '\n' || c == '\r') {
+                running = 0;
+            } else {}
+        } else {}
+        prev = c;
+    }
+    uart_puts("bye\r\n");
+}

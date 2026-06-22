@@ -235,6 +235,54 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  Alcotest.test_case "char literal becomes IntLit" `Quick (fun () ->
+    match parse "fn f() int { return 'A'; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.IntLit 65; _ } -> ()
+         | _ -> Alcotest.fail "expected Return(IntLit 65)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "char escape literals" `Quick (fun () ->
+    match parse "fn f() { let a = '\\n'; let b = '\\r'; let c = '\\0'; }" with
+    | [Ast.FuncDef { body = [s1; s2; s3]; _ }] ->
+        let check name expected s =
+          match s.Ast.desc with
+          | Ast.Let (_, _, Some { desc = Ast.IntLit n; _ }) ->
+              Alcotest.(check int) name expected n
+          | _ -> Alcotest.failf "%s: expected Let with IntLit" name
+        in
+        check "\\n" 10 s1; check "\\r" 13 s2; check "\\0" 0 s3
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "logical OR expression" `Quick (fun () ->
+    match parse "fn f(a: int, b: int) int { return a == 1 || b == 2; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+             Alcotest.check binop_t "outer op is Or" Ast.Or op
+         | _ -> Alcotest.fail "expected Return(BinOp Or)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "else if chain" `Quick (fun () ->
+    match parse "fn f(x: int) int {
+      if (x == 1) { return 1; }
+      else if (x == 2) { return 2; }
+      else { return 0; }
+    }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.If (_, [_], [inner]) ->
+             (match inner.desc with
+              | Ast.If (_, [_], [_]) -> ()
+              | _ -> Alcotest.fail "else branch should be If")
+         | _ -> Alcotest.fail "expected If with else-if")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
 ]
 
 (* ── Type inference tests ────────────────────────────────────────────────── *)

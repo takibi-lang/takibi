@@ -14,8 +14,10 @@ open Ast
 
 %token LT GT LE GE EQ NE
 %token PLUS MINUS TIMES DIV
+%token OR
 
 (* Precedence: low → high.  UNARY is a pseudo-token for %prec. *)
+%left OR
 %left LT GT LE GE EQ NE
 %left PLUS MINUS
 %left TIMES DIV
@@ -71,8 +73,8 @@ stmt:
   | LET id = IDENT rhs = let_rhs SEMI
     { { desc = Let (id, fst rhs, snd rhs); loc = $symbolstartpos } }
   | LBRACE s = stmts RBRACE { { desc = Block s; loc = $symbolstartpos } }
-  | IF LPAREN c = expr RPAREN LBRACE t = stmts RBRACE ELSE LBRACE e = stmts RBRACE
-    { { desc = If(c, t, e); loc = $symbolstartpos } }
+  | IF LPAREN c = expr RPAREN LBRACE t = stmts RBRACE p = else_part
+    { { desc = If(c, t, p); loc = $symbolstartpos } }
   | WHILE LPAREN c = expr RPAREN LBRACE b = stmts RBRACE
     { { desc = While(c, b); loc = $symbolstartpos } }
   | id = IDENT ASSIGN e = expr SEMI
@@ -80,7 +82,13 @@ stmt:
   | TIMES lhs = expr ASSIGN rhs = expr SEMI
     { { desc = AssignDeref (lhs, rhs); loc = $symbolstartpos } }
 
+else_part:
+  | ELSE LBRACE e = stmts RBRACE { e }
+  | ELSE IF LPAREN c = expr RPAREN LBRACE t = stmts RBRACE p = else_part
+    { [{ desc = If(c, t, p); loc = $symbolstartpos }] }
+
 expr:
+  | expr OR expr    { { desc = BinOp (Or, $1, $3); loc = $symbolstartpos } }
   | expr PLUS expr  { { desc = BinOp (Add, $1, $3); loc = $symbolstartpos } }
   | expr MINUS expr { { desc = BinOp (Sub, $1, $3); loc = $symbolstartpos } }
   | expr TIMES expr { { desc = BinOp (Mul, $1, $3); loc = $symbolstartpos } }

@@ -203,7 +203,8 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | Le  -> (TypeInt, build_icmp Icmp.Sle v1 v2 "letmp" builder)
        | Ge  -> (TypeInt, build_icmp Icmp.Sge v1 v2 "getmp" builder)
        | Eq  -> (TypeInt, build_icmp Icmp.Eq  v1 v2 "eqtmp" builder)
-       | Ne  -> (TypeInt, build_icmp Icmp.Ne  v1 v2 "netmp" builder))
+       | Ne  -> (TypeInt, build_icmp Icmp.Ne  v1 v2 "netmp" builder)
+       | Or  -> (TypeInt, build_or  (to_i32 v1) (to_i32 v2) "ortmp" builder))
 
   | Call (fname, args) ->
       (match Hashtbl.find_opt functions fname with
