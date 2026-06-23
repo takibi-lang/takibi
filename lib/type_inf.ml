@@ -56,6 +56,10 @@ let rec infer_expr tyenv fenv (e : Ast.expr) : ty =
         raise (TypeError (e.loc,
           Printf.sprintf "cannot take address of immutable variable '%s'" name));
       TPtr t
+  | Cast (target_ty, e) ->
+      ignore (infer_expr tyenv fenv e);
+      of_ast target_ty
+
   | Call (fname, args) ->
       (match StringMap.find_opt fname fenv with
        | None ->

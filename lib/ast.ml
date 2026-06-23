@@ -32,6 +32,7 @@ and expr_desc =
   | BinOp of binop * expr * expr
   | Deref of expr           (* *expr  — read through pointer *)
   | AddrOf of ident         (* &ident — take address of a local *)
+  | Cast of type_expr * expr  (* expr as T — explicit type cast *)
 [@@deriving show]
 
 type stmt = stmt_desc located

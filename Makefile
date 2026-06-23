@@ -106,9 +106,34 @@ qemu-echo: $(ECHO_KERNEL_ELF)
 		-semihosting-config enable=on,target=native \
 		-kernel $(ECHO_KERNEL_ELF)
 
+PRINT_INT_DIR        := examples/print_int
+PRINT_INT_SRC        := $(PRINT_INT_DIR)/print_int.tkb
+PRINT_INT_OBJ        := $(PRINT_INT_DIR)/print_int.o
+PRINT_INT_STARTUP_S  := $(PRINT_INT_DIR)/startup.S
+PRINT_INT_STARTUP_O  := $(PRINT_INT_DIR)/startup.o
+PRINT_INT_KERNEL_ELF := $(PRINT_INT_DIR)/kernel.elf
+PRINT_INT_LINK_LD    := $(PRINT_INT_DIR)/link.ld
+
+$(PRINT_INT_OBJ): $(PRINT_INT_SRC) build
+	$(TAKIBI) $< --target $(AARCH64_TARGET) -o $@
+
+$(PRINT_INT_STARTUP_O): $(PRINT_INT_STARTUP_S)
+	$(LLVM_MC) --triple=aarch64-none-elf --filetype=obj $< -o $@
+
+$(PRINT_INT_KERNEL_ELF): $(PRINT_INT_STARTUP_O) $(PRINT_INT_OBJ) $(PRINT_INT_LINK_LD)
+	$(LLD) -T $(PRINT_INT_LINK_LD) $(PRINT_INT_STARTUP_O) $(PRINT_INT_OBJ) -o $@
+
+## qemu-print-int: QEMU virt で uart_print_int テストを実行
+.PHONY: qemu-print-int
+qemu-print-int: $(PRINT_INT_KERNEL_ELF)
+	$(QEMU) -machine virt -cpu cortex-a53 -nographic \
+		-semihosting-config enable=on,target=native \
+		-kernel $(PRINT_INT_KERNEL_ELF)
+
 ## clean: dune の生成物 + リンク成果物を削除
 clean:
 	dune clean
 	rm -f $(OBJ) $(BIN) $(AARCH64_OBJ) \
 	      $(HELLO_OBJ) $(STARTUP_OBJ) $(KERNEL_ELF) \
-	      $(ECHO_OBJ) $(ECHO_STARTUP_O) $(ECHO_KERNEL_ELF)
+	      $(ECHO_OBJ) $(ECHO_STARTUP_O) $(ECHO_KERNEL_ELF) \
+	      $(PRINT_INT_OBJ) $(PRINT_INT_STARTUP_O) $(PRINT_INT_KERNEL_ELF)

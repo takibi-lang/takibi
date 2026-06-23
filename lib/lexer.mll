@@ -13,6 +13,7 @@ rule read = parse
   | "if"      { IF }
   | "else"    { ELSE }
   | "while"   { WHILE }
+  | "as"      { AS }
 
   | '{' { LBRACE }
   | '}' { RBRACE }

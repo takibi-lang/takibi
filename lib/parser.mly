@@ -15,13 +15,15 @@ open Ast
 %token LT GT LE GE EQ NE
 %token PLUS MINUS TIMES DIV
 %token OR
+%token AS
 
 (* Precedence: low → high.  UNARY is a pseudo-token for %prec. *)
 %left OR
 %left LT GT LE GE EQ NE
+%nonassoc AS      (* as cast: lower than arithmetic so a+b as T = (a+b) as T *)
 %left PLUS MINUS
 %left TIMES DIV
-%nonassoc UNARY   (* highest: unary * (deref) and & (addrof) *)
+%nonassoc UNARY   (* highest: unary * (deref), & (addrof), unary - *)
 
 %token INT_TYPE CHAR_TYPE
 %token COLON
@@ -104,11 +106,16 @@ expr:
   | expr NE expr   { { desc = BinOp (Ne, $1, $3); loc = $symbolstartpos } }
   | TIMES e = expr %prec UNARY { { desc = Deref e;    loc = $symbolstartpos } }
   | AMP   id = IDENT              { { desc = AddrOf id; loc = $symbolstartpos } }
+  | MINUS e = expr %prec UNARY
+    { { desc = BinOp (Sub, { desc = IntLit 0; loc = $symbolstartpos }, e);
+        loc = $symbolstartpos } }
   | INT    { { desc = IntLit $1;    loc = $symbolstartpos } }
   | STRING { { desc = StringLit $1; loc = $symbolstartpos } }
   | IDENT { { desc = Var $1; loc = $symbolstartpos } }
   | IDENT LPAREN args RPAREN { { desc = Call ($1, $3); loc = $symbolstartpos } }
   | LPAREN e = expr RPAREN { e }
+  | e = expr AS t = type_expr
+    { { desc = Cast (t, e); loc = $symbolstartpos } }
 
 args:
   | /* empty */ { [] }

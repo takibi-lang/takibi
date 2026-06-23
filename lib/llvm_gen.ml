@@ -219,6 +219,10 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | Ne  -> (TypeInt, build_icmp Icmp.Ne  v1 v2 "netmp" builder)
        | Or  -> (TypeInt, build_or  (to_i32 v1) (to_i32 v2) "ortmp" builder))
 
+  | Cast (target_ty, e) ->
+      let (_, v) = gen_expr locals e in
+      (target_ty, coerce v target_ty)
+
   | Call (fname, args) ->
       (match Hashtbl.find_opt functions fname with
        | None -> raise (Error (Printf.sprintf "Undefined function: %s" fname))
