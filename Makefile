@@ -12,33 +12,15 @@ COMMON_STARTUP_S := $(COMMON_DIR)/startup.S
 COMMON_STARTUP_O := $(COMMON_DIR)/startup.o
 COMMON_LINK_LD   := $(COMMON_DIR)/link.ld
 
-# ── Per-example sources and artefacts ────────────────────────────────────────
-START_DIR        := examples/start
-START_SRC        := $(START_DIR)/start.tkb
-START_OBJ        := $(START_DIR)/start.o
-START_KERNEL_ELF := $(START_DIR)/kernel.elf
-
-HELLO_DIR        := examples/hello
-HELLO_SRC        := $(HELLO_DIR)/hello.tkb
-HELLO_OBJ        := $(HELLO_DIR)/hello.o
-HELLO_KERNEL_ELF := $(HELLO_DIR)/kernel.elf
-
-ECHO_DIR         := examples/echo
-ECHO_SRC         := $(ECHO_DIR)/echo.tkb
-ECHO_OBJ         := $(ECHO_DIR)/echo.o
-ECHO_KERNEL_ELF  := $(ECHO_DIR)/kernel.elf
-
-PRINT_INT_DIR        := examples/print_int
-PRINT_INT_SRC        := $(PRINT_INT_DIR)/print_int.tkb
-PRINT_INT_OBJ        := $(PRINT_INT_DIR)/print_int.o
-PRINT_INT_KERNEL_ELF := $(PRINT_INT_DIR)/kernel.elf
-
-ALL_KERNELS := $(START_KERNEL_ELF) $(HELLO_KERNEL_ELF) \
-               $(ECHO_KERNEL_ELF) $(PRINT_INT_KERNEL_ELF)
+# ── Examples ──────────────────────────────────────────────────────────────────
+# 新しい例題を追加するときはここに名前を足すだけ。
+# 規約: examples/<name>/<name>.tkb → examples/<name>/kernel.elf
+EXAMPLES     := start hello echo print_int
+ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
+EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
 # ── Targets ──────────────────────────────────────────────────────────────────
-.PHONY: all build test qemutest check clean \
-        qemu-start qemu qemu-echo qemu-print-int
+.PHONY: build test qemutest check clean qemu-echo
 
 .DEFAULT_GOAL := build
 
@@ -57,47 +39,33 @@ qemutest: $(ALL_KERNELS)
 ## check: ユニットテスト + QEMU 結合テストを実行
 check: test qemutest
 
-# ── Shared startup object (built once, reused by all examples) ────────────────
+# ── Shared startup object ─────────────────────────────────────────────────────
 $(COMMON_STARTUP_O): $(COMMON_STARTUP_S)
 	$(LLVM_MC) --triple=aarch64-none-elf --filetype=obj $< -o $@
 
-# ── Generic rule: .tkb → .o (AArch64) ────────────────────────────────────────
-$(START_OBJ):     $(START_SRC)     build
-$(HELLO_OBJ):     $(HELLO_SRC)     build
-$(ECHO_OBJ):      $(ECHO_SRC)      build
-$(PRINT_INT_OBJ): $(PRINT_INT_SRC) build
+# ── .tkb → .o  (static pattern rule) ─────────────────────────────────────────
+# examples/%.o に対して % は "name/name"（スラッシュ込み）にマッチする。
+# 例: examples/start/start.o ← examples/start/start.tkb
+.SECONDEXPANSION:
 
-$(START_OBJ) $(HELLO_OBJ) $(ECHO_OBJ) $(PRINT_INT_OBJ):
+$(EXAMPLE_OBJS): examples/%.o: examples/%.tkb build
 	$(TAKIBI) $< --target $(AARCH64_TARGET) -o $@
 
-# ── Generic rule: startup.o + example.o → kernel.elf ─────────────────────────
-$(START_KERNEL_ELF):     $(COMMON_STARTUP_O) $(START_OBJ)
-$(HELLO_KERNEL_ELF):     $(COMMON_STARTUP_O) $(HELLO_OBJ)
-$(ECHO_KERNEL_ELF):      $(COMMON_STARTUP_O) $(ECHO_OBJ)
-$(PRINT_INT_KERNEL_ELF): $(COMMON_STARTUP_O) $(PRINT_INT_OBJ)
-
-$(ALL_KERNELS):
-	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) \
-	    $(filter-out $(COMMON_STARTUP_O), $^) -o $@
+# ── example.o + startup.o → kernel.elf ───────────────────────────────────────
+# examples/%/kernel.elf の % は "name" にマッチ（スラッシュなし）。
+# $$*.o は2段展開で examples/<name>/<name>.o になる:
+#   1段目: $$* → $*  ($$が$に縮退)
+#   2段目: $*  → name (ステム展開)
+$(ALL_KERNELS): examples/%/kernel.elf: \
+    $(COMMON_STARTUP_O) examples/%/$$*.o $(COMMON_LINK_LD)
+	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/$*/$*.o -o $@
 
 # ── QEMU run targets ──────────────────────────────────────────────────────────
 QEMU_FLAGS := -machine virt -cpu cortex-a53 -nographic \
               -semihosting-config enable=on,target=native
 
-## qemu-start: QEMU virt で start デモを実行
-qemu-start: $(START_KERNEL_ELF)
-	$(QEMU) $(QEMU_FLAGS) -kernel $<
-
-## qemu: QEMU virt で Hello World を実行
-qemu: $(HELLO_KERNEL_ELF)
-	$(QEMU) $(QEMU_FLAGS) -kernel $<
-
-## qemu-echo: QEMU virt で echo サーバを実行 (Ctrl-A X で終了)
-qemu-echo: $(ECHO_KERNEL_ELF)
-	$(QEMU) $(QEMU_FLAGS) -kernel $<
-
-## qemu-print-int: QEMU virt で uart_print_int テストを実行
-qemu-print-int: $(PRINT_INT_KERNEL_ELF)
+## qemu-echo: QEMU virt で echo サーバを手動実行 (Ctrl-A X で終了)
+qemu-echo: examples/echo/kernel.elf
 	$(QEMU) $(QEMU_FLAGS) -kernel $<
 
 # ── clean ─────────────────────────────────────────────────────────────────────
@@ -105,7 +73,4 @@ qemu-print-int: $(PRINT_INT_KERNEL_ELF)
 clean:
 	dune clean
 	rm -f $(COMMON_STARTUP_O) \
-	      $(START_OBJ)     $(START_KERNEL_ELF) \
-	      $(HELLO_OBJ)     $(HELLO_KERNEL_ELF) \
-	      $(ECHO_OBJ)      $(ECHO_KERNEL_ELF) \
-	      $(PRINT_INT_OBJ) $(PRINT_INT_KERNEL_ELF)
+	      $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o examples/$(e)/kernel.elf)

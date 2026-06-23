@@ -301,6 +301,51 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  (* ── 単項マイナス ───────────────────────────────────────────── *)
+
+  Alcotest.test_case "unary minus desugars to Sub from zero" `Quick (fun () ->
+    match parse "fn f() int { return -42; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (Ast.Sub,
+                                 { desc = Ast.IntLit 0; _ },
+                                 { desc = Ast.IntLit 42; _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Return(BinOp(Sub, IntLit 0, IntLit 42))")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  (* ── as キャスト ─────────────────────────────────────────────── *)
+
+  Alcotest.test_case "as cast to char" `Quick (fun () ->
+    match parse "fn f(n: int) char { return n as char; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.Cast (Ast.TypeChar,
+                                 { desc = Ast.Var "n"; _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Return(Cast(TypeChar, Var n))")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "as cast to int" `Quick (fun () ->
+    match parse "fn f(c: char) int { return c as int; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.Cast (Ast.TypeInt,
+                                 { desc = Ast.Var "c"; _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Return(Cast(TypeInt, Var c))")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "as has lower precedence than arithmetic" `Quick (fun () ->
+    match parse "fn f(a: int, b: int) char { return a + b as char; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.Cast (Ast.TypeChar,
+                                 { desc = Ast.BinOp (Ast.Add, _, _); _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Cast(TypeChar, BinOp(Add, ...)) — as must bind looser than +")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
 ]
 
 (* ── Type inference tests ────────────────────────────────────────────────── *)
@@ -432,6 +477,25 @@ let infer_tests = [
 
   Alcotest.test_case "write through immutable pointer variable is allowed" `Quick
     (expect_ok "fn f() { let p: *int = 0x09000000; *p = 1; }");
+
+  (* ── 単項マイナス ───────────────────────────────────────────── *)
+
+  Alcotest.test_case "unary minus type-checks" `Quick
+    (expect_ok "fn f(n: int) int { return -n; }");
+
+  (* ── as キャスト ─────────────────────────────────────────────── *)
+
+  Alcotest.test_case "as cast int to char passes" `Quick
+    (expect_ok "fn f(n: int) char { return n as char; }");
+
+  Alcotest.test_case "as cast char to int passes" `Quick
+    (expect_ok "fn f(c: char) int { return c as int; }");
+
+  Alcotest.test_case "as cast result type is the target type" `Quick (fun () ->
+    let pt = infer "fn f(n: int) char { return n as char; }" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
+    Alcotest.check type_t "return type is char" Ast.TypeChar fi.Types.ret_type
+  );
 
 ]
 
