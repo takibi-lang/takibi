@@ -58,6 +58,7 @@ run_test() {
 echo "Running QEMU integration tests..."
 echo ""
 
+run_test "start"     examples/start/kernel.elf     examples/start/start.expected
 run_test "hello"     examples/hello/kernel.elf     examples/hello/hello.expected
 run_test "print_int" examples/print_int/kernel.elf examples/print_int/print_int.expected
 run_test "echo"      examples/echo/kernel.elf      examples/echo/echo.expected \

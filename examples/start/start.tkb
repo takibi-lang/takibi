@@ -1,0 +1,64 @@
+let g_int = 1;
+let g_char: char = 0;
+
+fn uart_putc(c: char) {
+    let dr: *char = 0x09000000;
+    *dr = c;
+}
+
+fn uart_puts(s: *char) {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
+fn print_uint(n: int) {
+    if (n >= 10) {
+        print_uint(n / 10);
+    }
+    uart_putc((n - (n / 10) * 10 + 48) as char);
+}
+
+fn uart_print_int(n: int) {
+    if (n < 0) {
+        uart_putc('-');
+        print_uint(-n);
+    } else {
+        print_uint(n);
+    }
+}
+
+fn foo(c: int) int {
+    return 1;
+}
+
+fn bar(a: int, b: int) int {
+    let mut r = 0;
+
+    if (2 * a + 1 > b) {
+        while (r != 0) {
+            r = foo(a);
+        }
+        return r;
+    } else {
+        r = g_int;
+    }
+
+    return r;
+}
+
+fn main() {
+    uart_puts("foo(5)=");
+    uart_print_int(foo(5));
+    uart_putc('\r');
+    uart_putc('\n');
+    uart_puts("bar(3,4)=");
+    uart_print_int(bar(3, 4));
+    uart_putc('\r');
+    uart_putc('\n');
+    uart_puts("bar(1,10)=");
+    uart_print_int(bar(1, 10));
+    uart_putc('\r');
+    uart_putc('\n');
+}
