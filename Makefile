@@ -67,9 +67,18 @@ $(BIN): $(OBJ) $(MAIN_C)
 run: $(BIN)
 	$<
 
-## test: テスト実行
+## test: ユニットテスト実行
 test:
 	dune test
+
+## qemutest: QEMU 結合テストを実行（全例題をビルドして自動検証）
+.PHONY: qemutest
+qemutest: $(KERNEL_ELF) $(ECHO_KERNEL_ELF) $(PRINT_INT_KERNEL_ELF)
+	@bash tests/qemu_test.sh
+
+## check: ユニットテスト + QEMU 結合テストを実行
+.PHONY: check
+check: test qemutest
 
 ## $(HELLO_OBJ): hello.tkb を AArch64 オブジェクトにコンパイル
 $(HELLO_OBJ): $(HELLO_SRC) build
