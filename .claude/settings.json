@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//usr/**)",
+      "Read(//root/**)",
+      "Bash(qemu-system-aarch64 *)",
+      "Bash(opam *)",
+      "Bash(mkdir -p *)",
+      "Bash(make *)",
+      "Bash(ls *)",
+      "Bash(llvm-mc-19 *)",
+      "Bash(ld.lld-19 *)",
+      "Bash(grep *)",
+      "Bash(echo | timeout * qemu-system-aarch64 -machine virt *)",
+      "Bash(dune *)",
+      "Bash(dpkg *)",
+      "Bash(cat *)",
+      "Bash(awk *)",
+      "Bash(apt-cache *)"
+    ],
+    "additionalDirectories": [
+      "/tmp",
+      "/workspaces/takibi/examples"
+    ]
+  }
+}
