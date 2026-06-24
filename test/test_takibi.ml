@@ -346,6 +346,50 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  (* ── ビット演算 ──────────────────────────────────────────────── *)
+
+  Alcotest.test_case "bitwise AND expression" `Quick (fun () ->
+    match parse "fn f(n: int) int { return n & 15; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+             Alcotest.check binop_t "op is Band" Ast.Band op
+         | _ -> Alcotest.fail "expected Return(BinOp Band)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "right shift expression" `Quick (fun () ->
+    match parse "fn f(n: int) int { return n >> 4; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+             Alcotest.check binop_t "op is Shr" Ast.Shr op
+         | _ -> Alcotest.fail "expected Return(BinOp Shr)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case ">> binds tighter than &" `Quick (fun () ->
+    (* n >> 4 & 0xf  should parse as  (n >> 4) & 0xf *)
+    match parse "fn f(n: int) int { return n >> 4 & 15; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (Ast.Band,
+                                 { desc = Ast.BinOp (Ast.Shr, _, _); _ }, _); _ } -> ()
+         | _ -> Alcotest.fail "expected Band(Shr(...), 15) — >> must bind tighter than &")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "& binds tighter than comparison" `Quick (fun () ->
+    (* n & 15 == 0  should parse as  (n & 15) == 0 *)
+    match parse "fn f(n: int) int { return n & 15 == 0; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (Ast.Eq,
+                                 { desc = Ast.BinOp (Ast.Band, _, _); _ }, _); _ } -> ()
+         | _ -> Alcotest.fail "expected Eq(Band(...), 0) — & must bind tighter than ==")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
 ]
 
 (* ── Type inference tests ────────────────────────────────────────────────── *)
@@ -496,6 +540,18 @@ let infer_tests = [
     let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "return type is char" Ast.TypeChar fi.Types.ret_type
   );
+
+  (* ── ビット演算 ──────────────────────────────────────────────── *)
+
+  Alcotest.test_case "bitwise AND type-checks" `Quick
+    (expect_ok "fn f(n: int) int { return n & 15; }");
+
+  Alcotest.test_case "right shift type-checks" `Quick
+    (expect_ok "fn f(n: int) int { return n >> 4; }");
+
+  Alcotest.test_case "bitwise AND type error: non-int operand" `Quick
+    (expect_type_error "cannot unify"
+       "fn f(n: int, p: *int) int { return n & p; }");
 
 ]
 
