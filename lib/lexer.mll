@@ -30,6 +30,7 @@ rule read = parse
   | '/' { DIV }
 
   | "<"  { LT }
+  | ">>" { SHR }
   | ">"  { GT }
   | "<=" { LE }
   | ">=" { GE }

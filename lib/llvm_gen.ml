@@ -217,7 +217,9 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | Ge  -> (TypeInt, build_icmp Icmp.Sge v1 v2 "getmp" builder)
        | Eq  -> (TypeInt, build_icmp Icmp.Eq  v1 v2 "eqtmp" builder)
        | Ne  -> (TypeInt, build_icmp Icmp.Ne  v1 v2 "netmp" builder)
-       | Or  -> (TypeInt, build_or  (to_i32 v1) (to_i32 v2) "ortmp" builder))
+       | Or   -> (TypeInt, build_or   (to_i32 v1) (to_i32 v2) "ortmp"  builder)
+       | Band -> (TypeInt, build_and  (to_i32 v1) (to_i32 v2) "andtmp" builder)
+       | Shr  -> (TypeInt, build_lshr (to_i32 v1) (to_i32 v2) "shrtmp" builder))
 
   | Cast (target_ty, e) ->
       let (_, v) = gen_expr locals e in

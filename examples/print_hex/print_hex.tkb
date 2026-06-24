@@ -1,0 +1,42 @@
+fn uart_putc(c: char) {
+    let dr: *char = 0x09000000;
+    *dr = c;
+}
+
+fn uart_puts(s: *char) {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
+fn uart_print_hex_digit(n: int) {
+    if (n < 10) {
+        uart_putc((n + 48) as char);
+    } else {
+        uart_putc((n - 10 + 97) as char);
+    }
+}
+
+fn uart_print_hex(n: int) {
+    uart_puts("0x");
+    let mut i = 7;
+    while (i >= 0) {
+        uart_print_hex_digit((n >> (i * 4)) & 15);
+        i = i - 1;
+    }
+}
+
+fn main() {
+    uart_puts("=== uart_print_hex test ===\r\n");
+    uart_print_hex(0);
+    uart_putc('\r');
+    uart_putc('\n');
+    uart_print_hex(0x0000cafe);
+    uart_putc('\r');
+    uart_putc('\n');
+    uart_print_hex(0x12345678);
+    uart_putc('\r');
+    uart_putc('\n');
+    uart_puts("done\r\n");
+}

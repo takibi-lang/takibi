@@ -63,6 +63,7 @@ run_test "hello"     examples/hello/kernel.elf     examples/hello/hello.expected
 run_test "print_int" examples/print_int/kernel.elf examples/print_int/print_int.expected
 run_test "echo"      examples/echo/kernel.elf      examples/echo/echo.expected \
                      examples/echo/echo.stdin
+run_test "print_hex" examples/print_hex/kernel.elf examples/print_hex/print_hex.expected
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

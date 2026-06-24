@@ -13,7 +13,7 @@ type ident = string
 type binop =
   | Add | Sub | Mul | Div
   | Lt | Gt | Le | Ge | Eq | Ne
-  | Or
+  | Or | Band | Shr
 [@@deriving show]
 
 type type_expr =

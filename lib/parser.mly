@@ -14,14 +14,16 @@ open Ast
 
 %token LT GT LE GE EQ NE
 %token PLUS MINUS TIMES DIV
-%token OR
+%token OR SHR
 %token AS
 
 (* Precedence: low → high.  UNARY is a pseudo-token for %prec. *)
 %left OR
 %left LT GT LE GE EQ NE
+%left AMP         (* bitwise AND — also used as unary AddrOf prefix *)
 %nonassoc AS      (* as cast: lower than arithmetic so a+b as T = (a+b) as T *)
 %left PLUS MINUS
+%left SHR         (* right shift: tighter than +/-, looser than */÷ *)
 %left TIMES DIV
 %nonassoc UNARY   (* highest: unary * (deref), & (addrof), unary - *)
 
@@ -93,7 +95,9 @@ else_part:
   | (* empty *) { [] }
 
 expr:
-  | expr OR expr    { { desc = BinOp (Or, $1, $3); loc = $symbolstartpos } }
+  | expr OR   expr  { { desc = BinOp (Or,   $1, $3); loc = $symbolstartpos } }
+  | expr AMP  expr  { { desc = BinOp (Band, $1, $3); loc = $symbolstartpos } }
+  | expr SHR  expr  { { desc = BinOp (Shr,  $1, $3); loc = $symbolstartpos } }
   | expr PLUS expr  { { desc = BinOp (Add, $1, $3); loc = $symbolstartpos } }
   | expr MINUS expr { { desc = BinOp (Sub, $1, $3); loc = $symbolstartpos } }
   | expr TIMES expr { { desc = BinOp (Mul, $1, $3); loc = $symbolstartpos } }
