@@ -64,6 +64,7 @@ run_test "print_int" examples/print_int/kernel.elf examples/print_int/print_int.
 run_test "echo"      examples/echo/kernel.elf      examples/echo/echo.expected \
                      examples/echo/echo.stdin
 run_test "print_hex" examples/print_hex/kernel.elf examples/print_hex/print_hex.expected
+run_test "print_ptr" examples/print_ptr/kernel.elf examples/print_ptr/print_ptr.expected
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

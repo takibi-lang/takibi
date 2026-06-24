@@ -70,7 +70,12 @@ let coerce v (dst : Ast.type_expr) =
   | TypeChar ->
       if vty = i32_type context then build_trunc v dst_ll "trunc" builder else v
   | TypeInt ->
-      build_zext v dst_ll "zext" builder
+      if vty = pointer_type context then
+        (* pointer as int: ptrtoint → i64, then trunc to i32 (AArch64 RAM fits in 32 bits) *)
+        let i64v = build_ptrtoint v (i64_type context) "ptrtoint" builder in
+        build_trunc i64v (i32_type context) "trunc" builder
+      else
+        build_zext v dst_ll "zext" builder
   | TypeVoid -> v
 
 (* Widen an integer value to i32 so arithmetic stays uniform.

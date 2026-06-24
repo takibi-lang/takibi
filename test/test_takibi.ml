@@ -541,6 +541,9 @@ let infer_tests = [
     Alcotest.check type_t "return type is char" Ast.TypeChar fi.Types.ret_type
   );
 
+  Alcotest.test_case "as cast pointer to int passes" `Quick
+    (expect_ok "fn f(p: *int) int { return p as int; }");
+
   (* ── ビット演算 ──────────────────────────────────────────────── *)
 
   Alcotest.test_case "bitwise AND type-checks" `Quick

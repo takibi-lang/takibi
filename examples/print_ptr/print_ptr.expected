@@ -1,0 +1,3 @@
+=== print_ptr test ===
+uart: 0x09000000
+done

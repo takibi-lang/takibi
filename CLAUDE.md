@@ -24,7 +24,7 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
   - 論理 OR（`||`）
   - ビット演算（`>>` 右論理シフト、`&` ビット AND）— 両辺 `int`、結果 `int`
   - 関数呼び出し、`*expr`（デリファレンス）、`&ident`（アドレス取得）
-  - `expr as T` — 明示的型変換（int ↔ char）。優先順位は算術より低いので `a + b as char` = `(a + b) as char`
+  - `expr as T` — 明示的型変換（int ↔ char、`*T` → int）。優先順位は算術より低いので `a + b as char` = `(a + b) as char`
 - MMIO: volatile store/load として emit される（`set_volatile true`）
 
 ## ビルドコマンド
@@ -71,6 +71,9 @@ examples/
   print_hex/
     print_hex.tkb — uart_print_hex / >> と & ビット演算のデモ
     print_hex.expected
+  print_ptr/
+    print_ptr.tkb — ポインタ値を int キャスト（as int）して16進表示するデモ
+    print_ptr.expected
 tests/
   qemu_test.sh    — QEMU 結合テストスクリプト（FIFO で同期、sleep 不要）
 test/
@@ -117,7 +120,11 @@ AST・型推論・codegen を変更せずに済む。LLVM IR でも `sub i32 0, 
 2. `lib/lexer.mll` — `"as"` キーワード
 3. `lib/parser.mly` — `%nonassoc AS`（算術より低優先度）、`expr AS type_expr` 規則
 4. `lib/type_inf.ml` — ソース式をチェックしてターゲット型を返す
-5. `lib/llvm_gen.ml` — 既存の `coerce` 関数を呼ぶだけ（`i32→i8` trunc / `i8→i32` zext）
+5. `lib/llvm_gen.ml` — `coerce` 関数でターゲット型ごとに変換命令を選択:
+   - `int → char`: `trunc i32, i8`
+   - `char/i1 → int`: `zext`
+   - `int → *T`: `zext i32, i64` → `inttoptr`（MMIO アドレス代入）
+   - `*T → int`: `ptrtoint ptr, i64` → `trunc i64, i32`（ポインタ値の表示）
 
 ### 不変変数と可変変数の codegen
 `llvm_gen.ml` の locals テーブルは `(string, local_binding) Hashtbl.t` で管理する。
@@ -143,7 +150,7 @@ type local_binding =
 規約: `examples/<name>/<name>.tkb` → `examples/<name>/kernel.elf`
 
 ```makefile
-EXAMPLES := start hello echo print_int print_hex  # ← ここに追加するだけ
+EXAMPLES := start hello echo print_int print_hex print_ptr  # ← ここに追加するだけ
 ```
 
 `qemu-echo` のようにインタラクティブな手動起動が必要なターゲットだけ個別に追加する。
