@@ -1,0 +1,5 @@
+=== array test ===
+write: AAAAAAAA
+index: X
+fill:  ZZZZZZZZ
+done

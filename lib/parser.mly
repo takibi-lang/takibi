@@ -6,7 +6,7 @@ open Ast
 %token <string> IDENT
 %token <string> STRING
 %token FN RETURN LET MUT
-%token LBRACE RBRACE LPAREN RPAREN COMMA SEMI
+%token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI
 %token ASSIGN
 %token IF ELSE WHILE
 %token EOF
@@ -26,6 +26,7 @@ open Ast
 %left SHR         (* right shift: tighter than +/-, looser than */÷ *)
 %left TIMES DIV
 %nonassoc UNARY   (* highest: unary * (deref), & (addrof), unary - *)
+%nonassoc LBRACKET  (* postfix indexing — above all prefix/binary ops *)
 
 %token INT_TYPE CHAR_TYPE
 %token COLON
@@ -120,6 +121,11 @@ expr:
   | LPAREN e = expr RPAREN { e }
   | e = expr AS t = type_expr
     { { desc = Cast (t, e); loc = $symbolstartpos } }
+  | arr = expr LBRACKET idx = expr RBRACKET
+    (* arr[i] desugars to *(arr + i) — array decay to pointer happens in codegen *)
+    { let loc = $symbolstartpos in
+      let add = { desc = BinOp (Add, arr, idx); loc } in
+      { desc = Deref add; loc } }
 
 args:
   | /* empty */ { [] }
@@ -139,3 +145,4 @@ type_expr:
   | INT_TYPE  { TypeInt }
   | CHAR_TYPE { TypeChar }
   | TIMES type_expr { TypePtr $2 }
+  | LBRACKET t = type_expr SEMI n = INT RBRACKET { TypeArray (t, n) }

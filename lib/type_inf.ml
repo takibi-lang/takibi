@@ -20,7 +20,10 @@ let rec infer_expr tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
   | IntLit _    -> fresh ()  (* polymorphic: unifies with int or char via context *)
   | StringLit _ -> TPtr TChar
-  | Var name -> lookup e.loc name tyenv
+  | Var name ->
+      let t = lookup e.loc name tyenv in
+      (* 配列型は式中でポインタにデケイする（Cと同じ） *)
+      (match repr t with TArray (inner, _) -> TPtr inner | _ -> t)
   | BinOp (op, e1, e2) ->
       let t1 = infer_expr tyenv fenv e1 in
       let t2 = infer_expr tyenv fenv e2 in

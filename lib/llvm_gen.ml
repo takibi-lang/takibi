@@ -42,11 +42,12 @@ let emit_object machine output_path =
 
 (* ── Type helpers ──────────────────────────────────────────────────────── *)
 
-let ltype_of_ast = function
-  | TypeInt      -> i32_type context
-  | TypeChar     -> i8_type  context
-  | TypeVoid     -> void_type context
-  | TypePtr _    -> pointer_type context   (* LLVM 19: all pointers are opaque ptr *)
+let rec ltype_of_ast = function
+  | TypeInt         -> i32_type context
+  | TypeChar        -> i8_type  context
+  | TypeVoid        -> void_type context
+  | TypePtr _       -> pointer_type context   (* LLVM 19: all pointers are opaque ptr *)
+  | TypeArray (t, n) -> array_type (ltype_of_ast t) n
 
 let ltype_of_ret_ast = function
   | TypeVoid -> void_type context
@@ -76,7 +77,8 @@ let coerce v (dst : Ast.type_expr) =
         build_trunc i64v (i32_type context) "trunc" builder
       else
         build_zext v dst_ll "zext" builder
-  | TypeVoid -> v
+  | TypeVoid    -> v
+  | TypeArray _ -> v
 
 (* Widen an integer value to i32 so arithmetic stays uniform.
    Does NOT touch pointer values. *)
@@ -171,12 +173,20 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            in
            (ast_ty, v')
        | Mut (ast_ty, ptr) ->
-           let v  = build_load (ltype_of_ast ast_ty) ptr name builder in
-           let v' = match ast_ty with
-             | TypeInt | TypeChar -> to_i32 v
-             | _                  -> v
-           in
-           (ast_ty, v'))
+           (match ast_ty with
+            | TypeArray (elem_ty, n) ->
+                (* 配列変数は先頭要素へのポインタにデケイ（C と同じ）*)
+                let arr_ll = array_type (ltype_of_ast elem_ty) n in
+                let zero   = const_int (i32_type context) 0 in
+                let ep = build_in_bounds_gep arr_ll ptr [|zero; zero|] (name ^ "_ptr") builder in
+                (TypePtr elem_ty, ep)
+            | _ ->
+                let v  = build_load (ltype_of_ast ast_ty) ptr name builder in
+                let v' = match ast_ty with
+                  | TypeInt | TypeChar -> to_i32 v
+                  | _                  -> v
+                in
+                (ast_ty, v')))
 
   | Deref e1 ->
       let (ty1, v1) = gen_expr locals e1 in
@@ -331,10 +341,13 @@ let gen_func ?prog_types fdef =
              | None -> raise (Error (Printf.sprintf "Undefined variable: %s" name)))
 
     | AssignDeref (ptr_expr, val_expr) ->
-        let (_, ptr_v) = gen_expr locals ptr_expr in
-        let (_, val_v) = gen_expr locals val_expr in
-        (* volatile: MMIO writes must not be optimised away *)
-        let inst = build_store val_v ptr_v builder in
+        let (ptr_ty, ptr_v) = gen_expr locals ptr_expr in
+        let (_, val_v)      = gen_expr locals val_expr in
+        (* ポインタの要素型に合わせて coerce（i32→i8 など）してから store *)
+        let coerced = (match ptr_ty with
+          | TypePtr inner -> coerce val_v inner
+          | _             -> val_v) in
+        let inst = build_store coerced ptr_v builder in
         set_volatile true inst
 
     | Let (true, name, _, expr_opt) ->

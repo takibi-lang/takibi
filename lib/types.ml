@@ -7,6 +7,7 @@ type ty =
   | TFun of ty list * ty  (* param types, return type *)
   | TVar of tv ref
   | TPtr of ty            (* pointer type *)
+  | TArray of ty * int    (* array type: [T; N] *)
 
 and tv =
   | Unbound of int  (* unresolved unification variable *)
@@ -34,6 +35,7 @@ let rec to_string t =
   | TChar -> "char"
   | TVoid -> "void"
   | TPtr t -> Printf.sprintf "*%s" (to_string t)
+  | TArray (t, n) -> Printf.sprintf "[%s; %d]" (to_string t) n
   | TFun (ps, r) ->
       Printf.sprintf "(%s) -> %s"
         (String.concat ", " (List.map to_string ps)) (to_string r)
@@ -49,12 +51,17 @@ let rec occurs rv = function
   | TVar r                     -> r == rv
   | TFun (ps, r)               -> List.exists (occurs rv) ps || occurs rv r
   | TPtr t                     -> occurs rv t
+  | TArray (t, _)              -> occurs rv t
   | _                          -> false
 
 let rec unify t1 t2 =
   match repr t1, repr t2 with
   | TInt,  TInt  | TChar, TChar | TVoid, TVoid -> ()
   | TPtr t1, TPtr t2 -> unify t1 t2
+  | TArray (t1, n1), TArray (t2, n2) ->
+      if n1 <> n2 then
+        raise (Unify_error (Printf.sprintf "array size mismatch: %d vs %d" n1 n2));
+      unify t1 t2
   | TFun (ps1, r1), TFun (ps2, r2) ->
       if List.length ps1 <> List.length ps2 then
         raise (Unify_error "argument count mismatch");
@@ -79,7 +86,8 @@ let rec of_ast = function
   | Ast.TypeInt      -> TInt
   | Ast.TypeChar     -> TChar
   | Ast.TypeVoid     -> TVoid
-  | Ast.TypePtr t    -> TPtr (of_ast t)
+  | Ast.TypePtr t        -> TPtr (of_ast t)
+  | Ast.TypeArray (t, n) -> TArray (of_ast t, n)
 
 (* None → fresh unification variable *)
 let of_ast_opt = function
@@ -98,7 +106,8 @@ let rec to_ast t =
   | TInt  -> Ast.TypeInt
   | TChar -> Ast.TypeChar
   | TVoid -> Ast.TypeVoid
-  | TPtr t -> Ast.TypePtr (to_ast t)
+  | TPtr t        -> Ast.TypePtr (to_ast t)
+  | TArray (t, n) -> Ast.TypeArray (to_ast t, n)
   | TFun _                        -> Ast.TypeVoid
   | TVar { contents = Unbound _ } -> Ast.TypeInt
   | TVar { contents = Link _ }    -> assert false

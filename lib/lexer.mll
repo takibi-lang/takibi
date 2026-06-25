@@ -19,6 +19,8 @@ rule read = parse
   | '}' { RBRACE }
   | '(' { LPAREN }
   | ')' { RPAREN }
+  | '[' { LBRACKET }
+  | ']' { RBRACKET }
   | ',' { COMMA }
   | ';' { SEMI }
   | '=' { ASSIGN }

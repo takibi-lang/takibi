@@ -12,10 +12,11 @@ let infer src =
 (* Custom Alcotest testables *)
 
 let rec show_type = function
-  | Ast.TypeInt   -> "int"
-  | Ast.TypeChar  -> "char"
-  | Ast.TypeVoid  -> "void"
-  | Ast.TypePtr t -> "*" ^ show_type t
+  | Ast.TypeInt         -> "int"
+  | Ast.TypeChar        -> "char"
+  | Ast.TypeVoid        -> "void"
+  | Ast.TypePtr t       -> "*" ^ show_type t
+  | Ast.TypeArray (t,n) -> Printf.sprintf "[%s; %d]" (show_type t) n
 
 let type_t : Ast.type_expr Alcotest.testable =
   Alcotest.testable (fun fmt t -> Format.pp_print_string fmt (show_type t)) (=)
@@ -390,6 +391,40 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  (* ── 配列 ────────────────────────────────────────────────────── *)
+
+  Alcotest.test_case "array type annotation parses" `Quick (fun () ->
+    match parse "fn f() { let mut buf: [char; 8]; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Let (true, "buf", Some (Ast.TypeArray (Ast.TypeChar, 8)), None) -> ()
+         | _ -> Alcotest.fail "expected Let(mut, buf, TypeArray(char,8), None)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "array indexing desugars to Deref(Add(arr,idx))" `Quick (fun () ->
+    match parse "fn f(arr: *char, i: int) char { return arr[i]; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.Deref
+             { desc = Ast.BinOp (Ast.Add,
+                 { desc = Ast.Var "arr"; _ },
+                 { desc = Ast.Var "i"; _ }); _ }; _ } -> ()
+         | _ -> Alcotest.fail "expected Return(Deref(BinOp(Add, arr, i)))")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "arr[i] binds tighter than addition" `Quick (fun () ->
+    (* a + arr[i]  should parse as  a + deref(arr+i), not deref(a+arr)[i] *)
+    match parse "fn f(a: int, arr: *char, i: int) int { return a + arr[i]; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (Ast.Add, { desc = Ast.Var "a"; _ },
+                                 { desc = Ast.Deref _; _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Add(a, Deref(...)) — [] must bind tighter than +")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
 ]
 
 (* ── Type inference tests ────────────────────────────────────────────────── *)
@@ -555,6 +590,21 @@ let infer_tests = [
   Alcotest.test_case "bitwise AND type error: non-int operand" `Quick
     (expect_type_error "cannot unify"
        "fn f(n: int, p: *int) int { return n & p; }");
+
+  (* ── 配列 ────────────────────────────────────────────────────── *)
+
+  Alcotest.test_case "array declaration type-checks" `Quick
+    (expect_ok "fn f() { let mut buf: [char; 8]; }");
+
+  Alcotest.test_case "array write via pointer arith type-checks" `Quick
+    (expect_ok "fn f() { let mut buf: [char; 8]; *(buf + 0) = 'A'; }");
+
+  Alcotest.test_case "array read via indexing type-checks" `Quick
+    (expect_ok "fn putc(c: char) {} fn f() { let mut buf: [char; 4]; putc(buf[0]); }");
+
+  Alcotest.test_case "array decays to *char when passed to pointer param" `Quick
+    (expect_ok "fn fill(p: *char, n: int) {}
+                fn f() { let mut buf: [char; 4]; fill(buf, 4); }");
 
 ]
 
