@@ -13,8 +13,7 @@ fn uart_puts(s: *char) {
 fn my_memset(p: *char, val: char, n: int) {
     let mut i: int = 0;
     while (i < n) {
-        *p = val;
-        p = p + 1;
+        *(p + i) = val;
         i = i + 1;
     }
 }
@@ -22,9 +21,7 @@ fn my_memset(p: *char, val: char, n: int) {
 fn my_memcpy(dst: *char, src: *char, n: int) {
     let mut i: int = 0;
     while (i < n) {
-        *dst = *src;
-        dst = dst + 1;
-        src = src + 1;
+        *(dst + i) = src[i];
         i = i + 1;
     }
 }
@@ -32,8 +29,7 @@ fn my_memcpy(dst: *char, src: *char, n: int) {
 fn print_buf(p: *char, n: int) {
     let mut i: int = 0;
     while (i < n) {
-        uart_putc(*p);
-        p = p + 1;
+        uart_putc(p[i]);
         i = i + 1;
     }
 }
@@ -41,8 +37,8 @@ fn print_buf(p: *char, n: int) {
 fn main() {
     uart_puts("=== memset/memcpy test ===\r\n");
 
-    let buf_a: *char = 0x40020000;
-    let buf_b: *char = 0x40030000;
+    let mut buf_a: [char; 5];
+    let mut buf_b: [char; 5];
 
     my_memset(buf_a, 'A', 5);
     uart_puts("memset: ");
