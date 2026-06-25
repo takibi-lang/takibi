@@ -1,0 +1,64 @@
+fn uart_putc(c: char) {
+    let dr: *char = 0x09000000;
+    *dr = c;
+}
+
+fn uart_puts(s: *char) {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
+fn uart_print_hex8(n: int) {
+    let hi: int = (n >> 4) & 0xf;
+    let lo: int = n & 0xf;
+    if (hi < 10) {
+        uart_putc((hi + '0') as char);
+    } else {
+        uart_putc((hi - 10 + 'A') as char);
+    }
+    if (lo < 10) {
+        uart_putc((lo + '0') as char);
+    } else {
+        uart_putc((lo - 10 + 'A') as char);
+    }
+}
+
+fn strlen(s: *char) int {
+    let mut n: int = 0;
+    while (*s != 0) {
+        n = n + 1;
+        s = s + 1;
+    }
+    return n;
+}
+
+fn crc8(data: *char, len: int) int {
+    let mut crc: int = 0;
+    let mut i: int = 0;
+    while (i < len) {
+        crc = crc ^ (*data as int);
+        let mut bit: int = 0;
+        while (bit < 8) {
+            if ((crc & 0x80) != 0) {
+                crc = (crc << 1) ^ 0x07;
+            } else {
+                crc = crc << 1;
+            }
+            crc = crc & 0xff;
+            bit = bit + 1;
+        }
+        data = data + 1;
+        i = i + 1;
+    }
+    return crc;
+}
+
+fn main() {
+    let s: *char = "123456789";
+    let result: int = crc8(s, strlen(s));
+    uart_puts("CRC-8: 0x");
+    uart_print_hex8(result);
+    uart_puts("\r\n");
+}

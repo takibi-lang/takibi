@@ -1,0 +1,43 @@
+fn uart_putc(c: char) {
+    let dr: *char = 0x09000000;
+    *dr = c;
+}
+
+fn uart_puts(s: *char) {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
+fn uart_print_hex(n: int) {
+    uart_puts("0x");
+    let mut shift: int = 28;
+    while (shift >= 0) {
+        let nibble: int = (n >> shift) & 0xf;
+        if (nibble < 10) {
+            uart_putc((nibble + '0') as char);
+        } else {
+            uart_putc((nibble - 10 + 'A') as char);
+        }
+        shift = shift - 4;
+    }
+}
+
+fn djb2(s: *char) int {
+    let mut hash: int = 5381;
+    while (*s != 0) {
+        hash = ((hash << 5) + hash) ^ (*s as int);
+        s = s + 1;
+    }
+    return hash;
+}
+
+fn main() {
+    uart_puts("djb2(\"hello\"): ");
+    uart_print_hex(djb2("hello"));
+    uart_puts("\r\n");
+    uart_puts("djb2(\"world\"): ");
+    uart_print_hex(djb2("world"));
+    uart_puts("\r\n");
+}

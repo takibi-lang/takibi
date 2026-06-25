@@ -14,7 +14,7 @@ fn uart_print_uint(n: int) {
     if (n >= 10) {
         uart_print_uint(n / 10);
     }
-    uart_putc((n % 10 + 48) as char);
+    uart_putc((n % 10 + '0') as char);
 }
 
 fn print_arr(arr: *int, n: int) {

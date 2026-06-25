@@ -42,6 +42,7 @@ rule read = parse
   | "!=" { NE }
   | "||" { OR }
   | '|'  { PIPE }
+  | '^'  { HAT }
 
   | "int"  { INT_TYPE }
   | "char" { CHAR_TYPE }
