@@ -27,7 +27,6 @@ open Ast
 %left SHR SHL     (* shifts: tighter than +/-, looser than * / % *)
 %left TIMES DIV PERCENT  (* multiplicative *)
 %nonassoc UNARY   (* highest: unary * (deref), & (addrof), unary - *)
-%nonassoc LBRACKET  (* postfix indexing — above all prefix/binary ops *)
 
 %token INT_TYPE CHAR_TYPE
 %token COLON
@@ -87,7 +86,19 @@ stmt:
     { { desc = While(c, b); loc = $symbolstartpos } }
   | id = IDENT ASSIGN e = expr SEMI
     { { desc = Assign (id, e); loc = $symbolstartpos } }
-  | TIMES lhs = expr ASSIGN rhs = expr SEMI
+  | id = IDENT LBRACKET idx = expr RBRACKET ASSIGN rhs = expr SEMI
+    (* arr[i] = v  desugars to  *(arr + i) = v *)
+    { let loc = $symbolstartpos in
+      let arr = { desc = Var id; loc } in
+      let ptr = { desc = BinOp (Add, arr, idx); loc } in
+      { desc = AssignDeref (ptr, rhs); loc } }
+  | TIMES id = IDENT ASSIGN rhs = expr SEMI
+    (* *p = v  — simple pointer-deref write *)
+    { let loc = $symbolstartpos in
+      let ptr = { desc = Var id; loc } in
+      { desc = AssignDeref (ptr, rhs); loc } }
+  | TIMES LPAREN lhs = expr RPAREN ASSIGN rhs = expr SEMI
+    (* *(complex_expr) = v  — e.g. *(arr + i) = v *)
     { { desc = AssignDeref (lhs, rhs); loc = $symbolstartpos } }
 
 else_part:
@@ -125,9 +136,10 @@ expr:
   | LPAREN e = expr RPAREN { e }
   | e = expr AS t = type_expr
     { { desc = Cast (t, e); loc = $symbolstartpos } }
-  | arr = expr LBRACKET idx = expr RBRACKET
+  | id = IDENT LBRACKET idx = expr RBRACKET
     (* arr[i] desugars to *(arr + i) — array decay to pointer happens in codegen *)
     { let loc = $symbolstartpos in
+      let arr = { desc = Var id; loc } in
       let add = { desc = BinOp (Add, arr, idx); loc } in
       { desc = Deref add; loc } }
 

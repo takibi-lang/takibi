@@ -444,6 +444,19 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  Alcotest.test_case "array write arr[i]=v desugars to AssignDeref" `Quick (fun () ->
+    match parse "fn f(arr: *char, i: int) { arr[i] = 'X'; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.AssignDeref (
+             { desc = Ast.BinOp (Ast.Add,
+                 { desc = Ast.Var "arr"; _ },
+                 { desc = Ast.Var "i"; _ }); _ },
+             { desc = Ast.IntLit 88; _ }) -> ()   (* 'X' = 88 *)
+         | _ -> Alcotest.fail "expected AssignDeref(BinOp(Add,arr,i), 'X')")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
   (* ── 配列 ────────────────────────────────────────────────────── *)
 
   Alcotest.test_case "array type annotation parses" `Quick (fun () ->
@@ -658,6 +671,13 @@ let infer_tests = [
   Alcotest.test_case "array decays to *char when passed to pointer param" `Quick
     (expect_ok "fn fill(p: *char, n: int) {}
                 fn f() { let mut buf: [char; 4]; fill(buf, 4); }");
+
+  Alcotest.test_case "array write arr[i]=v type-checks" `Quick
+    (expect_ok "fn f(arr: *char) { arr[0] = 'A'; }");
+
+  Alcotest.test_case "array write to non-pointer is a type error" `Quick
+    (expect_type_error "cannot unify"
+       "fn f(n: int) { n[0] = 1; }");
 
 ]
 
