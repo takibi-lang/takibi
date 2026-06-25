@@ -83,10 +83,19 @@ examples/
   fizzbuzz/
     fizzbuzz.tkb  — FizzBuzz（% 剰余・if/else if チェーン）
     fizzbuzz.expected
+  fibonacci/
+    fibonacci.tkb — フィボナッチ数列（反復版、10項出力）
+    fibonacci.expected
+  bubblesort/
+    bubblesort.tkb — バブルソート（arr[i]=v 書き込み・arr[i] 読み出しのデモ）
+    bubblesort.expected
+  ringbuf/
+    ringbuf.tkb   — リングバッファ（&mut_var・buf[*ptr]=val・% 折り返しのデモ）
+    ringbuf.expected
 tests/
   qemu_test.sh    — QEMU 結合テストスクリプト（FIFO で同期、sleep 不要）
 test/
-  test_takibi.ml  — Alcotest による parser / type_inf ユニットテスト（76件）
+  test_takibi.ml  — Alcotest による parser / type_inf ユニットテスト（84件）
 ```
 
 ## 重要な設計上のポイント
@@ -161,7 +170,7 @@ type local_binding =
 規約: `examples/<name>/<name>.tkb` → `examples/<name>/kernel.elf`
 
 ```makefile
-EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz  # ← ここに追加するだけ
+EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf  # ← ここに追加するだけ
 ```
 
 `qemu-echo` のようにインタラクティブな手動起動が必要なターゲットだけ個別に追加する。

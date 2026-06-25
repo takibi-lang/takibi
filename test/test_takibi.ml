@@ -679,6 +679,13 @@ let infer_tests = [
     (expect_type_error "cannot unify"
        "fn f(n: int) { n[0] = 1; }");
 
+  Alcotest.test_case "array write with deref index buf[*ptr]=val type-checks" `Quick
+    (expect_ok "fn f(buf: *int, tail: *int) { buf[*tail] = 42; }");
+
+  Alcotest.test_case "addrof mut var as function argument type-checks" `Quick
+    (expect_ok "fn push(tail: *int) {}
+                fn f() { let mut t: int = 0; push(&t); }");
+
 ]
 
 (* ── Entry point ─────────────────────────────────────────────────────────── *)
