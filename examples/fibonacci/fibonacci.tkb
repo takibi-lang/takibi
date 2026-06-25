@@ -1,0 +1,33 @@
+fn uart_putc(c: char) {
+    let dr: *char = 0x09000000;
+    *dr = c;
+}
+
+fn uart_puts(s: *char) {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
+fn uart_print_uint(n: int) {
+    if (n >= 10) {
+        uart_print_uint(n / 10);
+    }
+    uart_putc((n % 10 + 48) as char);
+}
+
+fn main() {
+    let mut a: int = 0;
+    let mut b: int = 1;
+    let mut tmp: int = 0;
+    let mut i: int = 0;
+    while (i < 10) {
+        uart_print_uint(b);
+        uart_puts("\r\n");
+        tmp = a + b;
+        a = b;
+        b = tmp;
+        i = i + 1;
+    }
+}

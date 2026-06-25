@@ -15,7 +15,7 @@ COMMON_LINK_LD   := $(COMMON_DIR)/link.ld
 # ── Examples ──────────────────────────────────────────────────────────────────
 # 新しい例題を追加するときはここに名前を足すだけ。
 # 規約: examples/<name>/<name>.tkb → examples/<name>/kernel.elf
-EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz
+EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
