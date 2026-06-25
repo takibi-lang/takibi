@@ -391,6 +391,59 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  Alcotest.test_case "modulo BinOp" `Quick (fun () ->
+    match parse "fn f(n: int) int { return n % 3; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+             Alcotest.check binop_t "op is Mod" Ast.Mod op
+         | _ -> Alcotest.fail "expected Return(BinOp Mod)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "% binds tighter than +" `Quick (fun () ->
+    (* a + b % 3  should parse as  a + (b % 3) *)
+    match parse "fn f(a: int, b: int) int { return a + b % 3; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (Ast.Add, _,
+                                 { desc = Ast.BinOp (Ast.Mod, _, _); _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Add(a, Mod(b,3)) — % must bind tighter than +")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "bitwise OR expression" `Quick (fun () ->
+    match parse "fn f(a: int, b: int) int { return a | b; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+             Alcotest.check binop_t "op is Bor" Ast.Bor op
+         | _ -> Alcotest.fail "expected Return(BinOp Bor)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "| binds looser than ==" `Quick (fun () ->
+    (* a == 0 | b == 0  should parse as  (a == 0) | (b == 0) *)
+    match parse "fn f(a: int, b: int) int { return a == 0 | b == 0; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (Ast.Bor,
+                                 { desc = Ast.BinOp (Ast.Eq, _, _); _ },
+                                 { desc = Ast.BinOp (Ast.Eq, _, _); _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Bor(Eq(...),Eq(...)) — | must bind looser than ==")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "left shift expression" `Quick (fun () ->
+    match parse "fn f(n: int) int { return n << 2; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+             Alcotest.check binop_t "op is Shl" Ast.Shl op
+         | _ -> Alcotest.fail "expected Return(BinOp Shl)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
   (* ── 配列 ────────────────────────────────────────────────────── *)
 
   Alcotest.test_case "array type annotation parses" `Quick (fun () ->

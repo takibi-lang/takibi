@@ -30,7 +30,9 @@ rule read = parse
   | '-' { MINUS }
   | '*' { TIMES }
   | '/' { DIV }
+  | '%' { PERCENT }
 
+  | "<<" { SHL }
   | "<"  { LT }
   | ">>" { SHR }
   | ">"  { GT }
@@ -39,6 +41,7 @@ rule read = parse
   | "==" { EQ }
   | "!=" { NE }
   | "||" { OR }
+  | '|'  { PIPE }
 
   | "int"  { INT_TYPE }
   | "char" { CHAR_TYPE }

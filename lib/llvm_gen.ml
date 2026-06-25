@@ -233,8 +233,11 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | Eq  -> (TypeInt, build_icmp Icmp.Eq  v1 v2 "eqtmp" builder)
        | Ne  -> (TypeInt, build_icmp Icmp.Ne  v1 v2 "netmp" builder)
        | Or   -> (TypeInt, build_or   (to_i32 v1) (to_i32 v2) "ortmp"  builder)
+       | Bor  -> (TypeInt, build_or   (to_i32 v1) (to_i32 v2) "bortmp" builder)
        | Band -> (TypeInt, build_and  (to_i32 v1) (to_i32 v2) "andtmp" builder)
-       | Shr  -> (TypeInt, build_lshr (to_i32 v1) (to_i32 v2) "shrtmp" builder))
+       | Shr  -> (TypeInt, build_lshr (to_i32 v1) (to_i32 v2) "shrtmp" builder)
+       | Shl  -> (TypeInt, build_shl  (to_i32 v1) (to_i32 v2) "shltmp" builder)
+       | Mod  -> (TypeInt, build_srem (to_i32 v1) (to_i32 v2) "modtmp" builder))
 
   | Cast (target_ty, e) ->
       let (_, v) = gen_expr locals e in

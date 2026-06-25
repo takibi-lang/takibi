@@ -67,6 +67,7 @@ run_test "print_hex" examples/print_hex/kernel.elf examples/print_hex/print_hex.
 run_test "print_ptr" examples/print_ptr/kernel.elf examples/print_ptr/print_ptr.expected
 run_test "mem"       examples/mem/kernel.elf       examples/mem/mem.expected
 run_test "array"     examples/array/kernel.elf     examples/array/array.expected
+run_test "fizzbuzz"  examples/fizzbuzz/kernel.elf  examples/fizzbuzz/fizzbuzz.expected
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

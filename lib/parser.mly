@@ -13,18 +13,19 @@ open Ast
 %token AMP
 
 %token LT GT LE GE EQ NE
-%token PLUS MINUS TIMES DIV
-%token OR SHR
+%token PLUS MINUS TIMES DIV PERCENT
+%token OR PIPE SHR SHL
 %token AS
 
 (* Precedence: low → high.  UNARY is a pseudo-token for %prec. *)
 %left OR
+%left PIPE        (* bitwise OR: looser than comparison so (a==0)|(b==0) works *)
 %left LT GT LE GE EQ NE
 %left AMP         (* bitwise AND — also used as unary AddrOf prefix *)
 %nonassoc AS      (* as cast: lower than arithmetic so a+b as T = (a+b) as T *)
 %left PLUS MINUS
-%left SHR         (* right shift: tighter than +/-, looser than */÷ *)
-%left TIMES DIV
+%left SHR SHL     (* shifts: tighter than +/-, looser than * / % *)
+%left TIMES DIV PERCENT  (* multiplicative *)
 %nonassoc UNARY   (* highest: unary * (deref), & (addrof), unary - *)
 %nonassoc LBRACKET  (* postfix indexing — above all prefix/binary ops *)
 
@@ -96,13 +97,16 @@ else_part:
   | (* empty *) { [] }
 
 expr:
-  | expr OR   expr  { { desc = BinOp (Or,   $1, $3); loc = $symbolstartpos } }
-  | expr AMP  expr  { { desc = BinOp (Band, $1, $3); loc = $symbolstartpos } }
-  | expr SHR  expr  { { desc = BinOp (Shr,  $1, $3); loc = $symbolstartpos } }
-  | expr PLUS expr  { { desc = BinOp (Add, $1, $3); loc = $symbolstartpos } }
-  | expr MINUS expr { { desc = BinOp (Sub, $1, $3); loc = $symbolstartpos } }
-  | expr TIMES expr { { desc = BinOp (Mul, $1, $3); loc = $symbolstartpos } }
-  | expr DIV expr   { { desc = BinOp (Div, $1, $3); loc = $symbolstartpos } }
+  | expr OR      expr  { { desc = BinOp (Or,   $1, $3); loc = $symbolstartpos } }
+  | expr PIPE    expr  { { desc = BinOp (Bor,  $1, $3); loc = $symbolstartpos } }
+  | expr AMP     expr  { { desc = BinOp (Band, $1, $3); loc = $symbolstartpos } }
+  | expr SHR     expr  { { desc = BinOp (Shr,  $1, $3); loc = $symbolstartpos } }
+  | expr SHL     expr  { { desc = BinOp (Shl,  $1, $3); loc = $symbolstartpos } }
+  | expr PLUS    expr  { { desc = BinOp (Add,  $1, $3); loc = $symbolstartpos } }
+  | expr MINUS   expr  { { desc = BinOp (Sub,  $1, $3); loc = $symbolstartpos } }
+  | expr TIMES   expr  { { desc = BinOp (Mul,  $1, $3); loc = $symbolstartpos } }
+  | expr DIV     expr  { { desc = BinOp (Div,  $1, $3); loc = $symbolstartpos } }
+  | expr PERCENT expr  { { desc = BinOp (Mod,  $1, $3); loc = $symbolstartpos } }
   | expr LT expr   { { desc = BinOp (Lt, $1, $3); loc = $symbolstartpos } }
   | expr GT expr   { { desc = BinOp (Gt, $1, $3); loc = $symbolstartpos } }
   | expr LE expr   { { desc = BinOp (Le, $1, $3); loc = $symbolstartpos } }

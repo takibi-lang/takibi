@@ -11,9 +11,9 @@ type ident = string
 [@@deriving show]
 
 type binop =
-  | Add | Sub | Mul | Div
+  | Add | Sub | Mul | Div | Mod
   | Lt | Gt | Le | Ge | Eq | Ne
-  | Or | Band | Shr
+  | Or | Bor | Band | Shr | Shl
 [@@deriving show]
 
 type type_expr =
