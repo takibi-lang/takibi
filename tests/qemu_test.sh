@@ -71,6 +71,7 @@ run_test "fizzbuzz"  examples/fizzbuzz/kernel.elf  examples/fizzbuzz/fizzbuzz.ex
 run_test "fibonacci"  examples/fibonacci/kernel.elf  examples/fibonacci/fibonacci.expected
 run_test "bubblesort" examples/bubblesort/kernel.elf examples/bubblesort/bubblesort.expected
 run_test "ringbuf"    examples/ringbuf/kernel.elf    examples/ringbuf/ringbuf.expected
+run_test "callstack"  examples/callstack/kernel.elf  examples/callstack/callstack.expected
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then
