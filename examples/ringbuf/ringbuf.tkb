@@ -1,0 +1,62 @@
+fn uart_putc(c: char) {
+    let dr: *char = 0x09000000;
+    *dr = c;
+}
+
+fn uart_puts(s: *char) {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
+fn uart_print_uint(n: int) {
+    if (n >= 10) {
+        uart_print_uint(n / 10);
+    }
+    uart_putc((n % 10 + 48) as char);
+}
+
+fn rb_push(buf: *int, tail: *int, size: *int, cap: int, val: int) {
+    buf[*tail] = val;
+    *tail = (*tail + 1) % cap;
+    *size = *size + 1;
+}
+
+fn rb_pop(buf: *int, head: *int, size: *int, cap: int) int {
+    let mut val: int = buf[*head];
+    *head = (*head + 1) % cap;
+    *size = *size - 1;
+    return val;
+}
+
+fn main() {
+    let mut buf: [int; 4];
+    let mut head: int = 0;
+    let mut tail: int = 0;
+    let mut size: int = 0;
+
+    rb_push(buf, &tail, &size, 4, 1);
+    rb_push(buf, &tail, &size, 4, 2);
+    rb_push(buf, &tail, &size, 4, 3);
+    rb_push(buf, &tail, &size, 4, 4);
+
+    uart_puts("pop: ");
+    uart_print_uint(rb_pop(buf, &head, &size, 4));
+    uart_puts(" ");
+    uart_print_uint(rb_pop(buf, &head, &size, 4));
+    uart_puts("\r\n");
+
+    rb_push(buf, &tail, &size, 4, 5);
+    rb_push(buf, &tail, &size, 4, 6);
+
+    uart_puts("pop: ");
+    uart_print_uint(rb_pop(buf, &head, &size, 4));
+    uart_puts(" ");
+    uart_print_uint(rb_pop(buf, &head, &size, 4));
+    uart_puts(" ");
+    uart_print_uint(rb_pop(buf, &head, &size, 4));
+    uart_puts(" ");
+    uart_print_uint(rb_pop(buf, &head, &size, 4));
+    uart_puts("\r\n");
+}
