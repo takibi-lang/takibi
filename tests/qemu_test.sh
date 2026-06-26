@@ -55,6 +55,41 @@ run_test() {
     rm -f "$tmp_out"
 }
 
+# run_test_timed NAME KERNEL EXPECTED MIN_SECS
+#
+# Like run_test, but also verifies that QEMU ran for at least MIN_SECS seconds.
+# Used for delay/timer tests where the output alone cannot prove a real wait occurred.
+run_test_timed() {
+    local name="$1" kernel="$2" expected="$3" min_secs="$4"
+    local tmp_out t0 t1 elapsed output_ok=1 timing_ok=1
+    tmp_out=$(mktemp)
+
+    t0=$(date +%s)
+    echo | timeout "$TIMEOUT" $QEMU $QEMU_COMMON -kernel "$kernel" \
+        > "$tmp_out" 2>/dev/null
+    t1=$(date +%s)
+    elapsed=$((t1 - t0))
+
+    diff -q "$expected" "$tmp_out" > /dev/null 2>&1 || output_ok=0
+    [ "$elapsed" -ge "$min_secs" ]               || timing_ok=0
+
+    if [ "$output_ok" -eq 1 ] && [ "$timing_ok" -eq 1 ]; then
+        printf "${GRN}PASS${RST}  %s  (${elapsed}s >= ${min_secs}s)\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        printf "${RED}FAIL${RST}  %s\n" "$name"
+        [ "$output_ok" -eq 0 ] && {
+            printf "       expected bytes: %s\n" "$(od -An -c "$expected" | tr -s ' \n' ' ')"
+            printf "       got bytes:      %s\n" "$(od -An -c "$tmp_out"  | tr -s ' \n' ' ')"
+        }
+        [ "$timing_ok" -eq 0 ] && \
+            printf "       elapsed %ds < required %ds\n" "$elapsed" "$min_secs"
+        FAIL=$((FAIL + 1))
+    fi
+
+    rm -f "$tmp_out"
+}
+
 echo "Running QEMU integration tests..."
 echo ""
 
@@ -75,6 +110,7 @@ run_test "callstack"  examples/callstack/kernel.elf  examples/callstack/callstac
 run_test "crc8"       examples/crc8/kernel.elf       examples/crc8/crc8.expected
 run_test "djb2"       examples/djb2/kernel.elf       examples/djb2/djb2.expected
 run_test "bump"       examples/bump/kernel.elf       examples/bump/bump.expected
+run_test_timed "timer" examples/timer/kernel.elf examples/timer/timer.expected 1
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then
