@@ -444,6 +444,38 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  Alcotest.test_case "bitwise XOR expression" `Quick (fun () ->
+    match parse "fn f(a: int, b: int) int { return a ^ b; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+             Alcotest.check binop_t "op is Bxor" Ast.Bxor op
+         | _ -> Alcotest.fail "expected Return(BinOp Bxor)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "^ binds tighter than |" `Quick (fun () ->
+    (* a | b ^ c  should parse as  a | (b ^ c) *)
+    match parse "fn f(a: int, b: int, c: int) int { return a | b ^ c; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (Ast.Bor, _,
+                                 { desc = Ast.BinOp (Ast.Bxor, _, _); _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Bor(a, Bxor(b,c)) — ^ must bind tighter than |")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "== binds tighter than ^" `Quick (fun () ->
+    (* a ^ b == c  should parse as  a ^ (b == c)  — same as C *)
+    match parse "fn f(a: int, b: int, c: int) int { return a ^ b == c; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (Ast.Bxor, _,
+                                 { desc = Ast.BinOp (Ast.Eq, _, _); _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Bxor(a, Eq(b,c)) — == must bind tighter than ^")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
   Alcotest.test_case "array write arr[i]=v desugars to AssignDeref" `Quick (fun () ->
     match parse "fn f(arr: *char, i: int) { arr[i] = 'X'; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
@@ -656,6 +688,13 @@ let infer_tests = [
   Alcotest.test_case "bitwise AND type error: non-int operand" `Quick
     (expect_type_error "cannot unify"
        "fn f(n: int, p: *int) int { return n & p; }");
+
+  Alcotest.test_case "bitwise XOR type-checks" `Quick
+    (expect_ok "fn f(a: int, b: int) int { return a ^ b; }");
+
+  Alcotest.test_case "bitwise XOR type error: non-int operand" `Quick
+    (expect_type_error "cannot unify"
+       "fn f(n: int, p: *int) int { return n ^ p; }");
 
   (* ── 配列 ────────────────────────────────────────────────────── *)
 

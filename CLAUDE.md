@@ -6,10 +6,11 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
 ## 言語仕様（現時点）
 
 - ファイル拡張子: `.tkb`
-- 型: `int`, `char`, `void`, `*T`（ポインタ型、ネスト可）
+- 型: `int`, `char`, `void`, `*T`（ポインタ型、ネスト可）、`[T; N]`（配列型、関数引数はポインタに decay）
 - 文:
   - `let x = e` / `let x: T = e` — 不変変数宣言（初期値必須、再代入不可）
   - `let mut x = e` / `let mut x: T = e` — 可変変数宣言（再代入可）
+  - `let x: T;` — 未初期化グローバル変数宣言（グローバルスコープのみ）
   - `while`, `return`, 代入 (`x = e`)、ポインタ経由代入 (`*p = v`)
   - `if (cond) { ... }` — `else` は省略可
   - `if (cond) { ... } else { ... }` — 通常の if/else
@@ -22,7 +23,7 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
   - 算術演算（`+` `-` `*` `/` `%`）、比較演算（`<` `>` `<=` `>=` `==` `!=`）
   - 単項マイナス（`-expr`）— パーサで `BinOp(Sub, IntLit 0, expr)` に脱糖
   - 論理 OR（`||`）
-  - ビット演算（`>>` 右論理シフト、`<<` 左シフト、`&` ビット AND、`|` ビット OR）— 両辺 `int`、結果 `int`
+  - ビット演算（`>>` 右論理シフト、`<<` 左シフト、`&` ビット AND、`|` ビット OR、`^` ビット XOR）— 両辺 `int`、結果 `int`
   - 関数呼び出し、`*expr`（デリファレンス）、`&ident`（アドレス取得）
   - `expr as T` — 明示的型変換（int ↔ char、`*T` → int）。優先順位は算術より低いので `a + b as char` = `(a + b) as char`
 - MMIO: volatile store/load として emit される（`set_volatile true`）
@@ -31,7 +32,7 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
 
 ```bash
 make build          # コンパイラ (takibi) のビルド（= dune build）
-make test           # ユニットテスト実行（76件）
+make test           # ユニットテスト実行（89件）
 make qemutest       # QEMU 結合テスト実行（全例題をビルドして自動検証）
 make check          # make test + make qemutest を一括実行
 make qemu-echo      # QEMU virt (AArch64) で echo サーバを手動実行（Ctrl-A X で終了）
@@ -42,9 +43,9 @@ make clean          # 生成物を削除
 
 ```
 lib/
-  ast.ml          — AST 定義（TypePtr, Deref, AddrOf, AssignDeref, Cast を含む）
-  lexer.mll       — ocamllex（hex リテラル、& トークン、as キーワード含む）
-  parser.mly      — Menhir（ポインタ型、前置 * / & / 単項 -、as キャスト含む）
+  ast.ml          — AST 定義（TypePtr, TypeArray, Deref, AddrOf, AssignDeref, Cast を含む）
+  lexer.mll       — ocamllex（hex リテラル、& トークン、as キーワード、^ トークン含む）
+  parser.mly      — Menhir（ポインタ型、配列型、前置 * / & / 単項 -、as キャスト含む）
   types.ml        — 内部型 (ty) + HM 型推論の出力型 + StringMap
   type_inf.ml     — Hindley-Milner 型推論（immutable StringMap ベース）
   typechecker.ml  — 外部向けラッパー（main.ml から呼ぶ）
@@ -92,10 +93,28 @@ examples/
   ringbuf/
     ringbuf.tkb   — リングバッファ（&mut_var・buf[*ptr]=val・% 折り返しのデモ）
     ringbuf.expected
-tests/
-  qemu_test.sh    — QEMU 結合テストスクリプト（FIFO で同期、sleep 不要）
+  callstack/
+    callstack.tkb — 複数関数の呼び出し順テスト（スタック動作確認）
+    callstack.expected
+  crc8/
+    crc8.tkb      — CRC-8/SMBUS 計算（ポインタ走査・^ XOR・<< シフト）
+    crc8.expected
+  djb2/
+    djb2.tkb      — djb2 XOR ハッシュ関数（<< と ^ を使用）
+    djb2.expected
+  bump/
+    bump.tkb      — 簡易バンプアロケータ（グローバル配列 [char; 256] を使用）
+    bump.expected
+  timer/
+    timer.tkb     — PL031 RTC でポーリング 1 秒 delay のデモ
+    timer.expected
+  rtc/
+    rtc.tkb       — PL031 RTC の複数レジスタ読み出し・tick 計測
+    rtc.expected
+scripts/
+  run_qemutest.sh — QEMU 結合テストスクリプト（FIFO 同期・タイミング検証付き）
 test/
-  test_takibi.ml  — Alcotest による parser / type_inf ユニットテスト（84件）
+  test_takibi.ml  — Alcotest による parser / type_inf ユニットテスト（89件）
 ```
 
 ## 重要な設計上のポイント
@@ -113,28 +132,28 @@ val infer_stmt : tyenv -> fenv -> ty -> ty StringMap.t -> Ast.stmt
 ```
 戻り値の第2要素 `raw_locals` が codegen 用の Let バインディング型マップ（可変・不変両方を含む）。
 
-### binop を追加するときは3ファイルを更新する
-`Ast.binop` に新しいコンストラクタを追加する場合、以下の3ファイルを必ず更新する必要がある。
-OCaml の網羅性チェック（exhaustive match）がコンパイルエラーで漏れを教えてくれる。
+### binop を追加するときの更新ファイル
+`Ast.binop` に新しいコンストラクタを追加する場合の手順:
+- **既存トークンを再利用する場合（3ファイル）**: `lib/ast.ml`、`lib/type_inf.ml`、`lib/llvm_gen.ml`
+- **新しいシンボルを追加する場合（5ファイル）**: 上記3ファイルに加えて `lib/lexer.mll`（トークン定義）、`lib/parser.mly`（優先順位・文法規則）
 
-1. `lib/ast.ml` — コンストラクタ定義
-2. `lib/type_inf.ml` — `BinOp` の match に型推論ルールを追加
-3. `lib/llvm_gen.ml` — `BinOp` の match に LLVM IR 生成を追加
+OCaml の網羅性チェック（exhaustive match）がコンパイルエラーで漏れを教えてくれる。
 
 ### ビット演算の優先順位（C とは異なる点あり）
 `&`（Band）は比較演算子より**高い**優先順位を持つ（C では低い）。
 これにより `n & mask == 0` は `(n & mask) == 0` と解釈される（C の有名な落とし穴を回避）。
-`|`（Bor）は比較演算子より**低い**（C と同じ）。`a == 0 | b == 0` は `(a == 0) | (b == 0)` になる。
+`^`（Bxor）は比較演算子より**低い**（C と同じ）。`a ^ b == c` は `a ^ (b == c)` になる。
+`|`（Bor）は `^` より**低い**（C と同じ）。`a | b ^ c` は `a | (b ^ c)` になる。
 `>>`（Shr）と `<<`（Shl）は `&` より高く `+/-` より低い。`n >> 4 & 0xf` は `(n >> 4) & 0xf` になる。
 `%`（Mod）は `*` `/` と同じ優先順位（乗除算グループ）。
 
-優先順位（低→高）: `||` < `|` < 比較 < `&` < `as` < `+/-` < `>>` `<<` < `*/` `%` < 単項
+優先順位（低→高）: `||` < `|` < `^` < 比較 < `&` < `as` < `+/-` < `>>` `<<` < `*/` `%` < 単項
 
 ### 単項マイナスはパーサで脱糖
 `-expr` は `BinOp(Sub, IntLit 0, expr)` に変換される（`parser.mly` の `%prec UNARY` ルール）。
 AST・型推論・codegen を変更せずに済む。LLVM IR でも `sub i32 0, %x` が整数否定の正規形。
 
-### as キャストは4ファイルで構成
+### as キャストは5ファイルで構成
 `expr as T` を追加した際の変更ファイル:
 1. `lib/ast.ml` — `Cast of type_expr * expr` コンストラクタ
 2. `lib/lexer.mll` — `"as"` キーワード
@@ -161,6 +180,18 @@ type local_binding =
 
 **`gen_stmt` は `gen_func` の内側に定義されている**。これは不変 `let` の型を、HM 型推論結果を参照する `res` 関数で解決する必要があるため。OCaml のクロージャとして `gen_func` スコープの `res` を自然に参照できる。
 
+### グローバル配列と未初期化グローバル変数
+`let heap: [char; 256];` のような未初期化グローバル変数宣言をサポートする。
+
+- LLVM IR では `undef` として emit する（`zeroinitializer` ではない）
+- `startup.S` が BSS セクションをゼロクリアするため、実行時には必ずゼロになる
+- 配列型 `[T; N]` はグローバルスコープでのみ宣言可能。関数引数としては `*T` に decay する
+
+`gen_global` の未初期化ケース:
+```ocaml
+| None -> undef llty  (* BSS はstartup.Sがゼロクリアするので安全 *)
+```
+
 ### Integer literal → pointer coercion
 `let dr: *int = 0x09000000;` は整数リテラルをポインタ型変数に代入する。
 `llvm_gen.ml` の `coerce` 関数が `inttoptr(zext(i32, i64), ptr)` を emit する。
@@ -170,22 +201,26 @@ type local_binding =
 規約: `examples/<name>/<name>.tkb` → `examples/<name>/kernel.elf`
 
 ```makefile
-EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf  # ← ここに追加するだけ
+EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc  # ← ここに追加するだけ
 ```
 
 `qemu-echo` のようにインタラクティブな手動起動が必要なターゲットだけ個別に追加する。
 自動化できるプログラムは `qemutest` に `.expected` / `.stdin` ファイルを用意して登録する。
+タイミング検証が必要なテスト（delay が正しく動いているか確認）は `run_test_timed` を使う。
 
 ## QEMU ベアメタル（AArch64）
 
 - マシン: `virt`, CPU: `cortex-a53`
 - PL011 UART レジスタ: `0x09000000`（QEMU が事前初期化するので baud rate 設定不要）
+- PL031 RTC レジスタ: `0x09010000`（RTCDR: +0、RTCCR: +0x0C）— 1 秒粒度の時刻カウンタ
+  - RTCCR は QEMU で常に 1 を返す（RTC が常時動作中）
+  - ARM Generic Timer（`mrs` 命令）は takibi からは直接呼び出し不可（システムレジスタのため）
 - ロードアドレス: `0x40000000`（QEMU virt の RAM 開始アドレス）
 - セミホスティング exit: `SYS_EXIT` (x0=0x18) + AArch64 拡張フォーマット
   - x1 は値ではなく `[ADP_Stopped_ApplicationExit, 0]` の 2 ワードブロックへのポインタ
   - QEMU 起動オプション: `-semihosting-config enable=on,target=native`
 - アセンブラ: `llvm-mc-19`、リンカ: `ld.lld-19`
-- QEMU 結合テストは named pipe (FIFO) 経由で stdin を同期供給する（`tests/qemu_test.sh`）
+- QEMU 結合テストは named pipe (FIFO) 経由で stdin を同期供給する（`scripts/run_qemutest.sh`）
 
 ## Claude Code への指示
 
