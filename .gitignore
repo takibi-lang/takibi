@@ -30,3 +30,6 @@ takibi.opam
 
 # Local OPAM switch
 _opam/
+
+# Claude
+.claude/settings.local.json
