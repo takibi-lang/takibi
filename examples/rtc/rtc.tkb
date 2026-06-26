@@ -1,0 +1,38 @@
+fn uart_putc(c: char) {
+    let dr: *char = 0x09000000;
+    *dr = c;
+}
+
+fn uart_puts(s: *char) {
+    while (*s != '\0') {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
+fn uart_print_uint(n: int) {
+    if (n >= 10) {
+        uart_print_uint(n / 10);
+    }
+    uart_putc((n % 10 + '0') as char);
+}
+
+fn main() {
+    let base: *int = 0x09010000;
+
+    let ctrl: int = *(base + 3);
+    uart_puts("rtc: ");
+    if ((ctrl & 1) != 0) {
+        uart_puts("ok");
+    } else {
+        uart_puts("stopped");
+    }
+    uart_puts("\r\n");
+
+    let t0: int = *base;
+    while (*base == t0) {}
+    let t1: int = *base;
+    uart_puts("tick: ");
+    uart_print_uint(t1 - t0);
+    uart_puts("s\r\n");
+}
