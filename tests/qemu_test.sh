@@ -74,6 +74,7 @@ run_test "ringbuf"    examples/ringbuf/kernel.elf    examples/ringbuf/ringbuf.ex
 run_test "callstack"  examples/callstack/kernel.elf  examples/callstack/callstack.expected
 run_test "crc8"       examples/crc8/kernel.elf       examples/crc8/crc8.expected
 run_test "djb2"       examples/djb2/kernel.elf       examples/djb2/djb2.expected
+run_test "bump"       examples/bump/kernel.elf       examples/bump/bump.expected
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

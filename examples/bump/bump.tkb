@@ -1,0 +1,49 @@
+fn uart_putc(c: char) {
+    let dr: *char = 0x09000000;
+    *dr = c;
+}
+
+fn uart_puts(s: *char) {
+    while (*s != '\0') {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
+fn uart_print_uint(n: int) {
+    if (n >= 10) {
+        uart_print_uint(n / 10);
+    }
+    uart_putc((n % 10 + '0') as char);
+}
+
+let heap: [char; 256];
+let bump_offset: int = 0;
+
+fn bump_alloc(size: int) *char {
+    let result: *char = heap + bump_offset;
+    bump_offset = bump_offset + size;
+    return result;
+}
+
+fn main() {
+    let buf1: *char = bump_alloc(4);
+    buf1[0] = 'A';
+    buf1[1] = 'B';
+    buf1[2] = 'C';
+    buf1[3] = '\0';
+    uart_puts(buf1);
+    uart_puts("\r\n");
+
+    let buf2: *char = bump_alloc(4);
+    buf2[0] = 'X';
+    buf2[1] = 'Y';
+    buf2[2] = 'Z';
+    buf2[3] = '\0';
+    uart_puts(buf2);
+    uart_puts("\r\n");
+
+    uart_puts("used: ");
+    uart_print_uint(bump_offset);
+    uart_puts(" bytes\r\n");
+}

@@ -446,10 +446,7 @@ let gen_global ?prog_types name ty_opt expr_opt =
              let i64v = const_int (i64_type context) i in
              const_inttoptr i64v (pointer_type context)
          | _ -> const_int llty i)
-    | None ->
-        (match ast_ty with
-         | TypePtr _ -> const_null (pointer_type context)
-         | _         -> const_int llty 0)
+    | None -> undef llty  (* no initializer → LLVM undef; runtime value depends on startup *)
     | _ -> raise (Error "Global initializer must be a constant integer")
   in
   let gvar = define_global name init the_module in
