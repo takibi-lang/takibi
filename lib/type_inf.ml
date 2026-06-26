@@ -46,7 +46,17 @@ let rec infer_expr tyenv fenv (e : Ast.expr) : ty =
                 unify_at e1.loc t1 TInt;
                 unify_at e2.loc t2 TInt;
                 TInt)
-       | Sub | Mul | Div ->
+       | Sub ->
+           (* ポインタ算術: ptr - int → 同じポインタ型を返す *)
+           (match repr t1 with
+            | TPtr _ ->
+                unify_at e2.loc t2 TInt;
+                t1
+            | _ ->
+                unify_at e1.loc t1 TInt;
+                unify_at e2.loc t2 TInt;
+                TInt)
+       | Mul | Div ->
            unify_at e1.loc t1 TInt;
            unify_at e2.loc t2 TInt;
            TInt

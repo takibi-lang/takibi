@@ -28,7 +28,23 @@ extern fn read_cntfrq() -> int;
 extern fn set_cntp_tval(n: int);
 extern fn enable_cntp();
 extern fn disable_cntp();
-extern fn setup_task_stack(s: *char, f: fn() -> void) -> int;
+extern fn task_exit_stub();
+
+fn setup_task_stack(s: *char, f: fn() -> void) -> int {
+    let base: *char = s - 272;
+    let mut i: int = 0;
+    while (i < 272) {
+        *(base + i) = 0 as char;
+        i = i + 1;
+    }
+    let p_elr: *fn() -> void = (base + 256) as *fn() -> void;
+    *p_elr = f;
+    let p_spsr: *int = (base + 264) as *int;
+    *p_spsr = 0x05;
+    let p_x30: *fn() -> void = (base + 240) as *fn() -> void;
+    *p_x30 = task_exit_stub;
+    return base as int;
+}
 
 let task_count:   int = 3;
 let current_task: int = 0;

@@ -250,7 +250,14 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                      (ty2, build_gep (ltype_of_ast inner) v2 [|v1|] "ptradd" builder)
                  | _ ->
                      (TypeInt, build_add v1 v2 "addtmp" builder)))
-       | Sub -> (TypeInt, build_sub  v1 v2 "subtmp" builder)
+       | Sub ->
+           (* ポインタ算術: ptr - int → GEP with negated index *)
+           (match ty1 with
+            | TypePtr inner ->
+                let neg = build_neg v2 "negtmp" builder in
+                (ty1, build_gep (ltype_of_ast inner) v1 [|neg|] "ptrsub" builder)
+            | _ ->
+                (TypeInt, build_sub v1 v2 "subtmp" builder))
        | Mul -> (TypeInt, build_mul  v1 v2 "multmp" builder)
        | Div -> (TypeInt, build_sdiv v1 v2 "divtmp" builder)
        | Lt  -> (TypeInt, build_icmp Icmp.Slt v1 v2 "lttmp" builder)
