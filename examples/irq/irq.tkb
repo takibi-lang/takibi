@@ -1,0 +1,70 @@
+let gicd_ctlr:       *int = 0x08000000;
+let gicd_isenabler1: *int = 0x08000104;
+let gicc_ctlr:       *int = 0x08010000;
+let gicc_pmr:        *int = 0x08010004;
+let gicc_iar:        *int = 0x0801000C;
+let gicc_eoir:       *int = 0x08010010;
+
+let uart_imsc: *int = 0x09000038;
+
+let handlers: [fn() -> void; 64];
+
+let irq_done: int = 0;
+
+fn uart_putc(c: char) {
+    let dr: *char = 0x09000000;
+    *dr = c;
+}
+
+fn uart_puts(s: *char) {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
+fn register_irq(id: int, h: fn() -> void) {
+    handlers[id] = h;
+}
+
+fn irq_dispatch() {
+    let id: int = *gicc_iar;
+    if (id < 64) {
+        let h: fn() -> void = handlers[id];
+        h();
+        *gicc_eoir = id;
+    }
+}
+
+fn uart_rx_handler() {
+    let dr: *char = 0x09000000;
+    let c: char = *dr;
+    *dr = c;
+    if (c == '\r') {
+        let lf: char = '\n';
+        *dr = lf;
+        irq_done = 1;
+    }
+}
+
+fn gic_init() {
+    let gicd_itargetsr8: *int = 0x08000820;
+    *gicd_ctlr = 1;
+    *gicd_isenabler1 = 2;
+    *gicd_itargetsr8 = 0x01010101;
+    *gicc_pmr = 0xff;
+    *gicc_ctlr = 1;
+}
+
+fn uart_init_irq() {
+    *uart_imsc = 0x10;
+}
+
+fn main() {
+    gic_init();
+    register_irq(33, uart_rx_handler);
+    uart_puts("irq ready\r\n");
+    uart_init_irq();
+    while (irq_done == 0) {}
+    uart_puts("done\r\n");
+}

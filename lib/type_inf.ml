@@ -21,9 +21,18 @@ let rec infer_expr tyenv fenv (e : Ast.expr) : ty =
   | IntLit _    -> fresh ()  (* polymorphic: unifies with int or char via context *)
   | StringLit _ -> TPtr TChar
   | Var name ->
-      let t = lookup e.loc name tyenv in
-      (* 配列型は式中でポインタにデケイする（Cと同じ） *)
-      (match repr t with TArray (inner, _) -> TPtr inner | _ -> t)
+      (* まずローカル/グローバル変数を探す *)
+      (match StringMap.find_opt name tyenv with
+       | Some (t, _) ->
+           (* 配列型は式中でポインタにデケイする（Cと同じ） *)
+           (match repr t with TArray (inner, _) -> TPtr inner | _ -> t)
+       | None ->
+           (* 関数名を値（関数ポインタ）として使う場合 *)
+           match StringMap.find_opt name fenv with
+           | Some ft -> ft
+           | None ->
+               raise (TypeError (e.loc,
+                 Printf.sprintf "Unbound variable: %s" name)))
   | BinOp (op, e1, e2) ->
       let t1 = infer_expr tyenv fenv e1 in
       let t2 = infer_expr tyenv fenv e2 in
@@ -64,14 +73,25 @@ let rec infer_expr tyenv fenv (e : Ast.expr) : ty =
       of_ast target_ty
 
   | Call (fname, args) ->
-      (match StringMap.find_opt fname fenv with
+      (* 直接呼び出し（関数名 → fenv）を先に試みる *)
+      let ft_opt = match StringMap.find_opt fname fenv with
+        | Some ft -> Some ft
+        | None ->
+            (* 関数ポインタ変数（tyenv）を試みる *)
+            match StringMap.find_opt fname tyenv with
+            | Some (t, _) -> Some t
+            | None -> None
+      in
+      (match ft_opt with
        | None ->
            raise (TypeError (e.loc,
              Printf.sprintf "Undefined function: %s" fname))
        | Some ft ->
            let (param_tys, ret_ty) = match repr ft with
              | TFun (ps, r) -> (ps, r)
-             | _ -> assert false
+             | _ ->
+                 raise (TypeError (e.loc,
+                   Printf.sprintf "'%s' is not a function or function pointer" fname))
            in
            if List.length args <> List.length param_tys then
              raise (TypeError (e.loc,

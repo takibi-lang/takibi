@@ -17,6 +17,8 @@ let global_vars : (string, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 1
 let functions   : (string, lltype * llvalue) Hashtbl.t = Hashtbl.create 16
 (* Stores the return AST type for each function (needed when typing Call results) *)
 let func_ret_ast_types : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 16
+(* Stores the parameter AST types for each function (needed for function-as-value) *)
+let func_param_ast_types : (string, Ast.type_expr list) Hashtbl.t = Hashtbl.create 16
 
 (* Locals are either immutable SSA values or mutable alloca pointers *)
 type local_binding =
@@ -48,6 +50,7 @@ let rec ltype_of_ast = function
   | TypeVoid        -> void_type context
   | TypePtr _       -> pointer_type context   (* LLVM 19: all pointers are opaque ptr *)
   | TypeArray (t, n) -> array_type (ltype_of_ast t) n
+  | TypeFn _        -> pointer_type context   (* 関数ポインタも opaque ptr *)
 
 let ltype_of_ret_ast = function
   | TypeVoid -> void_type context
@@ -79,6 +82,7 @@ let coerce v (dst : Ast.type_expr) =
         build_zext v dst_ll "zext" builder
   | TypeVoid    -> v
   | TypeArray _ -> v
+  | TypeFn _    -> v   (* 関数ポインタは ptr のまま変換不要 *)
 
 (* Widen an integer value to i32 so arithmetic stays uniform.
    Does NOT touch pointer values. *)
@@ -157,22 +161,14 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (TypePtr TypeChar, ptr)
 
   | Var name ->
-      let binding =
-        match Hashtbl.find_opt locals name with
-        | Some b -> b
-        | None ->
-            match Hashtbl.find_opt global_vars name with
-            | Some (ast_ty, ptr) -> Mut (ast_ty, ptr)
-            | None -> raise (Error (Printf.sprintf "Undefined variable: %s" name))
-      in
-      (match binding with
-       | Imm (ast_ty, v) ->
+      (match Hashtbl.find_opt locals name with
+       | Some (Imm (ast_ty, v)) ->
            let v' = match ast_ty with
              | TypeInt | TypeChar -> to_i32 v
              | _                  -> v
            in
            (ast_ty, v')
-       | Mut (ast_ty, ptr) ->
+       | Some (Mut (ast_ty, ptr)) ->
            (match ast_ty with
             | TypeArray (elem_ty, n) ->
                 (* 配列変数は先頭要素へのポインタにデケイ（C と同じ）*)
@@ -186,7 +182,34 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                   | TypeInt | TypeChar -> to_i32 v
                   | _                  -> v
                 in
-                (ast_ty, v')))
+                (ast_ty, v'))
+       | None ->
+           (match Hashtbl.find_opt global_vars name with
+            | Some (TypeArray (elem_ty, n), ptr) ->
+                let arr_ll = array_type (ltype_of_ast elem_ty) n in
+                let zero   = const_int (i32_type context) 0 in
+                let ep = build_in_bounds_gep arr_ll ptr [|zero; zero|] (name ^ "_ptr") builder in
+                (TypePtr elem_ty, ep)
+            | Some (ast_ty, ptr) ->
+                let v  = build_load (ltype_of_ast ast_ty) ptr name builder in
+                let v' = match ast_ty with
+                  | TypeInt | TypeChar -> to_i32 v
+                  | _                  -> v
+                in
+                (ast_ty, v')
+            | None ->
+                (* 関数名を関数ポインタ値として使う *)
+                match Hashtbl.find_opt functions name with
+                | Some (_, f) ->
+                    let param_asts = match Hashtbl.find_opt func_param_ast_types name with
+                      | Some ps -> ps | None -> []
+                    in
+                    let ret_ast = match Hashtbl.find_opt func_ret_ast_types name with
+                      | Some r -> r | None -> TypeVoid
+                    in
+                    (TypeFn (param_asts, ret_ast), f)
+                | None ->
+                    raise (Error (Printf.sprintf "Undefined variable: %s" name))))
 
   | Deref e1 ->
       let (ty1, v1) = gen_expr locals e1 in
@@ -245,30 +268,61 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (target_ty, coerce v target_ty)
 
   | Call (fname, args) ->
+      let coerce_arg v lty =
+        let src = type_of v in
+        if src = lty then v
+        else if lty = i8_type  context && src = i32_type context then
+          build_trunc v lty "arg_trunc" builder
+        else if lty = i32_type context && src = i8_type  context then
+          build_zext  v lty "arg_ext"   builder
+        else v
+      in
       (match Hashtbl.find_opt functions fname with
-       | None -> raise (Error (Printf.sprintf "Undefined function: %s" fname))
        | Some (ft, callee) ->
+           (* 直接呼び出し（関数名で解決） *)
            let param_lltys = Array.to_list (param_types ft) in
            let arg_vals =
              List.map2 (fun a lty ->
-               let v   = snd (gen_expr locals a) in
-               let src = type_of v in
-               if src = lty then v
-               else if lty = i8_type  context && src = i32_type context then
-                 build_trunc v lty "arg_trunc" builder
-               else if lty = i32_type context && src = i8_type  context then
-                 build_zext  v lty "arg_ext"   builder
-               else v
+               coerce_arg (snd (gen_expr locals a)) lty
              ) args param_lltys |> Array.of_list
            in
            let ret_lty = return_type ft in
-           let name    = if ret_lty = void_type context then "" else "calltmp" in
-           let v       = build_call ft callee arg_vals name builder in
+           let call_name = if ret_lty = void_type context then "" else "calltmp" in
+           let v = build_call ft callee arg_vals call_name builder in
            let ast_ret = match Hashtbl.find_opt func_ret_ast_types fname with
-             | Some t -> t
-             | None   -> TypeInt
+             | Some t -> t | None -> TypeInt
            in
-           (ast_ret, v))
+           (ast_ret, v)
+       | None ->
+           (* 間接呼び出し: ローカル/グローバルの関数ポインタ変数 *)
+           let (fn_ast_ty, fn_ptr) =
+             match Hashtbl.find_opt locals fname with
+             | Some (Imm (ast_ty, v)) -> (ast_ty, v)
+             | Some (Mut (ast_ty, ptr)) ->
+                 (ast_ty, build_load (ltype_of_ast ast_ty) ptr fname builder)
+             | None ->
+                 match Hashtbl.find_opt global_vars fname with
+                 | Some (ast_ty, ptr) ->
+                     (ast_ty, build_load (ltype_of_ast ast_ty) ptr fname builder)
+                 | None ->
+                     raise (Error (Printf.sprintf "Undefined function: %s" fname))
+           in
+           (match fn_ast_ty with
+            | TypeFn (param_asts, ret_ast) ->
+                let param_lls = List.map ltype_of_ast param_asts |> Array.of_list in
+                let ret_ll    = ltype_of_ret_ast ret_ast in
+                let ft        = function_type ret_ll param_lls in
+                let arg_vals  =
+                  List.map2 (fun a lty ->
+                    coerce_arg (snd (gen_expr locals a)) lty
+                  ) args (Array.to_list param_lls) |> Array.of_list
+                in
+                let call_name = if ret_ll = void_type context then "" else "calltmp" in
+                let v = build_call ft fn_ptr arg_vals call_name builder in
+                (ret_ast, v)
+            | _ ->
+                raise (Error (Printf.sprintf
+                  "'%s' is not a function or function pointer" fname))))
 
 (* ── Function codegen ──────────────────────────────────────────────────── *)
 
@@ -462,7 +516,8 @@ let declare_func ?prog_types fdef =
     let ft        = function_type ret_ll param_lls in
     let f         = declare_function fdef.name ft the_module in
     Hashtbl.add functions fdef.name (ft, f);
-    Hashtbl.add func_ret_ast_types fdef.name ret_ast
+    Hashtbl.add func_ret_ast_types fdef.name ret_ast;
+    Hashtbl.add func_param_ast_types fdef.name param_ast
   end
 
 let gen_program ?prog_types prog =

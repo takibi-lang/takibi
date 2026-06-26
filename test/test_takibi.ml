@@ -17,6 +17,9 @@ let rec show_type = function
   | Ast.TypeVoid        -> "void"
   | Ast.TypePtr t       -> "*" ^ show_type t
   | Ast.TypeArray (t,n) -> Printf.sprintf "[%s; %d]" (show_type t) n
+  | Ast.TypeFn (ps, r)  ->
+      Printf.sprintf "fn(%s) -> %s"
+        (String.concat ", " (List.map show_type ps)) (show_type r)
 
 let type_t : Ast.type_expr Alcotest.testable =
   Alcotest.testable (fun fmt t -> Format.pp_print_string fmt (show_type t)) (=)

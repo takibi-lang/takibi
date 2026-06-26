@@ -14,6 +14,7 @@ rule read = parse
   | "else"    { ELSE }
   | "while"   { WHILE }
   | "as"      { AS }
+  | "void"    { VOID_TYPE }
 
   | '{' { LBRACE }
   | '}' { RBRACE }
@@ -27,6 +28,7 @@ rule read = parse
   | '&' { AMP }
 
   | '+' { PLUS }
+  | "->" { ARROW }
   | '-' { MINUS }
   | '*' { TIMES }
   | '/' { DIV }

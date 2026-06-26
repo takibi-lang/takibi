@@ -112,6 +112,8 @@ run_test "djb2"       examples/djb2/kernel.elf       examples/djb2/djb2.expected
 run_test "bump"       examples/bump/kernel.elf       examples/bump/bump.expected
 run_test_timed "timer" examples/timer/kernel.elf examples/timer/timer.expected 1
 run_test_timed "rtc"   examples/rtc/kernel.elf   examples/rtc/rtc.expected     1
+run_test       "irq"   examples/irq/kernel.elf   examples/irq/irq.expected \
+                       examples/irq/irq.stdin
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

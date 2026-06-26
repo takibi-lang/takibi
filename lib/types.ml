@@ -88,6 +88,7 @@ let rec of_ast = function
   | Ast.TypeVoid     -> TVoid
   | Ast.TypePtr t        -> TPtr (of_ast t)
   | Ast.TypeArray (t, n) -> TArray (of_ast t, n)
+  | Ast.TypeFn (ps, r)   -> TFun (List.map of_ast ps, of_ast r)
 
 (* None → fresh unification variable *)
 let of_ast_opt = function
@@ -108,7 +109,7 @@ let rec to_ast t =
   | TVoid -> Ast.TypeVoid
   | TPtr t        -> Ast.TypePtr (to_ast t)
   | TArray (t, n) -> Ast.TypeArray (to_ast t, n)
-  | TFun _                        -> Ast.TypeVoid
+  | TFun (ps, r)  -> Ast.TypeFn (List.map to_ast ps, to_ast r)
   | TVar { contents = Unbound _ } -> Ast.TypeInt
   | TVar { contents = Link _ }    -> assert false
 

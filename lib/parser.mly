@@ -29,8 +29,8 @@ open Ast
 %left TIMES DIV PERCENT  (* multiplicative *)
 %nonassoc UNARY   (* highest: unary * (deref), & (addrof), unary - *)
 
-%token INT_TYPE CHAR_TYPE
-%token COLON
+%token INT_TYPE CHAR_TYPE VOID_TYPE
+%token COLON ARROW
 
 %start <Ast.toplevel list> program
 
@@ -162,5 +162,16 @@ let_rhs:
 type_expr:
   | INT_TYPE  { TypeInt }
   | CHAR_TYPE { TypeChar }
+  | VOID_TYPE { TypeVoid }
   | TIMES type_expr { TypePtr $2 }
   | LBRACKET t = type_expr SEMI n = INT RBRACKET { TypeArray (t, n) }
+  | FN LPAREN fn_type_params RPAREN ARROW type_expr { TypeFn ($3, $6) }
+  | FN LPAREN fn_type_params RPAREN                 { TypeFn ($3, TypeVoid) }
+
+fn_type_params:
+  | /* empty */                              { [] }
+  | type_expr fn_type_params_rest            { $1 :: $2 }
+
+fn_type_params_rest:
+  | /* empty */                              { [] }
+  | COMMA type_expr fn_type_params_rest      { $2 :: $3 }

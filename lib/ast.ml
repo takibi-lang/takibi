@@ -20,8 +20,9 @@ type type_expr =
   | TypeInt
   | TypeChar
   | TypeVoid
-  | TypePtr of type_expr      (* *T *)
-  | TypeArray of type_expr * int  (* [T; N] *)
+  | TypePtr of type_expr           (* *T *)
+  | TypeArray of type_expr * int   (* [T; N] *)
+  | TypeFn of type_expr list * type_expr  (* fn(T...) -> R *)
 [@@deriving show]
 
 type expr = expr_desc located
