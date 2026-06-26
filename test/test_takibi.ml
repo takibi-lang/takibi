@@ -526,6 +526,35 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  (* ── 関数ポインタ型 ──────────────────────────────────────────── *)
+
+  Alcotest.test_case "fn pointer type with no args parses" `Quick (fun () ->
+    match parse "fn f(h: fn() -> void) {}" with
+    | [Ast.FuncDef { params = [("h", Some (Ast.TypeFn ([], Ast.TypeVoid)))]; _ }] -> ()
+    | _ -> Alcotest.fail "expected param h: fn() -> void"
+  );
+
+  Alcotest.test_case "fn pointer type with one arg parses" `Quick (fun () ->
+    match parse "fn f(h: fn(int) -> char) {}" with
+    | [Ast.FuncDef { params = [("h", Some (Ast.TypeFn ([Ast.TypeInt], Ast.TypeChar)))]; _ }] -> ()
+    | _ -> Alcotest.fail "expected param h: fn(int) -> char"
+  );
+
+  Alcotest.test_case "fn pointer type with multiple args parses" `Quick (fun () ->
+    match parse "fn f(h: fn(int, char) -> int) {}" with
+    | [Ast.FuncDef { params = [("h", Some (Ast.TypeFn ([Ast.TypeInt; Ast.TypeChar], Ast.TypeInt)))]; _ }] -> ()
+    | _ -> Alcotest.fail "expected param h: fn(int, char) -> int"
+  );
+
+  Alcotest.test_case "let variable with fn pointer type annotation parses" `Quick (fun () ->
+    match parse "fn foo() {} fn f() { let h: fn() -> void = foo; }" with
+    | [Ast.FuncDef _; Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Let (false, "h", Some (Ast.TypeFn ([], Ast.TypeVoid)), Some _) -> ()
+         | _ -> Alcotest.fail "expected Let(h, TypeFn([], void), Some(foo))")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
 ]
 
 (* ── Type inference tests ────────────────────────────────────────────────── *)
@@ -727,6 +756,25 @@ let infer_tests = [
   Alcotest.test_case "addrof mut var as function argument type-checks" `Quick
     (expect_ok "fn push(tail: *int) {}
                 fn f() { let mut t: int = 0; push(&t); }");
+
+  (* ── 関数ポインタ型 ──────────────────────────────────────────── *)
+
+  Alcotest.test_case "fn pointer param can be called indirectly" `Quick
+    (expect_ok "fn foo() {}
+                fn f(h: fn() -> void) { h(); }");
+
+  Alcotest.test_case "fn pointer let binding and indirect call type-checks" `Quick
+    (expect_ok "fn foo() {}
+                fn f() { let h: fn() -> void = foo; h(); }");
+
+  Alcotest.test_case "fn pointer stored in global array type-checks" `Quick
+    (expect_ok "let handlers: [fn() -> void; 4];
+                fn f(h: fn() -> void) { handlers[0] = h; }");
+
+  Alcotest.test_case "fn pointer argument count mismatch is a type error" `Quick
+    (expect_type_error "argument count mismatch"
+       "fn foo(x: int) {}
+        fn f(h: fn() -> void) { h = foo; }");
 
 ]
 

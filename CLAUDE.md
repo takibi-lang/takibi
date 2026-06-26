@@ -6,7 +6,7 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
 ## 言語仕様（現時点）
 
 - ファイル拡張子: `.tkb`
-- 型: `int`, `char`, `void`, `*T`（ポインタ型、ネスト可）、`[T; N]`（配列型、関数引数はポインタに decay）
+- 型: `int`, `char`, `void`, `*T`（ポインタ型、ネスト可）、`[T; N]`（配列型、関数引数はポインタに decay）、`fn(T...) -> R`（関数ポインタ型）
 - 文:
   - `let x = e` / `let x: T = e` — 不変変数宣言（初期値必須、再代入不可）
   - `let mut x = e` / `let mut x: T = e` — 可変変数宣言（再代入可）
@@ -32,7 +32,7 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
 
 ```bash
 make build          # コンパイラ (takibi) のビルド（= dune build）
-make test           # ユニットテスト実行（89件）
+make test           # ユニットテスト実行（97件）
 make qemutest       # QEMU 結合テスト実行（全例題をビルドして自動検証）
 make check          # make test + make qemutest を一括実行
 make qemu-echo      # QEMU virt (AArch64) で echo サーバを手動実行（Ctrl-A X で終了）
@@ -43,9 +43,9 @@ make clean          # 生成物を削除
 
 ```
 lib/
-  ast.ml          — AST 定義（TypePtr, TypeArray, Deref, AddrOf, AssignDeref, Cast を含む）
-  lexer.mll       — ocamllex（hex リテラル、& トークン、as キーワード、^ トークン含む）
-  parser.mly      — Menhir（ポインタ型、配列型、前置 * / & / 単項 -、as キャスト含む）
+  ast.ml          — AST 定義（TypePtr, TypeArray, TypeFn, Deref, AddrOf, AssignDeref, Cast を含む）
+  lexer.mll       — ocamllex（hex リテラル、& トークン、as キーワード、^ トークン、-> トークン、void キーワード含む）
+  parser.mly      — Menhir（ポインタ型、配列型、関数ポインタ型、前置 * / & / 単項 -、as キャスト含む）
   types.ml        — 内部型 (ty) + HM 型推論の出力型 + StringMap
   type_inf.ml     — Hindley-Milner 型推論（immutable StringMap ベース）
   typechecker.ml  — 外部向けラッパー（main.ml から呼ぶ）
@@ -111,10 +111,14 @@ examples/
   rtc/
     rtc.tkb       — PL031 RTC の複数レジスタ読み出し・tick 計測
     rtc.expected
+  irq/
+    irq.tkb       — GICv2 割り込みコントローラ経由の UART RX 割り込みハンドラ登録デモ（関数ポインタテーブル）
+    irq.expected
+    irq.stdin     — qemutest 用スクリプト入力
 scripts/
   run_qemutest.sh — QEMU 結合テストスクリプト（FIFO 同期・タイミング検証付き）
 test/
-  test_takibi.ml  — Alcotest による parser / type_inf ユニットテスト（89件）
+  test_takibi.ml  — Alcotest による parser / type_inf ユニットテスト（97件）
 ```
 
 ## 重要な設計上のポイント
@@ -192,6 +196,17 @@ type local_binding =
 | None -> undef llty  (* BSS はstartup.Sがゼロクリアするので安全 *)
 ```
 
+### 関数ポインタ型は5ファイルで構成
+`fn(T...) -> R` 型を追加した際の変更ファイル:
+1. `lib/ast.ml` — `TypeFn of type_expr list * type_expr` コンストラクタ
+2. `lib/lexer.mll` — `"->"` トークン、`"void"` キーワード
+3. `lib/parser.mly` — `fn_type` 非終端記号（`FN LPAREN type_list RPAREN ARROW type_expr`）
+4. `lib/type_inf.ml` — `Var` で関数名を `fenv` から `TFun` として取得、`Call` で直接呼び出し／間接呼び出し両対応
+5. `lib/llvm_gen.ml` — `ltype_of_ast (TypeFn _) = pointer_type context`（opaque ptr）、間接呼び出しは `function_type` を再構成して `build_call`
+
+**LLVM 19 における関数ポインタの実態**:  
+LLVM 19 はすべてのポインタが `ptr` 1 種類（opaque pointer）。`fn(int) -> char` も `fn() -> void` も LLVM IR 上は同じ `ptr`。型の区別は takibi の型チェッカーが担い、呼び出し命令（`build_call`）に `function_type` を渡すことで正しい calling convention が生成される。C の `void*` とは異なり、takibi の型チェッカーが署名の一致を強制する。
+
 ### Integer literal → pointer coercion
 `let dr: *int = 0x09000000;` は整数リテラルをポインタ型変数に代入する。
 `llvm_gen.ml` の `coerce` 関数が `inttoptr(zext(i32, i64), ptr)` を emit する。
@@ -201,7 +216,7 @@ type local_binding =
 規約: `examples/<name>/<name>.tkb` → `examples/<name>/kernel.elf`
 
 ```makefile
-EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc  # ← ここに追加するだけ
+EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq  # ← ここに追加するだけ
 ```
 
 `qemu-echo` のようにインタラクティブな手動起動が必要なターゲットだけ個別に追加する。
@@ -221,6 +236,9 @@ EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fi
   - QEMU 起動オプション: `-semihosting-config enable=on,target=native`
 - アセンブラ: `llvm-mc-19`、リンカ: `ld.lld-19`
 - QEMU 結合テストは named pipe (FIFO) 経由で stdin を同期供給する（`scripts/run_qemutest.sh`）
+- `startup.S` は全例題共通で IRQ/FIQ を有効化済み（`msr DAIFClr, #0x3`）。GIC 未初期化時は全割り込み無効なので既存例題に影響しない
+- 例外ベクタテーブル（2KB アライン）: EL1t/EL1h の IRQ・FIQ エントリがすべて `irq_entry` に接続済み。`irq_entry` はレジスタ全保存後 `irq_dispatch` を呼ぶ。takibi プログラムが `irq_dispatch` を定義しない場合は `.weak` な no-op が使われる
+- GICv2（`0x08000000`）: QEMU virt に内蔵。セキュリティ拡張なし（`secure=on` 不使用）では GICD_CTLR bit0=EnableGrp0。GICD_IGROUPR を書かなければ全 SPI は Group0 → FIQ で届く
 
 ## Claude Code への指示
 
