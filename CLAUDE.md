@@ -15,7 +15,7 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
   - `if (cond) { ... }` — `else` は省略可
   - `if (cond) { ... } else { ... }` — 通常の if/else
   - `if (cond) { ... } else if (cond) { ... } else { ... }` — else if チェーン
-  - 不変変数へのアドレス取得 (`&x`) はコンパイルエラー（今後必要になったとき再検討）
+  - 不変変数へのアドレス取得 (`&x`) はコンパイルエラー（グローバル変数は常に mutable 扱いなので `&global_var` は可）
 - 式:
   - 整数リテラル（10進・16進 `0x...`）
   - 文字リテラル（`'a'`、`'\n'`、`'\r'`、`'\t'`、`'\0'`、`'\\'`）— `IntLit (Char.code c)` に脱糖
@@ -26,7 +26,10 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
   - ビット演算（`>>` 右論理シフト、`<<` 左シフト、`&` ビット AND、`|` ビット OR、`^` ビット XOR）— 両辺 `int`、結果 `int`
   - 関数呼び出し、`*expr`（デリファレンス）、`&ident`（アドレス取得）
   - `expr as T` — 明示的型変換（int ↔ char、`*T` → int）。優先順位は算術より低いので `a + b as char` = `(a + b) as char`
+- `extern fn name(params) -> ret;` — 外部アセンブリ関数宣言（LLVM `declare` を emit する）
 - MMIO: volatile store/load として emit される（`set_volatile true`）
+  - `*p` デリファレンスはすべて volatile load。グローバル変数の直接読み出しは非 volatile なので、
+    割り込みハンドラと共有するフラグは `let p: *int = &global_flag; while (*p == 0) {}` の形で読む
 
 ## ビルドコマンド
 
@@ -115,6 +118,13 @@ examples/
     irq.tkb       — GICv2 割り込みコントローラ経由の UART RX 割り込みハンドラ登録デモ（関数ポインタテーブル）
     irq.expected
     irq.stdin     — qemutest 用スクリプト入力
+  scheduler/
+    scheduler.tkb — ラウンドロビン協調スケジューラ（関数ポインタ配列、task_finish による終了通知）
+    scheduler.expected
+  preempt/
+    preempt.tkb   — プリエンプティブスケジューラ（ARM Generic Timer + GICv2 + コンテキストスイッチ）
+    preempt_asm.S — timer_init / setup_task_stack / irq_dispatch（アセンブリ実装）
+    preempt.expected
 scripts/
   run_qemutest.sh — QEMU 結合テストスクリプト（FIFO 同期・タイミング検証付き）
 test/
@@ -207,6 +217,24 @@ type local_binding =
 **LLVM 19 における関数ポインタの実態**:  
 LLVM 19 はすべてのポインタが `ptr` 1 種類（opaque pointer）。`fn(int) -> char` も `fn() -> void` も LLVM IR 上は同じ `ptr`。型の区別は takibi の型チェッカーが担い、呼び出し命令（`build_call`）に `function_type` を渡すことで正しい calling convention が生成される。C の `void*` とは異なり、takibi の型チェッカーが署名の一致を強制する。
 
+### extern fn は5ファイルで構成
+`extern fn timer_init();` のような外部アセンブリ関数宣言を追加した際の変更ファイル:
+1. `lib/ast.ml` — `ExternFuncDef of ident * (ident * type_expr option) list * type_expr option`
+2. `lib/lexer.mll` — `"extern"` キーワード
+3. `lib/parser.mly` — `EXTERN FN IDENT LPAREN params RPAREN (ARROW type_expr)? SEMI` 規則
+4. `lib/type_inf.ml` — `fenv` の Pass 1 で `TFun` を追加、`genv` の fold で `ExternFuncDef _ -> m`
+5. `lib/llvm_gen.ml` — Pass 1 で `declare_function` を emit（Pass 2 は `ExternFuncDef _ -> ()`）
+
+### グローバル変数 volatile 読み出し（割り込み共有フラグ）
+LLVM は `while (flag == 0) {}` のようなタイトループで、グローバル変数の load をループ外に
+ホイストすることがある（結果: `cbz reg, self` の無限ループ）。
+割り込みハンドラと共有するフラグは必ずポインタ経由で読む:
+```takibi
+let p: *int = &sched_done;   // &global は llvm_gen.ml の AddrOf が global_vars を返す
+while (*p == 0) {}           // *p は volatile load（set_volatile true）
+```
+`AddrOf` は `locals` になければ `global_vars` テーブルを検索して LLVM global value を返す。
+
 ### Integer literal → pointer coercion
 `let dr: *int = 0x09000000;` は整数リテラルをポインタ型変数に代入する。
 `llvm_gen.ml` の `coerce` 関数が `inttoptr(zext(i32, i64), ptr)` を emit する。
@@ -216,7 +244,7 @@ LLVM 19 はすべてのポインタが `ptr` 1 種類（opaque pointer）。`fn(
 規約: `examples/<name>/<name>.tkb` → `examples/<name>/kernel.elf`
 
 ```makefile
-EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq  # ← ここに追加するだけ
+EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt  # ← ここに追加するだけ
 ```
 
 `qemu-echo` のようにインタラクティブな手動起動が必要なターゲットだけ個別に追加する。
@@ -239,6 +267,14 @@ EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fi
 - `startup.S` は全例題共通で IRQ/FIQ を有効化済み（`msr DAIFClr, #0x3`）。GIC 未初期化時は全割り込み無効なので既存例題に影響しない
 - 例外ベクタテーブル（2KB アライン）: EL1t/EL1h の IRQ・FIQ エントリがすべて `irq_entry` に接続済み。`irq_entry` はレジスタ全保存後 `irq_dispatch` を呼ぶ。takibi プログラムが `irq_dispatch` を定義しない場合は `.weak` な no-op が使われる
 - GICv2（`0x08000000`）: QEMU virt に内蔵。セキュリティ拡張なし（`secure=on` 不使用）では GICD_CTLR bit0=EnableGrp0。GICD_IGROUPR を書かなければ全 SPI は Group0 のまま。GICC_CTLR.FIQEn=0（デフォルト）では Group0 割り込みは IRQ として届く（0x280: EL1h IRQ ベクタ）。FIQEn=1 にして初めて FIQ（0x300）に届く
+- ARM Generic Timer（EL1 物理タイマ）:
+  - `cntp_tval_el0`: countdown timer value レジスタ（発火までのカウント）
+  - `cntp_ctl_el0`: bit0=ENABLE（1 で有効）
+  - `cntfrq_el0`: タイマクロック周波数（QEMU virt では 62500000 = 62.5 MHz）
+  - PPI #30 (GICD_ISENABLER0 bit30) で GIC に接続
+  - `cntfrq_el0 / 64 ≈ 15 ms` 間隔で発火させる場合は `lsr x0, cntfrq, #6` → `msr cntp_tval_el0, x0`
+  - 仮想タイマ（CNTV、PPI #27）は QEMU virt では EL2 ハイパーバイザ設定が必要なため、
+    ベアメタル EL1 では物理タイマ（CNTP、PPI #30）を使う
 
 ## Claude Code への指示
 

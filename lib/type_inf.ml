@@ -204,12 +204,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let pts = List.map (fun (_, t) -> of_ast_opt t) fdef.params in
         let rt  = ret_of_ast_opt fdef.ret_type in
         StringMap.add fdef.name (TFun (pts, rt)) m
+    | Ast.ExternFuncDef (name, params, ret_ty) ->
+        let pts = List.map (fun (_, t) -> of_ast_opt t) params in
+        let rt  = ret_of_ast_opt ret_ty in
+        StringMap.add name (TFun (pts, rt)) m
     | Ast.LetDef _ -> m
   ) StringMap.empty prog in
   (* Global variables are always mutable (true) *)
   let genv = List.fold_left (fun m -> function
     | Ast.LetDef (name, ty_opt, _) -> StringMap.add name (of_ast_opt ty_opt, true) m
     | Ast.FuncDef _                -> m
+    | Ast.ExternFuncDef _          -> m
   ) StringMap.empty prog in
   (* Pass 2: check global initializers *)
   List.iter (function

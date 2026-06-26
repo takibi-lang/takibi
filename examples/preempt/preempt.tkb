@@ -1,0 +1,60 @@
+fn uart_putc(c: char) {
+    let dr: *char = 0x09000000;
+    *dr = c;
+}
+
+fn uart_puts(s: *char) {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
+fn print_uint(n: int) {
+    if (n >= 10) {
+        print_uint(n / 10);
+    }
+    uart_putc((n - (n / 10) * 10 + '0') as char);
+}
+
+extern fn timer_init();
+extern fn setup_task_stack(s: *char, f: fn() -> void) -> int;
+
+let task_count: int = 3;
+let current_task: int = 0;
+let max_ticks: int = 6;
+let total_ticks: int = 0;
+let sched_done: int = 0;
+let tick_counts: [int; 3];
+let tcb_sp: [int; 3];
+
+let stack_a: [char; 4096];
+let stack_b: [char; 4096];
+
+fn task_a() {
+    let p: *int = &sched_done;
+    while (*p == 0) {}
+}
+
+fn task_b() {
+    let p: *int = &sched_done;
+    while (*p == 0) {}
+}
+
+fn main() {
+    tcb_sp[1] = setup_task_stack(stack_a + 4096, task_a);
+    tcb_sp[2] = setup_task_stack(stack_b + 4096, task_b);
+    timer_init();
+    let p: *int = &sched_done;
+    while (*p == 0) {}
+    uart_puts("main: ");
+    print_uint(tick_counts[0]);
+    uart_puts(" ticks\r\n");
+    uart_puts("task_a: ");
+    print_uint(tick_counts[1]);
+    uart_puts(" ticks\r\n");
+    uart_puts("task_b: ");
+    print_uint(tick_counts[2]);
+    uart_puts(" ticks\r\n");
+    uart_puts("done\r\n");
+}

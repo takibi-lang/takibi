@@ -15,7 +15,7 @@ COMMON_LINK_LD   := $(COMMON_DIR)/link.ld
 # ── Examples ──────────────────────────────────────────────────────────────────
 # 新しい例題を追加するときはここに名前を足すだけ。
 # 規約: examples/<name>/<name>.tkb → examples/<name>/kernel.elf
-EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler
+EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
@@ -56,9 +56,24 @@ $(EXAMPLE_OBJS): examples/%.o: examples/%.tkb build
 # $$*.o は2段展開で examples/<name>/<name>.o になる:
 #   1段目: $$* → $*  ($$が$に縮退)
 #   2段目: $*  → name (ステム展開)
-$(ALL_KERNELS): examples/%/kernel.elf: \
+# 追加アセンブリが必要な例題（preempt など）は個別ルールで定義するためここから除外する。
+GENERIC_KERNELS := $(filter-out examples/preempt/kernel.elf, $(ALL_KERNELS))
+
+$(GENERIC_KERNELS): examples/%/kernel.elf: \
     $(COMMON_STARTUP_O) examples/%/$$*.o $(COMMON_LINK_LD)
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/$*/$*.o -o $@
+
+# ── preempt: 追加アセンブリオブジェクトが必要なので個別ルールで上書き ─────────
+PREEMPT_ASM_S := examples/preempt/preempt_asm.S
+PREEMPT_ASM_O := examples/preempt/preempt_asm.o
+
+$(PREEMPT_ASM_O): $(PREEMPT_ASM_S)
+	$(LLVM_MC) --triple=aarch64-none-elf --filetype=obj $< -o $@
+
+examples/preempt/kernel.elf: \
+    $(COMMON_STARTUP_O) examples/preempt/preempt.o $(PREEMPT_ASM_O) $(COMMON_LINK_LD)
+	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) \
+	       examples/preempt/preempt.o $(PREEMPT_ASM_O) -o $@
 
 # ── QEMU run targets ──────────────────────────────────────────────────────────
 QEMU_FLAGS := -machine virt -cpu cortex-a53 -nographic \
@@ -73,4 +88,5 @@ qemu-echo: examples/echo/kernel.elf
 clean:
 	dune clean
 	rm -f $(COMMON_STARTUP_O) \
-	      $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o examples/$(e)/kernel.elf)
+	      $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o examples/$(e)/kernel.elf) \
+	      $(PREEMPT_ASM_O)

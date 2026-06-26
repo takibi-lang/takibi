@@ -15,6 +15,7 @@ rule read = parse
   | "while"   { WHILE }
   | "as"      { AS }
   | "void"    { VOID_TYPE }
+  | "extern"  { EXTERN }
 
   | '{' { LBRACE }
   | '}' { RBRACE }

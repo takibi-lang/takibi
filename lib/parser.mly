@@ -5,7 +5,7 @@ open Ast
 %token <int> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN RETURN LET MUT
+%token FN RETURN LET MUT EXTERN
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI
 %token ASSIGN
 %token IF ELSE WHILE
@@ -46,6 +46,10 @@ items:
 item:
   | func_def { FuncDef $1 }
   | LET IDENT let_rhs SEMI { LetDef ($2, fst $3, snd $3) }
+  | EXTERN FN IDENT LPAREN params RPAREN SEMI
+    { ExternFuncDef ($3, $5, None) }
+  | EXTERN FN IDENT LPAREN params RPAREN ARROW type_expr SEMI
+    { ExternFuncDef ($3, $5, Some $8) }
 
 func_def:
   | FN IDENT LPAREN params RPAREN ret_type_opt LBRACE stmts RBRACE

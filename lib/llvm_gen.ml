@@ -229,7 +229,11 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | Some (Mut (ast_ty, alloca)) -> (TypePtr ast_ty, alloca)
        | Some (Imm _) ->
            raise (Error (Printf.sprintf "BUG: addrof immutable '%s' (should be caught by type_inf)" name))
-       | None -> raise (Error (Printf.sprintf "cannot take address of '%s'" name)))
+       | None ->
+           (* グローバル変数のアドレス取得: LLVM global value はすでにポインタ *)
+           match Hashtbl.find_opt global_vars name with
+           | Some (ast_ty, ptr) -> (TypePtr ast_ty, ptr)
+           | None -> raise (Error (Printf.sprintf "cannot take address of '%s'" name)))
 
   | BinOp (op, e1, e2) ->
       let (ty1, v1) = gen_expr locals e1 in
@@ -525,9 +529,22 @@ let gen_program ?prog_types prog =
   List.iter (function
     | FuncDef fdef                    -> declare_func ?prog_types fdef
     | LetDef (name, ty_opt, expr_opt) -> gen_global ?prog_types name ty_opt expr_opt
+    | ExternFuncDef (name, params, ret_ty) ->
+        if not (Hashtbl.mem functions name) then begin
+          let param_ast = List.map (fun (_, t) -> match t with Some t -> t | None -> TypeInt) params in
+          let param_lls = List.map ltype_of_ast param_ast |> Array.of_list in
+          let ret_ast   = match ret_ty with Some t -> t | None -> TypeVoid in
+          let ret_ll    = ltype_of_ret_ast ret_ast in
+          let ft        = function_type ret_ll param_lls in
+          let f         = declare_function name ft the_module in
+          Hashtbl.add functions name (ft, f);
+          Hashtbl.add func_ret_ast_types name ret_ast;
+          Hashtbl.add func_param_ast_types name param_ast
+        end
   ) prog;
   (* Pass 2: generate function bodies *)
   List.iter (function
-    | FuncDef fdef -> ignore (gen_func ?prog_types fdef)
-    | LetDef _     -> ()
+    | FuncDef fdef    -> ignore (gen_func ?prog_types fdef)
+    | LetDef _        -> ()
+    | ExternFuncDef _ -> ()
   ) prog

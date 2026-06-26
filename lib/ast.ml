@@ -60,6 +60,8 @@ type func = {
 type toplevel =
   | FuncDef of func
   | LetDef of ident * type_expr option * expr option
+  | ExternFuncDef of ident * (ident * type_expr option) list * type_expr option
+  (* extern fn name(params) -> ret; — body は外部アセンブリが提供する *)
 [@@deriving show]
 
 let show_toplevel_list lst =
