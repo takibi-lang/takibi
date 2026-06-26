@@ -70,8 +70,9 @@ rest_params:
   | COMMA param rest_params { $2 :: $3 }
 
 ret_type_opt:
-  | /* empty */ { None }
-  | type_expr { Some $1 }
+  | /* empty */       { None }
+  | ARROW type_expr   { Some $2 }   (* fn foo() -> int  推奨: extern fn / fn ptr と統一 *)
+  | type_expr         { Some $1 }   (* fn foo() int     後方互換のため残す *)
 
 stmts:
   | /* empty */ { [] }

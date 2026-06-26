@@ -17,19 +17,61 @@ fn print_uint(n: int) {
     uart_putc((n - (n / 10) * 10 + '0') as char);
 }
 
-extern fn timer_init();
+let gicd_ctlr:  *int = 0x08000000;
+let gicd_isen0: *int = 0x08000100;
+let gicc_ctlr:  *int = 0x08010000;
+let gicc_pmr:   *int = 0x08010004;
+let gicc_iar:   *int = 0x0801000C;
+let gicc_eoir:  *int = 0x08010010;
+
+extern fn read_cntfrq() -> int;
+extern fn set_cntp_tval(n: int);
+extern fn enable_cntp();
+extern fn disable_cntp();
 extern fn setup_task_stack(s: *char, f: fn() -> void) -> int;
 
-let task_count: int = 3;
+let task_count:   int = 3;
 let current_task: int = 0;
-let max_ticks: int = 6;
-let total_ticks: int = 0;
-let sched_done: int = 0;
+let max_ticks:    int = 6;
+let total_ticks:  int = 0;
+let sched_done:   int = 0;
 let tick_counts: [int; 3];
-let tcb_sp: [int; 3];
+let tcb_sp:      [int; 3];
 
 let stack_a: [char; 4096];
 let stack_b: [char; 4096];
+
+fn gic_init() {
+    *gicd_ctlr  = 1;
+    *gicd_isen0 = 1 << 30;
+    *gicc_pmr   = 0xff;
+    *gicc_ctlr  = 1;
+}
+
+fn timer_init() {
+    gic_init();
+    set_cntp_tval(read_cntfrq() >> 6);
+    enable_cntp();
+}
+
+fn irq_dispatch(frame_sp: int) -> int {
+    let id: int = *gicc_iar;
+    if (id == 30) {
+        set_cntp_tval(read_cntfrq() >> 6);
+        total_ticks = total_ticks + 1;
+        tick_counts[current_task] = tick_counts[current_task] + 1;
+        tcb_sp[current_task] = frame_sp;
+        if (total_ticks >= max_ticks) {
+            disable_cntp();
+            sched_done = 1;
+        }
+        current_task = (current_task + 1) % task_count;
+        *gicc_eoir = id;
+        return tcb_sp[current_task];
+    }
+    *gicc_eoir = id;
+    return frame_sp;
+}
 
 fn task_a() {
     let p: *int = &sched_done;

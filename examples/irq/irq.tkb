@@ -27,13 +27,14 @@ fn register_irq(id: int, h: fn() -> void) {
     handlers[id] = h;
 }
 
-fn irq_dispatch() {
+fn irq_dispatch(frame_sp: int) -> int {
     let id: int = *gicc_iar;
     if (id < 64) {
         let h: fn() -> void = handlers[id];
         h();
         *gicc_eoir = id;
     }
+    return frame_sp;
 }
 
 fn uart_rx_handler() {

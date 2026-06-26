@@ -66,10 +66,13 @@ disable_irq:
     ret
 
 /* ── Default (no-op) irq_dispatch ──────────────────────────────────────────── */
-/* takibi プログラムが irq_dispatch を定義した場合、そちらが優先される（強いシンボル）*/
+/* 呼び出し規約: fn irq_dispatch(frame_sp: int) -> int
+   x0 = 現タスクのフレーム SP（irq_entry が確保した 272 バイトフレームの先頭）
+   戻り値 x0 = 次タスクのフレーム SP（コンテキストスイッチなし時は同じ値を返す）
+   takibi プログラムが irq_dispatch を定義した場合、そちらが優先される（強いシンボル）*/
     .weak   irq_dispatch
 irq_dispatch:
-    ret
+    ret     /* x0 unchanged = 同じフレームに戻る */
 
     .section .rodata
     .align  3
@@ -141,7 +144,9 @@ irq_entry:
     mrs     x1,  spsr_el1
     stp     x0,  x1,  [sp, #256]
 
-    bl      irq_dispatch
+    mov     x0, sp          /* 引数: 現フレームの SP */
+    bl      irq_dispatch    /* 戻り値: 次フレームの SP（変わらなければ同値） */
+    mov     sp, x0          /* SP を次タスクのフレームに切り替え */
 
     ldp     x0,  x1,  [sp, #256]
     msr     elr_el1,  x0
