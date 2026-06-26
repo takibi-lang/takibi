@@ -13,8 +13,9 @@ _start:
     isb
 
     /* Enable IRQ and FIQ (clear DAIF.I and DAIF.F).
-       GICv2 Group0 → FIQ, Group1 → IRQ。GIC 初期状態では全割り込み無効なので
-       既存例題への影響はない。割り込みを使うプログラムが GIC を初期化してから使う。 */
+       GICv2 デフォルト（GICC_CTLR.FIQEn=0）では Group0 SPI は IRQ として届く（0x280）。
+       FIQEn=1 にした場合に備えて FIQ も有効化しておく。GIC 未初期化時は全割り込み
+       無効なので既存例題への影響はない。割り込みを使うプログラムが GIC を初期化する。 */
     msr     DAIFClr, #0x3
     isb
 
@@ -86,7 +87,7 @@ exception_vectors:
     .align  7
     b       irq_entry           /* 0x080: IRQ         */
     .align  7
-    b       irq_entry           /* 0x100: FIQ (Group0 → FIQ in NS mode) */
+    b       irq_entry           /* 0x100: FIQ (Group0 with FIQEn=1) */
     .align  7
     b       .                   /* 0x180: SError      */
     /* EL1h (SP_EL1 使用時: reset 後のデフォルト) */

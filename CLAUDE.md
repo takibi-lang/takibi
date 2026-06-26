@@ -238,7 +238,7 @@ EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fi
 - QEMU 結合テストは named pipe (FIFO) 経由で stdin を同期供給する（`scripts/run_qemutest.sh`）
 - `startup.S` は全例題共通で IRQ/FIQ を有効化済み（`msr DAIFClr, #0x3`）。GIC 未初期化時は全割り込み無効なので既存例題に影響しない
 - 例外ベクタテーブル（2KB アライン）: EL1t/EL1h の IRQ・FIQ エントリがすべて `irq_entry` に接続済み。`irq_entry` はレジスタ全保存後 `irq_dispatch` を呼ぶ。takibi プログラムが `irq_dispatch` を定義しない場合は `.weak` な no-op が使われる
-- GICv2（`0x08000000`）: QEMU virt に内蔵。セキュリティ拡張なし（`secure=on` 不使用）では GICD_CTLR bit0=EnableGrp0。GICD_IGROUPR を書かなければ全 SPI は Group0 → FIQ で届く
+- GICv2（`0x08000000`）: QEMU virt に内蔵。セキュリティ拡張なし（`secure=on` 不使用）では GICD_CTLR bit0=EnableGrp0。GICD_IGROUPR を書かなければ全 SPI は Group0 のまま。GICC_CTLR.FIQEn=0（デフォルト）では Group0 割り込みは IRQ として届く（0x280: EL1h IRQ ベクタ）。FIQEn=1 にして初めて FIQ（0x300）に届く
 
 ## Claude Code への指示
 
