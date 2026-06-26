@@ -34,7 +34,7 @@ test:
 
 ## qemutest: QEMU 結合テストを実行（全例題をビルドして自動検証）
 qemutest: $(ALL_KERNELS)
-	@bash tests/qemu_test.sh
+	@bash scripts/run_qemutest.sh
 
 ## check: ユニットテスト + QEMU 結合テストを実行
 check: test qemutest
