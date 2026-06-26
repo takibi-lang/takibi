@@ -709,6 +709,9 @@ let infer_tests = [
   Alcotest.test_case "as cast pointer to int passes" `Quick
     (expect_ok "fn f(p: *int) int { return p as int; }");
 
+  Alcotest.test_case "as cast pointer to pointer passes" `Quick
+    (expect_ok "fn f(p: *char) int { let q: *int = p as *int; return 0; }");
+
   (* ── ビット演算 ──────────────────────────────────────────────── *)
 
   Alcotest.test_case "bitwise AND type-checks" `Quick
@@ -735,6 +738,9 @@ let infer_tests = [
 
   Alcotest.test_case "array write via pointer arith type-checks" `Quick
     (expect_ok "fn f() { let mut buf: [char; 8]; *(buf + 0) = 'A'; }");
+
+  Alcotest.test_case "pointer subtraction ptr - int type-checks" `Quick
+    (expect_ok "fn f(p: *char) *char { return p - 8; }");
 
   Alcotest.test_case "array read via indexing type-checks" `Quick
     (expect_ok "fn putc(c: char) {} fn f() { let mut buf: [char; 4]; putc(buf[0]); }");

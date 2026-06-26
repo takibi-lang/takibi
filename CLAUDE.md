@@ -21,11 +21,12 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
   - 文字リテラル（`'a'`、`'\n'`、`'\r'`、`'\t'`、`'\0'`、`'\\'`）— `IntLit (Char.code c)` に脱糖
   - 文字列リテラル（`"..."` — `\n` `\r` `\t` `\\` `\"` エスケープ対応）
   - 算術演算（`+` `-` `*` `/` `%`）、比較演算（`<` `>` `<=` `>=` `==` `!=`）
+  - ポインタ算術: `ptr + int` / `ptr - int` → 同じポインタ型（GEP として emit）。`int + ptr` も可。codegen は `build_neg + GEP` で実装
   - 単項マイナス（`-expr`）— パーサで `BinOp(Sub, IntLit 0, expr)` に脱糖
   - 論理 OR（`||`）
   - ビット演算（`>>` 右論理シフト、`<<` 左シフト、`&` ビット AND、`|` ビット OR、`^` ビット XOR）— 両辺 `int`、結果 `int`
   - 関数呼び出し、`*expr`（デリファレンス）、`&ident`（アドレス取得）
-  - `expr as T` — 明示的型変換（int ↔ char、`*T` → int）。優先順位は算術より低いので `a + b as char` = `(a + b) as char`
+  - `expr as T` — 明示的型変換（int ↔ char、`*T` → int、`*T` → `*U`）。優先順位は算術より低いので `a + b as char` = `(a + b) as char`
 - `extern fn name(params) -> ret;` — 外部アセンブリ関数宣言（LLVM `declare` を emit する）
 - MMIO: volatile store/load として emit される（`set_volatile true`）
   - `*p` デリファレンスはすべて volatile load。グローバル変数の直接読み出しは非 volatile なので、
@@ -35,7 +36,7 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
 
 ```bash
 make build          # コンパイラ (takibi) のビルド（= dune build）
-make test           # ユニットテスト実行（97件）
+make test           # ユニットテスト実行（99件）
 make qemutest       # QEMU 結合テスト実行（全例題をビルドして自動検証）
 make check          # make test + make qemutest を一括実行
 make qemu-echo      # QEMU virt (AArch64) で echo サーバを手動実行（Ctrl-A X で終了）
@@ -123,7 +124,7 @@ examples/
     scheduler.expected
   preempt/
     preempt.tkb   — プリエンプティブスケジューラ（ARM Generic Timer + GICv2 + コンテキストスイッチ）
-    preempt_asm.S — timer_init / setup_task_stack / irq_dispatch（アセンブリ実装）
+    preempt_asm.S — ARM Generic Timer システムレジスタスタブ4本 + task_exit_stub のみ（35行）
     preempt.expected
 scripts/
   run_qemutest.sh — QEMU 結合テストスクリプト（FIFO 同期・タイミング検証付き）
@@ -178,6 +179,7 @@ AST・型推論・codegen を変更せずに済む。LLVM IR でも `sub i32 0, 
    - `char/i1 → int`: `zext`
    - `int → *T`: `zext i32, i64` → `inttoptr`（MMIO アドレス代入）
    - `*T → int`: `ptrtoint ptr, i64` → `trunc i64, i32`（ポインタ値の表示）
+   - `*T → *U`: **no-op**（LLVM 19 では全ポインタが同じ `ptr` 型なので `coerce` の先頭の `if vty = dst_ll then v` が適用される。コンパイラ変更不要）
 
 ### 不変変数と可変変数の codegen
 `llvm_gen.ml` の locals テーブルは `(string, local_binding) Hashtbl.t` で管理する。
