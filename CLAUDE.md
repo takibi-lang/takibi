@@ -126,10 +126,18 @@ examples/
     preempt.tkb   — プリエンプティブスケジューラ（ARM Generic Timer + GICv2 + コンテキストスイッチ）
     preempt_asm.S — ARM Generic Timer システムレジスタスタブ4本 + task_exit_stub のみ（35行）
     preempt.expected
+  semaphore/
+    semaphore.tkb   — セマフォ（ldaxr/stlxr によるアトミック実装）のデモ。2タスクが各3回 sem_wait/sem_post → shared_count == 6 を確認
+    semaphore_asm.S — ARM Generic Timer スタブ + sem_wait（ldaxr+stxr）・sem_post（ldxr+stlxr）
+    semaphore.expected
+  condvar/
+    condvar.tkb   — mutex（sem_wait/sem_post の名前付きラッパー）+ 条件変数（シーケンスカウンタ方式）プロデューサー・コンシューマ デモ（5アイテム）
+    condvar_asm.S — semaphore_asm.S と同内容
+    condvar.expected
 scripts/
   run_qemutest.sh — QEMU 結合テストスクリプト（FIFO 同期・タイミング検証付き）
 test/
-  test_takibi.ml  — Alcotest による parser / type_inf ユニットテスト（97件）
+  test_takibi.ml  — Alcotest による parser / type_inf ユニットテスト（99件）
 ```
 
 ## 重要な設計上のポイント
@@ -227,6 +235,56 @@ LLVM 19 はすべてのポインタが `ptr` 1 種類（opaque pointer）。`fn(
 4. `lib/type_inf.ml` — `fenv` の Pass 1 で `TFun` を追加、`genv` の fold で `ExternFuncDef _ -> m`
 5. `lib/llvm_gen.ml` — Pass 1 で `declare_function` を emit（Pass 2 は `ExternFuncDef _ -> ()`）
 
+### 同期プリミティブの実装パターンと現状の制限
+
+`examples/semaphore/` と `examples/condvar/` で実装した同期プリミティブの構造:
+
+```
+assembly (ldaxr / stlxr)
+  └── sem_wait / sem_post          ← アトミック保証はここだけ（extern fn）
+
+takibi
+  └── mutex_lock / mutex_unlock    ← sem_wait/sem_post の名前付きラッパー
+  └── cond_wait / cond_signal      ← シーケンスカウンタ方式（takibi で記述）
+```
+
+**`sem_wait` の ldaxr/stxr パターン（semaphore_asm.S）**:
+```asm
+sem_wait:
+.Lw_retry:
+    ldaxr   w1, [x0]     // load-exclusive + acquire barrier
+    cbz     w1, .Lw_zero // counter == 0 → 待機
+    sub     w2, w1, #1
+    stxr    w3, w2, [x0] // store-exclusive
+    cbnz    w3, .Lw_retry
+    ret
+.Lw_zero:
+    clrex                // exclusive monitor をクリア（必須）
+    b       .Lw_retry
+```
+`sem_post` は `ldxr` + `stlxr`（release）。
+
+**`cond_wait` の取りこぼし防止（condvar.tkb）**:
+```takibi
+fn cond_wait(seq: *int, m: *int) {
+    let s: int = *seq;    // ① mutex を持ったままシーケンスを読む
+    mutex_unlock(m);       // ② アンロック
+    while (*seq == s) {}  // ③ *seq は volatile load — スピン
+    mutex_lock(m);         // ④ 再取得
+}
+```
+① でシーケンスを保存してから ② でアンロックするため、アンロックとスピン開始の間に
+`cond_signal` が来ても取りこぼさない。
+
+**現状の制限: シングルコアのみ保証**
+- `sem_wait` / `sem_post` は `ldaxr`/`stlxr` を使うためアトミックだが、
+  `cond_signal` の `*seq = *seq + 1` はアトミックではない。
+  常に mutex を持った状態で呼ぶ規約により、シングルコアでは正しく動作する。
+- `cond_wait` のスピン `while (*seq == s) {}` はハードウェアメモリバリアを持たない
+  通常の volatile load。シングルコア(QEMU)では問題ないが、マルチコアでは
+  `ldar`（load-acquire）を使ったスピンに置き換える必要がある。
+- マルチコア対応には `cond_signal` のアトミック化と `cond_wait` のスピンのバリア追加が必要。
+
 ### グローバル変数 volatile 読み出し（割り込み共有フラグ）
 LLVM は `while (flag == 0) {}` のようなタイトループで、グローバル変数の load をループ外に
 ホイストすることがある（結果: `cbz reg, self` の無限ループ）。
@@ -246,12 +304,18 @@ while (*p == 0) {}           // *p は volatile load（set_volatile true）
 規約: `examples/<name>/<name>.tkb` → `examples/<name>/kernel.elf`
 
 ```makefile
-EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt  # ← ここに追加するだけ
+EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar  # ← ここに追加するだけ
 ```
 
 `qemu-echo` のようにインタラクティブな手動起動が必要なターゲットだけ個別に追加する。
 自動化できるプログラムは `qemutest` に `.expected` / `.stdin` ファイルを用意して登録する。
 タイミング検証が必要なテスト（delay が正しく動いているか確認）は `run_test_timed` を使う。
+
+**追加アセンブリが必要な例題**（`*_asm.S` を持つもの）は `GENERIC_KERNELS` フィルタから除外して個別リンクルールを書く:
+```makefile
+GENERIC_KERNELS := $(filter-out examples/preempt/kernel.elf examples/semaphore/kernel.elf examples/condvar/kernel.elf, $(ALL_KERNELS))
+```
+新たに `*_asm.S` を追加する場合は、このフィルタへの追加・専用リンクルール・`clean` の `rm -f` への追記の3点が必要。
 
 ## QEMU ベアメタル（AArch64）
 
