@@ -117,6 +117,7 @@ run_test       "irq"   examples/irq/kernel.elf   examples/irq/irq.expected \
 run_test "scheduler" examples/scheduler/kernel.elf examples/scheduler/scheduler.expected
 run_test "preempt"   examples/preempt/kernel.elf   examples/preempt/preempt.expected
 run_test "semaphore" examples/semaphore/kernel.elf examples/semaphore/semaphore.expected
+run_test "condvar"   examples/condvar/kernel.elf   examples/condvar/condvar.expected
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

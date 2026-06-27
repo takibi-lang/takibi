@@ -15,7 +15,7 @@ COMMON_LINK_LD   := $(COMMON_DIR)/link.ld
 # ── Examples ──────────────────────────────────────────────────────────────────
 # 新しい例題を追加するときはここに名前を足すだけ。
 # 規約: examples/<name>/<name>.tkb → examples/<name>/kernel.elf
-EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore
+EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
@@ -57,7 +57,7 @@ $(EXAMPLE_OBJS): examples/%.o: examples/%.tkb build
 #   1段目: $$* → $*  ($$が$に縮退)
 #   2段目: $*  → name (ステム展開)
 # 追加アセンブリが必要な例題（preempt など）は個別ルールで定義するためここから除外する。
-GENERIC_KERNELS := $(filter-out examples/preempt/kernel.elf examples/semaphore/kernel.elf, $(ALL_KERNELS))
+GENERIC_KERNELS := $(filter-out examples/preempt/kernel.elf examples/semaphore/kernel.elf examples/condvar/kernel.elf, $(ALL_KERNELS))
 
 $(GENERIC_KERNELS): examples/%/kernel.elf: \
     $(COMMON_STARTUP_O) examples/%/$$*.o $(COMMON_LINK_LD)
@@ -87,6 +87,18 @@ examples/semaphore/kernel.elf: \
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) \
 	       examples/semaphore/semaphore.o $(SEMAPHORE_ASM_O) -o $@
 
+# ── condvar: 追加アセンブリオブジェクトが必要なので個別ルールで上書き ────────
+CONDVAR_ASM_S := examples/condvar/condvar_asm.S
+CONDVAR_ASM_O := examples/condvar/condvar_asm.o
+
+$(CONDVAR_ASM_O): $(CONDVAR_ASM_S)
+	$(LLVM_MC) --triple=aarch64-none-elf --filetype=obj $< -o $@
+
+examples/condvar/kernel.elf: \
+    $(COMMON_STARTUP_O) examples/condvar/condvar.o $(CONDVAR_ASM_O) $(COMMON_LINK_LD)
+	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) \
+	       examples/condvar/condvar.o $(CONDVAR_ASM_O) -o $@
+
 # ── QEMU run targets ──────────────────────────────────────────────────────────
 QEMU_FLAGS := -machine virt -cpu cortex-a53 -nographic \
               -semihosting-config enable=on,target=native
@@ -101,4 +113,4 @@ clean:
 	dune clean
 	rm -f $(COMMON_STARTUP_O) \
 	      $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o examples/$(e)/kernel.elf) \
-	      $(PREEMPT_ASM_O) $(SEMAPHORE_ASM_O)
+	      $(PREEMPT_ASM_O) $(SEMAPHORE_ASM_O) $(CONDVAR_ASM_O)
