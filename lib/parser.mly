@@ -167,6 +167,9 @@ expr:
   | e = expr DOT fname = IDENT
     (* e.field — struct field read; works for both Struct and *Struct *)
     { { desc = FieldGet (e, fname); loc = $symbolstartpos } }
+  | LBRACE fs = args RBRACE
+    (* { e, e, ... } — positional struct literal; requires a type annotation *)
+    { { desc = StructLit fs; loc = $symbolstartpos } }
 
 args:
   | /* empty */ { [] }

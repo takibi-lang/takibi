@@ -131,6 +131,10 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
            raise (TypeError (e.loc,
              Printf.sprintf "no field '%s' in struct '%s'" fname sname)))
 
+  | StructLit _ ->
+      raise (TypeError (e.loc,
+        "struct literal requires a type annotation: `let mut x: Name = {...}`"))
+
   | Call (fname, args) ->
       (* 直接呼び出し（関数名 → fenv）を先に試みる *)
       let ft_opt = match StringMap.find_opt fname fenv with
@@ -225,6 +229,28 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
            if not is_mut then
              raise (TypeError (s.loc,
                Printf.sprintf "immutable variable '%s' must have an initializer" name))
+       | Some { desc = StructLit exprs; loc } ->
+           (* 構造体リテラル: 型アノテーションから struct 名を取り、フィールドごとに型チェック *)
+           if not is_mut then
+             raise (TypeError (loc,
+               Printf.sprintf "struct literal requires `let mut %s: Name = {...}`" name));
+           (match repr ty with
+            | TStruct sname ->
+                let fields = match StringMap.find_opt sname senv with
+                  | Some fs -> fs
+                  | None -> raise (TypeError (loc,
+                      Printf.sprintf "unknown struct type '%s'" sname))
+                in
+                if List.length fields <> List.length exprs then
+                  raise (TypeError (loc, Printf.sprintf
+                    "struct '%s' has %d fields but literal has %d values"
+                    sname (List.length fields) (List.length exprs)));
+                List.iter2 (fun (_, ft) ei ->
+                  let te = infer_expr senv tyenv fenv ei in
+                  unify_at ei.loc te (of_ast ft)
+                ) fields exprs
+            | _ -> raise (TypeError (loc,
+                "struct literal requires a struct type annotation")))
        | Some e ->
            let et = infer_expr senv tyenv fenv e in
            unify_at e.loc ty et);
@@ -313,6 +339,26 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let (ty, _) = StringMap.find name genv in
         (match expr_opt with
          | None -> ()
+         | Some { desc = Ast.StructLit exprs; loc } ->
+             (* 構造体リテラル: 宣言型から struct 名を取り、フィールドごとに型チェック *)
+             (match repr ty with
+              | TStruct sname ->
+                  let fields = match StringMap.find_opt sname senv with
+                    | Some fs -> fs
+                    | None -> raise (TypeError (loc,
+                        Printf.sprintf "unknown struct type '%s'" sname))
+                  in
+                  if List.length fields <> List.length exprs then
+                    raise (TypeError (loc, Printf.sprintf
+                      "struct '%s' has %d fields but literal has %d values"
+                      sname (List.length fields) (List.length exprs)));
+                  List.iter2 (fun (_, ft) ei ->
+                    let te = infer_expr senv genv fenv ei in
+                    (try unify (of_ast ft) te
+                     with Unify_error m -> raise (TypeError (ei.loc, m)))
+                  ) fields exprs
+              | _ -> raise (TypeError (loc,
+                  "struct literal requires a struct type annotation")))
          | Some e ->
              let et = infer_expr senv genv fenv e in
              (try unify ty et

@@ -356,6 +356,9 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            in
            (field_ty, v'))
 
+  | StructLit _ ->
+      raise (Error "BUG: StructLit must be handled in gen_stmt / gen_global, not gen_expr")
+
   | Call (fname, args) ->
       let coerce_arg v lty =
         let src = type_of v in
@@ -521,6 +524,21 @@ let gen_func ?prog_types fdef =
          | Some (Mut (ast_ty, ptr)) ->
              (match expr_opt with
               | None -> ()
+              | Some { desc = StructLit exprs; _ } ->
+                  (* 構造体リテラル: フィールドごとに GEP して store *)
+                  (match ast_ty with
+                   | TypeNamed sname ->
+                       let llty = Hashtbl.find struct_lltypes sname in
+                       List.iteri (fun i ei ->
+                         let (_, v) = gen_expr locals ei in
+                         let fptr = build_in_bounds_gep llty ptr
+                           [| const_int (i32_type context) 0;
+                              const_int (i32_type context) i |]
+                           ("fld" ^ string_of_int i) builder
+                         in
+                         ignore (build_store v fptr builder)
+                       ) exprs
+                   | _ -> raise (Error "struct literal requires a struct type"))
               | Some e ->
                   let (_, v) = gen_expr locals e in
                   ignore (build_store (coerce v ast_ty) ptr builder))
@@ -606,6 +624,21 @@ let gen_global ?prog_types name ty_opt expr_opt =
              let i64v = const_int (i64_type context) i in
              const_inttoptr i64v (pointer_type context)
          | _ -> const_int llty i)
+    | Some { desc = StructLit exprs; _ } ->
+        (* 構造体リテラル: 各フィールドを定数として評価し const_named_struct で初期化値を生成 *)
+        (match ast_ty with
+         | TypeNamed sname ->
+             let fields = match Hashtbl.find_opt struct_fields sname with
+               | Some fs -> fs
+               | None -> raise (Error (Printf.sprintf "unknown struct '%s'" sname))
+             in
+             let vals = List.map2 (fun (_, ft) e ->
+               match e.desc with
+               | IntLit i -> const_int (ltype_of_ast ft) i
+               | _ -> raise (Error "global struct literal fields must be integer constants")
+             ) fields exprs in
+             const_named_struct llty (Array.of_list vals)
+         | _ -> raise (Error "struct literal requires a struct type"))
     | None -> undef llty  (* no initializer → LLVM undef; runtime value depends on startup *)
     | _ -> raise (Error "Global initializer must be a constant integer")
   in

@@ -37,6 +37,7 @@ and expr_desc =
   | AddrOf of expr          (* &lvalue — variable or struct field address *)
   | Cast of type_expr * expr  (* expr as T — explicit type cast *)
   | FieldGet of expr * string  (* expr.field — read a struct field *)
+  | StructLit of expr list     (* { e, e, ... } — positional struct literal *)
 [@@deriving show]
 
 type stmt = stmt_desc located

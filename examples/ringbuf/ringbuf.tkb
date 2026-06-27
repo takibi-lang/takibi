@@ -42,12 +42,7 @@ fn rb_pop(rb: *RingBuf) -> int {
 
 fn main() {
     let mut data: [int; 4];
-    let mut rb: RingBuf;
-    rb.buf  = data;
-    rb.head = 0;
-    rb.tail = 0;
-    rb.size = 0;
-    rb.cap  = 4;
+    let mut rb: RingBuf = {data, 0, 0, 0, 4};
 
     rb_push(&rb, 1);
     rb_push(&rb, 2);

@@ -64,9 +64,7 @@ fn main() {
     buf[6] = 7;
     buf[7] = 4;
 
-    let mut s: IntSlice;
-    s.data = buf;
-    s.len  = 8;
+    let mut s: IntSlice = {buf, 8};
 
     uart_puts("before: ");
     print_arr(&s);

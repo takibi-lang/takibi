@@ -32,11 +32,15 @@ fn print_uint(n: int) {
     uart_putc((n - (n / 10) * 10 + '0') as char);
 }
 
+struct Shared {
+    mutex: int;
+    count: int;
+}
+
 extern fn sem_wait(s: *int);
 extern fn sem_post(s: *int);
 
-let sem_mutex:    int = 1;
-let shared_count: int = 0;
+let shared: Shared = {1, 0};
 
 let task_a_done: int = 0;
 let task_b_done: int = 0;
@@ -110,9 +114,9 @@ fn irq_dispatch(frame_sp: int) -> int {
 fn task_a() {
     let mut i: int = 0;
     while (i < 3) {
-        sem_wait(&sem_mutex);
-        shared_count = shared_count + 1;
-        sem_post(&sem_mutex);
+        sem_wait(&shared.mutex);
+        shared.count = shared.count + 1;
+        sem_post(&shared.mutex);
         i = i + 1;
     }
     task_a_done = 1;
@@ -123,9 +127,9 @@ fn task_a() {
 fn task_b() {
     let mut i: int = 0;
     while (i < 3) {
-        sem_wait(&sem_mutex);
-        shared_count = shared_count + 1;
-        sem_post(&sem_mutex);
+        sem_wait(&shared.mutex);
+        shared.count = shared.count + 1;
+        sem_post(&shared.mutex);
         i = i + 1;
     }
     task_b_done = 1;
@@ -147,7 +151,7 @@ fn main() {
     disable_cntp();
     sched_done = 1;
     uart_puts("shared_count: ");
-    print_uint(shared_count);
+    print_uint(shared.count);
     uart_puts("\r\n");
     uart_puts("done\r\n");
 }
