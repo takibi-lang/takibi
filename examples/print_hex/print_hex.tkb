@@ -1,5 +1,6 @@
+// 32ビット整数の16進表示デモ。>> と & でニブル(4ビット)を取り出す。
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000;
+    let dr: *char = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
@@ -22,6 +23,7 @@ fn uart_print_hex(n: int) {
     uart_puts("0x");
     let mut i = 7;
     while (i >= 0) {
+        // 上位ニブルから順に取り出す
         uart_print_hex_digit((n >> (i * 4)) & 15);
         i = i - 1;
     }

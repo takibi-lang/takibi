@@ -1,3 +1,6 @@
+// 条件変数で同期した有界メッセージキュー (容量4) のデモ。
+// プロデューサーが 0〜4 を送信し、コンシューサーが受信して表示する。
+// MsgQueue はリングバッファ + mutex + not_empty/not_full の condvar で実装。
 struct GicRegs {
     distr_ctlr:  *int;
     distr_isen0: *int;
@@ -25,7 +28,7 @@ struct MsgQueue {
 }
 
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000;
+    let dr: *char = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 

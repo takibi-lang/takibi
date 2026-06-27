@@ -1,5 +1,6 @@
+// 符号付き整数の UART 出力デモ。as キャスト・単項マイナス（-n）を使用。
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000;
+    let dr: *char = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 

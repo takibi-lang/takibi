@@ -1,3 +1,7 @@
+// セマフォ (ldaxr/stlxr) を使ったアトミック操作デモ。
+// task_a と task_b が各3回 mutex で保護しながら shared.count をインクリメント。
+// 最終値 6 になることで競合なく更新できたことを確認。
+// sem_wait/sem_post の実装は semaphore_asm.S (ldaxr+stxr / ldxr+stlxr)。
 struct GicRegs {
     distr_ctlr:  *int;
     distr_isen0: *int;
@@ -14,7 +18,7 @@ struct SchedState {
 }
 
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000;
+    let dr: *char = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 

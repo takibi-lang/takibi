@@ -20,6 +20,7 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
   - 整数リテラル（10進・16進 `0x...`）
   - 文字リテラル（`'a'`、`'\n'`、`'\r'`、`'\t'`、`'\0'`、`'\\'`）— `IntLit (Char.code c)` に脱糖
   - 文字列リテラル（`"..."` — `\n` `\r` `\t` `\\` `\"` エスケープ対応）
+  - コメント（`// 行コメント`、`/* ブロックコメント */`）
   - 算術演算（`+` `-` `*` `/` `%`）、比較演算（`<` `>` `<=` `>=` `==` `!=`）
   - ポインタ算術: `ptr + int` / `ptr - int` → 同じポインタ型（GEP として emit）。`int + ptr` も可。codegen は `build_neg + GEP` で実装
   - 単項マイナス（`-expr`）— パーサで `BinOp(Sub, IntLit 0, expr)` に脱糖
@@ -41,7 +42,7 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
 
 ```bash
 make build          # コンパイラ (takibi) のビルド（= dune build）
-make test           # ユニットテスト実行（99件）
+make test           # ユニットテスト実行
 make qemutest       # QEMU 結合テスト実行（全例題をビルドして自動検証）
 make check          # make test + make qemutest を一括実行
 make qemu-echo      # QEMU virt (AArch64) で echo サーバを手動実行（Ctrl-A X で終了）
@@ -65,87 +66,15 @@ examples/
   common/
     startup.S     — _start → main、BSS ゼロクリア、AArch64 semihosting exit（全例題共通）
     link.ld       — リンカスクリプト（ロードアドレス 0x40000000）（全例題共通）
-  start/
-    start.tkb     — グローバル変数・if/else/while のデモ
-    start.expected
-  hello/
-    hello.tkb     — AArch64 ベアメタル Hello World
-    hello.expected
-  echo/
-    echo.tkb      — UART echo サーバ（q+Enter で終了、char リテラル・|| を使用）
-    echo.expected
-    echo.stdin    — qemutest 用スクリプト入力
-  print_int/
-    print_int.tkb — uart_print_int / as キャスト・単項マイナスのデモ
-    print_int.expected
-  print_hex/
-    print_hex.tkb — uart_print_hex / >> と & ビット演算のデモ
-    print_hex.expected
-  print_ptr/
-    print_ptr.tkb — ポインタ値を int キャスト（as int）して16進表示するデモ
-    print_ptr.expected
-  mem/
-    mem.tkb       — memset/memcpy デモ（スタック配列 [char; 5] を使用）
-    mem.expected
-  array/
-    array.tkb     — 配列の読み書き・デケイのデモ
-    array.expected
-  fizzbuzz/
-    fizzbuzz.tkb  — FizzBuzz（% 剰余・if/else if チェーン）
-    fizzbuzz.expected
-  fibonacci/
-    fibonacci.tkb — フィボナッチ数列（反復版、10項出力）
-    fibonacci.expected
-  bubblesort/
-    bubblesort.tkb — バブルソート（arr[i]=v 書き込み・arr[i] 読み出しのデモ）
-    bubblesort.expected
-  ringbuf/
-    ringbuf.tkb   — リングバッファ（&mut_var・buf[*ptr]=val・% 折り返しのデモ）
-    ringbuf.expected
-  callstack/
-    callstack.tkb — 複数関数の呼び出し順テスト（スタック動作確認）
-    callstack.expected
-  crc8/
-    crc8.tkb      — CRC-8/SMBUS 計算（ポインタ走査・^ XOR・<< シフト）
-    crc8.expected
-  djb2/
-    djb2.tkb      — djb2 XOR ハッシュ関数（<< と ^ を使用）
-    djb2.expected
-  bump/
-    bump.tkb      — 簡易バンプアロケータ（グローバル配列 [char; 256] を使用）
-    bump.expected
-  timer/
-    timer.tkb     — PL031 RTC でポーリング 1 秒 delay のデモ
-    timer.expected
-  rtc/
-    rtc.tkb       — PL031 RTC の複数レジスタ読み出し・tick 計測
-    rtc.expected
-  irq/
-    irq.tkb       — GICv2 割り込みコントローラ経由の UART RX 割り込みハンドラ登録デモ（関数ポインタテーブル）
-    irq.expected
-    irq.stdin     — qemutest 用スクリプト入力
-  scheduler/
-    scheduler.tkb — ラウンドロビン協調スケジューラ（関数ポインタ配列、task_finish による終了通知）
-    scheduler.expected
-  preempt/
-    preempt.tkb   — プリエンプティブスケジューラ（ARM Generic Timer + GICv2 + コンテキストスイッチ）
-    preempt_asm.S — ARM Generic Timer システムレジスタスタブ4本 + task_exit_stub のみ（35行）
-    preempt.expected
-  semaphore/
-    semaphore.tkb   — セマフォ（ldaxr/stlxr によるアトミック実装）のデモ。2タスクが各3回 sem_wait/sem_post → shared_count == 6 を確認
-    semaphore_asm.S — ARM Generic Timer スタブ + sem_wait（ldaxr+stxr）・sem_post（ldxr+stlxr）
-    semaphore.expected
-  condvar/
-    condvar.tkb   — mutex（sem_wait/sem_post の名前付きラッパー）+ 条件変数（シーケンスカウンタ方式）プロデューサー・コンシューマ デモ（5アイテム）
-    condvar_asm.S — semaphore_asm.S と同内容
-    condvar.expected
-  struct/
-    struct.tkb    — 構造体（Point/Rect、フィールドアクセス・代入・ポインタ渡し・swap）のデモ
-    struct.expected
+  hello/  start/  echo/  print_int/  print_hex/  print_ptr/
+  mem/  array/  fizzbuzz/  fibonacci/  bubblesort/  ringbuf/
+  callstack/  crc8/  djb2/  bump/  timer/  rtc/
+  irq/  scheduler/  preempt/  semaphore/  condvar/  struct/  msgqueue/
+  （各ディレクトリ: <name>.tkb 冒頭のコメントに内容説明あり）
 scripts/
   run_qemutest.sh — QEMU 結合テストスクリプト（FIFO 同期・タイミング検証付き）
 test/
-  test_takibi.ml  — Alcotest による parser / type_inf ユニットテスト（99件）
+  test_takibi.ml  — Alcotest による parser / type_inf ユニットテスト
 ```
 
 ## 重要な設計上のポイント
@@ -264,12 +193,11 @@ LLVM 19 はすべてのポインタが `ptr` 1 種類（opaque pointer）。`fn(
 
 **現在の制限**:
 - フィールド代入は `ident.field = v` 形式のみ（LHS が変数名 1 段のみ）
-- 構造体リテラル（`Name { x: 1, y: 2 }` 形式）は未サポート（フィールド個別代入で代替）
 - グローバル構造体変数は `let g: Name;` のみ（`let mut` はグローバルスコープで未対応、常に mutable）
 
-### 同期プリミティブの実装パターンと現状の制限
+### 同期プリミティブの設計方針と現状の制限
 
-`examples/semaphore/` と `examples/condvar/` で実装した同期プリミティブの構造:
+同期プリミティブは 3 層構造になっている:
 
 ```
 assembly (ldaxr / stlxr)
@@ -280,42 +208,11 @@ takibi
   └── cond_wait / cond_signal      ← シーケンスカウンタ方式（takibi で記述）
 ```
 
-**`sem_wait` の ldaxr/stxr パターン（semaphore_asm.S）**:
-```asm
-sem_wait:
-.Lw_retry:
-    ldaxr   w1, [x0]     // load-exclusive + acquire barrier
-    cbz     w1, .Lw_zero // counter == 0 → 待機
-    sub     w2, w1, #1
-    stxr    w3, w2, [x0] // store-exclusive
-    cbnz    w3, .Lw_retry
-    ret
-.Lw_zero:
-    clrex                // exclusive monitor をクリア（必須）
-    b       .Lw_retry
-```
-`sem_post` は `ldxr` + `stlxr`（release）。
-
-**`cond_wait` の取りこぼし防止（condvar.tkb）**:
-```takibi
-fn cond_wait(seq: *int, m: *int) {
-    let s: int = *seq;    // ① mutex を持ったままシーケンスを読む
-    mutex_unlock(m);       // ② アンロック
-    while (*seq == s) {}  // ③ *seq は volatile load — スピン
-    mutex_lock(m);         // ④ 再取得
-}
-```
-① でシーケンスを保存してから ② でアンロックするため、アンロックとスピン開始の間に
-`cond_signal` が来ても取りこぼさない。
+実装の詳細は各 `.tkb` ファイルのコメントを参照（`condvar.tkb` に cond_wait の取りこぼし防止の解説あり）。
 
 **現状の制限: シングルコアのみ保証**
-- `sem_wait` / `sem_post` は `ldaxr`/`stlxr` を使うためアトミックだが、
-  `cond_signal` の `*seq = *seq + 1` はアトミックではない。
-  常に mutex を持った状態で呼ぶ規約により、シングルコアでは正しく動作する。
-- `cond_wait` のスピン `while (*seq == s) {}` はハードウェアメモリバリアを持たない
-  通常の volatile load。シングルコア(QEMU)では問題ないが、マルチコアでは
-  `ldar`（load-acquire）を使ったスピンに置き換える必要がある。
-- マルチコア対応には `cond_signal` のアトミック化と `cond_wait` のスピンのバリア追加が必要。
+- `cond_signal` の `*seq = *seq + 1` はアトミックではない。mutex を持った状態で呼ぶ規約によりシングルコアでは正しく動作するが、マルチコアでは不十分。
+- `cond_wait` のスピン `while (*seq == s) {}` はハードウェアメモリバリアを持たない通常の volatile load。マルチコアでは `ldar`（load-acquire）への置き換えが必要。
 
 ### グローバル変数 volatile 読み出し（割り込み共有フラグ）
 LLVM は `while (flag == 0) {}` のようなタイトループで、グローバル変数の load をループ外に
@@ -336,7 +233,7 @@ while (*p == 0) {}           // *p は volatile load（set_volatile true）
 規約: `examples/<name>/<name>.tkb` → `examples/<name>/kernel.elf`
 
 ```makefile
-EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar  # ← ここに追加するだけ
+EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct msgqueue  # ← ここに追加するだけ
 ```
 
 `qemu-echo` のようにインタラクティブな手動起動が必要なターゲットだけ個別に追加する。

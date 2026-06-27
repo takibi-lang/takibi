@@ -1,5 +1,6 @@
+// フィボナッチ数列（反復版）。10 項を出力する。
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000;
+    let dr: *char = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 

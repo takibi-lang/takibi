@@ -1,3 +1,5 @@
+// mutex (sem_wait/sem_post のラッパー) + 条件変数 (シーケンスカウンタ方式) のデモ。
+// プロデューサーが 5 個送り、コンシューマーが 5 個受け取る。
 struct GicRegs {
     distr_ctlr:  *int;
     distr_isen0: *int;
@@ -22,7 +24,7 @@ struct Channel {
 }
 
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000;
+    let dr: *char = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
@@ -51,6 +53,10 @@ fn mutex_unlock(m: *int) {
     sem_post(m);
 }
 
+/* cond_wait の取りこぼし防止:
+   ① mutex を持ったままシーケンス番号を読む
+   ② unlock 後に signal が来ても ① で保存した s で検出できる
+   ③ *seq は volatile load — スピン中にコンパイラがホイストしない */
 fn cond_wait(seq: *int, m: *int) {
     let s: int = *seq;
     mutex_unlock(m);

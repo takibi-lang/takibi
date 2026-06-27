@@ -1,10 +1,12 @@
+// バブルソートのデモ。IntSlice 構造体でデータと長さをまとめてポインタ渡し。
+// arr[i]=v と arr[i] でポインタ経由の配列読み書きを示す。
 struct IntSlice {
     data: *int;
     len:  int;
 }
 
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000;
+    let dr: *char = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 

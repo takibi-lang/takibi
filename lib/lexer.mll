@@ -5,6 +5,8 @@ open Parser
 rule read = parse
   | [' ' '\t'] { read lexbuf }
   | '\n'       { Lexing.new_line lexbuf; read lexbuf }
+  | "//" [^ '\n']* { read lexbuf }   (* 行コメント: 改行はそのまま次ループで処理 *)
+  | "/*"           { read_block_comment lexbuf }
 
   | "fn"      { FN }
   | "return"  { RETURN }
@@ -69,6 +71,12 @@ rule read = parse
   | '"' { read_string (Buffer.create 32) lexbuf }
 
   | eof { EOF }
+
+and read_block_comment = parse
+  | "*/"   { read lexbuf }
+  | '\n'   { Lexing.new_line lexbuf; read_block_comment lexbuf }
+  | _      { read_block_comment lexbuf }
+  | eof    { failwith "unterminated block comment" }
 
 and read_string buf = parse
   | '"'        { STRING (Buffer.contents buf) }

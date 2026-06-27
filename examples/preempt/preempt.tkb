@@ -1,3 +1,7 @@
+// プリエンプティブスケジューラのデモ。
+// ARM Generic Timer (PPI #30) の tick で irq_dispatch が強制コンテキストスイッチを行う。
+// irq_dispatch は frame_sp を受け取り次タスクの sp を返す; startup.S の irq_entry がスタックを切り替える。
+// extern fn でシステムレジスタ操作 (cntfrq/cntp_tval/cntp_ctl) をアセンブリに委譲。
 struct GicRegs {
     distr_ctlr: *int;
     distr_isen0: *int;
@@ -18,7 +22,7 @@ struct SchedState {
 }
 
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000;
+    let dr: *char = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
@@ -73,7 +77,7 @@ fn gic_init() {
 
 fn timer_init() {
     gic_init();
-    set_cntp_tval(read_cntfrq() >> 6);
+    set_cntp_tval(read_cntfrq() >> 6); // cntfrq/64 ≈ 15ms 間隔でタイマを設定
     enable_cntp();
 }
 

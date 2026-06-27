@@ -709,6 +709,41 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  (* ── コメント ────────────────────────────────────────────────── *)
+
+  Alcotest.test_case "line comment // is ignored" `Quick (fun () ->
+    match parse "// this is a comment\nfn f() int { return 1; }" with
+    | [Ast.FuncDef { name = "f"; _ }] -> ()
+    | _ -> Alcotest.fail "expected single FuncDef f"
+  );
+
+  Alcotest.test_case "inline line comment after code" `Quick (fun () ->
+    match parse "fn f() int { return 42; // answer\n}" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.IntLit 42; _ } -> ()
+         | _ -> Alcotest.fail "expected Return(IntLit 42)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "block comment /* */ is ignored" `Quick (fun () ->
+    match parse "fn f() int { /* skip this */ return 0; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.IntLit 0; _ } -> ()
+         | _ -> Alcotest.fail "expected Return(IntLit 0)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "multi-line block comment is ignored" `Quick (fun () ->
+    match parse "fn f() int {\n  /*\n   * multi\n   * line\n   */\n  return 7;\n}" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.IntLit 7; _ } -> ()
+         | _ -> Alcotest.fail "expected Return(IntLit 7)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
 ]
 
 (* ── Type inference tests ────────────────────────────────────────────────── *)
