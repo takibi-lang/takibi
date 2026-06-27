@@ -608,6 +608,107 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  (* ── extern fn ─────────────────────────────────────────────────── *)
+
+  Alcotest.test_case "extern fn without return type parses" `Quick (fun () ->
+    match parse "extern fn uart_putc(c: char);" with
+    | [Ast.ExternFuncDef ("uart_putc", [("c", Some Ast.TypeChar)], None)] -> ()
+    | _ -> Alcotest.fail "expected ExternFuncDef(uart_putc, [c:char], None)"
+  );
+
+  Alcotest.test_case "extern fn with return type parses" `Quick (fun () ->
+    match parse "extern fn uart_getc() -> char;" with
+    | [Ast.ExternFuncDef ("uart_getc", [], Some Ast.TypeChar)] -> ()
+    | _ -> Alcotest.fail "expected ExternFuncDef(uart_getc, [], Some char)"
+  );
+
+  (* ── 文字列リテラル ──────────────────────────────────────────── *)
+
+  Alcotest.test_case "string literal parses to StringLit" `Quick (fun () ->
+    match parse "fn f() { let s = \"hello\"; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Let (_, _, _, Some { desc = Ast.StringLit "hello"; _ }) -> ()
+         | _ -> Alcotest.fail "expected Let(_, StringLit \"hello\")")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  (* ── -> 戻り値型構文 ─────────────────────────────────────────── *)
+
+  Alcotest.test_case "arrow return type syntax -> int parses" `Quick (fun () ->
+    match parse "fn f() -> int { return 0; }" with
+    | [Ast.FuncDef { ret_type = Some Ast.TypeInt; _ }] -> ()
+    | _ -> Alcotest.fail "expected ret_type = Some TypeInt"
+  );
+
+  (* ── 構造体リテラル ──────────────────────────────────────────── *)
+
+  Alcotest.test_case "struct literal { e, e } parses to StructLit" `Quick (fun () ->
+    match parse "fn f() { let mut p: P = {1, 2}; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Let (true, "p", Some (Ast.TypeNamed "P"),
+                    Some { desc = Ast.StructLit [_; _]; _ }) -> ()
+         | _ -> Alcotest.fail "expected Let(mut, p, TypeNamed P, StructLit [_, _])")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  (* ── 複合ポインタ代入 ────────────────────────────────────────── *)
+
+  Alcotest.test_case "complex pointer assign *(expr) = v parses to AssignDeref" `Quick (fun () ->
+    match parse "fn f(arr: *int, i: int) { *(arr + i) = 42; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.AssignDeref (
+             { desc = Ast.BinOp (Ast.Add, _, _); _ },
+             { desc = Ast.IntLit 42; _ }) -> ()
+         | _ -> Alcotest.fail "expected AssignDeref(BinOp(Add,...), 42)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  (* ── 構造体フィールドのアドレス取得 ─────────────────────────── *)
+
+  Alcotest.test_case "addrof struct field parses to AddrOf(FieldGet)" `Quick (fun () ->
+    match parse "fn f() { let q = &p.x; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Let (_, _, _, Some { desc = Ast.AddrOf
+             { desc = Ast.FieldGet _; _ }; _ }) -> ()
+         | _ -> Alcotest.fail "expected Let(_, AddrOf(FieldGet(...)))")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  (* ── 残りエスケープ文字 ──────────────────────────────────────── *)
+
+  Alcotest.test_case "tab escape char literal '\\t'" `Quick (fun () ->
+    match parse "fn f() { let t = '\\t'; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Let (_, _, _, Some { desc = Ast.IntLit 9; _ }) -> ()
+         | _ -> Alcotest.fail "expected IntLit 9 (tab = ASCII 9)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "backslash escape char literal '\\\\'" `Quick (fun () ->
+    match parse "fn f() { let bs = '\\\\'; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Let (_, _, _, Some { desc = Ast.IntLit 92; _ }) -> ()
+         | _ -> Alcotest.fail "expected IntLit 92 (backslash = ASCII 92)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  (* ── ブロック文 ──────────────────────────────────────────────── *)
+
+  Alcotest.test_case "block statement parses to Block" `Quick (fun () ->
+    match parse "fn f() { { let x = 1; } }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Block [_] -> ()
+         | _ -> Alcotest.fail "expected Block([Let ...])")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
 ]
 
 (* ── Type inference tests ────────────────────────────────────────────────── *)
@@ -874,6 +975,78 @@ let infer_tests = [
         struct B { x: int; }
         fn use_a(a: *A) {}
         fn f(b: *B) { use_a(b); }");
+
+  (* ── extern fn ─────────────────────────────────────────────────── *)
+
+  Alcotest.test_case "extern fn void can be called" `Quick
+    (expect_ok "extern fn uart_putc(c: char);
+                fn f() { uart_putc('A'); }");
+
+  Alcotest.test_case "extern fn with return type propagates" `Quick
+    (expect_ok "extern fn uart_getc() -> char;
+                fn f() char { return uart_getc(); }");
+
+  (* ── 文字列リテラル ──────────────────────────────────────────── *)
+
+  Alcotest.test_case "string literal infers as *char" `Quick (fun () ->
+    let pt = infer "fn f() { let s = \"hello\"; }" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
+    Alcotest.check type_t "s has type *char" (Ast.TypePtr Ast.TypeChar)
+      (Types.StringMap.find "s" fi.Types.local_types)
+  );
+
+  (* ── 構造体リテラル ──────────────────────────────────────────── *)
+
+  Alcotest.test_case "struct literal initializer type-checks" `Quick
+    (expect_ok "struct Point { x: int; y: int; }
+                fn f() { let mut p: Point = {1, 2}; }");
+
+  Alcotest.test_case "array literal initializer type-checks" `Quick
+    (expect_ok "fn f() { let mut arr: [char; 3] = {'a', 'b', 'c'}; }");
+
+  Alcotest.test_case "struct literal wrong field count is a type error" `Quick
+    (expect_type_error "has"
+       "struct Point { x: int; y: int; }
+        fn f() { let mut p: Point = {1, 2, 3}; }");
+
+  Alcotest.test_case "struct literal field type mismatch is a type error" `Quick
+    (expect_type_error "cannot unify"
+       "struct S { x: int; }
+        fn f(p: *int) { let mut s: S = {p}; }");
+
+  (* ── int + ptr 可換ポインタ算術 ─────────────────────────────── *)
+
+  Alcotest.test_case "int + ptr commutative pointer arithmetic type-checks" `Quick
+    (expect_ok "fn f(p: *char) *char { return 1 + p; }");
+
+  (* ── &s.field ────────────────────────────────────────────────── *)
+
+  Alcotest.test_case "&s.field yields pointer-to-field-type" `Quick (fun () ->
+    let pt = infer "struct P { x: int; }
+                    fn f() { let mut s: P; let q = &s.x; }" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
+    Alcotest.check type_t "q has type *int" (Ast.TypePtr Ast.TypeInt)
+      (Types.StringMap.find "q" fi.Types.local_types)
+  );
+
+  (* ── ポインタレシーバのフィールド代入 ───────────────────────── *)
+
+  Alcotest.test_case "field assign via pointer receiver type-checks" `Quick
+    (expect_ok "struct Point { x: int; y: int; }
+                fn f(p: *Point) { p.x = 1; p.y = 2; }");
+
+  (* ── let mut ローカル変数（初期化なし） ─────────────────────── *)
+
+  Alcotest.test_case "let mut local without initializer type-checks" `Quick
+    (expect_ok "fn f() { let mut x: int; x = 0; }");
+
+  (* ── 左シフト・ビット OR ─────────────────────────────────────── *)
+
+  Alcotest.test_case "left shift Shl type-checks" `Quick
+    (expect_ok "fn f(n: int) int { return n << 3; }");
+
+  Alcotest.test_case "bitwise OR Bor type-checks" `Quick
+    (expect_ok "fn f(a: int, b: int) int { return a | b; }");
 
 ]
 
