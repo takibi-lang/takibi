@@ -59,7 +59,7 @@ fn setup_task_stack(s: *char, f: fn() -> void) -> int {
 }
 
 let gic:   GicRegs;
-let sched: SchedState;
+let sched: SchedState = {3, 0, 6, 0, 0, {0, 0, 0}, {0, 0, 0}};
 
 let stack_a: [char; 4096];
 let stack_b: [char; 4096];
@@ -118,11 +118,6 @@ fn task_b() {
 
 fn main() {
     gic_setup();
-    sched.task_count   = 3;
-    sched.current_task = 0;
-    sched.max_ticks    = 6;
-    sched.total_ticks  = 0;
-    sched.done         = 0;
     let sp: *int = sched.tcb_sp;
     sp[1] = setup_task_stack(stack_a + 4096, task_a);
     sp[2] = setup_task_stack(stack_b + 4096, task_b);

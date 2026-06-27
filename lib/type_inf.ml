@@ -166,6 +166,36 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
            ) args param_tys;
            ret_ty)
 
+(* ── Checking mode ───────────────────────────────────────────────────────── *)
+(* check_expr pushes the expected type inward (bidirectional checking).
+   Handles nested StructLit for both struct and array fields.
+   Falls back to infer_expr + unify for all other expressions. *)
+
+let rec check_expr senv tyenv fenv (e : Ast.expr) (expected : ty) : unit =
+  match e.desc, repr expected with
+  | StructLit exprs, TArray (elem_ty, n) ->
+      if List.length exprs <> n then
+        raise (TypeError (e.loc, Printf.sprintf
+          "array [_; %d] expects %d elements but literal has %d"
+          n n (List.length exprs)));
+      List.iter (fun ei -> check_expr senv tyenv fenv ei elem_ty) exprs
+  | StructLit exprs, TStruct sname ->
+      let fields = match StringMap.find_opt sname senv with
+        | Some fs -> fs
+        | None -> raise (TypeError (e.loc,
+            Printf.sprintf "unknown struct type '%s'" sname))
+      in
+      if List.length fields <> List.length exprs then
+        raise (TypeError (e.loc, Printf.sprintf
+          "struct '%s' has %d fields but literal has %d values"
+          sname (List.length fields) (List.length exprs)));
+      List.iter2 (fun (_, ft) ei ->
+        check_expr senv tyenv fenv ei (of_ast ft)
+      ) fields exprs
+  | _ ->
+      let te = infer_expr senv tyenv fenv e in
+      unify_at e.loc te expected
+
 (* ── Statement inference ─────────────────────────────────────────────────── *)
 (* Returns (updated_tyenv, updated_raw_locals).
    tyenv grows with each Let in the current scope.
@@ -235,22 +265,10 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
              raise (TypeError (loc,
                Printf.sprintf "struct literal requires `let mut %s: Name = {...}`" name));
            (match repr ty with
-            | TStruct sname ->
-                let fields = match StringMap.find_opt sname senv with
-                  | Some fs -> fs
-                  | None -> raise (TypeError (loc,
-                      Printf.sprintf "unknown struct type '%s'" sname))
-                in
-                if List.length fields <> List.length exprs then
-                  raise (TypeError (loc, Printf.sprintf
-                    "struct '%s' has %d fields but literal has %d values"
-                    sname (List.length fields) (List.length exprs)));
-                List.iter2 (fun (_, ft) ei ->
-                  let te = infer_expr senv tyenv fenv ei in
-                  unify_at ei.loc te (of_ast ft)
-                ) fields exprs
+            | (TStruct _ | TArray _) as expected ->
+                check_expr senv tyenv fenv { desc = StructLit exprs; loc } expected
             | _ -> raise (TypeError (loc,
-                "struct literal requires a struct type annotation")))
+                "literal { ... } requires a struct or array type annotation")))
        | Some e ->
            let et = infer_expr senv tyenv fenv e in
            unify_at e.loc ty et);
@@ -342,23 +360,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          | Some { desc = Ast.StructLit exprs; loc } ->
              (* 構造体リテラル: 宣言型から struct 名を取り、フィールドごとに型チェック *)
              (match repr ty with
-              | TStruct sname ->
-                  let fields = match StringMap.find_opt sname senv with
-                    | Some fs -> fs
-                    | None -> raise (TypeError (loc,
-                        Printf.sprintf "unknown struct type '%s'" sname))
-                  in
-                  if List.length fields <> List.length exprs then
-                    raise (TypeError (loc, Printf.sprintf
-                      "struct '%s' has %d fields but literal has %d values"
-                      sname (List.length fields) (List.length exprs)));
-                  List.iter2 (fun (_, ft) ei ->
-                    let te = infer_expr senv genv fenv ei in
-                    (try unify (of_ast ft) te
-                     with Unify_error m -> raise (TypeError (ei.loc, m)))
-                  ) fields exprs
+              | (TStruct _ | TArray _) as expected ->
+                  check_expr senv genv fenv { desc = Ast.StructLit exprs; loc } expected
               | _ -> raise (TypeError (loc,
-                  "struct literal requires a struct type annotation")))
+                  "literal { ... } requires a struct or array type annotation")))
          | Some e ->
              let et = infer_expr senv genv fenv e in
              (try unify ty et

@@ -65,17 +65,7 @@ fn cond_signal(seq: *int) {
     *seq = *seq + 1;
 }
 
-let mq: MsgQueue;
-
-fn mq_init(cap: int) {
-    mq.mutex     = 1;
-    mq.not_empty = 0;
-    mq.not_full  = 0;
-    mq.head      = 0;
-    mq.tail      = 0;
-    mq.count     = 0;
-    mq.cap       = cap;
-}
+let mq: MsgQueue = {1, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 4};
 
 fn mq_send(val: int) {
     mutex_lock(&mq.mutex);
@@ -105,7 +95,7 @@ fn mq_recv() -> int {
 }
 
 let gic:   GicRegs;
-let sched: SchedState;
+let sched: SchedState = {3, 0, {0, 0, 0}};
 
 extern fn read_cntfrq() -> int;
 extern fn set_cntp_tval(n: int);
@@ -200,9 +190,6 @@ fn task_consumer() {
 
 fn main() {
     gic_setup();
-    mq_init(4);
-    sched.task_count   = 3;
-    sched.current_task = 0;
     let sp: *int = sched.tcb_sp;
     sp[1] = setup_task_stack(stack_a + 4096, task_producer);
     sp[2] = setup_task_stack(stack_b + 4096, task_consumer);

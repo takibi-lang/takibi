@@ -464,6 +464,32 @@ let gen_func ?prog_types fdef =
     end
   ) (collect_lets fdef.body);
 
+  (* Recursively initialize a memory location from a possibly-nested literal.
+     Handles nested StructLit for struct/array fields; falls back to gen_expr+store. *)
+  let rec init_memory (ptr : llvalue) (ast_ty : Ast.type_expr) (e : Ast.expr) =
+    match e.desc, ast_ty with
+    | StructLit exprs, TypeNamed sname ->
+        let llty = Hashtbl.find struct_lltypes sname in
+        let fields = Hashtbl.find struct_fields sname in
+        List.iteri (fun i ((_, ft), ei) ->
+          let fptr = build_in_bounds_gep llty ptr
+            [| const_int (i32_type context) 0; const_int (i32_type context) i |]
+            ("fld" ^ string_of_int i) builder in
+          init_memory fptr ft ei
+        ) (List.combine fields exprs)
+    | StructLit exprs, TypeArray (elem_ty, n) ->
+        let arr_ll = array_type (ltype_of_ast elem_ty) n in
+        List.iteri (fun i ei ->
+          let ep = build_in_bounds_gep arr_ll ptr
+            [| const_int (i32_type context) 0; const_int (i32_type context) i |]
+            ("elem" ^ string_of_int i) builder in
+          init_memory ep elem_ty ei
+        ) exprs
+    | _ ->
+        let (_, v) = gen_expr locals e in
+        ignore (build_store (coerce v ast_ty) ptr builder)
+  in
+
   (* ── Statement codegen (defined here to access `res` for immutable lets) ── *)
   let rec gen_stmt (s : Ast.stmt) =
     (* Skip dead code after a terminator *)
@@ -518,30 +544,11 @@ let gen_func ?prog_types fdef =
         ignore (build_store (coerce val_v field_ty) field_ptr builder)
 
     | Let (true, name, _, expr_opt) ->
-        (* Mutable: alloca was pre-allocated; just store the initial value *)
+        (* Mutable: alloca was pre-allocated; store the initial value via init_memory *)
         (match Hashtbl.find_opt locals name with
          | None -> raise (Error (Printf.sprintf "BUG: no alloca for %s" name))
          | Some (Mut (ast_ty, ptr)) ->
-             (match expr_opt with
-              | None -> ()
-              | Some { desc = StructLit exprs; _ } ->
-                  (* 構造体リテラル: フィールドごとに GEP して store *)
-                  (match ast_ty with
-                   | TypeNamed sname ->
-                       let llty = Hashtbl.find struct_lltypes sname in
-                       List.iteri (fun i ei ->
-                         let (_, v) = gen_expr locals ei in
-                         let fptr = build_in_bounds_gep llty ptr
-                           [| const_int (i32_type context) 0;
-                              const_int (i32_type context) i |]
-                           ("fld" ^ string_of_int i) builder
-                         in
-                         ignore (build_store v fptr builder)
-                       ) exprs
-                   | _ -> raise (Error "struct literal requires a struct type"))
-              | Some e ->
-                  let (_, v) = gen_expr locals e in
-                  ignore (build_store (coerce v ast_ty) ptr builder))
+             Option.iter (init_memory ptr ast_ty) expr_opt
          | Some (Imm _) ->
              raise (Error (Printf.sprintf "BUG: %s marked mutable but stored as Imm" name)))
 
@@ -617,30 +624,30 @@ let gen_global ?prog_types name ty_opt expr_opt =
         | None   -> (match ty_opt with Some t -> t | None -> TypeInt)
   in
   let llty = ltype_of_ast ast_ty in
+  (* Recursively evaluate a compile-time constant expression. *)
+  let rec eval_const (ft : Ast.type_expr) (e : Ast.expr) : llvalue =
+    match e.desc, ft with
+    | IntLit i, TypePtr _ ->
+        const_inttoptr (const_int (i64_type context) i) (pointer_type context)
+    | IntLit i, _ ->
+        const_int (ltype_of_ast ft) i
+    | StructLit exprs, TypeNamed sname ->
+        let llty = match Hashtbl.find_opt struct_lltypes sname with
+          | Some t -> t | None -> raise (Error (Printf.sprintf "unknown struct '%s'" sname))
+        in
+        let fields = match Hashtbl.find_opt struct_fields sname with
+          | Some fs -> fs | None -> raise (Error (Printf.sprintf "unknown struct '%s'" sname))
+        in
+        const_named_struct llty
+          (Array.of_list (List.map2 (fun (_, ft) e -> eval_const ft e) fields exprs))
+    | StructLit exprs, TypeArray (elem_ty, _) ->
+        let lelem = ltype_of_ast elem_ty in
+        const_array lelem (Array.of_list (List.map (eval_const elem_ty) exprs))
+    | _ -> raise (Error "global initializer: unsupported constant expression")
+  in
   let init = match expr_opt with
-    | Some { desc = IntLit i; _ } ->
-        (match ast_ty with
-         | TypePtr _ ->
-             let i64v = const_int (i64_type context) i in
-             const_inttoptr i64v (pointer_type context)
-         | _ -> const_int llty i)
-    | Some { desc = StructLit exprs; _ } ->
-        (* 構造体リテラル: 各フィールドを定数として評価し const_named_struct で初期化値を生成 *)
-        (match ast_ty with
-         | TypeNamed sname ->
-             let fields = match Hashtbl.find_opt struct_fields sname with
-               | Some fs -> fs
-               | None -> raise (Error (Printf.sprintf "unknown struct '%s'" sname))
-             in
-             let vals = List.map2 (fun (_, ft) e ->
-               match e.desc with
-               | IntLit i -> const_int (ltype_of_ast ft) i
-               | _ -> raise (Error "global struct literal fields must be integer constants")
-             ) fields exprs in
-             const_named_struct llty (Array.of_list vals)
-         | _ -> raise (Error "struct literal requires a struct type"))
-    | None -> undef llty  (* no initializer → LLVM undef; runtime value depends on startup *)
-    | _ -> raise (Error "Global initializer must be a constant integer")
+    | Some e -> eval_const ast_ty e
+    | None   -> undef llty  (* no initializer → LLVM undef; startup.S zeroes BSS *)
   in
   let gvar = define_global name init the_module in
   Hashtbl.add global_vars name (ast_ty, gvar)
