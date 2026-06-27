@@ -225,7 +225,7 @@ let parser_tests = [
     match parse "fn f() { let mut x = 0; let p = &x; }" with
     | [Ast.FuncDef { body = [_; s]; _ }] ->
         (match s.desc with
-         | Ast.Let (_, _, _, Some { desc = Ast.AddrOf "x"; _ }) -> ()
+         | Ast.Let (_, _, _, Some { desc = Ast.AddrOf { desc = Ast.Var "x"; _ }; _ }) -> ()
          | _ -> Alcotest.fail "expected Let(_, AddrOf x)")
     | _ -> Alcotest.fail "unexpected structure"
   );

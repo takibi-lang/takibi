@@ -75,12 +75,33 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
       let t1 = infer_expr senv tyenv fenv e1 in
       unify_at e1.loc t1 (TPtr inner);
       inner
-  | AddrOf name ->
-      let (t, is_mut) = lookup_binding e.loc name tyenv in
-      if not is_mut then
-        raise (TypeError (e.loc,
-          Printf.sprintf "cannot take address of immutable variable '%s'" name));
-      TPtr t
+  | AddrOf inner ->
+      (match inner.desc with
+       | Var name ->
+           let (t, is_mut) = lookup_binding e.loc name tyenv in
+           if not is_mut then
+             raise (TypeError (e.loc,
+               Printf.sprintf "cannot take address of immutable variable '%s'" name));
+           TPtr t
+       | FieldGet (base_expr, fname) ->
+           let bt = infer_expr senv tyenv fenv base_expr in
+           let sname = match repr bt with
+             | TStruct s | TPtr (TStruct s) -> s
+             | _ -> raise (TypeError (base_expr.loc,
+                 Printf.sprintf "field address '.%s' on non-struct type '%s'"
+                   fname (to_string bt)))
+           in
+           let fields = match StringMap.find_opt sname senv with
+             | Some fs -> fs
+             | None -> raise (TypeError (e.loc,
+                 Printf.sprintf "unknown struct type '%s'" sname))
+           in
+           (match List.assoc_opt fname fields with
+            | Some ft -> TPtr (of_ast ft)
+            | None -> raise (TypeError (e.loc,
+                Printf.sprintf "no field '%s' in struct '%s'" fname sname)))
+       | _ ->
+           raise (TypeError (e.loc, "& requires a variable or struct field")))
   | Cast (target_ty, e) ->
       ignore (infer_expr senv tyenv fenv e);
       of_ast target_ty

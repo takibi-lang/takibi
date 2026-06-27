@@ -147,7 +147,7 @@ expr:
   | expr EQ expr   { { desc = BinOp (Eq, $1, $3); loc = $symbolstartpos } }
   | expr NE expr   { { desc = BinOp (Ne, $1, $3); loc = $symbolstartpos } }
   | TIMES e = expr %prec UNARY { { desc = Deref e;    loc = $symbolstartpos } }
-  | AMP   id = IDENT              { { desc = AddrOf id; loc = $symbolstartpos } }
+  | AMP e = expr %prec UNARY { { desc = AddrOf e; loc = $symbolstartpos } }
   | MINUS e = expr %prec UNARY
     { { desc = BinOp (Sub, { desc = IntLit 0; loc = $symbolstartpos }, e);
         loc = $symbolstartpos } }

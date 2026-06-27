@@ -252,16 +252,36 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            (inner_ty, v')
        | _ -> raise (Error "dereference of non-pointer type"))
 
-  | AddrOf name ->
-      (match Hashtbl.find_opt locals name with
-       | Some (Mut (ast_ty, alloca)) -> (TypePtr ast_ty, alloca)
-       | Some (Imm _) ->
-           raise (Error (Printf.sprintf "BUG: addrof immutable '%s' (should be caught by type_inf)" name))
-       | None ->
-           (* グローバル変数のアドレス取得: LLVM global value はすでにポインタ *)
-           match Hashtbl.find_opt global_vars name with
-           | Some (ast_ty, ptr) -> (TypePtr ast_ty, ptr)
-           | None -> raise (Error (Printf.sprintf "cannot take address of '%s'" name)))
+  | AddrOf inner ->
+      (match inner.desc with
+       | Var name ->
+           (match Hashtbl.find_opt locals name with
+            | Some (Mut (ast_ty, alloca)) -> (TypePtr ast_ty, alloca)
+            | Some (Imm _) ->
+                raise (Error (Printf.sprintf "BUG: addrof immutable '%s' (should be caught by type_inf)" name))
+            | None ->
+                (* グローバル変数のアドレス取得: LLVM global value はすでにポインタ *)
+                match Hashtbl.find_opt global_vars name with
+                | Some (ast_ty, ptr) -> (TypePtr ast_ty, ptr)
+                | None -> raise (Error (Printf.sprintf "cannot take address of '%s'" name)))
+       | FieldGet (base_expr, fname) ->
+           (* &expr.field — GEP でフィールドへのポインタを取得（load しない）*)
+           let (base_ty, base_v) = gen_expr locals base_expr in
+           let sname = match base_ty with
+             | TypeNamed s        -> s
+             | TypePtr (TypeNamed s) -> s
+             | _ -> raise (Error (Printf.sprintf
+                 "field address '.%s' on non-struct type" fname))
+           in
+           let (idx, field_ty) = field_info sname fname in
+           let llty = Hashtbl.find struct_lltypes sname in
+           let field_ptr = build_in_bounds_gep llty base_v
+             [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
+             (fname ^ "_addr") builder
+           in
+           (TypePtr field_ty, field_ptr)
+       | _ ->
+           raise (Error "& requires a variable or struct field"))
 
   | BinOp (op, e1, e2) ->
       let (ty1, v1) = gen_expr locals e1 in

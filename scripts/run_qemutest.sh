@@ -119,6 +119,7 @@ run_test "preempt"   examples/preempt/kernel.elf   examples/preempt/preempt.expe
 run_test "semaphore" examples/semaphore/kernel.elf examples/semaphore/semaphore.expected
 run_test "condvar"   examples/condvar/kernel.elf   examples/condvar/condvar.expected
 run_test "struct"    examples/struct/kernel.elf    examples/struct/struct.expected
+run_test "msgqueue"  examples/msgqueue/kernel.elf  examples/msgqueue/msgqueue.expected
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

@@ -13,12 +13,15 @@ struct SchedState {
     tcb_sp:       [int; 3];
 }
 
-struct Channel {
-    mutex:      int;
-    not_empty:  int;
-    not_full:   int;
-    item:       int;
-    item_count: int;
+struct MsgQueue {
+    mutex:     int;
+    not_empty: int;
+    not_full:  int;
+    buf:       [int; 8];
+    head:      int;
+    tail:      int;
+    count:     int;
+    cap:       int;
 }
 
 fn uart_putc(c: char) {
@@ -62,14 +65,44 @@ fn cond_signal(seq: *int) {
     *seq = *seq + 1;
 }
 
-let ch: Channel;
+let mq: MsgQueue;
 
-let produced:    int = 0;
-let consumed:    int = 0;
+fn mq_init(cap: int) {
+    mq.mutex     = 1;
+    mq.not_empty = 0;
+    mq.not_full  = 0;
+    mq.head      = 0;
+    mq.tail      = 0;
+    mq.count     = 0;
+    mq.cap       = cap;
+}
 
-let task_a_done: int = 0;
-let task_b_done: int = 0;
-let sched_done:  int = 0;
+fn mq_send(val: int) {
+    mutex_lock(&mq.mutex);
+    while (mq.count >= mq.cap) {
+        cond_wait(&mq.not_full, &mq.mutex);
+    }
+    let buf: *int = mq.buf;
+    buf[mq.tail] = val;
+    mq.tail  = (mq.tail  + 1) % mq.cap;
+    mq.count = mq.count + 1;
+    cond_signal(&mq.not_empty);
+    mutex_unlock(&mq.mutex);
+}
+
+fn mq_recv() -> int {
+    mutex_lock(&mq.mutex);
+    while (mq.count == 0) {
+        cond_wait(&mq.not_empty, &mq.mutex);
+    }
+    let buf: *int = mq.buf;
+    let val: int = buf[mq.head];
+    mq.head  = (mq.head  + 1) % mq.cap;
+    mq.count = mq.count - 1;
+    cond_signal(&mq.not_full);
+    mutex_unlock(&mq.mutex);
+    return val;
+}
 
 let gic:   GicRegs;
 let sched: SchedState;
@@ -95,9 +128,6 @@ fn setup_task_stack(s: *char, f: fn() -> void) -> int {
     *p_x30 = task_exit_stub;
     return base as int;
 }
-
-let stack_a: [char; 4096];
-let stack_b: [char; 4096];
 
 fn gic_setup() {
     gic.distr_ctlr  = 0x08000000;
@@ -136,21 +166,20 @@ fn irq_dispatch(frame_sp: int) -> int {
     return frame_sp;
 }
 
+let producer_done: int = 0;
+let consumer_done: int = 0;
+let sched_done:    int = 0;
+
+let stack_a: [char; 4096];
+let stack_b: [char; 4096];
+
 fn task_producer() {
     let mut i: int = 0;
     while (i < 5) {
-        mutex_lock(&ch.mutex);
-        while (ch.item_count >= 1) {
-            cond_wait(&ch.not_full, &ch.mutex);
-        }
-        ch.item       = i;
-        ch.item_count = 1;
-        produced = produced + 1;
-        cond_signal(&ch.not_empty);
-        mutex_unlock(&ch.mutex);
+        mq_send(i);
         i = i + 1;
     }
-    task_a_done = 1;
+    producer_done = 1;
     let p: *int = &sched_done;
     while (*p == 0) {}
 }
@@ -158,43 +187,30 @@ fn task_producer() {
 fn task_consumer() {
     let mut i: int = 0;
     while (i < 5) {
-        mutex_lock(&ch.mutex);
-        while (ch.item_count == 0) {
-            cond_wait(&ch.not_empty, &ch.mutex);
-        }
-        consumed      = consumed + 1;
-        ch.item_count = 0;
-        cond_signal(&ch.not_full);
-        mutex_unlock(&ch.mutex);
+        let v: int = mq_recv();
+        uart_puts("recv: ");
+        print_uint(v);
+        uart_puts("\r\n");
         i = i + 1;
     }
-    task_b_done = 1;
+    consumer_done = 1;
     let p: *int = &sched_done;
     while (*p == 0) {}
 }
 
 fn main() {
-    ch.mutex     = 1;
-    ch.not_empty = 0;
-    ch.not_full  = 0;
-    ch.item_count = 0;
     gic_setup();
+    mq_init(4);
     sched.task_count   = 3;
     sched.current_task = 0;
     let sp: *int = sched.tcb_sp;
     sp[1] = setup_task_stack(stack_a + 4096, task_producer);
     sp[2] = setup_task_stack(stack_b + 4096, task_consumer);
     timer_init();
-    let pa: *int = &task_a_done;
-    let pb: *int = &task_b_done;
-    while (*pa == 0 || *pb == 0) {}
+    let pp: *int = &producer_done;
+    let pc: *int = &consumer_done;
+    while (*pp == 0 || *pc == 0) {}
     disable_cntp();
     sched_done = 1;
-    uart_puts("produced: ");
-    print_uint(produced);
-    uart_puts("\r\n");
-    uart_puts("consumed: ");
-    print_uint(consumed);
-    uart_puts("\r\n");
     uart_puts("done\r\n");
 }

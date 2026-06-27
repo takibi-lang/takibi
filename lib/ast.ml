@@ -34,7 +34,7 @@ and expr_desc =
   | Call of ident * expr list
   | BinOp of binop * expr * expr
   | Deref of expr           (* *expr  — read through pointer *)
-  | AddrOf of ident         (* &ident — take address of a local *)
+  | AddrOf of expr          (* &lvalue — variable or struct field address *)
   | Cast of type_expr * expr  (* expr as T — explicit type cast *)
   | FieldGet of expr * string  (* expr.field — read a struct field *)
 [@@deriving show]
