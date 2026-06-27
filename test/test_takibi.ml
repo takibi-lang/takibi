@@ -213,6 +213,28 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  Alcotest.test_case "*io int param type parses" `Quick (fun () ->
+    match parse "fn f(p: *io int) {}" with
+    | [Ast.FuncDef { params = [(_, Some t)]; _ }] ->
+        Alcotest.check type_t "param type is *io int"
+          (Ast.TypePtr (Ast.TypeIo Ast.TypeInt)) t
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "bare io type in global let parses" `Quick (fun () ->
+    match parse "let flag: io int;" with
+    | [Ast.LetDef (_, Some t, None)] ->
+        Alcotest.check type_t "type is io int" (Ast.TypeIo Ast.TypeInt) t
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "io type in struct field parses" `Quick (fun () ->
+    match parse "struct S { done: io int; }" with
+    | [Ast.StructDef (_, [(_, t)])] ->
+        Alcotest.check type_t "field type is io int" (Ast.TypeIo Ast.TypeInt) t
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
   Alcotest.test_case "deref expression" `Quick (fun () ->
     match parse "fn f(p: *int) int { return *p; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
@@ -869,6 +891,31 @@ let infer_tests = [
       (Ast.TypePtr Ast.TypeInt)
       (Types.StringMap.find "p" fi.Types.local_types)
   );
+
+  (* ── io 修飾型の型推論 ──────────────────────────────────────────── *)
+
+  Alcotest.test_case "deref *io int param yields int" `Quick (fun () ->
+    let pt = infer "fn f(p: *io int) int { return *p; }" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
+    Alcotest.check type_t "return type is int" Ast.TypeInt fi.Types.ret_type
+  );
+
+  Alcotest.test_case "addrof io int global yields *io int" `Quick (fun () ->
+    let pt = infer "let flag: io int;\nfn f() { let p: *io int = &flag; }" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
+    Alcotest.check type_t "p has type *io int"
+      (Ast.TypePtr (Ast.TypeIo Ast.TypeInt))
+      (Types.StringMap.find "p" fi.Types.local_types)
+  );
+
+  Alcotest.test_case "assign int to io int global type-checks" `Quick
+    (expect_ok "let flag: io int;\nfn f() { flag = 1; }");
+
+  Alcotest.test_case "io int global in comparison type-checks" `Quick
+    (expect_ok "let flag: io int;\nfn f() int { if (flag == 0) { return 1; } return 0; }");
+
+  Alcotest.test_case "io int struct field type-checks" `Quick
+    (expect_ok "struct S { done: io int; }\nlet s: S;\nfn f() { s.done = 1; }");
 
   Alcotest.test_case "deref non-pointer is a type error" `Quick
     (expect_type_error "cannot unify"

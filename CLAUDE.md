@@ -34,9 +34,12 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
 - `s.field = v` — フィールド書き込み（ローカル変数名への直接 dot 代入のみ、式の左辺は不可）
 - `&s` — 構造体変数のアドレス取得（`*Name` を返す、関数への pass by pointer に使う）
 - `extern fn name(params) -> ret;` — 外部アセンブリ関数宣言（LLVM `declare` を emit する）
-- MMIO: `*io T` 型ポインタ経由でアクセスする。`*p`（`p: *io T`）は volatile load、`*p = v` は volatile store
+- MMIO・volatile: `io T` は volatile 修飾値型。`*io T`（= `TypePtr(TypeIo T)`）は volatile MMIOポインタ
+  - `*io T` ポインタ: `*p` は volatile load、`*p = v` は volatile store
   - `*T`（通常ポインタ）の load/store は non-volatile（LLVMが最適化可能）
-  - 割り込みハンドラと共有するフラグは `let p: *io int = &flag as *io int; while (*p == 0) {}` の形で読む
+  - `io T` 変数（例 `let flag: io int;`）への直接アクセスも全て volatile
+  - `&io_var` は自動で `*io T` を返す（`as *io int` キャスト不要）
+  - 割り込みハンドラと共有するフラグ: `let flag: io int; while (flag == 0) {}` の形で読む
 
 ## ビルドコマンド
 
@@ -216,7 +219,7 @@ takibi
 
 ### MMIO と通常ポインタの区別（`io T`、`*io T` vs `*T`）
 
-**型の関係（案B設計）**:
+**型の関係**:
 - `io T` — volatile修飾値型（AST: `TypeIo T`）。LLVM型はTと同じ。記憶域修飾子。
 - `*io T` — volatile MMIOポインタ（AST: `TypePtr (TypeIo T)`）。LLVMはopaque ptr。
 - `*T` — 通常ポインタ（AST: `TypePtr T`）。non-volatile。
@@ -240,9 +243,9 @@ takibi
 ### グローバル変数 volatile 読み出し（割り込み共有フラグ）
 LLVM は `while (flag == 0) {}` のようなタイトループで、グローバル変数の load をループ外に
 ホイストすることがある（結果: `cbz reg, self` の無限ループ）。
-割り込みハンドラと共有するフラグは `io int` として宣言するか、`*io int` ポインタ経由で読む:
+割り込みハンドラと共有するフラグには `io int` を使う:
 
-**案B（推奨）**: 変数宣言に `io` を付ける:
+割り込みハンドラと共有するフラグは `io int` として宣言する:
 ```takibi
 let sched_done: io int = 0;        // volatile グローバル宣言
 sched_done = 1;                    // volatile store（自動）
