@@ -144,6 +144,17 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
            raise (TypeError (e.loc,
              Printf.sprintf "no field '%s' in struct '%s'" fname sname)))
 
+  | Index (id, idx) ->
+      (* 変数の元の型を取得（Var と違い array decay をしない）*)
+      let vt = lookup e.loc id tyenv in
+      let it = infer_expr senv tyenv fenv idx in
+      unify_at idx.loc it TInt;
+      (match repr vt with
+       | TArray (elem, _) -> elem              (* [T; N] → 要素型 T を返す（サイズNはcodegen用）*)
+       | TPtr   elem      -> strip_io elem     (* *T または *io T → T を返す（境界不明）*)
+       | _ -> raise (TypeError (e.loc,
+           Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt))))
+
   | StructLit _ ->
       raise (TypeError (e.loc,
         "struct literal requires a type annotation: `let mut x: Name = {...}`"))
@@ -249,6 +260,21 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
       let vt = infer_expr senv tyenv fenv val_expr in
       unify_at val_expr.loc vt inner;
       (tyenv, raw_locals)
+  | AssignIndex (id, idx, rhs) ->
+      (* 変数の元の型で判別（[T; N] vs *T）。tyenv には decay 前の型が入っている *)
+      let vt = lookup s.loc id tyenv in
+      let it = infer_expr senv tyenv fenv idx in
+      let rt = infer_expr senv tyenv fenv rhs in
+      unify_at idx.loc it TInt;
+      let elem_ty = match repr vt with
+        | TArray (elem, _) -> elem
+        | TPtr   elem      -> strip_io elem
+        | _ -> raise (TypeError (s.loc,
+            Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))
+      in
+      unify_at rhs.loc rt elem_ty;
+      (tyenv, raw_locals)
+
   | AssignField (base_expr, fname, val_expr) ->
       let bt = infer_expr senv tyenv fenv base_expr in
       let sname = match repr bt with

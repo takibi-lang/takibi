@@ -39,6 +39,7 @@ and expr_desc =
   | Cast of type_expr * expr  (* expr as T — explicit type cast *)
   | FieldGet of expr * string  (* expr.field — read a struct field *)
   | StructLit of expr list     (* { e, e, ... } — positional struct literal *)
+  | Index of ident * expr      (* arr[idx] — preserves array/pointer type for bounds checking *)
 [@@deriving show]
 
 type stmt = stmt_desc located
@@ -48,6 +49,7 @@ and stmt_desc =
   | Assign of ident * expr
   | AssignDeref of expr * expr   (* *lhs = rhs — write through pointer *)
   | AssignField of expr * string * expr  (* base.field = rhs — write a struct field *)
+  | AssignIndex of ident * expr * expr  (* arr[idx] = rhs — indexed write with bounds check *)
   | Block of stmt list
   | Let of bool * ident * type_expr option * expr option  (* is_mutable, name, type, init *)
   | If of expr * stmt list * stmt list

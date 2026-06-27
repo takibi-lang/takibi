@@ -503,16 +503,14 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  Alcotest.test_case "array write arr[i]=v desugars to AssignDeref" `Quick (fun () ->
+  Alcotest.test_case "array write arr[i]=v produces AssignIndex" `Quick (fun () ->
     match parse "fn f(arr: *char, i: int) { arr[i] = 'X'; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.AssignDeref (
-             { desc = Ast.BinOp (Ast.Add,
-                 { desc = Ast.Var "arr"; _ },
-                 { desc = Ast.Var "i"; _ }); _ },
+         | Ast.AssignIndex ("arr",
+             { desc = Ast.Var "i"; _ },
              { desc = Ast.IntLit 88; _ }) -> ()   (* 'X' = 88 *)
-         | _ -> Alcotest.fail "expected AssignDeref(BinOp(Add,arr,i), 'X')")
+         | _ -> Alcotest.fail "expected AssignIndex(arr, Var i, IntLit 88)")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -527,26 +525,23 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  Alcotest.test_case "array indexing desugars to Deref(Add(arr,idx))" `Quick (fun () ->
+  Alcotest.test_case "array indexing arr[i] produces Index node" `Quick (fun () ->
     match parse "fn f(arr: *char, i: int) char { return arr[i]; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.Deref
-             { desc = Ast.BinOp (Ast.Add,
-                 { desc = Ast.Var "arr"; _ },
-                 { desc = Ast.Var "i"; _ }); _ }; _ } -> ()
-         | _ -> Alcotest.fail "expected Return(Deref(BinOp(Add, arr, i)))")
+         | Ast.Return { desc = Ast.Index ("arr", { desc = Ast.Var "i"; _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Return(Index(arr, Var i))")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
   Alcotest.test_case "arr[i] binds tighter than addition" `Quick (fun () ->
-    (* a + arr[i]  should parse as  a + deref(arr+i), not deref(a+arr)[i] *)
+    (* a + arr[i]  should parse as  a + Index(arr,i), not Index(a+arr,i) *)
     match parse "fn f(a: int, arr: *char, i: int) int { return a + arr[i]; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Add, { desc = Ast.Var "a"; _ },
-                                 { desc = Ast.Deref _; _ }); _ } -> ()
-         | _ -> Alcotest.fail "expected Add(a, Deref(...)) — [] must bind tighter than +")
+                                 { desc = Ast.Index ("arr", _); _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Add(a, Index(arr,...)) — [] must bind tighter than +")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -990,7 +985,7 @@ let infer_tests = [
     (expect_ok "fn f(arr: *char) { arr[0] = 'A'; }");
 
   Alcotest.test_case "array write to non-pointer is a type error" `Quick
-    (expect_type_error "cannot unify"
+    (expect_type_error "non-array/pointer"
        "fn f(n: int) { n[0] = 1; }");
 
   Alcotest.test_case "array write with deref index buf[*ptr]=val type-checks" `Quick

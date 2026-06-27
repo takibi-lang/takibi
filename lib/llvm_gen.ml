@@ -157,6 +157,23 @@ let resolve_ret_ast (pt : Types.program_types option) fname ty_opt =
       | None    -> fallback
       | Some fi -> fi.Types.ret_type
 
+(* ── Bounds check ───────────────────────────────────────────────────────── *)
+(* [T; N] 配列の境界チェック。idx >= N（符号なし比較）なら llvm.trap で停止。
+   符号なし比較により idx < 0 の負インデックスも同時に捕捉できる。 *)
+let emit_bounds_check idx_v n =
+  let cur_f  = block_parent (insertion_block builder) in
+  let oob_bb = append_block context "oob"    cur_f in
+  let ok_bb  = append_block context "idx_ok" cur_f in
+  let n_llv  = const_int (i32_type context) n in
+  let cmp    = build_icmp Icmp.Uge idx_v n_llv "oob_cmp" builder in
+  ignore (build_cond_br cmp oob_bb ok_bb builder);
+  position_at_end oob_bb builder;
+  let trap_ft = function_type (void_type context) [||] in
+  let trap_fn = declare_function "llvm.trap" trap_ft the_module in
+  ignore (build_call trap_ft trap_fn [||] "" builder);
+  ignore (build_unreachable builder);
+  position_at_end ok_bb builder
+
 (* ── Expression codegen ─────────────────────────────────────────────────── *)
 (* Returns (ast_type, llvalue).  ast_type is needed for Deref to know
    the element type when emitting a load instruction (LLVM 19 opaque ptrs). *)
@@ -386,6 +403,57 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            in
            (field_ty, v'))
 
+  | Index (id, idx) ->
+      let idx_v = to_i32 (snd (gen_expr locals idx)) in
+      (* [T; N] 配列のロード: 境界チェックあり。GEP は [0, idx] で要素を指す *)
+      let load_from_array elem_ty n arr_ptr =
+        emit_bounds_check idx_v n;
+        let arr_ll = array_type (ltype_of_ast elem_ty) n in
+        let zero   = const_int (i32_type context) 0 in
+        let ep = build_in_bounds_gep arr_ll arr_ptr [|zero; idx_v|] "idx_ptr" builder in
+        let v  = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
+        let v' = match elem_ty with TypeInt | TypeChar -> to_i32 v | _ -> v in
+        (elem_ty, v')
+      in
+      (* ポインタ変数のロード: 境界チェックなし。ptr_v は実際のポインタ値 *)
+      let load_through_ptr elem_ty ptr_v is_volatile =
+        let ep = build_gep (ltype_of_ast elem_ty) ptr_v [|idx_v|] "idx_ptr" builder in
+        let v  = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
+        if is_volatile then set_volatile true v;
+        let v' = match elem_ty with TypeInt | TypeChar -> to_i32 v | _ -> v in
+        (elem_ty, v')
+      in
+      (match Hashtbl.find_opt locals id with
+       | Some (Mut (TypeArray (elem_ty, n), ptr)) ->
+           load_from_array elem_ty n ptr
+       | Some (Mut (TypePtr (TypeIo elem_ty), alloca_ptr)) ->
+           (* *io T 変数: alloca からポインタ値をロードし、volatile アクセス *)
+           let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
+           load_through_ptr elem_ty ptr_v true
+       | Some (Mut (TypePtr elem_ty, alloca_ptr)) ->
+           let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
+           load_through_ptr elem_ty ptr_v false
+       | Some (Imm (TypePtr (TypeIo elem_ty), ptr_v)) ->
+           load_through_ptr elem_ty ptr_v true
+       | Some (Imm (TypePtr elem_ty, ptr_v)) ->
+           load_through_ptr elem_ty ptr_v false
+       | Some _ ->
+           raise (Error (Printf.sprintf "Index: '%s' is not an array or pointer" id))
+       | None ->
+           (match Hashtbl.find_opt global_vars id with
+            | Some (TypeArray (elem_ty, n), gptr) ->
+                load_from_array elem_ty n gptr
+            | Some (TypePtr (TypeIo elem_ty), gptr) ->
+                let ptr_v = build_load (pointer_type context) gptr id builder in
+                load_through_ptr elem_ty ptr_v true
+            | Some (TypePtr elem_ty, gptr) ->
+                let ptr_v = build_load (pointer_type context) gptr id builder in
+                load_through_ptr elem_ty ptr_v false
+            | Some _ ->
+                raise (Error (Printf.sprintf "Index: '%s' is not an array or pointer" id))
+            | None ->
+                raise (Error (Printf.sprintf "Index: undefined variable '%s'" id))))
+
   | StructLit _ ->
       raise (Error "BUG: StructLit must be handled in gen_stmt / gen_global, not gen_expr")
 
@@ -558,6 +626,51 @@ let gen_func ?prog_types fdef =
         in
         let inst = build_store coerced ptr_v builder in
         if is_volatile then set_volatile true inst
+
+    | AssignIndex (id, idx, rhs) ->
+        let idx_v = to_i32 (snd (gen_expr locals idx)) in
+        let (_, rhs_v) = gen_expr locals rhs in
+        let store_to_array elem_ty n arr_ptr =
+          emit_bounds_check idx_v n;
+          let arr_ll = array_type (ltype_of_ast elem_ty) n in
+          let zero   = const_int (i32_type context) 0 in
+          let ep = build_in_bounds_gep arr_ll arr_ptr [|zero; idx_v|] "idx_ptr" builder in
+          ignore (build_store (coerce rhs_v elem_ty) ep builder)
+        in
+        let store_through_ptr elem_ty ptr_v is_volatile =
+          let ep = build_gep (ltype_of_ast elem_ty) ptr_v [|idx_v|] "idx_ptr" builder in
+          let inst = build_store (coerce rhs_v elem_ty) ep builder in
+          if is_volatile then set_volatile true inst
+        in
+        (match Hashtbl.find_opt locals id with
+         | Some (Mut (TypeArray (elem_ty, n), ptr)) ->
+             store_to_array elem_ty n ptr
+         | Some (Mut (TypePtr (TypeIo elem_ty), alloca_ptr)) ->
+             let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
+             store_through_ptr elem_ty ptr_v true
+         | Some (Mut (TypePtr elem_ty, alloca_ptr)) ->
+             let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
+             store_through_ptr elem_ty ptr_v false
+         | Some (Imm (TypePtr (TypeIo elem_ty), ptr_v)) ->
+             store_through_ptr elem_ty ptr_v true
+         | Some (Imm (TypePtr elem_ty, ptr_v)) ->
+             store_through_ptr elem_ty ptr_v false
+         | Some _ ->
+             raise (Error (Printf.sprintf "AssignIndex: '%s' is not an array or pointer" id))
+         | None ->
+             (match Hashtbl.find_opt global_vars id with
+              | Some (TypeArray (elem_ty, n), gptr) ->
+                  store_to_array elem_ty n gptr
+              | Some (TypePtr (TypeIo elem_ty), gptr) ->
+                  let ptr_v = build_load (pointer_type context) gptr id builder in
+                  store_through_ptr elem_ty ptr_v true
+              | Some (TypePtr elem_ty, gptr) ->
+                  let ptr_v = build_load (pointer_type context) gptr id builder in
+                  store_through_ptr elem_ty ptr_v false
+              | Some _ ->
+                  raise (Error (Printf.sprintf "AssignIndex: '%s' is not an array or pointer" id))
+              | None ->
+                  raise (Error (Printf.sprintf "AssignIndex: undefined variable '%s'" id))))
 
     | AssignField (base_expr, fname, val_expr) ->
         let (base_ty, base_v) = gen_expr locals base_expr in

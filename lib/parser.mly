@@ -103,11 +103,8 @@ stmt:
   | id = IDENT ASSIGN e = expr SEMI
     { { desc = Assign (id, e); loc = $symbolstartpos } }
   | id = IDENT LBRACKET idx = expr RBRACKET ASSIGN rhs = expr SEMI
-    (* arr[i] = v  desugars to  *(arr + i) = v *)
-    { let loc = $symbolstartpos in
-      let arr = { desc = Var id; loc } in
-      let ptr = { desc = BinOp (Add, arr, idx); loc } in
-      { desc = AssignDeref (ptr, rhs); loc } }
+    (* arr[i] = rhs — preserves id+size for bounds checking in codegen *)
+    { { desc = AssignIndex (id, idx, rhs); loc = $symbolstartpos } }
   | TIMES id = IDENT ASSIGN rhs = expr SEMI
     (* *p = v  — simple pointer-deref write *)
     { let loc = $symbolstartpos in
@@ -159,11 +156,8 @@ expr:
   | e = expr AS t = type_expr
     { { desc = Cast (t, e); loc = $symbolstartpos } }
   | id = IDENT LBRACKET idx = expr RBRACKET
-    (* arr[i] desugars to *(arr + i) — array decay to pointer happens in codegen *)
-    { let loc = $symbolstartpos in
-      let arr = { desc = Var id; loc } in
-      let add = { desc = BinOp (Add, arr, idx); loc } in
-      { desc = Deref add; loc } }
+    (* arr[i] — preserved as Index node; codegen emits bounds check for [T;N] arrays *)
+    { { desc = Index (id, idx); loc = $symbolstartpos } }
   | e = expr DOT fname = IDENT
     (* e.field — struct field read; works for both Struct and *Struct *)
     { { desc = FieldGet (e, fname); loc = $symbolstartpos } }
