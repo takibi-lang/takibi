@@ -1,7 +1,7 @@
 // 配列の読み書きと関数への decay のデモ。
 // [char; 8] 配列を宣言し arr[i]=v / arr[i] で読み書き、fill() に *char として渡す。
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000; // PL011 UART DR
+    let dr: *io char = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 

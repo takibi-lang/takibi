@@ -2,12 +2,12 @@
 // プロデューサーが 0〜4 を送信し、コンシューサーが受信して表示する。
 // MsgQueue はリングバッファ + mutex + not_empty/not_full の condvar で実装。
 struct GicRegs {
-    distr_ctlr:  *int;
-    distr_isen0: *int;
-    cpu_ctlr:    *int;
-    cpu_pmr:     *int;
-    cpu_iar:     *int;
-    cpu_eoir:    *int;
+    distr_ctlr:  *io int;
+    distr_isen0: *io int;
+    cpu_ctlr:    *io int;
+    cpu_pmr:     *io int;
+    cpu_iar:     *io int;
+    cpu_eoir:    *io int;
 }
 
 struct SchedState {
@@ -18,8 +18,8 @@ struct SchedState {
 
 struct MsgQueue {
     mutex:     int;
-    not_empty: int;
-    not_full:  int;
+    not_empty: io int;
+    not_full:  io int;
     buf:       [int; 8];
     head:      int;
     tail:      int;
@@ -28,7 +28,7 @@ struct MsgQueue {
 }
 
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000; // PL011 UART DR
+    let dr: *io char = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
@@ -57,14 +57,14 @@ fn mutex_unlock(m: *int) {
     sem_post(m);
 }
 
-fn cond_wait(seq: *int, m: *int) {
+fn cond_wait(seq: *io int, m: *int) {
     let s: int = *seq;
     mutex_unlock(m);
     while (*seq == s) {}
     mutex_lock(m);
 }
 
-fn cond_signal(seq: *int) {
+fn cond_signal(seq: *io int) {
     *seq = *seq + 1;
 }
 
@@ -150,9 +150,9 @@ fn irq_dispatch(frame_sp: int) -> int {
     return frame_sp;
 }
 
-let producer_done: int = 0;
-let consumer_done: int = 0;
-let sched_done:    int = 0;
+let producer_done: io int = 0;
+let consumer_done: io int = 0;
+let sched_done:    io int = 0;
 
 let stack_a: [char; 4096];
 let stack_b: [char; 4096];
@@ -164,7 +164,7 @@ fn task_producer() {
         i = i + 1;
     }
     producer_done = 1;
-    let p: *int = &sched_done;
+    let p: *io int = &sched_done;
     while (*p == 0) {}
 }
 
@@ -178,7 +178,7 @@ fn task_consumer() {
         i = i + 1;
     }
     consumer_done = 1;
-    let p: *int = &sched_done;
+    let p: *io int = &sched_done;
     while (*p == 0) {}
 }
 
@@ -187,8 +187,8 @@ fn main() {
     sp[1] = setup_task_stack(stack_a + 4096, task_producer);
     sp[2] = setup_task_stack(stack_b + 4096, task_consumer);
     timer_init();
-    let pp: *int = &producer_done;
-    let pc: *int = &consumer_done;
+    let pp: *io int = &producer_done;
+    let pc: *io int = &consumer_done;
     while (*pp == 0 || *pc == 0) {}
     disable_cntp();
     sched_done = 1;

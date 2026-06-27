@@ -20,7 +20,8 @@ type type_expr =
   | TypeInt
   | TypeChar
   | TypeVoid
-  | TypePtr of type_expr           (* *T *)
+  | TypePtr of type_expr           (* *T     — regular pointer, non-volatile *)
+  | TypeIo  of type_expr           (* io T   — volatile-qualified value type; *io T = TypePtr(TypeIo T) *)
   | TypeArray of type_expr * int   (* [T; N] *)
   | TypeFn of type_expr list * type_expr  (* fn(T...) -> R *)
   | TypeNamed of string            (* struct type by name *)

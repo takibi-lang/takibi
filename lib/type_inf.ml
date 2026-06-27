@@ -13,6 +13,9 @@ let lookup_binding loc name env =
 
 let lookup loc name env = fst (lookup_binding loc name env)
 
+(* io T is a storage qualifier; strip it to get the value type for expression checks *)
+let strip_io t = match repr t with TIo inner -> inner | _ -> t
+
 let unify_at loc t1 t2 =
   try unify t1 t2
   with Unify_error msg -> raise (TypeError (loc, msg))
@@ -27,8 +30,11 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
       (* まずローカル/グローバル変数を探す *)
       (match StringMap.find_opt name tyenv with
        | Some (t, _) ->
-           (* 配列型は式中でポインタにデケイする（Cと同じ） *)
-           (match repr t with TArray (inner, _) -> TPtr inner | _ -> t)
+           (* 配列型はポインタにデケイ。io T は値型として T を返す（volatileはcodegen担当）*)
+           (match repr t with
+            | TArray (inner, _) -> TPtr inner
+            | TIo    inner      -> inner
+            | _                 -> t)
        | None ->
            (* 関数名を値（関数ポインタ）として使う場合 *)
            match StringMap.find_opt name fenv with
@@ -41,7 +47,7 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
       let t2 = infer_expr senv tyenv fenv e2 in
       (match op with
        | Add ->
-           (* ポインタ算術: ptr + int → 同じポインタ型を返す *)
+           (* ポインタ算術: ptr + int → 同じポインタ型を返す。TIo は値型なので対象外 *)
            (match repr t1, repr t2 with
             | TPtr _, _ -> t1
             | _, TPtr _ -> t2
@@ -50,7 +56,7 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
                 unify_at e2.loc t2 TInt;
                 TInt)
        | Sub ->
-           (* ポインタ算術: ptr - int → 同じポインタ型を返す *)
+           (* ポインタ算術: ptr - int → 同じポインタ型を返す。TIo は値型なので対象外 *)
            (match repr t1 with
             | TPtr _ ->
                 unify_at e2.loc t2 TInt;
@@ -71,10 +77,15 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
            unify_at e2.loc t2 TInt;
            TInt)
   | Deref e1 ->
-      let inner = fresh () in
       let t1 = infer_expr senv tyenv fenv e1 in
-      unify_at e1.loc t1 (TPtr inner);
-      inner
+      (match repr t1 with
+       | TPtr inner ->
+           (* *io T deref は T を返す（io は記憶域修飾子; volatileはcodegenで処理）*)
+           strip_io inner
+       | _ ->
+           let inner = fresh () in
+           unify_at e1.loc t1 (TPtr inner);
+           inner)
   | AddrOf inner ->
       (match inner.desc with
        | Var name ->
@@ -86,7 +97,7 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
        | FieldGet (base_expr, fname) ->
            let bt = infer_expr senv tyenv fenv base_expr in
            let sname = match repr bt with
-             | TStruct s | TPtr (TStruct s) -> s
+             | TStruct s | TPtr (TStruct s) | TPtr (TIo (TStruct s)) -> s
              | _ -> raise (TypeError (base_expr.loc,
                  Printf.sprintf "field address '.%s' on non-struct type '%s'"
                    fname (to_string bt)))
@@ -109,8 +120,9 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
   | FieldGet (base_expr, fname) ->
       let bt = infer_expr senv tyenv fenv base_expr in
       let sname = match repr bt with
-        | TStruct s        -> s
-        | TPtr (TStruct s) -> s
+        | TStruct s                      -> s
+        | TPtr   (TStruct s)             -> s
+        | TPtr   (TIo (TStruct s))       -> s   (* *io Struct のフィールド読み出し *)
         | _ ->
             raise (TypeError (base_expr.loc,
               Printf.sprintf "field access '.%s' on non-struct type '%s'"
@@ -126,7 +138,8 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
        | Some ft ->
            (match of_ast ft with
             | TArray (inner, _) -> TPtr inner  (* 配列フィールドは *elem に decay *)
-            | t -> t)
+            | TIo    inner      -> inner        (* io フィールドは値型 T を返す（volatile はcodegen）*)
+            | t                 -> t)
        | None ->
            raise (TypeError (e.loc,
              Printf.sprintf "no field '%s' in struct '%s'" fname sname)))
@@ -194,7 +207,8 @@ let rec check_expr senv tyenv fenv (e : Ast.expr) (expected : ty) : unit =
       ) fields exprs
   | _ ->
       let te = infer_expr senv tyenv fenv e in
-      unify_at e.loc te expected
+      (* io T が期待型の場合: T との互換性で確認（記憶域修飾子を剥がす）*)
+      unify_at e.loc te (strip_io expected)
 
 (* ── Statement inference ─────────────────────────────────────────────────── *)
 (* Returns (updated_tyenv, updated_raw_locals).
@@ -218,20 +232,29 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
         raise (TypeError (s.loc,
           Printf.sprintf "cannot assign to immutable variable '%s'; use 'let mut'" name));
       let ety = infer_expr senv tyenv fenv e in
-      unify_at e.loc vty ety;
+      (* io T 変数への代入: T との互換性で確認（io は記憶域修飾子なので剥がす）*)
+      unify_at e.loc (strip_io vty) ety;
       (tyenv, raw_locals)
   | AssignDeref (ptr_expr, val_expr) ->
-      let inner = fresh () in
       let pt = infer_expr senv tyenv fenv ptr_expr in
-      unify_at ptr_expr.loc pt (TPtr inner);
+      let inner = match repr pt with
+        | TPtr i ->
+            (* *io T ポインタ経由の書き込み: inner は TIo T なので剥がして T で確認 *)
+            strip_io i
+        | _ ->
+            let inner = fresh () in
+            unify_at ptr_expr.loc pt (TPtr inner);
+            inner
+      in
       let vt = infer_expr senv tyenv fenv val_expr in
       unify_at val_expr.loc vt inner;
       (tyenv, raw_locals)
   | AssignField (base_expr, fname, val_expr) ->
       let bt = infer_expr senv tyenv fenv base_expr in
       let sname = match repr bt with
-        | TStruct s        -> s
-        | TPtr (TStruct s) -> s
+        | TStruct s                      -> s
+        | TPtr   (TStruct s)             -> s
+        | TPtr   (TIo (TStruct s))       -> s
         | _ ->
             raise (TypeError (base_expr.loc,
               Printf.sprintf "field assignment '.%s' on non-struct type '%s'"
@@ -250,7 +273,8 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
               Printf.sprintf "no field '%s' in struct '%s'" fname sname))
       in
       let vt = infer_expr senv tyenv fenv val_expr in
-      unify_at val_expr.loc vt field_ty;
+      (* io フィールドへの代入: T との互換性で確認（io は記憶域修飾子なので剥がす）*)
+      unify_at val_expr.loc vt (strip_io field_ty);
       (tyenv, raw_locals)
   | Let (is_mut, name, ty_opt, expr_opt) ->
       let ty = of_ast_opt ty_opt in
@@ -271,7 +295,8 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
                 "literal { ... } requires a struct or array type annotation")))
        | Some e ->
            let et = infer_expr senv tyenv fenv e in
-           unify_at e.loc ty et);
+           (* io T アノテーション付き変数の初期化: T との互換性で確認 *)
+           unify_at e.loc (strip_io ty) et);
       ( StringMap.add name (ty, is_mut) tyenv,
         StringMap.add name ty raw_locals )
   | Block stmts ->
@@ -366,7 +391,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   "literal { ... } requires a struct or array type annotation")))
          | Some e ->
              let et = infer_expr senv genv fenv e in
-             (try unify ty et
+             (* グローバル io T 変数の初期値: T との互換性で確認 *)
+             (try unify (strip_io ty) et
               with Unify_error m -> raise (TypeError (e.loc, m))))
     | _ -> ()
   ) prog;

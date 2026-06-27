@@ -6,12 +6,12 @@
 // task_hung:    3回 wdt_kick(2) した後、意図的に kick を止める → タイムアウト検出
 
 struct GicRegs {
-    distr_ctlr:  *int;
-    distr_isen0: *int;
-    cpu_ctlr:    *int;
-    cpu_pmr:     *int;
-    cpu_iar:     *int;
-    cpu_eoir:    *int;
+    distr_ctlr:  *io int;
+    distr_isen0: *io int;
+    cpu_ctlr:    *io int;
+    cpu_pmr:     *io int;
+    cpu_iar:     *io int;
+    cpu_eoir:    *io int;
 }
 
 struct SchedState {
@@ -28,11 +28,11 @@ struct WdtState {
     tick:      int;
     last_kick: [int; 3];
     deadline:  [int; 3];
-    done:      int;
+    done:      io int;
 }
 
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000; // PL011 UART DR
+    let dr: *io char = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
@@ -64,8 +64,8 @@ let sched: SchedState = {3, 0, {0, 0, 0}};
 // deadline[2]=12 (task_hung は kick を止めるので約 12 tick でタイムアウト)
 let wdt: WdtState = {0, {0, 0, 0}, {0, 20, 12}, 0};
 
-let hung_fired: int = 0; // タイムアウト検出フラグ
-let hung_task:  int = 0; // タイムアウトしたタスク ID（hung_fired が 1 のときのみ有効）
+let hung_fired: io int = 0; // タイムアウト検出フラグ
+let hung_task:  io int = 0; // タイムアウトしたタスク ID（hung_fired が 1 のときのみ有効）
 
 fn wdt_kick(task_id: int) {
     let lk: *int = wdt.last_kick;
@@ -136,7 +136,7 @@ fn irq_dispatch(frame_sp: int) -> int {
 
 // wdt.done が立つまで定期的に kick を続ける — タイムアウトしないタスク
 fn task_healthy() {
-    let pd: *int = &wdt.done;
+    let pd: *io int = &wdt.done;
     while (*pd == 0) {
         wdt_kick(1);
     }
@@ -150,7 +150,7 @@ fn task_hung() {
         i = i + 1;
     }
     // ここで kick を止める → ウォッチドッグが deadline 超過を検出する
-    let pd: *int = &wdt.done;
+    let pd: *io int = &wdt.done;
     while (*pd == 0) {}
 }
 
@@ -166,8 +166,7 @@ fn main() {
 
     timer_init();
 
-    // hung_fired は volatile ポインタ経由で読む（グローバル直接読みはホイストされる可能性があるため）
-    let pf: *int = &hung_fired;
+    let pf: *io int = &hung_fired;
     while (*pf == 0) {}
 
     disable_cntp();

@@ -3,12 +3,12 @@
 // irq_dispatch は frame_sp を受け取り次タスクの sp を返す; startup.S の irq_entry がスタックを切り替える。
 // extern fn でシステムレジスタ操作 (cntfrq/cntp_tval/cntp_ctl) をアセンブリに委譲。
 struct GicRegs {
-    distr_ctlr: *int;
-    distr_isen0: *int;
-    cpu_ctlr:   *int;
-    cpu_pmr:    *int;
-    cpu_iar:    *int;
-    cpu_eoir:   *int;
+    distr_ctlr: *io int;
+    distr_isen0: *io int;
+    cpu_ctlr:   *io int;
+    cpu_pmr:    *io int;
+    cpu_iar:    *io int;
+    cpu_eoir:   *io int;
 }
 
 struct SchedState {
@@ -16,13 +16,13 @@ struct SchedState {
     current_task: int;
     max_ticks:    int;
     total_ticks:  int;
-    done:         int;
+    done:         io int;
     tick_counts:  [int; 3];
     tcb_sp:       [int; 3];
 }
 
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000; // PL011 UART DR
+    let dr: *io char = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
@@ -104,11 +104,13 @@ fn irq_dispatch(frame_sp: int) -> int {
 }
 
 fn task_a() {
-    while (sched.done == 0) {}
+    let pd: *io int = &sched.done;
+    while (*pd == 0) {}
 }
 
 fn task_b() {
-    while (sched.done == 0) {}
+    let pd: *io int = &sched.done;
+    while (*pd == 0) {}
 }
 
 fn main() {
@@ -116,7 +118,8 @@ fn main() {
     sp[1] = setup_task_stack(stack_a + 4096, task_a);
     sp[2] = setup_task_stack(stack_b + 4096, task_b);
     timer_init();
-    while (sched.done == 0) {}
+    let pd: *io int = &sched.done;
+    while (*pd == 0) {}
     let tc: *int = sched.tick_counts;
     uart_puts("main: ");
     print_uint(tc[0]);

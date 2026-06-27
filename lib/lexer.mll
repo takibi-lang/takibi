@@ -19,6 +19,7 @@ rule read = parse
   | "void"    { VOID_TYPE }
   | "extern"  { EXTERN }
   | "struct"  { STRUCT }
+  | "io"      { IO }
 
   | '{' { LBRACE }
   | '}' { RBRACE }

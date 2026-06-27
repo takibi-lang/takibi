@@ -1,6 +1,6 @@
 // ポインタ値を as int でキャストして16進表示するデモ。
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000; // PL011 UART DR
+    let dr: *io char = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
@@ -31,7 +31,7 @@ fn uart_print_hex(n: int) {
 fn main() {
     uart_puts("=== print_ptr test ===\r\n");
 
-    let uart: *char = 0x09000000;
+    let uart: *io char = 0x09000000;
     uart_puts("uart: ");
     uart_print_hex(uart as int);
     uart_puts("\r\n");

@@ -1,6 +1,6 @@
 // UART echo サーバ。入力を即座に折り返し、q + Enter で終了する。
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000; // PL011 UART DR
+    let dr: *io char = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
@@ -12,9 +12,9 @@ fn uart_puts(s: *char) {
 }
 
 fn uart_getc() char {
-    let fr: *int = 0x09000018; // PL011 FR: bit4=RXFE (受信 FIFO 空)
+    let fr: *io int = 0x09000018; // PL011 FR: bit4=RXFE (受信 FIFO 空)
     while (*fr == 144) {} // 0x90 = TXFE|RXFE のアイドル状態; データ到着で変化
-    let dr: *char = 0x09000000; // PL011 UART DR
+    let dr: *io char = 0x09000000; // PL011 UART DR
     return *dr;
 }
 

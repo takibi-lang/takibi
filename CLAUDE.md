@@ -6,7 +6,7 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
 ## 言語仕様（現時点）
 
 - ファイル拡張子: `.tkb`
-- 型: `int`, `char`, `void`, `*T`（ポインタ型、ネスト可）、`[T; N]`（配列型、関数引数はポインタに decay）、`fn(T...) -> R`（関数ポインタ型）、`Name`（名前付き構造体型）
+- 型: `int`, `char`, `void`, `*T`（通常ポインタ型、non-volatile）、`io T`（volatile修飾値型）、`*io T`（volatile MMIOポインタ型 = `TypePtr(TypeIo T)`）、`[T; N]`（配列型、関数引数はポインタに decay）、`fn(T...) -> R`（関数ポインタ型）、`Name`（名前付き構造体型）
 - 文:
   - `let x = e` / `let x: T = e` — 不変変数宣言（初期値必須、再代入不可）
   - `let mut x = e` / `let mut x: T = e` — 可変変数宣言（再代入可）
@@ -34,9 +34,9 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
 - `s.field = v` — フィールド書き込み（ローカル変数名への直接 dot 代入のみ、式の左辺は不可）
 - `&s` — 構造体変数のアドレス取得（`*Name` を返す、関数への pass by pointer に使う）
 - `extern fn name(params) -> ret;` — 外部アセンブリ関数宣言（LLVM `declare` を emit する）
-- MMIO: volatile store/load として emit される（`set_volatile true`）
-  - `*p` デリファレンスはすべて volatile load。グローバル変数の直接読み出しは非 volatile なので、
-    割り込みハンドラと共有するフラグは `let p: *int = &global_flag; while (*p == 0) {}` の形で読む
+- MMIO: `*io T` 型ポインタ経由でアクセスする。`*p`（`p: *io T`）は volatile load、`*p = v` は volatile store
+  - `*T`（通常ポインタ）の load/store は non-volatile（LLVMが最適化可能）
+  - 割り込みハンドラと共有するフラグは `let p: *io int = &flag as *io int; while (*p == 0) {}` の形で読む
 
 ## ビルドコマンド
 
@@ -214,19 +214,46 @@ takibi
 - `cond_signal` の `*seq = *seq + 1` はアトミックではない。mutex を持った状態で呼ぶ規約によりシングルコアでは正しく動作するが、マルチコアでは不十分。
 - `cond_wait` のスピン `while (*seq == s) {}` はハードウェアメモリバリアを持たない通常の volatile load。マルチコアでは `ldar`（load-acquire）への置き換えが必要。
 
+### MMIO と通常ポインタの区別（`io T`、`*io T` vs `*T`）
+
+**型の関係（案B設計）**:
+- `io T` — volatile修飾値型（AST: `TypeIo T`）。LLVM型はTと同じ。記憶域修飾子。
+- `*io T` — volatile MMIOポインタ（AST: `TypePtr (TypeIo T)`）。LLVMはopaque ptr。
+- `*T` — 通常ポインタ（AST: `TypePtr T`）。non-volatile。
+
+**volatile の発生箇所**:
+- `let irq_done: io int;` — グローバル変数の読み書きが全て volatile
+- `irq_done = 1;` → volatile store（自動）
+- `while (irq_done == 0) {}` → `irq_done` が直接 volatile load（自動）
+- `&irq_done` → 自動で `*io int` を返す（`as *io int` キャスト不要）
+- 構造体フィールド `done: io int;` → `s.done = 1;` が volatile store
+- `*p` where `p: *io int` → volatile load
+- `*p = v` where `p: *io int` → volatile store
+- `p.field` where `p: *io Struct` → volatile load（`through_io` フラグ）
+
+**Deref で io が剥がれる**: `*p` where `p: *io int` → 結果型は `int`（io ではない）。volatileはloadへの `set_volatile true` に収まる。
+
+- `*io T` はコンパイラレベルの区別。CPUレベルのメモリバリアは `ldaxr/stlxr`（extern fn）が担う
+- ポインタ算術 `*io T + int` → `*io T` のまま保持される（`TypePtr _` でマッチ）
+- `int as *io T` — MMIOアドレスリテラルの代入（inttoptr coercion、`TypePtr _` ケース）
+
 ### グローバル変数 volatile 読み出し（割り込み共有フラグ）
 LLVM は `while (flag == 0) {}` のようなタイトループで、グローバル変数の load をループ外に
 ホイストすることがある（結果: `cbz reg, self` の無限ループ）。
-割り込みハンドラと共有するフラグは必ずポインタ経由で読む:
+割り込みハンドラと共有するフラグは `io int` として宣言するか、`*io int` ポインタ経由で読む:
+
+**案B（推奨）**: 変数宣言に `io` を付ける:
 ```takibi
-let p: *int = &sched_done;   // &global は llvm_gen.ml の AddrOf が global_vars を返す
-while (*p == 0) {}           // *p は volatile load（set_volatile true）
+let sched_done: io int = 0;        // volatile グローバル宣言
+sched_done = 1;                    // volatile store（自動）
+let p: *io int = &sched_done;      // &io_var は自動で *io int を返す（キャスト不要）
+while (*p == 0) {}                 // volatile load — ホイスト防止
 ```
-`AddrOf` は `locals` になければ `global_vars` テーブルを検索して LLVM global value を返す。
+`AddrOf (Var name)` where `name: io T` → 自動的に `TypePtr (TypeIo T)` = `*io T` を返す。キャスト不要。
 
 ### Integer literal → pointer coercion
-`let dr: *int = 0x09000000;` は整数リテラルをポインタ型変数に代入する。
-`llvm_gen.ml` の `coerce` 関数が `inttoptr(zext(i32, i64), ptr)` を emit する。
+`let dr: *io char = 0x09000000;` は整数リテラルをMMIOポインタ型変数に代入する。
+`llvm_gen.ml` の `coerce` 関数が `inttoptr(zext(i32, i64), ptr)` を emit する（`TypePtr _` ケース）。
 
 ### Makefile の例題登録規約
 `EXAMPLES` リストに名前を追加するだけで新例題を登録できる。

@@ -5,7 +5,7 @@ open Ast
 %token <int> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN RETURN LET MUT EXTERN STRUCT
+%token FN RETURN LET MUT EXTERN STRUCT IO
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI
 %token ASSIGN DOT
 %token IF ELSE WHILE
@@ -189,7 +189,8 @@ type_expr:
   | INT_TYPE  { TypeInt }
   | CHAR_TYPE { TypeChar }
   | VOID_TYPE { TypeVoid }
-  | TIMES type_expr { TypePtr $2 }
+  | IO         type_expr { TypeIo  $2 }         (* io T  — volatile-qualified type *)
+  | TIMES      type_expr { TypePtr $2 }         (* *T or *(io T) = *io T *)
   | LBRACKET t = type_expr SEMI n = INT RBRACKET { TypeArray (t, n) }
   | FN LPAREN fn_type_params RPAREN ARROW type_expr { TypeFn ($3, $6) }
   | FN LPAREN fn_type_params RPAREN                 { TypeFn ($3, TypeVoid) }

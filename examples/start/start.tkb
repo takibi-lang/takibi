@@ -4,7 +4,7 @@ let g_int = 1;
 let g_char: char = 0;
 
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000; // PL011 UART DR: 書き込みで送信
+    let dr: *io char = 0x09000000; // PL011 UART DR: 書き込みで送信
     *dr = c;
 }
 

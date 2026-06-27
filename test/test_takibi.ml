@@ -16,6 +16,7 @@ let rec show_type = function
   | Ast.TypeChar        -> "char"
   | Ast.TypeVoid        -> "void"
   | Ast.TypePtr t       -> "*" ^ show_type t
+  | Ast.TypeIo  t       -> "io " ^ show_type t   (* TypePtr(TypeIo t) → "*io T" 自動合成 *)
   | Ast.TypeArray (t,n) -> Printf.sprintf "[%s; %d]" (show_type t) n
   | Ast.TypeFn (ps, r)  ->
       Printf.sprintf "fn(%s) -> %s"

@@ -1,6 +1,6 @@
 // 32ビット整数の16進表示デモ。>> と & でニブル(4ビット)を取り出す。
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000; // PL011 UART DR
+    let dr: *io char = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 

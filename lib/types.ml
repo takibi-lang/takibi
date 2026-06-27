@@ -6,7 +6,8 @@ type ty =
   | TVoid
   | TFun of ty list * ty  (* param types, return type *)
   | TVar of tv ref
-  | TPtr of ty            (* pointer type *)
+  | TPtr of ty            (* *T    — regular pointer, non-volatile *)
+  | TIo  of ty            (* io T  — volatile-qualified value type; *io T = TPtr(TIo T) *)
   | TArray of ty * int    (* array type: [T; N] *)
   | TStruct of string     (* named struct type *)
 
@@ -35,7 +36,8 @@ let rec to_string t =
   | TInt  -> "int"
   | TChar -> "char"
   | TVoid -> "void"
-  | TPtr t -> Printf.sprintf "*%s" (to_string t)
+  | TPtr t -> Printf.sprintf "*%s" (to_string t)   (* *io T prints as "*io T" via TPtr(TIo T) *)
+  | TIo  t -> Printf.sprintf "io %s" (to_string t)
   | TArray (t, n) -> Printf.sprintf "[%s; %d]" (to_string t) n
   | TFun (ps, r) ->
       Printf.sprintf "(%s) -> %s"
@@ -52,7 +54,8 @@ let rec occurs rv = function
   | TVar { contents = Link t } -> occurs rv t
   | TVar r                     -> r == rv
   | TFun (ps, r)               -> List.exists (occurs rv) ps || occurs rv r
-  | TPtr t                     -> occurs rv t
+  | TPtr   t                   -> occurs rv t
+  | TIo    t                   -> occurs rv t
   | TArray (t, _)              -> occurs rv t
   | TStruct _                  -> false
   | _                          -> false
@@ -61,6 +64,7 @@ let rec unify t1 t2 =
   match repr t1, repr t2 with
   | TInt,  TInt  | TChar, TChar | TVoid, TVoid -> ()
   | TPtr t1, TPtr t2 -> unify t1 t2
+  | TIo  t1, TIo  t2 -> unify t1 t2
   | TArray (t1, n1), TArray (t2, n2) ->
       if n1 <> n2 then
         raise (Unify_error (Printf.sprintf "array size mismatch: %d vs %d" n1 n2));
@@ -92,7 +96,8 @@ let rec of_ast = function
   | Ast.TypeInt      -> TInt
   | Ast.TypeChar     -> TChar
   | Ast.TypeVoid     -> TVoid
-  | Ast.TypePtr t        -> TPtr (of_ast t)
+  | Ast.TypePtr   t      -> TPtr   (of_ast t)
+  | Ast.TypeIo    t      -> TIo (of_ast t)
   | Ast.TypeArray (t, n) -> TArray (of_ast t, n)
   | Ast.TypeFn (ps, r)   -> TFun (List.map of_ast ps, of_ast r)
   | Ast.TypeNamed s      -> TStruct s
@@ -114,7 +119,8 @@ let rec to_ast t =
   | TInt  -> Ast.TypeInt
   | TChar -> Ast.TypeChar
   | TVoid -> Ast.TypeVoid
-  | TPtr t        -> Ast.TypePtr (to_ast t)
+  | TPtr   t      -> Ast.TypePtr  (to_ast t)
+  | TIo    t      -> Ast.TypeIo   (to_ast t)
   | TArray (t, n) -> Ast.TypeArray (to_ast t, n)
   | TFun (ps, r)  -> Ast.TypeFn (List.map to_ast ps, to_ast r)
   | TStruct s     -> Ast.TypeNamed s

@@ -2,12 +2,12 @@
 // IRQ #33 (SPI #1) = PL011 UART RX。irq_tbl に登録したハンドラを irq_dispatch が呼ぶ。
 // irq_dispatch の関数シグネチャは startup.S の irq_entry と合わせる必要がある。
 struct GicRegs {
-    distr_ctlr: *int;
-    distr_isen: *int;
-    cpu_ctlr:   *int;
-    cpu_pmr:    *int;
-    cpu_iar:    *int;
-    cpu_eoir:   *int;
+    distr_ctlr: *io int;
+    distr_isen: *io int;
+    cpu_ctlr:   *io int;
+    cpu_pmr:    *io int;
+    cpu_iar:    *io int;
+    cpu_eoir:   *io int;
 }
 
 struct IrqTable {
@@ -16,11 +16,11 @@ struct IrqTable {
 
 let gic: GicRegs = {0x08000000, 0x08000104, 0x08010000, 0x08010004, 0x0801000C, 0x08010010};
 let irq_tbl:  IrqTable;
-let uart_imsc: *int = 0x09000038; // PL011 IMSC: 割り込みマスク設定 (bit4=RXIM)
-let irq_done:  int;
+let uart_imsc: *io int = 0x09000038; // PL011 IMSC: 割り込みマスク設定 (bit4=RXIM)
+let irq_done:  io int;
 
 fn uart_putc(c: char) {
-    let dr: *char = 0x09000000; // PL011 UART DR
+    let dr: *io char = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
@@ -48,7 +48,7 @@ fn irq_dispatch(frame_sp: int) -> int {
 }
 
 fn uart_rx_handler() {
-    let dr: *char = 0x09000000;
+    let dr: *io char = 0x09000000;
     let c: char = *dr;
     *dr = c;
     if (c == '\r') {
@@ -59,7 +59,7 @@ fn uart_rx_handler() {
 }
 
 fn gic_init() {
-    let gicd_itargetsr8: *int = 0x08000820;
+    let gicd_itargetsr8: *io int = 0x08000820;
     *(gic.distr_ctlr) = 1;
     *(gic.distr_isen) = 2; // GICD_ISENABLER0: bit1 = IRQ #33 を有効化 (SPI #1 = UART)
     *gicd_itargetsr8  = 0x01010101;
@@ -76,7 +76,7 @@ fn main() {
     register_irq(33, uart_rx_handler);
     uart_puts("irq ready\r\n");
     uart_init_irq();
-    let p: *int = &irq_done;
+    let p: *io int = &irq_done;
     while (*p == 0) {}
     uart_puts("done\r\n");
 }

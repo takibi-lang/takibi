@@ -53,6 +53,7 @@ let rec ltype_of_ast = function
   | TypeChar        -> i8_type  context
   | TypeVoid        -> void_type context
   | TypePtr _       -> pointer_type context   (* LLVM 19: all pointers are opaque ptr *)
+  | TypeIo  t       -> ltype_of_ast t         (* io T は値型: LLVM型はTと同じ *)
   | TypeArray (t, n) -> array_type (ltype_of_ast t) n
   | TypeFn _        -> pointer_type context   (* 関数ポインタも opaque ptr *)
   | TypeNamed sname ->
@@ -67,7 +68,7 @@ let ltype_of_ret_ast = function
 (* Coerce an llvalue to match a destination AST type.
    Handles: i1/i8 → i32 widening, i32 → i8 truncation,
             and integer → pointer conversion (inttoptr) for MMIO addresses. *)
-let coerce v (dst : Ast.type_expr) =
+let rec coerce v (dst : Ast.type_expr) =
   let vty    = type_of v in
   let dst_ll = ltype_of_ast dst in
   if vty = dst_ll then v
@@ -88,6 +89,7 @@ let coerce v (dst : Ast.type_expr) =
         build_trunc i64v (i32_type context) "trunc" builder
       else
         build_zext v dst_ll "zext" builder
+  | TypeIo t    -> coerce v t   (* io T は T と同じ LLVM 型: T として強制変換 *)
   | TypeVoid    -> v
   | TypeArray _ -> v
   | TypeFn _    -> v   (* 関数ポインタは ptr のまま変換不要 *)
@@ -201,6 +203,12 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
             | TypeNamed _ ->
                 (* 構造体変数: alloca ポインタをそのまま返す（配列と同じ方式）*)
                 (ast_ty, ptr)
+            | TypeIo inner_ty ->
+                (* io T ローカル変数: volatile load して内部型を返す *)
+                let inst = build_load (ltype_of_ast inner_ty) ptr name builder in
+                set_volatile true inst;
+                let v' = match inner_ty with TypeInt | TypeChar -> to_i32 inst | _ -> inst in
+                (inner_ty, v')
             | _ ->
                 let v  = build_load (ltype_of_ast ast_ty) ptr name builder in
                 let v' = match ast_ty with
@@ -218,6 +226,12 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
             | Some (TypeNamed _ as ast_ty, ptr) ->
                 (* グローバル構造体変数: グローバルポインタをそのまま返す *)
                 (ast_ty, ptr)
+            | Some (TypeIo inner_ty, ptr) ->
+                (* io T グローバル変数: volatile load して内部型を返す *)
+                let inst = build_load (ltype_of_ast inner_ty) ptr name builder in
+                set_volatile true inst;
+                let v' = match inner_ty with TypeInt | TypeChar -> to_i32 inst | _ -> inst in
+                (inner_ty, v')
             | Some (ast_ty, ptr) ->
                 let v  = build_load (ltype_of_ast ast_ty) ptr name builder in
                 let v' = match ast_ty with
@@ -242,9 +256,18 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
   | Deref e1 ->
       let (ty1, v1) = gen_expr locals e1 in
       (match ty1 with
-       | TypePtr inner_ty ->
+       | TypePtr (TypeIo inner_ty) ->
+           (* *io T ポインタのデリファレンス: volatile load *)
            let inst = build_load (ltype_of_ast inner_ty) v1 "deref" builder in
            set_volatile true inst;
+           let v' = match inner_ty with
+             | TypeInt | TypeChar -> to_i32 inst
+             | _                  -> inst
+           in
+           (inner_ty, v')
+       | TypePtr inner_ty ->
+           let inst = build_load (ltype_of_ast inner_ty) v1 "deref" builder in
+           (* non-volatile: 通常メモリアクセス *)
            let v' = match inner_ty with
              | TypeInt | TypeChar -> to_i32 inst
              | _                  -> inst
@@ -288,7 +311,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let (ty2, v2) = gen_expr locals e2 in
       (match op with
        | Add ->
-           (* ポインタ算術: ptr + int → GEP。整数同士は通常の加算 *)
+           (* ポインタ算術: ptr + int → GEP。*io T = TypePtr(TypeIo T) も TypePtr にマッチ *)
            (match ty1 with
             | TypePtr inner ->
                 (ty1, build_gep (ltype_of_ast inner) v1 [|v2|] "ptradd" builder)
@@ -328,9 +351,10 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
   | FieldGet (base_expr, fname) ->
       let (base_ty, base_v) = gen_expr locals base_expr in
-      let sname = match base_ty with
-        | TypeNamed s        -> s
-        | TypePtr (TypeNamed s) -> s
+      let (sname, through_io) = match base_ty with
+        | TypeNamed s                      -> (s, false)
+        | TypePtr   (TypeNamed s)          -> (s, false)
+        | TypePtr   (TypeIo (TypeNamed s)) -> (s, true)   (* *io Struct のフィールドは volatile *)
         | _ -> raise (Error (Printf.sprintf
             "field access '.%s' on non-struct type" fname))
       in
@@ -347,9 +371,15 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | TypeArray (elem_ty, _) ->
            (* 配列フィールド: 先頭要素へのポインタとして返す（ローカル配列変数と同じ decay）*)
            (TypePtr elem_ty, field_ptr)
+       | TypeIo inner_ty ->
+           (* io T フィールド: volatile load して内部型を返す *)
+           let v = build_load (ltype_of_ast inner_ty) field_ptr fname builder in
+           set_volatile true v;
+           let v' = match inner_ty with TypeInt | TypeChar -> to_i32 v | _ -> v in
+           (inner_ty, v')
        | _ ->
            let v = build_load (ltype_of_ast field_ty) field_ptr fname builder in
-           set_volatile true v;
+           if through_io then set_volatile true v;
            let v' = match field_ty with
              | TypeInt | TypeChar -> to_i32 v
              | _                  -> v
@@ -507,24 +537,27 @@ let gen_func ?prog_types fdef =
         let (_, v) = gen_expr locals e in
         (match Hashtbl.find_opt locals name with
          | Some (Mut (ast_ty, ptr)) ->
-             ignore (build_store (coerce v ast_ty) ptr builder)
+             let inst = build_store (coerce v ast_ty) ptr builder in
+             (match ast_ty with TypeIo _ -> set_volatile true inst | _ -> ())
          | Some (Imm _) ->
              raise (Error (Printf.sprintf "BUG: assign to immutable '%s'" name))
          | None ->
              match Hashtbl.find_opt global_vars name with
              | Some (ast_ty, gvar) ->
-                 ignore (build_store (coerce v ast_ty) gvar builder)
+                 let inst = build_store (coerce v ast_ty) gvar builder in
+                 (match ast_ty with TypeIo _ -> set_volatile true inst | _ -> ())
              | None -> raise (Error (Printf.sprintf "Undefined variable: %s" name)))
 
     | AssignDeref (ptr_expr, val_expr) ->
         let (ptr_ty, ptr_v) = gen_expr locals ptr_expr in
         let (_, val_v)      = gen_expr locals val_expr in
-        (* ポインタの要素型に合わせて coerce（i32→i8 など）してから store *)
-        let coerced = (match ptr_ty with
-          | TypePtr inner -> coerce val_v inner
-          | _             -> val_v) in
+        let (is_volatile, coerced) = match ptr_ty with
+          | TypePtr (TypeIo inner) -> (true,  coerce val_v inner)   (* *io T: volatile store *)
+          | TypePtr inner          -> (false, coerce val_v inner)   (* 通常ポインタ: non-volatile *)
+          | _                      -> (false, val_v)
+        in
         let inst = build_store coerced ptr_v builder in
-        set_volatile true inst
+        if is_volatile then set_volatile true inst
 
     | AssignField (base_expr, fname, val_expr) ->
         let (base_ty, base_v) = gen_expr locals base_expr in
@@ -541,7 +574,8 @@ let gen_func ?prog_types fdef =
           [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
           (fname ^ "_ptr") builder
         in
-        ignore (build_store (coerce val_v field_ty) field_ptr builder)
+        let inst = build_store (coerce val_v field_ty) field_ptr builder in
+        (match field_ty with TypeIo _ -> set_volatile true inst | _ -> ())
 
     | Let (true, name, _, expr_opt) ->
         (* Mutable: alloca was pre-allocated; store the initial value via init_memory *)
