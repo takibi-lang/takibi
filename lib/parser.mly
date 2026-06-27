@@ -5,9 +5,9 @@ open Ast
 %token <int> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN RETURN LET MUT EXTERN
+%token FN RETURN LET MUT EXTERN STRUCT
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI
-%token ASSIGN
+%token ASSIGN DOT
 %token IF ELSE WHILE
 %token EOF
 %token AMP
@@ -27,7 +27,8 @@ open Ast
 %left PLUS MINUS
 %left SHR SHL     (* shifts: tighter than +/-, looser than * / % *)
 %left TIMES DIV PERCENT  (* multiplicative *)
-%nonassoc UNARY   (* highest: unary * (deref), & (addrof), unary - *)
+%nonassoc UNARY   (* unary * (deref), & (addrof), unary - *)
+%left DOT         (* highest: field access — postfix, binds tighter than prefix ops *)
 
 %token INT_TYPE CHAR_TYPE VOID_TYPE
 %token COLON ARROW
@@ -50,6 +51,12 @@ item:
     { ExternFuncDef ($3, $5, None) }
   | EXTERN FN IDENT LPAREN params RPAREN ARROW type_expr SEMI
     { ExternFuncDef ($3, $5, Some $8) }
+  | STRUCT IDENT LBRACE struct_fields RBRACE
+    { StructDef ($2, $4) }
+
+struct_fields:
+  | /* empty */ { [] }
+  | IDENT COLON type_expr SEMI struct_fields { ($1, $3) :: $5 }
 
 func_def:
   | FN IDENT LPAREN params RPAREN ret_type_opt LBRACE stmts RBRACE
@@ -106,6 +113,11 @@ stmt:
   | TIMES LPAREN lhs = expr RPAREN ASSIGN rhs = expr SEMI
     (* *(complex_expr) = v  — e.g. *(arr + i) = v *)
     { { desc = AssignDeref (lhs, rhs); loc = $symbolstartpos } }
+  | id = IDENT DOT fname = IDENT ASSIGN rhs = expr SEMI
+    (* s.field = v  or  ptr.field = v — struct field write *)
+    { let loc = $symbolstartpos in
+      let base = { desc = Var id; loc } in
+      { desc = AssignField (base, fname, rhs); loc } }
 
 else_part:
   | ELSE LBRACE e = stmts RBRACE { e }
@@ -149,6 +161,9 @@ expr:
       let arr = { desc = Var id; loc } in
       let add = { desc = BinOp (Add, arr, idx); loc } in
       { desc = Deref add; loc } }
+  | e = expr DOT fname = IDENT
+    (* e.field — struct field read; works for both Struct and *Struct *)
+    { { desc = FieldGet (e, fname); loc = $symbolstartpos } }
 
 args:
   | /* empty */ { [] }
@@ -172,6 +187,7 @@ type_expr:
   | LBRACKET t = type_expr SEMI n = INT RBRACKET { TypeArray (t, n) }
   | FN LPAREN fn_type_params RPAREN ARROW type_expr { TypeFn ($3, $6) }
   | FN LPAREN fn_type_params RPAREN                 { TypeFn ($3, TypeVoid) }
+  | IDENT { TypeNamed $1 }   (* named struct type *)
 
 fn_type_params:
   | /* empty */                              { [] }

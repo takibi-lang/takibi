@@ -23,6 +23,7 @@ type type_expr =
   | TypePtr of type_expr           (* *T *)
   | TypeArray of type_expr * int   (* [T; N] *)
   | TypeFn of type_expr list * type_expr  (* fn(T...) -> R *)
+  | TypeNamed of string            (* struct type by name *)
 [@@deriving show]
 
 type expr = expr_desc located
@@ -35,6 +36,7 @@ and expr_desc =
   | Deref of expr           (* *expr  — read through pointer *)
   | AddrOf of ident         (* &ident — take address of a local *)
   | Cast of type_expr * expr  (* expr as T — explicit type cast *)
+  | FieldGet of expr * string  (* expr.field — read a struct field *)
 [@@deriving show]
 
 type stmt = stmt_desc located
@@ -43,6 +45,7 @@ and stmt_desc =
   | Expr of expr
   | Assign of ident * expr
   | AssignDeref of expr * expr   (* *lhs = rhs — write through pointer *)
+  | AssignField of expr * string * expr  (* base.field = rhs — write a struct field *)
   | Block of stmt list
   | Let of bool * ident * type_expr option * expr option  (* is_mutable, name, type, init *)
   | If of expr * stmt list * stmt list
@@ -62,6 +65,8 @@ type toplevel =
   | LetDef of ident * type_expr option * expr option
   | ExternFuncDef of ident * (ident * type_expr option) list * type_expr option
   (* extern fn name(params) -> ret; — body は外部アセンブリが提供する *)
+  | StructDef of string * (string * type_expr) list
+  (* struct Name { field: type; ... } — named struct type definition *)
 [@@deriving show]
 
 let show_toplevel_list lst =

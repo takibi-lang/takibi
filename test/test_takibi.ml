@@ -20,6 +20,7 @@ let rec show_type = function
   | Ast.TypeFn (ps, r)  ->
       Printf.sprintf "fn(%s) -> %s"
         (String.concat ", " (List.map show_type ps)) (show_type r)
+  | Ast.TypeNamed s     -> s
 
 let type_t : Ast.type_expr Alcotest.testable =
   Alcotest.testable (fun fmt t -> Format.pp_print_string fmt (show_type t)) (=)
@@ -555,6 +556,58 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  (* ── 構造体構文 ──────────────────────────────────────────────── *)
+
+  Alcotest.test_case "struct definition parses" `Quick (fun () ->
+    match parse "struct Point { x: int; y: int; }" with
+    | [Ast.StructDef ("Point", fields)] ->
+        Alcotest.(check int) "field count" 2 (List.length fields);
+        let (n0, t0) = List.nth fields 0 in
+        let (n1, t1) = List.nth fields 1 in
+        Alcotest.(check string) "field0 name" "x" n0;
+        Alcotest.(check type_t) "field0 type" Ast.TypeInt t0;
+        Alcotest.(check string) "field1 name" "y" n1;
+        Alcotest.(check type_t) "field1 type" Ast.TypeInt t1
+    | _ -> Alcotest.fail "expected StructDef(Point, [x:int; y:int])"
+  );
+
+  Alcotest.test_case "struct type in function param parses" `Quick (fun () ->
+    match parse "struct P { x: int; } fn f(p: *P) -> int { return p.x; }" with
+    | [Ast.StructDef _; Ast.FuncDef { params = [("p", Some (Ast.TypePtr (Ast.TypeNamed "P")))]; _ }] -> ()
+    | _ -> Alcotest.fail "expected *P param type"
+  );
+
+  Alcotest.test_case "field access expression parses to FieldGet" `Quick (fun () ->
+    match parse "struct P { x: int; } fn f(p: *P) -> int { return p.x; }" with
+    | [Ast.StructDef _; Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.FieldGet ({ desc = Ast.Var "p"; _ }, "x"); _ } -> ()
+         | _ -> Alcotest.fail "expected Return(FieldGet(p, x))")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "field assignment statement parses to AssignField" `Quick (fun () ->
+    match parse "fn f() { p.x = 5; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.AssignField ({ desc = Ast.Var "p"; _ }, "x",
+                             { desc = Ast.IntLit 5; _ }) -> ()
+         | _ -> Alcotest.fail "expected AssignField(p, x, 5)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "field access binds tighter than addition" `Quick (fun () ->
+    (* p.x + p.y should parse as (p.x) + (p.y), not p.(x + p).y *)
+    match parse "struct P { x: int; } fn f(p: *P) -> int { return p.x + p.x; }" with
+    | [Ast.StructDef _; Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (Ast.Add,
+               { desc = Ast.FieldGet _; _ },
+               { desc = Ast.FieldGet _; _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Add(FieldGet, FieldGet)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
 ]
 
 (* ── Type inference tests ────────────────────────────────────────────────── *)
@@ -781,6 +834,46 @@ let infer_tests = [
     (expect_type_error "argument count mismatch"
        "fn foo(x: int) {}
         fn f(h: fn() -> void) { h = foo; }");
+
+  (* ── 構造体 ────────────────────────────────────────────────────── *)
+
+  Alcotest.test_case "struct field access type-checks" `Quick
+    (expect_ok "struct Point { x: int; y: int; }
+                fn sum(p: *Point) -> int { return p.x + p.y; }");
+
+  Alcotest.test_case "struct field write type-checks" `Quick
+    (expect_ok "struct Point { x: int; y: int; }
+                fn f() { let mut p: Point; p.x = 3; p.y = 4; }");
+
+  Alcotest.test_case "struct passed by pointer type-checks" `Quick
+    (expect_ok "struct Point { x: int; y: int; }
+                fn sum(p: *Point) -> int { return p.x + p.y; }
+                fn f() { let mut s: Point; s.x = 1; s.y = 2; sum(&s); }");
+
+  Alcotest.test_case "global struct variable type-checks" `Quick
+    (expect_ok "struct Point { x: int; y: int; }
+                let g: Point;
+                fn f() { g.x = 10; g.y = 20; }");
+
+  Alcotest.test_case "struct field char type type-checks" `Quick
+    (expect_ok "struct Pair { a: int; b: char; }
+                fn f() { let mut p: Pair; p.a = 1; p.b = 'X'; }");
+
+  Alcotest.test_case "unknown field name is a type error" `Quick
+    (expect_type_error "no field"
+       "struct Point { x: int; y: int; }
+        fn f(p: *Point) -> int { return p.z; }");
+
+  Alcotest.test_case "field access on non-struct is a type error" `Quick
+    (expect_type_error "non-struct"
+       "fn f(n: int) -> int { return n.x; }");
+
+  Alcotest.test_case "struct type mismatch: passing *B where *A expected" `Quick
+    (expect_type_error "struct type mismatch"
+       "struct A { x: int; }
+        struct B { x: int; }
+        fn use_a(a: *A) {}
+        fn f(b: *B) { use_a(b); }");
 
 ]
 

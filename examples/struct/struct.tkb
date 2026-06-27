@@ -1,0 +1,77 @@
+struct Point {
+    x: int;
+    y: int;
+}
+
+struct Rect {
+    tl: int;
+    br: int;
+    w:  int;
+    h:  int;
+}
+
+fn uart_putc(c: char) {
+    let dr: *char = 0x09000000;
+    *dr = c;
+}
+
+fn uart_puts(s: *char) {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
+fn print_uint(n: int) {
+    if (n >= 10) {
+        print_uint(n / 10);
+    }
+    uart_putc((n % 10 + '0') as char);
+}
+
+fn point_sum(p: *Point) -> int {
+    return p.x + p.y;
+}
+
+fn point_swap(p: *Point) {
+    let tmp: int = p.x;
+    p.x = p.y;
+    p.y = tmp;
+}
+
+fn rect_area(r: *Rect) -> int {
+    return r.w * r.h;
+}
+
+let g: Point;
+
+fn main() {
+    g.x = 10;
+    g.y = 20;
+    uart_puts("global sum: ");
+    print_uint(point_sum(&g));
+    uart_puts("\r\n");
+
+    let mut p: Point;
+    p.x = 3;
+    p.y = 4;
+    uart_puts("local sum: ");
+    print_uint(point_sum(&p));
+    uart_puts("\r\n");
+
+    point_swap(&p);
+    uart_puts("after swap x: ");
+    print_uint(p.x);
+    uart_puts(" y: ");
+    print_uint(p.y);
+    uart_puts("\r\n");
+
+    let mut r: Rect;
+    r.tl = 0;
+    r.br = 1;
+    r.w = 5;
+    r.h = 6;
+    uart_puts("rect area: ");
+    print_uint(rect_area(&r));
+    uart_puts("\r\n");
+}

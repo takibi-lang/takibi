@@ -8,6 +8,7 @@ type ty =
   | TVar of tv ref
   | TPtr of ty            (* pointer type *)
   | TArray of ty * int    (* array type: [T; N] *)
+  | TStruct of string     (* named struct type *)
 
 and tv =
   | Unbound of int  (* unresolved unification variable *)
@@ -39,6 +40,7 @@ let rec to_string t =
   | TFun (ps, r) ->
       Printf.sprintf "(%s) -> %s"
         (String.concat ", " (List.map to_string ps)) (to_string r)
+  | TStruct s -> s
   | TVar { contents = Unbound id } -> Printf.sprintf "'t%d" id
   | TVar { contents = Link _ }     -> assert false
 
@@ -52,6 +54,7 @@ let rec occurs rv = function
   | TFun (ps, r)               -> List.exists (occurs rv) ps || occurs rv r
   | TPtr t                     -> occurs rv t
   | TArray (t, _)              -> occurs rv t
+  | TStruct _                  -> false
   | _                          -> false
 
 let rec unify t1 t2 =
@@ -67,6 +70,9 @@ let rec unify t1 t2 =
         raise (Unify_error "argument count mismatch");
       List.iter2 unify ps1 ps2;
       unify r1 r2
+  | TStruct s1, TStruct s2 ->
+      if s1 <> s2 then
+        raise (Unify_error (Printf.sprintf "struct type mismatch: %s vs %s" s1 s2))
   | TVar rv, t | t, TVar rv ->
       (match !rv with
        | Link t' -> unify t' t
@@ -89,6 +95,7 @@ let rec of_ast = function
   | Ast.TypePtr t        -> TPtr (of_ast t)
   | Ast.TypeArray (t, n) -> TArray (of_ast t, n)
   | Ast.TypeFn (ps, r)   -> TFun (List.map of_ast ps, of_ast r)
+  | Ast.TypeNamed s      -> TStruct s
 
 (* None → fresh unification variable *)
 let of_ast_opt = function
@@ -110,6 +117,7 @@ let rec to_ast t =
   | TPtr t        -> Ast.TypePtr (to_ast t)
   | TArray (t, n) -> Ast.TypeArray (to_ast t, n)
   | TFun (ps, r)  -> Ast.TypeFn (List.map to_ast ps, to_ast r)
+  | TStruct s     -> Ast.TypeNamed s
   | TVar { contents = Unbound _ } -> Ast.TypeInt
   | TVar { contents = Link _ }    -> assert false
 
@@ -126,4 +134,6 @@ type func_info = {
 type program_types = {
   globals   : Ast.type_expr StringMap.t;
   functions : func_info StringMap.t;
+  structs   : (string * Ast.type_expr) list StringMap.t;
+  (* struct name → ordered field list [(field_name, field_type)] *)
 }

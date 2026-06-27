@@ -16,6 +16,7 @@ rule read = parse
   | "as"      { AS }
   | "void"    { VOID_TYPE }
   | "extern"  { EXTERN }
+  | "struct"  { STRUCT }
 
   | '{' { LBRACE }
   | '}' { RBRACE }
@@ -50,6 +51,7 @@ rule read = parse
   | "int"  { INT_TYPE }
   | "char" { CHAR_TYPE }
   | ':' { COLON }
+  | '.' { DOT }
 
   | "0x" ['0'-'9' 'a'-'f' 'A'-'F']+ as h { INT (int_of_string h) }
   | ['0'-'9']+ as i { INT (int_of_string i) }

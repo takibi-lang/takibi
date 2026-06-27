@@ -19,6 +19,10 @@ let functions   : (string, lltype * llvalue) Hashtbl.t = Hashtbl.create 16
 let func_ret_ast_types : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 16
 (* Stores the parameter AST types for each function (needed for function-as-value) *)
 let func_param_ast_types : (string, Ast.type_expr list) Hashtbl.t = Hashtbl.create 16
+(* Struct type registry: name → LLVM struct lltype *)
+let struct_lltypes : (string, lltype) Hashtbl.t = Hashtbl.create 8
+(* Struct field registry: name → ordered [(field_name, field_ast_type)] *)
+let struct_fields  : (string, (string * Ast.type_expr) list) Hashtbl.t = Hashtbl.create 8
 
 (* Locals are either immutable SSA values or mutable alloca pointers *)
 type local_binding =
@@ -51,6 +55,10 @@ let rec ltype_of_ast = function
   | TypePtr _       -> pointer_type context   (* LLVM 19: all pointers are opaque ptr *)
   | TypeArray (t, n) -> array_type (ltype_of_ast t) n
   | TypeFn _        -> pointer_type context   (* 関数ポインタも opaque ptr *)
+  | TypeNamed sname ->
+      match Hashtbl.find_opt struct_lltypes sname with
+      | Some llty -> llty
+      | None -> raise (Error (Printf.sprintf "Unknown struct type: %s" sname))
 
 let ltype_of_ret_ast = function
   | TypeVoid -> void_type context
@@ -83,6 +91,7 @@ let coerce v (dst : Ast.type_expr) =
   | TypeVoid    -> v
   | TypeArray _ -> v
   | TypeFn _    -> v   (* 関数ポインタは ptr のまま変換不要 *)
+  | TypeNamed _ -> v   (* struct 型: ptr のまま変換不要 *)
 
 (* Widen an integer value to i32 so arithmetic stays uniform.
    Does NOT touch pointer values. *)
@@ -95,6 +104,19 @@ let to_i32 v =
 let as_cond v =
   if type_of v = i1_type context then v
   else build_icmp Icmp.Ne v (const_int (i32_type context) 0) "tobool" builder
+
+(* Look up a struct field by name; returns (field_index, field_ast_type) *)
+let field_info struct_name fname =
+  let fields = match Hashtbl.find_opt struct_fields struct_name with
+    | Some fs -> fs
+    | None -> raise (Error (Printf.sprintf "Unknown struct: %s" struct_name))
+  in
+  let rec find i = function
+    | [] -> raise (Error (Printf.sprintf "No field '%s' in struct '%s'" fname struct_name))
+    | (n, t) :: _ when n = fname -> (i, t)
+    | _ :: rest -> find (i + 1) rest
+  in
+  find 0 fields
 
 (* Pre-scan only mutable Let bindings — immutable ones need no alloca *)
 let rec collect_lets stmts =
@@ -176,6 +198,9 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 let zero   = const_int (i32_type context) 0 in
                 let ep = build_in_bounds_gep arr_ll ptr [|zero; zero|] (name ^ "_ptr") builder in
                 (TypePtr elem_ty, ep)
+            | TypeNamed _ ->
+                (* 構造体変数: alloca ポインタをそのまま返す（配列と同じ方式）*)
+                (ast_ty, ptr)
             | _ ->
                 let v  = build_load (ltype_of_ast ast_ty) ptr name builder in
                 let v' = match ast_ty with
@@ -190,6 +215,9 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 let zero   = const_int (i32_type context) 0 in
                 let ep = build_in_bounds_gep arr_ll ptr [|zero; zero|] (name ^ "_ptr") builder in
                 (TypePtr elem_ty, ep)
+            | Some (TypeNamed _ as ast_ty, ptr) ->
+                (* グローバル構造体変数: グローバルポインタをそのまま返す *)
+                (ast_ty, ptr)
             | Some (ast_ty, ptr) ->
                 let v  = build_load (ltype_of_ast ast_ty) ptr name builder in
                 let v' = match ast_ty with
@@ -277,6 +305,32 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
   | Cast (target_ty, e) ->
       let (_, v) = gen_expr locals e in
       (target_ty, coerce v target_ty)
+
+  | FieldGet (base_expr, fname) ->
+      let (base_ty, base_v) = gen_expr locals base_expr in
+      let sname = match base_ty with
+        | TypeNamed s        -> s
+        | TypePtr (TypeNamed s) -> s
+        | _ -> raise (Error (Printf.sprintf
+            "field access '.%s' on non-struct type" fname))
+      in
+      let (idx, field_ty) = field_info sname fname in
+      let llty = Hashtbl.find struct_lltypes sname in
+      let field_ptr = build_in_bounds_gep llty base_v
+        [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
+        (fname ^ "_ptr") builder
+      in
+      (match field_ty with
+       | TypeNamed _ ->
+           (* ネスト構造体フィールド: ポインタをそのまま返す（配列 decay と同じ方式）*)
+           (TypePtr field_ty, field_ptr)
+       | _ ->
+           let v = build_load (ltype_of_ast field_ty) field_ptr fname builder in
+           let v' = match field_ty with
+             | TypeInt | TypeChar -> to_i32 v
+             | _                  -> v
+           in
+           (field_ty, v'))
 
   | Call (fname, args) ->
       let coerce_arg v lty =
@@ -419,6 +473,23 @@ let gen_func ?prog_types fdef =
         let inst = build_store coerced ptr_v builder in
         set_volatile true inst
 
+    | AssignField (base_expr, fname, val_expr) ->
+        let (base_ty, base_v) = gen_expr locals base_expr in
+        let sname = match base_ty with
+          | TypeNamed s           -> s
+          | TypePtr (TypeNamed s) -> s
+          | _ -> raise (Error (Printf.sprintf
+              "field assignment '.%s' on non-struct type" fname))
+        in
+        let (idx, field_ty) = field_info sname fname in
+        let llty = Hashtbl.find struct_lltypes sname in
+        let (_, val_v) = gen_expr locals val_expr in
+        let field_ptr = build_in_bounds_gep llty base_v
+          [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
+          (fname ^ "_ptr") builder
+        in
+        ignore (build_store (coerce val_v field_ty) field_ptr builder)
+
     | Let (true, name, _, expr_opt) ->
         (* Mutable: alloca was pre-allocated; just store the initial value *)
         (match Hashtbl.find_opt locals name with
@@ -532,6 +603,16 @@ let declare_func ?prog_types fdef =
   end
 
 let gen_program ?prog_types prog =
+  (* Pass 0: register struct types — must precede ltype_of_ast for TypeNamed *)
+  List.iter (function
+    | StructDef (name, fields) ->
+        let field_lltys = List.map (fun (_, ty) -> ltype_of_ast ty) fields
+                          |> Array.of_list in
+        let llty = struct_type context field_lltys in
+        Hashtbl.add struct_lltypes name llty;
+        Hashtbl.add struct_fields  name fields
+    | _ -> ()
+  ) prog;
   (* Pass 1: register all globals and function signatures *)
   List.iter (function
     | FuncDef fdef                    -> declare_func ?prog_types fdef
@@ -548,10 +629,12 @@ let gen_program ?prog_types prog =
           Hashtbl.add func_ret_ast_types name ret_ast;
           Hashtbl.add func_param_ast_types name param_ast
         end
+    | StructDef _ -> ()
   ) prog;
   (* Pass 2: generate function bodies *)
   List.iter (function
     | FuncDef fdef    -> ignore (gen_func ?prog_types fdef)
     | LetDef _        -> ()
     | ExternFuncDef _ -> ()
+    | StructDef _     -> ()
   ) prog

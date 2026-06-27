@@ -6,7 +6,7 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
 ## 言語仕様（現時点）
 
 - ファイル拡張子: `.tkb`
-- 型: `int`, `char`, `void`, `*T`（ポインタ型、ネスト可）、`[T; N]`（配列型、関数引数はポインタに decay）、`fn(T...) -> R`（関数ポインタ型）
+- 型: `int`, `char`, `void`, `*T`（ポインタ型、ネスト可）、`[T; N]`（配列型、関数引数はポインタに decay）、`fn(T...) -> R`（関数ポインタ型）、`Name`（名前付き構造体型）
 - 文:
   - `let x = e` / `let x: T = e` — 不変変数宣言（初期値必須、再代入不可）
   - `let mut x = e` / `let mut x: T = e` — 可変変数宣言（再代入可）
@@ -27,6 +27,11 @@ OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由
   - ビット演算（`>>` 右論理シフト、`<<` 左シフト、`&` ビット AND、`|` ビット OR、`^` ビット XOR）— 両辺 `int`、結果 `int`
   - 関数呼び出し、`*expr`（デリファレンス）、`&ident`（アドレス取得）
   - `expr as T` — 明示的型変換（int ↔ char、`*T` → int、`*T` → `*U`）。優先順位は算術より低いので `a + b as char` = `(a + b) as char`
+- `struct Name { field: type; ... }` — 構造体型定義（トップレベルのみ、フィールドはプリミティブ型・ポインタ型・他の構造体型）
+- `let mut s: Name;` — 構造体変数宣言（ローカル/グローバル、常に mutable として扱う）
+- `s.field` — フィールド読み出し（`s: Name` または `s: *Name` 両対応、Zig 方式）
+- `s.field = v` — フィールド書き込み（ローカル変数名への直接 dot 代入のみ、式の左辺は不可）
+- `&s` — 構造体変数のアドレス取得（`*Name` を返す、関数への pass by pointer に使う）
 - `extern fn name(params) -> ret;` — 外部アセンブリ関数宣言（LLVM `declare` を emit する）
 - MMIO: volatile store/load として emit される（`set_volatile true`）
   - `*p` デリファレンスはすべて volatile load。グローバル変数の直接読み出しは非 volatile なので、
@@ -134,6 +139,9 @@ examples/
     condvar.tkb   — mutex（sem_wait/sem_post の名前付きラッパー）+ 条件変数（シーケンスカウンタ方式）プロデューサー・コンシューマ デモ（5アイテム）
     condvar_asm.S — semaphore_asm.S と同内容
     condvar.expected
+  struct/
+    struct.tkb    — 構造体（Point/Rect、フィールドアクセス・代入・ポインタ渡し・swap）のデモ
+    struct.expected
 scripts/
   run_qemutest.sh — QEMU 結合テストスクリプト（FIFO 同期・タイミング検証付き）
 test/
@@ -234,6 +242,30 @@ LLVM 19 はすべてのポインタが `ptr` 1 種類（opaque pointer）。`fn(
 3. `lib/parser.mly` — `EXTERN FN IDENT LPAREN params RPAREN (ARROW type_expr)? SEMI` 規則
 4. `lib/type_inf.ml` — `fenv` の Pass 1 で `TFun` を追加、`genv` の fold で `ExternFuncDef _ -> m`
 5. `lib/llvm_gen.ml` — Pass 1 で `declare_function` を emit（Pass 2 は `ExternFuncDef _ -> ()`）
+
+### 構造体の実装（7ファイル）
+
+`struct Name { field: type; }` を追加した際の変更ファイル:
+1. `lib/ast.ml` — `TypeNamed of string`（型）、`FieldGet of expr * string`（式）、`AssignField of expr * string * expr`（文）、`StructDef of string * (string * type_expr) list`（トップレベル）
+2. `lib/types.ml` — `TStruct of string`（内部型）、`program_types.structs` フィールド追加
+3. `lib/lexer.mll` — `"struct"` → `STRUCT`、`'.'` → `DOT` トークン
+4. `lib/parser.mly` — `%left DOT`（最高優先度）、`struct_fields` 規則、`IDENT DOT IDENT ASSIGN expr SEMI` 代入文、`expr DOT IDENT` フィールド読み出し式、`IDENT` → `TypeNamed` 型式
+5. `lib/type_inf.ml` — `senv : (string * Ast.type_expr) list StringMap.t` を Pass 0 で収集し全推論関数に引き回す
+6. `lib/llvm_gen.ml` — Pass 0 で `struct_type context fields` を登録、`TypeNamed` は alloca/global ポインタをそのまま返す（配列と同方式）、`FieldGet` は `build_in_bounds_gep` + load、`AssignField` は GEP + store
+7. `test/test_takibi.ml` + `examples/struct/` — パーサ・型推論テスト + QEMU デモ
+
+**構造体変数の codegen 設計**（配列と統一された方式）:
+- `let mut s: Name;` ローカル → `alloca [struct_type]` → `Mut (TypeNamed "Name", alloca_ptr)`
+- `Var "s"` where `TypeNamed _` → alloca ポインタをそのまま返す（ロードしない）
+- グローバル構造体変数も同様（`define_global` の値 = ポインタをそのまま返す）
+- `s.field` / `p.field` where `p: *Name` → GEP `[0, field_idx]` → load（型検査で自動判別）
+- `s.field = v` → GEP → store（volatile なし、MMIO ではないため）
+- `&s` → alloca ポインタを `*Name` として返す（pass by pointer 用）
+
+**現在の制限**:
+- フィールド代入は `ident.field = v` 形式のみ（LHS が変数名 1 段のみ）
+- 構造体リテラル（`Name { x: 1, y: 2 }` 形式）は未サポート（フィールド個別代入で代替）
+- グローバル構造体変数は `let g: Name;` のみ（`let mut` はグローバルスコープで未対応、常に mutable）
 
 ### 同期プリミティブの実装パターンと現状の制限
 
