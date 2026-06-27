@@ -1,0 +1,180 @@
+// タスクウォッチドッグのデモ。
+// タイマー tick ごとに各タスクの最終 kick 時刻をチェックし、
+// deadline を超えたタスクを "ハング" として検出する。
+//
+// task_healthy: 定期的に wdt_kick(1) を呼び続ける → タイムアウトしない
+// task_hung:    3回 wdt_kick(2) した後、意図的に kick を止める → タイムアウト検出
+
+struct GicRegs {
+    distr_ctlr:  *int;
+    distr_isen0: *int;
+    cpu_ctlr:    *int;
+    cpu_pmr:     *int;
+    cpu_iar:     *int;
+    cpu_eoir:    *int;
+}
+
+struct SchedState {
+    task_count:   int;
+    current_task: int;
+    tcb_sp:       [int; 3];
+}
+
+// tick:      タイマー割り込みごとにインクリメントする壁時計
+// last_kick: タスクごとの最終 kick tick（kick しないと古いまま残る）
+// deadline:  タスクごとの許容 tick 数（0 = 監視しない）
+// done:      main がタイムアウト検出後に 1 をセット
+struct WdtState {
+    tick:      int;
+    last_kick: [int; 3];
+    deadline:  [int; 3];
+    done:      int;
+}
+
+fn uart_putc(c: char) {
+    let dr: *char = 0x09000000; // PL011 UART DR
+    *dr = c;
+}
+
+fn uart_puts(s: *char) {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
+fn print_uint(n: int) {
+    if (n >= 10) {
+        print_uint(n / 10);
+    }
+    uart_putc((n - (n / 10) * 10 + '0') as char);
+}
+
+extern fn read_cntfrq() -> int;
+extern fn set_cntp_tval(n: int);
+extern fn enable_cntp();
+extern fn disable_cntp();
+extern fn task_exit_stub();
+
+let gic: GicRegs = {0x08000000, 0x08000100, 0x08010000, 0x08010004, 0x0801000C, 0x08010010};
+let sched: SchedState = {3, 0, {0, 0, 0}};
+
+// deadline[0]=0 (main は監視しない)
+// deadline[1]=20 (task_healthy は継続して kick するので問題なし)
+// deadline[2]=12 (task_hung は kick を止めるので約 12 tick でタイムアウト)
+let wdt: WdtState = {0, {0, 0, 0}, {0, 20, 12}, 0};
+
+let hung_fired: int = 0; // タイムアウト検出フラグ
+let hung_task:  int = 0; // タイムアウトしたタスク ID（hung_fired が 1 のときのみ有効）
+
+fn wdt_kick(task_id: int) {
+    let lk: *int = wdt.last_kick;
+    lk[task_id] = wdt.tick;
+}
+
+// タイマー割り込みから呼ばれ、tick を進めて全監視タスクの生存を確認する
+fn wdt_check() {
+    wdt.tick = wdt.tick + 1;
+    let lk: *int = wdt.last_kick;
+    let dl: *int = wdt.deadline;
+    let mut i: int = 0;
+    while (i < 3) {
+        if (dl[i] > 0) {
+            if (wdt.tick - lk[i] > dl[i]) {
+                hung_task  = i; // どのタスクがタイムアウトしたかを記録
+                hung_fired = 1;
+            }
+        }
+        i = i + 1;
+    }
+}
+
+fn setup_task_stack(s: *char, f: fn() -> void) -> int {
+    let base: *char = s - 272;
+    let mut i: int = 0;
+    while (i < 272) {
+        *(base + i) = 0 as char;
+        i = i + 1;
+    }
+    let p_elr: *fn() -> void = (base + 256) as *fn() -> void;
+    *p_elr = f;
+    let p_spsr: *int = (base + 264) as *int;
+    *p_spsr = 0x05;
+    let p_x30: *fn() -> void = (base + 240) as *fn() -> void;
+    *p_x30 = task_exit_stub;
+    return base as int;
+}
+
+fn gic_init() {
+    *(gic.distr_ctlr)  = 1;
+    *(gic.distr_isen0) = 1 << 30; // PPI #30 (Generic Timer) を有効化
+    *(gic.cpu_pmr)     = 0xff;
+    *(gic.cpu_ctlr)    = 1;
+}
+
+fn timer_init() {
+    gic_init();
+    set_cntp_tval(read_cntfrq() >> 6); // cntfrq/64 ≈ 15ms 間隔
+    enable_cntp();
+}
+
+fn irq_dispatch(frame_sp: int) -> int {
+    let id: int = *gic.cpu_iar;
+    if (id == 30) {
+        set_cntp_tval(read_cntfrq() >> 6);
+        wdt_check(); // ウォッチドッグ確認
+        let sp: *int = sched.tcb_sp;
+        sp[sched.current_task] = frame_sp;
+        sched.current_task = (sched.current_task + 1) % sched.task_count;
+        *(gic.cpu_eoir) = id;
+        let sp2: *int = sched.tcb_sp;
+        return sp2[sched.current_task];
+    }
+    *(gic.cpu_eoir) = id;
+    return frame_sp;
+}
+
+// wdt.done が立つまで定期的に kick を続ける — タイムアウトしないタスク
+fn task_healthy() {
+    let pd: *int = &wdt.done;
+    while (*pd == 0) {
+        wdt_kick(1);
+    }
+}
+
+// 3 回 kick した後、意図的に kick を止めてハング状態になる
+fn task_hung() {
+    let mut i: int = 0;
+    while (i < 3) {
+        wdt_kick(2);
+        i = i + 1;
+    }
+    // ここで kick を止める → ウォッチドッグが deadline 超過を検出する
+    let pd: *int = &wdt.done;
+    while (*pd == 0) {}
+}
+
+let stack_a: [char; 4096];
+let stack_b: [char; 4096];
+
+fn main() {
+    uart_puts("watchdog start\r\n");
+
+    let sp: *int = sched.tcb_sp;
+    sp[1] = setup_task_stack(stack_a + 4096, task_healthy);
+    sp[2] = setup_task_stack(stack_b + 4096, task_hung);
+
+    timer_init();
+
+    // hung_fired は volatile ポインタ経由で読む（グローバル直接読みはホイストされる可能性があるため）
+    let pf: *int = &hung_fired;
+    while (*pf == 0) {}
+
+    disable_cntp();
+    wdt.done = 1;
+
+    uart_puts("watchdog: task ");
+    print_uint(hung_task);
+    uart_puts(" timed out\r\n");
+    uart_puts("done\r\n");
+}

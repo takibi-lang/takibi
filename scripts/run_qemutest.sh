@@ -120,6 +120,7 @@ run_test "semaphore" examples/semaphore/kernel.elf examples/semaphore/semaphore.
 run_test "condvar"   examples/condvar/kernel.elf   examples/condvar/condvar.expected
 run_test "struct"    examples/struct/kernel.elf    examples/struct/struct.expected
 run_test "msgqueue"  examples/msgqueue/kernel.elf  examples/msgqueue/msgqueue.expected
+run_test "watchdog" examples/watchdog/kernel.elf examples/watchdog/watchdog.expected
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then
