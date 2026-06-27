@@ -94,7 +94,7 @@ fn mq_recv() -> int {
     return val;
 }
 
-let gic:   GicRegs;
+let gic: GicRegs = {0x08000000, 0x08000100, 0x08010000, 0x08010004, 0x0801000C, 0x08010010};
 let sched: SchedState = {3, 0, {0, 0, 0}};
 
 extern fn read_cntfrq() -> int;
@@ -117,15 +117,6 @@ fn setup_task_stack(s: *char, f: fn() -> void) -> int {
     let p_x30: *fn() -> void = (base + 240) as *fn() -> void;
     *p_x30 = task_exit_stub;
     return base as int;
-}
-
-fn gic_setup() {
-    gic.distr_ctlr  = 0x08000000;
-    gic.distr_isen0 = 0x08000100;
-    gic.cpu_ctlr    = 0x08010000;
-    gic.cpu_pmr     = 0x08010004;
-    gic.cpu_iar     = 0x0801000C;
-    gic.cpu_eoir    = 0x08010010;
 }
 
 fn gic_init() {
@@ -189,7 +180,6 @@ fn task_consumer() {
 }
 
 fn main() {
-    gic_setup();
     let sp: *int = sched.tcb_sp;
     sp[1] = setup_task_stack(stack_a + 4096, task_producer);
     sp[2] = setup_task_stack(stack_b + 4096, task_consumer);

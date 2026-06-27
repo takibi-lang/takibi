@@ -46,7 +46,7 @@ let task_a_done: int = 0;
 let task_b_done: int = 0;
 let sched_done:  int = 0;
 
-let gic:   GicRegs;
+let gic: GicRegs = {0x08000000, 0x08000100, 0x08010000, 0x08010004, 0x0801000C, 0x08010010};
 let sched: SchedState = {3, 0, {0, 0, 0}};
 
 extern fn read_cntfrq() -> int;
@@ -73,15 +73,6 @@ fn setup_task_stack(s: *char, f: fn() -> void) -> int {
 
 let stack_a: [char; 4096];
 let stack_b: [char; 4096];
-
-fn gic_setup() {
-    gic.distr_ctlr  = 0x08000000;
-    gic.distr_isen0 = 0x08000100;
-    gic.cpu_ctlr    = 0x08010000;
-    gic.cpu_pmr     = 0x08010004;
-    gic.cpu_iar     = 0x0801000C;
-    gic.cpu_eoir    = 0x08010010;
-}
 
 fn gic_init() {
     *(gic.distr_ctlr)  = 1;
@@ -138,7 +129,6 @@ fn task_b() {
 }
 
 fn main() {
-    gic_setup();
     let sp: *int = sched.tcb_sp;
     sp[1] = setup_task_stack(stack_a + 4096, task_a);
     sp[2] = setup_task_stack(stack_b + 4096, task_b);
