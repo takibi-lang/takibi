@@ -1,3 +1,11 @@
+struct RingBuf {
+    buf:  *int;
+    head: int;
+    tail: int;
+    size: int;
+    cap:  int;
+}
+
 fn uart_putc(c: char) {
     let dr: *char = 0x09000000;
     *dr = c;
@@ -17,46 +25,51 @@ fn uart_print_uint(n: int) {
     uart_putc((n % 10 + '0') as char);
 }
 
-fn rb_push(buf: *int, tail: *int, size: *int, cap: int, val: int) {
-    buf[*tail] = val;
-    *tail = (*tail + 1) % cap;
-    *size = *size + 1;
+fn rb_push(rb: *RingBuf, val: int) {
+    let buf: *int = rb.buf;
+    buf[rb.tail] = val;
+    rb.tail = (rb.tail + 1) % rb.cap;
+    rb.size = rb.size + 1;
 }
 
-fn rb_pop(buf: *int, head: *int, size: *int, cap: int) int {
-    let mut val: int = buf[*head];
-    *head = (*head + 1) % cap;
-    *size = *size - 1;
+fn rb_pop(rb: *RingBuf) -> int {
+    let buf: *int = rb.buf;
+    let val: int = buf[rb.head];
+    rb.head = (rb.head + 1) % rb.cap;
+    rb.size = rb.size - 1;
     return val;
 }
 
 fn main() {
-    let mut buf: [int; 4];
-    let mut head: int = 0;
-    let mut tail: int = 0;
-    let mut size: int = 0;
+    let mut data: [int; 4];
+    let mut rb: RingBuf;
+    rb.buf  = data;
+    rb.head = 0;
+    rb.tail = 0;
+    rb.size = 0;
+    rb.cap  = 4;
 
-    rb_push(buf, &tail, &size, 4, 1);
-    rb_push(buf, &tail, &size, 4, 2);
-    rb_push(buf, &tail, &size, 4, 3);
-    rb_push(buf, &tail, &size, 4, 4);
+    rb_push(&rb, 1);
+    rb_push(&rb, 2);
+    rb_push(&rb, 3);
+    rb_push(&rb, 4);
 
     uart_puts("pop: ");
-    uart_print_uint(rb_pop(buf, &head, &size, 4));
+    uart_print_uint(rb_pop(&rb));
     uart_puts(" ");
-    uart_print_uint(rb_pop(buf, &head, &size, 4));
+    uart_print_uint(rb_pop(&rb));
     uart_puts("\r\n");
 
-    rb_push(buf, &tail, &size, 4, 5);
-    rb_push(buf, &tail, &size, 4, 6);
+    rb_push(&rb, 5);
+    rb_push(&rb, 6);
 
     uart_puts("pop: ");
-    uart_print_uint(rb_pop(buf, &head, &size, 4));
+    uart_print_uint(rb_pop(&rb));
     uart_puts(" ");
-    uart_print_uint(rb_pop(buf, &head, &size, 4));
+    uart_print_uint(rb_pop(&rb));
     uart_puts(" ");
-    uart_print_uint(rb_pop(buf, &head, &size, 4));
+    uart_print_uint(rb_pop(&rb));
     uart_puts(" ");
-    uart_print_uint(rb_pop(buf, &head, &size, 4));
+    uart_print_uint(rb_pop(&rb));
     uart_puts("\r\n");
 }

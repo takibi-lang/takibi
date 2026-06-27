@@ -1,3 +1,23 @@
+struct GicRegs {
+    distr_ctlr:  *int;
+    distr_isen0: *int;
+    cpu_ctlr:    *int;
+    cpu_pmr:     *int;
+    cpu_iar:     *int;
+    cpu_eoir:    *int;
+}
+
+struct SchedState {
+    task_count:   int;
+    current_task: int;
+    tcb_sp:       [int; 3];
+}
+
+struct Channel {
+    item:       int;
+    item_count: int;
+}
+
 fn uart_putc(c: char) {
     let dr: *char = 0x09000000;
     *dr = c;
@@ -39,12 +59,11 @@ fn cond_signal(seq: *int) {
     *seq = *seq + 1;
 }
 
-let mutex:          int = 1;
-let cond_not_empty: int = 0;
-let cond_not_full:  int = 0;
+let mutex:     int = 1;
+let not_empty: int = 0;
+let not_full:  int = 0;
+let ch: Channel;
 
-let item_count:  int = 0;
-let shared_item: int = 0;
 let produced:    int = 0;
 let consumed:    int = 0;
 
@@ -52,12 +71,8 @@ let task_a_done: int = 0;
 let task_b_done: int = 0;
 let sched_done:  int = 0;
 
-let gicd_ctlr:  *int = 0x08000000;
-let gicd_isen0: *int = 0x08000100;
-let gicc_ctlr:  *int = 0x08010000;
-let gicc_pmr:   *int = 0x08010004;
-let gicc_iar:   *int = 0x0801000C;
-let gicc_eoir:  *int = 0x08010010;
+let gic:   GicRegs;
+let sched: SchedState;
 
 extern fn read_cntfrq() -> int;
 extern fn set_cntp_tval(n: int);
@@ -81,18 +96,23 @@ fn setup_task_stack(s: *char, f: fn() -> void) -> int {
     return base as int;
 }
 
-let task_count:   int = 3;
-let current_task: int = 0;
-let tcb_sp:      [int; 3];
-
 let stack_a: [char; 4096];
 let stack_b: [char; 4096];
 
+fn gic_setup() {
+    gic.distr_ctlr  = 0x08000000;
+    gic.distr_isen0 = 0x08000100;
+    gic.cpu_ctlr    = 0x08010000;
+    gic.cpu_pmr     = 0x08010004;
+    gic.cpu_iar     = 0x0801000C;
+    gic.cpu_eoir    = 0x08010010;
+}
+
 fn gic_init() {
-    *gicd_ctlr  = 1;
-    *gicd_isen0 = 1 << 30;
-    *gicc_pmr   = 0xff;
-    *gicc_ctlr  = 1;
+    *(gic.distr_ctlr)  = 1;
+    *(gic.distr_isen0) = 1 << 30;
+    *(gic.cpu_pmr)     = 0xff;
+    *(gic.cpu_ctlr)    = 1;
 }
 
 fn timer_init() {
@@ -102,15 +122,17 @@ fn timer_init() {
 }
 
 fn irq_dispatch(frame_sp: int) -> int {
-    let id: int = *gicc_iar;
+    let id: int = *gic.cpu_iar;
     if (id == 30) {
         set_cntp_tval(read_cntfrq() >> 6);
-        tcb_sp[current_task] = frame_sp;
-        current_task = (current_task + 1) % task_count;
-        *gicc_eoir = id;
-        return tcb_sp[current_task];
+        let sp: *int = sched.tcb_sp;
+        sp[sched.current_task] = frame_sp;
+        sched.current_task = (sched.current_task + 1) % sched.task_count;
+        *(gic.cpu_eoir) = id;
+        let sp2: *int = sched.tcb_sp;
+        return sp2[sched.current_task];
     }
-    *gicc_eoir = id;
+    *(gic.cpu_eoir) = id;
     return frame_sp;
 }
 
@@ -118,13 +140,13 @@ fn task_producer() {
     let mut i: int = 0;
     while (i < 5) {
         mutex_lock(&mutex);
-        while (item_count >= 1) {
-            cond_wait(&cond_not_full, &mutex);
+        while (ch.item_count >= 1) {
+            cond_wait(&not_full, &mutex);
         }
-        shared_item = i;
-        item_count = 1;
+        ch.item       = i;
+        ch.item_count = 1;
         produced = produced + 1;
-        cond_signal(&cond_not_empty);
+        cond_signal(&not_empty);
         mutex_unlock(&mutex);
         i = i + 1;
     }
@@ -137,12 +159,12 @@ fn task_consumer() {
     let mut i: int = 0;
     while (i < 5) {
         mutex_lock(&mutex);
-        while (item_count == 0) {
-            cond_wait(&cond_not_empty, &mutex);
+        while (ch.item_count == 0) {
+            cond_wait(&not_empty, &mutex);
         }
-        consumed = consumed + 1;
-        item_count = 0;
-        cond_signal(&cond_not_full);
+        consumed      = consumed + 1;
+        ch.item_count = 0;
+        cond_signal(&not_full);
         mutex_unlock(&mutex);
         i = i + 1;
     }
@@ -152,8 +174,12 @@ fn task_consumer() {
 }
 
 fn main() {
-    tcb_sp[1] = setup_task_stack(stack_a + 4096, task_producer);
-    tcb_sp[2] = setup_task_stack(stack_b + 4096, task_consumer);
+    gic_setup();
+    sched.task_count   = 3;
+    sched.current_task = 0;
+    let sp: *int = sched.tcb_sp;
+    sp[1] = setup_task_stack(stack_a + 4096, task_producer);
+    sp[2] = setup_task_stack(stack_b + 4096, task_consumer);
     timer_init();
     let pa: *int = &task_a_done;
     let pb: *int = &task_b_done;

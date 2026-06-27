@@ -102,7 +102,10 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
               Printf.sprintf "unknown struct type '%s'" sname))
       in
       (match List.assoc_opt fname fields with
-       | Some ft -> of_ast ft
+       | Some ft ->
+           (match of_ast ft with
+            | TArray (inner, _) -> TPtr inner  (* 配列フィールドは *elem に decay *)
+            | t -> t)
        | None ->
            raise (TypeError (e.loc,
              Printf.sprintf "no field '%s' in struct '%s'" fname sname)))

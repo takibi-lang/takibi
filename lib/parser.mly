@@ -87,7 +87,10 @@ stmts:
 
 stmt:
   | RETURN e = expr SEMI { { desc = Return e; loc = $symbolstartpos } }
-  | e = expr SEMI { { desc = Expr e; loc = $symbolstartpos } }
+  | fname = IDENT LPAREN args = args RPAREN SEMI
+    (* 式文は関数呼び出しのみ許容。IDENT LPAREN で確定するため DOT との S/R コンフリクトが消える *)
+    { let loc = $symbolstartpos in
+      { desc = Expr { desc = Call (fname, args); loc }; loc } }
   | LET id = IDENT rhs = let_rhs SEMI
     { { desc = Let (false, id, fst rhs, snd rhs); loc = $symbolstartpos } }
   | LET MUT id = IDENT rhs = let_rhs SEMI

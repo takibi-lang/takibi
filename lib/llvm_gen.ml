@@ -324,8 +324,12 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | TypeNamed _ ->
            (* ネスト構造体フィールド: ポインタをそのまま返す（配列 decay と同じ方式）*)
            (TypePtr field_ty, field_ptr)
+       | TypeArray (elem_ty, _) ->
+           (* 配列フィールド: 先頭要素へのポインタとして返す（ローカル配列変数と同じ decay）*)
+           (TypePtr elem_ty, field_ptr)
        | _ ->
            let v = build_load (ltype_of_ast field_ty) field_ptr fname builder in
+           set_volatile true v;
            let v' = match field_ty with
              | TypeInt | TypeChar -> to_i32 v
              | _                  -> v

@@ -1,3 +1,8 @@
+struct BumpAlloc {
+    heap:   [char; 256];
+    offset: int;
+}
+
 fn uart_putc(c: char) {
     let dr: *char = 0x09000000;
     *dr = c;
@@ -17,12 +22,11 @@ fn uart_print_uint(n: int) {
     uart_putc((n % 10 + '0') as char);
 }
 
-let heap: [char; 256];
-let bump_offset: int = 0;
+let alloc: BumpAlloc;
 
-fn bump_alloc(size: int) *char {
-    let result: *char = heap + bump_offset;
-    bump_offset = bump_offset + size;
+fn bump_alloc(size: int) -> *char {
+    let result: *char = alloc.heap + alloc.offset;
+    alloc.offset = alloc.offset + size;
     return result;
 }
 
@@ -44,6 +48,6 @@ fn main() {
     uart_puts("\r\n");
 
     uart_puts("used: ");
-    uart_print_uint(bump_offset);
+    uart_print_uint(alloc.offset);
     uart_puts(" bytes\r\n");
 }

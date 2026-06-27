@@ -1,3 +1,8 @@
+struct IntSlice {
+    data: *int;
+    len:  int;
+}
+
 fn uart_putc(c: char) {
     let dr: *char = 0x09000000;
     *dr = c;
@@ -17,11 +22,12 @@ fn uart_print_uint(n: int) {
     uart_putc((n % 10 + '0') as char);
 }
 
-fn print_arr(arr: *int, n: int) {
+fn print_arr(s: *IntSlice) {
+    let arr: *int = s.data;
     let mut i: int = 0;
-    while (i < n) {
+    while (i < s.len) {
         uart_print_uint(arr[i]);
-        if (i < n - 1) {
+        if (i < s.len - 1) {
             uart_putc(' ');
         }
         i = i + 1;
@@ -29,7 +35,9 @@ fn print_arr(arr: *int, n: int) {
     uart_puts("\r\n");
 }
 
-fn bubble_sort(arr: *int, n: int) {
+fn bubble_sort(s: *IntSlice) {
+    let arr: *int = s.data;
+    let n: int = s.len;
     let mut i: int = 0;
     while (i < n - 1) {
         let mut j: int = 0;
@@ -56,11 +64,15 @@ fn main() {
     buf[6] = 7;
     buf[7] = 4;
 
-    uart_puts("before: ");
-    print_arr(buf, 8);
+    let mut s: IntSlice;
+    s.data = buf;
+    s.len  = 8;
 
-    bubble_sort(buf, 8);
+    uart_puts("before: ");
+    print_arr(&s);
+
+    bubble_sort(&s);
 
     uart_puts("after:  ");
-    print_arr(buf, 8);
+    print_arr(&s);
 }

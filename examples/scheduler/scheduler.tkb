@@ -1,3 +1,10 @@
+struct Scheduler {
+    tasks:      [fn() -> void; 8];
+    task_count: int;
+    cur:        int;
+    active:     int;
+}
+
 fn uart_putc(c: char) {
     let dr: *char = 0x09000000;
     *dr = c;
@@ -17,26 +24,25 @@ fn print_uint(n: int) {
     uart_putc((n - (n / 10) * 10 + '0') as char);
 }
 
-let tasks: [fn() -> void; 8];
-let task_count: int = 0;
-let cur: int = 0;
-let active: int = 0;
+let sched: Scheduler;
 
 fn add_task(f: fn() -> void) {
-    tasks[task_count] = f;
-    task_count = task_count + 1;
-    active = active + 1;
+    let t: *fn() -> void = sched.tasks;
+    t[sched.task_count] = f;
+    sched.task_count = sched.task_count + 1;
+    sched.active = sched.active + 1;
 }
 
 fn task_finish() {
-    active = active - 1;
+    sched.active = sched.active - 1;
 }
 
 fn scheduler_run() {
-    while (active > 0) {
-        let f: fn() -> void = tasks[cur];
+    while (sched.active > 0) {
+        let t: *fn() -> void = sched.tasks;
+        let f: fn() -> void = t[sched.cur];
         f();
-        cur = (cur + 1) % task_count;
+        sched.cur = (sched.cur + 1) % sched.task_count;
     }
 }
 
