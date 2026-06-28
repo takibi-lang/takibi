@@ -61,10 +61,8 @@ extern fn task_exit_stub();
 
 fn setup_task_stack(s: *char, f: fn() -> void) -> int {
     let base: *char = s - 272;
-    let mut i: int = 0;
-    while (i < 272) {
+    for i in 0..<272 {
         *(base + i) = 0 as char;
-        i = i + 1;
     }
     let p_elr: *fn() -> void = (base + 256) as *fn() -> void;
     *p_elr = f;
@@ -107,12 +105,10 @@ fn irq_dispatch(frame_sp: int) -> int {
 }
 
 fn task_a() {
-    let mut i: int = 0;
-    while (i < 3) {
+    for i in 0..<3 {
         sem_wait(&shared.mutex);
         shared.count = shared.count + 1;
         sem_post(&shared.mutex);
-        i = i + 1;
     }
     task_a_done = 1;
     let p: *io int = &sched_done;
@@ -120,12 +116,10 @@ fn task_a() {
 }
 
 fn task_b() {
-    let mut i: int = 0;
-    while (i < 3) {
+    for i in 0..<3 {
         sem_wait(&shared.mutex);
         shared.count = shared.count + 1;
         sem_post(&shared.mutex);
-        i = i + 1;
     }
     task_b_done = 1;
     let p: *io int = &sched_done;

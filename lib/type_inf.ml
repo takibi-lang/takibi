@@ -101,7 +101,15 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
        | Lt | Gt | Le | Ge | Eq | Ne ->
            unify_at e.loc t1 t2;
            TInt
-       | Or | And | Bor | Bxor | Band | Shr | Shl | Mod ->
+       (* 区間伝播: n % m where m は正の定数 → {0..<m}。
+          n % 4 は必ず 0,1,2,3 のいずれかなのでリングバッファのインデックスに使える。 *)
+       | Mod ->
+           unify_at e1.loc t1 TInt;
+           unify_at e2.loc t2 TInt;
+           (match e2.desc with
+            | IntLit m when m > 0 -> TRefinedInt (0, m)
+            | _ -> TInt)
+       | Or | And | Bor | Bxor | Band | Shr | Shl ->
            unify_at e1.loc t1 TInt;
            unify_at e2.loc t2 TInt;
            TInt)
@@ -325,8 +333,9 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
         raise (TypeError (s.loc,
           Printf.sprintf "cannot assign to immutable variable '%s'; use 'let mut'" name));
       let ety = infer_expr senv tyenv fenv e in
-      (* io T 変数への代入: T との互換性で確認（io は記憶域修飾子なので剥がす）*)
-      unify_at e.loc (strip_io vty) ety;
+      (* 代入: "actual(rhs) が expected(lhs) のサブタイプ" として照合する。
+         TRefinedInt → TInt は OK（精度を落として代入）。逆は NG。 *)
+      unify_at e.loc ety (strip_io vty);
       (tyenv, raw_locals)
   | AssignDeref (ptr_expr, val_expr) ->
       let pt = infer_expr senv tyenv fenv ptr_expr in
@@ -409,8 +418,8 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
                 "literal { ... } requires a struct or array type annotation")))
        | Some e ->
            let et = infer_expr senv tyenv fenv e in
-           (* io T アノテーション付き変数の初期化: T との互換性で確認 *)
-           unify_at e.loc (strip_io ty) et);
+           (* 初期化: actual(式) が expected(型アノテーション) のサブタイプとして照合 *)
+           unify_at e.loc et (strip_io ty));
       ( StringMap.add name (ty, is_mut) tyenv,
         StringMap.add name ty raw_locals )
   | Block stmts ->

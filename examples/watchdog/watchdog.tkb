@@ -77,24 +77,20 @@ fn wdt_check() {
     wdt.tick = wdt.tick + 1;
     let lk: *int = wdt.last_kick;
     let dl: *int = wdt.deadline;
-    let mut i: int = 0;
-    while (i < 3) {
+    for i in 0..<3 {
         if (dl[i] > 0) {
             if (wdt.tick - lk[i] > dl[i]) {
                 hung_task  = i; // どのタスクがタイムアウトしたかを記録
                 hung_fired = 1;
             }
         }
-        i = i + 1;
     }
 }
 
 fn setup_task_stack(s: *char, f: fn() -> void) -> int {
     let base: *char = s - 272;
-    let mut i: int = 0;
-    while (i < 272) {
+    for i in 0..<272 {
         *(base + i) = 0 as char;
-        i = i + 1;
     }
     let p_elr: *fn() -> void = (base + 256) as *fn() -> void;
     *p_elr = f;
@@ -144,10 +140,8 @@ fn task_healthy() {
 
 // 3 回 kick した後、意図的に kick を止めてハング状態になる
 fn task_hung() {
-    let mut i: int = 0;
-    while (i < 3) {
+    for i in 0..<3 {
         wdt_kick(2);
-        i = i + 1;
     }
     // ここで kick を止める → ウォッチドッグが deadline 超過を検出する
     let pd: *io int = &wdt.done;

@@ -48,10 +48,8 @@ extern fn task_exit_stub();
 
 fn setup_task_stack(s: *char, f: fn() -> void) -> int {
     let base: *char = s - 272;
-    let mut i: int = 0;
-    while (i < 272) {
+    for i in 0..<272 {
         *(base + i) = 0 as char;
-        i = i + 1;
     }
     let p_elr: *fn() -> void = (base + 256) as *fn() -> void;
     *p_elr = f;

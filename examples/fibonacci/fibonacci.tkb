@@ -22,13 +22,11 @@ fn main() {
     let mut a: int = 0;
     let mut b: int = 1;
     let mut tmp: int = 0;
-    let mut i: int = 0;
-    while (i < 10) {
+    for i in 0..<10 {
         uart_print_uint(b);
         uart_puts("\r\n");
         tmp = a + b;
         a = b;
         b = tmp;
-        i = i + 1;
     }
 }

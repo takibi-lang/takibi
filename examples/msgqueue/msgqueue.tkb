@@ -108,10 +108,8 @@ extern fn task_exit_stub();
 
 fn setup_task_stack(s: *char, f: fn() -> void) -> int {
     let base: *char = s - 272;
-    let mut i: int = 0;
-    while (i < 272) {
+    for i in 0..<272 {
         *(base + i) = 0 as char;
-        i = i + 1;
     }
     let p_elr: *fn() -> void = (base + 256) as *fn() -> void;
     *p_elr = f;
@@ -158,10 +156,8 @@ let stack_a: [char; 4096];
 let stack_b: [char; 4096];
 
 fn task_producer() {
-    let mut i: int = 0;
-    while (i < 5) {
+    for i in 0..<5 {
         mq_send(i);
-        i = i + 1;
     }
     producer_done = 1;
     let p: *io int = &sched_done;
@@ -169,13 +165,11 @@ fn task_producer() {
 }
 
 fn task_consumer() {
-    let mut i: int = 0;
-    while (i < 5) {
+    for i in 0..<5 {
         let v: int = mq_recv();
         uart_puts("recv: ");
         print_uint(v);
         uart_puts("\r\n");
-        i = i + 1;
     }
     consumer_done = 1;
     let p: *io int = &sched_done;

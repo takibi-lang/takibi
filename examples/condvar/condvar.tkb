@@ -88,10 +88,8 @@ extern fn task_exit_stub();
 
 fn setup_task_stack(s: *char, f: fn() -> void) -> int {
     let base: *char = s - 272;
-    let mut i: int = 0;
-    while (i < 272) {
+    for i in 0..<272 {
         *(base + i) = 0 as char;
-        i = i + 1;
     }
     let p_elr: *fn() -> void = (base + 256) as *fn() -> void;
     *p_elr = f;
@@ -134,8 +132,7 @@ fn irq_dispatch(frame_sp: int) -> int {
 }
 
 fn task_producer() {
-    let mut i: int = 0;
-    while (i < 5) {
+    for i in 0..<5 {
         mutex_lock(&ch.mutex);
         while (ch.item_count >= 1) {
             cond_wait(&ch.not_full, &ch.mutex);
@@ -145,7 +142,6 @@ fn task_producer() {
         produced = produced + 1;
         cond_signal(&ch.not_empty);
         mutex_unlock(&ch.mutex);
-        i = i + 1;
     }
     task_a_done = 1;
     let p: *io int = &sched_done;
@@ -153,8 +149,7 @@ fn task_producer() {
 }
 
 fn task_consumer() {
-    let mut i: int = 0;
-    while (i < 5) {
+    for i in 0..<5 {
         mutex_lock(&ch.mutex);
         while (ch.item_count == 0) {
             cond_wait(&ch.not_empty, &ch.mutex);
@@ -163,7 +158,6 @@ fn task_consumer() {
         ch.item_count = 0;
         cond_signal(&ch.not_full);
         mutex_unlock(&ch.mutex);
-        i = i + 1;
     }
     task_b_done = 1;
     let p: *io int = &sched_done;

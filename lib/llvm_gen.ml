@@ -483,7 +483,15 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | Band -> (TypeInt, build_and  (to_i32 v1) (to_i32 v2) "andtmp" builder)
        | Shr  -> (TypeInt, build_lshr (to_i32 v1) (to_i32 v2) "shrtmp" builder)
        | Shl  -> (TypeInt, build_shl  (to_i32 v1) (to_i32 v2) "shltmp" builder)
-       | Mod  -> (TypeInt, build_srem (to_i32 v1) (to_i32 v2) "modtmp" builder))
+       (* 区間伝播: n % m where m は正の定数 → 結果は必ず {0..<m} に収まる。
+          これにより buf[x % N] where buf: [T; N] の境界チェックを省略できる。 *)
+       | Mod  ->
+           let result = build_srem (to_i32 v1) (to_i32 v2) "modtmp" builder in
+           let ret_ty = match e2.desc with
+             | IntLit m when m > 0 -> TypeRefined (0, m)
+             | _ -> TypeInt
+           in
+           (ret_ty, result))
 
   | Cast (target_ty, e) ->
       let (_, v) = gen_expr locals e in

@@ -120,6 +120,23 @@ run_compile_error_test() {
     rm -f "$tmp_err" "$tmp_obj"
 }
 
+# run_no_trap_test NAME KERNEL
+#
+# llvm-objdump で逆アセンブルし、brk 命令（llvm.trap → AArch64 brk #0x1）が
+# ゼロであることを確認する。配列境界チェックが型レベルで完全に証明されていることの検証。
+run_no_trap_test() {
+    local name="$1" kernel="$2"
+    local count
+    count=$(llvm-objdump-19 --disassemble "$kernel" 2>/dev/null | grep -c "brk" || true)
+    if [ "$count" -eq 0 ]; then
+        printf "${GRN}PASS${RST}  %s  (no brk)\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        printf "${RED}FAIL${RST}  %s  ($count brk instruction(s) — runtime trap risk)\n" "$name"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
 echo "Running compile-error tests (no QEMU required)..."
 echo ""
 
@@ -167,6 +184,17 @@ run_test "watchdog" examples/watchdog/kernel.elf examples/watchdog/watchdog.expe
 run_test "refined"  examples/refined/kernel.elf  examples/refined/refined.expected
 run_test "narrow"   examples/narrow/kernel.elf   examples/narrow/narrow.expected
 run_test "for"      examples/for/kernel.elf      examples/for/for.expected
+
+echo ""
+echo "Running no-trap checks (brk must be zero in these kernels)..."
+echo ""
+
+# 型レベルで境界が証明されているはずの例題。brk が入ったら型注釈を見直すこと。
+for e in start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci \
+          bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt \
+          semaphore condvar struct msgqueue watchdog refined narrow for; do
+    run_no_trap_test "$e (no-trap)" "examples/$e/kernel.elf"
+done
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

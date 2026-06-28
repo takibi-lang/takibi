@@ -25,17 +25,13 @@ fn main() {
 
     let mut buf: [char; 8];
 
-    let mut i: int = 0;
-    while (i < 8) {
+    for i in 0..<8 {
         buf[i] = 'A';
-        i = i + 1;
     }
 
     uart_puts("write: ");
-    i = 0;
-    while (i < 8) {
+    for i in 0..<8 {
         uart_putc(buf[i]);
-        i = i + 1;
     }
     uart_puts("\r\n");
 
@@ -46,10 +42,8 @@ fn main() {
 
     fill(buf, 'Z', 8);
     uart_puts("fill:  ");
-    i = 0;
-    while (i < 8) {
+    for i in 0..<8 {
         uart_putc(buf[i]);
-        i = i + 1;
     }
     uart_puts("\r\n");
 
