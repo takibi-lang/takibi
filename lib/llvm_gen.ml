@@ -76,6 +76,34 @@ let apply_narrowing (locals : (string, local_binding) Hashtbl.t) (cond : Ast.exp
 let restore_narrowing (locals : (string, local_binding) Hashtbl.t) saved =
   List.iter (fun (name, old) -> Hashtbl.replace locals name old) saved
 
+(* if-条件による Mut バインディングの絞り込みを保持するモジュールレベル表。
+   コンパイルは単一スレッドなので module-level Hashtbl として持つ（安全）。
+   gen_expr は locals に直接アクセスできないため、型オーバーライドをここで渡す。 *)
+let narrowing_ctx : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 4
+
+(* Mut バインディングに対して narrowing_ctx へ絞り込み型を記録する。
+   Returns [(name, old_opt)] — then-branch 終了後に restore_narrowing_mut へ渡す。 *)
+let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t) (cond : Ast.expr) =
+  let bounds = collect_bounds_cond cond in
+  Types.StringMap.fold (fun name (lo_opt, hi_opt) saved ->
+    match lo_opt, hi_opt with
+    | Some lo, Some hi ->
+        (match Hashtbl.find_opt locals name with
+         | Some (Mut (TypeInt, _)) ->
+             let old = Hashtbl.find_opt narrowing_ctx name in
+             Hashtbl.replace narrowing_ctx name (TypeRefined (lo, hi));
+             (name, old) :: saved
+         | _ -> saved)
+    | _ -> saved
+  ) bounds []
+
+let restore_narrowing_mut saved =
+  List.iter (fun (name, old_opt) ->
+    match old_opt with
+    | None     -> Hashtbl.remove narrowing_ctx name
+    | Some old -> Hashtbl.replace narrowing_ctx name old
+  ) saved
+
 let setup_target ?(triple = "") () =
   let _ = Llvm_all_backends.initialize () in
   let triple = if triple = "" then Llvm_target.Target.default_triple () else triple in
@@ -497,8 +525,14 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            (field_ty, v'))
 
   | Index (id, idx) ->
-      let (idx_ty, idx_raw) = gen_expr locals idx in
+      let (idx_ty_raw, idx_raw) = gen_expr locals idx in
       let idx_v = to_i32 idx_raw in
+      (* if-条件の Mut 絞り込み（narrowing_ctx）を優先して idx_ty を決める *)
+      let idx_ty = match idx.desc with
+        | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
+                    | Some t -> t | None -> idx_ty_raw)
+        | _ -> idx_ty_raw
+      in
       (* [T; N] 配列のロード: TypeRefined が安全性を証明する場合は境界チェックを省略 *)
       let load_from_array elem_ty n arr_ptr =
         let needs_check = match idx_ty with
@@ -726,8 +760,14 @@ let gen_func ?prog_types fdef =
         if is_volatile then set_volatile true inst
 
     | AssignIndex (id, idx, rhs) ->
-        let (idx_ty, idx_raw) = gen_expr locals idx in
+        let (idx_ty_raw, idx_raw) = gen_expr locals idx in
         let idx_v = to_i32 idx_raw in
+        (* if-条件の Mut 絞り込み（narrowing_ctx）を優先して idx_ty を決める *)
+        let idx_ty = match idx.desc with
+          | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
+                      | Some t -> t | None -> idx_ty_raw)
+          | _ -> idx_ty_raw
+        in
         let (_, rhs_v) = gen_expr locals rhs in
         let store_to_array elem_ty n arr_ptr =
           let needs_check = match idx_ty with
@@ -823,9 +863,11 @@ let gen_func ?prog_types fdef =
         ignore (build_cond_br cond_v then_bb else_bb builder);
 
         position_at_end then_bb builder;
-        let saved = apply_narrowing locals cond in
+        let saved     = apply_narrowing     locals cond in
+        let saved_mut = apply_narrowing_mut locals cond in
         List.iter gen_stmt then_stmts;
-        restore_narrowing locals saved;
+        restore_narrowing     locals saved;
+        restore_narrowing_mut saved_mut;
         if block_terminator (insertion_block builder) = None then
           ignore (build_br merge_bb builder);
 
