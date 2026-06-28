@@ -20,7 +20,7 @@ let unify_at loc t1 t2 =
   try unify t1 t2
   with Unify_error msg -> raise (TypeError (loc, msg))
 
-(* ── Expression inference ────────────────────────────────────────────────── *)
+(* -- Expression inference -------------------------------------------------- *)
 
 let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
@@ -47,11 +47,11 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
       let t2 = infer_expr senv tyenv fenv e2 in
       (match op with
        | Add ->
-           (* Pointer arithmetic: ptr + int → returns the same pointer type. TIo is a value type, excluded *)
+           (* Pointer arithmetic: ptr + int -> returns the same pointer type. TIo is a value type, excluded *)
            (match repr t1, repr t2 with
             | TPtr _, _ -> t1
             | _, TPtr _ -> t2
-            (* Range propagation: {a..<b} + k → {a+k..<b+k}. Precision preserved only when other operand is IntLit *)
+            (* Range propagation: {a..<b} + k -> {a+k..<b+k}. Precision preserved only when other operand is IntLit *)
             | TRefinedInt (a, b), _ ->
                 (match e2.desc with
                  | IntLit k ->
@@ -75,12 +75,12 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
                 unify_at e2.loc t2 TInt;
                 TInt)
        | Sub ->
-           (* Pointer arithmetic: ptr - int → returns the same pointer type. TIo is a value type, excluded *)
+           (* Pointer arithmetic: ptr - int -> returns the same pointer type. TIo is a value type, excluded *)
            (match repr t1 with
             | TPtr _ ->
                 unify_at e2.loc t2 TInt;
                 t1
-            (* Range propagation: {a..<b} - k → {a-k..<b-k}. Precision preserved only when other operand is IntLit *)
+            (* Range propagation: {a..<b} - k -> {a-k..<b-k}. Precision preserved only when other operand is IntLit *)
             | TRefinedInt (a, b) ->
                 (match e2.desc with
                  | IntLit k ->
@@ -101,10 +101,10 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
        | Lt | Gt | Le | Ge | Eq | Ne ->
            unify_at e.loc t1 t2;
            TInt
-       (* Range propagation: n % m where m is a positive constant → {0..<m}.
+       (* Range propagation: n % m where m is a positive constant -> {0..<m}.
           Soundness condition: propagate only when n is non-negative ({lo..<_} with lo >= 0).
           When n is int (can be negative), srem returns a negative remainder, so return TInt.
-          Example: (-5) % 8 = -5 (not 3) — returning {0..<m} without non-negativity is unsound. *)
+          Example: (-5) % 8 = -5 (not 3) -- returning {0..<m} without non-negativity is unsound. *)
        | Mod ->
            unify_at e2.loc t2 TInt;
            (match e2.desc with
@@ -115,7 +115,7 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
                      unify_at e1.loc t1 TInt;
                      TRefinedInt (0, m)
                  | _ ->
-                     (* e1 can be negative — return TInt for safety *)
+                     (* e1 can be negative -- return TInt for safety *)
                      unify_at e1.loc t1 TInt;
                      TInt)
             | _ ->
@@ -207,7 +207,7 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
                   Printf.sprintf "index %d is out of bounds for array of size %d" k n))
             | _ -> ());
            elem
-       | TPtr   elem      -> strip_io elem     (* *T or *io T → returns T (bounds unknown) *)
+       | TPtr   elem      -> strip_io elem     (* *T or *io T -> returns T (bounds unknown) *)
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt))))
 
@@ -216,7 +216,7 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
         "struct literal requires a type annotation: `let mut x: Name = {...}`"))
 
   | Call (fname, args) ->
-      (* Try direct call (function name → fenv) first *)
+      (* Try direct call (function name -> fenv) first *)
       let ft_opt = match StringMap.find_opt fname fenv with
         | Some ft -> Some ft
         | None ->
@@ -246,7 +246,7 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
            ) args param_tys;
            ret_ty)
 
-(* ── Checking mode ───────────────────────────────────────────────────────── *)
+(* -- Checking mode --------------------------------------------------------- *)
 (* check_expr pushes the expected type inward (bidirectional checking).
    Handles nested StructLit for both struct and array fields.
    Falls back to infer_expr + unify for all other expressions. *)
@@ -277,10 +277,10 @@ let rec check_expr senv tyenv fenv (e : Ast.expr) (expected : ty) : unit =
       (* If expected type is io T: check compatibility with T (strip the storage qualifier) *)
       unify_at e.loc te (strip_io expected)
 
-(* ── Flow-sensitive type narrowing ───────────────────────────────────────── *)
+(* -- Flow-sensitive type narrowing ----------------------------------------- *)
 
 (* Collect per-variable bounds from a condition: v >= lo / v < hi / && chains.
-   Returns name → (lo_opt, hi_opt). Commutative forms (lo < v) are also handled. *)
+   Returns name -> (lo_opt, hi_opt). Commutative forms (lo < v) are also handled. *)
 let collect_bounds (cond : Ast.expr) : (int option * int option) StringMap.t =
   let take_lo a b = match a, b with
     | Some x, Some y -> Some (max x y)
@@ -323,7 +323,7 @@ let narrow_from_cond tyenv (cond : Ast.expr) =
     | _ -> env
   ) bounds tyenv
 
-(* ── Statement inference ─────────────────────────────────────────────────── *)
+(* -- Statement inference --------------------------------------------------- *)
 (* Returns (updated_tyenv, updated_raw_locals).
    tyenv grows with each Let in the current scope.
    raw_locals accumulates every Let type seen (including inside blocks/if/while)
@@ -346,7 +346,7 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
           Printf.sprintf "cannot assign to immutable variable '%s'; use 'let mut'" name));
       let ety = infer_expr senv tyenv fenv e in
       (* Assignment: match as "actual(rhs) is a subtype of expected(lhs)".
-         TRefinedInt → TInt is OK (assigning with loss of precision). Reverse is NG. *)
+         TRefinedInt -> TInt is OK (assigning with loss of precision). Reverse is NG. *)
       unify_at e.loc ety (strip_io vty);
       (tyenv, raw_locals)
   | AssignDeref (ptr_expr, val_expr) ->
@@ -481,7 +481,7 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
       in
       (tyenv, raw_locals')
 
-(* ── Function inference ──────────────────────────────────────────────────── *)
+(* -- Function inference ---------------------------------------------------- *)
 
 let infer_func senv fenv genv (fdef : Ast.func) : func_info =
   let param_tys = List.map (fun (_, ty_opt) -> of_ast_opt ty_opt) fdef.params in
@@ -502,7 +502,7 @@ let infer_func senv fenv genv (fdef : Ast.func) : func_info =
     local_types = StringMap.map to_ast raw_locals;
   }
 
-(* ── Whole-program inference ─────────────────────────────────────────────── *)
+(* -- Whole-program inference ----------------------------------------------- *)
 
 let infer_program (prog : Ast.toplevel list) : program_types =
   (* Pass 0: collect struct definitions *)

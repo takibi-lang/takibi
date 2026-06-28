@@ -1,4 +1,4 @@
-// Test for call order across multiple functions (prints in order: main → A → B → C).
+// Test for call order across multiple functions (prints in order: main -> A -> B -> C).
 // Verifies that the AArch64 call stack works correctly.
 fn uart_putc(c: char) {
     let dr: *io char = 0x09000000; // PL011 UART DR

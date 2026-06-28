@@ -1,7 +1,7 @@
     .text
     .align 2
 
-/* ── ARM Generic Timer system register stubs ──────────────────────────────────
+/* -- ARM Generic Timer system register stubs ----------------------------------
    mrs/msr instructions cannot be used directly from takibi,
    so a one-instruction thin wrapper is provided for each.  */
 

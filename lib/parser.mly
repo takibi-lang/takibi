@@ -17,19 +17,19 @@ open Ast
 %token OR PIPE HAT SHR SHL DAMP
 %token AS
 
-(* Precedence: low → high.  UNARY is a pseudo-token for %prec. *)
-%left OR          (* || — lowest precedence logical operator *)
-%left DAMP        (* && — higher than ||, lower than comparison operators *)
+(* Precedence: low -> high.  UNARY is a pseudo-token for %prec. *)
+%left OR          (* || -- lowest precedence logical operator *)
+%left DAMP        (* && -- higher than ||, lower than comparison operators *)
 %left PIPE        (* bitwise OR: looser than comparison so (a==0)|(b==0) works *)
 %left HAT         (* bitwise XOR: between | and comparison *)
 %left LT GT LE GE EQ NE
-%left AMP         (* bitwise AND — also used as unary AddrOf prefix *)
+%left AMP         (* bitwise AND -- also used as unary AddrOf prefix *)
 %nonassoc AS      (* as cast: lower than arithmetic so a+b as T = (a+b) as T *)
 %left PLUS MINUS
 %left SHR SHL     (* shifts: tighter than +/-, looser than * / % *)
 %left TIMES DIV PERCENT  (* multiplicative *)
 %nonassoc UNARY   (* unary * (deref), & (addrof), unary - *)
-%left DOT         (* highest: field access — postfix, binds tighter than prefix ops *)
+%left DOT         (* highest: field access -- postfix, binds tighter than prefix ops *)
 
 %token INT_TYPE CHAR_TYPE VOID_TYPE
 %token COLON ARROW
@@ -106,18 +106,18 @@ stmt:
   | id = IDENT ASSIGN e = expr SEMI
     { { desc = Assign (id, e); loc = $symbolstartpos } }
   | id = IDENT LBRACKET idx = expr RBRACKET ASSIGN rhs = expr SEMI
-    (* arr[i] = rhs — preserves id+size for bounds checking in codegen *)
+    (* arr[i] = rhs -- preserves id+size for bounds checking in codegen *)
     { { desc = AssignIndex (id, idx, rhs); loc = $symbolstartpos } }
   | TIMES id = IDENT ASSIGN rhs = expr SEMI
-    (* *p = v  — simple pointer-deref write *)
+    (* *p = v  -- simple pointer-deref write *)
     { let loc = $symbolstartpos in
       let ptr = { desc = Var id; loc } in
       { desc = AssignDeref (ptr, rhs); loc } }
   | TIMES LPAREN lhs = expr RPAREN ASSIGN rhs = expr SEMI
-    (* *(complex_expr) = v  — e.g. *(arr + i) = v *)
+    (* *(complex_expr) = v  -- e.g. *(arr + i) = v *)
     { { desc = AssignDeref (lhs, rhs); loc = $symbolstartpos } }
   | id = IDENT DOT fname = IDENT ASSIGN rhs = expr SEMI
-    (* s.field = v  or  ptr.field = v — struct field write *)
+    (* s.field = v  or  ptr.field = v -- struct field write *)
     { let loc = $symbolstartpos in
       let base = { desc = Var id; loc } in
       { desc = AssignField (base, fname, rhs); loc } }
@@ -160,13 +160,13 @@ expr:
   | e = expr AS t = type_expr
     { { desc = Cast (t, e); loc = $symbolstartpos } }
   | id = IDENT LBRACKET idx = expr RBRACKET
-    (* arr[i] — preserved as Index node; codegen emits bounds check for [T;N] arrays *)
+    (* arr[i] -- preserved as Index node; codegen emits bounds check for [T;N] arrays *)
     { { desc = Index (id, idx); loc = $symbolstartpos } }
   | e = expr DOT fname = IDENT
-    (* e.field — struct field read; works for both Struct and *Struct *)
+    (* e.field -- struct field read; works for both Struct and *Struct *)
     { { desc = FieldGet (e, fname); loc = $symbolstartpos } }
   | LBRACE fs = args RBRACE
-    (* { e, e, ... } — positional struct literal; requires a type annotation *)
+    (* { e, e, ... } -- positional struct literal; requires a type annotation *)
     { { desc = StructLit fs; loc = $symbolstartpos } }
 
 args:

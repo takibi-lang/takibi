@@ -1,7 +1,7 @@
     .text
     .align 2
 
-/* ── ARM Generic Timer system register stubs ──────────────────────────────────
+/* -- ARM Generic Timer system register stubs ----------------------------------
    mrs/msr instructions cannot be used directly from takibi,
    so a one-instruction thin wrapper is provided for each.  */
 
@@ -31,7 +31,7 @@ disable_cntp:           /* fn disable_cntp() */
     msr     cntp_ctl_el0, xzr
     ret
 
-/* ── Semaphore (atomic implementation using ldaxr / stlxr) ──────────────────────────
+/* -- Semaphore (atomic implementation using ldaxr / stlxr) --------------------------
 
    sem_wait(s: *int)
      Spins until the counter is positive, then atomically decrements it.
@@ -48,7 +48,7 @@ sem_wait:                   /* fn sem_wait(s: *int) */
     cbz     w1, .Lw_zero    /* counter == 0: wait */
     sub     w2, w1, #1
     stxr    w3, w2, [x0]    /* store-exclusive; w3 == 0 means success */
-    cbnz    w3, .Lw_retry   /* conflict → retry from the top */
+    cbnz    w3, .Lw_retry   /* conflict -> retry from the top */
     ret
 .Lw_zero:
     clrex                   /* clear exclusive monitor */
@@ -65,7 +65,7 @@ sem_post:                   /* fn sem_post(s: *int) */
     ldxr    w1, [x0]        /* load-exclusive */
     add     w2, w1, #1
     stlxr   w3, w2, [x0]   /* store-exclusive (+ release) */
-    cbnz    w3, .Lp_retry   /* conflict → retry */
+    cbnz    w3, .Lp_retry   /* conflict -> retry */
     ret
 
 /* task_exit_stub: safety net for when a task function mistakenly returns */

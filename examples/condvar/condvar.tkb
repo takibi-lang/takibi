@@ -54,9 +54,9 @@ fn mutex_unlock(m: *int) {
 }
 
 /* Preventing missed wakeups in cond_wait:
-   ① Read the sequence number while holding the mutex
-   ② Even if a signal arrives after unlock, the saved s from ① still detects it
-   ③ *seq is a volatile load — the compiler will not hoist it out of the spin loop */
+   (1) Read the sequence number while holding the mutex
+   (2) Even if a signal arrives after unlock, the saved s from (1) still detects it
+   (3) *seq is a volatile load -- the compiler will not hoist it out of the spin loop */
 fn cond_wait(seq: *io int, m: *int) {
     let s: int = *seq;
     mutex_unlock(m);

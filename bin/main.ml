@@ -53,7 +53,7 @@ let () =
           exit 1
     in
 
-    (* HM type inference — catches type errors and produces resolved types *)
+    (* HM type inference -- catches type errors and produces resolved types *)
     let prog_types = Typechecker.infer_program prog in
 
     Llvm_gen.gen_program ~prog_types prog;

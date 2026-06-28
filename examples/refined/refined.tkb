@@ -4,13 +4,13 @@
 // The goal is that none of the generated machine code contains llvm.trap (brk #0).
 //
 //   Approach 1: manual {lo..<hi} annotation (Step 3.4)
-//     fill_pair(i: {0..<7}) — caller proves the type and passes it in
+//     fill_pair(i: {0..<7}) -- caller proves the type and passes it in
 //
 //   Approach 2: for loop (Step 3.5-for)
-//     for i in 0..<8 — compiler automatically determines i: {0..<8}
+//     for i in 0..<8 -- compiler automatically determines i: {0..<8}
 //
 //   Approach 3: if narrowing (Step 3.5-if)
-//     if (v >= 0 && v < 8) — converts a runtime check into a type proof
+//     if (v >= 0 && v < 8) -- converts a runtime check into a type proof
 //     Note: direct access through a Mut binding (v: int parameter) still conservatively
 //       retains the bounds check for now (to be improved in Step 3.5-Mut)
 //
@@ -26,10 +26,10 @@ fn uart_putc(c: char) {
 
 let buf: [char; 8];
 
-// ─── Approach 1: manual {lo..<hi} annotation (Step 3.4) ──────────────────────────
+// --- Approach 1: manual {lo..<hi} annotation (Step 3.4) --------------------------
 fn fill_pair(i: {0..<7}, lo: char, hi: char) {
-    buf[i]   = lo;   // TypeRefined(0,7): hi=7 <= 8 → check elided
-    buf[i+1] = hi;   // TypeRefined(1,8): hi=8 <= 8 → check elided
+    buf[i]   = lo;   // TypeRefined(0,7): hi=7 <= 8 -> check elided
+    buf[i+1] = hi;   // TypeRefined(1,8): hi=8 <= 8 -> check elided
 }
 
 fn fill_pairs() {
@@ -43,14 +43,14 @@ fn fill_pairs() {
     fill_pair(i6, 'G', 'H');
 }
 
-// ─── Approach 2: for loop (Step 3.5-for) ───────────────────────────────
+// --- Approach 2: for loop (Step 3.5-for) -------------------------------
 fn fill_loop() {
     for i in 0..<8 {
-        buf[i] = 'A' + i as char;  // i: {0..<8} → check elided
+        buf[i] = 'A' + i as char;  // i: {0..<8} -> check elided
     }
 }
 
-// ─── Approach 3: if narrowing (Step 3.5-if) ───────────────────────────────
+// --- Approach 3: if narrowing (Step 3.5-if) -------------------------------
 fn fill_cond(v: int, c: char) {
     if (v >= 0 && v < 8) {
         buf[v] = c;
@@ -65,7 +65,7 @@ fn fill_by_cond() {
     }
 }
 
-// ─── Common: print results ────────────────────────────────────────────────────────
+// --- Common: print results --------------------------------------------------------
 fn print_buf() {
     for i in 0..<8 {
         uart_putc(buf[i]);

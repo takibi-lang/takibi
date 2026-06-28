@@ -6,17 +6,17 @@ type ty =
   | TVoid
   | TFun of ty list * ty  (* param types, return type *)
   | TVar of tv ref
-  | TPtr of ty            (* *T    — regular pointer, non-volatile *)
-  | TIo  of ty            (* io T  — volatile-qualified value type; *io T = TPtr(TIo T) *)
+  | TPtr of ty            (* *T    -- regular pointer, non-volatile *)
+  | TIo  of ty            (* io T  -- volatile-qualified value type; *io T = TPtr(TIo T) *)
   | TArray of ty * int    (* array type: [T; N] *)
   | TStruct of string     (* named struct type *)
-  | TRefinedInt of int * int  (* {lo..<hi} — refined int with known range; lo <= x < hi *)
+  | TRefinedInt of int * int  (* {lo..<hi} -- refined int with known range; lo <= x < hi *)
 
 and tv =
   | Unbound of int  (* unresolved unification variable *)
   | Link    of ty   (* resolved: points to another type *)
 
-(* ── Unification variables ───────────────────────────────────────────────── *)
+(* -- Unification variables ------------------------------------------------- *)
 
 exception TypeError of Ast.loc * string
 
@@ -48,7 +48,7 @@ let rec to_string t =
   | TVar { contents = Unbound id } -> Printf.sprintf "'t%d" id
   | TVar { contents = Link _ }     -> assert false
 
-(* ── Unification ─────────────────────────────────────────────────────────── *)
+(* -- Unification ----------------------------------------------------------- *)
 
 exception Unify_error of string
 
@@ -81,8 +81,8 @@ let rec unify t1 t2 =
         raise (Unify_error (Printf.sprintf
           "refined int range mismatch: {%d..<%d} vs {%d..<%d}" lo1 hi1 lo2 hi2))
   (* Subtyping: TRefinedInt is a subtype of TInt (one direction only).
-     refined → int: OK (widening to a broader type).
-     int → refined: NG (range unproven; use if (v >= lo && v < hi) to narrow first). *)
+     refined -> int: OK (widening to a broader type).
+     int -> refined: NG (range unproven; use if (v >= lo && v < hi) to narrow first). *)
   | TRefinedInt _, TInt -> ()
   | TInt, TRefinedInt (lo, hi) ->
       raise (Unify_error (Printf.sprintf
@@ -104,7 +104,7 @@ let rec unify t1 t2 =
       raise (Unify_error (Printf.sprintf "cannot unify %s with %s"
         (to_string t1) (to_string t2)))
 
-(* ── Conversion to/from Ast types ───────────────────────────────────────── *)
+(* -- Conversion to/from Ast types ----------------------------------------- *)
 
 let rec of_ast = function
   | Ast.TypeInt      -> TInt
@@ -117,7 +117,7 @@ let rec of_ast = function
   | Ast.TypeNamed s      -> TStruct s
   | Ast.TypeRefined (lo, hi) -> TRefinedInt (lo, hi)
 
-(* None → fresh unification variable *)
+(* None -> fresh unification variable *)
 let of_ast_opt = function
   | Some t -> of_ast t
   | None   -> fresh ()
@@ -143,7 +143,7 @@ let rec to_ast t =
   | TVar { contents = Unbound _ } -> Ast.TypeInt
   | TVar { contents = Link _ }    -> assert false
 
-(* ── Output structs passed to codegen ───────────────────────────────────── *)
+(* -- Output structs passed to codegen ------------------------------------- *)
 
 module StringMap = Map.Make(String)
 
@@ -157,5 +157,5 @@ type program_types = {
   globals   : Ast.type_expr StringMap.t;
   functions : func_info StringMap.t;
   structs   : (string * Ast.type_expr) list StringMap.t;
-  (* struct name → ordered field list [(field_name, field_type)] *)
+  (* struct name -> ordered field list [(field_name, field_type)] *)
 }

@@ -6,8 +6,8 @@
 // How narrowing works:
 //   In the then-branch of  if (v >= 0 && v < 8) { ... }
 //   the compiler treats v as {0..<8}.
-//   → Array access buf[v] has its bounds check elided (Step 3.4 elision)
-//   → v can be passed to write_entry(i: {0..<8}), which requires a refined type
+//   -> Array access buf[v] has its bounds check elided (Step 3.4 elision)
+//   -> v can be passed to write_entry(i: {0..<8}), which requires a refined type
 //
 // QEMU expected output: ABCDEFGH\r\n
 

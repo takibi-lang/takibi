@@ -5,13 +5,13 @@
 //   while loop (let mut i: int):
 //     str i, [sp]        ; save to stack
 //     ldr i, [sp]        ; load (every iteration)
-//     cmp i, #8          ; bounds check ← llvm.trap candidate
+//     cmp i, #8          ; bounds check <- llvm.trap candidate
 //     b.hi trap
 //     ...
 //
 //   for i in 0..<8:
 //     load i_ctr         ; load loop counter
-//     i: {0..<8} — bounds check fully elided
+//     i: {0..<8} -- bounds check fully elided
 //     strb val, [buf+i]  ; direct write (no cmp)
 //
 // QEMU expected output: ABCDEFGH\r\n

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# QEMU integration test runner — called from repo root via: make qemutest
+# QEMU integration test runner -- called from repo root via: make qemutest
 set -euo pipefail
 
 QEMU="qemu-system-aarch64"
@@ -27,7 +27,7 @@ run_test() {
 
     if [ -n "$stdin_file" ]; then
         # Interactive test: use a named pipe so QEMU and the feeder
-        # synchronise automatically — no sleep required.
+        # synchronise automatically -- no sleep required.
         local tmp_fifo
         tmp_fifo=$(mktemp -u)
         mkfifo "$tmp_fifo"
@@ -123,7 +123,7 @@ run_compile_error_test() {
 # run_no_trap_test NAME KERNEL
 #
 # Disassembles with llvm-objdump and checks that the count of brk instructions
-# (llvm.trap → AArch64 brk #0x1) is zero. Verifies that array bounds are fully
+# (llvm.trap -> AArch64 brk #0x1) is zero. Verifies that array bounds are fully
 # proven at the type level.
 run_no_trap_test() {
     local name="$1" kernel="$2"
@@ -133,7 +133,7 @@ run_no_trap_test() {
         printf "${GRN}PASS${RST}  %s  (no brk)\n" "$name"
         PASS=$((PASS + 1))
     else
-        printf "${RED}FAIL${RST}  %s  ($count brk instruction(s) — runtime trap risk)\n" "$name"
+        printf "${RED}FAIL${RST}  %s  ($count brk instruction(s) -- runtime trap risk)\n" "$name"
         FAIL=$((FAIL + 1))
     fi
 }

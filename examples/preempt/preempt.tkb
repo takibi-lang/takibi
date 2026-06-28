@@ -75,7 +75,7 @@ fn gic_init() {
 
 fn timer_init() {
     gic_init();
-    set_cntp_tval(read_cntfrq() >> 6); // cntfrq/64 ≈ 15ms interval timer
+    set_cntp_tval(read_cntfrq() >> 6); // cntfrq/64 ~ 15ms interval timer
     enable_cntp();
 }
 

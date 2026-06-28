@@ -50,7 +50,7 @@ _start:
     wfe
     b       .Lhalt
 
-/* ── IRQ helpers callable from takibi ──────────────────────────────────────── */
+/* -- IRQ helpers callable from takibi ---------------------------------------- */
 
 /* enable_irq(): clear DAIF.I bit to enable IRQ */
     .global enable_irq
@@ -66,7 +66,7 @@ disable_irq:
     isb
     ret
 
-/* ── Default (no-op) irq_dispatch ──────────────────────────────────────────── */
+/* -- Default (no-op) irq_dispatch -------------------------------------------- */
 /* Calling convention: fn irq_dispatch(frame_sp: int) -> int
    x0 = frame SP of the current task (start of the 272-byte frame allocated by irq_entry)
    return x0 = frame SP of the next task (return the same value when no context switch occurs)
@@ -81,7 +81,7 @@ exit_params:
     .quad   0x20026    /* ADP_Stopped_ApplicationExit */
     .quad   0          /* exit code: 0               */
 
-/* ── Exception vector table (must be 2KB aligned) ─────────────────────────────── */
+/* -- Exception vector table (must be 2KB aligned) ------------------------------- */
     .section .text.vectors
     .align  11         /* 2^11 = 2048 byte alignment */
     .global exception_vectors
@@ -98,7 +98,7 @@ exception_vectors:
     .align  7
     b       .                   /* 0x200: Synchronous */
     .align  7
-    b       irq_entry           /* 0x280: IRQ  ← normally arrives here */
+    b       irq_entry           /* 0x280: IRQ  <- normally arrives here */
     .align  7
     b       irq_entry           /* 0x300: FIQ         */
     .align  7
@@ -122,7 +122,7 @@ exception_vectors:
     .align  7
     b       .                   /* 0x780: SError      */
 
-/* ── IRQ entry: save all general-purpose registers + ELR/SPSR, then call irq_dispatch ── */
+/* -- IRQ entry: save all general-purpose registers + ELR/SPSR, then call irq_dispatch -- */
 irq_entry:
     sub     sp,  sp,  #272
     stp     x0,  x1,  [sp, #0]

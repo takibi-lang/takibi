@@ -1,6 +1,6 @@
 open Takibi
 
-(* ── Helpers ─────────────────────────────────────────────────────────────── *)
+(* -- Helpers --------------------------------------------------------------- *)
 
 let parse src =
   let lexbuf = Lexing.from_string src in
@@ -16,7 +16,7 @@ let rec show_type = function
   | Ast.TypeChar        -> "char"
   | Ast.TypeVoid        -> "void"
   | Ast.TypePtr t       -> "*" ^ show_type t
-  | Ast.TypeIo  t       -> "io " ^ show_type t   (* TypePtr(TypeIo t) → "*io T" synthesized automatically *)
+  | Ast.TypeIo  t       -> "io " ^ show_type t   (* TypePtr(TypeIo t) -> "*io T" synthesized automatically *)
   | Ast.TypeArray (t,n) -> Printf.sprintf "[%s; %d]" (show_type t) n
   | Ast.TypeFn (ps, r)  ->
       Printf.sprintf "fn(%s) -> %s"
@@ -53,7 +53,7 @@ let expect_ok src () =
   | exception Types.TypeError (_, msg) ->
       Alcotest.failf "unexpected TypeError: %s" msg
 
-(* ── Parser tests ────────────────────────────────────────────────────────── *)
+(* -- Parser tests ---------------------------------------------------------- *)
 
 let parser_tests = [
 
@@ -197,7 +197,7 @@ let parser_tests = [
      | _ -> Alcotest.fail "second item should be FuncDef f")
   );
 
-  (* ── Pointer / address-of tests ────────────────────────────── *)
+  (* -- Pointer / address-of tests ------------------------------ *)
 
   Alcotest.test_case "pointer type in function param" `Quick (fun () ->
     match parse "fn f(p: *int) {}" with
@@ -316,7 +316,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "&& has lower prec than comparisons" `Quick (fun () ->
-    (* a >= 0 && b < 8  →  (a >= 0) && (b < 8): outer is And, both children are comparisons *)
+    (* a >= 0 && b < 8  ->  (a >= 0) && (b < 8): outer is And, both children are comparisons *)
     match parse "fn f(a: int, b: int) int { return a >= 0 && b < 8; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
@@ -328,7 +328,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "&& has higher prec than ||" `Quick (fun () ->
-    (* a || b && c  →  a || (b && c): outer is Or *)
+    (* a || b && c  ->  a || (b && c): outer is Or *)
     match parse "fn f(a: int, b: int, c: int) int { return a || b && c; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
@@ -363,7 +363,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── Unary minus ───────────────────────────────────────────── *)
+  (* -- Unary minus --------------------------------------------- *)
 
   Alcotest.test_case "unary minus desugars to Sub from zero" `Quick (fun () ->
     match parse "fn f() int { return -42; }" with
@@ -376,7 +376,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── as cast ─────────────────────────────────────────────── *)
+  (* -- as cast ----------------------------------------------- *)
 
   Alcotest.test_case "as cast to char" `Quick (fun () ->
     match parse "fn f(n: int) char { return n as char; }" with
@@ -404,11 +404,11 @@ let parser_tests = [
         (match s.desc with
          | Ast.Return { desc = Ast.Cast (Ast.TypeChar,
                                  { desc = Ast.BinOp (Ast.Add, _, _); _ }); _ } -> ()
-         | _ -> Alcotest.fail "expected Cast(TypeChar, BinOp(Add, ...)) — as must bind looser than +")
+         | _ -> Alcotest.fail "expected Cast(TypeChar, BinOp(Add, ...)) -- as must bind looser than +")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── Bitwise operations ──────────────────────────────────────────────── *)
+  (* -- Bitwise operations ------------------------------------------------ *)
 
   Alcotest.test_case "bitwise AND expression" `Quick (fun () ->
     match parse "fn f(n: int) int { return n & 15; }" with
@@ -437,7 +437,7 @@ let parser_tests = [
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Band,
                                  { desc = Ast.BinOp (Ast.Shr, _, _); _ }, _); _ } -> ()
-         | _ -> Alcotest.fail "expected Band(Shr(...), 15) — >> must bind tighter than &")
+         | _ -> Alcotest.fail "expected Band(Shr(...), 15) -- >> must bind tighter than &")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -448,7 +448,7 @@ let parser_tests = [
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Eq,
                                  { desc = Ast.BinOp (Ast.Band, _, _); _ }, _); _ } -> ()
-         | _ -> Alcotest.fail "expected Eq(Band(...), 0) — & must bind tighter than ==")
+         | _ -> Alcotest.fail "expected Eq(Band(...), 0) -- & must bind tighter than ==")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -469,7 +469,7 @@ let parser_tests = [
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Add, _,
                                  { desc = Ast.BinOp (Ast.Mod, _, _); _ }); _ } -> ()
-         | _ -> Alcotest.fail "expected Add(a, Mod(b,3)) — % must bind tighter than +")
+         | _ -> Alcotest.fail "expected Add(a, Mod(b,3)) -- % must bind tighter than +")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -491,7 +491,7 @@ let parser_tests = [
          | Ast.Return { desc = Ast.BinOp (Ast.Bor,
                                  { desc = Ast.BinOp (Ast.Eq, _, _); _ },
                                  { desc = Ast.BinOp (Ast.Eq, _, _); _ }); _ } -> ()
-         | _ -> Alcotest.fail "expected Bor(Eq(...),Eq(...)) — | must bind looser than ==")
+         | _ -> Alcotest.fail "expected Bor(Eq(...),Eq(...)) -- | must bind looser than ==")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -522,18 +522,18 @@ let parser_tests = [
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Bor, _,
                                  { desc = Ast.BinOp (Ast.Bxor, _, _); _ }); _ } -> ()
-         | _ -> Alcotest.fail "expected Bor(a, Bxor(b,c)) — ^ must bind tighter than |")
+         | _ -> Alcotest.fail "expected Bor(a, Bxor(b,c)) -- ^ must bind tighter than |")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
   Alcotest.test_case "== binds tighter than ^" `Quick (fun () ->
-    (* a ^ b == c  should parse as  a ^ (b == c)  — same as C *)
+    (* a ^ b == c  should parse as  a ^ (b == c)  -- same as C *)
     match parse "fn f(a: int, b: int, c: int) int { return a ^ b == c; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Bxor, _,
                                  { desc = Ast.BinOp (Ast.Eq, _, _); _ }); _ } -> ()
-         | _ -> Alcotest.fail "expected Bxor(a, Eq(b,c)) — == must bind tighter than ^")
+         | _ -> Alcotest.fail "expected Bxor(a, Eq(b,c)) -- == must bind tighter than ^")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -548,7 +548,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── Arrays ────────────────────────────────────────────────────── *)
+  (* -- Arrays ------------------------------------------------------ *)
 
   Alcotest.test_case "array type annotation parses" `Quick (fun () ->
     match parse "fn f() { let mut buf: [char; 8]; }" with
@@ -575,11 +575,11 @@ let parser_tests = [
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Add, { desc = Ast.Var "a"; _ },
                                  { desc = Ast.Index ("arr", _); _ }); _ } -> ()
-         | _ -> Alcotest.fail "expected Add(a, Index(arr,...)) — [] must bind tighter than +")
+         | _ -> Alcotest.fail "expected Add(a, Index(arr,...)) -- [] must bind tighter than +")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── Function pointer types ──────────────────────────────────────────── *)
+  (* -- Function pointer types -------------------------------------------- *)
 
   Alcotest.test_case "fn pointer type with no args parses" `Quick (fun () ->
     match parse "fn f(h: fn() -> void) {}" with
@@ -608,7 +608,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── Struct syntax ──────────────────────────────────────────────── *)
+  (* -- Struct syntax ------------------------------------------------ *)
 
   Alcotest.test_case "struct definition parses" `Quick (fun () ->
     match parse "struct Point { x: int; y: int; }" with
@@ -660,7 +660,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── extern fn ─────────────────────────────────────────────────── *)
+  (* -- extern fn --------------------------------------------------- *)
 
   Alcotest.test_case "extern fn without return type parses" `Quick (fun () ->
     match parse "extern fn uart_putc(c: char);" with
@@ -674,7 +674,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "expected ExternFuncDef(uart_getc, [], Some char)"
   );
 
-  (* ── String literals ──────────────────────────────────────────── *)
+  (* -- String literals -------------------------------------------- *)
 
   Alcotest.test_case "string literal parses to StringLit" `Quick (fun () ->
     match parse "fn f() { let s = \"hello\"; }" with
@@ -685,7 +685,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── -> return type syntax ─────────────────────────────────────────── *)
+  (* -- -> return type syntax ------------------------------------------- *)
 
   Alcotest.test_case "arrow return type syntax -> int parses" `Quick (fun () ->
     match parse "fn f() -> int { return 0; }" with
@@ -693,7 +693,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "expected ret_type = Some TypeInt"
   );
 
-  (* ── Struct literals ──────────────────────────────────────────── *)
+  (* -- Struct literals -------------------------------------------- *)
 
   Alcotest.test_case "struct literal { e, e } parses to StructLit" `Quick (fun () ->
     match parse "fn f() { let mut p: P = {1, 2}; }" with
@@ -705,7 +705,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── Compound pointer assignment ────────────────────────────────────────── *)
+  (* -- Compound pointer assignment ------------------------------------------ *)
 
   Alcotest.test_case "complex pointer assign *(expr) = v parses to AssignDeref" `Quick (fun () ->
     match parse "fn f(arr: *int, i: int) { *(arr + i) = 42; }" with
@@ -718,7 +718,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── Taking address of struct fields ─────────────────────────── *)
+  (* -- Taking address of struct fields --------------------------- *)
 
   Alcotest.test_case "addrof struct field parses to AddrOf(FieldGet)" `Quick (fun () ->
     match parse "fn f() { let q = &p.x; }" with
@@ -730,7 +730,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── Remaining escape characters ──────────────────────────────────────── *)
+  (* -- Remaining escape characters ---------------------------------------- *)
 
   Alcotest.test_case "tab escape char literal '\\t'" `Quick (fun () ->
     match parse "fn f() { let t = '\\t'; }" with
@@ -750,7 +750,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── Block statements ──────────────────────────────────────────────── *)
+  (* -- Block statements ------------------------------------------------ *)
 
   Alcotest.test_case "block statement parses to Block" `Quick (fun () ->
     match parse "fn f() { { let x = 1; } }" with
@@ -761,7 +761,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── Comments ────────────────────────────────────────────────── *)
+  (* -- Comments -------------------------------------------------- *)
 
   Alcotest.test_case "line comment // is ignored" `Quick (fun () ->
     match parse "// this is a comment\nfn f() int { return 1; }" with
@@ -798,11 +798,11 @@ let parser_tests = [
 
 ]
 
-(* ── Type inference tests ────────────────────────────────────────────────── *)
+(* -- Type inference tests -------------------------------------------------- *)
 
 let infer_tests = [
 
-  (* ── Success cases ─────────────────────────────────────────────── *)
+  (* -- Success cases ----------------------------------------------- *)
 
   Alcotest.test_case "fully annotated function passes" `Quick
     (expect_ok "fn add(a: int, b: int) int { return a; }");
@@ -868,7 +868,7 @@ let infer_tests = [
     (expect_ok "fn abs(x: int) int {
                   if (x > 0) { return x; } else { return 0; } }");
 
-  (* ── Immutability checks ─────────────────────────────────────────── *)
+  (* -- Immutability checks ------------------------------------------- *)
 
   Alcotest.test_case "assign to immutable variable is a type error" `Quick
     (expect_type_error "cannot assign to immutable"
@@ -888,7 +888,7 @@ let infer_tests = [
     (expect_type_error "must have an initializer"
        "fn f() { let x: int; }");
 
-  (* ── Error cases ───────────────────────────────────────────── *)
+  (* -- Error cases --------------------------------------------- *)
 
   Alcotest.test_case "undefined variable" `Quick
     (expect_type_error "Unbound variable"
@@ -912,7 +912,7 @@ let infer_tests = [
     (expect_type_error "cannot unify"
        "fn f(a: int, b: char) int { return a + b; }");
 
-  (* ── Pointer type inference ──────────────────────────────────────── *)
+  (* -- Pointer type inference ---------------------------------------- *)
 
   Alcotest.test_case "local pointer annotation type-checks" `Quick
     (expect_ok "fn f() { let p: *int = 0x09000000; *p = 1; }");
@@ -931,7 +931,7 @@ let infer_tests = [
       (Types.StringMap.find "p" fi.Types.local_types)
   );
 
-  (* ── Type inference for io-qualified types ──────────────────────────────────────────── *)
+  (* -- Type inference for io-qualified types -------------------------------------------- *)
 
   Alcotest.test_case "deref *io int param yields int" `Quick (fun () ->
     let pt = infer "fn f(p: *io int) int { return *p; }" in
@@ -963,12 +963,12 @@ let infer_tests = [
   Alcotest.test_case "write through immutable pointer variable is allowed" `Quick
     (expect_ok "fn f() { let p: *int = 0x09000000; *p = 1; }");
 
-  (* ── Unary minus ───────────────────────────────────────────── *)
+  (* -- Unary minus --------------------------------------------- *)
 
   Alcotest.test_case "unary minus type-checks" `Quick
     (expect_ok "fn f(n: int) int { return -n; }");
 
-  (* ── as cast ─────────────────────────────────────────────── *)
+  (* -- as cast ----------------------------------------------- *)
 
   Alcotest.test_case "as cast int to char passes" `Quick
     (expect_ok "fn f(n: int) char { return n as char; }");
@@ -988,7 +988,7 @@ let infer_tests = [
   Alcotest.test_case "as cast pointer to pointer passes" `Quick
     (expect_ok "fn f(p: *char) int { let q: *int = p as *int; return 0; }");
 
-  (* ── Bitwise operations ──────────────────────────────────────────────── *)
+  (* -- Bitwise operations ------------------------------------------------ *)
 
   Alcotest.test_case "bitwise AND type-checks" `Quick
     (expect_ok "fn f(n: int) int { return n & 15; }");
@@ -1007,7 +1007,7 @@ let infer_tests = [
     (expect_type_error "cannot unify"
        "fn f(n: int, p: *int) int { return n ^ p; }");
 
-  (* ── Arrays ────────────────────────────────────────────────────── *)
+  (* -- Arrays ------------------------------------------------------ *)
 
   Alcotest.test_case "array declaration type-checks" `Quick
     (expect_ok "fn f() { let mut buf: [char; 8]; }");
@@ -1039,7 +1039,7 @@ let infer_tests = [
     (expect_ok "fn push(tail: *int) {}
                 fn f() { let mut t: int = 0; push(&t); }");
 
-  (* ── Function pointer types ──────────────────────────────────────────── *)
+  (* -- Function pointer types -------------------------------------------- *)
 
   Alcotest.test_case "fn pointer param can be called indirectly" `Quick
     (expect_ok "fn foo() {}
@@ -1058,7 +1058,7 @@ let infer_tests = [
        "fn foo(x: int) {}
         fn f(h: fn() -> void) { h = foo; }");
 
-  (* ── Structs ────────────────────────────────────────────────────── *)
+  (* -- Structs ------------------------------------------------------ *)
 
   Alcotest.test_case "struct field access type-checks" `Quick
     (expect_ok "struct Point { x: int; y: int; }
@@ -1098,7 +1098,7 @@ let infer_tests = [
         fn use_a(a: *A) {}
         fn f(b: *B) { use_a(b); }");
 
-  (* ── extern fn ─────────────────────────────────────────────────── *)
+  (* -- extern fn --------------------------------------------------- *)
 
   Alcotest.test_case "extern fn void can be called" `Quick
     (expect_ok "extern fn uart_putc(c: char);
@@ -1108,7 +1108,7 @@ let infer_tests = [
     (expect_ok "extern fn uart_getc() -> char;
                 fn f() char { return uart_getc(); }");
 
-  (* ── String literals ──────────────────────────────────────────── *)
+  (* -- String literals -------------------------------------------- *)
 
   Alcotest.test_case "string literal infers as *char" `Quick (fun () ->
     let pt = infer "fn f() { let s = \"hello\"; }" in
@@ -1117,7 +1117,7 @@ let infer_tests = [
       (Types.StringMap.find "s" fi.Types.local_types)
   );
 
-  (* ── Struct literals ──────────────────────────────────────────── *)
+  (* -- Struct literals -------------------------------------------- *)
 
   Alcotest.test_case "struct literal initializer type-checks" `Quick
     (expect_ok "struct Point { x: int; y: int; }
@@ -1136,12 +1136,12 @@ let infer_tests = [
        "struct S { x: int; }
         fn f(p: *int) { let mut s: S = {p}; }");
 
-  (* ── Commutative pointer arithmetic: int + ptr ─────────────────────────────── *)
+  (* -- Commutative pointer arithmetic: int + ptr ------------------------------- *)
 
   Alcotest.test_case "int + ptr commutative pointer arithmetic type-checks" `Quick
     (expect_ok "fn f(p: *char) *char { return 1 + p; }");
 
-  (* ── &s.field ────────────────────────────────────────────────── *)
+  (* -- &s.field -------------------------------------------------- *)
 
   Alcotest.test_case "&s.field yields pointer-to-field-type" `Quick (fun () ->
     let pt = infer "struct P { x: int; }
@@ -1151,18 +1151,18 @@ let infer_tests = [
       (Types.StringMap.find "q" fi.Types.local_types)
   );
 
-  (* ── Field assignment through pointer receiver ───────────────────────── *)
+  (* -- Field assignment through pointer receiver ------------------------- *)
 
   Alcotest.test_case "field assign via pointer receiver type-checks" `Quick
     (expect_ok "struct Point { x: int; y: int; }
                 fn f(p: *Point) { p.x = 1; p.y = 2; }");
 
-  (* ── let mut local variable (uninitialized) ─────────────────────── *)
+  (* -- let mut local variable (uninitialized) ----------------------- *)
 
   Alcotest.test_case "let mut local without initializer type-checks" `Quick
     (expect_ok "fn f() { let mut x: int; x = 0; }");
 
-  (* ── Left shift and bitwise OR ─────────────────────────────────────── *)
+  (* -- Left shift and bitwise OR --------------------------------------- *)
 
   Alcotest.test_case "left shift Shl type-checks" `Quick
     (expect_ok "fn f(n: int) int { return n << 3; }");
@@ -1170,7 +1170,7 @@ let infer_tests = [
   Alcotest.test_case "bitwise OR Bor type-checks" `Quick
     (expect_ok "fn f(a: int, b: int) int { return a | b; }");
 
-  (* ── Compile-time bounds check for constant indices ─────────────── *)
+  (* -- Compile-time bounds check for constant indices --------------- *)
 
   Alcotest.test_case "constant in-bounds read type-checks" `Quick
     (expect_ok "fn f() int { let mut arr: [int; 4]; return arr[3]; }");
@@ -1201,7 +1201,7 @@ let infer_tests = [
     (expect_type_error "out of bounds"
        "let buf: [char; 8]; fn f() char { return buf[8]; }");
 
-  (* ── Bounds check for char arrays ─────────────────────────────────── *)
+  (* -- Bounds check for char arrays ----------------------------------- *)
 
   Alcotest.test_case "constant OOB read on char array is a compile error" `Quick
     (expect_type_error "out of bounds"
@@ -1211,7 +1211,7 @@ let infer_tests = [
     (expect_type_error "out of bounds"
        "fn f() { let mut arr: [char; 4]; arr[4] = 'A'; }");
 
-  (* ── Bounds check for size-1 arrays ─────────────────────────────── *)
+  (* -- Bounds check for size-1 arrays ------------------------------- *)
 
   Alcotest.test_case "size-1 array: index 0 is in-bounds" `Quick
     (expect_ok "fn f() int { let mut arr: [int; 1]; return arr[0]; }");
@@ -1220,13 +1220,13 @@ let infer_tests = [
     (expect_type_error "out of bounds"
        "fn f() int { let mut arr: [int; 1]; return arr[1]; }");
 
-  (* ── Write to global array ──────────────────────────────── *)
+  (* -- Write to global array -------------------------------- *)
 
   Alcotest.test_case "constant OOB write on global int array is a compile error" `Quick
     (expect_type_error "out of bounds"
        "let buf: [int; 4]; fn f() { buf[4] = 0; }");
 
-  (* ── OOB in expression context ───────────────────────────────────────── *)
+  (* -- OOB in expression context ----------------------------------------- *)
 
   Alcotest.test_case "constant OOB in function call argument is a compile error" `Quick
     (expect_type_error "out of bounds"
@@ -1236,13 +1236,13 @@ let infer_tests = [
     (expect_type_error "out of bounds"
        "fn f() int { let mut arr: [int; 4]; return arr[4] + 1; }");
 
-  (* ── Verify error message format ─────────────────────────────── *)
+  (* -- Verify error message format ------------------------------- *)
 
   Alcotest.test_case "OOB error message includes index and array size" `Quick
     (expect_type_error "index 5 is out of bounds for array of size 4"
        "fn f() int { let mut arr: [int; 4]; return arr[5]; }");
 
-  (* ── TypeRefined syntax (Step 3.1 / 3.2) ─────────────────────── *)
+  (* -- TypeRefined syntax (Step 3.1 / 3.2) ----------------------- *)
 
   Alcotest.test_case "TypeRefined parses as param annotation" `Quick (fun () ->
     let pt = infer "fn f(i: {0..<8}) int { return i; }" in
@@ -1267,7 +1267,7 @@ let infer_tests = [
   Alcotest.test_case "TypeRefined can be used as array index" `Quick
     (expect_ok "fn f(i: {0..<8}, p: *char) { p[i] = 'A'; }");
 
-  (* ── Step 3.3c: Range propagation ──────────────────────────────────── *)
+  (* -- Step 3.3c: Range propagation ------------------------------------ *)
 
   Alcotest.test_case "Add propagates TRefinedInt: {0..<7}+1 is {1..<8}" `Quick (fun () ->
     let pt = infer "fn f(i: {0..<7}) -> {1..<8} { return i + 1; }" in
@@ -1297,12 +1297,12 @@ let infer_tests = [
     (expect_type_error "range mismatch"
       "fn f(i: {0..<8}) -> {0..<8} { return i + 1; }");
 
-  (* ── Step 3.3c: soundness condition for % range propagation ──────────────────────────── *)
+  (* -- Step 3.3c: soundness condition for % range propagation ---------------------------- *)
   (* When the left operand is int (possibly negative), do not return {0..<m}.
      LLVM's srem returns a negative remainder when the dividend is negative, making this unsound.
-     Example: (-5) % 8 = -5 (not 3) — returning {0..<8} without a non-negative guarantee is wrong. *)
+     Example: (-5) % 8 = -5 (not 3) -- returning {0..<8} without a non-negative guarantee is wrong. *)
 
-  Alcotest.test_case "int%m stays TInt — negative left operand possible" `Quick
+  Alcotest.test_case "int%m stays TInt -- negative left operand possible" `Quick
     (expect_type_error "unproven int"
       "fn foo(i: {0..<4}) {} \
        fn f(n: int) { foo(n % 4); }");
@@ -1317,7 +1317,7 @@ let infer_tests = [
       "let buf: [char; 8]; \
        fn f(i: {0..<8}) { buf[i % 8] = 'X'; }");
 
-  (* ── Step 3.4: Bounds check elision (global array + TypeRefined index) ── *)
+  (* -- Step 3.4: Bounds check elision (global array + TypeRefined index) -- *)
 
   Alcotest.test_case "refined index on global array compiles" `Quick
     (expect_ok
@@ -1338,7 +1338,7 @@ let infer_tests = [
       "let buf: [char; 8]; \
        fn f(i: {0..<8}) { buf[i+1] = 'Z'; }");
 
-  (* ── Step 3.5: Type narrowing via if-condition ─────────────────────────────── *)
+  (* -- Step 3.5: Type narrowing via if-condition ------------------------------- *)
 
   Alcotest.test_case "if (v>=0 && v<8) narrows v to {0..<8}" `Quick
     (expect_ok
@@ -1376,7 +1376,7 @@ let infer_tests = [
       "fn foo(i: {0..<8}) {} \
        fn f(v: int) { if (0 <= v && v < 8) { foo(v); } }");
 
-  (* ── Step 3.5 for loop: for i in lo..<hi ─────────────────────────────────── *)
+  (* -- Step 3.5 for loop: for i in lo..<hi ----------------------------------- *)
 
   Alcotest.test_case "for loop parses and type-checks" `Quick
     (expect_ok "fn f() { for i in 0..<8 {} }");
@@ -1409,7 +1409,7 @@ let infer_tests = [
 
 ]
 
-(* ── Entry point ─────────────────────────────────────────────────────────── *)
+(* -- Entry point ----------------------------------------------------------- *)
 
 let () = Alcotest.run "takibi" [
   "parser",   parser_tests;

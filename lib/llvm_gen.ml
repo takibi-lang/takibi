@@ -10,7 +10,7 @@ let builder = builder context
 (* Counter for unique string literal global names *)
 let str_counter = ref 0
 
-(* Global tables — populated during gen_program *)
+(* Global tables -- populated during gen_program *)
 (* Stores (ast_type, llvalue) for global variables *)
 let global_vars : (string, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 16
 (* Stores (function_lltype, llvalue) for declared functions *)
@@ -19,15 +19,15 @@ let functions   : (string, lltype * llvalue) Hashtbl.t = Hashtbl.create 16
 let func_ret_ast_types : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 16
 (* Stores the parameter AST types for each function (needed for function-as-value) *)
 let func_param_ast_types : (string, Ast.type_expr list) Hashtbl.t = Hashtbl.create 16
-(* Struct type registry: name → LLVM struct lltype *)
+(* Struct type registry: name -> LLVM struct lltype *)
 let struct_lltypes : (string, lltype) Hashtbl.t = Hashtbl.create 8
-(* Struct field registry: name → ordered [(field_name, field_ast_type)] *)
+(* Struct field registry: name -> ordered [(field_name, field_ast_type)] *)
 let struct_fields  : (string, (string * Ast.type_expr) list) Hashtbl.t = Hashtbl.create 8
 
 (* Locals are either immutable SSA values or mutable alloca pointers *)
 type local_binding =
-  | Imm of Ast.type_expr * llvalue  (* direct SSA value — no alloca *)
-  | Mut of Ast.type_expr * llvalue  (* alloca pointer — load/store *)
+  | Imm of Ast.type_expr * llvalue  (* direct SSA value -- no alloca *)
+  | Mut of Ast.type_expr * llvalue  (* alloca pointer -- load/store *)
 
 (* Collect per-variable bounds from an if-condition for codegen narrowing.
    Mirrors the logic in type_inf.ml:narrow_from_cond. *)
@@ -82,7 +82,7 @@ let restore_narrowing (locals : (string, local_binding) Hashtbl.t) saved =
 let narrowing_ctx : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 4
 
 (* Record narrowed types for Mut bindings into narrowing_ctx.
-   Returns [(name, old_opt)] — pass to restore_narrowing_mut after the then-branch. *)
+   Returns [(name, old_opt)] -- pass to restore_narrowing_mut after the then-branch. *)
 let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t) (cond : Ast.expr) =
   let bounds = collect_bounds_cond cond in
   Types.StringMap.fold (fun name (lo_opt, hi_opt) saved ->
@@ -117,11 +117,11 @@ let setup_target ?(triple = "") () =
 (* Run IR-level optimization passes.
    - Vectorization is disabled: AArch64 bare-metal may lack NEON.
    - "default<O2>" includes the loop-idiom pass, which replaces memset/memcpy-like loops
-     with calls to external symbols — causing link errors in bare-metal (no stdlib).
+     with calls to external symbols -- causing link errors in bare-metal (no stdlib).
    - Custom pipeline with only the necessary passes:
      * mem2reg              : promote allocas to SSA registers (prerequisite for later passes)
      * early-cse            : basic common subexpression elimination
-     * simplifycfg          : dead branch elimination for constant OOB (icmp uge const,const → false → block removed)
+     * simplifycfg          : dead branch elimination for constant OOB (icmp uge const,const -> false -> block removed)
      * instcombine          : constant folding and redundant instruction elimination
      * correlated-propagation: propagate i<N inside while(i<N){ arr[i] } loop bodies,
                                folding bounds-check icmp uge i, N to false
@@ -148,7 +148,7 @@ let emit_object machine output_path =
     output_path
     machine
 
-(* ── Type helpers ──────────────────────────────────────────────────────── *)
+(* -- Type helpers -------------------------------------------------------- *)
 
 let rec ltype_of_ast = function
   | TypeInt         -> i32_type context
@@ -169,8 +169,8 @@ let ltype_of_ret_ast = function
   | t        -> ltype_of_ast t
 
 (* Coerce an llvalue to match a destination AST type.
-   Handles: i1/i8 → i32 widening, i32 → i8 truncation,
-            and integer → pointer conversion (inttoptr) for MMIO addresses. *)
+   Handles: i1/i8 -> i32 widening, i32 -> i8 truncation,
+            and integer -> pointer conversion (inttoptr) for MMIO addresses. *)
 let rec coerce v (dst : Ast.type_expr) =
   let vty    = type_of v in
   let dst_ll = ltype_of_ast dst in
@@ -187,7 +187,7 @@ let rec coerce v (dst : Ast.type_expr) =
       if vty = i32_type context then build_trunc v dst_ll "trunc" builder else v
   | TypeInt ->
       if vty = pointer_type context then
-        (* pointer as int: ptrtoint → i64, then trunc to i32 (AArch64 RAM fits in 32 bits) *)
+        (* pointer as int: ptrtoint -> i64, then trunc to i32 (AArch64 RAM fits in 32 bits) *)
         let i64v = build_ptrtoint v (i64_type context) "ptrtoint" builder in
         build_trunc i64v (i32_type context) "trunc" builder
       else
@@ -224,7 +224,7 @@ let field_info struct_name fname =
   in
   find 0 fields
 
-(* Pre-scan only mutable Let bindings — immutable ones need no alloca.
+(* Pre-scan only mutable Let bindings -- immutable ones need no alloca.
    For-loop counters ("__for_<name>") are also pre-allocated here. *)
 let rec collect_lets stmts =
   List.concat_map (fun s ->
@@ -237,7 +237,7 @@ let rec collect_lets stmts =
     | _                           -> []
   ) stmts
 
-(* ── resolve helpers: map AST annotation → Ast.type_expr using HM results ── *)
+(* -- resolve helpers: map AST annotation -> Ast.type_expr using HM results -- *)
 
 let resolve_local_ast (pt : Types.program_types option) fname name ty_opt =
   let fallback = match ty_opt with Some t -> t | None -> TypeInt in
@@ -263,7 +263,7 @@ let resolve_ret_ast (pt : Types.program_types option) fname ty_opt =
       | None    -> fallback
       | Some fi -> fi.Types.ret_type
 
-(* ── Bounds check ───────────────────────────────────────────────────────── *)
+(* -- Bounds check --------------------------------------------------------- *)
 (* Bounds check for [T; N] arrays. Traps via llvm.trap when idx >= N (unsigned compare).
    The unsigned compare also catches negative indices (idx < 0) as too-large unsigned values. *)
 let emit_bounds_check idx_v n =
@@ -280,7 +280,7 @@ let emit_bounds_check idx_v n =
   ignore (build_unreachable builder);
   position_at_end ok_bb builder
 
-(* ── Expression codegen ─────────────────────────────────────────────────── *)
+(* -- Expression codegen --------------------------------------------------- *)
 (* Returns (ast_type, llvalue).  ast_type is needed for Deref to know
    the element type when emitting a load instruction (LLVM 19 opaque ptrs). *)
 
@@ -413,7 +413,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 | Some (ast_ty, ptr) -> (TypePtr ast_ty, ptr)
                 | None -> raise (Error (Printf.sprintf "cannot take address of '%s'" name)))
        | FieldGet (base_expr, fname) ->
-           (* &expr.field — get a pointer to the field via GEP (no load) *)
+           (* &expr.field -- get a pointer to the field via GEP (no load) *)
            let (base_ty, base_v) = gen_expr locals base_expr in
            let sname = match base_ty with
              | TypeNamed s        -> s
@@ -436,7 +436,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let (ty2, v2) = gen_expr locals e2 in
       (match op with
        | Add ->
-           (* Pointer arithmetic: ptr + int → GEP. *io T = TypePtr(TypeIo T) also matches TypePtr *)
+           (* Pointer arithmetic: ptr + int -> GEP. *io T = TypePtr(TypeIo T) also matches TypePtr *)
            (match ty1 with
             | TypePtr inner ->
                 (ty1, build_gep (ltype_of_ast inner) v1 [|v2|] "ptradd" builder)
@@ -445,7 +445,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                  | TypePtr inner ->
                      (ty2, build_gep (ltype_of_ast inner) v2 [|v1|] "ptradd" builder)
                  | _ ->
-                     (* Range propagation: {a..<b} + k → {a+k..<b+k} (symmetric with type_inf.ml) *)
+                     (* Range propagation: {a..<b} + k -> {a+k..<b+k} (symmetric with type_inf.ml) *)
                      let sum = build_add v1 v2 "addtmp" builder in
                      let ret_ty = match ty1, e2.desc with
                        | TypeRefined (a, b), IntLit k -> TypeRefined (a + k, b + k)
@@ -455,13 +455,13 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                      in
                      (ret_ty, sum)))
        | Sub ->
-           (* Pointer arithmetic: ptr - int → GEP with negated index *)
+           (* Pointer arithmetic: ptr - int -> GEP with negated index *)
            (match ty1 with
             | TypePtr inner ->
                 let neg = build_neg v2 "negtmp" builder in
                 (ty1, build_gep (ltype_of_ast inner) v1 [|neg|] "ptrsub" builder)
             | _ ->
-                (* Range propagation: {a..<b} - k → {a-k..<b-k} (symmetric with type_inf.ml) *)
+                (* Range propagation: {a..<b} - k -> {a-k..<b-k} (symmetric with type_inf.ml) *)
                 let diff = build_sub v1 v2 "subtmp" builder in
                 let ret_ty = match ty1, e2.desc with
                   | TypeRefined (a, b), IntLit k -> TypeRefined (a - k, b - k)
@@ -483,7 +483,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | Band -> (TypeInt, build_and  (to_i32 v1) (to_i32 v2) "andtmp" builder)
        | Shr  -> (TypeInt, build_lshr (to_i32 v1) (to_i32 v2) "shrtmp" builder)
        | Shl  -> (TypeInt, build_shl  (to_i32 v1) (to_i32 v2) "shltmp" builder)
-       (* Range propagation: n % m where m is a positive constant and n is non-negative ({lo..<_} with lo>=0) → {0..<m}.
+       (* Range propagation: n % m where m is a positive constant and n is non-negative ({lo..<_} with lo>=0) -> {0..<m}.
           When n is TypeInt (possibly negative), returns TypeInt.
           Symmetric condition with type_inf.ml: relaxing only one side causes a mismatch. *)
        | Mod  ->
@@ -660,7 +660,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 raise (Error (Printf.sprintf
                   "'%s' is not a function or function pointer" fname))))
 
-(* ── Function codegen ──────────────────────────────────────────────────── *)
+(* -- Function codegen ---------------------------------------------------- *)
 
 let gen_func ?prog_types fdef =
   let res name ty_opt = resolve_local_ast prog_types fdef.name name ty_opt in
@@ -688,7 +688,7 @@ let gen_func ?prog_types fdef =
   let entry_bb = append_block context "entry" f in
   position_at_end entry_bb builder;
 
-  (* locals maps name → local_binding *)
+  (* locals maps name -> local_binding *)
   let locals : (string, local_binding) Hashtbl.t = Hashtbl.create 16 in
 
   (* Alloca + store for every parameter (params are always mutable) *)
@@ -734,7 +734,7 @@ let gen_func ?prog_types fdef =
         ignore (build_store (coerce v ast_ty) ptr builder)
   in
 
-  (* ── Statement codegen (defined here to access `res` for immutable lets) ── *)
+  (* -- Statement codegen (defined here to access `res` for immutable lets) -- *)
   let rec gen_stmt (s : Ast.stmt) =
     (* Skip dead code after a terminator *)
     if block_terminator (insertion_block builder) <> None then ()
@@ -912,7 +912,7 @@ let gen_func ?prog_types fdef =
     | For (name, lo_expr, hi_expr, body) ->
         (* Loop counter is pre-allocated in the entry block by collect_lets.
            The loop variable name is exposed to the body as an Imm binding (no reassignment).
-           When both bounds are integer literals, assigns TypeRefined → bounds check elision (Step 3.4). *)
+           When both bounds are integer literals, assigns TypeRefined -> bounds check elision (Step 3.4). *)
         let (_, lo_v) = gen_expr locals lo_expr in
         let (_, hi_v) = gen_expr locals hi_expr in
         let lo_i32    = to_i32 lo_v in
@@ -961,7 +961,7 @@ let gen_func ?prog_types fdef =
   Llvm_analysis.assert_valid_function f;
   f
 
-(* ── Top-level codegen ─────────────────────────────────────────────────── *)
+(* -- Top-level codegen --------------------------------------------------- *)
 
 let gen_global ?prog_types name ty_opt expr_opt =
   let ast_ty = match prog_types with
@@ -995,7 +995,7 @@ let gen_global ?prog_types name ty_opt expr_opt =
   in
   let init = match expr_opt with
     | Some e -> eval_const ast_ty e
-    | None   -> undef llty  (* no initializer → LLVM undef; startup.S zeroes BSS *)
+    | None   -> undef llty  (* no initializer -> LLVM undef; startup.S zeroes BSS *)
   in
   let gvar = define_global name init the_module in
   Hashtbl.add global_vars name (ast_ty, gvar)
@@ -1015,7 +1015,7 @@ let declare_func ?prog_types fdef =
   end
 
 let gen_program ?prog_types prog =
-  (* Pass 0: register struct types — must precede ltype_of_ast for TypeNamed *)
+  (* Pass 0: register struct types -- must precede ltype_of_ast for TypeNamed *)
   List.iter (function
     | StructDef (name, fields) ->
         let field_lltys = List.map (fun (_, ty) -> ltype_of_ast ty) fields

@@ -2,8 +2,8 @@
 // On each timer tick, checks the last kick time of each task and
 // detects any task that has exceeded its deadline as "hung".
 //
-// task_healthy: keeps calling wdt_kick(1) periodically → never times out
-// task_hung:    calls wdt_kick(2) 3 times, then deliberately stops → timeout detected
+// task_healthy: keeps calling wdt_kick(1) periodically -> never times out
+// task_hung:    calls wdt_kick(2) 3 times, then deliberately stops -> timeout detected
 
 struct GicRegs {
     distr_ctlr:  *io int;
@@ -110,7 +110,7 @@ fn gic_init() {
 
 fn timer_init() {
     gic_init();
-    set_cntp_tval(read_cntfrq() >> 6); // cntfrq/64 ≈ 15ms interval
+    set_cntp_tval(read_cntfrq() >> 6); // cntfrq/64 ~ 15ms interval
     enable_cntp();
 }
 
@@ -130,7 +130,7 @@ fn irq_dispatch(frame_sp: int) -> int {
     return frame_sp;
 }
 
-// Keep kicking periodically until wdt.done is set — this task never times out
+// Keep kicking periodically until wdt.done is set -- this task never times out
 fn task_healthy() {
     let pd: *io int = &wdt.done;
     while (*pd == 0) {
@@ -143,7 +143,7 @@ fn task_hung() {
     for i in 0..<3 {
         wdt_kick(2);
     }
-    // Kicking stops here → watchdog detects a deadline overrun
+    // Kicking stops here -> watchdog detects a deadline overrun
     let pd: *io int = &wdt.done;
     while (*pd == 0) {}
 }
