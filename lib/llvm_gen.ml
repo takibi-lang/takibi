@@ -39,7 +39,34 @@ let setup_target ?(triple = "") () =
   set_data_layout (Llvm_target.DataLayout.as_string layout) the_module;
   machine
 
+(* IR レベル最適化パスを実行する。
+   - ベクタ化は AArch64 ベアメタルで NEON が有効化されていない環境を考慮して無効化
+   - "default<O2>" は loop-idiom パスを含み、memset/memcpy 相当のループを外部シンボル呼び出しに
+     置き換えるため、ベアメタル環境（標準ライブラリなし）でリンクエラーになる。
+   - カスタムパイプラインで必要なパスだけを実行する:
+     * mem2reg         : alloca を SSA レジスタに昇格（後続パスの前提条件）
+     * early-cse       : 基本的な共通部分式消去
+     * simplifycfg     : 定数 OOB の dead branch 消去（icmp uge 定数,定数 → false → ブロック削除）
+     * instcombine     : 定数畳み込みと冗長命令の消去
+     * correlated-propagation : while(i<N){ arr[i] } のループ本体内で i<N が成立することを
+                         伝播し、bounds check の icmp uge i, N を false に畳み込む
+     * constraint-elimination : さらに強力な制約ベース消去（range check の重複排除）
+     * simplifycfg     : dead block の最終クリーンアップ *)
+let run_optimizations machine =
+  let opts = Llvm_passbuilder.create_passbuilder_options () in
+  Llvm_passbuilder.passbuilder_options_set_loop_vectorization opts false;
+  Llvm_passbuilder.passbuilder_options_set_slp_vectorization opts false;
+  let pipeline =
+    "function(mem2reg,early-cse,simplifycfg,\
+              correlated-propagation,constraint-elimination,simplifycfg)"
+  in
+  (match Llvm_passbuilder.run_passes the_module pipeline machine opts with
+   | Ok ()    -> ()
+   | Error msg -> raise (Error (Printf.sprintf "IR optimization failed: %s" msg)));
+  Llvm_passbuilder.dispose_passbuilder_options opts
+
 let emit_object machine output_path =
+  run_optimizations machine;
   Llvm_target.TargetMachine.emit_to_file
     the_module
     Llvm_target.CodeGenFileType.ObjectFile

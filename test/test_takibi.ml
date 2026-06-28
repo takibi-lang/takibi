@@ -1126,6 +1126,78 @@ let infer_tests = [
   Alcotest.test_case "bitwise OR Bor type-checks" `Quick
     (expect_ok "fn f(a: int, b: int) int { return a | b; }");
 
+  (* ── 定数インデックスのコンパイル時境界チェック ─────────────── *)
+
+  Alcotest.test_case "constant in-bounds read type-checks" `Quick
+    (expect_ok "fn f() int { let mut arr: [int; 4]; return arr[3]; }");
+
+  Alcotest.test_case "constant in-bounds write type-checks" `Quick
+    (expect_ok "fn f() { let mut arr: [int; 4]; arr[3] = 1; }");
+
+  Alcotest.test_case "constant OOB read is a compile error" `Quick
+    (expect_type_error "out of bounds"
+       "fn f() int { let mut arr: [int; 4]; return arr[4]; }");
+
+  Alcotest.test_case "constant OOB write is a compile error" `Quick
+    (expect_type_error "out of bounds"
+       "fn f() { let mut arr: [int; 4]; arr[4] = 1; }");
+
+  Alcotest.test_case "exact boundary OOB read is a compile error" `Quick
+    (expect_type_error "out of bounds"
+       "fn f() int { let mut arr: [int; 8]; return arr[8]; }");
+
+  Alcotest.test_case "large OOB index is a compile error" `Quick
+    (expect_type_error "out of bounds"
+       "fn f() int { let mut arr: [int; 4]; return arr[100]; }");
+
+  Alcotest.test_case "dynamic index on array still type-checks" `Quick
+    (expect_ok "fn f(i: int) int { let mut arr: [int; 4]; return arr[i]; }");
+
+  Alcotest.test_case "constant OOB on global array is a compile error" `Quick
+    (expect_type_error "out of bounds"
+       "let buf: [char; 8]; fn f() char { return buf[8]; }");
+
+  (* ── char 配列の境界チェック ─────────────────────────────────── *)
+
+  Alcotest.test_case "constant OOB read on char array is a compile error" `Quick
+    (expect_type_error "out of bounds"
+       "fn f() char { let mut arr: [char; 4]; return arr[4]; }");
+
+  Alcotest.test_case "constant OOB write on char array is a compile error" `Quick
+    (expect_type_error "out of bounds"
+       "fn f() { let mut arr: [char; 4]; arr[4] = 'A'; }");
+
+  (* ── サイズ 1 配列の境界チェック ─────────────────────────────── *)
+
+  Alcotest.test_case "size-1 array: index 0 is in-bounds" `Quick
+    (expect_ok "fn f() int { let mut arr: [int; 1]; return arr[0]; }");
+
+  Alcotest.test_case "size-1 array: index 1 is a compile error" `Quick
+    (expect_type_error "out of bounds"
+       "fn f() int { let mut arr: [int; 1]; return arr[1]; }");
+
+  (* ── グローバル配列への書き込み ──────────────────────────────── *)
+
+  Alcotest.test_case "constant OOB write on global int array is a compile error" `Quick
+    (expect_type_error "out of bounds"
+       "let buf: [int; 4]; fn f() { buf[4] = 0; }");
+
+  (* ── 式の中に現れる OOB ───────────────────────────────────────── *)
+
+  Alcotest.test_case "constant OOB in function call argument is a compile error" `Quick
+    (expect_type_error "out of bounds"
+       "fn g(x: int) {} fn f() { let mut arr: [int; 4]; g(arr[4]); }");
+
+  Alcotest.test_case "constant OOB in binary expression is a compile error" `Quick
+    (expect_type_error "out of bounds"
+       "fn f() int { let mut arr: [int; 4]; return arr[4] + 1; }");
+
+  (* ── エラーメッセージの形式確認 ─────────────────────────────── *)
+
+  Alcotest.test_case "OOB error message includes index and array size" `Quick
+    (expect_type_error "index 5 is out of bounds for array of size 4"
+       "fn f() int { let mut arr: [int; 4]; return arr[5]; }");
+
 ]
 
 (* ── Entry point ─────────────────────────────────────────────────────────── *)

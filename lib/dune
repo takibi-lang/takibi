@@ -2,7 +2,7 @@
  (name takibi)
  (public_name takibi)
  (modules ast types type_inf typechecker llvm_gen lexer parser)
- (libraries menhirLib llvm llvm.analysis llvm.target llvm.all_backends)
+ (libraries menhirLib llvm llvm.analysis llvm.target llvm.all_backends llvm.passbuilder)
  (preprocess
   (pps ppx_deriving.show)))
 

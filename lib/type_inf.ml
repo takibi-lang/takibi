@@ -150,7 +150,14 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
       let it = infer_expr senv tyenv fenv idx in
       unify_at idx.loc it TInt;
       (match repr vt with
-       | TArray (elem, _) -> elem              (* [T; N] → 要素型 T を返す（サイズNはcodegen用）*)
+       | TArray (elem, n) ->
+           (* 定数インデックスはコンパイル時に境界を検査 *)
+           (match idx.desc with
+            | IntLit k when k >= n ->
+                raise (TypeError (idx.loc,
+                  Printf.sprintf "index %d is out of bounds for array of size %d" k n))
+            | _ -> ());
+           elem
        | TPtr   elem      -> strip_io elem     (* *T または *io T → T を返す（境界不明）*)
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt))))
@@ -267,7 +274,13 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
       let rt = infer_expr senv tyenv fenv rhs in
       unify_at idx.loc it TInt;
       let elem_ty = match repr vt with
-        | TArray (elem, _) -> elem
+        | TArray (elem, n) ->
+            (match idx.desc with
+             | IntLit k when k >= n ->
+                 raise (TypeError (idx.loc,
+                   Printf.sprintf "index %d is out of bounds for array of size %d" k n))
+             | _ -> ());
+            elem
         | TPtr   elem      -> strip_io elem
         | _ -> raise (TypeError (s.loc,
             Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))

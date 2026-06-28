@@ -90,6 +90,46 @@ run_test_timed() {
     rm -f "$tmp_out"
 }
 
+# run_compile_error_test NAME TKB_FILE ERROR_FILE
+#
+# コンパイルが失敗し、stderr に ERROR_FILE の内容（部分文字列）が含まれることを確認する。
+# QEMU は不要。コンパイラのエラー検出パイプライン全体を統合テストする。
+run_compile_error_test() {
+    local name="$1" tkb="$2" error_file="$3"
+    local tmp_err tmp_obj expected_msg
+    tmp_err=$(mktemp)
+    tmp_obj=$(mktemp --suffix=.o)
+    expected_msg=$(cat "$error_file")
+
+    if dune exec takibi -- "$tkb" --target aarch64-none-elf -o "$tmp_obj" >"$tmp_err" 2>&1; then
+        printf "${RED}FAIL${RST}  %s\n" "$name"
+        printf "       expected compile error, but compilation succeeded\n"
+        FAIL=$((FAIL + 1))
+    else
+        if grep -qF "$expected_msg" "$tmp_err"; then
+            printf "${GRN}PASS${RST}  %s\n" "$name"
+            PASS=$((PASS + 1))
+        else
+            printf "${RED}FAIL${RST}  %s\n" "$name"
+            printf "       expected: %s\n" "$expected_msg"
+            printf "       got:      %s\n" "$(cat "$tmp_err")"
+            FAIL=$((FAIL + 1))
+        fi
+    fi
+
+    rm -f "$tmp_err" "$tmp_obj"
+}
+
+echo "Running compile-error tests (no QEMU required)..."
+echo ""
+
+run_compile_error_test "oob_const_read"  examples/oob_const_read/oob_const_read.tkb   examples/oob_const_read/oob_const_read.error
+run_compile_error_test "oob_const_write" examples/oob_const_write/oob_const_write.tkb examples/oob_const_write/oob_const_write.error
+run_compile_error_test "oob_char_array"  examples/oob_char_array/oob_char_array.tkb   examples/oob_char_array/oob_char_array.error
+run_compile_error_test "oob_global"      examples/oob_global/oob_global.tkb           examples/oob_global/oob_global.error
+run_compile_error_test "oob_size1"       examples/oob_size1/oob_size1.tkb             examples/oob_size1/oob_size1.error
+
+echo ""
 echo "Running QEMU integration tests..."
 echo ""
 
