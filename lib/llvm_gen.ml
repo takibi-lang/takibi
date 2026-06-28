@@ -287,7 +287,9 @@ let emit_bounds_check idx_v n =
 let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
   match e.desc with
   | IntLit i ->
-      (TypeInt, const_int (i32_type context) i)
+      (* 整数リテラルは値が確定しているので {i..<i+1} として扱う。
+         buf[0] や buf[7] のような定数インデックスは needs_check = false になり llvm.trap を出さない。 *)
+      (TypeRefined (i, i + 1), const_int (i32_type context) i)
 
   | StringLit s ->
       (* ヌル終端バイト列をグローバル定数配列として配置し、先頭へのポインタを返す *)
