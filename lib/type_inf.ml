@@ -22,9 +22,27 @@ let unify_at loc t1 t2 =
 
 (* -- Expression inference -------------------------------------------------- *)
 
+(* True for all fixed-width unsigned integer types and char *)
+let is_unsigned_ty = function
+  | TU8 | TU16 | TU32 | TU64 | TChar -> true
+  | _ -> false
+
+(* Accept bool or any integer type as a condition (for if/while) *)
+let check_cond loc ct =
+  match repr ct with
+  | TBool -> ()
+  | _ -> unify_at loc ct TInt
+
+(* Widen TRefinedInt to TInt; leave explicit-width types unchanged.
+   Used by arithmetic ops that do not propagate range information (Mul, Div, shifts, bitwise).
+   Without this, `i: {0..<8}` in `i * 4` would produce TRefinedInt(0,8) and later cause
+   `TInt >> TRefinedInt` to fail the unification anti-subtyping guard. *)
+let canon_ty t = match repr t with TRefinedInt _ -> TInt | t -> t
+
 let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
-  | IntLit _    -> fresh ()  (* polymorphic: unifies with int or char via context *)
+  | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
+  | BoolLit _   -> TBool
   | StringLit _ -> TPtr TChar
   | Var name ->
       (* Check local/global variables first *)
@@ -58,8 +76,7 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
                      unify_at e2.loc t2 TInt;
                      TRefinedInt (a + k, b + k)
                  | _ ->
-                     unify_at e1.loc t1 TInt;
-                     unify_at e2.loc t2 TInt;
+                     unify_at e2.loc (canon_ty t2) TInt;
                      TInt)
             | _, TRefinedInt (c, d) ->
                 (match e1.desc with
@@ -67,64 +84,61 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
                      unify_at e1.loc t1 TInt;
                      TRefinedInt (c + k, d + k)
                  | _ ->
-                     unify_at e1.loc t1 TInt;
-                     unify_at e2.loc t2 TInt;
+                     unify_at e1.loc (canon_ty t1) TInt;
                      TInt)
             | _ ->
-                unify_at e1.loc t1 TInt;
-                unify_at e2.loc t2 TInt;
-                TInt)
+                let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
+                unify_at e.loc ct1 ct2;
+                ct1)
        | Sub ->
            (* Pointer arithmetic: ptr - int -> returns the same pointer type. TIo is a value type, excluded *)
            (match repr t1 with
             | TPtr _ ->
                 unify_at e2.loc t2 TInt;
                 t1
-            (* Range propagation: {a..<b} - k -> {a-k..<b-k}. Precision preserved only when other operand is IntLit *)
+            (* Range propagation: {a..<b} - k -> {a-k..<b-k}. Precision preserved only when RHS is IntLit *)
             | TRefinedInt (a, b) ->
                 (match e2.desc with
                  | IntLit k ->
                      unify_at e2.loc t2 TInt;
                      TRefinedInt (a - k, b - k)
                  | _ ->
-                     unify_at e1.loc t1 TInt;
-                     unify_at e2.loc t2 TInt;
+                     unify_at e2.loc (canon_ty t2) TInt;
                      TInt)
             | _ ->
-                unify_at e1.loc t1 TInt;
-                unify_at e2.loc t2 TInt;
-                TInt)
+                let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
+                unify_at e.loc ct1 ct2;
+                ct1)
        | Mul | Div ->
-           unify_at e1.loc t1 TInt;
-           unify_at e2.loc t2 TInt;
-           TInt
+           let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
+           unify_at e.loc ct1 ct2;
+           ct1
        | Lt | Gt | Le | Ge | Eq | Ne ->
-           unify_at e.loc t1 t2;
-           TInt
+           unify_at e.loc (canon_ty t1) (canon_ty t2);
+           TBool
        (* Range propagation: n % m where m is a positive constant -> {0..<m}.
-          Soundness condition: propagate only when n is non-negative ({lo..<_} with lo >= 0).
-          When n is int (can be negative), srem returns a negative remainder, so return TInt.
+          Soundness condition: propagate only when n is guaranteed non-negative.
+          TRefinedInt with lo>=0 or unsigned types ({lo..<_}, lo>=0) satisfy this.
+          When n is int (can be negative), srem returns a negative remainder, so return same type.
           Example: (-5) % 8 = -5 (not 3) -- returning {0..<m} without non-negativity is unsound. *)
        | Mod ->
-           unify_at e2.loc t2 TInt;
+           let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
+           unify_at e.loc ct1 ct2;
            (match e2.desc with
             | IntLit m when m > 0 ->
                 (match repr t1 with
-                 | TRefinedInt (lo, _) when lo >= 0 ->
-                     (* e1 is guaranteed non-negative at the type level *)
-                     unify_at e1.loc t1 TInt;
-                     TRefinedInt (0, m)
-                 | _ ->
-                     (* e1 can be negative -- return TInt for safety *)
-                     unify_at e1.loc t1 TInt;
-                     TInt)
-            | _ ->
-                unify_at e1.loc t1 TInt;
-                TInt)
-       | Or | And | Bor | Bxor | Band | Shr | Shl ->
-           unify_at e1.loc t1 TInt;
-           unify_at e2.loc t2 TInt;
-           TInt)
+                 | TRefinedInt (lo, _) when lo >= 0 -> TRefinedInt (0, m)
+                 | t when is_unsigned_ty t -> TRefinedInt (0, m)
+                 | _ -> ct1)
+            | _ -> ct1)
+       | Or | And ->
+           check_cond e1.loc t1;
+           check_cond e2.loc t2;
+           TBool
+       | Bor | Bxor | Band | Shr | Shl ->
+           let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
+           unify_at e.loc ct1 ct2;
+           ct1)
   | Deref e1 ->
       let t1 = infer_expr senv tyenv fenv e1 in
       (match repr t1 with
@@ -317,7 +331,7 @@ let narrow_from_cond tyenv (cond : Ast.expr) =
     match lo_opt, hi_opt with
     | Some lo, Some hi ->
         (match StringMap.find_opt name env with
-         | Some (TInt, is_mut) ->
+         | Some ((TInt | TI32), is_mut) ->
              StringMap.add name (TRefinedInt (lo, hi), is_mut) env
          | _ -> env)
     | _ -> env
@@ -447,7 +461,7 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       (tyenv, raw_locals')
   | If (cond, then_s, else_s) ->
       let ct = infer_expr senv tyenv fenv cond in
-      unify_at cond.loc ct TInt;
+      check_cond cond.loc ct;
       let then_tyenv = narrow_from_cond tyenv cond in
       let (_, rl1) = List.fold_left
         (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs in_loop s)
@@ -460,7 +474,7 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       (tyenv, rl2)
   | While (cond, body) ->
       let ct = infer_expr senv tyenv fenv cond in
-      unify_at cond.loc ct TInt;
+      check_cond cond.loc ct;
       let (_, raw_locals') = List.fold_left
         (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs true s)
         (tyenv, raw_locals) body

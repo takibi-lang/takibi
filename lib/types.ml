@@ -1,8 +1,11 @@
 (* Hindley-Milner type representation with unification variables *)
 
 type ty =
-  | TInt
-  | TChar
+  | TInt              (* alias for TI32 -- kept for backward compat *)
+  | TChar             (* alias for TU8  -- kept for backward compat *)
+  | TBool
+  | TI8  | TI16 | TI32 | TI64
+  | TU8  | TU16 | TU32 | TU64
   | TVoid
   | TFun of ty list * ty  (* param types, return type *)
   | TVar of tv ref
@@ -36,6 +39,9 @@ let rec to_string t =
   match repr t with
   | TInt  -> "int"
   | TChar -> "char"
+  | TBool -> "bool"
+  | TI8   -> "i8"  | TI16 -> "i16" | TI32 -> "i32" | TI64 -> "i64"
+  | TU8   -> "u8"  | TU16 -> "u16" | TU32 -> "u32" | TU64 -> "u64"
   | TVoid -> "void"
   | TPtr t -> Printf.sprintf "*%s" (to_string t)   (* *io T prints as "*io T" via TPtr(TIo T) *)
   | TIo  t -> Printf.sprintf "io %s" (to_string t)
@@ -64,7 +70,12 @@ let rec occurs rv = function
 
 let rec unify t1 t2 =
   match repr t1, repr t2 with
-  | TInt,  TInt  | TChar, TChar | TVoid, TVoid -> ()
+  | TInt,  TInt  | TChar, TChar | TVoid, TVoid | TBool, TBool -> ()
+  | TI8,  TI8  | TI16, TI16 | TI32, TI32 | TI64, TI64 -> ()
+  | TU8,  TU8  | TU16, TU16 | TU32, TU32 | TU64, TU64 -> ()
+  (* int is alias for i32; char is alias for u8 *)
+  | TInt, TI32 | TI32, TInt   -> ()
+  | TChar, TU8 | TU8,  TChar  -> ()
   | TPtr t1, TPtr t2 -> unify t1 t2
   | TIo  t1, TIo  t2 -> unify t1 t2
   | TArray (t1, n1), TArray (t2, n2) ->
@@ -80,11 +91,11 @@ let rec unify t1 t2 =
       if lo1 <> lo2 || hi1 <> hi2 then
         raise (Unify_error (Printf.sprintf
           "refined int range mismatch: {%d..<%d} vs {%d..<%d}" lo1 hi1 lo2 hi2))
-  (* Subtyping: TRefinedInt is a subtype of TInt (one direction only).
-     refined -> int: OK (widening to a broader type).
-     int -> refined: NG (range unproven; use if (v >= lo && v < hi) to narrow first). *)
-  | TRefinedInt _, TInt -> ()
-  | TInt, TRefinedInt (lo, hi) ->
+  (* Subtyping: TRefinedInt is a subtype of TInt/TI32 (one direction only).
+     refined -> int/i32: OK (widening to a broader type).
+     int/i32 -> refined: NG (range unproven). *)
+  | TRefinedInt _, TInt | TRefinedInt _, TI32 -> ()
+  | TInt, TRefinedInt (lo, hi) | TI32, TRefinedInt (lo, hi) ->
       raise (Unify_error (Printf.sprintf
         "cannot pass unproven int where {%d..<%d} is required; \
          use if (v >= %d && v < %d) { ... } to narrow the range" lo hi lo hi))
@@ -109,6 +120,9 @@ let rec unify t1 t2 =
 let rec of_ast = function
   | Ast.TypeInt      -> TInt
   | Ast.TypeChar     -> TChar
+  | Ast.TypeBool     -> TBool
+  | Ast.TypeI8       -> TI8  | Ast.TypeI16 -> TI16 | Ast.TypeI32 -> TI32 | Ast.TypeI64 -> TI64
+  | Ast.TypeU8       -> TU8  | Ast.TypeU16 -> TU16 | Ast.TypeU32 -> TU32 | Ast.TypeU64 -> TU64
   | Ast.TypeVoid     -> TVoid
   | Ast.TypePtr   t      -> TPtr   (of_ast t)
   | Ast.TypeIo    t      -> TIo (of_ast t)
@@ -133,6 +147,9 @@ let rec to_ast t =
   match repr t with
   | TInt  -> Ast.TypeInt
   | TChar -> Ast.TypeChar
+  | TBool -> Ast.TypeBool
+  | TI8   -> Ast.TypeI8  | TI16 -> Ast.TypeI16 | TI32 -> Ast.TypeI32 | TI64 -> Ast.TypeI64
+  | TU8   -> Ast.TypeU8  | TU16 -> Ast.TypeU16 | TU32 -> Ast.TypeU32 | TU64 -> Ast.TypeU64
   | TVoid -> Ast.TypeVoid
   | TPtr   t      -> Ast.TypePtr  (to_ast t)
   | TIo    t      -> Ast.TypeIo   (to_ast t)

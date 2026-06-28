@@ -58,6 +58,11 @@ rule read = parse
 
   | "int"  { INT_TYPE }
   | "char" { CHAR_TYPE }
+  | "bool" { BOOL_TYPE }
+  | "true"  { TRUE }
+  | "false" { FALSE }
+  | "i8"   { I8_TYPE  } | "i16"  { I16_TYPE } | "i32"  { I32_TYPE } | "i64"  { I64_TYPE }
+  | "u8"   { U8_TYPE  } | "u16"  { U16_TYPE } | "u32"  { U32_TYPE } | "u64"  { U64_TYPE }
   | ':' { COLON }
   | "..<" { DOTDOTLT }   (* Range separator for {lo..<hi}. Match before '.' *)
   | '.' { DOT }

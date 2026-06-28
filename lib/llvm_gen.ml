@@ -89,7 +89,7 @@ let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t) (cond : Ast
     match lo_opt, hi_opt with
     | Some lo, Some hi ->
         (match Hashtbl.find_opt locals name with
-         | Some (Mut (TypeInt, _)) ->
+         | Some (Mut ((TypeInt | TypeI32), _)) ->
              let old = Hashtbl.find_opt narrowing_ctx name in
              Hashtbl.replace narrowing_ctx name (TypeRefined (lo, hi));
              (name, old) :: saved
@@ -153,58 +153,122 @@ let emit_object machine output_path =
 let rec ltype_of_ast = function
   | TypeInt         -> i32_type context
   | TypeChar        -> i8_type  context
+  | TypeBool        -> i1_type  context
+  | TypeI8  | TypeU8  -> i8_type  context
+  | TypeI16 | TypeU16 -> i16_type context
+  | TypeI32 | TypeU32 -> i32_type context
+  | TypeI64 | TypeU64 -> i64_type context
   | TypeVoid        -> void_type context
   | TypePtr _       -> pointer_type context   (* LLVM 19: all pointers are opaque ptr *)
   | TypeIo  t       -> ltype_of_ast t         (* io T is a value type: LLVM type is the same as T *)
   | TypeArray (t, n) -> array_type (ltype_of_ast t) n
   | TypeFn _        -> pointer_type context   (* function pointers are also opaque ptr *)
-  | TypeRefined _   -> i32_type context      (* refined int is identical to i32 at the LLVM level *)
+  | TypeRefined _   -> i32_type context       (* refined int is identical to i32 at the LLVM level *)
   | TypeNamed sname ->
       match Hashtbl.find_opt struct_lltypes sname with
       | Some llty -> llty
       | None -> raise (Error (Printf.sprintf "Unknown struct type: %s" sname))
+
+(* True for unsigned integer types (use udiv/urem/icmp ult etc.) *)
+let is_unsigned = function
+  | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeChar -> true
+  | _ -> false
+
+(* True for 64-bit integer types *)
+let is_64bit = function
+  | TypeI64 | TypeU64 -> true
+  | _ -> false
+
+(* Widen a loaded value to the arithmetic width (i32 or i64).
+   i8/u8/i16/u16 -> i32 (C-style integer promotion).
+   i32/u32/int   -> i32 (no-op for i32 values).
+   i64/u64       -> i64 (keep as-is).
+   Signed types use sext; unsigned types use zext. *)
+let widen_load (ast_ty : Ast.type_expr) v =
+  match ast_ty with
+  | TypeI64 | TypeU64 -> v
+  | TypeBool -> v
+  | TypeInt | TypeChar ->
+      (* Legacy: always zext to i32 (TypeChar is unsigned u8 alias) *)
+      let src = type_of v in
+      if src = i32_type context || src = pointer_type context then v
+      else build_zext v (i32_type context) "zext" builder
+  | TypeI8 | TypeI16 | TypeI32 ->
+      let dst = i32_type context in
+      let src = type_of v in
+      if src = dst then v
+      else build_sext v dst "sext" builder
+  | TypeU8 | TypeU16 | TypeU32 ->
+      let dst = i32_type context in
+      let src = type_of v in
+      if src = dst then v
+      else build_zext v dst "zext" builder
+  | _ -> v
 
 let ltype_of_ret_ast = function
   | TypeVoid -> void_type context
   | t        -> ltype_of_ast t
 
 (* Coerce an llvalue to match a destination AST type.
-   Handles: i1/i8 -> i32 widening, i32 -> i8 truncation,
-            and integer -> pointer conversion (inttoptr) for MMIO addresses. *)
+   Invariant: arithmetic values arrive here at i32 (for <=32-bit types) or i64 (for 64-bit types).
+   Handles truncation to narrow types, extension to i64, bool conversion,
+   and integer -> pointer conversion (inttoptr) for MMIO addresses. *)
 let rec coerce v (dst : Ast.type_expr) =
   let vty    = type_of v in
   let dst_ll = ltype_of_ast dst in
   if vty = dst_ll then v
   else match dst with
   | TypePtr _ ->
-      (* integer literal used as a memory-mapped address *)
       let v64 =
         if   vty = i64_type context then v
         else build_zext v (i64_type context) "zext64" builder
       in
       build_inttoptr v64 (pointer_type context) "inttoptr" builder
-  | TypeChar ->
-      if vty = i32_type context then build_trunc v dst_ll "trunc" builder else v
-  | TypeInt ->
-      if vty = pointer_type context then
-        (* pointer as int: ptrtoint -> i64, then trunc to i32 (AArch64 RAM fits in 32 bits) *)
+  | TypeChar | TypeU8 | TypeI8 ->
+      if vty = i32_type context || vty = i64_type context
+      then build_trunc v (i8_type context) "trunc" builder
+      else v
+  | TypeU16 | TypeI16 ->
+      if vty = i32_type context || vty = i64_type context
+      then build_trunc v (i16_type context) "trunc" builder
+      else v
+  | TypeInt | TypeI32 | TypeU32 ->
+      if vty = i64_type context then build_trunc v (i32_type context) "trunc" builder
+      else if vty = i1_type  context then build_zext  v (i32_type context) "zext"  builder
+      else if vty = pointer_type context then
         let i64v = build_ptrtoint v (i64_type context) "ptrtoint" builder in
         build_trunc i64v (i32_type context) "trunc" builder
-      else
-        build_zext v dst_ll "zext" builder
-  | TypeIo t    -> coerce v t   (* io T has the same LLVM type as T: coerce as T *)
+      else build_zext v (i32_type context) "zext" builder
+  | TypeI64 ->
+      if vty = pointer_type context then
+        build_ptrtoint v (i64_type context) "ptrtoint" builder
+      else if vty = i32_type context then build_sext v (i64_type context) "sext" builder
+      else build_zext v (i64_type context) "zext" builder
+  | TypeU64 ->
+      if vty = pointer_type context then
+        build_ptrtoint v (i64_type context) "ptrtoint" builder
+      else build_zext v (i64_type context) "zext" builder
+  | TypeBool ->
+      if vty = i1_type context then v
+      else build_icmp Icmp.Ne v (const_int vty 0) "tobool" builder
+  | TypeIo t    -> coerce v t
   | TypeVoid    -> v
   | TypeArray _ -> v
-  | TypeFn _    -> v   (* function pointer stays as ptr; no conversion needed *)
-  | TypeNamed _ -> v   (* struct type stays as ptr; no conversion needed *)
-  | TypeRefined _ -> coerce v TypeInt  (* refined int uses the same LLVM conversion as int *)
+  | TypeFn _    -> v
+  | TypeNamed _ -> v
+  | TypeRefined _ -> coerce v TypeInt
 
-(* Widen an integer value to i32 so arithmetic stays uniform.
+(* Widen an integer value to i32 so arithmetic stays uniform (legacy helper for TypeInt/TypeChar).
    Does NOT touch pointer values. *)
 let to_i32 v =
   let ty = type_of v in
   if ty = i32_type context || ty = pointer_type context then v
   else build_zext v (i32_type context) "zext" builder
+
+(* Promote a value to its arithmetic width based on its AST type.
+   <=32-bit types -> i32.  64-bit types -> i64.  bool -> i1 (unchanged).
+   Replaces to_i32 for new explicit-width types. *)
+let to_arith_width (ast_ty : Ast.type_expr) v = widen_load ast_ty v
 
 (* Build an i1 condition from an integer or comparison result *)
 let as_cond v =
@@ -287,9 +351,10 @@ let emit_bounds_check idx_v n =
 let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
   match e.desc with
   | IntLit i ->
-      (* Integer literals have a known value, so treat as {i..<i+1}.
-         Constant indices like buf[0] or buf[7] produce needs_check = false, skipping llvm.trap. *)
       (TypeRefined (i, i + 1), const_int (i32_type context) i)
+
+  | BoolLit b ->
+      (TypeBool, const_int (i1_type context) (if b then 1 else 0))
 
   | StringLit s ->
       (* Place the null-terminated byte sequence as a global constant array and return a pointer to its start *)
@@ -312,35 +377,23 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
   | Var name ->
       (match Hashtbl.find_opt locals name with
        | Some (Imm (ast_ty, v)) ->
-           let v' = match ast_ty with
-             | TypeInt | TypeChar -> to_i32 v
-             | _                  -> v
-           in
-           (ast_ty, v')
+           (ast_ty, to_arith_width ast_ty v)
        | Some (Mut (ast_ty, ptr)) ->
            (match ast_ty with
             | TypeArray (elem_ty, n) ->
-                (* Array variable decays to a pointer to its first element (same as C) *)
                 let arr_ll = array_type (ltype_of_ast elem_ty) n in
                 let zero   = const_int (i32_type context) 0 in
                 let ep = build_in_bounds_gep arr_ll ptr [|zero; zero|] (name ^ "_ptr") builder in
                 (TypePtr elem_ty, ep)
             | TypeNamed _ ->
-                (* Struct variable: return the alloca pointer directly (same approach as arrays) *)
                 (ast_ty, ptr)
             | TypeIo inner_ty ->
-                (* io T local variable: volatile load and return the inner type *)
                 let inst = build_load (ltype_of_ast inner_ty) ptr name builder in
                 set_volatile true inst;
-                let v' = match inner_ty with TypeInt | TypeChar -> to_i32 inst | _ -> inst in
-                (inner_ty, v')
+                (inner_ty, to_arith_width inner_ty inst)
             | _ ->
-                let v  = build_load (ltype_of_ast ast_ty) ptr name builder in
-                let v' = match ast_ty with
-                  | TypeInt | TypeChar -> to_i32 v
-                  | _                  -> v
-                in
-                (ast_ty, v'))
+                let v = build_load (ltype_of_ast ast_ty) ptr name builder in
+                (ast_ty, to_arith_width ast_ty v))
        | None ->
            (match Hashtbl.find_opt global_vars name with
             | Some (TypeArray (elem_ty, n), ptr) ->
@@ -349,21 +402,14 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 let ep = build_in_bounds_gep arr_ll ptr [|zero; zero|] (name ^ "_ptr") builder in
                 (TypePtr elem_ty, ep)
             | Some (TypeNamed _ as ast_ty, ptr) ->
-                (* Global struct variable: return the global pointer directly *)
                 (ast_ty, ptr)
             | Some (TypeIo inner_ty, ptr) ->
-                (* io T global variable: volatile load and return the inner type *)
                 let inst = build_load (ltype_of_ast inner_ty) ptr name builder in
                 set_volatile true inst;
-                let v' = match inner_ty with TypeInt | TypeChar -> to_i32 inst | _ -> inst in
-                (inner_ty, v')
+                (inner_ty, to_arith_width inner_ty inst)
             | Some (ast_ty, ptr) ->
-                let v  = build_load (ltype_of_ast ast_ty) ptr name builder in
-                let v' = match ast_ty with
-                  | TypeInt | TypeChar -> to_i32 v
-                  | _                  -> v
-                in
-                (ast_ty, v')
+                let v = build_load (ltype_of_ast ast_ty) ptr name builder in
+                (ast_ty, to_arith_width ast_ty v)
             | None ->
                 (* Use function name as a function pointer value *)
                 match Hashtbl.find_opt functions name with
@@ -382,22 +428,12 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let (ty1, v1) = gen_expr locals e1 in
       (match ty1 with
        | TypePtr (TypeIo inner_ty) ->
-           (* Dereference of *io T pointer: volatile load *)
            let inst = build_load (ltype_of_ast inner_ty) v1 "deref" builder in
            set_volatile true inst;
-           let v' = match inner_ty with
-             | TypeInt | TypeChar -> to_i32 inst
-             | _                  -> inst
-           in
-           (inner_ty, v')
+           (inner_ty, to_arith_width inner_ty inst)
        | TypePtr inner_ty ->
            let inst = build_load (ltype_of_ast inner_ty) v1 "deref" builder in
-           (* non-volatile: regular memory access *)
-           let v' = match inner_ty with
-             | TypeInt | TypeChar -> to_i32 inst
-             | _                  -> inst
-           in
-           (inner_ty, v')
+           (inner_ty, to_arith_width inner_ty inst)
        | _ -> raise (Error "dereference of non-pointer type"))
 
   | AddrOf inner ->
@@ -468,32 +504,59 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                   | _ -> TypeInt
                 in
                 (ret_ty, diff))
-       | Mul -> (TypeInt, build_mul  v1 v2 "multmp" builder)
-       | Div -> (TypeInt, build_sdiv v1 v2 "divtmp" builder)
-       | Lt  -> (TypeInt, build_icmp Icmp.Slt v1 v2 "lttmp" builder)
-       | Gt  -> (TypeInt, build_icmp Icmp.Sgt v1 v2 "gttmp" builder)
-       | Le  -> (TypeInt, build_icmp Icmp.Sle v1 v2 "letmp" builder)
-       | Ge  -> (TypeInt, build_icmp Icmp.Sge v1 v2 "getmp" builder)
-       | Eq  -> (TypeInt, build_icmp Icmp.Eq  v1 v2 "eqtmp" builder)
-       | Ne  -> (TypeInt, build_icmp Icmp.Ne  v1 v2 "netmp" builder)
-       | Or   -> (TypeInt, build_or   (to_i32 v1) (to_i32 v2) "ortmp"  builder)
-       | And  -> (TypeInt, build_and  (to_i32 v1) (to_i32 v2) "landtmp" builder)
-       | Bor  -> (TypeInt, build_or   (to_i32 v1) (to_i32 v2) "bortmp" builder)
-       | Bxor -> (TypeInt, build_xor  (to_i32 v1) (to_i32 v2) "xortmp" builder)
-       | Band -> (TypeInt, build_and  (to_i32 v1) (to_i32 v2) "andtmp" builder)
-       | Shr  -> (TypeInt, build_lshr (to_i32 v1) (to_i32 v2) "shrtmp" builder)
-       | Shl  -> (TypeInt, build_shl  (to_i32 v1) (to_i32 v2) "shltmp" builder)
-       (* Range propagation: n % m where m is a positive constant and n is non-negative ({lo..<_} with lo>=0) -> {0..<m}.
-          When n is TypeInt (possibly negative), returns TypeInt.
+       | Mul -> (ty1, build_mul v1 v2 "multmp" builder)
+       | Div ->
+           let result = if is_unsigned ty1
+                        then build_udiv v1 v2 "divtmp" builder
+                        else build_sdiv v1 v2 "divtmp" builder
+           in (ty1, result)
+       | Lt ->
+           let cmp = if is_unsigned ty1
+                     then build_icmp Icmp.Ult v1 v2 "lttmp" builder
+                     else build_icmp Icmp.Slt v1 v2 "lttmp" builder
+           in (TypeBool, cmp)
+       | Gt ->
+           let cmp = if is_unsigned ty1
+                     then build_icmp Icmp.Ugt v1 v2 "gttmp" builder
+                     else build_icmp Icmp.Sgt v1 v2 "gttmp" builder
+           in (TypeBool, cmp)
+       | Le ->
+           let cmp = if is_unsigned ty1
+                     then build_icmp Icmp.Ule v1 v2 "letmp" builder
+                     else build_icmp Icmp.Sle v1 v2 "letmp" builder
+           in (TypeBool, cmp)
+       | Ge ->
+           let cmp = if is_unsigned ty1
+                     then build_icmp Icmp.Uge v1 v2 "getmp" builder
+                     else build_icmp Icmp.Sge v1 v2 "getmp" builder
+           in (TypeBool, cmp)
+       | Eq  -> (TypeBool, build_icmp Icmp.Eq v1 v2 "eqtmp" builder)
+       | Ne  -> (TypeBool, build_icmp Icmp.Ne v1 v2 "netmp" builder)
+       | Or  -> (TypeBool, build_or  (as_cond v1) (as_cond v2) "ortmp"   builder)
+       | And -> (TypeBool, build_and (as_cond v1) (as_cond v2) "landtmp" builder)
+       | Bor  -> (ty1, build_or  v1 v2 "bortmp" builder)
+       | Bxor -> (ty1, build_xor v1 v2 "xortmp" builder)
+       | Band -> (ty1, build_and v1 v2 "andtmp" builder)
+       | Shr  ->
+           let result = if is_unsigned ty1
+                        then build_lshr v1 v2 "shrtmp" builder
+                        else build_ashr v1 v2 "shrtmp" builder
+           in (ty1, result)
+       | Shl  -> (ty1, build_shl v1 v2 "shltmp" builder)
+       (* Range propagation: n % m where m is a positive constant and n is guaranteed non-negative.
           Symmetric condition with type_inf.ml: relaxing only one side causes a mismatch. *)
        | Mod  ->
-           let result = build_srem (to_i32 v1) (to_i32 v2) "modtmp" builder in
+           let result = if is_unsigned ty1
+                        then build_urem v1 v2 "modtmp" builder
+                        else build_srem v1 v2 "modtmp" builder
+           in
            let ret_ty = match e2.desc with
              | IntLit m when m > 0 ->
                  (match ty1 with
                   | TypeRefined (lo, _) when lo >= 0 -> TypeRefined (0, m)
-                  | _ -> TypeInt)
-             | _ -> TypeInt
+                  | _ when is_unsigned ty1 -> TypeRefined (0, m)
+                  | _ -> ty1)
+             | _ -> ty1
            in
            (ret_ty, result))
 
@@ -524,19 +587,13 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            (* Array field: return a pointer to the first element (same decay as local array variables) *)
            (TypePtr elem_ty, field_ptr)
        | TypeIo inner_ty ->
-           (* io T field: volatile load and return the inner type *)
            let v = build_load (ltype_of_ast inner_ty) field_ptr fname builder in
            set_volatile true v;
-           let v' = match inner_ty with TypeInt | TypeChar -> to_i32 v | _ -> v in
-           (inner_ty, v')
+           (inner_ty, to_arith_width inner_ty v)
        | _ ->
            let v = build_load (ltype_of_ast field_ty) field_ptr fname builder in
            if through_io then set_volatile true v;
-           let v' = match field_ty with
-             | TypeInt | TypeChar -> to_i32 v
-             | _                  -> v
-           in
-           (field_ty, v'))
+           (field_ty, to_arith_width field_ty v))
 
   | Index (id, idx) ->
       let (idx_ty_raw, idx_raw) = gen_expr locals idx in
@@ -558,16 +615,13 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
         let zero   = const_int (i32_type context) 0 in
         let ep = build_in_bounds_gep arr_ll arr_ptr [|zero; idx_v|] "idx_ptr" builder in
         let v  = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
-        let v' = match elem_ty with TypeInt | TypeChar -> to_i32 v | _ -> v in
-        (elem_ty, v')
+        (elem_ty, to_arith_width elem_ty v)
       in
-      (* Pointer variable load: no bounds check. ptr_v is the actual pointer value *)
       let load_through_ptr elem_ty ptr_v is_volatile =
         let ep = build_gep (ltype_of_ast elem_ty) ptr_v [|idx_v|] "idx_ptr" builder in
         let v  = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
         if is_volatile then set_volatile true v;
-        let v' = match elem_ty with TypeInt | TypeChar -> to_i32 v | _ -> v in
-        (elem_ty, v')
+        (elem_ty, to_arith_width elem_ty v)
       in
       (match Hashtbl.find_opt locals id with
        | Some (Mut (TypeArray (elem_ty, n), ptr)) ->
@@ -604,23 +658,17 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       raise (Error "BUG: StructLit must be handled in gen_stmt / gen_global, not gen_expr")
 
   | Call (fname, args) ->
-      let coerce_arg v lty =
-        let src = type_of v in
-        if src = lty then v
-        else if lty = i8_type  context && src = i32_type context then
-          build_trunc v lty "arg_trunc" builder
-        else if lty = i32_type context && src = i8_type  context then
-          build_zext  v lty "arg_ext"   builder
-        else v
-      in
       (match Hashtbl.find_opt functions fname with
        | Some (ft, callee) ->
-           (* Direct call (resolved by function name) *)
-           let param_lltys = Array.to_list (param_types ft) in
+           let param_asts = match Hashtbl.find_opt func_param_ast_types fname with
+             | Some ps -> ps | None -> []
+           in
            let arg_vals =
-             List.map2 (fun a lty ->
-               coerce_arg (snd (gen_expr locals a)) lty
-             ) args param_lltys |> Array.of_list
+             List.mapi (fun i a ->
+               let (_, av) = gen_expr locals a in
+               let param_ast = (try List.nth param_asts i with _ -> TypeInt) in
+               coerce av param_ast
+             ) args |> Array.of_list
            in
            let ret_lty = return_type ft in
            let call_name = if ret_lty = void_type context then "" else "calltmp" in
@@ -649,9 +697,9 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 let ret_ll    = ltype_of_ret_ast ret_ast in
                 let ft        = function_type ret_ll param_lls in
                 let arg_vals  =
-                  List.map2 (fun a lty ->
-                    coerce_arg (snd (gen_expr locals a)) lty
-                  ) args (Array.to_list param_lls) |> Array.of_list
+                  List.map2 (fun a param_ast ->
+                    coerce (snd (gen_expr locals a)) param_ast
+                  ) args param_asts |> Array.of_list
                 in
                 let call_name = if ret_ll = void_type context then "" else "calltmp" in
                 let v = build_call ft fn_ptr arg_vals call_name builder in

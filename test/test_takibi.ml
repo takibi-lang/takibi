@@ -14,9 +14,12 @@ let infer src =
 let rec show_type = function
   | Ast.TypeInt         -> "int"
   | Ast.TypeChar        -> "char"
+  | Ast.TypeBool        -> "bool"
+  | Ast.TypeI8          -> "i8"  | Ast.TypeI16 -> "i16" | Ast.TypeI32 -> "i32" | Ast.TypeI64 -> "i64"
+  | Ast.TypeU8          -> "u8"  | Ast.TypeU16 -> "u16" | Ast.TypeU32 -> "u32" | Ast.TypeU64 -> "u64"
   | Ast.TypeVoid        -> "void"
   | Ast.TypePtr t       -> "*" ^ show_type t
-  | Ast.TypeIo  t       -> "io " ^ show_type t   (* TypePtr(TypeIo t) -> "*io T" synthesized automatically *)
+  | Ast.TypeIo  t       -> "io " ^ show_type t
   | Ast.TypeArray (t,n) -> Printf.sprintf "[%s; %d]" (show_type t) n
   | Ast.TypeFn (ps, r)  ->
       Printf.sprintf "fn(%s) -> %s"
@@ -866,21 +869,21 @@ let infer_tests = [
                               return r; }");
 
   Alcotest.test_case "logical OR of two comparisons" `Quick
-    (expect_ok "fn f(x: int) int { return x == 1 || x == 2; }");
+    (expect_ok "fn f(x: int) -> bool { return x == 1 || x == 2; }");
 
   Alcotest.test_case "logical OR type error: char operand" `Quick
     (expect_type_error "cannot unify"
-       "fn f(a: int, b: char) int { return a == 1 || b; }");
+       "fn f(a: int, b: char) -> bool { return a == 1 || b; }");
 
   Alcotest.test_case "logical AND of two comparisons" `Quick
-    (expect_ok "fn f(x: int) int { return x >= 0 && x < 8; }");
+    (expect_ok "fn f(x: int) -> bool { return x >= 0 && x < 8; }");
 
   Alcotest.test_case "logical AND in if condition" `Quick
     (expect_ok "fn f(v: int) int { if (v >= 0 && v < 8) { return v; } return 0; }");
 
   Alcotest.test_case "logical AND type error: char operand" `Quick
     (expect_type_error "cannot unify"
-       "fn f(a: int, b: char) int { return a == 1 && b; }");
+       "fn f(a: int, b: char) -> bool { return a == 1 && b; }");
 
   Alcotest.test_case "if/else branches both valid" `Quick
     (expect_ok "fn abs(x: int) int {

@@ -31,7 +31,10 @@ open Ast
 %nonassoc UNARY   (* unary * (deref), & (addrof), unary - *)
 %left DOT         (* highest: field access -- postfix, binds tighter than prefix ops *)
 
-%token INT_TYPE CHAR_TYPE VOID_TYPE
+%token INT_TYPE CHAR_TYPE VOID_TYPE BOOL_TYPE
+%token I8_TYPE I16_TYPE I32_TYPE I64_TYPE
+%token U8_TYPE U16_TYPE U32_TYPE U64_TYPE
+%token TRUE FALSE
 %token COLON ARROW
 
 %start <Ast.toplevel list> program
@@ -154,8 +157,10 @@ expr:
   | MINUS e = expr %prec UNARY
     { { desc = BinOp (Sub, { desc = IntLit 0; loc = $symbolstartpos }, e);
         loc = $symbolstartpos } }
-  | INT    { { desc = IntLit $1;    loc = $symbolstartpos } }
-  | STRING { { desc = StringLit $1; loc = $symbolstartpos } }
+  | INT    { { desc = IntLit $1;       loc = $symbolstartpos } }
+  | TRUE   { { desc = BoolLit true;   loc = $symbolstartpos } }
+  | FALSE  { { desc = BoolLit false;  loc = $symbolstartpos } }
+  | STRING { { desc = StringLit $1;   loc = $symbolstartpos } }
   | IDENT { { desc = Var $1; loc = $symbolstartpos } }
   | IDENT LPAREN args RPAREN { { desc = Call ($1, $3); loc = $symbolstartpos } }
   | LPAREN e = expr RPAREN { e }
@@ -188,9 +193,12 @@ let_rhs:
 (* base_type_expr: type expression that does not start with {. Used for the legacy ret_type_opt form (`fn f() int`).
    TypeRefined is excluded here because { would conflict with the function body's LBRACE. *)
 base_type_expr:
-  | INT_TYPE  { TypeInt }
+  | INT_TYPE  { TypeInt  }
   | CHAR_TYPE { TypeChar }
   | VOID_TYPE { TypeVoid }
+  | BOOL_TYPE { TypeBool }
+  | I8_TYPE   { TypeI8  } | I16_TYPE { TypeI16 } | I32_TYPE { TypeI32 } | I64_TYPE { TypeI64 }
+  | U8_TYPE   { TypeU8  } | U16_TYPE { TypeU16 } | U32_TYPE { TypeU32 } | U64_TYPE { TypeU64 }
   | IO         type_expr { TypeIo  $2 }
   | TIMES      type_expr { TypePtr $2 }
   | LBRACKET t = type_expr SEMI n = INT RBRACKET { TypeArray (t, n) }
