@@ -102,13 +102,25 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
            unify_at e.loc t1 t2;
            TInt
        (* 区間伝播: n % m where m は正の定数 → {0..<m}。
-          n % 4 は必ず 0,1,2,3 のいずれかなのでリングバッファのインデックスに使える。 *)
+          健全性条件: n が非負 ({lo..<_} で lo >= 0) のときのみ伝播する。
+          n が int (負になりえる) の場合、srem は負の余りを返すため TInt を返す。
+          例: (-5) % 8 = -5 (not 3) — 非負保証なしに {0..<8} を返すのは unsound。 *)
        | Mod ->
-           unify_at e1.loc t1 TInt;
            unify_at e2.loc t2 TInt;
            (match e2.desc with
-            | IntLit m when m > 0 -> TRefinedInt (0, m)
-            | _ -> TInt)
+            | IntLit m when m > 0 ->
+                (match repr t1 with
+                 | TRefinedInt (lo, _) when lo >= 0 ->
+                     (* e1 が非負であることが型レベルで保証されている *)
+                     unify_at e1.loc t1 TInt;
+                     TRefinedInt (0, m)
+                 | _ ->
+                     (* e1 が負になりえる — 安全のため TInt を返す *)
+                     unify_at e1.loc t1 TInt;
+                     TInt)
+            | _ ->
+                unify_at e1.loc t1 TInt;
+                TInt)
        | Or | And | Bor | Bxor | Band | Shr | Shl ->
            unify_at e1.loc t1 TInt;
            unify_at e2.loc t2 TInt;

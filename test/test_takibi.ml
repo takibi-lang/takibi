@@ -1297,6 +1297,26 @@ let infer_tests = [
     (expect_type_error "range mismatch"
       "fn f(i: {0..<8}) -> {0..<8} { return i + 1; }");
 
+  (* ── Step 3.3c: % 区間伝播の soundness 条件 ──────────────────────────── *)
+  (* 左辺が int（負になりえる）の場合は {0..<m} を返さない。
+     LLVM の srem は被除数が負なら負の余りを返すため unsound になるから。
+     例: (-5) % 8 = -5 (not 3) — 非負保証なしに {0..<8} を返すのは誤り。 *)
+
+  Alcotest.test_case "int%m stays TInt — negative left operand possible" `Quick
+    (expect_type_error "unproven int"
+      "fn foo(i: {0..<4}) {} \
+       fn f(n: int) { foo(n % 4); }");
+
+  Alcotest.test_case "{0..<8}%4 propagates to {0..<4}" `Quick
+    (expect_ok
+      "fn foo(i: {0..<4}) {} \
+       fn f(i: {0..<8}) { foo(i % 4); }");
+
+  Alcotest.test_case "{0..<8}%8 can index [char;8] without bounds check" `Quick
+    (expect_ok
+      "let buf: [char; 8]; \
+       fn f(i: {0..<8}) { buf[i % 8] = 'X'; }");
+
   (* ── Step 3.4: 境界チェック省略（グローバル配列 + TypeRefined インデックス）── *)
 
   Alcotest.test_case "refined index on global array compiles" `Quick
