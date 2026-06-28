@@ -1,18 +1,18 @@
-// for i in lo..<hi ループ: i が {lo..<hi} 型になり配列境界チェックが省略される
+// for i in lo..<hi loop: i gets type {lo..<hi}, so array bounds checks are elided.
 //
-// 生成される機械語の違い（AArch64 AEL1 ベアメタル）:
+// Difference in generated machine code (AArch64 AEL1 bare-metal):
 //
-//   while ループ（let mut i: int）:
-//     str i, [sp]        ; スタックへ保存
-//     ldr i, [sp]        ; ロード（毎回）
-//     cmp i, #8          ; 境界チェック ← llvm.trap 候補
+//   while loop (let mut i: int):
+//     str i, [sp]        ; save to stack
+//     ldr i, [sp]        ; load (every iteration)
+//     cmp i, #8          ; bounds check ← llvm.trap candidate
 //     b.hi trap
 //     ...
 //
 //   for i in 0..<8:
-//     load i_ctr         ; ループカウンタロード
-//     i: {0..<8} — 境界チェック完全省略
-//     strb val, [buf+i]  ; 直接書き込み（cmp なし）
+//     load i_ctr         ; load loop counter
+//     i: {0..<8} — bounds check fully elided
+//     strb val, [buf+i]  ; direct write (no cmp)
 //
 // QEMU expected output: ABCDEFGH\r\n
 
@@ -23,14 +23,14 @@ fn uart_putc(c: char) {
 
 let buf: [char; 8];
 
-// for ループで 'A'〜'H' を書き込む。i: {0..<8} なので buf[i] の境界チェックなし。
+// Write 'A' to 'H' using a for loop. i: {0..<8}, so buf[i] has no bounds check.
 fn fill() {
     for i in 0..<8 {
         buf[i] = 'A' + i as char;
     }
 }
 
-// for ループで読み出して UART へ送る。同様に境界チェックなし。
+// Read and send to UART using a for loop. Bounds check elided here too.
 fn print_buf() {
     for i in 0..<8 {
         uart_putc(buf[i]);

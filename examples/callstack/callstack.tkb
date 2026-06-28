@@ -1,5 +1,5 @@
-// 複数関数の呼び出し順テスト（main → A → B → C の順に出力）。
-// AArch64 コールスタックが正しく動作することを確認する。
+// Test for call order across multiple functions (prints in order: main → A → B → C).
+// Verifies that the AArch64 call stack works correctly.
 fn uart_putc(c: char) {
     let dr: *io char = 0x09000000; // PL011 UART DR
     *dr = c;

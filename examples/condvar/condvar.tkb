@@ -1,5 +1,5 @@
-// mutex (sem_wait/sem_post のラッパー) + 条件変数 (シーケンスカウンタ方式) のデモ。
-// プロデューサーが 5 個送り、コンシューマーが 5 個受け取る。
+// Demo of mutex (sem_wait/sem_post wrapper) + condition variable (sequence counter method).
+// Producer sends 5 items; consumer receives 5 items.
 struct GicRegs {
     distr_ctlr:  *io int;
     distr_isen0: *io int;
@@ -53,10 +53,10 @@ fn mutex_unlock(m: *int) {
     sem_post(m);
 }
 
-/* cond_wait の取りこぼし防止:
-   ① mutex を持ったままシーケンス番号を読む
-   ② unlock 後に signal が来ても ① で保存した s で検出できる
-   ③ *seq は volatile load — スピン中にコンパイラがホイストしない */
+/* Preventing missed wakeups in cond_wait:
+   ① Read the sequence number while holding the mutex
+   ② Even if a signal arrives after unlock, the saved s from ① still detects it
+   ③ *seq is a volatile load — the compiler will not hoist it out of the spin loop */
 fn cond_wait(seq: *io int, m: *int) {
     let s: int = *seq;
     mutex_unlock(m);

@@ -18,8 +18,8 @@ open Ast
 %token AS
 
 (* Precedence: low → high.  UNARY is a pseudo-token for %prec. *)
-%left OR          (* || — 最低優先度の論理演算 *)
-%left DAMP        (* && — || より高く、比較演算子より低い *)
+%left OR          (* || — lowest precedence logical operator *)
+%left DAMP        (* && — higher than ||, lower than comparison operators *)
 %left PIPE        (* bitwise OR: looser than comparison so (a==0)|(b==0) works *)
 %left HAT         (* bitwise XOR: between | and comparison *)
 %left LT GT LE GE EQ NE
@@ -79,8 +79,8 @@ rest_params:
 
 ret_type_opt:
   | /* empty */          { None }
-  | ARROW type_expr      { Some $2 }   (* fn foo() -> int  推奨形式 *)
-  | base_type_expr       { Some $1 }   (* fn foo() int  後方互換。{lo..<hi} は -> なしでは書けない *)
+  | ARROW type_expr      { Some $2 }   (* fn foo() -> int  preferred form *)
+  | base_type_expr       { Some $1 }   (* fn foo() int  backward-compatible; {lo..<hi} cannot be written without -> *)
 
 stmts:
   | /* empty */ { [] }
@@ -89,7 +89,7 @@ stmts:
 stmt:
   | RETURN e = expr SEMI { { desc = Return e; loc = $symbolstartpos } }
   | fname = IDENT LPAREN args = args RPAREN SEMI
-    (* 式文は関数呼び出しのみ許容。IDENT LPAREN で確定するため DOT との S/R コンフリクトが消える *)
+    (* Only function calls are allowed as expression statements. IDENT LPAREN disambiguates, eliminating S/R conflicts with DOT *)
     { let loc = $symbolstartpos in
       { desc = Expr { desc = Call (fname, args); loc }; loc } }
   | LET id = IDENT rhs = let_rhs SEMI
@@ -183,8 +183,8 @@ let_rhs:
   | COLON type_expr ASSIGN expr { (Some $2, Some $4) }
   | ASSIGN expr { (None, Some $2) }
 
-(* base_type_expr: { を先頭に含まない型式。ret_type_opt のレガシー形式（`fn f() int`）に使う。
-   { が関数本体の LBRACE と衝突するため TypeRefined をここには含めない。 *)
+(* base_type_expr: type expression that does not start with {. Used for the legacy ret_type_opt form (`fn f() int`).
+   TypeRefined is excluded here because { would conflict with the function body's LBRACE. *)
 base_type_expr:
   | INT_TYPE  { TypeInt }
   | CHAR_TYPE { TypeChar }
@@ -196,7 +196,7 @@ base_type_expr:
   | FN LPAREN fn_type_params RPAREN                 { TypeFn ($3, TypeVoid) }
   | IDENT { TypeNamed $1 }
 
-(* type_expr: base_type_expr + TypeRefined。: の後ろや -> の後ろなど文脈が明確な場所で使う。 *)
+(* type_expr: base_type_expr + TypeRefined. Used in unambiguous positions such as after : or -> *)
 type_expr:
   | base_type_expr { $1 }
   | LBRACE lo = INT DOTDOTLT hi = INT RBRACE { TypeRefined (lo, hi) }

@@ -1,5 +1,5 @@
-// このファイルはコンパイルエラーになることが期待される。
-// 定数インデックス 4 でサイズ 4 の配列を読み出そうとすると型推論が検出する。
+// This file is expected to produce a compile error.
+// Type inference detects a read from a size-4 array at constant index 4.
 fn main() {
     let mut arr: [int; 4];
     let x = arr[4];

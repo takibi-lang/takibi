@@ -1,4 +1,4 @@
-// PL031 RTC でポーリング 1 秒 delay のデモ。
+// Demo of a 1-second polling delay using the PL031 RTC.
 fn uart_putc(c: char) {
     let dr: *io char = 0x09000000;
     *dr = c;
@@ -12,7 +12,7 @@ fn uart_puts(s: *char) {
 }
 
 fn delay_seconds(n: int) {
-    let rtc: *io int = 0x09010000; // PL031 RTC DR: 1 秒粒度のカウンタ
+    let rtc: *io int = 0x09010000; // PL031 RTC DR: 1-second resolution counter
     let start: int = *rtc;
     while (*rtc - start < n) {}
 }

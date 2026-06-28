@@ -1,5 +1,5 @@
-// このファイルはコンパイルエラーになることが期待される。
-// char 配列でも定数 OOB を検出できることを確認する。
+// This file is expected to produce a compile error.
+// Verifies that constant OOB is detected for char arrays as well.
 fn main() {
     let mut buf: [char; 8];
     let c = buf[8];

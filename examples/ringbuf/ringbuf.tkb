@@ -1,4 +1,4 @@
-// リングバッファのデモ。RingBuf 構造体で head/tail を % cap で折り返す。
+// Ring buffer demo. RingBuf struct wraps head/tail with % cap.
 struct RingBuf {
     buf:  *int;
     head: int;

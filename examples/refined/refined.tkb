@@ -1,23 +1,23 @@
-// Step 3.3/3.4/3.5: {lo..<hi} 型・for ループ・if 絞り込みによる境界チェック省略
+// Step 3.3/3.4/3.5: bounds check elision via {lo..<hi} types, for loops, and if narrowing
 //
-// 3 つのアプローチで同じ buf[8] に 'A'..'H' を書き込んで出力する。
-// いずれも生成される機械語に llvm.trap (brk #0) が含まれないことを目標とする。
+// Three approaches all write 'A'..'H' to the same buf[8] and print it.
+// The goal is that none of the generated machine code contains llvm.trap (brk #0).
 //
-//   アプローチ 1: 手動 {lo..<hi} 注釈（Step 3.4）
-//     fill_pair(i: {0..<7}) — 呼び出し元が型を証明して渡す
+//   Approach 1: manual {lo..<hi} annotation (Step 3.4)
+//     fill_pair(i: {0..<7}) — caller proves the type and passes it in
 //
-//   アプローチ 2: for ループ（Step 3.5-for）
-//     for i in 0..<8 — コンパイラが i: {0..<8} を自動確定
+//   Approach 2: for loop (Step 3.5-for)
+//     for i in 0..<8 — compiler automatically determines i: {0..<8}
 //
-//   アプローチ 3: if 絞り込み（Step 3.5-if）
-//     if (v >= 0 && v < 8) — 実行時チェックを型証明に変換
-//     ※ Mut バインディング (v: int パラメータ) への直接アクセスは
-//       現状まだ保守的に境界チェックが残る（Step 3.5-Mut で改善予定）
+//   Approach 3: if narrowing (Step 3.5-if)
+//     if (v >= 0 && v < 8) — converts a runtime check into a type proof
+//     Note: direct access through a Mut binding (v: int parameter) still conservatively
+//       retains the bounds check for now (to be improved in Step 3.5-Mut)
 //
 // QEMU expected output:
-//   ABCDEFGH\r\n  (アプローチ 1)
-//   ABCDEFGH\r\n  (アプローチ 2)
-//   ABCDEFGH\r\n  (アプローチ 3)
+//   ABCDEFGH\r\n  (approach 1)
+//   ABCDEFGH\r\n  (approach 2)
+//   ABCDEFGH\r\n  (approach 3)
 
 fn uart_putc(c: char) {
     let dr: *io char = 0x09000000;
@@ -26,10 +26,10 @@ fn uart_putc(c: char) {
 
 let buf: [char; 8];
 
-// ─── アプローチ 1: 手動 {lo..<hi} 注釈（Step 3.4）──────────────────────────
+// ─── Approach 1: manual {lo..<hi} annotation (Step 3.4) ──────────────────────────
 fn fill_pair(i: {0..<7}, lo: char, hi: char) {
-    buf[i]   = lo;   // TypeRefined(0,7): hi=7 <= 8 → チェック省略
-    buf[i+1] = hi;   // TypeRefined(1,8): hi=8 <= 8 → チェック省略
+    buf[i]   = lo;   // TypeRefined(0,7): hi=7 <= 8 → check elided
+    buf[i+1] = hi;   // TypeRefined(1,8): hi=8 <= 8 → check elided
 }
 
 fn fill_pairs() {
@@ -43,14 +43,14 @@ fn fill_pairs() {
     fill_pair(i6, 'G', 'H');
 }
 
-// ─── アプローチ 2: for ループ（Step 3.5-for）───────────────────────────────
+// ─── Approach 2: for loop (Step 3.5-for) ───────────────────────────────
 fn fill_loop() {
     for i in 0..<8 {
-        buf[i] = 'A' + i as char;  // i: {0..<8} → チェック省略
+        buf[i] = 'A' + i as char;  // i: {0..<8} → check elided
     }
 }
 
-// ─── アプローチ 3: if 絞り込み（Step 3.5-if）───────────────────────────────
+// ─── Approach 3: if narrowing (Step 3.5-if) ───────────────────────────────
 fn fill_cond(v: int, c: char) {
     if (v >= 0 && v < 8) {
         buf[v] = c;
@@ -65,7 +65,7 @@ fn fill_by_cond() {
     }
 }
 
-// ─── 共通: 結果出力 ────────────────────────────────────────────────────────
+// ─── Common: print results ────────────────────────────────────────────────────────
 fn print_buf() {
     for i in 0..<8 {
         uart_putc(buf[i]);
@@ -75,8 +75,8 @@ fn print_buf() {
 }
 
 fn main() -> int {
-    fill_pairs();   print_buf();   // アプローチ 1
-    fill_loop();    print_buf();   // アプローチ 2
-    fill_by_cond(); print_buf();   // アプローチ 3
+    fill_pairs();   print_buf();   // approach 1
+    fill_loop();    print_buf();   // approach 2
+    fill_by_cond(); print_buf();   // approach 3
     return 0;
 }

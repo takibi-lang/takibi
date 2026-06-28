@@ -1,6 +1,6 @@
-// 条件変数で同期した有界メッセージキュー (容量4) のデモ。
-// プロデューサーが 0〜4 を送信し、コンシューサーが受信して表示する。
-// MsgQueue はリングバッファ + mutex + not_empty/not_full の condvar で実装。
+// Demo of a bounded message queue (capacity 4) synchronized with condition variables.
+// Producer sends 0 to 4; consumer receives and prints each value.
+// MsgQueue is implemented as a ring buffer + mutex + not_empty/not_full condvars.
 struct GicRegs {
     distr_ctlr:  *io int;
     distr_isen0: *io int;

@@ -1,5 +1,5 @@
-// CRC-8/SMBUS 計算のデモ（多項式 0x07）。
-// "123456789" の CRC-8 は 0xF4 が正解。ポインタ走査・^ XOR・<< シフトを使用。
+// CRC-8/SMBUS calculation demo (polynomial 0x07).
+// The CRC-8 of "123456789" is 0xF4. Uses pointer scan, ^ XOR, and << shift.
 fn uart_putc(c: char) {
     let dr: *io char = 0x09000000; // PL011 UART DR
     *dr = c;

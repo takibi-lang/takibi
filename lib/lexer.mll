@@ -5,7 +5,7 @@ open Parser
 rule read = parse
   | [' ' '\t'] { read lexbuf }
   | '\n'       { Lexing.new_line lexbuf; read lexbuf }
-  | "//" [^ '\n']* { read lexbuf }   (* 行コメント: 改行はそのまま次ループで処理 *)
+  | "//" [^ '\n']* { read lexbuf }   (* Line comment: newline is processed in the next iteration *)
   | "/*"           { read_block_comment lexbuf }
 
   | "fn"      { FN }
@@ -32,7 +32,7 @@ rule read = parse
   | ',' { COMMA }
   | ';' { SEMI }
   | '=' { ASSIGN }
-  | "&&" { DAMP }   (* 論理 AND。'&' より先にマッチさせる *)
+  | "&&" { DAMP }   (* Logical AND. Match before '&' *)
   | '&' { AMP }
 
   | '+' { PLUS }
@@ -57,7 +57,7 @@ rule read = parse
   | "int"  { INT_TYPE }
   | "char" { CHAR_TYPE }
   | ':' { COLON }
-  | "..<" { DOTDOTLT }   (* {lo..<hi} の範囲区切り。'.' より先にマッチさせる *)
+  | "..<" { DOTDOTLT }   (* Range separator for {lo..<hi}. Match before '.' *)
   | '.' { DOT }
 
   | "0x" ['0'-'9' 'a'-'f' 'A'-'F']+ as h { INT (int_of_string h) }

@@ -80,9 +80,9 @@ let rec unify t1 t2 =
       if lo1 <> lo2 || hi1 <> hi2 then
         raise (Unify_error (Printf.sprintf
           "refined int range mismatch: {%d..<%d} vs {%d..<%d}" lo1 hi1 lo2 hi2))
-  (* サブタイピング: TRefinedInt は TInt のサブタイプ（一方向のみ）。
-     refined → int: OK（幅広い型への昇格）。
-     int → refined: NG（範囲が未証明。if (v >= lo && v < hi) で絞り込んで使う）。 *)
+  (* Subtyping: TRefinedInt is a subtype of TInt (one direction only).
+     refined → int: OK (widening to a broader type).
+     int → refined: NG (range unproven; use if (v >= lo && v < hi) to narrow first). *)
   | TRefinedInt _, TInt -> ()
   | TInt, TRefinedInt (lo, hi) ->
       raise (Unify_error (Printf.sprintf

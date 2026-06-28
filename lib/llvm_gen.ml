@@ -76,13 +76,13 @@ let apply_narrowing (locals : (string, local_binding) Hashtbl.t) (cond : Ast.exp
 let restore_narrowing (locals : (string, local_binding) Hashtbl.t) saved =
   List.iter (fun (name, old) -> Hashtbl.replace locals name old) saved
 
-(* if-条件による Mut バインディングの絞り込みを保持するモジュールレベル表。
-   コンパイルは単一スレッドなので module-level Hashtbl として持つ（安全）。
-   gen_expr は locals に直接アクセスできないため、型オーバーライドをここで渡す。 *)
+(* Module-level table for Mut binding narrowing from if-conditions.
+   Compilation is single-threaded, so a module-level Hashtbl is safe.
+   gen_expr cannot access locals directly, so type overrides are passed through here. *)
 let narrowing_ctx : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 4
 
-(* Mut バインディングに対して narrowing_ctx へ絞り込み型を記録する。
-   Returns [(name, old_opt)] — then-branch 終了後に restore_narrowing_mut へ渡す。 *)
+(* Record narrowed types for Mut bindings into narrowing_ctx.
+   Returns [(name, old_opt)] — pass to restore_narrowing_mut after the then-branch. *)
 let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t) (cond : Ast.expr) =
   let bounds = collect_bounds_cond cond in
   Types.StringMap.fold (fun name (lo_opt, hi_opt) saved ->
@@ -114,19 +114,19 @@ let setup_target ?(triple = "") () =
   set_data_layout (Llvm_target.DataLayout.as_string layout) the_module;
   machine
 
-(* IR レベル最適化パスを実行する。
-   - ベクタ化は AArch64 ベアメタルで NEON が有効化されていない環境を考慮して無効化
-   - "default<O2>" は loop-idiom パスを含み、memset/memcpy 相当のループを外部シンボル呼び出しに
-     置き換えるため、ベアメタル環境（標準ライブラリなし）でリンクエラーになる。
-   - カスタムパイプラインで必要なパスだけを実行する:
-     * mem2reg         : alloca を SSA レジスタに昇格（後続パスの前提条件）
-     * early-cse       : 基本的な共通部分式消去
-     * simplifycfg     : 定数 OOB の dead branch 消去（icmp uge 定数,定数 → false → ブロック削除）
-     * instcombine     : 定数畳み込みと冗長命令の消去
-     * correlated-propagation : while(i<N){ arr[i] } のループ本体内で i<N が成立することを
-                         伝播し、bounds check の icmp uge i, N を false に畳み込む
-     * constraint-elimination : さらに強力な制約ベース消去（range check の重複排除）
-     * simplifycfg     : dead block の最終クリーンアップ *)
+(* Run IR-level optimization passes.
+   - Vectorization is disabled: AArch64 bare-metal may lack NEON.
+   - "default<O2>" includes the loop-idiom pass, which replaces memset/memcpy-like loops
+     with calls to external symbols — causing link errors in bare-metal (no stdlib).
+   - Custom pipeline with only the necessary passes:
+     * mem2reg              : promote allocas to SSA registers (prerequisite for later passes)
+     * early-cse            : basic common subexpression elimination
+     * simplifycfg          : dead branch elimination for constant OOB (icmp uge const,const → false → block removed)
+     * instcombine          : constant folding and redundant instruction elimination
+     * correlated-propagation: propagate i<N inside while(i<N){ arr[i] } loop bodies,
+                               folding bounds-check icmp uge i, N to false
+     * constraint-elimination: stronger constraint-based elimination (deduplicates range checks)
+     * simplifycfg          : final cleanup of dead blocks *)
 let run_optimizations machine =
   let opts = Llvm_passbuilder.create_passbuilder_options () in
   Llvm_passbuilder.passbuilder_options_set_loop_vectorization opts false;
@@ -155,10 +155,10 @@ let rec ltype_of_ast = function
   | TypeChar        -> i8_type  context
   | TypeVoid        -> void_type context
   | TypePtr _       -> pointer_type context   (* LLVM 19: all pointers are opaque ptr *)
-  | TypeIo  t       -> ltype_of_ast t         (* io T は値型: LLVM型はTと同じ *)
+  | TypeIo  t       -> ltype_of_ast t         (* io T is a value type: LLVM type is the same as T *)
   | TypeArray (t, n) -> array_type (ltype_of_ast t) n
-  | TypeFn _        -> pointer_type context   (* 関数ポインタも opaque ptr *)
-  | TypeRefined _   -> i32_type context      (* 区間型は LLVM レベルでは i32 と同一 *)
+  | TypeFn _        -> pointer_type context   (* function pointers are also opaque ptr *)
+  | TypeRefined _   -> i32_type context      (* refined int is identical to i32 at the LLVM level *)
   | TypeNamed sname ->
       match Hashtbl.find_opt struct_lltypes sname with
       | Some llty -> llty
@@ -192,12 +192,12 @@ let rec coerce v (dst : Ast.type_expr) =
         build_trunc i64v (i32_type context) "trunc" builder
       else
         build_zext v dst_ll "zext" builder
-  | TypeIo t    -> coerce v t   (* io T は T と同じ LLVM 型: T として強制変換 *)
+  | TypeIo t    -> coerce v t   (* io T has the same LLVM type as T: coerce as T *)
   | TypeVoid    -> v
   | TypeArray _ -> v
-  | TypeFn _    -> v   (* 関数ポインタは ptr のまま変換不要 *)
-  | TypeNamed _ -> v   (* struct 型: ptr のまま変換不要 *)
-  | TypeRefined _ -> coerce v TypeInt  (* 区間型は int と同じ LLVM 変換 *)
+  | TypeFn _    -> v   (* function pointer stays as ptr; no conversion needed *)
+  | TypeNamed _ -> v   (* struct type stays as ptr; no conversion needed *)
+  | TypeRefined _ -> coerce v TypeInt  (* refined int uses the same LLVM conversion as int *)
 
 (* Widen an integer value to i32 so arithmetic stays uniform.
    Does NOT touch pointer values. *)
@@ -264,8 +264,8 @@ let resolve_ret_ast (pt : Types.program_types option) fname ty_opt =
       | Some fi -> fi.Types.ret_type
 
 (* ── Bounds check ───────────────────────────────────────────────────────── *)
-(* [T; N] 配列の境界チェック。idx >= N（符号なし比較）なら llvm.trap で停止。
-   符号なし比較により idx < 0 の負インデックスも同時に捕捉できる。 *)
+(* Bounds check for [T; N] arrays. Traps via llvm.trap when idx >= N (unsigned compare).
+   The unsigned compare also catches negative indices (idx < 0) as too-large unsigned values. *)
 let emit_bounds_check idx_v n =
   let cur_f  = block_parent (insertion_block builder) in
   let oob_bb = append_block context "oob"    cur_f in
@@ -287,12 +287,12 @@ let emit_bounds_check idx_v n =
 let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
   match e.desc with
   | IntLit i ->
-      (* 整数リテラルは値が確定しているので {i..<i+1} として扱う。
-         buf[0] や buf[7] のような定数インデックスは needs_check = false になり llvm.trap を出さない。 *)
+      (* Integer literals have a known value, so treat as {i..<i+1}.
+         Constant indices like buf[0] or buf[7] produce needs_check = false, skipping llvm.trap. *)
       (TypeRefined (i, i + 1), const_int (i32_type context) i)
 
   | StringLit s ->
-      (* ヌル終端バイト列をグローバル定数配列として配置し、先頭へのポインタを返す *)
+      (* Place the null-terminated byte sequence as a global constant array and return a pointer to its start *)
       incr str_counter;
       let name   = Printf.sprintf ".str%d" !str_counter in
       let len    = String.length s in
@@ -320,16 +320,16 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | Some (Mut (ast_ty, ptr)) ->
            (match ast_ty with
             | TypeArray (elem_ty, n) ->
-                (* 配列変数は先頭要素へのポインタにデケイ（C と同じ）*)
+                (* Array variable decays to a pointer to its first element (same as C) *)
                 let arr_ll = array_type (ltype_of_ast elem_ty) n in
                 let zero   = const_int (i32_type context) 0 in
                 let ep = build_in_bounds_gep arr_ll ptr [|zero; zero|] (name ^ "_ptr") builder in
                 (TypePtr elem_ty, ep)
             | TypeNamed _ ->
-                (* 構造体変数: alloca ポインタをそのまま返す（配列と同じ方式）*)
+                (* Struct variable: return the alloca pointer directly (same approach as arrays) *)
                 (ast_ty, ptr)
             | TypeIo inner_ty ->
-                (* io T ローカル変数: volatile load して内部型を返す *)
+                (* io T local variable: volatile load and return the inner type *)
                 let inst = build_load (ltype_of_ast inner_ty) ptr name builder in
                 set_volatile true inst;
                 let v' = match inner_ty with TypeInt | TypeChar -> to_i32 inst | _ -> inst in
@@ -349,10 +349,10 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 let ep = build_in_bounds_gep arr_ll ptr [|zero; zero|] (name ^ "_ptr") builder in
                 (TypePtr elem_ty, ep)
             | Some (TypeNamed _ as ast_ty, ptr) ->
-                (* グローバル構造体変数: グローバルポインタをそのまま返す *)
+                (* Global struct variable: return the global pointer directly *)
                 (ast_ty, ptr)
             | Some (TypeIo inner_ty, ptr) ->
-                (* io T グローバル変数: volatile load して内部型を返す *)
+                (* io T global variable: volatile load and return the inner type *)
                 let inst = build_load (ltype_of_ast inner_ty) ptr name builder in
                 set_volatile true inst;
                 let v' = match inner_ty with TypeInt | TypeChar -> to_i32 inst | _ -> inst in
@@ -365,7 +365,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 in
                 (ast_ty, v')
             | None ->
-                (* 関数名を関数ポインタ値として使う *)
+                (* Use function name as a function pointer value *)
                 match Hashtbl.find_opt functions name with
                 | Some (_, f) ->
                     let param_asts = match Hashtbl.find_opt func_param_ast_types name with
@@ -382,7 +382,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let (ty1, v1) = gen_expr locals e1 in
       (match ty1 with
        | TypePtr (TypeIo inner_ty) ->
-           (* *io T ポインタのデリファレンス: volatile load *)
+           (* Dereference of *io T pointer: volatile load *)
            let inst = build_load (ltype_of_ast inner_ty) v1 "deref" builder in
            set_volatile true inst;
            let v' = match inner_ty with
@@ -392,7 +392,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            (inner_ty, v')
        | TypePtr inner_ty ->
            let inst = build_load (ltype_of_ast inner_ty) v1 "deref" builder in
-           (* non-volatile: 通常メモリアクセス *)
+           (* non-volatile: regular memory access *)
            let v' = match inner_ty with
              | TypeInt | TypeChar -> to_i32 inst
              | _                  -> inst
@@ -408,12 +408,12 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
             | Some (Imm _) ->
                 raise (Error (Printf.sprintf "BUG: addrof immutable '%s' (should be caught by type_inf)" name))
             | None ->
-                (* グローバル変数のアドレス取得: LLVM global value はすでにポインタ *)
+                (* Global variable address: LLVM global value is already a pointer *)
                 match Hashtbl.find_opt global_vars name with
                 | Some (ast_ty, ptr) -> (TypePtr ast_ty, ptr)
                 | None -> raise (Error (Printf.sprintf "cannot take address of '%s'" name)))
        | FieldGet (base_expr, fname) ->
-           (* &expr.field — GEP でフィールドへのポインタを取得（load しない）*)
+           (* &expr.field — get a pointer to the field via GEP (no load) *)
            let (base_ty, base_v) = gen_expr locals base_expr in
            let sname = match base_ty with
              | TypeNamed s        -> s
@@ -436,7 +436,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let (ty2, v2) = gen_expr locals e2 in
       (match op with
        | Add ->
-           (* ポインタ算術: ptr + int → GEP。*io T = TypePtr(TypeIo T) も TypePtr にマッチ *)
+           (* Pointer arithmetic: ptr + int → GEP. *io T = TypePtr(TypeIo T) also matches TypePtr *)
            (match ty1 with
             | TypePtr inner ->
                 (ty1, build_gep (ltype_of_ast inner) v1 [|v2|] "ptradd" builder)
@@ -445,7 +445,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                  | TypePtr inner ->
                      (ty2, build_gep (ltype_of_ast inner) v2 [|v1|] "ptradd" builder)
                  | _ ->
-                     (* 区間伝播: {a..<b} + k → {a+k..<b+k}（型システムと対称） *)
+                     (* Range propagation: {a..<b} + k → {a+k..<b+k} (symmetric with type_inf.ml) *)
                      let sum = build_add v1 v2 "addtmp" builder in
                      let ret_ty = match ty1, e2.desc with
                        | TypeRefined (a, b), IntLit k -> TypeRefined (a + k, b + k)
@@ -455,13 +455,13 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                      in
                      (ret_ty, sum)))
        | Sub ->
-           (* ポインタ算術: ptr - int → GEP with negated index *)
+           (* Pointer arithmetic: ptr - int → GEP with negated index *)
            (match ty1 with
             | TypePtr inner ->
                 let neg = build_neg v2 "negtmp" builder in
                 (ty1, build_gep (ltype_of_ast inner) v1 [|neg|] "ptrsub" builder)
             | _ ->
-                (* 区間伝播: {a..<b} - k → {a-k..<b-k}（型システムと対称） *)
+                (* Range propagation: {a..<b} - k → {a-k..<b-k} (symmetric with type_inf.ml) *)
                 let diff = build_sub v1 v2 "subtmp" builder in
                 let ret_ty = match ty1, e2.desc with
                   | TypeRefined (a, b), IntLit k -> TypeRefined (a - k, b - k)
@@ -483,9 +483,9 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | Band -> (TypeInt, build_and  (to_i32 v1) (to_i32 v2) "andtmp" builder)
        | Shr  -> (TypeInt, build_lshr (to_i32 v1) (to_i32 v2) "shrtmp" builder)
        | Shl  -> (TypeInt, build_shl  (to_i32 v1) (to_i32 v2) "shltmp" builder)
-       (* 区間伝播: n % m where m は正の定数、かつ n が非負({lo..<_} lo>=0) → {0..<m}。
-          n が TypeInt (負になりえる) の場合は TypeInt を返す。
-          type_inf.ml と対称な条件: 片方だけ緩めると両者が食い違う。 *)
+       (* Range propagation: n % m where m is a positive constant and n is non-negative ({lo..<_} with lo>=0) → {0..<m}.
+          When n is TypeInt (possibly negative), returns TypeInt.
+          Symmetric condition with type_inf.ml: relaxing only one side causes a mismatch. *)
        | Mod  ->
            let result = build_srem (to_i32 v1) (to_i32 v2) "modtmp" builder in
            let ret_ty = match e2.desc with
@@ -506,7 +506,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let (sname, through_io) = match base_ty with
         | TypeNamed s                      -> (s, false)
         | TypePtr   (TypeNamed s)          -> (s, false)
-        | TypePtr   (TypeIo (TypeNamed s)) -> (s, true)   (* *io Struct のフィールドは volatile *)
+        | TypePtr   (TypeIo (TypeNamed s)) -> (s, true)   (* field access through *io Struct is volatile *)
         | _ -> raise (Error (Printf.sprintf
             "field access '.%s' on non-struct type" fname))
       in
@@ -518,13 +518,13 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       in
       (match field_ty with
        | TypeNamed _ ->
-           (* ネスト構造体フィールド: ポインタをそのまま返す（配列 decay と同じ方式）*)
+           (* Nested struct field: return the pointer as-is (same approach as array decay) *)
            (TypePtr field_ty, field_ptr)
        | TypeArray (elem_ty, _) ->
-           (* 配列フィールド: 先頭要素へのポインタとして返す（ローカル配列変数と同じ decay）*)
+           (* Array field: return a pointer to the first element (same decay as local array variables) *)
            (TypePtr elem_ty, field_ptr)
        | TypeIo inner_ty ->
-           (* io T フィールド: volatile load して内部型を返す *)
+           (* io T field: volatile load and return the inner type *)
            let v = build_load (ltype_of_ast inner_ty) field_ptr fname builder in
            set_volatile true v;
            let v' = match inner_ty with TypeInt | TypeChar -> to_i32 v | _ -> v in
@@ -541,13 +541,13 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
   | Index (id, idx) ->
       let (idx_ty_raw, idx_raw) = gen_expr locals idx in
       let idx_v = to_i32 idx_raw in
-      (* if-条件の Mut 絞り込み（narrowing_ctx）を優先して idx_ty を決める *)
+      (* Prioritize Mut narrowing from narrowing_ctx (set by if-condition) when determining idx_ty *)
       let idx_ty = match idx.desc with
         | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
                     | Some t -> t | None -> idx_ty_raw)
         | _ -> idx_ty_raw
       in
-      (* [T; N] 配列のロード: TypeRefined が安全性を証明する場合は境界チェックを省略 *)
+      (* Array load [T; N]: skip bounds check when TypeRefined proves safety *)
       let load_from_array elem_ty n arr_ptr =
         let needs_check = match idx_ty with
           | TypeRefined (lo, hi) -> lo < 0 || hi > n
@@ -561,7 +561,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
         let v' = match elem_ty with TypeInt | TypeChar -> to_i32 v | _ -> v in
         (elem_ty, v')
       in
-      (* ポインタ変数のロード: 境界チェックなし。ptr_v は実際のポインタ値 *)
+      (* Pointer variable load: no bounds check. ptr_v is the actual pointer value *)
       let load_through_ptr elem_ty ptr_v is_volatile =
         let ep = build_gep (ltype_of_ast elem_ty) ptr_v [|idx_v|] "idx_ptr" builder in
         let v  = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
@@ -573,7 +573,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | Some (Mut (TypeArray (elem_ty, n), ptr)) ->
            load_from_array elem_ty n ptr
        | Some (Mut (TypePtr (TypeIo elem_ty), alloca_ptr)) ->
-           (* *io T 変数: alloca からポインタ値をロードし、volatile アクセス *)
+           (* *io T variable: load pointer value from alloca, then volatile access *)
            let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
            load_through_ptr elem_ty ptr_v true
        | Some (Mut (TypePtr elem_ty, alloca_ptr)) ->
@@ -615,7 +615,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       in
       (match Hashtbl.find_opt functions fname with
        | Some (ft, callee) ->
-           (* 直接呼び出し（関数名で解決） *)
+           (* Direct call (resolved by function name) *)
            let param_lltys = Array.to_list (param_types ft) in
            let arg_vals =
              List.map2 (fun a lty ->
@@ -630,7 +630,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            in
            (ast_ret, v)
        | None ->
-           (* 間接呼び出し: ローカル/グローバルの関数ポインタ変数 *)
+           (* Indirect call: local or global function pointer variable *)
            let (fn_ast_ty, fn_ptr) =
              match Hashtbl.find_opt locals fname with
              | Some (Imm (ast_ty, v)) -> (ast_ty, v)
@@ -767,7 +767,7 @@ let gen_func ?prog_types fdef =
         let (_, val_v)      = gen_expr locals val_expr in
         let (is_volatile, coerced) = match ptr_ty with
           | TypePtr (TypeIo inner) -> (true,  coerce val_v inner)   (* *io T: volatile store *)
-          | TypePtr inner          -> (false, coerce val_v inner)   (* 通常ポインタ: non-volatile *)
+          | TypePtr inner          -> (false, coerce val_v inner)   (* regular pointer: non-volatile *)
           | _                      -> (false, val_v)
         in
         let inst = build_store coerced ptr_v builder in
@@ -776,7 +776,7 @@ let gen_func ?prog_types fdef =
     | AssignIndex (id, idx, rhs) ->
         let (idx_ty_raw, idx_raw) = gen_expr locals idx in
         let idx_v = to_i32 idx_raw in
-        (* if-条件の Mut 絞り込み（narrowing_ctx）を優先して idx_ty を決める *)
+        (* Prioritize Mut narrowing from narrowing_ctx (set by if-condition) when determining idx_ty *)
         let idx_ty = match idx.desc with
           | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
                       | Some t -> t | None -> idx_ty_raw)
@@ -910,9 +910,9 @@ let gen_func ?prog_types fdef =
         position_at_end after_bb builder
 
     | For (name, lo_expr, hi_expr, body) ->
-        (* ループカウンタは collect_lets でエントリーブロックに事前確保済み。
-           ループ変数 name は Imm バインディングとして本体に公開する（再代入不可）。
-           両端が定数リテラルのとき TypeRefined を付与 → 境界チェック省略（Step 3.4）。 *)
+        (* Loop counter is pre-allocated in the entry block by collect_lets.
+           The loop variable name is exposed to the body as an Imm binding (no reassignment).
+           When both bounds are integer literals, assigns TypeRefined → bounds check elision (Step 3.4). *)
         let (_, lo_v) = gen_expr locals lo_expr in
         let (_, hi_v) = gen_expr locals hi_expr in
         let lo_i32    = to_i32 lo_v in

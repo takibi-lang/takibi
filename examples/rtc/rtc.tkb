@@ -1,5 +1,5 @@
-// PL031 RTC の複数レジスタ読み出しと tick 計測のデモ。
-// RTCDR (offset 0): 現在時刻。RTCCR (offset 0x0C = *int[3]): bit0=EN。
+// Demo of reading multiple PL031 RTC registers and measuring elapsed ticks.
+// RTCDR (offset 0): current time. RTCCR (offset 0x0C = *int[3]): bit0=EN.
 fn uart_putc(c: char) {
     let dr: *io char = 0x09000000;
     *dr = c;
@@ -20,9 +20,9 @@ fn uart_print_uint(n: int) {
 }
 
 fn main() {
-    let base: *io int = 0x09010000; // PL031 RTC ベースアドレス
+    let base: *io int = 0x09010000; // PL031 RTC base address
 
-    let ctrl: int = *(base + 3); // RTCCR: *int として 3 番目のワード (offset 0x0C)
+    let ctrl: int = *(base + 3); // RTCCR: 3rd word as *int (offset 0x0C)
     uart_puts("rtc: ");
     if ((ctrl & 1) != 0) {
         uart_puts("ok");

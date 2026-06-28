@@ -1,5 +1,5 @@
-// このファイルはコンパイルエラーになることが期待される。
-// 戻り値型 {0..<8} を宣言した関数から i+1（型 {1..<9}）を返すと型推論が検出する。
+// This file is expected to produce a compile error.
+// Type inference detects returning i+1 (type {1..<9}) from a function declared to return {0..<8}.
 fn add_one(i: {0..<8}) -> {0..<8} {
     return i + 1;
 }

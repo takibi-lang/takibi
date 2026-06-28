@@ -1,5 +1,5 @@
-// 構造体のデモ: フィールドアクセス・代入・ポインタ渡し・swap。
-// Point (x, y) と Rect (tl, br, w, h) の 2 種類の構造体を定義。
+// Struct demo: field access, assignment, pass-by-pointer, and swap.
+// Defines two struct types: Point (x, y) and Rect (tl, br, w, h).
 struct Point {
     x: int;
     y: int;

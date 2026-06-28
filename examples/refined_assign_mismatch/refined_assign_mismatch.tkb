@@ -1,5 +1,5 @@
-// このファイルはコンパイルエラーになることが期待される。
-// {0..<8} と宣言した変数に x+1（型 {1..<9}）を代入すると型推論が検出する。
+// This file is expected to produce a compile error.
+// Type inference detects assigning x+1 (type {1..<9}) to a variable declared as {0..<8}.
 fn main() -> int {
     let mut x: {0..<8} = 0;
     x = x + 1;

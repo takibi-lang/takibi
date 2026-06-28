@@ -70,7 +70,7 @@ type toplevel =
   | FuncDef of func
   | LetDef of ident * type_expr option * expr option
   | ExternFuncDef of ident * (ident * type_expr option) list * type_expr option
-  (* extern fn name(params) -> ret; — body は外部アセンブリが提供する *)
+  (* extern fn name(params) -> ret; — body is provided by external assembly *)
   | StructDef of string * (string * type_expr) list
   (* struct Name { field: type; ... } — named struct type definition *)
 [@@deriving show]

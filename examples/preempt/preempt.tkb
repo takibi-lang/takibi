@@ -1,7 +1,7 @@
-// プリエンプティブスケジューラのデモ。
-// ARM Generic Timer (PPI #30) の tick で irq_dispatch が強制コンテキストスイッチを行う。
-// irq_dispatch は frame_sp を受け取り次タスクの sp を返す; startup.S の irq_entry がスタックを切り替える。
-// extern fn でシステムレジスタ操作 (cntfrq/cntp_tval/cntp_ctl) をアセンブリに委譲。
+// Preemptive scheduler demo.
+// irq_dispatch performs a forced context switch on each ARM Generic Timer (PPI #30) tick.
+// irq_dispatch receives frame_sp and returns the next task's sp; irq_entry in startup.S switches the stack.
+// System register operations (cntfrq/cntp_tval/cntp_ctl) are delegated to assembly via extern fn.
 struct GicRegs {
     distr_ctlr: *io int;
     distr_isen0: *io int;
@@ -75,7 +75,7 @@ fn gic_init() {
 
 fn timer_init() {
     gic_init();
-    set_cntp_tval(read_cntfrq() >> 6); // cntfrq/64 ≈ 15ms 間隔でタイマを設定
+    set_cntp_tval(read_cntfrq() >> 6); // cntfrq/64 ≈ 15ms interval timer
     enable_cntp();
 }
 

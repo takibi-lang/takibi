@@ -1,8 +1,9 @@
     .text
     .align 2
 
-/* ── ARM Generic Timer システムレジスタスタブ ──────────────────────────────────
-   mrs/msr 命令は takibi から直接使えないため、各1命令の薄いラッパーを用意する。  */
+/* ── ARM Generic Timer system register stubs ──────────────────────────────────
+   mrs/msr instructions cannot be used directly from takibi,
+   so a one-instruction thin wrapper is provided for each.  */
 
     .global read_cntfrq
     .type   read_cntfrq, %function
@@ -30,7 +31,7 @@ disable_cntp:           /* fn disable_cntp() */
     msr     cntp_ctl_el0, xzr
     ret
 
-/* task_exit_stub: タスク関数が誤って return したときの安全ネット */
+/* task_exit_stub: safety net for when a task function mistakenly returns */
     .global task_exit_stub
     .type   task_exit_stub, %function
 task_exit_stub:

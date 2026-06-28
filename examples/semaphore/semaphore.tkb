@@ -1,7 +1,7 @@
-// セマフォ (ldaxr/stlxr) を使ったアトミック操作デモ。
-// task_a と task_b が各3回 mutex で保護しながら shared.count をインクリメント。
-// 最終値 6 になることで競合なく更新できたことを確認。
-// sem_wait/sem_post の実装は semaphore_asm.S (ldaxr+stxr / ldxr+stlxr)。
+// Atomic operation demo using semaphores (ldaxr/stlxr).
+// task_a and task_b each increment shared.count 3 times under mutex protection.
+// A final value of 6 confirms that all updates completed without race conditions.
+// sem_wait/sem_post are implemented in semaphore_asm.S (ldaxr+stxr / ldxr+stlxr).
 struct GicRegs {
     distr_ctlr:  *io int;
     distr_isen0: *io int;

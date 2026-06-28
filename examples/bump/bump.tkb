@@ -1,5 +1,5 @@
-// 簡易バンプアロケータのデモ。BumpAlloc 構造体に 256 バイトのヒープを内包。
-// bump_alloc(n) は heap + offset を返してオフセットを n 進める。
+// Simple bump allocator demo. BumpAlloc struct contains a 256-byte heap.
+// bump_alloc(n) returns heap + offset and advances the offset by n.
 struct BumpAlloc {
     heap:   [char; 256];
     offset: int;

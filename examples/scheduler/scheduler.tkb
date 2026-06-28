@@ -1,6 +1,6 @@
-// ラウンドロビン協調スケジューラのデモ。
-// task_a と task_b が交互に実行され、task_finish() で完了を通知する。
-// 各タスクは 3 ステップ実行したら task_finish を呼んで sched.active を減らす。
+// Round-robin cooperative scheduler demo.
+// task_a and task_b run alternately; task_finish() signals completion.
+// Each task runs 3 steps and then calls task_finish to decrement sched.active.
 struct Scheduler {
     tasks:      [fn() -> void; 8];
     task_count: int;

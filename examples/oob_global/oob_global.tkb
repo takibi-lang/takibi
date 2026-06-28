@@ -1,5 +1,5 @@
-// このファイルはコンパイルエラーになることが期待される。
-// グローバル配列への定数 OOB 読み出しを検出する。
+// This file is expected to produce a compile error.
+// Detects a constant OOB read from a global array.
 let buf: [char; 8];
 fn main() {
     let c = buf[8];

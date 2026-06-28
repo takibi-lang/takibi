@@ -1,4 +1,4 @@
-// djb2 XOR ハッシュ関数のデモ。hash = ((hash << 5) + hash) ^ c。
+// Demo of the djb2 XOR hash function: hash = ((hash << 5) + hash) ^ c.
 fn uart_putc(c: char) {
     let dr: *io char = 0x09000000; // PL011 UART DR
     *dr = c;

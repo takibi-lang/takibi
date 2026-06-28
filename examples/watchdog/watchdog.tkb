@@ -1,9 +1,9 @@
-// タスクウォッチドッグのデモ。
-// タイマー tick ごとに各タスクの最終 kick 時刻をチェックし、
-// deadline を超えたタスクを "ハング" として検出する。
+// Task watchdog demo.
+// On each timer tick, checks the last kick time of each task and
+// detects any task that has exceeded its deadline as "hung".
 //
-// task_healthy: 定期的に wdt_kick(1) を呼び続ける → タイムアウトしない
-// task_hung:    3回 wdt_kick(2) した後、意図的に kick を止める → タイムアウト検出
+// task_healthy: keeps calling wdt_kick(1) periodically → never times out
+// task_hung:    calls wdt_kick(2) 3 times, then deliberately stops → timeout detected
 
 struct GicRegs {
     distr_ctlr:  *io int;
@@ -20,10 +20,10 @@ struct SchedState {
     tcb_sp:       [int; 3];
 }
 
-// tick:      タイマー割り込みごとにインクリメントする壁時計
-// last_kick: タスクごとの最終 kick tick（kick しないと古いまま残る）
-// deadline:  タスクごとの許容 tick 数（0 = 監視しない）
-// done:      main がタイムアウト検出後に 1 をセット
+// tick:      wall-clock incremented on each timer interrupt
+// last_kick: last kick tick per task (stays stale if the task stops kicking)
+// deadline:  allowed tick count per task (0 = not monitored)
+// done:      set to 1 by main after a timeout is detected
 struct WdtState {
     tick:      int;
     last_kick: [int; 3];
@@ -59,20 +59,20 @@ extern fn task_exit_stub();
 let gic: GicRegs = {0x08000000, 0x08000100, 0x08010000, 0x08010004, 0x0801000C, 0x08010010};
 let sched: SchedState = {3, 0, {0, 0, 0}};
 
-// deadline[0]=0 (main は監視しない)
-// deadline[1]=20 (task_healthy は継続して kick するので問題なし)
-// deadline[2]=12 (task_hung は kick を止めるので約 12 tick でタイムアウト)
+// deadline[0]=0  (main is not monitored)
+// deadline[1]=20 (task_healthy keeps kicking, so no timeout)
+// deadline[2]=12 (task_hung stops kicking, so it times out at ~12 ticks)
 let wdt: WdtState = {0, {0, 0, 0}, {0, 20, 12}, 0};
 
-let hung_fired: io int = 0; // タイムアウト検出フラグ
-let hung_task:  io int = 0; // タイムアウトしたタスク ID（hung_fired が 1 のときのみ有効）
+let hung_fired: io int = 0; // timeout detection flag
+let hung_task:  io int = 0; // ID of the timed-out task (valid only when hung_fired == 1)
 
 fn wdt_kick(task_id: int) {
     let lk: *int = wdt.last_kick;
     lk[task_id] = wdt.tick;
 }
 
-// タイマー割り込みから呼ばれ、tick を進めて全監視タスクの生存を確認する
+// Called from the timer interrupt; advances tick and checks liveness of all monitored tasks
 fn wdt_check() {
     wdt.tick = wdt.tick + 1;
     let lk: *int = wdt.last_kick;
@@ -80,7 +80,7 @@ fn wdt_check() {
     for i in 0..<3 {
         if (dl[i] > 0) {
             if (wdt.tick - lk[i] > dl[i]) {
-                hung_task  = i; // どのタスクがタイムアウトしたかを記録
+                hung_task  = i; // record which task timed out
                 hung_fired = 1;
             }
         }
@@ -103,14 +103,14 @@ fn setup_task_stack(s: *char, f: fn() -> void) -> int {
 
 fn gic_init() {
     *(gic.distr_ctlr)  = 1;
-    *(gic.distr_isen0) = 1 << 30; // PPI #30 (Generic Timer) を有効化
+    *(gic.distr_isen0) = 1 << 30; // enable PPI #30 (Generic Timer)
     *(gic.cpu_pmr)     = 0xff;
     *(gic.cpu_ctlr)    = 1;
 }
 
 fn timer_init() {
     gic_init();
-    set_cntp_tval(read_cntfrq() >> 6); // cntfrq/64 ≈ 15ms 間隔
+    set_cntp_tval(read_cntfrq() >> 6); // cntfrq/64 ≈ 15ms interval
     enable_cntp();
 }
 
@@ -118,7 +118,7 @@ fn irq_dispatch(frame_sp: int) -> int {
     let id: int = *gic.cpu_iar;
     if (id == 30) {
         set_cntp_tval(read_cntfrq() >> 6);
-        wdt_check(); // ウォッチドッグ確認
+        wdt_check(); // check watchdog
         let sp: *int = sched.tcb_sp;
         sp[sched.current_task] = frame_sp;
         sched.current_task = (sched.current_task + 1) % sched.task_count;
@@ -130,7 +130,7 @@ fn irq_dispatch(frame_sp: int) -> int {
     return frame_sp;
 }
 
-// wdt.done が立つまで定期的に kick を続ける — タイムアウトしないタスク
+// Keep kicking periodically until wdt.done is set — this task never times out
 fn task_healthy() {
     let pd: *io int = &wdt.done;
     while (*pd == 0) {
@@ -138,12 +138,12 @@ fn task_healthy() {
     }
 }
 
-// 3 回 kick した後、意図的に kick を止めてハング状態になる
+// Kicks 3 times, then deliberately stops kicking to enter a hung state
 fn task_hung() {
     for i in 0..<3 {
         wdt_kick(2);
     }
-    // ここで kick を止める → ウォッチドッグが deadline 超過を検出する
+    // Kicking stops here → watchdog detects a deadline overrun
     let pd: *io int = &wdt.done;
     while (*pd == 0) {}
 }

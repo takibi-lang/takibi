@@ -16,7 +16,7 @@ let rec show_type = function
   | Ast.TypeChar        -> "char"
   | Ast.TypeVoid        -> "void"
   | Ast.TypePtr t       -> "*" ^ show_type t
-  | Ast.TypeIo  t       -> "io " ^ show_type t   (* TypePtr(TypeIo t) → "*io T" 自動合成 *)
+  | Ast.TypeIo  t       -> "io " ^ show_type t   (* TypePtr(TypeIo t) → "*io T" synthesized automatically *)
   | Ast.TypeArray (t,n) -> Printf.sprintf "[%s; %d]" (show_type t) n
   | Ast.TypeFn (ps, r)  ->
       Printf.sprintf "fn(%s) -> %s"
@@ -363,7 +363,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── 単項マイナス ───────────────────────────────────────────── *)
+  (* ── Unary minus ───────────────────────────────────────────── *)
 
   Alcotest.test_case "unary minus desugars to Sub from zero" `Quick (fun () ->
     match parse "fn f() int { return -42; }" with
@@ -376,7 +376,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── as キャスト ─────────────────────────────────────────────── *)
+  (* ── as cast ─────────────────────────────────────────────── *)
 
   Alcotest.test_case "as cast to char" `Quick (fun () ->
     match parse "fn f(n: int) char { return n as char; }" with
@@ -408,7 +408,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── ビット演算 ──────────────────────────────────────────────── *)
+  (* ── Bitwise operations ──────────────────────────────────────────────── *)
 
   Alcotest.test_case "bitwise AND expression" `Quick (fun () ->
     match parse "fn f(n: int) int { return n & 15; }" with
@@ -548,7 +548,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── 配列 ────────────────────────────────────────────────────── *)
+  (* ── Arrays ────────────────────────────────────────────────────── *)
 
   Alcotest.test_case "array type annotation parses" `Quick (fun () ->
     match parse "fn f() { let mut buf: [char; 8]; }" with
@@ -579,7 +579,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── 関数ポインタ型 ──────────────────────────────────────────── *)
+  (* ── Function pointer types ──────────────────────────────────────────── *)
 
   Alcotest.test_case "fn pointer type with no args parses" `Quick (fun () ->
     match parse "fn f(h: fn() -> void) {}" with
@@ -608,7 +608,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── 構造体構文 ──────────────────────────────────────────────── *)
+  (* ── Struct syntax ──────────────────────────────────────────────── *)
 
   Alcotest.test_case "struct definition parses" `Quick (fun () ->
     match parse "struct Point { x: int; y: int; }" with
@@ -674,7 +674,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "expected ExternFuncDef(uart_getc, [], Some char)"
   );
 
-  (* ── 文字列リテラル ──────────────────────────────────────────── *)
+  (* ── String literals ──────────────────────────────────────────── *)
 
   Alcotest.test_case "string literal parses to StringLit" `Quick (fun () ->
     match parse "fn f() { let s = \"hello\"; }" with
@@ -685,7 +685,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── -> 戻り値型構文 ─────────────────────────────────────────── *)
+  (* ── -> return type syntax ─────────────────────────────────────────── *)
 
   Alcotest.test_case "arrow return type syntax -> int parses" `Quick (fun () ->
     match parse "fn f() -> int { return 0; }" with
@@ -693,7 +693,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "expected ret_type = Some TypeInt"
   );
 
-  (* ── 構造体リテラル ──────────────────────────────────────────── *)
+  (* ── Struct literals ──────────────────────────────────────────── *)
 
   Alcotest.test_case "struct literal { e, e } parses to StructLit" `Quick (fun () ->
     match parse "fn f() { let mut p: P = {1, 2}; }" with
@@ -705,7 +705,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── 複合ポインタ代入 ────────────────────────────────────────── *)
+  (* ── Compound pointer assignment ────────────────────────────────────────── *)
 
   Alcotest.test_case "complex pointer assign *(expr) = v parses to AssignDeref" `Quick (fun () ->
     match parse "fn f(arr: *int, i: int) { *(arr + i) = 42; }" with
@@ -718,7 +718,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── 構造体フィールドのアドレス取得 ─────────────────────────── *)
+  (* ── Taking address of struct fields ─────────────────────────── *)
 
   Alcotest.test_case "addrof struct field parses to AddrOf(FieldGet)" `Quick (fun () ->
     match parse "fn f() { let q = &p.x; }" with
@@ -730,7 +730,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── 残りエスケープ文字 ──────────────────────────────────────── *)
+  (* ── Remaining escape characters ──────────────────────────────────────── *)
 
   Alcotest.test_case "tab escape char literal '\\t'" `Quick (fun () ->
     match parse "fn f() { let t = '\\t'; }" with
@@ -750,7 +750,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── ブロック文 ──────────────────────────────────────────────── *)
+  (* ── Block statements ──────────────────────────────────────────────── *)
 
   Alcotest.test_case "block statement parses to Block" `Quick (fun () ->
     match parse "fn f() { { let x = 1; } }" with
@@ -761,7 +761,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  (* ── コメント ────────────────────────────────────────────────── *)
+  (* ── Comments ────────────────────────────────────────────────── *)
 
   Alcotest.test_case "line comment // is ignored" `Quick (fun () ->
     match parse "// this is a comment\nfn f() int { return 1; }" with
@@ -802,7 +802,7 @@ let parser_tests = [
 
 let infer_tests = [
 
-  (* ── 成功ケース ─────────────────────────────────────────────── *)
+  (* ── Success cases ─────────────────────────────────────────────── *)
 
   Alcotest.test_case "fully annotated function passes" `Quick
     (expect_ok "fn add(a: int, b: int) int { return a; }");
@@ -868,7 +868,7 @@ let infer_tests = [
     (expect_ok "fn abs(x: int) int {
                   if (x > 0) { return x; } else { return 0; } }");
 
-  (* ── 不変性チェック ─────────────────────────────────────────── *)
+  (* ── Immutability checks ─────────────────────────────────────────── *)
 
   Alcotest.test_case "assign to immutable variable is a type error" `Quick
     (expect_type_error "cannot assign to immutable"
@@ -888,7 +888,7 @@ let infer_tests = [
     (expect_type_error "must have an initializer"
        "fn f() { let x: int; }");
 
-  (* ── エラーケース ───────────────────────────────────────────── *)
+  (* ── Error cases ───────────────────────────────────────────── *)
 
   Alcotest.test_case "undefined variable" `Quick
     (expect_type_error "Unbound variable"
@@ -912,7 +912,7 @@ let infer_tests = [
     (expect_type_error "cannot unify"
        "fn f(a: int, b: char) int { return a + b; }");
 
-  (* ── ポインタ型推論 ──────────────────────────────────────── *)
+  (* ── Pointer type inference ──────────────────────────────────────── *)
 
   Alcotest.test_case "local pointer annotation type-checks" `Quick
     (expect_ok "fn f() { let p: *int = 0x09000000; *p = 1; }");
@@ -931,7 +931,7 @@ let infer_tests = [
       (Types.StringMap.find "p" fi.Types.local_types)
   );
 
-  (* ── io 修飾型の型推論 ──────────────────────────────────────────── *)
+  (* ── Type inference for io-qualified types ──────────────────────────────────────────── *)
 
   Alcotest.test_case "deref *io int param yields int" `Quick (fun () ->
     let pt = infer "fn f(p: *io int) int { return *p; }" in
@@ -963,12 +963,12 @@ let infer_tests = [
   Alcotest.test_case "write through immutable pointer variable is allowed" `Quick
     (expect_ok "fn f() { let p: *int = 0x09000000; *p = 1; }");
 
-  (* ── 単項マイナス ───────────────────────────────────────────── *)
+  (* ── Unary minus ───────────────────────────────────────────── *)
 
   Alcotest.test_case "unary minus type-checks" `Quick
     (expect_ok "fn f(n: int) int { return -n; }");
 
-  (* ── as キャスト ─────────────────────────────────────────────── *)
+  (* ── as cast ─────────────────────────────────────────────── *)
 
   Alcotest.test_case "as cast int to char passes" `Quick
     (expect_ok "fn f(n: int) char { return n as char; }");
@@ -988,7 +988,7 @@ let infer_tests = [
   Alcotest.test_case "as cast pointer to pointer passes" `Quick
     (expect_ok "fn f(p: *char) int { let q: *int = p as *int; return 0; }");
 
-  (* ── ビット演算 ──────────────────────────────────────────────── *)
+  (* ── Bitwise operations ──────────────────────────────────────────────── *)
 
   Alcotest.test_case "bitwise AND type-checks" `Quick
     (expect_ok "fn f(n: int) int { return n & 15; }");
@@ -1007,7 +1007,7 @@ let infer_tests = [
     (expect_type_error "cannot unify"
        "fn f(n: int, p: *int) int { return n ^ p; }");
 
-  (* ── 配列 ────────────────────────────────────────────────────── *)
+  (* ── Arrays ────────────────────────────────────────────────────── *)
 
   Alcotest.test_case "array declaration type-checks" `Quick
     (expect_ok "fn f() { let mut buf: [char; 8]; }");
@@ -1039,7 +1039,7 @@ let infer_tests = [
     (expect_ok "fn push(tail: *int) {}
                 fn f() { let mut t: int = 0; push(&t); }");
 
-  (* ── 関数ポインタ型 ──────────────────────────────────────────── *)
+  (* ── Function pointer types ──────────────────────────────────────────── *)
 
   Alcotest.test_case "fn pointer param can be called indirectly" `Quick
     (expect_ok "fn foo() {}
@@ -1058,7 +1058,7 @@ let infer_tests = [
        "fn foo(x: int) {}
         fn f(h: fn() -> void) { h = foo; }");
 
-  (* ── 構造体 ────────────────────────────────────────────────────── *)
+  (* ── Structs ────────────────────────────────────────────────────── *)
 
   Alcotest.test_case "struct field access type-checks" `Quick
     (expect_ok "struct Point { x: int; y: int; }
@@ -1108,7 +1108,7 @@ let infer_tests = [
     (expect_ok "extern fn uart_getc() -> char;
                 fn f() char { return uart_getc(); }");
 
-  (* ── 文字列リテラル ──────────────────────────────────────────── *)
+  (* ── String literals ──────────────────────────────────────────── *)
 
   Alcotest.test_case "string literal infers as *char" `Quick (fun () ->
     let pt = infer "fn f() { let s = \"hello\"; }" in
@@ -1117,7 +1117,7 @@ let infer_tests = [
       (Types.StringMap.find "s" fi.Types.local_types)
   );
 
-  (* ── 構造体リテラル ──────────────────────────────────────────── *)
+  (* ── Struct literals ──────────────────────────────────────────── *)
 
   Alcotest.test_case "struct literal initializer type-checks" `Quick
     (expect_ok "struct Point { x: int; y: int; }
@@ -1136,7 +1136,7 @@ let infer_tests = [
        "struct S { x: int; }
         fn f(p: *int) { let mut s: S = {p}; }");
 
-  (* ── int + ptr 可換ポインタ算術 ─────────────────────────────── *)
+  (* ── Commutative pointer arithmetic: int + ptr ─────────────────────────────── *)
 
   Alcotest.test_case "int + ptr commutative pointer arithmetic type-checks" `Quick
     (expect_ok "fn f(p: *char) *char { return 1 + p; }");
@@ -1151,18 +1151,18 @@ let infer_tests = [
       (Types.StringMap.find "q" fi.Types.local_types)
   );
 
-  (* ── ポインタレシーバのフィールド代入 ───────────────────────── *)
+  (* ── Field assignment through pointer receiver ───────────────────────── *)
 
   Alcotest.test_case "field assign via pointer receiver type-checks" `Quick
     (expect_ok "struct Point { x: int; y: int; }
                 fn f(p: *Point) { p.x = 1; p.y = 2; }");
 
-  (* ── let mut ローカル変数（初期化なし） ─────────────────────── *)
+  (* ── let mut local variable (uninitialized) ─────────────────────── *)
 
   Alcotest.test_case "let mut local without initializer type-checks" `Quick
     (expect_ok "fn f() { let mut x: int; x = 0; }");
 
-  (* ── 左シフト・ビット OR ─────────────────────────────────────── *)
+  (* ── Left shift and bitwise OR ─────────────────────────────────────── *)
 
   Alcotest.test_case "left shift Shl type-checks" `Quick
     (expect_ok "fn f(n: int) int { return n << 3; }");
@@ -1170,7 +1170,7 @@ let infer_tests = [
   Alcotest.test_case "bitwise OR Bor type-checks" `Quick
     (expect_ok "fn f(a: int, b: int) int { return a | b; }");
 
-  (* ── 定数インデックスのコンパイル時境界チェック ─────────────── *)
+  (* ── Compile-time bounds check for constant indices ─────────────── *)
 
   Alcotest.test_case "constant in-bounds read type-checks" `Quick
     (expect_ok "fn f() int { let mut arr: [int; 4]; return arr[3]; }");
@@ -1201,7 +1201,7 @@ let infer_tests = [
     (expect_type_error "out of bounds"
        "let buf: [char; 8]; fn f() char { return buf[8]; }");
 
-  (* ── char 配列の境界チェック ─────────────────────────────────── *)
+  (* ── Bounds check for char arrays ─────────────────────────────────── *)
 
   Alcotest.test_case "constant OOB read on char array is a compile error" `Quick
     (expect_type_error "out of bounds"
@@ -1211,7 +1211,7 @@ let infer_tests = [
     (expect_type_error "out of bounds"
        "fn f() { let mut arr: [char; 4]; arr[4] = 'A'; }");
 
-  (* ── サイズ 1 配列の境界チェック ─────────────────────────────── *)
+  (* ── Bounds check for size-1 arrays ─────────────────────────────── *)
 
   Alcotest.test_case "size-1 array: index 0 is in-bounds" `Quick
     (expect_ok "fn f() int { let mut arr: [int; 1]; return arr[0]; }");
@@ -1220,13 +1220,13 @@ let infer_tests = [
     (expect_type_error "out of bounds"
        "fn f() int { let mut arr: [int; 1]; return arr[1]; }");
 
-  (* ── グローバル配列への書き込み ──────────────────────────────── *)
+  (* ── Write to global array ──────────────────────────────── *)
 
   Alcotest.test_case "constant OOB write on global int array is a compile error" `Quick
     (expect_type_error "out of bounds"
        "let buf: [int; 4]; fn f() { buf[4] = 0; }");
 
-  (* ── 式の中に現れる OOB ───────────────────────────────────────── *)
+  (* ── OOB in expression context ───────────────────────────────────────── *)
 
   Alcotest.test_case "constant OOB in function call argument is a compile error" `Quick
     (expect_type_error "out of bounds"
@@ -1236,13 +1236,13 @@ let infer_tests = [
     (expect_type_error "out of bounds"
        "fn f() int { let mut arr: [int; 4]; return arr[4] + 1; }");
 
-  (* ── エラーメッセージの形式確認 ─────────────────────────────── *)
+  (* ── Verify error message format ─────────────────────────────── *)
 
   Alcotest.test_case "OOB error message includes index and array size" `Quick
     (expect_type_error "index 5 is out of bounds for array of size 4"
        "fn f() int { let mut arr: [int; 4]; return arr[5]; }");
 
-  (* ── TypeRefined 構文（Step 3.1 / 3.2）─────────────────────── *)
+  (* ── TypeRefined syntax (Step 3.1 / 3.2) ─────────────────────── *)
 
   Alcotest.test_case "TypeRefined parses as param annotation" `Quick (fun () ->
     let pt = infer "fn f(i: {0..<8}) int { return i; }" in
@@ -1267,7 +1267,7 @@ let infer_tests = [
   Alcotest.test_case "TypeRefined can be used as array index" `Quick
     (expect_ok "fn f(i: {0..<8}, p: *char) { p[i] = 'A'; }");
 
-  (* ── Step 3.3c: 区間伝播 ──────────────────────────────────── *)
+  (* ── Step 3.3c: Range propagation ──────────────────────────────────── *)
 
   Alcotest.test_case "Add propagates TRefinedInt: {0..<7}+1 is {1..<8}" `Quick (fun () ->
     let pt = infer "fn f(i: {0..<7}) -> {1..<8} { return i + 1; }" in
@@ -1297,10 +1297,10 @@ let infer_tests = [
     (expect_type_error "range mismatch"
       "fn f(i: {0..<8}) -> {0..<8} { return i + 1; }");
 
-  (* ── Step 3.3c: % 区間伝播の soundness 条件 ──────────────────────────── *)
-  (* 左辺が int（負になりえる）の場合は {0..<m} を返さない。
-     LLVM の srem は被除数が負なら負の余りを返すため unsound になるから。
-     例: (-5) % 8 = -5 (not 3) — 非負保証なしに {0..<8} を返すのは誤り。 *)
+  (* ── Step 3.3c: soundness condition for % range propagation ──────────────────────────── *)
+  (* When the left operand is int (possibly negative), do not return {0..<m}.
+     LLVM's srem returns a negative remainder when the dividend is negative, making this unsound.
+     Example: (-5) % 8 = -5 (not 3) — returning {0..<8} without a non-negative guarantee is wrong. *)
 
   Alcotest.test_case "int%m stays TInt — negative left operand possible" `Quick
     (expect_type_error "unproven int"
@@ -1317,7 +1317,7 @@ let infer_tests = [
       "let buf: [char; 8]; \
        fn f(i: {0..<8}) { buf[i % 8] = 'X'; }");
 
-  (* ── Step 3.4: 境界チェック省略（グローバル配列 + TypeRefined インデックス）── *)
+  (* ── Step 3.4: Bounds check elision (global array + TypeRefined index) ── *)
 
   Alcotest.test_case "refined index on global array compiles" `Quick
     (expect_ok
@@ -1338,7 +1338,7 @@ let infer_tests = [
       "let buf: [char; 8]; \
        fn f(i: {0..<8}) { buf[i+1] = 'Z'; }");
 
-  (* ── Step 3.5: if-condition による型絞り込み ─────────────────────────────── *)
+  (* ── Step 3.5: Type narrowing via if-condition ─────────────────────────────── *)
 
   Alcotest.test_case "if (v>=0 && v<8) narrows v to {0..<8}" `Quick
     (expect_ok

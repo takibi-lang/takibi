@@ -1,5 +1,5 @@
-// このファイルはコンパイルエラーになることが期待される。
-// {0..<8} を引数に取る関数に {0..<9} の値を渡すと型推論が検出する。
+// This file is expected to produce a compile error.
+// Type inference detects passing a {0..<9} value to a function that expects {0..<8}.
 fn accept(i: {0..<8}) -> int {
     return i;
 }

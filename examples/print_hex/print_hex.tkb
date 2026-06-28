@@ -1,4 +1,4 @@
-// 32ビット整数の16進表示デモ。>> と & でニブル(4ビット)を取り出す。
+// Demo of hex display for 32-bit integers. Extracts nibbles (4 bits) using >> and &.
 fn uart_putc(c: char) {
     let dr: *io char = 0x09000000; // PL011 UART DR
     *dr = c;
@@ -23,7 +23,7 @@ fn uart_print_hex(n: int) {
     uart_puts("0x");
     let mut i = 7;
     while (i >= 0) {
-        // 上位ニブルから順に取り出す
+        // Extract nibbles from most significant to least significant
         uart_print_hex_digit((n >> (i * 4)) & 15);
         i = i - 1;
     }

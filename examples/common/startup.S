@@ -13,9 +13,10 @@ _start:
     isb
 
     /* Enable IRQ and FIQ (clear DAIF.I and DAIF.F).
-       GICv2 デフォルト（GICC_CTLR.FIQEn=0）では Group0 SPI は IRQ として届く（0x280）。
-       FIQEn=1 にした場合に備えて FIQ も有効化しておく。GIC 未初期化時は全割り込み
-       無効なので既存例題への影響はない。割り込みを使うプログラムが GIC を初期化する。 */
+       With GICv2 defaults (GICC_CTLR.FIQEn=0), Group0 SPIs arrive as IRQ (0x280).
+       FIQ is also enabled here in case FIQEn=1 is used. When the GIC is not initialized,
+       all interrupts are disabled, so existing examples are unaffected.
+       Programs using interrupts must initialize the GIC themselves. */
     msr     DAIFClr, #0x3
     isb
 
@@ -51,14 +52,14 @@ _start:
 
 /* ── IRQ helpers callable from takibi ──────────────────────────────────────── */
 
-/* enable_irq(): DAIF.I ビットをクリアして IRQ を有効にする */
+/* enable_irq(): clear DAIF.I bit to enable IRQ */
     .global enable_irq
 enable_irq:
     msr     DAIFClr, #0x2
     isb
     ret
 
-/* disable_irq(): DAIF.I ビットをセットして IRQ を無効にする */
+/* disable_irq(): set DAIF.I bit to disable IRQ */
     .global disable_irq
 disable_irq:
     msr     DAIFSet, #0x2
@@ -66,13 +67,13 @@ disable_irq:
     ret
 
 /* ── Default (no-op) irq_dispatch ──────────────────────────────────────────── */
-/* 呼び出し規約: fn irq_dispatch(frame_sp: int) -> int
-   x0 = 現タスクのフレーム SP（irq_entry が確保した 272 バイトフレームの先頭）
-   戻り値 x0 = 次タスクのフレーム SP（コンテキストスイッチなし時は同じ値を返す）
-   takibi プログラムが irq_dispatch を定義した場合、そちらが優先される（強いシンボル）*/
+/* Calling convention: fn irq_dispatch(frame_sp: int) -> int
+   x0 = frame SP of the current task (start of the 272-byte frame allocated by irq_entry)
+   return x0 = frame SP of the next task (return the same value when no context switch occurs)
+   If the takibi program defines irq_dispatch, that definition takes priority (strong symbol) */
     .weak   irq_dispatch
 irq_dispatch:
-    ret     /* x0 unchanged = 同じフレームに戻る */
+    ret     /* x0 unchanged = return to the same frame */
 
     .section .rodata
     .align  3
@@ -80,12 +81,12 @@ exit_params:
     .quad   0x20026    /* ADP_Stopped_ApplicationExit */
     .quad   0          /* exit code: 0               */
 
-/* ── Exception vector table (2KB アライン必須) ─────────────────────────────── */
+/* ── Exception vector table (must be 2KB aligned) ─────────────────────────────── */
     .section .text.vectors
-    .align  11         /* 2^11 = 2048 バイトアライン */
+    .align  11         /* 2^11 = 2048 byte alignment */
     .global exception_vectors
 exception_vectors:
-    /* EL1t (SP_EL0 使用時) */
+    /* EL1t (using SP_EL0) */
     b       .                   /* 0x000: Synchronous */
     .align  7
     b       irq_entry           /* 0x080: IRQ         */
@@ -93,11 +94,11 @@ exception_vectors:
     b       irq_entry           /* 0x100: FIQ (Group0 with FIQEn=1) */
     .align  7
     b       .                   /* 0x180: SError      */
-    /* EL1h (SP_EL1 使用時: reset 後のデフォルト) */
+    /* EL1h (using SP_EL1: default after reset) */
     .align  7
     b       .                   /* 0x200: Synchronous */
     .align  7
-    b       irq_entry           /* 0x280: IRQ  ← 通常はここに来る */
+    b       irq_entry           /* 0x280: IRQ  ← normally arrives here */
     .align  7
     b       irq_entry           /* 0x300: FIQ         */
     .align  7
@@ -121,7 +122,7 @@ exception_vectors:
     .align  7
     b       .                   /* 0x780: SError      */
 
-/* ── IRQ エントリ: 全汎用レジスタ + ELR/SPSR を保存して irq_dispatch を呼ぶ ── */
+/* ── IRQ entry: save all general-purpose registers + ELR/SPSR, then call irq_dispatch ── */
 irq_entry:
     sub     sp,  sp,  #272
     stp     x0,  x1,  [sp, #0]
@@ -144,9 +145,9 @@ irq_entry:
     mrs     x1,  spsr_el1
     stp     x0,  x1,  [sp, #256]
 
-    mov     x0, sp          /* 引数: 現フレームの SP */
-    bl      irq_dispatch    /* 戻り値: 次フレームの SP（変わらなければ同値） */
-    mov     sp, x0          /* SP を次タスクのフレームに切り替え */
+    mov     x0, sp          /* argument: SP of the current frame */
+    bl      irq_dispatch    /* return value: SP of the next frame (same if no context switch) */
+    mov     sp, x0          /* switch SP to the next task's frame */
 
     ldp     x0,  x1,  [sp, #256]
     msr     elr_el1,  x0

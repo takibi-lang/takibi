@@ -1,4 +1,4 @@
-// FizzBuzz: % 剰余演算と if/else if チェーンのデモ。1〜20 を出力。
+// FizzBuzz: demo of % modulo and if/else if chain. Prints 1 to 20.
 fn uart_putc(c: char) {
     let dr: *io char = 0x09000000; // PL011 UART DR
     *dr = c;

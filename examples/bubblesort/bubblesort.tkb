@@ -1,5 +1,5 @@
-// バブルソートのデモ。IntSlice 構造体でデータと長さをまとめてポインタ渡し。
-// arr[i]=v と arr[i] でポインタ経由の配列読み書きを示す。
+// Bubble sort demo. IntSlice struct bundles data and length for pass-by-pointer.
+// Demonstrates array read/write through a pointer using arr[i]=v and arr[i].
 struct IntSlice {
     data: *int;
     len:  int;
