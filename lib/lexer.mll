@@ -30,6 +30,7 @@ rule read = parse
   | ',' { COMMA }
   | ';' { SEMI }
   | '=' { ASSIGN }
+  | "&&" { DAMP }   (* 論理 AND。'&' より先にマッチさせる *)
   | '&' { AMP }
 
   | '+' { PLUS }

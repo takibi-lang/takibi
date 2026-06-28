@@ -398,6 +398,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | Eq  -> (TypeInt, build_icmp Icmp.Eq  v1 v2 "eqtmp" builder)
        | Ne  -> (TypeInt, build_icmp Icmp.Ne  v1 v2 "netmp" builder)
        | Or   -> (TypeInt, build_or   (to_i32 v1) (to_i32 v2) "ortmp"  builder)
+       | And  -> (TypeInt, build_and  (to_i32 v1) (to_i32 v2) "landtmp" builder)
        | Bor  -> (TypeInt, build_or   (to_i32 v1) (to_i32 v2) "bortmp" builder)
        | Bxor -> (TypeInt, build_xor  (to_i32 v1) (to_i32 v2) "xortmp" builder)
        | Band -> (TypeInt, build_and  (to_i32 v1) (to_i32 v2) "andtmp" builder)

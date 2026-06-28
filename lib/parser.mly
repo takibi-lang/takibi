@@ -14,11 +14,12 @@ open Ast
 
 %token LT GT LE GE EQ NE
 %token PLUS MINUS TIMES DIV PERCENT
-%token OR PIPE HAT SHR SHL
+%token OR PIPE HAT SHR SHL DAMP
 %token AS
 
 (* Precedence: low → high.  UNARY is a pseudo-token for %prec. *)
-%left OR
+%left OR          (* || — 最低優先度の論理演算 *)
+%left DAMP        (* && — || より高く、比較演算子より低い *)
 %left PIPE        (* bitwise OR: looser than comparison so (a==0)|(b==0) works *)
 %left HAT         (* bitwise XOR: between | and comparison *)
 %left LT GT LE GE EQ NE
@@ -127,6 +128,7 @@ else_part:
 
 expr:
   | expr OR      expr  { { desc = BinOp (Or,   $1, $3); loc = $symbolstartpos } }
+  | expr DAMP    expr  { { desc = BinOp (And,  $1, $3); loc = $symbolstartpos } }
   | expr PIPE    expr  { { desc = BinOp (Bor,  $1, $3); loc = $symbolstartpos } }
   | expr HAT     expr  { { desc = BinOp (Bxor, $1, $3); loc = $symbolstartpos } }
   | expr AMP     expr  { { desc = BinOp (Band, $1, $3); loc = $symbolstartpos } }

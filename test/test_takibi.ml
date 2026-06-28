@@ -305,6 +305,39 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  Alcotest.test_case "logical AND expression" `Quick (fun () ->
+    match parse "fn f(a: int, b: int) int { return a >= 0 && b < 8; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+             Alcotest.check binop_t "outer op is And" Ast.And op
+         | _ -> Alcotest.fail "expected Return(BinOp And)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "&& has lower prec than comparisons" `Quick (fun () ->
+    (* a >= 0 && b < 8  →  (a >= 0) && (b < 8): outer is And, both children are comparisons *)
+    match parse "fn f(a: int, b: int) int { return a >= 0 && b < 8; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (Ast.And,
+             { desc = Ast.BinOp (Ast.Ge, _, _); _ },
+             { desc = Ast.BinOp (Ast.Lt, _, _); _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected And(Ge, Lt)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "&& has higher prec than ||" `Quick (fun () ->
+    (* a || b && c  →  a || (b && c): outer is Or *)
+    match parse "fn f(a: int, b: int, c: int) int { return a || b && c; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.BinOp (Ast.Or, _,
+             { desc = Ast.BinOp (Ast.And, _, _); _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Or(_, And(_, _))")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
   Alcotest.test_case "if without else" `Quick (fun () ->
     match parse "fn f(x: int) { if (x == 0) { x = 1; } }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
@@ -820,6 +853,16 @@ let infer_tests = [
   Alcotest.test_case "logical OR type error: char operand" `Quick
     (expect_type_error "cannot unify"
        "fn f(a: int, b: char) int { return a == 1 || b; }");
+
+  Alcotest.test_case "logical AND of two comparisons" `Quick
+    (expect_ok "fn f(x: int) int { return x >= 0 && x < 8; }");
+
+  Alcotest.test_case "logical AND in if condition" `Quick
+    (expect_ok "fn f(v: int) int { if (v >= 0 && v < 8) { return v; } return 0; }");
+
+  Alcotest.test_case "logical AND type error: char operand" `Quick
+    (expect_type_error "cannot unify"
+       "fn f(a: int, b: char) int { return a == 1 && b; }");
 
   Alcotest.test_case "if/else branches both valid" `Quick
     (expect_ok "fn abs(x: int) int {
