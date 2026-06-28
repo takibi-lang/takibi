@@ -1,0 +1,62 @@
+// Step 3.5: if-condition による型絞り込み（flow-sensitive type narrowing）
+//
+// MMIO などから読んだ「範囲不明の int」を、実行時 if-check で {lo..<hi} 型に
+// 絞り込んでから配列アクセスや refined 引数の関数呼び出しに使う実証例。
+//
+// 型絞り込みの仕組み:
+//   if (v >= 0 && v < 8) { ... }  の then-branch では
+//   コンパイラが v: {0..<8} として扱う。
+//   → 配列アクセス buf[v] の境界チェックが省略される（Step 3.4 elision）
+//   → refined 型を要求する関数 write_entry(i: {0..<8}) へ渡せる
+//
+// QEMU expected output: ABCDEFGH\r\n
+
+fn uart_putc(c: char) {
+    let dr: *io char = 0x09000000;
+    *dr = c;
+}
+
+let buf: [char; 8];
+
+// refined 型引数を要求する関数。型絞り込みなしでは int を直接渡せない。
+fn write_entry(i: {0..<8}, c: char) {
+    buf[i] = c;  // 境界チェック省略（TypeRefined が安全性を証明）
+}
+
+fn print_buf() {
+    let mut i = 0;
+    while (i < 8) {
+        uart_putc(buf[i]);
+        i = i + 1;
+    }
+    uart_putc('\r');
+    uart_putc('\n');
+}
+
+// 呼び出し元では v が「何らかの外部入力（int 型、範囲不明）」と仮定する。
+// if-condition が実行時チェックを行い、then-branch で v が {0..<8} に絞り込まれる。
+fn fill_from_unknown(v: int, c: char) {
+    if (v >= 0 && v < 8) {
+        // この中では v: {0..<8} として型付けされる
+        write_entry(v, c);   // refined 引数へ: コンパイル OK（絞り込み済み）
+        buf[v] = c;          // 配列直接アクセス: 境界チェック省略
+    }
+    // if-block の外では v は再び int（絞り込みは脱出しない）
+}
+
+fn main() -> int {
+    // 0〜7 の各インデックスを「外部入力」として渡して書き込む
+    fill_from_unknown(0, 'A');
+    fill_from_unknown(1, 'B');
+    fill_from_unknown(2, 'C');
+    fill_from_unknown(3, 'D');
+    fill_from_unknown(4, 'E');
+    fill_from_unknown(5, 'F');
+    fill_from_unknown(6, 'G');
+    fill_from_unknown(7, 'H');
+    // 範囲外は if-check で弾かれる（buf は変更されない）
+    fill_from_unknown(-1, 'X');
+    fill_from_unknown(8, 'X');
+    print_buf();
+    return 0;
+}

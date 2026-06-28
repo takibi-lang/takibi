@@ -29,6 +29,53 @@ type local_binding =
   | Imm of Ast.type_expr * llvalue  (* direct SSA value — no alloca *)
   | Mut of Ast.type_expr * llvalue  (* alloca pointer — load/store *)
 
+(* Collect per-variable bounds from an if-condition for codegen narrowing.
+   Mirrors the logic in type_inf.ml:narrow_from_cond. *)
+let collect_bounds_cond (cond : Ast.expr) =
+  let take_lo a b = match a, b with
+    | Some x, Some y -> Some (max x y)
+    | Some _, None -> a | None, _ -> b in
+  let take_hi a b = match a, b with
+    | Some x, Some y -> Some (min x y)
+    | Some _, None -> a | None, _ -> b in
+  let update name lo_opt hi_opt acc =
+    let (pl, ph) = match Types.StringMap.find_opt name acc with
+      | Some p -> p | None -> (None, None) in
+    Types.StringMap.add name (take_lo lo_opt pl, take_hi hi_opt ph) acc
+  in
+  let rec go e acc = match e.desc with
+    | BinOp (And, e1, e2)                                     -> go e2 (go e1 acc)
+    | BinOp (Ge, {desc=Var n;_}, {desc=IntLit lo;_})         -> update n (Some lo)     None          acc
+    | BinOp (Gt, {desc=Var n;_}, {desc=IntLit lo;_})         -> update n (Some (lo+1)) None          acc
+    | BinOp (Lt, {desc=Var n;_}, {desc=IntLit hi;_})         -> update n None          (Some hi)     acc
+    | BinOp (Le, {desc=Var n;_}, {desc=IntLit hi;_})         -> update n None          (Some (hi+1)) acc
+    | BinOp (Le, {desc=IntLit lo;_}, {desc=Var n;_})         -> update n (Some lo)     None          acc
+    | BinOp (Lt, {desc=IntLit lo;_}, {desc=Var n;_})         -> update n (Some (lo+1)) None          acc
+    | BinOp (Ge, {desc=IntLit hi;_}, {desc=Var n;_})         -> update n None          (Some (hi+1)) acc
+    | BinOp (Gt, {desc=IntLit hi;_}, {desc=Var n;_})         -> update n None          (Some hi)     acc
+    | _ -> acc
+  in
+  go cond Types.StringMap.empty
+
+(* Temporarily narrow Imm locals based on condition bounds.
+   Only Imm (immutable) bindings are narrowed; Mut bindings are skipped.
+   Returns saved bindings for restoration after the then-branch. *)
+let apply_narrowing (locals : (string, local_binding) Hashtbl.t) (cond : Ast.expr) =
+  let bounds = collect_bounds_cond cond in
+  Types.StringMap.fold (fun name (lo_opt, hi_opt) saved ->
+    match lo_opt, hi_opt with
+    | Some lo, Some hi ->
+        (match Hashtbl.find_opt locals name with
+         | Some (Imm (_, v) as old) ->
+             Hashtbl.replace locals name (Imm (TypeRefined (lo, hi), v));
+             (name, old) :: saved
+         | _ -> saved)
+    | _ -> saved
+  ) bounds []
+
+let restore_narrowing (locals : (string, local_binding) Hashtbl.t) saved =
+  List.iter (fun (name, old) -> Hashtbl.replace locals name old) saved
+
 let setup_target ?(triple = "") () =
   let _ = Llvm_all_backends.initialize () in
   let triple = if triple = "" then Llvm_target.Target.default_triple () else triple in
@@ -774,7 +821,9 @@ let gen_func ?prog_types fdef =
         ignore (build_cond_br cond_v then_bb else_bb builder);
 
         position_at_end then_bb builder;
+        let saved = apply_narrowing locals cond in
         List.iter gen_stmt then_stmts;
+        restore_narrowing locals saved;
         if block_terminator (insertion_block builder) = None then
           ignore (build_br merge_bb builder);
 

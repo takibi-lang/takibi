@@ -165,6 +165,7 @@ run_test "struct"    examples/struct/kernel.elf    examples/struct/struct.expect
 run_test "msgqueue"  examples/msgqueue/kernel.elf  examples/msgqueue/msgqueue.expected
 run_test "watchdog" examples/watchdog/kernel.elf examples/watchdog/watchdog.expected
 run_test "refined"  examples/refined/kernel.elf  examples/refined/refined.expected
+run_test "narrow"   examples/narrow/kernel.elf   examples/narrow/narrow.expected
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

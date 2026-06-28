@@ -1318,6 +1318,44 @@ let infer_tests = [
       "let buf: [char; 8]; \
        fn f(i: {0..<8}) { buf[i+1] = 'Z'; }");
 
+  (* ── Step 3.5: if-condition による型絞り込み ─────────────────────────────── *)
+
+  Alcotest.test_case "if (v>=0 && v<8) narrows v to {0..<8}" `Quick
+    (expect_ok
+      "let buf: [char; 8]; \
+       fn foo(i: {0..<8}) {} \
+       fn f(v: int) { if (v >= 0 && v < 8) { foo(v); } }");
+
+  Alcotest.test_case "if (v>=0 && v<8) allows buf[v] write" `Quick
+    (expect_ok
+      "let buf: [char; 8]; \
+       fn f(v: int) { if (v >= 0 && v < 8) { buf[v] = 'X'; } }");
+
+  Alcotest.test_case "outside if block v remains int (no escape)" `Quick
+    (expect_type_error "unproven int"
+      "fn foo(i: {0..<8}) {} \
+       fn f(v: int) { if (v >= 0 && v < 8) {} foo(v); }");
+
+  Alcotest.test_case "single bound (only v<8) does not narrow" `Quick
+    (expect_type_error "unproven int"
+      "fn foo(i: {0..<8}) {} \
+       fn f(v: int) { if (v < 8) { foo(v); } }");
+
+  Alcotest.test_case "let mut variable is also narrowed in then-branch" `Quick
+    (expect_ok
+      "fn foo(i: {0..<8}) {} \
+       fn f() { let mut v: int = 3; if (v >= 0 && v < 8) { foo(v); } }");
+
+  Alcotest.test_case "else branch does not get narrowing" `Quick
+    (expect_type_error "unproven int"
+      "fn foo(i: {0..<8}) {} \
+       fn f(v: int) { if (v >= 0 && v < 8) {} else { foo(v); } }");
+
+  Alcotest.test_case "commutative form (0<=v && v<8) also narrows" `Quick
+    (expect_ok
+      "fn foo(i: {0..<8}) {} \
+       fn f(v: int) { if (0 <= v && v < 8) { foo(v); } }");
+
 ]
 
 (* ── Entry point ─────────────────────────────────────────────────────────── *)

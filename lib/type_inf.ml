@@ -257,6 +257,52 @@ let rec check_expr senv tyenv fenv (e : Ast.expr) (expected : ty) : unit =
       (* io T が期待型の場合: T との互換性で確認（記憶域修飾子を剥がす）*)
       unify_at e.loc te (strip_io expected)
 
+(* ── Flow-sensitive type narrowing ───────────────────────────────────────── *)
+
+(* Collect per-variable bounds from a condition: v >= lo / v < hi / && chains.
+   Returns name → (lo_opt, hi_opt). Commutative forms (lo < v) are also handled. *)
+let collect_bounds (cond : Ast.expr) : (int option * int option) StringMap.t =
+  let take_lo a b = match a, b with
+    | Some x, Some y -> Some (max x y)
+    | Some _, None -> a | None, _ -> b in
+  let take_hi a b = match a, b with
+    | Some x, Some y -> Some (min x y)
+    | Some _, None -> a | None, _ -> b in
+  let update name lo_opt hi_opt acc =
+    let (pl, ph) = match StringMap.find_opt name acc with
+      | Some p -> p | None -> (None, None) in
+    StringMap.add name (take_lo lo_opt pl, take_hi hi_opt ph) acc
+  in
+  let rec go (e : Ast.expr) acc = match e.desc with
+    | BinOp (And, e1, e2)                                          -> go e2 (go e1 acc)
+    | BinOp (Ge, {desc=Var n;_}, {desc=IntLit lo;_})              -> update n (Some lo)     None          acc
+    | BinOp (Gt, {desc=Var n;_}, {desc=IntLit lo;_})              -> update n (Some (lo+1)) None          acc
+    | BinOp (Lt, {desc=Var n;_}, {desc=IntLit hi;_})              -> update n None          (Some hi)     acc
+    | BinOp (Le, {desc=Var n;_}, {desc=IntLit hi;_})              -> update n None          (Some (hi+1)) acc
+    | BinOp (Le, {desc=IntLit lo;_}, {desc=Var n;_})              -> update n (Some lo)     None          acc
+    | BinOp (Lt, {desc=IntLit lo;_}, {desc=Var n;_})              -> update n (Some (lo+1)) None          acc
+    | BinOp (Ge, {desc=IntLit hi;_}, {desc=Var n;_})              -> update n None          (Some (hi+1)) acc
+    | BinOp (Gt, {desc=IntLit hi;_}, {desc=Var n;_})              -> update n None          (Some hi)     acc
+    | _ -> acc
+  in
+  go cond StringMap.empty
+
+(* Narrow the type environment for the then-branch of an if statement.
+   Narrows int bindings (both mutable and immutable) when both lo and hi bounds are proven
+   by the condition. Mutability is preserved so that assignment inside the branch still works.
+   Codegen-side narrowing for bounds-check elision is more conservative (Imm only). *)
+let narrow_from_cond tyenv (cond : Ast.expr) =
+  let bounds = collect_bounds cond in
+  StringMap.fold (fun name (lo_opt, hi_opt) env ->
+    match lo_opt, hi_opt with
+    | Some lo, Some hi ->
+        (match StringMap.find_opt name env with
+         | Some (TInt, is_mut) ->
+             StringMap.add name (TRefinedInt (lo, hi), is_mut) env
+         | _ -> env)
+    | _ -> env
+  ) bounds tyenv
+
 (* ── Statement inference ─────────────────────────────────────────────────── *)
 (* Returns (updated_tyenv, updated_raw_locals).
    tyenv grows with each Let in the current scope.
@@ -377,9 +423,10 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
   | If (cond, then_s, else_s) ->
       let ct = infer_expr senv tyenv fenv cond in
       unify_at cond.loc ct TInt;
+      let then_tyenv = narrow_from_cond tyenv cond in
       let (_, rl1) = List.fold_left
         (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs s)
-        (tyenv, raw_locals) then_s
+        (then_tyenv, raw_locals) then_s
       in
       let (_, rl2) = List.fold_left
         (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs s)

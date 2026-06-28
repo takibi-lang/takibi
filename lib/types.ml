@@ -80,9 +80,14 @@ let rec unify t1 t2 =
       if lo1 <> lo2 || hi1 <> hi2 then
         raise (Unify_error (Printf.sprintf
           "refined int range mismatch: {%d..<%d} vs {%d..<%d}" lo1 hi1 lo2 hi2))
-  (* サブタイピング: TRefinedInt は TInt のサブタイプ。どちら側にあっても成功。
-     精度情報は失われるが Step 3.3 で区間伝播として精緻化する。 *)
-  | TRefinedInt _, TInt | TInt, TRefinedInt _ -> ()
+  (* サブタイピング: TRefinedInt は TInt のサブタイプ（一方向のみ）。
+     refined → int: OK（幅広い型への昇格）。
+     int → refined: NG（範囲が未証明。if (v >= lo && v < hi) で絞り込んで使う）。 *)
+  | TRefinedInt _, TInt -> ()
+  | TInt, TRefinedInt (lo, hi) ->
+      raise (Unify_error (Printf.sprintf
+        "cannot pass unproven int where {%d..<%d} is required; \
+         use if (v >= %d && v < %d) { ... } to narrow the range" lo hi lo hi))
   | TStruct s1, TStruct s2 ->
       if s1 <> s2 then
         raise (Unify_error (Printf.sprintf "struct type mismatch: %s vs %s" s1 s2))
