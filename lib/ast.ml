@@ -56,6 +56,8 @@ and stmt_desc =
   | If of expr * stmt list * stmt list
   | While of expr * stmt list
   | For of ident * expr * expr * stmt list  (* for i in lo..<hi { body } *)
+  | Break
+  | Continue
 [@@deriving show]
 
 type func = {

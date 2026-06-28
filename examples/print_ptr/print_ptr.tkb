@@ -21,10 +21,8 @@ fn uart_print_hex_digit(n: int) {
 
 fn uart_print_hex(n: int) {
     uart_puts("0x");
-    let mut i = 7;
-    while (i >= 0) {
-        uart_print_hex_digit((n >> (i * 4)) & 15);
-        i = i - 1;
+    for i in 0..<8 {
+        uart_print_hex_digit((n >> (28 - i * 4)) & 15);
     }
 }
 

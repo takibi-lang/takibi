@@ -24,10 +24,8 @@ fn write_entry(i: {0..<8}, c: char) {
 }
 
 fn print_buf() {
-    let mut i = 0;
-    while (i < 8) {
-        uart_putc(buf[i]);
-        i = i + 1;
+    for i in 0..<8 {
+        uart_putc(buf[i]);  // i: {0..<8} -> bounds check elided
     }
     uart_putc('\r');
     uart_putc('\n');

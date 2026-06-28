@@ -1,0 +1,53 @@
+// break and continue demo.
+//
+// Part 1 (break): search 0..9 for the first value divisible by 3,
+//   print it and stop. Expected: "3\r\n"
+//
+// Part 2 (continue): iterate 0..7 and print only even values.
+//   Expected: "0\r\n2\r\n4\r\n6\r\n"
+//
+// QEMU expected output: 3\r\n0\r\n2\r\n4\r\n6\r\n
+
+fn uart_putc(c: char) {
+    let dr: *io char = 0x09000000;
+    *dr = c;
+}
+
+fn uart_puts(s: *char) {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
+fn uart_print_uint(n: int) {
+    if (n >= 10) {
+        uart_print_uint(n / 10);
+    }
+    uart_putc((n % 10 + '0') as char);
+}
+
+fn uart_println_int(n: int) {
+    uart_print_uint(n);
+    uart_puts("\r\n");
+}
+
+fn main() -> int {
+    // Part 1: find first multiple of 3 in 0..<10 using break.
+    for i in 0..<10 {
+        if (i % 3 == 0 && i != 0) {
+            uart_println_int(i);
+            break;
+        }
+    }
+
+    // Part 2: print even numbers in 0..<8 using continue.
+    for i in 0..<8 {
+        if (i % 2 != 0) {
+            continue;
+        }
+        uart_println_int(i);
+    }
+
+    return 0;
+}

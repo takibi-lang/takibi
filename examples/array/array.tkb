@@ -13,10 +13,8 @@ fn uart_puts(s: *char) {
 }
 
 fn fill(p: *char, val: char, n: int) {
-    let mut i: int = 0;
-    while (i < n) {
+    for i in 0..<n {
         p[i] = val;
-        i = i + 1;
     }
 }
 

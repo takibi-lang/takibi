@@ -14,9 +14,11 @@ rule read = parse
   | "mut"     { MUT }
   | "if"      { IF }
   | "else"    { ELSE }
-  | "while"   { WHILE }
-  | "for"     { FOR }
-  | "in"      { IN }
+  | "while"    { WHILE }
+  | "for"      { FOR }
+  | "in"       { IN }
+  | "break"    { BREAK }
+  | "continue" { CONTINUE }
   | "as"      { AS }
   | "void"    { VOID_TYPE }
   | "extern"  { EXTERN }

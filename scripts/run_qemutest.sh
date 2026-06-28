@@ -185,6 +185,7 @@ run_test "watchdog" examples/watchdog/kernel.elf examples/watchdog/watchdog.expe
 run_test "refined"  examples/refined/kernel.elf  examples/refined/refined.expected
 run_test "narrow"   examples/narrow/kernel.elf   examples/narrow/narrow.expected
 run_test "for"      examples/for/kernel.elf      examples/for/for.expected
+run_test "loop"     examples/loop/kernel.elf     examples/loop/loop.expected
 
 echo ""
 echo "Running no-trap checks (brk must be zero in these kernels)..."
@@ -193,7 +194,7 @@ echo ""
 # Examples whose bounds should be fully proven at the type level. If brk appears, review the type annotations.
 for e in start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci \
           bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt \
-          semaphore condvar struct msgqueue watchdog refined narrow for; do
+          semaphore condvar struct msgqueue watchdog refined narrow for loop; do
     run_no_trap_test "$e (no-trap)" "examples/$e/kernel.elf"
 done
 

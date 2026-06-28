@@ -329,9 +329,13 @@ let narrow_from_cond tyenv (cond : Ast.expr) =
    raw_locals accumulates every Let type seen (including inside blocks/if/while)
    so that codegen can pre-allocate mutable locals at function entry. *)
 
-let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
+let rec infer_stmt senv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
     : tyenv * ty StringMap.t =
   match s.desc with
+  | Break | Continue ->
+      if not in_loop then
+        raise (TypeError (s.loc, "break/continue outside of a loop"));
+      (tyenv, raw_locals)
   | Return e ->
       let t = infer_expr senv tyenv fenv e in
       unify_at e.loc t ret_ty;
@@ -437,7 +441,7 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
   | Block stmts ->
       (* Let bindings extend the inner env but do not escape the block *)
       let (_, raw_locals') = List.fold_left
-        (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs s)
+        (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs in_loop s)
         (tyenv, raw_locals) stmts
       in
       (tyenv, raw_locals')
@@ -446,11 +450,11 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
       unify_at cond.loc ct TInt;
       let then_tyenv = narrow_from_cond tyenv cond in
       let (_, rl1) = List.fold_left
-        (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs s)
+        (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs in_loop s)
         (then_tyenv, raw_locals) then_s
       in
       let (_, rl2) = List.fold_left
-        (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs s)
+        (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs in_loop s)
         (tyenv, rl1) else_s
       in
       (tyenv, rl2)
@@ -458,7 +462,7 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
       let ct = infer_expr senv tyenv fenv cond in
       unify_at cond.loc ct TInt;
       let (_, raw_locals') = List.fold_left
-        (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs s)
+        (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs true s)
         (tyenv, raw_locals) body
       in
       (tyenv, raw_locals')
@@ -476,7 +480,7 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
       (* Loop variable is immutable (Imm binding, no reassignment). Does not escape the loop. *)
       let body_env = StringMap.add name (idx_ty, false) tyenv in
       let (_, raw_locals') = List.fold_left
-        (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs s)
+        (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs true s)
         (body_env, raw_locals) body
       in
       (tyenv, raw_locals')
@@ -492,7 +496,7 @@ let infer_func senv fenv genv (fdef : Ast.func) : func_info =
     genv fdef.params param_tys
   in
   let (_, raw_locals) = List.fold_left
-    (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs s)
+    (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs false s)
     (init_env, StringMap.empty) fdef.body
   in
   {

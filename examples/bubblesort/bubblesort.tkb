@@ -26,13 +26,11 @@ fn uart_print_uint(n: int) {
 
 fn print_arr(s: *IntSlice) {
     let arr: *int = s.data;
-    let mut i: int = 0;
-    while (i < s.len) {
+    for i in 0..<s.len {
         uart_print_uint(arr[i]);
         if (i < s.len - 1) {
             uart_putc(' ');
         }
-        i = i + 1;
     }
     uart_puts("\r\n");
 }
@@ -40,18 +38,14 @@ fn print_arr(s: *IntSlice) {
 fn bubble_sort(s: *IntSlice) {
     let arr: *int = s.data;
     let n: int = s.len;
-    let mut i: int = 0;
-    while (i < n - 1) {
-        let mut j: int = 0;
-        while (j < n - 1 - i) {
+    for i in 0..<(n - 1) {
+        for j in 0..<(n - 1 - i) {
             if (arr[j] > arr[j + 1]) {
                 let mut tmp: int = arr[j];
                 arr[j] = arr[j + 1];
                 arr[j + 1] = tmp;
             }
-            j = j + 1;
         }
-        i = i + 1;
     }
 }
 

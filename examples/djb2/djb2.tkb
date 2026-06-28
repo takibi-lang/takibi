@@ -13,15 +13,13 @@ fn uart_puts(s: *char) {
 
 fn uart_print_hex(n: int) {
     uart_puts("0x");
-    let mut shift: int = 28;
-    while (shift >= 0) {
-        let nibble: int = (n >> shift) & 0xf;
+    for i in 0..<8 {
+        let nibble: int = (n >> (28 - i * 4)) & 0xf;
         if (nibble < 10) {
             uart_putc((nibble + '0') as char);
         } else {
             uart_putc((nibble - 10 + 'A') as char);
         }
-        shift = shift - 4;
     }
 }
 

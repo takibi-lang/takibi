@@ -38,21 +38,16 @@ fn strlen(s: *char) int {
 
 fn crc8(data: *char, len: int) int {
     let mut crc: int = 0;
-    let mut i: int = 0;
-    while (i < len) {
-        crc = crc ^ (*data as int);
-        let mut bit: int = 0;
-        while (bit < 8) {
+    for i in 0..<len {
+        crc = crc ^ (*(data + i) as int);
+        for bit in 0..<8 {
             if ((crc & 0x80) != 0) {
                 crc = (crc << 1) ^ 0x07;
             } else {
                 crc = crc << 1;
             }
             crc = crc & 0xff;
-            bit = bit + 1;
         }
-        data = data + 1;
-        i = i + 1;
     }
     return crc;
 }

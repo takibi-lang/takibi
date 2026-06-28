@@ -1407,6 +1407,38 @@ let infer_tests = [
        fn f() { for i in 0..<4 { buf[i] = 'A'; } \
                 for i in 0..<4 { buf[i] = 'B'; } }");
 
+  (* -- break and continue ---------------------------------------------------- *)
+
+  Alcotest.test_case "break in while parses and type-checks" `Quick
+    (expect_ok "fn f() { while (1) { break; } }");
+
+  Alcotest.test_case "continue in while parses and type-checks" `Quick
+    (expect_ok "fn f() { while (1) { continue; } }");
+
+  Alcotest.test_case "break in for parses and type-checks" `Quick
+    (expect_ok "fn f() { for i in 0..<10 { break; } }");
+
+  Alcotest.test_case "continue in for parses and type-checks" `Quick
+    (expect_ok "fn f() { for i in 0..<10 { continue; } }");
+
+  Alcotest.test_case "break inside if inside while type-checks" `Quick
+    (expect_ok "fn f(x: int) { while (1) { if (x == 0) { break; } } }");
+
+  Alcotest.test_case "continue inside if inside for type-checks" `Quick
+    (expect_ok "fn f(x: int) { for i in 0..<10 { if (x == 0) { continue; } } }");
+
+  Alcotest.test_case "break outside loop is a type error" `Quick
+    (expect_type_error "break/continue outside of a loop"
+      "fn f() { break; }");
+
+  Alcotest.test_case "continue outside loop is a type error" `Quick
+    (expect_type_error "break/continue outside of a loop"
+      "fn f() { continue; }");
+
+  Alcotest.test_case "break after if outside loop is a type error" `Quick
+    (expect_type_error "break/continue outside of a loop"
+      "fn f(x: int) { if (x == 0) { break; } }");
+
 ]
 
 (* -- Entry point ----------------------------------------------------------- *)

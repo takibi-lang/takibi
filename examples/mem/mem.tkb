@@ -12,26 +12,20 @@ fn uart_puts(s: *char) {
 }
 
 fn my_memset(p: *char, val: char, n: int) {
-    let mut i: int = 0;
-    while (i < n) {
+    for i in 0..<n {
         p[i] = val;
-        i = i + 1;
     }
 }
 
 fn my_memcpy(dst: *char, src: *char, n: int) {
-    let mut i: int = 0;
-    while (i < n) {
+    for i in 0..<n {
         dst[i] = src[i];
-        i = i + 1;
     }
 }
 
 fn print_buf(p: *char, n: int) {
-    let mut i: int = 0;
-    while (i < n) {
+    for i in 0..<n {
         uart_putc(p[i]);
-        i = i + 1;
     }
 }
 

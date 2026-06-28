@@ -734,6 +734,10 @@ let gen_func ?prog_types fdef =
         ignore (build_store (coerce v ast_ty) ptr builder)
   in
 
+  (* Stack of (break_bb, continue_bb) for the innermost enclosing loop.
+     Pushed when entering While/For, popped on exit. *)
+  let loop_stack : (llbasicblock * llbasicblock) Stack.t = Stack.create () in
+
   (* -- Statement codegen (defined here to access `res` for immutable lets) -- *)
   let rec gen_stmt (s : Ast.stmt) =
     (* Skip dead code after a terminator *)
@@ -892,6 +896,14 @@ let gen_func ?prog_types fdef =
 
         position_at_end merge_bb builder
 
+    | Break ->
+        let (break_bb, _) = Stack.top loop_stack in
+        ignore (build_br break_bb builder)
+
+    | Continue ->
+        let (_, continue_bb) = Stack.top loop_stack in
+        ignore (build_br continue_bb builder)
+
     | While (cond, body) ->
         let cond_bb  = append_block context "while_cond"  f in
         let body_bb  = append_block context "while_body"  f in
@@ -903,7 +915,9 @@ let gen_func ?prog_types fdef =
         ignore (build_cond_br cond_v body_bb after_bb builder);
 
         position_at_end body_bb builder;
+        Stack.push (after_bb, cond_bb) loop_stack;
         List.iter gen_stmt body;
+        ignore (Stack.pop loop_stack);
         if block_terminator (insertion_block builder) = None then
           ignore (build_br cond_bb builder);
 
@@ -925,6 +939,7 @@ let gen_func ?prog_types fdef =
         ignore (build_store lo_i32 ctr_ptr builder);
         let cond_bb = append_block context "for_cond" f in
         let body_bb = append_block context "for_body" f in
+        let incr_bb = append_block context "for_incr" f in
         let exit_bb = append_block context "for_exit" f in
         ignore (build_br cond_bb builder);
 
@@ -939,13 +954,19 @@ let gen_func ?prog_types fdef =
           | _ -> TypeInt
         in
         Hashtbl.add locals name (Imm (loop_ty, i_val));
+        Stack.push (exit_bb, incr_bb) loop_stack;
         List.iter gen_stmt body;
+        ignore (Stack.pop loop_stack);
         Hashtbl.remove locals name;
-        if block_terminator (insertion_block builder) = None then begin
-          let i_next = build_add i_val (const_int (i32_type context) 1) "for_next" builder in
-          ignore (build_store i_next ctr_ptr builder);
-          ignore (build_br cond_bb builder)
-        end;
+        if block_terminator (insertion_block builder) = None then
+          ignore (build_br incr_bb builder);
+
+        (* incr_bb: increment counter and loop back. continue jumps here.
+           i_val is defined in cond_bb which dominates incr_bb, so the SSA use is valid. *)
+        position_at_end incr_bb builder;
+        let i_next = build_add i_val (const_int (i32_type context) 1) "for_next" builder in
+        ignore (build_store i_next ctr_ptr builder);
+        ignore (build_br cond_bb builder);
 
         position_at_end exit_bb builder
   in
