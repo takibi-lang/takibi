@@ -156,6 +156,24 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  Alcotest.test_case "break statement parses to Break" `Quick (fun () ->
+    match parse "fn f() { while (1) { break; } }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.While (_, [{ desc = Ast.Break; _ }]) -> ()
+         | _ -> Alcotest.fail "expected While containing Break")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "continue statement parses to Continue" `Quick (fun () ->
+    match parse "fn f() { while (1) { continue; } }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.While (_, [{ desc = Ast.Continue; _ }]) -> ()
+         | _ -> Alcotest.fail "expected While containing Continue")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
   Alcotest.test_case "arithmetic BinOp" `Quick (fun () ->
     match parse "fn f() int { return 1 + 2 * 3; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->

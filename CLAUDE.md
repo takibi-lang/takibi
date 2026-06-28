@@ -29,6 +29,8 @@ The finished form of code is when index ranges are pinned at the type level usin
   - `let mut x = e` / `let mut x: T = e` -- mutable variable declaration (reassignment allowed)
   - `let x: T;` -- uninitialized global variable declaration (global scope only)
   - `while`, `return`, assignment (`x = e`), pointer-deref assignment (`*p = v`)
+  - `break` -- exits the innermost `while` or `for` loop immediately. Compile error outside a loop.
+  - `continue` -- skips to the next iteration of the innermost loop. For `for`, the counter is incremented first. Compile error outside a loop.
   - `if (cond) { ... }` -- `else` is optional
   - `if (cond) { ... } else { ... }` -- regular if/else
   - `if (cond) { ... } else if (cond) { ... } else { ... }` -- else-if chain
@@ -142,6 +144,27 @@ producing an unsound buffer under-read with the bounds check omitted.
 
 **Sync rule**: Both `lib/type_inf.ml` (`Mod` case) and `lib/llvm_gen.ml` (`Mod` case) have a `lo >= 0` guard.
 Relaxing only one side causes them to disagree; always change them together.
+
+### break / continue Implementation (4 Files)
+
+Files changed when `break` and `continue` were added:
+1. `lib/ast.ml` -- `Break` and `Continue` constructors in `stmt_desc`
+2. `lib/lexer.mll` -- `"break"` and `"continue"` keywords
+3. `lib/parser.mly` -- `BREAK SEMI` / `CONTINUE SEMI` statement rules
+4. `lib/type_inf.ml` -- `in_loop: bool` parameter added to `infer_stmt`; `Break | Continue` raises `TypeError` when `in_loop = false`. `While`/`For` bodies pass `true`; `Block`/`If` propagate the current value.
+5. `lib/llvm_gen.ml` -- `loop_stack : (break_bb * continue_bb) Stack.t` inside `gen_func`. Pushed on loop entry, popped on exit. `Break` emits `br break_bb`; `Continue` emits `br continue_bb`.
+
+**`for` loop `continue` target is `incr_bb`, not `cond_bb`**:
+The for loop has a dedicated `incr_bb` block that increments the counter and jumps to `cond_bb`.
+`continue` jumps to `incr_bb` so the counter is always incremented before rechecking the condition.
+`i_val` loaded in `cond_bb` dominates `incr_bb` (all paths to `incr_bb` go through `cond_bb`), so the SSA use is valid.
+
+```
+cond_bb: i_val = load ctr; if i_val < hi -> body_bb else exit_bb
+body_bb: [body]  break -> exit_bb / continue -> incr_bb / fallthrough -> incr_bb
+incr_bb: i_next = i_val + 1; store -> ctr; br cond_bb   <- continue target
+exit_bb: ...                                              <- break target
+```
 
 ### Unary Minus is Desugared in the Parser
 `-expr` is converted to `BinOp(Sub, IntLit 0, expr)` (the `%prec UNARY` rule in `parser.mly`).
