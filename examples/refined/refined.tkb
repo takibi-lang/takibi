@@ -1,0 +1,42 @@
+// Step 3.3/3.4: {lo..<hi} 型による配列境界チェック省略の実証
+//
+// グローバル配列 buf[8] を refined-type インデックスで操作する。
+// TypeRefined が [0,N) を包含することを型検査器が証明するため、
+// emit_bounds_check を省略し境界チェックのない機械語を生成する。
+
+fn uart_putc(c: char) {
+    let dr: *io char = 0x09000000;
+    *dr = c;
+}
+
+let buf: [char; 8];
+
+// i: {0..<7} → buf[i] と buf[i+1] を同時書き込み。両方チェック省略される。
+fn fill_pair(i: {0..<7}, lo: char, hi: char) {
+    buf[i]   = lo;   // TypeRefined(0,7): hi=7 <= n=8 → チェック省略
+    buf[i+1] = hi;   // TypeRefined(1,8): hi=8 <= n=8 → チェック省略
+}
+
+fn print_buf() {
+    let mut i = 0;
+    while (i < 8) {
+        uart_putc(buf[i]);
+        i = i + 1;
+    }
+    uart_putc('\r');
+    uart_putc('\n');
+}
+
+fn main() -> int {
+    // 4 組のペアで 8 要素を埋める（i=0,2,4,6 でそれぞれ 2 要素）
+    let i0: {0..<7} = 0;
+    let i2: {0..<7} = 2;
+    let i4: {0..<7} = 4;
+    let i6: {0..<7} = 6;
+    fill_pair(i0, 'A', 'B');
+    fill_pair(i2, 'C', 'D');
+    fill_pair(i4, 'E', 'F');
+    fill_pair(i6, 'G', 'H');
+    print_buf();
+    return 0;
+}

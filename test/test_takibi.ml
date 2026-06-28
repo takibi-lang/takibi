@@ -22,6 +22,7 @@ let rec show_type = function
       Printf.sprintf "fn(%s) -> %s"
         (String.concat ", " (List.map show_type ps)) (show_type r)
   | Ast.TypeNamed s     -> s
+  | Ast.TypeRefined (lo, hi) -> Printf.sprintf "{%d..<%d}" lo hi
 
 let type_t : Ast.type_expr Alcotest.testable =
   Alcotest.testable (fun fmt t -> Format.pp_print_string fmt (show_type t)) (=)
@@ -1197,6 +1198,82 @@ let infer_tests = [
   Alcotest.test_case "OOB error message includes index and array size" `Quick
     (expect_type_error "index 5 is out of bounds for array of size 4"
        "fn f() int { let mut arr: [int; 4]; return arr[5]; }");
+
+  (* ── TypeRefined 構文（Step 3.1 / 3.2）─────────────────────── *)
+
+  Alcotest.test_case "TypeRefined parses as param annotation" `Quick (fun () ->
+    let pt = infer "fn f(i: {0..<8}) int { return i; }" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
+    Alcotest.check type_t "i has type {0..<8}"
+      (Ast.TypeRefined (0, 8))
+      (snd (List.hd fi.Types.param_types)));
+
+  Alcotest.test_case "TypeRefined after -> parses as return type" `Quick (fun () ->
+    let pt = infer "fn f() -> {0..<8} { return 0; }" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
+    Alcotest.check type_t "return type is {0..<8}"
+      (Ast.TypeRefined (0, 8))
+      fi.Types.ret_type);
+
+  Alcotest.test_case "TypeRefined in let annotation type-checks" `Quick
+    (expect_ok "fn f() { let x: {0..<8} = 3; }");
+
+  Alcotest.test_case "TypeRefined as param unifies with int body" `Quick
+    (expect_ok "fn f(i: {0..<8}) int { return i; }");
+
+  Alcotest.test_case "TypeRefined can be used as array index" `Quick
+    (expect_ok "fn f(i: {0..<8}, p: *char) { p[i] = 'A'; }");
+
+  (* ── Step 3.3c: 区間伝播 ──────────────────────────────────── *)
+
+  Alcotest.test_case "Add propagates TRefinedInt: {0..<7}+1 is {1..<8}" `Quick (fun () ->
+    let pt = infer "fn f(i: {0..<7}) -> {1..<8} { return i + 1; }" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
+    Alcotest.check type_t "return type is {1..<8}"
+      (Ast.TypeRefined (1, 8))
+      fi.Types.ret_type);
+
+  Alcotest.test_case "Sub propagates TRefinedInt: {1..<8}-1 is {0..<7}" `Quick (fun () ->
+    let pt = infer "fn f(i: {1..<8}) -> {0..<7} { return i - 1; }" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
+    Alcotest.check type_t "return type is {0..<7}"
+      (Ast.TypeRefined (0, 7))
+      fi.Types.ret_type);
+
+  Alcotest.test_case "Add propagation: k+{c..<d} commutative" `Quick (fun () ->
+    let pt = infer "fn f(i: {0..<4}) -> {3..<7} { return 3 + i; }" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
+    Alcotest.check type_t "return type is {3..<7}"
+      (Ast.TypeRefined (3, 7))
+      fi.Types.ret_type);
+
+  Alcotest.test_case "TRefinedInt result is subtype of int return" `Quick
+    (expect_ok "fn f(i: {0..<7}) -> int { return i + 1; }");
+
+  Alcotest.test_case "Mismatched refined return is a type error" `Quick
+    (expect_type_error "range mismatch"
+      "fn f(i: {0..<8}) -> {0..<8} { return i + 1; }");
+
+  (* ── Step 3.4: 境界チェック省略（グローバル配列 + TypeRefined インデックス）── *)
+
+  Alcotest.test_case "refined index on global array compiles" `Quick
+    (expect_ok
+      "let buf: [char; 8]; \
+       fn f(i: {0..<8}) { buf[i] = 'X'; }");
+
+  Alcotest.test_case "refined pair write (i and i+1) compiles" `Quick
+    (expect_ok
+      "let buf: [char; 8]; \
+       fn f(i: {0..<7}) { buf[i] = 'A'; buf[i+1] = 'B'; }");
+
+  Alcotest.test_case "refined arithmetic range mismatch caught at return" `Quick
+    (expect_type_error "range mismatch"
+      "fn f(i: {0..<8}) -> {0..<8} { return i + 1; }");
+
+  Alcotest.test_case "non-proven index (overflow range) still compiles" `Quick
+    (expect_ok
+      "let buf: [char; 8]; \
+       fn f(i: {0..<8}) { buf[i+1] = 'Z'; }");
 
 ]
 

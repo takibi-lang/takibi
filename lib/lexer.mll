@@ -54,6 +54,7 @@ rule read = parse
   | "int"  { INT_TYPE }
   | "char" { CHAR_TYPE }
   | ':' { COLON }
+  | "..<" { DOTDOTLT }   (* {lo..<hi} の範囲区切り。'.' より先にマッチさせる *)
   | '.' { DOT }
 
   | "0x" ['0'-'9' 'a'-'f' 'A'-'F']+ as h { INT (int_of_string h) }

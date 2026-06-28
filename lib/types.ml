@@ -10,6 +10,7 @@ type ty =
   | TIo  of ty            (* io T  — volatile-qualified value type; *io T = TPtr(TIo T) *)
   | TArray of ty * int    (* array type: [T; N] *)
   | TStruct of string     (* named struct type *)
+  | TRefinedInt of int * int  (* {lo..<hi} — refined int with known range; lo <= x < hi *)
 
 and tv =
   | Unbound of int  (* unresolved unification variable *)
@@ -43,6 +44,7 @@ let rec to_string t =
       Printf.sprintf "(%s) -> %s"
         (String.concat ", " (List.map to_string ps)) (to_string r)
   | TStruct s -> s
+  | TRefinedInt (lo, hi) -> Printf.sprintf "{%d..<%d}" lo hi
   | TVar { contents = Unbound id } -> Printf.sprintf "'t%d" id
   | TVar { contents = Link _ }     -> assert false
 
@@ -74,6 +76,13 @@ let rec unify t1 t2 =
         raise (Unify_error "argument count mismatch");
       List.iter2 unify ps1 ps2;
       unify r1 r2
+  | TRefinedInt (lo1, hi1), TRefinedInt (lo2, hi2) ->
+      if lo1 <> lo2 || hi1 <> hi2 then
+        raise (Unify_error (Printf.sprintf
+          "refined int range mismatch: {%d..<%d} vs {%d..<%d}" lo1 hi1 lo2 hi2))
+  (* サブタイピング: TRefinedInt は TInt のサブタイプ。どちら側にあっても成功。
+     精度情報は失われるが Step 3.3 で区間伝播として精緻化する。 *)
+  | TRefinedInt _, TInt | TInt, TRefinedInt _ -> ()
   | TStruct s1, TStruct s2 ->
       if s1 <> s2 then
         raise (Unify_error (Printf.sprintf "struct type mismatch: %s vs %s" s1 s2))
@@ -101,6 +110,7 @@ let rec of_ast = function
   | Ast.TypeArray (t, n) -> TArray (of_ast t, n)
   | Ast.TypeFn (ps, r)   -> TFun (List.map of_ast ps, of_ast r)
   | Ast.TypeNamed s      -> TStruct s
+  | Ast.TypeRefined (lo, hi) -> TRefinedInt (lo, hi)
 
 (* None → fresh unification variable *)
 let of_ast_opt = function
@@ -124,6 +134,7 @@ let rec to_ast t =
   | TArray (t, n) -> Ast.TypeArray (to_ast t, n)
   | TFun (ps, r)  -> Ast.TypeFn (List.map to_ast ps, to_ast r)
   | TStruct s     -> Ast.TypeNamed s
+  | TRefinedInt (lo, hi) -> Ast.TypeRefined (lo, hi)
   | TVar { contents = Unbound _ } -> Ast.TypeInt
   | TVar { contents = Link _ }    -> assert false
 

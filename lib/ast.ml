@@ -25,6 +25,7 @@ type type_expr =
   | TypeArray of type_expr * int   (* [T; N] *)
   | TypeFn of type_expr list * type_expr  (* fn(T...) -> R *)
   | TypeNamed of string            (* struct type by name *)
+  | TypeRefined of int * int       (* {lo..<hi} — refined int: lo <= x < hi *)
 [@@deriving show]
 
 type expr = expr_desc located

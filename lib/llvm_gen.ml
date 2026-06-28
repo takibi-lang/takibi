@@ -83,6 +83,7 @@ let rec ltype_of_ast = function
   | TypeIo  t       -> ltype_of_ast t         (* io T は値型: LLVM型はTと同じ *)
   | TypeArray (t, n) -> array_type (ltype_of_ast t) n
   | TypeFn _        -> pointer_type context   (* 関数ポインタも opaque ptr *)
+  | TypeRefined _   -> i32_type context      (* 区間型は LLVM レベルでは i32 と同一 *)
   | TypeNamed sname ->
       match Hashtbl.find_opt struct_lltypes sname with
       | Some llty -> llty
@@ -121,6 +122,7 @@ let rec coerce v (dst : Ast.type_expr) =
   | TypeArray _ -> v
   | TypeFn _    -> v   (* 関数ポインタは ptr のまま変換不要 *)
   | TypeNamed _ -> v   (* struct 型: ptr のまま変換不要 *)
+  | TypeRefined _ -> coerce v TypeInt  (* 区間型は int と同じ LLVM 変換 *)
 
 (* Widen an integer value to i32 so arithmetic stays uniform.
    Does NOT touch pointer values. *)
@@ -364,7 +366,15 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                  | TypePtr inner ->
                      (ty2, build_gep (ltype_of_ast inner) v2 [|v1|] "ptradd" builder)
                  | _ ->
-                     (TypeInt, build_add v1 v2 "addtmp" builder)))
+                     (* 区間伝播: {a..<b} + k → {a+k..<b+k}（型システムと対称） *)
+                     let sum = build_add v1 v2 "addtmp" builder in
+                     let ret_ty = match ty1, e2.desc with
+                       | TypeRefined (a, b), IntLit k -> TypeRefined (a + k, b + k)
+                       | _ -> (match ty2, e1.desc with
+                               | TypeRefined (c, d), IntLit k -> TypeRefined (c + k, d + k)
+                               | _ -> TypeInt)
+                     in
+                     (ret_ty, sum)))
        | Sub ->
            (* ポインタ算術: ptr - int → GEP with negated index *)
            (match ty1 with
@@ -372,7 +382,13 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 let neg = build_neg v2 "negtmp" builder in
                 (ty1, build_gep (ltype_of_ast inner) v1 [|neg|] "ptrsub" builder)
             | _ ->
-                (TypeInt, build_sub v1 v2 "subtmp" builder))
+                (* 区間伝播: {a..<b} - k → {a-k..<b-k}（型システムと対称） *)
+                let diff = build_sub v1 v2 "subtmp" builder in
+                let ret_ty = match ty1, e2.desc with
+                  | TypeRefined (a, b), IntLit k -> TypeRefined (a - k, b - k)
+                  | _ -> TypeInt
+                in
+                (ret_ty, diff))
        | Mul -> (TypeInt, build_mul  v1 v2 "multmp" builder)
        | Div -> (TypeInt, build_sdiv v1 v2 "divtmp" builder)
        | Lt  -> (TypeInt, build_icmp Icmp.Slt v1 v2 "lttmp" builder)
@@ -431,10 +447,15 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            (field_ty, v'))
 
   | Index (id, idx) ->
-      let idx_v = to_i32 (snd (gen_expr locals idx)) in
-      (* [T; N] 配列のロード: 境界チェックあり。GEP は [0, idx] で要素を指す *)
+      let (idx_ty, idx_raw) = gen_expr locals idx in
+      let idx_v = to_i32 idx_raw in
+      (* [T; N] 配列のロード: TypeRefined が安全性を証明する場合は境界チェックを省略 *)
       let load_from_array elem_ty n arr_ptr =
-        emit_bounds_check idx_v n;
+        let needs_check = match idx_ty with
+          | TypeRefined (lo, hi) -> lo < 0 || hi > n
+          | _ -> true
+        in
+        if needs_check then emit_bounds_check idx_v n;
         let arr_ll = array_type (ltype_of_ast elem_ty) n in
         let zero   = const_int (i32_type context) 0 in
         let ep = build_in_bounds_gep arr_ll arr_ptr [|zero; idx_v|] "idx_ptr" builder in
@@ -655,10 +676,15 @@ let gen_func ?prog_types fdef =
         if is_volatile then set_volatile true inst
 
     | AssignIndex (id, idx, rhs) ->
-        let idx_v = to_i32 (snd (gen_expr locals idx)) in
+        let (idx_ty, idx_raw) = gen_expr locals idx in
+        let idx_v = to_i32 idx_raw in
         let (_, rhs_v) = gen_expr locals rhs in
         let store_to_array elem_ty n arr_ptr =
-          emit_bounds_check idx_v n;
+          let needs_check = match idx_ty with
+            | TypeRefined (lo, hi) -> lo < 0 || hi > n
+            | _ -> true
+          in
+          if needs_check then emit_bounds_check idx_v n;
           let arr_ll = array_type (ltype_of_ast elem_ty) n in
           let zero   = const_int (i32_type context) 0 in
           let ep = build_in_bounds_gep arr_ll arr_ptr [|zero; idx_v|] "idx_ptr" builder in

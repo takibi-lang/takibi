@@ -6,7 +6,7 @@ open Ast
 %token <string> IDENT
 %token <string> STRING
 %token FN RETURN LET MUT EXTERN STRUCT IO
-%token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI
+%token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT
 %token ASSIGN DOT
 %token IF ELSE WHILE
 %token EOF
@@ -77,9 +77,9 @@ rest_params:
   | COMMA param rest_params { $2 :: $3 }
 
 ret_type_opt:
-  | /* empty */       { None }
-  | ARROW type_expr   { Some $2 }   (* fn foo() -> int  推奨: extern fn / fn ptr と統一 *)
-  | type_expr         { Some $1 }   (* fn foo() int     後方互換のため残す *)
+  | /* empty */          { None }
+  | ARROW type_expr      { Some $2 }   (* fn foo() -> int  推奨形式 *)
+  | base_type_expr       { Some $1 }   (* fn foo() int  後方互換。{lo..<hi} は -> なしでは書けない *)
 
 stmts:
   | /* empty */ { [] }
@@ -179,16 +179,23 @@ let_rhs:
   | COLON type_expr ASSIGN expr { (Some $2, Some $4) }
   | ASSIGN expr { (None, Some $2) }
 
-type_expr:
+(* base_type_expr: { を先頭に含まない型式。ret_type_opt のレガシー形式（`fn f() int`）に使う。
+   { が関数本体の LBRACE と衝突するため TypeRefined をここには含めない。 *)
+base_type_expr:
   | INT_TYPE  { TypeInt }
   | CHAR_TYPE { TypeChar }
   | VOID_TYPE { TypeVoid }
-  | IO         type_expr { TypeIo  $2 }         (* io T  — volatile-qualified type *)
-  | TIMES      type_expr { TypePtr $2 }         (* *T or *(io T) = *io T *)
+  | IO         type_expr { TypeIo  $2 }
+  | TIMES      type_expr { TypePtr $2 }
   | LBRACKET t = type_expr SEMI n = INT RBRACKET { TypeArray (t, n) }
   | FN LPAREN fn_type_params RPAREN ARROW type_expr { TypeFn ($3, $6) }
   | FN LPAREN fn_type_params RPAREN                 { TypeFn ($3, TypeVoid) }
-  | IDENT { TypeNamed $1 }   (* named struct type *)
+  | IDENT { TypeNamed $1 }
+
+(* type_expr: base_type_expr + TypeRefined。: の後ろや -> の後ろなど文脈が明確な場所で使う。 *)
+type_expr:
+  | base_type_expr { $1 }
+  | LBRACE lo = INT DOTDOTLT hi = INT RBRACE { TypeRefined (lo, hi) }
 
 fn_type_params:
   | /* empty */                              { [] }

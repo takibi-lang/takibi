@@ -128,6 +128,9 @@ run_compile_error_test "oob_const_write" examples/oob_const_write/oob_const_writ
 run_compile_error_test "oob_char_array"  examples/oob_char_array/oob_char_array.tkb   examples/oob_char_array/oob_char_array.error
 run_compile_error_test "oob_global"      examples/oob_global/oob_global.tkb           examples/oob_global/oob_global.error
 run_compile_error_test "oob_size1"       examples/oob_size1/oob_size1.tkb             examples/oob_size1/oob_size1.error
+run_compile_error_test "refined_param_mismatch"  examples/refined_param_mismatch/refined_param_mismatch.tkb   examples/refined_param_mismatch/refined_param_mismatch.error
+run_compile_error_test "refined_return_mismatch" examples/refined_return_mismatch/refined_return_mismatch.tkb examples/refined_return_mismatch/refined_return_mismatch.error
+run_compile_error_test "refined_assign_mismatch" examples/refined_assign_mismatch/refined_assign_mismatch.tkb examples/refined_assign_mismatch/refined_assign_mismatch.error
 
 echo ""
 echo "Running QEMU integration tests..."
@@ -161,6 +164,7 @@ run_test "condvar"   examples/condvar/kernel.elf   examples/condvar/condvar.expe
 run_test "struct"    examples/struct/kernel.elf    examples/struct/struct.expected
 run_test "msgqueue"  examples/msgqueue/kernel.elf  examples/msgqueue/msgqueue.expected
 run_test "watchdog" examples/watchdog/kernel.elf examples/watchdog/watchdog.expected
+run_test "refined"  examples/refined/kernel.elf  examples/refined/refined.expected
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

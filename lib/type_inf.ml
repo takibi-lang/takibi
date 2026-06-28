@@ -51,6 +51,25 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
            (match repr t1, repr t2 with
             | TPtr _, _ -> t1
             | _, TPtr _ -> t2
+            (* 区間伝播: {a..<b} + k → {a+k..<b+k}。相手が IntLit の場合のみ精度を保つ *)
+            | TRefinedInt (a, b), _ ->
+                (match e2.desc with
+                 | IntLit k ->
+                     unify_at e2.loc t2 TInt;
+                     TRefinedInt (a + k, b + k)
+                 | _ ->
+                     unify_at e1.loc t1 TInt;
+                     unify_at e2.loc t2 TInt;
+                     TInt)
+            | _, TRefinedInt (c, d) ->
+                (match e1.desc with
+                 | IntLit k ->
+                     unify_at e1.loc t1 TInt;
+                     TRefinedInt (c + k, d + k)
+                 | _ ->
+                     unify_at e1.loc t1 TInt;
+                     unify_at e2.loc t2 TInt;
+                     TInt)
             | _ ->
                 unify_at e1.loc t1 TInt;
                 unify_at e2.loc t2 TInt;
@@ -61,6 +80,16 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
             | TPtr _ ->
                 unify_at e2.loc t2 TInt;
                 t1
+            (* 区間伝播: {a..<b} - k → {a-k..<b-k}。相手が IntLit の場合のみ精度を保つ *)
+            | TRefinedInt (a, b) ->
+                (match e2.desc with
+                 | IntLit k ->
+                     unify_at e2.loc t2 TInt;
+                     TRefinedInt (a - k, b - k)
+                 | _ ->
+                     unify_at e1.loc t1 TInt;
+                     unify_at e2.loc t2 TInt;
+                     TInt)
             | _ ->
                 unify_at e1.loc t1 TInt;
                 unify_at e2.loc t2 TInt;
