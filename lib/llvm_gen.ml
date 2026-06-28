@@ -196,7 +196,8 @@ let field_info struct_name fname =
   in
   find 0 fields
 
-(* Pre-scan only mutable Let bindings — immutable ones need no alloca *)
+(* Pre-scan only mutable Let bindings — immutable ones need no alloca.
+   For-loop counters ("__for_<name>") are also pre-allocated here. *)
 let rec collect_lets stmts =
   List.concat_map (fun s ->
     match s.desc with
@@ -204,6 +205,7 @@ let rec collect_lets stmts =
     | Block ss                    -> collect_lets ss
     | If (_, t, e)                -> collect_lets t @ collect_lets e
     | While (_, b)                -> collect_lets b
+    | For (name, _, _, body)      -> ("__for_" ^ name, Some TypeInt) :: collect_lets body
     | _                           -> []
   ) stmts
 
@@ -850,6 +852,46 @@ let gen_func ?prog_types fdef =
           ignore (build_br cond_bb builder);
 
         position_at_end after_bb builder
+
+    | For (name, lo_expr, hi_expr, body) ->
+        (* ループカウンタは collect_lets でエントリーブロックに事前確保済み。
+           ループ変数 name は Imm バインディングとして本体に公開する（再代入不可）。
+           両端が定数リテラルのとき TypeRefined を付与 → 境界チェック省略（Step 3.4）。 *)
+        let (_, lo_v) = gen_expr locals lo_expr in
+        let (_, hi_v) = gen_expr locals hi_expr in
+        let lo_i32    = to_i32 lo_v in
+        let hi_i32    = to_i32 hi_v in
+        let ctr_name  = "__for_" ^ name in
+        let ctr_ptr   = match Hashtbl.find_opt locals ctr_name with
+          | Some (Mut (_, p)) -> p
+          | _ -> raise (Error (Printf.sprintf "BUG: for counter '%s' not found" ctr_name))
+        in
+        ignore (build_store lo_i32 ctr_ptr builder);
+        let cond_bb = append_block context "for_cond" f in
+        let body_bb = append_block context "for_body" f in
+        let exit_bb = append_block context "for_exit" f in
+        ignore (build_br cond_bb builder);
+
+        position_at_end cond_bb builder;
+        let i_val = build_load (i32_type context) ctr_ptr "for_i" builder in
+        let cmp   = build_icmp Icmp.Slt i_val hi_i32 "for_cmp" builder in
+        ignore (build_cond_br cmp body_bb exit_bb builder);
+
+        position_at_end body_bb builder;
+        let loop_ty = match lo_expr.desc, hi_expr.desc with
+          | IntLit lo_k, IntLit hi_k -> TypeRefined (lo_k, hi_k)
+          | _ -> TypeInt
+        in
+        Hashtbl.add locals name (Imm (loop_ty, i_val));
+        List.iter gen_stmt body;
+        Hashtbl.remove locals name;
+        if block_terminator (insertion_block builder) = None then begin
+          let i_next = build_add i_val (const_int (i32_type context) 1) "for_next" builder in
+          ignore (build_store i_next ctr_ptr builder);
+          ignore (build_br cond_bb builder)
+        end;
+
+        position_at_end exit_bb builder
   in
 
   List.iter gen_stmt fdef.body;

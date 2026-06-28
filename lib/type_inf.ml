@@ -441,6 +441,24 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals (s : Ast.stmt)
         (tyenv, raw_locals) body
       in
       (tyenv, raw_locals')
+  | For (name, lo_expr, hi_expr, body) ->
+      let lo_ty = infer_expr senv tyenv fenv lo_expr in
+      let hi_ty = infer_expr senv tyenv fenv hi_expr in
+      unify_at lo_expr.loc lo_ty TInt;
+      unify_at hi_expr.loc hi_ty TInt;
+      (* 両端が定数リテラルの場合のみ TRefinedInt に確定できる。
+         変数の場合は実行時値が不明なので TInt に留める（保守的）。 *)
+      let idx_ty = match lo_expr.desc, hi_expr.desc with
+        | IntLit lo_v, IntLit hi_v -> TRefinedInt (lo_v, hi_v)
+        | _ -> TInt
+      in
+      (* ループ変数は不変（再代入不可）Imm バインディング。ループ外には漏れない。 *)
+      let body_env = StringMap.add name (idx_ty, false) tyenv in
+      let (_, raw_locals') = List.fold_left
+        (fun (env, locs) s -> infer_stmt senv env fenv ret_ty locs s)
+        (body_env, raw_locals) body
+      in
+      (tyenv, raw_locals')
 
 (* ── Function inference ──────────────────────────────────────────────────── *)
 

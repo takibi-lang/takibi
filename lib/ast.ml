@@ -55,6 +55,7 @@ and stmt_desc =
   | Let of bool * ident * type_expr option * expr option  (* is_mutable, name, type, init *)
   | If of expr * stmt list * stmt list
   | While of expr * stmt list
+  | For of ident * expr * expr * stmt list  (* for i in lo..<hi { body } *)
 [@@deriving show]
 
 type func = {

@@ -1,0 +1,46 @@
+// for i in lo..<hi ループ: i が {lo..<hi} 型になり配列境界チェックが省略される
+//
+// 生成される機械語の違い（AArch64 AEL1 ベアメタル）:
+//
+//   while ループ（let mut i: int）:
+//     str i, [sp]        ; スタックへ保存
+//     ldr i, [sp]        ; ロード（毎回）
+//     cmp i, #8          ; 境界チェック ← llvm.trap 候補
+//     b.hi trap
+//     ...
+//
+//   for i in 0..<8:
+//     load i_ctr         ; ループカウンタロード
+//     i: {0..<8} — 境界チェック完全省略
+//     strb val, [buf+i]  ; 直接書き込み（cmp なし）
+//
+// QEMU expected output: ABCDEFGH\r\n
+
+fn uart_putc(c: char) {
+    let dr: *io char = 0x09000000;
+    *dr = c;
+}
+
+let buf: [char; 8];
+
+// for ループで 'A'〜'H' を書き込む。i: {0..<8} なので buf[i] の境界チェックなし。
+fn fill() {
+    for i in 0..<8 {
+        buf[i] = 'A' + i as char;
+    }
+}
+
+// for ループで読み出して UART へ送る。同様に境界チェックなし。
+fn print_buf() {
+    for i in 0..<8 {
+        uart_putc(buf[i]);
+    }
+    uart_putc('\r');
+    uart_putc('\n');
+}
+
+fn main() -> int {
+    fill();
+    print_buf();
+    return 0;
+}

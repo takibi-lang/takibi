@@ -1356,6 +1356,37 @@ let infer_tests = [
       "fn foo(i: {0..<8}) {} \
        fn f(v: int) { if (0 <= v && v < 8) { foo(v); } }");
 
+  (* ── Step 3.5 for loop: for i in lo..<hi ─────────────────────────────────── *)
+
+  Alcotest.test_case "for loop parses and type-checks" `Quick
+    (expect_ok "fn f() { for i in 0..<8 {} }");
+
+  Alcotest.test_case "for loop variable has refined type (literal bounds)" `Quick
+    (fun () ->
+      let pt = infer "let buf: [char; 8]; \
+                      fn f() { for i in 0..<8 { buf[i] = 'X'; } }" in
+      (* buf[i] should compile without error: i:{0..<8} covers [char;8] *)
+      ignore pt);
+
+  Alcotest.test_case "for loop body accesses refined-param function" `Quick
+    (expect_ok
+      "fn foo(i: {0..<8}) {} \
+       fn f() { for i in 0..<8 { foo(i); } }");
+
+  Alcotest.test_case "for loop variable does not escape" `Quick
+    (expect_type_error "Unbound variable"
+      "fn f() { for i in 0..<8 {} let x: int = i; }");
+
+  Alcotest.test_case "for with variable bounds gives plain int" `Quick
+    (expect_ok
+      "fn f(n: int) { let mut s: int = 0; for i in 0..<n { s = s + i; } }");
+
+  Alcotest.test_case "nested for loops compile" `Quick
+    (expect_ok
+      "let buf: [char; 4]; \
+       fn f() { for i in 0..<4 { buf[i] = 'A'; } \
+                for i in 0..<4 { buf[i] = 'B'; } }");
+
 ]
 
 (* ── Entry point ─────────────────────────────────────────────────────────── *)

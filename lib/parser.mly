@@ -8,7 +8,7 @@ open Ast
 %token FN RETURN LET MUT EXTERN STRUCT IO
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT
 %token ASSIGN DOT
-%token IF ELSE WHILE
+%token IF ELSE WHILE FOR IN
 %token EOF
 %token AMP
 
@@ -101,6 +101,8 @@ stmt:
     { { desc = If(c, t, p); loc = $symbolstartpos } }
   | WHILE LPAREN c = expr RPAREN LBRACE b = stmts RBRACE
     { { desc = While(c, b); loc = $symbolstartpos } }
+  | FOR id = IDENT IN lo = expr DOTDOTLT hi = expr LBRACE body = stmts RBRACE
+    { { desc = For (id, lo, hi, body); loc = $symbolstartpos } }
   | id = IDENT ASSIGN e = expr SEMI
     { { desc = Assign (id, e); loc = $symbolstartpos } }
   | id = IDENT LBRACKET idx = expr RBRACKET ASSIGN rhs = expr SEMI

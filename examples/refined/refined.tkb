@@ -1,8 +1,23 @@
-// Step 3.3/3.4: {lo..<hi} 型による配列境界チェック省略の実証
+// Step 3.3/3.4/3.5: {lo..<hi} 型・for ループ・if 絞り込みによる境界チェック省略
 //
-// グローバル配列 buf[8] を refined-type インデックスで操作する。
-// TypeRefined が [0,N) を包含することを型検査器が証明するため、
-// emit_bounds_check を省略し境界チェックのない機械語を生成する。
+// 3 つのアプローチで同じ buf[8] に 'A'..'H' を書き込んで出力する。
+// いずれも生成される機械語に llvm.trap (brk #0) が含まれないことを目標とする。
+//
+//   アプローチ 1: 手動 {lo..<hi} 注釈（Step 3.4）
+//     fill_pair(i: {0..<7}) — 呼び出し元が型を証明して渡す
+//
+//   アプローチ 2: for ループ（Step 3.5-for）
+//     for i in 0..<8 — コンパイラが i: {0..<8} を自動確定
+//
+//   アプローチ 3: if 絞り込み（Step 3.5-if）
+//     if (v >= 0 && v < 8) — 実行時チェックを型証明に変換
+//     ※ Mut バインディング (v: int パラメータ) への直接アクセスは
+//       現状まだ保守的に境界チェックが残る（Step 3.5-Mut で改善予定）
+//
+// QEMU expected output:
+//   ABCDEFGH\r\n  (アプローチ 1)
+//   ABCDEFGH\r\n  (アプローチ 2)
+//   ABCDEFGH\r\n  (アプローチ 3)
 
 fn uart_putc(c: char) {
     let dr: *io char = 0x09000000;
@@ -11,24 +26,13 @@ fn uart_putc(c: char) {
 
 let buf: [char; 8];
 
-// i: {0..<7} → buf[i] と buf[i+1] を同時書き込み。両方チェック省略される。
+// ─── アプローチ 1: 手動 {lo..<hi} 注釈（Step 3.4）──────────────────────────
 fn fill_pair(i: {0..<7}, lo: char, hi: char) {
-    buf[i]   = lo;   // TypeRefined(0,7): hi=7 <= n=8 → チェック省略
-    buf[i+1] = hi;   // TypeRefined(1,8): hi=8 <= n=8 → チェック省略
+    buf[i]   = lo;   // TypeRefined(0,7): hi=7 <= 8 → チェック省略
+    buf[i+1] = hi;   // TypeRefined(1,8): hi=8 <= 8 → チェック省略
 }
 
-fn print_buf() {
-    let mut i = 0;
-    while (i < 8) {
-        uart_putc(buf[i]);
-        i = i + 1;
-    }
-    uart_putc('\r');
-    uart_putc('\n');
-}
-
-fn main() -> int {
-    // 4 組のペアで 8 要素を埋める（i=0,2,4,6 でそれぞれ 2 要素）
+fn fill_pairs() {
     let i0: {0..<7} = 0;
     let i2: {0..<7} = 2;
     let i4: {0..<7} = 4;
@@ -37,6 +41,42 @@ fn main() -> int {
     fill_pair(i2, 'C', 'D');
     fill_pair(i4, 'E', 'F');
     fill_pair(i6, 'G', 'H');
-    print_buf();
+}
+
+// ─── アプローチ 2: for ループ（Step 3.5-for）───────────────────────────────
+fn fill_loop() {
+    for i in 0..<8 {
+        buf[i] = 'A' + i as char;  // i: {0..<8} → チェック省略
+    }
+}
+
+// ─── アプローチ 3: if 絞り込み（Step 3.5-if）───────────────────────────────
+fn fill_cond(v: int, c: char) {
+    if (v >= 0 && v < 8) {
+        buf[v] = c;
+    }
+}
+
+fn fill_by_cond() {
+    let mut i = 0;
+    while (i < 8) {
+        fill_cond(i, 'A' + i as char);
+        i = i + 1;
+    }
+}
+
+// ─── 共通: 結果出力 ────────────────────────────────────────────────────────
+fn print_buf() {
+    for i in 0..<8 {
+        uart_putc(buf[i]);
+    }
+    uart_putc('\r');
+    uart_putc('\n');
+}
+
+fn main() -> int {
+    fill_pairs();   print_buf();   // アプローチ 1
+    fill_loop();    print_buf();   // アプローチ 2
+    fill_by_cond(); print_buf();   // アプローチ 3
     return 0;
 }

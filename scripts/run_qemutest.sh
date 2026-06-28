@@ -166,6 +166,7 @@ run_test "msgqueue"  examples/msgqueue/kernel.elf  examples/msgqueue/msgqueue.ex
 run_test "watchdog" examples/watchdog/kernel.elf examples/watchdog/watchdog.expected
 run_test "refined"  examples/refined/kernel.elf  examples/refined/refined.expected
 run_test "narrow"   examples/narrow/kernel.elf   examples/narrow/narrow.expected
+run_test "for"      examples/for/kernel.elf      examples/for/for.expected
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

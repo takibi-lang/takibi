@@ -15,6 +15,8 @@ rule read = parse
   | "if"      { IF }
   | "else"    { ELSE }
   | "while"   { WHILE }
+  | "for"     { FOR }
+  | "in"      { IN }
   | "as"      { AS }
   | "void"    { VOID_TYPE }
   | "extern"  { EXTERN }
