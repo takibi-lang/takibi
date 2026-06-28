@@ -13,8 +13,8 @@ COMMON_STARTUP_O := $(COMMON_DIR)/startup.o
 COMMON_LINK_LD   := $(COMMON_DIR)/link.ld
 
 # ── Examples ──────────────────────────────────────────────────────────────────
-# 新しい例題を追加するときはここに名前を足すだけ。
-# 規約: examples/<name>/<name>.tkb → examples/<name>/kernel.elf
+# To add a new example, just append its name here.
+# Convention: examples/<name>/<name>.tkb → examples/<name>/kernel.elf
 EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct msgqueue watchdog refined narrow for
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
@@ -24,19 +24,19 @@ EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
 .DEFAULT_GOAL := build
 
-## build: OCamlコンパイラ(dune)のみビルド
+## build: build only the OCaml compiler (dune)
 build:
 	dune build
 
-## test: ユニットテスト実行
+## test: run unit tests
 test:
 	dune test
 
-## qemutest: QEMU 結合テストを実行（全例題をビルドして自動検証）
+## qemutest: run QEMU integration tests (build all examples and verify automatically)
 qemutest: $(ALL_KERNELS)
 	@bash scripts/run_qemutest.sh
 
-## check: ユニットテスト + QEMU 結合テストを実行
+## check: run unit tests + QEMU integration tests
 check: test qemutest
 
 # ── Shared startup object ─────────────────────────────────────────────────────
@@ -44,26 +44,26 @@ $(COMMON_STARTUP_O): $(COMMON_STARTUP_S)
 	$(LLVM_MC) --triple=aarch64-none-elf --filetype=obj $< -o $@
 
 # ── .tkb → .o  (static pattern rule) ─────────────────────────────────────────
-# examples/%.o に対して % は "name/name"（スラッシュ込み）にマッチする。
-# 例: examples/start/start.o ← examples/start/start.tkb
+# For examples/%.o, % matches "name/name" (including the slash).
+# Example: examples/start/start.o ← examples/start/start.tkb
 .SECONDEXPANSION:
 
 $(EXAMPLE_OBJS): examples/%.o: examples/%.tkb build
 	$(TAKIBI) $< --target $(AARCH64_TARGET) -o $@
 
 # ── example.o + startup.o → kernel.elf ───────────────────────────────────────
-# examples/%/kernel.elf の % は "name" にマッチ（スラッシュなし）。
-# $$*.o は2段展開で examples/<name>/<name>.o になる:
-#   1段目: $$* → $*  ($$が$に縮退)
-#   2段目: $*  → name (ステム展開)
-# 追加アセンブリが必要な例題（preempt など）は個別ルールで定義するためここから除外する。
+# For examples/%/kernel.elf, % matches "name" (no slash).
+# $$*.o expands in two stages to examples/<name>/<name>.o:
+#   stage 1: $$* → $*  ($$ collapses to $)
+#   stage 2: $*  → name (stem expansion)
+# Examples requiring extra assembly (e.g. preempt) are excluded and handled by individual rules.
 GENERIC_KERNELS := $(filter-out examples/preempt/kernel.elf examples/semaphore/kernel.elf examples/condvar/kernel.elf examples/msgqueue/kernel.elf examples/watchdog/kernel.elf, $(ALL_KERNELS))
 
 $(GENERIC_KERNELS): examples/%/kernel.elf: \
     $(COMMON_STARTUP_O) examples/%/$$*.o $(COMMON_LINK_LD)
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/$*/$*.o -o $@
 
-# ── preempt: 追加アセンブリオブジェクトが必要なので個別ルールで上書き ─────────
+# ── preempt: override with individual rule because extra assembly objects are needed ─────────
 PREEMPT_ASM_S := examples/preempt/preempt_asm.S
 PREEMPT_ASM_O := examples/preempt/preempt_asm.o
 
@@ -75,7 +75,7 @@ examples/preempt/kernel.elf: \
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) \
 	       examples/preempt/preempt.o $(PREEMPT_ASM_O) -o $@
 
-# ── semaphore: 追加アセンブリオブジェクトが必要なので個別ルールで上書き ──────
+# ── semaphore: override with individual rule because extra assembly objects are needed ──────
 SEMAPHORE_ASM_S := examples/semaphore/semaphore_asm.S
 SEMAPHORE_ASM_O := examples/semaphore/semaphore_asm.o
 
@@ -87,7 +87,7 @@ examples/semaphore/kernel.elf: \
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) \
 	       examples/semaphore/semaphore.o $(SEMAPHORE_ASM_O) -o $@
 
-# ── condvar: 追加アセンブリオブジェクトが必要なので個別ルールで上書き ────────
+# ── condvar: override with individual rule because extra assembly objects are needed ────────
 CONDVAR_ASM_S := examples/condvar/condvar_asm.S
 CONDVAR_ASM_O := examples/condvar/condvar_asm.o
 
@@ -99,7 +99,7 @@ examples/condvar/kernel.elf: \
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) \
 	       examples/condvar/condvar.o $(CONDVAR_ASM_O) -o $@
 
-# ── watchdog: 追加アセンブリオブジェクトが必要なので個別ルールで上書き ──────
+# ── watchdog: override with individual rule because extra assembly objects are needed ──────
 WATCHDOG_ASM_S := examples/watchdog/watchdog_asm.S
 WATCHDOG_ASM_O := examples/watchdog/watchdog_asm.o
 
@@ -115,11 +115,11 @@ examples/watchdog/kernel.elf: \
 QEMU_FLAGS := -machine virt -cpu cortex-a53 -nographic \
               -semihosting-config enable=on,target=native
 
-## qemu-echo: QEMU virt で echo サーバを手動実行 (Ctrl-A X で終了)
+## qemu-echo: manually run the echo server on QEMU virt (press Ctrl-A X to quit)
 qemu-echo: examples/echo/kernel.elf
 	$(QEMU) $(QEMU_FLAGS) -kernel $<
 
-# ── msgqueue: 追加アセンブリオブジェクトが必要なので個別ルールで上書き ───────
+# ── msgqueue: override with individual rule because extra assembly objects are needed ───────
 MSGQUEUE_ASM_S := examples/msgqueue/msgqueue_asm.S
 MSGQUEUE_ASM_O := examples/msgqueue/msgqueue_asm.o
 
@@ -132,7 +132,7 @@ examples/msgqueue/kernel.elf: \
 	       examples/msgqueue/msgqueue.o $(MSGQUEUE_ASM_O) -o $@
 
 # ── clean ─────────────────────────────────────────────────────────────────────
-## clean: dune の生成物 + リンク成果物を削除
+## clean: remove dune build artifacts and linker outputs
 clean:
 	dune clean
 	rm -f $(COMMON_STARTUP_O) \

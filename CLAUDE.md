@@ -1,357 +1,350 @@
 # takibi
 
-OCaml 5.4.0 製の自作言語コンパイラ。LLVM 19 バックエンド経由でネイティブ機械語を生成する。
-最終目標は Raspberry Pi 3 / RISC-V / STM32 ベアメタル環境で TCP/IP スタックを実装し HTTP サーバを動かすこと。
+A self-made language compiler written in OCaml 5.4.0. Generates native machine code via an LLVM 19 backend.
+The ultimate goal is to implement a TCP/IP stack and run an HTTP server on Raspberry Pi 3 / RISC-V / STM32 bare-metal environments.
 
-## 設計原則：エラーはコンパイル時に検出する
+## Design Principle: Detect Errors at Compile Time
 
-**組み込み製品では実行時例外・パニックはゼロであることが要件。**
-タイマ・UART・TCP/IP スタックが走っているベアメタル環境で実行時トラップが起きた場合、
-システムは静かに壊れるか暴走する。ユーザーには何も伝わらない。
+**In embedded products, zero runtime exceptions and panics is a hard requirement.**
+If a runtime trap occurs in a bare-metal environment running timers, UART, and a TCP/IP stack,
+the system will silently break or run amok. Nothing is communicated to the user.
 
-- **エラーはコンパイル時に検出する**。型システムが証明できないアクセスは
-  コンパイルエラーにすることを最終目標とする。
-- **`llvm.trap` は過渡的な安全網**。現状の配列境界チェック（`icmp uge` → `llvm.trap`）は
-  開発中のデバッグを助けるためのものだが、AArch64 では `brk #0`（Synchronous Abort）に変換される
-  実行時エラーであり、製品コードでこれが発生してはならない。
-- **区間型 `{lo..<hi}` がその解決策**。`hi <= N` かつ `lo >= 0` をコンパイル時に証明できれば
-  `llvm.trap` のコードは一切生成されない（Step 3.4）。
-- **`int` と `{lo..<hi}` の使い分けはプログラマの責任**:
-  - `int` = 範囲不明（MMIO・外部入力など）→ 境界チェック必須
-  - `{lo..<hi}` = プログラマが範囲を知っている値 → チェック省略可能
-  - MMIO から読んだ値を無検査で配列インデックスに使うのはバグの温床であり、
-    `int` のままチェックが出るのは**正しい動作**である
+- **Detect errors at compile time.** The ultimate goal is to make any access that the type system cannot prove into a compile error.
+- **`llvm.trap` is a transitional safety net.** The current array bounds check (`icmp uge` → `llvm.trap`) aids debugging during development, but on AArch64 it translates to `brk #0` (Synchronous Abort) — a runtime error that must never occur in production code.
+- **The range type `{lo..<hi}` is the solution.** If `hi <= N` and `lo >= 0` can be proven at compile time, no `llvm.trap` code is generated at all (Step 3.4).
+- **When to use `int` vs `{lo..<hi}` is the programmer's responsibility**:
+  - `int` = unknown range (MMIO, external input, etc.) → bounds check required
+  - `{lo..<hi}` = value whose range the programmer knows → check can be omitted
+  - Using an unchecked value read from MMIO directly as an array index is a bug hotbed; a bounds check appearing on `int` is **correct behavior**
 
-**「境界チェックが残るコード = 型アノテーションがまだ不十分なコード」**と読む。
-`for i in 0..<n`（実装予定）や `{lo..<hi}` 注釈でインデックスの範囲を型レベルで確定させることが
-「完成した」コードの姿。
+**"Code with remaining bounds checks = code whose type annotations are still insufficient."**
+The finished form of code is when index ranges are pinned at the type level using `for i in 0..<n` or `{lo..<hi}` annotations.
 
-## 言語仕様（現時点）
+## Language Specification (Current)
 
-- ファイル拡張子: `.tkb`
-- 型: `int`, `char`, `void`, `*T`（通常ポインタ型、non-volatile）、`io T`（volatile修飾値型）、`*io T`（volatile MMIOポインタ型 = `TypePtr(TypeIo T)`）、`[T; N]`（配列型、関数引数はポインタに decay）、`fn(T...) -> R`（関数ポインタ型）、`Name`（名前付き構造体型）
-- 文:
-  - `let x = e` / `let x: T = e` — 不変変数宣言（初期値必須、再代入不可）
-  - `let mut x = e` / `let mut x: T = e` — 可変変数宣言（再代入可）
-  - `let x: T;` — 未初期化グローバル変数宣言（グローバルスコープのみ）
-  - `while`, `return`, 代入 (`x = e`)、ポインタ経由代入 (`*p = v`)
-  - `if (cond) { ... }` — `else` は省略可
-  - `if (cond) { ... } else { ... }` — 通常の if/else
-  - `if (cond) { ... } else if (cond) { ... } else { ... }` — else if チェーン
-  - 不変変数へのアドレス取得 (`&x`) はコンパイルエラー（グローバル変数は常に mutable 扱いなので `&global_var` は可）
-- 式:
-  - 整数リテラル（10進・16進 `0x...`）
-  - 文字リテラル（`'a'`、`'\n'`、`'\r'`、`'\t'`、`'\0'`、`'\\'`）— `IntLit (Char.code c)` に脱糖
-  - 文字列リテラル（`"..."` — `\n` `\r` `\t` `\\` `\"` エスケープ対応）
-  - コメント（`// 行コメント`、`/* ブロックコメント */`）
-  - 算術演算（`+` `-` `*` `/` `%`）、比較演算（`<` `>` `<=` `>=` `==` `!=`）
-  - ポインタ算術: `ptr + int` / `ptr - int` → 同じポインタ型（GEP として emit）。`int + ptr` も可。codegen は `build_neg + GEP` で実装
-  - 単項マイナス（`-expr`）— パーサで `BinOp(Sub, IntLit 0, expr)` に脱糖
-  - 論理 OR（`||`）
-  - ビット演算（`>>` 右論理シフト、`<<` 左シフト、`&` ビット AND、`|` ビット OR、`^` ビット XOR）— 両辺 `int`、結果 `int`
-  - 関数呼び出し、`*expr`（デリファレンス）、`&ident`（アドレス取得）
-  - `expr as T` — 明示的型変換（int ↔ char、`*T` → int、`*T` → `*U`）。優先順位は算術より低いので `a + b as char` = `(a + b) as char`
-- `struct Name { field: type; ... }` — 構造体型定義（トップレベルのみ、フィールドはプリミティブ型・ポインタ型・他の構造体型）
-- `let mut s: Name;` — 構造体変数宣言（ローカル/グローバル、常に mutable として扱う）
-- `s.field` — フィールド読み出し（`s: Name` または `s: *Name` 両対応、Zig 方式）
-- `s.field = v` — フィールド書き込み（ローカル変数名への直接 dot 代入のみ、式の左辺は不可）
-- `&s` — 構造体変数のアドレス取得（`*Name` を返す、関数への pass by pointer に使う）
-- `extern fn name(params) -> ret;` — 外部アセンブリ関数宣言（LLVM `declare` を emit する）
-- MMIO・volatile: `io T` は volatile 修飾値型。`*io T`（= `TypePtr(TypeIo T)`）は volatile MMIOポインタ
-  - `*io T` ポインタ: `*p` は volatile load、`*p = v` は volatile store
-  - `*T`（通常ポインタ）の load/store は non-volatile（LLVMが最適化可能）
-  - `io T` 変数（例 `let flag: io int;`）への直接アクセスも全て volatile
-  - `&io_var` は自動で `*io T` を返す（`as *io int` キャスト不要）
-  - 割り込みハンドラと共有するフラグ: `let flag: io int; while (flag == 0) {}` の形で読む
+- File extension: `.tkb`
+- Types: `int`, `char`, `void`, `*T` (regular pointer, non-volatile), `io T` (volatile-qualified value type), `*io T` (volatile MMIO pointer = `TypePtr(TypeIo T)`), `[T; N]` (array type; decays to pointer in function arguments), `fn(T...) -> R` (function pointer type), `Name` (named struct type)
+- Statements:
+  - `let x = e` / `let x: T = e` — immutable variable declaration (initial value required, no reassignment)
+  - `let mut x = e` / `let mut x: T = e` — mutable variable declaration (reassignment allowed)
+  - `let x: T;` — uninitialized global variable declaration (global scope only)
+  - `while`, `return`, assignment (`x = e`), pointer-deref assignment (`*p = v`)
+  - `if (cond) { ... }` — `else` is optional
+  - `if (cond) { ... } else { ... }` — regular if/else
+  - `if (cond) { ... } else if (cond) { ... } else { ... }` — else-if chain
+  - Taking the address of an immutable variable (`&x`) is a compile error (global variables are always treated as mutable, so `&global_var` is allowed)
+- Expressions:
+  - Integer literals (decimal and hex `0x...`)
+  - Character literals (`'a'`, `'\n'`, `'\r'`, `'\t'`, `'\0'`, `'\\'`) — desugared to `IntLit (Char.code c)`
+  - String literals (`"..."` — supports `\n` `\r` `\t` `\\` `\"` escapes)
+  - Comments (`// line comment`, `/* block comment */`)
+  - Arithmetic (`+` `-` `*` `/` `%`), comparison (`<` `>` `<=` `>=` `==` `!=`)
+  - Pointer arithmetic: `ptr + int` / `ptr - int` → same pointer type (emitted as GEP). `int + ptr` also works. Codegen uses `build_neg + GEP`
+  - Unary minus (`-expr`) — desugared to `BinOp(Sub, IntLit 0, expr)` in the parser
+  - Logical OR (`||`)
+  - Bitwise ops (`>>` logical right shift, `<<` left shift, `&` bitwise AND, `|` bitwise OR, `^` bitwise XOR) — both operands `int`, result `int`
+  - Function call, `*expr` (dereference), `&ident` (address-of)
+  - `expr as T` — explicit type cast (int ↔ char, `*T` → int, `*T` → `*U`). Lower precedence than arithmetic, so `a + b as char` = `(a + b) as char`
+- `struct Name { field: type; ... }` — struct type definition (top-level only; fields are primitive types, pointer types, or other struct types)
+- `let mut s: Name;` — struct variable declaration (local/global, always treated as mutable)
+- `s.field` — field read (works for both `s: Name` and `s: *Name`, Zig-style)
+- `s.field = v` — field write (direct dot assignment to a variable name only; not allowed as the left side of an expression)
+- `&s` — take the address of a struct variable (returns `*Name`, used for pass-by-pointer)
+- `extern fn name(params) -> ret;` — external assembly function declaration (emits an LLVM `declare`)
+- MMIO / volatile: `io T` is a volatile-qualified value type. `*io T` (= `TypePtr(TypeIo T)`) is a volatile MMIO pointer
+  - `*io T` pointer: `*p` is a volatile load, `*p = v` is a volatile store
+  - `*T` (regular pointer) load/store is non-volatile (LLVM may optimize)
+  - Direct accesses to an `io T` variable (e.g. `let flag: io int;`) are all volatile
+  - `&io_var` automatically returns `*io T` (no `as *io int` cast needed)
+  - Flags shared with interrupt handlers: read as `let flag: io int; while (flag == 0) {}`
 
-## ビルドコマンド
+## Build Commands
 
 ```bash
-make build          # コンパイラ (takibi) のビルド（= dune build）
-make test           # ユニットテスト実行
-make qemutest       # QEMU 結合テスト実行（全例題をビルドして自動検証）
-make check          # make test + make qemutest を一括実行
-make qemu-echo      # QEMU virt (AArch64) で echo サーバを手動実行（Ctrl-A X で終了）
-make clean          # 生成物を削除
+make build          # build the compiler (takibi) only (= dune build)
+make test           # run unit tests
+make qemutest       # run QEMU integration tests (build all examples and verify automatically)
+make check          # run make test + make qemutest together
+make qemu-echo      # manually run the echo server on QEMU virt (AArch64) (Ctrl-A X to quit)
+make clean          # remove generated artifacts
 ```
 
-## ディレクトリ構成
+## Directory Layout
 
 ```
 lib/
-  ast.ml          — AST 定義（TypePtr, TypeArray, TypeFn, Deref, AddrOf, AssignDeref, Cast を含む）
-  lexer.mll       — ocamllex（hex リテラル、& トークン、as キーワード、^ トークン、-> トークン、void キーワード含む）
-  parser.mly      — Menhir（ポインタ型、配列型、関数ポインタ型、前置 * / & / 単項 -、as キャスト含む）
-  types.ml        — 内部型 (ty) + HM 型推論の出力型 + StringMap
-  type_inf.ml     — Hindley-Milner 型推論（immutable StringMap ベース）
-  typechecker.ml  — 外部向けラッパー（main.ml から呼ぶ）
-  llvm_gen.ml     — LLVM IR 生成・オブジェクトファイル出力
+  ast.ml          — AST definitions (includes TypePtr, TypeArray, TypeFn, Deref, AddrOf, AssignDeref, Cast)
+  lexer.mll       — ocamllex (includes hex literals, & token, as keyword, ^ token, -> token, void keyword)
+  parser.mly      — Menhir (includes pointer types, array types, function pointer types, prefix * / & / unary -, as cast)
+  types.ml        — internal type (ty) + HM type inference output types + StringMap
+  type_inf.ml     — Hindley-Milner type inference (immutable StringMap based)
+  typechecker.ml  — external wrapper (called from main.ml)
+  llvm_gen.ml     — LLVM IR generation and object file output
 bin/
-  main.ml         — CLI（`takibi <file.tkb> [-o out.o] [--target <triple>]`）
+  main.ml         — CLI (`takibi <file.tkb> [-o out.o] [--target <triple>]`)
 examples/
   common/
-    startup.S     — _start → main、BSS ゼロクリア、AArch64 semihosting exit（全例題共通）
-    link.ld       — リンカスクリプト（ロードアドレス 0x40000000）（全例題共通）
+    startup.S     — _start → main, BSS zero-clear, AArch64 semihosting exit (shared by all examples)
+    link.ld       — linker script (load address 0x40000000) (shared by all examples)
   hello/  start/  echo/  print_int/  print_hex/  print_ptr/
   mem/  array/  fizzbuzz/  fibonacci/  bubblesort/  ringbuf/
   callstack/  crc8/  djb2/  bump/  timer/  rtc/
   irq/  scheduler/  preempt/  semaphore/  condvar/  struct/  msgqueue/
-  （各ディレクトリ: <name>.tkb 冒頭のコメントに内容説明あり）
+  (each directory: see the leading comment in <name>.tkb for a description)
 scripts/
-  run_qemutest.sh — QEMU 結合テストスクリプト（FIFO 同期・タイミング検証付き）
+  run_qemutest.sh — QEMU integration test script (FIFO sync and timing verification included)
 test/
-  test_takibi.ml  — Alcotest による parser / type_inf ユニットテスト
+  test_takibi.ml  — Alcotest unit tests for parser / type_inf
 ```
 
-## 重要な設計上のポイント
+## Important Design Notes
 
-### LLVM 19 opaque pointers
-LLVM 19 はポインタ型が 1 種類（`pointer_type context`）のみ。`build_load` に element type を明示する必要がある。
-そのため `gen_expr` は `llvalue` だけでなく `(Ast.type_expr * llvalue)` を返す設計になっている。
+### LLVM 19 Opaque Pointers
+LLVM 19 has only one pointer type (`pointer_type context`). The element type must be passed explicitly to `build_load`.
+For this reason, `gen_expr` returns `(Ast.type_expr * llvalue)` rather than just `llvalue`.
 
-### 型推論環境は immutable Map
-`tyenv` は `(ty * bool) Types.StringMap.t`（`Map.Make(String)` ベース、bool = is_mutable）。
-`Hashtbl` は使わない。`infer_stmt` のシグネチャ:
+### Type Inference Environment is an Immutable Map
+`tyenv` is `(ty * bool) Types.StringMap.t` (`Map.Make(String)` based; bool = is_mutable).
+`Hashtbl` is not used. The signature of `infer_stmt`:
 ```ocaml
 val infer_stmt : tyenv -> fenv -> ty -> ty StringMap.t -> Ast.stmt
                -> tyenv * ty StringMap.t
 ```
-戻り値の第2要素 `raw_locals` が codegen 用の Let バインディング型マップ（可変・不変両方を含む）。
+The second element of the return value, `raw_locals`, is the Let-binding type map for codegen (contains both mutable and immutable bindings).
 
-### binop を追加するときの更新ファイル
-`Ast.binop` に新しいコンストラクタを追加する場合の手順:
-- **既存トークンを再利用する場合（3ファイル）**: `lib/ast.ml`、`lib/type_inf.ml`、`lib/llvm_gen.ml`
-- **新しいシンボルを追加する場合（5ファイル）**: 上記3ファイルに加えて `lib/lexer.mll`（トークン定義）、`lib/parser.mly`（優先順位・文法規則）
+### Files to Update When Adding a binop
+When adding a new constructor to `Ast.binop`:
+- **Reusing an existing token (3 files)**: `lib/ast.ml`, `lib/type_inf.ml`, `lib/llvm_gen.ml`
+- **Adding a new symbol (5 files)**: the 3 files above plus `lib/lexer.mll` (token definition) and `lib/parser.mly` (precedence and grammar rules)
 
-OCaml の網羅性チェック（exhaustive match）がコンパイルエラーで漏れを教えてくれる。
+OCaml's exhaustive match check will report any omissions as compile errors.
 
-### ビット演算の優先順位（C とは異なる点あり）
-`&`（Band）は比較演算子より**高い**優先順位を持つ（C では低い）。
-これにより `n & mask == 0` は `(n & mask) == 0` と解釈される（C の有名な落とし穴を回避）。
-`^`（Bxor）は比較演算子より**低い**（C と同じ）。`a ^ b == c` は `a ^ (b == c)` になる。
-`|`（Bor）は `^` より**低い**（C と同じ）。`a | b ^ c` は `a | (b ^ c)` になる。
-`>>`（Shr）と `<<`（Shl）は `&` より高く `+/-` より低い。`n >> 4 & 0xf` は `(n >> 4) & 0xf` になる。
-`%`（Mod）は `*` `/` と同じ優先順位（乗除算グループ）。
+### Bitwise Operator Precedence (differs from C in some cases)
+`&` (Band) has **higher** precedence than comparison operators (lower in C).
+This means `n & mask == 0` is interpreted as `(n & mask) == 0` (avoiding a well-known C pitfall).
+`^` (Bxor) is **lower** than comparison (same as C). `a ^ b == c` becomes `a ^ (b == c)`.
+`|` (Bor) is **lower** than `^` (same as C). `a | b ^ c` becomes `a | (b ^ c)`.
+`>>` (Shr) and `<<` (Shl) are higher than `&` and lower than `+/-`. `n >> 4 & 0xf` becomes `(n >> 4) & 0xf`.
+`%` (Mod) has the same precedence as `*` and `/` (multiplicative group).
 
-優先順位（低→高）: `||` < `|` < `^` < 比較 < `&` < `as` < `+/-` < `>>` `<<` < `*/` `%` < 単項
+Precedence (low → high): `||` < `|` < `^` < comparison < `&` < `as` < `+/-` < `>>` `<<` < `*` `/` `%` < unary
 
-### % 区間伝播の soundness 条件
+### Soundness Condition for % Range Propagation
 
-`n % m`（m が正の整数リテラル）の区間伝播は **左辺が非負であることが型レベルで保証されているときのみ** `{0..<m}` を返す。
+Range propagation for `n % m` (where m is a positive integer literal) returns `{0..<m}` **only when the left operand is guaranteed non-negative at the type level**.
 
-- `n: {lo..<_}` で `lo >= 0` → `TRefinedInt(0, m)` / `TypeRefined(0, m)`（安全）
-- `n: int`（負になりえる） → `TInt` / `TypeInt`（保守的にフォール）
+- `n: {lo..<_}` with `lo >= 0` → `TRefinedInt(0, m)` / `TypeRefined(0, m)` (safe)
+- `n: int` (possibly negative) → `TInt` / `TypeInt` (conservative fallback)
 
-**根拠**: LLVM の `srem` は被除数が負なら負の余りを返す（`(-5) % 8 = -5`、not 3）。
-`n: int` に対して無条件に `{0..<m}` を返すと `arr[(-5) % 8]` を「安全」と誤判定し、
-bounds check を省略したままバッファアンダーリードが起きる unsound な動作になる。
+**Rationale**: LLVM's `srem` returns a negative remainder when the dividend is negative (`(-5) % 8 = -5`, not 3).
+Unconditionally returning `{0..<m}` for `n: int` would cause `arr[(-5) % 8]` to be judged "safe",
+producing an unsound buffer under-read with the bounds check omitted.
 
-**同期ルール**: `lib/type_inf.ml`（`Mod` ケース）と `lib/llvm_gen.ml`（`Mod` ケース）の
-両方に `lo >= 0` ガードがある。片方だけ緩めると両者が食い違うので必ず対で変更する。
+**Sync rule**: Both `lib/type_inf.ml` (`Mod` case) and `lib/llvm_gen.ml` (`Mod` case) have a `lo >= 0` guard.
+Relaxing only one side causes them to disagree; always change them together.
 
-### 単項マイナスはパーサで脱糖
-`-expr` は `BinOp(Sub, IntLit 0, expr)` に変換される（`parser.mly` の `%prec UNARY` ルール）。
-AST・型推論・codegen を変更せずに済む。LLVM IR でも `sub i32 0, %x` が整数否定の正規形。
+### Unary Minus is Desugared in the Parser
+`-expr` is converted to `BinOp(Sub, IntLit 0, expr)` (the `%prec UNARY` rule in `parser.mly`).
+No changes to AST, type inference, or codegen are needed. `sub i32 0, %x` is also the canonical form of integer negation in LLVM IR.
 
-### as キャストは5ファイルで構成
-`expr as T` を追加した際の変更ファイル:
-1. `lib/ast.ml` — `Cast of type_expr * expr` コンストラクタ
-2. `lib/lexer.mll` — `"as"` キーワード
-3. `lib/parser.mly` — `%nonassoc AS`（算術より低優先度）、`expr AS type_expr` 規則
-4. `lib/type_inf.ml` — ソース式をチェックしてターゲット型を返す
-5. `lib/llvm_gen.ml` — `coerce` 関数でターゲット型ごとに変換命令を選択:
+### The as Cast Spans 5 Files
+Files changed when `expr as T` was added:
+1. `lib/ast.ml` — `Cast of type_expr * expr` constructor
+2. `lib/lexer.mll` — `"as"` keyword
+3. `lib/parser.mly` — `%nonassoc AS` (lower precedence than arithmetic), `expr AS type_expr` rule
+4. `lib/type_inf.ml` — checks the source expression and returns the target type
+5. `lib/llvm_gen.ml` — `coerce` function selects the conversion instruction per target type:
    - `int → char`: `trunc i32, i8`
    - `char/i1 → int`: `zext`
-   - `int → *T`: `zext i32, i64` → `inttoptr`（MMIO アドレス代入）
-   - `*T → int`: `ptrtoint ptr, i64` → `trunc i64, i32`（ポインタ値の表示）
-   - `*T → *U`: **no-op**（LLVM 19 では全ポインタが同じ `ptr` 型なので `coerce` の先頭の `if vty = dst_ll then v` が適用される。コンパイラ変更不要）
+   - `int → *T`: `zext i32, i64` → `inttoptr` (MMIO address assignment)
+   - `*T → int`: `ptrtoint ptr, i64` → `trunc i64, i32` (displaying a pointer value)
+   - `*T → *U`: **no-op** (in LLVM 19, all pointers are the same `ptr` type, so the leading `if vty = dst_ll then v` in `coerce` applies; no compiler change needed)
 
-### 不変変数と可変変数の codegen
-`llvm_gen.ml` の locals テーブルは `(string, local_binding) Hashtbl.t` で管理する。
+### Codegen for Immutable and Mutable Variables
+The locals table in `llvm_gen.ml` is managed as `(string, local_binding) Hashtbl.t`.
 
 ```ocaml
 type local_binding =
-  | Imm of Ast.type_expr * llvalue  (* 不変: alloca なし、SSA 値を直接保持 *)
-  | Mut of Ast.type_expr * llvalue  (* 可変: alloca ポインタ *)
+  | Imm of Ast.type_expr * llvalue  (* immutable: no alloca; holds the SSA value directly *)
+  | Mut of Ast.type_expr * llvalue  (* mutable: alloca pointer *)
 ```
 
-- `let x = e` → 式を評価した llvalue を `Imm` としてテーブルに登録。`alloca/store/load` を生成しない
-- `let mut x = e` → エントリーブロックで `alloca` を確保（`Mut`）し、宣言箇所で `store`
-- 関数の引数は常に `Mut`（パラメータは再代入可能）
+- `let x = e` → evaluates the expression to an llvalue and registers it as `Imm`. No `alloca/store/load` is generated.
+- `let mut x = e` → allocates an `alloca` in the entry block (`Mut`) and emits a `store` at the declaration site.
+- Function arguments are always `Mut` (parameters can be reassigned).
 
-**`gen_stmt` は `gen_func` の内側に定義されている**。これは不変 `let` の型を、HM 型推論結果を参照する `res` 関数で解決する必要があるため。OCaml のクロージャとして `gen_func` スコープの `res` を自然に参照できる。
+**`gen_stmt` is defined inside `gen_func`**. This is because the type of an immutable `let` must be resolved via the `res` function that references the HM type inference result. As an OCaml closure, `res` in the `gen_func` scope can be referenced naturally.
 
-### グローバル配列と未初期化グローバル変数
-`let heap: [char; 256];` のような未初期化グローバル変数宣言をサポートする。
+### Global Arrays and Uninitialized Global Variables
+Uninitialized global variable declarations such as `let heap: [char; 256];` are supported.
 
-- LLVM IR では `undef` として emit する（`zeroinitializer` ではない）
-- `startup.S` が BSS セクションをゼロクリアするため、実行時には必ずゼロになる
-- 配列型 `[T; N]` はグローバルスコープでのみ宣言可能。関数引数としては `*T` に decay する
+- Emitted as `undef` in LLVM IR (not `zeroinitializer`)
+- Since `startup.S` zero-clears the BSS section, values are always zero at runtime
+- Array type `[T; N]` can only be declared in global scope. Decays to `*T` in function arguments.
 
-`gen_global` の未初期化ケース:
+Uninitialized case in `gen_global`:
 ```ocaml
-| None -> undef llty  (* BSS はstartup.Sがゼロクリアするので安全 *)
+| None -> undef llty  (* BSS is zero-cleared by startup.S, so this is safe *)
 ```
 
-### 関数ポインタ型は5ファイルで構成
-`fn(T...) -> R` 型を追加した際の変更ファイル:
-1. `lib/ast.ml` — `TypeFn of type_expr list * type_expr` コンストラクタ
-2. `lib/lexer.mll` — `"->"` トークン、`"void"` キーワード
-3. `lib/parser.mly` — `fn_type` 非終端記号（`FN LPAREN type_list RPAREN ARROW type_expr`）
-4. `lib/type_inf.ml` — `Var` で関数名を `fenv` から `TFun` として取得、`Call` で直接呼び出し／間接呼び出し両対応
-5. `lib/llvm_gen.ml` — `ltype_of_ast (TypeFn _) = pointer_type context`（opaque ptr）、間接呼び出しは `function_type` を再構成して `build_call`
+### Function Pointer Types Span 5 Files
+Files changed when the `fn(T...) -> R` type was added:
+1. `lib/ast.ml` — `TypeFn of type_expr list * type_expr` constructor
+2. `lib/lexer.mll` — `"->"` token, `"void"` keyword
+3. `lib/parser.mly` — `fn_type` non-terminal (`FN LPAREN type_list RPAREN ARROW type_expr`)
+4. `lib/type_inf.ml` — `Var` retrieves a function name as `TFun` from `fenv`; `Call` supports both direct and indirect calls
+5. `lib/llvm_gen.ml` — `ltype_of_ast (TypeFn _) = pointer_type context` (opaque ptr); indirect calls reconstruct `function_type` and use `build_call`
 
-**LLVM 19 における関数ポインタの実態**:  
-LLVM 19 はすべてのポインタが `ptr` 1 種類（opaque pointer）。`fn(int) -> char` も `fn() -> void` も LLVM IR 上は同じ `ptr`。型の区別は takibi の型チェッカーが担い、呼び出し命令（`build_call`）に `function_type` を渡すことで正しい calling convention が生成される。C の `void*` とは異なり、takibi の型チェッカーが署名の一致を強制する。
+**Function pointers in LLVM 19**:
+LLVM 19 has a single pointer kind (`ptr`, opaque pointer). `fn(int) -> char` and `fn() -> void` are both the same `ptr` in LLVM IR. The takibi type checker enforces type distinction; correct calling conventions are generated by passing `function_type` to `build_call`. Unlike C's `void*`, takibi's type checker enforces signature compatibility.
 
-### extern fn は5ファイルで構成
-`extern fn timer_init();` のような外部アセンブリ関数宣言を追加した際の変更ファイル:
+### extern fn Spans 5 Files
+Files changed when external assembly function declarations like `extern fn timer_init();` were added:
 1. `lib/ast.ml` — `ExternFuncDef of ident * (ident * type_expr option) list * type_expr option`
-2. `lib/lexer.mll` — `"extern"` キーワード
-3. `lib/parser.mly` — `EXTERN FN IDENT LPAREN params RPAREN (ARROW type_expr)? SEMI` 規則
-4. `lib/type_inf.ml` — `fenv` の Pass 1 で `TFun` を追加、`genv` の fold で `ExternFuncDef _ -> m`
-5. `lib/llvm_gen.ml` — Pass 1 で `declare_function` を emit（Pass 2 は `ExternFuncDef _ -> ()`）
+2. `lib/lexer.mll` — `"extern"` keyword
+3. `lib/parser.mly` — `EXTERN FN IDENT LPAREN params RPAREN (ARROW type_expr)? SEMI` rule
+4. `lib/type_inf.ml` — adds `TFun` in Pass 1 for `fenv`; `ExternFuncDef _ -> m` in the `genv` fold
+5. `lib/llvm_gen.ml` — emits `declare_function` in Pass 1 (Pass 2 does `ExternFuncDef _ -> ()`)
 
-### 構造体の実装（7ファイル）
+### Struct Implementation (7 Files)
 
-`struct Name { field: type; }` を追加した際の変更ファイル:
-1. `lib/ast.ml` — `TypeNamed of string`（型）、`FieldGet of expr * string`（式）、`AssignField of expr * string * expr`（文）、`StructDef of string * (string * type_expr) list`（トップレベル）
-2. `lib/types.ml` — `TStruct of string`（内部型）、`program_types.structs` フィールド追加
-3. `lib/lexer.mll` — `"struct"` → `STRUCT`、`'.'` → `DOT` トークン
-4. `lib/parser.mly` — `%left DOT`（最高優先度）、`struct_fields` 規則、`IDENT DOT IDENT ASSIGN expr SEMI` 代入文、`expr DOT IDENT` フィールド読み出し式、`IDENT` → `TypeNamed` 型式
-5. `lib/type_inf.ml` — `senv : (string * Ast.type_expr) list StringMap.t` を Pass 0 で収集し全推論関数に引き回す
-6. `lib/llvm_gen.ml` — Pass 0 で `struct_type context fields` を登録、`TypeNamed` は alloca/global ポインタをそのまま返す（配列と同方式）、`FieldGet` は `build_in_bounds_gep` + load、`AssignField` は GEP + store
-7. `test/test_takibi.ml` + `examples/struct/` — パーサ・型推論テスト + QEMU デモ
+Files changed when `struct Name { field: type; }` was added:
+1. `lib/ast.ml` — `TypeNamed of string` (type), `FieldGet of expr * string` (expr), `AssignField of expr * string * expr` (stmt), `StructDef of string * (string * type_expr) list` (top-level)
+2. `lib/types.ml` — `TStruct of string` (internal type), added `program_types.structs` field
+3. `lib/lexer.mll` — `"struct"` → `STRUCT`, `'.'` → `DOT` token
+4. `lib/parser.mly` — `%left DOT` (highest precedence), `struct_fields` rule, `IDENT DOT IDENT ASSIGN expr SEMI` assignment statement, `expr DOT IDENT` field read expression, `IDENT` → `TypeNamed` type expression
+5. `lib/type_inf.ml` — `senv : (string * Ast.type_expr) list StringMap.t` collected in Pass 0 and threaded through all inference functions
+6. `lib/llvm_gen.ml` — registers `struct_type context fields` in Pass 0; `TypeNamed` returns the alloca/global pointer as-is (same approach as arrays); `FieldGet` uses `build_in_bounds_gep` + load; `AssignField` uses GEP + store
+7. `test/test_takibi.ml` + `examples/struct/` — parser/type-inference tests + QEMU demo
 
-**構造体変数の codegen 設計**（配列と統一された方式）:
-- `let mut s: Name;` ローカル → `alloca [struct_type]` → `Mut (TypeNamed "Name", alloca_ptr)`
-- `Var "s"` where `TypeNamed _` → alloca ポインタをそのまま返す（ロードしない）
-- グローバル構造体変数も同様（`define_global` の値 = ポインタをそのまま返す）
-- `s.field` / `p.field` where `p: *Name` → GEP `[0, field_idx]` → load（型検査で自動判別）
-- `s.field = v` → GEP → store（volatile なし、MMIO ではないため）
-- `&s` → alloca ポインタを `*Name` として返す（pass by pointer 用）
+**Struct variable codegen design** (unified approach with arrays):
+- `let mut s: Name;` local → `alloca [struct_type]` → `Mut (TypeNamed "Name", alloca_ptr)`
+- `Var "s"` where `TypeNamed _` → return the alloca pointer as-is (no load)
+- Global struct variables are handled the same way (value of `define_global` = return the pointer as-is)
+- `s.field` / `p.field` where `p: *Name` → GEP `[0, field_idx]` → load (auto-distinguished by type check)
+- `s.field = v` → GEP → store (non-volatile; not MMIO)
+- `&s` → return the alloca pointer as `*Name` (for pass-by-pointer)
 
-**現在の制限**:
-- フィールド代入は `ident.field = v` 形式のみ（LHS が変数名 1 段のみ）
-- グローバル構造体変数は `let g: Name;` のみ（`let mut` はグローバルスコープで未対応、常に mutable）
+**Current limitations**:
+- Field assignment only in `ident.field = v` form (LHS is a single variable name only)
+- Global struct variable as `let g: Name;` only (`let mut` is not supported in global scope; always mutable)
 
-### 同期プリミティブの設計方針と現状の制限
+### Synchronization Primitive Design and Current Limitations
 
-同期プリミティブは 3 層構造になっている:
+Synchronization primitives have a 3-layer structure:
 
 ```
 assembly (ldaxr / stlxr)
-  └── sem_wait / sem_post          ← アトミック保証はここだけ（extern fn）
+  └── sem_wait / sem_post          ← atomic guarantee only here (extern fn)
 
 takibi
-  └── mutex_lock / mutex_unlock    ← sem_wait/sem_post の名前付きラッパー
-  └── cond_wait / cond_signal      ← シーケンスカウンタ方式（takibi で記述）
+  └── mutex_lock / mutex_unlock    ← named wrappers around sem_wait/sem_post
+  └── cond_wait / cond_signal      ← sequence counter method (written in takibi)
 ```
 
-実装の詳細は各 `.tkb` ファイルのコメントを参照（`condvar.tkb` に cond_wait の取りこぼし防止の解説あり）。
+See the comment in each `.tkb` file for implementation details (`condvar.tkb` explains missed-wakeup prevention in `cond_wait`).
 
-**現状の制限: シングルコアのみ保証**
-- `cond_signal` の `*seq = *seq + 1` はアトミックではない。mutex を持った状態で呼ぶ規約によりシングルコアでは正しく動作するが、マルチコアでは不十分。
-- `cond_wait` のスピン `while (*seq == s) {}` はハードウェアメモリバリアを持たない通常の volatile load。マルチコアでは `ldar`（load-acquire）への置き換えが必要。
+**Current limitation: single-core only**
+- `cond_signal`'s `*seq = *seq + 1` is not atomic. The convention of calling it while holding the mutex makes it correct on a single core, but it is insufficient for multi-core.
+- `cond_wait`'s spin `while (*seq == s) {}` is a plain volatile load without a hardware memory barrier. Multi-core requires replacing it with `ldar` (load-acquire).
 
-### MMIO と通常ポインタの区別（`io T`、`*io T` vs `*T`）
+### Distinguishing MMIO from Regular Pointers (`io T`, `*io T` vs `*T`)
 
-**型の関係**:
-- `io T` — volatile修飾値型（AST: `TypeIo T`）。LLVM型はTと同じ。記憶域修飾子。
-- `*io T` — volatile MMIOポインタ（AST: `TypePtr (TypeIo T)`）。LLVMはopaque ptr。
-- `*T` — 通常ポインタ（AST: `TypePtr T`）。non-volatile。
+**Type relationships**:
+- `io T` — volatile-qualified value type (AST: `TypeIo T`). LLVM type is the same as T. A storage qualifier.
+- `*io T` — volatile MMIO pointer (AST: `TypePtr (TypeIo T)`). LLVM type is opaque ptr.
+- `*T` — regular pointer (AST: `TypePtr T`). Non-volatile.
 
-**volatile の発生箇所**:
-- `let irq_done: io int;` — グローバル変数の読み書きが全て volatile
-- `irq_done = 1;` → volatile store（自動）
-- `while (irq_done == 0) {}` → `irq_done` が直接 volatile load（自動）
-- `&irq_done` → 自動で `*io int` を返す（`as *io int` キャスト不要）
-- 構造体フィールド `done: io int;` → `s.done = 1;` が volatile store
+**Where volatile is generated**:
+- `let irq_done: io int;` — all reads and writes to this global variable are volatile
+- `irq_done = 1;` → volatile store (automatic)
+- `while (irq_done == 0) {}` → `irq_done` is a direct volatile load (automatic)
+- `&irq_done` → automatically returns `*io int` (no `as *io int` cast needed)
+- Struct field `done: io int;` → `s.done = 1;` is a volatile store
 - `*p` where `p: *io int` → volatile load
 - `*p = v` where `p: *io int` → volatile store
-- `p.field` where `p: *io Struct` → volatile load（`through_io` フラグ）
+- `p.field` where `p: *io Struct` → volatile load (`through_io` flag)
 
-**Deref で io が剥がれる**: `*p` where `p: *io int` → 結果型は `int`（io ではない）。volatileはloadへの `set_volatile true` に収まる。
+**`io` is stripped on Deref**: `*p` where `p: *io int` → result type is `int` (not `io`). Volatile is confined to `set_volatile true` on the load.
 
-- `*io T` はコンパイラレベルの区別。CPUレベルのメモリバリアは `ldaxr/stlxr`（extern fn）が担う
-- ポインタ算術 `*io T + int` → `*io T` のまま保持される（`TypePtr _` でマッチ）
-- `int as *io T` — MMIOアドレスリテラルの代入（inttoptr coercion、`TypePtr _` ケース）
+- `*io T` is a compiler-level distinction. CPU-level memory barriers are provided by `ldaxr/stlxr` (extern fn).
+- Pointer arithmetic `*io T + int` → remains `*io T` (matches `TypePtr _`)
+- `int as *io T` — MMIO address literal assignment (inttoptr coercion, `TypePtr _` case)
 
-### グローバル変数 volatile 読み出し（割り込み共有フラグ）
-LLVM は `while (flag == 0) {}` のようなタイトループで、グローバル変数の load をループ外に
-ホイストすることがある（結果: `cbz reg, self` の無限ループ）。
-割り込みハンドラと共有するフラグには `io int` を使う:
+### Volatile Reads of Global Variables (Interrupt-Shared Flags)
+LLVM may hoist a global variable load out of a tight loop like `while (flag == 0) {}`,
+resulting in an infinite loop (`cbz reg, self`).
+Use `io int` for flags shared with interrupt handlers:
 
-割り込みハンドラと共有するフラグは `io int` として宣言する:
+Declare flags shared with interrupt handlers as `io int`:
 ```takibi
-let sched_done: io int = 0;        // volatile グローバル宣言
-sched_done = 1;                    // volatile store（自動）
-let p: *io int = &sched_done;      // &io_var は自動で *io int を返す（キャスト不要）
-while (*p == 0) {}                 // volatile load — ホイスト防止
+let sched_done: io int = 0;        // volatile global declaration
+sched_done = 1;                    // volatile store (automatic)
+let p: *io int = &sched_done;      // &io_var automatically returns *io int (no cast needed)
+while (*p == 0) {}                 // volatile load — prevents hoisting
 ```
-`AddrOf (Var name)` where `name: io T` → 自動的に `TypePtr (TypeIo T)` = `*io T` を返す。キャスト不要。
+`AddrOf (Var name)` where `name: io T` → automatically returns `TypePtr (TypeIo T)` = `*io T`. No cast needed.
 
-### Integer literal → pointer coercion
-`let dr: *io char = 0x09000000;` は整数リテラルをMMIOポインタ型変数に代入する。
-`llvm_gen.ml` の `coerce` 関数が `inttoptr(zext(i32, i64), ptr)` を emit する（`TypePtr _` ケース）。
+### Integer Literal → Pointer Coercion
+`let dr: *io char = 0x09000000;` assigns an integer literal to an MMIO pointer type variable.
+The `coerce` function in `llvm_gen.ml` emits `inttoptr(zext(i32, i64), ptr)` (`TypePtr _` case).
 
-### Makefile の例題登録規約
-`EXAMPLES` リストに名前を追加するだけで新例題を登録できる。
-規約: `examples/<name>/<name>.tkb` → `examples/<name>/kernel.elf`
+### Makefile Example Registration Convention
+Adding a name to the `EXAMPLES` list is all that's needed to register a new example.
+Convention: `examples/<name>/<name>.tkb` → `examples/<name>/kernel.elf`
 
 ```makefile
-EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct msgqueue  # ← ここに追加するだけ
+EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct msgqueue  # ← just add the name here
 ```
 
-`qemu-echo` のようにインタラクティブな手動起動が必要なターゲットだけ個別に追加する。
-自動化できるプログラムは `qemutest` に `.expected` / `.stdin` ファイルを用意して登録する。
-タイミング検証が必要なテスト（delay が正しく動いているか確認）は `run_test_timed` を使う。
+Only targets that require interactive manual startup (like `qemu-echo`) are added individually.
+Automatable programs are registered in `qemutest` by providing `.expected` / `.stdin` files.
+Use `run_test_timed` for tests that need timing verification (to confirm a delay actually waited).
 
-**追加アセンブリが必要な例題**（`*_asm.S` を持つもの）は `GENERIC_KERNELS` フィルタから除外して個別リンクルールを書く:
+**Examples requiring extra assembly** (those with `*_asm.S`) are excluded from the `GENERIC_KERNELS` filter and given individual link rules:
 ```makefile
 GENERIC_KERNELS := $(filter-out examples/preempt/kernel.elf examples/semaphore/kernel.elf examples/condvar/kernel.elf, $(ALL_KERNELS))
 ```
-新たに `*_asm.S` を追加する場合は、このフィルタへの追加・専用リンクルール・`clean` の `rm -f` への追記の3点が必要。
+When adding a new `*_asm.S`, three things are required: adding it to this filter, writing a dedicated link rule, and adding the object to `rm -f` in `clean`.
 
-## QEMU ベアメタル（AArch64）
+## QEMU Bare-Metal (AArch64)
 
-- マシン: `virt`, CPU: `cortex-a53`
-- PL011 UART レジスタ: `0x09000000`（QEMU が事前初期化するので baud rate 設定不要）
-- PL031 RTC レジスタ: `0x09010000`（RTCDR: +0、RTCCR: +0x0C）— 1 秒粒度の時刻カウンタ
-  - RTCCR は QEMU で常に 1 を返す（RTC が常時動作中）
-  - ARM Generic Timer（`mrs` 命令）は takibi からは直接呼び出し不可（システムレジスタのため）
-- ロードアドレス: `0x40000000`（QEMU virt の RAM 開始アドレス）
-- セミホスティング exit: `SYS_EXIT` (x0=0x18) + AArch64 拡張フォーマット
-  - x1 は値ではなく `[ADP_Stopped_ApplicationExit, 0]` の 2 ワードブロックへのポインタ
-  - QEMU 起動オプション: `-semihosting-config enable=on,target=native`
-- アセンブラ: `llvm-mc-19`、リンカ: `ld.lld-19`
-- QEMU 結合テストは named pipe (FIFO) 経由で stdin を同期供給する（`scripts/run_qemutest.sh`）
-- `startup.S` は全例題共通で IRQ/FIQ を有効化済み（`msr DAIFClr, #0x3`）。GIC 未初期化時は全割り込み無効なので既存例題に影響しない
-- 例外ベクタテーブル（2KB アライン）: EL1t/EL1h の IRQ・FIQ エントリがすべて `irq_entry` に接続済み。`irq_entry` はレジスタ全保存後 `irq_dispatch` を呼ぶ。takibi プログラムが `irq_dispatch` を定義しない場合は `.weak` な no-op が使われる
-- GICv2（`0x08000000`）: QEMU virt に内蔵。セキュリティ拡張なし（`secure=on` 不使用）では GICD_CTLR bit0=EnableGrp0。GICD_IGROUPR を書かなければ全 SPI は Group0 のまま。GICC_CTLR.FIQEn=0（デフォルト）では Group0 割り込みは IRQ として届く（0x280: EL1h IRQ ベクタ）。FIQEn=1 にして初めて FIQ（0x300）に届く
-- ARM Generic Timer（EL1 物理タイマ）:
-  - `cntp_tval_el0`: countdown timer value レジスタ（発火までのカウント）
-  - `cntp_ctl_el0`: bit0=ENABLE（1 で有効）
-  - `cntfrq_el0`: タイマクロック周波数（QEMU virt では 62500000 = 62.5 MHz）
-  - PPI #30 (GICD_ISENABLER0 bit30) で GIC に接続
-  - `cntfrq_el0 / 64 ≈ 15 ms` 間隔で発火させる場合は `lsr x0, cntfrq, #6` → `msr cntp_tval_el0, x0`
-  - 仮想タイマ（CNTV、PPI #27）は QEMU virt では EL2 ハイパーバイザ設定が必要なため、
-    ベアメタル EL1 では物理タイマ（CNTP、PPI #30）を使う
+- Machine: `virt`, CPU: `cortex-a53`
+- PL011 UART register: `0x09000000` (QEMU pre-initializes it, so no baud rate setup needed)
+- PL031 RTC register: `0x09010000` (RTCDR: +0, RTCCR: +0x0C) — 1-second resolution time counter
+  - RTCCR always returns 1 in QEMU (RTC is always running)
+  - ARM Generic Timer (`mrs` instruction) cannot be called directly from takibi (it is a system register)
+- Load address: `0x40000000` (start of QEMU virt RAM)
+- Semihosting exit: `SYS_EXIT` (x0=0x18) + AArch64 extended format
+  - x1 is not a value but a pointer to a 2-word block: `[ADP_Stopped_ApplicationExit, 0]`
+  - QEMU launch option: `-semihosting-config enable=on,target=native`
+- Assembler: `llvm-mc-19`, linker: `ld.lld-19`
+- QEMU integration tests feed stdin synchronously via a named pipe (FIFO) (`scripts/run_qemutest.sh`)
+- `startup.S` enables IRQ/FIQ for all examples (`msr DAIFClr, #0x3`). All interrupts are disabled when the GIC is not initialized, so existing examples are unaffected.
+- Exception vector table (2KB aligned): All IRQ/FIQ entries for EL1t/EL1h are wired to `irq_entry`. `irq_entry` saves all registers then calls `irq_dispatch`. If a takibi program does not define `irq_dispatch`, a `.weak` no-op is used.
+- GICv2 (`0x08000000`): built into QEMU virt. Without security extensions (`secure=on` not used), GICD_CTLR bit0=EnableGrp0. All SPIs stay Group0 unless GICD_IGROUPR is written. With GICC_CTLR.FIQEn=0 (default), Group0 interrupts arrive as IRQ (0x280: EL1h IRQ vector). Setting FIQEn=1 is required for them to arrive as FIQ (0x300).
+- ARM Generic Timer (EL1 physical timer):
+  - `cntp_tval_el0`: countdown timer value register (count until fire)
+  - `cntp_ctl_el0`: bit0=ENABLE (1 to enable)
+  - `cntfrq_el0`: timer clock frequency (62500000 = 62.5 MHz on QEMU virt)
+  - Connected to the GIC via PPI #30 (GICD_ISENABLER0 bit30)
+  - To fire at ~15 ms intervals: `lsr x0, cntfrq, #6` → `msr cntp_tval_el0, x0`
+  - The virtual timer (CNTV, PPI #27) requires EL2 hypervisor configuration on QEMU virt, so use the physical timer (CNTP, PPI #30) for bare-metal EL1.
 
-## Claude Code への指示
+## Instructions for Claude Code
 
-- **git commit は作成しない**。ユーザーが明示的に依頼した場合のみ行う
-- OCaml は慣用的なスタイルを優先する。`Hashtbl` より `Map.Make(String)` を使う
-- `base` パッケージは使わない（LLVM バインディングとの境界で摩擦が生じるため）
-- ユーザーは OCaml 初心者のため、コードの変更理由を「なぜこう書くのか」の観点で説明する
-- **`~/.claude` へのメモリ保存は行わない**。プロジェクト固有の情報はこのファイルに集約する（環境をまたいで共有できないため）
+- **Do not create git commits.** Only do so when the user explicitly requests it.
+- Prefer idiomatic OCaml style. Use `Map.Make(String)` over `Hashtbl`.
+- Do not use the `base` package (it causes friction at the boundary with LLVM bindings).
+- The user is an OCaml beginner, so explain the reason for code changes from the perspective of "why write it this way."
+- **Do not save memories to `~/.claude`.** Consolidate project-specific information in this file (it cannot be shared across environments).
 
-## 依存ツール
+## Dependencies
 
 ```
 ocaml 5.4.0, dune, menhir
 llvm-19 OCaml bindings (llvm, llvm.analysis, llvm.target, llvm.all_backends)
 ppx_deriving.show
-llvm-mc-19, ld.lld-19   (ベアメタルビルド用)
-qemu-system-aarch64     (QEMU 実行用)
+llvm-mc-19, ld.lld-19   (for bare-metal builds)
+qemu-system-aarch64     (for QEMU execution)
 ```

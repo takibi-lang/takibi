@@ -92,8 +92,8 @@ run_test_timed() {
 
 # run_compile_error_test NAME TKB_FILE ERROR_FILE
 #
-# コンパイルが失敗し、stderr に ERROR_FILE の内容（部分文字列）が含まれることを確認する。
-# QEMU は不要。コンパイラのエラー検出パイプライン全体を統合テストする。
+# Verifies that compilation fails and that stderr contains the contents of ERROR_FILE
+# as a substring. QEMU is not needed. Integration-tests the full compiler error detection pipeline.
 run_compile_error_test() {
     local name="$1" tkb="$2" error_file="$3"
     local tmp_err tmp_obj expected_msg
@@ -122,8 +122,9 @@ run_compile_error_test() {
 
 # run_no_trap_test NAME KERNEL
 #
-# llvm-objdump で逆アセンブルし、brk 命令（llvm.trap → AArch64 brk #0x1）が
-# ゼロであることを確認する。配列境界チェックが型レベルで完全に証明されていることの検証。
+# Disassembles with llvm-objdump and checks that the count of brk instructions
+# (llvm.trap → AArch64 brk #0x1) is zero. Verifies that array bounds are fully
+# proven at the type level.
 run_no_trap_test() {
     local name="$1" kernel="$2"
     local count
@@ -189,7 +190,7 @@ echo ""
 echo "Running no-trap checks (brk must be zero in these kernels)..."
 echo ""
 
-# 型レベルで境界が証明されているはずの例題。brk が入ったら型注釈を見直すこと。
+# Examples whose bounds should be fully proven at the type level. If brk appears, review the type annotations.
 for e in start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci \
           bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt \
           semaphore condvar struct msgqueue watchdog refined narrow for; do
