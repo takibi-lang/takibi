@@ -1,0 +1,8 @@
+// This file is expected to produce a compile error.
+// EtherType has underlying type u16, so casting from i32 is rejected.
+// i32 -> u16 truncation must be explicit: (raw as u16) as EtherType.
+enum EtherType: u16 { IPv4 = 0x0800; ARP = 0x0806; }
+fn main() {
+    let raw: i32 = 0x0800;
+    let et: EtherType = raw as EtherType;
+}

@@ -151,6 +151,8 @@ run_compile_error_test "refined_return_mismatch" examples/refined_return_mismatc
 run_compile_error_test "refined_assign_mismatch" examples/refined_assign_mismatch/refined_assign_mismatch.tkb examples/refined_assign_mismatch/refined_assign_mismatch.error
 run_compile_error_test "match_nonexhaustive"      examples/match_nonexhaustive/match_nonexhaustive.tkb           examples/match_nonexhaustive/match_nonexhaustive.error
 run_compile_error_test "match_nonexhaustive_open" examples/match_nonexhaustive_open/match_nonexhaustive_open.tkb examples/match_nonexhaustive_open/match_nonexhaustive_open.error
+run_compile_error_test "enum_cast_wrong_dst" examples/enum_cast_wrong_dst/enum_cast_wrong_dst.tkb examples/enum_cast_wrong_dst/enum_cast_wrong_dst.error
+run_compile_error_test "enum_cast_wrong_src" examples/enum_cast_wrong_src/enum_cast_wrong_src.tkb examples/enum_cast_wrong_src/enum_cast_wrong_src.error
 
 echo ""
 echo "Running QEMU integration tests..."

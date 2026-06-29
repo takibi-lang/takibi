@@ -1,0 +1,9 @@
+// This file is expected to produce a compile error.
+// EtherType has underlying type u16, so casting to u8 is rejected.
+// 0x0800 as u8 would silently truncate to 0x00 -- a silent data loss bug.
+// Use (et as u16) as u8 to make the truncation explicit.
+enum EtherType: u16 { IPv4 = 0x0800; ARP = 0x0806; }
+fn main() {
+    let et: EtherType = EtherType::IPv4;
+    let wrong: u8 = et as u8;
+}

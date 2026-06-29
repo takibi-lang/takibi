@@ -180,8 +180,42 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ ->
            raise (TypeError (e.loc, "& requires a variable or struct field")))
   | Cast (target_ty, e) ->
-      ignore (infer_expr senv eenv tyenv fenv e);
-      of_ast target_ty
+      let src_ty = infer_expr senv eenv tyenv fenv e in
+      let src_enum = match repr src_ty with
+        | TStruct sn when StringMap.mem sn eenv -> Some sn
+        | _ -> None
+      in
+      let tgt_enum = match target_ty with
+        | Ast.TypeNamed tn when StringMap.mem tn eenv -> Some tn
+        | _ -> None
+      in
+      (match src_enum, tgt_enum with
+       | Some ename, _ ->
+           (* Enum -> T: T must be exactly the underlying type.
+              Use (et as underlying) as T for any other conversion. *)
+           let (underlying, _, _) = StringMap.find ename eenv in
+           let expected = of_ast underlying in
+           let got      = of_ast target_ty in
+           if repr got <> repr expected then
+             raise (TypeError (e.loc,
+               Printf.sprintf
+                 "cannot cast enum '%s' (underlying %s) to '%s': cast to '%s' first"
+                 ename (to_string expected) (to_string got) (to_string expected)));
+           of_ast target_ty
+       | None, Some ename ->
+           (* T -> Enum: T must be assignable to the underlying type.
+              TRefinedInt subtyping is allowed (e.g. {0..<3} as Color where Color: u8). *)
+           let (underlying, _, _) = StringMap.find ename eenv in
+           let expected = of_ast underlying in
+           (try unify src_ty expected
+            with Unify_error _ ->
+              raise (TypeError (e.loc,
+                Printf.sprintf
+                  "cannot cast '%s' to enum '%s' (underlying %s): cast to '%s' first"
+                  (to_string src_ty) ename (to_string expected) (to_string expected))));
+           of_ast target_ty
+       | None, None ->
+           of_ast target_ty)
 
   | FieldGet (base_expr, fname) ->
       let bt = infer_expr senv eenv tyenv fenv base_expr in
