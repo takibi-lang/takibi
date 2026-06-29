@@ -679,6 +679,63 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  (* -- Enum syntax ------------------------------------------------- *)
+
+  Alcotest.test_case "exhaustive enum definition parses to EnumDef" `Quick (fun () ->
+    match parse "enum Color: u8 { Red = 0; Green = 1; Blue = 2; }" with
+    | [Ast.EnumDef ("Color", Some Ast.TypeU8, variants, false)] ->
+        Alcotest.(check int) "3 variants" 3 (List.length variants);
+        Alcotest.(check string) "variant0 name" "Red"   (fst (List.nth variants 0));
+        Alcotest.(check string) "variant1 name" "Green" (fst (List.nth variants 1));
+        Alcotest.(check (option int)) "variant0 value" (Some 0) (snd (List.nth variants 0))
+    | _ -> Alcotest.fail "expected EnumDef(Color, u8, 3 variants, false)"
+  );
+
+  Alcotest.test_case "non-exhaustive enum with _ marker parses (is_ne = true)" `Quick (fun () ->
+    match parse "enum EtherType: u16 { IPv4 = 0x0800; _; }" with
+    | [Ast.EnumDef ("EtherType", Some Ast.TypeU16, variants, true)] ->
+        Alcotest.(check int) "1 named variant" 1 (List.length variants)
+    | _ -> Alcotest.fail "expected EnumDef(EtherType, u16, 1 variant, true)"
+  );
+
+  Alcotest.test_case "enum default underlying type is u32" `Quick (fun () ->
+    match parse "enum Dir { North; South; }" with
+    | [Ast.EnumDef ("Dir", None, variants, false)] ->
+        Alcotest.(check int) "2 variants" 2 (List.length variants)
+    | _ -> Alcotest.fail "expected EnumDef(Dir, None, 2 variants, false)"
+  );
+
+  Alcotest.test_case "enum variant expression parses to EnumVariant" `Quick (fun () ->
+    match parse "enum Color: u8 { Red = 0; } fn f() { let c = Color::Red; }" with
+    | [Ast.EnumDef _; Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Let (_, _, _, Some { desc = Ast.EnumVariant ("Color", "Red"); _ }) -> ()
+         | _ -> Alcotest.fail "expected Let(_, EnumVariant(Color, Red))")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "match with variant arm parses to Match/ArmVariant" `Quick (fun () ->
+    match parse "enum Color: u8 { Red = 0; }
+                 fn f(c: Color) { match c { Color::Red => { let x = 0; } } }" with
+    | [Ast.EnumDef _; Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Match (_, [Ast.ArmVariant ("Color", "Red", [_])]) -> ()
+         | _ -> Alcotest.fail "expected Match(_, [ArmVariant(Color,Red,[_])])")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "match wildcard arm parses to ArmWild" `Quick (fun () ->
+    match parse "enum Color: u8 { Red = 0; }
+                 fn f(c: Color) { match c {
+                   Color::Red => { let x = 0; }
+                   _ => { let y = 1; } } }" with
+    | [Ast.EnumDef _; Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Match (_, [Ast.ArmVariant _; Ast.ArmWild [_]]) -> ()
+         | _ -> Alcotest.fail "expected Match(_, [ArmVariant, ArmWild])")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
   (* -- extern fn --------------------------------------------------- *)
 
   Alcotest.test_case "extern fn without return type parses" `Quick (fun () ->
@@ -1457,6 +1514,64 @@ let infer_tests = [
   Alcotest.test_case "break after if outside loop is a type error" `Quick
     (expect_type_error "break/continue outside of a loop"
       "fn f(x: i32) { if (x == 0) { break; } }");
+
+  (* -- Enum type inference ------------------------------------------- *)
+
+  Alcotest.test_case "exhaustive enum match all variants type-checks" `Quick
+    (expect_ok
+      "enum Color: u8 { Red = 0; Green = 1; }
+       fn f(c: Color) { match c {
+         Color::Red   => { let x = 0; }
+         Color::Green => { let y = 1; } } }");
+
+  Alcotest.test_case "exhaustive enum match missing variant is a type error" `Quick
+    (expect_type_error "non-exhaustive match: 'Color::Green' not covered"
+      "enum Color: u8 { Red = 0; Green = 1; }
+       fn f(c: Color) { match c { Color::Red => { let x = 0; } } }");
+
+  Alcotest.test_case "exhaustive enum match with wildcard type-checks" `Quick
+    (expect_ok
+      "enum Color: u8 { Red = 0; Green = 1; }
+       fn f(c: Color) { match c {
+         Color::Red => { let x = 0; }
+         _ => { let y = 1; } } }");
+
+  Alcotest.test_case "non-exhaustive enum match with _ type-checks" `Quick
+    (expect_ok
+      "enum EtherType: u16 { IPv4 = 0x0800; _; }
+       fn f(et: EtherType) { match et {
+         EtherType::IPv4 => { let x = 0; }
+         _ => { let y = 1; } } }");
+
+  Alcotest.test_case "non-exhaustive enum match without _ is a type error" `Quick
+    (expect_type_error "non-exhaustive enum 'EtherType' requires a '_' wildcard arm"
+      "enum EtherType: u16 { IPv4 = 0x0800; _; }
+       fn f(et: EtherType) { match et { EtherType::IPv4 => { let x = 0; } } }");
+
+  Alcotest.test_case "enum cast to underlying type type-checks" `Quick
+    (expect_ok
+      "enum Color: u8 { Red = 0; }
+       fn f(c: Color) u8 { return c as u8; }");
+
+  Alcotest.test_case "enum cast to wrong type is a type error" `Quick
+    (expect_type_error "cannot cast enum 'Color' (underlying u8) to 'i32'"
+      "enum Color: u8 { Red = 0; }
+       fn f(c: Color) i32 { return c as i32; }");
+
+  Alcotest.test_case "underlying type cast to enum type-checks" `Quick
+    (expect_ok
+      "enum Color: u8 { Red = 0; }
+       fn f(n: u8) Color { return n as Color; }");
+
+  Alcotest.test_case "wrong source type to enum cast is a type error" `Quick
+    (expect_type_error "cannot cast 'i32' to enum 'Color' (underlying u8)"
+      "enum Color: u8 { Red = 0; }
+       fn f(n: i32) Color { return n as Color; }");
+
+  Alcotest.test_case "refined int subtype cast to enum type-checks" `Quick
+    (expect_ok
+      "enum Color: u8 { Red = 0; Green = 1; Blue = 2; }
+       fn f() { for i in 0..<3 { let c: Color = i as Color; } }");
 
 ]
 
