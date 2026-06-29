@@ -149,7 +149,8 @@ run_compile_error_test "oob_size1"       examples/oob_size1/oob_size1.tkb       
 run_compile_error_test "refined_param_mismatch"  examples/refined_param_mismatch/refined_param_mismatch.tkb   examples/refined_param_mismatch/refined_param_mismatch.error
 run_compile_error_test "refined_return_mismatch" examples/refined_return_mismatch/refined_return_mismatch.tkb examples/refined_return_mismatch/refined_return_mismatch.error
 run_compile_error_test "refined_assign_mismatch" examples/refined_assign_mismatch/refined_assign_mismatch.tkb examples/refined_assign_mismatch/refined_assign_mismatch.error
-run_compile_error_test "match_nonexhaustive" examples/match_nonexhaustive/match_nonexhaustive.tkb examples/match_nonexhaustive/match_nonexhaustive.error
+run_compile_error_test "match_nonexhaustive"      examples/match_nonexhaustive/match_nonexhaustive.tkb           examples/match_nonexhaustive/match_nonexhaustive.error
+run_compile_error_test "match_nonexhaustive_open" examples/match_nonexhaustive_open/match_nonexhaustive_open.tkb examples/match_nonexhaustive_open/match_nonexhaustive_open.error
 
 echo ""
 echo "Running QEMU integration tests..."
@@ -187,7 +188,8 @@ run_test "refined"  examples/refined/kernel.elf  examples/refined/refined.expect
 run_test "narrow"   examples/narrow/kernel.elf   examples/narrow/narrow.expected
 run_test "for"      examples/for/kernel.elf      examples/for/for.expected
 run_test "loop"     examples/loop/kernel.elf     examples/loop/loop.expected
-run_test "enum"     examples/enum/kernel.elf     examples/enum/enum.expected
+run_test "enum"          examples/enum/kernel.elf          examples/enum/enum.expected
+run_test "nonexhaustive" examples/nonexhaustive/kernel.elf examples/nonexhaustive/nonexhaustive.expected
 
 echo ""
 echo "Running no-trap checks (brk must be zero in these kernels)..."

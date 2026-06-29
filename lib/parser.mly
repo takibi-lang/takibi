@@ -59,18 +59,19 @@ item:
   | STRUCT IDENT LBRACE struct_fields RBRACE
     { StructDef ($2, $4) }
   | ENUM IDENT COLON base_type_expr LBRACE enum_variants RBRACE
-    { EnumDef ($2, Some $4, $6) }
+    { let (vs, ne) = $6 in EnumDef ($2, Some $4, vs, ne) }
   | ENUM IDENT LBRACE enum_variants RBRACE
-    { EnumDef ($2, None, $4) }
+    { let (vs, ne) = $4 in EnumDef ($2, None, vs, ne) }
 
 struct_fields:
   | /* empty */ { [] }
   | IDENT COLON type_expr SEMI struct_fields { ($1, $3) :: $5 }
 
 enum_variants:
-  | /* empty */ { [] }
-  | IDENT ASSIGN INT SEMI enum_variants { ($1, Some $3) :: $5 }
-  | IDENT SEMI            enum_variants { ($1, None)    :: $3 }
+  | /* empty */                         { ([], false) }
+  | UNDERSCORE SEMI enum_variants       { let (vs, _) = $3 in (vs, true) }
+  | IDENT ASSIGN INT SEMI enum_variants { let (vs, ne) = $5 in (($1, Some $3) :: vs, ne) }
+  | IDENT SEMI            enum_variants { let (vs, ne) = $3 in (($1, None)    :: vs, ne) }
 
 func_def:
   | FN IDENT LPAREN params RPAREN ret_type_opt LBRACE stmts RBRACE

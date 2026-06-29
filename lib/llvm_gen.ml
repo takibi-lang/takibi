@@ -27,6 +27,8 @@ let struct_fields  : (string, (string * Ast.type_expr) list) Hashtbl.t = Hashtbl
 let enum_underlying  : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 8
 (* Enum variant registry: enum name -> [(variant_name, discriminant_value)] *)
 let enum_variants_tbl: (string, (string * int) list) Hashtbl.t = Hashtbl.create 8
+(* Non-exhaustive flag: enum name -> bool (true = has _ marker, int->enum cast skips trap) *)
+let enum_nonexhaustive: (string, bool) Hashtbl.t = Hashtbl.create 8
 
 (* Locals are either immutable SSA values or mutable alloca pointers *)
 type local_binding =
@@ -591,25 +593,31 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let (_, v) = gen_expr locals e in
       (match target_ty with
        | TypeNamed ename when Hashtbl.mem enum_underlying ename ->
-           (* int -> enum cast: check validity at runtime, trap on unknown value *)
-           let ut       = Hashtbl.find enum_underlying ename in
-           let variants = Hashtbl.find enum_variants_tbl ename in
-           let cur_f    = block_parent (insertion_block builder) in
-           let ok_bb    = append_block context "enum_ok"  cur_f in
-           let bad_bb   = append_block context "enum_bad" cur_f in
+           let ut    = Hashtbl.find enum_underlying ename in
+           let is_ne = Hashtbl.find enum_nonexhaustive ename in
            let v_coerced = coerce v ut in
-           let ll_ut    = ltype_of_ast ut in
-           let sw = build_switch v_coerced bad_bb (List.length variants) builder in
-           List.iter (fun (_, value) ->
-             add_case sw (const_int ll_ut value) ok_bb
-           ) variants;
-           position_at_end bad_bb builder;
-           let trap_ft = function_type (void_type context) [||] in
-           let trap_fn = declare_function "llvm.trap" trap_ft the_module in
-           ignore (build_call trap_ft trap_fn [||] "" builder);
-           ignore (build_unreachable builder);
-           position_at_end ok_bb builder;
-           (TypeNamed ename, v_coerced)
+           if is_ne then
+             (* non-exhaustive enum: any integer is valid; round-trip is guaranteed *)
+             (TypeNamed ename, v_coerced)
+           else begin
+             (* exhaustive enum: trap on unknown value at runtime *)
+             let variants = Hashtbl.find enum_variants_tbl ename in
+             let cur_f    = block_parent (insertion_block builder) in
+             let ok_bb    = append_block context "enum_ok"  cur_f in
+             let bad_bb   = append_block context "enum_bad" cur_f in
+             let ll_ut    = ltype_of_ast ut in
+             let sw = build_switch v_coerced bad_bb (List.length variants) builder in
+             List.iter (fun (_, value) ->
+               add_case sw (const_int ll_ut value) ok_bb
+             ) variants;
+             position_at_end bad_bb builder;
+             let trap_ft = function_type (void_type context) [||] in
+             let trap_fn = declare_function "llvm.trap" trap_ft the_module in
+             ignore (build_call trap_ft trap_fn [||] "" builder);
+             ignore (build_unreachable builder);
+             position_at_end ok_bb builder;
+             (TypeNamed ename, v_coerced)
+           end
        | _ ->
            (target_ty, coerce v target_ty))
 
@@ -1184,14 +1192,15 @@ let gen_program ?prog_types prog =
         let llty = struct_type context field_lltys in
         Hashtbl.add struct_lltypes name llty;
         Hashtbl.add struct_fields  name fields
-    | EnumDef (name, ty_opt, variants) ->
+    | EnumDef (name, ty_opt, variants, is_ne) ->
         let underlying = match ty_opt with Some t -> t | None -> TypeU32 in
         let (_, resolved) = List.fold_left (fun (next, acc) (vname, vopt) ->
           let v = match vopt with Some v -> v | None -> next in
           (v + 1, acc @ [(vname, v)])
         ) (0, []) variants in
-        Hashtbl.add enum_underlying   name underlying;
-        Hashtbl.add enum_variants_tbl name resolved
+        Hashtbl.add enum_underlying    name underlying;
+        Hashtbl.add enum_variants_tbl  name resolved;
+        Hashtbl.add enum_nonexhaustive name is_ne
     | _ -> ()
   ) prog;
   (* Pass 1: register all globals and function signatures *)

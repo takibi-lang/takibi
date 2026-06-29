@@ -82,8 +82,8 @@ type toplevel =
   (* extern fn name(params) -> ret; -- body is provided by external assembly *)
   | StructDef of string * (string * type_expr) list
   (* struct Name { field: type; ... } -- named struct type definition *)
-  | EnumDef of string * type_expr option * (string * int option) list
-  (* enum Name: u16 { Variant = val; ... } -- discriminant enum definition *)
+  | EnumDef of string * type_expr option * (string * int option) list * bool
+  (* enum Name: u16 { Variant = val; _; } -- last bool = is_nonexhaustive *)
 [@@deriving show]
 
 let show_toplevel_list lst =

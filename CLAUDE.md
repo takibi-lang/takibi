@@ -261,6 +261,28 @@ Files changed when `struct Name { field: type; }` was added:
 - Field assignment only in `ident.field = v` form (LHS is a single variable name only)
 - Global struct variable as `let g: Name;` only (`let mut` is not supported in global scope; always mutable)
 
+### Enum Implementation (5 Files)
+
+Files changed when `enum Name: u16 { V = n; _; }` was added:
+1. `lib/ast.ml` -- `EnumVariant of string * string` (expr), `Match / match_arm` (stmt, mutual recursion with `and`), `EnumDef of string * type_expr option * (string * int option) list * bool` (last bool = is_nonexhaustive)
+2. `lib/lexer.mll` -- `"enum"` `"match"` keywords, `"::"` `"=>"` `"_"` tokens
+3. `lib/parser.mly` -- `enum_variants` returns `(string * int option) list * bool`; `UNDERSCORE SEMI` sets `true`; `IDENT COLONCOLON IDENT` expr; `match expr { arms }` stmt
+4. `lib/type_inf.ml` -- `eenv : (Ast.type_expr * (string * int) list * bool) StringMap.t` (bool = is_nonexhaustive) collected in Pass 0. `Match` exhaustiveness: exhaustive enum requires all variants or `_`; non-exhaustive enum requires `_` (listing all known variants is not enough).
+5. `lib/llvm_gen.ml` -- `enum_underlying`, `enum_variants_tbl`, `enum_nonexhaustive` tables. `EnumVariant` -> integer constant. `Match` -> LLVM `switch`. `int as ExhaustiveEnum` -> switch+trap. `int as NonExhaustiveEnum` -> no-op (any integer is valid).
+
+**Two kinds of enum**:
+- Exhaustive (`_` absent): the type guarantees the value is one of the named variants. `int as Enum` traps on unknown values. `match` requires all variants or `_`.
+- Non-exhaustive (`_` present): models open sets (IANA-registered protocol fields, etc.). `int as Enum` never traps. `match` requires a `_` wildcard arm (compiler enforces this).
+
+**Round-trip guarantee** (intentional design, must not be broken):
+`(raw as NonExhaustiveEnum) as u16 == raw` for any `raw: u16`, including values that fall through to the `_` arm. This holds because `enum -> int` cast is a no-op at the LLVM IR level: no `unreachable` is inserted, so LLVM cannot assume the value is one of the named variants. This differs from C enum (UB for out-of-range values) and is essential for protocol implementations where unknown field values must be forwarded or logged intact.
+
+**eenv lookup pattern** (3-tuple destructuring):
+```ocaml
+let (_, variants, is_ne) = StringMap.find ename eenv in
+```
+`EnumVariant` inference and `Match` exhaustiveness check both use this pattern.
+
 ### Synchronization Primitive Design and Current Limitations
 
 Synchronization primitives have a 3-layer structure:

@@ -1,0 +1,16 @@
+// This file is expected to produce a compile error.
+// EtherType is non-exhaustive (has _ marker), so match requires a _ wildcard arm.
+// Listing only known variants is not enough: unknown values can arrive from the wire.
+enum EtherType: u16 {
+    IPv4 = 0x0800;
+    ARP  = 0x0806;
+    _;
+}
+fn main() {
+    let raw: u16 = 0x0800;
+    let et: EtherType = raw as EtherType;
+    match et {
+        EtherType::IPv4 => { let x: i32 = 0; }
+        EtherType::ARP  => { let x: i32 = 1; }
+    }
+}

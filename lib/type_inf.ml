@@ -232,7 +232,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       (match StringMap.find_opt ename eenv with
        | None ->
            raise (TypeError (e.loc, Printf.sprintf "Unknown enum: %s" ename))
-       | Some (_, variants) ->
+       | Some (_, variants, _) ->
            if not (List.mem_assoc vname variants) then
              raise (TypeError (e.loc,
                Printf.sprintf "Unknown variant '%s' of enum '%s'" vname ename));
@@ -519,7 +519,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         | t -> raise (TypeError (disc.loc,
             Printf.sprintf "match requires an enum type, got '%s'" (to_string t)))
       in
-      let (_, enum_variants) = StringMap.find ename eenv in
+      let (_, enum_variants, is_ne) = StringMap.find ename eenv in
       let has_wild = ref false in
       let covered  = Hashtbl.create 4 in
       let raw_locals' = List.fold_left (fun rl arm ->
@@ -544,12 +544,20 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
               (tyenv, rl) body
             in rl'
       ) raw_locals arms in
-      if not !has_wild then
-        List.iter (fun (vname, _) ->
-          if not (Hashtbl.mem covered vname) then
-            raise (TypeError (s.loc,
-              Printf.sprintf "non-exhaustive match: '%s::%s' not covered" ename vname))
-        ) enum_variants;
+      if is_ne then begin
+        (* non-exhaustive enum: _ wildcard is required because unknown values can arrive *)
+        if not !has_wild then
+          raise (TypeError (s.loc,
+            Printf.sprintf "non-exhaustive enum '%s' requires a '_' wildcard arm" ename))
+      end else begin
+        (* exhaustive enum: every variant must be covered (or _ present) *)
+        if not !has_wild then
+          List.iter (fun (vname, _) ->
+            if not (Hashtbl.mem covered vname) then
+              raise (TypeError (s.loc,
+                Printf.sprintf "non-exhaustive match: '%s::%s' not covered" ename vname))
+          ) enum_variants
+      end;
       (tyenv, raw_locals')
 
 (* -- Function inference ---------------------------------------------------- *)
@@ -582,13 +590,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> m
   ) StringMap.empty prog in
   let eenv = List.fold_left (fun m -> function
-    | Ast.EnumDef (name, ty_opt, variants) ->
+    | Ast.EnumDef (name, ty_opt, variants, is_ne) ->
         let underlying = match ty_opt with Some t -> t | None -> Ast.TypeU32 in
         let (_, resolved) = List.fold_left (fun (next, acc) (vname, vopt) ->
           let v = match vopt with Some v -> v | None -> next in
           (v + 1, acc @ [(vname, v)])
         ) (0, []) variants in
-        StringMap.add name (underlying, resolved) m
+        StringMap.add name (underlying, resolved, is_ne) m
     | _ -> m
   ) StringMap.empty prog in
   (* Pass 1: collect function signatures *)
@@ -637,7 +645,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add fdef.name (infer_func senv eenv fenv genv fdef) m
     | _ -> m
   ) StringMap.empty prog in
-  let enums = StringMap.map (fun (underlying, variants) ->
+  let enums = StringMap.map (fun (underlying, variants, _) ->
     { underlying; variants }
   ) eenv in
   {

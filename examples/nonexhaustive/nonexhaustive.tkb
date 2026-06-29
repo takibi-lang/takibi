@@ -1,0 +1,55 @@
+// Non-exhaustive enum demo.
+//
+// A non-exhaustive enum (marked with _ in the definition) represents
+// a set of known named values PLUS an open set of unknown values.
+// This is the right model for protocol fields whose value space is
+// defined externally (IANA, RFCs) and can be extended at any time.
+//
+// Key properties:
+//   1. int -> enum cast never traps: any integer is a valid enum value.
+//   2. match requires a _ wildcard arm (compiler enforces this).
+//   3. Round-trip guarantee: (raw as Enum) as u16 == raw, always.
+//      The original integer is preserved even for unknown values.
+//      This differs from C enum (UB for out-of-range values) and is
+//      guaranteed by the no-op nature of enum<->int casts in LLVM IR.
+
+enum EtherType: u16 {
+    IPv4 = 0x0800;
+    ARP  = 0x0806;
+    _;
+}
+
+fn ethertype_name(et: EtherType) -> *u8 {
+    match et {
+        EtherType::IPv4 => { return "IPv4"; }
+        EtherType::ARP  => { return "ARP"; }
+        _               => { return "unknown"; }
+    }
+    return "";
+}
+
+fn main() {
+    // Known value: behaves exactly like exhaustive enum.
+    let et: EtherType = EtherType::IPv4;
+    uart_puts(ethertype_name(et));
+    uart_puts("\r\n");
+
+    // Unknown value: no trap. The integer passes through as-is.
+    let raw: u16 = 0x86DD;
+    let et2: EtherType = raw as EtherType;
+    uart_puts(ethertype_name(et2));
+    uart_puts("\r\n");
+
+    // Round-trip guarantee: unknown value is recovered intact.
+    // (raw as EtherType) as u16 == raw, even for values not in the enum.
+    let recovered: u16 = et2 as u16;
+    if (recovered == raw) {
+        uart_puts("round-trip ok\r\n");
+    }
+
+    // Known value also round-trips.
+    let raw2: u16 = et as u16;
+    if (raw2 == 0x0800) {
+        uart_puts("IPv4 round-trip ok\r\n");
+    }
+}
