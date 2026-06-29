@@ -23,6 +23,10 @@ let func_param_ast_types : (string, Ast.type_expr list) Hashtbl.t = Hashtbl.crea
 let struct_lltypes : (string, lltype) Hashtbl.t = Hashtbl.create 8
 (* Struct field registry: name -> ordered [(field_name, field_ast_type)] *)
 let struct_fields  : (string, (string * Ast.type_expr) list) Hashtbl.t = Hashtbl.create 8
+(* Struct type-level alignment registry: name -> N (set when struct has align(N)) *)
+let struct_alignments : (string, int) Hashtbl.t = Hashtbl.create 4
+(* Target data layout -- set by setup_target; used for struct tail-padding computation *)
+let target_data : Llvm_target.DataLayout.t option ref = ref None
 (* Enum underlying type registry: enum name -> underlying Ast type (u8/u16/u32/u64) *)
 let enum_underlying  : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 8
 (* Enum variant registry: enum name -> [(variant_name, discriminant_value)] *)
@@ -118,6 +122,7 @@ let setup_target ?(triple = "") () =
   let machine = Llvm_target.TargetMachine.create ~triple target in
   let layout  = Llvm_target.TargetMachine.data_layout machine in
   set_data_layout (Llvm_target.DataLayout.as_string layout) the_module;
+  target_data := Some layout;
   machine
 
 (* Run IR-level optimization passes.
@@ -487,6 +492,22 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
   | BinOp (op, e1, e2) ->
       let (ty1, v1) = gen_expr locals e1 in
       let (ty2, v2) = gen_expr locals e2 in
+      (* IntLit always emits i32 in codegen, but the type inferencer may have unified it
+         with usize (i64).  Widen the narrower side before binary operations so that LLVM
+         does not see a type mismatch (e.g. `usize_val == 0` or `usize_val & 15`). *)
+      let (ty1, v1, ty2, v2) =
+        let ll1 = type_of v1 and ll2 = type_of v2 in
+        if ll1 = i64_type context && ll2 = i32_type context then
+          let v2w = if is_unsigned ty1 then build_zext v2 (i64_type context) "wi" builder
+                    else build_sext v2 (i64_type context) "wi" builder in
+          (ty1, v1, ty1, v2w)
+        else if ll2 = i64_type context && ll1 = i32_type context then
+          let v1w = if is_unsigned ty2 then build_zext v1 (i64_type context) "wi" builder
+                    else build_sext v1 (i64_type context) "wi" builder in
+          (ty2, v1w, ty2, v2)
+        else
+          (ty1, v1, ty2, v2)
+      in
       (match op with
        | Add ->
            (* Pointer arithmetic: ptr + int -> GEP. *io T = TypePtr(TypeIo T) also matches TypePtr *)
@@ -800,10 +821,21 @@ let gen_func ?prog_types fdef =
   (* locals maps name -> local_binding *)
   let locals : (string, local_binding) Hashtbl.t = Hashtbl.create 16 in
 
+  (* Apply struct type-level alignment to an alloca if the type has one registered. *)
+  let apply_struct_align ast_ty ptr =
+    match ast_ty with
+    | TypeNamed sname | TypeArray (TypeNamed sname, _) ->
+        (match Hashtbl.find_opt struct_alignments sname with
+         | Some n -> set_alignment n ptr
+         | None   -> ())
+    | _ -> ()
+  in
+
   (* Alloca + store for every parameter (params are always mutable) *)
   List.iteri (fun i (name, ty_opt) ->
     let ast_ty = res name ty_opt in
     let ptr    = build_alloca (ltype_of_ast ast_ty) name builder in
+    apply_struct_align ast_ty ptr;
     ignore (build_store (param f i) ptr builder);
     Hashtbl.add locals name (Mut (ast_ty, ptr))
   ) fdef.params;
@@ -813,6 +845,7 @@ let gen_func ?prog_types fdef =
     if not (Hashtbl.mem locals name) then begin
       let ast_ty = res name ty_opt in
       let ptr    = build_alloca (ltype_of_ast ast_ty) name builder in
+      apply_struct_align ast_ty ptr;
       Hashtbl.add locals name (Mut (ast_ty, ptr))
     end
   ) (collect_lets fdef.body);
@@ -1171,7 +1204,14 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt =
     | None   -> undef llty  (* no initializer -> LLVM undef; startup.S zeroes BSS *)
   in
   let gvar = define_global name init the_module in
-  (match align_opt with Some n -> set_alignment n gvar | None -> ());
+  let eff_align = match align_opt with
+    | Some _ -> align_opt
+    | None   -> (match ast_ty with
+                 | TypeNamed sname -> Hashtbl.find_opt struct_alignments sname
+                 | TypeArray (TypeNamed sname, _) -> Hashtbl.find_opt struct_alignments sname
+                 | _ -> None)
+  in
+  (match eff_align with Some n -> set_alignment n gvar | None -> ());
   Hashtbl.add global_vars name (ast_ty, gvar)
 
 let declare_func ?prog_types fdef =
@@ -1191,13 +1231,30 @@ let declare_func ?prog_types fdef =
 let gen_program ?prog_types prog =
   (* Pass 0: register struct and enum types -- must precede ltype_of_ast for TypeNamed *)
   List.iter (function
-    | StructDef (name, fields, is_packed) ->
+    | StructDef (name, fields, is_packed, align_opt) ->
         let field_lltys = List.map (fun (_, ty) -> ltype_of_ast ty) fields
                           |> Array.of_list in
-        let llty = if is_packed then packed_struct_type context field_lltys
-                   else struct_type context field_lltys in
+        let mk_struct fltys = if is_packed then packed_struct_type context fltys
+                              else struct_type context fltys in
+        let llty = mk_struct field_lltys in
+        (* Tail-pad the struct so that sizeof(struct) is a multiple of align(N).
+           Without this, elements 1, 2, ... of a [Name; N] array would be misaligned.
+           C compilers handle this automatically; here we add an explicit [i8; pad] field. *)
+        let llty = match align_opt with
+          | None   -> llty
+          | Some n ->
+              (match !target_data with
+               | None    -> llty  (* setup_target not called yet -- unit tests; no padding *)
+               | Some dl ->
+                   let sz  = Int64.to_int (Llvm_target.DataLayout.abi_size llty dl) in
+                   let pad = (n - (sz mod n)) mod n in
+                   if pad = 0 then llty
+                   else mk_struct (Array.append field_lltys
+                                     [| array_type (i8_type context) pad |]))
+        in
         Hashtbl.add struct_lltypes name llty;
-        Hashtbl.add struct_fields  name fields
+        Hashtbl.add struct_fields  name fields;
+        (match align_opt with Some n -> Hashtbl.add struct_alignments name n | None -> ())
     | EnumDef (name, ty_opt, variants, is_ne) ->
         let underlying = match ty_opt with Some t -> t | None -> TypeU32 in
         let (_, resolved) = List.fold_left (fun (next, acc) (vname, vopt) ->

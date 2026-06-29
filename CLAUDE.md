@@ -290,18 +290,22 @@ Files changed when `struct Name { field: type; }` was added:
 - Field assignment only in `ident.field = v` form (LHS is a single variable name only)
 - Global struct variable as `let g: Name;` only (`let mut` is not supported in global scope; always mutable)
 
-### Packed Struct (5 Files)
+### Packed Struct and Struct Type-Level Alignment (5 Files)
 
-Files changed when `struct packed Name { ... }` was added:
-1. `lib/ast.ml` -- `StructDef` 3rd field changed to `bool` (was absent); `true` = packed, `false` = normal
-2. `lib/lexer.mll` -- `"packed"` keyword -> `PACKED` token
-3. `lib/parser.mly` -- `PACKED` token; new `STRUCT PACKED IDENT LBRACE struct_fields RBRACE` rule sets `true`; existing rule sets `false`
-4. `lib/type_inf.ml` -- `StructDef (name, fields, _)` in Pass 0 (packed flag irrelevant for type checking)
-5. `lib/llvm_gen.ml` -- `packed_struct_type context field_lltys` when `is_packed = true`, `struct_type` otherwise
+Files changed when `struct packed Name { ... }` and `struct Name align(N) { ... }` were added:
+1. `lib/ast.ml` -- `StructDef of string * (string * type_expr) list * bool * int option` (is_packed, align_bytes)
+2. `lib/lexer.mll` -- `"packed"` keyword -> `PACKED` token (`ALIGN` was already present)
+3. `lib/parser.mly` -- 4 rules: plain / packed / align(N) / packed+align(N)
+4. `lib/type_inf.ml` -- `StructDef (name, fields, _, _)` in Pass 0 (both flags irrelevant for type checking)
+5. `lib/llvm_gen.ml` -- `packed_struct_type` when is_packed; `struct_alignments` table stores align_bytes per struct name; `set_alignment` applied at alloca (locals) and `define_global` (globals) time; also propagates to `[Name; N]` array allocas/globals
 
-**Use case**: protocol headers (Ethernet, IP, USB descriptors) and MMIO register maps where field layout must match hardware exactly without alignment padding.
+**Use case for packed**: protocol headers (Ethernet, IP, USB descriptors) and MMIO register maps where field layout must match hardware exactly without alignment padding.
 
-**Verification pattern** (`examples/packed/`): write known values, read raw bytes via `&s as *u8` alias to confirm no padding.
+**Use case for align(N)**: SIMD types (`Vec4 align(16)`), DMA descriptor rings (`Ring align(4096)`), cache-line-separated data. Alignment is set automatically on every variable of that type without repeating `align(N)` at each declaration site.
+
+**Struct tail padding** (`lib/llvm_gen.ml` Pass 0): When `align(N)` is specified and `sizeof(struct) % N != 0`, an `[i8; pad]` field is appended to the LLVM struct type so that `sizeof(struct)` becomes the next multiple of N. This ensures every element of `[Name; K]` arrays satisfies the alignment requirement (same behavior as C `__attribute__((aligned(N)))`). `struct_fields` stores only user-visible fields; the padding field is invisible to GEP and type inference. Tail padding uses the LLVM DataLayout (`Llvm_target.DataLayout.abi_size`) stored in `target_data` ref set by `setup_target`.
+
+**IntLit width sync in BinOp** (`lib/llvm_gen.ml`): `IntLit` always emits `i32` in codegen. When one BinOp operand is `i64` (usize) and the other is `i32` (from IntLit), the i32 is widened before the operation. This prevents an LLVM IR type-mismatch error on patterns like `usize_val == 0` or `usize_val & 15`.
 
 ### Enum Implementation (5 Files)
 

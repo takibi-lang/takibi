@@ -269,7 +269,7 @@ let parser_tests = [
 
   Alcotest.test_case "io type in struct field parses" `Quick (fun () ->
     match parse "struct S { done: io i32; }" with
-    | [Ast.StructDef (_, [(_, t)], _)] ->
+    | [Ast.StructDef (_, [(_, t)], _, _)] ->
         Alcotest.check type_t "field type is io i32" (Ast.TypeIo Ast.TypeI32) t
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -650,7 +650,7 @@ let parser_tests = [
 
   Alcotest.test_case "struct definition parses" `Quick (fun () ->
     match parse "struct Point { x: i32; y: i32; }" with
-    | [Ast.StructDef ("Point", fields, false)] ->
+    | [Ast.StructDef ("Point", fields, false, None)] ->
         Alcotest.(check int) "field count" 2 (List.length fields);
         let (n0, t0) = List.nth fields 0 in
         let (n1, t1) = List.nth fields 1 in
@@ -700,15 +700,28 @@ let parser_tests = [
 
   Alcotest.test_case "packed struct definition parses with is_packed=true" `Quick (fun () ->
     match parse "struct packed Hdr { a: u8; b: u16; }" with
-    | [Ast.StructDef ("Hdr", fields, true)] ->
+    | [Ast.StructDef ("Hdr", fields, true, None)] ->
         Alcotest.(check int) "field count" 2 (List.length fields)
     | _ -> Alcotest.fail "expected StructDef(Hdr, [...], true)"
   );
 
   Alcotest.test_case "normal struct definition parses with is_packed=false" `Quick (fun () ->
     match parse "struct Hdr { a: u8; b: u16; }" with
-    | [Ast.StructDef ("Hdr", _, false)] -> ()
+    | [Ast.StructDef ("Hdr", _, false, None)] -> ()
     | _ -> Alcotest.fail "expected is_packed=false"
+  );
+
+  Alcotest.test_case "struct align(N) parses with align_bytes=Some N" `Quick (fun () ->
+    match parse "struct Vec4 align(16) { x: i32; y: i32; z: i32; w: i32; }" with
+    | [Ast.StructDef ("Vec4", fields, false, Some 16)] ->
+        Alcotest.(check int) "field count" 4 (List.length fields)
+    | _ -> Alcotest.fail "expected StructDef(Vec4, [...], false, Some 16)"
+  );
+
+  Alcotest.test_case "struct packed align(N) parses with both flags" `Quick (fun () ->
+    match parse "struct packed Hdr align(4) { a: u8; b: u16; }" with
+    | [Ast.StructDef ("Hdr", _, true, Some 4)] -> ()
+    | _ -> Alcotest.fail "expected is_packed=true, align_bytes=Some 4"
   );
 
   (* -- Enum syntax ------------------------------------------------- *)
@@ -1646,6 +1659,14 @@ let infer_tests = [
 
   Alcotest.test_case "packed struct field access type-checks" `Quick
     (expect_ok "struct packed Hdr { a: u8; b: u16; }
+     fn f(h: *Hdr) -> u8 { return h.a; }");
+
+  Alcotest.test_case "struct align(N) field access type-checks" `Quick
+    (expect_ok "struct Vec4 align(16) { x: i32; y: i32; }
+     fn f(v: *Vec4) -> i32 { return v.x; }");
+
+  Alcotest.test_case "struct packed align(N) field access type-checks" `Quick
+    (expect_ok "struct packed Hdr align(4) { a: u8; b: u16; }
      fn f(h: *Hdr) -> u8 { return h.a; }");
 
   Alcotest.test_case "usize annotation type-checks" `Quick

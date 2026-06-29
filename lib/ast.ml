@@ -83,8 +83,8 @@ type toplevel =
   (* name, type, init, align_bytes -- align_bytes = Some N means global align(N) *)
   | ExternFuncDef of ident * (ident * type_expr option) list * type_expr option
   (* extern fn name(params) -> ret; -- body is provided by external assembly *)
-  | StructDef of string * (string * type_expr) list * bool
-  (* struct Name { field: type; ... } -- last bool = is_packed *)
+  | StructDef of string * (string * type_expr) list * bool * int option
+  (* name, fields, is_packed, align_bytes -- align_bytes = Some N means type-level align(N) *)
   | EnumDef of string * type_expr option * (string * int option) list * bool
   (* enum Name: u16 { Variant = val; _; } -- last bool = is_nonexhaustive *)
 [@@deriving show]

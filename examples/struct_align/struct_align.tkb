@@ -1,0 +1,88 @@
+// Demo of struct type-level alignment.
+// Every variable of type Vec4 is automatically 16-byte aligned without
+// requiring an explicit align(16) on each variable declaration.
+//
+// Also shows that an array of an aligned struct inherits the element alignment,
+// and that tail padding is added when sizeof(struct) is not a multiple of align(N)
+// so that every element of the array satisfies the alignment requirement.
+//
+// This mirrors the virtio use case:
+//   struct VirtqDesc align(16) { ... }
+//   let ring: [VirtqDesc; 16];             -- ring gets 16-byte alignment automatically
+//   let ring: [VirtqDesc; 16] align(4096); -- override to page-align for DMA
+//
+// We verify alignment by checking that (address & (N-1)) == 0.
+
+struct Vec4 align(16) {
+    x: i32;
+    y: i32;
+    z: i32;
+    w: i32;
+}
+
+// Virtio-style descriptor ring element (addr/len/flags/next = 16 bytes total).
+// align(16) ensures each element and the ring base are 16-byte aligned.
+struct VirtqDesc align(16) {
+    addr:  u64;
+    len:   u32;
+    flags: u16;
+    next:  u16;
+}
+
+// Non-power-of-two sized struct: fields total 6 bytes, align(16) requires 16.
+// The compiler adds 10 bytes of tail padding so sizeof(Odd) == 16,
+// guaranteeing that every element of [Odd; N] is 16-byte aligned.
+struct Odd align(16) {
+    a: i32;
+    b: i16;
+}
+
+// Global Vec4 -- 16-byte aligned automatically
+let g: Vec4;
+
+// Descriptor ring -- 16-byte aligned automatically (inherited from VirtqDesc align(16))
+let ring: [VirtqDesc; 4];
+
+// Page-aligned descriptor ring for DMA -- variable-level align(4096) overrides the
+// struct-level align(16), placing the ring on a 4096-byte boundary as virtio requires.
+let ring_dma: [VirtqDesc; 4] align(4096);
+
+// Array of Odd structs -- each element must be 16-byte aligned thanks to tail padding.
+let odds: [Odd; 4];
+
+fn print_aligned(label: *u8, addr: usize, mask: usize) {
+    uart_puts(label);
+    if ((addr & mask) == 0) {
+        uart_puts("aligned\r\n");
+    } else {
+        uart_puts("NOT aligned\r\n");
+    }
+}
+
+fn main() {
+    // Global struct variable
+    let gaddr: usize = (&g) as usize;
+    print_aligned("global Vec4:     ", gaddr, 15);
+
+    // Local struct variable
+    let mut v: Vec4;
+    v.x = 1;
+    let vaddr: usize = (&v) as usize;
+    print_aligned("local  Vec4:     ", vaddr, 15);
+
+    // Global array of aligned struct -- alignment propagated from element type
+    let raddr: usize = ring as usize;
+    print_aligned("global ring:     ", raddr, 15);
+
+    // Page-aligned ring -- variable-level align(4096) overrides struct-level align(16)
+    let daddr: usize = ring_dma as usize;
+    print_aligned("global ring_dma: ", daddr, 4095);
+
+    // Tail-padded array: element 0, 1, 2, 3 each 16-byte aligned
+    let p: *u8 = odds as *u8;
+    print_aligned("odds[0]:         ", p as usize, 15);
+    print_aligned("odds[1]:         ", (p + 16) as usize, 15);
+    print_aligned("odds[2]:         ", (p + 32) as usize, 15);
+
+    uart_puts("done\r\n");
+}

@@ -62,9 +62,13 @@ item:
   | EXTERN FN IDENT LPAREN params RPAREN ARROW type_expr SEMI
     { ExternFuncDef ($3, $5, Some $8) }
   | STRUCT IDENT LBRACE struct_fields RBRACE
-    { StructDef ($2, $4, false) }
+    { StructDef ($2, $4, false, None) }
   | STRUCT PACKED IDENT LBRACE struct_fields RBRACE
-    { StructDef ($3, $5, true) }
+    { StructDef ($3, $5, true, None) }
+  | STRUCT IDENT ALIGN LPAREN INT RPAREN LBRACE struct_fields RBRACE
+    { StructDef ($2, $8, false, Some $5) }
+  | STRUCT PACKED IDENT ALIGN LPAREN INT RPAREN LBRACE struct_fields RBRACE
+    { StructDef ($3, $9, true, Some $6) }
   | ENUM IDENT COLON base_type_expr LBRACE enum_variants RBRACE
     { let (vs, ne) = $6 in EnumDef ($2, Some $4, vs, ne) }
   | ENUM IDENT LBRACE enum_variants RBRACE
