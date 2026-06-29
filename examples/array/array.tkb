@@ -1,18 +1,18 @@
 // Demo of array read/write and decay to pointer on function call.
-// Declares a [char; 8] array, reads/writes via arr[i]=v / arr[i], and passes it to fill() as *char.
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000; // PL011 UART DR
+// Declares a [u8; 8] array, reads/writes via arr[i]=v / arr[i], and passes it to fill() as *u8.
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
-fn uart_puts(s: *char) {
+fn uart_puts(s: *u8) {
     while (*s != 0) {
         uart_putc(*s);
         s = s + 1;
     }
 }
 
-fn fill(p: *char, val: char, n: int) {
+fn fill(p: *u8, val: u8, n: i32) {
     for i in 0..<n {
         p[i] = val;
     }
@@ -21,7 +21,7 @@ fn fill(p: *char, val: char, n: int) {
 fn main() {
     uart_puts("=== array test ===\r\n");
 
-    let mut buf: [char; 8];
+    let mut buf: [u8; 8];
 
     for i in 0..<8 {
         buf[i] = 'A';

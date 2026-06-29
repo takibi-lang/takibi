@@ -6,18 +6,18 @@
 // task_hung:    calls wdt_kick(2) 3 times, then deliberately stops -> timeout detected
 
 struct GicRegs {
-    distr_ctlr:  *io int;
-    distr_isen0: *io int;
-    cpu_ctlr:    *io int;
-    cpu_pmr:     *io int;
-    cpu_iar:     *io int;
-    cpu_eoir:    *io int;
+    distr_ctlr:  *io i32;
+    distr_isen0: *io i32;
+    cpu_ctlr:    *io i32;
+    cpu_pmr:     *io i32;
+    cpu_iar:     *io i32;
+    cpu_eoir:    *io i32;
 }
 
 struct SchedState {
-    task_count:   int;
-    current_task: int;
-    tcb_sp:       [int; 3];
+    task_count:   i32;
+    current_task: i32;
+    tcb_sp:       [i32; 3];
 }
 
 // tick:      wall-clock incremented on each timer interrupt
@@ -25,33 +25,33 @@ struct SchedState {
 // deadline:  allowed tick count per task (0 = not monitored)
 // done:      set to 1 by main after a timeout is detected
 struct WdtState {
-    tick:      int;
-    last_kick: [int; 3];
-    deadline:  [int; 3];
-    done:      io int;
+    tick:      i32;
+    last_kick: [i32; 3];
+    deadline:  [i32; 3];
+    done:      io i32;
 }
 
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000; // PL011 UART DR
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
-fn uart_puts(s: *char) {
+fn uart_puts(s: *u8) {
     while (*s != 0) {
         uart_putc(*s);
         s = s + 1;
     }
 }
 
-fn print_uint(n: int) {
+fn print_uint(n: i32) {
     if (n >= 10) {
         print_uint(n / 10);
     }
-    uart_putc((n - (n / 10) * 10 + '0') as char);
+    uart_putc((n - (n / 10) * 10 + '0') as u8);
 }
 
-extern fn read_cntfrq() -> int;
-extern fn set_cntp_tval(n: int);
+extern fn read_cntfrq() -> i32;
+extern fn set_cntp_tval(n: i32);
 extern fn enable_cntp();
 extern fn disable_cntp();
 extern fn task_exit_stub();
@@ -64,19 +64,19 @@ let sched: SchedState = {3, 0, {0, 0, 0}};
 // deadline[2]=12 (task_hung stops kicking, so it times out at ~12 ticks)
 let wdt: WdtState = {0, {0, 0, 0}, {0, 20, 12}, 0};
 
-let hung_fired: io int = 0; // timeout detection flag
-let hung_task:  io int = 0; // ID of the timed-out task (valid only when hung_fired == 1)
+let hung_fired: io i32 = 0; // timeout detection flag
+let hung_task:  io i32 = 0; // ID of the timed-out task (valid only when hung_fired == 1)
 
-fn wdt_kick(task_id: int) {
-    let lk: *int = wdt.last_kick;
+fn wdt_kick(task_id: i32) {
+    let lk: *i32 = wdt.last_kick;
     lk[task_id] = wdt.tick;
 }
 
 // Called from the timer interrupt; advances tick and checks liveness of all monitored tasks
 fn wdt_check() {
     wdt.tick = wdt.tick + 1;
-    let lk: *int = wdt.last_kick;
-    let dl: *int = wdt.deadline;
+    let lk: *i32 = wdt.last_kick;
+    let dl: *i32 = wdt.deadline;
     for i in 0..<3 {
         if (dl[i] > 0) {
             if (wdt.tick - lk[i] > dl[i]) {
@@ -87,18 +87,18 @@ fn wdt_check() {
     }
 }
 
-fn setup_task_stack(s: *char, f: fn() -> void) -> int {
-    let base: *char = s - 272;
+fn setup_task_stack(s: *u8, f: fn() -> void) -> i32 {
+    let base: *u8 = s - 272;
     for i in 0..<272 {
-        *(base + i) = 0 as char;
+        *(base + i) = 0 as u8;
     }
     let p_elr: *fn() -> void = (base + 256) as *fn() -> void;
     *p_elr = f;
-    let p_spsr: *int = (base + 264) as *int;
+    let p_spsr: *i32 = (base + 264) as *i32;
     *p_spsr = 0x05;
     let p_x30: *fn() -> void = (base + 240) as *fn() -> void;
     *p_x30 = task_exit_stub;
-    return base as int;
+    return base as i32;
 }
 
 fn gic_init() {
@@ -114,16 +114,16 @@ fn timer_init() {
     enable_cntp();
 }
 
-fn irq_dispatch(frame_sp: int) -> int {
-    let id: int = *gic.cpu_iar;
+fn irq_dispatch(frame_sp: i32) -> i32 {
+    let id: i32 = *gic.cpu_iar;
     if (id == 30) {
         set_cntp_tval(read_cntfrq() >> 6);
         wdt_check(); // check watchdog
-        let sp: *int = sched.tcb_sp;
+        let sp: *i32 = sched.tcb_sp;
         sp[sched.current_task] = frame_sp;
         sched.current_task = (sched.current_task + 1) % sched.task_count;
         *(gic.cpu_eoir) = id;
-        let sp2: *int = sched.tcb_sp;
+        let sp2: *i32 = sched.tcb_sp;
         return sp2[sched.current_task];
     }
     *(gic.cpu_eoir) = id;
@@ -132,7 +132,7 @@ fn irq_dispatch(frame_sp: int) -> int {
 
 // Keep kicking periodically until wdt.done is set -- this task never times out
 fn task_healthy() {
-    let pd: *io int = &wdt.done;
+    let pd: *io i32 = &wdt.done;
     while (*pd == 0) {
         wdt_kick(1);
     }
@@ -144,23 +144,23 @@ fn task_hung() {
         wdt_kick(2);
     }
     // Kicking stops here -> watchdog detects a deadline overrun
-    let pd: *io int = &wdt.done;
+    let pd: *io i32 = &wdt.done;
     while (*pd == 0) {}
 }
 
-let stack_a: [char; 4096];
-let stack_b: [char; 4096];
+let stack_a: [u8; 4096];
+let stack_b: [u8; 4096];
 
 fn main() {
     uart_puts("watchdog start\r\n");
 
-    let sp: *int = sched.tcb_sp;
+    let sp: *i32 = sched.tcb_sp;
     sp[1] = setup_task_stack(stack_a + 4096, task_healthy);
     sp[2] = setup_task_stack(stack_b + 4096, task_hung);
 
     timer_init();
 
-    let pf: *io int = &hung_fired;
+    let pf: *io i32 = &hung_fired;
     while (*pf == 0) {}
 
     disable_cntp();

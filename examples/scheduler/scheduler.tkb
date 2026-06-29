@@ -3,28 +3,28 @@
 // Each task runs 3 steps and then calls task_finish to decrement sched.active.
 struct Scheduler {
     tasks:      [fn() -> void; 8];
-    task_count: int;
-    cur:        int;
-    active:     int;
+    task_count: i32;
+    cur:        i32;
+    active:     i32;
 }
 
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000; // PL011 UART DR
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
-fn uart_puts(s: *char) {
+fn uart_puts(s: *u8) {
     while (*s != 0) {
         uart_putc(*s);
         s = s + 1;
     }
 }
 
-fn print_uint(n: int) {
+fn print_uint(n: i32) {
     if (n >= 10) {
         print_uint(n / 10);
     }
-    uart_putc((n - (n / 10) * 10 + '0') as char);
+    uart_putc((n - (n / 10) * 10 + '0') as u8);
 }
 
 let sched: Scheduler;
@@ -49,7 +49,7 @@ fn scheduler_run() {
     }
 }
 
-let a_step: int = 0;
+let a_step: i32 = 0;
 
 fn task_a() {
     if (a_step < 3) {
@@ -63,7 +63,7 @@ fn task_a() {
     }
 }
 
-let b_step: int = 0;
+let b_step: i32 = 0;
 
 fn task_b() {
     if (b_step < 3) {

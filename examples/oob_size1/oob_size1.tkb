@@ -1,6 +1,6 @@
 // This file is expected to produce a compile error.
 // Index 1 is always out of bounds for a size-1 array.
 fn main() {
-    let mut arr: [int; 1];
+    let mut arr: [i32; 1];
     let x = arr[1];
 }

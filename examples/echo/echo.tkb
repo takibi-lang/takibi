@@ -1,28 +1,28 @@
 // UART echo server. Immediately echoes input back; exits on q + Enter.
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000; // PL011 UART DR
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
-fn uart_puts(s: *char) {
+fn uart_puts(s: *u8) {
     while (*s != 0) {
         uart_putc(*s);
         s = s + 1;
     }
 }
 
-fn uart_getc() char {
-    let fr: *io int = 0x09000018; // PL011 FR: bit4=RXFE (receive FIFO empty)
+fn uart_getc() u8 {
+    let fr: *io i32 = 0x09000018; // PL011 FR: bit4=RXFE (receive FIFO empty)
     while (*fr == 144) {} // 0x90 = TXFE|RXFE idle state; changes when data arrives
-    let dr: *io char = 0x09000000; // PL011 UART DR
+    let dr: *io u8 = 0x09000000; // PL011 UART DR
     return *dr;
 }
 
 fn main() {
     uart_puts("echo ready\r\n");
-    let mut prev: char = 0;
+    let mut prev: u8 = 0;
     while (1) {
-        let c: char = uart_getc();
+        let c: u8 = uart_getc();
         uart_putc(c);
         if (c == '\r') {
             uart_putc('\n');

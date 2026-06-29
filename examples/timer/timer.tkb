@@ -1,19 +1,19 @@
 // Demo of a 1-second polling delay using the PL031 RTC.
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000;
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000;
     *dr = c;
 }
 
-fn uart_puts(s: *char) {
+fn uart_puts(s: *u8) {
     while (*s != '\0') {
         uart_putc(*s);
         s = s + 1;
     }
 }
 
-fn delay_seconds(n: int) {
-    let rtc: *io int = 0x09010000; // PL031 RTC DR: 1-second resolution counter
-    let start: int = *rtc;
+fn delay_seconds(n: i32) {
+    let rtc: *io i32 = 0x09010000; // PL031 RTC DR: 1-second resolution counter
+    let start: i32 = *rtc;
     while (*rtc - start < n) {}
 }
 

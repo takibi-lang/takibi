@@ -3,68 +3,68 @@
 // irq_dispatch receives frame_sp and returns the next task's sp; irq_entry in startup.S switches the stack.
 // System register operations (cntfrq/cntp_tval/cntp_ctl) are delegated to assembly via extern fn.
 struct GicRegs {
-    distr_ctlr: *io int;
-    distr_isen0: *io int;
-    cpu_ctlr:   *io int;
-    cpu_pmr:    *io int;
-    cpu_iar:    *io int;
-    cpu_eoir:   *io int;
+    distr_ctlr: *io i32;
+    distr_isen0: *io i32;
+    cpu_ctlr:   *io i32;
+    cpu_pmr:    *io i32;
+    cpu_iar:    *io i32;
+    cpu_eoir:   *io i32;
 }
 
 struct SchedState {
-    task_count:   int;
-    current_task: int;
-    max_ticks:    int;
-    total_ticks:  int;
-    done:         io int;
-    tick_counts:  [int; 3];
-    tcb_sp:       [int; 3];
+    task_count:   i32;
+    current_task: i32;
+    max_ticks:    i32;
+    total_ticks:  i32;
+    done:         io i32;
+    tick_counts:  [i32; 3];
+    tcb_sp:       [i32; 3];
 }
 
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000; // PL011 UART DR
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
-fn uart_puts(s: *char) {
+fn uart_puts(s: *u8) {
     while (*s != 0) {
         uart_putc(*s);
         s = s + 1;
     }
 }
 
-fn print_uint(n: int) {
+fn print_uint(n: i32) {
     if (n >= 10) {
         print_uint(n / 10);
     }
-    uart_putc((n - (n / 10) * 10 + '0') as char);
+    uart_putc((n - (n / 10) * 10 + '0') as u8);
 }
 
-extern fn read_cntfrq() -> int;
-extern fn set_cntp_tval(n: int);
+extern fn read_cntfrq() -> i32;
+extern fn set_cntp_tval(n: i32);
 extern fn enable_cntp();
 extern fn disable_cntp();
 extern fn task_exit_stub();
 
-fn setup_task_stack(s: *char, f: fn() -> void) -> int {
-    let base: *char = s - 272;
+fn setup_task_stack(s: *u8, f: fn() -> void) -> i32 {
+    let base: *u8 = s - 272;
     for i in 0..<272 {
-        *(base + i) = 0 as char;
+        *(base + i) = 0 as u8;
     }
     let p_elr: *fn() -> void = (base + 256) as *fn() -> void;
     *p_elr = f;
-    let p_spsr: *int = (base + 264) as *int;
+    let p_spsr: *i32 = (base + 264) as *i32;
     *p_spsr = 0x05;
     let p_x30: *fn() -> void = (base + 240) as *fn() -> void;
     *p_x30 = task_exit_stub;
-    return base as int;
+    return base as i32;
 }
 
 let gic: GicRegs = {0x08000000, 0x08000100, 0x08010000, 0x08010004, 0x0801000C, 0x08010010};
 let sched: SchedState = {3, 0, 6, 0, 0, {0, 0, 0}, {0, 0, 0}};
 
-let stack_a: [char; 4096];
-let stack_b: [char; 4096];
+let stack_a: [u8; 4096];
+let stack_b: [u8; 4096];
 
 fn gic_init() {
     *(gic.distr_ctlr)  = 1;
@@ -79,14 +79,14 @@ fn timer_init() {
     enable_cntp();
 }
 
-fn irq_dispatch(frame_sp: int) -> int {
-    let id: int = *gic.cpu_iar;
+fn irq_dispatch(frame_sp: i32) -> i32 {
+    let id: i32 = *gic.cpu_iar;
     if (id == 30) {
         set_cntp_tval(read_cntfrq() >> 6);
         sched.total_ticks = sched.total_ticks + 1;
-        let tc: *int = sched.tick_counts;
+        let tc: *i32 = sched.tick_counts;
         tc[sched.current_task] = tc[sched.current_task] + 1;
-        let sp: *int = sched.tcb_sp;
+        let sp: *i32 = sched.tcb_sp;
         sp[sched.current_task] = frame_sp;
         if (sched.total_ticks >= sched.max_ticks) {
             disable_cntp();
@@ -94,7 +94,7 @@ fn irq_dispatch(frame_sp: int) -> int {
         }
         sched.current_task = (sched.current_task + 1) % sched.task_count;
         *(gic.cpu_eoir) = id;
-        let sp2: *int = sched.tcb_sp;
+        let sp2: *i32 = sched.tcb_sp;
         return sp2[sched.current_task];
     }
     *(gic.cpu_eoir) = id;
@@ -102,23 +102,23 @@ fn irq_dispatch(frame_sp: int) -> int {
 }
 
 fn task_a() {
-    let pd: *io int = &sched.done;
+    let pd: *io i32 = &sched.done;
     while (*pd == 0) {}
 }
 
 fn task_b() {
-    let pd: *io int = &sched.done;
+    let pd: *io i32 = &sched.done;
     while (*pd == 0) {}
 }
 
 fn main() {
-    let sp: *int = sched.tcb_sp;
+    let sp: *i32 = sched.tcb_sp;
     sp[1] = setup_task_stack(stack_a + 4096, task_a);
     sp[2] = setup_task_stack(stack_b + 4096, task_b);
     timer_init();
-    let pd: *io int = &sched.done;
+    let pd: *io i32 = &sched.done;
     while (*pd == 0) {}
-    let tc: *int = sched.tick_counts;
+    let tc: *i32 = sched.tick_counts;
     uart_puts("main: ");
     print_uint(tc[0]);
     uart_puts(" ticks\r\n");

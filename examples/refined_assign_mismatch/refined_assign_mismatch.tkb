@@ -1,6 +1,6 @@
 // This file is expected to produce a compile error.
 // Type inference detects assigning x+1 (type {1..<9}) to a variable declared as {0..<8}.
-fn main() -> int {
+fn main() -> i32 {
     let mut x: {0..<8} = 0;
     x = x + 1;
     return x;

@@ -1,48 +1,48 @@
 // Ring buffer demo. RingBuf struct wraps head/tail with % cap.
 struct RingBuf {
-    buf:  *int;
-    head: int;
-    tail: int;
-    size: int;
-    cap:  int;
+    buf:  *i32;
+    head: i32;
+    tail: i32;
+    size: i32;
+    cap:  i32;
 }
 
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000; // PL011 UART DR
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
-fn uart_puts(s: *char) {
+fn uart_puts(s: *u8) {
     while (*s != 0) {
         uart_putc(*s);
         s = s + 1;
     }
 }
 
-fn uart_print_uint(n: int) {
+fn uart_print_uint(n: i32) {
     if (n >= 10) {
         uart_print_uint(n / 10);
     }
-    uart_putc((n % 10 + '0') as char);
+    uart_putc((n % 10 + '0') as u8);
 }
 
-fn rb_push(rb: *RingBuf, val: int) {
-    let buf: *int = rb.buf;
+fn rb_push(rb: *RingBuf, val: i32) {
+    let buf: *i32 = rb.buf;
     buf[rb.tail] = val;
     rb.tail = (rb.tail + 1) % rb.cap;
     rb.size = rb.size + 1;
 }
 
-fn rb_pop(rb: *RingBuf) -> int {
-    let buf: *int = rb.buf;
-    let val: int = buf[rb.head];
+fn rb_pop(rb: *RingBuf) -> i32 {
+    let buf: *i32 = rb.buf;
+    let val: i32 = buf[rb.head];
     rb.head = (rb.head + 1) % rb.cap;
     rb.size = rb.size - 1;
     return val;
 }
 
 fn main() {
-    let mut data: [int; 4];
+    let mut data: [i32; 4];
     let mut rb: RingBuf = {data, 0, 0, 0, 4};
 
     rb_push(&rb, 1);

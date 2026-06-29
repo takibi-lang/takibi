@@ -12,10 +12,10 @@ the system will silently break or run amok. Nothing is communicated to the user.
 - **Detect errors at compile time.** The ultimate goal is to make any access that the type system cannot prove into a compile error.
 - **`llvm.trap` is a transitional safety net.** The current array bounds check (`icmp uge` -> `llvm.trap`) aids debugging during development, but on AArch64 it translates to `brk #0` (Synchronous Abort) -- a runtime error that must never occur in production code.
 - **The range type `{lo..<hi}` is the solution.** If `hi <= N` and `lo >= 0` can be proven at compile time, no `llvm.trap` code is generated at all (Step 3.4).
-- **When to use `int` vs `{lo..<hi}` is the programmer's responsibility**:
-  - `int` = unknown range (MMIO, external input, etc.) -> bounds check required
+- **When to use `i32` vs `{lo..<hi}` is the programmer's responsibility**:
+  - `i32` = unknown range (MMIO, external input, etc.) -> bounds check required
   - `{lo..<hi}` = value whose range the programmer knows -> check can be omitted
-  - Using an unchecked value read from MMIO directly as an array index is a bug hotbed; a bounds check appearing on `int` is **correct behavior**
+  - Using an unchecked value read from MMIO directly as an array index is a bug hotbed; a bounds check appearing on `i32` is **correct behavior**
 
 **"Code with remaining bounds checks = code whose type annotations are still insufficient."**
 The finished form of code is when index ranges are pinned at the type level using `for i in 0..<n` or `{lo..<hi}` annotations.
@@ -23,7 +23,7 @@ The finished form of code is when index ranges are pinned at the type level usin
 ## Language Specification (Current)
 
 - File extension: `.tkb`
-- Types: `int`, `char`, `void`, `*T` (regular pointer, non-volatile), `io T` (volatile-qualified value type), `*io T` (volatile MMIO pointer = `TypePtr(TypeIo T)`), `[T; N]` (array type; decays to pointer in function arguments), `fn(T...) -> R` (function pointer type), `Name` (named struct type)
+- Types: `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `void`, `*T` (regular pointer, non-volatile), `io T` (volatile-qualified value type), `*io T` (volatile MMIO pointer = `TypePtr(TypeIo T)`), `[T; N]` (array type; decays to pointer in function arguments), `fn(T...) -> R` (function pointer type), `Name` (named struct type), `{lo..<hi}` (refined integer subtype)
 - Statements:
   - `let x = e` / `let x: T = e` -- immutable variable declaration (initial value required, no reassignment)
   - `let mut x = e` / `let mut x: T = e` -- mutable variable declaration (reassignment allowed)
@@ -41,12 +41,12 @@ The finished form of code is when index ranges are pinned at the type level usin
   - String literals (`"..."` -- supports `\n` `\r` `\t` `\\` `\"` escapes)
   - Comments (`// line comment`, `/* block comment */`)
   - Arithmetic (`+` `-` `*` `/` `%`), comparison (`<` `>` `<=` `>=` `==` `!=`)
-  - Pointer arithmetic: `ptr + int` / `ptr - int` -> same pointer type (emitted as GEP). `int + ptr` also works. Codegen uses `build_neg + GEP`
+  - Pointer arithmetic: `ptr + i32` / `ptr - i32` -> same pointer type (emitted as GEP). `i32 + ptr` also works. Codegen uses `build_neg + GEP`
   - Unary minus (`-expr`) -- desugared to `BinOp(Sub, IntLit 0, expr)` in the parser
   - Logical OR (`||`)
-  - Bitwise ops (`>>` logical right shift, `<<` left shift, `&` bitwise AND, `|` bitwise OR, `^` bitwise XOR) -- both operands `int`, result `int`
+  - Bitwise ops (`>>` logical right shift, `<<` left shift, `&` bitwise AND, `|` bitwise OR, `^` bitwise XOR) -- both operands `i32`, result `i32`
   - Function call, `*expr` (dereference), `&ident` (address-of)
-  - `expr as T` -- explicit type cast (int <-> char, `*T` -> int, `*T` -> `*U`). Lower precedence than arithmetic, so `a + b as char` = `(a + b) as char`
+  - `expr as T` -- explicit type cast (i32 <-> u8, `*T` -> i32, `*T` -> `*U`). Lower precedence than arithmetic, so `a + b as u8` = `(a + b) as u8`
 - `struct Name { field: type; ... }` -- struct type definition (top-level only; fields are primitive types, pointer types, or other struct types)
 - `let mut s: Name;` -- struct variable declaration (local/global, always treated as mutable)
 - `s.field` -- field read (works for both `s: Name` and `s: *Name`, Zig-style)
@@ -56,9 +56,9 @@ The finished form of code is when index ranges are pinned at the type level usin
 - MMIO / volatile: `io T` is a volatile-qualified value type. `*io T` (= `TypePtr(TypeIo T)`) is a volatile MMIO pointer
   - `*io T` pointer: `*p` is a volatile load, `*p = v` is a volatile store
   - `*T` (regular pointer) load/store is non-volatile (LLVM may optimize)
-  - Direct accesses to an `io T` variable (e.g. `let flag: io int;`) are all volatile
-  - `&io_var` automatically returns `*io T` (no `as *io int` cast needed)
-  - Flags shared with interrupt handlers: read as `let flag: io int; while (flag == 0) {}`
+  - Direct accesses to an `io T` variable (e.g. `let flag: io i32;`) are all volatile
+  - `&io_var` automatically returns `*io T` (no `as *io i32` cast needed)
+  - Flags shared with interrupt handlers: read as `let flag: io i32; while (flag == 0) {}`
 
 ## Build Commands
 
@@ -136,10 +136,10 @@ Precedence (low -> high): `||` < `|` < `^` < comparison < `&` < `as` < `+/-` < `
 Range propagation for `n % m` (where m is a positive integer literal) returns `{0..<m}` **only when the left operand is guaranteed non-negative at the type level**.
 
 - `n: {lo..<_}` with `lo >= 0` -> `TRefinedInt(0, m)` / `TypeRefined(0, m)` (safe)
-- `n: int` (possibly negative) -> `TInt` / `TypeInt` (conservative fallback)
+- `n: i32` (possibly negative) -> `TI32` / `TypeI32` (conservative fallback)
 
 **Rationale**: LLVM's `srem` returns a negative remainder when the dividend is negative (`(-5) % 8 = -5`, not 3).
-Unconditionally returning `{0..<m}` for `n: int` would cause `arr[(-5) % 8]` to be judged "safe",
+Unconditionally returning `{0..<m}` for `n: i32` would cause `arr[(-5) % 8]` to be judged "safe",
 producing an unsound buffer under-read with the bounds check omitted.
 
 **Sync rule**: Both `lib/type_inf.ml` (`Mod` case) and `lib/llvm_gen.ml` (`Mod` case) have a `lo >= 0` guard.
@@ -177,10 +177,10 @@ Files changed when `expr as T` was added:
 3. `lib/parser.mly` -- `%nonassoc AS` (lower precedence than arithmetic), `expr AS type_expr` rule
 4. `lib/type_inf.ml` -- checks the source expression and returns the target type
 5. `lib/llvm_gen.ml` -- `coerce` function selects the conversion instruction per target type:
-   - `int -> char`: `trunc i32, i8`
-   - `char/i1 -> int`: `zext`
-   - `int -> *T`: `zext i32, i64` -> `inttoptr` (MMIO address assignment)
-   - `*T -> int`: `ptrtoint ptr, i64` -> `trunc i64, i32` (displaying a pointer value)
+   - `i32 -> u8`: `trunc i32, i8`
+   - `u8/i1 -> i32`: `zext`
+   - `i32 -> *T`: `zext i32, i64` -> `inttoptr` (MMIO address assignment)
+   - `*T -> i32`: `ptrtoint ptr, i64` -> `trunc i64, i32` (displaying a pointer value)
    - `*T -> *U`: **no-op** (in LLVM 19, all pointers are the same `ptr` type, so the leading `if vty = dst_ll then v` in `coerce` applies; no compiler change needed)
 
 ### Codegen for Immutable and Mutable Variables
@@ -199,7 +199,7 @@ type local_binding =
 **`gen_stmt` is defined inside `gen_func`**. This is because the type of an immutable `let` must be resolved via the `res` function that references the HM type inference result. As an OCaml closure, `res` in the `gen_func` scope can be referenced naturally.
 
 ### Global Arrays and Uninitialized Global Variables
-Uninitialized global variable declarations such as `let heap: [char; 256];` are supported.
+Uninitialized global variable declarations such as `let heap: [u8; 256];` are supported.
 
 - Emitted as `undef` in LLVM IR (not `zeroinitializer`)
 - Since `startup.S` zero-clears the BSS section, values are always zero at runtime
@@ -219,7 +219,7 @@ Files changed when the `fn(T...) -> R` type was added:
 5. `lib/llvm_gen.ml` -- `ltype_of_ast (TypeFn _) = pointer_type context` (opaque ptr); indirect calls reconstruct `function_type` and use `build_call`
 
 **Function pointers in LLVM 19**:
-LLVM 19 has a single pointer kind (`ptr`, opaque pointer). `fn(int) -> char` and `fn() -> void` are both the same `ptr` in LLVM IR. The takibi type checker enforces type distinction; correct calling conventions are generated by passing `function_type` to `build_call`. Unlike C's `void*`, takibi's type checker enforces signature compatibility.
+LLVM 19 has a single pointer kind (`ptr`, opaque pointer). `fn(i32) -> u8` and `fn() -> void` are both the same `ptr` in LLVM IR. The takibi type checker enforces type distinction; correct calling conventions are generated by passing `function_type` to `build_call`. Unlike C's `void*`, takibi's type checker enforces signature compatibility.
 
 ### extern fn Spans 5 Files
 Files changed when external assembly function declarations like `extern fn timer_init();` were added:
@@ -279,37 +279,37 @@ See the comment in each `.tkb` file for implementation details (`condvar.tkb` ex
 - `*T` -- regular pointer (AST: `TypePtr T`). Non-volatile.
 
 **Where volatile is generated**:
-- `let irq_done: io int;` -- all reads and writes to this global variable are volatile
+- `let irq_done: io i32;` -- all reads and writes to this global variable are volatile
 - `irq_done = 1;` -> volatile store (automatic)
 - `while (irq_done == 0) {}` -> `irq_done` is a direct volatile load (automatic)
-- `&irq_done` -> automatically returns `*io int` (no `as *io int` cast needed)
-- Struct field `done: io int;` -> `s.done = 1;` is a volatile store
-- `*p` where `p: *io int` -> volatile load
-- `*p = v` where `p: *io int` -> volatile store
+- `&irq_done` -> automatically returns `*io i32` (no `as *io i32` cast needed)
+- Struct field `done: io i32;` -> `s.done = 1;` is a volatile store
+- `*p` where `p: *io i32` -> volatile load
+- `*p = v` where `p: *io i32` -> volatile store
 - `p.field` where `p: *io Struct` -> volatile load (`through_io` flag)
 
-**`io` is stripped on Deref**: `*p` where `p: *io int` -> result type is `int` (not `io`). Volatile is confined to `set_volatile true` on the load.
+**`io` is stripped on Deref**: `*p` where `p: *io i32` -> result type is `i32` (not `io`). Volatile is confined to `set_volatile true` on the load.
 
 - `*io T` is a compiler-level distinction. CPU-level memory barriers are provided by `ldaxr/stlxr` (extern fn).
-- Pointer arithmetic `*io T + int` -> remains `*io T` (matches `TypePtr _`)
-- `int as *io T` -- MMIO address literal assignment (inttoptr coercion, `TypePtr _` case)
+- Pointer arithmetic `*io T + i32` -> remains `*io T` (matches `TypePtr _`)
+- `i32 as *io T` -- MMIO address literal assignment (inttoptr coercion, `TypePtr _` case)
 
 ### Volatile Reads of Global Variables (Interrupt-Shared Flags)
 LLVM may hoist a global variable load out of a tight loop like `while (flag == 0) {}`,
 resulting in an infinite loop (`cbz reg, self`).
-Use `io int` for flags shared with interrupt handlers:
+Use `io i32` for flags shared with interrupt handlers:
 
-Declare flags shared with interrupt handlers as `io int`:
+Declare flags shared with interrupt handlers as `io i32`:
 ```takibi
-let sched_done: io int = 0;        // volatile global declaration
+let sched_done: io i32 = 0;        // volatile global declaration
 sched_done = 1;                    // volatile store (automatic)
-let p: *io int = &sched_done;      // &io_var automatically returns *io int (no cast needed)
+let p: *io i32 = &sched_done;      // &io_var automatically returns *io i32 (no cast needed)
 while (*p == 0) {}                 // volatile load -- prevents hoisting
 ```
 `AddrOf (Var name)` where `name: io T` -> automatically returns `TypePtr (TypeIo T)` = `*io T`. No cast needed.
 
 ### Integer Literal -> Pointer Coercion
-`let dr: *io char = 0x09000000;` assigns an integer literal to an MMIO pointer type variable.
+`let dr: *io u8 = 0x09000000;` assigns an integer literal to an MMIO pointer type variable.
 The `coerce` function in `llvm_gen.ml` emits `inttoptr(zext(i32, i64), ptr)` (`TypePtr _` case).
 
 ### Makefile Example Registration Convention

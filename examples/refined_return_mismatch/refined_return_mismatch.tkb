@@ -3,6 +3,6 @@
 fn add_one(i: {0..<8}) -> {0..<8} {
     return i + 1;
 }
-fn main() -> int {
+fn main() -> i32 {
     return 0;
 }

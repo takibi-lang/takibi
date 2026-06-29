@@ -1,47 +1,47 @@
 // Struct demo: field access, assignment, pass-by-pointer, and swap.
 // Defines two struct types: Point (x, y) and Rect (tl, br, w, h).
 struct Point {
-    x: int;
-    y: int;
+    x: i32;
+    y: i32;
 }
 
 struct Rect {
-    tl: int;
-    br: int;
-    w:  int;
-    h:  int;
+    tl: i32;
+    br: i32;
+    w:  i32;
+    h:  i32;
 }
 
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000; // PL011 UART DR
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
-fn uart_puts(s: *char) {
+fn uart_puts(s: *u8) {
     while (*s != 0) {
         uart_putc(*s);
         s = s + 1;
     }
 }
 
-fn print_uint(n: int) {
+fn print_uint(n: i32) {
     if (n >= 10) {
         print_uint(n / 10);
     }
-    uart_putc((n % 10 + '0') as char);
+    uart_putc((n % 10 + '0') as u8);
 }
 
-fn point_sum(p: *Point) -> int {
+fn point_sum(p: *Point) -> i32 {
     return p.x + p.y;
 }
 
 fn point_swap(p: *Point) {
-    let tmp: int = p.x;
+    let tmp: i32 = p.x;
     p.x = p.y;
     p.y = tmp;
 }
 
-fn rect_area(r: *Rect) -> int {
+fn rect_area(r: *Rect) -> i32 {
     return r.w * r.h;
 }
 

@@ -2,12 +2,12 @@
 // IRQ #33 (SPI #1) = PL011 UART RX. irq_dispatch calls the handler registered in irq_tbl.
 // The function signature of irq_dispatch must match irq_entry in startup.S.
 struct GicRegs {
-    distr_ctlr: *io int;
-    distr_isen: *io int;
-    cpu_ctlr:   *io int;
-    cpu_pmr:    *io int;
-    cpu_iar:    *io int;
-    cpu_eoir:   *io int;
+    distr_ctlr: *io i32;
+    distr_isen: *io i32;
+    cpu_ctlr:   *io i32;
+    cpu_pmr:    *io i32;
+    cpu_iar:    *io i32;
+    cpu_eoir:   *io i32;
 }
 
 struct IrqTable {
@@ -16,28 +16,28 @@ struct IrqTable {
 
 let gic: GicRegs = {0x08000000, 0x08000104, 0x08010000, 0x08010004, 0x0801000C, 0x08010010};
 let irq_tbl:  IrqTable;
-let uart_imsc: *io int = 0x09000038; // PL011 IMSC: interrupt mask register (bit4=RXIM)
-let irq_done:  io int;
+let uart_imsc: *io i32 = 0x09000038; // PL011 IMSC: interrupt mask register (bit4=RXIM)
+let irq_done:  io i32;
 
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000; // PL011 UART DR
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
-fn uart_puts(s: *char) {
+fn uart_puts(s: *u8) {
     while (*s != 0) {
         uart_putc(*s);
         s = s + 1;
     }
 }
 
-fn register_irq(id: int, h: fn() -> void) {
+fn register_irq(id: i32, h: fn() -> void) {
     let t: *fn() -> void = irq_tbl.handlers;
     t[id] = h;
 }
 
-fn irq_dispatch(frame_sp: int) -> int {
-    let id: int = *gic.cpu_iar;
+fn irq_dispatch(frame_sp: i32) -> i32 {
+    let id: i32 = *gic.cpu_iar;
     if (id < 64) {
         let t: *fn() -> void = irq_tbl.handlers;
         let h: fn() -> void = t[id];
@@ -48,18 +48,18 @@ fn irq_dispatch(frame_sp: int) -> int {
 }
 
 fn uart_rx_handler() {
-    let dr: *io char = 0x09000000;
-    let c: char = *dr;
+    let dr: *io u8 = 0x09000000;
+    let c: u8 = *dr;
     *dr = c;
     if (c == '\r') {
-        let lf: char = '\n';
+        let lf: u8 = '\n';
         *dr = lf;
         irq_done = 1;
     }
 }
 
 fn gic_init() {
-    let gicd_itargetsr8: *io int = 0x08000820;
+    let gicd_itargetsr8: *io i32 = 0x08000820;
     *(gic.distr_ctlr) = 1;
     *(gic.distr_isen) = 2; // GICD_ISENABLER0: bit1 = enable IRQ #33 (SPI #1 = UART)
     *gicd_itargetsr8  = 0x01010101;
@@ -76,7 +76,7 @@ fn main() {
     register_irq(33, uart_rx_handler);
     uart_puts("irq ready\r\n");
     uart_init_irq();
-    let p: *io int = &irq_done;
+    let p: *io i32 = &irq_done;
     while (*p == 0) {}
     uart_puts("done\r\n");
 }

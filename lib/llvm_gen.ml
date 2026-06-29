@@ -89,7 +89,7 @@ let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t) (cond : Ast
     match lo_opt, hi_opt with
     | Some lo, Some hi ->
         (match Hashtbl.find_opt locals name with
-         | Some (Mut ((TypeInt | TypeI32), _)) ->
+         | Some (Mut (TypeI32, _)) ->
              let old = Hashtbl.find_opt narrowing_ctx name in
              Hashtbl.replace narrowing_ctx name (TypeRefined (lo, hi));
              (name, old) :: saved
@@ -151,8 +151,6 @@ let emit_object machine output_path =
 (* -- Type helpers -------------------------------------------------------- *)
 
 let rec ltype_of_ast = function
-  | TypeInt         -> i32_type context
-  | TypeChar        -> i8_type  context
   | TypeBool        -> i1_type  context
   | TypeI8  | TypeU8  -> i8_type  context
   | TypeI16 | TypeU16 -> i16_type context
@@ -171,7 +169,7 @@ let rec ltype_of_ast = function
 
 (* True for unsigned integer types (use udiv/urem/icmp ult etc.) *)
 let is_unsigned = function
-  | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeChar -> true
+  | TypeU8 | TypeU16 | TypeU32 | TypeU64 -> true
   | _ -> false
 
 (* True for 64-bit integer types *)
@@ -188,11 +186,6 @@ let widen_load (ast_ty : Ast.type_expr) v =
   match ast_ty with
   | TypeI64 | TypeU64 -> v
   | TypeBool -> v
-  | TypeInt | TypeChar ->
-      (* Legacy: always zext to i32 (TypeChar is unsigned u8 alias) *)
-      let src = type_of v in
-      if src = i32_type context || src = pointer_type context then v
-      else build_zext v (i32_type context) "zext" builder
   | TypeI8 | TypeI16 | TypeI32 ->
       let dst = i32_type context in
       let src = type_of v in
@@ -224,7 +217,7 @@ let rec coerce v (dst : Ast.type_expr) =
         else build_zext v (i64_type context) "zext64" builder
       in
       build_inttoptr v64 (pointer_type context) "inttoptr" builder
-  | TypeChar | TypeU8 | TypeI8 ->
+  | TypeU8 | TypeI8 ->
       if vty = i32_type context || vty = i64_type context
       then build_trunc v (i8_type context) "trunc" builder
       else v
@@ -232,7 +225,7 @@ let rec coerce v (dst : Ast.type_expr) =
       if vty = i32_type context || vty = i64_type context
       then build_trunc v (i16_type context) "trunc" builder
       else v
-  | TypeInt | TypeI32 | TypeU32 ->
+  | TypeI32 | TypeU32 ->
       if vty = i64_type context then build_trunc v (i32_type context) "trunc" builder
       else if vty = i1_type  context then build_zext  v (i32_type context) "zext"  builder
       else if vty = pointer_type context then
@@ -256,7 +249,7 @@ let rec coerce v (dst : Ast.type_expr) =
   | TypeArray _ -> v
   | TypeFn _    -> v
   | TypeNamed _ -> v
-  | TypeRefined _ -> coerce v TypeInt
+  | TypeRefined _ -> coerce v TypeI32
 
 (* Widen an integer value to i32 so arithmetic stays uniform (legacy helper for TypeInt/TypeChar).
    Does NOT touch pointer values. *)
@@ -297,14 +290,14 @@ let rec collect_lets stmts =
     | Block ss                    -> collect_lets ss
     | If (_, t, e)                -> collect_lets t @ collect_lets e
     | While (_, b)                -> collect_lets b
-    | For (name, _, _, body)      -> ("__for_" ^ name, Some TypeInt) :: collect_lets body
+    | For (name, _, _, body)      -> ("__for_" ^ name, Some TypeI32) :: collect_lets body
     | _                           -> []
   ) stmts
 
 (* -- resolve helpers: map AST annotation -> Ast.type_expr using HM results -- *)
 
 let resolve_local_ast (pt : Types.program_types option) fname name ty_opt =
-  let fallback = match ty_opt with Some t -> t | None -> TypeInt in
+  let fallback = match ty_opt with Some t -> t | None -> TypeI32 in
   match pt with
   | None -> fallback
   | Some pt ->
@@ -372,7 +365,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       set_linkage Linkage.Private g;
       let zero   = const_int (i32_type context) 0 in
       let ptr    = build_in_bounds_gep arr_ty g [|zero; zero|] "strptr" builder in
-      (TypePtr TypeChar, ptr)
+      (TypePtr TypeU8, ptr)
 
   | Var name ->
       (match Hashtbl.find_opt locals name with
@@ -487,7 +480,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                        | TypeRefined (a, b), IntLit k -> TypeRefined (a + k, b + k)
                        | _ -> (match ty2, e1.desc with
                                | TypeRefined (c, d), IntLit k -> TypeRefined (c + k, d + k)
-                               | _ -> TypeInt)
+                               | _ -> TypeI32)
                      in
                      (ret_ty, sum)))
        | Sub ->
@@ -501,7 +494,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 let diff = build_sub v1 v2 "subtmp" builder in
                 let ret_ty = match ty1, e2.desc with
                   | TypeRefined (a, b), IntLit k -> TypeRefined (a - k, b - k)
-                  | _ -> TypeInt
+                  | _ -> TypeI32
                 in
                 (ret_ty, diff))
        | Mul -> (ty1, build_mul v1 v2 "multmp" builder)
@@ -666,7 +659,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let arg_vals =
              List.mapi (fun i a ->
                let (_, av) = gen_expr locals a in
-               let param_ast = (try List.nth param_asts i with _ -> TypeInt) in
+               let param_ast = (try List.nth param_asts i with _ -> TypeI32) in
                coerce av param_ast
              ) args |> Array.of_list
            in
@@ -674,7 +667,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let call_name = if ret_lty = void_type context then "" else "calltmp" in
            let v = build_call ft callee arg_vals call_name builder in
            let ast_ret = match Hashtbl.find_opt func_ret_ast_types fname with
-             | Some t -> t | None -> TypeInt
+             | Some t -> t | None -> TypeI32
            in
            (ast_ret, v)
        | None ->
@@ -730,7 +723,7 @@ let gen_func ?prog_types fdef =
 
   let ret_ast = match Hashtbl.find_opt func_ret_ast_types fdef.name with
     | Some t -> t
-    | None   -> TypeInt
+    | None   -> TypeI32
   in
 
   let entry_bb = append_block context "entry" f in
@@ -999,7 +992,7 @@ let gen_func ?prog_types fdef =
         position_at_end body_bb builder;
         let loop_ty = match lo_expr.desc, hi_expr.desc with
           | IntLit lo_k, IntLit hi_k -> TypeRefined (lo_k, hi_k)
-          | _ -> TypeInt
+          | _ -> TypeI32
         in
         Hashtbl.add locals name (Imm (loop_ty, i_val));
         Stack.push (exit_bb, incr_bb) loop_stack;
@@ -1034,11 +1027,11 @@ let gen_func ?prog_types fdef =
 
 let gen_global ?prog_types name ty_opt expr_opt =
   let ast_ty = match prog_types with
-    | None -> (match ty_opt with Some t -> t | None -> TypeInt)
+    | None -> (match ty_opt with Some t -> t | None -> TypeI32)
     | Some (pt : Types.program_types) ->
         match Types.StringMap.find_opt name pt.Types.globals with
         | Some t -> t
-        | None   -> (match ty_opt with Some t -> t | None -> TypeInt)
+        | None   -> (match ty_opt with Some t -> t | None -> TypeI32)
   in
   let llty = ltype_of_ast ast_ty in
   (* Recursively evaluate a compile-time constant expression. *)
@@ -1100,7 +1093,7 @@ let gen_program ?prog_types prog =
     | LetDef (name, ty_opt, expr_opt) -> gen_global ?prog_types name ty_opt expr_opt
     | ExternFuncDef (name, params, ret_ty) ->
         if not (Hashtbl.mem functions name) then begin
-          let param_ast = List.map (fun (_, t) -> match t with Some t -> t | None -> TypeInt) params in
+          let param_ast = List.map (fun (_, t) -> match t with Some t -> t | None -> TypeI32) params in
           let param_lls = List.map ltype_of_ast param_ast |> Array.of_list in
           let ret_ast   = match ret_ty with Some t -> t | None -> TypeVoid in
           let ret_ll    = ltype_of_ret_ast ret_ast in

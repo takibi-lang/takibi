@@ -1,10 +1,10 @@
 // AArch64 bare-metal Hello World. Minimal implementation of string output to UART.
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000; // PL011 UART DR: write to transmit
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000; // PL011 UART DR: write to transmit
     *dr = c;
 }
 
-fn uart_puts(s: *char) {
+fn uart_puts(s: *u8) {
     while (*s != 0) {
         uart_putc(*s);
         s = s + 1;

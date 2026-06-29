@@ -1,39 +1,39 @@
 // Simple bump allocator demo. BumpAlloc struct contains a 256-byte heap.
 // bump_alloc(n) returns heap + offset and advances the offset by n.
 struct BumpAlloc {
-    heap:   [char; 256];
-    offset: int;
+    heap:   [u8; 256];
+    offset: i32;
 }
 
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000; // PL011 UART DR
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
-fn uart_puts(s: *char) {
+fn uart_puts(s: *u8) {
     while (*s != '\0') {
         uart_putc(*s);
         s = s + 1;
     }
 }
 
-fn uart_print_uint(n: int) {
+fn uart_print_uint(n: i32) {
     if (n >= 10) {
         uart_print_uint(n / 10);
     }
-    uart_putc((n % 10 + '0') as char);
+    uart_putc((n % 10 + '0') as u8);
 }
 
 let alloc: BumpAlloc;
 
-fn bump_alloc(size: int) -> *char {
-    let result: *char = alloc.heap + alloc.offset;
+fn bump_alloc(size: i32) -> *u8 {
+    let result: *u8 = alloc.heap + alloc.offset;
     alloc.offset = alloc.offset + size;
     return result;
 }
 
 fn main() {
-    let buf1: *char = bump_alloc(4);
+    let buf1: *u8 = bump_alloc(4);
     buf1[0] = 'A';
     buf1[1] = 'B';
     buf1[2] = 'C';
@@ -41,7 +41,7 @@ fn main() {
     uart_puts(buf1);
     uart_puts("\r\n");
 
-    let buf2: *char = bump_alloc(4);
+    let buf2: *u8 = bump_alloc(4);
     buf2[0] = 'X';
     buf2[1] = 'Y';
     buf2[2] = 'Z';

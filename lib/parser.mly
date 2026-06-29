@@ -31,7 +31,7 @@ open Ast
 %nonassoc UNARY   (* unary * (deref), & (addrof), unary - *)
 %left DOT         (* highest: field access -- postfix, binds tighter than prefix ops *)
 
-%token INT_TYPE CHAR_TYPE VOID_TYPE BOOL_TYPE
+%token VOID_TYPE BOOL_TYPE
 %token I8_TYPE I16_TYPE I32_TYPE I64_TYPE
 %token U8_TYPE U16_TYPE U32_TYPE U64_TYPE
 %token TRUE FALSE
@@ -193,8 +193,6 @@ let_rhs:
 (* base_type_expr: type expression that does not start with {. Used for the legacy ret_type_opt form (`fn f() int`).
    TypeRefined is excluded here because { would conflict with the function body's LBRACE. *)
 base_type_expr:
-  | INT_TYPE  { TypeInt  }
-  | CHAR_TYPE { TypeChar }
   | VOID_TYPE { TypeVoid }
   | BOOL_TYPE { TypeBool }
   | I8_TYPE   { TypeI8  } | I16_TYPE { TypeI16 } | I32_TYPE { TypeI32 } | I64_TYPE { TypeI64 }

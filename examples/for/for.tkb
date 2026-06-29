@@ -2,7 +2,7 @@
 //
 // Difference in generated machine code (AArch64 AEL1 bare-metal):
 //
-//   while loop (let mut i: int):
+//   while loop (let mut i: i32):
 //     str i, [sp]        ; save to stack
 //     ldr i, [sp]        ; load (every iteration)
 //     cmp i, #8          ; bounds check <- llvm.trap candidate
@@ -16,17 +16,17 @@
 //
 // QEMU expected output: ABCDEFGH\r\n
 
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000;
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000;
     *dr = c;
 }
 
-let buf: [char; 8];
+let buf: [u8; 8];
 
 // Write 'A' to 'H' using a for loop. i: {0..<8}, so buf[i] has no bounds check.
 fn fill() {
     for i in 0..<8 {
-        buf[i] = 'A' + i as char;
+        buf[i] = 'A' + i as u8;
     }
 }
 
@@ -39,7 +39,7 @@ fn print_buf() {
     uart_putc('\n');
 }
 
-fn main() -> int {
+fn main() -> i32 {
     fill();
     print_buf();
     return 0;

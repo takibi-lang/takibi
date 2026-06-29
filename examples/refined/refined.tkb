@@ -11,7 +11,7 @@
 //
 //   Approach 3: if narrowing (Step 3.5-if)
 //     if (v >= 0 && v < 8) -- converts a runtime check into a type proof
-//     Note: direct access through a Mut binding (v: int parameter) still conservatively
+//     Note: direct access through a Mut binding (v: i32 parameter) still conservatively
 //       retains the bounds check for now (to be improved in Step 3.5-Mut)
 //
 // QEMU expected output:
@@ -19,15 +19,15 @@
 //   ABCDEFGH\r\n  (approach 2)
 //   ABCDEFGH\r\n  (approach 3)
 
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000;
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000;
     *dr = c;
 }
 
-let buf: [char; 8];
+let buf: [u8; 8];
 
 // --- Approach 1: manual {lo..<hi} annotation (Step 3.4) --------------------------
-fn fill_pair(i: {0..<7}, lo: char, hi: char) {
+fn fill_pair(i: {0..<7}, lo: u8, hi: u8) {
     buf[i]   = lo;   // TypeRefined(0,7): hi=7 <= 8 -> check elided
     buf[i+1] = hi;   // TypeRefined(1,8): hi=8 <= 8 -> check elided
 }
@@ -46,12 +46,12 @@ fn fill_pairs() {
 // --- Approach 2: for loop (Step 3.5-for) -------------------------------
 fn fill_loop() {
     for i in 0..<8 {
-        buf[i] = 'A' + i as char;  // i: {0..<8} -> check elided
+        buf[i] = 'A' + i as u8;  // i: {0..<8} -> check elided
     }
 }
 
 // --- Approach 3: if narrowing (Step 3.5-if) -------------------------------
-fn fill_cond(v: int, c: char) {
+fn fill_cond(v: i32, c: u8) {
     if (v >= 0 && v < 8) {
         buf[v] = c;
     }
@@ -59,7 +59,7 @@ fn fill_cond(v: int, c: char) {
 
 fn fill_by_cond() {
     for i in 0..<8 {
-        fill_cond(i, 'A' + i as char);
+        fill_cond(i, 'A' + i as u8);
     }
 }
 
@@ -72,7 +72,7 @@ fn print_buf() {
     uart_putc('\n');
 }
 
-fn main() -> int {
+fn main() -> i32 {
     fill_pairs();   print_buf();   // approach 1
     fill_loop();    print_buf();   // approach 2
     fill_by_cond(); print_buf();   // approach 3

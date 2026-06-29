@@ -1,6 +1,6 @@
 // Step 3.5: flow-sensitive type narrowing via if-condition
 //
-// Demonstrates narrowing an "int of unknown range" (e.g. from MMIO) to {lo..<hi}
+// Demonstrates narrowing an "i32 of unknown range" (e.g. from MMIO) to {lo..<hi}
 // via a runtime if-check, then using it for array access or a function expecting a refined argument.
 //
 // How narrowing works:
@@ -11,15 +11,15 @@
 //
 // QEMU expected output: ABCDEFGH\r\n
 
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000;
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000;
     *dr = c;
 }
 
-let buf: [char; 8];
+let buf: [u8; 8];
 
-// Function requiring a refined-type argument. Without narrowing, int cannot be passed directly.
-fn write_entry(i: {0..<8}, c: char) {
+// Function requiring a refined-type argument. Without narrowing, i32 cannot be passed directly.
+fn write_entry(i: {0..<8}, c: u8) {
     buf[i] = c;  // bounds check elided (TypeRefined proves safety)
 }
 
@@ -31,18 +31,18 @@ fn print_buf() {
     uart_putc('\n');
 }
 
-// Caller treats v as "some external input (type int, unknown range)".
+// Caller treats v as "some external input (type i32, unknown range)".
 // The if-condition performs a runtime check; in the then-branch v is narrowed to {0..<8}.
-fn fill_from_unknown(v: int, c: char) {
+fn fill_from_unknown(v: i32, c: u8) {
     if (v >= 0 && v < 8) {
         // Inside here, v is typed as {0..<8}
         write_entry(v, c);   // pass to refined argument: compiles OK (already narrowed)
         buf[v] = c;          // direct array access: bounds check elided
     }
-    // Outside the if-block, v is int again (narrowing does not escape the block)
+    // Outside the if-block, v is i32 again (narrowing does not escape the block)
 }
 
-fn main() -> int {
+fn main() -> i32 {
     // Pass each index 0 to 7 as "external input" and write
     fill_from_unknown(0, 'A');
     fill_from_unknown(1, 'B');

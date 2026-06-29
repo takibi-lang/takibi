@@ -12,8 +12,6 @@ let infer src =
 (* Custom Alcotest testables *)
 
 let rec show_type = function
-  | Ast.TypeInt         -> "int"
-  | Ast.TypeChar        -> "char"
   | Ast.TypeBool        -> "bool"
   | Ast.TypeI8          -> "i8"  | Ast.TypeI16 -> "i16" | Ast.TypeI32 -> "i32" | Ast.TypeI64 -> "i64"
   | Ast.TypeU8          -> "u8"  | Ast.TypeU16 -> "u16" | Ast.TypeU32 -> "u32" | Ast.TypeU64 -> "u64"
@@ -71,17 +69,17 @@ let parser_tests = [
   );
 
   Alcotest.test_case "function with typed params and return" `Quick (fun () ->
-    match parse "fn add(a: int, b: int) int { return a; }" with
+    match parse "fn add(a: i32, b: i32) i32 { return a; }" with
     | [Ast.FuncDef f] ->
         Alcotest.(check string) "name" "add" f.name;
         Alcotest.(check int)    "param count" 2 (List.length f.params);
         let (n0, t0) = List.nth f.params 0 in
         let (n1, t1) = List.nth f.params 1 in
         Alcotest.(check string)        "param0 name" "a"   n0;
-        Alcotest.(check (option type_t)) "param0 type" (Some Ast.TypeInt) t0;
+        Alcotest.(check (option type_t)) "param0 type" (Some Ast.TypeI32) t0;
         Alcotest.(check string)        "param1 name" "b"   n1;
-        Alcotest.(check (option type_t)) "param1 type" (Some Ast.TypeInt) t1;
-        Alcotest.(check (option type_t)) "ret type" (Some Ast.TypeInt) f.ret_type;
+        Alcotest.(check (option type_t)) "param1 type" (Some Ast.TypeI32) t1;
+        Alcotest.(check (option type_t)) "ret type" (Some Ast.TypeI32) f.ret_type;
         Alcotest.(check int)    "body length" 1 (List.length f.body)
     | _ -> Alcotest.fail "expected single FuncDef"
   );
@@ -98,15 +96,15 @@ let parser_tests = [
   );
 
   Alcotest.test_case "global let with type annotation" `Quick (fun () ->
-    match parse "let g: char = 0;" with
+    match parse "let g: u8 = 0;" with
     | [Ast.LetDef (name, ty, _)] ->
         Alcotest.(check string)        "name" "g" name;
-        Alcotest.(check (option type_t)) "type" (Some Ast.TypeChar) ty
+        Alcotest.(check (option type_t)) "type" (Some Ast.TypeU8) ty
     | _ -> Alcotest.fail "expected single LetDef"
   );
 
   Alcotest.test_case "return statement" `Quick (fun () ->
-    match parse "fn f() int { return 42; }" with
+    match parse "fn f() i32 { return 42; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.IntLit 42; _ } -> ()
@@ -178,7 +176,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "arithmetic BinOp" `Quick (fun () ->
-    match parse "fn f() int { return 1 + 2 * 3; }" with
+    match parse "fn f() i32 { return 1 + 2 * 3; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
@@ -188,7 +186,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "comparison BinOp" `Quick (fun () ->
-    match parse "fn f() int { return 1 != 2; }" with
+    match parse "fn f() i32 { return 1 != 2; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
@@ -198,7 +196,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "function call expression" `Quick (fun () ->
-    match parse "fn f() int { return g(1, 2); }" with
+    match parse "fn f() i32 { return g(1, 2); }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.Call ("g", args); _ } ->
@@ -208,7 +206,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "multiple top-level items" `Quick (fun () ->
-    let prog = parse "let x = 0; fn f() {} fn g() int { return 1; }" in
+    let prog = parse "let x = 0; fn f() {} fn g() i32 { return 1; }" in
     Alcotest.(check int) "item count" 3 (List.length prog);
     (match List.nth prog 0 with
      | Ast.LetDef ("x", _, _) -> ()
@@ -221,44 +219,44 @@ let parser_tests = [
   (* -- Pointer / address-of tests ------------------------------ *)
 
   Alcotest.test_case "pointer type in function param" `Quick (fun () ->
-    match parse "fn f(p: *int) {}" with
+    match parse "fn f(p: *i32) {}" with
     | [Ast.FuncDef { params = [(_, Some t)]; _ }] ->
-        Alcotest.check type_t "param type is *int" (Ast.TypePtr Ast.TypeInt) t
+        Alcotest.check type_t "param type is *i32" (Ast.TypePtr Ast.TypeI32) t
     | _ -> Alcotest.fail "unexpected structure"
   );
 
   Alcotest.test_case "pointer-to-pointer type" `Quick (fun () ->
-    match parse "fn f(p: **int) {}" with
+    match parse "fn f(p: **i32) {}" with
     | [Ast.FuncDef { params = [(_, Some t)]; _ }] ->
-        Alcotest.check type_t "param type is **int"
-          (Ast.TypePtr (Ast.TypePtr Ast.TypeInt)) t
+        Alcotest.check type_t "param type is **i32"
+          (Ast.TypePtr (Ast.TypePtr Ast.TypeI32)) t
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  Alcotest.test_case "*io int param type parses" `Quick (fun () ->
-    match parse "fn f(p: *io int) {}" with
+  Alcotest.test_case "*io i32 param type parses" `Quick (fun () ->
+    match parse "fn f(p: *io i32) {}" with
     | [Ast.FuncDef { params = [(_, Some t)]; _ }] ->
-        Alcotest.check type_t "param type is *io int"
-          (Ast.TypePtr (Ast.TypeIo Ast.TypeInt)) t
+        Alcotest.check type_t "param type is *io i32"
+          (Ast.TypePtr (Ast.TypeIo Ast.TypeI32)) t
     | _ -> Alcotest.fail "unexpected structure"
   );
 
   Alcotest.test_case "bare io type in global let parses" `Quick (fun () ->
-    match parse "let flag: io int;" with
+    match parse "let flag: io i32;" with
     | [Ast.LetDef (_, Some t, None)] ->
-        Alcotest.check type_t "type is io int" (Ast.TypeIo Ast.TypeInt) t
+        Alcotest.check type_t "type is io i32" (Ast.TypeIo Ast.TypeI32) t
     | _ -> Alcotest.fail "unexpected structure"
   );
 
   Alcotest.test_case "io type in struct field parses" `Quick (fun () ->
-    match parse "struct S { done: io int; }" with
+    match parse "struct S { done: io i32; }" with
     | [Ast.StructDef (_, [(_, t)])] ->
-        Alcotest.check type_t "field type is io int" (Ast.TypeIo Ast.TypeInt) t
+        Alcotest.check type_t "field type is io i32" (Ast.TypeIo Ast.TypeI32) t
     | _ -> Alcotest.fail "unexpected structure"
   );
 
   Alcotest.test_case "deref expression" `Quick (fun () ->
-    match parse "fn f(p: *int) int { return *p; }" with
+    match parse "fn f(p: *i32) i32 { return *p; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.Deref { desc = Ast.Var "p"; _ }; _ } -> ()
@@ -276,7 +274,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "assign through pointer" `Quick (fun () ->
-    match parse "fn f(p: *int) { *p = 42; }" with
+    match parse "fn f(p: *i32) { *p = 42; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.AssignDeref ({ desc = Ast.Var "p"; _ },
@@ -286,7 +284,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "hex integer literal" `Quick (fun () ->
-    match parse "fn f() int { return 0xff; }" with
+    match parse "fn f() i32 { return 0xff; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.IntLit 255; _ } -> ()
@@ -294,8 +292,8 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  Alcotest.test_case "char literal becomes IntLit" `Quick (fun () ->
-    match parse "fn f() int { return 'A'; }" with
+  Alcotest.test_case "u8 literal becomes IntLit" `Quick (fun () ->
+    match parse "fn f() i32 { return 'A'; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.IntLit 65; _ } -> ()
@@ -303,7 +301,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  Alcotest.test_case "char escape literals" `Quick (fun () ->
+  Alcotest.test_case "u8 escape literals" `Quick (fun () ->
     match parse "fn f() { let a = '\\n'; let b = '\\r'; let c = '\\0'; }" with
     | [Ast.FuncDef { body = [s1; s2; s3]; _ }] ->
         let check name expected s =
@@ -317,7 +315,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "logical OR expression" `Quick (fun () ->
-    match parse "fn f(a: int, b: int) int { return a == 1 || b == 2; }" with
+    match parse "fn f(a: i32, b: i32) i32 { return a == 1 || b == 2; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
@@ -327,7 +325,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "logical AND expression" `Quick (fun () ->
-    match parse "fn f(a: int, b: int) int { return a >= 0 && b < 8; }" with
+    match parse "fn f(a: i32, b: i32) i32 { return a >= 0 && b < 8; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
@@ -338,7 +336,7 @@ let parser_tests = [
 
   Alcotest.test_case "&& has lower prec than comparisons" `Quick (fun () ->
     (* a >= 0 && b < 8  ->  (a >= 0) && (b < 8): outer is And, both children are comparisons *)
-    match parse "fn f(a: int, b: int) int { return a >= 0 && b < 8; }" with
+    match parse "fn f(a: i32, b: i32) i32 { return a >= 0 && b < 8; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.And,
@@ -350,7 +348,7 @@ let parser_tests = [
 
   Alcotest.test_case "&& has higher prec than ||" `Quick (fun () ->
     (* a || b && c  ->  a || (b && c): outer is Or *)
-    match parse "fn f(a: int, b: int, c: int) int { return a || b && c; }" with
+    match parse "fn f(a: i32, b: i32, c: i32) i32 { return a || b && c; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Or, _,
@@ -360,7 +358,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "if without else" `Quick (fun () ->
-    match parse "fn f(x: int) { if (x == 0) { x = 1; } }" with
+    match parse "fn f(x: i32) { if (x == 0) { x = 1; } }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.If (_, [_], []) -> ()
@@ -369,7 +367,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "else if chain" `Quick (fun () ->
-    match parse "fn f(x: int) int {
+    match parse "fn f(x: i32) i32 {
       if (x == 1) { return 1; }
       else if (x == 2) { return 2; }
       else { return 0; }
@@ -387,7 +385,7 @@ let parser_tests = [
   (* -- Unary minus --------------------------------------------- *)
 
   Alcotest.test_case "unary minus desugars to Sub from zero" `Quick (fun () ->
-    match parse "fn f() int { return -42; }" with
+    match parse "fn f() i32 { return -42; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Sub,
@@ -399,31 +397,31 @@ let parser_tests = [
 
   (* -- as cast ----------------------------------------------- *)
 
-  Alcotest.test_case "as cast to char" `Quick (fun () ->
-    match parse "fn f(n: int) char { return n as char; }" with
+  Alcotest.test_case "as cast to u8" `Quick (fun () ->
+    match parse "fn f(n: i32) u8 { return n as u8; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.Cast (Ast.TypeChar,
+         | Ast.Return { desc = Ast.Cast (Ast.TypeU8,
                                  { desc = Ast.Var "n"; _ }); _ } -> ()
          | _ -> Alcotest.fail "expected Return(Cast(TypeChar, Var n))")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  Alcotest.test_case "as cast to int" `Quick (fun () ->
-    match parse "fn f(c: char) int { return c as int; }" with
+  Alcotest.test_case "as cast to i32" `Quick (fun () ->
+    match parse "fn f(c: u8) i32 { return c as i32; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.Cast (Ast.TypeInt,
+         | Ast.Return { desc = Ast.Cast (Ast.TypeI32,
                                  { desc = Ast.Var "c"; _ }); _ } -> ()
          | _ -> Alcotest.fail "expected Return(Cast(TypeInt, Var c))")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
   Alcotest.test_case "as has lower precedence than arithmetic" `Quick (fun () ->
-    match parse "fn f(a: int, b: int) char { return a + b as char; }" with
+    match parse "fn f(a: i32, b: i32) u8 { return a + b as u8; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.Cast (Ast.TypeChar,
+         | Ast.Return { desc = Ast.Cast (Ast.TypeU8,
                                  { desc = Ast.BinOp (Ast.Add, _, _); _ }); _ } -> ()
          | _ -> Alcotest.fail "expected Cast(TypeChar, BinOp(Add, ...)) -- as must bind looser than +")
     | _ -> Alcotest.fail "unexpected structure"
@@ -432,7 +430,7 @@ let parser_tests = [
   (* -- Bitwise operations ------------------------------------------------ *)
 
   Alcotest.test_case "bitwise AND expression" `Quick (fun () ->
-    match parse "fn f(n: int) int { return n & 15; }" with
+    match parse "fn f(n: i32) i32 { return n & 15; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
@@ -442,7 +440,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "right shift expression" `Quick (fun () ->
-    match parse "fn f(n: int) int { return n >> 4; }" with
+    match parse "fn f(n: i32) i32 { return n >> 4; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
@@ -453,7 +451,7 @@ let parser_tests = [
 
   Alcotest.test_case ">> binds tighter than &" `Quick (fun () ->
     (* n >> 4 & 0xf  should parse as  (n >> 4) & 0xf *)
-    match parse "fn f(n: int) int { return n >> 4 & 15; }" with
+    match parse "fn f(n: i32) i32 { return n >> 4 & 15; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Band,
@@ -464,7 +462,7 @@ let parser_tests = [
 
   Alcotest.test_case "& binds tighter than comparison" `Quick (fun () ->
     (* n & 15 == 0  should parse as  (n & 15) == 0 *)
-    match parse "fn f(n: int) int { return n & 15 == 0; }" with
+    match parse "fn f(n: i32) i32 { return n & 15 == 0; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Eq,
@@ -474,7 +472,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "modulo BinOp" `Quick (fun () ->
-    match parse "fn f(n: int) int { return n % 3; }" with
+    match parse "fn f(n: i32) i32 { return n % 3; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
@@ -485,7 +483,7 @@ let parser_tests = [
 
   Alcotest.test_case "% binds tighter than +" `Quick (fun () ->
     (* a + b % 3  should parse as  a + (b % 3) *)
-    match parse "fn f(a: int, b: int) int { return a + b % 3; }" with
+    match parse "fn f(a: i32, b: i32) i32 { return a + b % 3; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Add, _,
@@ -495,7 +493,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "bitwise OR expression" `Quick (fun () ->
-    match parse "fn f(a: int, b: int) int { return a | b; }" with
+    match parse "fn f(a: i32, b: i32) i32 { return a | b; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
@@ -506,7 +504,7 @@ let parser_tests = [
 
   Alcotest.test_case "| binds looser than ==" `Quick (fun () ->
     (* a == 0 | b == 0  should parse as  (a == 0) | (b == 0) *)
-    match parse "fn f(a: int, b: int) int { return a == 0 | b == 0; }" with
+    match parse "fn f(a: i32, b: i32) i32 { return a == 0 | b == 0; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Bor,
@@ -517,7 +515,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "left shift expression" `Quick (fun () ->
-    match parse "fn f(n: int) int { return n << 2; }" with
+    match parse "fn f(n: i32) i32 { return n << 2; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
@@ -527,7 +525,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "bitwise XOR expression" `Quick (fun () ->
-    match parse "fn f(a: int, b: int) int { return a ^ b; }" with
+    match parse "fn f(a: i32, b: i32) i32 { return a ^ b; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
@@ -538,7 +536,7 @@ let parser_tests = [
 
   Alcotest.test_case "^ binds tighter than |" `Quick (fun () ->
     (* a | b ^ c  should parse as  a | (b ^ c) *)
-    match parse "fn f(a: int, b: int, c: int) int { return a | b ^ c; }" with
+    match parse "fn f(a: i32, b: i32, c: i32) i32 { return a | b ^ c; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Bor, _,
@@ -549,7 +547,7 @@ let parser_tests = [
 
   Alcotest.test_case "== binds tighter than ^" `Quick (fun () ->
     (* a ^ b == c  should parse as  a ^ (b == c)  -- same as C *)
-    match parse "fn f(a: int, b: int, c: int) int { return a ^ b == c; }" with
+    match parse "fn f(a: i32, b: i32, c: i32) i32 { return a ^ b == c; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Bxor, _,
@@ -559,7 +557,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "array write arr[i]=v produces AssignIndex" `Quick (fun () ->
-    match parse "fn f(arr: *char, i: int) { arr[i] = 'X'; }" with
+    match parse "fn f(arr: *u8, i: i32) { arr[i] = 'X'; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.AssignIndex ("arr",
@@ -572,16 +570,16 @@ let parser_tests = [
   (* -- Arrays ------------------------------------------------------ *)
 
   Alcotest.test_case "array type annotation parses" `Quick (fun () ->
-    match parse "fn f() { let mut buf: [char; 8]; }" with
+    match parse "fn f() { let mut buf: [u8; 8]; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Let (true, "buf", Some (Ast.TypeArray (Ast.TypeChar, 8)), None) -> ()
-         | _ -> Alcotest.fail "expected Let(mut, buf, TypeArray(char,8), None)")
+         | Ast.Let (true, "buf", Some (Ast.TypeArray (Ast.TypeU8, 8)), None) -> ()
+         | _ -> Alcotest.fail "expected Let(mut, buf, TypeArray(u8,8), None)")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
   Alcotest.test_case "array indexing arr[i] produces Index node" `Quick (fun () ->
-    match parse "fn f(arr: *char, i: int) char { return arr[i]; }" with
+    match parse "fn f(arr: *u8, i: i32) u8 { return arr[i]; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.Index ("arr", { desc = Ast.Var "i"; _ }); _ } -> ()
@@ -591,7 +589,7 @@ let parser_tests = [
 
   Alcotest.test_case "arr[i] binds tighter than addition" `Quick (fun () ->
     (* a + arr[i]  should parse as  a + Index(arr,i), not Index(a+arr,i) *)
-    match parse "fn f(a: int, arr: *char, i: int) int { return a + arr[i]; }" with
+    match parse "fn f(a: i32, arr: *u8, i: i32) i32 { return a + arr[i]; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Add, { desc = Ast.Var "a"; _ },
@@ -609,15 +607,15 @@ let parser_tests = [
   );
 
   Alcotest.test_case "fn pointer type with one arg parses" `Quick (fun () ->
-    match parse "fn f(h: fn(int) -> char) {}" with
-    | [Ast.FuncDef { params = [("h", Some (Ast.TypeFn ([Ast.TypeInt], Ast.TypeChar)))]; _ }] -> ()
-    | _ -> Alcotest.fail "expected param h: fn(int) -> char"
+    match parse "fn f(h: fn(i32) -> u8) {}" with
+    | [Ast.FuncDef { params = [("h", Some (Ast.TypeFn ([Ast.TypeI32], Ast.TypeU8)))]; _ }] -> ()
+    | _ -> Alcotest.fail "expected param h: fn(i32) -> u8"
   );
 
   Alcotest.test_case "fn pointer type with multiple args parses" `Quick (fun () ->
-    match parse "fn f(h: fn(int, char) -> int) {}" with
-    | [Ast.FuncDef { params = [("h", Some (Ast.TypeFn ([Ast.TypeInt; Ast.TypeChar], Ast.TypeInt)))]; _ }] -> ()
-    | _ -> Alcotest.fail "expected param h: fn(int, char) -> int"
+    match parse "fn f(h: fn(i32, u8) -> i32) {}" with
+    | [Ast.FuncDef { params = [("h", Some (Ast.TypeFn ([Ast.TypeI32; Ast.TypeU8], Ast.TypeI32)))]; _ }] -> ()
+    | _ -> Alcotest.fail "expected param h: fn(i32, u8) -> i32"
   );
 
   Alcotest.test_case "let variable with fn pointer type annotation parses" `Quick (fun () ->
@@ -632,26 +630,26 @@ let parser_tests = [
   (* -- Struct syntax ------------------------------------------------ *)
 
   Alcotest.test_case "struct definition parses" `Quick (fun () ->
-    match parse "struct Point { x: int; y: int; }" with
+    match parse "struct Point { x: i32; y: i32; }" with
     | [Ast.StructDef ("Point", fields)] ->
         Alcotest.(check int) "field count" 2 (List.length fields);
         let (n0, t0) = List.nth fields 0 in
         let (n1, t1) = List.nth fields 1 in
         Alcotest.(check string) "field0 name" "x" n0;
-        Alcotest.(check type_t) "field0 type" Ast.TypeInt t0;
+        Alcotest.(check type_t) "field0 type" Ast.TypeI32 t0;
         Alcotest.(check string) "field1 name" "y" n1;
-        Alcotest.(check type_t) "field1 type" Ast.TypeInt t1
-    | _ -> Alcotest.fail "expected StructDef(Point, [x:int; y:int])"
+        Alcotest.(check type_t) "field1 type" Ast.TypeI32 t1
+    | _ -> Alcotest.fail "expected StructDef(Point, [x:i32; y:i32])"
   );
 
   Alcotest.test_case "struct type in function param parses" `Quick (fun () ->
-    match parse "struct P { x: int; } fn f(p: *P) -> int { return p.x; }" with
+    match parse "struct P { x: i32; } fn f(p: *P) -> i32 { return p.x; }" with
     | [Ast.StructDef _; Ast.FuncDef { params = [("p", Some (Ast.TypePtr (Ast.TypeNamed "P")))]; _ }] -> ()
     | _ -> Alcotest.fail "expected *P param type"
   );
 
   Alcotest.test_case "field access expression parses to FieldGet" `Quick (fun () ->
-    match parse "struct P { x: int; } fn f(p: *P) -> int { return p.x; }" with
+    match parse "struct P { x: i32; } fn f(p: *P) -> i32 { return p.x; }" with
     | [Ast.StructDef _; Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.FieldGet ({ desc = Ast.Var "p"; _ }, "x"); _ } -> ()
@@ -671,7 +669,7 @@ let parser_tests = [
 
   Alcotest.test_case "field access binds tighter than addition" `Quick (fun () ->
     (* p.x + p.y should parse as (p.x) + (p.y), not p.(x + p).y *)
-    match parse "struct P { x: int; } fn f(p: *P) -> int { return p.x + p.x; }" with
+    match parse "struct P { x: i32; } fn f(p: *P) -> i32 { return p.x + p.x; }" with
     | [Ast.StructDef _; Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Add,
@@ -684,15 +682,15 @@ let parser_tests = [
   (* -- extern fn --------------------------------------------------- *)
 
   Alcotest.test_case "extern fn without return type parses" `Quick (fun () ->
-    match parse "extern fn uart_putc(c: char);" with
-    | [Ast.ExternFuncDef ("uart_putc", [("c", Some Ast.TypeChar)], None)] -> ()
-    | _ -> Alcotest.fail "expected ExternFuncDef(uart_putc, [c:char], None)"
+    match parse "extern fn uart_putc(c: u8);" with
+    | [Ast.ExternFuncDef ("uart_putc", [("c", Some Ast.TypeU8)], None)] -> ()
+    | _ -> Alcotest.fail "expected ExternFuncDef(uart_putc, [c:u8], None)"
   );
 
   Alcotest.test_case "extern fn with return type parses" `Quick (fun () ->
-    match parse "extern fn uart_getc() -> char;" with
-    | [Ast.ExternFuncDef ("uart_getc", [], Some Ast.TypeChar)] -> ()
-    | _ -> Alcotest.fail "expected ExternFuncDef(uart_getc, [], Some char)"
+    match parse "extern fn uart_getc() -> u8;" with
+    | [Ast.ExternFuncDef ("uart_getc", [], Some Ast.TypeU8)] -> ()
+    | _ -> Alcotest.fail "expected ExternFuncDef(uart_getc, [], Some u8)"
   );
 
   (* -- String literals -------------------------------------------- *)
@@ -708,9 +706,9 @@ let parser_tests = [
 
   (* -- -> return type syntax ------------------------------------------- *)
 
-  Alcotest.test_case "arrow return type syntax -> int parses" `Quick (fun () ->
-    match parse "fn f() -> int { return 0; }" with
-    | [Ast.FuncDef { ret_type = Some Ast.TypeInt; _ }] -> ()
+  Alcotest.test_case "arrow return type syntax -> i32 parses" `Quick (fun () ->
+    match parse "fn f() -> i32 { return 0; }" with
+    | [Ast.FuncDef { ret_type = Some Ast.TypeI32; _ }] -> ()
     | _ -> Alcotest.fail "expected ret_type = Some TypeInt"
   );
 
@@ -729,7 +727,7 @@ let parser_tests = [
   (* -- Compound pointer assignment ------------------------------------------ *)
 
   Alcotest.test_case "complex pointer assign *(expr) = v parses to AssignDeref" `Quick (fun () ->
-    match parse "fn f(arr: *int, i: int) { *(arr + i) = 42; }" with
+    match parse "fn f(arr: *i32, i: i32) { *(arr + i) = 42; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.AssignDeref (
@@ -753,7 +751,7 @@ let parser_tests = [
 
   (* -- Remaining escape characters ---------------------------------------- *)
 
-  Alcotest.test_case "tab escape char literal '\\t'" `Quick (fun () ->
+  Alcotest.test_case "tab escape u8 literal '\\t'" `Quick (fun () ->
     match parse "fn f() { let t = '\\t'; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
@@ -762,7 +760,7 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  Alcotest.test_case "backslash escape char literal '\\\\'" `Quick (fun () ->
+  Alcotest.test_case "backslash escape u8 literal '\\\\'" `Quick (fun () ->
     match parse "fn f() { let bs = '\\\\'; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
@@ -785,13 +783,13 @@ let parser_tests = [
   (* -- Comments -------------------------------------------------- *)
 
   Alcotest.test_case "line comment // is ignored" `Quick (fun () ->
-    match parse "// this is a comment\nfn f() int { return 1; }" with
+    match parse "// this is a comment\nfn f() i32 { return 1; }" with
     | [Ast.FuncDef { name = "f"; _ }] -> ()
     | _ -> Alcotest.fail "expected single FuncDef f"
   );
 
   Alcotest.test_case "inline line comment after code" `Quick (fun () ->
-    match parse "fn f() int { return 42; // answer\n}" with
+    match parse "fn f() i32 { return 42; // answer\n}" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.IntLit 42; _ } -> ()
@@ -800,7 +798,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "block comment /* */ is ignored" `Quick (fun () ->
-    match parse "fn f() int { /* skip this */ return 0; }" with
+    match parse "fn f() i32 { /* skip this */ return 0; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.IntLit 0; _ } -> ()
@@ -809,7 +807,7 @@ let parser_tests = [
   );
 
   Alcotest.test_case "multi-line block comment is ignored" `Quick (fun () ->
-    match parse "fn f() int {\n  /*\n   * multi\n   * line\n   */\n  return 7;\n}" with
+    match parse "fn f() i32 {\n  /*\n   * multi\n   * line\n   */\n  return 7;\n}" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.IntLit 7; _ } -> ()
@@ -826,67 +824,67 @@ let infer_tests = [
   (* -- Success cases ----------------------------------------------- *)
 
   Alcotest.test_case "fully annotated function passes" `Quick
-    (expect_ok "fn add(a: int, b: int) int { return a; }");
+    (expect_ok "fn add(a: i32, b: i32) i32 { return a; }");
 
   Alcotest.test_case "infer local let from literal" `Quick (fun () ->
-    let pt = infer "fn f() int { let x = 1; return x; }" in
+    let pt = infer "fn f() i32 { let x = 1; return x; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
-    Alcotest.check type_t "x inferred as int" Ast.TypeInt
+    Alcotest.check type_t "x inferred as i32" Ast.TypeI32
       (Types.StringMap.find "x" fi.Types.local_types)
   );
 
-  Alcotest.test_case "char annotation on global let" `Quick (fun () ->
-    let pt = infer "let g: char = 0;" in
-    Alcotest.check type_t "g is char" Ast.TypeChar
+  Alcotest.test_case "u8 annotation on global let" `Quick (fun () ->
+    let pt = infer "let g: u8 = 0;" in
+    Alcotest.check type_t "g is u8" Ast.TypeU8
       (Types.StringMap.find "g" pt.Types.globals)
   );
 
   Alcotest.test_case "annotated return type preserved" `Quick (fun () ->
-    let pt = infer "fn f() int { return 1; }" in
+    let pt = infer "fn f() i32 { return 1; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
-    Alcotest.check type_t "return type is int" Ast.TypeInt fi.Types.ret_type
+    Alcotest.check type_t "return type is i32" Ast.TypeI32 fi.Types.ret_type
   );
 
   Alcotest.test_case "infer param type used in arithmetic" `Quick (fun () ->
-    let pt = infer "fn f(a: int, b: int) int { return a + b; }" in
+    let pt = infer "fn f(a: i32, b: i32) i32 { return a + b; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
-    Alcotest.check type_t "a: int" Ast.TypeInt
+    Alcotest.check type_t "a: i32" Ast.TypeI32
       (List.assoc "a" fi.Types.param_types);
-    Alcotest.check type_t "b: int" Ast.TypeInt
+    Alcotest.check type_t "b: i32" Ast.TypeI32
       (List.assoc "b" fi.Types.param_types)
   );
 
   Alcotest.test_case "cross-function call type-checks" `Quick
-    (expect_ok "fn id(x: int) int { return x; }
-                fn caller() int { return id(5); }");
+    (expect_ok "fn id(x: i32) i32 { return x; }
+                fn caller() i32 { return id(5); }");
 
   Alcotest.test_case "global let used inside function" `Quick
-    (expect_ok "let g = 1; fn f() int { return g; }");
+    (expect_ok "let g = 1; fn f() i32 { return g; }");
 
   Alcotest.test_case "let mut in while loop" `Quick
-    (expect_ok "fn f() int { let mut r = 0;
+    (expect_ok "fn f() i32 { let mut r = 0;
                               while (r != 0) { r = 1; }
                               return r; }");
 
   Alcotest.test_case "logical OR of two comparisons" `Quick
-    (expect_ok "fn f(x: int) -> bool { return x == 1 || x == 2; }");
+    (expect_ok "fn f(x: i32) -> bool { return x == 1 || x == 2; }");
 
-  Alcotest.test_case "logical OR type error: char operand" `Quick
+  Alcotest.test_case "logical OR type error: u8 operand" `Quick
     (expect_type_error "cannot unify"
-       "fn f(a: int, b: char) -> bool { return a == 1 || b; }");
+       "fn f(a: i32, b: u8) -> bool { return a == 1 || b; }");
 
   Alcotest.test_case "logical AND of two comparisons" `Quick
-    (expect_ok "fn f(x: int) -> bool { return x >= 0 && x < 8; }");
+    (expect_ok "fn f(x: i32) -> bool { return x >= 0 && x < 8; }");
 
   Alcotest.test_case "logical AND in if condition" `Quick
-    (expect_ok "fn f(v: int) int { if (v >= 0 && v < 8) { return v; } return 0; }");
+    (expect_ok "fn f(v: i32) i32 { if (v >= 0 && v < 8) { return v; } return 0; }");
 
-  Alcotest.test_case "logical AND type error: char operand" `Quick
+  Alcotest.test_case "logical AND type error: u8 operand" `Quick
     (expect_type_error "cannot unify"
-       "fn f(a: int, b: char) -> bool { return a == 1 && b; }");
+       "fn f(a: i32, b: u8) -> bool { return a == 1 && b; }");
 
   Alcotest.test_case "if/else branches both valid" `Quick
-    (expect_ok "fn abs(x: int) int {
+    (expect_ok "fn abs(x: i32) i32 {
                   if (x > 0) { return x; } else { return 0; } }");
 
   (* -- Immutability checks ------------------------------------------- *)
@@ -903,162 +901,162 @@ let infer_tests = [
        "fn f() { let x = 0; let p = &x; }");
 
   Alcotest.test_case "addrof mutable variable succeeds" `Quick
-    (expect_ok "fn f() { let mut x: int = 0; let p = &x; }");
+    (expect_ok "fn f() { let mut x: i32 = 0; let p = &x; }");
 
   Alcotest.test_case "immutable let without initializer is a type error" `Quick
     (expect_type_error "must have an initializer"
-       "fn f() { let x: int; }");
+       "fn f() { let x: i32; }");
 
   (* -- Error cases --------------------------------------------- *)
 
   Alcotest.test_case "undefined variable" `Quick
     (expect_type_error "Unbound variable"
-       "fn f() int { return z; }");
+       "fn f() i32 { return z; }");
 
   Alcotest.test_case "undefined function" `Quick
     (expect_type_error "Undefined function"
-       "fn f() int { return noexist(1); }");
+       "fn f() i32 { return noexist(1); }");
 
   Alcotest.test_case "too many arguments" `Quick
     (expect_type_error "expects 1 argument"
-       "fn id(x: int) int { return x; }
-        fn f() int { return id(1, 2); }");
+       "fn id(x: i32) i32 { return x; }
+        fn f() i32 { return id(1, 2); }");
 
   Alcotest.test_case "too few arguments" `Quick
     (expect_type_error "expects 2 argument"
-       "fn add(a: int, b: int) int { return a; }
-        fn f() int { return add(1); }");
+       "fn add(a: i32, b: i32) i32 { return a; }
+        fn f() i32 { return add(1); }");
 
   Alcotest.test_case "arithmetic operand type mismatch" `Quick
     (expect_type_error "cannot unify"
-       "fn f(a: int, b: char) int { return a + b; }");
+       "fn f(a: i32, b: u8) i32 { return a + b; }");
 
   (* -- Pointer type inference ---------------------------------------- *)
 
   Alcotest.test_case "local pointer annotation type-checks" `Quick
-    (expect_ok "fn f() { let p: *int = 0x09000000; *p = 1; }");
+    (expect_ok "fn f() { let p: *i32 = 0x09000000; *p = 1; }");
 
   Alcotest.test_case "deref yields element type" `Quick (fun () ->
-    let pt = infer "fn f(p: *int) int { return *p; }" in
+    let pt = infer "fn f(p: *i32) i32 { return *p; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
-    Alcotest.check type_t "return type is int" Ast.TypeInt fi.Types.ret_type
+    Alcotest.check type_t "return type is i32" Ast.TypeI32 fi.Types.ret_type
   );
 
   Alcotest.test_case "addrof yields pointer type" `Quick (fun () ->
-    let pt = infer "fn f() { let mut x: int = 0; let p = &x; }" in
+    let pt = infer "fn f() { let mut x: i32 = 0; let p = &x; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
-    Alcotest.check type_t "p has type *int"
-      (Ast.TypePtr Ast.TypeInt)
+    Alcotest.check type_t "p has type *i32"
+      (Ast.TypePtr Ast.TypeI32)
       (Types.StringMap.find "p" fi.Types.local_types)
   );
 
   (* -- Type inference for io-qualified types -------------------------------------------- *)
 
-  Alcotest.test_case "deref *io int param yields int" `Quick (fun () ->
-    let pt = infer "fn f(p: *io int) int { return *p; }" in
+  Alcotest.test_case "deref *io i32 param yields i32" `Quick (fun () ->
+    let pt = infer "fn f(p: *io i32) i32 { return *p; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
-    Alcotest.check type_t "return type is int" Ast.TypeInt fi.Types.ret_type
+    Alcotest.check type_t "return type is i32" Ast.TypeI32 fi.Types.ret_type
   );
 
-  Alcotest.test_case "addrof io int global yields *io int" `Quick (fun () ->
-    let pt = infer "let flag: io int;\nfn f() { let p: *io int = &flag; }" in
+  Alcotest.test_case "addrof io i32 global yields *io i32" `Quick (fun () ->
+    let pt = infer "let flag: io i32;\nfn f() { let p: *io i32 = &flag; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
-    Alcotest.check type_t "p has type *io int"
-      (Ast.TypePtr (Ast.TypeIo Ast.TypeInt))
+    Alcotest.check type_t "p has type *io i32"
+      (Ast.TypePtr (Ast.TypeIo Ast.TypeI32))
       (Types.StringMap.find "p" fi.Types.local_types)
   );
 
-  Alcotest.test_case "assign int to io int global type-checks" `Quick
-    (expect_ok "let flag: io int;\nfn f() { flag = 1; }");
+  Alcotest.test_case "assign i32 to io i32 global type-checks" `Quick
+    (expect_ok "let flag: io i32;\nfn f() { flag = 1; }");
 
-  Alcotest.test_case "io int global in comparison type-checks" `Quick
-    (expect_ok "let flag: io int;\nfn f() int { if (flag == 0) { return 1; } return 0; }");
+  Alcotest.test_case "io i32 global in comparison type-checks" `Quick
+    (expect_ok "let flag: io i32;\nfn f() i32 { if (flag == 0) { return 1; } return 0; }");
 
-  Alcotest.test_case "io int struct field type-checks" `Quick
-    (expect_ok "struct S { done: io int; }\nlet s: S;\nfn f() { s.done = 1; }");
+  Alcotest.test_case "io i32 struct field type-checks" `Quick
+    (expect_ok "struct S { done: io i32; }\nlet s: S;\nfn f() { s.done = 1; }");
 
   Alcotest.test_case "deref non-pointer is a type error" `Quick
     (expect_type_error "cannot unify"
-       "fn f(x: int) { *x = 1; }");
+       "fn f(x: i32) { *x = 1; }");
 
   Alcotest.test_case "write through immutable pointer variable is allowed" `Quick
-    (expect_ok "fn f() { let p: *int = 0x09000000; *p = 1; }");
+    (expect_ok "fn f() { let p: *i32 = 0x09000000; *p = 1; }");
 
   (* -- Unary minus --------------------------------------------- *)
 
   Alcotest.test_case "unary minus type-checks" `Quick
-    (expect_ok "fn f(n: int) int { return -n; }");
+    (expect_ok "fn f(n: i32) i32 { return -n; }");
 
   (* -- as cast ----------------------------------------------- *)
 
-  Alcotest.test_case "as cast int to char passes" `Quick
-    (expect_ok "fn f(n: int) char { return n as char; }");
+  Alcotest.test_case "as cast i32 to u8 passes" `Quick
+    (expect_ok "fn f(n: i32) u8 { return n as u8; }");
 
-  Alcotest.test_case "as cast char to int passes" `Quick
-    (expect_ok "fn f(c: char) int { return c as int; }");
+  Alcotest.test_case "as cast u8 to i32 passes" `Quick
+    (expect_ok "fn f(c: u8) i32 { return c as i32; }");
 
   Alcotest.test_case "as cast result type is the target type" `Quick (fun () ->
-    let pt = infer "fn f(n: int) char { return n as char; }" in
+    let pt = infer "fn f(n: i32) u8 { return n as u8; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
-    Alcotest.check type_t "return type is char" Ast.TypeChar fi.Types.ret_type
+    Alcotest.check type_t "return type is u8" Ast.TypeU8 fi.Types.ret_type
   );
 
-  Alcotest.test_case "as cast pointer to int passes" `Quick
-    (expect_ok "fn f(p: *int) int { return p as int; }");
+  Alcotest.test_case "as cast pointer to i32 passes" `Quick
+    (expect_ok "fn f(p: *i32) i32 { return p as i32; }");
 
   Alcotest.test_case "as cast pointer to pointer passes" `Quick
-    (expect_ok "fn f(p: *char) int { let q: *int = p as *int; return 0; }");
+    (expect_ok "fn f(p: *u8) i32 { let q: *i32 = p as *i32; return 0; }");
 
   (* -- Bitwise operations ------------------------------------------------ *)
 
   Alcotest.test_case "bitwise AND type-checks" `Quick
-    (expect_ok "fn f(n: int) int { return n & 15; }");
+    (expect_ok "fn f(n: i32) i32 { return n & 15; }");
 
   Alcotest.test_case "right shift type-checks" `Quick
-    (expect_ok "fn f(n: int) int { return n >> 4; }");
+    (expect_ok "fn f(n: i32) i32 { return n >> 4; }");
 
-  Alcotest.test_case "bitwise AND type error: non-int operand" `Quick
+  Alcotest.test_case "bitwise AND type error: non-i32 operand" `Quick
     (expect_type_error "cannot unify"
-       "fn f(n: int, p: *int) int { return n & p; }");
+       "fn f(n: i32, p: *i32) i32 { return n & p; }");
 
   Alcotest.test_case "bitwise XOR type-checks" `Quick
-    (expect_ok "fn f(a: int, b: int) int { return a ^ b; }");
+    (expect_ok "fn f(a: i32, b: i32) i32 { return a ^ b; }");
 
-  Alcotest.test_case "bitwise XOR type error: non-int operand" `Quick
+  Alcotest.test_case "bitwise XOR type error: non-i32 operand" `Quick
     (expect_type_error "cannot unify"
-       "fn f(n: int, p: *int) int { return n ^ p; }");
+       "fn f(n: i32, p: *i32) i32 { return n ^ p; }");
 
   (* -- Arrays ------------------------------------------------------ *)
 
   Alcotest.test_case "array declaration type-checks" `Quick
-    (expect_ok "fn f() { let mut buf: [char; 8]; }");
+    (expect_ok "fn f() { let mut buf: [u8; 8]; }");
 
   Alcotest.test_case "array write via pointer arith type-checks" `Quick
-    (expect_ok "fn f() { let mut buf: [char; 8]; *(buf + 0) = 'A'; }");
+    (expect_ok "fn f() { let mut buf: [u8; 8]; *(buf + 0) = 'A'; }");
 
-  Alcotest.test_case "pointer subtraction ptr - int type-checks" `Quick
-    (expect_ok "fn f(p: *char) *char { return p - 8; }");
+  Alcotest.test_case "pointer subtraction ptr - i32 type-checks" `Quick
+    (expect_ok "fn f(p: *u8) *u8 { return p - 8; }");
 
   Alcotest.test_case "array read via indexing type-checks" `Quick
-    (expect_ok "fn putc(c: char) {} fn f() { let mut buf: [char; 4]; putc(buf[0]); }");
+    (expect_ok "fn putc(c: u8) {} fn f() { let mut buf: [u8; 4]; putc(buf[0]); }");
 
-  Alcotest.test_case "array decays to *char when passed to pointer param" `Quick
-    (expect_ok "fn fill(p: *char, n: int) {}
-                fn f() { let mut buf: [char; 4]; fill(buf, 4); }");
+  Alcotest.test_case "array decays to *u8 when passed to pointer param" `Quick
+    (expect_ok "fn fill(p: *u8, n: i32) {}
+                fn f() { let mut buf: [u8; 4]; fill(buf, 4); }");
 
   Alcotest.test_case "array write arr[i]=v type-checks" `Quick
-    (expect_ok "fn f(arr: *char) { arr[0] = 'A'; }");
+    (expect_ok "fn f(arr: *u8) { arr[0] = 'A'; }");
 
   Alcotest.test_case "array write to non-pointer is a type error" `Quick
     (expect_type_error "non-array/pointer"
-       "fn f(n: int) { n[0] = 1; }");
+       "fn f(n: i32) { n[0] = 1; }");
 
   Alcotest.test_case "array write with deref index buf[*ptr]=val type-checks" `Quick
-    (expect_ok "fn f(buf: *int, tail: *int) { buf[*tail] = 42; }");
+    (expect_ok "fn f(buf: *i32, tail: *i32) { buf[*tail] = 42; }");
 
   Alcotest.test_case "addrof mut var as function argument type-checks" `Quick
-    (expect_ok "fn push(tail: *int) {}
-                fn f() { let mut t: int = 0; push(&t); }");
+    (expect_ok "fn push(tail: *i32) {}
+                fn f() { let mut t: i32 = 0; push(&t); }");
 
   (* -- Function pointer types -------------------------------------------- *)
 
@@ -1076,197 +1074,197 @@ let infer_tests = [
 
   Alcotest.test_case "fn pointer argument count mismatch is a type error" `Quick
     (expect_type_error "argument count mismatch"
-       "fn foo(x: int) {}
+       "fn foo(x: i32) {}
         fn f(h: fn() -> void) { h = foo; }");
 
   (* -- Structs ------------------------------------------------------ *)
 
   Alcotest.test_case "struct field access type-checks" `Quick
-    (expect_ok "struct Point { x: int; y: int; }
-                fn sum(p: *Point) -> int { return p.x + p.y; }");
+    (expect_ok "struct Point { x: i32; y: i32; }
+                fn sum(p: *Point) -> i32 { return p.x + p.y; }");
 
   Alcotest.test_case "struct field write type-checks" `Quick
-    (expect_ok "struct Point { x: int; y: int; }
+    (expect_ok "struct Point { x: i32; y: i32; }
                 fn f() { let mut p: Point; p.x = 3; p.y = 4; }");
 
   Alcotest.test_case "struct passed by pointer type-checks" `Quick
-    (expect_ok "struct Point { x: int; y: int; }
-                fn sum(p: *Point) -> int { return p.x + p.y; }
+    (expect_ok "struct Point { x: i32; y: i32; }
+                fn sum(p: *Point) -> i32 { return p.x + p.y; }
                 fn f() { let mut s: Point; s.x = 1; s.y = 2; sum(&s); }");
 
   Alcotest.test_case "global struct variable type-checks" `Quick
-    (expect_ok "struct Point { x: int; y: int; }
+    (expect_ok "struct Point { x: i32; y: i32; }
                 let g: Point;
                 fn f() { g.x = 10; g.y = 20; }");
 
-  Alcotest.test_case "struct field char type type-checks" `Quick
-    (expect_ok "struct Pair { a: int; b: char; }
+  Alcotest.test_case "struct field u8 type type-checks" `Quick
+    (expect_ok "struct Pair { a: i32; b: u8; }
                 fn f() { let mut p: Pair; p.a = 1; p.b = 'X'; }");
 
   Alcotest.test_case "unknown field name is a type error" `Quick
     (expect_type_error "no field"
-       "struct Point { x: int; y: int; }
-        fn f(p: *Point) -> int { return p.z; }");
+       "struct Point { x: i32; y: i32; }
+        fn f(p: *Point) -> i32 { return p.z; }");
 
   Alcotest.test_case "field access on non-struct is a type error" `Quick
     (expect_type_error "non-struct"
-       "fn f(n: int) -> int { return n.x; }");
+       "fn f(n: i32) -> i32 { return n.x; }");
 
   Alcotest.test_case "struct type mismatch: passing *B where *A expected" `Quick
     (expect_type_error "struct type mismatch"
-       "struct A { x: int; }
-        struct B { x: int; }
+       "struct A { x: i32; }
+        struct B { x: i32; }
         fn use_a(a: *A) {}
         fn f(b: *B) { use_a(b); }");
 
   (* -- extern fn --------------------------------------------------- *)
 
   Alcotest.test_case "extern fn void can be called" `Quick
-    (expect_ok "extern fn uart_putc(c: char);
+    (expect_ok "extern fn uart_putc(c: u8);
                 fn f() { uart_putc('A'); }");
 
   Alcotest.test_case "extern fn with return type propagates" `Quick
-    (expect_ok "extern fn uart_getc() -> char;
-                fn f() char { return uart_getc(); }");
+    (expect_ok "extern fn uart_getc() -> u8;
+                fn f() u8 { return uart_getc(); }");
 
   (* -- String literals -------------------------------------------- *)
 
-  Alcotest.test_case "string literal infers as *char" `Quick (fun () ->
+  Alcotest.test_case "string literal infers as *u8" `Quick (fun () ->
     let pt = infer "fn f() { let s = \"hello\"; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
-    Alcotest.check type_t "s has type *char" (Ast.TypePtr Ast.TypeChar)
+    Alcotest.check type_t "s has type *u8" (Ast.TypePtr Ast.TypeU8)
       (Types.StringMap.find "s" fi.Types.local_types)
   );
 
   (* -- Struct literals -------------------------------------------- *)
 
   Alcotest.test_case "struct literal initializer type-checks" `Quick
-    (expect_ok "struct Point { x: int; y: int; }
+    (expect_ok "struct Point { x: i32; y: i32; }
                 fn f() { let mut p: Point = {1, 2}; }");
 
   Alcotest.test_case "array literal initializer type-checks" `Quick
-    (expect_ok "fn f() { let mut arr: [char; 3] = {'a', 'b', 'c'}; }");
+    (expect_ok "fn f() { let mut arr: [u8; 3] = {'a', 'b', 'c'}; }");
 
   Alcotest.test_case "struct literal wrong field count is a type error" `Quick
     (expect_type_error "has"
-       "struct Point { x: int; y: int; }
+       "struct Point { x: i32; y: i32; }
         fn f() { let mut p: Point = {1, 2, 3}; }");
 
   Alcotest.test_case "struct literal field type mismatch is a type error" `Quick
     (expect_type_error "cannot unify"
-       "struct S { x: int; }
-        fn f(p: *int) { let mut s: S = {p}; }");
+       "struct S { x: i32; }
+        fn f(p: *i32) { let mut s: S = {p}; }");
 
   (* -- Commutative pointer arithmetic: int + ptr ------------------------------- *)
 
-  Alcotest.test_case "int + ptr commutative pointer arithmetic type-checks" `Quick
-    (expect_ok "fn f(p: *char) *char { return 1 + p; }");
+  Alcotest.test_case "i32 + ptr commutative pointer arithmetic type-checks" `Quick
+    (expect_ok "fn f(p: *u8) *u8 { return 1 + p; }");
 
   (* -- &s.field -------------------------------------------------- *)
 
   Alcotest.test_case "&s.field yields pointer-to-field-type" `Quick (fun () ->
-    let pt = infer "struct P { x: int; }
+    let pt = infer "struct P { x: i32; }
                     fn f() { let mut s: P; let q = &s.x; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
-    Alcotest.check type_t "q has type *int" (Ast.TypePtr Ast.TypeInt)
+    Alcotest.check type_t "q has type *i32" (Ast.TypePtr Ast.TypeI32)
       (Types.StringMap.find "q" fi.Types.local_types)
   );
 
   (* -- Field assignment through pointer receiver ------------------------- *)
 
   Alcotest.test_case "field assign via pointer receiver type-checks" `Quick
-    (expect_ok "struct Point { x: int; y: int; }
+    (expect_ok "struct Point { x: i32; y: i32; }
                 fn f(p: *Point) { p.x = 1; p.y = 2; }");
 
   (* -- let mut local variable (uninitialized) ----------------------- *)
 
   Alcotest.test_case "let mut local without initializer type-checks" `Quick
-    (expect_ok "fn f() { let mut x: int; x = 0; }");
+    (expect_ok "fn f() { let mut x: i32; x = 0; }");
 
   (* -- Left shift and bitwise OR --------------------------------------- *)
 
   Alcotest.test_case "left shift Shl type-checks" `Quick
-    (expect_ok "fn f(n: int) int { return n << 3; }");
+    (expect_ok "fn f(n: i32) i32 { return n << 3; }");
 
   Alcotest.test_case "bitwise OR Bor type-checks" `Quick
-    (expect_ok "fn f(a: int, b: int) int { return a | b; }");
+    (expect_ok "fn f(a: i32, b: i32) i32 { return a | b; }");
 
   (* -- Compile-time bounds check for constant indices --------------- *)
 
   Alcotest.test_case "constant in-bounds read type-checks" `Quick
-    (expect_ok "fn f() int { let mut arr: [int; 4]; return arr[3]; }");
+    (expect_ok "fn f() i32 { let mut arr: [i32; 4]; return arr[3]; }");
 
   Alcotest.test_case "constant in-bounds write type-checks" `Quick
-    (expect_ok "fn f() { let mut arr: [int; 4]; arr[3] = 1; }");
+    (expect_ok "fn f() { let mut arr: [i32; 4]; arr[3] = 1; }");
 
   Alcotest.test_case "constant OOB read is a compile error" `Quick
     (expect_type_error "out of bounds"
-       "fn f() int { let mut arr: [int; 4]; return arr[4]; }");
+       "fn f() i32 { let mut arr: [i32; 4]; return arr[4]; }");
 
   Alcotest.test_case "constant OOB write is a compile error" `Quick
     (expect_type_error "out of bounds"
-       "fn f() { let mut arr: [int; 4]; arr[4] = 1; }");
+       "fn f() { let mut arr: [i32; 4]; arr[4] = 1; }");
 
   Alcotest.test_case "exact boundary OOB read is a compile error" `Quick
     (expect_type_error "out of bounds"
-       "fn f() int { let mut arr: [int; 8]; return arr[8]; }");
+       "fn f() i32 { let mut arr: [i32; 8]; return arr[8]; }");
 
   Alcotest.test_case "large OOB index is a compile error" `Quick
     (expect_type_error "out of bounds"
-       "fn f() int { let mut arr: [int; 4]; return arr[100]; }");
+       "fn f() i32 { let mut arr: [i32; 4]; return arr[100]; }");
 
   Alcotest.test_case "dynamic index on array still type-checks" `Quick
-    (expect_ok "fn f(i: int) int { let mut arr: [int; 4]; return arr[i]; }");
+    (expect_ok "fn f(i: i32) i32 { let mut arr: [i32; 4]; return arr[i]; }");
 
   Alcotest.test_case "constant OOB on global array is a compile error" `Quick
     (expect_type_error "out of bounds"
-       "let buf: [char; 8]; fn f() char { return buf[8]; }");
+       "let buf: [u8; 8]; fn f() u8 { return buf[8]; }");
 
   (* -- Bounds check for char arrays ----------------------------------- *)
 
-  Alcotest.test_case "constant OOB read on char array is a compile error" `Quick
+  Alcotest.test_case "constant OOB read on u8 array is a compile error" `Quick
     (expect_type_error "out of bounds"
-       "fn f() char { let mut arr: [char; 4]; return arr[4]; }");
+       "fn f() u8 { let mut arr: [u8; 4]; return arr[4]; }");
 
-  Alcotest.test_case "constant OOB write on char array is a compile error" `Quick
+  Alcotest.test_case "constant OOB write on u8 array is a compile error" `Quick
     (expect_type_error "out of bounds"
-       "fn f() { let mut arr: [char; 4]; arr[4] = 'A'; }");
+       "fn f() { let mut arr: [u8; 4]; arr[4] = 'A'; }");
 
   (* -- Bounds check for size-1 arrays ------------------------------- *)
 
   Alcotest.test_case "size-1 array: index 0 is in-bounds" `Quick
-    (expect_ok "fn f() int { let mut arr: [int; 1]; return arr[0]; }");
+    (expect_ok "fn f() i32 { let mut arr: [i32; 1]; return arr[0]; }");
 
   Alcotest.test_case "size-1 array: index 1 is a compile error" `Quick
     (expect_type_error "out of bounds"
-       "fn f() int { let mut arr: [int; 1]; return arr[1]; }");
+       "fn f() i32 { let mut arr: [i32; 1]; return arr[1]; }");
 
   (* -- Write to global array -------------------------------- *)
 
-  Alcotest.test_case "constant OOB write on global int array is a compile error" `Quick
+  Alcotest.test_case "constant OOB write on global i32 array is a compile error" `Quick
     (expect_type_error "out of bounds"
-       "let buf: [int; 4]; fn f() { buf[4] = 0; }");
+       "let buf: [i32; 4]; fn f() { buf[4] = 0; }");
 
   (* -- OOB in expression context ----------------------------------------- *)
 
   Alcotest.test_case "constant OOB in function call argument is a compile error" `Quick
     (expect_type_error "out of bounds"
-       "fn g(x: int) {} fn f() { let mut arr: [int; 4]; g(arr[4]); }");
+       "fn g(x: i32) {} fn f() { let mut arr: [i32; 4]; g(arr[4]); }");
 
   Alcotest.test_case "constant OOB in binary expression is a compile error" `Quick
     (expect_type_error "out of bounds"
-       "fn f() int { let mut arr: [int; 4]; return arr[4] + 1; }");
+       "fn f() i32 { let mut arr: [i32; 4]; return arr[4] + 1; }");
 
   (* -- Verify error message format ------------------------------- *)
 
   Alcotest.test_case "OOB error message includes index and array size" `Quick
     (expect_type_error "index 5 is out of bounds for array of size 4"
-       "fn f() int { let mut arr: [int; 4]; return arr[5]; }");
+       "fn f() i32 { let mut arr: [i32; 4]; return arr[5]; }");
 
   (* -- TypeRefined syntax (Step 3.1 / 3.2) ----------------------- *)
 
   Alcotest.test_case "TypeRefined parses as param annotation" `Quick (fun () ->
-    let pt = infer "fn f(i: {0..<8}) int { return i; }" in
+    let pt = infer "fn f(i: {0..<8}) i32 { return i; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "i has type {0..<8}"
       (Ast.TypeRefined (0, 8))
@@ -1282,11 +1280,11 @@ let infer_tests = [
   Alcotest.test_case "TypeRefined in let annotation type-checks" `Quick
     (expect_ok "fn f() { let x: {0..<8} = 3; }");
 
-  Alcotest.test_case "TypeRefined as param unifies with int body" `Quick
-    (expect_ok "fn f(i: {0..<8}) int { return i; }");
+  Alcotest.test_case "TypeRefined as param unifies with i32 body" `Quick
+    (expect_ok "fn f(i: {0..<8}) i32 { return i; }");
 
   Alcotest.test_case "TypeRefined can be used as array index" `Quick
-    (expect_ok "fn f(i: {0..<8}, p: *char) { p[i] = 'A'; }");
+    (expect_ok "fn f(i: {0..<8}, p: *u8) { p[i] = 'A'; }");
 
   (* -- Step 3.3c: Range propagation ------------------------------------ *)
 
@@ -1311,8 +1309,8 @@ let infer_tests = [
       (Ast.TypeRefined (3, 7))
       fi.Types.ret_type);
 
-  Alcotest.test_case "TRefinedInt result is subtype of int return" `Quick
-    (expect_ok "fn f(i: {0..<7}) -> int { return i + 1; }");
+  Alcotest.test_case "TRefinedInt result is subtype of i32 return" `Quick
+    (expect_ok "fn f(i: {0..<7}) -> i32 { return i + 1; }");
 
   Alcotest.test_case "Mismatched refined return is a type error" `Quick
     (expect_type_error "range mismatch"
@@ -1323,31 +1321,31 @@ let infer_tests = [
      LLVM's srem returns a negative remainder when the dividend is negative, making this unsound.
      Example: (-5) % 8 = -5 (not 3) -- returning {0..<8} without a non-negative guarantee is wrong. *)
 
-  Alcotest.test_case "int%m stays TInt -- negative left operand possible" `Quick
-    (expect_type_error "unproven int"
+  Alcotest.test_case "i32%m stays TInt -- negative left operand possible" `Quick
+    (expect_type_error "unproven i32"
       "fn foo(i: {0..<4}) {} \
-       fn f(n: int) { foo(n % 4); }");
+       fn f(n: i32) { foo(n % 4); }");
 
   Alcotest.test_case "{0..<8}%4 propagates to {0..<4}" `Quick
     (expect_ok
       "fn foo(i: {0..<4}) {} \
        fn f(i: {0..<8}) { foo(i % 4); }");
 
-  Alcotest.test_case "{0..<8}%8 can index [char;8] without bounds check" `Quick
+  Alcotest.test_case "{0..<8}%8 can index [u8;8] without bounds check" `Quick
     (expect_ok
-      "let buf: [char; 8]; \
+      "let buf: [u8; 8]; \
        fn f(i: {0..<8}) { buf[i % 8] = 'X'; }");
 
   (* -- Step 3.4: Bounds check elision (global array + TypeRefined index) -- *)
 
   Alcotest.test_case "refined index on global array compiles" `Quick
     (expect_ok
-      "let buf: [char; 8]; \
+      "let buf: [u8; 8]; \
        fn f(i: {0..<8}) { buf[i] = 'X'; }");
 
   Alcotest.test_case "refined pair write (i and i+1) compiles" `Quick
     (expect_ok
-      "let buf: [char; 8]; \
+      "let buf: [u8; 8]; \
        fn f(i: {0..<7}) { buf[i] = 'A'; buf[i+1] = 'B'; }");
 
   Alcotest.test_case "refined arithmetic range mismatch caught at return" `Quick
@@ -1356,46 +1354,46 @@ let infer_tests = [
 
   Alcotest.test_case "non-proven index (overflow range) still compiles" `Quick
     (expect_ok
-      "let buf: [char; 8]; \
+      "let buf: [u8; 8]; \
        fn f(i: {0..<8}) { buf[i+1] = 'Z'; }");
 
   (* -- Step 3.5: Type narrowing via if-condition ------------------------------- *)
 
   Alcotest.test_case "if (v>=0 && v<8) narrows v to {0..<8}" `Quick
     (expect_ok
-      "let buf: [char; 8]; \
+      "let buf: [u8; 8]; \
        fn foo(i: {0..<8}) {} \
-       fn f(v: int) { if (v >= 0 && v < 8) { foo(v); } }");
+       fn f(v: i32) { if (v >= 0 && v < 8) { foo(v); } }");
 
   Alcotest.test_case "if (v>=0 && v<8) allows buf[v] write" `Quick
     (expect_ok
-      "let buf: [char; 8]; \
-       fn f(v: int) { if (v >= 0 && v < 8) { buf[v] = 'X'; } }");
+      "let buf: [u8; 8]; \
+       fn f(v: i32) { if (v >= 0 && v < 8) { buf[v] = 'X'; } }");
 
-  Alcotest.test_case "outside if block v remains int (no escape)" `Quick
-    (expect_type_error "unproven int"
+  Alcotest.test_case "outside if block v remains i32 (no escape)" `Quick
+    (expect_type_error "unproven i32"
       "fn foo(i: {0..<8}) {} \
-       fn f(v: int) { if (v >= 0 && v < 8) {} foo(v); }");
+       fn f(v: i32) { if (v >= 0 && v < 8) {} foo(v); }");
 
   Alcotest.test_case "single bound (only v<8) does not narrow" `Quick
-    (expect_type_error "unproven int"
+    (expect_type_error "unproven i32"
       "fn foo(i: {0..<8}) {} \
-       fn f(v: int) { if (v < 8) { foo(v); } }");
+       fn f(v: i32) { if (v < 8) { foo(v); } }");
 
   Alcotest.test_case "let mut variable is also narrowed in then-branch" `Quick
     (expect_ok
       "fn foo(i: {0..<8}) {} \
-       fn f() { let mut v: int = 3; if (v >= 0 && v < 8) { foo(v); } }");
+       fn f() { let mut v: i32 = 3; if (v >= 0 && v < 8) { foo(v); } }");
 
   Alcotest.test_case "else branch does not get narrowing" `Quick
-    (expect_type_error "unproven int"
+    (expect_type_error "unproven i32"
       "fn foo(i: {0..<8}) {} \
-       fn f(v: int) { if (v >= 0 && v < 8) {} else { foo(v); } }");
+       fn f(v: i32) { if (v >= 0 && v < 8) {} else { foo(v); } }");
 
   Alcotest.test_case "commutative form (0<=v && v<8) also narrows" `Quick
     (expect_ok
       "fn foo(i: {0..<8}) {} \
-       fn f(v: int) { if (0 <= v && v < 8) { foo(v); } }");
+       fn f(v: i32) { if (0 <= v && v < 8) { foo(v); } }");
 
   (* -- Step 3.5 for loop: for i in lo..<hi ----------------------------------- *)
 
@@ -1404,9 +1402,9 @@ let infer_tests = [
 
   Alcotest.test_case "for loop variable has refined type (literal bounds)" `Quick
     (fun () ->
-      let pt = infer "let buf: [char; 8]; \
+      let pt = infer "let buf: [u8; 8]; \
                       fn f() { for i in 0..<8 { buf[i] = 'X'; } }" in
-      (* buf[i] should compile without error: i:{0..<8} covers [char;8] *)
+      (* buf[i] should compile without error: i:{0..<8} covers [u8;8] *)
       ignore pt);
 
   Alcotest.test_case "for loop body accesses refined-param function" `Quick
@@ -1416,15 +1414,15 @@ let infer_tests = [
 
   Alcotest.test_case "for loop variable does not escape" `Quick
     (expect_type_error "Unbound variable"
-      "fn f() { for i in 0..<8 {} let x: int = i; }");
+      "fn f() { for i in 0..<8 {} let x: i32 = i; }");
 
-  Alcotest.test_case "for with variable bounds gives plain int" `Quick
+  Alcotest.test_case "for with variable bounds gives plain i32" `Quick
     (expect_ok
-      "fn f(n: int) { let mut s: int = 0; for i in 0..<n { s = s + i; } }");
+      "fn f(n: i32) { let mut s: i32 = 0; for i in 0..<n { s = s + i; } }");
 
   Alcotest.test_case "nested for loops compile" `Quick
     (expect_ok
-      "let buf: [char; 4]; \
+      "let buf: [u8; 4]; \
        fn f() { for i in 0..<4 { buf[i] = 'A'; } \
                 for i in 0..<4 { buf[i] = 'B'; } }");
 
@@ -1443,10 +1441,10 @@ let infer_tests = [
     (expect_ok "fn f() { for i in 0..<10 { continue; } }");
 
   Alcotest.test_case "break inside if inside while type-checks" `Quick
-    (expect_ok "fn f(x: int) { while (1) { if (x == 0) { break; } } }");
+    (expect_ok "fn f(x: i32) { while (1) { if (x == 0) { break; } } }");
 
   Alcotest.test_case "continue inside if inside for type-checks" `Quick
-    (expect_ok "fn f(x: int) { for i in 0..<10 { if (x == 0) { continue; } } }");
+    (expect_ok "fn f(x: i32) { for i in 0..<10 { if (x == 0) { continue; } } }");
 
   Alcotest.test_case "break outside loop is a type error" `Quick
     (expect_type_error "break/continue outside of a loop"
@@ -1458,7 +1456,7 @@ let infer_tests = [
 
   Alcotest.test_case "break after if outside loop is a type error" `Quick
     (expect_type_error "break/continue outside of a loop"
-      "fn f(x: int) { if (x == 0) { break; } }");
+      "fn f(x: i32) { if (x == 0) { break; } }");
 
 ]
 

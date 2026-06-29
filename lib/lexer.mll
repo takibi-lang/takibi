@@ -56,8 +56,6 @@ rule read = parse
   | '|'  { PIPE }
   | '^'  { HAT }
 
-  | "int"  { INT_TYPE }
-  | "char" { CHAR_TYPE }
   | "bool" { BOOL_TYPE }
   | "true"  { TRUE }
   | "false" { FALSE }

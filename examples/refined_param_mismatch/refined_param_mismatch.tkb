@@ -1,9 +1,9 @@
 // This file is expected to produce a compile error.
 // Type inference detects passing a {0..<9} value to a function that expects {0..<8}.
-fn accept(i: {0..<8}) -> int {
+fn accept(i: {0..<8}) -> i32 {
     return i;
 }
-fn main() -> int {
+fn main() -> i32 {
     let j: {0..<9} = 3;
     return accept(j);
 }

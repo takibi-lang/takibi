@@ -17,8 +17,6 @@ type binop =
 [@@deriving show]
 
 type type_expr =
-  | TypeInt               (* alias for TypeI32 -- kept for backward compat *)
-  | TypeChar              (* alias for TypeU8  -- kept for backward compat *)
   | TypeBool
   | TypeI8  | TypeI16 | TypeI32 | TypeI64
   | TypeU8  | TypeU16 | TypeU32 | TypeU64

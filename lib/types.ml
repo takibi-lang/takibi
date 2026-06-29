@@ -1,8 +1,6 @@
 (* Hindley-Milner type representation with unification variables *)
 
 type ty =
-  | TInt              (* alias for TI32 -- kept for backward compat *)
-  | TChar             (* alias for TU8  -- kept for backward compat *)
   | TBool
   | TI8  | TI16 | TI32 | TI64
   | TU8  | TU16 | TU32 | TU64
@@ -37,8 +35,6 @@ let rec repr = function
 
 let rec to_string t =
   match repr t with
-  | TInt  -> "int"
-  | TChar -> "char"
   | TBool -> "bool"
   | TI8   -> "i8"  | TI16 -> "i16" | TI32 -> "i32" | TI64 -> "i64"
   | TU8   -> "u8"  | TU16 -> "u16" | TU32 -> "u32" | TU64 -> "u64"
@@ -70,12 +66,9 @@ let rec occurs rv = function
 
 let rec unify t1 t2 =
   match repr t1, repr t2 with
-  | TInt,  TInt  | TChar, TChar | TVoid, TVoid | TBool, TBool -> ()
+  | TBool, TBool | TVoid, TVoid -> ()
   | TI8,  TI8  | TI16, TI16 | TI32, TI32 | TI64, TI64 -> ()
   | TU8,  TU8  | TU16, TU16 | TU32, TU32 | TU64, TU64 -> ()
-  (* int is alias for i32; char is alias for u8 *)
-  | TInt, TI32 | TI32, TInt   -> ()
-  | TChar, TU8 | TU8,  TChar  -> ()
   | TPtr t1, TPtr t2 -> unify t1 t2
   | TIo  t1, TIo  t2 -> unify t1 t2
   | TArray (t1, n1), TArray (t2, n2) ->
@@ -94,18 +87,17 @@ let rec unify t1 t2 =
   (* Subtyping: TRefinedInt(lo, hi) is a subtype of any integer type where the range fits.
      The LLVM representation of TRefinedInt is always i32; coerce handles narrowing on use.
      One direction only: refined -> wider type is OK; unproven wider type -> refined is NG. *)
-  | TRefinedInt _, TInt  | TRefinedInt _, TI32 -> ()   (* int/i32: always fits (i32 range) *)
+  | TRefinedInt _, TI32 -> ()                           (* i32: always fits (i32 range) *)
   | TRefinedInt _, TI64  -> ()                          (* i64: i32 range always fits *)
-  | TRefinedInt (lo, hi), TChar when lo >= 0 && hi <= 256     -> ()  (* char = u8 alias *)
   | TRefinedInt (lo, hi), TU8  when lo >= 0 && hi <= 256     -> ()
   | TRefinedInt (lo, hi), TU16 when lo >= 0 && hi <= 65536   -> ()
   | TRefinedInt (lo, _),  TU32 when lo >= 0                  -> ()   (* practical: hi < 2^31 *)
   | TRefinedInt (lo, _),  TU64 when lo >= 0                  -> ()
   | TRefinedInt (lo, hi), TI8  when lo >= -128  && hi <= 128 -> ()
   | TRefinedInt (lo, hi), TI16 when lo >= -32768 && hi <= 32768 -> ()
-  | TInt, TRefinedInt (lo, hi) | TI32, TRefinedInt (lo, hi) ->
+  | TI32, TRefinedInt (lo, hi) ->
       raise (Unify_error (Printf.sprintf
-        "cannot pass unproven int where {%d..<%d} is required; \
+        "cannot pass unproven i32 where {%d..<%d} is required; \
          use if (v >= %d && v < %d) { ... } to narrow the range" lo hi lo hi))
   | TStruct s1, TStruct s2 ->
       if s1 <> s2 then
@@ -126,8 +118,6 @@ let rec unify t1 t2 =
 (* -- Conversion to/from Ast types ----------------------------------------- *)
 
 let rec of_ast = function
-  | Ast.TypeInt      -> TInt
-  | Ast.TypeChar     -> TChar
   | Ast.TypeBool     -> TBool
   | Ast.TypeI8       -> TI8  | Ast.TypeI16 -> TI16 | Ast.TypeI32 -> TI32 | Ast.TypeI64 -> TI64
   | Ast.TypeU8       -> TU8  | Ast.TypeU16 -> TU16 | Ast.TypeU32 -> TU32 | Ast.TypeU64 -> TU64
@@ -153,8 +143,6 @@ let ret_of_ast_opt = function
    Unbound variables default to int (unconstrained integer) *)
 let rec to_ast t =
   match repr t with
-  | TInt  -> Ast.TypeInt
-  | TChar -> Ast.TypeChar
   | TBool -> Ast.TypeBool
   | TI8   -> Ast.TypeI8  | TI16 -> Ast.TypeI16 | TI32 -> Ast.TypeI32 | TI64 -> Ast.TypeI64
   | TU8   -> Ast.TypeU8  | TU16 -> Ast.TypeU16 | TU32 -> Ast.TypeU32 | TU64 -> Ast.TypeU64
@@ -165,7 +153,7 @@ let rec to_ast t =
   | TFun (ps, r)  -> Ast.TypeFn (List.map to_ast ps, to_ast r)
   | TStruct s     -> Ast.TypeNamed s
   | TRefinedInt (lo, hi) -> Ast.TypeRefined (lo, hi)
-  | TVar { contents = Unbound _ } -> Ast.TypeInt
+  | TVar { contents = Unbound _ } -> Ast.TypeI32
   | TVar { contents = Link _ }    -> assert false
 
 (* -- Output structs passed to codegen ------------------------------------- *)

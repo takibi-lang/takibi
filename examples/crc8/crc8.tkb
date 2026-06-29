@@ -1,34 +1,34 @@
 // CRC-8/SMBUS calculation demo (polynomial 0x07).
 // The CRC-8 of "123456789" is 0xF4. Uses pointer scan, ^ XOR, and << shift.
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000; // PL011 UART DR
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
-fn uart_puts(s: *char) {
+fn uart_puts(s: *u8) {
     while (*s != 0) {
         uart_putc(*s);
         s = s + 1;
     }
 }
 
-fn uart_print_hex8(n: int) {
-    let hi: int = (n >> 4) & 0xf;
-    let lo: int = n & 0xf;
+fn uart_print_hex8(n: i32) {
+    let hi: i32 = (n >> 4) & 0xf;
+    let lo: i32 = n & 0xf;
     if (hi < 10) {
-        uart_putc((hi + '0') as char);
+        uart_putc((hi + '0') as u8);
     } else {
-        uart_putc((hi - 10 + 'A') as char);
+        uart_putc((hi - 10 + 'A') as u8);
     }
     if (lo < 10) {
-        uart_putc((lo + '0') as char);
+        uart_putc((lo + '0') as u8);
     } else {
-        uart_putc((lo - 10 + 'A') as char);
+        uart_putc((lo - 10 + 'A') as u8);
     }
 }
 
-fn strlen(s: *char) int {
-    let mut n: int = 0;
+fn strlen(s: *u8) i32 {
+    let mut n: i32 = 0;
     while (*s != 0) {
         n = n + 1;
         s = s + 1;
@@ -36,10 +36,10 @@ fn strlen(s: *char) int {
     return n;
 }
 
-fn crc8(data: *char, len: int) int {
-    let mut crc: int = 0;
+fn crc8(data: *u8, len: i32) i32 {
+    let mut crc: i32 = 0;
     for i in 0..<len {
-        crc = crc ^ (*(data + i) as int);
+        crc = crc ^ (*(data + i) as i32);
         for bit in 0..<8 {
             if ((crc & 0x80) != 0) {
                 crc = (crc << 1) ^ 0x07;
@@ -53,8 +53,8 @@ fn crc8(data: *char, len: int) int {
 }
 
 fn main() {
-    let s: *char = "123456789";
-    let result: int = crc8(s, strlen(s));
+    let s: *u8 = "123456789";
+    let result: i32 = crc8(s, strlen(s));
     uart_puts("CRC-8: 0x");
     uart_print_hex8(result);
     uart_puts("\r\n");

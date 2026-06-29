@@ -1,29 +1,29 @@
-// memset / memcpy demo using a stack-allocated [char; 5] array.
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000; // PL011 UART DR
+// memset / memcpy demo using a stack-allocated [u8; 5] array.
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000; // PL011 UART DR
     *dr = c;
 }
 
-fn uart_puts(s: *char) {
+fn uart_puts(s: *u8) {
     while (*s != 0) {
         uart_putc(*s);
         s = s + 1;
     }
 }
 
-fn my_memset(p: *char, val: char, n: int) {
+fn my_memset(p: *u8, val: u8, n: i32) {
     for i in 0..<n {
         p[i] = val;
     }
 }
 
-fn my_memcpy(dst: *char, src: *char, n: int) {
+fn my_memcpy(dst: *u8, src: *u8, n: i32) {
     for i in 0..<n {
         dst[i] = src[i];
     }
 }
 
-fn print_buf(p: *char, n: int) {
+fn print_buf(p: *u8, n: i32) {
     for i in 0..<n {
         uart_putc(p[i]);
     }
@@ -32,8 +32,8 @@ fn print_buf(p: *char, n: int) {
 fn main() {
     uart_puts("=== memset/memcpy test ===\r\n");
 
-    let mut buf_a: [char; 5];
-    let mut buf_b: [char; 5];
+    let mut buf_a: [u8; 5];
+    let mut buf_b: [u8; 5];
 
     my_memset(buf_a, 'A', 5);
     uart_puts("memset: ");

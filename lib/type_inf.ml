@@ -22,28 +22,28 @@ let unify_at loc t1 t2 =
 
 (* -- Expression inference -------------------------------------------------- *)
 
-(* True for all fixed-width unsigned integer types and char *)
+(* True for all fixed-width unsigned integer types *)
 let is_unsigned_ty = function
-  | TU8 | TU16 | TU32 | TU64 | TChar -> true
+  | TU8 | TU16 | TU32 | TU64 -> true
   | _ -> false
 
 (* Accept bool or any integer type as a condition (for if/while) *)
 let check_cond loc ct =
   match repr ct with
   | TBool -> ()
-  | _ -> unify_at loc ct TInt
+  | _ -> unify_at loc ct TI32
 
-(* Widen TRefinedInt to TInt; leave explicit-width types unchanged.
+(* Widen TRefinedInt to TI32; leave explicit-width types unchanged.
    Used by arithmetic ops that do not propagate range information (Mul, Div, shifts, bitwise).
    Without this, `i: {0..<8}` in `i * 4` would produce TRefinedInt(0,8) and later cause
-   `TInt >> TRefinedInt` to fail the unification anti-subtyping guard. *)
-let canon_ty t = match repr t with TRefinedInt _ -> TInt | t -> t
+   `TI32 >> TRefinedInt` to fail the unification anti-subtyping guard. *)
+let canon_ty t = match repr t with TRefinedInt _ -> TI32 | t -> t
 
 let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
   | BoolLit _   -> TBool
-  | StringLit _ -> TPtr TChar
+  | StringLit _ -> TPtr TU8
   | Var name ->
       (* Check local/global variables first *)
       (match StringMap.find_opt name tyenv with
@@ -73,19 +73,19 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
             | TRefinedInt (a, b), _ ->
                 (match e2.desc with
                  | IntLit k ->
-                     unify_at e2.loc t2 TInt;
+                     unify_at e2.loc t2 TI32;
                      TRefinedInt (a + k, b + k)
                  | _ ->
-                     unify_at e2.loc (canon_ty t2) TInt;
-                     TInt)
+                     unify_at e2.loc (canon_ty t2) TI32;
+                     TI32)
             | _, TRefinedInt (c, d) ->
                 (match e1.desc with
                  | IntLit k ->
-                     unify_at e1.loc t1 TInt;
+                     unify_at e1.loc t1 TI32;
                      TRefinedInt (c + k, d + k)
                  | _ ->
-                     unify_at e1.loc (canon_ty t1) TInt;
-                     TInt)
+                     unify_at e1.loc (canon_ty t1) TI32;
+                     TI32)
             | _ ->
                 let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
                 unify_at e.loc ct1 ct2;
@@ -94,17 +94,17 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
            (* Pointer arithmetic: ptr - int -> returns the same pointer type. TIo is a value type, excluded *)
            (match repr t1 with
             | TPtr _ ->
-                unify_at e2.loc t2 TInt;
+                unify_at e2.loc t2 TI32;
                 t1
             (* Range propagation: {a..<b} - k -> {a-k..<b-k}. Precision preserved only when RHS is IntLit *)
             | TRefinedInt (a, b) ->
                 (match e2.desc with
                  | IntLit k ->
-                     unify_at e2.loc t2 TInt;
+                     unify_at e2.loc t2 TI32;
                      TRefinedInt (a - k, b - k)
                  | _ ->
-                     unify_at e2.loc (canon_ty t2) TInt;
-                     TInt)
+                     unify_at e2.loc (canon_ty t2) TI32;
+                     TI32)
             | _ ->
                 let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
                 unify_at e.loc ct1 ct2;
@@ -211,7 +211,7 @@ let rec infer_expr senv tyenv fenv (e : Ast.expr) : ty =
       (* Get the variable's original type (no array decay, unlike Var) *)
       let vt = lookup e.loc id tyenv in
       let it = infer_expr senv tyenv fenv idx in
-      unify_at idx.loc it TInt;
+      unify_at idx.loc it TI32;
       (match repr vt with
        | TArray (elem, n) ->
            (* Constant index: check bounds at compile time *)
@@ -331,7 +331,7 @@ let narrow_from_cond tyenv (cond : Ast.expr) =
     match lo_opt, hi_opt with
     | Some lo, Some hi ->
         (match StringMap.find_opt name env with
-         | Some ((TInt | TI32), is_mut) ->
+         | Some (TI32, is_mut) ->
              StringMap.add name (TRefinedInt (lo, hi), is_mut) env
          | _ -> env)
     | _ -> env
@@ -364,7 +364,7 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
           Printf.sprintf "cannot assign to immutable variable '%s'; use 'let mut'" name));
       let ety = infer_expr senv tyenv fenv e in
       (* Assignment: match as "actual(rhs) is a subtype of expected(lhs)".
-         TRefinedInt -> TInt is OK (assigning with loss of precision). Reverse is NG. *)
+         TRefinedInt -> TI32 is OK (assigning with loss of precision). Reverse is NG. *)
       unify_at e.loc ety (strip_io vty);
       (tyenv, raw_locals)
   | AssignDeref (ptr_expr, val_expr) ->
@@ -386,7 +386,7 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       let vt = lookup s.loc id tyenv in
       let it = infer_expr senv tyenv fenv idx in
       let rt = infer_expr senv tyenv fenv rhs in
-      unify_at idx.loc it TInt;
+      unify_at idx.loc it TI32;
       let elem_ty = match repr vt with
         | TArray (elem, n) ->
             (match idx.desc with
@@ -483,13 +483,13 @@ let rec infer_stmt senv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
   | For (name, lo_expr, hi_expr, body) ->
       let lo_ty = infer_expr senv tyenv fenv lo_expr in
       let hi_ty = infer_expr senv tyenv fenv hi_expr in
-      unify_at lo_expr.loc lo_ty TInt;
-      unify_at hi_expr.loc hi_ty TInt;
+      unify_at lo_expr.loc lo_ty TI32;
+      unify_at hi_expr.loc hi_ty TI32;
       (* Refine to TRefinedInt only when both bounds are integer literals.
-         For variables, the runtime value is unknown, so conservatively use TInt. *)
+         For variables, the runtime value is unknown, so conservatively use TI32. *)
       let idx_ty = match lo_expr.desc, hi_expr.desc with
         | IntLit lo_v, IntLit hi_v -> TRefinedInt (lo_v, hi_v)
-        | _ -> TInt
+        | _ -> TI32
       in
       (* Loop variable is immutable (Imm binding, no reassignment). Does not escape the loop. *)
       let body_env = StringMap.add name (idx_ty, false) tyenv in

@@ -1,28 +1,28 @@
 // Demo of reading multiple PL031 RTC registers and measuring elapsed ticks.
-// RTCDR (offset 0): current time. RTCCR (offset 0x0C = *int[3]): bit0=EN.
-fn uart_putc(c: char) {
-    let dr: *io char = 0x09000000;
+// RTCDR (offset 0): current time. RTCCR (offset 0x0C = *i32[3]): bit0=EN.
+fn uart_putc(c: u8) {
+    let dr: *io u8 = 0x09000000;
     *dr = c;
 }
 
-fn uart_puts(s: *char) {
+fn uart_puts(s: *u8) {
     while (*s != '\0') {
         uart_putc(*s);
         s = s + 1;
     }
 }
 
-fn uart_print_uint(n: int) {
+fn uart_print_uint(n: i32) {
     if (n >= 10) {
         uart_print_uint(n / 10);
     }
-    uart_putc((n % 10 + '0') as char);
+    uart_putc((n % 10 + '0') as u8);
 }
 
 fn main() {
-    let base: *io int = 0x09010000; // PL031 RTC base address
+    let base: *io i32 = 0x09010000; // PL031 RTC base address
 
-    let ctrl: int = *(base + 3); // RTCCR: 3rd word as *int (offset 0x0C)
+    let ctrl: i32 = *(base + 3); // RTCCR: 3rd word as *i32 (offset 0x0C)
     uart_puts("rtc: ");
     if ((ctrl & 1) != 0) {
         uart_puts("ok");
@@ -31,9 +31,9 @@ fn main() {
     }
     uart_puts("\r\n");
 
-    let t0: int = *base;
+    let t0: i32 = *base;
     while (*base == t0) {}
-    let t1: int = *base;
+    let t1: i32 = *base;
     uart_puts("tick: ");
     uart_print_uint(t1 - t0);
     uart_puts("s\r\n");
