@@ -83,15 +83,24 @@ lib/
   typechecker.ml  -- external wrapper (called from main.ml)
   llvm_gen.ml     -- LLVM IR generation and object file output
 bin/
-  main.ml         -- CLI (`takibi <file.tkb> [-o out.o] [--target <triple>]`)
+  main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>]`)
+                     Multiple .tkb files are concatenated (flat global namespace) before compilation.
 examples/
   common/
     startup.S     -- _start -> main, BSS zero-clear, AArch64 semihosting exit (shared by all examples)
     link.ld       -- linker script (load address 0x40000000) (shared by all examples)
+    timer_asm.S   -- ARM Generic Timer stubs: read_cntfrq, set_cntp_tval, enable_cntp, disable_cntp, task_exit_stub
+    sem_asm.S     -- atomic semaphore: sem_wait (ldaxr/stxr), sem_post (ldxr/stlxr)
+    uart.tkb      -- uart_putc, uart_puts
+    print.tkb     -- uart_print_uint, uart_print_hex, uart_print_int
+    gic.tkb       -- GicRegs struct, gic_init, gic_enable_timer_ppi, gic_enable_uart_spi
+    timer.tkb     -- extern fn timer stubs, setup_task_stack, timer_init (depends on gic.tkb)
+    sync.tkb      -- extern fn sem_wait/sem_post, mutex_lock/unlock, cond_wait/signal
   hello/  start/  echo/  print_int/  print_hex/  print_ptr/
   mem/  array/  fizzbuzz/  fibonacci/  bubblesort/  ringbuf/
   callstack/  crc8/  djb2/  bump/  timer/  rtc/
   irq/  scheduler/  preempt/  semaphore/  condvar/  struct/  msgqueue/
+  watchdog/  refined/  narrow/  for/  loop/
   (each directory: see the leading comment in <name>.tkb for a description)
 scripts/
   run_qemutest.sh -- QEMU integration test script (FIFO sync and timing verification included)
@@ -317,18 +326,32 @@ Adding a name to the `EXAMPLES` list is all that's needed to register a new exam
 Convention: `examples/<name>/<name>.tkb` -> `examples/<name>/kernel.elf`
 
 ```makefile
-EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct msgqueue  # <- just add the name here
+EXAMPLES := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct msgqueue watchdog refined narrow for loop  # <- just add the name here
 ```
 
 Only targets that require interactive manual startup (like `qemu-echo`) are added individually.
 Automatable programs are registered in `qemutest` by providing `.expected` / `.stdin` files.
 Use `run_test_timed` for tests that need timing verification (to confirm a delay actually waited).
 
-**Examples requiring extra assembly** (those with `*_asm.S`) are excluded from the `GENERIC_KERNELS` filter and given individual link rules:
+**Compilation groups** (which common `.tkb` files are prepended to each example):
+- Standard (uart.tkb + print.tkb): most examples
+- IRQ group (+ gic.tkb): `irq`
+- Timer group (+ gic.tkb + timer.tkb): `preempt`, `semaphore`, `watchdog`
+- Sync group (+ gic.tkb + timer.tkb + sync.tkb): `condvar`, `msgqueue`
+
+Note: `semaphore.tkb` declares its own `extern fn sem_wait/sem_post` (no `sync.tkb` needed), but still needs `sem_asm.o` at link time.
+
+**Link groups** (which common assembly objects are linked in):
 ```makefile
-GENERIC_KERNELS := $(filter-out examples/preempt/kernel.elf examples/semaphore/kernel.elf examples/condvar/kernel.elf, $(ALL_KERNELS))
+TIMER_KERNELS := examples/preempt/kernel.elf examples/watchdog/kernel.elf
+                 # linked with: startup.o + timer_asm.o
+SEM_KERNELS   := examples/semaphore/kernel.elf examples/condvar/kernel.elf examples/msgqueue/kernel.elf
+                 # linked with: startup.o + timer_asm.o + sem_asm.o
+GENERIC_KERNELS := (all others)
+                 # linked with: startup.o only
 ```
-When adding a new `*_asm.S`, three things are required: adding it to this filter, writing a dedicated link rule, and adding the object to `rm -f` in `clean`.
+
+When adding a new example that needs timer or semaphore support, add it to the appropriate `*_OBJS` and `*_KERNELS` variable in the Makefile. No new `*_asm.S` files should be created; place any new assembly in `examples/common/` and add a build rule there.
 
 ## QEMU Bare-Metal (AArch64)
 
