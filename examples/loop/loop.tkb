@@ -8,11 +8,6 @@
 //
 // QEMU expected output: 3\r\n0\r\n2\r\n4\r\n6\r\n
 
-fn uart_println_int(n: i32) {
-    uart_print_uint(n);
-    uart_puts("\r\n");
-}
-
 fn main() -> i32 {
     // Part 1: find first multiple of 3 in 0..<10 using break.
     for i in 0..<10 {

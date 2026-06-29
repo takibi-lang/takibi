@@ -192,6 +192,7 @@ run_test "for"      examples/for/kernel.elf      examples/for/for.expected
 run_test "loop"     examples/loop/kernel.elf     examples/loop/loop.expected
 run_test "enum"          examples/enum/kernel.elf          examples/enum/enum.expected
 run_test "nonexhaustive" examples/nonexhaustive/kernel.elf examples/nonexhaustive/nonexhaustive.expected
+run_test "bitops"        examples/bitops/kernel.elf        examples/bitops/bitops.expected
 
 echo ""
 echo "Running no-trap checks (brk must be zero in these kernels)..."
@@ -200,7 +201,7 @@ echo ""
 # Examples whose bounds should be fully proven at the type level. If brk appears, review the type annotations.
 for e in start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci \
           bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt \
-          semaphore condvar struct msgqueue watchdog refined narrow for loop; do
+          semaphore condvar struct msgqueue watchdog refined narrow for loop bitops; do
 # enum is intentionally excluded: `i as Color` (int->enum cast) emits llvm.trap for invalid values
     run_no_trap_test "$e (no-trap)" "examples/$e/kernel.elf"
 done

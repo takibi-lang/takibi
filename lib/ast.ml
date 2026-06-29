@@ -37,6 +37,7 @@ and expr_desc =
   | Var of ident
   | Call of ident * expr list
   | BinOp of binop * expr * expr
+  | Bnot of expr               (* ~expr -- bitwise NOT *)
   | Deref of expr           (* *expr  -- read through pointer *)
   | AddrOf of expr          (* &lvalue -- variable or struct field address *)
   | Cast of type_expr * expr  (* expr as T -- explicit type cast *)

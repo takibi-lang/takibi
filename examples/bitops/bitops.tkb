@@ -1,0 +1,59 @@
+// Bitwise operator demo: ~, |=, &=, ^=, <<=, >>=, +=, -=
+//
+// Demonstrates all operators added in the compound-assignment / bitwise-NOT
+// batch.  The three patterns below appear throughout MMIO driver code:
+//
+//   reg |= FLAG          -- set bit
+//   reg &= ~FLAG         -- clear bit  (~FLAG flips all bits of FLAG)
+//   reg ^= FLAG          -- toggle bit
+//
+// Compound assignments work on five LHS forms:
+//   variable    : x |= v
+//   deref       : *p &= ~v
+//   array elem  : buf[i] ^= v
+//   struct field: s.f += v
+//
+// QEMU expected output (uses uart_println_hex from common/print.tkb):
+//   0x00000005   flags after |= 0x01 then |= 0x04
+//   0x00000004   flags after &= ~0x01 (bit 0 cleared)
+//   0x0000000b   flags after ^= 0x0f (lower nibble toggled)
+//   0xfffffffe   ~0x01  (bitwise NOT of 1)
+//   0x00000010   1 after <<= 4
+//   0x00000004   16 after >>= 2
+//   0x0000000f   10 after += 5
+//   0x0000000c   15 after -= 3
+
+fn main() -> i32 {
+    // --- Flag manipulation: set / clear / toggle ---
+    let mut flags: i32 = 0;
+    flags |= 0x01;              // set bit 0
+    flags |= 0x04;              // set bit 2
+    uart_println_hex(flags);    // 0x00000005
+
+    flags &= ~0x01;             // clear bit 0
+    uart_println_hex(flags);    // 0x00000004
+
+    flags ^= 0x0f;              // toggle lower nibble
+    uart_println_hex(flags);    // 0x0000000b
+
+    // --- Bitwise NOT standalone ---
+    uart_println_hex(~0x01);    // 0xfffffffe
+
+    // --- Shift-assign ---
+    let mut val: i32 = 1;
+    val <<= 4;                  // 1 << 4 = 16
+    uart_println_hex(val);      // 0x00000010
+
+    val >>= 2;                  // 16 >> 2 = 4
+    uart_println_hex(val);      // 0x00000004
+
+    // --- Arithmetic compound assignment ---
+    let mut n: i32 = 10;
+    n += 5;
+    uart_println_hex(n);        // 0x0000000f  (15)
+
+    n -= 3;
+    uart_println_hex(n);        // 0x0000000c  (12)
+
+    return 0;
+}

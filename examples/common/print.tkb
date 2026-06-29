@@ -35,3 +35,18 @@ fn uart_print_int(n: i32) {
         print_uint(n);
     }
 }
+
+fn uart_println_uint(n: i32) {
+    uart_print_uint(n);
+    uart_puts("\r\n");
+}
+
+fn uart_println_hex(n: i32) {
+    uart_print_hex(n);
+    uart_puts("\r\n");
+}
+
+fn uart_println_int(n: i32) {
+    uart_print_int(n);
+    uart_puts("\r\n");
+}

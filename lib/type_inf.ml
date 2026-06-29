@@ -142,6 +142,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
            unify_at e.loc ct1 ct2;
            ct1)
+  | Bnot e1 ->
+      let t1 = infer_expr senv eenv tyenv fenv e1 in
+      canon_ty t1
   | Deref e1 ->
       let t1 = infer_expr senv eenv tyenv fenv e1 in
       (match repr t1 with

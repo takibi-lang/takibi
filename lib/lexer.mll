@@ -37,19 +37,24 @@ rule read = parse
   | ';' { SEMI }
   | '=' { ASSIGN }
   | "&&" { DAMP }   (* Logical AND. Match before '&' *)
+  | "&=" { AMP_EQ }
   | '&' { AMP }
   | "=>" { DARROW }    (* Match arm separator. Match before '=' *)
   | "::" { COLONCOLON }  (* Enum variant access. Match before ':' *)
 
+  | "+=" { PLUS_EQ }
   | '+' { PLUS }
   | "->" { ARROW }
+  | "-=" { MINUS_EQ }
   | '-' { MINUS }
   | '*' { TIMES }
   | '/' { DIV }
   | '%' { PERCENT }
 
+  | "<<=" { SHL_EQ }
   | "<<" { SHL }
   | "<"  { LT }
+  | ">>=" { SHR_EQ }
   | ">>" { SHR }
   | ">"  { GT }
   | "<=" { LE }
@@ -57,8 +62,11 @@ rule read = parse
   | "==" { EQ }
   | "!=" { NE }
   | "||" { OR }
+  | "|=" { PIPE_EQ }
   | '|'  { PIPE }
+  | "^=" { HAT_EQ }
   | '^'  { HAT }
+  | '~'  { TILDE }
 
   | "bool" { BOOL_TYPE }
   | "true"  { TRUE }

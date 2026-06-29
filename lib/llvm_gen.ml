@@ -577,6 +577,10 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            in
            (ret_ty, result))
 
+  | Bnot e1 ->
+      let (ty1, v1) = gen_expr locals e1 in
+      (ty1, build_not v1 "bnottmp" builder)
+
   | EnumVariant (ename, vname) ->
       let ut       = match Hashtbl.find_opt enum_underlying ename with
         | Some t -> t

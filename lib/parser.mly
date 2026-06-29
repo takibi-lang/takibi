@@ -11,12 +11,13 @@ open Ast
 %token ASSIGN DOT
 %token IF ELSE WHILE FOR IN BREAK CONTINUE
 %token EOF
-%token AMP
+%token AMP TILDE
 
 %token LT GT LE GE EQ NE
 %token PLUS MINUS TIMES DIV PERCENT
 %token OR PIPE HAT SHR SHL DAMP
 %token AS
+%token PLUS_EQ MINUS_EQ PIPE_EQ AMP_EQ HAT_EQ SHL_EQ SHR_EQ
 
 (* Precedence: low -> high.  UNARY is a pseudo-token for %prec. *)
 %left OR          (* || -- lowest precedence logical operator *)
@@ -139,6 +140,37 @@ stmt:
     { let loc = $symbolstartpos in
       let base = { desc = Var id; loc } in
       { desc = AssignField (base, fname, rhs); loc } }
+  | id = IDENT op = compound_op rhs = expr SEMI
+    { let loc = $symbolstartpos in
+      let lhs = { desc = Var id; loc } in
+      { desc = Assign (id, { desc = BinOp (op, lhs, rhs); loc }); loc } }
+  | id = IDENT LBRACKET idx = expr RBRACKET op = compound_op rhs = expr SEMI
+    { let loc = $symbolstartpos in
+      let load = { desc = Index (id, idx); loc } in
+      { desc = AssignIndex (id, idx, { desc = BinOp (op, load, rhs); loc }); loc } }
+  | TIMES id = IDENT op = compound_op rhs = expr SEMI
+    { let loc = $symbolstartpos in
+      let ptr = { desc = Var id; loc } in
+      let load = { desc = Deref ptr; loc } in
+      { desc = AssignDeref (ptr, { desc = BinOp (op, load, rhs); loc }); loc } }
+  | TIMES LPAREN lhs = expr RPAREN op = compound_op rhs = expr SEMI
+    { let loc = $symbolstartpos in
+      let load = { desc = Deref lhs; loc } in
+      { desc = AssignDeref (lhs, { desc = BinOp (op, load, rhs); loc }); loc } }
+  | id = IDENT DOT fname = IDENT op = compound_op rhs = expr SEMI
+    { let loc = $symbolstartpos in
+      let base = { desc = Var id; loc } in
+      let load = { desc = FieldGet (base, fname); loc } in
+      { desc = AssignField (base, fname, { desc = BinOp (op, load, rhs); loc }); loc } }
+
+%inline compound_op:
+  | PLUS_EQ  { Add }
+  | MINUS_EQ { Sub }
+  | PIPE_EQ  { Bor }
+  | AMP_EQ   { Band }
+  | HAT_EQ   { Bxor }
+  | SHL_EQ   { Shl }
+  | SHR_EQ   { Shr }
 
 else_part:
   | ELSE LBRACE e = stmts RBRACE { e }
@@ -177,6 +209,7 @@ expr:
   | expr NE expr   { { desc = BinOp (Ne, $1, $3); loc = $symbolstartpos } }
   | TIMES e = expr %prec UNARY { { desc = Deref e;    loc = $symbolstartpos } }
   | AMP e = expr %prec UNARY { { desc = AddrOf e; loc = $symbolstartpos } }
+  | TILDE e = expr %prec UNARY { { desc = Bnot e; loc = $symbolstartpos } }
   | MINUS e = expr %prec UNARY
     { { desc = BinOp (Sub, { desc = IntLit 0; loc = $symbolstartpos }, e);
         loc = $symbolstartpos } }

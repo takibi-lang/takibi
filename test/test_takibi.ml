@@ -872,6 +872,44 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  (* -- Bitwise NOT and compound assignment tests ---------------------- *)
+
+  Alcotest.test_case "bitwise NOT parses to Bnot" `Quick (fun () ->
+    match parse "fn f(x: i32) i32 { return ~x; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.Bnot { desc = Ast.Var "x"; _ }; _ } -> ()
+         | _ -> Alcotest.fail "expected Return(Bnot(Var x))")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "compound += desugars to Assign(BinOp(Add))" `Quick (fun () ->
+    match parse "fn f() { let mut x = 0; x += 1; }" with
+    | [Ast.FuncDef { body = [_let; s]; _ }] ->
+        (match s.desc with
+         | Ast.Assign ("x", { desc = Ast.BinOp (Ast.Add, { desc = Ast.Var "x"; _ }, _); _ }) -> ()
+         | _ -> Alcotest.fail "expected Assign(x, BinOp(Add, Var x, _))")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "compound |= desugars to Assign(BinOp(Bor))" `Quick (fun () ->
+    match parse "fn f() { let mut x = 0; x |= 2; }" with
+    | [Ast.FuncDef { body = [_let; s]; _ }] ->
+        (match s.desc with
+         | Ast.Assign ("x", { desc = Ast.BinOp (Ast.Bor, { desc = Ast.Var "x"; _ }, _); _ }) -> ()
+         | _ -> Alcotest.fail "expected Assign(x, BinOp(Bor, Var x, _))")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "compound &= on deref desugars to AssignDeref(BinOp(Band))" `Quick (fun () ->
+    match parse "fn f(p: *i32) { *p &= 0xff; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.AssignDeref (_, { desc = Ast.BinOp (Ast.Band, { desc = Ast.Deref _; _ }, _); _ }) -> ()
+         | _ -> Alcotest.fail "expected AssignDeref(_, BinOp(Band, Deref _, _))")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
 ]
 
 (* -- Type inference tests -------------------------------------------------- *)
