@@ -1,0 +1,37 @@
+fn print_uint(n: i32) {
+    if (n >= 10) {
+        print_uint(n / 10);
+    }
+    uart_putc((n - (n / 10) * 10 + '0') as u8);
+}
+
+fn uart_print_uint(n: i32) {
+    if (n >= 10) {
+        uart_print_uint(n / 10);
+    }
+    uart_putc((n % 10 + '0') as u8);
+}
+
+fn uart_print_hex_digit(n: i32) {
+    if (n < 10) {
+        uart_putc((n + '0') as u8);
+    } else {
+        uart_putc((n - 10 + 'a') as u8);
+    }
+}
+
+fn uart_print_hex(n: i32) {
+    uart_puts("0x");
+    for i in 0..<8 {
+        uart_print_hex_digit((n >> (28 - i * 4)) & 15);
+    }
+}
+
+fn uart_print_int(n: i32) {
+    if (n < 0) {
+        uart_putc('-');
+        print_uint(-n);
+    } else {
+        print_uint(n);
+    }
+}

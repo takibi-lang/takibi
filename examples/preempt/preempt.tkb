@@ -2,14 +2,6 @@
 // irq_dispatch performs a forced context switch on each ARM Generic Timer (PPI #30) tick.
 // irq_dispatch receives frame_sp and returns the next task's sp; irq_entry in startup.S switches the stack.
 // System register operations (cntfrq/cntp_tval/cntp_ctl) are delegated to assembly via extern fn.
-struct GicRegs {
-    distr_ctlr: *io i32;
-    distr_isen0: *io i32;
-    cpu_ctlr:   *io i32;
-    cpu_pmr:    *io i32;
-    cpu_iar:    *io i32;
-    cpu_eoir:   *io i32;
-}
 
 struct SchedState {
     task_count:   i32;
@@ -21,63 +13,10 @@ struct SchedState {
     tcb_sp:       [i32; 3];
 }
 
-fn uart_putc(c: u8) {
-    let dr: *io u8 = 0x09000000; // PL011 UART DR
-    *dr = c;
-}
-
-fn uart_puts(s: *u8) {
-    while (*s != 0) {
-        uart_putc(*s);
-        s = s + 1;
-    }
-}
-
-fn print_uint(n: i32) {
-    if (n >= 10) {
-        print_uint(n / 10);
-    }
-    uart_putc((n - (n / 10) * 10 + '0') as u8);
-}
-
-extern fn read_cntfrq() -> i32;
-extern fn set_cntp_tval(n: i32);
-extern fn enable_cntp();
-extern fn disable_cntp();
-extern fn task_exit_stub();
-
-fn setup_task_stack(s: *u8, f: fn() -> void) -> i32 {
-    let base: *u8 = s - 272;
-    for i in 0..<272 {
-        *(base + i) = 0 as u8;
-    }
-    let p_elr: *fn() -> void = (base + 256) as *fn() -> void;
-    *p_elr = f;
-    let p_spsr: *i32 = (base + 264) as *i32;
-    *p_spsr = 0x05;
-    let p_x30: *fn() -> void = (base + 240) as *fn() -> void;
-    *p_x30 = task_exit_stub;
-    return base as i32;
-}
-
-let gic: GicRegs = {0x08000000, 0x08000100, 0x08010000, 0x08010004, 0x0801000C, 0x08010010};
 let sched: SchedState = {3, 0, 6, 0, 0, {0, 0, 0}, {0, 0, 0}};
 
 let stack_a: [u8; 4096];
 let stack_b: [u8; 4096];
-
-fn gic_init() {
-    *(gic.distr_ctlr)  = 1;
-    *(gic.distr_isen0) = 1 << 30;
-    *(gic.cpu_pmr)     = 0xff;
-    *(gic.cpu_ctlr)    = 1;
-}
-
-fn timer_init() {
-    gic_init();
-    set_cntp_tval(read_cntfrq() >> 6); // cntfrq/64 ~ 15ms interval timer
-    enable_cntp();
-}
 
 fn irq_dispatch(frame_sp: i32) -> i32 {
     let id: i32 = *gic.cpu_iar;
@@ -130,3 +69,4 @@ fn main() {
     uart_puts(" ticks\r\n");
     uart_puts("done\r\n");
 }
+

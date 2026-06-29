@@ -1,0 +1,26 @@
+extern fn read_cntfrq() -> i32;
+extern fn set_cntp_tval(n: i32);
+extern fn enable_cntp();
+extern fn disable_cntp();
+extern fn task_exit_stub();
+
+fn setup_task_stack(s: *u8, f: fn() -> void) -> i32 {
+    let base: *u8 = s - 272;
+    for i in 0..<272 {
+        *(base + i) = 0 as u8;
+    }
+    let p_elr: *fn() -> void = (base + 256) as *fn() -> void;
+    *p_elr = f;
+    let p_spsr: *i32 = (base + 264) as *i32;
+    *p_spsr = 0x05;
+    let p_x30: *fn() -> void = (base + 240) as *fn() -> void;
+    *p_x30 = task_exit_stub;
+    return base as i32;
+}
+
+fn timer_init() {
+    gic_init();
+    gic_enable_timer_ppi();
+    set_cntp_tval(read_cntfrq() >> 6);
+    enable_cntp();
+}

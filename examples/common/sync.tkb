@@ -1,0 +1,25 @@
+extern fn sem_wait(s: *i32);
+extern fn sem_post(s: *i32);
+
+fn mutex_lock(m: *i32) {
+    sem_wait(m);
+}
+
+fn mutex_unlock(m: *i32) {
+    sem_post(m);
+}
+
+/* Preventing missed wakeups in cond_wait:
+   (1) Read the sequence number while holding the mutex
+   (2) Even if a signal arrives after unlock, the saved s from (1) still detects it
+   (3) *seq is a volatile load -- the compiler will not hoist it out of the spin loop */
+fn cond_wait(seq: *io i32, m: *i32) {
+    let s: i32 = *seq;
+    mutex_unlock(m);
+    while (*seq == s) {}
+    mutex_lock(m);
+}
+
+fn cond_signal(seq: *io i32) {
+    *seq = *seq + 1;
+}

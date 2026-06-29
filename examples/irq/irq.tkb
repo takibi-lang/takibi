@@ -1,35 +1,12 @@
 // Demo of UART RX interrupt via the GICv2 interrupt controller.
 // IRQ #33 (SPI #1) = PL011 UART RX. irq_dispatch calls the handler registered in irq_tbl.
 // The function signature of irq_dispatch must match irq_entry in startup.S.
-struct GicRegs {
-    distr_ctlr: *io i32;
-    distr_isen: *io i32;
-    cpu_ctlr:   *io i32;
-    cpu_pmr:    *io i32;
-    cpu_iar:    *io i32;
-    cpu_eoir:   *io i32;
-}
-
 struct IrqTable {
     handlers: [fn() -> void; 64];
 }
-
-let gic: GicRegs = {0x08000000, 0x08000104, 0x08010000, 0x08010004, 0x0801000C, 0x08010010};
 let irq_tbl:  IrqTable;
 let uart_imsc: *io i32 = 0x09000038; // PL011 IMSC: interrupt mask register (bit4=RXIM)
 let irq_done:  io i32;
-
-fn uart_putc(c: u8) {
-    let dr: *io u8 = 0x09000000; // PL011 UART DR
-    *dr = c;
-}
-
-fn uart_puts(s: *u8) {
-    while (*s != 0) {
-        uart_putc(*s);
-        s = s + 1;
-    }
-}
 
 fn register_irq(id: i32, h: fn() -> void) {
     let t: *fn() -> void = irq_tbl.handlers;
@@ -58,21 +35,13 @@ fn uart_rx_handler() {
     }
 }
 
-fn gic_init() {
-    let gicd_itargetsr8: *io i32 = 0x08000820;
-    *(gic.distr_ctlr) = 1;
-    *(gic.distr_isen) = 2; // GICD_ISENABLER0: bit1 = enable IRQ #33 (SPI #1 = UART)
-    *gicd_itargetsr8  = 0x01010101;
-    *(gic.cpu_pmr)    = 0xff;
-    *(gic.cpu_ctlr)   = 1;
-}
-
 fn uart_init_irq() {
     *uart_imsc = 0x10; // Set the RXIM bit to enable receive interrupt
 }
 
 fn main() {
     gic_init();
+    gic_enable_uart_spi();
     register_irq(33, uart_rx_handler);
     uart_puts("irq ready\r\n");
     uart_init_irq();
@@ -80,3 +49,4 @@ fn main() {
     while (*p == 0) {}
     uart_puts("done\r\n");
 }
+

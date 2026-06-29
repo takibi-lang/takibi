@@ -6,9 +6,25 @@ let report_error pos msg =
   let file = pos.Lexing.pos_fname in
   Printf.eprintf "File \"%s\", line %d, character %d: %s\n" file line col msg
 
+let parse_file filename =
+  let chan = open_in filename in
+  let lexbuf = Lexing.from_channel chan in
+  Lexing.set_filename lexbuf filename;
+  let result =
+    match Parser.program Lexer.read lexbuf with
+    | prog -> prog
+    | exception Parser.Error ->
+        let pos = Lexing.lexeme_start_p lexbuf in
+        close_in chan;
+        report_error pos "Syntax error";
+        exit 1
+  in
+  close_in chan;
+  result
+
 let () =
-  (* Parse arguments: takibi <input> [-o <output.o>] [--target <triple>] *)
-  let input_file  = ref "" in
+  (* Parse arguments: takibi <input>... [-o <output.o>] [--target <triple>] *)
+  let input_files  = ref [] in
   let output_file = ref "" in
   let target_triple = ref "" in
   let i = ref 1 in
@@ -27,31 +43,21 @@ let () =
          );
          target_triple := Sys.argv.(!i)
      | arg ->
-         if !input_file = "" then input_file := arg
-         else (Printf.eprintf "Unexpected argument: %s\n" arg; exit 1));
+         input_files := arg :: !input_files);
     incr i
   done;
+  let input_files = List.rev !input_files in
 
-  if !input_file = "" then (
-    Printf.eprintf "Usage: %s <filename> [-o <output.o>] [--target <triple>]\n"
+  if input_files = [] then (
+    Printf.eprintf "Usage: %s <filename>... [-o <output.o>] [--target <triple>]\n"
       Sys.argv.(0);
     exit 1
   );
 
   let machine = Llvm_gen.setup_target ~triple:!target_triple () in
 
-  let chan   = open_in !input_file in
-  let lexbuf = Lexing.from_channel chan in
-  Lexing.set_filename lexbuf !input_file;
-
-  try
-    let prog =
-      try Parser.program Lexer.read lexbuf with
-      | Parser.Error ->
-          let pos = Lexing.lexeme_start_p lexbuf in
-          report_error pos "Syntax error";
-          exit 1
-    in
+  (try
+    let prog = List.concat_map parse_file input_files in
 
     (* HM type inference -- catches type errors and produces resolved types *)
     let prog_types = Typechecker.infer_program prog in
@@ -61,14 +67,8 @@ let () =
     if !output_file <> "" then
       Llvm_gen.emit_object machine !output_file
     else
-      Llvm.dump_module Llvm_gen.the_module;
-
-    close_in chan
+      Llvm.dump_module Llvm_gen.the_module
   with
   | Typechecker.TypeError (loc, msg) ->
       report_error loc msg;
-      close_in chan;
-      exit 1
-  | e ->
-      close_in chan;
-      raise e
+      exit 1)

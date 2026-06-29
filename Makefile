@@ -11,6 +11,11 @@ COMMON_DIR       := examples/common
 COMMON_STARTUP_S := $(COMMON_DIR)/startup.S
 COMMON_STARTUP_O := $(COMMON_DIR)/startup.o
 COMMON_LINK_LD   := $(COMMON_DIR)/link.ld
+COMMON_UART      := $(COMMON_DIR)/uart.tkb
+COMMON_PRINT     := $(COMMON_DIR)/print.tkb
+COMMON_GIC       := $(COMMON_DIR)/gic.tkb
+COMMON_TIMER     := $(COMMON_DIR)/timer.tkb
+COMMON_SYNC      := $(COMMON_DIR)/sync.tkb
 
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
@@ -55,13 +60,35 @@ check: test qemutest langcheck
 $(COMMON_STARTUP_O): $(COMMON_STARTUP_S)
 	$(LLVM_MC) --triple=aarch64-none-elf --filetype=obj $< -o $@
 
-# -- .tkb -> .o  (static pattern rule) -----------------------------------------
+# -- .tkb -> .o  (static pattern rules) ----------------------------------------
 # For examples/%.o, % matches "name/name" (including the slash).
 # Example: examples/start/start.o <- examples/start/start.tkb
+#
+# Common file sets passed to takibi:
+#   Standard   : uart.tkb + print.tkb                        (most examples)
+#   IRQ group  : + gic.tkb                                   (irq)
+#   Timer group: + gic.tkb + timer.tkb                       (preempt semaphore watchdog)
+#   Sync group : + gic.tkb + timer.tkb + sync.tkb            (condvar msgqueue)
 .SECONDEXPANSION:
 
-$(EXAMPLE_OBJS): examples/%.o: examples/%.tkb build
-	$(TAKIBI) $< --target $(AARCH64_TARGET) -o $@
+IRQ_OBJS   := examples/irq/irq.o
+TIMER_OBJS := examples/preempt/preempt.o examples/semaphore/semaphore.o \
+              examples/watchdog/watchdog.o
+SYNC_OBJS  := examples/condvar/condvar.o examples/msgqueue/msgqueue.o
+SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS)
+STANDARD_OBJS := $(filter-out $(SPECIAL_OBJS), $(EXAMPLE_OBJS))
+
+$(STANDARD_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) build
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $< --target $(AARCH64_TARGET) -o $@
+
+$(IRQ_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) build
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $< --target $(AARCH64_TARGET) -o $@
+
+$(TIMER_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) build
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $< --target $(AARCH64_TARGET) -o $@
+
+$(SYNC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) build
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) $< --target $(AARCH64_TARGET) -o $@
 
 # -- example.o + startup.o -> kernel.elf ---------------------------------------
 # For examples/%/kernel.elf, % matches "name" (no slash).

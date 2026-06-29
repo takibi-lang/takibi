@@ -1,0 +1,27 @@
+struct GicRegs {
+    distr_ctlr:  *io i32;   // 0x08000000  GICD_CTLR
+    distr_isen0: *io i32;   // 0x08000100  GICD_ISENABLER0 (SGI/PPI, IRQ 0-31)
+    distr_isen1: *io i32;   // 0x08000104  GICD_ISENABLER1 (SPI,     IRQ 32-63)
+    cpu_ctlr:    *io i32;   // 0x08010000  GICC_CTLR
+    cpu_pmr:     *io i32;   // 0x08010004  GICC_PMR
+    cpu_iar:     *io i32;   // 0x0801000C  GICC_IAR
+    cpu_eoir:    *io i32;   // 0x08010010  GICC_EOIR
+}
+
+let gic: GicRegs = {0x08000000, 0x08000100, 0x08000104, 0x08010000, 0x08010004, 0x0801000C, 0x08010010};
+
+fn gic_init() {
+    *(gic.distr_ctlr) = 1;
+    *(gic.cpu_pmr)    = 0xff;
+    *(gic.cpu_ctlr)   = 1;
+}
+
+fn gic_enable_timer_ppi() {
+    *(gic.distr_isen0) = 1 << 30; // PPI #30: ARM Generic Timer
+}
+
+fn gic_enable_uart_spi() {
+    let gicd_itargetsr8: *io i32 = 0x08000820;
+    *(gic.distr_isen1) = 2;          // SPI #1 (IRQ #33): PL011 UART RX
+    *gicd_itargetsr8   = 0x01010101; // route SPI #0-#3 to CPU0
+}

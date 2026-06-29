@@ -8,25 +8,6 @@
 //
 // QEMU expected output: 3\r\n0\r\n2\r\n4\r\n6\r\n
 
-fn uart_putc(c: u8) {
-    let dr: *io u8 = 0x09000000;
-    *dr = c;
-}
-
-fn uart_puts(s: *u8) {
-    while (*s != 0) {
-        uart_putc(*s);
-        s = s + 1;
-    }
-}
-
-fn uart_print_uint(n: i32) {
-    if (n >= 10) {
-        uart_print_uint(n / 10);
-    }
-    uart_putc((n % 10 + '0') as u8);
-}
-
 fn uart_println_int(n: i32) {
     uart_print_uint(n);
     uart_puts("\r\n");
@@ -51,3 +32,4 @@ fn main() -> i32 {
 
     return 0;
 }
+

@@ -1,2 +1,2 @@
-djb2("hello"): 0x0A9CEDE7
-djb2("world"): 0x0B6952E7
+djb2("hello"): 0x0a9cede7
+djb2("world"): 0x0b6952e7
