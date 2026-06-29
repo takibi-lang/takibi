@@ -1136,7 +1136,7 @@ let gen_func ?prog_types fdef =
 
 (* -- Top-level codegen --------------------------------------------------- *)
 
-let gen_global ?prog_types name ty_opt expr_opt =
+let gen_global ?prog_types name ty_opt expr_opt align_opt =
   let ast_ty = match prog_types with
     | None -> (match ty_opt with Some t -> t | None -> TypeI32)
     | Some (pt : Types.program_types) ->
@@ -1171,6 +1171,7 @@ let gen_global ?prog_types name ty_opt expr_opt =
     | None   -> undef llty  (* no initializer -> LLVM undef; startup.S zeroes BSS *)
   in
   let gvar = define_global name init the_module in
+  (match align_opt with Some n -> set_alignment n gvar | None -> ());
   Hashtbl.add global_vars name (ast_ty, gvar)
 
 let declare_func ?prog_types fdef =
@@ -1210,7 +1211,7 @@ let gen_program ?prog_types prog =
   (* Pass 1: register all globals and function signatures *)
   List.iter (function
     | FuncDef fdef                    -> declare_func ?prog_types fdef
-    | LetDef (name, ty_opt, expr_opt) -> gen_global ?prog_types name ty_opt expr_opt
+    | LetDef (name, ty_opt, expr_opt, align_opt) -> gen_global ?prog_types name ty_opt expr_opt align_opt
     | ExternFuncDef (name, params, ret_ty) ->
         if not (Hashtbl.mem functions name) then begin
           let param_ast = List.map (fun (_, t) -> match t with Some t -> t | None -> TypeI32) params in

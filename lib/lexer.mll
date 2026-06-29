@@ -26,6 +26,7 @@ rule read = parse
   | "io"      { IO }
   | "enum"    { ENUM }
   | "match"   { MATCH }
+  | "align"   { ALIGN }
 
   | '{' { LBRACE }
   | '}' { RBRACE }

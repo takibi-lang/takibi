@@ -86,7 +86,7 @@ let parser_tests = [
 
   Alcotest.test_case "global let without type" `Quick (fun () ->
     match parse "let x = 1;" with
-    | [Ast.LetDef (name, ty, init)] ->
+    | [Ast.LetDef (name, ty, init, _)] ->
         Alcotest.(check string)        "name"    "x"   name;
         Alcotest.(check (option type_t)) "type"    None  ty;
         (match init with
@@ -97,10 +97,22 @@ let parser_tests = [
 
   Alcotest.test_case "global let with type annotation" `Quick (fun () ->
     match parse "let g: u8 = 0;" with
-    | [Ast.LetDef (name, ty, _)] ->
+    | [Ast.LetDef (name, ty, _, _)] ->
         Alcotest.(check string)        "name" "g" name;
         Alcotest.(check (option type_t)) "type" (Some Ast.TypeU8) ty
     | _ -> Alcotest.fail "expected single LetDef"
+  );
+
+  Alcotest.test_case "global let with align(N) no init parses" `Quick (fun () ->
+    match parse "let buf: [u8; 16] align(64);" with
+    | [Ast.LetDef ("buf", Some (Ast.TypeArray (Ast.TypeU8, 16)), None, Some 64)] -> ()
+    | _ -> Alcotest.fail "expected LetDef with align 64"
+  );
+
+  Alcotest.test_case "global let with align(N) and init parses" `Quick (fun () ->
+    match parse "let x: i32 align(16) = 0;" with
+    | [Ast.LetDef ("x", Some Ast.TypeI32, Some _, Some 16)] -> ()
+    | _ -> Alcotest.fail "expected LetDef with align 16 and init"
   );
 
   Alcotest.test_case "return statement" `Quick (fun () ->
@@ -209,7 +221,7 @@ let parser_tests = [
     let prog = parse "let x = 0; fn f() {} fn g() i32 { return 1; }" in
     Alcotest.(check int) "item count" 3 (List.length prog);
     (match List.nth prog 0 with
-     | Ast.LetDef ("x", _, _) -> ()
+     | Ast.LetDef ("x", _, _, _) -> ()
      | _ -> Alcotest.fail "first item should be LetDef x");
     (match List.nth prog 1 with
      | Ast.FuncDef { name = "f"; _ } -> ()
@@ -243,7 +255,7 @@ let parser_tests = [
 
   Alcotest.test_case "bare io type in global let parses" `Quick (fun () ->
     match parse "let flag: io i32;" with
-    | [Ast.LetDef (_, Some t, None)] ->
+    | [Ast.LetDef (_, Some t, None, _)] ->
         Alcotest.check type_t "type is io i32" (Ast.TypeIo Ast.TypeI32) t
     | _ -> Alcotest.fail "unexpected structure"
   );

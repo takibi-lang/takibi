@@ -1,0 +1,23 @@
+// Global variable alignment demo: let x: T align(N)
+//
+// align(N) requests N-byte alignment for a global variable.
+// Useful for DMA descriptor rings (4096B), cache-line buffers (64B), etc.
+//
+// This demo verifies at runtime that the aligned buffer's address
+// satisfies the alignment requirement by printing (addr & (N-1)).
+// A correctly aligned address produces 0.
+//
+// Expected QEMU output:
+//   0x00000000   buf64 address is 64-byte aligned (lower 6 bits = 0)
+//   0x00000000   buf4096 address is 4096-byte aligned (lower 12 bits = 0)
+
+let buf64:   [u8; 64]   align(64);
+let buf4096: [u8; 4096] align(4096);
+
+fn main() -> i32 {
+    let addr64:   i32 = (&buf64)   as i32;
+    let addr4096: i32 = (&buf4096) as i32;
+    uart_println_hex(addr64   & 63);    // 0x00000000
+    uart_println_hex(addr4096 & 4095);  // 0x00000000
+    return 0;
+}

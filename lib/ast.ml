@@ -78,7 +78,8 @@ type func = {
 
 type toplevel =
   | FuncDef of func
-  | LetDef of ident * type_expr option * expr option
+  | LetDef of ident * type_expr option * expr option * int option
+  (* name, type, init, align_bytes -- align_bytes = Some N means global align(N) *)
   | ExternFuncDef of ident * (ident * type_expr option) list * type_expr option
   (* extern fn name(params) -> ret; -- body is provided by external assembly *)
   | StructDef of string * (string * type_expr) list

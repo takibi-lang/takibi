@@ -28,6 +28,7 @@ The finished form of code is when index ranges are pinned at the type level usin
   - `let x = e` / `let x: T = e` -- immutable variable declaration (initial value required, no reassignment)
   - `let mut x = e` / `let mut x: T = e` -- mutable variable declaration (reassignment allowed)
   - `let x: T;` -- uninitialized global variable declaration (global scope only)
+  - `let x: T align(N);` -- global variable with N-byte alignment (N must be a power of two). Emits `set_alignment N` on the LLVM global. Use for DMA descriptor rings (`align(4096)`), cache-line buffers (`align(64)`), etc. Optional initializer: `let x: T align(N) = e;`. Local variable alignment is not supported.
   - `while`, `return`, assignment (`x = e`), pointer-deref assignment (`*p = v`)
   - `break` -- exits the innermost `while` or `for` loop immediately. Compile error outside a loop.
   - `continue` -- skips to the next iteration of the innermost loop. For `for`, the counter is incremented first. Compile error outside a loop.
@@ -224,6 +225,26 @@ Uninitialized case in `gen_global`:
 ```ocaml
 | None -> undef llty  (* BSS is zero-cleared by startup.S, so this is safe *)
 ```
+
+### Global Variable Alignment -- align(N) (5 Files)
+
+Files changed when `let x: T align(N)` was added:
+1. `lib/ast.ml` -- `LetDef` 4th field: `int option` (`None` = no alignment, `Some N` = N-byte alignment)
+2. `lib/lexer.mll` -- `"align"` keyword -> `ALIGN` token
+3. `lib/parser.mly` -- `ALIGN` token; two new `item` rules for `align(N)` with and without initializer
+4. `lib/type_inf.ml` -- all `LetDef` patterns updated to 4-tuple; alignment field is ignored during type checking
+5. `lib/llvm_gen.ml` -- `gen_global` gains `align_opt` parameter; calls `set_alignment n gvar` when `Some n`
+
+**Design note**: alignment is a property of a specific variable instance, not of the type.
+`VirtqDesc` structs don't inherently need 4096B alignment -- only the descriptor ring array does.
+Type-level alignment (`struct Name align(N) { ... }`) is a separate, not-yet-implemented feature.
+
+**Syntax**:
+```
+let buf: [u8; 4096] align(4096);          // no initializer
+let reg: i32 align(64) = 0;              // with initializer
+```
+N must be a power of two (not enforced by the compiler; LLVM will assert at IR generation time).
 
 ### Function Pointer Types Span 5 Files
 Files changed when the `fn(T...) -> R` type was added:

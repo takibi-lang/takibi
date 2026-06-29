@@ -652,7 +652,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   ) StringMap.empty prog in
   (* Global variables are always mutable (true) *)
   let genv = List.fold_left (fun m -> function
-    | Ast.LetDef (name, ty_opt, _) -> StringMap.add name (of_ast_opt ty_opt, true) m
+    | Ast.LetDef (name, ty_opt, _, _) -> StringMap.add name (of_ast_opt ty_opt, true) m
     | Ast.FuncDef _                -> m
     | Ast.ExternFuncDef _          -> m
     | Ast.StructDef _              -> m
@@ -660,7 +660,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   ) StringMap.empty prog in
   (* Pass 2: check global initializers *)
   List.iter (function
-    | Ast.LetDef (name, _, expr_opt) ->
+    | Ast.LetDef (name, _, expr_opt, _) ->
         let (ty, _) = StringMap.find name genv in
         (match expr_opt with
          | None -> ()
