@@ -23,6 +23,7 @@ rule read = parse
   | "void"    { VOID_TYPE }
   | "extern"  { EXTERN }
   | "struct"  { STRUCT }
+  | "packed"  { PACKED }
   | "io"      { IO }
   | "enum"    { ENUM }
   | "match"   { MATCH }

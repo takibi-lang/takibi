@@ -5,7 +5,7 @@ open Ast
 %token <int> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN RETURN LET MUT EXTERN STRUCT IO ENUM MATCH ALIGN
+%token FN RETURN LET MUT EXTERN STRUCT PACKED IO ENUM MATCH ALIGN
 %token DARROW COLONCOLON UNDERSCORE
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT
 %token ASSIGN DOT
@@ -62,7 +62,9 @@ item:
   | EXTERN FN IDENT LPAREN params RPAREN ARROW type_expr SEMI
     { ExternFuncDef ($3, $5, Some $8) }
   | STRUCT IDENT LBRACE struct_fields RBRACE
-    { StructDef ($2, $4) }
+    { StructDef ($2, $4, false) }
+  | STRUCT PACKED IDENT LBRACE struct_fields RBRACE
+    { StructDef ($3, $5, true) }
   | ENUM IDENT COLON base_type_expr LBRACE enum_variants RBRACE
     { let (vs, ne) = $6 in EnumDef ($2, Some $4, vs, ne) }
   | ENUM IDENT LBRACE enum_variants RBRACE

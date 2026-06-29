@@ -269,7 +269,7 @@ let parser_tests = [
 
   Alcotest.test_case "io type in struct field parses" `Quick (fun () ->
     match parse "struct S { done: io i32; }" with
-    | [Ast.StructDef (_, [(_, t)])] ->
+    | [Ast.StructDef (_, [(_, t)], _)] ->
         Alcotest.check type_t "field type is io i32" (Ast.TypeIo Ast.TypeI32) t
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -650,7 +650,7 @@ let parser_tests = [
 
   Alcotest.test_case "struct definition parses" `Quick (fun () ->
     match parse "struct Point { x: i32; y: i32; }" with
-    | [Ast.StructDef ("Point", fields)] ->
+    | [Ast.StructDef ("Point", fields, false)] ->
         Alcotest.(check int) "field count" 2 (List.length fields);
         let (n0, t0) = List.nth fields 0 in
         let (n1, t1) = List.nth fields 1 in
@@ -696,6 +696,19 @@ let parser_tests = [
                { desc = Ast.FieldGet _; _ }); _ } -> ()
          | _ -> Alcotest.fail "expected Add(FieldGet, FieldGet)")
     | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "packed struct definition parses with is_packed=true" `Quick (fun () ->
+    match parse "struct packed Hdr { a: u8; b: u16; }" with
+    | [Ast.StructDef ("Hdr", fields, true)] ->
+        Alcotest.(check int) "field count" 2 (List.length fields)
+    | _ -> Alcotest.fail "expected StructDef(Hdr, [...], true)"
+  );
+
+  Alcotest.test_case "normal struct definition parses with is_packed=false" `Quick (fun () ->
+    match parse "struct Hdr { a: u8; b: u16; }" with
+    | [Ast.StructDef ("Hdr", _, false)] -> ()
+    | _ -> Alcotest.fail "expected is_packed=false"
   );
 
   (* -- Enum syntax ------------------------------------------------- *)
@@ -1630,6 +1643,10 @@ let infer_tests = [
     (expect_ok
       "enum Color: u8 { Red = 0; Green = 1; Blue = 2; }
        fn f() { for i in 0..<3 { let c: Color = i as Color; } }");
+
+  Alcotest.test_case "packed struct field access type-checks" `Quick
+    (expect_ok "struct packed Hdr { a: u8; b: u16; }
+     fn f(h: *Hdr) -> u8 { return h.a; }");
 
   Alcotest.test_case "usize annotation type-checks" `Quick
     (expect_ok "let g: u8; fn f() { let x: usize = 0; }");

@@ -1191,10 +1191,11 @@ let declare_func ?prog_types fdef =
 let gen_program ?prog_types prog =
   (* Pass 0: register struct and enum types -- must precede ltype_of_ast for TypeNamed *)
   List.iter (function
-    | StructDef (name, fields) ->
+    | StructDef (name, fields, is_packed) ->
         let field_lltys = List.map (fun (_, ty) -> ltype_of_ast ty) fields
                           |> Array.of_list in
-        let llty = struct_type context field_lltys in
+        let llty = if is_packed then packed_struct_type context field_lltys
+                   else struct_type context field_lltys in
         Hashtbl.add struct_lltypes name llty;
         Hashtbl.add struct_fields  name fields
     | EnumDef (name, ty_opt, variants, is_ne) ->

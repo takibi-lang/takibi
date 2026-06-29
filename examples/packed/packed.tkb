@@ -1,0 +1,49 @@
+// Demo of packed structs.
+// Verify that no padding is inserted between fields by reading raw bytes.
+//
+// Normal struct: u8 at offset 0, then 1-byte padding, u16 at offset 2
+// Packed struct: u8 at offset 0, u16 immediately at offset 1 (no padding)
+//
+// We write known values and read the raw bytes via a *u8 alias to confirm.
+
+struct Normal {
+    a: u8;
+    b: u16;
+}
+
+struct packed Packed {
+    a: u8;
+    b: u16;
+}
+
+fn main() {
+    // --- normal struct ---
+    let mut n: Normal;
+    n.a = 0x11;
+    n.b = 0x3344;
+    // byte layout: [0x11] [pad] [0x44] [0x33]  (little-endian, 2-byte aligned)
+    let pn: *u8 = &n as *u8;
+    uart_puts("normal: ");
+    uart_print_hex(pn[0] as i32);  // 0x11
+    uart_puts(" ");
+    uart_print_hex(pn[1] as i32);  // 0x00 (padding)
+    uart_puts(" ");
+    uart_print_hex(pn[2] as i32);  // 0x44
+    uart_puts("\r\n");
+
+    // --- packed struct ---
+    let mut p: Packed;
+    p.a = 0x11;
+    p.b = 0x3344;
+    // byte layout: [0x11] [0x44] [0x33]  (no padding)
+    let pp: *u8 = &p as *u8;
+    uart_puts("packed: ");
+    uart_print_hex(pp[0] as i32);  // 0x11
+    uart_puts(" ");
+    uart_print_hex(pp[1] as i32);  // 0x44
+    uart_puts(" ");
+    uart_print_hex(pp[2] as i32);  // 0x33
+    uart_puts("\r\n");
+
+    uart_puts("done\r\n");
+}

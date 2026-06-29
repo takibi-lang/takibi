@@ -270,7 +270,7 @@ Files changed when external assembly function declarations like `extern fn timer
 ### Struct Implementation (7 Files)
 
 Files changed when `struct Name { field: type; }` was added:
-1. `lib/ast.ml` -- `TypeNamed of string` (type), `FieldGet of expr * string` (expr), `AssignField of expr * string * expr` (stmt), `StructDef of string * (string * type_expr) list` (top-level)
+1. `lib/ast.ml` -- `TypeNamed of string` (type), `FieldGet of expr * string` (expr), `AssignField of expr * string * expr` (stmt), `StructDef of string * (string * type_expr) list * bool` (last bool = is_packed)
 2. `lib/types.ml` -- `TStruct of string` (internal type), added `program_types.structs` field
 3. `lib/lexer.mll` -- `"struct"` -> `STRUCT`, `'.'` -> `DOT` token
 4. `lib/parser.mly` -- `%left DOT` (highest precedence), `struct_fields` rule, `IDENT DOT IDENT ASSIGN expr SEMI` assignment statement, `expr DOT IDENT` field read expression, `IDENT` -> `TypeNamed` type expression
@@ -289,6 +289,19 @@ Files changed when `struct Name { field: type; }` was added:
 **Current limitations**:
 - Field assignment only in `ident.field = v` form (LHS is a single variable name only)
 - Global struct variable as `let g: Name;` only (`let mut` is not supported in global scope; always mutable)
+
+### Packed Struct (5 Files)
+
+Files changed when `struct packed Name { ... }` was added:
+1. `lib/ast.ml` -- `StructDef` 3rd field changed to `bool` (was absent); `true` = packed, `false` = normal
+2. `lib/lexer.mll` -- `"packed"` keyword -> `PACKED` token
+3. `lib/parser.mly` -- `PACKED` token; new `STRUCT PACKED IDENT LBRACE struct_fields RBRACE` rule sets `true`; existing rule sets `false`
+4. `lib/type_inf.ml` -- `StructDef (name, fields, _)` in Pass 0 (packed flag irrelevant for type checking)
+5. `lib/llvm_gen.ml` -- `packed_struct_type context field_lltys` when `is_packed = true`, `struct_type` otherwise
+
+**Use case**: protocol headers (Ethernet, IP, USB descriptors) and MMIO register maps where field layout must match hardware exactly without alignment padding.
+
+**Verification pattern** (`examples/packed/`): write known values, read raw bytes via `&s as *u8` alias to confirm no padding.
 
 ### Enum Implementation (5 Files)
 

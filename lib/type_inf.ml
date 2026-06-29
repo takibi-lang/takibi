@@ -634,7 +634,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
 let infer_program (prog : Ast.toplevel list) : program_types =
   (* Pass 0: collect struct and enum definitions *)
   let senv = List.fold_left (fun m -> function
-    | Ast.StructDef (name, fields) -> StringMap.add name fields m
+    | Ast.StructDef (name, fields, _) -> StringMap.add name fields m
     | _ -> m
   ) StringMap.empty prog in
   let eenv = List.fold_left (fun m -> function
