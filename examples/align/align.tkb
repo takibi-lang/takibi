@@ -4,8 +4,9 @@
 // Useful for DMA descriptor rings (4096B), cache-line buffers (64B), etc.
 //
 // This demo verifies at runtime that the aligned buffer's address
-// satisfies the alignment requirement by printing (addr & (N-1)).
-// A correctly aligned address produces 0.
+// satisfies the alignment requirement.  usize holds the full 64-bit
+// address on AArch64, so no precision is lost.  The alignment mask
+// result fits in i32, so the final cast is safe.
 //
 // Expected QEMU output:
 //   0x00000000   buf64 address is 64-byte aligned (lower 6 bits = 0)
@@ -15,9 +16,9 @@ let buf64:   [u8; 64]   align(64);
 let buf4096: [u8; 4096] align(4096);
 
 fn main() -> i32 {
-    let addr64:   i32 = (&buf64)   as i32;
-    let addr4096: i32 = (&buf4096) as i32;
-    uart_println_hex(addr64   & 63);    // 0x00000000
-    uart_println_hex(addr4096 & 4095);  // 0x00000000
+    let addr64:   usize = (&buf64)   as usize;
+    let addr4096: usize = (&buf4096) as usize;
+    uart_println_hex((addr64   & 63)   as i32);   // 0x00000000
+    uart_println_hex((addr4096 & 4095) as i32);   // 0x00000000
     return 0;
 }

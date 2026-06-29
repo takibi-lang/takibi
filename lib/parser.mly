@@ -35,7 +35,7 @@ open Ast
 
 %token VOID_TYPE BOOL_TYPE
 %token I8_TYPE I16_TYPE I32_TYPE I64_TYPE
-%token U8_TYPE U16_TYPE U32_TYPE U64_TYPE
+%token U8_TYPE U16_TYPE U32_TYPE U64_TYPE USIZE_TYPE
 %token TRUE FALSE
 %token COLON ARROW
 
@@ -259,6 +259,7 @@ base_type_expr:
   | BOOL_TYPE { TypeBool }
   | I8_TYPE   { TypeI8  } | I16_TYPE { TypeI16 } | I32_TYPE { TypeI32 } | I64_TYPE { TypeI64 }
   | U8_TYPE   { TypeU8  } | U16_TYPE { TypeU16 } | U32_TYPE { TypeU32 } | U64_TYPE { TypeU64 }
+  | USIZE_TYPE { TypeUsize }
   | IO         type_expr { TypeIo  $2 }
   | TIMES      type_expr { TypePtr $2 }
   | LBRACKET t = type_expr SEMI n = INT RBRACKET { TypeArray (t, n) }

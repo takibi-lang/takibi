@@ -25,9 +25,9 @@ let unify_at loc t1 t2 =
 
 (* -- Expression inference -------------------------------------------------- *)
 
-(* True for all fixed-width unsigned integer types *)
+(* True for all unsigned integer types (including usize) *)
 let is_unsigned_ty = function
-  | TU8 | TU16 | TU32 | TU64 -> true
+  | TU8 | TU16 | TU32 | TU64 | TUsize -> true
   | _ -> false
 
 (* Accept bool or any integer type as a condition (for if/while) *)
@@ -218,7 +218,18 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                   (to_string src_ty) ename (to_string expected) (to_string expected))));
            of_ast target_ty
        | None, None ->
-           of_ast target_ty)
+           let tgt = of_ast target_ty in
+           (match repr src_ty with
+            | TPtr _ ->
+                (match tgt with
+                 | TUsize | TPtr _ -> tgt
+                 | _ ->
+                     raise (TypeError (e.loc,
+                       Printf.sprintf
+                         "cannot cast pointer to %s; \
+                          use `(ptr as usize) as %s` to make the truncation explicit"
+                         (to_string tgt) (to_string tgt))))
+            | _ -> tgt))
 
   | FieldGet (base_expr, fname) ->
       let bt = infer_expr senv eenv tyenv fenv base_expr in

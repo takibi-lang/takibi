@@ -15,6 +15,7 @@ let rec show_type = function
   | Ast.TypeBool        -> "bool"
   | Ast.TypeI8          -> "i8"  | Ast.TypeI16 -> "i16" | Ast.TypeI32 -> "i32" | Ast.TypeI64 -> "i64"
   | Ast.TypeU8          -> "u8"  | Ast.TypeU16 -> "u16" | Ast.TypeU32 -> "u32" | Ast.TypeU64 -> "u64"
+  | Ast.TypeUsize       -> "usize"
   | Ast.TypeVoid        -> "void"
   | Ast.TypePtr t       -> "*" ^ show_type t
   | Ast.TypeIo  t       -> "io " ^ show_type t
@@ -113,6 +114,12 @@ let parser_tests = [
     match parse "let x: i32 align(16) = 0;" with
     | [Ast.LetDef ("x", Some Ast.TypeI32, Some _, Some 16)] -> ()
     | _ -> Alcotest.fail "expected LetDef with align 16 and init"
+  );
+
+  Alcotest.test_case "usize type parses" `Quick (fun () ->
+    match parse "let addr: usize;" with
+    | [Ast.LetDef ("addr", Some Ast.TypeUsize, None, None)] -> ()
+    | _ -> Alcotest.fail "expected LetDef with TypeUsize"
   );
 
   Alcotest.test_case "return statement" `Quick (fun () ->
@@ -1108,8 +1115,9 @@ let infer_tests = [
     Alcotest.check type_t "return type is u8" Ast.TypeU8 fi.Types.ret_type
   );
 
-  Alcotest.test_case "as cast pointer to i32 passes" `Quick
-    (expect_ok "fn f(p: *i32) i32 { return p as i32; }");
+  Alcotest.test_case "as cast pointer to i32 is a type error" `Quick
+    (expect_type_error "cannot cast pointer"
+       "fn f(p: *i32) i32 { return p as i32; }");
 
   Alcotest.test_case "as cast pointer to pointer passes" `Quick
     (expect_ok "fn f(p: *u8) i32 { let q: *i32 = p as *i32; return 0; }");
@@ -1622,6 +1630,30 @@ let infer_tests = [
     (expect_ok
       "enum Color: u8 { Red = 0; Green = 1; Blue = 2; }
        fn f() { for i in 0..<3 { let c: Color = i as Color; } }");
+
+  Alcotest.test_case "usize annotation type-checks" `Quick
+    (expect_ok "let g: u8; fn f() { let x: usize = 0; }");
+
+  Alcotest.test_case "pointer as usize type-checks" `Quick
+    (expect_ok "let g: u8; fn f() { let p: *u8 = &g; let x: usize = p as usize; }");
+
+  Alcotest.test_case "usize as pointer type-checks" `Quick
+    (expect_ok "let g: u8; fn f() { let a: usize = 0x09000000; let p: *u8 = a as *u8; }");
+
+  Alcotest.test_case "usize arithmetic type-checks" `Quick
+    (expect_ok "let g: u8;
+     fn f() { let a: usize = (&g) as usize; let b: usize = a & 63; let c: usize = b + 1; }");
+
+  Alcotest.test_case "pointer as i32 is a type error" `Quick
+    (expect_type_error "cannot cast pointer"
+       "let g: u8; fn f() { let p: *u8 = &g; let x: i32 = p as i32; }");
+
+  Alcotest.test_case "pointer as u64 is a type error" `Quick
+    (expect_type_error "cannot cast pointer"
+       "let g: u8; fn f() { let p: *u8 = &g; let x: u64 = p as u64; }");
+
+  Alcotest.test_case "pointer as usize then i32 is ok" `Quick
+    (expect_ok "let g: u8; fn f() { let p: *u8 = &g; let x: i32 = (p as usize) as i32; }");
 
 ]
 

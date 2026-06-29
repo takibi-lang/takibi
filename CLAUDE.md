@@ -23,7 +23,7 @@ The finished form of code is when index ranges are pinned at the type level usin
 ## Language Specification (Current)
 
 - File extension: `.tkb`
-- Types: `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `void`, `*T` (regular pointer, non-volatile), `io T` (volatile-qualified value type), `*io T` (volatile MMIO pointer = `TypePtr(TypeIo T)`), `[T; N]` (array type; decays to pointer in function arguments), `fn(T...) -> R` (function pointer type), `Name` (named struct type), `{lo..<hi}` (refined integer subtype)
+- Types: `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `usize` (pointer-sized unsigned integer; maps to `i64` on AArch64 and RISC-V 64), `void`, `*T` (regular pointer, non-volatile), `io T` (volatile-qualified value type), `*io T` (volatile MMIO pointer = `TypePtr(TypeIo T)`), `[T; N]` (array type; decays to pointer in function arguments), `fn(T...) -> R` (function pointer type), `Name` (named struct type), `{lo..<hi}` (refined integer subtype)
 - Statements:
   - `let x = e` / `let x: T = e` -- immutable variable declaration (initial value required, no reassignment)
   - `let mut x = e` / `let mut x: T = e` -- mutable variable declaration (reassignment allowed)
@@ -191,12 +191,14 @@ Files changed when `expr as T` was added:
 1. `lib/ast.ml` -- `Cast of type_expr * expr` constructor
 2. `lib/lexer.mll` -- `"as"` keyword
 3. `lib/parser.mly` -- `%nonassoc AS` (lower precedence than arithmetic), `expr AS type_expr` rule
-4. `lib/type_inf.ml` -- checks the source expression and returns the target type
+4. `lib/type_inf.ml` -- checks the source expression and returns the target type.
+   **Pointer cast restriction**: `*T as X` where X is a fixed-width integer (`i8/i16/i32/i64/u8/u16/u32/u64`) is a compile error.
+   Only `*T as usize` and `*T as *U` are allowed. Use `(ptr as usize) as i32` to make any truncation explicit.
 5. `lib/llvm_gen.ml` -- `coerce` function selects the conversion instruction per target type:
    - `i32 -> u8`: `trunc i32, i8`
    - `u8/i1 -> i32`: `zext`
    - `i32 -> *T`: `zext i32, i64` -> `inttoptr` (MMIO address assignment)
-   - `*T -> i32`: `ptrtoint ptr, i64` -> `trunc i64, i32` (displaying a pointer value)
+   - `*T -> usize`: `ptrtoint ptr, i64` (full 64-bit address; no truncation)
    - `*T -> *U`: **no-op** (in LLVM 19, all pointers are the same `ptr` type, so the leading `if vty = dst_ll then v` in `coerce` applies; no compiler change needed)
 
 ### Codegen for Immutable and Mutable Variables

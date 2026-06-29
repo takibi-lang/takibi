@@ -161,7 +161,7 @@ let rec ltype_of_ast = function
   | TypeI8  | TypeU8  -> i8_type  context
   | TypeI16 | TypeU16 -> i16_type context
   | TypeI32 | TypeU32 -> i32_type context
-  | TypeI64 | TypeU64 -> i64_type context
+  | TypeI64 | TypeU64 | TypeUsize -> i64_type context
   | TypeVoid        -> void_type context
   | TypePtr _       -> pointer_type context   (* LLVM 19: all pointers are opaque ptr *)
   | TypeIo  t       -> ltype_of_ast t         (* io T is a value type: LLVM type is the same as T *)
@@ -178,12 +178,12 @@ let rec ltype_of_ast = function
 
 (* True for unsigned integer types (use udiv/urem/icmp ult etc.) *)
 let is_unsigned = function
-  | TypeU8 | TypeU16 | TypeU32 | TypeU64 -> true
+  | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeUsize -> true
   | _ -> false
 
 (* True for 64-bit integer types *)
 let is_64bit = function
-  | TypeI64 | TypeU64 -> true
+  | TypeI64 | TypeU64 | TypeUsize -> true
   | _ -> false
 
 (* Widen a loaded value to the arithmetic width (i32 or i64).
@@ -193,7 +193,7 @@ let is_64bit = function
    Signed types use sext; unsigned types use zext. *)
 let widen_load (ast_ty : Ast.type_expr) v =
   match ast_ty with
-  | TypeI64 | TypeU64 -> v
+  | TypeI64 | TypeU64 | TypeUsize -> v
   | TypeBool -> v
   | TypeI8 | TypeI16 | TypeI32 ->
       let dst = i32_type context in
@@ -246,7 +246,7 @@ let rec coerce v (dst : Ast.type_expr) =
         build_ptrtoint v (i64_type context) "ptrtoint" builder
       else if vty = i32_type context then build_sext v (i64_type context) "sext" builder
       else build_zext v (i64_type context) "zext" builder
-  | TypeU64 ->
+  | TypeU64 | TypeUsize ->
       if vty = pointer_type context then
         build_ptrtoint v (i64_type context) "ptrtoint" builder
       else build_zext v (i64_type context) "zext" builder

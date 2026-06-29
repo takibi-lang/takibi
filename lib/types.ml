@@ -4,6 +4,7 @@ type ty =
   | TBool
   | TI8  | TI16 | TI32 | TI64
   | TU8  | TU16 | TU32 | TU64
+  | TUsize  (* pointer-sized unsigned integer; maps to i64 on 64-bit targets *)
   | TVoid
   | TFun of ty list * ty  (* param types, return type *)
   | TVar of tv ref
@@ -38,6 +39,7 @@ let rec to_string t =
   | TBool -> "bool"
   | TI8   -> "i8"  | TI16 -> "i16" | TI32 -> "i32" | TI64 -> "i64"
   | TU8   -> "u8"  | TU16 -> "u16" | TU32 -> "u32" | TU64 -> "u64"
+  | TUsize -> "usize"
   | TVoid -> "void"
   | TPtr t -> Printf.sprintf "*%s" (to_string t)   (* *io T prints as "*io T" via TPtr(TIo T) *)
   | TIo  t -> Printf.sprintf "io %s" (to_string t)
@@ -69,6 +71,7 @@ let rec unify t1 t2 =
   | TBool, TBool | TVoid, TVoid -> ()
   | TI8,  TI8  | TI16, TI16 | TI32, TI32 | TI64, TI64 -> ()
   | TU8,  TU8  | TU16, TU16 | TU32, TU32 | TU64, TU64 -> ()
+  | TUsize, TUsize -> ()
   | TPtr t1, TPtr t2 -> unify t1 t2
   | TIo  t1, TIo  t2 -> unify t1 t2
   | TArray (t1, n1), TArray (t2, n2) ->
@@ -121,6 +124,7 @@ let rec of_ast = function
   | Ast.TypeBool     -> TBool
   | Ast.TypeI8       -> TI8  | Ast.TypeI16 -> TI16 | Ast.TypeI32 -> TI32 | Ast.TypeI64 -> TI64
   | Ast.TypeU8       -> TU8  | Ast.TypeU16 -> TU16 | Ast.TypeU32 -> TU32 | Ast.TypeU64 -> TU64
+  | Ast.TypeUsize    -> TUsize
   | Ast.TypeVoid     -> TVoid
   | Ast.TypePtr   t      -> TPtr   (of_ast t)
   | Ast.TypeIo    t      -> TIo (of_ast t)
@@ -146,6 +150,7 @@ let rec to_ast t =
   | TBool -> Ast.TypeBool
   | TI8   -> Ast.TypeI8  | TI16 -> Ast.TypeI16 | TI32 -> Ast.TypeI32 | TI64 -> Ast.TypeI64
   | TU8   -> Ast.TypeU8  | TU16 -> Ast.TypeU16 | TU32 -> Ast.TypeU32 | TU64 -> Ast.TypeU64
+  | TUsize -> Ast.TypeUsize
   | TVoid -> Ast.TypeVoid
   | TPtr   t      -> Ast.TypePtr  (to_ast t)
   | TIo    t      -> Ast.TypeIo   (to_ast t)

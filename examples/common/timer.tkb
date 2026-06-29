@@ -4,7 +4,7 @@ extern fn enable_cntp();
 extern fn disable_cntp();
 extern fn task_exit_stub();
 
-fn setup_task_stack(s: *u8, f: fn() -> void) -> i32 {
+fn setup_task_stack(s: *u8, f: fn() -> void) -> usize {
     let base: *u8 = s - 272;
     for i in 0..<272 {
         *(base + i) = 0 as u8;
@@ -15,7 +15,7 @@ fn setup_task_stack(s: *u8, f: fn() -> void) -> i32 {
     *p_spsr = 0x05;
     let p_x30: *fn() -> void = (base + 240) as *fn() -> void;
     *p_x30 = task_exit_stub;
-    return base as i32;
+    return base as usize;
 }
 
 fn timer_init() {

@@ -67,7 +67,7 @@ disable_irq:
     ret
 
 /* -- Default (no-op) irq_dispatch -------------------------------------------- */
-/* Calling convention: fn irq_dispatch(frame_sp: int) -> int
+/* Calling convention: fn irq_dispatch(frame_sp: usize) -> usize
    x0 = frame SP of the current task (start of the 272-byte frame allocated by irq_entry)
    return x0 = frame SP of the next task (return the same value when no context switch occurs)
    If the takibi program defines irq_dispatch, that definition takes priority (strong symbol) */

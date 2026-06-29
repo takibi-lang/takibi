@@ -8,7 +8,7 @@
 struct SchedState {
     task_count:   i32;
     current_task: i32;
-    tcb_sp:       [i32; 3];
+    tcb_sp:       [usize; 3];
 }
 
 // tick:      wall-clock incremented on each timer interrupt
@@ -52,16 +52,16 @@ fn wdt_check() {
     }
 }
 
-fn irq_dispatch(frame_sp: i32) -> i32 {
+fn irq_dispatch(frame_sp: usize) -> usize {
     let id: i32 = *gic.cpu_iar;
     if (id == 30) {
         set_cntp_tval(read_cntfrq() >> 6);
         wdt_check(); // check watchdog
-        let sp: *i32 = sched.tcb_sp;
+        let sp: *usize = sched.tcb_sp;
         sp[sched.current_task] = frame_sp;
         sched.current_task = (sched.current_task + 1) % sched.task_count;
         *(gic.cpu_eoir) = id;
-        let sp2: *i32 = sched.tcb_sp;
+        let sp2: *usize = sched.tcb_sp;
         return sp2[sched.current_task];
     }
     *(gic.cpu_eoir) = id;
@@ -92,7 +92,7 @@ let stack_b: [u8; 4096];
 fn main() {
     uart_puts("watchdog start\r\n");
 
-    let sp: *i32 = sched.tcb_sp;
+    let sp: *usize = sched.tcb_sp;
     sp[1] = setup_task_stack(stack_a + 4096, task_healthy);
     sp[2] = setup_task_stack(stack_b + 4096, task_hung);
 

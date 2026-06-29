@@ -1,0 +1,1 @@
+cannot cast pointer to i32; use `(ptr as usize) as i32` to make the truncation explicit

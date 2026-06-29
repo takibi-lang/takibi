@@ -153,6 +153,7 @@ run_compile_error_test "match_nonexhaustive"      examples/match_nonexhaustive/m
 run_compile_error_test "match_nonexhaustive_open" examples/match_nonexhaustive_open/match_nonexhaustive_open.tkb examples/match_nonexhaustive_open/match_nonexhaustive_open.error
 run_compile_error_test "enum_cast_wrong_dst" examples/enum_cast_wrong_dst/enum_cast_wrong_dst.tkb examples/enum_cast_wrong_dst/enum_cast_wrong_dst.error
 run_compile_error_test "enum_cast_wrong_src" examples/enum_cast_wrong_src/enum_cast_wrong_src.tkb examples/enum_cast_wrong_src/enum_cast_wrong_src.error
+run_compile_error_test "ptr_cast_wrong"      examples/ptr_cast_wrong/ptr_cast_wrong.tkb           examples/ptr_cast_wrong/ptr_cast_wrong.error
 
 echo ""
 echo "Running QEMU integration tests..."
