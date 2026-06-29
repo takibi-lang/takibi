@@ -78,4 +78,12 @@ fn main() {
     if (d == Direction::West) {
         uart_puts("d is West\r\n");
     }
+
+    // _ wildcard: catches any variant not listed above it.
+    // Useful when you only care about a subset of variants.
+    // Unlike an exhaustive match, _ silences the exhaustiveness check.
+    match c {
+        Color::Red => { uart_puts("wildcard: red\r\n"); }
+        _ => { uart_puts("wildcard: not red\r\n"); }
+    }
 }

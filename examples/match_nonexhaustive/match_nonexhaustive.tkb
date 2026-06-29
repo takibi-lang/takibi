@@ -1,0 +1,12 @@
+// This file is expected to produce a compile error.
+// A match on Color omits Color::Blue, so the compiler rejects it
+// even though _ is not present. Add Color::Blue => { ... } or
+// a _ wildcard arm to fix it.
+enum Color: u8 { Red = 0; Green = 1; Blue = 2; }
+fn main() {
+    let c: Color = Color::Green;
+    match c {
+        Color::Red   => { let x: i32 = 0; }
+        Color::Green => { let x: i32 = 1; }
+    }
+}

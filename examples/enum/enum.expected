@@ -10,3 +10,4 @@ c is not Red
 r != c
 r is Red
 d is West
+wildcard: not red
