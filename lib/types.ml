@@ -166,9 +166,16 @@ type func_info = {
   local_types : Ast.type_expr StringMap.t;
 }
 
+type enum_info = {
+  underlying : Ast.type_expr;         (* u8 / u16 / u32 / u64 *)
+  variants   : (string * int) list;   (* [(variant_name, discriminant_value); ...] *)
+}
+
 type program_types = {
   globals   : Ast.type_expr StringMap.t;
   functions : func_info StringMap.t;
   structs   : (string * Ast.type_expr) list StringMap.t;
+  enums     : enum_info StringMap.t;
   (* struct name -> ordered field list [(field_name, field_type)] *)
+  (* enum name  -> underlying type + variant list                 *)
 }

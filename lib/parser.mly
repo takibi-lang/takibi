@@ -5,7 +5,8 @@ open Ast
 %token <int> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN RETURN LET MUT EXTERN STRUCT IO
+%token FN RETURN LET MUT EXTERN STRUCT IO ENUM MATCH
+%token DARROW COLONCOLON UNDERSCORE
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT
 %token ASSIGN DOT
 %token IF ELSE WHILE FOR IN BREAK CONTINUE
@@ -57,10 +58,19 @@ item:
     { ExternFuncDef ($3, $5, Some $8) }
   | STRUCT IDENT LBRACE struct_fields RBRACE
     { StructDef ($2, $4) }
+  | ENUM IDENT COLON base_type_expr LBRACE enum_variants RBRACE
+    { EnumDef ($2, Some $4, $6) }
+  | ENUM IDENT LBRACE enum_variants RBRACE
+    { EnumDef ($2, None, $4) }
 
 struct_fields:
   | /* empty */ { [] }
   | IDENT COLON type_expr SEMI struct_fields { ($1, $3) :: $5 }
+
+enum_variants:
+  | /* empty */ { [] }
+  | IDENT ASSIGN INT SEMI enum_variants { ($1, Some $3) :: $5 }
+  | IDENT SEMI            enum_variants { ($1, None)    :: $3 }
 
 func_def:
   | FN IDENT LPAREN params RPAREN ret_type_opt LBRACE stmts RBRACE
@@ -108,6 +118,8 @@ stmt:
     { { desc = For (id, lo, hi, body); loc = $symbolstartpos } }
   | BREAK SEMI    { { desc = Break;    loc = $symbolstartpos } }
   | CONTINUE SEMI { { desc = Continue; loc = $symbolstartpos } }
+  | MATCH expr LBRACE match_arms RBRACE
+    { { desc = Match ($2, $4); loc = $symbolstartpos } }
   | id = IDENT ASSIGN e = expr SEMI
     { { desc = Assign (id, e); loc = $symbolstartpos } }
   | id = IDENT LBRACKET idx = expr RBRACKET ASSIGN rhs = expr SEMI
@@ -132,6 +144,16 @@ else_part:
   | ELSE IF LPAREN c = expr RPAREN LBRACE t = stmts RBRACE p = else_part
     { [{ desc = If(c, t, p); loc = $symbolstartpos }] }
   | (* empty *) { [] }
+
+match_arms:
+  | /* empty */ { [] }
+  | match_arm match_arms { $1 :: $2 }
+
+match_arm:
+  | IDENT COLONCOLON IDENT DARROW LBRACE stmts RBRACE
+    { ArmVariant ($1, $3, $6) }
+  | UNDERSCORE DARROW LBRACE stmts RBRACE
+    { ArmWild $4 }
 
 expr:
   | expr OR      expr  { { desc = BinOp (Or,   $1, $3); loc = $symbolstartpos } }
@@ -163,6 +185,8 @@ expr:
   | STRING { { desc = StringLit $1;   loc = $symbolstartpos } }
   | IDENT { { desc = Var $1; loc = $symbolstartpos } }
   | IDENT LPAREN args RPAREN { { desc = Call ($1, $3); loc = $symbolstartpos } }
+  | IDENT COLONCOLON IDENT
+    { { desc = EnumVariant ($1, $3); loc = $symbolstartpos } }
   | LPAREN e = expr RPAREN { e }
   | e = expr AS t = type_expr
     { { desc = Cast (t, e); loc = $symbolstartpos } }

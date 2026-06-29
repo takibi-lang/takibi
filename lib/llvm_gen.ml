@@ -23,6 +23,10 @@ let func_param_ast_types : (string, Ast.type_expr list) Hashtbl.t = Hashtbl.crea
 let struct_lltypes : (string, lltype) Hashtbl.t = Hashtbl.create 8
 (* Struct field registry: name -> ordered [(field_name, field_ast_type)] *)
 let struct_fields  : (string, (string * Ast.type_expr) list) Hashtbl.t = Hashtbl.create 8
+(* Enum underlying type registry: enum name -> underlying Ast type (u8/u16/u32/u64) *)
+let enum_underlying  : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 8
+(* Enum variant registry: enum name -> [(variant_name, discriminant_value)] *)
+let enum_variants_tbl: (string, (string * int) list) Hashtbl.t = Hashtbl.create 8
 
 (* Locals are either immutable SSA values or mutable alloca pointers *)
 type local_binding =
@@ -163,9 +167,12 @@ let rec ltype_of_ast = function
   | TypeFn _        -> pointer_type context   (* function pointers are also opaque ptr *)
   | TypeRefined _   -> i32_type context       (* refined int is identical to i32 at the LLVM level *)
   | TypeNamed sname ->
-      match Hashtbl.find_opt struct_lltypes sname with
-      | Some llty -> llty
-      | None -> raise (Error (Printf.sprintf "Unknown struct type: %s" sname))
+      (match Hashtbl.find_opt enum_underlying sname with
+       | Some ut -> ltype_of_ast ut   (* enum: integer type of the underlying type *)
+       | None ->
+           match Hashtbl.find_opt struct_lltypes sname with
+           | Some llty -> llty
+           | None -> raise (Error (Printf.sprintf "Unknown named type: %s" sname)))
 
 (* True for unsigned integer types (use udiv/urem/icmp ult etc.) *)
 let is_unsigned = function
@@ -291,6 +298,12 @@ let rec collect_lets stmts =
     | If (_, t, e)                -> collect_lets t @ collect_lets e
     | While (_, b)                -> collect_lets b
     | For (name, _, _, body)      -> ("__for_" ^ name, Some TypeI32) :: collect_lets body
+    | Match (_, arms)             ->
+        List.concat_map (fun arm ->
+          match arm with
+          | ArmVariant (_, _, body) -> collect_lets body
+          | ArmWild body            -> collect_lets body
+        ) arms
     | _                           -> []
   ) stmts
 
@@ -378,6 +391,11 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 let zero   = const_int (i32_type context) 0 in
                 let ep = build_in_bounds_gep arr_ll ptr [|zero; zero|] (name ^ "_ptr") builder in
                 (TypePtr elem_ty, ep)
+            | TypeNamed sname when Hashtbl.mem enum_underlying sname ->
+                (* Enum variable: load the integer value (unlike struct which returns the pointer) *)
+                let ut = Hashtbl.find enum_underlying sname in
+                let v  = build_load (ltype_of_ast ut) ptr name builder in
+                (ast_ty, v)
             | TypeNamed _ ->
                 (ast_ty, ptr)
             | TypeIo inner_ty ->
@@ -394,6 +412,10 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 let zero   = const_int (i32_type context) 0 in
                 let ep = build_in_bounds_gep arr_ll ptr [|zero; zero|] (name ^ "_ptr") builder in
                 (TypePtr elem_ty, ep)
+            | Some (TypeNamed sname as ast_ty, ptr) when Hashtbl.mem enum_underlying sname ->
+                let ut = Hashtbl.find enum_underlying sname in
+                let v  = build_load (ltype_of_ast ut) ptr name builder in
+                (ast_ty, v)
             | Some (TypeNamed _ as ast_ty, ptr) ->
                 (ast_ty, ptr)
             | Some (TypeIo inner_ty, ptr) ->
@@ -553,9 +575,43 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            in
            (ret_ty, result))
 
+  | EnumVariant (ename, vname) ->
+      let ut       = match Hashtbl.find_opt enum_underlying ename with
+        | Some t -> t
+        | None -> raise (Error (Printf.sprintf "Unknown enum: %s" ename))
+      in
+      let variants = Hashtbl.find enum_variants_tbl ename in
+      let value    = match List.assoc_opt vname variants with
+        | Some v -> v
+        | None -> raise (Error (Printf.sprintf "Unknown variant %s::%s" ename vname))
+      in
+      (TypeNamed ename, const_int (ltype_of_ast ut) value)
+
   | Cast (target_ty, e) ->
       let (_, v) = gen_expr locals e in
-      (target_ty, coerce v target_ty)
+      (match target_ty with
+       | TypeNamed ename when Hashtbl.mem enum_underlying ename ->
+           (* int -> enum cast: check validity at runtime, trap on unknown value *)
+           let ut       = Hashtbl.find enum_underlying ename in
+           let variants = Hashtbl.find enum_variants_tbl ename in
+           let cur_f    = block_parent (insertion_block builder) in
+           let ok_bb    = append_block context "enum_ok"  cur_f in
+           let bad_bb   = append_block context "enum_bad" cur_f in
+           let v_coerced = coerce v ut in
+           let ll_ut    = ltype_of_ast ut in
+           let sw = build_switch v_coerced bad_bb (List.length variants) builder in
+           List.iter (fun (_, value) ->
+             add_case sw (const_int ll_ut value) ok_bb
+           ) variants;
+           position_at_end bad_bb builder;
+           let trap_ft = function_type (void_type context) [||] in
+           let trap_fn = declare_function "llvm.trap" trap_ft the_module in
+           ignore (build_call trap_ft trap_fn [||] "" builder);
+           ignore (build_unreachable builder);
+           position_at_end ok_bb builder;
+           (TypeNamed ename, v_coerced)
+       | _ ->
+           (target_ty, coerce v target_ty))
 
   | FieldGet (base_expr, fname) ->
       let (base_ty, base_v) = gen_expr locals base_expr in
@@ -1010,6 +1066,49 @@ let gen_func ?prog_types fdef =
         ignore (build_br cond_bb builder);
 
         position_at_end exit_bb builder
+
+    | Match (disc, arms) ->
+        let (_, disc_v) = gen_expr locals disc in
+        let disc_ll_ty  = type_of disc_v in
+        let merge_bb = append_block context "match_merge" f in
+        let dead_bb  = append_block context "match_dead"  f in
+        (* Build per-arm basic blocks *)
+        let arm_bbs = List.map (fun arm ->
+          match arm with
+          | ArmVariant (_, vname, _) ->
+              (arm, append_block context ("match_" ^ vname) f)
+          | ArmWild _ ->
+              (arm, append_block context "match_wild" f)
+        ) arms in
+        (* Default target: wildcard arm if present, otherwise dead (unreachable) *)
+        let default_bb = match List.find_opt (fun (a, _) ->
+          match a with ArmWild _ -> true | _ -> false) arm_bbs with
+          | Some (_, bb) -> bb
+          | None         -> dead_bb
+        in
+        let n_variants = List.length (List.filter (fun (a, _) ->
+          match a with ArmVariant _ -> true | _ -> false) arm_bbs) in
+        let sw = build_switch disc_v default_bb n_variants builder in
+        List.iter (fun (arm, bb) ->
+          match arm with
+          | ArmVariant (ename, vname, _) ->
+              let variants = Hashtbl.find enum_variants_tbl ename in
+              let value    = List.assoc vname variants in
+              add_case sw (const_int disc_ll_ty value) bb
+          | ArmWild _ -> ()
+        ) arm_bbs;
+        List.iter (fun (arm, bb) ->
+          position_at_end bb builder;
+          (match arm with
+           | ArmVariant (_, _, body) -> List.iter gen_stmt body
+           | ArmWild body            -> List.iter gen_stmt body);
+          if block_terminator (insertion_block builder) = None then
+            ignore (build_br merge_bb builder)
+        ) arm_bbs;
+        (* dead_bb: only reachable when no wildcard and match is fully exhaustive *)
+        position_at_end dead_bb builder;
+        ignore (build_unreachable builder);
+        position_at_end merge_bb builder
   in
 
   List.iter gen_stmt fdef.body;
@@ -1077,7 +1176,7 @@ let declare_func ?prog_types fdef =
   end
 
 let gen_program ?prog_types prog =
-  (* Pass 0: register struct types -- must precede ltype_of_ast for TypeNamed *)
+  (* Pass 0: register struct and enum types -- must precede ltype_of_ast for TypeNamed *)
   List.iter (function
     | StructDef (name, fields) ->
         let field_lltys = List.map (fun (_, ty) -> ltype_of_ast ty) fields
@@ -1085,6 +1184,14 @@ let gen_program ?prog_types prog =
         let llty = struct_type context field_lltys in
         Hashtbl.add struct_lltypes name llty;
         Hashtbl.add struct_fields  name fields
+    | EnumDef (name, ty_opt, variants) ->
+        let underlying = match ty_opt with Some t -> t | None -> TypeU32 in
+        let (_, resolved) = List.fold_left (fun (next, acc) (vname, vopt) ->
+          let v = match vopt with Some v -> v | None -> next in
+          (v + 1, acc @ [(vname, v)])
+        ) (0, []) variants in
+        Hashtbl.add enum_underlying   name underlying;
+        Hashtbl.add enum_variants_tbl name resolved
     | _ -> ()
   ) prog;
   (* Pass 1: register all globals and function signatures *)
@@ -1104,6 +1211,7 @@ let gen_program ?prog_types prog =
           Hashtbl.add func_param_ast_types name param_ast
         end
     | StructDef _ -> ()
+    | EnumDef _   -> ()
   ) prog;
   (* Pass 2: generate function bodies *)
   List.iter (function
@@ -1111,4 +1219,5 @@ let gen_program ?prog_types prog =
     | LetDef _        -> ()
     | ExternFuncDef _ -> ()
     | StructDef _     -> ()
+    | EnumDef _       -> ()
   ) prog

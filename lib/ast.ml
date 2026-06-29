@@ -43,6 +43,7 @@ and expr_desc =
   | FieldGet of expr * string  (* expr.field -- read a struct field *)
   | StructLit of expr list     (* { e, e, ... } -- positional struct literal *)
   | Index of ident * expr      (* arr[idx] -- preserves array/pointer type for bounds checking *)
+  | EnumVariant of string * string  (* EtherType::IPv4 -- enum name, variant name *)
 [@@deriving show]
 
 type stmt = stmt_desc located
@@ -60,6 +61,10 @@ and stmt_desc =
   | For of ident * expr * expr * stmt list  (* for i in lo..<hi { body } *)
   | Break
   | Continue
+  | Match of expr * match_arm list  (* match expr { EName::V => {...} _ => {...} } *)
+and match_arm =
+  | ArmVariant of string * string * stmt list  (* EnumName::Variant => { stmts } *)
+  | ArmWild    of stmt list                    (* _ => { stmts } *)
 [@@deriving show]
 
 type func = {
@@ -77,6 +82,8 @@ type toplevel =
   (* extern fn name(params) -> ret; -- body is provided by external assembly *)
   | StructDef of string * (string * type_expr) list
   (* struct Name { field: type; ... } -- named struct type definition *)
+  | EnumDef of string * type_expr option * (string * int option) list
+  (* enum Name: u16 { Variant = val; ... } -- discriminant enum definition *)
 [@@deriving show]
 
 let show_toplevel_list lst =

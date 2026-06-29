@@ -1,0 +1,81 @@
+// enum Phase 1 demo: discriminant enums, match statement, if-comparison, and as-cast.
+// Verifies: enum definition, EnumVariant expr, match exhaustiveness,
+//           enum == / != comparison (bool result), enum->int cast (no-op),
+//           int->enum cast (trap on invalid).
+
+enum Color: u8 {
+    Red   = 0;
+    Green = 1;
+    Blue  = 2;
+}
+
+enum Direction {
+    North;
+    East;
+    South;
+    West;
+}
+
+fn color_name(c: Color) -> *u8 {
+    match c {
+        Color::Red   => { return "Red\r\n"; }
+        Color::Green => { return "Green\r\n"; }
+        Color::Blue  => { return "Blue\r\n"; }
+    }
+    return "";
+}
+
+fn direction_name(d: Direction) -> *u8 {
+    match d {
+        Direction::North => { return "North\r\n"; }
+        Direction::East  => { return "East\r\n"; }
+        Direction::South => { return "South\r\n"; }
+        Direction::West  => { return "West\r\n"; }
+    }
+    return "";
+}
+
+fn main() {
+    let c: Color = Color::Green;
+    uart_puts(color_name(c));
+
+    let d: Direction = Direction::West;
+    uart_puts(direction_name(d));
+
+    let raw: u8 = c as u8;
+    uart_print_uint(raw as i32);
+    uart_puts("\r\n");
+
+    let c2: Color = raw as Color;
+    uart_puts(color_name(c2));
+
+    for i in 0..<3 {
+        let ci: Color = i as Color;
+        uart_puts(color_name(ci));
+    }
+
+    // enum == / != : result type is bool, exactly like integer comparison.
+    // LLVM emits: icmp eq i8 %val1, %val2
+    if (c == Color::Green) {
+        uart_puts("c is Green\r\n");
+    }
+    if (c != Color::Red) {
+        uart_puts("c is not Red\r\n");
+    }
+
+    // comparing two enum variables of the same type
+    let r: Color = Color::Red;
+    if (r != c) {
+        uart_puts("r != c\r\n");
+    }
+    if (r == Color::Red) {
+        uart_puts("r is Red\r\n");
+    }
+
+    // match and if are both valid; use whichever fits:
+    //   match  -- when you need to handle every variant (exhaustiveness enforced)
+    //   if     -- when you only care about one or two specific values
+    if (d == Direction::West) {
+        uart_puts("d is West\r\n");
+    }
+}

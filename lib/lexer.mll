@@ -24,6 +24,8 @@ rule read = parse
   | "extern"  { EXTERN }
   | "struct"  { STRUCT }
   | "io"      { IO }
+  | "enum"    { ENUM }
+  | "match"   { MATCH }
 
   | '{' { LBRACE }
   | '}' { RBRACE }
@@ -36,6 +38,8 @@ rule read = parse
   | '=' { ASSIGN }
   | "&&" { DAMP }   (* Logical AND. Match before '&' *)
   | '&' { AMP }
+  | "=>" { DARROW }    (* Match arm separator. Match before '=' *)
+  | "::" { COLONCOLON }  (* Enum variant access. Match before ':' *)
 
   | '+' { PLUS }
   | "->" { ARROW }
@@ -75,6 +79,7 @@ rule read = parse
   | '\'' '\\' '\\' '\'' { INT 92 }
   | '\'' ([^ '\'' '\\' '\n'] as c) '\'' { INT (Char.code c) }
 
+  | '_' { UNDERSCORE }  (* wildcard for match. Longest-match: _foo -> IDENT, _ alone -> UNDERSCORE *)
   | ['a'-'z' 'A'-'Z' '_' ] ['a'-'z' 'A'-'Z' '0'-'9' '_' ]* as id
     { IDENT id }
 
