@@ -11,7 +11,7 @@ the system will silently break or run amok. Nothing is communicated to the user.
 
 - **Detect errors at compile time.** The ultimate goal is to make any access that the type system cannot prove into a compile error.
 - **`llvm.trap` is a transitional safety net.** The current array bounds check (`icmp uge` -> `llvm.trap`) aids debugging during development, but on AArch64 it translates to `brk #0` (Synchronous Abort) -- a runtime error that must never occur in production code.
-- **The range type `{lo..<hi}` is the solution.** If `hi <= N` and `lo >= 0` can be proven at compile time, no `llvm.trap` code is generated at all (Step 3.4).
+- **The range type `{lo..<hi}` is the solution.** If `hi <= N` and `lo >= 0` can be proven at compile time, no `llvm.trap` code is generated at all.
 - **When to use `i32` vs `{lo..<hi}` is the programmer's responsibility**:
   - `i32` = unknown range (MMIO, external input, etc.) -> bounds check required
   - `{lo..<hi}` = value whose range the programmer knows -> check can be omitted
@@ -70,7 +70,6 @@ make build          # build the compiler (takibi) only (= dune build)
 make test           # run unit tests
 make qemutest       # run QEMU integration tests (build all examples and verify automatically)
 make check          # run make test + make qemutest together
-make qemu-echo      # manually run the echo server on QEMU virt (AArch64) (Ctrl-A X to quit)
 make clean          # remove generated artifacts
 ```
 
@@ -99,12 +98,7 @@ examples/
     gic.tkb       -- GicRegs struct, gic_init, gic_enable_timer_ppi, gic_enable_uart_spi
     timer.tkb     -- extern fn timer stubs, setup_task_stack, timer_init (depends on gic.tkb)
     sync.tkb      -- extern fn sem_wait/sem_post, mutex_lock/unlock, cond_wait/signal
-  hello/  start/  echo/  print_int/  print_hex/  print_ptr/
-  mem/  array/  fizzbuzz/  fibonacci/  bubblesort/  ringbuf/
-  callstack/  crc8/  djb2/  bump/  timer/  rtc/
-  irq/  scheduler/  preempt/  semaphore/  condvar/  struct/  msgqueue/
-  watchdog/  refined/  narrow/  for/  loop/
-  (each directory: see the leading comment in <name>.tkb for a description)
+  <name>/         -- each directory: see the leading comment in <name>.tkb for a description
 scripts/
   run_qemutest.sh -- QEMU integration test script (FIFO sync and timing verification included)
 test/
