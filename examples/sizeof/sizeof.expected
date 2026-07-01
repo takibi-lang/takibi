@@ -1,0 +1,6 @@
+sizeof(i32)         = 4
+sizeof(Hdr)         = 8
+sizeof(PackedHdr)   = 6
+sizeof(Aligned16)   = 16
+buffer holds a full PackedHdr
+done

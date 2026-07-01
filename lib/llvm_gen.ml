@@ -614,6 +614,15 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       in
       (TypeNamed ename, const_int (ltype_of_ast ut) value)
 
+  | SizeOf ty ->
+      let elem_llty = ltype_of_ast ty in
+      let dl = match !target_data with
+        | Some dl -> dl
+        | None -> raise (Error "sizeof: target data layout not initialized")
+      in
+      let sz = Int64.to_int (Llvm_target.DataLayout.abi_size elem_llty dl) in
+      (TypeUsize, const_int (ltype_of_ast TypeUsize) sz)
+
   | Cast (target_ty, e) ->
       let (_, v) = gen_expr locals e in
       (match target_ty with

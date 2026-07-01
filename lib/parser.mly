@@ -5,7 +5,7 @@ open Ast
 %token <int> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN RETURN LET MUT EXTERN STRUCT PACKED IO ENUM MATCH ALIGN
+%token FN RETURN LET MUT EXTERN STRUCT PACKED IO ENUM MATCH ALIGN SIZEOF
 %token DARROW COLONCOLON UNDERSCORE
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT
 %token ASSIGN DOT
@@ -237,6 +237,8 @@ expr:
   | IDENT LPAREN args RPAREN { { desc = Call ($1, $3); loc = $symbolstartpos } }
   | IDENT COLONCOLON IDENT
     { { desc = EnumVariant ($1, $3); loc = $symbolstartpos } }
+  | SIZEOF LPAREN t = type_expr RPAREN
+    { { desc = SizeOf t; loc = $symbolstartpos } }
   | LPAREN e = expr RPAREN { e }
   | e = expr AS t = type_expr
     { { desc = Cast (t, e); loc = $symbolstartpos } }

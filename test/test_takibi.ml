@@ -455,6 +455,26 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  (* -- sizeof -------------------------------------------------- *)
+
+  Alcotest.test_case "sizeof(T) parses to SizeOf" `Quick (fun () ->
+    match parse "fn f() usize { return sizeof(i32); }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.SizeOf Ast.TypeI32; _ } -> ()
+         | _ -> Alcotest.fail "expected Return(SizeOf TypeI32)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "sizeof(StructName) parses to SizeOf TypeNamed" `Quick (fun () ->
+    match parse "struct P { x: i32; } fn f() usize { return sizeof(P); }" with
+    | [Ast.StructDef _; Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.SizeOf (Ast.TypeNamed "P"); _ } -> ()
+         | _ -> Alcotest.fail "expected Return(SizeOf (TypeNamed P))")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
   (* -- as cast ----------------------------------------------- *)
 
   Alcotest.test_case "as cast to u8" `Quick (fun () ->
@@ -1764,6 +1784,37 @@ let infer_tests = [
        "let QUEUE_SIZE: i32 = 4;
         let mut ring: [u8; QUEUE_SIZE];
         fn f() { ring[4] = 1; }");
+
+  (* -- sizeof ------------------------------------------------------------ *)
+
+  Alcotest.test_case "sizeof(T) has type usize" `Quick (fun () ->
+    let pt = infer "fn f() { let n: usize = sizeof(i32); }" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
+    Alcotest.check type_t "n has type usize"
+      Ast.TypeUsize
+      (Types.StringMap.find "n" fi.Types.local_types)
+  );
+
+  Alcotest.test_case "sizeof(StructName) type-checks" `Quick
+    (expect_ok "struct Point { x: i32; y: i32; }
+                fn f() { let n: usize = sizeof(Point); }");
+
+  Alcotest.test_case "sizeof of an unknown struct name is a type error" `Quick
+    (expect_type_error "unknown type"
+       "fn f() { let n: usize = sizeof(Bogus); }");
+
+  Alcotest.test_case "sizeof(T) compared directly against an i32 is a type error" `Quick
+    (expect_type_error "cannot unify"
+       "struct Hdr { a: i32; b: i32; }
+        fn f(len: i32) i32 { if (len >= sizeof(Hdr)) { return 1; } return 0; }");
+
+  Alcotest.test_case "sizeof(T) compared against an explicitly-cast i32 length type-checks" `Quick
+    (expect_ok "struct Hdr { a: i32; b: i32; }
+                fn f(len: i32) i32 { if ((len as usize) >= sizeof(Hdr)) { return 1; } return 0; }");
+
+  Alcotest.test_case "sizeof(T) compared against a usize length type-checks" `Quick
+    (expect_ok "struct Hdr { a: i32; b: i32; }
+                fn f(len: usize) i32 { if (len >= sizeof(Hdr)) { return 1; } return 0; }");
 
 ]
 

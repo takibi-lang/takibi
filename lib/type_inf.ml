@@ -286,6 +286,16 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                Printf.sprintf "Unknown variant '%s' of enum '%s'" vname ename));
            TStruct ename)
 
+  | SizeOf ty ->
+      (* sizeof(T) is a compile-time constant of type usize. Validate named
+         struct/enum types exist so unknown names are caught here rather than
+         surfacing as an internal error during codegen. *)
+      (match ty with
+       | Ast.TypeNamed name when not (StringMap.mem name senv) && not (StringMap.mem name eenv) ->
+           raise (TypeError (e.loc, Printf.sprintf "unknown type '%s' in sizeof" name))
+       | _ -> ());
+      TUsize
+
   | StructLit _ ->
       raise (TypeError (e.loc,
         "struct literal requires a type annotation: `let mut x: Name = {...}`"))

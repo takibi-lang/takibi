@@ -28,6 +28,7 @@ rule read = parse
   | "enum"    { ENUM }
   | "match"   { MATCH }
   | "align"   { ALIGN }
+  | "sizeof"  { SIZEOF }
 
   | '{' { LBRACE }
   | '}' { RBRACE }

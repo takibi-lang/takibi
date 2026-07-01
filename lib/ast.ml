@@ -46,6 +46,7 @@ and expr_desc =
   | StructLit of expr list     (* { e, e, ... } -- positional struct literal *)
   | Index of ident * expr      (* arr[idx] -- preserves array/pointer type for bounds checking *)
   | EnumVariant of string * string  (* EtherType::IPv4 -- enum name, variant name *)
+  | SizeOf of type_expr        (* sizeof(T) -- compile-time size in bytes, type usize *)
 [@@deriving show]
 
 type stmt = stmt_desc located
