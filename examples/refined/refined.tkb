@@ -19,7 +19,7 @@
 //   ABCDEFGH\r\n  (approach 2)
 //   ABCDEFGH\r\n  (approach 3)
 
-let buf: [u8; 8];
+let mut buf: [u8; 8];
 
 // --- Approach 1: manual {lo..<hi} annotation (Step 3.4) --------------------------
 fn fill_pair(i: {0..<7}, lo: u8, hi: u8) {

@@ -1169,7 +1169,7 @@ let gen_func ?prog_types fdef =
 
 (* -- Top-level codegen --------------------------------------------------- *)
 
-let gen_global ?prog_types name ty_opt expr_opt align_opt =
+let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable =
   let ast_ty = match prog_types with
     | None -> (match ty_opt with Some t -> t | None -> TypeI32)
     | Some (pt : Types.program_types) ->
@@ -1212,6 +1212,7 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt =
                  | _ -> None)
   in
   (match eff_align with Some n -> set_alignment n gvar | None -> ());
+  if not is_mutable then set_global_constant true gvar;
   Hashtbl.add global_vars name (ast_ty, gvar)
 
 let declare_func ?prog_types fdef =
@@ -1269,7 +1270,8 @@ let gen_program ?prog_types prog =
   (* Pass 1: register all globals and function signatures *)
   List.iter (function
     | FuncDef fdef                    -> declare_func ?prog_types fdef
-    | LetDef (name, ty_opt, expr_opt, align_opt) -> gen_global ?prog_types name ty_opt expr_opt align_opt
+    | LetDef (name, ty_opt, expr_opt, align_opt, is_mutable) ->
+        gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable
     | ExternFuncDef (name, params, ret_ty) ->
         if not (Hashtbl.mem functions name) then begin
           let param_ast = List.map (fun (_, t) -> match t with Some t -> t | None -> TypeI32) params in

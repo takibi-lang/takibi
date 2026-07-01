@@ -16,7 +16,7 @@
 //
 // QEMU expected output: ABCDEFGH\r\n
 
-let buf: [u8; 8];
+let mut buf: [u8; 8];
 
 // Write 'A' to 'H' using a for loop. i: {0..<8}, so buf[i] has no bounds check.
 fn fill() {

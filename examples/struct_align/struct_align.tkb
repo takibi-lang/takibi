@@ -38,17 +38,17 @@ struct Odd align(16) {
 }
 
 // Global Vec4 -- 16-byte aligned automatically
-let g: Vec4;
+let mut g: Vec4;
 
 // Descriptor ring -- 16-byte aligned automatically (inherited from VirtqDesc align(16))
-let ring: [VirtqDesc; 4];
+let mut ring: [VirtqDesc; 4];
 
 // Page-aligned descriptor ring for DMA -- variable-level align(4096) overrides the
 // struct-level align(16), placing the ring on a 4096-byte boundary as virtio requires.
-let ring_dma: [VirtqDesc; 4] align(4096);
+let mut ring_dma: [VirtqDesc; 4] align(4096);
 
 // Array of Odd structs -- each element must be 16-byte aligned thanks to tail padding.
-let odds: [Odd; 4];
+let mut odds: [Odd; 4];
 
 fn print_aligned(label: *u8, addr: usize, mask: usize) {
     uart_puts(label);

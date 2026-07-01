@@ -3,6 +3,7 @@ open Takibi
 (* -- Helpers --------------------------------------------------------------- *)
 
 let parse src =
+  Const_env.reset ();
   let lexbuf = Lexing.from_string src in
   Parser.program Lexer.read lexbuf
 
@@ -87,7 +88,7 @@ let parser_tests = [
 
   Alcotest.test_case "global let without type" `Quick (fun () ->
     match parse "let x = 1;" with
-    | [Ast.LetDef (name, ty, init, _)] ->
+    | [Ast.LetDef (name, ty, init, _, _)] ->
         Alcotest.(check string)        "name"    "x"   name;
         Alcotest.(check (option type_t)) "type"    None  ty;
         (match init with
@@ -98,7 +99,7 @@ let parser_tests = [
 
   Alcotest.test_case "global let with type annotation" `Quick (fun () ->
     match parse "let g: u8 = 0;" with
-    | [Ast.LetDef (name, ty, _, _)] ->
+    | [Ast.LetDef (name, ty, _, _, _)] ->
         Alcotest.(check string)        "name" "g" name;
         Alcotest.(check (option type_t)) "type" (Some Ast.TypeU8) ty
     | _ -> Alcotest.fail "expected single LetDef"
@@ -106,20 +107,60 @@ let parser_tests = [
 
   Alcotest.test_case "global let with align(N) no init parses" `Quick (fun () ->
     match parse "let buf: [u8; 16] align(64);" with
-    | [Ast.LetDef ("buf", Some (Ast.TypeArray (Ast.TypeU8, 16)), None, Some 64)] -> ()
+    | [Ast.LetDef ("buf", Some (Ast.TypeArray (Ast.TypeU8, 16)), None, Some 64, false)] -> ()
     | _ -> Alcotest.fail "expected LetDef with align 64"
   );
 
   Alcotest.test_case "global let with align(N) and init parses" `Quick (fun () ->
     match parse "let x: i32 align(16) = 0;" with
-    | [Ast.LetDef ("x", Some Ast.TypeI32, Some _, Some 16)] -> ()
+    | [Ast.LetDef ("x", Some Ast.TypeI32, Some _, Some 16, false)] -> ()
     | _ -> Alcotest.fail "expected LetDef with align 16 and init"
   );
 
   Alcotest.test_case "usize type parses" `Quick (fun () ->
     match parse "let addr: usize;" with
-    | [Ast.LetDef ("addr", Some Ast.TypeUsize, None, None)] -> ()
+    | [Ast.LetDef ("addr", Some Ast.TypeUsize, None, None, false)] -> ()
     | _ -> Alcotest.fail "expected LetDef with TypeUsize"
+  );
+
+  Alcotest.test_case "bare global let parses as immutable (is_mutable=false)" `Quick (fun () ->
+    match parse "let N: i32 = 16;" with
+    | [Ast.LetDef ("N", Some Ast.TypeI32, Some _, None, false)] -> ()
+    | _ -> Alcotest.fail "expected is_mutable=false"
+  );
+
+  Alcotest.test_case "global let mut parses as mutable (is_mutable=true)" `Quick (fun () ->
+    match parse "let mut g: i32 = 0;" with
+    | [Ast.LetDef ("g", Some Ast.TypeI32, Some _, None, true)] -> ()
+    | _ -> Alcotest.fail "expected is_mutable=true"
+  );
+
+  Alcotest.test_case "global let mut with align(N) parses" `Quick (fun () ->
+    match parse "let mut buf: [u8; 16] align(64);" with
+    | [Ast.LetDef ("buf", Some (Ast.TypeArray (Ast.TypeU8, 16)), None, Some 64, true)] -> ()
+    | _ -> Alcotest.fail "expected LetDef with is_mutable=true and align 64"
+  );
+
+  Alcotest.test_case "array size via named compile-time constant resolves" `Quick (fun () ->
+    match parse "let N: i32 = 4; let ring: [u8; N];" with
+    | [Ast.LetDef _; Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 4)), None, None, false)] -> ()
+    | _ -> Alcotest.fail "expected array size resolved to 4"
+  );
+
+  Alcotest.test_case "array size referencing unknown identifier is a syntax error" `Quick (fun () ->
+    match parse "let ring: [u8; UNDEFINED];" with
+    | _ -> Alcotest.fail "expected an error, but parsing succeeded"
+    | exception Types.TypeError (_, msg) ->
+        Alcotest.(check bool) "mentions the unknown name" true
+          (let n = String.length "UNDEFINED" and m = String.length msg in
+           let rec scan i = i + n <= m && (String.sub msg i n = "UNDEFINED" || scan (i + 1)) in
+           scan 0)
+  );
+
+  Alcotest.test_case "array size referencing a mutable global is a syntax error" `Quick (fun () ->
+    match parse "let mut N: i32 = 4; let ring: [u8; N];" with
+    | _ -> Alcotest.fail "expected an error, but parsing succeeded"
+    | exception Types.TypeError _ -> ()
   );
 
   Alcotest.test_case "return statement" `Quick (fun () ->
@@ -228,7 +269,7 @@ let parser_tests = [
     let prog = parse "let x = 0; fn f() {} fn g() i32 { return 1; }" in
     Alcotest.(check int) "item count" 3 (List.length prog);
     (match List.nth prog 0 with
-     | Ast.LetDef ("x", _, _, _) -> ()
+     | Ast.LetDef ("x", _, _, _, _) -> ()
      | _ -> Alcotest.fail "first item should be LetDef x");
     (match List.nth prog 1 with
      | Ast.FuncDef { name = "f"; _ } -> ()
@@ -262,7 +303,7 @@ let parser_tests = [
 
   Alcotest.test_case "bare io type in global let parses" `Quick (fun () ->
     match parse "let flag: io i32;" with
-    | [Ast.LetDef (_, Some t, None, _)] ->
+    | [Ast.LetDef (_, Some t, None, _, _)] ->
         Alcotest.check type_t "type is io i32" (Ast.TypeIo Ast.TypeI32) t
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1099,7 +1140,7 @@ let infer_tests = [
   );
 
   Alcotest.test_case "addrof io i32 global yields *io i32" `Quick (fun () ->
-    let pt = infer "let flag: io i32;\nfn f() { let p: *io i32 = &flag; }" in
+    let pt = infer "let mut flag: io i32;\nfn f() { let p: *io i32 = &flag; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "p has type *io i32"
       (Ast.TypePtr (Ast.TypeIo Ast.TypeI32))
@@ -1107,13 +1148,13 @@ let infer_tests = [
   );
 
   Alcotest.test_case "assign i32 to io i32 global type-checks" `Quick
-    (expect_ok "let flag: io i32;\nfn f() { flag = 1; }");
+    (expect_ok "let mut flag: io i32;\nfn f() { flag = 1; }");
 
   Alcotest.test_case "io i32 global in comparison type-checks" `Quick
-    (expect_ok "let flag: io i32;\nfn f() i32 { if (flag == 0) { return 1; } return 0; }");
+    (expect_ok "let mut flag: io i32;\nfn f() i32 { if (flag == 0) { return 1; } return 0; }");
 
   Alcotest.test_case "io i32 struct field type-checks" `Quick
-    (expect_ok "struct S { done: io i32; }\nlet s: S;\nfn f() { s.done = 1; }");
+    (expect_ok "struct S { done: io i32; }\nlet mut s: S;\nfn f() { s.done = 1; }");
 
   Alcotest.test_case "deref non-pointer is a type error" `Quick
     (expect_type_error "cannot unify"
@@ -1210,7 +1251,7 @@ let infer_tests = [
                 fn f() { let h: fn() -> void = foo; h(); }");
 
   Alcotest.test_case "fn pointer stored in global array type-checks" `Quick
-    (expect_ok "let handlers: [fn() -> void; 4];
+    (expect_ok "let mut handlers: [fn() -> void; 4];
                 fn f(h: fn() -> void) { handlers[0] = h; }");
 
   Alcotest.test_case "fn pointer argument count mismatch is a type error" `Quick
@@ -1235,7 +1276,7 @@ let infer_tests = [
 
   Alcotest.test_case "global struct variable type-checks" `Quick
     (expect_ok "struct Point { x: i32; y: i32; }
-                let g: Point;
+                let mut g: Point;
                 fn f() { g.x = 10; g.y = 20; }");
 
   Alcotest.test_case "struct field u8 type type-checks" `Quick
@@ -1359,7 +1400,7 @@ let infer_tests = [
 
   Alcotest.test_case "constant OOB on global array is a compile error" `Quick
     (expect_type_error "out of bounds"
-       "let buf: [u8; 8]; fn f() u8 { return buf[8]; }");
+       "let mut buf: [u8; 8]; fn f() u8 { return buf[8]; }");
 
   (* -- Bounds check for char arrays ----------------------------------- *)
 
@@ -1384,7 +1425,7 @@ let infer_tests = [
 
   Alcotest.test_case "constant OOB write on global i32 array is a compile error" `Quick
     (expect_type_error "out of bounds"
-       "let buf: [i32; 4]; fn f() { buf[4] = 0; }");
+       "let mut buf: [i32; 4]; fn f() { buf[4] = 0; }");
 
   (* -- OOB in expression context ----------------------------------------- *)
 
@@ -1474,19 +1515,19 @@ let infer_tests = [
 
   Alcotest.test_case "{0..<8}%8 can index [u8;8] without bounds check" `Quick
     (expect_ok
-      "let buf: [u8; 8]; \
+      "let mut buf: [u8; 8]; \
        fn f(i: {0..<8}) { buf[i % 8] = 'X'; }");
 
   (* -- Step 3.4: Bounds check elision (global array + TypeRefined index) -- *)
 
   Alcotest.test_case "refined index on global array compiles" `Quick
     (expect_ok
-      "let buf: [u8; 8]; \
+      "let mut buf: [u8; 8]; \
        fn f(i: {0..<8}) { buf[i] = 'X'; }");
 
   Alcotest.test_case "refined pair write (i and i+1) compiles" `Quick
     (expect_ok
-      "let buf: [u8; 8]; \
+      "let mut buf: [u8; 8]; \
        fn f(i: {0..<7}) { buf[i] = 'A'; buf[i+1] = 'B'; }");
 
   Alcotest.test_case "refined arithmetic range mismatch caught at return" `Quick
@@ -1495,20 +1536,20 @@ let infer_tests = [
 
   Alcotest.test_case "non-proven index (overflow range) still compiles" `Quick
     (expect_ok
-      "let buf: [u8; 8]; \
+      "let mut buf: [u8; 8]; \
        fn f(i: {0..<8}) { buf[i+1] = 'Z'; }");
 
   (* -- Step 3.5: Type narrowing via if-condition ------------------------------- *)
 
   Alcotest.test_case "if (v>=0 && v<8) narrows v to {0..<8}" `Quick
     (expect_ok
-      "let buf: [u8; 8]; \
+      "let mut buf: [u8; 8]; \
        fn foo(i: {0..<8}) {} \
        fn f(v: i32) { if (v >= 0 && v < 8) { foo(v); } }");
 
   Alcotest.test_case "if (v>=0 && v<8) allows buf[v] write" `Quick
     (expect_ok
-      "let buf: [u8; 8]; \
+      "let mut buf: [u8; 8]; \
        fn f(v: i32) { if (v >= 0 && v < 8) { buf[v] = 'X'; } }");
 
   Alcotest.test_case "outside if block v remains i32 (no escape)" `Quick
@@ -1543,7 +1584,7 @@ let infer_tests = [
 
   Alcotest.test_case "for loop variable has refined type (literal bounds)" `Quick
     (fun () ->
-      let pt = infer "let buf: [u8; 8]; \
+      let pt = infer "let mut buf: [u8; 8]; \
                       fn f() { for i in 0..<8 { buf[i] = 'X'; } }" in
       (* buf[i] should compile without error: i:{0..<8} covers [u8;8] *)
       ignore pt);
@@ -1563,7 +1604,7 @@ let infer_tests = [
 
   Alcotest.test_case "nested for loops compile" `Quick
     (expect_ok
-      "let buf: [u8; 4]; \
+      "let mut buf: [u8; 4]; \
        fn f() { for i in 0..<4 { buf[i] = 'A'; } \
                 for i in 0..<4 { buf[i] = 'B'; } }");
 
@@ -1670,28 +1711,59 @@ let infer_tests = [
      fn f(h: *Hdr) -> u8 { return h.a; }");
 
   Alcotest.test_case "usize annotation type-checks" `Quick
-    (expect_ok "let g: u8; fn f() { let x: usize = 0; }");
+    (expect_ok "let mut g: u8; fn f() { let x: usize = 0; }");
 
   Alcotest.test_case "pointer as usize type-checks" `Quick
-    (expect_ok "let g: u8; fn f() { let p: *u8 = &g; let x: usize = p as usize; }");
+    (expect_ok "let mut g: u8; fn f() { let p: *u8 = &g; let x: usize = p as usize; }");
 
   Alcotest.test_case "usize as pointer type-checks" `Quick
-    (expect_ok "let g: u8; fn f() { let a: usize = 0x09000000; let p: *u8 = a as *u8; }");
+    (expect_ok "let mut g: u8; fn f() { let a: usize = 0x09000000; let p: *u8 = a as *u8; }");
 
   Alcotest.test_case "usize arithmetic type-checks" `Quick
-    (expect_ok "let g: u8;
+    (expect_ok "let mut g: u8;
      fn f() { let a: usize = (&g) as usize; let b: usize = a & 63; let c: usize = b + 1; }");
 
   Alcotest.test_case "pointer as i32 is a type error" `Quick
     (expect_type_error "cannot cast pointer"
-       "let g: u8; fn f() { let p: *u8 = &g; let x: i32 = p as i32; }");
+       "let mut g: u8; fn f() { let p: *u8 = &g; let x: i32 = p as i32; }");
 
   Alcotest.test_case "pointer as u64 is a type error" `Quick
     (expect_type_error "cannot cast pointer"
-       "let g: u8; fn f() { let p: *u8 = &g; let x: u64 = p as u64; }");
+       "let mut g: u8; fn f() { let p: *u8 = &g; let x: u64 = p as u64; }");
 
   Alcotest.test_case "pointer as usize then i32 is ok" `Quick
-    (expect_ok "let g: u8; fn f() { let p: *u8 = &g; let x: i32 = (p as usize) as i32; }");
+    (expect_ok "let mut g: u8; fn f() { let p: *u8 = &g; let x: i32 = (p as usize) as i32; }");
+
+  (* -- Global let/let mut mutability ------------------------------------- *)
+
+  Alcotest.test_case "reassigning an immutable global is a type error" `Quick
+    (expect_type_error "cannot assign to immutable variable"
+       "let N: i32 = 4; fn f() { N = 5; }");
+
+  Alcotest.test_case "taking the address of an immutable global is a type error" `Quick
+    (expect_type_error "cannot take address of immutable variable"
+       "let N: i32 = 4; fn f() { let p: *i32 = &N; }");
+
+  Alcotest.test_case "immutable global without an initializer is a type error" `Quick
+    (expect_type_error "must have an initializer"
+       "let N: i32;");
+
+  Alcotest.test_case "mutable global can be reassigned" `Quick
+    (expect_ok "let mut g: i32 = 0; fn f() { g = 5; }");
+
+  Alcotest.test_case "mutable global can have its address taken" `Quick
+    (expect_ok "let mut g: i32 = 0; fn f() { let p: *i32 = &g; }");
+
+  Alcotest.test_case "array size via named constant type-checks like a literal" `Quick
+    (expect_ok "let QUEUE_SIZE: i32 = 4;
+                let mut ring: [u8; QUEUE_SIZE];
+                fn f() { ring[3] = 1; }");
+
+  Alcotest.test_case "array size via named constant still bounds-checks" `Quick
+    (expect_type_error "out of bounds"
+       "let QUEUE_SIZE: i32 = 4;
+        let mut ring: [u8; QUEUE_SIZE];
+        fn f() { ring[4] = 1; }");
 
 ]
 

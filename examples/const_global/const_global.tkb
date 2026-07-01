@@ -1,0 +1,36 @@
+// Demo of global `let` (compile-time constant) vs `let mut` (variable), and
+// of using a named constant as an array size.
+//
+// A plain global `let` is now an immutable compile-time constant, matching
+// local variable semantics (`let` = immutable, `let mut` = variable).
+// Reassigning it or taking its address is a compile error -- see
+// examples/const_global_wrong/ for that case.
+//
+// QUEUE_SIZE must be declared with a literal integer initializer, and it
+// must appear (textually, in the concatenated source) before its use as an
+// array size below. No forward references, no constant folding -- only a
+// bare literal initializer is recognized.
+
+let QUEUE_SIZE: i32 = 4;
+
+// [i32; QUEUE_SIZE] -- resolved to [i32; 4] at parse time.
+let mut ring: [i32; QUEUE_SIZE];
+
+fn fill() {
+    for i in 0..<QUEUE_SIZE {
+        ring[i] = i * 10;
+    }
+}
+
+fn main() {
+    fill();
+    uart_puts("QUEUE_SIZE = ");
+    uart_print_uint(QUEUE_SIZE);
+    uart_puts("\r\n");
+    for i in 0..<QUEUE_SIZE {
+        uart_print_uint(ring[i]);
+        uart_puts(" ");
+    }
+    uart_puts("\r\n");
+    uart_puts("done\r\n");
+}

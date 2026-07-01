@@ -13,10 +13,10 @@ struct SchedState {
     tcb_sp:       [usize; 3];
 }
 
-let sched: SchedState = {3, 0, 6, 0, 0, {0, 0, 0}, {0, 0, 0}};
+let mut sched: SchedState = {3, 0, 6, 0, 0, {0, 0, 0}, {0, 0, 0}};
 
-let stack_a: [u8; 4096];
-let stack_b: [u8; 4096];
+let mut stack_a: [u8; 4096];
+let mut stack_b: [u8; 4096];
 
 fn irq_dispatch(frame_sp: usize) -> usize {
     let id: i32 = *gic.cpu_iar;

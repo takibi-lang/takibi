@@ -19,7 +19,7 @@ struct MsgQueue {
     cap:       i32;
 }
 
-let mq: MsgQueue = {1, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 4};
+let mut mq: MsgQueue = {1, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 4};
 
 fn mq_send(val: i32) {
     mutex_lock(&mq.mutex);
@@ -48,7 +48,7 @@ fn mq_recv() -> i32 {
     return val;
 }
 
-let sched: SchedState = {3, 0, {0, 0, 0}};
+let mut sched: SchedState = {3, 0, {0, 0, 0}};
 
 fn irq_dispatch(frame_sp: usize) -> usize {
     let id: i32 = *gic.cpu_iar;
@@ -65,12 +65,12 @@ fn irq_dispatch(frame_sp: usize) -> usize {
     return frame_sp;
 }
 
-let producer_done: io i32 = 0;
-let consumer_done: io i32 = 0;
-let sched_done:    io i32 = 0;
+let mut producer_done: io i32 = 0;
+let mut consumer_done: io i32 = 0;
+let mut sched_done:    io i32 = 0;
 
-let stack_a: [u8; 4096];
-let stack_b: [u8; 4096];
+let mut stack_a: [u8; 4096];
+let mut stack_b: [u8; 4096];
 
 fn task_producer() {
     for i in 0..<5 {

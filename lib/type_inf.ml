@@ -661,9 +661,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.StructDef _ -> m
     | Ast.EnumDef _   -> m
   ) StringMap.empty prog in
-  (* Global variables are always mutable (true) *)
+  (* Global mutability: plain `let` = immutable compile-time constant, `let mut` = variable.
+     Reuses the same tyenv-based mutability check as local variables (Assign/AddrOf). *)
   let genv = List.fold_left (fun m -> function
-    | Ast.LetDef (name, ty_opt, _, _) -> StringMap.add name (of_ast_opt ty_opt, true) m
+    | Ast.LetDef (name, ty_opt, _, _, is_mutable) -> StringMap.add name (of_ast_opt ty_opt, is_mutable) m
     | Ast.FuncDef _                -> m
     | Ast.ExternFuncDef _          -> m
     | Ast.StructDef _              -> m
@@ -671,10 +672,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   ) StringMap.empty prog in
   (* Pass 2: check global initializers *)
   List.iter (function
-    | Ast.LetDef (name, _, expr_opt, _) ->
+    | Ast.LetDef (name, _, expr_opt, _, is_mutable) ->
         let (ty, _) = StringMap.find name genv in
         (match expr_opt with
-         | None -> ()
+         | None ->
+             if not is_mutable then
+               raise (TypeError (Lexing.dummy_pos,
+                 Printf.sprintf "immutable global '%s' must have an initializer; use 'let mut' for uninitialized globals" name))
          | Some { desc = Ast.StructLit exprs; loc } ->
              (match repr ty with
               | (TStruct _ | TArray _) as expected ->

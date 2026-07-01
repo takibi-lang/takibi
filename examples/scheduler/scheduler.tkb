@@ -8,7 +8,7 @@ struct Scheduler {
     active:     i32;
 }
 
-let sched: Scheduler;
+let mut sched: Scheduler;
 
 fn add_task(f: fn() -> void) {
     let t: *fn() -> void = sched.tasks;
@@ -30,7 +30,7 @@ fn scheduler_run() {
     }
 }
 
-let a_step: i32 = 0;
+let mut a_step: i32 = 0;
 
 fn task_a() {
     if (a_step < 3) {
@@ -44,7 +44,7 @@ fn task_a() {
     }
 }
 
-let b_step: i32 = 0;
+let mut b_step: i32 = 0;
 
 fn task_b() {
     if (b_step < 3) {

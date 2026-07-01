@@ -11,7 +11,7 @@
 //
 // QEMU expected output: ABCDEFGH\r\n
 
-let buf: [u8; 8];
+let mut buf: [u8; 8];
 
 // Function requiring a refined-type argument. Without narrowing, i32 cannot be passed directly.
 fn write_entry(i: {0..<8}, c: u8) {

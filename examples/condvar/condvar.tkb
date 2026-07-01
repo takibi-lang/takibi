@@ -15,19 +15,19 @@ struct Channel {
     item_count: i32;
 }
 
-let ch: Channel = {1, 0, 0, 0, 0};
+let mut ch: Channel = {1, 0, 0, 0, 0};
 
-let produced:    i32 = 0;
-let consumed:    i32 = 0;
+let mut produced:    i32 = 0;
+let mut consumed:    i32 = 0;
 
-let task_a_done: io i32 = 0;
-let task_b_done: io i32 = 0;
-let sched_done:  io i32 = 0;
+let mut task_a_done: io i32 = 0;
+let mut task_b_done: io i32 = 0;
+let mut sched_done:  io i32 = 0;
 
-let sched: SchedState = {3, 0, {0, 0, 0}};
+let mut sched: SchedState = {3, 0, {0, 0, 0}};
 
-let stack_a: [u8; 4096];
-let stack_b: [u8; 4096];
+let mut stack_a: [u8; 4096];
+let mut stack_b: [u8; 4096];
 
 fn irq_dispatch(frame_sp: usize) -> usize {
     let id: i32 = *gic.cpu_iar;

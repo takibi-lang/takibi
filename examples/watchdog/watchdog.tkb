@@ -22,15 +22,15 @@ struct WdtState {
     done:      io i32;
 }
 
-let sched: SchedState = {3, 0, {0, 0, 0}};
+let mut sched: SchedState = {3, 0, {0, 0, 0}};
 
 // deadline[0]=0  (main is not monitored)
 // deadline[1]=20 (task_healthy keeps kicking, so no timeout)
 // deadline[2]=12 (task_hung stops kicking, so it times out at ~12 ticks)
-let wdt: WdtState = {0, {0, 0, 0}, {0, 20, 12}, 0};
+let mut wdt: WdtState = {0, {0, 0, 0}, {0, 20, 12}, 0};
 
-let hung_fired: io i32 = 0; // timeout detection flag
-let hung_task:  io i32 = 0; // ID of the timed-out task (valid only when hung_fired == 1)
+let mut hung_fired: io i32 = 0; // timeout detection flag
+let mut hung_task:  io i32 = 0; // ID of the timed-out task (valid only when hung_fired == 1)
 
 fn wdt_kick(task_id: i32) {
     let lk: *i32 = wdt.last_kick;
@@ -86,8 +86,8 @@ fn task_hung() {
     while (*pd == 0) {}
 }
 
-let stack_a: [u8; 4096];
-let stack_b: [u8; 4096];
+let mut stack_a: [u8; 4096];
+let mut stack_b: [u8; 4096];
 
 fn main() {
     uart_puts("watchdog start\r\n");

@@ -27,8 +27,9 @@ The finished form of code is when index ranges are pinned at the type level usin
 - Statements:
   - `let x = e` / `let x: T = e` -- immutable variable declaration (initial value required, no reassignment)
   - `let mut x = e` / `let mut x: T = e` -- mutable variable declaration (reassignment allowed)
-  - `let x: T;` -- uninitialized global variable declaration (global scope only)
-  - `let x: T align(N);` -- global variable with N-byte alignment (N must be a power of two). Emits `set_alignment N` on the LLVM global. Use for DMA descriptor rings (`align(4096)`), cache-line buffers (`align(64)`), etc. Optional initializer: `let x: T align(N) = e;`. Local variable alignment is not supported.
+  - Global scope mirrors this: plain `let NAME: T = e;` is an immutable compile-time constant (reassignment and `&NAME` are compile errors, and it must have an initializer); `let mut NAME: T = e;` is a mutable global variable. `let mut x: T;` (no initializer) is allowed for global scope only, relying on BSS zero-clear.
+  - `[T; N]` array size `N` may be a literal integer, or the name of an immutable global declared earlier (in the concatenated source) with a bare literal integer initializer, e.g. `let QUEUE_SIZE: i32 = 16; let mut ring: [T; QUEUE_SIZE];`. Resolved entirely in the parser (see "Array-Size Constants" below); no forward references, no constant folding.
+  - `let mut x: T align(N);` -- global variable with N-byte alignment (N must be a power of two). Emits `set_alignment N` on the LLVM global. Use for DMA descriptor rings (`align(4096)`), cache-line buffers (`align(64)`), etc. Optional initializer: `let mut x: T align(N) = e;` (or plain `let x: T align(N) = e;` for an immutable aligned constant). Local variable alignment is not supported.
   - `while`, `return`, assignment (`x = e`), pointer-deref assignment (`*p = v`)
   - `break` -- exits the innermost `while` or `for` loop immediately. Compile error outside a loop.
   - `continue` -- skips to the next iteration of the innermost loop. For `for`, the counter is incremented first. Compile error outside a loop.
@@ -233,14 +234,63 @@ Files changed when `let x: T align(N)` was added:
 
 **Design note**: alignment is a property of a specific variable instance, not of the type.
 `VirtqDesc` structs don't inherently need 4096B alignment -- only the descriptor ring array does.
-Type-level alignment (`struct Name align(N) { ... }`) is a separate, not-yet-implemented feature.
+Type-level alignment (`struct Name align(N) { ... }`) is a separate feature -- see
+"Packed Struct and Struct Type-Level Alignment" below.
 
 **Syntax**:
 ```
-let buf: [u8; 4096] align(4096);          // no initializer
-let reg: i32 align(64) = 0;              // with initializer
+let mut buf: [u8; 4096] align(4096);      // no initializer (must be `mut`: no init requires mutability)
+let reg: i32 align(64) = 0;               // immutable, with initializer
+let mut counter: i32 align(64) = 0;       // mutable, with initializer
 ```
 N must be a power of two (not enforced by the compiler; LLVM will assert at IR generation time).
+
+### Global let / let mut and Array-Size Constants (7 Files)
+
+Global scope now distinguishes immutable constants from mutable variables, mirroring local
+variable semantics (`let` = immutable, `let mut` = variable), and a named immutable constant
+with a literal initializer can be used as an array size.
+
+Files changed:
+1. `lib/ast.ml` -- `LetDef` gains a 5th field `bool` (`is_mutable`); `TypeArray`'s `int` size is
+   unchanged (array-size constants are resolved entirely inside the parser, see below).
+2. `lib/const_env.ml` (new) -- `(string, int) Hashtbl.t` mapping constant name -> value, populated
+   incrementally as the parser consumes top-level items left to right. `reset ()` clears it (called
+   once per compiler invocation in `main.ml`, and once per `parse` call in `test_takibi.ml` for test
+   isolation). `define_if_literal is_mutable name init_opt` records `name` only when `is_mutable =
+   false` and `init_opt` is a bare `IntLit` (no forward references, no constant folding).
+3. `lib/parser.mly` -- `%inline mut_flag` nonterminal (`MUT` -> `true`, empty -> `false`) threaded
+   through all `item`-level `LetDef` productions. The plain (non-`align`) production calls
+   `Const_env.define_if_literal`. New `array_size` nonterminal used in the `[T; N]` grammar
+   production: `INT` is used directly; `IDENT` is looked up via `Const_env.find`, raising
+   `Types.TypeError` if not found (e.g. undeclared, declared later in the file, or declared with
+   `mut`/a non-literal initializer).
+4. `lib/type_inf.ml` -- `LetDef` patterns updated to 5-tuple. `genv` now stores the real
+   `is_mutable` flag instead of a hardcoded `true`. Because `Assign`/`AddrOf` already key their
+   mutability checks off the shared `tyenv` (used for both locals and globals), `&const_global` and
+   `const_global = ...` become compile errors automatically, with no new enforcement code. Pass 2
+   additionally rejects an immutable global with no initializer.
+5. `lib/llvm_gen.ml` -- `LetDef` patterns updated to 5-tuple; `gen_global` takes an `is_mutable`
+   parameter and calls `set_global_constant true` on the LLVM global when `false`.
+6. `bin/main.ml` -- calls `Const_env.reset ()` once before parsing the (possibly multi-file,
+   concatenated) input.
+7. `test/test_takibi.ml` -- `parse` helper calls `Const_env.reset ()` first (test isolation); all
+   `LetDef` patterns updated to 5-tuple.
+
+**Why resolve array-size constants in the parser, not via a `Types.ty`-level pass**: `Ast.TypeArray`
+is pattern-matched directly (not via `Types.ty`) in roughly 15 places across `llvm_gen.ml` (locals,
+globals, struct fields, `StructLit` codegen, tail-padding, etc.). Resolving the constant reference to
+a plain `int` at parse time means `TypeArray` itself never changes shape, so none of those call sites
+needed touching. The trade-off is that the constant must be declared textually before its use (no
+forward references) -- acceptable since the feature is scoped to simple "declare a size, use it
+below" readability, not a general compile-time-constant system.
+
+**Example**:
+```takibi
+let QUEUE_SIZE: i32 = 4;              // immutable constant; &QUEUE_SIZE and QUEUE_SIZE = ... are compile errors
+let mut ring: [i32; QUEUE_SIZE];      // resolved to [i32; 4] at parse time
+```
+See `examples/const_global/` (valid usage) and `examples/const_global_wrong/` (compile-error demo).
 
 ### Function Pointer Types Span 5 Files
 Files changed when the `fn(T...) -> R` type was added:

@@ -4,9 +4,9 @@
 struct IrqTable {
     handlers: [fn() -> void; 64];
 }
-let irq_tbl:  IrqTable;
+let mut irq_tbl:  IrqTable;
 let uart_imsc: *io i32 = 0x09000038; // PL011 IMSC: interrupt mask register (bit4=RXIM)
-let irq_done:  io i32;
+let mut irq_done:  io i32;
 
 fn register_irq(id: i32, h: fn() -> void) {
     let t: *fn() -> void = irq_tbl.handlers;

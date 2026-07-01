@@ -50,13 +50,19 @@ items:
   | item { [$1] }
   | item items { $1 :: $2 }
 
+%inline mut_flag:
+  | /* empty */ { false }
+  | MUT         { true }
+
 item:
   | func_def { FuncDef $1 }
-  | LET IDENT let_rhs SEMI { LetDef ($2, fst $3, snd $3, None) }
-  | LET IDENT COLON type_expr ALIGN LPAREN INT RPAREN SEMI
-    { LetDef ($2, Some $4, None, Some $7) }
-  | LET IDENT COLON type_expr ALIGN LPAREN INT RPAREN ASSIGN expr SEMI
-    { LetDef ($2, Some $4, Some $10, Some $7) }
+  | LET m = mut_flag IDENT let_rhs SEMI
+    { Const_env.define_if_literal m $3 (snd $4);
+      LetDef ($3, fst $4, snd $4, None, m) }
+  | LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN INT RPAREN SEMI
+    { LetDef ($3, Some $5, None, Some $8, m) }
+  | LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN INT RPAREN ASSIGN expr SEMI
+    { LetDef ($3, Some $5, Some $11, Some $8, m) }
   | EXTERN FN IDENT LPAREN params RPAREN SEMI
     { ExternFuncDef ($3, $5, None) }
   | EXTERN FN IDENT LPAREN params RPAREN ARROW type_expr SEMI
@@ -268,10 +274,24 @@ base_type_expr:
   | USIZE_TYPE { TypeUsize }
   | IO         type_expr { TypeIo  $2 }
   | TIMES      type_expr { TypePtr $2 }
-  | LBRACKET t = type_expr SEMI n = INT RBRACKET { TypeArray (t, n) }
+  | LBRACKET t = type_expr SEMI n = array_size RBRACKET { TypeArray (t, n) }
   | FN LPAREN fn_type_params RPAREN ARROW type_expr { TypeFn ($3, $6) }
   | FN LPAREN fn_type_params RPAREN                 { TypeFn ($3, TypeVoid) }
   | IDENT { TypeNamed $1 }
+
+(* Array size: a literal integer, or the name of a compile-time integer
+   constant declared earlier as an immutable global `let NAME: T = N;`. *)
+array_size:
+  | n = INT   { n }
+  | name = IDENT
+    { match Const_env.find name with
+      | Some n -> n
+      | None ->
+          raise (Types.TypeError ($symbolstartpos,
+            Printf.sprintf
+              "array size '%s' is not a known compile-time integer constant \
+               (declare it earlier as an immutable global `let %s: T = N;`)"
+              name name)) }
 
 (* type_expr: base_type_expr + TypeRefined. Used in unambiguous positions such as after : or -> *)
 type_expr:

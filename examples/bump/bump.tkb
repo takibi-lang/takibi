@@ -5,7 +5,7 @@ struct BumpAlloc {
     offset: i32;
 }
 
-let alloc: BumpAlloc;
+let mut alloc: BumpAlloc;
 
 fn bump_alloc(size: i32) -> *u8 {
     let result: *u8 = alloc.heap + alloc.offset;

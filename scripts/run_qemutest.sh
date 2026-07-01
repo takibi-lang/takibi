@@ -154,6 +154,7 @@ run_compile_error_test "match_nonexhaustive_open" examples/match_nonexhaustive_o
 run_compile_error_test "enum_cast_wrong_dst" examples/enum_cast_wrong_dst/enum_cast_wrong_dst.tkb examples/enum_cast_wrong_dst/enum_cast_wrong_dst.error
 run_compile_error_test "enum_cast_wrong_src" examples/enum_cast_wrong_src/enum_cast_wrong_src.tkb examples/enum_cast_wrong_src/enum_cast_wrong_src.error
 run_compile_error_test "ptr_cast_wrong"      examples/ptr_cast_wrong/ptr_cast_wrong.tkb           examples/ptr_cast_wrong/ptr_cast_wrong.error
+run_compile_error_test "const_global_wrong"  examples/const_global_wrong/const_global_wrong.tkb   examples/const_global_wrong/const_global_wrong.error
 
 echo ""
 echo "Running QEMU integration tests..."
@@ -197,6 +198,7 @@ run_test "bitops"        examples/bitops/kernel.elf        examples/bitops/bitop
 run_test "align"         examples/align/kernel.elf         examples/align/align.expected
 run_test "packed"        examples/packed/kernel.elf        examples/packed/packed.expected
 run_test "struct_align"  examples/struct_align/kernel.elf  examples/struct_align/struct_align.expected
+run_test "const_global"  examples/const_global/kernel.elf  examples/const_global/const_global.expected
 
 echo ""
 echo "Running no-trap checks (brk must be zero in these kernels)..."

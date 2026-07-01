@@ -12,8 +12,8 @@
 //   0x00000000   buf64 address is 64-byte aligned (lower 6 bits = 0)
 //   0x00000000   buf4096 address is 4096-byte aligned (lower 12 bits = 0)
 
-let buf64:   [u8; 64]   align(64);
-let buf4096: [u8; 4096] align(4096);
+let mut buf64:   [u8; 64]   align(64);
+let mut buf4096: [u8; 4096] align(4096);
 
 fn main() -> i32 {
     let addr64:   usize = (&buf64)   as usize;

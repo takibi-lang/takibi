@@ -2,7 +2,7 @@
 // Casting a pointer directly to a fixed-width integer (i32, u64, etc.) is
 // rejected because it silently truncates the 64-bit address on AArch64.
 // Use (ptr as usize) as i32 to make the truncation explicit.
-let g: u8;
+let mut g: u8;
 fn main() {
     let p: *u8 = &g;
     let addr: i32 = p as i32;
