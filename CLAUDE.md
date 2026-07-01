@@ -80,6 +80,8 @@ make clean          # remove generated artifacts
 ```
 lib/
   ast.ml          -- AST definitions (includes TypePtr, TypeArray, TypeFn, Deref, AddrOf, AssignDeref, Cast)
+  const_env.ml    -- parser-time table of compile-time integer constants (immutable globals with a literal
+                     initializer), used to resolve named array sizes like [T; QUEUE_SIZE]
   lexer.mll       -- ocamllex (includes hex literals, & token, as keyword, ^ token, -> token, void keyword)
   parser.mly      -- Menhir (includes pointer types, array types, function pointer types, prefix * / & / unary -, as cast)
   types.ml        -- internal type (ty) + HM type inference output types + StringMap
@@ -477,6 +479,28 @@ GENERIC_KERNELS := (all others)
 ```
 
 When adding a new example that needs timer or semaphore support, add it to the appropriate `*_OBJS` and `*_KERNELS` variable in the Makefile. No new `*_asm.S` files should be created; place any new assembly in `examples/common/` and add a build rule there.
+
+## Known Limitations / Deferred Design Decisions
+
+- **`uart_print_uint` / `print_uint` take `i32`, not `u32`** (`examples/common/print.tkb`): the name promises unsigned
+  semantics but the parameter type does not enforce non-negativity, and `%`/`/` on `i32` use signed `srem`/`sdiv`. A
+  genuinely negative argument prints garbage (e.g. `-5 % 10 = -5` in LLVM, not the mathematical `5`). No current
+  caller passes a negative value, so this has not manifested as a bug. Fixing the type to `u32` is a mechanical but
+  wide-reaching change (every call site needs an explicit `i32 -> u32` cast, similar in scope to the global
+  `let`/`let mut` migration). **Deferred**: the better fix is likely function overloading (same name, dispatch on
+  parameter type -- `print(n: u32)` and `print(n: i32)` coexisting), so a `u32`-only rename now would likely be
+  reshaped again once that lands. Revisit when a concrete number-to-string design is undertaken; a `printf`-style
+  variadic/format-string approach was explicitly ruled out (runtime format parsing, no `void*`/generics, and a
+  security-sensitive parser this project doesn't want in a bare-metal image).
+- **No function overloading**: only one definition per function name is allowed (`fenv` is keyed by bare name). A
+  `u32`/`i32`/`u8` family of `print`-like functions would need this. Estimated to be a moderate addition: `fenv`
+  becomes name -> list of signatures, `Call` picks the best match by argument types, and `llvm_gen.ml` needs to
+  mangle LLVM symbol names per overload (today one takibi name maps to exactly one LLVM function symbol).
+- **`isize` (signed pointer-sized integer) is not implemented** -- tracked as a GitHub issue, not urgent. Needed for
+  `ptr - ptr` (pointer difference), which is itself unimplemented. Neither is required for the planned Ethernet L2
+  echo server (`ptr + i32` / `ptr - i32` already work for descriptor-ring indexing).
+- **`sizeof(T)` cannot be used as an array size** (`[T; sizeof(Foo)]`) -- see the `sizeof(T)` section above for why
+  (parser-time vs. codegen-time resolution mismatch) and what combining them would require.
 
 ## QEMU Bare-Metal (AArch64)
 
