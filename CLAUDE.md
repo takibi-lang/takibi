@@ -717,6 +717,63 @@ increasingly-integrated steps instead:
   script always runs everything and reports the full failure list at the
   end instead.
 
+### TCP: examples/tcp_parse (parse-only) + examples/tcp_echo (grown incrementally)
+
+TCP is being split differently than IPv4/ICMP was, because TCP itself
+splits into two genuinely different kinds of step:
+
+- **`examples/tcp_parse`** is a one-shot separate example, exactly
+  mirroring `ip_parse`: canned buffers, no virtio-net, just field
+  extraction and checksum validation. This is a clean split because
+  header parsing is a self-contained concern independent of connection
+  state.
+- **`examples/tcp_echo`** (handshake -> data echo -> close) is deliberately
+  **one example grown incrementally across multiple sessions**, not a
+  separate example per stage. Reason: unlike ARP/ICMP (stateless,
+  one-frame-in-one-frame-out), TCP's stages are not independent -- you
+  cannot meaningfully test "data echo" without a connection that already
+  went through handshake, so a standalone "handshake-only" binary
+  wouldn't be a real artifact, just a subset of the final one. Regression
+  granularity is instead achieved by accumulating independent test
+  *functions* inside `scripts/tcp_echo_test.py`, one per stage, all
+  run against the same final kernel -- e.g. `test_handshake_only`,
+  `test_data_echo`, `test_close`. This mirrors `icmp_echo_test.py`'s
+  existing multi-function structure (`test_ping_us`,
+  `test_ping_other_stays_silent`, `test_corrupted_checksum_dropped`
+  already exist there for the same reason). Each function stays in the
+  suite permanently, so a future change that breaks handshake sequencing
+  but not data-echo behavior still fails specifically at
+  `test_handshake_only`.
+
+**TCP checksum needs a "pseudo-header"** (12 bytes: src IP, dst IP, a
+zero byte, protocol, TCP length) that is never actually transmitted but
+is included in the checksum computation, prepended to the TCP header+data.
+This doesn't fit `inet_checksum`'s single-contiguous-buffer signature, so
+`examples/common/inet_checksum.tkb` was split into `checksum_add(data,
+len, sum_in)` (accumulates an *unfolded* running sum, chainable across
+non-contiguous buffers) and `checksum_fold(sum)` (carries + one's
+complement, done once at the end) -- `inet_checksum` itself is now just
+`checksum_fold(checksum_add(data, len, 0))`, so `ip_parse`/`icmp_echo`
+needed no changes. The two-chunk chaining is valid per RFC 1071 because
+the pseudo-header is exactly 12 bytes (a whole number of 16-bit words),
+so only the *last* chunk (the actual TCP segment) can be odd-length and
+need padding -- see `checksum_add`'s comment.
+
+**`bytes_eq`/`bytes_copy`/`read_u16be`/`write_u16be` were extracted into
+`examples/common/netutil.tkb`** at this point too (previously duplicated
+verbatim in both `arp_reply.tkb` and `icmp_echo.tkb`) -- three call sites
+needing the same four helpers was the threshold where deduplication
+clearly paid for itself. Also added `read_u32be`/`write_u32be` for TCP's
+32-bit sequence/acknowledgment numbers, same big-endian-byte-by-byte
+reasoning as the 16-bit versions. Note `read_u32be` can produce a
+"negative" `i32` bit pattern for seq numbers >= `0x80000000` (i32 is
+signed) -- harmless for display (print via `uart_print_hex`, which shows
+the bit pattern regardless of sign, not `uart_print_uint`, which assumes
+non-negative) and harmless for the modular arithmetic TCP sequence
+numbers actually need, but worth remembering if a future step adds
+seq-number *comparisons* (`<`, `>`) -- those need wraparound-aware
+comparison logic, not a plain signed or unsigned `<`.
+
 ## Instructions for Claude Code
 
 - **Do not create git commits.** Only do so when the user explicitly requests it.

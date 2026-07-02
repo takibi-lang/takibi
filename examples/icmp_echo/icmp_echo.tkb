@@ -39,29 +39,8 @@ let PROTO_ICMP:        i32 = 1;
 let ICMP_ECHO_REQUEST: i32 = 8;
 let ICMP_ECHO_REPLY:   i32 = 0;
 
-fn bytes_eq(a: *u8, b: *u8, n: i32) -> i32 {
-    for i in 0..<n {
-        if (a[i] != b[i]) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-fn bytes_copy(dst: *u8, src: *u8, n: i32) {
-    for i in 0..<n {
-        dst[i] = src[i];
-    }
-}
-
-fn read_u16be(p: *u8) -> i32 {
-    return (p[0] as i32) * 256 + (p[1] as i32);
-}
-
-fn write_u16be(p: *u8, v: i32) {
-    p[0] = (v / 256) as u8;
-    p[1] = (v - (v / 256) * 256) as u8;
-}
+// bytes_eq/bytes_copy/read_u16be/write_u16be now live in
+// examples/common/netutil.tkb (shared with arp_reply, tcp_parse, tcp_echo).
 
 // Rewrites an ICMP echo request into a reply in place, and the enclosing
 // IPv4/Ethernet headers to match. Only called after the caller has already

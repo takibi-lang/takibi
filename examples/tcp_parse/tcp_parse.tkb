@@ -1,0 +1,132 @@
+// TCP header parsing and validation -- parse only, no reply, exactly the
+// same "canned buffer, no virtio-net" scope as examples/ip_parse. Two new
+// things TCP needs beyond IPv4/ICMP: the checksum covers a 12-byte
+// "pseudo-header" (src/dst IP + protocol + TCP length) that isn't
+// actually on the wire, and there are more bit-packed header fields
+// (data offset, six flag bits) worth printing individually.
+//
+// Real virtio-net RX/TX and connection state come later in
+// examples/tcp_echo, which reuses this parsing logic against live
+// packets -- see CLAUDE.md's IPv4/ICMP section for why parsing and
+// networking I/O are kept as separate steps.
+
+fn print_ip(p: *u8) {
+    uart_print_uint(p[0] as i32);
+    uart_putc('.');
+    uart_print_uint(p[1] as i32);
+    uart_putc('.');
+    uart_print_uint(p[2] as i32);
+    uart_putc('.');
+    uart_print_uint(p[3] as i32);
+}
+
+fn print_tcp_flags(flags: i32) {
+    let mut first: i32 = 1;
+    if ((flags & 0x02) != 0) {
+        uart_puts("SYN");
+        first = 0;
+    }
+    if ((flags & 0x10) != 0) {
+        if (first == 0) { uart_puts(","); }
+        uart_puts("ACK");
+        first = 0;
+    }
+    if ((flags & 0x08) != 0) {
+        if (first == 0) { uart_puts(","); }
+        uart_puts("PSH");
+        first = 0;
+    }
+    if ((flags & 0x01) != 0) {
+        if (first == 0) { uart_puts(","); }
+        uart_puts("FIN");
+        first = 0;
+    }
+    if ((flags & 0x04) != 0) {
+        if (first == 0) { uart_puts(","); }
+        uart_puts("RST");
+        first = 0;
+    }
+    if ((flags & 0x20) != 0) {
+        if (first == 0) { uart_puts(","); }
+        uart_puts("URG");
+        first = 0;
+    }
+    if (first == 1) {
+        uart_puts("(none)");
+    }
+}
+
+// ip: start of the IPv4 header. Assumes ip's own version/IHL/protocol/
+// checksum were already validated by the caller (mirrors ip_parse.tkb;
+// this function only handles the TCP layer).
+fn parse_tcp(ip: *u8, ihl: i32) {
+    let tcp: *u8 = ip + ihl;
+    let src_port: i32 = read_u16be(tcp);
+    let dst_port: i32 = read_u16be(tcp + 2);
+    let seq:      i32 = read_u32be(tcp + 4);
+    let ack:      i32 = read_u32be(tcp + 8);
+    let data_offset: i32 = ((tcp[12] as i32) >> 4) * 4;
+    let flags:    i32 = (tcp[13] as i32) & 0x3f;
+    let window:   i32 = read_u16be(tcp + 14);
+    let ip_total_len: i32 = read_u16be(ip + 2);
+    let tcp_len:  i32 = ip_total_len - ihl;
+
+    // TCP checksum covers the pseudo-header (src IP, dst IP, zero byte,
+    // protocol, TCP length) followed by the TCP segment itself (header +
+    // data) -- see examples/common/inet_checksum.tkb's checksum_add for
+    // why this needs two chained calls instead of one.
+    let mut pseudo: [u8; 12];
+    bytes_copy(pseudo as *u8, ip + 12, 4);      // src IP
+    bytes_copy((pseudo as *u8) + 4, ip + 16, 4); // dst IP
+    pseudo[8] = 0 as u8;
+    pseudo[9] = ip[9]; // protocol
+    write_u16be((pseudo as *u8) + 10, tcp_len);
+    let sum: i32 = checksum_add(pseudo as *u8, 12, 0);
+    let checksum: i32 = checksum_fold(checksum_add(tcp, tcp_len, sum));
+
+    uart_puts("TCP segment:\r\n");
+    uart_puts("  src_port:    "); uart_println_uint(src_port);
+    uart_puts("  dst_port:    "); uart_println_uint(dst_port);
+    uart_puts("  seq:         "); uart_println_hex(seq);
+    uart_puts("  ack:         "); uart_println_hex(ack);
+    uart_puts("  data_offset: "); uart_println_uint(data_offset);
+    uart_puts("  flags:       "); print_tcp_flags(flags); uart_puts("\r\n");
+    uart_puts("  window:      "); uart_println_uint(window);
+    uart_puts("  src_ip:      "); print_ip(ip + 12); uart_puts("\r\n");
+    uart_puts("  dst_ip:      "); print_ip(ip + 16); uart_puts("\r\n");
+    uart_puts("  checksum:    ");
+    if (checksum == 0) {
+        uart_puts("OK\r\n");
+    } else {
+        uart_puts("BAD\r\n");
+    }
+}
+
+fn main() {
+    // IPv4 header (20 bytes, no options) wrapping a TCP SYN segment (20
+    // bytes, no options): src_port=54321, dst_port=80, seq=1000, ack=0,
+    // flags=SYN, window=65535. Verified independently in Python (both the
+    // IP and TCP-with-pseudo-header checksums) before being committed
+    // here.
+    let mut pkt: [u8; 40];
+    pkt[0]  = 0x45 as u8; pkt[1]  = 0x00 as u8; pkt[2]  = 0x00 as u8; pkt[3]  = 0x28 as u8;
+    pkt[4]  = 0x00 as u8; pkt[5]  = 0x00 as u8; pkt[6]  = 0x00 as u8; pkt[7]  = 0x00 as u8;
+    pkt[8]  = 0x40 as u8; pkt[9]  = 0x06 as u8; pkt[10] = 0xf6 as u8; pkt[11] = 0x97 as u8;
+    pkt[12] = 0xc0 as u8; pkt[13] = 0x00 as u8; pkt[14] = 0x02 as u8; pkt[15] = 0x37 as u8;
+    pkt[16] = 0xc0 as u8; pkt[17] = 0x00 as u8; pkt[18] = 0x02 as u8; pkt[19] = 0x01 as u8;
+    pkt[20] = 0xd4 as u8; pkt[21] = 0x31 as u8; pkt[22] = 0x00 as u8; pkt[23] = 0x50 as u8;
+    pkt[24] = 0x00 as u8; pkt[25] = 0x00 as u8; pkt[26] = 0x03 as u8; pkt[27] = 0xe8 as u8;
+    pkt[28] = 0x00 as u8; pkt[29] = 0x00 as u8; pkt[30] = 0x00 as u8; pkt[31] = 0x00 as u8;
+    pkt[32] = 0x50 as u8; pkt[33] = 0x02 as u8; pkt[34] = 0xff as u8; pkt[35] = 0xff as u8;
+    pkt[36] = 0x53 as u8; pkt[37] = 0x40 as u8; pkt[38] = 0x00 as u8; pkt[39] = 0x00 as u8;
+
+    uart_puts("=== valid SYN packet ===\r\n");
+    parse_tcp(pkt as *u8, 20);
+
+    // Corrupt the TCP checksum field itself so it no longer matches --
+    // demonstrates detecting a corrupted/tampered segment.
+    pkt[36] = 0x00 as u8;
+    pkt[37] = 0x00 as u8;
+    uart_puts("=== corrupted packet (TCP checksum zeroed) ===\r\n");
+    parse_tcp(pkt as *u8, 20);
+}

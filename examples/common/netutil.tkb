@@ -1,0 +1,47 @@
+// Small byte-buffer helpers shared by the protocol examples
+// (arp_reply, icmp_echo, tcp_parse, tcp_echo). MAC/IP addresses and
+// multi-byte header fields are always handled as raw byte arrays rather
+// than native multi-byte integers -- see the read_u16be/write_u16be
+// comment below for why.
+
+fn bytes_eq(a: *u8, b: *u8, n: i32) -> i32 {
+    for i in 0..<n {
+        if (a[i] != b[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+fn bytes_copy(dst: *u8, src: *u8, n: i32) {
+    for i in 0..<n {
+        dst[i] = src[i];
+    }
+}
+
+// Manually composes/decomposes a big-endian 16-bit integer from individual
+// byte reads/writes, rather than loading/storing 2 bytes at once through a
+// cast pointer. Network fields are big-endian on the wire; this target is
+// little-endian; a raw multi-byte load would silently byte-reverse the
+// value. Doing it byte-by-byte sidesteps the issue regardless of target
+// endianness.
+fn read_u16be(p: *u8) -> i32 {
+    return (p[0] as i32) * 256 + (p[1] as i32);
+}
+
+fn write_u16be(p: *u8, v: i32) {
+    p[0] = (v / 256) as u8;
+    p[1] = (v - (v / 256) * 256) as u8;
+}
+
+// Same idea, for the 32-bit fields TCP needs (sequence/ack numbers).
+fn read_u32be(p: *u8) -> i32 {
+    return ((p[0] as i32) << 24) | ((p[1] as i32) << 16) | ((p[2] as i32) << 8) | (p[3] as i32);
+}
+
+fn write_u32be(p: *u8, v: i32) {
+    p[0] = (v >> 24) as u8;
+    p[1] = (v >> 16) as u8;
+    p[2] = (v >> 8) as u8;
+    p[3] = v as u8;
+}
