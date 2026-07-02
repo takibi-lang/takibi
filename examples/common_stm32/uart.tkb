@@ -1,0 +1,52 @@
+// STM32F746G-DISCOVERY UART HAL, over the ST-LINK/V2-1 virtual COM port.
+// The board wires USART1 (TX = PA9, RX = PB7) to the ST-LINK's VCP.
+// Same public signatures as examples/common/uart.tkb (uart_putc/uart_puts) so
+// example .tkb files stay unchanged across the QEMU and STM32 HALs; uart_init
+// has no QEMU counterpart since the PL011 model there needs no setup.
+//
+// Deliberately uses the default HSI (16MHz) clock, no PLL/clock-tree setup --
+// keeps this first bring-up minimal. USART1 is on APB2; with all prescalers
+// at their reset value of 1, APB2 clock == HSI == 16MHz.
+
+fn uart_init() {
+    let rcc_ahb1enr: *io u32 = 0x40023830; // RCC_AHB1ENR
+    let rcc_apb2enr: *io u32 = 0x40023844; // RCC_APB2ENR
+    *rcc_ahb1enr = *rcc_ahb1enr | (1 | (1 << 1)); // GPIOAEN | GPIOBEN
+    *rcc_apb2enr = *rcc_apb2enr | (1 << 4);       // USART1EN
+
+    // PA9 -> AF7 (USART1_TX): 2-bit MODER field = 0b10 (alternate function)
+    let gpioa_moder: *io u32 = 0x40020000;
+    let gpioa_afrh:  *io u32 = 0x40020024;
+    *gpioa_moder = (*gpioa_moder & ~(3 << 18)) | (2 << 18);
+    *gpioa_afrh  = (*gpioa_afrh  & ~(15 << 4)) | (7 << 4);
+
+    // PB7 -> AF7 (USART1_RX)
+    let gpiob_moder: *io u32 = 0x40020400;
+    let gpiob_afrl:  *io u32 = 0x40020420;
+    *gpiob_moder = (*gpiob_moder & ~(3 << 14)) | (2 << 14);
+    *gpiob_afrl  = (*gpiob_afrl  & ~(15 << 28)) | (7 << 28);
+
+    // USART1: 115200 baud @ 16MHz HSI. This is the STM32F7 "improved" USART
+    // (ISR/TDR-style, not the classic F1/F4 SR/DR layout): with OVER8=0
+    // (default), BRR is used directly as the divider, no manual
+    // mantissa/fraction packing needed.
+    // BRR = round(16_000_000 / 115200) = 139 = 0x8B
+    let usart1_brr: *io u32 = 0x4001100C;
+    let usart1_cr1: *io u32 = 0x40011000;
+    *usart1_brr = 139;
+    *usart1_cr1 = 1 | (1 << 2) | (1 << 3); // UE | RE | TE
+}
+
+fn uart_putc(c: u8) {
+    let usart1_isr: *io u32 = 0x4001101C;
+    let usart1_tdr: *io u8  = 0x40011028;
+    while ((*usart1_isr & (1 << 7)) == 0) {} // wait for TXE
+    *usart1_tdr = c;
+}
+
+fn uart_puts(s: *u8) {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}

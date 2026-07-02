@@ -32,7 +32,7 @@ ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server profile-http-server profile-tcp-echo
+.PHONY: build test qemutest hwcheck langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server profile-http-server profile-tcp-echo
 
 .DEFAULT_GOAL := build
 
@@ -47,6 +47,13 @@ test:
 ## qemutest: run QEMU integration tests (build all examples and verify automatically)
 qemutest: $(ALL_KERNELS) examples/fizzbuzz/kernel.debug.elf examples/fibonacci/kernel.debug.elf
 	@bash scripts/run_qemutest.sh
+
+## hwcheck: run STM32 hardware integration tests (requires a real
+## STM32F746G-DISCOVERY board connected via USB). NOT part of `make check` --
+## unlike qemutest, this needs physical hardware, so it stays runnable-only-
+## when-available rather than a requirement for every clone of this repo.
+hwcheck: examples/hello/kernel_stm32.bin
+	@bash scripts/run_hwtest.sh
 
 ## langcheck: verify that all source files contain only ASCII characters
 langcheck:
@@ -199,6 +206,38 @@ examples/tcp_echo/tcp_echo.debug.o: examples/tcp_echo/tcp_echo.tkb \
 
 examples/tcp_echo/kernel.debug.elf: $(COMMON_STARTUP_O) examples/tcp_echo/tcp_echo.debug.o $(COMMON_LINK_LD)
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/tcp_echo/tcp_echo.debug.o -o $@
+
+# -- STM32F746G-DISCOVERY hardware bring-up (step 2: UART Hello World) ---------
+# One-off rules for a single example, same reasoning as the -g debug builds
+# above: this is a second target for one proof-of-concept example, not yet a
+# general second target for every entry in EXAMPLES, so it's kept out of the
+# STANDARD_OBJS/GENERIC_KERNELS auto-registration machinery. Reuses
+# examples/common/print.tkb and examples/hello/hello.tkb verbatim -- only the
+# UART HAL (examples/common_stm32/uart.tkb) and the startup/linker files are
+# STM32-specific. No `make check`/`qemutest` coverage yet (that's step 3: a
+# scripted flash+serial-capture harness); for now this is verified by hand
+# against the real board (flash examples/hello/kernel_stm32.bin, then read
+# /dev/ttyACM0 and diff against examples/hello/hello.expected).
+STM32_TARGET := thumbv7em-none-eabi
+STM32_CPU    := cortex-m7
+
+COMMON_STM32_DIR       := examples/common_stm32
+COMMON_STM32_STARTUP_S := $(COMMON_STM32_DIR)/startup.S
+COMMON_STM32_STARTUP_O := $(COMMON_STM32_DIR)/startup.o
+COMMON_STM32_LINK_LD   := $(COMMON_STM32_DIR)/link.ld
+COMMON_STM32_UART      := $(COMMON_STM32_DIR)/uart.tkb
+
+$(COMMON_STM32_STARTUP_O): $(COMMON_STM32_STARTUP_S)
+	$(LLVM_MC) --triple=$(STM32_TARGET) --filetype=obj $< -o $@
+
+examples/hello/hello_stm32.o: examples/hello/hello.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) build
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+
+examples/hello/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/hello/hello_stm32.o $(COMMON_STM32_LINK_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/hello/hello_stm32.o -o $@
+
+examples/hello/kernel_stm32.bin: examples/hello/kernel_stm32.elf
+	llvm-objcopy-19 -O binary $< $@
 
 # -- QEMU run targets ----------------------------------------------------------
 QEMU_FLAGS := -machine virt -cpu cortex-a53 -nographic \
