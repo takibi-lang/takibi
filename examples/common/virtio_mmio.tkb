@@ -1,0 +1,195 @@
+// Minimal legacy virtio-mmio transport driver (QEMU "virt" machine only).
+//
+// Register offsets and the vring layout follow the virtio 1.x spec's
+// "legacy interface" (Version register reads 1, no FEATURES_OK handshake --
+// that round-trip is a virtio 1.0/"modern" addition; a legacy device only
+// expects ACKNOWLEDGE -> DRIVER -> (features) -> queue setup -> DRIVER_OK).
+// We deliberately force legacy mode on the QEMU command line
+// (-global virtio-mmio.force-legacy=on) because it avoids the split
+// 64-bit feature-select / queue-address registers of modern (v2)
+// virtio-mmio, at the cost of depending on a QEMU compatibility knob that
+// could be removed in a future release -- see CLAUDE.md's virtio-net
+// section for the tradeoff.
+
+let VIRTIO_DEVICE_ID:        i32 = 0x08;
+let VIRTIO_HOST_FEATURES:    i32 = 0x10;
+let VIRTIO_GUEST_FEATURES:   i32 = 0x20;
+let VIRTIO_GUEST_PAGE_SIZE:  i32 = 0x28;
+let VIRTIO_QUEUE_SEL:        i32 = 0x30;
+let VIRTIO_QUEUE_NUM_MAX:    i32 = 0x34;
+let VIRTIO_QUEUE_NUM:        i32 = 0x38;
+let VIRTIO_QUEUE_ALIGN:      i32 = 0x3c;
+let VIRTIO_QUEUE_PFN:        i32 = 0x40;
+let VIRTIO_QUEUE_NOTIFY:     i32 = 0x50;
+let VIRTIO_INTERRUPT_STATUS: i32 = 0x60;
+let VIRTIO_INTERRUPT_ACK:    i32 = 0x64;
+let VIRTIO_STATUS:           i32 = 0x70;
+
+let VIRTIO_MAGIC_VALUE:   i32 = 0x74726976;
+let VIRTIO_DEVICE_ID_NET: i32 = 1;
+
+let STATUS_ACKNOWLEDGE: i32 = 1;
+let STATUS_DRIVER:      i32 = 2;
+let STATUS_DRIVER_OK:   i32 = 4;
+
+let PAGE_SIZE: i32 = 4096;
+
+let VIRTIO_MMIO_FIRST_SLOT: i32 = 0x0a000000;
+let VIRTIO_MMIO_SLOT_STRIDE: i32 = 0x200;
+let VIRTIO_MMIO_SLOT_COUNT: i32 = 32;
+// GIC IRQ of slot 0, per the QEMU "virt" board's device tree
+// (virtio_mmio@a000000 -> interrupts SPI 0x10=16 -> GIC IRQ 32+16=48;
+// each following 0x200-byte slot is the next SPI number). Confirmed via
+// `qemu-system-aarch64 -machine virt,dumpdtb=...` + dtc against this
+// devcontainer's QEMU 8.2.2.
+let VIRTIO_MMIO_FIRST_SPI: i32 = 48;
+
+let QNUM: i32 = 8; // virtqueue depth for both the RX and TX queues
+
+// Descriptor flags (virtio spec).
+let VIRTQ_DESC_F_WRITE: i32 = 2; // device writes into this buffer (RX only)
+
+// Discovered at runtime: the slot base address is NOT fixed by the
+// compiler, because QEMU does not always attach a lone virtio-net-device
+// to slot 0 -- empirically, under this devcontainer's QEMU 8.2.2 with a
+// single virtio-net-device on the command line, the device landed on slot
+// 31 (base 0x0a003e00, GIC IRQ 79). Rather than hardcode that (fragile
+// across QEMU versions/command lines), virtio_net_find() scans all 32
+// slots at boot and derives both the base address and GIC IRQ from
+// whichever slot actually reports DeviceID == 1 (network).
+let mut virtio_base:    i32 = 0;
+let mut virtio_gic_irq: i32 = 0;
+
+// Set by virtio_irq_handler(), cleared by the main loop after it has
+// re-scanned both queues' used rings. Mirrors the irq_done pattern in
+// examples/irq/irq.tkb: the handler only signals "something happened",
+// the main loop does the actual work.
+let mut virtio_irq_flag: io i32 = 0;
+
+fn vreg(offset: i32) -> *io i32 {
+    return (virtio_base + offset) as *io i32;
+}
+
+fn virtio_net_find() -> i32 {
+    for i in 0..<VIRTIO_MMIO_SLOT_COUNT {
+        let base: i32 = VIRTIO_MMIO_FIRST_SLOT + i * VIRTIO_MMIO_SLOT_STRIDE;
+        let magic_p: *io i32 = base as *io i32;
+        if (*magic_p == VIRTIO_MAGIC_VALUE) {
+            let devid_p: *io i32 = (base + VIRTIO_DEVICE_ID) as *io i32;
+            if (*devid_p == VIRTIO_DEVICE_ID_NET) {
+                virtio_base = base;
+                virtio_gic_irq = VIRTIO_MMIO_FIRST_SPI + i;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+// Enables virtio_gic_irq at the GIC distributor and routes it to CPU0.
+// gic.tkb only wires up ISENABLER0 (IRQ 0-31) and ISENABLER1 (IRQ 32-63);
+// our discovered IRQ can land above 63 (it was 79 in the empirical probe),
+// so this computes the correct ISENABLERn/bit and ITARGETSR byte directly
+// instead of extending the shared GicRegs struct for a single caller.
+fn gic_enable_virtio_irq() {
+    let isenabler_n: i32 = virtio_gic_irq / 32;
+    let bit:         i32 = virtio_gic_irq - isenabler_n * 32;
+    let isenabler: *io i32 = (0x08000100 + isenabler_n * 4) as *io i32;
+    *isenabler = 1 << bit;
+
+    let itargetsr: *io u8 = (0x08000800 + virtio_gic_irq) as *io u8;
+    *itargetsr = 1 as u8; // route to CPU0
+}
+
+// Device bring-up up through feature negotiation. Queue setup and
+// DRIVER_OK happen separately (virtio_queue_setup / virtio_driver_ok)
+// since the caller needs to set up both queues in between.
+fn virtio_negotiate() {
+    *(vreg(VIRTIO_STATUS)) = 0; // reset
+    *(vreg(VIRTIO_STATUS)) = STATUS_ACKNOWLEDGE;
+    *(vreg(VIRTIO_STATUS)) = STATUS_ACKNOWLEDGE | STATUS_DRIVER;
+
+    // Ack no optional features -- offloads are already disabled on the
+    // QEMU command line, so this keeps virtio_net_hdr fixed at 10 bytes
+    // and skips the control queue entirely.
+    *(vreg(VIRTIO_GUEST_FEATURES)) = 0;
+    *(vreg(VIRTIO_GUEST_PAGE_SIZE)) = PAGE_SIZE;
+}
+
+fn virtio_queue_setup(queue_idx: i32, queue_mem: *u8) {
+    *(vreg(VIRTIO_QUEUE_SEL)) = queue_idx;
+    *(vreg(VIRTIO_QUEUE_NUM)) = QNUM;
+    *(vreg(VIRTIO_QUEUE_ALIGN)) = PAGE_SIZE;
+    let addr: usize = queue_mem as usize;
+    let pfn: i32 = (addr / (PAGE_SIZE as usize)) as i32;
+    *(vreg(VIRTIO_QUEUE_PFN)) = pfn;
+}
+
+fn virtio_driver_ok() {
+    *(vreg(VIRTIO_STATUS)) = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK;
+}
+
+fn virtio_notify(queue_idx: i32) {
+    *(vreg(VIRTIO_QUEUE_NOTIFY)) = queue_idx;
+}
+
+// -- Raw vring accessors -----------------------------------------------
+// Struct field assignment in takibi only supports `ident.field = v` (a
+// bare variable name on the left), which a descriptor-table *entry*
+// picked out by a runtime index is not. So the vring is manipulated as a
+// flat byte buffer with manual offsets instead of struct arrays -- the
+// same approach a minimal C driver takes when poking a fixed-layout DMA
+// structure. Layout per queue_mem (matches virtio_queue_setup's PAGE_SIZE
+// QueueAlign): [0, QNUM*16) descriptor table, immediately followed by the
+// avail ring, then the used ring starting at the next page (offset 4096).
+
+fn desc_set(queue_mem: *u8, i: i32, addr: usize, len: i32, flags: i32) {
+    let base: *u8 = queue_mem + i * 16;
+    let addr_p: *usize = base as *usize;
+    *addr_p = addr;
+    let len_p: *i32 = (base + 8) as *i32;
+    *len_p = len;
+    let flags_p: *u16 = (base + 12) as *u16;
+    *flags_p = flags as u16;
+    // `next` field (offset 14) is left at 0 (BSS-zeroed at boot): we never
+    // chain descriptors, so VIRTQ_DESC_F_NEXT is never set and it's unused.
+}
+
+fn avail_ring_set(queue_mem: *u8, slot: i32, desc_idx: i32) {
+    let avail_off: i32 = QNUM * 16;
+    let p: *u16 = (queue_mem + avail_off + 4 + slot * 2) as *u16;
+    *p = desc_idx as u16;
+}
+
+fn avail_publish(queue_mem: *u8, new_idx: i32) {
+    let avail_off: i32 = QNUM * 16;
+    let p: *u16 = (queue_mem + avail_off + 2) as *u16;
+    *p = new_idx as u16;
+}
+
+// These three read memory the device writes asynchronously via DMA, and
+// used_idx_get() in particular is polled in a tight busy-wait loop in the
+// main echo loop. A non-volatile load here is exactly the "LLVM may hoist
+// a global/memory load out of a tight loop" hazard called out in
+// CLAUDE.md's "Volatile Reads of Global Variables" section (the compiler
+// has no way to know DMA writes are coming) -- so these must be `io`.
+fn used_idx_get(queue_mem: *u8) -> i32 {
+    let p: *io u16 = (queue_mem + PAGE_SIZE + 2) as *io u16;
+    return (*p) as i32;
+}
+
+fn used_ring_get_id(queue_mem: *u8, slot: i32) -> i32 {
+    let p: *io i32 = (queue_mem + PAGE_SIZE + 4 + slot * 8) as *io i32;
+    return *p;
+}
+
+fn used_ring_get_len(queue_mem: *u8, slot: i32) -> i32 {
+    let p: *io i32 = (queue_mem + PAGE_SIZE + 4 + slot * 8 + 4) as *io i32;
+    return *p;
+}
+
+fn virtio_irq_handler() {
+    let status: i32 = *(vreg(VIRTIO_INTERRUPT_STATUS));
+    *(vreg(VIRTIO_INTERRUPT_ACK)) = status;
+    virtio_irq_flag = 1;
+}

@@ -30,7 +30,7 @@ The finished form of code is when index ranges are pinned at the type level usin
   - Global scope mirrors this: plain `let NAME: T = e;` is an immutable compile-time constant (reassignment and `&NAME` are compile errors, and it must have an initializer); `let mut NAME: T = e;` is a mutable global variable. `let mut x: T;` (no initializer) is allowed for global scope only, relying on BSS zero-clear.
   - `[T; N]` array size `N` may be a literal integer, or the name of an immutable global declared earlier (in the concatenated source) with a bare literal integer initializer, e.g. `let QUEUE_SIZE: i32 = 16; let mut ring: [T; QUEUE_SIZE];`. Resolved entirely in the parser (see "Array-Size Constants" below); no forward references, no constant folding.
   - `let mut x: T align(N);` -- global variable with N-byte alignment (N must be a power of two). Emits `set_alignment N` on the LLVM global. Use for DMA descriptor rings (`align(4096)`), cache-line buffers (`align(64)`), etc. Optional initializer: `let mut x: T align(N) = e;` (or plain `let x: T align(N) = e;` for an immutable aligned constant). Local variable alignment is not supported.
-  - `while`, `return`, assignment (`x = e`), pointer-deref assignment (`*p = v`)
+  - `while`, `return` (always takes an expression -- bare `return;` in a `void` function is a syntax error; let the function fall through instead), assignment (`x = e`), pointer-deref assignment (`*p = v`)
   - `break` -- exits the innermost `while` or `for` loop immediately. Compile error outside a loop.
   - `continue` -- skips to the next iteration of the innermost loop. For `for`, the counter is incremented first. Compile error outside a loop.
   - `if (cond) { ... }` -- `else` is optional
@@ -525,6 +525,56 @@ When adding a new example that needs timer or semaphore support, add it to the a
   - Connected to the GIC via PPI #30 (GICD_ISENABLER0 bit30)
   - To fire at ~15 ms intervals: `lsr x0, cntfrq, #6` -> `msr cntp_tval_el0, x0`
   - The virtual timer (CNTV, PPI #27) requires EL2 hypervisor configuration on QEMU virt, so use the physical timer (CNTP, PPI #30) for bare-metal EL1.
+
+## virtio-net L2 Echo (examples/net_echo)
+
+QEMU-only stepping stone toward the TCP/IP stack goal: receives a raw
+Ethernet frame over virtio-net, swaps src/dst MAC, sends it back. No ARP,
+no IP -- it only proves the virtqueue/DMA/IRQ plumbing. `virtio-net`
+doesn't exist on real hardware (RPi3/RISC-V/STM32 will need dedicated
+MAC/PHY drivers later); what transfers is the ring-buffer/IRQ pattern, not
+the virtio protocol itself.
+
+- **Legacy virtio-mmio only** (`-global virtio-mmio.force-legacy=on`).
+  Skips the FEATURES_OK handshake and the split 64-bit feature/queue-address
+  registers of modern (v2) virtio-mmio -- Version register reads 1. This
+  depends on a QEMU compatibility knob that could be removed in a future
+  release; if legacy mode disappears, this driver needs a rewrite against
+  the modern register layout.
+- **The virtio-mmio slot is discovered at boot, not hardcoded**
+  (`virtio_net_find()` in `examples/common/virtio_mmio.tkb`). A lone
+  `-device virtio-net-device` does NOT land on slot 0: empirically, under
+  this devcontainer's QEMU 8.2.2, it landed on slot 31 (base `0x0a003e00`,
+  GIC IRQ 79 = SPI 47). The mapping `gic_irq = 48 + slot_index` comes from
+  the "virt" board's device tree (confirmed via
+  `qemu-system-aarch64 -machine virt,dumpdtb=...` + `dtc`); the driver
+  scans all 32 slots for `DeviceID == 1` (network) and derives both the
+  base address and IRQ from whatever slot it actually finds, so a future
+  QEMU version placing the device elsewhere doesn't break it.
+- **IRQ 79 needs GICD_ISENABLER2**, which `gic.tkb`'s `GicRegs` doesn't
+  have (it only wires ISENABLER0/1, covering IRQ 0-63). Rather than extend
+  the shared struct for one caller, `gic_enable_virtio_irq()` computes the
+  ISENABLERn/bit and ITARGETSR byte directly from the discovered IRQ
+  number.
+- **The vring is manipulated as raw byte offsets, not struct arrays.**
+  Struct field assignment only supports `ident.field = v` (a bare variable
+  name on the left -- see "Current limitations" under Struct Implementation
+  above), so a descriptor-table *entry* picked out by a runtime index
+  (`descs[i].field = v`) isn't expressible. `desc_set`/`avail_ring_set`/
+  `used_ring_get_*` in `virtio_mmio.tkb` poke fixed byte offsets through
+  cast pointers instead, the same way a minimal C driver would.
+- **Used-ring polling reads must be `io`.** `used_idx_get` etc. read memory
+  the device writes via DMA and are polled in a busy-wait loop in
+  `net_echo.tkb`'s main loop -- exactly the "LLVM may hoist a load out of a
+  tight loop" hazard described under "Volatile Reads of Global Variables"
+  above, since nothing else marks that memory as externally modified.
+- **Test harness**: `scripts/virtio_net_test.py` sends/verifies raw frames
+  over a UDP-backed `-netdev dgram` (one UDP datagram == one raw Ethernet
+  frame, no ARP/DHCP noise since it's a private point-to-point socket,
+  unlike `-netdev user`). This is the one place in the test suite that
+  depends on Python -- `run_qemutest.sh` invokes it via `run_virtio_test`,
+  which judges pass/fail by the script's exit code rather than diffing
+  QEMU's stdout, so `net_echo.tkb` is free to print debug output.
 
 ## Instructions for Claude Code
 

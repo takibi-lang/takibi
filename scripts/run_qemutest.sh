@@ -120,6 +120,49 @@ run_compile_error_test() {
     rm -f "$tmp_err" "$tmp_obj"
 }
 
+# run_virtio_test NAME KERNEL
+#
+# Launches QEMU with a virtio-net-device backed by a UDP -netdev dgram
+# (one UDP datagram == one raw Ethernet frame) and runs
+# scripts/virtio_net_test.py, which sends/verifies frames directly over
+# that socket. Correctness is judged entirely by the python script's exit
+# code, not by diffing QEMU's stdout, so the kernel is free to print debug
+# output via uart_puts without affecting the result. Uses its own timeout
+# (VIRTIO_TIMEOUT) rather than TIMEOUT: virtio_net_test.py sends dozens of
+# frames with a bounded per-frame retry loop, which legitimately takes
+# longer than the simple byte-diff tests above.
+VIRTIO_TIMEOUT=30
+run_virtio_test() {
+    local name="$1" kernel="$2"
+    local qemu_log
+    qemu_log=$(mktemp)
+
+    timeout "$VIRTIO_TIMEOUT" $QEMU $QEMU_COMMON \
+        -global virtio-mmio.force-legacy=on \
+        -netdev dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=17771,remote.type=inet,remote.host=127.0.0.1,remote.port=17772 \
+        -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56,csum=off,guest_csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ufo=off,guest_uso4=off,guest_uso6=off,mrg_rxbuf=off,ctrl_vq=off,mq=off,indirect_desc=off,event_idx=off \
+        -kernel "$kernel" > "$qemu_log" 2>&1 &
+    local qpid=$!
+
+    local rc=0
+    timeout 25 python3 "$(dirname "$0")/virtio_net_test.py" || rc=$?
+
+    kill "$qpid" 2>/dev/null || true
+    wait "$qpid" 2>/dev/null || true
+
+    if [ "$rc" -eq 0 ]; then
+        printf "${GRN}PASS${RST}  %s\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        printf "${RED}FAIL${RST}  %s\n" "$name"
+        printf "       qemu output:\n"
+        sed 's/^/       /' "$qemu_log"
+        FAIL=$((FAIL + 1))
+    fi
+
+    rm -f "$qemu_log"
+}
+
 # run_no_trap_test NAME KERNEL
 #
 # Disassembles with llvm-objdump and checks that the count of brk instructions
@@ -200,6 +243,7 @@ run_test "packed"        examples/packed/kernel.elf        examples/packed/packe
 run_test "struct_align"  examples/struct_align/kernel.elf  examples/struct_align/struct_align.expected
 run_test "const_global"  examples/const_global/kernel.elf  examples/const_global/const_global.expected
 run_test "sizeof"        examples/sizeof/kernel.elf        examples/sizeof/sizeof.expected
+run_virtio_test "net_echo" examples/net_echo/kernel.elf
 
 echo ""
 echo "Running no-trap checks (brk must be zero in these kernels)..."
@@ -208,7 +252,7 @@ echo ""
 # Examples whose bounds should be fully proven at the type level. If brk appears, review the type annotations.
 for e in start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci \
           bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt \
-          semaphore condvar struct msgqueue watchdog refined narrow for loop bitops align packed struct_align sizeof; do
+          semaphore condvar struct msgqueue watchdog refined narrow for loop bitops align packed struct_align sizeof net_echo; do
 # enum is intentionally excluded: `i as Color` (int->enum cast) emits llvm.trap for invalid values
     run_no_trap_test "$e (no-trap)" "examples/$e/kernel.elf"
 done

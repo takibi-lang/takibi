@@ -20,16 +20,17 @@ COMMON_PRINT       := $(COMMON_DIR)/print.tkb
 COMMON_GIC         := $(COMMON_DIR)/gic.tkb
 COMMON_TIMER       := $(COMMON_DIR)/timer.tkb
 COMMON_SYNC        := $(COMMON_DIR)/sync.tkb
+COMMON_VIRTIO_MMIO := $(COMMON_DIR)/virtio_mmio.tkb
 
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
 # Convention: examples/<name>/<name>.tkb -> examples/<name>/kernel.elf
-EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof
+EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof net_echo
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest langcheck check clean qemu-echo
+.PHONY: build test qemutest langcheck check clean qemu-echo qemu-net-echo
 
 .DEFAULT_GOAL := build
 
@@ -79,6 +80,7 @@ $(COMMON_SEM_ASM_O): $(COMMON_SEM_ASM_S)
 #   IRQ group  : + gic.tkb                                   (irq)
 #   Timer group: + gic.tkb + timer.tkb                       (preempt semaphore watchdog)
 #   Sync group : + gic.tkb + timer.tkb + sync.tkb            (condvar msgqueue)
+#   Net group  : + gic.tkb + virtio_mmio.tkb                 (net_echo)
 .SECONDEXPANSION:
 
 IRQ_OBJS   := examples/irq/irq.o
@@ -86,7 +88,8 @@ IRQ_OBJS   := examples/irq/irq.o
 TIMER_OBJS := examples/preempt/preempt.o examples/semaphore/semaphore.o \
               examples/watchdog/watchdog.o
 SYNC_OBJS  := examples/condvar/condvar.o examples/msgqueue/msgqueue.o
-SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS)
+NET_OBJS   := examples/net_echo/net_echo.o
+SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS) $(NET_OBJS)
 STANDARD_OBJS := $(filter-out $(SPECIAL_OBJS), $(EXAMPLE_OBJS))
 
 $(STANDARD_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) build
@@ -100,6 +103,9 @@ $(TIMER_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COM
 
 $(SYNC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) build
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) $< --target $(AARCH64_TARGET) -o $@
+
+$(NET_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) build
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $< --target $(AARCH64_TARGET) -o $@
 
 # -- example.o + startup.o -> kernel.elf ---------------------------------------
 # For examples/%/kernel.elf, % matches "name" (no slash).
@@ -137,6 +143,17 @@ QEMU_FLAGS := -machine virt -cpu cortex-a53 -nographic \
 ## qemu-echo: manually run the echo server on QEMU virt (press Ctrl-A X to quit)
 qemu-echo: examples/echo/kernel.elf
 	$(QEMU) $(QEMU_FLAGS) -kernel $<
+
+# Offloads disabled so GuestFeatures negotiates to 0 and virtio_net_hdr
+# stays a fixed 10 bytes -- see examples/common/virtio_mmio.tkb.
+VIRTIO_NET_FLAGS := -global virtio-mmio.force-legacy=on \
+    -netdev dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=17771,remote.type=inet,remote.host=127.0.0.1,remote.port=17772 \
+    -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56,csum=off,guest_csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ufo=off,guest_uso4=off,guest_uso6=off,mrg_rxbuf=off,ctrl_vq=off,mq=off,indirect_desc=off,event_idx=off
+
+## qemu-net-echo: manually run the L2 echo server (Ctrl-A X to quit).
+## In another terminal: python3 scripts/virtio_net_test.py
+qemu-net-echo: examples/net_echo/kernel.elf
+	$(QEMU) $(QEMU_FLAGS) $(VIRTIO_NET_FLAGS) -kernel $<
 
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts and linker outputs
