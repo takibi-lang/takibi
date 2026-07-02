@@ -285,6 +285,14 @@ run_hw_test "rtc (stm32)" examples/rtc/kernel_stm32.bin examples/rtc/rtc.expecte
 run_hw_test_stdin "echo (stm32)" examples/echo/kernel_stm32.bin examples/echo/echo.expected \
     examples/echo/echo.stdin
 
+# inet_checksum/ip_parse/tcp_parse: pure compute (canned buffers baked into
+# the binary, no virtio-net/real Ethernet needed at all -- see the Makefile's
+# STM32_CHECKSUM_* comment), so these use the plain run_hw_test like the
+# first 29.
+run_hw_test "inet_checksum (stm32)" examples/inet_checksum/kernel_stm32.bin examples/inet_checksum/inet_checksum.expected
+run_hw_test "ip_parse (stm32)"      examples/ip_parse/kernel_stm32.bin      examples/ip_parse/ip_parse.expected
+run_hw_test "tcp_parse (stm32)"     examples/tcp_parse/kernel_stm32.bin     examples/tcp_parse/tcp_parse.expected
+
 echo ""
 if [ "$FAIL" -eq 0 ]; then
     printf "${GRN}All $PASS hardware test(s) passed.${RST}\n"

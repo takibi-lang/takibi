@@ -51,6 +51,18 @@ STM32_BINS     := $(foreach e,$(STM32_EXAMPLES),examples/$(e)/kernel_stm32.bin)
 # one-off rules near COMMON_STM32_RTC/COMMON_STM32_UART_GETC below.
 STM32_EXTRA_BINS := examples/rtc/kernel_stm32.bin examples/echo/kernel_stm32.bin
 
+# inet_checksum/ip_parse/tcp_parse: same CHECKSUM_OBJS group as the AArch64
+# side, but examples/common/inet_checksum.tkb and examples/common/netutil.tkb
+# are pure compute with no MMIO addresses at all (unlike uart.tkb) -- so
+# unlike rtc/echo, no STM32-specific version of either is needed, both are
+# reused completely unchanged. Kept as their own small group (not folded
+# into STM32_EXAMPLES) since the recipe needs two extra common files that
+# the rest of STM32_EXAMPLES doesn't.
+STM32_CHECKSUM_EXAMPLES := inet_checksum ip_parse tcp_parse
+STM32_CHECKSUM_OBJS     := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/$(e)_stm32.o)
+STM32_CHECKSUM_KERNELS  := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/kernel_stm32.elf)
+STM32_CHECKSUM_BINS     := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/kernel_stm32.bin)
+
 # -- Targets ------------------------------------------------------------------
 .PHONY: build test qemutest hwcheck langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server profile-http-server profile-tcp-echo
 
@@ -72,7 +84,7 @@ qemutest: $(ALL_KERNELS) examples/fizzbuzz/kernel.debug.elf examples/fibonacci/k
 ## STM32F746G-DISCOVERY board connected via USB). NOT part of `make check` --
 ## unlike qemutest, this needs physical hardware, so it stays runnable-only-
 ## when-available rather than a requirement for every clone of this repo.
-hwcheck: $(STM32_BINS) $(STM32_EXTRA_BINS)
+hwcheck: $(STM32_BINS) $(STM32_EXTRA_BINS) $(STM32_CHECKSUM_BINS)
 	@bash scripts/run_hwtest.sh
 
 ## langcheck: verify that all source files contain only ASCII characters
@@ -304,6 +316,16 @@ examples/echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/echo/echo_stm
 	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/echo/echo_stm32.o -o $@
 
 examples/echo/kernel_stm32.bin: examples/echo/kernel_stm32.elf
+	llvm-objcopy-19 -O binary $< $@
+
+$(STM32_CHECKSUM_OBJS): examples/%_stm32.o: examples/%.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) build
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+
+$(STM32_CHECKSUM_KERNELS): examples/%/kernel_stm32.elf: \
+    $(COMMON_STM32_STARTUP_O) examples/%/$$*_stm32.o $(COMMON_STM32_LINK_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/$*/$*_stm32.o -o $@
+
+$(STM32_CHECKSUM_BINS): examples/%/kernel_stm32.bin: examples/%/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
 # -- QEMU run targets ----------------------------------------------------------
