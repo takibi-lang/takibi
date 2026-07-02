@@ -214,7 +214,7 @@ echo ""
 # Examples whose bounds should be fully proven at the type level. If brk appears, review the type annotations.
 for e in start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci \
           bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt \
-          semaphore condvar struct msgqueue watchdog refined narrow for loop bitops align packed struct_align sizeof net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse; do
+          semaphore condvar struct msgqueue watchdog refined narrow for loop bitops align packed struct_align sizeof net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo; do
 # enum is intentionally excluded: `i as Color` (int->enum cast) emits llvm.trap for invalid values
     run_no_trap_test "$e (no-trap)" "examples/$e/kernel.elf"
 done
@@ -269,6 +269,7 @@ run_test "tcp_parse"     examples/tcp_parse/kernel.elf     examples/tcp_parse/tc
 run_virtio_test "net_echo"   examples/net_echo/kernel.elf   virtio_net_test.py
 run_virtio_test "arp_reply"  examples/arp_reply/kernel.elf  arp_test.py
 run_virtio_test "icmp_echo"  examples/icmp_echo/kernel.elf  icmp_echo_test.py
+run_virtio_test "tcp_echo"   examples/tcp_echo/kernel.elf   tcp_echo_test.py
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

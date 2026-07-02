@@ -1,0 +1,262 @@
+// TCP echo server over QEMU's virtio-net-device -- grown incrementally
+// across several sessions rather than split into separate examples (see
+// CLAUDE.md's TCP section for why): unlike ARP/ICMP, TCP's stages
+// (handshake -> data echo -> close) share one connection's state and
+// can't be tested independently as separate binaries. Regression
+// granularity instead comes from accumulating independent test functions
+// in scripts/tcp_echo_test.py, one per stage, all run against this same
+// kernel.
+//
+// Session 1 (this one): three-way handshake only (LISTEN -> SYN_RCVD ->
+// ESTABLISHED). No data transfer or connection close yet -- once
+// ESTABLISHED, further segments for this connection are currently
+// ignored (ready for the next step to add echo behavior there).
+//
+// Listens on TCP port 7 (the "Echo Protocol", RFC 862 -- a fitting choice
+// for what this will become). Single connection only: while a handshake
+// is in progress or a connection is established, SYNs from other clients
+// are ignored rather than queued.
+
+let RX_BUF_SIZE: i32 = 1536;
+
+let mut rx_queue_mem: [u8; 8192] align(4096);
+let mut tx_queue_mem: [u8; 8192] align(4096);
+let mut rx_bufs: [u8; 12288];
+
+let mut our_mac: [u8; 6];
+let mut our_ip:  [u8; 4];
+
+// IPv4 field offsets, relative to the start of the IP header.
+let IP_TOTAL_LEN: i32 = 2;
+let IP_TTL:       i32 = 8;
+let IP_PROTOCOL:  i32 = 9;
+let IP_CHECKSUM:  i32 = 10;
+let IP_SRC:       i32 = 12;
+let IP_DST:       i32 = 16;
+
+// TCP field offsets, relative to the start of the TCP header.
+let TCP_SRC_PORT:    i32 = 0;
+let TCP_DST_PORT:    i32 = 2;
+let TCP_SEQ:         i32 = 4;
+let TCP_ACK:         i32 = 8;
+let TCP_DATA_OFFSET: i32 = 12;
+let TCP_FLAGS:       i32 = 13;
+let TCP_WINDOW:      i32 = 14;
+let TCP_CHECKSUM:    i32 = 16;
+let TCP_URGENT:      i32 = 18;
+
+let TCP_FLAG_FIN: i32 = 0x01;
+let TCP_FLAG_SYN: i32 = 0x02;
+let TCP_FLAG_RST: i32 = 0x04;
+let TCP_FLAG_ACK: i32 = 0x10;
+
+let PROTO_TCP:    i32 = 6;
+let TCP_ECHO_PORT: i32 = 7;
+
+// Fixed initial sequence number: no real security need for randomness in
+// a bare-metal, single-connection, test-only responder.
+let OUR_ISN: i32 = 0x00001000;
+
+let TCP_LISTEN:      i32 = 0;
+let TCP_SYN_RCVD:    i32 = 1;
+let TCP_ESTABLISHED: i32 = 2;
+
+let mut conn_state:       i32 = 0; // TCP_LISTEN
+let mut conn_remote_mac:  [u8; 6];
+let mut conn_remote_ip:   [u8; 4];
+let mut conn_remote_port: i32 = 0;
+let mut conn_snd_nxt:     i32 = 0; // our next unacknowledged sequence number
+let mut conn_rcv_nxt:     i32 = 0; // next sequence number we expect from remote
+
+// Recomputes the TCP checksum (header + data, len bytes) over the
+// pseudo-header implied by `ip`, and writes it into tcp+TCP_CHECKSUM.
+// Must be called last, after every other TCP field has its final value.
+fn fix_tcp_checksum(ip: *u8, tcp: *u8, len: i32) {
+    write_u16be(tcp + TCP_CHECKSUM, 0);
+    let mut pseudo: [u8; 12];
+    bytes_copy(pseudo as *u8, ip + IP_SRC, 4);
+    bytes_copy((pseudo as *u8) + 4, ip + IP_DST, 4);
+    pseudo[8] = 0 as u8;
+    pseudo[9] = PROTO_TCP as u8;
+    write_u16be((pseudo as *u8) + 10, len);
+    let sum: i32 = checksum_add(pseudo as *u8, 12, 0);
+    write_u16be(tcp + TCP_CHECKSUM, checksum_fold(checksum_add(tcp, len, sum)));
+}
+
+// Rewrites a SYN request into a SYN-ACK reply in place. Only called from
+// TCP_LISTEN after the caller has already validated the request (IP/TCP
+// checksums, dst port, SYN flag set).
+fn build_syn_ack(eth: *u8, ip: *u8, ihl: i32, tcp: *u8) {
+    bytes_copy(eth, eth + 6, 6);
+    bytes_copy(eth + 6, our_mac as *u8, 6);
+
+    bytes_copy(ip + IP_DST, ip + IP_SRC, 4);
+    bytes_copy(ip + IP_SRC, our_ip as *u8, 4);
+    ip[IP_TTL] = 64 as u8;
+    write_u16be(ip + IP_TOTAL_LEN, ihl + 20);
+    write_u16be(ip + IP_CHECKSUM, 0);
+    write_u16be(ip + IP_CHECKSUM, inet_checksum(ip, ihl));
+
+    let client_port: i32 = read_u16be(tcp + TCP_SRC_PORT);
+    write_u16be(tcp + TCP_SRC_PORT, TCP_ECHO_PORT);
+    write_u16be(tcp + TCP_DST_PORT, client_port);
+    write_u32be(tcp + TCP_SEQ, OUR_ISN);
+    write_u32be(tcp + TCP_ACK, conn_rcv_nxt);
+    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8; // 20-byte header, no options
+    tcp[TCP_FLAGS] = (TCP_FLAG_SYN | TCP_FLAG_ACK) as u8;
+    write_u16be(tcp + TCP_WINDOW, 65535);
+    write_u16be(tcp + TCP_URGENT, 0);
+
+    fix_tcp_checksum(ip, tcp, 20);
+}
+
+fn irq_dispatch(frame_sp: i32) -> i32 {
+    let id: i32 = *(gic.cpu_iar);
+    if (id == virtio_gic_irq) {
+        virtio_irq_handler();
+    }
+    *(gic.cpu_eoir) = id;
+    return frame_sp;
+}
+
+fn main() {
+    uart_puts("tcp_echo: init\r\n");
+    if (virtio_net_find() == 0) {
+        uart_puts("tcp_echo: virtio-net device not found\r\n");
+    } else {
+        gic_init();
+        gic_enable_virtio_irq();
+
+        virtio_negotiate(VIRTIO_NET_F_MAC);
+        virtio_net_read_mac(our_mac as *u8);
+        our_ip[0] = 192 as u8;
+        our_ip[1] = 0 as u8;
+        our_ip[2] = 2 as u8;
+        our_ip[3] = 1 as u8;
+
+        virtio_queue_setup(0, rx_queue_mem as *u8); // RX
+        virtio_queue_setup(1, tx_queue_mem as *u8); // TX
+        virtio_driver_ok();
+
+        for i in 0..<QNUM {
+            let buf: *u8 = rx_bufs + i * RX_BUF_SIZE;
+            desc_set(rx_queue_mem as *u8, i, buf as usize, RX_BUF_SIZE, VIRTQ_DESC_F_WRITE);
+            avail_ring_set(rx_queue_mem as *u8, i, i);
+        }
+        let mut rx_avail_idx: i32 = QNUM;
+        avail_publish(rx_queue_mem as *u8, rx_avail_idx);
+        virtio_notify(0);
+
+        uart_puts("tcp_echo: ready\r\n");
+
+        let mut rx_used_seen: i32 = 0;
+        let mut tx_used_seen: i32 = 0;
+        let mut tx_avail_idx: i32 = 0;
+
+        while (1) {
+            let flag_p: *io i32 = &virtio_irq_flag;
+            while (*flag_p == 0) {}
+            virtio_irq_flag = 0;
+
+            while (rx_used_seen != used_idx_get(rx_queue_mem as *u8)) {
+                let slot: i32 = rx_used_seen % QNUM;
+                let desc_idx: i32 = used_ring_get_id(rx_queue_mem as *u8, slot);
+                let frame_total_len: i32 = used_ring_get_len(rx_queue_mem as *u8, slot);
+                let buf: *u8 = rx_bufs + desc_idx * RX_BUF_SIZE;
+                let eth: *u8 = buf + 10;
+                let mut should_tx: i32 = 0;
+                let mut tx_len: i32 = 0;
+
+                // 10 (virtio hdr) + 14 (eth) + 20 (min IPv4) + 20 (min TCP) = 64
+                if (frame_total_len >= 64 && read_u16be(eth + 12) == 0x0800) {
+                    let ip: *u8 = eth + 14;
+                    let version: i32 = (ip[0] as i32) >> 4;
+                    let ihl:     i32 = ((ip[0] as i32) & 0x0f) * 4;
+
+                    if (version == 4 && ihl == 20) {
+                        let total_len:       i32 = read_u16be(ip + IP_TOTAL_LEN);
+                        let ip_len_in_frame: i32 = frame_total_len - 10 - 14;
+
+                        if (total_len <= ip_len_in_frame && total_len >= ihl &&
+                            (ip[IP_PROTOCOL] as i32) == PROTO_TCP &&
+                            inet_checksum(ip, ihl) == 0) {
+                            if (bytes_eq(ip + IP_DST, our_ip as *u8, 4) == 1) {
+                                let tcp:     *u8 = ip + ihl;
+                                let tcp_len: i32 = total_len - ihl;
+
+                                // No TCP options supported -- data offset must be exactly 20 bytes.
+                                if (tcp_len >= 20 && ((tcp[TCP_DATA_OFFSET] as i32) >> 4) == 5) {
+                                    let mut pseudo: [u8; 12];
+                                    bytes_copy(pseudo as *u8, ip + IP_SRC, 4);
+                                    bytes_copy((pseudo as *u8) + 4, ip + IP_DST, 4);
+                                    pseudo[8] = 0 as u8;
+                                    pseudo[9] = PROTO_TCP as u8;
+                                    write_u16be((pseudo as *u8) + 10, tcp_len);
+                                    let sum: i32 = checksum_add(pseudo as *u8, 12, 0);
+
+                                    if (checksum_fold(checksum_add(tcp, tcp_len, sum)) == 0) {
+                                        let dst_port: i32 = read_u16be(tcp + TCP_DST_PORT);
+                                        let src_port: i32 = read_u16be(tcp + TCP_SRC_PORT);
+                                        let flags:    i32 = tcp[TCP_FLAGS] as i32;
+                                        let seq:      i32 = read_u32be(tcp + TCP_SEQ);
+                                        let ack:      i32 = read_u32be(tcp + TCP_ACK);
+
+                                        if (dst_port == TCP_ECHO_PORT) {
+                                            if (conn_state == TCP_LISTEN) {
+                                                if ((flags & TCP_FLAG_SYN) != 0) {
+                                                    bytes_copy(conn_remote_mac as *u8, eth + 6, 6);
+                                                    bytes_copy(conn_remote_ip as *u8, ip + IP_SRC, 4);
+                                                    conn_remote_port = src_port;
+                                                    conn_rcv_nxt = seq + 1;
+                                                    conn_snd_nxt = OUR_ISN + 1;
+
+                                                    build_syn_ack(eth, ip, ihl, tcp);
+                                                    should_tx = 1;
+                                                    tx_len = 10 + 14 + ihl + 20;
+                                                    conn_state = TCP_SYN_RCVD;
+                                                }
+                                            } else {
+                                                // SYN_RCVD or ESTABLISHED: only the recorded
+                                                // connection's segments matter.
+                                                if (bytes_eq(ip + IP_SRC, conn_remote_ip as *u8, 4) == 1 &&
+                                                    src_port == conn_remote_port) {
+                                                    if (conn_state == TCP_SYN_RCVD) {
+                                                        if ((flags & TCP_FLAG_ACK) != 0 &&
+                                                            (flags & TCP_FLAG_SYN) == 0 &&
+                                                            ack == conn_snd_nxt && seq == conn_rcv_nxt) {
+                                                            conn_state = TCP_ESTABLISHED;
+                                                        }
+                                                    }
+                                                    // TCP_ESTABLISHED: data echo lands here in a later step.
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (should_tx == 1) {
+                    desc_set(tx_queue_mem as *u8, 0, buf as usize, tx_len, 0);
+                    avail_ring_set(tx_queue_mem as *u8, 0, 0);
+                    tx_avail_idx = tx_avail_idx + 1;
+                    avail_publish(tx_queue_mem as *u8, tx_avail_idx);
+                    virtio_notify(1);
+
+                    while (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {}
+                    tx_used_seen = tx_used_seen + 1;
+                }
+
+                let rx_slot: i32 = rx_avail_idx % QNUM;
+                avail_ring_set(rx_queue_mem as *u8, rx_slot, desc_idx);
+                rx_avail_idx = rx_avail_idx + 1;
+                avail_publish(rx_queue_mem as *u8, rx_avail_idx);
+                virtio_notify(0);
+
+                rx_used_seen = rx_used_seen + 1;
+            }
+        }
+    }
+}

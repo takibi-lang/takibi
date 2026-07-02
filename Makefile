@@ -27,12 +27,12 @@ COMMON_NETUTIL     := $(COMMON_DIR)/netutil.tkb
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
 # Convention: examples/<name>/<name>.tkb -> examples/<name>/kernel.elf
-EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse
+EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo
+.PHONY: build test qemutest langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo
 
 .DEFAULT_GOAL := build
 
@@ -84,7 +84,7 @@ $(COMMON_SEM_ASM_O): $(COMMON_SEM_ASM_S)
 #   Sync group : + gic.tkb + timer.tkb + sync.tkb            (condvar msgqueue)
 #   Net group  : + gic.tkb + virtio_mmio.tkb + netutil.tkb  (net_echo, arp_reply)
 #   Checksum group: + inet_checksum.tkb + netutil.tkb       (inet_checksum, ip_parse, tcp_parse)
-#   ICMP group : + gic.tkb + virtio_mmio.tkb + inet_checksum.tkb + netutil.tkb (icmp_echo)
+#   App group  : + gic.tkb + virtio_mmio.tkb + inet_checksum.tkb + netutil.tkb (icmp_echo, tcp_echo)
 .SECONDEXPANSION:
 
 IRQ_OBJS   := examples/irq/irq.o
@@ -95,8 +95,8 @@ SYNC_OBJS  := examples/condvar/condvar.o examples/msgqueue/msgqueue.o
 NET_OBJS   := examples/net_echo/net_echo.o examples/arp_reply/arp_reply.o
 CHECKSUM_OBJS := examples/inet_checksum/inet_checksum.o examples/ip_parse/ip_parse.o \
                  examples/tcp_parse/tcp_parse.o
-ICMP_OBJS  := examples/icmp_echo/icmp_echo.o
-SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS) $(NET_OBJS) $(CHECKSUM_OBJS) $(ICMP_OBJS)
+APP_OBJS   := examples/icmp_echo/icmp_echo.o examples/tcp_echo/tcp_echo.o
+SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS) $(NET_OBJS) $(CHECKSUM_OBJS) $(APP_OBJS)
 STANDARD_OBJS := $(filter-out $(SPECIAL_OBJS), $(EXAMPLE_OBJS))
 
 $(STANDARD_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) build
@@ -117,7 +117,7 @@ $(NET_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMO
 $(CHECKSUM_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) build
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(AARCH64_TARGET) -o $@
 
-$(ICMP_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) build
+$(APP_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) build
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(AARCH64_TARGET) -o $@
 
 # -- example.o + startup.o -> kernel.elf ---------------------------------------
@@ -176,6 +176,11 @@ qemu-arp-reply: examples/arp_reply/kernel.elf
 ## qemu-icmp-echo: manually run the ICMP echo (ping) responder (Ctrl-A X to quit).
 ## In another terminal: python3 scripts/icmp_echo_test.py
 qemu-icmp-echo: examples/icmp_echo/kernel.elf
+	$(QEMU) $(QEMU_FLAGS) $(VIRTIO_NET_FLAGS) -kernel $<
+
+## qemu-tcp-echo: manually run the TCP echo server (Ctrl-A X to quit).
+## In another terminal: python3 scripts/tcp_echo_test.py
+qemu-tcp-echo: examples/tcp_echo/kernel.elf
 	$(QEMU) $(QEMU_FLAGS) $(VIRTIO_NET_FLAGS) -kernel $<
 
 # -- clean ---------------------------------------------------------------------
