@@ -8,6 +8,7 @@ TIMEOUT=10
 
 PASS=0
 FAIL=0
+FAILED_TESTS=()
 
 # ANSI colours only when writing to a terminal
 if [ -t 1 ]; then
@@ -50,6 +51,7 @@ run_test() {
         printf "       expected bytes: %s\n" "$(od -An -c "$expected" | tr -s ' \n' ' ')"
         printf "       got bytes:      %s\n" "$(od -An -c "$tmp_out"  | tr -s ' \n' ' ')"
         FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
     fi
 
     rm -f "$tmp_out"
@@ -85,6 +87,7 @@ run_test_timed() {
         [ "$timing_ok" -eq 0 ] && \
             printf "       elapsed %ds < required %ds\n" "$elapsed" "$min_secs"
         FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
     fi
 
     rm -f "$tmp_out"
@@ -105,6 +108,7 @@ run_compile_error_test() {
         printf "${RED}FAIL${RST}  %s\n" "$name"
         printf "       expected compile error, but compilation succeeded\n"
         FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
     else
         if grep -qF "$expected_msg" "$tmp_err"; then
             printf "${GRN}PASS${RST}  %s\n" "$name"
@@ -114,6 +118,7 @@ run_compile_error_test() {
             printf "       expected: %s\n" "$expected_msg"
             printf "       got:      %s\n" "$(cat "$tmp_err")"
             FAIL=$((FAIL + 1))
+            FAILED_TESTS+=("$name")
         fi
     fi
 
@@ -158,6 +163,7 @@ run_virtio_test() {
         printf "       qemu output:\n"
         sed 's/^/       /' "$qemu_log"
         FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
     fi
 
     rm -f "$qemu_log"
@@ -178,6 +184,7 @@ run_no_trap_test() {
     else
         printf "${RED}FAIL${RST}  %s  ($count brk instruction(s) -- runtime trap risk)\n" "$name"
         FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
     fi
 }
 
@@ -262,6 +269,11 @@ if [ "$FAIL" -eq 0 ]; then
     printf "${GRN}All $PASS tests passed.${RST}\n"
 else
     printf "${RED}$FAIL test(s) failed${RST} ($PASS passed).\n"
+    printf "${RED}Failed:${RST}"
+    for t in "${FAILED_TESTS[@]}"; do
+        printf "  %s" "$t"
+    done
+    printf "\n"
 fi
 
 [ "$FAIL" -eq 0 ]
