@@ -653,7 +653,19 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
              (TypeNamed ename, v_coerced)
            end
        | _ ->
-           (target_ty, coerce v target_ty))
+           (* Every other u8/i16/etc-typed expression result (Var, Index,
+              FieldGet, Deref) is represented in-flight as an i32-widened
+              value per widen_load's invariant ("arithmetic values arrive
+              at coerce already widened"); coerce narrows only at the
+              point of storage. `as` must match that invariant too: coerce
+              to the true narrow width first (so truncation semantics are
+              correct, e.g. `300 as u8` really wraps to 44), then widen
+              back so the returned value composes correctly with other
+              expressions (e.g. `idx_expr == literal_expr as u8`, where
+              idx_expr is an i32-widened Index read of a u8 array/pointer
+              -- returning a bare narrow i8 here would make the two sides
+              of `==` disagree in LLVM type despite matching AST types). *)
+           (target_ty, to_arith_width target_ty (coerce v target_ty)))
 
   | FieldGet (base_expr, fname) ->
       let (base_ty, base_v) = gen_expr locals base_expr in
@@ -1173,7 +1185,20 @@ let gen_func ?prog_types fdef =
     else ignore (build_ret (const_int (ltype_of_ast ret_ast) 0) builder)
   end;
 
-  Llvm_analysis.assert_valid_function f;
+  (* Use the non-aborting checker, not Llvm_analysis.assert_valid_function:
+     that variant prints a diagnostic to stderr and calls C's abort() (see
+     llvm_analysis.mli) on invalid IR, which is not a catchable OCaml
+     exception. That took down the entire test process with SIGABRT and no
+     indication of which test case triggered it (see git history around
+     2026-07 for the codegen bug this caught and the experiment that
+     compared both). Raising Error here instead lets both the CLI (which
+     already doesn't catch Error specially, same as every other internal
+     Error in this file) and the test suite report a normal, attributable
+     failure. *)
+  if not (Llvm_analysis.verify_function f) then
+    raise (Error (Printf.sprintf
+      "internal compiler error: invalid LLVM IR generated for function '%s'\n%s"
+      fdef.name (string_of_llvalue f)));
   f
 
 (* -- Top-level codegen --------------------------------------------------- *)

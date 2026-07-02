@@ -10,6 +10,27 @@ let parse src =
 let infer src =
   Type_inf.infer_program (parse src)
 
+(* Runs the full pipeline through LLVM codegen (no target machine, no
+   object-file emission -- gen_program works without setup_target, see its
+   align_opt handling). Each caller must use function/global names unique
+   within this test binary: Llvm_gen.the_module is a single process-global
+   module with no reset, so two test cases defining the same name would
+   collide. *)
+let gen_codegen src =
+  let prog = parse src in
+  let prog_types = Type_inf.infer_program prog in
+  Llvm_gen.gen_program ~prog_types prog
+
+(* Expect the full pipeline (parse -> infer -> codegen) to succeed,
+   including LLVM's own IR verifier (gen_func calls
+   Llvm_analysis.verify_function and raises Llvm_gen.Error on failure --
+   see the comment at that call site for why it's not the aborting
+   Llvm_analysis.assert_valid_function). *)
+let expect_codegen_ok src () =
+  match gen_codegen src with
+  | _ -> ()
+  | exception Llvm_gen.Error msg -> Alcotest.failf "unexpected codegen Error: %s" msg
+
 (* Custom Alcotest testables *)
 
 let rec show_type = function
@@ -1818,9 +1839,55 @@ let infer_tests = [
 
 ]
 
+(* -- Codegen tests ----------------------------------------------------------
+   parser/type_inf tests check the AST/type layer; these additionally run
+   real LLVM codegen and its verifier, catching bugs that only manifest as
+   invalid IR (mismatched operand types, missing terminators, etc.) rather
+   than a type error. Kept small and targeted rather than broad: this is a
+   regression suite for specific past codegen bugs, not a general codegen
+   test bed (that role is filled by examples/ + make qemutest, which also
+   checks runtime behavior, not just "the IR verifies"). *)
+
+let codegen_tests = [
+
+  Alcotest.test_case
+    "u8 loaded via array indexing compares against a u8 cast literal \
+     (regression: both must be i32-widened in-flight, or LLVM's verifier \
+     rejects the mismatched icmp operand widths)" `Quick
+    (expect_codegen_ok
+       "fn codegen_u8_index_cmp_array(p: *u8) -> i32 {
+          let mut a: [u8; 4];
+          a[0] = 6 as u8;
+          if (a[0] == 6 as u8) { return 1; }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "u8 loaded via pointer indexing compares against a u8 cast literal \
+     (same regression as above, through a *u8 parameter instead of an \
+     array)" `Quick
+    (expect_codegen_ok
+       "fn codegen_u8_index_cmp_ptr(p: *u8) -> i32 {
+          if (p[0] == 6 as u8) { return 1; }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "u8 as u8 cast result composes with itself across a chain of && \
+     comparisons (the exact shape used in examples/arp_reply/arp_reply.tkb \
+     for ARP header validation)" `Quick
+    (expect_codegen_ok
+       "fn codegen_u8_cast_chain(p: *u8) -> i32 {
+          if (p[0] == 6 as u8 && p[1] == 4 as u8) { return 1; }
+          return 0;
+        }");
+
+]
+
 (* -- Entry point ----------------------------------------------------------- *)
 
 let () = Alcotest.run "takibi" [
   "parser",   parser_tests;
   "type_inf", infer_tests;
+  "codegen",  codegen_tests;
 ]

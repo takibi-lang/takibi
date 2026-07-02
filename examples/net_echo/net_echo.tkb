@@ -47,7 +47,7 @@ fn main() {
         gic_init();
         gic_enable_virtio_irq();
 
-        virtio_negotiate();
+        virtio_negotiate(0); // no optional features needed for a blind L2 echo
         virtio_queue_setup(0, rx_queue_mem as *u8); // RX
         virtio_queue_setup(1, tx_queue_mem as *u8); // TX
         virtio_driver_ok();

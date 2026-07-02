@@ -49,6 +49,9 @@ let QNUM: i32 = 8; // virtqueue depth for both the RX and TX queues
 // Descriptor flags (virtio spec).
 let VIRTQ_DESC_F_WRITE: i32 = 2; // device writes into this buffer (RX only)
 
+let VIRTIO_NET_F_MAC: i32 = 32; // bit 5: device exposes its MAC in Config space
+let VIRTIO_CONFIG_MAC_OFFSET: i32 = 0x100; // Config space starts right after the transport registers
+
 // Discovered at runtime: the slot base address is NOT fixed by the
 // compiler, because QEMU does not always attach a lone virtio-net-device
 // to slot 0 -- empirically, under this devcontainer's QEMU 8.2.2 with a
@@ -104,15 +107,19 @@ fn gic_enable_virtio_irq() {
 // Device bring-up up through feature negotiation. Queue setup and
 // DRIVER_OK happen separately (virtio_queue_setup / virtio_driver_ok)
 // since the caller needs to set up both queues in between.
-fn virtio_negotiate() {
+//
+// `features` is caller-chosen rather than hardcoded to 0: offloads are
+// already disabled on the QEMU command line regardless (keeping
+// virtio_net_hdr fixed at 10 bytes and skipping the control queue), but
+// some callers need a specific bit acked -- e.g. arp_reply.tkb needs
+// VIRTIO_NET_F_MAC to be allowed to read the device's MAC out of Config
+// space. Pass 0 for "no optional features" (net_echo.tkb doesn't need any).
+fn virtio_negotiate(features: i32) {
     *(vreg(VIRTIO_STATUS)) = 0; // reset
     *(vreg(VIRTIO_STATUS)) = STATUS_ACKNOWLEDGE;
     *(vreg(VIRTIO_STATUS)) = STATUS_ACKNOWLEDGE | STATUS_DRIVER;
 
-    // Ack no optional features -- offloads are already disabled on the
-    // QEMU command line, so this keeps virtio_net_hdr fixed at 10 bytes
-    // and skips the control queue entirely.
-    *(vreg(VIRTIO_GUEST_FEATURES)) = 0;
+    *(vreg(VIRTIO_GUEST_FEATURES)) = features;
     *(vreg(VIRTIO_GUEST_PAGE_SIZE)) = PAGE_SIZE;
 }
 
@@ -127,6 +134,17 @@ fn virtio_queue_setup(queue_idx: i32, queue_mem: *u8) {
 
 fn virtio_driver_ok() {
     *(vreg(VIRTIO_STATUS)) = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK;
+}
+
+// Reads the device's 6-byte MAC out of Config space. Only meaningful if
+// VIRTIO_NET_F_MAC was acked in virtio_negotiate() -- QEMU populates this
+// field from -device virtio-net-device,mac=... regardless, but reading it
+// without acking the feature bit is technically off-spec.
+fn virtio_net_read_mac(mac_out: *u8) {
+    for i in 0..<6 {
+        let p: *io u8 = (virtio_base + VIRTIO_CONFIG_MAC_OFFSET + i) as *io u8;
+        mac_out[i] = *p;
+    }
 }
 
 fn virtio_notify(queue_idx: i32) {

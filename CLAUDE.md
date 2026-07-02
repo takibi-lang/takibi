@@ -199,6 +199,50 @@ Files changed when `expr as T` was added:
    - `*T -> usize`: `ptrtoint ptr, i64` (full 64-bit address; no truncation)
    - `*T -> *U`: **no-op** (in LLVM 19, all pointers are the same `ptr` type, so the leading `if vty = dst_ll then v` in `coerce` applies; no compiler change needed)
 
+**Bug fixed while building examples/arp_reply (2026-07): `as` must return a
+widened value, not a bare narrow one.** `widen_load`'s doc comment states
+the invariant every other narrow-typed expression path relies on:
+"arithmetic values arrive at `coerce` already widened to i32/i64; `coerce`
+narrows only at the point of storage." `Var`, `Index`, `FieldGet`, and
+`Deref` all follow it -- each loads the raw narrow value, then calls
+`to_arith_width` before returning it as an in-flight `gen_expr` result. The
+`Cast` case's fallback branch did not: it returned `coerce v target_ty`
+directly, so `expr as u8` produced a genuine `i8` value instead of an
+`i8`-truncated-then-`i32`-widened one. Two u8-typed expressions with
+different origins (say, `arr[i]` vs `6 as u8`) then disagreed on LLVM type
+despite agreeing on AST type, and `icmp eq i32 ..., i8 6` crashed the LLVM
+verifier ("Broken function found") -- not a wrong-answer bug, a
+compile-time crash on any narrow-typed comparison/arithmetic that mixed a
+loaded value with a cast literal. Fixed by changing the fallback to
+`to_arith_width target_ty (coerce v target_ty)`, matching every other
+narrow-typed path. **Lesson for future codegen changes**: any `gen_expr`
+case returning a `TypeI8/I16/U8/U16` (or `bool`-adjacent) value must widen
+before returning, even if the AST type says narrow -- the AST type and the
+LLVM value's actual bit width are intentionally allowed to diverge for
+<=32-bit integer types, and every consumer downstream (`coerce`,
+arithmetic, comparisons) assumes the widened representation.
+
+**Follow-up (same 2026-07 investigation): `gen_func` now uses
+`Llvm_analysis.verify_function` + `raise (Error ...)` instead of
+`Llvm_analysis.assert_valid_function`.** The assert variant prints its
+diagnostic to stderr and calls C's `abort()` on invalid IR (see
+`llvm_analysis.mli`) -- not a catchable OCaml exception. An experiment
+confirmed the difference concretely: reproducing the bug above under the
+old assert-based code killed the whole `test_takibi.exe` process with
+SIGABRT (exit 134), silently dropping every test case scheduled after the
+crashing one with no indication of which test caused it; the same
+reproduction under `verify_function` produced a normal Alcotest `[FAIL]`
+line naming the test, a full backtrace, and let all 271 tests still run
+("3 failures! ... 271 tests run"). Any future `gen_func`-adjacent change
+that might produce invalid IR should rely on this catchable path, not
+reintroduce an aborting check -- it's the difference between `make check`
+telling you exactly which test regressed versus just telling you dune
+test crashed somewhere. See `test/test_takibi.ml`'s `codegen_tests` group
+for the regression coverage this enabled (three cases exercising the
+pattern above, using a `gen_codegen`/`expect_codegen_ok` helper that runs
+the real parse -> infer -> `Llvm_gen.gen_program` pipeline without a
+target machine).
+
 ### sizeof(T) Spans 4 Files
 Files changed when `sizeof(T)` was added:
 1. `lib/ast.ml` -- `SizeOf of type_expr` constructor in `expr_desc`
@@ -526,14 +570,23 @@ When adding a new example that needs timer or semaphore support, add it to the a
   - To fire at ~15 ms intervals: `lsr x0, cntfrq, #6` -> `msr cntp_tval_el0, x0`
   - The virtual timer (CNTV, PPI #27) requires EL2 hypervisor configuration on QEMU virt, so use the physical timer (CNTP, PPI #30) for bare-metal EL1.
 
-## virtio-net L2 Echo (examples/net_echo)
+## virtio-net Examples (examples/net_echo, examples/arp_reply)
 
-QEMU-only stepping stone toward the TCP/IP stack goal: receives a raw
-Ethernet frame over virtio-net, swaps src/dst MAC, sends it back. No ARP,
-no IP -- it only proves the virtqueue/DMA/IRQ plumbing. `virtio-net`
-doesn't exist on real hardware (RPi3/RISC-V/STM32 will need dedicated
-MAC/PHY drivers later); what transfers is the ring-buffer/IRQ pattern, not
-the virtio protocol itself.
+QEMU-only stepping stones toward the TCP/IP stack goal, each adding one
+protocol layer on top of the same virtqueue/DMA/IRQ plumbing:
+- `net_echo`: receives a raw Ethernet frame over virtio-net, swaps
+  src/dst MAC, sends it back unchanged otherwise. No protocol parsing at
+  all -- proves the plumbing works.
+- `arp_reply`: answers ARP "who-has 192.0.2.1" with "is-at <our MAC>"
+  (192.0.2.1 is RFC 5737 TEST-NET-1, chosen specifically because it's
+  reserved for exactly this kind of test/example use); every other frame
+  (wrong EtherType, wrong OPER, request for a different IP) is dropped,
+  not echoed. First real protocol dispatch and in-place header rewriting.
+
+`virtio-net` doesn't exist on real hardware (RPi3/RISC-V/STM32 will need
+dedicated MAC/PHY drivers later); what transfers is the ring-buffer/IRQ
+pattern and the raw-byte-offset header manipulation technique, not the
+virtio protocol itself.
 
 - **Legacy virtio-mmio only** (`-global virtio-mmio.force-legacy=on`).
   Skips the FEATURES_OK handshake and the split 64-bit feature/queue-address
@@ -563,18 +616,58 @@ the virtio protocol itself.
   (`descs[i].field = v`) isn't expressible. `desc_set`/`avail_ring_set`/
   `used_ring_get_*` in `virtio_mmio.tkb` poke fixed byte offsets through
   cast pointers instead, the same way a minimal C driver would.
+  `arp_reply.tkb` extends the same technique to the ARP header itself
+  (`bytes_eq`/`bytes_copy`/`read_u16be`/`write_u16be`), rewriting the
+  request into a reply in place with no temporary struct/copy -- this was
+  a deliberate choice over copying into a local struct and back (see
+  git history around 2026-07 for the reasoning): raw offsets touch only
+  the bytes that actually change and avoid a full extra copy in and out,
+  and takibi has no struct-literal-from-bytes/memcpy builtin that would
+  make the copy-based version meaningfully shorter anyway.
+- **MAC/IP fields are always handled as raw byte arrays, never as a single
+  multi-byte integer.** They're compared/copied byte-by-byte
+  (`bytes_eq`/`bytes_copy`), not loaded as e.g. a `u32`, specifically to
+  avoid an endianness bug: ARP fields are big-endian on the wire, this
+  target is little-endian, and a raw multi-byte load would silently
+  byte-reverse the value. `read_u16be`/`write_u16be` (used for EtherType
+  and ARP OPER, which *are* conventionally written/compared as 16-bit hex
+  constants like `0x0806`) manually compose/decompose big-endian integers
+  from individual byte reads/writes instead of relying on the host's
+  native load width, sidestepping the issue entirely regardless of target
+  endianness.
+- **`arp_reply.tkb` reads its own MAC from the device instead of
+  hardcoding it**, via `virtio_net_read_mac()` in `virtio_mmio.tkb`
+  (Config space offset `0x100`, gated on negotiating `VIRTIO_NET_F_MAC`).
+  This is why `virtio_negotiate()` takes a `features: i32` parameter
+  instead of always acking 0 -- `net_echo.tkb` still passes `0` (it never
+  reads Config space), `arp_reply.tkb` passes `VIRTIO_NET_F_MAC`. Avoids a
+  second hardcoded MAC constant that would need to be kept in sync with
+  the QEMU command line's `mac=` value.
 - **Used-ring polling reads must be `io`.** `used_idx_get` etc. read memory
-  the device writes via DMA and are polled in a busy-wait loop in
-  `net_echo.tkb`'s main loop -- exactly the "LLVM may hoist a load out of a
-  tight loop" hazard described under "Volatile Reads of Global Variables"
-  above, since nothing else marks that memory as externally modified.
-- **Test harness**: `scripts/virtio_net_test.py` sends/verifies raw frames
-  over a UDP-backed `-netdev dgram` (one UDP datagram == one raw Ethernet
-  frame, no ARP/DHCP noise since it's a private point-to-point socket,
-  unlike `-netdev user`). This is the one place in the test suite that
-  depends on Python -- `run_qemutest.sh` invokes it via `run_virtio_test`,
-  which judges pass/fail by the script's exit code rather than diffing
-  QEMU's stdout, so `net_echo.tkb` is free to print debug output.
+  the device writes via DMA and are polled in a busy-wait loop in the main
+  loop -- exactly the "LLVM may hoist a load out of a tight loop" hazard
+  described under "Volatile Reads of Global Variables" above, since
+  nothing else marks that memory as externally modified.
+- **Test harness**: `scripts/virtio_net_test.py` and `scripts/arp_test.py`
+  send/verify raw frames over a UDP-backed `-netdev dgram` (one UDP
+  datagram == one raw Ethernet frame, no ARP/DHCP noise since it's a
+  private point-to-point socket, unlike `-netdev user`). This is the one
+  place in the test suite that depends on Python -- `run_qemutest.sh`
+  invokes them via `run_virtio_test NAME KERNEL SCRIPT`, which judges
+  pass/fail by the script's exit code rather than diffing QEMU's stdout,
+  so the kernels are free to print debug output. Deliberately NOT
+  unit-tested in isolation (no QEMU-free test of the comparison logic):
+  the scripts are simple enough (plain byte-equality checks) that the
+  cost of a second, QEMU-booting "does the test detect a broken echo"
+  test wasn't judged worth it -- see git history around 2026-07 if that
+  tradeoff needs revisiting as the scripts grow more complex.
+- **`run_qemutest.sh` prints a `Failed: name1 name2 ...` line in its final
+  summary** (via a `FAILED_TESTS` array appended to on every failure
+  branch) rather than stopping at the first failure. Deliberate: QEMU
+  boot cost makes fail-fast expensive to iterate against in CI (you'd only
+  learn about the next failure after fixing and re-running), so the
+  script always runs everything and reports the full failure list at the
+  end instead.
 
 ## Instructions for Claude Code
 

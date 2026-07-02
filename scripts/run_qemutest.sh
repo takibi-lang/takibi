@@ -125,20 +125,21 @@ run_compile_error_test() {
     rm -f "$tmp_err" "$tmp_obj"
 }
 
-# run_virtio_test NAME KERNEL
+# run_virtio_test NAME KERNEL SCRIPT
 #
 # Launches QEMU with a virtio-net-device backed by a UDP -netdev dgram
-# (one UDP datagram == one raw Ethernet frame) and runs
-# scripts/virtio_net_test.py, which sends/verifies frames directly over
-# that socket. Correctness is judged entirely by the python script's exit
-# code, not by diffing QEMU's stdout, so the kernel is free to print debug
-# output via uart_puts without affecting the result. Uses its own timeout
-# (VIRTIO_TIMEOUT) rather than TIMEOUT: virtio_net_test.py sends dozens of
-# frames with a bounded per-frame retry loop, which legitimately takes
-# longer than the simple byte-diff tests above.
+# (one UDP datagram == one raw Ethernet frame) and runs the given python
+# SCRIPT (e.g. virtio_net_test.py, arp_test.py), which sends/verifies
+# frames directly over that socket. Correctness is judged entirely by the
+# python script's exit code, not by diffing QEMU's stdout, so the kernel
+# is free to print debug output via uart_puts without affecting the
+# result. Uses its own timeout (VIRTIO_TIMEOUT) rather than TIMEOUT: the
+# python scripts send dozens of frames with a bounded per-frame retry
+# loop, which legitimately takes longer than the simple byte-diff tests
+# above.
 VIRTIO_TIMEOUT=30
 run_virtio_test() {
-    local name="$1" kernel="$2"
+    local name="$1" kernel="$2" script="$3"
     local qemu_log
     qemu_log=$(mktemp)
 
@@ -150,7 +151,7 @@ run_virtio_test() {
     local qpid=$!
 
     local rc=0
-    timeout 25 python3 "$(dirname "$0")/virtio_net_test.py" || rc=$?
+    timeout 25 python3 "$(dirname "$0")/$script" || rc=$?
 
     kill "$qpid" 2>/dev/null || true
     wait "$qpid" 2>/dev/null || true
@@ -250,7 +251,8 @@ run_test "packed"        examples/packed/kernel.elf        examples/packed/packe
 run_test "struct_align"  examples/struct_align/kernel.elf  examples/struct_align/struct_align.expected
 run_test "const_global"  examples/const_global/kernel.elf  examples/const_global/const_global.expected
 run_test "sizeof"        examples/sizeof/kernel.elf        examples/sizeof/sizeof.expected
-run_virtio_test "net_echo" examples/net_echo/kernel.elf
+run_virtio_test "net_echo"   examples/net_echo/kernel.elf   virtio_net_test.py
+run_virtio_test "arp_reply"  examples/arp_reply/kernel.elf  arp_test.py
 
 echo ""
 echo "Running no-trap checks (brk must be zero in these kernels)..."
@@ -259,7 +261,7 @@ echo ""
 # Examples whose bounds should be fully proven at the type level. If brk appears, review the type annotations.
 for e in start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci \
           bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt \
-          semaphore condvar struct msgqueue watchdog refined narrow for loop bitops align packed struct_align sizeof net_echo; do
+          semaphore condvar struct msgqueue watchdog refined narrow for loop bitops align packed struct_align sizeof net_echo arp_reply; do
 # enum is intentionally excluded: `i as Color` (int->enum cast) emits llvm.trap for invalid values
     run_no_trap_test "$e (no-trap)" "examples/$e/kernel.elf"
 done

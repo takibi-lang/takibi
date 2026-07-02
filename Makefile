@@ -25,12 +25,12 @@ COMMON_VIRTIO_MMIO := $(COMMON_DIR)/virtio_mmio.tkb
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
 # Convention: examples/<name>/<name>.tkb -> examples/<name>/kernel.elf
-EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof net_echo
+EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof net_echo arp_reply
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest langcheck check clean qemu-echo qemu-net-echo
+.PHONY: build test qemutest langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply
 
 .DEFAULT_GOAL := build
 
@@ -80,7 +80,7 @@ $(COMMON_SEM_ASM_O): $(COMMON_SEM_ASM_S)
 #   IRQ group  : + gic.tkb                                   (irq)
 #   Timer group: + gic.tkb + timer.tkb                       (preempt semaphore watchdog)
 #   Sync group : + gic.tkb + timer.tkb + sync.tkb            (condvar msgqueue)
-#   Net group  : + gic.tkb + virtio_mmio.tkb                 (net_echo)
+#   Net group  : + gic.tkb + virtio_mmio.tkb                 (net_echo, arp_reply)
 .SECONDEXPANSION:
 
 IRQ_OBJS   := examples/irq/irq.o
@@ -88,7 +88,7 @@ IRQ_OBJS   := examples/irq/irq.o
 TIMER_OBJS := examples/preempt/preempt.o examples/semaphore/semaphore.o \
               examples/watchdog/watchdog.o
 SYNC_OBJS  := examples/condvar/condvar.o examples/msgqueue/msgqueue.o
-NET_OBJS   := examples/net_echo/net_echo.o
+NET_OBJS   := examples/net_echo/net_echo.o examples/arp_reply/arp_reply.o
 SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS) $(NET_OBJS)
 STANDARD_OBJS := $(filter-out $(SPECIAL_OBJS), $(EXAMPLE_OBJS))
 
@@ -153,6 +153,11 @@ VIRTIO_NET_FLAGS := -global virtio-mmio.force-legacy=on \
 ## qemu-net-echo: manually run the L2 echo server (Ctrl-A X to quit).
 ## In another terminal: python3 scripts/virtio_net_test.py
 qemu-net-echo: examples/net_echo/kernel.elf
+	$(QEMU) $(QEMU_FLAGS) $(VIRTIO_NET_FLAGS) -kernel $<
+
+## qemu-arp-reply: manually run the ARP responder (Ctrl-A X to quit).
+## In another terminal: python3 scripts/arp_test.py
+qemu-arp-reply: examples/arp_reply/kernel.elf
 	$(QEMU) $(QEMU_FLAGS) $(VIRTIO_NET_FLAGS) -kernel $<
 
 # -- clean ---------------------------------------------------------------------
