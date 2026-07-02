@@ -1,0 +1,20 @@
+=== valid packet ===
+IPv4 packet:
+  version:   4
+  ihl:       20
+  total_len: 60
+  ttl:       64
+  protocol:  6 (TCP)
+  src:       172.16.10.99
+  dst:       172.16.10.12
+  checksum:  OK
+=== corrupted packet (TTL changed after checksum) ===
+IPv4 packet:
+  version:   4
+  ihl:       20
+  total_len: 60
+  ttl:       1
+  protocol:  6 (TCP)
+  src:       172.16.10.99
+  dst:       172.16.10.12
+  checksum:  BAD

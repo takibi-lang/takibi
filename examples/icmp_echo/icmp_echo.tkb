@@ -1,0 +1,202 @@
+// ICMP echo (ping) responder over QEMU's virtio-net-device -- the IPv4
+// "echo server" step. Answers ICMP echo requests (type 8) addressed to
+// our_ip with an echo reply (type 0), preserving identifier/sequence/data
+// unchanged. Builds on examples/net_echo (virtqueue/IRQ plumbing),
+// examples/arp_reply (protocol dispatch + in-place raw-offset header
+// rewriting), and examples/ip_parse (field layout/validation logic) --
+// this is the first example that needs a *correct* checksum on the wire
+// rather than just a validated one (examples/common/inet_checksum.tkb).
+//
+// Scope: IPv4 headers with no options only (IHL must be 5 / 20 bytes).
+// ARP is not handled here (see examples/arp_reply) since the raw
+// point-to-point test transport never needs ARP resolution to reach this
+// responder -- frames are addressed directly by MAC.
+
+let RX_BUF_SIZE: i32 = 1536;
+
+let mut rx_queue_mem: [u8; 8192] align(4096);
+let mut tx_queue_mem: [u8; 8192] align(4096);
+let mut rx_bufs: [u8; 12288];
+
+let mut our_mac: [u8; 6];
+let mut our_ip:  [u8; 4];
+
+// IPv4 field offsets, relative to the start of the IP header.
+let IP_VERSION_IHL: i32 = 0;
+let IP_TOTAL_LEN:   i32 = 2;
+let IP_TTL:         i32 = 8;
+let IP_PROTOCOL:    i32 = 9;
+let IP_CHECKSUM:    i32 = 10;
+let IP_SRC:         i32 = 12;
+let IP_DST:         i32 = 16;
+
+// ICMP field offsets, relative to the start of the ICMP message.
+let ICMP_TYPE:     i32 = 0;
+let ICMP_CODE:     i32 = 1;
+let ICMP_CHECKSUM: i32 = 2;
+
+let PROTO_ICMP:        i32 = 1;
+let ICMP_ECHO_REQUEST: i32 = 8;
+let ICMP_ECHO_REPLY:   i32 = 0;
+
+fn bytes_eq(a: *u8, b: *u8, n: i32) -> i32 {
+    for i in 0..<n {
+        if (a[i] != b[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+fn bytes_copy(dst: *u8, src: *u8, n: i32) {
+    for i in 0..<n {
+        dst[i] = src[i];
+    }
+}
+
+fn read_u16be(p: *u8) -> i32 {
+    return (p[0] as i32) * 256 + (p[1] as i32);
+}
+
+fn write_u16be(p: *u8, v: i32) {
+    p[0] = (v / 256) as u8;
+    p[1] = (v - (v / 256) * 256) as u8;
+}
+
+// Rewrites an ICMP echo request into a reply in place, and the enclosing
+// IPv4/Ethernet headers to match. Only called after the caller has already
+// verified this is a well-formed echo request addressed to our_ip.
+fn build_echo_reply(eth: *u8, ip: *u8, ihl: i32, icmp: *u8, icmp_len: i32) {
+    // Ethernet: dst = old src, then src = our_mac (must read old src
+    // before it's overwritten).
+    bytes_copy(eth, eth + 6, 6);
+    bytes_copy(eth + 6, our_mac as *u8, 6);
+
+    // IPv4: dst = old src, src = our_ip, fresh TTL, recompute checksum
+    // (source/dest/TTL all changed since the request).
+    bytes_copy(ip + IP_DST, ip + IP_SRC, 4);
+    bytes_copy(ip + IP_SRC, our_ip as *u8, 4);
+    ip[IP_TTL] = 64 as u8;
+    write_u16be(ip + IP_CHECKSUM, 0);
+    write_u16be(ip + IP_CHECKSUM, inet_checksum(ip, ihl));
+
+    // ICMP: type request -> reply, identifier/sequence/data unchanged,
+    // recompute checksum (it covers the type byte, which just changed).
+    icmp[ICMP_TYPE] = ICMP_ECHO_REPLY as u8;
+    write_u16be(icmp + ICMP_CHECKSUM, 0);
+    write_u16be(icmp + ICMP_CHECKSUM, inet_checksum(icmp, icmp_len));
+}
+
+fn irq_dispatch(frame_sp: i32) -> i32 {
+    let id: i32 = *(gic.cpu_iar);
+    if (id == virtio_gic_irq) {
+        virtio_irq_handler();
+    }
+    *(gic.cpu_eoir) = id;
+    return frame_sp;
+}
+
+fn main() {
+    uart_puts("icmp_echo: init\r\n");
+    if (virtio_net_find() == 0) {
+        uart_puts("icmp_echo: virtio-net device not found\r\n");
+    } else {
+        gic_init();
+        gic_enable_virtio_irq();
+
+        virtio_negotiate(VIRTIO_NET_F_MAC);
+        virtio_net_read_mac(our_mac as *u8);
+        our_ip[0] = 192 as u8;
+        our_ip[1] = 0 as u8;
+        our_ip[2] = 2 as u8;
+        our_ip[3] = 1 as u8;
+
+        virtio_queue_setup(0, rx_queue_mem as *u8); // RX
+        virtio_queue_setup(1, tx_queue_mem as *u8); // TX
+        virtio_driver_ok();
+
+        for i in 0..<QNUM {
+            let buf: *u8 = rx_bufs + i * RX_BUF_SIZE;
+            desc_set(rx_queue_mem as *u8, i, buf as usize, RX_BUF_SIZE, VIRTQ_DESC_F_WRITE);
+            avail_ring_set(rx_queue_mem as *u8, i, i);
+        }
+        let mut rx_avail_idx: i32 = QNUM;
+        avail_publish(rx_queue_mem as *u8, rx_avail_idx);
+        virtio_notify(0);
+
+        uart_puts("icmp_echo: ready\r\n");
+
+        let mut rx_used_seen: i32 = 0;
+        let mut tx_used_seen: i32 = 0;
+        let mut tx_avail_idx: i32 = 0;
+
+        while (1) {
+            let flag_p: *io i32 = &virtio_irq_flag;
+            while (*flag_p == 0) {}
+            virtio_irq_flag = 0;
+
+            while (rx_used_seen != used_idx_get(rx_queue_mem as *u8)) {
+                let slot: i32 = rx_used_seen % QNUM;
+                let desc_idx: i32 = used_ring_get_id(rx_queue_mem as *u8, slot);
+                let frame_total_len: i32 = used_ring_get_len(rx_queue_mem as *u8, slot);
+                let buf: *u8 = rx_bufs + desc_idx * RX_BUF_SIZE;
+                let eth: *u8 = buf + 10; // past the virtio_net_hdr
+
+                // 10 (virtio hdr) + 14 (eth) + 20 (min IPv4) + 8 (min ICMP) = 52
+                if (frame_total_len >= 52 && read_u16be(eth + 12) == 0x0800) {
+                    let ip: *u8 = eth + 14;
+                    let version: i32 = (ip[IP_VERSION_IHL] as i32) >> 4;
+                    let ihl:     i32 = ((ip[IP_VERSION_IHL] as i32) & 0x0f) * 4;
+
+                    // No IP options supported -- IHL must be exactly 20.
+                    if (version == 4 && ihl == 20) {
+                        let total_len:       i32 = read_u16be(ip + IP_TOTAL_LEN);
+                        let ip_len_in_frame: i32 = frame_total_len - 10 - 14;
+
+                        // total_len must fit what the device actually
+                        // delivered, and must be large enough to contain
+                        // the IPv4 header itself, before it's used to
+                        // size the ICMP checksum read below.
+                        if (total_len <= ip_len_in_frame && total_len >= ihl) {
+                            if ((ip[IP_PROTOCOL] as i32) == PROTO_ICMP &&
+                                inet_checksum(ip, ihl) == 0) {
+                                if (bytes_eq(ip + IP_DST, our_ip as *u8, 4) == 1) {
+                                    let icmp:     *u8 = ip + ihl;
+                                    let icmp_len: i32 = total_len - ihl;
+
+                                    if (icmp_len >= 8) {
+                                        if ((icmp[ICMP_TYPE] as i32) == ICMP_ECHO_REQUEST &&
+                                            (icmp[ICMP_CODE] as i32) == 0 &&
+                                            inet_checksum(icmp, icmp_len) == 0) {
+
+                                            build_echo_reply(eth, ip, ihl, icmp, icmp_len);
+
+                                            let reply_len: i32 = 10 + 14 + total_len;
+                                            desc_set(tx_queue_mem as *u8, 0, buf as usize, reply_len, 0);
+                                            avail_ring_set(tx_queue_mem as *u8, 0, 0);
+                                            tx_avail_idx = tx_avail_idx + 1;
+                                            avail_publish(tx_queue_mem as *u8, tx_avail_idx);
+                                            virtio_notify(1);
+
+                                            while (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {}
+                                            tx_used_seen = tx_used_seen + 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Re-post the RX descriptor regardless of whether we replied.
+                let rx_slot: i32 = rx_avail_idx % QNUM;
+                avail_ring_set(rx_queue_mem as *u8, rx_slot, desc_idx);
+                rx_avail_idx = rx_avail_idx + 1;
+                avail_publish(rx_queue_mem as *u8, rx_avail_idx);
+                virtio_notify(0);
+
+                rx_used_seen = rx_used_seen + 1;
+            }
+        }
+    }
+}

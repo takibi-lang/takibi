@@ -1,0 +1,35 @@
+// Demo of the Internet checksum (RFC 1071) algorithm -- see
+// examples/common/inet_checksum.tkb for the implementation. No networking
+// I/O here, just the algorithm, following the same pure-compute demo
+// pattern as crc8.tkb/djb2.tkb.
+//
+// Demonstrated on a real IPv4 header (20 bytes, no options):
+//   - Checksumming the header AS-IS (with its correct checksum field
+//     already in place) must yield 0x0000 -- that's how a receiver
+//     verifies a packet.
+//   - Checksumming the same header with the checksum field zeroed yields
+//     the value that belongs in that field -- that's how a sender computes
+//     it before transmitting.
+// Both expected values were verified independently in Python before being
+// committed here as the .expected file.
+
+fn main() {
+    // version/IHL, DSCP/ECN, total length, id, flags/fragoffset, TTL,
+    // protocol, checksum, src IP, dst IP.
+    let mut hdr: [u8; 20];
+    hdr[0]  = 0x45 as u8; hdr[1]  = 0x00 as u8; hdr[2]  = 0x00 as u8; hdr[3]  = 0x3c as u8;
+    hdr[4]  = 0x1c as u8; hdr[5]  = 0x46 as u8; hdr[6]  = 0x40 as u8; hdr[7]  = 0x00 as u8;
+    hdr[8]  = 0x40 as u8; hdr[9]  = 0x06 as u8; hdr[10] = 0xb1 as u8; hdr[11] = 0xe6 as u8;
+    hdr[12] = 0xac as u8; hdr[13] = 0x10 as u8; hdr[14] = 0x0a as u8; hdr[15] = 0x63 as u8;
+    hdr[16] = 0xac as u8; hdr[17] = 0x10 as u8; hdr[18] = 0x0a as u8; hdr[19] = 0x0c as u8;
+
+    uart_puts("checksum(with checksum field): ");
+    uart_print_hex16(inet_checksum(hdr as *u8, 20));
+    uart_puts("\r\n");
+
+    hdr[10] = 0 as u8;
+    hdr[11] = 0 as u8;
+    uart_puts("checksum(field zeroed):        ");
+    uart_print_hex16(inet_checksum(hdr as *u8, 20));
+    uart_puts("\r\n");
+}

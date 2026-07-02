@@ -570,7 +570,7 @@ When adding a new example that needs timer or semaphore support, add it to the a
   - To fire at ~15 ms intervals: `lsr x0, cntfrq, #6` -> `msr cntp_tval_el0, x0`
   - The virtual timer (CNTV, PPI #27) requires EL2 hypervisor configuration on QEMU virt, so use the physical timer (CNTP, PPI #30) for bare-metal EL1.
 
-## virtio-net Examples (examples/net_echo, examples/arp_reply)
+## virtio-net Examples (examples/net_echo, examples/arp_reply, examples/icmp_echo)
 
 QEMU-only stepping stones toward the TCP/IP stack goal, each adding one
 protocol layer on top of the same virtqueue/DMA/IRQ plumbing:
@@ -582,6 +582,11 @@ protocol layer on top of the same virtqueue/DMA/IRQ plumbing:
   reserved for exactly this kind of test/example use); every other frame
   (wrong EtherType, wrong OPER, request for a different IP) is dropped,
   not echoed. First real protocol dispatch and in-place header rewriting.
+- `icmp_echo`: answers ICMP echo requests (ping) addressed to 192.0.2.1
+  with an echo reply, preserving identifier/sequence/payload. First
+  example needing a *correct* checksum on the wire (not just a validated
+  one) -- see the inet_checksum/ip_parse entries below for the two smaller
+  steps this was deliberately split from.
 
 `virtio-net` doesn't exist on real hardware (RPi3/RISC-V/STM32 will need
 dedicated MAC/PHY drivers later); what transfers is the ring-buffer/IRQ
@@ -648,19 +653,62 @@ virtio protocol itself.
   loop -- exactly the "LLVM may hoist a load out of a tight loop" hazard
   described under "Volatile Reads of Global Variables" above, since
   nothing else marks that memory as externally modified.
-- **Test harness**: `scripts/virtio_net_test.py` and `scripts/arp_test.py`
-  send/verify raw frames over a UDP-backed `-netdev dgram` (one UDP
-  datagram == one raw Ethernet frame, no ARP/DHCP noise since it's a
-  private point-to-point socket, unlike `-netdev user`). This is the one
-  place in the test suite that depends on Python -- `run_qemutest.sh`
-  invokes them via `run_virtio_test NAME KERNEL SCRIPT`, which judges
-  pass/fail by the script's exit code rather than diffing QEMU's stdout,
-  so the kernels are free to print debug output. Deliberately NOT
-  unit-tested in isolation (no QEMU-free test of the comparison logic):
-  the scripts are simple enough (plain byte-equality checks) that the
-  cost of a second, QEMU-booting "does the test detect a broken echo"
-  test wasn't judged worth it -- see git history around 2026-07 if that
-  tradeoff needs revisiting as the scripts grow more complex.
+- **Test harness**: `scripts/virtio_net_test.py`, `scripts/arp_test.py`,
+  and `scripts/icmp_echo_test.py` send/verify raw frames over a UDP-backed
+  `-netdev dgram` (one UDP datagram == one raw Ethernet frame, no
+  ARP/DHCP noise since it's a private point-to-point socket, unlike
+  `-netdev user`). This is the one place in the test suite that depends
+  on Python -- `run_qemutest.sh` invokes them via
+  `run_virtio_test NAME KERNEL SCRIPT`, which judges pass/fail by the
+  script's exit code rather than diffing QEMU's stdout, so the kernels
+  are free to print debug output. Deliberately NOT unit-tested in
+  isolation (no QEMU-free test of the comparison logic): the scripts are
+  simple enough (plain byte-equality checks) that the cost of a second,
+  QEMU-booting "does the test detect a broken echo" test wasn't judged
+  worth it -- see git history around 2026-07 if that tradeoff needs
+  revisiting as the scripts grow more complex.
+
+### IPv4/ICMP: split into 3 deliberately small steps (examples/inet_checksum, examples/ip_parse, examples/icmp_echo)
+
+The original ask was "an IPv4 echo server" (ICMP ping responder), but that
+bundles two genuinely new things at once -- the Internet checksum
+algorithm (RFC 1071) and real virtio-net RX/TX of a new protocol -- making
+failures hard to attribute to one or the other. Split into three
+increasingly-integrated steps instead:
+
+1. **`examples/inet_checksum`** -- the checksum algorithm alone, no
+   networking I/O at all, following the exact same pure-compute demo
+   pattern as `crc8.tkb`/`djb2.tkb` (operate on a fixed buffer, print a
+   hex result, diff against a `.expected` file). Test vector is a real
+   20-byte IPv4 header, verified independently in Python before being
+   committed: checksumming it with its correct checksum field in place
+   yields `0x0000` (how a receiver verifies a packet); checksumming it
+   with that field zeroed yields `0xb1e6`, the value that belongs there
+   (how a sender computes it). The function itself lives in
+   `examples/common/inet_checksum.tkb` so `ip_parse` and `icmp_echo` can
+   both reuse it rather than duplicating it.
+2. **`examples/ip_parse`** -- IPv4 header field extraction and checksum
+   *validation* only, no reply, and deliberately **not** wired to
+   virtio-net at all: it parses two canned buffers baked into the binary
+   (one valid, one with a corrupted TTL so the checksum no longer
+   verifies) and prints the results. The virtqueue/IRQ plumbing was
+   already fully proven by `net_echo`/`arp_reply`; re-exercising it here
+   would test the same thing twice while adding nothing to what's new in
+   this step (the parsing logic itself). Scope is intentionally narrow:
+   only headers with no IP options (IHL must be exactly 5/20 bytes).
+3. **`examples/icmp_echo`** -- the real thing: live virtio-net RX/TX
+   (same pattern as `net_echo`/`arp_reply`) combined with IPv4/ICMP
+   parsing and, for the first time, checksum *construction* (not just
+   validation) for the reply. Validates the request's IP and ICMP
+   checksums independently before replying and silently drops anything
+   that fails either check, isn't addressed to `our_ip`, or isn't a
+   well-formed echo request -- `scripts/icmp_echo_test.py` explicitly
+   tests a corrupted-checksum request is dropped, not just that a valid
+   one is answered. Builds the reply in place (swap MACs, swap IPs, fresh
+   TTL, ICMP type 8->0, identifier/sequence/payload untouched) and
+   recomputes both checksums from scratch with `inet_checksum` rather
+   than attempting an incremental update -- simpler and reuses the
+   already-verified function instead of a second, subtler algorithm.
 - **`run_qemutest.sh` prints a `Failed: name1 name2 ...` line in its final
   summary** (via a `FAILED_TESTS` array appended to on every failure
   branch) rather than stopping at the first failure. Deliberate: QEMU

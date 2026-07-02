@@ -251,8 +251,11 @@ run_test "packed"        examples/packed/kernel.elf        examples/packed/packe
 run_test "struct_align"  examples/struct_align/kernel.elf  examples/struct_align/struct_align.expected
 run_test "const_global"  examples/const_global/kernel.elf  examples/const_global/const_global.expected
 run_test "sizeof"        examples/sizeof/kernel.elf        examples/sizeof/sizeof.expected
+run_test "inet_checksum" examples/inet_checksum/kernel.elf examples/inet_checksum/inet_checksum.expected
+run_test "ip_parse"      examples/ip_parse/kernel.elf      examples/ip_parse/ip_parse.expected
 run_virtio_test "net_echo"   examples/net_echo/kernel.elf   virtio_net_test.py
 run_virtio_test "arp_reply"  examples/arp_reply/kernel.elf  arp_test.py
+run_virtio_test "icmp_echo"  examples/icmp_echo/kernel.elf  icmp_echo_test.py
 
 echo ""
 echo "Running no-trap checks (brk must be zero in these kernels)..."
@@ -261,7 +264,7 @@ echo ""
 # Examples whose bounds should be fully proven at the type level. If brk appears, review the type annotations.
 for e in start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci \
           bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt \
-          semaphore condvar struct msgqueue watchdog refined narrow for loop bitops align packed struct_align sizeof net_echo arp_reply; do
+          semaphore condvar struct msgqueue watchdog refined narrow for loop bitops align packed struct_align sizeof net_echo arp_reply inet_checksum ip_parse icmp_echo; do
 # enum is intentionally excluded: `i as Color` (int->enum cast) emits llvm.trap for invalid values
     run_no_trap_test "$e (no-trap)" "examples/$e/kernel.elf"
 done

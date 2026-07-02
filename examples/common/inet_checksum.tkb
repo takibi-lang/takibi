@@ -1,0 +1,20 @@
+// Internet checksum (RFC 1071): the one's-complement 16-bit checksum used
+// by IPv4, ICMP, UDP, and TCP. Shared by examples/inet_checksum (algorithm
+// demo), examples/ip_parse (header validation), and examples/icmp_echo
+// (validation + reply construction).
+fn inet_checksum(data: *u8, len: i32) i32 {
+    let mut sum: i32 = 0;
+    let mut i: i32 = 0;
+    while (i + 1 < len) {
+        let word: i32 = ((*(data + i) as i32) << 8) | (*(data + i + 1) as i32);
+        sum = sum + word;
+        i = i + 2;
+    }
+    if (i < len) {
+        sum = sum + ((*(data + i) as i32) << 8);
+    }
+    while ((sum >> 16) != 0) {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    return (~sum) & 0xffff;
+}

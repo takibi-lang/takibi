@@ -1,0 +1,77 @@
+// IPv4 header parsing and validation -- parse only, no reply. Deliberately
+// operates on canned buffers baked into the binary rather than real
+// virtio-net RX: the goal of this step is proving the *parsing logic*
+// (field extraction, checksum validation via examples/common/inet_checksum.tkb)
+// is correct in isolation, not re-proving the virtqueue/IRQ plumbing that
+// examples/net_echo and examples/arp_reply already established. Real
+// network I/O (RX/TX over virtio-net) is exercised by examples/icmp_echo,
+// which reuses this parsing logic against live packets.
+
+fn print_ip(p: *u8) {
+    uart_print_uint(p[0] as i32);
+    uart_putc('.');
+    uart_print_uint(p[1] as i32);
+    uart_putc('.');
+    uart_print_uint(p[2] as i32);
+    uart_putc('.');
+    uart_print_uint(p[3] as i32);
+}
+
+fn print_protocol_name(proto: i32) {
+    if (proto == 1) {
+        uart_puts("ICMP");
+    } else if (proto == 6) {
+        uart_puts("TCP");
+    } else if (proto == 17) {
+        uart_puts("UDP");
+    } else {
+        uart_puts("unknown");
+    }
+}
+
+fn parse_ipv4(pkt: *u8, len: i32) {
+    let version:  i32 = (pkt[0] as i32) >> 4;
+    let ihl:      i32 = ((pkt[0] as i32) & 0x0f) * 4;
+    let total_len: i32 = ((pkt[2] as i32) << 8) | (pkt[3] as i32);
+    let ttl:      i32 = pkt[8] as i32;
+    let protocol: i32 = pkt[9] as i32;
+    let checksum: i32 = inet_checksum(pkt, ihl);
+
+    uart_puts("IPv4 packet:\r\n");
+    uart_puts("  version:   "); uart_println_uint(version);
+    uart_puts("  ihl:       "); uart_println_uint(ihl);
+    uart_puts("  total_len: "); uart_println_uint(total_len);
+    uart_puts("  ttl:       "); uart_println_uint(ttl);
+    uart_puts("  protocol:  "); uart_print_uint(protocol);
+    uart_puts(" (");           print_protocol_name(protocol); uart_puts(")\r\n");
+    uart_puts("  src:       "); print_ip(pkt + 12); uart_puts("\r\n");
+    uart_puts("  dst:       "); print_ip(pkt + 16); uart_puts("\r\n");
+    uart_puts("  checksum:  ");
+    if (checksum == 0) {
+        uart_puts("OK\r\n");
+    } else {
+        uart_puts("BAD\r\n");
+    }
+}
+
+fn main() {
+    // version/IHL, DSCP/ECN, total length, id, flags/fragoffset, TTL,
+    // protocol, checksum, src IP, dst IP. Same bytes as
+    // examples/inet_checksum/inet_checksum.tkb (already verified valid).
+    let mut pkt: [u8; 20];
+    pkt[0]  = 0x45 as u8; pkt[1]  = 0x00 as u8; pkt[2]  = 0x00 as u8; pkt[3]  = 0x3c as u8;
+    pkt[4]  = 0x1c as u8; pkt[5]  = 0x46 as u8; pkt[6]  = 0x40 as u8; pkt[7]  = 0x00 as u8;
+    pkt[8]  = 0x40 as u8; pkt[9]  = 0x06 as u8; pkt[10] = 0xb1 as u8; pkt[11] = 0xe6 as u8;
+    pkt[12] = 0xac as u8; pkt[13] = 0x10 as u8; pkt[14] = 0x0a as u8; pkt[15] = 0x63 as u8;
+    pkt[16] = 0xac as u8; pkt[17] = 0x10 as u8; pkt[18] = 0x0a as u8; pkt[19] = 0x0c as u8;
+
+    uart_puts("=== valid packet ===\r\n");
+    parse_ipv4(pkt as *u8, 20);
+
+    // Corrupt TTL after the checksum was computed for the original bytes,
+    // so the checksum field no longer matches the header -- demonstrates
+    // detecting a corrupted/tampered header.
+    pkt[8] = 1 as u8;
+    uart_puts("=== corrupted packet (TTL changed after checksum) ===\r\n");
+    parse_ipv4(pkt as *u8, 20);
+}

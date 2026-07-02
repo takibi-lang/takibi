@@ -27,6 +27,13 @@ fn uart_print_hex(n: i32) {
     }
 }
 
+fn uart_print_hex16(n: i32) {
+    uart_puts("0x");
+    for i in 0..<4 {
+        uart_print_hex_digit((n >> (12 - i * 4)) & 15);
+    }
+}
+
 fn uart_print_int(n: i32) {
     if (n < 0) {
         uart_putc('-');
