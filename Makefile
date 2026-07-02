@@ -31,6 +31,20 @@ EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuz
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
+# STM32F746G-DISCOVERY hardware port: the subset of EXAMPLES that's pure
+# compute + uart_puts/uart_print_* output with no interrupt/timer/hand-written
+# -assembly dependency (see the "STM32 hardware bring-up" section below for
+# the full rationale and what's deliberately excluded, e.g. rtc/echo).
+STM32_TARGET := thumbv7em-none-eabi
+STM32_CPU    := cortex-m7
+STM32_EXAMPLES := start hello print_int print_hex print_ptr mem array \
+                  fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump \
+                  scheduler struct refined narrow for loop enum nonexhaustive \
+                  bitops align packed struct_align const_global sizeof
+STM32_OBJS     := $(foreach e,$(STM32_EXAMPLES),examples/$(e)/$(e)_stm32.o)
+STM32_KERNELS  := $(foreach e,$(STM32_EXAMPLES),examples/$(e)/kernel_stm32.elf)
+STM32_BINS     := $(foreach e,$(STM32_EXAMPLES),examples/$(e)/kernel_stm32.bin)
+
 # -- Targets ------------------------------------------------------------------
 .PHONY: build test qemutest hwcheck langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server profile-http-server profile-tcp-echo
 
@@ -52,7 +66,7 @@ qemutest: $(ALL_KERNELS) examples/fizzbuzz/kernel.debug.elf examples/fibonacci/k
 ## STM32F746G-DISCOVERY board connected via USB). NOT part of `make check` --
 ## unlike qemutest, this needs physical hardware, so it stays runnable-only-
 ## when-available rather than a requirement for every clone of this repo.
-hwcheck: examples/hello/kernel_stm32.bin
+hwcheck: $(STM32_BINS)
 	@bash scripts/run_hwtest.sh
 
 ## langcheck: verify that all source files contain only ASCII characters
@@ -207,20 +221,28 @@ examples/tcp_echo/tcp_echo.debug.o: examples/tcp_echo/tcp_echo.tkb \
 examples/tcp_echo/kernel.debug.elf: $(COMMON_STARTUP_O) examples/tcp_echo/tcp_echo.debug.o $(COMMON_LINK_LD)
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/tcp_echo/tcp_echo.debug.o -o $@
 
-# -- STM32F746G-DISCOVERY hardware bring-up (step 2: UART Hello World) ---------
-# One-off rules for a single example, same reasoning as the -g debug builds
-# above: this is a second target for one proof-of-concept example, not yet a
-# general second target for every entry in EXAMPLES, so it's kept out of the
-# STANDARD_OBJS/GENERIC_KERNELS auto-registration machinery. Reuses
-# examples/common/print.tkb and examples/hello/hello.tkb verbatim -- only the
-# UART HAL (examples/common_stm32/uart.tkb) and the startup/linker files are
-# STM32-specific. No `make check`/`qemutest` coverage yet (that's step 3: a
-# scripted flash+serial-capture harness); for now this is verified by hand
-# against the real board (flash examples/hello/kernel_stm32.bin, then read
-# /dev/ttyACM0 and diff against examples/hello/hello.expected).
-STM32_TARGET := thumbv7em-none-eabi
-STM32_CPU    := cortex-m7
-
+# -- STM32F746G-DISCOVERY hardware bring-up (step 2/2b: pure-compute examples) --
+# Covers every example that only needs examples/common/uart.tkb +
+# examples/common/print.tkb on the AArch64 side (i.e. STANDARD_OBJS), minus
+# two deliberately excluded for reasons unrelated to "is it portable":
+#   - rtc: pokes the QEMU-only PL031 RTC address directly, no STM32 RTC
+#     peripheral support exists yet (separate task, different peripheral
+#     entirely from anything ported so far).
+#   - echo: defines its own uart_getc() against the QEMU-only PL011 FR
+#     register, and its test methodology needs writing bytes to the serial
+#     port (interactive stdin), not just reading -- scripts/run_hwtest.sh
+#     only supports the read-and-diff shape today.
+# Every other STANDARD_OBJS example is pure compute + uart_puts/uart_print_*
+# output with no interrupt/timer/hand-written-assembly dependency (confirmed
+# by inspection before adding this list), so all of them reuse
+# examples/common_stm32/uart.tkb + examples/common/print.tkb exactly like
+# examples/hello/hello.tkb did in the first STM32 port, and their existing
+# .expected files (already used by the AArch64/QEMU run_test calls below) are
+# reused unchanged -- uart_puts/uart_print_* write the exact same bytes on
+# either HAL.
+# (STM32_TARGET/STM32_CPU/STM32_EXAMPLES/STM32_OBJS/STM32_KERNELS/STM32_BINS
+# are defined near the top of this file, alongside EXAMPLES/ALL_KERNELS, so
+# that hwcheck's prerequisite list further up can reference them.)
 COMMON_STM32_DIR       := examples/common_stm32
 COMMON_STM32_STARTUP_S := $(COMMON_STM32_DIR)/startup.S
 COMMON_STM32_STARTUP_O := $(COMMON_STM32_DIR)/startup.o
@@ -230,13 +252,14 @@ COMMON_STM32_UART      := $(COMMON_STM32_DIR)/uart.tkb
 $(COMMON_STM32_STARTUP_O): $(COMMON_STM32_STARTUP_S)
 	$(LLVM_MC) --triple=$(STM32_TARGET) --filetype=obj $< -o $@
 
-examples/hello/hello_stm32.o: examples/hello/hello.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) build
+$(STM32_OBJS): examples/%_stm32.o: examples/%.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) build
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/hello/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/hello/hello_stm32.o $(COMMON_STM32_LINK_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/hello/hello_stm32.o -o $@
+$(STM32_KERNELS): examples/%/kernel_stm32.elf: \
+    $(COMMON_STM32_STARTUP_O) examples/%/$$*_stm32.o $(COMMON_STM32_LINK_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/$*/$*_stm32.o -o $@
 
-examples/hello/kernel_stm32.bin: examples/hello/kernel_stm32.elf
+$(STM32_BINS): examples/%/kernel_stm32.bin: examples/%/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
 # -- QEMU run targets ----------------------------------------------------------
@@ -341,4 +364,4 @@ profile-tcp-echo: examples/tcp_echo/kernel.debug.elf
 clean:
 	dune clean
 	rm -f $(COMMON_STARTUP_O) $(COMMON_TIMER_ASM_O) $(COMMON_SEM_ASM_O) \
-	      $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o examples/$(e)/kernel.elf)
+	      $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o examples/$(e)/kernel.elf examples/$(e)/kernel_stm32.bin)
