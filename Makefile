@@ -27,12 +27,12 @@ COMMON_NETUTIL     := $(COMMON_DIR)/netutil.tkb
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
 # Convention: examples/<name>/<name>.tkb -> examples/<name>/kernel.elf
-EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo
+EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo
+.PHONY: build test qemutest langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server
 
 .DEFAULT_GOAL := build
 
@@ -95,7 +95,8 @@ SYNC_OBJS  := examples/condvar/condvar.o examples/msgqueue/msgqueue.o
 NET_OBJS   := examples/net_echo/net_echo.o examples/arp_reply/arp_reply.o
 CHECKSUM_OBJS := examples/inet_checksum/inet_checksum.o examples/ip_parse/ip_parse.o \
                  examples/tcp_parse/tcp_parse.o
-APP_OBJS   := examples/icmp_echo/icmp_echo.o examples/tcp_echo/tcp_echo.o
+APP_OBJS   := examples/icmp_echo/icmp_echo.o examples/tcp_echo/tcp_echo.o \
+              examples/http_server/http_server.o
 SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS) $(NET_OBJS) $(CHECKSUM_OBJS) $(APP_OBJS)
 STANDARD_OBJS := $(filter-out $(SPECIAL_OBJS), $(EXAMPLE_OBJS))
 
@@ -182,6 +183,53 @@ qemu-icmp-echo: examples/icmp_echo/kernel.elf
 ## In another terminal: python3 scripts/tcp_echo_test.py
 qemu-tcp-echo: examples/tcp_echo/kernel.elf
 	$(QEMU) $(QEMU_FLAGS) $(VIRTIO_NET_FLAGS) -kernel $<
+
+# -netdev user (SLIRP) instead of -netdev dgram: a real IP-routable
+# network so an actual browser on the host can reach the guest, unlike
+# the raw point-to-point pipe scripts/*_test.py use. SLIRP's default
+# guest-side address is 10.0.2.15 (http_server.tkb's our_ip matches this
+# on purpose) and it will not deliver any IP packet to the guest until
+# the guest has answered an ARP request for that address -- see
+# http_server.tkb's file header for how that was discovered.
+#
+# HTTP_HOST_PORT is overridable (make qemu-http-server HTTP_HOST_PORT=8081)
+# in case the default is still taken on your machine -- QEMU fails with
+# "Could not set up host forwarding rule" if so, which doesn't say *why*
+# it failed. Check what's using it first with `lsof -i :18080`
+# (macOS/Linux). Deliberately NOT one of the well-known dev-server ports
+# (3000, 5000, 8000, 8080, 8888, 9000, ...) -- 8080 was the original
+# default here and immediately collided with Syncthing on a real machine;
+# 18080 follows the same "high, uncommon port" convention as this
+# project's own dgram test transport (17771/17772).
+HTTP_HOST_PORT ?= 18080
+HTTP_SERVER_FLAGS := -global virtio-mmio.force-legacy=on \
+    -netdev user,id=net0,hostfwd=tcp::$(HTTP_HOST_PORT)-:80 \
+    -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56,csum=off,guest_csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ufo=off,guest_uso4=off,guest_uso6=off,mrg_rxbuf=off,ctrl_vq=off,mq=off,indirect_desc=off,event_idx=off
+
+## qemu-http-server: run the HTTP server and browse to it from the host
+## (Ctrl-C to quit -- see HTTP_SERVER_QEMU_FLAGS for why this one target
+## doesn't need Ctrl-A X like the others). Open http://localhost:18080/ in
+## a browser while this is running. If port 18080 is already taken on your
+## machine, override it: make qemu-http-server HTTP_HOST_PORT=8081
+#
+# Every other qemu-* target uses $(QEMU_FLAGS)'s -nographic, which pipes
+# the terminal through to the guest's serial console in raw mode so
+# keystrokes reach the guest -- that's why they need the QEMU-specific
+# Ctrl-A X escape instead of plain Ctrl-C (raw mode passes Ctrl-C to the
+# guest as a byte, not as a host-level interrupt). http_server never reads
+# from the guest's UART -- all interaction is over the network via a real
+# browser -- so it doesn't need that pass-through: -serial file:/dev/stdout
+# still shows the "http_server: init/ready" debug output, but without
+# putting the terminal in raw mode, plain Ctrl-C reaches QEMU as a normal
+# SIGINT and it exits cleanly (confirmed via `kill -INT`, matching what a
+# terminal's Ctrl-C sends).
+HTTP_SERVER_QEMU_FLAGS := -machine virt -cpu cortex-a53 -display none \
+    -serial file:/dev/stdout -monitor none \
+    -semihosting-config enable=on,target=native
+
+qemu-http-server: examples/http_server/kernel.elf
+	@echo "Open http://localhost:$(HTTP_HOST_PORT)/ in your browser (Ctrl-C to quit)"
+	$(QEMU) $(HTTP_SERVER_QEMU_FLAGS) $(HTTP_SERVER_FLAGS) -kernel $<
 
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts and linker outputs

@@ -27,9 +27,11 @@
 # after that would be true for the wrong reason (slot taken, not
 # whatever-was-being-tested).
 #
-# Order that matters: test_syn_wrong_port_silent, test_syn_bad_checksum_silent
-# (either order, both need LISTEN) -> test_handshake_only -> test_data_echo
-# -> test_close -> test_reconnect_after_close.
+# Order that matters: test_syn_wrong_port_silent, test_syn_bad_checksum_silent,
+# test_syn_with_options_accepted (any order among these three, all need
+# LISTEN and the last one RSTs its own half-open connection before
+# returning so it doesn't hold the slot) -> test_handshake_only ->
+# test_data_echo -> test_close -> test_reconnect_after_close.
 #
 # Exit code only (0 = pass, 1 = fail); run_qemutest.sh prints the
 # PASS/FAIL banner, matching the other virtio test scripts' convention.
@@ -87,15 +89,22 @@ def checksum_fold(s: int) -> int:
 
 
 def build_frame(client_port: int, seq: int, ack: int, flags: int,
-                 data: bytes = b"", corrupt_tcp_checksum: bool = False) -> bytes:
+                 data: bytes = b"", corrupt_tcp_checksum: bool = False,
+                 options: bytes = b"") -> bytes:
+    # options is raw bytes inserted between the fixed 20-byte header and
+    # data (e.g. a 4-byte MSS option), with the data offset field adjusted
+    # to match -- used by test_syn_with_options_accepted to prove
+    # tcp_echo.tkb doesn't require a bare 20-byte header. len(options)
+    # must be a multiple of 4 (TCP header length is in 32-bit words).
+    doff_words = 5 + len(options) // 4
     tcp_no_csum = struct.pack("!HHIIBBHHH", client_port, SERVER_PORT, seq, ack,
-                               (5 << 4), flags, 65535, 0, 0) + data
+                               (doff_words << 4), flags, 65535, 0, 0) + options + data
     pseudo = CLIENT_IP + SERVER_IP + bytes([0, 6]) + struct.pack("!H", len(tcp_no_csum))
     csum = checksum_fold(checksum_add(pseudo + tcp_no_csum))
     if corrupt_tcp_checksum:
         csum ^= 0xffff
     tcp = struct.pack("!HHIIBBHHH", client_port, SERVER_PORT, seq, ack,
-                       (5 << 4), flags, 65535, csum, 0) + data
+                       (doff_words << 4), flags, 65535, csum, 0) + options + data
 
     total_len = 20 + len(tcp)
     ip_no_csum = struct.pack("!BBHHHBBH4s4s", 0x45, 0, total_len, 0, 0, 64, 6, 0,
@@ -149,6 +158,46 @@ def test_syn_bad_checksum_silent() -> bool:
     frame = build_frame(client_port=40002, seq=200, ack=0, flags=FLAG_SYN,
                          corrupt_tcp_checksum=True)
     ok = expect_silence(sock, frame)
+    sock.close()
+    return ok
+
+
+def test_syn_with_options_accepted() -> bool:
+    # Regression test: tcp_echo.tkb used to require a bare 20-byte header
+    # (data offset == 5) and reject anything else, which happened to never
+    # matter for this script (every frame here is hand-built without
+    # options) but silently broke any *real* TCP client -- SLIRP and every
+    # real OS always attach at least an MSS option to a SYN. Caught (and
+    # fixed) while building examples/http_server; see CLAUDE.md's HTTP
+    # Server section. This sends a SYN with a 4-byte MSS option (data
+    # offset == 6, 24-byte header) and confirms it still gets a normal
+    # SYN-ACK, then RSTs the half-open connection to free the slot for the
+    # rest of this file's tests (which assume a bare LISTEN to start).
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind((QEMU_HOST, LOCAL_PORT))
+
+    client_port = 40003
+    client_isn = 300
+    mss_option = bytes([0x02, 0x04, 0x05, 0xb4])  # kind=MSS, len=4, value=1460
+    syn = build_frame(client_port, client_isn, 0, FLAG_SYN, options=mss_option)
+    reply = send_and_wait(sock, syn)
+    if reply is None:
+        print("  no SYN-ACK reply to a SYN carrying a TCP option")
+        sock.close()
+        return False
+
+    tcp = reply[34:]
+    src_port, dst_port, seq, ack, _doff_res, flags = struct.unpack("!HHIIBB", tcp[0:14])
+    ok = (src_port == SERVER_PORT and dst_port == client_port and
+          flags == (FLAG_SYN | FLAG_ACK) and ack == client_isn + 1 and seq == SERVER_ISN)
+    if not ok:
+        print("  bad SYN-ACK for options-bearing SYN: src_port=%d dst_port=%d "
+              "seq=%d ack=%d flags=0x%02x" % (src_port, dst_port, seq, ack, flags))
+
+    # Abandon this half-open connection regardless of ok, so a failure
+    # here doesn't also break every test that runs after it.
+    rst = build_frame(client_port, client_isn + 1, 0, FLAG_RST)
+    sock.sendto(rst, (QEMU_HOST, QEMU_PORT))
     sock.close()
     return ok
 
@@ -304,6 +353,9 @@ def main() -> int:
     ok2 = test_syn_bad_checksum_silent()
     print("  SYN with bad TCP checksum (silent): %s" % ("PASS" if ok2 else "FAIL"))
 
+    ok2b = test_syn_with_options_accepted()
+    print("  SYN with TCP options accepted:     %s" % ("PASS" if ok2b else "FAIL"))
+
     ok3 = test_handshake_only()
     print("  three-way handshake:               %s" % ("PASS" if ok3 else "FAIL"))
 
@@ -316,7 +368,7 @@ def main() -> int:
     ok6 = ok5 and test_reconnect_after_close()
     print("  reconnect after close:             %s" % ("PASS" if ok6 else "FAIL"))
 
-    return 0 if (ok1 and ok2 and ok3 and ok4 and ok5 and ok6) else 1
+    return 0 if (ok1 and ok2 and ok2b and ok3 and ok4 and ok5 and ok6) else 1
 
 
 if __name__ == "__main__":

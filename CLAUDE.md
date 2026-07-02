@@ -802,6 +802,114 @@ numbers actually need, but worth remembering if a future step adds
 seq-number *comparisons* (`<`, `>`) -- those need wraparound-aware
 comparison logic, not a plain signed or unsigned `<`.
 
+## HTTP Server (examples/http_server) -- the TCP/IP progression's payoff
+
+Serves a single styled HTML page (inline CSS, dark/monospace theme) with
+a live request counter on port 80. Built on `tcp_echo`'s state machine
+(same LISTEN/SYN_RCVD/ESTABLISHED/LAST_ACK cycle), but is the first
+example that is genuinely usable from a real browser, not just the
+`-netdev dgram` synthetic test transport -- and getting that working
+surfaced two real bugs/gaps that no earlier example's automated tests had
+caught, because those tests only ever talked to *themselves*
+(hand-crafted Python packets, never a real TCP/IP stack):
+
+- **QEMU's `-netdev user` (SLIRP) refuses to deliver any IP packet until
+  the guest has answered an ARP request for its address.** `net_echo`'s
+  and `arp_reply`'s own tests never needed this, because `-netdev dgram`
+  is a raw point-to-point pipe where the python script already knows the
+  guest's MAC -- there's no link layer to resolve. A real network path
+  always has one. Consequence: `http_server.tkb` has to combine ARP
+  response (reused from `arp_reply.tkb`) and TCP/HTTP handling in the
+  *same* kernel, dispatching on ethertype, since only one kernel can run
+  at a time. Discovered by writing a throwaway probe kernel that just
+  logged every received frame's ethertype under `-netdev user` -- only
+  ARP frames showed up until ARP response was added.
+- **Real TCP clients (SLIRP's kernel-grade TCP stack, and any real
+  browser) always include a TCP options block on the SYN** (at minimum an
+  MSS option, making the header 24 bytes / data offset 6, not the bare
+  20-byte / data-offset-5 header `tcp_echo.tkb` and `tcp_parse.tkb`
+  originally required). Since `scripts/*_test.py` construct every packet
+  by hand and never bothered with options, this was completely invisible
+  to `make qemutest` -- it only surfaced once tested against a real
+  client. Fixed in both `http_server.tkb` and (for consistency,
+  afterward) `tcp_echo.tkb`: compute `tcp_hdr_len` from the segment's
+  actual data offset (accepting doff 5..15) and use it to locate where
+  data starts, rather than hardcoding the no-options 20-byte assumption;
+  options themselves are never parsed, just skipped over.
+  `tcp_parse.tkb` turned out not to need this fix at all -- it already
+  computed and *displayed* `data_offset` generically, it just never used
+  it to locate anything (no reply construction, so nothing was ever
+  assumed to start at a fixed offset).
+
+  **The fix is not just "accept a wider range of doff values"; the data
+  itself has to move.** `tcp_echo.tkb`'s echo reply always writes a clean
+  20-byte header (no options) starting at `tcp+0`, so if the *received*
+  segment had a 24-byte header, its payload sits at `tcp+24`, not
+  `tcp+20` -- reusing the same buffer in place without shifting the
+  payload down would silently prepend 4 bytes of stale option data and
+  truncate the last 4 bytes of the real payload. `build_data_echo` now
+  takes the actual data pointer and `bytes_copy`s it down to `tcp+20`
+  first when they differ; safe even though the ranges can overlap,
+  because the destination never leads the source and the copy loop goes
+  forward (same direction requirement as `memmove` for this case -- see
+  the function's comment). Loosening the acceptance check *without* this
+  shift would have silently swapped "reject options-bearing segments" for
+  "corrupt them," which is worse. `scripts/tcp_echo_test.py` gained
+  `test_syn_with_options_accepted()` (sends a SYN with a real 4-byte MSS
+  option, verifies a normal SYN-ACK, then RSTs the half-open connection
+  so it doesn't hold the single connection slot for the rest of the
+  file's tests) so this doesn't silently regress again.
+
+**our_ip is `10.0.2.15`, not the `192.0.2.1` TEST-NET-1 address every
+earlier example uses.** SLIRP's `hostfwd` rule routes to a fixed default
+guest address (confirmed empirically, not just from memory -- see the
+probe kernel above), and the guest must actually own that address for
+the connection to land anywhere. `scripts/http_server_test.py` (still a
+`-netdev dgram` test) uses the same `10.0.2.15` for consistency even
+though its raw transport doesn't technically require it.
+
+**Response construction needed two new `netutil.tkb` primitives**:
+`copy_str(dst, src)` (copies a NUL-terminated string literal into a
+buffer, returns length -- same idea as `uart_puts` but targeting memory
+instead of streaming to UART) and `write_udec(buf, n)` (writes decimal
+digits with no leading zeros, returns digit count -- same recursive
+approach as `print.tkb`'s `uart_print_uint`, targeting a buffer). Needed
+because the response's `Content-Length` and the request counter are both
+variable-width at runtime, so the response has to be *built* (body first,
+into a staging buffer `html_body`, to learn its length; then headers,
+using that now-known length; then the body copied in after) rather than
+templated with a fixed size like every earlier fixed-format reply
+(SYN-ACK, ICMP echo reply, etc.) was.
+
+**Manual browser access**: `make qemu-http-server` (uses `-netdev
+user,hostfwd=tcp::$(HTTP_HOST_PORT)-:80` instead of the automated tests'
+`-netdev dgram`; `HTTP_HOST_PORT` defaults to 18080 -- not 8080, which
+immediately collided with Syncthing on a real dev machine the first time
+this was tried outside the devcontainer; override with e.g.
+`make qemu-http-server HTTP_HOST_PORT=8081` if 18080 is also taken), then
+open `http://localhost:18080/` in a real browser. Reloading the page
+re-runs the whole connect/request/respond/close cycle and the counter
+visibly increments -- this is deliberately *not* something
+`make qemutest` exercises (see the request-counter determinism note
+below), since it depends on a human clicking reload, not a scripted
+sequence.
+
+**Request counter determinism** (flagged as a concern before
+implementation, worth recording why it's actually safe): `make qemutest`
+boots a fresh QEMU process per test, so `request_count` always starts at
+0. `scripts/http_server_test.py` sends exactly two real, sequential
+requests and asserts the counter reads 1 then 2 -- deterministic, not
+timing-dependent. The one way this *could* have been flaky is if a
+network-level retry (see `send_and_wait`, used for the SYN and the GET in
+case a packet is lost before the guest finishes booting) caused the
+server to process the same logical request twice; it can't, because the
+retry resends the identical frame bytes (same sequence number), and the
+server only acts on a segment when its `seq` matches `conn_rcv_nxt`
+exactly -- a resent duplicate's `seq` is already stale by the time a
+retry would fire, so it's silently ignored. This is the same
+duplicate-suppression property `tcp_echo_test.py` already depends on,
+just relied on for a new reason here.
+
 ## Instructions for Claude Code
 
 - **Do not create git commits.** Only do so when the user explicitly requests it.
