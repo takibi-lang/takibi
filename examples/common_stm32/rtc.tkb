@@ -1,0 +1,67 @@
+// STM32F746 RTC HAL. Same public signatures as examples/common/rtc.tkb so
+// examples/rtc/rtc.tkb is portable across both HALs.
+//
+// Uses LSI (internal ~32kHz RC oscillator) as the RTC clock source, not
+// LSE/HSE -- no external crystal needed, and this demo only needs "does the
+// clock visibly tick", not accurate timekeeping. PRER is left at the
+// LSE-tuned reset default ((127+1)*(255+1) = 32768 divisions), which is
+// close enough to LSI's nominal ~32kHz for that purpose.
+//
+// rtc_read_seconds() returns the raw RTC_TR seconds nibbles (BCD, not
+// decoded to a real integer) -- see examples/rtc/rtc.tkb for why no
+// arithmetic is ever done on this value: RTC_TR is a BCD calendar
+// register, not a linear counter like QEMU's PL031, and subtracting raw
+// BCD bytes gives wrong answers whenever the "units" nibble rolls over
+// (0x09 -> 0x10 is a raw jump of 7, not 1), not just at 60 seconds.
+
+fn rtc_init() {
+    let rcc_apb1enr: *io u32 = 0x40023840;
+    *rcc_apb1enr = *rcc_apb1enr | (1 << 28); // PWREN
+
+    let pwr_cr1: *io u32 = 0x40007000;
+    *pwr_cr1 = *pwr_cr1 | (1 << 8); // DBP: unlock backup domain writes
+
+    let rcc_csr: *io u32 = 0x40023874;
+    *rcc_csr = *rcc_csr | 1; // LSION
+    while ((*rcc_csr & (1 << 1)) == 0) {} // wait LSIRDY
+
+    // RTCSEL/RTCEN persist across a plain system reset (backup domain),
+    // so this is only ever really written once across repeated test runs
+    // -- harmless to redo every boot, the hardware ignores RTCSEL writes
+    // once already selected.
+    let rcc_bdcr: *io u32 = 0x40023870;
+    *rcc_bdcr = (*rcc_bdcr & ~(3 << 8)) | (2 << 8); // RTCSEL = LSI (0b10)
+    *rcc_bdcr = *rcc_bdcr | (1 << 15);              // RTCEN
+
+    // RTC_WPR's unlocked state does NOT persist across reset, so this
+    // must run every boot even though RTCEN above usually doesn't need to.
+    let rtc_wpr: *io u32 = 0x40002824;
+    *rtc_wpr = 0xCA;
+    *rtc_wpr = 0x53;
+
+    let rtc_isr: *io u32 = 0x4000280C;
+    *rtc_isr = *rtc_isr | (1 << 7);       // INIT: enter init mode
+    while ((*rtc_isr & (1 << 6)) == 0) {} // wait INITF
+
+    let rtc_prer: *io u32 = 0x40002810;
+    *rtc_prer = (127 << 16) | 255; // PREDIV_A=127, PREDIV_S=255
+
+    *rtc_isr = *rtc_isr & ~(1 << 7); // exit init mode; calendar resumes
+
+    *rtc_isr = *rtc_isr & ~(1 << 5); // clear RSF
+    while ((*rtc_isr & (1 << 5)) == 0) {} // wait RSF (shadow regs synced)
+}
+
+fn rtc_is_running() -> bool {
+    let rcc_bdcr: *io u32 = 0x40023870;
+    return (*rcc_bdcr & (1 << 15)) != 0; // RTCEN
+}
+
+fn rtc_read_seconds() -> i32 {
+    let rtc_tr: *io u32 = 0x40002800;
+    let rtc_dr: *io u32 = 0x40002804;
+    let v: u32 = *rtc_tr & 0x7F; // ST (bits 6:4) + SU (bits 3:0), raw BCD
+    let unused: u32 = *rtc_dr;   // must read DR after TR to unfreeze the
+                                 // calendar shadow registers (RM0385)
+    return v as i32;
+}

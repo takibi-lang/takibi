@@ -23,6 +23,8 @@ COMMON_SYNC        := $(COMMON_DIR)/sync.tkb
 COMMON_VIRTIO_MMIO := $(COMMON_DIR)/virtio_mmio.tkb
 COMMON_INET_CKSUM  := $(COMMON_DIR)/inet_checksum.tkb
 COMMON_NETUTIL     := $(COMMON_DIR)/netutil.tkb
+COMMON_RTC         := $(COMMON_DIR)/rtc.tkb
+COMMON_UART_GETC   := $(COMMON_DIR)/uart_getc.tkb
 
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
@@ -44,6 +46,10 @@ STM32_EXAMPLES := start hello print_int print_hex print_ptr mem array \
 STM32_OBJS     := $(foreach e,$(STM32_EXAMPLES),examples/$(e)/$(e)_stm32.o)
 STM32_KERNELS  := $(foreach e,$(STM32_EXAMPLES),examples/$(e)/kernel_stm32.elf)
 STM32_BINS     := $(foreach e,$(STM32_EXAMPLES),examples/$(e)/kernel_stm32.bin)
+# rtc/echo: ported separately (real RTC peripheral / bidirectional serial
+# test), each needs one extra common file beyond uart+print -- see the
+# one-off rules near COMMON_STM32_RTC/COMMON_STM32_UART_GETC below.
+STM32_EXTRA_BINS := examples/rtc/kernel_stm32.bin examples/echo/kernel_stm32.bin
 
 # -- Targets ------------------------------------------------------------------
 .PHONY: build test qemutest hwcheck langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server profile-http-server profile-tcp-echo
@@ -66,7 +72,7 @@ qemutest: $(ALL_KERNELS) examples/fizzbuzz/kernel.debug.elf examples/fibonacci/k
 ## STM32F746G-DISCOVERY board connected via USB). NOT part of `make check` --
 ## unlike qemutest, this needs physical hardware, so it stays runnable-only-
 ## when-available rather than a requirement for every clone of this repo.
-hwcheck: $(STM32_BINS)
+hwcheck: $(STM32_BINS) $(STM32_EXTRA_BINS)
 	@bash scripts/run_hwtest.sh
 
 ## langcheck: verify that all source files contain only ASCII characters
@@ -118,7 +124,13 @@ CHECKSUM_OBJS := examples/inet_checksum/inet_checksum.o examples/ip_parse/ip_par
                  examples/tcp_parse/tcp_parse.o
 APP_OBJS   := examples/icmp_echo/icmp_echo.o examples/tcp_echo/tcp_echo.o \
               examples/http_server/http_server.o
-SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS) $(NET_OBJS) $(CHECKSUM_OBJS) $(APP_OBJS)
+# rtc/echo each need one extra common file (rtc.tkb / uart_getc.tkb) beyond
+# the standard uart+print pair, so neither fits STANDARD_OBJS -- same
+# single-member-group treatment as IRQ_OBJS.
+RTC_OBJS   := examples/rtc/rtc.o
+GETC_OBJS  := examples/echo/echo.o
+SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS) $(NET_OBJS) $(CHECKSUM_OBJS) $(APP_OBJS) \
+                $(RTC_OBJS) $(GETC_OBJS)
 STANDARD_OBJS := $(filter-out $(SPECIAL_OBJS), $(EXAMPLE_OBJS))
 
 $(STANDARD_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) build
@@ -126,6 +138,12 @@ $(STANDARD_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) bu
 
 $(IRQ_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) build
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $< --target $(AARCH64_TARGET) -o $@
+
+$(RTC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_RTC) build
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_RTC) $< --target $(AARCH64_TARGET) -o $@
+
+$(GETC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_UART_GETC) build
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_UART_GETC) $< --target $(AARCH64_TARGET) -o $@
 
 $(TIMER_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) build
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $< --target $(AARCH64_TARGET) -o $@
@@ -260,6 +278,32 @@ $(STM32_KERNELS): examples/%/kernel_stm32.elf: \
 	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/$*/$*_stm32.o -o $@
 
 $(STM32_BINS): examples/%/kernel_stm32.bin: examples/%/kernel_stm32.elf
+	llvm-objcopy-19 -O binary $< $@
+
+# rtc and echo each need one extra STM32-specific common file beyond the
+# standard uart+print pair (real RTC peripheral driver / USART1 RX poll),
+# so -- like their AArch64-side RTC_OBJS/GETC_OBJS counterparts -- they get
+# their own one-off rule pairs rather than joining the generic
+# STM32_EXAMPLES loop above.
+COMMON_STM32_RTC       := $(COMMON_STM32_DIR)/rtc.tkb
+COMMON_STM32_UART_GETC := $(COMMON_STM32_DIR)/uart_getc.tkb
+
+examples/rtc/rtc_stm32.o: examples/rtc/rtc.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_RTC) build
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_RTC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+
+examples/rtc/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/rtc/rtc_stm32.o $(COMMON_STM32_LINK_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/rtc/rtc_stm32.o -o $@
+
+examples/rtc/kernel_stm32.bin: examples/rtc/kernel_stm32.elf
+	llvm-objcopy-19 -O binary $< $@
+
+examples/echo/echo_stm32.o: examples/echo/echo.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_UART_GETC) build
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_UART_GETC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+
+examples/echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/echo/echo_stm32.o $(COMMON_STM32_LINK_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/echo/echo_stm32.o -o $@
+
+examples/echo/kernel_stm32.bin: examples/echo/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
 # -- QEMU run targets ----------------------------------------------------------

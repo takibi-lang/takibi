@@ -1,23 +1,23 @@
-// Demo of reading multiple PL031 RTC registers and measuring elapsed ticks.
-// RTCDR (offset 0): current time. RTCCR (offset 0x0C = *i32[3]): bit0=EN.
+// Demo of waiting for the RTC to tick once. Portable across the QEMU
+// (examples/common/rtc.tkb, PL011/PL031) and STM32
+// (examples/common_stm32/rtc.tkb, real RTC peripheral) HALs -- see those
+// files for why rtc_read_seconds()'s value is never subtracted (STM32's is
+// raw BCD, not a linear counter): the loop below already guarantees exactly
+// one tick elapses between sampling t0 and observing the change, so the
+// elapsed count is always 1 by construction and doesn't need computing.
 
 fn main() {
-    let base: *io i32 = 0x09010000; // PL031 RTC base address
+    rtc_init();
 
-    let ctrl: i32 = *(base + 3); // RTCCR: 3rd word as *i32 (offset 0x0C)
     uart_puts("rtc: ");
-    if ((ctrl & 1) != 0) {
+    if (rtc_is_running()) {
         uart_puts("ok");
     } else {
         uart_puts("stopped");
     }
     uart_puts("\r\n");
 
-    let t0: i32 = *base;
-    while (*base == t0) {}
-    let t1: i32 = *base;
-    uart_puts("tick: ");
-    uart_print_uint(t1 - t0);
-    uart_puts("s\r\n");
+    let t0: i32 = rtc_read_seconds();
+    while (rtc_read_seconds() == t0) {}
+    uart_puts("tick: 1s\r\n");
 }
-

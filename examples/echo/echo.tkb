@@ -1,11 +1,6 @@
 // UART echo server. Immediately echoes input back; exits on q + Enter.
-
-fn uart_getc() u8 {
-    let fr: *io i32 = 0x09000018; // PL011 FR: bit4=RXFE (receive FIFO empty)
-    while (*fr == 144) {} // 0x90 = TXFE|RXFE idle state; changes when data arrives
-    let dr: *io u8 = 0x09000000; // PL011 UART DR
-    return *dr;
-}
+// uart_getc() comes from the HAL (examples/common/uart_getc.tkb or
+// examples/common_stm32/uart_getc.tkb) so this file is portable.
 
 fn main() {
     uart_puts("echo ready\r\n");

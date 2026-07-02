@@ -90,11 +90,18 @@ read_until_quiet() {
     wait "$catpid" 2>/dev/null || true
 }
 
-# run_hw_test NAME BIN EXPECTED
+# run_hw_test NAME BIN EXPECTED [MAX_SECS] [STABLE_POLLS]
 #
 # Flashes BIN at FLASH_ADDR, resets, and captures UART output, diffing
 # against EXPECTED byte-for-byte (same expected-file convention as
-# run_qemutest.sh's run_test).
+# run_qemutest.sh's run_test). MAX_SECS overrides CAPTURE_MAX_SECS, and
+# STABLE_POLLS overrides CAPTURE_STABLE_POLLS, when a test needs more
+# margin than the default -- e.g. rtc prints once, then waits up to
+# roughly an LSI-clocked "second" (which may run faster or slower than a
+# true second -- see examples/common_stm32/rtc.tkb) before printing again,
+# so the default ~200ms idle-quiet threshold would (and did, empirically)
+# mistake that mid-test pause for completion and cut the capture short
+# before the second line ever arrives.
 #
 # The serial reader is started BEFORE the (explicit) reset, not after: at
 # 16MHz, boot plus a tiny program runs in microseconds, and `st-flash write`
@@ -114,7 +121,8 @@ read_until_quiet() {
 # capture -- so only the explicit `st-flash reset` below is actually being
 # measured.
 run_hw_test() {
-    local name="$1" bin="$2" expected="$3"
+    local name="$1" bin="$2" expected="$3" max_secs="${4:-$CAPTURE_MAX_SECS}" \
+          stable_polls="${5:-$CAPTURE_STABLE_POLLS}"
     local tmp_out tmp_drain tmp_flash_log
     tmp_out=$(mktemp)
     tmp_drain=$(mktemp)
@@ -133,8 +141,86 @@ run_hw_test() {
     read_until_quiet "$tmp_drain" "$DRAIN_MAX_SECS" "$DRAIN_STABLE_POLLS" 0
     rm -f "$tmp_drain"
 
-    read_until_quiet "$tmp_out" "$CAPTURE_MAX_SECS" "$CAPTURE_STABLE_POLLS" 1 \
+    read_until_quiet "$tmp_out" "$max_secs" "$stable_polls" 1 \
         "st-flash reset > /dev/null 2>&1"
+
+    if diff -q "$expected" "$tmp_out" > /dev/null 2>&1; then
+        printf "${GRN}PASS${RST}  %s\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        printf "${RED}FAIL${RST}  %s\n" "$name"
+        printf "       expected bytes: %s\n" "$(od -An -c "$expected" | tr -s ' \n' ' ')"
+        printf "       got bytes:      %s\n" "$(od -An -c "$tmp_out"  | tr -s ' \n' ' ')"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+    fi
+
+    rm -f "$tmp_out" "$tmp_flash_log"
+}
+
+# run_hw_test_stdin NAME BIN EXPECTED STDIN_FILE
+#
+# Like run_hw_test, but for examples that read input (currently just echo):
+# after the reset, waits (bounded) until the device has said *something* --
+# confirming its initial uart_puts() has already returned, which only
+# happens once the firmware is about to start polling for input -- before
+# writing STDIN_FILE to the port. Writing any earlier risks overrunning the
+# single-byte-deep USART RDR before anything is reading it. Once input is
+# sent, polls for real quiescence the same way run_hw_test does (echo.tkb
+# goes silent for good after printing "bye\r\n").
+run_hw_test_stdin() {
+    local name="$1" bin="$2" expected="$3" stdin_file="$4"
+    local tmp_out tmp_drain tmp_flash_log
+    tmp_out=$(mktemp)
+    tmp_drain=$(mktemp)
+    tmp_flash_log=$(mktemp)
+
+    if ! st-flash write "$bin" "$FLASH_ADDR" > "$tmp_flash_log" 2>&1; then
+        printf "${RED}FAIL${RST}  %s  (st-flash write failed)\n" "$name"
+        sed 's/^/       /' "$tmp_flash_log"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+        rm -f "$tmp_out" "$tmp_drain" "$tmp_flash_log"
+        return
+    fi
+
+    stty -F "$SERIAL_DEV" "$BAUD" raw -echo
+    read_until_quiet "$tmp_drain" "$DRAIN_MAX_SECS" "$DRAIN_STABLE_POLLS" 0
+    rm -f "$tmp_drain"
+
+    : > "$tmp_out"
+    cat "$SERIAL_DEV" > "$tmp_out" 2>/dev/null &
+    local catpid=$!
+    sleep 0.1
+    st-flash reset > /dev/null 2>&1
+
+    local max_wait_polls waited=0 size
+    max_wait_polls=$(awk -v m="$CAPTURE_MAX_SECS" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
+    while [ "$waited" -lt "$max_wait_polls" ]; do
+        sleep "$POLL_INTERVAL"
+        size=$(stat -c%s "$tmp_out" 2>/dev/null || echo 0)
+        [ "$size" -gt 0 ] && break
+        waited=$((waited + 1))
+    done
+
+    cat "$stdin_file" > "$SERIAL_DEV"
+
+    local max_polls last_size=-1 stable=0 poll=0
+    max_polls=$(awk -v m="$CAPTURE_MAX_SECS" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
+    while [ "$poll" -lt "$max_polls" ]; do
+        sleep "$POLL_INTERVAL"
+        size=$(stat -c%s "$tmp_out" 2>/dev/null || echo 0)
+        if [ "$size" = "$last_size" ]; then
+            stable=$((stable + 1))
+            [ "$stable" -ge "$CAPTURE_STABLE_POLLS" ] && break
+        else
+            stable=0
+        fi
+        last_size="$size"
+        poll=$((poll + 1))
+    done
+    kill "$catpid" 2>/dev/null || true
+    wait "$catpid" 2>/dev/null || true
 
     if diff -q "$expected" "$tmp_out" > /dev/null 2>&1; then
         printf "${GRN}PASS${RST}  %s\n" "$name"
@@ -188,6 +274,16 @@ run_hw_test "packed (stm32)"        examples/packed/kernel_stm32.bin        exam
 run_hw_test "struct_align (stm32)"  examples/struct_align/kernel_stm32.bin  examples/struct_align/struct_align.expected
 run_hw_test "const_global (stm32)"  examples/const_global/kernel_stm32.bin  examples/const_global/const_global.expected
 run_hw_test "sizeof (stm32)"        examples/sizeof/kernel_stm32.bin        examples/sizeof/sizeof.expected
+
+# rtc: real RTC peripheral, LSI-clocked. Prints once, then waits up to
+# roughly an LSI-imprecise "second" before printing again -- needs a much
+# longer idle-quiet threshold (40 polls ~= 2s) than the default ~200ms, or
+# the mid-test pause gets mistaken for completion (see run_hw_test above).
+run_hw_test "rtc (stm32)" examples/rtc/kernel_stm32.bin examples/rtc/rtc.expected 5 40
+
+# echo: the one bidirectional test -- needs input written to the port.
+run_hw_test_stdin "echo (stm32)" examples/echo/kernel_stm32.bin examples/echo/echo.expected \
+    examples/echo/echo.stdin
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

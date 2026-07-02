@@ -1,0 +1,18 @@
+// PL011 RTC HAL (QEMU virt board). Same public signatures as
+// examples/common_stm32/rtc.tkb so examples/rtc/rtc.tkb is portable.
+// rtc_init() is a no-op here: QEMU's PL031 model needs no setup, it's
+// always running (RTCCR always reads back enabled).
+
+fn rtc_init() {
+}
+
+fn rtc_is_running() -> bool {
+    let base: *io i32 = 0x09010000; // PL031 RTC base address
+    let ctrl: i32 = *(base + 3);    // RTCCR: 3rd word as *i32 (offset 0x0C)
+    return (ctrl & 1) != 0;
+}
+
+fn rtc_read_seconds() -> i32 {
+    let base: *io i32 = 0x09010000;
+    return *base; // RTCDR: current time, offset 0
+}

@@ -1,0 +1,11 @@
+// STM32F746 UART receive, over USART1 (same peripheral examples/common_stm32
+// /uart.tkb's uart_putc/uart_puts use). Same signature as
+// examples/common/uart_getc.tkb. RX itself needs no extra init beyond what
+// uart_init() (CR1.RE) already does.
+
+fn uart_getc() u8 {
+    let usart1_isr: *io u32 = 0x4001101C;
+    let usart1_rdr: *io u8  = 0x40011024;
+    while ((*usart1_isr & (1 << 5)) == 0) {} // wait for RXNE
+    return *usart1_rdr;
+}
