@@ -7,15 +7,29 @@
 // in scripts/tcp_echo_test.py, one per stage, all run against this same
 // kernel.
 //
-// Session 1 (this one): three-way handshake only (LISTEN -> SYN_RCVD ->
-// ESTABLISHED). No data transfer or connection close yet -- once
-// ESTABLISHED, further segments for this connection are currently
-// ignored (ready for the next step to add echo behavior there).
+// Session 1: three-way handshake (LISTEN -> SYN_RCVD -> ESTABLISHED).
+// Session 2: data echo once ESTABLISHED -- a received segment carrying
+// data from the recorded connection, with the expected next sequence
+// number, gets ACKed and echoed back verbatim in a single PSH|ACK reply.
+// Session 3 (this one): connection close. A FIN from ESTABLISHED is
+// answered with a combined FIN|ACK (ACKing the client's FIN and sending
+// our own FIN in the same segment, since we never have unsent data of our
+// own queued up -- real stacks do this too when there's nothing left to
+// send), moving to LAST_ACK. The client's ACK of that FIN moves back to
+// LISTEN, freeing the connection for a new client -- there is no
+// CLOSE_WAIT/FIN_WAIT distinction here because both sides' FINs are
+// combined into one segment instead of being independent events.
 //
 // Listens on TCP port 7 (the "Echo Protocol", RFC 862 -- a fitting choice
 // for what this will become). Single connection only: while a handshake
 // is in progress or a connection is established, SYNs from other clients
-// are ignored rather than queued.
+// are ignored rather than queued. Out-of-order data (seq != conn_rcv_nxt)
+// is silently dropped rather than buffered or explicitly NAKed -- no
+// retransmission timer exists on the sender side of this test harness, so
+// reordering never actually happens in practice here. A FIN arriving
+// together with its own data in the same segment is not supported -- the
+// data is simply not echoed, only the FIN is processed -- since nothing
+// in this test suite sends that combination.
 
 let RX_BUF_SIZE: i32 = 1536;
 
@@ -48,6 +62,7 @@ let TCP_URGENT:      i32 = 18;
 let TCP_FLAG_FIN: i32 = 0x01;
 let TCP_FLAG_SYN: i32 = 0x02;
 let TCP_FLAG_RST: i32 = 0x04;
+let TCP_FLAG_PSH: i32 = 0x08;
 let TCP_FLAG_ACK: i32 = 0x10;
 
 let PROTO_TCP:    i32 = 6;
@@ -60,6 +75,7 @@ let OUR_ISN: i32 = 0x00001000;
 let TCP_LISTEN:      i32 = 0;
 let TCP_SYN_RCVD:    i32 = 1;
 let TCP_ESTABLISHED: i32 = 2;
+let TCP_LAST_ACK:    i32 = 3;
 
 let mut conn_state:       i32 = 0; // TCP_LISTEN
 let mut conn_remote_mac:  [u8; 6];
@@ -104,6 +120,64 @@ fn build_syn_ack(eth: *u8, ip: *u8, ihl: i32, tcp: *u8) {
     write_u32be(tcp + TCP_ACK, conn_rcv_nxt);
     tcp[TCP_DATA_OFFSET] = (5 << 4) as u8; // 20-byte header, no options
     tcp[TCP_FLAGS] = (TCP_FLAG_SYN | TCP_FLAG_ACK) as u8;
+    write_u16be(tcp + TCP_WINDOW, 65535);
+    write_u16be(tcp + TCP_URGENT, 0);
+
+    fix_tcp_checksum(ip, tcp, 20);
+}
+
+// Rewrites a received data segment into an ACK|PSH reply carrying the
+// same payload verbatim (the data bytes at tcp+20..tcp+20+data_len are
+// already in the buffer and are left untouched). Only called from
+// TCP_ESTABLISHED after the caller has already validated the request and
+// confirmed seq == conn_rcv_nxt.
+fn build_data_echo(eth: *u8, ip: *u8, ihl: i32, tcp: *u8, data_len: i32) {
+    bytes_copy(eth, eth + 6, 6);
+    bytes_copy(eth + 6, our_mac as *u8, 6);
+
+    bytes_copy(ip + IP_DST, ip + IP_SRC, 4);
+    bytes_copy(ip + IP_SRC, our_ip as *u8, 4);
+    ip[IP_TTL] = 64 as u8;
+    write_u16be(ip + IP_TOTAL_LEN, ihl + 20 + data_len);
+    write_u16be(ip + IP_CHECKSUM, 0);
+    write_u16be(ip + IP_CHECKSUM, inet_checksum(ip, ihl));
+
+    let client_port: i32 = read_u16be(tcp + TCP_SRC_PORT);
+    write_u16be(tcp + TCP_SRC_PORT, TCP_ECHO_PORT);
+    write_u16be(tcp + TCP_DST_PORT, client_port);
+    write_u32be(tcp + TCP_SEQ, conn_snd_nxt);
+    write_u32be(tcp + TCP_ACK, conn_rcv_nxt + data_len);
+    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
+    tcp[TCP_FLAGS] = (TCP_FLAG_ACK | TCP_FLAG_PSH) as u8;
+    write_u16be(tcp + TCP_WINDOW, 65535);
+    write_u16be(tcp + TCP_URGENT, 0);
+
+    fix_tcp_checksum(ip, tcp, 20 + data_len);
+}
+
+// Rewrites a received FIN into a combined FIN|ACK reply: ACKs the
+// client's FIN (which consumes one sequence number, already folded into
+// conn_rcv_nxt by the caller) and sends our own FIN in the same segment.
+// Only called from TCP_ESTABLISHED after the caller has already validated
+// the request and confirmed seq == conn_rcv_nxt (before incrementing it).
+fn build_fin_ack(eth: *u8, ip: *u8, ihl: i32, tcp: *u8) {
+    bytes_copy(eth, eth + 6, 6);
+    bytes_copy(eth + 6, our_mac as *u8, 6);
+
+    bytes_copy(ip + IP_DST, ip + IP_SRC, 4);
+    bytes_copy(ip + IP_SRC, our_ip as *u8, 4);
+    ip[IP_TTL] = 64 as u8;
+    write_u16be(ip + IP_TOTAL_LEN, ihl + 20);
+    write_u16be(ip + IP_CHECKSUM, 0);
+    write_u16be(ip + IP_CHECKSUM, inet_checksum(ip, ihl));
+
+    let client_port: i32 = read_u16be(tcp + TCP_SRC_PORT);
+    write_u16be(tcp + TCP_SRC_PORT, TCP_ECHO_PORT);
+    write_u16be(tcp + TCP_DST_PORT, client_port);
+    write_u32be(tcp + TCP_SEQ, conn_snd_nxt);
+    write_u32be(tcp + TCP_ACK, conn_rcv_nxt);
+    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
+    tcp[TCP_FLAGS] = (TCP_FLAG_FIN | TCP_FLAG_ACK) as u8;
     write_u16be(tcp + TCP_WINDOW, 65535);
     write_u16be(tcp + TCP_URGENT, 0);
 
@@ -216,18 +290,46 @@ fn main() {
                                                     conn_state = TCP_SYN_RCVD;
                                                 }
                                             } else {
-                                                // SYN_RCVD or ESTABLISHED: only the recorded
-                                                // connection's segments matter.
+                                                // SYN_RCVD, ESTABLISHED, or LAST_ACK: only the
+                                                // recorded connection's segments matter.
                                                 if (bytes_eq(ip + IP_SRC, conn_remote_ip as *u8, 4) == 1 &&
                                                     src_port == conn_remote_port) {
-                                                    if (conn_state == TCP_SYN_RCVD) {
+                                                    if ((flags & TCP_FLAG_RST) != 0) {
+                                                        // Abrupt close from the client: drop the
+                                                        // connection with no reply and free the slot.
+                                                        conn_state = TCP_LISTEN;
+                                                    } else if (conn_state == TCP_SYN_RCVD) {
                                                         if ((flags & TCP_FLAG_ACK) != 0 &&
                                                             (flags & TCP_FLAG_SYN) == 0 &&
                                                             ack == conn_snd_nxt && seq == conn_rcv_nxt) {
                                                             conn_state = TCP_ESTABLISHED;
                                                         }
+                                                    } else if (conn_state == TCP_ESTABLISHED) {
+                                                        if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
+                                                            conn_rcv_nxt = conn_rcv_nxt + 1; // FIN consumes one seq number
+                                                            build_fin_ack(eth, ip, ihl, tcp);
+                                                            should_tx = 1;
+                                                            tx_len = 10 + 14 + ihl + 20;
+                                                            conn_snd_nxt = conn_snd_nxt + 1; // our FIN too
+                                                            conn_state = TCP_LAST_ACK;
+                                                        } else {
+                                                            let data_len: i32 = tcp_len - 20;
+                                                            if (data_len > 0 &&
+                                                                (flags & TCP_FLAG_ACK) != 0 &&
+                                                                seq == conn_rcv_nxt) {
+                                                                build_data_echo(eth, ip, ihl, tcp, data_len);
+                                                                should_tx = 1;
+                                                                tx_len = 10 + 14 + ihl + 20 + data_len;
+                                                                conn_rcv_nxt = conn_rcv_nxt + data_len;
+                                                                conn_snd_nxt = conn_snd_nxt + data_len;
+                                                            }
+                                                        }
+                                                    } else if (conn_state == TCP_LAST_ACK) {
+                                                        if ((flags & TCP_FLAG_ACK) != 0 && ack == conn_snd_nxt) {
+                                                            // Close complete; ready for a new client.
+                                                            conn_state = TCP_LISTEN;
+                                                        }
                                                     }
-                                                    // TCP_ESTABLISHED: data echo lands here in a later step.
                                                 }
                                             }
                                         }

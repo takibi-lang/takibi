@@ -734,16 +734,44 @@ splits into two genuinely different kinds of step:
   cannot meaningfully test "data echo" without a connection that already
   went through handshake, so a standalone "handshake-only" binary
   wouldn't be a real artifact, just a subset of the final one. Regression
-  granularity is instead achieved by accumulating independent test
-  *functions* inside `scripts/tcp_echo_test.py`, one per stage, all
-  run against the same final kernel -- e.g. `test_handshake_only`,
-  `test_data_echo`, `test_close`. This mirrors `icmp_echo_test.py`'s
-  existing multi-function structure (`test_ping_us`,
-  `test_ping_other_stays_silent`, `test_corrupted_checksum_dropped`
-  already exist there for the same reason). Each function stays in the
-  suite permanently, so a future change that breaks handshake sequencing
-  but not data-echo behavior still fails specifically at
-  `test_handshake_only`.
+  granularity is instead achieved by accumulating test *functions* inside
+  `scripts/tcp_echo_test.py`, one per stage, all run against the same
+  final kernel -- e.g. `test_handshake_only`, `test_data_echo`,
+  `test_close`. This mirrors `icmp_echo_test.py`'s existing multi-function
+  structure (`test_ping_us`, `test_ping_other_stays_silent`,
+  `test_corrupted_checksum_dropped` already exist there for the same
+  reason), with one caveat that only became apparent once `test_data_echo`
+  was actually written: **the test functions turned out not to be fully
+  independent either**, for the identical reason (`tcp_echo.tkb` supports
+  exactly one connection, with no close/reset-to-LISTEN path yet).
+  `test_data_echo()` cannot perform its own handshake -- the connection
+  slot is already taken by whatever `test_handshake_only()` established --
+  so it directly continues that same connection using shared module-level
+  constants (`HANDSHAKE_CLIENT_PORT`/`HANDSHAKE_CLIENT_ISN`/`SERVER_ISN`)
+  and must run strictly after `test_handshake_only()` succeeds (see
+  `main()`'s `ok4 = ok3 and test_data_echo()`). Each function still prints
+  and is judged on its own labeled PASS/FAIL line, so the *reporting*
+  granularity the user wanted is preserved even though the *execution* is
+  now a chain, not independent calls.
+
+  **Close (FIN handling) is done, and `test_reconnect_after_close`
+  confirms the chain-of-tests problem above is now avoidable going
+  forward** -- once `conn_state` returns to `TCP_LISTEN`, a brand new,
+  fully independent connection (different port/ISN, no relation to any
+  prior test's state) can be established, and that's exactly what
+  `test_reconnect_after_close()` does after `test_close()` tears down the
+  first connection. It exists specifically to catch a "close looks like
+  it worked (sent the right FIN|ACK) but forgot to actually reset
+  `conn_state`" bug, which `test_close()` alone could not catch (it only
+  checks that the *reply* was well-formed and that the closing ACK
+  produced silence, not that the server is usable again afterward).
+  `TCP_LISTEN` -> `TCP_SYN_RCVD` -> `TCP_ESTABLISHED` -> `TCP_LAST_ACK` ->
+  back to `TCP_LISTEN` is the full state cycle; there's no separate
+  `CLOSE_WAIT`/`FIN_WAIT` because the server always has nothing left to
+  send by the time a client FINs, so it ACKs the client's FIN and sends
+  its own FIN in the *same* segment (`build_fin_ack`) rather than as two
+  separate events -- a deliberate simplification real stacks also take
+  when there's no queued outbound data.
 
 **TCP checksum needs a "pseudo-header"** (12 bytes: src IP, dst IP, a
 zero byte, protocol, TCP length) that is never actually transmitted but
