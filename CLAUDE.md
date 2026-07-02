@@ -898,8 +898,13 @@ just relied on for a new reason here.
 
 ```
 ocaml 5.4.0, dune, menhir
-llvm-19 OCaml bindings (llvm, llvm.analysis, llvm.target, llvm.all_backends)
+llvm-19 OCaml bindings (llvm, llvm.analysis, llvm.target, llvm.all_backends, llvm.debuginfo)
 ppx_deriving.show
 llvm-mc-19, ld.lld-19   (for bare-metal builds)
 qemu-system-aarch64     (for QEMU execution)
+gdb-multiarch           (AArch64-capable gdb; stock `gdb` on this platform is x86_64-only and
+                         cannot parse QEMU's AArch64 target-description XML over the remote
+                         protocol -- confirmed by the "unknown architecture aarch64" / truncated
+                         register errors it raises. Needed for gdb-remote-based tooling, e.g. a
+                         QEMU-based sampling profiler; not needed for DWARF emission itself.)
 ```

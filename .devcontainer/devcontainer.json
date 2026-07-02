@@ -16,7 +16,7 @@
     "source=${localEnv:HOME}/claude/dot.claude,target=/home/vscode/.claude,type=bind",
     "source=${localEnv:HOME}/claude/dot.claude.json,target=/home/vscode/.claude.json,type=bind"
   ],
-  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude && sudo apt-get update && sudo apt-get install -y cmake llvm-19-dev libzstd-dev lld-19 qemu-system-arm && opam update && opam install -y ppx_deriving llvm",
+  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude && sudo apt-get update && sudo apt-get install -y cmake llvm-19-dev libzstd-dev lld-19 qemu-system-arm gdb-multiarch && opam update && opam install -y ppx_deriving llvm",
   "containerEnv": {
     "LANG": "en_US.UTF-8",
     "LC_ALL": "en_US.UTF-8",
