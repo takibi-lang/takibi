@@ -199,49 +199,28 @@ Files changed when `expr as T` was added:
    - `*T -> usize`: `ptrtoint ptr, i64` (full 64-bit address; no truncation)
    - `*T -> *U`: **no-op** (in LLVM 19, all pointers are the same `ptr` type, so the leading `if vty = dst_ll then v` in `coerce` applies; no compiler change needed)
 
-**Bug fixed while building examples/arp_reply (2026-07): `as` must return a
-widened value, not a bare narrow one.** `widen_load`'s doc comment states
-the invariant every other narrow-typed expression path relies on:
-"arithmetic values arrive at `coerce` already widened to i32/i64; `coerce`
-narrows only at the point of storage." `Var`, `Index`, `FieldGet`, and
-`Deref` all follow it -- each loads the raw narrow value, then calls
-`to_arith_width` before returning it as an in-flight `gen_expr` result. The
-`Cast` case's fallback branch did not: it returned `coerce v target_ty`
-directly, so `expr as u8` produced a genuine `i8` value instead of an
-`i8`-truncated-then-`i32`-widened one. Two u8-typed expressions with
-different origins (say, `arr[i]` vs `6 as u8`) then disagreed on LLVM type
-despite agreeing on AST type, and `icmp eq i32 ..., i8 6` crashed the LLVM
-verifier ("Broken function found") -- not a wrong-answer bug, a
-compile-time crash on any narrow-typed comparison/arithmetic that mixed a
-loaded value with a cast literal. Fixed by changing the fallback to
-`to_arith_width target_ty (coerce v target_ty)`, matching every other
-narrow-typed path. **Lesson for future codegen changes**: any `gen_expr`
-case returning a `TypeI8/I16/U8/U16` (or `bool`-adjacent) value must widen
-before returning, even if the AST type says narrow -- the AST type and the
-LLVM value's actual bit width are intentionally allowed to diverge for
-<=32-bit integer types, and every consumer downstream (`coerce`,
-arithmetic, comparisons) assumes the widened representation.
+**Invariant: narrow-typed (`i8/u8/i16/u16`) `gen_expr` results must be
+i32/i64-widened in-flight, never returned as a bare narrow value.**
+`widen_load` documents this: "arithmetic values arrive at `coerce` already
+widened; `coerce` narrows only at the point of storage." `Var`/`Index`/
+`FieldGet`/`Deref` all follow it. The `Cast` case's fallback branch once
+didn't (`coerce v target_ty` with no re-widening), so `expr as u8` composed
+with e.g. `arr[i]` (an i32-widened u8) via `==` produced two operands that
+disagreed on LLVM type despite matching AST type -- `icmp eq i32 ..., i8 6`
+crashed the LLVM verifier. Fixed via `to_arith_width target_ty (coerce v
+target_ty)`. **Any future `gen_expr` case returning a narrow type must
+widen before returning**, even though the AST type says narrow.
 
-**Follow-up (same 2026-07 investigation): `gen_func` now uses
-`Llvm_analysis.verify_function` + `raise (Error ...)` instead of
-`Llvm_analysis.assert_valid_function`.** The assert variant prints its
-diagnostic to stderr and calls C's `abort()` on invalid IR (see
-`llvm_analysis.mli`) -- not a catchable OCaml exception. An experiment
-confirmed the difference concretely: reproducing the bug above under the
-old assert-based code killed the whole `test_takibi.exe` process with
-SIGABRT (exit 134), silently dropping every test case scheduled after the
-crashing one with no indication of which test caused it; the same
-reproduction under `verify_function` produced a normal Alcotest `[FAIL]`
-line naming the test, a full backtrace, and let all 271 tests still run
-("3 failures! ... 271 tests run"). Any future `gen_func`-adjacent change
-that might produce invalid IR should rely on this catchable path, not
-reintroduce an aborting check -- it's the difference between `make check`
-telling you exactly which test regressed versus just telling you dune
-test crashed somewhere. See `test/test_takibi.ml`'s `codegen_tests` group
-for the regression coverage this enabled (three cases exercising the
-pattern above, using a `gen_codegen`/`expect_codegen_ok` helper that runs
-the real parse -> infer -> `Llvm_gen.gen_program` pipeline without a
-target machine).
+**`gen_func` verifies generated IR with `Llvm_analysis.verify_function` +
+`raise (Error ...)`, not `Llvm_analysis.assert_valid_function`.** The
+assert variant calls C's `abort()` on invalid IR (uncatchable OCaml-side),
+which during the bug above killed `test_takibi.exe` with SIGABRT and
+silently dropped every later test with no indication which one crashed;
+`verify_function` produces a normal, attributable `[FAIL]` instead. Any
+future `gen_func`-adjacent change should keep using this catchable path.
+Regression coverage: `test/test_takibi.ml`'s `codegen_tests` group (via a
+`gen_codegen`/`expect_codegen_ok` helper running parse -> infer ->
+`Llvm_gen.gen_program` with no target machine).
 
 ### sizeof(T) Spans 4 Files
 Files changed when `sizeof(T)` was added:
@@ -734,50 +713,32 @@ splits into two genuinely different kinds of step:
   header parsing is a self-contained concern independent of connection
   state.
 - **`examples/tcp_echo`** (handshake -> data echo -> close) is deliberately
-  **one example grown incrementally across multiple sessions**, not a
-  separate example per stage. Reason: unlike ARP/ICMP (stateless,
-  one-frame-in-one-frame-out), TCP's stages are not independent -- you
-  cannot meaningfully test "data echo" without a connection that already
-  went through handshake, so a standalone "handshake-only" binary
-  wouldn't be a real artifact, just a subset of the final one. Regression
-  granularity is instead achieved by accumulating test *functions* inside
-  `scripts/tcp_echo_test.py`, one per stage, all run against the same
-  final kernel -- e.g. `test_handshake_only`, `test_data_echo`,
-  `test_close`. This mirrors `icmp_echo_test.py`'s existing multi-function
-  structure (`test_ping_us`, `test_ping_other_stays_silent`,
-  `test_corrupted_checksum_dropped` already exist there for the same
-  reason), with one caveat that only became apparent once `test_data_echo`
-  was actually written: **the test functions turned out not to be fully
-  independent either**, for the identical reason (`tcp_echo.tkb` supports
-  exactly one connection, with no close/reset-to-LISTEN path yet).
-  `test_data_echo()` cannot perform its own handshake -- the connection
-  slot is already taken by whatever `test_handshake_only()` established --
-  so it directly continues that same connection using shared module-level
-  constants (`HANDSHAKE_CLIENT_PORT`/`HANDSHAKE_CLIENT_ISN`/`SERVER_ISN`)
-  and must run strictly after `test_handshake_only()` succeeds (see
-  `main()`'s `ok4 = ok3 and test_data_echo()`). Each function still prints
-  and is judged on its own labeled PASS/FAIL line, so the *reporting*
-  granularity the user wanted is preserved even though the *execution* is
-  now a chain, not independent calls.
+  **one example grown incrementally**, not a separate example per stage:
+  unlike ARP/ICMP (stateless, one-frame-in-one-frame-out), TCP's stages
+  share a connection, so a standalone "handshake-only" binary wouldn't be
+  a real artifact. Regression granularity instead comes from accumulating
+  test *functions* in `scripts/tcp_echo_test.py` (mirrors
+  `icmp_echo_test.py`'s multi-function structure), one per stage --
+  `test_handshake_only`, `test_data_echo`, `test_close`,
+  `test_reconnect_after_close`. **These functions are not independent**:
+  `tcp_echo.tkb` supports exactly one connection, so
+  `test_data_echo()`/`test_close()` continue the *same* connection
+  `test_handshake_only()` established (shared module-level constants:
+  `HANDSHAKE_CLIENT_PORT`/`HANDSHAKE_CLIENT_ISN`/`SERVER_ISN`) and must run
+  in that order (`main()`'s `ok4 = ok3 and test_data_echo()` chain). Each
+  still prints its own labeled PASS/FAIL line, so per-stage regression
+  attribution still works even though execution is a chain, not
+  independent calls. `test_reconnect_after_close()` is the one function
+  that *is* independent -- a brand new connection after `test_close()` --
+  specifically to catch a "close looks right but forgot to reset
+  `conn_state`" bug that `test_close()` alone can't see (it only checks
+  the reply, not that the server is usable again afterward).
 
-  **Close (FIN handling) is done, and `test_reconnect_after_close`
-  confirms the chain-of-tests problem above is now avoidable going
-  forward** -- once `conn_state` returns to `TCP_LISTEN`, a brand new,
-  fully independent connection (different port/ISN, no relation to any
-  prior test's state) can be established, and that's exactly what
-  `test_reconnect_after_close()` does after `test_close()` tears down the
-  first connection. It exists specifically to catch a "close looks like
-  it worked (sent the right FIN|ACK) but forgot to actually reset
-  `conn_state`" bug, which `test_close()` alone could not catch (it only
-  checks that the *reply* was well-formed and that the closing ACK
-  produced silence, not that the server is usable again afterward).
-  `TCP_LISTEN` -> `TCP_SYN_RCVD` -> `TCP_ESTABLISHED` -> `TCP_LAST_ACK` ->
-  back to `TCP_LISTEN` is the full state cycle; there's no separate
-  `CLOSE_WAIT`/`FIN_WAIT` because the server always has nothing left to
-  send by the time a client FINs, so it ACKs the client's FIN and sends
-  its own FIN in the *same* segment (`build_fin_ack`) rather than as two
-  separate events -- a deliberate simplification real stacks also take
-  when there's no queued outbound data.
+  State cycle: `TCP_LISTEN` -> `TCP_SYN_RCVD` -> `TCP_ESTABLISHED` ->
+  `TCP_LAST_ACK` -> back to `TCP_LISTEN`. No separate `CLOSE_WAIT`/
+  `FIN_WAIT`: the server never has queued outbound data by the time a
+  client FINs, so it ACKs the FIN and sends its own FIN in the same
+  segment (`build_fin_ack`) rather than as two events.
 
 **TCP checksum needs a "pseudo-header"** (12 bytes: src IP, dst IP, a
 zero byte, protocol, TCP length) that is never actually transmitted but
@@ -900,24 +861,13 @@ visibly increments -- this is deliberately *not* something
 below), since it depends on a human clicking reload, not a scripted
 sequence.
 
-`qemu-http-server` quits on a plain **Ctrl-C**, unlike every other
-`qemu-*` target (which need the QEMU-specific Ctrl-A X escape). Those
-other targets use `$(QEMU_FLAGS)`'s `-nographic`, which puts the terminal
-in raw mode so keystrokes pass through to the guest's UART -- necessary
-for `echo`/`irq`, which read real input, but that same raw mode is *why*
-Ctrl-C doesn't reach QEMU as a host-level interrupt on those targets (it's
-passed to the guest as byte 0x03 instead). `http_server` never reads from
-the guest's UART at all (everything is over the network), so it uses its
-own `HTTP_SERVER_QEMU_FLAGS` (`-display none -serial file:/dev/stdout
--monitor none`, no `-nographic`) instead -- still shows the guest's debug
-`uart_puts` output, but without grabbing the terminal, so Ctrl-C reaches
-QEMU as a normal SIGINT. Confirmed via `kill -INT` against the running
-QEMU process rather than assumed from documentation alone. The Makefile
-target also prints the actual URL (`Open http://localhost:$(HTTP_HOST_PORT)/`)
-right before launching QEMU -- the guest's own `uart_puts("http_server:
-ready\r\n")` can't include it, since the host-side port number (whatever
-`HTTP_HOST_PORT` resolves to) isn't something the guest has any way to
-know.
+`qemu-http-server` quits on plain **Ctrl-C** (every other `qemu-*` target
+needs QEMU's Ctrl-A X escape instead) -- see `HTTP_SERVER_QEMU_FLAGS` in
+the Makefile for the full reasoning (raw-mode terminal pass-through vs.
+`-serial file:/dev/stdout`, confirmed via `kill -INT` rather than assumed).
+The Makefile target also echoes the actual browser URL right before
+launching QEMU, since the guest has no way to know the host-side
+`HTTP_HOST_PORT`.
 
 **Request counter determinism** (flagged as a concern before
 implementation, worth recording why it's actually safe): `make qemutest`
