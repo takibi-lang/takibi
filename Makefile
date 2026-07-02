@@ -32,7 +32,7 @@ ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server
+.PHONY: build test qemutest langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server profile-http-server profile-tcp-echo
 
 .DEFAULT_GOAL := build
 
@@ -174,6 +174,32 @@ examples/fibonacci/fibonacci.debug.o: examples/fibonacci/fibonacci.tkb $(COMMON_
 examples/fibonacci/kernel.debug.elf: $(COMMON_STARTUP_O) examples/fibonacci/fibonacci.debug.o $(COMMON_LINK_LD)
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/fibonacci/fibonacci.debug.o -o $@
 
+# Third dedicated -g build, this time for the "App group" common files
+# (see the compilation-groups comment above IRQ_OBJS): needed so
+# scripts/profile_http_server.py has DWARF line info to resolve sampled
+# addresses against. Not part of `make check`/`qemutest` -- profiling is an
+# exploratory dev activity, not a pass/fail regression (same reasoning as
+# the manual qemu-* targets below).
+examples/http_server/http_server.debug.o: examples/http_server/http_server.tkb \
+    $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) build
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) \
+	          $< --target $(AARCH64_TARGET) -g -o $@
+
+examples/http_server/kernel.debug.elf: $(COMMON_STARTUP_O) examples/http_server/http_server.debug.o $(COMMON_LINK_LD)
+	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/http_server/http_server.debug.o -o $@
+
+# Same, for tcp_echo -- profile_http_server.py's profile landed ~100% in the
+# idle interrupt-wait loop (network round trips dominate wall-clock time at
+# the HTTP layer), so scripts/profile_tcp_echo.py profiles one layer down
+# with a workload built to keep the server continuously busy instead.
+examples/tcp_echo/tcp_echo.debug.o: examples/tcp_echo/tcp_echo.tkb \
+    $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) build
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) \
+	          $< --target $(AARCH64_TARGET) -g -o $@
+
+examples/tcp_echo/kernel.debug.elf: $(COMMON_STARTUP_O) examples/tcp_echo/tcp_echo.debug.o $(COMMON_LINK_LD)
+	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/tcp_echo/tcp_echo.debug.o -o $@
+
 # -- QEMU run targets ----------------------------------------------------------
 QEMU_FLAGS := -machine virt -cpu cortex-a53 -nographic \
               -semihosting-config enable=on,target=native
@@ -254,6 +280,22 @@ HTTP_SERVER_QEMU_FLAGS := -machine virt -cpu cortex-a53 -display none \
 qemu-http-server: examples/http_server/kernel.elf
 	@echo "Open http://localhost:$(HTTP_HOST_PORT)/ in your browser (Ctrl-C to quit)"
 	$(QEMU) $(HTTP_SERVER_QEMU_FLAGS) $(HTTP_SERVER_FLAGS) -kernel $<
+
+## profile-http-server: rough execution profile of http_server.tkb under QEMU
+## (gdb-multiarch PC sampling against the -g build + a repeated-request
+## load generator). See scripts/profile_http_server.py's module docstring
+## for the caveats -- this is a *relative* profile (QEMU's TCG emulation
+## doesn't model real Cortex-A53 timing), useful for "which function/line
+## dominates", not an absolute cycle count.
+profile-http-server: examples/http_server/kernel.debug.elf
+	python3 scripts/profile_http_server.py $<
+
+## profile-tcp-echo: rough execution profile of tcp_echo.tkb under QEMU,
+## using a sustained burst of large data segments (see
+## scripts/profile_tcp_echo.py's module docstring for why this exists
+## alongside profile-http-server, and the same directional-only caveats).
+profile-tcp-echo: examples/tcp_echo/kernel.debug.elf
+	python3 scripts/profile_tcp_echo.py $<
 
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts and linker outputs
