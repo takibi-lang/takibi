@@ -504,11 +504,17 @@ Only targets that require interactive manual startup (like `qemu-echo`) are adde
 Automatable programs are registered in `qemutest` by providing `.expected` / `.stdin` files.
 Use `run_test_timed` for tests that need timing verification (to confirm a delay actually waited).
 
-**Compilation groups** (which common `.tkb` files are prepended to each example):
+**Compilation groups** (which common `.tkb` files are prepended to each example)
+-- see the Makefile's own "Common file sets passed to takibi" comment
+(just above `IRQ_OBJS`) for the authoritative, currently-maintained list;
+summarized here:
 - Standard (uart.tkb + print.tkb): most examples
 - IRQ group (+ gic.tkb): `irq`
 - Timer group (+ gic.tkb + timer.tkb): `preempt`, `semaphore`, `watchdog`
 - Sync group (+ gic.tkb + timer.tkb + sync.tkb): `condvar`, `msgqueue`
+- Net group (+ gic.tkb + virtio_mmio.tkb + netutil.tkb): `net_echo`, `arp_reply`
+- Checksum group (+ inet_checksum.tkb + netutil.tkb): `inet_checksum`, `ip_parse`, `tcp_parse`
+- App group (+ gic.tkb + virtio_mmio.tkb + inet_checksum.tkb + netutil.tkb): `icmp_echo`, `tcp_echo`, `http_server`
 
 Note: `semaphore.tkb` declares its own `extern fn sem_wait/sem_post` (no `sync.tkb` needed), but still needs `sem_asm.o` at link time.
 
@@ -893,6 +899,25 @@ visibly increments -- this is deliberately *not* something
 `make qemutest` exercises (see the request-counter determinism note
 below), since it depends on a human clicking reload, not a scripted
 sequence.
+
+`qemu-http-server` quits on a plain **Ctrl-C**, unlike every other
+`qemu-*` target (which need the QEMU-specific Ctrl-A X escape). Those
+other targets use `$(QEMU_FLAGS)`'s `-nographic`, which puts the terminal
+in raw mode so keystrokes pass through to the guest's UART -- necessary
+for `echo`/`irq`, which read real input, but that same raw mode is *why*
+Ctrl-C doesn't reach QEMU as a host-level interrupt on those targets (it's
+passed to the guest as byte 0x03 instead). `http_server` never reads from
+the guest's UART at all (everything is over the network), so it uses its
+own `HTTP_SERVER_QEMU_FLAGS` (`-display none -serial file:/dev/stdout
+-monitor none`, no `-nographic`) instead -- still shows the guest's debug
+`uart_puts` output, but without grabbing the terminal, so Ctrl-C reaches
+QEMU as a normal SIGINT. Confirmed via `kill -INT` against the running
+QEMU process rather than assumed from documentation alone. The Makefile
+target also prints the actual URL (`Open http://localhost:$(HTTP_HOST_PORT)/`)
+right before launching QEMU -- the guest's own `uart_puts("http_server:
+ready\r\n")` can't include it, since the host-side port number (whatever
+`HTTP_HOST_PORT` resolves to) isn't something the guest has any way to
+know.
 
 **Request counter determinism** (flagged as a concern before
 implementation, worth recording why it's actually safe): `make qemutest`

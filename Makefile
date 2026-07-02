@@ -84,7 +84,7 @@ $(COMMON_SEM_ASM_O): $(COMMON_SEM_ASM_S)
 #   Sync group : + gic.tkb + timer.tkb + sync.tkb            (condvar msgqueue)
 #   Net group  : + gic.tkb + virtio_mmio.tkb + netutil.tkb  (net_echo, arp_reply)
 #   Checksum group: + inet_checksum.tkb + netutil.tkb       (inet_checksum, ip_parse, tcp_parse)
-#   App group  : + gic.tkb + virtio_mmio.tkb + inet_checksum.tkb + netutil.tkb (icmp_echo, tcp_echo)
+#   App group  : + gic.tkb + virtio_mmio.tkb + inet_checksum.tkb + netutil.tkb (icmp_echo, tcp_echo, http_server)
 .SECONDEXPANSION:
 
 IRQ_OBJS   := examples/irq/irq.o
