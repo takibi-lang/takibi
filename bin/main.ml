@@ -23,10 +23,11 @@ let parse_file filename =
   result
 
 let () =
-  (* Parse arguments: takibi <input>... [-o <output.o>] [--target <triple>] *)
+  (* Parse arguments: takibi <input>... [-o <output.o>] [--target <triple>] [-g] *)
   let input_files  = ref [] in
   let output_file = ref "" in
   let target_triple = ref "" in
+  let debug_info = ref false in
   let i = ref 1 in
   while !i < Array.length Sys.argv do
     (match Sys.argv.(!i) with
@@ -42,6 +43,8 @@ let () =
            Printf.eprintf "Error: --target requires an argument\n"; exit 1
          );
          target_triple := Sys.argv.(!i)
+     | "-g" ->
+         debug_info := true
      | arg ->
          input_files := arg :: !input_files);
     incr i
@@ -49,12 +52,13 @@ let () =
   let input_files = List.rev !input_files in
 
   if input_files = [] then (
-    Printf.eprintf "Usage: %s <filename>... [-o <output.o>] [--target <triple>]\n"
+    Printf.eprintf "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [-g]\n"
       Sys.argv.(0);
     exit 1
   );
 
   let machine = Llvm_gen.setup_target ~triple:!target_triple () in
+  if !debug_info then Llvm_gen.enable_debug_info (List.hd input_files);
 
   (try
     Const_env.reset ();

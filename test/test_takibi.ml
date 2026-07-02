@@ -1882,6 +1882,32 @@ let codegen_tests = [
           return 0;
         }");
 
+  (* Kept last in this group deliberately: Llvm_gen.enable_debug_info flips a
+     process-global ref with no way back off (same one-way-switch pattern
+     Llvm_gen.setup_target's target_data already uses), so every codegen test
+     registered after this one would also get DISubprogram/DILocation
+     metadata attached. That's harmless (extra metadata, not a behavior
+     change), but keeping this test last avoids it being a surprise to
+     earlier, unrelated test cases. *)
+  Alcotest.test_case
+    "DWARF debug info (-g): attaching a DISubprogram plus a per-statement \
+     DILocation still produces IR that LLVM's verifier accepts, across \
+     nested If/While bodies (regression coverage for the -g flag)" `Quick
+    (fun () ->
+       Llvm_gen.enable_debug_info "test.tkb";
+       expect_codegen_ok
+         "fn codegen_debug_info(n: i32) -> i32 {
+            let mut total: i32 = 0;
+            let mut i: i32 = 0;
+            while (i < n) {
+              if (i % 2 == 0) {
+                total = total + i;
+              }
+              i = i + 1;
+            }
+            return total;
+          }" ());
+
 ]
 
 (* -- Entry point ----------------------------------------------------------- *)

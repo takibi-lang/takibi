@@ -93,7 +93,7 @@ enum_variants:
 func_def:
   | FN IDENT LPAREN params RPAREN ret_type_opt LBRACE stmts RBRACE
     {
-      Ast.{ name = $2; params = $4; ret_type = $6; body = $8 }
+      Ast.{ name = $2; params = $4; ret_type = $6; body = $8; def_loc = $symbolstartpos }
     }
 
 param:

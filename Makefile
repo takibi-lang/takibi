@@ -45,7 +45,7 @@ test:
 	dune test
 
 ## qemutest: run QEMU integration tests (build all examples and verify automatically)
-qemutest: $(ALL_KERNELS)
+qemutest: $(ALL_KERNELS) examples/fizzbuzz/kernel.debug.elf
 	@bash scripts/run_qemutest.sh
 
 ## langcheck: verify that all source files contain only ASCII characters
@@ -149,6 +149,20 @@ $(SEM_KERNELS): examples/%/kernel.elf: \
     $(COMMON_STARTUP_O) $(COMMON_TIMER_ASM_O) $(COMMON_SEM_ASM_O) examples/%/$$*.o $(COMMON_LINK_LD)
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) $(COMMON_TIMER_ASM_O) $(COMMON_SEM_ASM_O) \
 	       examples/$*/$*.o -o $@
+
+# -- DWARF debug-info regression check ------------------------------------------
+# A dedicated -g build of ONE example (fizzbuzz), entirely separate from the
+# always-g-free rules above (its own .debug.o / kernel.debug.elf, so it can't
+# collide with or affect examples/fizzbuzz/kernel.elf). Exists so that
+# scripts/run_qemutest.sh's run_dwarf_test can verify the emitted DWARF line
+# table actually resolves to the correct source line (via llvm-dwarfdump-19
+# and addr2line), using fizzbuzz.tkb's fixed, well-known shape (fn main() at
+# line 3, for at line 4, final uart_puts at line 13) as the expected answer.
+examples/fizzbuzz/fizzbuzz.debug.o: examples/fizzbuzz/fizzbuzz.tkb $(COMMON_UART) $(COMMON_PRINT) build
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $< --target $(AARCH64_TARGET) -g -o $@
+
+examples/fizzbuzz/kernel.debug.elf: $(COMMON_STARTUP_O) examples/fizzbuzz/fizzbuzz.debug.o $(COMMON_LINK_LD)
+	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/fizzbuzz/fizzbuzz.debug.o -o $@
 
 # -- QEMU run targets ----------------------------------------------------------
 QEMU_FLAGS := -machine virt -cpu cortex-a53 -nographic \

@@ -34,6 +34,71 @@ let enum_variants_tbl: (string, (string * int) list) Hashtbl.t = Hashtbl.create 
 (* Non-exhaustive flag: enum name -> bool (true = has _ marker, int->enum cast skips trap) *)
 let enum_nonexhaustive: (string, bool) Hashtbl.t = Hashtbl.create 8
 
+(* ---- DWARF debug info (opt-in via -g; see enable_debug_info) ----
+   Everything DI-related elsewhere in this file (gen_func / gen_stmt / gen_program)
+   checks !debug_info_enabled first and is a no-op when -g was not passed. *)
+let debug_info_enabled = ref false
+let dibuilder_opt : Llvm_debuginfo.lldibuilder option ref = ref None
+let di_compile_unit : Llvm.llmetadata option ref = ref None
+(* One DIFile per source filename: `takibi a.tkb b.tkb -o out.o` concatenates ASTs
+   from different files, so each function's DISubprogram needs the DIFile that
+   actually matches where it was written, not just the first input file. *)
+let di_files : (string, Llvm.llmetadata) Hashtbl.t = Hashtbl.create 8
+
+let di_file_for (dib : Llvm_debuginfo.lldibuilder) (filename : string) : Llvm.llmetadata =
+  match Hashtbl.find_opt di_files filename with
+  | Some f -> f
+  | None ->
+      (* Every DIFile's directory must be absolute. DWARF resolves a *relative*
+         directory by joining it onto the DICompileUnit's own (single) comp_dir,
+         so two files in different relative directories -- e.g. examples/common/uart.tkb
+         and examples/fizzbuzz/fizzbuzz.tkb -- would otherwise get concatenated into
+         one bogus path (observed: "examples/common/examples/fizzbuzz/fizzbuzz.tkb")
+         by addr2line/llvm-dwarfdump. Making every directory absolute sidesteps
+         comp_dir entirely. *)
+      let abs_filename =
+        if Filename.is_relative filename
+        then Filename.concat (Sys.getcwd ()) filename
+        else filename
+      in
+      let f = Llvm_debuginfo.dibuild_create_file dib
+          ~filename:(Filename.basename abs_filename)
+          ~directory:(Filename.dirname abs_filename) in
+      Hashtbl.add di_files filename f;
+      f
+
+(* Enable DWARF line-table emission for the rest of this compilation.
+   Called once from bin/main.ml when -g is passed, before gen_program runs.
+   [primary_file] anchors the DICompileUnit; each function's own DISubprogram
+   still points at its true source file via di_file_for. *)
+let enable_debug_info (primary_file : string) =
+  debug_info_enabled := true;
+  let dib = Llvm_debuginfo.dibuilder the_module in
+  dibuilder_opt := Some dib;
+  let file = di_file_for dib primary_file in
+  let cu = Llvm_debuginfo.dibuild_create_compile_unit dib
+      Llvm_debuginfo.DWARFSourceLanguageKind.C
+      ~file_ref:file
+      ~producer:"takibi"
+      ~is_optimized:true
+      ~flags:""
+      ~runtime_ver:0
+      ~split_name:""
+      Llvm_debuginfo.DWARFEmissionKind.Full
+      ~dwoid:0
+      ~di_inlining:false
+      ~di_profiling:false
+      ~sys_root:""
+      ~sdk:""
+  in
+  di_compile_unit := Some cu;
+  (* Without these module flags LLVM silently strips all debug metadata again
+     (a missing/mismatched "Debug Info Version" is treated as "no debug info"). *)
+  add_module_flag the_module ModuleFlagBehavior.Warning "Debug Info Version"
+    (value_as_metadata (const_int (i32_type context) (Llvm_debuginfo.debug_metadata_version ())));
+  add_module_flag the_module ModuleFlagBehavior.Warning "Dwarf Version"
+    (value_as_metadata (const_int (i32_type context) 4))
+
 (* Locals are either immutable SSA values or mutable alloca pointers *)
 type local_binding =
   | Imm of Ast.type_expr * llvalue  (* direct SSA value -- no alloca *)
@@ -839,6 +904,34 @@ let gen_func ?prog_types fdef =
   let entry_bb = append_block context "entry" f in
   position_at_end entry_bb builder;
 
+  (* DWARF: one DISubprogram per function, captured here so gen_stmt (below)
+     can attach a DILocation scoped to it for every statement it generates. *)
+  let di_subprogram =
+    if !debug_info_enabled then begin
+      let dib = match !dibuilder_opt with Some d -> d | None -> assert false in
+      let cu  = match !di_compile_unit with Some c -> c | None -> assert false in
+      let file = di_file_for dib fdef.def_loc.Lexing.pos_fname in
+      let line = fdef.def_loc.Lexing.pos_lnum in
+      let subroutine_ty =
+        Llvm_debuginfo.dibuild_create_subroutine_type dib ~file ~param_types:[||]
+          (Llvm_debuginfo.diflags_get Llvm_debuginfo.DIFlag.Zero)
+      in
+      let sp =
+        Llvm_debuginfo.dibuild_create_function dib
+          ~scope:cu ~name:fdef.name ~linkage_name:fdef.name ~file ~line_no:line
+          ~ty:subroutine_ty ~is_local_to_unit:false ~is_definition:true
+          ~scope_line:line ~flags:(Llvm_debuginfo.diflags_get Llvm_debuginfo.DIFlag.Zero)
+          ~is_optimized:true
+      in
+      Llvm_debuginfo.set_subprogram f sp;
+      (* Seed a location before the parameter-alloca/pre-alloca prologue below,
+         which runs before the first gen_stmt call would otherwise set one. *)
+      let loc = Llvm_debuginfo.dibuild_create_debug_location context ~line ~column:1 ~scope:sp in
+      set_current_debug_location builder (metadata_as_value context loc);
+      Some sp
+    end else None
+  in
+
   (* locals maps name -> local_binding *)
   let locals : (string, local_binding) Hashtbl.t = Hashtbl.create 16 in
 
@@ -903,6 +996,17 @@ let gen_func ?prog_types fdef =
 
   (* -- Statement codegen (defined here to access `res` for immutable lets) -- *)
   let rec gen_stmt (s : Ast.stmt) =
+    (* DWARF: every build_* call after set_current_debug_location auto-attaches
+       this location, until the next call changes it -- so one call per statement
+       here is enough to tag the whole statement, including nested If/While/For/
+       Block bodies (they recurse back into gen_stmt with their own s.loc). *)
+    (match di_subprogram with
+     | Some sp ->
+         let line   = s.loc.Lexing.pos_lnum in
+         let column = s.loc.Lexing.pos_cnum - s.loc.Lexing.pos_bol + 1 in
+         let loc    = Llvm_debuginfo.dibuild_create_debug_location context ~line ~column ~scope:sp in
+         set_current_debug_location builder (metadata_as_value context loc)
+     | None -> ());
     (* Skip dead code after a terminator *)
     if block_terminator (insertion_block builder) <> None then ()
     else
@@ -1328,4 +1432,9 @@ let gen_program ?prog_types prog =
     | ExternFuncDef _ -> ()
     | StructDef _     -> ()
     | EnumDef _       -> ()
-  ) prog
+  ) prog;
+  (* Resolve any deferred/forward-referenced DI metadata. Must run after every
+     gen_func call above, before the module is optimized or emitted to an object. *)
+  (match !dibuilder_opt with
+   | Some dib -> Llvm_debuginfo.dibuild_finalize dib
+   | None -> ())
