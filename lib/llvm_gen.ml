@@ -179,12 +179,12 @@ let restore_narrowing_mut saved =
     | Some old -> Hashtbl.replace narrowing_ctx name old
   ) saved
 
-let setup_target ?(triple = "") () =
+let setup_target ?(triple = "") ?(cpu = "") ?(features = "") () =
   let _ = Llvm_all_backends.initialize () in
   let triple = if triple = "" then Llvm_target.Target.default_triple () else triple in
   set_target_triple triple the_module;
   let target  = Llvm_target.Target.by_triple triple in
-  let machine = Llvm_target.TargetMachine.create ~triple target in
+  let machine = Llvm_target.TargetMachine.create ~triple ~cpu ~features target in
   let layout  = Llvm_target.TargetMachine.data_layout machine in
   set_data_layout (Llvm_target.DataLayout.as_string layout) the_module;
   target_data := Some layout;
@@ -226,12 +226,28 @@ let emit_object machine output_path =
 
 (* -- Type helpers -------------------------------------------------------- *)
 
+(* usize's LLVM width follows the target's pointer size (32-bit on Cortex-M7,
+   64-bit on AArch64/RISC-V64). Falls back to i64 when no target machine has
+   been set up yet (unit tests construct IR via gen_program with no
+   setup_target call -- see the codegen_tests group in test_takibi.ml -- so
+   this must not raise/depend on Some). *)
+let usize_lltype () =
+  match !target_data with
+  | Some dl -> Llvm_target.DataLayout.intptr_type context dl
+  | None    -> i64_type context
+
+(* Test-only introspection: usize's current bit-width (32 or 64) as a plain
+   int, so test_takibi.ml can assert on it without needing the `llvm`
+   ocamlfind package linked directly (this library already depends on it). *)
+let usize_bitwidth () = integer_bitwidth (usize_lltype ())
+
 let rec ltype_of_ast = function
   | TypeBool        -> i1_type  context
   | TypeI8  | TypeU8  -> i8_type  context
   | TypeI16 | TypeU16 -> i16_type context
   | TypeI32 | TypeU32 -> i32_type context
-  | TypeI64 | TypeU64 | TypeUsize -> i64_type context
+  | TypeI64 | TypeU64 -> i64_type context
+  | TypeUsize       -> usize_lltype ()
   | TypeVoid        -> void_type context
   | TypePtr _       -> pointer_type context   (* LLVM 19: all pointers are opaque ptr *)
   | TypeIo  t       -> ltype_of_ast t         (* io T is a value type: LLVM type is the same as T *)
@@ -284,13 +300,14 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
   | TypeU16   -> basic_int "u16"   16 dw_ate_unsigned
   | TypeU32   -> basic_int "u32"   32 dw_ate_unsigned
   | TypeU64   -> basic_int "u64"   64 dw_ate_unsigned
-  | TypeUsize -> basic_int "usize" 64 dw_ate_unsigned
+  | TypeUsize -> basic_int "usize" (integer_bitwidth (usize_lltype ())) dw_ate_unsigned
   | TypeVoid  -> Llvm_debuginfo.llmetadata_null ()
   | TypeRefined _ -> ditype_of_ast dib file TypeI32  (* same LLVM-level representation as i32; see ltype_of_ast *)
   | TypeIo t       -> ditype_of_ast dib file t       (* io T is a value type at the LLVM level too; see ltype_of_ast *)
   | TypePtr t ->
+      let ptr_bits = integer_bitwidth (usize_lltype ()) in
       Llvm_debuginfo.dibuild_create_pointer_type dib ~pointee_ty:(ditype_of_ast dib file t)
-        ~size_in_bits:64 ~align_in_bits:64 ~address_space:0 ~name:""
+        ~size_in_bits:ptr_bits ~align_in_bits:ptr_bits ~address_space:0 ~name:""
   | TypeArray (t, n) ->
       let elem_bits =
         match !target_data with
@@ -330,11 +347,6 @@ let is_unsigned = function
   | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeUsize -> true
   | _ -> false
 
-(* True for 64-bit integer types *)
-let is_64bit = function
-  | TypeI64 | TypeU64 | TypeUsize -> true
-  | _ -> false
-
 (* Widen a loaded value to the arithmetic width (i32 or i64).
    i8/u8/i16/u16 -> i32 (C-style integer promotion).
    i32/u32/int   -> i32 (no-op for i32 values).
@@ -370,11 +382,11 @@ let rec coerce v (dst : Ast.type_expr) =
   if vty = dst_ll then v
   else match dst with
   | TypePtr _ ->
-      let v64 =
-        if   vty = i64_type context then v
-        else build_zext v (i64_type context) "zext64" builder
-      in
-      build_inttoptr v64 (pointer_type context) "inttoptr" builder
+      (* inttoptr auto-truncates/zero-extends the source integer to the
+         pointer width per the LLVM LangRef, so no manual width-matching
+         step is needed -- this works whether the pointer is 32-bit
+         (Cortex-M7) or 64-bit (AArch64) without knowing which. *)
+      build_inttoptr v (pointer_type context) "inttoptr" builder
   | TypeU8 | TypeI8 ->
       if vty = i32_type context || vty = i64_type context
       then build_trunc v (i8_type context) "trunc" builder
@@ -395,10 +407,20 @@ let rec coerce v (dst : Ast.type_expr) =
         build_ptrtoint v (i64_type context) "ptrtoint" builder
       else if vty = i32_type context then build_sext v (i64_type context) "sext" builder
       else build_zext v (i64_type context) "zext" builder
-  | TypeU64 | TypeUsize ->
+  | TypeU64 ->
       if vty = pointer_type context then
         build_ptrtoint v (i64_type context) "ptrtoint" builder
       else build_zext v (i64_type context) "zext" builder
+  | TypeUsize ->
+      let dst_ty = usize_lltype () in
+      if vty = pointer_type context then
+        (* ptrtoint auto-adjusts to dst_ty's width, whatever it is. *)
+        build_ptrtoint v dst_ty "ptrtoint" builder
+      else
+        let src_bits = integer_bitwidth vty and dst_bits = integer_bitwidth dst_ty in
+        if src_bits > dst_bits then build_trunc v dst_ty "trunc" builder
+        else if src_bits < dst_bits then build_zext v dst_ty "zext" builder
+        else v
   | TypeBool ->
       if vty = i1_type context then v
       else build_icmp Icmp.Ne v (const_int vty 0) "tobool" builder
@@ -1445,7 +1467,7 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable =
   let rec eval_const (ft : Ast.type_expr) (e : Ast.expr) : llvalue =
     match e.desc, ft with
     | IntLit i, TypePtr _ ->
-        const_inttoptr (const_int (i64_type context) i) (pointer_type context)
+        const_inttoptr (const_int (usize_lltype ()) i) (pointer_type context)
     | IntLit i, _ ->
         const_int (ltype_of_ast ft) i
     | StructLit exprs, TypeNamed sname ->

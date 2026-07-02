@@ -1941,6 +1941,61 @@ let codegen_tests = [
           return arr[0];
         }");
 
+  (* Kept last, in this exact order, for the same one-way-switch reason as
+     the DWARF tests above: Llvm_gen.setup_target permanently overwrites
+     Llvm_gen.the_module's target triple/data layout (Llvm_gen.target_data)
+     for the rest of this test process -- there is no way to reset back to
+     "no target machine". Every codegen test registered above this point
+     relies on that state staying None (usize/pointer-int conversions
+     falling back to i64 -- see Llvm_gen.usize_lltype), so nothing may be
+     added after this group without re-checking that assumption.
+     Regression coverage for the Cortex-M7/STM32 bring-up's usize-width fix
+     (usize must be 32-bit on a 32-bit-pointer target, not hardcoded i64). *)
+  Alcotest.test_case
+    "usize is i64-wide when no target machine has been configured \
+     (the fallback every earlier codegen test above implicitly relies on)"
+    `Quick
+    (fun () -> Alcotest.(check int) "usize_bitwidth" 64 (Llvm_gen.usize_bitwidth ()));
+
+  Alcotest.test_case
+    "usize is 64-bit on a real 64-bit-pointer target (aarch64-none-elf), \
+     confirming the DataLayout-driven path agrees with the no-target \
+     fallback for the target this project has shipped on so far" `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
+       in
+       Alcotest.(check int) "usize_bitwidth" 64 (Llvm_gen.usize_bitwidth ()));
+
+  Alcotest.test_case
+    "usize is 32-bit on a 32-bit-pointer target (thumbv7em-none-eabi / \
+     cortex-m7, i.e. STM32F746): the regression this group exists to catch \
+     is usize silently staying i64-wide on a target where pointers are 32 \
+     bits" `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"thumbv7em-none-eabi" ~cpu:"cortex-m7" ()
+       in
+       Alcotest.(check int) "usize_bitwidth" 32 (Llvm_gen.usize_bitwidth ()));
+
+  Alcotest.test_case
+    "full pipeline still verifies under the 32-bit target for the coerce \
+     paths usize touches: pointer -> usize -> pointer round-trip (ptrtoint/ \
+     inttoptr auto-adjusting to the 32-bit width) and an explicit i64 -> \
+     usize narrowing cast (exercises the trunc, not zext, branch added to \
+     coerce's TypeUsize case -- on a 64-bit target this same source would \
+     have needed zext instead, so this specifically catches a \
+     wrong-direction trunc/zext bug)" `Quick
+    (expect_codegen_ok
+       "fn codegen_usize_ptr_roundtrip_cortexm(p: *i32) -> *i32 {
+          let addr: usize = p as usize;
+          return addr as *i32;
+        }
+
+        fn codegen_usize_narrowing_cast_cortexm(n: i64) -> usize {
+          return n as usize;
+        }");
+
 ]
 
 (* -- Entry point ----------------------------------------------------------- *)

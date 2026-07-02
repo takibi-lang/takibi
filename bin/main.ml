@@ -23,10 +23,13 @@ let parse_file filename =
   result
 
 let () =
-  (* Parse arguments: takibi <input>... [-o <output.o>] [--target <triple>] [-g] *)
+  (* Parse arguments: takibi <input>... [-o <output.o>] [--target <triple>]
+     [--cpu <cpu>] [--features <features>] [-g] *)
   let input_files  = ref [] in
   let output_file = ref "" in
   let target_triple = ref "" in
+  let target_cpu = ref "" in
+  let target_features = ref "" in
   let debug_info = ref false in
   let i = ref 1 in
   while !i < Array.length Sys.argv do
@@ -43,6 +46,18 @@ let () =
            Printf.eprintf "Error: --target requires an argument\n"; exit 1
          );
          target_triple := Sys.argv.(!i)
+     | "--cpu" ->
+         incr i;
+         if !i >= Array.length Sys.argv then (
+           Printf.eprintf "Error: --cpu requires an argument\n"; exit 1
+         );
+         target_cpu := Sys.argv.(!i)
+     | "--features" ->
+         incr i;
+         if !i >= Array.length Sys.argv then (
+           Printf.eprintf "Error: --features requires an argument\n"; exit 1
+         );
+         target_features := Sys.argv.(!i)
      | "-g" ->
          debug_info := true
      | arg ->
@@ -52,12 +67,16 @@ let () =
   let input_files = List.rev !input_files in
 
   if input_files = [] then (
-    Printf.eprintf "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [-g]\n"
+    Printf.eprintf
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g]\n"
       Sys.argv.(0);
     exit 1
   );
 
-  let machine = Llvm_gen.setup_target ~triple:!target_triple () in
+  let machine =
+    Llvm_gen.setup_target ~triple:!target_triple ~cpu:!target_cpu
+      ~features:!target_features ()
+  in
   if !debug_info then Llvm_gen.enable_debug_info (List.hd input_files);
 
   (try
