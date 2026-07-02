@@ -54,7 +54,7 @@ langcheck:
 	@if LC_ALL=C grep -rnP '[^\x00-\x7F]' --exclude-dir=_build \
 	       --include="*.ml" --include="*.mll" --include="*.mly" \
 	       --include="*.tkb" --include="*.S" --include="*.md" \
-	       --include="*.sh" --include="*.ld" \
+	       --include="*.sh" --include="*.ld" --include="*.py" \
 	       . Makefile 2>/dev/null; then \
 	    echo "ERROR: non-ASCII characters found (see above)"; exit 1; \
 	fi

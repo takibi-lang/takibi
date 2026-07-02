@@ -1908,6 +1908,39 @@ let codegen_tests = [
             return total;
           }" ());
 
+  (* Companion to the test above, covering the parts of ditype_of_ast
+     (lib/llvm_gen.ml) that one only exercises with a pointer-to-struct
+     parameter, a struct-typed local, and an array-typed local: the i32
+     params/locals in the previous test never touch the TypePtr / TypeNamed
+     / TypeArray branches at all. Also a self-referential struct (a node
+     pointing at its own type) -- this is precisely the shape ditype_of_ast
+     is built to never recurse into (structs always resolve to a memberless
+     forward declaration, regardless of whether reached directly or through
+     a pointer), so this is the regression test for that specific
+     "must not hang/crash on self-reference" guarantee, not just "it
+     verifies". Also exercises the di_struct_placeholders cache: DwarfNode
+     is named twice (once via the pointer parameter, once via the direct
+     local), which must resolve to the same cached forward-decl rather than
+     create a duplicate metadata node each time. *)
+  Alcotest.test_case
+    "DWARF debug info (-g): pointer-to-struct parameter, struct-typed local, \
+     and array-typed local all produce verifier-accepted IR, including a \
+     self-referential struct type (regression coverage for ditype_of_ast's \
+     struct-as-forward-declaration design)" `Quick
+    (expect_codegen_ok
+       "struct DwarfNode {
+          value: i32;
+          next: *DwarfNode;
+        }
+
+        fn codegen_debug_info_struct_ptr(n: *DwarfNode) -> i32 {
+          let mut node: DwarfNode;
+          let mut arr: [i32; 4];
+          node.value = n.value;
+          arr[0] = node.value;
+          return arr[0];
+        }");
+
 ]
 
 (* -- Entry point ----------------------------------------------------------- *)

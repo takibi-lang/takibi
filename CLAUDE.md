@@ -89,8 +89,9 @@ lib/
   typechecker.ml  -- external wrapper (called from main.ml)
   llvm_gen.ml     -- LLVM IR generation and object file output
 bin/
-  main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>]`)
+  main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>] [-g]`)
                      Multiple .tkb files are concatenated (flat global namespace) before compilation.
+                     -g emits DWARF debug info -- see "Execution Profiling (QEMU)" below.
 examples/
   common/
     startup.S     -- _start -> main, BSS zero-clear, AArch64 semihosting exit (shared by all examples)
@@ -508,6 +509,13 @@ GENERIC_KERNELS := (all others)
 ```
 
 When adding a new example that needs timer or semaphore support, add it to the appropriate `*_OBJS` and `*_KERNELS` variable in the Makefile. No new `*_asm.S` files should be created; place any new assembly in `examples/common/` and add a build rule there.
+
+**This `EXAMPLES` registration flow is separate from the `-g` debug-build
+rules** (`examples/<name>/<name>.debug.o` / `kernel.debug.elf`, e.g. for
+`fizzbuzz`, `fibonacci`, `http_server`, `tcp_echo`) -- those are one-off,
+manually-written rules outside `EXAMPLES`, not a third compilation group.
+See "Execution Profiling (QEMU)" below for why they're kept separate from
+the normal (always `-g`-free) build outputs.
 
 ## Known Limitations / Deferred Design Decisions
 
@@ -1008,7 +1016,7 @@ software process.
 
 ```
 ocaml 5.4.0, dune, menhir
-llvm-19 OCaml bindings (llvm, llvm.analysis, llvm.target, llvm.all_backends, llvm.debuginfo)
+llvm-19 OCaml bindings (llvm, llvm.analysis, llvm.target, llvm.all_backends, llvm.passbuilder, llvm.debuginfo)
 ppx_deriving.show
 llvm-mc-19, ld.lld-19   (for bare-metal builds)
 qemu-system-aarch64     (for QEMU execution)
