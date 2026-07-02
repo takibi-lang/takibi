@@ -45,7 +45,7 @@ test:
 	dune test
 
 ## qemutest: run QEMU integration tests (build all examples and verify automatically)
-qemutest: $(ALL_KERNELS) examples/fizzbuzz/kernel.debug.elf
+qemutest: $(ALL_KERNELS) examples/fizzbuzz/kernel.debug.elf examples/fibonacci/kernel.debug.elf
 	@bash scripts/run_qemutest.sh
 
 ## langcheck: verify that all source files contain only ASCII characters
@@ -163,6 +163,16 @@ examples/fizzbuzz/fizzbuzz.debug.o: examples/fizzbuzz/fizzbuzz.tkb $(COMMON_UART
 
 examples/fizzbuzz/kernel.debug.elf: $(COMMON_STARTUP_O) examples/fizzbuzz/fizzbuzz.debug.o $(COMMON_LINK_LD)
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/fizzbuzz/fizzbuzz.debug.o -o $@
+
+# Same pattern, second example (fibonacci): its `let mut a/b/tmp` locals and
+# uart_putc's `c` parameter (uart.tkb is compiled in alongside it, same as
+# the no-debug build) give run_dwarf_var_test something to check that
+# fizzbuzz -- which has no `let mut` of its own -- doesn't exercise.
+examples/fibonacci/fibonacci.debug.o: examples/fibonacci/fibonacci.tkb $(COMMON_UART) $(COMMON_PRINT) build
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $< --target $(AARCH64_TARGET) -g -o $@
+
+examples/fibonacci/kernel.debug.elf: $(COMMON_STARTUP_O) examples/fibonacci/fibonacci.debug.o $(COMMON_LINK_LD)
+	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/fibonacci/fibonacci.debug.o -o $@
 
 # -- QEMU run targets ----------------------------------------------------------
 QEMU_FLAGS := -machine virt -cpu cortex-a53 -nographic \

@@ -239,6 +239,43 @@ run_dwarf_test() {
     fi
 }
 
+# run_dwarf_var_test NAME KERNEL VARNAME TAG DECL_FILE_SUBSTR DECL_LINE TYPE_NAME
+#
+# Verifies a parameter/local variable (added to DWARF via gen_func's
+# declare_var, see lib/llvm_gen.ml) shows up with the right name/declaration
+# site/type. Uses `llvm-dwarfdump-19 --name=VARNAME`, which prints only the
+# debug info entries whose DW_AT_name exactly matches VARNAME -- a small,
+# targeted query rather than a full-file dump.
+#
+# Deliberately does NOT diff the whole entry or care about attribute order:
+# only 5 substrings are checked, independently, and everything else
+# (the DIE's own address, DW_AT_location's register/PC-range content, which
+# depends on register allocation and shifts on any unrelated codegen change)
+# is ignored. This keeps the test decoupled from llvm-dwarfdump's exact
+# textual formatting -- an LLVM version bump that reorders attributes or adds
+# a new one won't break this, only an actual regression in what we emit will.
+run_dwarf_var_test() {
+    local name="$1" kernel="$2" varname="$3" tag="$4" decl_file="$5" decl_line="$6" type_name="$7"
+    local out ok=1
+    out=$(llvm-dwarfdump-19 --name="$varname" "$kernel" 2>/dev/null)
+
+    echo "$out" | grep -qF "$tag"                                        || ok=0
+    echo "$out" | grep "DW_AT_name"      | grep -qF "\"$varname\")"       || ok=0
+    echo "$out" | grep "DW_AT_decl_file" | grep -qF "$decl_file"          || ok=0
+    echo "$out" | grep "DW_AT_decl_line" | grep -qF "($decl_line)"        || ok=0
+    echo "$out" | grep "DW_AT_type"      | grep -qF "\"$type_name\")"     || ok=0
+
+    if [ "$ok" -eq 1 ]; then
+        printf "${GRN}PASS${RST}  %s\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        printf "${RED}FAIL${RST}  %s  (llvm-dwarfdump-19 --name=%s did not match expectations)\n" "$name" "$varname"
+        printf "%s\n" "$out" | sed 's/^/       /'
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+    fi
+}
+
 echo "Running compile-error tests (no QEMU required)..."
 echo ""
 
@@ -274,6 +311,12 @@ echo "Running DWARF debug-info check (-g build)..."
 echo ""
 
 run_dwarf_test "fizzbuzz (dwarf)" examples/fizzbuzz/kernel.debug.elf examples/fizzbuzz/fizzbuzz.tkb 3
+
+FIB_DEBUG_ELF=examples/fibonacci/kernel.debug.elf
+run_dwarf_var_test "fibonacci a (dwarf var)"   "$FIB_DEBUG_ELF" a   DW_TAG_variable          fibonacci.tkb 4 i32
+run_dwarf_var_test "fibonacci b (dwarf var)"   "$FIB_DEBUG_ELF" b   DW_TAG_variable          fibonacci.tkb 5 i32
+run_dwarf_var_test "fibonacci tmp (dwarf var)" "$FIB_DEBUG_ELF" tmp DW_TAG_variable          fibonacci.tkb 6 i32
+run_dwarf_var_test "uart_putc c (dwarf param)" "$FIB_DEBUG_ELF" c   DW_TAG_formal_parameter  uart.tkb      1 u8
 
 echo ""
 echo "Running QEMU integration tests..."
