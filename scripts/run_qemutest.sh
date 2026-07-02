@@ -208,6 +208,18 @@ run_compile_error_test "ptr_cast_wrong"      examples/ptr_cast_wrong/ptr_cast_wr
 run_compile_error_test "const_global_wrong"  examples/const_global_wrong/const_global_wrong.tkb   examples/const_global_wrong/const_global_wrong.error
 
 echo ""
+echo "Running no-trap checks (brk must be zero in these kernels)..."
+echo ""
+
+# Examples whose bounds should be fully proven at the type level. If brk appears, review the type annotations.
+for e in start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci \
+          bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt \
+          semaphore condvar struct msgqueue watchdog refined narrow for loop bitops align packed struct_align sizeof net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse; do
+# enum is intentionally excluded: `i as Color` (int->enum cast) emits llvm.trap for invalid values
+    run_no_trap_test "$e (no-trap)" "examples/$e/kernel.elf"
+done
+
+echo ""
 echo "Running QEMU integration tests..."
 echo ""
 
@@ -257,18 +269,6 @@ run_test "tcp_parse"     examples/tcp_parse/kernel.elf     examples/tcp_parse/tc
 run_virtio_test "net_echo"   examples/net_echo/kernel.elf   virtio_net_test.py
 run_virtio_test "arp_reply"  examples/arp_reply/kernel.elf  arp_test.py
 run_virtio_test "icmp_echo"  examples/icmp_echo/kernel.elf  icmp_echo_test.py
-
-echo ""
-echo "Running no-trap checks (brk must be zero in these kernels)..."
-echo ""
-
-# Examples whose bounds should be fully proven at the type level. If brk appears, review the type annotations.
-for e in start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci \
-          bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt \
-          semaphore condvar struct msgqueue watchdog refined narrow for loop bitops align packed struct_align sizeof net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse; do
-# enum is intentionally excluded: `i as Color` (int->enum cast) emits llvm.trap for invalid values
-    run_no_trap_test "$e (no-trap)" "examples/$e/kernel.elf"
-done
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then
