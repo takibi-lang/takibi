@@ -1,0 +1,106 @@
+// Task watchdog demo. Separate source file from
+// examples/watchdog/watchdog.tkb -- see
+// examples/preempt/preempt_stm32.tkb's comment for why. wdt_check's
+// deadline-checking logic is unchanged, just moved into SysTick_Handler
+// instead of irq_dispatch's tick-count-check spot.
+//
+// task_healthy: keeps calling wdt_kick(1) periodically -> never times out
+// task_hung:    calls wdt_kick(2) 3 times, then deliberately stops -> timeout detected
+
+struct SchedState {
+    task_count:   i32;
+    current_task: i32;
+    tcb_sp:       [usize; 3];
+}
+
+struct WdtState {
+    tick:      i32;
+    last_kick: [i32; 3];
+    deadline:  [i32; 3];
+    done:      io i32;
+}
+
+let mut sched: SchedState = {3, 0, {0, 0, 0}};
+
+// deadline[0]=0  (main is not monitored)
+// deadline[1]=20 (task_healthy keeps kicking, so no timeout)
+// deadline[2]=12 (task_hung stops kicking, so it times out at ~12 ticks)
+let mut wdt: WdtState = {0, {0, 0, 0}, {0, 20, 12}, 0};
+
+let mut hung_fired: io i32 = 0; // timeout detection flag
+let mut hung_task:  io i32 = 0; // ID of the timed-out task (valid only when hung_fired == 1)
+
+fn wdt_kick(task_id: i32) {
+    let lk: *i32 = wdt.last_kick;
+    lk[task_id] = wdt.tick;
+}
+
+// Called from SysTick_Handler; advances tick and checks liveness of all monitored tasks
+fn wdt_check() {
+    wdt.tick = wdt.tick + 1;
+    let lk: *i32 = wdt.last_kick;
+    let dl: *i32 = wdt.deadline;
+    for i in 0..<3 {
+        if (dl[i] > 0) {
+            if (wdt.tick - lk[i] > dl[i]) {
+                hung_task  = i; // record which task timed out
+                hung_fired = 1;
+            }
+        }
+    }
+}
+
+fn SysTick_Handler() {
+    wdt_check();
+    pendsv_trigger();
+}
+
+fn pendsv_dispatch(frame_sp: usize) -> usize {
+    let sp: *usize = sched.tcb_sp;
+    sp[sched.current_task] = frame_sp;
+    sched.current_task = (sched.current_task + 1) % sched.task_count;
+    let sp2: *usize = sched.tcb_sp;
+    return sp2[sched.current_task];
+}
+
+// Keep kicking periodically until wdt.done is set -- this task never times out
+fn task_healthy() {
+    let pd: *io i32 = &wdt.done;
+    while (*pd == 0) {
+        wdt_kick(1);
+    }
+}
+
+// Kicks 3 times, then deliberately stops kicking to enter a hung state
+fn task_hung() {
+    for i in 0..<3 {
+        wdt_kick(2);
+    }
+    // Kicking stops here -> watchdog detects a deadline overrun
+    let pd: *io i32 = &wdt.done;
+    while (*pd == 0) {}
+}
+
+let mut stack_a: [u8; 4096];
+let mut stack_b: [u8; 4096];
+
+fn main() {
+    uart_puts("watchdog start\r\n");
+
+    let sp: *usize = sched.tcb_sp;
+    sp[1] = setup_task_stack(stack_a + 4096, task_healthy);
+    sp[2] = setup_task_stack(stack_b + 4096, task_hung);
+
+    systick_init(249999);
+
+    let pf: *io i32 = &hung_fired;
+    while (*pf == 0) {}
+
+    systick_disable();
+    wdt.done = 1;
+
+    uart_puts("watchdog: task ");
+    print_uint(hung_task);
+    uart_puts(" timed out\r\n");
+    uart_puts("done\r\n");
+}

@@ -1,14 +1,21 @@
-// Demo of a 1-second polling delay using the PL031 RTC.
+// Demo of a 1-second polling delay using the RTC. Portable across the QEMU
+// (examples/common/rtc.tkb) and STM32 (examples/common_stm32/rtc.tkb) HALs
+// -- see examples/rtc/rtc.tkb for why rtc_read_seconds()'s value is never
+// subtracted (STM32's is raw BCD, not a linear counter): waits for n
+// individual ticks instead of comparing a difference.
 
 fn delay_seconds(n: i32) {
-    let rtc: *io i32 = 0x09010000; // PL031 RTC DR: 1-second resolution counter
-    let start: i32 = *rtc;
-    while (*rtc - start < n) {}
+    let mut i: i32 = 0;
+    while (i < n) {
+        let t0: i32 = rtc_read_seconds();
+        while (rtc_read_seconds() == t0) {}
+        i = i + 1;
+    }
 }
 
 fn main() {
+    rtc_init();
     uart_puts("waiting 1s...\r\n");
     delay_seconds(1);
     uart_puts("done\r\n");
 }
-

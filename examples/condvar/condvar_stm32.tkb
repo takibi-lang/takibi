@@ -1,0 +1,99 @@
+// Demo of mutex (sem_wait/sem_post wrapper) + condition variable (sequence
+// counter method). Separate source file from examples/condvar/condvar.tkb
+// -- see examples/preempt/preempt_stm32.tkb's comment for why. Reuses
+// examples/common/sync.tkb (mutex_lock/unlock, cond_wait/cond_signal)
+// completely unchanged -- pure takibi logic with no hardware dependency,
+// just linked against examples/common_stm32/sem_asm.o instead of the
+// AArch64 sem_asm.o. Producer sends 5 items; consumer receives 5 items.
+
+struct SchedState {
+    task_count:   i32;
+    current_task: i32;
+    tcb_sp:       [usize; 3];
+}
+
+struct Channel {
+    mutex:      i32;
+    not_empty:  io i32;
+    not_full:   io i32;
+    item:       i32;
+    item_count: i32;
+}
+
+let mut ch: Channel = {1, 0, 0, 0, 0};
+
+let mut produced:    i32 = 0;
+let mut consumed:    i32 = 0;
+
+let mut task_a_done: io i32 = 0;
+let mut task_b_done: io i32 = 0;
+let mut sched_done:  io i32 = 0;
+
+let mut sched: SchedState = {3, 0, {0, 0, 0}};
+
+let mut stack_a: [u8; 4096];
+let mut stack_b: [u8; 4096];
+
+fn SysTick_Handler() {
+    pendsv_trigger();
+}
+
+fn pendsv_dispatch(frame_sp: usize) -> usize {
+    let sp: *usize = sched.tcb_sp;
+    sp[sched.current_task] = frame_sp;
+    sched.current_task = (sched.current_task + 1) % sched.task_count;
+    let sp2: *usize = sched.tcb_sp;
+    return sp2[sched.current_task];
+}
+
+fn task_producer() {
+    for i in 0..<5 {
+        mutex_lock(&ch.mutex);
+        while (ch.item_count >= 1) {
+            cond_wait(&ch.not_full, &ch.mutex);
+        }
+        ch.item       = i;
+        ch.item_count = 1;
+        produced = produced + 1;
+        cond_signal(&ch.not_empty);
+        mutex_unlock(&ch.mutex);
+    }
+    task_a_done = 1;
+    let p: *io i32 = &sched_done;
+    while (*p == 0) {}
+}
+
+fn task_consumer() {
+    for i in 0..<5 {
+        mutex_lock(&ch.mutex);
+        while (ch.item_count == 0) {
+            cond_wait(&ch.not_empty, &ch.mutex);
+        }
+        consumed      = consumed + 1;
+        ch.item_count = 0;
+        cond_signal(&ch.not_full);
+        mutex_unlock(&ch.mutex);
+    }
+    task_b_done = 1;
+    let p: *io i32 = &sched_done;
+    while (*p == 0) {}
+}
+
+fn main() {
+    let sp: *usize = sched.tcb_sp;
+    sp[1] = setup_task_stack(stack_a + 4096, task_producer);
+    sp[2] = setup_task_stack(stack_b + 4096, task_consumer);
+    systick_init(249999);
+    let pa: *io i32 = &task_a_done;
+    let pb: *io i32 = &task_b_done;
+    while (*pa == 0 || *pb == 0) {}
+    systick_disable();
+    sched_done = 1;
+    uart_puts("produced: ");
+    print_uint(produced);
+    uart_puts("\r\n");
+    uart_puts("consumed: ");
+    print_uint(consumed);
+    uart_puts("\r\n");
+    uart_puts("done\r\n");
+}

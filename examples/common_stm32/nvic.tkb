@@ -1,0 +1,10 @@
+// NVIC helpers. STM32's NVIC vectors interrupts directly to a per-source
+// handler address (see examples/common_stm32/startup.S's vector table) --
+// unlike GICv2 on the QEMU/AArch64 side, there is no software IAR/EOI
+// dispatch step; enabling an interrupt here is the only setup an ISR needs
+// beyond defining the handler function itself.
+
+fn enable_usart1_irq() {
+    let nvic_iser1: *io u32 = 0xE000E104; // NVIC_ISER1 (covers IRQ32-63)
+    *nvic_iser1 = *nvic_iser1 | (1 << 5); // IRQ37 = USART1 (37 - 32 = bit 5)
+}

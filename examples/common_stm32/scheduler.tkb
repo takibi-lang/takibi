@@ -1,0 +1,61 @@
+// Cortex-M preemptive-scheduler primitives: SysTick (periodic tick source)
+// + PendSV (context switch, see examples/common_stm32/startup.S's
+// PendSv_Handler) replacing the QEMU/AArch64 side's ARM Generic Timer +
+// GIC timer PPI (examples/common/timer_asm.S / timer.tkb).
+//
+// setup_task_stack keeps the exact same name/signature as the AArch64
+// version so callers (tcb_sp[i] = setup_task_stack(stack, task_fn)) don't
+// change -- only the frame it builds differs: a 64-byte Cortex-M exception
+// frame (8 words hardware-shaped: r0-r3,r12,LR,PC,xPSR; 8 words
+// software-shaped below it: r4-r11) instead of AArch64's 272-byte one.
+// task_exit_stub is plain takibi (an infinite loop) -- Cortex-M needs no
+// `wfe` assembly stub for this, unlike examples/common/timer_asm.S's.
+
+fn task_exit_stub() {
+    while (true) {}
+}
+
+fn setup_task_stack(s: *u8, f: fn() -> void) -> usize {
+    let base: *u8 = s - 64;
+    for i in 0..<64 {
+        *(base + i) = 0 as u8;
+    }
+    // offsets 0..28: r4-r11 (software-saved region PendSV restores first) -- left zero
+    // offsets 32..44: r0,r1,r2,r3,r12 (hardware-restored) -- left zero
+    let p_lr: *fn() -> void = (base + 52) as *fn() -> void;
+    *p_lr = task_exit_stub;               // LR: where the task "returns" to if it ever does
+    let p_pc: *fn() -> void = (base + 56) as *fn() -> void;
+    *p_pc = f;                            // PC: task entry point
+    let p_xpsr: *u32 = (base + 60) as *u32;
+    *p_xpsr = 0x01000000;                 // xPSR: Thumb bit (T, bit 24) set
+    return base as usize;
+}
+
+// systick_init(reload): configures SysTick to fire every (reload+1) core
+// clock cycles (processor clock source, TICKINT so it raises an exception),
+// and sets PendSV to the lowest exception priority (standard ARM guidance:
+// a context switch must never preempt another pending exception mid-flight).
+fn systick_init(reload: u32) {
+    let shpr3: *io u32 = 0xE000ED20;
+    *shpr3 = *shpr3 | (0xFF << 16); // PendSV (bits 23:16) = lowest priority
+
+    let systick_ctrl: *io u32 = 0xE000E010;
+    let systick_load: *io u32 = 0xE000E014;
+    let systick_val:  *io u32 = 0xE000E018;
+    *systick_load = reload;
+    *systick_val = 0;
+    *systick_ctrl = 1 | (1 << 1) | (1 << 2); // ENABLE | TICKINT | CLKSOURCE=core clock
+}
+
+fn systick_disable() {
+    let systick_ctrl: *io u32 = 0xE000E010;
+    *systick_ctrl = *systick_ctrl & ~1; // clear ENABLE
+}
+
+// Called from a SysTick_Handler to request a context switch; the actual
+// register save/restore happens in PendSV_Handler (examples/common_stm32/
+// startup.S), which then calls the takibi-defined pendsv_dispatch.
+fn pendsv_trigger() {
+    let icsr: *io u32 = 0xE000ED04;
+    *icsr = *icsr | (1 << 28); // ICSR.PENDSVSET
+}

@@ -1,0 +1,106 @@
+// Demo of a bounded message queue (capacity 4) synchronized with condition
+// variables. Separate source file from examples/msgqueue/msgqueue.tkb --
+// see examples/preempt/preempt_stm32.tkb's comment for why. Reuses
+// examples/common/sync.tkb unchanged, same as condvar_stm32.tkb. Producer
+// sends 0 to 4; consumer receives and prints each value.
+
+struct SchedState {
+    task_count:   i32;
+    current_task: i32;
+    tcb_sp:       [usize; 3];
+}
+
+struct MsgQueue {
+    mutex:     i32;
+    not_empty: io i32;
+    not_full:  io i32;
+    buf:       [i32; 8];
+    head:      i32;
+    tail:      i32;
+    count:     i32;
+    cap:       i32;
+}
+
+let mut mq: MsgQueue = {1, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 4};
+
+fn mq_send(val: i32) {
+    mutex_lock(&mq.mutex);
+    while (mq.count >= mq.cap) {
+        cond_wait(&mq.not_full, &mq.mutex);
+    }
+    let buf: *i32 = mq.buf;
+    buf[mq.tail] = val;
+    mq.tail  = (mq.tail  + 1) % mq.cap;
+    mq.count = mq.count + 1;
+    cond_signal(&mq.not_empty);
+    mutex_unlock(&mq.mutex);
+}
+
+fn mq_recv() -> i32 {
+    mutex_lock(&mq.mutex);
+    while (mq.count == 0) {
+        cond_wait(&mq.not_empty, &mq.mutex);
+    }
+    let buf: *i32 = mq.buf;
+    let val: i32 = buf[mq.head];
+    mq.head  = (mq.head  + 1) % mq.cap;
+    mq.count = mq.count - 1;
+    cond_signal(&mq.not_full);
+    mutex_unlock(&mq.mutex);
+    return val;
+}
+
+let mut sched: SchedState = {3, 0, {0, 0, 0}};
+
+fn SysTick_Handler() {
+    pendsv_trigger();
+}
+
+fn pendsv_dispatch(frame_sp: usize) -> usize {
+    let sp: *usize = sched.tcb_sp;
+    sp[sched.current_task] = frame_sp;
+    sched.current_task = (sched.current_task + 1) % sched.task_count;
+    let sp2: *usize = sched.tcb_sp;
+    return sp2[sched.current_task];
+}
+
+let mut producer_done: io i32 = 0;
+let mut consumer_done: io i32 = 0;
+let mut sched_done:    io i32 = 0;
+
+let mut stack_a: [u8; 4096];
+let mut stack_b: [u8; 4096];
+
+fn task_producer() {
+    for i in 0..<5 {
+        mq_send(i);
+    }
+    producer_done = 1;
+    let p: *io i32 = &sched_done;
+    while (*p == 0) {}
+}
+
+fn task_consumer() {
+    for i in 0..<5 {
+        let v: i32 = mq_recv();
+        uart_puts("recv: ");
+        print_uint(v);
+        uart_puts("\r\n");
+    }
+    consumer_done = 1;
+    let p: *io i32 = &sched_done;
+    while (*p == 0) {}
+}
+
+fn main() {
+    let sp: *usize = sched.tcb_sp;
+    sp[1] = setup_task_stack(stack_a + 4096, task_producer);
+    sp[2] = setup_task_stack(stack_b + 4096, task_consumer);
+    systick_init(249999);
+    let pp: *io i32 = &producer_done;
+    let pc: *io i32 = &consumer_done;
+    while (*pp == 0 || *pc == 0) {}
+    systick_disable();
+    sched_done = 1;
+    uart_puts("done\r\n");
+}

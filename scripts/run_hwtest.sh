@@ -281,9 +281,27 @@ run_hw_test "sizeof (stm32)"        examples/sizeof/kernel_stm32.bin        exam
 # the mid-test pause gets mistaken for completion (see run_hw_test above).
 run_hw_test "rtc (stm32)" examples/rtc/kernel_stm32.bin examples/rtc/rtc.expected 5 40
 
+# timer: same RTC-tick-pause reasoning as rtc above.
+run_hw_test "timer (stm32)" examples/timer/kernel_stm32.bin examples/timer/timer.expected 5 40
+
 # echo: the one bidirectional test -- needs input written to the port.
 run_hw_test_stdin "echo (stm32)" examples/echo/kernel_stm32.bin examples/echo/echo.expected \
     examples/echo/echo.stdin
+
+# irq: also bidirectional (UART RX interrupt echoes typed input back).
+run_hw_test_stdin "irq (stm32)" examples/irq/kernel_stm32.bin examples/irq/irq.expected \
+    examples/irq/irq.stdin
+
+# preempt: preemptive round-robin scheduler via SysTick+PendSV.
+run_hw_test "preempt (stm32)" examples/preempt/kernel_stm32.bin examples/preempt/preempt.expected
+
+# semaphore/condvar/msgqueue/watchdog: same SysTick+PendSV scheduler core as
+# preempt, plus (condvar/msgqueue) examples/common/sync.tkb reused unchanged
+# over the STM32 ldrex/strex sem_asm.o.
+run_hw_test "semaphore (stm32)" examples/semaphore/kernel_stm32.bin examples/semaphore/semaphore.expected
+run_hw_test "condvar (stm32)"   examples/condvar/kernel_stm32.bin   examples/condvar/condvar.expected
+run_hw_test "msgqueue (stm32)"  examples/msgqueue/kernel_stm32.bin  examples/msgqueue/msgqueue.expected
+run_hw_test "watchdog (stm32)"  examples/watchdog/kernel_stm32.bin  examples/watchdog/watchdog.expected
 
 # inet_checksum/ip_parse/tcp_parse: pure compute (canned buffers baked into
 # the binary, no virtio-net/real Ethernet needed at all -- see the Makefile's
