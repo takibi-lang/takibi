@@ -23,10 +23,10 @@ import time
 
 IFACE = os.environ.get("ETH_TEST_IFACE", "enp4s0")
 
-REQUESTER_IP = bytes([192, 0, 2, 55])
+REQUESTER_IP = bytes([192, 168, 10, 55])
 TARGET_MAC = bytes([0x00, 0x80, 0xE1, 0x00, 0x00, 0x00])  # must match netconfig.tkb's OUR_MAC
-TARGET_IP = bytes([192, 0, 2, 1])                          # must match netconfig.tkb's OUR_IP
-OTHER_IP = bytes([192, 0, 2, 200])                          # some IP icmp_echo_stm32 does NOT own
+TARGET_IP = bytes([192, 168, 10, 2])                       # must match netconfig.tkb's OUR_IP
+OTHER_IP = bytes([192, 168, 10, 200])                      # some IP icmp_echo_stm32 does NOT own
 
 RETRIES = 20
 RETRY_TIMEOUT_SECS = 0.5
@@ -151,10 +151,10 @@ def main() -> int:
     sock.settimeout(RETRY_TIMEOUT_SECS)
 
     ok1 = test_ping_us(sock, requester_mac)
-    print("  ping 192.0.2.1 (ours):             %s" % ("PASS" if ok1 else "FAIL"))
+    print("  ping 192.168.10.2 (ours):             %s" % ("PASS" if ok1 else "FAIL"))
 
     ok2 = test_ping_other_stays_silent(sock, requester_mac)
-    print("  ping 192.0.2.200 (silent):         %s" % ("PASS" if ok2 else "FAIL"))
+    print("  ping 192.168.10.200 (silent):         %s" % ("PASS" if ok2 else "FAIL"))
 
     ok3 = test_corrupted_checksum_dropped(sock, requester_mac)
     print("  ping with bad ICMP checksum (silent): %s" % ("PASS" if ok3 else "FAIL"))

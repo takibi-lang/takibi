@@ -1,6 +1,6 @@
 // ICMP echo (ping) responder over QEMU's virtio-net-device -- the IPv4
 // "echo server" step. Answers ICMP echo requests (type 8) addressed to
-// our_ip with an echo reply (type 0), preserving identifier/sequence/data
+// OUR_IP (examples/common/netconfig.tkb) with an echo reply (type 0), preserving identifier/sequence/data
 // unchanged. Builds on examples/net_echo (virtqueue/IRQ plumbing),
 // examples/arp_reply (protocol dispatch + in-place raw-offset header
 // rewriting), and examples/ip_parse (field layout/validation logic) --
@@ -19,7 +19,6 @@ let mut tx_queue_mem: [u8; 8192] align(4096);
 let mut rx_bufs: [u8; 12288];
 
 let mut our_mac: [u8; 6];
-let mut our_ip:  [u8; 4];
 
 // IPv4 field offsets, relative to the start of the IP header.
 let IP_VERSION_IHL: i32 = 0;
@@ -44,17 +43,17 @@ let ICMP_ECHO_REPLY:   i32 = 0;
 
 // Rewrites an ICMP echo request into a reply in place, and the enclosing
 // IPv4/Ethernet headers to match. Only called after the caller has already
-// verified this is a well-formed echo request addressed to our_ip.
+// verified this is a well-formed echo request addressed to OUR_IP.
 fn build_echo_reply(eth: *u8, ip: *u8, ihl: i32, icmp: *u8, icmp_len: i32) {
     // Ethernet: dst = old src, then src = our_mac (must read old src
     // before it's overwritten).
     bytes_copy(eth, eth + 6, 6);
     bytes_copy(eth + 6, our_mac as *u8, 6);
 
-    // IPv4: dst = old src, src = our_ip, fresh TTL, recompute checksum
+    // IPv4: dst = old src, src = OUR_IP, fresh TTL, recompute checksum
     // (source/dest/TTL all changed since the request).
     bytes_copy(ip + IP_DST, ip + IP_SRC, 4);
-    bytes_copy(ip + IP_SRC, our_ip as *u8, 4);
+    bytes_copy(ip + IP_SRC, OUR_IP as *u8, 4);
     ip[IP_TTL] = 64 as u8;
     write_u16be(ip + IP_CHECKSUM, 0);
     write_u16be(ip + IP_CHECKSUM, inet_checksum(ip, ihl));
@@ -85,10 +84,6 @@ fn main() {
 
         virtio_negotiate(VIRTIO_NET_F_MAC);
         virtio_net_read_mac(our_mac as *u8);
-        our_ip[0] = 192 as u8;
-        our_ip[1] = 0 as u8;
-        our_ip[2] = 2 as u8;
-        our_ip[3] = 1 as u8;
 
         virtio_queue_setup(0, rx_queue_mem as *u8); // RX
         virtio_queue_setup(1, tx_queue_mem as *u8); // TX
@@ -139,7 +134,7 @@ fn main() {
                         if (total_len <= ip_len_in_frame && total_len >= ihl) {
                             if ((ip[IP_PROTOCOL] as i32) == PROTO_ICMP &&
                                 inet_checksum(ip, ihl) == 0) {
-                                if (bytes_eq(ip + IP_DST, our_ip as *u8, 4) == 1) {
+                                if (bytes_eq(ip + IP_DST, OUR_IP as *u8, 4) == 1) {
                                     let icmp:     *u8 = ip + ihl;
                                     let icmp_len: i32 = total_len - ihl;
 

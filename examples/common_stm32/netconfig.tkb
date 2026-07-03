@@ -15,8 +15,18 @@
 // the same production batch can still collide). Simplicity wins.
 let OUR_MAC: [u8; 6] = {0x00, 0x80, 0xE1, 0x00, 0x00, 0x00};
 
-// our_ip: 192.0.2.1, RFC 5737 TEST-NET-1 -- reserved for exactly this kind
-// of test use, same address examples/arp_reply/arp_reply.tkb (QEMU) already
-// uses. Not routable, no real network implied; the hardware test scripts
-// talk to the board over a raw point-to-point link, not IP routing.
-let OUR_IP: [u8; 4] = {192, 0, 2, 1};
+// our_ip: 192.168.10.2 -- same /24 as this devcontainer's point-to-point
+// NIC (enp4s0, 192.168.10.1/24), chosen specifically so the board is
+// directly reachable with zero host-side routing changes: any client on
+// this machine (curl, a real browser for http_server_stm32, etc.) can just
+// reach 192.168.10.2 straight over the wire via ordinary ARP, no extra
+// route needed. Deliberately NOT the RFC 5737 TEST-NET-1 address
+// (192.0.2.1) the QEMU/virtio-net examples use (examples/common/netconfig.tkb)
+// -- those only ever talk to hand-crafted raw-socket test scripts that
+// address frames directly by MAC, so routability was never a requirement
+// there. If this machine's point-to-point interface or its subnet ever
+// changes, update this constant (and the matching values in
+// scripts/eth_arp_reply_test.py / eth_icmp_echo_test.py / eth_tcp_echo_test.py,
+// which hardcode the same address for the same reason netconfig.tkb can't
+// help a Python script).
+let OUR_IP: [u8; 4] = {192, 168, 10, 2};

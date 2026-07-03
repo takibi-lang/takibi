@@ -1,6 +1,6 @@
 // ARP responder over QEMU's virtio-net-device.
 //
-// Answers "who-has <our_ip>" requests with "is-at <our_mac>"; every other
+// Answers "who-has <OUR_IP>" requests with "is-at <our_mac>"; every other
 // frame (wrong EtherType, wrong OPER, or a request for a different IP) is
 // silently dropped -- only re-posted to the RX ring, never echoed. Builds
 // on examples/net_echo/net_echo.tkb's virtqueue/IRQ plumbing but replaces
@@ -10,8 +10,8 @@
 // our_mac is read from the device's Config space (VIRTIO_NET_F_MAC) rather
 // than hardcoded, so it always matches whatever `-device
 // virtio-net-device,mac=...` the test harness used -- no risk of the two
-// drifting out of sync. our_ip is a fixed test-only address: 192.0.2.1,
-// from the RFC 5737 TEST-NET-1 block reserved for exactly this purpose.
+// drifting out of sync. OUR_IP is a fixed test-only address (RFC 5737
+// TEST-NET-1), shared with icmp_echo/tcp_echo via examples/common/netconfig.tkb.
 //
 // Correctness is checked by scripts/arp_test.py, not UART output; uart_puts
 // below is purely for interactive debugging (`make qemu-arp-reply`).
@@ -26,7 +26,6 @@ let mut tx_queue_mem: [u8; 8192] align(4096);
 let mut rx_bufs: [u8; 12288];
 
 let mut our_mac: [u8; 6];
-let mut our_ip:  [u8; 4];
 
 // ARP-over-Ethernet/IPv4 field offsets, relative to the start of the ARP
 // payload (right after the 14-byte Ethernet header). Total length is 28
@@ -46,7 +45,7 @@ let ARP_TPA:   i32 = 24;
 
 // Rewrites the ARP request at `arp` into a reply in place, and swaps the
 // enclosing Ethernet header's src/dst. Only called after the caller has
-// already verified this is a "who-has our_ip" request.
+// already verified this is a "who-has OUR_IP" request.
 fn build_arp_reply(eth: *u8, arp: *u8) {
     // Ethernet: dst = old src, then src = our_mac (order matters: must
     // read the old src before overwriting it).
@@ -59,7 +58,7 @@ fn build_arp_reply(eth: *u8, arp: *u8) {
     bytes_copy(arp + ARP_THA, arp + ARP_SHA, 6);
     bytes_copy(arp + ARP_TPA, arp + ARP_SPA, 4);
     bytes_copy(arp + ARP_SHA, our_mac as *u8, 6);
-    bytes_copy(arp + ARP_SPA, our_ip as *u8, 4);
+    bytes_copy(arp + ARP_SPA, OUR_IP as *u8, 4);
     write_u16be(arp + ARP_OPER, 2); // reply
 }
 
@@ -82,10 +81,6 @@ fn main() {
 
         virtio_negotiate(VIRTIO_NET_F_MAC);
         virtio_net_read_mac(our_mac as *u8);
-        our_ip[0] = 192 as u8;
-        our_ip[1] = 0 as u8;
-        our_ip[2] = 2 as u8;
-        our_ip[3] = 1 as u8;
 
         virtio_queue_setup(0, rx_queue_mem as *u8); // RX
         virtio_queue_setup(1, tx_queue_mem as *u8); // TX
@@ -124,7 +119,7 @@ fn main() {
                     if (read_u16be(arp + ARP_HTYPE) == 1 && read_u16be(arp + ARP_PTYPE) == 0x0800 &&
                         arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
                         read_u16be(arp + ARP_OPER) == 1) {
-                        if (bytes_eq(arp + ARP_TPA, our_ip as *u8, 4) == 1) {
+                        if (bytes_eq(arp + ARP_TPA, OUR_IP as *u8, 4) == 1) {
                             build_arp_reply(eth, arp);
 
                             desc_set(tx_queue_mem as *u8, 0, buf as usize, frame_total_len, 0);

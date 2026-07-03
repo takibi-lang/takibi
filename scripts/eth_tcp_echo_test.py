@@ -32,9 +32,9 @@ import time
 
 IFACE = os.environ.get("ETH_TEST_IFACE", "enp4s0")
 
-CLIENT_IP = bytes([192, 0, 2, 55])
+CLIENT_IP = bytes([192, 168, 10, 55])
 SERVER_MAC = bytes([0x00, 0x80, 0xE1, 0x00, 0x00, 0x00])  # must match netconfig.tkb's OUR_MAC
-SERVER_IP = bytes([192, 0, 2, 1])                          # must match netconfig.tkb's OUR_IP
+SERVER_IP = bytes([192, 168, 10, 2])                       # must match netconfig.tkb's OUR_IP
 SERVER_PORT = 7                                            # must match tcp_echo_stm32.tkb's TCP_ECHO_PORT
 
 RETRIES = 20

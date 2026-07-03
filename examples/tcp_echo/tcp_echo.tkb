@@ -38,7 +38,6 @@ let mut tx_queue_mem: [u8; 8192] align(4096);
 let mut rx_bufs: [u8; 12288];
 
 let mut our_mac: [u8; 6];
-let mut our_ip:  [u8; 4];
 
 // IPv4 field offsets, relative to the start of the IP header.
 let IP_TOTAL_LEN: i32 = 2;
@@ -107,7 +106,7 @@ fn build_syn_ack(eth: *u8, ip: *u8, ihl: i32, tcp: *u8) {
     bytes_copy(eth + 6, our_mac as *u8, 6);
 
     bytes_copy(ip + IP_DST, ip + IP_SRC, 4);
-    bytes_copy(ip + IP_SRC, our_ip as *u8, 4);
+    bytes_copy(ip + IP_SRC, OUR_IP as *u8, 4);
     ip[IP_TTL] = 64 as u8;
     write_u16be(ip + IP_TOTAL_LEN, ihl + 20);
     write_u16be(ip + IP_CHECKSUM, 0);
@@ -148,7 +147,7 @@ fn build_data_echo(eth: *u8, ip: *u8, ihl: i32, tcp: *u8, data: *u8, data_len: i
     bytes_copy(eth + 6, our_mac as *u8, 6);
 
     bytes_copy(ip + IP_DST, ip + IP_SRC, 4);
-    bytes_copy(ip + IP_SRC, our_ip as *u8, 4);
+    bytes_copy(ip + IP_SRC, OUR_IP as *u8, 4);
     ip[IP_TTL] = 64 as u8;
     write_u16be(ip + IP_TOTAL_LEN, ihl + 20 + data_len);
     write_u16be(ip + IP_CHECKSUM, 0);
@@ -177,7 +176,7 @@ fn build_fin_ack(eth: *u8, ip: *u8, ihl: i32, tcp: *u8) {
     bytes_copy(eth + 6, our_mac as *u8, 6);
 
     bytes_copy(ip + IP_DST, ip + IP_SRC, 4);
-    bytes_copy(ip + IP_SRC, our_ip as *u8, 4);
+    bytes_copy(ip + IP_SRC, OUR_IP as *u8, 4);
     ip[IP_TTL] = 64 as u8;
     write_u16be(ip + IP_TOTAL_LEN, ihl + 20);
     write_u16be(ip + IP_CHECKSUM, 0);
@@ -215,10 +214,6 @@ fn main() {
 
         virtio_negotiate(VIRTIO_NET_F_MAC);
         virtio_net_read_mac(our_mac as *u8);
-        our_ip[0] = 192 as u8;
-        our_ip[1] = 0 as u8;
-        our_ip[2] = 2 as u8;
-        our_ip[3] = 1 as u8;
 
         virtio_queue_setup(0, rx_queue_mem as *u8); // RX
         virtio_queue_setup(1, tx_queue_mem as *u8); // TX
@@ -266,7 +261,7 @@ fn main() {
                         if (total_len <= ip_len_in_frame && total_len >= ihl &&
                             (ip[IP_PROTOCOL] as i32) == PROTO_TCP &&
                             inet_checksum(ip, ihl) == 0) {
-                            if (bytes_eq(ip + IP_DST, our_ip as *u8, 4) == 1) {
+                            if (bytes_eq(ip + IP_DST, OUR_IP as *u8, 4) == 1) {
                                 let tcp:     *u8 = ip + ihl;
                                 let tcp_len: i32 = total_len - ihl;
 

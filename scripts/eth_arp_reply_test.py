@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Sends an ARP "who-has" request for arp_reply_stm32's configured static IP
-# (192.0.2.1 -- RFC 5737 TEST-NET-1, examples/common_stm32/netconfig.tkb)
+# (192.168.10.2 -- examples/common_stm32/netconfig.tkb)
 # over a raw AF_PACKET socket on a physical point-to-point link to the real
 # STM32F746G-DISCOVERY board, and verifies the ARP reply: OPER=2 (reply),
 # SHA/SPA are the responder's MAC/IP, THA/TPA echo back the requester's, and
@@ -32,9 +32,9 @@ IFACE = os.environ.get("ETH_TEST_IFACE", "enp4s0")
 ARP_ETHERTYPE = bytes([0x08, 0x06])
 
 REQUESTER_MAC = bytes([0x02, 0x00, 0x00, 0x00, 0x00, 0x01])
-REQUESTER_IP = bytes([192, 0, 2, 55])
-TARGET_IP = bytes([192, 0, 2, 1])       # must match netconfig.tkb's OUR_IP
-OTHER_IP = bytes([192, 0, 2, 200])      # some IP arp_reply_stm32 does NOT own
+REQUESTER_IP = bytes([192, 168, 10, 55])
+TARGET_IP = bytes([192, 168, 10, 2])       # must match netconfig.tkb's OUR_IP
+OTHER_IP = bytes([192, 168, 10, 200])      # some IP arp_reply_stm32 does NOT own
 BROADCAST_MAC = bytes([0xff] * 6)
 
 RETRIES = 20
@@ -133,10 +133,10 @@ def main() -> int:
     sock.settimeout(RETRY_TIMEOUT_SECS)
 
     ok1 = test_who_has_us(sock, requester_mac)
-    print("  who-has 192.0.2.1 (ours):     %s" % ("PASS" if ok1 else "FAIL"))
+    print("  who-has 192.168.10.2 (ours):     %s" % ("PASS" if ok1 else "FAIL"))
 
     ok2 = test_who_has_other_stays_silent(sock, requester_mac)
-    print("  who-has 192.0.2.200 (silent): %s" % ("PASS" if ok2 else "FAIL"))
+    print("  who-has 192.168.10.200 (silent): %s" % ("PASS" if ok2 else "FAIL"))
 
     return 0 if (ok1 and ok2) else 1
 

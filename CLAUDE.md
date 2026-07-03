@@ -562,7 +562,16 @@ the normal (always `-g`-free) build outputs.
   shared by every STM32 Ethernet example -- MAC is a fixed `00:80:E1:00:00:00`, matching ST's own
   STM32CubeF7 LwIP example convention (hardcoded, not derived from the chip's unique ID -- see that file's
   comment for the tradeoff) -- so changing the board's network identity means editing one file, not each
-  example. `examples/net_echo/net_echo_stm32.tkb` proved the plumbing end-to-end first; `arp_reply_stm32.tkb`,
+  example. **IP is `192.168.10.2`**, deliberately the same /24 as this devcontainer's point-to-point NIC
+  (`enp4s0`, `192.168.10.1/24`) rather than the RFC 5737 TEST-NET-1 address the QEMU examples use --
+  chosen so the board is reachable with zero host-side routing changes, since `http_server_stm32`'s whole
+  point is being reachable from a real browser. The QEMU side got the same treatment in the other
+  direction: `examples/common/netconfig.tkb` holds a single shared `OUR_IP` (`192.0.2.1`) for
+  `arp_reply`/`icmp_echo`/`tcp_echo` (MAC is deliberately NOT in this file -- those examples read it from
+  the virtio-net device at runtime, nothing to share); `http_server.tkb` keeps its own separate,
+  differently-named `our_ip` (`10.0.2.15`, the fixed SLIRP requirement) and is unaffected by this file even
+  though it's harmlessly compiled into that binary too (see the Makefile's `APP_OBJS`/`NET_OBJS` comment).
+  `examples/net_echo/net_echo_stm32.tkb` proved the plumbing end-to-end first; `arp_reply_stm32.tkb`,
   `icmp_echo_stm32.tkb`, and `tcp_echo_stm32.tkb` then followed the exact same pattern (swap `virtio_mmio.tkb`
   calls for `eth.tkb`'s equivalents, reuse `netutil.tkb`/`inet_checksum.tkb` unchanged) with no new
   driver-level surprises -- the hardware bring-up bug below was net_echo's alone to find. `tcp_echo_stm32.tkb`
