@@ -54,7 +54,7 @@ STM32_EXTRA_BINS := examples/rtc/kernel_stm32.bin examples/echo/kernel_stm32.bin
                     examples/timer/kernel_stm32.bin examples/irq/kernel_stm32.bin \
                     examples/preempt/kernel_stm32.bin examples/semaphore/kernel_stm32.bin \
                     examples/condvar/kernel_stm32.bin examples/msgqueue/kernel_stm32.bin \
-                    examples/watchdog/kernel_stm32.bin
+                    examples/watchdog/kernel_stm32.bin examples/net_echo/kernel_stm32.bin
 
 # inet_checksum/ip_parse/tcp_parse: same CHECKSUM_OBJS group as the AArch64
 # side, but examples/common/inet_checksum.tkb and examples/common/netutil.tkb
@@ -69,7 +69,7 @@ STM32_CHECKSUM_KERNELS  := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/
 STM32_CHECKSUM_BINS     := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/kernel_stm32.bin)
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest stm32build hwcheck langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server profile-http-server profile-tcp-echo
+.PHONY: build test qemutest stm32build hwcheck hwcheck-net langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server profile-http-server profile-tcp-echo
 
 .DEFAULT_GOAL := build
 
@@ -99,6 +99,17 @@ stm32build: $(STM32_BINS) $(STM32_EXTRA_BINS) $(STM32_CHECKSUM_BINS)
 ## only-when-available rather than a requirement for every clone of this repo.
 hwcheck: stm32build
 	@bash scripts/run_hwtest.sh
+
+## hwcheck-net: run all STM32 real-Ethernet hardware tests (net_echo today,
+## more as they're ported -- see scripts/run_hwtest_net.sh) over a physical
+## point-to-point link to the STM32F746G-DISCOVERY board (requires the
+## board's Ethernet port wired directly to this machine's NIC). NOT part of
+## hwcheck's automated UART-diff suite, and NOT part of `make check`/
+## `make hwcheck` -- these are network tests (raw AF_PACKET sockets), not a
+## UART capture/diff, and need CAP_NET_RAW (run with sudo) plus
+## ETH_TEST_IFACE set to the wired interface if it isn't the default.
+hwcheck-net: stm32build
+	@bash scripts/run_hwtest_net.sh
 
 ## langcheck: verify that all source files contain only ASCII characters
 langcheck:
@@ -294,6 +305,9 @@ COMMON_STM32_STARTUP_S := $(COMMON_STM32_DIR)/startup.S
 COMMON_STM32_STARTUP_O := $(COMMON_STM32_DIR)/startup.o
 COMMON_STM32_LINK_LD   := $(COMMON_STM32_DIR)/link.ld
 COMMON_STM32_UART      := $(COMMON_STM32_DIR)/uart.tkb
+# eth.tkb's DMA descriptor rings/buffers need AXI SRAM, not the DTCM every
+# other STM32 example links into -- see link_eth.ld's own comment.
+COMMON_STM32_LINK_ETH_LD := $(COMMON_STM32_DIR)/link_eth.ld
 
 $(COMMON_STM32_STARTUP_O): $(COMMON_STM32_STARTUP_S)
 	$(LLVM_MC) --triple=$(STM32_TARGET) --filetype=obj $< -o $@
@@ -421,6 +435,29 @@ examples/watchdog/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/watchdog/
 	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/watchdog/watchdog_stm32.o -o $@
 
 examples/watchdog/kernel_stm32.bin: examples/watchdog/kernel_stm32.elf
+	llvm-objcopy-19 -O binary $< $@
+
+# net_echo (STM32): real Ethernet MAC/PHY/DMA (examples/common_stm32/eth.tkb)
+# instead of virtio-net -- first real-hardware milestone toward the
+# Ethernet examples (net_echo/arp_reply/icmp_echo/tcp_echo/http_server) that
+# are otherwise QEMU-only (see CLAUDE.md's virtio-net section). Genuinely
+# separate net_echo_stm32.tkb, same as irq/preempt/etc., since there is no
+# STM32 counterpart to virtio_mmio.tkb to just recompile. Links against
+# COMMON_STM32_LINK_ETH_LD (AXI SRAM), not the shared DTCM-based link.ld.
+COMMON_STM32_ETH       := $(COMMON_STM32_DIR)/eth.tkb
+COMMON_STM32_ETH_ASM_S := $(COMMON_STM32_DIR)/eth_asm.S
+COMMON_STM32_ETH_ASM_O := $(COMMON_STM32_DIR)/eth_asm.o
+
+$(COMMON_STM32_ETH_ASM_O): $(COMMON_STM32_ETH_ASM_S)
+	$(LLVM_MC) --triple=$(STM32_TARGET) --filetype=obj $< -o $@
+
+examples/net_echo/net_echo_stm32.o: examples/net_echo/net_echo_stm32.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) build
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+
+examples/net_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/net_echo/net_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/net_echo/net_echo_stm32.o -o $@
+
+examples/net_echo/kernel_stm32.bin: examples/net_echo/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
 $(STM32_CHECKSUM_OBJS): examples/%_stm32.o: examples/%.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) build

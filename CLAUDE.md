@@ -553,11 +553,36 @@ the normal (always `-g`-free) build outputs.
   echo server (`ptr + i32` / `ptr - i32` already work for descriptor-ring indexing).
 - **`sizeof(T)` cannot be used as an array size** (`[T; sizeof(Foo)]`) -- see the `sizeof(T)` section above for why
   (parser-time vs. codegen-time resolution mismatch) and what combining them would require.
-- **STM32 Ethernet is not implemented**: `net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo`, `http_server` remain
-  QEMU/virtio-net-only. The STM32F746 has a real Ethernet MAC + LAN8742 PHY, but this needs a from-scratch
-  MAC/DMA-descriptor-ring driver and MDIO-based PHY init/RMII setup -- a substantially bigger task than anything
-  else in the STM32 port so far (see "STM32F746G-DISCOVERY Bare-Metal" above for everything that IS ported).
-  Deferred to a separate effort.
+- **STM32 Ethernet: `net_echo` is ported (real hardware, real MAC/PHY/DMA); `arp_reply`, `icmp_echo`,
+  `tcp_echo`, `http_server` remain QEMU/virtio-net-only.** `examples/common_stm32/eth.tkb` is a from-scratch
+  MAC/DMA-descriptor-ring driver + MDIO-based LAN8742A PHY init over RMII (RMII pins, PHY bring-up, and the
+  DMA descriptor ring design are documented in that file's header comment). `examples/net_echo/net_echo_stm32.tkb`
+  proves the plumbing end-to-end against a real point-to-point link (`scripts/eth_net_echo_test.py`, run via
+  `make hwcheck-net` -- not part of `make check`/`make hwcheck` since it needs a real board wired
+  directly to the test machine's NIC, plus `CAP_NET_RAW`. `make hwcheck-net` aggregates all such
+  Ethernet hardware tests via `scripts/run_hwtest_net.sh`, same PASS/FAIL-summary style as
+  `scripts/run_hwtest.sh` -- add new Ethernet examples there as they're ported, e.g. an ICMP-echo
+  hardware test, rather than each getting its own separate `make` target). Two things deliberately deferred to keep this first
+  milestone's blast radius small: (1) **polling-only, no interrupt-driven RX** -- `examples/common_stm32/startup.S`'s
+  vector table currently only extends through IRQ37 (USART1), and every other STM32 example links against that
+  same shared file, so extending it through IRQ61 (ETH) is left for a follow-up once polling-only was confirmed
+  working; (2) porting `arp_reply`/`icmp_echo`/`tcp_echo`/`http_server` themselves, which should be mechanical
+  once each's virtio_mmio.tkb calls are swapped for eth.tkb's equivalents, following the exact same pattern as
+  `net_echo_stm32.tkb`.
+
+  **Hardware bring-up bug worth knowing about**: the very first working version had every DMA descriptor field
+  byte-for-byte correct (verified live via openocd/gdb-multiarch register+memory dumps) yet the TX descriptor's
+  OWN bit would never clear -- the DMA engine simply never acted on it. Root cause: writing the descriptor
+  fields (AXI SRAM) and then immediately poking the "poll demand" register (a different peripheral) has no
+  ordering guarantee on Cortex-M7 -- `*io` writes in takibi are volatile (the compiler won't reorder/drop them)
+  but that says nothing about the CPU's write buffer having actually retired the SRAM write before the very next
+  store lands, so the DMA engine could race ahead and read a stale (OWN=0) descriptor. Confirmed by re-issuing
+  the poll-demand write by hand through the debugger after enough time had passed for the earlier write to
+  settle -- the descriptor completed instantly. Fixed with a `dsb` (Data Synchronization Barrier) instruction
+  between the descriptor write and the poll-demand kick (`examples/common_stm32/eth_asm.S`, called via
+  `extern fn eth_dsb()` -- same `extern fn` mechanism as `sem_wait`/`sem_post`). **Any future takibi code that
+  writes memory a DMA engine will read, then kicks that DMA engine via a register write, needs the same barrier
+  -- volatile alone is not enough.**
 
 ## QEMU Bare-Metal (AArch64)
 

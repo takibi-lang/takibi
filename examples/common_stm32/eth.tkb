@@ -1,0 +1,367 @@
+// STM32F746G-DISCOVERY real Ethernet MAC/DMA driver + LAN8742A PHY bring-up
+// over RMII. First real-hardware counterpart to examples/common/virtio_mmio.tkb
+// -- unlike virtio-net (QEMU-only), this drives the actual STM32F7 Ethernet
+// MAC IP block, so there is no device to negotiate features with: instead we
+// configure clocks/GPIO/SYSCFG, soft-reset the MAC/DMA, bring up the PHY over
+// MDIO, and hand-build the DMA descriptor rings ourselves.
+//
+// This first pass is deliberately POLLING-ONLY (no ETH_IRQHandler / NVIC
+// wiring): examples/common_stm32/startup.S's vector table currently only
+// extends through IRQ37 (USART1), and every other STM32 example links
+// against that same shared file, so extending it is a change with a much
+// larger blast radius than anything else in this file. Proving the MAC +
+// PHY + DMA descriptor plumbing works at all is the goal of this first
+// milestone; interrupt-driven RX (extending startup.S through IRQ61 and
+// adding enable_eth_irq() to nvic.tkb) is a natural, low-risk follow-up once
+// that's confirmed on real hardware, not bundled into this first cut.
+//
+// Register offsets and bit positions below were cross-checked against ST's
+// official CMSIS device header (cmsis_device_f7/Include/stm32f746xx.h) and
+// HAL header (stm32f7xx_hal_driver/Inc/stm32f7xx_hal_eth.h), not guessed --
+// see the RMII pin table / register notes in this project's STM32 Ethernet
+// plan for the exact sources.
+//
+// RAM note: DMA descriptors and frame buffers declared in this file MUST be
+// linked into AXI SRAM (examples/common_stm32/link_eth.ld), not the DTCM
+// that examples/common_stm32/link.ld uses for every other example -- the
+// STM32F7 Ethernet DMA master cannot reach DTCM at all (it isn't on the bus
+// matrix DTCM sits behind). Cache maintenance (clean/invalidate) around
+// these buffers is deliberately not implemented: nothing in startup.S or
+// link_eth.ld enables the Cortex-M7 D-cache (SCB->CCR DCE bit is left at its
+// post-reset-disabled state), so there is no coherency hazard yet -- this
+// must be revisited if a future change enables the D-cache.
+
+// -- RCC / SYSCFG -----------------------------------------------------------
+let RCC_AHB1ENR: *io u32 = 0x40023830;
+let RCC_APB2ENR: *io u32 = 0x40023844;
+let SYSCFG_PMC:  *io u32 = 0x40013804;
+
+// -- GPIO (MODER/OSPEEDR/AFRL/AFRH), same read-modify-write idiom as
+// examples/common_stm32/uart.tkb -----------------------------------------
+let GPIOA_MODER:   *io u32 = 0x40020000;
+let GPIOA_OSPEEDR: *io u32 = 0x40020008;
+let GPIOA_AFRL:    *io u32 = 0x40020020;
+
+let GPIOC_MODER:   *io u32 = 0x40020800;
+let GPIOC_OSPEEDR: *io u32 = 0x40020808;
+let GPIOC_AFRL:    *io u32 = 0x40020820;
+
+let GPIOG_MODER:   *io u32 = 0x40021800;
+let GPIOG_OSPEEDR: *io u32 = 0x40021808;
+let GPIOG_AFRH:    *io u32 = 0x40021824;
+
+// -- Ethernet MAC/DMA registers (ETH_BASE = AHB1PERIPH_BASE + 0x8000) ------
+let ETH_MACCR:    *io u32 = 0x40028000;
+let ETH_MACFFR:   *io u32 = 0x40028004;
+let ETH_MACMIIAR: *io u32 = 0x40028010;
+let ETH_MACMIIDR: *io u32 = 0x40028014;
+
+let ETH_DMABMR:   *io u32 = 0x40029000;
+let ETH_DMATPDR:  *io u32 = 0x40029004;
+let ETH_DMARPDR:  *io u32 = 0x40029008;
+let ETH_DMARDLAR: *io u32 = 0x4002900C;
+let ETH_DMATDLAR: *io u32 = 0x40029010;
+let ETH_DMASR:    *io u32 = 0x40029014;
+let ETH_DMAOMR:   *io u32 = 0x40029018;
+
+// -- LAN8742A PHY (IEEE 802.3 clause 22 standard registers only -- avoids
+// depending on any vendor-specific register 31 bit encoding). MDIO address
+// is 0 on this board (confirmed: LAN8742's PHYAD pin strapping on the
+// STM32F746G-DISCOVERY ties it to address 0). ------------------------------
+let PHY_ADDR: i32 = 0;
+let PHY_BCR:    i32 = 0; // Basic Control Register
+let PHY_BSR:    i32 = 1; // Basic Status Register
+let PHY_ANAR:   i32 = 4; // Auto-Negotiation Advertisement Register
+let PHY_ANLPAR: i32 = 5; // Auto-Negotiation Link Partner Ability Register
+
+let PHY_BCR_RESET:        i32 = 0x8000;
+let PHY_BCR_AUTONEG_EN:   i32 = 0x1000;
+let PHY_BCR_RESTART_AN:   i32 = 0x0200;
+
+let PHY_BSR_AUTONEG_DONE: i32 = 0x0020;
+let PHY_BSR_LINK_UP:      i32 = 0x0004;
+
+// Advertise 10/100 Mbps, half/full duplex (bits 8:5) + IEEE 802.3 selector
+// field (bits 4:0 = 00001).
+let PHY_ANAR_ADVERTISE_ALL: i32 = 0x01E1;
+let PHY_AN_100_FULL: i32 = 0x0100;
+let PHY_AN_100_HALF: i32 = 0x0080;
+let PHY_AN_10_FULL:  i32 = 0x0040;
+let PHY_AN_10_HALF:  i32 = 0x0020;
+
+// -- DMA descriptor ring geometry --------------------------------------------
+// Struct field assignment in takibi only supports `ident.field = v` (a bare
+// variable name on the left), so a runtime-indexed descriptor-table entry
+// (`descs[i].field = v`) can't be expressed -- same limitation
+// examples/common/virtio_mmio.tkb already works around. Each descriptor is
+// manipulated as a flat 16-byte (4-word) buffer via manual offsets, exactly
+// like that file's desc_set/used_ring_get_* helpers.
+// examples/common_stm32/eth_asm.S: dsb (Data Synchronization Barrier),
+// forces prior writes to the descriptor rings to complete before the very
+// next poll-demand register write, so the DMA engine can't race ahead and
+// read a stale descriptor. See that file's comment for how this was found.
+extern fn eth_dsb();
+
+let ETH_DESC_WORDS: i32 = 4;
+let ETH_DESC_SIZE:  i32 = 16; // ETH_DESC_WORDS * 4
+let ETH_RX_DESC_COUNT: i32 = 4;
+let ETH_TX_DESC_COUNT: i32 = 4;
+let ETH_BUF_SIZE: i32 = 1536; // max 1518-byte Ethernet frame, rounded up
+
+// 0x80000000 as i32 wraps to a negative bit pattern (top bit set) -- only
+// ever tested via bitwise AND below, never compared as a signed magnitude.
+// (Global initializers only accept a bare IntLit, not a Cast expression --
+// see lib/llvm_gen.ml's gen_global/eval_const -- so this can't spell "as i32".)
+let ETH_RDES0_OWN: i32 = 0x80000000;
+let ETH_RDES1_RCH: i32 = 0x4000;
+let ETH_RDES0_FL_SHIFT: i32 = 16;
+let ETH_RDES_FL_MASK: i32 = 0x3FFF;
+
+let ETH_TDES0_OWN: i32 = 0x80000000; // same as ETH_RDES0_OWN: top-bit flag, bitwise use only
+let ETH_TDES0_LS:  i32 = 0x20000000;
+let ETH_TDES0_FS:  i32 = 0x10000000;
+let ETH_TDES0_TCH: i32 = 0x00100000;
+
+// Descriptor rings and packet buffers. Placed in AXI SRAM by link_eth.ld
+// (see this file's header comment) -- no takibi-level section attribute
+// needed, the linker script alone decides which physical RAM bank .bss
+// lands in.
+let mut eth_rx_descs: [u8; 64] align(4); // ETH_RX_DESC_COUNT * ETH_DESC_SIZE
+let mut eth_tx_descs: [u8; 64] align(4); // ETH_TX_DESC_COUNT * ETH_DESC_SIZE
+let mut eth_rx_bufs:  [u8; 6144] align(4); // ETH_RX_DESC_COUNT * ETH_BUF_SIZE
+
+let mut eth_rx_cur: i32 = 0;
+let mut eth_tx_cur: i32 = 0;
+
+fn rx_desc_ptr(i: i32) -> *u8 {
+    return eth_rx_descs + i * ETH_DESC_SIZE;
+}
+
+fn tx_desc_ptr(i: i32) -> *u8 {
+    return eth_tx_descs + i * ETH_DESC_SIZE;
+}
+
+fn desc_word(desc: *u8, word_idx: i32) -> *io u32 {
+    return (desc + word_idx * 4) as *io u32;
+}
+
+fn ptr_to_u32(p: *u8) -> u32 {
+    return (p as usize) as u32;
+}
+
+// -- MDIO (MACMIIAR/MACMIIDR) -----------------------------------------------
+// Clock range CR = Div16 (HCLK/16): with HSI 16MHz and no PLL setup
+// (examples/common_stm32/uart.tkb makes the same simplicity trade-off), the
+// resulting MDC clock is 1MHz. ST's documented CR table only lists ranges
+// starting at HCLK=20MHz, but the constraint that actually matters (IEEE
+// 802.3 clause 22: MDC must be <= 2.5MHz) is still satisfied -- Div16 is
+// simply more conservative than its documented floor implies, not out of
+// spec.
+let MACMIIAR_CR_DIV16: i32 = 0x8;
+
+fn mdio_wait() {
+    while ((*ETH_MACMIIAR & 1) != 0) {} // MB (MII busy)
+}
+
+fn mdio_read(reg: i32) -> i32 {
+    let cmd: i32 = (PHY_ADDR << 11) | (reg << 6) | MACMIIAR_CR_DIV16 | 1; // PA | MR | CR | MB
+    *ETH_MACMIIAR = cmd as u32;
+    mdio_wait();
+    return (*ETH_MACMIIDR) as i32;
+}
+
+fn mdio_write(reg: i32, val: i32) {
+    *ETH_MACMIIDR = val as u32;
+    let cmd: i32 = (PHY_ADDR << 11) | (reg << 6) | MACMIIAR_CR_DIV16 | 2 | 1; // PA | MR | CR | MW | MB
+    *ETH_MACMIIAR = cmd as u32;
+    mdio_wait();
+}
+
+// -- Bring-up -----------------------------------------------------------
+fn eth_gpio_init() {
+    // GPIOA/C/G + SYSCFG clocks.
+    *RCC_AHB1ENR = *RCC_AHB1ENR | (1 | (1 << 2) | (1 << 6)); // GPIOAEN | GPIOCEN | GPIOGEN
+    *RCC_APB2ENR = *RCC_APB2ENR | (1 << 14); // SYSCFGEN
+
+    // PA1 (REF_CLK), PA2 (MDIO), PA7 (CRS_DV) -> AF11, very-high-speed.
+    *GPIOA_MODER   = (*GPIOA_MODER   & ~((3 << 2) | (3 << 4) | (3 << 14)))
+                    | (2 << 2) | (2 << 4) | (2 << 14);
+    *GPIOA_OSPEEDR = *GPIOA_OSPEEDR | (3 << 2) | (3 << 4) | (3 << 14);
+    *GPIOA_AFRL    = (*GPIOA_AFRL & ~((15 << 4) | (15 << 8) | (15 << 28)))
+                    | (11 << 4) | (11 << 8) | (11 << 28);
+
+    // PC1 (MDC), PC4 (RXD0), PC5 (RXD1) -> AF11.
+    *GPIOC_MODER   = (*GPIOC_MODER   & ~((3 << 2) | (3 << 8) | (3 << 10)))
+                    | (2 << 2) | (2 << 8) | (2 << 10);
+    *GPIOC_OSPEEDR = *GPIOC_OSPEEDR | (3 << 2) | (3 << 8) | (3 << 10);
+    *GPIOC_AFRL    = (*GPIOC_AFRL & ~((15 << 4) | (15 << 16) | (15 << 20)))
+                    | (11 << 4) | (11 << 16) | (11 << 20);
+
+    // PG11 (TX_EN), PG13 (TXD0), PG14 (TXD1) -> AF11.
+    *GPIOG_MODER   = (*GPIOG_MODER   & ~((3 << 22) | (3 << 26) | (3 << 28)))
+                    | (2 << 22) | (2 << 26) | (2 << 28);
+    *GPIOG_OSPEEDR = *GPIOG_OSPEEDR | (3 << 22) | (3 << 26) | (3 << 28);
+    *GPIOG_AFRH    = (*GPIOG_AFRH & ~((15 << 12) | (15 << 20) | (15 << 24)))
+                    | (11 << 12) | (11 << 20) | (11 << 24);
+
+    // Select RMII (vs. default MII) before the MAC clocks are enabled.
+    *SYSCFG_PMC = *SYSCFG_PMC | (1 << 23); // MII_RMII_SEL
+
+    *RCC_AHB1ENR = *RCC_AHB1ENR | ((1 << 25) | (1 << 26) | (1 << 27)); // ETHMACEN | ETHMACTXEN | ETHMACRXEN
+}
+
+fn eth_mac_dma_reset() {
+    *ETH_DMABMR = *ETH_DMABMR | 1; // DMABMR.SR (software reset), self-clearing
+    while ((*ETH_DMABMR & 1) != 0) {}
+}
+
+// Resets the PHY, advertises every 10/100 mode, restarts auto-negotiation,
+// and busy-waits for both auto-neg-complete and link-up. Returns the
+// negotiated (speed_is_100, full_duplex) pair packed as speed*2+duplex
+// (bit1=speed100, bit0=fullduplex), or -1 if no common mode was found
+// (should not happen once BSR reports auto-neg complete, since both link
+// partners always support at least 10BASE-T half duplex).
+fn phy_init() -> i32 {
+    mdio_write(PHY_BCR, PHY_BCR_RESET);
+    while ((mdio_read(PHY_BCR) & PHY_BCR_RESET) != 0) {}
+
+    mdio_write(PHY_ANAR, PHY_ANAR_ADVERTISE_ALL);
+    mdio_write(PHY_BCR, PHY_BCR_AUTONEG_EN | PHY_BCR_RESTART_AN);
+
+    while (1) {
+        let bsr: i32 = mdio_read(PHY_BSR);
+        if ((bsr & PHY_BSR_AUTONEG_DONE) != 0) {
+            if ((bsr & PHY_BSR_LINK_UP) != 0) {
+                break;
+            }
+        }
+    }
+
+    let common: i32 = mdio_read(PHY_ANAR) & mdio_read(PHY_ANLPAR) & 0x01E0;
+    if ((common & PHY_AN_100_FULL) != 0) {
+        return 3; // 100 Mbps, full duplex
+    } else if ((common & PHY_AN_100_HALF) != 0) {
+        return 2; // 100 Mbps, half duplex
+    } else if ((common & PHY_AN_10_FULL) != 0) {
+        return 1; // 10 Mbps, full duplex
+    } else if ((common & PHY_AN_10_HALF) != 0) {
+        return 0; // 10 Mbps, half duplex
+    } else {
+        return -1;
+    }
+}
+
+fn eth_rx_ring_init() {
+    for i in 0..<ETH_RX_DESC_COUNT {
+        let desc: *u8 = rx_desc_ptr(i);
+        let buf:  *u8 = eth_rx_bufs + i * ETH_BUF_SIZE;
+        let next: *u8 = rx_desc_ptr((i + 1) % ETH_RX_DESC_COUNT);
+
+        *(desc_word(desc, 1)) = (ETH_RDES1_RCH | ETH_BUF_SIZE) as u32; // RCH | RBS1
+        *(desc_word(desc, 2)) = ptr_to_u32(buf);                       // buffer1 address
+        *(desc_word(desc, 3)) = ptr_to_u32(next);                     // next descriptor (RCH mode)
+        *(desc_word(desc, 0)) = ETH_RDES0_OWN as u32;                  // hand to DMA last
+    }
+    *ETH_DMARDLAR = ptr_to_u32(rx_desc_ptr(0));
+}
+
+fn eth_tx_ring_init() {
+    for i in 0..<ETH_TX_DESC_COUNT {
+        let desc: *u8 = tx_desc_ptr(i);
+        let next: *u8 = tx_desc_ptr((i + 1) % ETH_TX_DESC_COUNT);
+        // word0 (status/control) and word1/word2 (size/buffer) are left at
+        // 0 (BSS-zeroed): OWN=0 means these start out owned by the CPU, and
+        // eth_transmit() fills them in fresh on every send.
+        *(desc_word(desc, 3)) = ptr_to_u32(next); // next descriptor (TCH mode)
+    }
+    *ETH_DMATDLAR = ptr_to_u32(tx_desc_ptr(0));
+}
+
+// Brings up GPIO/clocks, resets the MAC/DMA, negotiates the PHY link, and
+// starts DMA RX/TX. Returns 1 on success, 0 if no PHY link could be
+// established (see phy_init()'s comment -- practically should not happen on
+// a live point-to-point link).
+fn eth_init() -> i32 {
+    eth_gpio_init();
+    eth_mac_dma_reset();
+
+    let link: i32 = phy_init();
+    if (link < 0) {
+        return 0;
+    }
+    let speed100: i32 = link / 2;
+    let fullduplex: i32 = link % 2;
+
+    // APCS (Automatic Pad/CRC Stripping): the MAC pads/appends CRC on
+    // transmit and strips pad+CRC on receive, so RDES0's FL field already
+    // reflects the real (CRC-free) frame length and eth_transmit() never
+    // needs to compute or append a CRC itself.
+    let maccr: i32 = (1 << 2) | (1 << 3) | (1 << 7) // RE | TE | APCS
+                    | (speed100 << 14)               // FES
+                    | (fullduplex << 11);            // DM
+    *ETH_MACCR = maccr as u32;
+
+    // RA (Receive All): bypasses destination-address filtering entirely.
+    // Needed because net_echo_stm32 has no fixed MAC address of its own to
+    // filter on (it only swaps whatever src/dst arrives, exactly like
+    // examples/net_echo/net_echo.tkb) -- MACA0HR/LR are left unprogrammed.
+    *ETH_MACFFR = (1 << 31) as u32; // RA
+
+    eth_rx_ring_init();
+    eth_tx_ring_init();
+    eth_dsb(); // ring writes must complete before DMA is started below
+
+    *ETH_DMAOMR = (1 << 21) | (1 << 25); // TSF | RSF (store-and-forward)
+    *ETH_DMAOMR = *ETH_DMAOMR | (1 << 1) | (1 << 13); // SR | ST (start RX/TX DMA)
+
+    return 1;
+}
+
+// Returns the received frame length if the current RX descriptor has been
+// filled in by the DMA (OWN bit clear), or 0 if nothing is ready yet.
+// Non-zero return must be followed by exactly one eth_rx_release() call
+// once the caller is done reading eth_rx_buf().
+fn eth_poll_rx() -> i32 {
+    let desc: *u8 = rx_desc_ptr(eth_rx_cur);
+    let word0: i32 = (*(desc_word(desc, 0))) as i32;
+    if ((word0 & ETH_RDES0_OWN) != 0) {
+        return 0; // still owned by the DMA
+    }
+    return (word0 >> ETH_RDES0_FL_SHIFT) & ETH_RDES_FL_MASK;
+}
+
+fn eth_rx_buf() -> *u8 {
+    return eth_rx_bufs + eth_rx_cur * ETH_BUF_SIZE;
+}
+
+// Hands the current RX descriptor back to the DMA and advances the ring.
+// Must only be called after a non-zero eth_poll_rx() and once the caller no
+// longer needs eth_rx_buf()'s contents (e.g. after eth_transmit() has
+// already copied/sent them out, since eth_transmit() is synchronous).
+fn eth_rx_release() {
+    let desc: *u8 = rx_desc_ptr(eth_rx_cur);
+    *(desc_word(desc, 0)) = ETH_RDES0_OWN as u32;
+    eth_dsb(); // see eth_asm.S: must complete before the DMA can be kicked
+    *ETH_DMARPDR = 1; // poll demand: resume RX DMA if it had suspended
+    eth_rx_cur = (eth_rx_cur + 1) % ETH_RX_DESC_COUNT;
+}
+
+// Transmits len bytes starting at buf. Synchronous: busy-waits for the DMA
+// to finish reading buf before returning, so the caller can safely reuse or
+// release buf (e.g. via eth_rx_release()) immediately afterward -- same
+// completion-ordering guarantee examples/common/virtio_mmio.tkb's net_echo
+// consumer relies on before re-posting an RX descriptor.
+fn eth_transmit(buf: *u8, len: i32) {
+    let desc: *u8 = tx_desc_ptr(eth_tx_cur);
+
+    *(desc_word(desc, 2)) = ptr_to_u32(buf);
+    *(desc_word(desc, 1)) = len as u32; // TBS1
+    *(desc_word(desc, 0)) = (ETH_TDES0_OWN | ETH_TDES0_FS | ETH_TDES0_LS | ETH_TDES0_TCH) as u32;
+
+    eth_dsb(); // see eth_asm.S: must complete before the DMA can be kicked
+    *ETH_DMATPDR = 1; // poll demand: prompt DMA to check for a ready descriptor now
+
+    while (((*(desc_word(desc, 0))) as i32 & ETH_TDES0_OWN) != 0) {}
+
+    eth_tx_cur = (eth_tx_cur + 1) % ETH_TX_DESC_COUNT;
+}
