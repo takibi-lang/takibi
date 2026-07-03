@@ -1,20 +1,32 @@
-// Shared static IP for QEMU/virtio-net example responders that need one
-// (examples/arp_reply/arp_reply.tkb, examples/icmp_echo/icmp_echo.tkb,
-// examples/tcp_echo/tcp_echo.tkb). Edit the constant below to change it
-// without touching each example's main().
+// Shared static IP for the QEMU/virtio-net example responders that need
+// one (examples/arp_reply/arp_reply.tkb, examples/icmp_echo/icmp_echo.tkb,
+// examples/tcp_echo/tcp_echo.tkb -- each is a single shared .tkb file that
+// also runs on the STM32 target, see examples/net_echo/net_echo.tkb's
+// header comment). Edit the constant below to change it without touching
+// each example's main().
 //
 // MAC is deliberately NOT included here, unlike the STM32 side's
 // examples/common_stm32/netconfig.tkb: these QEMU examples read their MAC
-// from the virtio-net device itself at runtime (virtio_net_read_mac), not a
-// fixed constant, so there is nothing to share.
+// from the virtio-net device itself at runtime (net_read_mac(), which on
+// this backend calls virtio_net_read_mac() -- see
+// examples/common/virtio_mmio.tkb), not a fixed constant, so there is
+// nothing to share.
 //
 // our_ip: 192.0.2.1, RFC 5737 TEST-NET-1 -- reserved for exactly this kind
 // of test use. examples/http_server/http_server.tkb deliberately does NOT
-// use this constant: SLIRP's -netdev user hostfwd requires the guest to own
-// 10.0.2.15 specifically (see that file's header comment), a hard
-// requirement this shared default would break -- it keeps its own separate
-// our_ip. (This is the QEMU-side counterpart of the STM32 side's decision
-// to give the real board a fixed, routable address instead -- see
-// examples/common_stm32/netconfig.tkb's comment: different constraints,
-// different answers.)
+// use this constant on the QEMU side: SLIRP's -netdev user hostfwd requires
+// the guest to own 10.0.2.15 specifically (see that file's header comment),
+// a hard requirement this shared default would break -- it keeps its own
+// separate our_ip, branching on IS_QEMU below. (This is the QEMU-side
+// counterpart of the STM32 side's decision to give the real board a fixed,
+// routable address instead -- see examples/common_stm32/netconfig.tkb's
+// comment: different constraints, different answers.)
 let OUR_IP: [u8; 4] = {192, 0, 2, 1};
+
+// Lets the one place that genuinely needs to know which backend it's
+// linked against (http_server.tkb's SLIRP-address special case above)
+// branch at runtime -- an ordinary global constant, not a compiler
+// feature: examples/common_stm32/netconfig.tkb defines the same symbol
+// as 0. No other shared example needs this; net_read_mac()/OUR_IP already
+// hide every other platform difference behind a uniform API.
+let IS_QEMU: i32 = 1;

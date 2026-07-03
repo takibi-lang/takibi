@@ -10,6 +10,25 @@
 // virtio-mmio, at the cost of depending on a QEMU compatibility knob that
 // could be removed in a future release -- see CLAUDE.md's virtio-net
 // section for the tradeoff.
+//
+// Exposes the same net_init/net_poll_rx/net_rx_buf/net_transmit/
+// net_rx_release/net_read_mac API as examples/common_stm32/eth.tkb, so
+// application-level examples (net_echo.tkb, etc.) are a single shared
+// .tkb file for both the QEMU/virtio-net and STM32/real-MAC targets --
+// mirroring how uart.tkb/print.tkb already share identical signatures
+// across examples/common/ and examples/common_stm32/. Descriptor rings,
+// RX/TX buffers, and the virtio_net_hdr framing detail are all internal to
+// this file; the app only ever sees a plain Ethernet frame.
+//
+// Polling-only, matching eth.tkb: net_poll_rx() checks the used ring
+// directly instead of waiting on a GIC-routed interrupt. QEMU's
+// virtio-mmio device works identically either way (the interrupt is a
+// notification convenience, not a requirement -- the driver polling
+// used_idx_get() directly is a spec-legal alternative), and
+// examples/common/startup.S already safely no-ops when the GIC is never
+// initialized (relied on today by every non-IRQ example). This removes
+// the GIC/IRQ wiring (gic_init/gic_enable_virtio_irq/irq_dispatch/
+// virtio_irq_flag) every consumer used to have to set up by hand.
 
 let VIRTIO_DEVICE_ID:        i32 = 0x08;
 let VIRTIO_HOST_FEATURES:    i32 = 0x10;
@@ -21,8 +40,6 @@ let VIRTIO_QUEUE_NUM:        i32 = 0x38;
 let VIRTIO_QUEUE_ALIGN:      i32 = 0x3c;
 let VIRTIO_QUEUE_PFN:        i32 = 0x40;
 let VIRTIO_QUEUE_NOTIFY:     i32 = 0x50;
-let VIRTIO_INTERRUPT_STATUS: i32 = 0x60;
-let VIRTIO_INTERRUPT_ACK:    i32 = 0x64;
 let VIRTIO_STATUS:           i32 = 0x70;
 
 let VIRTIO_MAGIC_VALUE:   i32 = 0x74726976;
@@ -37,12 +54,6 @@ let PAGE_SIZE: i32 = 4096;
 let VIRTIO_MMIO_FIRST_SLOT: i32 = 0x0a000000;
 let VIRTIO_MMIO_SLOT_STRIDE: i32 = 0x200;
 let VIRTIO_MMIO_SLOT_COUNT: i32 = 32;
-// GIC IRQ of slot 0, per the QEMU "virt" board's device tree
-// (virtio_mmio@a000000 -> interrupts SPI 0x10=16 -> GIC IRQ 32+16=48;
-// each following 0x200-byte slot is the next SPI number). Confirmed via
-// `qemu-system-aarch64 -machine virt,dumpdtb=...` + dtc against this
-// devcontainer's QEMU 8.2.2.
-let VIRTIO_MMIO_FIRST_SPI: i32 = 48;
 
 let QNUM: i32 = 8; // virtqueue depth for both the RX and TX queues
 
@@ -56,18 +67,30 @@ let VIRTIO_CONFIG_MAC_OFFSET: i32 = 0x100; // Config space starts right after th
 // compiler, because QEMU does not always attach a lone virtio-net-device
 // to slot 0 -- empirically, under this devcontainer's QEMU 8.2.2 with a
 // single virtio-net-device on the command line, the device landed on slot
-// 31 (base 0x0a003e00, GIC IRQ 79). Rather than hardcode that (fragile
-// across QEMU versions/command lines), virtio_net_find() scans all 32
-// slots at boot and derives both the base address and GIC IRQ from
-// whichever slot actually reports DeviceID == 1 (network).
-let mut virtio_base:    i32 = 0;
-let mut virtio_gic_irq: i32 = 0;
+// 31 (base 0x0a003e00). Rather than hardcode that (fragile across QEMU
+// versions/command lines), net_init() scans all 32 slots at boot and
+// derives the base address from whichever slot actually reports
+// DeviceID == 1 (network).
+let mut virtio_base: i32 = 0;
 
-// Set by virtio_irq_handler(), cleared by the main loop after it has
-// re-scanned both queues' used rings. Mirrors the irq_done pattern in
-// examples/irq/irq.tkb: the handler only signals "something happened",
-// the main loop does the actual work.
-let mut virtio_irq_flag: io i32 = 0;
+// RX_BUF_SIZE and every buffer/ring-index below are internal to this
+// driver (matching eth.tkb's encapsulation) -- the app never needs to know
+// about queue depth, PAGE_SIZE, or descriptor rings.
+let RX_BUF_SIZE: i32 = 1536; // 10-byte virtio_net_hdr + max 1514-byte Ethernet frame, rounded up
+
+// 8192 = 2 * PAGE_SIZE (array sizes must be literal constants).
+let mut rx_queue_mem: [u8; 8192] align(4096);
+let mut tx_queue_mem: [u8; 8192] align(4096);
+
+// QNUM (8) RX packet buffers, posted once at init and re-posted after
+// each completion. 12288 = QNUM * RX_BUF_SIZE.
+let mut rx_bufs: [u8; 12288];
+
+let mut rx_used_seen:        i32 = 0;
+let mut tx_used_seen:        i32 = 0;
+let mut rx_avail_idx:        i32 = 0;
+let mut tx_avail_idx:        i32 = 0;
+let mut net_last_rx_desc_idx: i32 = 0;
 
 fn vreg(offset: i32) -> *io i32 {
     return (virtio_base + offset) as *io i32;
@@ -81,7 +104,6 @@ fn virtio_net_find() -> i32 {
             let devid_p: *io i32 = (base + VIRTIO_DEVICE_ID) as *io i32;
             if (*devid_p == VIRTIO_DEVICE_ID_NET) {
                 virtio_base = base;
-                virtio_gic_irq = VIRTIO_MMIO_FIRST_SPI + i;
                 return 1;
             }
         }
@@ -89,31 +111,10 @@ fn virtio_net_find() -> i32 {
     return 0;
 }
 
-// Enables virtio_gic_irq at the GIC distributor and routes it to CPU0.
-// gic.tkb only wires up ISENABLER0 (IRQ 0-31) and ISENABLER1 (IRQ 32-63);
-// our discovered IRQ can land above 63 (it was 79 in the empirical probe),
-// so this computes the correct ISENABLERn/bit and ITARGETSR byte directly
-// instead of extending the shared GicRegs struct for a single caller.
-fn gic_enable_virtio_irq() {
-    let isenabler_n: i32 = virtio_gic_irq / 32;
-    let bit:         i32 = virtio_gic_irq - isenabler_n * 32;
-    let isenabler: *io i32 = (0x08000100 + isenabler_n * 4) as *io i32;
-    *isenabler = 1 << bit;
-
-    let itargetsr: *io u8 = (0x08000800 + virtio_gic_irq) as *io u8;
-    *itargetsr = 1 as u8; // route to CPU0
-}
-
-// Device bring-up up through feature negotiation. Queue setup and
-// DRIVER_OK happen separately (virtio_queue_setup / virtio_driver_ok)
-// since the caller needs to set up both queues in between.
-//
-// `features` is caller-chosen rather than hardcoded to 0: offloads are
-// already disabled on the QEMU command line regardless (keeping
-// virtio_net_hdr fixed at 10 bytes and skipping the control queue), but
-// some callers need a specific bit acked -- e.g. arp_reply.tkb needs
-// VIRTIO_NET_F_MAC to be allowed to read the device's MAC out of Config
-// space. Pass 0 for "no optional features" (net_echo.tkb doesn't need any).
+// Device bring-up through feature negotiation. VIRTIO_NET_F_MAC is always
+// acked (unconditionally, regardless of whether the caller ever calls
+// net_read_mac()) since it's part of the shared driver API surface now --
+// harmless for callers that don't use it.
 fn virtio_negotiate(features: i32) {
     *(vreg(VIRTIO_STATUS)) = 0; // reset
     *(vreg(VIRTIO_STATUS)) = STATUS_ACKNOWLEDGE;
@@ -136,10 +137,8 @@ fn virtio_driver_ok() {
     *(vreg(VIRTIO_STATUS)) = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK;
 }
 
-// Reads the device's 6-byte MAC out of Config space. Only meaningful if
-// VIRTIO_NET_F_MAC was acked in virtio_negotiate() -- QEMU populates this
-// field from -device virtio-net-device,mac=... regardless, but reading it
-// without acking the feature bit is technically off-spec.
+// Reads the device's 6-byte MAC out of Config space. VIRTIO_NET_F_MAC is
+// always acked in virtio_negotiate() now, so this is always meaningful.
 fn virtio_net_read_mac(mac_out: *u8) {
     for i in 0..<6 {
         let p: *io u8 = (virtio_base + VIRTIO_CONFIG_MAC_OFFSET + i) as *io u8;
@@ -186,8 +185,8 @@ fn avail_publish(queue_mem: *u8, new_idx: i32) {
 }
 
 // These three read memory the device writes asynchronously via DMA, and
-// used_idx_get() in particular is polled in a tight busy-wait loop in the
-// main echo loop. A non-volatile load here is exactly the "LLVM may hoist
+// used_idx_get() in particular is polled directly in net_poll_rx()'s
+// per-call check. A non-volatile load here is exactly the "LLVM may hoist
 // a global/memory load out of a tight loop" hazard called out in
 // CLAUDE.md's "Volatile Reads of Global Variables" section (the compiler
 // has no way to know DMA writes are coming) -- so these must be `io`.
@@ -206,8 +205,81 @@ fn used_ring_get_len(queue_mem: *u8, slot: i32) -> i32 {
     return *p;
 }
 
-fn virtio_irq_handler() {
-    let status: i32 = *(vreg(VIRTIO_INTERRUPT_STATUS));
-    *(vreg(VIRTIO_INTERRUPT_ACK)) = status;
-    virtio_irq_flag = 1;
+// -- Shared driver API (matches examples/common_stm32/eth.tkb) --------------
+
+// Finds the virtio-net device, negotiates features, sets up both queues,
+// and posts all RX descriptors. Returns 1 on success, 0 if no virtio-net
+// device was found.
+fn net_init() -> i32 {
+    if (virtio_net_find() == 0) {
+        return 0;
+    }
+
+    virtio_negotiate(VIRTIO_NET_F_MAC);
+    virtio_queue_setup(0, rx_queue_mem as *u8); // RX
+    virtio_queue_setup(1, tx_queue_mem as *u8); // TX
+    virtio_driver_ok();
+
+    for i in 0..<QNUM {
+        let buf: *u8 = rx_bufs + i * RX_BUF_SIZE;
+        desc_set(rx_queue_mem as *u8, i, buf as usize, RX_BUF_SIZE, VIRTQ_DESC_F_WRITE);
+        avail_ring_set(rx_queue_mem as *u8, i, i);
+    }
+    rx_avail_idx = QNUM;
+    avail_publish(rx_queue_mem as *u8, rx_avail_idx);
+    virtio_notify(0);
+
+    return 1;
+}
+
+// Returns the received frame length (virtio_net_hdr already excluded) if a
+// frame is ready, 0 otherwise. Non-zero return must be followed by exactly
+// one net_rx_release() call once the caller is done reading net_rx_buf().
+fn net_poll_rx() -> i32 {
+    if (rx_used_seen == used_idx_get(rx_queue_mem as *u8)) {
+        return 0;
+    }
+    let slot: i32 = rx_used_seen % QNUM;
+    net_last_rx_desc_idx = used_ring_get_id(rx_queue_mem as *u8, slot);
+    let frame_total_len: i32 = used_ring_get_len(rx_queue_mem as *u8, slot);
+    return frame_total_len - 10; // hide the 10-byte virtio_net_hdr from the caller
+}
+
+fn net_rx_buf() -> *u8 {
+    return rx_bufs + net_last_rx_desc_idx * RX_BUF_SIZE + 10;
+}
+
+// Hands the current RX descriptor back to the device and advances the
+// ring. Must only be called after a non-zero net_poll_rx() and once the
+// caller no longer needs net_rx_buf()'s contents.
+fn net_rx_release() {
+    let rx_slot: i32 = rx_avail_idx % QNUM;
+    avail_ring_set(rx_queue_mem as *u8, rx_slot, net_last_rx_desc_idx);
+    rx_avail_idx = rx_avail_idx + 1;
+    avail_publish(rx_queue_mem as *u8, rx_avail_idx);
+    virtio_notify(0);
+
+    rx_used_seen = rx_used_seen + 1;
+}
+
+// Transmits len bytes starting at buf (buf must be net_rx_buf()'s own
+// pointer -- every example replies in place, reusing the RX buffer, so
+// `buf - 10` always lands back on the true DMA buffer start where the
+// virtio_net_hdr the device expects on TX too still sits, untouched since
+// the device itself wrote it on receive). Synchronous: busy-waits for the
+// device to finish reading buf before returning, so the caller can safely
+// release buf (net_rx_release()) immediately afterward.
+fn net_transmit(buf: *u8, len: i32) {
+    desc_set(tx_queue_mem as *u8, 0, (buf - 10) as usize, len + 10, 0);
+    avail_ring_set(tx_queue_mem as *u8, 0, 0);
+    tx_avail_idx = tx_avail_idx + 1;
+    avail_publish(tx_queue_mem as *u8, tx_avail_idx);
+    virtio_notify(1);
+
+    while (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {}
+    tx_used_seen = tx_used_seen + 1;
+}
+
+fn net_read_mac(mac_out: *u8) {
+    virtio_net_read_mac(mac_out);
 }

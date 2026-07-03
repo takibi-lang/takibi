@@ -1,25 +1,20 @@
-// L2 (Ethernet) echo server over QEMU's virtio-net-device.
+// L2 (Ethernet) echo server -- the simplest example in the
+// net_echo -> arp_reply -> icmp_echo -> tcp_echo -> http_server
+// progression. Receives raw Ethernet frames, swaps the source/destination
+// MAC addresses in place, and sends the frame back out unchanged
+// otherwise. No ARP, no IP -- this only proves the underlying network
+// driver's RX/TX/DMA plumbing works.
 //
-// Receives raw Ethernet frames via a virtio-net RX virtqueue, swaps the
-// source/destination MAC addresses in place, and sends the frame back out
-// the TX virtqueue unchanged otherwise. No ARP, no IP -- this only proves
-// the virtqueue/DMA/IRQ plumbing (see examples/common/virtio_mmio.tkb).
-// Correctness is checked by scripts/virtio_net_test.py over a UDP-backed
-// -netdev dgram (one UDP datagram == one raw Ethernet frame), not by UART
-// output, so uart_puts below is purely for interactive debugging
-// (`make qemu-net-echo`).
-
-let RX_BUF_SIZE: i32 = 1536; // 10-byte virtio_net_hdr + max 1514-byte Ethernet frame, rounded up
-
-// Two virtqueues' worth of descriptor+avail+used rings (see
-// virtio_mmio.tkb's layout comment). 8192 = 2 * PAGE_SIZE (array sizes
-// must be literal constants, see CLAUDE.md's Array-Size Constants note).
-let mut rx_queue_mem: [u8; 8192] align(4096);
-let mut tx_queue_mem: [u8; 8192] align(4096);
-
-// QNUM (8) RX packet buffers, posted once at init and re-posted after
-// each completion. 12288 = QNUM * RX_BUF_SIZE.
-let mut rx_bufs: [u8; 12288];
+// Single shared file for both targets: examples/common/virtio_mmio.tkb
+// (QEMU/virtio-net) and examples/common_stm32/eth.tkb (STM32 real
+// Ethernet MAC) expose the identical net_init/net_poll_rx/net_rx_buf/
+// net_transmit/net_rx_release API, so this file never needs to know which
+// one it's linked against -- same principle as uart.tkb/print.tkb already
+// being shared verbatim across both targets.
+//
+// Correctness is checked by scripts/virtio_net_test.py (QEMU) /
+// scripts/eth_net_echo_test.py (STM32 hardware), not UART output --
+// uart_puts below is purely for interactive bring-up debugging.
 
 fn swap_mac(frame: *u8) {
     for i in 0..<6 {
@@ -30,84 +25,24 @@ fn swap_mac(frame: *u8) {
     }
 }
 
-fn irq_dispatch(frame_sp: i32) -> i32 {
-    let id: i32 = *(gic.cpu_iar);
-    if (id == virtio_gic_irq) {
-        virtio_irq_handler();
-    }
-    *(gic.cpu_eoir) = id;
-    return frame_sp;
-}
-
 fn main() {
     uart_puts("net_echo: init\r\n");
-    if (virtio_net_find() == 0) {
-        uart_puts("net_echo: virtio-net device not found\r\n");
+
+    if (net_init() == 0) {
+        uart_puts("net_echo: device/link not found\r\n");
     } else {
-        gic_init();
-        gic_enable_virtio_irq();
-
-        virtio_negotiate(0); // no optional features needed for a blind L2 echo
-        virtio_queue_setup(0, rx_queue_mem as *u8); // RX
-        virtio_queue_setup(1, tx_queue_mem as *u8); // TX
-        virtio_driver_ok();
-
-        // Post all RX descriptors so the device has somewhere to write incoming frames.
-        for i in 0..<QNUM {
-            let buf: *u8 = rx_bufs + i * RX_BUF_SIZE;
-            desc_set(rx_queue_mem as *u8, i, buf as usize, RX_BUF_SIZE, VIRTQ_DESC_F_WRITE);
-            avail_ring_set(rx_queue_mem as *u8, i, i);
-        }
-        let mut rx_avail_idx: i32 = QNUM;
-        avail_publish(rx_queue_mem as *u8, rx_avail_idx);
-        virtio_notify(0);
-
         uart_puts("net_echo: ready\r\n");
 
-        let mut rx_used_seen: i32 = 0;
-        let mut tx_used_seen: i32 = 0;
-        let mut tx_avail_idx: i32 = 0;
-
         while (1) {
-            let flag_p: *io i32 = &virtio_irq_flag;
-            while (*flag_p == 0) {}
-            virtio_irq_flag = 0;
-
-            while (rx_used_seen != used_idx_get(rx_queue_mem as *u8)) {
-                let slot: i32 = rx_used_seen % QNUM;
-                let desc_idx: i32 = used_ring_get_id(rx_queue_mem as *u8, slot);
-                let frame_total_len: i32 = used_ring_get_len(rx_queue_mem as *u8, slot);
-                let buf: *u8 = rx_bufs + desc_idx * RX_BUF_SIZE;
-
-                // frame_total_len includes the 10-byte virtio_net_hdr; a valid
-                // Ethernet frame needs at least a 12-byte dst+src MAC pair.
-                if (frame_total_len >= 22) {
-                    let frame: *u8 = buf + 10;
-                    swap_mac(frame);
-
-                    // TX directly out of the same buffer the frame arrived in --
-                    // no separate TX buffer or copy needed.
-                    desc_set(tx_queue_mem as *u8, 0, buf as usize, frame_total_len, 0);
-                    avail_ring_set(tx_queue_mem as *u8, 0, 0);
-                    tx_avail_idx = tx_avail_idx + 1;
-                    avail_publish(tx_queue_mem as *u8, tx_avail_idx);
-                    virtio_notify(1);
-
-                    // Wait for the TX to complete before the buffer is reused
-                    // (re-posted to RX) or overwritten by the next receive.
-                    while (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {}
-                    tx_used_seen = tx_used_seen + 1;
-                }
-
-                // Re-post the RX descriptor: buffer address/length/flags are
-                // unchanged (set once above), only the avail ring slot moves.
-                let rx_slot: i32 = rx_avail_idx % QNUM;
-                avail_ring_set(rx_queue_mem as *u8, rx_slot, desc_idx);
-                rx_avail_idx = rx_avail_idx + 1;
-                avail_publish(rx_queue_mem as *u8, rx_avail_idx);
-                virtio_notify(0);
-
-                rx_used_seen = rx_used_seen + 1;
+            let len: i32 = net_poll_rx();
+            // A valid Ethernet frame needs at least a 12-byte dst+src MAC pair.
+            if (len >= 12) {
+                let frame: *u8 = net_rx_buf();
+                swap_mac(frame);
+                net_transmit(frame, len);
+            }
+            if (len > 0) {
+                net_rx_release();
             }
         }
     }

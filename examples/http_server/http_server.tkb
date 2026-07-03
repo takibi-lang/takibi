@@ -1,19 +1,18 @@
-// HTTP server over QEMU's virtio-net-device -- the payoff of the whole
+// HTTP server -- the payoff of the whole
 // net_echo -> arp_reply -> icmp_echo -> tcp_echo progression. Serves a
 // single styled HTML page with a live request counter on port 80.
 //
 // Combines two things no earlier example needed together in the same
 // kernel:
-//   - ARP response (reused from examples/arp_reply's approach). Discovered
-//     empirically while setting this example up: QEMU's -netdev user
-//     (SLIRP, used so a real browser on the host can reach this over
-//     -device ...,hostfwd=tcp::8080-:80) refuses to deliver any IP packet
-//     to a guest MAC it hasn't ARP-resolved first, even though
-//     examples/net_echo's/arp_reply's own automated tests never needed
-//     this (their -netdev dgram test transport is a raw point-to-point
-//     pipe with no ARP step -- the python test scripts already know the
-//     guest's MAC). A real network path always needs ARP; a synthetic
-//     point-to-point one doesn't.
+//   - ARP response (reused from examples/arp_reply's approach). A real
+//     client's TCP/IP stack always ARPs before sending IP packets, unlike
+//     the point-to-point test transports the other four examples are
+//     verified with (a raw dgram socket that already knows the peer's MAC,
+//     or a raw AF_PACKET socket addressing frames directly by MAC) --
+//     discovered empirically while first setting this example up against
+//     QEMU's -netdev user/SLIRP (see git history / CLAUDE.md's HTTP Server
+//     section for the full story), and confirmed again identically true
+//     against the real STM32 board's host-machine TCP/IP stack.
 //   - TCP's active-close variant: after tcp_echo.tkb (which only ever
 //     answers a client-initiated FIN), an HTTP/1.0-style "respond once,
 //     then close" server needs to *initiate* the close itself right after
@@ -25,25 +24,28 @@
 //     final ACK, then return to LISTEN so the *next* browser tab/reload
 //     can connect.
 //
-// our_ip is 10.0.2.15 rather than the 192.0.2.1 TEST-NET-1 address used
-// by every earlier example: 10.0.2.15 is SLIRP's default guest address
-// (confirmed empirically -- see the qemu-http-server Makefile target),
-// required for -netdev user's hostfwd rule to actually route the
+// Single shared file for both targets -- see examples/net_echo/net_echo.tkb's
+// header comment for why. OUR_IP is a plain shared constant per target
+// (examples/common/netconfig.tkb for QEMU -- see that file's comment for
+// why this example does NOT use it, using a differently-named our_ip
+// instead; examples/common_stm32/netconfig.tkb for STM32).
+//
+// our_ip is 10.0.2.15 on the QEMU side rather than the shared OUR_IP
+// constant every other example uses: 10.0.2.15 is SLIRP's default guest
+// address (confirmed empirically -- see the qemu-http-server Makefile
+// target), required for -netdev user's hostfwd rule to actually route the
 // connection here. scripts/http_server_test.py (the -netdev dgram
 // automated test) uses the same address for consistency, even though its
-// raw point-to-point transport doesn't care what address is used.
+// raw point-to-point transport doesn't care what address is used. On the
+// STM32 side, our_ip is set from the shared OUR_IP constant
+// (192.168.10.2, the same /24 as this devcontainer's point-to-point NIC)
+// since there is no SLIRP-style constraint there -- see main() below.
 //
 // Request parsing is minimal: any ESTABLISHED-state segment whose payload
 // starts with "GET" is treated as an HTTP request and answered with the
 // same fixed page, regardless of path/headers -- there is exactly one
 // page to serve, so routing would add complexity without adding
 // capability.
-
-let RX_BUF_SIZE: i32 = 1536;
-
-let mut rx_queue_mem: [u8; 8192] align(4096);
-let mut tx_queue_mem: [u8; 8192] align(4096);
-let mut rx_bufs: [u8; 12288];
 
 let mut our_mac: [u8; 6];
 let mut our_ip:  [u8; 4];
@@ -111,7 +113,7 @@ let mut html_body: [u8; 512];
 fn build_html_body() -> i32 {
     let mut len: i32 = 0;
     len = len + copy_str(html_body + len,
-        "<!DOCTYPE html><html><head><title>Takibi</title><style>body{background:#111;color:#eee;font-family:monospace;text-align:center;padding-top:8%}h1{color:#ff9944}p{color:#999}.count{color:#6cf}</style></head><body><h1>Hello from Takibi!</h1><p>Served by a TCP/IP stack written from scratch<br>in the takibi language, running bare-metal<br>on AArch64 under QEMU.</p><p>Request <span class='count'>#");
+        "<!DOCTYPE html><html><head><title>Takibi</title><style>body{background:#111;color:#eee;font-family:monospace;text-align:center;padding-top:8%}h1{color:#ff9944}p{color:#999}.count{color:#6cf}</style></head><body><h1>Hello from Takibi!</h1><p>Served by a TCP/IP stack written from scratch<br>in the takibi language, running bare-metal.</p><p>Request <span class='count'>#");
     len = len + write_udec(html_body + len, request_count);
     len = len + copy_str(html_body + len, "</span> since boot.</p></body></html>");
     return len;
@@ -235,170 +237,143 @@ fn build_http_response_fin(eth: *u8, ip: *u8, ihl: i32, tcp: *u8) -> i32 {
     return len;
 }
 
-fn irq_dispatch(frame_sp: i32) -> i32 {
-    let id: i32 = *(gic.cpu_iar);
-    if (id == virtio_gic_irq) {
-        virtio_irq_handler();
-    }
-    *(gic.cpu_eoir) = id;
-    return frame_sp;
-}
-
 fn main() {
     uart_puts("http_server: init\r\n");
-    if (virtio_net_find() == 0) {
-        uart_puts("http_server: virtio-net device not found\r\n");
+
+    if (net_init() == 0) {
+        uart_puts("http_server: device/link not found\r\n");
     } else {
-        gic_init();
-        gic_enable_virtio_irq();
-
-        virtio_negotiate(VIRTIO_NET_F_MAC);
-        virtio_net_read_mac(our_mac as *u8);
-        our_ip[0] = 10 as u8;
-        our_ip[1] = 0 as u8;
-        our_ip[2] = 2 as u8;
-        our_ip[3] = 15 as u8;
-
-        virtio_queue_setup(0, rx_queue_mem as *u8); // RX
-        virtio_queue_setup(1, tx_queue_mem as *u8); // TX
-        virtio_driver_ok();
-
-        for i in 0..<QNUM {
-            let buf: *u8 = rx_bufs + i * RX_BUF_SIZE;
-            desc_set(rx_queue_mem as *u8, i, buf as usize, RX_BUF_SIZE, VIRTQ_DESC_F_WRITE);
-            avail_ring_set(rx_queue_mem as *u8, i, i);
+        net_read_mac(our_mac as *u8);
+        // See the file header comment for why this differs from every
+        // other example's shared OUR_IP constant: SLIRP's -netdev user
+        // hostfwd (QEMU) requires the guest to own 10.0.2.15 specifically.
+        // On real STM32 hardware there is no such constraint, so it just
+        // uses the shared OUR_IP constant like every other example.
+        if (IS_QEMU == 1) {
+            our_ip[0] = 10 as u8;
+            our_ip[1] = 0 as u8;
+            our_ip[2] = 2 as u8;
+            our_ip[3] = 15 as u8;
+        } else {
+            bytes_copy(our_ip as *u8, OUR_IP as *u8, 4);
         }
-        let mut rx_avail_idx: i32 = QNUM;
-        avail_publish(rx_queue_mem as *u8, rx_avail_idx);
-        virtio_notify(0);
 
         uart_puts("http_server: ready\r\n");
 
-        let mut rx_used_seen: i32 = 0;
-        let mut tx_used_seen: i32 = 0;
-        let mut tx_avail_idx: i32 = 0;
-
         while (1) {
-            let flag_p: *io i32 = &virtio_irq_flag;
-            while (*flag_p == 0) {}
-            virtio_irq_flag = 0;
+            let len: i32 = net_poll_rx();
+            let mut should_tx: i32 = 0;
+            let mut tx_len: i32 = 0;
+            let eth: *u8 = net_rx_buf();
+            let ethertype: i32 = read_u16be(eth + 12);
 
-            while (rx_used_seen != used_idx_get(rx_queue_mem as *u8)) {
-                let slot: i32 = rx_used_seen % QNUM;
-                let desc_idx: i32 = used_ring_get_id(rx_queue_mem as *u8, slot);
-                let frame_total_len: i32 = used_ring_get_len(rx_queue_mem as *u8, slot);
-                let buf: *u8 = rx_bufs + desc_idx * RX_BUF_SIZE;
-                let eth: *u8 = buf + 10;
-                let mut should_tx: i32 = 0;
-                let mut tx_len: i32 = 0;
-                let ethertype: i32 = read_u16be(eth + 12);
-
-                if (frame_total_len >= 52 && ethertype == 0x0806) {
-                    let arp: *u8 = eth + 14;
-                    if (read_u16be(arp + ARP_HTYPE) == 1 && read_u16be(arp + ARP_PTYPE) == 0x0800 &&
-                        arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
-                        read_u16be(arp + ARP_OPER) == 1) {
-                        if (bytes_eq(arp + ARP_TPA, our_ip as *u8, 4) == 1) {
-                            build_arp_reply(eth, arp);
-                            should_tx = 1;
-                            tx_len = 10 + 14 + 28;
-                        }
+            if (len >= 42 && ethertype == 0x0806) {
+                let arp: *u8 = eth + 14;
+                if (read_u16be(arp + ARP_HTYPE) == 1 && read_u16be(arp + ARP_PTYPE) == 0x0800 &&
+                    arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
+                    read_u16be(arp + ARP_OPER) == 1) {
+                    if (bytes_eq(arp + ARP_TPA, our_ip as *u8, 4) == 1) {
+                        build_arp_reply(eth, arp);
+                        should_tx = 1;
+                        tx_len = 14 + 28;
                     }
-                } else if (frame_total_len >= 64 && ethertype == 0x0800) {
-                    let ip: *u8 = eth + 14;
-                    let version: i32 = (ip[0] as i32) >> 4;
-                    let ihl:     i32 = ((ip[0] as i32) & 0x0f) * 4;
+                }
+            } else if (len >= 54 && ethertype == 0x0800) {
+                let ip: *u8 = eth + 14;
+                let version: i32 = (ip[0] as i32) >> 4;
+                let ihl:     i32 = ((ip[0] as i32) & 0x0f) * 4;
 
-                    if (version == 4 && ihl == 20) {
-                        let total_len:       i32 = read_u16be(ip + IP_TOTAL_LEN);
-                        let ip_len_in_frame: i32 = frame_total_len - 10 - 14;
+                if (version == 4 && ihl == 20) {
+                    let total_len:       i32 = read_u16be(ip + IP_TOTAL_LEN);
+                    let ip_len_in_frame: i32 = len - 14;
 
-                        if (total_len <= ip_len_in_frame && total_len >= ihl &&
-                            (ip[IP_PROTOCOL] as i32) == PROTO_TCP &&
-                            inet_checksum(ip, ihl) == 0) {
-                            if (bytes_eq(ip + IP_DST, our_ip as *u8, 4) == 1) {
-                                let tcp:     *u8 = ip + ihl;
-                                let tcp_len: i32 = total_len - ihl;
-                                // Data offset in 32-bit words (5..15 -- 20..60 byte
-                                // header). Real TCP stacks always include at least
-                                // an MSS option on the SYN (doff > 5), unlike the
-                                // synthetic packets scripts/*_test.py send -- this
-                                // was only discovered by testing against a real
-                                // client (QEMU's -netdev user / SLIRP) instead of
-                                // just the python test scripts. Options themselves
-                                // are never parsed, just skipped over via tcp_hdr_len.
-                                let doff: i32 = (tcp[TCP_DATA_OFFSET] as i32) >> 4;
-                                let tcp_hdr_len: i32 = doff * 4;
+                    if (total_len <= ip_len_in_frame && total_len >= ihl &&
+                        (ip[IP_PROTOCOL] as i32) == PROTO_TCP &&
+                        inet_checksum(ip, ihl) == 0) {
+                        if (bytes_eq(ip + IP_DST, our_ip as *u8, 4) == 1) {
+                            let tcp:     *u8 = ip + ihl;
+                            let tcp_len: i32 = total_len - ihl;
+                            // Data offset in 32-bit words (5..15 -- 20..60 byte
+                            // header). Real TCP stacks always include at least
+                            // an MSS option on the SYN (doff > 5), unlike the
+                            // synthetic packets scripts/*_test.py send -- this
+                            // was only discovered by testing against a real
+                            // client (QEMU's -netdev user / SLIRP, and later
+                            // the STM32 board's host-machine TCP/IP stack)
+                            // instead of just the python test scripts. Options
+                            // themselves are never parsed, just skipped over
+                            // via tcp_hdr_len.
+                            let doff: i32 = (tcp[TCP_DATA_OFFSET] as i32) >> 4;
+                            let tcp_hdr_len: i32 = doff * 4;
 
-                                if (tcp_len >= 20 && doff >= 5 && doff <= 15 && tcp_len >= tcp_hdr_len) {
-                                    let mut pseudo: [u8; 12];
-                                    bytes_copy(pseudo as *u8, ip + IP_SRC, 4);
-                                    bytes_copy((pseudo as *u8) + 4, ip + IP_DST, 4);
-                                    pseudo[8] = 0 as u8;
-                                    pseudo[9] = PROTO_TCP as u8;
-                                    write_u16be((pseudo as *u8) + 10, tcp_len);
-                                    let sum: i32 = checksum_add(pseudo as *u8, 12, 0);
+                            if (tcp_len >= 20 && doff >= 5 && doff <= 15 && tcp_len >= tcp_hdr_len) {
+                                let mut pseudo: [u8; 12];
+                                bytes_copy(pseudo as *u8, ip + IP_SRC, 4);
+                                bytes_copy((pseudo as *u8) + 4, ip + IP_DST, 4);
+                                pseudo[8] = 0 as u8;
+                                pseudo[9] = PROTO_TCP as u8;
+                                write_u16be((pseudo as *u8) + 10, tcp_len);
+                                let sum: i32 = checksum_add(pseudo as *u8, 12, 0);
 
-                                    if (checksum_fold(checksum_add(tcp, tcp_len, sum)) == 0) {
-                                        let dst_port: i32 = read_u16be(tcp + TCP_DST_PORT);
-                                        let src_port: i32 = read_u16be(tcp + TCP_SRC_PORT);
-                                        let flags:    i32 = tcp[TCP_FLAGS] as i32;
-                                        let seq:      i32 = read_u32be(tcp + TCP_SEQ);
-                                        let ack:      i32 = read_u32be(tcp + TCP_ACK);
+                                if (checksum_fold(checksum_add(tcp, tcp_len, sum)) == 0) {
+                                    let dst_port: i32 = read_u16be(tcp + TCP_DST_PORT);
+                                    let src_port: i32 = read_u16be(tcp + TCP_SRC_PORT);
+                                    let flags:    i32 = tcp[TCP_FLAGS] as i32;
+                                    let seq:      i32 = read_u32be(tcp + TCP_SEQ);
+                                    let ack:      i32 = read_u32be(tcp + TCP_ACK);
 
-                                        if (dst_port == HTTP_PORT) {
-                                            if (conn_state == TCP_LISTEN) {
-                                                if ((flags & TCP_FLAG_SYN) != 0) {
-                                                    bytes_copy(conn_remote_ip as *u8, ip + IP_SRC, 4);
-                                                    conn_remote_port = src_port;
-                                                    conn_rcv_nxt = seq + 1;
-                                                    conn_snd_nxt = OUR_ISN + 1;
+                                    if (dst_port == HTTP_PORT) {
+                                        if (conn_state == TCP_LISTEN) {
+                                            if ((flags & TCP_FLAG_SYN) != 0) {
+                                                bytes_copy(conn_remote_ip as *u8, ip + IP_SRC, 4);
+                                                conn_remote_port = src_port;
+                                                conn_rcv_nxt = seq + 1;
+                                                conn_snd_nxt = OUR_ISN + 1;
 
-                                                    build_syn_ack(eth, ip, ihl, tcp);
-                                                    should_tx = 1;
-                                                    tx_len = 10 + 14 + ihl + 20;
-                                                    conn_state = TCP_SYN_RCVD;
-                                                }
-                                            } else {
-                                                if (bytes_eq(ip + IP_SRC, conn_remote_ip as *u8, 4) == 1 &&
-                                                    src_port == conn_remote_port) {
-                                                    if ((flags & TCP_FLAG_RST) != 0) {
+                                                build_syn_ack(eth, ip, ihl, tcp);
+                                                should_tx = 1;
+                                                tx_len = 14 + ihl + 20;
+                                                conn_state = TCP_SYN_RCVD;
+                                            }
+                                        } else {
+                                            if (bytes_eq(ip + IP_SRC, conn_remote_ip as *u8, 4) == 1 &&
+                                                src_port == conn_remote_port) {
+                                                if ((flags & TCP_FLAG_RST) != 0) {
+                                                    conn_state = TCP_LISTEN;
+                                                } else if (conn_state == TCP_SYN_RCVD) {
+                                                    if ((flags & TCP_FLAG_ACK) != 0 &&
+                                                        (flags & TCP_FLAG_SYN) == 0 &&
+                                                        ack == conn_snd_nxt && seq == conn_rcv_nxt) {
+                                                        conn_state = TCP_ESTABLISHED;
+                                                    }
+                                                } else if (conn_state == TCP_ESTABLISHED) {
+                                                    let data_len: i32 = tcp_len - tcp_hdr_len;
+                                                    let data: *u8 = tcp + tcp_hdr_len;
+                                                    if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
+                                                        conn_rcv_nxt = conn_rcv_nxt + 1;
+                                                        build_fin_ack(eth, ip, ihl, tcp);
+                                                        should_tx = 1;
+                                                        tx_len = 14 + ihl + 20;
+                                                        conn_snd_nxt = conn_snd_nxt + 1;
+                                                        conn_state = TCP_LAST_ACK;
+                                                    } else if (data_len >= 3 &&
+                                                               (flags & TCP_FLAG_ACK) != 0 &&
+                                                               seq == conn_rcv_nxt &&
+                                                               data[0] == 'G' as u8 &&
+                                                               data[1] == 'E' as u8 &&
+                                                               data[2] == 'T' as u8) {
+                                                        conn_rcv_nxt = conn_rcv_nxt + data_len;
+                                                        request_count = request_count + 1;
+                                                        let payload_len: i32 =
+                                                            build_http_response_fin(eth, ip, ihl, tcp);
+                                                        should_tx = 1;
+                                                        tx_len = 14 + ihl + 20 + payload_len;
+                                                        conn_snd_nxt = conn_snd_nxt + payload_len + 1;
+                                                        conn_state = TCP_LAST_ACK;
+                                                    }
+                                                } else if (conn_state == TCP_LAST_ACK) {
+                                                    if ((flags & TCP_FLAG_ACK) != 0 && ack == conn_snd_nxt) {
                                                         conn_state = TCP_LISTEN;
-                                                    } else if (conn_state == TCP_SYN_RCVD) {
-                                                        if ((flags & TCP_FLAG_ACK) != 0 &&
-                                                            (flags & TCP_FLAG_SYN) == 0 &&
-                                                            ack == conn_snd_nxt && seq == conn_rcv_nxt) {
-                                                            conn_state = TCP_ESTABLISHED;
-                                                        }
-                                                    } else if (conn_state == TCP_ESTABLISHED) {
-                                                        let data_len: i32 = tcp_len - tcp_hdr_len;
-                                                        let data: *u8 = tcp + tcp_hdr_len;
-                                                        if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
-                                                            conn_rcv_nxt = conn_rcv_nxt + 1;
-                                                            build_fin_ack(eth, ip, ihl, tcp);
-                                                            should_tx = 1;
-                                                            tx_len = 10 + 14 + ihl + 20;
-                                                            conn_snd_nxt = conn_snd_nxt + 1;
-                                                            conn_state = TCP_LAST_ACK;
-                                                        } else if (data_len >= 3 &&
-                                                                   (flags & TCP_FLAG_ACK) != 0 &&
-                                                                   seq == conn_rcv_nxt &&
-                                                                   data[0] == 'G' as u8 &&
-                                                                   data[1] == 'E' as u8 &&
-                                                                   data[2] == 'T' as u8) {
-                                                            conn_rcv_nxt = conn_rcv_nxt + data_len;
-                                                            request_count = request_count + 1;
-                                                            let payload_len: i32 =
-                                                                build_http_response_fin(eth, ip, ihl, tcp);
-                                                            should_tx = 1;
-                                                            tx_len = 10 + 14 + ihl + 20 + payload_len;
-                                                            conn_snd_nxt = conn_snd_nxt + payload_len + 1;
-                                                            conn_state = TCP_LAST_ACK;
-                                                        }
-                                                    } else if (conn_state == TCP_LAST_ACK) {
-                                                        if ((flags & TCP_FLAG_ACK) != 0 && ack == conn_snd_nxt) {
-                                                            conn_state = TCP_LISTEN;
-                                                        }
                                                     }
                                                 }
                                             }
@@ -409,25 +384,13 @@ fn main() {
                         }
                     }
                 }
+            }
 
-                if (should_tx == 1) {
-                    desc_set(tx_queue_mem as *u8, 0, buf as usize, tx_len, 0);
-                    avail_ring_set(tx_queue_mem as *u8, 0, 0);
-                    tx_avail_idx = tx_avail_idx + 1;
-                    avail_publish(tx_queue_mem as *u8, tx_avail_idx);
-                    virtio_notify(1);
-
-                    while (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {}
-                    tx_used_seen = tx_used_seen + 1;
-                }
-
-                let rx_slot: i32 = rx_avail_idx % QNUM;
-                avail_ring_set(rx_queue_mem as *u8, rx_slot, desc_idx);
-                rx_avail_idx = rx_avail_idx + 1;
-                avail_publish(rx_queue_mem as *u8, rx_avail_idx);
-                virtio_notify(0);
-
-                rx_used_seen = rx_used_seen + 1;
+            if (should_tx == 1) {
+                net_transmit(eth, tx_len);
+            }
+            if (len > 0) {
+                net_rx_release();
             }
         }
     }

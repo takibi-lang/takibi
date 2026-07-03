@@ -271,7 +271,7 @@ fn eth_tx_ring_init() {
         let next: *u8 = tx_desc_ptr((i + 1) % ETH_TX_DESC_COUNT);
         // word0 (status/control) and word1/word2 (size/buffer) are left at
         // 0 (BSS-zeroed): OWN=0 means these start out owned by the CPU, and
-        // eth_transmit() fills them in fresh on every send.
+        // net_transmit() fills them in fresh on every send.
         *(desc_word(desc, 3)) = ptr_to_u32(next); // next descriptor (TCH mode)
     }
     *ETH_DMATDLAR = ptr_to_u32(tx_desc_ptr(0));
@@ -281,7 +281,15 @@ fn eth_tx_ring_init() {
 // starts DMA RX/TX. Returns 1 on success, 0 if no PHY link could be
 // established (see phy_init()'s comment -- practically should not happen on
 // a live point-to-point link).
-fn eth_init() -> i32 {
+//
+// Named net_init/net_poll_rx/net_rx_buf/net_transmit/net_rx_release/
+// net_read_mac (not eth_*) so this file exposes the exact same driver API
+// as examples/common/virtio_mmio.tkb -- see that file's matching functions.
+// This is what lets application-level examples (net_echo.tkb, etc.) be a
+// single shared .tkb file for both the QEMU/virtio-net and STM32/real-MAC
+// targets, mirroring how uart.tkb/print.tkb already share identical
+// signatures across examples/common/ and examples/common_stm32/.
+fn net_init() -> i32 {
     eth_gpio_init();
     eth_mac_dma_reset();
 
@@ -294,7 +302,7 @@ fn eth_init() -> i32 {
 
     // APCS (Automatic Pad/CRC Stripping): the MAC pads/appends CRC on
     // transmit and strips pad+CRC on receive, so RDES0's FL field already
-    // reflects the real (CRC-free) frame length and eth_transmit() never
+    // reflects the real (CRC-free) frame length and net_transmit() never
     // needs to compute or append a CRC itself.
     let maccr: i32 = (1 << 2) | (1 << 3) | (1 << 7) // RE | TE | APCS
                     | (speed100 << 14)               // FES
@@ -319,9 +327,9 @@ fn eth_init() -> i32 {
 
 // Returns the received frame length if the current RX descriptor has been
 // filled in by the DMA (OWN bit clear), or 0 if nothing is ready yet.
-// Non-zero return must be followed by exactly one eth_rx_release() call
-// once the caller is done reading eth_rx_buf().
-fn eth_poll_rx() -> i32 {
+// Non-zero return must be followed by exactly one net_rx_release() call
+// once the caller is done reading net_rx_buf().
+fn net_poll_rx() -> i32 {
     let desc: *u8 = rx_desc_ptr(eth_rx_cur);
     let word0: i32 = (*(desc_word(desc, 0))) as i32;
     if ((word0 & ETH_RDES0_OWN) != 0) {
@@ -330,15 +338,15 @@ fn eth_poll_rx() -> i32 {
     return (word0 >> ETH_RDES0_FL_SHIFT) & ETH_RDES_FL_MASK;
 }
 
-fn eth_rx_buf() -> *u8 {
+fn net_rx_buf() -> *u8 {
     return eth_rx_bufs + eth_rx_cur * ETH_BUF_SIZE;
 }
 
 // Hands the current RX descriptor back to the DMA and advances the ring.
-// Must only be called after a non-zero eth_poll_rx() and once the caller no
-// longer needs eth_rx_buf()'s contents (e.g. after eth_transmit() has
-// already copied/sent them out, since eth_transmit() is synchronous).
-fn eth_rx_release() {
+// Must only be called after a non-zero net_poll_rx() and once the caller no
+// longer needs net_rx_buf()'s contents (e.g. after net_transmit() has
+// already copied/sent them out, since net_transmit() is synchronous).
+fn net_rx_release() {
     let desc: *u8 = rx_desc_ptr(eth_rx_cur);
     *(desc_word(desc, 0)) = ETH_RDES0_OWN as u32;
     eth_dsb(); // see eth_asm.S: must complete before the DMA can be kicked
@@ -348,10 +356,10 @@ fn eth_rx_release() {
 
 // Transmits len bytes starting at buf. Synchronous: busy-waits for the DMA
 // to finish reading buf before returning, so the caller can safely reuse or
-// release buf (e.g. via eth_rx_release()) immediately afterward -- same
+// release buf (e.g. via net_rx_release()) immediately afterward -- same
 // completion-ordering guarantee examples/common/virtio_mmio.tkb's net_echo
 // consumer relies on before re-posting an RX descriptor.
-fn eth_transmit(buf: *u8, len: i32) {
+fn net_transmit(buf: *u8, len: i32) {
     let desc: *u8 = tx_desc_ptr(eth_tx_cur);
 
     *(desc_word(desc, 2)) = ptr_to_u32(buf);
@@ -364,4 +372,16 @@ fn eth_transmit(buf: *u8, len: i32) {
     while (((*(desc_word(desc, 0))) as i32 & ETH_TDES0_OWN) != 0) {}
 
     eth_tx_cur = (eth_tx_cur + 1) % ETH_TX_DESC_COUNT;
+}
+
+// Fills mac_out with this board's fixed MAC address (examples/common_stm32/
+// netconfig.tkb's OUR_MAC) -- the STM32 counterpart to
+// examples/common/virtio_mmio.tkb's net_read_mac, which instead reads the
+// virtio-net device's Config space at runtime. Adds netconfig.tkb (for
+// OUR_MAC) and netutil.tkb (for bytes_copy) as build dependencies for every
+// consumer of this file, including net_echo_stm32 (which never calls this
+// but still needs both symbols to resolve, since function bodies are always
+// compiled regardless of whether they're called).
+fn net_read_mac(mac_out: *u8) {
+    bytes_copy(mac_out, OUR_MAC as *u8, 6);
 }

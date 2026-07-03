@@ -554,36 +554,40 @@ the normal (always `-g`-free) build outputs.
 - **`sizeof(T)` cannot be used as an array size** (`[T; sizeof(Foo)]`) -- see the `sizeof(T)` section above for why
   (parser-time vs. codegen-time resolution mismatch) and what combining them would require.
 - **STM32 Ethernet: all five examples are ported -- `net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo`,
-  and `http_server` all run on real hardware with real MAC/PHY/DMA.** `http_server_stm32` is confirmed
-  reachable from the devcontainer host's real TCP/IP stack (`curl http://192.168.10.2/` after flushing
-  the ARP neighbor cache, forcing a genuine ARP resolution + full TCP handshake/request/close through the
-  host kernel, not a hand-crafted test script -- request counter incremented `#1` -> `#2` across two
-  requests as expected); browsing to `http://192.168.10.2/` from a real Firefox on the same machine was
-  the whole point of doing this and is expected to work identically (same TCP/IP path curl already
-  exercised), but is a manual/visual check, not something this file can claim to have run itself.
-  `examples/common_stm32/eth.tkb` is a from-scratch
-  MAC/DMA-descriptor-ring driver + MDIO-based LAN8742A PHY init over RMII (RMII pins, PHY bring-up, and the
-  DMA descriptor ring design are documented in that file's header comment). `examples/common_stm32/netconfig.tkb`
-  holds the board's MAC/IP as plain global constants (`OUR_MAC`/`OUR_IP`, array-literal `{...}` initializers)
-  shared by every STM32 Ethernet example -- MAC is a fixed `00:80:E1:00:00:00`, matching ST's own
-  STM32CubeF7 LwIP example convention (hardcoded, not derived from the chip's unique ID -- see that file's
-  comment for the tradeoff) -- so changing the board's network identity means editing one file, not each
-  example. **IP is `192.168.10.2`**, deliberately the same /24 as this devcontainer's point-to-point NIC
-  (`enp4s0`, `192.168.10.1/24`) rather than the RFC 5737 TEST-NET-1 address the QEMU examples use --
-  chosen so the board is reachable with zero host-side routing changes, since `http_server_stm32`'s whole
-  point is being reachable from a real browser. The QEMU side got the same treatment in the other
-  direction: `examples/common/netconfig.tkb` holds a single shared `OUR_IP` (`192.0.2.1`) for
-  `arp_reply`/`icmp_echo`/`tcp_echo` (MAC is deliberately NOT in this file -- those examples read it from
-  the virtio-net device at runtime, nothing to share); `http_server.tkb` keeps its own separate,
-  differently-named `our_ip` (`10.0.2.15`, the fixed SLIRP requirement) and is unaffected by this file even
-  though it's harmlessly compiled into that binary too (see the Makefile's `APP_OBJS`/`NET_OBJS` comment).
-  `examples/net_echo/net_echo_stm32.tkb` proved the plumbing end-to-end first; `arp_reply_stm32.tkb`,
-  `icmp_echo_stm32.tkb`, and `tcp_echo_stm32.tkb` then followed the exact same pattern (swap `virtio_mmio.tkb`
-  calls for `eth.tkb`'s equivalents, reuse `netutil.tkb`/`inet_checksum.tkb` unchanged) with no new
-  driver-level surprises -- the hardware bring-up bug below was net_echo's alone to find. `tcp_echo_stm32.tkb`
-  carries the same connection state machine as the QEMU version verbatim (LISTEN -> SYN_RCVD -> ESTABLISHED ->
-  LAST_ACK); only length/offset math changed (no virtio_net_hdr to skip over).
-  All four are verified against a real point-to-point link via `scripts/eth_*_test.py` + `make hwcheck-net`
+  and `http_server` all run on real hardware with real MAC/PHY/DMA, and are the *same source file* as
+  their QEMU/virtio-net counterparts.** `examples/common_stm32/eth.tkb` is a from-scratch MAC/DMA-
+  descriptor-ring driver + MDIO-based LAN8742A PHY init over RMII (RMII pins, PHY bring-up, and the DMA
+  descriptor ring design are documented in that file's header comment).
+
+  **Unified driver API**: `eth.tkb` and `examples/common/virtio_mmio.tkb` both expose the identical
+  `net_init() -> i32` / `net_poll_rx() -> i32` / `net_rx_buf() -> *u8` / `net_transmit(buf, len)` /
+  `net_rx_release()` / `net_read_mac(mac_out)` functions -- mirroring how `uart.tkb`/`print.tkb` already
+  share identical signatures across `examples/common/` and `examples/common_stm32/`. This means
+  `examples/net_echo/net_echo.tkb` (and the other four) are a *single* file compiled against either
+  backend depending on target, not a QEMU version plus a hand-maintained `_stm32.tkb` copy -- see that
+  file's header comment. Descriptor rings, RX/TX buffers, and virtio's 10-byte `virtio_net_hdr` framing
+  are all hidden inside each backend; application code never sees them. `virtio_mmio.tkb`'s `net_poll_rx()`
+  now polls the used ring directly instead of waiting on a GIC-routed interrupt (removing
+  `gic_init`/`gic_enable_virtio_irq`/`virtio_irq_handler`/`virtio_irq_flag`/every app's identical
+  `irq_dispatch` entirely) -- QEMU's virtio-mmio device works identically either way, and
+  `examples/common/startup.S` already safely no-ops when the GIC is never initialized (relied on today by
+  every non-IRQ example). `gic.tkb` itself is untouched, still used by `irq`/`preempt`/`semaphore`/
+  `watchdog`/`condvar`/`msgqueue`.
+
+  **Network config**: `examples/common_stm32/netconfig.tkb` holds the board's MAC/IP as plain global
+  constants (`OUR_MAC`/`OUR_IP`, array-literal `{...}` initializers). MAC is a fixed `00:80:E1:00:00:00`,
+  matching ST's own STM32CubeF7 LwIP example convention (hardcoded, not derived from the chip's unique ID
+  -- see that file's comment for the tradeoff). IP is `192.168.10.2`, the same /24 as this devcontainer's
+  point-to-point NIC (`enp4s0`, `192.168.10.1/24`), chosen so the board is reachable with zero host-side
+  routing changes. `examples/common/netconfig.tkb` holds the QEMU-side counterpart: `OUR_IP` = `192.0.2.1`
+  (RFC 5737 TEST-NET-1) for `arp_reply`/`icmp_echo`/`tcp_echo`/`http_server` (MAC is deliberately NOT in
+  this file -- `net_read_mac()`'s virtio-net backend reads it from the device at runtime, nothing to
+  share), plus `IS_QEMU` (`1` here, `0` in the STM32 file) -- the *one* genuinely platform-conditional bit
+  of logic in these five examples (`http_server.tkb`'s SLIRP-address special case, below) branches on it
+  at runtime. This is an ordinary global constant, not a compiler feature -- no preprocessor/conditional
+  compilation was added or needed anywhere in this refactor.
+
+  All five are verified against a real point-to-point link via `scripts/eth_*_test.py` + `make hwcheck-net`
   (not part of `make check`/`make hwcheck` since it needs a real board wired directly to the test machine's
   NIC, plus `CAP_NET_RAW`). `make hwcheck-net` aggregates all such Ethernet hardware tests via
   `scripts/run_hwtest_net.sh`, same PASS/FAIL-summary style as `scripts/run_hwtest.sh` -- add new Ethernet
@@ -601,27 +605,24 @@ the normal (always `-g`-free) build outputs.
   `scripts/eth_tcp_echo_test.py` slices every reply to its exact expected length instead of an open-ended
   slice, for exactly this reason.
 
-  `http_server_stm32.tkb` combines `arp_reply_stm32`'s ARP response with `tcp_echo_stm32`'s state machine
-  in one kernel (dispatching on EtherType), plus initiating its own FIN right after the response
-  (`build_http_response_fin`) -- exactly the same shape as QEMU's `http_server.tkb` (see the HTTP Server
-  section below), needed for the same reason: a real client always ARPs before sending IP packets, unlike
-  the hand-crafted-packet test scripts the other four examples are verified with. Unlike the QEMU port,
-  no real-client-vs-hand-crafted-test gap surfaced here -- the TCP options-in-SYN issue QEMU's port
-  discovered the hard way was already fixed in `tcp_echo_stm32.tkb` (ported from the already-fixed QEMU
-  source), so `curl`/Firefox worked against this implementation on the first real-hardware attempt.
-  `scripts/eth_http_server_test.py` (also wired into `make hwcheck-net`, same as the other four) is
+  `http_server.tkb` combines `arp_reply`'s ARP response with `tcp_echo`'s state machine in one kernel
+  (dispatching on EtherType), plus initiating its own FIN right after the response
+  (`build_http_response_fin`) -- needed because a real client always ARPs before sending IP packets,
+  unlike the hand-crafted-packet test scripts the other four examples are verified with (both on QEMU,
+  via SLIRP, and identically on the real STM32 board, via the devcontainer host's TCP/IP stack). Confirmed
+  reachable from the devcontainer host's real TCP/IP stack (`curl http://192.168.10.2/` after flushing the
+  ARP neighbor cache, forcing a genuine cold-start ARP resolution + full TCP handshake/request/close --
+  request counter incremented `#1` -> `#2` across two requests as expected) and from a real Firefox on the
+  same machine. `scripts/eth_http_server_test.py` (wired into `make hwcheck-net` like the other four) is
   deliberately NOT another hand-crafted raw-socket script -- it uses Python's `http.client` over ordinary
-  OS sockets (the real TCP/IP stack, same path a browser takes), flushing the ARP neighbor cache first so
-  the request forces a genuine cold-start ARP resolution. Sends two requests and checks the counter
-  increments between them, mirroring `scripts/http_server_test.py`'s QEMU version. No `sudo`-only
-  privilege is actually needed for the HTTP requests themselves (plain sockets, unlike the other four's
-  raw `AF_PACKET`) -- only the `ip neigh flush` step needs root, which `make hwcheck-net`'s existing
-  blanket `sudo` already covers.
+  OS sockets (the real TCP/IP stack, same path a browser takes). No `sudo`-only privilege is actually
+  needed for the HTTP requests themselves (plain sockets, unlike the other four's raw `AF_PACKET`) -- only
+  the `ip neigh flush` step needs root, which `make hwcheck-net`'s existing blanket `sudo` already covers.
 
-  Deliberately still deferred: **polling-only, no interrupt-driven RX** -- `examples/common_stm32/startup.S`'s
-  vector table currently only extends through IRQ37 (USART1), and every other STM32 example links against that
-  same shared file, so extending it through IRQ61 (ETH) is left for a follow-up once polling-only was confirmed
-  working across all five examples.
+  Deliberately still deferred: **polling-only, no interrupt-driven RX** on the STM32 side --
+  `examples/common_stm32/startup.S`'s vector table currently only extends through IRQ37 (USART1), and
+  every other STM32 example links against that same shared file, so extending it through IRQ61 (ETH) is
+  left for a follow-up once polling-only was confirmed working across all five examples.
 
   **Hardware bring-up bug worth knowing about**: the very first working version had every DMA descriptor field
   byte-for-byte correct (verified live via openocd/gdb-multiarch register+memory dumps) yet the TX descriptor's
@@ -824,18 +825,14 @@ virtio protocol itself.
 - **The virtio-mmio slot is discovered at boot, not hardcoded**
   (`virtio_net_find()` in `examples/common/virtio_mmio.tkb`). A lone
   `-device virtio-net-device` does NOT land on slot 0: empirically, under
-  this devcontainer's QEMU 8.2.2, it landed on slot 31 (base `0x0a003e00`,
-  GIC IRQ 79 = SPI 47). The mapping `gic_irq = 48 + slot_index` comes from
-  the "virt" board's device tree (confirmed via
-  `qemu-system-aarch64 -machine virt,dumpdtb=...` + `dtc`); the driver
-  scans all 32 slots for `DeviceID == 1` (network) and derives both the
-  base address and IRQ from whatever slot it actually finds, so a future
-  QEMU version placing the device elsewhere doesn't break it.
-- **IRQ 79 needs GICD_ISENABLER2**, which `gic.tkb`'s `GicRegs` doesn't
-  have (it only wires ISENABLER0/1, covering IRQ 0-63). Rather than extend
-  the shared struct for one caller, `gic_enable_virtio_irq()` computes the
-  ISENABLERn/bit and ITARGETSR byte directly from the discovered IRQ
-  number.
+  this devcontainer's QEMU 8.2.2, it landed on slot 31 (base `0x0a003e00`).
+  The driver scans all 32 slots for `DeviceID == 1` (network) and derives
+  the base address from whatever slot it actually finds, so a future QEMU
+  version placing the device elsewhere doesn't break it. (Earlier versions
+  of this driver also derived a GIC IRQ number from the discovered slot
+  for interrupt-driven RX; `net_poll_rx()` now polls the used ring
+  directly instead, so no IRQ/GIC involvement remains here at all -- see
+  the STM32 Ethernet entry above for why and when that changed.)
 - **The vring is manipulated as raw byte offsets, not struct arrays.**
   Struct field assignment only supports `ident.field = v` (a bare variable
   name on the left -- see "Current limitations" under Struct Implementation

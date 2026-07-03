@@ -1,22 +1,23 @@
-// ICMP echo (ping) responder over QEMU's virtio-net-device -- the IPv4
-// "echo server" step. Answers ICMP echo requests (type 8) addressed to
-// OUR_IP (examples/common/netconfig.tkb) with an echo reply (type 0), preserving identifier/sequence/data
-// unchanged. Builds on examples/net_echo (virtqueue/IRQ plumbing),
-// examples/arp_reply (protocol dispatch + in-place raw-offset header
-// rewriting), and examples/ip_parse (field layout/validation logic) --
-// this is the first example that needs a *correct* checksum on the wire
-// rather than just a validated one (examples/common/inet_checksum.tkb).
+// ICMP echo (ping) responder -- the IPv4 "echo server" step. Answers ICMP
+// echo requests (type 8) addressed to OUR_IP with an echo reply (type 0),
+// preserving identifier/sequence/data unchanged. Builds on
+// examples/net_echo (driver plumbing), examples/arp_reply (protocol
+// dispatch + in-place raw-offset header rewriting), and examples/ip_parse
+// (field layout/validation logic) -- this is the first example that needs
+// a *correct* checksum on the wire rather than just a validated one
+// (examples/common/inet_checksum.tkb).
 //
 // Scope: IPv4 headers with no options only (IHL must be 5 / 20 bytes).
 // ARP is not handled here (see examples/arp_reply) since the raw
 // point-to-point test transport never needs ARP resolution to reach this
 // responder -- frames are addressed directly by MAC.
-
-let RX_BUF_SIZE: i32 = 1536;
-
-let mut rx_queue_mem: [u8; 8192] align(4096);
-let mut tx_queue_mem: [u8; 8192] align(4096);
-let mut rx_bufs: [u8; 12288];
+//
+// Single shared file for both targets -- see examples/net_echo/net_echo.tkb's
+// header comment for why.
+//
+// Correctness is checked by scripts/icmp_echo_test.py (QEMU) /
+// scripts/eth_icmp_echo_test.py (STM32 hardware), not UART output;
+// uart_puts below is purely for interactive debugging.
 
 let mut our_mac: [u8; 6];
 
@@ -38,8 +39,7 @@ let PROTO_ICMP:        i32 = 1;
 let ICMP_ECHO_REQUEST: i32 = 8;
 let ICMP_ECHO_REPLY:   i32 = 0;
 
-// bytes_eq/bytes_copy/read_u16be/write_u16be now live in
-// examples/common/netutil.tkb (shared with arp_reply, tcp_parse, tcp_echo).
+// bytes_eq/bytes_copy/read_u16be/write_u16be live in examples/common/netutil.tkb.
 
 // Rewrites an ICMP echo request into a reply in place, and the enclosing
 // IPv4/Ethernet headers to match. Only called after the caller has already
@@ -65,59 +65,23 @@ fn build_echo_reply(eth: *u8, ip: *u8, ihl: i32, icmp: *u8, icmp_len: i32) {
     write_u16be(icmp + ICMP_CHECKSUM, inet_checksum(icmp, icmp_len));
 }
 
-fn irq_dispatch(frame_sp: i32) -> i32 {
-    let id: i32 = *(gic.cpu_iar);
-    if (id == virtio_gic_irq) {
-        virtio_irq_handler();
-    }
-    *(gic.cpu_eoir) = id;
-    return frame_sp;
-}
-
 fn main() {
     uart_puts("icmp_echo: init\r\n");
-    if (virtio_net_find() == 0) {
-        uart_puts("icmp_echo: virtio-net device not found\r\n");
+
+    if (net_init() == 0) {
+        uart_puts("icmp_echo: device/link not found\r\n");
     } else {
-        gic_init();
-        gic_enable_virtio_irq();
-
-        virtio_negotiate(VIRTIO_NET_F_MAC);
-        virtio_net_read_mac(our_mac as *u8);
-
-        virtio_queue_setup(0, rx_queue_mem as *u8); // RX
-        virtio_queue_setup(1, tx_queue_mem as *u8); // TX
-        virtio_driver_ok();
-
-        for i in 0..<QNUM {
-            let buf: *u8 = rx_bufs + i * RX_BUF_SIZE;
-            desc_set(rx_queue_mem as *u8, i, buf as usize, RX_BUF_SIZE, VIRTQ_DESC_F_WRITE);
-            avail_ring_set(rx_queue_mem as *u8, i, i);
-        }
-        let mut rx_avail_idx: i32 = QNUM;
-        avail_publish(rx_queue_mem as *u8, rx_avail_idx);
-        virtio_notify(0);
+        net_read_mac(our_mac as *u8);
 
         uart_puts("icmp_echo: ready\r\n");
 
-        let mut rx_used_seen: i32 = 0;
-        let mut tx_used_seen: i32 = 0;
-        let mut tx_avail_idx: i32 = 0;
-
         while (1) {
-            let flag_p: *io i32 = &virtio_irq_flag;
-            while (*flag_p == 0) {}
-            virtio_irq_flag = 0;
+            let len: i32 = net_poll_rx();
 
-            while (rx_used_seen != used_idx_get(rx_queue_mem as *u8)) {
-                let slot: i32 = rx_used_seen % QNUM;
-                let desc_idx: i32 = used_ring_get_id(rx_queue_mem as *u8, slot);
-                let frame_total_len: i32 = used_ring_get_len(rx_queue_mem as *u8, slot);
-                let buf: *u8 = rx_bufs + desc_idx * RX_BUF_SIZE;
-                let eth: *u8 = buf + 10; // past the virtio_net_hdr
-
-                // 10 (virtio hdr) + 14 (eth) + 20 (min IPv4) + 8 (min ICMP) = 52
-                if (frame_total_len >= 52 && read_u16be(eth + 12) == 0x0800) {
+            // 14 (eth) + 20 (min IPv4) + 8 (min ICMP) = 42
+            if (len >= 42) {
+                let eth: *u8 = net_rx_buf();
+                if (read_u16be(eth + 12) == 0x0800) {
                     let ip: *u8 = eth + 14;
                     let version: i32 = (ip[IP_VERSION_IHL] as i32) >> 4;
                     let ihl:     i32 = ((ip[IP_VERSION_IHL] as i32) & 0x0f) * 4;
@@ -125,7 +89,7 @@ fn main() {
                     // No IP options supported -- IHL must be exactly 20.
                     if (version == 4 && ihl == 20) {
                         let total_len:       i32 = read_u16be(ip + IP_TOTAL_LEN);
-                        let ip_len_in_frame: i32 = frame_total_len - 10 - 14;
+                        let ip_len_in_frame: i32 = len - 14;
 
                         // total_len must fit what the device actually
                         // delivered, and must be large enough to contain
@@ -145,15 +109,8 @@ fn main() {
 
                                             build_echo_reply(eth, ip, ihl, icmp, icmp_len);
 
-                                            let reply_len: i32 = 10 + 14 + total_len;
-                                            desc_set(tx_queue_mem as *u8, 0, buf as usize, reply_len, 0);
-                                            avail_ring_set(tx_queue_mem as *u8, 0, 0);
-                                            tx_avail_idx = tx_avail_idx + 1;
-                                            avail_publish(tx_queue_mem as *u8, tx_avail_idx);
-                                            virtio_notify(1);
-
-                                            while (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {}
-                                            tx_used_seen = tx_used_seen + 1;
+                                            let reply_len: i32 = 14 + total_len;
+                                            net_transmit(eth, reply_len);
                                         }
                                     }
                                 }
@@ -161,15 +118,11 @@ fn main() {
                         }
                     }
                 }
+            }
 
-                // Re-post the RX descriptor regardless of whether we replied.
-                let rx_slot: i32 = rx_avail_idx % QNUM;
-                avail_ring_set(rx_queue_mem as *u8, rx_slot, desc_idx);
-                rx_avail_idx = rx_avail_idx + 1;
-                avail_publish(rx_queue_mem as *u8, rx_avail_idx);
-                virtio_notify(0);
-
-                rx_used_seen = rx_used_seen + 1;
+            // Re-post the RX descriptor regardless of whether we replied.
+            if (len > 0) {
+                net_rx_release();
             }
         }
     }

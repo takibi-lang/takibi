@@ -1,7 +1,9 @@
 // Network configuration shared by every STM32 real-Ethernet example
-// (examples/net_echo/net_echo_stm32.tkb, examples/arp_reply/arp_reply_stm32.tkb,
-// and further examples as they're ported). Edit the two constants below to
-// change the board's MAC/IP without touching any example-specific logic.
+// (examples/net_echo/net_echo.tkb, examples/arp_reply/arp_reply.tkb, and
+// the others -- each is a single shared .tkb file that also runs on the
+// QEMU/virtio-net target, see examples/net_echo/net_echo.tkb's header
+// comment). Edit the two constants below to change the board's MAC/IP
+// without touching any example-specific logic.
 //
 // MAC: fixed, not derived from the chip's unique ID. This matches ST's own
 // STM32CubeF7 LwIP example projects (ethernetif.c), which likewise hardcode
@@ -30,3 +32,8 @@ let OUR_MAC: [u8; 6] = {0x00, 0x80, 0xE1, 0x00, 0x00, 0x00};
 // which hardcode the same address for the same reason netconfig.tkb can't
 // help a Python script).
 let OUR_IP: [u8; 4] = {192, 168, 10, 2};
+
+// See examples/common/netconfig.tkb's comment: lets http_server.tkb's one
+// genuinely platform-conditional bit of logic (the QEMU-side SLIRP address
+// special case) branch at runtime. No other shared example needs this.
+let IS_QEMU: i32 = 0;

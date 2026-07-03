@@ -1,29 +1,23 @@
-// ARP responder over QEMU's virtio-net-device.
+// ARP responder.
 //
 // Answers "who-has <OUR_IP>" requests with "is-at <our_mac>"; every other
 // frame (wrong EtherType, wrong OPER, or a request for a different IP) is
 // silently dropped -- only re-posted to the RX ring, never echoed. Builds
-// on examples/net_echo/net_echo.tkb's virtqueue/IRQ plumbing but replaces
-// the blind echo with real protocol dispatch, exercising EtherType
-// filtering and in-place ARP header rewriting.
+// on examples/net_echo/net_echo.tkb's driver plumbing but replaces the
+// blind echo with real protocol dispatch, exercising EtherType filtering
+// and in-place ARP header rewriting.
 //
-// our_mac is read from the device's Config space (VIRTIO_NET_F_MAC) rather
-// than hardcoded, so it always matches whatever `-device
-// virtio-net-device,mac=...` the test harness used -- no risk of the two
-// drifting out of sync. OUR_IP is a fixed test-only address (RFC 5737
-// TEST-NET-1), shared with icmp_echo/tcp_echo via examples/common/netconfig.tkb.
+// Single shared file for both targets -- see examples/net_echo/net_echo.tkb's
+// header comment for why. our_mac is filled by net_read_mac() (virtio-net's
+// Config space at runtime for QEMU, the fixed OUR_MAC constant for STM32 --
+// see each backend's net_read_mac()). OUR_IP is a plain shared constant
+// (examples/common/netconfig.tkb for QEMU, examples/common_stm32/netconfig.tkb
+// for STM32 -- same symbol, different value per target, see either file's
+// comment for why).
 //
-// Correctness is checked by scripts/arp_test.py, not UART output; uart_puts
-// below is purely for interactive debugging (`make qemu-arp-reply`).
-
-let RX_BUF_SIZE: i32 = 1536; // 10-byte virtio_net_hdr + max 1514-byte Ethernet frame, rounded up
-
-// 8192 = 2 * PAGE_SIZE (array sizes must be literal constants).
-let mut rx_queue_mem: [u8; 8192] align(4096);
-let mut tx_queue_mem: [u8; 8192] align(4096);
-
-// 12288 = QNUM * RX_BUF_SIZE.
-let mut rx_bufs: [u8; 12288];
+// Correctness is checked by scripts/arp_test.py (QEMU) /
+// scripts/eth_arp_reply_test.py (STM32 hardware), not UART output;
+// uart_puts below is purely for interactive debugging.
 
 let mut our_mac: [u8; 6];
 
@@ -40,8 +34,7 @@ let ARP_SPA:   i32 = 14;
 let ARP_THA:   i32 = 18;
 let ARP_TPA:   i32 = 24;
 
-// bytes_eq/bytes_copy/read_u16be/write_u16be now live in
-// examples/common/netutil.tkb (shared with icmp_echo, tcp_parse, tcp_echo).
+// bytes_eq/bytes_copy/read_u16be/write_u16be live in examples/common/netutil.tkb.
 
 // Rewrites the ARP request at `arp` into a reply in place, and swaps the
 // enclosing Ethernet header's src/dst. Only called after the caller has
@@ -62,86 +55,37 @@ fn build_arp_reply(eth: *u8, arp: *u8) {
     write_u16be(arp + ARP_OPER, 2); // reply
 }
 
-fn irq_dispatch(frame_sp: i32) -> i32 {
-    let id: i32 = *(gic.cpu_iar);
-    if (id == virtio_gic_irq) {
-        virtio_irq_handler();
-    }
-    *(gic.cpu_eoir) = id;
-    return frame_sp;
-}
-
 fn main() {
     uart_puts("arp_reply: init\r\n");
-    if (virtio_net_find() == 0) {
-        uart_puts("arp_reply: virtio-net device not found\r\n");
+
+    if (net_init() == 0) {
+        uart_puts("arp_reply: device/link not found\r\n");
     } else {
-        gic_init();
-        gic_enable_virtio_irq();
-
-        virtio_negotiate(VIRTIO_NET_F_MAC);
-        virtio_net_read_mac(our_mac as *u8);
-
-        virtio_queue_setup(0, rx_queue_mem as *u8); // RX
-        virtio_queue_setup(1, tx_queue_mem as *u8); // TX
-        virtio_driver_ok();
-
-        for i in 0..<QNUM {
-            let buf: *u8 = rx_bufs + i * RX_BUF_SIZE;
-            desc_set(rx_queue_mem as *u8, i, buf as usize, RX_BUF_SIZE, VIRTQ_DESC_F_WRITE);
-            avail_ring_set(rx_queue_mem as *u8, i, i);
-        }
-        let mut rx_avail_idx: i32 = QNUM;
-        avail_publish(rx_queue_mem as *u8, rx_avail_idx);
-        virtio_notify(0);
+        net_read_mac(our_mac as *u8);
 
         uart_puts("arp_reply: ready\r\n");
 
-        let mut rx_used_seen: i32 = 0;
-        let mut tx_used_seen: i32 = 0;
-        let mut tx_avail_idx: i32 = 0;
-
         while (1) {
-            let flag_p: *io i32 = &virtio_irq_flag;
-            while (*flag_p == 0) {}
-            virtio_irq_flag = 0;
+            let len: i32 = net_poll_rx();
 
-            while (rx_used_seen != used_idx_get(rx_queue_mem as *u8)) {
-                let slot: i32 = rx_used_seen % QNUM;
-                let desc_idx: i32 = used_ring_get_id(rx_queue_mem as *u8, slot);
-                let frame_total_len: i32 = used_ring_get_len(rx_queue_mem as *u8, slot);
-                let buf: *u8 = rx_bufs + desc_idx * RX_BUF_SIZE;
-                let eth: *u8 = buf + 10; // past the virtio_net_hdr
-
-                // 10 (hdr) + 14 (eth) + 28 (arp) = 52
-                if (frame_total_len >= 52 && read_u16be(eth + 12) == 0x0806) {
-                    let arp: *u8 = eth + 14;
-                    if (read_u16be(arp + ARP_HTYPE) == 1 && read_u16be(arp + ARP_PTYPE) == 0x0800 &&
-                        arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
-                        read_u16be(arp + ARP_OPER) == 1) {
-                        if (bytes_eq(arp + ARP_TPA, OUR_IP as *u8, 4) == 1) {
-                            build_arp_reply(eth, arp);
-
-                            desc_set(tx_queue_mem as *u8, 0, buf as usize, frame_total_len, 0);
-                            avail_ring_set(tx_queue_mem as *u8, 0, 0);
-                            tx_avail_idx = tx_avail_idx + 1;
-                            avail_publish(tx_queue_mem as *u8, tx_avail_idx);
-                            virtio_notify(1);
-
-                            while (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {}
-                            tx_used_seen = tx_used_seen + 1;
-                        }
+            // 14 (eth) + 28 (arp) = 42
+            if (len >= 42) {
+                let eth: *u8 = net_rx_buf();
+                let arp: *u8 = eth + 14;
+                if (read_u16be(eth + 12) == 0x0806 &&
+                    read_u16be(arp + ARP_HTYPE) == 1 && read_u16be(arp + ARP_PTYPE) == 0x0800 &&
+                    arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
+                    read_u16be(arp + ARP_OPER) == 1) {
+                    if (bytes_eq(arp + ARP_TPA, OUR_IP as *u8, 4) == 1) {
+                        build_arp_reply(eth, arp);
+                        net_transmit(eth, len);
                     }
                 }
+            }
 
-                // Re-post the RX descriptor regardless of whether we replied.
-                let rx_slot: i32 = rx_avail_idx % QNUM;
-                avail_ring_set(rx_queue_mem as *u8, rx_slot, desc_idx);
-                rx_avail_idx = rx_avail_idx + 1;
-                avail_publish(rx_queue_mem as *u8, rx_avail_idx);
-                virtio_notify(0);
-
-                rx_used_seen = rx_used_seen + 1;
+            // Re-post the RX descriptor regardless of whether we replied.
+            if (len > 0) {
+                net_rx_release();
             }
         }
     }
