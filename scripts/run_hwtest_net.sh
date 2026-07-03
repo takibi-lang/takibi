@@ -70,6 +70,7 @@ echo ""
 run_net_hw_test "net_echo (stm32)" examples/net_echo/kernel_stm32.bin scripts/eth_net_echo_test.py
 run_net_hw_test "arp_reply (stm32)" examples/arp_reply/kernel_stm32.bin scripts/eth_arp_reply_test.py
 run_net_hw_test "icmp_echo (stm32)" examples/icmp_echo/kernel_stm32.bin scripts/eth_icmp_echo_test.py
+run_net_hw_test "tcp_echo (stm32)" examples/tcp_echo/kernel_stm32.bin scripts/eth_tcp_echo_test.py
 
 # Add new Ethernet hardware tests here as they're ported.
 

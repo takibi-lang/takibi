@@ -553,29 +553,50 @@ the normal (always `-g`-free) build outputs.
   echo server (`ptr + i32` / `ptr - i32` already work for descriptor-ring indexing).
 - **`sizeof(T)` cannot be used as an array size** (`[T; sizeof(Foo)]`) -- see the `sizeof(T)` section above for why
   (parser-time vs. codegen-time resolution mismatch) and what combining them would require.
-- **STM32 Ethernet: `net_echo`, `arp_reply`, `icmp_echo` are ported (real hardware, real MAC/PHY/DMA);
-  `tcp_echo`, `http_server` remain QEMU/virtio-net-only.** `examples/common_stm32/eth.tkb` is a from-scratch
+- **STM32 Ethernet: `net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo` are ported (real hardware, real
+  MAC/PHY/DMA); only `http_server` remains QEMU/virtio-net-only, with a real-browser (Firefox) demo as
+  the explicit goal for that final step.** `examples/common_stm32/eth.tkb` is a from-scratch
   MAC/DMA-descriptor-ring driver + MDIO-based LAN8742A PHY init over RMII (RMII pins, PHY bring-up, and the
   DMA descriptor ring design are documented in that file's header comment). `examples/common_stm32/netconfig.tkb`
   holds the board's MAC/IP as plain global constants (`OUR_MAC`/`OUR_IP`, array-literal `{...}` initializers)
   shared by every STM32 Ethernet example -- MAC is a fixed `00:80:E1:00:00:00`, matching ST's own
   STM32CubeF7 LwIP example convention (hardcoded, not derived from the chip's unique ID -- see that file's
   comment for the tradeoff) -- so changing the board's network identity means editing one file, not each
-  example. `examples/net_echo/net_echo_stm32.tkb` proved the plumbing end-to-end first; `arp_reply_stm32.tkb`
-  and `icmp_echo_stm32.tkb` then followed the exact same pattern (swap `virtio_mmio.tkb` calls for `eth.tkb`'s
-  equivalents, reuse `netutil.tkb`/`inet_checksum.tkb` unchanged) with no new driver-level surprises -- the
-  hardware bring-up bug below was net_echo's alone to find.
-  All three are verified against a real point-to-point link via `scripts/eth_*_test.py` + `make hwcheck-net`
+  example. `examples/net_echo/net_echo_stm32.tkb` proved the plumbing end-to-end first; `arp_reply_stm32.tkb`,
+  `icmp_echo_stm32.tkb`, and `tcp_echo_stm32.tkb` then followed the exact same pattern (swap `virtio_mmio.tkb`
+  calls for `eth.tkb`'s equivalents, reuse `netutil.tkb`/`inet_checksum.tkb` unchanged) with no new
+  driver-level surprises -- the hardware bring-up bug below was net_echo's alone to find. `tcp_echo_stm32.tkb`
+  carries the same connection state machine as the QEMU version verbatim (LISTEN -> SYN_RCVD -> ESTABLISHED ->
+  LAST_ACK); only length/offset math changed (no virtio_net_hdr to skip over).
+  All four are verified against a real point-to-point link via `scripts/eth_*_test.py` + `make hwcheck-net`
   (not part of `make check`/`make hwcheck` since it needs a real board wired directly to the test machine's
   NIC, plus `CAP_NET_RAW`). `make hwcheck-net` aggregates all such Ethernet hardware tests via
   `scripts/run_hwtest_net.sh`, same PASS/FAIL-summary style as `scripts/run_hwtest.sh` -- add new Ethernet
   examples there as they're ported (one `run_net_hw_test NAME BIN TEST_SCRIPT` line), rather than each
   getting its own separate `make` target.
+
+  **Real-hardware-only test wrinkle (first hit porting `tcp_echo`, applies to any future short-segment
+  test)**: TCP control segments with no payload (bare SYN/SYN-ACK/FIN-ACK, 54 bytes total) are below
+  Ethernet's 60-byte minimum frame size. The STM32 MAC's automatic pad handling (MACCR.APCS) pads
+  *outgoing* short frames up to 60 bytes regardless of EtherType -- this is a transmit-side behavior,
+  distinct from the *receive*-side stripping ambiguity already documented in
+  `scripts/eth_net_echo_test.py`'s module comment (which only applies to frames the board receives). A
+  test script slicing "everything remaining in the reply" (safe over virtio-net, which never pads) would
+  fold those trailing pad bytes into a TCP checksum verification and fail it for the wrong reason.
+  `scripts/eth_tcp_echo_test.py` slices every reply to its exact expected length instead of an open-ended
+  slice, for exactly this reason.
+
   Deliberately still deferred: (1) **polling-only, no interrupt-driven RX** -- `examples/common_stm32/startup.S`'s
   vector table currently only extends through IRQ37 (USART1), and every other STM32 example links against that
   same shared file, so extending it through IRQ61 (ETH) is left for a follow-up once polling-only was confirmed
-  working; (2) porting `tcp_echo`/`http_server` themselves, which need connection-state handling (not just
-  stateless request/reply) but should still follow the same eth.tkb-substitution pattern.
+  working; (2) porting `http_server` itself. Unlike the four examples above (all tested via hand-crafted raw
+  AF_PACKET scripts addressing the board directly by MAC, no ARP needed), the stated goal for `http_server` is
+  browsing to the board from a real Firefox instance -- meaning the host's real TCP/IP stack (real ARP
+  resolution, real routing) is in the path, not a synthetic point-to-point test script. This mirrors exactly
+  what QEMU's `http_server.tkb` already had to solve for `-netdev user`/SLIRP (see the HTTP Server section
+  below): `arp_reply`'s logic needs to be combined into the same kernel as the TCP/HTTP handling, dispatching
+  on EtherType, since only one kernel runs at a time. Expect this to surface real-client-vs-hand-crafted-test
+  gaps the same way the QEMU port did.
 
   **Hardware bring-up bug worth knowing about**: the very first working version had every DMA descriptor field
   byte-for-byte correct (verified live via openocd/gdb-multiarch register+memory dumps) yet the TX descriptor's
