@@ -23,7 +23,7 @@ The finished form of code is when index ranges are pinned at the type level usin
 ## Language Specification (Current)
 
 - File extension: `.tkb`
-- Types: `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `usize` (pointer-sized unsigned integer; maps to `i64` on AArch64 and RISC-V 64), `void`, `*T` (regular pointer, non-volatile), `io T` (volatile-qualified value type), `*io T` (volatile MMIO pointer = `TypePtr(TypeIo T)`), `[T; N]` (array type; decays to pointer in function arguments), `fn(T...) -> R` (function pointer type), `Name` (named struct type), `{lo..<hi}` (refined integer subtype)
+- Types: `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `usize` (pointer-sized unsigned integer; LLVM width follows the target's actual pointer size via `Llvm_gen.usize_lltype ()` -- `i64` on AArch64/RISC-V64, `i32` on Cortex-M/STM32; falls back to `i64` when no target machine is configured, e.g. in unit tests), `void`, `*T` (regular pointer, non-volatile), `io T` (volatile-qualified value type), `*io T` (volatile MMIO pointer = `TypePtr(TypeIo T)`), `[T; N]` (array type; decays to pointer in function arguments), `fn(T...) -> R` (function pointer type), `Name` (named struct type), `{lo..<hi}` (refined integer subtype)
 - Statements:
   - `let x = e` / `let x: T = e` -- immutable variable declaration (initial value required, no reassignment)
   - `let mut x = e` / `let mut x: T = e` -- mutable variable declaration (reassignment allowed)
@@ -89,7 +89,7 @@ lib/
   typechecker.ml  -- external wrapper (called from main.ml)
   llvm_gen.ml     -- LLVM IR generation and object file output
 bin/
-  main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>] [-g]`)
+  main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g]`)
                      Multiple .tkb files are concatenated (flat global namespace) before compilation.
                      -g emits DWARF debug info -- see "Execution Profiling (QEMU)" below.
 examples/
@@ -103,9 +103,24 @@ examples/
     gic.tkb       -- GicRegs struct, gic_init, gic_enable_timer_ppi, gic_enable_uart_spi
     timer.tkb     -- extern fn timer stubs, setup_task_stack, timer_init (depends on gic.tkb)
     sync.tkb      -- extern fn sem_wait/sem_post, mutex_lock/unlock, cond_wait/signal
-  <name>/         -- each directory: see the leading comment in <name>.tkb for a description
+  common_stm32/   -- STM32F746G-DISCOVERY (Cortex-M7) HAL, mirroring common/'s function
+                     names/signatures so example .tkb files stay portable -- see
+                     "STM32F746G-DISCOVERY Bare-Metal (Cortex-M7)" below
+    startup.S     -- Reset_Handler, 54-word vector table, PendSV_Handler, weak
+                     SysTick_Handler/USART1_IRQHandler/pendsv_dispatch stubs
+    link.ld       -- MEMORY {FLASH RAM} linker script (RAM = DTCM, 64K)
+    uart.tkb      -- uart_init, uart_putc, uart_puts (USART1, PA9/PB7, AF7)
+    uart_getc.tkb -- uart_getc (USART1 RX poll; only echo needs RX)
+    rtc.tkb       -- rtc_init, rtc_is_running, rtc_read_seconds (real RTC peripheral, LSI)
+    nvic.tkb      -- enable_usart1_irq
+    scheduler.tkb -- setup_task_stack, task_exit_stub, systick_init/_disable, pendsv_trigger
+    sem_asm.S     -- atomic semaphore: sem_wait/sem_post (ldrex/strex/dmb)
+  <name>/         -- each directory: see the leading comment in <name>.tkb for a description.
+                     A few examples have a second, deliberately separate <name>_stm32.tkb
+                     (not a shared-and-recompiled file) -- see the STM32 section below for why.
 scripts/
   run_qemutest.sh -- QEMU integration test script (FIFO sync and timing verification included)
+  run_hwtest.sh   -- STM32 hardware integration test script (flash + serial capture; see below)
 test/
   test_takibi.ml  -- Alcotest unit tests for parser / type_inf
 ```
@@ -196,8 +211,8 @@ Files changed when `expr as T` was added:
 5. `lib/llvm_gen.ml` -- `coerce` function selects the conversion instruction per target type:
    - `i32 -> u8`: `trunc i32, i8`
    - `u8/i1 -> i32`: `zext`
-   - `i32 -> *T`: `zext i32, i64` -> `inttoptr` (MMIO address assignment)
-   - `*T -> usize`: `ptrtoint ptr, i64` (full 64-bit address; no truncation)
+   - `i32 -> *T`: `inttoptr` directly (no manual zext step -- see the STM32 usize note below for why)
+   - `*T -> usize`: `ptrtoint ptr, <usize_lltype>` (width follows the target's actual pointer size, not hardcoded)
    - `*T -> *U`: **no-op** (in LLVM 19, all pointers are the same `ptr` type, so the leading `if vty = dst_ll then v` in `coerce` applies; no compiler change needed)
 
 **Invariant: narrow-typed (`i8/u8/i16/u16`) `gen_expr` results must be
@@ -388,7 +403,7 @@ Files changed when `struct packed Name { ... }` and `struct Name align(N) { ... 
 
 **Struct tail padding** (`lib/llvm_gen.ml` Pass 0): When `align(N)` is specified and `sizeof(struct) % N != 0`, an `[i8; pad]` field is appended to the LLVM struct type so that `sizeof(struct)` becomes the next multiple of N. This ensures every element of `[Name; K]` arrays satisfies the alignment requirement (same behavior as C `__attribute__((aligned(N)))`). `struct_fields` stores only user-visible fields; the padding field is invisible to GEP and type inference. Tail padding uses the LLVM DataLayout (`Llvm_target.DataLayout.abi_size`) stored in `target_data` ref set by `setup_target`.
 
-**IntLit width sync in BinOp** (`lib/llvm_gen.ml`): `IntLit` always emits `i32` in codegen. When one BinOp operand is `i64` (usize) and the other is `i32` (from IntLit), the i32 is widened before the operation. This prevents an LLVM IR type-mismatch error on patterns like `usize_val == 0` or `usize_val & 15`.
+**IntLit width sync in BinOp** (`lib/llvm_gen.ml`): `IntLit` always emits `i32` in codegen. When one BinOp operand is `i64` (usize on a 64-bit target) and the other is `i32` (from IntLit), the i32 is widened before the operation. This prevents an LLVM IR type-mismatch error on patterns like `usize_val == 0` or `usize_val & 15`. On a 32-bit target (Cortex-M), usize is itself `i32`, so this widening branch's `i64`-vs-`i32` mismatch condition simply never fires -- no separate code path needed for the two widths.
 
 ### Enum Implementation (5 Files)
 
@@ -538,6 +553,11 @@ the normal (always `-g`-free) build outputs.
   echo server (`ptr + i32` / `ptr - i32` already work for descriptor-ring indexing).
 - **`sizeof(T)` cannot be used as an array size** (`[T; sizeof(Foo)]`) -- see the `sizeof(T)` section above for why
   (parser-time vs. codegen-time resolution mismatch) and what combining them would require.
+- **STM32 Ethernet is not implemented**: `net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo`, `http_server` remain
+  QEMU/virtio-net-only. The STM32F746 has a real Ethernet MAC + LAN8742 PHY, but this needs a from-scratch
+  MAC/DMA-descriptor-ring driver and MDIO-based PHY init/RMII setup -- a substantially bigger task than anything
+  else in the STM32 port so far (see "STM32F746G-DISCOVERY Bare-Metal" above for everything that IS ported).
+  Deferred to a separate effort.
 
 ## QEMU Bare-Metal (AArch64)
 
@@ -562,6 +582,136 @@ the normal (always `-g`-free) build outputs.
   - Connected to the GIC via PPI #30 (GICD_ISENABLER0 bit30)
   - To fire at ~15 ms intervals: `lsr x0, cntfrq, #6` -> `msr cntp_tval_el0, x0`
   - The virtual timer (CNTV, PPI #27) requires EL2 hypervisor configuration on QEMU virt, so use the physical timer (CNTP, PPI #30) for bare-metal EL1.
+
+## STM32F746G-DISCOVERY Bare-Metal (Cortex-M7)
+
+Real-hardware port, running alongside (not replacing) the QEMU/AArch64 build. 37 of 38
+examples are ported as of this writing; the remaining 5 (`net_echo`, `arp_reply`,
+`icmp_echo`, `tcp_echo`, `http_server`) need a real Ethernet MAC+PHY driver, deferred to
+a separate effort. `rtc`/`timer` (real RTC peripheral, LSI-clocked) and `irq`/`preempt`/
+`semaphore`/`condvar`/`watchdog`/`msgqueue` (NVIC + SysTick/PendSV scheduler) needed
+genuinely new infrastructure, not just address changes -- see below.
+
+**Devcontainer/USB setup** (`.devcontainer/devcontainer.json`): `runArgs` passes through
+`/dev/ttyACM0` (ST-LINK V2-1 VCP, serial) and `/dev/bus/usb` with a
+`--device-cgroup-rule` (ST-LINK debug/flash interface, VID:PID `0483:374b`) so hot-replug
+doesn't require editing the device path. `postCreateCommand` installs `openocd`
+`stlink-tools` and adds the `vscode` user to the `plugdev`/`dialout` groups (host GIDs
+46/20) so neither needs `sudo`/`sg` after a fresh rebuild.
+
+**Build model**: `Makefile`'s `STM32_TARGET`/`STM32_CPU` (`thumbv7em-none-eabi` /
+`cortex-m7`) and `STM32_EXAMPLES` list mirror `AARCH64_TARGET`/`EXAMPLES`. Most examples
+just recompile the *same* `.tkb` file against `examples/common_stm32/` instead of
+`examples/common/` (same pattern as the AArch64 side's compilation groups); a handful
+that need one extra common file beyond the standard uart+print pair (`rtc`, `timer`,
+`echo`, `irq`, `preempt`, `semaphore`, `condvar`, `watchdog`, `msgqueue`) get their own
+one-off rule pairs, same reasoning as the existing `-g` debug-build rules. `make
+stm32build` compiles every ported example (no hardware needed, part of `make check`);
+`make hwcheck` additionally flashes and verifies each one against the real board (not
+part of `make check` -- needs physical hardware).
+
+**Files that turned out to need zero STM32-specific changes**: `examples/common/
+print.tkb`, `examples/common/sync.tkb`, `examples/common/inet_checksum.tkb`,
+`examples/common/netutil.tkb` are all pure takibi logic with no MMIO addresses --
+reused completely unchanged, just recompiled/relinked against the STM32 HAL.
+
+**Files that needed a genuinely separate `<name>_stm32.tkb`, not a shared-and-recompiled
+one**: `irq`, `preempt`, `semaphore`, `condvar`, `watchdog`, `msgqueue`. GICv2's
+shared-IRQ-vector-plus-software-ID-dispatch model and Cortex-M's NVIC-direct-vectoring-
+plus-SysTick/PendSV model aren't the same shape behind different addresses -- the
+scheduling/dispatch code itself is restructured, not just register addresses, so these
+five (plus `irq`) have their own `examples/<name>/<name>_stm32.tkb` source file.
+
+**USART1** (VCP, confirmed via ST/Zephyr docs + the board schematic): TX=PA9, RX=PB7,
+AF7. STM32F7's USART is the "improved" generation (`CR1/BRR/ISR/ICR/RDR/TDR`), **not**
+the classic F1/F4 `SR`/`DR` layout -- copying an F4-style init would silently compile and
+produce no output. `uart_init()` uses the default HSI (16MHz) clock, no PLL setup;
+`BRR = round(16_000_000 / 115200) = 139` for 115200 baud (OVER8=0, BRR used directly as
+the divider in this USART generation, no mantissa/fraction packing).
+
+**RTC**: LSI (~32kHz nominal, imprecise, no external crystal needed), PWR_CR1.DBP unlock
+-> RCC_BDCR RTCSEL=LSI+RTCEN -> RTC_WPR 0xCA,0x53 unlock -> RTC_ISR.INIT/INITF -> PRER
+left at the LSE-tuned reset default (close enough for "does it visibly tick", not
+accurate timekeeping). **RTC_TR is BCD**, not a linear counter like QEMU's PL031 --
+`rtc_read_seconds()`/`examples/rtc/rtc.tkb`'s wait loop never subtracts two samples
+(`0x09 -> 0x10` is a raw jump of 7, not 1, whenever the BCD units nibble rolls over, not
+just at 60 seconds); the loop instead waits for the raw value to change once and, since
+that's guaranteed to be exactly one tick by construction, prints a fixed `"1"` rather
+than a computed difference. Software must read RTC_DR after RTC_TR (even if unused) to
+unfreeze the calendar shadow registers for the next read (RM0385).
+
+**NVIC vs. GICv2**: GICv2 has one shared IRQ vector; the ISR reads `GICC_IAR` to learn
+which source fired (software dispatch by ID) and writes `GICC_EOIR` to acknowledge.
+NVIC vectors *directly* to a per-source handler address (`examples/common_stm32/
+startup.S`'s vector table, 54 words: core exceptions + IRQ0-37) -- no software
+dispatch table or EOI register at all; reading/clearing the peripheral's own interrupt
+flag (e.g. USART1 RDR read clearing RXNE) *is* the acknowledgment. USART1 = IRQ37
+(confirmed via search), vector position 16+37=53, byte offset `0xD4`.
+
+**SysTick+PendSV preemptive scheduler** (`irq_dispatch(frame_sp) -> frame_sp` on the
+AArch64 side splits into two on Cortex-M):
+- `SysTick_Handler` (plain takibi -- SysTick auto-reloads from `LOAD`, no per-tick rearm
+  needed unlike the ARM Generic Timer's `tval`) does per-tick bookkeeping, then requests
+  a switch via `pendsv_trigger()` (sets `ICSR.PENDSVSET`).
+- `PendSV_Handler` (hand-written asm, `examples/common_stm32/startup.S`, always present
+  and lowest priority via `SHPR3=0xFF`) is the only place touching PSP: saves r4-r11
+  (hardware already stacked r0-r3/r12/lr/pc/xPSR), calls takibi's
+  `pendsv_dispatch(sp) -> sp` (same shape as `irq_dispatch`, round-robin `tcb_sp` swap
+  only, no IAR/EOIR), restores r4-r11, `msr psp`, returns via `EXC_RETURN=0xFFFFFFFD`.
+- `setup_task_stack` keeps its exact AArch64 name/signature so callers are unchanged;
+  only the frame differs -- 64 bytes (8 words hardware-shaped: r0-r3,r12,LR=
+  task_exit_stub,PC=f,xPSR=0x01000000; 8 words software-shaped below: r4-r11=0) instead
+  of AArch64's 272-byte one. `task_exit_stub` is a plain takibi `while (true) {}` --
+  Cortex-M needs no assembly stub for this.
+- `sem_wait`/`sem_post` (`examples/common_stm32/sem_asm.S`): ARMv7-M `ldrex`/`strex`
+  with explicit `dmb` (no acquire/release-encoded instructions like AArch64's
+  `ldaxr`/`stlxr`), `dmb` placed after the successful acquire and before the release
+  store (standard ARM Cortex-M synchronization-primitives placement).
+
+**Critical bug found and fixed: MSP/PSP must not overlap.** `Reset_Handler` switches
+Thread mode to PSP (`CONTROL.SPSEL=1`) before calling `main`, since a preemptive-
+scheduler example treats `main()` as "task 0", switched via the exact same PendSV
+mechanism as its explicitly-created tasks -- `main()` must already be on PSP by the
+time SysTick/PendSV can first fire (PendSV_Handler unconditionally reads/writes PSP,
+but Cortex-M defaults to MSP for everything after reset). The first version of this
+switch did `mrs r0,msp; msr psp,r0` -- a plain copy, giving MSP and PSP the *same*
+starting address, so the two stacks fully overlapped rather than occupying separate
+memory. Every `preempt`/`semaphore`/`condvar`/`msgqueue` test happened to pass anyway
+(their task functions and SysTick_Handlers are shallow enough that the corruption never
+touched anything load-bearing) until `watchdog` -- whose `SysTick_Handler` calls the
+real function `wdt_check()`, using more MSP stack depth -- hit a HardFault. Confirmed via
+`openocd`/`gdb-multiarch` register inspection: `CFSR` (`0xE000ED28`) bit 18 = INVPC,
+`HFSR` (`0xE000ED2C`) bit 30 = FORCED, `LR = 0xFFFFFFFD` (the fault was inside PendSV's
+own exception-return path). Fixed by reserving the top `0x800` (2KB) of the boot stack
+region exclusively for MSP and starting PSP that much lower
+(`mrs r0,msp; sub r0,r0,#0x800; msr psp,r0`), giving each stack a genuinely separate
+region. **Any future change to this switch must keep the two stacks non-overlapping.**
+
+**Hardware test harness** (`scripts/run_hwtest.sh`, `make hwcheck`): flashes via
+`st-flash write` and captures UART output, diffing against the *same* `.expected` files
+`run_qemutest.sh` already uses (`uart_puts`/`uart_print_*` write identical bytes on
+either HAL). Two things had to be solved that QEMU's semihosting-exit model doesn't need
+to deal with:
+- `st-flash write` itself resets and runs the newly-flashed program as a side effect,
+  before the harness ever opens the serial port -- and that unread run's output doesn't
+  vanish cleanly (a short tail fragment survives in a small kernel/USB-CDC buffer and
+  would otherwise contaminate the *next* capture). Fixed with a drain step (open the
+  port, discard whatever's already sitting there) before the real, explicitly-triggered
+  `st-flash reset` that the harness actually measures.
+- A fixed-duration `timeout N cat` capture (this project's first approach) was
+  needlessly slow multiplied across ~40 examples per run, *and* wrong for examples with
+  a real mid-test pause (`rtc`/`timer` wait up to an LSI-clocked "second" between two
+  print statements; a naive short idle-quiet threshold mistook that pause for
+  completion and truncated the capture). Replaced with `read_until_quiet`: polls file
+  size until no growth for N consecutive polls, with a `WAIT_FOR_DATA` gate (don't
+  declare quiet before anything has arrived at all -- needed since the reader starts
+  before the `st-flash reset` that actually triggers output) and per-call overrides for
+  tests needing a longer pause tolerance (`rtc`/`timer` use a much longer idle threshold
+  than the ~200ms default). Cut the full suite from ~125s to ~30-45s.
+- `echo`/`irq` (the two examples needing input) use `run_hw_test_stdin`: waits for the
+  first output byte (confirming the firmware's read loop has actually started, since
+  USART's RDR is only 1 byte deep -- writing input any earlier risks an overrun) before
+  writing the `.stdin` file to the serial port.
 
 ## virtio-net Examples (examples/net_echo, examples/arp_reply, examples/icmp_echo)
 
@@ -1024,5 +1174,12 @@ gdb-multiarch           (AArch64-capable gdb; stock `gdb` on this platform is x8
                          cannot parse QEMU's AArch64 target-description XML over the remote
                          protocol -- confirmed by the "unknown architecture aarch64" / truncated
                          register errors it raises. Needed for gdb-remote-based tooling, e.g. a
-                         QEMU-based sampling profiler; not needed for DWARF emission itself.)
+                         QEMU-based sampling profiler; not needed for DWARF emission itself.
+                         Also used for STM32 hardware debugging via openocd's gdbstub.)
+openocd, stlink-tools   (for STM32F746G-DISCOVERY: openocd for SWD debug/register inspection,
+                         `st-flash`/`st-info` (stlink-tools) for flashing -- see "STM32F746G-
+                         DISCOVERY Bare-Metal" above. Requires USB passthrough set up in
+                         .devcontainer/devcontainer.json; `make hwcheck` needs the real board
+                         connected, everything else (including `make check`'s `stm32build`)
+                         does not.)
 ```

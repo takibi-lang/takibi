@@ -69,7 +69,7 @@ STM32_CHECKSUM_KERNELS  := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/
 STM32_CHECKSUM_BINS     := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/kernel_stm32.bin)
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest hwcheck langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server profile-http-server profile-tcp-echo
+.PHONY: build test qemutest stm32build hwcheck langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server profile-http-server profile-tcp-echo
 
 .DEFAULT_GOAL := build
 
@@ -85,11 +85,19 @@ test:
 qemutest: $(ALL_KERNELS) examples/fizzbuzz/kernel.debug.elf examples/fibonacci/kernel.debug.elf
 	@bash scripts/run_qemutest.sh
 
+## stm32build: compile every ported STM32 example to a linked .bin, with no
+## flashing/serial capture -- unlike hwcheck, this needs no physical
+## hardware (only the same LLVM toolchain qemutest already requires), so it
+## IS part of `make check`: it's the only thing that would otherwise catch
+## a compiler regression breaking Cortex-M/Thumb2 codegen specifically
+## (qemutest only ever exercises the aarch64-none-elf path).
+stm32build: $(STM32_BINS) $(STM32_EXTRA_BINS) $(STM32_CHECKSUM_BINS)
+
 ## hwcheck: run STM32 hardware integration tests (requires a real
 ## STM32F746G-DISCOVERY board connected via USB). NOT part of `make check` --
-## unlike qemutest, this needs physical hardware, so it stays runnable-only-
-## when-available rather than a requirement for every clone of this repo.
-hwcheck: $(STM32_BINS) $(STM32_EXTRA_BINS) $(STM32_CHECKSUM_BINS)
+## unlike stm32build, this needs physical hardware, so it stays runnable-
+## only-when-available rather than a requirement for every clone of this repo.
+hwcheck: stm32build
 	@bash scripts/run_hwtest.sh
 
 ## langcheck: verify that all source files contain only ASCII characters
@@ -104,8 +112,8 @@ langcheck:
 	fi
 	@echo "OK: all files are ASCII-clean"
 
-## check: run unit tests + QEMU integration tests + ASCII check
-check: test qemutest langcheck
+## check: run unit tests + QEMU integration tests + STM32 build check + ASCII check
+check: langcheck test stm32build qemutest
 
 # -- Shared assembly objects ---------------------------------------------------
 $(COMMON_STARTUP_O): $(COMMON_STARTUP_S)
