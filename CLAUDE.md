@@ -553,9 +553,15 @@ the normal (always `-g`-free) build outputs.
   echo server (`ptr + i32` / `ptr - i32` already work for descriptor-ring indexing).
 - **`sizeof(T)` cannot be used as an array size** (`[T; sizeof(Foo)]`) -- see the `sizeof(T)` section above for why
   (parser-time vs. codegen-time resolution mismatch) and what combining them would require.
-- **STM32 Ethernet: `net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo` are ported (real hardware, real
-  MAC/PHY/DMA); only `http_server` remains QEMU/virtio-net-only, with a real-browser (Firefox) demo as
-  the explicit goal for that final step.** `examples/common_stm32/eth.tkb` is a from-scratch
+- **STM32 Ethernet: all five examples are ported -- `net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo`,
+  and `http_server` all run on real hardware with real MAC/PHY/DMA.** `http_server_stm32` is confirmed
+  reachable from the devcontainer host's real TCP/IP stack (`curl http://192.168.10.2/` after flushing
+  the ARP neighbor cache, forcing a genuine ARP resolution + full TCP handshake/request/close through the
+  host kernel, not a hand-crafted test script -- request counter incremented `#1` -> `#2` across two
+  requests as expected); browsing to `http://192.168.10.2/` from a real Firefox on the same machine was
+  the whole point of doing this and is expected to work identically (same TCP/IP path curl already
+  exercised), but is a manual/visual check, not something this file can claim to have run itself.
+  `examples/common_stm32/eth.tkb` is a from-scratch
   MAC/DMA-descriptor-ring driver + MDIO-based LAN8742A PHY init over RMII (RMII pins, PHY bring-up, and the
   DMA descriptor ring design are documented in that file's header comment). `examples/common_stm32/netconfig.tkb`
   holds the board's MAC/IP as plain global constants (`OUR_MAC`/`OUR_IP`, array-literal `{...}` initializers)
@@ -595,17 +601,27 @@ the normal (always `-g`-free) build outputs.
   `scripts/eth_tcp_echo_test.py` slices every reply to its exact expected length instead of an open-ended
   slice, for exactly this reason.
 
-  Deliberately still deferred: (1) **polling-only, no interrupt-driven RX** -- `examples/common_stm32/startup.S`'s
+  `http_server_stm32.tkb` combines `arp_reply_stm32`'s ARP response with `tcp_echo_stm32`'s state machine
+  in one kernel (dispatching on EtherType), plus initiating its own FIN right after the response
+  (`build_http_response_fin`) -- exactly the same shape as QEMU's `http_server.tkb` (see the HTTP Server
+  section below), needed for the same reason: a real client always ARPs before sending IP packets, unlike
+  the hand-crafted-packet test scripts the other four examples are verified with. Unlike the QEMU port,
+  no real-client-vs-hand-crafted-test gap surfaced here -- the TCP options-in-SYN issue QEMU's port
+  discovered the hard way was already fixed in `tcp_echo_stm32.tkb` (ported from the already-fixed QEMU
+  source), so `curl`/Firefox worked against this implementation on the first real-hardware attempt.
+  `scripts/eth_http_server_test.py` (also wired into `make hwcheck-net`, same as the other four) is
+  deliberately NOT another hand-crafted raw-socket script -- it uses Python's `http.client` over ordinary
+  OS sockets (the real TCP/IP stack, same path a browser takes), flushing the ARP neighbor cache first so
+  the request forces a genuine cold-start ARP resolution. Sends two requests and checks the counter
+  increments between them, mirroring `scripts/http_server_test.py`'s QEMU version. No `sudo`-only
+  privilege is actually needed for the HTTP requests themselves (plain sockets, unlike the other four's
+  raw `AF_PACKET`) -- only the `ip neigh flush` step needs root, which `make hwcheck-net`'s existing
+  blanket `sudo` already covers.
+
+  Deliberately still deferred: **polling-only, no interrupt-driven RX** -- `examples/common_stm32/startup.S`'s
   vector table currently only extends through IRQ37 (USART1), and every other STM32 example links against that
   same shared file, so extending it through IRQ61 (ETH) is left for a follow-up once polling-only was confirmed
-  working; (2) porting `http_server` itself. Unlike the four examples above (all tested via hand-crafted raw
-  AF_PACKET scripts addressing the board directly by MAC, no ARP needed), the stated goal for `http_server` is
-  browsing to the board from a real Firefox instance -- meaning the host's real TCP/IP stack (real ARP
-  resolution, real routing) is in the path, not a synthetic point-to-point test script. This mirrors exactly
-  what QEMU's `http_server.tkb` already had to solve for `-netdev user`/SLIRP (see the HTTP Server section
-  below): `arp_reply`'s logic needs to be combined into the same kernel as the TCP/HTTP handling, dispatching
-  on EtherType, since only one kernel runs at a time. Expect this to surface real-client-vs-hand-crafted-test
-  gaps the same way the QEMU port did.
+  working across all five examples.
 
   **Hardware bring-up bug worth knowing about**: the very first working version had every DMA descriptor field
   byte-for-byte correct (verified live via openocd/gdb-multiarch register+memory dumps) yet the TX descriptor's
@@ -647,10 +663,11 @@ the normal (always `-g`-free) build outputs.
 
 ## STM32F746G-DISCOVERY Bare-Metal (Cortex-M7)
 
-Real-hardware port, running alongside (not replacing) the QEMU/AArch64 build. 37 of 38
-examples are ported as of this writing; the remaining 5 (`net_echo`, `arp_reply`,
-`icmp_echo`, `tcp_echo`, `http_server`) need a real Ethernet MAC+PHY driver, deferred to
-a separate effort. `rtc`/`timer` (real RTC peripheral, LSI-clocked) and `irq`/`preempt`/
+Real-hardware port, running alongside (not replacing) the QEMU/AArch64 build. All 38
+examples are now ported, including `net_echo`/`arp_reply`/`icmp_echo`/`tcp_echo`/
+`http_server` (real Ethernet MAC+PHY driver, `examples/common_stm32/eth.tkb` -- see the
+"STM32 Ethernet" entry under Known Limitations/Deferred Design Decisions above for the
+full story). `rtc`/`timer` (real RTC peripheral, LSI-clocked) and `irq`/`preempt`/
 `semaphore`/`condvar`/`watchdog`/`msgqueue` (NVIC + SysTick/PendSV scheduler) needed
 genuinely new infrastructure, not just address changes -- see below.
 

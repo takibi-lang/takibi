@@ -1,0 +1,357 @@
+// HTTP server over the STM32F746G-DISCOVERY's real Ethernet MAC (RMII +
+// LAN8742A PHY, see examples/common_stm32/eth.tkb) -- the real-hardware
+// counterpart to examples/http_server/http_server.tkb, and the payoff of
+// the whole net_echo -> arp_reply -> icmp_echo -> tcp_echo STM32 porting
+// progression. Serves a single styled HTML page with a live request
+// counter on port 80, browsable from a real browser (Firefox) on this
+// devcontainer's host machine.
+//
+// Combines ARP response (examples/arp_reply/arp_reply_stm32.tkb's logic)
+// with TCP's active-close variant (examples/tcp_echo/tcp_echo_stm32.tkb's
+// state machine, plus initiating our own FIN right after the response --
+// see build_http_response_fin) in the same kernel, dispatching on
+// EtherType, exactly like the QEMU version already does -- see that file's
+// header comment for why both are needed together (a real browser always
+// ARPs before sending IP packets, and an HTTP/1.0-style "respond once,
+// then close" server must initiate its own close).
+//
+// OUR_MAC/OUR_IP come from examples/common_stm32/netconfig.tkb --
+// 192.168.10.2, the same /24 as this devcontainer's point-to-point NIC, so
+// the board is reachable from the host with no routing changes (see that
+// file's comment for the full reasoning -- this is the reason that IP was
+// chosen over the QEMU side's RFC 5737 TEST-NET-1 address).
+//
+// Request parsing is minimal: any ESTABLISHED-state segment whose payload
+// starts with "GET" is treated as an HTTP request and answered with the
+// same fixed page, regardless of path/headers.
+//
+// Polling-only, same as every other STM32 Ethernet example (see eth.tkb's
+// header comment for why interrupt-driven RX is deferred).
+
+// ARP-over-Ethernet/IPv4 field offsets, relative to the start of the ARP
+// payload (right after the 14-byte Ethernet header). See
+// examples/arp_reply/arp_reply_stm32.tkb for the full explanation.
+let ARP_HTYPE: i32 = 0;
+let ARP_PTYPE: i32 = 2;
+let ARP_HLEN:  i32 = 4;
+let ARP_PLEN:  i32 = 5;
+let ARP_OPER:  i32 = 6;
+let ARP_SHA:   i32 = 8;
+let ARP_SPA:   i32 = 14;
+let ARP_THA:   i32 = 18;
+let ARP_TPA:   i32 = 24;
+
+// IPv4 field offsets, relative to the start of the IP header.
+let IP_TOTAL_LEN: i32 = 2;
+let IP_TTL:       i32 = 8;
+let IP_PROTOCOL:  i32 = 9;
+let IP_CHECKSUM:  i32 = 10;
+let IP_SRC:       i32 = 12;
+let IP_DST:       i32 = 16;
+
+// TCP field offsets, relative to the start of the TCP header.
+let TCP_SRC_PORT:    i32 = 0;
+let TCP_DST_PORT:    i32 = 2;
+let TCP_SEQ:         i32 = 4;
+let TCP_ACK:         i32 = 8;
+let TCP_DATA_OFFSET: i32 = 12;
+let TCP_FLAGS:       i32 = 13;
+let TCP_WINDOW:      i32 = 14;
+let TCP_CHECKSUM:    i32 = 16;
+let TCP_URGENT:      i32 = 18;
+
+let TCP_FLAG_FIN: i32 = 0x01;
+let TCP_FLAG_SYN: i32 = 0x02;
+let TCP_FLAG_RST: i32 = 0x04;
+let TCP_FLAG_PSH: i32 = 0x08;
+let TCP_FLAG_ACK: i32 = 0x10;
+
+let PROTO_TCP: i32 = 6;
+let HTTP_PORT: i32 = 80;
+
+let OUR_ISN: i32 = 0x00001000;
+
+let TCP_LISTEN:      i32 = 0;
+let TCP_SYN_RCVD:    i32 = 1;
+let TCP_ESTABLISHED: i32 = 2;
+let TCP_LAST_ACK:    i32 = 3;
+
+let mut conn_state:       i32 = 0; // TCP_LISTEN
+let mut conn_remote_ip:   [u8; 4];
+let mut conn_remote_port: i32 = 0;
+let mut conn_snd_nxt:     i32 = 0;
+let mut conn_rcv_nxt:     i32 = 0;
+
+let mut request_count: i32 = 0;
+
+// Staging buffer for the HTML body (built once per request, then copied
+// after the headers into the reply segment -- see build_http_response_fin).
+let mut html_body: [u8; 512];
+
+fn build_html_body() -> i32 {
+    let mut len: i32 = 0;
+    len = len + copy_str(html_body + len,
+        "<!DOCTYPE html><html><head><title>Takibi</title><style>body{background:#111;color:#eee;font-family:monospace;text-align:center;padding-top:8%}h1{color:#ff9944}p{color:#999}.count{color:#6cf}</style></head><body><h1>Hello from Takibi!</h1><p>Served by a TCP/IP stack written from scratch<br>in the takibi language, running bare-metal<br>on a real STM32F746G-DISCOVERY board.</p><p>Request <span class='count'>#");
+    len = len + write_udec(html_body + len, request_count);
+    len = len + copy_str(html_body + len, "</span> since boot.</p></body></html>");
+    return len;
+}
+
+// Rewrites a received ARP request into a reply in place. Only called
+// after the caller has already verified this is a "who-has OUR_IP"
+// request. See examples/arp_reply/arp_reply_stm32.tkb for the identical
+// logic with more commentary.
+fn build_arp_reply(eth: *u8, arp: *u8) {
+    bytes_copy(eth, eth + 6, 6);
+    bytes_copy(eth + 6, OUR_MAC as *u8, 6);
+
+    bytes_copy(arp + ARP_THA, arp + ARP_SHA, 6);
+    bytes_copy(arp + ARP_TPA, arp + ARP_SPA, 4);
+    bytes_copy(arp + ARP_SHA, OUR_MAC as *u8, 6);
+    bytes_copy(arp + ARP_SPA, OUR_IP as *u8, 4);
+    write_u16be(arp + ARP_OPER, 2);
+}
+
+// Recomputes the TCP checksum (header + data, len bytes) over the
+// pseudo-header implied by `ip`, and writes it into tcp+TCP_CHECKSUM.
+// Must be called last, after every other TCP field has its final value.
+fn fix_tcp_checksum(ip: *u8, tcp: *u8, len: i32) {
+    write_u16be(tcp + TCP_CHECKSUM, 0);
+    let mut pseudo: [u8; 12];
+    bytes_copy(pseudo as *u8, ip + IP_SRC, 4);
+    bytes_copy((pseudo as *u8) + 4, ip + IP_DST, 4);
+    pseudo[8] = 0 as u8;
+    pseudo[9] = PROTO_TCP as u8;
+    write_u16be((pseudo as *u8) + 10, len);
+    let sum: i32 = checksum_add(pseudo as *u8, 12, 0);
+    write_u16be(tcp + TCP_CHECKSUM, checksum_fold(checksum_add(tcp, len, sum)));
+}
+
+fn build_syn_ack(eth: *u8, ip: *u8, ihl: i32, tcp: *u8) {
+    bytes_copy(eth, eth + 6, 6);
+    bytes_copy(eth + 6, OUR_MAC as *u8, 6);
+
+    bytes_copy(ip + IP_DST, ip + IP_SRC, 4);
+    bytes_copy(ip + IP_SRC, OUR_IP as *u8, 4);
+    ip[IP_TTL] = 64 as u8;
+    write_u16be(ip + IP_TOTAL_LEN, ihl + 20);
+    write_u16be(ip + IP_CHECKSUM, 0);
+    write_u16be(ip + IP_CHECKSUM, inet_checksum(ip, ihl));
+
+    let client_port: i32 = read_u16be(tcp + TCP_SRC_PORT);
+    write_u16be(tcp + TCP_SRC_PORT, HTTP_PORT);
+    write_u16be(tcp + TCP_DST_PORT, client_port);
+    write_u32be(tcp + TCP_SEQ, OUR_ISN);
+    write_u32be(tcp + TCP_ACK, conn_rcv_nxt);
+    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
+    tcp[TCP_FLAGS] = (TCP_FLAG_SYN | TCP_FLAG_ACK) as u8;
+    write_u16be(tcp + TCP_WINDOW, 65535);
+    write_u16be(tcp + TCP_URGENT, 0);
+
+    fix_tcp_checksum(ip, tcp, 20);
+}
+
+fn build_fin_ack(eth: *u8, ip: *u8, ihl: i32, tcp: *u8) {
+    bytes_copy(eth, eth + 6, 6);
+    bytes_copy(eth + 6, OUR_MAC as *u8, 6);
+
+    bytes_copy(ip + IP_DST, ip + IP_SRC, 4);
+    bytes_copy(ip + IP_SRC, OUR_IP as *u8, 4);
+    ip[IP_TTL] = 64 as u8;
+    write_u16be(ip + IP_TOTAL_LEN, ihl + 20);
+    write_u16be(ip + IP_CHECKSUM, 0);
+    write_u16be(ip + IP_CHECKSUM, inet_checksum(ip, ihl));
+
+    let client_port: i32 = read_u16be(tcp + TCP_SRC_PORT);
+    write_u16be(tcp + TCP_SRC_PORT, HTTP_PORT);
+    write_u16be(tcp + TCP_DST_PORT, client_port);
+    write_u32be(tcp + TCP_SEQ, conn_snd_nxt);
+    write_u32be(tcp + TCP_ACK, conn_rcv_nxt);
+    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
+    tcp[TCP_FLAGS] = (TCP_FLAG_FIN | TCP_FLAG_ACK) as u8;
+    write_u16be(tcp + TCP_WINDOW, 65535);
+    write_u16be(tcp + TCP_URGENT, 0);
+
+    fix_tcp_checksum(ip, tcp, 20);
+}
+
+// Builds "HTTP/1.1 200 OK ... <html>...</html>" into tcp+20 (overwriting
+// the request that was there), combined with our own FIN (we always close
+// right after answering -- see the file header comment). Returns the
+// total payload length (headers + body).
+fn build_http_response_fin(eth: *u8, ip: *u8, ihl: i32, tcp: *u8) -> i32 {
+    let body_len: i32 = build_html_body();
+
+    let payload: *u8 = tcp + 20;
+    let mut len: i32 = 0;
+    len = len + copy_str(payload + len,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=us-ascii\r\nContent-Length: ");
+    len = len + write_udec(payload + len, body_len);
+    len = len + copy_str(payload + len, "\r\nConnection: close\r\n\r\n");
+    bytes_copy(payload + len, html_body as *u8, body_len);
+    len = len + body_len;
+
+    bytes_copy(eth, eth + 6, 6);
+    bytes_copy(eth + 6, OUR_MAC as *u8, 6);
+
+    bytes_copy(ip + IP_DST, ip + IP_SRC, 4);
+    bytes_copy(ip + IP_SRC, OUR_IP as *u8, 4);
+    ip[IP_TTL] = 64 as u8;
+    write_u16be(ip + IP_TOTAL_LEN, ihl + 20 + len);
+    write_u16be(ip + IP_CHECKSUM, 0);
+    write_u16be(ip + IP_CHECKSUM, inet_checksum(ip, ihl));
+
+    let client_port: i32 = read_u16be(tcp + TCP_SRC_PORT);
+    write_u16be(tcp + TCP_SRC_PORT, HTTP_PORT);
+    write_u16be(tcp + TCP_DST_PORT, client_port);
+    write_u32be(tcp + TCP_SEQ, conn_snd_nxt);
+    write_u32be(tcp + TCP_ACK, conn_rcv_nxt);
+    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
+    tcp[TCP_FLAGS] = (TCP_FLAG_ACK | TCP_FLAG_PSH | TCP_FLAG_FIN) as u8;
+    write_u16be(tcp + TCP_WINDOW, 65535);
+    write_u16be(tcp + TCP_URGENT, 0);
+
+    fix_tcp_checksum(ip, tcp, 20 + len);
+    return len;
+}
+
+fn main() {
+    // uart_init() is already called by Reset_Handler (examples/common_stm32/startup.S)
+    // before main(), same as every other STM32 example -- no need to call it again here.
+    uart_puts("http_server_stm32: init\r\n");
+
+    if (eth_init() == 0) {
+        uart_puts("http_server_stm32: PHY link-up failed\r\n");
+    } else {
+        uart_puts("http_server_stm32: ready\r\n");
+
+        while (1) {
+            let len: i32 = eth_poll_rx();
+            let mut should_tx: i32 = 0;
+            let mut tx_len: i32 = 0;
+            let eth: *u8 = eth_rx_buf();
+            let ethertype: i32 = read_u16be(eth + 12);
+
+            if (len >= 42 && ethertype == 0x0806) {
+                let arp: *u8 = eth + 14;
+                if (read_u16be(arp + ARP_HTYPE) == 1 && read_u16be(arp + ARP_PTYPE) == 0x0800 &&
+                    arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
+                    read_u16be(arp + ARP_OPER) == 1) {
+                    if (bytes_eq(arp + ARP_TPA, OUR_IP as *u8, 4) == 1) {
+                        build_arp_reply(eth, arp);
+                        should_tx = 1;
+                        tx_len = 14 + 28;
+                    }
+                }
+            } else if (len >= 54 && ethertype == 0x0800) {
+                let ip: *u8 = eth + 14;
+                let version: i32 = (ip[0] as i32) >> 4;
+                let ihl:     i32 = ((ip[0] as i32) & 0x0f) * 4;
+
+                if (version == 4 && ihl == 20) {
+                    let total_len:       i32 = read_u16be(ip + IP_TOTAL_LEN);
+                    let ip_len_in_frame: i32 = len - 14;
+
+                    if (total_len <= ip_len_in_frame && total_len >= ihl &&
+                        (ip[IP_PROTOCOL] as i32) == PROTO_TCP &&
+                        inet_checksum(ip, ihl) == 0) {
+                        if (bytes_eq(ip + IP_DST, OUR_IP as *u8, 4) == 1) {
+                            let tcp:     *u8 = ip + ihl;
+                            let tcp_len: i32 = total_len - ihl;
+                            // Data offset in 32-bit words (5..15 -- 20..60 byte
+                            // header). Real TCP stacks always include at least
+                            // an MSS option on the SYN (doff > 5). Options
+                            // themselves are never parsed, just skipped over
+                            // via tcp_hdr_len.
+                            let doff: i32 = (tcp[TCP_DATA_OFFSET] as i32) >> 4;
+                            let tcp_hdr_len: i32 = doff * 4;
+
+                            if (tcp_len >= 20 && doff >= 5 && doff <= 15 && tcp_len >= tcp_hdr_len) {
+                                let mut pseudo: [u8; 12];
+                                bytes_copy(pseudo as *u8, ip + IP_SRC, 4);
+                                bytes_copy((pseudo as *u8) + 4, ip + IP_DST, 4);
+                                pseudo[8] = 0 as u8;
+                                pseudo[9] = PROTO_TCP as u8;
+                                write_u16be((pseudo as *u8) + 10, tcp_len);
+                                let sum: i32 = checksum_add(pseudo as *u8, 12, 0);
+
+                                if (checksum_fold(checksum_add(tcp, tcp_len, sum)) == 0) {
+                                    let dst_port: i32 = read_u16be(tcp + TCP_DST_PORT);
+                                    let src_port: i32 = read_u16be(tcp + TCP_SRC_PORT);
+                                    let flags:    i32 = tcp[TCP_FLAGS] as i32;
+                                    let seq:      i32 = read_u32be(tcp + TCP_SEQ);
+                                    let ack:      i32 = read_u32be(tcp + TCP_ACK);
+
+                                    if (dst_port == HTTP_PORT) {
+                                        if (conn_state == TCP_LISTEN) {
+                                            if ((flags & TCP_FLAG_SYN) != 0) {
+                                                bytes_copy(conn_remote_ip as *u8, ip + IP_SRC, 4);
+                                                conn_remote_port = src_port;
+                                                conn_rcv_nxt = seq + 1;
+                                                conn_snd_nxt = OUR_ISN + 1;
+
+                                                build_syn_ack(eth, ip, ihl, tcp);
+                                                should_tx = 1;
+                                                tx_len = 14 + ihl + 20;
+                                                conn_state = TCP_SYN_RCVD;
+                                            }
+                                        } else {
+                                            if (bytes_eq(ip + IP_SRC, conn_remote_ip as *u8, 4) == 1 &&
+                                                src_port == conn_remote_port) {
+                                                if ((flags & TCP_FLAG_RST) != 0) {
+                                                    conn_state = TCP_LISTEN;
+                                                } else if (conn_state == TCP_SYN_RCVD) {
+                                                    if ((flags & TCP_FLAG_ACK) != 0 &&
+                                                        (flags & TCP_FLAG_SYN) == 0 &&
+                                                        ack == conn_snd_nxt && seq == conn_rcv_nxt) {
+                                                        conn_state = TCP_ESTABLISHED;
+                                                    }
+                                                } else if (conn_state == TCP_ESTABLISHED) {
+                                                    let data_len: i32 = tcp_len - tcp_hdr_len;
+                                                    let data: *u8 = tcp + tcp_hdr_len;
+                                                    if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
+                                                        conn_rcv_nxt = conn_rcv_nxt + 1;
+                                                        build_fin_ack(eth, ip, ihl, tcp);
+                                                        should_tx = 1;
+                                                        tx_len = 14 + ihl + 20;
+                                                        conn_snd_nxt = conn_snd_nxt + 1;
+                                                        conn_state = TCP_LAST_ACK;
+                                                    } else if (data_len >= 3 &&
+                                                               (flags & TCP_FLAG_ACK) != 0 &&
+                                                               seq == conn_rcv_nxt &&
+                                                               data[0] == 'G' as u8 &&
+                                                               data[1] == 'E' as u8 &&
+                                                               data[2] == 'T' as u8) {
+                                                        conn_rcv_nxt = conn_rcv_nxt + data_len;
+                                                        request_count = request_count + 1;
+                                                        let payload_len: i32 =
+                                                            build_http_response_fin(eth, ip, ihl, tcp);
+                                                        should_tx = 1;
+                                                        tx_len = 14 + ihl + 20 + payload_len;
+                                                        conn_snd_nxt = conn_snd_nxt + payload_len + 1;
+                                                        conn_state = TCP_LAST_ACK;
+                                                    }
+                                                } else if (conn_state == TCP_LAST_ACK) {
+                                                    if ((flags & TCP_FLAG_ACK) != 0 && ack == conn_snd_nxt) {
+                                                        conn_state = TCP_LISTEN;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (should_tx == 1) {
+                eth_transmit(eth, tx_len);
+            }
+            if (len > 0) {
+                eth_rx_release();
+            }
+        }
+    }
+}
