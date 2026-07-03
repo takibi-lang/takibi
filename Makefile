@@ -636,4 +636,4 @@ profile-tcp-echo: examples/tcp_echo/kernel.debug.elf
 clean:
 	dune clean
 	rm -f $(COMMON_STARTUP_O) $(COMMON_TIMER_ASM_O) $(COMMON_SEM_ASM_O) \
-	      $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o examples/$(e)/kernel.elf examples/$(e)/kernel_stm32.bin)
+	      $(foreach e,$(EXAMPLES),examples/$(e)/*.o examples/$(e)/*.elf examples/$(e)/*.bin)
