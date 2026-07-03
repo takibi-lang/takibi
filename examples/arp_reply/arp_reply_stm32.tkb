@@ -1,0 +1,86 @@
+// ARP responder over the STM32F746G-DISCOVERY's real Ethernet MAC (RMII +
+// LAN8742A PHY, see examples/common_stm32/eth.tkb) -- the real-hardware
+// counterpart to examples/arp_reply/arp_reply.tkb's virtio-net version.
+//
+// Answers "who-has OUR_IP" requests with "is-at OUR_MAC" (both from
+// examples/common_stm32/netconfig.tkb); every other frame (wrong EtherType,
+// wrong OPER, or a request for a different IP) is silently dropped -- only
+// re-posted to the RX ring, never echoed. Builds on
+// examples/net_echo/net_echo_stm32.tkb's eth.tkb plumbing but replaces the
+// blind echo with real protocol dispatch.
+//
+// Polling-only, same as net_echo_stm32.tkb (see eth.tkb's header comment for
+// why interrupt-driven RX is deferred to a follow-up).
+//
+// Correctness is checked by scripts/eth_arp_reply_test.py, not UART output;
+// uart_puts below is purely for interactive bring-up debugging.
+
+// ARP-over-Ethernet/IPv4 field offsets, relative to the start of the ARP
+// payload (right after the 14-byte Ethernet header). Total length is 28
+// bytes: HTYPE(2) PTYPE(2) HLEN(1) PLEN(1) OPER(2) SHA(6) SPA(4) THA(6) TPA(4).
+let ARP_HTYPE: i32 = 0;
+let ARP_PTYPE: i32 = 2;
+let ARP_HLEN:  i32 = 4;
+let ARP_PLEN:  i32 = 5;
+let ARP_OPER:  i32 = 6;
+let ARP_SHA:   i32 = 8;
+let ARP_SPA:   i32 = 14;
+let ARP_THA:   i32 = 18;
+let ARP_TPA:   i32 = 24;
+
+// bytes_eq/bytes_copy/read_u16be/write_u16be live in examples/common/netutil.tkb.
+
+// Rewrites the ARP request at `arp` into a reply in place, and swaps the
+// enclosing Ethernet header's src/dst. Only called after the caller has
+// already verified this is a "who-has OUR_IP" request.
+fn build_arp_reply(eth: *u8, arp: *u8) {
+    // Ethernet: dst = old src, then src = OUR_MAC (order matters: must read
+    // the old src before overwriting it).
+    bytes_copy(eth, eth + 6, 6);
+    bytes_copy(eth + 6, OUR_MAC as *u8, 6);
+
+    // ARP: THA/TPA = old SHA/SPA (read before SHA/SPA are overwritten
+    // below; THA/TPA and SHA/SPA are disjoint byte ranges so this is safe
+    // regardless of order, but reading first keeps the intent obvious).
+    bytes_copy(arp + ARP_THA, arp + ARP_SHA, 6);
+    bytes_copy(arp + ARP_TPA, arp + ARP_SPA, 4);
+    bytes_copy(arp + ARP_SHA, OUR_MAC as *u8, 6);
+    bytes_copy(arp + ARP_SPA, OUR_IP as *u8, 4);
+    write_u16be(arp + ARP_OPER, 2); // reply
+}
+
+fn main() {
+    // uart_init() is already called by Reset_Handler (examples/common_stm32/startup.S)
+    // before main(), same as every other STM32 example -- no need to call it again here.
+    uart_puts("arp_reply_stm32: init\r\n");
+
+    if (eth_init() == 0) {
+        uart_puts("arp_reply_stm32: PHY link-up failed\r\n");
+    } else {
+        uart_puts("arp_reply_stm32: ready\r\n");
+
+        while (1) {
+            let len: i32 = eth_poll_rx();
+
+            // 14 (eth) + 28 (arp) = 42
+            if (len >= 42) {
+                let eth: *u8 = eth_rx_buf();
+                let arp: *u8 = eth + 14;
+                if (read_u16be(eth + 12) == 0x0806 &&
+                    read_u16be(arp + ARP_HTYPE) == 1 && read_u16be(arp + ARP_PTYPE) == 0x0800 &&
+                    arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
+                    read_u16be(arp + ARP_OPER) == 1) {
+                    if (bytes_eq(arp + ARP_TPA, OUR_IP as *u8, 4) == 1) {
+                        build_arp_reply(eth, arp);
+                        eth_transmit(eth, len);
+                    }
+                }
+            }
+
+            // Re-post the RX descriptor regardless of whether we replied.
+            if (len > 0) {
+                eth_rx_release();
+            }
+        }
+    }
+}

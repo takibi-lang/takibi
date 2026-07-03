@@ -1,0 +1,22 @@
+// Network configuration shared by every STM32 real-Ethernet example
+// (examples/net_echo/net_echo_stm32.tkb, examples/arp_reply/arp_reply_stm32.tkb,
+// and further examples as they're ported). Edit the two constants below to
+// change the board's MAC/IP without touching any example-specific logic.
+//
+// MAC: fixed, not derived from the chip's unique ID. This matches ST's own
+// STM32CubeF7 LwIP example projects (ethernetif.c), which likewise hardcode
+// a MAC rather than generating one -- 00:80:E1 is ST's registered IEEE OUI.
+// The tradeoff (documented for posterity, since a unique-ID-derived MAC was
+// considered and rejected): a fixed MAC is not unique across boards, but
+// every hardware test in this repo runs against exactly one board on a
+// private point-to-point link, so uniqueness buys nothing here -- and
+// per-board-batch uniqueness from the unique ID isn't even guaranteed
+// (Zephyr's STM32 MAC generation has a documented issue where boards from
+// the same production batch can still collide). Simplicity wins.
+let OUR_MAC: [u8; 6] = {0x00, 0x80, 0xE1, 0x00, 0x00, 0x00};
+
+// our_ip: 192.0.2.1, RFC 5737 TEST-NET-1 -- reserved for exactly this kind
+// of test use, same address examples/arp_reply/arp_reply.tkb (QEMU) already
+// uses. Not routable, no real network implied; the hardware test scripts
+// talk to the board over a raw point-to-point link, not IP routing.
+let OUR_IP: [u8; 4] = {192, 0, 2, 1};

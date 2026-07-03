@@ -54,7 +54,8 @@ STM32_EXTRA_BINS := examples/rtc/kernel_stm32.bin examples/echo/kernel_stm32.bin
                     examples/timer/kernel_stm32.bin examples/irq/kernel_stm32.bin \
                     examples/preempt/kernel_stm32.bin examples/semaphore/kernel_stm32.bin \
                     examples/condvar/kernel_stm32.bin examples/msgqueue/kernel_stm32.bin \
-                    examples/watchdog/kernel_stm32.bin examples/net_echo/kernel_stm32.bin
+                    examples/watchdog/kernel_stm32.bin examples/net_echo/kernel_stm32.bin \
+                    examples/arp_reply/kernel_stm32.bin
 
 # inet_checksum/ip_parse/tcp_parse: same CHECKSUM_OBJS group as the AArch64
 # side, but examples/common/inet_checksum.tkb and examples/common/netutil.tkb
@@ -456,6 +457,23 @@ examples/net_echo/net_echo_stm32.o: examples/net_echo/net_echo_stm32.tkb $(COMMO
 
 examples/net_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/net_echo/net_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/net_echo/net_echo_stm32.o -o $@
+
+# arp_reply (STM32): same eth.tkb plumbing as net_echo_stm32, plus real
+# protocol dispatch (ARP) and examples/common_stm32/netconfig.tkb for the
+# board's MAC/IP (fixed, ST's-own-LwIP-example convention -- see that
+# file's comment for why a unique-ID-derived MAC was considered and
+# rejected). netutil.tkb (bytes_eq/bytes_copy/read_u16be/write_u16be) is
+# pure compute, reused unchanged from the AArch64/QEMU side.
+COMMON_STM32_NETCONFIG := $(COMMON_STM32_DIR)/netconfig.tkb
+
+examples/arp_reply/arp_reply_stm32.o: examples/arp_reply/arp_reply_stm32.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) build
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+
+examples/arp_reply/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/arp_reply/arp_reply_stm32.o $(COMMON_STM32_LINK_ETH_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/arp_reply/arp_reply_stm32.o -o $@
+
+examples/arp_reply/kernel_stm32.bin: examples/arp_reply/kernel_stm32.elf
+	llvm-objcopy-19 -O binary $< $@
 
 examples/net_echo/kernel_stm32.bin: examples/net_echo/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
