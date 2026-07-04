@@ -1,4 +1,13 @@
 # -- Configuration ------------------------------------------------------------
+# Parallel by default (this repo's ~50 independent example builds are the
+# common case), overridable per-invocation: `make -j1 check` forces serial
+# execution back, e.g. when a build error needs to be read one recipe at a
+# time. Deliberately not paired with -Otarget: that buffers each recipe's
+# output until the recipe finishes, so progress isn't visible line-by-line
+# while jobs are still running -- worse for watching a long build than the
+# occasional interleaved line.
+MAKEFLAGS += -j$(shell nproc)
+
 AARCH64_TARGET := aarch64-none-elf
 
 # Invoke the built binary directly rather than "dune exec takibi --": dune
