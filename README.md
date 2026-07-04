@@ -1,1 +1,214 @@
 # takibi - Takibi Language
+
+**takibi** is a from-scratch programming language and compiler, implemented in
+OCaml, that generates native machine code through an LLVM backend.
+
+The language is designed for **bare-metal embedded programming**, where a
+runtime panic or trap is not an acceptable failure mode. The long-term goal of
+this project is to implement a TCP/IP stack and run an HTTP server on
+bare-metal targets -- and that goal is already reached today on both QEMU
+(AArch64) and real
+[STM32F746G-DISCOVERY](https://www.st.com/en/evaluation-tools/32f746gdiscovery.html)
+(Cortex-M7) hardware.
+
+## Design Principle: Detect Errors at Compile Time
+
+In embedded products, zero runtime exceptions and panics is a hard
+requirement. If a runtime trap occurs in a bare-metal environment running
+timers, UART, and a TCP/IP stack, the system will silently break with nothing
+communicated to the user. takibi's type system is built around pushing as
+many of those failures as possible into compile-time errors instead:
+
+- The compiler currently emits an `icmp uge` + `llvm.trap` bounds check on
+  array indexing when the index range cannot be proven safe. On AArch64 this
+  lowers to a `brk #0` (a real hardware trap) -- acceptable for development,
+  but a bug in shipped firmware.
+- The refinement type `{lo..<hi}` is how the type system removes the trap
+  entirely: if `hi <= N` and `lo >= 0` can be proven at compile time for an
+  array of size `N`, no bounds-check code is generated at all.
+- Choosing `i32` (unknown range: MMIO, external input, ...) vs. `{lo..<hi}`
+  (a range the programmer can vouch for) is a deliberate part of the API a
+  takibi program presents. A bounds check appearing on plain `i32` indexing
+  is correct, expected behavior, not a compiler shortcoming.
+
+"Code with remaining bounds checks = code whose type annotations are still
+insufficient." The finished form of a piece of code is one where every index
+range is pinned at the type level using `for i in 0..<n` or `{lo..<hi}`
+annotations.
+
+## Current Status
+
+- A full pipeline exists: lexer -> Menhir parser -> Hindley-Milner type
+  inference -> LLVM 19 IR generation -> native object code.
+- Around 60 example programs compile and run today (see `examples/`),
+  covering arithmetic, control flow, structs (packed / aligned), enums with
+  exhaustiveness checking, function pointers, MMIO/volatile access,
+  compile-time-checked array bounds via refinement types, semaphores,
+  mutexes, condition variables, a preemptive round-robin scheduler, and a
+  hand-written TCP/IP stack.
+- **The TCP/IP stack goal has been reached**: `examples/http_server` serves a
+  live HTML page with a request counter over a real TCP connection, reachable
+  from an actual web browser, both under QEMU (via a virtio-net driver) and on
+  real STM32F746G-DISCOVERY hardware (via a from-scratch Ethernet MAC/PHY/DMA
+  driver in `examples/common_stm32/eth.tkb`).
+- Every example (with the exception of the six examples needing hardware
+  interrupt/scheduling primitives, which are unified via shared function
+  names across the two HALs) is a **single `.tkb` source file** that compiles
+  unchanged for both the QEMU/AArch64 target and the STM32/Cortex-M7 target.
+- DWARF debug-info emission (`-g`) and a small gdbstub-based sampling
+  profiler are implemented, along with an analysis of what this profiling
+  technique is (and is not) useful for on interrupt-driven I/O code.
+
+See `CLAUDE.md` for the full, continuously-updated engineering log of design
+decisions, hardware bring-up bugs, and the reasoning behind them.
+
+## Demo: Serving a Real Web Page from an STM32F746G-DISCOVERY Board
+
+This walks through reproducing the project's headline result yourself: a
+takibi-compiled HTTP server, running with no operating system on a real
+STM32F746G-DISCOVERY board, answering requests from an ordinary web browser
+over a real Ethernet link.
+
+### What you need
+
+- An STM32F746G-DISCOVERY board (its on-board ST-LINK/V2-1 debug probe is
+  used for both flashing and the serial console -- no separate probe needed).
+- A micro-USB cable (ST-LINK: power, flashing, and the UART log all go over
+  this one cable).
+- An Ethernet cable, and a spare Ethernet NIC on your Linux host that you can
+  dedicate to a direct link to the board (no router or switch required --
+  a plain point-to-point cable is enough, since the demo uses a fixed IP
+  address with no DHCP).
+- A Linux host with the toolchain in "Dependencies" below installed --
+  `openocd`, `stlink-tools`, and the rest of the standard build. The
+  `.devcontainer/` in this repo already has everything installed; opening
+  the repo in that devcontainer (VS Code's "Dev Containers" extension, or
+  any OCI-compatible tool that reads `devcontainer.json`) is the easiest way
+  to get a working environment.
+
+### 1. Connect the board
+
+Plug the micro-USB cable into the board's ST-LINK USB port and into your
+host. Connect an Ethernet cable between the board's Ethernet jack and the
+NIC you're dedicating to this demo.
+
+### 2. Give your host NIC a matching address
+
+The board always serves on a fixed address, `192.168.10.2/24`
+(you can configure `examples/common_stm32/netconfig.tkb`).
+Put your host's NIC on the same `/24` so it can reach the board directly,
+with no routing needed:
+
+```bash
+sudo ip addr add 192.168.10.1/24 dev <your-interface>
+sudo ip link set <your-interface> up
+```
+
+Replace `<your-interface>` with whatever `ip link` shows for the NIC wired
+to the board (e.g. `enp4s0`).
+
+### 3. Confirm the board is visible to the toolchain
+
+```bash
+st-info --probe
+```
+
+This should report the on-board ST-LINK. If it fails, check USB
+permissions (the devcontainer already adds its user to the `plugdev` and
+`dialout` groups for this).
+
+### 4. Build, flash, and run
+
+```bash
+make stm32-http-server
+```
+
+This compiles `examples/http_server` for the STM32/Cortex-M7 target (if not
+already built), flashes it to the board via `st-flash`, and streams the
+board's UART log to your terminal. It prints the URL to open, e.g.:
+
+```
+Open http://192.168.10.2/ in your browser (Ctrl-C to quit)
+```
+
+### 5. Open it in a browser
+
+Visit the printed URL. You should see a small HTML page served directly by
+the board, with a live request counter that increments every time you
+reload.
+
+### 6. Stop
+
+Ctrl-C in the terminal running `make stm32-http-server` stops streaming the
+log. The board itself keeps serving until it's powered off or reflashed.
+
+### Troubleshooting
+
+- `error: ... not found -- is the STM32F746G-DISCOVERY board connected?` --
+  the board's USB serial device wasn't found at the expected path. Check
+  `dmesg` for where it enumerated and override with, e.g.,
+  `STM32_SERIAL_DEV=/dev/ttyACM1 make stm32-http-server`.
+- `st-info --probe` fails -- a USB permissions issue; see step 3 above.
+- Browser can't reach `192.168.10.2` -- confirm the NIC's address with
+  `ip addr show <your-interface>` and that the Ethernet cable is actually
+  linked up (`ip link show <your-interface>` should say `state UP`).
+
+## Building and Testing
+
+```bash
+make build          # build the compiler (takibi) only
+make test           # run unit tests
+make qemutest        # build every example and verify it under QEMU (AArch64)
+make stm32build      # cross-compile every ported example for STM32 (no hardware needed)
+make check           # langcheck + test + stm32build + qemutest
+make hwcheck          # like stm32build, but also flashes + verifies against real STM32 hardware
+make hwcheck-net      # real-Ethernet hardware tests (needs the board wired to this host's NIC)
+```
+
+Builds run in parallel across all cores by default.
+
+### Dependencies
+
+```
+ocaml 5.4.0, dune, menhir
+llvm-19 OCaml bindings (llvm, llvm.analysis, llvm.target, llvm.all_backends,
+                        llvm.passbuilder, llvm.debuginfo)
+ppx_deriving.show
+llvm-mc-19, ld.lld-19     (bare-metal assembling/linking)
+qemu-system-aarch64       (QEMU execution)
+gdb-multiarch             (AArch64-capable gdb, for profiling/hardware debugging)
+openocd, stlink-tools     (STM32F746G-DISCOVERY flashing/debugging)
+```
+
+A ready-to-use devcontainer configuration is provided in `.devcontainer/`.
+
+## Directory Layout
+
+```
+lib/       -- lexer, parser, type inference, LLVM code generation
+bin/       -- the takibi CLI
+examples/  -- ~60 example programs, each demonstrating one feature or
+              building toward the TCP/IP stack goal
+scripts/   -- QEMU/hardware integration test runners and profiling tools
+test/      -- unit tests (parser / type inference)
+```
+
+Each directory under `examples/` documents itself in its `.tkb` file's
+header comment. `examples/common/` and `examples/common_stm32/` hold the
+QEMU and STM32 hardware-abstraction layers (UART, timers, interrupt
+controllers, Ethernet), sharing function names/signatures so application
+code is written once.
+
+## Targets
+
+- QEMU `virt` machine, `cortex-a53` CPU (AArch64 bare-metal).
+- STM32F746G-DISCOVERY (Cortex-M7 bare-metal), flashed and verified
+  against real hardware.
+
+## Acknowledgements
+
+The most implementation were written with assistance from Claude Code.
+
+## License
+
+GPLv3 -- see `LICENSE`.
