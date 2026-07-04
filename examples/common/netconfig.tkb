@@ -13,20 +13,18 @@
 // nothing to share.
 //
 // our_ip: 192.0.2.1, RFC 5737 TEST-NET-1 -- reserved for exactly this kind
-// of test use. examples/http_server/http_server.tkb deliberately does NOT
-// use this constant on the QEMU side: SLIRP's -netdev user hostfwd requires
-// the guest to own 10.0.2.15 specifically (see that file's header comment),
-// a hard requirement this shared default would break -- it keeps its own
-// separate our_ip, branching on IS_QEMU below. (This is the QEMU-side
-// counterpart of the STM32 side's decision to give the real board a fixed,
-// routable address instead -- see examples/common_stm32/netconfig.tkb's
-// comment: different constraints, different answers.)
+// of test use.
 let OUR_IP: [u8; 4] = {192, 0, 2, 1};
 
-// Lets the one place that genuinely needs to know which backend it's
-// linked against (http_server.tkb's SLIRP-address special case above)
-// branch at runtime -- an ordinary global constant, not a compiler
-// feature: examples/common_stm32/netconfig.tkb defines the same symbol
-// as 0. No other shared example needs this; net_read_mac()/OUR_IP already
-// hide every other platform difference behind a uniform API.
-let IS_QEMU: i32 = 1;
+// examples/http_server/http_server.tkb deliberately does NOT use OUR_IP:
+// SLIRP's -netdev user hostfwd requires the guest to own 10.0.2.15
+// specifically (confirmed empirically -- see that file's header comment
+// and the qemu-http-server Makefile target), a hard requirement OUR_IP's
+// shared default would break. Rather than branch on which constant to
+// copy from, it just gets its own dedicated constant, so its main() can
+// do a single unconditional `bytes_copy(our_ip as *u8,
+// HTTP_SERVER_IP as *u8, 4)` on either target. (This is the QEMU-side
+// counterpart of the STM32 side's decision to give the real board a
+// fixed, routable address instead -- see examples/common_stm32/
+// netconfig.tkb's comment: different constraints, different answers.)
+let HTTP_SERVER_IP: [u8; 4] = {10, 0, 2, 15};

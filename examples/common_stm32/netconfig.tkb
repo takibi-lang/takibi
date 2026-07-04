@@ -33,7 +33,10 @@ let OUR_MAC: [u8; 6] = {0x00, 0x80, 0xE1, 0x00, 0x00, 0x00};
 // help a Python script).
 let OUR_IP: [u8; 4] = {192, 168, 10, 2};
 
-// See examples/common/netconfig.tkb's comment: lets http_server.tkb's one
-// genuinely platform-conditional bit of logic (the QEMU-side SLIRP address
-// special case) branch at runtime. No other shared example needs this.
-let IS_QEMU: i32 = 0;
+// examples/http_server/http_server.tkb's dedicated constant (see
+// examples/common/netconfig.tkb's comment for why it doesn't just use
+// OUR_IP) -- no SLIRP-style constraint exists on real hardware, so this
+// is simply the same value as OUR_IP above, just under the name
+// http_server.tkb actually references so its main() needs no branch to
+// pick between the two.
+let HTTP_SERVER_IP: [u8; 4] = {192, 168, 10, 2};

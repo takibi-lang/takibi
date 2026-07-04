@@ -98,26 +98,44 @@ examples/
     link.ld       -- linker script (load address 0x40000000) (shared by all examples)
     timer_asm.S   -- ARM Generic Timer stubs: read_cntfrq, set_cntp_tval, enable_cntp, disable_cntp, task_exit_stub
     sem_asm.S     -- atomic semaphore: sem_wait (ldaxr/stxr), sem_post (ldxr/stlxr)
-    uart.tkb      -- uart_putc, uart_puts
+    uart.tkb      -- uart_putc, uart_puts, uart_isr_getc (RX-interrupt byte read, no polling)
     print.tkb     -- uart_print_uint, uart_print_hex, uart_print_int
-    gic.tkb       -- GicRegs struct, gic_init, gic_enable_timer_ppi, gic_enable_uart_spi
-    timer.tkb     -- extern fn timer stubs, setup_task_stack, timer_init (depends on gic.tkb)
+    gic.tkb       -- GicRegs struct, gic_init, gic_enable_timer_ppi, gic_enable_uart_spi,
+                     irq_uart_rx_setup/_unmask (uniform names shared with
+                     common_stm32/nvic.tkb, see the STM32 section below)
+    timer.tkb     -- extern fn timer stubs, setup_task_stack, timer_init (depends on gic.tkb),
+                     scheduler_init/_disable/_rearm_tick (uniform names shared with
+                     common_stm32/scheduler.tkb, see the STM32 section below)
     sync.tkb      -- extern fn sem_wait/sem_post, mutex_lock/unlock, cond_wait/signal
+    virtio_mmio.tkb -- net_init/net_poll_rx/net_rx_buf/net_transmit/net_rx_release/net_read_mac
+                     (uniform API shared with common_stm32/eth.tkb, see "STM32 Ethernet" above)
+    netconfig.tkb -- OUR_IP (QEMU-side static IP for arp_reply/icmp_echo/tcp_echo),
+                     HTTP_SERVER_IP (http_server's own IP, see "Network config" below)
+    stm32_stub.tkb -- no-op stand-ins for STM32-only symbols a shared example's dead
+                     QEMU-side code still references (see the STM32 section below)
   common_stm32/   -- STM32F746G-DISCOVERY (Cortex-M7) HAL, mirroring common/'s function
-                     names/signatures so example .tkb files stay portable -- see
-                     "STM32F746G-DISCOVERY Bare-Metal (Cortex-M7)" below
+                     names/signatures so every example .tkb file is a single file shared
+                     by both targets -- see "STM32F746G-DISCOVERY Bare-Metal (Cortex-M7)" below
     startup.S     -- Reset_Handler, 54-word vector table, PendSV_Handler, weak
                      SysTick_Handler/USART1_IRQHandler/pendsv_dispatch stubs
     link.ld       -- MEMORY {FLASH RAM} linker script (RAM = DTCM, 64K)
-    uart.tkb      -- uart_init, uart_putc, uart_puts (USART1, PA9/PB7, AF7)
+    link_eth.ld   -- same, RAM = AXI SRAM (Ethernet DMA can't reach DTCM)
+    uart.tkb      -- uart_init, uart_putc, uart_puts (USART1, PA9/PB7, AF7), uart_isr_getc
     uart_getc.tkb -- uart_getc (USART1 RX poll; only echo needs RX)
     rtc.tkb       -- rtc_init, rtc_is_running, rtc_read_seconds (real RTC peripheral, LSI)
-    nvic.tkb      -- enable_usart1_irq
-    scheduler.tkb -- setup_task_stack, task_exit_stub, systick_init/_disable, pendsv_trigger
+    nvic.tkb      -- enable_usart1_irq, irq_uart_rx_setup/_unmask
+    scheduler.tkb -- setup_task_stack, task_exit_stub, systick_init/_disable, pendsv_trigger,
+                     scheduler_init/_disable/_rearm_tick (see the STM32 section below)
     sem_asm.S     -- atomic semaphore: sem_wait/sem_post (ldrex/strex/dmb)
+    eth.tkb       -- net_init/net_poll_rx/net_rx_buf/net_transmit/net_rx_release/net_read_mac
+                     (real Ethernet MAC/PHY/DMA driver, see "STM32 Ethernet" above)
+    netconfig.tkb -- OUR_MAC/OUR_IP (STM32 board's fixed network identity),
+                     HTTP_SERVER_IP (same value as OUR_IP here, see "Network config" below)
   <name>/         -- each directory: see the leading comment in <name>.tkb for a description.
-                     A few examples have a second, deliberately separate <name>_stm32.tkb
-                     (not a shared-and-recompiled file) -- see the STM32 section below for why.
+                     Every example is now a single file compiled for both targets -- no
+                     `<name>_stm32.tkb` exists anywhere in this repo (see the STM32 section
+                     below for how the hardest cases, irq/preempt/semaphore/condvar/watchdog/
+                     msgqueue, got there too).
 scripts/
   run_qemutest.sh -- QEMU integration test script (FIFO sync and timing verification included)
   run_hwtest.sh   -- STM32 hardware integration test script (flash + serial capture; see below)
@@ -575,17 +593,22 @@ the normal (always `-g`-free) build outputs.
   `watchdog`/`condvar`/`msgqueue`.
 
   **Network config**: `examples/common_stm32/netconfig.tkb` holds the board's MAC/IP as plain global
-  constants (`OUR_MAC`/`OUR_IP`, array-literal `{...}` initializers). MAC is a fixed `00:80:E1:00:00:00`,
-  matching ST's own STM32CubeF7 LwIP example convention (hardcoded, not derived from the chip's unique ID
-  -- see that file's comment for the tradeoff). IP is `192.168.10.2`, the same /24 as this devcontainer's
-  point-to-point NIC (`enp4s0`, `192.168.10.1/24`), chosen so the board is reachable with zero host-side
-  routing changes. `examples/common/netconfig.tkb` holds the QEMU-side counterpart: `OUR_IP` = `192.0.2.1`
-  (RFC 5737 TEST-NET-1) for `arp_reply`/`icmp_echo`/`tcp_echo`/`http_server` (MAC is deliberately NOT in
-  this file -- `net_read_mac()`'s virtio-net backend reads it from the device at runtime, nothing to
-  share), plus `IS_QEMU` (`1` here, `0` in the STM32 file) -- the *one* genuinely platform-conditional bit
-  of logic in these five examples (`http_server.tkb`'s SLIRP-address special case, below) branches on it
-  at runtime. This is an ordinary global constant, not a compiler feature -- no preprocessor/conditional
-  compilation was added or needed anywhere in this refactor.
+  constants (`OUR_MAC`/`OUR_IP`/`HTTP_SERVER_IP`, array-literal `{...}` initializers). MAC is a fixed
+  `00:80:E1:00:00:00`, matching ST's own STM32CubeF7 LwIP example convention (hardcoded, not derived from
+  the chip's unique ID -- see that file's comment for the tradeoff). IP is `192.168.10.2`, the same /24 as
+  this devcontainer's point-to-point NIC (`enp4s0`, `192.168.10.1/24`), chosen so the board is reachable
+  with zero host-side routing changes. `examples/common/netconfig.tkb` holds the QEMU-side counterpart:
+  `OUR_IP` = `192.0.2.1` (RFC 5737 TEST-NET-1) for `arp_reply`/`icmp_echo`/`tcp_echo` (MAC is deliberately
+  NOT in this file -- `net_read_mac()`'s virtio-net backend reads it from the device at runtime, nothing to
+  share). `http_server.tkb` reads a third constant, `HTTP_SERVER_IP`, instead of `OUR_IP`: on the QEMU side
+  this is `10.0.2.15` (SLIRP's fixed `-netdev user` guest address, needed for `hostfwd` to route a real
+  browser's connection to the guest at all -- see that file's header comment), while on the STM32 side it's
+  simply the same value as `OUR_IP` (no SLIRP-style constraint on real hardware). Both `netconfig.tkb` files
+  define the same two variable names (`OUR_IP`, `HTTP_SERVER_IP`) for consistency, even though the STM32
+  side's `HTTP_SERVER_IP` is a duplicate of its own `OUR_IP`. This lets every example's `main()` do a single
+  unconditional `bytes_copy` from the constant it needs, with no runtime branch at all (see the STM32
+  section below for `irq.tkb`'s GIC-vs-NVIC enable sequence, which eliminated its own runtime branch the
+  same way -- a per-target pair of definitions behind one uniform name).
 
   All five are verified against a real point-to-point link via `scripts/eth_*_test.py` + `make hwcheck-net`
   (not part of `make check`/`make hwcheck` since it needs a real board wired directly to the test machine's
@@ -668,9 +691,12 @@ Real-hardware port, running alongside (not replacing) the QEMU/AArch64 build. Al
 examples are now ported, including `net_echo`/`arp_reply`/`icmp_echo`/`tcp_echo`/
 `http_server` (real Ethernet MAC+PHY driver, `examples/common_stm32/eth.tkb` -- see the
 "STM32 Ethernet" entry under Known Limitations/Deferred Design Decisions above for the
-full story). `rtc`/`timer` (real RTC peripheral, LSI-clocked) and `irq`/`preempt`/
-`semaphore`/`condvar`/`watchdog`/`msgqueue` (NVIC + SysTick/PendSV scheduler) needed
-genuinely new infrastructure, not just address changes -- see below.
+full story) and `irq`/`preempt`/`semaphore`/`condvar`/`watchdog`/`msgqueue` (NVIC +
+SysTick/PendSV scheduler -- `examples/common_stm32/scheduler.tkb`/`nvic.tkb`). **Every
+example is now a single shared `.tkb` file that compiles for both targets** -- no
+`_stm32.tkb` variant exists anywhere in this repo anymore; see below for how the last 6
+(genuinely the hardest case, since GICv2's and NVIC's dispatch models differ, not just
+addresses) got there too.
 
 **Devcontainer/USB setup** (`.devcontainer/devcontainer.json`): `runArgs` passes through
 `/dev/ttyACM0` (ST-LINK V2-1 VCP, serial) and `/dev/bus/usb` with a
@@ -695,12 +721,52 @@ print.tkb`, `examples/common/sync.tkb`, `examples/common/inet_checksum.tkb`,
 `examples/common/netutil.tkb` are all pure takibi logic with no MMIO addresses --
 reused completely unchanged, just recompiled/relinked against the STM32 HAL.
 
-**Files that needed a genuinely separate `<name>_stm32.tkb`, not a shared-and-recompiled
-one**: `irq`, `preempt`, `semaphore`, `condvar`, `watchdog`, `msgqueue`. GICv2's
-shared-IRQ-vector-plus-software-ID-dispatch model and Cortex-M's NVIC-direct-vectoring-
-plus-SysTick/PendSV model aren't the same shape behind different addresses -- the
-scheduling/dispatch code itself is restructured, not just register addresses, so these
-five (plus `irq`) have their own `examples/<name>/<name>_stm32.tkb` source file.
+**`irq`/`preempt`/`semaphore`/`condvar`/`watchdog`/`msgqueue` used to need a genuinely
+separate `<name>_stm32.tkb`, and are now unified anyway.** GICv2's shared-IRQ-vector-
+plus-software-ID-dispatch model and Cortex-M's NVIC-direct-vectoring-plus-SysTick/PendSV
+model aren't the same shape behind different addresses -- unlike the networking examples
+(where polling replaced interrupts entirely, making the dispatch mechanism invisible to
+the app), here the interrupt *entry-point names themselves* are dictated by each
+platform's assembly: QEMU's is always `irq_dispatch(frame_sp) -> frame_sp`
+(`examples/common/startup.S`'s `irq_entry`); STM32's is `USART1_IRQHandler()` (`irq`) or
+`SysTick_Handler()` + `pendsv_dispatch(sp) -> sp` (the other five), vectored directly by
+`examples/common_stm32/startup.S`'s hardware vector table. The fix: define **both**
+platforms' entry points unconditionally in the one shared file (`examples/preempt/
+preempt.tkb`'s header comment has the full reasoning) -- whichever one isn't relevant to
+the target being built is simply dead code there, same idea as `OUR_MAC` sitting unused
+in `net_echo`'s STM32 binary. Three small pieces of shared infrastructure make both
+definitions actually *compile* on both targets:
+- **`scheduler_init()`/`scheduler_disable()`/`scheduler_rearm_tick()`** (uniform names,
+  real implementations in both `examples/common/timer.tkb` and `examples/common_stm32/
+  scheduler.tkb`) hide the one genuine naming/arity mismatch found: STM32's
+  `systick_init()` needs an explicit reload value `timer_init()` has no parameter for,
+  and the ARM Generic Timer needs re-arming every tick where SysTick auto-reloads and
+  doesn't. `main()` calls these three uniformly, no per-platform branch needed for any
+  of it. (The `249999` reload value used to be duplicated at every STM32 example's call
+  site; hoisting it into `scheduler_init()` removed that too.)
+- **`examples/common/stm32_stub.tkb`** (QEMU-only): a no-op stand-in for
+  `pendsv_trigger()` -- an STM32-only function that a shared file's dead-under-QEMU
+  code (`SysTick_Handler`'s body) still references. Never actually invoked; exists
+  solely so compilation succeeds under `aarch64-none-elf` too.
+- `watchdog`'s `wdt_check()` needed no hook/override mechanism to call from both
+  `irq_dispatch` and `SysTick_Handler` -- both entry points already live in the same
+  file, so it's just an ordinary in-file function call on either platform.
+- `examples/irq/irq.tkb` additionally needed a tiny `uart_isr_getc() -> u8` added to
+  both `uart.tkb` files (PL011 `DR` vs USART1 `RDR` -- the one example here where the
+  actual byte-read address, not just the dispatch wrapper, differs by platform), so its
+  shared ISR body needs no per-platform branch either. Its interrupt *enable* sequence
+  (GICv2 init+SPI-routing vs. NVIC line enable, then a final unmask done after the
+  "ready" message so nothing can arrive before the handler is wired up) is handled the
+  same way: **`irq_uart_rx_setup()`/`irq_uart_rx_unmask()`** -- uniform names, real
+  implementations in `examples/common/gic.tkb` and `examples/common_stm32/nvic.tkb`
+  (not `uart.tkb`, even though they're UART-interrupt related: `uart.tkb` is
+  concatenated into *every* example's build, including ones that never touch GIC/NVIC
+  at all, so a function defined there calling `gic_init()`/`enable_usart1_irq()` would
+  fail to resolve on those other builds; `gic.tkb`/`nvic.tkb` are only ever included
+  where those symbols already exist). `main()` calls both uniformly with no branch, and
+  `register_irq()` itself (writing into a QEMU-only dispatch table) is harmless to call
+  unconditionally too, since the STM32 side's `USART1_IRQHandler` never reads that
+  table.
 
 **USART1** (VCP, confirmed via ST/Zephyr docs + the board schematic): TX=PA9, RX=PB7,
 AF7. STM32F7's USART is the "improved" generation (`CR1/BRR/ISR/ICR/RDR/TDR`), **not**

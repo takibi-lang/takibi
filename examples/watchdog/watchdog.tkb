@@ -1,9 +1,15 @@
-// Task watchdog demo.
-// On each timer tick, checks the last kick time of each task and
-// detects any task that has exceeded its deadline as "hung".
+// Task watchdog demo. On each timer tick, checks the last kick time of
+// each task and detects any task that has exceeded its deadline as "hung".
 //
 // task_healthy: keeps calling wdt_kick(1) periodically -> never times out
 // task_hung:    calls wdt_kick(2) 3 times, then deliberately stops -> timeout detected
+//
+// Single shared file for both targets -- see examples/preempt/preempt.tkb's
+// header comment for the general dispatch-unification pattern. wdt_check's
+// deadline-checking logic is unchanged and lives in this same file, called
+// from both irq_dispatch (QEMU) and SysTick_Handler (STM32) -- no
+// cross-file hook/override needed, it's just an ordinary in-file function
+// call on both platforms.
 
 struct SchedState {
     task_count:   i32;
@@ -37,7 +43,7 @@ fn wdt_kick(task_id: i32) {
     lk[task_id] = wdt.tick;
 }
 
-// Called from the timer interrupt; advances tick and checks liveness of all monitored tasks
+// Called from the timer tick handler; advances tick and checks liveness of all monitored tasks
 fn wdt_check() {
     wdt.tick = wdt.tick + 1;
     let lk: *i32 = wdt.last_kick;
@@ -55,7 +61,7 @@ fn wdt_check() {
 fn irq_dispatch(frame_sp: usize) -> usize {
     let id: i32 = *gic.cpu_iar;
     if (id == 30) {
-        set_cntp_tval(read_cntfrq() >> 6);
+        scheduler_rearm_tick();
         wdt_check(); // check watchdog
         let sp: *usize = sched.tcb_sp;
         sp[sched.current_task] = frame_sp;
@@ -66,6 +72,19 @@ fn irq_dispatch(frame_sp: usize) -> usize {
     }
     *(gic.cpu_eoir) = id;
     return frame_sp;
+}
+
+fn SysTick_Handler() {
+    wdt_check();
+    pendsv_trigger();
+}
+
+fn pendsv_dispatch(frame_sp: usize) -> usize {
+    let sp: *usize = sched.tcb_sp;
+    sp[sched.current_task] = frame_sp;
+    sched.current_task = (sched.current_task + 1) % sched.task_count;
+    let sp2: *usize = sched.tcb_sp;
+    return sp2[sched.current_task];
 }
 
 // Keep kicking periodically until wdt.done is set -- this task never times out
@@ -96,12 +115,12 @@ fn main() {
     sp[1] = setup_task_stack(stack_a + 4096, task_healthy);
     sp[2] = setup_task_stack(stack_b + 4096, task_hung);
 
-    timer_init();
+    scheduler_init();
 
     let pf: *io i32 = &hung_fired;
     while (*pf == 0) {}
 
-    disable_cntp();
+    scheduler_disable();
     wdt.done = 1;
 
     uart_puts("watchdog: task ");
@@ -109,4 +128,3 @@ fn main() {
     uart_puts(" timed out\r\n");
     uart_puts("done\r\n");
 }
-

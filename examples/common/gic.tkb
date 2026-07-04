@@ -25,3 +25,19 @@ fn gic_enable_uart_spi() {
     *(gic.distr_isen1) = 2;          // SPI #1 (IRQ #33): PL011 UART RX
     *gicd_itargetsr8   = 0x01010101; // route SPI #0-#3 to CPU0
 }
+
+// UART RX interrupt enable, split into a setup half and an unmask half so
+// examples/irq/irq.tkb's main() can call each at the right point in the
+// sequence (setup -> print "ready" -> unmask, so nothing can arrive before
+// everything needed to handle it is in place) with no per-platform branch.
+// Shares its name with examples/common_stm32/nvic.tkb's version, which does
+// the equivalent NVIC/USART setup instead.
+fn irq_uart_rx_setup() {
+    gic_init();
+    gic_enable_uart_spi();
+}
+
+fn irq_uart_rx_unmask() {
+    let uart_imsc: *io i32 = 0x09000038; // PL011 IMSC: interrupt mask register (bit4=RXIM)
+    *uart_imsc = 0x10;
+}

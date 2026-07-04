@@ -24,3 +24,26 @@ fn timer_init() {
     set_cntp_tval(read_cntfrq() >> 6);
     enable_cntp();
 }
+
+// Uniform names shared with examples/common_stm32/scheduler.tkb's
+// scheduler_init()/scheduler_disable() -- lets a single shared app-level
+// example (preempt.tkb, etc.) call the same two functions on either
+// target without branching. STM32's systick_init() needs an explicit
+// reload value that timer_init() has no equivalent parameter for; hiding
+// that arity difference here (rather than in each app's main()) is the
+// whole point of this wrapper.
+fn scheduler_init() {
+    timer_init();
+}
+
+fn scheduler_disable() {
+    disable_cntp();
+}
+
+// Re-arms the ARM Generic Timer for the next tick -- called once per tick
+// from irq_dispatch. Uniform name shared with examples/common_stm32/
+// scheduler.tkb's scheduler_rearm_tick(), which is a no-op there (SysTick
+// auto-reloads from LOAD, unlike the Generic Timer's one-shot tval).
+fn scheduler_rearm_tick() {
+    set_cntp_tval(read_cntfrq() >> 6);
+}

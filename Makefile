@@ -26,6 +26,7 @@ COMMON_NETUTIL     := $(COMMON_DIR)/netutil.tkb
 COMMON_RTC         := $(COMMON_DIR)/rtc.tkb
 COMMON_UART_GETC   := $(COMMON_DIR)/uart_getc.tkb
 COMMON_NETCONFIG   := $(COMMON_DIR)/netconfig.tkb
+COMMON_STM32_STUB  := $(COMMON_DIR)/stm32_stub.tkb
 
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
@@ -178,6 +179,11 @@ STANDARD_OBJS := $(filter-out $(SPECIAL_OBJS), $(EXAMPLE_OBJS))
 $(STANDARD_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) build
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $< --target $(AARCH64_TARGET) -o $@
 
+# COMMON_GIC is needed because examples/irq/irq.tkb is now a single file
+# shared with the STM32 build -- see that file's header comment. Both
+# platforms' interrupt entry points are compiled regardless of target;
+# COMMON_GIC supplies the QEMU-only gic struct/functions the (real, active)
+# irq_dispatch entry point references.
 $(IRQ_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) build
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $< --target $(AARCH64_TARGET) -o $@
 
@@ -187,13 +193,17 @@ $(RTC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMO
 $(GETC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_UART_GETC) build
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_UART_GETC) $< --target $(AARCH64_TARGET) -o $@
 
-$(TIMER_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) build
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $< --target $(AARCH64_TARGET) -o $@
+# COMMON_STM32_STUB supplies pendsv_trigger() (a no-op here) so each of
+# these shared examples' STM32-shaped SysTick_Handler/pendsv_dispatch
+# entry points (dead code under QEMU) still compile -- see
+# examples/preempt/preempt.tkb's header comment.
+$(TIMER_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_STM32_STUB) build
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_STM32_STUB) $< --target $(AARCH64_TARGET) -o $@
 
-$(SYNC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) build
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) $< --target $(AARCH64_TARGET) -o $@
+$(SYNC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) $(COMMON_STM32_STUB) build
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) $(COMMON_STM32_STUB) $< --target $(AARCH64_TARGET) -o $@
 
-# COMMON_NETCONFIG (OUR_IP/IS_QEMU) is unused-but-harmless for net_echo (no
+# COMMON_NETCONFIG (OUR_IP) is unused-but-harmless for net_echo (no
 # IP awareness at all) -- it just gets one inert extra constant rather than
 # needing a split recipe group of its own. GIC is no longer needed at all:
 # virtio_mmio.tkb polls the used ring directly now instead of routing
@@ -375,12 +385,20 @@ examples/echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/echo/echo_stm
 examples/echo/kernel_stm32.bin: examples/echo/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
+# irq/preempt/semaphore/condvar/watchdog/msgqueue: each compiles the *same*
+# examples/<name>/<name>.tkb file the QEMU build uses (see
+# examples/net_echo/net_echo.tkb's header comment for the general pattern,
+# and examples/irq/irq.tkb / examples/preempt/preempt.tkb's header comments
+# for how GICv2-vs-NVIC dispatch is unified despite the two hardware models
+# genuinely differing). COMMON_GIC is included for all six (harmless,
+# unused on this target) so the QEMU-shaped entry point in each shared file
+# still compiles -- see examples/common/stm32_stub.tkb's comment for the
+# other half of that (QEMU needing STM32-only stand-ins).
+#
 # irq: NVIC vectors directly to USART1_IRQHandler, a fundamentally
-# different dispatch model from GICv2's software IAR/EOIR table (see
-# examples/irq/irq_stm32.tkb's own comment for why this is a separate
-# source file, not a shared-and-recompiled one like hello.tkb/rtc.tkb).
-examples/irq/irq_stm32.o: examples/irq/irq_stm32.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_NVIC) build
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_NVIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+# different dispatch model from GICv2's software IAR/EOIR table.
+examples/irq/irq_stm32.o: examples/irq/irq.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_NVIC) $(COMMON_GIC) build
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_NVIC) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 examples/irq/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/irq/irq_stm32.o $(COMMON_STM32_LINK_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/irq/irq_stm32.o -o $@
@@ -393,8 +411,8 @@ examples/irq/kernel_stm32.bin: examples/irq/kernel_stm32.elf
 # harmless for every other example since nothing triggers PENDSVSET unless
 # a program enables SysTick, so no extra object needs linking here beyond
 # the usual startup.o.
-examples/preempt/preempt_stm32.o: examples/preempt/preempt_stm32.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) build
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+examples/preempt/preempt_stm32.o: examples/preempt/preempt.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) build
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 examples/preempt/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/preempt/preempt_stm32.o $(COMMON_STM32_LINK_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/preempt/preempt_stm32.o -o $@
@@ -405,8 +423,8 @@ examples/preempt/kernel_stm32.bin: examples/preempt/kernel_stm32.elf
 # semaphore: same scheduler restructure as preempt; declares its own extern
 # fn sem_wait/sem_post (no sync.tkb needed, same as the AArch64 version),
 # links against the STM32 sem_asm.o (ldrex/strex, not ldaxr/stlxr).
-examples/semaphore/semaphore_stm32.o: examples/semaphore/semaphore_stm32.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) build
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+examples/semaphore/semaphore_stm32.o: examples/semaphore/semaphore.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) build
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 examples/semaphore/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_SEM_ASM_O) examples/semaphore/semaphore_stm32.o $(COMMON_STM32_LINK_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_SEM_ASM_O) examples/semaphore/semaphore_stm32.o -o $@
@@ -417,8 +435,8 @@ examples/semaphore/kernel_stm32.bin: examples/semaphore/kernel_stm32.elf
 # condvar/msgqueue: same scheduler restructure, plus reuse
 # examples/common/sync.tkb completely unchanged (pure takibi logic calling
 # only sem_wait/sem_post), linked against the STM32 sem_asm.o.
-examples/condvar/condvar_stm32.o: examples/condvar/condvar_stm32.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) build
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+examples/condvar/condvar_stm32.o: examples/condvar/condvar.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) build
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 examples/condvar/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_SEM_ASM_O) examples/condvar/condvar_stm32.o $(COMMON_STM32_LINK_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_SEM_ASM_O) examples/condvar/condvar_stm32.o -o $@
@@ -426,8 +444,8 @@ examples/condvar/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_SEM_
 examples/condvar/kernel_stm32.bin: examples/condvar/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
-examples/msgqueue/msgqueue_stm32.o: examples/msgqueue/msgqueue_stm32.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) build
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+examples/msgqueue/msgqueue_stm32.o: examples/msgqueue/msgqueue.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) build
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 examples/msgqueue/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_SEM_ASM_O) examples/msgqueue/msgqueue_stm32.o $(COMMON_STM32_LINK_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_SEM_ASM_O) examples/msgqueue/msgqueue_stm32.o -o $@
@@ -436,8 +454,8 @@ examples/msgqueue/kernel_stm32.bin: examples/msgqueue/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
 # watchdog: same scheduler restructure as preempt, no semaphore needed.
-examples/watchdog/watchdog_stm32.o: examples/watchdog/watchdog_stm32.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) build
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+examples/watchdog/watchdog_stm32.o: examples/watchdog/watchdog.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) build
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 examples/watchdog/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/watchdog/watchdog_stm32.o $(COMMON_STM32_LINK_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/watchdog/watchdog_stm32.o -o $@
@@ -454,7 +472,7 @@ examples/watchdog/kernel_stm32.bin: examples/watchdog/kernel_stm32.elf
 # net_rx_buf/net_transmit/net_rx_release/net_read_mac API
 # examples/common/virtio_mmio.tkb does. Links against
 # COMMON_STM32_LINK_ETH_LD (AXI SRAM), not the shared DTCM-based link.ld.
-# netconfig.tkb (OUR_MAC/OUR_IP/IS_QEMU) and netutil.tkb (bytes_eq/
+# netconfig.tkb (OUR_MAC/OUR_IP) and netutil.tkb (bytes_eq/
 # bytes_copy/read_u16be/write_u16be, needed by net_read_mac's bytes_copy
 # call) are included for all five, even net_echo (which never references
 # either symbol) -- harmless, matching the same "one inert extra file

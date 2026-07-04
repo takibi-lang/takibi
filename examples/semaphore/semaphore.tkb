@@ -1,7 +1,14 @@
-// Atomic operation demo using semaphores (ldaxr/stlxr).
-// task_a and task_b each increment shared.count 3 times under mutex protection.
-// A final value of 6 confirms that all updates completed without race conditions.
-// sem_wait/sem_post are implemented in semaphore_asm.S (ldaxr+stxr / ldxr+stlxr).
+// Atomic operation demo using semaphores (examples/common/sem_asm.S /
+// examples/common_stm32/sem_asm.S -- ldaxr/stlxr vs ldrex/strex+dmb, same
+// sem_wait/sem_post extern names on both). task_a and task_b each
+// increment shared.count 3 times under mutex protection; a final value of
+// 6 confirms no lost updates.
+//
+// Single shared file for both targets -- see examples/preempt/preempt.tkb's
+// header comment for the general dispatch-unification pattern (this
+// example needs no per-tick bookkeeping of its own, so its irq_dispatch/
+// SysTick_Handler are simpler than preempt's: just re-arm/switch, no tick
+// counting).
 
 struct SchedState {
     task_count:   i32;
@@ -31,7 +38,7 @@ let mut stack_b: [u8; 4096];
 fn irq_dispatch(frame_sp: usize) -> usize {
     let id: i32 = *gic.cpu_iar;
     if (id == 30) {
-        set_cntp_tval(read_cntfrq() >> 6);
+        scheduler_rearm_tick();
         let sp: *usize = sched.tcb_sp;
         sp[sched.current_task] = frame_sp;
         sched.current_task = (sched.current_task + 1) % sched.task_count;
@@ -41,6 +48,18 @@ fn irq_dispatch(frame_sp: usize) -> usize {
     }
     *(gic.cpu_eoir) = id;
     return frame_sp;
+}
+
+fn SysTick_Handler() {
+    pendsv_trigger();
+}
+
+fn pendsv_dispatch(frame_sp: usize) -> usize {
+    let sp: *usize = sched.tcb_sp;
+    sp[sched.current_task] = frame_sp;
+    sched.current_task = (sched.current_task + 1) % sched.task_count;
+    let sp2: *usize = sched.tcb_sp;
+    return sp2[sched.current_task];
 }
 
 fn task_a() {
@@ -69,15 +88,14 @@ fn main() {
     let sp: *usize = sched.tcb_sp;
     sp[1] = setup_task_stack(stack_a + 4096, task_a);
     sp[2] = setup_task_stack(stack_b + 4096, task_b);
-    timer_init();
+    scheduler_init();
     let pa: *io i32 = &task_a_done;
     let pb: *io i32 = &task_b_done;
     while (*pa == 0 || *pb == 0) {}
-    disable_cntp();
+    scheduler_disable();
     sched_done = 1;
     uart_puts("shared_count: ");
     print_uint(shared.count);
     uart_puts("\r\n");
     uart_puts("done\r\n");
 }
-

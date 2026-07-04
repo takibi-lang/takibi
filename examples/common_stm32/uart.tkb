@@ -50,3 +50,15 @@ fn uart_puts(s: *u8) {
         s = s + 1;
     }
 }
+
+// Reads one byte directly, no polling -- only valid when called from an
+// RX-interrupt handler that already knows a byte is waiting (examples/irq/
+// irq.tkb). Shares its name with examples/common/uart.tkb's version, which
+// reads a different register (PL011 DR, not USART1 RDR), so a shared ISR
+// body can call this uniformly on either target. Reading RDR also clears
+// USART1's RXNE flag -- that IS the interrupt acknowledgment on this
+// target, no separate step needed (see irq.tkb's header comment).
+fn uart_isr_getc() -> u8 {
+    let usart1_rdr: *io u8 = 0x40011024;
+    return *usart1_rdr;
+}

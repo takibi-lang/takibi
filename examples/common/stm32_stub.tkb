@@ -1,0 +1,13 @@
+// No-op stand-in for pendsv_trigger(), a STM32-only function that a shared
+// example's dead (never-executed-on-QEMU) code path still references: the
+// STM32-shaped SysTick_Handler entry point's body, in the 5 scheduler
+// examples (preempt/semaphore/condvar/watchdog/msgqueue) -- it has no
+// QEMU-side equivalent concept at all, unlike scheduler_init/
+// scheduler_disable/scheduler_rearm_tick, which route through a
+// uniformly-named real implementation on each side instead of needing a
+// stub here. takibi has no conditional compilation, so every
+// function/branch in a shared file is compiled for both targets
+// regardless of which one actually runs it -- this exists solely so that
+// compilation succeeds under QEMU/AArch64; it is never actually invoked
+// there. Real implementation: examples/common_stm32/scheduler.tkb.
+fn pendsv_trigger() {}

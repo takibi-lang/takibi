@@ -1,7 +1,22 @@
-// Preemptive scheduler demo.
-// irq_dispatch performs a forced context switch on each ARM Generic Timer (PPI #30) tick.
-// irq_dispatch receives frame_sp and returns the next task's sp; irq_entry in startup.S switches the stack.
-// System register operations (cntfrq/cntp_tval/cntp_ctl) are delegated to assembly via extern fn.
+// Preemptive scheduler demo. Single shared file for both targets: the
+// scheduling algorithm (tick bookkeeping + round-robin task switch) is
+// identical, but the two platforms trigger and structure it differently --
+//   - QEMU (ARM Generic Timer, PPI #30): `irq_dispatch(frame_sp) -> next_sp`
+//     does the tick bookkeeping AND the round-robin switch in one function,
+//     called directly from examples/common/startup.S's irq_entry.
+//   - STM32 (SysTick + PendSV): `SysTick_Handler()` does the tick
+//     bookkeeping then requests a switch via pendsv_trigger(); the actual
+//     switch happens in `pendsv_dispatch(frame_sp) -> next_sp`, called from
+//     examples/common_stm32/startup.S's PendSV_Handler.
+// Both sets of entry points are defined unconditionally below (see
+// examples/net_echo/net_echo.tkb's header comment for the general
+// pattern) -- whichever isn't relevant to the target being built is dead
+// code there. scheduler_init()/scheduler_disable()/scheduler_rearm_tick()
+// (examples/common/timer.tkb / examples/common_stm32/scheduler.tkb) hide
+// the remaining per-platform differences (STM32's systick_init() needs an
+// explicit reload value timer_init() has no equivalent for; the ARM
+// Generic Timer needs re-arming every tick, SysTick auto-reloads and
+// doesn't) behind matching names, so main() needs no per-platform branch at all.
 
 struct SchedState {
     task_count:   i32;
@@ -21,14 +36,14 @@ let mut stack_b: [u8; 4096];
 fn irq_dispatch(frame_sp: usize) -> usize {
     let id: i32 = *gic.cpu_iar;
     if (id == 30) {
-        set_cntp_tval(read_cntfrq() >> 6);
+        scheduler_rearm_tick();
         sched.total_ticks = sched.total_ticks + 1;
         let tc: *i32 = sched.tick_counts;
         tc[sched.current_task] = tc[sched.current_task] + 1;
         let sp: *usize = sched.tcb_sp;
         sp[sched.current_task] = frame_sp;
         if (sched.total_ticks >= sched.max_ticks) {
-            disable_cntp();
+            scheduler_disable();
             sched.done = 1;
         }
         sched.current_task = (sched.current_task + 1) % sched.task_count;
@@ -38,6 +53,25 @@ fn irq_dispatch(frame_sp: usize) -> usize {
     }
     *(gic.cpu_eoir) = id;
     return frame_sp;
+}
+
+fn SysTick_Handler() {
+    sched.total_ticks = sched.total_ticks + 1;
+    let tc: *i32 = sched.tick_counts;
+    tc[sched.current_task] = tc[sched.current_task] + 1;
+    if (sched.total_ticks >= sched.max_ticks) {
+        scheduler_disable();
+        sched.done = 1;
+    }
+    pendsv_trigger();
+}
+
+fn pendsv_dispatch(frame_sp: usize) -> usize {
+    let sp: *usize = sched.tcb_sp;
+    sp[sched.current_task] = frame_sp;
+    sched.current_task = (sched.current_task + 1) % sched.task_count;
+    let sp2: *usize = sched.tcb_sp;
+    return sp2[sched.current_task];
 }
 
 fn task_a() {
@@ -54,7 +88,7 @@ fn main() {
     let sp: *usize = sched.tcb_sp;
     sp[1] = setup_task_stack(stack_a + 4096, task_a);
     sp[2] = setup_task_stack(stack_b + 4096, task_b);
-    timer_init();
+    scheduler_init();
     let pd: *io i32 = &sched.done;
     while (*pd == 0) {}
     let tc: *i32 = sched.tick_counts;
@@ -69,4 +103,3 @@ fn main() {
     uart_puts(" ticks\r\n");
     uart_puts("done\r\n");
 }
-

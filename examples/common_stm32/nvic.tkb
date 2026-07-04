@@ -8,3 +8,14 @@ fn enable_usart1_irq() {
     let nvic_iser1: *io u32 = 0xE000E104; // NVIC_ISER1 (covers IRQ32-63)
     *nvic_iser1 = *nvic_iser1 | (1 << 5); // IRQ37 = USART1 (37 - 32 = bit 5)
 }
+
+// UART RX interrupt enable, split into a setup half and an unmask half --
+// see examples/common/gic.tkb's version of these two functions for why.
+fn irq_uart_rx_setup() {
+    enable_usart1_irq();
+}
+
+fn irq_uart_rx_unmask() {
+    let usart1_cr1: *io u32 = 0x40011000;
+    *usart1_cr1 = *usart1_cr1 | (1 << 5); // RXNEIE
+}

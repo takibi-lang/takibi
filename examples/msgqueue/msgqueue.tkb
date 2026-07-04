@@ -1,6 +1,12 @@
-// Demo of a bounded message queue (capacity 4) synchronized with condition variables.
-// Producer sends 0 to 4; consumer receives and prints each value.
-// MsgQueue is implemented as a ring buffer + mutex + not_empty/not_full condvars.
+// Demo of a bounded message queue (capacity 4) synchronized with condition
+// variables (examples/common/sync.tkb, reused unchanged). Producer sends
+// 0 to 4; consumer receives and prints each value. MsgQueue is
+// implemented as a ring buffer + mutex + not_empty/not_full condvars.
+//
+// Single shared file for both targets -- see examples/preempt/preempt.tkb's
+// header comment for the general dispatch-unification pattern (this
+// example needs no per-tick bookkeeping of its own, so its irq_dispatch/
+// SysTick_Handler are simpler than preempt's: just re-arm/switch).
 
 struct SchedState {
     task_count:   i32;
@@ -53,7 +59,7 @@ let mut sched: SchedState = {3, 0, {0, 0, 0}};
 fn irq_dispatch(frame_sp: usize) -> usize {
     let id: i32 = *gic.cpu_iar;
     if (id == 30) {
-        set_cntp_tval(read_cntfrq() >> 6);
+        scheduler_rearm_tick();
         let sp: *usize = sched.tcb_sp;
         sp[sched.current_task] = frame_sp;
         sched.current_task = (sched.current_task + 1) % sched.task_count;
@@ -63,6 +69,18 @@ fn irq_dispatch(frame_sp: usize) -> usize {
     }
     *(gic.cpu_eoir) = id;
     return frame_sp;
+}
+
+fn SysTick_Handler() {
+    pendsv_trigger();
+}
+
+fn pendsv_dispatch(frame_sp: usize) -> usize {
+    let sp: *usize = sched.tcb_sp;
+    sp[sched.current_task] = frame_sp;
+    sched.current_task = (sched.current_task + 1) % sched.task_count;
+    let sp2: *usize = sched.tcb_sp;
+    return sp2[sched.current_task];
 }
 
 let mut producer_done: io i32 = 0;
@@ -97,12 +115,11 @@ fn main() {
     let sp: *usize = sched.tcb_sp;
     sp[1] = setup_task_stack(stack_a + 4096, task_producer);
     sp[2] = setup_task_stack(stack_b + 4096, task_consumer);
-    timer_init();
+    scheduler_init();
     let pp: *io i32 = &producer_done;
     let pc: *io i32 = &consumer_done;
     while (*pp == 0 || *pc == 0) {}
-    disable_cntp();
+    scheduler_disable();
     sched_done = 1;
     uart_puts("done\r\n");
 }
-

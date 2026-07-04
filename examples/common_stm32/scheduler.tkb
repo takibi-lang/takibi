@@ -59,3 +59,23 @@ fn pendsv_trigger() {
     let icsr: *io u32 = 0xE000ED04;
     *icsr = *icsr | (1 << 28); // ICSR.PENDSVSET
 }
+
+// Uniform names shared with examples/common/timer.tkb's scheduler_init()/
+// scheduler_disable() -- lets a single shared app-level example
+// (preempt.tkb, etc.) call the same two functions on either target
+// without branching. The 249999 reload value (~1/64s tick @ 16MHz HSI,
+// same spirit as the AArch64 side's tick rate) used to be duplicated at
+// every STM32 example's call site; hoisting it here removes that.
+fn scheduler_init() {
+    systick_init(249999);
+}
+
+fn scheduler_disable() {
+    systick_disable();
+}
+
+// See examples/common/timer.tkb's scheduler_rearm_tick(): SysTick
+// auto-reloads from LOAD every period, so there is nothing to do here --
+// this only exists so a shared example's tick handler can call the same
+// name on either target.
+fn scheduler_rearm_tick() {}

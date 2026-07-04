@@ -25,21 +25,16 @@
 //     can connect.
 //
 // Single shared file for both targets -- see examples/net_echo/net_echo.tkb's
-// header comment for why. OUR_IP is a plain shared constant per target
-// (examples/common/netconfig.tkb for QEMU -- see that file's comment for
-// why this example does NOT use it, using a differently-named our_ip
-// instead; examples/common_stm32/netconfig.tkb for STM32).
-//
-// our_ip is 10.0.2.15 on the QEMU side rather than the shared OUR_IP
-// constant every other example uses: 10.0.2.15 is SLIRP's default guest
-// address (confirmed empirically -- see the qemu-http-server Makefile
-// target), required for -netdev user's hostfwd rule to actually route the
-// connection here. scripts/http_server_test.py (the -netdev dgram
-// automated test) uses the same address for consistency, even though its
-// raw point-to-point transport doesn't care what address is used. On the
-// STM32 side, our_ip is set from the shared OUR_IP constant
-// (192.168.10.2, the same /24 as this devcontainer's point-to-point NIC)
-// since there is no SLIRP-style constraint there -- see main() below.
+// header comment for why. our_ip is filled from HTTP_SERVER_IP
+// (examples/common/netconfig.tkb / examples/common_stm32/netconfig.tkb) --
+// this example's own dedicated constant, not the OUR_IP every other
+// example shares, because the QEMU side needs a different value: SLIRP's
+// -netdev user hostfwd requires the guest to own 10.0.2.15 specifically
+// (confirmed empirically -- see the qemu-http-server Makefile target),
+// which would conflict with OUR_IP's value if shared. See
+// examples/common/netconfig.tkb's comment for the full reasoning; STM32's
+// HTTP_SERVER_IP is simply the same value as its OUR_IP, since no
+// SLIRP-style constraint exists on real hardware.
 //
 // Request parsing is minimal: any ESTABLISHED-state segment whose payload
 // starts with "GET" is treated as an HTTP request and answered with the
@@ -244,19 +239,7 @@ fn main() {
         uart_puts("http_server: device/link not found\r\n");
     } else {
         net_read_mac(our_mac as *u8);
-        // See the file header comment for why this differs from every
-        // other example's shared OUR_IP constant: SLIRP's -netdev user
-        // hostfwd (QEMU) requires the guest to own 10.0.2.15 specifically.
-        // On real STM32 hardware there is no such constraint, so it just
-        // uses the shared OUR_IP constant like every other example.
-        if (IS_QEMU == 1) {
-            our_ip[0] = 10 as u8;
-            our_ip[1] = 0 as u8;
-            our_ip[2] = 2 as u8;
-            our_ip[3] = 15 as u8;
-        } else {
-            bytes_copy(our_ip as *u8, OUR_IP as *u8, 4);
-        }
+        bytes_copy(our_ip as *u8, HTTP_SERVER_IP as *u8, 4);
 
         uart_puts("http_server: ready\r\n");
 
