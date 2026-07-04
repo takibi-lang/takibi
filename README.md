@@ -36,6 +36,45 @@ insufficient." The finished form of a piece of code is one where every index
 range is pinned at the type level using `for i in 0..<n` or `{lo..<hi}`
 annotations.
 
+## Development Workflow: Gradual Elimination of Runtime Traps
+
+takibi's central bet is a workflow, not just a type system. Languages like
+SPARK or Dafny demand full rigor from the first line; takibi instead
+supports **raising rigor as the development phase advances**, at the
+language level:
+
+1. **Prototype freely.** By default, unproven array accesses and range
+   casts compile fine and get a runtime check (`llvm.trap` on violation).
+   A trap firing during driver bring-up is not treated as a shameful bug --
+   it is a *signal that type information is missing*, pointing at exactly
+   the access whose range the programmer has not yet expressed.
+2. **Strengthen incrementally.** Replace raw indices with `for i in 0..<n`
+   loops, `{lo..<hi}` refined types, slice types (`[u8; 54..]`) and
+   `if (v >= 0 && v < N)` / `if (s.len >= N)` narrowing. Each addition of
+   type information makes checks (and their traps) *provably unnecessary*,
+   and the compiler deletes them.
+3. **Ship with `--forbid-trap`.** The compiler then rejects the program if
+   ANY runtime trap check remains, listing every unproven site with its
+   source location. A binary that builds under this flag contains zero
+   trap instructions -- the "no runtime panics" requirement is a build
+   result, not a code-review hope.
+
+Two design invariants keep this path monotonic: proofs are never lost
+silently (an immutable binding keeps what its initializer proved, even
+under a weaker type annotation), and unchecked assertions are never
+invisible (constructs that ask the compiler to *trust* rather than *check*
+-- e.g. building a slice from a raw pointer at a driver boundary -- must
+be wrapped in `unsafe { ... }`, so they are seen when written and when
+read).
+
+`--forbid-trap` is expected to grow into a family: per-category strictness
+options (array-bounds trap freedom, checked-cast freedom, safe-pointer
+enforcement outside `unsafe`, ...) with one umbrella flag enabling them
+all. Today's single flag is the first member. Currently all but one of the
+~45 examples -- including the full TCP/IP stack and HTTP server -- compile
+trap-free under it (the one exception is a demo whose entire point is a
+runtime-checked cast).
+
 ## Current Status
 
 - A full pipeline exists: lexer -> Menhir parser -> Hindley-Milner type

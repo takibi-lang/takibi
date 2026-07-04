@@ -72,6 +72,7 @@ rule read = parse
   | '~'  { TILDE }
 
   | "bool" { BOOL_TYPE }
+  | "unsafe" { UNSAFE }
   | "true"  { TRUE }
   | "false" { FALSE }
   | "i8"   { I8_TYPE  } | "i16"  { I16_TYPE } | "i32"  { I32_TYPE } | "i64"  { I64_TYPE }
@@ -79,6 +80,8 @@ rule read = parse
   | "usize" { USIZE_TYPE }
   | ':' { COLON }
   | "..<" { DOTDOTLT }   (* Range separator for {lo..<hi}. Match before '.' *)
+  | ".."  { DOTDOT }     (* Open-ended range for slice min length: [u8; 54..].
+                            ocamllex longest-match keeps "..<" winning when a '<' follows. *)
   | '.' { DOT }
 
   | "0x" ['0'-'9' 'a'-'f' 'A'-'F']+ as h { INT (int_of_string h) }

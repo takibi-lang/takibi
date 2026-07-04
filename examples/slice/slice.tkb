@@ -1,0 +1,76 @@
+// Slice type demo (P1): a slice is a fat value (pointer + usize length)
+// whose type carries a compile-time MINIMUM length -- [u8; N..] means
+// "at least N bytes"; []u8 means "length unknown" (minimum 0).
+//
+// Everything in this file is proven at the type level: zero runtime
+// bounds checks are generated, so it also compiles under --forbid-trap
+// (registered as forbid_trap_slice in scripts/run_qemutest.sh).
+// The proof devices, in order of appearance:
+//   - [u8; 8..] parameter: the caller must prove at least 8 bytes;
+//     inside, `for i in 0..<8` / constant indices are within the minimum
+//   - `buf as []u8`: an array variable's static size becomes the slice's
+//     minimum ([u8; 16] -> [u8; 16..]); passing it where [u8; 8..] is
+//     required is subtyping (a stronger guarantee always passes)
+//   - s[4..<8]: constant subslice, proven against the base's minimum,
+//     yields [u8; 4..]
+//   - `if (s.len >= 1)`: length narrowing turns a runtime comparison
+//     into a type-level minimum for the branch (same machinery, and the
+//     same written_names kill rule, as integer if-narrowing)
+//
+// NOTE on annotations: `let m: []u8 = s[4..<8];` does NOT weaken the
+// proof -- for an IMMUTABLE binding the compiler keeps the initializer's
+// proven minimum ([u8; 4..]) regardless of the annotation ("proofs are
+// only lost at mutation points, never at annotation" -- see CLAUDE.md's
+// gradual-trap-elimination section). `let mut m: []u8 = ...` DOES keep
+// the declared weak type: reassignment can bring shorter slices, so the
+// weak type is honest and its runtime checks are real proof gaps.
+//
+// QEMU expected output:
+//   len=16 data=ABCDEFGH sub=EFGH head=A sum=548
+
+let mut buf: [u8; 16];
+
+fn fill8(s: [u8; 8..]) {
+    for i in 0..<8 {
+        s[i] = ('A' + i) as u8;
+    }
+}
+
+fn sum8(s: [u8; 8..]) -> i32 {
+    let mut total: i32 = 0;
+    for i in 0..<8 {
+        total = total + (s[i] as i32);
+    }
+    return total;
+}
+
+fn print4(s: [u8; 4..]) {
+    uart_putc(s[0]);
+    uart_putc(s[1]);
+    uart_putc(s[2]);
+    uart_putc(s[3]);
+}
+
+fn head_or_zero(s: []u8) -> u8 {
+    if (s.len >= 1) {
+        return s[0];    // proven by the narrowing above, no check
+    }
+    return '0' as u8;
+}
+
+fn main() {
+    let s = buf as []u8;    // [u8; 16..]
+    fill8(s);
+    uart_puts("len=");
+    uart_print_uint(s.len as i32);
+    uart_puts(" data=");
+    print4(s[0..<4]);
+    print4(s[4..<8]);
+    uart_puts(" sub=");
+    print4(s[4..<8]);
+    uart_puts(" head=");
+    uart_putc(head_or_zero(s));
+    uart_puts(" sum=");
+    uart_print_uint(sum8(s));
+    uart_puts("\r\n");
+}

@@ -5,9 +5,9 @@ open Ast
 %token <int> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN RETURN LET MUT EXTERN STRUCT PACKED IO ENUM MATCH ALIGN SIZEOF
+%token FN RETURN LET MUT EXTERN STRUCT PACKED IO ENUM MATCH ALIGN SIZEOF UNSAFE
 %token DARROW COLONCOLON UNDERSCORE
-%token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT
+%token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT
 %token ASSIGN DOT
 %token IF ELSE WHILE FOR IN BREAK CONTINUE
 %token EOF
@@ -245,6 +245,12 @@ expr:
   | id = IDENT LBRACKET idx = expr RBRACKET
     (* arr[i] -- preserved as Index node; codegen emits bounds check for [T;N] arrays *)
     { { desc = Index (id, idx); loc = $symbolstartpos } }
+  | id = IDENT LBRACKET lo = expr DOTDOTLT hi = expr RBRACKET
+    (* s[lo..<hi] -- subslice (constant bounds, proven) or slice-from-pointer (unchecked) *)
+    { { desc = SliceOf (id, lo, hi); loc = $symbolstartpos } }
+  | UNSAFE LBRACE e = expr RBRACE
+    (* unsafe { e } -- visibility marker permitting unchecked-assertion constructs in e *)
+    { { desc = Unsafe e; loc = $symbolstartpos } }
   | e = expr DOT fname = IDENT
     (* e.field -- struct field read; works for both Struct and *Struct *)
     { { desc = FieldGet (e, fname); loc = $symbolstartpos } }
@@ -277,6 +283,10 @@ base_type_expr:
   | IO         type_expr { TypeIo  $2 }
   | TIMES      type_expr { TypePtr $2 }
   | LBRACKET t = type_expr SEMI n = array_size RBRACKET { TypeArray (t, n) }
+  | LBRACKET RBRACKET t = type_expr { TypeSlice (t, 0) }
+    (* []T -- slice with no compile-time minimum length *)
+  | LBRACKET t = type_expr SEMI n = array_size DOTDOT RBRACKET { TypeSlice (t, n) }
+    (* [T; N..] -- slice whose runtime length is at least N *)
   | FN LPAREN fn_type_params RPAREN ARROW type_expr { TypeFn ($3, $6) }
   | FN LPAREN fn_type_params RPAREN                 { TypeFn ($3, TypeVoid) }
   | IDENT { TypeNamed $1 }

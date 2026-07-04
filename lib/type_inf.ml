@@ -42,6 +42,14 @@ let check_cond loc ct =
    `TI32 >> TRefinedInt` to fail the unification anti-subtyping guard. *)
 let canon_ty t = match repr t with TRefinedInt _ -> TI32 | t -> t
 
+(* Nesting depth of `unsafe { ... }` expressions around the expression
+   currently being inferred. Compilation is single-threaded, so a module
+   -level counter is safe (same pattern as llvm_gen's narrowing_ctx).
+   Reset at the start of infer_program: a TypeError raised inside an
+   unsafe block aborts that compilation with the counter left non-zero,
+   and unit tests run many compilations in one process. *)
+let unsafe_depth = ref 0
+
 let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
@@ -219,6 +227,43 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            of_ast target_ty
        | None, None ->
            let tgt = of_ast target_ty in
+           (match target_ty with
+            | Ast.TypeSlice (el_ast, want_min) ->
+                (* Slice creation cast. Sources:
+                   - an array VARIABLE (its declared [T; N] carries the static
+                     length; note infer_expr's Var case decays arrays to *T,
+                     so the length must be recovered from the binding, not
+                     from src_ty -- llvm_gen's Cast case does the same)
+                   - another slice (min-length may only be relaxed) *)
+                let el_want = of_ast el_ast in
+                (match repr src_ty with
+                 | TSlice (el_s, m) ->
+                     unify_at e.loc el_s el_want;
+                     if m < want_min then
+                       raise (TypeError (e.loc, Printf.sprintf
+                         "cannot cast %s to %s: minimum length %d is not proven"
+                         (to_string src_ty) (to_string tgt) want_min));
+                     TSlice (el_want, m)
+                 | _ ->
+                     (match e.desc with
+                      | Ast.Var name ->
+                          (match StringMap.find_opt name tyenv with
+                           | Some (t, _) ->
+                               (match repr t with
+                                | TArray (el_a, n) ->
+                                    unify_at e.loc el_a el_want;
+                                    if n < want_min then
+                                      raise (TypeError (e.loc, Printf.sprintf
+                                        "cannot cast [_; %d] to %s: array is shorter \
+                                         than the required minimum %d" n (to_string tgt) want_min));
+                                    TSlice (el_want, n)
+                                | t' -> raise (TypeError (e.loc, Printf.sprintf
+                                    "cannot cast '%s' to a slice" (to_string t'))))
+                           | None -> raise (TypeError (e.loc,
+                               Printf.sprintf "Unbound variable: %s" name)))
+                      | _ -> raise (TypeError (e.loc,
+                          "slice cast requires an array variable or slice source"))))
+            | _ ->
            (match repr src_ty with
             | TPtr _ ->
                 (match tgt with
@@ -229,10 +274,16 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                          "cannot cast pointer to %s; \
                           use `(ptr as usize) as %s` to make the truncation explicit"
                          (to_string tgt) (to_string tgt))))
-            | _ -> tgt))
+            | TSlice _ ->
+                raise (TypeError (e.loc,
+                  Printf.sprintf "cannot cast a slice to %s" (to_string tgt)))
+            | _ -> tgt)))
 
   | FieldGet (base_expr, fname) ->
       let bt = infer_expr senv eenv tyenv fenv base_expr in
+      (match repr bt, fname with
+       | TSlice _, "len" -> TUsize  (* s.len -- the slice's runtime length *)
+       | _ ->
       let sname = match repr bt with
         | TStruct s                      -> s
         | TPtr   (TStruct s)             -> s
@@ -256,7 +307,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | t                 -> t)
        | None ->
            raise (TypeError (e.loc,
-             Printf.sprintf "no field '%s' in struct '%s'" fname sname)))
+             Printf.sprintf "no field '%s' in struct '%s'" fname sname))))
 
   | Index (id, idx) ->
       (* Get the variable's original type (no array decay, unlike Var) *)
@@ -272,9 +323,70 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                   Printf.sprintf "index %d is out of bounds for array of size %d" k n))
             | _ -> ());
            elem
+       | TSlice (elem, _) -> elem  (* runtime length; codegen elides the check
+                                      only when idx's range fits the MINIMUM *)
        | TPtr   elem      -> strip_io elem     (* *T or *io T -> returns T (bounds unknown) *)
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt))))
+
+  | SliceOf (id, lo_e, hi_e) ->
+      let vt = lookup e.loc id tyenv in
+      let lo_t = infer_expr senv eenv tyenv fenv lo_e in
+      let hi_t = infer_expr senv eenv tyenv fenv hi_e in
+      unify_at lo_e.loc (canon_ty lo_t) TI32;
+      unify_at hi_e.loc (canon_ty hi_t) TI32;
+      let const_bounds = (Const_env.bound_value lo_e, Const_env.bound_value hi_e) in
+      (match repr vt with
+       | TSlice (elem, m) | TArray (elem, m) ->
+           (* Proven subslice: bounds must be compile-time constants inside
+              the base's minimum length. m is a LOWER bound of the runtime
+              length, so b <= m implies b <= len -- no runtime check needed.
+              (Runtime-checked subslicing is deferred -- P3 in the slice
+              design; today's answer for a runtime offset is a raw pointer.) *)
+           (match const_bounds with
+            | Some a, Some b when 0 <= a && a <= b && b <= m ->
+                TSlice (elem, b - a)
+            | Some a, Some b ->
+                raise (TypeError (e.loc,
+                  Printf.sprintf
+                    "subslice [%d..<%d] is outside the proven range of '%s' \
+                     (minimum length %d)" a b (to_string vt) m))
+            | _ ->
+                raise (TypeError (e.loc,
+                  "subslice bounds on a slice/array must be compile-time \
+                   constants; runtime-checked subslicing is not implemented")))
+       | TPtr elem ->
+           (* Slice construction from a raw pointer: an unchecked length
+              ASSERTION with no evidence, so it must be visibly marked --
+              only allowed inside unsafe { ... }. A false assertion here
+              poisons every downstream "proof", which is categorically
+              worse than a local pointer bug; the unsafe keyword is what
+              makes that visible when writing and when reading. *)
+           (match repr elem with
+            | TIo _ ->
+                raise (TypeError (e.loc,
+                  "cannot make a slice from a volatile (*io) pointer: slice \
+                   accesses are non-volatile and would silently drop io"))
+            | _ ->
+                if !unsafe_depth = 0 then
+                  raise (TypeError (e.loc,
+                    Printf.sprintf
+                      "slice construction from a raw pointer asserts a length \
+                       without evidence; write `unsafe { %s[..] }` to mark it" id));
+                (match const_bounds with
+                 | Some a, Some b when 0 <= a && a <= b -> TSlice (elem, b - a)
+                 | _ -> TSlice (elem, 0)))
+       | t -> raise (TypeError (e.loc,
+           Printf.sprintf "subslice on non-slice/array/pointer type '%s'" (to_string t))))
+
+  | Unsafe e1 ->
+      (* Transparent to typing except for permitting unchecked-assertion
+         constructs inside. No exception-safe decrement needed: a TypeError
+         aborts this compilation, and infer_program resets the counter. *)
+      incr unsafe_depth;
+      let t = infer_expr senv eenv tyenv fenv e1 in
+      decr unsafe_depth;
+      t
 
   | EnumVariant (ename, vname) ->
       (match StringMap.find_opt ename eenv with
@@ -406,15 +518,30 @@ let collect_bounds (cond : Ast.expr) : (int option * int option) StringMap.t =
 let narrow_from_cond tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
   let killed = Ast.written_names then_body in
   let bounds = collect_bounds cond in
-  StringMap.fold (fun name (lo_opt, hi_opt) env ->
-    match lo_opt, hi_opt with
-    | Some lo, Some hi when not (List.mem name killed) ->
-        (match StringMap.find_opt name env with
-         | Some (TI32, is_mut) ->
-             StringMap.add name (TRefinedInt (lo, hi), is_mut) env
-         | _ -> env)
-    | _ -> env
-  ) bounds tyenv
+  let env =
+    StringMap.fold (fun name (lo_opt, hi_opt) env ->
+      match lo_opt, hi_opt with
+      | Some lo, Some hi when not (List.mem name killed) ->
+          (match StringMap.find_opt name env with
+           | Some (TI32, is_mut) ->
+               StringMap.add name (TRefinedInt (lo, hi), is_mut) env
+           | _ -> env)
+      | _ -> env
+    ) bounds tyenv
+  in
+  (* Slice minimum-length narrowing: `if (s.len >= K)` upgrades s's proven
+     minimum for the branch. Same kill rule; llvm_gen's apply_narrowing/_mut
+     consume the same Ast.slice_len_mins (sync rule). *)
+  List.fold_left (fun env (name, k) ->
+    if List.mem name killed then env
+    else match StringMap.find_opt name env with
+      | Some (t, is_mut) ->
+          (match repr t with
+           | TSlice (el, m) when k > m ->
+               StringMap.add name (TSlice (el, k), is_mut) env
+           | _ -> env)
+      | None -> env
+  ) env (Ast.slice_len_mins cond)
 
 (* -- Statement inference --------------------------------------------------- *)
 (* Returns (updated_tyenv, updated_raw_locals).
@@ -474,6 +601,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                    Printf.sprintf "index %d is out of bounds for array of size %d" k n))
              | _ -> ());
             elem
+        | TSlice (elem, _) -> elem
         | TPtr   elem      -> strip_io elem
         | _ -> raise (TypeError (s.loc,
             Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))
@@ -510,27 +638,53 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       (tyenv, raw_locals)
   | Let (is_mut, name, ty_opt, expr_opt) ->
       let ty = of_ast_opt ty_opt in
-      (match expr_opt with
-       | None ->
-           if not is_mut then
-             raise (TypeError (s.loc,
-               Printf.sprintf "immutable variable '%s' must have an initializer" name))
-       | Some { desc = StructLit exprs; loc } ->
-           (* Struct literal: look up struct name from the type annotation and check each field *)
-           if not is_mut then
-             raise (TypeError (loc,
-               Printf.sprintf "struct literal requires `let mut %s: Name = {...}`" name));
-           (match repr ty with
-            | (TStruct _ | TArray _) as expected ->
-                check_expr senv eenv tyenv fenv { desc = StructLit exprs; loc } expected
-            | _ -> raise (TypeError (loc,
-                "literal { ... } requires a struct or array type annotation")))
-       | Some e ->
-           let et = infer_expr senv eenv tyenv fenv e in
-           (* Initialization: match actual(expr) as a subtype of expected(type annotation) *)
-           unify_at e.loc et (strip_io ty));
-      ( StringMap.add name (ty, is_mut) tyenv,
-        StringMap.add name ty raw_locals )
+      let init_ty_opt =
+        match expr_opt with
+        | None ->
+            if not is_mut then
+              raise (TypeError (s.loc,
+                Printf.sprintf "immutable variable '%s' must have an initializer" name));
+            None
+        | Some { desc = StructLit exprs; loc } ->
+            (* Struct literal: look up struct name from the type annotation and check each field *)
+            if not is_mut then
+              raise (TypeError (loc,
+                Printf.sprintf "struct literal requires `let mut %s: Name = {...}`" name));
+            (match repr ty with
+             | (TStruct _ | TArray _) as expected ->
+                 check_expr senv eenv tyenv fenv { desc = StructLit exprs; loc } expected
+             | _ -> raise (TypeError (loc,
+                 "literal { ... } requires a struct or array type annotation")));
+            None
+        | Some e ->
+            let et = infer_expr senv eenv tyenv fenv e in
+            (* Initialization: match actual(expr) as a subtype of expected(type annotation) *)
+            unify_at e.loc et (strip_io ty);
+            Some et
+      in
+      (* Proofs are only lost at mutation points, never at annotation
+         (gradual-trap-elimination invariant): for an IMMUTABLE binding, a
+         weaker annotation must not discard what the initializer proved --
+         the value can never change, so keeping the stronger type is sound,
+         and no runtime check (trap site) is manufactured out of
+         already-proven code. Applies to the two proof-carrying types:
+         slice minimum lengths, and refined int ranges (the latter only
+         when the annotation is plain i32 -- narrower annotations like u8
+         change the storage representation, so there the declared type must
+         win). `let mut` keeps the declared type: reassignment can
+         genuinely bring weaker values, so the weak type is honest. *)
+      let bind_ty =
+        if is_mut then ty
+        else match init_ty_opt with
+          | None -> ty
+          | Some et ->
+              (match repr ty, repr et with
+               | TSlice (el, m1), TSlice (_, m2) when m2 > m1 -> TSlice (el, m2)
+               | TI32, (TRefinedInt _ as r) -> r
+               | _ -> ty)
+      in
+      ( StringMap.add name (bind_ty, is_mut) tyenv,
+        StringMap.add name bind_ty raw_locals )
   | Block stmts ->
       (* Let bindings extend the inner env but do not escape the block *)
       let (_, raw_locals') = List.fold_left
@@ -690,6 +844,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
 (* -- Whole-program inference ----------------------------------------------- *)
 
 let infer_program (prog : Ast.toplevel list) : program_types =
+  unsafe_depth := 0;  (* see its comment: fresh per compilation / per unit test *)
   (* Pass 0: collect struct and enum definitions *)
   let senv = List.fold_left (fun m -> function
     | Ast.StructDef (name, fields, _, _) -> StringMap.add name fields m

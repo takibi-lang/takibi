@@ -489,6 +489,29 @@ let (_, variants, is_ne) = StringMap.find ename eenv in
 
 ### --forbid-trap: Gradual Verification (permissive dev mode / proven ship mode)
 
+**This workflow is a central goal of the project, not a side feature**:
+start permissive (traps allowed -- a trap is not a bug but a SIGNAL that
+type information is missing), strengthen types incrementally (for-loop
+refinement, {lo..<hi}, slice minimum lengths, narrowing), and finally ship
+with --forbid-trap, which guarantees the emitted binary contains zero trap
+instructions. SPARK/Dafny assume rigor from day one; takibi's bet is that
+raising rigor PER DEVELOPMENT PHASE, supported at the language level, is
+the right shape for embedded work ("Gradual Elimination of Runtime Traps").
+Two invariants keep the path to ship monotonic:
+- **Proofs are only lost at mutation points, never at annotation**: an
+  immutable `let` keeps the initializer's proven type (slice minimum /
+  refined range) even under a weaker annotation -- a weaker annotation must
+  never manufacture trap sites out of already-proven code, because those
+  would resurface as ship-time rejections with no real proof gap behind
+  them. `let mut` keeps its declared (honestly weak) type: reassignment
+  can bring weaker values, so its checks mark real gaps.
+- **Unchecked assertions are visibly marked** (`unsafe { ... }`, see below):
+  the checks/trap axis and the trust axis stay separate.
+Naming note for the future: --forbid-trap may later split into per-category
+options (array-bounds trap freedom, checked-cast freedom, safe-pointers-
+only, ...) with today's flag becoming the umbrella that enables all of
+them; a rename (e.g. --notrap) is on the table then. Not worth churn yet.
+
 `takibi ... --forbid-trap` rejects compilation if ANY runtime trap check
 remains in the generated code, listing every unproven site with its source
 location (all of them, not just the first -- same report-all philosophy as
@@ -581,6 +604,26 @@ check_const_shadowing), `lib/ast.ml` (written_names), `lib/const_env.ml`
 run_qemutest.sh; run_compile_error_test now accepts trailing extra takibi
 flags, and run_forbid_trap_ok_test is the success-side counterpart).
 
+**`unsafe { expr }`** (expression form; `lib/ast.ml` Unsafe, gated in
+`lib/type_inf.ml` via a module-level `unsafe_depth` counter, transparent in
+codegen): permits unchecked-assertion constructs inside -- currently
+exactly one, slice construction from a raw pointer (`unsafe { p[0..<n] }`,
+the driver-boundary op whose false length claim would poison every
+downstream proof; that categorical difference from an ordinary local
+pointer bug is why unsafe starts HERE and not at general pointer
+arithmetic). Key distinction, deliberately preserved: **unsafe produces no
+traps** -- a trap is a CHECK the compiler still doubts; unsafe is a
+checkless ASSERTION the compiler is told to trust. --forbid-trap polices
+the first axis; auditing the second is a future `--list-unsafe`-style
+concern (how many human oaths underlie the shipped binary's proofs).
+Deliberately NOT yet unsafe-gated: int->ptr / ptr->ptr casts and the
+integer-literal->pointer Let coercion (Tier 2 -- ~16 `as *io` sites plus
+ring-manipulation reinterprets, concentrated in the HALs; needs a decision
+on the no-`as` literal coercion form first), and general pointer
+deref/index/arith (Tier 3 -- ~113 pointer bindings in the HALs; marking
+everything would drown the signal. Revisit as an `unsafe fn`-style marker
+once slices have pushed pointers out of application code).
+
 **Deliberately deferred** (recorded so the next step starts from data, not
 guesswork): flow-sensitive assignment kill (narrow until the first write
 instead of killing the whole branch), while-condition narrowing
@@ -590,6 +633,100 @@ point for a VC+SMT (Z3) backend; everything above stays in the
 non-relational interval world where plain OCaml implementation is the
 right tool. The empirical result that 43/44 examples needed ZERO relational
 reasoning is the argument for not introducing a solver yet.
+
+### Slice Type (P1): []T / [T; N..] -- fat pointer with a compile-time minimum length
+
+Designed from a full census of examples/http_server's raw-pointer usage (see
+git history around 2026-07): ~77 of its pointer operations are constant
+offsets/lengths inside views whose size was guarded by a constant comparison
+-- i.e. provable with interval reasoning only -- so the slice type carries a
+compile-time MINIMUM length and nothing more. `[]u8` = minimum 0 (length
+unknown), `[u8; 54..]` = at least 54 bytes. No relational (`i < len`-style)
+reasoning was added; the census showed exactly one app-layer site that needs
+it (tcp_hdr_len options skip), deferred to a later phase.
+
+**Representation / ABI**: an LLVM first-class struct value `{ptr, usize}`
+(`ltype_of_ast TypeSlice`), so `gen_expr` returns it as one llvalue and
+LLVM's own ABI lowering passes it in register pairs on both targets. The
+len half follows the target pointer width: `{ptr, i64}` on AArch64,
+`{ptr, i32}` on Cortex-M7. Slices never cross `extern fn` boundaries.
+
+**`.len` is usize, not i32** (deliberate): composes cast-free with
+`sizeof(T)` (`if (s.len >= sizeof(Hdr))`), encodes non-negativity in the
+type instead of as an out-of-band invariant, and forces an explicit
+`(wire_value as usize)` exactly at the untrusted-input trust boundary,
+consistent with the pointer-cast philosophy.
+
+**Creation forms**:
+- `arr as []u8` -- array variable to slice; the array's static size becomes
+  the minimum ([u8; 16] -> [u8; 16..]). Note infer_expr's Var case decays
+  arrays to *T, so BOTH type_inf's and llvm_gen's Cast cases recover the
+  length from the declared binding, not from the decayed source type.
+- `s[a..<b]` on a slice/array -- constant-bound subslice, proven against
+  the base's minimum at compile time (a runtime-bound subslice is a
+  compile error for now -- P3), yields `[T; (b-a)..]`.
+- `unsafe { p[a..<b] }` on a raw pointer -- UNCHECKED slice construction
+  (the driver-boundary escape hatch; as unsafe as the pointer arithmetic it
+  replaces, but done once, after which accesses are bounds-governed). The
+  `unsafe { ... }` marker is REQUIRED (compile error without it -- see the
+  unsafe paragraph in the --forbid-trap section): this is a length
+  assertion with no evidence, and it must be visible when writing and when
+  reading. Constant bounds still yield a minimum. Rejected on `*io T`
+  (slice loads/stores are non-volatile and would silently drop io
+  semantics).
+
+**Indexing / proof rule**: `s[i]` is proven (no check, no trap site) iff
+i's range `{lo..<hi}` satisfies `lo >= 0 && hi <= minimum`; the minimum is
+a lower bound of the runtime length, so this is sound. Anything unproven
+gets a runtime check against the RUNTIME length (`emit_bounds_check_dyn`:
+zext the i32-widened index to usize width -- negative indices become huge
+unsigned values -- one unsigned compare, llvm.trap, recorded as a
+--forbid-trap site).
+
+**Length narrowing**: `if (s.len >= K)` upgrades the binding's minimum to K
+inside the branch. Single shared recognizer `Ast.slice_len_mins` consumed
+by type_inf's narrow_from_cond AND llvm_gen's apply_narrowing/_mut (sync
+rule), subject to the same written_names kill rule as integer narrowing
+(assign/alias/rebind of the slice kills it). Mut bindings go through
+narrowing_ctx (consulted via effective_slice_min at Index/AssignIndex/
+SliceOf sites); Imm bindings are replaced in the locals table directly.
+
+**Subtyping**: `unify (TSlice m_actual) (TSlice m_expected)` succeeds iff
+m_actual >= m_expected (mirrors TRefinedInt's one-directional rule; unify's
+call sites all pass (actual, expected)). **Annotations do NOT weaken
+immutable bindings**: `let m: []u8 = s[2..<6];` keeps the initializer's
+proven `[u8; 4..]` (and `let x: i32 = v` keeps v's `{lo..<hi}`) -- see the
+"proofs are only lost at mutation points" invariant in the --forbid-trap
+section for why (an earlier version let the annotation win, which
+manufactured ship-time --forbid-trap rejections out of already-proven
+code). `let mut` keeps the declared type; its checks mark real proof gaps.
+Documented in examples/slice/slice.tkb's header.
+
+**Codegen re-verifies what type_inf proved** (constant subslice range vs.
+its own effective minimum) and raises a "BUG:" Error on disagreement,
+rather than trusting silently -- keeps the two-sided sync-rule discipline
+auditable.
+
+**Files**: `lib/ast.ml` (TypeSlice, SliceOf, slice_len_mins, written_names
+case), `lib/lexer.mll` (DOTDOT -- ".." lexes after "..<" by longest-match),
+`lib/parser.mly` ([]T, [T; N..] via array_size, IDENT[e..<e]),
+`lib/types.ml` (TSlice + subtyping unify), `lib/type_inf.ml` (.len, Index,
+SliceOf, AssignIndex, Cast, narrow_from_cond), `lib/llvm_gen.ml` (ltype,
+ditype-as-pointer, slice_ptr/slice_len/make_slice/effective_slice_min,
+emit_bounds_check_dyn, Index/AssignIndex/SliceOf/Cast/FieldGet cases,
+narrowing), `examples/slice/` (demo, both targets, --forbid-trap clean:
+forbid_trap_slice in run_qemutest.sh), 11 unit-test cases.
+
+**Deferred (P2/P3, in order of payoff)**: element iteration `for b in s`
+and copy/eq builtins (what the netutil helpers need to become slice-based
+without relational reasoning -- their `for i in 0..<n { a[i] }` loops are
+where n-vs-len relations concentrate); runtime-checked subslice `s[a..<b]`
+with runtime bounds = one recorded trap site (needed for tcp_hdr_len
+options skip -- the single genuinely relational site in http_server);
+driver API returning (frame capacity slice, received length) so the
+device-reported length gets validated once at the boundary (today's code
+trusts it unchecked -- a real latent OOB found during the census, along
+with the unbounded response build in build_http_response_fin).
 
 ### Synchronization Primitive Design and Current Limitations
 

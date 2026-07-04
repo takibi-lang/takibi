@@ -28,6 +28,10 @@ type type_expr =
   | TypeFn of type_expr list * type_expr  (* fn(T...) -> R *)
   | TypeNamed of string            (* struct type by name *)
   | TypeRefined of int * int       (* {lo..<hi} -- refined int: lo <= x < hi *)
+  | TypeSlice of type_expr * int   (* []T / [T; N..] -- fat pointer (ptr + usize len);
+                                      int = compile-time MINIMUM length (0 = unknown).
+                                      The runtime length is always >= the minimum; index
+                                      proofs and constant subslices check against it. *)
 [@@deriving show]
 
 type expr = expr_desc located
@@ -45,6 +49,15 @@ and expr_desc =
   | FieldGet of expr * string  (* expr.field -- read a struct field *)
   | StructLit of expr list     (* { e, e, ... } -- positional struct literal *)
   | Index of ident * expr      (* arr[idx] -- preserves array/pointer type for bounds checking *)
+  | SliceOf of ident * expr * expr  (* s[lo..<hi] -- subslice of a slice/array (compile-time
+                                       constant bounds, proven against the min length) or
+                                       slice construction from a raw pointer (unchecked
+                                       assertion; only allowed inside unsafe { ... }) *)
+  | Unsafe of expr             (* unsafe { expr } -- permits unchecked-assertion
+                                  constructs (pointer -> slice construction) inside.
+                                  Changes NO semantics and generates NO code of its
+                                  own: it is a visibility marker, gating what the
+                                  type checker accepts. *)
   | EnumVariant of string * string  (* EtherType::IPv4 -- enum name, variant name *)
   | SizeOf of type_expr        (* sizeof(T) -- compile-time size in bytes, type usize *)
 [@@deriving show]
@@ -120,11 +133,13 @@ let written_names (stmts : stmt list) : string list =
   let add n = Hashtbl.replace acc n () in
   let rec go_expr (e : expr) = match e.desc with
     | AddrOf { desc = Var n; _ } -> add n
-    | AddrOf e1 | Bnot e1 | Deref e1 | Cast (_, e1) | FieldGet (e1, _) ->
+    | AddrOf e1 | Bnot e1 | Deref e1 | Cast (_, e1) | FieldGet (e1, _)
+    | Unsafe e1 ->
         go_expr e1
     | BinOp (_, a, b) -> go_expr a; go_expr b
     | Call (_, args) | StructLit args -> List.iter go_expr args
     | Index (_, idx) -> go_expr idx
+    | SliceOf (_, lo, hi) -> go_expr lo; go_expr hi
     | IntLit _ | BoolLit _ | StringLit _ | Var _ | EnumVariant _ | SizeOf _ ->
         ()
   in
@@ -151,3 +166,31 @@ let written_names (stmts : stmt list) : string list =
   in
   List.iter go_stmt stmts;
   Hashtbl.fold (fun n () l -> n :: l) acc []
+
+(* Slice length lower bounds proven by an if condition: [(name, min_len)].
+   Recognized shapes (joined by &&): `s.len >= K`, `s.len > K`,
+   `K <= s.len`, `K < s.len` with K a bare integer literal. Used by
+   if-narrowing to upgrade a slice binding's compile-time minimum length
+   within the then-branch (subject to the same written_names kill rule as
+   integer range narrowing). Single shared implementation for type_inf.ml
+   and llvm_gen.ml -- sync rule, same reasoning as written_names above. *)
+let slice_len_mins (cond : expr) : (string * int) list =
+  let acc = Hashtbl.create 4 in
+  let update name k =
+    let prev = match Hashtbl.find_opt acc name with Some p -> p | None -> 0 in
+    Hashtbl.replace acc name (max prev k)
+  in
+  let rec go e = match e.desc with
+    | BinOp (And, e1, e2) -> go e1; go e2
+    | BinOp (Ge, { desc = FieldGet ({ desc = Var n; _ }, "len"); _ },
+                 { desc = IntLit k; _ }) -> update n k
+    | BinOp (Gt, { desc = FieldGet ({ desc = Var n; _ }, "len"); _ },
+                 { desc = IntLit k; _ }) -> update n (k + 1)
+    | BinOp (Le, { desc = IntLit k; _ },
+                 { desc = FieldGet ({ desc = Var n; _ }, "len"); _ }) -> update n k
+    | BinOp (Lt, { desc = IntLit k; _ },
+                 { desc = FieldGet ({ desc = Var n; _ }, "len"); _ }) -> update n (k + 1)
+    | _ -> ()
+  in
+  go cond;
+  Hashtbl.fold (fun n k l -> (n, k) :: l) acc []

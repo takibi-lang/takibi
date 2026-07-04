@@ -58,6 +58,8 @@ let rec show_type = function
         (String.concat ", " (List.map show_type ps)) (show_type r)
   | Ast.TypeNamed s     -> s
   | Ast.TypeRefined (lo, hi) -> Printf.sprintf "{%d..<%d}" lo hi
+  | Ast.TypeSlice (t, 0) -> Printf.sprintf "[]%s" (show_type t)
+  | Ast.TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (show_type t) n
 
 let type_t : Ast.type_expr Alcotest.testable =
   Alcotest.testable (fun fmt t -> Format.pp_print_string fmt (show_type t)) (=)
@@ -2057,6 +2059,169 @@ let codegen_tests = [
           let FTRAP_N: i32 = 100;
           return FTRAP_N;
         }");
+
+  (* -- Slice type (P1): fat value {ptr, usize len} + minimum-length proofs -- *)
+
+  Alcotest.test_case
+    "slice with static minimum: constant index below the minimum is proven, \
+     zero trap sites" `Quick
+    (expect_trap_sites 0
+       "fn ftsl_static_min(s: [u8; 8..]) -> u8 {
+          return s[3];
+        }");
+
+  Alcotest.test_case
+    "slice with unknown length: unproven i32 index gets a runtime check \
+     against the RUNTIME length (one trap site)" `Quick
+    (expect_trap_sites 1
+       "fn ftsl_dyn_index(s: []u8, i: i32) -> u8 {
+          return s[i];
+        }");
+
+  Alcotest.test_case
+    "length narrowing: `if (s.len >= 4)` upgrades the slice's minimum for \
+     the branch, proving the constant index (zero sites)" `Quick
+    (expect_trap_sites 0
+       "fn ftsl_len_narrow(s: []u8) -> u8 {
+          if (s.len >= 4) {
+            return s[3];
+          }
+          return 0 as u8;
+        }");
+
+  Alcotest.test_case
+    "length narrowing is killed by reassigning the slice inside the branch \
+     (written_names kill rule applies to slices too)" `Quick
+    (expect_trap_sites 1
+       "fn ftsl_len_kill(s: []u8, t: []u8) -> u8 {
+          let mut u: []u8 = s;
+          if (u.len >= 8) {
+            u = t;
+            return u[7];
+          }
+          return 0 as u8;
+        }");
+
+  Alcotest.test_case
+    "constant subslice: s[2..<6] of [u8; 8..] yields [u8; 4..]; index 3 \
+     within it is proven (zero sites)" `Quick
+    (expect_trap_sites 0
+       "fn ftsl_subslice(s: [u8; 8..]) -> u8 {
+          let m = s[2..<6];
+          return m[3];
+        }");
+
+  Alcotest.test_case
+    "constant subslice outside the proven minimum is a compile error" `Quick
+    (expect_type_error "outside the proven range"
+       "fn ftsl_subslice_oob(s: [u8; 8..]) -> u8 {
+          let m = s[2..<10];
+          return m[0];
+        }");
+
+  Alcotest.test_case
+    "array-to-slice cast carries the static length as the minimum: \
+     [u8; 16] as []u8 proves index 15 (zero sites)" `Quick
+    (expect_trap_sites 0
+       "let mut ftsl_buf: [u8; 16];
+        fn ftsl_array_cast() -> u8 {
+          let s = ftsl_buf as []u8;
+          return s[15];
+        }");
+
+  Alcotest.test_case
+    "slice subtyping: a larger minimum passes where a smaller one is \
+     required; the reverse is the anti-subtyping compile error" `Quick
+    (fun () ->
+       expect_codegen_ok
+         "fn ftsl_sub_callee(s: [u8; 20..]) -> u8 { return s[19]; }
+          fn ftsl_sub_caller(s: [u8; 54..]) -> u8 { return ftsl_sub_callee(s); }" ();
+       expect_type_error "narrow with if (s.len"
+         "fn ftsl_sub_callee2(s: [u8; 54..]) -> u8 { return s[53]; }
+          fn ftsl_sub_caller2(s: [u8; 20..]) -> u8 { return ftsl_sub_callee2(s); }" ());
+
+  Alcotest.test_case
+    "s.len has type usize: assigning it to i32 without a cast is a compile \
+     error; with `as i32` it compiles" `Quick
+    (fun () ->
+       expect_type_error "cannot unify"
+         "fn ftsl_len_i32(s: []u8) -> i32 {
+            let n: i32 = s.len;
+            return n;
+          }" ();
+       expect_codegen_ok
+         "fn ftsl_len_cast(s: []u8) -> i32 {
+            return s.len as i32;
+          }" ());
+
+  Alcotest.test_case
+    "slice construction from a raw pointer requires unsafe { ... }: inside \
+     it, constant bounds become the minimum, proving later indexing (zero \
+     sites); without the marker it is a compile error" `Quick
+    (fun () ->
+       expect_trap_sites 0
+         "fn ftsl_from_ptr(p: *u8) -> u8 {
+            let s = unsafe { p[0..<8] };
+            return s[7];
+          }" ();
+       expect_type_error "unsafe"
+         "fn ftsl_from_ptr_bare(p: *u8) -> u8 {
+            let s = p[0..<8];
+            return s[0];
+          }" ());
+
+  Alcotest.test_case
+    "slice construction from a volatile (*io) pointer is rejected: slice \
+     accesses are non-volatile and would silently drop io semantics" `Quick
+    (expect_type_error "volatile"
+       "fn ftsl_from_io(p: *io u8) -> u8 {
+          let s = p[0..<8];
+          return s[0];
+        }");
+
+  (* -- proofs survive weaker annotations on immutable bindings (B-plan) --- *)
+  (* "Proofs are only lost at mutation points, never at annotation": in the
+     gradual-trap-elimination workflow, a weaker annotation on an IMMUTABLE
+     let must not manufacture trap sites out of already-proven code (they
+     would resurface as --forbid-trap rejections at ship time with no real
+     proof gap behind them). `let mut` keeps the declared (honestly weak)
+     type, because reassignment can bring weaker values. *)
+
+  Alcotest.test_case
+    "immutable let with a weaker slice annotation keeps the initializer's \
+     proven minimum: `let m: []u8 = s[2..<6]` still proves m[3] (zero sites)" `Quick
+    (expect_trap_sites 0
+       "fn ftbp_imm_slice(s: [u8; 8..]) -> u8 {
+          let m: []u8 = s[2..<6];
+          return m[3];
+        }");
+
+  Alcotest.test_case
+    "let mut with the same weak slice annotation honestly weakens: \
+     reassignment is possible, so the check stays (one site)" `Quick
+    (expect_trap_sites 1
+       "fn ftbp_mut_slice(s: [u8; 8..]) -> u8 {
+          let mut m: []u8 = s[2..<6];
+          return m[3];
+        }");
+
+  Alcotest.test_case
+    "immutable let with an i32 annotation keeps a refined initializer's \
+     range: `let x: i32 = v` where v: {2..<5} still elides buf[x] (zero \
+     sites); let mut keeps the declared i32 (one site)" `Quick
+    (fun () ->
+       expect_trap_sites 0
+         "let mut ftbp_buf_a: [u8; 8];
+          fn ftbp_imm_int(v: {2..<5}) -> u8 {
+            let x: i32 = v;
+            return ftbp_buf_a[x];
+          }" ();
+       expect_trap_sites 1
+         "let mut ftbp_buf_b: [u8; 8];
+          fn ftbp_mut_int(v: {2..<5}) -> u8 {
+            let mut x: i32 = v;
+            return ftbp_buf_b[x];
+          }" ());
 
   (* Kept last in this group deliberately: Llvm_gen.enable_debug_info flips a
      process-global ref with no way back off (same one-way-switch pattern

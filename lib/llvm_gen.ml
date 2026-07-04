@@ -62,6 +62,8 @@ let rec ty_str = function
   | TypeFn _  -> "fn(...)"
   | TypeNamed s -> s
   | TypeRefined (lo, hi) -> Printf.sprintf "{%d..<%d}" lo hi
+  | TypeSlice (t, 0) -> Printf.sprintf "[]%s" (ty_str t)
+  | TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (ty_str t) n
 
 (* ---- DWARF debug info (opt-in via -g; see enable_debug_info) ----
    Everything DI-related elsewhere in this file (gen_func / gen_stmt / gen_program)
@@ -171,16 +173,30 @@ let collect_bounds_cond (cond : Ast.expr) =
 let apply_narrowing (locals : (string, local_binding) Hashtbl.t)
     (cond : Ast.expr) (killed : string list) =
   let bounds = collect_bounds_cond cond in
-  Types.StringMap.fold (fun name (lo_opt, hi_opt) saved ->
-    match lo_opt, hi_opt with
-    | Some lo, Some hi when not (List.mem name killed) ->
-        (match Hashtbl.find_opt locals name with
-         | Some (Imm (_, v) as old) ->
-             Hashtbl.replace locals name (Imm (TypeRefined (lo, hi), v));
-             (name, old) :: saved
-         | _ -> saved)
-    | _ -> saved
-  ) bounds []
+  let saved =
+    Types.StringMap.fold (fun name (lo_opt, hi_opt) saved ->
+      match lo_opt, hi_opt with
+      | Some lo, Some hi when not (List.mem name killed) ->
+          (match Hashtbl.find_opt locals name with
+           | Some (Imm (TypeSlice _, _)) -> saved  (* handled below *)
+           | Some (Imm (_, v) as old) ->
+               Hashtbl.replace locals name (Imm (TypeRefined (lo, hi), v));
+               (name, old) :: saved
+           | _ -> saved)
+      | _ -> saved
+    ) bounds []
+  in
+  (* Slice minimum-length narrowing (`if (s.len >= K)`) for Imm slice
+     bindings. type_inf.ml's narrow_from_cond consumes the same
+     Ast.slice_len_mins (sync rule). *)
+  List.fold_left (fun saved (name, k) ->
+    if List.mem name killed then saved
+    else match Hashtbl.find_opt locals name with
+      | Some (Imm (TypeSlice (el, m), v) as old) when k > m ->
+          Hashtbl.replace locals name (Imm (TypeSlice (el, k), v));
+          (name, old) :: saved
+      | _ -> saved
+  ) saved (Ast.slice_len_mins cond)
 
 let restore_narrowing (locals : (string, local_binding) Hashtbl.t) saved =
   List.iter (fun (name, old) -> Hashtbl.replace locals name old) saved
@@ -202,17 +218,32 @@ let narrowing_ctx : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 4
 let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t)
     (cond : Ast.expr) (killed : string list) =
   let bounds = collect_bounds_cond cond in
-  Types.StringMap.fold (fun name (lo_opt, hi_opt) saved ->
-    match lo_opt, hi_opt with
-    | Some lo, Some hi when not (List.mem name killed) ->
-        (match Hashtbl.find_opt locals name with
-         | Some (Mut (TypeI32, _)) ->
-             let old = Hashtbl.find_opt narrowing_ctx name in
-             Hashtbl.replace narrowing_ctx name (TypeRefined (lo, hi));
-             (name, old) :: saved
-         | _ -> saved)
-    | _ -> saved
-  ) bounds []
+  let saved =
+    Types.StringMap.fold (fun name (lo_opt, hi_opt) saved ->
+      match lo_opt, hi_opt with
+      | Some lo, Some hi when not (List.mem name killed) ->
+          (match Hashtbl.find_opt locals name with
+           | Some (Mut (TypeI32, _)) ->
+               let old = Hashtbl.find_opt narrowing_ctx name in
+               Hashtbl.replace narrowing_ctx name (TypeRefined (lo, hi));
+               (name, old) :: saved
+           | _ -> saved)
+      | _ -> saved
+    ) bounds []
+  in
+  (* Slice minimum-length narrowing for Mut slice bindings, via
+     narrowing_ctx (consulted by effective_slice_min at Index/AssignIndex
+     sites). Same kill rule and same Ast.slice_len_mins as the Imm side
+     and type_inf.ml (sync rule). *)
+  List.fold_left (fun saved (name, k) ->
+    if List.mem name killed then saved
+    else match Hashtbl.find_opt locals name with
+      | Some (Mut (TypeSlice (el, m), _)) when k > m ->
+          let old = Hashtbl.find_opt narrowing_ctx name in
+          Hashtbl.replace narrowing_ctx name (TypeSlice (el, max m k));
+          (name, old) :: saved
+      | _ -> saved
+  ) saved (Ast.slice_len_mins cond)
 
 let restore_narrowing_mut saved =
   List.iter (fun (name, old_opt) ->
@@ -296,6 +327,12 @@ let rec ltype_of_ast = function
   | TypeArray (t, n) -> array_type (ltype_of_ast t) n
   | TypeFn _        -> pointer_type context   (* function pointers are also opaque ptr *)
   | TypeRefined _   -> i32_type context       (* refined int is identical to i32 at the LLVM level *)
+  | TypeSlice _     ->
+      (* Fat value {ptr, len}: len width follows the target pointer size
+         (usize), so the layout is {ptr, i32} on Cortex-M and {ptr, i64} on
+         AArch64. Passed by value; LLVM lowers small aggregates to register
+         pairs on both targets. *)
+      struct_type context [| pointer_type context; usize_lltype () |]
   | TypeNamed sname ->
       (match Hashtbl.find_opt enum_underlying sname with
        | Some ut -> ltype_of_ast ut   (* enum: integer type of the underlying type *)
@@ -345,6 +382,10 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
   | TypeUsize -> basic_int "usize" (integer_bitwidth (usize_lltype ())) dw_ate_unsigned
   | TypeVoid  -> Llvm_debuginfo.llmetadata_null ()
   | TypeRefined _ -> ditype_of_ast dib file TypeI32  (* same LLVM-level representation as i32; see ltype_of_ast *)
+  | TypeSlice (t, _) -> ditype_of_ast dib file (TypePtr t)
+      (* modeled as a pointer for now: enough for gdb to follow the data;
+         a real {ptr, len} DICompositeType needs the member-offset plumbing
+         deliberately skipped for structs (see the comment above) *)
   | TypeIo t       -> ditype_of_ast dib file t       (* io T is a value type at the LLVM level too; see ltype_of_ast *)
   | TypePtr t ->
       let ptr_bits = integer_bitwidth (usize_lltype ()) in
@@ -472,6 +513,7 @@ let rec coerce v (dst : Ast.type_expr) =
   | TypeFn _    -> v
   | TypeNamed _ -> v
   | TypeRefined _ -> coerce v TypeI32
+  | TypeSlice _ -> v   (* fat values are never numerically coerced *)
 
 (* Widen an integer value to i32 so arithmetic stays uniform (legacy helper for TypeInt/TypeChar).
    Does NOT touch pointer values. *)
@@ -595,6 +637,41 @@ let emit_refined_cast_check loc src_ty v lo hi =
   let ge  = build_icmp Icmp.Sge v (const_int cty hi) "rc_ge" builder in
   let bad = build_or lt ge "rc_bad" builder in
   emit_trap_when bad ~bad_name:"rc_trap" ~ok_name:"rc_ok"
+
+(* Bounds check against a slice's RUNTIME length (a usize-width value).
+   The index arrives i32-widened (widen_load invariant); zext to the
+   length's width first -- a negative i32 zext-widens to a huge unsigned
+   value, so the single unsigned compare catches both directions.
+   min_len only feeds the trap-site message. *)
+let emit_bounds_check_dyn loc idx_ty idx_v min_len len_v =
+  record_trap loc (Printf.sprintf
+    "slice bounds check remains: index type %s cannot prove range {0..<%d} \
+     (the slice's compile-time minimum length)"
+    (ty_str idx_ty) min_len);
+  let lw = type_of len_v in
+  let idx_w = if type_of idx_v = lw then idx_v
+              else build_zext idx_v lw "zext" builder in
+  let cmp = build_icmp Icmp.Uge idx_w len_v "oob_cmp" builder in
+  emit_trap_when cmp ~bad_name:"oob" ~ok_name:"idx_ok"
+
+(* -- Slice (fat value {ptr, len}) helpers --------------------------------- *)
+
+let slice_ptr fat = build_extractvalue fat 0 "s_ptr" builder
+let slice_len fat = build_extractvalue fat 1 "s_len" builder
+
+let make_slice ptr len =
+  let v0 = undef (ltype_of_ast (TypeSlice (TypeU8, 0))) in
+  let v1 = build_insertvalue v0 ptr 0 "s0" builder in
+  build_insertvalue v1 len 1 "s" builder
+
+(* Effective compile-time minimum length of the slice named [id]:
+   the binding's own minimum, upgraded by any active if-condition narrowing
+   (narrowing_ctx, Mut bindings only -- Imm bindings are replaced in the
+   locals table directly by apply_narrowing). *)
+let effective_slice_min id m =
+  match Hashtbl.find_opt narrowing_ctx id with
+  | Some (TypeSlice (_, m2)) -> max m m2
+  | _ -> m
 
 (* -- Expression codegen --------------------------------------------------- *)
 (* Returns (ast_type, llvalue).  ast_type is needed for Deref to know
@@ -930,6 +1007,35 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            in
            if not proven then emit_refined_cast_check e.loc src_ty v lo hi;
            (target_ty, to_arith_width target_ty (coerce v target_ty))
+       | TypeSlice (el, _) ->
+           (* Slice creation cast. type_inf already proved the minimum-length
+              requirement; here we only build the fat value. *)
+           (match src_ty with
+            | TypeSlice (_, m) ->
+                (* slice -> slice: min-length relaxation is a no-op on the value *)
+                (TypeSlice (el, m), v)
+            | _ ->
+                (* array variable -> slice: gen_expr already decayed the value
+                   to an elem-0 pointer (exactly the ptr half we need); the
+                   static length comes from the declared binding, which the
+                   decayed TYPE no longer carries. *)
+                (match src_e.desc with
+                 | Var name ->
+                     let arr_len = match Hashtbl.find_opt locals name with
+                       | Some (Mut (TypeArray (_, n), _)) -> Some n
+                       | _ ->
+                           (match Hashtbl.find_opt global_vars name with
+                            | Some (TypeArray (_, n), _) -> Some n
+                            | _ -> None)
+                     in
+                     (match arr_len with
+                      | Some n ->
+                          (TypeSlice (el, n),
+                           make_slice v (const_int (usize_lltype ()) n))
+                      | None -> raise (Error
+                          "slice cast source must be an array variable or a slice"))
+                 | _ -> raise (Error
+                     "slice cast source must be an array variable or a slice")))
        | _ ->
            (* Every other u8/i16/etc-typed expression result (Var, Index,
               FieldGet, Deref) is represented in-flight as an i32-widened
@@ -947,6 +1053,10 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
   | FieldGet (base_expr, fname) ->
       let (base_ty, base_v) = gen_expr locals base_expr in
+      (match base_ty, fname with
+       | TypeSlice _, "len" ->
+           (TypeUsize, slice_len base_v)
+       | _ ->
       let (sname, through_io) = match base_ty with
         | TypeNamed s                      -> (s, false)
         | TypePtr   (TypeNamed s)          -> (s, false)
@@ -974,7 +1084,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | _ ->
            let v = build_load (ltype_of_ast field_ty) field_ptr fname builder in
            if through_io then set_volatile true v;
-           (field_ty, to_arith_width field_ty v))
+           (field_ty, to_arith_width field_ty v)))
 
   | Index (id, idx) ->
       let (idx_ty_raw, idx_raw) = gen_expr locals idx in
@@ -1004,9 +1114,29 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
         if is_volatile then set_volatile true v;
         (elem_ty, to_arith_width elem_ty v)
       in
+      (* Slice load: elide the check only when idx's range fits the slice's
+         compile-time MINIMUM length (a lower bound of the runtime length,
+         so hi <= min implies hi <= len). Otherwise check against the
+         runtime length. *)
+      let load_from_slice elem_ty min_len fat =
+        let proven = match idx_ty with
+          | TypeRefined (lo, hi) -> lo >= 0 && hi <= min_len
+          | _ -> false
+        in
+        if not proven then
+          emit_bounds_check_dyn e.loc idx_ty idx_v min_len (slice_len fat);
+        let ep = build_gep (ltype_of_ast elem_ty) (slice_ptr fat) [|idx_v|] "idx_ptr" builder in
+        let v  = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
+        (elem_ty, to_arith_width elem_ty v)
+      in
       (match Hashtbl.find_opt locals id with
        | Some (Mut (TypeArray (elem_ty, n), ptr)) ->
            load_from_array elem_ty n ptr
+       | Some (Mut (TypeSlice (elem_ty, m), alloca_ptr)) ->
+           let fat = build_load (ltype_of_ast (TypeSlice (elem_ty, m))) alloca_ptr id builder in
+           load_from_slice elem_ty (effective_slice_min id m) fat
+       | Some (Imm (TypeSlice (elem_ty, m), fat)) ->
+           load_from_slice elem_ty m fat
        | Some (Mut (TypePtr (TypeIo elem_ty), alloca_ptr)) ->
            (* *io T variable: load pointer value from alloca, then volatile access *)
            let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
@@ -1024,6 +1154,9 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            (match Hashtbl.find_opt global_vars id with
             | Some (TypeArray (elem_ty, n), gptr) ->
                 load_from_array elem_ty n gptr
+            | Some (TypeSlice (elem_ty, m), gptr) ->
+                let fat = build_load (ltype_of_ast (TypeSlice (elem_ty, m))) gptr id builder in
+                load_from_slice elem_ty (effective_slice_min id m) fat
             | Some (TypePtr (TypeIo elem_ty), gptr) ->
                 let ptr_v = build_load (pointer_type context) gptr id builder in
                 load_through_ptr elem_ty ptr_v true
@@ -1034,6 +1167,88 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 raise (Error (Printf.sprintf "Index: '%s' is not an array or pointer" id))
             | None ->
                 raise (Error (Printf.sprintf "Index: undefined variable '%s'" id))))
+
+  | SliceOf (id, lo_e, hi_e) ->
+      (* Sync rule: bound constness and range validity were checked by
+         type_inf.ml's SliceOf case through the same Const_env.bound_value;
+         codegen re-verifies the range against its own effective minimum
+         (raising a BUG error on disagreement) rather than trusting blindly. *)
+      let cb = (Const_env.bound_value lo_e, Const_env.bound_value hi_e) in
+      let usz = usize_lltype () in
+      let sub_of_slice elem_ty min_len fat =
+        (match cb with
+         | Some a, Some b when 0 <= a && a <= b && b <= min_len ->
+             let ep = build_gep (ltype_of_ast elem_ty) (slice_ptr fat)
+               [| const_int (i32_type context) a |] "sub_ptr" builder in
+             (TypeSlice (elem_ty, b - a), make_slice ep (const_int usz (b - a)))
+         | _ -> raise (Error
+             "BUG: subslice bounds not proven against the slice minimum \
+              (type_inf should have rejected this)"))
+      in
+      let sub_of_array elem_ty n arr_ptr =
+        (match cb with
+         | Some a, Some b when 0 <= a && a <= b && b <= n ->
+             let arr_ll = array_type (ltype_of_ast elem_ty) n in
+             let zero = const_int (i32_type context) 0 in
+             let ep = build_in_bounds_gep arr_ll arr_ptr
+               [| zero; const_int (i32_type context) a |] "sub_ptr" builder in
+             (TypeSlice (elem_ty, b - a), make_slice ep (const_int usz (b - a)))
+         | _ -> raise (Error
+             "BUG: subslice bounds not proven against the array size \
+              (type_inf should have rejected this)"))
+      in
+      let sub_of_ptr elem_ty base_ptr =
+        (* Slice construction from a raw pointer: UNCHECKED by design (the
+           pointer world's escape hatch, used once at a driver boundary).
+           Constant bounds still yield a compile-time minimum length. *)
+        match cb with
+        | Some a, Some b when 0 <= a && a <= b ->
+            let ep = build_gep (ltype_of_ast elem_ty) base_ptr
+              [| const_int (i32_type context) a |] "sub_ptr" builder in
+            (TypeSlice (elem_ty, b - a), make_slice ep (const_int usz (b - a)))
+        | _ ->
+            let (_, lo_v) = gen_expr locals lo_e in
+            let (_, hi_v) = gen_expr locals hi_e in
+            let lo_v = to_i32 lo_v and hi_v = to_i32 hi_v in
+            let ep = build_gep (ltype_of_ast elem_ty) base_ptr [| lo_v |] "sub_ptr" builder in
+            let len32 = build_sub hi_v lo_v "sub_len" builder in
+            let len = if type_of len32 = usz then len32
+                      else build_zext len32 usz "zext" builder in
+            (TypeSlice (elem_ty, 0), make_slice ep len)
+      in
+      (match Hashtbl.find_opt locals id with
+       | Some (Mut (TypeSlice (el, m), alloca_ptr)) ->
+           let fat = build_load (ltype_of_ast (TypeSlice (el, m))) alloca_ptr id builder in
+           sub_of_slice el (effective_slice_min id m) fat
+       | Some (Imm (TypeSlice (el, m), fat)) ->
+           sub_of_slice el m fat
+       | Some (Mut (TypeArray (el, n), ptr)) ->
+           sub_of_array el n ptr
+       | Some (Mut (TypePtr el, alloca_ptr)) ->
+           let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
+           sub_of_ptr el ptr_v
+       | Some (Imm (TypePtr el, ptr_v)) ->
+           sub_of_ptr el ptr_v
+       | Some _ ->
+           raise (Error (Printf.sprintf "SliceOf: '%s' is not a slice/array/pointer" id))
+       | None ->
+           (match Hashtbl.find_opt global_vars id with
+            | Some (TypeSlice (el, m), gptr) ->
+                let fat = build_load (ltype_of_ast (TypeSlice (el, m))) gptr id builder in
+                sub_of_slice el (effective_slice_min id m) fat
+            | Some (TypeArray (el, n), gptr) ->
+                sub_of_array el n gptr
+            | Some (TypePtr el, gptr) ->
+                let ptr_v = build_load (pointer_type context) gptr id builder in
+                sub_of_ptr el ptr_v
+            | Some _ ->
+                raise (Error (Printf.sprintf "SliceOf: '%s' is not a slice/array/pointer" id))
+            | None ->
+                raise (Error (Printf.sprintf "SliceOf: undefined variable '%s'" id))))
+
+  | Unsafe e1 ->
+      (* Purely a type-checker gate (see Ast.Unsafe); codegen is transparent. *)
+      gen_expr locals e1
 
   | StructLit _ ->
       raise (Error "BUG: StructLit must be handled in gen_stmt / gen_global, not gen_expr")
@@ -1326,9 +1541,27 @@ let gen_func ?prog_types fdef =
           let inst = build_store (coerce rhs_v elem_ty) ep builder in
           if is_volatile then set_volatile true inst
         in
+        (* Mirrors load_from_slice in gen_expr's Index case: elide only when
+           idx's range fits the compile-time minimum, else check against the
+           runtime length. *)
+        let store_to_slice elem_ty min_len fat =
+          let proven = match idx_ty with
+            | TypeRefined (lo, hi) -> lo >= 0 && hi <= min_len
+            | _ -> false
+          in
+          if not proven then
+            emit_bounds_check_dyn s.loc idx_ty idx_v min_len (slice_len fat);
+          let ep = build_gep (ltype_of_ast elem_ty) (slice_ptr fat) [|idx_v|] "idx_ptr" builder in
+          ignore (build_store (coerce rhs_v elem_ty) ep builder)
+        in
         (match Hashtbl.find_opt locals id with
          | Some (Mut (TypeArray (elem_ty, n), ptr)) ->
              store_to_array elem_ty n ptr
+         | Some (Mut (TypeSlice (el, m), alloca_ptr)) ->
+             let fat = build_load (ltype_of_ast (TypeSlice (el, m))) alloca_ptr id builder in
+             store_to_slice el (effective_slice_min id m) fat
+         | Some (Imm (TypeSlice (el, m), fat)) ->
+             store_to_slice el m fat
          | Some (Mut (TypePtr (TypeIo elem_ty), alloca_ptr)) ->
              let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
              store_through_ptr elem_ty ptr_v true
@@ -1345,6 +1578,9 @@ let gen_func ?prog_types fdef =
              (match Hashtbl.find_opt global_vars id with
               | Some (TypeArray (elem_ty, n), gptr) ->
                   store_to_array elem_ty n gptr
+              | Some (TypeSlice (el, m), gptr) ->
+                  let fat = build_load (ltype_of_ast (TypeSlice (el, m))) gptr id builder in
+                  store_to_slice el (effective_slice_min id m) fat
               | Some (TypePtr (TypeIo elem_ty), gptr) ->
                   let ptr_v = build_load (pointer_type context) gptr id builder in
                   store_through_ptr elem_ty ptr_v true

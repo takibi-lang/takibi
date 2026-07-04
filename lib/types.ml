@@ -13,6 +13,8 @@ type ty =
   | TArray of ty * int    (* array type: [T; N] *)
   | TStruct of string     (* named struct type *)
   | TRefinedInt of int * int  (* {lo..<hi} -- refined int with known range; lo <= x < hi *)
+  | TSlice of ty * int    (* []T / [T; N..] -- fat pointer (ptr + usize len);
+                             int = compile-time minimum length (0 = unknown) *)
 
 and tv =
   | Unbound of int  (* unresolved unification variable *)
@@ -44,6 +46,8 @@ let rec to_string t =
   | TPtr t -> Printf.sprintf "*%s" (to_string t)   (* *io T prints as "*io T" via TPtr(TIo T) *)
   | TIo  t -> Printf.sprintf "io %s" (to_string t)
   | TArray (t, n) -> Printf.sprintf "[%s; %d]" (to_string t) n
+  | TSlice (t, 0) -> Printf.sprintf "[]%s" (to_string t)
+  | TSlice (t, n) -> Printf.sprintf "[%s; %d..]" (to_string t) n
   | TFun (ps, r) ->
       Printf.sprintf "(%s) -> %s"
         (String.concat ", " (List.map to_string ps)) (to_string r)
@@ -63,6 +67,7 @@ let rec occurs rv = function
   | TPtr   t                   -> occurs rv t
   | TIo    t                   -> occurs rv t
   | TArray (t, _)              -> occurs rv t
+  | TSlice (t, _)              -> occurs rv t
   | TStruct _                  -> false
   | _                          -> false
 
@@ -87,6 +92,19 @@ let rec unify t1 t2 =
       if lo1 <> lo2 || hi1 <> hi2 then
         raise (Unify_error (Printf.sprintf
           "refined int range mismatch: {%d..<%d} vs {%d..<%d}" lo1 hi1 lo2 hi2))
+  (* Slice subtyping mirrors TRefinedInt's: a slice whose proven minimum
+     length is LARGER can be used where a smaller minimum is expected
+     (actual guarantee is stronger). unify's call sites pass (actual,
+     expected) -- Call args, Assign, Return all follow that order. The
+     reverse direction is the anti-subtyping guard: an unproven/shorter
+     slice cannot flow into a position demanding a longer minimum. *)
+  | TSlice (e1, m1), TSlice (e2, m2) ->
+      if m1 < m2 then
+        raise (Unify_error (Printf.sprintf
+          "cannot pass %s where %s is required; \
+           narrow with if (s.len >= %d) { ... } or a constant subslice"
+          (to_string (TSlice (e1, m1))) (to_string (TSlice (e2, m2))) m2));
+      unify e1 e2
   (* Subtyping: TRefinedInt(lo, hi) is a subtype of any integer type where the range fits.
      The LLVM representation of TRefinedInt is always i32; coerce handles narrowing on use.
      One direction only: refined -> wider type is OK; unproven wider type -> refined is NG. *)
@@ -132,6 +150,7 @@ let rec of_ast = function
   | Ast.TypeFn (ps, r)   -> TFun (List.map of_ast ps, of_ast r)
   | Ast.TypeNamed s      -> TStruct s
   | Ast.TypeRefined (lo, hi) -> TRefinedInt (lo, hi)
+  | Ast.TypeSlice (t, n) -> TSlice (of_ast t, n)
 
 (* None -> fresh unification variable *)
 let of_ast_opt = function
@@ -158,6 +177,7 @@ let rec to_ast t =
   | TFun (ps, r)  -> Ast.TypeFn (List.map to_ast ps, to_ast r)
   | TStruct s     -> Ast.TypeNamed s
   | TRefinedInt (lo, hi) -> Ast.TypeRefined (lo, hi)
+  | TSlice (t, n) -> Ast.TypeSlice (to_ast t, n)
   | TVar { contents = Unbound _ } -> Ast.TypeI32
   | TVar { contents = Link _ }    -> assert false
 
