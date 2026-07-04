@@ -571,6 +571,34 @@ the normal (always `-g`-free) build outputs.
   echo server (`ptr + i32` / `ptr - i32` already work for descriptor-ring indexing).
 - **`sizeof(T)` cannot be used as an array size** (`[T; sizeof(Foo)]`) -- see the `sizeof(T)` section above for why
   (parser-time vs. codegen-time resolution mismatch) and what combining them would require.
+- **Global `let` initializers can't constant-fold `as` casts or reference another global constant** -- only a bare
+  `IntLit`/`StructLit` is accepted (`lib/llvm_gen.ml`'s `eval_const`). Hit twice during the STM32 Ethernet/unification
+  work: `let ETH_RDES0_OWN: i32 = 0x80000000 as i32;` failed with "unsupported constant expression" (had to drop the
+  cast and use a bare literal instead), and `examples/common_stm32/netconfig.tkb`'s `HTTP_SERVER_IP` had to duplicate
+  `OUR_IP`'s array literal verbatim rather than reference it, so the two constants can silently drift apart if only
+  one is ever edited. **Deferred**: would need extending the array-size-constant folding already done by
+  `Const_env` (see "Global let / let mut and Array-Size Constants" above) to general initializer expressions --
+  currently that mechanism only resolves bare-`IntLit`-valued names for `[T; N]` sizes, not arbitrary constant
+  expressions used as an initializer value.
+- **No module/import system for `.tkb` files** -- which common files get concatenated into a given example's build
+  is decided entirely by hand-maintained Makefile variable lists (`COMMON_UART`, `COMMON_GIC`, etc.), with nothing
+  in the source itself declaring "this file needs that file." Bit us directly while removing `irq.tkb`'s `IS_QEMU`
+  branch: a new helper function was first placed in `uart.tkb` (concatenated into literally every example) even
+  though its body called `gic_init()`/`enable_usart1_irq()`, symbols that only exist in a handful of builds --
+  this silently broke unrelated examples like `start` with an "Undefined function" error, not caught until
+  `make stm32build` was re-run over the whole example set. Ended up moving the functions into `gic.tkb`/`nvic.tkb`
+  instead (already only included where those symbols exist). **Deferred**: a lightweight `use <file>;`-style
+  declaration (even just "this file requires these to be present," checked at parse/link time) would catch this
+  class of mistake at the point of writing the code rather than requiring a full rebuild sweep to notice.
+- **No built-in memory-barrier intrinsic** -- the STM32 Ethernet DMA bring-up needed a `dsb` instruction between a
+  descriptor-ring write and the "poll demand" register kick, because `*io` volatile writes alone don't guarantee the
+  CPU's write buffer has retired before a subsequent register write reaches the DMA engine (see the "Hardware
+  bring-up bug worth knowing about" paragraph under the STM32 Ethernet section below -- found only via live
+  openocd/gdb-multiarch debugging on real hardware, not something the compiler flagged). Worked around with a
+  hand-written `extern fn eth_dsb()` (`examples/common_stm32/eth_asm.S`), one target's instruction only.
+  **Deferred**: a builtin `fence()`/`barrier()` (lowering to `dsb` on AArch64, `dmb` on Cortex-M, the same way
+  `sizeof`/`as` already lower per-target) would remove a whole class of "did you remember the barrier before this
+  DMA kick" bugs that today are invisible to the type checker and only surface as real hardware misbehavior.
 - **STM32 Ethernet: all five examples are ported -- `net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo`,
   and `http_server` all run on real hardware with real MAC/PHY/DMA, and are the *same source file* as
   their QEMU/virtio-net counterparts.** `examples/common_stm32/eth.tkb` is a from-scratch MAC/DMA-
