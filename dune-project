@@ -17,6 +17,7 @@
 
 (package
  (name takibi)
+ (version 0.1.0)
  (synopsis "Takibi Language")
  (description "Takibi Language")
  (depends ocaml llvm)

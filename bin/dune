@@ -1,4 +1,4 @@
 (executable
  (public_name takibi)
  (name main)
- (libraries takibi))
+ (libraries takibi dune-build-info))

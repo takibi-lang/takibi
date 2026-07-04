@@ -1,5 +1,10 @@
 open Takibi
 
+let version =
+  match Build_info.V1.version () with
+  | Some v -> Build_info.V1.Version.to_string v
+  | None -> "unknown (not installed via dune)"
+
 let report_error pos msg =
   let line = pos.Lexing.pos_lnum in
   let col = pos.Lexing.pos_cnum - pos.Lexing.pos_bol + 1 in
@@ -31,9 +36,12 @@ let () =
   let target_cpu = ref "" in
   let target_features = ref "" in
   let debug_info = ref false in
+  let show_version = ref false in
   let i = ref 1 in
   while !i < Array.length Sys.argv do
     (match Sys.argv.(!i) with
+     | "--version" ->
+         show_version := true
      | "-o" ->
          incr i;
          if !i >= Array.length Sys.argv then (
@@ -66,9 +74,14 @@ let () =
   done;
   let input_files = List.rev !input_files in
 
+  if !show_version then (
+    Printf.printf "takibi %s\n" version;
+    exit 0
+  );
+
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
