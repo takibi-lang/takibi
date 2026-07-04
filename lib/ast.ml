@@ -174,6 +174,24 @@ let written_names (stmts : stmt list) : string list =
   List.iter go_stmt stmts;
   Hashtbl.fold (fun n () l -> n :: l) acc []
 
+(* Decompose a subslice bound into (base variable, constant offset) when it
+   has that syntactic shape: `v`, `v + k`, or `k + v`. Used by the
+   same-base subslice rule in type_inf.ml and llvm_gen.ml (sync rule --
+   single shared implementation): s[v + j ..< v + k] has length exactly
+   k - j, and lo <= hi holds iff j <= k, regardless of v's runtime value.
+   This is the one depth-1 "difference constraint" protocol code actually
+   needs (the TCP options skip: frame[data_off ..< data_off + 3]), obtained
+   syntactically -- no relational abstract domain, no solver.
+   Callers must exclude io-qualified base variables: the two bound
+   expressions load v twice, and a volatile v could change between the
+   loads, silently breaking lo <= hi. *)
+let var_plus_const (e : expr) : (ident * int) option =
+  match e.desc with
+  | Var v -> Some (v, 0)
+  | BinOp (Add, { desc = Var v; _ }, { desc = IntLit k; _ }) -> Some (v, k)
+  | BinOp (Add, { desc = IntLit k; _ }, { desc = Var v; _ }) -> Some (v, k)
+  | _ -> None
+
 (* Slice length lower bounds proven by an if condition: [(name, min_len)].
    Recognized shapes (joined by &&): `s.len >= K`, `s.len > K`,
    `K <= s.len`, `K < s.len` with K a bare integer literal. Used by

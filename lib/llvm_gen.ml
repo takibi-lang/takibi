@@ -135,9 +135,27 @@ type local_binding =
   | Imm of Ast.type_expr * llvalue  (* direct SSA value -- no alloca *)
   | Mut of Ast.type_expr * llvalue  (* alloca pointer -- load/store *)
 
+(* Module-level table for Mut binding narrowing from if-conditions.
+   Compilation is single-threaded, so a module-level Hashtbl is safe.
+   gen_expr cannot access locals directly, so type overrides are passed through here. *)
+let narrowing_ctx : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 4
+
 (* Collect per-variable bounds from an if-condition for codegen narrowing.
-   Mirrors the logic in type_inf.ml:narrow_from_cond. *)
-let collect_bounds_cond (cond : Ast.expr) =
+   A comparison constrains `Var n` whenever the OTHER operand's static
+   value range is known: an integer literal / Const_env constant is
+   {k..<k+1}, and a variable whose binding (or active narrowing) is
+   refined contributes its own range. The fact collapses to a CONSTANT at
+   collection time -- still interval reasoning, no relational domain, and
+   no new kill obligations (the constant was true when the condition
+   executed; n's own kill is governed by written_names as before).
+   Equality (`ihl == 20`) narrows to the operand's exact range.
+   Sync rule: mirrors type_inf.ml's collect_bounds -- change together.
+   Known conservative gap vs type_inf: refined GLOBALS and Mut-narrowed
+   variables reached through arithmetic are not consulted here, so codegen
+   may keep a check type_inf considered proven -- safe direction, shows up
+   as a --forbid-trap site; bind the value to an immutable local to fix. *)
+let collect_bounds_cond (locals : (string, local_binding) Hashtbl.t)
+    (cond : Ast.expr) =
   let take_lo a b = match a, b with
     | Some x, Some y -> Some (max x y)
     | Some _, None -> a | None, _ -> b in
@@ -149,16 +167,54 @@ let collect_bounds_cond (cond : Ast.expr) =
       | Some p -> p | None -> (None, None) in
     Types.StringMap.add name (take_lo lo_opt pl, take_hi hi_opt ph) acc
   in
+  let range_of (e : Ast.expr) =
+    match Const_env.bound_value e with
+    | Some k -> Some (k, k + 1)
+    | None ->
+        (match e.desc with
+         | Var m ->
+             let refined = function
+               | TypeRefined (a, b) -> Some (a, b)
+               | _ -> None
+             in
+             (match Hashtbl.find_opt narrowing_ctx m with
+              | Some t -> refined t
+              | None ->
+                  (match Hashtbl.find_opt locals m with
+                   | Some (Imm (t, _)) | Some (Mut (t, _)) -> refined t
+                   | None -> None))
+         | _ -> None)
+  in
+  (* n <op> rhs where rhs's range is {c..<d} (so c <= rhs <= d-1). *)
+  let constrain_left op n (c, d) acc =
+    match op with
+    | Ge -> update n (Some c)       None           acc
+    | Gt -> update n (Some (c + 1)) None           acc
+    | Le -> update n None           (Some d)       acc
+    | Lt -> update n None           (Some (d - 1)) acc
+    | Eq -> update n (Some c)       (Some d)       acc
+    | _ -> acc
+  in
+  (* lhs <op> n where lhs's range is {c..<d} -- mirrored constraints. *)
+  let constrain_right op n (c, d) acc =
+    match op with
+    | Ge -> update n None           (Some d)       acc  (* n <= lhs *)
+    | Gt -> update n None           (Some (d - 1)) acc  (* n <  lhs *)
+    | Le -> update n (Some c)       None           acc  (* n >= lhs *)
+    | Lt -> update n (Some (c + 1)) None           acc  (* n >  lhs *)
+    | Eq -> update n (Some c)       (Some d)       acc
+    | _ -> acc
+  in
   let rec go e acc = match e.desc with
-    | BinOp (And, e1, e2)                                     -> go e2 (go e1 acc)
-    | BinOp (Ge, {desc=Var n;_}, {desc=IntLit lo;_})         -> update n (Some lo)     None          acc
-    | BinOp (Gt, {desc=Var n;_}, {desc=IntLit lo;_})         -> update n (Some (lo+1)) None          acc
-    | BinOp (Lt, {desc=Var n;_}, {desc=IntLit hi;_})         -> update n None          (Some hi)     acc
-    | BinOp (Le, {desc=Var n;_}, {desc=IntLit hi;_})         -> update n None          (Some (hi+1)) acc
-    | BinOp (Le, {desc=IntLit lo;_}, {desc=Var n;_})         -> update n (Some lo)     None          acc
-    | BinOp (Lt, {desc=IntLit lo;_}, {desc=Var n;_})         -> update n (Some (lo+1)) None          acc
-    | BinOp (Ge, {desc=IntLit hi;_}, {desc=Var n;_})         -> update n None          (Some (hi+1)) acc
-    | BinOp (Gt, {desc=IntLit hi;_}, {desc=Var n;_})         -> update n None          (Some hi)     acc
+    | BinOp (And, e1, e2) -> go e2 (go e1 acc)
+    | BinOp ((Ge | Gt | Le | Lt | Eq) as op, l, r) ->
+        let acc = match l.desc, range_of r with
+          | Var n, Some rng -> constrain_left op n rng acc
+          | _ -> acc
+        in
+        (match r.desc, range_of l with
+         | Var n, Some rng -> constrain_right op n rng acc
+         | _ -> acc)
     | _ -> acc
   in
   go cond Types.StringMap.empty
@@ -172,7 +228,7 @@ let collect_bounds_cond (cond : Ast.expr) =
    uses -- so killed names are skipped here too. *)
 let apply_narrowing (locals : (string, local_binding) Hashtbl.t)
     (cond : Ast.expr) (killed : string list) =
-  let bounds = collect_bounds_cond cond in
+  let bounds = collect_bounds_cond locals cond in
   let saved =
     Types.StringMap.fold (fun name (lo_opt, hi_opt) saved ->
       match lo_opt, hi_opt with
@@ -201,11 +257,6 @@ let apply_narrowing (locals : (string, local_binding) Hashtbl.t)
 let restore_narrowing (locals : (string, local_binding) Hashtbl.t) saved =
   List.iter (fun (name, old) -> Hashtbl.replace locals name old) saved
 
-(* Module-level table for Mut binding narrowing from if-conditions.
-   Compilation is single-threaded, so a module-level Hashtbl is safe.
-   gen_expr cannot access locals directly, so type overrides are passed through here. *)
-let narrowing_ctx : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 4
-
 (* Record narrowed types for Mut bindings into narrowing_ctx.
    Returns [(name, old_opt)] -- pass to restore_narrowing_mut after the then-branch.
    Invalidation (kill) rule: a variable the branch body may write to, alias
@@ -217,7 +268,7 @@ let narrowing_ctx : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 4
    same function (sync rule -- see written_names' comment). *)
 let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t)
     (cond : Ast.expr) (killed : string list) =
-  let bounds = collect_bounds_cond cond in
+  let bounds = collect_bounds_cond locals cond in
   let saved =
     Types.StringMap.fold (fun name (lo_opt, hi_opt) saved ->
       match lo_opt, hi_opt with
@@ -836,13 +887,19 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                  | TypePtr inner ->
                      (ty2, build_gep (ltype_of_ast inner) v2 [|v1|] "ptradd" builder)
                  | _ ->
-                     (* Range propagation: {a..<b} + k -> {a+k..<b+k} (symmetric with type_inf.ml) *)
+                     (* Range propagation (interval arithmetic; sync rule
+                        with type_inf.ml's Add case, change together):
+                        {a..<b}+{c..<d} -> {a+c..<b+d-1}; {a..<b}+k -> shift *)
                      let sum = build_add v1 v2 "addtmp" builder in
-                     let ret_ty = match ty1, e2.desc with
-                       | TypeRefined (a, b), IntLit k -> TypeRefined (a + k, b + k)
-                       | _ -> (match ty2, e1.desc with
-                               | TypeRefined (c, d), IntLit k -> TypeRefined (c + k, d + k)
-                               | _ -> TypeI32)
+                     let ret_ty = match ty1, ty2 with
+                       | TypeRefined (a, b), TypeRefined (c, d) ->
+                           TypeRefined (a + c, b + d - 1)
+                       | _ ->
+                           (match ty1, e2.desc with
+                            | TypeRefined (a, b), IntLit k -> TypeRefined (a + k, b + k)
+                            | _ -> (match ty2, e1.desc with
+                                    | TypeRefined (c, d), IntLit k -> TypeRefined (c + k, d + k)
+                                    | _ -> TypeI32))
                      in
                      (ret_ty, sum)))
        | Sub ->
@@ -852,14 +909,29 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 let neg = build_neg v2 "negtmp" builder in
                 (ty1, build_gep (ltype_of_ast inner) v1 [|neg|] "ptrsub" builder)
             | _ ->
-                (* Range propagation: {a..<b} - k -> {a-k..<b-k} (symmetric with type_inf.ml) *)
+                (* Range propagation (sync rule with type_inf.ml's Sub):
+                   {a..<b}-{c..<d} -> {a-d+1..<b-c}; {a..<b}-k -> shift *)
                 let diff = build_sub v1 v2 "subtmp" builder in
-                let ret_ty = match ty1, e2.desc with
-                  | TypeRefined (a, b), IntLit k -> TypeRefined (a - k, b - k)
-                  | _ -> TypeI32
+                let ret_ty = match ty1, ty2 with
+                  | TypeRefined (a, b), TypeRefined (c, d) ->
+                      TypeRefined (a - d + 1, b - c)
+                  | _ ->
+                      (match ty1, e2.desc with
+                       | TypeRefined (a, b), IntLit k -> TypeRefined (a - k, b - k)
+                       | _ -> TypeI32)
                 in
                 (ret_ty, diff))
-       | Mul -> (ty1, build_mul v1 v2 "multmp" builder)
+       | Mul ->
+           (* Range propagation (sync rule with type_inf.ml's Mul):
+              {a..<b} * k (positive literal) -> {a*k..<(b-1)*k+1} *)
+           let ret_ty = match ty1, e2.desc, ty2, e1.desc with
+             | TypeRefined (a, b), IntLit k, _, _ when k > 0 ->
+                 TypeRefined (a * k, (b - 1) * k + 1)
+             | _, _, TypeRefined (a, b), IntLit k when k > 0 ->
+                 TypeRefined (a * k, (b - 1) * k + 1)
+             | _ -> ty1
+           in
+           (ret_ty, build_mul v1 v2 "multmp" builder)
        | Div ->
            let result = if is_unsigned ty1
                         then build_udiv v1 v2 "divtmp" builder
@@ -1209,16 +1281,40 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
         in
         (to_i32 bv, range)
       in
+      (* Same-base rule: s[v + j ..< v + k] has length exactly k - j and
+         lo <= hi iff j <= k, regardless of v's value -- the shared
+         Ast.var_plus_const decomposition (sync rule with type_inf's
+         SliceOf). io-qualified v is excluded: two volatile loads could
+         disagree between the bounds. *)
+      let same_base_len =
+        match Ast.var_plus_const lo_e, Ast.var_plus_const hi_e with
+        | Some (v1, j), Some (v2, k) when v1 = v2 && j <= k ->
+            let is_io = function Ast.TypeIo _ -> true | _ -> false in
+            let base_is_io =
+              match Hashtbl.find_opt locals v1 with
+              | Some (Imm (t, _)) | Some (Mut (t, _)) -> is_io t
+              | None ->
+                  (match Hashtbl.find_opt global_vars v1 with
+                   | Some (t, _) -> is_io t
+                   | None -> false)
+            in
+            if base_is_io then None else Some (k - j)
+        | _ -> None
+      in
       let ranges_proven lo_r hi_r limit =
         match lo_r, hi_r with
         | Some (la, lb), Some (ha, hb) ->
-            la >= 0 && lb - 1 <= ha && hb - 1 <= limit
+            la >= 0 && (lb - 1 <= ha || same_base_len <> None)
+            && hb - 1 <= limit
         | _ -> false
       in
       let guaranteed_min lo_r hi_r =
-        match lo_r, hi_r with
-        | Some (_, lb), Some (ha, _) when ha - (lb - 1) > 0 -> ha - (lb - 1)
-        | _ -> 0
+        match same_base_len with
+        | Some l -> l  (* exact length, proven or once the check has passed *)
+        | None ->
+            (match lo_r, hi_r with
+             | Some (_, lb), Some (ha, _) when ha - (lb - 1) > 0 -> ha - (lb - 1)
+             | _ -> 0)
       in
       let finish_sub elem_ty base_ptr lo_v hi_v min_len =
         let ep = build_gep (ltype_of_ast elem_ty) base_ptr [| lo_v |] "sub_ptr" builder in

@@ -2376,6 +2376,105 @@ let codegen_tests = [
             return s as i32;
           }" ());
 
+  (* -- P4a: interval extensions + same-base subslice rule ---------------- *)
+
+  Alcotest.test_case
+    "equality narrowing: `if (ihl == 20)` gives ihl the exact range \
+     {20..<21}, proving the index (zero sites)" `Quick
+    (expect_trap_sites 0
+       "let mut ftp4_buf_a: [u8; 32];
+        fn ftp4_eq(ihl: i32) -> u8 {
+          if (ihl == 20) {
+            return ftp4_buf_a[ihl];
+          }
+          return 0 as u8;
+        }");
+
+  Alcotest.test_case
+    "comparison against a range-known VARIABLE narrows (the fact collapses \
+     to a constant -- still intervals): total <= bounded proves the index" `Quick
+    (expect_trap_sites 0
+       "let mut ftp4_buf_b: [u8; 40];
+        fn ftp4_var_cmp(total: i32, cap: {10..<40}) -> u8 {
+          if (total >= 0 && total <= cap) {
+            return ftp4_buf_b[total];
+          }
+          return 0 as u8;
+        }");
+
+  Alcotest.test_case
+    "interval arithmetic propagation: refined+refined, refined-refined, \
+     refined*positive-literal all carry ranges through immutable lets" `Quick
+    (expect_trap_sites 0
+       "let mut ftp4_buf_c: [u8; 128];
+        fn ftp4_arith(a: {5..<16}, b: {0..<8}) -> u8 {
+          let m: i32 = a * 4;       // {20..<61}
+          let s: i32 = a + b;       // {5..<23}
+          let d: i32 = m - a;       // {5..<56}
+          return ftp4_buf_c[m] + ftp4_buf_c[s] + ftp4_buf_c[d];
+        }");
+
+  Alcotest.test_case
+    "same-base subslice: s[off..<off+3] is proven when off's range fits \
+     (lo <= hi holds syntactically regardless of off's value) and yields \
+     exact length 3" `Quick
+    (expect_trap_sites 0
+       "fn ftp4_same_base(frame: [u8; 1514..], off: {54..<95}) -> u8 {
+          let d = frame[off..<off + 3];
+          return d[2];
+        }");
+
+  Alcotest.test_case
+    "same-base subslice without a range on the base is still the checked \
+     form (memory safety needs off's range), but the exact length 3 \
+     survives the check and proves the inner index (exactly one site)" `Quick
+    (expect_trap_sites 1
+       "fn ftp4_same_base_dyn(frame: [u8; 1514..], off: i32) -> u8 {
+          let d = frame[off..<off + 3];
+          return d[2];
+        }");
+
+  Alcotest.test_case
+    "the P4 probe: http_server's full guard chain -- device-length clamp, \
+     ihl equality, total_len vs frame room, segment view of runtime \
+     length, options skip at runtime offset -- proven end to end with \
+     zero trap sites (the 'depth-1 difference constraint suffices' \
+     hypothesis)" `Quick
+    (expect_trap_sites 0
+       "fn ftp4_read16(s: [u8; 2..]) -> i32 {
+          return (s[0] as i32) * 256 + (s[1] as i32);
+        }
+        fn ftp4_sum(s: []u8) -> i32 {
+          let mut t: i32 = 0;
+          for x in s { t = t + (x as i32); }
+          return t;
+        }
+        fn ftp4_probe(frame: [u8; 1514..], len: i32) -> i32 {
+          if (len >= 54 && len <= 1514) {
+            let ip = frame[14..<34];
+            let ihl: i32 = ((ip[0] as i32) & 0x0f) * 4;
+            if (ihl == 20) {
+              let total_len: i32 = ftp4_read16(ip[2..<4]);
+              let ip_len_in_frame: i32 = len - 14;
+              if (total_len <= ip_len_in_frame && total_len >= ihl) {
+                let tcp_len: i32 = total_len - ihl;
+                let seg = frame[34..<34 + tcp_len];
+                let tcp = frame[34..<54];
+                let doff: i32 = (tcp[12] as i32) >> 4;
+                if (tcp_len >= 20 && doff >= 5 && doff <= 15) {
+                  let tcp_hdr_len: i32 = doff * 4;
+                  let data_off: i32 = 34 + tcp_hdr_len;
+                  let d3 = frame[data_off..<data_off + 3];
+                  if (d3[0] == 'G' as u8) {
+                    return ftp4_sum(seg);
+                  }
+                }
+              }
+            }
+          }
+          return 0;
+        }");
+
   (* Kept last in this group deliberately: Llvm_gen.enable_debug_info flips a
      process-global ref with no way back off (same one-way-switch pattern
      Llvm_gen.setup_target's target_data already uses), so every codegen test

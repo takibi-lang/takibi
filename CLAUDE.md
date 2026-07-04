@@ -717,16 +717,21 @@ emit_bounds_check_dyn, Index/AssignIndex/SliceOf/Cast/FieldGet cases,
 narrowing), `examples/slice/` (demo, both targets, --forbid-trap clean:
 forbid_trap_slice in run_qemutest.sh), 11 unit-test cases.
 
-P2 (for-in + builtins) and P3 (checked/refined subslices + the http_server
-migration) are both delivered -- see the two sections below. What remains
-after P3 (the P4 frontier, all needing either relational facts or
-checked-append machinery):
-- the TCP-options skip (`data_p = tcp_p + tcp_hdr_len`) -- the one
-  genuinely relational offset in http_server;
-- checksum spans over runtime lengths (`checksum_add(ptr, tcp_len, sum)`)
-  -- tcp_len's relation to the frame view is not interval-expressible;
+P2 (for-in + builtins), P3 (checked/refined subslices + the http_server
+migration), and P4a (interval extensions + same-base rule -- see its
+section below) are delivered. **P4a proved the "no solver needed"
+hypothesis**: the TCP-options skip and the runtime-length segment view --
+the two sites P3 classified as relational -- are both PROVABLE now (the
+ftp4_probe unit test reproduces http_server's full guard chain with zero
+trap sites). What remains (P4b, source migrations + one genuine leftover):
+- rewriting http_server's checksum spans and options skip onto the
+  now-provable slice forms (needs inet_checksum's slice signatures first,
+  which drags all its callers -- one migration wave with the `*_p`
+  removal below);
 - response building (copy_str / write_udec appends at runtime offsets) --
-  bounded today only by a documented static margin;
+  bounded today only by a documented static margin; needs bounded-append
+  forms (e.g. range-carrying slice_copy returns), the one item where new
+  design is still open;
 - migrating arp_reply / icmp_echo / tcp_parse / tcp_echo off the
   TRANSITIONAL `*_p` netutil wrappers (mechanical, http_server is the
   template).
@@ -850,6 +855,59 @@ additions, Index const-name rule), `examples/common/netutil.tkb`,
 `examples/http_server/http_server.tkb`, `_p` renames in the four
 un-migrated examples, 5 unit-test cases + 2 updated to the new checked
 semantics.
+
+### Interval Extensions and the Same-Base Subslice Rule (P4a)
+
+Four small, individually-sound extensions that together discharge both
+sites P3 had classified as "genuinely relational" -- still with no
+relational abstract domain and no solver. The ftp4_probe unit test
+reproduces http_server's complete guard chain (device-length clamp, ihl
+equality, total_len-vs-frame-room, runtime-length segment view, options
+skip) and proves it end to end with zero trap sites.
+
+1. **Interval arithmetic propagation** (type_inf's and llvm_gen's BinOp
+   typing, sync rule -- change together):
+   `{a..<b}+{c..<d} -> {a+c..<b+d-1}`, `{a..<b}-{c..<d} -> {a-d+1..<b-c}`,
+   `{a..<b}*k -> {a*k..<(b-1)*k+1}` for a positive literal k (what carries
+   doff's {5..<16} into tcp_hdr_len's {20..<61}).
+2. **Equality narrowing**: `if (ihl == 20)` narrows to {20..<21} (Eq joins
+   Ge/Gt/Le/Lt in both bound collectors).
+3. **Comparison against a range-known operand**: the bound collectors were
+   rewritten around a range_of helper -- a literal / Const_env constant is
+   {k..<k+1} (subsuming the old 8 patterns) and a VARIABLE with a refined
+   binding contributes its own range, so `total_len <= ip_len_in_frame`
+   narrows total_len's upper bound to ip_len_in_frame's static maximum.
+   The fact collapses to a constant AT COLLECTION TIME, which is why this
+   is still interval reasoning and needs no new kill obligations (the
+   constant was true when the condition executed; the narrowed variable's
+   own kill is governed by written_names as before). type_inf's
+   collect_bounds now takes tyenv; llvm_gen's collect_bounds_cond takes
+   locals (+ narrowing_ctx, which moved above it in the file).
+4. **Same-base subslice rule** (`Ast.var_plus_const`, single shared
+   decomposition -- sync rule): `s[v + j ..< v + k]` (same variable,
+   constant offsets) has length exactly k - j, and lo <= hi holds iff
+   j <= k regardless of v's value -- the correlation plain intervals treat
+   as two independent occurrences. This is the depth-1 "difference
+   constraint" (ABCD's minimal subset) obtained syntactically. io-qualified
+   bases are excluded in both checkers: the two bound loads would be
+   volatile and could disagree. With v's range known the subslice is fully
+   proven; without it, the runtime check remains but the EXACT length k - j
+   still survives into the result minimum (so `frame[off..<off+3]` with an
+   unbounded off is 1 site, and d[2] inside is still proven).
+
+**Known conservative gap (safe direction, documented in
+collect_bounds_cond's comment)**: codegen does not consult narrowing_ctx
+for variables reached through arithmetic inside bound expressions, and
+does not see refined globals -- where type_inf proves but codegen cannot,
+the check stays and --forbid-trap reports it; binding the value to an
+immutable local (the natural style anyway) resolves it. All the guard
+values in the probe/http_server chain are immutable lets, so this gap
+never fires there.
+
+Files: `lib/type_inf.ml` (BinOp Add/Sub/Mul, collect_bounds rewrite,
+SliceOf same-base), `lib/llvm_gen.ml` (BinOp mirror, collect_bounds_cond
+rewrite, SliceOf same-base), `lib/ast.ml` (var_plus_const), 6 unit-test
+cases including the probe.
 
 ### Synchronization Primitive Design and Current Limitations
 

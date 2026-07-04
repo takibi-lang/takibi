@@ -76,11 +76,16 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       let t2 = infer_expr senv eenv tyenv fenv e2 in
       (match op with
        | Add ->
-           (* Pointer arithmetic: ptr + int -> returns the same pointer type. TIo is a value type, excluded *)
+           (* Pointer arithmetic: ptr + int -> returns the same pointer type. TIo is a value type, excluded.
+              Range propagation (interval arithmetic; sync rule: llvm_gen's
+              BinOp typing mirrors every case below, change together):
+                {a..<b} + {c..<d} -> {a+c..<b+d-1}
+                {a..<b} + k       -> {a+k..<b+k}   (and symmetric) *)
            (match repr t1, repr t2 with
             | TPtr _, _ -> t1
             | _, TPtr _ -> t2
-            (* Range propagation: {a..<b} + k -> {a+k..<b+k}. Precision preserved only when other operand is IntLit *)
+            | TRefinedInt (a, b), TRefinedInt (c, d) ->
+                TRefinedInt (a + c, b + d - 1)
             | TRefinedInt (a, b), _ ->
                 (match e2.desc with
                  | IntLit k ->
@@ -102,25 +107,47 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 unify_at e.loc ct1 ct2;
                 ct1)
        | Sub ->
-           (* Pointer arithmetic: ptr - int -> returns the same pointer type. TIo is a value type, excluded *)
+           (* Pointer arithmetic: ptr - int -> returns the same pointer type. TIo is a value type, excluded.
+              Range propagation (sync rule with llvm_gen, as for Add):
+                {a..<b} - {c..<d} -> {a-d+1..<b-c}
+                {a..<b} - k       -> {a-k..<b-k} *)
            (match repr t1 with
             | TPtr _ ->
                 unify_at e2.loc t2 TI32;
                 t1
-            (* Range propagation: {a..<b} - k -> {a-k..<b-k}. Precision preserved only when RHS is IntLit *)
             | TRefinedInt (a, b) ->
-                (match e2.desc with
-                 | IntLit k ->
-                     unify_at e2.loc t2 TI32;
-                     TRefinedInt (a - k, b - k)
+                (match repr t2 with
+                 | TRefinedInt (c, d) -> TRefinedInt (a - d + 1, b - c)
                  | _ ->
-                     unify_at e2.loc (canon_ty t2) TI32;
-                     TI32)
+                     (match e2.desc with
+                      | IntLit k ->
+                          unify_at e2.loc t2 TI32;
+                          TRefinedInt (a - k, b - k)
+                      | _ ->
+                          unify_at e2.loc (canon_ty t2) TI32;
+                          TI32))
             | _ ->
                 let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
                 unify_at e.loc ct1 ct2;
                 ct1)
-       | Mul | Div ->
+       | Mul ->
+           (* Range propagation: {a..<b} * k (k a positive literal) ->
+              {a*k..<(b-1)*k+1} -- what makes `tcp_hdr_len = doff * 4` carry
+              doff's narrowed {5..<16} into {20..<61}. Sync rule with
+              llvm_gen as for Add/Sub. Non-literal or non-positive
+              multipliers fall back to i32. *)
+           (match repr t1, e2.desc, repr t2, e1.desc with
+            | TRefinedInt (a, b), IntLit k, _, _ when k > 0 ->
+                unify_at e2.loc t2 TI32;
+                TRefinedInt (a * k, (b - 1) * k + 1)
+            | _, _, TRefinedInt (a, b), IntLit k when k > 0 ->
+                unify_at e1.loc t1 TI32;
+                TRefinedInt (a * k, (b - 1) * k + 1)
+            | _ ->
+                let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
+                unify_at e.loc ct1 ct2;
+                ct1)
+       | Div ->
            let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
            unify_at e.loc ct1 ct2;
            ct1
@@ -371,20 +398,41 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
         | Some k -> Some (k, k + 1)
         | None -> (match repr bt with TRefinedInt (a, b) -> Some (a, b) | _ -> None)
       in
+      (* Same-base rule: s[v + j ..< v + k] (same variable v, constant
+         offsets) has length exactly k - j, and lo <= hi holds iff j <= k --
+         regardless of v's value. This discharges the correlated-bounds
+         pattern (frame[data_off ..< data_off + 3]) that plain interval
+         reasoning cannot (it treats the two occurrences of v as
+         independent). io-qualified v is excluded: its two loads are
+         volatile and could disagree. Sync rule: llvm_gen's SliceOf
+         computes the same via the shared Ast.var_plus_const. *)
+      let same_base_len =
+        match Ast.var_plus_const lo_e, Ast.var_plus_const hi_e with
+        | Some (v1, j), Some (v2, k) when v1 = v2 && j <= k ->
+            let is_io = match StringMap.find_opt v1 tyenv with
+              | Some (t, _) -> (match repr t with TIo _ -> true | _ -> false)
+              | None -> false
+            in
+            if is_io then None else Some (k - j)
+        | _ -> None
+      in
       (match repr vt with
        | TSlice (elem, m) ->
            (* Proven subslice: 0 <= lo, lo <= hi, hi <= m must all follow
               from the bounds' STATIC ranges (m is a lower bound of the
-              runtime length, so hi <= m implies hi <= len). Interval-only:
-              max(lo) <= min(hi) proves lo <= hi without any relational
-              reasoning. The result's minimum is the guaranteed length
-              min(hi) - max(lo). This is how `frame[0..<len]` after
-              `if (len >= 54 && len <= 1514)` narrowing yields [u8; 54..]
-              with no runtime check at all. *)
+              runtime length, so hi <= m implies hi <= len), except that
+              lo <= hi may also come from the same-base rule. The result's
+              minimum is the guaranteed length: exact k - j for same-base,
+              min(hi) - max(lo) otherwise. This is how `frame[0..<len]`
+              after `if (len >= 54 && len <= 1514)` narrowing yields
+              [u8; 54..] with no runtime check at all. *)
            (match bound_range lo_e lo_t, bound_range hi_e hi_t with
             | Some (la, lb), Some (ha, hb)
-              when la >= 0 && lb - 1 <= ha && hb - 1 <= m ->
-                TSlice (elem, ha - (lb - 1))
+              when la >= 0 && (lb - 1 <= ha || same_base_len <> None)
+                   && hb - 1 <= m ->
+                (match same_base_len with
+                 | Some l -> TSlice (elem, l)
+                 | None   -> TSlice (elem, ha - (lb - 1)))
             | lo_r, hi_r ->
                 (match const_bounds with
                  | Some a, Some b when a < 0 || a > b ->
@@ -403,10 +451,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                         keeps whatever the static ranges still guarantee
                         once the check has passed: len = hi - lo >=
                         min(hi) - max(lo). *)
-                     let min_after = match lo_r, hi_r with
-                       | Some (_, lb), Some (ha, _) when ha - (lb - 1) > 0 ->
-                           ha - (lb - 1)
-                       | _ -> 0
+                     let min_after = match same_base_len with
+                       | Some l -> l  (* exact once the check has passed *)
+                       | None ->
+                           (match lo_r, hi_r with
+                            | Some (_, lb), Some (ha, _) when ha - (lb - 1) > 0 ->
+                                ha - (lb - 1)
+                            | _ -> 0)
                      in
                      TSlice (elem, min_after)))
        | TArray (elem, n) ->
@@ -416,8 +467,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               first if a runtime-checked subslice is really wanted). *)
            (match bound_range lo_e lo_t, bound_range hi_e hi_t with
             | Some (la, lb), Some (ha, hb)
-              when la >= 0 && lb - 1 <= ha && hb - 1 <= n ->
-                TSlice (elem, ha - (lb - 1))
+              when la >= 0 && (lb - 1 <= ha || same_base_len <> None)
+                   && hb - 1 <= n ->
+                (match same_base_len with
+                 | Some l -> TSlice (elem, l)
+                 | None   -> TSlice (elem, ha - (lb - 1)))
             | _ ->
                 (match const_bounds with
                  | Some a, Some b ->
@@ -592,7 +646,19 @@ let rec check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : unit =
 
 (* Collect per-variable bounds from a condition: v >= lo / v < hi / && chains.
    Returns name -> (lo_opt, hi_opt). Commutative forms (lo < v) are also handled. *)
-let collect_bounds (cond : Ast.expr) : (int option * int option) StringMap.t =
+(* Collect per-variable bounds from an if condition. A comparison
+   constrains `Var n` whenever the OTHER operand's static value range is
+   known: an integer literal k is {k..<k+1}, a Const_env constant likewise,
+   and a variable whose binding is refined contributes its own range
+   (`total_len <= ip_len_in_frame` narrows total_len's upper bound to
+   ip_len_in_frame's static maximum -- the fact collapses to a CONSTANT at
+   collection time, so this is still interval reasoning, not a relational
+   domain, and no new kill obligations arise: the constant was true when
+   the condition executed and n's own kill is governed by written_names as
+   before). Equality (`ihl == 20`) narrows to the operand's exact range.
+   Sync rule: llvm_gen.ml's collect_bounds_cond is the same algorithm over
+   its own binding tables; change the two together. *)
+let collect_bounds tyenv (cond : Ast.expr) : (int option * int option) StringMap.t =
   let take_lo a b = match a, b with
     | Some x, Some y -> Some (max x y)
     | Some _, None -> a | None, _ -> b in
@@ -604,16 +670,51 @@ let collect_bounds (cond : Ast.expr) : (int option * int option) StringMap.t =
       | Some p -> p | None -> (None, None) in
     StringMap.add name (take_lo lo_opt pl, take_hi hi_opt ph) acc
   in
+  (* Static value range of a comparison operand, when known. *)
+  let range_of (e : Ast.expr) =
+    match Const_env.bound_value e with
+    | Some k -> Some (k, k + 1)
+    | None ->
+        (match e.desc with
+         | Var m ->
+             (match StringMap.find_opt m tyenv with
+              | Some (t, _) ->
+                  (match repr t with
+                   | TRefinedInt (a, b) -> Some (a, b)
+                   | _ -> None)
+              | None -> None)
+         | _ -> None)
+  in
+  (* n <op> rhs where rhs's range is {c..<d} (so c <= rhs <= d-1). *)
+  let constrain_left op n (c, d) acc =
+    match op with
+    | Ast.Ge -> update n (Some c)       None           acc
+    | Ast.Gt -> update n (Some (c + 1)) None           acc
+    | Ast.Le -> update n None           (Some d)       acc
+    | Ast.Lt -> update n None           (Some (d - 1)) acc
+    | Ast.Eq -> update n (Some c)       (Some d)       acc
+    | _ -> acc
+  in
+  (* lhs <op> n where lhs's range is {c..<d} -- the mirrored constraints. *)
+  let constrain_right op n (c, d) acc =
+    match op with
+    | Ast.Ge -> update n None           (Some d)       acc  (* n <= lhs *)
+    | Ast.Gt -> update n None           (Some (d - 1)) acc  (* n <  lhs *)
+    | Ast.Le -> update n (Some c)       None           acc  (* n >= lhs *)
+    | Ast.Lt -> update n (Some (c + 1)) None           acc  (* n >  lhs *)
+    | Ast.Eq -> update n (Some c)       (Some d)       acc
+    | _ -> acc
+  in
   let rec go (e : Ast.expr) acc = match e.desc with
-    | BinOp (And, e1, e2)                                          -> go e2 (go e1 acc)
-    | BinOp (Ge, {desc=Var n;_}, {desc=IntLit lo;_})              -> update n (Some lo)     None          acc
-    | BinOp (Gt, {desc=Var n;_}, {desc=IntLit lo;_})              -> update n (Some (lo+1)) None          acc
-    | BinOp (Lt, {desc=Var n;_}, {desc=IntLit hi;_})              -> update n None          (Some hi)     acc
-    | BinOp (Le, {desc=Var n;_}, {desc=IntLit hi;_})              -> update n None          (Some (hi+1)) acc
-    | BinOp (Le, {desc=IntLit lo;_}, {desc=Var n;_})              -> update n (Some lo)     None          acc
-    | BinOp (Lt, {desc=IntLit lo;_}, {desc=Var n;_})              -> update n (Some (lo+1)) None          acc
-    | BinOp (Ge, {desc=IntLit hi;_}, {desc=Var n;_})              -> update n None          (Some (hi+1)) acc
-    | BinOp (Gt, {desc=IntLit hi;_}, {desc=Var n;_})              -> update n None          (Some hi)     acc
+    | BinOp (And, e1, e2) -> go e2 (go e1 acc)
+    | BinOp ((Ge | Gt | Le | Lt | Eq) as op, l, r) ->
+        let acc = match l.desc, range_of r with
+          | Var n, Some rng -> constrain_left op n rng acc
+          | _ -> acc
+        in
+        (match r.desc, range_of l with
+         | Var n, Some rng -> constrain_right op n rng acc
+         | _ -> acc)
     | _ -> acc
   in
   go cond StringMap.empty
@@ -631,7 +732,7 @@ let collect_bounds (cond : Ast.expr) : (int option * int option) StringMap.t =
    same function on the same body (sync rule -- see written_names' comment). *)
 let narrow_from_cond tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
   let killed = Ast.written_names then_body in
-  let bounds = collect_bounds cond in
+  let bounds = collect_bounds tyenv cond in
   let env =
     StringMap.fold (fun name (lo_opt, hi_opt) env ->
       match lo_opt, hi_opt with
