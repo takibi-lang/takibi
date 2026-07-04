@@ -1,0 +1,86 @@
+// for-in element iteration + slice builtins demo (P2 of the slice design).
+//
+// The point of this trio is that variable-length buffer code -- the shape
+// that lives in examples/common/netutil.tkb and inet_checksum.tkb -- can
+// now be written with ZERO trap sites and ZERO relational reasoning:
+//
+//   - `for x in s { ... }`: the compiler generates the counter, the length
+//     compare, and the in-bounds element load itself. Safe by
+//     construction; no index proof exists because no index exists.
+//   - `slice_copy(dst, src) -> usize`: copies min(dst.len, src.len)
+//     elements forward (overlap-safe when dst does not lead src, the same
+//     guarantee bytes_copy's callers rely on) and returns the count.
+//     Total function: a length mismatch shows up in the return value,
+//     never as a trap.
+//   - `slice_eq(a, b) -> bool`: length mismatch is false, not an error.
+//
+// checksum_slice below is the proof-of-concept: RFC 1071's Internet
+// checksum written without any indexed access. The hi/lo alternation
+// state replaces inet_checksum.tkb's stride-2 index loop (data[i],
+// data[i+1]) -- exactly the loop whose `i + 1 < len` condition would
+// otherwise demand relational reasoning. Same algorithm, same result,
+// no bounds obligations at all.
+//
+// This whole file compiles under --forbid-trap (registered as
+// forbid_trap_foreach in scripts/run_qemutest.sh).
+//
+// QEMU expected output:
+//   copied=8 eq=yes eq2=no sum=548 ck=61162 part=4
+
+let mut a: [u8; 8];
+let mut b: [u8; 8];
+
+fn sum_slice(s: []u8) -> i32 {
+    let mut total: i32 = 0;
+    for x in s {
+        total = total + (x as i32);
+    }
+    return total;
+}
+
+fn checksum_slice(s: []u8) -> i32 {
+    let mut sum: i32 = 0;
+    let mut hi: i32 = 1;
+    for x in s {
+        if (hi == 1) {
+            sum = sum + ((x as i32) << 8);
+            hi = 0;
+        } else {
+            sum = sum + (x as i32);
+            hi = 1;
+        }
+    }
+    while ((sum >> 16) != 0) {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    return (~sum) & 0xffff;
+}
+
+fn main() {
+    for i in 0..<8 {
+        a[i] = ('A' + i) as u8;
+    }
+    let sa = a as []u8;
+    let sb = b as []u8;
+
+    uart_puts("copied=");
+    uart_print_uint(slice_copy(sb, sa) as i32);
+
+    uart_puts(" eq=");
+    if (slice_eq(sa, sb)) { uart_puts("yes"); } else { uart_puts("no"); }
+
+    b[7] = 'X';
+    uart_puts(" eq2=");
+    if (slice_eq(sa, sb)) { uart_puts("yes"); } else { uart_puts("no"); }
+
+    uart_puts(" sum=");
+    uart_print_uint(sum_slice(sa));       // 'A'+...+'H' = 65+...+72
+
+    uart_puts(" ck=");
+    uart_print_uint(checksum_slice(sa));  // one's-complement sum of ABCDEFGH
+
+    uart_puts(" part=");
+    uart_print_uint(slice_copy(sb[0..<4], sa) as i32);  // min(4, 8) = 4
+
+    uart_puts("\r\n");
+}

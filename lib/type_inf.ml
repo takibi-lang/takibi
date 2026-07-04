@@ -412,6 +412,42 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       raise (TypeError (e.loc,
         "struct literal requires a type annotation: `let mut x: Name = {...}`"))
 
+  | Call ("slice_copy", args) ->
+      (* Builtin (reserved name, see check_reserved_fn): copies
+         min(dst.len, src.len) elements FORWARD from src to dst and returns
+         the count as usize. Total function -- no trap, no check; a length
+         mismatch shows up in the return value, never as a runtime error.
+         The forward loop makes overlapping ranges safe when dst does not
+         lead src (same guarantee bytes_copy's callers already rely on,
+         e.g. the payload shift in tcp_echo -- see CLAUDE.md). The compiler
+         emits the loop itself, so no takibi-level index proof is needed:
+         this is how variable-length buffer code stays inside the
+         non-relational interval world. *)
+      (match args with
+       | [d; s] ->
+           let dt = infer_expr senv eenv tyenv fenv d in
+           let st = infer_expr senv eenv tyenv fenv s in
+           let ev = fresh () in
+           unify_at d.loc dt (TSlice (ev, 0));
+           unify_at s.loc st (TSlice (ev, 0));
+           TUsize
+       | _ -> raise (TypeError (e.loc,
+           "slice_copy expects 2 arguments: slice_copy(dst, src)")))
+
+  | Call ("slice_eq", args) ->
+      (* Builtin: true iff the lengths are equal AND all elements match.
+         Total function -- length mismatch is false, not an error. *)
+      (match args with
+       | [a; b] ->
+           let at = infer_expr senv eenv tyenv fenv a in
+           let bt = infer_expr senv eenv tyenv fenv b in
+           let ev = fresh () in
+           unify_at a.loc at (TSlice (ev, 0));
+           unify_at b.loc bt (TSlice (ev, 0));
+           TBool
+       | _ -> raise (TypeError (e.loc,
+           "slice_eq expects 2 arguments: slice_eq(a, b)")))
+
   | Call (fname, args) ->
       (* Try direct call (function name -> fenv) first *)
       let ft_opt = match StringMap.find_opt fname fenv with
@@ -736,6 +772,23 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       in
       (tyenv, raw_locals')
 
+  | ForEach (name, se, body) ->
+      let st = infer_expr senv eenv tyenv fenv se in
+      (match repr st with
+       | TSlice (el, _) ->
+           (* Element is an immutable per-iteration value of the element type. *)
+           let body_env = StringMap.add name (el, false) tyenv in
+           let (_, raw_locals') = List.fold_left
+             (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs true s)
+             (body_env, raw_locals) body
+           in
+           (tyenv, raw_locals')
+       | t ->
+           raise (TypeError (se.loc,
+             Printf.sprintf
+               "for-in iterates over a slice, got '%s' (write `arr as []T` \
+                to iterate an array)" (to_string t))))
+
   | Match (disc, arms) ->
       let dt = infer_expr senv eenv tyenv fenv disc in
       let ename = match repr dt with
@@ -812,6 +865,9 @@ let check_const_shadowing (fdef : Ast.func) =
     | Ast.For (name, _, _, body) ->
         if Const_env.find name <> None then reject s.loc name;
         List.iter go_stmt body
+    | Ast.ForEach (name, _, body) ->
+        if Const_env.find name <> None then reject s.loc name;
+        List.iter go_stmt body
     | Ast.Match (_, arms) ->
         List.iter (function
           | Ast.ArmVariant (_, _, b) -> List.iter go_stmt b
@@ -861,12 +917,22 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> m
   ) StringMap.empty prog in
   (* Pass 1: collect function signatures *)
+  (* Builtin names are reserved: infer_expr's Call case dispatches on them
+     BEFORE consulting fenv, so a same-named user/extern function would be
+     silently unreachable -- reject the definition instead. *)
+  let check_reserved_fn loc name =
+    if name = "slice_copy" || name = "slice_eq" then
+      raise (TypeError (loc,
+        Printf.sprintf "'%s' is a compiler builtin and cannot be redefined" name))
+  in
   let fenv = List.fold_left (fun m -> function
     | Ast.FuncDef fdef ->
+        check_reserved_fn fdef.def_loc fdef.name;
         let pts = List.map (fun (_, t) -> of_ast_opt t) fdef.params in
         let rt  = ret_of_ast_opt fdef.ret_type in
         StringMap.add fdef.name (TFun (pts, rt)) m
     | Ast.ExternFuncDef (name, params, ret_ty) ->
+        check_reserved_fn Lexing.dummy_pos name;
         let pts = List.map (fun (_, t) -> of_ast_opt t) params in
         let rt  = ret_of_ast_opt ret_ty in
         StringMap.add name (TFun (pts, rt)) m

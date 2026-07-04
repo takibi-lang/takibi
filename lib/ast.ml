@@ -75,6 +75,12 @@ and stmt_desc =
   | If of expr * stmt list * stmt list
   | While of expr * stmt list
   | For of ident * expr * expr * stmt list  (* for i in lo..<hi { body } *)
+  | ForEach of ident * expr * stmt list
+      (* for x in s { body } -- element iteration over a slice. The slice
+         expression is evaluated ONCE at loop entry (snapshot semantics,
+         like For's bounds); x is an immutable per-iteration element value.
+         Safe by construction: the compiler generates the counter and the
+         in-bounds access itself, so no index proof is ever needed. *)
   | Break
   | Continue
   | Match of expr * match_arm list  (* match expr { EName::V => {...} _ => {...} } *)
@@ -157,6 +163,7 @@ let written_names (stmts : stmt list) : string list =
     | While (c, b)           -> go_expr c; List.iter go_stmt b
     | For (n, lo, hi, b)     -> add n; go_expr lo; go_expr hi;
                                 List.iter go_stmt b
+    | ForEach (n, se, b)     -> add n; go_expr se; List.iter go_stmt b
     | Break | Continue       -> ()
     | Match (d, arms)        ->
         go_expr d;

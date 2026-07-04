@@ -134,6 +134,10 @@ stmt:
     { { desc = While(c, b); loc = $symbolstartpos } }
   | FOR id = IDENT IN lo = expr DOTDOTLT hi = expr LBRACE body = stmts RBRACE
     { { desc = For (id, lo, hi, body); loc = $symbolstartpos } }
+  | FOR id = IDENT IN s = expr LBRACE body = stmts RBRACE
+    (* for x in s { ... } -- element iteration over a slice (LBRACE after the
+       expression disambiguates from the lo..<hi range form) *)
+    { { desc = ForEach (id, s, body); loc = $symbolstartpos } }
   | BREAK SEMI    { { desc = Break;    loc = $symbolstartpos } }
   | CONTINUE SEMI { { desc = Continue; loc = $symbolstartpos } }
   | MATCH expr LBRACE match_arms RBRACE

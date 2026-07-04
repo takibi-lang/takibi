@@ -717,16 +717,70 @@ emit_bounds_check_dyn, Index/AssignIndex/SliceOf/Cast/FieldGet cases,
 narrowing), `examples/slice/` (demo, both targets, --forbid-trap clean:
 forbid_trap_slice in run_qemutest.sh), 11 unit-test cases.
 
-**Deferred (P2/P3, in order of payoff)**: element iteration `for b in s`
-and copy/eq builtins (what the netutil helpers need to become slice-based
-without relational reasoning -- their `for i in 0..<n { a[i] }` loops are
-where n-vs-len relations concentrate); runtime-checked subslice `s[a..<b]`
-with runtime bounds = one recorded trap site (needed for tcp_hdr_len
-options skip -- the single genuinely relational site in http_server);
-driver API returning (frame capacity slice, received length) so the
-device-reported length gets validated once at the boundary (today's code
-trusts it unchecked -- a real latent OOB found during the census, along
-with the unbounded response build in build_http_response_fin).
+**Deferred (P3, in order of payoff)** (P2 -- for-in element iteration +
+slice builtins -- is delivered, see the next section): runtime-checked
+subslice `s[a..<b]` with runtime bounds = one recorded trap site (needed
+for tcp_hdr_len options skip -- the single genuinely relational site in
+http_server); driver API returning (frame capacity slice, received length)
+so the device-reported length gets validated once at the boundary (today's
+code trusts it unchecked -- a real latent OOB found during the census,
+along with the unbounded response build in build_http_response_fin); the
+netutil/inet_checksum rewrite to slice signatures (the language pieces now
+exist; the rewrite drags every caller with it, so it lands together with
+the P3 items as one http_server-and-friends migration).
+
+### for-in Element Iteration and Slice Builtins (P2)
+
+The P2 goal: variable-length buffer code (the netutil.tkb /
+inet_checksum.tkb shape) must be writable with zero trap sites and zero
+relational reasoning. Three pieces, all demonstrated end-to-end in
+examples/foreach (which runs under QEMU on both targets and is
+--forbid-trap clean -- forbid_trap_foreach in run_qemutest.sh):
+
+**`for x in s { ... }`** (`Ast.ForEach`): element iteration over a slice.
+The compiler generates the counter (`__foreach_<name>`, usize-width, pre
+-allocated by collect_lets like For's `__for_`), the length compare, and
+the in-bounds element load -- safe by construction, no index exists so no
+index proof exists. The slice expression is evaluated ONCE at loop entry
+(snapshot semantics, like For's bounds); x is an immutable per-iteration
+value (widened per the widen_load invariant). Block layout mirrors For
+exactly, including `continue` -> incr_bb. Iterating a non-slice is a
+compile error suggesting `arr as []T`. ForEach is covered by
+written_names (rebinding kills outer narrowing) and
+check_const_shadowing -- both have explicit ForEach cases; note
+check_const_shadowing and collect_lets have `_ -> ()` fallbacks, so a
+future statement form must be added there BY HAND (the OCaml
+exhaustiveness check will not flag those two).
+
+**`slice_copy(dst, src) -> usize` / `slice_eq(a, b) -> bool`** (compiler
+builtins, dispatched in type_inf's and llvm_gen's Call cases BEFORE the
+fenv/functions lookup; the names are reserved -- defining fn/extern fn
+with them is a compile error via check_reserved_fn, since a user
+definition would be silently unreachable). Both are TOTAL functions:
+- slice_copy copies min(dst.len, src.len) elements FORWARD and returns the
+  count; a length mismatch shows in the return value, never as a trap.
+  The forward loop keeps the overlap guarantee bytes_copy's callers
+  already rely on (dst not leading src -- tcp_echo's payload shift).
+- slice_eq is false on length mismatch, true iff all elements match.
+Codegen builds phi-based loops, NOT allocas (an alloca at the call site
+would sit inside any enclosing loop and grow the stack per iteration),
+and NOT llvm.memcpy (with a dynamic length the intrinsic lowers to a
+memcpy libcall = bare-metal link error, the same reason run_optimizations
+excludes the loop-idiom pass).
+
+**The checksum pattern**: examples/foreach's checksum_slice writes RFC
+1071 without indexed access -- a hi/lo alternation flag replaces
+inet_checksum.tkb's stride-2 loop (`data[i]`, `data[i+1]`, guarded by
+`i + 1 < len`), which is exactly the loop shape that would otherwise
+demand relational reasoning. Same algorithm, verified against the same
+kind of vector at runtime under QEMU.
+
+Files: `lib/ast.ml` (ForEach + written_names case), `lib/parser.mly`
+(second FOR production -- LBRACE vs DOTDOTLT after the expression
+disambiguates, no grammar conflict), `lib/type_inf.ml` (ForEach inference,
+check_const_shadowing case, two builtin Call cases, check_reserved_fn),
+`lib/llvm_gen.ml` (collect_lets case, gen_stmt ForEach, two builtin Call
+intercepts), `examples/foreach/`, 7 unit-test cases.
 
 ### Synchronization Primitive Design and Current Limitations
 

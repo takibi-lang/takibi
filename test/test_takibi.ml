@@ -2223,6 +2223,90 @@ let codegen_tests = [
             return ftbp_buf_b[x];
           }" ());
 
+  (* -- for-in element iteration + slice builtins (P2) -------------------- *)
+
+  Alcotest.test_case
+    "for-in over a slice is safe by construction: zero trap sites, and the \
+     element value composes with arithmetic (widened per the invariant)" `Quick
+    (expect_trap_sites 0
+       "fn ftfe_sum(s: []u8) -> i32 {
+          let mut total: i32 = 0;
+          for x in s {
+            total = total + (x as i32);
+          }
+          return total;
+        }");
+
+  Alcotest.test_case
+    "for-in with break and continue targets the compiler-generated \
+     increment/exit blocks (same layout as For)" `Quick
+    (expect_trap_sites 0
+       "fn ftfe_scan(s: []u8) -> i32 {
+          let mut t: i32 = 0;
+          for x in s {
+            if (x == 0 as u8) { break; }
+            if (x == 32 as u8) { continue; }
+            t = t + 1;
+          }
+          return t;
+        }");
+
+  Alcotest.test_case
+    "for-in over a non-slice is a compile error suggesting `arr as []T`" `Quick
+    (expect_type_error "for-in iterates over a slice"
+       "fn ftfe_bad(n: i32) -> i32 {
+          for x in n { }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "for-in rebinding a narrowed name kills the narrowing (written_names \
+     covers ForEach): the read after the loop keeps its bounds check" `Quick
+    (expect_trap_sites 1
+       "let mut ftfe_buf: [u8; 8];
+        fn ftfe_kill(v: i32, s: []u8) -> u8 {
+          if (v >= 0 && v < 8) {
+            for v in s { }
+            return ftfe_buf[v];
+          }
+          return 0 as u8;
+        }");
+
+  Alcotest.test_case
+    "slice_copy builtin: returns usize, total (zero trap sites); arity and \
+     element-type mismatches are compile errors" `Quick
+    (fun () ->
+       expect_trap_sites 0
+         "fn ftsc_ok(d: []u8, s: []u8) -> usize {
+            return slice_copy(d, s);
+          }" ();
+       expect_type_error "slice_copy expects 2 arguments"
+         "fn ftsc_arity(d: []u8) -> usize {
+            return slice_copy(d);
+          }" ();
+       expect_type_error "cannot unify"
+         "let mut ftsc_ints: [i32; 4];
+          fn ftsc_elem(d: []u8) -> usize {
+            return slice_copy(d, ftsc_ints as []i32);
+          }" ());
+
+  Alcotest.test_case
+    "slice_eq builtin: returns bool usable directly in if, zero trap sites" `Quick
+    (expect_trap_sites 0
+       "fn ftse_ok(a: []u8, b: []u8) -> i32 {
+          if (slice_eq(a, b)) { return 1; }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "builtin names are reserved: defining fn slice_copy / extern fn \
+     slice_eq is a compile error" `Quick
+    (fun () ->
+       expect_type_error "compiler builtin"
+         "fn slice_copy(a: i32) -> i32 { return a; }" ();
+       expect_type_error "compiler builtin"
+         "extern fn slice_eq(a: i32) -> i32;" ());
+
   (* Kept last in this group deliberately: Llvm_gen.enable_debug_info flips a
      process-global ref with no way back off (same one-way-switch pattern
      Llvm_gen.setup_target's target_data already uses), so every codegen test

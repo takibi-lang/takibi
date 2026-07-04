@@ -558,6 +558,7 @@ let rec collect_lets stmts =
     | If (_, t, e)                -> collect_lets t @ collect_lets e
     | While (_, b)                -> collect_lets b
     | For (name, _, _, body)      -> ("__for_" ^ name, Some TypeI32, s.loc) :: collect_lets body
+    | ForEach (name, _, body)     -> ("__foreach_" ^ name, Some TypeUsize, s.loc) :: collect_lets body
     | Match (_, arms)             ->
         List.concat_map (fun arm ->
           match arm with
@@ -1253,6 +1254,87 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
   | StructLit _ ->
       raise (Error "BUG: StructLit must be handled in gen_stmt / gen_global, not gen_expr")
 
+  | Call ("slice_copy", [d_e; s_e]) ->
+      (* Builtin (see type_inf.ml's Call case for the full semantics
+         contract): copy min(dst.len, src.len) elements forward, return the
+         count as usize. The loop is built with a phi, NOT an alloca, so a
+         slice_copy inside a while loop does not grow the stack per
+         iteration. An explicit loop rather than llvm.memcpy: with a
+         dynamic length the intrinsic lowers to a memcpy libcall, a link
+         error on bare-metal (same reason run_optimizations excludes the
+         loop-idiom pass). *)
+      let (dt, dv) = gen_expr locals d_e in
+      let (_,  sv) = gen_expr locals s_e in
+      let elem_ty = match dt with
+        | TypeSlice (el, _) -> el
+        | _ -> raise (Error "BUG: slice_copy on non-slice (type_inf should reject)")
+      in
+      let usz  = usize_lltype () in
+      let dptr = slice_ptr dv and dlen = slice_len dv in
+      let sptr = slice_ptr sv and slen = slice_len sv in
+      let lt = build_icmp Icmp.Ult dlen slen "sc_lt" builder in
+      let n  = build_select lt dlen slen "sc_n" builder in
+      let cur_f   = block_parent (insertion_block builder) in
+      let pre_bb  = insertion_block builder in
+      let cond_bb = append_block context "sc_cond" cur_f in
+      let body_bb = append_block context "sc_body" cur_f in
+      let exit_bb = append_block context "sc_exit" cur_f in
+      ignore (build_br cond_bb builder);
+      position_at_end cond_bb builder;
+      let i_phi = build_phi [ (const_int usz 0, pre_bb) ] "sc_i" builder in
+      let cmp = build_icmp Icmp.Ult i_phi n "sc_cmp" builder in
+      ignore (build_cond_br cmp body_bb exit_bb builder);
+      position_at_end body_bb builder;
+      let sp = build_gep (ltype_of_ast elem_ty) sptr [| i_phi |] "sc_sp" builder in
+      let v  = build_load (ltype_of_ast elem_ty) sp "sc_v" builder in
+      let dp = build_gep (ltype_of_ast elem_ty) dptr [| i_phi |] "sc_dp" builder in
+      ignore (build_store v dp builder);
+      let i_next = build_add i_phi (const_int usz 1) "sc_next" builder in
+      add_incoming (i_next, insertion_block builder) i_phi;
+      ignore (build_br cond_bb builder);
+      position_at_end exit_bb builder;
+      (TypeUsize, n)
+
+  | Call ("slice_eq", [a_e; b_e]) ->
+      (* Builtin: lengths equal AND elements equal; length mismatch is
+         false, never an error. Same phi-loop construction as slice_copy. *)
+      let (at, av) = gen_expr locals a_e in
+      let (_,  bv) = gen_expr locals b_e in
+      let elem_ty = match at with
+        | TypeSlice (el, _) -> el
+        | _ -> raise (Error "BUG: slice_eq on non-slice (type_inf should reject)")
+      in
+      let usz  = usize_lltype () in
+      let i1t  = i1_type context in
+      let aptr = slice_ptr av and alen = slice_len av in
+      let bptr = slice_ptr bv and blen = slice_len bv in
+      let cur_f    = block_parent (insertion_block builder) in
+      let entry_bb = insertion_block builder in
+      let cond_bb  = append_block context "se_cond" cur_f in
+      let body_bb  = append_block context "se_body" cur_f in
+      let done_bb  = append_block context "se_done" cur_f in
+      let len_eq = build_icmp Icmp.Eq alen blen "se_len_eq" builder in
+      ignore (build_cond_br len_eq cond_bb done_bb builder);
+      position_at_end cond_bb builder;
+      let i_phi  = build_phi [ (const_int usz 0, entry_bb) ] "se_i" builder in
+      let at_end = build_icmp Icmp.Eq i_phi alen "se_at_end" builder in
+      ignore (build_cond_br at_end done_bb body_bb builder);
+      position_at_end body_bb builder;
+      let ap = build_gep (ltype_of_ast elem_ty) aptr [| i_phi |] "se_ap" builder in
+      let la = build_load (ltype_of_ast elem_ty) ap "se_la" builder in
+      let bp = build_gep (ltype_of_ast elem_ty) bptr [| i_phi |] "se_bp" builder in
+      let lb = build_load (ltype_of_ast elem_ty) bp "se_lb" builder in
+      let eqv = build_icmp Icmp.Eq la lb "se_eqv" builder in
+      let i_next = build_add i_phi (const_int usz 1) "se_next" builder in
+      add_incoming (i_next, insertion_block builder) i_phi;
+      ignore (build_cond_br eqv cond_bb done_bb builder);
+      position_at_end done_bb builder;
+      let res = build_phi [ (const_int i1t 0, entry_bb);   (* length mismatch  *)
+                            (const_int i1t 1, cond_bb);    (* reached the end  *)
+                            (const_int i1t 0, body_bb) ]   (* element mismatch *)
+                  "se_res" builder in
+      (TypeBool, res)
+
   | Call (fname, args) ->
       (match Hashtbl.find_opt functions fname with
        | Some (ft, callee) ->
@@ -1727,6 +1809,58 @@ let gen_func ?prog_types fdef =
            i_val is defined in cond_bb which dominates incr_bb, so the SSA use is valid. *)
         position_at_end incr_bb builder;
         let i_next = build_add i_val (const_int (i32_type context) 1) "for_next" builder in
+        ignore (build_store i_next ctr_ptr builder);
+        ignore (build_br cond_bb builder);
+
+        position_at_end exit_bb builder
+
+    | ForEach (name, se, body) ->
+        (* Element iteration over a slice: the compiler generates the
+           counter, the length compare, and the in-bounds element load
+           itself -- safe by construction, zero trap sites, no index proof
+           ever needed. The slice expression is evaluated ONCE here
+           (snapshot semantics; reassigning the slice variable inside the
+           body does not affect the iteration -- same as For evaluating its
+           bounds once). Block layout mirrors For, including continue ->
+           incr_bb. *)
+        let (sty, fat) = gen_expr locals se in
+        let elem_ty = match sty with
+          | TypeSlice (el, _) -> el
+          | _ -> raise (Error "BUG: for-in over non-slice (type_inf should reject)")
+        in
+        let ptr   = slice_ptr fat in
+        let len_v = slice_len fat in
+        let usz   = usize_lltype () in
+        let ctr_name = "__foreach_" ^ name in
+        let ctr_ptr  = match Hashtbl.find_opt locals ctr_name with
+          | Some (Mut (_, p)) -> p
+          | _ -> raise (Error (Printf.sprintf "BUG: foreach counter '%s' not found" ctr_name))
+        in
+        ignore (build_store (const_int usz 0) ctr_ptr builder);
+        let cond_bb = append_block context "fe_cond" f in
+        let body_bb = append_block context "fe_body" f in
+        let incr_bb = append_block context "fe_incr" f in
+        let exit_bb = append_block context "fe_exit" f in
+        ignore (build_br cond_bb builder);
+
+        position_at_end cond_bb builder;
+        let i_val = build_load usz ctr_ptr "fe_i" builder in
+        let cmp   = build_icmp Icmp.Ult i_val len_v "fe_cmp" builder in
+        ignore (build_cond_br cmp body_bb exit_bb builder);
+
+        position_at_end body_bb builder;
+        let ep = build_gep (ltype_of_ast elem_ty) ptr [| i_val |] "fe_ptr" builder in
+        let ev = build_load (ltype_of_ast elem_ty) ep "fe_val" builder in
+        Hashtbl.add locals name (Imm (elem_ty, to_arith_width elem_ty ev));
+        Stack.push (exit_bb, incr_bb) loop_stack;
+        List.iter gen_stmt body;
+        ignore (Stack.pop loop_stack);
+        Hashtbl.remove locals name;
+        if block_terminator (insertion_block builder) = None then
+          ignore (build_br incr_bb builder);
+
+        position_at_end incr_bb builder;
+        let i_next = build_add i_val (const_int usz 1) "fe_next" builder in
         ignore (build_store i_next ctr_ptr builder);
         ignore (build_br cond_bb builder);
 

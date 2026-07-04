@@ -335,6 +335,7 @@ run_compile_error_test "const_global_wrong"  examples/const_global_wrong/const_g
 run_compile_error_test "forbid_trap_wrong"   examples/forbid_trap_wrong/forbid_trap_wrong.tkb     examples/forbid_trap_wrong/forbid_trap_wrong.error --forbid-trap
 run_forbid_trap_ok_test "forbid_trap_ok"     examples/forbid_trap_ok/forbid_trap_ok.tkb
 run_forbid_trap_ok_test "forbid_trap_slice"  examples/common/uart.tkb examples/common/print.tkb examples/slice/slice.tkb
+run_forbid_trap_ok_test "forbid_trap_foreach" examples/common/uart.tkb examples/common/print.tkb examples/foreach/foreach.tkb
 
 echo ""
 echo "Running no-trap checks (brk must be zero in these kernels)..."
@@ -405,6 +406,7 @@ run_test "struct_align"  examples/struct_align/kernel.elf  examples/struct_align
 run_test "const_global"  examples/const_global/kernel.elf  examples/const_global/const_global.expected
 run_test "sizeof"        examples/sizeof/kernel.elf        examples/sizeof/sizeof.expected
 run_test "slice"         examples/slice/kernel.elf         examples/slice/slice.expected
+run_test "foreach"       examples/foreach/kernel.elf       examples/foreach/foreach.expected
 run_test "inet_checksum" examples/inet_checksum/kernel.elf examples/inet_checksum/inet_checksum.expected
 run_test "ip_parse"      examples/ip_parse/kernel.elf      examples/ip_parse/ip_parse.expected
 run_test "tcp_parse"     examples/tcp_parse/kernel.elf     examples/tcp_parse/tcp_parse.expected
