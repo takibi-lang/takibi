@@ -6,6 +6,15 @@ QEMU="qemu-system-aarch64"
 QEMU_COMMON="-machine virt -cpu cortex-a53 -nographic -semihosting-config enable=on,target=native"
 TIMEOUT=10
 
+# Invoke the built binary directly rather than "dune exec takibi --": under
+# `make -j`, this script's own recipe can run concurrently with other Make
+# jobs that also touch dune (e.g. "dune test"), and dune's build-directory
+# lock file is not safe against concurrent dune invocations (observed:
+# "Unexpected contents of build directory global lock file" / spurious
+# failures in run_compile_error_test below). The Makefile already ensures
+# _build/default/bin/main.exe exists and is current before this script runs.
+TAKIBI="_build/default/bin/main.exe"
+
 PASS=0
 FAIL=0
 FAILED_TESTS=()
@@ -104,7 +113,7 @@ run_compile_error_test() {
     tmp_obj=$(mktemp --suffix=.o)
     expected_msg=$(cat "$error_file")
 
-    if dune exec takibi -- "$tkb" --target aarch64-none-elf -o "$tmp_obj" >"$tmp_err" 2>&1; then
+    if "$TAKIBI" "$tkb" --target aarch64-none-elf -o "$tmp_obj" >"$tmp_err" 2>&1; then
         printf "${RED}FAIL${RST}  %s\n" "$name"
         printf "       expected compile error, but compilation succeeded\n"
         FAIL=$((FAIL + 1))
