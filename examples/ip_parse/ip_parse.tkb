@@ -7,7 +7,7 @@
 // network I/O (RX/TX over virtio-net) is exercised by examples/icmp_echo,
 // which reuses this parsing logic against live packets.
 
-fn print_ip(p: *u8) {
+fn print_ip(p: [u8; 4..]) {
     uart_print_uint(p[0] as i32);
     uart_putc('.');
     uart_print_uint(p[1] as i32);
@@ -29,13 +29,20 @@ fn print_protocol_name(proto: i32) {
     }
 }
 
-fn parse_ipv4(pkt: *u8, len: i32) {
+fn parse_ipv4(pkt: [u8; 20..], len: i32) {
     let version:  i32 = (pkt[0] as i32) >> 4;
     let ihl:      i32 = ((pkt[0] as i32) & 0x0f) * 4;
     let total_len: i32 = ((pkt[2] as i32) << 8) | (pkt[3] as i32);
     let ttl:      i32 = pkt[8] as i32;
     let protocol: i32 = pkt[9] as i32;
-    let checksum: i32 = inet_checksum(pkt, ihl);
+    // ihl is read from the wire, not otherwise validated here (this demo's
+    // whole point is field extraction, not enforcing IHL == 20 the way
+    // icmp_echo/tcp_echo/http_server do) -- so pkt[0..<ihl] is a
+    // RUNTIME-CHECKED subslice (gradual form, one recorded --forbid-trap
+    // site): if ihl were corrupted past pkt's real length, the check traps
+    // instead of the old raw-pointer version silently reading past the
+    // 20-byte buffer.
+    let checksum: i32 = inet_checksum(pkt[0..<ihl]);
 
     uart_puts("IPv4 packet:\r\n");
     uart_puts("  version:   "); uart_println_uint(version);
@@ -44,8 +51,8 @@ fn parse_ipv4(pkt: *u8, len: i32) {
     uart_puts("  ttl:       "); uart_println_uint(ttl);
     uart_puts("  protocol:  "); uart_print_uint(protocol);
     uart_puts(" (");           print_protocol_name(protocol); uart_puts(")\r\n");
-    uart_puts("  src:       "); print_ip(pkt + 12); uart_puts("\r\n");
-    uart_puts("  dst:       "); print_ip(pkt + 16); uart_puts("\r\n");
+    uart_puts("  src:       "); print_ip(pkt[12..<16]); uart_puts("\r\n");
+    uart_puts("  dst:       "); print_ip(pkt[16..<20]); uart_puts("\r\n");
     uart_puts("  checksum:  ");
     if (checksum == 0) {
         uart_puts("OK\r\n");
@@ -66,12 +73,12 @@ fn main() {
     pkt[16] = 0xac as u8; pkt[17] = 0x10 as u8; pkt[18] = 0x0a as u8; pkt[19] = 0x0c as u8;
 
     uart_puts("=== valid packet ===\r\n");
-    parse_ipv4(pkt as *u8, 20);
+    parse_ipv4(pkt as []u8, 20);
 
     // Corrupt TTL after the checksum was computed for the original bytes,
     // so the checksum field no longer matches the header -- demonstrates
     // detecting a corrupted/tampered header.
     pkt[8] = 1 as u8;
     uart_puts("=== corrupted packet (TTL changed after checksum) ===\r\n");
-    parse_ipv4(pkt as *u8, 20);
+    parse_ipv4(pkt as []u8, 20);
 }

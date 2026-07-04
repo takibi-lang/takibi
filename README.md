@@ -70,10 +70,16 @@ read).
 `--forbid-trap` is expected to grow into a family: per-category strictness
 options (array-bounds trap freedom, checked-cast freedom, safe-pointer
 enforcement outside `unsafe`, ...) with one umbrella flag enabling them
-all. Today's single flag is the first member. Currently all but one of the
-~45 examples -- including the full TCP/IP stack and HTTP server -- compile
-trap-free under it (the one exception is a demo whose entire point is a
-runtime-checked cast).
+all. Today's single flag is the first member. Most of the ~47 examples --
+including the full TCP/IP stack and HTTP server -- compile trap-free
+under it. The handful of exceptions are all deliberate and documented,
+not oversights: one demo whose entire point is a runtime-checked cast,
+two parser demos that intentionally never validate a wire-derived length
+against buffer capacity (their "corrupted packet" tests would have nothing
+to demonstrate otherwise), and one path in the TCP echo server combining
+two independently-derived runtime lengths in a way plain interval
+reasoning can't discharge -- the one genuinely relational gap found across
+the whole networking stack so far (see CLAUDE.md's P4b section).
 
 ## Current Status
 

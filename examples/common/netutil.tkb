@@ -1,8 +1,18 @@
-// Small byte-buffer helpers shared by the protocol examples
-// (arp_reply, icmp_echo, tcp_parse, tcp_echo). MAC/IP addresses and
+// Small byte-buffer helpers shared by the protocol examples (arp_reply,
+// icmp_echo, tcp_parse, tcp_echo, http_server). MAC/IP addresses and
 // multi-byte header fields are always handled as raw byte arrays rather
 // than native multi-byte integers -- see the read_u16be/write_u16be
 // comment below for why.
+//
+// SLICE MIGRATION (P4b): read/write_u16be/u32be now take slices (see
+// their own comment below) -- every caller has migrated, so no
+// transitional pointer wrapper remains here. bytes_eq/bytes_copy/
+// copy_str/write_udec stay pointer-based: bytes_eq/bytes_copy are general
+// -purpose (still used by netconfig.tkb / common_stm32/eth.tkb /
+// http_server's response-body construction), and copy_str/write_udec's
+// unbounded-append pattern is the one deliberately-deferred item (see
+// CLAUDE.md's P4b section) -- use slice_copy/slice_eq (compiler builtins)
+// directly wherever a slice view is already in hand instead of these.
 
 fn bytes_eq(a: *u8, b: *u8, n: i32) -> i32 {
     for i in 0..<n {
@@ -49,28 +59,6 @@ fn write_u32be(s: [u8; 4..], v: i32) {
     s[1] = (v >> 16) as u8;
     s[2] = (v >> 8) as u8;
     s[3] = v as u8;
-}
-
-// TRANSITIONAL pointer wrappers for the examples not yet migrated to slice
-// views (arp_reply, icmp_echo, tcp_parse, tcp_echo -- http_server is
-// migrated). Each wrapper contains the one unsafe length assertion its
-// pointer-based caller was implicitly making all along; deleting these (by
-// migrating their callers) is part of the P3 follow-up. Do NOT use in new
-// code.
-fn read_u16be_p(p: *u8) -> i32 {
-    return read_u16be(unsafe { p[0..<2] });
-}
-
-fn write_u16be_p(p: *u8, v: i32) {
-    write_u16be(unsafe { p[0..<2] }, v);
-}
-
-fn read_u32be_p(p: *u8) -> i32 {
-    return read_u32be(unsafe { p[0..<4] });
-}
-
-fn write_u32be_p(p: *u8, v: i32) {
-    write_u32be(unsafe { p[0..<4] }, v);
 }
 
 // Copies a NUL-terminated string (as produced by a string literal) into

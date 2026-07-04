@@ -740,6 +740,18 @@ let narrow_from_cond tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
           (match StringMap.find_opt name env with
            | Some (TI32, is_mut) ->
                StringMap.add name (TRefinedInt (lo, hi), is_mut) env
+           (* Already refined (e.g. an immutable let whose initializer was
+              itself refined, kept via the "proofs survive weaker
+              annotations" rule -- see check_bound_shadowing/B-plan) --
+              INTERSECT rather than no-op. Without this, a variable that
+              arrives at the if already-refined (very common once P4a's
+              interval propagation is in play) would silently keep its
+              WIDER pre-existing range instead of the tighter one the
+              condition just proved, e.g. `icmp_len: {0..<1481}` at entry
+              plus `if (icmp_len >= 8 && icmp_len <= 1480)` must become
+              {8..<1481}, not stay {0..<1481}. *)
+           | Some (TRefinedInt (elo, ehi), is_mut) ->
+               StringMap.add name (TRefinedInt (max lo elo, min hi ehi), is_mut) env
            | _ -> env)
       | _ -> env
     ) bounds tyenv

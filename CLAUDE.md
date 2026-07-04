@@ -909,6 +909,153 @@ SliceOf same-base), `lib/llvm_gen.ml` (BinOp mirror, collect_bounds_cond
 rewrite, SliceOf same-base), `lib/ast.ml` (var_plus_const), 6 unit-test
 cases including the probe.
 
+### P4b: The Migration Wave (netutil/inet_checksum -> slices, all five
+### protocol examples off pointer+length pairs)
+
+P4a's probe proved the TECHNIQUE works; P4b applied it everywhere and, in
+doing so, found and fixed one more real gap in the narrowing machinery
+plus confirmed exactly where the honest relational boundary sits in
+practice (one file, one path, precisely accounted for -- not "the census
+was wrong").
+
+**inet_checksum.tkb migrated to slices**: `checksum_add(data: []u8,
+sum_in: i32)` and `inet_checksum(data: []u8)` -- no length parameter; the
+slice's own `.len` (walked via `for b in data`, examples/foreach's hi/lo
+alternation technique) replaces the old stride-2 index loop entirely.
+`checksum_fold` is unchanged (pure integer folding, never touched a
+buffer).
+
+**The critical redesign that made checksum spans provable across a
+function call: pass an ALREADY-SLICED SEGMENT, never an integer length.**
+`fix_tcp_checksum(ip: [u8; 20..], tcp_seg: [u8; 20..])` takes the full
+segment directly and reads `tcp_seg.len` back for the pseudo-header's
+length field (so it can never disagree with what it's actually
+checksumming). This sidesteps a hard limit: **TRefinedInt-to-TRefinedInt
+function arguments require an EXACT range match, not subtyping**
+(`unify`'s TRefinedInt/TRefinedInt case raises unless `lo1=lo2 && hi1=hi2`
+-- there is no general "narrower fits into wider" rule the way slice
+minimum-length subtyping has). Passing an integer LENGTH into a function
+and trying to prove a subslice INSIDE that function against a plain `i32`
+parameter therefore never works (the parameter carries no range at all).
+Passing an already-constructed SLICE VALUE instead works, because slice
+parameters use genuine covariant subtyping (`m_actual >= m_expected`) --
+so the proof happens once, at the call site (where the length variable's
+real refined range is still in scope), and the callee just consumes the
+slice's own runtime `.len`.
+
+**Where exact-match refined parameters DO work**: `ihl: {20..<21}` is used
+as a parameter type in every migrated file's header-touching functions.
+This is legitimate specifically because each file's scope is "IHL always
+exactly 20, no IP options" -- an existing runtime precondition, previously
+enforced only by an `if`, now stated in the type signature -- and the ONE
+caller narrows via `ihl == 20` (Eq narrowing), producing the EXACT SAME
+`{20..<21}` the callee declares. This only works because caller and
+callee agree on the identical literal range; it would NOT generalize to
+"pass any 16..<24 IHL", which is the real content of the TRefinedInt
+exact-match limitation above.
+
+**Second real bug found and fixed: if-narrowing silently no-oped on an
+ALREADY-refined variable.** Both `narrow_from_cond` (type_inf.ml) and
+`apply_narrowing`/`apply_narrowing_mut` (llvm_gen.ml) originally matched
+only `Some (TI32, is_mut)` / `Some (Mut (TypeI32, _))` -- if the variable
+arriving at the `if` was ALREADY `TRefinedInt` (extremely common once
+P4a's interval propagation and the B-plan "proofs survive weaker
+annotations" rule are both in play -- e.g. `icmp_len: i32 = total_len -
+ihl` picks up a refined range straight from its Sub-propagated
+initializer), the narrowing branch didn't match, fell through to `_ ->
+env`/`_ -> saved`, and the condition's tighter bounds were silently
+DISCARDED -- the variable kept its wider pre-existing range instead of
+the INTERSECTION. Found migrating icmp_echo (`if (icmp_len >= 8 &&
+icmp_len <= 1480)` failed to narrow icmp_len past its Sub-derived
+`{0..<1481}`, so the resulting subslice's minimum stayed 0, failing to
+satisfy a callee's `[u8; 8..]` parameter). Fixed by adding an
+`TRefinedInt (elo, ehi) -> intersect` case to all three call sites (a
+Mut variable can also arrive already-narrowed from an OUTER if via
+narrowing_ctx -- llvm_gen's fix intersects with any existing narrowing_ctx
+entry too, not just the locals table's declared type). Two regression
+tests added (`ftp4b_intersect`, `ftp4b_nested_mut`).
+
+**Companion technique for a MUTABLE accumulator (http_server's response
+length, tcp_echo's data_len parameter): snapshot into an immutable
+local.** `apply_narrowing`/`_mut`'s narrowing_ctx overlay is only consulted
+when the narrowed variable is used DIRECTLY as an index/subslice bound
+(`Var n` pattern match in `gen_bound`/Index's idx_ty lookup) -- burying it
+inside an arithmetic expression like `54 + len` bypasses narrowing_ctx
+entirely (gen_expr's ordinary `Var` case for a Mut binding just returns
+the DECLARED type, ignoring narrowing_ctx). The fix used throughout: after
+the bounding `if`, `let n: i32 = len;` -- an immutable let's initializer
+type comes from `tyenv` directly (which DOES reflect the narrowing) and
+the B-plan keeps it via the refined-initializer-survives-weaker-annotation
+rule, so plain arithmetic on `n` is fully visible to codegen with no gap.
+Documented as a **known conservative gap** (safe direction: codegen may
+keep a check type_inf proved away) rather than fixed at the root, since
+"make narrowing_ctx aware of arbitrary bound sub-expressions" is
+materially more machinery for a problem this local snapshot solves in one
+extra line, at the one place it's needed. Both http_server's
+`HTTP_MAX_PAYLOAD` check and tcp_echo's `TCP_MAX_PAYLOAD` check are this
+pattern AND close a real latent gap simultaneously (the payload/segment
+length was previously trusted downstream with no capacity check at all).
+
+**http_server.tkb**: fully migrated, remains --forbid-trap clean
+(`forbid_trap_http_server`). The options-skip and the request-checksum
+span are now both PROVEN (not just "gradual", per P4a's confirmation);
+the two-line `n` snapshot proves the REPLY's checksum span too. Response
+BODY CONSTRUCTION (copy_str/write_udec into a raw pointer) remains the one
+deliberately-deferred pointer island -- see its own header comment for
+exactly why (needs bounded-append primitives, not subslice/interval
+machinery) and the enforced `HTTP_MAX_PAYLOAD` margin that bounds it today.
+
+**arp_reply.tkb, icmp_echo.tkb**: fully migrated and fully proven (both
+now registered as `forbid_trap_arp_reply` / `forbid_trap_icmp_echo`).
+icmp_echo needed the same `len <= 1514` upper clamp http_server already
+had (without it, `ip_len_in_frame` stays unrefined and the
+narrowing-against-a-range-known-variable extension never fires) plus the
+intersect fix above.
+
+**tcp_parse.tkb, ip_parse.tkb**: migrated to slices but DELIBERATELY left
+with one genuine runtime-checked (gradual) subslice each -- these
+parse-only demos never validate a wire-derived length (`ihl` / `tcp_len`)
+against the packet's actual capacity (that's the whole point of their
+"corrupted packet" demonstrations), so the checksum span is honestly
+unprovable, and the check is a REAL SAFETY IMPROVEMENT over the original
+raw-pointer code (which read out of bounds on a corrupted length with no
+check at all). Both were removed from run_qemutest.sh's no-trap example
+list (which predates this migration and only passed before because
+pointer indexing has no checks to begin with, not because these files
+were ever proof-complete).
+
+**tcp_echo.tkb**: fully migrated but keeps 2 recorded trap sites in
+`build_data_echo`'s data-echo path -- the one place across this entire
+migration wave that is genuinely, unavoidably relational with the current
+toolkit. `data_off` (where payload starts, past any TCP options) and
+`data_len` (how much payload there is) are independently-derived
+quantities; proving `data_off + data_len <= frame's capacity` needs a
+two-variable fact plain interval arithmetic cannot carry, and the
+same-base rule doesn't apply either (it only handles a variable plus a
+COMPILE-TIME CONSTANT offset -- `data_len` is a runtime variable, not a
+constant). Confirmed concretely by trying to compute `data_len`'s own
+Sub-propagated range here: with `tcp_len`/`tcp_hdr_len` both refined, the
+formula gives `{-40..<1461}` -- a NEGATIVE lower bound, even though the
+existing runtime guard (`tcp_len >= tcp_hdr_len`) makes that impossible at
+runtime. Intervals only see each variable's OWN range, not the RELATION
+between two of them, so this pessimism is fundamentally the domain's
+limit, not a missing extension. Removed from the no-trap example list for
+the same honest reason. This is the ONE (out of five protocol examples,
+one algorithm library, and one server) file/path in the whole P4 wave that
+would need a genuine relational domain or VC+SMT to close -- a strong
+empirical data point for "not yet, and maybe not ever, for this
+codebase's actual shape."
+
+Files: `examples/common/inet_checksum.tkb`, `examples/common/netutil.tkb`
+(`_p` transitional wrappers deleted -- every caller migrated),
+`examples/http_server/http_server.tkb`, `examples/arp_reply/arp_reply.tkb`,
+`examples/icmp_echo/icmp_echo.tkb`, `examples/ip_parse/ip_parse.tkb`,
+`examples/tcp_parse/tcp_parse.tkb`, `examples/tcp_echo/tcp_echo.tkb`,
+`examples/inet_checksum/inet_checksum.tkb`, `lib/type_inf.ml` +
+`lib/llvm_gen.ml` (the intersect-narrowing fix), `scripts/run_qemutest.sh`
+(no-trap list correction + 2 new forbid_trap_* registrations), 2 new
+unit-test cases.
+
 ### Synchronization Primitive Design and Current Limitations
 
 Synchronization primitives have a 3-layer structure:

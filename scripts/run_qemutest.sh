@@ -337,6 +337,8 @@ run_forbid_trap_ok_test "forbid_trap_ok"     examples/forbid_trap_ok/forbid_trap
 run_forbid_trap_ok_test "forbid_trap_slice"  examples/common/uart.tkb examples/common/print.tkb examples/slice/slice.tkb
 run_forbid_trap_ok_test "forbid_trap_foreach" examples/common/uart.tkb examples/common/print.tkb examples/foreach/foreach.tkb
 run_forbid_trap_ok_test "forbid_trap_http_server" examples/common/uart.tkb examples/common/print.tkb examples/common/virtio_mmio.tkb examples/common/netconfig.tkb examples/common/inet_checksum.tkb examples/common/netutil.tkb examples/http_server/http_server.tkb
+run_forbid_trap_ok_test "forbid_trap_arp_reply" examples/common/uart.tkb examples/common/print.tkb examples/common/virtio_mmio.tkb examples/common/netconfig.tkb examples/common/netutil.tkb examples/arp_reply/arp_reply.tkb
+run_forbid_trap_ok_test "forbid_trap_icmp_echo" examples/common/uart.tkb examples/common/print.tkb examples/common/virtio_mmio.tkb examples/common/netconfig.tkb examples/common/inet_checksum.tkb examples/common/netutil.tkb examples/icmp_echo/icmp_echo.tkb
 
 echo ""
 echo "Running no-trap checks (brk must be zero in these kernels)..."
@@ -345,8 +347,20 @@ echo ""
 # Examples whose bounds should be fully proven at the type level. If brk appears, review the type annotations.
 for e in start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci \
           bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt \
-          semaphore condvar struct msgqueue watchdog refined narrow for loop bitops align packed struct_align sizeof net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server; do
+          semaphore condvar struct msgqueue watchdog refined narrow for loop bitops align packed struct_align sizeof net_echo arp_reply inet_checksum icmp_echo http_server; do
 # enum is intentionally excluded: `i as Color` (int->enum cast) emits llvm.trap for invalid values
+# ip_parse/tcp_parse are intentionally excluded (P4b slice migration): these
+# demos never validate a wire-derived length (ihl / tcp_len) against the
+# packet's actual capacity -- that's the whole point of their "corrupted
+# packet" demonstrations -- so their checksum span is a genuine
+# runtime-checked (gradual) subslice, one recorded brk each, which is a
+# SAFETY IMPROVEMENT over the pre-migration raw-pointer code (which had no
+# check there at all). See each file's header comment.
+# tcp_echo is intentionally excluded: its data-echo path combines two
+# independently-derived runtime quantities (data_off, data_len) in a way
+# plain interval/same-base reasoning cannot fully discharge -- see
+# CLAUDE.md's P4b section and tcp_echo.tkb's header comment for the full
+# accounting of why this is an honest boundary, not an oversight.
     run_no_trap_test "$e (no-trap)" "examples/$e/kernel.elf"
 done
 

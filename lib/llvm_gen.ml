@@ -235,6 +235,15 @@ let apply_narrowing (locals : (string, local_binding) Hashtbl.t)
       | Some lo, Some hi when not (List.mem name killed) ->
           (match Hashtbl.find_opt locals name with
            | Some (Imm (TypeSlice _, _)) -> saved  (* handled below *)
+           | Some (Imm (TypeRefined (elo, ehi), v) as old) ->
+               (* Already refined (sync rule with type_inf.ml's
+                  narrow_from_cond): INTERSECT, don't just overwrite --
+                  needed so an if-condition that's true but WIDER than an
+                  already-proven fact (e.g. a redundant re-check) can never
+                  discard precision codegen would otherwise disagree with
+                  type_inf about. *)
+               Hashtbl.replace locals name (Imm (TypeRefined (max lo elo, min hi ehi), v));
+               (name, old) :: saved
            | Some (Imm (_, v) as old) ->
                Hashtbl.replace locals name (Imm (TypeRefined (lo, hi), v));
                (name, old) :: saved
@@ -276,7 +285,16 @@ let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t)
           (match Hashtbl.find_opt locals name with
            | Some (Mut (TypeI32, _)) ->
                let old = Hashtbl.find_opt narrowing_ctx name in
-               Hashtbl.replace narrowing_ctx name (TypeRefined (lo, hi));
+               (* An outer if may have already narrowed this Mut variable
+                  (nested ifs): INTERSECT with any existing narrowing_ctx
+                  entry rather than overwriting it, mirroring type_inf.ml's
+                  tyenv-threading (an inner narrow_from_cond naturally sees
+                  the outer narrowing already applied) -- sync rule. *)
+               let (nlo, nhi) = match old with
+                 | Some (TypeRefined (elo, ehi)) -> (max lo elo, min hi ehi)
+                 | _ -> (lo, hi)
+               in
+               Hashtbl.replace narrowing_ctx name (TypeRefined (nlo, nhi));
                (name, old) :: saved
            | _ -> saved)
       | _ -> saved

@@ -14,8 +14,9 @@
 //     paths (passive FIN-ACK reply or active response+FIN) and handles
 //     both identically: wait for the final ACK, then return to LISTEN.
 //
-// SLICE MIGRATION (P3): this example is the first fully slice-based
-// protocol kernel. The layering of proof:
+// SLICE MIGRATION (P3/P4): this is a fully slice-based protocol kernel,
+// with --forbid-trap clean end to end (locked in by forbid_trap_http_server
+// in run_qemutest.sh). The layering of proof:
 //   - net_rx_frame() returns a [u8; 1514..] capacity view; the single
 //     unsafe length assertion lives inside the driver, next to its
 //     evidence (see virtio_mmio.tkb / eth.tkb).
@@ -26,23 +27,49 @@
 //     subslice bounds (arp[ARP_SHA..<ARP_SPA]) and as proven indices
 //     (tcp[TCP_FLAGS]); adjacent protocol offsets line up exactly.
 //   - The device-reported length is clamped ONCE (`len <= 1514` in the
-//     IPv4 branch condition) before anything trusts it -- previously a
-//     bogus length from the device could drive checksum reads past the
-//     RX buffer (latent OOB found during the P3 census; now dead).
+//     IPv4 branch condition) before anything trusts it.
+//   - `ihl` is typed `{20..<21}` in every function that receives it: this
+//     file's scope is "no IP options" (IHL always exactly 20), and an
+//     EXACT-match refined parameter type turns that existing runtime
+//     precondition (previously just an `if`) into something the checksum
+//     span proofs below can build on. The two sites narrowing ihl to
+//     exactly {20..<21} (main()'s `ihl == 20` check) always match this
+//     exactly, so every call typechecks.
+//   - Checksum spans are constructed as SLICES, not pointer+length pairs
+//     (fix_tcp_checksum takes tcp_seg: [u8; 20..] directly, and reads its
+//     own length back via tcp_seg.len for the pseudo-header -- no integer
+//     length parameter can disagree with the segment it describes). The
+//     variable-length span in the request path (`frame[34..<34+tcp_len]`)
+//     and in the reply path (`eth[34..<54+len]`) are both proven by P4a's
+//     interval-propagation chain (total_len/tcp_len/len all carry a
+//     {lo..<hi} range from their narrowing all the way to the subslice),
+//     not by any relational solver.
+//   - The TCP-options skip (`frame[data_off..<data_off+3]`, the "GET"
+//     sniff) is proven by P4a's same-base subslice rule: data_off's exact
+//     value is unconstrained, but the length (3) and the lo<=hi obligation
+//     are both syntactic facts about `data_off + 0 .. data_off + 3`.
+//   - The response length is explicitly bounded (`len <= HTTP_MAX_PAYLOAD`)
+//     before it is trusted for the reply's checksum span, IP total_len
+//     field, and tx_len -- this both PROVES the checksum span (turns an
+//     undocumented "the page happens to be small" assumption into an
+//     enforced precondition) and fails safe (drops the reply rather than
+//     ever constructing an oversized segment) if the page is ever edited
+//     to grow past the margin. See HTTP_MAX_PAYLOAD's comment for the
+//     exact worst-case computation this margin is checked against.
 //
-// Deliberate POINTER ISLANDS (each needs relational reasoning or checked
-// appends, the honest P4 frontier -- see CLAUDE.md's slice section):
-//   - checksum spans: checksum_add((frame as *u8) + 34, tcp_len, sum) --
-//     tcp_len is runtime, its relation to the frame view is the single
-//     relational fact intervals cannot carry;
-//   - the TCP-options skip (data_p = tcp_p + tcp_hdr_len) and the "GET"
-//     sniff through it;
-//   - response building (copy_str / write_udec appends at runtime
-//     offsets into payload_p). NOTE the static margin here: headers are
-//     <= ~120 bytes and html_body is a 512-byte staging buffer, against
-//     1460 bytes of payload capacity -- if the page ever grows past that,
-//     this island overflows silently; migrating it to bounded slice
-//     appends is a P4 item.
+// Remaining POINTER ISLAND: building the response body/headers themselves
+// (copy_str/write_udec appends into a raw pointer -- see build_html_body /
+// build_http_response_fin). This is deliberately NOT migrated to bounded
+// slice appends here: copy_str/write_udec are recursive/incremental over
+// an unbounded destination with no way to know at compile time how much
+// room is left, and proving that needs new bounded-append primitives
+// (a capacity-aware writer that returns how much space remains), not
+// just the subslice/interval machinery this file already uses elsewhere.
+// The margin is enforced (see HTTP_MAX_PAYLOAD above) but the WRITES
+// themselves are not individually bounds-checked -- safe today only
+// because html_body (512 bytes) and the payload area (up to 1460 bytes)
+// both comfortably exceed the computed 525-byte worst case. This is the
+// one item still deferred past P4b.
 //
 // Single shared file for both targets; our_ip comes from HTTP_SERVER_IP
 // (see netconfig.tkb comments for why it differs from OUR_IP on QEMU).
@@ -114,6 +141,16 @@ let mut request_count: i32 = 0;
 // after the headers into the reply segment -- see build_http_response_fin).
 let mut html_body: [u8; 512];
 
+// Safe upper bound on the total reply payload (headers + body), checked
+// explicitly in build_http_response_fin before anything downstream trusts
+// it. Exact worst case with the current fixed page and a 10-digit (i32
+// max) request counter: 76 ("HTTP/1.1 200 OK...Content-Length: ") + 10
+// (digits of body_len) + 23 ("\r\nConnection: close\r\n\r\n") + 369 (HTML
+// prefix) + 10 (digits of request_count) + 37 (HTML suffix) = 525 bytes.
+// 700 leaves a comfortable margin for editing the page without silently
+// reopening the overflow this check exists to prevent.
+let HTTP_MAX_PAYLOAD: i32 = 700;
+
 fn build_html_body() -> i32 {
     let mut len: i32 = 0;
     len = len + copy_str(html_body + len,
@@ -140,28 +177,28 @@ fn build_arp_reply(eth: [u8; 42..]) {
     write_u16be(arp[ARP_OPER..<ARP_SHA], 2);
 }
 
-// Recomputes the TCP checksum (header + data, len bytes) over the
-// pseudo-header implied by the IP view, and writes it into the checksum
-// field. Must be called last, after every other TCP field has its final
-// value. The pseudo-header is built entirely with proven slice ops; the
-// header+data span is a pointer island (see the file header comment).
-fn fix_tcp_checksum(eth: [u8; 54..], len: i32) {
-    let ip  = eth[14..<34];
-    let tcp = eth[34..<54];
-
-    write_u16be(tcp[TCP_CHECKSUM..<TCP_URGENT], 0);
+// Recomputes the TCP checksum over the pseudo-header implied by `ip` and
+// the full segment `tcp_seg` (header + data -- ITS OWN LENGTH, read back
+// via tcp_seg.len, is what goes in the pseudo-header's length field, so
+// this can never disagree with the segment it's actually checksumming).
+// Must be called last, after every other TCP field has its final value.
+// tcp_seg's declared minimum (20) only needs to cover the fixed header
+// fields written below; checksum_add's `for b in tcp_seg` walks the
+// segment's REAL runtime length regardless of that static minimum.
+fn fix_tcp_checksum(ip: [u8; 20..], tcp_seg: [u8; 20..]) {
+    write_u16be(tcp_seg[TCP_CHECKSUM..<TCP_URGENT], 0);
     let mut pseudo: [u8; 12];
     slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
     slice_copy(pseudo[4..<8], ip[IP_DST..<20]);
     pseudo[8] = 0 as u8;
     pseudo[9] = PROTO_TCP as u8;
-    write_u16be(pseudo[10..<12], len);
-    let sum: i32 = checksum_add(pseudo as *u8, 12, 0);
-    write_u16be(tcp[TCP_CHECKSUM..<TCP_URGENT],
-                checksum_fold(checksum_add((eth as *u8) + 34, len, sum)));
+    write_u16be(pseudo[10..<12], tcp_seg.len as i32);
+    let sum: i32 = checksum_add(pseudo as []u8, 0);
+    write_u16be(tcp_seg[TCP_CHECKSUM..<TCP_URGENT],
+                checksum_fold(checksum_add(tcp_seg, sum)));
 }
 
-fn build_syn_ack(eth: [u8; 54..], ihl: i32) {
+fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 
@@ -173,7 +210,7 @@ fn build_syn_ack(eth: [u8; 54..], ihl: i32) {
     ip[IP_TTL] = 64 as u8;
     write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum((eth as *u8) + 14, ihl));
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
 
     let client_port: i32 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]);
     write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT);
@@ -185,10 +222,10 @@ fn build_syn_ack(eth: [u8; 54..], ihl: i32) {
     write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
     write_u16be(tcp[TCP_URGENT..<20], 0);
 
-    fix_tcp_checksum(eth, 20);
+    fix_tcp_checksum(ip, tcp);
 }
 
-fn build_fin_ack(eth: [u8; 54..], ihl: i32) {
+fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 
@@ -200,7 +237,7 @@ fn build_fin_ack(eth: [u8; 54..], ihl: i32) {
     ip[IP_TTL] = 64 as u8;
     write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum((eth as *u8) + 14, ihl));
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
 
     let client_port: i32 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]);
     write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT);
@@ -212,14 +249,16 @@ fn build_fin_ack(eth: [u8; 54..], ihl: i32) {
     write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
     write_u16be(tcp[TCP_URGENT..<20], 0);
 
-    fix_tcp_checksum(eth, 20);
+    fix_tcp_checksum(ip, tcp);
 }
 
 // Builds "HTTP/1.1 200 OK ... <html>...</html>" into the payload area
 // (overwriting the request that was there), combined with our own FIN.
-// Returns the total payload length (headers + body). The payload appends
-// are a pointer island -- see the file header comment for the margin.
-fn build_http_response_fin(eth: [u8; 54..], ihl: i32) -> i32 {
+// Returns the total payload length (headers + body) on success, or -1 if
+// it would have exceeded HTTP_MAX_PAYLOAD (never actually happens with
+// the current fixed page; the caller must check for this and drop the
+// reply rather than transmit, see main()'s use of the return value).
+fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21}) -> i32 {
     let body_len: i32 = build_html_body();
 
     let payload: *u8 = (eth as *u8) + 54;
@@ -231,31 +270,45 @@ fn build_http_response_fin(eth: [u8; 54..], ihl: i32) -> i32 {
     bytes_copy(payload + len, html_body as *u8, body_len);
     len = len + body_len;
 
-    slice_copy(eth[0..<6], eth[6..<12]);
-    slice_copy(eth[6..<12], our_mac as []u8);
+    if (len >= 0 && len <= HTTP_MAX_PAYLOAD) {
+        // Snapshot the narrowed range into an IMMUTABLE local: codegen's
+        // if-narrowing for a MUTABLE variable (narrowing_ctx) is only
+        // consulted when the variable is used directly as an index/bound,
+        // not when it's buried inside an arithmetic expression like
+        // `54 + len` -- see CLAUDE.md's P4a "known conservative gap".
+        // An immutable `let` carries its narrowed type directly (the same
+        // B-plan mechanism that makes `let x: i32 = refined_v;` keep
+        // refined_v's range), so plain arithmetic on `n` below is fully
+        // visible to codegen with no gap.
+        let n: i32 = len;
 
-    let ip  = eth[14..<34];
-    let tcp = eth[34..<54];
+        slice_copy(eth[0..<6], eth[6..<12]);
+        slice_copy(eth[6..<12], our_mac as []u8);
 
-    slice_copy(ip[IP_DST..<20],     ip[IP_SRC..<IP_DST]);
-    slice_copy(ip[IP_SRC..<IP_DST], our_ip as []u8);
-    ip[IP_TTL] = 64 as u8;
-    write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20 + len);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum((eth as *u8) + 14, ihl));
+        let ip      = eth[14..<34];
+        let tcp_seg = eth[34..<54 + n];
 
-    let client_port: i32 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]);
-    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT);
-    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port);
-    write_u32be(tcp[TCP_SEQ..<TCP_ACK], conn_snd_nxt);
-    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt);
-    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
-    tcp[TCP_FLAGS] = (TCP_FLAG_ACK | TCP_FLAG_PSH | TCP_FLAG_FIN) as u8;
-    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
-    write_u16be(tcp[TCP_URGENT..<20], 0);
+        slice_copy(ip[IP_DST..<20],     ip[IP_SRC..<IP_DST]);
+        slice_copy(ip[IP_SRC..<IP_DST], our_ip as []u8);
+        ip[IP_TTL] = 64 as u8;
+        write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20 + n);
+        write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
+        write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
 
-    fix_tcp_checksum(eth, 20 + len);
-    return len;
+        let client_port: i32 = read_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT]);
+        write_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT);
+        write_u16be(tcp_seg[TCP_DST_PORT..<TCP_SEQ], client_port);
+        write_u32be(tcp_seg[TCP_SEQ..<TCP_ACK], conn_snd_nxt);
+        write_u32be(tcp_seg[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt);
+        tcp_seg[TCP_DATA_OFFSET] = (5 << 4) as u8;
+        tcp_seg[TCP_FLAGS] = (TCP_FLAG_ACK | TCP_FLAG_PSH | TCP_FLAG_FIN) as u8;
+        write_u16be(tcp_seg[TCP_WINDOW..<TCP_CHECKSUM], 65535);
+        write_u16be(tcp_seg[TCP_URGENT..<20], 0);
+
+        fix_tcp_checksum(ip, tcp_seg);
+        return n;
+    }
+    return -1;
 }
 
 fn main() {
@@ -302,7 +355,7 @@ fn main() {
 
                     if (total_len <= ip_len_in_frame && total_len >= ihl &&
                         (ip[IP_PROTOCOL] as i32) == PROTO_TCP &&
-                        inet_checksum((frame as *u8) + 14, ihl) == 0) {
+                        inet_checksum(ip[0..<ihl]) == 0) {
                         if (slice_eq(ip[IP_DST..<20], our_ip as []u8)) {
                             let tcp:     [u8; 20..] = frame[34..<54];
                             let tcp_len: i32 = total_len - ihl;
@@ -311,19 +364,28 @@ fn main() {
                             // at least an MSS option on the SYN; options
                             // are never parsed, just skipped over.
                             let doff: i32 = (tcp[TCP_DATA_OFFSET] as i32) >> 4;
-                            let tcp_hdr_len: i32 = doff * 4;
 
-                            if (tcp_len >= 20 && doff >= 5 && doff <= 15 && tcp_len >= tcp_hdr_len) {
+                            // doff must be narrowed to {5..<16} BEFORE
+                            // tcp_hdr_len = doff * 4 is computed, so that
+                            // Mul propagation gives tcp_hdr_len (and later
+                            // data_off) a real range -- computing
+                            // tcp_hdr_len first (matching the original
+                            // pointer-based code's order) would leave it
+                            // unrefined and fall back to a runtime check.
+                            if (tcp_len >= 20 && doff >= 5 && doff <= 15) {
+                            let tcp_hdr_len: i32 = doff * 4;  // {20..<61}
+
+                            if (tcp_len >= tcp_hdr_len) {
                                 let mut pseudo: [u8; 12];
                                 slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
                                 slice_copy(pseudo[4..<8], ip[IP_DST..<20]);
                                 pseudo[8] = 0 as u8;
                                 pseudo[9] = PROTO_TCP as u8;
                                 write_u16be(pseudo[10..<12], tcp_len);
-                                let sum: i32 = checksum_add(pseudo as *u8, 12, 0);
-                                let tcp_p: *u8 = (frame as *u8) + 34;
+                                let sum: i32 = checksum_add(pseudo as []u8, 0);
+                                let tcp_seg = frame[34..<34 + tcp_len];
 
-                                if (checksum_fold(checksum_add(tcp_p, tcp_len, sum)) == 0) {
+                                if (checksum_fold(checksum_add(tcp_seg, sum)) == 0) {
                                     let dst_port: i32 = read_u16be(tcp[TCP_DST_PORT..<TCP_SEQ]);
                                     let src_port: i32 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]);
                                     let flags:    i32 = tcp[TCP_FLAGS] as i32;
@@ -356,10 +418,7 @@ fn main() {
                                                     }
                                                 } else if (conn_state == TCP_ESTABLISHED) {
                                                     let data_len: i32 = tcp_len - tcp_hdr_len;
-                                                    // Pointer island: the options skip is
-                                                    // the one relational offset (see the
-                                                    // file header comment).
-                                                    let data_p: *u8 = tcp_p + tcp_hdr_len;
+                                                    let data_off: i32 = 34 + tcp_hdr_len;
                                                     if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
                                                         conn_rcv_nxt = conn_rcv_nxt + 1;
                                                         build_fin_ack(frame, ihl);
@@ -369,18 +428,32 @@ fn main() {
                                                         conn_state = TCP_LAST_ACK;
                                                     } else if (data_len >= 3 &&
                                                                (flags & TCP_FLAG_ACK) != 0 &&
-                                                               seq == conn_rcv_nxt &&
-                                                               data_p[0] == 'G' as u8 &&
-                                                               data_p[1] == 'E' as u8 &&
-                                                               data_p[2] == 'T' as u8) {
-                                                        conn_rcv_nxt = conn_rcv_nxt + data_len;
-                                                        request_count = request_count + 1;
-                                                        let payload_len: i32 =
-                                                            build_http_response_fin(frame, ihl);
-                                                        should_tx = 1;
-                                                        tx_len = 14 + ihl + 20 + payload_len;
-                                                        conn_snd_nxt = conn_snd_nxt + payload_len + 1;
-                                                        conn_state = TCP_LAST_ACK;
+                                                               seq == conn_rcv_nxt) {
+                                                        // Proven via the same-base subslice
+                                                        // rule: data_off's exact value is
+                                                        // unconstrained, but the length (3)
+                                                        // and lo<=hi are syntactic facts.
+                                                        let data3 = frame[data_off..<data_off + 3];
+                                                        if (data3[0] == 'G' as u8 &&
+                                                            data3[1] == 'E' as u8 &&
+                                                            data3[2] == 'T' as u8) {
+                                                            conn_rcv_nxt = conn_rcv_nxt + data_len;
+                                                            request_count = request_count + 1;
+                                                            let payload_len: i32 =
+                                                                build_http_response_fin(frame, ihl);
+                                                            if (payload_len >= 0) {
+                                                                should_tx = 1;
+                                                                tx_len = 14 + ihl + 20 + payload_len;
+                                                                conn_snd_nxt = conn_snd_nxt + payload_len + 1;
+                                                                conn_state = TCP_LAST_ACK;
+                                                            }
+                                                            // else: page unexpectedly exceeded
+                                                            // HTTP_MAX_PAYLOAD (never happens
+                                                            // with the current fixed page) --
+                                                            // drop the reply and stay
+                                                            // ESTABLISHED so the client's TCP
+                                                            // stack can retry.
+                                                        }
                                                     }
                                                 } else if (conn_state == TCP_LAST_ACK) {
                                                     if ((flags & TCP_FLAG_ACK) != 0 && ack == conn_snd_nxt) {
@@ -391,6 +464,7 @@ fn main() {
                                         }
                                     }
                                 }
+                            }
                             }
                         }
                     }

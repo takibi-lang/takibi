@@ -2475,6 +2475,42 @@ let codegen_tests = [
           return 0;
         }");
 
+  (* -- P4b: intersect-narrowing fix (found migrating icmp_echo) ---------- *)
+
+  Alcotest.test_case
+    "if-narrowing INTERSECTS with an ALREADY-refined immutable let, rather \
+     than no-oping (the pre-fix bug): icmp_len arrives at the if with \
+     {0..<1481} (Sub-propagated from two refined operands), and \
+     `if (icmp_len >= 8 && icmp_len <= 1480)` must tighten it to \
+     {8..<1481} so the resulting subslice's minimum (8) satisfies the \
+     callee's [u8; 8..] parameter -- zero trap sites end to end" `Quick
+    (expect_trap_sites 0
+       "fn ftp4b_use(s: [u8; 8..]) -> u8 { return s[0]; }
+        fn ftp4b_intersect(frame: [u8; 1514..], a: {20..<1501}, ihl: {20..<21}) -> u8 {
+          let icmp_len: i32 = a - ihl;         // Sub(refined,refined) -> {0..<1481}
+          if (icmp_len >= 8 && icmp_len <= 1480) {
+            let seg = frame[34..<34 + icmp_len];  // must get minimum >= 8
+            return ftp4b_use(seg);
+          }
+          return 0 as u8;
+        }");
+
+  Alcotest.test_case
+    "the intersect also applies to a MUT variable narrowed by a nested if \
+     on top of an outer if's narrowing (llvm_gen's narrowing_ctx must \
+     intersect with its own prior entry, not overwrite it)" `Quick
+    (expect_trap_sites 0
+       "let mut ftp4b_buf: [u8; 100];
+        fn ftp4b_nested_mut(v: i32) -> u8 {
+          let mut x: i32 = v;
+          if (x >= 0 && x <= 99) {
+            if (x >= 10 && x <= 50) {
+              return ftp4b_buf[x];
+            }
+          }
+          return 0 as u8;
+        }");
+
   (* Kept last in this group deliberately: Llvm_gen.enable_debug_info flips a
      process-global ref with no way back off (same one-way-switch pattern
      Llvm_gen.setup_target's target_data already uses), so every codegen test

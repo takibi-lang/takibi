@@ -1,32 +1,36 @@
 // Internet checksum (RFC 1071): the one's-complement 16-bit checksum used
 // by IPv4, ICMP, UDP, and TCP. Shared by examples/inet_checksum (algorithm
-// demo), examples/ip_parse (header validation), examples/icmp_echo
-// (validation + reply construction), and examples/tcp_parse/tcp_echo
-// (same, but TCP's checksum also covers a 12-byte "pseudo-header" of
+// demo), examples/ip_parse (header validation), examples/icmp_echo/
+// arp_reply/tcp_parse/tcp_echo/http_server (validation + reply
+// construction). TCP's checksum also covers a 12-byte "pseudo-header" of
 // src/dst IP + protocol + length that isn't actually on the wire, so it
 // can't be checksummed as a single contiguous buffer with the segment --
 // hence checksum_add/checksum_fold are split out as their own primitives
 // rather than only exposing the single-buffer inet_checksum convenience
-// wrapper).
-
-// Accumulates the *unfolded* running sum of `data` (len bytes) into
-// sum_in, so a checksum can be built up across several non-contiguous
-// buffers (e.g. TCP's pseudo-header + header + data) before folding once
-// at the end. RFC 1071's sum is associative regardless of how the input
-// is chunked, as long as each chunk's own odd-byte padding (if any) only
-// happens on the last byte fed in overall -- true here because every
-// caller's non-final chunks are a whole number of 16-bit words (the
-// pseudo-header is 12 bytes) and only the final chunk can be odd-length.
-fn checksum_add(data: *u8, len: i32, sum_in: i32) -> i32 {
+// wrapper.
+//
+// SLICE-BASED (P4b): checksum_add takes a slice, not a pointer+len pair --
+// the length lives in the slice's own .len, so a caller with a
+// compile-time-proven view (a fixed-offset header field, or a runtime
+// span proven via the P4a same-base/interval rules) gets a fully
+// --forbid-trap-clean call; only a genuinely unbounded span falls back to
+// a runtime-checked subslice (one recorded trap site) at the CALL site,
+// not inside this function. `for b in data` replaces the old stride-2
+// index loop (data[i], data[i+1], guarded by i+1<len) with the hi/lo
+// alternation technique from examples/foreach/foreach.tkb: odd-length
+// input naturally leaves the last byte shifted into the high half exactly
+// like the old tail-padding branch did, with zero indexing at all.
+fn checksum_add(data: []u8, sum_in: i32) -> i32 {
     let mut sum: i32 = sum_in;
-    let mut i: i32 = 0;
-    while (i + 1 < len) {
-        let word: i32 = ((*(data + i) as i32) << 8) | (*(data + i + 1) as i32);
-        sum = sum + word;
-        i = i + 2;
-    }
-    if (i < len) {
-        sum = sum + ((*(data + i) as i32) << 8);
+    let mut hi: i32 = 1;
+    for b in data {
+        if (hi == 1) {
+            sum = sum + ((b as i32) << 8);
+            hi = 0;
+        } else {
+            sum = sum + (b as i32);
+            hi = 1;
+        }
     }
     return sum;
 }
@@ -42,7 +46,7 @@ fn checksum_fold(sum_in: i32) -> i32 {
 }
 
 // Convenience wrapper for the common single-buffer case (IPv4 header,
-// whole ICMP message): checksum_fold(checksum_add(data, len, 0)).
-fn inet_checksum(data: *u8, len: i32) -> i32 {
-    return checksum_fold(checksum_add(data, len, 0));
+// whole ICMP message): checksum_fold(checksum_add(data, 0)).
+fn inet_checksum(data: []u8) -> i32 {
+    return checksum_fold(checksum_add(data, 0));
 }

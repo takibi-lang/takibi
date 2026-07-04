@@ -24,12 +24,12 @@ fn main() {
     hdr[16] = 0xac as u8; hdr[17] = 0x10 as u8; hdr[18] = 0x0a as u8; hdr[19] = 0x0c as u8;
 
     uart_puts("checksum(with checksum field): ");
-    uart_print_hex16(inet_checksum(hdr as *u8, 20));
+    uart_print_hex16(inet_checksum(hdr as []u8));
     uart_puts("\r\n");
 
     hdr[10] = 0 as u8;
     hdr[11] = 0 as u8;
     uart_puts("checksum(field zeroed):        ");
-    uart_print_hex16(inet_checksum(hdr as *u8, 20));
+    uart_print_hex16(inet_checksum(hdr as []u8));
     uart_puts("\r\n");
 }
