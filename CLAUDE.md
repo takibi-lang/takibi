@@ -71,9 +71,41 @@ The finished form of code is when index ranges are pinned at the type level usin
 make build          # build the compiler (takibi) only (= dune build)
 make test           # run unit tests
 make qemutest       # run QEMU integration tests (build all examples and verify automatically)
-make check          # run make test + make qemutest together
+make stm32build     # cross-compile every ported example for STM32F746G-DISCOVERY (no hardware needed)
+make check          # run langcheck + test + stm32build + qemutest together
+make hwcheck        # like stm32build, but also flashes + UART-diffs against real STM32 hardware
+make hwcheck-net    # real-Ethernet hardware tests (needs the board's Ethernet port wired to this host)
 make clean          # remove generated artifacts
 ```
+
+**Parallel by default** (`Makefile`'s `MAKEFLAGS += -j$(shell nproc)`): every `.tkb` example
+is an independent build, so `make check`/`make stm32build`/etc. fan out across all cores with
+no flag needed. Pass `-j1` explicitly (`make -j1 check`) to force serial execution back, e.g.
+when a build error's parallel-interleaved output needs to be read one recipe at a time.
+`-Otarget` (which buffers each recipe's output into one clean block) was tried and rejected --
+it hides progress until each recipe finishes, worse for watching a long build than the
+occasional interleaved line.
+
+**`TAKIBI` invokes `_build/default/bin/main.exe` directly, not `dune exec takibi --`**: `dune
+exec` re-locks the dune workspace on every call, which serializes what should be independent
+parallel compiles. Every per-example object-file rule depends on the `build` target (`dune
+build`) as an **order-only** prerequisite (`| build`, not a plain prerequisite) -- `build` is
+`.PHONY`, and a plain (non-order-only) phony prerequisite makes every dependent target look
+permanently out-of-date, which was silently forcing a full rebuild of all ~50 examples on
+every invocation before this was fixed. Order-only prerequisites are still built when needed,
+but don't affect whether the depending target itself is considered stale, so make's normal
+`.tkb`-timestamp-based skip-if-unchanged logic works correctly again.
+
+**Known dune footgun found while wiring up `-j`**: running `dune build` and `dune test`
+concurrently (e.g. two independent Make recipes under `make -j`) can corrupt/race on
+`_build/.lock` ("Unexpected contents of build directory global lock file"), non-deterministically
+failing or hanging unrelated recipes. Fixed by making the `test` target depend on `build` (a
+normal prerequisite, ensuring `dune build` always completes before `dune test` starts) and by
+making sure nothing else in the build graph calls `dune exec`/`dune build`/`dune test` (see the
+`TAKIBI` note above and `scripts/run_qemutest.sh`'s `run_compile_error_test`, which had its own
+independent `dune exec takibi --` call fixed for the same reason). If a future change
+reintroduces a second concurrent `dune` invocation anywhere in the `make -j` graph, expect this
+same class of flake to come back.
 
 ## Directory Layout
 
@@ -89,9 +121,19 @@ lib/
   typechecker.ml  -- external wrapper (called from main.ml)
   llvm_gen.ml     -- LLVM IR generation and object file output
 bin/
-  main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g]`)
+  main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--version]`)
                      Multiple .tkb files are concatenated (flat global namespace) before compilation.
                      -g emits DWARF debug info -- see "Execution Profiling (QEMU)" below.
+                     --version prints the version from dune-project's `(version ...)` field via
+                     the `dune-build-info` library (`Build_info.V1.version ()`) and exits 0 --
+                     bump `dune-project`'s package version to change what this prints, nothing in
+                     `bin/main.ml` itself needs editing. Confirmed this populates even under plain
+                     `dune build` (no `dune install` needed), despite `dune-build-info`'s own .mli
+                     comment saying the value is `None` until "artifact substitution" happens --
+                     that turned out to already occur on every build in dune 3.22, at least for
+                     this project's setup. Falls back to a literal "unknown (not installed via
+                     dune)" string if a future dune/setup combination brings back the documented
+                     None case.
 examples/
   common/
     startup.S     -- _start -> main, BSS zero-clear, AArch64 semihosting exit (shared by all examples)
@@ -1219,6 +1261,18 @@ the Makefile for the full reasoning (raw-mode terminal pass-through vs.
 The Makefile target also echoes the actual browser URL right before
 launching QEMU, since the guest has no way to know the host-side
 `HTTP_HOST_PORT`.
+
+**`make stm32-http-server`**: same demo, on the real STM32F746G-DISCOVERY board instead of
+QEMU (flashes `examples/http_server/kernel_stm32.bin` via `st-flash`, prints the URL to open,
+then streams the board's own UART log lines until Ctrl-C). Unlike `qemu-http-server`'s fixed
+`localhost:$(HTTP_HOST_PORT)`, the printed URL is parsed live from `examples/common_stm32/
+netconfig.tkb`'s `HTTP_SERVER_IP` constant (`grep`+`tr`, no hardcoded IP in the Makefile), so it
+can't silently drift out of sync if that constant is ever changed. The serial reader is
+attached (backgrounded) *before* the explicit `st-flash reset`, not after, so the board's
+earliest "ready" message isn't lost to a reader that hasn't opened the port yet -- same
+ordering reasoning as `read_until_quiet`'s `WAIT_FOR_DATA` case in `scripts/run_hwtest.sh`.
+Needs the board connected and its Ethernet port wired directly to this machine's NIC (see the
+STM32 hardware bring-up section's devcontainer note for the `/dev-host/ttyACM0` serial path).
 
 **Request counter determinism** (flagged as a concern before
 implementation, worth recording why it's actually safe): `make qemutest`
