@@ -1034,9 +1034,21 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                           (TypeSlice (el, n),
                            make_slice v (const_int (usize_lltype ()) n))
                       | None -> raise (Error
-                          "slice cast source must be an array variable or a slice"))
+                          "slice cast source must be an array variable, string \
+                           literal, or slice"))
+                 | StringLit str ->
+                     (* v is the literal's global pointer; the compile-time
+                        byte length (NUL excluded) becomes the minimum. *)
+                     let n = String.length str in
+                     (TypeSlice (el, n),
+                      make_slice v (const_int (usize_lltype ()) n))
                  | _ -> raise (Error
-                     "slice cast source must be an array variable or a slice")))
+                     "slice cast source must be an array variable, string \
+                      literal, or slice")))
+       | TypePtr _ when (match src_ty with TypeSlice _ -> true | _ -> false) ->
+           (* slice -> pointer: the explicit bridge back into the pointer
+              world; just the ptr half of the fat value. *)
+           (target_ty, slice_ptr v)
        | _ ->
            (* Every other u8/i16/etc-typed expression result (Var, Index,
               FieldGet, Deref) is represented in-flight as an i32-widened
@@ -1090,11 +1102,17 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
   | Index (id, idx) ->
       let (idx_ty_raw, idx_raw) = gen_expr locals idx in
       let idx_v = to_i32 idx_raw in
-      (* Prioritize Mut narrowing from narrowing_ctx (set by if-condition) when determining idx_ty *)
-      let idx_ty = match idx.desc with
-        | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
-                    | Some t -> t | None -> idx_ty_raw)
-        | _ -> idx_ty_raw
+      (* idx_ty priority: Const_env constant name (e.g. tcp[TCP_FLAGS] --
+         sound because check_const_shadowing forbids shadowing, so the value
+         is exactly the recorded literal) > Mut narrowing from narrowing_ctx
+         (if-condition) > the raw inferred type. *)
+      let idx_ty = match Const_env.bound_value idx with
+        | Some k -> TypeRefined (k, k + 1)
+        | None ->
+            (match idx.desc with
+             | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
+                         | Some t -> t | None -> idx_ty_raw)
+             | _ -> idx_ty_raw)
       in
       (* Array load [T; N]: skip bounds check when TypeRefined proves safety *)
       let load_from_array elem_ty n arr_ptr =
@@ -1170,52 +1188,94 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 raise (Error (Printf.sprintf "Index: undefined variable '%s'" id))))
 
   | SliceOf (id, lo_e, hi_e) ->
-      (* Sync rule: bound constness and range validity were checked by
-         type_inf.ml's SliceOf case through the same Const_env.bound_value;
-         codegen re-verifies the range against its own effective minimum
-         (raising a BUG error on disagreement) rather than trusting blindly. *)
-      let cb = (Const_env.bound_value lo_e, Const_env.bound_value hi_e) in
+      (* Sync rule: the proven/checked decision below uses the same
+         bound-range formula as type_inf.ml's SliceOf case (constant via
+         Const_env.bound_value, else the bound expression's refined range,
+         with narrowing_ctx consulted for Mut variables) -- change the two
+         together. Codegen re-verifies rather than trusting type_inf
+         blindly: an array subslice that fails the proof here is a BUG
+         error, not silent emission. *)
       let usz = usize_lltype () in
+      let gen_bound be =
+        let (bty_raw, bv) = gen_expr locals be in
+        let bty = match be.desc with
+          | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
+                      | Some t -> t | None -> bty_raw)
+          | _ -> bty_raw
+        in
+        let range = match Const_env.bound_value be with
+          | Some k -> Some (k, k + 1)
+          | None -> (match bty with TypeRefined (a, b) -> Some (a, b) | _ -> None)
+        in
+        (to_i32 bv, range)
+      in
+      let ranges_proven lo_r hi_r limit =
+        match lo_r, hi_r with
+        | Some (la, lb), Some (ha, hb) ->
+            la >= 0 && lb - 1 <= ha && hb - 1 <= limit
+        | _ -> false
+      in
+      let guaranteed_min lo_r hi_r =
+        match lo_r, hi_r with
+        | Some (_, lb), Some (ha, _) when ha - (lb - 1) > 0 -> ha - (lb - 1)
+        | _ -> 0
+      in
+      let finish_sub elem_ty base_ptr lo_v hi_v min_len =
+        let ep = build_gep (ltype_of_ast elem_ty) base_ptr [| lo_v |] "sub_ptr" builder in
+        let len32 = build_sub hi_v lo_v "sub_len" builder in
+        let len = if type_of len32 = usz then len32
+                  else build_zext len32 usz "zext" builder in
+        (TypeSlice (elem_ty, min_len), make_slice ep len)
+      in
       let sub_of_slice elem_ty min_len fat =
-        (match cb with
-         | Some a, Some b when 0 <= a && a <= b && b <= min_len ->
-             let ep = build_gep (ltype_of_ast elem_ty) (slice_ptr fat)
-               [| const_int (i32_type context) a |] "sub_ptr" builder in
-             (TypeSlice (elem_ty, b - a), make_slice ep (const_int usz (b - a)))
-         | _ -> raise (Error
-             "BUG: subslice bounds not proven against the slice minimum \
-              (type_inf should have rejected this)"))
+        let (lo_v, lo_r) = gen_bound lo_e in
+        let (hi_v, hi_r) = gen_bound hi_e in
+        if not (ranges_proven lo_r hi_r min_len) then begin
+          (* Runtime-checked subslice (gradual form): one check, one
+             recorded trap site, and everything downstream of the resulting
+             view is bounds-governed again. *)
+          record_trap e.loc (Printf.sprintf
+            "subslice bounds check remains: bounds cannot prove range \
+             {0..<%d} (the slice's compile-time minimum length)" min_len);
+          let i32z = const_int (i32_type context) 0 in
+          let neg  = build_icmp Icmp.Slt lo_v i32z "ss_neg" builder in
+          let inv  = build_icmp Icmp.Sgt lo_v hi_v "ss_inv" builder in
+          let hi_w = if type_of hi_v = usz then hi_v
+                     else build_zext hi_v usz "zext" builder in
+          let over = build_icmp Icmp.Ugt hi_w (slice_len fat) "ss_over" builder in
+          let bad  = build_or (build_or neg inv "ss_bad0" builder) over "ss_bad" builder in
+          emit_trap_when bad ~bad_name:"ss_trap" ~ok_name:"ss_ok"
+        end;
+        finish_sub elem_ty (slice_ptr fat) lo_v hi_v (guaranteed_min lo_r hi_r)
       in
       let sub_of_array elem_ty n arr_ptr =
-        (match cb with
-         | Some a, Some b when 0 <= a && a <= b && b <= n ->
-             let arr_ll = array_type (ltype_of_ast elem_ty) n in
-             let zero = const_int (i32_type context) 0 in
-             let ep = build_in_bounds_gep arr_ll arr_ptr
-               [| zero; const_int (i32_type context) a |] "sub_ptr" builder in
-             (TypeSlice (elem_ty, b - a), make_slice ep (const_int usz (b - a)))
-         | _ -> raise (Error
-             "BUG: subslice bounds not proven against the array size \
-              (type_inf should have rejected this)"))
+        let (lo_v, lo_r) = gen_bound lo_e in
+        let (hi_v, hi_r) = gen_bound hi_e in
+        if not (ranges_proven lo_r hi_r n) then
+          raise (Error
+            "BUG: subslice bounds not proven against the array size \
+             (type_inf should have rejected this)");
+        let arr_ll = array_type (ltype_of_ast elem_ty) n in
+        let zero = const_int (i32_type context) 0 in
+        let ep = build_in_bounds_gep arr_ll arr_ptr [| zero; lo_v |] "sub_ptr" builder in
+        let len32 = build_sub hi_v lo_v "sub_len" builder in
+        let len = if type_of len32 = usz then len32
+                  else build_zext len32 usz "zext" builder in
+        (TypeSlice (elem_ty, guaranteed_min lo_r hi_r), make_slice ep len)
       in
       let sub_of_ptr elem_ty base_ptr =
         (* Slice construction from a raw pointer: UNCHECKED by design (the
-           pointer world's escape hatch, used once at a driver boundary).
-           Constant bounds still yield a compile-time minimum length. *)
-        match cb with
-        | Some a, Some b when 0 <= a && a <= b ->
-            let ep = build_gep (ltype_of_ast elem_ty) base_ptr
-              [| const_int (i32_type context) a |] "sub_ptr" builder in
-            (TypeSlice (elem_ty, b - a), make_slice ep (const_int usz (b - a)))
-        | _ ->
-            let (_, lo_v) = gen_expr locals lo_e in
-            let (_, hi_v) = gen_expr locals hi_e in
-            let lo_v = to_i32 lo_v and hi_v = to_i32 hi_v in
-            let ep = build_gep (ltype_of_ast elem_ty) base_ptr [| lo_v |] "sub_ptr" builder in
-            let len32 = build_sub hi_v lo_v "sub_len" builder in
-            let len = if type_of len32 = usz then len32
-                      else build_zext len32 usz "zext" builder in
-            (TypeSlice (elem_ty, 0), make_slice ep len)
+           unsafe-gated escape hatch, used once at a driver boundary). The
+           claimed minimum is whatever the bounds' static ranges guarantee
+           (sync rule: same formula as type_inf's TPtr branch). *)
+        let (lo_v, lo_r) = gen_bound lo_e in
+        let (hi_v, hi_r) = gen_bound hi_e in
+        let min_len = match lo_r, hi_r with
+          | Some (la, lb), Some (ha, _) when la >= 0 && lb - 1 <= ha ->
+              ha - (lb - 1)
+          | _ -> 0
+        in
+        finish_sub elem_ty base_ptr lo_v hi_v min_len
       in
       (match Hashtbl.find_opt locals id with
        | Some (Mut (TypeSlice (el, m), alloca_ptr)) ->
@@ -1600,11 +1660,15 @@ let gen_func ?prog_types fdef =
     | AssignIndex (id, idx, rhs) ->
         let (idx_ty_raw, idx_raw) = gen_expr locals idx in
         let idx_v = to_i32 idx_raw in
-        (* Prioritize Mut narrowing from narrowing_ctx (set by if-condition) when determining idx_ty *)
-        let idx_ty = match idx.desc with
-          | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
-                      | Some t -> t | None -> idx_ty_raw)
-          | _ -> idx_ty_raw
+        (* Same idx_ty priority as gen_expr's Index case (sync rule):
+           Const_env constant name > narrowing_ctx > raw inferred type. *)
+        let idx_ty = match Const_env.bound_value idx with
+          | Some k -> TypeRefined (k, k + 1)
+          | None ->
+              (match idx.desc with
+               | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
+                           | Some t -> t | None -> idx_ty_raw)
+               | _ -> idx_ty_raw)
         in
         let (_, rhs_v) = gen_expr locals rhs in
         let store_to_array elem_ty n arr_ptr =

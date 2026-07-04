@@ -52,7 +52,7 @@ fn build_arp_reply(eth: *u8, arp: *u8) {
     bytes_copy(arp + ARP_TPA, arp + ARP_SPA, 4);
     bytes_copy(arp + ARP_SHA, our_mac as *u8, 6);
     bytes_copy(arp + ARP_SPA, OUR_IP as *u8, 4);
-    write_u16be(arp + ARP_OPER, 2); // reply
+    write_u16be_p(arp + ARP_OPER, 2); // reply
 }
 
 fn main() {
@@ -72,10 +72,10 @@ fn main() {
             if (len >= 42) {
                 let eth: *u8 = net_rx_buf();
                 let arp: *u8 = eth + 14;
-                if (read_u16be(eth + 12) == 0x0806 &&
-                    read_u16be(arp + ARP_HTYPE) == 1 && read_u16be(arp + ARP_PTYPE) == 0x0800 &&
+                if (read_u16be_p(eth + 12) == 0x0806 &&
+                    read_u16be_p(arp + ARP_HTYPE) == 1 && read_u16be_p(arp + ARP_PTYPE) == 0x0800 &&
                     arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
-                    read_u16be(arp + ARP_OPER) == 1) {
+                    read_u16be_p(arp + ARP_OPER) == 1) {
                     if (bytes_eq(arp + ARP_TPA, OUR_IP as *u8, 4) == 1) {
                         build_arp_reply(eth, arp);
                         net_transmit(eth, len);

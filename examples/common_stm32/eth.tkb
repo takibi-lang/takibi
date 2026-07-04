@@ -342,6 +342,21 @@ fn net_rx_buf() -> *u8 {
     return eth_rx_bufs + eth_rx_cur * ETH_BUF_SIZE;
 }
 
+// Capacity view of the current RX buffer as a slice: 1514 bytes = the
+// maximum Ethernet frame this stack handles (the physical buffer is
+// larger, so the assertion below is true by construction -- that evidence
+// is exactly why the one `unsafe` lives HERE, inside the driver, and
+// nowhere in application code). Callers narrow the device-reported length
+// ONCE (`if (len >= K && len <= 1514)`) and take frame[0..<len]; that
+// subslice is then interval-proven with no runtime check, which also
+// closes the "device reports a bogus length" hole: a length outside
+// 0..1514 fails the narrowing check and the frame is dropped.
+fn net_rx_frame() -> [u8; 1514..] {
+    let p: *u8 = net_rx_buf();
+    return unsafe { p[0..<1514] };
+}
+
+
 // Hands the current RX descriptor back to the DMA and advances the ring.
 // Must only be called after a non-zero net_poll_rx() and once the caller no
 // longer needs net_rx_buf()'s contents (e.g. after net_transmit() has

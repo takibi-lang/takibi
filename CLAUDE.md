@@ -717,17 +717,19 @@ emit_bounds_check_dyn, Index/AssignIndex/SliceOf/Cast/FieldGet cases,
 narrowing), `examples/slice/` (demo, both targets, --forbid-trap clean:
 forbid_trap_slice in run_qemutest.sh), 11 unit-test cases.
 
-**Deferred (P3, in order of payoff)** (P2 -- for-in element iteration +
-slice builtins -- is delivered, see the next section): runtime-checked
-subslice `s[a..<b]` with runtime bounds = one recorded trap site (needed
-for tcp_hdr_len options skip -- the single genuinely relational site in
-http_server); driver API returning (frame capacity slice, received length)
-so the device-reported length gets validated once at the boundary (today's
-code trusts it unchecked -- a real latent OOB found during the census,
-along with the unbounded response build in build_http_response_fin); the
-netutil/inet_checksum rewrite to slice signatures (the language pieces now
-exist; the rewrite drags every caller with it, so it lands together with
-the P3 items as one http_server-and-friends migration).
+P2 (for-in + builtins) and P3 (checked/refined subslices + the http_server
+migration) are both delivered -- see the two sections below. What remains
+after P3 (the P4 frontier, all needing either relational facts or
+checked-append machinery):
+- the TCP-options skip (`data_p = tcp_p + tcp_hdr_len`) -- the one
+  genuinely relational offset in http_server;
+- checksum spans over runtime lengths (`checksum_add(ptr, tcp_len, sum)`)
+  -- tcp_len's relation to the frame view is not interval-expressible;
+- response building (copy_str / write_udec appends at runtime offsets) --
+  bounded today only by a documented static margin;
+- migrating arp_reply / icmp_echo / tcp_parse / tcp_echo off the
+  TRANSITIONAL `*_p` netutil wrappers (mechanical, http_server is the
+  template).
 
 ### for-in Element Iteration and Slice Builtins (P2)
 
@@ -781,6 +783,73 @@ disambiguates, no grammar conflict), `lib/type_inf.ml` (ForEach inference,
 check_const_shadowing case, two builtin Call cases, check_reserved_fn),
 `lib/llvm_gen.ml` (collect_lets case, gen_stmt ForEach, two builtin Call
 intercepts), `examples/foreach/`, 7 unit-test cases.
+
+### Checked/Refined Subslices and the http_server Migration (P3)
+
+**Refined-bound subslice proof**: subslice bounds are judged by their
+STATIC VALUE RANGES (a constant k is {k..<k+1}; a refined-typed expression
+contributes its {lo..<hi}), shared formula in type_inf's SliceOf
+`bound_range` and llvm_gen's SliceOf `gen_bound` (sync rule; llvm_gen also
+consults narrowing_ctx for Mut bound variables, like Index does). Proven
+iff `min(lo) >= 0 && max(lo) <= min(hi) && max(hi) <= base minimum`; the
+result minimum is the guaranteed length `min(hi) - max(lo)`. This is what
+makes the driver-boundary pattern interval-only: after
+`if (len >= 54 && len <= 1514)`, `frame[0..<len]` on a [u8; 1514..] frame
+is proven with NO runtime check and yields [u8; 54..].
+
+**Runtime-checked subslice (gradual form)**: an unprovable subslice on a
+slice base emits `0 <= lo && lo <= hi && hi <= s.len -> llvm.trap`, one
+recorded --forbid-trap site; the result keeps whatever minimum the static
+ranges still guarantee. SEMANTICS CHANGE from P1: a constant subslice
+beyond the base's minimum (s[2..<10] on [u8; 8..]) is now a checked
+subslice, NOT a compile error -- the runtime length may exceed the
+minimum. Only definitely-malformed bounds (lo < 0, lo > hi) and
+array-base violations (arrays have EXACT lengths) remain compile errors.
+
+**Smaller pieces**: `"literal" as []u8` (compile-time byte length, NUL
+excluded, becomes the minimum -- `slice_copy(dst, "..." as []u8)` is the
+bounded replacement for copy_str's unbounded scan, not yet used by
+http_server's response island); `s as *T` (explicit bridge back to the
+pointer world, just the ptr half -- casting a slice to anything else is
+still an error); Const_env constant names as PROVEN INDICES
+(`tcp[TCP_FLAGS]` -- Index/AssignIndex idx_ty now checks
+Const_env.bound_value first, sound because check_const_shadowing forbids
+shadowing).
+
+**Driver boundary**: both backends gained
+`net_rx_frame() -> [u8; 1514..]` (the return ANNOTATION matters: an
+earlier `-> []u8` silently erased the minimum and broke every downstream
+proof -- annotation weakening still applies at function boundaries, only
+immutable `let` bindings are exempt). The single `unsafe { p[0..<1514] }`
+lives inside the driver, next to the buffer-size evidence that justifies
+it; application code contains no unsafe at all.
+
+**http_server migration** (the payoff; wire behavior verified byte-exact
+by the existing protocol tests + real handshake/GET/counter flow): all
+header parsing and rewriting now goes through constant-offset views
+(`frame[14..<34]` ip, `frame[34..<54]` tcp) and the slice-based
+read/write_u16/32be; adjacent offset constants double as field subslices
+(`arp[ARP_SHA..<ARP_SPA]`). The DEVICE-REPORTED length is clamped once
+(`len <= 1514` in the IPv4 branch) before total_len may trust it --
+killing the latent OOB found in the P3 census. http_server remains
+--forbid-trap clean (locked in by forbid_trap_http_server in
+run_qemutest.sh). Its remaining pointer islands are enumerated in the
+file header and in the P4 list above.
+
+**netutil.tkb**: read/write_u16be/u32be now take [u8; 2..] / [u8; 4..]
+(bodies are fully proven, zero checks); `*_p` TRANSITIONAL pointer
+wrappers (each containing the one unsafe assertion its pointer caller was
+implicitly making) keep arp_reply / icmp_echo / tcp_parse / tcp_echo
+compiling until they migrate -- do not use `*_p` in new code.
+bytes_copy/bytes_eq/copy_str/write_udec keep pointer signatures for the
+un-migrated callers and http_server's response island.
+
+Files: `lib/type_inf.ml` + `lib/llvm_gen.ml` (SliceOf rework, Cast
+additions, Index const-name rule), `examples/common/netutil.tkb`,
+`examples/common/virtio_mmio.tkb`, `examples/common_stm32/eth.tkb`,
+`examples/http_server/http_server.tkb`, `_p` renames in the four
+un-migrated examples, 5 unit-test cases + 2 updated to the new checked
+semantics.
 
 ### Synchronization Primitive Design and Current Limitations
 

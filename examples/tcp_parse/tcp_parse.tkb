@@ -61,14 +61,14 @@ fn print_tcp_flags(flags: i32) {
 // this function only handles the TCP layer).
 fn parse_tcp(ip: *u8, ihl: i32) {
     let tcp: *u8 = ip + ihl;
-    let src_port: i32 = read_u16be(tcp);
-    let dst_port: i32 = read_u16be(tcp + 2);
-    let seq:      i32 = read_u32be(tcp + 4);
-    let ack:      i32 = read_u32be(tcp + 8);
+    let src_port: i32 = read_u16be_p(tcp);
+    let dst_port: i32 = read_u16be_p(tcp + 2);
+    let seq:      i32 = read_u32be_p(tcp + 4);
+    let ack:      i32 = read_u32be_p(tcp + 8);
     let data_offset: i32 = ((tcp[12] as i32) >> 4) * 4;
     let flags:    i32 = (tcp[13] as i32) & 0x3f;
-    let window:   i32 = read_u16be(tcp + 14);
-    let ip_total_len: i32 = read_u16be(ip + 2);
+    let window:   i32 = read_u16be_p(tcp + 14);
+    let ip_total_len: i32 = read_u16be_p(ip + 2);
     let tcp_len:  i32 = ip_total_len - ihl;
 
     // TCP checksum covers the pseudo-header (src IP, dst IP, zero byte,
@@ -80,7 +80,7 @@ fn parse_tcp(ip: *u8, ihl: i32) {
     bytes_copy((pseudo as *u8) + 4, ip + 16, 4); // dst IP
     pseudo[8] = 0 as u8;
     pseudo[9] = ip[9]; // protocol
-    write_u16be((pseudo as *u8) + 10, tcp_len);
+    write_u16be_p((pseudo as *u8) + 10, tcp_len);
     let sum: i32 = checksum_add(pseudo as *u8, 12, 0);
     let checksum: i32 = checksum_fold(checksum_add(tcp, tcp_len, sum));
 

@@ -336,6 +336,7 @@ run_compile_error_test "forbid_trap_wrong"   examples/forbid_trap_wrong/forbid_t
 run_forbid_trap_ok_test "forbid_trap_ok"     examples/forbid_trap_ok/forbid_trap_ok.tkb
 run_forbid_trap_ok_test "forbid_trap_slice"  examples/common/uart.tkb examples/common/print.tkb examples/slice/slice.tkb
 run_forbid_trap_ok_test "forbid_trap_foreach" examples/common/uart.tkb examples/common/print.tkb examples/foreach/foreach.tkb
+run_forbid_trap_ok_test "forbid_trap_http_server" examples/common/uart.tkb examples/common/print.tkb examples/common/virtio_mmio.tkb examples/common/netconfig.tkb examples/common/inet_checksum.tkb examples/common/netutil.tkb examples/http_server/http_server.tkb
 
 echo ""
 echo "Running no-trap checks (brk must be zero in these kernels)..."

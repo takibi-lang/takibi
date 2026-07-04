@@ -25,25 +25,52 @@ fn bytes_copy(dst: *u8, src: *u8, n: i32) {
 // little-endian; a raw multi-byte load would silently byte-reverse the
 // value. Doing it byte-by-byte sidesteps the issue regardless of target
 // endianness.
-fn read_u16be(p: *u8) -> i32 {
-    return (p[0] as i32) * 256 + (p[1] as i32);
+//
+// Slice signatures ([u8; 2..] / [u8; 4..]): the caller passes a view that
+// PROVES the field fits -- e.g. read_u16be(ip[2..<4]) on an ip view of
+// minimum length 20 is fully compile-time proven, so these bodies contain
+// zero bounds checks and stay --forbid-trap clean.
+fn read_u16be(s: [u8; 2..]) -> i32 {
+    return (s[0] as i32) * 256 + (s[1] as i32);
 }
 
-fn write_u16be(p: *u8, v: i32) {
-    p[0] = (v / 256) as u8;
-    p[1] = (v - (v / 256) * 256) as u8;
+fn write_u16be(s: [u8; 2..], v: i32) {
+    s[0] = (v / 256) as u8;
+    s[1] = (v - (v / 256) * 256) as u8;
 }
 
 // Same idea, for the 32-bit fields TCP needs (sequence/ack numbers).
-fn read_u32be(p: *u8) -> i32 {
-    return ((p[0] as i32) << 24) | ((p[1] as i32) << 16) | ((p[2] as i32) << 8) | (p[3] as i32);
+fn read_u32be(s: [u8; 4..]) -> i32 {
+    return ((s[0] as i32) << 24) | ((s[1] as i32) << 16) | ((s[2] as i32) << 8) | (s[3] as i32);
 }
 
-fn write_u32be(p: *u8, v: i32) {
-    p[0] = (v >> 24) as u8;
-    p[1] = (v >> 16) as u8;
-    p[2] = (v >> 8) as u8;
-    p[3] = v as u8;
+fn write_u32be(s: [u8; 4..], v: i32) {
+    s[0] = (v >> 24) as u8;
+    s[1] = (v >> 16) as u8;
+    s[2] = (v >> 8) as u8;
+    s[3] = v as u8;
+}
+
+// TRANSITIONAL pointer wrappers for the examples not yet migrated to slice
+// views (arp_reply, icmp_echo, tcp_parse, tcp_echo -- http_server is
+// migrated). Each wrapper contains the one unsafe length assertion its
+// pointer-based caller was implicitly making all along; deleting these (by
+// migrating their callers) is part of the P3 follow-up. Do NOT use in new
+// code.
+fn read_u16be_p(p: *u8) -> i32 {
+    return read_u16be(unsafe { p[0..<2] });
+}
+
+fn write_u16be_p(p: *u8, v: i32) {
+    write_u16be(unsafe { p[0..<2] }, v);
+}
+
+fn read_u32be_p(p: *u8) -> i32 {
+    return read_u32be(unsafe { p[0..<4] });
+}
+
+fn write_u32be_p(p: *u8, v: i32) {
+    write_u32be(unsafe { p[0..<4] }, v);
 }
 
 // Copies a NUL-terminated string (as produced by a string literal) into

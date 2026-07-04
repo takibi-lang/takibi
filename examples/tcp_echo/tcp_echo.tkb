@@ -83,15 +83,15 @@ let mut conn_rcv_nxt:     i32 = 0; // next sequence number we expect from remote
 // pseudo-header implied by `ip`, and writes it into tcp+TCP_CHECKSUM.
 // Must be called last, after every other TCP field has its final value.
 fn fix_tcp_checksum(ip: *u8, tcp: *u8, len: i32) {
-    write_u16be(tcp + TCP_CHECKSUM, 0);
+    write_u16be_p(tcp + TCP_CHECKSUM, 0);
     let mut pseudo: [u8; 12];
     bytes_copy(pseudo as *u8, ip + IP_SRC, 4);
     bytes_copy((pseudo as *u8) + 4, ip + IP_DST, 4);
     pseudo[8] = 0 as u8;
     pseudo[9] = PROTO_TCP as u8;
-    write_u16be((pseudo as *u8) + 10, len);
+    write_u16be_p((pseudo as *u8) + 10, len);
     let sum: i32 = checksum_add(pseudo as *u8, 12, 0);
-    write_u16be(tcp + TCP_CHECKSUM, checksum_fold(checksum_add(tcp, len, sum)));
+    write_u16be_p(tcp + TCP_CHECKSUM, checksum_fold(checksum_add(tcp, len, sum)));
 }
 
 // Rewrites a SYN request into a SYN-ACK reply in place. Only called from
@@ -104,19 +104,19 @@ fn build_syn_ack(eth: *u8, ip: *u8, ihl: i32, tcp: *u8) {
     bytes_copy(ip + IP_DST, ip + IP_SRC, 4);
     bytes_copy(ip + IP_SRC, OUR_IP as *u8, 4);
     ip[IP_TTL] = 64 as u8;
-    write_u16be(ip + IP_TOTAL_LEN, ihl + 20);
-    write_u16be(ip + IP_CHECKSUM, 0);
-    write_u16be(ip + IP_CHECKSUM, inet_checksum(ip, ihl));
+    write_u16be_p(ip + IP_TOTAL_LEN, ihl + 20);
+    write_u16be_p(ip + IP_CHECKSUM, 0);
+    write_u16be_p(ip + IP_CHECKSUM, inet_checksum(ip, ihl));
 
-    let client_port: i32 = read_u16be(tcp + TCP_SRC_PORT);
-    write_u16be(tcp + TCP_SRC_PORT, TCP_ECHO_PORT);
-    write_u16be(tcp + TCP_DST_PORT, client_port);
-    write_u32be(tcp + TCP_SEQ, OUR_ISN);
-    write_u32be(tcp + TCP_ACK, conn_rcv_nxt);
+    let client_port: i32 = read_u16be_p(tcp + TCP_SRC_PORT);
+    write_u16be_p(tcp + TCP_SRC_PORT, TCP_ECHO_PORT);
+    write_u16be_p(tcp + TCP_DST_PORT, client_port);
+    write_u32be_p(tcp + TCP_SEQ, OUR_ISN);
+    write_u32be_p(tcp + TCP_ACK, conn_rcv_nxt);
     tcp[TCP_DATA_OFFSET] = (5 << 4) as u8; // 20-byte header, no options
     tcp[TCP_FLAGS] = (TCP_FLAG_SYN | TCP_FLAG_ACK) as u8;
-    write_u16be(tcp + TCP_WINDOW, 65535);
-    write_u16be(tcp + TCP_URGENT, 0);
+    write_u16be_p(tcp + TCP_WINDOW, 65535);
+    write_u16be_p(tcp + TCP_URGENT, 0);
 
     fix_tcp_checksum(ip, tcp, 20);
 }
@@ -144,19 +144,19 @@ fn build_data_echo(eth: *u8, ip: *u8, ihl: i32, tcp: *u8, data: *u8, data_len: i
     bytes_copy(ip + IP_DST, ip + IP_SRC, 4);
     bytes_copy(ip + IP_SRC, OUR_IP as *u8, 4);
     ip[IP_TTL] = 64 as u8;
-    write_u16be(ip + IP_TOTAL_LEN, ihl + 20 + data_len);
-    write_u16be(ip + IP_CHECKSUM, 0);
-    write_u16be(ip + IP_CHECKSUM, inet_checksum(ip, ihl));
+    write_u16be_p(ip + IP_TOTAL_LEN, ihl + 20 + data_len);
+    write_u16be_p(ip + IP_CHECKSUM, 0);
+    write_u16be_p(ip + IP_CHECKSUM, inet_checksum(ip, ihl));
 
-    let client_port: i32 = read_u16be(tcp + TCP_SRC_PORT);
-    write_u16be(tcp + TCP_SRC_PORT, TCP_ECHO_PORT);
-    write_u16be(tcp + TCP_DST_PORT, client_port);
-    write_u32be(tcp + TCP_SEQ, conn_snd_nxt);
-    write_u32be(tcp + TCP_ACK, conn_rcv_nxt + data_len);
+    let client_port: i32 = read_u16be_p(tcp + TCP_SRC_PORT);
+    write_u16be_p(tcp + TCP_SRC_PORT, TCP_ECHO_PORT);
+    write_u16be_p(tcp + TCP_DST_PORT, client_port);
+    write_u32be_p(tcp + TCP_SEQ, conn_snd_nxt);
+    write_u32be_p(tcp + TCP_ACK, conn_rcv_nxt + data_len);
     tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
     tcp[TCP_FLAGS] = (TCP_FLAG_ACK | TCP_FLAG_PSH) as u8;
-    write_u16be(tcp + TCP_WINDOW, 65535);
-    write_u16be(tcp + TCP_URGENT, 0);
+    write_u16be_p(tcp + TCP_WINDOW, 65535);
+    write_u16be_p(tcp + TCP_URGENT, 0);
 
     fix_tcp_checksum(ip, tcp, 20 + data_len);
 }
@@ -173,19 +173,19 @@ fn build_fin_ack(eth: *u8, ip: *u8, ihl: i32, tcp: *u8) {
     bytes_copy(ip + IP_DST, ip + IP_SRC, 4);
     bytes_copy(ip + IP_SRC, OUR_IP as *u8, 4);
     ip[IP_TTL] = 64 as u8;
-    write_u16be(ip + IP_TOTAL_LEN, ihl + 20);
-    write_u16be(ip + IP_CHECKSUM, 0);
-    write_u16be(ip + IP_CHECKSUM, inet_checksum(ip, ihl));
+    write_u16be_p(ip + IP_TOTAL_LEN, ihl + 20);
+    write_u16be_p(ip + IP_CHECKSUM, 0);
+    write_u16be_p(ip + IP_CHECKSUM, inet_checksum(ip, ihl));
 
-    let client_port: i32 = read_u16be(tcp + TCP_SRC_PORT);
-    write_u16be(tcp + TCP_SRC_PORT, TCP_ECHO_PORT);
-    write_u16be(tcp + TCP_DST_PORT, client_port);
-    write_u32be(tcp + TCP_SEQ, conn_snd_nxt);
-    write_u32be(tcp + TCP_ACK, conn_rcv_nxt);
+    let client_port: i32 = read_u16be_p(tcp + TCP_SRC_PORT);
+    write_u16be_p(tcp + TCP_SRC_PORT, TCP_ECHO_PORT);
+    write_u16be_p(tcp + TCP_DST_PORT, client_port);
+    write_u32be_p(tcp + TCP_SEQ, conn_snd_nxt);
+    write_u32be_p(tcp + TCP_ACK, conn_rcv_nxt);
     tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
     tcp[TCP_FLAGS] = (TCP_FLAG_FIN | TCP_FLAG_ACK) as u8;
-    write_u16be(tcp + TCP_WINDOW, 65535);
-    write_u16be(tcp + TCP_URGENT, 0);
+    write_u16be_p(tcp + TCP_WINDOW, 65535);
+    write_u16be_p(tcp + TCP_URGENT, 0);
 
     fix_tcp_checksum(ip, tcp, 20);
 }
@@ -207,13 +207,13 @@ fn main() {
             let eth: *u8 = net_rx_buf();
 
             // 14 (eth) + 20 (min IPv4) + 20 (min TCP) = 54
-            if (len >= 54 && read_u16be(eth + 12) == 0x0800) {
+            if (len >= 54 && read_u16be_p(eth + 12) == 0x0800) {
                 let ip: *u8 = eth + 14;
                 let version: i32 = (ip[0] as i32) >> 4;
                 let ihl:     i32 = ((ip[0] as i32) & 0x0f) * 4;
 
                 if (version == 4 && ihl == 20) {
-                    let total_len:       i32 = read_u16be(ip + IP_TOTAL_LEN);
+                    let total_len:       i32 = read_u16be_p(ip + IP_TOTAL_LEN);
                     let ip_len_in_frame: i32 = len - 14;
 
                     if (total_len <= ip_len_in_frame && total_len >= ihl &&
@@ -237,15 +237,15 @@ fn main() {
                                 bytes_copy((pseudo as *u8) + 4, ip + IP_DST, 4);
                                 pseudo[8] = 0 as u8;
                                 pseudo[9] = PROTO_TCP as u8;
-                                write_u16be((pseudo as *u8) + 10, tcp_len);
+                                write_u16be_p((pseudo as *u8) + 10, tcp_len);
                                 let sum: i32 = checksum_add(pseudo as *u8, 12, 0);
 
                                 if (checksum_fold(checksum_add(tcp, tcp_len, sum)) == 0) {
-                                    let dst_port: i32 = read_u16be(tcp + TCP_DST_PORT);
-                                    let src_port: i32 = read_u16be(tcp + TCP_SRC_PORT);
+                                    let dst_port: i32 = read_u16be_p(tcp + TCP_DST_PORT);
+                                    let src_port: i32 = read_u16be_p(tcp + TCP_SRC_PORT);
                                     let flags:    i32 = tcp[TCP_FLAGS] as i32;
-                                    let seq:      i32 = read_u32be(tcp + TCP_SEQ);
-                                    let ack:      i32 = read_u32be(tcp + TCP_ACK);
+                                    let seq:      i32 = read_u32be_p(tcp + TCP_SEQ);
+                                    let ack:      i32 = read_u32be_p(tcp + TCP_ACK);
 
                                     if (dst_port == TCP_ECHO_PORT) {
                                         if (conn_state == TCP_LISTEN) {

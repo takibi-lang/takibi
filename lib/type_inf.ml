@@ -261,8 +261,22 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                                     "cannot cast '%s' to a slice" (to_string t'))))
                            | None -> raise (TypeError (e.loc,
                                Printf.sprintf "Unbound variable: %s" name)))
+                      | Ast.StringLit str ->
+                          (* String literal as a slice: the compile-time
+                             byte length (NUL excluded) becomes the minimum,
+                             so `slice_copy(dst, "..." as []u8)` copies the
+                             literal and returns its length -- no NUL scan,
+                             no unbounded write. *)
+                          unify_at e.loc TU8 el_want;
+                          let n = String.length str in
+                          if n < want_min then
+                            raise (TypeError (e.loc, Printf.sprintf
+                              "cannot cast a %d-byte string literal to %s"
+                              n (to_string tgt)));
+                          TSlice (el_want, n)
                       | _ -> raise (TypeError (e.loc,
-                          "slice cast requires an array variable or slice source"))))
+                          "slice cast requires an array variable, string \
+                           literal, or slice source"))))
             | _ ->
            (match repr src_ty with
             | TPtr _ ->
@@ -275,8 +289,20 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                           use `(ptr as usize) as %s` to make the truncation explicit"
                          (to_string tgt) (to_string tgt))))
             | TSlice _ ->
-                raise (TypeError (e.loc,
-                  Printf.sprintf "cannot cast a slice to %s" (to_string tgt)))
+                (match tgt with
+                 | TPtr _ ->
+                     (* Explicit bridge from the slice world back into the
+                        pointer world (`frame as *u8`) -- used where an API
+                        still takes pointer+length (checksums, net_transmit,
+                        response building). As free as *T as *U, and equally
+                        visible: the reader sees exactly where bounds
+                        governance ends. *)
+                     tgt
+                 | _ ->
+                     raise (TypeError (e.loc,
+                       Printf.sprintf
+                         "cannot cast a slice to %s (only `as *T` is allowed)"
+                         (to_string tgt))))
             | _ -> tgt)))
 
   | FieldGet (base_expr, fname) ->
@@ -336,25 +362,74 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       unify_at lo_e.loc (canon_ty lo_t) TI32;
       unify_at hi_e.loc (canon_ty hi_t) TI32;
       let const_bounds = (Const_env.bound_value lo_e, Const_env.bound_value hi_e) in
+      (* Static value range of a bound: a compile-time constant k is {k..<k+1};
+         a refined-typed expression contributes its own range. Sync rule:
+         llvm_gen.ml's SliceOf makes the same proven/checked decision through
+         the same formula (see its bound_range helper) -- change together. *)
+      let bound_range be bt =
+        match Const_env.bound_value be with
+        | Some k -> Some (k, k + 1)
+        | None -> (match repr bt with TRefinedInt (a, b) -> Some (a, b) | _ -> None)
+      in
       (match repr vt with
-       | TSlice (elem, m) | TArray (elem, m) ->
-           (* Proven subslice: bounds must be compile-time constants inside
-              the base's minimum length. m is a LOWER bound of the runtime
-              length, so b <= m implies b <= len -- no runtime check needed.
-              (Runtime-checked subslicing is deferred -- P3 in the slice
-              design; today's answer for a runtime offset is a raw pointer.) *)
-           (match const_bounds with
-            | Some a, Some b when 0 <= a && a <= b && b <= m ->
-                TSlice (elem, b - a)
-            | Some a, Some b ->
-                raise (TypeError (e.loc,
-                  Printf.sprintf
-                    "subslice [%d..<%d] is outside the proven range of '%s' \
-                     (minimum length %d)" a b (to_string vt) m))
+       | TSlice (elem, m) ->
+           (* Proven subslice: 0 <= lo, lo <= hi, hi <= m must all follow
+              from the bounds' STATIC ranges (m is a lower bound of the
+              runtime length, so hi <= m implies hi <= len). Interval-only:
+              max(lo) <= min(hi) proves lo <= hi without any relational
+              reasoning. The result's minimum is the guaranteed length
+              min(hi) - max(lo). This is how `frame[0..<len]` after
+              `if (len >= 54 && len <= 1514)` narrowing yields [u8; 54..]
+              with no runtime check at all. *)
+           (match bound_range lo_e lo_t, bound_range hi_e hi_t with
+            | Some (la, lb), Some (ha, hb)
+              when la >= 0 && lb - 1 <= ha && hb - 1 <= m ->
+                TSlice (elem, ha - (lb - 1))
+            | lo_r, hi_r ->
+                (match const_bounds with
+                 | Some a, Some b when a < 0 || a > b ->
+                     (* Definitely-malformed constants: reject rather than
+                        emit a check that always traps. (b > m is NOT
+                        definitely wrong for a slice -- the runtime length
+                        may exceed the minimum -- so that becomes a check.) *)
+                     raise (TypeError (e.loc,
+                       Printf.sprintf
+                         "subslice [%d..<%d] is malformed (lo must satisfy \
+                          0 <= lo <= hi)" a b))
+                 | _ ->
+                     (* Runtime-checked subslice (gradual form): codegen
+                        emits 0 <= lo && lo <= hi && hi <= s.len -> trap,
+                        recorded as a --forbid-trap site. The result minimum
+                        keeps whatever the static ranges still guarantee
+                        once the check has passed: len = hi - lo >=
+                        min(hi) - max(lo). *)
+                     let min_after = match lo_r, hi_r with
+                       | Some (_, lb), Some (ha, _) when ha - (lb - 1) > 0 ->
+                           ha - (lb - 1)
+                       | _ -> 0
+                     in
+                     TSlice (elem, min_after)))
+       | TArray (elem, n) ->
+           (* Arrays have an EXACT static length, so bounds must be provable
+              outright; out-of-range constants are definite errors, and
+              runtime bounds have no checked form here (cast to a slice
+              first if a runtime-checked subslice is really wanted). *)
+           (match bound_range lo_e lo_t, bound_range hi_e hi_t with
+            | Some (la, lb), Some (ha, hb)
+              when la >= 0 && lb - 1 <= ha && hb - 1 <= n ->
+                TSlice (elem, ha - (lb - 1))
             | _ ->
-                raise (TypeError (e.loc,
-                  "subslice bounds on a slice/array must be compile-time \
-                   constants; runtime-checked subslicing is not implemented")))
+                (match const_bounds with
+                 | Some a, Some b ->
+                     raise (TypeError (e.loc,
+                       Printf.sprintf
+                         "subslice [%d..<%d] is outside the proven range of \
+                          '%s' (minimum length %d)" a b (to_string vt) n))
+                 | _ ->
+                     raise (TypeError (e.loc,
+                       "subslice bounds on an array must be provable at \
+                        compile time; cast to a slice first (`arr as []T`) \
+                        for a runtime-checked subslice"))))
        | TPtr elem ->
            (* Slice construction from a raw pointer: an unchecked length
               ASSERTION with no evidence, so it must be visibly marked --
@@ -373,8 +448,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                     Printf.sprintf
                       "slice construction from a raw pointer asserts a length \
                        without evidence; write `unsafe { %s[..] }` to mark it" id));
-                (match const_bounds with
-                 | Some a, Some b when 0 <= a && a <= b -> TSlice (elem, b - a)
+                (* Claimed minimum from the bounds' static ranges (sync
+                   rule: same formula as llvm_gen's sub_of_ptr). *)
+                (match bound_range lo_e lo_t, bound_range hi_e hi_t with
+                 | Some (la, lb), Some (ha, _) when la >= 0 && lb - 1 <= ha ->
+                     TSlice (elem, ha - (lb - 1))
                  | _ -> TSlice (elem, 0)))
        | t -> raise (TypeError (e.loc,
            Printf.sprintf "subslice on non-slice/array/pointer type '%s'" (to_string t))))

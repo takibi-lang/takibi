@@ -55,14 +55,14 @@ fn build_echo_reply(eth: *u8, ip: *u8, ihl: i32, icmp: *u8, icmp_len: i32) {
     bytes_copy(ip + IP_DST, ip + IP_SRC, 4);
     bytes_copy(ip + IP_SRC, OUR_IP as *u8, 4);
     ip[IP_TTL] = 64 as u8;
-    write_u16be(ip + IP_CHECKSUM, 0);
-    write_u16be(ip + IP_CHECKSUM, inet_checksum(ip, ihl));
+    write_u16be_p(ip + IP_CHECKSUM, 0);
+    write_u16be_p(ip + IP_CHECKSUM, inet_checksum(ip, ihl));
 
     // ICMP: type request -> reply, identifier/sequence/data unchanged,
     // recompute checksum (it covers the type byte, which just changed).
     icmp[ICMP_TYPE] = ICMP_ECHO_REPLY as u8;
-    write_u16be(icmp + ICMP_CHECKSUM, 0);
-    write_u16be(icmp + ICMP_CHECKSUM, inet_checksum(icmp, icmp_len));
+    write_u16be_p(icmp + ICMP_CHECKSUM, 0);
+    write_u16be_p(icmp + ICMP_CHECKSUM, inet_checksum(icmp, icmp_len));
 }
 
 fn main() {
@@ -81,14 +81,14 @@ fn main() {
             // 14 (eth) + 20 (min IPv4) + 8 (min ICMP) = 42
             if (len >= 42) {
                 let eth: *u8 = net_rx_buf();
-                if (read_u16be(eth + 12) == 0x0800) {
+                if (read_u16be_p(eth + 12) == 0x0800) {
                     let ip: *u8 = eth + 14;
                     let version: i32 = (ip[IP_VERSION_IHL] as i32) >> 4;
                     let ihl:     i32 = ((ip[IP_VERSION_IHL] as i32) & 0x0f) * 4;
 
                     // No IP options supported -- IHL must be exactly 20.
                     if (version == 4 && ihl == 20) {
-                        let total_len:       i32 = read_u16be(ip + IP_TOTAL_LEN);
+                        let total_len:       i32 = read_u16be_p(ip + IP_TOTAL_LEN);
                         let ip_len_in_frame: i32 = len - 14;
 
                         // total_len must fit what the device actually

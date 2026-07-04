@@ -2112,12 +2112,31 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
-    "constant subslice outside the proven minimum is a compile error" `Quick
-    (expect_type_error "outside the proven range"
+    "constant subslice beyond the proven minimum becomes a RUNTIME-CHECKED \
+     subslice (P3 gradual form: the runtime length may exceed the minimum, \
+     so this is one recorded trap site, not an error); after the check the \
+     guaranteed length still proves inner indexing" `Quick
+    (expect_trap_sites 1
        "fn ftsl_subslice_oob(s: [u8; 8..]) -> u8 {
           let m = s[2..<10];
-          return m[0];
+          return m[7];
         }");
+
+  Alcotest.test_case
+    "malformed constant subslice (lo > hi) is still a compile error, and \
+     an array subslice out of the exact static size is too" `Quick
+    (fun () ->
+       expect_type_error "malformed"
+         "fn ftsl_subslice_bad(s: [u8; 8..]) -> u8 {
+            let m = s[6..<2];
+            return m[0];
+          }" ();
+       expect_type_error "outside the proven range"
+         "let mut ftsl_arr_oob: [u8; 8];
+          fn ftsl_arr_sub() -> u8 {
+            let m = ftsl_arr_oob[2..<10];
+            return m[0];
+          }" ());
 
   Alcotest.test_case
     "array-to-slice cast carries the static length as the minimum: \
@@ -2306,6 +2325,56 @@ let codegen_tests = [
          "fn slice_copy(a: i32) -> i32 { return a; }" ();
        expect_type_error "compiler builtin"
          "extern fn slice_eq(a: i32) -> i32;" ());
+
+  (* -- P3: refined-bound subslice proof, checked subslice, lit/ptr casts -- *)
+
+  Alcotest.test_case
+    "refined-bound subslice is proven by intervals alone: frame[0..<len] \
+     after `if (len >= 54 && len <= 1514)` on a [u8; 1514..] frame yields \
+     [u8; 54..] with zero checks -- the driver-boundary pattern" `Quick
+    (expect_trap_sites 0
+       "fn ftp3_rx(frame: [u8; 1514..], len: i32) -> i32 {
+          if (len >= 54 && len <= 1514) {
+            let rx = frame[0..<len];
+            return read_ftp3(rx);
+          }
+          return 0;
+        }
+        fn read_ftp3(rx: [u8; 54..]) -> i32 {
+          return rx[12] as i32;
+        }");
+
+  Alcotest.test_case
+    "runtime-bound subslice on a slice is the gradual checked form: one \
+     recorded trap site, result minimum 0" `Quick
+    (expect_trap_sites 2
+       "fn ftp3_checked(s: []u8, a: i32, b: i32) -> u8 {
+          let m = s[a..<b];
+          return m[0];
+        }");
+
+  Alcotest.test_case
+    "string literal as []u8 carries its compile-time byte length as the \
+     minimum (NUL excluded): slice_copy of a literal is bounded and \
+     returns min(dst.len, lit.len) -- zero trap sites" `Quick
+    (expect_trap_sites 0
+       "fn ftp3_lit(dst: []u8) -> usize {
+          return slice_copy(dst, \"HTTP/1.1 200 OK\" as []u8);
+        }");
+
+  Alcotest.test_case
+    "slice as *T is the explicit bridge back to the pointer world; other \
+     slice casts remain errors" `Quick
+    (fun () ->
+       expect_codegen_ok
+         "fn ftp3_takes_ptr(p: *u8) -> u8 { return p[0]; }
+          fn ftp3_bridge(s: [u8; 4..]) -> u8 {
+            return ftp3_takes_ptr(s as *u8);
+          }" ();
+       expect_type_error "cannot cast a slice"
+         "fn ftp3_bad(s: []u8) -> i32 {
+            return s as i32;
+          }" ());
 
   (* Kept last in this group deliberately: Llvm_gen.enable_debug_info flips a
      process-global ref with no way back off (same one-way-switch pattern
