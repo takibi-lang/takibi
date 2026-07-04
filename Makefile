@@ -87,7 +87,7 @@ STM32_CHECKSUM_KERNELS  := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/
 STM32_CHECKSUM_BINS     := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/kernel_stm32.bin)
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest stm32build hwcheck hwcheck-net langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server profile-http-server profile-tcp-echo
+.PHONY: build test qemutest stm32build hwcheck hwcheck-net langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server profile-http-server profile-tcp-echo
 
 .DEFAULT_GOAL := build
 
@@ -641,6 +641,43 @@ HTTP_SERVER_QEMU_FLAGS := -machine virt -cpu cortex-a53 -display none \
 qemu-http-server: examples/http_server/kernel.elf
 	@echo "Open http://localhost:$(HTTP_HOST_PORT)/ in your browser (Ctrl-C to quit)"
 	$(QEMU) $(HTTP_SERVER_QEMU_FLAGS) $(HTTP_SERVER_FLAGS) -kernel $<
+
+# Same STM32_SERIAL_DEV/FLASH_ADDR convention as scripts/run_hwtest.sh
+# (overridable the same way: STM32_SERIAL_DEV=/dev/ttyACM1 make ...).
+STM32_SERIAL_DEV ?= /dev/ttyACM0
+STM32_FLASH_ADDR := 0x08000000
+
+## stm32-http-server: flash and run the HTTP server demo on the real
+## STM32F746G-DISCOVERY board (requires it connected via USB -- ST-LINK for
+## flashing, VCP serial for the log lines below -- and its Ethernet port
+## wired directly to this machine's NIC, see examples/common_stm32/
+## netconfig.tkb's OUR_IP comment for why that specific subnet was chosen).
+## Same UX as qemu-http-server (announce the URL, then let the server's own
+## log lines scroll by, Ctrl-C to quit), but the URL is parsed from
+## netconfig.tkb's HTTP_SERVER_IP constant instead of a fixed QEMU/SLIRP
+## address, so it can't silently drift out of sync with the board's actual
+## configured IP. The serial reader is attached (backgrounded) before the
+## explicit reset, not after, so the board's own earliest "ready" message
+## isn't lost to a reader that hasn't opened the port yet -- same ordering
+## reasoning as read_until_quiet's WAIT_FOR_DATA case in run_hwtest.sh.
+stm32-http-server: examples/http_server/kernel_stm32.bin
+	@if [ ! -e "$(STM32_SERIAL_DEV)" ]; then \
+	    echo "error: $(STM32_SERIAL_DEV) not found -- is the STM32F746G-DISCOVERY board connected?" >&2; \
+	    exit 1; \
+	fi
+	@if ! st-info --probe > /dev/null 2>&1; then \
+	    echo "error: st-info --probe failed -- is the ST-LINK debug interface accessible?" >&2; \
+	    exit 1; \
+	fi
+	st-flash write $< $(STM32_FLASH_ADDR)
+	@ip=$$(grep -m1 '^let HTTP_SERVER_IP' examples/common_stm32/netconfig.tkb | grep -oP '\{[^}]*\}' | tr -d '{} ' | tr ',' '.'); \
+	echo "Open http://$$ip/ in your browser (Ctrl-C to quit)"; \
+	stty -F $(STM32_SERIAL_DEV) 115200 raw -echo; \
+	cat $(STM32_SERIAL_DEV) & \
+	catpid=$$!; \
+	sleep 0.2; \
+	st-flash reset > /dev/null 2>&1; \
+	wait $$catpid
 
 ## profile-http-server: rough execution profile of http_server.tkb under QEMU
 ## (gdb-multiarch PC sampling against the -g build + a repeated-request
