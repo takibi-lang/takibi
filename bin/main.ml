@@ -36,6 +36,7 @@ let () =
   let target_cpu = ref "" in
   let target_features = ref "" in
   let debug_info = ref false in
+  let forbid_trap = ref false in
   let show_version = ref false in
   let i = ref 1 in
   while !i < Array.length Sys.argv do
@@ -68,6 +69,8 @@ let () =
          target_features := Sys.argv.(!i)
      | "-g" ->
          debug_info := true
+     | "--forbid-trap" ->
+         forbid_trap := true
      | arg ->
          input_files := arg :: !input_files);
     incr i
@@ -81,7 +84,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--forbid-trap] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -100,6 +103,21 @@ let () =
     let prog_types = Typechecker.infer_program prog in
 
     Llvm_gen.gen_program ~prog_types prog;
+
+    (* --forbid-trap: reject the program if any runtime trap check remains.
+       The judgment is what the type system could prove at IR-generation
+       time -- deliberately NOT whether LLVM's optimizer would fold a given
+       check away later (see Llvm_gen.trap_sites' comment). Every unproven
+       site is reported, not just the first, mirroring run_qemutest.sh's
+       report-all-failures philosophy. *)
+    if !forbid_trap && !Llvm_gen.trap_sites <> [] then begin
+      let sites = List.rev !Llvm_gen.trap_sites in
+      List.iter (fun (loc, what) -> report_error loc what) sites;
+      Printf.eprintf
+        "Error: --forbid-trap: %d runtime trap site(s) remain (listed above)\n"
+        (List.length sites);
+      exit 1
+    end;
 
     if !output_file <> "" then
       Llvm_gen.emit_object machine !output_file

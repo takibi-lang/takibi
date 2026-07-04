@@ -31,6 +31,17 @@ let expect_codegen_ok src () =
   | _ -> ()
   | exception Llvm_gen.Error msg -> Alcotest.failf "unexpected codegen Error: %s" msg
 
+(* Expect codegen to succeed AND to have recorded exactly [expected] runtime
+   trap sites (Llvm_gen.trap_sites -- the --forbid-trap accounting).
+   gen_program resets the list at the start of each run, so this reads the
+   sites of exactly this test's program, not accumulated state. *)
+let expect_trap_sites expected src () =
+  (match gen_codegen src with
+   | _ -> ()
+   | exception Llvm_gen.Error msg -> Alcotest.failf "unexpected codegen Error: %s" msg);
+  Alcotest.(check int) "recorded trap sites"
+    expected (List.length !Llvm_gen.trap_sites)
+
 (* Custom Alcotest testables *)
 
 let rec show_type = function
@@ -1880,6 +1891,171 @@ let codegen_tests = [
        "fn codegen_u8_cast_chain(p: *u8) -> i32 {
           if (p[0] == 6 as u8 && p[1] == 4 as u8) { return 1; }
           return 0;
+        }");
+
+  (* -- --forbid-trap accounting (Llvm_gen.trap_sites) -------------------- *)
+
+  Alcotest.test_case
+    "unproven i32 array index records exactly one trap site (the residual \
+     bounds check --forbid-trap would reject)" `Quick
+    (expect_trap_sites 1
+       "let mut ftrap_buf_a: [u8; 8];
+        fn ftrap_i32_index(v: i32) -> u8 {
+          return ftrap_buf_a[v];
+        }");
+
+  Alcotest.test_case
+    "refined-typed index records zero trap sites (bounds check elided by \
+     the type, so the program is --forbid-trap clean)" `Quick
+    (expect_trap_sites 0
+       "let mut ftrap_buf_b: [u8; 8];
+        fn ftrap_refined_index(v: {0..<8}) -> u8 {
+          return ftrap_buf_b[v];
+        }");
+
+  Alcotest.test_case
+    "i32 as {lo..<hi} is a CHECKED cast: exactly one trap site (the range \
+     check), and the subsequent index is elided. Regression for the \
+     soundness hole where this cast was silently unchecked and \
+     arr[v as {0..<8}] became an unchecked OOB access (zero sites, zero \
+     traps, wrong)" `Quick
+    (expect_trap_sites 1
+       "let mut ftrap_buf_c: [u8; 8];
+        fn ftrap_checked_cast(v: i32) -> u8 {
+          return ftrap_buf_c[v as {0..<8}];
+        }");
+
+  Alcotest.test_case
+    "refined-to-wider-refined cast is a provable subtype coercion: zero \
+     trap sites, stays legal under --forbid-trap" `Quick
+    (expect_trap_sites 0
+       "let mut ftrap_buf_d: [u8; 8];
+        fn ftrap_subtype_cast(v: {2..<5}) -> u8 {
+          return ftrap_buf_d[v as {0..<8}];
+        }");
+
+  Alcotest.test_case
+    "int as exhaustive enum records one trap site (runtime variant check); \
+     the same cast to a non-exhaustive enum records none (any integer is \
+     valid, no check emitted)" `Quick
+    (fun () ->
+       expect_trap_sites 1
+         "enum FtrapColor: u8 { R = 1; G = 2; }
+          fn ftrap_enum_closed(n: i32) -> u8 {
+            let c: FtrapColor = n as u8 as FtrapColor;
+            return c as u8;
+          }" ();
+       expect_trap_sites 0
+         "enum FtrapEther: u16 { IPv4 = 0x0800; ARP = 0x0806; _; }
+          fn ftrap_enum_open(n: i32) -> u16 {
+            let t: FtrapEther = n as u16 as FtrapEther;
+            return t as u16;
+          }" ());
+
+  (* -- narrowing invalidation (kill) rule: Ast.written_names ------------- *)
+  (* Soundness regressions: before the kill rule, all three "killed" cases
+     below elided the bounds check entirely (zero trap sites AND zero traps
+     in the IR) -- a silent unchecked OOB access. *)
+
+  Alcotest.test_case
+    "if-narrowing is killed by assignment inside the branch: \
+     `if (0 <= v < 8) { v = 100; buf[v] }` keeps its bounds check" `Quick
+    (expect_trap_sites 1
+       "let mut fkill_buf_a: [u8; 8];
+        fn fkill_assign(v: i32) -> u8 {
+          if (v >= 0 && v < 8) {
+            v = 100;
+            return fkill_buf_a[v];
+          }
+          return 0 as u8;
+        }");
+
+  Alcotest.test_case
+    "if-narrowing is killed by aliasing (&v) inside the branch: a write \
+     through the pointer can change v after the condition was checked" `Quick
+    (expect_trap_sites 1
+       "let mut fkill_buf_b: [u8; 8];
+        fn fkill_alias(v: i32) -> u8 {
+          if (v >= 0 && v < 8) {
+            let p: *i32 = &v;
+            *p = 100;
+            return fkill_buf_b[v];
+          }
+          return 0 as u8;
+        }");
+
+  Alcotest.test_case
+    "if-narrowing is killed by a for-counter rebinding the narrowed name: \
+     the fresh {0..<100} counter must not inherit the outer {0..<8} proof \
+     (2 sites: the in-loop store against size 8, and the read after)" `Quick
+    (expect_trap_sites 2
+       "let mut fkill_buf_c: [u8; 8];
+        fn fkill_rebind(v: i32) -> u8 {
+          if (v >= 0 && v < 8) {
+            for v in 0..<100 {
+              fkill_buf_c[v] = 1 as u8;
+            }
+            return fkill_buf_c[v];
+          }
+          return 0 as u8;
+        }");
+
+  Alcotest.test_case
+    "if-narrowing still elides the check when the branch only reads the \
+     narrowed variable (the kill rule must not over-kill)" `Quick
+    (expect_trap_sites 0
+       "let mut fkill_buf_d: [u8; 8];
+        fn fkill_readonly(v: i32) -> u8 {
+          if (v >= 0 && v < 8) {
+            return fkill_buf_d[v];
+          }
+          return 0 as u8;
+        }");
+
+  (* -- Const_env-driven refinement ---------------------------------------- *)
+
+  Alcotest.test_case
+    "for-loop bound naming a global constant refines the counter: \
+     `for i in 0..<SIZE` elides the check against [T; SIZE] \
+     (examples/const_global's residual sites under --forbid-trap)" `Quick
+    (expect_trap_sites 0
+       "let FTRAP_SIZE: i32 = 4;
+        let mut ftrap_ring: [i32; FTRAP_SIZE];
+        fn ftrap_const_bound() -> i32 {
+          for i in 0..<FTRAP_SIZE {
+            ftrap_ring[i] = i;
+          }
+          return ftrap_ring[0 as {0..<1}];
+        }");
+
+  Alcotest.test_case
+    "refined source covering only variant values proves an exhaustive-enum \
+     cast: {1..<3} as a {1,2}-valued enum emits no switch/trap; {0..<3} \
+     (0 is not a variant) keeps the runtime check" `Quick
+    (fun () ->
+       expect_trap_sites 0
+         "enum FtrapTone: u8 { Lo = 1; Hi = 2; }
+          fn ftrap_enum_proven(v: {1..<3}) -> u8 {
+            let t: FtrapTone = v as FtrapTone;
+            return t as u8;
+          }" ();
+       expect_trap_sites 1
+         "enum FtrapTone2: u8 { Lo = 1; Hi = 2; }
+          fn ftrap_enum_unproven(v: {0..<3}) -> u8 {
+            let t: FtrapTone2 = v as FtrapTone2;
+            return t as u8;
+          }" ());
+
+  Alcotest.test_case
+    "a local shadowing a global constant is rejected (Const_env resolves \
+     names with no scope info, so shadowing would let `for i in 0..<N` \
+     refine against the global's value while looping to the local's)" `Quick
+    (expect_type_error "shadows a global constant"
+       "let FTRAP_N: i32 = 4;
+        let mut ftrap_arr: [i32; FTRAP_N];
+        fn ftrap_shadow() -> i32 {
+          let FTRAP_N: i32 = 100;
+          return FTRAP_N;
         }");
 
   (* Kept last in this group deliberately: Llvm_gen.enable_debug_info flips a

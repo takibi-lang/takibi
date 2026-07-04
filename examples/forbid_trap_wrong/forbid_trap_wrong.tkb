@@ -1,0 +1,23 @@
+// Compile-error demo: --forbid-trap rejects code whose type annotations
+// cannot prove every array access / refined cast at compile time.
+//
+// WITHOUT --forbid-trap this file compiles fine: buf[v] gets a runtime
+// bounds check (llvm.trap on OOB), which is the intended permissive
+// development mode -- quick driver-bringup code is allowed to lean on the
+// runtime check. WITH --forbid-trap the same residual check becomes a
+// compile error pointing at this exact line: shipping mode, where only
+// type-proven accesses may exist.
+//
+// Registered in scripts/run_qemutest.sh via run_compile_error_test with
+// the extra --forbid-trap flag (the first compile-error test that needs
+// a flag to fail; the helper passes trailing args through to takibi).
+
+let mut buf: [u8; 8];
+
+fn read_at(v: i32) -> u8 {
+    return buf[v];   // index type i32: bounds check remains -> rejected
+}
+
+fn main() -> i32 {
+    return read_at(3) as i32;
+}

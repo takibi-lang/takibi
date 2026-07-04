@@ -24,3 +24,21 @@ let define_if_literal is_mutable name (init_opt : Ast.expr option) =
     match init_opt with
     | Some { Ast.desc = Ast.IntLit n; _ } -> define name n
     | _ -> ()
+
+(* Resolve a for-loop bound to a compile-time integer when possible: a bare
+   literal, or the name of a recorded constant. Shared by type_inf.ml (For's
+   TRefinedInt decision) and llvm_gen.ml (For's TypeRefined decision) so the
+   two sides can never drift apart -- same sync concern as the Mod range
+   rule's lo >= 0 guard documented in CLAUDE.md.
+   Soundness precondition: a `Var` here must actually denote the global
+   constant, not a local shadowing it. That is guaranteed by
+   Type_inf.check_const_shadowing, which rejects any local let / parameter /
+   for-counter reusing a recorded constant name (this table is name-only,
+   with no scope information, so shadowing would silently refine against the
+   global's value while the loop runs to the local's -- an unsound
+   bounds-check elision). *)
+let bound_value (e : Ast.expr) =
+  match e.Ast.desc with
+  | Ast.IntLit n -> Some n
+  | Ast.Var name -> find name
+  | _ -> None

@@ -34,6 +34,35 @@ let enum_variants_tbl: (string, (string * int) list) Hashtbl.t = Hashtbl.create 
 (* Non-exhaustive flag: enum name -> bool (true = has _ marker, int->enum cast skips trap) *)
 let enum_nonexhaustive: (string, bool) Hashtbl.t = Hashtbl.create 8
 
+(* -- Trap-site accounting (--forbid-trap) --------------------------------- *)
+(* Every runtime trap check emitted by codegen (array bounds check, checked
+   refined cast, exhaustive-enum cast) is recorded here with its source
+   location. bin/main.ml reads this after gen_program: under --forbid-trap a
+   non-empty list is a compile error listing every unproven site.
+   Recording happens at IR-generation time, i.e. it reflects exactly what the
+   type system could not prove. This is deliberately independent of whether
+   LLVM's optimizer would later fold a particular check away (see
+   run_optimizations' correlated-propagation note): the --forbid-trap
+   guarantee must stay deterministic across LLVM versions and pass behavior,
+   so "the optimizer happened to remove it" never counts as proof. *)
+let trap_sites : (Lexing.position * string) list ref = ref []
+let record_trap loc what = trap_sites := (loc, what) :: !trap_sites
+
+(* Human-readable type names for trap-site messages (Ast.show_type_expr's
+   raw constructor dump is too noisy for a user-facing compile error). *)
+let rec ty_str = function
+  | TypeBool -> "bool"
+  | TypeI8 -> "i8" | TypeI16 -> "i16" | TypeI32 -> "i32" | TypeI64 -> "i64"
+  | TypeU8 -> "u8" | TypeU16 -> "u16" | TypeU32 -> "u32" | TypeU64 -> "u64"
+  | TypeUsize -> "usize"
+  | TypeVoid  -> "void"
+  | TypePtr t -> "*" ^ ty_str t
+  | TypeIo  t -> "io " ^ ty_str t
+  | TypeArray (t, n) -> Printf.sprintf "[%s; %d]" (ty_str t) n
+  | TypeFn _  -> "fn(...)"
+  | TypeNamed s -> s
+  | TypeRefined (lo, hi) -> Printf.sprintf "{%d..<%d}" lo hi
+
 (* ---- DWARF debug info (opt-in via -g; see enable_debug_info) ----
    Everything DI-related elsewhere in this file (gen_func / gen_stmt / gen_program)
    checks !debug_info_enabled first and is a no-op when -g was not passed. *)
@@ -134,12 +163,17 @@ let collect_bounds_cond (cond : Ast.expr) =
 
 (* Temporarily narrow Imm locals based on condition bounds.
    Only Imm (immutable) bindings are narrowed; Mut bindings are skipped.
-   Returns saved bindings for restoration after the then-branch. *)
-let apply_narrowing (locals : (string, local_binding) Hashtbl.t) (cond : Ast.expr) =
+   Returns saved bindings for restoration after the then-branch.
+   [killed] is the branch body's Ast.written_names: an Imm binding cannot
+   be assigned or aliased, but the body can REBIND the name (let / for
+   counter), and the narrowed entry must not leak into that fresh binding's
+   uses -- so killed names are skipped here too. *)
+let apply_narrowing (locals : (string, local_binding) Hashtbl.t)
+    (cond : Ast.expr) (killed : string list) =
   let bounds = collect_bounds_cond cond in
   Types.StringMap.fold (fun name (lo_opt, hi_opt) saved ->
     match lo_opt, hi_opt with
-    | Some lo, Some hi ->
+    | Some lo, Some hi when not (List.mem name killed) ->
         (match Hashtbl.find_opt locals name with
          | Some (Imm (_, v) as old) ->
              Hashtbl.replace locals name (Imm (TypeRefined (lo, hi), v));
@@ -157,12 +191,20 @@ let restore_narrowing (locals : (string, local_binding) Hashtbl.t) saved =
 let narrowing_ctx : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 4
 
 (* Record narrowed types for Mut bindings into narrowing_ctx.
-   Returns [(name, old_opt)] -- pass to restore_narrowing_mut after the then-branch. *)
-let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t) (cond : Ast.expr) =
+   Returns [(name, old_opt)] -- pass to restore_narrowing_mut after the then-branch.
+   Invalidation (kill) rule: a variable the branch body may write to, alias
+   (&x), or rebind is NOT narrowed at all -- the condition only proves the
+   range at the moment it was evaluated, and any later write invalidates
+   that proof (`if (v >= 0 && v < 8) { v = 100; buf[v] = ...; }` must keep
+   its bounds check). [killed] comes from Ast.written_names on the branch
+   body; type_inf.ml's narrow_from_cond applies the same rule through the
+   same function (sync rule -- see written_names' comment). *)
+let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t)
+    (cond : Ast.expr) (killed : string list) =
   let bounds = collect_bounds_cond cond in
   Types.StringMap.fold (fun name (lo_opt, hi_opt) saved ->
     match lo_opt, hi_opt with
-    | Some lo, Some hi ->
+    | Some lo, Some hi when not (List.mem name killed) ->
         (match Hashtbl.find_opt locals name with
          | Some (Mut (TypeI32, _)) ->
              let old = Hashtbl.find_opt narrowing_ctx name in
@@ -509,22 +551,50 @@ let resolve_ret_ast (pt : Types.program_types option) fname ty_opt =
       | None    -> fallback
       | Some fi -> fi.Types.ret_type
 
-(* -- Bounds check --------------------------------------------------------- *)
-(* Bounds check for [T; N] arrays. Traps via llvm.trap when idx >= N (unsigned compare).
-   The unsigned compare also catches negative indices (idx < 0) as too-large unsigned values. *)
-let emit_bounds_check idx_v n =
+(* -- Runtime trap checks -------------------------------------------------- *)
+(* Branch to llvm.trap when [bad] is true, then continue at a fresh block.
+   Shared tail of every runtime check codegen emits. *)
+let emit_trap_when bad ~bad_name ~ok_name =
   let cur_f  = block_parent (insertion_block builder) in
-  let oob_bb = append_block context "oob"    cur_f in
-  let ok_bb  = append_block context "idx_ok" cur_f in
-  let n_llv  = const_int (i32_type context) n in
-  let cmp    = build_icmp Icmp.Uge idx_v n_llv "oob_cmp" builder in
-  ignore (build_cond_br cmp oob_bb ok_bb builder);
-  position_at_end oob_bb builder;
+  let bad_bb = append_block context bad_name cur_f in
+  let ok_bb  = append_block context ok_name  cur_f in
+  ignore (build_cond_br bad bad_bb ok_bb builder);
+  position_at_end bad_bb builder;
   let trap_ft = function_type (void_type context) [||] in
   let trap_fn = declare_function "llvm.trap" trap_ft the_module in
   ignore (build_call trap_ft trap_fn [||] "" builder);
   ignore (build_unreachable builder);
   position_at_end ok_bb builder
+
+(* Bounds check for [T; N] arrays. Traps via llvm.trap when idx >= N (unsigned compare).
+   The unsigned compare also catches negative indices (idx < 0) as too-large unsigned values. *)
+let emit_bounds_check loc idx_ty idx_v n =
+  record_trap loc (Printf.sprintf
+    "array bounds check remains: index type %s cannot prove range {0..<%d}"
+    (ty_str idx_ty) n);
+  let n_llv = const_int (i32_type context) n in
+  let cmp   = build_icmp Icmp.Uge idx_v n_llv "oob_cmp" builder in
+  emit_trap_when cmp ~bad_name:"oob" ~ok_name:"idx_ok"
+
+(* Checked refined cast: `expr as {lo..<hi}` where the source type cannot
+   prove the target range. Mirrors `int as ExhaustiveEnum` (switch + trap):
+   the cast is the explicit, runtime-checked bridge from unproven integers
+   into a refined type, and under --forbid-trap it becomes a compile error
+   unless the source range is provable.
+   Signed compare is correct here: every unproven source arrives either
+   i32-widened (widen_load invariant) or as a genuine i64 (i64/u64/usize);
+   a u64 bit pattern >= 2^63 compares negative and correctly traps. *)
+let emit_refined_cast_check loc src_ty v lo hi =
+  record_trap loc (Printf.sprintf
+    "checked cast remains: %s as {%d..<%d} needs a runtime range check"
+    (ty_str src_ty) lo hi);
+  let v = if type_of v = i1_type context
+          then build_zext v (i32_type context) "zext" builder else v in
+  let cty = type_of v in
+  let lt  = build_icmp Icmp.Slt v (const_int cty lo) "rc_lt" builder in
+  let ge  = build_icmp Icmp.Sge v (const_int cty hi) "rc_ge" builder in
+  let bad = build_or lt ge "rc_bad" builder in
+  emit_trap_when bad ~bad_name:"rc_trap" ~ok_name:"rc_ok"
 
 (* -- Expression codegen --------------------------------------------------- *)
 (* Returns (ast_type, llvalue).  ast_type is needed for Deref to know
@@ -792,18 +862,40 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let sz = Int64.to_int (Llvm_target.DataLayout.abi_size elem_llty dl) in
       (TypeUsize, const_int (ltype_of_ast TypeUsize) sz)
 
-  | Cast (target_ty, e) ->
-      let (_, v) = gen_expr locals e in
+  | Cast (target_ty, src_e) ->
+      let (src_ty, v) = gen_expr locals src_e in
       (match target_ty with
        | TypeNamed ename when Hashtbl.mem enum_underlying ename ->
            let ut    = Hashtbl.find enum_underlying ename in
            let is_ne = Hashtbl.find enum_nonexhaustive ename in
            let v_coerced = coerce v ut in
+           let variants_proven () =
+             (* A refined source whose entire range consists of variant
+                values proves the cast statically -- no switch, no trap.
+                E.g. `i as Color` where i: {0..<3} and Color = {0,1,2}
+                (examples/enum/enum.tkb's for-loop cast). An empty range
+                (lo >= hi) is vacuously proven: the value cannot exist. *)
+             let variants = Hashtbl.find enum_variants_tbl ename in
+             match src_ty with
+             | TypeRefined (a, b) ->
+                 let rec all_in v =
+                   v >= b
+                   || (List.exists (fun (_, dv) -> dv = v) variants
+                       && all_in (v + 1))
+                 in
+                 all_in a
+             | _ -> false
+           in
            if is_ne then
              (* non-exhaustive enum: any integer is valid; round-trip is guaranteed *)
              (TypeNamed ename, v_coerced)
+           else if variants_proven () then
+             (TypeNamed ename, v_coerced)
            else begin
              (* exhaustive enum: trap on unknown value at runtime *)
+             record_trap e.loc (Printf.sprintf
+               "enum check remains: %s as %s (exhaustive) needs a runtime variant check"
+               (ty_str src_ty) ename);
              let variants = Hashtbl.find enum_variants_tbl ename in
              let cur_f    = block_parent (insertion_block builder) in
              let ok_bb    = append_block context "enum_ok"  cur_f in
@@ -821,6 +913,23 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
              position_at_end ok_bb builder;
              (TypeNamed ename, v_coerced)
            end
+       | TypeRefined (lo, hi) ->
+           (* Checked refined cast. When the source's static range already
+              proves the target range, this is a plain subtype coercion and
+              no check is emitted (so it stays legal under --forbid-trap).
+              Everything else gets a runtime range check + trap -- previously
+              this cast was silently unchecked, which let
+              `arr[v as {0..<N}]` elide the bounds check for an arbitrary
+              i32 v: an unsound OOB access with no trap at all. *)
+           let proven = match src_ty with
+             | TypeRefined (a, b) -> lo <= a && b <= hi
+             | TypeBool -> lo <= 0 && 2 <= hi           (* i1 zext: {0..<2} *)
+             | TypeU8   -> lo <= 0 && 0x100   <= hi     (* zext-widened     *)
+             | TypeU16  -> lo <= 0 && 0x10000 <= hi
+             | _ -> false
+           in
+           if not proven then emit_refined_cast_check e.loc src_ty v lo hi;
+           (target_ty, to_arith_width target_ty (coerce v target_ty))
        | _ ->
            (* Every other u8/i16/etc-typed expression result (Var, Index,
               FieldGet, Deref) is represented in-flight as an i32-widened
@@ -882,7 +991,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
           | TypeRefined (lo, hi) -> lo < 0 || hi > n
           | _ -> true
         in
-        if needs_check then emit_bounds_check idx_v n;
+        if needs_check then emit_bounds_check e.loc idx_ty idx_v n;
         let arr_ll = array_type (ltype_of_ast elem_ty) n in
         let zero   = const_int (i32_type context) 0 in
         let ep = build_in_bounds_gep arr_ll arr_ptr [|zero; idx_v|] "idx_ptr" builder in
@@ -1206,7 +1315,7 @@ let gen_func ?prog_types fdef =
             | TypeRefined (lo, hi) -> lo < 0 || hi > n
             | _ -> true
           in
-          if needs_check then emit_bounds_check idx_v n;
+          if needs_check then emit_bounds_check s.loc idx_ty idx_v n;
           let arr_ll = array_type (ltype_of_ast elem_ty) n in
           let zero   = const_int (i32_type context) 0 in
           let ep = build_in_bounds_gep arr_ll arr_ptr [|zero; idx_v|] "idx_ptr" builder in
@@ -1295,8 +1404,9 @@ let gen_func ?prog_types fdef =
         ignore (build_cond_br cond_v then_bb else_bb builder);
 
         position_at_end then_bb builder;
-        let saved     = apply_narrowing     locals cond in
-        let saved_mut = apply_narrowing_mut locals cond in
+        let killed    = Ast.written_names then_stmts in
+        let saved     = apply_narrowing     locals cond killed in
+        let saved_mut = apply_narrowing_mut locals cond killed in
         List.iter gen_stmt then_stmts;
         restore_narrowing     locals saved;
         restore_narrowing_mut saved_mut;
@@ -1363,8 +1473,10 @@ let gen_func ?prog_types fdef =
         ignore (build_cond_br cmp body_bb exit_bb builder);
 
         position_at_end body_bb builder;
-        let loop_ty = match lo_expr.desc, hi_expr.desc with
-          | IntLit lo_k, IntLit hi_k -> TypeRefined (lo_k, hi_k)
+        (* Sync rule: type_inf.ml's For case makes the same decision through
+           the same Const_env.bound_value helper; keep them identical. *)
+        let loop_ty = match Const_env.bound_value lo_expr, Const_env.bound_value hi_expr with
+          | Some lo_k, Some hi_k -> TypeRefined (lo_k, hi_k)
           | _ -> TypeI32
         in
         Hashtbl.add locals name (Imm (loop_ty, i_val));
@@ -1515,6 +1627,7 @@ let declare_func ?prog_types fdef =
   end
 
 let gen_program ?prog_types prog =
+  trap_sites := [];  (* fresh per compilation (and per unit test) *)
   (* Pass 0: register struct and enum types -- must precede ltype_of_ast for TypeNamed *)
   List.iter (function
     | StructDef (name, fields, is_packed, align_opt) ->

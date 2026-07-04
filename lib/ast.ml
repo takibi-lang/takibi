@@ -94,3 +94,60 @@ type toplevel =
 
 let show_toplevel_list lst =
   String.concat "\n" (List.map show_toplevel lst)
+
+(* Names a statement list may write to or rebind:
+   - direct assignment targets (x = e, x[i] = e; compound assignments are
+     already desugared to these in the parser)
+   - &x anywhere in an expression (once aliased, any later *p = v may write
+     x without naming it)
+   - let re-declarations and for-counter names (a fresh binding under the
+     same name must not inherit an outer binding's narrowing)
+
+   This is the invalidation pre-scan for if-condition range narrowing: a
+   name in this set must NOT be narrowed to {lo..<hi} for the branch body,
+   because the body can change the value after the condition was evaluated
+   -- `if (v >= 0 && v < 8) { v = 100; buf[v] = ...; }` must keep its
+   bounds check. Conservative by design: a write anywhere in the body
+   kills narrowing for the whole body (no before/after distinction).
+
+   Sync rule: type_inf.ml (narrow_from_cond) and llvm_gen.ml
+   (apply_narrowing / apply_narrowing_mut) must both consult this same
+   function. If only one side skips a variable, the two disagree and the
+   elision becomes unsound -- same class of rule as the Mod range
+   propagation's lo >= 0 guard (see CLAUDE.md). *)
+let written_names (stmts : stmt list) : string list =
+  let acc = Hashtbl.create 8 in
+  let add n = Hashtbl.replace acc n () in
+  let rec go_expr (e : expr) = match e.desc with
+    | AddrOf { desc = Var n; _ } -> add n
+    | AddrOf e1 | Bnot e1 | Deref e1 | Cast (_, e1) | FieldGet (e1, _) ->
+        go_expr e1
+    | BinOp (_, a, b) -> go_expr a; go_expr b
+    | Call (_, args) | StructLit args -> List.iter go_expr args
+    | Index (_, idx) -> go_expr idx
+    | IntLit _ | BoolLit _ | StringLit _ | Var _ | EnumVariant _ | SizeOf _ ->
+        ()
+  in
+  let rec go_stmt (s : stmt) = match s.desc with
+    | Assign (n, e)          -> add n; go_expr e
+    | AssignIndex (n, i, e)  -> add n; go_expr i; go_expr e
+    | AssignDeref (p, e)     -> go_expr p; go_expr e
+    | AssignField (b, _, e)  -> go_expr b; go_expr e
+    | Let (_, n, _, init)    -> add n; (match init with
+                                        | Some e -> go_expr e | None -> ())
+    | Expr e | Return e      -> go_expr e
+    | Block ss               -> List.iter go_stmt ss
+    | If (c, t, el)          -> go_expr c;
+                                List.iter go_stmt t; List.iter go_stmt el
+    | While (c, b)           -> go_expr c; List.iter go_stmt b
+    | For (n, lo, hi, b)     -> add n; go_expr lo; go_expr hi;
+                                List.iter go_stmt b
+    | Break | Continue       -> ()
+    | Match (d, arms)        ->
+        go_expr d;
+        List.iter (function
+          | ArmVariant (_, _, b) | ArmWild b -> List.iter go_stmt b
+        ) arms
+  in
+  List.iter go_stmt stmts;
+  Hashtbl.fold (fun n () l -> n :: l) acc []

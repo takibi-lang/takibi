@@ -102,18 +102,21 @@ run_test_timed() {
     rm -f "$tmp_out"
 }
 
-# run_compile_error_test NAME TKB_FILE ERROR_FILE
+# run_compile_error_test NAME TKB_FILE ERROR_FILE [EXTRA_TAKIBI_FLAGS...]
 #
 # Verifies that compilation fails and that stderr contains the contents of ERROR_FILE
 # as a substring. QEMU is not needed. Integration-tests the full compiler error detection pipeline.
+# Trailing arguments are passed through to takibi (e.g. --forbid-trap for a
+# test that only fails under a specific mode).
 run_compile_error_test() {
     local name="$1" tkb="$2" error_file="$3"
+    shift 3
     local tmp_err tmp_obj expected_msg
     tmp_err=$(mktemp)
     tmp_obj=$(mktemp --suffix=.o)
     expected_msg=$(cat "$error_file")
 
-    if "$TAKIBI" "$tkb" --target aarch64-none-elf -o "$tmp_obj" >"$tmp_err" 2>&1; then
+    if "$TAKIBI" "$tkb" --target aarch64-none-elf -o "$tmp_obj" "$@" >"$tmp_err" 2>&1; then
         printf "${RED}FAIL${RST}  %s\n" "$name"
         printf "       expected compile error, but compilation succeeded\n"
         FAIL=$((FAIL + 1))
@@ -129,6 +132,33 @@ run_compile_error_test() {
             FAIL=$((FAIL + 1))
             FAILED_TESTS+=("$name")
         fi
+    fi
+
+    rm -f "$tmp_err" "$tmp_obj"
+}
+
+# run_forbid_trap_ok_test NAME TKB_FILES...
+#
+# Verifies that compilation SUCCEEDS under --forbid-trap, i.e. the program
+# generates zero runtime trap checks (all array indices / refined casts are
+# proven at the type level). Compile-only; QEMU is not needed. The positive
+# counterpart of run_compile_error_test's forbid_trap_wrong registration.
+run_forbid_trap_ok_test() {
+    local name="$1"
+    shift
+    local tmp_err tmp_obj
+    tmp_err=$(mktemp)
+    tmp_obj=$(mktemp --suffix=.o)
+
+    if "$TAKIBI" "$@" --target aarch64-none-elf -o "$tmp_obj" --forbid-trap >"$tmp_err" 2>&1; then
+        printf "${GRN}PASS${RST}  %s\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        printf "${RED}FAIL${RST}  %s\n" "$name"
+        printf "       expected --forbid-trap compile to succeed, got:\n"
+        sed 's/^/       /' "$tmp_err"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
     fi
 
     rm -f "$tmp_err" "$tmp_obj"
@@ -302,6 +332,8 @@ run_compile_error_test "enum_cast_wrong_dst" examples/enum_cast_wrong_dst/enum_c
 run_compile_error_test "enum_cast_wrong_src" examples/enum_cast_wrong_src/enum_cast_wrong_src.tkb examples/enum_cast_wrong_src/enum_cast_wrong_src.error
 run_compile_error_test "ptr_cast_wrong"      examples/ptr_cast_wrong/ptr_cast_wrong.tkb           examples/ptr_cast_wrong/ptr_cast_wrong.error
 run_compile_error_test "const_global_wrong"  examples/const_global_wrong/const_global_wrong.tkb   examples/const_global_wrong/const_global_wrong.error
+run_compile_error_test "forbid_trap_wrong"   examples/forbid_trap_wrong/forbid_trap_wrong.tkb     examples/forbid_trap_wrong/forbid_trap_wrong.error --forbid-trap
+run_forbid_trap_ok_test "forbid_trap_ok"     examples/forbid_trap_ok/forbid_trap_ok.tkb
 
 echo ""
 echo "Running no-trap checks (brk must be zero in these kernels)..."

@@ -395,12 +395,20 @@ let collect_bounds (cond : Ast.expr) : (int option * int option) StringMap.t =
 (* Narrow the type environment for the then-branch of an if statement.
    Narrows int bindings (both mutable and immutable) when both lo and hi bounds are proven
    by the condition. Mutability is preserved so that assignment inside the branch still works.
-   Codegen-side narrowing for bounds-check elision is more conservative (Imm only). *)
-let narrow_from_cond tyenv (cond : Ast.expr) =
+   Codegen-side narrowing for bounds-check elision goes through the same kill rule.
+
+   Invalidation (kill) rule: a variable the branch body may write to, alias
+   (&x), or rebind is NOT narrowed at all -- the condition only proves the
+   range at the moment it was evaluated, and any later write invalidates
+   that proof (`if (v >= 0 && v < 8) { v = 100; use(v); }`). The kill set
+   comes from Ast.written_names; llvm_gen.ml's apply_narrowing/_mut use the
+   same function on the same body (sync rule -- see written_names' comment). *)
+let narrow_from_cond tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
+  let killed = Ast.written_names then_body in
   let bounds = collect_bounds cond in
   StringMap.fold (fun name (lo_opt, hi_opt) env ->
     match lo_opt, hi_opt with
-    | Some lo, Some hi ->
+    | Some lo, Some hi when not (List.mem name killed) ->
         (match StringMap.find_opt name env with
          | Some (TI32, is_mut) ->
              StringMap.add name (TRefinedInt (lo, hi), is_mut) env
@@ -533,7 +541,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
   | If (cond, then_s, else_s) ->
       let ct = infer_expr senv eenv tyenv fenv cond in
       check_cond cond.loc ct;
-      let then_tyenv = narrow_from_cond tyenv cond in
+      let then_tyenv = narrow_from_cond tyenv cond then_s in
       let (_, rl1) = List.fold_left
         (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
         (then_tyenv, raw_locals) then_s
@@ -556,10 +564,14 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       let hi_ty = infer_expr senv eenv tyenv fenv hi_expr in
       unify_at lo_expr.loc lo_ty TI32;
       unify_at hi_expr.loc hi_ty TI32;
-      (* Refine to TRefinedInt only when both bounds are integer literals.
-         For variables, the runtime value is unknown, so conservatively use TI32. *)
-      let idx_ty = match lo_expr.desc, hi_expr.desc with
-        | IntLit lo_v, IntLit hi_v -> TRefinedInt (lo_v, hi_v)
+      (* Refine to TRefinedInt when both bounds are compile-time integers:
+         a literal, or the name of a Const_env global constant (sound because
+         check_const_shadowing rejects any local reusing a constant name).
+         For runtime variables, conservatively use TI32.
+         Sync rule: llvm_gen.ml's For case makes the same decision through
+         the same Const_env.bound_value helper; keep them identical. *)
+      let idx_ty = match Const_env.bound_value lo_expr, Const_env.bound_value hi_expr with
+        | Some lo_v, Some hi_v -> TRefinedInt (lo_v, hi_v)
         | _ -> TI32
       in
       (* Loop variable is immutable (Imm binding, no reassignment). Does not escape the loop. *)
@@ -620,7 +632,43 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
 
 (* -- Function inference ---------------------------------------------------- *)
 
+(* Reject a local let / parameter / for-counter that reuses the name of a
+   global compile-time constant (Const_env). Array sizes and for-loop bounds
+   resolve such names through Const_env by name alone, with no scope
+   information, so a shadowing local would silently make a refinement be
+   computed from the global's value while the runtime value is the local's
+   -- an unsound bounds-check elision. Checked after parsing (the Const_env
+   table is complete by then), so declaration order cannot smuggle a shadow
+   in: a function defined before the constant is checked all the same. *)
+let check_const_shadowing (fdef : Ast.func) =
+  let reject loc name =
+    raise (TypeError (loc, Printf.sprintf
+      "'%s' shadows a global constant of the same name (constant names are \
+       resolved at compile time in array sizes and for-loop bounds); rename \
+       the local" name))
+  in
+  List.iter (fun (pname, _) ->
+    if Const_env.find pname <> None then reject fdef.def_loc pname
+  ) fdef.params;
+  let rec go_stmt (s : Ast.stmt) = match s.desc with
+    | Ast.Let (_, name, _, _) ->
+        if Const_env.find name <> None then reject s.loc name
+    | Ast.Block ss | Ast.While (_, ss) -> List.iter go_stmt ss
+    | Ast.If (_, t, e) -> List.iter go_stmt t; List.iter go_stmt e
+    | Ast.For (name, _, _, body) ->
+        if Const_env.find name <> None then reject s.loc name;
+        List.iter go_stmt body
+    | Ast.Match (_, arms) ->
+        List.iter (function
+          | Ast.ArmVariant (_, _, b) -> List.iter go_stmt b
+          | Ast.ArmWild b            -> List.iter go_stmt b
+        ) arms
+    | _ -> ()
+  in
+  List.iter go_stmt fdef.body
+
 let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
+  check_const_shadowing fdef;
   let param_tys = List.map (fun (_, ty_opt) -> of_ast_opt ty_opt) fdef.params in
   let ret_ty    = ret_of_ast_opt fdef.ret_type in
   (* Start with globals visible, then shadow them with params (params are mutable) *)

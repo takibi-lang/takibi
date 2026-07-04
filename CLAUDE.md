@@ -121,7 +121,7 @@ lib/
   typechecker.ml  -- external wrapper (called from main.ml)
   llvm_gen.ml     -- LLVM IR generation and object file output
 bin/
-  main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--version]`)
+  main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--forbid-trap] [--version]`)
                      Multiple .tkb files are concatenated (flat global namespace) before compilation.
                      -g emits DWARF debug info -- see "Execution Profiling (QEMU)" below.
                      --version prints the version from dune-project's `(version ...)` field via
@@ -486,6 +486,110 @@ Files changed when `enum Name: u16 { V = n; _; }` was added:
 let (_, variants, is_ne) = StringMap.find ename eenv in
 ```
 `EnumVariant` inference and `Match` exhaustiveness check both use this pattern.
+
+### --forbid-trap: Gradual Verification (permissive dev mode / proven ship mode)
+
+`takibi ... --forbid-trap` rejects compilation if ANY runtime trap check
+remains in the generated code, listing every unproven site with its source
+location (all of them, not just the first -- same report-all philosophy as
+run_qemutest.sh). Without the flag, behavior is unchanged: unproven accesses
+compile fine and get a runtime check (llvm.trap on violation) -- that IS the
+intended permissive development mode for quick driver bring-up. The flag is
+ship mode: only type-proven accesses may exist. **Current status: 43 of 44
+examples compile clean under --forbid-trap**; the one holdout is
+examples/enum/enum.tkb's deliberate `u8 as Color` checked-cast demo, where
+the runtime check is the point.
+
+**Mechanism** (`lib/llvm_gen.ml` `trap_sites` / `record_trap`): every trap
+check codegen emits (array bounds check, checked refined cast, exhaustive-
+enum cast) is recorded with loc + human-readable reason at IR-generation
+time. bin/main.ml reads the list after gen_program and errors under the
+flag. **The judgment is deliberately type-level, not post-optimizer**: LLVM
+passes (correlated-propagation etc.) may well fold a given check away, but
+"the optimizer happened to remove it" must never count as proof -- the
+guarantee has to stay deterministic across LLVM versions. Consequence:
+`while (i < 8) { arr[i] }` is rejected even though LLVM elides its check;
+the answer is `for i in 0..<8`, which is proven at the type level.
+
+**What --forbid-trap does NOT guarantee**: pointer indexing (`p[i]` where
+`p: *T`) has no bounds checks at all and is therefore invisible to this
+mechanism -- raw pointers are takibi's unsafe escape hatch (all the network
+code indexes packet buffers through pointers). A future slice type
+(pointer + type-level length) is the long-term answer; until then
+--forbid-trap means "no runtime trap instructions", not "memory-safe".
+
+**Checked refined cast** (`expr as {lo..<hi}`): previously this cast was
+silently UNCHECKED -- type_inf returned the target type for any non-pointer
+source, and codegen emitted no check, so `arr[v as {0..<8}]` with `v: i32`
+elided the bounds check and produced an unchecked OOB access (a genuine
+soundness hole, found while building this feature). Now it mirrors
+`int as ExhaustiveEnum`: if the source's static range proves the target
+range (`{2..<5} as {0..<8}`, literals, bool/u8/u16 fitting entirely), it is
+a free subtype coercion; otherwise a range check + llvm.trap is emitted (and
+recorded, so --forbid-trap rejects it). This cast is the explicit bridge
+from unproven integers into refined types -- the gradual-verification story
+in one construct: permissive mode traps at runtime, ship mode demands the
+source range be provable.
+
+**Narrowing invalidation (kill) rule** (`Ast.written_names`, shared by
+`type_inf.ml:narrow_from_cond` and `llvm_gen.ml:apply_narrowing/_mut` --
+sync rule: both sides MUST use this same function, like the Mod lo >= 0
+guard): if-condition narrowing (`if (v >= 0 && v < 8) { ... }`) must not
+apply to a variable the branch body can (a) assign, (b) alias via `&v`, or
+(c) rebind (let redeclaration or for-counter). All three were soundness
+holes before this rule existed: `if (v >= 0 && v < 8) { v = 100; buf[v] }`
+compiled with the check fully elided (silent OOB, no trap at all), same for
+a write through `&v`, same for `for v in 0..<100` shadowing the narrowed
+name. The pre-scan is deliberately flow-insensitive within the branch (a
+write anywhere kills narrowing for the whole body, even before the write)
+-- simple to reason about, and refining it to a statement-ordered kill is
+future work that must keep both consumers in lockstep. `io` variables were
+already excluded (apply_narrowing_mut only matches `Mut (TypeI32, _)`);
+globals were already excluded (narrowing tables only hold function locals);
+function calls cannot touch locals whose address was never taken, and
+address-taking is exactly case (b).
+
+**For-loop bounds from named constants** (`Const_env.bound_value`, shared
+by both sides -- same sync rule): `for i in 0..<QUEUE_SIZE` now refines `i`
+to `{0..<QUEUE_SIZE's value}` when the bound names a Const_env constant
+(immutable global with literal initializer), not just when it is a literal.
+This is what made examples/const_global --forbid-trap clean. Soundness
+precondition: the name must actually denote the global constant, so
+**shadowing a Const_env constant name with a local let / parameter /
+for-counter is now a compile error** (`type_inf.ml:check_const_shadowing`,
+run per function AFTER parsing so declaration order cannot smuggle a shadow
+in). Const_env resolves by name with zero scope information; allowing a
+local `QUEUE_SIZE` would refine against the global's value while the loop
+runs to the local's. Rejecting the shadow keeps by-name resolution sound by
+construction (and it also retroactively hardens the existing array-size
+feature, which had the same latent ambiguity).
+
+**Exhaustive-enum cast from a refined source** (`llvm_gen.ml` Cast case):
+`i as Color` where `i: {0..<3}` and Color = {0,1,2} now emits no switch/no
+trap -- the range proves every possible value is a variant. A range with
+any non-variant value (e.g. `{0..<3}` into a {1,2}-valued enum) keeps the
+runtime check. This removed examples/enum's for-loop cast site.
+
+**Files**: `lib/llvm_gen.ml` (trap_sites/record_trap/ty_str, emit_trap_when
+/ emit_bounds_check loc+type params / emit_refined_cast_check, Cast
+TypeRefined + enum-proof branches, For bound_value, narrowing kill),
+`lib/type_inf.ml` (narrow_from_cond kill, For bound_value,
+check_const_shadowing), `lib/ast.ml` (written_names), `lib/const_env.ml`
+(bound_value), `bin/main.ml` (flag + report), `test/test_takibi.ml`
+(expect_trap_sites helper + 12 cases), `examples/forbid_trap_wrong/` +
+`examples/forbid_trap_ok/` (compile-only tests registered in
+run_qemutest.sh; run_compile_error_test now accepts trailing extra takibi
+flags, and run_forbid_trap_ok_test is the success-side counterpart).
+
+**Deliberately deferred** (recorded so the next step starts from data, not
+guesswork): flow-sensitive assignment kill (narrow until the first write
+instead of killing the whole branch), while-condition narrowing
+(`while (i < 8)`), symbolic/relational bounds (`{0..<n}` where n is a
+runtime value, `i < len` facts) -- the last one is the honest decision
+point for a VC+SMT (Z3) backend; everything above stays in the
+non-relational interval world where plain OCaml implementation is the
+right tool. The empirical result that 43/44 examples needed ZERO relational
+reasoning is the argument for not introducing a solver yet.
 
 ### Synchronization Primitive Design and Current Limitations
 
