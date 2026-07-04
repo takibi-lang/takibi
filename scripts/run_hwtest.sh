@@ -6,7 +6,12 @@
 # on any clone of this repo with no physical hardware attached.
 set -euo pipefail
 
-SERIAL_DEV="${STM32_SERIAL_DEV:-/dev/ttyACM0}"
+# Default is /dev-host, not /dev: .devcontainer/devcontainer.json bind-mounts
+# the host's /dev read-only at /dev-host (not /dev/ttyACM0 directly), so the
+# devcontainer can build/start without the ST-LINK plugged in, and a board
+# plugged in afterward is picked up with no container restart -- see that
+# file's runArgs comment.
+SERIAL_DEV="${STM32_SERIAL_DEV:-/dev-host/ttyACM0}"
 BAUD=115200
 FLASH_ADDR=0x08000000
 

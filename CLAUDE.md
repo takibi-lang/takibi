@@ -727,11 +727,34 @@ example is now a single shared `.tkb` file that compiles for both targets** -- n
 addresses) got there too.
 
 **Devcontainer/USB setup** (`.devcontainer/devcontainer.json`): `runArgs` passes through
-`/dev/ttyACM0` (ST-LINK V2-1 VCP, serial) and `/dev/bus/usb` with a
-`--device-cgroup-rule` (ST-LINK debug/flash interface, VID:PID `0483:374b`) so hot-replug
-doesn't require editing the device path. `postCreateCommand` installs `openocd`
-`stlink-tools` and adds the `vscode` user to the `plugdev`/`dialout` groups (host GIDs
-46/20) so neither needs `sudo`/`sg` after a fresh rebuild.
+`/dev/bus/usb` (ST-LINK debug/flash interface, VID:PID `0483:374b`) with a
+`--device-cgroup-rule` so hot-replug doesn't require editing the device path.
+`postCreateCommand` installs `openocd` `stlink-tools` and adds the `vscode` user to the
+`plugdev`/`dialout` groups (host GIDs 46/20) so neither needs `sudo`/`sg` after a fresh
+rebuild.
+
+**ST-LINK VCP serial (`/dev/ttyACM0`) is deliberately NOT bind-mounted directly** (no
+`--device=/dev/ttyACM0`, unlike an earlier version of this file): that form requires the
+device to already exist on the host at container create time, so building/starting the
+devcontainer would fail outright whenever the ST-LINK wasn't plugged in yet -- a real
+problem, since `/dev/bus/usb`'s own hot-replug tolerance (mounting the always-present
+parent directory, so individual bus-numbered device files can come and go freely) doesn't
+apply to `/dev/ttyACM0` (a flat file directly under `/dev`, with no similarly-stable parent
+to mount instead). Fixed by bind-mounting the host's entire `/dev` tree read-only at
+`/dev-host` (`-v /dev:/dev-host:ro`) plus `--device-cgroup-rule=c 166:* rmw` (166 = ttyACM's
+major number) instead: the devcontainer builds/starts fine with no board attached, and a
+board plugged in afterward shows up live at `/dev-host/ttyACM0` with no rebuild/restart.
+The container's own `/dev` (and its `/dev/shm`/`/dev/pts` isolation) is left untouched --
+only a read-only side path is added, not a replacement of `/dev` itself. The `ro` flag only
+blocks directory-level operations (create/delete/rename) on the mirrored tree; it does not
+block read/write I/O to a character device reached through it, so `/dev-host/ttyACM0` is
+fully usable for serial communication. Path visibility through `/dev-host` is also not the
+same as access: the container's cgroup device policy still only allows major 166 (ttyACM)
+and 189 (USB) -- e.g. `/dev-host/sda` is visible by name but not actually readable, since
+block-device majors were never added to the allowlist. `scripts/run_hwtest.sh`'s
+`STM32_SERIAL_DEV` env var and the Makefile's `STM32_SERIAL_DEV` variable both default to
+`/dev-host/ttyACM0` accordingly (override to plain `/dev/ttyACM0` only if running this
+Makefile outside this devcontainer, e.g. directly on a Linux host with the board attached).
 
 **Build model**: `Makefile`'s `STM32_TARGET`/`STM32_CPU` (`thumbv7em-none-eabi` /
 `cortex-m7`) and `STM32_EXAMPLES` list mirror `AARCH64_TARGET`/`EXAMPLES`. Most examples

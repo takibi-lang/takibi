@@ -644,7 +644,14 @@ qemu-http-server: examples/http_server/kernel.elf
 
 # Same STM32_SERIAL_DEV/FLASH_ADDR convention as scripts/run_hwtest.sh
 # (overridable the same way: STM32_SERIAL_DEV=/dev/ttyACM1 make ...).
-STM32_SERIAL_DEV ?= /dev/ttyACM0
+# Default points at /dev-host, not /dev, on purpose: .devcontainer/
+# devcontainer.json no longer bind-mounts /dev/ttyACM0 directly (that
+# required the ST-LINK to already be plugged in at container start, or the
+# whole devcontainer failed to build/start -- see its runArgs comment). It
+# instead bind-mounts the host's entire /dev read-only at /dev-host, so a
+# board plugged in after the container is already running still shows up
+# here with no rebuild/restart needed.
+STM32_SERIAL_DEV ?= /dev-host/ttyACM0
 STM32_FLASH_ADDR := 0x08000000
 
 ## stm32-http-server: flash and run the HTTP server demo on the real
