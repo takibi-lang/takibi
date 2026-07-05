@@ -211,6 +211,60 @@ let parser_tests = [
     | exception Types.TypeError _ -> ()
   );
 
+  Alcotest.test_case "array size formula: product of two named constants" `Quick (fun () ->
+    match parse "let QNUM: i32 = 8; let RX_BUF_SIZE: i32 = 1536; \
+                 let bufs: [u8; QNUM * RX_BUF_SIZE];" with
+    | [_; _; Ast.LetDef ("bufs", Some (Ast.TypeArray (Ast.TypeU8, 12288)), None, None, false)] -> ()
+    | _ -> Alcotest.fail "expected array size resolved to 12288"
+  );
+
+  Alcotest.test_case "array size formula: difference of a named constant and a literal" `Quick (fun () ->
+    match parse "let COUNT: i32 = 4; let ring: [u8; COUNT - 1];" with
+    | [_; Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 3)), None, None, false)] -> ()
+    | _ -> Alcotest.fail "expected array size resolved to 3"
+  );
+
+  Alcotest.test_case "array size formula: parentheses and operator precedence \
+                       (a + b * c, not (a + b) * c)" `Quick (fun () ->
+    match parse "let ring: [u8; 2 + 3 * 4];" with
+    | [Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 14)), None, None, false)] -> ()
+    | _ -> Alcotest.fail "expected array size resolved to 14 (2 + 12), not 20"
+  );
+
+  Alcotest.test_case "array size formula: explicit parentheses override precedence" `Quick (fun () ->
+    match parse "let ring: [u8; (2 + 3) * 4];" with
+    | [Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 20)), None, None, false)] -> ()
+    | _ -> Alcotest.fail "expected array size resolved to 20"
+  );
+
+  Alcotest.test_case "array size formula: division by a named constant" `Quick (fun () ->
+    match parse "let PAGE_SIZE: i32 = 4096; let bufs: [u8; (2 * PAGE_SIZE) / 2];" with
+    | [_; Ast.LetDef ("bufs", Some (Ast.TypeArray (Ast.TypeU8, 4096)), None, None, false)] -> ()
+    | _ -> Alcotest.fail "expected array size resolved to 4096"
+  );
+
+  Alcotest.test_case "array size formula: division by zero is a compile error, \
+                       not a crash" `Quick (fun () ->
+    match parse "let Z: i32 = 0; let ring: [u8; 4 / Z];" with
+    | _ -> Alcotest.fail "expected an error, but parsing succeeded"
+    | exception Types.TypeError (_, msg) ->
+        Alcotest.(check bool) "mentions division by zero" true
+          (let n = String.length "division by zero" and m = String.length msg in
+           let rec scan i = i + n <= m && (String.sub msg i n = "division by zero" || scan (i + 1)) in
+           scan 0)
+  );
+
+  Alcotest.test_case "array size formula: an undefined name inside a formula \
+                       is still a syntax error (same as a bare undefined name)" `Quick (fun () ->
+    match parse "let ring: [u8; UNDEFINED * 2];" with
+    | _ -> Alcotest.fail "expected an error, but parsing succeeded"
+    | exception Types.TypeError (_, msg) ->
+        Alcotest.(check bool) "mentions the unknown name" true
+          (let n = String.length "UNDEFINED" and m = String.length msg in
+           let rec scan i = i + n <= m && (String.sub msg i n = "UNDEFINED" || scan (i + 1)) in
+           scan 0)
+  );
+
   Alcotest.test_case "refined type bound within i32 range parses fine" `Quick (fun () ->
     match parse "fn f(x: {0..<2147483647}) i32 { return 0; }" with
     | [Ast.FuncDef _] -> ()

@@ -28,7 +28,7 @@ The finished form of code is when index ranges are pinned at the type level usin
   - `let x = e` / `let x: T = e` -- immutable variable declaration (initial value required, no reassignment)
   - `let mut x = e` / `let mut x: T = e` -- mutable variable declaration (reassignment allowed)
   - Global scope mirrors this: plain `let NAME: T = e;` is an immutable compile-time constant (reassignment and `&NAME` are compile errors, and it must have an initializer); `let mut NAME: T = e;` is a mutable global variable. `let mut x: T;` (no initializer) is allowed for global scope only, relying on BSS zero-clear.
-  - `[T; N]` array size `N` may be a literal integer, or the name of an immutable global declared earlier (in the concatenated source) with a bare literal integer initializer, e.g. `let QUEUE_SIZE: i32 = 16; let mut ring: [T; QUEUE_SIZE];`. Resolved entirely in the parser (see "Array-Size Constants" below); no forward references, no constant folding.
+  - `[T; N]` array size `N` may be a literal integer, the name of an immutable global declared earlier (in the concatenated source) with a bare literal integer initializer, or `+`/`-`/`*`/`/` arithmetic combining those (parentheses allowed for grouping), e.g. `let QUEUE_SIZE: i32 = 16; let mut ring: [T; QUEUE_SIZE]; let mut pair: [T; QUEUE_SIZE * 2];`. Resolved entirely in the parser (see "Array-Size Constants" below); no forward references. This arithmetic folding is scoped to the `[T; N]` grammar position only -- a global `let`'s own initializer expression still cannot fold arithmetic (see "Global Constant Folding" below for what that one does and does not support).
   - `let mut x: T align(N);` -- global variable with N-byte alignment (N must be a power of two). Emits `set_alignment N` on the LLVM global. Use for DMA descriptor rings (`align(4096)`), cache-line buffers (`align(64)`), etc. Optional initializer: `let mut x: T align(N) = e;` (or plain `let x: T align(N) = e;` for an immutable aligned constant). Local variable alignment is not supported.
   - `while`, `return` (always takes an expression -- bare `return;` in a `void` function is a syntax error; let the function fall through instead), assignment (`x = e`), pointer-deref assignment (`*p = v`)
   - `break` -- exits the innermost `while` or `for` loop immediately. Compile error outside a loop.
@@ -421,7 +421,12 @@ Files changed:
    `Const_env.define_if_literal`. New `array_size` nonterminal used in the `[T; N]` grammar
    production: `INT` is used directly; `IDENT` is looked up via `Const_env.find`, raising
    `Types.TypeError` if not found (e.g. undeclared, declared later in the file, or declared with
-   `mut`/a non-literal initializer).
+   `mut`/a non-literal initializer). `array_size` also has `+`/`-`/`*`/`/` and parenthesized-grouping
+   productions (added later, see "Array-Size Arithmetic Formulas" below) evaluating directly to an
+   `int` during parsing, using the same flat-ambiguous-alternatives-plus-global-`%left`-precedence
+   idiom the main `expr` grammar already uses for `PLUS`/`MINUS`/`TIMES`/`DIV` (confirmed this
+   resolves precedence correctly for a second, unrelated nonterminal reusing the same token
+   declarations -- `2 + 3 * 4` parses as `2 + (3 * 4)` = 14, not `(2 + 3) * 4`).
 4. `lib/type_inf.ml` -- `LetDef` patterns updated to 5-tuple. `genv` now stores the real
    `is_mutable` flag instead of a hardcoded `true`. Because `Assign`/`AddrOf` already key their
    mutability checks off the shared `tyenv` (used for both locals and globals), `&const_global` and
@@ -448,6 +453,51 @@ let QUEUE_SIZE: i32 = 4;              // immutable constant; &QUEUE_SIZE and QUE
 let mut ring: [i32; QUEUE_SIZE];      // resolved to [i32; 4] at parse time
 ```
 See `examples/const_global/` (valid usage) and `examples/const_global_wrong/` (compile-error demo).
+
+### Array-Size Arithmetic Formulas
+
+`array_size` originally only accepted a bare `INT` or a single `Const_env`-resolvable name --
+combining two constants (`QNUM * RX_BUF_SIZE`, `ETH_RX_DESC_COUNT * ETH_DESC_SIZE`) had to be
+hand-computed into a literal, with a comment recording the formula so a future edit to either
+constant wouldn't silently leave the array size out of sync (exactly the drift risk "Global
+Constant Folding" below closes for a global's *value*, just on the *array-size* side instead).
+`examples/common/virtio_mmio.tkb`'s `rx_queue_mem`/`tx_queue_mem`/`rx_bufs` and
+`examples/common_stm32/eth.tkb`'s `eth_rx_descs`/`eth_tx_descs`/`eth_rx_bufs` all had exactly
+this shape before this feature.
+
+**Extended `array_size` to a small arithmetic grammar**, evaluated to a plain `int` directly
+during parsing (no new phase, no `Types.ty` involvement -- same reasoning as the original
+"resolve in the parser, not via a `Types.ty`-level pass" trade-off above still applies): a
+literal, a `Const_env`-resolvable name, `+`/`-`/`*`/`/` combining two `array_size`s, or a
+parenthesized `array_size` for grouping. Division by zero is a `Types.TypeError` at the
+division site, not a crash. No forward references (same restriction as before -- a referenced
+name must already be in `Const_env`'s table). `sizeof(T)` still cannot appear in an array-size
+formula (unchanged from the existing "Not supported" note above -- `sizeof` needs
+`struct_lltypes`/`DataLayout`, only available at codegen time, well after array sizes are
+already resolved).
+
+**Scope boundary vs. "Global Constant Folding" below**: this only widens the `[T; N]` grammar
+position specifically. A global `let`'s own initializer expression is a completely separate
+code path (`lib/llvm_gen.ml`'s `eval_const`/`eval_const_int`, operating on an already-parsed
+`Ast.expr` at codegen time) and still cannot fold arithmetic BinOps -- `let ETH_DESC_SIZE: i32 =
+ETH_DESC_WORDS * 4;` still fails with "unsupported constant expression" today, only
+`let mut eth_rx_descs: [u8; ETH_RX_DESC_COUNT * ETH_DESC_SIZE];` (the array-size position) is
+fixed by this feature. Likewise, a few remaining hand-computed literals with an explanatory
+comment are deliberately NOT touched by this feature because they are not in the array-size
+grammar position at all -- e.g. `examples/common/virtio_mmio.tkb`'s and
+`examples/common_stm32/eth.tkb`'s `min(net_last_rx_desc_idx, 7)` / `min(eth_rx_cur, 3)` calls,
+where the `7`/`3` is a plain function-call argument that needs to be recognized as a
+compile-time constant by `Const_env.bound_value` (used by the refined-type range machinery),
+not by `array_size` -- `Const_env.bound_value` still only recognizes a bare `IntLit` or `Var`,
+not arithmetic, so `min(idx, QNUM - 1)` there still does not resolve to a proven range today.
+Extending `Const_env.bound_value` the same way is a natural, still-open follow-up, not done as
+part of this feature.
+
+Files: `lib/parser.mly` (`array_size` grammar), `examples/common/virtio_mmio.tkb` +
+`examples/common_stm32/eth.tkb` (hand-computed literals replaced with their formulas), 7 new
+parser unit tests in `test/test_takibi.ml` (product/difference of named constants, operator
+precedence without and with explicit parentheses, division, division-by-zero error, and an
+undefined name inside a formula).
 
 ### Global Constant Folding: `as` Casts and Cross-Global References
 

@@ -295,8 +295,19 @@ base_type_expr:
   | FN LPAREN fn_type_params RPAREN                 { TypeFn ($3, TypeVoid) }
   | IDENT { TypeNamed $1 }
 
-(* Array size: a literal integer, or the name of a compile-time integer
-   constant declared earlier as an immutable global `let NAME: T = N;`. *)
+(* Array size: a compile-time integer constant expression -- a literal, the
+   name of an immutable global constant declared earlier (`let NAME: T =
+   N;`), or +/-/*// arithmetic combining those (parentheses allowed for
+   grouping), e.g. `[u8; QNUM * RX_BUF_SIZE]` or `[u8; ETH_RX_DESC_COUNT *
+   ETH_DESC_SIZE]`. Evaluated directly during parsing into a plain int, the
+   same as the single-literal/single-name forms already were -- this only
+   widens what counts as a "compile-time integer constant expression" here
+   from one token to a small formula, so an array size never has to be a
+   hand-computed literal that can silently drift from the constants it was
+   computed from (see CLAUDE.md's "Global Constant Folding" section for the
+   same drift concern on the *value* side of a global let). No forward
+   references: a referenced name must already be in Const_env's table (its
+   `let` appeared earlier in the concatenated source). *)
 array_size:
   | n = INT   { n }
   | name = IDENT
@@ -308,6 +319,15 @@ array_size:
               "array size '%s' is not a known compile-time integer constant \
                (declare it earlier as an immutable global `let %s: T = N;`)"
               name name)) }
+  | LPAREN n = array_size RPAREN { n }
+  | a = array_size PLUS  b = array_size { a + b }
+  | a = array_size MINUS b = array_size { a - b }
+  | a = array_size TIMES b = array_size { a * b }
+  | a = array_size DIV   b = array_size
+    { if b = 0 then
+        raise (Types.TypeError ($symbolstartpos,
+          "array size expression: division by zero"))
+      else a / b }
 
 (* type_expr: base_type_expr + TypeRefined. Used in unambiguous positions such as after : or -> *)
 type_expr:

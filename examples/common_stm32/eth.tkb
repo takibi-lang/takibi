@@ -122,9 +122,9 @@ let ETH_TDES0_TCH: u32 = 0x00100000;
 // (see this file's header comment) -- no takibi-level section attribute
 // needed, the linker script alone decides which physical RAM bank .bss
 // lands in.
-let mut eth_rx_descs: [u8; 64] align(4); // ETH_RX_DESC_COUNT * ETH_DESC_SIZE
-let mut eth_tx_descs: [u8; 64] align(4); // ETH_TX_DESC_COUNT * ETH_DESC_SIZE
-let mut eth_rx_bufs:  [u8; 6144] align(4); // ETH_RX_DESC_COUNT * ETH_BUF_SIZE
+let mut eth_rx_descs: [u8; ETH_RX_DESC_COUNT * ETH_DESC_SIZE] align(4);
+let mut eth_tx_descs: [u8; ETH_TX_DESC_COUNT * ETH_DESC_SIZE] align(4);
+let mut eth_rx_bufs:  [u8; ETH_RX_DESC_COUNT * ETH_BUF_SIZE] align(4);
 
 let mut eth_rx_cur: i32 = 0;
 let mut eth_tx_cur: i32 = 0;

@@ -78,13 +78,12 @@ let mut virtio_base: i32 = 0;
 // about queue depth, PAGE_SIZE, or descriptor rings.
 let RX_BUF_SIZE: i32 = 1536; // 10-byte virtio_net_hdr + max 1514-byte Ethernet frame, rounded up
 
-// 8192 = 2 * PAGE_SIZE (array sizes must be literal constants).
-let mut rx_queue_mem: [u8; 8192] align(4096);
-let mut tx_queue_mem: [u8; 8192] align(4096);
+let mut rx_queue_mem: [u8; 2 * PAGE_SIZE] align(4096);
+let mut tx_queue_mem: [u8; 2 * PAGE_SIZE] align(4096);
 
 // QNUM (8) RX packet buffers, posted once at init and re-posted after
-// each completion. 12288 = QNUM * RX_BUF_SIZE.
-let mut rx_bufs: [u8; 12288];
+// each completion.
+let mut rx_bufs: [u8; QNUM * RX_BUF_SIZE];
 
 let mut rx_used_seen:        i32 = 0;
 let mut tx_used_seen:        i32 = 0;
