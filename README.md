@@ -70,7 +70,7 @@ read).
 `--forbid-trap` is expected to grow into a family: per-category strictness
 options (array-bounds trap freedom, checked-cast freedom, safe-pointer
 enforcement outside `unsafe`, ...) with one umbrella flag enabling them
-all. Today's single flag is the first member. **All ~47 examples --
+all. Today's single flag is the first member. **All ~48 examples --
 including the full TCP/IP stack and HTTP server -- compile trap-free
 under it.** A few tools do almost all of the work: refined integer ranges
 that propagate through ordinary arithmetic and bitwise masking (so a
@@ -246,7 +246,7 @@ A ready-to-use devcontainer configuration is provided in `.devcontainer/`.
 ```
 lib/       -- lexer, parser, type inference, LLVM code generation
 bin/       -- the takibi CLI
-examples/  -- ~60 example programs, each demonstrating one feature or
+examples/  -- ~48 example programs, each demonstrating one feature or
               building toward the TCP/IP stack goal
 scripts/   -- QEMU/hardware integration test runners and profiling tools
 test/      -- unit tests (parser / type inference)
