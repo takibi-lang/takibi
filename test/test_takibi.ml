@@ -2669,6 +2669,32 @@ let codegen_tests = [
           return ftp4c1_checksum2(pkt[ihl..<ihl + tlc], 0);
         }");
 
+  Alcotest.test_case
+    "max(a - b, 0) clamps a Sub result whose OWN range has a spuriously \
+     negative lower bound (Sub-refined-refined's formula assumes the \
+     worst-case combination of a's minimum with b's maximum, which the \
+     type system cannot rule out even though the raw subtraction is never \
+     actually negative for these bounds) up to a genuinely non-negative \
+     range -- proven here by feeding the clamped result into the \
+     same-base rule's `wlo >= 0` guard directly, closing a subslice proof \
+     that the raw (unclamped) subtraction cannot close on its own. Same \
+     mechanism as the tcp_echo.tkb data_len fix in this session, though \
+     that site's capacity margin is too tight for the clamp alone to \
+     close the proof there (it remains behind `unsafe`) -- this test uses \
+     more forgiving bounds specifically to isolate and confirm the clamp \
+     mechanism itself" `Quick
+    (fun () ->
+       expect_trap_sites 0
+         "fn ftp4c1_clamp_sub(base: [u8; 1514..], a: {0..<100}, b: {20..<61}) -> []u8 {
+            let clamped: i32 = max(a - b, 0);   // now honestly {0..<80}
+            return base[b..<b + clamped];
+          }" ();
+       expect_trap_sites 1
+         "fn ftp4c1_no_clamp(base: [u8; 1514..], a: {0..<100}, b: {20..<61}) -> []u8 {
+            let raw: i32 = a - b;               // spuriously negative lower bound
+            return base[b..<b + raw];
+          }" ());
+
   (* Kept last in this group deliberately: Llvm_gen.enable_debug_info flips a
      process-global ref with no way back off (same one-way-switch pattern
      Llvm_gen.setup_target's target_data already uses), so every codegen test
