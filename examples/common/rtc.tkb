@@ -7,12 +7,12 @@ fn rtc_init() {
 }
 
 fn rtc_is_running() -> bool {
-    let base: *io i32 = 0x09010000; // PL031 RTC base address
-    let ctrl: i32 = *(base + 3);    // RTCCR: 3rd word as *i32 (offset 0x0C)
+    let base: *io u32 = 0x09010000; // PL031 RTC base address
+    let ctrl: u32 = *(base + 3);    // RTCCR: 3rd word as *u32 (offset 0x0C)
     return (ctrl & 1) != 0;
 }
 
 fn rtc_read_seconds() -> i32 {
-    let base: *io i32 = 0x09010000;
-    return *base; // RTCDR: current time, offset 0
+    let base: *io u32 = 0x09010000;
+    return (*base) as i32; // RTCDR: current time, offset 0
 }

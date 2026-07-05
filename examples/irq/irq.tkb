@@ -46,12 +46,16 @@ fn uart_rx_isr() {
 }
 
 fn irq_dispatch(frame_sp: i32) -> i32 {
-    let id: i32 = *gic.cpu_iar;
+    let id: i32 = (*gic.cpu_iar) as i32; // GICC_IAR is u32; the ID itself fits
+                                          // comfortably in i32 and is used as
+                                          // an array index below (which
+                                          // requires i32, see lib/type_inf.ml's
+                                          // Index case).
     if (id < 64) {
         let t: *fn() -> void = irq_tbl.handlers;
         let h: fn() -> void = t[id];
         h();
-        *(gic.cpu_eoir) = id;
+        *(gic.cpu_eoir) = id as u32;
     }
     return frame_sp;
 }

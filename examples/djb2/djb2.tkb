@@ -1,9 +1,9 @@
 // Demo of the djb2 XOR hash function: hash = ((hash << 5) + hash) ^ c.
 
-fn djb2(s: *u8) i32 {
-    let mut hash: i32 = 5381;
+fn djb2(s: *u8) u32 {
+    let mut hash: u32 = 5381;
     while (*s != 0) {
-        hash = ((hash << 5) + hash) ^ (*s as i32);
+        hash = ((hash << 5) + hash) ^ (*s as u32);
         s = s + 1;
     }
     return hash;
@@ -11,10 +11,10 @@ fn djb2(s: *u8) i32 {
 
 fn main() {
     uart_puts("djb2(\"hello\"): ");
-    uart_print_hex(djb2("hello"));
+    uart_print_hex(djb2("hello") as i32);
     uart_puts("\r\n");
     uart_puts("djb2(\"world\"): ");
-    uart_print_hex(djb2("world"));
+    uart_print_hex(djb2("world") as i32);
     uart_puts("\r\n");
 }
 

@@ -42,8 +42,8 @@ let VIRTIO_QUEUE_PFN:        i32 = 0x40;
 let VIRTIO_QUEUE_NOTIFY:     i32 = 0x50;
 let VIRTIO_STATUS:           i32 = 0x70;
 
-let VIRTIO_MAGIC_VALUE:   i32 = 0x74726976;
-let VIRTIO_DEVICE_ID_NET: i32 = 1;
+let VIRTIO_MAGIC_VALUE:   u32 = 0x74726976;
+let VIRTIO_DEVICE_ID_NET: u32 = 1;
 
 let STATUS_ACKNOWLEDGE: i32 = 1;
 let STATUS_DRIVER:      i32 = 2;
@@ -99,9 +99,9 @@ fn vreg(offset: i32) -> *io i32 {
 fn virtio_net_find() -> i32 {
     for i in 0..<VIRTIO_MMIO_SLOT_COUNT {
         let base: i32 = VIRTIO_MMIO_FIRST_SLOT + i * VIRTIO_MMIO_SLOT_STRIDE;
-        let magic_p: *io i32 = base as *io i32;
+        let magic_p: *io u32 = base as *io u32;
         if (*magic_p == VIRTIO_MAGIC_VALUE) {
-            let devid_p: *io i32 = (base + VIRTIO_DEVICE_ID) as *io i32;
+            let devid_p: *io u32 = (base + VIRTIO_DEVICE_ID) as *io u32;
             if (*devid_p == VIRTIO_DEVICE_ID_NET) {
                 virtio_base = base;
                 return 1;
@@ -164,8 +164,8 @@ fn desc_set(queue_mem: *u8, i: i32, addr: usize, len: i32, flags: i32) {
     let base: *u8 = queue_mem + i * 16;
     let addr_p: *usize = base as *usize;
     *addr_p = addr;
-    let len_p: *i32 = (base + 8) as *i32;
-    *len_p = len;
+    let len_p: *u32 = (base + 8) as *u32; // virtq_desc.len is le32 (unsigned) per the virtio spec
+    *len_p = len as u32;
     let flags_p: *u16 = (base + 12) as *u16;
     *flags_p = flags as u16;
     // `next` field (offset 14) is left at 0 (BSS-zeroed at boot): we never
@@ -196,13 +196,16 @@ fn used_idx_get(queue_mem: *u8) -> i32 {
 }
 
 fn used_ring_get_id(queue_mem: *u8, slot: i32) -> i32 {
-    let p: *io i32 = (queue_mem + PAGE_SIZE + 4 + slot * 8) as *io i32;
-    return *p;
+    let p: *io u32 = (queue_mem + PAGE_SIZE + 4 + slot * 8) as *io u32;
+    return (*p) as i32; // matches used_idx_get's pattern above: the register
+                        // itself is unsigned, but the returned descriptor
+                        // index feeds the i32-based index/length machinery
+                        // used_ring_get_id's own callers rely on.
 }
 
 fn used_ring_get_len(queue_mem: *u8, slot: i32) -> i32 {
-    let p: *io i32 = (queue_mem + PAGE_SIZE + 4 + slot * 8 + 4) as *io i32;
-    return *p;
+    let p: *io u32 = (queue_mem + PAGE_SIZE + 4 + slot * 8 + 4) as *io u32;
+    return (*p) as i32; // same reasoning as used_ring_get_id above.
 }
 
 // -- Shared driver API (matches examples/common_stm32/eth.tkb) --------------

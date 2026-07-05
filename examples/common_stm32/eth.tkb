@@ -68,26 +68,26 @@ let ETH_DMAOMR:   *io u32 = 0x40029018;
 // depending on any vendor-specific register 31 bit encoding). MDIO address
 // is 0 on this board (confirmed: LAN8742's PHYAD pin strapping on the
 // STM32F746G-DISCOVERY ties it to address 0). ------------------------------
-let PHY_ADDR: i32 = 0;
-let PHY_BCR:    i32 = 0; // Basic Control Register
-let PHY_BSR:    i32 = 1; // Basic Status Register
-let PHY_ANAR:   i32 = 4; // Auto-Negotiation Advertisement Register
-let PHY_ANLPAR: i32 = 5; // Auto-Negotiation Link Partner Ability Register
+let PHY_ADDR: u32 = 0;
+let PHY_BCR:    u32 = 0; // Basic Control Register
+let PHY_BSR:    u32 = 1; // Basic Status Register
+let PHY_ANAR:   u32 = 4; // Auto-Negotiation Advertisement Register
+let PHY_ANLPAR: u32 = 5; // Auto-Negotiation Link Partner Ability Register
 
-let PHY_BCR_RESET:        i32 = 0x8000;
-let PHY_BCR_AUTONEG_EN:   i32 = 0x1000;
-let PHY_BCR_RESTART_AN:   i32 = 0x0200;
+let PHY_BCR_RESET:        u32 = 0x8000;
+let PHY_BCR_AUTONEG_EN:   u32 = 0x1000;
+let PHY_BCR_RESTART_AN:   u32 = 0x0200;
 
-let PHY_BSR_AUTONEG_DONE: i32 = 0x0020;
-let PHY_BSR_LINK_UP:      i32 = 0x0004;
+let PHY_BSR_AUTONEG_DONE: u32 = 0x0020;
+let PHY_BSR_LINK_UP:      u32 = 0x0004;
 
 // Advertise 10/100 Mbps, half/full duplex (bits 8:5) + IEEE 802.3 selector
 // field (bits 4:0 = 00001).
-let PHY_ANAR_ADVERTISE_ALL: i32 = 0x01E1;
-let PHY_AN_100_FULL: i32 = 0x0100;
-let PHY_AN_100_HALF: i32 = 0x0080;
-let PHY_AN_10_FULL:  i32 = 0x0040;
-let PHY_AN_10_HALF:  i32 = 0x0020;
+let PHY_ANAR_ADVERTISE_ALL: u32 = 0x01E1;
+let PHY_AN_100_FULL: u32 = 0x0100;
+let PHY_AN_100_HALF: u32 = 0x0080;
+let PHY_AN_10_FULL:  u32 = 0x0040;
+let PHY_AN_10_HALF:  u32 = 0x0020;
 
 // -- DMA descriptor ring geometry --------------------------------------------
 // Struct field assignment in takibi only supports `ident.field = v` (a bare
@@ -108,17 +108,15 @@ let ETH_RX_DESC_COUNT: i32 = 4;
 let ETH_TX_DESC_COUNT: i32 = 4;
 let ETH_BUF_SIZE: i32 = 1536; // max 1518-byte Ethernet frame, rounded up
 
-// 0x80000000 as i32 wraps to a negative bit pattern (top bit set) -- only
-// ever tested via bitwise AND below, never compared as a signed magnitude.
-let ETH_RDES0_OWN: i32 = 0x80000000 as i32;
-let ETH_RDES1_RCH: i32 = 0x4000;
-let ETH_RDES0_FL_SHIFT: i32 = 16;
-let ETH_RDES_FL_MASK: i32 = 0x3FFF;
+let ETH_RDES0_OWN: u32 = 0x80000000;
+let ETH_RDES1_RCH: u32 = 0x4000;
+let ETH_RDES0_FL_SHIFT: u32 = 16;
+let ETH_RDES_FL_MASK: u32 = 0x3FFF;
 
-let ETH_TDES0_OWN: i32 = ETH_RDES0_OWN; // same top-bit flag, bitwise use only
-let ETH_TDES0_LS:  i32 = 0x20000000;
-let ETH_TDES0_FS:  i32 = 0x10000000;
-let ETH_TDES0_TCH: i32 = 0x00100000;
+let ETH_TDES0_OWN: u32 = ETH_RDES0_OWN; // same top-bit flag
+let ETH_TDES0_LS:  u32 = 0x20000000;
+let ETH_TDES0_FS:  u32 = 0x10000000;
+let ETH_TDES0_TCH: u32 = 0x00100000;
 
 // Descriptor rings and packet buffers. Placed in AXI SRAM by link_eth.ld
 // (see this file's header comment) -- no takibi-level section attribute
@@ -155,23 +153,23 @@ fn ptr_to_u32(p: *u8) -> u32 {
 // 802.3 clause 22: MDC must be <= 2.5MHz) is still satisfied -- Div16 is
 // simply more conservative than its documented floor implies, not out of
 // spec.
-let MACMIIAR_CR_DIV16: i32 = 0x8;
+let MACMIIAR_CR_DIV16: u32 = 0x8;
 
 fn mdio_wait() {
     while ((*ETH_MACMIIAR & 1) != 0) {} // MB (MII busy)
 }
 
-fn mdio_read(reg: i32) -> i32 {
-    let cmd: i32 = (PHY_ADDR << 11) | (reg << 6) | MACMIIAR_CR_DIV16 | 1; // PA | MR | CR | MB
-    *ETH_MACMIIAR = cmd as u32;
+fn mdio_read(reg: u32) -> u32 {
+    let cmd: u32 = (PHY_ADDR << 11) | (reg << 6) | MACMIIAR_CR_DIV16 | 1; // PA | MR | CR | MB
+    *ETH_MACMIIAR = cmd;
     mdio_wait();
-    return (*ETH_MACMIIDR) as i32;
+    return *ETH_MACMIIDR;
 }
 
-fn mdio_write(reg: i32, val: i32) {
-    *ETH_MACMIIDR = val as u32;
-    let cmd: i32 = (PHY_ADDR << 11) | (reg << 6) | MACMIIAR_CR_DIV16 | 2 | 1; // PA | MR | CR | MW | MB
-    *ETH_MACMIIAR = cmd as u32;
+fn mdio_write(reg: u32, val: u32) {
+    *ETH_MACMIIDR = val;
+    let cmd: u32 = (PHY_ADDR << 11) | (reg << 6) | MACMIIAR_CR_DIV16 | 2 | 1; // PA | MR | CR | MW | MB
+    *ETH_MACMIIAR = cmd;
     mdio_wait();
 }
 
@@ -227,7 +225,7 @@ fn phy_init() -> i32 {
     mdio_write(PHY_BCR, PHY_BCR_AUTONEG_EN | PHY_BCR_RESTART_AN);
 
     while (1) {
-        let bsr: i32 = mdio_read(PHY_BSR);
+        let bsr: u32 = mdio_read(PHY_BSR);
         if ((bsr & PHY_BSR_AUTONEG_DONE) != 0) {
             if ((bsr & PHY_BSR_LINK_UP) != 0) {
                 break;
@@ -235,7 +233,7 @@ fn phy_init() -> i32 {
         }
     }
 
-    let common: i32 = mdio_read(PHY_ANAR) & mdio_read(PHY_ANLPAR) & 0x01E0;
+    let common: u32 = mdio_read(PHY_ANAR) & mdio_read(PHY_ANLPAR) & 0x01E0;
     if ((common & PHY_AN_100_FULL) != 0) {
         return 3; // 100 Mbps, full duplex
     } else if ((common & PHY_AN_100_HALF) != 0) {
@@ -255,10 +253,10 @@ fn eth_rx_ring_init() {
         let buf:  *u8 = eth_rx_bufs + i * ETH_BUF_SIZE;
         let next: *u8 = rx_desc_ptr((i + 1) % ETH_RX_DESC_COUNT);
 
-        *(desc_word(desc, 1)) = (ETH_RDES1_RCH | ETH_BUF_SIZE) as u32; // RCH | RBS1
+        *(desc_word(desc, 1)) = ETH_RDES1_RCH | (ETH_BUF_SIZE as u32); // RCH | RBS1
         *(desc_word(desc, 2)) = ptr_to_u32(buf);                       // buffer1 address
         *(desc_word(desc, 3)) = ptr_to_u32(next);                     // next descriptor (RCH mode)
-        *(desc_word(desc, 0)) = ETH_RDES0_OWN as u32;                  // hand to DMA last
+        *(desc_word(desc, 0)) = ETH_RDES0_OWN;                        // hand to DMA last
     }
     *ETH_DMARDLAR = ptr_to_u32(rx_desc_ptr(0));
 }
@@ -329,11 +327,14 @@ fn net_init() -> i32 {
 // once the caller is done reading net_rx_buf().
 fn net_poll_rx() -> i32 {
     let desc: *u8 = rx_desc_ptr(eth_rx_cur);
-    let word0: i32 = (*(desc_word(desc, 0))) as i32;
+    let word0: u32 = *(desc_word(desc, 0));
     if ((word0 & ETH_RDES0_OWN) != 0) {
         return 0; // still owned by the DMA
     }
-    return (word0 >> ETH_RDES0_FL_SHIFT) & ETH_RDES_FL_MASK;
+    // Extracting FL via a u32 (logical) shift is correct regardless of
+    // whether OWN happens to be clear -- unlike an i32 (arithmetic) shift,
+    // which would sign-extend if this were ever reached with bit 31 set.
+    return ((word0 >> ETH_RDES0_FL_SHIFT) & ETH_RDES_FL_MASK) as i32;
 }
 
 fn net_rx_buf() -> *u8 {
@@ -376,7 +377,7 @@ fn net_rx_frame() -> [u8; 1514..] {
 // already copied/sent them out, since net_transmit() is synchronous).
 fn net_rx_release() {
     let desc: *u8 = rx_desc_ptr(eth_rx_cur);
-    *(desc_word(desc, 0)) = ETH_RDES0_OWN as u32;
+    *(desc_word(desc, 0)) = ETH_RDES0_OWN;
     eth_dsb(); // see eth_asm.S: must complete before the DMA can be kicked
     *ETH_DMARPDR = 1; // poll demand: resume RX DMA if it had suspended
     eth_rx_cur = (eth_rx_cur + 1) % ETH_RX_DESC_COUNT;
@@ -392,12 +393,12 @@ fn net_transmit(buf: *u8, len: i32) {
 
     *(desc_word(desc, 2)) = ptr_to_u32(buf);
     *(desc_word(desc, 1)) = len as u32; // TBS1
-    *(desc_word(desc, 0)) = (ETH_TDES0_OWN | ETH_TDES0_FS | ETH_TDES0_LS | ETH_TDES0_TCH) as u32;
+    *(desc_word(desc, 0)) = ETH_TDES0_OWN | ETH_TDES0_FS | ETH_TDES0_LS | ETH_TDES0_TCH;
 
     eth_dsb(); // see eth_asm.S: must complete before the DMA can be kicked
     *ETH_DMATPDR = 1; // poll demand: prompt DMA to check for a ready descriptor now
 
-    while (((*(desc_word(desc, 0))) as i32 & ETH_TDES0_OWN) != 0) {}
+    while ((*(desc_word(desc, 0)) & ETH_TDES0_OWN) != 0) {}
 
     eth_tx_cur = (eth_tx_cur + 1) % ETH_TX_DESC_COUNT;
 }

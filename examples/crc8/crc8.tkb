@@ -25,17 +25,16 @@ fn strlen(s: *u8) i32 {
     return n;
 }
 
-fn crc8(data: *u8, len: i32) i32 {
-    let mut crc: i32 = 0;
+fn crc8(data: *u8, len: i32) u8 {
+    let mut crc: u8 = 0;
     for i in 0..<len {
-        crc = crc ^ (*(data + i) as i32);
+        crc = crc ^ *(data + i);
         for bit in 0..<8 {
             if ((crc & 0x80) != 0) {
                 crc = (crc << 1) ^ 0x07;
             } else {
                 crc = crc << 1;
             }
-            crc = crc & 0xff;
         }
     }
     return crc;
@@ -43,7 +42,7 @@ fn crc8(data: *u8, len: i32) i32 {
 
 fn main() {
     let s: *u8 = "123456789";
-    let result: i32 = crc8(s, strlen(s));
+    let result: i32 = crc8(s, strlen(s)) as i32;
     uart_puts("CRC-8: 0x");
     uart_print_hex8(result);
     uart_puts("\r\n");

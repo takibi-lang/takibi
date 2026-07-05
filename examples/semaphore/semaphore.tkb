@@ -36,7 +36,7 @@ let mut stack_a: [u8; 4096];
 let mut stack_b: [u8; 4096];
 
 fn irq_dispatch(frame_sp: usize) -> usize {
-    let id: i32 = *gic.cpu_iar;
+    let id: u32 = *gic.cpu_iar;
     if (id == 30) {
         scheduler_rearm_tick();
         let sp: *usize = sched.tcb_sp;

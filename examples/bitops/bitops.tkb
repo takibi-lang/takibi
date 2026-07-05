@@ -25,27 +25,27 @@
 
 fn main() -> i32 {
     // --- Flag manipulation: set / clear / toggle ---
-    let mut flags: i32 = 0;
+    let mut flags: u32 = 0;
     flags |= 0x01;              // set bit 0
     flags |= 0x04;              // set bit 2
-    uart_println_hex(flags);    // 0x00000005
+    uart_println_hex(flags as i32);    // 0x00000005
 
     flags &= ~0x01;             // clear bit 0
-    uart_println_hex(flags);    // 0x00000004
+    uart_println_hex(flags as i32);    // 0x00000004
 
     flags ^= 0x0f;              // toggle lower nibble
-    uart_println_hex(flags);    // 0x0000000b
+    uart_println_hex(flags as i32);    // 0x0000000b
 
     // --- Bitwise NOT standalone ---
     uart_println_hex(~0x01);    // 0xfffffffe
 
     // --- Shift-assign ---
-    let mut val: i32 = 1;
+    let mut val: u32 = 1;
     val <<= 4;                  // 1 << 4 = 16
-    uart_println_hex(val);      // 0x00000010
+    uart_println_hex(val as i32);      // 0x00000010
 
     val >>= 2;                  // 16 >> 2 = 4
-    uart_println_hex(val);      // 0x00000004
+    uart_println_hex(val as i32);      // 0x00000004
 
     // --- Arithmetic compound assignment ---
     let mut n: i32 = 10;
