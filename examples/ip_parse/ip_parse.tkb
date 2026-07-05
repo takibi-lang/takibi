@@ -31,17 +31,24 @@ fn print_protocol_name(proto: i32) {
 
 fn parse_ipv4(pkt: [u8; 20..], len: i32) {
     let version:  i32 = (pkt[0] as i32) >> 4;
-    let ihl:      i32 = ((pkt[0] as i32) & 0x0f) * 4;
+    // ihl is read from the wire and never otherwise validated here (this
+    // demo's whole point is field extraction, not enforcing IHL == 20 the
+    // way icmp_echo/tcp_echo/http_server do). P4c-2: `& 0x0f` alone
+    // already carries ihl to {0..<16} (a non-negative-literal mask is
+    // ALWAYS in [0, mask] regardless of the byte's own value), and `* 4`
+    // carries that to {0..<61} -- but pkt is only 20 bytes, so
+    // pkt[0..<ihl] on ITS OWN would still need a runtime check. min(ihl,
+    // 20) clamps the upper bound to what pkt can actually satisfy,
+    // provably, no matter what garbage byte 0 turns out to hold --
+    // closing the gap a plain runtime bounds check used to be the only
+    // answer for (this file is --forbid-trap clean; see
+    // scripts/run_qemutest.sh's forbid_trap_ip_parse). The demo's own
+    // packets always have the real IHL == 20 (no options), so clamping to
+    // 20 (pkt's full size) never actually truncates anything here.
+    let ihl: i32 = min(((pkt[0] as i32) & 0x0f) * 4, 20);
     let total_len: i32 = ((pkt[2] as i32) << 8) | (pkt[3] as i32);
     let ttl:      i32 = pkt[8] as i32;
     let protocol: i32 = pkt[9] as i32;
-    // ihl is read from the wire, not otherwise validated here (this demo's
-    // whole point is field extraction, not enforcing IHL == 20 the way
-    // icmp_echo/tcp_echo/http_server do) -- so pkt[0..<ihl] is a
-    // RUNTIME-CHECKED subslice (gradual form, one recorded --forbid-trap
-    // site): if ihl were corrupted past pkt's real length, the check traps
-    // instead of the old raw-pointer version silently reading past the
-    // 20-byte buffer.
     let checksum: i32 = inet_checksum(pkt[0..<ihl]);
 
     uart_puts("IPv4 packet:\r\n");

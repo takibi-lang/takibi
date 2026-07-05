@@ -114,6 +114,7 @@ let rec unify t1 t2 =
   | TRefinedInt (lo, hi), TU16 when lo >= 0 && hi <= 65536   -> ()
   | TRefinedInt (lo, _),  TU32 when lo >= 0                  -> ()   (* practical: hi < 2^31 *)
   | TRefinedInt (lo, _),  TU64 when lo >= 0                  -> ()
+  | TRefinedInt (lo, _),  TUsize when lo >= 0                -> ()
   | TRefinedInt (lo, hi), TI8  when lo >= -128  && hi <= 128 -> ()
   | TRefinedInt (lo, hi), TI16 when lo >= -32768 && hi <= 32768 -> ()
   | TI32, TRefinedInt (lo, hi) ->

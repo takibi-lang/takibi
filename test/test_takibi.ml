@@ -2511,6 +2511,148 @@ let codegen_tests = [
           return 0 as u8;
         }");
 
+  (* -- P4c-2: Band mask propagation + min/max builtins -------------------- *)
+
+  Alcotest.test_case
+    "x & k (non-negative literal mask) propagates to {0..<k+1} regardless \
+     of x's own sign or range -- proves an index with no prior narrowing \
+     at all (zero trap sites)" `Quick
+    (expect_trap_sites 0
+       "let mut ftp4c_buf_a: [u8; 16];
+        fn ftp4c_mask(v: i32) -> u8 {
+          return ftp4c_buf_a[v & 0x0f];
+        }");
+
+  Alcotest.test_case
+    "mask propagation is symmetric (literal & x) and composes with Mul \
+     (P4a): (v & 0x0f) * 4 carries {0..<16} to {0..<61}" `Quick
+    (expect_trap_sites 0
+       "let mut ftp4c_buf_b: [u8; 61];
+        fn ftp4c_mask_mul(v: i32) -> u8 {
+          let ihl: i32 = (0x0f & v) * 4;
+          return ftp4c_buf_b[ihl];
+        }");
+
+  Alcotest.test_case
+    "min(a, LITERAL) clamps the upper bound to the literal regardless of \
+     a's own range, proving a subslice against a smaller buffer than a's \
+     own {0..<64} range would otherwise allow (zero trap sites) -- the \
+     idiom that makes examples/ip_parse's ihl clamp provable" `Quick
+    (expect_trap_sites 0
+       "let mut ftp4c_buf_c: [u8; 20];
+        fn ftp4c_min_clamp(raw: i32) -> u8 {
+          let ihl: i32 = raw & 0x3f;      // {0..<64}
+          let capped: i32 = min(ihl, 19); // {0..<20}
+          return ftp4c_buf_c[capped];
+        }");
+
+  Alcotest.test_case
+    "HONEST NEGATIVE RESULT: chaining two CORRELATED clamps (cap ihl, then \
+     cap tcp_len against the room DERIVED from that same ihl) does NOT \
+     reach zero trap sites, unlike the single-clamp case above -- the \
+     tcp_parse/tcp_echo pattern. `tlc <= room = 40 - ihl` is a genuine \
+     RELATIONAL fact (tlc's value is tied to ihl's), and it is lost the \
+     moment tlc becomes its own named variable with just an independent \
+     {0..<41} range: `ihl + tlc`'s ordinary interval combination (using \
+     ihl's OWN worst case together with tlc's OWN worst case, a \
+     combination that cannot actually co-occur) overshoots the true bound \
+     (40) even though the same-base rule above already closes the lo<=hi \
+     side of the proof. This is the precise boundary P4c-2's tools don't \
+     cross; CLAUDE.md's P4c section recommends the unsafe-extension \
+     (P4c-1) or a genuine relational/difference-constraint domain to \
+     close it, not a bigger interval hack" `Quick
+    (expect_trap_sites 1
+       "fn ftp4c_checksum(s: []u8, sum_in: i32) -> i32 {
+          let mut sum: i32 = sum_in;
+          for b in s { sum = sum + (b as i32); }
+          return sum;
+        }
+        fn ftp4c_chained(pkt: [u8; 40..], raw_ihl: i32, tcp_len: i32) -> i32 {
+          let ihl: i32 = min(raw_ihl & 0x3f, 20);   // {0..<21}
+          let room: i32 = 40 - ihl;                  // {20..<41} via Sub
+          let tl: i32 = max(tcp_len, 0);              // >= 0, upper unknown
+          let tlc: i32 = min(tl, room);                // {0..<41}
+          return ftp4c_checksum(pkt[ihl..<ihl + tlc], 0);
+        }");
+
+  Alcotest.test_case
+    "max(a, LITERAL) clamps the lower bound; min/max with an unconstrained \
+     other operand falls back to plain i32 (conservative, not unsound)" `Quick
+    (fun () ->
+       expect_trap_sites 0
+         "let mut ftp4c_buf_d: [u8; 50];
+          fn ftp4c_max_clamp(v: i32) -> u8 {
+            let x: i32 = max(v & 0x1f, 0);  // {0..<32}, lower clamp is a no-op here but exercises max
+            return ftp4c_buf_d[x];
+          }" ();
+       expect_trap_sites 1
+         "fn ftp4c_unconstrained(a: i32, b: i32) -> i32 {
+            return min(a, b);
+          }
+          let mut ftp4c_buf_e: [u8; 10];
+          fn ftp4c_use_it(a: i32, b: i32) -> u8 {
+            let m: i32 = ftp4c_unconstrained(a, b);
+            return ftp4c_buf_e[m];
+          }" ());
+
+  Alcotest.test_case
+    "min/max names are reserved compiler builtins and cannot be redefined" `Quick
+    (fun () ->
+       expect_type_error "compiler builtin"
+         "fn min(a: i32, b: i32) -> i32 { return a; }" ();
+       expect_type_error "compiler builtin"
+         "fn max(a: i32, b: i32) -> i32 { return a; }" ());
+
+  (* -- P4c-1: unsafe extended to slice/array-BASE subslice construction -- *)
+  (* Previously unsafe only gated pointer->slice construction (a length
+     assertion with NO evidence at all). This extends the SAME gate to a
+     slice/array-base subslice whose bounds fail the interval/same-base
+     proof (a correlated-bounds case like tcp_echo's data-echo path or
+     tcp_parse's checksum span, e.g. ftp4c_chained above) -- letting the
+     programmer choose, per call site, between the DEFAULT (checked,
+     traps on violation, --forbid-trap rejects it) and an explicit,
+     visible unchecked assertion that --forbid-trap accepts. The type
+     computed is UNCHANGED either way (unsafe doesn't grant new static
+     information, only skips verifying it) -- only whether llvm_gen emits
+     the runtime check differs. *)
+
+  Alcotest.test_case
+    "unsafe on a SLICE-base subslice (not just a raw pointer) skips the \
+     runtime check entirely: the same correlated-bounds construction that \
+     recorded 1 trap site unwrapped now records zero, and --forbid-trap \
+     accepts it" `Quick
+    (expect_trap_sites 0
+       "fn ftp4c1_checksum(s: []u8, sum_in: i32) -> i32 {
+          let mut sum: i32 = sum_in;
+          for b in s { sum = sum + (b as i32); }
+          return sum;
+        }
+        fn ftp4c1_unsafe_slice(pkt: [u8; 40..], raw_ihl: i32, tcp_len: i32) -> i32 {
+          let ihl: i32 = min(raw_ihl & 0x3f, 20);
+          let room: i32 = 40 - ihl;
+          let tl: i32 = max(tcp_len, 0);
+          let tlc: i32 = min(tl, room);
+          return ftp4c1_checksum(unsafe { pkt[ihl..<ihl + tlc] }, 0);
+        }");
+
+  Alcotest.test_case
+    "the SAME construction WITHOUT unsafe still records exactly the one \
+     trap site it did before this extension existed (the extension is \
+     opt-in, not a change to default behavior)" `Quick
+    (expect_trap_sites 1
+       "fn ftp4c1_checksum2(s: []u8, sum_in: i32) -> i32 {
+          let mut sum: i32 = sum_in;
+          for b in s { sum = sum + (b as i32); }
+          return sum;
+        }
+        fn ftp4c1_checked_slice(pkt: [u8; 40..], raw_ihl: i32, tcp_len: i32) -> i32 {
+          let ihl: i32 = min(raw_ihl & 0x3f, 20);
+          let room: i32 = 40 - ihl;
+          let tl: i32 = max(tcp_len, 0);
+          let tlc: i32 = min(tl, room);
+          return ftp4c1_checksum2(pkt[ihl..<ihl + tlc], 0);
+        }");
+
   (* Kept last in this group deliberately: Llvm_gen.enable_debug_info flips a
      process-global ref with no way back off (same one-way-switch pattern
      Llvm_gen.setup_target's target_data already uses), so every codegen test

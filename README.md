@@ -70,16 +70,25 @@ read).
 `--forbid-trap` is expected to grow into a family: per-category strictness
 options (array-bounds trap freedom, checked-cast freedom, safe-pointer
 enforcement outside `unsafe`, ...) with one umbrella flag enabling them
-all. Today's single flag is the first member. Most of the ~47 examples --
+all. Today's single flag is the first member. **All ~47 examples --
 including the full TCP/IP stack and HTTP server -- compile trap-free
-under it. The handful of exceptions are all deliberate and documented,
-not oversights: one demo whose entire point is a runtime-checked cast,
-two parser demos that intentionally never validate a wire-derived length
-against buffer capacity (their "corrupted packet" tests would have nothing
-to demonstrate otherwise), and one path in the TCP echo server combining
-two independently-derived runtime lengths in a way plain interval
-reasoning can't discharge -- the one genuinely relational gap found across
-the whole networking stack so far (see CLAUDE.md's P4b section).
+under it.** A few tools do almost all of the work: refined integer ranges
+that propagate through ordinary arithmetic and bitwise masking (so a
+value like a wire-derived header length carries a real bound with no
+extra code), `min`/`max` builtins that provably clamp a value against a
+compile-time buffer capacity regardless of its actual runtime value, and
+plain input validation (checking a wire-derived length against a buffer's
+real capacity before trusting it -- not a type-system trick, just what a
+correct parser needs to do anyway, and it happens to make the surrounding
+code provable too). Where a bound genuinely can't be proven this way --
+typically because two values are secretly correlated in a way plain
+interval reasoning can't see -- the code says so explicitly with
+`unsafe { ... }`, rather than silently falling back to an unexplained
+runtime check. See CLAUDE.md's P4c section for the full accounting,
+including one honest negative result (chained/correlated clamps that
+don't close without a genuine relational domain) and the case that
+looked like it needed one but didn't: the fix turned out to be a missing
+validation check, not a type-system gap.
 
 ## Current Status
 

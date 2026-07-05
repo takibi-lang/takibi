@@ -10,18 +10,23 @@
 // packets -- see CLAUDE.md's IPv4/ICMP section for why parsing and
 // networking I/O are kept as separate steps.
 //
-// SLICE MIGRATION (P4b): `ihl` is typed `{20..<21}` (this demo's canned
-// packet always has a 20-byte, no-options IP header) so the fixed-field
-// view `ip[ihl..<ihl + 20]` is fully proven. The checksum span
-// (`ip[ihl..<ihl + tcp_len]`) is NOT similarly bounded: this file never
-// validates tcp_len against the packet's actual capacity (unlike
-// icmp_echo/tcp_echo/http_server, which all clamp the device-reported
-// length before trusting it) -- that's an intentional scope choice (this
-// is a parse-only demo of the ALGORITHM, not of length validation), so
-// the checksum span is a runtime-checked subslice (one recorded
-// --forbid-trap site, not registered as a forbid_trap test here). Unlike
-// the original raw-pointer version, that check actually catches a
-// corrupted/oversized tcp_len at runtime rather than reading past pkt.
+// SLICE MIGRATION (P4b) + VALIDATION (P4c): `ihl` is typed `{20..<21}`
+// (this demo's canned packet always has a 20-byte, no-options IP header)
+// so the fixed-field view `ip[ihl..<ihl + 20]` is fully proven. The
+// checksum span (`ip[ihl..<ihl + tcp_len]`) needs `ip_total_len` (a raw
+// wire value) validated against ip's own capacity before it can be
+// trusted -- exactly the same shape as icmp_echo/tcp_echo/http_server's
+// device-length clamps, just missing here at first. A real binary parser
+// cannot assume its input is always well-formed, so `parse_tcp` now
+// checks `ip_total_len` explicitly and reports a malformed segment
+// instead of computing a checksum over a bogus span. The upshot: once
+// ip_total_len is narrowed to {ihl..<41} by the `if`, `tcp_len =
+// ip_total_len - ihl` picks up a real {0..<21} range via ordinary Sub
+// propagation (both operands refined), and `ip[ihl..<ihl+tcp_len]` is
+// then FULLY PROVEN by the same-base rule -- no unsafe, no relational
+// domain, just the validation any parser needs anyway (this file is
+// --forbid-trap clean; see scripts/run_qemutest.sh's
+// forbid_trap_tcp_parse).
 
 fn print_ip(p: [u8; 4..]) {
     uart_print_uint(p[0] as i32);
@@ -82,21 +87,6 @@ fn parse_tcp(ip: [u8; 40..], ihl: {20..<21}) {
     let flags:    i32 = (hdr[13] as i32) & 0x3f;
     let window:   i32 = read_u16be(hdr[14..<16]);
     let ip_total_len: i32 = read_u16be(ip[2..<4]);
-    let tcp_len:  i32 = ip_total_len - ihl;
-
-    // TCP checksum covers the pseudo-header (src IP, dst IP, zero byte,
-    // protocol, TCP length) followed by the TCP segment itself (header +
-    // data) -- see examples/common/inet_checksum.tkb's checksum_add for
-    // why this needs two chained calls instead of one. The segment span
-    // is a runtime-checked subslice (see the file header comment).
-    let mut pseudo: [u8; 12];
-    slice_copy(pseudo[0..<4], ip[12..<16]);  // src IP
-    slice_copy(pseudo[4..<8], ip[16..<20]);  // dst IP
-    pseudo[8] = 0 as u8;
-    pseudo[9] = ip[9]; // protocol
-    write_u16be(pseudo[10..<12], tcp_len);
-    let sum: i32 = checksum_add(pseudo as []u8, 0);
-    let checksum: i32 = checksum_fold(checksum_add(ip[ihl..<ihl + tcp_len], sum));
 
     uart_puts("TCP segment:\r\n");
     uart_puts("  src_port:    "); uart_println_uint(src_port);
@@ -109,10 +99,40 @@ fn parse_tcp(ip: [u8; 40..], ihl: {20..<21}) {
     uart_puts("  src_ip:      "); print_ip(ip[12..<16]); uart_puts("\r\n");
     uart_puts("  dst_ip:      "); print_ip(ip[16..<20]); uart_puts("\r\n");
     uart_puts("  checksum:    ");
-    if (checksum == 0) {
-        uart_puts("OK\r\n");
+
+    // ip_total_len is a raw wire value: a real parser must not trust it
+    // blindly (a genuinely malformed/corrupted packet can claim any
+    // 16-bit value). Validating it against ip's own capacity (40) here,
+    // rather than asserting it away, is what a binary parser needs to do
+    // regardless of --forbid-trap -- and it happens to be exactly what
+    // makes the checksum span below provable: once narrowed to
+    // {ihl..<41}, `tcp_len = ip_total_len - ihl` gets a real {0..<21}
+    // range (Sub of two now-refined operands), and the same-base rule
+    // closes `ip[ihl..<ihl+tcp_len]` outright.
+    if (ip_total_len >= ihl && ip_total_len <= 40) {
+        let tcp_len: i32 = ip_total_len - ihl;
+
+        // TCP checksum covers the pseudo-header (src IP, dst IP, zero
+        // byte, protocol, TCP length) followed by the TCP segment itself
+        // (header + data) -- see examples/common/inet_checksum.tkb's
+        // checksum_add for why this needs two chained calls instead of
+        // one.
+        let mut pseudo: [u8; 12];
+        slice_copy(pseudo[0..<4], ip[12..<16]);  // src IP
+        slice_copy(pseudo[4..<8], ip[16..<20]);  // dst IP
+        pseudo[8] = 0 as u8;
+        pseudo[9] = ip[9]; // protocol
+        write_u16be(pseudo[10..<12], tcp_len);
+        let sum: i32 = checksum_add(pseudo as []u8, 0);
+        let checksum: i32 = checksum_fold(checksum_add(ip[ihl..<ihl + tcp_len], sum));
+
+        if (checksum == 0) {
+            uart_puts("OK\r\n");
+        } else {
+            uart_puts("BAD\r\n");
+        }
     } else {
-        uart_puts("BAD\r\n");
+        uart_puts("MALFORMED (total_len out of range)\r\n");
     }
 }
 

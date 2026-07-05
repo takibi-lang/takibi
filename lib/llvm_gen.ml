@@ -48,6 +48,15 @@ let enum_nonexhaustive: (string, bool) Hashtbl.t = Hashtbl.create 8
 let trap_sites : (Lexing.position * string) list ref = ref []
 let record_trap loc what = trap_sites := (loc, what) :: !trap_sites
 
+(* Mirrors type_inf.ml's unsafe_depth (sync rule): nesting depth of
+   `unsafe { ... }` around the expression currently being generated.
+   Consulted by the SliceOf codegen case (P4c-1) to decide whether an
+   unprovable slice/array-base subslice's runtime check should be emitted
+   (default, unchanged behavior) or skipped (inside unsafe -- an explicit
+   unchecked assertion, same semantics as the pointer-base case). Reset
+   per compilation for the same reason type_inf's counter is. *)
+let unsafe_depth = ref 0
+
 (* Human-readable type names for trap-site messages (Ast.show_type_expr's
    raw constructor dump is too noisy for a user-facing compile error). *)
 let rec ty_str = function
@@ -981,7 +990,17 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | And -> (TypeBool, build_and (as_cond v1) (as_cond v2) "landtmp" builder)
        | Bor  -> (ty1, build_or  v1 v2 "bortmp" builder)
        | Bxor -> (ty1, build_xor v1 v2 "xortmp" builder)
-       | Band -> (ty1, build_and v1 v2 "andtmp" builder)
+       | Band ->
+           (* Range propagation (sync rule with type_inf.ml's Band case):
+              x & k -> {0..<k+1} for a non-negative literal mask k,
+              regardless of x's own sign/range. *)
+           let ret_ty = match e2.desc with
+             | IntLit k when k >= 0 -> TypeRefined (0, k + 1)
+             | _ -> (match e1.desc with
+                     | IntLit k when k >= 0 -> TypeRefined (0, k + 1)
+                     | _ -> ty1)
+           in
+           (ret_ty, build_and v1 v2 "andtmp" builder)
        | Shr  ->
            let result = if is_unsigned ty1
                         then build_lshr v1 v2 "shrtmp" builder
@@ -1299,24 +1318,59 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
         in
         (to_i32 bv, range)
       in
-      (* Same-base rule: s[v + j ..< v + k] has length exactly k - j and
-         lo <= hi iff j <= k, regardless of v's value -- the shared
-         Ast.var_plus_const decomposition (sync rule with type_inf's
-         SliceOf). io-qualified v is excluded: two volatile loads could
-         disagree between the bounds. *)
+      (* Same-base rule: s[v ..< v + w] has lo <= hi and a guaranteed
+         length >= lower(w), for ANY w with a known non-negative lower
+         bound (a literal, or another refined variable e.g. from a
+         min()-clamp) -- sync rule with type_inf's SliceOf, which must
+         decompose hi_e identically. io-qualified v is excluded: two
+         volatile loads could disagree between the bounds. *)
       let same_base_len =
-        match Ast.var_plus_const lo_e, Ast.var_plus_const hi_e with
-        | Some (v1, j), Some (v2, k) when v1 = v2 && j <= k ->
-            let is_io = function Ast.TypeIo _ -> true | _ -> false in
-            let base_is_io =
-              match Hashtbl.find_opt locals v1 with
-              | Some (Imm (t, _)) | Some (Mut (t, _)) -> is_io t
-              | None ->
-                  (match Hashtbl.find_opt global_vars v1 with
-                   | Some (t, _) -> is_io t
-                   | None -> false)
+        match lo_e.desc with
+        | Var v1 ->
+            let w_opt = match hi_e.desc with
+              | BinOp (Add, { desc = Var v2; _ }, w) when v2 = v1 -> Some w
+              | BinOp (Add, w, { desc = Var v2; _ }) when v2 = v1 -> Some w
+              | _ -> None
             in
-            if base_is_io then None else Some (k - j)
+            (match w_opt with
+             | None -> None
+             | Some w ->
+                 let is_io = function TypeIo _ -> true | _ -> false in
+                 let base_is_io =
+                   match Hashtbl.find_opt locals v1 with
+                   | Some (Imm (t, _)) | Some (Mut (t, _)) -> is_io t
+                   | None ->
+                       (match Hashtbl.find_opt global_vars v1 with
+                        | Some (t, _) -> is_io t
+                        | None -> false)
+                 in
+                 if base_is_io then None
+                 else
+                   (* w is looked up WITHOUT calling gen_expr/gen_bound on
+                      it a second time (it will be evaluated once, as part
+                      of hi_e itself, below) -- a direct table lookup only,
+                      restricted to a bare literal or a bare variable (sync
+                      rule with type_inf.ml's identical restriction; see
+                      its comment for why re-evaluating an arbitrary
+                      expression here would risk duplicating side
+                      effects). *)
+                   (match w.desc with
+                    | IntLit k when k >= 0 -> Some k
+                    | Var w_name ->
+                        let wty = match Hashtbl.find_opt narrowing_ctx w_name with
+                          | Some t -> Some t
+                          | None ->
+                              (match Hashtbl.find_opt locals w_name with
+                               | Some (Imm (t, _)) | Some (Mut (t, _)) -> Some t
+                               | None ->
+                                   (match Hashtbl.find_opt global_vars w_name with
+                                    | Some (t, _) -> Some t
+                                    | None -> None))
+                        in
+                        (match wty with
+                         | Some (TypeRefined (wlo, _)) when wlo >= 0 -> Some wlo
+                         | _ -> None)
+                    | _ -> None))
         | _ -> None
       in
       let ranges_proven lo_r hi_r limit =
@@ -1345,20 +1399,32 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
         let (lo_v, lo_r) = gen_bound lo_e in
         let (hi_v, hi_r) = gen_bound hi_e in
         if not (ranges_proven lo_r hi_r min_len) then begin
-          (* Runtime-checked subslice (gradual form): one check, one
-             recorded trap site, and everything downstream of the resulting
-             view is bounds-governed again. *)
-          record_trap e.loc (Printf.sprintf
-            "subslice bounds check remains: bounds cannot prove range \
-             {0..<%d} (the slice's compile-time minimum length)" min_len);
-          let i32z = const_int (i32_type context) 0 in
-          let neg  = build_icmp Icmp.Slt lo_v i32z "ss_neg" builder in
-          let inv  = build_icmp Icmp.Sgt lo_v hi_v "ss_inv" builder in
-          let hi_w = if type_of hi_v = usz then hi_v
-                     else build_zext hi_v usz "zext" builder in
-          let over = build_icmp Icmp.Ugt hi_w (slice_len fat) "ss_over" builder in
-          let bad  = build_or (build_or neg inv "ss_bad0" builder) over "ss_bad" builder in
-          emit_trap_when bad ~bad_name:"ss_trap" ~ok_name:"ss_ok"
+          if !unsafe_depth > 0 then
+            (* P4c-1: unsafe skips the check entirely -- an explicit,
+               visible "trust me" (same semantics as the pointer-base
+               case) for a bound the current interval/same-base tools
+               cannot close (e.g. two independently-clamped variables
+               whose combination is actually bounded by a relation the
+               type system doesn't track -- see CLAUDE.md's P4c section).
+               No trap site recorded: this is a deliberate assertion, not
+               a residual gap --forbid-trap should report. *)
+            ()
+          else begin
+            (* Runtime-checked subslice (gradual form): one check, one
+               recorded trap site, and everything downstream of the
+               resulting view is bounds-governed again. *)
+            record_trap e.loc (Printf.sprintf
+              "subslice bounds check remains: bounds cannot prove range \
+               {0..<%d} (the slice's compile-time minimum length)" min_len);
+            let i32z = const_int (i32_type context) 0 in
+            let neg  = build_icmp Icmp.Slt lo_v i32z "ss_neg" builder in
+            let inv  = build_icmp Icmp.Sgt lo_v hi_v "ss_inv" builder in
+            let hi_w = if type_of hi_v = usz then hi_v
+                       else build_zext hi_v usz "zext" builder in
+            let over = build_icmp Icmp.Ugt hi_w (slice_len fat) "ss_over" builder in
+            let bad  = build_or (build_or neg inv "ss_bad0" builder) over "ss_bad" builder in
+            emit_trap_when bad ~bad_name:"ss_trap" ~ok_name:"ss_ok"
+          end
         end;
         finish_sub elem_ty (slice_ptr fat) lo_v hi_v (guaranteed_min lo_r hi_r)
       in
@@ -1422,8 +1488,21 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 raise (Error (Printf.sprintf "SliceOf: undefined variable '%s'" id))))
 
   | Unsafe e1 ->
-      (* Purely a type-checker gate (see Ast.Unsafe); codegen is transparent. *)
-      gen_expr locals e1
+      (* Mostly a type-checker gate (see Ast.Unsafe): for the pointer->slice
+         case this is fully transparent to codegen. For a SLICE/ARRAY-base
+         subslice whose bounds aren't statically provable (P4c-1), codegen
+         DOES look at unsafe_depth (below): inside unsafe, the runtime
+         check that would otherwise be emitted is skipped entirely, an
+         explicit "trust me" mirroring the pointer case's own semantics
+         (an unchecked length assertion), rather than requiring a genuine
+         relational domain to discharge a small number of cases like
+         tcp_echo's data-echo path or tcp_parse's checksum span (see
+         CLAUDE.md's P4c section for why those are correlated-bounds cases
+         plain intervals can't close). *)
+      incr unsafe_depth;
+      let r = gen_expr locals e1 in
+      decr unsafe_depth;
+      r
 
   | StructLit _ ->
       raise (Error "BUG: StructLit must be handled in gen_stmt / gen_global, not gen_expr")
@@ -1508,6 +1587,44 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                             (const_int i1t 0, body_bb) ]   (* element mismatch *)
                   "se_res" builder in
       (TypeBool, res)
+
+  | Call (("min" | "max") as fname, [a_e; b_e]) ->
+      (* Builtin (P4c-2): sync rule with type_inf.ml's Call case -- the
+         range computed here for the RESULT must match exactly (including
+         the asymmetric one-operand-known cases, see that case's comment),
+         or codegen could accept an access type_inf never proved. *)
+      let (at, av) = gen_expr locals a_e in
+      let (bt, bv) = gen_expr locals b_e in
+      let av = to_i32 av and bv = to_i32 bv in
+      let range_of (ae : Ast.expr) (aty : Ast.type_expr) =
+        match Const_env.bound_value ae with
+        | Some k -> Some (k, k + 1)
+        | None -> (match aty with TypeRefined (x, y) -> Some (x, y) | _ -> None)
+      in
+      let sentinel_lo = -1_000_000_000 and sentinel_hi = 1_000_000_000 in
+      let ra = range_of a_e at and rb = range_of b_e bt in
+      let lo =
+        match ra, rb with
+        | Some (la, _), Some (lb, _) -> if fname = "min" then min la lb else max la lb
+        | _ -> if fname = "max" then
+                 (match ra, rb with
+                  | Some (la, _), None | None, Some (la, _) -> la
+                  | _ -> sentinel_lo)
+               else sentinel_lo
+      in
+      let hi =
+        match ra, rb with
+        | Some (_, ha), Some (_, hb) -> if fname = "min" then min ha hb else max ha hb
+        | _ -> if fname = "min" then
+                 (match ra, rb with
+                  | Some (_, ha), None | None, Some (_, ha) -> ha
+                  | _ -> sentinel_hi)
+               else sentinel_hi
+      in
+      let ret_ty = TypeRefined (lo, hi) in
+      let cmp = if fname = "min" then build_icmp Icmp.Slt av bv "mm_cmp" builder
+                else build_icmp Icmp.Sgt av bv "mm_cmp" builder in
+      (ret_ty, build_select cmp av bv "mm_res" builder)
 
   | Call (fname, args) ->
       (match Hashtbl.find_opt functions fname with
@@ -2176,6 +2293,7 @@ let declare_func ?prog_types fdef =
 
 let gen_program ?prog_types prog =
   trap_sites := [];  (* fresh per compilation (and per unit test) *)
+  unsafe_depth := 0;
   (* Pass 0: register struct and enum types -- must precede ltype_of_ast for TypeNamed *)
   List.iter (function
     | StructDef (name, fields, is_packed, align_opt) ->

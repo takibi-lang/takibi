@@ -182,7 +182,18 @@ fn build_data_echo(eth: [u8; 1514..], ihl: {20..<21}, data: []u8, data_len: i32)
         let n: i32 = data_len;
         let tcp_seg = eth[34..<54 + n];
 
-        slice_copy(tcp_seg[20..<20 + n], data);
+        // tcp_seg[20..<20+n]: tcp_seg's declared/proven minimum is only 20
+        // (the worst case n=0), but its ACTUAL runtime length is exactly
+        // 20+n by construction just above -- the type system only
+        // remembers the conservative minimum, not that exact construction
+        // history, so this specific subslice can't reuse the n>=0 fact
+        // already established (same-base needs lo_e to be a bare
+        // variable; here lo_e is the literal 20, not tcp_seg's own base).
+        // unsafe is appropriate: n was ALREADY bounds-checked above (the
+        // `if` this is nested in), so this is a real assertion backed by
+        // evidence one line up, not a guess -- see CLAUDE.md's P4c
+        // section (this is one of tcp_echo's two documented unsafe sites).
+        slice_copy(unsafe { tcp_seg[20..<20 + n] }, data);
 
         slice_copy(eth[0..<6], eth[6..<12]);
         slice_copy(eth[6..<12], our_mac as []u8);
@@ -348,7 +359,26 @@ fn main() {
                                                             if (data_len > 0 &&
                                                                 (flags & TCP_FLAG_ACK) != 0 &&
                                                                 seq == conn_rcv_nxt) {
-                                                                let data = frame[data_off..<data_off + data_len];
+                                                                // data_off + data_len == 34 + tcp_len always
+                                                                // (algebraic identity: data_off = 34 +
+                                                                // tcp_hdr_len, data_len = tcp_len -
+                                                                // tcp_hdr_len), which fits frame's capacity --
+                                                                // but data_off and data_len are tracked as two
+                                                                // INDEPENDENT ranges, so combining them loses
+                                                                // that correlation (data_len's own Sub-derived
+                                                                // range even has a spuriously negative lower
+                                                                // bound, since it can't see the
+                                                                // tcp_len>=tcp_hdr_len guard that makes it
+                                                                // real). The `data_len > 0` check just above
+                                                                // is the actual runtime evidence; unsafe here
+                                                                // is a documented assertion backed by it, not
+                                                                // a guess -- see CLAUDE.md's P4c section (the
+                                                                // other of tcp_echo's two documented unsafe
+                                                                // sites; this is exactly the pattern that
+                                                                // would need a genuine relational/
+                                                                // difference-constraint domain to prove
+                                                                // outright, deliberately deferred).
+                                                                let data = unsafe { frame[data_off..<data_off + data_len] };
                                                                 if (build_data_echo(frame, ihl, data, data_len) == 1) {
                                                                     should_tx = 1;
                                                                     tx_len = 14 + ihl + 20 + data_len;

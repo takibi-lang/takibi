@@ -110,7 +110,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            (* Pointer arithmetic: ptr - int -> returns the same pointer type. TIo is a value type, excluded.
               Range propagation (sync rule with llvm_gen, as for Add):
                 {a..<b} - {c..<d} -> {a-d+1..<b-c}
-                {a..<b} - k       -> {a-k..<b-k} *)
+                {a..<b} - k       -> {a-k..<b-k}
+                k - {c..<d}       -> {k-d+1..<k-c+1}  (k a literal; symmetric
+                                      with Add's both-directions handling --
+                                      what makes `40 - ihl` carry ihl's
+                                      Band/min-derived range through to
+                                      "remaining room" for a chained clamp,
+                                      see CLAUDE.md's P4c section) *)
            (match repr t1 with
             | TPtr _ ->
                 unify_at e2.loc t2 TI32;
@@ -127,9 +133,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                           unify_at e2.loc (canon_ty t2) TI32;
                           TI32))
             | _ ->
-                let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
-                unify_at e.loc ct1 ct2;
-                ct1)
+                (match e1.desc, repr t2 with
+                 | IntLit k, TRefinedInt (c, d) ->
+                     unify_at e1.loc t1 TI32;
+                     TRefinedInt (k - d + 1, k - c + 1)
+                 | _ ->
+                     let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
+                     unify_at e.loc ct1 ct2;
+                     ct1))
        | Mul ->
            (* Range propagation: {a..<b} * k (k a positive literal) ->
               {a*k..<(b-1)*k+1} -- what makes `tcp_hdr_len = doff * 4` carry
@@ -173,7 +184,22 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            check_cond e1.loc t1;
            check_cond e2.loc t2;
            TBool
-       | Bor | Bxor | Band | Shr | Shl ->
+       (* Range propagation: x & k -> {0..<k+1} when k is a non-negative
+          literal mask. Sound regardless of x's own sign or range: bitwise
+          AND with a non-negative value can only clear bits, so the result
+          is always in [0, k] in two's complement, for ANY x (a negative x
+          like -1 = all-ones still yields x & k <= k). Symmetric (k may be
+          either operand). Sync rule: llvm_gen.ml's BinOp Band case must
+          compute the same thing -- change together. *)
+       | Band ->
+           let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
+           unify_at e.loc ct1 ct2;
+           (match e2.desc with
+            | IntLit k when k >= 0 -> TRefinedInt (0, k + 1)
+            | _ -> (match e1.desc with
+                    | IntLit k when k >= 0 -> TRefinedInt (0, k + 1)
+                    | _ -> ct1))
+       | Bor | Bxor | Shr | Shl ->
            let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
            unify_at e.loc ct1 ct2;
            ct1)
@@ -398,22 +424,55 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
         | Some k -> Some (k, k + 1)
         | None -> (match repr bt with TRefinedInt (a, b) -> Some (a, b) | _ -> None)
       in
-      (* Same-base rule: s[v + j ..< v + k] (same variable v, constant
-         offsets) has length exactly k - j, and lo <= hi holds iff j <= k --
-         regardless of v's value. This discharges the correlated-bounds
-         pattern (frame[data_off ..< data_off + 3]) that plain interval
-         reasoning cannot (it treats the two occurrences of v as
-         independent). io-qualified v is excluded: its two loads are
-         volatile and could disagree. Sync rule: llvm_gen's SliceOf
-         computes the same via the shared Ast.var_plus_const. *)
+      (* Same-base rule: s[v ..< v + w] (same variable v as the lo bound,
+         reused inside the hi bound) has lo <= hi and a guaranteed length
+         >= lower(w) -- for ANY w with a known non-negative lower bound,
+         not just a compile-time constant. This discharges the
+         correlated-bounds pattern plain interval reasoning cannot (which
+         treats the two occurrences of v as independent, so v's own
+         WORST-CASE upper bound looks like it could exceed v+w's
+         BEST-CASE lower bound, even though they can't actually both
+         happen at once since it's the same v): both
+         `frame[data_off ..< data_off + 3]` (w = a literal, wlo = 3
+         exactly) and `ip[ihl ..< ihl + tcp_len]` (w = another refined
+         variable, e.g. the result of a min()-clamp -- see CLAUDE.md's
+         P4c section) are this same shape; only the SOURCE of w's lower
+         bound differs. io-qualified v is excluded: its two loads are
+         volatile and could disagree. Sync rule: llvm_gen's SliceOf must
+         decompose hi_e identically. *)
+      (* w is restricted to a bare literal or a bare variable (not an
+         arbitrary expression): llvm_gen's mirror of this check must look
+         up w's range WITHOUT re-running codegen on it a second time (w
+         has already been evaluated once as part of hi_e itself), so it
+         can only use a direct table lookup, not a general re-inference --
+         keeping both sides to the same restriction is the sync rule. *)
       let same_base_len =
-        match Ast.var_plus_const lo_e, Ast.var_plus_const hi_e with
-        | Some (v1, j), Some (v2, k) when v1 = v2 && j <= k ->
-            let is_io = match StringMap.find_opt v1 tyenv with
-              | Some (t, _) -> (match repr t with TIo _ -> true | _ -> false)
-              | None -> false
+        match lo_e.desc with
+        | Var v1 ->
+            let w_opt = match hi_e.desc with
+              | BinOp (Add, { desc = Var v2; _ }, w) when v2 = v1 -> Some w
+              | BinOp (Add, w, { desc = Var v2; _ }) when v2 = v1 -> Some w
+              | _ -> None
             in
-            if is_io then None else Some (k - j)
+            (match w_opt with
+             | None -> None
+             | Some w ->
+                 let is_io = match StringMap.find_opt v1 tyenv with
+                   | Some (t, _) -> (match repr t with TIo _ -> true | _ -> false)
+                   | None -> false
+                 in
+                 if is_io then None
+                 else
+                   match w.desc with
+                   | IntLit k when k >= 0 -> Some k
+                   | Var w_name ->
+                       (match StringMap.find_opt w_name tyenv with
+                        | Some (t, _) ->
+                            (match repr t with
+                             | TRefinedInt (wlo, _) when wlo >= 0 -> Some wlo
+                             | _ -> None)
+                        | None -> None)
+                   | _ -> None)
         | _ -> None
       in
       (match repr vt with
@@ -579,6 +638,73 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            TBool
        | _ -> raise (TypeError (e.loc,
            "slice_eq expects 2 arguments: slice_eq(a, b)")))
+
+  | Call (("min" | "max") as fname, args) ->
+      (* Builtins (P4c-2): min(a,b)/max(a,b) on i32. Purely interval-domain
+         range propagation -- no relational reasoning. This is the tool for
+         clamping a wire-derived value against a compile-time buffer
+         capacity: `min(ihl, 20)` is provably <= 20 no matter what ihl
+         turns out to be at runtime, closing a gap a plain runtime bounds
+         check used to be the only answer for (see CLAUDE.md's P4c
+         section). Sync rule: llvm_gen.ml's Call case must compute the
+         identical range.
+
+         Each bound is derived independently, and each needs a DIFFERENT
+         amount of information -- this asymmetry is the actual content of
+         the rule, not a simplification:
+           min(a,b) <= a and <= b ALWAYS (definition of min), so if EITHER
+             operand's upper bound is known, that alone bounds the
+             result's upper side -- the OTHER operand may be totally
+             unconstrained. But min(a,b) could equal WHICHEVER operand is
+             smaller, so a LOWER bound requires BOTH operands' lower
+             bounds to be known (an unconstrained operand could always be
+             the one that's smaller, dragging the result down with it).
+           max is the mirror image: a lower bound needs only one operand
+             known (`max(tcp_len, 0)` proves >= 0 even though tcp_len
+             itself is a bare, unconstrained i32 parameter); an upper
+             bound needs both.
+         "Unknown" is represented with a wide sentinel range rather than
+         a genuine option type, so the result is always a plain
+         TRefinedInt: a subslice/index proof against any REAL buffer
+         capacity will correctly fail to close against a sentinel bound
+         (never falsely succeed), so this is a representational
+         convenience, not a soundness-relevant choice. *)
+      (match args with
+       | [a; b] ->
+           let at = infer_expr senv eenv tyenv fenv a in
+           let bt = infer_expr senv eenv tyenv fenv b in
+           unify_at a.loc (canon_ty at) TI32;
+           unify_at b.loc (canon_ty bt) TI32;
+           let range_of (ae : Ast.expr) (aty : ty) =
+             match Const_env.bound_value ae with
+             | Some k -> Some (k, k + 1)
+             | None -> (match repr aty with TRefinedInt (x, y) -> Some (x, y) | _ -> None)
+           in
+           let sentinel_lo = -1_000_000_000 and sentinel_hi = 1_000_000_000 in
+           let ra = range_of a at and rb = range_of b bt in
+           let lo =
+             match ra, rb with
+             | Some (la, _), Some (lb, _) ->
+                 if fname = "min" then min la lb else max la lb
+             | _ -> if fname = "max" then
+                      (match ra, rb with
+                       | Some (la, _), None | None, Some (la, _) -> la
+                       | _ -> sentinel_lo)
+                    else sentinel_lo
+           in
+           let hi =
+             match ra, rb with
+             | Some (_, ha), Some (_, hb) ->
+                 if fname = "min" then min ha hb else max ha hb
+             | _ -> if fname = "min" then
+                      (match ra, rb with
+                       | Some (_, ha), None | None, Some (_, ha) -> ha
+                       | _ -> sentinel_hi)
+                    else sentinel_hi
+           in
+           TRefinedInt (lo, hi)
+       | _ -> raise (TypeError (e.loc,
+           Printf.sprintf "%s expects 2 arguments: %s(a, b)" fname fname)))
 
   | Call (fname, args) ->
       (* Try direct call (function name -> fenv) first *)
@@ -1112,7 +1238,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      BEFORE consulting fenv, so a same-named user/extern function would be
      silently unreachable -- reject the definition instead. *)
   let check_reserved_fn loc name =
-    if name = "slice_copy" || name = "slice_eq" then
+    if name = "slice_copy" || name = "slice_eq" || name = "min" || name = "max" then
       raise (TypeError (loc,
         Printf.sprintf "'%s' is a compiler builtin and cannot be redefined" name))
   in

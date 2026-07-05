@@ -1056,6 +1056,199 @@ Files: `examples/common/inet_checksum.tkb`, `examples/common/netutil.tkb`
 (no-trap list correction + 2 new forbid_trap_* registrations), 2 new
 unit-test cases.
 
+### P4c: Closing the P4 Census -- Band Masking, min/max, Same-Base
+### Generalization, and unsafe Extended to Slice Bases
+
+Goal stated at the top of P4: every idiom found in http_server (and, by
+extension, the other protocol examples) should land in exactly one of two
+buckets -- (1) compiles fine without `--forbid-trap` and traps on
+violation, unchanged from today, or (2) compiles clean WITH
+`--forbid-trap`, either because it's genuinely proven or because an
+`unsafe { ... }` marks an explicit, evidence-backed assertion. No third
+"silently checked, --forbid-trap just rejects it forever" bucket should
+exist without a documented reason. **Result: 43 of 44 examples are now
+--forbid-trap clean** (up from 40/44 after P4b); the one holdout
+(tcp_parse) is a deliberate exception with a recorded reason, not a gap.
+
+**enum.tkb: Color made non-exhaustive.** The residual cast-check trap
+(`raw as Color`, `raw: u8` with no static evidence bounding it to
+{0,1,2}) was correct, not a bug -- but it also wasn't the RIGHT fix to
+just accept forever. The user's insight: this demo's own cast site has no
+evidence at all, so the type-level choice matching REALITY is "any byte
+value is a legal Color" (open-ended), which is exactly what `_;`
+(non-exhaustive) already means. Color gained `_;`; `color_name`'s match
+gained a required `_` arm (compiler-enforced for non-exhaustive enums).
+**Important distinction surfaced while investigating this**: a `match`
+with no `_` on an EXHAUSTIVE enum compiles its uncovered case to LLVM
+`unreachable`, not `llvm.trap` -- so the cast's check is not a redundant
+courtesy alongside match exhaustiveness, it's the ONLY thing standing
+between an invalid value and genuine undefined behavior (the optimizer is
+free to assume `unreachable` never executes). This is why `unsafe { raw
+as Color }` (skipping an exhaustive-enum cast's check) is a materially
+more dangerous escape hatch than the slice/pointer cases below, and was
+deliberately NOT added -- non-exhaustive enum is the existing, already-
+sound tool for "I don't have evidence, and I'm ok with any value."
+
+**Band (`&`) mask range propagation** (`lib/type_inf.ml` + `lib/llvm_gen.ml`
+BinOp Band case, sync rule): `x & k` for a non-negative literal mask k ->
+`{0..<k+1}`, regardless of x's own sign or range (bitwise AND with a
+non-negative value can only clear bits, so the result is always in
+[0, k] in two's complement, for ANY x). Symmetric (k may be either
+operand). This is what gives `(byte & 0x0f) * 4` (the ubiquitous IHL
+field extraction) a real range with NO prior narrowing at all -- `& 0x0f`
+alone gives {0..<16}, and P4a's existing Mul rule carries that to
+{0..<61}.
+
+**`min(a,b)` / `max(a,b)` builtins** (compiler builtins, reserved names,
+dispatched like slice_copy/slice_eq): the tool for clamping a wire-derived
+value against a compile-time buffer capacity -- `min(ihl, 20)` is
+provably <= 20 no matter what ihl turns out to be at runtime. The
+asymmetry in what each bound needs is the actual content of the rule, not
+an implementation shortcut:
+- `min(a,b) <= a` and `<= b` ALWAYS (definition of min), so if EITHER
+  operand's upper bound is known, that alone bounds the result's upper
+  side -- the other operand may be completely unconstrained.
+- A LOWER bound for min needs BOTH operands' lower bounds known (an
+  unconstrained operand could always be the one that's smaller, dragging
+  the result down with it).
+- max is the mirror image: `max(tcp_len, 0)` proves >= 0 even though
+  tcp_len itself is a bare, unconstrained i32 parameter (lower bound needs
+  only one operand known); an upper bound needs both.
+"Unknown" is represented with a wide sentinel range (+-1 billion) rather
+than a genuine option type, so the result is always a plain TRefinedInt --
+a subslice/index proof against any REAL buffer capacity correctly fails to
+close against a sentinel (never falsely succeeds), so this is a
+representational convenience, not a soundness-relevant choice.
+
+**Two latent gaps found and fixed while building this** (both were
+pre-existing, surfaced by exercising min/max against real code, not
+introduced by it):
+1. `TRefinedInt` had no subtyping rule into `TUsize` at all (only into
+   TU64/TU32/etc.) -- `let b: usize = a & 63;` (a: usize) failed to
+   unify once Band started returning a refined type. Fixed by adding
+   `TRefinedInt (lo, _), TUsize when lo >= 0 -> ()` alongside the
+   existing TU64 rule in `lib/types.ml`.
+2. Sub only propagated ranges when checking its FIRST operand
+   (`TRefinedInt (a,b), _ -> ...`) for refinement -- `40 - ihl` (literal
+   MINUS a refined variable) fell through to plain i32, asymmetric with
+   Add (which already handles both directions). Added the mirror case:
+   `k - {c..<d} -> {k-d+1..<k-c+1}` for a literal k, matching Add's
+   existing both-directions handling (sync rule, both files).
+
+**Same-base rule generalized from constant offsets to any non-negative
+lower-bounded expression** (`lib/type_inf.ml` + `lib/llvm_gen.ml` SliceOf,
+sync rule): P4a's same-base rule only recognized `s[v ..< v + k]` for a
+literal k. Needed generalizing the moment a REAL min/max-clamped variable
+appeared as the offset (`ip[ihl ..< ihl + tcp_len]`): plain interval
+bound_range on `ihl` and `ihl + tcp_len` independently treats the two
+occurrences of `ihl` as unrelated, so `ihl`'s own worst case (its upper
+bound) can look like it exceeds `ihl + tcp_len`'s best case (its lower
+bound) even though they're the same variable and can't actually diverge
+like that. The rule now accepts `s[v ..< v + w]` for ANY w (not just a
+literal) whose own range has a known non-negative lower bound -- a
+literal's lower bound IS the literal itself, so this subsumes the old
+rule exactly, no regression. **Deliberate implementation restriction**:
+w must be a bare literal or a bare variable, not an arbitrary expression --
+llvm_gen's mirror of this check must look up w's range via a direct table
+lookup (locals/globals/narrowing_ctx), NOT by calling gen_expr/gen_bound
+on it again, because w has already been evaluated once as part of hi_e
+itself; re-evaluating an arbitrary expression a second time would risk
+duplicating side effects (a general function call, not just a harmless
+redundant load). Both sides of the sync rule enforce the same
+restriction.
+
+**Honest negative result: CHAINED/correlated clamps do not close.**
+Tried extending the above to prove tcp_parse's `ip[ihl ..< ihl + tcp_len]`
+fully, using `ihl = min(raw_ihl & 0x3f, 20)` and
+`tcp_len = min(tcp_len_raw, 40 - ihl)` (room derived from the ALREADY-
+clamped ihl). This does NOT reach zero trap sites: `tcp_len`'s own
+{0..<~41} range (from the min/max combination) is correct in isolation,
+but combining it with `ihl` via ordinary interval Add loses the fact that
+`tcp_len <= 40 - ihl` was how it was DERIVED -- the combined upper bound
+computed independently (`ihl`'s own worst case + `tcp_len`'s own worst
+case) overshoots the true capacity (40), because that specific worst-case
+COMBINATION can't actually co-occur (it would require `tcp_len` to be
+large exactly when `ihl` is ALSO large, but `tcp_len`'s clamp was built
+FROM `ihl`, so they move together, not independently). This is a genuine,
+different-in-KIND limitation from anything else P4c-2 closes: it's the
+same class of "two variables secretly correlated via subtraction" problem
+as tcp_echo's `data_off`/`data_len`, just one level more indirect (through
+an intermediate `room` variable). Confirmed empirically (not just argued)
+via a regression test (`ftp4c_chained` in test_takibi.ml) that DOES record
+exactly 1 trap site despite every individual clamp being provably correct
+on its own. This is the precise, now twice-confirmed boundary of what
+interval + same-base + min/max can do without a genuine relational
+(difference-constraint) domain or VC+SMT.
+
+**unsafe extended to slice/array-BASE subslice construction, not just
+pointer-base** (`lib/llvm_gen.ml`; deliberately NO type_inf.ml change --
+see below): previously `unsafe { ... }` only gated pointer -> slice
+construction (a length assertion with zero evidence). Extended the SAME
+gate to a slice/array-base subslice whose bounds fail the interval/same-
+base proof: `unsafe { s[a..<b] }` now SKIPS the runtime check entirely
+when `s` is already a slice, an explicit "trust me" with the identical
+semantics as the pointer case, closing exactly the correlated-bounds
+residue found above (tcp_echo's two sites) without needing a relational
+domain at all. **Type_inf.ml needed zero changes**: unsafe doesn't grant
+new STATIC information (the computed type/minimum is identical whether
+checked or unsafe-skipped -- skipping the check just means "don't verify
+what was already computed," not "know something new"), so the type
+computation in SliceOf is completely unaffected by unsafe; only
+llvm_gen's decision of whether to EMIT the check changes. Implementation:
+a module-level `Llvm_gen.unsafe_depth` mirrors type_inf's counter (reset
+per compilation like `trap_sites`), incremented/decremented in the
+`Unsafe` codegen case (previously fully transparent); `sub_of_slice`
+checks it before emitting the check/calling `record_trap`. Applied to
+tcp_echo's two documented sites (`tcp_seg[20..<20+n]` and
+`frame[data_off..<data_off+data_len]`), both now with comments explaining
+the specific evidence backing the assertion (an adjacent runtime check,
+or an algebraic identity that the type system can't see but a human can
+verify). NOT applied to enum casts (see above) or to tcp_parse (see next).
+
+**tcp_parse's checksum span: fixed by VALIDATING, not asserting away.**
+Initially left CHECKED (not unsafe) and flagged back to the user as a
+judgment call -- wrapping `ip[ihl..<ihl+tcp_len]` in unsafe would have
+silently traded away real protection against a realistic corruption
+class (a malformed `ip_total_len`) for --forbid-trap cleanliness this
+file was never promised to have. **The user's response identified the
+actually-correct fix**: a real binary parser cannot assume its input is
+well-formed, so add the SAME validation icmp_echo/tcp_echo/http_server
+already do (`if (ip_total_len >= ihl && ip_total_len <= 40)`), report a
+malformed segment on failure, and only compute the checksum in the
+validated branch. This is not a workaround -- it is the missing input
+validation any parser needs regardless of the type system, and it
+happens to ALSO make the checksum span fully provable: once
+`ip_total_len` is narrowed to `{ihl..<41}`, `tcp_len = ip_total_len - ihl`
+gets a real `{0..<21}` range via ordinary Sub propagation (both operands
+now refined), and the same-base rule closes `ip[ihl..<ihl+tcp_len]`
+outright -- no unsafe, no relational domain, zero trap sites. **All 44
+examples are now --forbid-trap clean.** This is arguably the most
+important finding of the whole P4 arc: the "one remaining case" wasn't a
+type-system gap at all -- it was a missing `if` that any correct parser
+needed anyway, and the type system was correctly refusing to let a
+genuinely unvalidated wire value drive a buffer access. Worth remembering
+before reaching for unsafe or a bigger abstract domain: check whether the
+REAL fix is just the input validation the code was missing regardless.
+
+**Practical implication for the enum finding**: the two enum-cast unsafe
+questions (whether to extend unsafe to `raw as Color`-style checked casts
+in general, and whether enum.tkb's own demo should use it) remain
+deliberately unresolved -- flagged as dangerous (unreachable-based, not
+trap-based) rather than implemented. Revisit only with a concrete need
+distinct from "make this specific demo forbid-trap clean," which
+non-exhaustive already solved more honestly.
+
+Files: `examples/enum/enum.tkb` (non-exhaustive Color + match wildcard),
+`lib/type_inf.ml` + `lib/llvm_gen.ml` (Band propagation, min/max builtins,
+Sub literal-minus-refined case, same-base generalization, reserved names),
+`lib/types.ml` (TRefinedInt->TUsize subtyping fix), `examples/ip_parse/
+ip_parse.tkb` (min-clamp, now fully proven), `examples/tcp_parse/
+tcp_parse.tkb` (ip_total_len validation, now fully proven),
+`examples/tcp_echo/tcp_echo.tkb` (two unsafe-wrapped sites),
+`scripts/run_qemutest.sh` (enum/ip_parse/tcp_parse/tcp_echo all moved
+back into the no-trap list; 3 new forbid_trap_* registrations), 7 new
+unit-test cases including the honest-negative-result regression.
+
 ### Synchronization Primitive Design and Current Limitations
 
 Synchronization primitives have a 3-layer structure:
