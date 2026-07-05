@@ -65,7 +65,7 @@ fn pendsv_dispatch(frame_sp: usize) -> usize {
 }
 
 fn task_producer() {
-    for i in 0..<5 {
+    for i: i32 in 0..<5 {
         mutex_lock(&ch.mutex);
         while (ch.item_count >= 1) {
             cond_wait(&ch.not_full, &ch.mutex);
@@ -82,7 +82,7 @@ fn task_producer() {
 }
 
 fn task_consumer() {
-    for i in 0..<5 {
+    for i: i32 in 0..<5 {
         mutex_lock(&ch.mutex);
         while (ch.item_count == 0) {
             cond_wait(&ch.not_empty, &ch.mutex);

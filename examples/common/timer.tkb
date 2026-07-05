@@ -6,7 +6,7 @@ extern fn task_exit_stub();
 
 fn setup_task_stack(s: *u8, f: fn() -> void) -> usize {
     let base: *u8 = s - 272;
-    for i in 0..<272 {
+    for i: i32 in 0..<272 {
         *(base + i) = 0 as u8;
     }
     let p_elr: *fn() -> void = (base + 256) as *fn() -> void;

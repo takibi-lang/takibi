@@ -63,7 +63,7 @@ fn pendsv_dispatch(frame_sp: usize) -> usize {
 }
 
 fn task_a() {
-    for i in 0..<3 {
+    for i: i32 in 0..<3 {
         sem_wait(&shared.mutex);
         shared.count = shared.count + 1;
         sem_post(&shared.mutex);
@@ -74,7 +74,7 @@ fn task_a() {
 }
 
 fn task_b() {
-    for i in 0..<3 {
+    for i: i32 in 0..<3 {
         sem_wait(&shared.mutex);
         shared.count = shared.count + 1;
         sem_post(&shared.mutex);

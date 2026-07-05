@@ -96,6 +96,16 @@ every invocation before this was fixed. Order-only prerequisites are still built
 but don't affect whether the depending target itself is considered stale, so make's normal
 `.tkb`-timestamp-based skip-if-unchanged logic works correctly again.
 
+**Consequence worth knowing, found much later**: this also means `make check` without `make
+clean` first can give a FALSE PASS for a compiler change that alters accept/reject behavior
+or codegen for an EXISTING, unchanged `.tkb` file -- its `.o`/`.elf` from a previous run (built
+with the OLDER compiler) is never recompiled, since only the `.tkb` file's own timestamp is
+consulted. Run `make clean && make check` (not just `make check`) after any compiler change
+that could plausibly affect files you didn't directly edit -- see "The Undetermined-For-Loop
+-Counter Case Is Now Also a Compile Error" below for the concrete incident that surfaced this
+(a `-k check` run without `make clean` reported zero failures; `make clean && make check`
+immediately found 16 affected files it had silently missed).
+
 **Known dune footgun found while wiring up `-j`**: running `dune build` and `dune test`
 concurrently (e.g. two independent Make recipes under `make -j`) can corrupt/race on
 `_build/.lock` ("Unexpected contents of build directory global lock file"), non-deterministically
@@ -1303,12 +1313,12 @@ different, more invasive change**: making `unify`'s own `TRefinedInt`
 -into-concrete-type subtyping rule retroactively pin an unresolved `base`
 on first concrete use, rather than only checking bounds. This touches
 `types.ml`'s core `unify` function directly -- used far more broadly than
-`For`'s own logic -- so it was deliberately NOT done as part of this
-change. The alternative (and, on reflection, probably preferable) way to
-close this gap is surface syntax letting the programmer spell the
-counter's base directly (e.g. `for i: u8 in 0..<4`), rather than teaching
-inference to guess it from indirect, easy-to-miss body usage -- proposed
-as a follow-up, not yet implemented as of this section.
+`For`'s own logic -- so it was deliberately NOT done. The alternative
+(and, on reflection, preferable) way to close this gap is surface syntax
+letting the programmer spell the counter's base directly, rather than
+teaching inference to guess it from indirect, easy-to-miss body usage --
+implemented immediately after this as `for i: T in ...`, see the next two
+sections.
 
 **Verification**: `test/test_takibi.ml` gained two `type_inf`-level
 (direct `program_types` inspection, not just "does it compile") tests
@@ -1318,6 +1328,127 @@ so a future change to the subtyping rule above has to consciously update
 the second test's expected result, not silently drift. Full `make check`
 (langcheck, 381 unit tests, stm32build, all 125 qemutest cases) passes
 with zero regressions.
+
+### for i: T in lo..<hi -- Explicit Base Annotation on the Loop Counter
+
+Direct follow-up, same session: since deferred, usage-driven inference
+cannot close the common bare-literal-bounds gap (previous section), the
+programmer needs a way to spell the counter's base directly. New surface
+syntax: `for i: u8 in 0..<4 { ... }` gives `i` the type
+`{0..<4 as u8}` -- exactly, both the width AND the compile-time bounds
+proof, unlike the pre-existing `for i in 0..<(4 as u8) { ... }`
+cast-based workaround (confirmed empirically to already work, at a real
+cost: casting the bound literal makes it a `Cast` node, which
+`Const_env.bound_value` doesn't recognize as a constant, AND `Cast` to a
+non-refined-syntax target always discards the source's proven range --
+see the "Refinement Numerical Type" section's Cast-and-proof-loss
+discussion -- so the cast-based form gets `i: u8` but reopens a trap site
+that the annotated form does not).
+
+**Grammar**: `Ast.For` gained a second field,
+`ident * type_expr option * expr * expr * stmt list` (the annotation sits
+right after the identifier, matching source order and this language's
+existing `IDENT COLON type_expr` convention for `let`/parameters). The
+annotation's type is restricted to `int_base_type_expr` (the same 9
+primitive integer types `{lo..<hi as base}` accepts), not the full
+`type_expr` grammar -- a loop counter's type is always one of these by
+convention, and a pointer/array/struct annotation would be nonsensical.
+No new tokens needed (`COLON` and `int_base_type_expr` already existed);
+`FOR IDENT COLON int_base_type_expr IN ...` is unambiguous against the
+existing `FOR IDENT IN ...` (single-token lookahead after `IDENT`).
+
+**Type-checking**: in `type_inf.ml`'s `For` case, an annotation unifies
+`base_raw` against `of_ast ann_ty` IMMEDIATELY, right after the bounds are
+unified against each other and before anything else -- this makes
+`base_raw` concrete from the very start, so the deferred "still
+unresolved after the body" path from the previous section simply never
+fires for an annotated loop (its `TVar (Unbound _)` branch is dead code
+for this case, reached only when there's no annotation and nothing else
+pinned it either). A conflicting bound (`for i: u8 in 0..<n` where
+`n: u16`) surfaces as an ordinary "cannot unify" error, the same way any
+other concrete type mismatch is caught -- no special-casing needed.
+
+**A real soundness gap found and closed while implementing this, not
+after**: a bare-literal for-loop bound has no inherent width of its own,
+so when BOTH bounds are recognized by `Const_env.bound_value` (i.e. the
+counter gets wrapped in `TRefinedInt(lo, hi, base)`) AND an explicit
+annotation is given, the bounds must be validated against the ANNOTATED
+base -- without this, `for i: u8 in 0..<300 { ... }` would silently
+construct `TRefinedInt(0, 300, TU8)` and wrap around at codegen time via
+`const_int i8_type 300`, exactly the class of bug the `{lo..<hi as
+base}` surface syntax's own `check_refined_base_range` already exists to
+prevent for the OTHER place a base gets attached to a literal bound.
+Fixed by adding an analogous `for_annotation_bound_range`/
+`check_for_annotation_range` pair in `type_inf.ml` (sync rule with
+`parser.mly`'s `base_bound_range`/`check_refined_base_range` -- same
+reasoning and the exact same per-base numeric ranges, just operating on
+plain OCaml `int` bounds already narrowed via `Const_env.bound_value`
+against a `Types.ty` base at TYPE-CHECK time, rather than `Int64.t`
+bounds against an `Ast.type_expr` base at PARSE time for the literal
+syntax).
+
+**Verification**: `test/test_takibi.ml` gained parser/type-check tests
+(the annotation parses for all 9 bases, gives the exact expected
+`TRefinedInt`, rejects an out-of-range bound, rejects a conflicting
+bound) and a codegen test confirming `for i: u8 in 0..<4 { buf[i] = ...;
+}` proves the array access with ZERO trap sites (unlike the cast-based
+workaround, which has one).
+
+### The Undetermined-For-Loop-Counter Case Is Now Also a Compile Error
+
+With the annotation syntax above in place, the one remaining reason the
+previous two sections kept a SILENT i32 default for for-loop counters
+(distinguishing them from `let`/`let mut`'s hard error) disappears: there
+is now an explicit escape hatch, so guessing is no longer the only
+alternative to an error. `type_inf.ml`'s `For` case's post-body check
+changed from silently defaulting an unresolved `base_raw` to i32, to
+raising the same class of error `let`/`let mut` already raise:
+`"cannot determine a concrete type for for-loop counter '<name>': add an
+explicit type annotation (e.g. `for <name>: i32 in ...`)"`.
+
+**This is a genuinely wide-reaching, mechanical change, not just a
+policy flip**: MOST existing for-loops in this codebase use a bare
+literal bound (`for i in 0..<8`) and never pass the counter to anything
+with a concrete type of its own (`buf[i]`/`arr[i]` alone never pins a
+type -- see the previous two sections for exactly why), so this newly
+requires an explicit `: i32` annotation across roughly 20 example files.
+Every one was updated (`ip_parse`-style protocol files were unaffected --
+their loops were already migrated to slices/`ForEach` earlier in this
+project's history, or their bounds were already named constants/runtime
+variables with their own concrete type, which was never the problem
+case).
+
+**A serious, unrelated methodology gap found while verifying this,
+important enough to record on its own**: an initial `make -k check` run
+(without `make clean` first) reported ZERO new failures, which was
+WRONG -- a subsequent `make clean && make check` found 16 more affected
+files the first run had silently missed entirely. Root cause: per this
+file's own Makefile section, every per-example object-file rule depends
+on `dune build` as an ORDER-ONLY prerequisite specifically so that
+rebuilding the COMPILER doesn't force every example to recompile on
+every invocation (a deliberate, previously-documented optimization).
+The side effect, never previously exercised because no earlier compiler
+change in this project's history happened to change ACCEPT/REJECT
+behavior for code that was never touched: `make check` without `make
+clean` first only recompiles `.tkb` files that changed, or that have
+never been built -- an unchanged `.tkb` file's `.o`/`.elf` from a
+PREVIOUS run (built with an OLDER version of the compiler) is treated as
+up to date and never recompiled, so its stale, already-compiled binary
+silently "passes" regardless of what the CURRENT compiler would do with
+it. **Any compiler change that could plausibly alter accept/reject
+behavior or generated code for existing, unchanged example files now
+needs `make clean` before `make check` to get an honest signal** --
+this was not needed for changes scoped to specific example files (which
+naturally force their own rebuild), but IS needed for compiler-wide
+policy changes like this one. Confirmed concretely: `examples/fibonacci/
+fibonacci.tkb` (completely untouched by this change) passed under a
+non-clean `-k check` and failed immediately after `make clean`.
+
+**Verification**: after `make clean`, a full `make check` (langcheck, 388
+unit tests, stm32build, all 125 qemutest cases including every
+`forbid_trap_*` check) passes with zero regressions -- the first fully
+honest, complete verification of this entire change (the pre-`make
+clean` run's "zero failures" was a false negative, not a real pass).
 
 ### Soundness Condition for % Range Propagation
 

@@ -87,7 +87,13 @@ and stmt_desc =
   | Let of bool * ident * type_expr option * expr option  (* is_mutable, name, type, init *)
   | If of expr * stmt list * stmt list
   | While of expr * stmt list
-  | For of ident * expr * expr * stmt list  (* for i in lo..<hi { body } *)
+  | For of ident * type_expr option * expr * expr * stmt list
+      (* for i [: T] in lo..<hi { body } -- the optional T is an explicit
+         base-type annotation on the loop counter (e.g. `for i: u8 in
+         0..<4 { ... }`), letting the programmer pin the counter's type
+         directly instead of relying on inference to guess it from the
+         bounds/body usage (which, for the common bare-literal-bounds
+         case, cannot: see CLAUDE.md's for-loop sections for why). *)
   | ForEach of ident * expr * stmt list
       (* for x in s { body } -- element iteration over a slice. The slice
          expression is evaluated ONCE at loop entry (snapshot semantics,
@@ -194,7 +200,7 @@ let written_names (stmts : stmt list) : string list =
     | If (c, t, el)          -> go_expr c;
                                 List.iter go_stmt t; List.iter go_stmt el
     | While (c, b)           -> go_expr c; List.iter go_stmt b
-    | For (n, lo, hi, b)     -> add n; go_expr lo; go_expr hi;
+    | For (n, _, lo, hi, b)  -> add n; go_expr lo; go_expr hi;
                                 List.iter go_stmt b
     | ForEach (n, se, b)     -> add n; go_expr se; List.iter go_stmt b
     | Break | Continue       -> ()

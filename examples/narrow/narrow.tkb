@@ -19,7 +19,7 @@ fn write_entry(i: {0..<8}, c: u8) {
 }
 
 fn print_buf() {
-    for i in 0..<8 {
+    for i: i32 in 0..<8 {
         uart_putc(buf[i]);  // i: {0..<8} -> bounds check elided
     }
     uart_putc('\r');

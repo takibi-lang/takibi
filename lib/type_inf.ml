@@ -122,6 +122,37 @@ let rec is_undetermined t =
   | TRefinedInt (_, _, base) -> is_undetermined base
   | _ -> false
 
+(* Mirrors lib/parser.mly's base_bound_range/check_refined_base_range
+   (sync rule, same reasoning, different representation): that check
+   validates an Int64.t bound against an Ast.type_expr base at PARSE time
+   for the literal `{lo..<hi as base}` surface syntax; this validates a
+   plain OCaml int bound (already narrowed via Const_env.bound_value)
+   against a Types.ty base at TYPE-CHECK time for `for i: base in
+   lo..<hi`'s explicit annotation. Needed for the same reason: a bare
+   -literal for-loop bound has no inherent width of its own, so the
+   annotation is the ONLY source of width information, and a too-wide
+   bound (e.g. `for i: u8 in 0..<300`) would otherwise silently wrap at
+   codegen time via `const_int i8_type 300`. *)
+let for_annotation_bound_range = function
+  | TI8    -> (-128, Some 128)
+  | TI16   -> (-32768, Some 32768)
+  | TI32   -> (-2147483648, Some 2147483647)
+  | TI64   -> (min_int, None)
+  | TU8    -> (0, Some 256)
+  | TU16   -> (0, Some 65536)
+  | TU32   -> (0, Some 4294967296)
+  | TU64   -> (0, None)
+  | TUsize -> (0, Some 4294967296)
+  | _ -> (min_int, None) (* unreachable: only reached via int_base_type_expr's 9 bases *)
+
+let check_for_annotation_range loc lo hi base =
+  let (blo, bhi_opt) = for_annotation_bound_range base in
+  let out_of_range = lo < blo || (match bhi_opt with Some bhi -> hi > bhi | None -> false) in
+  if out_of_range then
+    raise (TypeError (loc, Printf.sprintf
+      "for-loop bound {%d..<%d} does not fit the annotated type '%s'"
+      lo hi (to_string base)))
+
 (* Extract a small-number-scoped compile-time integer from an expression,
    iff it is exactly an integer literal that fits natively (see
    Ast.int_of_intlit's comment for why IntLit's Int64.t payload cannot
@@ -1240,11 +1271,11 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         (tyenv, raw_locals) body
       in
       (tyenv, raw_locals')
-  | For (name, lo_expr, hi_expr, body) ->
+  | For (name, ty_opt, lo_expr, hi_expr, body) ->
       let lo_ty = infer_expr senv eenv tyenv fenv lo_expr in
       let hi_ty = infer_expr senv eenv tyenv fenv hi_expr in
-      (* The loop counter's base now follows the BOUNDS' own type, instead
-         of hardcoding TI32 (the same generalization already applied to
+      (* The loop counter's base follows the BOUNDS' own type, instead of
+         hardcoding TI32 (the same generalization already applied to
          min/max/Band/Mod/narrowing) -- unify lo/hi against EACH OTHER via
          canon_ty, mirroring min/max's Call case exactly. This was a real,
          found gap, not just a style choice: `for i in 0..<s.len` (s.len:
@@ -1257,22 +1288,50 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          refinement-producing site in this file. *)
       let base_raw = canon_ty lo_ty in
       unify_at hi_expr.loc base_raw (canon_ty hi_ty);
-      (* Deliberately NOT validated/defaulted yet (require_integer no
-         longer does either eagerly -- see its own comment): base_raw may
-         still be resolved by how `name` is used INSIDE the body below
-         (e.g. passed to a function with a concrete-typed parameter),
-         exactly like ordinary HM inference lets a shared unification
-         variable be pinned by any later constraint. Deferred to
-         check_for_counter_type, called AFTER the body, mirroring
+      (* Explicit annotation (`for i: u8 in ...`): pins base_raw
+         IMMEDIATELY, same as any other concrete-type unification --
+         after this, base_raw is no longer a candidate for the deferred
+         "still unresolved" path below at all. A conflicting bound (e.g.
+         `for i: u8 in 0..<n` where n: u16) surfaces as an ordinary
+         "cannot unify" error here, same as anywhere else a concrete type
+         mismatch is caught. *)
+      (match ty_opt with
+       | Some ann_ty -> unify_at lo_expr.loc base_raw (of_ast ann_ty)
+       | None -> ());
+      (* Deliberately NOT validated/defaulted yet when there's no
+         annotation: base_raw may still be resolved by how `name` is used
+         INSIDE the body below (e.g. passed to a function with a
+         concrete-typed parameter), exactly like ordinary HM inference
+         lets a shared unification variable be pinned by any later
+         constraint. Deferred to the check after the body, mirroring
          check_undetermined_lets's identical "let later constraints run
-         first" reasoning. *)
+         first" reasoning. NOTE (see CLAUDE.md): for the single most
+         common shape, `for i in 0..<4` with both bounds bare literals,
+         this deferral has NO effect in practice, because such bounds get
+         wrapped in TRefinedInt below, whose subtyping into a concrete
+         type ignores the base field entirely -- the annotation syntax
+         (`ty_opt`) is precisely the fix for that residual gap. *)
       (* Refine to TRefinedInt when both bounds are compile-time integers:
          a literal, or the name of a Const_env global constant (sound because
          check_const_shadowing rejects any local reusing a constant name).
          For runtime variables, conservatively use the bounds' own base.
          Sync rule: llvm_gen.ml's For case makes the same decision through
          the same Const_env.bound_value helper; keep them identical. *)
-      let idx_ty = match Const_env.bound_value lo_expr, Const_env.bound_value hi_expr with
+      let const_bounds = (Const_env.bound_value lo_expr, Const_env.bound_value hi_expr) in
+      (* If both bounds are compile-time constants AND an explicit
+         annotation was given, validate the bounds actually fit the
+         annotated base -- a bare-literal bound has no inherent width of
+         its own, so without this check `for i: u8 in 0..<300` would
+         silently construct TRefinedInt(0, 300, TU8), wrapping around at
+         codegen time exactly like the {lo..<hi as base} surface syntax's
+         own bound check exists to prevent (see check_refined_base_range
+         in parser.mly, sync rule -- same reasoning, different
+         representation and call site). *)
+      (match ty_opt, const_bounds with
+       | Some _, (Some lo_v, Some hi_v) ->
+           check_for_annotation_range lo_expr.loc lo_v hi_v (repr base_raw)
+       | _ -> ());
+      let idx_ty = match const_bounds with
         | Some lo_v, Some hi_v -> TRefinedInt (lo_v, hi_v, base_raw)
         | _ -> base_raw
       in
@@ -1288,17 +1347,25 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs true s)
         (body_env, raw_locals) body
       in
-      (* NOW validate/default base_raw: the body has had its full chance to
-         pin it (via a shared TVar reference nested inside idx_ty/raw_locals'
-         -- mutating the ref cell in place propagates to the already-stored
+      (* NOW validate base_raw: the body has had its full chance to pin it
+         (via a shared TVar reference nested inside idx_ty/raw_locals' --
+         mutating the ref cell in place propagates to the already-stored
          value, same reasoning as check_undetermined_lets). If STILL
-         unresolved, default to i32 -- deliberately a SILENT default here,
-         unlike let/let mut's hard error (see CLAUDE.md's "Undetermined
-         let/let mut..." section for why loop counters are treated
-         differently). If resolved to something CONCRETE but non-integer
-         (e.g. `for i in 0..<true`), raise instead of silently accepting it. *)
+         unresolved, this is a HARD ERROR, not a silent i32 default: now
+         that `for i: T in ...` exists as an explicit escape hatch, there
+         is no reason left to guess -- exactly the same reasoning as
+         let/let mut's own "Undetermined ... Types Are a Compile Error"
+         rule, applied here now that the annotation syntax closes the gap
+         that rule used to leave open for loop counters specifically. If
+         resolved to something CONCRETE but non-integer (e.g. `for i in
+         0..<true`), raise a different, more specific error instead. *)
       (match repr base_raw with
-       | TVar { contents = Unbound _ } -> unify_at lo_expr.loc base_raw TI32
+       | TVar { contents = Unbound _ } ->
+           raise (TypeError (lo_expr.loc, Printf.sprintf
+             "cannot determine a concrete type for for-loop counter '%s': \
+              add an explicit type annotation (e.g. `for %s: i32 in ...`) \
+              -- this language does not default an undetermined integer type"
+             name name))
        | _ -> ());
       (match repr base_raw with
        | TI8 | TI16 | TI32 | TI64 | TU8 | TU16 | TU32 | TU64 | TUsize -> ()
@@ -1397,7 +1464,7 @@ let check_const_shadowing (fdef : Ast.func) =
         if Const_env.find name <> None then reject s.loc name
     | Ast.Block ss | Ast.While (_, ss) -> List.iter go_stmt ss
     | Ast.If (_, t, e) -> List.iter go_stmt t; List.iter go_stmt e
-    | Ast.For (name, _, _, body) ->
+    | Ast.For (name, _, _, _, body) ->
         if Const_env.find name <> None then reject s.loc name;
         List.iter go_stmt body
     | Ast.ForEach (name, _, body) ->
@@ -1439,7 +1506,7 @@ let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
     | Ast.Let (_, _, Some _, _) -> ()
     | Ast.Block ss | Ast.While (_, ss) -> List.iter go_stmt ss
     | Ast.If (_, t, e) -> List.iter go_stmt t; List.iter go_stmt e
-    | Ast.For (_, _, _, body) | Ast.ForEach (_, _, body) -> List.iter go_stmt body
+    | Ast.For (_, _, _, _, body) | Ast.ForEach (_, _, body) -> List.iter go_stmt body
     | Ast.Match (_, arms) ->
         List.iter (function
           | Ast.ArmVariant (_, _, b) -> List.iter go_stmt b

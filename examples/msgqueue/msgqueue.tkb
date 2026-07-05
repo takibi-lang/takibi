@@ -91,7 +91,7 @@ let mut stack_a: [u8; 4096];
 let mut stack_b: [u8; 4096];
 
 fn task_producer() {
-    for i in 0..<5 {
+    for i: i32 in 0..<5 {
         mq_send(i);
     }
     producer_done = 1;
@@ -100,7 +100,7 @@ fn task_producer() {
 }
 
 fn task_consumer() {
-    for i in 0..<5 {
+    for i: i32 in 0..<5 {
         let v: i32 = mq_recv();
         uart_puts("recv: ");
         print_uint(v);

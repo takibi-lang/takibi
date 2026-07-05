@@ -48,7 +48,7 @@ fn wdt_check() {
     wdt.tick = wdt.tick + 1;
     let lk: *i32 = wdt.last_kick;
     let dl: *i32 = wdt.deadline;
-    for i in 0..<3 {
+    for i: i32 in 0..<3 {
         if (dl[i] > 0) {
             if (wdt.tick - lk[i] > dl[i]) {
                 hung_task  = i; // record which task timed out
@@ -97,7 +97,7 @@ fn task_healthy() {
 
 // Kicks 3 times, then deliberately stops kicking to enter a hung state
 fn task_hung() {
-    for i in 0..<3 {
+    for i: i32 in 0..<3 {
         wdt_kick(2);
     }
     // Kicking stops here -> watchdog detects a deadline overrun

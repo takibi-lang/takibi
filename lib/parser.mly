@@ -194,7 +194,15 @@ stmt:
   | WHILE LPAREN c = expr RPAREN LBRACE b = stmts RBRACE
     { { desc = While(c, b); loc = $symbolstartpos } }
   | FOR id = IDENT IN lo = expr DOTDOTLT hi = expr LBRACE body = stmts RBRACE
-    { { desc = For (id, lo, hi, body); loc = $symbolstartpos } }
+    { { desc = For (id, None, lo, hi, body); loc = $symbolstartpos } }
+  | FOR id = IDENT COLON ty = int_base_type_expr IN lo = expr DOTDOTLT hi = expr LBRACE body = stmts RBRACE
+    (* Explicit base annotation on the loop counter (e.g. `for i: u8 in
+       0..<4 { ... }`) -- restricted to int_base_type_expr (the same 9
+       primitive integer types {lo..<hi as base} accepts), not the full
+       type_expr grammar: a loop counter's type is always one of these by
+       convention (see TRefinedInt's own comment in types.ml), and a
+       pointer/array/struct annotation here would be nonsensical. *)
+    { { desc = For (id, Some ty, lo, hi, body); loc = $symbolstartpos } }
   | FOR id = IDENT IN s = expr LBRACE body = stmts RBRACE
     (* for x in s { ... } -- element iteration over a slice (LBRACE after the
        expression disambiguates from the lo..<hi range form) *)

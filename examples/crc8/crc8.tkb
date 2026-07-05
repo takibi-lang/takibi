@@ -29,7 +29,7 @@ fn crc8(data: *u8, len: i32) u8 {
     let mut crc: u8 = 0;
     for i in 0..<len {
         crc = crc ^ *(data + i);
-        for bit in 0..<8 {
+        for bit: i32 in 0..<8 {
             if ((crc & 0x80) != 0) {
                 crc = (crc << 1) ^ 0x07;
             } else {

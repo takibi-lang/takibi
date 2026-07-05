@@ -57,7 +57,7 @@ fn checksum_slice(s: []u8) -> i32 {
 }
 
 fn main() {
-    for i in 0..<8 {
+    for i: i32 in 0..<8 {
         a[i] = ('A' + i) as u8;
     }
     let sa = a as []u8;

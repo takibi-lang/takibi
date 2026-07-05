@@ -17,7 +17,7 @@ fn task_exit_stub() {
 
 fn setup_task_stack(s: *u8, f: fn() -> void) -> usize {
     let base: *u8 = s - 64;
-    for i in 0..<64 {
+    for i: i32 in 0..<64 {
         *(base + i) = 0 as u8;
     }
     // offsets 0..28: r4-r11 (software-saved region PendSV restores first) -- left zero

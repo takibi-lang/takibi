@@ -71,7 +71,7 @@ fn main() {
     let c2: Color = raw as Color;
     uart_puts(color_name(c2));
 
-    for i in 0..<3 {
+    for i: i32 in 0..<3 {
         let ci: Color = i as Color;
         uart_puts(color_name(ci));
     }

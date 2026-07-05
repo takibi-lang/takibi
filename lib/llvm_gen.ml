@@ -733,7 +733,7 @@ let rec collect_lets stmts =
     | Block ss                    -> collect_lets ss
     | If (_, t, e)                -> collect_lets t @ collect_lets e
     | While (_, b)                -> collect_lets b
-    | For (name, _, _, body)      ->
+    | For (name, _, _, _, body)   ->
         (* type_inf.ml's For case now registers "__for_<name>" in
            raw_locals with the bounds' own base type (sync rule), so
            resolve_local_ast finds the real type via local_types --
@@ -2295,7 +2295,12 @@ let gen_func ?prog_types fdef =
 
         position_at_end after_bb builder
 
-    | For (name, lo_expr, hi_expr, body) ->
+    | For (name, _ty_opt, lo_expr, hi_expr, body) ->
+        (* _ty_opt (the explicit `for i: T in ...` annotation, if any) is
+           not consulted directly here: type_inf.ml has already folded it
+           into the counter's resolved type, retrieved below via `res
+           ctr_name None` exactly as before -- codegen needs no separate
+           annotation-handling logic of its own. *)
         (* Loop counter is pre-allocated in the entry block by collect_lets,
            at whatever type type_inf.ml determined for the bounds (sync
            rule: both sides now unify lo/hi against EACH OTHER instead of

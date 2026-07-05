@@ -7,7 +7,11 @@
 //     fill_pair(i: {0..<7}) -- caller proves the type and passes it in
 //
 //   Approach 2: for loop (Step 3.5-for)
-//     for i in 0..<8 -- compiler automatically determines i: {0..<8}
+//     for i: i32 in 0..<8 -- the counter gets type {0..<8}. The `: i32`
+//     annotation is required here: nothing in either loop body passes `i`
+//     to anything with a concrete type of its own, so without it this is
+//     a compile error asking for one, not a silent i32 default -- see
+//     CLAUDE.md's for-loop sections.
 //
 //   Approach 3: if narrowing (Step 3.5-if)
 //     if (v >= 0 && v < 8) -- converts a runtime check into a type proof
@@ -40,7 +44,7 @@ fn fill_pairs() {
 
 // --- Approach 2: for loop (Step 3.5-for) -------------------------------
 fn fill_loop() {
-    for i in 0..<8 {
+    for i: i32 in 0..<8 {
         buf[i] = 'A' + i as u8;  // i: {0..<8} -> check elided
     }
 }
@@ -53,14 +57,14 @@ fn fill_cond(v: i32, c: u8) {
 }
 
 fn fill_by_cond() {
-    for i in 0..<8 {
+    for i: i32 in 0..<8 {
         fill_cond(i, 'A' + i as u8);
     }
 }
 
 // --- Common: print results --------------------------------------------------------
 fn print_buf() {
-    for i in 0..<8 {
+    for i: i32 in 0..<8 {
         uart_putc(buf[i]);
     }
     uart_putc('\r');

@@ -1874,12 +1874,25 @@ let infer_tests = [
   (* -- Step 3.5 for loop: for i in lo..<hi ----------------------------------- *)
 
   Alcotest.test_case "for loop parses and type-checks" `Quick
-    (expect_ok "fn f() { for i in 0..<8 {} }");
+    (expect_ok "fn f() { for i: i32 in 0..<8 {} }");
+
+  (* -- for i: T in lo..<hi -- explicit base annotation on the loop counter -- *)
+
+  Alcotest.test_case "for i: u8 in lo..<hi gives i type {lo..<hi as u8}" `Quick
+    (fun () ->
+      let pt = infer "fn f() { for i: u8 in 0..<4 {} }" in
+      let fi = Types.StringMap.find "f" pt.Types.functions in
+      Alcotest.check type_t "i is {0..<4 as u8}"
+        (Ast.TypeRefined (0, 4, Ast.TypeU8))
+        (Types.StringMap.find "__for_i" fi.Types.local_types));
+
+  Alcotest.test_case "for i: usize in lo..<hi parses (all 9 int_base_type_expr bases accepted)" `Quick
+    (expect_ok "fn f() { for i: usize in 0..<4 {} }");
 
   Alcotest.test_case "for loop variable has refined type (literal bounds)" `Quick
     (fun () ->
       let pt = infer "let mut buf: [u8; 8]; \
-                      fn f() { for i in 0..<8 { buf[i] = 'X'; } }" in
+                      fn f() { for i: i32 in 0..<8 { buf[i] = 'X'; } }" in
       (* buf[i] should compile without error: i:{0..<8} covers [u8;8] *)
       ignore pt);
 
@@ -1890,7 +1903,7 @@ let infer_tests = [
 
   Alcotest.test_case "for loop variable does not escape" `Quick
     (expect_type_error "Unbound variable"
-      "fn f() { for i in 0..<8 {} let x: i32 = i; }");
+      "fn f() { for i: i32 in 0..<8 {} let x: i32 = i; }");
 
   Alcotest.test_case "for with variable bounds gives plain i32" `Quick
     (expect_ok
@@ -1899,8 +1912,8 @@ let infer_tests = [
   Alcotest.test_case "nested for loops compile" `Quick
     (expect_ok
       "let mut buf: [u8; 4]; \
-       fn f() { for i in 0..<4 { buf[i] = 'A'; } \
-                for i in 0..<4 { buf[i] = 'B'; } }");
+       fn f() { for i: i32 in 0..<4 { buf[i] = 'A'; } \
+                for i: i32 in 0..<4 { buf[i] = 'B'; } }");
 
   (* -- For-loop counter follows the bounds' own base type, not a hardcoded
      TI32 (regression -- `for i in 0..<s.len` (s.len: TUsize) used to fail
@@ -1953,16 +1966,16 @@ let infer_tests = [
     (expect_ok "fn f() { while (1) { continue; } }");
 
   Alcotest.test_case "break in for parses and type-checks" `Quick
-    (expect_ok "fn f() { for i in 0..<10 { break; } }");
+    (expect_ok "fn f() { for i: i32 in 0..<10 { break; } }");
 
   Alcotest.test_case "continue in for parses and type-checks" `Quick
-    (expect_ok "fn f() { for i in 0..<10 { continue; } }");
+    (expect_ok "fn f() { for i: i32 in 0..<10 { continue; } }");
 
   Alcotest.test_case "break inside if inside while type-checks" `Quick
     (expect_ok "fn f(x: i32) { while (1) { if (x == 0) { break; } } }");
 
   Alcotest.test_case "continue inside if inside for type-checks" `Quick
-    (expect_ok "fn f(x: i32) { for i in 0..<10 { if (x == 0) { continue; } } }");
+    (expect_ok "fn f(x: i32) { for i: i32 in 0..<10 { if (x == 0) { continue; } } }");
 
   Alcotest.test_case "break outside loop is a type error" `Quick
     (expect_type_error "break/continue outside of a loop"
@@ -2032,7 +2045,7 @@ let infer_tests = [
   Alcotest.test_case "refined int subtype cast to enum type-checks" `Quick
     (expect_ok
       "enum Color: u8 { Red = 0; Green = 1; Blue = 2; }
-       fn f() { for i in 0..<3 { let c: Color = i as Color; } }");
+       fn f() { for i: i32 in 0..<3 { let c: Color = i as Color; } }");
 
   Alcotest.test_case "packed struct field access type-checks" `Quick
     (expect_ok "struct packed Hdr { a: u8; b: u16; }
@@ -2276,7 +2289,7 @@ let codegen_tests = [
        "let mut fkill_buf_c: [u8; 8];
         fn fkill_rebind(v: i32) -> u8 {
           if (v >= 0 && v < 8) {
-            for v in 0..<100 {
+            for v: i32 in 0..<100 {
               fkill_buf_c[v] = 1 as u8;
             }
             return fkill_buf_c[v];
@@ -3454,31 +3467,86 @@ let codegen_tests = [
         (Types.StringMap.find "__for_i" fi.Types.local_types));
 
   Alcotest.test_case
-    "HONEST LIMITATION: for-loop counter over ORDINARY literal bounds \
-     (`0..<4`, which Const_env.bound_value DOES recognize) still ends up \
-     i32 even when the body passes it to a u8-typed function -- deferred \
-     inference does not change this common case, because a bare-literal \
-     -bounded counter is wrapped in TRefinedInt(0, 4, base), and \
-     TRefinedInt's subtyping into a concrete destination type (`TRefinedInt \
-     _, TU8 when lo>=0 && hi<=256 -> ()` in types.ml) deliberately ignores \
-     the refined value's OWN base field entirely -- passing it to foo(x: \
-     u8) proves the BOUNDS fit u8, but never touches/pins `base` itself. \
-     Confirmed empirically (not just argued) via a scratch IR dump before \
-     writing this test. Closing this gap for the common case would need a \
-     DIFFERENT, more invasive change to unify's own TRefinedInt subtyping \
-     rule (retroactively pinning an unresolved base on first concrete \
-     use) -- deliberately not done here; this test exists so a future \
-     change to that rule has to consciously update this test's expected \
-     result, not silently drift" `Quick
+    "for-loop counter over ORDINARY literal bounds (`0..<4`, which
+     Const_env.bound_value DOES recognize) is now a COMPILE ERROR when the
+     body's only usage can't pin a concrete type -- deferred, usage-driven
+     inference does not help THIS common shape, because a bare-literal
+     -bounded counter is wrapped in TRefinedInt(0, 4, base), and
+     TRefinedInt's subtyping into a concrete destination type (`TRefinedInt
+     _, TU8 when lo>=0 && hi<=256 -> ()` in types.ml) deliberately ignores
+     the refined value's OWN base field entirely -- passing it to foo(x:
+     u8) proves the BOUNDS fit u8, but never touches/pins `base` itself
+     (confirmed empirically, not just argued, via a scratch IR dump before
+     this section existed). This USED to silently default to i32; now
+     that `for i: T in ...` exists as an explicit escape hatch, requiring
+     it instead (same reasoning as let/let mut's own hard error) closes
+     the gap for this exact case -- the fix is an explicit annotation
+     (`for i: u8 in 0..<4 { foo(i); }`), not smarter inference" `Quick
+    (expect_type_error
+       "cannot determine a concrete type for for-loop counter 'i'"
+       "fn foo(x: u8) {}
+        fn f() { for i in 0..<4 { foo(i); } }");
+
+  Alcotest.test_case
+    "for i: u8 in 0..<4 gives the counter EXACTLY TRefinedInt(0, 4, u8) --
+     the explicit-annotation escape hatch for the case above, and the
+     syntax's most basic use" `Quick
     (fun () ->
       let pt = infer
         "fn foo(x: u8) {}
-         fn f() { for i in 0..<4 { foo(i); } }" in
+         fn f() { for i: u8 in 0..<4 { foo(i); } }" in
       let fi = Types.StringMap.find "f" pt.Types.functions in
       Alcotest.check type_t
-        "i is still {0..<4 as i32}, NOT pinned to u8 by foo(x: u8)"
-        (Ast.TypeRefined (0, 4, Ast.TypeI32))
+        "i is {0..<4 as u8}"
+        (Ast.TypeRefined (0, 4, Ast.TypeU8))
         (Types.StringMap.find "__for_i" fi.Types.local_types));
+
+  Alcotest.test_case
+    "for i: u8 in 0..<300 is a compile error (300 doesn't fit u8) -- a
+     bare-literal for-loop bound has no inherent width of its own, so
+     without this check the annotation would silently let a too-wide
+     bound wrap around at codegen time (`const_int i8_type 300`), exactly
+     the soundness hole the {lo..<hi as base} surface syntax's own bound
+     check exists to prevent" `Quick
+    (expect_type_error
+       "for-loop bound {0..<300} does not fit the annotated type"
+       "fn f() { for i: u8 in 0..<300 {} }");
+
+  Alcotest.test_case
+    "for i: u8 in 0..<n (n: u16) is an ordinary 'cannot unify' error --
+     a conflicting bound and annotation are caught the same way any other
+     concrete type mismatch is" `Quick
+    (expect_type_error "cannot unify"
+       "fn f(n: u16) { for i: u8 in 0..<n {} }");
+
+  Alcotest.test_case
+    "for i: u8 in 0..<4 codegens a genuinely i8-wide counter and proves
+     the array access with zero trap sites -- the syntax's basic
+     end-to-end use case (annotate once, get the width AND the bounds
+     -check elision, unlike the `for i in 0..<(4 as u8)` cast-based
+     workaround, which gets the width but loses the elision since a cast
+     to a non-refined-syntax target always discards the source's proven
+     range)" `Quick
+    (expect_trap_sites 0
+       "let mut refnum_for_buf: [u8; 4];
+        fn refnum_for_annotated() {
+          for i: u8 in 0..<4 {
+            refnum_for_buf[i] = ('A' + i) as u8;
+          }
+        }");
+
+  Alcotest.test_case
+    "for i: usize in 0..<s.len parses and codegens: the annotation syntax
+     accepts all 9 primitive integer bases (int_base_type_expr), same as
+     {lo..<hi as base}" `Quick
+    (expect_codegen_ok
+       "fn refnum_for_usize_ann(s: []u8) -> i32 {
+          let mut total: i32 = 0;
+          for i: usize in 0..<s.len {
+            total = total + (s[i] as i32);
+          }
+          return total;
+        }");
 
 ]
 

@@ -17,7 +17,7 @@
 // uart_puts below is purely for interactive bring-up debugging.
 
 fn swap_mac(frame: *u8) {
-    for i in 0..<6 {
+    for i: i32 in 0..<6 {
         let a: u8 = frame[i];
         let b: u8 = frame[6 + i];
         frame[i] = b;
