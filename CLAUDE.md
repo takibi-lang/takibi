@@ -88,34 +88,57 @@ occasional interleaved line.
 
 **`TAKIBI` invokes `_build/default/bin/main.exe` directly, not `dune exec takibi --`**: `dune
 exec` re-locks the dune workspace on every call, which serializes what should be independent
-parallel compiles. Every per-example object-file rule depends on the `build` target (`dune
-build`) as an **order-only** prerequisite (`| build`, not a plain prerequisite) -- `build` is
-`.PHONY`, and a plain (non-order-only) phony prerequisite makes every dependent target look
-permanently out-of-date, which was silently forcing a full rebuild of all ~50 examples on
-every invocation before this was fixed. Order-only prerequisites are still built when needed,
-but don't affect whether the depending target itself is considered stale, so make's normal
-`.tkb`-timestamp-based skip-if-unchanged logic works correctly again.
+parallel compiles.
 
-**Consequence worth knowing, found much later**: this also means `make check` without `make
-clean` first can give a FALSE PASS for a compiler change that alters accept/reject behavior
-or codegen for an EXISTING, unchanged `.tkb` file -- its `.o`/`.elf` from a previous run (built
-with the OLDER compiler) is never recompiled, since only the `.tkb` file's own timestamp is
-consulted. Run `make clean && make check` (not just `make check`) after any compiler change
-that could plausibly affect files you didn't directly edit -- see "The Undetermined-For-Loop
--Counter Case Is Now Also a Compile Error" below for the concrete incident that surfaced this
-(a `-k check` run without `make clean` reported zero failures; `make clean && make check`
-immediately found 16 affected files it had silently missed).
+**History: order-only `| build`, then the false-pass bug it caused, now fixed for real.**
+Originally every per-example object-file rule depended on the `build` target (`dune build`) as
+an **order-only** prerequisite (`| build`, not a plain one) -- `build` is `.PHONY`, and a plain
+(non-order-only) phony prerequisite makes every dependent target look permanently out-of-date,
+which was silently forcing a full rebuild of all ~50 examples on every invocation before that
+was fixed. Order-only prerequisites are still built when needed, but don't affect whether the
+depending target itself is considered stale, so make's normal `.tkb`-timestamp-based
+skip-if-unchanged logic worked correctly again -- **except** this also meant `make check`
+without `make clean` first could give a FALSE PASS for a compiler change that altered
+accept/reject behavior or codegen for an EXISTING, unchanged `.tkb` file: its `.o`/`.elf` from a
+previous run (built with the OLDER compiler) was never recompiled, since only the `.tkb` file's
+own timestamp was consulted, and `| build`'s order-only nature meant $(TAKIBI)'s own freshness
+was invisible to that comparison. See "The Undetermined-For-Loop-Counter Case Is Now Also a
+Compile Error" below for the concrete incident that surfaced this (a `-k check` run without
+`make clean` reported zero failures; `make clean && make check` immediately found 16 affected
+files it had silently missed).
 
-**Known dune footgun found while wiring up `-j`**: running `dune build` and `dune test`
-concurrently (e.g. two independent Make recipes under `make -j`) can corrupt/race on
-`_build/.lock` ("Unexpected contents of build directory global lock file"), non-deterministically
-failing or hanging unrelated recipes. Fixed by making the `test` target depend on `build` (a
-normal prerequisite, ensuring `dune build` always completes before `dune test` starts) and by
-making sure nothing else in the build graph calls `dune exec`/`dune build`/`dune test` (see the
-`TAKIBI` note above and `scripts/run_qemutest.sh`'s `run_compile_error_test`, which had its own
-independent `dune exec takibi --` call fixed for the same reason). If a future change
-reintroduces a second concurrent `dune` invocation anywhere in the `make -j` graph, expect this
-same class of flake to come back.
+**Fixed for real**: every per-example rule's prerequisite list now names `$(TAKIBI)` itself (the
+real binary path, `_build/default/bin/main.exe`) as a **normal** (not order-only) prerequisite,
+in place of the old `| build`. `$(TAKIBI)`'s own rule forces `dune build` to run on every `make`
+invocation that reaches it (via a `FORCE`-based always-out-of-date prerequisite, the standard
+make idiom for "always run this recipe"), but **dune's own incremental/content-addressed build
+only touches `main.exe`'s mtime when the compiled output genuinely changes** -- confirmed
+empirically before relying on it: repeated no-op `dune build` runs, a mtime-only `touch` of a
+source file, and even a comment-only source edit all left `main.exe`'s mtime untouched; only a
+change that actually alters compiled output (adding/removing/reverting a real binding) updates
+it. This is exactly the property needed for the fix to be both safe (no perpetual "every example
+always looks stale" regression -- confirmed by running the same target twice in a row with no
+change and observing zero rebuild) and correct (a genuine compiler change now correctly cascades
+into every example that depends on it, with no separate `make clean` step required -- confirmed
+by making a real `bin/main.ml` edit, running `make examples/fibonacci/fibonacci.o` alone with NO
+prior clean, and observing both `main.exe` and `fibonacci.o` get fresh mtimes; reverting the edit
+and re-running triggers a second real rebuild the same way, and a third run with nothing changed
+rebuilds neither). `build:` itself is now just `build: $(TAKIBI)`, an alias -- it no longer calls
+`dune build` directly, so **every path in the Makefile that ever needs the compiler fresh now
+funnels through this one target**.
+
+**Known dune footgun found while wiring up `-j` (this is exactly why the above funnels through
+one target)**: running `dune build` and `dune test` concurrently (e.g. two independent Make
+recipes under `make -j`) can corrupt/race on `_build/.lock` ("Unexpected contents of build
+directory global lock file"), non-deterministically failing or hanging unrelated recipes. Fixed
+by making the `test` target depend on `build` (a normal prerequisite, ensuring `dune build`
+always completes before `dune test` starts) and by making sure nothing else in the build graph
+calls `dune exec`/`dune build`/`dune test` directly (see `scripts/run_qemutest.sh`'s
+`run_compile_error_test`, which had its own independent `dune exec takibi --` call fixed for the
+same reason). `$(TAKIBI)`'s rule is now the ONLY place that invokes `dune build` -- if a future
+change reintroduces a second, independent `dune build`/`dune test` invocation anywhere in the
+`make -j` graph (rather than depending on `$(TAKIBI)`/`build` like everything else does), expect
+this same class of flake to come back.
 
 ## Directory Layout
 
