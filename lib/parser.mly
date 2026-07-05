@@ -1,8 +1,26 @@
 %{
 open Ast
+
+(* Narrow an INT token's Int64.t value to a native int for grammar positions
+   that only ever need a small, realistic value (alignment, enum
+   discriminants, array sizes) -- see Ast.int_of_intlit's comment for why a
+   plain Int64.to_int would be unsound here (OCaml's int is one bit
+   narrower than Int64.t on a 64-bit host). Unlike the small-number-scoped
+   ANALYSIS code elsewhere (range propagation, narrowing) that silently
+   falls back to a conservative "can't reason about this" behavior on
+   overflow, each of these grammar positions has no such fallback -- the
+   value is used directly as a hard requirement (LLVM's set_alignment, an
+   enum's discriminant, an array's element count) -- so overflow here is a
+   hard TypeError instead. *)
+let narrow_int64 pos what (n : Int64.t) : int =
+  match Ast.int_of_intlit n with
+  | Some i -> i
+  | None ->
+      raise (Types.TypeError (pos,
+        Printf.sprintf "%s value %Ld is too large to represent" what n))
 %}
 
-%token <int> INT
+%token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
 %token FN RETURN LET MUT EXTERN STRUCT PACKED IO ENUM MATCH ALIGN SIZEOF UNSAFE
@@ -60,9 +78,9 @@ item:
     { Const_env.define_if_literal m $3 (snd $4);
       LetDef ($3, fst $4, snd $4, None, m) }
   | LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN INT RPAREN SEMI
-    { LetDef ($3, Some $5, None, Some $8, m) }
+    { LetDef ($3, Some $5, None, Some (narrow_int64 $symbolstartpos "alignment" $8), m) }
   | LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN INT RPAREN ASSIGN expr SEMI
-    { LetDef ($3, Some $5, Some $11, Some $8, m) }
+    { LetDef ($3, Some $5, Some $11, Some (narrow_int64 $symbolstartpos "alignment" $8), m) }
   | EXTERN FN IDENT LPAREN params RPAREN SEMI
     { ExternFuncDef ($3, $5, None) }
   | EXTERN FN IDENT LPAREN params RPAREN ARROW type_expr SEMI
@@ -72,9 +90,9 @@ item:
   | STRUCT PACKED IDENT LBRACE struct_fields RBRACE
     { StructDef ($3, $5, true, None) }
   | STRUCT IDENT ALIGN LPAREN INT RPAREN LBRACE struct_fields RBRACE
-    { StructDef ($2, $8, false, Some $5) }
+    { StructDef ($2, $8, false, Some (narrow_int64 $symbolstartpos "alignment" $5)) }
   | STRUCT PACKED IDENT ALIGN LPAREN INT RPAREN LBRACE struct_fields RBRACE
-    { StructDef ($3, $9, true, Some $6) }
+    { StructDef ($3, $9, true, Some (narrow_int64 $symbolstartpos "alignment" $6)) }
   | ENUM IDENT COLON base_type_expr LBRACE enum_variants RBRACE
     { let (vs, ne) = $6 in EnumDef ($2, Some $4, vs, ne) }
   | ENUM IDENT LBRACE enum_variants RBRACE
@@ -87,7 +105,9 @@ struct_fields:
 enum_variants:
   | /* empty */                         { ([], false) }
   | UNDERSCORE SEMI enum_variants       { let (vs, _) = $3 in (vs, true) }
-  | IDENT ASSIGN INT SEMI enum_variants { let (vs, ne) = $5 in (($1, Some $3) :: vs, ne) }
+  | IDENT ASSIGN INT SEMI enum_variants
+    { let (vs, ne) = $5 in
+      (($1, Some (narrow_int64 $symbolstartpos "enum discriminant" $3)) :: vs, ne) }
   | IDENT SEMI            enum_variants { let (vs, ne) = $3 in (($1, None)    :: vs, ne) }
 
 func_def:
@@ -231,7 +251,7 @@ expr:
   | AMP e = expr %prec UNARY { { desc = AddrOf e; loc = $symbolstartpos } }
   | TILDE e = expr %prec UNARY { { desc = Bnot e; loc = $symbolstartpos } }
   | MINUS e = expr %prec UNARY
-    { { desc = BinOp (Sub, { desc = IntLit 0; loc = $symbolstartpos }, e);
+    { { desc = BinOp (Sub, { desc = IntLit 0L; loc = $symbolstartpos }, e);
         loc = $symbolstartpos } }
   | INT    { { desc = IntLit $1;       loc = $symbolstartpos } }
   | TRUE   { { desc = BoolLit true;   loc = $symbolstartpos } }
@@ -309,7 +329,7 @@ base_type_expr:
    references: a referenced name must already be in Const_env's table (its
    `let` appeared earlier in the concatenated source). *)
 array_size:
-  | n = INT   { n }
+  | n = INT   { narrow_int64 $symbolstartpos "array size" n }
   | name = IDENT
     { match Const_env.find name with
       | Some n -> n
@@ -334,21 +354,21 @@ type_expr:
   | base_type_expr { $1 }
   | LBRACE lo = INT DOTDOTLT hi = INT RBRACE
     { (* TypeRefined is always represented as i32 at the LLVM level (see
-         lib/types.ml); lo/hi are OCaml ints (63-bit) so a bound outside
-         i32's range parses fine but silently truncates at codegen time
-         (e.g. emit_refined_cast_check's `const_int i32 hi`), turning a
-         nonsensical range into a wrapped-around one with no warning.
+         lib/types.ml), regardless of INT now carrying a full Int64.t --
+         a bound outside i32's range would silently truncate at codegen
+         time (e.g. emit_refined_cast_check's `const_int i32 hi`), turning
+         a nonsensical range into a wrapped-around one with no warning.
          Reject it here instead, at the single grammar production that
          ever constructs a literal TypeRefined. *)
-      if lo < -2147483648 || hi > 2147483647 then
+      if lo < -2147483648L || hi > 2147483647L then
         raise (Types.TypeError ($symbolstartpos,
           Printf.sprintf
-            "refined type bound {%d..<%d} is out of i32 range \
+            "refined type bound {%Ld..<%Ld} is out of i32 range \
              (-2147483648..2147483647): {lo..<hi} is always represented \
              as i32 internally, regardless of the integer type it is used \
              with"
             lo hi));
-      TypeRefined (lo, hi) }
+      TypeRefined (Int64.to_int lo, Int64.to_int hi) }
 
 fn_type_params:
   | /* empty */                              { [] }

@@ -1,0 +1,4 @@
+global   : 0xffffffff:0xffffffff
+local    : 0x00000001:0x2a05f200
+argument : 0xffffffff:0xffffffff
+negative : -1

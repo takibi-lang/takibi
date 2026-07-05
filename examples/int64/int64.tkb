@@ -1,0 +1,53 @@
+// 64-bit integer literal demo. IntLit's payload is Int64.t (see CLAUDE.md's
+// "64-bit Integer Literals" section), so a literal all the way up to
+// u64::MAX now parses and codegens correctly, whether it appears as a
+// global initializer, a local variable's initializer, or a bare function
+// argument -- all three are exercised below, since they go through
+// different code paths (eval_const/eval_const_int for the global,
+// gen_expr's IntLit case for the other two).
+//
+// print_u64_hex is a local helper: the project's shared print.tkb only has
+// i32-width printers (see CLAUDE.md's "no function overloading" known
+// limitation), so this file prints a u64 as two hex halves instead.
+//
+// QEMU expected output:
+//   global   : 0xffffffff:0xffffffff
+//   local    : 0x00000001:0x2a05f200
+//   argument : 0xffffffff:0xffffffff
+//   negative : -1
+
+let FULL_MASK: u64 = 0xFFFFFFFFFFFFFFFF;
+
+fn print_u64_hex(v: u64) {
+    let hi: u32 = (v >> 32) as u32;
+    let lo: u32 = (v & 0xFFFFFFFF) as u32;
+    uart_print_hex(hi as i32);
+    uart_puts(":");
+    uart_print_hex(lo as i32);
+    uart_puts("\r\n");
+}
+
+fn local_big_value() -> u64 {
+    // 5_000_000_000 exceeds i32's range but fits comfortably in Int64 --
+    // the exact shape that used to silently truncate-then-zero-extend to
+    // the wrong value before gen_expr's IntLit case became width-aware.
+    let x: u64 = 5000000000;
+    return x;
+}
+
+fn main() {
+    uart_puts("global   : ");
+    print_u64_hex(FULL_MASK);
+
+    uart_puts("local    : ");
+    print_u64_hex(local_big_value());
+
+    uart_puts("argument : ");
+    // A bare wide literal passed directly as a u64 argument (Int64 -1's
+    // bit pattern -- the case that specifically needs bit-31-aware
+    // routing between the i32-native and i64-native codegen paths).
+    print_u64_hex(0xFFFFFFFFFFFFFFFF);
+
+    uart_puts("negative : ");
+    uart_println_int(-1);
+}

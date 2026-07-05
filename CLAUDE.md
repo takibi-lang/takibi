@@ -231,9 +231,10 @@ separate check (`lib/types.ml`'s `TRefinedInt _, TU8/TU16/TU32/TU64/
 TUsize/TI8/TI16/TI64 when ...` cases), not a change of the underlying
 representation.
 
-`lo`/`hi` are parsed as OCaml `int` (63-bit), so a bound outside i32's
-range (e.g. `{0..<5000000000}`) used to parse and type-check with no
-error, then silently misbehave at codegen time -- e.g.
+`lo`/`hi` come from the `INT` token (originally OCaml `int`, 63-bit; now
+`Int64.t` -- see "64-bit Integer Literals" below for why that changed), so
+a bound outside i32's range (e.g. `{0..<5000000000}`) used to parse and
+type-check with no error, then silently misbehave at codegen time -- e.g.
 `emit_refined_cast_check`'s `const_int (i32_type context) hi` truncates
 `hi` to its low 32 bits, turning a nonsensical range into a wrapped-around
 one with no warning. This was a real, if never-yet-triggered, latent
@@ -243,16 +244,19 @@ buffer sizes stay well under 2^31 -- but nothing stopped it).
 Fixed in `lib/parser.mly`'s `type_expr` rule (the single grammar
 production that ever constructs a literal `TypeRefined` from source,
 covering every use site: parameter/return types, `let` annotations, and
-`expr as {lo..<hi}` casts): `lo < -2147483648 || hi > 2147483647` is now a
-compile error (`Types.TypeError`), raised at the same `$symbolstartpos`
-pattern already used by `array_size`'s unknown-constant error. The lower
-bound is currently unreachable via source syntax (`{lo..<hi}`'s grammar
-only accepts a bare non-negative `INT` token for `lo`/`hi` -- no unary
-minus support at the type level, a separate pre-existing limitation, not
-one this check introduces), but is included for when that syntax gap is
-closed. Test coverage: `test/test_takibi.ml`'s parser_tests (in-range
-bound parses, out-of-range upper bound is a `TypeError` mentioning "i32
-range").
+`expr as {lo..<hi}` casts): `lo < -2147483648L || hi > 2147483647L` (an
+`Int64.t` comparison now) is a compile error (`Types.TypeError`), raised
+at the same `$symbolstartpos` pattern already used by `array_size`'s
+unknown-constant error, before the checked value is narrowed to `int` via
+`Int64.to_int` for storage in `TypeRefined`'s `int * int` fields (safe at
+that point -- the check already proved it fits comfortably in i32, let
+alone a 63-bit native int). The lower bound is currently unreachable via
+source syntax (`{lo..<hi}`'s grammar only accepts a bare non-negative
+`INT` token for `lo`/`hi` -- no unary minus support at the type level, a
+separate pre-existing limitation, not one this check introduces), but is
+included for when that syntax gap is closed. Test coverage:
+`test/test_takibi.ml`'s parser_tests (in-range bound parses, out-of-range
+upper bound is a `TypeError` mentioning "i32 range").
 
 **Deliberately NOT addressed by this fix**: widening `TRefinedInt` itself
 to genuinely support ranges beyond i32 (e.g. for `usize`/`u64`/`i64`
@@ -263,6 +267,180 @@ narrowing rule) with no concrete example needing it yet -- deferred until
 one does, per this project's usual practice of not generalizing ahead of
 a real need. The guard added here only prevents *silent miscompilation*
 of an out-of-range bound; it does not lift the range limit itself.
+
+### 64-bit Integer Literals (IntLit's Payload: `int` -> `Int64.t`)
+
+**The bug**: `Ast.IntLit` was `IntLit of int` -- OCaml's native `int`,
+63 bits on a 64-bit host (`Sys.int_size = 63`). `lib/lexer.mll` parsed
+literals via plain `int_of_string`, which raises an uncaught `Failure`
+(a raw OCaml exception, not a clean compile error) for any literal at or
+beyond 2^62 -- e.g. `0xFFFFFFFFFFFFFFFF` crashed the compiler outright,
+even in a plain function body with no global involved. Below that
+threshold there was a second, quieter bug: `lib/llvm_gen.ml`'s `gen_expr`
+unconditionally embedded every `IntLit` as `const_int (i32_type context)
+i`, truncating the value to 32 bits before the surrounding `coerce`/widen
+logic ever got a chance to see it -- so `let x: u64 = 5000000000;` (a
+value comfortably within OCaml's 63-bit int and requiring no cast at all)
+silently became a *wrong*, truncated-then-zero-extended value, since
+`const_int` wraps its input to the target type's width with no warning.
+Filed as GitHub issue "IntLit support 64bit value" and fixed here.
+
+**Representation choice: `Int64.t`, not a bignum**. u64's range
+(0..2^64-1) does not fit in a *signed* 64-bit container either in
+principle, but `Int64.t` is exactly the right tool anyway: LLVM constants
+have no inherent signedness (a bit pattern is a bit pattern; `icmp`/
+`ashr`/`lshr` are what apply a signed or unsigned *interpretation*), and
+`Llvm.const_of_int64 ty v signed` already takes exactly this kind of raw
+64-bit container. `Int64.t` -1 and u64's `0xFFFFFFFFFFFFFFFF` are the
+same bit pattern; which one a piece of code means is a question the
+*type* answers, not the *value*. This mirrors how the whole codebase
+already treats integers (see `is_unsigned`, `coerce`'s sext/zext choice).
+
+**Deliberately not a step toward i128/u128 today, but not a dead end
+either**: no primitive type beyond u64/i64/usize exists in takibi yet, so
+actually supporting one is out of scope here (per this project's usual
+practice of not building ahead of a concrete need -- see the `TRefinedInt`
+i32-range note above for the same reasoning applied to a different
+subsystem). What this change *does* do is remove the one hard blocker
+that would have made ANY future widening impossible: OCaml's native `int`
+literally cannot hold a full 64-bit pattern, so no width wider than
+"64 bits minus a bit for the tag" could ever have been represented at
+all, no matter how the rest of the compiler was designed. `Int64.t` itself
+tops out at 64 bits too, so it does not directly hold a future i128
+value -- a real i128 add would still need a further representation change
+(e.g. a pair of `Int64.t`, or a bignum library like `zarith`). What
+*does* carry forward is the pattern this change establishes: a literal's
+storage type is independent of, and wider than, what any *particular*
+consumer needs, and consumers that only ever need a small, realistic
+value narrow explicitly (see `int_of_intlit` below) with a defined,
+sound fallback on overflow -- rather than every one of the ~30 call
+sites across the compiler assuming the literal already fits whatever
+width it happens to need.
+
+**Lexer (`lib/lexer.mll`)**: hex and decimal digits are now accumulated
+by hand in `Int64.t` space (`int64_of_digits`), not via `int_of_string`/
+`Int64.of_string`. This is not just a width change -- `Int64.of_string`
+range-checks a plain decimal digit string against Int64's *signed* range
+(rejecting a perfectly valid u64 value like 2^63) and raises `Failure`
+past 16 hex digits. Neither restriction matches what an integer literal
+here means (a raw bit pattern, not a signed magnitude), so hand-rolled
+digit-by-digit accumulation (`Int64.add (Int64.mul acc base) digit`) is
+used for both bases instead, wrapping silently past 64 bits exactly like
+hex already did -- an astronomically unrealistic edge case (no type in
+this language is wider than 64 bits, so no literal ever legitimately
+needs more), accepted as wraparound rather than turned into a new
+diagnostic category no other part of the compiler has.
+
+**The narrowing discipline (`Ast.int_of_intlit`)**: most of the compiler
+(range propagation, narrowing, array sizes, alignment, enum
+discriminants, `Const_env`) only ever needs to reason about small,
+realistic values and was written entirely in native `int`, long before
+this change. Rather than rewrite that machinery in `Int64.t` arithmetic
+(high risk, no benefit -- these subsystems are already capped to small
+values by their own domain, e.g. `TypeRefined` is i32-only regardless),
+every one of those call sites now narrows via one shared helper:
+```ocaml
+let int_of_intlit (k : Int64.t) : int option =
+  let i = Int64.to_int k in
+  if Int64.of_int i = k then Some i else None
+```
+Round-tripping through `Int64.of_int (Int64.to_int k)` and comparing
+catches exactly the case a plain `Int64.to_int` would get wrong: OCaml's
+`int` is 63 bits, one bit short of `Int64.t`, so a genuinely-wide value
+can silently wrap into the wrong native int with no warning -- the same
+class of silent-miscompilation risk the `{lo..<hi}` i32-range check above
+and the `Mod`/`lo>=0` sync rule both already guard against. What a caller
+does with `None` splits into two disciplines, matching whether the call
+site already had a defined "can't reason about this" fallback:
+- **Analysis/proof call sites** (range propagation's `TRefinedInt`
+  formulas, if-narrowing, the same-base subslice rule, `var_plus_const`,
+  `slice_len_mins`) already had a conservative fallback for "this operand
+  isn't a usable compile-time constant" -- `None` is routed into that
+  exact same fallback (unrefined `TI32`, "don't narrow", "not this
+  shape"), via a small `intlit_opt`/`IntLit k -> Ast.int_of_intlit k`
+  wrapper duplicated (sync rule) in `type_inf.ml` and `llvm_gen.ml`.
+- **Grammar positions with no such fallback** (`array_size`, `align(N)`,
+  a struct's `align(N)`, an enum's explicit discriminant) use a second
+  helper, `parser.mly`'s `narrow_int64 pos what n`, which raises a
+  `Types.TypeError` instead -- there is no sensible "conservative" array
+  size or alignment, so overflow here is a hard compile error, not a
+  silent fallback.
+- **Constant-index bounds checks** (`Index`/`AssignIndex` in
+  `type_inf.ml`) are a hybrid: a literal too large to narrow is not
+  merely "unprovable", it is certainly out of bounds for any real array
+  (arrays are never anywhere near 2^63 elements), so it is reported as an
+  out-of-bounds error directly rather than silently passing through.
+- **`Const_env`** (`define_if_literal`/`bound_value`, backing array-size
+  names and for-loop bounds) treats a too-large literal as if it were
+  never a recognized bare-literal constant at all -- simply not recorded
+  -- so each consumer's own pre-existing "not found" handling (an
+  `array_size` name-lookup error, or `bound_value`'s conservative
+  unrefined case) applies unchanged.
+
+**Codegen (`lib/llvm_gen.ml`)**: `Llvm.const_int` takes a plain `int`, so
+every direct construction site now uses `Llvm.const_of_int64` instead.
+Two places needed more than a mechanical swap:
+- **`eval_const_int`** (the global-initializer constant-folding
+  evaluator added for `as`-cast/cross-global-reference folding -- see
+  "Global Constant Folding" below) now threads `Int64.t` all the way
+  through instead of `int`, including `mask_to_bits`'s truncating-cast
+  masks (`Int64.logand`/`Int64.shift_left`, not native bit operators) --
+  otherwise the SAME representational gap this whole feature closes
+  would have just reappeared one level down, inside global constant
+  folding specifically.
+- **`gen_expr`'s `IntLit` case** (ordinary expression codegen, function
+  bodies -- distinct from `eval_const`, which only handles global
+  initializers) picks i32 vs i64 representation per-literal: i32 when the
+  value is `0 <= i <= 0x7FFFFFFF`, i64 otherwise. This is **deliberately
+  narrower than the full signed i32 range**, not merely "whatever fits in
+  32 bits" -- `gen_expr` has no visibility into whether the surrounding
+  context will eventually sign- or zero-extend this value (that decision
+  lives in `coerce`, driven by the destination type's signedness, at some
+  later, unrelated call site), and an i32 representation can only be
+  safely widened *either* way -- reconstructing the identical 64-bit
+  value regardless of which extension is later applied -- when bit 31 is
+  clear. Once bit 31 is set, sign- and zero-extension diverge:
+  `0xFFFFFFFFFFFFFFFF` (`Int64.t` -1) naively "fits" the full signed i32
+  range too, but truncating it to i32 -1 and then *zero*-extending (as
+  `coerce`'s `TypeU64` case does) gives the wrong
+  `0x00000000FFFFFFFF`, not the correct all-ones value -- a real bug this
+  project's own test suite caught (see `examples/int64`'s "argument" case
+  below) before this narrower threshold was chosen. Routing anything with
+  bit 31 set through the i64-native path instead sidesteps the ambiguity
+  entirely: `i64 -> narrower` is always a sign-agnostic `build_trunc` (see
+  `coerce`'s and `to_i32`'s narrowing branches), so a wide value
+  reconstructs correctly regardless of which narrower type it ends up
+  used as, with no need to guess a destination's signedness upfront.
+- **`to_i32`** (used only for index/bound expressions -- `Index`,
+  `SliceOf`, `min`/`max`) gained a `build_trunc` branch for an i64 source,
+  alongside its existing widen-only (`build_zext`) branches. Under a
+  normally type-checked program this is unreachable (`type_inf.ml`'s
+  `Index`/`SliceOf` cases unify their operand with plain `TI32`, so the
+  inferred type already guarantees i32), *except* for a bare wide `IntLit`
+  used directly as an index/bound: it type-checks as `TI32` via ordinary
+  context-driven unification (`IntLit _ -> fresh ()` is fully polymorphic
+  and carries no magnitude check), but codegens to an i64 llvalue once it
+  doesn't fit i32. A truncate is the well-defined, if unusual, outcome for
+  that case (e.g. a nonsensical huge literal used as an array index)
+  rather than an invalid "narrow via build_zext" call or a crash.
+
+**Files**: `lib/ast.ml` (`IntLit of Int64.t`, `int_of_intlit`,
+`var_plus_const`/`slice_len_mins` narrowing), `lib/lexer.mll`
+(`int64_of_digits`, `INT` token, char-literal productions),
+`lib/parser.mly` (`%token <Int64.t> INT`, `narrow_int64`, every
+`align`/struct-`align`/enum-discriminant/`array_size`/`{lo..<hi}` site),
+`lib/const_env.ml` (`define_if_literal`/`bound_value`), `lib/type_inf.ml`
+(`intlit_opt`, all range-propagation and bounds-check sites),
+`lib/llvm_gen.ml` (`intlit_opt`, `gen_expr`'s `IntLit` case, `to_i32`,
+`eval_const_int`/`eval_const`, all range-propagation mirror sites),
+`test/test_takibi.ml` (39 existing `IntLit n` patterns gained the `L`
+suffix; new tests for full-width hex/decimal parsing, the local-u64 and
+wide-function-argument codegen regressions, and array-size/`align(N)`
+overflow producing a clean `TypeError`), `examples/int64/` (new QEMU
+example exercising all three runtime-codegen-relevant forms -- a global,
+a local variable, and a bare wide literal passed as a function argument
+-- registered in `run_qemutest.sh`'s ordinary and no-trap example lists
+and in the Makefile's `EXAMPLES`/`STM32_EXAMPLES`).
 
 ### Soundness Condition for % Range Propagation
 

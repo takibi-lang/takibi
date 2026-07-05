@@ -520,6 +520,19 @@ let is_unsigned = function
   | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeUsize -> true
   | _ -> false
 
+(* Extract a small-number-scoped compile-time integer from an expression,
+   iff it is exactly an integer literal that fits natively (see
+   Ast.int_of_intlit's comment for why IntLit's Int64.t payload cannot
+   always be narrowed to `int`). Used throughout the range-propagation
+   mirror of type_inf.ml's BinOp typing below (sync rule: both sides must
+   make the same decision). None uniformly covers both "not a literal at
+   all" and "a literal, but too large to reason about here" -- both fall
+   back to the conservative (unrefined) case. *)
+let intlit_opt (e : Ast.expr) : int option =
+  match e.desc with
+  | Ast.IntLit k -> Ast.int_of_intlit k
+  | _ -> None
+
 (* Widen a loaded value to the arithmetic width (i32 or i64).
    i8/u8/i16/u16 -> i32 (C-style integer promotion).
    i32/u32/int   -> i32 (no-op for i32 values).
@@ -606,10 +619,21 @@ let rec coerce v (dst : Ast.type_expr) =
   | TypeSlice _ -> v   (* fat values are never numerically coerced *)
 
 (* Widen an integer value to i32 so arithmetic stays uniform (legacy helper for TypeInt/TypeChar).
-   Does NOT touch pointer values. *)
+   Does NOT touch pointer values. Also truncates an i64 source down to i32
+   (rather than only ever widening): type_inf.ml's Index/SliceOf/min/max
+   cases all require their operand to unify with plain TI32, so under
+   normal type-checked programs this function is never actually asked to
+   narrow -- the one exception is a bare 64-bit-wide IntLit (see gen_expr's
+   IntLit case), which type-checks as TI32 via its usual context-driven
+   unification but codegens to an i64 llvalue when the literal doesn't fit
+   i32. A truncate here is the well-defined, if unusual, outcome for that
+   case (e.g. a nonsensical huge literal used directly as an array index)
+   rather than an invalid build_zext (narrowing via "zero-extend") or a
+   crash. *)
 let to_i32 v =
   let ty = type_of v in
   if ty = i32_type context || ty = pointer_type context then v
+  else if ty = i64_type context then build_trunc v (i32_type context) "trunc" builder
   else build_zext v (i32_type context) "zext" builder
 
 (* Promote a value to its arithmetic width based on its AST type.
@@ -771,7 +795,36 @@ let effective_slice_min id m =
 let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
   match e.desc with
   | IntLit i ->
-      (TypeRefined (i, i + 1), const_int (i32_type context) i)
+      (* Represent the literal at i32 width when it fits NON-NEGATIVELY
+         there (0..0x7FFFFFFF), or i64 otherwise -- never the FULL signed
+         i32 range. This asymmetry is deliberate, not an oversight: gen_expr
+         has no visibility into what type this bare literal will eventually
+         be coerced to (i64/signed vs u64/unsigned), and coerce's widening
+         direction (build_sext vs build_zext) depends entirely on the
+         DESTINATION type's signedness. An i32 representation can only be
+         safely widened either way -- reconstructing the exact same 64-bit
+         value regardless of which extension the destination applies --
+         when bit 31 is clear; once bit 31 is set, sign- and zero-extension
+         diverge (e.g. 0xFFFFFFFFFFFFFFFF, i.e. Int64 -1, would wrongly
+         become 0x00000000FFFFFFFF if zero-extended from a truncated i32
+         -1, instead of staying all-ones). Routing anything with bit 31 set
+         through the i64-native path instead sidesteps the ambiguity
+         entirely: i64 -> narrower is always a plain, sign-agnostic
+         build_trunc (see coerce's and to_i32's narrowing branches), so a
+         wide value is always reconstructed correctly no matter which
+         narrower type it is eventually used as. Never silently truncate to
+         i32 the way an unconditional `const_int i32_type i` would for a
+         value outside i32's non-negative range -- see CLAUDE.md's "64-bit
+         Integer Literals" section for the real, previously-invisible bug
+         that was (a plain literal like 5_000_000_000 assigned to a u64
+         local silently became wrong, truncated-then-zero-extended, since
+         LLVM's const_int wraps its input to the target type's width with
+         no warning). *)
+      if i >= 0L && i <= 2147483647L then
+        let i32v = Int64.to_int i in
+        (TypeRefined (i32v, i32v + 1), const_int (i32_type context) i32v)
+      else
+        (TypeU64, const_of_int64 (i64_type context) i true)
 
   | BoolLit b ->
       (TypeBool, const_int (i1_type context) (if b then 1 else 0))
@@ -934,10 +987,10 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                        | TypeRefined (a, b), TypeRefined (c, d) ->
                            TypeRefined (a + c, b + d - 1)
                        | _ ->
-                           (match ty1, e2.desc with
-                            | TypeRefined (a, b), IntLit k -> TypeRefined (a + k, b + k)
-                            | _ -> (match ty2, e1.desc with
-                                    | TypeRefined (c, d), IntLit k -> TypeRefined (c + k, d + k)
+                           (match ty1, intlit_opt e2 with
+                            | TypeRefined (a, b), Some k -> TypeRefined (a + k, b + k)
+                            | _ -> (match ty2, intlit_opt e1 with
+                                    | TypeRefined (c, d), Some k -> TypeRefined (c + k, d + k)
                                     | _ -> TypeI32))
                      in
                      (ret_ty, sum)))
@@ -955,8 +1008,8 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                   | TypeRefined (a, b), TypeRefined (c, d) ->
                       TypeRefined (a - d + 1, b - c)
                   | _ ->
-                      (match ty1, e2.desc with
-                       | TypeRefined (a, b), IntLit k -> TypeRefined (a - k, b - k)
+                      (match ty1, intlit_opt e2 with
+                       | TypeRefined (a, b), Some k -> TypeRefined (a - k, b - k)
                        | _ -> TypeI32)
                 in
                 (ret_ty, diff))
@@ -1008,10 +1061,10 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            (* Range propagation (sync rule with type_inf.ml's Band case):
               x & k -> {0..<k+1} for a non-negative literal mask k,
               regardless of x's own sign/range. *)
-           let ret_ty = match e2.desc with
-             | IntLit k when k >= 0 -> TypeRefined (0, k + 1)
-             | _ -> (match e1.desc with
-                     | IntLit k when k >= 0 -> TypeRefined (0, k + 1)
+           let ret_ty = match intlit_opt e2 with
+             | Some k when k >= 0 -> TypeRefined (0, k + 1)
+             | _ -> (match intlit_opt e1 with
+                     | Some k when k >= 0 -> TypeRefined (0, k + 1)
                      | _ -> ty1)
            in
            (ret_ty, build_and v1 v2 "andtmp" builder)
@@ -1028,8 +1081,8 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                         then build_urem v1 v2 "modtmp" builder
                         else build_srem v1 v2 "modtmp" builder
            in
-           let ret_ty = match e2.desc with
-             | IntLit m when m > 0 ->
+           let ret_ty = match intlit_opt e2 with
+             | Some m when m > 0 ->
                  (match ty1 with
                   | TypeRefined (lo, _) when lo >= 0 -> TypeRefined (0, m)
                   | _ when is_unsigned ty1 -> TypeRefined (0, m)
@@ -1369,7 +1422,10 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                       expression here would risk duplicating side
                       effects). *)
                    (match w.desc with
-                    | IntLit k when k >= 0 -> Some k
+                    | IntLit _ ->
+                        (match intlit_opt w with
+                         | Some k when k >= 0 -> Some k
+                         | _ -> None)
                     | Var w_name ->
                         let wty = match Hashtbl.find_opt narrowing_ctx w_name with
                           | Some t -> Some t
@@ -2260,38 +2316,41 @@ let int_bits_of_ast (ty : Ast.type_expr) =
   | TypeRefined _      -> 32  (* always i32 at the LLVM level, see types.ml *)
   | _                  -> 64  (* not reached: eval_const only calls this for the cases above *)
 
-let mask_to_bits bits n =
-  if bits >= 62 then n  (* OCaml's own int is 63-bit signed; nothing narrower to mask against *)
-  else n land ((1 lsl bits) - 1)
+let mask_to_bits bits (n : Int64.t) : Int64.t =
+  if bits >= 64 then n  (* nothing narrower than Int64.t's own 64 bits to mask against *)
+  else Int64.logand n (Int64.sub (Int64.shift_left 1L bits) 1L)
 
 (* Reduce a compile-time integer/bool-valued expression (int literal, `as`
-   cast chain, or a reference to an earlier immutable global constant) to a
-   plain OCaml int. Working entirely in OCaml int space rather than emitting
-   LLVM const_trunc/zext/sext at each cast layer sidesteps a real gap: the
+   cast chain, or a reference to an earlier immutable global constant) to
+   an Int64.t -- the full 64-bit raw bit pattern, matching IntLit's own
+   payload type (see CLAUDE.md's "64-bit Integer Literals" section). This
+   still works entirely in Int64/OCaml space rather than emitting LLVM
+   const_trunc/zext/sext at each cast layer, sidestepping a real gap: the
    LLVM 19 OCaml bindings expose const_trunc but not const_zext/const_sext,
    so a widening step has no direct constant-folding primitive to call.
-   const_int's own width-based wraparound already produces the correct final
-   bit pattern once a value is embedded at its true destination width, so
-   the only place that actually needs to happen mid-chain is a NARROWING
-   cast -- hence the explicit mask on every Cast layer here, using that
-   layer's own target width (not the outer caller's), so e.g.
-   `(300 as u8) as i32` truncates to 44 before widening back to i32, instead
-   of the outer i32 cast silently seeing the original untruncated 300. *)
-let rec eval_const_int (e : Ast.expr) : int =
+   const_of_int64's own width-based wraparound already produces the
+   correct final bit pattern once a value is embedded at its true
+   destination width, so the only place that actually needs to happen
+   mid-chain is a NARROWING cast -- hence the explicit mask on every Cast
+   layer here, using that layer's own target width (not the outer
+   caller's), so e.g. `(300 as u8) as i32` truncates to 44 before widening
+   back to i32, instead of the outer i32 cast silently seeing the original
+   untruncated 300. *)
+let rec eval_const_int (e : Ast.expr) : Int64.t =
   match e.desc with
   | IntLit n -> n
-  | BoolLit b -> if b then 1 else 0
+  | BoolLit b -> if b then 1L else 0L
   | Cast (target_ty, inner) ->
       let v = eval_const_int inner in
       (match target_ty with
        | TypePtr _ -> v  (* address value; no integer width to mask against *)
        | _ -> mask_to_bits (int_bits_of_ast target_ty) v)
-  | BinOp (Sub, { desc = IntLit 0; _ }, inner) ->
+  | BinOp (Sub, { desc = IntLit 0L; _ }, inner) ->
       (* Unary minus is desugared to this exact shape in the parser (see
          parser.mly's MINUS rule) -- recognized here so a plain negative
          global constant like `let X: i32 = -5;` folds, without taking on
          general compile-time arithmetic folding beyond this one shape. *)
-      - (eval_const_int inner)
+      Int64.neg (eval_const_int inner)
   | Var name ->
       (match Hashtbl.find_opt global_const_defs name with
        | Some (_, ge) -> eval_const_int ge
@@ -2314,9 +2373,9 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable =
   let rec eval_const (ft : Ast.type_expr) (e : Ast.expr) : llvalue =
     match e.desc, ft with
     | IntLit i, TypePtr _ ->
-        const_inttoptr (const_int (usize_lltype ()) i) (pointer_type context)
+        const_inttoptr (const_of_int64 (usize_lltype ()) i true) (pointer_type context)
     | IntLit i, _ ->
-        const_int (ltype_of_ast ft) i
+        const_of_int64 (ltype_of_ast ft) i true
     | StructLit exprs, TypeNamed sname ->
         let llty = match Hashtbl.find_opt struct_lltypes sname with
           | Some t -> t | None -> raise (Error (Printf.sprintf "unknown struct '%s'" sname))
@@ -2330,16 +2389,16 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable =
         let lelem = ltype_of_ast elem_ty in
         const_array lelem (Array.of_list (List.map (eval_const elem_ty) exprs))
     | Cast (_, _), TypePtr _ ->
-        const_inttoptr (const_int (usize_lltype ()) (eval_const_int e)) (pointer_type context)
-    | (Cast (_, _) | BinOp (Sub, { desc = IntLit 0; _ }, _)),
+        const_inttoptr (const_of_int64 (usize_lltype ()) (eval_const_int e) true) (pointer_type context)
+    | (Cast (_, _) | BinOp (Sub, { desc = IntLit 0L; _ }, _)),
       (TypeI8|TypeU8|TypeI16|TypeU16|TypeI32|TypeU32
       |TypeI64|TypeU64|TypeUsize|TypeBool|TypeRefined _) ->
         (* Cast chains fold via eval_const_int (see its comment for why an
            `as` cast needs its own evaluator); a bare unary minus (desugared
-           to BinOp(Sub, IntLit 0, _) in the parser) reuses the same
+           to BinOp(Sub, IntLit 0L, _) in the parser) reuses the same
            evaluator's matching case rather than duplicating the negation
            here. *)
-        const_int (ltype_of_ast ft) (eval_const_int e)
+        const_of_int64 (ltype_of_ast ft) (eval_const_int e) true
     | Var name, _ ->
         (match Hashtbl.find_opt global_const_defs name with
          | Some (_, ge) -> eval_const ft ge

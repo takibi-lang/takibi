@@ -42,6 +42,20 @@ let check_cond loc ct =
    `TI32 >> TRefinedInt` to fail the unification anti-subtyping guard. *)
 let canon_ty t = match repr t with TRefinedInt _ -> TI32 | t -> t
 
+(* Extract a small-number-scoped compile-time integer from an expression,
+   iff it is exactly an integer literal that fits natively (see
+   Ast.int_of_intlit's comment for why IntLit's Int64.t payload cannot
+   always be narrowed to `int`). Used throughout range propagation below,
+   which only ever needs to reason about realistic mask/comparison/
+   multiplier constants, never a genuinely 64-bit-wide value. None
+   uniformly covers both "not a literal at all" and "a literal, but too
+   large to reason about here" -- both fall back to the conservative
+   (unrefined) case, the same as any other non-constant expression would. *)
+let intlit_opt (e : Ast.expr) : int option =
+  match e.desc with
+  | IntLit k -> Ast.int_of_intlit k
+  | _ -> None
+
 (* Nesting depth of `unsafe { ... }` expressions around the expression
    currently being inferred. Compilation is single-threaded, so a module
    -level counter is safe (same pattern as llvm_gen's narrowing_ctx).
@@ -87,19 +101,19 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | TRefinedInt (a, b), TRefinedInt (c, d) ->
                 TRefinedInt (a + c, b + d - 1)
             | TRefinedInt (a, b), _ ->
-                (match e2.desc with
-                 | IntLit k ->
+                (match intlit_opt e2 with
+                 | Some k ->
                      unify_at e2.loc t2 TI32;
                      TRefinedInt (a + k, b + k)
-                 | _ ->
+                 | None ->
                      unify_at e2.loc (canon_ty t2) TI32;
                      TI32)
             | _, TRefinedInt (c, d) ->
-                (match e1.desc with
-                 | IntLit k ->
+                (match intlit_opt e1 with
+                 | Some k ->
                      unify_at e1.loc t1 TI32;
                      TRefinedInt (c + k, d + k)
-                 | _ ->
+                 | None ->
                      unify_at e1.loc (canon_ty t1) TI32;
                      TI32)
             | _ ->
@@ -125,16 +139,16 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 (match repr t2 with
                  | TRefinedInt (c, d) -> TRefinedInt (a - d + 1, b - c)
                  | _ ->
-                     (match e2.desc with
-                      | IntLit k ->
+                     (match intlit_opt e2 with
+                      | Some k ->
                           unify_at e2.loc t2 TI32;
                           TRefinedInt (a - k, b - k)
-                      | _ ->
+                      | None ->
                           unify_at e2.loc (canon_ty t2) TI32;
                           TI32))
             | _ ->
-                (match e1.desc, repr t2 with
-                 | IntLit k, TRefinedInt (c, d) ->
+                (match intlit_opt e1, repr t2 with
+                 | Some k, TRefinedInt (c, d) ->
                      unify_at e1.loc t1 TI32;
                      TRefinedInt (k - d + 1, k - c + 1)
                  | _ ->
@@ -176,8 +190,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Mod ->
            let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
            unify_at e.loc ct1 ct2;
-           (match e2.desc with
-            | IntLit m when m > 0 ->
+           (match intlit_opt e2 with
+            | Some m when m > 0 ->
                 (match repr t1 with
                  | TRefinedInt (lo, _) when lo >= 0 -> TRefinedInt (0, m)
                  | t when is_unsigned_ty t -> TRefinedInt (0, m)
@@ -197,10 +211,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Band ->
            let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
            unify_at e.loc ct1 ct2;
-           (match e2.desc with
-            | IntLit k when k >= 0 -> TRefinedInt (0, k + 1)
-            | _ -> (match e1.desc with
-                    | IntLit k when k >= 0 -> TRefinedInt (0, k + 1)
+           (match intlit_opt e2 with
+            | Some k when k >= 0 -> TRefinedInt (0, k + 1)
+            | _ -> (match intlit_opt e1 with
+                    | Some k when k >= 0 -> TRefinedInt (0, k + 1)
                     | _ -> ct1))
        | Bor | Bxor | Shr | Shl ->
            let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
@@ -398,11 +412,20 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       unify_at idx.loc it TI32;
       (match repr vt with
        | TArray (elem, n) ->
-           (* Constant index: check bounds at compile time *)
+           (* Constant index: check bounds at compile time. A literal too
+              large to narrow natively (see Ast.int_of_intlit) is certainly
+              out of bounds for any real array, so it is reported the same
+              way rather than silently passing through unchecked. *)
            (match idx.desc with
-            | IntLit k when k >= n ->
-                raise (TypeError (idx.loc,
-                  Printf.sprintf "index %d is out of bounds for array of size %d" k n))
+            | IntLit k64 ->
+                (match Ast.int_of_intlit k64 with
+                 | Some k when k >= n ->
+                     raise (TypeError (idx.loc,
+                       Printf.sprintf "index %d is out of bounds for array of size %d" k n))
+                 | Some _ -> ()
+                 | None ->
+                     raise (TypeError (idx.loc,
+                       Printf.sprintf "index %Ld is out of bounds for array of size %d" k64 n)))
             | _ -> ());
            elem
        | TSlice (elem, _) -> elem  (* runtime length; codegen elides the check
@@ -467,7 +490,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  if is_io then None
                  else
                    match w.desc with
-                   | IntLit k when k >= 0 -> Some k
+                   | IntLit _ ->
+                       (match intlit_opt w with
+                        | Some k when k >= 0 -> Some k
+                        | _ -> None)
                    | Var w_name ->
                        (match StringMap.find_opt w_name tyenv with
                         | Some (t, _) ->
@@ -952,9 +978,15 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       let elem_ty = match repr vt with
         | TArray (elem, n) ->
             (match idx.desc with
-             | IntLit k when k >= n ->
-                 raise (TypeError (idx.loc,
-                   Printf.sprintf "index %d is out of bounds for array of size %d" k n))
+             | IntLit k64 ->
+                 (match Ast.int_of_intlit k64 with
+                  | Some k when k >= n ->
+                      raise (TypeError (idx.loc,
+                        Printf.sprintf "index %d is out of bounds for array of size %d" k n))
+                  | Some _ -> ()
+                  | None ->
+                      raise (TypeError (idx.loc,
+                        Printf.sprintf "index %Ld is out of bounds for array of size %d" k64 n)))
              | _ -> ());
             elem
         | TSlice (elem, _) -> elem

@@ -22,7 +22,18 @@ let find name = Hashtbl.find_opt table name
 let define_if_literal is_mutable name (init_opt : Ast.expr option) =
   if not is_mutable then
     match init_opt with
-    | Some { Ast.desc = Ast.IntLit n; _ } -> define name n
+    | Some { Ast.desc = Ast.IntLit n; _ } ->
+        (* IntLit's Int64.t payload can hold a genuinely 64-bit value, but
+           this table only ever backs array sizes and for-loop bounds
+           (always small); a value too large to narrow safely (see
+           Ast.int_of_intlit) is simply not recorded, exactly as if it were
+           never a bare-literal-initialized constant at all -- each
+           consumer already has a sound fallback for that (array_size's
+           "not a known compile-time integer constant" error, or
+           bound_value's conservative unrefined case). *)
+        (match Ast.int_of_intlit n with
+         | Some i -> define name i
+         | None -> ())
     | _ -> ()
 
 (* Resolve a for-loop bound to a compile-time integer when possible: a bare
@@ -39,6 +50,6 @@ let define_if_literal is_mutable name (init_opt : Ast.expr option) =
    bounds-check elision). *)
 let bound_value (e : Ast.expr) =
   match e.Ast.desc with
-  | Ast.IntLit n -> Some n
+  | Ast.IntLit n -> Ast.int_of_intlit n
   | Ast.Var name -> find name
   | _ -> None

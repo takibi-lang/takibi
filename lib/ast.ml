@@ -36,7 +36,15 @@ type type_expr =
 
 type expr = expr_desc located
 and expr_desc =
-  | IntLit of int
+  | IntLit of Int64.t
+    (* Full 64-bit value (the raw bit pattern of the literal as written --
+       see CLAUDE.md's "64-bit Integer Literals" section). Int64.t, not
+       `int`: OCaml's native `int` is only 63 bits on a 64-bit host, one bit
+       short of holding every u64/i64 bit pattern (e.g. a hex literal with
+       the top bit set). Consumers that only ever need a small, realistic
+       value (array sizes, alignment, refined-type bounds, range-propagation
+       constants) narrow via `int_of_intlit` below rather than assuming the
+       value fits. *)
   | BoolLit of bool
   | StringLit of string     (* "..."  -- null-terminated *char constant *)
   | Var of ident
@@ -114,6 +122,26 @@ type toplevel =
 let show_toplevel_list lst =
   String.concat "\n" (List.map show_toplevel lst)
 
+(* Narrow an IntLit's Int64 payload to a native `int`, safely: OCaml's `int`
+   is 63 bits on a 64-bit host, one bit short of Int64.t, so a plain
+   `Int64.to_int` can silently wrap a genuinely-64-bit value (e.g. a hex
+   literal with the top bit set) into the wrong native int with no warning
+   -- exactly the class of silent-miscompilation risk this project already
+   guards against elsewhere (see CLAUDE.md's `{lo..<hi}` i32-range check and
+   the Mod/lo>=0 sync rule). Round-tripping through Int64 detects this: if
+   converting back doesn't reproduce the original value, the conversion
+   would have lost information, so this returns None instead.
+   Every caller of this function is a small-number-scoped subsystem (array
+   sizes, alignment, enum discriminants, refined-type bounds, range
+   propagation, narrowing) that only ever needs to reason about realistic
+   values (buffer sizes, bit positions, comparison constants) -- None means
+   "fall back to the conservative/unproven case", the same way an ordinary
+   non-constant runtime expression already does at each of those call
+   sites, never a hard error. *)
+let int_of_intlit (k : Int64.t) : int option =
+  let i = Int64.to_int k in
+  if Int64.of_int i = k then Some i else None
+
 (* Names a statement list may write to or rebind:
    - direct assignment targets (x = e, x[i] = e; compound assignments are
      already desugared to these in the parser)
@@ -188,8 +216,10 @@ let written_names (stmts : stmt list) : string list =
 let var_plus_const (e : expr) : (ident * int) option =
   match e.desc with
   | Var v -> Some (v, 0)
-  | BinOp (Add, { desc = Var v; _ }, { desc = IntLit k; _ }) -> Some (v, k)
-  | BinOp (Add, { desc = IntLit k; _ }, { desc = Var v; _ }) -> Some (v, k)
+  | BinOp (Add, { desc = Var v; _ }, { desc = IntLit k; _ }) ->
+      (match int_of_intlit k with Some k -> Some (v, k) | None -> None)
+  | BinOp (Add, { desc = IntLit k; _ }, { desc = Var v; _ }) ->
+      (match int_of_intlit k with Some k -> Some (v, k) | None -> None)
   | _ -> None
 
 (* Slice length lower bounds proven by an if condition: [(name, min_len)].
@@ -208,13 +238,17 @@ let slice_len_mins (cond : expr) : (string * int) list =
   let rec go e = match e.desc with
     | BinOp (And, e1, e2) -> go e1; go e2
     | BinOp (Ge, { desc = FieldGet ({ desc = Var n; _ }, "len"); _ },
-                 { desc = IntLit k; _ }) -> update n k
+                 { desc = IntLit k; _ }) ->
+        (match int_of_intlit k with Some k -> update n k | None -> ())
     | BinOp (Gt, { desc = FieldGet ({ desc = Var n; _ }, "len"); _ },
-                 { desc = IntLit k; _ }) -> update n (k + 1)
+                 { desc = IntLit k; _ }) ->
+        (match int_of_intlit k with Some k -> update n (k + 1) | None -> ())
     | BinOp (Le, { desc = IntLit k; _ },
-                 { desc = FieldGet ({ desc = Var n; _ }, "len"); _ }) -> update n k
+                 { desc = FieldGet ({ desc = Var n; _ }, "len"); _ }) ->
+        (match int_of_intlit k with Some k -> update n k | None -> ())
     | BinOp (Lt, { desc = IntLit k; _ },
-                 { desc = FieldGet ({ desc = Var n; _ }, "len"); _ }) -> update n (k + 1)
+                 { desc = FieldGet ({ desc = Var n; _ }, "len"); _ }) ->
+        (match int_of_intlit k with Some k -> update n (k + 1) | None -> ())
     | _ -> ()
   in
   go cond;

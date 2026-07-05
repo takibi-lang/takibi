@@ -1,5 +1,27 @@
 {
 open Parser
+
+(* Accumulate an integer literal's digits directly in Int64 space, silently
+   wrapping past 64 bits exactly like the eventual const_int/const_of_int64
+   embedding at the literal's target width already does (see CLAUDE.md's
+   "64-bit Integer Literals" section) -- written by hand instead of via
+   Int64.of_string, which range-checks plain decimal digit strings against
+   Int64's SIGNED range (rejecting a perfectly valid u64 value like 2^63)
+   and raises Failure past 16 hex digits. Neither restriction matches what
+   an integer literal here means: a raw bit pattern, not a signed
+   magnitude, with wraparound (not a compile error) beyond 64 bits being an
+   already-accepted, astronomically unrealistic edge case for this
+   language's widest integer type. *)
+let int64_of_digits ~(base : int) (s : string) : Int64.t =
+  let digit_val c =
+    if c >= '0' && c <= '9' then Char.code c - Char.code '0'
+    else if c >= 'a' && c <= 'f' then Char.code c - Char.code 'a' + 10
+    else Char.code c - Char.code 'A' + 10
+  in
+  let base64 = Int64.of_int base in
+  String.fold_left
+    (fun acc c -> Int64.add (Int64.mul acc base64) (Int64.of_int (digit_val c)))
+    0L s
 }
 
 rule read = parse
@@ -84,15 +106,15 @@ rule read = parse
                             ocamllex longest-match keeps "..<" winning when a '<' follows. *)
   | '.' { DOT }
 
-  | "0x" ['0'-'9' 'a'-'f' 'A'-'F']+ as h { INT (int_of_string h) }
-  | ['0'-'9']+ as i { INT (int_of_string i) }
+  | "0x" (['0'-'9' 'a'-'f' 'A'-'F']+ as h) { INT (int64_of_digits ~base:16 h) }
+  | (['0'-'9']+ as i) { INT (int64_of_digits ~base:10 i) }
 
-  | '\'' '\\' 'n'  '\'' { INT 10 }
-  | '\'' '\\' 'r'  '\'' { INT 13 }
-  | '\'' '\\' 't'  '\'' { INT  9 }
-  | '\'' '\\' '0'  '\'' { INT  0 }
-  | '\'' '\\' '\\' '\'' { INT 92 }
-  | '\'' ([^ '\'' '\\' '\n'] as c) '\'' { INT (Char.code c) }
+  | '\'' '\\' 'n'  '\'' { INT 10L }
+  | '\'' '\\' 'r'  '\'' { INT 13L }
+  | '\'' '\\' 't'  '\'' { INT  9L }
+  | '\'' '\\' '0'  '\'' { INT  0L }
+  | '\'' '\\' '\\' '\'' { INT 92L }
+  | '\'' ([^ '\'' '\\' '\n'] as c) '\'' { INT (Int64.of_int (Char.code c)) }
 
   | '_' { UNDERSCORE }  (* wildcard for match. Longest-match: _foo -> IDENT, _ alone -> UNDERSCORE *)
   | ['a'-'z' 'A'-'Z' '_' ] ['a'-'z' 'A'-'Z' '0'-'9' '_' ]* as id

@@ -140,7 +140,7 @@ let parser_tests = [
         Alcotest.(check string)        "name"    "x"   name;
         Alcotest.(check (option type_t)) "type"    None  ty;
         (match init with
-         | Some { Ast.desc = Ast.IntLit 1; _ } -> ()
+         | Some { Ast.desc = Ast.IntLit 1L; _ } -> ()
          | _ -> Alcotest.fail "expected IntLit 1")
     | _ -> Alcotest.fail "expected single LetDef"
   );
@@ -295,7 +295,7 @@ let parser_tests = [
     match parse "fn f() i32 { return 42; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.IntLit 42; _ } -> ()
+         | Ast.Return { desc = Ast.IntLit 42L; _ } -> ()
          | _ -> Alcotest.fail "expected Return(IntLit 42)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -304,7 +304,7 @@ let parser_tests = [
     match parse "fn f() { let x = 5; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Let (false, "x", None, Some { desc = Ast.IntLit 5; _ }) -> ()
+         | Ast.Let (false, "x", None, Some { desc = Ast.IntLit 5L; _ }) -> ()
          | _ -> Alcotest.fail "expected Let(false, x, None, IntLit 5)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -313,7 +313,7 @@ let parser_tests = [
     match parse "fn f() { let mut x = 5; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Let (true, "x", None, Some { desc = Ast.IntLit 5; _ }) -> ()
+         | Ast.Let (true, "x", None, Some { desc = Ast.IntLit 5L; _ }) -> ()
          | _ -> Alcotest.fail "expected Let(true, x, None, IntLit 5)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -322,7 +322,7 @@ let parser_tests = [
     match parse "fn f() { x = 3; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Assign ("x", { desc = Ast.IntLit 3; _ }) -> ()
+         | Ast.Assign ("x", { desc = Ast.IntLit 3L; _ }) -> ()
          | _ -> Alcotest.fail "expected Assign(x, IntLit 3)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -466,7 +466,7 @@ let parser_tests = [
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.AssignDeref ({ desc = Ast.Var "p"; _ },
-                             { desc = Ast.IntLit 42; _ }) -> ()
+                             { desc = Ast.IntLit 42L; _ }) -> ()
          | _ -> Alcotest.fail "expected AssignDeref(Var p, IntLit 42)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -475,8 +475,35 @@ let parser_tests = [
     match parse "fn f() i32 { return 0xff; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.IntLit 255; _ } -> ()
+         | Ast.Return { desc = Ast.IntLit 255L; _ } -> ()
          | _ -> Alcotest.fail "expected Return(IntLit 255)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "full 64-bit hex literal parses to the exact Int64 \
+                       value with no truncation (IntLit's payload is \
+                       Int64.t, not OCaml's native 63-bit int -- see \
+                       CLAUDE.md's '64-bit Integer Literals' section)" `Quick (fun () ->
+    match parse "fn f() u64 { return 0xFFFFFFFFFFFFFFFF; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.IntLit (-1L); _ } -> ()
+             (* 0xFFFFFFFFFFFFFFFF as a signed Int64 bit pattern is -1L;
+                the important thing is EVERY bit survives parsing, not
+                which OCaml literal happens to print it. *)
+         | _ -> Alcotest.fail "expected Return(IntLit -1L)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "a decimal literal past i64::MAX (but within u64's \
+                       range) parses via the hand-written digit \
+                       accumulator, not Int64.of_string (which rejects it \
+                       -- see lib/lexer.mll)" `Quick (fun () ->
+    match parse "fn f() u64 { return 18446744073709551615; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.IntLit (-1L); _ } -> ()  (* u64::MAX's bit pattern *)
+         | _ -> Alcotest.fail "expected Return(IntLit -1L)")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -484,7 +511,7 @@ let parser_tests = [
     match parse "fn f() i32 { return 'A'; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.IntLit 65; _ } -> ()
+         | Ast.Return { desc = Ast.IntLit 65L; _ } -> ()
          | _ -> Alcotest.fail "expected Return(IntLit 65)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -495,7 +522,7 @@ let parser_tests = [
         let check name expected s =
           match s.Ast.desc with
           | Ast.Let (_, _, _, Some { desc = Ast.IntLit n; _ }) ->
-              Alcotest.(check int) name expected n
+              Alcotest.(check int) name expected (Int64.to_int n)
           | _ -> Alcotest.failf "%s: expected Let with IntLit" name
         in
         check "\\n" 10 s1; check "\\r" 13 s2; check "\\0" 0 s3
@@ -577,8 +604,8 @@ let parser_tests = [
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return { desc = Ast.BinOp (Ast.Sub,
-                                 { desc = Ast.IntLit 0; _ },
-                                 { desc = Ast.IntLit 42; _ }); _ } -> ()
+                                 { desc = Ast.IntLit 0L; _ },
+                                 { desc = Ast.IntLit 42L; _ }); _ } -> ()
          | _ -> Alcotest.fail "expected Return(BinOp(Sub, IntLit 0, IntLit 42))")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -770,7 +797,7 @@ let parser_tests = [
         (match s.desc with
          | Ast.AssignIndex ("arr",
              { desc = Ast.Var "i"; _ },
-             { desc = Ast.IntLit 88; _ }) -> ()   (* 'X' = 88 *)
+             { desc = Ast.IntLit 88L; _ }) -> ()   (* 'X' = 88 *)
          | _ -> Alcotest.fail "expected AssignIndex(arr, Var i, IntLit 88)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -870,7 +897,7 @@ let parser_tests = [
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.AssignField ({ desc = Ast.Var "p"; _ }, "x",
-                             { desc = Ast.IntLit 5; _ }) -> ()
+                             { desc = Ast.IntLit 5L; _ }) -> ()
          | _ -> Alcotest.fail "expected AssignField(p, x, 5)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1023,7 +1050,7 @@ let parser_tests = [
         (match s.desc with
          | Ast.AssignDeref (
              { desc = Ast.BinOp (Ast.Add, _, _); _ },
-             { desc = Ast.IntLit 42; _ }) -> ()
+             { desc = Ast.IntLit 42L; _ }) -> ()
          | _ -> Alcotest.fail "expected AssignDeref(BinOp(Add,...), 42)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1046,7 +1073,7 @@ let parser_tests = [
     match parse "fn f() { let t = '\\t'; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Let (_, _, _, Some { desc = Ast.IntLit 9; _ }) -> ()
+         | Ast.Let (_, _, _, Some { desc = Ast.IntLit 9L; _ }) -> ()
          | _ -> Alcotest.fail "expected IntLit 9 (tab = ASCII 9)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1055,7 +1082,7 @@ let parser_tests = [
     match parse "fn f() { let bs = '\\\\'; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Let (_, _, _, Some { desc = Ast.IntLit 92; _ }) -> ()
+         | Ast.Let (_, _, _, Some { desc = Ast.IntLit 92L; _ }) -> ()
          | _ -> Alcotest.fail "expected IntLit 92 (backslash = ASCII 92)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1083,7 +1110,7 @@ let parser_tests = [
     match parse "fn f() i32 { return 42; // answer\n}" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.IntLit 42; _ } -> ()
+         | Ast.Return { desc = Ast.IntLit 42L; _ } -> ()
          | _ -> Alcotest.fail "expected Return(IntLit 42)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1092,7 +1119,7 @@ let parser_tests = [
     match parse "fn f() i32 { /* skip this */ return 0; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.IntLit 0; _ } -> ()
+         | Ast.Return { desc = Ast.IntLit 0L; _ } -> ()
          | _ -> Alcotest.fail "expected Return(IntLit 0)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1101,7 +1128,7 @@ let parser_tests = [
     match parse "fn f() i32 {\n  /*\n   * multi\n   * line\n   */\n  return 7;\n}" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.IntLit 7; _ } -> ()
+         | Ast.Return { desc = Ast.IntLit 7L; _ } -> ()
          | _ -> Alcotest.fail "expected Return(IntLit 7)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -2970,6 +2997,86 @@ let codegen_tests = [
        "let GLOBALCONST_FWD_B: i32 = GLOBALCONST_FWD_A;
         let GLOBALCONST_FWD_A: i32 = 1;
         fn codegen_globalconst_fwd_ref_use() -> i32 { return GLOBALCONST_FWD_B; }");
+
+  (* 64-bit integer literals (CLAUDE.md's "64-bit Integer Literals" section):
+     IntLit's payload widened from OCaml's native (63-bit) int to Int64.t,
+     touching the lexer, parser, ast, type_inf, and llvm_gen. These are
+     regression tests for the representation itself; runtime VALUE
+     correctness for a local variable and a bare function argument (the
+     two forms that go through gen_expr's IntLit case, not eval_const) is
+     additionally verified end-to-end under QEMU by examples/int64. *)
+  Alcotest.test_case
+    "global u64 initializer with a full 64-bit hex literal embeds the \
+     exact bit pattern -- regression for the pre-Int64-IntLit bug where \
+     eval_const's `const_int (ltype_of_ast ft) i` truncated any literal \
+     outside OCaml's native int to i32 before ever reaching u64" `Quick
+    (fun () ->
+       let src =
+         "let GLOBALCONST_U64_FULL: u64 = 0xFFFFFFFFFFFFFFFF;
+          fn codegen_globalconst_u64_full_use() -> u64 { return GLOBALCONST_U64_FULL; }"
+       in
+       match gen_codegen src with
+       | _ ->
+           (match Hashtbl.find_opt Llvm_gen.global_vars "GLOBALCONST_U64_FULL" with
+            | Some (_, gv) ->
+                (match Llvm.global_initializer gv with
+                 | Some init ->
+                     (match Llvm.int64_of_const init with
+                      | Some v -> Alcotest.(check bool) "bit pattern is all-ones" true (v = -1L)
+                      | None -> Alcotest.fail "expected an integer constant")
+                 | None -> Alcotest.fail "expected an initializer")
+            | None -> Alcotest.fail "GLOBALCONST_U64_FULL not found in global_vars")
+       | exception Llvm_gen.Error msg -> Alcotest.failf "unexpected codegen Error: %s" msg);
+
+  Alcotest.test_case
+    "local u64 variable initialized with a value beyond i32's range \
+     compiles cleanly (gen_expr's IntLit case must route this through the \
+     i64-native path, not silently truncate to i32 first)" `Quick
+    (expect_codegen_ok
+       "fn codegen_intlit_local_u64() -> u64 {
+          let x: u64 = 5000000000;
+          return x;
+        }");
+
+  Alcotest.test_case
+    "a bare wide hex literal passed directly as a u64 function argument \
+     compiles cleanly (the specific case that needs the non-negative-only \
+     i32 fast path, not the full signed i32 range: 0xFFFFFFFFFFFFFFFF's \
+     Int64 value is -1, which fits the signed i32 range but must NOT take \
+     the i32-then-widen shortcut, since zero- vs sign-extending -1 gives \
+     different 64-bit results)" `Quick
+    (expect_codegen_ok
+       "fn codegen_intlit_wide_arg_callee(v: u64) -> u64 { return v; }
+        fn codegen_intlit_wide_arg_caller() -> u64 {
+          return codegen_intlit_wide_arg_callee(0xFFFFFFFFFFFFFFFF);
+        }");
+
+  Alcotest.test_case
+    "array size formula overflowing native int is a compile error, not a \
+     silent wraparound (narrow_int64 in parser.mly). Uses 0x8000000000000000
+     (Int64.min_int) specifically: it is the cleanest value guaranteed not
+     to round-trip through OCaml's 63-bit native int, unlike an arbitrary
+     huge decimal string, whose 64-bit wraparound could coincidentally land
+     back inside the 63-bit range" `Quick (fun () ->
+    match parse "let ring: [u8; 0x8000000000000000];" with
+    | _ -> Alcotest.fail "expected an error, but parsing succeeded"
+    | exception Types.TypeError (_, msg) ->
+        Alcotest.(check bool) "mentions array size" true
+          (let n = String.length "array size" and m = String.length msg in
+           let rec scan i = i + n <= m && (String.sub msg i n = "array size" || scan (i + 1)) in
+           scan 0));
+
+  Alcotest.test_case
+    "align(N) overflowing native int is a compile error, not a silent \
+     wraparound (narrow_int64 in parser.mly; same 0x8000000000000000 \
+     choice as the array-size test above)" `Quick (fun () ->
+    match parse "let mut buf: [u8; 4] align(0x8000000000000000);" with
+    | _ -> Alcotest.fail "expected an error, but parsing succeeded"
+    | exception Types.TypeError (_, msg) ->
+        Alcotest.(check bool) "mentions alignment" true
+          (let n = String.length "alignment" and m = String.length msg in
+           let rec scan i = i + n <= m && (String.sub msg i n = "alignment" || scan (i + 1)) in
+           scan 0));
 
 ]
 
