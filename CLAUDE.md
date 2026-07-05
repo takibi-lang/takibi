@@ -1141,6 +1141,96 @@ notably reassuring result given this change touches `Index`/
 `AssignIndex`/`SliceOf`/`For`, i.e. essentially every array/slice access
 in every example in the codebase.
 
+### Undetermined let/let mut Types Are a Compile Error, Not an i32 Default
+
+Prompted by a design discussion after the for-loop fix above: should this
+language have ANY silent default for a type the compiler can't determine?
+`Types.to_ast`'s `TVar (Unbound _) -> Ast.TypeI32` fallback meant a bare
+`let x = 5;` (no annotation, nothing else ever constraining `x`) silently
+became a plain `i32` local -- including for `let mut`, where `x` gets a
+REAL, stable alloca (a debugger-visible memory location). The concern,
+distilled: "looks fine, wrong binary representation" is exactly the class
+of bug this project exists to eliminate elsewhere (the explicit
+`{lo..<hi as base}` syntax, the Polymorphic Literal `?expected_ty`
+threading) -- a stable memory location whose width the programmer never
+consciously chose is the same shape of gap, just at the `let` level
+instead of the type-literal level.
+
+**Scope, deliberately narrower than "no defaults anywhere"**: this ONLY
+applies to `let`/`let mut` (local and global). It deliberately does NOT
+extend to internal, ephemeral type-inference decision points like a
+for-loop's residual "neither bound determines anything" fallback (see the
+section above) or `min`/`max`'s sentinel handling. Two distinct reasons,
+not one:
+- Most "can't infer" cases at those OTHER sites turn out to be "hasn't
+  been propagated yet" rather than genuinely undecidable -- the for-loop
+  fix above is the concrete proof: `for i in 0..<s.len` wasn't
+  undecidable, it was just being forced into i32 without ever looking at
+  `s.len`'s own type. Punting every such gap to a mandatory annotation
+  would make the PROGRAMMER responsible for closing compiler
+  completeness gaps that are better fixed by propagating more
+  information, exactly as `for` was.
+- A for-loop counter is very often a purely ephemeral SSA/register value
+  with no stable, independently-inspectable memory representation the way
+  a `let mut` binding's alloca has -- the "wrong binary representation in
+  a hardware-debugging dump" concern that motivates this section applies
+  much more directly to a value that is actually, stably stored somewhere.
+
+**Implementation**: a new `is_undetermined t` (in `lib/type_inf.ml`, right
+after `canon_ty`/`require_integer`) recognizes a bare unresolved
+`TVar (Unbound _)`, or a `TRefinedInt` whose own `base` still is (e.g.
+`let x = min(5, 10);` with no annotation -- `min`/`max`'s Call case can
+itself leave the base an open TVar when NEITHER argument pins one).
+Nested TVars are otherwise unreachable in this language: no written
+type-expression position ever embeds an inference placeholder, so this
+covers every realistic case without needing a fully general recursive
+type-tree walk.
+
+**A real design mistake found and fixed WHILE implementing this, not
+after**: the first attempt checked `is_undetermined` immediately, inline
+in the `Let` case itself, right after computing `bind_ty`. This rejected
+the entirely ordinary `let x = 1; return x;` pattern (10 existing unit
+tests broke) -- the function's own return-type unification, which
+determines `x`'s type, is processed by a LATER statement, so checking
+eagerly at the `Let` site sees `x` as still-unresolved and reports a
+false positive. The same class of mistake, one level up: an EARLIER
+GLOBAL's type can be pinned by a LATER global's reference (`let g = 5;
+let h: i32 = g;`, via the existing `Var vname` cross-reference case in
+Pass 2) or by a FUNCTION BODY'S usage (`let g = 1; fn f() i32 { return g;
+}`, only resolved in Pass 3) -- checking right after Pass 2 (the first
+placement tried for the global case) is still too eager.
+
+**Fix: defer the check to the point where nothing further could ever
+constrain the type.** For locals, this means AFTER the whole function
+body has been processed, not inline in `Let`: a new `check_undetermined_lets
+fdef raw_locals` (mirroring `check_const_shadowing`'s existing `go_stmt`
+traversal shape exactly) re-walks the already-parsed AST purely to
+recover each un-annotated `Let`'s source location for the error message
+-- `raw_locals` only maps name -> type, with no location, and threading a
+location map through `infer_stmt`'s signature everywhere was judged more
+invasive than one extra lightweight syntactic pass, the same tradeoff
+`check_const_shadowing` already made. For globals, this means AFTER Pass
+3 (function bodies) entirely, not right after Pass 2 -- moved to
+immediately after `functions` is computed, before `program_types` is
+constructed. `LetDef`/`genv` carry no source location at all (the
+codebase's existing `Lexing.dummy_pos` precedent for other whole-program
+global checks applies here too).
+
+**Verification**: `test/test_takibi.ml` gained two rejection tests (a bare
+local `let x = 5;`, a bare global `let g = 5;`) and three
+deferred-resolution regression tests (local: determined by a later
+`return`; global: determined by a later global's reference; global:
+determined only by a function body's usage) -- the exact three "checking
+too eagerly would reject this" shapes found while building this feature.
+Four pre-existing tests needed an explicit annotation added (their
+snippets, e.g. `let mut x = 0; x = 1;` in an enum-match-arm body, never
+actually determined `x`'s type any other way -- confirmed by tracing
+through `unify`'s own `TVar, TVar` case, which only LINKS the two
+placeholders together without ever attaching anything concrete). Full
+`make check` (langcheck, 379 unit tests, stm32build, all 125 qemutest
+cases) passes with zero regressions -- notably, not a single example in
+the entire codebase relies on an undetermined bare literal anywhere.
+
 ### Soundness Condition for % Range Propagation
 
 Range propagation for `n % m` (where m is a positive integer literal) returns `{0..<m}` **only when the left operand is guaranteed non-negative at the type level**.

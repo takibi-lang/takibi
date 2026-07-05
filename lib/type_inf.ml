@@ -93,6 +93,23 @@ let require_integer loc t =
    | _ -> raise (TypeError (loc,
        Printf.sprintf "expected an integer type, got '%s'" (to_string t))))
 
+(* True if a type is not yet fully determined: a bare unresolved
+   unification variable, or a TRefinedInt whose own base still is (e.g.
+   `let x = min(5, 10);` with no annotation -- min/max's Call case can
+   itself leave the base an open TVar when NEITHER argument pins one).
+   Nested TVars are otherwise unreachable in this language: no written
+   type-expression position ever embeds an inference placeholder, so a
+   compound type (TArray/TPtr/TSlice/TStruct) can only ever have a
+   concrete element/pointee/field type once its OWN top-level shape is
+   concrete. Used by Let/LetDef to require an explicit annotation instead
+   of silently deferring to Types.to_ast's i32 default -- see the Let
+   case's own comment for why. *)
+let rec is_undetermined t =
+  match repr t with
+  | TVar { contents = Unbound _ } -> true
+  | TRefinedInt (_, _, base) -> is_undetermined base
+  | _ -> false
+
 (* Extract a small-number-scoped compile-time integer from an expression,
    iff it is exactly an integer literal that fits natively (see
    Ast.int_of_intlit's comment for why IntLit's Int64.t payload cannot
@@ -1173,6 +1190,14 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                | t_ann, (TRefinedInt (_, _, base) as r) when t_ann = repr base -> r
                | _ -> ty)
       in
+      (* Deliberately NOT checked here for is_undetermined: `let x = 1;
+         return x;` is entirely ordinary, and the function's OWN return
+         type (processed by a LATER statement) is what determines x's
+         type -- checking immediately at this Let would reject it as a
+         false positive, since later statements haven't run yet. The
+         check instead runs once, in infer_func, after the WHOLE body has
+         been processed and every constraint has had a chance to fire --
+         see check_undetermined_lets. *)
       ( StringMap.add name (bind_ty, is_mut) tyenv,
         StringMap.add name bind_ty raw_locals )
   | Block stmts ->
@@ -1357,6 +1382,43 @@ let check_const_shadowing (fdef : Ast.func) =
   in
   List.iter go_stmt fdef.body
 
+(* Require an explicit type annotation on any `let`/`let mut` whose type is
+   STILL undetermined after the whole function body has been processed
+   (raw_locals reflects every constraint the ENTIRE function ever placed
+   on it, not just what was known at the Let statement's own textual
+   position -- see the Let case's own comment for why checking eagerly,
+   right there, produces a false positive on the entirely ordinary
+   `let x = 1; return x;` pattern). This is a plain syntactic re-walk
+   (mirroring check_const_shadowing's go_stmt exactly) rather than
+   threading a location map through infer_stmt's signature everywhere:
+   raw_locals only holds name -> ty, with no location, so the AST is
+   walked a second time purely to recover a `Let`'s source position for
+   the error message. *)
+let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
+  let check loc name =
+    match StringMap.find_opt name raw_locals with
+    | Some ty when is_undetermined ty ->
+        raise (TypeError (loc, Printf.sprintf
+          "cannot determine a concrete type for '%s': add an explicit \
+           type annotation (e.g. `: i32`) -- this language does not \
+           default an undetermined integer type" name))
+    | _ -> ()
+  in
+  let rec go_stmt (s : Ast.stmt) = match s.desc with
+    | Ast.Let (_, name, None, _) -> check s.loc name
+    | Ast.Let (_, _, Some _, _) -> ()
+    | Ast.Block ss | Ast.While (_, ss) -> List.iter go_stmt ss
+    | Ast.If (_, t, e) -> List.iter go_stmt t; List.iter go_stmt e
+    | Ast.For (_, _, _, body) | Ast.ForEach (_, _, body) -> List.iter go_stmt body
+    | Ast.Match (_, arms) ->
+        List.iter (function
+          | Ast.ArmVariant (_, _, b) -> List.iter go_stmt b
+          | Ast.ArmWild b            -> List.iter go_stmt b
+        ) arms
+    | _ -> ()
+  in
+  List.iter go_stmt fdef.body
+
 let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
   check_const_shadowing fdef;
   let param_tys = List.map (fun (_, ty_opt) -> of_ast_opt ty_opt) fdef.params in
@@ -1370,6 +1432,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
     (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs false s)
     (init_env, StringMap.empty) fdef.body
   in
+  check_undetermined_lets fdef raw_locals;
   {
     ret_type    = to_ast ret_ty;
     param_types = List.map2 (fun (name, _) ty -> (name, to_ast ty))
@@ -1473,6 +1536,28 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add fdef.name (infer_func senv eenv fenv genv fdef) m
     | _ -> m
   ) StringMap.empty prog in
+  (* Deferred until AFTER Pass 3, same reasoning as check_undetermined_lets
+     for locals: a global's type can be pinned not only by another global
+     (the `Var vname` cross-reference case above) but also by a FUNCTION
+     BODY'S usage (`let g = 1; fn f() i32 { return g; }` -- g's type is
+     only ever determined by f's own return-type unification, which Pass
+     3 performs). Checking right after Pass 2 (as first attempted)
+     rejected that as a false positive; checking here, after everything
+     that could ever constrain a global has run, does not. LetDef/genv
+     carry no source location (see the Lexing.dummy_pos precedent in Pass
+     2, for the same underlying reason), so this reports the same
+     placeholder position other whole-program global checks already do. *)
+  List.iter (function
+    | Ast.LetDef (name, None, _, _, _) ->
+        (match StringMap.find_opt name genv with
+         | Some (ty, _) when is_undetermined ty ->
+             raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+               "cannot determine a concrete type for global '%s': add an \
+                explicit type annotation (e.g. `: i32`) -- this language \
+                does not default an undetermined integer type" name))
+         | _ -> ())
+    | _ -> ()
+  ) prog;
   let enums = StringMap.map (fun (underlying, variants, _) ->
     { underlying; variants }
   ) eenv in

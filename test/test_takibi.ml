@@ -1330,7 +1330,7 @@ let infer_tests = [
        "fn f() { let x = 0; x = 1; }");
 
   Alcotest.test_case "let mut allows reassignment" `Quick
-    (expect_ok "fn f() { let mut x = 0; x = 1; }");
+    (expect_ok "fn f() { let mut x: i32 = 0; x = 1; }");
 
   Alcotest.test_case "addrof immutable variable is a type error" `Quick
     (expect_type_error "cannot take address of immutable"
@@ -1342,6 +1342,45 @@ let infer_tests = [
   Alcotest.test_case "immutable let without initializer is a type error" `Quick
     (expect_type_error "must have an initializer"
        "fn f() { let x: i32; }");
+
+  (* -- Undetermined integer types require an explicit annotation ------
+     (this language does not silently default to i32 the way a for-loop
+     bound's residual "nothing else determines it" case still does -- a
+     `let`/`let mut` binding is a stable, potentially debugger-visible
+     memory location whose bit width the programmer should always have
+     chosen deliberately, unlike a purely ephemeral loop counter). *)
+
+  Alcotest.test_case
+    "a bare, never-otherwise-constrained local let is a type error \
+     (regression: this used to silently default to i32 via Types.to_ast's \
+     TVar-Unbound fallback)" `Quick
+    (expect_type_error "cannot determine a concrete type"
+       "fn f() { let x = 5; }");
+
+  Alcotest.test_case
+    "a bare, never-otherwise-constrained global let is a type error" `Quick
+    (expect_type_error "cannot determine a concrete type"
+       "let g = 5;");
+
+  Alcotest.test_case
+    "a local let determined by a LATER statement (not the Let itself) is \
+     NOT a false positive -- `let x = 1; return x;` is the entirely \
+     ordinary case where the function's own return type (processed after \
+     the Let) is what pins x's type; checking eagerly at the Let site \
+     itself (first attempted) rejected this" `Quick
+    (expect_ok "fn f() i32 { let x = 1; return x; }");
+
+  Alcotest.test_case
+    "a global let determined by a LATER global's reference is NOT a \
+     false positive -- `let g = 5; let h: i32 = g;` pins g's type through \
+     h's own annotation, processed after g's own initializer" `Quick
+    (expect_ok "let g = 5; let h: i32 = g;");
+
+  Alcotest.test_case
+    "a global let determined only by a function body's usage is NOT a \
+     false positive -- the check must run after Pass 3 (function \
+     bodies), not just after Pass 2 (global initializers)" `Quick
+    (expect_ok "let g = 1; fn f() i32 { return g; }");
 
   (* -- Error cases --------------------------------------------- *)
 
@@ -1943,8 +1982,8 @@ let infer_tests = [
     (expect_ok
       "enum Color: u8 { Red = 0; Green = 1; }
        fn f(c: Color) { match c {
-         Color::Red   => { let x = 0; }
-         Color::Green => { let y = 1; } } }");
+         Color::Red   => { let x: i32 = 0; }
+         Color::Green => { let y: i32 = 1; } } }");
 
   Alcotest.test_case "exhaustive enum match missing variant is a type error" `Quick
     (expect_type_error "non-exhaustive match: 'Color::Green' not covered"
@@ -1955,15 +1994,15 @@ let infer_tests = [
     (expect_ok
       "enum Color: u8 { Red = 0; Green = 1; }
        fn f(c: Color) { match c {
-         Color::Red => { let x = 0; }
-         _ => { let y = 1; } } }");
+         Color::Red => { let x: i32 = 0; }
+         _ => { let y: i32 = 1; } } }");
 
   Alcotest.test_case "non-exhaustive enum match with _ type-checks" `Quick
     (expect_ok
       "enum EtherType: u16 { IPv4 = 0x0800; _; }
        fn f(et: EtherType) { match et {
-         EtherType::IPv4 => { let x = 0; }
-         _ => { let y = 1; } } }");
+         EtherType::IPv4 => { let x: i32 = 0; }
+         _ => { let y: i32 = 1; } } }");
 
   Alcotest.test_case "non-exhaustive enum match without _ is a type error" `Quick
     (expect_type_error "non-exhaustive enum 'EtherType' requires a '_' wildcard arm"
