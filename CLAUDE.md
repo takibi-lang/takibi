@@ -739,6 +739,231 @@ four fully-unconstrained, must not raise).
 qemutest cases including every `--forbid-trap`/no-trap check) passes with
 zero regressions after both bugs above were fixed.
 
+### Explicit-Base {lo..<hi as base} Surface Syntax
+
+Motivated by a concrete need the "Deliberately NOT addressed" list above
+predicted but didn't yet have an example for: rewriting the protocol
+examples (`ip_parse`, `tcp_parse`, `icmp_echo`, `tcp_echo`, `http_server`)
+to use natural wire-width types (`u8` for IP version/IHL/TTL/protocol,
+TCP flags/data-offset; `u16` for ports/total-length; `u32` for TCP
+sequence/ack numbers) instead of i32 everywhere. Several of these files
+pass an `ihl: {20..<21}` value across a function boundary (e.g.
+`build_echo_reply`, `build_syn_ack`, `parse_tcp`) to prove the same-base
+subslice rule `ip[ihl..<ihl+tcp_len]`. Because the surface `{lo..<hi}`
+syntax could only ever spell base = i32, passing a narrower-based local
+into such a parameter failed to unify at all (`TRefinedInt`'s
+subtyping/unification requires bounds AND base to match exactly for a
+function argument -- there's no "narrower fits into wider" rule the way
+slice minimum-length subtyping has), which transitively forced every
+variable entangled in that one proof chain to stay i32-based even when
+every one of them is naturally narrower on the wire. Lifting this
+required letting a programmer spell a non-i32 base directly in source,
+not just receive one indirectly from the compiler's own range-propagation
+machinery (Add/Sub/Mul/Band/Mod/min/max/narrowing).
+
+**Syntax**: `{lo..<hi as base}`, where `base` is one of i8/i16/i32/i64/
+u8/u16/u32/u64/usize (the same set "by convention" already documented as
+`TRefinedInt`'s allowed bases). Reuses the existing `AS` token rather than
+inventing new grammar -- `{20..<21 as u8}` reads as "a value in this
+range, as this base type", and there is no ambiguity with the ordinary
+`expr AS type_expr` cast (this form only ever appears between `hi` and
+`RBRACE`, strictly inside the braces). The bare `{lo..<hi}` form (no `as`)
+is unchanged and still defaults to i32.
+
+**Per-base range validation, generalizing the existing i32-only check**:
+just like a bare `{lo..<hi}` bound outside i32's range used to silently
+wrap at codegen time before that check was added, `{lo..<hi as u8}` with
+`hi > 256` would silently wrap via `const_int i8_type <hi>` with no
+warning. `lib/parser.mly`'s new production validates `lo`/`hi` against
+each base's own representable range (`base_bound_range`): i8 needs
+`lo >= -128 && hi <= 128`, i16 needs `lo >= -32768 && hi <= 32768`, i32
+matches the existing bare-form check, u8 needs `lo >= 0 && hi <= 256`, u16
+needs `lo >= 0 && hi <= 65536`, u32 needs `lo >= 0 && hi <= 4294967296`.
+i64/u64 impose no upper-bound check at all, matching `types.ml`'s own
+`TRefinedInt` subtyping rules for those bases (which likewise never
+restrict `hi`) -- and also sidestepping a real representational limit:
+`i64`'s true upper bound (2^63) does not fit in an `Int64.t` `hi` value
+either. `usize` is checked the same as `u32` (`hi <= 4294967296`) even
+though it's i64-wide on AArch64/RISC-V64, because it's only 32-bit on
+Cortex-M and the parser doesn't know the target yet at parse time --
+conservatively assuming the narrowest supported width is the safe
+direction (rejects some values that would be fine on a 64-bit target
+rather than silently accepting values that would wrap on a 32-bit one).
+
+**A real, previously-latent bug found immediately while testing this**:
+the first program exercised through this new syntax (`let x: u8 = a &
+mask; let y: u8 = x * 4;` then passing `y` into a `{20..<21 as u8}`
+parameter) crashed `gen_func`'s own `Llvm_analysis.verify_function` with
+`mul i8 %x, i32 4` -- an LLVM type mismatch. Root cause: `widen_load`
+(aliased `to_arith_width`, used by every `Var`/`Index`/`FieldGet`/`Deref`
+codegen case per the project's "narrow-typed gen_expr results must be
+widened in-flight" invariant) pattern-matches `TypeI8|TypeI16|TypeI32` /
+`TypeU8|TypeU16|TypeU32` explicitly but had no case for `TypeRefined` at
+all, falling through to `| _ -> v` (return unchanged). **This was
+harmless before the "Refinement Numerical Type" generalization above**,
+because every `TypeRefined` value was i32-shaped in memory regardless of
+what it represented, so returning it unwidened was a no-op (it was
+already the right width). Once a `TypeRefined` value can genuinely be
+i8/i16-shaped (e.g. `base = TypeU8`, reachable ever since that
+generalization landed, just never exercised end-to-end until this new
+syntax made it easy to write), the SAME fallthrough silently returned a
+still-narrow value to a caller (e.g. `BinOp`'s Mul case) that assumes
+arithmetic-width (i32/i64) input. This is the same class of oversight as
+the `is_unsigned`/`canon_ty` fixes documented above, just in a THIRD
+function that also needed the "recurse into `TypeRefined`'s base" case
+and was missed in the original pass. Fixed by making `widen_load`
+`rec` and adding `TypeRefined (_, _, base) -> widen_load base v` as its
+first case (`lib/llvm_gen.ml`). Regression test:
+`test/test_takibi.ml`'s `refnum_widen_mul`/`refnum_widen_add`/
+`refnum_widen_call_site` (Imm bindings with a narrow refined base used in
+further arithmetic and passed across a `{lo..<hi as base}` parameter
+boundary; `expect_codegen_ok` catches a regression here because
+`gen_func`'s IR verifier -- not a hand-written assertion -- is what
+actually fails).
+
+**Files**: `lib/parser.mly` (`int_base_type_expr`, `base_bound_range`,
+`check_refined_base_range`, the new `{lo..<hi as base}` production),
+`lib/llvm_gen.ml` (`widen_load`'s `TypeRefined` case), `test/
+test_takibi.ml` (parser tests for all 9 bases + the out-of-range/
+no-upper-bound-for-64-bit cases, codegen regression tests for the
+`widen_load` bug). This unblocks, but does not itself perform, the
+protocol-examples rewrite described above -- that is tracked separately.
+
+### The Protocol Examples Rewrite: i32-Forced Refinement Locals -> Natural
+### Wire-Width Types
+
+Rewrote `ip_parse.tkb`, `tcp_parse.tkb`, `icmp_echo.tkb`, `tcp_echo.tkb`,
+and `http_server.tkb` so that fields naturally a single byte (IP version/
+IHL/TTL/protocol, TCP flags/data-offset), a 16-bit half-word (ports,
+total-length, window), or a 32-bit word (TCP sequence/ack numbers) use
+`u8`/`u16`/`u32` instead of the i32 that was the only option before the
+Refinement Numerical Type generalization and the explicit-base syntax
+above. `arp_reply.tkb` needed no change (every field is compared inline,
+no i32-forced refinement locals exist there); `refined.tkb`/`narrow.tkb`
+(deliberately illustrate narrowing an i32-of-unknown-range index/MMIO
+value -- i32 is the CORRECT type there) and `crc8.tkb`/`foreach.tkb`/
+`int64.tkb` (checksum accumulators needing i32 headroom, or generic i32
+input by design) were likewise left alone.
+
+**A real, previously-latent bug found immediately while testing the
+first rewritten file**: `pkt[0..<ihl]` (`ihl: u8`, `ip_parse.tkb`'s
+existing `min(...)`-clamped IHL) raised `cannot unify u8 with i32`.
+Root cause: `SliceOf`'s bound check in `lib/type_inf.ml` did `unify_at
+lo_e.loc (canon_ty lo_t) TI32` -- `canon_ty` WIDENS a refined bound to
+its bare base FIRST (e.g. `TRefinedInt(0,21,TU8) -> TU8`), and a bare
+`TU8` has no unification rule against `TI32` at all. `Index`'s parallel
+check (`unify_at idx.loc it TI32`, no `canon_ty`) never had this bug,
+because unifying the RAW `TRefinedInt` directly relies on `types.ml`'s
+existing base-agnostic subtyping rule (`TRefinedInt _, TI32 -> ()`,
+unconditional regardless of the refined value's own base) -- exactly what
+a u8/u16/etc.-based bound needs. This was invisible before this session's
+work only because every refined bound was i32-based anyway (`canon_ty`'d
+i32 unifies with i32 trivially, masking that `canon_ty` was doing nothing
+useful there even then). Fixed by removing the `canon_ty` call, matching
+Index's pattern exactly: `unify_at lo_e.loc lo_t TI32` /
+`unify_at hi_e.loc hi_t TI32`. `llvm_gen.ml`'s codegen mirror
+(`gen_bound`) needed no change -- it calls `to_i32` directly on the
+LLVALUE (not the AST type), which already handles any integer LLVM width
+correctly regardless of the AST type tag. Regression test:
+`test/test_takibi.ml`'s `refnum_slice_bound_u8`.
+
+**The `ihl`-entanglement finding, and why several fields stay i32 after
+all**: the explicit-base syntax unblocks `ihl: {20..<21 as base}` as a
+parameter, but `tcp_parse.tkb`/`icmp_echo.tkb`/`tcp_echo.tkb`/
+`http_server.tkb` all compare `ihl`/`total_len`/`tcp_len` against
+quantities ultimately derived from `net_poll_rx()`'s return value (`len`),
+which is deliberately-unconstrained `i32` (external, device-reported,
+per this project's `i32 = unknown range` convention). Casting a value to
+a plain (non-refined-syntax) target type ALWAYS discards any refined
+range the source had (`type_inf.ml`'s `Cast` case: `| _ -> tgt`,
+unconditional) -- so bridging `total_len`/`ihl` into a narrower base at
+the point they're compared against `ip_len_in_frame = len - 14` would
+silently break the narrowing chain the whole checksum-span proof depends
+on. Consequences, worked out per file:
+- `ip_parse.tkb`: no entanglement at all (its `ihl` is a purely local
+  `min(...)`-clamped value, never compared against anything `len`
+  -derived) -- `version`/`ihl`/`ttl`/`protocol` -> `u8`, `total_len` ->
+  `u16`, no explicit-base syntax needed.
+- `tcp_parse.tkb`: `ihl` IS a `{lo..<hi}` parameter, but `ip_total_len`
+  there comes directly from `read_u16be` (inherently 16-bit, never
+  compared against a `len`-derived value) -- `ihl: {20..<21 as u16}`,
+  `ip_total_len`/`tcp_len` follow at `u16`; `flags`/`data_offset` (display
+  -only, never touch the `ihl` chain) -> `u8`; ports -> `u16`; seq/ack ->
+  `u32` (display-only via `uart_println_hex`).
+- `icmp_echo.tkb`/`tcp_echo.tkb`/`http_server.tkb`: `ihl`/`total_len`/
+  `ip_len_in_frame`/`tcp_len`/`tcp_hdr_len`/`data_len`/`data_off` ALL stay
+  `i32` (the `len`-entanglement above). Only `version` (standalone),
+  `doff`/`flags` (TCP's own byte-scale fields, never directly combined
+  with the `ihl` chain -- `tcp_hdr_len = doff * 4` upcasts `doff` back to
+  `i32`), ports, and seq/ack/`conn_snd_nxt`/`conn_rcv_nxt` (equality/
+  increment only, confirmed no `<`/`>` ordering comparisons exist, so the
+  CLAUDE.md caveat about `read_u32be`'s signed bit pattern for large seq
+  numbers no longer applies to these fields at all) narrow.
+- Wire-VALUE constants compared against a narrowed field follow it
+  (`TCP_FLAG_*`/`PROTO_TCP` -> `u8`; `TCP_ECHO_PORT`/`HTTP_PORT` -> `u16`;
+  `OUR_ISN` -> `u32`) -- unlike the pure OFFSET constants (`IP_TTL`,
+  `TCP_SEQ`, `ARP_SHA`, ...), which stay `i32` as array indices, matching
+  the codebase's existing for-loop-counter convention.
+- A narrowed counter combined with an i32-entangled value needs one
+  explicit cast at the point of combination, not a redeclaration:
+  `conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);` (`conn_rcv_nxt: u32`,
+  `data_len: i32`, entangled). Safe because `conn_rcv_nxt`/`conn_snd_nxt`
+  are never used as a slice bound or index anywhere -- no proof depends
+  on their refined-ness (they have none to begin with, being plain
+  running counters), so discarding it via the cast costs nothing.
+- `netutil.tkb`/`inet_checksum.tkb`'s shared function signatures
+  (`read_u16be`/`read_u32be`/`write_u16be`/`write_u32be`, `checksum_add`/
+  `checksum_fold`) were NOT changed -- narrowing those ripples into every
+  caller across 5 files for uncertain benefit; an explicit `as u16`/
+  `as u32` cast at the call site gets the same local clarity without
+  that ripple. `checksum_add`'s running `sum` accumulator keeps `i32` too
+  (needs >16-bit headroom during folding, a correct design choice, not
+  an oversight).
+
+**A second real regression found via `--forbid-trap` while rewriting
+`http_server.tkb`** (not merely a type error this time -- a SILENT loss
+of a proof that had been catching zero trap sites before): naively
+upcasting `doff` to `i32` right before multiplying (`(doff as i32) * 4`)
+compiles fine and LOOKS equivalent, but a plain `as i32` cast discards
+`doff`'s if-narrowed `{5..<16 as u8}` range (same "Cast to a
+non-refined-syntax target always drops refinement" rule as above), so
+`tcp_hdr_len` came out unrefined instead of the `{20..<61}` its own
+comment claimed -- and `data_off = 34 + tcp_hdr_len` lost its upper bound
+as a direct consequence, reopening a trap site at
+`frame[data_off..<data_off+3]` (the TCP-options-skip / "GET" sniff,
+previously proven by the same-base rule with ZERO runtime check). Caught
+immediately by re-running `--forbid-trap` after the rewrite (exactly the
+verification step the plan called for), not by a passing-but-wrong test.
+Fixed with the EXPLICIT refined cast instead of a plain one:
+`(doff * 4) as {20..<61 as i32}` -- `doff * 4` on the narrowed
+(u8-based) `doff` proves `{20..<61 as u8}` via ordinary Mul propagation,
+and casting that to an EXPLICIT `{20..<61 as i32}` target (same bounds,
+different base) is a free coercion (the checked-refined-cast machinery
+proves it needs no runtime check, since the source range already implies
+the target range exactly) -- carrying the proven range across the width
+change instead of discarding it. Applied to `tcp_echo.tkb` too for
+consistency (not strictly required there for `--forbid-trap`, since that
+file's equivalent `data_off`/`data_len` site is already `unsafe`-wrapped
+and skips the check regardless of `tcp_hdr_len`'s range -- but a plain
+cast would still have been quietly wrong in the same way, just invisible
+there). **General lesson reinforced**: any `as ConcreteType` cast on a
+value whose refined range is later needed for a proof is a potential
+silent proof-loss point, not just a width conversion -- the explicit
+refined-cast form (`as {lo..<hi as base}`) is the correct tool whenever
+that range must survive a base change, now that the syntax exists to
+express it.
+
+**Verification**: every one of the 5 rewritten files was checked
+individually (not just at the end) -- `dune build`, `--forbid-trap`
+(zero new trap sites in each), a byte-exact diff against `.expected`
+output for the parse-only demos (`ip_parse`, `tcp_parse`), and the live
+`scripts/*_test.py` protocol tests under QEMU for the networked ones
+(`icmp_echo_test.py`, `tcp_echo_test.py` -- including the data-echo stage
+that exercises `tcp_echo.tkb`'s one `unsafe` site, `http_server_test.py`
+-- including the request-counter bump). Full `make check` (langcheck,
+370 unit tests, stm32build, all 125 qemutest cases) passes with zero
+regressions after both bugs above were fixed.
+
 ### Soundness Condition for % Range Propagation
 
 Range propagation for `n % m` (where m is a positive integer literal) returns `{0..<m}` **only when the left operand is guaranteed non-negative at the type level**.

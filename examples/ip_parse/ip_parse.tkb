@@ -17,7 +17,7 @@ fn print_ip(p: [u8; 4..]) {
     uart_print_uint(p[3] as i32);
 }
 
-fn print_protocol_name(proto: i32) {
+fn print_protocol_name(proto: u8) {
     if (proto == 1) {
         uart_puts("ICMP");
     } else if (proto == 6) {
@@ -30,7 +30,10 @@ fn print_protocol_name(proto: i32) {
 }
 
 fn parse_ipv4(pkt: [u8; 20..], len: i32) {
-    let version:  i32 = (pkt[0] as i32) >> 4;
+    // version/ihl/ttl/protocol are all single-byte wire fields -- u8 is
+    // their natural type now that Refinement Numerical Type supports any
+    // base (see CLAUDE.md). total_len is a 16-bit field, so u16.
+    let version: u8 = pkt[0] >> 4;
     // ihl is read from the wire and never otherwise validated here (this
     // demo's whole point is field extraction, not enforcing IHL == 20 the
     // way icmp_echo/tcp_echo/http_server do). P4c-2: `& 0x0f` alone
@@ -45,18 +48,18 @@ fn parse_ipv4(pkt: [u8; 20..], len: i32) {
     // scripts/run_qemutest.sh's forbid_trap_ip_parse). The demo's own
     // packets always have the real IHL == 20 (no options), so clamping to
     // 20 (pkt's full size) never actually truncates anything here.
-    let ihl: i32 = min(((pkt[0] as i32) & 0x0f) * 4, 20);
-    let total_len: i32 = ((pkt[2] as i32) << 8) | (pkt[3] as i32);
-    let ttl:      i32 = pkt[8] as i32;
-    let protocol: i32 = pkt[9] as i32;
+    let ihl: u8 = min((pkt[0] & 0x0f) * 4, 20);
+    let total_len: u16 = ((pkt[2] as u16) << 8) | (pkt[3] as u16);
+    let ttl:      u8 = pkt[8];
+    let protocol: u8 = pkt[9];
     let checksum: i32 = inet_checksum(pkt[0..<ihl]);
 
     uart_puts("IPv4 packet:\r\n");
-    uart_puts("  version:   "); uart_println_uint(version);
-    uart_puts("  ihl:       "); uart_println_uint(ihl);
-    uart_puts("  total_len: "); uart_println_uint(total_len);
-    uart_puts("  ttl:       "); uart_println_uint(ttl);
-    uart_puts("  protocol:  "); uart_print_uint(protocol);
+    uart_puts("  version:   "); uart_println_uint(version as i32);
+    uart_puts("  ihl:       "); uart_println_uint(ihl as i32);
+    uart_puts("  total_len: "); uart_println_uint(total_len as i32);
+    uart_puts("  ttl:       "); uart_println_uint(ttl as i32);
+    uart_puts("  protocol:  "); uart_print_uint(protocol as i32);
     uart_puts(" (");           print_protocol_name(protocol); uart_puts(")\r\n");
     uart_puts("  src:       "); print_ip(pkt[12..<16]); uart_puts("\r\n");
     uart_puts("  dst:       "); print_ip(pkt[16..<20]); uart_puts("\r\n");

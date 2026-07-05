@@ -320,6 +320,57 @@ let parser_tests = [
            scan 0)
   );
 
+  (* -- Explicit-base {lo..<hi as base} surface syntax -------------------- *)
+  (* Previously {lo..<hi} could only ever spell base = i32 in source; a
+     non-i32 base arose only from the compiler's own range-propagation
+     machinery. This extension lets a programmer write one directly --
+     needed so a {lo..<hi}-typed FUNCTION PARAMETER can unify against a
+     genuinely narrow-based local (see CLAUDE.md's "Refinement Numerical
+     Type" section, explicit-base follow-up). *)
+  Alcotest.test_case "{lo..<hi as u8} parses as a u8-based TypeRefined" `Quick (fun () ->
+    Alcotest.(check bool) "parses"
+      true
+      (match parse "fn f(x: {0..<20 as u8}) u8 { return x; }" with
+       | [Ast.FuncDef { params = [(_, Some (Ast.TypeRefined (0, 20, Ast.TypeU8)))]; _ }] -> true
+       | _ -> false)
+  );
+
+  Alcotest.test_case "{lo..<hi as base} accepts every primitive integer base" `Quick (fun () ->
+    List.iter (fun (base_name, expect) ->
+      match parse (Printf.sprintf "fn f(x: {0..<8 as %s}) i32 { return 0; }" base_name) with
+      | [Ast.FuncDef { params = [(_, Some (Ast.TypeRefined (0, 8, actual)))]; _ }] ->
+          Alcotest.(check bool) (base_name ^ " base") true (actual = expect)
+      | _ -> Alcotest.fail (base_name ^ ": expected single FuncDef with a refined param"))
+      [ ("i8", Ast.TypeI8); ("i16", Ast.TypeI16); ("i32", Ast.TypeI32); ("i64", Ast.TypeI64);
+        ("u8", Ast.TypeU8); ("u16", Ast.TypeU16); ("u32", Ast.TypeU32); ("u64", Ast.TypeU64);
+        ("usize", Ast.TypeUsize) ]
+  );
+
+  Alcotest.test_case
+    "{lo..<hi as u8} rejects a bound outside u8's representable range \
+     (same soundness reasoning as the bare-{lo..<hi}-vs-i32 check above, \
+     generalized per base -- a bound of 300 would silently wrap at codegen \
+     time via `const_int i8_type 300` with no warning if left unchecked)"
+    `Quick (fun () ->
+    match parse "fn f(x: {0..<300 as u8}) u8 { return x; }" with
+    | _ -> Alcotest.fail "expected an error, but parsing succeeded"
+    | exception Types.TypeError (_, msg) ->
+        Alcotest.(check bool) "mentions the base name" true
+          (let n = String.length "u8" and m = String.length msg in
+           let rec scan i = i + n <= m &&
+             (String.sub msg i n = "u8" || scan (i + 1)) in
+           scan 0)
+  );
+
+  Alcotest.test_case
+    "{lo..<hi as i64}/{lo..<hi as u64} impose no upper-bound check (matches \
+     types.ml's own TRefinedInt subtyping rules for those bases, which \
+     likewise never restrict hi)" `Quick (fun () ->
+    match parse "fn f(x: {0..<9000000000 as i64}) i64 { return x; }" with
+    | [Ast.FuncDef _] -> ()
+    | _ -> Alcotest.fail "expected single FuncDef"
+  );
+
   Alcotest.test_case "return statement" `Quick (fun () ->
     match parse "fn f() i32 { return 42; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
@@ -3206,6 +3257,64 @@ let codegen_tests = [
         }
         fn refnum_max_i16_unconstrained(a: i16, b: i16) -> i16 {
           return max(a, b);
+        }");
+
+  Alcotest.test_case
+    "Refinement Numerical Type: widen_load recurses into TypeRefined's own \
+     base before widening (regression -- an Imm (immutable let) binding \
+     holding a narrow-based refined value, e.g. `let x: u8 = a & mask;`, \
+     used again in later arithmetic, e.g. `x * 4`, used to emit `mul i8 \
+     %x, i32 4` (an LLVM verifier failure caught by gen_func's own \
+     Llvm_analysis.verify_function): widen_load's fallthrough case was \
+     never updated to unwrap TypeRefined when TRefinedInt/TypeRefined was \
+     generalized to carry a non-i32 base -- before that generalization \
+     every TypeRefined value WAS i32-shaped in memory, so the same \
+     fallthrough happened to be a harmless no-op. First found via the new \
+     explicit-base {lo..<hi as base} surface syntax, the first construct \
+     to exercise an Imm binding holding a genuinely narrow-based refined \
+     value used again in later arithmetic -- but the underlying bug is in \
+     widen_load itself, reachable for any u8/u16/i8/i16-based refined Imm \
+     binding regardless of how its base became narrow" `Quick
+    (expect_codegen_ok
+       "fn refnum_widen_mul(raw: u8) -> u8 {
+          let masked: u8 = raw & 0x0f;
+          let quadrupled: u8 = masked * 4;
+          return quadrupled;
+        }
+        fn refnum_widen_add(raw: u16) -> u16 {
+          let masked: u16 = raw & 0x00ff;
+          let plus_one: u16 = masked + 1;
+          return plus_one;
+        }
+        fn refnum_widen_into_param(x: {20..<21 as u8}) -> u8 {
+          return x;
+        }
+        fn refnum_widen_call_site(raw: u8) -> u8 {
+          let ihl: u8 = (raw & 0x0f) * 4;
+          if (ihl == 20) {
+            return refnum_widen_into_param(ihl);
+          }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "Refinement Numerical Type: a u8-based refined slice bound (the \
+     ip_parse.tkb `pkt[0..<ihl]` idiom, ihl: u8 = min(...)) proves the \
+     subslice with zero trap sites (regression -- SliceOf's bound check \
+     used to `canon_ty` the bound's type before unifying against TI32, \
+     which widens a refined bound to its BARE base first (e.g. plain u8) \
+     -- a bare u8 has no unification rule against i32 at all, so this \
+     raised 'cannot unify u8 with i32' the first time a non-i32-based \
+     slice bound was tried. Index's parallel check (`unify_at idx.loc it \
+     TI32`) never had this bug because it unifies the RAW refined type \
+     directly, relying on TRefinedInt's existing base-agnostic subtyping \
+     into TI32 -- SliceOf's canon_ty call was pure surplus that only \
+     happened to be harmless while every refined bound was i32-based \
+     anyway" `Quick
+    (expect_trap_sites 0
+       "fn refnum_slice_bound_u8(pkt: [u8; 20..]) -> []u8 {
+          let ihl: u8 = min((pkt[0] & 0x0f) * 4, 20);
+          return pkt[0..<ihl];
         }");
 
 ]

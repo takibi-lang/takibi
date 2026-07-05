@@ -467,8 +467,24 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       let vt = lookup e.loc id tyenv in
       let lo_t = infer_expr senv eenv tyenv fenv lo_e in
       let hi_t = infer_expr senv eenv tyenv fenv hi_e in
-      unify_at lo_e.loc (canon_ty lo_t) TI32;
-      unify_at hi_e.loc (canon_ty hi_t) TI32;
+      (* Unify the RAW (possibly TRefinedInt) type against TI32 directly,
+         NOT canon_ty'd first -- mirrors Index's already-correct
+         `unify_at idx.loc it TI32` (no canon_ty there either). A refined
+         bound unifies against TI32 via TRefinedInt's permissive,
+         base-agnostic subtyping rule (`TRefinedInt _, TI32 -> ()` in
+         types.ml, unconditional regardless of the refined value's own
+         base) -- exactly what a u8/u16/etc.-based bound (e.g. `ihl:
+         {20..<21 as u8}`) needs to pass through here. canon_ty WIDENS a
+         refined bound to its bare base FIRST (e.g. TU8), and a bare TU8
+         has no unification rule against TI32 at all -- a real regression
+         found while exercising a u8-based slice bound for the first time
+         (`pkt[0..<ihl]` with `ihl: u8`), previously invisible only
+         because every refined bound was i32-based anyway before the
+         "Refinement Numerical Type" generalization (canon_ty'd-i32-vs-i32
+         trivially unifies, masking that canon_ty was doing nothing useful
+         here even then). *)
+      unify_at lo_e.loc lo_t TI32;
+      unify_at hi_e.loc hi_t TI32;
       let const_bounds = (Const_env.bound_value lo_e, Const_env.bound_value hi_e) in
       (* Static value range of a bound: a compile-time constant k is {k..<k+1};
          a refined-typed expression contributes its own range. Sync rule:

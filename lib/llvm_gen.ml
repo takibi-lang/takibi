@@ -584,9 +584,24 @@ let intlit_opt (e : Ast.expr) : int option =
    i8/u8/i16/u16 -> i32 (C-style integer promotion).
    i32/u32/int   -> i32 (no-op for i32 values).
    i64/u64       -> i64 (keep as-is).
-   Signed types use sext; unsigned types use zext. *)
-let widen_load (ast_ty : Ast.type_expr) v =
+   Signed types use sext; unsigned types use zext.
+   TypeRefined recurses into its own base (sync note: this was MISSED when
+   TRefinedInt/TypeRefined was generalized to carry a non-i32 base -- see
+   CLAUDE.md's "Refinement Numerical Type" section. Before that
+   generalization every TypeRefined value was i32-shaped in memory, so the
+   old `| _ -> v` fallthrough here was a harmless no-op (the value was
+   already the right width). Once a TypeRefined value can genuinely be
+   i8/i16-shaped (e.g. base = u8, from `let x: u8 = a & mask;`), the same
+   fallthrough silently returned an UN-widened narrow value to a caller
+   that assumes arithmetic-width input -- e.g. a later `x * 4` emitted
+   `mul i8 %x, i32 4`, an LLVM type mismatch caught by gen_func's own IR
+   verifier. Found via a real regression while testing the new explicit
+   -base `{lo..<hi as base}` surface syntax, the first construct to
+   exercise an Imm binding holding a genuinely narrow-based TypeRefined
+   value used again in later arithmetic.) *)
+let rec widen_load (ast_ty : Ast.type_expr) v =
   match ast_ty with
+  | TypeRefined (_, _, base) -> widen_load base v
   | TypeI64 | TypeU64 | TypeUsize -> v
   | TypeBool -> v
   | TypeI8 | TypeI16 | TypeI32 ->

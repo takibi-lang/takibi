@@ -38,7 +38,7 @@ fn print_ip(p: [u8; 4..]) {
     uart_print_uint(p[3] as i32);
 }
 
-fn print_tcp_flags(flags: i32) {
+fn print_tcp_flags(flags: u8) {
     let mut first: i32 = 1;
     if ((flags & 0x02) != 0) {
         uart_puts("SYN");
@@ -77,25 +77,41 @@ fn print_tcp_flags(flags: i32) {
 // ip: start of the IPv4 header. Assumes ip's own version/IHL/protocol/
 // checksum were already validated by the caller (mirrors ip_parse.tkb;
 // this function only handles the TCP layer).
-fn parse_tcp(ip: [u8; 40..], ihl: {20..<21}) {
+//
+// ihl is {20..<21 as u16}, not u8: it's added to tcp_len (derived from
+// ip_total_len, a 16-bit wire field -- see below) in the checksum span's
+// same-base subslice proof, and BinOp/the same-base rule both require
+// the two operands to share the EXACT same base, so ihl's base follows
+// whatever the wider side of that chain genuinely needs -- u16, not the
+// single-byte width IHL would get in isolation (see CLAUDE.md's
+// "Explicit-Base {lo..<hi as base}" section for why this file's ihl
+// can't be u8 the way ip_parse.tkb's local ihl is).
+fn parse_tcp(ip: [u8; 40..], ihl: {20..<21 as u16}) {
     let hdr: [u8; 20..] = ip[ihl..<ihl + 20];
-    let src_port: i32 = read_u16be(hdr[0..<2]);
-    let dst_port: i32 = read_u16be(hdr[2..<4]);
-    let seq:      i32 = read_u32be(hdr[4..<8]);
-    let ack:      i32 = read_u32be(hdr[8..<12]);
-    let data_offset: i32 = ((hdr[12] as i32) >> 4) * 4;
-    let flags:    i32 = (hdr[13] as i32) & 0x3f;
-    let window:   i32 = read_u16be(hdr[14..<16]);
-    let ip_total_len: i32 = read_u16be(ip[2..<4]);
+    let src_port: u16 = read_u16be(hdr[0..<2]) as u16;
+    let dst_port: u16 = read_u16be(hdr[2..<4]) as u16;
+    let seq:      u32 = read_u32be(hdr[4..<8]) as u32;
+    let ack:      u32 = read_u32be(hdr[8..<12]) as u32;
+    // data_offset/flags are TCP's own byte-scale fields, never combined
+    // with ihl's arithmetic (display only) -- genuinely u8.
+    let data_offset: u8 = (hdr[12] >> 4) * 4;
+    let flags:    u8 = hdr[13] & 0x3f;
+    let window:   u16 = read_u16be(hdr[14..<16]) as u16;
+    // ip_total_len is read_u16be's return value, i32 in the shared
+    // helper's own signature but always in [0, 65535] by construction
+    // (two u8 bytes combined) -- `as u16` is a lossless truncation, not a
+    // premature narrowing of an unvalidated value. Must match ihl's base
+    // (u16) for the comparison/subtraction below to type-check.
+    let ip_total_len: u16 = read_u16be(ip[2..<4]) as u16;
 
     uart_puts("TCP segment:\r\n");
-    uart_puts("  src_port:    "); uart_println_uint(src_port);
-    uart_puts("  dst_port:    "); uart_println_uint(dst_port);
-    uart_puts("  seq:         "); uart_println_hex(seq);
-    uart_puts("  ack:         "); uart_println_hex(ack);
-    uart_puts("  data_offset: "); uart_println_uint(data_offset);
+    uart_puts("  src_port:    "); uart_println_uint(src_port as i32);
+    uart_puts("  dst_port:    "); uart_println_uint(dst_port as i32);
+    uart_puts("  seq:         "); uart_println_hex(seq as i32);
+    uart_puts("  ack:         "); uart_println_hex(ack as i32);
+    uart_puts("  data_offset: "); uart_println_uint(data_offset as i32);
     uart_puts("  flags:       "); print_tcp_flags(flags); uart_puts("\r\n");
-    uart_puts("  window:      "); uart_println_uint(window);
+    uart_puts("  window:      "); uart_println_uint(window as i32);
     uart_puts("  src_ip:      "); print_ip(ip[12..<16]); uart_puts("\r\n");
     uart_puts("  dst_ip:      "); print_ip(ip[16..<20]); uart_puts("\r\n");
     uart_puts("  checksum:    ");
@@ -110,7 +126,7 @@ fn parse_tcp(ip: [u8; 40..], ihl: {20..<21}) {
     // range (Sub of two now-refined operands), and the same-base rule
     // closes `ip[ihl..<ihl+tcp_len]` outright.
     if (ip_total_len >= ihl && ip_total_len <= 40) {
-        let tcp_len: i32 = ip_total_len - ihl;
+        let tcp_len: u16 = ip_total_len - ihl;
 
         // TCP checksum covers the pseudo-header (src IP, dst IP, zero
         // byte, protocol, TCP length) followed by the TCP segment itself
@@ -122,7 +138,7 @@ fn parse_tcp(ip: [u8; 40..], ihl: {20..<21}) {
         slice_copy(pseudo[4..<8], ip[16..<20]);  // dst IP
         pseudo[8] = 0 as u8;
         pseudo[9] = ip[9]; // protocol
-        write_u16be(pseudo[10..<12], tcp_len);
+        write_u16be(pseudo[10..<12], tcp_len as i32);
         let sum: i32 = checksum_add(pseudo as []u8, 0);
         let checksum: i32 = checksum_fold(checksum_add(ip[ihl..<ihl + tcp_len], sum));
 

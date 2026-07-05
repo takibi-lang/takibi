@@ -78,18 +78,25 @@ let TCP_WINDOW:      i32 = 14;
 let TCP_CHECKSUM:    i32 = 16;
 let TCP_URGENT:      i32 = 18;
 
-let TCP_FLAG_FIN: i32 = 0x01;
-let TCP_FLAG_SYN: i32 = 0x02;
-let TCP_FLAG_RST: i32 = 0x04;
-let TCP_FLAG_PSH: i32 = 0x08;
-let TCP_FLAG_ACK: i32 = 0x10;
+// TCP_FLAG_*/PROTO_TCP/TCP_ECHO_PORT are wire-VALUE constants compared
+// directly against a byte/half-word field, so they take that field's
+// natural width (u8/u16) -- unlike the pure offset constants above,
+// which stay i32 as array indices (see CLAUDE.md's "Explicit-Base
+// {lo..<hi as base}" section for the entanglement reasoning behind why
+// ihl/total_len/tcp_len/tcp_hdr_len/data_len/data_off below stay i32
+// instead of following suit).
+let TCP_FLAG_FIN: u8 = 0x01;
+let TCP_FLAG_SYN: u8 = 0x02;
+let TCP_FLAG_RST: u8 = 0x04;
+let TCP_FLAG_PSH: u8 = 0x08;
+let TCP_FLAG_ACK: u8 = 0x10;
 
-let PROTO_TCP:    i32 = 6;
-let TCP_ECHO_PORT: i32 = 7;
+let PROTO_TCP:    u8 = 6;
+let TCP_ECHO_PORT: u16 = 7;
 
 // Fixed initial sequence number: no real security need for randomness in
 // a bare-metal, single-connection, test-only responder.
-let OUR_ISN: i32 = 0x00001000;
+let OUR_ISN: u32 = 0x00001000;
 
 // Safe upper bound on the echoed payload: 1514 (frame capacity) - 14
 // (eth) - 20 (IP) - 20 (TCP, no options in OUR reply) = 1460. Checked
@@ -105,9 +112,9 @@ let TCP_LAST_ACK:    i32 = 3;
 let mut conn_state:       i32 = 0; // TCP_LISTEN
 let mut conn_remote_mac:  [u8; 6];
 let mut conn_remote_ip:   [u8; 4];
-let mut conn_remote_port: i32 = 0;
-let mut conn_snd_nxt:     i32 = 0; // our next unacknowledged sequence number
-let mut conn_rcv_nxt:     i32 = 0; // next sequence number we expect from remote
+let mut conn_remote_port: u16 = 0;
+let mut conn_snd_nxt:     u32 = 0; // our next unacknowledged sequence number
+let mut conn_rcv_nxt:     u32 = 0; // next sequence number we expect from remote
 
 // Recomputes the TCP checksum over the pseudo-header implied by `ip` and
 // the full segment `tcp_seg` (header + data -- ITS OWN LENGTH, read back
@@ -120,7 +127,7 @@ fn fix_tcp_checksum(ip: [u8; 20..], tcp_seg: [u8; 20..]) {
     slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
     slice_copy(pseudo[4..<8], ip[IP_DST..<20]);
     pseudo[8] = 0 as u8;
-    pseudo[9] = PROTO_TCP as u8;
+    pseudo[9] = PROTO_TCP;
     write_u16be(pseudo[10..<12], tcp_seg.len as i32);
     let sum: i32 = checksum_add(pseudo as []u8, 0);
     write_u16be(tcp_seg[TCP_CHECKSUM..<TCP_URGENT],
@@ -144,13 +151,13 @@ fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21}) {
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
 
-    let client_port: i32 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]);
-    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], TCP_ECHO_PORT);
-    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port);
-    write_u32be(tcp[TCP_SEQ..<TCP_ACK], OUR_ISN);
-    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt);
+    let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
+    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], TCP_ECHO_PORT as i32);
+    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
+    write_u32be(tcp[TCP_SEQ..<TCP_ACK], OUR_ISN as i32);
+    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
     tcp[TCP_DATA_OFFSET] = (5 << 4) as u8; // 20-byte header, no options
-    tcp[TCP_FLAGS] = (TCP_FLAG_SYN | TCP_FLAG_ACK) as u8;
+    tcp[TCP_FLAGS] = TCP_FLAG_SYN | TCP_FLAG_ACK;
     write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
     write_u16be(tcp[TCP_URGENT..<20], 0);
 
@@ -209,13 +216,13 @@ fn build_data_echo(eth: [u8; 1514..], ihl: {20..<21}, data: []u8, data_len: i32)
         write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
         write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
 
-        let client_port: i32 = read_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT]);
-        write_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT], TCP_ECHO_PORT);
-        write_u16be(tcp_seg[TCP_DST_PORT..<TCP_SEQ], client_port);
-        write_u32be(tcp_seg[TCP_SEQ..<TCP_ACK], conn_snd_nxt);
-        write_u32be(tcp_seg[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt + n);
+        let client_port: u16 = read_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
+        write_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT], TCP_ECHO_PORT as i32);
+        write_u16be(tcp_seg[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
+        write_u32be(tcp_seg[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
+        write_u32be(tcp_seg[TCP_ACK..<TCP_DATA_OFFSET], (conn_rcv_nxt as i32) + n);
         tcp_seg[TCP_DATA_OFFSET] = (5 << 4) as u8;
-        tcp_seg[TCP_FLAGS] = (TCP_FLAG_ACK | TCP_FLAG_PSH) as u8;
+        tcp_seg[TCP_FLAGS] = TCP_FLAG_ACK | TCP_FLAG_PSH;
         write_u16be(tcp_seg[TCP_WINDOW..<TCP_CHECKSUM], 65535);
         write_u16be(tcp_seg[TCP_URGENT..<20], 0);
 
@@ -244,13 +251,13 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21}) {
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
 
-    let client_port: i32 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]);
-    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], TCP_ECHO_PORT);
-    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port);
-    write_u32be(tcp[TCP_SEQ..<TCP_ACK], conn_snd_nxt);
-    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt);
+    let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
+    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], TCP_ECHO_PORT as i32);
+    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
+    write_u32be(tcp[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
+    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
     tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
-    tcp[TCP_FLAGS] = (TCP_FLAG_FIN | TCP_FLAG_ACK) as u8;
+    tcp[TCP_FLAGS] = TCP_FLAG_FIN | TCP_FLAG_ACK;
     write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
     write_u16be(tcp[TCP_URGENT..<20], 0);
 
@@ -277,7 +284,16 @@ fn main() {
             if (len >= 54 && len <= 1514) {
                 if (read_u16be(frame[12..<14]) == 0x0800) {
                     let ip = frame[14..<34];
-                    let version: i32 = (ip[0] as i32) >> 4;
+                    // version is standalone (compared only to a literal)
+                    // -- safely u8. ihl and everything derived from it
+                    // below (total_len, tcp_len, tcp_hdr_len, data_len,
+                    // data_off) stay i32: they're entangled, via
+                    // `total_len <= ip_len_in_frame`, with
+                    // ip_len_in_frame = len - 14, and len is
+                    // net_poll_rx()'s deliberately-unconstrained i32
+                    // device-reported length -- see CLAUDE.md's
+                    // "Explicit-Base {lo..<hi as base}" section.
+                    let version: u8 = ip[0] >> 4;
                     let ihl:     i32 = ((ip[0] as i32) & 0x0f) * 4;
 
                     if (version == 4 && ihl == 20) {
@@ -285,38 +301,53 @@ fn main() {
                         let ip_len_in_frame: i32 = len - 14;
 
                         if (total_len <= ip_len_in_frame && total_len >= ihl &&
-                            (ip[IP_PROTOCOL] as i32) == PROTO_TCP &&
+                            ip[IP_PROTOCOL] == PROTO_TCP &&
                             inet_checksum(ip[0..<ihl]) == 0) {
                             if (slice_eq(ip[IP_DST..<20], OUR_IP as []u8)) {
                                 let tcp:     [u8; 20..] = frame[34..<54];
                                 let tcp_len: i32 = total_len - ihl;
 
-                                let doff: i32 = (tcp[TCP_DATA_OFFSET] as i32) >> 4;
+                                // doff is TCP's own byte-scale field,
+                                // never combined with the ihl/tcp_len
+                                // chain directly (tcp_hdr_len, derived
+                                // from it via Mul, upcasts back to i32
+                                // below to match tcp_len for the
+                                // subtraction that follows) -- genuinely
+                                // u8.
+                                let doff: u8 = tcp[TCP_DATA_OFFSET] >> 4;
 
                                 // doff must be narrowed to {5..<16} BEFORE
                                 // tcp_hdr_len = doff * 4 is computed, so
                                 // Mul propagation gives tcp_hdr_len (and
                                 // later data_off) a real range -- see
-                                // http_server.tkb's identical comment.
+                                // http_server.tkb's identical comment
+                                // (including why the explicit refined cast
+                                // below, not a plain `as i32`, is needed to
+                                // carry that range across the width
+                                // change -- this file's own data_off use is
+                                // inside `unsafe` so losing the range
+                                // wouldn't have shown up as a trap site
+                                // here, but a plain cast would still have
+                                // been quietly wrong).
                                 if (tcp_len >= 20 && doff >= 5 && doff <= 15) {
-                                let tcp_hdr_len: i32 = doff * 4;  // {20..<61}
+                                let tcp_hdr_len: i32 = (doff * 4) as {20..<61 as i32};
 
                                 if (tcp_len >= tcp_hdr_len) {
                                     let mut pseudo: [u8; 12];
                                     slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
                                     slice_copy(pseudo[4..<8], ip[IP_DST..<20]);
                                     pseudo[8] = 0 as u8;
-                                    pseudo[9] = PROTO_TCP as u8;
+                                    pseudo[9] = PROTO_TCP;
                                     write_u16be(pseudo[10..<12], tcp_len);
                                     let sum: i32 = checksum_add(pseudo as []u8, 0);
                                     let tcp_seg = frame[34..<34 + tcp_len];
 
                                     if (checksum_fold(checksum_add(tcp_seg, sum)) == 0) {
-                                        let dst_port: i32 = read_u16be(tcp[TCP_DST_PORT..<TCP_SEQ]);
-                                        let src_port: i32 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]);
-                                        let flags:    i32 = tcp[TCP_FLAGS] as i32;
-                                        let seq:      i32 = read_u32be(tcp[TCP_SEQ..<TCP_ACK]);
-                                        let ack:      i32 = read_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET]);
+                                        let dst_port: u16 = read_u16be(tcp[TCP_DST_PORT..<TCP_SEQ]) as u16;
+                                        let src_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
+                                        let flags:    u8  = tcp[TCP_FLAGS];
+                                        let seq:      u32 = read_u32be(tcp[TCP_SEQ..<TCP_ACK]) as u32;
+                                        let ack:      u32 = read_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET]) as u32;
 
                                         if (dst_port == TCP_ECHO_PORT) {
                                             if (conn_state == TCP_LISTEN) {
@@ -400,8 +431,16 @@ fn main() {
                                                                 if (build_data_echo(frame, ihl, data, data_len) == 1) {
                                                                     should_tx = 1;
                                                                     tx_len = 14 + ihl + 20 + data_len;
-                                                                    conn_rcv_nxt = conn_rcv_nxt + data_len;
-                                                                    conn_snd_nxt = conn_snd_nxt + data_len;
+                                                                    // data_len stays i32 (entangled with
+                                                                    // the ihl/tcp_len chain); conn_rcv_nxt/
+                                                                    // conn_snd_nxt are u32 (sequence
+                                                                    // numbers). Cast here is harmless --
+                                                                    // neither counter is ever used as a
+                                                                    // slice bound/index, so no proof
+                                                                    // depends on their refined-ness (they
+                                                                    // have none to begin with).
+                                                                    conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
+                                                                    conn_snd_nxt = conn_snd_nxt + (data_len as u32);
                                                                 }
                                                             }
                                                         }

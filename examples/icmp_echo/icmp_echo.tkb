@@ -102,7 +102,19 @@ fn main() {
                 let frame = net_rx_frame();
                 if (read_u16be(frame[12..<14]) == 0x0800) {
                     let ip = frame[14..<34];
-                    let version: i32 = (ip[IP_VERSION_IHL] as i32) >> 4;
+                    // version is standalone (only ever compared to a
+                    // literal) -- safely u8. ihl stays i32: it's compared
+                    // against total_len (16-bit) and total_len is in turn
+                    // compared against ip_len_in_frame = len - 14, where
+                    // len is net_poll_rx()'s deliberately-unconstrained
+                    // i32 device-reported length -- narrowing ihl/
+                    // total_len would need an explicit cast at that
+                    // comparison, which discards the refined range Cast
+                    // to a plain (non-refined-syntax) target always drops
+                    // (see CLAUDE.md's "Explicit-Base {lo..<hi as base}"
+                    // section), breaking the narrowing chain the whole
+                    // proof depends on.
+                    let version: u8 = ip[IP_VERSION_IHL] >> 4;
                     let ihl:     i32 = ((ip[IP_VERSION_IHL] as i32) & 0x0f) * 4;
 
                     // No IP options supported -- IHL must be exactly 20.

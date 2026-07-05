@@ -18,6 +18,47 @@ let narrow_int64 pos what (n : Int64.t) : int =
   | None ->
       raise (Types.TypeError (pos,
         Printf.sprintf "%s value %Ld is too large to represent" what n))
+
+(* Display name for an explicit {lo..<hi as base} base, error messages only. *)
+let base_type_name = function
+  | TypeI8 -> "i8" | TypeI16 -> "i16" | TypeI32 -> "i32" | TypeI64 -> "i64"
+  | TypeU8 -> "u8" | TypeU16 -> "u16" | TypeU32 -> "u32" | TypeU64 -> "u64"
+  | TypeUsize -> "usize" | _ -> "?"
+
+(* The (inclusive lo, exclusive-upper-bound-or-None) range an explicit
+   {lo..<hi as base} bound must fit within, so a too-wide range doesn't
+   silently truncate at codegen time the same way a bare {lo..<hi} bound
+   used to before the i32-range check above was added -- same reasoning,
+   generalized per base. i64/u64 (and usize, treated as the narrowest
+   width it can have across supported targets -- Cortex-M's usize is
+   32-bit -- so it's checked the same as u32, not left as wide as i64/u64
+   themselves) have no upper limit checked here: their own representable
+   range either already exceeds what narrow_int64 can hold (i64/u64) or
+   isn't target-width-independent to state precisely (usize), and
+   types.ml's own TRefinedInt subtyping rules for those bases likewise
+   impose no hi restriction. *)
+let base_bound_range = function
+  | TypeI8    -> (-128L, Some 128L)
+  | TypeI16   -> (-32768L, Some 32768L)
+  | TypeI32   -> (-2147483648L, Some 2147483647L)
+  | TypeI64   -> (Int64.min_int, None)
+  | TypeU8    -> (0L, Some 256L)
+  | TypeU16   -> (0L, Some 65536L)
+  | TypeU32   -> (0L, Some 4294967296L)
+  | TypeU64   -> (0L, None)
+  | TypeUsize -> (0L, Some 4294967296L)
+  | _ -> (Int64.min_int, None) (* unreachable: int_base_type_expr only ever produces the above *)
+
+let check_refined_base_range pos lo hi base =
+  let (blo, bhi_opt) = base_bound_range base in
+  let out_of_range =
+    lo < blo || (match bhi_opt with Some bhi -> hi > bhi | None -> false)
+  in
+  if out_of_range then
+    raise (Types.TypeError (pos,
+      Printf.sprintf
+        "refined type bound {%Ld..<%Ld as %s} is out of range for %s"
+        lo hi (base_type_name base) (base_type_name base)))
 %}
 
 %token <Int64.t> INT
@@ -353,24 +394,57 @@ array_size:
 type_expr:
   | base_type_expr { $1 }
   | LBRACE lo = INT DOTDOTLT hi = INT RBRACE
-    { (* The bare {lo..<hi} SURFACE SYNTAX always spells base = i32 (see
-         Ast.TypeRefined's comment) -- a bound outside i32's range would
-         silently truncate at codegen time (e.g. emit_refined_cast_check's
-         `const_int i32 hi`), turning a nonsensical range into a
-         wrapped-around one with no warning. Reject it here instead, at
-         the single grammar production that ever constructs a literal
-         TypeRefined from source. (A non-i32 base only ever arises later,
-         from range-propagation preserving an already-typed operand's own
-         base -- see CLAUDE.md's "Refinement Numerical Type" section.) *)
+    { (* The BARE {lo..<hi} surface syntax (no explicit base) defaults to
+         i32 -- see Ast.TypeRefined's comment -- a bound outside i32's
+         range would silently truncate at codegen time (e.g.
+         emit_refined_cast_check's `const_int i32 hi`), turning a
+         nonsensical range into a wrapped-around one with no warning.
+         Reject it here instead. Use `{lo..<hi as u8/u16/u32/u64/i8/i16/
+         i64/usize}` (below) to spell a non-i32 base explicitly. *)
       if lo < -2147483648L || hi > 2147483647L then
         raise (Types.TypeError ($symbolstartpos,
           Printf.sprintf
             "refined type bound {%Ld..<%Ld} is out of i32 range \
-             (-2147483648..2147483647): {lo..<hi} is always represented \
-             as i32 internally, regardless of the integer type it is used \
-             with"
+             (-2147483648..2147483647): a bare {lo..<hi} with no explicit \
+             base defaults to i32 -- write {lo..<hi as u64} (or another \
+             base) to use a wider range"
             lo hi));
       TypeRefined (Int64.to_int lo, Int64.to_int hi, TypeI32) }
+  | LBRACE lo = INT DOTDOTLT hi = INT AS base = int_base_type_expr RBRACE
+    { (* Explicit-base {lo..<hi as base} surface syntax: lets a programmer
+         write a refined type whose LLVM representation genuinely is
+         `base` (i8/i16/i32/i64/u8/u16/u32/u64/usize), rather than only
+         ever getting a non-i32 base indirectly through the compiler's
+         own range-propagation machinery (Add/Sub/Mul/Band/Mod/min/max/
+         narrowing -- see CLAUDE.md's "Refinement Numerical Type"
+         section). Needed for a {lo..<hi}-typed FUNCTION PARAMETER: the
+         same-base subslice rule requires an argument passed into it to
+         unify EXACTLY (bounds and base) against the declared parameter
+         type, so as long as {lo..<hi} could only ever spell base=i32,
+         any local variable feeding such a parameter -- and everything
+         entangled in that same-base proof alongside it -- was forced to
+         stay i32 too, even when every one of those values was naturally
+         narrower on the wire (see CLAUDE.md's protocol examples for the
+         concrete case this unblocks). *)
+      check_refined_base_range $symbolstartpos lo hi base;
+      TypeRefined (narrow_int64 $symbolstartpos "refined type bound" lo,
+                   narrow_int64 $symbolstartpos "refined type bound" hi,
+                   base) }
+
+(* Restricted to the primitive integer types {lo..<hi as base} is allowed
+   to name -- matches the "by convention" restriction on TRefinedInt's own
+   base documented in lib/types.ml (pointers/arrays/structs/etc. make no
+   sense as a refined integer's representation). *)
+int_base_type_expr:
+  | I8_TYPE    { TypeI8 }
+  | I16_TYPE   { TypeI16 }
+  | I32_TYPE   { TypeI32 }
+  | I64_TYPE   { TypeI64 }
+  | U8_TYPE    { TypeU8 }
+  | U16_TYPE   { TypeU16 }
+  | U32_TYPE   { TypeU32 }
+  | U64_TYPE   { TypeU64 }
+  | USIZE_TYPE { TypeUsize }
 
 fn_type_params:
   | /* empty */                              { [] }
