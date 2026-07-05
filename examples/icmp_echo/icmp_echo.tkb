@@ -16,8 +16,8 @@
 // header comment for why.
 //
 // SLICE MIGRATION (P4b): the direct template is
-// examples/http_server/http_server.tkb. `ihl` is typed `{20..<21}` in
-// build_echo_reply (this file's whole scope is "no IP options" -- IHL
+// examples/http_server/http_server.tkb. `ihl` is typed `{20..<21 as u16}`
+// in build_echo_reply (this file's whole scope is "no IP options" -- IHL
 // always exactly 20 -- and main()'s `ihl == 20` narrowing always produces
 // exactly that range, so the exact-match refined-parameter call
 // typechecks; see http_server's header comment for why this needs to be
@@ -26,6 +26,19 @@
 // length is clamped (`len <= 1514`) alongside the existing `len >= 42`
 // check so total_len's upper bound narrows all the way down to the ICMP
 // checksum span, matching http_server's total_len/tcp_len chain.
+//
+// WIRE-WIDTH TYPES (see CLAUDE.md's "Refinement Numerical Type" /
+// "Explicit-Base {lo..<hi as base}" sections): ihl/total_len/
+// ip_len_in_frame/icmp_len are all u16-based, not i32 -- `len` (from
+// net_poll_rx(), a deliberately-unconstrained i32 device-reported length)
+// is bridged into the u16 world with ONE explicit refined cast
+// (`len_n as {42..<1515 as u16}`) right after the length is validated;
+// everything downstream inherits u16-based refined ranges through
+// ordinary Add/Sub/comparison propagation from there, with no further
+// hardcoded-bounds casts needed. The bridge cast's own bounds must be
+// kept in sync with the `len >= 42 && len <= 1514` check just above it --
+// if they ever drift, --forbid-trap catches it immediately as a
+// reintroduced trap site (a caught regression, not a silent one).
 //
 // Correctness is checked by scripts/icmp_echo_test.py (QEMU) /
 // scripts/eth_icmp_echo_test.py (STM32 hardware), not UART output;
@@ -47,9 +60,12 @@ let ICMP_TYPE:     i32 = 0;
 let ICMP_CODE:     i32 = 1;
 let ICMP_CHECKSUM: i32 = 2;
 
-let PROTO_ICMP:        i32 = 1;
-let ICMP_ECHO_REQUEST: i32 = 8;
-let ICMP_ECHO_REPLY:   i32 = 0;
+// Wire-VALUE constants compared/written directly against a byte field --
+// u8, matching that field (unlike the OFFSET constants above, which stay
+// i32 as array indices).
+let PROTO_ICMP:        u8 = 1;
+let ICMP_ECHO_REQUEST: u8 = 8;
+let ICMP_ECHO_REPLY:   u8 = 0;
 
 // bytes_eq/bytes_copy/read_u16be/write_u16be/slice_copy/slice_eq/
 // checksum_add/inet_checksum live in examples/common/netutil.tkb and
@@ -61,7 +77,7 @@ let ICMP_ECHO_REPLY:   i32 = 0;
 // icmp_seg is the full ICMP message (header + data); its own runtime
 // length (icmp_seg.len) is what the checksum walks, so it can never
 // disagree with the segment it describes.
-fn build_echo_reply(eth: [u8; 42..], ihl: {20..<21}, icmp_seg: [u8; 8..]) {
+fn build_echo_reply(eth: [u8; 42..], ihl: {20..<21 as u16}, icmp_seg: [u8; 8..]) {
     // Ethernet: dst = old src, then src = our_mac (must read old src
     // before it's overwritten).
     slice_copy(eth[0..<6], eth[6..<12]);
@@ -79,7 +95,7 @@ fn build_echo_reply(eth: [u8; 42..], ihl: {20..<21}, icmp_seg: [u8; 8..]) {
 
     // ICMP: type request -> reply, identifier/sequence/data unchanged,
     // recompute checksum (it covers the type byte, which just changed).
-    icmp_seg[ICMP_TYPE] = ICMP_ECHO_REPLY as u8;
+    icmp_seg[ICMP_TYPE] = ICMP_ECHO_REPLY;
     write_u16be(icmp_seg[ICMP_CHECKSUM..<4], 0);
     write_u16be(icmp_seg[ICMP_CHECKSUM..<4], inet_checksum(icmp_seg));
 }
@@ -99,38 +115,45 @@ fn main() {
 
             // 14 (eth) + 20 (min IPv4) + 8 (min ICMP) = 42
             if (len >= 42 && len <= 1514) {
+                // Snapshot into an immutable local: the explicit refined
+                // cast below (len_n as {42..<1515 as u16}) needs to see
+                // len's CURRENT narrowed range, but a function PARAMETER
+                // (always a Mut binding) only exposes its narrowed range
+                // through the separate narrowing_ctx side-table, which a
+                // bare Cast on a Mut variable does not consult (only
+                // specific Index/SliceOf sites do) -- an immutable
+                // snapshot's type inherits the narrowing directly (the
+                // same "B-plan" mechanism used elsewhere in this codebase
+                // for exactly this reason), so the cast proves clean
+                // instead of falling back to a runtime check.
+                let len_n: i32 = len;
                 let frame = net_rx_frame();
                 if (read_u16be(frame[12..<14]) == 0x0800) {
                     let ip = frame[14..<34];
                     // version is standalone (only ever compared to a
-                    // literal) -- safely u8. ihl stays i32: it's compared
-                    // against total_len (16-bit) and total_len is in turn
-                    // compared against ip_len_in_frame = len - 14, where
-                    // len is net_poll_rx()'s deliberately-unconstrained
-                    // i32 device-reported length -- narrowing ihl/
-                    // total_len would need an explicit cast at that
-                    // comparison, which discards the refined range Cast
-                    // to a plain (non-refined-syntax) target always drops
-                    // (see CLAUDE.md's "Explicit-Base {lo..<hi as base}"
-                    // section), breaking the narrowing chain the whole
-                    // proof depends on.
+                    // literal) -- safely u8.
                     let version: u8 = ip[IP_VERSION_IHL] >> 4;
-                    let ihl:     i32 = ((ip[IP_VERSION_IHL] as i32) & 0x0f) * 4;
+                    let ihl:     u16 = (ip[IP_VERSION_IHL] & 0x0f) * 4;
 
                     // No IP options supported -- IHL must be exactly 20.
                     if (version == 4 && ihl == 20) {
-                        let total_len:       i32 = read_u16be(ip[IP_TOTAL_LEN..<4]);
-                        let ip_len_in_frame: i32 = len - 14;
+                        // Bridge len_n's proven {42..<1515} range into
+                        // u16 -- see the header comment. A free coercion
+                        // (no runtime check): the source range already
+                        // implies the target range exactly.
+                        let len16: u16 = len_n as {42..<1515 as u16};
+                        let total_len:       u16 = read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
+                        let ip_len_in_frame: u16 = len16 - 14;
 
                         // total_len must fit what the device actually
                         // delivered, and must be large enough to contain
                         // the IPv4 header itself, before it's used to
                         // size the ICMP checksum read below.
                         if (total_len <= ip_len_in_frame && total_len >= ihl) {
-                            if ((ip[IP_PROTOCOL] as i32) == PROTO_ICMP &&
+                            if (ip[IP_PROTOCOL] == PROTO_ICMP &&
                                 inet_checksum(ip[0..<ihl]) == 0) {
                                 if (slice_eq(ip[IP_DST..<20], OUR_IP as []u8)) {
-                                    let icmp_len: i32 = total_len - ihl;
+                                    let icmp_len: u16 = total_len - ihl;
 
                                     // The upper bound restates icmp_len's
                                     // own already-established range (from
@@ -146,8 +169,8 @@ fn main() {
                                     // of 0.
                                     if (icmp_len >= 8 && icmp_len <= 1480) {
                                         let icmp_seg = frame[34..<34 + icmp_len];
-                                        if ((icmp_seg[ICMP_TYPE] as i32) == ICMP_ECHO_REQUEST &&
-                                            (icmp_seg[ICMP_CODE] as i32) == 0 &&
+                                        if (icmp_seg[ICMP_TYPE] == ICMP_ECHO_REQUEST &&
+                                            icmp_seg[ICMP_CODE] == 0 &&
                                             inet_checksum(icmp_seg) == 0) {
 
                                             build_echo_reply(frame, ihl, icmp_seg);

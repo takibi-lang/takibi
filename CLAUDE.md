@@ -964,6 +964,100 @@ that exercises `tcp_echo.tkb`'s one `unsafe` site, `http_server_test.py`
 370 unit tests, stm32build, all 125 qemutest cases) passes with zero
 regressions after both bugs above were fixed.
 
+### Follow-up: Narrowing the Remaining i32 Chain (ihl/total_len/tcp_len/
+### tcp_hdr_len/data_len/data_off) in icmp_echo/tcp_echo/http_server
+
+The three networked files above still had `ihl` and everything derived
+from it declared `i32`, entangled via `total_len <= ip_len_in_frame`
+(`ip_len_in_frame = len - 14`) with `net_poll_rx()`'s deliberately
+-unconstrained `i32` device-reported length. This entanglement is real,
+but not an unliftable wall: `len` itself, once narrowed by its own
+`if (len >= N && len <= 1514)` check, CAN be bridged into `u16` with the
+explicit refined-cast syntax above -- the blocker was only ever "no way
+to spell a non-i32 base," which that syntax now provides.
+
+**The technique, worked out once and reused in all three files**:
+1. Snapshot `len` into an immutable local (`let len_n: i32 = len;`)
+   immediately upon entering the length-checked branch. This step is NOT
+   optional: `len` is a function PARAMETER (always a `Mut` binding), and
+   a `Mut` binding's if-narrowing lives in the separate `narrowing_ctx`
+   side-table, consulted only by specific `Index`/`SliceOf` call sites --
+   a bare `Cast` on `len` directly sees only its plain, unnarrowed
+   declared type and would need a runtime check. An immutable snapshot's
+   type inherits the CURRENT narrowing directly (the same mechanism
+   already used elsewhere in these files for exactly this reason, e.g.
+   `http_server.tkb`'s pre-existing `let n: i32 = len;` for the response
+   -length case) -- confirmed empirically via a scratch test before
+   touching the real files: casting the bare parameter left one trap
+   site (`checked cast remains: i32 as {...} needs a runtime range
+   check`); casting the snapshot instead proved clean.
+2. Bridge the snapshot's proven range into `u16` with ONE explicit
+   refined cast, right after the branch narrowing `ihl` establishes it's
+   exactly 20: `let len16: u16 = len_n as {54..<1515 as u16};` (bounds
+   matching that file's own `len >= 54 && len <= 1514` check exactly).
+   This is a free coercion (no runtime check): the source range already
+   implies the target range.
+3. Everything downstream (`ip_len_in_frame`, `total_len`, `tcp_len`)
+   inherits u16-based refined ranges through ORDINARY Sub/comparison
+   propagation from `len16` -- no further hardcoded-bounds casts needed
+   anywhere else in the chain, since propagation itself is already
+   base-parametric (this session's earlier generalization).
+4. `ihl`'s own declared type changes from `((ip[0] as i32) & 0x0f) * 4`
+   (needing the `as i32` cast on `ip[0]`, itself u8) to plain
+   `(ip[0] & 0x0f) * 4` with a `u16` annotation -- the initializer's own
+   u8-based proof is DISCARDED by the mismatched annotation (`bind_ty`
+   only preserves a refined initializer when the annotation's type
+   EXACTLY matches the initializer's base; u16 != u8), but this is
+   harmless here because the only thing that matters, `ihl == 20`
+   equality-narrowing right below, re-establishes `{20..<21 as u16}`
+   fresh regardless of what `ihl` carried on the way in.
+5. Every `{lo..<hi}`-typed FUNCTION PARAMETER (`build_syn_ack`/
+   `build_fin_ack`/`build_data_echo`/`build_http_response_fin`'s `ihl`)
+   must change to the SAME explicit base (`{20..<21 as u16}`) for the
+   call to type-check at all -- passing a `u16`-based argument into an
+   `i32`-based `{lo..<hi}` parameter fails the exact-match requirement
+   for `TRefinedInt`-into-`TRefinedInt` parameters.
+
+**A real, previously-latent bug found in `http_server.tkb` specifically
+(NOT present in `tcp_echo.tkb`)**: `let data_len: u16 = tcp_len -
+tcp_hdr_len;` (no `max(.., 0)` clamp, unlike `tcp_echo.tkb`'s already
+-existing one) failed with `cannot unify {-60..<1461} with u16`.
+`tcp_len - tcp_hdr_len`'s raw Sub-derived range has a spuriously negative
+lower bound (the type system can't see the `tcp_len >= tcp_hdr_len` guard
+just above that makes a genuinely negative result impossible) -- this was
+ALWAYS true, even in the original i32 code, but harmless there because
+`TRefinedInt`-into-`TI32` subtyping has no `lo >= 0` restriction. Once
+`data_len` targeted `u16` (whose subtyping DOES require `lo >= 0`), the
+same latent imprecision became a hard type error. Fixed by adding the
+identical `max(tcp_len - tcp_hdr_len, 0)` clamp `tcp_echo.tkb` already
+had -- a genuinely safe, behavior-preserving fix (0 still fails the same
+downstream `data_len > 0`-style check a negative value would have), not
+a workaround.
+
+**Sites needing exactly one explicit cast, and why others don't**: any
+expression mixing a now-`u16`-based `ihl`/`tcp_len`/etc. with an
+UNRELATED plain-i32 value needs one cast at that mixing point (e.g.
+`build_http_response_fin`'s `(ihl as i32) + 20 + n`, where `n` is an
+app-level HTTP response length with no wire-width meaning; `main()`'s
+`tx_len = 14 + (ihl as i32) + 20 + payload_len`). Conversely,
+`tcp_echo.tkb`'s `build_data_echo` needed NO such cast for its
+`ihl + 20 + n` because its `n` (a snapshot of `data_len`, itself derived
+from the SAME entangled chain) was changed to `u16` too, keeping the
+whole expression consistently based -- the general principle is: a value
+genuinely PART OF the wire-width chain should follow it into `u16`; a
+value that is merely APP-LEVEL bookkeeping (response byte counts,
+request counters) should stay `i32` and get an explicit cast at the one
+point it's combined with the chain, per this session's earlier
+established `request_count`/`body_len`/`payload_len` decision.
+
+**Verification**: identical discipline to the initial rewrite --
+`dune build`, `--forbid-trap` (zero trap sites) per file, the live
+`scripts/*_test.py` protocol tests (including `tcp_echo_test.py`'s
+data-echo stage, exercising the file's one `unsafe` site with the new
+u16-typed `data_off`/`data_len`), STM32 cross-compilation, and a final
+full `make check` (langcheck, 370 unit tests, stm32build, all 125
+qemutest cases) with zero regressions.
+
 ### Soundness Condition for % Range Propagation
 
 Range propagation for `n % m` (where m is a positive integer literal) returns `{0..<m}` **only when the left operand is guaranteed non-negative at the type level**.

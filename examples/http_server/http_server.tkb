@@ -117,9 +117,12 @@ let TCP_URGENT:      i32 = 18;
 // directly against a byte/half-word field, so they take that field's
 // natural width -- unlike the pure offset constants above, which stay
 // i32 as array indices (see CLAUDE.md's "Explicit-Base {lo..<hi as
-// base}" section for why ihl/total_len/tcp_len/tcp_hdr_len/data_len/
-// data_off below stay i32 instead of following suit -- entangled with
-// net_poll_rx()'s deliberately-unconstrained i32 length, same as
+// base}" section). ihl/total_len/tcp_len/tcp_hdr_len/data_len/data_off
+// below are ALSO u16-based: `len` (net_poll_rx()'s deliberately
+// -unconstrained i32 device-reported length) is bridged into u16 with
+// ONE explicit refined cast right after its own range is established,
+// and everything downstream inherits u16-based refined ranges through
+// ordinary Add/Sub/comparison propagation from there (same technique as
 // tcp_echo.tkb).
 let TCP_FLAG_FIN: u8 = 0x01;
 let TCP_FLAG_SYN: u8 = 0x02;
@@ -206,7 +209,7 @@ fn fix_tcp_checksum(ip: [u8; 20..], tcp_seg: [u8; 20..]) {
                 checksum_fold(checksum_add(tcp_seg, sum)));
 }
 
-fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21}) {
+fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 
@@ -233,7 +236,7 @@ fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21}) {
     fix_tcp_checksum(ip, tcp);
 }
 
-fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21}) {
+fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 
@@ -266,7 +269,7 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21}) {
 // it would have exceeded HTTP_MAX_PAYLOAD (never actually happens with
 // the current fixed page; the caller must check for this and drop the
 // reply rather than transmit, see main()'s use of the return value).
-fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21}) -> i32 {
+fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
     let body_len: i32 = build_html_body();
 
     let payload: *u8 = (eth as *u8) + 54;
@@ -299,7 +302,13 @@ fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21}) -> i32 {
         slice_copy(ip[IP_DST..<20],     ip[IP_SRC..<IP_DST]);
         slice_copy(ip[IP_SRC..<IP_DST], our_ip as []u8);
         ip[IP_TTL] = 64 as u8;
-        write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20 + n);
+        // n here is the HTTP response length (app-level byte count,
+        // bounded by HTTP_MAX_PAYLOAD, unrelated to the wire ihl/tcp_len
+        // chain -- stays i32, matching body_len/payload_len elsewhere in
+        // this file), so ihl (u16) needs an explicit upcast to combine
+        // with it; ihl's own refined-ness isn't needed for this VALUE
+        // computation, only for the `ip[0..<ihl]` slice bound below.
+        write_u16be(ip[IP_TOTAL_LEN..<4], (ihl as i32) + 20 + n);
         write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
         write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
 
@@ -353,37 +362,47 @@ fn main() {
                 // len <= 1514 clamps the DEVICE-reported length to the RX
                 // view's capacity before total_len (and through it every
                 // checksum span) is allowed to trust it.
+                //
+                // Snapshot into an immutable local: the explicit refined
+                // cast below (len_n as {54..<1515 as u16}) needs to see
+                // len's CURRENT narrowed range, but a function PARAMETER
+                // (always Mut) only exposes its narrowed range through
+                // the separate narrowing_ctx side-table, which a bare
+                // Cast does not consult -- an immutable snapshot's type
+                // inherits the narrowing directly (same "B-plan"
+                // mechanism used elsewhere), so the cast proves clean.
+                let len_n: i32 = len;
                 let ip = frame[14..<34];
                 // version is standalone (compared only to a literal) --
-                // safely u8. ihl and everything derived from it below
-                // (total_len, tcp_len, tcp_hdr_len, data_len, data_off)
-                // stay i32: entangled, via `total_len <= ip_len_in_frame`,
-                // with ip_len_in_frame = len - 14, and len is
-                // net_poll_rx()'s deliberately-unconstrained i32 device
-                // -reported length -- see CLAUDE.md's "Explicit-Base
-                // {lo..<hi as base}" section (same reasoning as
-                // tcp_echo.tkb).
+                // safely u8.
                 let version: u8 = ip[0] >> 4;
-                let ihl:     i32 = ((ip[0] as i32) & 0x0f) * 4;
+                let ihl:     u16 = (ip[0] & 0x0f) * 4;
 
                 if (version == 4 && ihl == 20) {
-                    let total_len:       i32 = read_u16be(ip[IP_TOTAL_LEN..<4]);
-                    let ip_len_in_frame: i32 = len - 14;
+                    // Bridge len_n's proven {54..<1515} range into u16
+                    // (a free coercion: the source range already implies
+                    // the target range exactly). This bound must be kept
+                    // in sync with the `len >= 54 && len <= 1514` check
+                    // above.
+                    let len16: u16 = len_n as {54..<1515 as u16};
+                    let total_len:       u16 = read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
+                    let ip_len_in_frame: u16 = len16 - 14;
 
                     if (total_len <= ip_len_in_frame && total_len >= ihl &&
                         ip[IP_PROTOCOL] == PROTO_TCP &&
                         inet_checksum(ip[0..<ihl]) == 0) {
                         if (slice_eq(ip[IP_DST..<20], our_ip as []u8)) {
                             let tcp:     [u8; 20..] = frame[34..<54];
-                            let tcp_len: i32 = total_len - ihl;
+                            let tcp_len: u16 = total_len - ihl;
                             // Data offset in 32-bit words (5..15 -- 20..60
                             // byte header). Real TCP stacks always include
                             // at least an MSS option on the SYN; options
                             // are never parsed, just skipped over. doff is
                             // TCP's own byte-scale field, never combined
                             // with the ihl/tcp_len chain directly --
-                            // genuinely u8 (tcp_hdr_len upcasts back to
-                            // i32 below to match tcp_len).
+                            // genuinely u8 (tcp_hdr_len carries its proven
+                            // range across an explicit refined cast to
+                            // u16 below to match tcp_len).
                             let doff: u8 = tcp[TCP_DATA_OFFSET] >> 4;
 
                             // doff must be narrowed to {5..<16} BEFORE
@@ -395,17 +414,18 @@ fn main() {
                             // unrefined and fall back to a runtime check.
                             // `doff * 4` on the narrowed (u8-based) doff
                             // proves {20..<61 as u8}; the explicit refined
-                            // cast to {20..<61 as i32} carries that EXACT
+                            // cast to {20..<61 as u16} carries that EXACT
                             // proven range across the width change (a free
                             // coercion, not a runtime check, since the
-                            // bounds match exactly) -- a plain `as i32`
+                            // bounds match exactly) -- a plain `as u16`
                             // would have discarded the range entirely
                             // (Cast to a non-refined-syntax target always
-                            // does), which silently reintroduced a trap
+                            // does), which silently reintroduces a trap
                             // site at data_off's subslice below (found via
-                            // --forbid-trap while rewriting this file).
+                            // --forbid-trap while first doing this
+                            // rewrite -- see CLAUDE.md).
                             if (tcp_len >= 20 && doff >= 5 && doff <= 15) {
-                            let tcp_hdr_len: i32 = (doff * 4) as {20..<61 as i32};
+                            let tcp_hdr_len: u16 = (doff * 4) as {20..<61 as u16};
 
                             if (tcp_len >= tcp_hdr_len) {
                                 let mut pseudo: [u8; 12];
@@ -449,8 +469,21 @@ fn main() {
                                                         conn_state = TCP_ESTABLISHED;
                                                     }
                                                 } else if (conn_state == TCP_ESTABLISHED) {
-                                                    let data_len: i32 = tcp_len - tcp_hdr_len;
-                                                    let data_off: i32 = 34 + tcp_hdr_len;
+                                                    // data_len/data_off are u16 (matching tcp_len/
+                                                    // tcp_hdr_len's base), needed for the `data_off + 3`
+                                                    // same-base subslice below to type-check.
+                                                    // max(.., 0): tcp_len - tcp_hdr_len's raw Sub-derived
+                                                    // range has a spuriously negative lower bound (the
+                                                    // type system can't see the tcp_len >= tcp_hdr_len
+                                                    // guard above that makes a genuinely negative result
+                                                    // impossible) -- harmless when data_len targeted i32
+                                                    // (unconditional subtyping), but u16's subtyping
+                                                    // requires lo >= 0, so the clamp is now required, not
+                                                    // just documentation (found via this rewrite; see
+                                                    // tcp_echo.tkb's identical, already-existing clamp and
+                                                    // comment for why this doesn't change behavior).
+                                                    let data_len: u16 = max(tcp_len - tcp_hdr_len, 0);
+                                                    let data_off: u16 = 34 + tcp_hdr_len;
                                                     if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
                                                         conn_rcv_nxt = conn_rcv_nxt + 1;
                                                         build_fin_ack(frame, ihl);
@@ -469,14 +502,14 @@ fn main() {
                                                         if (data3[0] == 'G' as u8 &&
                                                             data3[1] == 'E' as u8 &&
                                                             data3[2] == 'T' as u8) {
-                                                            // data_len/payload_len stay i32 (data_len
-                                                            // entangled with the ihl/tcp_len chain;
-                                                            // payload_len is an app-level byte count,
-                                                            // not a wire-width field); conn_rcv_nxt/
-                                                            // conn_snd_nxt are u32 (sequence numbers).
-                                                            // Casting here is harmless -- neither
-                                                            // counter is ever used as a slice bound
-                                                            // /index, so no proof depends on their
+                                                            // data_len is u16 (matches tcp_len/tcp_hdr_len);
+                                                            // payload_len stays i32 (an app-level byte
+                                                            // count, not a wire-width field, matching
+                                                            // request_count/body_len elsewhere in this
+                                                            // file); conn_rcv_nxt/conn_snd_nxt are u32
+                                                            // (sequence numbers). Casting here is harmless
+                                                            // -- neither counter is ever used as a slice
+                                                            // bound/index, so no proof depends on their
                                                             // refined-ness.
                                                             conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
                                                             request_count = request_count + 1;
@@ -484,7 +517,11 @@ fn main() {
                                                                 build_http_response_fin(frame, ihl);
                                                             if (payload_len >= 0) {
                                                                 should_tx = 1;
-                                                                tx_len = 14 + ihl + 20 + payload_len;
+                                                                // ihl (u16) needs an explicit upcast to
+                                                                // combine with payload_len (i32) here --
+                                                                // ihl's refined-ness isn't needed for this
+                                                                // VALUE computation.
+                                                                tx_len = 14 + (ihl as i32) + 20 + payload_len;
                                                                 conn_snd_nxt = conn_snd_nxt + (payload_len as u32) + 1;
                                                                 conn_state = TCP_LAST_ACK;
                                                             }
