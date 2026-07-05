@@ -3428,6 +3428,58 @@ let codegen_tests = [
           return total;
         }");
 
+  (* -- Deferred, usage-driven for-loop counter typing (follow-up to the
+     above): the counter's type defaults to i32 only AFTER the whole body
+     has had a chance to pin it via ordinary usage, not eagerly the
+     moment the bounds are seen -- mirrors check_undetermined_lets's
+     "let later constraints run first" reasoning exactly. require_integer
+     no longer defaults an unresolved TVar itself (only validates an
+     ALREADY-concrete type); Index/AssignIndex/SliceOf calling it no
+     longer forces the counter's shared type variable to i32 the moment
+     the body indexes anything with it. *)
+
+  Alcotest.test_case
+    "for-loop counter over a NON-const-recognized compound bound \
+     (`0 + 4`, which Const_env.bound_value does not recognize as a \
+     literal the way a bare `4` is) is pinned by the body's OWN usage \
+     (passing it to a u8-typed function parameter), not defaulted to i32 \
+     -- this is the case where deferred inference actually changes the \
+     outcome" `Quick
+    (fun () ->
+      let pt = infer
+        "fn foo(x: u8) {}
+         fn f() { for i in 0..<(0 + 4) { foo(i); } }" in
+      let fi = Types.StringMap.find "f" pt.Types.functions in
+      Alcotest.check type_t "i inferred as u8, pinned by foo(x: u8)" Ast.TypeU8
+        (Types.StringMap.find "__for_i" fi.Types.local_types));
+
+  Alcotest.test_case
+    "HONEST LIMITATION: for-loop counter over ORDINARY literal bounds \
+     (`0..<4`, which Const_env.bound_value DOES recognize) still ends up \
+     i32 even when the body passes it to a u8-typed function -- deferred \
+     inference does not change this common case, because a bare-literal \
+     -bounded counter is wrapped in TRefinedInt(0, 4, base), and \
+     TRefinedInt's subtyping into a concrete destination type (`TRefinedInt \
+     _, TU8 when lo>=0 && hi<=256 -> ()` in types.ml) deliberately ignores \
+     the refined value's OWN base field entirely -- passing it to foo(x: \
+     u8) proves the BOUNDS fit u8, but never touches/pins `base` itself. \
+     Confirmed empirically (not just argued) via a scratch IR dump before \
+     writing this test. Closing this gap for the common case would need a \
+     DIFFERENT, more invasive change to unify's own TRefinedInt subtyping \
+     rule (retroactively pinning an unresolved base on first concrete \
+     use) -- deliberately not done here; this test exists so a future \
+     change to that rule has to consciously update this test's expected \
+     result, not silently drift" `Quick
+    (fun () ->
+      let pt = infer
+        "fn foo(x: u8) {}
+         fn f() { for i in 0..<4 { foo(i); } }" in
+      let fi = Types.StringMap.find "f" pt.Types.functions in
+      Alcotest.check type_t
+        "i is still {0..<4 as i32}, NOT pinned to u8 by foo(x: u8)"
+        (Ast.TypeRefined (0, 4, Ast.TypeI32))
+        (Types.StringMap.find "__for_i" fi.Types.local_types));
+
 ]
 
 (* -- Entry point ----------------------------------------------------------- *)

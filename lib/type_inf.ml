@@ -68,30 +68,42 @@ let check_cond loc ct =
    the other, genuinely-u64-typed operand. *)
 let canon_ty t = match repr t with TRefinedInt (_, _, base) -> base | t -> t
 
-(* Require an integer type, defaulting a genuinely-unconstrained type
-   variable to i32 (this language's existing "unconstrained integer
-   literal defaults to i32" convention -- see Types.to_ast's `TVar
-   (Unbound _) -> TypeI32` case) rather than rejecting it outright. Used
-   everywhere an index/loop-bound-shaped value is required (Index,
-   AssignIndex, SliceOf, For): unlike TRefinedInt (which enjoys
-   unconditional leniency into TI32 via its own subtyping rule), a BARE
-   concrete type like TU8/TUsize/TI64 has no such rule, so a plain
-   `unify_at loc t TI32` alone wrongly rejects, e.g., a for-loop counter
-   over `s.len` (TUsize, not wrapped in TRefinedInt when the length isn't
-   a compile-time constant) used as an array index -- a real gap found
-   while generalizing For's loop-counter base (see CLAUDE.md's
-   "Refinement Numerical Type" section). Only defaults the TVar when
-   nothing else has pinned a concrete type yet; it does not override one
-   that something else (e.g. `s.len`'s own TUsize) already determined. *)
+(* Require an integer type, WITHOUT defaulting a genuinely-unconstrained
+   type variable -- only reject it if it's already resolved to something
+   CONCRETE and non-integer (e.g. `buf[some_bool_var]`); an unresolved
+   TVar is left alone, deferring to whatever resolves it later (more body
+   usage, e.g. a for-loop counter passed to a function elsewhere in the
+   loop) or, failing that, to Types.to_ast's `TVar (Unbound _) ->
+   TypeI32` end-of-pipeline default. Used everywhere an index/loop-bound
+   -shaped value is required (Index, AssignIndex, SliceOf, For): unlike
+   TRefinedInt (which enjoys unconditional leniency into TI32 via its own
+   subtyping rule), a BARE concrete type like TU8/TUsize/TI64 has no such
+   rule, so a plain `unify_at loc t TI32` alone wrongly rejects, e.g., a
+   for-loop counter over `s.len` (TUsize, not wrapped in TRefinedInt when
+   the length isn't a compile-time constant) used as an array index -- a
+   real gap found while generalizing For's loop-counter base (see
+   CLAUDE.md's "Refinement Numerical Type" section).
+
+   Originally this ALSO defaulted an unresolved TVar to i32 immediately,
+   right here -- but that defeated deferred, usage-driven inference for a
+   for-loop counter the MOMENT the body indexed anything with it
+   (`buf[i]`), since Index calls this same function: the counter's shared
+   type variable would get defaulted right there, before any LATER
+   body statement (e.g. `foo(i)` with a concrete-typed parameter) ever
+   got a chance to pin it. Removing the eager default here is safe for
+   Index/AssignIndex/SliceOf too: none of their own downstream logic
+   actually depends on an index's type being concrete (Index/AssignIndex
+   only care about the CONTAINER's type; SliceOf's bound_range already
+   has a graceful "unknown range" fallback for exactly this case) -- see
+   CLAUDE.md's "For-Loop Counters..." follow-up section for the full
+   story and its one honest limitation. *)
 let require_integer loc t =
   let base = canon_ty t in
-  (match repr base with
-   | TVar { contents = Unbound _ } -> unify_at loc base TI32
-   | _ -> ());
-  (match repr base with
-   | TI8 | TI16 | TI32 | TI64 | TU8 | TU16 | TU32 | TU64 | TUsize -> ()
-   | _ -> raise (TypeError (loc,
-       Printf.sprintf "expected an integer type, got '%s'" (to_string t))))
+  match repr base with
+  | TVar { contents = Unbound _ } -> ()
+  | TI8 | TI16 | TI32 | TI64 | TU8 | TU16 | TU32 | TU64 | TUsize -> ()
+  | _ -> raise (TypeError (loc,
+      Printf.sprintf "expected an integer type, got '%s'" (to_string t)))
 
 (* True if a type is not yet fully determined: a bare unresolved
    unification variable, or a TRefinedInt whose own base still is (e.g.
@@ -1245,14 +1257,15 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          refinement-producing site in this file. *)
       let base_raw = canon_ty lo_ty in
       unify_at hi_expr.loc base_raw (canon_ty hi_ty);
-      (* require_integer both validates base_raw is an integer type and,
-         if neither bound pinned a concrete type at all (both bare,
-         otherwise-unconstrained literals, e.g. `for i in 0..<8`), defaults
-         it to i32 -- this language's existing "unconstrained integer
-         literal defaults to i32" convention, not a NEW fallback. It does
-         NOT override a type something else (e.g. `s.len`) already pinned. *)
-      require_integer lo_expr.loc base_raw;
-      let base = repr base_raw in
+      (* Deliberately NOT validated/defaulted yet (require_integer no
+         longer does either eagerly -- see its own comment): base_raw may
+         still be resolved by how `name` is used INSIDE the body below
+         (e.g. passed to a function with a concrete-typed parameter),
+         exactly like ordinary HM inference lets a shared unification
+         variable be pinned by any later constraint. Deferred to
+         check_for_counter_type, called AFTER the body, mirroring
+         check_undetermined_lets's identical "let later constraints run
+         first" reasoning. *)
       (* Refine to TRefinedInt when both bounds are compile-time integers:
          a literal, or the name of a Const_env global constant (sound because
          check_const_shadowing rejects any local reusing a constant name).
@@ -1260,8 +1273,8 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          Sync rule: llvm_gen.ml's For case makes the same decision through
          the same Const_env.bound_value helper; keep them identical. *)
       let idx_ty = match Const_env.bound_value lo_expr, Const_env.bound_value hi_expr with
-        | Some lo_v, Some hi_v -> TRefinedInt (lo_v, hi_v, base)
-        | _ -> base
+        | Some lo_v, Some hi_v -> TRefinedInt (lo_v, hi_v, base_raw)
+        | _ -> base_raw
       in
       (* Loop variable is immutable (Imm binding, no reassignment). Does not escape the loop.
          Also register under the mangled "__for_<name>" key: llvm_gen.ml's
@@ -1275,6 +1288,23 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs true s)
         (body_env, raw_locals) body
       in
+      (* NOW validate/default base_raw: the body has had its full chance to
+         pin it (via a shared TVar reference nested inside idx_ty/raw_locals'
+         -- mutating the ref cell in place propagates to the already-stored
+         value, same reasoning as check_undetermined_lets). If STILL
+         unresolved, default to i32 -- deliberately a SILENT default here,
+         unlike let/let mut's hard error (see CLAUDE.md's "Undetermined
+         let/let mut..." section for why loop counters are treated
+         differently). If resolved to something CONCRETE but non-integer
+         (e.g. `for i in 0..<true`), raise instead of silently accepting it. *)
+      (match repr base_raw with
+       | TVar { contents = Unbound _ } -> unify_at lo_expr.loc base_raw TI32
+       | _ -> ());
+      (match repr base_raw with
+       | TI8 | TI16 | TI32 | TI64 | TU8 | TU16 | TU32 | TU64 | TUsize -> ()
+       | _ -> raise (TypeError (lo_expr.loc,
+           Printf.sprintf "for-loop bounds must be an integer type, got '%s'"
+             (to_string base_raw))));
       (tyenv, raw_locals')
 
   | ForEach (name, se, body) ->

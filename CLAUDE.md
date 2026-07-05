@@ -1231,6 +1231,94 @@ placeholders together without ever attaching anything concrete). Full
 cases) passes with zero regressions -- notably, not a single example in
 the entire codebase relies on an undetermined bare literal anywhere.
 
+### For-Loop Counter Defaulting Deferred Until After the Body (and Why It
+### Mostly Doesn't Change Anything)
+
+Direct follow-up to the previous two sections, same session: the
+for-loop generalization above still decided the counter's base EAGERLY,
+the moment the bounds were unified, before ever looking at the loop
+body. This meant a for-loop counter used inside the body as, say, a
+function argument with a concrete-typed parameter could never retroactively
+determine the counter's own base -- unlike ordinary HM inference, where a
+shared unification variable is normally free to be pinned by ANY later
+constraint, whenever it occurs.
+
+**The fix, technique-wise**: since this codebase's unification is
+mutable-ref-based (a `TVar` is a `ref` cell that gets mutated in place
+when resolved, not a fresh copy), deferring is possible without
+restructuring how inference works: just don't force a decision until
+AFTER the body has run. Two changes:
+1. `require_integer` (used by `Index`/`AssignIndex`/`SliceOf`/`For`) no
+   longer defaults a genuinely-unresolved `TVar` to i32 -- it only
+   rejects a type that is ALREADY concrete and non-integer, leaving an
+   unresolved one alone. This was necessary, not optional: the moment a
+   for-loop body does `buf[i]`, `Index` calls `require_integer` on `i`'s
+   type -- with the OLD eager-defaulting behavior, THIS is what locked
+   the shared type variable to i32, before any LATER body statement
+   (e.g. a function call with a concrete-typed parameter) ever got a
+   chance to pin it. Removing the eager default here is safe for all
+   three other call sites too: none of their downstream logic actually
+   depends on an index's type being concrete yet (`Index`/`AssignIndex`
+   only care about the CONTAINER's type; `SliceOf`'s `bound_range`
+   already has a graceful "unknown range" fallback for an unresolved
+   type, identical to what it already does for a resolved-but-unrelated
+   type).
+2. `For`'s own validate-and-default step moved from immediately after
+   unifying the bounds to AFTER the body has been fully processed --
+   mirroring `check_undetermined_lets`'s identical "let later
+   constraints run first" structure (though `For` still SILENTLY
+   defaults to i32 when nothing pins it, rather than raising the way
+   `let`/`let mut` now do -- see this file's own reasoning in the previous
+   section for why loop counters are treated differently: often a purely
+   ephemeral SSA/register value, conventionally array-index-shaped,
+   without let/let mut's "stable debugger-visible memory location"
+   property).
+
+**An honest, empirically-confirmed limitation, not swept under the rug**:
+this deferral has NO observable effect for the single most common
+for-loop shape, `for i in 0..<4 { foo(i); }` (bare integer literal
+bounds) -- `i` still ends up i32-based even when `foo` takes a `u8`
+parameter. Root cause is a SEPARATE mechanism, not a bug in the deferral
+itself: `Const_env.bound_value` recognizes a bare `IntLit` (or a `Var`
+naming a recorded constant) as a compile-time constant, so BOTH bounds of
+`0..<4` get recognized, and the counter's type becomes `TRefinedInt(0, 4,
+base)` -- wrapped, not bare. `types.ml`'s subtyping rule for passing a
+`TRefinedInt` into a concrete destination type
+(`TRefinedInt _, TU8 when lo >= 0 && hi <= 256 -> ()`) deliberately
+ignores the refined value's own `base` field entirely (documented as
+intentional: "a subtype of any integer type where the range fits,
+REGARDLESS of its own base") -- so `foo(i)` only proves `i`'s BOUNDS
+(0..<4) fit inside u8's range, and never touches, let alone pins,
+`base` itself. Deferred inference genuinely helps only in the narrower
+case where at least one bound is NOT recognized by `Const_env.bound_value`
+(a compound expression like `0 + 4`, or a genuinely runtime, non-constant
+value) -- confirmed empirically via three scratch-IR checks before
+committing to this design, not just reasoned through: a bare-literal
+bound stayed i32-wrapped-in-TRefinedInt regardless of body usage; a
+`0 + 4` compound bound (which `Const_env.bound_value` does NOT recognize)
+correctly picked up `u8` from a `foo(x: u8)` call in the body.
+
+**Closing the gap for the common (bare-literal-bounds) case would need a
+different, more invasive change**: making `unify`'s own `TRefinedInt`
+-into-concrete-type subtyping rule retroactively pin an unresolved `base`
+on first concrete use, rather than only checking bounds. This touches
+`types.ml`'s core `unify` function directly -- used far more broadly than
+`For`'s own logic -- so it was deliberately NOT done as part of this
+change. The alternative (and, on reflection, probably preferable) way to
+close this gap is surface syntax letting the programmer spell the
+counter's base directly (e.g. `for i: u8 in 0..<4`), rather than teaching
+inference to guess it from indirect, easy-to-miss body usage -- proposed
+as a follow-up, not yet implemented as of this section.
+
+**Verification**: `test/test_takibi.ml` gained two `type_inf`-level
+(direct `program_types` inspection, not just "does it compile") tests
+side by side -- one confirming the compound-bound case DOES defer
+correctly, one confirming the literal-bound case deliberately does NOT,
+so a future change to the subtyping rule above has to consciously update
+the second test's expected result, not silently drift. Full `make check`
+(langcheck, 381 unit tests, stm32build, all 125 qemutest cases) passes
+with zero regressions.
+
 ### Soundness Condition for % Range Propagation
 
 Range propagation for `n % m` (where m is a positive integer literal) returns `{0..<m}` **only when the left operand is guaranteed non-negative at the type level**.
