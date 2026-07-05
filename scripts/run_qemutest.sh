@@ -350,7 +350,7 @@ echo ""
 # Examples whose bounds should be fully proven at the type level. If brk appears, review the type annotations.
 for e in start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci \
           bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt \
-          semaphore condvar struct msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align sizeof net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server; do
+          semaphore condvar struct msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server; do
 # enum (P4c): Color was made NON-EXHAUSTIVE (`_;`) since its one cast site
 # (`raw as Color`) has no static evidence bounding raw to {0,1,2} -- see
 # CLAUDE.md's P4c section. No trap at all now (round-trip guaranteed).
