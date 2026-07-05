@@ -2534,6 +2534,22 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
+    "Mul's constant-multiplier detection resolves a Const_env-named global \
+     (`idx * RX_BUF_SIZE`), not just a bare IntLit token -- found while \
+     removing net_rx_frame's unsafe (see CLAUDE.md's P4c section): the \
+     literal-vs-named-constant distinction is invisible in ordinary code, \
+     so this gap silently blocked the exact same idiom Mul already \
+     supported for a literal multiplier" `Quick
+    (expect_trap_sites 0
+       "let RX_BUF_SIZE: i32 = 1536;
+        let mut ftp4c_buf_f: [u8; 12288];
+        fn ftp4c_mul_const(raw_idx: i32) -> u8 {
+          let idx: i32 = max(min(raw_idx, 7), 0);   // {0..<8}
+          let offset: i32 = idx * RX_BUF_SIZE;       // {0..<10753} via Const_env-resolved k
+          return ftp4c_buf_f[offset];
+        }");
+
+  Alcotest.test_case
     "min(a, LITERAL) clamps the upper bound to the literal regardless of \
      a's own range, proving a subslice against a smaller buffer than a's \
      own {0..<64} range would otherwise allow (zero trap sites) -- the \

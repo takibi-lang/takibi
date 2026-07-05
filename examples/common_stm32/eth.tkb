@@ -344,16 +344,31 @@ fn net_rx_buf() -> *u8 {
 
 // Capacity view of the current RX buffer as a slice: 1514 bytes = the
 // maximum Ethernet frame this stack handles (the physical buffer is
-// larger, so the assertion below is true by construction -- that evidence
-// is exactly why the one `unsafe` lives HERE, inside the driver, and
-// nowhere in application code). Callers narrow the device-reported length
-// ONCE (`if (len >= K && len <= 1514)`) and take frame[0..<len]; that
+// larger). Callers narrow the device-reported length ONCE
+// (`if (len >= K && len <= 1514)`) and take frame[0..<len]; that
 // subslice is then interval-proven with no runtime check, which also
 // closes the "device reports a bogus length" hole: a length outside
 // 0..1514 fails the narrowing check and the frame is dropped.
+//
+// eth_rx_cur is self-managed (advanced only via the `% ETH_RX_DESC_COUNT`
+// in net_rx_release() below), but as a GLOBAL its type carries no range
+// across the function boundary regardless -- clamping it here, exactly
+// like virtio_mmio.tkb's net_last_rx_desc_idx, lets the capacity view be
+// constructed directly from eth_rx_bufs (a real array) with no unsafe
+// pointer assertion: min/max prove the clamped index is in
+// [0, ETH_RX_DESC_COUNT-1], Mul/Add propagation carry that through the
+// byte offset, and the same-base rule (literal offset 1514) closes the
+// subslice outright.
 fn net_rx_frame() -> [u8; 1514..] {
-    let p: *u8 = net_rx_buf();
-    return unsafe { p[0..<1514] };
+    // 3 is ETH_RX_DESC_COUNT-1 written as a literal, not a computed
+    // expression: Const_env only resolves bare literals/names, not
+    // arithmetic on them (see CLAUDE.md's "global let initializers can't
+    // constant-fold" limitation), so a computed bound here would lose the
+    // range min() needs. Update this literal if ETH_RX_DESC_COUNT
+    // (declared above) ever changes.
+    let idx: i32 = max(min(eth_rx_cur, 3), 0);
+    let offset: i32 = idx * ETH_BUF_SIZE;
+    return eth_rx_bufs[offset..<offset + 1514];
 }
 
 

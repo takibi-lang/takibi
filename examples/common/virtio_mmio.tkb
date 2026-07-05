@@ -252,15 +252,28 @@ fn net_rx_buf() -> *u8 {
 // Capacity view of the current RX buffer as a slice: 1514 bytes = the
 // maximum Ethernet frame this stack handles (the physical buffer is
 // larger, so the assertion below is true by construction -- that evidence
-// is exactly why the one `unsafe` lives HERE, inside the driver, and
-// nowhere in application code). Callers narrow the device-reported length
-// ONCE (`if (len >= K && len <= 1514)`) and take frame[0..<len]; that
-// subslice is then interval-proven with no runtime check, which also
 // closes the "device reports a bogus length" hole: a length outside
 // 0..1514 fails the narrowing check and the frame is dropped.
+//
+// net_last_rx_desc_idx is itself a DEVICE-REPORTED value
+// (used_ring_get_id() in net_poll_rx(), never previously validated
+// against QNUM) -- clamping it here closes that gap too, and lets the
+// capacity view be constructed directly from rx_bufs (a real array) with
+// no unsafe pointer assertion at all: min/max prove the clamped index is
+// in [0, QNUM-1], Mul/Add propagation carry that through the byte offset
+// computation, and the same-base rule (literal offset 1514) closes the
+// subslice outright. A corrupted index degrades to reading the wrong
+// (but always in-bounds) buffer slot instead of the raw pointer
+// arithmetic construction this replaces, which had no such guarantee.
 fn net_rx_frame() -> [u8; 1514..] {
-    let p: *u8 = net_rx_buf();
-    return unsafe { p[0..<1514] };
+    // 7 is QNUM-1 written as a literal, not a computed expression:
+    // Const_env only resolves bare literals/names, not arithmetic on
+    // them (see CLAUDE.md's "global let initializers can't constant-fold"
+    // limitation), so `QNUM - 1` here would lose the range min() needs.
+    // Update this literal if QNUM (declared above) ever changes.
+    let idx: i32 = max(min(net_last_rx_desc_idx, 7), 0);
+    let offset: i32 = idx * RX_BUF_SIZE + 10;
+    return rx_bufs[offset..<offset + 1514];
 }
 
 

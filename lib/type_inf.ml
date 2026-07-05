@@ -142,16 +142,19 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                      unify_at e.loc ct1 ct2;
                      ct1))
        | Mul ->
-           (* Range propagation: {a..<b} * k (k a positive literal) ->
-              {a*k..<(b-1)*k+1} -- what makes `tcp_hdr_len = doff * 4` carry
-              doff's narrowed {5..<16} into {20..<61}. Sync rule with
-              llvm_gen as for Add/Sub. Non-literal or non-positive
-              multipliers fall back to i32. *)
-           (match repr t1, e2.desc, repr t2, e1.desc with
-            | TRefinedInt (a, b), IntLit k, _, _ when k > 0 ->
+           (* Range propagation: {a..<b} * k (k a positive literal OR a
+              Const_env-resolvable named constant, e.g. `idx * RX_BUF_SIZE`
+              -- see CLAUDE.md's P4c section for where using e2.desc's bare
+              IntLit check alone missed this) -> {a*k..<(b-1)*k+1} -- what
+              makes `tcp_hdr_len = doff * 4` carry doff's narrowed {5..<16}
+              into {20..<61}. Sync rule with llvm_gen as for Add/Sub.
+              Non-constant or non-positive multipliers fall back to i32. *)
+           let k2 = Const_env.bound_value e2 and k1 = Const_env.bound_value e1 in
+           (match repr t1, k2, repr t2, k1 with
+            | TRefinedInt (a, b), Some k, _, _ when k > 0 ->
                 unify_at e2.loc t2 TI32;
                 TRefinedInt (a * k, (b - 1) * k + 1)
-            | _, _, TRefinedInt (a, b), IntLit k when k > 0 ->
+            | _, _, TRefinedInt (a, b), Some k when k > 0 ->
                 unify_at e1.loc t1 TI32;
                 TRefinedInt (a * k, (b - 1) * k + 1)
             | _ ->

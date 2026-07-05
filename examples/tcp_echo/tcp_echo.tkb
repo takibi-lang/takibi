@@ -33,24 +33,29 @@
 // Single shared file for both targets -- see examples/net_echo/net_echo.tkb's
 // header comment for why.
 //
-// SLICE MIGRATION (P4b): the handshake/close paths (build_syn_ack,
+// SLICE MIGRATION (P4b/P4c): the handshake/close paths (build_syn_ack,
 // build_fin_ack, fix_tcp_checksum, the request-checksum span, the TCP
 // options skip) follow examples/http_server/http_server.tkb's fully-proven
-// template exactly (see its header comment for the technique). The
-// DATA-ECHO path is the one genuinely relational case this migration
-// leaves as a runtime-checked (gradual) subslice rather than forcing a
-// proof: `data_off` (where the payload starts, past any options) and
-// `data_len` (how much payload there is) are two INDEPENDENTLY-derived
-// quantities whose combination (`data_off + data_len <= frame's capacity`)
-// is exactly the kind of two-variable fact plain interval arithmetic
-// cannot carry, even with the same-base rule (which only handles a
-// variable plus a COMPILE-TIME CONSTANT offset, not two runtime variables
-// together) -- see CLAUDE.md's P4b section for the full accounting of why
-// this is the honest boundary, not an oversight. Both the source view
-// (`data`) and the reply's payload-inclusive span end up as recorded
-// --forbid-trap sites; tcp_echo is NOT registered as a forbid_trap test
-// (unlike http_server), and that is a deliberate, documented distinction,
-// not a regression.
+// template exactly (see its header comment for the technique), and this
+// file is --forbid-trap clean (forbid_trap_tcp_echo in run_qemutest.sh).
+//
+// ONE genuinely relational site remains, in build_data_echo, marked
+// `unsafe` rather than left as a silent runtime check: `data_off` (where
+// the payload starts, past any options) and `data_len` (how much payload
+// there is) are two INDEPENDENTLY-tracked quantities whose combination
+// (`data_off + data_len <= frame's capacity`) is exactly the kind of
+// two-variable fact plain interval arithmetic cannot carry, even with the
+// same-base rule (which needs the offset to be a bare literal or a bare
+// variable with its OWN non-negative lower bound, not an expression
+// correlated with the base through a THIRD variable like tcp_hdr_len
+// here). Confirmed empirically, not just argued: neither clamping
+// data_len directly nor bounding the sum `data_off + data_len` with an
+// explicit extra `if` closes it (both were tried -- see CLAUDE.md's P4c
+// section for the two failed reformulations and exactly why each one
+// still overshoots). This is the one case across the whole P4 census that
+// would need a genuine relational/difference-constraint domain to prove
+// outright; unsafe is the deliberate, visible stand-in until that's
+// judged worthwhile.
 
 let mut our_mac: [u8; 6];
 
@@ -182,18 +187,15 @@ fn build_data_echo(eth: [u8; 1514..], ihl: {20..<21}, data: []u8, data_len: i32)
         let n: i32 = data_len;
         let tcp_seg = eth[34..<54 + n];
 
-        // tcp_seg[20..<20+n]: tcp_seg's declared/proven minimum is only 20
-        // (the worst case n=0), but its ACTUAL runtime length is exactly
-        // 20+n by construction just above -- the type system only
-        // remembers the conservative minimum, not that exact construction
-        // history, so this specific subslice can't reuse the n>=0 fact
-        // already established (same-base needs lo_e to be a bare
-        // variable; here lo_e is the literal 20, not tcp_seg's own base).
-        // unsafe is appropriate: n was ALREADY bounds-checked above (the
-        // `if` this is nested in), so this is a real assertion backed by
-        // evidence one line up, not a guess -- see CLAUDE.md's P4c
-        // section (this is one of tcp_echo's two documented unsafe sites).
-        slice_copy(unsafe { tcp_seg[20..<20 + n] }, data);
+        // Constructed directly from `eth` (literal base 54 = 34+20), NOT
+        // by re-slicing tcp_seg[20..<20+n]: tcp_seg's own declared minimum
+        // is only 20 (the worst case n=0), so a SECOND subslice built
+        // from tcp_seg would lose the connection to n that its own
+        // construction above already has. Going straight to `eth` with
+        // the same literal-offset same-base shape that proved tcp_seg
+        // itself (`eth[34..<54+n]`) proves this one too -- same memory,
+        // no unsafe needed.
+        slice_copy(eth[54..<54 + n], data);
 
         slice_copy(eth[0..<6], eth[6..<12]);
         slice_copy(eth[6..<12], our_mac as []u8);

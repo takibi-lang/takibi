@@ -950,11 +950,13 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 (ret_ty, diff))
        | Mul ->
            (* Range propagation (sync rule with type_inf.ml's Mul):
-              {a..<b} * k (positive literal) -> {a*k..<(b-1)*k+1} *)
-           let ret_ty = match ty1, e2.desc, ty2, e1.desc with
-             | TypeRefined (a, b), IntLit k, _, _ when k > 0 ->
+              {a..<b} * k (a positive literal OR Const_env-resolvable
+              named constant) -> {a*k..<(b-1)*k+1} *)
+           let k2 = Const_env.bound_value e2 and k1 = Const_env.bound_value e1 in
+           let ret_ty = match ty1, k2, ty2, k1 with
+             | TypeRefined (a, b), Some k, _, _ when k > 0 ->
                  TypeRefined (a * k, (b - 1) * k + 1)
-             | _, _, TypeRefined (a, b), IntLit k when k > 0 ->
+             | _, _, TypeRefined (a, b), Some k when k > 0 ->
                  TypeRefined (a * k, (b - 1) * k + 1)
              | _ -> ty1
            in

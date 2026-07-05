@@ -84,11 +84,16 @@ code provable too). Where a bound genuinely can't be proven this way --
 typically because two values are secretly correlated in a way plain
 interval reasoning can't see -- the code says so explicitly with
 `unsafe { ... }`, rather than silently falling back to an unexplained
-runtime check. See CLAUDE.md's P4c section for the full accounting,
-including one honest negative result (chained/correlated clamps that
-don't close without a genuine relational domain) and the case that
-looked like it needed one but didn't: the fix turned out to be a missing
-validation check, not a type-system gap.
+runtime check. As of this writing, exactly **one** `unsafe` use remains
+across the entire example suite -- everywhere else it was tried, removing
+it turned out to be possible (and worth doing: two of the removals closed
+real gaps, an unvalidated device-reported ring index and a lossy
+intermediate slice reconstruction, not just cosmetic --forbid-trap
+fixes). See CLAUDE.md's P4c section for the full accounting, including
+two honest negative results (reformulations that don't close without a
+genuine relational domain) and the case that looked like it needed one
+but didn't: the fix turned out to be a missing validation check, not a
+type-system gap.
 
 ## Current Status
 

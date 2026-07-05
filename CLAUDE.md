@@ -1244,10 +1244,98 @@ Sub literal-minus-refined case, same-base generalization, reserved names),
 `lib/types.ml` (TRefinedInt->TUsize subtyping fix), `examples/ip_parse/
 ip_parse.tkb` (min-clamp, now fully proven), `examples/tcp_parse/
 tcp_parse.tkb` (ip_total_len validation, now fully proven),
-`examples/tcp_echo/tcp_echo.tkb` (two unsafe-wrapped sites),
-`scripts/run_qemutest.sh` (enum/ip_parse/tcp_parse/tcp_echo all moved
-back into the no-trap list; 3 new forbid_trap_* registrations), 7 new
-unit-test cases including the honest-negative-result regression.
+`examples/tcp_echo/tcp_echo.tkb` (one unsafe-wrapped site remaining, down
+from two -- see below), `scripts/run_qemutest.sh` (enum/ip_parse/
+tcp_parse/tcp_echo all moved back into the no-trap list; 3 new
+forbid_trap_* registrations), 7 new unit-test cases including the
+honest-negative-result regression.
+
+### P4c Follow-up: Three of Four unsafe Sites Removed, One Confirmed Necessary
+
+After the above, the codebase still had 4 `unsafe` uses: two identical
+`net_rx_frame()` implementations (virtio_mmio.tkb / eth.tkb) and
+tcp_echo's two data-echo sites. Asked, for each one, "can an `if` remove
+this the same way tcp_parse's fix did" -- the honest answer turned out to
+be "yes" for three of the four, and each `unsafe` removal PROVED something
+genuinely true and useful, not just "make the compiler happy":
+
+**`net_rx_frame()` (both backends): the pointer assertion was itself
+hiding an unvalidated device value.** `unsafe { p[0..<1514] }` asserted
+"this pointer is good for 1514 bytes" with zero evidence -- but the REAL
+issue one line up was that `net_last_rx_desc_idx` (virtio) /
+`eth_rx_cur` (STM32), the index selecting WHICH ring slot's buffer `p`
+points into, is read from a mutable global with no range at all (in
+virtio's case, genuinely DEVICE-REPORTED via `used_ring_get_id()`, never
+previously checked against QNUM). Fix: skip the pointer step entirely --
+clamp the index with `max(min(idx, QNUM-1), 0)` and construct the
+capacity view DIRECTLY from the underlying array (`rx_bufs[offset..<
+offset+1514]` / `eth_rx_bufs[...]`), which the interval + Mul/Add +
+same-base machinery already proves outright (same-base's literal offset
+1514 covers the lo<=hi side; the array's real declared size covers the
+capacity side). Net result: closes a real "trust an unvalidated
+device-reported ring index" gap, not merely a cosmetic --forbid-trap
+fix -- a corrupted index now degrades to reading the wrong (but always
+in-bounds) slot instead of driving raw pointer arithmetic with no bound
+at all.
+
+**Another Const_env gap found in the process**: `idx * RX_BUF_SIZE`
+failed to propagate a range, because Mul's positive-literal-multiplier
+check only matched a bare `IntLit` AST node (`e2.desc`), not a
+Const_env-resolvable NAMED constant (`RX_BUF_SIZE`, an ordinary
+`let RX_BUF_SIZE: i32 = 1536;`) -- the exact same "reference vs. literal
+token" distinction already fixed for the `min`/`max` builtins' range
+lookups, just missed in Mul specifically. Fixed by using
+`Const_env.bound_value` in place of the raw `e2.desc`/`e1.desc` match
+(both files, sync rule) -- this is now consistent with how every other
+P4a/P4c rule resolves constants.
+
+**tcp_echo's `tcp_seg[20..<20+n]` (one of its two sites): fixed by NOT
+re-slicing.** The problem was never irreducible -- `tcp_seg` (itself
+`eth[34..<54+n]`, fully proven) has a declared minimum of only 20 (the
+worst case n=0), so subslicing INTO it a second time
+(`tcp_seg[20..<20+n]`) loses the connection to `n` that `tcp_seg`'s own
+construction still has. Constructing the copy destination DIRECTLY from
+`eth` instead -- `eth[54..<54+n]` (54 = 34+20, same memory, just reached
+without the lossy intermediate step) -- reuses the exact same
+literal-offset same-base proof that already closed `tcp_seg` itself.
+General lesson: when a same-base-proven slice's OWN subslice fails to
+prove, try reconstructing from the ORIGINAL wider-capacity base with the
+combined literal offset, rather than assuming the failure is fundamental.
+
+**tcp_echo's `frame[data_off..<data_off+data_len]`: confirmed necessary,
+not just assumed.** Two additional reformulations were tried and BOTH
+failed, empirically (not just argued by hand): (1) clamping `data_len`
+directly with an extra `if (data_len <= TCP_MAX_PAYLOAD)` intersected into
+its existing (already broken, spuriously negative) Sub-derived range --
+still overshoots, because `data_off`'s own upper bound and `data_len`'s
+own upper bound can't actually co-occur (they move in OPPOSITE
+directions, both driven by `tcp_hdr_len`), but ordinary interval Add has
+no way to know that; (2) introducing an explicit `hi = data_off +
+data_len` local and validating `hi >= 0 && hi <= 1514 && data_off <= hi`
+directly -- still fails, because `data_off <= hi` narrows `data_off`'s
+own upper bound using `hi`'s STATIC range (the existing
+comparison-against-a-range-known-variable rule), which is a DIFFERENT,
+weaker fact than "lo <= hi holds for THIS specific pair," and the
+same-base rule doesn't apply either (`hi` is a separate named variable,
+not syntactically `data_off + <something>`). This is the one site in the
+entire example suite that needs an actual relational/difference-
+constraint domain to close without `unsafe` -- confirmed by exhausting
+the interval toolkit's reasonable extensions, not by assumption.
+
+**Final count: 3 of 4 `unsafe` uses removed; the remaining one is the
+same site already identified as the P4 census's sole genuinely relational
+case.** This is a second strong, now twice-independently-confirmed
+empirical data point (after tcp_parse's "it wasn't a type-system gap"
+finding) for calibrating VC+SMT's actual necessity in this codebase: even
+under direct pressure to eliminate every remaining `unsafe`, the type
+system's non-relational toolkit closed everything except this single,
+already-diagnosed correlation.
+
+Files: `examples/common/virtio_mmio.tkb` + `examples/common_stm32/
+eth.tkb` (`net_rx_frame()` rewritten, unsafe removed), `lib/type_inf.ml`
++ `lib/llvm_gen.ml` (Mul's Const_env-constant fix), `examples/tcp_echo/
+tcp_echo.tkb` (one site fixed, one site's necessity reinforced with the
+two failed-reformulation findings), 1 new unit-test case for the Mul fix.
 
 ### Synchronization Primitive Design and Current Limitations
 
