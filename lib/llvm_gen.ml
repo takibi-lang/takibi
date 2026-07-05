@@ -733,7 +733,14 @@ let rec collect_lets stmts =
     | Block ss                    -> collect_lets ss
     | If (_, t, e)                -> collect_lets t @ collect_lets e
     | While (_, b)                -> collect_lets b
-    | For (name, _, _, body)      -> ("__for_" ^ name, Some TypeI32, s.loc) :: collect_lets body
+    | For (name, _, _, body)      ->
+        (* type_inf.ml's For case now registers "__for_<name>" in
+           raw_locals with the bounds' own base type (sync rule), so
+           resolve_local_ast finds the real type via local_types --
+           `None` here is a dead fallback, never actually consulted, but
+           kept `None` (rather than the old hardcoded `Some TypeI32`) so
+           it doesn't misleadingly suggest i32 is still the answer. *)
+        ("__for_" ^ name, None, s.loc) :: collect_lets body
     | ForEach (name, _, body)     -> ("__foreach_" ^ name, Some TypeUsize, s.loc) :: collect_lets body
     | Match (_, arms)             ->
         List.concat_map (fun arm ->
@@ -2289,19 +2296,33 @@ let gen_func ?prog_types fdef =
         position_at_end after_bb builder
 
     | For (name, lo_expr, hi_expr, body) ->
-        (* Loop counter is pre-allocated in the entry block by collect_lets.
-           The loop variable name is exposed to the body as an Imm binding (no reassignment).
-           When both bounds are integer literals, assigns TypeRefined -> bounds check elision (Step 3.4). *)
-        let (_, lo_v) = gen_expr locals lo_expr in
-        let (_, hi_v) = gen_expr locals hi_expr in
-        let lo_i32    = to_i32 lo_v in
-        let hi_i32    = to_i32 hi_v in
-        let ctr_name  = "__for_" ^ name in
+        (* Loop counter is pre-allocated in the entry block by collect_lets,
+           at whatever type type_inf.ml determined for the bounds (sync
+           rule: both sides now unify lo/hi against EACH OTHER instead of
+           hardcoding TI32, so the counter's base follows the bounds' own
+           type -- e.g. `for i in 0..<s.len` gives i a usize-based type,
+           matching s.len itself, instead of failing to compile at all).
+           The loop variable name is exposed to the body as an Imm binding
+           (no reassignment). When both bounds are integer literals,
+           assigns TypeRefined -> bounds check elision (Step 3.4). *)
+        (* Looked up by the MANGLED "__for_<name>" key, matching what
+           type_inf.ml's For case actually stores in raw_locals -- the
+           bare user-visible name is deliberately NOT reused here (a flat,
+           whole-function StringMap keyed by plain "i" would collide with
+           an unrelated local, or a second for-loop, also named "i"). *)
+        let ctr_name     = "__for_" ^ name in
+        let counter_ty   = res ctr_name None in
+        let counter_base = canon_ty counter_ty in
+        let is_uns       = is_unsigned counter_base in
+        let (_, lo_v0) = gen_expr ~expected_ty:counter_base locals lo_expr in
+        let (_, hi_v0) = gen_expr ~expected_ty:counter_base locals hi_expr in
+        let lo_w      = to_arith_width counter_base lo_v0 in
+        let hi_w      = to_arith_width counter_base hi_v0 in
         let ctr_ptr   = match Hashtbl.find_opt locals ctr_name with
           | Some (Mut (_, p)) -> p
           | _ -> raise (Error (Printf.sprintf "BUG: for counter '%s' not found" ctr_name))
         in
-        ignore (build_store lo_i32 ctr_ptr builder);
+        ignore (build_store (coerce lo_w counter_base) ctr_ptr builder);
         let cond_bb = append_block context "for_cond" f in
         let body_bb = append_block context "for_body" f in
         let incr_bb = append_block context "for_incr" f in
@@ -2309,21 +2330,18 @@ let gen_func ?prog_types fdef =
         ignore (build_br cond_bb builder);
 
         position_at_end cond_bb builder;
-        let i_val = build_load (i32_type context) ctr_ptr "for_i" builder in
-        let cmp   = build_icmp Icmp.Slt i_val hi_i32 "for_cmp" builder in
+        let i_raw = build_load (ltype_of_ast counter_base) ctr_ptr "for_i" builder in
+        let i_val = to_arith_width counter_base i_raw in
+        let cmp   = if is_uns then build_icmp Icmp.Ult i_val hi_w "for_cmp" builder
+                    else build_icmp Icmp.Slt i_val hi_w "for_cmp" builder in
         ignore (build_cond_br cmp body_bb exit_bb builder);
 
         position_at_end body_bb builder;
         (* Sync rule: type_inf.ml's For case makes the same decision through
            the same Const_env.bound_value helper; keep them identical. *)
         let loop_ty = match Const_env.bound_value lo_expr, Const_env.bound_value hi_expr with
-          (* Loop counters stay base=TypeI32 always (sync rule with
-             type_inf.ml's For case) -- a deliberate exception, since a
-             loop counter is fundamentally array-index-shaped and i_val
-             is always loaded as i32 above regardless of the bounds'
-             own types. *)
-          | Some lo_k, Some hi_k -> TypeRefined (lo_k, hi_k, TypeI32)
-          | _ -> TypeI32
+          | Some lo_k, Some hi_k -> TypeRefined (lo_k, hi_k, counter_base)
+          | _ -> counter_base
         in
         Hashtbl.add locals name (Imm (loop_ty, i_val));
         Stack.push (exit_bb, incr_bb) loop_stack;
@@ -2336,8 +2354,8 @@ let gen_func ?prog_types fdef =
         (* incr_bb: increment counter and loop back. continue jumps here.
            i_val is defined in cond_bb which dominates incr_bb, so the SSA use is valid. *)
         position_at_end incr_bb builder;
-        let i_next = build_add i_val (const_int (i32_type context) 1) "for_next" builder in
-        ignore (build_store i_next ctr_ptr builder);
+        let i_next = build_add i_val (const_int (type_of i_val) 1) "for_next" builder in
+        ignore (build_store (coerce i_next counter_base) ctr_ptr builder);
         ignore (build_br cond_bb builder);
 
         position_at_end exit_bb builder

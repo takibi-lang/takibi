@@ -1863,6 +1863,48 @@ let infer_tests = [
        fn f() { for i in 0..<4 { buf[i] = 'A'; } \
                 for i in 0..<4 { buf[i] = 'B'; } }");
 
+  (* -- For-loop counter follows the bounds' own base type, not a hardcoded
+     TI32 (regression -- `for i in 0..<s.len` (s.len: TUsize) used to fail
+     outright with "cannot unify usize with i32", because the old
+     unconditional `unify_at ... TI32` forced both bounds to already be
+     i32-compatible before TRefinedInt's leniency into TI32 could ever
+     apply -- a bare (non-refined) TUsize has no such leniency rule) -- *)
+
+  Alcotest.test_case
+    "for loop over a slice's own .len (usize) type-checks -- previously \
+     failed with 'cannot unify usize with i32'" `Quick
+    (expect_ok
+      "fn f(s: []u8) -> i32 { \
+         let mut total: i32 = 0; \
+         for i in 0..<s.len { total = total + (s[i] as i32); } \
+         return total; \
+       }");
+
+  Alcotest.test_case
+    "for loop bound typed u8 gives the counter a u8-based type (usable as \
+     an array index directly, via Index's own require_integer \
+     generalization)" `Quick
+    (expect_ok
+      "fn f(n: u8) -> i32 { \
+         let mut total: i32 = 0; \
+         for i in 0..<n { total = total + 1; } \
+         return total; \
+       }");
+
+  Alcotest.test_case
+    "for loop bounds must be an integer type -- a bool bound is rejected \
+     with a clear error, not silently accepted as some nonsense counter \
+     type" `Quick
+    (fun () ->
+      match infer "fn f() { for i in 0..<true {} }" with
+      | _ -> Alcotest.fail "expected an error, but type-checking succeeded"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) "mentions integer type" true
+            (let n = String.length "integer type" and m = String.length msg in
+             let rec scan i = i + n <= m &&
+               (String.sub msg i n = "integer type" || scan (i + 1)) in
+             scan 0));
+
   (* -- break and continue ---------------------------------------------------- *)
 
   Alcotest.test_case "break in while parses and type-checks" `Quick
@@ -3315,6 +3357,36 @@ let codegen_tests = [
        "fn refnum_slice_bound_u8(pkt: [u8; 20..]) -> []u8 {
           let ihl: u8 = min((pkt[0] & 0x0f) * 4, 20);
           return pkt[0..<ihl];
+        }");
+
+  Alcotest.test_case
+    "Refinement Numerical Type: for-loop counter follows the bounds' own \
+     base type instead of a hardcoded i32 (regression -- generalizing \
+     type_inf.ml's For case to unify lo/hi against each other, instead of \
+     forcing both into TI32, surfaced a SEPARATE codegen bug: looking up \
+     the counter's resolved type via `res name None` (the user's bare \
+     loop-variable name, e.g. \"i\") instead of the mangled \
+     \"__for_<name>\" key type_inf.ml actually stores it under -- the \
+     lookup silently fell back to i32 regardless of the real base, so a \
+     usize-based loop counter's alloca (correctly i64-wide, since
+     collect_lets's OWN alloca-type resolution used the right key) was \
+     STORED INTO with an i32-shaped 0, an LLVM verifier failure caught by \
+     gen_func's own Llvm_analysis.verify_function. This test exercises \
+     u8 (narrow, needs widen-for-compare/narrow-for-store at every \
+     boundary) and usize (wide, needs unsigned `icmp ult` not signed \
+     `icmp slt`) loop bounds together with a `for i in 0..<s.len` slice \
+     bound (previously a type error, now also a codegen regression \
+     surface)" `Quick
+    (expect_codegen_ok
+       "fn refnum_for_u8(n: u8) -> i32 {
+          let mut total: i32 = 0;
+          for i in 0..<n { total = total + 1; }
+          return total;
+        }
+        fn refnum_for_usize(s: []u8) -> i32 {
+          let mut total: i32 = 0;
+          for i in 0..<s.len { total = total + (s[i] as i32); }
+          return total;
         }");
 
 ]

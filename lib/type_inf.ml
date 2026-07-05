@@ -68,6 +68,31 @@ let check_cond loc ct =
    the other, genuinely-u64-typed operand. *)
 let canon_ty t = match repr t with TRefinedInt (_, _, base) -> base | t -> t
 
+(* Require an integer type, defaulting a genuinely-unconstrained type
+   variable to i32 (this language's existing "unconstrained integer
+   literal defaults to i32" convention -- see Types.to_ast's `TVar
+   (Unbound _) -> TypeI32` case) rather than rejecting it outright. Used
+   everywhere an index/loop-bound-shaped value is required (Index,
+   AssignIndex, SliceOf, For): unlike TRefinedInt (which enjoys
+   unconditional leniency into TI32 via its own subtyping rule), a BARE
+   concrete type like TU8/TUsize/TI64 has no such rule, so a plain
+   `unify_at loc t TI32` alone wrongly rejects, e.g., a for-loop counter
+   over `s.len` (TUsize, not wrapped in TRefinedInt when the length isn't
+   a compile-time constant) used as an array index -- a real gap found
+   while generalizing For's loop-counter base (see CLAUDE.md's
+   "Refinement Numerical Type" section). Only defaults the TVar when
+   nothing else has pinned a concrete type yet; it does not override one
+   that something else (e.g. `s.len`'s own TUsize) already determined. *)
+let require_integer loc t =
+  let base = canon_ty t in
+  (match repr base with
+   | TVar { contents = Unbound _ } -> unify_at loc base TI32
+   | _ -> ());
+  (match repr base with
+   | TI8 | TI16 | TI32 | TI64 | TU8 | TU16 | TU32 | TU64 | TUsize -> ()
+   | _ -> raise (TypeError (loc,
+       Printf.sprintf "expected an integer type, got '%s'" (to_string t))))
+
 (* Extract a small-number-scoped compile-time integer from an expression,
    iff it is exactly an integer literal that fits natively (see
    Ast.int_of_intlit's comment for why IntLit's Int64.t payload cannot
@@ -438,7 +463,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       (* Get the variable's original type (no array decay, unlike Var) *)
       let vt = lookup e.loc id tyenv in
       let it = infer_expr senv eenv tyenv fenv idx in
-      unify_at idx.loc it TI32;
+      require_integer idx.loc it;
       (match repr vt with
        | TArray (elem, n) ->
            (* Constant index: check bounds at compile time. A literal too
@@ -467,24 +492,20 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       let vt = lookup e.loc id tyenv in
       let lo_t = infer_expr senv eenv tyenv fenv lo_e in
       let hi_t = infer_expr senv eenv tyenv fenv hi_e in
-      (* Unify the RAW (possibly TRefinedInt) type against TI32 directly,
-         NOT canon_ty'd first -- mirrors Index's already-correct
-         `unify_at idx.loc it TI32` (no canon_ty there either). A refined
-         bound unifies against TI32 via TRefinedInt's permissive,
-         base-agnostic subtyping rule (`TRefinedInt _, TI32 -> ()` in
-         types.ml, unconditional regardless of the refined value's own
-         base) -- exactly what a u8/u16/etc.-based bound (e.g. `ihl:
-         {20..<21 as u8}`) needs to pass through here. canon_ty WIDENS a
-         refined bound to its bare base FIRST (e.g. TU8), and a bare TU8
-         has no unification rule against TI32 at all -- a real regression
-         found while exercising a u8-based slice bound for the first time
-         (`pkt[0..<ihl]` with `ihl: u8`), previously invisible only
-         because every refined bound was i32-based anyway before the
-         "Refinement Numerical Type" generalization (canon_ty'd-i32-vs-i32
-         trivially unifies, masking that canon_ty was doing nothing useful
-         here even then). *)
-      unify_at lo_e.loc lo_t TI32;
-      unify_at hi_e.loc hi_t TI32;
+      (* require_integer accepts a bound of ANY integer type, refined or
+         bare: a TRefinedInt bound (e.g. `ihl: {20..<21 as u8}`) passes via
+         its own base-agnostic subtyping into TI32; a bare non-i32 type
+         (e.g. a for-loop counter over `s.len`, itself TUsize) passes
+         because require_integer checks "is this some integer type", not
+         "does this unify with TI32 specifically" -- a plain
+         `unify_at lo_e.loc lo_t TI32` would reject the bare case outright
+         (only TRefinedInt has a leniency rule into TI32; a bare TUsize/
+         TU8/etc. has none). Found via two real regressions: a u8-based
+         refined bound (canon_ty'd first, which strips the leniency) and,
+         later, a bare usize bound from a generalized for-loop counter --
+         see CLAUDE.md's "Refinement Numerical Type" section. *)
+      require_integer lo_e.loc lo_t;
+      require_integer hi_e.loc hi_t;
       let const_bounds = (Const_env.bound_value lo_e, Const_env.bound_value hi_e) in
       (* Static value range of a bound: a compile-time constant k is {k..<k+1};
          a refined-typed expression contributes its own range. Sync rule:
@@ -1041,7 +1062,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       let vt = lookup s.loc id tyenv in
       let it = infer_expr senv eenv tyenv fenv idx in
       let rt = infer_expr senv eenv tyenv fenv rhs in
-      unify_at idx.loc it TI32;
+      require_integer idx.loc it;
       let elem_ty = match repr vt with
         | TArray (elem, n) ->
             (match idx.desc with
@@ -1185,25 +1206,46 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
   | For (name, lo_expr, hi_expr, body) ->
       let lo_ty = infer_expr senv eenv tyenv fenv lo_expr in
       let hi_ty = infer_expr senv eenv tyenv fenv hi_expr in
-      unify_at lo_expr.loc lo_ty TI32;
-      unify_at hi_expr.loc hi_ty TI32;
+      (* The loop counter's base now follows the BOUNDS' own type, instead
+         of hardcoding TI32 (the same generalization already applied to
+         min/max/Band/Mod/narrowing) -- unify lo/hi against EACH OTHER via
+         canon_ty, mirroring min/max's Call case exactly. This was a real,
+         found gap, not just a style choice: `for i in 0..<s.len` (s.len:
+         TUsize) previously failed outright with "cannot unify usize with
+         i32", because the OLD unconditional `unify_at ... TI32` forced
+         both bounds to already be i32-compatible before any of
+         TRefinedInt's leniency into TI32 could apply -- a bare (non
+         -refined) TUsize has no such leniency rule. Fixed by unifying the
+         bounds against each other instead, exactly like every other
+         refinement-producing site in this file. *)
+      let base_raw = canon_ty lo_ty in
+      unify_at hi_expr.loc base_raw (canon_ty hi_ty);
+      (* require_integer both validates base_raw is an integer type and,
+         if neither bound pinned a concrete type at all (both bare,
+         otherwise-unconstrained literals, e.g. `for i in 0..<8`), defaults
+         it to i32 -- this language's existing "unconstrained integer
+         literal defaults to i32" convention, not a NEW fallback. It does
+         NOT override a type something else (e.g. `s.len`) already pinned. *)
+      require_integer lo_expr.loc base_raw;
+      let base = repr base_raw in
       (* Refine to TRefinedInt when both bounds are compile-time integers:
          a literal, or the name of a Const_env global constant (sound because
          check_const_shadowing rejects any local reusing a constant name).
-         For runtime variables, conservatively use TI32.
+         For runtime variables, conservatively use the bounds' own base.
          Sync rule: llvm_gen.ml's For case makes the same decision through
          the same Const_env.bound_value helper; keep them identical. *)
       let idx_ty = match Const_env.bound_value lo_expr, Const_env.bound_value hi_expr with
-        (* Loop counters stay base=TI32 always (a deliberate exception,
-           unlike every other TRefinedInt construction site in this file):
-           a for-loop counter is fundamentally array-index-shaped, and
-           lo_ty/hi_ty are already forced to TI32 above regardless of the
-           bound expressions' own types. *)
-        | Some lo_v, Some hi_v -> TRefinedInt (lo_v, hi_v, TI32)
-        | _ -> TI32
+        | Some lo_v, Some hi_v -> TRefinedInt (lo_v, hi_v, base)
+        | _ -> base
       in
-      (* Loop variable is immutable (Imm binding, no reassignment). Does not escape the loop. *)
+      (* Loop variable is immutable (Imm binding, no reassignment). Does not escape the loop.
+         Also register under the mangled "__for_<name>" key: llvm_gen.ml's
+         collect_lets pre-allocates the counter's own storage under that
+         name, and resolve_local_ast looks types up by exactly this key --
+         without this second binding, the counter's alloca would silently
+         fall back to i32 regardless of what idx_ty says here. *)
       let body_env = StringMap.add name (idx_ty, false) tyenv in
+      let raw_locals = StringMap.add ("__for_" ^ name) idx_ty raw_locals in
       let (_, raw_locals') = List.fold_left
         (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs true s)
         (body_env, raw_locals) body

@@ -584,8 +584,11 @@ lockstep, verified by re-running the full test suite after each pass):
    (generalized from matching only `TI32` locals to matching any of
    i8/i16/i32/i64/u8/u16/u32/u64/usize), the `Let` "proofs survive weaker
    annotations" `bind_ty` check, min/max (see its own paragraph below).
-   `For` loop counters deliberately stay `base = TI32` always (loop
-   counters are array-index-shaped; see "Deliberately NOT addressed").
+   `For` loop counters originally stayed `base = TI32` always regardless
+   of the bounds' own type -- since generalized to follow the bounds
+   instead; see "For-Loop Counters Follow the Bounds' Own Base Type"
+   below for why that original choice turned out to be a real gap, not
+   a settled design decision.
 5. `lib/llvm_gen.ml` -- the codegen mirror of all of the above, plus the
    actual representation-width change: `ltype_of_ast (TypeRefined (_, _,
    base)) = ltype_of_ast base` (was hardcoded `i32_type context`), so a
@@ -716,16 +719,19 @@ if evaluated on the raw value). Regression test:
 `test/test_takibi.ml`'s `refnum_min_u8_unconstrained` (u8/u16/i8/i16, all
 four fully-unconstrained, must not raise).
 
-**Deliberately NOT addressed by this generalization**:
-- The surface `{lo..<hi}` type syntax still always means "base i32" --
-  there is no source-level way to write a refined u64/i64 literally.
-  Non-i32 bases only ever arise from the compiler's OWN range-propagation
-  machinery. Adding source syntax for this (e.g. `{lo..<hi}: u64` or
-  similar) is a natural follow-up but has no concrete need yet.
-- `For` loop counters are hardcoded to `base = TI32` regardless of the
-  loop bound's own type -- loop counters are conventionally used as array
-  indices (i32-shaped), and generalizing this specific site had no
-  motivating example.
+**Deliberately NOT addressed by this generalization (both since resolved --
+see the later sections in this file)**:
+- The surface `{lo..<hi}` type syntax still always means "base i32" when
+  written bare, with no source-level way to write a refined u64/i64
+  literally -- resolved by the explicit `{lo..<hi as base}` syntax added
+  later this same session (see "Explicit-Base {lo..<hi as base} Surface
+  Syntax" below); the bare form's i32 default is unchanged and still
+  correct for the common case.
+- `For` loop counters were hardcoded to `base = TI32` regardless of the
+  loop bound's own type -- this was believed to have "no motivating
+  example," which turned out to be wrong (`for i in 0..<s.len` is exactly
+  such an example, and failed outright); see "For-Loop Counters Follow
+  the Bounds' Own Base Type" below.
 - This work does NOT change anything about how bare integer LITERALS are
   typed in a `BinOp` (`LITERAL + n` still directly computes as `n`'s own
   type, which was already correct -- see the "Deliberately NOT threaded"
@@ -1057,6 +1063,83 @@ data-echo stage, exercising the file's one `unsafe` site with the new
 u16-typed `data_off`/`data_len`), STM32 cross-compilation, and a final
 full `make check` (langcheck, 370 unit tests, stm32build, all 125
 qemutest cases) with zero regressions.
+
+### For-Loop Counters Follow the Bounds' Own Base Type
+
+Previously `for i in 0..<n` **hardcoded** the loop counter's base to i32
+regardless of `n`'s own type -- documented as "a deliberate exception...
+generalizing this specific site had no motivating example." That
+justification turned out to be wrong: `for i in 0..<s.len` (`s.len:
+TUsize`, this project's own architecture-relative type -- i64 on
+AArch64/RISC-V64, i32 on Cortex-M) failed outright with `cannot unify
+usize with i32`. Root cause: `type_inf.ml`'s `For` case did
+`unify_at lo_expr.loc lo_ty TI32; unify_at hi_expr.loc hi_ty TI32;`
+UNCONDITIONALLY, before any of `TRefinedInt`'s leniency into `TI32` could
+apply -- a bare (non-refined) `TUsize`/`TU8`/etc. has no such leniency
+rule, so a for-loop bound that was anything other than already-i32
+-compatible was rejected outright, never mind what base the LOOP COUNTER
+ended up with.
+
+**Fix**: `For` now unifies `lo_ty` and `hi_ty` against EACH OTHER via
+`canon_ty` (mirroring `min`/`max`'s Call case exactly), instead of forcing
+both into `TI32`. A new shared helper, `require_integer loc t`, then (a)
+defaults a genuinely-unconstrained type variable to i32 -- this language's
+existing "unconstrained integer literal defaults to i32" convention (see
+`Types.to_ast`'s `TVar (Unbound _) -> TypeI32` case), so `for i in 0..<8`
+with nothing else pinning `i`'s type still behaves exactly as before --
+and (b) otherwise validates the result is one of the nine legal integer
+types, raising a clear `TypeError` for anything else (e.g. a `bool`
+bound) rather than silently accepting nonsense. `require_integer`
+replaced FOUR separate `unify_at ... TI32` call sites that all had this
+exact same latent bug (just not yet triggered): `Index`, `AssignIndex`,
+and `SliceOf`'s two bound checks (`SliceOf`'s had already been generalized
+once this session -- see the "Explicit-Base" section above -- but that
+fix specifically preserved the direct-unify-into-TI32 shape, which still
+doesn't accept a BARE non-i32 type, only a refined one). Pointer
+arithmetic's own `ptr +/- i32` restriction (`BinOp` `Add`/`Sub`'s
+`TPtr _` case) is unrelated and deliberately untouched -- that's a
+documented, intentional language restriction, not a gap.
+
+**A second, distinct bug found immediately while testing the fix**:
+`llvm_gen.ml`'s `For` codegen looked up the counter's resolved type via
+`res name None` (the user's bare loop-variable name, e.g. `"i"`) -- but
+`type_inf.ml`'s `For` case stores it under the MANGLED `"__for_" ^ name`
+key (matching `collect_lets`'s own pre-allocation key; the mangled key
+exists specifically to avoid colliding with an unrelated local, or a
+second for-loop, also named `i`). The mismatch meant the lookup silently
+fell through to i32 regardless of the real base, so a `usize`-based
+counter's alloca (correctly i64-wide, since `collect_lets`'s OWN
+alloca-type resolution used the right key) got an i32-shaped store into
+it -- an LLVM verifier failure caught immediately by `gen_func`'s own
+`Llvm_analysis.verify_function`, not a silent miscompilation. Fixed by
+looking the type up via `ctr_name` (`"__for_" ^ name`) instead of the bare
+`name`.
+
+**The rest of the codegen generalization** (mirroring the width/
+signedness handling already established for `BinOp`/`min`/`max`): the
+loop bound expressions are evaluated with `~expected_ty:counter_base`
+(letting a bare literal bound embed directly at the right width, per the
+Polymorphic Literal work); the comparison picks `Icmp.Ult` vs `Icmp.Slt`
+based on `is_unsigned counter_base` (previously always signed `Slt`, wrong
+for an unsigned base like `usize`/`u32` with the top bit set); the
+counter's own load/store narrows/widens via `coerce`/`to_arith_width` at
+each boundary, exactly matching how any other `Mut` variable of that type
+already behaves elsewhere in this codebase -- a narrow base (e.g. `u8`)
+gets a genuinely `i8`-sized alloca, with arithmetic still happening at the
+widened (i32) arithmetic width in between, per the existing `widen_load`
+invariant.
+
+**Verification**: `test/test_takibi.ml` gained a `for`-loop-over-`s.len`
+type-check regression, a for-loop-bounds-must-be-integer rejection test
+(a `bool` bound), and a codegen-level regression test
+(`refnum_for_u8`/`refnum_for_usize`) exercising both the narrow (`u8`)
+and wide (`usize`) cases through `gen_func`'s own IR verifier -- the
+class of test that would have caught the second bug above, since a type
+-check-only test cannot. Full `make check` (langcheck, 374 unit tests,
+stm32build, all 125 qemutest cases) passes with zero regressions -- a
+notably reassuring result given this change touches `Index`/
+`AssignIndex`/`SliceOf`/`For`, i.e. essentially every array/slice access
+in every example in the codebase.
 
 ### Soundness Condition for % Range Propagation
 
