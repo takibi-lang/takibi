@@ -442,6 +442,93 @@ a local variable, and a bare wide literal passed as a function argument
 -- registered in `run_qemutest.sh`'s ordinary and no-trap example lists
 and in the Makefile's `EXAMPLES`/`STM32_EXAMPLES`).
 
+### Follow-up: `gen_expr`'s `?expected_ty` Hint (Genuinely Polymorphic
+### Literals, Not Just Correct-by-Constant-Folding)
+
+The 64-bit fix above left one honestly-documented gap: `gen_expr`'s
+`IntLit` case, with no hint available, still had to *guess* i32 vs i64
+from the literal's own magnitude, because it had no visibility into what
+type the surrounding context actually wanted. For a literal already
+sitting in an unambiguously-typed position (`let v: u64 = LITERAL;`, a
+`return`, a function call argument, an assignment, a struct/array
+literal field), this guess-then-`coerce` two-step happened to produce
+the right final *value* -- but only because `coerce`'s `build_zext`/
+`build_trunc`, given a compile-time-constant operand, get silently
+constant-folded by LLVM into a single direct constant, erasing the i32
+intermediate from the emitted IR. That erasure is an LLVM implementation
+detail, not something this compiler's own architecture guaranteed --
+confirmed by dumping unoptimized IR for `let w: u64 = LITERAL + n;`
+(`n: i32`), where the i32 stage is NOT erased (`add i32 <lit>, %n` then a
+real `zext i32 %addtmp to i64` instruction), because a runtime value is
+involved and there is nothing left to fold.
+
+**The fix**: `gen_expr` gained an optional `?expected_ty : Ast.type_expr`
+parameter, defaulting to `None` (so every existing recursive call within
+`gen_expr` itself, and any call site that has no natural type hint to
+offer, is unaffected byte-for-byte). `IntLit`'s case checks it first: if
+`expected_ty` names a concrete scalar type (`TypeI8`..`TypeUsize`,
+`TypeBool`, or `TypeIo` wrapping one -- `io` is a storage qualifier, so
+it is stripped before the check, matching how `io` is handled everywhere
+else in this file), the literal is constructed DIRECTLY at that width via
+`const_of_int64`, with the old magnitude-based i32-or-i64 guess now only
+a fallback for when no hint is available or the destination is something
+`?expected_ty` deliberately doesn't special-case (`TypeRefined`,
+`TypeSlice`, a pointer -- the existing guess already serves those
+correctly).
+
+**Threaded from every call site that already knows a concrete expected
+type**, each a small, targeted change (no broad "expected-type inference"
+system added -- `Types.program_types` still only carries types by name,
+not per-expression-node, so this is deliberately a *codegen-side*
+threading of already-available name-keyed type information, not a new
+type-inference capability):
+- `Let` (both the immutable case, and the mutable case via
+  `init_memory` -- which also covers nested struct/array literal fields,
+  since `init_memory` recurses into those with each field's own type)
+- `Return` (hinted by the function's own return type, `ret_ast`)
+- `Assign` (a second, cheap lookup of the assignment target's stored type
+  happens *before* evaluating the RHS, so the existing store-side match
+  logic afterward is unchanged)
+- `AssignField` (hinted by `field_info`'s already-resolved field type)
+- `AssignDeref` (the pointer is evaluated first as before; its pointee
+  type, once known, hints the value expression evaluated second)
+- `AssignIndex` (a lightweight peek at the container's element type,
+  mirroring the fuller match used later for the actual store, happens
+  before the RHS is evaluated)
+- Function call arguments, both direct (`Call` resolving to a known
+  `fenv` function) and indirect (a function-pointer-typed variable) --
+  each argument is hinted by its corresponding parameter's declared type
+
+**Deliberately NOT threaded**: `BinOp` operands. `LITERAL + n` (`n: i32`)
+genuinely should compute the literal as i32 -- that IS what unification
+already required of the whole expression (both operands unify to the
+same type) -- so there is no bug to fix there; only the FINAL result,
+if used somewhere needing a wider type, needs a real runtime extension,
+which already happens correctly. Conflating "the literal's own natural
+type in this expression" with "the type some later cast might want" would
+be a mistake, not a generalization.
+
+**Verification**: `test/test_takibi.ml` gained
+`assert_direct_i64_literal`, which inspects the actual generated
+function body text (`Llvm.string_of_llvalue`) for the ABSENCE of any
+`zext`/`trunc` instruction and the PRESENCE of the literal's exact bit
+pattern -- a stronger check than "compiles and returns the right value",
+since that weaker check cannot distinguish "genuinely direct" from
+"correct only because LLVM folded it". Confirmed directly via manual
+unoptimized-IR dumps (a throwaway scratch executable linking this
+project's own `Llvm_gen`/`Parser`/`Type_inf` modules and calling
+`Llvm.dump_module`) before writing the automated tests, covering all of:
+global, immutable local, mutable local, function argument (direct and
+indirect call), assignment, struct field, array index, and pointer
+deref -- all confirmed to emit the literal directly as `i64 -1`
+(`0xFFFFFFFFFFFFFFFF`'s bit pattern) with no `zext`/`trunc` anywhere.
+`examples/int64/int64.tkb` gained a `local_full_mask()` function
+exercising this at runtime under QEMU too (a value that, unlike
+`local_big_value()`'s 5\_000\_000\_000, only reaches the correct answer
+because of this fix -- 5 billion happened to already round-trip through
+the old guess-based path correctly, since it doesn't have bit 31 set;
+`0xFFFFFFFFFFFFFFFF` is the case that actually needed a hint).
+
 ### Soundness Condition for % Range Propagation
 
 Range propagation for `n % m` (where m is a positive integer literal) returns `{0..<m}` **only when the left operand is guaranteed non-negative at the type level**.

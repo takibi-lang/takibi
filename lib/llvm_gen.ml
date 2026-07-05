@@ -792,39 +792,67 @@ let effective_slice_min id m =
 (* Returns (ast_type, llvalue).  ast_type is needed for Deref to know
    the element type when emitting a load instruction (LLVM 19 opaque ptrs). *)
 
-let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
+let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
   match e.desc with
   | IntLit i ->
-      (* Represent the literal at i32 width when it fits NON-NEGATIVELY
-         there (0..0x7FFFFFFF), or i64 otherwise -- never the FULL signed
-         i32 range. This asymmetry is deliberate, not an oversight: gen_expr
-         has no visibility into what type this bare literal will eventually
-         be coerced to (i64/signed vs u64/unsigned), and coerce's widening
-         direction (build_sext vs build_zext) depends entirely on the
-         DESTINATION type's signedness. An i32 representation can only be
-         safely widened either way -- reconstructing the exact same 64-bit
-         value regardless of which extension the destination applies --
-         when bit 31 is clear; once bit 31 is set, sign- and zero-extension
-         diverge (e.g. 0xFFFFFFFFFFFFFFFF, i.e. Int64 -1, would wrongly
-         become 0x00000000FFFFFFFF if zero-extended from a truncated i32
-         -1, instead of staying all-ones). Routing anything with bit 31 set
-         through the i64-native path instead sidesteps the ambiguity
-         entirely: i64 -> narrower is always a plain, sign-agnostic
-         build_trunc (see coerce's and to_i32's narrowing branches), so a
-         wide value is always reconstructed correctly no matter which
-         narrower type it is eventually used as. Never silently truncate to
-         i32 the way an unconditional `const_int i32_type i` would for a
-         value outside i32's non-negative range -- see CLAUDE.md's "64-bit
-         Integer Literals" section for the real, previously-invisible bug
-         that was (a plain literal like 5_000_000_000 assigned to a u64
-         local silently became wrong, truncated-then-zero-extended, since
-         LLVM's const_int wraps its input to the target type's width with
-         no warning). *)
-      if i >= 0L && i <= 2147483647L then
-        let i32v = Int64.to_int i in
-        (TypeRefined (i32v, i32v + 1), const_int (i32_type context) i32v)
-      else
-        (TypeU64, const_of_int64 (i64_type context) i true)
+      (* When the caller already knows exactly what type this literal must
+         become (a Let's declared/resolved type, a function's return type,
+         a call argument's parameter type, a struct/array literal field's
+         type, ...), construct the LLVM constant DIRECTLY at that width,
+         via ?expected_ty -- rather than always guessing from the value's
+         own magnitude and coercing after the fact. This is what makes a
+         literal in an already-typed position genuinely polymorphic all
+         the way through codegen, not just at the HM type-inference level:
+         no i32 (or i64) intermediate representation exists to widen/
+         truncate away, not even conceptually -- see CLAUDE.md's "64-bit
+         Integer Literals" section for the follow-up this closes (that
+         section's own example showed the intermediate i32 stage being
+         erased only by LLVM's own constant folding, which is invisible
+         and not something to rely on architecturally). *)
+      let direct_ty = match expected_ty with
+        | Some (TypeIo t) -> Some t  (* io is a storage qualifier; values are never tagged io *)
+        | other -> other
+      in
+      (match direct_ty with
+       | Some ((TypeI8|TypeI16|TypeI32|TypeI64
+               |TypeU8|TypeU16|TypeU32|TypeU64|TypeUsize|TypeBool) as ty) ->
+           (ty, const_of_int64 (ltype_of_ast ty) i true)
+       | _ ->
+           (* No usable hint (or an exotic destination -- TypeRefined,
+              TypeSlice, a pointer, ... -- already served correctly by the
+              guess below): represent the literal at i32 width when it
+              fits NON-NEGATIVELY there (0..0x7FFFFFFF), or i64 otherwise
+              -- never the FULL signed i32 range. This asymmetry is
+              deliberate, not an oversight: with no hint, gen_expr has no
+              visibility into what type this bare literal will eventually
+              be coerced to (i64/signed vs u64/unsigned), and coerce's
+              widening direction (build_sext vs build_zext) depends
+              entirely on the DESTINATION type's signedness. An i32
+              representation can only be safely widened either way --
+              reconstructing the exact same 64-bit value regardless of
+              which extension the destination applies -- when bit 31 is
+              clear; once bit 31 is set, sign- and zero-extension diverge
+              (e.g. 0xFFFFFFFFFFFFFFFF, i.e. Int64 -1, would wrongly
+              become 0x00000000FFFFFFFF if zero-extended from a truncated
+              i32 -1, instead of staying all-ones). Routing anything with
+              bit 31 set through the i64-native path instead sidesteps the
+              ambiguity entirely: i64 -> narrower is always a plain,
+              sign-agnostic build_trunc (see coerce's and to_i32's
+              narrowing branches), so a wide value is always reconstructed
+              correctly no matter which narrower type it is eventually
+              used as. Never silently truncate to i32 the way an
+              unconditional `const_int i32_type i` would for a value
+              outside i32's non-negative range -- see CLAUDE.md's "64-bit
+              Integer Literals" section for the real, previously-invisible
+              bug that was (a plain literal like 5_000_000_000 assigned to
+              a u64 local silently became wrong, truncated-then-zero-
+              extended, since LLVM's const_int wraps its input to the
+              target type's width with no warning). *)
+           if i >= 0L && i <= 2147483647L then
+             let i32v = Int64.to_int i in
+             (TypeRefined (i32v, i32v + 1), const_int (i32_type context) i32v)
+           else
+             (TypeU64, const_of_int64 (i64_type context) i true))
 
   | BoolLit b ->
       (TypeBool, const_int (i1_type context) (if b then 1 else 0))
@@ -1704,8 +1732,8 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
            in
            let arg_vals =
              List.mapi (fun i a ->
-               let (_, av) = gen_expr locals a in
                let param_ast = (try List.nth param_asts i with _ -> TypeI32) in
+               let (_, av) = gen_expr ~expected_ty:param_ast locals a in
                coerce av param_ast
              ) args |> Array.of_list
            in
@@ -1737,7 +1765,7 @@ let rec gen_expr locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 let ft        = function_type ret_ll param_lls in
                 let arg_vals  =
                   List.map2 (fun a param_ast ->
-                    coerce (snd (gen_expr locals a)) param_ast
+                    coerce (snd (gen_expr ~expected_ty:param_ast locals a)) param_ast
                   ) args param_asts |> Array.of_list
                 in
                 let call_name = if ret_ll = void_type context then "" else "calltmp" in
@@ -1900,7 +1928,7 @@ let gen_func ?prog_types fdef =
           init_memory ep elem_ty ei
         ) exprs
     | _ ->
-        let (_, v) = gen_expr locals e in
+        let (_, v) = gen_expr ~expected_ty:ast_ty locals e in
         ignore (build_store (coerce v ast_ty) ptr builder)
   in
 
@@ -1926,14 +1954,26 @@ let gen_func ?prog_types fdef =
     else
     match s.desc with
     | Return e ->
-        let (_, v) = gen_expr locals e in
+        let (_, v) = gen_expr ~expected_ty:ret_ast locals e in
         ignore (build_ret (coerce v ret_ast) builder)
 
     | Expr e ->
         ignore (gen_expr locals e)
 
     | Assign (name, e) ->
-        let (_, v) = gen_expr locals e in
+        (* Look up the target's type first (a second, cheap lookup below
+           re-derives the same binding for the actual store) so a bare
+           literal on the RHS can be hinted directly at the assignment
+           target's type instead of guessing from its own magnitude. *)
+        let target_ty_opt =
+          match Hashtbl.find_opt locals name with
+          | Some (Mut (ast_ty, _)) -> Some ast_ty
+          | Some (Imm _) | None ->
+              (match Hashtbl.find_opt global_vars name with
+               | Some (ast_ty, _) -> Some ast_ty
+               | None -> None)
+        in
+        let (_, v) = gen_expr ?expected_ty:target_ty_opt locals e in
         (match Hashtbl.find_opt locals name with
          | Some (Mut (ast_ty, ptr)) ->
              let inst = build_store (coerce v ast_ty) ptr builder in
@@ -1949,7 +1989,11 @@ let gen_func ?prog_types fdef =
 
     | AssignDeref (ptr_expr, val_expr) ->
         let (ptr_ty, ptr_v) = gen_expr locals ptr_expr in
-        let (_, val_v)      = gen_expr locals val_expr in
+        let pointee_ty = match ptr_ty with
+          | TypePtr (TypeIo inner) | TypePtr inner -> Some inner
+          | _ -> None
+        in
+        let (_, val_v) = gen_expr ?expected_ty:pointee_ty locals val_expr in
         let (is_volatile, coerced) = match ptr_ty with
           | TypePtr (TypeIo inner) -> (true,  coerce val_v inner)   (* *io T: volatile store *)
           | TypePtr inner          -> (false, coerce val_v inner)   (* regular pointer: non-volatile *)
@@ -1971,7 +2015,21 @@ let gen_func ?prog_types fdef =
                            | Some t -> t | None -> idx_ty_raw)
                | _ -> idx_ty_raw)
         in
-        let (_, rhs_v) = gen_expr locals rhs in
+        (* Peek at the container's element type so a bare literal RHS can
+           be hinted directly, mirroring the fuller match on the same
+           binding further below (which does the actual store). *)
+        let elem_ty_hint =
+          match Hashtbl.find_opt locals id with
+          | Some (Mut (TypeArray (elem_ty, _), _))
+          | Some (Mut (TypeSlice (elem_ty, _), _))
+          | Some (Imm (TypeSlice (elem_ty, _), _))
+          | Some (Mut (TypePtr (TypeIo elem_ty), _))
+          | Some (Mut (TypePtr elem_ty, _))
+          | Some (Imm (TypePtr (TypeIo elem_ty), _))
+          | Some (Imm (TypePtr elem_ty, _)) -> Some elem_ty
+          | _ -> None
+        in
+        let (_, rhs_v) = gen_expr ?expected_ty:elem_ty_hint locals rhs in
         let store_to_array elem_ty n arr_ptr =
           let needs_check = match idx_ty with
             | TypeRefined (lo, hi) -> lo < 0 || hi > n
@@ -2049,7 +2107,7 @@ let gen_func ?prog_types fdef =
         in
         let (idx, field_ty) = field_info sname fname in
         let llty = Hashtbl.find struct_lltypes sname in
-        let (_, val_v) = gen_expr locals val_expr in
+        let (_, val_v) = gen_expr ~expected_ty:field_ty locals val_expr in
         let field_ptr = build_in_bounds_gep llty base_v
           [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
           (fname ^ "_ptr") builder
@@ -2073,7 +2131,7 @@ let gen_func ?prog_types fdef =
              raise (Error (Printf.sprintf "BUG: immutable '%s' has no initializer" name))
          | Some e ->
              let ast_ty = res name ty_opt in
-             let (_, v) = gen_expr locals e in
+             let (_, v) = gen_expr ~expected_ty:ast_ty locals e in
              Hashtbl.add locals name (Imm (ast_ty, coerce v ast_ty)))
 
     | Block stmts ->

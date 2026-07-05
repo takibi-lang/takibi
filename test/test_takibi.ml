@@ -56,6 +56,35 @@ let expect_codegen_error fragment src () =
               in scan 0)
       then Alcotest.failf "Llvm_gen.Error %S does not contain %S" msg fragment
 
+(* Plain substring test, shared by expect_codegen_error/expect_type_error's
+   inline scans above and any test that needs to check LLVM IR text. *)
+let contains_substring haystack needle =
+  let n = String.length needle and m = String.length haystack in
+  let rec scan i = i + n <= m && (String.sub haystack i n = needle || scan (i + 1)) in
+  scan 0
+
+(* gen_expr's ?expected_ty hint (CLAUDE.md's "64-bit Integer Literals"
+   follow-up): a bare literal in an already-typed position must embed
+   DIRECTLY at that type in the generated LLVM IR, with no intermediate
+   i32 (or i64) representation to widen/truncate away -- not merely a
+   value that happens to come out correct because LLVM's own constant
+   folding erased the intermediate step. Checked here by inspecting the
+   actual generated function body text for the absence of any zext/trunc
+   instruction, which is what an i32-first-then-coerce design would have
+   needed to reach a 64-bit destination. *)
+let assert_direct_i64_literal fname src () =
+  match gen_codegen src with
+  | _ ->
+      (match Hashtbl.find_opt Llvm_gen.functions fname with
+       | Some (_, f) ->
+           let ir = Llvm.string_of_llvalue f in
+           Alcotest.(check bool) "no zext instruction" false (contains_substring ir "zext");
+           Alcotest.(check bool) "no trunc instruction" false (contains_substring ir "trunc");
+           Alcotest.(check bool) "the literal's exact bit pattern appears" true
+             (contains_substring ir "-1")  (* 0xFFFFFFFFFFFFFFFF as i64 prints as -1 *)
+       | None -> Alcotest.failf "function '%s' not found" fname)
+  | exception Llvm_gen.Error msg -> Alcotest.failf "unexpected codegen Error: %s" msg
+
 (* Custom Alcotest testables *)
 
 let rec show_type = function
@@ -3077,6 +3106,43 @@ let codegen_tests = [
           (let n = String.length "alignment" and m = String.length msg in
            let rec scan i = i + n <= m && (String.sub msg i n = "alignment" || scan (i + 1)) in
            scan 0));
+
+  Alcotest.test_case
+    "a local u64 variable initialized with a full 64-bit literal embeds it \
+     as a direct i64 constant (Let's resolved type threaded into gen_expr \
+     via ?expected_ty)" `Quick
+    (assert_direct_i64_literal "codegen_intlit_direct_local"
+       "fn codegen_intlit_direct_local() -> u64 {
+          let w: u64 = 0xFFFFFFFFFFFFFFFF;
+          return w;
+        }");
+
+  Alcotest.test_case
+    "a bare full 64-bit literal in a return statement embeds directly, \
+     hinted by the function's own return type" `Quick
+    (assert_direct_i64_literal "codegen_intlit_direct_return"
+       "fn codegen_intlit_direct_return() -> u64 {
+          return 0xFFFFFFFFFFFFFFFF;
+        }");
+
+  Alcotest.test_case
+    "a bare full 64-bit literal passed as a function call argument embeds \
+     directly, hinted by the callee's declared parameter type" `Quick
+    (assert_direct_i64_literal "codegen_intlit_direct_caller"
+       "fn codegen_intlit_direct_callee(x: u64) -> u64 { return x; }
+        fn codegen_intlit_direct_caller() -> u64 {
+          return codegen_intlit_direct_callee(0xFFFFFFFFFFFFFFFF);
+        }");
+
+  Alcotest.test_case
+    "assigning a full 64-bit literal to an already-declared u64 variable \
+     embeds directly, hinted by the variable's stored type" `Quick
+    (assert_direct_i64_literal "codegen_intlit_direct_assign"
+       "fn codegen_intlit_direct_assign() -> u64 {
+          let mut w: u64 = 0;
+          w = 0xFFFFFFFFFFFFFFFF;
+          return w;
+        }");
 
 ]
 
