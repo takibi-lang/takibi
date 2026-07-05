@@ -12,7 +12,27 @@ type ty =
   | TIo  of ty            (* io T  -- volatile-qualified value type; *io T = TPtr(TIo T) *)
   | TArray of ty * int    (* array type: [T; N] *)
   | TStruct of string     (* named struct type *)
-  | TRefinedInt of int * int  (* {lo..<hi} -- refined int with known range; lo <= x < hi *)
+  | TRefinedInt of int * int * ty
+    (* {lo..<hi} -- refined int with known range; lo <= x < hi. Third field
+       is the underlying primitive type this range is tied to (always one
+       of TI8/TI16/TI32/TI64/TU8/TU16/TU32/TU64/TUsize -- enforced by
+       construction discipline, not the type system, same as this
+       project's other "shape guaranteed by construction site, not by a
+       dedicated variant" conventions, e.g. Const_env's bare-IntLit-only
+       recording). Determines both the LLVM representation width (was
+       unconditionally i32 before this field existed; see CLAUDE.md's
+       "Refinement Numerical Type: Width/Signedness-Aware TRefinedInt"
+       section) and signedness (is_unsigned reads it directly) for
+       operations -- comparisons, shifts, extension direction -- performed
+       on a refined value. The bare `{lo..<hi}` surface SYNTAX always
+       defaults this to TI32 (unchanged from before this field existed);
+       a different base only ever arises from range PROPAGATION preserving
+       an already-typed operand's own base (e.g. `u64_var & 0xff` produces
+       a TU64-based {0..<256}, not a TI32-based one). For-loop counter
+       refinement is a deliberate exception that stays TI32-based always,
+       since a loop counter is fundamentally array-index-shaped (indexing
+       requires plain TI32 regardless of what a loop's bound expression's
+       own type is). *)
   | TSlice of ty * int    (* []T / [T; N..] -- fat pointer (ptr + usize len);
                              int = compile-time minimum length (0 = unknown) *)
 
@@ -52,7 +72,7 @@ let rec to_string t =
       Printf.sprintf "(%s) -> %s"
         (String.concat ", " (List.map to_string ps)) (to_string r)
   | TStruct s -> s
-  | TRefinedInt (lo, hi) -> Printf.sprintf "{%d..<%d}" lo hi
+  | TRefinedInt (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
   | TVar { contents = Unbound id } -> Printf.sprintf "'t%d" id
   | TVar { contents = Link _ }     -> assert false
 
@@ -88,10 +108,11 @@ let rec unify t1 t2 =
         raise (Unify_error "argument count mismatch");
       List.iter2 unify ps1 ps2;
       unify r1 r2
-  | TRefinedInt (lo1, hi1), TRefinedInt (lo2, hi2) ->
+  | TRefinedInt (lo1, hi1, base1), TRefinedInt (lo2, hi2, base2) ->
       if lo1 <> lo2 || hi1 <> hi2 then
         raise (Unify_error (Printf.sprintf
-          "refined int range mismatch: {%d..<%d} vs {%d..<%d}" lo1 hi1 lo2 hi2))
+          "refined int range mismatch: {%d..<%d} vs {%d..<%d}" lo1 hi1 lo2 hi2));
+      unify base1 base2
   (* Slice subtyping mirrors TRefinedInt's: a slice whose proven minimum
      length is LARGER can be used where a smaller minimum is expected
      (actual guarantee is stronger). unify's call sites pass (actual,
@@ -105,22 +126,34 @@ let rec unify t1 t2 =
            narrow with if (s.len >= %d) { ... } or a constant subslice"
           (to_string (TSlice (e1, m1))) (to_string (TSlice (e2, m2))) m2));
       unify e1 e2
-  (* Subtyping: TRefinedInt(lo, hi) is a subtype of any integer type where the range fits.
-     The LLVM representation of TRefinedInt is always i32; coerce handles narrowing on use.
-     One direction only: refined -> wider type is OK; unproven wider type -> refined is NG. *)
+  (* Subtyping: TRefinedInt(lo, hi, base) is a subtype of any integer type
+     where the range fits, REGARDLESS of its own base -- this check is
+     purely about whether the VALUE range fits the target's representable
+     range; coerce (llvm_gen.ml) already handles any width/sign mismatch
+     between base and the target via ordinary narrow/widen. One direction
+     only: refined -> wider type is OK; unproven wider type -> refined is NG. *)
   | TRefinedInt _, TI32 -> ()                           (* i32: always fits (i32 range) *)
   | TRefinedInt _, TI64  -> ()                          (* i64: i32 range always fits *)
-  | TRefinedInt (lo, hi), TU8  when lo >= 0 && hi <= 256     -> ()
-  | TRefinedInt (lo, hi), TU16 when lo >= 0 && hi <= 65536   -> ()
-  | TRefinedInt (lo, _),  TU32 when lo >= 0                  -> ()   (* practical: hi < 2^31 *)
-  | TRefinedInt (lo, _),  TU64 when lo >= 0                  -> ()
-  | TRefinedInt (lo, _),  TUsize when lo >= 0                -> ()
-  | TRefinedInt (lo, hi), TI8  when lo >= -128  && hi <= 128 -> ()
-  | TRefinedInt (lo, hi), TI16 when lo >= -32768 && hi <= 32768 -> ()
-  | TI32, TRefinedInt (lo, hi) ->
+  | TRefinedInt (lo, hi, _), TU8  when lo >= 0 && hi <= 256     -> ()
+  | TRefinedInt (lo, hi, _), TU16 when lo >= 0 && hi <= 65536   -> ()
+  | TRefinedInt (lo, _, _),  TU32 when lo >= 0                  -> ()   (* practical: hi < 2^31 *)
+  | TRefinedInt (lo, _, _),  TU64 when lo >= 0                  -> ()
+  | TRefinedInt (lo, _, _),  TUsize when lo >= 0                -> ()
+  | TRefinedInt (lo, hi, _), TI8  when lo >= -128  && hi <= 128 -> ()
+  | TRefinedInt (lo, hi, _), TI16 when lo >= -32768 && hi <= 32768 -> ()
+  | t1, TRefinedInt (lo, hi, base) when t1 = repr base ->
+      (* Anti-subtyping guard, generalized from the old TI32-only case: an
+         UNPROVEN value of exactly the refined type's own base cannot flow
+         into a position demanding a proven range. A value of a genuinely
+         DIFFERENT type falls through to the generic "cannot unify"
+         mismatch below instead. `base` is a NESTED field inside the
+         already-repr'd t2, so it is not itself guaranteed dereferenced --
+         must repr it again before comparing (t1 is already repr'd, via
+         the outer `match repr t1, repr t2 with`). *)
       raise (Unify_error (Printf.sprintf
-        "cannot pass unproven i32 where {%d..<%d} is required; \
-         use if (v >= %d && v < %d) { ... } to narrow the range" lo hi lo hi))
+        "cannot pass unproven %s where {%d..<%d} is required; \
+         use if (v >= %d && v < %d) { ... } to narrow the range"
+        (to_string t1) lo hi lo hi))
   | TStruct s1, TStruct s2 ->
       if s1 <> s2 then
         raise (Unify_error (Printf.sprintf "struct type mismatch: %s vs %s" s1 s2))
@@ -150,7 +183,7 @@ let rec of_ast = function
   | Ast.TypeArray (t, n) -> TArray (of_ast t, n)
   | Ast.TypeFn (ps, r)   -> TFun (List.map of_ast ps, of_ast r)
   | Ast.TypeNamed s      -> TStruct s
-  | Ast.TypeRefined (lo, hi) -> TRefinedInt (lo, hi)
+  | Ast.TypeRefined (lo, hi, base) -> TRefinedInt (lo, hi, of_ast base)
   | Ast.TypeSlice (t, n) -> TSlice (of_ast t, n)
 
 (* None -> fresh unification variable *)
@@ -177,7 +210,7 @@ let rec to_ast t =
   | TArray (t, n) -> Ast.TypeArray (to_ast t, n)
   | TFun (ps, r)  -> Ast.TypeFn (List.map to_ast ps, to_ast r)
   | TStruct s     -> Ast.TypeNamed s
-  | TRefinedInt (lo, hi) -> Ast.TypeRefined (lo, hi)
+  | TRefinedInt (lo, hi, base) -> Ast.TypeRefined (lo, hi, to_ast base)
   | TSlice (t, n) -> Ast.TypeSlice (to_ast t, n)
   | TVar { contents = Unbound _ } -> Ast.TypeI32
   | TVar { contents = Link _ }    -> assert false

@@ -353,13 +353,15 @@ array_size:
 type_expr:
   | base_type_expr { $1 }
   | LBRACE lo = INT DOTDOTLT hi = INT RBRACE
-    { (* TypeRefined is always represented as i32 at the LLVM level (see
-         lib/types.ml), regardless of INT now carrying a full Int64.t --
-         a bound outside i32's range would silently truncate at codegen
-         time (e.g. emit_refined_cast_check's `const_int i32 hi`), turning
-         a nonsensical range into a wrapped-around one with no warning.
-         Reject it here instead, at the single grammar production that
-         ever constructs a literal TypeRefined. *)
+    { (* The bare {lo..<hi} SURFACE SYNTAX always spells base = i32 (see
+         Ast.TypeRefined's comment) -- a bound outside i32's range would
+         silently truncate at codegen time (e.g. emit_refined_cast_check's
+         `const_int i32 hi`), turning a nonsensical range into a
+         wrapped-around one with no warning. Reject it here instead, at
+         the single grammar production that ever constructs a literal
+         TypeRefined from source. (A non-i32 base only ever arises later,
+         from range-propagation preserving an already-typed operand's own
+         base -- see CLAUDE.md's "Refinement Numerical Type" section.) *)
       if lo < -2147483648L || hi > 2147483647L then
         raise (Types.TypeError ($symbolstartpos,
           Printf.sprintf
@@ -368,7 +370,7 @@ type_expr:
              as i32 internally, regardless of the integer type it is used \
              with"
             lo hi));
-      TypeRefined (Int64.to_int lo, Int64.to_int hi) }
+      TypeRefined (Int64.to_int lo, Int64.to_int hi, TypeI32) }
 
 fn_type_params:
   | /* empty */                              { [] }

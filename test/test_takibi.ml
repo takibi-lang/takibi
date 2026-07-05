@@ -100,7 +100,7 @@ let rec show_type = function
       Printf.sprintf "fn(%s) -> %s"
         (String.concat ", " (List.map show_type ps)) (show_type r)
   | Ast.TypeNamed s     -> s
-  | Ast.TypeRefined (lo, hi) -> Printf.sprintf "{%d..<%d}" lo hi
+  | Ast.TypeRefined (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
   | Ast.TypeSlice (t, 0) -> Printf.sprintf "[]%s" (show_type t)
   | Ast.TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (show_type t) n
 
@@ -1653,14 +1653,14 @@ let infer_tests = [
     let pt = infer "fn f(i: {0..<8}) i32 { return i; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "i has type {0..<8}"
-      (Ast.TypeRefined (0, 8))
+      (Ast.TypeRefined (0, 8, Ast.TypeI32))
       (snd (List.hd fi.Types.param_types)));
 
   Alcotest.test_case "TypeRefined after -> parses as return type" `Quick (fun () ->
     let pt = infer "fn f() -> {0..<8} { return 0; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "return type is {0..<8}"
-      (Ast.TypeRefined (0, 8))
+      (Ast.TypeRefined (0, 8, Ast.TypeI32))
       fi.Types.ret_type);
 
   Alcotest.test_case "TypeRefined in let annotation type-checks" `Quick
@@ -1678,21 +1678,21 @@ let infer_tests = [
     let pt = infer "fn f(i: {0..<7}) -> {1..<8} { return i + 1; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "return type is {1..<8}"
-      (Ast.TypeRefined (1, 8))
+      (Ast.TypeRefined (1, 8, Ast.TypeI32))
       fi.Types.ret_type);
 
   Alcotest.test_case "Sub propagates TRefinedInt: {1..<8}-1 is {0..<7}" `Quick (fun () ->
     let pt = infer "fn f(i: {1..<8}) -> {0..<7} { return i - 1; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "return type is {0..<7}"
-      (Ast.TypeRefined (0, 7))
+      (Ast.TypeRefined (0, 7, Ast.TypeI32))
       fi.Types.ret_type);
 
   Alcotest.test_case "Add propagation: k+{c..<d} commutative" `Quick (fun () ->
     let pt = infer "fn f(i: {0..<4}) -> {3..<7} { return 3 + i; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "return type is {3..<7}"
-      (Ast.TypeRefined (3, 7))
+      (Ast.TypeRefined (3, 7, Ast.TypeI32))
       fi.Types.ret_type);
 
   Alcotest.test_case "TRefinedInt result is subtype of i32 return" `Quick
@@ -3142,6 +3142,47 @@ let codegen_tests = [
           let mut w: u64 = 0;
           w = 0xFFFFFFFFFFFFFFFF;
           return w;
+        }");
+
+  Alcotest.test_case
+    "Refinement Numerical Type: min/max on two UNCONSTRAINED u64 arguments \
+     type-checks and codegens (regression -- min/max's \"unknown\" sentinel \
+     range used a hardcoded negative lower bound, which is illegal for an \
+     unsigned destination type once min/max started unifying its arguments \
+     against each other instead of always TI32; this used to raise \
+     'cannot unify {-1000000000..<1000000000} with u64')" `Quick
+    (expect_codegen_ok
+       "fn refnum_min_u64(a: u64, b: u64) -> u64 {
+          return min(a, b);
+        }
+        fn refnum_max_u64(a: u64, b: u64) -> u64 {
+          return max(a, b);
+        }");
+
+  Alcotest.test_case
+    "Refinement Numerical Type: min(u64_val, LITERAL) still proves an array \
+     index against a smaller buffer than u64's own range would otherwise \
+     allow, i.e. the base-type generalization didn't regress min/max's \
+     clamping proof itself, just widened which base types it accepts" `Quick
+    (expect_trap_sites 0
+       "let mut refnum_buf_u64: [u8; 20];
+        fn refnum_min_clamp_u64(raw: u64) -> u8 {
+          let capped: u64 = min(raw, 19);
+          return refnum_buf_u64[capped];
+        }");
+
+  Alcotest.test_case
+    "Refinement Numerical Type: an if-narrowed u64 variable proves an array \
+     index with zero trap sites (regression for is_unsigned/canon_ty/\
+     narrowing all correctly recursing into a refined type's own base \
+     instead of assuming i32)" `Quick
+    (expect_trap_sites 0
+       "let mut refnum_buf_u64b: [u8; 100];
+        fn refnum_narrow_u64(n: u64) -> u8 {
+          if (n >= 0 && n <= 50) {
+            return refnum_buf_u64b[n];
+          }
+          return 0;
         }");
 
 ]

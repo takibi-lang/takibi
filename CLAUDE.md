@@ -223,13 +223,23 @@ for unsigned types (u8/u16/u32/u64) it generates `lshr` (logical, zero-extending
 
 ### {lo..<hi} Bounds Are Rejected Outside i32 Range at Parse Time
 
-`TRefinedInt`/`TypeRefined` is **always represented as i32 at the LLVM
-level** (see `lib/types.ml`'s comment above its subtyping rules), no
-matter which integer type a `{lo..<hi}` value is later used with (u8,
-u64, usize, ...) -- subtyping into those wider/narrower types is a
-separate check (`lib/types.ml`'s `TRefinedInt _, TU8/TU16/TU32/TU64/
-TUsize/TI8/TI16/TI64 when ...` cases), not a change of the underlying
-representation.
+**Superseded in part by "Refinement Numerical Type" below**: `TRefinedInt`/
+`TypeRefined` no longer always represents as i32 at the LLVM level in
+general -- it now carries its own base type (`TRefinedInt of int * int *
+ty`), and `ltype_of_ast`/codegen represent it at that base's actual
+width. What remains true, and is what this section is actually about: the
+SURFACE `{lo..<hi}` type syntax (what a programmer can literally type)
+always constructs base = i32 (`lib/parser.mly`'s `type_expr` rule hardcodes
+`TypeI32`) -- there is no source syntax for writing a refined u64/i64
+directly, only the compiler's own range-propagation machinery (Add/Sub/
+Mul/Band/Mod/min/max/narrowing) ever produces a non-i32 base. So the
+range check below (bounds must fit in i32) is specifically a limit on
+the parsed surface syntax, not a general limit on every `TRefinedInt`
+value that can exist internally. Subtyping a `{lo..<hi}` value into a
+wider/narrower concrete type (u8, u64, usize, ...) remains a separate
+check (`lib/types.ml`'s `TRefinedInt _, TU8/TU16/TU32/TU64/TUsize/TI8/
+TI16/TI64 when ...` cases), unrelated to which base the value's own
+representation happens to carry.
 
 `lo`/`hi` come from the `INT` token (originally OCaml `int`, 63-bit; now
 `Int64.t` -- see "64-bit Integer Literals" below for why that changed), so
@@ -528,6 +538,162 @@ exercising this at runtime under QEMU too (a value that, unlike
 because of this fix -- 5 billion happened to already round-trip through
 the old guess-based path correctly, since it doesn't have bit 31 set;
 `0xFFFFFFFFFFFFFFFF` is the case that actually needed a hint).
+
+### Refinement Numerical Type: {lo..<hi} Generalized to Carry Any Base Integer Type
+
+Historically `TRefinedInt`/`TypeRefined` was ALWAYS represented as i32 at
+the LLVM level, no matter which integer type a `{lo..<hi}` value was used
+with (see the older note on this below, now superseded) -- this meant
+`is_unsigned (TypeRefined _)` always returned `false` unconditionally,
+which was a real bug: a refined value derived from a u64 (e.g. via `&`,
+`min`/`max`, if-narrowing) silently lost its unsignedness the moment it
+became refined, so a subsequent i32/i64 BinOp width-sync could pick
+`sext` instead of `zext` for it. Fixed by generalizing `TRefinedInt`/
+`TypeRefined` to a 3-argument form that carries its own base type:
+`TRefinedInt of int * int * ty` (`types.ml`) / `TypeRefined of int * int *
+type_expr` (`ast.ml`) -- `{lo..<hi}` is no longer implicitly i32, it is
+"a value of type `base` known to be in `[lo, hi)`", where `base` is
+(by convention, not enforced by the type system itself) one of
+i8/i16/i32/i64/u8/u16/u32/u64/usize.
+
+**Files changed** (the same "sync rule" duplication pattern as every
+other feature in this file -- type_inf.ml and llvm_gen.ml were changed in
+lockstep, verified by re-running the full test suite after each pass):
+1. `lib/types.ml` -- `TRefinedInt of int * int * ty`; `unify`'s
+   `TRefinedInt, TRefinedInt` case now also unifies the two bases (not
+   just checking bounds equality); every subtyping-into-concrete-type rule
+   (`TRefinedInt _, TI32/TI64/TU8/.../TUsize`) keeps its existing
+   bounds-only condition, now with `_` for the ignored base field; the
+   generalized anti-subtyping guard (`t1, TRefinedInt (lo, hi, base) when
+   t1 = repr base -> raise (Unify_error "cannot pass unproven ...")`) now
+   fires for ANY base, not just i32.
+2. `lib/ast.ml` -- `TypeRefined of int * int * type_expr` (surface AST
+   mirror).
+3. `lib/parser.mly` -- the literal `{lo..<hi}` type syntax always
+   constructs `TypeRefined (lo, hi, TypeI32)` -- the SURFACE SYNTAX still
+   defaults to i32 (there is no source-level way to write "{lo..<hi} of
+   u64" directly); non-i32 bases arise only from the type system's OWN
+   range-propagation machinery (Add/Sub/Mul/Band/Mod/min/max/narrowing),
+   never from what a programmer types. This was a deliberate scope
+   decision, not an oversight -- see "Deliberately NOT addressed" below.
+4. `lib/type_inf.ml` -- every TRefinedInt-producing site threads/unifies
+   `base` instead of hardcoding TI32: `canon_ty` (widens to the value's
+   OWN base, not always TI32 -- this single change is what fixed several
+   previously-latent bugs in Mul/Bor/Bxor/Shr/Shl's fallback cases, see
+   below), BinOp Add/Sub/Mul/Band/Mod, `narrow_from_cond`/`collect_bounds`
+   (generalized from matching only `TI32` locals to matching any of
+   i8/i16/i32/i64/u8/u16/u32/u64/usize), the `Let` "proofs survive weaker
+   annotations" `bind_ty` check, min/max (see its own paragraph below).
+   `For` loop counters deliberately stay `base = TI32` always (loop
+   counters are array-index-shaped; see "Deliberately NOT addressed").
+5. `lib/llvm_gen.ml` -- the codegen mirror of all of the above, plus the
+   actual representation-width change: `ltype_of_ast (TypeRefined (_, _,
+   base)) = ltype_of_ast base` (was hardcoded `i32_type context`), so a
+   `{lo..<hi}` value with a u64/i64 base now genuinely occupies an LLVM
+   `i64`, not a truncated-then-implicitly-widened i32. `is_unsigned`
+   (**the fix for the originally-reported bug**) now recurses:
+   `TypeRefined (_, _, base) -> is_unsigned base`. `coerce`, `ditype_of_ast`,
+   `int_bits_of_ast`, and every Index/SliceOf/narrowing site were updated
+   the same way.
+6. `test/test_takibi.ml` -- all existing `TypeRefined`/`TRefinedInt`
+   pattern matches and constructions updated to the 3-arg form (the
+   literal-syntax tests all expect base = `TypeI32`, matching point 3
+   above); new regression tests added for the two bugs found during this
+   work (see below).
+
+**Two latent bugs fixed as side effects of the systematic pass** (not the
+originally-reported bug, but found while touching every call site):
+- `canon_ty`'s old fallback (`TRefinedInt _ -> TI32` unconditionally)
+  meant Mul/Bor/Bxor/Shr/Shl's "operation doesn't preserve the range"
+  fallback cases returned a STALE, no-longer-valid refined range in some
+  paths instead of correctly widening to the value's actual base type --
+  a real, if narrow, pre-existing soundness gap. `canon_ty` now widens to
+  the value's OWN base (`TRefinedInt (_, _, base) -> base`), which fixed
+  this everywhere `canon_ty` is already called, with no new call sites
+  needed.
+- `llvm_gen.ml`'s min/max codegen previously called `to_i32` unconditionally
+  on both operands (silently truncating a genuine u64 argument) and always
+  used signed comparison (`Icmp.Slt/Sgt`, wrong for e.g. a u32 value with
+  the top bit set). Both fixed to mirror BinOp's existing i32/i64
+  width-sync-with-`is_unsigned`-for-extension-direction pattern, and to
+  pick `Icmp.Ult/Ugt` vs `Icmp.Slt/Sgt` based on `is_unsigned`.
+
+**Bug found and fixed DURING verification (a real regression caught by
+the existing test suite, not a new one)**: the `Let` binding's "proofs
+survive weaker annotations" check and the generalized anti-subtyping
+guard both originally compared the extracted `base` field directly with
+OCaml's structural `=` (`t_ann = base`, `t1 = base`). This is unsound
+because `repr` (the HM union-find dereference function) only resolves
+the TOP-LEVEL type passed to it -- it does NOT recursively resolve fields
+NESTED inside an already-matched constructor. If `base` came from a
+still-unresolved unification variable at the time the `TRefinedInt` was
+constructed (e.g. `0x0f & v` where `0x0f`'s own type variable only gets
+unified with `v`'s type LATER, inside the same expression), `base` could
+still be a raw `TVar (ref (Link TI32))` rather than the plain `TI32`
+constant, so `t_ann = base` compared `TI32` against a boxed TVar wrapper
+and (structurally) never matched, silently discarding an already-proven
+range. Caught by the existing "mask propagation is symmetric ... (v &
+0x0f) * 4 carries {0..<16} to {0..<61}" test (which started failing with
+an unexpected trap site after the generalization). Fixed by comparing
+`repr base` instead of the raw `base` in both places. **Sync note for any
+future code touching an extracted `base` field**: always `repr` it
+before comparing/pattern-matching its concrete shape; the field is not
+guaranteed pre-resolved just because the outer `TRefinedInt`/`TypeRefined`
+value itself was matched via an already-`repr`'d discriminant.
+
+**Second bug found and fixed DURING post-verification manual testing (not
+caught by the existing suite -- none of it exercised min/max with a
+non-i32 base before this work)**: min/max's "unknown bound" sentinel
+range (`sentinel_lo = -1_000_000_000`, `sentinel_hi = 1_000_000_000`,
+used when neither argument's range is statically known) is only a legal
+value of the RESULT's base type when that base accepts negative numbers.
+Before this generalization, min/max's result was always unified against
+`TI32` (whose `TRefinedInt _, TI32 -> ()` subtyping rule has no `lo >= 0`
+restriction), so the negative sentinel was always fine. Once min/max
+started unifying its two arguments against EACH OTHER (letting e.g. two
+`u64` arguments through), the SAME negative sentinel became illegal
+against any unsigned destination (`TU8/TU16/TU32/TU64/TUsize`'s subtyping
+rules all require `lo >= 0`), so `min(a, b)` with two unconstrained `u64`
+parameters raised `cannot unify {-1000000000..<1000000000} with u64`, an
+outright regression for a previously-nonexistent capability. Fixed in
+both files (sync rule) by making `sentinel_lo` conditional:
+`is_unsigned_ty base` (type_inf.ml) / `is_unsigned at` (llvm_gen.ml)
+selects `0` instead of `-1_000_000_000`; `sentinel_hi` stays
+`1_000_000_000` unconditionally (imprecise for a narrow base like u8, but
+conservative/safe, not unsound, so left alone). The `base`/`at` value
+consulted here must ALSO be resolved through `repr` before this check
+(same class of issue as the `Let`/anti-subtyping fix above, applied
+proactively here since `is_unsigned_ty` PATTERN MATCHES the base's
+concrete shape rather than comparing it, and an unresolved TVar would
+silently fall through to "not unsigned" regardless of what it actually
+resolves to). Regression tests: `test/test_takibi.ml`'s
+`refnum_min_u64`/`refnum_max_u64` (unconstrained u64 arguments, must not
+raise), `refnum_min_clamp_u64` (min against a literal still proves an
+array index against a smaller buffer), `refnum_narrow_u64` (if-narrowing
+a u64 variable proves an index with zero trap sites).
+
+**Deliberately NOT addressed by this generalization**:
+- The surface `{lo..<hi}` type syntax still always means "base i32" --
+  there is no source-level way to write a refined u64/i64 literally.
+  Non-i32 bases only ever arise from the compiler's OWN range-propagation
+  machinery. Adding source syntax for this (e.g. `{lo..<hi}: u64` or
+  similar) is a natural follow-up but has no concrete need yet.
+- `For` loop counters are hardcoded to `base = TI32` regardless of the
+  loop bound's own type -- loop counters are conventionally used as array
+  indices (i32-shaped), and generalizing this specific site had no
+  motivating example.
+- This work does NOT change anything about how bare integer LITERALS are
+  typed in a `BinOp` (`LITERAL + n` still directly computes as `n`'s own
+  type, which was already correct -- see the "Deliberately NOT threaded"
+  paragraph in the Polymorphic Literal section above). The user explicitly
+  separated these two topics and asked for this generalization FIRST,
+  planning to revisit BinOp/literal handling as a distinct discussion
+  afterward.
+
+**Full verification**: `make check` (langcheck, 363 unit tests -- up from
+360, +3 for this work's own regressions -- stm32build, and all 125
+qemutest cases including every `--forbid-trap`/no-trap check) passes with
+zero regressions after both bugs above were fixed.
 
 ### Soundness Condition for % Range Propagation
 

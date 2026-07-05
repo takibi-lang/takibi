@@ -82,7 +82,7 @@ let rec ty_str = function
   | TypeArray (t, n) -> Printf.sprintf "[%s; %d]" (ty_str t) n
   | TypeFn _  -> "fn(...)"
   | TypeNamed s -> s
-  | TypeRefined (lo, hi) -> Printf.sprintf "{%d..<%d}" lo hi
+  | TypeRefined (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
   | TypeSlice (t, 0) -> Printf.sprintf "[]%s" (ty_str t)
   | TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (ty_str t) n
 
@@ -195,7 +195,7 @@ let collect_bounds_cond (locals : (string, local_binding) Hashtbl.t)
         (match e.desc with
          | Var m ->
              let refined = function
-               | TypeRefined (a, b) -> Some (a, b)
+               | TypeRefined (a, b, _) -> Some (a, b)
                | _ -> None
              in
              (match Hashtbl.find_opt narrowing_ctx m with
@@ -256,17 +256,22 @@ let apply_narrowing (locals : (string, local_binding) Hashtbl.t)
       | Some lo, Some hi when not (List.mem name killed) ->
           (match Hashtbl.find_opt locals name with
            | Some (Imm (TypeSlice _, _)) -> saved  (* handled below *)
-           | Some (Imm (TypeRefined (elo, ehi), v) as old) ->
+           | Some (Imm (TypeRefined (elo, ehi, base), v) as old) ->
                (* Already refined (sync rule with type_inf.ml's
                   narrow_from_cond): INTERSECT, don't just overwrite --
                   needed so an if-condition that's true but WIDER than an
                   already-proven fact (e.g. a redundant re-check) can never
                   discard precision codegen would otherwise disagree with
                   type_inf about. *)
-               Hashtbl.replace locals name (Imm (TypeRefined (max lo elo, min hi ehi), v));
+               Hashtbl.replace locals name (Imm (TypeRefined (max lo elo, min hi ehi, base), v));
                (name, old) :: saved
-           | Some (Imm (_, v) as old) ->
-               Hashtbl.replace locals name (Imm (TypeRefined (lo, hi), v));
+           | Some (Imm (((TypeI8|TypeI16|TypeI32|TypeI64
+                         |TypeU8|TypeU16|TypeU32|TypeU64|TypeUsize) as base), v) as old) ->
+               (* Any plain primitive integer type can be narrowed, not
+                  just TypeI32 (sync rule with type_inf.ml's
+                  narrow_from_cond) -- the variable's OWN type becomes the
+                  refined range's base. *)
+               Hashtbl.replace locals name (Imm (TypeRefined (lo, hi, base), v));
                (name, old) :: saved
            | _ -> saved)
       | _ -> saved
@@ -304,18 +309,22 @@ let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t)
       match lo_opt, hi_opt with
       | Some lo, Some hi when not (List.mem name killed) ->
           (match Hashtbl.find_opt locals name with
-           | Some (Mut (TypeI32, _)) ->
+           | Some (Mut (((TypeI8|TypeI16|TypeI32|TypeI64
+                         |TypeU8|TypeU16|TypeU32|TypeU64|TypeUsize) as base), _)) ->
                let old = Hashtbl.find_opt narrowing_ctx name in
                (* An outer if may have already narrowed this Mut variable
                   (nested ifs): INTERSECT with any existing narrowing_ctx
                   entry rather than overwriting it, mirroring type_inf.ml's
                   tyenv-threading (an inner narrow_from_cond naturally sees
-                  the outer narrowing already applied) -- sync rule. *)
+                  the outer narrowing already applied) -- sync rule. Any
+                  plain primitive integer type can be narrowed, not just
+                  TypeI32 -- the variable's OWN type becomes the refined
+                  range's base. *)
                let (nlo, nhi) = match old with
-                 | Some (TypeRefined (elo, ehi)) -> (max lo elo, min hi ehi)
+                 | Some (TypeRefined (elo, ehi, _)) -> (max lo elo, min hi ehi)
                  | _ -> (lo, hi)
                in
-               Hashtbl.replace narrowing_ctx name (TypeRefined (nlo, nhi));
+               Hashtbl.replace narrowing_ctx name (TypeRefined (nlo, nhi, base));
                (name, old) :: saved
            | _ -> saved)
       | _ -> saved
@@ -416,7 +425,13 @@ let rec ltype_of_ast = function
   | TypeIo  t       -> ltype_of_ast t         (* io T is a value type: LLVM type is the same as T *)
   | TypeArray (t, n) -> array_type (ltype_of_ast t) n
   | TypeFn _        -> pointer_type context   (* function pointers are also opaque ptr *)
-  | TypeRefined _   -> i32_type context       (* refined int is identical to i32 at the LLVM level *)
+  | TypeRefined (_, _, base) -> ltype_of_ast base
+    (* Representation follows the refined range's own base (see
+       types.ml's TRefinedInt comment) -- was unconditionally i32_type
+       before "Refinement Numerical Type" generalized TRefinedInt to carry
+       a base; a for-loop counter's base is always TypeI32 by construction
+       (type_inf.ml's For case), so this is exactly i32 for loop counters,
+       matching the old behavior there unchanged. *)
   | TypeSlice _     ->
       (* Fat value {ptr, len}: len width follows the target pointer size
          (usize), so the layout is {ptr, i32} on Cortex-M and {ptr, i64} on
@@ -471,7 +486,7 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
   | TypeU64   -> basic_int "u64"   64 dw_ate_unsigned
   | TypeUsize -> basic_int "usize" (integer_bitwidth (usize_lltype ())) dw_ate_unsigned
   | TypeVoid  -> Llvm_debuginfo.llmetadata_null ()
-  | TypeRefined _ -> ditype_of_ast dib file TypeI32  (* same LLVM-level representation as i32; see ltype_of_ast *)
+  | TypeRefined (_, _, base) -> ditype_of_ast dib file base  (* same LLVM-level representation as its base; see ltype_of_ast *)
   | TypeSlice (t, _) -> ditype_of_ast dib file (TypePtr t)
       (* modeled as a pointer for now: enough for gdb to follow the data;
          a real {ptr, len} DICompositeType needs the member-offset plumbing
@@ -515,10 +530,27 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
                Hashtbl.add di_struct_placeholders sname placeholder;
                placeholder)
 
-(* True for unsigned integer types (use udiv/urem/icmp ult etc.) *)
-let is_unsigned = function
+(* True for unsigned integer types (use udiv/urem/icmp ult etc.). Recurses
+   into a refined type's own base -- this is what fixes the BinOp i32/i64
+   width-sync's sign- vs zero-extension choice (see CLAUDE.md's
+   "Refinement Numerical Type" section): before TRefinedInt carried a
+   base, this always returned false for ANY refined value, so widening one
+   in a mixed-width BinOp always sign-extended, which only ever happened
+   to be safe because the old i32-guess fallback for bare literals never
+   produced a refined value with the sign bit set. *)
+let rec is_unsigned = function
   | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeUsize -> true
+  | TypeRefined (_, _, base) -> is_unsigned base
   | _ -> false
+
+(* Widen TypeRefined to its own base type; leave explicit-width types
+   unchanged. Mirrors type_inf.ml's canon_ty (sync rule): codegen needs
+   this too now that a refined value's LLVM representation width follows
+   its base (see ltype_of_ast) -- a "give up on refinement" fallback must
+   return the refined value's OWN base, not a hardcoded TypeI32, or the
+   returned ast_type would disagree with the actual (possibly i64-wide)
+   llvalue just computed. *)
+let canon_ty = function TypeRefined (_, _, base) -> base | t -> t
 
 (* Extract a small-number-scoped compile-time integer from an expression,
    iff it is exactly an integer literal that fits natively (see
@@ -615,7 +647,7 @@ let rec coerce v (dst : Ast.type_expr) =
   | TypeArray _ -> v
   | TypeFn _    -> v
   | TypeNamed _ -> v
-  | TypeRefined _ -> coerce v TypeI32
+  | TypeRefined (_, _, base) -> coerce v base
   | TypeSlice _ -> v   (* fat values are never numerically coerced *)
 
 (* Widen an integer value to i32 so arithmetic stays uniform (legacy helper for TypeInt/TypeChar).
@@ -850,7 +882,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
               target type's width with no warning). *)
            if i >= 0L && i <= 2147483647L then
              let i32v = Int64.to_int i in
-             (TypeRefined (i32v, i32v + 1), const_int (i32_type context) i32v)
+             (TypeRefined (i32v, i32v + 1, TypeI32), const_int (i32_type context) i32v)
            else
              (TypeU64, const_of_int64 (i64_type context) i true))
 
@@ -1012,14 +1044,14 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                         {a..<b}+{c..<d} -> {a+c..<b+d-1}; {a..<b}+k -> shift *)
                      let sum = build_add v1 v2 "addtmp" builder in
                      let ret_ty = match ty1, ty2 with
-                       | TypeRefined (a, b), TypeRefined (c, d) ->
-                           TypeRefined (a + c, b + d - 1)
+                       | TypeRefined (a, b, base), TypeRefined (c, d, _) ->
+                           TypeRefined (a + c, b + d - 1, base)
                        | _ ->
                            (match ty1, intlit_opt e2 with
-                            | TypeRefined (a, b), Some k -> TypeRefined (a + k, b + k)
+                            | TypeRefined (a, b, base), Some k -> TypeRefined (a + k, b + k, base)
                             | _ -> (match ty2, intlit_opt e1 with
-                                    | TypeRefined (c, d), Some k -> TypeRefined (c + k, d + k)
-                                    | _ -> TypeI32))
+                                    | TypeRefined (c, d, base), Some k -> TypeRefined (c + k, d + k, base)
+                                    | _ -> canon_ty ty1))
                      in
                      (ret_ty, sum)))
        | Sub ->
@@ -1033,12 +1065,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                    {a..<b}-{c..<d} -> {a-d+1..<b-c}; {a..<b}-k -> shift *)
                 let diff = build_sub v1 v2 "subtmp" builder in
                 let ret_ty = match ty1, ty2 with
-                  | TypeRefined (a, b), TypeRefined (c, d) ->
-                      TypeRefined (a - d + 1, b - c)
+                  | TypeRefined (a, b, base), TypeRefined (c, d, _) ->
+                      TypeRefined (a - d + 1, b - c, base)
                   | _ ->
                       (match ty1, intlit_opt e2 with
-                       | TypeRefined (a, b), Some k -> TypeRefined (a - k, b - k)
-                       | _ -> TypeI32)
+                       | TypeRefined (a, b, base), Some k -> TypeRefined (a - k, b - k, base)
+                       | _ -> canon_ty ty1)
                 in
                 (ret_ty, diff))
        | Mul ->
@@ -1047,11 +1079,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
               named constant) -> {a*k..<(b-1)*k+1} *)
            let k2 = Const_env.bound_value e2 and k1 = Const_env.bound_value e1 in
            let ret_ty = match ty1, k2, ty2, k1 with
-             | TypeRefined (a, b), Some k, _, _ when k > 0 ->
-                 TypeRefined (a * k, (b - 1) * k + 1)
-             | _, _, TypeRefined (a, b), Some k when k > 0 ->
-                 TypeRefined (a * k, (b - 1) * k + 1)
-             | _ -> ty1
+             | TypeRefined (a, b, base), Some k, _, _ when k > 0 ->
+                 TypeRefined (a * k, (b - 1) * k + 1, base)
+             | _, _, TypeRefined (a, b, base), Some k when k > 0 ->
+                 TypeRefined (a * k, (b - 1) * k + 1, base)
+             | _ -> canon_ty ty1
            in
            (ret_ty, build_mul v1 v2 "multmp" builder)
        | Div ->
@@ -1083,25 +1115,25 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | Ne  -> (TypeBool, build_icmp Icmp.Ne v1 v2 "netmp" builder)
        | Or  -> (TypeBool, build_or  (as_cond v1) (as_cond v2) "ortmp"   builder)
        | And -> (TypeBool, build_and (as_cond v1) (as_cond v2) "landtmp" builder)
-       | Bor  -> (ty1, build_or  v1 v2 "bortmp" builder)
-       | Bxor -> (ty1, build_xor v1 v2 "xortmp" builder)
+       | Bor  -> (canon_ty ty1, build_or  v1 v2 "bortmp" builder)
+       | Bxor -> (canon_ty ty1, build_xor v1 v2 "xortmp" builder)
        | Band ->
            (* Range propagation (sync rule with type_inf.ml's Band case):
               x & k -> {0..<k+1} for a non-negative literal mask k,
               regardless of x's own sign/range. *)
            let ret_ty = match intlit_opt e2 with
-             | Some k when k >= 0 -> TypeRefined (0, k + 1)
+             | Some k when k >= 0 -> TypeRefined (0, k + 1, canon_ty ty1)
              | _ -> (match intlit_opt e1 with
-                     | Some k when k >= 0 -> TypeRefined (0, k + 1)
-                     | _ -> ty1)
+                     | Some k when k >= 0 -> TypeRefined (0, k + 1, canon_ty ty1)
+                     | _ -> canon_ty ty1)
            in
            (ret_ty, build_and v1 v2 "andtmp" builder)
        | Shr  ->
            let result = if is_unsigned ty1
                         then build_lshr v1 v2 "shrtmp" builder
                         else build_ashr v1 v2 "shrtmp" builder
-           in (ty1, result)
-       | Shl  -> (ty1, build_shl v1 v2 "shltmp" builder)
+           in (canon_ty ty1, result)
+       | Shl  -> (canon_ty ty1, build_shl v1 v2 "shltmp" builder)
        (* Range propagation: n % m where m is a positive constant and n is guaranteed non-negative.
           Symmetric condition with type_inf.ml: relaxing only one side causes a mismatch. *)
        | Mod  ->
@@ -1112,10 +1144,10 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let ret_ty = match intlit_opt e2 with
              | Some m when m > 0 ->
                  (match ty1 with
-                  | TypeRefined (lo, _) when lo >= 0 -> TypeRefined (0, m)
-                  | _ when is_unsigned ty1 -> TypeRefined (0, m)
-                  | _ -> ty1)
-             | _ -> ty1
+                  | TypeRefined (lo, _, base) when lo >= 0 -> TypeRefined (0, m, base)
+                  | _ when is_unsigned ty1 -> TypeRefined (0, m, ty1)
+                  | _ -> canon_ty ty1)
+             | _ -> canon_ty ty1
            in
            (ret_ty, result))
 
@@ -1159,7 +1191,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 (lo >= hi) is vacuously proven: the value cannot exist. *)
              let variants = Hashtbl.find enum_variants_tbl ename in
              match src_ty with
-             | TypeRefined (a, b) ->
+             | TypeRefined (a, b, _) ->
                  let rec all_in v =
                    v >= b
                    || (List.exists (fun (_, dv) -> dv = v) variants
@@ -1195,16 +1227,20 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              position_at_end ok_bb builder;
              (TypeNamed ename, v_coerced)
            end
-       | TypeRefined (lo, hi) ->
+       | TypeRefined (lo, hi, _) ->
            (* Checked refined cast. When the source's static range already
               proves the target range, this is a plain subtype coercion and
               no check is emitted (so it stays legal under --forbid-trap).
               Everything else gets a runtime range check + trap -- previously
               this cast was silently unchecked, which let
               `arr[v as {0..<N}]` elide the bounds check for an arbitrary
-              i32 v: an unsound OOB access with no trap at all. *)
+              i32 v: an unsound OOB access with no trap at all. This range
+              check is base-agnostic by design (matches types.ml's
+              subtyping rule): a proven fit is about the VALUE range, not
+              whether src's base happens to match the cast target's base
+              (always TypeI32 for the `{lo..<hi}` cast syntax). *)
            let proven = match src_ty with
-             | TypeRefined (a, b) -> lo <= a && b <= hi
+             | TypeRefined (a, b, _) -> lo <= a && b <= hi
              | TypeBool -> lo <= 0 && 2 <= hi           (* i1 zext: {0..<2} *)
              | TypeU8   -> lo <= 0 && 0x100   <= hi     (* zext-widened     *)
              | TypeU16  -> lo <= 0 && 0x10000 <= hi
@@ -1311,7 +1347,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          is exactly the recorded literal) > Mut narrowing from narrowing_ctx
          (if-condition) > the raw inferred type. *)
       let idx_ty = match Const_env.bound_value idx with
-        | Some k -> TypeRefined (k, k + 1)
+        | Some k -> TypeRefined (k, k + 1, TypeI32)  (* idx_v is already forced to i32 via to_i32 above *)
         | None ->
             (match idx.desc with
              | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
@@ -1321,7 +1357,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (* Array load [T; N]: skip bounds check when TypeRefined proves safety *)
       let load_from_array elem_ty n arr_ptr =
         let needs_check = match idx_ty with
-          | TypeRefined (lo, hi) -> lo < 0 || hi > n
+          | TypeRefined (lo, hi, _) -> lo < 0 || hi > n
           | _ -> true
         in
         if needs_check then emit_bounds_check e.loc idx_ty idx_v n;
@@ -1343,7 +1379,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          runtime length. *)
       let load_from_slice elem_ty min_len fat =
         let proven = match idx_ty with
-          | TypeRefined (lo, hi) -> lo >= 0 && hi <= min_len
+          | TypeRefined (lo, hi, _) -> lo >= 0 && hi <= min_len
           | _ -> false
         in
         if not proven then
@@ -1409,7 +1445,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         in
         let range = match Const_env.bound_value be with
           | Some k -> Some (k, k + 1)
-          | None -> (match bty with TypeRefined (a, b) -> Some (a, b) | _ -> None)
+          | None -> (match bty with TypeRefined (a, b, _) -> Some (a, b) | _ -> None)
         in
         (to_i32 bv, range)
       in
@@ -1466,7 +1502,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                                     | None -> None))
                         in
                         (match wty with
-                         | Some (TypeRefined (wlo, _)) when wlo >= 0 -> Some wlo
+                         | Some (TypeRefined (wlo, _, _)) when wlo >= 0 -> Some wlo
                          | _ -> None)
                     | _ -> None))
         | _ -> None
@@ -1693,13 +1729,39 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          or codegen could accept an access type_inf never proved. *)
       let (at, av) = gen_expr locals a_e in
       let (bt, bv) = gen_expr locals b_e in
-      let av = to_i32 av and bv = to_i32 bv in
+      (* Width-sync mirroring BinOp's (sync rule): type_inf.ml's min/max
+         now unifies its two arguments against EACH OTHER (not hardcoded
+         TI32), so a genuinely u32/u64/usize-typed call is legal -- but
+         the actual llvalues can still arrive at different LLVM widths
+         (e.g. IntLit's own i32-vs-i64 guess), so widen the narrower one
+         exactly like BinOp does, using is_unsigned to pick the correct
+         extension direction. Previously this unconditionally truncated
+         both operands to i32 via to_i32, which would have silently
+         corrupted a genuinely-wide argument now that one is possible. *)
+      let (at, av, bt, bv) =
+        let ll1 = type_of av and ll2 = type_of bv in
+        if ll1 = i64_type context && ll2 = i32_type context then
+          let bvw = if is_unsigned at then build_zext bv (i64_type context) "wi" builder
+                    else build_sext bv (i64_type context) "wi" builder in
+          (at, av, at, bvw)
+        else if ll2 = i64_type context && ll1 = i32_type context then
+          let avw = if is_unsigned bt then build_zext av (i64_type context) "wi" builder
+                    else build_sext av (i64_type context) "wi" builder in
+          (bt, avw, bt, bv)
+        else
+          (at, av, bt, bv)
+      in
       let range_of (ae : Ast.expr) (aty : Ast.type_expr) =
         match Const_env.bound_value ae with
         | Some k -> Some (k, k + 1)
-        | None -> (match aty with TypeRefined (x, y) -> Some (x, y) | _ -> None)
+        | None -> (match aty with TypeRefined (x, y, _) -> Some (x, y) | _ -> None)
       in
-      let sentinel_lo = -1_000_000_000 and sentinel_hi = 1_000_000_000 in
+      (* Sync rule with type_inf.ml's Call case: the "unknown" sentinel
+         must itself be a legal value of the result's base type -- a
+         negative sentinel_lo cannot subtype into an unsigned destination
+         (u8/u16/u32/u64/usize all require lo >= 0), so use 0 there. *)
+      let sentinel_lo = if is_unsigned at then 0 else -1_000_000_000
+      and sentinel_hi = 1_000_000_000 in
       let ra = range_of a_e at and rb = range_of b_e bt in
       let lo =
         match ra, rb with
@@ -1719,9 +1781,14 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                   | _ -> sentinel_hi)
                else sentinel_hi
       in
-      let ret_ty = TypeRefined (lo, hi) in
-      let cmp = if fname = "min" then build_icmp Icmp.Slt av bv "mm_cmp" builder
-                else build_icmp Icmp.Sgt av bv "mm_cmp" builder in
+      let ret_ty = TypeRefined (lo, hi, canon_ty at) in
+      let cmp = if is_unsigned at then
+                  (if fname = "min" then build_icmp Icmp.Ult av bv "mm_cmp" builder
+                   else build_icmp Icmp.Ugt av bv "mm_cmp" builder)
+                else
+                  (if fname = "min" then build_icmp Icmp.Slt av bv "mm_cmp" builder
+                   else build_icmp Icmp.Sgt av bv "mm_cmp" builder)
+      in
       (ret_ty, build_select cmp av bv "mm_res" builder)
 
   | Call (fname, args) ->
@@ -2008,7 +2075,7 @@ let gen_func ?prog_types fdef =
         (* Same idx_ty priority as gen_expr's Index case (sync rule):
            Const_env constant name > narrowing_ctx > raw inferred type. *)
         let idx_ty = match Const_env.bound_value idx with
-          | Some k -> TypeRefined (k, k + 1)
+          | Some k -> TypeRefined (k, k + 1, TypeI32)  (* idx_v is already forced to i32 via to_i32 above *)
           | None ->
               (match idx.desc with
                | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
@@ -2032,7 +2099,7 @@ let gen_func ?prog_types fdef =
         let (_, rhs_v) = gen_expr ?expected_ty:elem_ty_hint locals rhs in
         let store_to_array elem_ty n arr_ptr =
           let needs_check = match idx_ty with
-            | TypeRefined (lo, hi) -> lo < 0 || hi > n
+            | TypeRefined (lo, hi, _) -> lo < 0 || hi > n
             | _ -> true
           in
           if needs_check then emit_bounds_check s.loc idx_ty idx_v n;
@@ -2051,7 +2118,7 @@ let gen_func ?prog_types fdef =
            runtime length. *)
         let store_to_slice elem_ty min_len fat =
           let proven = match idx_ty with
-            | TypeRefined (lo, hi) -> lo >= 0 && hi <= min_len
+            | TypeRefined (lo, hi, _) -> lo >= 0 && hi <= min_len
             | _ -> false
           in
           if not proven then
@@ -2217,7 +2284,12 @@ let gen_func ?prog_types fdef =
         (* Sync rule: type_inf.ml's For case makes the same decision through
            the same Const_env.bound_value helper; keep them identical. *)
         let loop_ty = match Const_env.bound_value lo_expr, Const_env.bound_value hi_expr with
-          | Some lo_k, Some hi_k -> TypeRefined (lo_k, hi_k)
+          (* Loop counters stay base=TypeI32 always (sync rule with
+             type_inf.ml's For case) -- a deliberate exception, since a
+             loop counter is fundamentally array-index-shaped and i_val
+             is always loaded as i32 above regardless of the bounds'
+             own types. *)
+          | Some lo_k, Some hi_k -> TypeRefined (lo_k, hi_k, TypeI32)
           | _ -> TypeI32
         in
         Hashtbl.add locals name (Imm (loop_ty, i_val));
@@ -2363,7 +2435,7 @@ let gen_func ?prog_types fdef =
    ltype_of_ast would give that AST type -- kept separate from ltype_of_ast
    itself since eval_const_int stays entirely in OCaml int space (see its
    comment below for why). *)
-let int_bits_of_ast (ty : Ast.type_expr) =
+let rec int_bits_of_ast (ty : Ast.type_expr) =
   match ty with
   | TypeI8  | TypeU8   -> 8
   | TypeI16 | TypeU16  -> 16
@@ -2371,7 +2443,11 @@ let int_bits_of_ast (ty : Ast.type_expr) =
   | TypeI64 | TypeU64  -> 64
   | TypeUsize          -> usize_bitwidth ()
   | TypeBool           -> 1
-  | TypeRefined _      -> 32  (* always i32 at the LLVM level, see types.ml *)
+  | TypeRefined (_, _, base) -> int_bits_of_ast base
+    (* Always TypeI32 in practice: the only way a literal TypeRefined
+       reaches here is via the `{lo..<hi}` cast-target syntax, which
+       always spells base = TypeI32 (see Ast.TypeRefined's comment) --
+       kept recursive anyway for robustness rather than hardcoding 32. *)
   | _                  -> 64  (* not reached: eval_const only calls this for the cases above *)
 
 let mask_to_bits bits (n : Int64.t) : Int64.t =

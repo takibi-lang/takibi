@@ -27,7 +27,12 @@ type type_expr =
   | TypeArray of type_expr * int   (* [T; N] *)
   | TypeFn of type_expr list * type_expr  (* fn(T...) -> R *)
   | TypeNamed of string            (* struct type by name *)
-  | TypeRefined of int * int       (* {lo..<hi} -- refined int: lo <= x < hi *)
+  | TypeRefined of int * int * type_expr
+    (* {lo..<hi} -- refined int: lo <= x < hi. Third field is the
+       underlying primitive type (mirrors Types.ty's TRefinedInt -- see
+       its comment). The `{lo..<hi}` surface syntax always spells this
+       with base = TypeI32; parser.mly's array_size/{lo..<hi} sites are
+       the only place that constructs this literally from source. *)
   | TypeSlice of type_expr * int   (* []T / [T; N..] -- fat pointer (ptr + usize len);
                                       int = compile-time MINIMUM length (0 = unknown).
                                       The runtime length is always >= the minimum; index

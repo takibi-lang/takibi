@@ -36,11 +36,18 @@ let check_cond loc ct =
   | TBool -> ()
   | _ -> unify_at loc ct TI32
 
-(* Widen TRefinedInt to TI32; leave explicit-width types unchanged.
-   Used by arithmetic ops that do not propagate range information (Mul, Div, shifts, bitwise).
-   Without this, `i: {0..<8}` in `i * 4` would produce TRefinedInt(0,8) and later cause
-   `TI32 >> TRefinedInt` to fail the unification anti-subtyping guard. *)
-let canon_ty t = match repr t with TRefinedInt _ -> TI32 | t -> t
+(* Widen TRefinedInt to its OWN base type; leave explicit-width types
+   unchanged. Used by arithmetic ops that do not propagate range
+   information (Mul, Div, shifts, bitwise). Without this, `i: {0..<8}` in
+   `i * 4` would produce TRefinedInt(0,8,base) and later cause
+   `base >> TRefinedInt` to fail the unification anti-subtyping guard.
+   Widening to the refined value's OWN base (not unconditionally TI32) is
+   what makes this correct now that a refined range can be tied to any
+   primitive type: `u64_i: {0..<8}:u64` in `u64_i * 4` must widen to TU64,
+   not TI32 -- widening to the wrong (narrower or differently-signed) type
+   would either lose information or produce a bogus unify error against
+   the other, genuinely-u64-typed operand. *)
+let canon_ty t = match repr t with TRefinedInt (_, _, base) -> base | t -> t
 
 (* Extract a small-number-scoped compile-time integer from an expression,
    iff it is exactly an integer literal that fits natively (see
@@ -98,24 +105,25 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            (match repr t1, repr t2 with
             | TPtr _, _ -> t1
             | _, TPtr _ -> t2
-            | TRefinedInt (a, b), TRefinedInt (c, d) ->
-                TRefinedInt (a + c, b + d - 1)
-            | TRefinedInt (a, b), _ ->
+            | TRefinedInt (a, b, base1), TRefinedInt (c, d, base2) ->
+                unify_at e.loc base1 base2;
+                TRefinedInt (a + c, b + d - 1, base1)
+            | TRefinedInt (a, b, base), _ ->
                 (match intlit_opt e2 with
                  | Some k ->
-                     unify_at e2.loc t2 TI32;
-                     TRefinedInt (a + k, b + k)
+                     unify_at e2.loc t2 base;
+                     TRefinedInt (a + k, b + k, base)
                  | None ->
-                     unify_at e2.loc (canon_ty t2) TI32;
-                     TI32)
-            | _, TRefinedInt (c, d) ->
+                     unify_at e2.loc (canon_ty t2) base;
+                     base)
+            | _, TRefinedInt (c, d, base) ->
                 (match intlit_opt e1 with
                  | Some k ->
-                     unify_at e1.loc t1 TI32;
-                     TRefinedInt (c + k, d + k)
+                     unify_at e1.loc t1 base;
+                     TRefinedInt (c + k, d + k, base)
                  | None ->
-                     unify_at e1.loc (canon_ty t1) TI32;
-                     TI32)
+                     unify_at e1.loc (canon_ty t1) base;
+                     base)
             | _ ->
                 let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
                 unify_at e.loc ct1 ct2;
@@ -135,22 +143,24 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | TPtr _ ->
                 unify_at e2.loc t2 TI32;
                 t1
-            | TRefinedInt (a, b) ->
+            | TRefinedInt (a, b, base) ->
                 (match repr t2 with
-                 | TRefinedInt (c, d) -> TRefinedInt (a - d + 1, b - c)
+                 | TRefinedInt (c, d, base2) ->
+                     unify_at e.loc base base2;
+                     TRefinedInt (a - d + 1, b - c, base)
                  | _ ->
                      (match intlit_opt e2 with
                       | Some k ->
-                          unify_at e2.loc t2 TI32;
-                          TRefinedInt (a - k, b - k)
+                          unify_at e2.loc t2 base;
+                          TRefinedInt (a - k, b - k, base)
                       | None ->
-                          unify_at e2.loc (canon_ty t2) TI32;
-                          TI32))
+                          unify_at e2.loc (canon_ty t2) base;
+                          base))
             | _ ->
                 (match intlit_opt e1, repr t2 with
-                 | Some k, TRefinedInt (c, d) ->
-                     unify_at e1.loc t1 TI32;
-                     TRefinedInt (k - d + 1, k - c + 1)
+                 | Some k, TRefinedInt (c, d, base) ->
+                     unify_at e1.loc t1 base;
+                     TRefinedInt (k - d + 1, k - c + 1, base)
                  | _ ->
                      let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
                      unify_at e.loc ct1 ct2;
@@ -165,12 +175,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               Non-constant or non-positive multipliers fall back to i32. *)
            let k2 = Const_env.bound_value e2 and k1 = Const_env.bound_value e1 in
            (match repr t1, k2, repr t2, k1 with
-            | TRefinedInt (a, b), Some k, _, _ when k > 0 ->
-                unify_at e2.loc t2 TI32;
-                TRefinedInt (a * k, (b - 1) * k + 1)
-            | _, _, TRefinedInt (a, b), Some k when k > 0 ->
-                unify_at e1.loc t1 TI32;
-                TRefinedInt (a * k, (b - 1) * k + 1)
+            | TRefinedInt (a, b, base), Some k, _, _ when k > 0 ->
+                unify_at e2.loc t2 base;
+                TRefinedInt (a * k, (b - 1) * k + 1, base)
+            | _, _, TRefinedInt (a, b, base), Some k when k > 0 ->
+                unify_at e1.loc t1 base;
+                TRefinedInt (a * k, (b - 1) * k + 1, base)
             | _ ->
                 let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
                 unify_at e.loc ct1 ct2;
@@ -193,8 +203,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            (match intlit_opt e2 with
             | Some m when m > 0 ->
                 (match repr t1 with
-                 | TRefinedInt (lo, _) when lo >= 0 -> TRefinedInt (0, m)
-                 | t when is_unsigned_ty t -> TRefinedInt (0, m)
+                 | TRefinedInt (lo, _, _) when lo >= 0 -> TRefinedInt (0, m, ct1)
+                 | t when is_unsigned_ty t -> TRefinedInt (0, m, ct1)
                  | _ -> ct1)
             | _ -> ct1)
        | Or | And ->
@@ -212,9 +222,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
            unify_at e.loc ct1 ct2;
            (match intlit_opt e2 with
-            | Some k when k >= 0 -> TRefinedInt (0, k + 1)
+            | Some k when k >= 0 -> TRefinedInt (0, k + 1, ct1)
             | _ -> (match intlit_opt e1 with
-                    | Some k when k >= 0 -> TRefinedInt (0, k + 1)
+                    | Some k when k >= 0 -> TRefinedInt (0, k + 1, ct1)
                     | _ -> ct1))
        | Bor | Bxor | Shr | Shl ->
            let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
@@ -448,7 +458,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       let bound_range be bt =
         match Const_env.bound_value be with
         | Some k -> Some (k, k + 1)
-        | None -> (match repr bt with TRefinedInt (a, b) -> Some (a, b) | _ -> None)
+        | None -> (match repr bt with TRefinedInt (a, b, _) -> Some (a, b) | _ -> None)
       in
       (* Same-base rule: s[v ..< v + w] (same variable v as the lo bound,
          reused inside the hi bound) has lo <= hi and a guaranteed length
@@ -498,7 +508,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                        (match StringMap.find_opt w_name tyenv with
                         | Some (t, _) ->
                             (match repr t with
-                             | TRefinedInt (wlo, _) when wlo >= 0 -> Some wlo
+                             | TRefinedInt (wlo, _, _) when wlo >= 0 -> Some wlo
                              | _ -> None)
                         | None -> None)
                    | _ -> None)
@@ -702,14 +712,39 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | [a; b] ->
            let at = infer_expr senv eenv tyenv fenv a in
            let bt = infer_expr senv eenv tyenv fenv b in
-           unify_at a.loc (canon_ty at) TI32;
-           unify_at b.loc (canon_ty bt) TI32;
+           (* Both arguments must agree on a base type, same as any other
+              binary numeric operation (Add/Sub/etc.) -- previously
+              hardcoded TI32 for both, independently, which meant
+              min/max simply could not be used on u32/u64/usize-typed
+              values at all. Unifying them against EACH OTHER instead
+              (and tagging the result TRefinedInt with that base) is what
+              lets `min(some_u64_val, 20)` type-check and stay refined. *)
+           let base_raw = canon_ty at in
+           unify_at e.loc base_raw (canon_ty bt);
+           (* repr again AFTER unify_at: unify_at may have just resolved
+              base_raw in place (e.g. a or b was a fresh, not-yet-bound
+              IntLit type variable) -- base must be the FULLY resolved
+              type before is_unsigned_ty inspects its concrete shape below,
+              or an unresolved TVar would silently (and wrongly) read as
+              "not unsigned" regardless of what it actually resolves to
+              (found via a real regression: min/max on two u64 arguments
+              raised a spurious "cannot unify" error because the sentinel
+              range's negative lower bound doesn't fit an unsigned
+              destination -- see sentinel_lo below). *)
+           let base = repr base_raw in
            let range_of (ae : Ast.expr) (aty : ty) =
              match Const_env.bound_value ae with
              | Some k -> Some (k, k + 1)
-             | None -> (match repr aty with TRefinedInt (x, y) -> Some (x, y) | _ -> None)
+             | None -> (match repr aty with TRefinedInt (x, y, _) -> Some (x, y) | _ -> None)
            in
-           let sentinel_lo = -1_000_000_000 and sentinel_hi = 1_000_000_000 in
+           (* The "unknown" sentinel must itself be a legal value of base:
+              a negative sentinel_lo is fine for a signed base (matches
+              the original i32-only design) but cannot subtype into an
+              UNSIGNED destination at all (TRefinedInt's subtyping rules
+              require lo >= 0 for u8/u16/u32/u64/usize) -- 0 is the
+              correct "no lower bound known" placeholder there instead. *)
+           let sentinel_lo = if is_unsigned_ty base then 0 else -1_000_000_000
+           and sentinel_hi = 1_000_000_000 in
            let ra = range_of a at and rb = range_of b bt in
            let lo =
              match ra, rb with
@@ -731,7 +766,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                        | _ -> sentinel_hi)
                     else sentinel_hi
            in
-           TRefinedInt (lo, hi)
+           TRefinedInt (lo, hi, base)
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "%s expects 2 arguments: %s(a, b)" fname fname)))
 
@@ -835,7 +870,7 @@ let collect_bounds tyenv (cond : Ast.expr) : (int option * int option) StringMap
              (match StringMap.find_opt m tyenv with
               | Some (t, _) ->
                   (match repr t with
-                   | TRefinedInt (a, b) -> Some (a, b)
+                   | TRefinedInt (a, b, _) -> Some (a, b)
                    | _ -> None)
               | None -> None)
          | _ -> None)
@@ -893,8 +928,6 @@ let narrow_from_cond tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
       match lo_opt, hi_opt with
       | Some lo, Some hi when not (List.mem name killed) ->
           (match StringMap.find_opt name env with
-           | Some (TI32, is_mut) ->
-               StringMap.add name (TRefinedInt (lo, hi), is_mut) env
            (* Already refined (e.g. an immutable let whose initializer was
               itself refined, kept via the "proofs survive weaker
               annotations" rule -- see check_bound_shadowing/B-plan) --
@@ -905,8 +938,14 @@ let narrow_from_cond tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
               condition just proved, e.g. `icmp_len: {0..<1481}` at entry
               plus `if (icmp_len >= 8 && icmp_len <= 1480)` must become
               {8..<1481}, not stay {0..<1481}. *)
-           | Some (TRefinedInt (elo, ehi), is_mut) ->
-               StringMap.add name (TRefinedInt (max lo elo, min hi ehi), is_mut) env
+           | Some (TRefinedInt (elo, ehi, base), is_mut) ->
+               StringMap.add name (TRefinedInt (max lo elo, min hi ehi, base), is_mut) env
+           (* Any plain primitive integer type can be narrowed, not just
+              TI32 -- a u8/u16/u32/u64/usize/i8/i16/i64-typed variable
+              narrowed by an if-condition keeps ITS OWN type as the
+              refined range's base (see types.ml's TRefinedInt comment). *)
+           | Some ((TI8|TI16|TI32|TI64|TU8|TU16|TU32|TU64|TUsize) as base, is_mut) ->
+               StringMap.add name (TRefinedInt (lo, hi, base), is_mut) env
            | _ -> env)
       | _ -> env
     ) bounds tyenv
@@ -1056,11 +1095,15 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          the value can never change, so keeping the stronger type is sound,
          and no runtime check (trap site) is manufactured out of
          already-proven code. Applies to the two proof-carrying types:
-         slice minimum lengths, and refined int ranges (the latter only
-         when the annotation is plain i32 -- narrower annotations like u8
-         change the storage representation, so there the declared type must
-         win). `let mut` keeps the declared type: reassignment can
-         genuinely bring weaker values, so the weak type is honest. *)
+         slice minimum lengths, and refined int ranges -- the latter only
+         when the annotation's own type MATCHES the refined value's base
+         (generalized from the old i32-only check: a refined int's base
+         now determines its storage representation, so an annotation
+         naming a DIFFERENT primitive type would change that
+         representation, and there the declared type must win, same
+         reasoning as before just no longer hardcoded to i32). `let mut`
+         keeps the declared type: reassignment can genuinely bring weaker
+         values, so the weak type is honest. *)
       let bind_ty =
         if is_mut then ty
         else match init_ty_opt with
@@ -1068,7 +1111,17 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
           | Some et ->
               (match repr ty, repr et with
                | TSlice (el, m1), TSlice (_, m2) when m2 > m1 -> TSlice (el, m2)
-               | TI32, (TRefinedInt _ as r) -> r
+               (* `base` is a NESTED field inside the already-repr'd `et`,
+                  so it is not itself guaranteed dereferenced (repr only
+                  resolves the top-level TVar chain, not fields nested
+                  inside a matched constructor) -- must repr it again
+                  before comparing, or a base that's still a live
+                  TVar(ref(Link TI32)) would structurally disagree with
+                  the plain TI32 annotation despite meaning the same type
+                  after resolution. Found via a real test regression
+                  (Mul/Band chain producing a refined result whose base
+                  came from a freshly-unified IntLit type variable). *)
+               | t_ann, (TRefinedInt (_, _, base) as r) when t_ann = repr base -> r
                | _ -> ty)
       in
       ( StringMap.add name (bind_ty, is_mut) tyenv,
@@ -1113,7 +1166,12 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          Sync rule: llvm_gen.ml's For case makes the same decision through
          the same Const_env.bound_value helper; keep them identical. *)
       let idx_ty = match Const_env.bound_value lo_expr, Const_env.bound_value hi_expr with
-        | Some lo_v, Some hi_v -> TRefinedInt (lo_v, hi_v)
+        (* Loop counters stay base=TI32 always (a deliberate exception,
+           unlike every other TRefinedInt construction site in this file):
+           a for-loop counter is fundamentally array-index-shaped, and
+           lo_ty/hi_ty are already forced to TI32 above regardless of the
+           bound expressions' own types. *)
+        | Some lo_v, Some hi_v -> TRefinedInt (lo_v, hi_v, TI32)
         | _ -> TI32
       in
       (* Loop variable is immutable (Imm binding, no reassignment). Does not escape the loop. *)
