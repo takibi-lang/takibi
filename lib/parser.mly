@@ -312,7 +312,23 @@ array_size:
 (* type_expr: base_type_expr + TypeRefined. Used in unambiguous positions such as after : or -> *)
 type_expr:
   | base_type_expr { $1 }
-  | LBRACE lo = INT DOTDOTLT hi = INT RBRACE { TypeRefined (lo, hi) }
+  | LBRACE lo = INT DOTDOTLT hi = INT RBRACE
+    { (* TypeRefined is always represented as i32 at the LLVM level (see
+         lib/types.ml); lo/hi are OCaml ints (63-bit) so a bound outside
+         i32's range parses fine but silently truncates at codegen time
+         (e.g. emit_refined_cast_check's `const_int i32 hi`), turning a
+         nonsensical range into a wrapped-around one with no warning.
+         Reject it here instead, at the single grammar production that
+         ever constructs a literal TypeRefined. *)
+      if lo < -2147483648 || hi > 2147483647 then
+        raise (Types.TypeError ($symbolstartpos,
+          Printf.sprintf
+            "refined type bound {%d..<%d} is out of i32 range \
+             (-2147483648..2147483647): {lo..<hi} is always represented \
+             as i32 internally, regardless of the integer type it is used \
+             with"
+            lo hi));
+      TypeRefined (lo, hi) }
 
 fn_type_params:
   | /* empty */                              { [] }

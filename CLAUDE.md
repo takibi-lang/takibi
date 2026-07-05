@@ -221,6 +221,49 @@ Precedence (low -> high): `||` < `|` < `^` < comparison < `&` < `as` < `+/-` < `
 **`>>` is sign-aware**: for signed types (i8/i16/i32/i64) `>>` generates `ashr` (arithmetic, sign-extending);
 for unsigned types (u8/u16/u32/u64) it generates `lshr` (logical, zero-extending). This matches standard C behavior.
 
+### {lo..<hi} Bounds Are Rejected Outside i32 Range at Parse Time
+
+`TRefinedInt`/`TypeRefined` is **always represented as i32 at the LLVM
+level** (see `lib/types.ml`'s comment above its subtyping rules), no
+matter which integer type a `{lo..<hi}` value is later used with (u8,
+u64, usize, ...) -- subtyping into those wider/narrower types is a
+separate check (`lib/types.ml`'s `TRefinedInt _, TU8/TU16/TU32/TU64/
+TUsize/TI8/TI16/TI64 when ...` cases), not a change of the underlying
+representation.
+
+`lo`/`hi` are parsed as OCaml `int` (63-bit), so a bound outside i32's
+range (e.g. `{0..<5000000000}`) used to parse and type-check with no
+error, then silently misbehave at codegen time -- e.g.
+`emit_refined_cast_check`'s `const_int (i32_type context) hi` truncates
+`hi` to its low 32 bits, turning a nonsensical range into a wrapped-around
+one with no warning. This was a real, if never-yet-triggered, latent
+soundness hole (no example ever wrote a bound this large -- embedded
+buffer sizes stay well under 2^31 -- but nothing stopped it).
+
+Fixed in `lib/parser.mly`'s `type_expr` rule (the single grammar
+production that ever constructs a literal `TypeRefined` from source,
+covering every use site: parameter/return types, `let` annotations, and
+`expr as {lo..<hi}` casts): `lo < -2147483648 || hi > 2147483647` is now a
+compile error (`Types.TypeError`), raised at the same `$symbolstartpos`
+pattern already used by `array_size`'s unknown-constant error. The lower
+bound is currently unreachable via source syntax (`{lo..<hi}`'s grammar
+only accepts a bare non-negative `INT` token for `lo`/`hi` -- no unary
+minus support at the type level, a separate pre-existing limitation, not
+one this check introduces), but is included for when that syntax gap is
+closed. Test coverage: `test/test_takibi.ml`'s parser_tests (in-range
+bound parses, out-of-range upper bound is a `TypeError` mentioning "i32
+range").
+
+**Deliberately NOT addressed by this fix**: widening `TRefinedInt` itself
+to genuinely support ranges beyond i32 (e.g. for `usize`/`u64`/`i64`
+values whose real range exceeds 2^31, such as an SD card LBA offset
+`lba * 512` on a card larger than 2GB). This is a bigger change (a new
+LLVM-level representation choice, propagating through every binop/
+narrowing rule) with no concrete example needing it yet -- deferred until
+one does, per this project's usual practice of not generalizing ahead of
+a real need. The guard added here only prevents *silent miscompilation*
+of an out-of-range bound; it does not lift the range limit itself.
+
 ### Soundness Condition for % Range Propagation
 
 Range propagation for `n % m` (where m is a positive integer literal) returns `{0..<m}` **only when the left operand is guaranteed non-negative at the type level**.

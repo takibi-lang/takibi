@@ -197,6 +197,32 @@ let parser_tests = [
     | exception Types.TypeError _ -> ()
   );
 
+  Alcotest.test_case "refined type bound within i32 range parses fine" `Quick (fun () ->
+    match parse "fn f(x: {0..<2147483647}) i32 { return 0; }" with
+    | [Ast.FuncDef _] -> ()
+    | _ -> Alcotest.fail "expected single FuncDef"
+  );
+
+  Alcotest.test_case
+    "refined type upper bound beyond i32 range is a compile error, not a \
+     silent i32 truncation ({lo..<hi} is always represented as i32 at the \
+     LLVM level -- see lib/types.ml -- so a bound this compiler once \
+     accepted with no check would wrap around unnoticed at codegen time). \
+     Note: {lo..<hi}'s grammar only accepts a bare (non-negative) INT \
+     literal for lo/hi, so a negative-lower-bound counterpart of this test \
+     is not currently expressible in source at all -- a separate, \
+     pre-existing limitation, not one this check introduces"
+    `Quick (fun () ->
+    match parse "fn f(x: {0..<5000000000}) i32 { return 0; }" with
+    | _ -> Alcotest.fail "expected an error, but parsing succeeded"
+    | exception Types.TypeError (_, msg) ->
+        Alcotest.(check bool) "mentions i32 range" true
+          (let n = String.length "i32 range" and m = String.length msg in
+           let rec scan i = i + n <= m &&
+             (String.sub msg i n = "i32 range" || scan (i + 1)) in
+           scan 0)
+  );
+
   Alcotest.test_case "return statement" `Quick (fun () ->
     match parse "fn f() i32 { return 42; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
