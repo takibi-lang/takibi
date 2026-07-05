@@ -1337,6 +1337,42 @@ eth.tkb` (`net_rx_frame()` rewritten, unsafe removed), `lib/type_inf.ml`
 tcp_echo.tkb` (one site fixed, one site's necessity reinforced with the
 two failed-reformulation findings), 1 new unit-test case for the Mul fix.
 
+**Two follow-up refinements on the remaining site** (same session,
+prompted by asking "could net_rx_frame's return type just be more
+flexible instead?"):
+
+1. `data_len` is now computed as `max(tcp_len - tcp_hdr_len, 0)` instead
+   of the raw subtraction. This is a genuine, safe-side improvement, not
+   just cosmetic: the raw Sub result's spuriously negative lower bound
+   (an artifact of the type system, not a real possibility) is exactly
+   what made the same-base rule's `wlo >= 0` guard fail. Clamping changes
+   NO observable behavior (a genuinely-negative raw result clamps to 0,
+   and 0 still fails the very next `data_len > 0` check exactly like a
+   negative value would have) -- it only makes `data_len`'s own type
+   honestly reflect a fact that was already true.
+
+2. **Confirmed by direct algebra why "make net_rx_frame's return type
+   more flexible" does not close this, and why the assertion is
+   nonetheless 100% true** (not merely "probably fine"): `data_off +
+   data_len = (34 + tcp_hdr_len) + (tcp_len - tcp_hdr_len) = 34 + tcp_len`
+   -- `tcp_hdr_len` cancels algebraically. And `tcp_len = total_len - ihl
+   <= (len - 14) - 20 = len - 34` (using the already-checked `total_len <=
+   len - 14` and `ihl == 20`), so `data_off + data_len <= len <= 1514`
+   ALWAYS, for any packet that passed the earlier validation -- not a rare
+   case, not a protocol edge case, a plain algebraic certainty. Verified
+   empirically too, not just by hand: widening `frame`'s declared minimum
+   to an absurd 100000 does NOT make the proof succeed with the raw
+   (unclamped) `data_len`, because the FIRST failing check is the lo<=hi
+   proof (same-base's `wlo>=0` guard), independent of capacity entirely;
+   only after fixing that (item 1 above) does the capacity check even
+   become the active constraint, and at that point it needs frame's
+   minimum to be an inflated (dishonest) ~1554 to close -- confirming the
+   gap is purely representational (the type system cannot express "these
+   two variables' sum is invariant"), not a real runtime possibility and
+   not something any amount of "flexibility" on frame's OWN declared type
+   can fix, since frame's type has nothing to do with the data_off/
+   data_len relationship at all.
+
 ### Synchronization Primitive Design and Current Limitations
 
 Synchronization primitives have a 3-layer structure:
