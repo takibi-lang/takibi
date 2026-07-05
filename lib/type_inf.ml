@@ -30,6 +30,25 @@ let is_unsigned_ty = function
   | TU8 | TU16 | TU32 | TU64 | TUsize -> true
   | _ -> false
 
+(* min/max's "unknown bound" placeholder (see the Call case below) must
+   itself be a legal value of whichever base type the result unifies
+   against, or a fully-unconstrained call fails to type-check for no real
+   reason: types.ml's TRefinedInt subtyping rules reject bounds wider than
+   a narrow type's own representable range (u8 needs hi <= 256, u16 needs
+   hi <= 65536, i8/i16 need |lo|/hi within their own range), so one fixed
+   magic constant everywhere is only safe for i32/i64/u32/u64/usize, not
+   u8/u16/i8/i16. Clamp per base instead. Sync rule: lib/llvm_gen.ml's
+   min/max codegen mirrors this exactly (base must be repr'd first --
+   see the Call case's own comment on why). *)
+let min_max_sentinel base =
+  match base with
+  | TI8  -> (-128, 128)
+  | TI16 -> (-32768, 32768)
+  | TU8  -> (0, 256)
+  | TU16 -> (0, 65536)
+  | t when is_unsigned_ty t -> (0, 1_000_000_000)
+  | _ -> (-1_000_000_000, 1_000_000_000)
+
 (* Accept bool or any integer type as a condition (for if/while) *)
 let check_cond loc ct =
   match repr ct with
@@ -737,14 +756,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              | Some k -> Some (k, k + 1)
              | None -> (match repr aty with TRefinedInt (x, y, _) -> Some (x, y) | _ -> None)
            in
-           (* The "unknown" sentinel must itself be a legal value of base:
-              a negative sentinel_lo is fine for a signed base (matches
-              the original i32-only design) but cannot subtype into an
-              UNSIGNED destination at all (TRefinedInt's subtyping rules
-              require lo >= 0 for u8/u16/u32/u64/usize) -- 0 is the
-              correct "no lower bound known" placeholder there instead. *)
-           let sentinel_lo = if is_unsigned_ty base then 0 else -1_000_000_000
-           and sentinel_hi = 1_000_000_000 in
+           let (sentinel_lo, sentinel_hi) = min_max_sentinel base in
            let ra = range_of a at and rb = range_of b bt in
            let lo =
              match ra, rb with

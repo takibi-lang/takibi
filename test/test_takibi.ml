@@ -3185,6 +3185,29 @@ let codegen_tests = [
           return 0;
         }");
 
+  Alcotest.test_case
+    "Refinement Numerical Type: min/max's unknown-bound sentinel is clamped \
+     to each base's own representable range (min_max_sentinel), not one \
+     fixed +-1 billion constant everywhere -- u32/u64/usize/i32/i64 are wide \
+     enough to absorb +-1 billion so those were never affected, but u8 \
+     (hi <= 256), u16 (hi <= 65536), i8 (+-128), and i16 (+-32768) are not: \
+     a fully-unconstrained min/max call on two such values used to fail to \
+     unify against the result's own narrow destination type, even though \
+     every individual clamp involved is trivially sound" `Quick
+    (expect_codegen_ok
+       "fn refnum_min_u8_unconstrained(a: u8, b: u8) -> u8 {
+          return min(a, b);
+        }
+        fn refnum_max_u16_unconstrained(a: u16, b: u16) -> u16 {
+          return max(a, b);
+        }
+        fn refnum_min_i8_unconstrained(a: i8, b: i8) -> i8 {
+          return min(a, b);
+        }
+        fn refnum_max_i16_unconstrained(a: i16, b: i16) -> i16 {
+          return max(a, b);
+        }");
+
 ]
 
 (* -- Entry point ----------------------------------------------------------- *)

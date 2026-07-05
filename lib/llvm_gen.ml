@@ -543,6 +543,21 @@ let rec is_unsigned = function
   | TypeRefined (_, _, base) -> is_unsigned base
   | _ -> false
 
+(* Sync rule with type_inf.ml's min_max_sentinel: the "unknown bound"
+   placeholder must itself be a legal value of whichever base type the
+   result is tagged with, or a fully-unconstrained min/max call on a
+   narrow type would disagree with what type_inf.ml already proved.
+   Operates on Ast.type_expr (already fully resolved by codegen time, no
+   repr needed here). *)
+let min_max_sentinel base =
+  match base with
+  | TypeI8  -> (-128, 128)
+  | TypeI16 -> (-32768, 32768)
+  | TypeU8  -> (0, 256)
+  | TypeU16 -> (0, 65536)
+  | t when is_unsigned t -> (0, 1_000_000_000)
+  | _ -> (-1_000_000_000, 1_000_000_000)
+
 (* Widen TypeRefined to its own base type; leave explicit-width types
    unchanged. Mirrors type_inf.ml's canon_ty (sync rule): codegen needs
    this too now that a refined value's LLVM representation width follows
@@ -1756,12 +1771,15 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         | Some k -> Some (k, k + 1)
         | None -> (match aty with TypeRefined (x, y, _) -> Some (x, y) | _ -> None)
       in
-      (* Sync rule with type_inf.ml's Call case: the "unknown" sentinel
-         must itself be a legal value of the result's base type -- a
-         negative sentinel_lo cannot subtype into an unsigned destination
-         (u8/u16/u32/u64/usize all require lo >= 0), so use 0 there. *)
-      let sentinel_lo = if is_unsigned at then 0 else -1_000_000_000
-      and sentinel_hi = 1_000_000_000 in
+      (* canon_ty here (not raw `at`): `at` can itself still be a
+         TypeRefined wrapping the true base (e.g. one operand was already
+         narrowed before reaching this call), and min_max_sentinel pattern
+         -matches concrete base constructors directly -- feeding it an
+         un-canon'd TypeRefined would miss the TypeU8/TypeI8/etc. cases
+         and fall back to the wide generic sentinel, producing a bound
+         that then fails ret_ty's OWN subtyping check below. *)
+      let base = canon_ty at in
+      let (sentinel_lo, sentinel_hi) = min_max_sentinel base in
       let ra = range_of a_e at and rb = range_of b_e bt in
       let lo =
         match ra, rb with
@@ -1781,7 +1799,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                   | _ -> sentinel_hi)
                else sentinel_hi
       in
-      let ret_ty = TypeRefined (lo, hi, canon_ty at) in
+      let ret_ty = TypeRefined (lo, hi, base) in
       let cmp = if is_unsigned at then
                   (if fname = "min" then build_icmp Icmp.Ult av bv "mm_cmp" builder
                    else build_icmp Icmp.Ugt av bv "mm_cmp" builder)

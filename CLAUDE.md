@@ -658,19 +658,63 @@ parameters raised `cannot unify {-1000000000..<1000000000} with u64`, an
 outright regression for a previously-nonexistent capability. Fixed in
 both files (sync rule) by making `sentinel_lo` conditional:
 `is_unsigned_ty base` (type_inf.ml) / `is_unsigned at` (llvm_gen.ml)
-selects `0` instead of `-1_000_000_000`; `sentinel_hi` stays
-`1_000_000_000` unconditionally (imprecise for a narrow base like u8, but
-conservative/safe, not unsound, so left alone). The `base`/`at` value
-consulted here must ALSO be resolved through `repr` before this check
-(same class of issue as the `Let`/anti-subtyping fix above, applied
-proactively here since `is_unsigned_ty` PATTERN MATCHES the base's
-concrete shape rather than comparing it, and an unresolved TVar would
-silently fall through to "not unsigned" regardless of what it actually
-resolves to). Regression tests: `test/test_takibi.ml`'s
-`refnum_min_u64`/`refnum_max_u64` (unconstrained u64 arguments, must not
-raise), `refnum_min_clamp_u64` (min against a literal still proves an
-array index against a smaller buffer), `refnum_narrow_u64` (if-narrowing
-a u64 variable proves an index with zero trap sites).
+selects `0` instead of `-1_000_000_000`; `sentinel_hi` was left at
+`1_000_000_000` unconditionally at the time, believed "imprecise for a
+narrow base like u8, but conservative/safe, not unsound" -- **this belief
+was wrong, corrected below.** The `base`/`at` value consulted here must
+ALSO be resolved through `repr` before this check (same class of issue as
+the `Let`/anti-subtyping fix above, applied proactively here since
+`is_unsigned_ty` PATTERN MATCHES the base's concrete shape rather than
+comparing it, and an unresolved TVar would silently fall through to "not
+unsigned" regardless of what it actually resolves to). Regression tests:
+`test/test_takibi.ml`'s `refnum_min_u64`/`refnum_max_u64` (unconstrained
+u64 arguments, must not raise), `refnum_min_clamp_u64` (min against a
+literal still proves an array index against a smaller buffer),
+`refnum_narrow_u64` (if-narrowing a u64 variable proves an index with
+zero trap sites).
+
+**Follow-up fix (same session, prompted by the user asking specifically
+whether the sentinel should be "clamped to the base's actual width"):
+the "conservative/safe" claim above was wrong.** `sentinel_hi =
+1_000_000_000` is only harmless for bases whose subtyping rule has no
+upper-bound restriction at all (`TI32`/`TI64`, unconditional; `TU32`/
+`TU64`/`TUsize`, `lo >= 0` only) -- but `TU8` requires `hi <= 256`, `TU16`
+requires `hi <= 65536`, and `TI8`/`TI16` require `hi <= 128`/`32768`
+(with a matching `lo` floor). A sentinel of 1 billion FAILS all four of
+those checks outright, so a fully-unconstrained `min`/`max` call on two
+u8/u16/i8/i16-typed arguments (e.g. `min(a: u8, b: u8)` with neither
+argument statically bounded) raised a spurious `cannot unify` error --
+the exact same class of regression as the u64 case above, just not
+triggered by anything in the existing test suite (nothing exercised
+min/max on a narrow base with no known bound at all) or by the earlier
+manual verification (which only tried u64). Fixed by replacing the
+single hardcoded sentinel pair with `min_max_sentinel base` (added right
+after `is_unsigned_ty`/`is_unsigned`, sync rule), which returns the
+correct per-base placeholder: `(-128, 128)` for i8, `(-32768, 32768)` for
+i16, `(0, 256)` for u8, `(0, 65536)` for u16, `(0, 1_000_000_000)` for any
+other unsigned base, `(-1_000_000_000, 1_000_000_000)` otherwise (i32/
+i64) -- i.e. each narrow type's placeholder is its own true representable
+range, while the wide types keep the original arbitrary-but-sufficient
+constant (their subtyping rules don't care how large `hi` is anyway, so
+there's no benefit to computing their true 2^31/2^63-ish bounds, and doing
+so for i64/u64 would risk overflowing OCaml's 63-bit native `int`).
+**`llvm_gen.ml`'s codegen mirror needed one additional correction found
+while wiring this up**: `at` (the min/max call's own operand type) can
+itself still be a `TypeRefined` wrapping the true base (e.g. one operand
+was already narrowed by an outer `if` before reaching this call) --
+`min_max_sentinel` pattern-matches concrete base constructors directly, so
+calling it on a raw, un-`canon_ty`'d `at` would miss the `TypeU8`/`TypeI8`
+/etc. cases, silently fall through to the wide generic sentinel, and
+produce a bound that then fails `ret_ty`'s OWN subtyping check one line
+later -- the same "extract the base without canonicalizing/repr'ing it
+first" mistake as the two bugs above, just one call deeper. Fixed by
+computing `let base = canon_ty at in` once and reusing that same `base`
+for both the sentinel lookup and `ret_ty`'s construction (previously
+`ret_ty` computed `canon_ty at` separately, a second call that coincidentally
+gave the same right answer for `ret_ty` itself but not for the sentinel
+if evaluated on the raw value). Regression test:
+`test/test_takibi.ml`'s `refnum_min_u8_unconstrained` (u8/u16/i8/i16, all
+four fully-unconstrained, must not raise).
 
 **Deliberately NOT addressed by this generalization**:
 - The surface `{lo..<hi}` type syntax still always means "base i32" --
