@@ -38,5 +38,7 @@ let OUR_IP: [u8; 4] = {192, 168, 10, 2};
 // OUR_IP) -- no SLIRP-style constraint exists on real hardware, so this
 // is simply the same value as OUR_IP above, just under the name
 // http_server.tkb actually references so its main() needs no branch to
-// pick between the two.
-let HTTP_SERVER_IP: [u8; 4] = {192, 168, 10, 2};
+// pick between the two. Referencing OUR_IP directly (instead of
+// duplicating its array literal) means the two constants can no longer
+// silently drift apart if only one of them is ever edited.
+let HTTP_SERVER_IP: [u8; 4] = OUR_IP;

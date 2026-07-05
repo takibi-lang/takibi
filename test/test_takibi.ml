@@ -42,6 +42,20 @@ let expect_trap_sites expected src () =
   Alcotest.(check int) "recorded trap sites"
     expected (List.length !Llvm_gen.trap_sites)
 
+(* Expect codegen to raise Llvm_gen.Error with a message containing [fragment]. *)
+let expect_codegen_error fragment src () =
+  match gen_codegen src with
+  | _ ->
+      Alcotest.failf "expected Llvm_gen.Error containing %S, but codegen succeeded"
+        fragment
+  | exception Llvm_gen.Error msg ->
+      if not (let n = String.length fragment in
+              let m = String.length msg in
+              let rec scan i = i + n <= m &&
+                (String.sub msg i n = fragment || scan (i + 1))
+              in scan 0)
+      then Alcotest.failf "Llvm_gen.Error %S does not contain %S" msg fragment
+
 (* Custom Alcotest testables *)
 
 let rec show_type = function
@@ -2834,6 +2848,74 @@ let codegen_tests = [
         fn codegen_usize_narrowing_cast_cortexm(n: i64) -> usize {
           return n as usize;
         }");
+
+  (* Global initializer constant folding: `as` casts and references to
+     earlier immutable global constants. Previously eval_const only
+     recognized bare IntLit/StructLit initializers, so any of these forms
+     raised "unsupported constant expression" -- see CLAUDE.md's "Global
+     let / let mut and Array-Size Constants" follow-up notes for the two
+     real-world cases (an `as i32` cast on an MMIO bit-pattern constant, and
+     HTTP_SERVER_IP duplicating OUR_IP's array literal) that motivated this. *)
+  Alcotest.test_case
+    "global let initializer: `as` cast on a literal folds (the ETH_RDES0_OWN \
+     case -- previously had to be written as a bare literal with no cast)"
+    `Quick
+    (expect_codegen_ok
+       "let GLOBALCONST_ETH_RDES0_OWN: i32 = 0x80000000 as i32;
+        fn codegen_globalconst_cast_use() -> i32 { return GLOBALCONST_ETH_RDES0_OWN; }");
+
+  Alcotest.test_case
+    "global let initializer: unary minus (desugared to BinOp(Sub, IntLit 0, _)) \
+     folds to a negative constant" `Quick
+    (expect_codegen_ok
+       "let GLOBALCONST_NEG: i32 = -5;
+        fn codegen_globalconst_neg_use() -> i32 { return GLOBALCONST_NEG; }");
+
+  Alcotest.test_case
+    "global let initializer: a chained truncating cast folds correctly at \
+     each layer, not just the outermost one -- (300 as u8) as i32 must yield \
+     44 (300 mod 256), not 300, confirming the intermediate u8 truncation \
+     actually happens before the final widen" `Quick
+    (expect_codegen_ok
+       "let GLOBALCONST_CHAINED_CAST: i32 = (300 as u8) as i32;
+        fn codegen_globalconst_chained_cast_use() -> i32 { return GLOBALCONST_CHAINED_CAST; }");
+
+  Alcotest.test_case
+    "global let initializer: a scalar reference to an earlier immutable \
+     global constant folds" `Quick
+    (expect_codegen_ok
+       "let GLOBALCONST_A: i32 = 1;
+        let GLOBALCONST_B: i32 = GLOBALCONST_A;
+        fn codegen_globalconst_scalar_ref_use() -> i32 { return GLOBALCONST_B; }");
+
+  Alcotest.test_case
+    "global let initializer: an array-typed reference to an earlier \
+     immutable global constant folds (the HTTP_SERVER_IP = OUR_IP case -- \
+     previously rejected at the type-check stage because Var's ordinary \
+     array-decay-to-pointer rule doesn't match an array-typed annotation)"
+    `Quick
+    (expect_codegen_ok
+       "let GLOBALCONST_OUR_IP: [u8; 4] = {192, 0, 2, 1};
+        let GLOBALCONST_SERVER_IP: [u8; 4] = GLOBALCONST_OUR_IP;
+        fn codegen_globalconst_array_ref_use() -> u8 { return GLOBALCONST_SERVER_IP[0]; }");
+
+  Alcotest.test_case
+    "global let initializer: referencing a `let mut` global is rejected -- \
+     a mutable global's value can change at runtime, so it is never a \
+     compile-time constant" `Quick
+    (expect_codegen_error "not a compile-time constant"
+       "let mut GLOBALCONST_MUT_A: i32 = 1;
+        let GLOBALCONST_MUT_B: i32 = GLOBALCONST_MUT_A;
+        fn codegen_globalconst_mut_ref_use() -> i32 { return GLOBALCONST_MUT_B; }");
+
+  Alcotest.test_case
+    "global let initializer: referencing a global declared LATER in the \
+     source is rejected (no forward references, same convention as \
+     Const_env's array-size constants)" `Quick
+    (expect_codegen_error "not a compile-time constant"
+       "let GLOBALCONST_FWD_B: i32 = GLOBALCONST_FWD_A;
+        let GLOBALCONST_FWD_A: i32 = 1;
+        fn codegen_globalconst_fwd_ref_use() -> i32 { return GLOBALCONST_FWD_B; }");
 
 ]
 

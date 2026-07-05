@@ -110,14 +110,12 @@ let ETH_BUF_SIZE: i32 = 1536; // max 1518-byte Ethernet frame, rounded up
 
 // 0x80000000 as i32 wraps to a negative bit pattern (top bit set) -- only
 // ever tested via bitwise AND below, never compared as a signed magnitude.
-// (Global initializers only accept a bare IntLit, not a Cast expression --
-// see lib/llvm_gen.ml's gen_global/eval_const -- so this can't spell "as i32".)
-let ETH_RDES0_OWN: i32 = 0x80000000;
+let ETH_RDES0_OWN: i32 = 0x80000000 as i32;
 let ETH_RDES1_RCH: i32 = 0x4000;
 let ETH_RDES0_FL_SHIFT: i32 = 16;
 let ETH_RDES_FL_MASK: i32 = 0x3FFF;
 
-let ETH_TDES0_OWN: i32 = 0x80000000; // same as ETH_RDES0_OWN: top-bit flag, bitwise use only
+let ETH_TDES0_OWN: i32 = ETH_RDES0_OWN; // same top-bit flag, bitwise use only
 let ETH_TDES0_LS:  i32 = 0x20000000;
 let ETH_TDES0_FS:  i32 = 0x10000000;
 let ETH_TDES0_TCH: i32 = 0x00100000;

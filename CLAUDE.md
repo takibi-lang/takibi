@@ -449,6 +449,89 @@ let mut ring: [i32; QUEUE_SIZE];      // resolved to [i32; 4] at parse time
 ```
 See `examples/const_global/` (valid usage) and `examples/const_global_wrong/` (compile-error demo).
 
+### Global Constant Folding: `as` Casts and Cross-Global References
+
+Extends the same "compile-time constant" idea as the array-size constants
+above (and reuses the same no-forward-references convention), but for the
+*value* side: an immutable global's initializer can now be an `as` cast
+chain (`let ETH_RDES0_OWN: i32 = 0x80000000 as i32;`) or a reference to an
+earlier immutable global constant (`let HTTP_SERVER_IP: [u8;4] = OUR_IP;`),
+not just a bare `IntLit`/`StructLit`. Motivated by two real pain points hit
+during the STM32 Ethernet work (see git history around 2026-07): the `as
+i32` cast above used to fail with "unsupported constant expression" (had to
+be written as a bare literal instead), and `examples/common_stm32/
+netconfig.tkb`'s `HTTP_SERVER_IP` had to duplicate `OUR_IP`'s array literal
+verbatim, so the two could silently drift apart if only one was ever
+edited. Both are fixed now (see that file and `examples/common_stm32/
+eth.tkb`'s `ETH_RDES0_OWN`/`ETH_TDES0_OWN`).
+
+**Design: fold in OCaml-int space, not via LLVM constant-expression ops.**
+`lib/llvm_gen.ml`'s `eval_const_int` reduces an integer/bool-valued
+constant expression (`IntLit`, an `as` cast chain, the unary-minus desugar
+`BinOp(Sub, IntLit 0, _)` -- see "Unary Minus is Desugared in the Parser"
+above -- or a `Var` reference) to a plain OCaml `int`, entirely without
+calling into LLVM. This sidesteps a real gap: the LLVM 19 OCaml bindings
+expose `const_trunc` but not `const_zext`/`const_sext`, so there is no
+direct constant-folding primitive for a *widening* cast. Working in OCaml
+int space avoids needing one at all -- `Llvm.const_int` already wraps/
+truncates its input to the target width when the value is finally
+embedded, exactly like the pre-existing `IntLit i, _ -> const_int
+(ltype_of_ast ft) i` case already relied on. The only place explicit
+masking is still needed is a *narrowing* cast **in the middle of a chain**:
+`(300 as u8) as i32` must truncate to 44 before widening back to i32, or
+the outer i32 cast would silently see the untruncated 300. `eval_const_int`
+handles this by masking at every `Cast` layer using *that layer's own*
+target width (from the AST node itself, not the outer caller's `ft`), so
+each truncation happens at exactly the point the source `as` chain says it
+should.
+
+**Cross-global references reuse one table, `global_const_defs`**
+(name -> declared type + original initializer expr), populated by
+`gen_global` in source order as each immutable global with an initializer
+is processed. `eval_const`'s new `Var name, _` case looks the name up and
+recursively re-evaluates the *referenced global's own initializer
+expression* against the current `ft` -- this one case handles scalar,
+array, and struct references uniformly (no separate array-specific logic
+needed), and `eval_const_int`'s own `Var` case does the same for the
+integer-folding path. A `let mut` global is never recorded (its value can
+change at runtime, so it is never a compile-time constant); referencing
+one, or referencing a global declared *later* in the source (no forward
+references, same restriction as `Const_env`'s array-size constants),
+simply finds no entry and raises a clear `Llvm_gen.Error` rather than
+silently reading a stale or wrong value.
+
+**Why this didn't need a `type_inf.ml` change for scalars, but did for
+arrays/structs**: `infer_expr`'s ordinary `Var` case decays an array-typed
+variable to a pointer (correct for using the array as an ordinary
+expression value, e.g. passed to a function) -- but a global referencing
+another global by name means "copy that global's value", so unifying the
+declared array type against the decayed pointer type was rejecting exactly
+the case this feature exists to allow. Pass 2 of `infer_program` (global
+initializer checking) now has a dedicated `Var vname` branch that looks
+`vname` up in `genv` directly (the raw, undecayed type) and unifies
+against that instead of going through `infer_expr`. Scalar references
+already worked before this change (a scalar type never decays), so this
+branch is a pure generalization, not a behavior change for the cases that
+already passed.
+
+**Deliberately NOT implemented**: general constant-expression arithmetic
+(`Add`/`Mul`/etc. between two constants). The unary-minus case is handled
+only because it is a single, very common, already-desugared shape
+(`BinOp(Sub, IntLit 0, _)`); a broader "constexpr" evaluator was judged
+out of scope for what was actually asked for (an `as` cast and a
+same-value global reference), per this project's usual practice of not
+generalizing ahead of a concrete need. Revisit if a real example needs
+e.g. `let X: i32 = A + B;` between two global constants.
+
+**Files**: `lib/type_inf.ml` (Pass 2's `Var` branch), `lib/llvm_gen.ml`
+(`global_const_defs`, `eval_const_int`, `eval_const`'s `Cast`/`Var` cases),
+`examples/common_stm32/eth.tkb` (`ETH_RDES0_OWN` cast restored,
+`ETH_TDES0_OWN` now references it), `examples/common_stm32/netconfig.tkb`
+(`HTTP_SERVER_IP` now references `OUR_IP`), 7 new unit-test cases in
+`test/test_takibi.ml`'s `codegen_tests` (cast folding, chained truncating
+cast, unary minus, scalar/array cross-references, and the two rejection
+cases: mutable-global reference and forward reference).
+
 ### Function Pointer Types Span 5 Files
 Files changed when the `fn(T...) -> R` type was added:
 1. `lib/ast.ml` -- `TypeFn of type_expr list * type_expr` constructor
@@ -1542,15 +1625,6 @@ the normal (always `-g`-free) build outputs.
   echo server (`ptr + i32` / `ptr - i32` already work for descriptor-ring indexing).
 - **`sizeof(T)` cannot be used as an array size** (`[T; sizeof(Foo)]`) -- see the `sizeof(T)` section above for why
   (parser-time vs. codegen-time resolution mismatch) and what combining them would require.
-- **Global `let` initializers can't constant-fold `as` casts or reference another global constant** -- only a bare
-  `IntLit`/`StructLit` is accepted (`lib/llvm_gen.ml`'s `eval_const`). Hit twice during the STM32 Ethernet/unification
-  work: `let ETH_RDES0_OWN: i32 = 0x80000000 as i32;` failed with "unsupported constant expression" (had to drop the
-  cast and use a bare literal instead), and `examples/common_stm32/netconfig.tkb`'s `HTTP_SERVER_IP` had to duplicate
-  `OUR_IP`'s array literal verbatim rather than reference it, so the two constants can silently drift apart if only
-  one is ever edited. **Deferred**: would need extending the array-size-constant folding already done by
-  `Const_env` (see "Global let / let mut and Array-Size Constants" above) to general initializer expressions --
-  currently that mechanism only resolves bare-`IntLit`-valued names for `[T; N]` sizes, not arbitrary constant
-  expressions used as an initializer value.
 - **No module/import system for `.tkb` files** -- which common files get concatenated into a given example's build
   is decided entirely by hand-maintained Makefile variable lists (`COMMON_UART`, `COMMON_GIC`, etc.), with nothing
   in the source itself declaring "this file needs that file." Bit us directly while removing `irq.tkb`'s `IS_QEMU`

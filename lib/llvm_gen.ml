@@ -33,6 +33,18 @@ let enum_underlying  : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 8
 let enum_variants_tbl: (string, (string * int) list) Hashtbl.t = Hashtbl.create 8
 (* Non-exhaustive flag: enum name -> bool (true = has _ marker, int->enum cast skips trap) *)
 let enum_nonexhaustive: (string, bool) Hashtbl.t = Hashtbl.create 8
+(* Immutable global constant registry: name -> (declared_type, initializer_expr).
+   Populated by gen_global as each global is processed, in source order, and
+   consulted by eval_const's Cast/Var cases below so a later global's
+   initializer can fold a reference to an earlier one (`let B: T = A;`) or a
+   cast built on one (`let B: T = A as T;`). Only immutable globals with an
+   initializer are recorded -- a `let mut` global's value can change at
+   runtime, so it is never a compile-time constant, and looking it up here
+   simply won't be found (giving a clear "not a compile-time constant" error
+   rather than silently reading a stale value). Recording happens in source
+   order with no forward-reference support, mirroring Const_env's existing
+   array-size-constant mechanism. *)
+let global_const_defs : (string, Ast.type_expr * Ast.expr) Hashtbl.t = Hashtbl.create 16
 
 (* -- Trap-site accounting (--forbid-trap) --------------------------------- *)
 (* Every runtime trap check emitted by codegen (array bounds check, checked
@@ -2233,6 +2245,62 @@ let gen_func ?prog_types fdef =
 
 (* -- Top-level codegen --------------------------------------------------- *)
 
+(* Bit width to mask a compile-time integer cast against, mirroring what
+   ltype_of_ast would give that AST type -- kept separate from ltype_of_ast
+   itself since eval_const_int stays entirely in OCaml int space (see its
+   comment below for why). *)
+let int_bits_of_ast (ty : Ast.type_expr) =
+  match ty with
+  | TypeI8  | TypeU8   -> 8
+  | TypeI16 | TypeU16  -> 16
+  | TypeI32 | TypeU32  -> 32
+  | TypeI64 | TypeU64  -> 64
+  | TypeUsize          -> usize_bitwidth ()
+  | TypeBool           -> 1
+  | TypeRefined _      -> 32  (* always i32 at the LLVM level, see types.ml *)
+  | _                  -> 64  (* not reached: eval_const only calls this for the cases above *)
+
+let mask_to_bits bits n =
+  if bits >= 62 then n  (* OCaml's own int is 63-bit signed; nothing narrower to mask against *)
+  else n land ((1 lsl bits) - 1)
+
+(* Reduce a compile-time integer/bool-valued expression (int literal, `as`
+   cast chain, or a reference to an earlier immutable global constant) to a
+   plain OCaml int. Working entirely in OCaml int space rather than emitting
+   LLVM const_trunc/zext/sext at each cast layer sidesteps a real gap: the
+   LLVM 19 OCaml bindings expose const_trunc but not const_zext/const_sext,
+   so a widening step has no direct constant-folding primitive to call.
+   const_int's own width-based wraparound already produces the correct final
+   bit pattern once a value is embedded at its true destination width, so
+   the only place that actually needs to happen mid-chain is a NARROWING
+   cast -- hence the explicit mask on every Cast layer here, using that
+   layer's own target width (not the outer caller's), so e.g.
+   `(300 as u8) as i32` truncates to 44 before widening back to i32, instead
+   of the outer i32 cast silently seeing the original untruncated 300. *)
+let rec eval_const_int (e : Ast.expr) : int =
+  match e.desc with
+  | IntLit n -> n
+  | BoolLit b -> if b then 1 else 0
+  | Cast (target_ty, inner) ->
+      let v = eval_const_int inner in
+      (match target_ty with
+       | TypePtr _ -> v  (* address value; no integer width to mask against *)
+       | _ -> mask_to_bits (int_bits_of_ast target_ty) v)
+  | BinOp (Sub, { desc = IntLit 0; _ }, inner) ->
+      (* Unary minus is desugared to this exact shape in the parser (see
+         parser.mly's MINUS rule) -- recognized here so a plain negative
+         global constant like `let X: i32 = -5;` folds, without taking on
+         general compile-time arithmetic folding beyond this one shape. *)
+      - (eval_const_int inner)
+  | Var name ->
+      (match Hashtbl.find_opt global_const_defs name with
+       | Some (_, ge) -> eval_const_int ge
+       | None -> raise (Error (Printf.sprintf
+           "'%s' is not a compile-time integer constant (must be an immutable \
+            global with a constant initializer, declared earlier in the source)"
+           name)))
+  | _ -> raise (Error "global initializer: unsupported constant expression")
+
 let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable =
   let ast_ty = match prog_types with
     | None -> (match ty_opt with Some t -> t | None -> TypeI32)
@@ -2261,12 +2329,33 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable =
     | StructLit exprs, TypeArray (elem_ty, _) ->
         let lelem = ltype_of_ast elem_ty in
         const_array lelem (Array.of_list (List.map (eval_const elem_ty) exprs))
+    | Cast (_, _), TypePtr _ ->
+        const_inttoptr (const_int (usize_lltype ()) (eval_const_int e)) (pointer_type context)
+    | (Cast (_, _) | BinOp (Sub, { desc = IntLit 0; _ }, _)),
+      (TypeI8|TypeU8|TypeI16|TypeU16|TypeI32|TypeU32
+      |TypeI64|TypeU64|TypeUsize|TypeBool|TypeRefined _) ->
+        (* Cast chains fold via eval_const_int (see its comment for why an
+           `as` cast needs its own evaluator); a bare unary minus (desugared
+           to BinOp(Sub, IntLit 0, _) in the parser) reuses the same
+           evaluator's matching case rather than duplicating the negation
+           here. *)
+        const_int (ltype_of_ast ft) (eval_const_int e)
+    | Var name, _ ->
+        (match Hashtbl.find_opt global_const_defs name with
+         | Some (_, ge) -> eval_const ft ge
+         | None -> raise (Error (Printf.sprintf
+             "'%s' is not a compile-time constant (must reference an earlier \
+              immutable global with a constant initializer)" name)))
     | _ -> raise (Error "global initializer: unsupported constant expression")
   in
   let init = match expr_opt with
     | Some e -> eval_const ast_ty e
     | None   -> undef llty  (* no initializer -> LLVM undef; startup.S zeroes BSS *)
   in
+  if (not is_mutable) then
+    (match expr_opt with
+     | Some e -> Hashtbl.add global_const_defs name (ast_ty, e)
+     | None -> ());
   let gvar = define_global name init the_module in
   let eff_align = match align_opt with
     | Some _ -> align_opt

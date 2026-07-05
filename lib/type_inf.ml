@@ -1284,6 +1284,23 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   check_expr senv eenv genv fenv { desc = Ast.StructLit exprs; loc } expected
               | _ -> raise (TypeError (loc,
                   "literal { ... } requires a struct or array type annotation")))
+         | Some { desc = Ast.Var vname; loc } ->
+             (* Bypass infer_expr's ordinary Var case here: it decays array
+                types to a pointer (the right behavior for array VALUES used
+                as ordinary expressions, e.g. passed to a function), but a
+                global referencing another global by name means "copy that
+                global's value" -- unifying against the decayed pointer type
+                would reject `let B: [u8;4] = A;` even though it is exactly
+                what array-typed global aliasing should allow. Looking the
+                name up in genv directly (raw, undecayed type) and unifying
+                against that instead fixes arrays/structs while leaving
+                scalar references (which never decayed anyway) unaffected. *)
+             (match StringMap.find_opt vname genv with
+              | Some (vty, _) ->
+                  (try unify (strip_io ty) (strip_io vty)
+                   with Unify_error m -> raise (TypeError (loc, m)))
+              | None ->
+                  raise (TypeError (loc, Printf.sprintf "Unbound variable: %s" vname)))
          | Some e ->
              let et = infer_expr senv eenv genv fenv e in
              (try unify (strip_io ty) et
