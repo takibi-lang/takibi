@@ -710,6 +710,15 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  Alcotest.test_case "offsetof(T, field) parses to OffsetOf" `Quick (fun () ->
+    match parse "struct P { x: u8; y: i32; } fn f() usize { return offsetof(P, y); }" with
+    | [Ast.StructDef _; Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Return { desc = Ast.OffsetOf (Ast.TypeNamed "P", "y"); _ } -> ()
+         | _ -> Alcotest.fail "expected Return(OffsetOf(TypeNamed P, y))")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
   (* -- as cast ----------------------------------------------- *)
 
   Alcotest.test_case "as cast to u8" `Quick (fun () ->
@@ -2145,6 +2154,23 @@ let infer_tests = [
     (expect_ok "struct Hdr { a: i32; b: i32; }
                 fn f(len: usize) i32 { if (len >= sizeof(Hdr)) { return 1; } return 0; }");
 
+  Alcotest.test_case "offsetof(T, field) has type usize" `Quick
+    (expect_ok "struct OffsetPoint { x: u8; y: i32; }
+                fn offset_type() { let n: usize = offsetof(OffsetPoint, y); }");
+
+  Alcotest.test_case "offsetof rejects an unknown struct" `Quick
+    (expect_type_error "unknown struct"
+       "fn offset_unknown_struct() { let n: usize = offsetof(Bogus, x); }");
+
+  Alcotest.test_case "offsetof rejects an unknown field" `Quick
+    (expect_type_error "unknown field"
+       "struct OffsetKnown { x: i32; }
+        fn offset_unknown_field() { let n: usize = offsetof(OffsetKnown, y); }");
+
+  Alcotest.test_case "offsetof rejects a non-struct type" `Quick
+    (expect_type_error "requires a named struct"
+       "fn offset_non_struct() { let n: usize = offsetof(i32, x); }");
+
 ]
 
 (* -- Codegen tests ----------------------------------------------------------
@@ -2157,6 +2183,29 @@ let infer_tests = [
    checks runtime behavior, not just "the IR verifies"). *)
 
 let codegen_tests = [
+
+  Alcotest.test_case
+    "offsetof uses the target DataLayout for normal and packed structs"
+    `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
+       in
+       let _ = gen_codegen
+         "struct OffsetNormal { tag: u8; value: i32; }
+          struct packed OffsetPacked { tag: u8; value: i32; }
+          fn offset_normal_value() usize { return offsetof(OffsetNormal, value); }
+          fn offset_packed_value() usize { return offsetof(OffsetPacked, value); }"
+       in
+       let function_ir name =
+         match Hashtbl.find_opt Llvm_gen.functions name with
+         | Some (_, fn) -> Llvm.string_of_llvalue fn
+         | None -> Alcotest.failf "function '%s' not found" name
+       in
+       Alcotest.(check bool) "normal field offset includes padding" true
+         (contains_substring (function_ir "offset_normal_value") "ret i64 4");
+       Alcotest.(check bool) "packed field offset has no padding" true
+         (contains_substring (function_ir "offset_packed_value") "ret i64 1"));
 
   Alcotest.test_case
     "u8 loaded via array indexing compares against a u8 cast literal \

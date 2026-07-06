@@ -64,7 +64,7 @@ let check_refined_base_range pos lo hi base =
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN RETURN LET MUT EXTERN STRUCT PACKED IO ENUM MATCH ALIGN SIZEOF UNSAFE
+%token FN RETURN LET MUT EXTERN STRUCT PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE
 %token DARROW COLONCOLON UNDERSCORE
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT
 %token ASSIGN DOT
@@ -312,6 +312,8 @@ expr:
     { { desc = EnumVariant ($1, $3); loc = $symbolstartpos } }
   | SIZEOF LPAREN t = type_expr RPAREN
     { { desc = SizeOf t; loc = $symbolstartpos } }
+  | OFFSETOF LPAREN t = type_expr COMMA field = IDENT RPAREN
+    { { desc = OffsetOf (t, field); loc = $symbolstartpos } }
   | LPAREN e = expr RPAREN { e }
   | e = expr AS t = type_expr
     { { desc = Cast (t, e); loc = $symbolstartpos } }

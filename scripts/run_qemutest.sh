@@ -350,7 +350,7 @@ echo ""
 # Examples whose bounds should be fully proven at the type level. If brk appears, review the type annotations.
 for e in start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci \
           bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt \
-          semaphore condvar struct msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof int64 net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server; do
+          semaphore condvar struct msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof_offsetof int64 net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server; do
 # enum (P4c): Color was made NON-EXHAUSTIVE (`_;`) since its one cast site
 # (`raw as Color`) has no static evidence bounding raw to {0,1,2} -- see
 # CLAUDE.md's P4c section. No trap at all now (round-trip guaranteed).
@@ -424,7 +424,7 @@ run_test "align"         examples/align/kernel.elf         examples/align/align.
 run_test "packed"        examples/packed/kernel.elf        examples/packed/packed.expected
 run_test "struct_align"  examples/struct_align/kernel.elf  examples/struct_align/struct_align.expected
 run_test "const_global"  examples/const_global/kernel.elf  examples/const_global/const_global.expected
-run_test "sizeof"        examples/sizeof/kernel.elf        examples/sizeof/sizeof.expected
+run_test "sizeof_offsetof" examples/sizeof_offsetof/kernel.elf examples/sizeof_offsetof/sizeof_offsetof.expected
 run_test "slice"         examples/slice/kernel.elf         examples/slice/slice.expected
 run_test "foreach"       examples/foreach/kernel.elf       examples/foreach/foreach.expected
 run_test "int64"         examples/int64/kernel.elf         examples/int64/int64.expected

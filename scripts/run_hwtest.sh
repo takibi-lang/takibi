@@ -278,7 +278,7 @@ run_hw_test "align (stm32)"         examples/align/kernel_stm32.bin         exam
 run_hw_test "packed (stm32)"        examples/packed/kernel_stm32.bin        examples/packed/packed.expected
 run_hw_test "struct_align (stm32)"  examples/struct_align/kernel_stm32.bin  examples/struct_align/struct_align.expected
 run_hw_test "const_global (stm32)"  examples/const_global/kernel_stm32.bin  examples/const_global/const_global.expected
-run_hw_test "sizeof (stm32)"        examples/sizeof/kernel_stm32.bin        examples/sizeof/sizeof.expected
+run_hw_test "sizeof_offsetof (stm32)" examples/sizeof_offsetof/kernel_stm32.bin examples/sizeof_offsetof/sizeof_offsetof.expected
 
 # rtc: real RTC peripheral, LSI-clocked. Prints once, then waits up to
 # roughly an LSI-imprecise "second" before printing again -- needs a much
