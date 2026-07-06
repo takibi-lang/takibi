@@ -1938,10 +1938,8 @@ location (all of them, not just the first -- same report-all philosophy as
 run_qemutest.sh). Without the flag, behavior is unchanged: unproven accesses
 compile fine and get a runtime check (llvm.trap on violation) -- that IS the
 intended permissive development mode for quick driver bring-up. The flag is
-ship mode: only type-proven accesses may exist. **Current status: 43 of 44
-examples compile clean under --forbid-trap**; the one holdout is
-examples/enum/enum.tkb's deliberate `u8 as Color` checked-cast demo, where
-the runtime check is the point.
+ship mode: only type-proven accesses may exist. **The current example suite
+compiles clean under --forbid-trap**.
 
 **Mechanism** (`lib/llvm_gen.ml` `trap_sites` / `record_trap`): every trap
 check codegen emits (array bounds check, checked refined cast, exhaustive-
@@ -2051,8 +2049,9 @@ instead of killing the whole branch), while-condition narrowing
 runtime value, `i < len` facts) -- the last one is the honest decision
 point for a VC+SMT (Z3) backend; everything above stays in the
 non-relational interval world where plain OCaml implementation is the
-right tool. The empirical result that 43/44 examples needed ZERO relational
-reasoning is the argument for not introducing a solver yet.
+right tool. The empirical result from the P4 census is that most examples
+did not need relational reasoning, which is the argument for not
+introducing a solver yet.
 
 ### Slice Type (P1): []T / [T; N..] -- fat pointer with a compile-time minimum length
 
@@ -2486,9 +2485,8 @@ violation, unchanged from today, or (2) compiles clean WITH
 `--forbid-trap`, either because it's genuinely proven or because an
 `unsafe { ... }` marks an explicit, evidence-backed assertion. No third
 "silently checked, --forbid-trap just rejects it forever" bucket should
-exist without a documented reason. **Result: 43 of 44 examples are now
---forbid-trap clean** (up from 40/44 after P4b); the one holdout
-(tcp_parse) is a deliberate exception with a recorded reason, not a gap.
+exist without a documented reason. **Result: the current example suite is
+--forbid-trap clean**.
 
 **enum.tkb: Color made non-exhaustive.** The residual cast-check trap
 (`raw as Color`, `raw: u8` with no static evidence bounding it to
@@ -2914,9 +2912,8 @@ the normal (always `-g`-free) build outputs.
   `u32`/`i32`/`u8` family of `print`-like functions would need this. Estimated to be a moderate addition: `fenv`
   becomes name -> list of signatures, `Call` picks the best match by argument types, and `llvm_gen.ml` needs to
   mangle LLVM symbol names per overload (today one takibi name maps to exactly one LLVM function symbol).
-- **`isize` (signed pointer-sized integer) is not implemented** -- tracked as a GitHub issue, not urgent. Needed for
-  `ptr - ptr` (pointer difference), which is itself unimplemented. Neither is required for the planned Ethernet L2
-  echo server (`ptr + i32` / `ptr - i32` already work for descriptor-ring indexing).
+- **`isize` (signed pointer-sized integer) is implemented** -- it is the pointer-sized signed integer used for raw
+  pointer arithmetic and pointer differences (`ptr - ptr` returns `isize`).
 - **`sizeof(T)` cannot be used as an array size** (`[T; sizeof(Foo)]`) -- see the `sizeof(T)` section above for why
   (parser-time vs. codegen-time resolution mismatch) and what combining them would require.
 - **No module/import system for `.tkb` files** -- which common files get concatenated into a given example's build
