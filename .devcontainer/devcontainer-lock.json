@@ -4,6 +4,11 @@
       "version": "1.0.5",
       "resolved": "ghcr.io/anthropics/devcontainer-features/claude-code@sha256:cfc2e7d3e9fd3b9b01f8d5cb158508a884c8c0ede2e23ed10f32dea5d4ffe69a",
       "integrity": "sha256:cfc2e7d3e9fd3b9b01f8d5cb158508a884c8c0ede2e23ed10f32dea5d4ffe69a"
+    },
+    "ghcr.io/sliekens/devcontainer-features/codex:1": {
+      "version": "1.1.2",
+      "resolved": "ghcr.io/sliekens/devcontainer-features/codex@sha256:f109114053968fa79369bb20430905fa55809c90d9b91bf1b5ddcb15991920b7",
+      "integrity": "sha256:f109114053968fa79369bb20430905fa55809c90d9b91bf1b5ddcb15991920b7"
     }
   }
 }
