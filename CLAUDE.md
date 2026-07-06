@@ -1562,6 +1562,24 @@ Files changed when `sizeof(T)` was added:
 
 **Not supported**: `sizeof(T)` as an array size (`[T; sizeof(Foo)]`). Array-size constants are resolved entirely in the parser via `Const_env` (see "Global let / let mut and Array-Size Constants" above), before struct layout exists; `sizeof` needs `struct_lltypes`/`DataLayout`, which are only available at codegen time. Combining the two would require moving array-size resolution out of the parser into a later phase -- deferred until a concrete need arises.
 
+### offsetof(T, field) Spans 5 Files
+
+`offsetof(StructName, field)` is a compile-time constant of type `usize`
+giving the field's byte offset in the target's actual struct layout. It
+uses `Llvm_target.DataLayout.offset_of_element`, so natural padding, packed
+structs, and target-specific alignment rules are handled by the same LLVM
+DataLayout used by `sizeof(T)` and field GEP generation.
+
+Files involved:
+1. `lib/ast.ml` -- `OffsetOf of type_expr * string`
+2. `lib/lexer.mll` -- `"offsetof"` keyword
+3. `lib/parser.mly` -- `OFFSETOF LPAREN type_expr COMMA IDENT RPAREN`
+4. `lib/type_inf.ml` -- requires a named struct, validates the field, and returns `TUsize`
+5. `lib/llvm_gen.ml` -- resolves the field index through `field_info` and emits a `usize` constant from `DataLayout.offset_of_element`
+
+Like `sizeof(T)`, `offsetof` is not supported in parser-time array-size
+formulas because target DataLayout is unavailable during parsing.
+
 ### Codegen for Immutable and Mutable Variables
 The locals table in `llvm_gen.ml` is managed as `(string, local_binding) Hashtbl.t`.
 

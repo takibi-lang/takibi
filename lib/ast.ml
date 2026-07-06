@@ -73,6 +73,8 @@ and expr_desc =
                                   type checker accepts. *)
   | EnumVariant of string * string  (* EtherType::IPv4 -- enum name, variant name *)
   | SizeOf of type_expr        (* sizeof(T) -- compile-time size in bytes, type usize *)
+  | OffsetOf of type_expr * string
+      (* offsetof(T, field) -- compile-time field offset in bytes, type usize *)
 [@@deriving show]
 
 type stmt = stmt_desc located
@@ -185,7 +187,8 @@ let written_names (stmts : stmt list) : string list =
     | Call (_, args) | StructLit args -> List.iter go_expr args
     | Index (_, idx) -> go_expr idx
     | SliceOf (_, lo, hi) -> go_expr lo; go_expr hi
-    | IntLit _ | BoolLit _ | StringLit _ | Var _ | EnumVariant _ | SizeOf _ ->
+    | IntLit _ | BoolLit _ | StringLit _ | Var _ | EnumVariant _ | SizeOf _
+    | OffsetOf _ ->
         ()
   in
   let rec go_stmt (s : stmt) = match s.desc with

@@ -2,5 +2,7 @@ sizeof(i32)         = 4
 sizeof(Hdr)         = 8
 sizeof(PackedHdr)   = 6
 sizeof(Aligned16)   = 16
+offsetof(OffsetHdr, value)       = 4
+offsetof(PackedOffsetHdr, value) = 1
 buffer holds a full PackedHdr
 done

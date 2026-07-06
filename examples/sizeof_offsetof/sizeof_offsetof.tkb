@@ -1,6 +1,6 @@
-// Demo of sizeof(T) -- a compile-time constant of type usize giving the
-// size in bytes of a type, computed from the same LLVM DataLayout used for
-// struct tail-padding (align(N)) elsewhere in the compiler.
+// Demo of sizeof(T) and offsetof(T, field) -- compile-time constants of
+// type usize computed from the same LLVM DataLayout used for struct layout
+// and tail-padding (align(N)) elsewhere in the compiler.
 //
 // sizeof(T) is a fixed usize (like a pointer address), not a polymorphic
 // integer literal: comparing or assigning it against i32 requires an
@@ -21,6 +21,16 @@ struct Aligned16 align(16) {
     b: i16;
 }
 
+struct OffsetHdr {
+    tag: u8;
+    value: i32;
+}
+
+struct packed PackedOffsetHdr {
+    tag: u8;
+    value: i32;
+}
+
 fn main() {
     uart_puts("sizeof(i32)         = ");
     uart_print_uint(sizeof(i32) as i32);
@@ -36,6 +46,14 @@ fn main() {
 
     uart_puts("sizeof(Aligned16)   = ");
     uart_print_uint(sizeof(Aligned16) as i32);
+    uart_puts("\r\n");
+
+    uart_puts("offsetof(OffsetHdr, value)       = ");
+    uart_print_uint(offsetof(OffsetHdr, value) as i32);
+    uart_puts("\r\n");
+
+    uart_puts("offsetof(PackedOffsetHdr, value) = ");
+    uart_print_uint(offsetof(PackedOffsetHdr, value) as i32);
     uart_puts("\r\n");
 
     // A realistic usage: guarding a length check before parsing a header.

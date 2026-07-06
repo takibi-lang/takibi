@@ -754,6 +754,23 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> ());
       TUsize
 
+  | OffsetOf (ty, field) ->
+      (* offsetof is meaningful only for a named struct. Validate both the
+         type and field here so source errors do not become codegen errors. *)
+      (match ty with
+       | Ast.TypeNamed name ->
+           (match StringMap.find_opt name senv with
+            | None ->
+                raise (TypeError (e.loc,
+                  Printf.sprintf "unknown struct '%s' in offsetof" name))
+            | Some fields when not (List.mem_assoc field fields) ->
+                raise (TypeError (e.loc,
+                  Printf.sprintf "unknown field '%s' in struct '%s'" field name))
+            | Some _ -> ())
+       | _ ->
+           raise (TypeError (e.loc, "offsetof requires a named struct type")));
+      TUsize
+
   | StructLit _ ->
       raise (TypeError (e.loc,
         "struct literal requires a type annotation: `let mut x: Name = {...}`"))

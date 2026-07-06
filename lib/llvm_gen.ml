@@ -1213,6 +1213,19 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let sz = Int64.to_int (Llvm_target.DataLayout.abi_size elem_llty dl) in
       (TypeUsize, const_int (ltype_of_ast TypeUsize) sz)
 
+  | OffsetOf (ty, field) ->
+      let (name, llty) = match ty with
+        | TypeNamed name -> (name, ltype_of_ast ty)
+        | _ -> raise (Error "offsetof requires a named struct type")
+      in
+      let (field_index, _) = field_info name field in
+      let dl = match !target_data with
+        | Some dl -> dl
+        | None -> raise (Error "offsetof: target data layout not initialized")
+      in
+      let offset = Llvm_target.DataLayout.offset_of_element llty field_index dl in
+      (TypeUsize, const_of_int64 (ltype_of_ast TypeUsize) offset false)
+
   | Cast (target_ty, src_e) ->
       let (src_ty, v) = gen_expr locals src_e in
       (match target_ty with

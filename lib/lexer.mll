@@ -51,6 +51,7 @@ rule read = parse
   | "match"   { MATCH }
   | "align"   { ALIGN }
   | "sizeof"  { SIZEOF }
+  | "offsetof" { OFFSETOF }
 
   | '{' { LBRACE }
   | '}' { RBRACE }
