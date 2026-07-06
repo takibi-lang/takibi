@@ -101,7 +101,7 @@ let require_integer loc t =
   let base = canon_ty t in
   match repr base with
   | TVar { contents = Unbound _ } -> ()
-  | TI8 | TI16 | TI32 | TI64 | TU8 | TU16 | TU32 | TU64 | TUsize -> ()
+  | TI8 | TI16 | TI32 | TI64 | TU8 | TU16 | TU32 | TU64 | TIsize | TUsize -> ()
   | _ -> raise (TypeError (loc,
       Printf.sprintf "expected an integer type, got '%s'" (to_string t)))
 
@@ -142,8 +142,9 @@ let for_annotation_bound_range = function
   | TU16   -> (0, Some 65536)
   | TU32   -> (0, Some 4294967296)
   | TU64   -> (0, None)
+  | TIsize -> (-2147483648, Some 2147483647)
   | TUsize -> (0, Some 4294967296)
-  | _ -> (min_int, None) (* unreachable: only reached via int_base_type_expr's 9 bases *)
+  | _ -> (min_int, None) (* unreachable: only reached via int_base_type_expr's 10 bases *)
 
 let check_for_annotation_range loc lo hi base =
   let (blo, bhi_opt) = for_annotation_bound_range base in
@@ -201,14 +202,20 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       let t2 = infer_expr senv eenv tyenv fenv e2 in
       (match op with
        | Add ->
-           (* Pointer arithmetic: ptr + int -> returns the same pointer type. TIo is a value type, excluded.
+           (* Pointer arithmetic: ptr + isize -> returns the same pointer type. TIo is a value type, excluded.
               Range propagation (interval arithmetic; sync rule: llvm_gen's
               BinOp typing mirrors every case below, change together):
                 {a..<b} + {c..<d} -> {a+c..<b+d-1}
                 {a..<b} + k       -> {a+k..<b+k}   (and symmetric) *)
            (match repr t1, repr t2 with
-            | TPtr _, _ -> t1
-            | _, TPtr _ -> t2
+            | TPtr _, TPtr _ ->
+                raise (TypeError (e.loc, "cannot add two pointers"))
+            | TPtr _, _ ->
+                unify_at e2.loc t2 TIsize;
+                t1
+            | _, TPtr _ ->
+                unify_at e1.loc t1 TIsize;
+                t2
             | TRefinedInt (a, b, base1), TRefinedInt (c, d, base2) ->
                 unify_at e.loc base1 base2;
                 TRefinedInt (a + c, b + d - 1, base1)
@@ -233,7 +240,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 unify_at e.loc ct1 ct2;
                 ct1)
        | Sub ->
-           (* Pointer arithmetic: ptr - int -> returns the same pointer type. TIo is a value type, excluded.
+           (* Pointer arithmetic: ptr - isize -> returns the same pointer type; ptr - ptr -> isize.
               Range propagation (sync rule with llvm_gen, as for Add):
                 {a..<b} - {c..<d} -> {a-d+1..<b-c}
                 {a..<b} - k       -> {a-k..<b-k}
@@ -243,11 +250,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                                       Band/min-derived range through to
                                       "remaining room" for a chained clamp,
                                       see CLAUDE.md's P4c section) *)
-           (match repr t1 with
-            | TPtr _ ->
-                unify_at e2.loc t2 TI32;
+           (match repr t1, repr t2 with
+            | TPtr inner1, TPtr inner2 ->
+                unify_at e.loc inner1 inner2;
+                TIsize
+            | TPtr _, _ ->
+                unify_at e2.loc t2 TIsize;
                 t1
-            | TRefinedInt (a, b, base) ->
+            | TRefinedInt (a, b, base), _ ->
                 (match repr t2 with
                  | TRefinedInt (c, d, base2) ->
                      unify_at e.loc base base2;
@@ -260,7 +270,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                       | None ->
                           unify_at e2.loc (canon_ty t2) base;
                           base))
-            | _ ->
+            | _, _ ->
                 (match intlit_opt e1, repr t2 with
                  | Some k, TRefinedInt (c, d, base) ->
                      unify_at e1.loc t1 base;
@@ -1070,7 +1080,7 @@ let narrow_from_cond tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
               TI32 -- a u8/u16/u32/u64/usize/i8/i16/i64-typed variable
               narrowed by an if-condition keeps ITS OWN type as the
               refined range's base (see types.ml's TRefinedInt comment). *)
-           | Some ((TI8|TI16|TI32|TI64|TU8|TU16|TU32|TU64|TUsize) as base, is_mut) ->
+           | Some ((TI8|TI16|TI32|TI64|TU8|TU16|TU32|TU64|TIsize|TUsize) as base, is_mut) ->
                StringMap.add name (TRefinedInt (lo, hi, base), is_mut) env
            | _ -> env)
       | _ -> env
@@ -1385,7 +1395,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
              name name))
        | _ -> ());
       (match repr base_raw with
-       | TI8 | TI16 | TI32 | TI64 | TU8 | TU16 | TU32 | TU64 | TUsize -> ()
+       | TI8 | TI16 | TI32 | TI64 | TU8 | TU16 | TU32 | TU64 | TIsize | TUsize -> ()
        | _ -> raise (TypeError (lo_expr.loc,
            Printf.sprintf "for-loop bounds must be an integer type, got '%s'"
              (to_string base_raw))));

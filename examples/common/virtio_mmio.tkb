@@ -49,13 +49,13 @@ let STATUS_ACKNOWLEDGE: i32 = 1;
 let STATUS_DRIVER:      i32 = 2;
 let STATUS_DRIVER_OK:   i32 = 4;
 
-let PAGE_SIZE: i32 = 4096;
+let PAGE_SIZE: isize = 4096;
 
 let VIRTIO_MMIO_FIRST_SLOT: i32 = 0x0a000000;
 let VIRTIO_MMIO_SLOT_STRIDE: i32 = 0x200;
 let VIRTIO_MMIO_SLOT_COUNT: i32 = 32;
 
-let QNUM: i32 = 8; // virtqueue depth for both the RX and TX queues
+let QNUM: isize = 8; // virtqueue depth for both the RX and TX queues
 
 struct packed VirtqDesc {
     addr: usize;
@@ -100,7 +100,7 @@ let mut virtio_base: i32 = 0;
 // RX_BUF_SIZE and every buffer/ring-index below are internal to this
 // driver (matching eth.tkb's encapsulation) -- the app never needs to know
 // about queue depth, PAGE_SIZE, or descriptor rings.
-let RX_BUF_SIZE: i32 = 1536; // 10-byte virtio_net_hdr + max 1514-byte Ethernet frame, rounded up
+let RX_BUF_SIZE: isize = 1536; // 10-byte virtio_net_hdr + max 1514-byte Ethernet frame, rounded up
 
 let mut rx_queue_mem: [u8; 2 * PAGE_SIZE] align(4096);
 let mut tx_queue_mem: [u8; 2 * PAGE_SIZE] align(4096);
@@ -109,11 +109,11 @@ let mut tx_queue_mem: [u8; 2 * PAGE_SIZE] align(4096);
 // each completion.
 let mut rx_bufs: [u8; QNUM * RX_BUF_SIZE];
 
-let mut rx_used_seen:        i32 = 0;
-let mut tx_used_seen:        i32 = 0;
-let mut rx_avail_idx:        i32 = 0;
-let mut tx_avail_idx:        i32 = 0;
-let mut net_last_rx_desc_idx: i32 = 0;
+let mut rx_used_seen:        isize = 0;
+let mut tx_used_seen:        isize = 0;
+let mut rx_avail_idx:        isize = 0;
+let mut tx_avail_idx:        isize = 0;
+let mut net_last_rx_desc_idx: isize = 0;
 
 fn vreg(offset: i32) -> *io i32 {
     return (virtio_base + offset) as *io i32;
@@ -144,13 +144,13 @@ fn virtio_negotiate(features: i32) {
     *(vreg(VIRTIO_STATUS)) = STATUS_ACKNOWLEDGE | STATUS_DRIVER;
 
     *(vreg(VIRTIO_GUEST_FEATURES)) = features;
-    *(vreg(VIRTIO_GUEST_PAGE_SIZE)) = PAGE_SIZE;
+    *(vreg(VIRTIO_GUEST_PAGE_SIZE)) = PAGE_SIZE as i32;
 }
 
 fn virtio_queue_setup(queue_idx: i32, queue_mem: *u8) {
     *(vreg(VIRTIO_QUEUE_SEL)) = queue_idx;
-    *(vreg(VIRTIO_QUEUE_NUM)) = QNUM;
-    *(vreg(VIRTIO_QUEUE_ALIGN)) = PAGE_SIZE;
+    *(vreg(VIRTIO_QUEUE_NUM)) = QNUM as i32;
+    *(vreg(VIRTIO_QUEUE_ALIGN)) = PAGE_SIZE as i32;
     let addr: usize = queue_mem as usize;
     let pfn: i32 = (addr / (PAGE_SIZE as usize)) as i32;
     *(vreg(VIRTIO_QUEUE_PFN)) = pfn;
@@ -180,7 +180,7 @@ fn virtio_notify(queue_idx: i32) {
 // table, immediately followed by the avail ring, then the used ring starting
 // at the next page (offset PAGE_SIZE).
 
-fn desc_set(queue_mem: *u8, i: i32, addr: usize, len: i32, flags: i32) {
+fn desc_set(queue_mem: *u8, i: isize, addr: usize, len: isize, flags: i32) {
     let descs: *VirtqDesc = queue_mem as *VirtqDesc;
     descs[i].addr = addr;
     descs[i].len = len as u32;
@@ -189,15 +189,15 @@ fn desc_set(queue_mem: *u8, i: i32, addr: usize, len: i32, flags: i32) {
     // chain descriptors, so VIRTQ_DESC_F_NEXT is never set and it's unused.
 }
 
-fn avail_ring_set(queue_mem: *u8, slot: i32, desc_idx: i32) {
-    let avail_off: i32 = QNUM * (sizeof(VirtqDesc) as i32);
+fn avail_ring_set(queue_mem: *u8, slot: isize, desc_idx: isize) {
+    let avail_off: isize = QNUM * (sizeof(VirtqDesc) as isize);
     let ring: *u16 = (queue_mem + avail_off
-        + (offsetof(VirtqAvail, ring) as i32)) as *u16;
+        + (offsetof(VirtqAvail, ring) as isize)) as *u16;
     ring[slot] = desc_idx as u16;
 }
 
-fn avail_publish(queue_mem: *u8, new_idx: i32) {
-    let avail_off: i32 = QNUM * (sizeof(VirtqDesc) as i32);
+fn avail_publish(queue_mem: *u8, new_idx: isize) {
+    let avail_off: isize = QNUM * (sizeof(VirtqDesc) as isize);
     let avail: *VirtqAvail = (queue_mem + avail_off) as *VirtqAvail;
     avail.idx = new_idx as u16;
 }
@@ -208,22 +208,20 @@ fn avail_publish(queue_mem: *u8, new_idx: i32) {
 // a global/memory load out of a tight loop" hazard called out in
 // CLAUDE.md's "Volatile Reads of Global Variables" section (the compiler
 // has no way to know DMA writes are coming) -- so these must be `io`.
-fn used_idx_get(queue_mem: *u8) -> i32 {
+fn used_idx_get(queue_mem: *u8) -> isize {
     let used: *io VirtqUsed = (queue_mem + PAGE_SIZE) as *io VirtqUsed;
-    return used.idx as i32;
+    return used.idx as isize;
 }
 
-fn used_ring_get_id(queue_mem: *u8, slot: i32) -> i32 {
+fn used_ring_get_id(queue_mem: *u8, slot: isize) -> isize {
     let ring: *io VirtqUsedElem = (queue_mem + PAGE_SIZE
-        + (offsetof(VirtqUsed, ring) as i32)) as *io VirtqUsedElem;
-    return ring[slot].id as i32; // The device value is unsigned, but the
-                                 // returned descriptor index feeds the
-                                 // i32-based index/length machinery.
+        + (offsetof(VirtqUsed, ring) as isize)) as *io VirtqUsedElem;
+    return ring[slot].id as isize;
 }
 
-fn used_ring_get_len(queue_mem: *u8, slot: i32) -> i32 {
+fn used_ring_get_len(queue_mem: *u8, slot: isize) -> i32 {
     let ring: *io VirtqUsedElem = (queue_mem + PAGE_SIZE
-        + (offsetof(VirtqUsed, ring) as i32)) as *io VirtqUsedElem;
+        + (offsetof(VirtqUsed, ring) as isize)) as *io VirtqUsedElem;
     return ring[slot].len as i32; // same reasoning as used_ring_get_id.
 }
 
@@ -243,7 +241,8 @@ fn net_init() -> i32 {
     virtio_driver_ok();
 
     for i in 0..<QNUM {
-        let buf: *u8 = rx_bufs + i * RX_BUF_SIZE;
+        let buf_off: isize = i * RX_BUF_SIZE;
+        let buf: *u8 = rx_bufs + buf_off;
         desc_set(rx_queue_mem as *u8, i, buf as usize, RX_BUF_SIZE, VIRTQ_DESC_F_WRITE);
         avail_ring_set(rx_queue_mem as *u8, i, i);
     }
@@ -261,14 +260,15 @@ fn net_poll_rx() -> i32 {
     if (rx_used_seen == used_idx_get(rx_queue_mem as *u8)) {
         return 0;
     }
-    let slot: i32 = rx_used_seen % QNUM;
+    let slot: isize = rx_used_seen % QNUM;
     net_last_rx_desc_idx = used_ring_get_id(rx_queue_mem as *u8, slot);
     let frame_total_len: i32 = used_ring_get_len(rx_queue_mem as *u8, slot);
     return frame_total_len - 10; // hide the 10-byte virtio_net_hdr from the caller
 }
 
 fn net_rx_buf() -> *u8 {
-    return rx_bufs + net_last_rx_desc_idx * RX_BUF_SIZE + 10;
+    let buf_off: isize = net_last_rx_desc_idx * RX_BUF_SIZE;
+    return rx_bufs + buf_off + 10;
 }
 
 // Capacity view of the current RX buffer as a slice: 1514 bytes = the
@@ -293,8 +293,8 @@ fn net_rx_frame() -> [u8; 1514..] {
     // them (see CLAUDE.md's "global let initializers can't constant-fold"
     // limitation), so `QNUM - 1` here would lose the range min() needs.
     // Update this literal if QNUM (declared above) ever changes.
-    let idx: i32 = max(min(net_last_rx_desc_idx, 7), 0);
-    let offset: i32 = idx * RX_BUF_SIZE + 10;
+    let idx: isize = max(min(net_last_rx_desc_idx, 7), 0);
+    let offset: isize = idx * RX_BUF_SIZE + 10;
     return rx_bufs[offset..<offset + 1514];
 }
 
@@ -303,7 +303,7 @@ fn net_rx_frame() -> [u8; 1514..] {
 // ring. Must only be called after a non-zero net_poll_rx() and once the
 // caller no longer needs net_rx_buf()'s contents.
 fn net_rx_release() {
-    let rx_slot: i32 = rx_avail_idx % QNUM;
+    let rx_slot: isize = rx_avail_idx % QNUM;
     avail_ring_set(rx_queue_mem as *u8, rx_slot, net_last_rx_desc_idx);
     rx_avail_idx = rx_avail_idx + 1;
     avail_publish(rx_queue_mem as *u8, rx_avail_idx);
@@ -320,7 +320,7 @@ fn net_rx_release() {
 // device to finish reading buf before returning, so the caller can safely
 // release buf (net_rx_release()) immediately afterward.
 fn net_transmit(buf: *u8, len: i32) {
-    desc_set(tx_queue_mem as *u8, 0, (buf - 10) as usize, len + 10, 0);
+    desc_set(tx_queue_mem as *u8, 0, (buf - 10) as usize, (len + 10) as isize, 0);
     avail_ring_set(tx_queue_mem as *u8, 0, 0);
     tx_avail_idx = tx_avail_idx + 1;
     avail_publish(tx_queue_mem as *u8, tx_avail_idx);

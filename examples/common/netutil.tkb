@@ -65,8 +65,8 @@ fn write_u32be(s: [u8; 4..], v: i32) {
 // dst and returns the number of bytes copied (the NUL itself is not
 // copied) -- used to build a response body/headers into a buffer instead
 // of streaming to UART like uart_puts does.
-fn copy_str(dst: *u8, src: *u8) -> i32 {
-    let mut n: i32 = 0;
+fn copy_str(dst: *u8, src: *u8) -> isize {
+    let mut n: isize = 0;
     while (src[n] != 0) {
         dst[n] = src[n];
         n = n + 1;
@@ -78,9 +78,9 @@ fn copy_str(dst: *u8, src: *u8) -> i32 {
 // leading zeros, and returns the digit count. Same recursive-digit
 // approach as print.tkb's uart_print_uint, just targeting a memory
 // buffer instead of streaming to UART one byte at a time.
-fn write_udec(buf: *u8, n: i32) -> i32 {
+fn write_udec(buf: *u8, n: i32) -> isize {
     if (n >= 10) {
-        let hi_len: i32 = write_udec(buf, n / 10);
+        let hi_len: isize = write_udec(buf, n / 10);
         buf[hi_len] = (n - (n / 10) * 10 + '0') as u8;
         return hi_len + 1;
     } else {
