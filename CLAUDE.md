@@ -3272,12 +3272,14 @@ virtio protocol itself.
   for interrupt-driven RX; `net_poll_rx()` now polls the used ring
   directly instead, so no IRQ/GIC involvement remains here at all -- see
   the STM32 Ethernet entry above for why and when that changed.)
-- **The vring is manipulated as raw byte offsets, not struct arrays.**
-  This implementation predates indexed struct field assignment. Although
-  `descs[i].field = v` is now expressible, `desc_set`/`avail_ring_set`/
-  `used_ring_get_*` still poke fixed byte offsets because the descriptor,
-  avail-ring, and page-aligned used-ring layouts share one backing allocation;
-  migrating that representation requires a separate layout audit.
+- **The vring uses typed views over one shared backing allocation.**
+  `VirtqDesc`, `VirtqAvail`, `VirtqUsed`, and `VirtqUsedElem` describe the
+  specification-defined layouts. Descriptor writes use `descs[i].field`,
+  while `sizeof(VirtqDesc)` and `offsetof(..., ring)` locate the avail/used
+  subregions without duplicating byte offsets. The used-ring views are `*io`
+  so device-written fields remain volatile. The page-aligned byte arrays are
+  still the owning storage because all three regions must share one legacy
+  virtqueue allocation.
   `arp_reply.tkb` extends the same technique to the ARP header itself
   (`bytes_eq`/`bytes_copy`/`read_u16be`/`write_u16be`), rewriting the
   request into a reply in place with no temporary struct/copy -- this was
