@@ -2,12 +2,12 @@
 // bump_alloc(n) returns heap + offset and advances the offset by n.
 struct BumpAlloc {
     heap:   [u8; 256];
-    offset: i32;
+    offset: isize;
 }
 
 let mut alloc: BumpAlloc;
 
-fn bump_alloc(size: i32) -> *u8 {
+fn bump_alloc(size: isize) -> *u8 {
     let result: *u8 = alloc.heap + alloc.offset;
     alloc.offset = alloc.offset + size;
     return result;
@@ -31,7 +31,6 @@ fn main() {
     uart_puts("\r\n");
 
     uart_puts("used: ");
-    uart_print_uint(alloc.offset);
+    uart_print_uint(alloc.offset as i32);
     uart_puts(" bytes\r\n");
 }
-

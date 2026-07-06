@@ -20,6 +20,7 @@ type type_expr =
   | TypeBool
   | TypeI8  | TypeI16 | TypeI32 | TypeI64
   | TypeU8  | TypeU16 | TypeU32 | TypeU64
+  | TypeIsize                              (* pointer-sized signed integer *)
   | TypeUsize                              (* pointer-sized unsigned integer *)
   | TypeVoid
   | TypePtr of type_expr           (* *T     -- regular pointer, non-volatile *)

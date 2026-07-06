@@ -75,6 +75,7 @@ let rec ty_str = function
   | TypeBool -> "bool"
   | TypeI8 -> "i8" | TypeI16 -> "i16" | TypeI32 -> "i32" | TypeI64 -> "i64"
   | TypeU8 -> "u8" | TypeU16 -> "u16" | TypeU32 -> "u32" | TypeU64 -> "u64"
+  | TypeIsize -> "isize"
   | TypeUsize -> "usize"
   | TypeVoid  -> "void"
   | TypePtr t -> "*" ^ ty_str t
@@ -265,7 +266,7 @@ let apply_narrowing (locals : (string, local_binding) Hashtbl.t)
                   type_inf about. *)
                Hashtbl.replace locals name (Imm (TypeRefined (max lo elo, min hi ehi, base), v));
                (name, old) :: saved
-           | Some (Imm (((TypeI8|TypeI16|TypeI32|TypeI64
+           | Some (Imm (((TypeI8|TypeI16|TypeI32|TypeI64|TypeIsize
                          |TypeU8|TypeU16|TypeU32|TypeU64|TypeUsize) as base), v) as old) ->
                (* Any plain primitive integer type can be narrowed, not
                   just TypeI32 (sync rule with type_inf.ml's
@@ -309,7 +310,7 @@ let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t)
       match lo_opt, hi_opt with
       | Some lo, Some hi when not (List.mem name killed) ->
           (match Hashtbl.find_opt locals name with
-           | Some (Mut (((TypeI8|TypeI16|TypeI32|TypeI64
+           | Some (Mut (((TypeI8|TypeI16|TypeI32|TypeI64|TypeIsize
                          |TypeU8|TypeU16|TypeU32|TypeU64|TypeUsize) as base), _)) ->
                let old = Hashtbl.find_opt narrowing_ctx name in
                (* An outer if may have already narrowed this Mut variable
@@ -408,10 +409,13 @@ let usize_lltype () =
   | Some dl -> Llvm_target.DataLayout.intptr_type context dl
   | None    -> i64_type context
 
+let isize_lltype () = usize_lltype ()
+
 (* Test-only introspection: usize's current bit-width (32 or 64) as a plain
    int, so test_takibi.ml can assert on it without needing the `llvm`
    ocamlfind package linked directly (this library already depends on it). *)
 let usize_bitwidth () = integer_bitwidth (usize_lltype ())
+let isize_bitwidth () = integer_bitwidth (isize_lltype ())
 
 let rec ltype_of_ast = function
   | TypeBool        -> i1_type  context
@@ -419,6 +423,7 @@ let rec ltype_of_ast = function
   | TypeI16 | TypeU16 -> i16_type context
   | TypeI32 | TypeU32 -> i32_type context
   | TypeI64 | TypeU64 -> i64_type context
+  | TypeIsize       -> isize_lltype ()
   | TypeUsize       -> usize_lltype ()
   | TypeVoid        -> void_type context
   | TypePtr _       -> pointer_type context   (* LLVM 19: all pointers are opaque ptr *)
@@ -484,6 +489,7 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
   | TypeU16   -> basic_int "u16"   16 dw_ate_unsigned
   | TypeU32   -> basic_int "u32"   32 dw_ate_unsigned
   | TypeU64   -> basic_int "u64"   64 dw_ate_unsigned
+  | TypeIsize -> basic_int "isize" (integer_bitwidth (isize_lltype ())) dw_ate_signed
   | TypeUsize -> basic_int "usize" (integer_bitwidth (usize_lltype ())) dw_ate_unsigned
   | TypeVoid  -> Llvm_debuginfo.llmetadata_null ()
   | TypeRefined (_, _, base) -> ditype_of_ast dib file base  (* same LLVM-level representation as its base; see ltype_of_ast *)
@@ -602,7 +608,7 @@ let intlit_opt (e : Ast.expr) : int option =
 let rec widen_load (ast_ty : Ast.type_expr) v =
   match ast_ty with
   | TypeRefined (_, _, base) -> widen_load base v
-  | TypeI64 | TypeU64 | TypeUsize -> v
+  | TypeI64 | TypeU64 | TypeIsize | TypeUsize -> v
   | TypeBool -> v
   | TypeI8 | TypeI16 | TypeI32 ->
       let dst = i32_type context in
@@ -659,6 +665,12 @@ let rec coerce v (dst : Ast.type_expr) =
       if vty = pointer_type context then
         build_ptrtoint v (i64_type context) "ptrtoint" builder
       else build_zext v (i64_type context) "zext" builder
+  | TypeIsize ->
+      let dst_ty = isize_lltype () in
+      let src_bits = integer_bitwidth vty and dst_bits = integer_bitwidth dst_ty in
+      if src_bits > dst_bits then build_trunc v dst_ty "trunc" builder
+      else if src_bits < dst_bits then build_sext v dst_ty "sext" builder
+      else v
   | TypeUsize ->
       let dst_ty = usize_lltype () in
       if vty = pointer_type context then
@@ -884,7 +896,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       in
       (match direct_ty with
        | Some ((TypeI8|TypeI16|TypeI32|TypeI64
-               |TypeU8|TypeU16|TypeU32|TypeU64|TypeUsize|TypeBool) as ty) ->
+               |TypeU8|TypeU16|TypeU32|TypeU64|TypeIsize|TypeUsize|TypeBool) as ty) ->
            (ty, const_of_int64 (ltype_of_ast ty) i true)
        | _ ->
            (* No usable hint (or an exotic destination -- TypeRefined,
@@ -1057,17 +1069,17 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         if ll1 = i64_type context && ll2 = i32_type context then
           let v2w = if is_unsigned ty1 then build_zext v2 (i64_type context) "wi" builder
                     else build_sext v2 (i64_type context) "wi" builder in
-          (ty1, v1, ty1, v2w)
+          (ty1, v1, ty2, v2w)
         else if ll2 = i64_type context && ll1 = i32_type context then
           let v1w = if is_unsigned ty2 then build_zext v1 (i64_type context) "wi" builder
                     else build_sext v1 (i64_type context) "wi" builder in
-          (ty2, v1w, ty2, v2)
+          (ty1, v1w, ty2, v2)
         else
           (ty1, v1, ty2, v2)
       in
       (match op with
        | Add ->
-           (* Pointer arithmetic: ptr + int -> GEP. *io T = TypePtr(TypeIo T) also matches TypePtr *)
+           (* Pointer arithmetic: ptr + isize -> GEP. *io T = TypePtr(TypeIo T) also matches TypePtr *)
            (match ty1 with
             | TypePtr inner ->
                 (ty1, build_gep (ltype_of_ast inner) v1 [|v2|] "ptradd" builder)
@@ -1092,12 +1104,15 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                      in
                      (ret_ty, sum)))
        | Sub ->
-           (* Pointer arithmetic: ptr - int -> GEP with negated index *)
-           (match ty1 with
-            | TypePtr inner ->
+           (* Pointer difference is measured in elements; pointer - isize
+              remains element-addressed GEP with a negated index. *)
+           (match ty1, ty2 with
+            | TypePtr inner1, TypePtr _ ->
+                (TypeIsize, build_ptrdiff (ltype_of_ast inner1) v1 v2 "ptrdiff" builder)
+            | TypePtr inner, _ ->
                 let neg = build_neg v2 "negtmp" builder in
                 (ty1, build_gep (ltype_of_ast inner) v1 [|neg|] "ptrsub" builder)
-            | _ ->
+            | _, _ ->
                 (* Range propagation (sync rule with type_inf.ml's Sub):
                    {a..<b}-{c..<d} -> {a-d+1..<b-c}; {a..<b}-k -> shift *)
                 let diff = build_sub v1 v2 "subtmp" builder in
@@ -1622,10 +1637,16 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let sub_of_array elem_ty n arr_ptr =
         let (lo_v, lo_r) = gen_bound lo_e in
         let (hi_v, hi_r) = gen_bound hi_e in
-        if not (ranges_proven lo_r hi_r n) then
-          raise (Error
-            "BUG: subslice bounds not proven against the array size \
-             (type_inf should have rejected this)");
+        if not (ranges_proven lo_r hi_r n) then begin
+          let show_range = function
+            | Some (a, b) -> Printf.sprintf "{%d..<%d}" a b
+            | None -> "unknown"
+          in
+          raise (Error (Printf.sprintf
+            "BUG: subslice bounds %s..<%s not proven against array size %d \
+             (type_inf should have rejected this)"
+            (show_range lo_r) (show_range hi_r) n))
+        end;
         let arr_ll = array_type (ltype_of_ast elem_ty) n in
         let zero = const_int (i32_type context) 0 in
         let ep = build_in_bounds_gep arr_ll arr_ptr [| zero; lo_v |] "sub_ptr" builder in
@@ -1800,11 +1821,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         if ll1 = i64_type context && ll2 = i32_type context then
           let bvw = if is_unsigned at then build_zext bv (i64_type context) "wi" builder
                     else build_sext bv (i64_type context) "wi" builder in
-          (at, av, at, bvw)
+          (at, av, bt, bvw)
         else if ll2 = i64_type context && ll1 = i32_type context then
           let avw = if is_unsigned bt then build_zext av (i64_type context) "wi" builder
                     else build_sext av (i64_type context) "wi" builder in
-          (bt, avw, bt, bv)
+          (at, avw, bt, bv)
         else
           (at, av, bt, bv)
       in
@@ -2519,6 +2540,7 @@ let rec int_bits_of_ast (ty : Ast.type_expr) =
   | TypeI16 | TypeU16  -> 16
   | TypeI32 | TypeU32  -> 32
   | TypeI64 | TypeU64  -> 64
+  | TypeIsize          -> usize_bitwidth ()
   | TypeUsize          -> usize_bitwidth ()
   | TypeBool           -> 1
   | TypeRefined (_, _, base) -> int_bits_of_ast base
@@ -2604,7 +2626,7 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable =
         const_inttoptr (const_of_int64 (usize_lltype ()) (eval_const_int e) true) (pointer_type context)
     | (Cast (_, _) | BinOp (Sub, { desc = IntLit 0L; _ }, _)),
       (TypeI8|TypeU8|TypeI16|TypeU16|TypeI32|TypeU32
-      |TypeI64|TypeU64|TypeUsize|TypeBool|TypeRefined _) ->
+      |TypeI64|TypeU64|TypeIsize|TypeUsize|TypeBool|TypeRefined _) ->
         (* Cast chains fold via eval_const_int (see its comment for why an
            `as` cast needs its own evaluator); a bare unary minus (desugared
            to BinOp(Sub, IntLit 0L, _) in the parser) reuses the same

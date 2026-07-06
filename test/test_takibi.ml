@@ -91,6 +91,7 @@ let rec show_type = function
   | Ast.TypeBool        -> "bool"
   | Ast.TypeI8          -> "i8"  | Ast.TypeI16 -> "i16" | Ast.TypeI32 -> "i32" | Ast.TypeI64 -> "i64"
   | Ast.TypeU8          -> "u8"  | Ast.TypeU16 -> "u16" | Ast.TypeU32 -> "u32" | Ast.TypeU64 -> "u64"
+  | Ast.TypeIsize       -> "isize"
   | Ast.TypeUsize       -> "usize"
   | Ast.TypeVoid        -> "void"
   | Ast.TypePtr t       -> "*" ^ show_type t
@@ -198,6 +199,12 @@ let parser_tests = [
     match parse "let addr: usize;" with
     | [Ast.LetDef ("addr", Some Ast.TypeUsize, None, None, false)] -> ()
     | _ -> Alcotest.fail "expected LetDef with TypeUsize"
+  );
+
+  Alcotest.test_case "isize type parses" `Quick (fun () ->
+    match parse "let offset: isize;" with
+    | [Ast.LetDef ("offset", Some Ast.TypeIsize, None, None, false)] -> ()
+    | _ -> Alcotest.fail "expected LetDef with TypeIsize"
   );
 
   Alcotest.test_case "bare global let parses as immutable (is_mutable=false)" `Quick (fun () ->
@@ -343,6 +350,7 @@ let parser_tests = [
       | _ -> Alcotest.fail (base_name ^ ": expected single FuncDef with a refined param"))
       [ ("i8", Ast.TypeI8); ("i16", Ast.TypeI16); ("i32", Ast.TypeI32); ("i64", Ast.TypeI64);
         ("u8", Ast.TypeU8); ("u16", Ast.TypeU16); ("u32", Ast.TypeU32); ("u64", Ast.TypeU64);
+        ("isize", Ast.TypeIsize);
         ("usize", Ast.TypeUsize) ]
   );
 
@@ -1544,8 +1552,26 @@ let infer_tests = [
   Alcotest.test_case "array write via pointer arith type-checks" `Quick
     (expect_ok "fn f() { let mut buf: [u8; 8]; *(buf + 0) = 'A'; }");
 
-  Alcotest.test_case "pointer subtraction ptr - i32 type-checks" `Quick
-    (expect_ok "fn f(p: *u8) *u8 { return p - 8; }");
+  Alcotest.test_case "pointer minus isize returns a pointer" `Quick
+    (expect_ok "fn f(p: *u8, offset: isize) *u8 { return p - offset; }");
+
+  Alcotest.test_case "pointer plus i32 variable is rejected" `Quick
+    (expect_type_error "cannot unify i32 with isize"
+       "fn f(p: *u8, offset: i32) *u8 { return p + offset; }");
+
+  Alcotest.test_case "pointer minus i32 variable is rejected" `Quick
+    (expect_type_error "cannot unify i32 with isize"
+       "fn f(p: *u8, offset: i32) *u8 { return p - offset; }");
+
+  Alcotest.test_case "pointer difference has type isize" `Quick (fun () ->
+    let pt = infer "fn distance(a: *u32, b: *u32) isize { return b - a; }" in
+    let fi = Types.StringMap.find "distance" pt.Types.functions in
+    Alcotest.check type_t "return type is isize" Ast.TypeIsize fi.Types.ret_type
+  );
+
+  Alcotest.test_case "pointer difference requires matching pointee types" `Quick
+    (expect_type_error "cannot unify"
+       "fn distance(a: *u8, b: *u32) isize { return b - a; }");
 
   Alcotest.test_case "array read via indexing type-checks" `Quick
     (expect_ok "fn putc(c: u8) {} fn f() { let mut buf: [u8; 4]; putc(buf[0]); }");
@@ -1679,10 +1705,14 @@ let infer_tests = [
        "struct S { x: i32; }
         fn f(p: *i32) { let mut s: S = {p}; }");
 
-  (* -- Commutative pointer arithmetic: int + ptr ------------------------------- *)
+  (* -- Commutative pointer arithmetic: isize + ptr --------------------------- *)
 
-  Alcotest.test_case "i32 + ptr commutative pointer arithmetic type-checks" `Quick
-    (expect_ok "fn f(p: *u8) *u8 { return 1 + p; }");
+  Alcotest.test_case "isize + ptr commutative pointer arithmetic type-checks" `Quick
+    (expect_ok "fn f(p: *u8, offset: isize) *u8 { return offset + p; }");
+
+  Alcotest.test_case "i32 + ptr commutative pointer arithmetic is rejected" `Quick
+    (expect_type_error "cannot unify i32 with isize"
+       "fn f(p: *u8, offset: i32) *u8 { return offset + p; }");
 
   (* -- &s.field -------------------------------------------------- *)
 
@@ -3174,6 +3204,26 @@ let codegen_tests = [
           return arr[0];
         }");
 
+  Alcotest.test_case
+    "pointer difference codegens as an isize element count"
+    `Quick
+    (expect_codegen_ok
+       "fn codegen_ptrdiff(a: *u32, b: *u32) -> isize {
+          return b - a;
+        }");
+
+  Alcotest.test_case
+    "isize range arithmetic with a literal preserves subslice proof"
+    `Quick
+    (expect_codegen_ok
+       "let mut codegen_isize_slice_buf: [u8; 8 * 1536];
+        let mut codegen_isize_slice_idx: isize = 0;
+        fn codegen_isize_slice() -> [u8; 1514..] {
+          let idx: isize = max(min(codegen_isize_slice_idx, 7), 0);
+          let offset: isize = idx * 1536 + 10;
+          return codegen_isize_slice_buf[offset..<offset + 1514];
+        }");
+
   (* Kept last, in this exact order, for the same one-way-switch reason as
      the DWARF tests above: Llvm_gen.setup_target permanently overwrites
      Llvm_gen.the_module's target triple/data layout (Llvm_gen.target_data)
@@ -3188,7 +3238,9 @@ let codegen_tests = [
     "usize is i64-wide when no target machine has been configured \
      (the fallback every earlier codegen test above implicitly relies on)"
     `Quick
-    (fun () -> Alcotest.(check int) "usize_bitwidth" 64 (Llvm_gen.usize_bitwidth ()));
+    (fun () ->
+       Alcotest.(check int) "usize_bitwidth" 64 (Llvm_gen.usize_bitwidth ());
+       Alcotest.(check int) "isize_bitwidth" 64 (Llvm_gen.isize_bitwidth ()));
 
   Alcotest.test_case
     "usize is 64-bit on a real 64-bit-pointer target (aarch64-none-elf), \
@@ -3198,7 +3250,8 @@ let codegen_tests = [
        let (_ : Llvm_target.TargetMachine.t) =
          Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
        in
-       Alcotest.(check int) "usize_bitwidth" 64 (Llvm_gen.usize_bitwidth ()));
+       Alcotest.(check int) "usize_bitwidth" 64 (Llvm_gen.usize_bitwidth ());
+       Alcotest.(check int) "isize_bitwidth" 64 (Llvm_gen.isize_bitwidth ()));
 
   Alcotest.test_case
     "usize is 32-bit on a 32-bit-pointer target (thumbv7em-none-eabi / \
@@ -3209,7 +3262,8 @@ let codegen_tests = [
        let (_ : Llvm_target.TargetMachine.t) =
          Llvm_gen.setup_target ~triple:"thumbv7em-none-eabi" ~cpu:"cortex-m7" ()
        in
-       Alcotest.(check int) "usize_bitwidth" 32 (Llvm_gen.usize_bitwidth ()));
+       Alcotest.(check int) "usize_bitwidth" 32 (Llvm_gen.usize_bitwidth ());
+       Alcotest.(check int) "isize_bitwidth" 32 (Llvm_gen.isize_bitwidth ()));
 
   Alcotest.test_case
     "full pipeline still verifies under the 32-bit target for the coerce \
@@ -3227,6 +3281,10 @@ let codegen_tests = [
 
         fn codegen_usize_narrowing_cast_cortexm(n: i64) -> usize {
           return n as usize;
+        }
+
+        fn codegen_ptrdiff_cortexm(a: *u32, b: *u32) -> isize {
+          return b - a;
         }");
 
   (* Global initializer constant folding: `as` casts and references to
@@ -3662,7 +3720,7 @@ let codegen_tests = [
 
   Alcotest.test_case
     "for i: usize in 0..<s.len parses and codegens: the annotation syntax
-     accepts all 9 primitive integer bases (int_base_type_expr), same as
+     accepts all 10 primitive integer bases (int_base_type_expr), same as
      {lo..<hi as base}" `Quick
     (expect_codegen_ok
        "fn refnum_for_usize_ann(s: []u8) -> i32 {

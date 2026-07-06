@@ -16,8 +16,8 @@ fn uart_print_hex8(n: i32) {
     }
 }
 
-fn strlen(s: *u8) i32 {
-    let mut n: i32 = 0;
+fn strlen(s: *u8) isize {
+    let mut n: isize = 0;
     while (*s != 0) {
         n = n + 1;
         s = s + 1;
@@ -25,7 +25,7 @@ fn strlen(s: *u8) i32 {
     return n;
 }
 
-fn crc8(data: *u8, len: i32) u8 {
+fn crc8(data: *u8, len: isize) u8 {
     let mut crc: u8 = 0;
     for i in 0..<len {
         crc = crc ^ *(data + i);
@@ -47,4 +47,3 @@ fn main() {
     uart_print_hex8(result);
     uart_puts("\r\n");
 }
-

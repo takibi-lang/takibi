@@ -23,7 +23,7 @@ The finished form of code is when index ranges are pinned at the type level usin
 ## Language Specification (Current)
 
 - File extension: `.tkb`
-- Types: `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `usize` (pointer-sized unsigned integer; LLVM width follows the target's actual pointer size via `Llvm_gen.usize_lltype ()` -- `i64` on AArch64/RISC-V64, `i32` on Cortex-M/STM32; falls back to `i64` when no target machine is configured, e.g. in unit tests), `void`, `*T` (regular pointer, non-volatile), `io T` (volatile-qualified value type), `*io T` (volatile MMIO pointer = `TypePtr(TypeIo T)`), `[T; N]` (array type; decays to pointer in function arguments), `fn(T...) -> R` (function pointer type), `Name` (named struct type), `{lo..<hi}` (refined integer subtype)
+- Types: `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `isize`, `usize` (`isize`/`usize` are pointer-sized signed/unsigned integers; LLVM width follows the target's actual pointer size via DataLayout -- 64 bits on AArch64/RISC-V64, 32 bits on Cortex-M/STM32; falls back to 64 bits when no target machine is configured, e.g. in unit tests), `void`, `*T` (regular pointer, non-volatile), `io T` (volatile-qualified value type), `*io T` (volatile MMIO pointer = `TypePtr(TypeIo T)`), `[T; N]` (array type; decays to pointer in function arguments), `fn(T...) -> R` (function pointer type), `Name` (named struct type), `{lo..<hi}` (refined integer subtype)
 - Statements:
   - `let x = e` / `let x: T = e` -- immutable variable declaration (initial value required, no reassignment)
   - `let mut x = e` / `let mut x: T = e` -- mutable variable declaration (reassignment allowed)
@@ -43,14 +43,14 @@ The finished form of code is when index ranges are pinned at the type level usin
   - String literals (`"..."` -- supports `\n` `\r` `\t` `\\` `\"` escapes)
   - Comments (`// line comment`, `/* block comment */`)
   - Arithmetic (`+` `-` `*` `/` `%`), comparison (`<` `>` `<=` `>=` `==` `!=`)
-  - Pointer arithmetic: `ptr + i32` / `ptr - i32` -> same pointer type (emitted as GEP). `i32 + ptr` also works. Codegen uses `build_neg + GEP`
+  - Pointer arithmetic uses element counts of type `isize` exclusively: `ptr + offset`, `offset + ptr`, and `ptr - offset` return the same pointer type. An `i32`/`usize` variable is rejected unless explicitly cast to `isize`; bare integer literals remain context-polymorphic and infer as `isize` here. `end - begin` requires matching pointee types and returns the element distance as `isize` (`Llvm.build_ptrdiff`). As with all raw-pointer operations, the compiler does not prove that both pointers belong to the same allocation.
   - Unary minus (`-expr`) -- desugared to `BinOp(Sub, IntLit 0, expr)` in the parser
   - Logical OR (`||`)
   - Bitwise NOT: `~expr` -- flips all bits; returns the same type as the operand (desugars to LLVM `not`)
   - Bitwise ops (`>>` right shift (arithmetic for signed types, logical for unsigned), `<<` left shift, `&` bitwise AND, `|` bitwise OR, `^` bitwise XOR) -- both operands must be the same integer type
   - Compound assignments: `+=` `-=` `|=` `&=` `^=` `<<=` `>>=` -- desugared in the parser to `x = x op rhs`; supported on all five LHS forms (variable, `*p`, `*(expr)`, `arr[i]`, `s.field`)
   - Function call, `*expr` (dereference), `&ident` (address-of)
-  - `expr as T` -- explicit type cast (i32 <-> u8, `*T` -> i32, `*T` -> `*U`). Lower precedence than arithmetic, so `a + b as u8` = `(a + b) as u8`
+  - `expr as T` -- explicit type cast (integer widths including `isize`/`usize`, `*T` -> `usize`, `usize` -> `*T`, `*T` -> `*U`). Lower precedence than arithmetic, so `a + b as u8` = `(a + b) as u8`
   - `sizeof(T)` -- compile-time size of `T` in bytes, type `usize` (fixed, not a polymorphic literal; compare/assign against other integer types requires an explicit `as` cast, e.g. `len >= sizeof(Hdr)` requires `len: usize`). Reads the same LLVM DataLayout used for struct tail-padding, so `sizeof` on a `packed` or `align(N)` struct reflects the true in-memory size.
 - `struct Name { field: type; ... }` -- struct type definition (top-level only; fields are primitive types, pointer types, or other struct types)
 - `let mut s: Name;` -- struct variable declaration (local/global, always treated as mutable)
@@ -587,7 +587,7 @@ became refined, so a subsequent i32/i64 BinOp width-sync could pick
 type_expr` (`ast.ml`) -- `{lo..<hi}` is no longer implicitly i32, it is
 "a value of type `base` known to be in `[lo, hi)`", where `base` is
 (by convention, not enforced by the type system itself) one of
-i8/i16/i32/i64/u8/u16/u32/u64/usize.
+i8/i16/i32/i64/u8/u16/u32/u64/isize/usize.
 
 **Files changed** (the same "sync rule" duplication pattern as every
 other feature in this file -- type_inf.ml and llvm_gen.ml were changed in
@@ -615,7 +615,7 @@ lockstep, verified by re-running the full test suite after each pass):
    previously-latent bugs in Mul/Bor/Bxor/Shr/Shl's fallback cases, see
    below), BinOp Add/Sub/Mul/Band/Mod, `narrow_from_cond`/`collect_bounds`
    (generalized from matching only `TI32` locals to matching any of
-   i8/i16/i32/i64/u8/u16/u32/u64/usize), the `Let` "proofs survive weaker
+   i8/i16/i32/i64/u8/u16/u32/u64/isize/usize), the `Let` "proofs survive weaker
    annotations" `bind_ty` check, min/max (see its own paragraph below).
    `For` loop counters originally stayed `base = TI32` always regardless
    of the bounds' own type -- since generalized to follow the bounds
@@ -863,7 +863,7 @@ actually fails).
 **Files**: `lib/parser.mly` (`int_base_type_expr`, `base_bound_range`,
 `check_refined_base_range`, the new `{lo..<hi as base}` production),
 `lib/llvm_gen.ml` (`widen_load`'s `TypeRefined` case), `test/
-test_takibi.ml` (parser tests for all 9 bases + the out-of-range/
+test_takibi.ml` (parser tests for all 10 bases + the out-of-range/
 no-upper-bound-for-64-bit cases, codegen regression tests for the
 `widen_load` bug). This unblocks, but does not itself perform, the
 protocol-examples rewrite described above -- that is tracked separately.
@@ -1120,7 +1120,7 @@ defaults a genuinely-unconstrained type variable to i32 -- this language's
 existing "unconstrained integer literal defaults to i32" convention (see
 `Types.to_ast`'s `TVar (Unbound _) -> TypeI32` case), so `for i in 0..<8`
 with nothing else pinning `i`'s type still behaves exactly as before --
-and (b) otherwise validates the result is one of the nine legal integer
+and (b) otherwise validates the result is one of the ten legal integer
 types, raising a clear `TypeError` for anything else (e.g. a `bool`
 bound) rather than silently accepting nonsense. `require_integer`
 replaced FOUR separate `unify_at ... TI32` call sites that all had this
@@ -1129,9 +1129,8 @@ and `SliceOf`'s two bound checks (`SliceOf`'s had already been generalized
 once this session -- see the "Explicit-Base" section above -- but that
 fix specifically preserved the direct-unify-into-TI32 shape, which still
 doesn't accept a BARE non-i32 type, only a refined one). Pointer
-arithmetic's own `ptr +/- i32` restriction (`BinOp` `Add`/`Sub`'s
-`TPtr _` case) is unrelated and deliberately untouched -- that's a
-documented, intentional language restriction, not a gap.
+arithmetic is unrelated to indexing and requires `isize` offsets (see the
+current language specification above).
 
 **A second, distinct bug found immediately while testing the fix**:
 `llvm_gen.ml`'s `For` codegen looked up the counter's resolved type via
@@ -1411,7 +1410,7 @@ bounds against an `Ast.type_expr` base at PARSE time for the literal
 syntax).
 
 **Verification**: `test/test_takibi.ml` gained parser/type-check tests
-(the annotation parses for all 9 bases, gives the exact expected
+(the annotation parses for all 10 bases, gives the exact expected
 `TRefinedInt`, rejects an out-of-range bound, rejects a conflicting
 bound) and a codegen test confirming `for i: u8 in 0..<4 { buf[i] = ...;
 }` proves the array access with ZERO trap sites (unlike the cast-based
@@ -1549,6 +1548,24 @@ future `gen_func`-adjacent change should keep using this catchable path.
 Regression coverage: `test/test_takibi.ml`'s `codegen_tests` group (via a
 `gen_codegen`/`expect_codegen_ok` helper running parse -> infer ->
 `Llvm_gen.gen_program` with no target machine).
+
+### isize and Raw Pointer Arithmetic
+
+`isize` is the pointer-sized signed integer counterpart to `usize`. Both use
+LLVM DataLayout's actual pointer width (`i64` on AArch64, `i32` on Cortex-M),
+but their roles are intentionally distinct: `usize` represents addresses,
+lengths, and non-negative sizes; `isize` represents relative pointer offsets
+and pointer differences.
+
+Pointer arithmetic accepts no legacy `i32` exception:
+- `*T + isize`, `isize + *T`, and `*T - isize` operate in units of `T` and return `*T`.
+- `*T - *T` requires identical pointee types and returns an element count as `isize` via `Llvm.build_ptrdiff`.
+- `*T + *T` is always a type error.
+- A bare literal in pointer arithmetic infers as `isize`; an already-typed `i32`/`usize` value requires an explicit `as isize` cast.
+
+The compiler does not track allocation provenance for raw pointers, so pointer
+subtraction is only meaningful when both operands derive from the same array or
+allocation. Slices remain the checked abstraction for ordinary bounded access.
 
 ### sizeof(T) Spans 4 Files
 Files changed when `sizeof(T)` was added:
@@ -2815,7 +2832,7 @@ See the comment in each `.tkb` file for implementation details (`condvar.tkb` ex
 **`io` is stripped on Deref**: `*p` where `p: *io i32` -> result type is `i32` (not `io`). Volatile is confined to `set_volatile true` on the load.
 
 - `*io T` is a compiler-level distinction. CPU-level memory barriers are provided by `ldaxr/stlxr` (extern fn).
-- Pointer arithmetic `*io T + i32` -> remains `*io T` (matches `TypePtr _`)
+- Pointer arithmetic `*io T + isize` -> remains `*io T` (matches `TypePtr _`)
 - `i32 as *io T` -- MMIO address literal assignment (inttoptr coercion, `TypePtr _` case)
 
 ### Volatile Reads of Global Variables (Interrupt-Shared Flags)

@@ -23,7 +23,7 @@ let narrow_int64 pos what (n : Int64.t) : int =
 let base_type_name = function
   | TypeI8 -> "i8" | TypeI16 -> "i16" | TypeI32 -> "i32" | TypeI64 -> "i64"
   | TypeU8 -> "u8" | TypeU16 -> "u16" | TypeU32 -> "u32" | TypeU64 -> "u64"
-  | TypeUsize -> "usize" | _ -> "?"
+  | TypeIsize -> "isize" | TypeUsize -> "usize" | _ -> "?"
 
 (* The (inclusive lo, exclusive-upper-bound-or-None) range an explicit
    {lo..<hi as base} bound must fit within, so a too-wide range doesn't
@@ -46,6 +46,7 @@ let base_bound_range = function
   | TypeU16   -> (0L, Some 65536L)
   | TypeU32   -> (0L, Some 4294967296L)
   | TypeU64   -> (0L, None)
+  | TypeIsize -> (-2147483648L, Some 2147483647L)
   | TypeUsize -> (0L, Some 4294967296L)
   | _ -> (Int64.min_int, None) (* unreachable: int_base_type_expr only ever produces the above *)
 
@@ -94,7 +95,7 @@ let check_refined_base_range pos lo hi base =
 
 %token VOID_TYPE BOOL_TYPE
 %token I8_TYPE I16_TYPE I32_TYPE I64_TYPE
-%token U8_TYPE U16_TYPE U32_TYPE U64_TYPE USIZE_TYPE
+%token U8_TYPE U16_TYPE U32_TYPE U64_TYPE ISIZE_TYPE USIZE_TYPE
 %token TRUE FALSE
 %token COLON ARROW
 
@@ -364,6 +365,7 @@ base_type_expr:
   | BOOL_TYPE { TypeBool }
   | I8_TYPE   { TypeI8  } | I16_TYPE { TypeI16 } | I32_TYPE { TypeI32 } | I64_TYPE { TypeI64 }
   | U8_TYPE   { TypeU8  } | U16_TYPE { TypeU16 } | U32_TYPE { TypeU32 } | U64_TYPE { TypeU64 }
+  | ISIZE_TYPE { TypeIsize }
   | USIZE_TYPE { TypeUsize }
   | IO         type_expr { TypeIo  $2 }
   | TIMES      type_expr { TypePtr $2 }
@@ -433,7 +435,7 @@ type_expr:
   | LBRACE lo = INT DOTDOTLT hi = INT AS base = int_base_type_expr RBRACE
     { (* Explicit-base {lo..<hi as base} surface syntax: lets a programmer
          write a refined type whose LLVM representation genuinely is
-         `base` (i8/i16/i32/i64/u8/u16/u32/u64/usize), rather than only
+         `base` (i8/i16/i32/i64/u8/u16/u32/u64/isize/usize), rather than only
          ever getting a non-i32 base indirectly through the compiler's
          own range-propagation machinery (Add/Sub/Mul/Band/Mod/min/max/
          narrowing -- see CLAUDE.md's "Refinement Numerical Type"
@@ -464,6 +466,7 @@ int_base_type_expr:
   | U16_TYPE   { TypeU16 }
   | U32_TYPE   { TypeU32 }
   | U64_TYPE   { TypeU64 }
+  | ISIZE_TYPE { TypeIsize }
   | USIZE_TYPE { TypeUsize }
 
 fn_type_params:
