@@ -4,6 +4,7 @@ open Takibi
 
 let parse src =
   Const_env.reset ();
+  Type_layout.reset ();
   let lexbuf = Lexing.from_string src in
   Parser.program Lexer.read lexbuf
 
@@ -229,6 +230,12 @@ let parser_tests = [
     match parse "let N: i32 = 4; let ring: [u8; N];" with
     | [Ast.LetDef _; Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 4)), None, None, false)] -> ()
     | _ -> Alcotest.fail "expected array size resolved to 4"
+  );
+
+  Alcotest.test_case "array size via sizeof(Struct) resolves" `Quick (fun () ->
+    match parse "struct Foo { a: u32; b: u32; } let buf: [u8; sizeof(Foo)];" with
+    | [Ast.StructDef _; Ast.LetDef ("buf", Some (Ast.TypeArray (Ast.TypeU8, 8)), None, None, false)] -> ()
+    | _ -> Alcotest.fail "expected array size resolved to 8"
   );
 
   Alcotest.test_case "array size referencing unknown identifier is a syntax error" `Quick (fun () ->

@@ -2592,6 +2592,24 @@ let rec eval_const_int (e : Ast.expr) : Int64.t =
            "'%s' is not a compile-time integer constant (must be an immutable \
             global with a constant initializer, declared earlier in the source)"
            name)))
+  | SizeOf ty ->
+      let elem_llty = ltype_of_ast ty in
+      let dl = match !target_data with
+        | Some dl -> dl
+        | None -> raise (Error "sizeof: target data layout not initialized")
+      in
+      Llvm_target.DataLayout.abi_size elem_llty dl
+  | OffsetOf (ty, field) ->
+      let (name, llty) = match ty with
+        | TypeNamed name -> (name, ltype_of_ast ty)
+        | _ -> raise (Error "offsetof requires a named struct type")
+      in
+      let (field_index, _) = field_info name field in
+      let dl = match !target_data with
+        | Some dl -> dl
+        | None -> raise (Error "offsetof: target data layout not initialized")
+      in
+      Llvm_target.DataLayout.offset_of_element llty field_index dl
   | _ -> raise (Error "global initializer: unsupported constant expression")
 
 let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable =
@@ -2622,6 +2640,12 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable =
     | StructLit exprs, TypeArray (elem_ty, _) ->
         let lelem = ltype_of_ast elem_ty in
         const_array lelem (Array.of_list (List.map (eval_const elem_ty) exprs))
+    | SizeOf ty, _ ->
+        const_of_int64 (ltype_of_ast ft)
+          (eval_const_int { Ast.desc = SizeOf ty; loc = Lexing.dummy_pos }) true
+    | OffsetOf (ty, field), _ ->
+        const_of_int64 (ltype_of_ast ft)
+          (eval_const_int { Ast.desc = OffsetOf (ty, field); loc = Lexing.dummy_pos }) false
     | Cast (_, _), TypePtr _ ->
         const_inttoptr (const_of_int64 (usize_lltype ()) (eval_const_int e) true) (pointer_type context)
     | (Cast (_, _) | BinOp (Sub, { desc = IntLit 0L; _ }, _)),

@@ -27,44 +27,8 @@
 
 let mut our_mac: [u8; 6];
 
-// ARP-over-Ethernet/IPv4 field offsets, relative to the start of the ARP
-// payload (right after the 14-byte Ethernet header). Total length is 28
-// bytes: HTYPE(2) PTYPE(2) HLEN(1) PLEN(1) OPER(2) SHA(6) SPA(4) THA(6) TPA(4).
-// Adjacent constants double as subslice bounds: arp[ARP_SHA..<ARP_SPA] is
-// exactly the 6-byte sender MAC field.
-let ARP_HTYPE: i32 = 0;
-let ARP_PTYPE: i32 = 2;
-let ARP_HLEN:  i32 = 4;
-let ARP_PLEN:  i32 = 5;
-let ARP_OPER:  i32 = 6;
-let ARP_SHA:   i32 = 8;
-let ARP_SPA:   i32 = 14;
-let ARP_THA:   i32 = 18;
-let ARP_TPA:   i32 = 24;
-
 // bytes_eq/bytes_copy/read_u16be/write_u16be/slice_copy/slice_eq live in
 // examples/common/netutil.tkb (netutil) and are compiler builtins.
-
-// Rewrites the ARP request at `arp` into a reply in place, and swaps the
-// enclosing Ethernet header's src/dst. Only called after the caller has
-// already verified this is a "who-has OUR_IP" request.
-fn build_arp_reply(eth: [u8; 42..]) {
-    let arp = eth[14..<42];
-
-    // Ethernet: dst = old src, then src = our_mac (order matters: must
-    // read the old src before overwriting it).
-    slice_copy(eth[0..<6], eth[6..<12]);
-    slice_copy(eth[6..<12], our_mac as []u8);
-
-    // ARP: THA/TPA = old SHA/SPA (read before SHA/SPA are overwritten
-    // below; THA/TPA and SHA/SPA are disjoint byte ranges so this is safe
-    // regardless of order, but reading first keeps the intent obvious).
-    slice_copy(arp[ARP_THA..<ARP_TPA], arp[ARP_SHA..<ARP_SPA]);
-    slice_copy(arp[ARP_TPA..<28],      arp[ARP_SPA..<ARP_THA]);
-    slice_copy(arp[ARP_SHA..<ARP_SPA], our_mac as []u8);
-    slice_copy(arp[ARP_SPA..<ARP_THA], OUR_IP as []u8);
-    write_u16be(arp[ARP_OPER..<ARP_SHA], 2); // reply
-}
 
 fn main() {
     uart_puts("arp_reply: init\r\n");
@@ -89,7 +53,16 @@ fn main() {
                         arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
                         read_u16be(arp[ARP_OPER..<ARP_SHA]) == 1) {
                         if (slice_eq(arp[ARP_TPA..<28], OUR_IP as []u8)) {
-                            build_arp_reply(frame);
+                            // Ethernet: dst = old src, then src = our_mac.
+                            slice_copy(frame[0..<6], frame[6..<12]);
+                            slice_copy(frame[6..<12], our_mac as []u8);
+
+                            // ARP: THA/TPA = old SHA/SPA.
+                            slice_copy(arp[ARP_THA..<ARP_TPA], arp[ARP_SHA..<ARP_SPA]);
+                            slice_copy(arp[ARP_TPA..<28],      arp[ARP_SPA..<ARP_THA]);
+                            slice_copy(arp[ARP_SHA..<ARP_SPA], our_mac as []u8);
+                            slice_copy(arp[ARP_SPA..<ARP_THA], OUR_IP as []u8);
+                            write_u16be(arp[ARP_OPER..<ARP_SHA], 2);
                             net_transmit(frame as *u8, len);
                         }
                     }
