@@ -1834,7 +1834,7 @@ Files changed when `struct Name { field: type; }` was added:
 1. `lib/ast.ml` -- `TypeNamed of string` (type), `FieldGet of expr * string` (expr), `AssignField of expr * string * expr` (stmt), `StructDef of string * (string * type_expr) list * bool` (last bool = is_packed)
 2. `lib/types.ml` -- `TStruct of string` (internal type), added `program_types.structs` field
 3. `lib/lexer.mll` -- `"struct"` -> `STRUCT`, `'.'` -> `DOT` token
-4. `lib/parser.mly` -- `%left DOT` (highest precedence), `struct_fields` rule, `IDENT DOT IDENT ASSIGN expr SEMI` assignment statement, `expr DOT IDENT` field read expression, `IDENT` -> `TypeNamed` type expression
+4. `lib/parser.mly` -- `%left DOT` (highest precedence), `struct_fields` rule, field assignment for both `s.field = v` and `arr[i].field = v`, `expr DOT IDENT` field read expression, `IDENT` -> `TypeNamed` type expression
 5. `lib/type_inf.ml` -- `senv : (string * Ast.type_expr) list StringMap.t` collected in Pass 0 and threaded through all inference functions
 6. `lib/llvm_gen.ml` -- registers `struct_type context fields` in Pass 0; `TypeNamed` returns the alloca/global pointer as-is (same approach as arrays); `FieldGet` uses `build_in_bounds_gep` + load; `AssignField` uses GEP + store
 7. `test/test_takibi.ml` + `examples/struct/` -- parser/type-inference tests + QEMU demo
@@ -1845,10 +1845,10 @@ Files changed when `struct Name { field: type; }` was added:
 - Global struct variables are handled the same way (value of `define_global` = return the pointer as-is)
 - `s.field` / `p.field` where `p: *Name` -> GEP `[0, field_idx]` -> load (auto-distinguished by type check)
 - `s.field = v` -> GEP -> store (non-volatile; not MMIO)
+- `arr[i].field = v` -> bounds-checked element GEP -> field GEP -> store; `ptr[i].field = v` uses pointer indexing without an array bounds check
 - `&s` -> return the alloca pointer as `*Name` (for pass-by-pointer)
 
 **Current limitations**:
-- Field assignment only in `ident.field = v` form (LHS is a single variable name only)
 - Global struct variable as `let g: Name;` only (`let mut` is not supported in global scope; always mutable)
 
 ### Packed Struct and Struct Type-Level Alignment (5 Files)
@@ -3272,13 +3272,14 @@ virtio protocol itself.
   for interrupt-driven RX; `net_poll_rx()` now polls the used ring
   directly instead, so no IRQ/GIC involvement remains here at all -- see
   the STM32 Ethernet entry above for why and when that changed.)
-- **The vring is manipulated as raw byte offsets, not struct arrays.**
-  Struct field assignment only supports `ident.field = v` (a bare variable
-  name on the left -- see "Current limitations" under Struct Implementation
-  above), so a descriptor-table *entry* picked out by a runtime index
-  (`descs[i].field = v`) isn't expressible. `desc_set`/`avail_ring_set`/
-  `used_ring_get_*` in `virtio_mmio.tkb` poke fixed byte offsets through
-  cast pointers instead, the same way a minimal C driver would.
+- **The vring uses typed views over one shared backing allocation.**
+  `VirtqDesc`, `VirtqAvail`, `VirtqUsed`, and `VirtqUsedElem` describe the
+  specification-defined layouts. Descriptor writes use `descs[i].field`,
+  while `sizeof(VirtqDesc)` and `offsetof(..., ring)` locate the avail/used
+  subregions without duplicating byte offsets. The used-ring views are `*io`
+  so device-written fields remain volatile. The page-aligned byte arrays are
+  still the owning storage because all three regions must share one legacy
+  virtqueue allocation.
   `arp_reply.tkb` extends the same technique to the ARP header itself
   (`bytes_eq`/`bytes_copy`/`read_u16be`/`write_u16be`), rewriting the
   request into a reply in place with no temporary struct/copy -- this was

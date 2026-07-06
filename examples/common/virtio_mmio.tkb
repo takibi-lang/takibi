@@ -57,6 +57,30 @@ let VIRTIO_MMIO_SLOT_COUNT: i32 = 32;
 
 let QNUM: i32 = 8; // virtqueue depth for both the RX and TX queues
 
+struct packed VirtqDesc {
+    addr: usize;
+    len: u32;
+    flags: u16;
+    next: u16;
+}
+
+struct packed VirtqAvail {
+    flags: u16;
+    idx: u16;
+    ring: [u16; QNUM];
+}
+
+struct packed VirtqUsedElem {
+    id: u32;
+    len: u32;
+}
+
+struct packed VirtqUsed {
+    flags: u16;
+    idx: u16;
+    ring: [VirtqUsedElem; QNUM];
+}
+
 // Descriptor flags (virtio spec).
 let VIRTQ_DESC_F_WRITE: i32 = 2; // device writes into this buffer (RX only)
 
@@ -149,38 +173,33 @@ fn virtio_notify(queue_idx: i32) {
     *(vreg(VIRTIO_QUEUE_NOTIFY)) = queue_idx;
 }
 
-// -- Raw vring accessors -----------------------------------------------
-// Struct field assignment in takibi only supports `ident.field = v` (a
-// bare variable name on the left), which a descriptor-table *entry*
-// picked out by a runtime index is not. So the vring is manipulated as a
-// flat byte buffer with manual offsets instead of struct arrays -- the
-// same approach a minimal C driver takes when poking a fixed-layout DMA
-// structure. Layout per queue_mem (matches virtio_queue_setup's PAGE_SIZE
-// QueueAlign): [0, QNUM*16) descriptor table, immediately followed by the
-// avail ring, then the used ring starting at the next page (offset 4096).
+// -- Vring accessors ----------------------------------------------------
+// The three regions still share one page-aligned backing allocation, but each
+// region is viewed through its specification-defined struct layout. Layout per
+// queue_mem (matches virtio_queue_setup's PAGE_SIZE QueueAlign): descriptor
+// table, immediately followed by the avail ring, then the used ring starting
+// at the next page (offset PAGE_SIZE).
 
 fn desc_set(queue_mem: *u8, i: i32, addr: usize, len: i32, flags: i32) {
-    let base: *u8 = queue_mem + i * 16;
-    let addr_p: *usize = base as *usize;
-    *addr_p = addr;
-    let len_p: *u32 = (base + 8) as *u32; // virtq_desc.len is le32 (unsigned) per the virtio spec
-    *len_p = len as u32;
-    let flags_p: *u16 = (base + 12) as *u16;
-    *flags_p = flags as u16;
+    let descs: *VirtqDesc = queue_mem as *VirtqDesc;
+    descs[i].addr = addr;
+    descs[i].len = len as u32;
+    descs[i].flags = flags as u16;
     // `next` field (offset 14) is left at 0 (BSS-zeroed at boot): we never
     // chain descriptors, so VIRTQ_DESC_F_NEXT is never set and it's unused.
 }
 
 fn avail_ring_set(queue_mem: *u8, slot: i32, desc_idx: i32) {
-    let avail_off: i32 = QNUM * 16;
-    let p: *u16 = (queue_mem + avail_off + 4 + slot * 2) as *u16;
-    *p = desc_idx as u16;
+    let avail_off: i32 = QNUM * (sizeof(VirtqDesc) as i32);
+    let ring: *u16 = (queue_mem + avail_off
+        + (offsetof(VirtqAvail, ring) as i32)) as *u16;
+    ring[slot] = desc_idx as u16;
 }
 
 fn avail_publish(queue_mem: *u8, new_idx: i32) {
-    let avail_off: i32 = QNUM * 16;
-    let p: *u16 = (queue_mem + avail_off + 2) as *u16;
-    *p = new_idx as u16;
+    let avail_off: i32 = QNUM * (sizeof(VirtqDesc) as i32);
+    let avail: *VirtqAvail = (queue_mem + avail_off) as *VirtqAvail;
+    avail.idx = new_idx as u16;
 }
 
 // These three read memory the device writes asynchronously via DMA, and
@@ -190,21 +209,22 @@ fn avail_publish(queue_mem: *u8, new_idx: i32) {
 // CLAUDE.md's "Volatile Reads of Global Variables" section (the compiler
 // has no way to know DMA writes are coming) -- so these must be `io`.
 fn used_idx_get(queue_mem: *u8) -> i32 {
-    let p: *io u16 = (queue_mem + PAGE_SIZE + 2) as *io u16;
-    return (*p) as i32;
+    let used: *io VirtqUsed = (queue_mem + PAGE_SIZE) as *io VirtqUsed;
+    return used.idx as i32;
 }
 
 fn used_ring_get_id(queue_mem: *u8, slot: i32) -> i32 {
-    let p: *io u32 = (queue_mem + PAGE_SIZE + 4 + slot * 8) as *io u32;
-    return (*p) as i32; // matches used_idx_get's pattern above: the register
-                        // itself is unsigned, but the returned descriptor
-                        // index feeds the i32-based index/length machinery
-                        // used_ring_get_id's own callers rely on.
+    let ring: *io VirtqUsedElem = (queue_mem + PAGE_SIZE
+        + (offsetof(VirtqUsed, ring) as i32)) as *io VirtqUsedElem;
+    return ring[slot].id as i32; // The device value is unsigned, but the
+                                 // returned descriptor index feeds the
+                                 // i32-based index/length machinery.
 }
 
 fn used_ring_get_len(queue_mem: *u8, slot: i32) -> i32 {
-    let p: *io u32 = (queue_mem + PAGE_SIZE + 4 + slot * 8 + 4) as *io u32;
-    return (*p) as i32; // same reasoning as used_ring_get_id above.
+    let ring: *io VirtqUsedElem = (queue_mem + PAGE_SIZE
+        + (offsetof(VirtqUsed, ring) as i32)) as *io VirtqUsedElem;
+    return ring[slot].len as i32; // same reasoning as used_ring_get_id.
 }
 
 // -- Shared driver API (matches examples/common_stm32/eth.tkb) --------------

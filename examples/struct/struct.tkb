@@ -1,4 +1,5 @@
-// Struct demo: field access, assignment, pass-by-pointer, and swap.
+// Struct demo: field access, assignment, indexed assignment, pass-by-pointer,
+// and swap.
 // Defines two struct types: Point (x, y) and Rect (tl, br, w, h).
 struct Point {
     x: i32;
@@ -27,6 +28,7 @@ fn rect_area(r: *Rect) -> i32 {
 }
 
 let mut g: Point = {10, 20};
+let mut points: [Point; 2];
 
 fn main() {
     uart_puts("global sum: ");
@@ -49,5 +51,15 @@ fn main() {
     uart_puts("rect area: ");
     print_uint(rect_area(&r));
     uart_puts("\r\n");
-}
 
+    points[0].x = 7;
+    points[0].y = 8;
+    points[1].x = 10;
+    points[1].y = 5;
+    points[1].x += 5;
+    uart_puts("indexed sums: ");
+    print_uint(points[0].x + points[0].y);
+    uart_puts(" ");
+    print_uint(points[1].x + points[1].y);
+    uart_puts("\r\n");
+}
