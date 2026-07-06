@@ -17,11 +17,11 @@
 // uart_puts below is purely for interactive bring-up debugging.
 
 fn swap_mac(frame: *u8) {
-    for i: i32 in 0..<6 {
-        let a: u8 = frame[i];
-        let b: u8 = frame[6 + i];
-        frame[i] = b;
-        frame[6 + i] = a;
+    for i in 0..<ETH_MAC_LEN {
+        let a: u8 = frame[ETH_DST_OFF + i];
+        let b: u8 = frame[ETH_SRC_OFF + i];
+        frame[ETH_DST_OFF + i] = b;
+        frame[ETH_SRC_OFF + i] = a;
     }
 }
 

@@ -14,6 +14,135 @@
 // CLAUDE.md's P4b section) -- use slice_copy/slice_eq (compiler builtins)
 // directly wherever a slice view is already in hand instead of these.
 
+// Shared protocol layouts. These packed structs exist so the examples can
+// spell header lengths and field offsets with `sizeof(...)` / `offsetof(...)`
+// instead of hand-maintaining duplicated byte constants in each protocol file.
+// The payload bytes are still manipulated through byte slices; the structs are
+// just a single source of truth for the wire layout.
+struct packed EthHdr {
+    dst: [u8; 6];
+    src: [u8; 6];
+    ethertype: [u8; 2];
+}
+
+struct packed ArpHdr {
+    htype: [u8; 2];
+    ptype: [u8; 2];
+    hlen: u8;
+    plen: u8;
+    oper: [u8; 2];
+    sha: [u8; 6];
+    spa: [u8; 4];
+    tha: [u8; 6];
+    tpa: [u8; 4];
+}
+
+struct packed Ipv4Hdr {
+    version_ihl: u8;
+    dscp_ecn: u8;
+    total_len: [u8; 2];
+    ident: [u8; 2];
+    flags_frag: [u8; 2];
+    ttl: u8;
+    protocol: u8;
+    checksum: [u8; 2];
+    src: [u8; 4];
+    dst: [u8; 4];
+}
+
+struct packed TcpHdr {
+    src_port: [u8; 2];
+    dst_port: [u8; 2];
+    seq: [u8; 4];
+    ack: [u8; 4];
+    data_offset: u8;
+    flags: u8;
+    window: [u8; 2];
+    checksum: [u8; 2];
+    urgent: [u8; 2];
+}
+
+struct packed IcmpHdr {
+    ty: u8;
+    code: u8;
+    checksum: [u8; 2];
+    rest: [u8; 4];
+}
+
+let ETH_HDR_LEN: isize = 14;
+let ETH_MAC_LEN: isize = 6;
+let ETH_DST_OFF: isize = 0;
+let ETH_SRC_OFF: isize = 6;
+let ETH_TYPE_OFF: isize = 12;
+let ETH_DST: isize = 0;
+let ETH_SRC: isize = 6;
+let ETH_TYPE: isize = 12;
+
+let ARP_HDR_LEN: isize = 28;
+let ARP_HTYPE_OFF: isize = 0;
+let ARP_PTYPE_OFF: isize = 2;
+let ARP_HLEN_OFF: isize = 4;
+let ARP_PLEN_OFF: isize = 5;
+let ARP_OPER_OFF: isize = 6;
+let ARP_SHA_OFF: isize = 8;
+let ARP_SPA_OFF: isize = 14;
+let ARP_THA_OFF: isize = 18;
+let ARP_TPA_OFF: isize = 24;
+let ARP_HTYPE: isize = 0;
+let ARP_PTYPE: isize = 2;
+let ARP_HLEN: isize = 4;
+let ARP_PLEN: isize = 5;
+let ARP_OPER: isize = 6;
+let ARP_SHA: isize = 8;
+let ARP_SPA: isize = 14;
+let ARP_THA: isize = 18;
+let ARP_TPA: isize = 24;
+
+let IP_HDR_LEN: isize = 20;
+let IP_ADDR_LEN: isize = 4;
+let IP_VERSION_IHL_OFF: isize = 0;
+let IP_TOTAL_LEN_OFF: isize = 2;
+let IP_TTL_OFF: isize = 8;
+let IP_PROTOCOL_OFF: isize = 9;
+let IP_CHECKSUM_OFF: isize = 10;
+let IP_SRC_OFF: isize = 12;
+let IP_DST_OFF: isize = 16;
+let IP_VERSION_IHL: isize = 0;
+let IP_TOTAL_LEN: isize = 2;
+let IP_TTL: isize = 8;
+let IP_PROTOCOL: isize = 9;
+let IP_CHECKSUM: isize = 10;
+let IP_SRC: isize = 12;
+let IP_DST: isize = 16;
+
+let TCP_HDR_LEN: isize = 20;
+let TCP_SRC_PORT_OFF: isize = 0;
+let TCP_DST_PORT_OFF: isize = 2;
+let TCP_SEQ_OFF: isize = 4;
+let TCP_ACK_OFF: isize = 8;
+let TCP_DATA_OFFSET_OFF: isize = 12;
+let TCP_FLAGS_OFF: isize = 13;
+let TCP_WINDOW_OFF: isize = 14;
+let TCP_CHECKSUM_OFF: isize = 16;
+let TCP_URGENT_OFF: isize = 18;
+let TCP_SRC_PORT: isize = 0;
+let TCP_DST_PORT: isize = 2;
+let TCP_SEQ: isize = 4;
+let TCP_ACK: isize = 8;
+let TCP_DATA_OFFSET: isize = 12;
+let TCP_FLAGS: isize = 13;
+let TCP_WINDOW: isize = 14;
+let TCP_CHECKSUM: isize = 16;
+let TCP_URGENT: isize = 18;
+
+let ICMP_HDR_LEN: isize = 8;
+let ICMP_TYPE_OFF: isize = 0;
+let ICMP_CODE_OFF: isize = 1;
+let ICMP_CHECKSUM_OFF: isize = 2;
+let ICMP_TYPE: isize = 0;
+let ICMP_CODE: isize = 1;
+let ICMP_CHECKSUM: isize = 2;
+
 fn bytes_eq(a: *u8, b: *u8, n: i32) -> i32 {
     for i in 0..<n {
         if (a[i] != b[i]) {

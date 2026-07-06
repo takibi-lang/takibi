@@ -127,18 +127,34 @@ item:
     { ExternFuncDef ($3, $5, None) }
   | EXTERN FN IDENT LPAREN params RPAREN ARROW type_expr SEMI
     { ExternFuncDef ($3, $5, Some $8) }
-  | STRUCT IDENT LBRACE struct_fields RBRACE
-    { StructDef ($2, $4, false, None) }
-  | STRUCT PACKED IDENT LBRACE struct_fields RBRACE
-    { StructDef ($3, $5, true, None) }
-  | STRUCT IDENT ALIGN LPAREN INT RPAREN LBRACE struct_fields RBRACE
-    { StructDef ($2, $8, false, Some (narrow_int64 $symbolstartpos "alignment" $5)) }
-  | STRUCT PACKED IDENT ALIGN LPAREN INT RPAREN LBRACE struct_fields RBRACE
-    { StructDef ($3, $9, true, Some (narrow_int64 $symbolstartpos "alignment" $6)) }
+  | struct_intro LBRACE struct_fields RBRACE
+    { let (name, is_packed, align_opt) = $1 in
+      Type_layout.finish_struct name $3 is_packed align_opt;
+      StructDef (name, $3, is_packed, align_opt) }
   | ENUM IDENT COLON base_type_expr LBRACE enum_variants RBRACE
-    { let (vs, ne) = $6 in EnumDef ($2, Some $4, vs, ne) }
+    { let (vs, ne) = $6 in
+      Type_layout.register_enum $2 $4;
+      EnumDef ($2, Some $4, vs, ne) }
   | ENUM IDENT LBRACE enum_variants RBRACE
-    { let (vs, ne) = $4 in EnumDef ($2, None, vs, ne) }
+    { let (vs, ne) = $4 in
+      Type_layout.register_enum $2 TypeU32;
+      EnumDef ($2, None, vs, ne) }
+
+struct_intro:
+  | STRUCT IDENT
+    { Type_layout.begin_struct $2;
+      ($2, false, None) }
+  | STRUCT PACKED IDENT
+    { Type_layout.begin_struct $3;
+      ($3, true, None) }
+  | STRUCT IDENT ALIGN LPAREN INT RPAREN
+    { let align = narrow_int64 $symbolstartpos "alignment" $5 in
+      Type_layout.begin_struct $2;
+      ($2, false, Some align) }
+  | STRUCT PACKED IDENT ALIGN LPAREN INT RPAREN
+    { let align = narrow_int64 $symbolstartpos "alignment" $6 in
+      Type_layout.begin_struct $3;
+      ($3, true, Some align) }
 
 struct_fields:
   | /* empty */ { [] }
@@ -402,6 +418,8 @@ array_size:
               "array size '%s' is not a known compile-time integer constant \
                (declare it earlier as an immutable global `let %s: T = N;`)"
               name name)) }
+  | SIZEOF LPAREN t = type_expr RPAREN
+    { Type_layout.sizeof_type $symbolstartpos t }
   | LPAREN n = array_size RPAREN { n }
   | a = array_size PLUS  b = array_size { a + b }
   | a = array_size MINUS b = array_size { a - b }

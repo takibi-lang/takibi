@@ -10,7 +10,8 @@
 
 let table : (string, int) Hashtbl.t = Hashtbl.create 8
 
-let reset () = Hashtbl.reset table
+let reset () =
+  Hashtbl.reset table
 
 let define name n = Hashtbl.replace table name n
 
