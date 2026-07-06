@@ -150,12 +150,10 @@ fn virtio_notify(queue_idx: i32) {
 }
 
 // -- Raw vring accessors -----------------------------------------------
-// Struct field assignment in takibi only supports `ident.field = v` (a
-// bare variable name on the left), which a descriptor-table *entry*
-// picked out by a runtime index is not. So the vring is manipulated as a
-// flat byte buffer with manual offsets instead of struct arrays -- the
-// same approach a minimal C driver takes when poking a fixed-layout DMA
-// structure. Layout per queue_mem (matches virtio_queue_setup's PAGE_SIZE
+// This vring code predates indexed struct field assignment and remains a flat
+// byte buffer using manual offsets. Migrating it is separate work because the
+// descriptor, avail-ring, and page-aligned used-ring layout share one backing
+// allocation. Layout per queue_mem (matches virtio_queue_setup's PAGE_SIZE
 // QueueAlign): [0, QNUM*16) descriptor table, immediately followed by the
 // avail ring, then the used ring starting at the next page (offset 4096).
 

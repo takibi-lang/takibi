@@ -991,6 +991,31 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  Alcotest.test_case "indexed field assignment parses to AssignField(Index(...))" `Quick (fun () ->
+    match parse "fn f(i: i32) { descs[i].value = 5; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.AssignField (
+             { desc = Ast.Index ("descs", { desc = Ast.Var "i"; _ }); _ },
+             "value", { desc = Ast.IntLit 5L; _ }) -> ()
+         | _ -> Alcotest.fail "expected AssignField(Index(descs, i), value, 5)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "indexed compound field assignment parses" `Quick (fun () ->
+    match parse "fn f(i: i32) { descs[i].value += 1; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.AssignField (
+             ({ desc = Ast.Index ("descs", _); _ } as base), "value",
+             { desc = Ast.BinOp (Ast.Add,
+                 { desc = Ast.FieldGet (load_base, "value"); _ },
+                 { desc = Ast.IntLit 1L; _ }); _ })
+           when base == load_base -> ()
+         | _ -> Alcotest.fail "expected indexed AssignField compound desugaring")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
   Alcotest.test_case "field access binds tighter than addition" `Quick (fun () ->
     (* p.x + p.y should parse as (p.x) + (p.y), not p.(x + p).y *)
     match parse "struct P { x: i32; } fn f(p: *P) -> i32 { return p.x + p.x; }" with
@@ -1571,6 +1596,20 @@ let infer_tests = [
   Alcotest.test_case "struct field write type-checks" `Quick
     (expect_ok "struct Point { x: i32; y: i32; }
                 fn f() { let mut p: Point; p.x = 3; p.y = 4; }");
+
+  Alcotest.test_case "indexed struct field write type-checks" `Quick
+    (expect_ok "struct IndexedPoint { x: i32; y: i32; }
+                let mut indexed_points: [IndexedPoint; 4];
+                fn indexed_write(i: {0..<4}) {
+                  indexed_points[i].x = 3;
+                  indexed_points[i].y += 4;
+                }");
+
+  Alcotest.test_case "pointer-indexed struct field write type-checks" `Quick
+    (expect_ok "struct PointerPoint { x: i32; }
+                fn pointer_indexed_write(p: *PointerPoint, i: i32) {
+                  p[i].x = 3;
+                }");
 
   Alcotest.test_case "struct passed by pointer type-checks" `Quick
     (expect_ok "struct Point { x: i32; y: i32; }
@@ -2206,6 +2245,43 @@ let codegen_tests = [
          (contains_substring (function_ir "offset_normal_value") "ret i64 4");
        Alcotest.(check bool) "packed field offset has no padding" true
          (contains_substring (function_ir "offset_packed_value") "ret i64 1"));
+
+  Alcotest.test_case
+    "indexed struct field assignment codegens through the element address"
+    `Quick
+    (expect_trap_sites 0
+       "struct CodegenIndexedDesc { status: u32; length: u32; }
+        let mut codegen_indexed_descs: [CodegenIndexedDesc; 4];
+        fn codegen_indexed_store(i: {0..<4 as u8}) {
+          codegen_indexed_descs[i].status = 1 as u32;
+          codegen_indexed_descs[i].length += 16 as u32;
+        }");
+
+  Alcotest.test_case
+    "dynamic indexed struct field assignment retains the array bounds trap"
+    `Quick
+    (expect_trap_sites 1
+       "struct CodegenCheckedDesc { status: u32; }
+        let mut codegen_checked_descs: [CodegenCheckedDesc; 4];
+        fn codegen_checked_store(i: i32) {
+          codegen_checked_descs[i].status = 1 as u32;
+        }");
+
+  Alcotest.test_case
+    "pointer-indexed io struct field assignment emits a volatile store"
+    `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "struct CodegenIoReg { value: u32; }
+          fn codegen_io_indexed_store(p: *io CodegenIoReg, i: i32) {
+            p[i].value = 1 as u32;
+          }"
+       in
+       match Hashtbl.find_opt Llvm_gen.functions "codegen_io_indexed_store" with
+       | Some (_, fn) ->
+           Alcotest.(check bool) "volatile store" true
+             (contains_substring (Llvm.string_of_llvalue fn) "store volatile")
+       | None -> Alcotest.fail "function 'codegen_io_indexed_store' not found");
 
   Alcotest.test_case
     "u8 loaded via array indexing compares against a u8 cast literal \

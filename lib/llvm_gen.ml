@@ -1414,14 +1414,21 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         let arr_ll = array_type (ltype_of_ast elem_ty) n in
         let zero   = const_int (i32_type context) 0 in
         let ep = build_in_bounds_gep arr_ll arr_ptr [|zero; idx_v|] "idx_ptr" builder in
-        let v  = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
-        (elem_ty, to_arith_width elem_ty v)
+        match elem_ty with
+        | TypeNamed _ -> (elem_ty, ep)
+        | _ ->
+            let v = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
+            (elem_ty, to_arith_width elem_ty v)
       in
       let load_through_ptr elem_ty ptr_v is_volatile =
         let ep = build_gep (ltype_of_ast elem_ty) ptr_v [|idx_v|] "idx_ptr" builder in
-        let v  = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
-        if is_volatile then set_volatile true v;
-        (elem_ty, to_arith_width elem_ty v)
+        match elem_ty with
+        | TypeNamed _ when is_volatile -> (TypePtr (TypeIo elem_ty), ep)
+        | TypeNamed _ -> (elem_ty, ep)
+        | _ ->
+            let v = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
+            if is_volatile then set_volatile true v;
+            (elem_ty, to_arith_width elem_ty v)
       in
       (* Slice load: elide the check only when idx's range fits the slice's
          compile-time MINIMUM length (a lower bound of the runtime length,
@@ -2219,9 +2226,10 @@ let gen_func ?prog_types fdef =
 
     | AssignField (base_expr, fname, val_expr) ->
         let (base_ty, base_v) = gen_expr locals base_expr in
-        let sname = match base_ty with
-          | TypeNamed s           -> s
-          | TypePtr (TypeNamed s) -> s
+        let (sname, through_io) = match base_ty with
+          | TypeNamed s                      -> (s, false)
+          | TypePtr (TypeNamed s)            -> (s, false)
+          | TypePtr (TypeIo (TypeNamed s))   -> (s, true)
           | _ -> raise (Error (Printf.sprintf
               "field assignment '.%s' on non-struct type" fname))
         in
@@ -2233,7 +2241,8 @@ let gen_func ?prog_types fdef =
           (fname ^ "_ptr") builder
         in
         let inst = build_store (coerce val_v field_ty) field_ptr builder in
-        (match field_ty with TypeIo _ -> set_volatile true inst | _ -> ())
+        if through_io || (match field_ty with TypeIo _ -> true | _ -> false)
+        then set_volatile true inst
 
     | Let (true, name, _, expr_opt) ->
         (* Mutable: alloca was pre-allocated; store the initial value via init_memory *)

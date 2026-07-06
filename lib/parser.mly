@@ -229,6 +229,11 @@ stmt:
     { let loc = $symbolstartpos in
       let base = { desc = Var id; loc } in
       { desc = AssignField (base, fname, rhs); loc } }
+  | id = IDENT LBRACKET idx = expr RBRACKET DOT fname = IDENT ASSIGN rhs = expr SEMI
+    (* arr[i].field = v -- indexed struct field write *)
+    { let loc = $symbolstartpos in
+      let base = { desc = Index (id, idx); loc } in
+      { desc = AssignField (base, fname, rhs); loc } }
   | id = IDENT op = compound_op rhs = expr SEMI
     { let loc = $symbolstartpos in
       let lhs = { desc = Var id; loc } in
@@ -249,6 +254,11 @@ stmt:
   | id = IDENT DOT fname = IDENT op = compound_op rhs = expr SEMI
     { let loc = $symbolstartpos in
       let base = { desc = Var id; loc } in
+      let load = { desc = FieldGet (base, fname); loc } in
+      { desc = AssignField (base, fname, { desc = BinOp (op, load, rhs); loc }); loc } }
+  | id = IDENT LBRACKET idx = expr RBRACKET DOT fname = IDENT op = compound_op rhs = expr SEMI
+    { let loc = $symbolstartpos in
+      let base = { desc = Index (id, idx); loc } in
       let load = { desc = FieldGet (base, fname); loc } in
       { desc = AssignField (base, fname, { desc = BinOp (op, load, rhs); loc }); loc } }
 
