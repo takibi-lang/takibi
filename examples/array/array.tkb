@@ -12,12 +12,12 @@ fn main() {
 
     let mut buf: [u8; 8];
 
-    for i: i32 in 0..<8 {
+    for i: usize in 0..<8 {
         buf[i] = 'A';
     }
 
     uart_puts("write: ");
-    for i: i32 in 0..<8 {
+    for i: usize in 0..<8 {
         uart_putc(buf[i]);
     }
     uart_puts("\r\n");
@@ -29,7 +29,7 @@ fn main() {
 
     fill(buf, 'Z', 8);
     uart_puts("fill:  ");
-    for i: i32 in 0..<8 {
+    for i: usize in 0..<8 {
         uart_putc(buf[i]);
     }
     uart_puts("\r\n");

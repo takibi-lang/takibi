@@ -4,19 +4,25 @@
 // The goal is that none of the generated machine code contains llvm.trap (brk #0).
 //
 //   Approach 1: manual {lo..<hi} annotation (Step 3.4)
-//     fill_pair(i: {0..<7}) -- caller proves the type and passes it in
+//     fill_pair(i: {0..<7 as usize}) -- caller proves the type and passes it
+//     in. The explicit `as usize` base is required: array/slice indexing is
+//     usize-only now (see CLAUDE.md's "Array/Slice Indices Must Be usize"),
+//     and a TRefinedInt-into-TRefinedInt parameter needs an EXACT (bounds
+//     AND base) match, not just a proven-safe range.
 //
 //   Approach 2: for loop (Step 3.5-for)
-//     for i: i32 in 0..<8 -- the counter gets type {0..<8}. The `: i32`
-//     annotation is required here: nothing in either loop body passes `i`
-//     to anything with a concrete type of its own, so without it this is
-//     a compile error asking for one, not a silent i32 default -- see
-//     CLAUDE.md's for-loop sections.
+//     for i: usize in 0..<8 -- the counter gets type {0..<8 as usize}. The
+//     annotation is required here for two reasons: nothing in either loop
+//     body passes `i` to anything with a concrete type of its own, so
+//     without SOME annotation this is a compile error asking for one; and
+//     `usize` specifically is what buf[i] requires directly, with no cast.
 //
 //   Approach 3: if narrowing (Step 3.5-if)
-//     if (v >= 0 && v < 8) -- converts a runtime check into a type proof
-//     Note: direct access through a Mut binding (v: i32 parameter) still conservatively
-//       retains the bounds check for now (to be improved in Step 3.5-Mut)
+//     if (v >= 0 && v < 8) -- converts a runtime check into a type proof.
+//     v itself stays i32 (the point of this demo is narrowing an unknown
+//     -range i32), so buf[v] needs one explicit `as {0..<8 as usize}` cast
+//     to bridge the narrowed range across the base change -- a FREE
+//     coercion (zero runtime cost) since the bounds already match exactly.
 //
 // QEMU expected output:
 //   ABCDEFGH\r\n  (approach 1)
@@ -26,16 +32,16 @@
 let mut buf: [u8; 8];
 
 // --- Approach 1: manual {lo..<hi} annotation (Step 3.4) --------------------------
-fn fill_pair(i: {0..<7}, lo: u8, hi: u8) {
+fn fill_pair(i: {0..<7 as usize}, lo: u8, hi: u8) {
     buf[i]   = lo;   // TypeRefined(0,7): hi=7 <= 8 -> check elided
     buf[i+1] = hi;   // TypeRefined(1,8): hi=8 <= 8 -> check elided
 }
 
 fn fill_pairs() {
-    let i0: {0..<7} = 0;
-    let i2: {0..<7} = 2;
-    let i4: {0..<7} = 4;
-    let i6: {0..<7} = 6;
+    let i0: {0..<7 as usize} = 0;
+    let i2: {0..<7 as usize} = 2;
+    let i4: {0..<7 as usize} = 4;
+    let i6: {0..<7 as usize} = 6;
     fill_pair(i0, 'A', 'B');
     fill_pair(i2, 'C', 'D');
     fill_pair(i4, 'E', 'F');
@@ -44,7 +50,7 @@ fn fill_pairs() {
 
 // --- Approach 2: for loop (Step 3.5-for) -------------------------------
 fn fill_loop() {
-    for i: i32 in 0..<8 {
+    for i: usize in 0..<8 {
         buf[i] = 'A' + i as u8;  // i: {0..<8} -> check elided
     }
 }
@@ -52,7 +58,7 @@ fn fill_loop() {
 // --- Approach 3: if narrowing (Step 3.5-if) -------------------------------
 fn fill_cond(v: i32, c: u8) {
     if (v >= 0 && v < 8) {
-        buf[v] = c;
+        buf[v as {0..<8 as usize}] = c;
     }
 }
 
@@ -64,7 +70,7 @@ fn fill_by_cond() {
 
 // --- Common: print results --------------------------------------------------------
 fn print_buf() {
-    for i: i32 in 0..<8 {
+    for i: usize in 0..<8 {
         uart_putc(buf[i]);
     }
     uart_putc('\r');

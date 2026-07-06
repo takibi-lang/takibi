@@ -32,15 +32,21 @@ let mut our_mac: [u8; 6];
 // bytes: HTYPE(2) PTYPE(2) HLEN(1) PLEN(1) OPER(2) SHA(6) SPA(4) THA(6) TPA(4).
 // Adjacent constants double as subslice bounds: arp[ARP_SHA..<ARP_SPA] is
 // exactly the 6-byte sender MAC field.
-let ARP_HTYPE: i32 = 0;
-let ARP_PTYPE: i32 = 2;
-let ARP_HLEN:  i32 = 4;
-let ARP_PLEN:  i32 = 5;
-let ARP_OPER:  i32 = 6;
-let ARP_SHA:   i32 = 8;
-let ARP_SPA:   i32 = 14;
-let ARP_THA:   i32 = 18;
-let ARP_TPA:   i32 = 24;
+// usize, not i32: ARP_HLEN/ARP_PLEN are used as direct slice ELEMENT
+// indices below (arp[ARP_HLEN]), and array/slice indexing is usize-only
+// (see CLAUDE.md's "Array/Slice Indices Must Be usize"). The rest stay
+// usize too for consistency, since they're SliceOf bounds mixed with the
+// same constants (require_integer accepts any integer type there, so this
+// is not strictly required for those uses, just uniform).
+let ARP_HTYPE: usize = 0;
+let ARP_PTYPE: usize = 2;
+let ARP_HLEN:  usize = 4;
+let ARP_PLEN:  usize = 5;
+let ARP_OPER:  usize = 6;
+let ARP_SHA:   usize = 8;
+let ARP_SPA:   usize = 14;
+let ARP_THA:   usize = 18;
+let ARP_TPA:   usize = 24;
 
 // bytes_eq/bytes_copy/read_u16be/write_u16be/slice_copy/slice_eq live in
 // examples/common/netutil.tkb (netutil) and are compiler builtins.

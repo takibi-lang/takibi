@@ -105,6 +105,51 @@ let require_integer loc t =
   | _ -> raise (TypeError (loc,
       Printf.sprintf "expected an integer type, got '%s'" (to_string t)))
 
+(* Require an [T; N]/slice INDEX be usize specifically -- narrower than
+   require_integer (still used for raw-pointer p[i] indexing, which stays
+   permissive; see CLAUDE.md's "Array/Slice Indices Must Be usize"
+   section for why the line is drawn there and not at pointers too).
+   Mirrors Rust/Zig, where array/slice Index is only ever implemented for
+   usize: a value proven safe in some OTHER base (u8, i32, ...) must be
+   re-typed or explicitly cast, even though the compiler can see it fits.
+
+   Deliberately NOT implemented as a plain `unify_at loc t TUsize`: a bare
+   `unify_at` would go through TRefinedInt's existing subtyping-into-TUsize
+   leniency (types.ml's `TRefinedInt (lo, _), TUsize when lo >= 0 -> ()`),
+   which ignores the refined value's own base entirely -- exactly the
+   escape hatch that makes this check TOOTHLESS for the common case, since
+   nearly every for-loop counter is Const_env-const-bounded (wrapped in
+   TRefinedInt) and would sail through unchanged regardless of its base.
+   This function checks the base directly instead.
+
+   Unlike require_integer, this ACTIVELY resolves (not just tolerates) an
+   unresolved TVar: both a bare literal index and a for-loop counter's
+   still-open base get pinned to TUsize immediately. This is safe (unlike
+   require_integer's old eager-i32-default mistake, see its own comment)
+   because pinning to usize is exactly the type indexing already demands
+   -- there is no "wait for a later, more informative use" concern the way
+   there was for a bare loop counter with no fixed role yet. *)
+let require_usize_index loc t =
+  let reject () =
+    raise (TypeError (loc, Printf.sprintf
+      "array/slice index must be usize, got '%s' -- prefer declaring the \
+       value as usize directly (e.g. `for i: usize in ...`), which keeps \
+       any proven range; a plain `as usize` cast also works but discards \
+       the proven range (reopening a runtime bounds check) -- use an \
+       explicit `as {lo..<hi as usize}` cast instead to carry a proven \
+       range across the base change"
+      (to_string t)))
+  in
+  match repr t with
+  | TUsize -> ()
+  | TVar { contents = Unbound _ } -> unify_at loc t TUsize
+  | TRefinedInt (_, _, base) ->
+      (match repr base with
+       | TUsize -> ()
+       | TVar { contents = Unbound _ } -> unify_at loc base TUsize
+       | _ -> reject ())
+  | _ -> reject ()
+
 (* True if a type is not yet fully determined: a bare unresolved
    unification variable, or a TRefinedInt whose own base still is (e.g.
    `let x = min(5, 10);` with no annotation -- min/max's Call case can
@@ -523,9 +568,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       (* Get the variable's original type (no array decay, unlike Var) *)
       let vt = lookup e.loc id tyenv in
       let it = infer_expr senv eenv tyenv fenv idx in
-      require_integer idx.loc it;
       (match repr vt with
        | TArray (elem, n) ->
+           require_usize_index idx.loc it;
            (* Constant index: check bounds at compile time. A literal too
               large to narrow natively (see Ast.int_of_intlit) is certainly
               out of bounds for any real array, so it is reported the same
@@ -542,9 +587,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                        Printf.sprintf "index %Ld is out of bounds for array of size %d" k64 n)))
             | _ -> ());
            elem
-       | TSlice (elem, _) -> elem  (* runtime length; codegen elides the check
-                                      only when idx's range fits the MINIMUM *)
-       | TPtr   elem      -> strip_io elem     (* *T or *io T -> returns T (bounds unknown) *)
+       | TSlice (elem, _) ->
+           require_usize_index idx.loc it;
+           elem  (* runtime length; codegen elides the check
+                    only when idx's range fits the MINIMUM *)
+       | TPtr   elem      ->
+           require_integer idx.loc it;  (* pointer indexing stays permissive -- see
+                                            require_usize_index's own comment *)
+           strip_io elem     (* *T or *io T -> returns T (bounds unknown) *)
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt))))
 
@@ -1139,9 +1189,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       let vt = lookup s.loc id tyenv in
       let it = infer_expr senv eenv tyenv fenv idx in
       let rt = infer_expr senv eenv tyenv fenv rhs in
-      require_integer idx.loc it;
       let elem_ty = match repr vt with
         | TArray (elem, n) ->
+            require_usize_index idx.loc it;
             (match idx.desc with
              | IntLit k64 ->
                  (match Ast.int_of_intlit k64 with
@@ -1154,8 +1204,8 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                         Printf.sprintf "index %Ld is out of bounds for array of size %d" k64 n)))
              | _ -> ());
             elem
-        | TSlice (elem, _) -> elem
-        | TPtr   elem      -> strip_io elem
+        | TSlice (elem, _) -> require_usize_index idx.loc it; elem
+        | TPtr   elem      -> require_integer idx.loc it; strip_io elem
         | _ -> raise (TypeError (s.loc,
             Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))
       in

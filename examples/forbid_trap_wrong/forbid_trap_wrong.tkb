@@ -14,8 +14,8 @@
 
 let mut buf: [u8; 8];
 
-fn read_at(v: i32) -> u8 {
-    return buf[v];   // index type i32: bounds check remains -> rejected
+fn read_at(v: usize) -> u8 {
+    return buf[v];   // index type usize (unproven range): bounds check remains -> rejected
 }
 
 fn main() -> i32 {

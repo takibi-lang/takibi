@@ -11,7 +11,14 @@
 // array size below. No forward references, no constant folding -- only a
 // bare literal initializer is recognized.
 
-let QUEUE_SIZE: i32 = 4;
+// usize, not i32: the for-loop below indexes `ring` with this bound
+// directly, and array/slice indexing is usize-only (see CLAUDE.md's
+// "Array/Slice Indices Must Be usize") -- the bound's own declared type is
+// what the loop counter's base gets unified against, before any `for i:
+// usize in ...` annotation would even get a chance to apply, so the
+// constant itself must already be usize. Array-size resolution ([i32;
+// QUEUE_SIZE] below) is unaffected: it works purely by VALUE, not type.
+let QUEUE_SIZE: usize = 4;
 
 // [i32; QUEUE_SIZE] -- resolved to [i32; 4] at parse time.
 let mut ring: [i32; QUEUE_SIZE];
@@ -25,7 +32,7 @@ fn fill() {
 fn main() {
     fill();
     uart_puts("QUEUE_SIZE = ");
-    uart_print_uint(QUEUE_SIZE);
+    uart_print_uint(QUEUE_SIZE as i32);
     uart_puts("\r\n");
     for i in 0..<QUEUE_SIZE {
         uart_print_uint(ring[i]);

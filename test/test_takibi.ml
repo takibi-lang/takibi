@@ -1698,8 +1698,12 @@ let infer_tests = [
     (expect_type_error "out of bounds"
        "fn f() i32 { let mut arr: [i32; 4]; return arr[100]; }");
 
-  Alcotest.test_case "dynamic index on array still type-checks" `Quick
-    (expect_ok "fn f(i: i32) i32 { let mut arr: [i32; 4]; return arr[i]; }");
+  Alcotest.test_case "dynamic index on array still type-checks (usize)" `Quick
+    (expect_ok "fn f(i: usize) i32 { let mut arr: [i32; 4]; return arr[i]; }");
+
+  Alcotest.test_case "dynamic i32 index on array is a compile error (must be usize)" `Quick
+    (expect_type_error "must be usize"
+       "fn f(i: i32) i32 { let mut arr: [i32; 4]; return arr[i]; }");
 
   Alcotest.test_case "constant OOB on global array is a compile error" `Quick
     (expect_type_error "out of bounds"
@@ -1819,19 +1823,19 @@ let infer_tests = [
   Alcotest.test_case "{0..<8}%8 can index [u8;8] without bounds check" `Quick
     (expect_ok
       "let mut buf: [u8; 8]; \
-       fn f(i: {0..<8}) { buf[i % 8] = 'X'; }");
+       fn f(i: {0..<8 as usize}) { buf[i % 8] = 'X'; }");
 
   (* -- Step 3.4: Bounds check elision (global array + TypeRefined index) -- *)
 
   Alcotest.test_case "refined index on global array compiles" `Quick
     (expect_ok
       "let mut buf: [u8; 8]; \
-       fn f(i: {0..<8}) { buf[i] = 'X'; }");
+       fn f(i: {0..<8 as usize}) { buf[i] = 'X'; }");
 
   Alcotest.test_case "refined pair write (i and i+1) compiles" `Quick
     (expect_ok
       "let mut buf: [u8; 8]; \
-       fn f(i: {0..<7}) { buf[i] = 'A'; buf[i+1] = 'B'; }");
+       fn f(i: {0..<7 as usize}) { buf[i] = 'A'; buf[i+1] = 'B'; }");
 
   Alcotest.test_case "refined arithmetic range mismatch caught at return" `Quick
     (expect_type_error "range mismatch"
@@ -1840,7 +1844,7 @@ let infer_tests = [
   Alcotest.test_case "non-proven index (overflow range) still compiles" `Quick
     (expect_ok
       "let mut buf: [u8; 8]; \
-       fn f(i: {0..<8}) { buf[i+1] = 'Z'; }");
+       fn f(i: {0..<8 as usize}) { buf[i+1] = 'Z'; }");
 
   (* -- Step 3.5: Type narrowing via if-condition ------------------------------- *)
 
@@ -1850,10 +1854,11 @@ let infer_tests = [
        fn foo(i: {0..<8}) {} \
        fn f(v: i32) { if (v >= 0 && v < 8) { foo(v); } }");
 
-  Alcotest.test_case "if (v>=0 && v<8) allows buf[v] write" `Quick
+  Alcotest.test_case "if (v>=0 && v<8) allows buf[v] write (cast to usize \
+                       carries the narrowed range across the base change)" `Quick
     (expect_ok
       "let mut buf: [u8; 8]; \
-       fn f(v: i32) { if (v >= 0 && v < 8) { buf[v] = 'X'; } }");
+       fn f(v: i32) { if (v >= 0 && v < 8) { buf[v as {0..<8 as usize}] = 'X'; } }");
 
   Alcotest.test_case "outside if block v remains i32 (no escape)" `Quick
     (expect_type_error "unproven i32"
@@ -1901,8 +1906,8 @@ let infer_tests = [
   Alcotest.test_case "for loop variable has refined type (literal bounds)" `Quick
     (fun () ->
       let pt = infer "let mut buf: [u8; 8]; \
-                      fn f() { for i: i32 in 0..<8 { buf[i] = 'X'; } }" in
-      (* buf[i] should compile without error: i:{0..<8} covers [u8;8] *)
+                      fn f() { for i: usize in 0..<8 { buf[i] = 'X'; } }" in
+      (* buf[i] should compile without error: i:{0..<8 as usize} covers [u8;8] *)
       ignore pt);
 
   Alcotest.test_case "for loop body accesses refined-param function" `Quick
@@ -1921,8 +1926,8 @@ let infer_tests = [
   Alcotest.test_case "nested for loops compile" `Quick
     (expect_ok
       "let mut buf: [u8; 4]; \
-       fn f() { for i: i32 in 0..<4 { buf[i] = 'A'; } \
-                for i: i32 in 0..<4 { buf[i] = 'B'; } }");
+       fn f() { for i: usize in 0..<4 { buf[i] = 'A'; } \
+                for i: usize in 0..<4 { buf[i] = 'B'; } }");
 
   (* -- For-loop counter follows the bounds' own base type, not a hardcoded
      TI32 (regression -- `for i in 0..<s.len` (s.len: TUsize) used to fail
@@ -2242,11 +2247,20 @@ let codegen_tests = [
   (* -- --forbid-trap accounting (Llvm_gen.trap_sites) -------------------- *)
 
   Alcotest.test_case
-    "unproven i32 array index records exactly one trap site (the residual \
-     bounds check --forbid-trap would reject)" `Quick
+    "unproven i32 array index is a compile error: array/slice indices must \
+     be usize now (see require_usize_index), not just any integer type" `Quick
+    (expect_type_error "must be usize"
+       "let mut ftrap_buf_a0: [u8; 8];
+        fn ftrap_i32_index(v: i32) -> u8 {
+          return ftrap_buf_a0[v];
+        }");
+
+  Alcotest.test_case
+    "unproven usize array index records exactly one trap site (the \
+     residual bounds check --forbid-trap would reject)" `Quick
     (expect_trap_sites 1
        "let mut ftrap_buf_a: [u8; 8];
-        fn ftrap_i32_index(v: i32) -> u8 {
+        fn ftrap_usize_index(v: usize) -> u8 {
           return ftrap_buf_a[v];
         }");
 
@@ -2255,29 +2269,29 @@ let codegen_tests = [
      the type, so the program is --forbid-trap clean)" `Quick
     (expect_trap_sites 0
        "let mut ftrap_buf_b: [u8; 8];
-        fn ftrap_refined_index(v: {0..<8}) -> u8 {
+        fn ftrap_refined_index(v: {0..<8 as usize}) -> u8 {
           return ftrap_buf_b[v];
         }");
 
   Alcotest.test_case
-    "i32 as {lo..<hi} is a CHECKED cast: exactly one trap site (the range \
-     check), and the subsequent index is elided. Regression for the \
-     soundness hole where this cast was silently unchecked and \
+    "i32 as {lo..<hi as usize} is a CHECKED cast: exactly one trap site \
+     (the range check), and the subsequent index is elided. Regression for \
+     the soundness hole where this cast was silently unchecked and \
      arr[v as {0..<8}] became an unchecked OOB access (zero sites, zero \
      traps, wrong)" `Quick
     (expect_trap_sites 1
        "let mut ftrap_buf_c: [u8; 8];
         fn ftrap_checked_cast(v: i32) -> u8 {
-          return ftrap_buf_c[v as {0..<8}];
+          return ftrap_buf_c[v as {0..<8 as usize}];
         }");
 
   Alcotest.test_case
-    "refined-to-wider-refined cast is a provable subtype coercion: zero \
-     trap sites, stays legal under --forbid-trap" `Quick
+    "refined-to-wider-refined cast (across a base change too) is a provable \
+     subtype coercion: zero trap sites, stays legal under --forbid-trap" `Quick
     (expect_trap_sites 0
        "let mut ftrap_buf_d: [u8; 8];
         fn ftrap_subtype_cast(v: {2..<5}) -> u8 {
-          return ftrap_buf_d[v as {0..<8}];
+          return ftrap_buf_d[v as {0..<8 as usize}];
         }");
 
   Alcotest.test_case
@@ -2308,7 +2322,7 @@ let codegen_tests = [
      `if (0 <= v < 8) { v = 100; buf[v] }` keeps its bounds check" `Quick
     (expect_trap_sites 1
        "let mut fkill_buf_a: [u8; 8];
-        fn fkill_assign(v: i32) -> u8 {
+        fn fkill_assign(v: usize) -> u8 {
           if (v >= 0 && v < 8) {
             v = 100;
             return fkill_buf_a[v];
@@ -2321,9 +2335,9 @@ let codegen_tests = [
      through the pointer can change v after the condition was checked" `Quick
     (expect_trap_sites 1
        "let mut fkill_buf_b: [u8; 8];
-        fn fkill_alias(v: i32) -> u8 {
+        fn fkill_alias(v: usize) -> u8 {
           if (v >= 0 && v < 8) {
-            let p: *i32 = &v;
+            let p: *usize = &v;
             *p = 100;
             return fkill_buf_b[v];
           }
@@ -2336,9 +2350,9 @@ let codegen_tests = [
      (2 sites: the in-loop store against size 8, and the read after)" `Quick
     (expect_trap_sites 2
        "let mut fkill_buf_c: [u8; 8];
-        fn fkill_rebind(v: i32) -> u8 {
+        fn fkill_rebind(v: usize) -> u8 {
           if (v >= 0 && v < 8) {
-            for v: i32 in 0..<100 {
+            for v: usize in 0..<100 {
               fkill_buf_c[v] = 1 as u8;
             }
             return fkill_buf_c[v];
@@ -2351,7 +2365,7 @@ let codegen_tests = [
      narrowed variable (the kill rule must not over-kill)" `Quick
     (expect_trap_sites 0
        "let mut fkill_buf_d: [u8; 8];
-        fn fkill_readonly(v: i32) -> u8 {
+        fn fkill_readonly(v: usize) -> u8 {
           if (v >= 0 && v < 8) {
             return fkill_buf_d[v];
           }
@@ -2365,13 +2379,13 @@ let codegen_tests = [
      `for i in 0..<SIZE` elides the check against [T; SIZE] \
      (examples/const_global's residual sites under --forbid-trap)" `Quick
     (expect_trap_sites 0
-       "let FTRAP_SIZE: i32 = 4;
+       "let FTRAP_SIZE: usize = 4;
         let mut ftrap_ring: [i32; FTRAP_SIZE];
         fn ftrap_const_bound() -> i32 {
-          for i in 0..<FTRAP_SIZE {
-            ftrap_ring[i] = i;
+          for i: usize in 0..<FTRAP_SIZE {
+            ftrap_ring[i] = i as i32;
           }
-          return ftrap_ring[0 as {0..<1}];
+          return ftrap_ring[0 as {0..<1 as usize}];
         }");
 
   Alcotest.test_case
@@ -2415,10 +2429,10 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
-    "slice with unknown length: unproven i32 index gets a runtime check \
+    "slice with unknown length: unproven usize index gets a runtime check \
      against the RUNTIME length (one trap site)" `Quick
     (expect_trap_sites 1
-       "fn ftsl_dyn_index(s: []u8, i: i32) -> u8 {
+       "fn ftsl_dyn_index(s: []u8, i: usize) -> u8 {
           return s[i];
         }");
 
@@ -2569,20 +2583,20 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
-    "immutable let with an i32 annotation keeps a refined initializer's \
-     range: `let x: i32 = v` where v: {2..<5} still elides buf[x] (zero \
-     sites); let mut keeps the declared i32 (one site)" `Quick
+    "immutable let with a same-base annotation keeps a refined initializer's \
+     range: `let x: usize = v` where v: {2..<5 as usize} still elides \
+     buf[x] (zero sites); let mut keeps the declared usize (one site)" `Quick
     (fun () ->
        expect_trap_sites 0
          "let mut ftbp_buf_a: [u8; 8];
-          fn ftbp_imm_int(v: {2..<5}) -> u8 {
-            let x: i32 = v;
+          fn ftbp_imm_int(v: {2..<5 as usize}) -> u8 {
+            let x: usize = v;
             return ftbp_buf_a[x];
           }" ();
        expect_trap_sites 1
          "let mut ftbp_buf_b: [u8; 8];
-          fn ftbp_mut_int(v: {2..<5}) -> u8 {
-            let mut x: i32 = v;
+          fn ftbp_mut_int(v: {2..<5 as usize}) -> u8 {
+            let mut x: usize = v;
             return ftbp_buf_b[x];
           }" ());
 
@@ -2627,7 +2641,7 @@ let codegen_tests = [
      covers ForEach): the read after the loop keeps its bounds check" `Quick
     (expect_trap_sites 1
        "let mut ftfe_buf: [u8; 8];
-        fn ftfe_kill(v: i32, s: []u8) -> u8 {
+        fn ftfe_kill(v: usize, s: []u8) -> u8 {
           if (v >= 0 && v < 8) {
             for v in s { }
             return ftfe_buf[v];
@@ -2727,7 +2741,7 @@ let codegen_tests = [
      {20..<21}, proving the index (zero sites)" `Quick
     (expect_trap_sites 0
        "let mut ftp4_buf_a: [u8; 32];
-        fn ftp4_eq(ihl: i32) -> u8 {
+        fn ftp4_eq(ihl: usize) -> u8 {
           if (ihl == 20) {
             return ftp4_buf_a[ihl];
           }
@@ -2739,7 +2753,7 @@ let codegen_tests = [
      to a constant -- still intervals): total <= bounded proves the index" `Quick
     (expect_trap_sites 0
        "let mut ftp4_buf_b: [u8; 40];
-        fn ftp4_var_cmp(total: i32, cap: {10..<40}) -> u8 {
+        fn ftp4_var_cmp(total: usize, cap: {10..<40 as usize}) -> u8 {
           if (total >= 0 && total <= cap) {
             return ftp4_buf_b[total];
           }
@@ -2751,10 +2765,10 @@ let codegen_tests = [
      refined*positive-literal all carry ranges through immutable lets" `Quick
     (expect_trap_sites 0
        "let mut ftp4_buf_c: [u8; 128];
-        fn ftp4_arith(a: {5..<16}, b: {0..<8}) -> u8 {
-          let m: i32 = a * 4;       // {20..<61}
-          let s: i32 = a + b;       // {5..<23}
-          let d: i32 = m - a;       // {5..<56}
+        fn ftp4_arith(a: {5..<16 as usize}, b: {0..<8 as usize}) -> u8 {
+          let m: usize = a * 4;       // {20..<61}
+          let s: usize = a + b;       // {5..<23}
+          let d: usize = m - a;       // {5..<56}
           return ftp4_buf_c[m] + ftp4_buf_c[s] + ftp4_buf_c[d];
         }");
 
@@ -2845,8 +2859,8 @@ let codegen_tests = [
      intersect with its own prior entry, not overwrite it)" `Quick
     (expect_trap_sites 0
        "let mut ftp4b_buf: [u8; 100];
-        fn ftp4b_nested_mut(v: i32) -> u8 {
-          let mut x: i32 = v;
+        fn ftp4b_nested_mut(v: usize) -> u8 {
+          let mut x: usize = v;
           if (x >= 0 && x <= 99) {
             if (x >= 10 && x <= 50) {
               return ftp4b_buf[x];
@@ -2863,7 +2877,7 @@ let codegen_tests = [
      at all (zero trap sites)" `Quick
     (expect_trap_sites 0
        "let mut ftp4c_buf_a: [u8; 16];
-        fn ftp4c_mask(v: i32) -> u8 {
+        fn ftp4c_mask(v: usize) -> u8 {
           return ftp4c_buf_a[v & 0x0f];
         }");
 
@@ -2872,8 +2886,8 @@ let codegen_tests = [
      (P4a): (v & 0x0f) * 4 carries {0..<16} to {0..<61}" `Quick
     (expect_trap_sites 0
        "let mut ftp4c_buf_b: [u8; 61];
-        fn ftp4c_mask_mul(v: i32) -> u8 {
-          let ihl: i32 = (0x0f & v) * 4;
+        fn ftp4c_mask_mul(v: usize) -> u8 {
+          let ihl: usize = (0x0f & v) * 4;
           return ftp4c_buf_b[ihl];
         }");
 
@@ -2885,11 +2899,11 @@ let codegen_tests = [
      so this gap silently blocked the exact same idiom Mul already \
      supported for a literal multiplier" `Quick
     (expect_trap_sites 0
-       "let RX_BUF_SIZE: i32 = 1536;
+       "let RX_BUF_SIZE: usize = 1536;
         let mut ftp4c_buf_f: [u8; 12288];
-        fn ftp4c_mul_const(raw_idx: i32) -> u8 {
-          let idx: i32 = max(min(raw_idx, 7), 0);   // {0..<8}
-          let offset: i32 = idx * RX_BUF_SIZE;       // {0..<10753} via Const_env-resolved k
+        fn ftp4c_mul_const(raw_idx: usize) -> u8 {
+          let idx: usize = max(min(raw_idx, 7), 0);   // {0..<8}
+          let offset: usize = idx * RX_BUF_SIZE;       // {0..<10753} via Const_env-resolved k
           return ftp4c_buf_f[offset];
         }");
 
@@ -2900,9 +2914,9 @@ let codegen_tests = [
      idiom that makes examples/ip_parse's ihl clamp provable" `Quick
     (expect_trap_sites 0
        "let mut ftp4c_buf_c: [u8; 20];
-        fn ftp4c_min_clamp(raw: i32) -> u8 {
-          let ihl: i32 = raw & 0x3f;      // {0..<64}
-          let capped: i32 = min(ihl, 19); // {0..<20}
+        fn ftp4c_min_clamp(raw: usize) -> u8 {
+          let ihl: usize = raw & 0x3f;      // {0..<64}
+          let capped: usize = min(ihl, 19); // {0..<20}
           return ftp4c_buf_c[capped];
         }");
 
@@ -2941,17 +2955,17 @@ let codegen_tests = [
     (fun () ->
        expect_trap_sites 0
          "let mut ftp4c_buf_d: [u8; 50];
-          fn ftp4c_max_clamp(v: i32) -> u8 {
-            let x: i32 = max(v & 0x1f, 0);  // {0..<32}, lower clamp is a no-op here but exercises max
+          fn ftp4c_max_clamp(v: usize) -> u8 {
+            let x: usize = max(v & 0x1f, 0);  // {0..<32}, lower clamp is a no-op here but exercises max
             return ftp4c_buf_d[x];
           }" ();
        expect_trap_sites 1
-         "fn ftp4c_unconstrained(a: i32, b: i32) -> i32 {
+         "fn ftp4c_unconstrained(a: usize, b: usize) -> usize {
             return min(a, b);
           }
           let mut ftp4c_buf_e: [u8; 10];
-          fn ftp4c_use_it(a: i32, b: i32) -> u8 {
-            let m: i32 = ftp4c_unconstrained(a, b);
+          fn ftp4c_use_it(a: usize, b: usize) -> u8 {
+            let m: usize = ftp4c_unconstrained(a, b);
             return ftp4c_buf_e[m];
           }" ());
 
@@ -3362,7 +3376,7 @@ let codegen_tests = [
        "let mut refnum_buf_u64: [u8; 20];
         fn refnum_min_clamp_u64(raw: u64) -> u8 {
           let capped: u64 = min(raw, 19);
-          return refnum_buf_u64[capped];
+          return refnum_buf_u64[capped as {0..<20 as usize}];
         }");
 
   Alcotest.test_case
@@ -3374,7 +3388,7 @@ let codegen_tests = [
        "let mut refnum_buf_u64b: [u8; 100];
         fn refnum_narrow_u64(n: u64) -> u8 {
           if (n >= 0 && n <= 50) {
-            return refnum_buf_u64b[n];
+            return refnum_buf_u64b[n as {0..<51 as usize}];
           }
           return 0;
         }");
@@ -3570,17 +3584,19 @@ let codegen_tests = [
 
   Alcotest.test_case
     "for i: u8 in 0..<4 codegens a genuinely i8-wide counter and proves
-     the array access with zero trap sites -- the syntax's basic
-     end-to-end use case (annotate once, get the width AND the bounds
-     -check elision, unlike the `for i in 0..<(4 as u8)` cast-based
-     workaround, which gets the width but loses the elision since a cast
-     to a non-refined-syntax target always discards the source's proven
-     range)" `Quick
+     the array access with zero trap sites -- annotate once for the
+     register width, then bridge to usize with an explicit `as {lo..<hi as
+     usize}` cast at the index site (array/slice indexing is usize-only
+     now, see require_usize_index): a FREE coercion since the bounds
+     already match exactly, unlike the `for i in 0..<(4 as u8)` cast-based
+     workaround, which gets the width but loses the elision entirely since
+     a cast to a non-refined-syntax target always discards the source's
+     proven range" `Quick
     (expect_trap_sites 0
        "let mut refnum_for_buf: [u8; 4];
         fn refnum_for_annotated() {
           for i: u8 in 0..<4 {
-            refnum_for_buf[i] = ('A' + i) as u8;
+            refnum_for_buf[i as {0..<4 as usize}] = ('A' + i) as u8;
           }
         }");
 

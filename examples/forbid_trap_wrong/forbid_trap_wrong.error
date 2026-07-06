@@ -1,1 +1,1 @@
-array bounds check remains: index type i32 cannot prove range {0..<8}
+array bounds check remains: index type usize cannot prove range {0..<8}

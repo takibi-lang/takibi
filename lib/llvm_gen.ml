@@ -682,21 +682,50 @@ let rec coerce v (dst : Ast.type_expr) =
 
 (* Widen an integer value to i32 so arithmetic stays uniform (legacy helper for TypeInt/TypeChar).
    Does NOT touch pointer values. Also truncates an i64 source down to i32
-   (rather than only ever widening): type_inf.ml's Index/SliceOf/min/max
-   cases all require their operand to unify with plain TI32, so under
-   normal type-checked programs this function is never actually asked to
-   narrow -- the one exception is a bare 64-bit-wide IntLit (see gen_expr's
-   IntLit case), which type-checks as TI32 via its usual context-driven
-   unification but codegens to an i64 llvalue when the literal doesn't fit
-   i32. A truncate here is the well-defined, if unusual, outcome for that
-   case (e.g. a nonsensical huge literal used directly as an array index)
-   rather than an invalid build_zext (narrowing via "zero-extend") or a
-   crash. *)
+   (rather than only ever widening): type_inf.ml's SliceOf case requires
+   its bounds to unify with plain TI32, so under normal type-checked
+   programs this function is never actually asked to narrow -- the one
+   exception is a bare 64-bit-wide IntLit (see gen_expr's IntLit case),
+   which type-checks as TI32 via its usual context-driven unification but
+   codegens to an i64 llvalue when the literal doesn't fit i32. A truncate
+   here is the well-defined, if unusual, outcome for that case (e.g. a
+   nonsensical huge literal used directly as a subslice bound) rather than
+   an invalid build_zext (narrowing via "zero-extend") or a crash.
+   Scope note: this is ONLY used by SliceOf's gen_bound now -- Index/
+   AssignIndex use to_index_width below instead (see its comment for why
+   this one's i32-only target was a real bug for those two). *)
 let to_i32 v =
   let ty = type_of v in
   if ty = i32_type context || ty = pointer_type context then v
   else if ty = i64_type context then build_trunc v (i32_type context) "trunc" builder
   else build_zext v (i32_type context) "zext" builder
+
+(* Normalize an index/offset value to usize width for use as a GEP index --
+   replaces to_i32 at Index/AssignIndex call sites, which unconditionally
+   truncated to i32 even for a genuinely i64/usize-typed index. On a
+   64-bit target (usize = i64) that silently discarded the index's upper
+   bits, corrupting any access into a buffer needing more than 2^31
+   elements to address -- a real correctness gap given a genuine 64-bit
+   address space, even though no actual bare-metal target this project
+   ships for has anywhere near enough RAM to trigger it today.
+   is_signed controls sext vs zext when WIDENING a narrower type (matches
+   the value's own signedness -- e.g. a signed i8/i16 pointer offset, still
+   permitted for raw-pointer p[i] indexing even though array/slice
+   indexing is now usize-only, see type_inf.ml's require_usize_index);
+   only truncates when the source is genuinely WIDER than usize, the same
+   well-defined "nonsensical huge literal" fallback to_i32 already used
+   for its own i64->i32 case above. *)
+let to_index_width ~is_signed v =
+  let ty = type_of v in
+  let target = usize_lltype () in
+  if ty = target || ty = pointer_type context then v
+  else
+    let src_bits = integer_bitwidth ty and dst_bits = integer_bitwidth target in
+    if src_bits > dst_bits then build_trunc v target "idxtrunc" builder
+    else if src_bits < dst_bits then
+      (if is_signed then build_sext v target "idxsext" builder
+       else build_zext v target "idxzext" builder)
+    else v
 
 (* Promote a value to its arithmetic width based on its AST type.
    <=32-bit types -> i32.  64-bit types -> i64.  bool -> i1 (unchanged).
@@ -793,12 +822,15 @@ let emit_trap_when bad ~bad_name ~ok_name =
   position_at_end ok_bb builder
 
 (* Bounds check for [T; N] arrays. Traps via llvm.trap when idx >= N (unsigned compare).
-   The unsigned compare also catches negative indices (idx < 0) as too-large unsigned values. *)
+   The unsigned compare also catches negative indices (idx < 0) as too-large unsigned values.
+   n_llv is built at idx_v's OWN width (usize width via to_index_width, not
+   hardcoded i32): comparing a usize-width idx_v against a hardcoded i32
+   constant would be an LLVM type mismatch on a 64-bit target. *)
 let emit_bounds_check loc idx_ty idx_v n =
   record_trap loc (Printf.sprintf
     "array bounds check remains: index type %s cannot prove range {0..<%d}"
     (ty_str idx_ty) n);
-  let n_llv = const_int (i32_type context) n in
+  let n_llv = const_int (type_of idx_v) n in
   let cmp   = build_icmp Icmp.Uge idx_v n_llv "oob_cmp" builder in
   emit_trap_when cmp ~bad_name:"oob" ~ok_name:"idx_ok"
 
@@ -1227,7 +1259,23 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (TypeUsize, const_of_int64 (ltype_of_ast TypeUsize) offset false)
 
   | Cast (target_ty, src_e) ->
-      let (src_ty, v) = gen_expr locals src_e in
+      let (src_ty_raw, v) = gen_expr locals src_e in
+      (* Consult narrowing_ctx when the source is a bare Var, same pattern
+         as Index/AssignIndex/SliceOf: an if-narrowed Mut variable's proven
+         range must be visible here too, since `v as {lo..<hi as usize}` is
+         now the standard idiom for carrying a narrowed range across a base
+         change (e.g. into a usize-typed array index -- see
+         require_usize_index in type_inf.ml). Without this, a narrowed i32
+         cast to a usize-based refined type would look unproven here even
+         though type_inf.ml (which threads the narrowed tyenv through
+         infer_expr) already proved it, silently reopening a runtime check
+         that used to be elided -- a correctness gap for the runtime CHECK
+         COUNT (not soundness: the check is merely redundant, never wrong). *)
+      let src_ty = match src_e.desc with
+        | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
+                    | Some t -> t | None -> src_ty_raw)
+        | _ -> src_ty_raw
+      in
       (match target_ty with
        | TypeNamed ename when Hashtbl.mem enum_underlying ename ->
            let ut    = Hashtbl.find enum_underlying ename in
@@ -1391,13 +1439,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
   | Index (id, idx) ->
       let (idx_ty_raw, idx_raw) = gen_expr locals idx in
-      let idx_v = to_i32 idx_raw in
+      let idx_v = to_index_width ~is_signed:(not (is_unsigned idx_ty_raw)) idx_raw in
       (* idx_ty priority: Const_env constant name (e.g. tcp[TCP_FLAGS] --
          sound because check_const_shadowing forbids shadowing, so the value
          is exactly the recorded literal) > Mut narrowing from narrowing_ctx
          (if-condition) > the raw inferred type. *)
       let idx_ty = match Const_env.bound_value idx with
-        | Some k -> TypeRefined (k, k + 1, TypeI32)  (* idx_v is already forced to i32 via to_i32 above *)
+        | Some k -> TypeRefined (k, k + 1, TypeUsize)  (* idx_v is already forced to usize width via to_index_width above *)
         | None ->
             (match idx.desc with
              | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
@@ -2124,11 +2172,11 @@ let gen_func ?prog_types fdef =
 
     | AssignIndex (id, idx, rhs) ->
         let (idx_ty_raw, idx_raw) = gen_expr locals idx in
-        let idx_v = to_i32 idx_raw in
+        let idx_v = to_index_width ~is_signed:(not (is_unsigned idx_ty_raw)) idx_raw in
         (* Same idx_ty priority as gen_expr's Index case (sync rule):
            Const_env constant name > narrowing_ctx > raw inferred type. *)
         let idx_ty = match Const_env.bound_value idx with
-          | Some k -> TypeRefined (k, k + 1, TypeI32)  (* idx_v is already forced to i32 via to_i32 above *)
+          | Some k -> TypeRefined (k, k + 1, TypeUsize)  (* idx_v is already forced to usize width via to_index_width above *)
           | None ->
               (match idx.desc with
                | Var n -> (match Hashtbl.find_opt narrowing_ctx n with

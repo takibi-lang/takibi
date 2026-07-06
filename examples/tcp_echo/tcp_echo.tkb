@@ -60,29 +60,29 @@
 let mut our_mac: [u8; 6];
 
 // IPv4 field offsets, relative to the start of the IP header.
-let IP_TOTAL_LEN: i32 = 2;
-let IP_TTL:       i32 = 8;
-let IP_PROTOCOL:  i32 = 9;
-let IP_CHECKSUM:  i32 = 10;
-let IP_SRC:       i32 = 12;
-let IP_DST:       i32 = 16;
+let IP_TOTAL_LEN: usize = 2;
+let IP_TTL:       usize = 8;
+let IP_PROTOCOL:  usize = 9;
+let IP_CHECKSUM:  usize = 10;
+let IP_SRC:       usize = 12;
+let IP_DST:       usize = 16;
 
 // TCP field offsets, relative to the start of the TCP header.
-let TCP_SRC_PORT:    i32 = 0;
-let TCP_DST_PORT:    i32 = 2;
-let TCP_SEQ:         i32 = 4;
-let TCP_ACK:         i32 = 8;
-let TCP_DATA_OFFSET: i32 = 12;
-let TCP_FLAGS:       i32 = 13;
-let TCP_WINDOW:      i32 = 14;
-let TCP_CHECKSUM:    i32 = 16;
-let TCP_URGENT:      i32 = 18;
+let TCP_SRC_PORT:    usize = 0;
+let TCP_DST_PORT:    usize = 2;
+let TCP_SEQ:         usize = 4;
+let TCP_ACK:         usize = 8;
+let TCP_DATA_OFFSET: usize = 12;
+let TCP_FLAGS:       usize = 13;
+let TCP_WINDOW:      usize = 14;
+let TCP_CHECKSUM:    usize = 16;
+let TCP_URGENT:      usize = 18;
 
 // TCP_FLAG_*/PROTO_TCP/TCP_ECHO_PORT are wire-VALUE constants compared
 // directly against a byte/half-word field, so they take that field's
 // natural width (u8/u16) -- unlike the pure offset constants above,
-// which stay i32 as array indices (see CLAUDE.md's "Explicit-Base
-// {lo..<hi as base}" section). ihl/total_len/tcp_len/tcp_hdr_len/
+// which are usize (array/slice indexing is usize-only, see CLAUDE.md's
+// "Array/Slice Indices Must Be usize" section). ihl/total_len/tcp_len/tcp_hdr_len/
 // data_len/data_off below are ALSO u16-based: `len` (net_poll_rx()'s
 // deliberately-unconstrained i32 device-reported length) is bridged into
 // u16 with ONE explicit refined cast right after its own range is

@@ -1,10 +1,12 @@
 // for i: T in lo..<hi loop: i gets type {lo..<hi}, so array bounds checks
-// are elided. The explicit `: i32` annotation is required here (not just
-// style): neither fill()'s nor print_buf()'s body ever passes `i` to
-// anything with a concrete type of its own (`buf[i]` doesn't -- Index
-// accepts any integer type; `'A' + i as u8` and `uart_putc` don't either),
-// so without the annotation this is a compile error asking for one,
-// rather than a silent i32 default -- see CLAUDE.md's for-loop sections.
+// are elided. The explicit `: usize` annotation is required here for two
+// reasons now: neither fill()'s nor print_buf()'s body ever passes `i` to
+// anything with a concrete type of its own (`buf[i]` doesn't pin it by
+// itself -- Index accepts any integer type in general; `'A' + i as u8` and
+// `uart_putc` don't either), so without SOME annotation this would be a
+// compile error asking for one; AND array/slice indexing is usize-only
+// (see CLAUDE.md's "Array/Slice Indices Must Be usize"), so `usize` is
+// specifically the base that satisfies buf[i] directly, with no cast.
 //
 // Difference in generated machine code (AArch64 AEL1 bare-metal):
 //
@@ -15,7 +17,7 @@
 //     b.hi trap
 //     ...
 //
-//   for i: i32 in 0..<8:
+//   for i: usize in 0..<8:
 //     load i_ctr         ; load loop counter
 //     i: {0..<8} -- bounds check fully elided
 //     strb val, [buf+i]  ; direct write (no cmp)
@@ -26,14 +28,14 @@ let mut buf: [u8; 8];
 
 // Write 'A' to 'H' using a for loop. i: {0..<8}, so buf[i] has no bounds check.
 fn fill() {
-    for i: i32 in 0..<8 {
+    for i: usize in 0..<8 {
         buf[i] = 'A' + i as u8;
     }
 }
 
 // Read and send to UART using a for loop. Bounds check elided here too.
 fn print_buf() {
-    for i: i32 in 0..<8 {
+    for i: usize in 0..<8 {
         uart_putc(buf[i]);
     }
     uart_putc('\r');
