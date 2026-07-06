@@ -1901,6 +1901,16 @@ Files changed when `enum Name: u16 { V = n; _; }` was added:
 **Round-trip guarantee** (intentional design, must not be broken):
 `(raw as NonExhaustiveEnum) as u16 == raw` for any `raw: u16`, including values that fall through to the `_` arm. This holds because `enum -> int` cast is a no-op at the LLVM IR level: no `unreachable` is inserted, so LLVM cannot assume the value is one of the named variants. This differs from C enum (UB for out-of-range values) and is essential for protocol implementations where unknown field values must be forwarded or logged intact.
 
+**Enum variants are valid global constant initializers**: both
+`let mut state: State = State::Idle;` and an underlying-type constant such
+as `let code: u16 = Code::Ready as u16;` are folded by `eval_const`/
+`eval_const_int` to the variant's resolved discriminant. This keeps enum
+globals explicitly initialized instead of relying on BSS zeroing and the
+first variant remaining discriminant zero. `examples/tcp_echo` and
+`examples/http_server` use this for their exhaustive `ConnState: u8`
+state variables (Listen/SynRcvd/Established/LastAck), replacing the old
+unrestricted i32 constants.
+
 **eenv lookup pattern** (3-tuple destructuring):
 ```ocaml
 let (_, variants, is_ne) = StringMap.find ename eenv in

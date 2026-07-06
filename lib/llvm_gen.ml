@@ -2574,6 +2574,14 @@ let rec eval_const_int (e : Ast.expr) : Int64.t =
   match e.desc with
   | IntLit n -> n
   | BoolLit b -> if b then 1L else 0L
+  | EnumVariant (ename, vname) ->
+      let variants = match Hashtbl.find_opt enum_variants_tbl ename with
+        | Some variants -> variants
+        | None -> raise (Error (Printf.sprintf "Unknown enum: %s" ename))
+      in
+      (match List.assoc_opt vname variants with
+       | Some value -> Int64.of_int value
+       | None -> raise (Error (Printf.sprintf "Unknown variant %s::%s" ename vname)))
   | Cast (target_ty, inner) ->
       let v = eval_const_int inner in
       (match target_ty with
@@ -2628,6 +2636,12 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable =
         const_inttoptr (const_of_int64 (usize_lltype ()) i true) (pointer_type context)
     | IntLit i, _ ->
         const_of_int64 (ltype_of_ast ft) i true
+    | EnumVariant (ename, _), TypeNamed target_name when ename = target_name ->
+        let underlying = match Hashtbl.find_opt enum_underlying ename with
+          | Some underlying -> underlying
+          | None -> raise (Error (Printf.sprintf "Unknown enum: %s" ename))
+        in
+        const_of_int64 (ltype_of_ast underlying) (eval_const_int e) false
     | StructLit exprs, TypeNamed sname ->
         let llty = match Hashtbl.find_opt struct_lltypes sname with
           | Some t -> t | None -> raise (Error (Printf.sprintf "unknown struct '%s'" sname))

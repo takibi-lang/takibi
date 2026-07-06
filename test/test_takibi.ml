@@ -3334,6 +3334,44 @@ let codegen_tests = [
         fn codegen_globalconst_scalar_ref_use() -> i32 { return GLOBALCONST_B; }");
 
   Alcotest.test_case
+    "global enum initializer: an enum variant folds to its underlying value"
+    `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "enum GlobalInitState: u8 { Idle; Running; }
+          let mut GLOBAL_ENUM_STATE: GlobalInitState = GlobalInitState::Running;
+          fn codegen_global_enum_use() -> GlobalInitState { return GLOBAL_ENUM_STATE; }"
+       in
+       let gv = match Llvm.lookup_global "GLOBAL_ENUM_STATE" Llvm_gen.the_module with
+         | Some gv -> gv
+         | None -> Alcotest.fail "GLOBAL_ENUM_STATE was not emitted"
+       in
+       let init = match Llvm.global_initializer gv with
+         | Some init -> Llvm.string_of_llvalue init
+         | None -> Alcotest.fail "GLOBAL_ENUM_STATE has no initializer"
+       in
+       Alcotest.(check string) "Running discriminant" "i8 1" init);
+
+  Alcotest.test_case
+    "global enum initializer: an enum variant can be cast to its underlying type"
+    `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "enum GlobalInitCode: u16 { First = 7; Second = 11; }
+          let GLOBAL_ENUM_CODE: u16 = GlobalInitCode::Second as u16;
+          fn codegen_global_enum_code_use() -> u16 { return GLOBAL_ENUM_CODE; }"
+       in
+       let gv = match Llvm.lookup_global "GLOBAL_ENUM_CODE" Llvm_gen.the_module with
+         | Some gv -> gv
+         | None -> Alcotest.fail "GLOBAL_ENUM_CODE was not emitted"
+       in
+       let init = match Llvm.global_initializer gv with
+         | Some init -> Llvm.string_of_llvalue init
+         | None -> Alcotest.fail "GLOBAL_ENUM_CODE has no initializer"
+       in
+       Alcotest.(check string) "Second discriminant" "i16 11" init);
+
+  Alcotest.test_case
     "global let initializer: an array-typed reference to an earlier \
      immutable global constant folds (the HTTP_SERVER_IP = OUR_IP case -- \
      previously rejected at the type-check stage because Var's ordinary \
