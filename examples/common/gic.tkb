@@ -27,7 +27,7 @@ fn gic_enable_uart_spi() {
 }
 
 // UART RX interrupt enable, split into a setup half and an unmask half so
-// examples/irq/irq.tkb's main() can call each at the right point in the
+// examples/irq/irq.tkb's app_main() can call each at the right point in the
 // sequence (setup -> print "ready" -> unmask, so nothing can arrive before
 // everything needed to handle it is in place) with no per-platform branch.
 // Shares its name with examples/common_stm32/nvic.tkb's version, which does

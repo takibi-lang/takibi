@@ -23,17 +23,19 @@ many of those failures as possible into compile-time errors instead:
   array indexing when the index range cannot be proven safe. On AArch64 this
   lowers to a `brk #0` (a real hardware trap) -- acceptable for development,
   but a bug in shipped firmware.
-- The refinement type `{lo..<hi}` is how the type system removes the trap
-  entirely: if `hi <= N` and `lo >= 0` can be proven at compile time for an
-  array of size `N`, no bounds-check code is generated at all.
-- Choosing `i32` (unknown range: MMIO, external input, ...) vs. `{lo..<hi}`
-  (a range the programmer can vouch for) is a deliberate part of the API a
-  takibi program presents. A bounds check appearing on plain `i32` indexing
-  is correct, expected behavior, not a compiler shortcoming.
+- The refinement type `{lo..<hi as base}` is how the type system removes the
+  trap entirely: if `hi <= N` and `lo >= 0` can be proven at compile time for
+  an array of size `N`, no bounds-check code is generated at all. The base is
+  explicit; refinements are not implicitly represented as `i32`.
+- Array/slice indices are `usize`; raw-pointer offsets are `isize`. Choosing
+  an unrefined integer (unknown range: MMIO, external input, ...) versus a
+  refined integer is a deliberate part of the API. An unproven `usize` array
+  index receives a checked access; an integer of the wrong base is rejected.
 
 "Code with remaining bounds checks = code whose type annotations are still
 insufficient." The finished form of a piece of code is one where every index
-range is pinned at the type level using `for i in 0..<n` or `{lo..<hi}`
+range is pinned at the type level using `for i: usize in 0..<n` or
+`{lo..<hi as usize}`
 annotations.
 
 ## Development Workflow: Gradual Elimination of Runtime Traps
@@ -49,7 +51,7 @@ language level:
    it is a *signal that type information is missing*, pointing at exactly
    the access whose range the programmer has not yet expressed.
 2. **Strengthen incrementally.** Replace raw indices with `for i in 0..<n`
-   loops, `{lo..<hi}` refined types, slice types (`[u8; 54..]`) and
+   loops, `{lo..<hi as base}` refined types, slice types (`[u8; 54..]`) and
    `if (v >= 0 && v < N)` / `if (s.len >= N)` narrowing. Each addition of
    type information makes checks (and their traps) *provably unnecessary*,
    and the compiler deletes them.
@@ -105,15 +107,24 @@ type-system gap.
   compile-time-checked array bounds via refinement types, semaphores,
   mutexes, condition variables, a preemptive round-robin scheduler, and a
   hand-written TCP/IP stack.
+- DMA/device ordering is expressed through compiler builtins rather than
+  handwritten assembly. The STM32 port also performs cache maintenance,
+  places DMA memory in an MPU non-cacheable window, and uses affine opaque
+  receive handles to reject double release and use-after-release.
+- Ethernet and STM32 UART I/O are interrupt-driven. ARM/AArch64 retained
+  events (`wfe`/`sev`) avoid both idle busy-spins and check-then-sleep lost
+  wakeups.
 - **The TCP/IP stack goal has been reached**: `examples/http_server` serves a
   live HTML page with a request counter over a real TCP connection, reachable
   from an actual web browser, both under QEMU (via a virtio-net driver) and on
   real STM32F746G-DISCOVERY hardware (via a from-scratch Ethernet MAC/PHY/DMA
   driver in `examples/common_stm32/eth.tkb`).
-- Every example (with the exception of the six examples needing hardware
-  interrupt/scheduling primitives, which are unified via shared function
-  names across the two HALs) is a **single `.tkb` source file** that compiles
-  unchanged for both the QEMU/AArch64 target and the STM32/Cortex-M7 target.
+- Every ported example is a **single `.tkb` application source file** that
+  compiles unchanged for QEMU/AArch64 and STM32/Cortex-M7. Platform-specific
+  behavior is supplied by same-signature HAL files selected by the Makefile.
+- Applications expose `app_main()`. A shared high-level runtime `main()` calls
+  `platform_init()`, `app_main()`, and `platform_shutdown()`; startup assembly
+  remains independent of individual device drivers.
 - DWARF debug-info emission (`-g`) and a small gdbstub-based sampling
   profiler are implemented, along with an analysis of what this profiling
   technique is (and is not) useful for on interrupt-driven I/O code.
@@ -246,10 +257,10 @@ A ready-to-use devcontainer configuration is provided in `.devcontainer/`.
 ```
 lib/       -- lexer, parser, type inference, LLVM code generation
 bin/       -- the takibi CLI
-examples/  -- ~48 example programs, each demonstrating one feature or
+examples/  -- example programs, each demonstrating one feature or
               building toward the TCP/IP stack goal
 scripts/   -- QEMU/hardware integration test runners and profiling tools
-test/      -- unit tests (parser / type inference)
+test/      -- unit tests (parser, type inference, LLVM code generation/layout)
 ```
 
 Each directory under `examples/` documents itself in its `.tkb` file's

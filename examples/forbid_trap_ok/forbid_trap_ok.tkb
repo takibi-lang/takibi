@@ -4,7 +4,7 @@
 //
 //   - fill():    `for i: usize in 0..<8` gives i the type {0..<8 as usize}
 //   - read_at(): the {0..<8 as usize} parameter type makes the caller prove the range
-//   - main():    the literal 7 has type {7..<8}, a subtype of {0..<8 as usize}
+//   - app_main(): the literal 7 has type {7..<8}, a subtype of {0..<8 as usize}
 //
 // fill()'s explicit `: usize` annotation is required for two reasons: `i`
 // is never passed anywhere with a concrete type of its own inside the loop

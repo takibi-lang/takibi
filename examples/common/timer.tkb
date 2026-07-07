@@ -30,7 +30,7 @@ fn timer_init() {
 // example (preempt.tkb, etc.) call the same two functions on either
 // target without branching. STM32's systick_init() needs an explicit
 // reload value that timer_init() has no equivalent parameter for; hiding
-// that arity difference here (rather than in each app's main()) is the
+// that arity difference here (rather than in each app's app_main()) is the
 // whole point of this wrapper.
 fn scheduler_init() {
     timer_init();

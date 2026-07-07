@@ -3,7 +3,7 @@
 // examples/tcp_echo/tcp_echo.tkb -- each is a single shared .tkb file that
 // also runs on the STM32 target, see examples/net_echo/net_echo.tkb's
 // header comment). Edit the constant below to change it without touching
-// each example's main().
+// each example's app_main().
 //
 // MAC is deliberately NOT included here, unlike the STM32 side's
 // examples/common_stm32/netconfig.tkb: these QEMU examples read their MAC
@@ -21,7 +21,7 @@ let OUR_IP: [u8; 4] = {192, 0, 2, 1};
 // specifically (confirmed empirically -- see that file's header comment
 // and the qemu-http-server Makefile target), a hard requirement OUR_IP's
 // shared default would break. Rather than branch on which constant to
-// copy from, it just gets its own dedicated constant, so its main() can
+// copy from, it just gets its own dedicated constant, so its app_main() can
 // do a single unconditional `bytes_copy(our_ip as *u8,
 // HTTP_SERVER_IP as *u8, 4)` on either target. (This is the QEMU-side
 // counterpart of the STM32 side's decision to give the real board a

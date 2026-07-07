@@ -3226,7 +3226,9 @@ let codegen_tests = [
             device_fence();
           }" ();
        expect_type_error "expects no arguments"
-         "fn bad_barrier_call() { dma_publish(1); }" ());
+         "fn bad_barrier_call() { dma_publish(1); }" ();
+       expect_type_error "expects no arguments"
+         "fn bad_wait_call() { interrupt_wait(1); }" ());
 
   Alcotest.test_case
     "DMA/device barrier builtin names cannot be redefined" `Quick
@@ -3234,7 +3236,8 @@ let codegen_tests = [
        expect_type_error "compiler builtin" "fn dma_publish() {}" ();
        expect_type_error "compiler builtin" "extern fn device_fence();" ();
        expect_type_error "compiler builtin" "fn signal_fence() {}" ();
-       expect_type_error "compiler builtin" "fn interrupt_wait() {}" ());
+       expect_type_error "compiler builtin" "fn interrupt_wait() {}" ();
+       expect_type_error "compiler builtin" "extern fn interrupt_notify();" ());
 
   Alcotest.test_case "DMA cache builtins require pointer and usize length" `Quick
     (fun () ->
@@ -4070,7 +4073,9 @@ let codegen_tests = [
        Alcotest.(check bool) "publish fence w,o" true (contains_substring ir "fence w, o");
        Alcotest.(check bool) "consume fence i,r" true (contains_substring ir "fence i, r");
        Alcotest.(check bool) "full fence iorw" true
-         (contains_substring ir "fence iorw, iorw"));
+         (contains_substring ir "fence iorw, iorw");
+       expect_codegen_error "interrupt event wait/notify is not implemented"
+         "fn riscv_event_wait_is_rejected() { interrupt_wait(); }" ());
 
 ]
 

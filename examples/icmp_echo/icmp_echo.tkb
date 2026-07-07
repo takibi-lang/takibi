@@ -18,7 +18,7 @@
 // SLICE MIGRATION (P4b): the direct template is
 // examples/http_server/http_server.tkb. `ihl` is typed `{20..<21 as u16}`
 // in build_echo_reply (this file's whole scope is "no IP options" -- IHL
-// always exactly 20 -- and main()'s `ihl == 20` narrowing always produces
+// always exactly 20 -- and app_main()'s `ihl == 20` narrowing always produces
 // exactly that range, so the exact-match refined-parameter call
 // typechecks; see http_server's header comment for why this needs to be
 // an EXACT match, not just a fit). --forbid-trap clean (registered as

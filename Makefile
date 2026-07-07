@@ -210,9 +210,8 @@ CHECKSUM_OBJS := examples/inet_checksum/inet_checksum.o examples/ip_parse/ip_par
                  examples/tcp_parse/tcp_parse.o
 APP_OBJS   := examples/icmp_echo/icmp_echo.o examples/tcp_echo/tcp_echo.o \
               examples/http_server/http_server.o
-# rtc/echo each need one extra common file (rtc.tkb / uart_getc.tkb) beyond
-# the standard uart+print pair, so neither fits STANDARD_OBJS -- same
-# single-member-group treatment as IRQ_OBJS. timer.tkb turned out to need
+# rtc needs one extra common file and echo needs GIC plus the UART IRQ stub,
+# so neither fits STANDARD_OBJS. timer.tkb turned out to need
 # the same rtc.tkb HAL as rtc itself (not gic.tkb/timer.tkb -- it just polls
 # the RTC directly, unlike TIMER_OBJS below which is unrelated), so it
 # joins this group too.
@@ -297,7 +296,7 @@ $(SEM_KERNELS): examples/%/kernel.elf: \
 # collide with or affect examples/fizzbuzz/kernel.elf). Exists so that
 # scripts/run_qemutest.sh's run_dwarf_test can verify the emitted DWARF line
 # table actually resolves to the correct source line (via llvm-dwarfdump-19
-# and addr2line), using fizzbuzz.tkb's fixed, well-known shape (fn main() at
+# and addr2line), using fizzbuzz.tkb's fixed, well-known shape (fn app_main() at
 # line 3, for at line 4, final uart_puts at line 13) as the expected answer.
 examples/fizzbuzz/fizzbuzz.debug.o: examples/fizzbuzz/fizzbuzz.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $< --target $(AARCH64_TARGET) -g -o $@
@@ -348,7 +347,7 @@ examples/tcp_echo/kernel.debug.elf: $(COMMON_STARTUP_O) examples/tcp_echo/tcp_ec
 #   - rtc: pokes the QEMU-only PL031 RTC address directly, no STM32 RTC
 #     peripheral support exists yet (separate task, different peripheral
 #     entirely from anything ported so far).
-#   - echo: defines its own uart_getc() against the QEMU-only PL011 FR
+#   - echo: uses the QEMU GIC dispatch and uniform UART RX callback stub
 #     register, and its test methodology needs writing bytes to the serial
 #     port (interactive stdin), not just reading -- scripts/run_hwtest.sh
 #     only supports the read-and-diff shape today.

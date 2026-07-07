@@ -33,7 +33,7 @@
 //     EXACT-match refined parameter type turns that existing runtime
 //     precondition (previously just an `if`) into something the checksum
 //     span proofs below can build on. The two sites narrowing ihl to
-//     exactly {20..<21} (main()'s `ihl == 20` check) always match this
+//     exactly {20..<21} (app_main()'s `ihl == 20` check) always match this
 //     exactly, so every call typechecks.
 //   - Checksum spans are constructed as SLICES, not pointer+length pairs
 //     (fix_tcp_checksum takes tcp_seg: [u8; 20..] directly, and reads its
@@ -272,7 +272,7 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
 // Returns the total payload length (headers + body) on success, or -1 if
 // it would have exceeded HTTP_MAX_PAYLOAD (never actually happens with
 // the current fixed page; the caller must check for this and drop the
-// reply rather than transmit, see main()'s use of the return value).
+// reply rather than transmit, see app_main()'s use of the return value).
 fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
     let body_len: isize = build_html_body();
 

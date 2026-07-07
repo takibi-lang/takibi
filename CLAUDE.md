@@ -18,7 +18,8 @@ the system will silently break or run amok. Nothing is communicated to the user.
   - Using an unchecked value read from MMIO directly as an array index is a bug hotbed; a bounds check appearing on `i32` is **correct behavior**
 
 **"Code with remaining bounds checks = code whose type annotations are still insufficient."**
-The finished form of code is when index ranges are pinned at the type level using `for i in 0..<n` or `{lo..<hi}` annotations.
+The finished form of code is when index ranges are pinned at the type level using
+`for i: usize in 0..<n` or `{lo..<hi as usize}` annotations.
 
 ## Language Specification (Current)
 
@@ -207,15 +208,13 @@ examples/
   common_stm32/   -- STM32F746G-DISCOVERY (Cortex-M7) HAL, mirroring common/'s function
                      names/signatures so every example .tkb file is a single file shared
                      by both targets -- see "STM32F746G-DISCOVERY Bare-Metal (Cortex-M7)" below
-    startup.S     -- Reset_Handler, vector table, PendSV_Handler, generic
-                     platform_init/platform_shutdown hooks, weak SysTick/ETH/
-                     pendsv_dispatch stubs (no direct device-driver calls)
+    startup.S     -- Reset_Handler, vector table, PendSV_Handler, weak
+                     SysTick/ETH/pendsv_dispatch stubs; calls only `main`
     link.ld       -- MEMORY {FLASH RAM} linker script (RAM = DTCM, 64K)
     link_eth.ld   -- same, RAM = AXI SRAM (Ethernet DMA can't reach DTCM)
-    uart.tkb      -- platform hook implementation, uart_init, interrupt-driven
+    uart.tkb      -- uart_init, platform_init/platform_shutdown, interrupt-driven
                      TX ring (uart_putc/uart_puts), unified USART1 RX/TX ISR and
                      RX callback registration (PA9/PB7, AF7), uart_isr_getc
-    uart_getc.tkb -- uart_getc (USART1 RX poll; only echo needs RX)
     rtc.tkb       -- rtc_init, rtc_is_running, rtc_read_seconds (real RTC peripheral, LSI)
     nvic.tkb      -- enable_usart1_irq, irq_uart_rx_setup/_unmask
     scheduler.tkb -- setup_task_stack, task_exit_stub, systick_init/_disable, pendsv_trigger,
@@ -471,18 +470,10 @@ Two places needed more than a mechanical swap:
   `coerce`'s and `to_i32`'s narrowing branches), so a wide value
   reconstructs correctly regardless of which narrower type it ends up
   used as, with no need to guess a destination's signedness upfront.
-- **`to_i32`** (used only for index/bound expressions -- `Index`,
-  `SliceOf`, `min`/`max`) gained a `build_trunc` branch for an i64 source,
-  alongside its existing widen-only (`build_zext`) branches. Under a
-  normally type-checked program this is unreachable (`type_inf.ml`'s
-  `Index`/`SliceOf` cases unify their operand with plain `TI32`, so the
-  inferred type already guarantees i32), *except* for a bare wide `IntLit`
-  used directly as an index/bound: it type-checks as `TI32` via ordinary
-  context-driven unification (`IntLit _ -> fresh ()` is fully polymorphic
-  and carries no magnitude check), but codegens to an i64 llvalue once it
-  doesn't fit i32. A truncate is the well-defined, if unusual, outcome for
-  that case (e.g. a nonsensical huge literal used as an array index)
-  rather than an invalid "narrow via build_zext" call or a crash.
+- The old `to_i32` index helper described by the original implementation is
+  gone. Current array/slice indices are `usize`, raw-pointer offsets are
+  `isize`, and codegen normalizes them with `to_index_width` using the target
+  pointer width without truncating 64-bit indices to i32.
 
 **Files**: `lib/ast.ml` (`IntLit of Int64.t`, `int_of_intlit`,
 `var_plus_const`/`slice_len_mins` narrowing), `lib/lexer.mll`
@@ -491,7 +482,7 @@ Two places needed more than a mechanical swap:
 `align`/struct-`align`/enum-discriminant/`array_size`/`{lo..<hi}` site),
 `lib/const_env.ml` (`define_if_literal`/`bound_value`), `lib/type_inf.ml`
 (`intlit_opt`, all range-propagation and bounds-check sites),
-`lib/llvm_gen.ml` (`intlit_opt`, `gen_expr`'s `IntLit` case, `to_i32`,
+`lib/llvm_gen.ml` (`intlit_opt`, `gen_expr`'s `IntLit` case, `to_index_width`,
 `eval_const_int`/`eval_const`, all range-propagation mirror sites),
 `test/test_takibi.ml` (39 existing `IntLit n` patterns gained the `L`
 suffix; new tests for full-width hex/decimal parsing, the local-u64 and
@@ -1091,7 +1082,7 @@ a workaround.
 expression mixing a now-`u16`-based `ihl`/`tcp_len`/etc. with an
 UNRELATED plain-i32 value needs one cast at that mixing point (e.g.
 `build_http_response_fin`'s `(ihl as i32) + 20 + n`, where `n` is an
-app-level HTTP response length with no wire-width meaning; `main()`'s
+app-level HTTP response length with no wire-width meaning; `app_main()`'s
 `tx_len = 14 + (ihl as i32) + 20 + payload_len`). Conversely,
 `tcp_echo.tkb`'s `build_data_echo` needed NO such cast for its
 `ihl + 20 + n` because its `n` (a snapshot of `data_len`, itself derived
@@ -1111,86 +1102,20 @@ u16-typed `data_off`/`data_len`), STM32 cross-compilation, and a final
 full `make check` (langcheck, 370 unit tests, stm32build, all 125
 qemutest cases) with zero regressions.
 
-### For-Loop Counters Follow the Bounds' Own Base Type
+### For-Loop Counter Typing (Current)
 
-Previously `for i in 0..<n` **hardcoded** the loop counter's base to i32
-regardless of `n`'s own type -- documented as "a deliberate exception...
-generalizing this specific site had no motivating example." That
-justification turned out to be wrong: `for i in 0..<s.len` (`s.len:
-TUsize`, this project's own architecture-relative type -- i64 on
-AArch64/RISC-V64, i32 on Cortex-M) failed outright with `cannot unify
-usize with i32`. Root cause: `type_inf.ml`'s `For` case did
-`unify_at lo_expr.loc lo_ty TI32; unify_at hi_expr.loc hi_ty TI32;`
-UNCONDITIONALLY, before any of `TRefinedInt`'s leniency into `TI32` could
-apply -- a bare (non-refined) `TUsize`/`TU8`/etc. has no such leniency
-rule, so a for-loop bound that was anything other than already-i32
--compatible was rejected outright, never mind what base the LOOP COUNTER
-ended up with.
-
-**Fix**: `For` now unifies `lo_ty` and `hi_ty` against EACH OTHER via
-`canon_ty` (mirroring `min`/`max`'s Call case exactly), instead of forcing
-both into `TI32`. A new shared helper, `require_integer loc t`, then (a)
-defaults a genuinely-unconstrained type variable to i32 -- this language's
-existing "unconstrained integer literal defaults to i32" convention (see
-`Types.to_ast`'s `TVar (Unbound _) -> TypeI32` case), so `for i in 0..<8`
-with nothing else pinning `i`'s type still behaves exactly as before --
-and (b) otherwise validates the result is one of the ten legal integer
-types, raising a clear `TypeError` for anything else (e.g. a `bool`
-bound) rather than silently accepting nonsense. `require_integer`
-replaced FOUR separate `unify_at ... TI32` call sites that all had this
-exact same latent bug (just not yet triggered): `Index`, `AssignIndex`,
-and `SliceOf`'s two bound checks (`SliceOf`'s had already been generalized
-once this session -- see the "Explicit-Base" section above -- but that
-fix specifically preserved the direct-unify-into-TI32 shape, which still
-doesn't accept a BARE non-i32 type, only a refined one). Pointer
-arithmetic is unrelated to indexing and requires `isize` offsets (see the
-current language specification above).
-
-**A second, distinct bug found immediately while testing the fix**:
-`llvm_gen.ml`'s `For` codegen looked up the counter's resolved type via
-`res name None` (the user's bare loop-variable name, e.g. `"i"`) -- but
-`type_inf.ml`'s `For` case stores it under the MANGLED `"__for_" ^ name`
-key (matching `collect_lets`'s own pre-allocation key; the mangled key
-exists specifically to avoid colliding with an unrelated local, or a
-second for-loop, also named `i`). The mismatch meant the lookup silently
-fell through to i32 regardless of the real base, so a `usize`-based
-counter's alloca (correctly i64-wide, since `collect_lets`'s OWN
-alloca-type resolution used the right key) got an i32-shaped store into
-it -- an LLVM verifier failure caught immediately by `gen_func`'s own
-`Llvm_analysis.verify_function`, not a silent miscompilation. Fixed by
-looking the type up via `ctr_name` (`"__for_" ^ name`) instead of the bare
-`name`.
-
-**The rest of the codegen generalization** (mirroring the width/
-signedness handling already established for `BinOp`/`min`/`max`): the
-loop bound expressions are evaluated with `~expected_ty:counter_base`
-(letting a bare literal bound embed directly at the right width, per the
-Polymorphic Literal work); the comparison picks `Icmp.Ult` vs `Icmp.Slt`
-based on `is_unsigned counter_base` (previously always signed `Slt`, wrong
-for an unsigned base like `usize`/`u32` with the top bit set); the
-counter's own load/store narrows/widens via `coerce`/`to_arith_width` at
-each boundary, exactly matching how any other `Mut` variable of that type
-already behaves elsewhere in this codebase -- a narrow base (e.g. `u8`)
-gets a genuinely `i8`-sized alloca, with arithmetic still happening at the
-widened (i32) arithmetic width in between, per the existing `widen_load`
-invariant.
-
-**Verification**: `test/test_takibi.ml` gained a `for`-loop-over-`s.len`
-type-check regression, a for-loop-bounds-must-be-integer rejection test
-(a `bool` bound), and a codegen-level regression test
-(`refnum_for_u8`/`refnum_for_usize`) exercising both the narrow (`u8`)
-and wide (`usize`) cases through `gen_func`'s own IR verifier -- the
-class of test that would have caught the second bug above, since a type
--check-only test cannot. Full `make check` (langcheck, 374 unit tests,
-stm32build, all 125 qemutest cases) passes with zero regressions -- a
-notably reassuring result given this change touches `Index`/
-`AssignIndex`/`SliceOf`/`For`, i.e. essentially every array/slice access
-in every example in the codebase.
+A `for` counter follows the bounds integer base and carries a refinement when
+the bounds are compile-time constants. An explicit annotation such as
+`for i: usize in 0..<n` pins the base directly. Body constraints may infer an
+otherwise unresolved base, but if neither bounds nor body determine it the
+compiler reports an undetermined-counter error; there is no implicit i32
+fallback. Array/slice use pins the counter to `usize`, while raw-pointer use
+requires `isize`. Code generation reads the resolved `__for_<name>` type, so
+the LLVM PHI and arithmetic width match the inferred source type.
 
 ### Array and Slice Indices Must Be usize
 
-The later, stricter rule supersedes the `require_integer` statement in the
-for-loop section above: safe array/slice indexing is no longer polymorphic.
+Safe array/slice indexing is not polymorphic.
 `Index`, `AssignIndex`, and both bounds of an array/slice `SliceOf` require
 `usize` (or a `TypeRefined` whose own base is `usize`). An unresolved bare
 literal or for-loop counter is pinned to `usize` by the indexing use. A
@@ -1312,99 +1237,10 @@ placeholders together without ever attaching anything concrete). Full
 cases) passes with zero regressions -- notably, not a single example in
 the entire codebase relies on an undetermined bare literal anywhere.
 
-### For-Loop Counter Defaulting Deferred Until After the Body (and Why It
-### Mostly Doesn't Change Anything)
-
-Direct follow-up to the previous two sections, same session: the
-for-loop generalization above still decided the counter's base EAGERLY,
-the moment the bounds were unified, before ever looking at the loop
-body. This meant a for-loop counter used inside the body as, say, a
-function argument with a concrete-typed parameter could never retroactively
-determine the counter's own base -- unlike ordinary HM inference, where a
-shared unification variable is normally free to be pinned by ANY later
-constraint, whenever it occurs.
-
-**The fix, technique-wise**: since this codebase's unification is
-mutable-ref-based (a `TVar` is a `ref` cell that gets mutated in place
-when resolved, not a fresh copy), deferring is possible without
-restructuring how inference works: just don't force a decision until
-AFTER the body has run. Two changes:
-1. `require_integer` (used by `Index`/`AssignIndex`/`SliceOf`/`For`) no
-   longer defaults a genuinely-unresolved `TVar` to i32 -- it only
-   rejects a type that is ALREADY concrete and non-integer, leaving an
-   unresolved one alone. This was necessary, not optional: the moment a
-   for-loop body does `buf[i]`, `Index` calls `require_integer` on `i`'s
-   type -- with the OLD eager-defaulting behavior, THIS is what locked
-   the shared type variable to i32, before any LATER body statement
-   (e.g. a function call with a concrete-typed parameter) ever got a
-   chance to pin it. Removing the eager default here is safe for all
-   three other call sites too: none of their downstream logic actually
-   depends on an index's type being concrete yet (`Index`/`AssignIndex`
-   only care about the CONTAINER's type; `SliceOf`'s `bound_range`
-   already has a graceful "unknown range" fallback for an unresolved
-   type, identical to what it already does for a resolved-but-unrelated
-   type).
-2. `For`'s own validate-and-default step moved from immediately after
-   unifying the bounds to AFTER the body has been fully processed --
-   mirroring `check_undetermined_lets`'s identical "let later
-   constraints run first" structure (though `For` still SILENTLY
-   defaults to i32 when nothing pins it, rather than raising the way
-   `let`/`let mut` now do -- see this file's own reasoning in the previous
-   section for why loop counters are treated differently: often a purely
-   ephemeral SSA/register value, conventionally array-index-shaped,
-   without let/let mut's "stable debugger-visible memory location"
-   property).
-
-**An honest, empirically-confirmed limitation, not swept under the rug**:
-this deferral has NO observable effect for the single most common
-for-loop shape, `for i in 0..<4 { foo(i); }` (bare integer literal
-bounds) -- `i` still ends up i32-based even when `foo` takes a `u8`
-parameter. Root cause is a SEPARATE mechanism, not a bug in the deferral
-itself: `Const_env.bound_value` recognizes a bare `IntLit` (or a `Var`
-naming a recorded constant) as a compile-time constant, so BOTH bounds of
-`0..<4` get recognized, and the counter's type becomes `TRefinedInt(0, 4,
-base)` -- wrapped, not bare. `types.ml`'s subtyping rule for passing a
-`TRefinedInt` into a concrete destination type
-(`TRefinedInt _, TU8 when lo >= 0 && hi <= 256 -> ()`) deliberately
-ignores the refined value's own `base` field entirely (documented as
-intentional: "a subtype of any integer type where the range fits,
-REGARDLESS of its own base") -- so `foo(i)` only proves `i`'s BOUNDS
-(0..<4) fit inside u8's range, and never touches, let alone pins,
-`base` itself. Deferred inference genuinely helps only in the narrower
-case where at least one bound is NOT recognized by `Const_env.bound_value`
-(a compound expression like `0 + 4`, or a genuinely runtime, non-constant
-value) -- confirmed empirically via three scratch-IR checks before
-committing to this design, not just reasoned through: a bare-literal
-bound stayed i32-wrapped-in-TRefinedInt regardless of body usage; a
-`0 + 4` compound bound (which `Const_env.bound_value` does NOT recognize)
-correctly picked up `u8` from a `foo(x: u8)` call in the body.
-
-**Closing the gap for the common (bare-literal-bounds) case would need a
-different, more invasive change**: making `unify`'s own `TRefinedInt`
--into-concrete-type subtyping rule retroactively pin an unresolved `base`
-on first concrete use, rather than only checking bounds. This touches
-`types.ml`'s core `unify` function directly -- used far more broadly than
-`For`'s own logic -- so it was deliberately NOT done. The alternative
-(and, on reflection, preferable) way to close this gap is surface syntax
-letting the programmer spell the counter's base directly, rather than
-teaching inference to guess it from indirect, easy-to-miss body usage --
-implemented immediately after this as `for i: T in ...`, see the next two
-sections.
-
-**Verification**: `test/test_takibi.ml` gained two `type_inf`-level
-(direct `program_types` inspection, not just "does it compile") tests
-side by side -- one confirming the compound-bound case DOES defer
-correctly, one confirming the literal-bound case deliberately does NOT,
-so a future change to the subtyping rule above has to consciously update
-the second test's expected result, not silently drift. Full `make check`
-(langcheck, 381 unit tests, stm32build, all 125 qemutest cases) passes
-with zero regressions.
-
 ### for i: T in lo..<hi -- Explicit Base Annotation on the Loop Counter
 
-Direct follow-up, same session: since deferred, usage-driven inference
-cannot close the common bare-literal-bounds gap (previous section), the
-programmer needs a way to spell the counter's base directly. New surface
+The programmer can spell a counter's base directly when bounds and body
+usage do not determine it. Surface
 syntax: `for i: u8 in 0..<4 { ... }` gives `i` the type
 `{0..<4 as u8}` -- exactly, both the width AND the compile-time bounds
 proof, unlike the pre-existing `for i in 0..<(4 as u8) { ... }`
@@ -2958,6 +2794,28 @@ the normal (always `-g`-free) build outputs.
 
 ## Known Limitations / Deferred Design Decisions
 
+- **`interrupt_wait`/`interrupt_notify` currently support ARM/AArch64 only.**
+  They use the retained-event `wfe`/`sev` pair, which closes the
+  check-then-sleep race. AMD64 and RISC-V code generation deliberately rejects
+  these builtins until an equally race-free wake protocol (not a bare `hlt` or
+  `wfi`) is designed with the interrupt controller/runtime.
+- **Hardware bring-up waits still need bounded timeouts.** STM32 MDIO busy,
+  MAC software reset, PHY reset/autonegotiation, and RTC initialization poll
+  status bits during startup. These are not steady-state CPU-spin paths and
+  generally have no useful completion IRQ, but a disconnected or failed device
+  can currently block forever. Add a monotonic deadline and actionable error
+  return before growing the driver set.
+- **Platform lifecycle composition is intentionally minimal.** The shared
+  high-level `main` calls `platform_init`, `app_main`, and `platform_shutdown`;
+  QEMU hooks are empty and STM32 hooks currently own UART setup/drain. When a
+  second always-on platform service needs lifecycle work, introduce an explicit
+  platform runtime module that composes drivers rather than making UART depend
+  on unrelated devices. Integer return values from `app_main` are currently
+  ignored because both bare-metal exits use a fixed success status.
+- **TX APIs are synchronous despite interrupt-driven completion.** Network TX
+  sleeps rather than spins, but retains the caller until DMA completion. Fully
+  asynchronous TX needs an affine `NetTxInFlight` handle (or equivalent buffer
+  ownership token) before callers may safely reuse memory.
 - **`uart_print_uint` / `print_uint` take `i32`, not `u32`** (`examples/common/print.tkb`): the name promises unsigned
   semantics but the parameter type does not enforce non-negativity, and `%`/`/` on `i32` use signed `srem`/`sdiv`. A
   genuinely negative argument prints garbage (e.g. `-5 % 10 = -5` in LLVM, not the mathematical `5`). No current
@@ -3030,7 +2888,7 @@ the normal (always `-g`-free) build outputs.
   browser's connection to the guest at all -- see that file's header comment), while on the STM32 side it's
   simply the same value as `OUR_IP` (no SLIRP-style constraint on real hardware). Both `netconfig.tkb` files
   define the same two variable names (`OUR_IP`, `HTTP_SERVER_IP`) for consistency, even though the STM32
-  side's `HTTP_SERVER_IP` is a duplicate of its own `OUR_IP`. This lets every example's `main()` do a single
+  side's `HTTP_SERVER_IP` is a duplicate of its own `OUR_IP`. This lets every example's `app_main()` do a single
   unconditional `bytes_copy` from the constant it needs, with no runtime branch at all (see the STM32
   section below for `irq.tkb`'s GIC-vs-NVIC enable sequence, which eliminated its own runtime branch the
   same way -- a per-target pair of definitions behind one uniform name).
@@ -3196,7 +3054,7 @@ definitions actually *compile* on both targets:
   scheduler.tkb`) hide the one genuine naming/arity mismatch found: STM32's
   `systick_init()` needs an explicit reload value `timer_init()` has no parameter for,
   and the ARM Generic Timer needs re-arming every tick where SysTick auto-reloads and
-  doesn't. `main()` calls these three uniformly, no per-platform branch needed for any
+  doesn't. `app_main()` calls these three uniformly, no per-platform branch needed for any
   of it. (The `249999` reload value used to be duplicated at every STM32 example's call
   site; hoisting it into `scheduler_init()` removed that too.)
 - **`examples/common/stm32_stub.tkb`** (QEMU-only): a no-op stand-in for
@@ -3218,7 +3076,7 @@ definitions actually *compile* on both targets:
   concatenated into *every* example's build, including ones that never touch GIC/NVIC
   at all, so a function defined there calling `gic_init()`/`enable_usart1_irq()` would
   fail to resolve on those other builds; `gic.tkb`/`nvic.tkb` are only ever included
-  where those symbols already exist). `main()` calls both uniformly with no branch, and
+  where those symbols already exist). `app_main()` calls both uniformly with no branch, and
   `register_irq()` itself (writing into a QEMU-only dispatch table) is harmless to call
   unconditionally too, since the STM32 side's `USART1_IRQHandler` never reads that
   table.
@@ -3244,7 +3102,7 @@ unfreeze the calendar shadow registers for the next read (RM0385).
 **NVIC vs. GICv2**: GICv2 has one shared IRQ vector; the ISR reads `GICC_IAR` to learn
 which source fired (software dispatch by ID) and writes `GICC_EOIR` to acknowledge.
 NVIC vectors *directly* to a per-source handler address (`examples/common_stm32/
-startup.S`'s vector table, 54 words: core exceptions + IRQ0-37) -- no software
+startup.S`'s vector table, covering core exceptions through Ethernet IRQ61) -- no software
 dispatch table or EOI register at all; reading/clearing the peripheral's own interrupt
 flag (e.g. USART1 RDR read clearing RXNE) *is* the acknowledgment. USART1 = IRQ37
 (confirmed via search), vector position 16+37=53, byte offset `0xD4`.
@@ -3385,11 +3243,10 @@ virtio protocol itself.
   reads Config space), `arp_reply.tkb` passes `VIRTIO_NET_F_MAC`. Avoids a
   second hardcoded MAC constant that would need to be kept in sync with
   the QEMU command line's `mac=` value.
-- **Used-ring polling reads must be `io`.** `used_idx_get` etc. read memory
-  the device writes via DMA and are polled in a busy-wait loop in the main
-  loop -- exactly the "LLVM may hoist a load out of a tight loop" hazard
-  described under "Volatile Reads of Global Variables" above, since
-  nothing else marks that memory as externally modified.
+- **Used-ring reads must be `io`.** `used_idx_get` etc. read memory the device
+  writes via DMA. An interrupt is only a notification, so normal context
+  re-checks the used ring after `interrupt_wait()` wakes. Volatile access
+  prevents LLVM from caching or hoisting these externally modified loads.
 - **Test harness**: `scripts/virtio_net_test.py`, `scripts/arp_test.py`,
   and `scripts/icmp_echo_test.py` send/verify raw frames over a UDP-backed
   `-netdev dgram` (one UDP datagram == one raw Ethernet frame, no
@@ -3477,7 +3334,7 @@ splits into two genuinely different kinds of step:
   `test_data_echo()`/`test_close()` continue the *same* connection
   `test_handshake_only()` established (shared module-level constants:
   `HANDSHAKE_CLIENT_PORT`/`HANDSHAKE_CLIENT_ISN`/`SERVER_ISN`) and must run
-  in that order (`main()`'s `ok4 = ok3 and test_data_echo()` chain). Each
+  in that order (`app_main()`'s `ok4 = ok3 and test_data_echo()` chain). Each
   still prints its own labeled PASS/FAIL line, so per-stage regression
   attribution still works even though execution is a chain, not
   independent calls. `test_reconnect_after_close()` is the one function

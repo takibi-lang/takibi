@@ -17,7 +17,7 @@
 // net_echo.tkb's header comment for the general pattern): whichever one
 // isn't relevant to the target being built is simply never called by that
 // target's assembly, same as an unused constant sitting in a binary.
-// main()'s enable sequence itself needs no per-platform branch either:
+// app_main()'s enable sequence itself needs no per-platform branch either:
 // irq_uart_rx_setup()/irq_uart_rx_unmask() are uniformly-named functions
 // with a real, different-shaped implementation in each of
 // examples/common/gic.tkb and examples/common_stm32/nvic.tkb (same

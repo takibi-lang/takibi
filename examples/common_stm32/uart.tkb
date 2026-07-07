@@ -1,8 +1,9 @@
 // STM32F746G-DISCOVERY UART HAL, over the ST-LINK/V2-1 virtual COM port.
 // The board wires USART1 (TX = PA9, RX = PB7) to the ST-LINK's VCP.
-// Same public signatures as examples/common/uart.tkb (uart_putc/uart_puts) so
-// example .tkb files stay unchanged across the QEMU and STM32 HALs; uart_init
-// has no QEMU counterpart since the PL011 model there needs no setup.
+// Same public signatures as examples/common/uart.tkb (uart_putc/uart_puts and
+// platform hooks) so application files stay unchanged across the QEMU and
+// STM32 HALs. QEMU's platform hooks are currently empty because its PL011
+// model needs no setup.
 //
 // Deliberately uses the default HSI (16MHz) clock, no PLL/clock-tree setup --
 // keeps this first bring-up minimal. USART1 is on APB2; with all prescalers
@@ -93,7 +94,7 @@ fn uart_set_rx_handler(handler: fn() -> void) {
     uart_rx_handler = handler;
 }
 
-// Called by USART1_IRQHandler, including startup.S's weak default handler.
+// Called by the driver-owned USART1_IRQHandler below.
 // One byte per interrupt keeps ISR latency bounded. Disabling TXEIE when the
 // ring becomes empty prevents the level-sensitive TXE source from retriggering.
 fn uart_tx_isr() {
@@ -120,9 +121,9 @@ fn USART1_IRQHandler() {
     uart_tx_isr();
 }
 
-// Used by startup after a finite main() returns. Wait until every queued
-// byte has reached TDR, then quiesce USART1 interrupts before a debugger
-// installs its next flash loader. Long-running servers never call this.
+// Used by platform_shutdown after a finite app_main() returns. Wait until
+// every queued byte has reached TDR, then quiesce USART1 interrupts before a
+// debugger installs its next flash loader. Long-running servers never return.
 fn uart_shutdown() {
     while (uart_tx_tail != uart_tx_head) {
         interrupt_wait();
@@ -133,8 +134,7 @@ fn uart_shutdown() {
     *nvic_icer1 = 1 << 5; // disable IRQ37
 }
 
-// Generic runtime hooks called by startup.S. Device-specific initialization
-// stays in this driver while the startup path depends only on platform hooks.
+// Generic hooks called by examples/common/runtime.tkb's high-level main.
 fn platform_init() {
     uart_init();
 }

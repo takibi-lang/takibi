@@ -16,7 +16,7 @@
 // the remaining per-platform differences (STM32's systick_init() needs an
 // explicit reload value timer_init() has no equivalent for; the ARM
 // Generic Timer needs re-arming every tick, SysTick auto-reloads and
-// doesn't) behind matching names, so main() needs no per-platform branch at all.
+// doesn't) behind matching names, so app_main() needs no per-platform branch at all.
 
 struct SchedState {
     task_count:   isize;
