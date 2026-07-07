@@ -1179,6 +1179,12 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  Alcotest.test_case "opaque struct declaration parses" `Quick (fun () ->
+    match parse "opaque struct Token;" with
+    | [Ast.OpaqueStructDef "Token"] -> ()
+    | _ -> Alcotest.fail "expected OpaqueStructDef(Token)"
+  );
+
   (* -- Compound pointer assignment ------------------------------------------ *)
 
   Alcotest.test_case "complex pointer assign *(expr) = v parses to AssignDeref" `Quick (fun () ->
@@ -1681,6 +1687,22 @@ let infer_tests = [
         struct B { x: i32; }
         fn use_a(a: *A) {}
         fn f(b: *B) { use_a(b); }");
+
+  Alcotest.test_case "opaque struct is usable through pointers" `Quick
+    (expect_ok "opaque struct Token;
+                let mut storage: u8;
+                fn get() -> *Token { return &storage as *Token; }
+                fn use(t: *Token) {}");
+
+  Alcotest.test_case "opaque struct cannot be used by value" `Quick
+    (expect_type_error "incomplete"
+       "opaque struct Token; fn consume(t: Token) {}");
+
+  Alcotest.test_case "distinct opaque handle states do not unify" `Quick
+    (expect_type_error "struct type mismatch"
+       "opaque struct DmaOwned; opaque struct CpuOwned;
+        fn release(t: *CpuOwned) {}
+        fn bad(t: *DmaOwned) { release(t); }");
 
   (* -- extern fn --------------------------------------------------- *)
 
@@ -3927,6 +3949,14 @@ let codegen_tests = [
        in
        Alcotest.(check int) "three mfence calls" 3
          (count_substring (Llvm.string_of_llvalue fn) "llvm.x86.sse2.mfence"));
+
+  Alcotest.test_case "opaque handle pointers codegen without a concrete layout" `Quick
+    (expect_codegen_ok
+       "opaque struct DmaOwned;
+        opaque struct CpuOwned;
+        let mut token_byte: u8;
+        fn initial() -> *DmaOwned { return &token_byte as *DmaOwned; }
+        fn acquire(t: *DmaOwned) -> *CpuOwned { return t as *CpuOwned; }");
 
   Alcotest.test_case
     "DMA/device barriers preserve RISC-V memory/I/O fence directions" `Quick

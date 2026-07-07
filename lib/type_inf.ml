@@ -1,5 +1,7 @@
 open Types
 
+module StringSet = Set.Make (String)
+
 (* Type environment: immutable map from variable name to (type, is_mutable) *)
 type tyenv = (ty * bool) StringMap.t
 
@@ -1644,6 +1646,36 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
 
 let infer_program (prog : Ast.toplevel list) : program_types =
   unsafe_depth := 0;  (* see its comment: fresh per compilation / per unit test *)
+  let opaque_names = List.fold_left (fun names -> function
+    | Ast.OpaqueStructDef name -> StringSet.add name names
+    | _ -> names
+  ) StringSet.empty prog in
+  let rec validate_complete_type loc behind_ptr = function
+    | Ast.TypeNamed name when StringSet.mem name opaque_names && not behind_ptr ->
+        raise (TypeError (loc, Printf.sprintf
+          "opaque struct '%s' is incomplete and may only be used behind a pointer" name))
+    | Ast.TypePtr inner -> validate_complete_type loc true inner
+    | Ast.TypeIo inner -> validate_complete_type loc behind_ptr inner
+    | Ast.TypeArray (inner, _) | Ast.TypeSlice (inner, _) ->
+        validate_complete_type loc false inner
+    | Ast.TypeFn (args, ret) ->
+        List.iter (validate_complete_type loc false) args;
+        validate_complete_type loc false ret
+    | Ast.TypeRefined (_, _, base) -> validate_complete_type loc false base
+    | _ -> ()
+  in
+  List.iter (function
+    | Ast.FuncDef f ->
+        List.iter (fun (_, ty) -> Option.iter (validate_complete_type f.def_loc false) ty) f.params;
+        Option.iter (validate_complete_type f.def_loc false) f.ret_type
+    | Ast.ExternFuncDef (_, params, ret) ->
+        List.iter (fun (_, ty) -> Option.iter (validate_complete_type Lexing.dummy_pos false) ty) params;
+        Option.iter (validate_complete_type Lexing.dummy_pos false) ret
+    | Ast.LetDef (_, ty, _, _, _) ->
+        Option.iter (validate_complete_type Lexing.dummy_pos false) ty
+    | Ast.StructDef (_, fields, _, _) ->
+        List.iter (fun (_, ty) -> validate_complete_type Lexing.dummy_pos false ty) fields
+    | Ast.OpaqueStructDef _ | Ast.EnumDef _ -> ()) prog;
   (* Pass 0: collect struct and enum definitions *)
   let senv = List.fold_left (fun m -> function
     | Ast.StructDef (name, fields, _, _) -> StringMap.add name fields m
@@ -1682,6 +1714,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add name (TFun (pts, rt)) m
     | Ast.LetDef _    -> m
     | Ast.StructDef _ -> m
+    | Ast.OpaqueStructDef _ -> m
     | Ast.EnumDef _   -> m
   ) StringMap.empty prog in
   (* Global mutability: plain `let` = immutable compile-time constant, `let mut` = variable.
@@ -1691,6 +1724,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.FuncDef _                -> m
     | Ast.ExternFuncDef _          -> m
     | Ast.StructDef _              -> m
+    | Ast.OpaqueStructDef _        -> m
     | Ast.EnumDef _                -> m
   ) StringMap.empty prog in
   (* Pass 2: check global initializers *)

@@ -2794,6 +2794,8 @@ let gen_program ?prog_types prog =
   unsafe_depth := 0;
   (* Pass 0: register struct and enum types -- must precede ltype_of_ast for TypeNamed *)
   List.iter (function
+    | OpaqueStructDef name ->
+        Hashtbl.add struct_lltypes name (named_struct_type context name)
     | StructDef (name, fields, is_packed, align_opt) ->
         let field_lltys = List.map (fun (_, ty) -> ltype_of_ast ty) fields
                           |> Array.of_list in
@@ -2847,6 +2849,7 @@ let gen_program ?prog_types prog =
           Hashtbl.add func_param_ast_types name param_ast
         end
     | StructDef _ -> ()
+    | OpaqueStructDef _ -> ()
     | EnumDef _   -> ()
   ) prog;
   (* Pass 2: generate function bodies *)
@@ -2855,6 +2858,7 @@ let gen_program ?prog_types prog =
     | LetDef _        -> ()
     | ExternFuncDef _ -> ()
     | StructDef _     -> ()
+    | OpaqueStructDef _ -> ()
     | EnumDef _       -> ()
   ) prog;
   (* Resolve any deferred/forward-referenced DI metadata. Must run after every

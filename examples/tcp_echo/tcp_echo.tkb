@@ -83,7 +83,7 @@ let TCP_URGENT:      usize = 18;
 // natural width (u8/u16) -- unlike the pure offset constants above,
 // which are usize (array/slice indexing is usize-only, see CLAUDE.md's
 // "Array/Slice Indices Must Be usize" section). ihl/total_len/tcp_len/tcp_hdr_len/
-// data_len/data_off below are ALSO u16-based: `len` (net_rx_acquire()'s
+// data_len/data_off below are ALSO u16-based: `len` (net_rx_len()'s
 // deliberately-unconstrained i32 device-reported length) is bridged into
 // u16 with ONE explicit refined cast right after its own range is
 // established, and everything downstream inherits u16-based refined
@@ -284,11 +284,14 @@ fn main() {
 
         uart_puts("tcp_echo: ready\r\n");
 
+        let mut rx_token: *NetRxDmaOwned = net_rx_token();
         while (1) {
-            let len: i32 = net_rx_acquire();
+            let acquired: *NetRxCpuOwned = net_rx_acquire(rx_token);
+            if ((acquired as usize) != 0) {
+            let len: i32 = net_rx_len(acquired);
             let mut should_tx: i32 = 0;
             let mut tx_len: i32 = 0;
-            let frame = net_rx_frame();   // [u8; 1514..] capacity view
+            let frame = net_rx_frame(acquired);   // only read when len proves acquisition
 
             // 14 (eth) + 20 (min IPv4) + 20 (min TCP) = 54
             if (len >= 54 && len <= 1514) {
@@ -496,8 +499,9 @@ fn main() {
             if (should_tx == 1) {
                 net_transmit(frame as *u8, tx_len);
             }
-            if (len > 0) {
-                net_rx_release();
+            if ((acquired as usize) != 0) {
+                rx_token = net_rx_release(acquired);
+            }
             }
         }
     }

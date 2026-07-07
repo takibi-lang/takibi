@@ -131,6 +131,8 @@ type toplevel =
   (* extern fn name(params) -> ret; -- body is provided by external assembly *)
   | StructDef of string * (string * type_expr) list * bool * int option
   (* name, fields, is_packed, align_bytes -- align_bytes = Some N means type-level align(N) *)
+  | OpaqueStructDef of string
+  (* opaque struct Name; -- incomplete nominal type, usable only behind a pointer *)
   | EnumDef of string * type_expr option * (string * int option) list * bool
   (* enum Name: u16 { Variant = val; _; } -- last bool = is_nonexhaustive *)
 [@@deriving show]

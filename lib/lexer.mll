@@ -45,6 +45,7 @@ rule read = parse
   | "void"    { VOID_TYPE }
   | "extern"  { EXTERN }
   | "struct"  { STRUCT }
+  | "opaque"  { OPAQUE }
   | "packed"  { PACKED }
   | "io"      { IO }
   | "enum"    { ENUM }

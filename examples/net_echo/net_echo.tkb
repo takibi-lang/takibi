@@ -33,16 +33,21 @@ fn main() {
     } else {
         uart_puts("net_echo: ready\r\n");
 
+        let mut rx_token: *NetRxDmaOwned = net_rx_token();
         while (1) {
-            let len: i32 = net_rx_acquire();
+            let acquired: *NetRxCpuOwned = net_rx_acquire(rx_token);
+            let mut len: i32 = 0;
+            if ((acquired as usize) != 0) {
+                len = net_rx_len(acquired);
+            }
             // A valid Ethernet frame needs at least a 12-byte dst+src MAC pair.
             if (len >= 12) {
-                let frame = net_rx_frame();
+                let frame = net_rx_frame(acquired);
                 swap_mac(frame as *u8);
                 net_transmit(frame as *u8, len);
             }
-            if (len > 0) {
-                net_rx_release();
+            if ((acquired as usize) != 0) {
+                rx_token = net_rx_release(acquired);
             }
         }
     }

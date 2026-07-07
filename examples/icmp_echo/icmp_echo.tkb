@@ -30,7 +30,7 @@
 // WIRE-WIDTH TYPES (see CLAUDE.md's "Refinement Numerical Type" /
 // "Explicit-Base {lo..<hi as base}" sections): ihl/total_len/
 // ip_len_in_frame/icmp_len are all u16-based, not i32 -- `len` (from
-// net_rx_acquire(), a deliberately-unconstrained i32 device-reported length)
+// net_rx_len(), a deliberately-unconstrained i32 device-reported length)
 // is bridged into the u16 world with ONE explicit refined cast
 // (`len_n as {42..<1515 as u16}`) right after the length is validated;
 // everything downstream inherits u16-based refined ranges through
@@ -97,8 +97,13 @@ fn main() {
 
         uart_puts("icmp_echo: ready\r\n");
 
+        let mut rx_token: *NetRxDmaOwned = net_rx_token();
         while (1) {
-            let len: i32 = net_rx_acquire();
+            let acquired: *NetRxCpuOwned = net_rx_acquire(rx_token);
+            let mut len: i32 = 0;
+            if ((acquired as usize) != 0) {
+                len = net_rx_len(acquired);
+            }
 
             // 14 (eth) + 20 (min IPv4) + 8 (min ICMP) = 42
             if (len >= 42 && len <= 1514) {
@@ -114,7 +119,7 @@ fn main() {
                 // for exactly this reason), so the cast proves clean
                 // instead of falling back to a runtime check.
                 let len_n: i32 = len;
-                let frame = net_rx_frame();
+                let frame = net_rx_frame(acquired);
                 if (read_u16be(frame[12..<14]) == 0x0800) {
                     let ip = frame[14..<34];
                     // version is standalone (only ever compared to a
@@ -176,8 +181,8 @@ fn main() {
             }
 
             // Re-post the RX descriptor regardless of whether we replied.
-            if (len > 0) {
-                net_rx_release();
+            if ((acquired as usize) != 0) {
+                rx_token = net_rx_release(acquired);
             }
         }
     }

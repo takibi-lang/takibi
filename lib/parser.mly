@@ -65,7 +65,7 @@ let check_refined_base_range pos lo hi base =
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN RETURN LET MUT EXTERN STRUCT PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE
+%token FN RETURN LET MUT EXTERN STRUCT OPAQUE PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE
 %token DARROW COLONCOLON UNDERSCORE
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT
 %token ASSIGN DOT
@@ -131,6 +131,8 @@ item:
     { let (name, is_packed, align_opt) = $1 in
       Type_layout.finish_struct name $3 is_packed align_opt;
       StructDef (name, $3, is_packed, align_opt) }
+  | OPAQUE STRUCT IDENT SEMI
+    { OpaqueStructDef $3 }
   | ENUM IDENT COLON base_type_expr LBRACE enum_variants RBRACE
     { let (vs, ne) = $6 in
       Type_layout.register_enum $2 $4;

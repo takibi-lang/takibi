@@ -59,6 +59,7 @@ The finished form of code is when index ranges are pinned at the type level usin
   - `sizeof(T)` -- compile-time size of `T` in bytes, type `usize` (fixed, not a polymorphic literal; compare/assign against other integer types requires an explicit `as` cast, e.g. `len >= sizeof(Hdr)` requires `len: usize`). Reads the same LLVM DataLayout used for struct tail-padding, so `sizeof` on a `packed` or `align(N)` struct reflects the true in-memory size.
   - DMA/device synchronization builtins are zero-argument, target-lowered operations: `dma_publish()` transfers CPU writes toward a device before a later MMIO notification; `dma_consume()` acquires device-written DMA state after completion is observed; `device_fence()` is a conservative full device barrier. ARM/AArch64 lower to DSB SY, AMD64 currently lowers conservatively to MFENCE, and RISC-V uses direction-preserving `fence w,o` / `fence i,r` / `fence iorw,iorw`. Driver code should encapsulate these at ownership boundaries rather than exposing them to applications.
 - `struct Name { field: type; ... }` -- struct type definition (top-level only; fields are primitive types, pointer types, or other struct types)
+- `opaque struct Name;` -- incomplete nominal type usable only behind a pointer. It has no constructible value, fields, or size and is intended for driver-owned state handles.
 - `let mut s: Name;` -- struct variable declaration (local/global, always treated as mutable)
 - `s.field` -- field read (works for both `s: Name` and `s: *Name`, Zig-style)
 - `s.field = v` -- field write (direct dot assignment to a variable name only; not allowed as the left side of an expression)
@@ -911,7 +912,7 @@ correctly regardless of the AST type tag. Regression test:
 all**: the explicit-base syntax unblocks `ihl: {20..<21 as base}` as a
 parameter, but `tcp_parse.tkb`/`icmp_echo.tkb`/`tcp_echo.tkb`/
 `http_server.tkb` all compare `ihl`/`total_len`/`tcp_len` against
-quantities ultimately derived from `net_rx_acquire()`'s return value (`len`),
+quantities ultimately derived from `net_rx_len()`'s device-reported value (`len`),
 which is deliberately-unconstrained `i32` (external, device-reported,
 per this project's `i32 = unknown range` convention). Casting a value to
 a plain (non-refined-syntax) target type ALWAYS discards any refined
@@ -1009,7 +1010,7 @@ regressions after both bugs above were fixed.
 
 The three networked files above still had `ihl` and everything derived
 from it declared `i32`, entangled via `total_len <= ip_len_in_frame`
-(`ip_len_in_frame = len - 14`) with `net_rx_acquire()`'s deliberately
+(`ip_len_in_frame = len - 14`) with `net_rx_len()`'s deliberately
 -unconstrained `i32` device-reported length. This entanglement is real,
 but not an unliftable wall: `len` itself, once narrowed by its own
 `if (len >= N && len <= 1514)` check, CAN be bridged into `u16` with the
@@ -2989,8 +2990,10 @@ the normal (always `-g`-free) build outputs.
   descriptor ring design are documented in that file's header comment).
 
   **Unified driver API**: `eth.tkb` and `examples/common/virtio_mmio.tkb` both expose the identical
-  `net_init() -> i32` / `net_rx_acquire() -> i32` / `net_rx_frame() -> [u8; 1514..]` / `net_transmit(buf, len)` /
-  `net_rx_release()` / `net_read_mac(mac_out)` functions -- mirroring how `uart.tkb`/`print.tkb` already
+  `net_init() -> i32` / `net_rx_token() -> *NetRxDmaOwned` /
+  `net_rx_acquire(*NetRxDmaOwned) -> *NetRxCpuOwned` / `net_rx_len(*NetRxCpuOwned) -> i32` /
+  `net_rx_frame(*NetRxCpuOwned) -> [u8; 1514..]` / `net_transmit(buf, len)` /
+  `net_rx_release(*NetRxCpuOwned) -> *NetRxDmaOwned` / `net_read_mac(mac_out)` functions -- mirroring how `uart.tkb`/`print.tkb` already
   share identical signatures across `examples/common/` and `examples/common_stm32/`. This means
   `examples/net_echo/net_echo.tkb` (and the other four) are a *single* file compiled against either
   backend depending on target, not a QEMU version plus a hand-maintained `_stm32.tkb` copy -- see that
