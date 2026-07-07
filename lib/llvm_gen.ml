@@ -402,6 +402,25 @@ let emit_device_barrier kind =
     raise (Error (Printf.sprintf
       "DMA/device barriers are not implemented for target '%s'" triple))
 
+(* A retained event avoids the check-then-sleep lost-wakeup race: ARM SEV
+   sets the event register even if the matching WFE has not executed yet.
+   WFE may also return spuriously, so source code must always re-check its
+   flag in a loop.  Do not silently substitute WFI on targets without an
+   equivalent retained notification -- that would reintroduce the race. *)
+let emit_interrupt_event notify =
+  let triple = target_triple the_module in
+  let fty = function_type (void_type context) [||] in
+  let asm =
+    if starts_with triple "aarch64" || starts_with triple "arm"
+       || starts_with triple "thumb" then
+      if notify then "sev" else "wfe"
+    else
+      raise (Error (Printf.sprintf
+        "interrupt event wait/notify is not implemented for target '%s'" triple))
+  in
+  let inline = const_inline_asm fty asm "~{memory}" true false in
+  ignore (build_call fty inline [||] "" builder)
+
 let setup_target ?(triple = "") ?(cpu = "") ?(features = "") () =
   let _ = Llvm_all_backends.initialize () in
   let triple = if triple = "" then Llvm_target.Target.default_triple () else triple in
@@ -1846,6 +1865,14 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let fty = function_type (void_type context) [||] in
       let inline = const_inline_asm fty "" "~{memory}" true false in
       ignore (build_call fty inline [||] "" builder);
+      (TypeVoid, const_null (i1_type context))
+
+  | Call ("interrupt_wait", []) ->
+      emit_interrupt_event false;
+      (TypeVoid, const_null (i1_type context))
+
+  | Call ("interrupt_notify", []) ->
+      emit_interrupt_event true;
       (TypeVoid, const_null (i1_type context))
 
   | Call (("dma_prepare_tx" | "dma_prepare_rx" | "dma_finish_rx") as name,

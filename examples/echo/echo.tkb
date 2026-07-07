@@ -16,6 +16,7 @@ fn echo_uart_rx_isr() {
         signal_fence(); // publish the byte before the volatile head update
         echo_rx_head = next;
     }
+    interrupt_notify();
 }
 
 fn irq_dispatch(frame_sp: usize) -> usize {
@@ -28,7 +29,10 @@ fn irq_dispatch(frame_sp: usize) -> usize {
 }
 
 fn USART1_IRQHandler() {
-    echo_uart_rx_isr();
+    if (uart_rx_ready()) {
+        echo_uart_rx_isr();
+    }
+    uart_tx_isr();
 }
 
 fn main() {
@@ -39,7 +43,9 @@ fn main() {
     irq_uart_rx_unmask();
     let mut prev: u8 = 0;
     while (1) {
-        while (echo_rx_tail == echo_rx_head) {}
+        while (echo_rx_tail == echo_rx_head) {
+            interrupt_wait();
+        }
         signal_fence(); // acquire the byte after observing the head update
         let tail: usize = echo_rx_tail;
         let ring: *u8 = echo_rx_buf;

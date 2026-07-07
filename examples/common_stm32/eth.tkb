@@ -130,6 +130,7 @@ fn ETH_IRQHandler() {
     if ((status & ETH_DMASR_TS) != 0) {
         eth_tx_irq_flag = 1;
     }
+    interrupt_notify(); // retained event closes the flag-check/sleep race
 }
 
 // Descriptor rings and packet buffers. Placed in AXI SRAM by link_eth.ld
@@ -370,6 +371,12 @@ fn net_rx_acquire() -> *NetRxCpuOwned {
     return &net_rx_token_storage as *NetRxCpuOwned;
 }
 
+fn net_rx_wait() {
+    while (eth_rx_irq_flag == 0) {
+        interrupt_wait();
+    }
+}
+
 fn net_rx_len(frame: borrow *NetRxCpuOwned) -> i32 {
     return net_rx_acquired_len;
 }
@@ -418,8 +425,8 @@ fn net_rx_release(frame: *NetRxCpuOwned) {
     eth_rx_cur = (eth_rx_cur + 1) % ETH_RX_DESC_COUNT;
 }
 
-// Transmits len bytes starting at buf. Synchronous: busy-waits for the DMA
-// to finish reading buf before returning, so the caller can safely reuse or
+// Transmits len bytes starting at buf. Synchronous: sleeps on the retained
+// interrupt event until the DMA finishes reading buf, so the caller can safely reuse or
 // release buf (e.g. via net_rx_release()) immediately afterward -- same
 // completion-ordering guarantee examples/common/virtio_mmio.tkb's net_echo
 // consumer relies on before re-posting an RX descriptor.
@@ -444,7 +451,9 @@ fn net_transmit(buf: *u8, len: i32) {
         dma_finish_rx(desc as *u8, sizeof(EthDmaDesc));
         tx_owned = desc.word0;
         if ((tx_owned & ETH_TDES0_OWN) != 0) {
-            while (eth_tx_irq_flag == 0) {}
+            while (eth_tx_irq_flag == 0) {
+                interrupt_wait();
+            }
         }
     }
 

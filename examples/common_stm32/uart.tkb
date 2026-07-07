@@ -8,9 +8,14 @@
 // keeps this first bring-up minimal. USART1 is on APB2; with all prescalers
 // at their reset value of 1, APB2 clock == HSI == 16MHz.
 
+let mut uart_tx_buf: [u8; 128];
+let mut uart_tx_head: io usize;
+let mut uart_tx_tail: io usize;
+
 fn uart_init() {
     let rcc_ahb1enr: *io u32 = 0x40023830; // RCC_AHB1ENR
     let rcc_apb2enr: *io u32 = 0x40023844; // RCC_APB2ENR
+    let nvic_iser1: *io u32 = 0xE000E104;  // IRQ37 USART1
     *rcc_ahb1enr = *rcc_ahb1enr | (1 | (1 << 1)); // GPIOAEN | GPIOBEN
     *rcc_apb2enr = *rcc_apb2enr | (1 << 4);       // USART1EN
 
@@ -33,15 +38,24 @@ fn uart_init() {
     // BRR = round(16_000_000 / 115200) = 139 = 0x8B
     let usart1_brr: *io u32 = 0x4001100C;
     let usart1_cr1: *io u32 = 0x40011000;
+    uart_tx_head = 0;
+    uart_tx_tail = 0;
     *usart1_brr = 139;
     *usart1_cr1 = 1 | (1 << 2) | (1 << 3); // UE | RE | TE
+    *nvic_iser1 = *nvic_iser1 | (1 << 5);
 }
 
 fn uart_putc(c: u8) {
-    let usart1_isr: *io u32 = 0x4001101C;
-    let usart1_tdr: *io u8  = 0x40011028;
-    while ((*usart1_isr & (1 << 7)) == 0) {} // wait for TXE
-    *usart1_tdr = c;
+    let head: usize = uart_tx_head;
+    let next: usize = (head + 1) % 128;
+    while (next == uart_tx_tail) {
+        interrupt_wait();
+    }
+    uart_tx_buf[head] = c;
+    signal_fence();
+    uart_tx_head = next;
+    let usart1_cr1: *io u32 = 0x40011000;
+    *usart1_cr1 = *usart1_cr1 | (1 << 7); // TXEIE: ISR drains the ring
 }
 
 fn uart_puts(s: *u8) {
@@ -61,4 +75,39 @@ fn uart_puts(s: *u8) {
 fn uart_isr_getc() -> u8 {
     let usart1_rdr: *io u8 = 0x40011024;
     return *usart1_rdr;
+}
+
+fn uart_rx_ready() -> bool {
+    let usart1_isr: *io u32 = 0x4001101C;
+    return (*usart1_isr & (1 << 5)) != 0; // RXNE
+}
+
+// Called by USART1_IRQHandler, including startup.S's weak default handler.
+// One byte per interrupt keeps ISR latency bounded. Disabling TXEIE when the
+// ring becomes empty prevents the level-sensitive TXE source from retriggering.
+fn uart_tx_isr() {
+    let usart1_cr1: *io u32 = 0x40011000;
+    let usart1_tdr: *io u8 = 0x40011028;
+    let tail: usize = uart_tx_tail;
+    if (tail != uart_tx_head) {
+        signal_fence();
+        *usart1_tdr = uart_tx_buf[tail];
+        uart_tx_tail = (tail + 1) % 128;
+        interrupt_notify();
+    } else {
+        *usart1_cr1 = *usart1_cr1 & ~(1 << 7); // TXEIE
+    }
+}
+
+// Used by startup after a finite main() returns. Wait until every queued
+// byte has reached TDR, then quiesce USART1 interrupts before a debugger
+// installs its next flash loader. Long-running servers never call this.
+fn uart_shutdown() {
+    while (uart_tx_tail != uart_tx_head) {
+        interrupt_wait();
+    }
+    let usart1_cr1: *io u32 = 0x40011000;
+    let nvic_icer1: *io u32 = 0xE000E184;
+    *usart1_cr1 = *usart1_cr1 & ~((1 << 7) | (1 << 5)); // TXEIE | RXNEIE
+    *nvic_icer1 = 1 << 5; // disable IRQ37
 }

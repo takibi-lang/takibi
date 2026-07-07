@@ -59,6 +59,7 @@ The finished form of code is when index ranges are pinned at the type level usin
   - `sizeof(T)` -- compile-time size of `T` in bytes, type `usize` (fixed, not a polymorphic literal; compare/assign against other integer types requires an explicit `as` cast, e.g. `len >= sizeof(Hdr)` requires `len: usize`). Reads the same LLVM DataLayout used for struct tail-padding, so `sizeof` on a `packed` or `align(N)` struct reflects the true in-memory size.
   - DMA/device synchronization builtins include `dma_publish()`, `dma_consume()`, and `device_fence()`. ARM/AArch64 lower to DSB SY, AMD64 currently lowers conservatively to MFENCE, and RISC-V uses direction-preserving fences. Cache-aware operations are `dma_prepare_tx(ptr, len)`, `dma_prepare_rx(ptr, len)`, and `dma_finish_rx(ptr, len)`. Cortex-M7 rounds the range to 32-byte cache lines and uses SCB DCCMVAC/DCIMVAC plus barriers; currently supported coherent non-Cortex-M targets use the corresponding ordering barrier. DMA buffers must not share cache lines with unrelated mutable data. Driver code encapsulates these operations at ownership boundaries.
   - `signal_fence()` is a compiler-only memory boundary for ISR/normal-context communication. It lowers to side-effecting empty LLVM inline assembly with a memory clobber and emits no hardware barrier instruction.
+  - `interrupt_wait()` / `interrupt_notify()` form a race-free event wait pair on ARM/AArch64 (`wfe` / `sev`). An ISR stores its volatile flag then calls `interrupt_notify()`; normal context loops on the flag and calls `interrupt_wait()` while it is clear. ARM's retained event closes the check-then-sleep lost-wakeup window, and callers still re-check because waits may return spuriously. Unsupported targets are rejected during code generation rather than silently lowered to a racy `wfi` sequence.
 - `struct Name { field: type; ... }` -- struct type definition (top-level only; fields are primitive types, pointer types, or other struct types)
 - `opaque struct Name;` -- incomplete nominal type usable only behind a pointer. It has no constructible value, fields, or size and is intended for driver-owned state handles.
 - `affine opaque struct Name;` marks pointers to that opaque type as affine handles. Passing one to an ordinary affine-handle parameter consumes the local value; a second consumption or later use is a compile error. `borrow *Name` is allowed only as a function parameter and permits non-consuming inspection. This is intentionally a restricted, intraprocedural facility rather than a general affine type system: values may be dropped, explicit pointer casts remain an escape hatch, and consuming an affine value declared outside a loop from inside that loop is conservatively rejected.
@@ -204,7 +205,8 @@ examples/
                      SysTick_Handler/USART1_IRQHandler/pendsv_dispatch stubs
     link.ld       -- MEMORY {FLASH RAM} linker script (RAM = DTCM, 64K)
     link_eth.ld   -- same, RAM = AXI SRAM (Ethernet DMA can't reach DTCM)
-    uart.tkb      -- uart_init, uart_putc, uart_puts (USART1, PA9/PB7, AF7), uart_isr_getc
+    uart.tkb      -- uart_init, interrupt-driven TX ring (uart_putc/uart_puts),
+                     RX/TX IRQ helpers (USART1, PA9/PB7, AF7), uart_isr_getc
     uart_getc.tkb -- uart_getc (USART1 RX poll; only echo needs RX)
     rtc.tkb       -- rtc_init, rtc_is_running, rtc_read_seconds (real RTC peripheral, LSI)
     nvic.tkb      -- enable_usart1_irq, irq_uart_rx_setup/_unmask
@@ -2993,7 +2995,7 @@ the normal (always `-g`-free) build outputs.
   descriptor ring design are documented in that file's header comment).
 
   **Unified driver API**: `eth.tkb` and `examples/common/virtio_mmio.tkb` both expose the identical
-  `net_init() -> i32` / `net_rx_acquire() -> *NetRxCpuOwned` /
+  `net_init() -> i32` / `net_rx_wait()` / `net_rx_acquire() -> *NetRxCpuOwned` /
   `net_rx_len(borrow *NetRxCpuOwned) -> i32` /
   `net_rx_frame(borrow *NetRxCpuOwned) -> [u8; 1514..]` / `net_transmit(buf, len)` /
   `net_rx_release(*NetRxCpuOwned)` / `net_read_mac(mac_out)` functions -- mirroring how `uart.tkb`/`print.tkb` already
@@ -3003,7 +3005,8 @@ the normal (always `-g`-free) build outputs.
   file's header comment. Descriptor rings, RX/TX buffers, and virtio's 10-byte `virtio_net_hdr` framing
   are all hidden inside each backend; application code never sees them. Both backends are interrupt-driven:
   STM32 vectors IRQ61 directly to `ETH_IRQHandler`, while virtio discovers its SPI from the MMIO slot and
-  dispatches through GICv2. ISRs only acknowledge and set `io` flags; used-ring/descriptor inspection,
+  dispatches through GICv2. ISRs acknowledge, set `io` flags, and issue `interrupt_notify()`; normal
+  context uses `interrupt_wait()` instead of spinning while idle. Used-ring/descriptor inspection,
   cache maintenance, affine-handle creation, and packet processing remain in normal context.
 
   **Network config**: `examples/common_stm32/netconfig.tkb` holds the board's MAC/IP as plain global

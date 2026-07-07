@@ -2400,6 +2400,8 @@ let codegen_tests = [
             dma_consume();
             device_fence();
             signal_fence();
+            interrupt_wait();
+            interrupt_notify();
           }"
        in
        let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_barriers_aarch64" with
@@ -2408,7 +2410,9 @@ let codegen_tests = [
        in
        let ir = Llvm.string_of_llvalue fn in
        Alcotest.(check int) "three dsb calls" 3
-         (count_substring ir "llvm.aarch64.dsb"));
+         (count_substring ir "llvm.aarch64.dsb");
+       Alcotest.(check bool) "event wait" true (contains_substring ir "wfe");
+       Alcotest.(check bool) "event notify" true (contains_substring ir "sev"));
 
   Alcotest.test_case
     "indexed struct field assignment codegens through the element address"
@@ -3229,7 +3233,8 @@ let codegen_tests = [
     (fun () ->
        expect_type_error "compiler builtin" "fn dma_publish() {}" ();
        expect_type_error "compiler builtin" "extern fn device_fence();" ();
-       expect_type_error "compiler builtin" "fn signal_fence() {}" ());
+       expect_type_error "compiler builtin" "fn signal_fence() {}" ();
+       expect_type_error "compiler builtin" "fn interrupt_wait() {}" ());
 
   Alcotest.test_case "DMA cache builtins require pointer and usize length" `Quick
     (fun () ->

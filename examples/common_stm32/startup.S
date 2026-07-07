@@ -186,6 +186,7 @@ Reset_Handler:
 
     bl      uart_init
     bl      main
+    bl      uart_shutdown
 
     /* No semihosting host is attached in normal operation on real
        hardware, so unlike the QEMU version there is nothing to exit to:
@@ -249,7 +250,7 @@ SysTick_Handler:
     .weak   USART1_IRQHandler
     .thumb_func
 USART1_IRQHandler:
-    bx      lr
+    b       uart_tx_isr
 
     .weak   ETH_IRQHandler
     .thumb_func

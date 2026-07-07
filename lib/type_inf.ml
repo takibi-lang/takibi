@@ -853,7 +853,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       raise (TypeError (e.loc,
         "struct literal requires a type annotation: `let mut x: Name = {...}`"))
 
-  | Call (("dma_publish" | "dma_consume" | "device_fence" | "signal_fence") as fname, args) ->
+  | Call (("dma_publish" | "dma_consume" | "device_fence" | "signal_fence"
+          | "interrupt_wait" | "interrupt_notify") as fname, args) ->
       (* Target-independent DMA/device ordering builtins. Their hardware
          lowering is selected in llvm_gen.ml; keeping them zero-argument
          makes the synchronization boundary explicit and prevents a runtime
@@ -1779,7 +1780,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let check_reserved_fn loc name =
     if name = "slice_copy" || name = "slice_eq" || name = "min" || name = "max"
        || name = "dma_publish" || name = "dma_consume" || name = "device_fence"
-       || name = "signal_fence"
+       || name = "signal_fence" || name = "interrupt_wait" || name = "interrupt_notify"
        || name = "dma_prepare_tx" || name = "dma_prepare_rx" || name = "dma_finish_rx" then
       raise (TypeError (loc,
         Printf.sprintf "'%s' is a compiler builtin and cannot be redefined" name))
