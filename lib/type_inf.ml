@@ -602,20 +602,18 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       let vt = lookup e.loc id tyenv in
       let lo_t = infer_expr senv eenv tyenv fenv lo_e in
       let hi_t = infer_expr senv eenv tyenv fenv hi_e in
-      (* require_integer accepts a bound of ANY integer type, refined or
-         bare: a TRefinedInt bound (e.g. `ihl: {20..<21 as u8}`) passes via
-         its own base-agnostic subtyping into TI32; a bare non-i32 type
-         (e.g. a for-loop counter over `s.len`, itself TUsize) passes
-         because require_integer checks "is this some integer type", not
-         "does this unify with TI32 specifically" -- a plain
-         `unify_at lo_e.loc lo_t TI32` would reject the bare case outright
-         (only TRefinedInt has a leniency rule into TI32; a bare TUsize/
-         TU8/etc. has none). Found via two real regressions: a u8-based
-         refined bound (canon_ty'd first, which strips the leniency) and,
-         later, a bare usize bound from a generalized for-loop counter --
-         see CLAUDE.md's "Refinement Numerical Type" section. *)
-      require_integer lo_e.loc lo_t;
-      require_integer hi_e.loc hi_t;
+      (* A subslice range is indexing too: array/slice bounds use usize,
+         matching single-element Index/AssignIndex and the runtime length's
+         own type. Raw-pointer slice construction remains a low-level
+         offset operation and keeps accepting any integer base. *)
+      (match repr vt with
+       | TArray _ | TSlice _ ->
+           require_usize_index lo_e.loc lo_t;
+           require_usize_index hi_e.loc hi_t
+       | TPtr _ ->
+           require_integer lo_e.loc lo_t;
+           require_integer hi_e.loc hi_t
+       | _ -> ());
       let const_bounds = (Const_env.bound_value lo_e, Const_env.bound_value hi_e) in
       (* Static value range of a bound: a compile-time constant k is {k..<k+1};
          a refined-typed expression contributes its own range. Sync rule:

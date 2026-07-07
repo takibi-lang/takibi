@@ -1705,6 +1705,20 @@ let infer_tests = [
     (expect_type_error "must be usize"
        "fn f(i: i32) i32 { let mut arr: [i32; 4]; return arr[i]; }");
 
+  Alcotest.test_case "dynamic i32 array assignment index is a compile error" `Quick
+    (expect_type_error "must be usize"
+       "fn f(i: i32) { let mut arr: [i32; 4]; arr[i] = 1; }");
+
+  Alcotest.test_case "dynamic i32 subslice bound is a compile error (must be usize)" `Quick
+    (expect_type_error "must be usize"
+       "fn f(s: []u8, lo: i32, hi: i32) -> []u8 { return s[lo..<hi]; }");
+
+  Alcotest.test_case "raw-pointer slice bounds remain integer offsets" `Quick
+    (expect_ok
+       "fn f(p: *u8, lo: i32, hi: i32) -> []u8 {
+          return unsafe { p[lo..<hi] };
+        }");
+
   Alcotest.test_case "constant OOB on global array is a compile error" `Quick
     (expect_type_error "out of bounds"
        "let mut buf: [u8; 8]; fn f() u8 { return buf[8]; }");
@@ -2693,7 +2707,7 @@ let codegen_tests = [
     (expect_trap_sites 0
        "fn ftp3_rx(frame: [u8; 1514..], len: i32) -> i32 {
           if (len >= 54 && len <= 1514) {
-            let rx = frame[0..<len];
+            let rx = frame[0..<len as {54..<1515 as usize}];
             return read_ftp3(rx);
           }
           return 0;
@@ -2707,7 +2721,7 @@ let codegen_tests = [
      recorded trap site, result minimum 0" `Quick
     (expect_trap_sites 2
        "fn ftp3_checked(s: []u8, a: i32, b: i32) -> u8 {
-          let m = s[a..<b];
+          let m = s[a as usize..<b as usize];
           return m[0];
         }");
 
@@ -2777,7 +2791,7 @@ let codegen_tests = [
      (lo <= hi holds syntactically regardless of off's value) and yields \
      exact length 3" `Quick
     (expect_trap_sites 0
-       "fn ftp4_same_base(frame: [u8; 1514..], off: {54..<95}) -> u8 {
+       "fn ftp4_same_base(frame: [u8; 1514..], off: {54..<95 as usize}) -> u8 {
           let d = frame[off..<off + 3];
           return d[2];
         }");
@@ -2787,7 +2801,7 @@ let codegen_tests = [
      form (memory safety needs off's range), but the exact length 3 \
      survives the check and proves the inner index (exactly one site)" `Quick
     (expect_trap_sites 1
-       "fn ftp4_same_base_dyn(frame: [u8; 1514..], off: i32) -> u8 {
+       "fn ftp4_same_base_dyn(frame: [u8; 1514..], off: usize) -> u8 {
           let d = frame[off..<off + 3];
           return d[2];
         }");
@@ -2807,21 +2821,21 @@ let codegen_tests = [
           for x in s { t = t + (x as i32); }
           return t;
         }
-        fn ftp4_probe(frame: [u8; 1514..], len: i32) -> i32 {
+        fn ftp4_probe(frame: [u8; 1514..], len: usize) -> i32 {
           if (len >= 54 && len <= 1514) {
             let ip = frame[14..<34];
-            let ihl: i32 = ((ip[0] as i32) & 0x0f) * 4;
+            let ihl: usize = ((ip[0] as usize) & 0x0f) * 4;
             if (ihl == 20) {
-              let total_len: i32 = ftp4_read16(ip[2..<4]);
-              let ip_len_in_frame: i32 = len - 14;
+              let total_len: usize = ftp4_read16(ip[2..<4]) as usize;
+              let ip_len_in_frame: usize = len - 14;
               if (total_len <= ip_len_in_frame && total_len >= ihl) {
-                let tcp_len: i32 = total_len - ihl;
+                let tcp_len: usize = total_len - ihl;
                 let seg = frame[34..<34 + tcp_len];
                 let tcp = frame[34..<54];
-                let doff: i32 = (tcp[12] as i32) >> 4;
+                let doff: usize = (tcp[12] as usize) >> 4;
                 if (tcp_len >= 20 && doff >= 5 && doff <= 15) {
-                  let tcp_hdr_len: i32 = doff * 4;
-                  let data_off: i32 = 34 + tcp_hdr_len;
+                  let tcp_hdr_len: usize = doff * 4;
+                  let data_off: usize = 34 + tcp_hdr_len;
                   let d3 = frame[data_off..<data_off + 3];
                   if (d3[0] == 'G' as u8) {
                     return ftp4_sum(seg);
@@ -2844,8 +2858,8 @@ let codegen_tests = [
      callee's [u8; 8..] parameter -- zero trap sites end to end" `Quick
     (expect_trap_sites 0
        "fn ftp4b_use(s: [u8; 8..]) -> u8 { return s[0]; }
-        fn ftp4b_intersect(frame: [u8; 1514..], a: {20..<1501}, ihl: {20..<21}) -> u8 {
-          let icmp_len: i32 = a - ihl;         // Sub(refined,refined) -> {0..<1481}
+        fn ftp4b_intersect(frame: [u8; 1514..], a: {20..<1501 as usize}, ihl: {20..<21 as usize}) -> u8 {
+          let icmp_len: usize = a - ihl;         // Sub(refined,refined) -> {0..<1481}
           if (icmp_len >= 8 && icmp_len <= 1480) {
             let seg = frame[34..<34 + icmp_len];  // must get minimum >= 8
             return ftp4b_use(seg);
@@ -2941,11 +2955,11 @@ let codegen_tests = [
           for b in s { sum = sum + (b as i32); }
           return sum;
         }
-        fn ftp4c_chained(pkt: [u8; 40..], raw_ihl: i32, tcp_len: i32) -> i32 {
-          let ihl: i32 = min(raw_ihl & 0x3f, 20);   // {0..<21}
-          let room: i32 = 40 - ihl;                  // {20..<41} via Sub
-          let tl: i32 = max(tcp_len, 0);              // >= 0, upper unknown
-          let tlc: i32 = min(tl, room);                // {0..<41}
+        fn ftp4c_chained(pkt: [u8; 40..], raw_ihl: usize, tcp_len: usize) -> i32 {
+          let ihl: usize = min(raw_ihl & 0x3f, 20);   // {0..<21}
+          let room: usize = 40 - ihl;                  // {20..<41} via Sub
+          let tl: usize = max(tcp_len, 0);              // >= 0, upper unknown
+          let tlc: usize = min(tl, room);                // {0..<41}
           return ftp4c_checksum(pkt[ihl..<ihl + tlc], 0);
         }");
 
@@ -3001,11 +3015,11 @@ let codegen_tests = [
           for b in s { sum = sum + (b as i32); }
           return sum;
         }
-        fn ftp4c1_unsafe_slice(pkt: [u8; 40..], raw_ihl: i32, tcp_len: i32) -> i32 {
-          let ihl: i32 = min(raw_ihl & 0x3f, 20);
-          let room: i32 = 40 - ihl;
-          let tl: i32 = max(tcp_len, 0);
-          let tlc: i32 = min(tl, room);
+        fn ftp4c1_unsafe_slice(pkt: [u8; 40..], raw_ihl: usize, tcp_len: usize) -> i32 {
+          let ihl: usize = min(raw_ihl & 0x3f, 20);
+          let room: usize = 40 - ihl;
+          let tl: usize = max(tcp_len, 0);
+          let tlc: usize = min(tl, room);
           return ftp4c1_checksum(unsafe { pkt[ihl..<ihl + tlc] }, 0);
         }");
 
@@ -3019,11 +3033,11 @@ let codegen_tests = [
           for b in s { sum = sum + (b as i32); }
           return sum;
         }
-        fn ftp4c1_checked_slice(pkt: [u8; 40..], raw_ihl: i32, tcp_len: i32) -> i32 {
-          let ihl: i32 = min(raw_ihl & 0x3f, 20);
-          let room: i32 = 40 - ihl;
-          let tl: i32 = max(tcp_len, 0);
-          let tlc: i32 = min(tl, room);
+        fn ftp4c1_checked_slice(pkt: [u8; 40..], raw_ihl: usize, tcp_len: usize) -> i32 {
+          let ihl: usize = min(raw_ihl & 0x3f, 20);
+          let room: usize = 40 - ihl;
+          let tl: usize = max(tcp_len, 0);
+          let tlc: usize = min(tl, room);
           return ftp4c1_checksum2(pkt[ihl..<ihl + tlc], 0);
         }");
 
@@ -3043,13 +3057,13 @@ let codegen_tests = [
      mechanism itself" `Quick
     (fun () ->
        expect_trap_sites 0
-         "fn ftp4c1_clamp_sub(base: [u8; 1514..], a: {0..<100}, b: {20..<61}) -> []u8 {
-            let clamped: i32 = max(a - b, 0);   // now honestly {0..<80}
+         "fn ftp4c1_clamp_sub(base: [u8; 1514..], a: {0..<100 as usize}, b: {20..<61 as usize}) -> []u8 {
+            let clamped: usize = max(a - b, 0);   // now honestly {0..<80}
             return base[b..<b + clamped];
           }" ();
        expect_trap_sites 1
-         "fn ftp4c1_no_clamp(base: [u8; 1514..], a: {0..<100}, b: {20..<61}) -> []u8 {
-            let raw: i32 = a - b;               // spuriously negative lower bound
+         "fn ftp4c1_no_clamp(base: [u8; 1514..], a: {0..<100 as usize}, b: {20..<61 as usize}) -> []u8 {
+            let raw = a - b;                      // spuriously negative lower bound
             return base[b..<b + raw];
           }" ());
 
@@ -3137,6 +3151,26 @@ let codegen_tests = [
          Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
        in
        Alcotest.(check int) "usize_bitwidth" 64 (Llvm_gen.usize_bitwidth ()));
+
+  Alcotest.test_case
+    "array GEP preserves a usize index at i64 width on AArch64"
+    `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "let mut codegen_wide_index_buf: [u8; 4];
+          fn codegen_wide_index(i: usize) -> u8 {
+            return codegen_wide_index_buf[i];
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_wide_index" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_wide_index was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check bool) "no narrowing truncation" false
+         (contains_substring ir "trunc i64");
+       Alcotest.(check bool) "GEP uses i64 index" true
+         (contains_substring ir "getelementptr" && contains_substring ir "i64"));
 
   Alcotest.test_case
     "usize is 32-bit on a 32-bit-pointer target (thumbv7em-none-eabi / \
@@ -3471,7 +3505,7 @@ let codegen_tests = [
     (expect_trap_sites 0
        "fn refnum_slice_bound_u8(pkt: [u8; 20..]) -> []u8 {
           let ihl: u8 = min((pkt[0] & 0x0f) * 4, 20);
-          return pkt[0..<ihl];
+          return pkt[0..<ihl as {0..<21 as usize}];
         }");
 
   Alcotest.test_case

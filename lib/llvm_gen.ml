@@ -680,28 +680,8 @@ let rec coerce v (dst : Ast.type_expr) =
   | TypeRefined (_, _, base) -> coerce v base
   | TypeSlice _ -> v   (* fat values are never numerically coerced *)
 
-(* Widen an integer value to i32 so arithmetic stays uniform (legacy helper for TypeInt/TypeChar).
-   Does NOT touch pointer values. Also truncates an i64 source down to i32
-   (rather than only ever widening): type_inf.ml's SliceOf case requires
-   its bounds to unify with plain TI32, so under normal type-checked
-   programs this function is never actually asked to narrow -- the one
-   exception is a bare 64-bit-wide IntLit (see gen_expr's IntLit case),
-   which type-checks as TI32 via its usual context-driven unification but
-   codegens to an i64 llvalue when the literal doesn't fit i32. A truncate
-   here is the well-defined, if unusual, outcome for that case (e.g. a
-   nonsensical huge literal used directly as a subslice bound) rather than
-   an invalid build_zext (narrowing via "zero-extend") or a crash.
-   Scope note: this is ONLY used by SliceOf's gen_bound now -- Index/
-   AssignIndex use to_index_width below instead (see its comment for why
-   this one's i32-only target was a real bug for those two). *)
-let to_i32 v =
-  let ty = type_of v in
-  if ty = i32_type context || ty = pointer_type context then v
-  else if ty = i64_type context then build_trunc v (i32_type context) "trunc" builder
-  else build_zext v (i32_type context) "zext" builder
-
 (* Normalize an index/offset value to usize width for use as a GEP index --
-   replaces to_i32 at Index/AssignIndex call sites, which unconditionally
+   used by Index/AssignIndex/SliceOf. The old path unconditionally
    truncated to i32 even for a genuinely i64/usize-typed index. On a
    64-bit target (usize = i64) that silently discarded the index's upper
    bits, corrupting any access into a buffer needing more than 2^31
@@ -712,9 +692,7 @@ let to_i32 v =
    the value's own signedness -- e.g. a signed i8/i16 pointer offset, still
    permitted for raw-pointer p[i] indexing even though array/slice
    indexing is now usize-only, see type_inf.ml's require_usize_index);
-   only truncates when the source is genuinely WIDER than usize, the same
-   well-defined "nonsensical huge literal" fallback to_i32 already used
-   for its own i64->i32 case above. *)
+   only truncates when the source is genuinely WIDER than usize. *)
 let to_index_width ~is_signed v =
   let ty = type_of v in
   let target = usize_lltype () in
@@ -1089,11 +1067,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         if ll1 = i64_type context && ll2 = i32_type context then
           let v2w = if is_unsigned ty1 then build_zext v2 (i64_type context) "wi" builder
                     else build_sext v2 (i64_type context) "wi" builder in
-          (ty1, v1, ty1, v2w)
+          (ty1, v1, ty2, v2w)
         else if ll2 = i64_type context && ll1 = i32_type context then
           let v1w = if is_unsigned ty2 then build_zext v1 (i64_type context) "wi" builder
                     else build_sext v1 (i64_type context) "wi" builder in
-          (ty2, v1w, ty2, v2)
+          (ty1, v1w, ty2, v2)
         else
           (ty1, v1, ty2, v2)
       in
@@ -1533,7 +1511,6 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          together. Codegen re-verifies rather than trusting type_inf
          blindly: an array subslice that fails the proof here is a BUG
          error, not silent emission. *)
-      let usz = usize_lltype () in
       let gen_bound be =
         let (bty_raw, bv) = gen_expr locals be in
         let bty = match be.desc with
@@ -1545,7 +1522,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
           | Some k -> Some (k, k + 1)
           | None -> (match bty with TypeRefined (a, b, _) -> Some (a, b) | _ -> None)
         in
-        (to_i32 bv, range)
+        (to_index_width ~is_signed:(not (is_unsigned bty_raw)) bv, range)
       in
       (* Same-base rule: s[v ..< v + w] has lo <= hi and a guaranteed
          length >= lower(w), for ANY w with a known non-negative lower
@@ -1622,9 +1599,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       in
       let finish_sub elem_ty base_ptr lo_v hi_v min_len =
         let ep = build_gep (ltype_of_ast elem_ty) base_ptr [| lo_v |] "sub_ptr" builder in
-        let len32 = build_sub hi_v lo_v "sub_len" builder in
-        let len = if type_of len32 = usz then len32
-                  else build_zext len32 usz "zext" builder in
+        let len = build_sub hi_v lo_v "sub_len" builder in
         (TypeSlice (elem_ty, min_len), make_slice ep len)
       in
       let sub_of_slice elem_ty min_len fat =
@@ -1648,13 +1623,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
             record_trap e.loc (Printf.sprintf
               "subslice bounds check remains: bounds cannot prove range \
                {0..<%d} (the slice's compile-time minimum length)" min_len);
-            let i32z = const_int (i32_type context) 0 in
-            let neg  = build_icmp Icmp.Slt lo_v i32z "ss_neg" builder in
-            let inv  = build_icmp Icmp.Sgt lo_v hi_v "ss_inv" builder in
-            let hi_w = if type_of hi_v = usz then hi_v
-                       else build_zext hi_v usz "zext" builder in
-            let over = build_icmp Icmp.Ugt hi_w (slice_len fat) "ss_over" builder in
-            let bad  = build_or (build_or neg inv "ss_bad0" builder) over "ss_bad" builder in
+            let inv  = build_icmp Icmp.Ugt lo_v hi_v "ss_inv" builder in
+            let over = build_icmp Icmp.Ugt hi_v (slice_len fat) "ss_over" builder in
+            let bad  = build_or inv over "ss_bad" builder in
             emit_trap_when bad ~bad_name:"ss_trap" ~ok_name:"ss_ok"
           end
         end;
@@ -1670,9 +1641,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         let arr_ll = array_type (ltype_of_ast elem_ty) n in
         let zero = const_int (i32_type context) 0 in
         let ep = build_in_bounds_gep arr_ll arr_ptr [| zero; lo_v |] "sub_ptr" builder in
-        let len32 = build_sub hi_v lo_v "sub_len" builder in
-        let len = if type_of len32 = usz then len32
-                  else build_zext len32 usz "zext" builder in
+        let len = build_sub hi_v lo_v "sub_len" builder in
         (TypeSlice (elem_ty, guaranteed_min lo_r hi_r), make_slice ep len)
       in
       let sub_of_ptr elem_ty base_ptr =

@@ -107,6 +107,7 @@ let ETH_DESC_SIZE:  i32 = 16; // ETH_DESC_WORDS * 4
 let ETH_RX_DESC_COUNT: i32 = 4;
 let ETH_TX_DESC_COUNT: i32 = 4;
 let ETH_BUF_SIZE: i32 = 1536; // max 1518-byte Ethernet frame, rounded up
+let ETH_BUF_SIZE_USIZE: usize = 1536; // memory indexing counterpart
 
 let ETH_RDES0_OWN: u32 = 0x80000000;
 let ETH_RDES1_RCH: u32 = 0x4000;
@@ -365,8 +366,8 @@ fn net_rx_frame() -> [u8; 1514..] {
     // constant-fold" limitation), so a computed bound here would lose the
     // range min() needs. Update this literal if ETH_RX_DESC_COUNT
     // (declared above) ever changes.
-    let idx: i32 = max(min(eth_rx_cur, 3), 0);
-    let offset: i32 = idx * ETH_BUF_SIZE;
+    let idx: usize = max(min(eth_rx_cur, 3), 0) as {0..<4 as usize};
+    let offset: usize = idx * ETH_BUF_SIZE_USIZE;
     return eth_rx_bufs[offset..<offset + 1514];
 }
 

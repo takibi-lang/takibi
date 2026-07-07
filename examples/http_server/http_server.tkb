@@ -221,7 +221,8 @@ fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     ip[IP_TTL] = 64 as u8;
     write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                inet_checksum(ip[0..<ihl as {20..<21 as usize}]));
 
     let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
     write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
@@ -248,7 +249,8 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     ip[IP_TTL] = 64 as u8;
     write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                inet_checksum(ip[0..<ihl as {20..<21 as usize}]));
 
     let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
     write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
@@ -292,12 +294,13 @@ fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
         // refined_v's range), so plain arithmetic on `n` below is fully
         // visible to codegen with no gap.
         let n: i32 = len;
+        let n_idx: usize = n as {0..<701 as usize};
 
         slice_copy(eth[0..<6], eth[6..<12]);
         slice_copy(eth[6..<12], our_mac as []u8);
 
         let ip      = eth[14..<34];
-        let tcp_seg = eth[34..<54 + n];
+        let tcp_seg = eth[34..<54 + n_idx];
 
         slice_copy(ip[IP_DST..<20],     ip[IP_SRC..<IP_DST]);
         slice_copy(ip[IP_SRC..<IP_DST], our_ip as []u8);
@@ -310,7 +313,8 @@ fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
         // computation, only for the `ip[0..<ihl]` slice bound below.
         write_u16be(ip[IP_TOTAL_LEN..<4], (ihl as i32) + 20 + n);
         write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-        write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
+        write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                    inet_checksum(ip[0..<ihl as {20..<21 as usize}]));
 
         let client_port: u16 = read_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
         write_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
@@ -390,7 +394,7 @@ fn main() {
 
                     if (total_len <= ip_len_in_frame && total_len >= ihl &&
                         ip[IP_PROTOCOL] == PROTO_TCP &&
-                        inet_checksum(ip[0..<ihl]) == 0) {
+                        inet_checksum(ip[0..<ihl as {20..<21 as usize}]) == 0) {
                         if (slice_eq(ip[IP_DST..<20], our_ip as []u8)) {
                             let tcp:     [u8; 20..] = frame[34..<54];
                             let tcp_len: u16 = total_len - ihl;
@@ -435,7 +439,9 @@ fn main() {
                                 pseudo[9] = PROTO_TCP;
                                 write_u16be(pseudo[10..<12], tcp_len);
                                 let sum: i32 = checksum_add(pseudo as []u8, 0);
-                                let tcp_seg = frame[34..<34 + tcp_len];
+                                let tcp_len_idx: usize =
+                                    tcp_len as {0..<1481 as usize};
+                                let tcp_seg = frame[34..<34 + tcp_len_idx];
 
                                 if (checksum_fold(checksum_add(tcp_seg, sum)) == 0) {
                                     let dst_port: u16 = read_u16be(tcp[TCP_DST_PORT..<TCP_SEQ]) as u16;
@@ -484,6 +490,8 @@ fn main() {
                                                     // comment for why this doesn't change behavior).
                                                     let data_len: u16 = max(tcp_len - tcp_hdr_len, 0);
                                                     let data_off: u16 = 34 + tcp_hdr_len;
+                                                    let data_off_idx: usize =
+                                                        data_off as {54..<95 as usize};
                                                     if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
                                                         conn_rcv_nxt = conn_rcv_nxt + 1;
                                                         build_fin_ack(frame, ihl);
@@ -498,7 +506,7 @@ fn main() {
                                                         // rule: data_off's exact value is
                                                         // unconstrained, but the length (3)
                                                         // and lo<=hi are syntactic facts.
-                                                        let data3 = frame[data_off..<data_off + 3];
+                                                        let data3 = frame[data_off_idx..<data_off_idx + 3];
                                                         if (data3[0] == 'G' as u8 &&
                                                             data3[1] == 'E' as u8 &&
                                                             data3[2] == 'T' as u8) {
