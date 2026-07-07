@@ -118,7 +118,7 @@ let TCP_URGENT:      usize = 18;
 // natural width -- unlike the pure offset constants above, which are
 // usize (array/slice indices are usize-only, see CLAUDE.md's "Array/Slice
 // Indices Must Be usize" section). ihl/total_len/tcp_len/tcp_hdr_len/data_len/data_off
-// below are ALSO u16-based: `len` (net_poll_rx()'s deliberately
+// below are ALSO u16-based: `len` (net_rx_acquire()'s deliberately
 // -unconstrained i32 device-reported length) is bridged into u16 with
 // ONE explicit refined cast right after its own range is established,
 // and everything downstream inherits u16-based refined ranges through
@@ -348,7 +348,7 @@ fn main() {
         uart_puts("http_server: ready\r\n");
 
         while (1) {
-            let len: i32 = net_poll_rx();
+            let len: i32 = net_rx_acquire();
             let mut should_tx: i32 = 0;
             let mut tx_len: i32 = 0;
             let frame = net_rx_frame();   // [u8; 1514..] capacity view

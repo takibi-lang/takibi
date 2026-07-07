@@ -274,7 +274,7 @@ fn eth_tx_ring_init() {
 // established (see phy_init()'s comment -- practically should not happen on
 // a live point-to-point link).
 //
-// Named net_init/net_poll_rx/net_rx_buf/net_transmit/net_rx_release/
+// Named net_init/net_rx_acquire/net_rx_frame/net_transmit/net_rx_release/
 // net_read_mac (not eth_*) so this file exposes the exact same driver API
 // as examples/common/virtio_mmio.tkb -- see that file's matching functions.
 // This is what lets application-level examples (net_echo.tkb, etc.) be a
@@ -320,8 +320,9 @@ fn net_init() -> i32 {
 // Returns the received frame length if the current RX descriptor has been
 // filled in by the DMA (OWN bit clear), or 0 if nothing is ready yet.
 // Non-zero return must be followed by exactly one net_rx_release() call
-// once the caller is done reading net_rx_buf().
-fn net_poll_rx() -> i32 {
+// once the caller is done reading net_rx_frame(). This is the DMA
+// ownership-acquire boundary; application code does not issue barriers.
+fn net_rx_acquire() -> i32 {
     let desc: *EthDmaDesc = rx_desc_ptr(eth_rx_cur);
     let word0: u32 = desc.word0;
     if ((word0 & ETH_RDES0_OWN) != 0) {
@@ -333,10 +334,6 @@ fn net_poll_rx() -> i32 {
     // whether OWN happens to be clear -- unlike an i32 (arithmetic) shift,
     // which would sign-extend if this were ever reached with bit 31 set.
     return ((completed_word0 >> ETH_RDES0_FL_SHIFT) & ETH_RDES_FL_MASK) as i32;
-}
-
-fn net_rx_buf() -> *u8 {
-    return eth_rx_bufs + eth_rx_cur * ETH_BUF_SIZE;
 }
 
 // Capacity view of the current RX buffer as a slice: 1514 bytes = the
@@ -370,8 +367,8 @@ fn net_rx_frame() -> [u8; 1514..] {
 
 
 // Hands the current RX descriptor back to the DMA and advances the ring.
-// Must only be called after a non-zero net_poll_rx() and once the caller no
-// longer needs net_rx_buf()'s contents (e.g. after net_transmit() has
+// Must only be called after a non-zero net_rx_acquire() and once the caller no
+// longer needs net_rx_frame()'s contents (e.g. after net_transmit() has
 // already copied/sent them out, since net_transmit() is synchronous).
 fn net_rx_release() {
     let desc: *EthDmaDesc = rx_desc_ptr(eth_rx_cur);

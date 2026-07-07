@@ -188,7 +188,7 @@ examples/
                      scheduler_init/_disable/_rearm_tick (uniform names shared with
                      common_stm32/scheduler.tkb, see the STM32 section below)
     sync.tkb      -- extern fn sem_wait/sem_post, mutex_lock/unlock, cond_wait/signal
-    virtio_mmio.tkb -- net_init/net_poll_rx/net_rx_buf/net_transmit/net_rx_release/net_read_mac
+    virtio_mmio.tkb -- net_init/net_rx_acquire/net_rx_frame/net_transmit/net_rx_release/net_read_mac
                      (uniform API shared with common_stm32/eth.tkb, see "STM32 Ethernet" above)
     netconfig.tkb -- OUR_IP (QEMU-side static IP for arp_reply/icmp_echo/tcp_echo),
                      HTTP_SERVER_IP (http_server's own IP, see "Network config" below)
@@ -208,7 +208,7 @@ examples/
     scheduler.tkb -- setup_task_stack, task_exit_stub, systick_init/_disable, pendsv_trigger,
                      scheduler_init/_disable/_rearm_tick (see the STM32 section below)
     sem_asm.S     -- atomic semaphore: sem_wait/sem_post (ldrex/strex/dmb)
-    eth.tkb       -- net_init/net_poll_rx/net_rx_buf/net_transmit/net_rx_release/net_read_mac
+    eth.tkb       -- net_init/net_rx_acquire/net_rx_frame/net_transmit/net_rx_release/net_read_mac
                      (real Ethernet MAC/PHY/DMA driver, see "STM32 Ethernet" above)
     netconfig.tkb -- OUR_MAC/OUR_IP (STM32 board's fixed network identity),
                      HTTP_SERVER_IP (same value as OUR_IP here, see "Network config" below)
@@ -911,7 +911,7 @@ correctly regardless of the AST type tag. Regression test:
 all**: the explicit-base syntax unblocks `ihl: {20..<21 as base}` as a
 parameter, but `tcp_parse.tkb`/`icmp_echo.tkb`/`tcp_echo.tkb`/
 `http_server.tkb` all compare `ihl`/`total_len`/`tcp_len` against
-quantities ultimately derived from `net_poll_rx()`'s return value (`len`),
+quantities ultimately derived from `net_rx_acquire()`'s return value (`len`),
 which is deliberately-unconstrained `i32` (external, device-reported,
 per this project's `i32 = unknown range` convention). Casting a value to
 a plain (non-refined-syntax) target type ALWAYS discards any refined
@@ -1009,7 +1009,7 @@ regressions after both bugs above were fixed.
 
 The three networked files above still had `ihl` and everything derived
 from it declared `i32`, entangled via `total_len <= ip_len_in_frame`
-(`ip_len_in_frame = len - 14`) with `net_poll_rx()`'s deliberately
+(`ip_len_in_frame = len - 14`) with `net_rx_acquire()`'s deliberately
 -unconstrained `i32` device-reported length. This entanglement is real,
 but not an unliftable wall: `len` itself, once narrowed by its own
 `if (len >= N && len <= 1514)` check, CAN be bridged into `u16` with the
@@ -2989,13 +2989,13 @@ the normal (always `-g`-free) build outputs.
   descriptor ring design are documented in that file's header comment).
 
   **Unified driver API**: `eth.tkb` and `examples/common/virtio_mmio.tkb` both expose the identical
-  `net_init() -> i32` / `net_poll_rx() -> i32` / `net_rx_buf() -> *u8` / `net_transmit(buf, len)` /
+  `net_init() -> i32` / `net_rx_acquire() -> i32` / `net_rx_frame() -> [u8; 1514..]` / `net_transmit(buf, len)` /
   `net_rx_release()` / `net_read_mac(mac_out)` functions -- mirroring how `uart.tkb`/`print.tkb` already
   share identical signatures across `examples/common/` and `examples/common_stm32/`. This means
   `examples/net_echo/net_echo.tkb` (and the other four) are a *single* file compiled against either
   backend depending on target, not a QEMU version plus a hand-maintained `_stm32.tkb` copy -- see that
   file's header comment. Descriptor rings, RX/TX buffers, and virtio's 10-byte `virtio_net_hdr` framing
-  are all hidden inside each backend; application code never sees them. `virtio_mmio.tkb`'s `net_poll_rx()`
+  are all hidden inside each backend; application code never sees them. `virtio_mmio.tkb`'s `net_rx_acquire()`
   now polls the used ring directly instead of waiting on a GIC-routed interrupt (removing
   `gic_init`/`gic_enable_virtio_irq`/`virtio_irq_handler`/`virtio_irq_flag`/every app's identical
   `irq_dispatch` entirely) -- QEMU's virtio-mmio device works identically either way, and
@@ -3329,7 +3329,7 @@ virtio protocol itself.
   the base address from whatever slot it actually finds, so a future QEMU
   version placing the device elsewhere doesn't break it. (Earlier versions
   of this driver also derived a GIC IRQ number from the discovered slot
-  for interrupt-driven RX; `net_poll_rx()` now polls the used ring
+  for interrupt-driven RX; `net_rx_acquire()` now polls the used ring
   directly instead, so no IRQ/GIC involvement remains here at all -- see
   the STM32 Ethernet entry above for why and when that changed.)
 - **The vring uses typed views over one shared backing allocation.**

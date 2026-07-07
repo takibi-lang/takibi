@@ -30,7 +30,7 @@
 // WIRE-WIDTH TYPES (see CLAUDE.md's "Refinement Numerical Type" /
 // "Explicit-Base {lo..<hi as base}" sections): ihl/total_len/
 // ip_len_in_frame/icmp_len are all u16-based, not i32 -- `len` (from
-// net_poll_rx(), a deliberately-unconstrained i32 device-reported length)
+// net_rx_acquire(), a deliberately-unconstrained i32 device-reported length)
 // is bridged into the u16 world with ONE explicit refined cast
 // (`len_n as {42..<1515 as u16}`) right after the length is validated;
 // everything downstream inherits u16-based refined ranges through
@@ -98,7 +98,7 @@ fn main() {
         uart_puts("icmp_echo: ready\r\n");
 
         while (1) {
-            let len: i32 = net_poll_rx();
+            let len: i32 = net_rx_acquire();
 
             // 14 (eth) + 20 (min IPv4) + 8 (min ICMP) = 42
             if (len >= 42 && len <= 1514) {

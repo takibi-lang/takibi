@@ -41,7 +41,7 @@ fn main() {
         uart_puts("arp_reply: ready\r\n");
 
         while (1) {
-            let len: i32 = net_poll_rx();
+            let len: i32 = net_rx_acquire();
 
             // 14 (eth) + 28 (arp) = 42
             if (len >= 42) {

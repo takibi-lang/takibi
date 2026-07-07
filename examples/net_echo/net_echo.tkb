@@ -7,7 +7,7 @@
 //
 // Single shared file for both targets: examples/common/virtio_mmio.tkb
 // (QEMU/virtio-net) and examples/common_stm32/eth.tkb (STM32 real
-// Ethernet MAC) expose the identical net_init/net_poll_rx/net_rx_buf/
+// Ethernet MAC) expose the identical net_init/net_rx_acquire/net_rx_frame/
 // net_transmit/net_rx_release API, so this file never needs to know which
 // one it's linked against -- same principle as uart.tkb/print.tkb already
 // being shared verbatim across both targets.
@@ -34,12 +34,12 @@ fn main() {
         uart_puts("net_echo: ready\r\n");
 
         while (1) {
-            let len: i32 = net_poll_rx();
+            let len: i32 = net_rx_acquire();
             // A valid Ethernet frame needs at least a 12-byte dst+src MAC pair.
             if (len >= 12) {
-                let frame: *u8 = net_rx_buf();
-                swap_mac(frame);
-                net_transmit(frame, len);
+                let frame = net_rx_frame();
+                swap_mac(frame as *u8);
+                net_transmit(frame as *u8, len);
             }
             if (len > 0) {
                 net_rx_release();

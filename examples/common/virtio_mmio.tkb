@@ -11,7 +11,7 @@
 // could be removed in a future release -- see CLAUDE.md's virtio-net
 // section for the tradeoff.
 //
-// Exposes the same net_init/net_poll_rx/net_rx_buf/net_transmit/
+// Exposes the same net_init/net_rx_acquire/net_rx_frame/net_transmit/
 // net_rx_release/net_read_mac API as examples/common_stm32/eth.tkb, so
 // application-level examples (net_echo.tkb, etc.) are a single shared
 // .tkb file for both the QEMU/virtio-net and STM32/real-MAC targets --
@@ -20,7 +20,7 @@
 // RX/TX buffers, and the virtio_net_hdr framing detail are all internal to
 // this file; the app only ever sees a plain Ethernet frame.
 //
-// Polling-only, matching eth.tkb: net_poll_rx() checks the used ring
+// Polling-only, matching eth.tkb: net_rx_acquire() checks the used ring
 // directly instead of waiting on a GIC-routed interrupt. QEMU's
 // virtio-mmio device works identically either way (the interrupt is a
 // notification convenience, not a requirement -- the driver polling
@@ -206,7 +206,7 @@ fn avail_publish(queue_mem: *u8, new_idx: isize) {
 }
 
 // These three read memory the device writes asynchronously via DMA, and
-// used_idx_get() in particular is polled directly in net_poll_rx()'s
+// used_idx_get() in particular is polled directly in net_rx_acquire()'s
 // per-call check. A non-volatile load here is exactly the "LLVM may hoist
 // a global/memory load out of a tight loop" hazard called out in
 // CLAUDE.md's "Volatile Reads of Global Variables" section (the compiler
@@ -258,8 +258,10 @@ fn net_init() -> i32 {
 
 // Returns the received frame length (virtio_net_hdr already excluded) if a
 // frame is ready, 0 otherwise. Non-zero return must be followed by exactly
-// one net_rx_release() call once the caller is done reading net_rx_buf().
-fn net_poll_rx() -> i32 {
+// one net_rx_release() call once the caller is done reading net_rx_frame().
+// This is the DMA ownership-acquire boundary; application code must not
+// perform the dma_consume() operation itself.
+fn net_rx_acquire() -> i32 {
     if (rx_used_seen == used_idx_get(rx_queue_mem as *u8)) {
         return 0;
     }
@@ -270,11 +272,6 @@ fn net_poll_rx() -> i32 {
     return frame_total_len - 10; // hide the 10-byte virtio_net_hdr from the caller
 }
 
-fn net_rx_buf() -> *u8 {
-    let buf_off: isize = net_last_rx_desc_idx * RX_BUF_SIZE;
-    return rx_bufs + buf_off + 10;
-}
-
 // Capacity view of the current RX buffer as a slice: 1514 bytes = the
 // maximum Ethernet frame this stack handles (the physical buffer is
 // larger, so the assertion below is true by construction -- that evidence
@@ -282,7 +279,7 @@ fn net_rx_buf() -> *u8 {
 // 0..1514 fails the narrowing check and the frame is dropped.
 //
 // net_last_rx_desc_idx is itself a DEVICE-REPORTED value
-// (used_ring_get_id() in net_poll_rx(), never previously validated
+// (used_ring_get_id() in net_rx_acquire(), never previously validated
 // against QNUM) -- clamping it here closes that gap too, and lets the
 // capacity view be constructed directly from rx_bufs (a real array) with
 // no unsafe pointer assertion at all: min/max prove the clamped index is
@@ -304,8 +301,8 @@ fn net_rx_frame() -> [u8; 1514..] {
 
 
 // Hands the current RX descriptor back to the device and advances the
-// ring. Must only be called after a non-zero net_poll_rx() and once the
-// caller no longer needs net_rx_buf()'s contents.
+// ring. Must only be called after a non-zero net_rx_acquire() and once the
+// caller no longer needs net_rx_frame()'s contents.
 fn net_rx_release() {
     let rx_slot: isize = rx_avail_idx % QNUM;
     avail_ring_set(rx_queue_mem as *u8, rx_slot, net_last_rx_desc_idx);
@@ -316,7 +313,7 @@ fn net_rx_release() {
     rx_used_seen = rx_used_seen + 1;
 }
 
-// Transmits len bytes starting at buf (buf must be net_rx_buf()'s own
+// Transmits len bytes starting at buf (buf must be net_rx_frame()'s own
 // pointer -- every example replies in place, reusing the RX buffer, so
 // `buf - 10` always lands back on the true DMA buffer start where the
 // virtio_net_hdr the device expects on TX too still sits, untouched since
