@@ -1,10 +1,10 @@
 // Ring buffer demo. RingBuf struct wraps head/tail with % cap.
 struct RingBuf {
     buf:  *i32;
-    head: i32;
-    tail: i32;
+    head: isize;
+    tail: isize;
     size: i32;
-    cap:  i32;
+    cap:  isize;
 }
 
 fn rb_push(rb: *RingBuf, val: i32) {
@@ -50,4 +50,3 @@ fn main() {
     uart_print_uint(rb_pop(&rb));
     uart_puts("\r\n");
 }
-

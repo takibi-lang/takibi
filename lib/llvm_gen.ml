@@ -701,9 +701,9 @@ let rec coerce v (dst : Ast.type_expr) =
    address space, even though no actual bare-metal target this project
    ships for has anywhere near enough RAM to trigger it today.
    is_signed controls sext vs zext when WIDENING a narrower type (matches
-   the value's own signedness -- e.g. a signed i8/i16 pointer offset, still
-   permitted for raw-pointer p[i] indexing even though array/slice
-   indexing is now usize-only, see type_inf.ml's require_usize_index);
+   the value's own signedness. Raw-pointer offsets are isize and array/slice
+   indices are usize, so both already have target pointer width after type
+   checking; the extension logic remains useful for literal/intermediate IR;
    only truncates when the source is genuinely WIDER than usize. *)
 let to_index_width ~is_signed v =
   let ty = type_of v in

@@ -1,12 +1,11 @@
 // for i: T in lo..<hi loop: i gets type {lo..<hi}, so array bounds checks
 // are elided. The explicit `: usize` annotation is required here for two
 // reasons now: neither fill()'s nor print_buf()'s body ever passes `i` to
-// anything with a concrete type of its own (`buf[i]` doesn't pin it by
-// itself -- Index accepts any integer type in general; `'A' + i as u8` and
-// `uart_putc` don't either), so without SOME annotation this would be a
-// compile error asking for one; AND array/slice indexing is usize-only
-// (see CLAUDE.md's "Array/Slice Indices Must Be usize"), so `usize` is
-// specifically the base that satisfies buf[i] directly, with no cast.
+// anything with a concrete type of its own except `buf[i]`; array/slice
+// indexing pins an unresolved counter to usize. The annotation documents
+// that requirement explicitly and keeps the loop's range proof attached to
+// the usize base with no cast (see CLAUDE.md's
+// "Array and Slice Indices Must Be usize").
 //
 // Difference in generated machine code (AArch64 AEL1 bare-metal):
 //
@@ -47,4 +46,3 @@ fn main() -> i32 {
     print_buf();
     return 0;
 }
-

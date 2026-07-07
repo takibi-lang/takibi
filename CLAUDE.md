@@ -45,8 +45,9 @@ The finished form of code is when index ranges are pinned at the type level usin
   - Arithmetic (`+` `-` `*` `/` `%`), comparison (`<` `>` `<=` `>=` `==` `!=`)
   - Array/slice indexing and subslice bounds use `usize` exclusively:
     `arr[i]`, `slice[i]`, and `slice[lo..<hi]`. Bare literals infer as
-    `usize` in these positions. Raw-pointer indexing/slicing remains a
-    low-level integer-offset operation and accepts any integer base.
+    `usize` in these positions. Raw-pointer indexing and raw-pointer slice
+    bounds use `isize` exclusively because they are signed pointer
+    displacements; bare literals infer as `isize` in those positions.
   - Pointer arithmetic uses element counts of type `isize` exclusively: `ptr + offset`, `offset + ptr`, and `ptr - offset` return the same pointer type. An `i32`/`usize` variable is rejected unless explicitly cast to `isize`; bare integer literals remain context-polymorphic and infer as `isize` here. `end - begin` requires matching pointee types and returns the element distance as `isize` (`Llvm.build_ptrdiff`). As with all raw-pointer operations, the compiler does not prove that both pointers belong to the same allocation.
   - Unary minus (`-expr`) -- desugared to `BinOp(Sub, IntLit 0, expr)` in the parser
   - Logical OR (`||`)
@@ -1190,9 +1191,10 @@ refined value with another base must cross the boundary explicitly, e.g.
 runtime bounds check.
 
 Raw pointers are intentionally separate: `p[i]` and
-`unsafe { p[lo..<hi] }` remain low-level offset operations accepting any
-integer type. They carry no array-length guarantee, so forcing their offset
-to `usize` would conflate safe container indexing with pointer arithmetic.
+`unsafe { p[lo..<hi] }` are low-level signed displacement operations and
+require `isize` (or a refined integer whose own base is `isize`). Bare
+literals infer as `isize`; an already-typed `i32`/`usize` value needs an
+explicit cast. They carry no array-length guarantee or runtime bounds check.
 
 Codegen normalizes every GEP index to the target's pointer width through
 `to_index_width`: i64 on AArch64 and i32 on Cortex-M. The former `to_i32`
@@ -1598,6 +1600,7 @@ and pointer differences.
 Pointer arithmetic accepts no legacy `i32` exception:
 - `*T + isize`, `isize + *T`, and `*T - isize` operate in units of `T` and return `*T`.
 - `*T - *T` requires identical pointee types and returns an element count as `isize` via `Llvm.build_ptrdiff`.
+- `p[i]`, `p[i] = value`, and raw-pointer slice bounds require `isize`, matching signed pointer displacement semantics.
 - `*T + *T` is always a type error.
 - A bare literal in pointer arithmetic infers as `isize`; an already-typed `i32`/`usize` value requires an explicit `as isize` cast.
 

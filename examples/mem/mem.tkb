@@ -1,18 +1,18 @@
 // memset / memcpy demo using a stack-allocated [u8; 5] array.
 
-fn my_memset(p: *u8, val: u8, n: i32) {
+fn my_memset(p: *u8, val: u8, n: isize) {
     for i in 0..<n {
         p[i] = val;
     }
 }
 
-fn my_memcpy(dst: *u8, src: *u8, n: i32) {
+fn my_memcpy(dst: *u8, src: *u8, n: isize) {
     for i in 0..<n {
         dst[i] = src[i];
     }
 }
 
-fn print_buf(p: *u8, n: i32) {
+fn print_buf(p: *u8, n: isize) {
     for i in 0..<n {
         uart_putc(p[i]);
     }
@@ -36,4 +36,3 @@ fn main() {
 
     uart_puts("done\r\n");
 }
-

@@ -1595,7 +1595,7 @@ let infer_tests = [
        "fn f(n: i32) { n[0] = 1; }");
 
   Alcotest.test_case "array write with deref index buf[*ptr]=val type-checks" `Quick
-    (expect_ok "fn f(buf: *i32, tail: *i32) { buf[*tail] = 42; }");
+    (expect_ok "fn f(buf: *i32, tail: *isize) { buf[*tail] = 42; }");
 
   Alcotest.test_case "addrof mut var as function argument type-checks" `Quick
     (expect_ok "fn push(tail: *i32) {}
@@ -1640,7 +1640,7 @@ let infer_tests = [
 
   Alcotest.test_case "pointer-indexed struct field write type-checks" `Quick
     (expect_ok "struct PointerPoint { x: i32; }
-                fn pointer_indexed_write(p: *PointerPoint, i: i32) {
+                fn pointer_indexed_write(p: *PointerPoint, i: isize) {
                   p[i].x = 3;
                 }");
 
@@ -1789,9 +1789,30 @@ let infer_tests = [
     (expect_type_error "must be usize"
        "fn f(s: []u8, lo: i32, hi: i32) -> []u8 { return s[lo..<hi]; }");
 
-  Alcotest.test_case "raw-pointer slice bounds remain integer offsets" `Quick
+  Alcotest.test_case "raw-pointer slice bounds use isize offsets" `Quick
     (expect_ok
-       "fn f(p: *u8, lo: i32, hi: i32) -> []u8 {
+       "fn f(p: *u8, lo: isize, hi: isize) -> []u8 {
+          return unsafe { p[lo..<hi] };
+        }");
+
+  Alcotest.test_case "raw-pointer index rejects i32 offsets" `Quick
+    (expect_type_error "must be isize"
+       "fn f(p: *u8, i: i32) -> u8 { return p[i]; }");
+
+  Alcotest.test_case "raw-pointer index rejects usize offsets" `Quick
+    (expect_type_error "must be isize"
+       "fn f(p: *u8, i: usize) -> u8 { return p[i]; }");
+
+  Alcotest.test_case "raw-pointer assignment rejects i32 offsets" `Quick
+    (expect_type_error "must be isize"
+       "fn f(p: *u8, i: i32) { p[i] = 1 as u8; }");
+
+  Alcotest.test_case "raw-pointer negative index infers as isize" `Quick
+    (expect_ok "fn f(p: *u8) -> u8 { return p[-1]; }");
+
+  Alcotest.test_case "raw-pointer slice rejects non-isize bounds" `Quick
+    (expect_type_error "must be isize"
+       "fn f(p: *u8, lo: usize, hi: usize) -> []u8 {
           return unsafe { p[lo..<hi] };
         }");
 
@@ -1863,7 +1884,7 @@ let infer_tests = [
     (expect_ok "fn f(i: {0..<8}) i32 { return i; }");
 
   Alcotest.test_case "TypeRefined can be used as array index" `Quick
-    (expect_ok "fn f(i: {0..<8}, p: *u8) { p[i] = 'A'; }");
+    (expect_ok "fn f(i: {0..<8 as isize}, p: *u8) { p[i] = 'A'; }");
 
   (* -- Step 3.3c: Range propagation ------------------------------------ *)
 
@@ -2329,7 +2350,7 @@ let codegen_tests = [
     (fun () ->
        let _ = gen_codegen
          "struct CodegenIoReg { value: u32; }
-          fn codegen_io_indexed_store(p: *io CodegenIoReg, i: i32) {
+          fn codegen_io_indexed_store(p: *io CodegenIoReg, i: isize) {
             p[i].value = 1 as u32;
           }"
        in

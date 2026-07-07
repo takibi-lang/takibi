@@ -106,9 +106,7 @@ let require_integer loc t =
       Printf.sprintf "expected an integer type, got '%s'" (to_string t)))
 
 (* Require an [T; N]/slice INDEX be usize specifically -- narrower than
-   require_integer (still used for raw-pointer p[i] indexing, which stays
-   permissive; see CLAUDE.md's "Array/Slice Indices Must Be usize"
-   section for why the line is drawn there and not at pointers too).
+   require_integer.
    Mirrors Rust/Zig, where array/slice Index is only ever implemented for
    usize: a value proven safe in some OTHER base (u8, i32, ...) must be
    re-typed or explicitly cast, even though the compiler can see it fits.
@@ -147,6 +145,27 @@ let require_usize_index loc t =
       (match repr base with
        | TUsize -> ()
        | TVar { contents = Unbound _ } -> unify_at loc base TUsize
+       | _ -> reject ())
+  | _ -> reject ()
+
+(* Raw-pointer indexing is signed pointer displacement, matching ptr +/-
+   offset and Rust's offset(isize): negative indices are meaningful and the
+   operand must have the target's pointer width. Bare literals are pinned to
+   isize; values in another integer base require an explicit cast. *)
+let require_isize_offset loc t =
+  let reject () =
+    raise (TypeError (loc, Printf.sprintf
+      "raw-pointer index/offset must be isize, got '%s' -- declare the value \
+       as isize or cast it explicitly with `as isize`"
+      (to_string t)))
+  in
+  match repr t with
+  | TIsize -> ()
+  | TVar { contents = Unbound _ } -> unify_at loc t TIsize
+  | TRefinedInt (_, _, base) ->
+      (match repr base with
+       | TIsize -> ()
+       | TVar { contents = Unbound _ } -> unify_at loc base TIsize
        | _ -> reject ())
   | _ -> reject ()
 
@@ -602,8 +621,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            elem  (* runtime length; codegen elides the check
                     only when idx's range fits the MINIMUM *)
        | TPtr   elem      ->
-           require_integer idx.loc it;  (* pointer indexing stays permissive -- see
-                                            require_usize_index's own comment *)
+           require_isize_offset idx.loc it;
            strip_io elem     (* *T or *io T -> returns T (bounds unknown) *)
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt))))
@@ -614,15 +632,15 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       let hi_t = infer_expr senv eenv tyenv fenv hi_e in
       (* A subslice range is indexing too: array/slice bounds use usize,
          matching single-element Index/AssignIndex and the runtime length's
-         own type. Raw-pointer slice construction remains a low-level
-         offset operation and keeps accepting any integer base. *)
+         own type. Raw-pointer slice construction uses signed pointer-sized
+         displacements, matching pointer arithmetic and pointer indexing. *)
       (match repr vt with
        | TArray _ | TSlice _ ->
            require_usize_index lo_e.loc lo_t;
            require_usize_index hi_e.loc hi_t
        | TPtr _ ->
-           require_integer lo_e.loc lo_t;
-           require_integer hi_e.loc hi_t
+           require_isize_offset lo_e.loc lo_t;
+           require_isize_offset hi_e.loc hi_t
        | _ -> ());
       let const_bounds = (Const_env.bound_value lo_e, Const_env.bound_value hi_e) in
       (* Static value range of a bound: a compile-time constant k is {k..<k+1};
@@ -1213,7 +1231,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
              | _ -> ());
             elem
         | TSlice (elem, _) -> require_usize_index idx.loc it; elem
-        | TPtr   elem      -> require_integer idx.loc it; strip_io elem
+        | TPtr   elem      -> require_isize_offset idx.loc it; strip_io elem
         | _ -> raise (TypeError (s.loc,
             Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))
       in

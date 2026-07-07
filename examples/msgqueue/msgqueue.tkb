@@ -9,8 +9,8 @@
 // SysTick_Handler are simpler than preempt's: just re-arm/switch).
 
 struct SchedState {
-    task_count:   i32;
-    current_task: i32;
+    task_count:   isize;
+    current_task: isize;
     tcb_sp:       [usize; 3];
 }
 
@@ -19,10 +19,10 @@ struct MsgQueue {
     not_empty: io i32;
     not_full:  io i32;
     buf:       [i32; 8];
-    head:      i32;
-    tail:      i32;
-    count:     i32;
-    cap:       i32;
+    head:      isize;
+    tail:      isize;
+    count:     isize;
+    cap:       isize;
 }
 
 let mut mq: MsgQueue = {1, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 4};

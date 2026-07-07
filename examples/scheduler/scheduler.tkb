@@ -3,8 +3,8 @@
 // Each task runs 3 steps and then calls task_finish to decrement sched.active.
 struct Scheduler {
     tasks:      [fn() -> void; 8];
-    task_count: i32;
-    cur:        i32;
+    task_count: isize;
+    cur:        isize;
     active:     i32;
 }
 
@@ -65,4 +65,3 @@ fn main() {
     scheduler_run();
     uart_puts("done\r\n");
 }
-

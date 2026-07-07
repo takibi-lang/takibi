@@ -19,8 +19,8 @@
 // doesn't) behind matching names, so main() needs no per-platform branch at all.
 
 struct SchedState {
-    task_count:   i32;
-    current_task: i32;
+    task_count:   isize;
+    current_task: isize;
     max_ticks:    i32;
     total_ticks:  i32;
     done:         io i32;

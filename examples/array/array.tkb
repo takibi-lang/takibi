@@ -1,7 +1,7 @@
 // Demo of array read/write and decay to pointer on function call.
 // Declares a [u8; 8] array, reads/writes via arr[i]=v / arr[i], and passes it to fill() as *u8.
 
-fn fill(p: *u8, val: u8, n: i32) {
+fn fill(p: *u8, val: u8, n: isize) {
     for i in 0..<n {
         p[i] = val;
     }
@@ -36,4 +36,3 @@ fn main() {
 
     uart_puts("done\r\n");
 }
-

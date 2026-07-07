@@ -31,7 +31,7 @@ struct IrqTable {
 let mut irq_tbl: IrqTable;
 let mut irq_done: io i32;
 
-fn register_irq(id: i32, h: fn() -> void) {
+fn register_irq(id: isize, h: fn() -> void) {
     let t: *fn() -> void = irq_tbl.handlers;
     t[id] = h;
 }
@@ -52,8 +52,9 @@ fn irq_dispatch(frame_sp: i32) -> i32 {
                                           // requires i32, see lib/type_inf.ml's
                                           // Index case).
     if (id < 64) {
+        let index: isize = id as isize;
         let t: *fn() -> void = irq_tbl.handlers;
-        let h: fn() -> void = t[id];
+        let h: fn() -> void = t[index];
         h();
         *(gic.cpu_eoir) = id as u32;
     }

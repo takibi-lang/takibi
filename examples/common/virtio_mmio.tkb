@@ -164,8 +164,9 @@ fn virtio_driver_ok() {
 // Reads the device's 6-byte MAC out of Config space. VIRTIO_NET_F_MAC is
 // always acked in virtio_negotiate() now, so this is always meaningful.
 fn virtio_net_read_mac(mac_out: *u8) {
-    for i in 0..<6 {
-        let p: *io u8 = (virtio_base + VIRTIO_CONFIG_MAC_OFFSET + i) as *io u8;
+    for i: isize in 0..<6 {
+        let p: *io u8 = (virtio_base + VIRTIO_CONFIG_MAC_OFFSET
+            + (i as i32)) as *io u8;
         mac_out[i] = *p;
     }
 }

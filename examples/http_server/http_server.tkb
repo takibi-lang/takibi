@@ -164,13 +164,13 @@ let mut html_body: [u8; 512];
 // reopening the overflow this check exists to prevent.
 let HTTP_MAX_PAYLOAD: i32 = 700;
 
-fn build_html_body() -> i32 {
+fn build_html_body() -> isize {
     let mut len: isize = 0;
     len = len + copy_str(html_body + len,
         "<!DOCTYPE html><html><head><title>Takibi</title><style>body{background:#111;color:#eee;font-family:monospace;text-align:center;padding-top:8%}h1{color:#ff9944}p{color:#999}.count{color:#6cf}</style></head><body><h1>Hello from Takibi!</h1><p>Served by a TCP/IP stack written from scratch<br>in the takibi language, running bare-metal.</p><p>Request <span class='count'>#");
     len = len + write_udec(html_body + len, request_count);
     len = len + copy_str(html_body + len, "</span> since boot.</p></body></html>");
-    return len as i32;
+    return len;
 }
 
 // Rewrites a received ARP request into a reply in place. Only called
@@ -274,16 +274,16 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
 // the current fixed page; the caller must check for this and drop the
 // reply rather than transmit, see main()'s use of the return value).
 fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
-    let body_len: i32 = build_html_body();
+    let body_len: isize = build_html_body();
 
     let payload: *u8 = (eth as *u8) + 54;
     let mut len: isize = 0;
     len = len + copy_str(payload + len,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=us-ascii\r\nContent-Length: ");
-    len = len + write_udec(payload + len, body_len);
+    len = len + write_udec(payload + len, body_len as i32);
     len = len + copy_str(payload + len, "\r\nConnection: close\r\n\r\n");
     bytes_copy(payload + len, html_body as *u8, body_len);
-    len = len + (body_len as isize);
+    len = len + body_len;
 
     let wire_len: i32 = len as i32;
     if (len >= 0 && len <= (HTTP_MAX_PAYLOAD as isize)
