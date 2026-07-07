@@ -135,12 +135,14 @@ let HTTP_PORT: u16 = 80;
 
 let OUR_ISN: u32 = 0x00001000;
 
-let TCP_LISTEN:      i32 = 0;
-let TCP_SYN_RCVD:    i32 = 1;
-let TCP_ESTABLISHED: i32 = 2;
-let TCP_LAST_ACK:    i32 = 3;
+enum ConnState: u8 {
+    Listen;
+    SynRcvd;
+    Established;
+    LastAck;
+}
 
-let mut conn_state:       i32 = 0; // TCP_LISTEN
+let mut conn_state:       ConnState = ConnState::Listen;
 let mut conn_remote_ip:   [u8; 4];
 let mut conn_remote_port: u16 = 0;
 let mut conn_snd_nxt:     u32 = 0;
@@ -163,12 +165,12 @@ let mut html_body: [u8; 512];
 let HTTP_MAX_PAYLOAD: i32 = 700;
 
 fn build_html_body() -> i32 {
-    let mut len: i32 = 0;
+    let mut len: isize = 0;
     len = len + copy_str(html_body + len,
         "<!DOCTYPE html><html><head><title>Takibi</title><style>body{background:#111;color:#eee;font-family:monospace;text-align:center;padding-top:8%}h1{color:#ff9944}p{color:#999}.count{color:#6cf}</style></head><body><h1>Hello from Takibi!</h1><p>Served by a TCP/IP stack written from scratch<br>in the takibi language, running bare-metal.</p><p>Request <span class='count'>#");
     len = len + write_udec(html_body + len, request_count);
     len = len + copy_str(html_body + len, "</span> since boot.</p></body></html>");
-    return len;
+    return len as i32;
 }
 
 // Rewrites a received ARP request into a reply in place. Only called
@@ -275,15 +277,17 @@ fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
     let body_len: i32 = build_html_body();
 
     let payload: *u8 = (eth as *u8) + 54;
-    let mut len: i32 = 0;
+    let mut len: isize = 0;
     len = len + copy_str(payload + len,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=us-ascii\r\nContent-Length: ");
     len = len + write_udec(payload + len, body_len);
     len = len + copy_str(payload + len, "\r\nConnection: close\r\n\r\n");
     bytes_copy(payload + len, html_body as *u8, body_len);
-    len = len + body_len;
+    len = len + (body_len as isize);
 
-    if (len >= 0 && len <= HTTP_MAX_PAYLOAD) {
+    let wire_len: i32 = len as i32;
+    if (len >= 0 && len <= (HTTP_MAX_PAYLOAD as isize)
+        && wire_len >= 0 && wire_len <= HTTP_MAX_PAYLOAD) {
         // Snapshot the narrowed range into an IMMUTABLE local: codegen's
         // if-narrowing for a MUTABLE variable (narrowing_ctx) is only
         // consulted when the variable is used directly as an index/bound,
@@ -293,7 +297,7 @@ fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
         // B-plan mechanism that makes `let x: i32 = refined_v;` keep
         // refined_v's range), so plain arithmetic on `n` below is fully
         // visible to codegen with no gap.
-        let n: i32 = len;
+        let n: i32 = wire_len;
         let n_idx: usize = n as {0..<701 as usize};
 
         slice_copy(eth[0..<6], eth[6..<12]);
@@ -451,7 +455,7 @@ fn main() {
                                     let ack:      u32 = read_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET]) as u32;
 
                                     if (dst_port == HTTP_PORT) {
-                                        if (conn_state == TCP_LISTEN) {
+                                        if (conn_state == ConnState::Listen) {
                                             if ((flags & TCP_FLAG_SYN) != 0) {
                                                 slice_copy(conn_remote_ip as []u8, ip[IP_SRC..<IP_DST]);
                                                 conn_remote_port = src_port;
@@ -461,20 +465,20 @@ fn main() {
                                                 build_syn_ack(frame, ihl);
                                                 should_tx = 1;
                                                 tx_len = 14 + ihl + 20;
-                                                conn_state = TCP_SYN_RCVD;
+                                                conn_state = ConnState::SynRcvd;
                                             }
                                         } else {
                                             if (slice_eq(ip[IP_SRC..<IP_DST], conn_remote_ip as []u8) &&
                                                 src_port == conn_remote_port) {
                                                 if ((flags & TCP_FLAG_RST) != 0) {
-                                                    conn_state = TCP_LISTEN;
-                                                } else if (conn_state == TCP_SYN_RCVD) {
+                                                    conn_state = ConnState::Listen;
+                                                } else if (conn_state == ConnState::SynRcvd) {
                                                     if ((flags & TCP_FLAG_ACK) != 0 &&
                                                         (flags & TCP_FLAG_SYN) == 0 &&
                                                         ack == conn_snd_nxt && seq == conn_rcv_nxt) {
-                                                        conn_state = TCP_ESTABLISHED;
+                                                        conn_state = ConnState::Established;
                                                     }
-                                                } else if (conn_state == TCP_ESTABLISHED) {
+                                                } else if (conn_state == ConnState::Established) {
                                                     // data_len/data_off are u16 (matching tcp_len/
                                                     // tcp_hdr_len's base), needed for the `data_off + 3`
                                                     // same-base subslice below to type-check.
@@ -498,7 +502,7 @@ fn main() {
                                                         should_tx = 1;
                                                         tx_len = 14 + ihl + 20;
                                                         conn_snd_nxt = conn_snd_nxt + 1;
-                                                        conn_state = TCP_LAST_ACK;
+                                                        conn_state = ConnState::LastAck;
                                                     } else if (data_len >= 3 &&
                                                                (flags & TCP_FLAG_ACK) != 0 &&
                                                                seq == conn_rcv_nxt) {
@@ -531,7 +535,7 @@ fn main() {
                                                                 // VALUE computation.
                                                                 tx_len = 14 + (ihl as i32) + 20 + payload_len;
                                                                 conn_snd_nxt = conn_snd_nxt + (payload_len as u32) + 1;
-                                                                conn_state = TCP_LAST_ACK;
+                                                                conn_state = ConnState::LastAck;
                                                             }
                                                             // else: page unexpectedly exceeded
                                                             // HTTP_MAX_PAYLOAD (never happens
@@ -541,9 +545,9 @@ fn main() {
                                                             // stack can retry.
                                                         }
                                                     }
-                                                } else if (conn_state == TCP_LAST_ACK) {
+                                                } else if (conn_state == ConnState::LastAck) {
                                                     if ((flags & TCP_FLAG_ACK) != 0 && ack == conn_snd_nxt) {
-                                                        conn_state = TCP_LISTEN;
+                                                        conn_state = ConnState::Listen;
                                                     }
                                                 }
                                             }

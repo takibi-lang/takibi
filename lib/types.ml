@@ -4,6 +4,7 @@ type ty =
   | TBool
   | TI8  | TI16 | TI32 | TI64
   | TU8  | TU16 | TU32 | TU64
+  | TIsize  (* pointer-sized signed integer *)
   | TUsize  (* pointer-sized unsigned integer; maps to i64 on 64-bit targets *)
   | TVoid
   | TFun of ty list * ty  (* param types, return type *)
@@ -15,7 +16,7 @@ type ty =
   | TRefinedInt of int * int * ty
     (* {lo..<hi} -- refined int with known range; lo <= x < hi. Third field
        is the underlying primitive type this range is tied to (always one
-       of TI8/TI16/TI32/TI64/TU8/TU16/TU32/TU64/TUsize -- enforced by
+       of TI8/TI16/TI32/TI64/TU8/TU16/TU32/TU64/TIsize/TUsize -- enforced by
        construction discipline, not the type system, same as this
        project's other "shape guaranteed by construction site, not by a
        dedicated variant" conventions, e.g. Const_env's bare-IntLit-only
@@ -61,6 +62,7 @@ let rec to_string t =
   | TBool -> "bool"
   | TI8   -> "i8"  | TI16 -> "i16" | TI32 -> "i32" | TI64 -> "i64"
   | TU8   -> "u8"  | TU16 -> "u16" | TU32 -> "u32" | TU64 -> "u64"
+  | TIsize -> "isize"
   | TUsize -> "usize"
   | TVoid -> "void"
   | TPtr t -> Printf.sprintf "*%s" (to_string t)   (* *io T prints as "*io T" via TPtr(TIo T) *)
@@ -96,6 +98,7 @@ let rec unify t1 t2 =
   | TBool, TBool | TVoid, TVoid -> ()
   | TI8,  TI8  | TI16, TI16 | TI32, TI32 | TI64, TI64 -> ()
   | TU8,  TU8  | TU16, TU16 | TU32, TU32 | TU64, TU64 -> ()
+  | TIsize, TIsize -> ()
   | TUsize, TUsize -> ()
   | TPtr t1, TPtr t2 -> unify t1 t2
   | TIo  t1, TIo  t2 -> unify t1 t2
@@ -134,6 +137,7 @@ let rec unify t1 t2 =
      only: refined -> wider type is OK; unproven wider type -> refined is NG. *)
   | TRefinedInt _, TI32 -> ()                           (* i32: always fits (i32 range) *)
   | TRefinedInt _, TI64  -> ()                          (* i64: i32 range always fits *)
+  | TRefinedInt _, TIsize -> ()                         (* surface ranges fit signed 32-bit *)
   | TRefinedInt (lo, hi, _), TU8  when lo >= 0 && hi <= 256     -> ()
   | TRefinedInt (lo, hi, _), TU16 when lo >= 0 && hi <= 65536   -> ()
   | TRefinedInt (lo, _, _),  TU32 when lo >= 0                  -> ()   (* practical: hi < 2^31 *)
@@ -176,6 +180,7 @@ let rec of_ast = function
   | Ast.TypeBool     -> TBool
   | Ast.TypeI8       -> TI8  | Ast.TypeI16 -> TI16 | Ast.TypeI32 -> TI32 | Ast.TypeI64 -> TI64
   | Ast.TypeU8       -> TU8  | Ast.TypeU16 -> TU16 | Ast.TypeU32 -> TU32 | Ast.TypeU64 -> TU64
+  | Ast.TypeIsize    -> TIsize
   | Ast.TypeUsize    -> TUsize
   | Ast.TypeVoid     -> TVoid
   | Ast.TypePtr   t      -> TPtr   (of_ast t)
@@ -203,6 +208,7 @@ let rec to_ast t =
   | TBool -> Ast.TypeBool
   | TI8   -> Ast.TypeI8  | TI16 -> Ast.TypeI16 | TI32 -> Ast.TypeI32 | TI64 -> Ast.TypeI64
   | TU8   -> Ast.TypeU8  | TU16 -> Ast.TypeU16 | TU32 -> Ast.TypeU32 | TU64 -> Ast.TypeU64
+  | TIsize -> Ast.TypeIsize
   | TUsize -> Ast.TypeUsize
   | TVoid -> Ast.TypeVoid
   | TPtr   t      -> Ast.TypePtr  (to_ast t)

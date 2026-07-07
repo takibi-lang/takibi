@@ -23,7 +23,7 @@ The finished form of code is when index ranges are pinned at the type level usin
 ## Language Specification (Current)
 
 - File extension: `.tkb`
-- Types: `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `usize` (pointer-sized unsigned integer; LLVM width follows the target's actual pointer size via `Llvm_gen.usize_lltype ()` -- `i64` on AArch64/RISC-V64, `i32` on Cortex-M/STM32; falls back to `i64` when no target machine is configured, e.g. in unit tests), `void`, `*T` (regular pointer, non-volatile), `io T` (volatile-qualified value type), `*io T` (volatile MMIO pointer = `TypePtr(TypeIo T)`), `[T; N]` (array type; decays to pointer in function arguments), `fn(T...) -> R` (function pointer type), `Name` (named struct type), `{lo..<hi}` (refined integer subtype)
+- Types: `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `isize`, `usize` (`isize`/`usize` are pointer-sized signed/unsigned integers; LLVM width follows the target's actual pointer size via DataLayout -- 64 bits on AArch64/RISC-V64, 32 bits on Cortex-M/STM32; falls back to 64 bits when no target machine is configured, e.g. in unit tests), `void`, `*T` (regular pointer, non-volatile), `io T` (volatile-qualified value type), `*io T` (volatile MMIO pointer = `TypePtr(TypeIo T)`), `[T; N]` (array type; decays to pointer in function arguments), `fn(T...) -> R` (function pointer type), `Name` (named struct type), `{lo..<hi}` (refined integer subtype)
 - Statements:
   - `let x = e` / `let x: T = e` -- immutable variable declaration (initial value required, no reassignment)
   - `let mut x = e` / `let mut x: T = e` -- mutable variable declaration (reassignment allowed)
@@ -47,14 +47,14 @@ The finished form of code is when index ranges are pinned at the type level usin
     `arr[i]`, `slice[i]`, and `slice[lo..<hi]`. Bare literals infer as
     `usize` in these positions. Raw-pointer indexing/slicing remains a
     low-level integer-offset operation and accepts any integer base.
-  - Pointer arithmetic: `ptr + i32` / `ptr - i32` -> same pointer type (emitted as GEP). `i32 + ptr` also works. Codegen uses `build_neg + GEP`
+  - Pointer arithmetic uses element counts of type `isize` exclusively: `ptr + offset`, `offset + ptr`, and `ptr - offset` return the same pointer type. An `i32`/`usize` variable is rejected unless explicitly cast to `isize`; bare integer literals remain context-polymorphic and infer as `isize` here. `end - begin` requires matching pointee types and returns the element distance as `isize` (`Llvm.build_ptrdiff`). As with all raw-pointer operations, the compiler does not prove that both pointers belong to the same allocation.
   - Unary minus (`-expr`) -- desugared to `BinOp(Sub, IntLit 0, expr)` in the parser
   - Logical OR (`||`)
   - Bitwise NOT: `~expr` -- flips all bits; returns the same type as the operand (desugars to LLVM `not`)
   - Bitwise ops (`>>` right shift (arithmetic for signed types, logical for unsigned), `<<` left shift, `&` bitwise AND, `|` bitwise OR, `^` bitwise XOR) -- both operands must be the same integer type
   - Compound assignments: `+=` `-=` `|=` `&=` `^=` `<<=` `>>=` -- desugared in the parser to `x = x op rhs`; supported on all five LHS forms (variable, `*p`, `*(expr)`, `arr[i]`, `s.field`)
   - Function call, `*expr` (dereference), `&ident` (address-of)
-  - `expr as T` -- explicit type cast (i32 <-> u8, `*T` -> i32, `*T` -> `*U`). Lower precedence than arithmetic, so `a + b as u8` = `(a + b) as u8`
+  - `expr as T` -- explicit type cast (integer widths including `isize`/`usize`, `*T` -> `usize`, `usize` -> `*T`, `*T` -> `*U`). Lower precedence than arithmetic, so `a + b as u8` = `(a + b) as u8`
   - `sizeof(T)` -- compile-time size of `T` in bytes, type `usize` (fixed, not a polymorphic literal; compare/assign against other integer types requires an explicit `as` cast, e.g. `len >= sizeof(Hdr)` requires `len: usize`). Reads the same LLVM DataLayout used for struct tail-padding, so `sizeof` on a `packed` or `align(N)` struct reflects the true in-memory size.
 - `struct Name { field: type; ... }` -- struct type definition (top-level only; fields are primitive types, pointer types, or other struct types)
 - `let mut s: Name;` -- struct variable declaration (local/global, always treated as mutable)
@@ -591,7 +591,7 @@ became refined, so a subsequent i32/i64 BinOp width-sync could pick
 type_expr` (`ast.ml`) -- `{lo..<hi}` is no longer implicitly i32, it is
 "a value of type `base` known to be in `[lo, hi)`", where `base` is
 (by convention, not enforced by the type system itself) one of
-i8/i16/i32/i64/u8/u16/u32/u64/usize.
+i8/i16/i32/i64/u8/u16/u32/u64/isize/usize.
 
 **Files changed** (the same "sync rule" duplication pattern as every
 other feature in this file -- type_inf.ml and llvm_gen.ml were changed in
@@ -619,7 +619,7 @@ lockstep, verified by re-running the full test suite after each pass):
    previously-latent bugs in Mul/Bor/Bxor/Shr/Shl's fallback cases, see
    below), BinOp Add/Sub/Mul/Band/Mod, `narrow_from_cond`/`collect_bounds`
    (generalized from matching only `TI32` locals to matching any of
-   i8/i16/i32/i64/u8/u16/u32/u64/usize), the `Let` "proofs survive weaker
+   i8/i16/i32/i64/u8/u16/u32/u64/isize/usize), the `Let` "proofs survive weaker
    annotations" `bind_ty` check, min/max (see its own paragraph below).
    `For` loop counters originally stayed `base = TI32` always regardless
    of the bounds' own type -- since generalized to follow the bounds
@@ -867,7 +867,7 @@ actually fails).
 **Files**: `lib/parser.mly` (`int_base_type_expr`, `base_bound_range`,
 `check_refined_base_range`, the new `{lo..<hi as base}` production),
 `lib/llvm_gen.ml` (`widen_load`'s `TypeRefined` case), `test/
-test_takibi.ml` (parser tests for all 9 bases + the out-of-range/
+test_takibi.ml` (parser tests for all 10 bases + the out-of-range/
 no-upper-bound-for-64-bit cases, codegen regression tests for the
 `widen_load` bug). This unblocks, but does not itself perform, the
 protocol-examples rewrite described above -- that is tracked separately.
@@ -1124,7 +1124,7 @@ defaults a genuinely-unconstrained type variable to i32 -- this language's
 existing "unconstrained integer literal defaults to i32" convention (see
 `Types.to_ast`'s `TVar (Unbound _) -> TypeI32` case), so `for i in 0..<8`
 with nothing else pinning `i`'s type still behaves exactly as before --
-and (b) otherwise validates the result is one of the nine legal integer
+and (b) otherwise validates the result is one of the ten legal integer
 types, raising a clear `TypeError` for anything else (e.g. a `bool`
 bound) rather than silently accepting nonsense. `require_integer`
 replaced FOUR separate `unify_at ... TI32` call sites that all had this
@@ -1133,9 +1133,8 @@ and `SliceOf`'s two bound checks (`SliceOf`'s had already been generalized
 once this session -- see the "Explicit-Base" section above -- but that
 fix specifically preserved the direct-unify-into-TI32 shape, which still
 doesn't accept a BARE non-i32 type, only a refined one). Pointer
-arithmetic's own `ptr +/- i32` restriction (`BinOp` `Add`/`Sub`'s
-`TPtr _` case) is unrelated and deliberately untouched -- that's a
-documented, intentional language restriction, not a gap.
+arithmetic is unrelated to indexing and requires `isize` offsets (see the
+current language specification above).
 
 **A second, distinct bug found immediately while testing the fix**:
 `llvm_gen.ml`'s `For` codegen looked up the counter's resolved type via
@@ -1449,7 +1448,7 @@ bounds against an `Ast.type_expr` base at PARSE time for the literal
 syntax).
 
 **Verification**: `test/test_takibi.ml` gained parser/type-check tests
-(the annotation parses for all 9 bases, gives the exact expected
+(the annotation parses for all 10 bases, gives the exact expected
 `TRefinedInt`, rejects an out-of-range bound, rejects a conflicting
 bound) and a codegen test confirming `for i: u8 in 0..<4 { buf[i] = ...;
 }` proves the array access with ZERO trap sites (unlike the cast-based
@@ -1587,6 +1586,24 @@ future `gen_func`-adjacent change should keep using this catchable path.
 Regression coverage: `test/test_takibi.ml`'s `codegen_tests` group (via a
 `gen_codegen`/`expect_codegen_ok` helper running parse -> infer ->
 `Llvm_gen.gen_program` with no target machine).
+
+### isize and Raw Pointer Arithmetic
+
+`isize` is the pointer-sized signed integer counterpart to `usize`. Both use
+LLVM DataLayout's actual pointer width (`i64` on AArch64, `i32` on Cortex-M),
+but their roles are intentionally distinct: `usize` represents addresses,
+lengths, and non-negative sizes; `isize` represents relative pointer offsets
+and pointer differences.
+
+Pointer arithmetic accepts no legacy `i32` exception:
+- `*T + isize`, `isize + *T`, and `*T - isize` operate in units of `T` and return `*T`.
+- `*T - *T` requires identical pointee types and returns an element count as `isize` via `Llvm.build_ptrdiff`.
+- `*T + *T` is always a type error.
+- A bare literal in pointer arithmetic infers as `isize`; an already-typed `i32`/`usize` value requires an explicit `as isize` cast.
+
+The compiler does not track allocation provenance for raw pointers, so pointer
+subtraction is only meaningful when both operands derive from the same array or
+allocation. Slices remain the checked abstraction for ordinary bounded access.
 
 ### sizeof(T) Spans 4 Files
 Files changed when `sizeof(T)` was added:
@@ -1872,7 +1889,7 @@ Files changed when `struct Name { field: type; }` was added:
 1. `lib/ast.ml` -- `TypeNamed of string` (type), `FieldGet of expr * string` (expr), `AssignField of expr * string * expr` (stmt), `StructDef of string * (string * type_expr) list * bool` (last bool = is_packed)
 2. `lib/types.ml` -- `TStruct of string` (internal type), added `program_types.structs` field
 3. `lib/lexer.mll` -- `"struct"` -> `STRUCT`, `'.'` -> `DOT` token
-4. `lib/parser.mly` -- `%left DOT` (highest precedence), `struct_fields` rule, `IDENT DOT IDENT ASSIGN expr SEMI` assignment statement, `expr DOT IDENT` field read expression, `IDENT` -> `TypeNamed` type expression
+4. `lib/parser.mly` -- `%left DOT` (highest precedence), `struct_fields` rule, field assignment for both `s.field = v` and `arr[i].field = v`, `expr DOT IDENT` field read expression, `IDENT` -> `TypeNamed` type expression
 5. `lib/type_inf.ml` -- `senv : (string * Ast.type_expr) list StringMap.t` collected in Pass 0 and threaded through all inference functions
 6. `lib/llvm_gen.ml` -- registers `struct_type context fields` in Pass 0; `TypeNamed` returns the alloca/global pointer as-is (same approach as arrays); `FieldGet` uses `build_in_bounds_gep` + load; `AssignField` uses GEP + store
 7. `test/test_takibi.ml` + `examples/struct/` -- parser/type-inference tests + QEMU demo
@@ -1883,10 +1900,10 @@ Files changed when `struct Name { field: type; }` was added:
 - Global struct variables are handled the same way (value of `define_global` = return the pointer as-is)
 - `s.field` / `p.field` where `p: *Name` -> GEP `[0, field_idx]` -> load (auto-distinguished by type check)
 - `s.field = v` -> GEP -> store (non-volatile; not MMIO)
+- `arr[i].field = v` -> bounds-checked element GEP -> field GEP -> store; `ptr[i].field = v` uses pointer indexing without an array bounds check
 - `&s` -> return the alloca pointer as `*Name` (for pass-by-pointer)
 
 **Current limitations**:
-- Field assignment only in `ident.field = v` form (LHS is a single variable name only)
 - Global struct variable as `let g: Name;` only (`let mut` is not supported in global scope; always mutable)
 
 ### Packed Struct and Struct Type-Level Alignment (5 Files)
@@ -1921,6 +1938,16 @@ Files changed when `enum Name: u16 { V = n; _; }` was added:
 
 **Round-trip guarantee** (intentional design, must not be broken):
 `(raw as NonExhaustiveEnum) as u16 == raw` for any `raw: u16`, including values that fall through to the `_` arm. This holds because `enum -> int` cast is a no-op at the LLVM IR level: no `unreachable` is inserted, so LLVM cannot assume the value is one of the named variants. This differs from C enum (UB for out-of-range values) and is essential for protocol implementations where unknown field values must be forwarded or logged intact.
+
+**Enum variants are valid global constant initializers**: both
+`let mut state: State = State::Idle;` and an underlying-type constant such
+as `let code: u16 = Code::Ready as u16;` are folded by `eval_const`/
+`eval_const_int` to the variant's resolved discriminant. This keeps enum
+globals explicitly initialized instead of relying on BSS zeroing and the
+first variant remaining discriminant zero. `examples/tcp_echo` and
+`examples/http_server` use this for their exhaustive `ConnState: u8`
+state variables (Listen/SynRcvd/Established/LastAck), replacing the old
+unrestricted i32 constants.
 
 **eenv lookup pattern** (3-tuple destructuring):
 ```ocaml
@@ -1959,10 +1986,8 @@ location (all of them, not just the first -- same report-all philosophy as
 run_qemutest.sh). Without the flag, behavior is unchanged: unproven accesses
 compile fine and get a runtime check (llvm.trap on violation) -- that IS the
 intended permissive development mode for quick driver bring-up. The flag is
-ship mode: only type-proven accesses may exist. **Current status: 43 of 44
-examples compile clean under --forbid-trap**; the one holdout is
-examples/enum/enum.tkb's deliberate `u8 as Color` checked-cast demo, where
-the runtime check is the point.
+ship mode: only type-proven accesses may exist. **The current example suite
+compiles clean under --forbid-trap**.
 
 **Mechanism** (`lib/llvm_gen.ml` `trap_sites` / `record_trap`): every trap
 check codegen emits (array bounds check, checked refined cast, exhaustive-
@@ -2072,8 +2097,9 @@ instead of killing the whole branch), while-condition narrowing
 runtime value, `i < len` facts) -- the last one is the honest decision
 point for a VC+SMT (Z3) backend; everything above stays in the
 non-relational interval world where plain OCaml implementation is the
-right tool. The empirical result that 43/44 examples needed ZERO relational
-reasoning is the argument for not introducing a solver yet.
+right tool. The empirical result from the P4 census is that most examples
+did not need relational reasoning, which is the argument for not
+introducing a solver yet.
 
 ### Slice Type (P1): []T / [T; N..] -- fat pointer with a compile-time minimum length
 
@@ -2507,9 +2533,8 @@ violation, unchanged from today, or (2) compiles clean WITH
 `--forbid-trap`, either because it's genuinely proven or because an
 `unsafe { ... }` marks an explicit, evidence-backed assertion. No third
 "silently checked, --forbid-trap just rejects it forever" bucket should
-exist without a documented reason. **Result: 43 of 44 examples are now
---forbid-trap clean** (up from 40/44 after P4b); the one holdout
-(tcp_parse) is a deliberate exception with a recorded reason, not a gap.
+exist without a documented reason. **Result: the current example suite is
+--forbid-trap clean**.
 
 **enum.tkb: Color made non-exhaustive.** The residual cast-check trap
 (`raw as Color`, `raw: u8` with no static evidence bounding it to
@@ -2853,7 +2878,7 @@ See the comment in each `.tkb` file for implementation details (`condvar.tkb` ex
 **`io` is stripped on Deref**: `*p` where `p: *io i32` -> result type is `i32` (not `io`). Volatile is confined to `set_volatile true` on the load.
 
 - `*io T` is a compiler-level distinction. CPU-level memory barriers are provided by `ldaxr/stlxr` (extern fn).
-- Pointer arithmetic `*io T + i32` -> remains `*io T` (matches `TypePtr _`)
+- Pointer arithmetic `*io T + isize` -> remains `*io T` (matches `TypePtr _`)
 - `i32 as *io T` -- MMIO address literal assignment (inttoptr coercion, `TypePtr _` case)
 
 ### Volatile Reads of Global Variables (Interrupt-Shared Flags)
@@ -2935,9 +2960,8 @@ the normal (always `-g`-free) build outputs.
   `u32`/`i32`/`u8` family of `print`-like functions would need this. Estimated to be a moderate addition: `fenv`
   becomes name -> list of signatures, `Call` picks the best match by argument types, and `llvm_gen.ml` needs to
   mangle LLVM symbol names per overload (today one takibi name maps to exactly one LLVM function symbol).
-- **`isize` (signed pointer-sized integer) is not implemented** -- tracked as a GitHub issue, not urgent. Needed for
-  `ptr - ptr` (pointer difference), which is itself unimplemented. Neither is required for the planned Ethernet L2
-  echo server (`ptr + i32` / `ptr - i32` already work for descriptor-ring indexing).
+- **`isize` (signed pointer-sized integer) is implemented** -- it is the pointer-sized signed integer used for raw
+  pointer arithmetic and pointer differences (`ptr - ptr` returns `isize`).
 - **`sizeof(T)` cannot be used as an array size** (`[T; sizeof(Foo)]`) -- see the `sizeof(T)` section above for why
   (parser-time vs. codegen-time resolution mismatch) and what combining them would require.
 - **No module/import system for `.tkb` files** -- which common files get concatenated into a given example's build
@@ -3310,13 +3334,14 @@ virtio protocol itself.
   for interrupt-driven RX; `net_poll_rx()` now polls the used ring
   directly instead, so no IRQ/GIC involvement remains here at all -- see
   the STM32 Ethernet entry above for why and when that changed.)
-- **The vring is manipulated as raw byte offsets, not struct arrays.**
-  Struct field assignment only supports `ident.field = v` (a bare variable
-  name on the left -- see "Current limitations" under Struct Implementation
-  above), so a descriptor-table *entry* picked out by a runtime index
-  (`descs[i].field = v`) isn't expressible. `desc_set`/`avail_ring_set`/
-  `used_ring_get_*` in `virtio_mmio.tkb` poke fixed byte offsets through
-  cast pointers instead, the same way a minimal C driver would.
+- **The vring uses typed views over one shared backing allocation.**
+  `VirtqDesc`, `VirtqAvail`, `VirtqUsed`, and `VirtqUsedElem` describe the
+  specification-defined layouts. Descriptor writes use `descs[i].field`,
+  while `sizeof(VirtqDesc)` and `offsetof(..., ring)` locate the avail/used
+  subregions without duplicating byte offsets. The used-ring views are `*io`
+  so device-written fields remain volatile. The page-aligned byte arrays are
+  still the owning storage because all three regions must share one legacy
+  virtqueue allocation.
   `arp_reply.tkb` extends the same technique to the ARP header itself
   (`bytes_eq`/`bytes_copy`/`read_u16be`/`write_u16be`), rewriting the
   request into a reply in place with no temporary struct/copy -- this was

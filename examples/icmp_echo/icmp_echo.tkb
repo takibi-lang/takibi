@@ -46,20 +46,6 @@
 
 let mut our_mac: [u8; 6];
 
-// IPv4 field offsets, relative to the start of the IP header.
-let IP_VERSION_IHL: usize = 0;
-let IP_TOTAL_LEN:   usize = 2;
-let IP_TTL:         usize = 8;
-let IP_PROTOCOL:    usize = 9;
-let IP_CHECKSUM:    usize = 10;
-let IP_SRC:         usize = 12;
-let IP_DST:         usize = 16;
-
-// ICMP field offsets, relative to the start of the ICMP message.
-let ICMP_TYPE:     usize = 0;
-let ICMP_CODE:     usize = 1;
-let ICMP_CHECKSUM: usize = 2;
-
 // Wire-VALUE constants compared/written directly against a byte field --
 // u8, matching that field (unlike the OFFSET constants above, which are
 // usize -- array/slice indexing is usize-only now).

@@ -70,8 +70,8 @@ read).
 `--forbid-trap` is expected to grow into a family: per-category strictness
 options (array-bounds trap freedom, checked-cast freedom, safe-pointer
 enforcement outside `unsafe`, ...) with one umbrella flag enabling them
-all. Today's single flag is the first member. **All ~48 examples --
-including the full TCP/IP stack and HTTP server -- compile trap-free
+all. Today's single flag is the first member. **The current example suite --
+including the full TCP/IP stack and HTTP server -- compiles trap-free
 under it.** A few tools do almost all of the work: refined integer ranges
 that propagate through ordinary arithmetic and bitwise masking (so a
 value like a wire-derived header length carries a real bound with no
@@ -99,7 +99,7 @@ type-system gap.
 
 - A full pipeline exists: lexer -> Menhir parser -> Hindley-Milner type
   inference -> LLVM 19 IR generation -> native object code.
-- Around 60 example programs compile and run today (see `examples/`),
+- The example suite compiles and runs today (see `examples/`),
   covering arithmetic, control flow, structs (packed / aligned), enums with
   exhaustiveness checking, function pointers, MMIO/volatile access,
   compile-time-checked array bounds via refinement types, semaphores,

@@ -90,24 +90,25 @@ let PHY_AN_10_FULL:  u32 = 0x0040;
 let PHY_AN_10_HALF:  u32 = 0x0020;
 
 // -- DMA descriptor ring geometry --------------------------------------------
-// Struct field assignment in takibi only supports `ident.field = v` (a bare
-// variable name on the left), so a runtime-indexed descriptor-table entry
-// (`descs[i].field = v`) can't be expressed -- same limitation
-// examples/common/virtio_mmio.tkb already works around. Each descriptor is
-// manipulated as a flat 16-byte (4-word) buffer via manual offsets, exactly
-// like that file's desc_set/used_ring_get_* helpers.
 // examples/common_stm32/eth_asm.S: dsb (Data Synchronization Barrier),
 // forces prior writes to the descriptor rings to complete before the very
 // next poll-demand register write, so the DMA engine can't race ahead and
 // read a stale descriptor. See that file's comment for how this was found.
 extern fn eth_dsb();
 
-let ETH_DESC_WORDS: i32 = 4;
-let ETH_DESC_SIZE:  i32 = 16; // ETH_DESC_WORDS * 4
-let ETH_RX_DESC_COUNT: i32 = 4;
-let ETH_TX_DESC_COUNT: i32 = 4;
-let ETH_BUF_SIZE: i32 = 1536; // max 1518-byte Ethernet frame, rounded up
+let ETH_RX_DESC_COUNT: isize = 4;
+let ETH_TX_DESC_COUNT: isize = 4;
+let ETH_BUF_SIZE: isize = 1536; // max 1518-byte Ethernet frame, rounded up
 let ETH_BUF_SIZE_USIZE: usize = 1536; // memory indexing counterpart
+
+// Four 32-bit words, exactly matching the STM32F7 chained DMA descriptor.
+// Fields are io because the DMA engine updates them asynchronously.
+struct EthDmaDesc align(4) {
+    word0: io u32;
+    word1: io u32;
+    word2: io u32;
+    word3: io u32;
+}
 
 let ETH_RDES0_OWN: u32 = 0x80000000;
 let ETH_RDES1_RCH: u32 = 0x4000;
@@ -123,23 +124,19 @@ let ETH_TDES0_TCH: u32 = 0x00100000;
 // (see this file's header comment) -- no takibi-level section attribute
 // needed, the linker script alone decides which physical RAM bank .bss
 // lands in.
-let mut eth_rx_descs: [u8; ETH_RX_DESC_COUNT * ETH_DESC_SIZE] align(4);
-let mut eth_tx_descs: [u8; ETH_TX_DESC_COUNT * ETH_DESC_SIZE] align(4);
+let mut eth_rx_descs: [EthDmaDesc; ETH_RX_DESC_COUNT] align(4);
+let mut eth_tx_descs: [EthDmaDesc; ETH_TX_DESC_COUNT] align(4);
 let mut eth_rx_bufs:  [u8; ETH_RX_DESC_COUNT * ETH_BUF_SIZE] align(4);
 
-let mut eth_rx_cur: i32 = 0;
-let mut eth_tx_cur: i32 = 0;
+let mut eth_rx_cur: isize = 0;
+let mut eth_tx_cur: isize = 0;
 
-fn rx_desc_ptr(i: i32) -> *u8 {
-    return eth_rx_descs + i * ETH_DESC_SIZE;
+fn rx_desc_ptr(i: isize) -> *EthDmaDesc {
+    return eth_rx_descs + i;
 }
 
-fn tx_desc_ptr(i: i32) -> *u8 {
-    return eth_tx_descs + i * ETH_DESC_SIZE;
-}
-
-fn desc_word(desc: *u8, word_idx: i32) -> *io u32 {
-    return (desc + word_idx * 4) as *io u32;
+fn tx_desc_ptr(i: isize) -> *EthDmaDesc {
+    return eth_tx_descs + i;
 }
 
 fn ptr_to_u32(p: *u8) -> u32 {
@@ -249,29 +246,29 @@ fn phy_init() -> i32 {
 }
 
 fn eth_rx_ring_init() {
-    for i in 0..<ETH_RX_DESC_COUNT {
-        let desc: *u8 = rx_desc_ptr(i);
-        let buf:  *u8 = eth_rx_bufs + i * ETH_BUF_SIZE;
-        let next: *u8 = rx_desc_ptr((i + 1) % ETH_RX_DESC_COUNT);
+    for i: usize in 0..<4 {
+        let ptr_i: isize = i as isize;
+        let buf:  *u8 = eth_rx_bufs + ptr_i * ETH_BUF_SIZE;
+        let next: *EthDmaDesc = rx_desc_ptr((ptr_i + 1) % ETH_RX_DESC_COUNT);
 
-        *(desc_word(desc, 1)) = ETH_RDES1_RCH | (ETH_BUF_SIZE as u32); // RCH | RBS1
-        *(desc_word(desc, 2)) = ptr_to_u32(buf);                       // buffer1 address
-        *(desc_word(desc, 3)) = ptr_to_u32(next);                     // next descriptor (RCH mode)
-        *(desc_word(desc, 0)) = ETH_RDES0_OWN;                        // hand to DMA last
+        eth_rx_descs[i].word1 = ETH_RDES1_RCH | (ETH_BUF_SIZE as u32); // RCH | RBS1
+        eth_rx_descs[i].word2 = ptr_to_u32(buf);                       // buffer1 address
+        eth_rx_descs[i].word3 = ptr_to_u32(next as *u8);              // next descriptor (RCH mode)
+        eth_rx_descs[i].word0 = ETH_RDES0_OWN;                        // hand to DMA last
     }
-    *ETH_DMARDLAR = ptr_to_u32(rx_desc_ptr(0));
+    *ETH_DMARDLAR = ptr_to_u32(rx_desc_ptr(0) as *u8);
 }
 
 fn eth_tx_ring_init() {
-    for i in 0..<ETH_TX_DESC_COUNT {
-        let desc: *u8 = tx_desc_ptr(i);
-        let next: *u8 = tx_desc_ptr((i + 1) % ETH_TX_DESC_COUNT);
+    for i: usize in 0..<4 {
+        let ptr_i: isize = i as isize;
+        let next: *EthDmaDesc = tx_desc_ptr((ptr_i + 1) % ETH_TX_DESC_COUNT);
         // word0 (status/control) and word1/word2 (size/buffer) are left at
         // 0 (BSS-zeroed): OWN=0 means these start out owned by the CPU, and
         // net_transmit() fills them in fresh on every send.
-        *(desc_word(desc, 3)) = ptr_to_u32(next); // next descriptor (TCH mode)
+        eth_tx_descs[i].word3 = ptr_to_u32(next as *u8); // next descriptor (TCH mode)
     }
-    *ETH_DMATDLAR = ptr_to_u32(tx_desc_ptr(0));
+    *ETH_DMATDLAR = ptr_to_u32(tx_desc_ptr(0) as *u8);
 }
 
 // Brings up GPIO/clocks, resets the MAC/DMA, negotiates the PHY link, and
@@ -327,8 +324,8 @@ fn net_init() -> i32 {
 // Non-zero return must be followed by exactly one net_rx_release() call
 // once the caller is done reading net_rx_buf().
 fn net_poll_rx() -> i32 {
-    let desc: *u8 = rx_desc_ptr(eth_rx_cur);
-    let word0: u32 = *(desc_word(desc, 0));
+    let desc: *EthDmaDesc = rx_desc_ptr(eth_rx_cur);
+    let word0: u32 = desc.word0;
     if ((word0 & ETH_RDES0_OWN) != 0) {
         return 0; // still owned by the DMA
     }
@@ -377,8 +374,8 @@ fn net_rx_frame() -> [u8; 1514..] {
 // longer needs net_rx_buf()'s contents (e.g. after net_transmit() has
 // already copied/sent them out, since net_transmit() is synchronous).
 fn net_rx_release() {
-    let desc: *u8 = rx_desc_ptr(eth_rx_cur);
-    *(desc_word(desc, 0)) = ETH_RDES0_OWN;
+    let desc: *EthDmaDesc = rx_desc_ptr(eth_rx_cur);
+    desc.word0 = ETH_RDES0_OWN;
     eth_dsb(); // see eth_asm.S: must complete before the DMA can be kicked
     *ETH_DMARPDR = 1; // poll demand: resume RX DMA if it had suspended
     eth_rx_cur = (eth_rx_cur + 1) % ETH_RX_DESC_COUNT;
@@ -390,16 +387,16 @@ fn net_rx_release() {
 // completion-ordering guarantee examples/common/virtio_mmio.tkb's net_echo
 // consumer relies on before re-posting an RX descriptor.
 fn net_transmit(buf: *u8, len: i32) {
-    let desc: *u8 = tx_desc_ptr(eth_tx_cur);
+    let desc: *EthDmaDesc = tx_desc_ptr(eth_tx_cur);
 
-    *(desc_word(desc, 2)) = ptr_to_u32(buf);
-    *(desc_word(desc, 1)) = len as u32; // TBS1
-    *(desc_word(desc, 0)) = ETH_TDES0_OWN | ETH_TDES0_FS | ETH_TDES0_LS | ETH_TDES0_TCH;
+    desc.word2 = ptr_to_u32(buf);
+    desc.word1 = len as u32; // TBS1
+    desc.word0 = ETH_TDES0_OWN | ETH_TDES0_FS | ETH_TDES0_LS | ETH_TDES0_TCH;
 
     eth_dsb(); // see eth_asm.S: must complete before the DMA can be kicked
     *ETH_DMATPDR = 1; // poll demand: prompt DMA to check for a ready descriptor now
 
-    while ((*(desc_word(desc, 0)) & ETH_TDES0_OWN) != 0) {}
+    while ((desc.word0 & ETH_TDES0_OWN) != 0) {}
 
     eth_tx_cur = (eth_tx_cur + 1) % ETH_TX_DESC_COUNT;
 }

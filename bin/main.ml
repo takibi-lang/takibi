@@ -97,6 +97,7 @@ let () =
 
   (try
     Const_env.reset ();
+    Type_layout.reset ();
     let prog = List.concat_map parse_file input_files in
 
     (* HM type inference -- catches type errors and produces resolved types *)

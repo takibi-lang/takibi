@@ -107,12 +107,14 @@ let OUR_ISN: u32 = 0x00001000;
 // see that function's comment.
 let TCP_MAX_PAYLOAD: u16 = 1460;
 
-let TCP_LISTEN:      i32 = 0;
-let TCP_SYN_RCVD:    i32 = 1;
-let TCP_ESTABLISHED: i32 = 2;
-let TCP_LAST_ACK:    i32 = 3;
+enum ConnState: u8 {
+    Listen;
+    SynRcvd;
+    Established;
+    LastAck;
+}
 
-let mut conn_state:       i32 = 0; // TCP_LISTEN
+let mut conn_state:       ConnState = ConnState::Listen;
 let mut conn_remote_mac:  [u8; 6];
 let mut conn_remote_ip:   [u8; 4];
 let mut conn_remote_port: u16 = 0;
@@ -368,7 +370,7 @@ fn main() {
                                         let ack:      u32 = read_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET]) as u32;
 
                                         if (dst_port == TCP_ECHO_PORT) {
-                                            if (conn_state == TCP_LISTEN) {
+                                            if (conn_state == ConnState::Listen) {
                                                 if ((flags & TCP_FLAG_SYN) != 0) {
                                                     slice_copy(conn_remote_mac as []u8, frame[6..<12]);
                                                     slice_copy(conn_remote_ip as []u8, ip[IP_SRC..<IP_DST]);
@@ -379,7 +381,7 @@ fn main() {
                                                     build_syn_ack(frame, ihl);
                                                     should_tx = 1;
                                                     tx_len = 14 + ihl + 20;
-                                                    conn_state = TCP_SYN_RCVD;
+                                                    conn_state = ConnState::SynRcvd;
                                                 }
                                             } else {
                                                 // SYN_RCVD, ESTABLISHED, or LAST_ACK: only the
@@ -389,21 +391,21 @@ fn main() {
                                                     if ((flags & TCP_FLAG_RST) != 0) {
                                                         // Abrupt close from the client: drop the
                                                         // connection with no reply and free the slot.
-                                                        conn_state = TCP_LISTEN;
-                                                    } else if (conn_state == TCP_SYN_RCVD) {
+                                                        conn_state = ConnState::Listen;
+                                                    } else if (conn_state == ConnState::SynRcvd) {
                                                         if ((flags & TCP_FLAG_ACK) != 0 &&
                                                             (flags & TCP_FLAG_SYN) == 0 &&
                                                             ack == conn_snd_nxt && seq == conn_rcv_nxt) {
-                                                            conn_state = TCP_ESTABLISHED;
+                                                            conn_state = ConnState::Established;
                                                         }
-                                                    } else if (conn_state == TCP_ESTABLISHED) {
+                                                    } else if (conn_state == ConnState::Established) {
                                                         if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
                                                             conn_rcv_nxt = conn_rcv_nxt + 1; // FIN consumes one seq number
                                                             build_fin_ack(frame, ihl);
                                                             should_tx = 1;
                                                             tx_len = 14 + ihl + 20;
                                                             conn_snd_nxt = conn_snd_nxt + 1; // our FIN too
-                                                            conn_state = TCP_LAST_ACK;
+                                                            conn_state = ConnState::LastAck;
                                                         } else {
                                                             // max(.., 0): tcp_len - tcp_hdr_len's raw
                                                             // Sub-derived range has a spuriously negative
@@ -472,10 +474,10 @@ fn main() {
                                                                 }
                                                             }
                                                         }
-                                                    } else if (conn_state == TCP_LAST_ACK) {
+                                                    } else if (conn_state == ConnState::LastAck) {
                                                         if ((flags & TCP_FLAG_ACK) != 0 && ack == conn_snd_nxt) {
                                                             // Close complete; ready for a new client.
-                                                            conn_state = TCP_LISTEN;
+                                                            conn_state = ConnState::Listen;
                                                         }
                                                     }
                                                 }
