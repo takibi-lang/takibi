@@ -46,6 +46,8 @@ rule read = parse
   | "extern"  { EXTERN }
   | "struct"  { STRUCT }
   | "opaque"  { OPAQUE }
+  | "affine"  { AFFINE }
+  | "borrow"  { BORROW }
   | "packed"  { PACKED }
   | "io"      { IO }
   | "enum"    { ENUM }

@@ -40,9 +40,8 @@ fn main() {
 
         uart_puts("arp_reply: ready\r\n");
 
-        let mut rx_token: *NetRxDmaOwned = net_rx_token();
         while (1) {
-            let acquired: *NetRxCpuOwned = net_rx_acquire(rx_token);
+            let acquired: *NetRxCpuOwned = net_rx_acquire();
             let mut len: i32 = 0;
             if ((acquired as usize) != 0) {
                 len = net_rx_len(acquired);
@@ -76,7 +75,7 @@ fn main() {
 
             // Re-post the RX descriptor regardless of whether we replied.
             if ((acquired as usize) != 0) {
-                rx_token = net_rx_release(acquired);
+                net_rx_release(acquired);
             }
         }
     }

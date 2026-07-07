@@ -284,9 +284,8 @@ fn main() {
 
         uart_puts("tcp_echo: ready\r\n");
 
-        let mut rx_token: *NetRxDmaOwned = net_rx_token();
         while (1) {
-            let acquired: *NetRxCpuOwned = net_rx_acquire(rx_token);
+            let acquired: *NetRxCpuOwned = net_rx_acquire();
             if ((acquired as usize) != 0) {
             let len: i32 = net_rx_len(acquired);
             let mut should_tx: i32 = 0;
@@ -500,7 +499,7 @@ fn main() {
                 net_transmit(frame as *u8, tx_len);
             }
             if ((acquired as usize) != 0) {
-                rx_token = net_rx_release(acquired);
+                net_rx_release(acquired);
             }
             }
         }

@@ -86,6 +86,7 @@ let rec ty_str = function
   | TypeRefined (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
   | TypeSlice (t, 0) -> Printf.sprintf "[]%s" (ty_str t)
   | TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (ty_str t) n
+  | TypeBorrow t -> "borrow " ^ ty_str t
 
 (* ---- DWARF debug info (opt-in via -g; see enable_debug_info) ----
    Everything DI-related elsewhere in this file (gen_func / gen_stmt / gen_program)
@@ -498,6 +499,7 @@ let rec ltype_of_ast = function
            match Hashtbl.find_opt struct_lltypes sname with
            | Some llty -> llty
            | None -> raise (Error (Printf.sprintf "Unknown named type: %s" sname)))
+  | TypeBorrow t -> ltype_of_ast t
 
 (* DWARF Attribute Type Encoding constants (DWARF5 spec section 7.8, table 7.11).
    Llvm_debuginfo has no named enum for these -- they're stable spec constants,
@@ -542,6 +544,7 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
   | TypeVoid  -> Llvm_debuginfo.llmetadata_null ()
   | TypeRefined (_, _, base) -> ditype_of_ast dib file base  (* same LLVM-level representation as its base; see ltype_of_ast *)
   | TypeSlice (t, _) -> ditype_of_ast dib file (TypePtr t)
+  | TypeBorrow t -> ditype_of_ast dib file t
       (* modeled as a pointer for now: enough for gdb to follow the data;
          a real {ptr, len} DICompositeType needs the member-offset plumbing
          deliberately skipped for structs (see the comment above) *)
@@ -739,6 +742,7 @@ let rec coerce v (dst : Ast.type_expr) =
   | TypeNamed _ -> v
   | TypeRefined (_, _, base) -> coerce v base
   | TypeSlice _ -> v   (* fat values are never numerically coerced *)
+  | TypeBorrow t -> coerce v t
 
 (* Normalize an index/offset value to usize width for use as a GEP index --
    used by Index/AssignIndex/SliceOf. The old path unconditionally
@@ -2794,7 +2798,7 @@ let gen_program ?prog_types prog =
   unsafe_depth := 0;
   (* Pass 0: register struct and enum types -- must precede ltype_of_ast for TypeNamed *)
   List.iter (function
-    | OpaqueStructDef name ->
+    | OpaqueStructDef (name, _) ->
         Hashtbl.add struct_lltypes name (named_struct_type context name)
     | StructDef (name, fields, is_packed, align_opt) ->
         let field_lltys = List.map (fun (_, ty) -> ltype_of_ast ty) fields

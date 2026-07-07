@@ -40,6 +40,7 @@ type type_expr =
                                       int = compile-time MINIMUM length (0 = unknown).
                                       The runtime length is always >= the minimum; index
                                       proofs and constant subslices check against it. *)
+  | TypeBorrow of type_expr        (* parameter-only, non-consuming affine borrow *)
 [@@deriving show]
 
 type expr = expr_desc located
@@ -131,8 +132,8 @@ type toplevel =
   (* extern fn name(params) -> ret; -- body is provided by external assembly *)
   | StructDef of string * (string * type_expr) list * bool * int option
   (* name, fields, is_packed, align_bytes -- align_bytes = Some N means type-level align(N) *)
-  | OpaqueStructDef of string
-  (* opaque struct Name; -- incomplete nominal type, usable only behind a pointer *)
+  | OpaqueStructDef of string * bool
+  (* name, is_affine -- incomplete nominal type, usable only behind a pointer *)
   | EnumDef of string * type_expr option * (string * int option) list * bool
   (* enum Name: u16 { Variant = val; _; } -- last bool = is_nonexhaustive *)
 [@@deriving show]

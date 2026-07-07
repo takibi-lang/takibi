@@ -60,6 +60,7 @@ The finished form of code is when index ranges are pinned at the type level usin
   - DMA/device synchronization builtins are zero-argument, target-lowered operations: `dma_publish()` transfers CPU writes toward a device before a later MMIO notification; `dma_consume()` acquires device-written DMA state after completion is observed; `device_fence()` is a conservative full device barrier. ARM/AArch64 lower to DSB SY, AMD64 currently lowers conservatively to MFENCE, and RISC-V uses direction-preserving `fence w,o` / `fence i,r` / `fence iorw,iorw`. Driver code should encapsulate these at ownership boundaries rather than exposing them to applications.
 - `struct Name { field: type; ... }` -- struct type definition (top-level only; fields are primitive types, pointer types, or other struct types)
 - `opaque struct Name;` -- incomplete nominal type usable only behind a pointer. It has no constructible value, fields, or size and is intended for driver-owned state handles.
+- `affine opaque struct Name;` marks pointers to that opaque type as affine handles. Passing one to an ordinary affine-handle parameter consumes the local value; a second consumption or later use is a compile error. `borrow *Name` is allowed only as a function parameter and permits non-consuming inspection. This is intentionally a restricted, intraprocedural facility rather than a general affine type system: values may be dropped, explicit pointer casts remain an escape hatch, and consuming an affine value declared outside a loop from inside that loop is conservatively rejected.
 - `let mut s: Name;` -- struct variable declaration (local/global, always treated as mutable)
 - `s.field` -- field read (works for both `s: Name` and `s: *Name`, Zig-style)
 - `s.field = v` -- field write (direct dot assignment to a variable name only; not allowed as the left side of an expression)
@@ -2981,8 +2982,8 @@ the normal (always `-g`-free) build outputs.
   openocd/gdb-multiarch debugging on real hardware, not something the compiler flagged). The original handwritten
   `extern fn eth_dsb()`/`eth_asm.S` workaround has been removed. `dma_publish()`, `dma_consume()`, and
   `device_fence()` now lower per target and are placed inside the STM32 and virtio driver ownership transitions,
-  so application examples do not manually select barriers. Future affine DMA handles can enforce these transitions
-  statically without changing the source-level barrier semantics.
+  so application examples do not manually select barriers. The RX API now uses an affine opaque CPU-ownership
+  handle to reject use-after-release and double-release statically without changing the source-level barrier semantics.
 - **STM32 Ethernet: all five examples are ported -- `net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo`,
   and `http_server` all run on real hardware with real MAC/PHY/DMA, and are the *same source file* as
   their QEMU/virtio-net counterparts.** `examples/common_stm32/eth.tkb` is a from-scratch MAC/DMA-
@@ -2990,10 +2991,10 @@ the normal (always `-g`-free) build outputs.
   descriptor ring design are documented in that file's header comment).
 
   **Unified driver API**: `eth.tkb` and `examples/common/virtio_mmio.tkb` both expose the identical
-  `net_init() -> i32` / `net_rx_token() -> *NetRxDmaOwned` /
-  `net_rx_acquire(*NetRxDmaOwned) -> *NetRxCpuOwned` / `net_rx_len(*NetRxCpuOwned) -> i32` /
-  `net_rx_frame(*NetRxCpuOwned) -> [u8; 1514..]` / `net_transmit(buf, len)` /
-  `net_rx_release(*NetRxCpuOwned) -> *NetRxDmaOwned` / `net_read_mac(mac_out)` functions -- mirroring how `uart.tkb`/`print.tkb` already
+  `net_init() -> i32` / `net_rx_acquire() -> *NetRxCpuOwned` /
+  `net_rx_len(borrow *NetRxCpuOwned) -> i32` /
+  `net_rx_frame(borrow *NetRxCpuOwned) -> [u8; 1514..]` / `net_transmit(buf, len)` /
+  `net_rx_release(*NetRxCpuOwned)` / `net_read_mac(mac_out)` functions -- mirroring how `uart.tkb`/`print.tkb` already
   share identical signatures across `examples/common/` and `examples/common_stm32/`. This means
   `examples/net_echo/net_echo.tkb` (and the other four) are a *single* file compiled against either
   backend depending on target, not a QEMU version plus a hand-maintained `_stm32.tkb` copy -- see that

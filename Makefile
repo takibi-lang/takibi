@@ -515,7 +515,7 @@ examples/watchdog/kernel_stm32.bin: examples/watchdog/kernel_stm32.elf
 # compiles the *same* examples/<name>/<name>.tkb file the QEMU build uses
 # (see examples/net_echo/net_echo.tkb's header comment) -- unlike
 # irq/preempt/etc., there is no genuinely-different-shape logic here
-# anymore, eth.tkb just implements the same typed net_rx_token/acquire/
+# anymore, eth.tkb just implements the same typed net_rx_acquire/
 # len/frame/release API plus net_init/net_transmit/net_read_mac
 # examples/common/virtio_mmio.tkb does. Links against
 # COMMON_STM32_LINK_ETH_LD (AXI SRAM), not the shared DTCM-based link.ld.

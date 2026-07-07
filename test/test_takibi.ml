@@ -114,6 +114,7 @@ let rec show_type = function
   | Ast.TypeRefined (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
   | Ast.TypeSlice (t, 0) -> Printf.sprintf "[]%s" (show_type t)
   | Ast.TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (show_type t) n
+  | Ast.TypeBorrow t -> "borrow " ^ show_type t
 
 let type_t : Ast.type_expr Alcotest.testable =
   Alcotest.testable (fun fmt t -> Format.pp_print_string fmt (show_type t)) (=)
@@ -1181,8 +1182,16 @@ let parser_tests = [
 
   Alcotest.test_case "opaque struct declaration parses" `Quick (fun () ->
     match parse "opaque struct Token;" with
-    | [Ast.OpaqueStructDef "Token"] -> ()
+    | [Ast.OpaqueStructDef ("Token", false)] -> ()
     | _ -> Alcotest.fail "expected OpaqueStructDef(Token)"
+  );
+
+  Alcotest.test_case "affine opaque struct and borrow parameter parse" `Quick (fun () ->
+    match parse "affine opaque struct Token; fn inspect(t: borrow *Token) {}" with
+    | [Ast.OpaqueStructDef ("Token", true);
+       Ast.FuncDef { params = [("t", Some (Ast.TypeBorrow (Ast.TypePtr
+         (Ast.TypeNamed "Token"))))]; _ }] -> ()
+    | _ -> Alcotest.fail "expected affine opaque Token and borrowed pointer"
   );
 
   (* -- Compound pointer assignment ------------------------------------------ *)
@@ -1703,6 +1712,35 @@ let infer_tests = [
        "opaque struct DmaOwned; opaque struct CpuOwned;
         fn release(t: *CpuOwned) {}
         fn bad(t: *DmaOwned) { release(t); }");
+
+  Alcotest.test_case "affine handle may be borrowed repeatedly then consumed" `Quick
+    (expect_ok "affine opaque struct Token;
+                let mut byte: u8;
+                fn make() -> *Token { return &byte as *Token; }
+                fn inspect(t: borrow *Token) -> usize { return t as usize; }
+                fn release(t: *Token) {}
+                fn good() { let t: *Token = make(); inspect(t); inspect(t); release(t); }");
+
+  Alcotest.test_case "affine handle cannot be consumed twice" `Quick
+    (expect_type_error "already consumed"
+       "affine opaque struct Token;
+        let mut byte: u8;
+        fn make() -> *Token { return &byte as *Token; }
+        fn release(t: *Token) {}
+        fn bad() { let t: *Token = make(); release(t); release(t); }");
+
+  Alcotest.test_case "affine handle cannot be used after consumption" `Quick
+    (expect_type_error "already consumed"
+       "affine opaque struct Token;
+        let mut byte: u8;
+        fn make() -> *Token { return &byte as *Token; }
+        fn inspect(t: borrow *Token) {}
+        fn release(t: *Token) {}
+        fn bad() { let t: *Token = make(); release(t); inspect(t); }");
+
+  Alcotest.test_case "borrow is rejected for ordinary parameter types" `Quick
+    (expect_type_error "borrow is only valid"
+       "fn bad(x: borrow *u8) {}");
 
   (* -- extern fn --------------------------------------------------- *)
 

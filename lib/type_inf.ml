@@ -1647,7 +1647,11 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
 let infer_program (prog : Ast.toplevel list) : program_types =
   unsafe_depth := 0;  (* see its comment: fresh per compilation / per unit test *)
   let opaque_names = List.fold_left (fun names -> function
-    | Ast.OpaqueStructDef name -> StringSet.add name names
+    | Ast.OpaqueStructDef (name, _) -> StringSet.add name names
+    | _ -> names
+  ) StringSet.empty prog in
+  let affine_names = List.fold_left (fun names -> function
+    | Ast.OpaqueStructDef (name, true) -> StringSet.add name names
     | _ -> names
   ) StringSet.empty prog in
   let rec validate_complete_type loc behind_ptr = function
@@ -1662,19 +1666,82 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         List.iter (validate_complete_type loc false) args;
         validate_complete_type loc false ret
     | Ast.TypeRefined (_, _, base) -> validate_complete_type loc false base
+    | Ast.TypeBorrow inner -> validate_complete_type loc behind_ptr inner
     | _ -> ()
+  in
+  let rec contains_borrow = function
+    | Ast.TypeBorrow _ -> true
+    | Ast.TypePtr t | Ast.TypeIo t -> contains_borrow t
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> contains_borrow t
+    | Ast.TypeFn (args, ret) -> List.exists contains_borrow args || contains_borrow ret
+    | Ast.TypeRefined (_, _, base) -> contains_borrow base
+    | _ -> false
+  in
+  let validate_param_type loc = function
+    | Ast.TypeBorrow (Ast.TypePtr (Ast.TypeNamed name) as inner)
+      when StringSet.mem name affine_names -> validate_complete_type loc false inner
+    | Ast.TypeBorrow _ ->
+        raise (TypeError (loc,
+          "borrow is only valid on a pointer to an affine opaque struct parameter"))
+    | ty -> validate_complete_type loc false ty
+  in
+  let validate_nonparam_type loc ty =
+    if contains_borrow ty then
+      raise (TypeError (loc, "borrow is only valid in function parameter types"));
+    validate_complete_type loc false ty
+  in
+  let rec validate_expr_types (e : Ast.expr) =
+    (match e.desc with
+     | Ast.Cast (ty, x) -> validate_nonparam_type e.loc ty; validate_expr_types x
+     | Ast.SizeOf ty | Ast.OffsetOf (ty, _) -> validate_nonparam_type e.loc ty
+     | Ast.BinOp (_, a, b) -> validate_expr_types a; validate_expr_types b
+     | Ast.Bnot x | Ast.Deref x | Ast.AddrOf x | Ast.FieldGet (x, _)
+     | Ast.Unsafe x -> validate_expr_types x
+     | Ast.Call (_, xs) | Ast.StructLit xs -> List.iter validate_expr_types xs
+     | Ast.Index (_, i) -> validate_expr_types i
+     | Ast.SliceOf (_, lo, hi) -> validate_expr_types lo; validate_expr_types hi
+     | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.Var _
+     | Ast.EnumVariant _ -> ())
+  and validate_stmt_types (s : Ast.stmt) =
+    (match s.desc with
+     | Ast.Let (_, _, ty, init) ->
+         Option.iter (validate_nonparam_type s.loc) ty;
+         Option.iter validate_expr_types init
+     | Ast.For (_, ty, lo, hi, body) ->
+         Option.iter (validate_nonparam_type s.loc) ty;
+         validate_expr_types lo; validate_expr_types hi;
+         List.iter validate_stmt_types body
+     | Ast.Return e | Ast.Expr e -> validate_expr_types e
+     | Ast.Assign (_, e) -> validate_expr_types e
+     | Ast.AssignDeref (a, b) | Ast.AssignField (a, _, b)
+     | Ast.AssignIndex (_, a, b) -> validate_expr_types a; validate_expr_types b
+     | Ast.Block body -> List.iter validate_stmt_types body
+     | Ast.While (c, body) ->
+         validate_expr_types c; List.iter validate_stmt_types body
+     | Ast.If (c, yes, no) ->
+         validate_expr_types c; List.iter validate_stmt_types yes;
+         List.iter validate_stmt_types no
+     | Ast.ForEach (_, e, body) ->
+         validate_expr_types e; List.iter validate_stmt_types body
+     | Ast.Match (e, arms) ->
+         validate_expr_types e;
+         List.iter (function Ast.ArmVariant (_, _, b) | Ast.ArmWild b ->
+           List.iter validate_stmt_types b) arms
+     | Ast.Break | Ast.Continue -> ())
   in
   List.iter (function
     | Ast.FuncDef f ->
-        List.iter (fun (_, ty) -> Option.iter (validate_complete_type f.def_loc false) ty) f.params;
-        Option.iter (validate_complete_type f.def_loc false) f.ret_type
+        List.iter (fun (_, ty) -> Option.iter (validate_param_type f.def_loc) ty) f.params;
+        Option.iter (validate_nonparam_type f.def_loc) f.ret_type;
+        List.iter validate_stmt_types f.body
     | Ast.ExternFuncDef (_, params, ret) ->
-        List.iter (fun (_, ty) -> Option.iter (validate_complete_type Lexing.dummy_pos false) ty) params;
-        Option.iter (validate_complete_type Lexing.dummy_pos false) ret
-    | Ast.LetDef (_, ty, _, _, _) ->
-        Option.iter (validate_complete_type Lexing.dummy_pos false) ty
+        List.iter (fun (_, ty) -> Option.iter (validate_param_type Lexing.dummy_pos) ty) params;
+        Option.iter (validate_nonparam_type Lexing.dummy_pos) ret
+    | Ast.LetDef (_, ty, init, _, _) ->
+        Option.iter (validate_nonparam_type Lexing.dummy_pos) ty;
+        Option.iter validate_expr_types init
     | Ast.StructDef (_, fields, _, _) ->
-        List.iter (fun (_, ty) -> validate_complete_type Lexing.dummy_pos false ty) fields
+        List.iter (fun (_, ty) -> validate_nonparam_type Lexing.dummy_pos ty) fields
     | Ast.OpaqueStructDef _ | Ast.EnumDef _ -> ()) prog;
   (* Pass 0: collect struct and enum definitions *)
   let senv = List.fold_left (fun m -> function
@@ -1771,6 +1838,145 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add fdef.name (infer_func senv eenv fenv genv fdef) m
     | _ -> m
   ) StringMap.empty prog in
+  (* Restricted affine checking for pointers to `affine opaque struct`.
+     This deliberately stops short of a general ownership system: affine
+     values may be dropped, but a consuming call/return/assignment moves a
+     named local and any later use is rejected. `borrow T` is parameter-only
+     and makes calls through that parameter non-consuming. *)
+  let rec strip_borrow = function
+    | Ast.TypeBorrow t -> strip_borrow t
+    | t -> t
+  in
+  let is_affine_type ty = match strip_borrow ty with
+    | Ast.TypePtr (Ast.TypeNamed name) -> StringSet.mem name affine_names
+    | _ -> false
+  in
+  let call_params = List.fold_left (fun m -> function
+    | Ast.FuncDef f -> StringMap.add f.name (List.map snd f.params) m
+    | Ast.ExternFuncDef (name, params, _) -> StringMap.add name (List.map snd params) m
+    | _ -> m
+  ) StringMap.empty prog in
+  let check_affine_func fdef =
+    let finfo = StringMap.find fdef.Ast.name functions in
+    let var_types = ref finfo.local_types in
+    List.iter2 (fun (name, _) (_, ty) ->
+      var_types := StringMap.add name ty !var_types
+    ) fdef.params finfo.param_types;
+    let is_affine_var name = match StringMap.find_opt name !var_types with
+      | Some ty -> is_affine_type ty
+      | None -> false
+    in
+    let require_available loc moved name =
+      if is_affine_var name && StringSet.mem name moved then
+        raise (TypeError (loc, Printf.sprintf
+          "affine value '%s' was already consumed" name))
+    in
+    let rec check_expr moved consume (e : Ast.expr) =
+      match e.desc with
+      | Ast.Var name ->
+          require_available e.loc moved name;
+          if consume && is_affine_var name then StringSet.add name moved else moved
+      | Ast.Call (name, args) ->
+          let params = Option.value (StringMap.find_opt name call_params) ~default:[] in
+          let rec check_args moved args params = match args with
+            | [] -> moved
+            | arg :: rest ->
+            let consume_arg = match params with
+              | Some ty :: _ when is_affine_type ty ->
+                  (match ty with Ast.TypeBorrow _ -> false | _ -> true)
+              | _ -> false
+            in
+            let moved = check_expr moved consume_arg arg in
+            check_args moved rest (match params with _ :: ps -> ps | [] -> [])
+          in
+          check_args moved args params
+      | Ast.BinOp (_, a, b) -> check_expr (check_expr moved false a) false b
+      | Ast.Bnot a | Ast.Deref a | Ast.AddrOf a | Ast.Cast (_, a)
+      | Ast.FieldGet (a, _) | Ast.Unsafe a -> check_expr moved false a
+      | Ast.StructLit xs -> List.fold_left (fun m x -> check_expr m false x) moved xs
+      | Ast.Index (_, i) -> check_expr moved false i
+      | Ast.SliceOf (_, lo, hi) -> check_expr (check_expr moved false lo) false hi
+      | Ast.SizeOf _ | Ast.OffsetOf _ | Ast.IntLit _ | Ast.BoolLit _
+      | Ast.StringLit _ | Ast.EnumVariant _ -> moved
+    in
+    let rec check_stmts moved declared stmts =
+      List.fold_left (fun (moved, declared) s -> check_stmt moved declared s)
+        (moved, declared) stmts
+    and check_stmt moved declared (s : Ast.stmt) =
+      match s.desc with
+      | Ast.Return e ->
+          let consumes = match fdef.ret_type with
+            | Some ty -> is_affine_type ty
+            | None -> false
+          in
+          (check_expr moved consumes e, declared)
+      | Ast.Expr e -> (check_expr moved false e, declared)
+      | Ast.Assign (name, e) ->
+          require_available s.loc moved name;
+          let moved = check_expr moved (is_affine_var name) e in
+          (StringSet.remove name moved, StringSet.add name declared)
+      | Ast.AssignDeref (a, b) ->
+          (check_expr (check_expr moved false a) false b, declared)
+      | Ast.AssignField (a, _, b) ->
+          (check_expr (check_expr moved false a) false b, declared)
+      | Ast.AssignIndex (_, i, v) ->
+          (check_expr (check_expr moved false i) false v, declared)
+      | Ast.Let (_, name, _, init) ->
+          let moved = match init with
+            | Some e -> check_expr moved (is_affine_var name) e
+            | None -> moved
+          in
+          (StringSet.remove name moved, StringSet.add name declared)
+      | Ast.Block body ->
+          let (out, _) = check_stmts moved declared body in
+          (out, declared)
+      | Ast.If (cond, yes, no) ->
+          let moved = check_expr moved false cond in
+          let (ym, _) = check_stmts moved declared yes in
+          let (nm, _) = check_stmts moved declared no in
+          (StringSet.union ym nm, declared)
+      | Ast.While (cond, body) ->
+          let moved = check_expr moved false cond in
+          let (body_moved, _) = check_stmts moved declared body in
+          let newly_moved_outer = StringSet.inter declared (StringSet.diff body_moved moved) in
+          if not (StringSet.is_empty newly_moved_outer) then
+            raise (TypeError (s.loc,
+              "cannot consume an affine value declared outside a loop inside that loop"));
+          (moved, declared)
+      | Ast.For (name, _, lo, hi, body) ->
+          let moved = check_expr (check_expr moved false lo) false hi in
+          let declared_body = StringSet.add name declared in
+          let (body_moved, _) = check_stmts moved declared_body body in
+          let newly_moved_outer = StringSet.inter declared (StringSet.diff body_moved moved) in
+          if not (StringSet.is_empty newly_moved_outer) then
+            raise (TypeError (s.loc,
+              "cannot consume an affine value declared outside a loop inside that loop"));
+          (moved, declared)
+      | Ast.ForEach (name, collection, body) ->
+          let moved = check_expr moved false collection in
+          let (body_moved, _) = check_stmts moved (StringSet.add name declared) body in
+          let newly_moved_outer = StringSet.inter declared (StringSet.diff body_moved moved) in
+          if not (StringSet.is_empty newly_moved_outer) then
+            raise (TypeError (s.loc,
+              "cannot consume an affine value declared outside a loop inside that loop"));
+          (moved, declared)
+      | Ast.Match (e, arms) ->
+          let moved = check_expr moved false e in
+          let arm_moved = List.fold_left (fun acc arm ->
+            let body = match arm with
+              | Ast.ArmVariant (_, _, b) | Ast.ArmWild b -> b
+            in
+            let (am, _) = check_stmts moved declared body in
+            StringSet.union acc am
+          ) moved arms in
+          (arm_moved, declared)
+      | Ast.Break | Ast.Continue -> (moved, declared)
+    in
+    ignore (check_stmts StringSet.empty
+      (List.fold_left (fun d (name, _) -> StringSet.add name d)
+         StringSet.empty fdef.params) fdef.body)
+  in
+  List.iter (function Ast.FuncDef f -> check_affine_func f | _ -> ()) prog;
   (* Deferred until AFTER Pass 3, same reasoning as check_undetermined_lets
      for locals: a global's type can be pinned not only by another global
      (the `Var vname` cross-reference case above) but also by a FUNCTION

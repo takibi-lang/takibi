@@ -96,14 +96,9 @@ let PHY_AN_10_HALF:  u32 = 0x0020;
 
 let ETH_RX_DESC_COUNT: isize = 4;
 let ETH_TX_DESC_COUNT: isize = 4;
-opaque struct NetRxDmaOwned;
-opaque struct NetRxCpuOwned;
+affine opaque struct NetRxCpuOwned;
 let mut net_rx_token_storage: u8;
 let mut net_rx_acquired_len: i32;
-
-fn net_rx_token() -> *NetRxDmaOwned {
-    return &net_rx_token_storage as *NetRxDmaOwned;
-}
 let ETH_BUF_SIZE: isize = 1536; // max 1518-byte Ethernet frame, rounded up
 let ETH_BUF_SIZE_USIZE: usize = 1536; // memory indexing counterpart
 
@@ -329,7 +324,7 @@ fn net_init() -> i32 {
 // descriptor is complete, or returns null otherwise. Every non-null result
 // must be passed exactly once to net_rx_release(). The frame length is kept
 // separate so malformed lengths cannot suppress descriptor release.
-fn net_rx_acquire(token: *NetRxDmaOwned) -> *NetRxCpuOwned {
+fn net_rx_acquire() -> *NetRxCpuOwned {
     let desc: *EthDmaDesc = rx_desc_ptr(eth_rx_cur);
     let word0: u32 = desc.word0;
     if ((word0 & ETH_RDES0_OWN) != 0) {
@@ -341,10 +336,10 @@ fn net_rx_acquire(token: *NetRxDmaOwned) -> *NetRxCpuOwned {
     // whether OWN happens to be clear -- unlike an i32 (arithmetic) shift,
     // which would sign-extend if this were ever reached with bit 31 set.
     net_rx_acquired_len = ((completed_word0 >> ETH_RDES0_FL_SHIFT) & ETH_RDES_FL_MASK) as i32;
-    return token as *NetRxCpuOwned;
+    return &net_rx_token_storage as *NetRxCpuOwned;
 }
 
-fn net_rx_len(frame: *NetRxCpuOwned) -> i32 {
+fn net_rx_len(frame: borrow *NetRxCpuOwned) -> i32 {
     return net_rx_acquired_len;
 }
 
@@ -365,7 +360,7 @@ fn net_rx_len(frame: *NetRxCpuOwned) -> i32 {
 // [0, ETH_RX_DESC_COUNT-1], Mul/Add propagation carry that through the
 // byte offset, and the same-base rule (literal offset 1514) closes the
 // subslice outright.
-fn net_rx_frame(frame: *NetRxCpuOwned) -> [u8; 1514..] {
+fn net_rx_frame(frame: borrow *NetRxCpuOwned) -> [u8; 1514..] {
     // 3 is ETH_RX_DESC_COUNT-1 written as a literal, not a computed
     // expression: Const_env only resolves bare literals/names, not
     // arithmetic on them (see CLAUDE.md's "global let initializers can't
@@ -382,13 +377,12 @@ fn net_rx_frame(frame: *NetRxCpuOwned) -> [u8; 1514..] {
 // Must receive the CPU-owned handle returned by net_rx_acquire(), once the
 // caller no longer needs net_rx_frame()'s contents (e.g. after net_transmit() has
 // already copied/sent them out, since net_transmit() is synchronous).
-fn net_rx_release(frame: *NetRxCpuOwned) -> *NetRxDmaOwned {
+fn net_rx_release(frame: *NetRxCpuOwned) {
     let desc: *EthDmaDesc = rx_desc_ptr(eth_rx_cur);
     desc.word0 = ETH_RDES0_OWN;
     dma_publish(); // CPU returns descriptor ownership before kicking DMA
     *ETH_DMARPDR = 1; // poll demand: resume RX DMA if it had suspended
     eth_rx_cur = (eth_rx_cur + 1) % ETH_RX_DESC_COUNT;
-    return frame as *NetRxDmaOwned;
 }
 
 // Transmits len bytes starting at buf. Synchronous: busy-waits for the DMA
