@@ -47,8 +47,8 @@
 let mut our_mac: [u8; 6];
 
 // Wire-VALUE constants compared/written directly against a byte field --
-// u8, matching that field (unlike the OFFSET constants above, which stay
-// i32 as array indices).
+// u8, matching that field (unlike the OFFSET constants above, which are
+// usize -- array/slice indexing is usize-only now).
 let PROTO_ICMP:        u8 = 1;
 let ICMP_ECHO_REQUEST: u8 = 8;
 let ICMP_ECHO_REPLY:   u8 = 0;
@@ -77,7 +77,8 @@ fn build_echo_reply(eth: [u8; 42..], ihl: {20..<21 as u16}, icmp_seg: [u8; 8..])
     slice_copy(ip[IP_SRC..<IP_DST], OUR_IP as []u8);
     ip[IP_TTL] = 64 as u8;
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                inet_checksum(ip[0..<ihl as {20..<21 as usize}]));
 
     // ICMP: type request -> reply, identifier/sequence/data unchanged,
     // recompute checksum (it covers the type byte, which just changed).
@@ -137,7 +138,7 @@ fn main() {
                         // size the ICMP checksum read below.
                         if (total_len <= ip_len_in_frame && total_len >= ihl) {
                             if (ip[IP_PROTOCOL] == PROTO_ICMP &&
-                                inet_checksum(ip[0..<ihl]) == 0) {
+                                inet_checksum(ip[0..<ihl as {20..<21 as usize}]) == 0) {
                                 if (slice_eq(ip[IP_DST..<20], OUR_IP as []u8)) {
                                     let icmp_len: u16 = total_len - ihl;
 
@@ -154,7 +155,9 @@ fn main() {
                                     // the LET declaration's unnarrowed floor
                                     // of 0.
                                     if (icmp_len >= 8 && icmp_len <= 1480) {
-                                        let icmp_seg = frame[34..<34 + icmp_len];
+                                        let icmp_len_idx: usize =
+                                            icmp_len as {8..<1481 as usize};
+                                        let icmp_seg = frame[34..<34 + icmp_len_idx];
                                         if (icmp_seg[ICMP_TYPE] == ICMP_ECHO_REQUEST &&
                                             icmp_seg[ICMP_CODE] == 0 &&
                                             inet_checksum(icmp_seg) == 0) {

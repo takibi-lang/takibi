@@ -60,29 +60,29 @@
 let mut our_mac: [u8; 6];
 
 // IPv4 field offsets, relative to the start of the IP header.
-let IP_TOTAL_LEN: i32 = 2;
-let IP_TTL:       i32 = 8;
-let IP_PROTOCOL:  i32 = 9;
-let IP_CHECKSUM:  i32 = 10;
-let IP_SRC:       i32 = 12;
-let IP_DST:       i32 = 16;
+let IP_TOTAL_LEN: usize = 2;
+let IP_TTL:       usize = 8;
+let IP_PROTOCOL:  usize = 9;
+let IP_CHECKSUM:  usize = 10;
+let IP_SRC:       usize = 12;
+let IP_DST:       usize = 16;
 
 // TCP field offsets, relative to the start of the TCP header.
-let TCP_SRC_PORT:    i32 = 0;
-let TCP_DST_PORT:    i32 = 2;
-let TCP_SEQ:         i32 = 4;
-let TCP_ACK:         i32 = 8;
-let TCP_DATA_OFFSET: i32 = 12;
-let TCP_FLAGS:       i32 = 13;
-let TCP_WINDOW:      i32 = 14;
-let TCP_CHECKSUM:    i32 = 16;
-let TCP_URGENT:      i32 = 18;
+let TCP_SRC_PORT:    usize = 0;
+let TCP_DST_PORT:    usize = 2;
+let TCP_SEQ:         usize = 4;
+let TCP_ACK:         usize = 8;
+let TCP_DATA_OFFSET: usize = 12;
+let TCP_FLAGS:       usize = 13;
+let TCP_WINDOW:      usize = 14;
+let TCP_CHECKSUM:    usize = 16;
+let TCP_URGENT:      usize = 18;
 
 // TCP_FLAG_*/PROTO_TCP/TCP_ECHO_PORT are wire-VALUE constants compared
 // directly against a byte/half-word field, so they take that field's
 // natural width (u8/u16) -- unlike the pure offset constants above,
-// which stay i32 as array indices (see CLAUDE.md's "Explicit-Base
-// {lo..<hi as base}" section). ihl/total_len/tcp_len/tcp_hdr_len/
+// which are usize (array/slice indexing is usize-only, see CLAUDE.md's
+// "Array/Slice Indices Must Be usize" section). ihl/total_len/tcp_len/tcp_hdr_len/
 // data_len/data_off below are ALSO u16-based: `len` (net_poll_rx()'s
 // deliberately-unconstrained i32 device-reported length) is bridged into
 // u16 with ONE explicit refined cast right after its own range is
@@ -154,7 +154,8 @@ fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     ip[IP_TTL] = 64 as u8;
     write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                inet_checksum(ip[0..<ihl as {20..<21 as usize}]));
 
     let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
     write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], TCP_ECHO_PORT as i32);
@@ -197,7 +198,8 @@ fn build_data_echo(eth: [u8; 1514..], ihl: {20..<21 as u16}, data: []u8, data_le
     // this responder's single-segment design supports.
     if (data_len >= 0 && data_len <= TCP_MAX_PAYLOAD) {
         let n: u16 = data_len;
-        let tcp_seg = eth[34..<54 + n];
+        let n_idx: usize = n as {0..<1461 as usize};
+        let tcp_seg = eth[34..<54 + n_idx];
 
         // Constructed directly from `eth` (literal base 54 = 34+20), NOT
         // by re-slicing tcp_seg[20..<20+n]: tcp_seg's own declared minimum
@@ -207,7 +209,7 @@ fn build_data_echo(eth: [u8; 1514..], ihl: {20..<21 as u16}, data: []u8, data_le
         // the same literal-offset same-base shape that proved tcp_seg
         // itself (`eth[34..<54+n]`) proves this one too -- same memory,
         // no unsafe needed.
-        slice_copy(eth[54..<54 + n], data);
+        slice_copy(eth[54..<54 + n_idx], data);
 
         slice_copy(eth[0..<6], eth[6..<12]);
         slice_copy(eth[6..<12], our_mac as []u8);
@@ -219,7 +221,8 @@ fn build_data_echo(eth: [u8; 1514..], ihl: {20..<21 as u16}, data: []u8, data_le
         ip[IP_TTL] = 64 as u8;
         write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20 + n);
         write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-        write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
+        write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                    inet_checksum(ip[0..<ihl as {20..<21 as usize}]));
 
         let client_port: u16 = read_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
         write_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT], TCP_ECHO_PORT as i32);
@@ -254,7 +257,8 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     ip[IP_TTL] = 64 as u8;
     write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                inet_checksum(ip[0..<ihl as {20..<21 as usize}]));
 
     let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
     write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], TCP_ECHO_PORT as i32);
@@ -315,7 +319,7 @@ fn main() {
 
                         if (total_len <= ip_len_in_frame && total_len >= ihl &&
                             ip[IP_PROTOCOL] == PROTO_TCP &&
-                            inet_checksum(ip[0..<ihl]) == 0) {
+                            inet_checksum(ip[0..<ihl as {20..<21 as usize}]) == 0) {
                             if (slice_eq(ip[IP_DST..<20], OUR_IP as []u8)) {
                                 let tcp:     [u8; 20..] = frame[34..<54];
                                 let tcp_len: u16 = total_len - ihl;
@@ -354,7 +358,9 @@ fn main() {
                                     pseudo[9] = PROTO_TCP;
                                     write_u16be(pseudo[10..<12], tcp_len);
                                     let sum: i32 = checksum_add(pseudo as []u8, 0);
-                                    let tcp_seg = frame[34..<34 + tcp_len];
+                                    let tcp_len_idx: usize =
+                                        tcp_len as {0..<1481 as usize};
+                                    let tcp_seg = frame[34..<34 + tcp_len_idx];
 
                                     if (checksum_fold(checksum_add(tcp_seg, sum)) == 0) {
                                         let dst_port: u16 = read_u16be(tcp[TCP_DST_PORT..<TCP_SEQ]) as u16;
@@ -424,6 +430,10 @@ fn main() {
                                                             // fact that the access itself is unsafe.
                                                             let data_len: u16 = max(tcp_len - tcp_hdr_len, 0);
                                                             let data_off: u16 = 34 + tcp_hdr_len;
+                                                            let data_off_idx: usize =
+                                                                data_off as {54..<95 as usize};
+                                                            let data_len_idx: usize =
+                                                                data_len as {0..<1461 as usize};
                                                             if (data_len > 0 &&
                                                                 (flags & TCP_FLAG_ACK) != 0 &&
                                                                 seq == conn_rcv_nxt) {
@@ -446,7 +456,9 @@ fn main() {
                                                                 // and the one that would need a genuine
                                                                 // relational/difference-constraint domain to
                                                                 // prove outright, deliberately deferred.
-                                                                let data = unsafe { frame[data_off..<data_off + data_len] };
+                                                                let data = unsafe {
+                                                                    frame[data_off_idx..<data_off_idx + data_len_idx]
+                                                                };
                                                                 if (build_data_echo(frame, ihl, data, data_len) == 1) {
                                                                     should_tx = 1;
                                                                     tx_len = 14 + ihl + 20 + data_len;

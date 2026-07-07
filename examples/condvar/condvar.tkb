@@ -10,8 +10,8 @@
 // SysTick_Handler are simpler than preempt's: just re-arm/switch).
 
 struct SchedState {
-    task_count:   i32;
-    current_task: i32;
+    task_count:   isize;
+    current_task: isize;
     tcb_sp:       [usize; 3];
 }
 

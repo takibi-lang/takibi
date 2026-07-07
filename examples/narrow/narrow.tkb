@@ -6,20 +6,25 @@
 // How narrowing works:
 //   In the then-branch of  if (v >= 0 && v < 8) { ... }
 //   the compiler treats v as {0..<8}.
-//   -> Array access buf[v] has its bounds check elided (Step 3.4 elision)
-//   -> v can be passed to write_entry(i: {0..<8}), which requires a refined type
+//   -> Array/slice indexing is usize-only (see CLAUDE.md's "Array/Slice
+//      Indices Must Be usize"), so the narrowed {0..<8} (base i32, since v
+//      itself is i32) needs one explicit `as {0..<8 as usize}` cast to
+//      bridge into the index/parameter's required base -- a FREE coercion
+//      (zero runtime cost) since the bounds already match exactly.
+//   -> v can be passed to write_entry(i: {0..<8 as usize}), which requires
+//      an EXACT (bounds AND base) match, not just a proven-safe range
 //
 // QEMU expected output: ABCDEFGH\r\n
 
 let mut buf: [u8; 8];
 
 // Function requiring a refined-type argument. Without narrowing, i32 cannot be passed directly.
-fn write_entry(i: {0..<8}, c: u8) {
+fn write_entry(i: {0..<8 as usize}, c: u8) {
     buf[i] = c;  // bounds check elided (TypeRefined proves safety)
 }
 
 fn print_buf() {
-    for i: i32 in 0..<8 {
+    for i: usize in 0..<8 {
         uart_putc(buf[i]);  // i: {0..<8} -> bounds check elided
     }
     uart_putc('\r');
@@ -30,9 +35,9 @@ fn print_buf() {
 // The if-condition performs a runtime check; in the then-branch v is narrowed to {0..<8}.
 fn fill_from_unknown(v: i32, c: u8) {
     if (v >= 0 && v < 8) {
-        // Inside here, v is typed as {0..<8}
-        write_entry(v, c);   // pass to refined argument: compiles OK (already narrowed)
-        buf[v] = c;          // direct array access: bounds check elided
+        // Inside here, v is typed as {0..<8}; bridge to usize (free coercion)
+        write_entry(v as {0..<8 as usize}, c);   // pass to refined argument: compiles OK (already narrowed)
+        buf[v as {0..<8 as usize}] = c;          // direct array access: bounds check elided
     }
     // Outside the if-block, v is i32 again (narrowing does not escape the block)
 }

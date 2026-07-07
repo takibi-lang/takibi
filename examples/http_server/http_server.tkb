@@ -84,40 +84,40 @@ let mut our_ip:  [u8; 4];
 // payload (right after the 14-byte Ethernet header). Adjacent constants
 // double as subslice bounds: arp[ARP_SHA..<ARP_SPA] is exactly the 6-byte
 // sender MAC field.
-let ARP_HTYPE: i32 = 0;
-let ARP_PTYPE: i32 = 2;
-let ARP_HLEN:  i32 = 4;
-let ARP_PLEN:  i32 = 5;
-let ARP_OPER:  i32 = 6;
-let ARP_SHA:   i32 = 8;
-let ARP_SPA:   i32 = 14;
-let ARP_THA:   i32 = 18;
-let ARP_TPA:   i32 = 24;
+let ARP_HTYPE: usize = 0;
+let ARP_PTYPE: usize = 2;
+let ARP_HLEN:  usize = 4;
+let ARP_PLEN:  usize = 5;
+let ARP_OPER:  usize = 6;
+let ARP_SHA:   usize = 8;
+let ARP_SPA:   usize = 14;
+let ARP_THA:   usize = 18;
+let ARP_TPA:   usize = 24;
 
 // IPv4 field offsets, relative to the start of the IP header.
-let IP_TOTAL_LEN: i32 = 2;
-let IP_TTL:       i32 = 8;
-let IP_PROTOCOL:  i32 = 9;
-let IP_CHECKSUM:  i32 = 10;
-let IP_SRC:       i32 = 12;
-let IP_DST:       i32 = 16;
+let IP_TOTAL_LEN: usize = 2;
+let IP_TTL:       usize = 8;
+let IP_PROTOCOL:  usize = 9;
+let IP_CHECKSUM:  usize = 10;
+let IP_SRC:       usize = 12;
+let IP_DST:       usize = 16;
 
 // TCP field offsets, relative to the start of the TCP header.
-let TCP_SRC_PORT:    i32 = 0;
-let TCP_DST_PORT:    i32 = 2;
-let TCP_SEQ:         i32 = 4;
-let TCP_ACK:         i32 = 8;
-let TCP_DATA_OFFSET: i32 = 12;
-let TCP_FLAGS:       i32 = 13;
-let TCP_WINDOW:      i32 = 14;
-let TCP_CHECKSUM:    i32 = 16;
-let TCP_URGENT:      i32 = 18;
+let TCP_SRC_PORT:    usize = 0;
+let TCP_DST_PORT:    usize = 2;
+let TCP_SEQ:         usize = 4;
+let TCP_ACK:         usize = 8;
+let TCP_DATA_OFFSET: usize = 12;
+let TCP_FLAGS:       usize = 13;
+let TCP_WINDOW:      usize = 14;
+let TCP_CHECKSUM:    usize = 16;
+let TCP_URGENT:      usize = 18;
 
 // TCP_FLAG_*/PROTO_TCP/HTTP_PORT are wire-VALUE constants compared
 // directly against a byte/half-word field, so they take that field's
-// natural width -- unlike the pure offset constants above, which stay
-// i32 as array indices (see CLAUDE.md's "Explicit-Base {lo..<hi as
-// base}" section). ihl/total_len/tcp_len/tcp_hdr_len/data_len/data_off
+// natural width -- unlike the pure offset constants above, which are
+// usize (array/slice indices are usize-only, see CLAUDE.md's "Array/Slice
+// Indices Must Be usize" section). ihl/total_len/tcp_len/tcp_hdr_len/data_len/data_off
 // below are ALSO u16-based: `len` (net_poll_rx()'s deliberately
 // -unconstrained i32 device-reported length) is bridged into u16 with
 // ONE explicit refined cast right after its own range is established,
@@ -164,13 +164,13 @@ let mut html_body: [u8; 512];
 // reopening the overflow this check exists to prevent.
 let HTTP_MAX_PAYLOAD: i32 = 700;
 
-fn build_html_body() -> i32 {
+fn build_html_body() -> isize {
     let mut len: isize = 0;
     len = len + copy_str(html_body + len,
         "<!DOCTYPE html><html><head><title>Takibi</title><style>body{background:#111;color:#eee;font-family:monospace;text-align:center;padding-top:8%}h1{color:#ff9944}p{color:#999}.count{color:#6cf}</style></head><body><h1>Hello from Takibi!</h1><p>Served by a TCP/IP stack written from scratch<br>in the takibi language, running bare-metal.</p><p>Request <span class='count'>#");
     len = len + write_udec(html_body + len, request_count);
     len = len + copy_str(html_body + len, "</span> since boot.</p></body></html>");
-    return len as i32;
+    return len;
 }
 
 // Rewrites a received ARP request into a reply in place. Only called
@@ -223,7 +223,8 @@ fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     ip[IP_TTL] = 64 as u8;
     write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                inet_checksum(ip[0..<ihl as {20..<21 as usize}]));
 
     let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
     write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
@@ -250,7 +251,8 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     ip[IP_TTL] = 64 as u8;
     write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                inet_checksum(ip[0..<ihl as {20..<21 as usize}]));
 
     let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
     write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
@@ -272,16 +274,16 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
 // the current fixed page; the caller must check for this and drop the
 // reply rather than transmit, see main()'s use of the return value).
 fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
-    let body_len: i32 = build_html_body();
+    let body_len: isize = build_html_body();
 
     let payload: *u8 = (eth as *u8) + 54;
     let mut len: isize = 0;
     len = len + copy_str(payload + len,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=us-ascii\r\nContent-Length: ");
-    len = len + write_udec(payload + len, body_len);
+    len = len + write_udec(payload + len, body_len as i32);
     len = len + copy_str(payload + len, "\r\nConnection: close\r\n\r\n");
     bytes_copy(payload + len, html_body as *u8, body_len);
-    len = len + (body_len as isize);
+    len = len + body_len;
 
     let wire_len: i32 = len as i32;
     if (len >= 0 && len <= (HTTP_MAX_PAYLOAD as isize)
@@ -296,12 +298,13 @@ fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
         // refined_v's range), so plain arithmetic on `n` below is fully
         // visible to codegen with no gap.
         let n: i32 = wire_len;
+        let n_idx: usize = n as {0..<701 as usize};
 
         slice_copy(eth[0..<6], eth[6..<12]);
         slice_copy(eth[6..<12], our_mac as []u8);
 
         let ip      = eth[14..<34];
-        let tcp_seg = eth[34..<54 + n];
+        let tcp_seg = eth[34..<54 + n_idx];
 
         slice_copy(ip[IP_DST..<20],     ip[IP_SRC..<IP_DST]);
         slice_copy(ip[IP_SRC..<IP_DST], our_ip as []u8);
@@ -314,7 +317,8 @@ fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
         // computation, only for the `ip[0..<ihl]` slice bound below.
         write_u16be(ip[IP_TOTAL_LEN..<4], (ihl as i32) + 20 + n);
         write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-        write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip[0..<ihl]));
+        write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                    inet_checksum(ip[0..<ihl as {20..<21 as usize}]));
 
         let client_port: u16 = read_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
         write_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
@@ -394,7 +398,7 @@ fn main() {
 
                     if (total_len <= ip_len_in_frame && total_len >= ihl &&
                         ip[IP_PROTOCOL] == PROTO_TCP &&
-                        inet_checksum(ip[0..<ihl]) == 0) {
+                        inet_checksum(ip[0..<ihl as {20..<21 as usize}]) == 0) {
                         if (slice_eq(ip[IP_DST..<20], our_ip as []u8)) {
                             let tcp:     [u8; 20..] = frame[34..<54];
                             let tcp_len: u16 = total_len - ihl;
@@ -439,7 +443,9 @@ fn main() {
                                 pseudo[9] = PROTO_TCP;
                                 write_u16be(pseudo[10..<12], tcp_len);
                                 let sum: i32 = checksum_add(pseudo as []u8, 0);
-                                let tcp_seg = frame[34..<34 + tcp_len];
+                                let tcp_len_idx: usize =
+                                    tcp_len as {0..<1481 as usize};
+                                let tcp_seg = frame[34..<34 + tcp_len_idx];
 
                                 if (checksum_fold(checksum_add(tcp_seg, sum)) == 0) {
                                     let dst_port: u16 = read_u16be(tcp[TCP_DST_PORT..<TCP_SEQ]) as u16;
@@ -488,6 +494,8 @@ fn main() {
                                                     // comment for why this doesn't change behavior).
                                                     let data_len: u16 = max(tcp_len - tcp_hdr_len, 0);
                                                     let data_off: u16 = 34 + tcp_hdr_len;
+                                                    let data_off_idx: usize =
+                                                        data_off as {54..<95 as usize};
                                                     if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
                                                         conn_rcv_nxt = conn_rcv_nxt + 1;
                                                         build_fin_ack(frame, ihl);
@@ -502,7 +510,7 @@ fn main() {
                                                         // rule: data_off's exact value is
                                                         // unconstrained, but the length (3)
                                                         // and lo<=hi are syntactic facts.
-                                                        let data3 = frame[data_off..<data_off + 3];
+                                                        let data3 = frame[data_off_idx..<data_off_idx + 3];
                                                         if (data3[0] == 'G' as u8 &&
                                                             data3[1] == 'E' as u8 &&
                                                             data3[2] == 'T' as u8) {

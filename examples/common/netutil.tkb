@@ -74,9 +74,9 @@ let ETH_MAC_LEN: isize = 6;
 let ETH_DST_OFF: isize = 0;
 let ETH_SRC_OFF: isize = 6;
 let ETH_TYPE_OFF: isize = 12;
-let ETH_DST: isize = 0;
-let ETH_SRC: isize = 6;
-let ETH_TYPE: isize = 12;
+let ETH_DST: usize = 0;
+let ETH_SRC: usize = 6;
+let ETH_TYPE: usize = 12;
 
 let ARP_HDR_LEN: isize = 28;
 let ARP_HTYPE_OFF: isize = 0;
@@ -88,15 +88,15 @@ let ARP_SHA_OFF: isize = 8;
 let ARP_SPA_OFF: isize = 14;
 let ARP_THA_OFF: isize = 18;
 let ARP_TPA_OFF: isize = 24;
-let ARP_HTYPE: isize = 0;
-let ARP_PTYPE: isize = 2;
-let ARP_HLEN: isize = 4;
-let ARP_PLEN: isize = 5;
-let ARP_OPER: isize = 6;
-let ARP_SHA: isize = 8;
-let ARP_SPA: isize = 14;
-let ARP_THA: isize = 18;
-let ARP_TPA: isize = 24;
+let ARP_HTYPE: usize = 0;
+let ARP_PTYPE: usize = 2;
+let ARP_HLEN: usize = 4;
+let ARP_PLEN: usize = 5;
+let ARP_OPER: usize = 6;
+let ARP_SHA: usize = 8;
+let ARP_SPA: usize = 14;
+let ARP_THA: usize = 18;
+let ARP_TPA: usize = 24;
 
 let IP_HDR_LEN: isize = 20;
 let IP_ADDR_LEN: isize = 4;
@@ -107,13 +107,13 @@ let IP_PROTOCOL_OFF: isize = 9;
 let IP_CHECKSUM_OFF: isize = 10;
 let IP_SRC_OFF: isize = 12;
 let IP_DST_OFF: isize = 16;
-let IP_VERSION_IHL: isize = 0;
-let IP_TOTAL_LEN: isize = 2;
-let IP_TTL: isize = 8;
-let IP_PROTOCOL: isize = 9;
-let IP_CHECKSUM: isize = 10;
-let IP_SRC: isize = 12;
-let IP_DST: isize = 16;
+let IP_VERSION_IHL: usize = 0;
+let IP_TOTAL_LEN: usize = 2;
+let IP_TTL: usize = 8;
+let IP_PROTOCOL: usize = 9;
+let IP_CHECKSUM: usize = 10;
+let IP_SRC: usize = 12;
+let IP_DST: usize = 16;
 
 let TCP_HDR_LEN: isize = 20;
 let TCP_SRC_PORT_OFF: isize = 0;
@@ -125,25 +125,25 @@ let TCP_FLAGS_OFF: isize = 13;
 let TCP_WINDOW_OFF: isize = 14;
 let TCP_CHECKSUM_OFF: isize = 16;
 let TCP_URGENT_OFF: isize = 18;
-let TCP_SRC_PORT: isize = 0;
-let TCP_DST_PORT: isize = 2;
-let TCP_SEQ: isize = 4;
-let TCP_ACK: isize = 8;
-let TCP_DATA_OFFSET: isize = 12;
-let TCP_FLAGS: isize = 13;
-let TCP_WINDOW: isize = 14;
-let TCP_CHECKSUM: isize = 16;
-let TCP_URGENT: isize = 18;
+let TCP_SRC_PORT: usize = 0;
+let TCP_DST_PORT: usize = 2;
+let TCP_SEQ: usize = 4;
+let TCP_ACK: usize = 8;
+let TCP_DATA_OFFSET: usize = 12;
+let TCP_FLAGS: usize = 13;
+let TCP_WINDOW: usize = 14;
+let TCP_CHECKSUM: usize = 16;
+let TCP_URGENT: usize = 18;
 
 let ICMP_HDR_LEN: isize = 8;
 let ICMP_TYPE_OFF: isize = 0;
 let ICMP_CODE_OFF: isize = 1;
 let ICMP_CHECKSUM_OFF: isize = 2;
-let ICMP_TYPE: isize = 0;
-let ICMP_CODE: isize = 1;
-let ICMP_CHECKSUM: isize = 2;
+let ICMP_TYPE: usize = 0;
+let ICMP_CODE: usize = 1;
+let ICMP_CHECKSUM: usize = 2;
 
-fn bytes_eq(a: *u8, b: *u8, n: i32) -> i32 {
+fn bytes_eq(a: *u8, b: *u8, n: isize) -> i32 {
     for i in 0..<n {
         if (a[i] != b[i]) {
             return 0;
@@ -152,7 +152,7 @@ fn bytes_eq(a: *u8, b: *u8, n: i32) -> i32 {
     return 1;
 }
 
-fn bytes_copy(dst: *u8, src: *u8, n: i32) {
+fn bytes_copy(dst: *u8, src: *u8, n: isize) {
     for i in 0..<n {
         dst[i] = src[i];
     }

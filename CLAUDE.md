@@ -43,6 +43,11 @@ The finished form of code is when index ranges are pinned at the type level usin
   - String literals (`"..."` -- supports `\n` `\r` `\t` `\\` `\"` escapes)
   - Comments (`// line comment`, `/* block comment */`)
   - Arithmetic (`+` `-` `*` `/` `%`), comparison (`<` `>` `<=` `>=` `==` `!=`)
+  - Array/slice indexing and subslice bounds use `usize` exclusively:
+    `arr[i]`, `slice[i]`, and `slice[lo..<hi]`. Bare literals infer as
+    `usize` in these positions. Raw-pointer indexing and raw-pointer slice
+    bounds use `isize` exclusively because they are signed pointer
+    displacements; bare literals infer as `isize` in those positions.
   - Pointer arithmetic uses element counts of type `isize` exclusively: `ptr + offset`, `offset + ptr`, and `ptr - offset` return the same pointer type. An `i32`/`usize` variable is rejected unless explicitly cast to `isize`; bare integer literals remain context-polymorphic and infer as `isize` here. `end - begin` requires matching pointee types and returns the element distance as `isize` (`Llvm.build_ptrdiff`). As with all raw-pointer operations, the compiler does not prove that both pointers belong to the same allocation.
   - Unary minus (`-expr`) -- desugared to `BinOp(Sub, IntLit 0, expr)` in the parser
   - Logical OR (`||`)
@@ -1173,6 +1178,41 @@ notably reassuring result given this change touches `Index`/
 `AssignIndex`/`SliceOf`/`For`, i.e. essentially every array/slice access
 in every example in the codebase.
 
+### Array and Slice Indices Must Be usize
+
+The later, stricter rule supersedes the `require_integer` statement in the
+for-loop section above: safe array/slice indexing is no longer polymorphic.
+`Index`, `AssignIndex`, and both bounds of an array/slice `SliceOf` require
+`usize` (or a `TypeRefined` whose own base is `usize`). An unresolved bare
+literal or for-loop counter is pinned to `usize` by the indexing use. A
+refined value with another base must cross the boundary explicitly, e.g.
+`ihl as {0..<21 as usize}`, so its range proof is retained. A plain
+`as usize` is legal but intentionally discards the proof and may leave a
+runtime bounds check.
+
+Raw pointers are intentionally separate: `p[i]` and
+`unsafe { p[lo..<hi] }` are low-level signed displacement operations and
+require `isize` (or a refined integer whose own base is `isize`). Bare
+literals infer as `isize`; an already-typed `i32`/`usize` value needs an
+explicit cast. They carry no array-length guarantee or runtime bounds check.
+
+Codegen normalizes every GEP index to the target's pointer width through
+`to_index_width`: i64 on AArch64 and i32 on Cortex-M. The former `to_i32`
+path silently truncated a genuine AArch64 `usize` index to i32; GEP treats
+that i32 index as signed, so values from 2^31 onward addressed the wrong
+element. Widening preserves the
+source signedness for raw-pointer offsets; safe array/slice indices are
+unsigned. Slice runtime checks compare `usize` bounds with unsigned
+comparisons, avoiding the incorrect rejection of valid values with the top
+bit set.
+
+One codegen bug surfaced during this migration: BinOp width synchronization
+replaced the narrower operand's semantic AST type with the wider operand's
+type. Consequently `{0..<7 as usize} + 1` was treated as adding two
+`{0..<7}` ranges and became `{0..<13}`, instead of `{1..<8}`. Width sync now
+changes only LLVM values; interval propagation keeps each operand's original
+semantic type.
+
 ### Undetermined let/let mut Types Are a Compile Error, Not an i32 Default
 
 Prompted by a design discussion after the for-loop fix above: should this
@@ -1560,6 +1600,7 @@ and pointer differences.
 Pointer arithmetic accepts no legacy `i32` exception:
 - `*T + isize`, `isize + *T`, and `*T - isize` operate in units of `T` and return `*T`.
 - `*T - *T` requires identical pointee types and returns an element count as `isize` via `Llvm.build_ptrdiff`.
+- `p[i]`, `p[i] = value`, and raw-pointer slice bounds require `isize`, matching signed pointer displacement semantics.
 - `*T + *T` is always a type error.
 - A bare literal in pointer arithmetic infers as `isize`; an already-typed `i32`/`usize` value requires an explicit `as isize` cast.
 
@@ -2108,8 +2149,8 @@ consistent with the pointer-cast philosophy.
 i's range `{lo..<hi}` satisfies `lo >= 0 && hi <= minimum`; the minimum is
 a lower bound of the runtime length, so this is sound. Anything unproven
 gets a runtime check against the RUNTIME length (`emit_bounds_check_dyn`:
-zext the i32-widened index to usize width -- negative indices become huge
-unsigned values -- one unsigned compare, llvm.trap, recorded as a
+the index is already target-width `usize`, so one unsigned compare catches
+values at or beyond the length -- llvm.trap, recorded as a
 --forbid-trap site).
 
 **Length narrowing**: `if (s.len >= K)` upgrades the binding's minimum to K

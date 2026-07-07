@@ -692,23 +692,30 @@ let rec coerce v (dst : Ast.type_expr) =
   | TypeRefined (_, _, base) -> coerce v base
   | TypeSlice _ -> v   (* fat values are never numerically coerced *)
 
-(* Widen an integer value to i32 so arithmetic stays uniform (legacy helper for TypeInt/TypeChar).
-   Does NOT touch pointer values. Also truncates an i64 source down to i32
-   (rather than only ever widening): type_inf.ml's Index/SliceOf/min/max
-   cases all require their operand to unify with plain TI32, so under
-   normal type-checked programs this function is never actually asked to
-   narrow -- the one exception is a bare 64-bit-wide IntLit (see gen_expr's
-   IntLit case), which type-checks as TI32 via its usual context-driven
-   unification but codegens to an i64 llvalue when the literal doesn't fit
-   i32. A truncate here is the well-defined, if unusual, outcome for that
-   case (e.g. a nonsensical huge literal used directly as an array index)
-   rather than an invalid build_zext (narrowing via "zero-extend") or a
-   crash. *)
-let to_i32 v =
+(* Normalize an index/offset value to usize width for use as a GEP index --
+   used by Index/AssignIndex/SliceOf. The old path unconditionally
+   truncated to i32 even for a genuinely i64/usize-typed index. On a
+   64-bit target (usize = i64) that silently discarded the index's upper
+   bits, corrupting any access into a buffer needing more than 2^31
+   elements to address -- a real correctness gap given a genuine 64-bit
+   address space, even though no actual bare-metal target this project
+   ships for has anywhere near enough RAM to trigger it today.
+   is_signed controls sext vs zext when WIDENING a narrower type (matches
+   the value's own signedness. Raw-pointer offsets are isize and array/slice
+   indices are usize, so both already have target pointer width after type
+   checking; the extension logic remains useful for literal/intermediate IR;
+   only truncates when the source is genuinely WIDER than usize. *)
+let to_index_width ~is_signed v =
   let ty = type_of v in
-  if ty = i32_type context || ty = pointer_type context then v
-  else if ty = i64_type context then build_trunc v (i32_type context) "trunc" builder
-  else build_zext v (i32_type context) "zext" builder
+  let target = usize_lltype () in
+  if ty = target || ty = pointer_type context then v
+  else
+    let src_bits = integer_bitwidth ty and dst_bits = integer_bitwidth target in
+    if src_bits > dst_bits then build_trunc v target "idxtrunc" builder
+    else if src_bits < dst_bits then
+      (if is_signed then build_sext v target "idxsext" builder
+       else build_zext v target "idxzext" builder)
+    else v
 
 (* Promote a value to its arithmetic width based on its AST type.
    <=32-bit types -> i32.  64-bit types -> i64.  bool -> i1 (unchanged).
@@ -805,12 +812,15 @@ let emit_trap_when bad ~bad_name ~ok_name =
   position_at_end ok_bb builder
 
 (* Bounds check for [T; N] arrays. Traps via llvm.trap when idx >= N (unsigned compare).
-   The unsigned compare also catches negative indices (idx < 0) as too-large unsigned values. *)
+   The unsigned compare also catches negative indices (idx < 0) as too-large unsigned values.
+   n_llv is built at idx_v's OWN width (usize width via to_index_width, not
+   hardcoded i32): comparing a usize-width idx_v against a hardcoded i32
+   constant would be an LLVM type mismatch on a 64-bit target. *)
 let emit_bounds_check loc idx_ty idx_v n =
   record_trap loc (Printf.sprintf
     "array bounds check remains: index type %s cannot prove range {0..<%d}"
     (ty_str idx_ty) n);
-  let n_llv = const_int (i32_type context) n in
+  let n_llv = const_int (type_of idx_v) n in
   let cmp   = build_icmp Icmp.Uge idx_v n_llv "oob_cmp" builder in
   emit_trap_when cmp ~bad_name:"oob" ~ok_name:"idx_ok"
 
@@ -1242,7 +1252,23 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (TypeUsize, const_of_int64 (ltype_of_ast TypeUsize) offset false)
 
   | Cast (target_ty, src_e) ->
-      let (src_ty, v) = gen_expr locals src_e in
+      let (src_ty_raw, v) = gen_expr locals src_e in
+      (* Consult narrowing_ctx when the source is a bare Var, same pattern
+         as Index/AssignIndex/SliceOf: an if-narrowed Mut variable's proven
+         range must be visible here too, since `v as {lo..<hi as usize}` is
+         now the standard idiom for carrying a narrowed range across a base
+         change (e.g. into a usize-typed array index -- see
+         require_usize_index in type_inf.ml). Without this, a narrowed i32
+         cast to a usize-based refined type would look unproven here even
+         though type_inf.ml (which threads the narrowed tyenv through
+         infer_expr) already proved it, silently reopening a runtime check
+         that used to be elided -- a correctness gap for the runtime CHECK
+         COUNT (not soundness: the check is merely redundant, never wrong). *)
+      let src_ty = match src_e.desc with
+        | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
+                    | Some t -> t | None -> src_ty_raw)
+        | _ -> src_ty_raw
+      in
       (match target_ty with
        | TypeNamed ename when Hashtbl.mem enum_underlying ename ->
            let ut    = Hashtbl.find enum_underlying ename in
@@ -1406,13 +1432,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
   | Index (id, idx) ->
       let (idx_ty_raw, idx_raw) = gen_expr locals idx in
-      let idx_v = to_i32 idx_raw in
+      let idx_v = to_index_width ~is_signed:(not (is_unsigned idx_ty_raw)) idx_raw in
       (* idx_ty priority: Const_env constant name (e.g. tcp[TCP_FLAGS] --
          sound because check_const_shadowing forbids shadowing, so the value
          is exactly the recorded literal) > Mut narrowing from narrowing_ctx
          (if-condition) > the raw inferred type. *)
       let idx_ty = match Const_env.bound_value idx with
-        | Some k -> TypeRefined (k, k + 1, TypeI32)  (* idx_v is already forced to i32 via to_i32 above *)
+        | Some k -> TypeRefined (k, k + 1, TypeUsize)  (* idx_v is already forced to usize width via to_index_width above *)
         | None ->
             (match idx.desc with
              | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
@@ -1507,7 +1533,6 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          together. Codegen re-verifies rather than trusting type_inf
          blindly: an array subslice that fails the proof here is a BUG
          error, not silent emission. *)
-      let usz = usize_lltype () in
       let gen_bound be =
         let (bty_raw, bv) = gen_expr locals be in
         let bty = match be.desc with
@@ -1519,7 +1544,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
           | Some k -> Some (k, k + 1)
           | None -> (match bty with TypeRefined (a, b, _) -> Some (a, b) | _ -> None)
         in
-        (to_i32 bv, range)
+        (to_index_width ~is_signed:(not (is_unsigned bty_raw)) bv, range)
       in
       (* Same-base rule: s[v ..< v + w] has lo <= hi and a guaranteed
          length >= lower(w), for ANY w with a known non-negative lower
@@ -1596,9 +1621,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       in
       let finish_sub elem_ty base_ptr lo_v hi_v min_len =
         let ep = build_gep (ltype_of_ast elem_ty) base_ptr [| lo_v |] "sub_ptr" builder in
-        let len32 = build_sub hi_v lo_v "sub_len" builder in
-        let len = if type_of len32 = usz then len32
-                  else build_zext len32 usz "zext" builder in
+        let len = build_sub hi_v lo_v "sub_len" builder in
         (TypeSlice (elem_ty, min_len), make_slice ep len)
       in
       let sub_of_slice elem_ty min_len fat =
@@ -1622,13 +1645,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
             record_trap e.loc (Printf.sprintf
               "subslice bounds check remains: bounds cannot prove range \
                {0..<%d} (the slice's compile-time minimum length)" min_len);
-            let i32z = const_int (i32_type context) 0 in
-            let neg  = build_icmp Icmp.Slt lo_v i32z "ss_neg" builder in
-            let inv  = build_icmp Icmp.Sgt lo_v hi_v "ss_inv" builder in
-            let hi_w = if type_of hi_v = usz then hi_v
-                       else build_zext hi_v usz "zext" builder in
-            let over = build_icmp Icmp.Ugt hi_w (slice_len fat) "ss_over" builder in
-            let bad  = build_or (build_or neg inv "ss_bad0" builder) over "ss_bad" builder in
+            let inv  = build_icmp Icmp.Ugt lo_v hi_v "ss_inv" builder in
+            let over = build_icmp Icmp.Ugt hi_v (slice_len fat) "ss_over" builder in
+            let bad  = build_or inv over "ss_bad" builder in
             emit_trap_when bad ~bad_name:"ss_trap" ~ok_name:"ss_ok"
           end
         end;
@@ -1650,9 +1669,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         let arr_ll = array_type (ltype_of_ast elem_ty) n in
         let zero = const_int (i32_type context) 0 in
         let ep = build_in_bounds_gep arr_ll arr_ptr [| zero; lo_v |] "sub_ptr" builder in
-        let len32 = build_sub hi_v lo_v "sub_len" builder in
-        let len = if type_of len32 = usz then len32
-                  else build_zext len32 usz "zext" builder in
+        let len = build_sub hi_v lo_v "sub_len" builder in
         (TypeSlice (elem_ty, guaranteed_min lo_r hi_r), make_slice ep len)
       in
       let sub_of_ptr elem_ty base_ptr =
@@ -2152,11 +2169,11 @@ let gen_func ?prog_types fdef =
 
     | AssignIndex (id, idx, rhs) ->
         let (idx_ty_raw, idx_raw) = gen_expr locals idx in
-        let idx_v = to_i32 idx_raw in
+        let idx_v = to_index_width ~is_signed:(not (is_unsigned idx_ty_raw)) idx_raw in
         (* Same idx_ty priority as gen_expr's Index case (sync rule):
            Const_env constant name > narrowing_ctx > raw inferred type. *)
         let idx_ty = match Const_env.bound_value idx with
-          | Some k -> TypeRefined (k, k + 1, TypeI32)  (* idx_v is already forced to i32 via to_i32 above *)
+          | Some k -> TypeRefined (k, k + 1, TypeUsize)  (* idx_v is already forced to usize width via to_index_width above *)
           | None ->
               (match idx.desc with
                | Var n -> (match Hashtbl.find_opt narrowing_ctx n with

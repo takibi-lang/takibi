@@ -101,6 +101,7 @@ let mut virtio_base: i32 = 0;
 // driver (matching eth.tkb's encapsulation) -- the app never needs to know
 // about queue depth, PAGE_SIZE, or descriptor rings.
 let RX_BUF_SIZE: isize = 1536; // 10-byte virtio_net_hdr + max 1514-byte Ethernet frame, rounded up
+let RX_BUF_SIZE_USIZE: usize = 1536; // memory indexing counterpart
 
 let mut rx_queue_mem: [u8; 2 * PAGE_SIZE] align(4096);
 let mut tx_queue_mem: [u8; 2 * PAGE_SIZE] align(4096);
@@ -163,8 +164,9 @@ fn virtio_driver_ok() {
 // Reads the device's 6-byte MAC out of Config space. VIRTIO_NET_F_MAC is
 // always acked in virtio_negotiate() now, so this is always meaningful.
 fn virtio_net_read_mac(mac_out: *u8) {
-    for i in 0..<6 {
-        let p: *io u8 = (virtio_base + VIRTIO_CONFIG_MAC_OFFSET + i) as *io u8;
+    for i: isize in 0..<6 {
+        let p: *io u8 = (virtio_base + VIRTIO_CONFIG_MAC_OFFSET
+            + (i as i32)) as *io u8;
         mac_out[i] = *p;
     }
 }
@@ -293,8 +295,8 @@ fn net_rx_frame() -> [u8; 1514..] {
     // them (see CLAUDE.md's "global let initializers can't constant-fold"
     // limitation), so `QNUM - 1` here would lose the range min() needs.
     // Update this literal if QNUM (declared above) ever changes.
-    let idx: isize = max(min(net_last_rx_desc_idx, 7), 0);
-    let offset: isize = idx * RX_BUF_SIZE + 10;
+    let idx: usize = max(min(net_last_rx_desc_idx, 7), 0) as {0..<8 as usize};
+    let offset: usize = idx * RX_BUF_SIZE_USIZE + 10;
     return rx_bufs[offset..<offset + 1514];
 }
 

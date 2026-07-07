@@ -2,7 +2,7 @@
 // Demonstrates array read/write through a pointer using arr[i]=v and arr[i].
 struct IntSlice {
     data: *i32;
-    len:  i32;
+    len:  isize;
 }
 
 fn print_arr(s: *IntSlice) {
@@ -18,7 +18,7 @@ fn print_arr(s: *IntSlice) {
 
 fn bubble_sort(s: *IntSlice) {
     let arr: *i32 = s.data;
-    let n: i32 = s.len;
+    let n: isize = s.len;
     for i in 0..<(n - 1) {
         for j in 0..<(n - 1 - i) {
             if (arr[j] > arr[j + 1]) {
@@ -43,4 +43,3 @@ fn main() {
     uart_puts("after:  ");
     print_arr(&s);
 }
-

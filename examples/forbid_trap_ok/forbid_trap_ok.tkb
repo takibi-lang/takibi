@@ -2,15 +2,17 @@
 // but every access has its index range pinned at the type level, so zero
 // runtime trap checks are generated and the strict mode accepts the file.
 //
-//   - fill():    `for i: i32 in 0..<8` gives i the type {0..<8}
-//   - read_at(): the {0..<8} parameter type makes the caller prove the range
-//   - main():    the literal 7 has type {7..<8}, a subtype of {0..<8}
+//   - fill():    `for i: usize in 0..<8` gives i the type {0..<8 as usize}
+//   - read_at(): the {0..<8 as usize} parameter type makes the caller prove the range
+//   - main():    the literal 7 has type {7..<8}, a subtype of {0..<8 as usize}
 //
-// fill()'s explicit `: i32` annotation is required, not just style: `i` is
-// never passed anywhere with a concrete type of its own inside the loop
-// body (`buf[i]`/`'A' + i` don't pin anything -- see CLAUDE.md's for-loop
-// sections for why), so without the annotation this is a compile error
-// asking for one, rather than a silent i32 default.
+// fill()'s explicit `: usize` annotation is required for two reasons: `i`
+// is never passed anywhere with a concrete type of its own inside the loop
+// body (`buf[i]`/`'A' + i` don't pin anything by themselves -- see
+// CLAUDE.md's for-loop sections), so without SOME annotation this is a
+// compile error asking for one; and array/slice indexing is usize-only
+// (see CLAUDE.md's "Array/Slice Indices Must Be usize"), so `usize`
+// specifically is what buf[i] requires directly, with no cast.
 //
 // This is the "finished form" the design principle describes: code with no
 // remaining bounds checks = code whose index ranges are fully expressed in
@@ -20,12 +22,12 @@
 let mut buf: [u8; 8];
 
 fn fill() {
-    for i: i32 in 0..<8 {
+    for i: usize in 0..<8 {
         buf[i] = ('A' + i) as u8;
     }
 }
 
-fn read_at(i: {0..<8}) -> u8 {
+fn read_at(i: {0..<8 as usize}) -> u8 {
     return buf[i];
 }
 

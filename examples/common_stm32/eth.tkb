@@ -99,6 +99,7 @@ extern fn eth_dsb();
 let ETH_RX_DESC_COUNT: isize = 4;
 let ETH_TX_DESC_COUNT: isize = 4;
 let ETH_BUF_SIZE: isize = 1536; // max 1518-byte Ethernet frame, rounded up
+let ETH_BUF_SIZE_USIZE: usize = 1536; // memory indexing counterpart
 
 // Four 32-bit words, exactly matching the STM32F7 chained DMA descriptor.
 // Fields are io because the DMA engine updates them asynchronously.
@@ -245,9 +246,10 @@ fn phy_init() -> i32 {
 }
 
 fn eth_rx_ring_init() {
-    for i in 0..<ETH_RX_DESC_COUNT {
-        let buf:  *u8 = eth_rx_bufs + i * ETH_BUF_SIZE;
-        let next: *EthDmaDesc = rx_desc_ptr((i + 1) % ETH_RX_DESC_COUNT);
+    for i: usize in 0..<4 {
+        let ptr_i: isize = i as isize;
+        let buf:  *u8 = eth_rx_bufs + ptr_i * ETH_BUF_SIZE;
+        let next: *EthDmaDesc = rx_desc_ptr((ptr_i + 1) % ETH_RX_DESC_COUNT);
 
         eth_rx_descs[i].word1 = ETH_RDES1_RCH | (ETH_BUF_SIZE as u32); // RCH | RBS1
         eth_rx_descs[i].word2 = ptr_to_u32(buf);                       // buffer1 address
@@ -258,8 +260,9 @@ fn eth_rx_ring_init() {
 }
 
 fn eth_tx_ring_init() {
-    for i in 0..<ETH_TX_DESC_COUNT {
-        let next: *EthDmaDesc = tx_desc_ptr((i + 1) % ETH_TX_DESC_COUNT);
+    for i: usize in 0..<4 {
+        let ptr_i: isize = i as isize;
+        let next: *EthDmaDesc = tx_desc_ptr((ptr_i + 1) % ETH_TX_DESC_COUNT);
         // word0 (status/control) and word1/word2 (size/buffer) are left at
         // 0 (BSS-zeroed): OWN=0 means these start out owned by the CPU, and
         // net_transmit() fills them in fresh on every send.
@@ -360,8 +363,8 @@ fn net_rx_frame() -> [u8; 1514..] {
     // constant-fold" limitation), so a computed bound here would lose the
     // range min() needs. Update this literal if ETH_RX_DESC_COUNT
     // (declared above) ever changes.
-    let idx: isize = max(min(eth_rx_cur, 3), 0);
-    let offset: isize = idx * ETH_BUF_SIZE;
+    let idx: usize = max(min(eth_rx_cur, 3), 0) as {0..<4 as usize};
+    let offset: usize = idx * ETH_BUF_SIZE_USIZE;
     return eth_rx_bufs[offset..<offset + 1514];
 }
 

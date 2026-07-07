@@ -31,14 +31,14 @@
 let mut buf: [u8; 16];
 
 fn fill8(s: [u8; 8..]) {
-    for i: i32 in 0..<8 {
+    for i: usize in 0..<8 {
         s[i] = ('A' + i) as u8;
     }
 }
 
 fn sum8(s: [u8; 8..]) -> i32 {
     let mut total: i32 = 0;
-    for i: i32 in 0..<8 {
+    for i: usize in 0..<8 {
         total = total + (s[i] as i32);
     }
     return total;
