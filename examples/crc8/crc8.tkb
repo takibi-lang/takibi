@@ -40,7 +40,7 @@ fn crc8(data: *u8, len: isize) u8 {
     return crc;
 }
 
-fn main() {
+fn app_main() {
     let s: *u8 = "123456789";
     let result: i32 = crc8(s, strlen(s)) as i32;
     uart_puts("CRC-8: 0x");

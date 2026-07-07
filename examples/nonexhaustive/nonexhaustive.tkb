@@ -28,7 +28,7 @@ fn ethertype_name(et: EtherType) -> *u8 {
     return "";
 }
 
-fn main() {
+fn app_main() {
     // Known value: behaves exactly like exhaustive enum.
     let et: EtherType = EtherType::IPv4;
     uart_puts(ethertype_name(et));

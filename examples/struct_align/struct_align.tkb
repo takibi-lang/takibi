@@ -59,7 +59,7 @@ fn print_aligned(label: *u8, addr: usize, mask: usize) {
     }
 }
 
-fn main() {
+fn app_main() {
     // Global struct variable
     let gaddr: usize = (&g) as usize;
     print_aligned("global Vec4:     ", gaddr, 15);

@@ -3,7 +3,7 @@
 fn accept(i: {0..<8 as i32}) -> i32 {
     return i;
 }
-fn main() -> i32 {
+fn app_main() -> i32 {
     let j: {0..<9 as i32} = 3;
     return accept(j);
 }

@@ -31,7 +31,7 @@ fn read_at(i: {0..<8 as usize}) -> u8 {
     return buf[i];
 }
 
-fn main() -> i32 {
+fn app_main() -> i32 {
     fill();
     return read_at(7) as i32;
 }

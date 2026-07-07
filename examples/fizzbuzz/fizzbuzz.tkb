@@ -1,6 +1,6 @@
 // FizzBuzz: demo of % modulo and if/else if chain. Prints 1 to 20.
 
-fn main() {
+fn app_main() {
     for i: i32 in 1..<21 {
         if (i % 15 == 0) {
             uart_puts("FizzBuzz\r\n");

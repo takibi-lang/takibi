@@ -43,6 +43,7 @@ fn uart_rx_isr() {
         uart_putc('\n');
         irq_done = 1;
     }
+    interrupt_notify();
 }
 
 fn irq_dispatch(frame_sp: i32) -> i32 {
@@ -61,13 +62,10 @@ fn irq_dispatch(frame_sp: i32) -> i32 {
     return frame_sp;
 }
 
-fn USART1_IRQHandler() {
-    uart_rx_isr();
-}
-
-fn main() {
+fn app_main() {
     register_irq(33, uart_rx_isr);
     irq_uart_rx_setup();
+    uart_set_rx_handler(uart_rx_isr);
     uart_puts("irq ready\r\n");
 
     // Unmask the interrupt source last, after setup and the ready message,
@@ -76,6 +74,8 @@ fn main() {
     irq_uart_rx_unmask();
 
     let p: *io i32 = &irq_done;
-    while (*p == 0) {}
+    while (*p == 0) {
+        interrupt_wait();
+    }
     uart_puts("done\r\n");
 }

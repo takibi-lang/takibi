@@ -86,6 +86,7 @@ let rec ty_str = function
   | TypeRefined (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
   | TypeSlice (t, 0) -> Printf.sprintf "[]%s" (ty_str t)
   | TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (ty_str t) n
+  | TypeBorrow t -> "borrow " ^ ty_str t
 
 (* ---- DWARF debug info (opt-in via -g; see enable_debug_info) ----
    Everything DI-related elsewhere in this file (gen_func / gen_stmt / gen_program)
@@ -352,6 +353,74 @@ let restore_narrowing_mut saved =
     | Some old -> Hashtbl.replace narrowing_ctx name old
   ) saved
 
+type device_barrier_kind = DmaPublish | DmaConsume | DeviceFence
+
+let starts_with s prefix =
+  let n = String.length prefix in
+  String.length s >= n && String.sub s 0 n = prefix
+
+let get_or_declare_intrinsic name fty =
+  match lookup_function name the_module with
+  | Some fn -> fn
+  | None -> declare_function name fty the_module
+
+(* Emit a target-specific hardware barrier which is also opaque to LLVM's
+   memory optimizer. ARM/AArch64 and x86 have target intrinsics; LLVM 19/22
+   expose no RISC-V fence intrinsic carrying the I/O predecessor/successor
+   bits, so RISC-V uses compiler-internal side-effecting inline asm with a
+   memory clobber. This is an implementation detail, not source-level asm.
+
+   ARM currently uses the conservative DSB SY for all three operations --
+   exactly the instruction validated by the STM32 Ethernet bring-up. x86
+   likewise starts conservatively with MFENCE. These can be weakened later
+   per platform without changing Takibi source semantics. *)
+let emit_device_barrier kind =
+  let triple = target_triple the_module in
+  let void_fn = function_type (void_type context) [||] in
+  if starts_with triple "aarch64" then begin
+    let fty = function_type (void_type context) [| i32_type context |] in
+    let fn = get_or_declare_intrinsic "llvm.aarch64.dsb" fty in
+    ignore (build_call fty fn [| const_int (i32_type context) 15 |] "" builder)
+  end else if starts_with triple "arm" || starts_with triple "thumb" then begin
+    let fty = function_type (void_type context) [| i32_type context |] in
+    let fn = get_or_declare_intrinsic "llvm.arm.dsb" fty in
+    ignore (build_call fty fn [| const_int (i32_type context) 15 |] "" builder)
+  end else if starts_with triple "x86_64" || starts_with triple "i386"
+       || starts_with triple "i486" || starts_with triple "i586"
+       || starts_with triple "i686" then begin
+    let fn = get_or_declare_intrinsic "llvm.x86.sse2.mfence" void_fn in
+    ignore (build_call void_fn fn [||] "" builder)
+  end else if starts_with triple "riscv32" || starts_with triple "riscv64" then begin
+    let asm = match kind with
+      | DmaPublish -> "fence w, o"
+      | DmaConsume -> "fence i, r"
+      | DeviceFence -> "fence iorw, iorw"
+    in
+    let inline = const_inline_asm void_fn asm "~{memory}" true false in
+    ignore (build_call void_fn inline [||] "" builder)
+  end else
+    raise (Error (Printf.sprintf
+      "DMA/device barriers are not implemented for target '%s'" triple))
+
+(* A retained event avoids the check-then-sleep lost-wakeup race: ARM SEV
+   sets the event register even if the matching WFE has not executed yet.
+   WFE may also return spuriously, so source code must always re-check its
+   flag in a loop.  Do not silently substitute WFI on targets without an
+   equivalent retained notification -- that would reintroduce the race. *)
+let emit_interrupt_event notify =
+  let triple = target_triple the_module in
+  let fty = function_type (void_type context) [||] in
+  let asm =
+    if starts_with triple "aarch64" || starts_with triple "arm"
+       || starts_with triple "thumb" then
+      if notify then "sev" else "wfe"
+    else
+      raise (Error (Printf.sprintf
+        "interrupt event wait/notify is not implemented for target '%s'" triple))
+  in
+  let inline = const_inline_asm fty asm "~{memory}" true false in
+  ignore (build_call fty inline [||] "" builder)
+
 let setup_target ?(triple = "") ?(cpu = "") ?(features = "") () =
   let _ = Llvm_all_backends.initialize () in
   let triple = if triple = "" then Llvm_target.Target.default_triple () else triple in
@@ -411,6 +480,48 @@ let usize_lltype () =
 
 let isize_lltype () = usize_lltype ()
 
+type dma_cache_op = CacheClean | CacheInvalidate
+
+(* Cortex-M7 exposes cache-line maintenance through the memory-mapped SCB
+   DCCMVAC/DCIMVAC registers. The operation covers every 32-byte line touched
+   by [ptr, ptr+len); callers must still ensure that DMA buffers do not share
+   cache lines with unrelated mutable data. *)
+let emit_cortex_m_cache_range op ptr len =
+  let fn = block_parent (insertion_block builder) in
+  let preheader = insertion_block builder in
+  let cond_bb = append_block context "dma.cache.cond" fn in
+  let body_bb = append_block context "dma.cache.body" fn in
+  let done_bb = append_block context "dma.cache.done" fn in
+  let ity = usize_lltype () in
+  let addr = build_ptrtoint ptr ity "dma.addr" builder in
+  let mask = const_int ity (-32) in
+  let start = build_and addr mask "dma.line.start" builder in
+  let end_unaligned = build_add addr len "dma.end.unaligned" builder in
+  let end_rounded = build_and
+    (build_add end_unaligned (const_int ity 31) "dma.end.plus31" builder)
+    mask "dma.line.end" builder in
+  ignore (build_br cond_bb builder);
+  position_at_end cond_bb builder;
+  let line = build_phi [(start, preheader)] "dma.line" builder in
+  let nonempty = build_icmp Icmp.Ne len (const_null ity) "dma.nonempty" builder in
+  let before_end = build_icmp Icmp.Ult line end_rounded "dma.before.end" builder in
+  ignore (build_cond_br (build_and nonempty before_end "dma.cache.more" builder)
+            body_bb done_bb builder);
+  position_at_end body_bb builder;
+  let reg_addr = match op with
+    | CacheClean -> 0xE000EF68
+    | CacheInvalidate -> 0xE000EF5C
+  in
+  let reg = const_inttoptr (const_int ity reg_addr) (pointer_type context) in
+  let line32 = if ity = i32_type context then line
+               else build_trunc line (i32_type context) "dma.line32" builder in
+  let st = build_store line32 reg builder in
+  set_volatile true st;
+  let next = build_add line (const_int ity 32) "dma.line.next" builder in
+  ignore (build_br cond_bb builder);
+  add_incoming (next, body_bb) line;
+  position_at_end done_bb builder
+
 (* Test-only introspection: usize's current bit-width (32 or 64) as a plain
    int, so test_takibi.ml can assert on it without needing the `llvm`
    ocamlfind package linked directly (this library already depends on it). *)
@@ -449,6 +560,7 @@ let rec ltype_of_ast = function
            match Hashtbl.find_opt struct_lltypes sname with
            | Some llty -> llty
            | None -> raise (Error (Printf.sprintf "Unknown named type: %s" sname)))
+  | TypeBorrow t -> ltype_of_ast t
 
 (* DWARF Attribute Type Encoding constants (DWARF5 spec section 7.8, table 7.11).
    Llvm_debuginfo has no named enum for these -- they're stable spec constants,
@@ -493,6 +605,7 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
   | TypeVoid  -> Llvm_debuginfo.llmetadata_null ()
   | TypeRefined (_, _, base) -> ditype_of_ast dib file base  (* same LLVM-level representation as its base; see ltype_of_ast *)
   | TypeSlice (t, _) -> ditype_of_ast dib file (TypePtr t)
+  | TypeBorrow t -> ditype_of_ast dib file t
       (* modeled as a pointer for now: enough for gdb to follow the data;
          a real {ptr, len} DICompositeType needs the member-offset plumbing
          deliberately skipped for structs (see the comment above) *)
@@ -690,6 +803,7 @@ let rec coerce v (dst : Ast.type_expr) =
   | TypeNamed _ -> v
   | TypeRefined (_, _, base) -> coerce v base
   | TypeSlice _ -> v   (* fat values are never numerically coerced *)
+  | TypeBorrow t -> coerce v t
 
 (* Normalize an index/offset value to usize width for use as a GEP index --
    used by Index/AssignIndex/SliceOf. The old path unconditionally
@@ -1735,6 +1849,55 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
   | StructLit _ ->
       raise (Error "BUG: StructLit must be handled in gen_stmt / gen_global, not gen_expr")
 
+  | Call ("dma_publish", []) ->
+      emit_device_barrier DmaPublish;
+      (TypeVoid, const_null (i1_type context))
+
+  | Call ("dma_consume", []) ->
+      emit_device_barrier DmaConsume;
+      (TypeVoid, const_null (i1_type context))
+
+  | Call ("device_fence", []) ->
+      emit_device_barrier DeviceFence;
+      (TypeVoid, const_null (i1_type context))
+
+  | Call ("signal_fence", []) ->
+      let fty = function_type (void_type context) [||] in
+      let inline = const_inline_asm fty "" "~{memory}" true false in
+      ignore (build_call fty inline [||] "" builder);
+      (TypeVoid, const_null (i1_type context))
+
+  | Call ("interrupt_wait", []) ->
+      emit_interrupt_event false;
+      (TypeVoid, const_null (i1_type context))
+
+  | Call ("interrupt_notify", []) ->
+      emit_interrupt_event true;
+      (TypeVoid, const_null (i1_type context))
+
+  | Call (("dma_prepare_tx" | "dma_prepare_rx" | "dma_finish_rx") as name,
+          [ptr_e; len_e]) ->
+      let (_, ptr) = gen_expr locals ptr_e in
+      let (_, len) = gen_expr ~expected_ty:TypeUsize locals len_e in
+      let triple = target_triple the_module in
+      if starts_with triple "arm" || starts_with triple "thumb" then begin
+        (match name with
+         | "dma_prepare_tx" ->
+             emit_cortex_m_cache_range CacheClean ptr len;
+             emit_device_barrier DmaPublish
+         | "dma_prepare_rx" ->
+             emit_cortex_m_cache_range CacheInvalidate ptr len;
+             emit_device_barrier DmaPublish
+         | _ ->
+             emit_device_barrier DmaConsume;
+             emit_cortex_m_cache_range CacheInvalidate ptr len;
+             emit_device_barrier DmaConsume)
+      end else
+        emit_device_barrier (match name with
+          | "dma_prepare_tx" | "dma_prepare_rx" -> DmaPublish
+          | _ -> DmaConsume);
+      (TypeVoid, const_null (i1_type context))
+
   | Call ("slice_copy", [d_e; s_e]) ->
       (* Builtin (see type_inf.ml's Call case for the full semantics
          contract): copy min(dst.len, src.len) elements forward, return the
@@ -2733,6 +2896,8 @@ let gen_program ?prog_types prog =
   unsafe_depth := 0;
   (* Pass 0: register struct and enum types -- must precede ltype_of_ast for TypeNamed *)
   List.iter (function
+    | OpaqueStructDef (name, _) ->
+        Hashtbl.add struct_lltypes name (named_struct_type context name)
     | StructDef (name, fields, is_packed, align_opt) ->
         let field_lltys = List.map (fun (_, ty) -> ltype_of_ast ty) fields
                           |> Array.of_list in
@@ -2786,6 +2951,7 @@ let gen_program ?prog_types prog =
           Hashtbl.add func_param_ast_types name param_ast
         end
     | StructDef _ -> ()
+    | OpaqueStructDef _ -> ()
     | EnumDef _   -> ()
   ) prog;
   (* Pass 2: generate function bodies *)
@@ -2794,6 +2960,7 @@ let gen_program ?prog_types prog =
     | LetDef _        -> ()
     | ExternFuncDef _ -> ()
     | StructDef _     -> ()
+    | OpaqueStructDef _ -> ()
     | EnumDef _       -> ()
   ) prog;
   (* Resolve any deferred/forward-referenced DI metadata. Must run after every

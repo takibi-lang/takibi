@@ -15,7 +15,7 @@ fn print_a() {
     print_b();
 }
 
-fn main() {
+fn app_main() {
     print_a();
     uart_puts("done\r\n");
 }

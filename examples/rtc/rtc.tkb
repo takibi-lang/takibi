@@ -6,7 +6,7 @@
 // one tick elapses between sampling t0 and observing the change, so the
 // elapsed count is always 1 by construction and doesn't need computing.
 
-fn main() {
+fn app_main() {
     rtc_init();
 
     uart_puts("rtc: ");

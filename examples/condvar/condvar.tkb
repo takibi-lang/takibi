@@ -97,7 +97,7 @@ fn task_consumer() {
     while (*p == 0) {}
 }
 
-fn main() {
+fn app_main() {
     let sp: *usize = sched.tcb_sp;
     sp[1] = setup_task_stack(stack_a + 4096, task_producer);
     sp[2] = setup_task_stack(stack_b + 4096, task_consumer);

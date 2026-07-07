@@ -236,7 +236,7 @@ run_no_trap_test() {
 #   - llvm-dwarfdump-19 --debug-line: checks SRC_TKB's basename appears in
 #     the file_names table (proves the compile unit references the right
 #     source file at all).
-#   - addr2line, pointed at the address of `main` (found via llvm-nm-19):
+#   - addr2line, pointed at the address of `app_main` (found via llvm-nm-19):
 #     checks the resolved "file:line" is an ABSOLUTE path ending in
 #     ":<MAIN_LINE>". Requiring an absolute path guards against the exact
 #     bug this check was written for: DIFile directories left relative get
@@ -244,7 +244,7 @@ run_no_trap_test() {
 #     e.g. "examples/common/examples/fizzbuzz/fizzbuzz.tkb" instead of
 #     ".../examples/fizzbuzz/fizzbuzz.tkb" (see lib/llvm_gen.ml's
 #     di_file_for comment for the fix).
-# MAIN_LINE (the source line `fn main()` is declared on) is passed explicitly
+# MAIN_LINE (the source line `fn app_main()` is declared on) is passed explicitly
 # rather than grepped out of SRC_TKB, so this check fails loudly if fizzbuzz.tkb
 # is ever edited without updating it, instead of silently checking the wrong line.
 run_dwarf_test() {
@@ -258,9 +258,9 @@ run_dwarf_test() {
         return
     fi
 
-    main_addr=$(llvm-nm-19 "$kernel" 2>/dev/null | awk '$3 == "main" { print "0x" $1; exit }')
+    main_addr=$(llvm-nm-19 "$kernel" 2>/dev/null | awk '$3 == "app_main" { print "0x" $1; exit }')
     if [ -z "$main_addr" ]; then
-        printf "${RED}FAIL${RST}  %s  (could not find 'main' symbol via llvm-nm-19)\n" "$name"
+        printf "${RED}FAIL${RST}  %s  (could not find 'app_main' symbol via llvm-nm-19)\n" "$name"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
         return
@@ -268,7 +268,7 @@ run_dwarf_test() {
 
     resolved=$(addr2line -e "$kernel" -f -C "$main_addr" 2>/dev/null | tail -n1)
     if [[ "$resolved" == /* && "$resolved" == *":$main_line" ]]; then
-        printf "${GRN}PASS${RST}  %s  (main -> %s)\n" "$name" "$resolved"
+        printf "${GRN}PASS${RST}  %s  (app_main -> %s)\n" "$name" "$resolved"
         PASS=$((PASS + 1))
     else
         printf "${RED}FAIL${RST}  %s  (expected an absolute path ending \":%s\", got \"%s\")\n" \
@@ -336,11 +336,11 @@ run_compile_error_test "forbid_trap_wrong"   examples/forbid_trap_wrong/forbid_t
 run_forbid_trap_ok_test "forbid_trap_ok"     examples/forbid_trap_ok/forbid_trap_ok.tkb
 run_forbid_trap_ok_test "forbid_trap_slice"  examples/common/uart.tkb examples/common/print.tkb examples/slice/slice.tkb
 run_forbid_trap_ok_test "forbid_trap_foreach" examples/common/uart.tkb examples/common/print.tkb examples/foreach/foreach.tkb
-run_forbid_trap_ok_test "forbid_trap_http_server" examples/common/uart.tkb examples/common/print.tkb examples/common/virtio_mmio.tkb examples/common/netconfig.tkb examples/common/inet_checksum.tkb examples/common/netutil.tkb examples/http_server/http_server.tkb
-run_forbid_trap_ok_test "forbid_trap_arp_reply" examples/common/uart.tkb examples/common/print.tkb examples/common/virtio_mmio.tkb examples/common/netconfig.tkb examples/common/netutil.tkb examples/arp_reply/arp_reply.tkb
-run_forbid_trap_ok_test "forbid_trap_icmp_echo" examples/common/uart.tkb examples/common/print.tkb examples/common/virtio_mmio.tkb examples/common/netconfig.tkb examples/common/inet_checksum.tkb examples/common/netutil.tkb examples/icmp_echo/icmp_echo.tkb
+run_forbid_trap_ok_test "forbid_trap_http_server" examples/common/uart.tkb examples/common/print.tkb examples/common/gic.tkb examples/common/virtio_mmio.tkb examples/common/netconfig.tkb examples/common/inet_checksum.tkb examples/common/netutil.tkb examples/http_server/http_server.tkb
+run_forbid_trap_ok_test "forbid_trap_arp_reply" examples/common/uart.tkb examples/common/print.tkb examples/common/gic.tkb examples/common/virtio_mmio.tkb examples/common/netconfig.tkb examples/common/netutil.tkb examples/arp_reply/arp_reply.tkb
+run_forbid_trap_ok_test "forbid_trap_icmp_echo" examples/common/uart.tkb examples/common/print.tkb examples/common/gic.tkb examples/common/virtio_mmio.tkb examples/common/netconfig.tkb examples/common/inet_checksum.tkb examples/common/netutil.tkb examples/icmp_echo/icmp_echo.tkb
 run_forbid_trap_ok_test "forbid_trap_ip_parse" examples/common/uart.tkb examples/common/print.tkb examples/common/inet_checksum.tkb examples/common/netutil.tkb examples/ip_parse/ip_parse.tkb
-run_forbid_trap_ok_test "forbid_trap_tcp_echo" examples/common/uart.tkb examples/common/print.tkb examples/common/virtio_mmio.tkb examples/common/netconfig.tkb examples/common/inet_checksum.tkb examples/common/netutil.tkb examples/tcp_echo/tcp_echo.tkb
+run_forbid_trap_ok_test "forbid_trap_tcp_echo" examples/common/uart.tkb examples/common/print.tkb examples/common/gic.tkb examples/common/virtio_mmio.tkb examples/common/netconfig.tkb examples/common/inet_checksum.tkb examples/common/netutil.tkb examples/tcp_echo/tcp_echo.tkb
 run_forbid_trap_ok_test "forbid_trap_tcp_parse" examples/common/uart.tkb examples/common/print.tkb examples/common/inet_checksum.tkb examples/common/netutil.tkb examples/tcp_parse/tcp_parse.tkb
 
 echo ""

@@ -42,7 +42,7 @@ fn fill_from_unknown(v: i32, c: u8) {
     // Outside the if-block, v is i32 again (narrowing does not escape the block)
 }
 
-fn main() -> i32 {
+fn app_main() -> i32 {
     // Pass each index 0 to 7 as "external input" and write
     fill_from_unknown(0, 'A');
     fill_from_unknown(1, 'B');

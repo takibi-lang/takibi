@@ -73,6 +73,7 @@ def main() -> int:
         want = expected_reply(src_mac, payload)
 
         ok = False
+        last_unexpected = None
         for attempt in range(RETRIES_PER_FRAME):
             # Resend on every attempt: harmless if the board just hasn't
             # finished booting/negotiating link yet.
@@ -91,12 +92,16 @@ def main() -> int:
                 if reply[: len(want)] == want:
                     ok = True
                     break
+                last_unexpected = reply
             if ok:
                 break
 
         status = "PASS" if ok else "FAIL"
         print(f"  frame {n:2d} (payload={plen:4d} bytes): {status}")
         if not ok:
+            if last_unexpected is not None:
+                print(f"    last unexpected reply len={len(last_unexpected)} "
+                      f"head={last_unexpected[:96].hex()}")
             all_ok = False
 
     return 0 if all_ok else 1

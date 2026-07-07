@@ -23,6 +23,11 @@ The finished form of code is when index ranges are pinned at the type level usin
 ## Language Specification (Current)
 
 - File extension: `.tkb`
+- Runtime entry: examples define `app_main()` (either `void` or an ignored
+  integer return). `examples/common/runtime.tkb` provides the linked `main()`
+  and calls `platform_init()`, `app_main()`, then `platform_shutdown()` in
+  high-level Takibi code. Startup assembly calls only `main`; QEMU supplies
+  empty platform hooks and STM32's UART HAL currently supplies the real ones.
 - Types: `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `isize`, `usize` (`isize`/`usize` are pointer-sized signed/unsigned integers; LLVM width follows the target's actual pointer size via DataLayout -- 64 bits on AArch64/RISC-V64, 32 bits on Cortex-M/STM32; falls back to 64 bits when no target machine is configured, e.g. in unit tests), `void`, `*T` (regular pointer, non-volatile), `io T` (volatile-qualified value type), `*io T` (volatile MMIO pointer = `TypePtr(TypeIo T)`), `[T; N]` (array type; decays to pointer in function arguments), `fn(T...) -> R` (function pointer type), `Name` (named struct type), `{lo..<hi as base}` (refined integer subtype; explicit base currently required)
 - Statements:
   - `let x = e` / `let x: T = e` -- immutable variable declaration (initial value required, no reassignment)
@@ -57,7 +62,12 @@ The finished form of code is when index ranges are pinned at the type level usin
   - Function call, `*expr` (dereference), `&ident` (address-of)
   - `expr as T` -- explicit type cast (integer widths including `isize`/`usize`, `*T` -> `usize`, `usize` -> `*T`, `*T` -> `*U`). Lower precedence than arithmetic, so `a + b as u8` = `(a + b) as u8`
   - `sizeof(T)` -- compile-time size of `T` in bytes, type `usize` (fixed, not a polymorphic literal; compare/assign against other integer types requires an explicit `as` cast, e.g. `len >= sizeof(Hdr)` requires `len: usize`). Reads the same LLVM DataLayout used for struct tail-padding, so `sizeof` on a `packed` or `align(N)` struct reflects the true in-memory size.
+  - DMA/device synchronization builtins include `dma_publish()`, `dma_consume()`, and `device_fence()`. ARM/AArch64 lower to DSB SY, AMD64 currently lowers conservatively to MFENCE, and RISC-V uses direction-preserving fences. Cache-aware operations are `dma_prepare_tx(ptr, len)`, `dma_prepare_rx(ptr, len)`, and `dma_finish_rx(ptr, len)`. Cortex-M7 rounds the range to 32-byte cache lines and uses SCB DCCMVAC/DCIMVAC plus barriers; currently supported coherent non-Cortex-M targets use the corresponding ordering barrier. DMA buffers must not share cache lines with unrelated mutable data. Driver code encapsulates these operations at ownership boundaries.
+  - `signal_fence()` is a compiler-only memory boundary for ISR/normal-context communication. It lowers to side-effecting empty LLVM inline assembly with a memory clobber and emits no hardware barrier instruction.
+  - `interrupt_wait()` / `interrupt_notify()` form a race-free event wait pair on ARM/AArch64 (`wfe` / `sev`). An ISR stores its volatile flag then calls `interrupt_notify()`; normal context loops on the flag and calls `interrupt_wait()` while it is clear. ARM's retained event closes the check-then-sleep lost-wakeup window, and callers still re-check because waits may return spuriously. Unsupported targets are rejected during code generation rather than silently lowered to a racy `wfi` sequence.
 - `struct Name { field: type; ... }` -- struct type definition (top-level only; fields are primitive types, pointer types, or other struct types)
+- `opaque struct Name;` -- incomplete nominal type usable only behind a pointer. It has no constructible value, fields, or size and is intended for driver-owned state handles.
+- `affine opaque struct Name;` marks pointers to that opaque type as affine handles. Passing one to an ordinary affine-handle parameter consumes the local value; a second consumption or later use is a compile error. `borrow *Name` is allowed only as a function parameter and permits non-consuming inspection. This is intentionally a restricted, intraprocedural facility rather than a general affine type system: values may be dropped, explicit pointer casts remain an escape hatch, and consuming an affine value declared outside a loop from inside that loop is conservatively rejected.
 - `let mut s: Name;` -- struct variable declaration (local/global, always treated as mutable)
 - `s.field` -- field read (works for both `s: Name` and `s: *Name`, Zig-style)
 - `s.field = v` -- field write (direct dot assignment to a variable name only; not allowed as the left side of an expression)
@@ -175,6 +185,7 @@ bin/
 examples/
   common/
     startup.S     -- _start -> main, BSS zero-clear, AArch64 semihosting exit (shared by all examples)
+    runtime.tkb   -- high-level main wrapper around platform_init/app_main/platform_shutdown
     link.ld       -- linker script (load address 0x40000000) (shared by all examples)
     timer_asm.S   -- ARM Generic Timer stubs: read_cntfrq, set_cntp_tval, enable_cntp, disable_cntp, task_exit_stub
     sem_asm.S     -- atomic semaphore: sem_wait (ldaxr/stxr), sem_post (ldxr/stlxr)
@@ -187,7 +198,7 @@ examples/
                      scheduler_init/_disable/_rearm_tick (uniform names shared with
                      common_stm32/scheduler.tkb, see the STM32 section below)
     sync.tkb      -- extern fn sem_wait/sem_post, mutex_lock/unlock, cond_wait/signal
-    virtio_mmio.tkb -- net_init/net_poll_rx/net_rx_buf/net_transmit/net_rx_release/net_read_mac
+    virtio_mmio.tkb -- net_init/net_rx_acquire/net_rx_frame/net_transmit/net_rx_release/net_read_mac
                      (uniform API shared with common_stm32/eth.tkb, see "STM32 Ethernet" above)
     netconfig.tkb -- OUR_IP (QEMU-side static IP for arp_reply/icmp_echo/tcp_echo),
                      HTTP_SERVER_IP (http_server's own IP, see "Network config" below)
@@ -196,18 +207,21 @@ examples/
   common_stm32/   -- STM32F746G-DISCOVERY (Cortex-M7) HAL, mirroring common/'s function
                      names/signatures so every example .tkb file is a single file shared
                      by both targets -- see "STM32F746G-DISCOVERY Bare-Metal (Cortex-M7)" below
-    startup.S     -- Reset_Handler, 54-word vector table, PendSV_Handler, weak
-                     SysTick_Handler/USART1_IRQHandler/pendsv_dispatch stubs
+    startup.S     -- Reset_Handler, vector table, PendSV_Handler, generic
+                     platform_init/platform_shutdown hooks, weak SysTick/ETH/
+                     pendsv_dispatch stubs (no direct device-driver calls)
     link.ld       -- MEMORY {FLASH RAM} linker script (RAM = DTCM, 64K)
     link_eth.ld   -- same, RAM = AXI SRAM (Ethernet DMA can't reach DTCM)
-    uart.tkb      -- uart_init, uart_putc, uart_puts (USART1, PA9/PB7, AF7), uart_isr_getc
+    uart.tkb      -- platform hook implementation, uart_init, interrupt-driven
+                     TX ring (uart_putc/uart_puts), unified USART1 RX/TX ISR and
+                     RX callback registration (PA9/PB7, AF7), uart_isr_getc
     uart_getc.tkb -- uart_getc (USART1 RX poll; only echo needs RX)
     rtc.tkb       -- rtc_init, rtc_is_running, rtc_read_seconds (real RTC peripheral, LSI)
     nvic.tkb      -- enable_usart1_irq, irq_uart_rx_setup/_unmask
     scheduler.tkb -- setup_task_stack, task_exit_stub, systick_init/_disable, pendsv_trigger,
                      scheduler_init/_disable/_rearm_tick (see the STM32 section below)
     sem_asm.S     -- atomic semaphore: sem_wait/sem_post (ldrex/strex/dmb)
-    eth.tkb       -- net_init/net_poll_rx/net_rx_buf/net_transmit/net_rx_release/net_read_mac
+    eth.tkb       -- net_init/net_rx_acquire/net_rx_frame/net_transmit/net_rx_release/net_read_mac
                      (real Ethernet MAC/PHY/DMA driver, see "STM32 Ethernet" above)
     netconfig.tkb -- OUR_MAC/OUR_IP (STM32 board's fixed network identity),
                      HTTP_SERVER_IP (same value as OUR_IP here, see "Network config" below)
@@ -910,7 +924,7 @@ correctly regardless of the AST type tag. Regression test:
 all**: the explicit-base syntax unblocks `ihl: {20..<21 as base}` as a
 parameter, but `tcp_parse.tkb`/`icmp_echo.tkb`/`tcp_echo.tkb`/
 `http_server.tkb` all compare `ihl`/`total_len`/`tcp_len` against
-quantities ultimately derived from `net_poll_rx()`'s return value (`len`),
+quantities ultimately derived from `net_rx_len()`'s device-reported value (`len`),
 which is deliberately-unconstrained `i32` (external, device-reported,
 per this project's `i32 = unknown range` convention). Casting a value to
 a plain (non-refined-syntax) target type ALWAYS discards any refined
@@ -1008,7 +1022,7 @@ regressions after both bugs above were fixed.
 
 The three networked files above still had `ihl` and everything derived
 from it declared `i32`, entangled via `total_len <= ip_len_in_frame`
-(`ip_len_in_frame = len - 14`) with `net_poll_rx()`'s deliberately
+(`ip_len_in_frame = len - 14`) with `net_rx_len()`'s deliberately
 -unconstrained `i32` device-reported length. This entanglement is real,
 but not an unliftable wall: `len` itself, once narrowed by its own
 `if (len >= N && len <= 1514)` check, CAN be bridged into `u16` with the
@@ -2972,15 +2986,16 @@ the normal (always `-g`-free) build outputs.
   instead (already only included where those symbols exist). **Deferred**: a lightweight `use <file>;`-style
   declaration (even just "this file requires these to be present," checked at parse/link time) would catch this
   class of mistake at the point of writing the code rather than requiring a full rebuild sweep to notice.
-- **No built-in memory-barrier intrinsic** -- the STM32 Ethernet DMA bring-up needed a `dsb` instruction between a
+- **DMA/device memory-barrier builtins are implemented** -- the STM32 Ethernet DMA bring-up needed a `dsb` instruction between a
   descriptor-ring write and the "poll demand" register kick, because `*io` volatile writes alone don't guarantee the
   CPU's write buffer has retired before a subsequent register write reaches the DMA engine (see the "Hardware
   bring-up bug worth knowing about" paragraph under the STM32 Ethernet section below -- found only via live
-  openocd/gdb-multiarch debugging on real hardware, not something the compiler flagged). Worked around with a
-  hand-written `extern fn eth_dsb()` (`examples/common_stm32/eth_asm.S`), one target's instruction only.
-  **Deferred**: a builtin `fence()`/`barrier()` (lowering to `dsb` on AArch64, `dmb` on Cortex-M, the same way
-  `sizeof`/`as` already lower per-target) would remove a whole class of "did you remember the barrier before this
-  DMA kick" bugs that today are invisible to the type checker and only surface as real hardware misbehavior.
+  openocd/gdb-multiarch debugging on real hardware, not something the compiler flagged). The original handwritten
+  `extern fn eth_dsb()`/`eth_asm.S` workaround has been removed. `dma_publish()`, `dma_consume()`, and
+  `device_fence()` now lower per target and are placed inside the STM32 and virtio driver ownership transitions.
+  The cache-aware `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` operations maintain Cortex-M7 cache lines,
+  so application examples do not manually select barriers. The RX API now uses an affine opaque CPU-ownership
+  handle to reject use-after-release and double-release statically without changing the source-level barrier semantics.
 - **STM32 Ethernet: all five examples are ported -- `net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo`,
   and `http_server` all run on real hardware with real MAC/PHY/DMA, and are the *same source file* as
   their QEMU/virtio-net counterparts.** `examples/common_stm32/eth.tkb` is a from-scratch MAC/DMA-
@@ -2988,19 +3003,19 @@ the normal (always `-g`-free) build outputs.
   descriptor ring design are documented in that file's header comment).
 
   **Unified driver API**: `eth.tkb` and `examples/common/virtio_mmio.tkb` both expose the identical
-  `net_init() -> i32` / `net_poll_rx() -> i32` / `net_rx_buf() -> *u8` / `net_transmit(buf, len)` /
-  `net_rx_release()` / `net_read_mac(mac_out)` functions -- mirroring how `uart.tkb`/`print.tkb` already
+  `net_init() -> i32` / `net_rx_wait()` / `net_rx_acquire() -> *NetRxCpuOwned` /
+  `net_rx_len(borrow *NetRxCpuOwned) -> i32` /
+  `net_rx_frame(borrow *NetRxCpuOwned) -> [u8; 1514..]` / `net_transmit(buf, len)` /
+  `net_rx_release(*NetRxCpuOwned)` / `net_read_mac(mac_out)` functions -- mirroring how `uart.tkb`/`print.tkb` already
   share identical signatures across `examples/common/` and `examples/common_stm32/`. This means
   `examples/net_echo/net_echo.tkb` (and the other four) are a *single* file compiled against either
   backend depending on target, not a QEMU version plus a hand-maintained `_stm32.tkb` copy -- see that
   file's header comment. Descriptor rings, RX/TX buffers, and virtio's 10-byte `virtio_net_hdr` framing
-  are all hidden inside each backend; application code never sees them. `virtio_mmio.tkb`'s `net_poll_rx()`
-  now polls the used ring directly instead of waiting on a GIC-routed interrupt (removing
-  `gic_init`/`gic_enable_virtio_irq`/`virtio_irq_handler`/`virtio_irq_flag`/every app's identical
-  `irq_dispatch` entirely) -- QEMU's virtio-mmio device works identically either way, and
-  `examples/common/startup.S` already safely no-ops when the GIC is never initialized (relied on today by
-  every non-IRQ example). `gic.tkb` itself is untouched, still used by `irq`/`preempt`/`semaphore`/
-  `watchdog`/`condvar`/`msgqueue`.
+  are all hidden inside each backend; application code never sees them. Both backends are interrupt-driven:
+  STM32 vectors IRQ61 directly to `ETH_IRQHandler`, while virtio discovers its SPI from the MMIO slot and
+  dispatches through GICv2. ISRs acknowledge, set `io` flags, and issue `interrupt_notify()`; normal
+  context uses `interrupt_wait()` instead of spinning while idle. Used-ring/descriptor inspection,
+  cache maintenance, affine-handle creation, and packet processing remain in normal context.
 
   **Network config**: `examples/common_stm32/netconfig.tkb` holds the board's MAC/IP as plain global
   constants (`OUR_MAC`/`OUR_IP`/`HTTP_SERVER_IP`, array-literal `{...}` initializers). MAC is a fixed
@@ -3052,10 +3067,12 @@ the normal (always `-g`-free) build outputs.
   needed for the HTTP requests themselves (plain sockets, unlike the other four's raw `AF_PACKET`) -- only
   the `ip neigh flush` step needs root, which `make hwcheck-net`'s existing blanket `sudo` already covers.
 
-  Deliberately still deferred: **polling-only, no interrupt-driven RX** on the STM32 side --
-  `examples/common_stm32/startup.S`'s vector table currently only extends through IRQ37 (USART1), and
-  every other STM32 example links against that same shared file, so extending it through IRQ61 (ETH) is
-  left for a follow-up once polling-only was confirmed working across all five examples.
+  STM32 startup configures MPU region 0 for `0x20010000..<0x20020000` as Normal, non-cacheable,
+  shareable memory before enabling the Cortex-M7 I-cache and D-cache. Ethernet images are linked at
+  `0x20010000`; `link_eth.ld` asserts that their data plus stack remain inside this 64KB window so future
+  growth cannot silently place DMA-visible globals in cacheable AXI SRAM. Descriptors remain padded/aligned
+  to one 32-byte cache line and RX/TX ownership transitions retain explicit cache-maintenance builtins and
+  barriers, keeping the driver contract valid if its placement strategy changes later.
 
   **Hardware bring-up bug worth knowing about**: the very first working version had every DMA descriptor field
   byte-for-byte correct (verified live via openocd/gdb-multiarch register+memory dumps) yet the TX descriptor's
@@ -3065,11 +3082,16 @@ the normal (always `-g`-free) build outputs.
   but that says nothing about the CPU's write buffer having actually retired the SRAM write before the very next
   store lands, so the DMA engine could race ahead and read a stale (OWN=0) descriptor. Confirmed by re-issuing
   the poll-demand write by hand through the debugger after enough time had passed for the earlier write to
-  settle -- the descriptor completed instantly. Fixed with a `dsb` (Data Synchronization Barrier) instruction
-  between the descriptor write and the poll-demand kick (`examples/common_stm32/eth_asm.S`, called via
-  `extern fn eth_dsb()` -- same `extern fn` mechanism as `sem_wait`/`sem_post`). **Any future takibi code that
-  writes memory a DMA engine will read, then kicks that DMA engine via a register write, needs the same barrier
-  -- volatile alone is not enough.**
+  settle -- the descriptor completed instantly. Fixed originally with a handwritten `dsb`, now replaced by the
+  compiler builtin `dma_publish()` between descriptor writes and poll-demand kicks. Completion paths use
+  `dma_consume()` before CPU access to device-written descriptors/buffers. These calls stay inside driver APIs;
+  volatile alone is not enough for DMA ownership transfer.
+
+  TX interrupt-driven completion also requires `TDES0.IC` (bit 30) on every submitted descriptor. Enabling
+  `DMAIER.TIE` alone is insufficient: without IC the DMA clears OWN after transmitting but emits no normal TX
+  completion interrupt, leaving a flag-based waiter blocked forever. The waiter treats the interrupt as a wakeup
+  and still verifies that OWN has cleared after acquiring the descriptor; the notification itself is not used as
+  proof of ownership.
 
 ## QEMU Bare-Metal (AArch64)
 
@@ -3325,13 +3347,9 @@ virtio protocol itself.
   (`virtio_net_find()` in `examples/common/virtio_mmio.tkb`). A lone
   `-device virtio-net-device` does NOT land on slot 0: empirically, under
   this devcontainer's QEMU 8.2.2, it landed on slot 31 (base `0x0a003e00`).
-  The driver scans all 32 slots for `DeviceID == 1` (network) and derives
-  the base address from whatever slot it actually finds, so a future QEMU
-  version placing the device elsewhere doesn't break it. (Earlier versions
-  of this driver also derived a GIC IRQ number from the discovered slot
-  for interrupt-driven RX; `net_poll_rx()` now polls the used ring
-  directly instead, so no IRQ/GIC involvement remains here at all -- see
-  the STM32 Ethernet entry above for why and when that changed.)
+  The driver scans all 32 slots for `DeviceID == 1` (network), derives both
+  its base address and GIC SPI, routes that SPI to CPU0, and acknowledges
+  legacy queue interrupts inside the driver-owned IRQ dispatcher.
 - **The vring uses typed views over one shared backing allocation.**
   `VirtqDesc`, `VirtqAvail`, `VirtqUsed`, and `VirtqUsedElem` describe the
   specification-defined layouts. Descriptor writes use `descs[i].field`,

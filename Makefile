@@ -32,7 +32,7 @@ COMMON_SEM_ASM_S   := $(COMMON_DIR)/sem_asm.S
 COMMON_SEM_ASM_O   := $(COMMON_DIR)/sem_asm.o
 COMMON_LINK_LD     := $(COMMON_DIR)/link.ld
 COMMON_UART        := $(COMMON_DIR)/uart.tkb
-COMMON_PRINT       := $(COMMON_DIR)/print.tkb
+COMMON_PRINT       := $(COMMON_DIR)/print.tkb $(COMMON_DIR)/runtime.tkb
 COMMON_GIC         := $(COMMON_DIR)/gic.tkb
 COMMON_TIMER       := $(COMMON_DIR)/timer.tkb
 COMMON_SYNC        := $(COMMON_DIR)/sync.tkb
@@ -40,7 +40,6 @@ COMMON_VIRTIO_MMIO := $(COMMON_DIR)/virtio_mmio.tkb
 COMMON_INET_CKSUM  := $(COMMON_DIR)/inet_checksum.tkb
 COMMON_NETUTIL     := $(COMMON_DIR)/netutil.tkb
 COMMON_RTC         := $(COMMON_DIR)/rtc.tkb
-COMMON_UART_GETC   := $(COMMON_DIR)/uart_getc.tkb
 COMMON_NETCONFIG   := $(COMMON_DIR)/netconfig.tkb
 COMMON_STM32_STUB  := $(COMMON_DIR)/stm32_stub.tkb
 
@@ -64,10 +63,9 @@ STM32_EXAMPLES := start hello print_int print_hex print_ptr mem array \
 STM32_OBJS     := $(foreach e,$(STM32_EXAMPLES),examples/$(e)/$(e)_stm32.o)
 STM32_KERNELS  := $(foreach e,$(STM32_EXAMPLES),examples/$(e)/kernel_stm32.elf)
 STM32_BINS     := $(foreach e,$(STM32_EXAMPLES),examples/$(e)/kernel_stm32.bin)
-# rtc/echo/timer: ported separately (real RTC peripheral / bidirectional
-# serial test / rtc.tkb HAL reuse), each needs one extra common file beyond
-# uart+print -- see the one-off rules near COMMON_STM32_RTC/
-# COMMON_STM32_UART_GETC below.
+# rtc/echo/timer: ported separately (real RTC peripheral / interrupt-driven
+# serial test / rtc.tkb HAL reuse), each needs a special source set beyond
+# the generic uart+print group.
 STM32_EXTRA_BINS := examples/rtc/kernel_stm32.bin examples/echo/kernel_stm32.bin \
                     examples/timer/kernel_stm32.bin examples/irq/kernel_stm32.bin \
                     examples/preempt/kernel_stm32.bin examples/semaphore/kernel_stm32.bin \
@@ -202,6 +200,7 @@ $(COMMON_SEM_ASM_O): $(COMMON_SEM_ASM_S)
 .SECONDEXPANSION:
 
 IRQ_OBJS   := examples/irq/irq.o
+COMMON_UART_IRQ_STUB := $(COMMON_DIR)/uart_irq_stub.tkb
 # semaphore.tkb declares its own extern fn sem_wait/sem_post, so no sync.tkb needed here
 TIMER_OBJS := examples/preempt/preempt.o examples/semaphore/semaphore.o \
               examples/watchdog/watchdog.o
@@ -231,14 +230,14 @@ $(STANDARD_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(
 # platforms' interrupt entry points are compiled regardless of target;
 # COMMON_GIC supplies the QEMU-only gic struct/functions the (real, active)
 # irq_dispatch entry point references.
-$(IRQ_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $< --target $(AARCH64_TARGET) -o $@
+$(IRQ_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_UART_IRQ_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_UART_IRQ_STUB) $< --target $(AARCH64_TARGET) -o $@
 
 $(RTC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_RTC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_RTC) $< --target $(AARCH64_TARGET) -o $@
 
-$(GETC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_UART_GETC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_UART_GETC) $< --target $(AARCH64_TARGET) -o $@
+$(GETC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_UART_IRQ_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_UART_IRQ_STUB) $< --target $(AARCH64_TARGET) -o $@
 
 # COMMON_STM32_STUB supplies pendsv_trigger() (a no-op here) so each of
 # these shared examples' STM32-shaped SysTick_Handler/pendsv_dispatch
@@ -252,17 +251,16 @@ $(SYNC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMM
 
 # COMMON_NETCONFIG (OUR_IP) is unused-but-harmless for net_echo (no
 # IP awareness at all) -- it just gets one inert extra constant rather than
-# needing a split recipe group of its own. GIC is no longer needed at all:
-# virtio_mmio.tkb polls the used ring directly now instead of routing
-# through an interrupt (see that file's header comment).
-$(NET_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_NETUTIL) $< --target $(AARCH64_TARGET) -o $@
+# needing a split recipe group of its own. virtio_mmio.tkb owns its GIC
+# dispatch and queue interrupt flags, keeping IRQ details out of applications.
+$(NET_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_NETUTIL) $< --target $(AARCH64_TARGET) -o $@
 
 $(CHECKSUM_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(AARCH64_TARGET) -o $@
 
-$(APP_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(AARCH64_TARGET) -o $@
+$(APP_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(AARCH64_TARGET) -o $@
 
 # -- example.o + startup.o -> kernel.elf ---------------------------------------
 # For examples/%/kernel.elf, % matches "name" (no slash).
@@ -387,13 +385,9 @@ $(STM32_KERNELS): examples/%/kernel_stm32.elf: \
 $(STM32_BINS): examples/%/kernel_stm32.bin: examples/%/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
-# rtc and echo each need one extra STM32-specific common file beyond the
-# standard uart+print pair (real RTC peripheral driver / USART1 RX poll),
-# so -- like their AArch64-side RTC_OBJS/GETC_OBJS counterparts -- they get
-# their own one-off rule pairs rather than joining the generic
-# STM32_EXAMPLES loop above.
+# rtc and echo need target-specific RTC/interrupt-controller dependencies,
+# so they keep one-off rules rather than joining the generic group above.
 COMMON_STM32_RTC       := $(COMMON_STM32_DIR)/rtc.tkb
-COMMON_STM32_UART_GETC := $(COMMON_STM32_DIR)/uart_getc.tkb
 COMMON_STM32_NVIC      := $(COMMON_STM32_DIR)/nvic.tkb
 COMMON_STM32_SCHEDULER := $(COMMON_STM32_DIR)/scheduler.tkb
 COMMON_STM32_SEM_ASM_S := $(COMMON_STM32_DIR)/sem_asm.S
@@ -423,8 +417,8 @@ examples/timer/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/timer/timer_
 examples/timer/kernel_stm32.bin: examples/timer/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
-examples/echo/echo_stm32.o: examples/echo/echo.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_UART_GETC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_UART_GETC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+examples/echo/echo_stm32.o: examples/echo/echo.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_NVIC) $(COMMON_GIC) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_NVIC) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 examples/echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/echo/echo_stm32.o $(COMMON_STM32_LINK_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/echo/echo_stm32.o -o $@
@@ -515,8 +509,8 @@ examples/watchdog/kernel_stm32.bin: examples/watchdog/kernel_stm32.elf
 # compiles the *same* examples/<name>/<name>.tkb file the QEMU build uses
 # (see examples/net_echo/net_echo.tkb's header comment) -- unlike
 # irq/preempt/etc., there is no genuinely-different-shape logic here
-# anymore, eth.tkb just implements the same net_init/net_poll_rx/
-# net_rx_buf/net_transmit/net_rx_release/net_read_mac API
+# anymore, eth.tkb just implements the same typed net_rx_acquire/
+# len/frame/release API plus net_init/net_transmit/net_read_mac
 # examples/common/virtio_mmio.tkb does. Links against
 # COMMON_STM32_LINK_ETH_LD (AXI SRAM), not the shared DTCM-based link.ld.
 # netconfig.tkb (OUR_MAC/OUR_IP) and netutil.tkb (bytes_eq/
@@ -525,51 +519,46 @@ examples/watchdog/kernel_stm32.bin: examples/watchdog/kernel_stm32.elf
 # either symbol) -- harmless, matching the same "one inert extra file
 # rather than a split recipe group" choice the QEMU-side NET_OBJS makes.
 COMMON_STM32_ETH       := $(COMMON_STM32_DIR)/eth.tkb
-COMMON_STM32_ETH_ASM_S := $(COMMON_STM32_DIR)/eth_asm.S
-COMMON_STM32_ETH_ASM_O := $(COMMON_STM32_DIR)/eth_asm.o
 COMMON_STM32_NETCONFIG := $(COMMON_STM32_DIR)/netconfig.tkb
 
-$(COMMON_STM32_ETH_ASM_O): $(COMMON_STM32_ETH_ASM_S)
-	$(LLVM_MC) --triple=$(STM32_TARGET) --filetype=obj $< -o $@
+examples/net_echo/net_echo_stm32.o: examples/net_echo/net_echo.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/net_echo/net_echo_stm32.o: examples/net_echo/net_echo.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+examples/net_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/net_echo/net_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/net_echo/net_echo_stm32.o -o $@
 
-examples/net_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/net_echo/net_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/net_echo/net_echo_stm32.o -o $@
+examples/arp_reply/arp_reply_stm32.o: examples/arp_reply/arp_reply.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/arp_reply/arp_reply_stm32.o: examples/arp_reply/arp_reply.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
-
-examples/arp_reply/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/arp_reply/arp_reply_stm32.o $(COMMON_STM32_LINK_ETH_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/arp_reply/arp_reply_stm32.o -o $@
+examples/arp_reply/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/arp_reply/arp_reply_stm32.o $(COMMON_STM32_LINK_ETH_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/arp_reply/arp_reply_stm32.o -o $@
 
 examples/arp_reply/kernel_stm32.bin: examples/arp_reply/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
-examples/icmp_echo/icmp_echo_stm32.o: examples/icmp_echo/icmp_echo.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+examples/icmp_echo/icmp_echo_stm32.o: examples/icmp_echo/icmp_echo.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/icmp_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/icmp_echo/icmp_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/icmp_echo/icmp_echo_stm32.o -o $@
+examples/icmp_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/icmp_echo/icmp_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/icmp_echo/icmp_echo_stm32.o -o $@
 
 examples/icmp_echo/kernel_stm32.bin: examples/icmp_echo/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
-examples/tcp_echo/tcp_echo_stm32.o: examples/tcp_echo/tcp_echo.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+examples/tcp_echo/tcp_echo_stm32.o: examples/tcp_echo/tcp_echo.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/tcp_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/tcp_echo/tcp_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/tcp_echo/tcp_echo_stm32.o -o $@
+examples/tcp_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/tcp_echo/tcp_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/tcp_echo/tcp_echo_stm32.o -o $@
 
 examples/tcp_echo/kernel_stm32.bin: examples/tcp_echo/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
-examples/http_server/http_server_stm32.o: examples/http_server/http_server.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+examples/http_server/http_server_stm32.o: examples/http_server/http_server.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/http_server/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/http_server/http_server_stm32.o $(COMMON_STM32_LINK_ETH_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/http_server/http_server_stm32.o -o $@
+examples/http_server/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/http_server/http_server_stm32.o $(COMMON_STM32_LINK_ETH_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/http_server/http_server_stm32.o -o $@
 
 examples/http_server/kernel_stm32.bin: examples/http_server/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@

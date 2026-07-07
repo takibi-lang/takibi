@@ -108,7 +108,7 @@ fn task_hung() {
 let mut stack_a: [u8; 4096];
 let mut stack_b: [u8; 4096];
 
-fn main() {
+fn app_main() {
     uart_puts("watchdog start\r\n");
 
     let sp: *usize = sched.tcb_sp;

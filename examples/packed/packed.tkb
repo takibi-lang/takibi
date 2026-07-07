@@ -16,7 +16,7 @@ struct packed Packed {
     b: u16;
 }
 
-fn main() {
+fn app_main() {
     // --- normal struct ---
     let mut n: Normal;
     n.a = 0x11;

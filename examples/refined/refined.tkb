@@ -77,7 +77,7 @@ fn print_buf() {
     uart_putc('\n');
 }
 
-fn main() -> i32 {
+fn app_main() -> i32 {
     fill_pairs();   print_buf();   // approach 1
     fill_loop();    print_buf();   // approach 2
     fill_by_cond(); print_buf();   // approach 3

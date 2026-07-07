@@ -41,7 +41,7 @@ fn print_buf() {
     uart_putc('\n');
 }
 
-fn main() -> i32 {
+fn app_main() -> i32 {
     fill();
     print_buf();
     return 0;

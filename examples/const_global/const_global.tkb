@@ -29,7 +29,7 @@ fn fill() {
     }
 }
 
-fn main() {
+fn app_main() {
     fill();
     uart_puts("QUEUE_SIZE = ");
     uart_print_uint(QUEUE_SIZE as i32);

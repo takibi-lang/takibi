@@ -64,6 +64,15 @@ let contains_substring haystack needle =
   let rec scan i = i + n <= m && (String.sub haystack i n = needle || scan (i + 1)) in
   scan 0
 
+let count_substring haystack needle =
+  let n = String.length needle and m = String.length haystack in
+  let rec count i acc =
+    if i + n > m then acc
+    else if String.sub haystack i n = needle then count (i + n) (acc + 1)
+    else count (i + 1) acc
+  in
+  if n = 0 then 0 else count 0 0
+
 (* gen_expr's ?expected_ty hint (CLAUDE.md's "64-bit Integer Literals"
    follow-up): a bare literal in an already-typed position must embed
    DIRECTLY at that type in the generated LLVM IR, with no intermediate
@@ -105,6 +114,7 @@ let rec show_type = function
   | Ast.TypeRefined (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
   | Ast.TypeSlice (t, 0) -> Printf.sprintf "[]%s" (show_type t)
   | Ast.TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (show_type t) n
+  | Ast.TypeBorrow t -> "borrow " ^ show_type t
 
 let type_t : Ast.type_expr Alcotest.testable =
   Alcotest.testable (fun fmt t -> Format.pp_print_string fmt (show_type t)) (=)
@@ -1170,6 +1180,20 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  Alcotest.test_case "opaque struct declaration parses" `Quick (fun () ->
+    match parse "opaque struct Token;" with
+    | [Ast.OpaqueStructDef ("Token", false)] -> ()
+    | _ -> Alcotest.fail "expected OpaqueStructDef(Token)"
+  );
+
+  Alcotest.test_case "affine opaque struct and borrow parameter parse" `Quick (fun () ->
+    match parse "affine opaque struct Token; fn inspect(t: borrow *Token) {}" with
+    | [Ast.OpaqueStructDef ("Token", true);
+       Ast.FuncDef { params = [("t", Some (Ast.TypeBorrow (Ast.TypePtr
+         (Ast.TypeNamed "Token"))))]; _ }] -> ()
+    | _ -> Alcotest.fail "expected affine opaque Token and borrowed pointer"
+  );
+
   (* -- Compound pointer assignment ------------------------------------------ *)
 
   Alcotest.test_case "complex pointer assign *(expr) = v parses to AssignDeref" `Quick (fun () ->
@@ -1672,6 +1696,51 @@ let infer_tests = [
         struct B { x: i32; }
         fn use_a(a: *A) {}
         fn f(b: *B) { use_a(b); }");
+
+  Alcotest.test_case "opaque struct is usable through pointers" `Quick
+    (expect_ok "opaque struct Token;
+                let mut storage: u8;
+                fn get() -> *Token { return &storage as *Token; }
+                fn use(t: *Token) {}");
+
+  Alcotest.test_case "opaque struct cannot be used by value" `Quick
+    (expect_type_error "incomplete"
+       "opaque struct Token; fn consume(t: Token) {}");
+
+  Alcotest.test_case "distinct opaque handle states do not unify" `Quick
+    (expect_type_error "struct type mismatch"
+       "opaque struct DmaOwned; opaque struct CpuOwned;
+        fn release(t: *CpuOwned) {}
+        fn bad(t: *DmaOwned) { release(t); }");
+
+  Alcotest.test_case "affine handle may be borrowed repeatedly then consumed" `Quick
+    (expect_ok "affine opaque struct Token;
+                let mut byte: u8;
+                fn make() -> *Token { return &byte as *Token; }
+                fn inspect(t: borrow *Token) -> usize { return t as usize; }
+                fn release(t: *Token) {}
+                fn good() { let t: *Token = make(); inspect(t); inspect(t); release(t); }");
+
+  Alcotest.test_case "affine handle cannot be consumed twice" `Quick
+    (expect_type_error "already consumed"
+       "affine opaque struct Token;
+        let mut byte: u8;
+        fn make() -> *Token { return &byte as *Token; }
+        fn release(t: *Token) {}
+        fn bad() { let t: *Token = make(); release(t); release(t); }");
+
+  Alcotest.test_case "affine handle cannot be used after consumption" `Quick
+    (expect_type_error "already consumed"
+       "affine opaque struct Token;
+        let mut byte: u8;
+        fn make() -> *Token { return &byte as *Token; }
+        fn inspect(t: borrow *Token) {}
+        fn release(t: *Token) {}
+        fn bad() { let t: *Token = make(); release(t); inspect(t); }");
+
+  Alcotest.test_case "borrow is rejected for ordinary parameter types" `Quick
+    (expect_type_error "borrow is only valid"
+       "fn bad(x: borrow *u8) {}");
 
   (* -- extern fn --------------------------------------------------- *)
 
@@ -2321,6 +2390,29 @@ let codegen_tests = [
          (contains_substring (function_ir "offset_normal_value") "ret i64 4");
        Alcotest.(check bool) "packed field offset has no padding" true
          (contains_substring (function_ir "offset_packed_value") "ret i64 1"));
+
+  Alcotest.test_case
+    "DMA/device barriers lower to AArch64 DSB intrinsics" `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "fn codegen_barriers_aarch64() {
+            dma_publish();
+            dma_consume();
+            device_fence();
+            signal_fence();
+            interrupt_wait();
+            interrupt_notify();
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_barriers_aarch64" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_barriers_aarch64 was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check int) "three dsb calls" 3
+         (count_substring ir "llvm.aarch64.dsb");
+       Alcotest.(check bool) "event wait" true (contains_substring ir "wfe");
+       Alcotest.(check bool) "event notify" true (contains_substring ir "sev"));
 
   Alcotest.test_case
     "indexed struct field assignment codegens through the element address"
@@ -3124,6 +3216,52 @@ let codegen_tests = [
        expect_type_error "compiler builtin"
          "fn max(a: i32, b: i32) -> i32 { return a; }" ());
 
+  Alcotest.test_case
+    "DMA/device barrier builtins are zero-argument void operations" `Quick
+    (fun () ->
+       expect_ok
+         "fn barrier_calls() {
+            dma_publish();
+            dma_consume();
+            device_fence();
+          }" ();
+       expect_type_error "expects no arguments"
+         "fn bad_barrier_call() { dma_publish(1); }" ());
+
+  Alcotest.test_case
+    "DMA/device barrier builtin names cannot be redefined" `Quick
+    (fun () ->
+       expect_type_error "compiler builtin" "fn dma_publish() {}" ();
+       expect_type_error "compiler builtin" "extern fn device_fence();" ();
+       expect_type_error "compiler builtin" "fn signal_fence() {}" ();
+       expect_type_error "compiler builtin" "fn interrupt_wait() {}" ());
+
+  Alcotest.test_case "DMA cache builtins require pointer and usize length" `Quick
+    (fun () ->
+       expect_ok
+         "fn cache_ops(p: *u8, n: usize) {
+            dma_prepare_tx(p, n);
+            dma_prepare_rx(p, n);
+            dma_finish_rx(p, n);
+          }" ();
+       expect_type_error "raw pointer"
+         "fn bad_cache_ptr(n: usize) { dma_prepare_tx(n, n); }" ();
+       expect_type_error "cannot unify"
+         "fn bad_cache_len(p: *u8, n: i32) { dma_finish_rx(p, n); }" ());
+
+  Alcotest.test_case "signal_fence emits a compiler memory clobber only" `Quick
+    (fun () ->
+       let _ = gen_codegen "fn codegen_signal_fence() { signal_fence(); }" in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_signal_fence" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_signal_fence was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check bool) "memory clobber" true
+         (contains_substring ir "~{memory}");
+       Alcotest.(check bool) "no hardware fence intrinsic" false
+         (contains_substring ir "llvm.arm.dsb"));
+
   (* -- P4c-1: unsafe extended to slice/array-BASE subslice construction -- *)
   (* Previously unsafe only gated pointer->slice construction (a length
      assertion with NO evidence at all). This extends the SAME gate to a
@@ -3340,6 +3478,46 @@ let codegen_tests = [
        in
        Alcotest.(check int) "usize_bitwidth" 32 (Llvm_gen.usize_bitwidth ());
        Alcotest.(check int) "isize_bitwidth" 32 (Llvm_gen.isize_bitwidth ()));
+
+  Alcotest.test_case
+    "DMA/device barriers lower to ARM DSB intrinsics on Cortex-M" `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "fn codegen_barriers_cortexm() {
+            dma_publish();
+            dma_consume();
+            device_fence();
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_barriers_cortexm" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_barriers_cortexm was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check int) "three dsb calls" 3
+         (count_substring ir "llvm.arm.dsb"));
+
+  Alcotest.test_case
+    "DMA cache builtins lower to Cortex-M7 SCB line maintenance loops" `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "fn codegen_dma_cache(p: *u8, n: usize) {
+            dma_prepare_tx(p, n);
+            dma_prepare_rx(p, n);
+            dma_finish_rx(p, n);
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_dma_cache" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_dma_cache was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check bool) "cache-line loop" true
+         (contains_substring ir "dma.cache.cond");
+       Alcotest.(check int) "three volatile SCB writes" 3
+         (count_substring ir "store volatile i32");
+       Alcotest.(check int) "cache operations are fenced" 4
+         (count_substring ir "llvm.arm.dsb"));
 
   Alcotest.test_case
     "full pipeline still verifies under the 32-bit target for the coerce \
@@ -3846,6 +4024,53 @@ let codegen_tests = [
           }
           return total;
         }");
+
+  Alcotest.test_case
+    "DMA/device barriers lower to MFENCE on AMD64" `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"x86_64-none-elf" ()
+       in
+       let _ = gen_codegen
+         "fn codegen_barriers_x86() {
+            dma_publish(); dma_consume(); device_fence();
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_barriers_x86" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_barriers_x86 was not emitted"
+       in
+       Alcotest.(check int) "three mfence calls" 3
+         (count_substring (Llvm.string_of_llvalue fn) "llvm.x86.sse2.mfence"));
+
+  Alcotest.test_case "opaque handle pointers codegen without a concrete layout" `Quick
+    (expect_codegen_ok
+       "opaque struct DmaOwned;
+        opaque struct CpuOwned;
+        let mut token_byte: u8;
+        fn initial() -> *DmaOwned { return &token_byte as *DmaOwned; }
+        fn acquire(t: *DmaOwned) -> *CpuOwned { return t as *CpuOwned; }");
+
+  Alcotest.test_case
+    "DMA/device barriers preserve RISC-V memory/I/O fence directions" `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"riscv64-none-elf" ()
+       in
+       let _ = gen_codegen
+         "fn codegen_barriers_riscv() {
+            dma_publish(); dma_consume(); device_fence();
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_barriers_riscv" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_barriers_riscv was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check bool) "publish fence w,o" true (contains_substring ir "fence w, o");
+       Alcotest.(check bool) "consume fence i,r" true (contains_substring ir "fence i, r");
+       Alcotest.(check bool) "full fence iorw" true
+         (contains_substring ir "fence iorw, iorw"));
 
 ]
 

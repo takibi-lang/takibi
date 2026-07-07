@@ -65,7 +65,7 @@ let check_refined_base_range pos lo hi base =
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN RETURN LET MUT EXTERN STRUCT PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE
+%token FN RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE BORROW PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE
 %token DARROW COLONCOLON UNDERSCORE
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT
 %token ASSIGN DOT
@@ -131,6 +131,10 @@ item:
     { let (name, is_packed, align_opt) = $1 in
       Type_layout.finish_struct name $3 is_packed align_opt;
       StructDef (name, $3, is_packed, align_opt) }
+  | OPAQUE STRUCT IDENT SEMI
+    { OpaqueStructDef ($3, false) }
+  | AFFINE OPAQUE STRUCT IDENT SEMI
+    { OpaqueStructDef ($4, true) }
   | ENUM IDENT COLON base_type_expr LBRACE enum_variants RBRACE
     { let (vs, ne) = $6 in
       Type_layout.register_enum $2 $4;
@@ -433,6 +437,7 @@ array_size:
 (* type_expr: base_type_expr + TypeRefined. Used in unambiguous positions such as after : or -> *)
 type_expr:
   | base_type_expr { $1 }
+  | BORROW t = type_expr { TypeBorrow t }
   | LBRACE lo = INT DOTDOTLT hi = INT RBRACE
     { (* Reserved for future contextual base inference. Until the AST and
          signature inference can represent an unresolved refinement base,

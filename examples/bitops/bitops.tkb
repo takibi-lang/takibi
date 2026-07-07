@@ -23,7 +23,7 @@
 //   0x0000000f   10 after += 5
 //   0x0000000c   15 after -= 3
 
-fn main() -> i32 {
+fn app_main() -> i32 {
     // --- Flag manipulation: set / clear / toggle ---
     let mut flags: u32 = 0;
     flags |= 0x01;              // set bit 0

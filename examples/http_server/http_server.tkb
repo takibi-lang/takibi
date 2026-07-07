@@ -118,7 +118,7 @@ let TCP_URGENT:      usize = 18;
 // natural width -- unlike the pure offset constants above, which are
 // usize (array/slice indices are usize-only, see CLAUDE.md's "Array/Slice
 // Indices Must Be usize" section). ihl/total_len/tcp_len/tcp_hdr_len/data_len/data_off
-// below are ALSO u16-based: `len` (net_poll_rx()'s deliberately
+// below are ALSO u16-based: `len` (net_rx_len()'s deliberately
 // -unconstrained i32 device-reported length) is bridged into u16 with
 // ONE explicit refined cast right after its own range is established,
 // and everything downstream inherits u16-based refined ranges through
@@ -336,7 +336,7 @@ fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
     return -1;
 }
 
-fn main() {
+fn app_main() {
     uart_puts("http_server: init\r\n");
 
     if (net_init() == 0) {
@@ -348,10 +348,13 @@ fn main() {
         uart_puts("http_server: ready\r\n");
 
         while (1) {
-            let len: i32 = net_poll_rx();
+            net_rx_wait();
+            let acquired: *NetRxCpuOwned = net_rx_acquire();
+            if ((acquired as usize) != 0) {
+            let len: i32 = net_rx_len(acquired);
             let mut should_tx: i32 = 0;
             let mut tx_len: i32 = 0;
-            let frame = net_rx_frame();   // [u8; 1514..] capacity view
+            let frame = net_rx_frame(acquired);   // only read when len proves acquisition
             let ethertype: i32 = read_u16be(frame[12..<14]);
 
             if (len >= 42 && ethertype == 0x0806) {
@@ -564,8 +567,9 @@ fn main() {
             if (should_tx == 1) {
                 net_transmit(frame as *u8, tx_len);
             }
-            if (len > 0) {
-                net_rx_release();
+            if ((acquired as usize) != 0) {
+                net_rx_release(acquired);
+            }
             }
         }
     }

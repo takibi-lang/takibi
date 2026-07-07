@@ -3,6 +3,6 @@
 fn add_one(i: {0..<8 as i32}) -> {0..<8 as i32} {
     return i + 1;
 }
-fn main() -> i32 {
+fn app_main() -> i32 {
     return 0;
 }
