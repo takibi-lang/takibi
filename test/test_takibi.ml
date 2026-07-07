@@ -308,39 +308,38 @@ let parser_tests = [
            scan 0)
   );
 
-  Alcotest.test_case "refined type bound within i32 range parses fine" `Quick (fun () ->
-    match parse "fn f(x: {0..<2147483647}) i32 { return 0; }" with
+  Alcotest.test_case "explicit i32 refined type parses" `Quick (fun () ->
+    match parse "fn f(x: {0..<2147483647 as i32}) i32 { return 0; }" with
     | [Ast.FuncDef _] -> ()
     | _ -> Alcotest.fail "expected single FuncDef"
   );
 
-  Alcotest.test_case
-    "refined type upper bound beyond i32 range is a compile error, not a \
-     silent i32 truncation ({lo..<hi} is always represented as i32 at the \
-     LLVM level -- see lib/types.ml -- so a bound this compiler once \
-     accepted with no check would wrap around unnoticed at codegen time). \
-     Note: {lo..<hi}'s grammar only accepts a bare (non-negative) INT \
-     literal for lo/hi, so a negative-lower-bound counterpart of this test \
-     is not currently expressible in source at all -- a separate, \
-     pre-existing limitation, not one this check introduces"
-    `Quick (fun () ->
-    match parse "fn f(x: {0..<5000000000}) i32 { return 0; }" with
+  Alcotest.test_case "bare refined type requires an explicit base" `Quick
+    (fun () ->
+    match parse "fn f(x: {0..<8}) i32 { return x; }" with
     | _ -> Alcotest.fail "expected an error, but parsing succeeded"
     | exception Types.TypeError (_, msg) ->
-        Alcotest.(check bool) "mentions i32 range" true
-          (let n = String.length "i32 range" and m = String.length msg in
+        Alcotest.(check bool) "mentions explicit base" true
+          (contains_substring msg "requires an explicit base")
+  );
+
+  Alcotest.test_case
+    "explicit i32 refined type rejects a bound outside i32 range"
+    `Quick (fun () ->
+    match parse "fn f(x: {0..<5000000000 as i32}) i32 { return 0; }" with
+    | _ -> Alcotest.fail "expected an error, but parsing succeeded"
+    | exception Types.TypeError (_, msg) ->
+        Alcotest.(check bool) "mentions i32" true
+          (let n = String.length "i32" and m = String.length msg in
            let rec scan i = i + n <= m &&
-             (String.sub msg i n = "i32 range" || scan (i + 1)) in
+             (String.sub msg i n = "i32" || scan (i + 1)) in
            scan 0)
   );
 
   (* -- Explicit-base {lo..<hi as base} surface syntax -------------------- *)
-  (* Previously {lo..<hi} could only ever spell base = i32 in source; a
-     non-i32 base arose only from the compiler's own range-propagation
-     machinery. This extension lets a programmer write one directly --
-     needed so a {lo..<hi}-typed FUNCTION PARAMETER can unify against a
-     genuinely narrow-based local (see CLAUDE.md's "Refinement Numerical
-     Type" section, explicit-base follow-up). *)
+  (* Source refinements always name their representation base explicitly.
+     This lets a refined FUNCTION PARAMETER unify against a genuinely
+     narrow-based local; bare syntax is reserved for future inference. *)
   Alcotest.test_case "{lo..<hi as u8} parses as a u8-based TypeRefined" `Quick (fun () ->
     Alcotest.(check bool) "parses"
       true
@@ -1864,74 +1863,74 @@ let infer_tests = [
   (* -- TypeRefined syntax (Step 3.1 / 3.2) ----------------------- *)
 
   Alcotest.test_case "TypeRefined parses as param annotation" `Quick (fun () ->
-    let pt = infer "fn f(i: {0..<8}) i32 { return i; }" in
+    let pt = infer "fn f(i: {0..<8 as i32}) i32 { return i; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
-    Alcotest.check type_t "i has type {0..<8}"
+    Alcotest.check type_t "i has type {0..<8 as i32}"
       (Ast.TypeRefined (0, 8, Ast.TypeI32))
       (snd (List.hd fi.Types.param_types)));
 
   Alcotest.test_case "TypeRefined after -> parses as return type" `Quick (fun () ->
-    let pt = infer "fn f() -> {0..<8} { return 0; }" in
+    let pt = infer "fn f() -> {0..<8 as i32} { return 0; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
-    Alcotest.check type_t "return type is {0..<8}"
+    Alcotest.check type_t "return type is {0..<8 as i32}"
       (Ast.TypeRefined (0, 8, Ast.TypeI32))
       fi.Types.ret_type);
 
   Alcotest.test_case "TypeRefined in let annotation type-checks" `Quick
-    (expect_ok "fn f() { let x: {0..<8} = 3; }");
+    (expect_ok "fn f() { let x: {0..<8 as i32} = 3; }");
 
   Alcotest.test_case "TypeRefined as param unifies with i32 body" `Quick
-    (expect_ok "fn f(i: {0..<8}) i32 { return i; }");
+    (expect_ok "fn f(i: {0..<8 as i32}) i32 { return i; }");
 
   Alcotest.test_case "TypeRefined can be used as array index" `Quick
     (expect_ok "fn f(i: {0..<8 as isize}, p: *u8) { p[i] = 'A'; }");
 
   (* -- Step 3.3c: Range propagation ------------------------------------ *)
 
-  Alcotest.test_case "Add propagates TRefinedInt: {0..<7}+1 is {1..<8}" `Quick (fun () ->
-    let pt = infer "fn f(i: {0..<7}) -> {1..<8} { return i + 1; }" in
+  Alcotest.test_case "Add propagates TRefinedInt: {0..<7 as i32}+1 is {1..<8 as i32}" `Quick (fun () ->
+    let pt = infer "fn f(i: {0..<7 as i32}) -> {1..<8 as i32} { return i + 1; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
-    Alcotest.check type_t "return type is {1..<8}"
+    Alcotest.check type_t "return type is {1..<8 as i32}"
       (Ast.TypeRefined (1, 8, Ast.TypeI32))
       fi.Types.ret_type);
 
-  Alcotest.test_case "Sub propagates TRefinedInt: {1..<8}-1 is {0..<7}" `Quick (fun () ->
-    let pt = infer "fn f(i: {1..<8}) -> {0..<7} { return i - 1; }" in
+  Alcotest.test_case "Sub propagates TRefinedInt: {1..<8 as i32}-1 is {0..<7 as i32}" `Quick (fun () ->
+    let pt = infer "fn f(i: {1..<8 as i32}) -> {0..<7 as i32} { return i - 1; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
-    Alcotest.check type_t "return type is {0..<7}"
+    Alcotest.check type_t "return type is {0..<7 as i32}"
       (Ast.TypeRefined (0, 7, Ast.TypeI32))
       fi.Types.ret_type);
 
   Alcotest.test_case "Add propagation: k+{c..<d} commutative" `Quick (fun () ->
-    let pt = infer "fn f(i: {0..<4}) -> {3..<7} { return 3 + i; }" in
+    let pt = infer "fn f(i: {0..<4 as i32}) -> {3..<7 as i32} { return 3 + i; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
-    Alcotest.check type_t "return type is {3..<7}"
+    Alcotest.check type_t "return type is {3..<7 as i32}"
       (Ast.TypeRefined (3, 7, Ast.TypeI32))
       fi.Types.ret_type);
 
   Alcotest.test_case "TRefinedInt result is subtype of i32 return" `Quick
-    (expect_ok "fn f(i: {0..<7}) -> i32 { return i + 1; }");
+    (expect_ok "fn f(i: {0..<7 as i32}) -> i32 { return i + 1; }");
 
   Alcotest.test_case "Mismatched refined return is a type error" `Quick
     (expect_type_error "range mismatch"
-      "fn f(i: {0..<8}) -> {0..<8} { return i + 1; }");
+      "fn f(i: {0..<8 as i32}) -> {0..<8 as i32} { return i + 1; }");
 
   (* -- Step 3.3c: soundness condition for % range propagation ---------------------------- *)
   (* When the left operand is int (possibly negative), do not return {0..<m}.
      LLVM's srem returns a negative remainder when the dividend is negative, making this unsound.
-     Example: (-5) % 8 = -5 (not 3) -- returning {0..<8} without a non-negative guarantee is wrong. *)
+     Example: (-5) % 8 = -5 (not 3) -- returning {0..<8 as i32} without a non-negative guarantee is wrong. *)
 
   Alcotest.test_case "i32%m stays TInt -- negative left operand possible" `Quick
     (expect_type_error "unproven i32"
-      "fn foo(i: {0..<4}) {} \
+      "fn foo(i: {0..<4 as i32}) {} \
        fn f(n: i32) { foo(n % 4); }");
 
-  Alcotest.test_case "{0..<8}%4 propagates to {0..<4}" `Quick
+  Alcotest.test_case "{0..<8 as i32}%4 propagates to {0..<4 as i32}" `Quick
     (expect_ok
-      "fn foo(i: {0..<4}) {} \
-       fn f(i: {0..<8}) { foo(i % 4); }");
+      "fn foo(i: {0..<4 as i32}) {} \
+       fn f(i: {0..<8 as i32}) { foo(i % 4); }");
 
-  Alcotest.test_case "{0..<8}%8 can index [u8;8] without bounds check" `Quick
+  Alcotest.test_case "{0..<8 as i32}%8 can index [u8;8] without bounds check" `Quick
     (expect_ok
       "let mut buf: [u8; 8]; \
        fn f(i: {0..<8 as usize}) { buf[i % 8] = 'X'; }");
@@ -1950,7 +1949,7 @@ let infer_tests = [
 
   Alcotest.test_case "refined arithmetic range mismatch caught at return" `Quick
     (expect_type_error "range mismatch"
-      "fn f(i: {0..<8}) -> {0..<8} { return i + 1; }");
+      "fn f(i: {0..<8 as i32}) -> {0..<8 as i32} { return i + 1; }");
 
   Alcotest.test_case "non-proven index (overflow range) still compiles" `Quick
     (expect_ok
@@ -1959,10 +1958,10 @@ let infer_tests = [
 
   (* -- Step 3.5: Type narrowing via if-condition ------------------------------- *)
 
-  Alcotest.test_case "if (v>=0 && v<8) narrows v to {0..<8}" `Quick
+  Alcotest.test_case "if (v>=0 && v<8) narrows v to {0..<8 as i32}" `Quick
     (expect_ok
       "let mut buf: [u8; 8]; \
-       fn foo(i: {0..<8}) {} \
+       fn foo(i: {0..<8 as i32}) {} \
        fn f(v: i32) { if (v >= 0 && v < 8) { foo(v); } }");
 
   Alcotest.test_case "if (v>=0 && v<8) allows buf[v] write (cast to usize \
@@ -1973,27 +1972,27 @@ let infer_tests = [
 
   Alcotest.test_case "outside if block v remains i32 (no escape)" `Quick
     (expect_type_error "unproven i32"
-      "fn foo(i: {0..<8}) {} \
+      "fn foo(i: {0..<8 as i32}) {} \
        fn f(v: i32) { if (v >= 0 && v < 8) {} foo(v); }");
 
   Alcotest.test_case "single bound (only v<8) does not narrow" `Quick
     (expect_type_error "unproven i32"
-      "fn foo(i: {0..<8}) {} \
+      "fn foo(i: {0..<8 as i32}) {} \
        fn f(v: i32) { if (v < 8) { foo(v); } }");
 
   Alcotest.test_case "let mut variable is also narrowed in then-branch" `Quick
     (expect_ok
-      "fn foo(i: {0..<8}) {} \
+      "fn foo(i: {0..<8 as i32}) {} \
        fn f() { let mut v: i32 = 3; if (v >= 0 && v < 8) { foo(v); } }");
 
   Alcotest.test_case "else branch does not get narrowing" `Quick
     (expect_type_error "unproven i32"
-      "fn foo(i: {0..<8}) {} \
+      "fn foo(i: {0..<8 as i32}) {} \
        fn f(v: i32) { if (v >= 0 && v < 8) {} else { foo(v); } }");
 
   Alcotest.test_case "commutative form (0<=v && v<8) also narrows" `Quick
     (expect_ok
-      "fn foo(i: {0..<8}) {} \
+      "fn foo(i: {0..<8 as i32}) {} \
        fn f(v: i32) { if (0 <= v && v < 8) { foo(v); } }");
 
   (* -- Step 3.5 for loop: for i in lo..<hi ----------------------------------- *)
@@ -2023,7 +2022,7 @@ let infer_tests = [
 
   Alcotest.test_case "for loop body accesses refined-param function" `Quick
     (expect_ok
-      "fn foo(i: {0..<8}) {} \
+      "fn foo(i: {0..<8 as i32}) {} \
        fn f() { for i in 0..<8 { foo(i); } }");
 
   Alcotest.test_case "for loop variable does not escape" `Quick
@@ -2425,7 +2424,7 @@ let codegen_tests = [
     "i32 as {lo..<hi as usize} is a CHECKED cast: exactly one trap site \
      (the range check), and the subsequent index is elided. Regression for \
      the soundness hole where this cast was silently unchecked and \
-     arr[v as {0..<8}] became an unchecked OOB access (zero sites, zero \
+     arr[v as {0..<8 as i32}] became an unchecked OOB access (zero sites, zero \
      traps, wrong)" `Quick
     (expect_trap_sites 1
        "let mut ftrap_buf_c: [u8; 8];
@@ -2438,7 +2437,7 @@ let codegen_tests = [
      subtype coercion: zero trap sites, stays legal under --forbid-trap" `Quick
     (expect_trap_sites 0
        "let mut ftrap_buf_d: [u8; 8];
-        fn ftrap_subtype_cast(v: {2..<5}) -> u8 {
+        fn ftrap_subtype_cast(v: {2..<5 as i32}) -> u8 {
           return ftrap_buf_d[v as {0..<8 as usize}];
         }");
 
@@ -2494,7 +2493,7 @@ let codegen_tests = [
 
   Alcotest.test_case
     "if-narrowing is killed by a for-counter rebinding the narrowed name: \
-     the fresh {0..<100} counter must not inherit the outer {0..<8} proof \
+     the fresh {0..<100 as i32} counter must not inherit the outer {0..<8 as i32} proof \
      (2 sites: the in-loop store against size 8, and the read after)" `Quick
     (expect_trap_sites 2
        "let mut fkill_buf_c: [u8; 8];
@@ -2538,18 +2537,18 @@ let codegen_tests = [
 
   Alcotest.test_case
     "refined source covering only variant values proves an exhaustive-enum \
-     cast: {1..<3} as a {1,2}-valued enum emits no switch/trap; {0..<3} \
+     cast: {1..<3 as i32} as a {1,2}-valued enum emits no switch/trap; {0..<3 as i32} \
      (0 is not a variant) keeps the runtime check" `Quick
     (fun () ->
        expect_trap_sites 0
          "enum FtrapTone: u8 { Lo = 1; Hi = 2; }
-          fn ftrap_enum_proven(v: {1..<3}) -> u8 {
+          fn ftrap_enum_proven(v: {1..<3 as i32}) -> u8 {
             let t: FtrapTone = v as FtrapTone;
             return t as u8;
           }" ();
        expect_trap_sites 1
          "enum FtrapTone2: u8 { Lo = 1; Hi = 2; }
-          fn ftrap_enum_unproven(v: {0..<3}) -> u8 {
+          fn ftrap_enum_unproven(v: {0..<3 as i32}) -> u8 {
             let t: FtrapTone2 = v as FtrapTone2;
             return t as u8;
           }" ());
@@ -2886,7 +2885,7 @@ let codegen_tests = [
 
   Alcotest.test_case
     "equality narrowing: `if (ihl == 20)` gives ihl the exact range \
-     {20..<21}, proving the index (zero sites)" `Quick
+     {20..<21 as i32}, proving the index (zero sites)" `Quick
     (expect_trap_sites 0
        "let mut ftp4_buf_a: [u8; 32];
         fn ftp4_eq(ihl: usize) -> u8 {
@@ -2914,9 +2913,9 @@ let codegen_tests = [
     (expect_trap_sites 0
        "let mut ftp4_buf_c: [u8; 128];
         fn ftp4_arith(a: {5..<16 as usize}, b: {0..<8 as usize}) -> u8 {
-          let m: usize = a * 4;       // {20..<61}
-          let s: usize = a + b;       // {5..<23}
-          let d: usize = m - a;       // {5..<56}
+          let m: usize = a * 4;       // {20..<61 as i32}
+          let s: usize = a + b;       // {5..<23 as i32}
+          let d: usize = m - a;       // {5..<56 as i32}
           return ftp4_buf_c[m] + ftp4_buf_c[s] + ftp4_buf_c[d];
         }");
 
@@ -2986,14 +2985,14 @@ let codegen_tests = [
   Alcotest.test_case
     "if-narrowing INTERSECTS with an ALREADY-refined immutable let, rather \
      than no-oping (the pre-fix bug): icmp_len arrives at the if with \
-     {0..<1481} (Sub-propagated from two refined operands), and \
+     {0..<1481 as i32} (Sub-propagated from two refined operands), and \
      `if (icmp_len >= 8 && icmp_len <= 1480)` must tighten it to \
-     {8..<1481} so the resulting subslice's minimum (8) satisfies the \
+     {8..<1481 as i32} so the resulting subslice's minimum (8) satisfies the \
      callee's [u8; 8..] parameter -- zero trap sites end to end" `Quick
     (expect_trap_sites 0
        "fn ftp4b_use(s: [u8; 8..]) -> u8 { return s[0]; }
         fn ftp4b_intersect(frame: [u8; 1514..], a: {20..<1501 as usize}, ihl: {20..<21 as usize}) -> u8 {
-          let icmp_len: usize = a - ihl;         // Sub(refined,refined) -> {0..<1481}
+          let icmp_len: usize = a - ihl;         // Sub(refined,refined) -> {0..<1481 as i32}
           if (icmp_len >= 8 && icmp_len <= 1480) {
             let seg = frame[34..<34 + icmp_len];  // must get minimum >= 8
             return ftp4b_use(seg);
@@ -3031,7 +3030,7 @@ let codegen_tests = [
 
   Alcotest.test_case
     "mask propagation is symmetric (literal & x) and composes with Mul \
-     (P4a): (v & 0x0f) * 4 carries {0..<16} to {0..<61}" `Quick
+     (P4a): (v & 0x0f) * 4 carries {0..<16 as i32} to {0..<61 as i32}" `Quick
     (expect_trap_sites 0
        "let mut ftp4c_buf_b: [u8; 61];
         fn ftp4c_mask_mul(v: usize) -> u8 {
@@ -3050,21 +3049,21 @@ let codegen_tests = [
        "let RX_BUF_SIZE: usize = 1536;
         let mut ftp4c_buf_f: [u8; 12288];
         fn ftp4c_mul_const(raw_idx: usize) -> u8 {
-          let idx: usize = max(min(raw_idx, 7), 0);   // {0..<8}
-          let offset: usize = idx * RX_BUF_SIZE;       // {0..<10753} via Const_env-resolved k
+          let idx: usize = max(min(raw_idx, 7), 0);   // {0..<8 as i32}
+          let offset: usize = idx * RX_BUF_SIZE;       // {0..<10753 as i32} via Const_env-resolved k
           return ftp4c_buf_f[offset];
         }");
 
   Alcotest.test_case
     "min(a, LITERAL) clamps the upper bound to the literal regardless of \
      a's own range, proving a subslice against a smaller buffer than a's \
-     own {0..<64} range would otherwise allow (zero trap sites) -- the \
+     own {0..<64 as i32} range would otherwise allow (zero trap sites) -- the \
      idiom that makes examples/ip_parse's ihl clamp provable" `Quick
     (expect_trap_sites 0
        "let mut ftp4c_buf_c: [u8; 20];
         fn ftp4c_min_clamp(raw: usize) -> u8 {
-          let ihl: usize = raw & 0x3f;      // {0..<64}
-          let capped: usize = min(ihl, 19); // {0..<20}
+          let ihl: usize = raw & 0x3f;      // {0..<64 as i32}
+          let capped: usize = min(ihl, 19); // {0..<20 as i32}
           return ftp4c_buf_c[capped];
         }");
 
@@ -3075,7 +3074,7 @@ let codegen_tests = [
      tcp_parse/tcp_echo pattern. `tlc <= room = 40 - ihl` is a genuine \
      RELATIONAL fact (tlc's value is tied to ihl's), and it is lost the \
      moment tlc becomes its own named variable with just an independent \
-     {0..<41} range: `ihl + tlc`'s ordinary interval combination (using \
+     {0..<41 as i32} range: `ihl + tlc`'s ordinary interval combination (using \
      ihl's OWN worst case together with tlc's OWN worst case, a \
      combination that cannot actually co-occur) overshoots the true bound \
      (40) even though the same-base rule above already closes the lo<=hi \
@@ -3090,10 +3089,10 @@ let codegen_tests = [
           return sum;
         }
         fn ftp4c_chained(pkt: [u8; 40..], raw_ihl: usize, tcp_len: usize) -> i32 {
-          let ihl: usize = min(raw_ihl & 0x3f, 20);   // {0..<21}
-          let room: usize = 40 - ihl;                  // {20..<41} via Sub
+          let ihl: usize = min(raw_ihl & 0x3f, 20);   // {0..<21 as i32}
+          let room: usize = 40 - ihl;                  // {20..<41 as i32} via Sub
           let tl: usize = max(tcp_len, 0);              // >= 0, upper unknown
-          let tlc: usize = min(tl, room);                // {0..<41}
+          let tlc: usize = min(tl, room);                // {0..<41 as i32}
           return ftp4c_checksum(pkt[ihl..<ihl + tlc], 0);
         }");
 
@@ -3104,7 +3103,7 @@ let codegen_tests = [
        expect_trap_sites 0
          "let mut ftp4c_buf_d: [u8; 50];
           fn ftp4c_max_clamp(v: usize) -> u8 {
-            let x: usize = max(v & 0x1f, 0);  // {0..<32}, lower clamp is a no-op here but exercises max
+            let x: usize = max(v & 0x1f, 0);  // {0..<32 as i32}, lower clamp is a no-op here but exercises max
             return ftp4c_buf_d[x];
           }" ();
        expect_trap_sites 1
@@ -3192,7 +3191,7 @@ let codegen_tests = [
     (fun () ->
        expect_trap_sites 0
          "fn ftp4c1_clamp_sub(base: [u8; 1514..], a: {0..<100 as usize}, b: {20..<61 as usize}) -> []u8 {
-            let clamped: usize = max(a - b, 0);   // now honestly {0..<80}
+            let clamped: usize = max(a - b, 0);   // now honestly {0..<80 as i32}
             return base[b..<b + clamped];
           }" ();
        expect_trap_sites 1

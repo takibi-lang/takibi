@@ -1,6 +1,6 @@
 // This file is expected to produce a compile error.
 // Type inference detects returning i+1 (type {1..<9}) from a function declared to return {0..<8}.
-fn add_one(i: {0..<8}) -> {0..<8} {
+fn add_one(i: {0..<8 as i32}) -> {0..<8 as i32} {
     return i + 1;
 }
 fn main() -> i32 {

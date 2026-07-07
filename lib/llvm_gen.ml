@@ -434,9 +434,8 @@ let rec ltype_of_ast = function
     (* Representation follows the refined range's own base (see
        types.ml's TRefinedInt comment) -- was unconditionally i32_type
        before "Refinement Numerical Type" generalized TRefinedInt to carry
-       a base; a for-loop counter's base is always TypeI32 by construction
-       (type_inf.ml's For case), so this is exactly i32 for loop counters,
-       matching the old behavior there unchanged. *)
+       a base. For-loop counters likewise retain their inferred or explicit
+       integer base, so their refined LLVM width follows that base. *)
   | TypeSlice _     ->
       (* Fat value {ptr, len}: len width follows the target pointer size
          (usize), so the layout is {ptr, i32} on Cortex-M and {ptr, i64} on
@@ -1328,8 +1327,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
               i32 v: an unsound OOB access with no trap at all. This range
               check is base-agnostic by design (matches types.ml's
               subtyping rule): a proven fit is about the VALUE range, not
-              whether src's base happens to match the cast target's base
-              (always TypeI32 for the `{lo..<hi}` cast syntax). *)
+              whether src's base happens to match the cast target's base,
+              selected by `{lo..<hi as base}`. *)
            let proven = match src_ty with
              | TypeRefined (a, b, _) -> lo <= a && b <= hi
              | TypeBool -> lo <= 0 && 2 <= hi           (* i1 zext: {0..<2} *)
@@ -2561,10 +2560,9 @@ let rec int_bits_of_ast (ty : Ast.type_expr) =
   | TypeUsize          -> usize_bitwidth ()
   | TypeBool           -> 1
   | TypeRefined (_, _, base) -> int_bits_of_ast base
-    (* Always TypeI32 in practice: the only way a literal TypeRefined
-       reaches here is via the `{lo..<hi}` cast-target syntax, which
-       always spells base = TypeI32 (see Ast.TypeRefined's comment) --
-       kept recursive anyway for robustness rather than hardcoding 32. *)
+    (* Refined constants use their selected/inferred base width. Source
+       annotations select it with `{lo..<hi as base}`; propagated
+       refinements preserve the operand's primitive integer base. *)
   | _                  -> 64  (* not reached: eval_const only calls this for the cases above *)
 
 let mask_to_bits bits (n : Int64.t) : Int64.t =

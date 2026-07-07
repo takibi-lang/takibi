@@ -31,9 +31,11 @@ type type_expr =
   | TypeRefined of int * int * type_expr
     (* {lo..<hi} -- refined int: lo <= x < hi. Third field is the
        underlying primitive type (mirrors Types.ty's TRefinedInt -- see
-       its comment). The `{lo..<hi}` surface syntax always spells this
-       with base = TypeI32; parser.mly's array_size/{lo..<hi} sites are
-       the only place that constructs this literally from source. *)
+       its comment). Source annotations require `{lo..<hi as base}` with
+       an explicit primitive integer base; bare `{lo..<hi}` is reserved for
+       future contextual inference and currently rejected. Inference and
+       range propagation can construct refined types that preserve an
+       operand's existing base. *)
   | TypeSlice of type_expr * int   (* []T / [T; N..] -- fat pointer (ptr + usize len);
                                       int = compile-time MINIMUM length (0 = unknown).
                                       The runtime length is always >= the minimum; index

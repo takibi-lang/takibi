@@ -10,7 +10,8 @@
 // packets -- see CLAUDE.md's IPv4/ICMP section for why parsing and
 // networking I/O are kept as separate steps.
 //
-// SLICE MIGRATION (P4b) + VALIDATION (P4c): `ihl` is typed `{20..<21}`
+// SLICE MIGRATION (P4b) + VALIDATION (P4c): `ihl` is typed
+// `{20..<21 as u16}`
 // (this demo's canned packet always has a 20-byte, no-options IP header)
 // so the fixed-field view `ip[ihl..<ihl + 20]` is fully proven. The
 // checksum span (`ip[ihl..<ihl + tcp_len]`) needs `ip_total_len` (a raw

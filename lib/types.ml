@@ -25,15 +25,13 @@ type ty =
        "Refinement Numerical Type: Width/Signedness-Aware TRefinedInt"
        section) and signedness (is_unsigned reads it directly) for
        operations -- comparisons, shifts, extension direction -- performed
-       on a refined value. The bare `{lo..<hi}` surface SYNTAX always
-       defaults this to TI32 (unchanged from before this field existed);
-       a different base only ever arises from range PROPAGATION preserving
-       an already-typed operand's own base (e.g. `u64_var & 0xff` produces
-       a TU64-based {0..<256}, not a TI32-based one). For-loop counter
-       refinement is a deliberate exception that stays TI32-based always,
-       since a loop counter is fundamentally array-index-shaped (indexing
-       requires plain TI32 regardless of what a loop's bound expression's
-       own type is). *)
+       on a refined value. Source annotations require the explicit
+       `{lo..<hi as base}` syntax; bare `{lo..<hi}` is currently rejected.
+       Range propagation preserves an already-typed operand's base (e.g.
+       `u64_var & 0xff` produces a TU64-based {0..<256}), and a for-loop
+       counter follows its bounds/annotation base. Array and slice indices
+       therefore use TUsize-based refinements, while raw-pointer offsets use
+       TIsize-based refinements. *)
   | TSlice of ty * int    (* []T / [T; N..] -- fat pointer (ptr + usize len);
                              int = compile-time minimum length (0 = unknown) *)
 

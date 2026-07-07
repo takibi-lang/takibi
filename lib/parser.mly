@@ -434,22 +434,16 @@ array_size:
 type_expr:
   | base_type_expr { $1 }
   | LBRACE lo = INT DOTDOTLT hi = INT RBRACE
-    { (* The BARE {lo..<hi} surface syntax (no explicit base) defaults to
-         i32 -- see Ast.TypeRefined's comment -- a bound outside i32's
-         range would silently truncate at codegen time (e.g.
-         emit_refined_cast_check's `const_int i32 hi`), turning a
-         nonsensical range into a wrapped-around one with no warning.
-         Reject it here instead. Use `{lo..<hi as u8/u16/u32/u64/i8/i16/
-         i64/usize}` (below) to spell a non-i32 base explicitly. *)
-      if lo < -2147483648L || hi > 2147483647L then
-        raise (Types.TypeError ($symbolstartpos,
-          Printf.sprintf
-            "refined type bound {%Ld..<%Ld} is out of i32 range \
-             (-2147483648..2147483647): a bare {lo..<hi} with no explicit \
-             base defaults to i32 -- write {lo..<hi as u64} (or another \
-             base) to use a wider range"
-            lo hi));
-      TypeRefined (Int64.to_int lo, Int64.to_int hi, TypeI32) }
+    { (* Reserved for future contextual base inference. Until the AST and
+         signature inference can represent an unresolved refinement base,
+         require the programmer to state it instead of retaining the old,
+         implicit i32 default. Do not infer the smallest fitting type: that
+         would make an innocent range edit silently change ABI width. *)
+      raise (Types.TypeError ($symbolstartpos,
+        Printf.sprintf
+          "refined type {%Ld..<%Ld} requires an explicit base; write \
+           {%Ld..<%Ld as i32} (or another integer base)"
+          lo hi lo hi)) }
   | LBRACE lo = INT DOTDOTLT hi = INT AS base = int_base_type_expr RBRACE
     { (* Explicit-base {lo..<hi as base} surface syntax: lets a programmer
          write a refined type whose LLVM representation genuinely is

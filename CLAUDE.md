@@ -11,10 +11,10 @@ the system will silently break or run amok. Nothing is communicated to the user.
 
 - **Detect errors at compile time.** The ultimate goal is to make any access that the type system cannot prove into a compile error.
 - **`llvm.trap` is a transitional safety net.** The current array bounds check (`icmp uge` -> `llvm.trap`) aids debugging during development, but on AArch64 it translates to `brk #0` (Synchronous Abort) -- a runtime error that must never occur in production code.
-- **The range type `{lo..<hi}` is the solution.** If `hi <= N` and `lo >= 0` can be proven at compile time, no `llvm.trap` code is generated at all.
-- **When to use `i32` vs `{lo..<hi}` is the programmer's responsibility**:
+- **The range type `{lo..<hi as base}` is the solution.** If `hi <= N` and `lo >= 0` can be proven at compile time, no `llvm.trap` code is generated at all.
+- **When to use an unrefined integer vs `{lo..<hi as base}` is the programmer's responsibility**:
   - `i32` = unknown range (MMIO, external input, etc.) -> bounds check required
-  - `{lo..<hi}` = value whose range the programmer knows -> check can be omitted
+  - `{lo..<hi as base}` = value whose range and representation base the programmer knows -> check can be omitted
   - Using an unchecked value read from MMIO directly as an array index is a bug hotbed; a bounds check appearing on `i32` is **correct behavior**
 
 **"Code with remaining bounds checks = code whose type annotations are still insufficient."**
@@ -23,7 +23,7 @@ The finished form of code is when index ranges are pinned at the type level usin
 ## Language Specification (Current)
 
 - File extension: `.tkb`
-- Types: `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `isize`, `usize` (`isize`/`usize` are pointer-sized signed/unsigned integers; LLVM width follows the target's actual pointer size via DataLayout -- 64 bits on AArch64/RISC-V64, 32 bits on Cortex-M/STM32; falls back to 64 bits when no target machine is configured, e.g. in unit tests), `void`, `*T` (regular pointer, non-volatile), `io T` (volatile-qualified value type), `*io T` (volatile MMIO pointer = `TypePtr(TypeIo T)`), `[T; N]` (array type; decays to pointer in function arguments), `fn(T...) -> R` (function pointer type), `Name` (named struct type), `{lo..<hi}` (refined integer subtype)
+- Types: `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `isize`, `usize` (`isize`/`usize` are pointer-sized signed/unsigned integers; LLVM width follows the target's actual pointer size via DataLayout -- 64 bits on AArch64/RISC-V64, 32 bits on Cortex-M/STM32; falls back to 64 bits when no target machine is configured, e.g. in unit tests), `void`, `*T` (regular pointer, non-volatile), `io T` (volatile-qualified value type), `*io T` (volatile MMIO pointer = `TypePtr(TypeIo T)`), `[T; N]` (array type; decays to pointer in function arguments), `fn(T...) -> R` (function pointer type), `Name` (named struct type), `{lo..<hi as base}` (refined integer subtype; explicit base currently required)
 - Statements:
   - `let x = e` / `let x: T = e` -- immutable variable declaration (initial value required, no reassignment)
   - `let mut x = e` / `let mut x: T = e` -- mutable variable declaration (reassignment allowed)
@@ -259,21 +259,19 @@ Precedence (low -> high): `||` < `|` < `^` < comparison < `&` < `as` < `+/-` < `
 **`>>` is sign-aware**: for signed types (i8/i16/i32/i64) `>>` generates `ashr` (arithmetic, sign-extending);
 for unsigned types (u8/u16/u32/u64) it generates `lshr` (logical, zero-extending). This matches standard C behavior.
 
-### {lo..<hi} Bounds Are Rejected Outside i32 Range at Parse Time
+### Refined-Type Bases Are Explicit in Source
 
 **Superseded in part by "Refinement Numerical Type" below**: `TRefinedInt`/
 `TypeRefined` no longer always represents as i32 at the LLVM level in
 general -- it now carries its own base type (`TRefinedInt of int * int *
 ty`), and `ltype_of_ast`/codegen represent it at that base's actual
-width. What remains true, and is what this section is actually about: the
-SURFACE `{lo..<hi}` type syntax (what a programmer can literally type)
-always constructs base = i32 (`lib/parser.mly`'s `type_expr` rule hardcodes
-`TypeI32`) -- there is no source syntax for writing a refined u64/i64
-directly, only the compiler's own range-propagation machinery (Add/Sub/
-Mul/Band/Mod/min/max/narrowing) ever produces a non-i32 base. So the
-range check below (bounds must fit in i32) is specifically a limit on
-the parsed surface syntax, not a general limit on every `TRefinedInt`
-value that can exist internally. Subtyping a `{lo..<hi}` value into a
+width. Source annotations now require the explicit `{lo..<hi as base}`
+form; bare `{lo..<hi}` is reserved for future contextual inference and is
+currently rejected instead of silently choosing i32. The explicit form
+can select any primitive integer base, and the
+compiler's range-propagation machinery (Add/Sub/Mul/Band/Mod/min/max/
+narrowing) also preserves non-i32 bases. Bounds are validated against the
+selected base, not against a universal i32 limit. Subtyping a refined value into a
 wider/narrower concrete type (u8, u64, usize, ...) remains a separate
 check (`lib/types.ml`'s `TRefinedInt _, TU8/TU16/TU32/TU64/TUsize/TI8/
 TI16/TI64 when ...` cases), unrelated to which base the value's own
@@ -385,7 +383,7 @@ discriminants, `Const_env`) only ever needs to reason about small,
 realistic values and was written entirely in native `int`, long before
 this change. Rather than rewrite that machinery in `Int64.t` arithmetic
 (high risk, no benefit -- these subsystems are already capped to small
-values by their own domain, e.g. `TypeRefined` is i32-only regardless),
+values by their own domain, and refined bounds are stored as native `int`),
 every one of those call sites now narrows via one shared helper:
 ```ocaml
 let int_of_intlit (k : Int64.t) : int option =
@@ -607,13 +605,11 @@ lockstep, verified by re-running the full test suite after each pass):
    fires for ANY base, not just i32.
 2. `lib/ast.ml` -- `TypeRefined of int * int * type_expr` (surface AST
    mirror).
-3. `lib/parser.mly` -- the literal `{lo..<hi}` type syntax always
-   constructs `TypeRefined (lo, hi, TypeI32)` -- the SURFACE SYNTAX still
-   defaults to i32 (there is no source-level way to write "{lo..<hi} of
-   u64" directly); non-i32 bases arise only from the type system's OWN
-   range-propagation machinery (Add/Sub/Mul/Band/Mod/min/max/narrowing),
-   never from what a programmer types. This was a deliberate scope
-   decision, not an oversight -- see "Deliberately NOT addressed" below.
+3. `lib/parser.mly` -- at this stage of the original generalization, the
+   literal `{lo..<hi}` syntax still constructed
+   `TypeRefined (lo, hi, TypeI32)`. This was subsequently superseded twice:
+   first by explicit `{lo..<hi as base}` syntax, then by rejecting the bare
+   form entirely so it no longer carries an implicit i32 default.
 4. `lib/type_inf.ml` -- every TRefinedInt-producing site threads/unifies
    `base` instead of hardcoding TI32: `canon_ty` (widens to the value's
    OWN base, not always TI32 -- this single change is what fixed several
@@ -759,12 +755,10 @@ four fully-unconstrained, must not raise).
 
 **Deliberately NOT addressed by this generalization (both since resolved --
 see the later sections in this file)**:
-- The surface `{lo..<hi}` type syntax still always means "base i32" when
-  written bare, with no source-level way to write a refined u64/i64
-  literally -- resolved by the explicit `{lo..<hi as base}` syntax added
-  later this same session (see "Explicit-Base {lo..<hi as base} Surface
-  Syntax" below); the bare form's i32 default is unchanged and still
-  correct for the common case.
+- The surface `{lo..<hi}` type syntax still meant "base i32" at this stage,
+  with no source-level way to write a refined u64/i64 literally. Explicit
+  `{lo..<hi as base}` syntax resolved the first problem; the implicit i32
+  fallback was later removed as well, and the bare form is now rejected.
 - `For` loop counters were hardcoded to `base = TI32` regardless of the
   loop bound's own type -- this was believed to have "no motivating
   example," which turned out to be wrong (`for i in 0..<s.len` is exactly
@@ -806,13 +800,14 @@ not just receive one indirectly from the compiler's own range-propagation
 machinery (Add/Sub/Mul/Band/Mod/min/max/narrowing).
 
 **Syntax**: `{lo..<hi as base}`, where `base` is one of i8/i16/i32/i64/
-u8/u16/u32/u64/usize (the same set "by convention" already documented as
+u8/u16/u32/u64/isize/usize (the same set "by convention" already documented as
 `TRefinedInt`'s allowed bases). Reuses the existing `AS` token rather than
 inventing new grammar -- `{20..<21 as u8}` reads as "a value in this
 range, as this base type", and there is no ambiguity with the ordinary
 `expr AS type_expr` cast (this form only ever appears between `hi` and
 `RBRACE`, strictly inside the braces). The bare `{lo..<hi}` form (no `as`)
-is unchanged and still defaults to i32.
+is reserved for future contextual inference and currently produces a
+compile error asking for an explicit base.
 
 **Per-base range validation, generalizing the existing i32-only check**:
 just like a bare `{lo..<hi}` bound outside i32's range used to silently

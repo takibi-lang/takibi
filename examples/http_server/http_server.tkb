@@ -28,7 +28,7 @@
 //     (tcp[TCP_FLAGS]); adjacent protocol offsets line up exactly.
 //   - The device-reported length is clamped ONCE (`len <= 1514` in the
 //     IPv4 branch condition) before anything trusts it.
-//   - `ihl` is typed `{20..<21}` in every function that receives it: this
+//   - `ihl` is typed `{20..<21 as u16}` in every function that receives it: this
 //     file's scope is "no IP options" (IHL always exactly 20), and an
 //     EXACT-match refined parameter type turns that existing runtime
 //     precondition (previously just an `if`) into something the checksum

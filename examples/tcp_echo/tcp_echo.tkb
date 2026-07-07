@@ -191,7 +191,8 @@ fn build_data_echo(eth: [u8; 1514..], ihl: {20..<21 as u16}, data: []u8, data_le
     // Snapshot into an immutable local after an explicit bound check: a
     // PLAIN u16 PARAMETER carries no range at all (unlike a refined local,
     // parameters can't cross a function boundary with a refined type
-    // except by exact match -- see http_server.tkb's `ihl: {20..<21}`
+    // except by exact match -- see http_server.tkb's
+    // `ihl: {20..<21 as u16}`
     // comment for why). This mirrors http_server's HTTP_MAX_PAYLOAD
     // pattern: the check both PROVES tcp_seg's minimum (>= 20, needed by
     // fix_tcp_checksum) and fails safe if data_len is ever larger than
