@@ -202,6 +202,7 @@ fn avail_publish(queue_mem: *u8, new_idx: isize) {
     let avail_off: isize = QNUM * (sizeof(VirtqDesc) as isize);
     let avail: *VirtqAvail = (queue_mem + avail_off) as *VirtqAvail;
     avail.idx = new_idx as u16;
+    dma_publish(); // descriptors, ring entries, and idx before MMIO notify
 }
 
 // These three read memory the device writes asynchronously via DMA, and
@@ -262,6 +263,7 @@ fn net_poll_rx() -> i32 {
     if (rx_used_seen == used_idx_get(rx_queue_mem as *u8)) {
         return 0;
     }
+    dma_consume(); // used-ring entry and RX payload now belong to the CPU
     let slot: isize = rx_used_seen % QNUM;
     net_last_rx_desc_idx = used_ring_get_id(rx_queue_mem as *u8, slot);
     let frame_total_len: i32 = used_ring_get_len(rx_queue_mem as *u8, slot);
@@ -329,6 +331,7 @@ fn net_transmit(buf: *u8, len: i32) {
     virtio_notify(1);
 
     while (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {}
+    dma_consume(); // device finished reading the transmitted buffer
     tx_used_seen = tx_used_seen + 1;
 }
 

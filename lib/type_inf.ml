@@ -851,6 +851,16 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       raise (TypeError (e.loc,
         "struct literal requires a type annotation: `let mut x: Name = {...}`"))
 
+  | Call (("dma_publish" | "dma_consume" | "device_fence") as fname, args) ->
+      (* Target-independent DMA/device ordering builtins. Their hardware
+         lowering is selected in llvm_gen.ml; keeping them zero-argument
+         makes the synchronization boundary explicit and prevents a runtime
+         value from accidentally selecting barrier semantics. *)
+      (match args with
+       | [] -> TVoid
+       | _ -> raise (TypeError (e.loc,
+           Printf.sprintf "%s expects no arguments: %s()" fname fname)))
+
   | Call ("slice_copy", args) ->
       (* Builtin (reserved name, see check_reserved_fn): copies
          min(dst.len, src.len) elements FORWARD from src to dst and returns
@@ -1654,7 +1664,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      BEFORE consulting fenv, so a same-named user/extern function would be
      silently unreachable -- reject the definition instead. *)
   let check_reserved_fn loc name =
-    if name = "slice_copy" || name = "slice_eq" || name = "min" || name = "max" then
+    if name = "slice_copy" || name = "slice_eq" || name = "min" || name = "max"
+       || name = "dma_publish" || name = "dma_consume" || name = "device_fence" then
       raise (TypeError (loc,
         Printf.sprintf "'%s' is a compiler builtin and cannot be redefined" name))
   in

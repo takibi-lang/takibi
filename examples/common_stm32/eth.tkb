@@ -90,11 +90,9 @@ let PHY_AN_10_FULL:  u32 = 0x0040;
 let PHY_AN_10_HALF:  u32 = 0x0020;
 
 // -- DMA descriptor ring geometry --------------------------------------------
-// examples/common_stm32/eth_asm.S: dsb (Data Synchronization Barrier),
-// forces prior writes to the descriptor rings to complete before the very
-// next poll-demand register write, so the DMA engine can't race ahead and
-// read a stale descriptor. See that file's comment for how this was found.
-extern fn eth_dsb();
+// Descriptor ownership transitions use the compiler's DMA builtins below.
+// They provide both a compiler memory boundary and the target-specific
+// hardware barrier required before doorbell/MMIO writes and after completion.
 
 let ETH_RX_DESC_COUNT: isize = 4;
 let ETH_TX_DESC_COUNT: isize = 4;
@@ -311,7 +309,7 @@ fn net_init() -> i32 {
 
     eth_rx_ring_init();
     eth_tx_ring_init();
-    eth_dsb(); // ring writes must complete before DMA is started below
+    dma_publish(); // ring writes must complete before DMA is started below
 
     *ETH_DMAOMR = (1 << 21) | (1 << 25); // TSF | RSF (store-and-forward)
     *ETH_DMAOMR = *ETH_DMAOMR | (1 << 1) | (1 << 13); // SR | ST (start RX/TX DMA)
@@ -329,10 +327,12 @@ fn net_poll_rx() -> i32 {
     if ((word0 & ETH_RDES0_OWN) != 0) {
         return 0; // still owned by the DMA
     }
+    dma_consume(); // device returned ownership; payload/descriptor are now readable
+    let completed_word0: u32 = desc.word0;
     // Extracting FL via a u32 (logical) shift is correct regardless of
     // whether OWN happens to be clear -- unlike an i32 (arithmetic) shift,
     // which would sign-extend if this were ever reached with bit 31 set.
-    return ((word0 >> ETH_RDES0_FL_SHIFT) & ETH_RDES_FL_MASK) as i32;
+    return ((completed_word0 >> ETH_RDES0_FL_SHIFT) & ETH_RDES_FL_MASK) as i32;
 }
 
 fn net_rx_buf() -> *u8 {
@@ -376,7 +376,7 @@ fn net_rx_frame() -> [u8; 1514..] {
 fn net_rx_release() {
     let desc: *EthDmaDesc = rx_desc_ptr(eth_rx_cur);
     desc.word0 = ETH_RDES0_OWN;
-    eth_dsb(); // see eth_asm.S: must complete before the DMA can be kicked
+    dma_publish(); // CPU returns descriptor ownership before kicking DMA
     *ETH_DMARPDR = 1; // poll demand: resume RX DMA if it had suspended
     eth_rx_cur = (eth_rx_cur + 1) % ETH_RX_DESC_COUNT;
 }
@@ -393,10 +393,11 @@ fn net_transmit(buf: *u8, len: i32) {
     desc.word1 = len as u32; // TBS1
     desc.word0 = ETH_TDES0_OWN | ETH_TDES0_FS | ETH_TDES0_LS | ETH_TDES0_TCH;
 
-    eth_dsb(); // see eth_asm.S: must complete before the DMA can be kicked
+    dma_publish(); // descriptor and payload must be visible before the kick
     *ETH_DMATPDR = 1; // poll demand: prompt DMA to check for a ready descriptor now
 
     while ((desc.word0 & ETH_TDES0_OWN) != 0) {}
+    dma_consume(); // DMA has finished reading buf before the caller reuses it
 
     eth_tx_cur = (eth_tx_cur + 1) % ETH_TX_DESC_COUNT;
 }

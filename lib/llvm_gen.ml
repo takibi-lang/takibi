@@ -352,6 +352,55 @@ let restore_narrowing_mut saved =
     | Some old -> Hashtbl.replace narrowing_ctx name old
   ) saved
 
+type device_barrier_kind = DmaPublish | DmaConsume | DeviceFence
+
+let starts_with s prefix =
+  let n = String.length prefix in
+  String.length s >= n && String.sub s 0 n = prefix
+
+let get_or_declare_intrinsic name fty =
+  match lookup_function name the_module with
+  | Some fn -> fn
+  | None -> declare_function name fty the_module
+
+(* Emit a target-specific hardware barrier which is also opaque to LLVM's
+   memory optimizer. ARM/AArch64 and x86 have target intrinsics; LLVM 19/22
+   expose no RISC-V fence intrinsic carrying the I/O predecessor/successor
+   bits, so RISC-V uses compiler-internal side-effecting inline asm with a
+   memory clobber. This is an implementation detail, not source-level asm.
+
+   ARM currently uses the conservative DSB SY for all three operations --
+   exactly the instruction validated by the STM32 Ethernet bring-up. x86
+   likewise starts conservatively with MFENCE. These can be weakened later
+   per platform without changing Takibi source semantics. *)
+let emit_device_barrier kind =
+  let triple = target_triple the_module in
+  let void_fn = function_type (void_type context) [||] in
+  if starts_with triple "aarch64" then begin
+    let fty = function_type (void_type context) [| i32_type context |] in
+    let fn = get_or_declare_intrinsic "llvm.aarch64.dsb" fty in
+    ignore (build_call fty fn [| const_int (i32_type context) 15 |] "" builder)
+  end else if starts_with triple "arm" || starts_with triple "thumb" then begin
+    let fty = function_type (void_type context) [| i32_type context |] in
+    let fn = get_or_declare_intrinsic "llvm.arm.dsb" fty in
+    ignore (build_call fty fn [| const_int (i32_type context) 15 |] "" builder)
+  end else if starts_with triple "x86_64" || starts_with triple "i386"
+       || starts_with triple "i486" || starts_with triple "i586"
+       || starts_with triple "i686" then begin
+    let fn = get_or_declare_intrinsic "llvm.x86.sse2.mfence" void_fn in
+    ignore (build_call void_fn fn [||] "" builder)
+  end else if starts_with triple "riscv32" || starts_with triple "riscv64" then begin
+    let asm = match kind with
+      | DmaPublish -> "fence w, o"
+      | DmaConsume -> "fence i, r"
+      | DeviceFence -> "fence iorw, iorw"
+    in
+    let inline = const_inline_asm void_fn asm "~{memory}" true false in
+    ignore (build_call void_fn inline [||] "" builder)
+  end else
+    raise (Error (Printf.sprintf
+      "DMA/device barriers are not implemented for target '%s'" triple))
+
 let setup_target ?(triple = "") ?(cpu = "") ?(features = "") () =
   let _ = Llvm_all_backends.initialize () in
   let triple = if triple = "" then Llvm_target.Target.default_triple () else triple in
@@ -1734,6 +1783,18 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
   | StructLit _ ->
       raise (Error "BUG: StructLit must be handled in gen_stmt / gen_global, not gen_expr")
+
+  | Call ("dma_publish", []) ->
+      emit_device_barrier DmaPublish;
+      (TypeVoid, const_null (i1_type context))
+
+  | Call ("dma_consume", []) ->
+      emit_device_barrier DmaConsume;
+      (TypeVoid, const_null (i1_type context))
+
+  | Call ("device_fence", []) ->
+      emit_device_barrier DeviceFence;
+      (TypeVoid, const_null (i1_type context))
 
   | Call ("slice_copy", [d_e; s_e]) ->
       (* Builtin (see type_inf.ml's Call case for the full semantics

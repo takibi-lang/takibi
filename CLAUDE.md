@@ -57,6 +57,7 @@ The finished form of code is when index ranges are pinned at the type level usin
   - Function call, `*expr` (dereference), `&ident` (address-of)
   - `expr as T` -- explicit type cast (integer widths including `isize`/`usize`, `*T` -> `usize`, `usize` -> `*T`, `*T` -> `*U`). Lower precedence than arithmetic, so `a + b as u8` = `(a + b) as u8`
   - `sizeof(T)` -- compile-time size of `T` in bytes, type `usize` (fixed, not a polymorphic literal; compare/assign against other integer types requires an explicit `as` cast, e.g. `len >= sizeof(Hdr)` requires `len: usize`). Reads the same LLVM DataLayout used for struct tail-padding, so `sizeof` on a `packed` or `align(N)` struct reflects the true in-memory size.
+  - DMA/device synchronization builtins are zero-argument, target-lowered operations: `dma_publish()` transfers CPU writes toward a device before a later MMIO notification; `dma_consume()` acquires device-written DMA state after completion is observed; `device_fence()` is a conservative full device barrier. ARM/AArch64 lower to DSB SY, AMD64 currently lowers conservatively to MFENCE, and RISC-V uses direction-preserving `fence w,o` / `fence i,r` / `fence iorw,iorw`. Driver code should encapsulate these at ownership boundaries rather than exposing them to applications.
 - `struct Name { field: type; ... }` -- struct type definition (top-level only; fields are primitive types, pointer types, or other struct types)
 - `let mut s: Name;` -- struct variable declaration (local/global, always treated as mutable)
 - `s.field` -- field read (works for both `s: Name` and `s: *Name`, Zig-style)
@@ -2972,15 +2973,15 @@ the normal (always `-g`-free) build outputs.
   instead (already only included where those symbols exist). **Deferred**: a lightweight `use <file>;`-style
   declaration (even just "this file requires these to be present," checked at parse/link time) would catch this
   class of mistake at the point of writing the code rather than requiring a full rebuild sweep to notice.
-- **No built-in memory-barrier intrinsic** -- the STM32 Ethernet DMA bring-up needed a `dsb` instruction between a
+- **DMA/device memory-barrier builtins are implemented** -- the STM32 Ethernet DMA bring-up needed a `dsb` instruction between a
   descriptor-ring write and the "poll demand" register kick, because `*io` volatile writes alone don't guarantee the
   CPU's write buffer has retired before a subsequent register write reaches the DMA engine (see the "Hardware
   bring-up bug worth knowing about" paragraph under the STM32 Ethernet section below -- found only via live
-  openocd/gdb-multiarch debugging on real hardware, not something the compiler flagged). Worked around with a
-  hand-written `extern fn eth_dsb()` (`examples/common_stm32/eth_asm.S`), one target's instruction only.
-  **Deferred**: a builtin `fence()`/`barrier()` (lowering to `dsb` on AArch64, `dmb` on Cortex-M, the same way
-  `sizeof`/`as` already lower per-target) would remove a whole class of "did you remember the barrier before this
-  DMA kick" bugs that today are invisible to the type checker and only surface as real hardware misbehavior.
+  openocd/gdb-multiarch debugging on real hardware, not something the compiler flagged). The original handwritten
+  `extern fn eth_dsb()`/`eth_asm.S` workaround has been removed. `dma_publish()`, `dma_consume()`, and
+  `device_fence()` now lower per target and are placed inside the STM32 and virtio driver ownership transitions,
+  so application examples do not manually select barriers. Future affine DMA handles can enforce these transitions
+  statically without changing the source-level barrier semantics.
 - **STM32 Ethernet: all five examples are ported -- `net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo`,
   and `http_server` all run on real hardware with real MAC/PHY/DMA, and are the *same source file* as
   their QEMU/virtio-net counterparts.** `examples/common_stm32/eth.tkb` is a from-scratch MAC/DMA-
@@ -3065,11 +3066,10 @@ the normal (always `-g`-free) build outputs.
   but that says nothing about the CPU's write buffer having actually retired the SRAM write before the very next
   store lands, so the DMA engine could race ahead and read a stale (OWN=0) descriptor. Confirmed by re-issuing
   the poll-demand write by hand through the debugger after enough time had passed for the earlier write to
-  settle -- the descriptor completed instantly. Fixed with a `dsb` (Data Synchronization Barrier) instruction
-  between the descriptor write and the poll-demand kick (`examples/common_stm32/eth_asm.S`, called via
-  `extern fn eth_dsb()` -- same `extern fn` mechanism as `sem_wait`/`sem_post`). **Any future takibi code that
-  writes memory a DMA engine will read, then kicks that DMA engine via a register write, needs the same barrier
-  -- volatile alone is not enough.**
+  settle -- the descriptor completed instantly. Fixed originally with a handwritten `dsb`, now replaced by the
+  compiler builtin `dma_publish()` between descriptor writes and poll-demand kicks. Completion paths use
+  `dma_consume()` before CPU access to device-written descriptors/buffers. These calls stay inside driver APIs;
+  volatile alone is not enough for DMA ownership transfer.
 
 ## QEMU Bare-Metal (AArch64)
 

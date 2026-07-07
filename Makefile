@@ -525,24 +525,19 @@ examples/watchdog/kernel_stm32.bin: examples/watchdog/kernel_stm32.elf
 # either symbol) -- harmless, matching the same "one inert extra file
 # rather than a split recipe group" choice the QEMU-side NET_OBJS makes.
 COMMON_STM32_ETH       := $(COMMON_STM32_DIR)/eth.tkb
-COMMON_STM32_ETH_ASM_S := $(COMMON_STM32_DIR)/eth_asm.S
-COMMON_STM32_ETH_ASM_O := $(COMMON_STM32_DIR)/eth_asm.o
 COMMON_STM32_NETCONFIG := $(COMMON_STM32_DIR)/netconfig.tkb
-
-$(COMMON_STM32_ETH_ASM_O): $(COMMON_STM32_ETH_ASM_S)
-	$(LLVM_MC) --triple=$(STM32_TARGET) --filetype=obj $< -o $@
 
 examples/net_echo/net_echo_stm32.o: examples/net_echo/net_echo.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/net_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/net_echo/net_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/net_echo/net_echo_stm32.o -o $@
+examples/net_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/net_echo/net_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/net_echo/net_echo_stm32.o -o $@
 
 examples/arp_reply/arp_reply_stm32.o: examples/arp_reply/arp_reply.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/arp_reply/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/arp_reply/arp_reply_stm32.o $(COMMON_STM32_LINK_ETH_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/arp_reply/arp_reply_stm32.o -o $@
+examples/arp_reply/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/arp_reply/arp_reply_stm32.o $(COMMON_STM32_LINK_ETH_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/arp_reply/arp_reply_stm32.o -o $@
 
 examples/arp_reply/kernel_stm32.bin: examples/arp_reply/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
@@ -550,8 +545,8 @@ examples/arp_reply/kernel_stm32.bin: examples/arp_reply/kernel_stm32.elf
 examples/icmp_echo/icmp_echo_stm32.o: examples/icmp_echo/icmp_echo.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/icmp_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/icmp_echo/icmp_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/icmp_echo/icmp_echo_stm32.o -o $@
+examples/icmp_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/icmp_echo/icmp_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/icmp_echo/icmp_echo_stm32.o -o $@
 
 examples/icmp_echo/kernel_stm32.bin: examples/icmp_echo/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
@@ -559,8 +554,8 @@ examples/icmp_echo/kernel_stm32.bin: examples/icmp_echo/kernel_stm32.elf
 examples/tcp_echo/tcp_echo_stm32.o: examples/tcp_echo/tcp_echo.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/tcp_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/tcp_echo/tcp_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/tcp_echo/tcp_echo_stm32.o -o $@
+examples/tcp_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/tcp_echo/tcp_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/tcp_echo/tcp_echo_stm32.o -o $@
 
 examples/tcp_echo/kernel_stm32.bin: examples/tcp_echo/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
@@ -568,8 +563,8 @@ examples/tcp_echo/kernel_stm32.bin: examples/tcp_echo/kernel_stm32.elf
 examples/http_server/http_server_stm32.o: examples/http_server/http_server.tkb $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_PRINT) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/http_server/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/http_server/http_server_stm32.o $(COMMON_STM32_LINK_ETH_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_ETH_ASM_O) examples/http_server/http_server_stm32.o -o $@
+examples/http_server/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/http_server/http_server_stm32.o $(COMMON_STM32_LINK_ETH_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/http_server/http_server_stm32.o -o $@
 
 examples/http_server/kernel_stm32.bin: examples/http_server/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@

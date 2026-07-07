@@ -64,6 +64,15 @@ let contains_substring haystack needle =
   let rec scan i = i + n <= m && (String.sub haystack i n = needle || scan (i + 1)) in
   scan 0
 
+let count_substring haystack needle =
+  let n = String.length needle and m = String.length haystack in
+  let rec count i acc =
+    if i + n > m then acc
+    else if String.sub haystack i n = needle then count (i + n) (acc + 1)
+    else count (i + 1) acc
+  in
+  if n = 0 then 0 else count 0 0
+
 (* gen_expr's ?expected_ty hint (CLAUDE.md's "64-bit Integer Literals"
    follow-up): a bare literal in an already-typed position must embed
    DIRECTLY at that type in the generated LLVM IR, with no intermediate
@@ -2323,6 +2332,24 @@ let codegen_tests = [
          (contains_substring (function_ir "offset_packed_value") "ret i64 1"));
 
   Alcotest.test_case
+    "DMA/device barriers lower to AArch64 DSB intrinsics" `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "fn codegen_barriers_aarch64() {
+            dma_publish();
+            dma_consume();
+            device_fence();
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_barriers_aarch64" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_barriers_aarch64 was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check int) "three dsb calls" 3
+         (count_substring ir "llvm.aarch64.dsb"));
+
+  Alcotest.test_case
     "indexed struct field assignment codegens through the element address"
     `Quick
     (expect_trap_sites 0
@@ -3124,6 +3151,24 @@ let codegen_tests = [
        expect_type_error "compiler builtin"
          "fn max(a: i32, b: i32) -> i32 { return a; }" ());
 
+  Alcotest.test_case
+    "DMA/device barrier builtins are zero-argument void operations" `Quick
+    (fun () ->
+       expect_ok
+         "fn barrier_calls() {
+            dma_publish();
+            dma_consume();
+            device_fence();
+          }" ();
+       expect_type_error "expects no arguments"
+         "fn bad_barrier_call() { dma_publish(1); }" ());
+
+  Alcotest.test_case
+    "DMA/device barrier builtin names cannot be redefined" `Quick
+    (fun () ->
+       expect_type_error "compiler builtin" "fn dma_publish() {}" ();
+       expect_type_error "compiler builtin" "extern fn device_fence();" ());
+
   (* -- P4c-1: unsafe extended to slice/array-BASE subslice construction -- *)
   (* Previously unsafe only gated pointer->slice construction (a length
      assertion with NO evidence at all). This extends the SAME gate to a
@@ -3340,6 +3385,24 @@ let codegen_tests = [
        in
        Alcotest.(check int) "usize_bitwidth" 32 (Llvm_gen.usize_bitwidth ());
        Alcotest.(check int) "isize_bitwidth" 32 (Llvm_gen.isize_bitwidth ()));
+
+  Alcotest.test_case
+    "DMA/device barriers lower to ARM DSB intrinsics on Cortex-M" `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "fn codegen_barriers_cortexm() {
+            dma_publish();
+            dma_consume();
+            device_fence();
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_barriers_cortexm" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_barriers_cortexm was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check int) "three dsb calls" 3
+         (count_substring ir "llvm.arm.dsb"));
 
   Alcotest.test_case
     "full pipeline still verifies under the 32-bit target for the coerce \
@@ -3846,6 +3909,45 @@ let codegen_tests = [
           }
           return total;
         }");
+
+  Alcotest.test_case
+    "DMA/device barriers lower to MFENCE on AMD64" `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"x86_64-none-elf" ()
+       in
+       let _ = gen_codegen
+         "fn codegen_barriers_x86() {
+            dma_publish(); dma_consume(); device_fence();
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_barriers_x86" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_barriers_x86 was not emitted"
+       in
+       Alcotest.(check int) "three mfence calls" 3
+         (count_substring (Llvm.string_of_llvalue fn) "llvm.x86.sse2.mfence"));
+
+  Alcotest.test_case
+    "DMA/device barriers preserve RISC-V memory/I/O fence directions" `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"riscv64-none-elf" ()
+       in
+       let _ = gen_codegen
+         "fn codegen_barriers_riscv() {
+            dma_publish(); dma_consume(); device_fence();
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_barriers_riscv" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_barriers_riscv was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check bool) "publish fence w,o" true (contains_substring ir "fence w, o");
+       Alcotest.(check bool) "consume fence i,r" true (contains_substring ir "fence i, r");
+       Alcotest.(check bool) "full fence iorw" true
+         (contains_substring ir "fence iorw, iorw"));
 
 ]
 
