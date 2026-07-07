@@ -1,12 +1,50 @@
-// UART echo server. Immediately echoes input back; exits on q + Enter.
-// uart_getc() comes from the HAL (examples/common/uart_getc.tkb or
-// examples/common_stm32/uart_getc.tkb) so this file is portable.
+// Interrupt-driven UART echo server. The platform HAL supplies uniform
+// setup/unmask helpers; QEMU dispatches through GIC while STM32 vectors
+// USART1 directly to USART1_IRQHandler.
+
+let mut echo_rx_buf: [u8; 64];
+let mut echo_rx_head: io usize;
+let mut echo_rx_tail: io usize;
+
+fn echo_uart_rx_isr() {
+    let c: u8 = uart_isr_getc();
+    let head: usize = echo_rx_head;
+    let next: usize = (head + 1) % 64;
+    if (next != echo_rx_tail) {
+        let ring: *u8 = echo_rx_buf;
+        ring[head as isize] = c;
+        signal_fence(); // publish the byte before the volatile head update
+        echo_rx_head = next;
+    }
+}
+
+fn irq_dispatch(frame_sp: usize) -> usize {
+    let id: u32 = *(gic.cpu_iar);
+    if (id == 33) {
+        echo_uart_rx_isr();
+    }
+    *(gic.cpu_eoir) = id;
+    return frame_sp;
+}
+
+fn USART1_IRQHandler() {
+    echo_uart_rx_isr();
+}
 
 fn main() {
+    irq_uart_rx_setup();
     uart_puts("echo ready\r\n");
+    echo_rx_head = 0;
+    echo_rx_tail = 0;
+    irq_uart_rx_unmask();
     let mut prev: u8 = 0;
     while (1) {
-        let c: u8 = uart_getc();
+        while (echo_rx_tail == echo_rx_head) {}
+        signal_fence(); // acquire the byte after observing the head update
+        let tail: usize = echo_rx_tail;
+        let ring: *u8 = echo_rx_buf;
+        let c: u8 = ring[tail as isize];
+        echo_rx_tail = (tail + 1) % 64;
         uart_putc(c);
         if (c == '\r') {
             uart_putc('\n');
@@ -20,4 +58,3 @@ fn main() {
     }
     uart_puts("bye\r\n");
 }
-

@@ -57,7 +57,8 @@ The finished form of code is when index ranges are pinned at the type level usin
   - Function call, `*expr` (dereference), `&ident` (address-of)
   - `expr as T` -- explicit type cast (integer widths including `isize`/`usize`, `*T` -> `usize`, `usize` -> `*T`, `*T` -> `*U`). Lower precedence than arithmetic, so `a + b as u8` = `(a + b) as u8`
   - `sizeof(T)` -- compile-time size of `T` in bytes, type `usize` (fixed, not a polymorphic literal; compare/assign against other integer types requires an explicit `as` cast, e.g. `len >= sizeof(Hdr)` requires `len: usize`). Reads the same LLVM DataLayout used for struct tail-padding, so `sizeof` on a `packed` or `align(N)` struct reflects the true in-memory size.
-  - DMA/device synchronization builtins are zero-argument, target-lowered operations: `dma_publish()` transfers CPU writes toward a device before a later MMIO notification; `dma_consume()` acquires device-written DMA state after completion is observed; `device_fence()` is a conservative full device barrier. ARM/AArch64 lower to DSB SY, AMD64 currently lowers conservatively to MFENCE, and RISC-V uses direction-preserving `fence w,o` / `fence i,r` / `fence iorw,iorw`. Driver code should encapsulate these at ownership boundaries rather than exposing them to applications.
+  - DMA/device synchronization builtins include `dma_publish()`, `dma_consume()`, and `device_fence()`. ARM/AArch64 lower to DSB SY, AMD64 currently lowers conservatively to MFENCE, and RISC-V uses direction-preserving fences. Cache-aware operations are `dma_prepare_tx(ptr, len)`, `dma_prepare_rx(ptr, len)`, and `dma_finish_rx(ptr, len)`. Cortex-M7 rounds the range to 32-byte cache lines and uses SCB DCCMVAC/DCIMVAC plus barriers; currently supported coherent non-Cortex-M targets use the corresponding ordering barrier. DMA buffers must not share cache lines with unrelated mutable data. Driver code encapsulates these operations at ownership boundaries.
+  - `signal_fence()` is a compiler-only memory boundary for ISR/normal-context communication. It lowers to side-effecting empty LLVM inline assembly with a memory clobber and emits no hardware barrier instruction.
 - `struct Name { field: type; ... }` -- struct type definition (top-level only; fields are primitive types, pointer types, or other struct types)
 - `opaque struct Name;` -- incomplete nominal type usable only behind a pointer. It has no constructible value, fields, or size and is intended for driver-owned state handles.
 - `affine opaque struct Name;` marks pointers to that opaque type as affine handles. Passing one to an ordinary affine-handle parameter consumes the local value; a second consumption or later use is a compile error. `borrow *Name` is allowed only as a function parameter and permits non-consuming inspection. This is intentionally a restricted, intraprocedural facility rather than a general affine type system: values may be dropped, explicit pointer casts remain an escape hatch, and consuming an affine value declared outside a loop from inside that loop is conservatively rejected.
@@ -2981,7 +2982,8 @@ the normal (always `-g`-free) build outputs.
   bring-up bug worth knowing about" paragraph under the STM32 Ethernet section below -- found only via live
   openocd/gdb-multiarch debugging on real hardware, not something the compiler flagged). The original handwritten
   `extern fn eth_dsb()`/`eth_asm.S` workaround has been removed. `dma_publish()`, `dma_consume()`, and
-  `device_fence()` now lower per target and are placed inside the STM32 and virtio driver ownership transitions,
+  `device_fence()` now lower per target and are placed inside the STM32 and virtio driver ownership transitions.
+  The cache-aware `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` operations maintain Cortex-M7 cache lines,
   so application examples do not manually select barriers. The RX API now uses an affine opaque CPU-ownership
   handle to reject use-after-release and double-release statically without changing the source-level barrier semantics.
 - **STM32 Ethernet: all five examples are ported -- `net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo`,
@@ -2999,13 +3001,10 @@ the normal (always `-g`-free) build outputs.
   `examples/net_echo/net_echo.tkb` (and the other four) are a *single* file compiled against either
   backend depending on target, not a QEMU version plus a hand-maintained `_stm32.tkb` copy -- see that
   file's header comment. Descriptor rings, RX/TX buffers, and virtio's 10-byte `virtio_net_hdr` framing
-  are all hidden inside each backend; application code never sees them. `virtio_mmio.tkb`'s `net_rx_acquire()`
-  now polls the used ring directly instead of waiting on a GIC-routed interrupt (removing
-  `gic_init`/`gic_enable_virtio_irq`/`virtio_irq_handler`/`virtio_irq_flag`/every app's identical
-  `irq_dispatch` entirely) -- QEMU's virtio-mmio device works identically either way, and
-  `examples/common/startup.S` already safely no-ops when the GIC is never initialized (relied on today by
-  every non-IRQ example). `gic.tkb` itself is untouched, still used by `irq`/`preempt`/`semaphore`/
-  `watchdog`/`condvar`/`msgqueue`.
+  are all hidden inside each backend; application code never sees them. Both backends are interrupt-driven:
+  STM32 vectors IRQ61 directly to `ETH_IRQHandler`, while virtio discovers its SPI from the MMIO slot and
+  dispatches through GICv2. ISRs only acknowledge and set `io` flags; used-ring/descriptor inspection,
+  cache maintenance, affine-handle creation, and packet processing remain in normal context.
 
   **Network config**: `examples/common_stm32/netconfig.tkb` holds the board's MAC/IP as plain global
   constants (`OUR_MAC`/`OUR_IP`/`HTTP_SERVER_IP`, array-literal `{...}` initializers). MAC is a fixed
@@ -3057,10 +3056,12 @@ the normal (always `-g`-free) build outputs.
   needed for the HTTP requests themselves (plain sockets, unlike the other four's raw `AF_PACKET`) -- only
   the `ip neigh flush` step needs root, which `make hwcheck-net`'s existing blanket `sudo` already covers.
 
-  Deliberately still deferred: **polling-only, no interrupt-driven RX** on the STM32 side --
-  `examples/common_stm32/startup.S`'s vector table currently only extends through IRQ37 (USART1), and
-  every other STM32 example links against that same shared file, so extending it through IRQ61 (ETH) is
-  left for a follow-up once polling-only was confirmed working across all five examples.
+  STM32 startup configures MPU region 0 for `0x20010000..<0x20020000` as Normal, non-cacheable,
+  shareable memory before enabling the Cortex-M7 I-cache and D-cache. Ethernet images are linked at
+  `0x20010000`; `link_eth.ld` asserts that their data plus stack remain inside this 64KB window so future
+  growth cannot silently place DMA-visible globals in cacheable AXI SRAM. Descriptors remain padded/aligned
+  to one 32-byte cache line and RX/TX ownership transitions retain explicit cache-maintenance builtins and
+  barriers, keeping the driver contract valid if its placement strategy changes later.
 
   **Hardware bring-up bug worth knowing about**: the very first working version had every DMA descriptor field
   byte-for-byte correct (verified live via openocd/gdb-multiarch register+memory dumps) yet the TX descriptor's
@@ -3074,6 +3075,12 @@ the normal (always `-g`-free) build outputs.
   compiler builtin `dma_publish()` between descriptor writes and poll-demand kicks. Completion paths use
   `dma_consume()` before CPU access to device-written descriptors/buffers. These calls stay inside driver APIs;
   volatile alone is not enough for DMA ownership transfer.
+
+  TX interrupt-driven completion also requires `TDES0.IC` (bit 30) on every submitted descriptor. Enabling
+  `DMAIER.TIE` alone is insufficient: without IC the DMA clears OWN after transmitting but emits no normal TX
+  completion interrupt, leaving a flag-based waiter blocked forever. The waiter treats the interrupt as a wakeup
+  and still verifies that OWN has cleared after acquiring the descriptor; the notification itself is not used as
+  proof of ownership.
 
 ## QEMU Bare-Metal (AArch64)
 
@@ -3329,13 +3336,9 @@ virtio protocol itself.
   (`virtio_net_find()` in `examples/common/virtio_mmio.tkb`). A lone
   `-device virtio-net-device` does NOT land on slot 0: empirically, under
   this devcontainer's QEMU 8.2.2, it landed on slot 31 (base `0x0a003e00`).
-  The driver scans all 32 slots for `DeviceID == 1` (network) and derives
-  the base address from whatever slot it actually finds, so a future QEMU
-  version placing the device elsewhere doesn't break it. (Earlier versions
-  of this driver also derived a GIC IRQ number from the discovered slot
-  for interrupt-driven RX; `net_rx_acquire()` now polls the used ring
-  directly instead, so no IRQ/GIC involvement remains here at all -- see
-  the STM32 Ethernet entry above for why and when that changed.)
+  The driver scans all 32 slots for `DeviceID == 1` (network), derives both
+  its base address and GIC SPI, routes that SPI to CPU0, and acknowledges
+  legacy queue interrupts inside the driver-owned IRQ dispatcher.
 - **The vring uses typed views over one shared backing allocation.**
   `VirtqDesc`, `VirtqAvail`, `VirtqUsed`, and `VirtqUsedElem` describe the
   specification-defined layouts. Descriptor writes use `descs[i].field`,

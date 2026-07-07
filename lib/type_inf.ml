@@ -853,7 +853,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       raise (TypeError (e.loc,
         "struct literal requires a type annotation: `let mut x: Name = {...}`"))
 
-  | Call (("dma_publish" | "dma_consume" | "device_fence") as fname, args) ->
+  | Call (("dma_publish" | "dma_consume" | "device_fence" | "signal_fence") as fname, args) ->
       (* Target-independent DMA/device ordering builtins. Their hardware
          lowering is selected in llvm_gen.ml; keeping them zero-argument
          makes the synchronization boundary explicit and prevents a runtime
@@ -862,6 +862,20 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | [] -> TVoid
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "%s expects no arguments: %s()" fname fname)))
+
+  | Call (("dma_prepare_tx" | "dma_prepare_rx" | "dma_finish_rx") as fname, args) ->
+      (match args with
+       | [ptr; len] ->
+           let pt = infer_expr senv eenv tyenv fenv ptr in
+           let lt = infer_expr senv eenv tyenv fenv len in
+           (match repr pt with
+            | TPtr _ -> ()
+            | _ -> raise (TypeError (ptr.loc, Printf.sprintf
+                "%s expects a raw pointer as its first argument" fname)));
+           unify_at len.loc lt TUsize;
+           TVoid
+       | _ -> raise (TypeError (e.loc, Printf.sprintf
+           "%s expects two arguments: %s(ptr, len)" fname fname)))
 
   | Call ("slice_copy", args) ->
       (* Builtin (reserved name, see check_reserved_fn): copies
@@ -1764,7 +1778,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      silently unreachable -- reject the definition instead. *)
   let check_reserved_fn loc name =
     if name = "slice_copy" || name = "slice_eq" || name = "min" || name = "max"
-       || name = "dma_publish" || name = "dma_consume" || name = "device_fence" then
+       || name = "dma_publish" || name = "dma_consume" || name = "device_fence"
+       || name = "signal_fence"
+       || name = "dma_prepare_tx" || name = "dma_prepare_rx" || name = "dma_finish_rx" then
       raise (TypeError (loc,
         Printf.sprintf "'%s' is a compiler builtin and cannot be redefined" name))
   in

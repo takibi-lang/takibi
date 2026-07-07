@@ -20,15 +20,9 @@
 // RX/TX buffers, and the virtio_net_hdr framing detail are all internal to
 // this file; the app only ever sees a plain Ethernet frame.
 //
-// Polling-only, matching eth.tkb: net_rx_acquire() checks the used ring
-// directly instead of waiting on a GIC-routed interrupt. QEMU's
-// virtio-mmio device works identically either way (the interrupt is a
-// notification convenience, not a requirement -- the driver polling
-// used_idx_get() directly is a spec-legal alternative), and
-// examples/common/startup.S already safely no-ops when the GIC is never
-// initialized (relied on today by every non-IRQ example). This removes
-// the GIC/IRQ wiring (gic_init/gic_enable_virtio_irq/irq_dispatch/
-// virtio_irq_flag) every consumer used to have to set up by hand.
+// Interrupt-driven: the shared GIC entry only acknowledges the virtio-mmio
+// interrupt and records queue-work flags. Descriptor ownership and packet
+// processing remain in normal context inside the API below.
 
 let VIRTIO_DEVICE_ID:        i32 = 0x08;
 let VIRTIO_HOST_FEATURES:    i32 = 0x10;
@@ -40,6 +34,8 @@ let VIRTIO_QUEUE_NUM:        i32 = 0x38;
 let VIRTIO_QUEUE_ALIGN:      i32 = 0x3c;
 let VIRTIO_QUEUE_PFN:        i32 = 0x40;
 let VIRTIO_QUEUE_NOTIFY:     i32 = 0x50;
+let VIRTIO_INTERRUPT_STATUS: i32 = 0x60;
+let VIRTIO_INTERRUPT_ACK:    i32 = 0x64;
 let VIRTIO_STATUS:           i32 = 0x70;
 
 let VIRTIO_MAGIC_VALUE:   u32 = 0x74726976;
@@ -54,6 +50,7 @@ let PAGE_SIZE: isize = 4096;
 let VIRTIO_MMIO_FIRST_SLOT: i32 = 0x0a000000;
 let VIRTIO_MMIO_SLOT_STRIDE: i32 = 0x200;
 let VIRTIO_MMIO_SLOT_COUNT: i32 = 32;
+let VIRTIO_MMIO_FIRST_SPI: i32 = 48;
 
 let QNUM: isize = 8; // virtqueue depth for both the RX and TX queues
 
@@ -100,6 +97,9 @@ let VIRTIO_CONFIG_MAC_OFFSET: i32 = 0x100; // Config space starts right after th
 // derives the base address from whichever slot actually reports
 // DeviceID == 1 (network).
 let mut virtio_base: i32 = 0;
+let mut virtio_gic_irq: i32 = 0;
+let mut virtio_rx_irq_flag: io u32;
+let mut virtio_tx_irq_flag: io u32;
 
 // RX_BUF_SIZE and every buffer/ring-index below are internal to this
 // driver (matching eth.tkb's encapsulation) -- the app never needs to know
@@ -132,11 +132,40 @@ fn virtio_net_find() -> i32 {
             let devid_p: *io u32 = (base + VIRTIO_DEVICE_ID) as *io u32;
             if (*devid_p == VIRTIO_DEVICE_ID_NET) {
                 virtio_base = base;
+                virtio_gic_irq = VIRTIO_MMIO_FIRST_SPI + i;
                 return 1;
             }
         }
     }
     return 0;
+}
+
+fn gic_enable_virtio_irq() {
+    let isenabler_n: i32 = virtio_gic_irq / 32;
+    let bit: i32 = virtio_gic_irq - isenabler_n * 32;
+    let isenabler: *io u32 = (0x08000100 + isenabler_n * 4) as *io u32;
+    *isenabler = 1 << (bit as u32);
+
+    let itargetsr: *io u8 = (0x08000800 + virtio_gic_irq) as *io u8;
+    *itargetsr = 1 as u8;
+}
+
+fn virtio_irq_handler() {
+    let status: i32 = *(vreg(VIRTIO_INTERRUPT_STATUS));
+    *(vreg(VIRTIO_INTERRUPT_ACK)) = status;
+    // Legacy virtio-mmio reports a queue-wide notification, not which queue
+    // changed. Normal context re-checks each used ring before acting.
+    virtio_rx_irq_flag = 1;
+    virtio_tx_irq_flag = 1;
+}
+
+fn irq_dispatch(frame_sp: usize) -> usize {
+    let id: u32 = *(gic.cpu_iar);
+    if (id == (virtio_gic_irq as u32)) {
+        virtio_irq_handler();
+    }
+    *(gic.cpu_eoir) = id;
+    return frame_sp;
 }
 
 // Device bring-up through feature negotiation. VIRTIO_NET_F_MAC is always
@@ -242,6 +271,11 @@ fn net_init() -> i32 {
         return 0;
     }
 
+    virtio_rx_irq_flag = 0;
+    virtio_tx_irq_flag = 0;
+    gic_init();
+    gic_enable_virtio_irq();
+
     virtio_negotiate(VIRTIO_NET_F_MAC);
     virtio_queue_setup(0, rx_queue_mem as *u8); // RX
     virtio_queue_setup(1, tx_queue_mem as *u8); // TX
@@ -266,9 +300,14 @@ fn net_init() -> i32 {
 // net_rx_len(), so even a malformed zero/negative length cannot hide an
 // acquired descriptor and prevent its release.
 fn net_rx_acquire() -> *NetRxCpuOwned {
+    if (virtio_rx_irq_flag == 0) {
+        return 0 as usize as *NetRxCpuOwned;
+    }
+    virtio_rx_irq_flag = 0;
     if (rx_used_seen == used_idx_get(rx_queue_mem as *u8)) {
         return 0 as usize as *NetRxCpuOwned;
     }
+    virtio_rx_irq_flag = 1; // drain coalesced used-ring entries
     dma_consume(); // used-ring entry and RX payload now belong to the CPU
     let slot: isize = rx_used_seen % QNUM;
     net_last_rx_desc_idx = used_ring_get_id(rx_queue_mem as *u8, slot);
@@ -334,9 +373,15 @@ fn net_transmit(buf: *u8, len: i32) {
     avail_ring_set(tx_queue_mem as *u8, 0, 0);
     tx_avail_idx = tx_avail_idx + 1;
     avail_publish(tx_queue_mem as *u8, tx_avail_idx);
+    virtio_tx_irq_flag = 0;
     virtio_notify(1);
 
-    while (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {}
+    while (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {
+        virtio_tx_irq_flag = 0;
+        if (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {
+            while (virtio_tx_irq_flag == 0) {}
+        }
+    }
     dma_consume(); // device finished reading the transmitted buffer
     tx_used_seen = tx_used_seen + 1;
 }

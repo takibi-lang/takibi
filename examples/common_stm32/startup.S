@@ -15,7 +15,7 @@
    Cortex-M context-switch mechanism (see PendSV_Handler's comment), shared
    by every preemptive-scheduler example, harmless to include unconditionally
    since nothing ever sets ICSR.PENDSVSET unless a program explicitly enables
-   SysTick. SysTick and USART1 (IRQ37, the only external interrupt any
+   SysTick. SysTick, USART1 (IRQ37), and Ethernet (IRQ61)
    example currently uses) are `.weak`, defaulting to a no-op return rather
    than Default_Handler's infinite loop -- unlike a genuine fault, these only
    fire if a program deliberately enabled them, so hanging is not the safe
@@ -41,12 +41,15 @@ _vector_table:
     .word   0                   /* Reserved    */
     .word   PendSV_Handler      /* PendSV      */
     .word   SysTick_Handler     /* SysTick     */
-    /* External interrupts (NVIC IRQ0-37). Only IRQ37 (USART1) is used by
-       any example so far; IRQ0-36 all point at Default_Handler. */
+    /* External interrupts through IRQ61 (Ethernet). */
     .rept   37                  /* IRQ0-36 */
     .word   Default_Handler
     .endr
     .word   USART1_IRQHandler   /* IRQ37 */
+    .rept   23                  /* IRQ38-60 */
+    .word   Default_Handler
+    .endr
+    .word   ETH_IRQHandler      /* IRQ61 */
 
     .section .text
     .thumb_func
@@ -79,6 +82,73 @@ Reset_Handler:
     b       .Lzero_bss_loop
 .Lzero_bss_done:
 
+    /* Ethernet examples are linked into AXI SRAM starting at 0x20010000.
+       Unlike DTCM, that memory is visible to both the Cortex-M7 and the
+       Ethernet DMA master.  Keep its first 64KB non-cacheable so CPU and
+       DMA ownership transfers cannot leave descriptor or packet data in
+       different versions of a cache line.  Region attributes are:
+
+         XN=1, AP=full access, TEX=1, C=0, B=0, S=1,
+         SIZE=64KB, ENABLE=1
+
+       This is Normal, non-cacheable, shareable memory.  PRIVDEFENA keeps
+       the architectural default memory map for all addresses not covered
+       by this region (including ordinary DTCM-linked examples and flash).
+       Configure the MPU before enabling either cache. */
+    dsb
+    ldr     r0, =0xE000ED94     /* MPU_CTRL */
+    movs    r1, #0
+    str     r1, [r0]
+    ldr     r0, =0xE000ED98     /* MPU_RNR */
+    str     r1, [r0]            /* region 0 */
+    ldr     r0, =0xE000ED9C     /* MPU_RBAR */
+    ldr     r1, =0x20010000
+    str     r1, [r0]
+    ldr     r0, =0xE000EDA0     /* MPU_RASR */
+    ldr     r1, =0x130C001F
+    str     r1, [r0]
+    ldr     r0, =0xE000ED94     /* MPU_CTRL */
+    movs    r1, #5              /* PRIVDEFENA | ENABLE */
+    str     r1, [r0]
+    dsb
+    isb
+
+    /* Enable both Cortex-M7 L1 caches. The 4KB D-cache is 4-way set
+       associative with 32-byte lines, so invalidate all 32 sets in all
+       four ways before setting CCR.DC. The Ethernet DMA window above is
+       non-cacheable; compiler DMA builtins still provide the ownership
+       barriers and remain correct if buffers later move elsewhere. */
+    dsb
+    ldr     r0, =0xE000EF60     /* SCB_DCISW */
+    movs    r1, #0
+.Ldcache_way:
+    movs    r2, #0
+.Ldcache_set:
+    lsls    r3, r1, #30
+    orr     r3, r3, r2, lsl #5
+    str     r3, [r0]
+    adds    r2, r2, #1
+    cmp     r2, #32
+    blt     .Ldcache_set
+    adds    r1, r1, #1
+    cmp     r1, #4
+    blt     .Ldcache_way
+    dsb
+    isb
+
+    ldr     r0, =0xE000EF50     /* SCB_ICIALLU */
+    movs    r1, #0
+    str     r1, [r0]
+    dsb
+    isb
+
+    ldr     r0, =0xE000ED14     /* SCB_CCR */
+    ldr     r1, [r0]
+    orr     r1, r1, #(1 << 16)  /* DC */
+    orr     r1, r1, #(1 << 17)  /* IC */
+    str     r1, [r0]
+    dsb
+    isb
     /* Switch Thread mode to use PSP (process stack pointer), reserving the
        top 0x800 (2KB) bytes of the boot stack region exclusively for MSP
        (exception/Handler mode always uses MSP, never PSP, regardless of
@@ -179,4 +249,9 @@ SysTick_Handler:
     .weak   USART1_IRQHandler
     .thumb_func
 USART1_IRQHandler:
+    bx      lr
+
+    .weak   ETH_IRQHandler
+    .thumb_func
+ETH_IRQHandler:
     bx      lr

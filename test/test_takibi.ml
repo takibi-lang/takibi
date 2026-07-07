@@ -2399,6 +2399,7 @@ let codegen_tests = [
             dma_publish();
             dma_consume();
             device_fence();
+            signal_fence();
           }"
        in
        let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_barriers_aarch64" with
@@ -3227,7 +3228,34 @@ let codegen_tests = [
     "DMA/device barrier builtin names cannot be redefined" `Quick
     (fun () ->
        expect_type_error "compiler builtin" "fn dma_publish() {}" ();
-       expect_type_error "compiler builtin" "extern fn device_fence();" ());
+       expect_type_error "compiler builtin" "extern fn device_fence();" ();
+       expect_type_error "compiler builtin" "fn signal_fence() {}" ());
+
+  Alcotest.test_case "DMA cache builtins require pointer and usize length" `Quick
+    (fun () ->
+       expect_ok
+         "fn cache_ops(p: *u8, n: usize) {
+            dma_prepare_tx(p, n);
+            dma_prepare_rx(p, n);
+            dma_finish_rx(p, n);
+          }" ();
+       expect_type_error "raw pointer"
+         "fn bad_cache_ptr(n: usize) { dma_prepare_tx(n, n); }" ();
+       expect_type_error "cannot unify"
+         "fn bad_cache_len(p: *u8, n: i32) { dma_finish_rx(p, n); }" ());
+
+  Alcotest.test_case "signal_fence emits a compiler memory clobber only" `Quick
+    (fun () ->
+       let _ = gen_codegen "fn codegen_signal_fence() { signal_fence(); }" in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_signal_fence" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_signal_fence was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check bool) "memory clobber" true
+         (contains_substring ir "~{memory}");
+       Alcotest.(check bool) "no hardware fence intrinsic" false
+         (contains_substring ir "llvm.arm.dsb"));
 
   (* -- P4c-1: unsafe extended to slice/array-BASE subslice construction -- *)
   (* Previously unsafe only gated pointer->slice construction (a length
@@ -3462,6 +3490,28 @@ let codegen_tests = [
        in
        let ir = Llvm.string_of_llvalue fn in
        Alcotest.(check int) "three dsb calls" 3
+         (count_substring ir "llvm.arm.dsb"));
+
+  Alcotest.test_case
+    "DMA cache builtins lower to Cortex-M7 SCB line maintenance loops" `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "fn codegen_dma_cache(p: *u8, n: usize) {
+            dma_prepare_tx(p, n);
+            dma_prepare_rx(p, n);
+            dma_finish_rx(p, n);
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_dma_cache" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_dma_cache was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check bool) "cache-line loop" true
+         (contains_substring ir "dma.cache.cond");
+       Alcotest.(check int) "three volatile SCB writes" 3
+         (count_substring ir "store volatile i32");
+       Alcotest.(check int) "cache operations are fenced" 4
          (count_substring ir "llvm.arm.dsb"));
 
   Alcotest.test_case

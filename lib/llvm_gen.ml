@@ -461,6 +461,48 @@ let usize_lltype () =
 
 let isize_lltype () = usize_lltype ()
 
+type dma_cache_op = CacheClean | CacheInvalidate
+
+(* Cortex-M7 exposes cache-line maintenance through the memory-mapped SCB
+   DCCMVAC/DCIMVAC registers. The operation covers every 32-byte line touched
+   by [ptr, ptr+len); callers must still ensure that DMA buffers do not share
+   cache lines with unrelated mutable data. *)
+let emit_cortex_m_cache_range op ptr len =
+  let fn = block_parent (insertion_block builder) in
+  let preheader = insertion_block builder in
+  let cond_bb = append_block context "dma.cache.cond" fn in
+  let body_bb = append_block context "dma.cache.body" fn in
+  let done_bb = append_block context "dma.cache.done" fn in
+  let ity = usize_lltype () in
+  let addr = build_ptrtoint ptr ity "dma.addr" builder in
+  let mask = const_int ity (-32) in
+  let start = build_and addr mask "dma.line.start" builder in
+  let end_unaligned = build_add addr len "dma.end.unaligned" builder in
+  let end_rounded = build_and
+    (build_add end_unaligned (const_int ity 31) "dma.end.plus31" builder)
+    mask "dma.line.end" builder in
+  ignore (build_br cond_bb builder);
+  position_at_end cond_bb builder;
+  let line = build_phi [(start, preheader)] "dma.line" builder in
+  let nonempty = build_icmp Icmp.Ne len (const_null ity) "dma.nonempty" builder in
+  let before_end = build_icmp Icmp.Ult line end_rounded "dma.before.end" builder in
+  ignore (build_cond_br (build_and nonempty before_end "dma.cache.more" builder)
+            body_bb done_bb builder);
+  position_at_end body_bb builder;
+  let reg_addr = match op with
+    | CacheClean -> 0xE000EF68
+    | CacheInvalidate -> 0xE000EF5C
+  in
+  let reg = const_inttoptr (const_int ity reg_addr) (pointer_type context) in
+  let line32 = if ity = i32_type context then line
+               else build_trunc line (i32_type context) "dma.line32" builder in
+  let st = build_store line32 reg builder in
+  set_volatile true st;
+  let next = build_add line (const_int ity 32) "dma.line.next" builder in
+  ignore (build_br cond_bb builder);
+  add_incoming (next, body_bb) line;
+  position_at_end done_bb builder
+
 (* Test-only introspection: usize's current bit-width (32 or 64) as a plain
    int, so test_takibi.ml can assert on it without needing the `llvm`
    ocamlfind package linked directly (this library already depends on it). *)
@@ -1798,6 +1840,35 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
   | Call ("device_fence", []) ->
       emit_device_barrier DeviceFence;
+      (TypeVoid, const_null (i1_type context))
+
+  | Call ("signal_fence", []) ->
+      let fty = function_type (void_type context) [||] in
+      let inline = const_inline_asm fty "" "~{memory}" true false in
+      ignore (build_call fty inline [||] "" builder);
+      (TypeVoid, const_null (i1_type context))
+
+  | Call (("dma_prepare_tx" | "dma_prepare_rx" | "dma_finish_rx") as name,
+          [ptr_e; len_e]) ->
+      let (_, ptr) = gen_expr locals ptr_e in
+      let (_, len) = gen_expr ~expected_ty:TypeUsize locals len_e in
+      let triple = target_triple the_module in
+      if starts_with triple "arm" || starts_with triple "thumb" then begin
+        (match name with
+         | "dma_prepare_tx" ->
+             emit_cortex_m_cache_range CacheClean ptr len;
+             emit_device_barrier DmaPublish
+         | "dma_prepare_rx" ->
+             emit_cortex_m_cache_range CacheInvalidate ptr len;
+             emit_device_barrier DmaPublish
+         | _ ->
+             emit_device_barrier DmaConsume;
+             emit_cortex_m_cache_range CacheInvalidate ptr len;
+             emit_device_barrier DmaConsume)
+      end else
+        emit_device_barrier (match name with
+          | "dma_prepare_tx" | "dma_prepare_rx" -> DmaPublish
+          | _ -> DmaConsume);
       (TypeVoid, const_null (i1_type context))
 
   | Call ("slice_copy", [d_e; s_e]) ->

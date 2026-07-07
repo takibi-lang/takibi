@@ -5,15 +5,9 @@
 // configure clocks/GPIO/SYSCFG, soft-reset the MAC/DMA, bring up the PHY over
 // MDIO, and hand-build the DMA descriptor rings ourselves.
 //
-// This first pass is deliberately POLLING-ONLY (no ETH_IRQHandler / NVIC
-// wiring): examples/common_stm32/startup.S's vector table currently only
-// extends through IRQ37 (USART1), and every other STM32 example links
-// against that same shared file, so extending it is a change with a much
-// larger blast radius than anything else in this file. Proving the MAC +
-// PHY + DMA descriptor plumbing works at all is the goal of this first
-// milestone; interrupt-driven RX (extending startup.S through IRQ61 and
-// adding enable_eth_irq() to nvic.tkb) is a natural, low-risk follow-up once
-// that's confirmed on real hardware, not bundled into this first cut.
+// RX and TX completion are interrupt-driven through NVIC IRQ61. The ISR
+// acknowledges DMA status and sets flags only; descriptor/cache ownership
+// transitions and packet processing remain in normal context.
 //
 // Register offsets and bit positions below were cross-checked against ST's
 // official CMSIS device header (cmsis_device_f7/Include/stm32f746xx.h) and
@@ -25,11 +19,9 @@
 // linked into AXI SRAM (examples/common_stm32/link_eth.ld), not the DTCM
 // that examples/common_stm32/link.ld uses for every other example -- the
 // STM32F7 Ethernet DMA master cannot reach DTCM at all (it isn't on the bus
-// matrix DTCM sits behind). Cache maintenance (clean/invalidate) around
-// these buffers is deliberately not implemented: nothing in startup.S or
-// link_eth.ld enables the Cortex-M7 D-cache (SCB->CCR DCE bit is left at its
-// post-reset-disabled state), so there is no coherency hazard yet -- this
-// must be revisited if a future change enables the D-cache.
+// matrix DTCM sits behind). startup.S enables the Cortex-M7 D-cache, so DMA
+// objects are isolated on 32-byte cache lines and every CPU/device ownership
+// transition below performs explicit clean/invalidate maintenance.
 
 // -- RCC / SYSCFG -----------------------------------------------------------
 let RCC_AHB1ENR: *io u32 = 0x40023830;
@@ -63,6 +55,7 @@ let ETH_DMARDLAR: *io u32 = 0x4002900C;
 let ETH_DMATDLAR: *io u32 = 0x40029010;
 let ETH_DMASR:    *io u32 = 0x40029014;
 let ETH_DMAOMR:   *io u32 = 0x40029018;
+let ETH_DMAIER:   *io u32 = 0x4002901C;
 
 // -- LAN8742A PHY (IEEE 802.3 clause 22 standard registers only -- avoids
 // depending on any vendor-specific register 31 bit encoding). MDIO address
@@ -99,12 +92,14 @@ let ETH_TX_DESC_COUNT: isize = 4;
 affine opaque struct NetRxCpuOwned;
 let mut net_rx_token_storage: u8;
 let mut net_rx_acquired_len: i32;
+let mut eth_rx_irq_flag: io u32;
+let mut eth_tx_irq_flag: io u32;
 let ETH_BUF_SIZE: isize = 1536; // max 1518-byte Ethernet frame, rounded up
 let ETH_BUF_SIZE_USIZE: usize = 1536; // memory indexing counterpart
 
 // Four 32-bit words, exactly matching the STM32F7 chained DMA descriptor.
 // Fields are io because the DMA engine updates them asynchronously.
-struct EthDmaDesc align(4) {
+struct EthDmaDesc align(32) {
     word0: io u32;
     word1: io u32;
     word2: io u32;
@@ -117,17 +112,33 @@ let ETH_RDES0_FL_SHIFT: u32 = 16;
 let ETH_RDES_FL_MASK: u32 = 0x3FFF;
 
 let ETH_TDES0_OWN: u32 = ETH_RDES0_OWN; // same top-bit flag
+let ETH_TDES0_IC:  u32 = 0x40000000;
 let ETH_TDES0_LS:  u32 = 0x20000000;
 let ETH_TDES0_FS:  u32 = 0x10000000;
 let ETH_TDES0_TCH: u32 = 0x00100000;
+
+let ETH_DMASR_TS:  u32 = 0x00000001;
+let ETH_DMASR_RS:  u32 = 0x00000040;
+let ETH_DMASR_NIS: u32 = 0x00010000;
+
+fn ETH_IRQHandler() {
+    let status: u32 = *ETH_DMASR;
+    *ETH_DMASR = status; // W1C: acknowledge every latched DMA source
+    if ((status & ETH_DMASR_RS) != 0) {
+        eth_rx_irq_flag = 1;
+    }
+    if ((status & ETH_DMASR_TS) != 0) {
+        eth_tx_irq_flag = 1;
+    }
+}
 
 // Descriptor rings and packet buffers. Placed in AXI SRAM by link_eth.ld
 // (see this file's header comment) -- no takibi-level section attribute
 // needed, the linker script alone decides which physical RAM bank .bss
 // lands in.
-let mut eth_rx_descs: [EthDmaDesc; ETH_RX_DESC_COUNT] align(4);
-let mut eth_tx_descs: [EthDmaDesc; ETH_TX_DESC_COUNT] align(4);
-let mut eth_rx_bufs:  [u8; ETH_RX_DESC_COUNT * ETH_BUF_SIZE] align(4);
+let mut eth_rx_descs: [EthDmaDesc; ETH_RX_DESC_COUNT] align(32);
+let mut eth_tx_descs: [EthDmaDesc; ETH_TX_DESC_COUNT] align(32);
+let mut eth_rx_bufs:  [u8; ETH_RX_DESC_COUNT * ETH_BUF_SIZE] align(32);
 
 let mut eth_rx_cur: isize = 0;
 let mut eth_tx_cur: isize = 0;
@@ -255,7 +266,9 @@ fn eth_rx_ring_init() {
         eth_rx_descs[i].word1 = ETH_RDES1_RCH | (ETH_BUF_SIZE as u32); // RCH | RBS1
         eth_rx_descs[i].word2 = ptr_to_u32(buf);                       // buffer1 address
         eth_rx_descs[i].word3 = ptr_to_u32(next as *u8);              // next descriptor (RCH mode)
+        dma_prepare_rx(buf, ETH_BUF_SIZE as usize);
         eth_rx_descs[i].word0 = ETH_RDES0_OWN;                        // hand to DMA last
+        dma_prepare_tx(rx_desc_ptr(ptr_i) as *u8, sizeof(EthDmaDesc));
     }
     *ETH_DMARDLAR = ptr_to_u32(rx_desc_ptr(0) as *u8);
 }
@@ -268,6 +281,7 @@ fn eth_tx_ring_init() {
         // 0 (BSS-zeroed): OWN=0 means these start out owned by the CPU, and
         // net_transmit() fills them in fresh on every send.
         eth_tx_descs[i].word3 = ptr_to_u32(next as *u8); // next descriptor (TCH mode)
+        dma_prepare_tx(tx_desc_ptr(ptr_i) as *u8, sizeof(EthDmaDesc));
     }
     *ETH_DMATDLAR = ptr_to_u32(tx_desc_ptr(0) as *u8);
 }
@@ -314,6 +328,12 @@ fn net_init() -> i32 {
     eth_tx_ring_init();
     dma_publish(); // ring writes must complete before DMA is started below
 
+    eth_rx_irq_flag = 0;
+    eth_tx_irq_flag = 0;
+    *ETH_DMASR = 0xFFFFFFFF; // clear stale W1C status before unmasking
+    enable_eth_irq();
+    *ETH_DMAIER = ETH_DMASR_NIS | ETH_DMASR_RS | ETH_DMASR_TS;
+
     *ETH_DMAOMR = (1 << 21) | (1 << 25); // TSF | RSF (store-and-forward)
     *ETH_DMAOMR = *ETH_DMAOMR | (1 << 1) | (1 << 13); // SR | ST (start RX/TX DMA)
 
@@ -325,12 +345,23 @@ fn net_init() -> i32 {
 // must be passed exactly once to net_rx_release(). The frame length is kept
 // separate so malformed lengths cannot suppress descriptor release.
 fn net_rx_acquire() -> *NetRxCpuOwned {
+    if (eth_rx_irq_flag == 0) {
+        return 0 as usize as *NetRxCpuOwned;
+    }
+    // Clear before inspecting the descriptor so an IRQ racing with this
+    // check sets it again instead of being overwritten afterward.
+    eth_rx_irq_flag = 0;
     let desc: *EthDmaDesc = rx_desc_ptr(eth_rx_cur);
+    dma_finish_rx(desc as *u8, sizeof(EthDmaDesc));
     let word0: u32 = desc.word0;
     if ((word0 & ETH_RDES0_OWN) != 0) {
         return 0 as usize as *NetRxCpuOwned; // still owned by the DMA
     }
-    dma_consume(); // device returned ownership; payload/descriptor are now readable
+    // Keep draining already-completed descriptors from the ring even when
+    // several frames were coalesced into one DMA interrupt.
+    eth_rx_irq_flag = 1;
+    dma_finish_rx(eth_rx_bufs + eth_rx_cur * ETH_BUF_SIZE,
+                  ETH_BUF_SIZE as usize);
     let completed_word0: u32 = desc.word0;
     // Extracting FL via a u32 (logical) shift is correct regardless of
     // whether OWN happens to be clear -- unlike an i32 (arithmetic) shift,
@@ -379,8 +410,10 @@ fn net_rx_frame(frame: borrow *NetRxCpuOwned) -> [u8; 1514..] {
 // already copied/sent them out, since net_transmit() is synchronous).
 fn net_rx_release(frame: *NetRxCpuOwned) {
     let desc: *EthDmaDesc = rx_desc_ptr(eth_rx_cur);
+    dma_prepare_rx(eth_rx_bufs + eth_rx_cur * ETH_BUF_SIZE,
+                   ETH_BUF_SIZE as usize);
     desc.word0 = ETH_RDES0_OWN;
-    dma_publish(); // CPU returns descriptor ownership before kicking DMA
+    dma_prepare_tx(desc as *u8, sizeof(EthDmaDesc));
     *ETH_DMARPDR = 1; // poll demand: resume RX DMA if it had suspended
     eth_rx_cur = (eth_rx_cur + 1) % ETH_RX_DESC_COUNT;
 }
@@ -395,13 +428,25 @@ fn net_transmit(buf: *u8, len: i32) {
 
     desc.word2 = ptr_to_u32(buf);
     desc.word1 = len as u32; // TBS1
-    desc.word0 = ETH_TDES0_OWN | ETH_TDES0_FS | ETH_TDES0_LS | ETH_TDES0_TCH;
+    desc.word0 = ETH_TDES0_OWN | ETH_TDES0_IC | ETH_TDES0_FS | ETH_TDES0_LS | ETH_TDES0_TCH;
 
-    dma_publish(); // descriptor and payload must be visible before the kick
+    dma_prepare_tx(buf, len as usize);
+    dma_prepare_tx(desc as *u8, sizeof(EthDmaDesc));
+    eth_tx_irq_flag = 0;
     *ETH_DMATPDR = 1; // poll demand: prompt DMA to check for a ready descriptor now
 
-    while ((desc.word0 & ETH_TDES0_OWN) != 0) {}
-    dma_consume(); // DMA has finished reading buf before the caller reuses it
+    // TS is a notification to re-check the descriptor, not proof that this
+    // descriptor has completed: a stale/early TX status may race with the
+    // handoff. OWN is the authoritative ownership state.
+    let mut tx_owned: u32 = ETH_TDES0_OWN;
+    while ((tx_owned & ETH_TDES0_OWN) != 0) {
+        eth_tx_irq_flag = 0;
+        dma_finish_rx(desc as *u8, sizeof(EthDmaDesc));
+        tx_owned = desc.word0;
+        if ((tx_owned & ETH_TDES0_OWN) != 0) {
+            while (eth_tx_irq_flag == 0) {}
+        }
+    }
 
     eth_tx_cur = (eth_tx_cur + 1) % ETH_TX_DESC_COUNT;
 }

@@ -45,4 +45,10 @@ SECTIONS {
         . += 0x2000;
         _stack_top = .;
     } > RAM
+
+    /* startup.S maps this window Normal/non-cacheable for Ethernet DMA.
+       Fail at link time instead of silently placing DMA-visible globals in
+       the cacheable remainder of AXI SRAM. */
+    ASSERT(_stack_top <= 0x20020000,
+           "Ethernet image exceeds the 64KB non-cacheable MPU window")
 }
