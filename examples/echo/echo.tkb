@@ -28,15 +28,9 @@ fn irq_dispatch(frame_sp: usize) -> usize {
     return frame_sp;
 }
 
-fn USART1_IRQHandler() {
-    if (uart_rx_ready()) {
-        echo_uart_rx_isr();
-    }
-    uart_tx_isr();
-}
-
-fn main() {
+fn app_main() {
     irq_uart_rx_setup();
+    uart_set_rx_handler(echo_uart_rx_isr);
     uart_puts("echo ready\r\n");
     echo_rx_head = 0;
     echo_rx_tail = 0;

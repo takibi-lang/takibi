@@ -1,0 +1,8 @@
+// High-level runtime entry shared by QEMU and STM32. Platform HALs provide
+// the hooks; application examples expose app_main so startup assembly needs
+// to know only this one device-independent main symbol.
+fn main() {
+    platform_init();
+    app_main();
+    platform_shutdown();
+}

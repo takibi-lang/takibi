@@ -1,6 +1,6 @@
 // Fibonacci sequence (iterative). Prints the first 10 terms.
 
-fn main() {
+fn app_main() {
     let mut a: i32 = 0;
     let mut b: i32 = 1;
     let mut tmp: i32 = 0;

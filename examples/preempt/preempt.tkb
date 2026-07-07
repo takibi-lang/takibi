@@ -84,7 +84,7 @@ fn task_b() {
     while (*pd == 0) {}
 }
 
-fn main() {
+fn app_main() {
     let sp: *usize = sched.tcb_sp;
     sp[1] = setup_task_stack(stack_a + 4096, task_a);
     sp[2] = setup_task_stack(stack_b + 4096, task_b);

@@ -13,7 +13,7 @@ fn delay_seconds(n: i32) {
     }
 }
 
-fn main() {
+fn app_main() {
     rtc_init();
     uart_puts("waiting 1s...\r\n");
     delay_seconds(1);

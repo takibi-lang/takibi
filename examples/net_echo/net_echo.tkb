@@ -25,7 +25,7 @@ fn swap_mac(frame: *u8) {
     }
 }
 
-fn main() {
+fn app_main() {
     uart_puts("net_echo: init\r\n");
 
     if (net_init() == 0) {

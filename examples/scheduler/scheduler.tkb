@@ -58,7 +58,7 @@ fn task_b() {
     }
 }
 
-fn main() {
+fn app_main() {
     uart_puts("scheduler start\r\n");
     add_task(task_a);
     add_task(task_b);

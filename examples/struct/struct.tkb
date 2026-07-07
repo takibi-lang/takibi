@@ -30,7 +30,7 @@ fn rect_area(r: *Rect) -> i32 {
 let mut g: Point = {10, 20};
 let mut points: [Point; 2];
 
-fn main() {
+fn app_main() {
     uart_puts("global sum: ");
     print_uint(point_sum(&g));
     uart_puts("\r\n");

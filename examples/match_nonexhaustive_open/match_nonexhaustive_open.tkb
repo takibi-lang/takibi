@@ -6,7 +6,7 @@ enum EtherType: u16 {
     ARP  = 0x0806;
     _;
 }
-fn main() {
+fn app_main() {
     let raw: u16 = 0x0800;
     let et: EtherType = raw as EtherType;
     match et {

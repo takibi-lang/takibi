@@ -15,7 +15,7 @@
 let mut buf64:   [u8; 64]   align(64);
 let mut buf4096: [u8; 4096] align(4096);
 
-fn main() -> i32 {
+fn app_main() -> i32 {
     let addr64:   usize = (&buf64)   as usize;
     let addr4096: usize = (&buf4096) as usize;
     uart_println_hex((addr64   & 63)   as i32);   // 0x00000000

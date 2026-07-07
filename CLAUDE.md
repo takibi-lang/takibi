@@ -23,6 +23,11 @@ The finished form of code is when index ranges are pinned at the type level usin
 ## Language Specification (Current)
 
 - File extension: `.tkb`
+- Runtime entry: examples define `app_main()` (either `void` or an ignored
+  integer return). `examples/common/runtime.tkb` provides the linked `main()`
+  and calls `platform_init()`, `app_main()`, then `platform_shutdown()` in
+  high-level Takibi code. Startup assembly calls only `main`; QEMU supplies
+  empty platform hooks and STM32's UART HAL currently supplies the real ones.
 - Types: `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `isize`, `usize` (`isize`/`usize` are pointer-sized signed/unsigned integers; LLVM width follows the target's actual pointer size via DataLayout -- 64 bits on AArch64/RISC-V64, 32 bits on Cortex-M/STM32; falls back to 64 bits when no target machine is configured, e.g. in unit tests), `void`, `*T` (regular pointer, non-volatile), `io T` (volatile-qualified value type), `*io T` (volatile MMIO pointer = `TypePtr(TypeIo T)`), `[T; N]` (array type; decays to pointer in function arguments), `fn(T...) -> R` (function pointer type), `Name` (named struct type), `{lo..<hi as base}` (refined integer subtype; explicit base currently required)
 - Statements:
   - `let x = e` / `let x: T = e` -- immutable variable declaration (initial value required, no reassignment)
@@ -180,6 +185,7 @@ bin/
 examples/
   common/
     startup.S     -- _start -> main, BSS zero-clear, AArch64 semihosting exit (shared by all examples)
+    runtime.tkb   -- high-level main wrapper around platform_init/app_main/platform_shutdown
     link.ld       -- linker script (load address 0x40000000) (shared by all examples)
     timer_asm.S   -- ARM Generic Timer stubs: read_cntfrq, set_cntp_tval, enable_cntp, disable_cntp, task_exit_stub
     sem_asm.S     -- atomic semaphore: sem_wait (ldaxr/stxr), sem_post (ldxr/stlxr)
@@ -201,12 +207,14 @@ examples/
   common_stm32/   -- STM32F746G-DISCOVERY (Cortex-M7) HAL, mirroring common/'s function
                      names/signatures so every example .tkb file is a single file shared
                      by both targets -- see "STM32F746G-DISCOVERY Bare-Metal (Cortex-M7)" below
-    startup.S     -- Reset_Handler, 54-word vector table, PendSV_Handler, weak
-                     SysTick_Handler/USART1_IRQHandler/pendsv_dispatch stubs
+    startup.S     -- Reset_Handler, vector table, PendSV_Handler, generic
+                     platform_init/platform_shutdown hooks, weak SysTick/ETH/
+                     pendsv_dispatch stubs (no direct device-driver calls)
     link.ld       -- MEMORY {FLASH RAM} linker script (RAM = DTCM, 64K)
     link_eth.ld   -- same, RAM = AXI SRAM (Ethernet DMA can't reach DTCM)
-    uart.tkb      -- uart_init, interrupt-driven TX ring (uart_putc/uart_puts),
-                     RX/TX IRQ helpers (USART1, PA9/PB7, AF7), uart_isr_getc
+    uart.tkb      -- platform hook implementation, uart_init, interrupt-driven
+                     TX ring (uart_putc/uart_puts), unified USART1 RX/TX ISR and
+                     RX callback registration (PA9/PB7, AF7), uart_isr_getc
     uart_getc.tkb -- uart_getc (USART1 RX poll; only echo needs RX)
     rtc.tkb       -- rtc_init, rtc_is_running, rtc_read_seconds (real RTC peripheral, LSI)
     nvic.tkb      -- enable_usart1_irq, irq_uart_rx_setup/_unmask

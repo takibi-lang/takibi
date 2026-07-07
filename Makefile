@@ -32,7 +32,7 @@ COMMON_SEM_ASM_S   := $(COMMON_DIR)/sem_asm.S
 COMMON_SEM_ASM_O   := $(COMMON_DIR)/sem_asm.o
 COMMON_LINK_LD     := $(COMMON_DIR)/link.ld
 COMMON_UART        := $(COMMON_DIR)/uart.tkb
-COMMON_PRINT       := $(COMMON_DIR)/print.tkb
+COMMON_PRINT       := $(COMMON_DIR)/print.tkb $(COMMON_DIR)/runtime.tkb
 COMMON_GIC         := $(COMMON_DIR)/gic.tkb
 COMMON_TIMER       := $(COMMON_DIR)/timer.tkb
 COMMON_SYNC        := $(COMMON_DIR)/sync.tkb
@@ -200,6 +200,7 @@ $(COMMON_SEM_ASM_O): $(COMMON_SEM_ASM_S)
 .SECONDEXPANSION:
 
 IRQ_OBJS   := examples/irq/irq.o
+COMMON_UART_IRQ_STUB := $(COMMON_DIR)/uart_irq_stub.tkb
 # semaphore.tkb declares its own extern fn sem_wait/sem_post, so no sync.tkb needed here
 TIMER_OBJS := examples/preempt/preempt.o examples/semaphore/semaphore.o \
               examples/watchdog/watchdog.o
@@ -229,14 +230,14 @@ $(STANDARD_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(
 # platforms' interrupt entry points are compiled regardless of target;
 # COMMON_GIC supplies the QEMU-only gic struct/functions the (real, active)
 # irq_dispatch entry point references.
-$(IRQ_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $< --target $(AARCH64_TARGET) -o $@
+$(IRQ_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_UART_IRQ_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_UART_IRQ_STUB) $< --target $(AARCH64_TARGET) -o $@
 
 $(RTC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_RTC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_RTC) $< --target $(AARCH64_TARGET) -o $@
 
-$(GETC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $< --target $(AARCH64_TARGET) -o $@
+$(GETC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_UART_IRQ_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_UART_IRQ_STUB) $< --target $(AARCH64_TARGET) -o $@
 
 # COMMON_STM32_STUB supplies pendsv_trigger() (a no-op here) so each of
 # these shared examples' STM32-shaped SysTick_Handler/pendsv_dispatch

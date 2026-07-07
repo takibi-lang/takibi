@@ -274,7 +274,7 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     fix_tcp_checksum(ip, tcp);
 }
 
-fn main() {
+fn app_main() {
     uart_puts("tcp_echo: init\r\n");
 
     if (net_init() == 0) {

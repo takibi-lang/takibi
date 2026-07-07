@@ -57,7 +57,7 @@ fn direction_name(d: Direction) -> *u8 {
     return "";
 }
 
-fn main() {
+fn app_main() {
     let c: Color = Color::Green;
     uart_puts(color_name(c));
 

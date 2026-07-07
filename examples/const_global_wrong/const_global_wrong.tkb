@@ -3,6 +3,6 @@
 // is rejected, just like a local `let` variable. Use `let mut` if the
 // global needs to be written to at runtime.
 let QUEUE_SIZE: i32 = 4;
-fn main() {
+fn app_main() {
     QUEUE_SIZE = 8;
 }

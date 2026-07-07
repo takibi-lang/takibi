@@ -18,6 +18,6 @@ fn read_at(v: usize) -> u8 {
     return buf[v];   // index type usize (unproven range): bounds check remains -> rejected
 }
 
-fn main() -> i32 {
+fn app_main() -> i32 {
     return read_at(3) as i32;
 }

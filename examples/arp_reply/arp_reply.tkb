@@ -30,7 +30,7 @@ let mut our_mac: [u8; 6];
 // bytes_eq/bytes_copy/read_u16be/write_u16be/slice_copy/slice_eq live in
 // examples/common/netutil.tkb (netutil) and are compiler builtins.
 
-fn main() {
+fn app_main() {
     uart_puts("arp_reply: init\r\n");
 
     if (net_init() == 0) {

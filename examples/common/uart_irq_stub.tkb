@@ -1,0 +1,4 @@
+// QEMU's GIC dispatch is registered directly by echo/irq, so the uniform
+// STM32 UART callback-registration hook has no work to do on this platform.
+fn uart_set_rx_handler(handler: fn() -> void) {
+}

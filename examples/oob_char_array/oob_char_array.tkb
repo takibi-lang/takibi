@@ -1,6 +1,6 @@
 // This file is expected to produce a compile error.
 // Verifies that constant OOB is detected for u8 arrays as well.
-fn main() {
+fn app_main() {
     let mut buf: [u8; 8];
     let c = buf[8];
 }

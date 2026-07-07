@@ -11,6 +11,12 @@
 let mut uart_tx_buf: [u8; 128];
 let mut uart_tx_head: io usize;
 let mut uart_tx_tail: io usize;
+let mut uart_rx_handler: fn() -> void;
+
+fn uart_rx_discard() {
+    let usart1_rdr: *io u8 = 0x40011024;
+    let discarded: u8 = *usart1_rdr;
+}
 
 fn uart_init() {
     let rcc_ahb1enr: *io u32 = 0x40023830; // RCC_AHB1ENR
@@ -40,6 +46,7 @@ fn uart_init() {
     let usart1_cr1: *io u32 = 0x40011000;
     uart_tx_head = 0;
     uart_tx_tail = 0;
+    uart_rx_handler = uart_rx_discard;
     *usart1_brr = 139;
     *usart1_cr1 = 1 | (1 << 2) | (1 << 3); // UE | RE | TE
     *nvic_iser1 = *nvic_iser1 | (1 << 5);
@@ -82,6 +89,10 @@ fn uart_rx_ready() -> bool {
     return (*usart1_isr & (1 << 5)) != 0; // RXNE
 }
 
+fn uart_set_rx_handler(handler: fn() -> void) {
+    uart_rx_handler = handler;
+}
+
 // Called by USART1_IRQHandler, including startup.S's weak default handler.
 // One byte per interrupt keeps ISR latency bounded. Disabling TXEIE when the
 // ring becomes empty prevents the level-sensitive TXE source from retriggering.
@@ -99,6 +110,16 @@ fn uart_tx_isr() {
     }
 }
 
+// USART1 owns one NVIC vector for both RXNE and TXE. Keep this dispatch in
+// the driver rather than startup.S; applications register only their RX
+// callback, while TX ring service remains an internal driver concern.
+fn USART1_IRQHandler() {
+    if (uart_rx_ready()) {
+        uart_rx_handler();
+    }
+    uart_tx_isr();
+}
+
 // Used by startup after a finite main() returns. Wait until every queued
 // byte has reached TDR, then quiesce USART1 interrupts before a debugger
 // installs its next flash loader. Long-running servers never call this.
@@ -110,4 +131,14 @@ fn uart_shutdown() {
     let nvic_icer1: *io u32 = 0xE000E184;
     *usart1_cr1 = *usart1_cr1 & ~((1 << 7) | (1 << 5)); // TXEIE | RXNEIE
     *nvic_icer1 = 1 << 5; // disable IRQ37
+}
+
+// Generic runtime hooks called by startup.S. Device-specific initialization
+// stays in this driver while the startup path depends only on platform hooks.
+fn platform_init() {
+    uart_init();
+}
+
+fn platform_shutdown() {
+    uart_shutdown();
 }

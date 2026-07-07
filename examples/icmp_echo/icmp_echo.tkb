@@ -87,7 +87,7 @@ fn build_echo_reply(eth: [u8; 42..], ihl: {20..<21 as u16}, icmp_seg: [u8; 8..])
     write_u16be(icmp_seg[ICMP_CHECKSUM..<4], inet_checksum(icmp_seg));
 }
 
-fn main() {
+fn app_main() {
     uart_puts("icmp_echo: init\r\n");
 
     if (net_init() == 0) {

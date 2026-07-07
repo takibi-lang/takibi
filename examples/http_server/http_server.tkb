@@ -336,7 +336,7 @@ fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
     return -1;
 }
 
-fn main() {
+fn app_main() {
     uart_puts("http_server: init\r\n");
 
     if (net_init() == 0) {

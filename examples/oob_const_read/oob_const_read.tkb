@@ -1,6 +1,6 @@
 // This file is expected to produce a compile error.
 // Type inference detects a read from a size-4 array at constant index 4.
-fn main() {
+fn app_main() {
     let mut arr: [i32; 4];
     let x = arr[4];
 }

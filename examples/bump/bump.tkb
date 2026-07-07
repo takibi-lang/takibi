@@ -13,7 +13,7 @@ fn bump_alloc(size: isize) -> *u8 {
     return result;
 }
 
-fn main() {
+fn app_main() {
     let buf1: *u8 = bump_alloc(4);
     buf1[0] = 'A';
     buf1[1] = 'B';

@@ -29,3 +29,9 @@ fn uart_rx_ready() -> bool {
 
 fn uart_tx_isr() {
 }
+
+fn platform_init() {
+}
+
+fn platform_shutdown() {
+}

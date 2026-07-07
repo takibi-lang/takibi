@@ -62,16 +62,10 @@ fn irq_dispatch(frame_sp: i32) -> i32 {
     return frame_sp;
 }
 
-fn USART1_IRQHandler() {
-    if (uart_rx_ready()) {
-        uart_rx_isr();
-    }
-    uart_tx_isr();
-}
-
-fn main() {
+fn app_main() {
     register_irq(33, uart_rx_isr);
     irq_uart_rx_setup();
+    uart_set_rx_handler(uart_rx_isr);
     uart_puts("irq ready\r\n");
 
     // Unmask the interrupt source last, after setup and the ready message,

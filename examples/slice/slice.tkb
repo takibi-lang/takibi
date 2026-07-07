@@ -58,7 +58,7 @@ fn head_or_zero(s: []u8) -> u8 {
     return '0' as u8;
 }
 
-fn main() {
+fn app_main() {
     let s = buf as []u8;    // [u8; 16..]
     fill8(s);
     uart_puts("len=");
