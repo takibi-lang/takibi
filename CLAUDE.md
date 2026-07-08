@@ -184,30 +184,52 @@ bin/
                      dune)" string if a future dune/setup combination brings back the documented
                      None case.
 examples/
-  common/
-    startup.S     -- _start -> main, BSS zero-clear, AArch64 semihosting exit (shared by all examples)
+  common/         -- platform-agnostic .tkb logic with no MMIO/assembly dependency at
+                     all, reused byte-for-byte by both targets. Everything
+                     target-specific (startup assembly, linker scripts, UART/GIC/timer/
+                     network drivers) now lives in common_qemu/ or common_stm32/
+                     instead -- see each's own entry below for why this split exists.
     runtime.tkb   -- high-level main wrapper around platform_init/app_main/platform_shutdown
+    print.tkb     -- uart_print/uart_println overloaded core (bool + every signed/
+                     unsigned width); common_qemu/print.tkb and common_stm32/print.tkb
+                     each add only the isize/usize overloads at their own native width
+    sync.tkb      -- extern fn sem_wait/sem_post, mutex_lock/unlock, cond_wait/signal
+    netutil.tkb   -- bytes_eq/bytes_copy/read_u16be/write_u16be/read_u32be/write_u32be,
+                     shared by every protocol example on both targets
+    inet_checksum.tkb -- RFC 1071 Internet checksum (checksum_add/checksum_fold),
+                     pure compute, no MMIO
+  common_qemu/    -- QEMU/AArch64-only HAL: startup assembly, linker script, and every
+                     MMIO-backed driver (UART, GIC, timer, virtio-net). Split out from
+                     common/ once enough of common/ turned out to be genuinely
+                     platform-agnostic (see common/'s own entry above) that a single
+                     flat directory no longer made the QEMU-only/shared boundary clear.
+    startup.S     -- _start -> main, BSS zero-clear, AArch64 semihosting exit (shared by all examples)
     link.ld       -- linker script (load address 0x40000000) (shared by all examples)
     timer_asm.S   -- ARM Generic Timer stubs: read_cntfrq, set_cntp_tval, enable_cntp, disable_cntp, task_exit_stub
     sem_asm.S     -- atomic semaphore: sem_wait (ldaxr/stxr), sem_post (ldxr/stlxr)
     uart.tkb      -- uart_putc, uart_puts, uart_isr_getc (RX-interrupt byte read, no polling)
-    print.tkb     -- uart_print_uint, uart_print_hex, uart_print_int
+    uart_irq_stub.tkb -- no-op uart_set_rx_handler(): QEMU's GIC dispatch is registered
+                     directly by echo/irq, so the uniform STM32 UART callback
+                     -registration hook (see common_stm32/uart.tkb) has nothing to do here
+    print.tkb     -- isize/usize uart_print/uart_println overloads at this target's
+                     native 64-bit width (see common/print.tkb above)
     gic.tkb       -- GicRegs struct, gic_init, gic_enable_timer_ppi, gic_enable_uart_spi,
                      irq_uart_rx_setup/_unmask (uniform names shared with
                      common_stm32/nvic.tkb, see the STM32 section below)
     timer.tkb     -- extern fn timer stubs, setup_task_stack, timer_init (depends on gic.tkb),
                      scheduler_init/_disable/_rearm_tick (uniform names shared with
                      common_stm32/scheduler.tkb, see the STM32 section below)
-    sync.tkb      -- extern fn sem_wait/sem_post, mutex_lock/unlock, cond_wait/signal
+    rtc.tkb       -- PL031 RTC register access (see "QEMU Bare-Metal" below)
     virtio_mmio.tkb -- net_init/net_rx_acquire/net_rx_frame/net_transmit/net_rx_release/net_read_mac
                      (uniform API shared with common_stm32/eth.tkb, see "STM32 Ethernet" above)
     netconfig.tkb -- OUR_IP (QEMU-side static IP for arp_reply/icmp_echo/tcp_echo),
                      HTTP_SERVER_IP (http_server's own IP, see "Network config" below)
     stm32_stub.tkb -- no-op stand-ins for STM32-only symbols a shared example's dead
                      QEMU-side code still references (see the STM32 section below)
-  common_stm32/   -- STM32F746G-DISCOVERY (Cortex-M7) HAL, mirroring common/'s function
-                     names/signatures so every example .tkb file is a single file shared
-                     by both targets -- see "STM32F746G-DISCOVERY Bare-Metal (Cortex-M7)" below
+  common_stm32/   -- STM32F746G-DISCOVERY (Cortex-M7) HAL, mirroring common_qemu's
+                     function names/signatures so every example .tkb file is a single
+                     file shared by both targets -- see "STM32F746G-DISCOVERY Bare-Metal
+                     (Cortex-M7)" below
     startup.S     -- Reset_Handler, vector table, PendSV_Handler, weak
                      SysTick/ETH/pendsv_dispatch stubs; calls only `main`
     link.ld       -- MEMORY {FLASH RAM} linker script (RAM = DTCM, 64K)
