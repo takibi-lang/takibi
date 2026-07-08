@@ -11,6 +11,9 @@ bare-metal targets -- and that goal is already reached today on both QEMU
 [STM32F746G-DISCOVERY](https://www.st.com/en/evaluation-tools/32f746gdiscovery.html)
 (Cortex-M7) hardware.
 
+For the current language syntax and grammar (types, statements,
+expressions), see [`SPEC.md`](SPEC.md).
+
 ## Design Principle: Detect Errors at Compile Time
 
 In embedded products, zero runtime exceptions and panics is a hard
@@ -129,7 +132,8 @@ type-system gap.
   profiler are implemented, along with an analysis of what this profiling
   technique is (and is not) useful for on interrupt-driven I/O code.
 
-See `CLAUDE.md` for the full, continuously-updated engineering log of design
+See [`SPEC.md`](SPEC.md) for the current language syntax and grammar, and
+`CLAUDE.md` for the full, continuously-updated engineering log of design
 decisions, hardware bring-up bugs, and the reasoning behind them.
 
 ## Demo: Serving a Real Web Page from an STM32F746G-DISCOVERY Board
@@ -264,7 +268,8 @@ test/      -- unit tests (parser, type inference, LLVM code generation/layout)
 ```
 
 Each directory under `examples/` documents itself in its `.tkb` file's
-header comment. `examples/common/` and `examples/common_stm32/` hold the
+header comment. `examples/common/` holds platform-agnostic logic shared by
+both targets; `examples/common_qemu/` and `examples/common_stm32/` hold the
 QEMU and STM32 hardware-abstraction layers (UART, timers, interrupt
 controllers, Ethernet), sharing function names/signatures so application
 code is written once.

@@ -3,6 +3,10 @@
 A self-made language compiler written in OCaml 5.4.0. Generates native machine code via an LLVM 19 backend.
 The ultimate goal is to implement a TCP/IP stack and run an HTTP server on Raspberry Pi 3 / RISC-V / STM32 bare-metal environments.
 
+**Looking for the current language syntax/grammar (types, statements, expressions)?
+See `SPEC.md`.** This file is the engineering log -- design rationale, bugs found
+and fixed, and the history behind each decision.
+
 ## Design Principle: Detect Errors at Compile Time
 
 **In embedded products, zero runtime exceptions and panics is a hard requirement.**
@@ -21,65 +25,14 @@ the system will silently break or run amok. Nothing is communicated to the user.
 The finished form of code is when index ranges are pinned at the type level using
 `for i: usize in 0..<n` or `{lo..<hi as usize}` annotations.
 
-## Language Specification (Current)
+## Language Specification
 
-- File extension: `.tkb`
-- Runtime entry: examples define `app_main()` (either `void` or an ignored
-  integer return). `examples/common/runtime.tkb` provides the linked `main()`
-  and calls `platform_init()`, `app_main()`, then `platform_shutdown()` in
-  high-level Takibi code. Startup assembly calls only `main`; QEMU supplies
-  empty platform hooks and STM32's UART HAL currently supplies the real ones.
-- Types: `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `isize`, `usize` (`isize`/`usize` are pointer-sized signed/unsigned integers; LLVM width follows the target's actual pointer size via DataLayout -- 64 bits on AArch64/RISC-V64, 32 bits on Cortex-M/STM32; falls back to 64 bits when no target machine is configured, e.g. in unit tests), `void`, `*T` (regular pointer, non-volatile), `io T` (volatile-qualified value type), `*io T` (volatile MMIO pointer = `TypePtr(TypeIo T)`), `[T; N]` (array type; decays to pointer in function arguments), `fn(T...) -> R` (function pointer type), `Name` (named struct type), `{lo..<hi as base}` (refined integer subtype; explicit base currently required)
-- Statements:
-  - `let x = e` / `let x: T = e` -- immutable variable declaration (initial value required, no reassignment)
-  - `let mut x = e` / `let mut x: T = e` -- mutable variable declaration (reassignment allowed)
-  - Global scope mirrors this: plain `let NAME: T = e;` is an immutable compile-time constant (reassignment and `&NAME` are compile errors, and it must have an initializer); `let mut NAME: T = e;` is a mutable global variable. `let mut x: T;` (no initializer) is allowed for global scope only, relying on BSS zero-clear.
-  - `[T; N]` array size `N` may be a literal integer, the name of an immutable global declared earlier (in the concatenated source) with a bare literal integer initializer, or `+`/`-`/`*`/`/` arithmetic combining those (parentheses allowed for grouping), e.g. `let QUEUE_SIZE: i32 = 16; let mut ring: [T; QUEUE_SIZE]; let mut pair: [T; QUEUE_SIZE * 2];`. Resolved entirely in the parser (see "Array-Size Constants" below); no forward references. This arithmetic folding is scoped to the `[T; N]` grammar position only -- a global `let`'s own initializer expression still cannot fold arithmetic (see "Global Constant Folding" below for what that one does and does not support).
-  - `let mut x: T align(N);` -- global variable with N-byte alignment (N must be a power of two). Emits `set_alignment N` on the LLVM global. Use for DMA descriptor rings (`align(4096)`), cache-line buffers (`align(64)`), etc. Optional initializer: `let mut x: T align(N) = e;` (or plain `let x: T align(N) = e;` for an immutable aligned constant). Local variable alignment is not supported.
-  - `while`, `return` (always takes an expression -- bare `return;` in a `void` function is a syntax error; let the function fall through instead), assignment (`x = e`), pointer-deref assignment (`*p = v`)
-  - `break` -- exits the innermost `while` or `for` loop immediately. Compile error outside a loop.
-  - `continue` -- skips to the next iteration of the innermost loop. For `for`, the counter is incremented first. Compile error outside a loop.
-  - `if (cond) { ... }` -- `else` is optional
-  - `if (cond) { ... } else { ... }` -- regular if/else
-  - `if (cond) { ... } else if (cond) { ... } else { ... }` -- else-if chain
-  - Taking the address of an immutable variable (`&x`) is a compile error (global variables are always treated as mutable, so `&global_var` is allowed)
-- Expressions:
-  - Integer literals (decimal and hex `0x...`)
-  - Character literals (`'a'`, `'\n'`, `'\r'`, `'\t'`, `'\0'`, `'\\'`) -- desugared to `IntLit (Char.code c)`
-  - String literals (`"..."` -- supports `\n` `\r` `\t` `\\` `\"` escapes)
-  - Comments (`// line comment`, `/* block comment */`)
-  - Arithmetic (`+` `-` `*` `/` `%`), comparison (`<` `>` `<=` `>=` `==` `!=`)
-  - Array/slice indexing and subslice bounds use `usize` exclusively:
-    `arr[i]`, `slice[i]`, and `slice[lo..<hi]`. Bare literals infer as
-    `usize` in these positions. Raw-pointer indexing and raw-pointer slice
-    bounds use `isize` exclusively because they are signed pointer
-    displacements; bare literals infer as `isize` in those positions.
-  - Pointer arithmetic uses element counts of type `isize` exclusively: `ptr + offset`, `offset + ptr`, and `ptr - offset` return the same pointer type. An `i32`/`usize` variable is rejected unless explicitly cast to `isize`; bare integer literals remain context-polymorphic and infer as `isize` here. `end - begin` requires matching pointee types and returns the element distance as `isize` (`Llvm.build_ptrdiff`). As with all raw-pointer operations, the compiler does not prove that both pointers belong to the same allocation.
-  - Unary minus (`-expr`) -- desugared to `BinOp(Sub, IntLit 0, expr)` in the parser
-  - Logical OR (`||`)
-  - Bitwise NOT: `~expr` -- flips all bits; returns the same type as the operand (desugars to LLVM `not`)
-  - Bitwise ops (`>>` right shift (arithmetic for signed types, logical for unsigned), `<<` left shift, `&` bitwise AND, `|` bitwise OR, `^` bitwise XOR) -- both operands must be the same integer type
-  - Compound assignments: `+=` `-=` `|=` `&=` `^=` `<<=` `>>=` -- desugared in the parser to `x = x op rhs`; supported on all five LHS forms (variable, `*p`, `*(expr)`, `arr[i]`, `s.field`)
-  - Function call, `*expr` (dereference), `&ident` (address-of)
-  - `expr as T` -- explicit type cast (integer widths including `isize`/`usize`, `*T` -> `usize`, `usize` -> `*T`, `*T` -> `*U`). Lower precedence than arithmetic, so `a + b as u8` = `(a + b) as u8`
-  - `sizeof(T)` -- compile-time size of `T` in bytes, type `usize` (fixed, not a polymorphic literal; compare/assign against other integer types requires an explicit `as` cast, e.g. `len >= sizeof(Hdr)` requires `len: usize`). Reads the same LLVM DataLayout used for struct tail-padding, so `sizeof` on a `packed` or `align(N)` struct reflects the true in-memory size.
-  - DMA/device synchronization builtins include `dma_publish()`, `dma_consume()`, and `device_fence()`. ARM/AArch64 lower to DSB SY, AMD64 currently lowers conservatively to MFENCE, and RISC-V uses direction-preserving fences. Cache-aware operations are `dma_prepare_tx(ptr, len)`, `dma_prepare_rx(ptr, len)`, and `dma_finish_rx(ptr, len)`. Cortex-M7 rounds the range to 32-byte cache lines and uses SCB DCCMVAC/DCIMVAC plus barriers; currently supported coherent non-Cortex-M targets use the corresponding ordering barrier. DMA buffers must not share cache lines with unrelated mutable data. Driver code encapsulates these operations at ownership boundaries.
-  - `signal_fence()` is a compiler-only memory boundary for ISR/normal-context communication. It lowers to side-effecting empty LLVM inline assembly with a memory clobber and emits no hardware barrier instruction.
-  - `interrupt_wait()` / `interrupt_notify()` form a race-free event wait pair on ARM/AArch64 (`wfe` / `sev`). An ISR stores its volatile flag then calls `interrupt_notify()`; normal context loops on the flag and calls `interrupt_wait()` while it is clear. ARM's retained event closes the check-then-sleep lost-wakeup window, and callers still re-check because waits may return spuriously. Unsupported targets are rejected during code generation rather than silently lowered to a racy `wfi` sequence.
-- `struct Name { field: type; ... }` -- struct type definition (top-level only; fields are primitive types, pointer types, or other struct types)
-- `opaque struct Name;` -- incomplete nominal type usable only behind a pointer. It has no constructible value, fields, or size and is intended for driver-owned state handles.
-- `affine opaque struct Name;` marks pointers to that opaque type as affine handles. Passing one to an ordinary affine-handle parameter consumes the local value; a second consumption or later use is a compile error. `borrow *Name` is allowed only as a function parameter and permits non-consuming inspection. This is intentionally a restricted, intraprocedural facility rather than a general affine type system: values may be dropped, explicit pointer casts remain an escape hatch, and consuming an affine value declared outside a loop from inside that loop is conservatively rejected.
-- `let mut s: Name;` -- struct variable declaration (local/global, always treated as mutable)
-- `s.field` -- field read (works for both `s: Name` and `s: *Name`, Zig-style)
-- `s.field = v` -- field write (direct dot assignment to a variable name only; not allowed as the left side of an expression)
-- `&s` -- take the address of a struct variable (returns `*Name`, used for pass-by-pointer)
-- `extern fn name(params) -> ret;` -- external assembly function declaration (emits an LLVM `declare`)
-- MMIO / volatile: `io T` is a volatile-qualified value type. `*io T` (= `TypePtr(TypeIo T)`) is a volatile MMIO pointer
-  - `*io T` pointer: `*p` is a volatile load, `*p = v` is a volatile store
-  - `*T` (regular pointer) load/store is non-volatile (LLVM may optimize)
-  - Direct accesses to an `io T` variable (e.g. `let flag: io i32;`) are all volatile
-  - `&io_var` automatically returns `*io T` (no `as *io i32` cast needed)
-  - Flags shared with interrupt handlers: read as `let flag: io i32; while (flag == 0) {}`
+**See `SPEC.md` for the current language specification** (types, syntax,
+statements, expressions, and semantics as they exist today). This file
+(`CLAUDE.md`) is the engineering log: design rationale, bugs found and
+fixed, and the chronological "why" behind each decision. When a language
+feature changes, update `SPEC.md` directly rather than letting the
+description drift between the two files.
 
 ## Build Commands
 
@@ -1773,8 +1726,13 @@ Files changed when `struct Name { field: type; }` was added:
 - `arr[i].field = v` -> bounds-checked element GEP -> field GEP -> store; `ptr[i].field = v` uses pointer indexing without an array bounds check
 - `&s` -> return the alloca pointer as `*Name` (for pass-by-pointer)
 
-**Current limitations**:
-- Global struct variable as `let g: Name;` only (`let mut` is not supported in global scope; always mutable)
+**Stale note, corrected while extracting SPEC.md**: this originally said
+`let mut` was not supported for global struct variables. That is no
+longer true (or was never actually enforced) -- `examples/irq/irq.tkb`,
+`examples/scheduler/scheduler.tkb`, and `examples/bump/bump.tkb` all
+declare `let mut x: Name;` at global scope and build/run correctly today.
+A struct variable is always mutable storage regardless of the `let`/
+`let mut` keyword, same as arrays.
 
 ### Packed Struct and Struct Type-Level Alignment (5 Files)
 
