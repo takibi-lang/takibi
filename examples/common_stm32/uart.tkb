@@ -1,6 +1,6 @@
 // STM32F746G-DISCOVERY UART HAL, over the ST-LINK/V2-1 virtual COM port.
 // The board wires USART1 (TX = PA9, RX = PB7) to the ST-LINK's VCP.
-// Same public signatures as examples/common/uart.tkb (uart_putc/uart_puts and
+// Same public signatures as examples/common_qemu/uart.tkb (uart_putc/uart_puts and
 // platform hooks) so application files stay unchanged across the QEMU and
 // STM32 HALs. QEMU's platform hooks are currently empty because its PL011
 // model needs no setup.
@@ -87,7 +87,7 @@ fn uart_puts(s: *u8) {
 
 // Reads one byte directly, no polling -- only valid when called from an
 // RX-interrupt handler that already knows a byte is waiting (examples/irq/
-// irq.tkb). Shares its name with examples/common/uart.tkb's version, which
+// irq.tkb). Shares its name with examples/common_qemu/uart.tkb's version, which
 // reads a different register (PL011 DR, not USART1 RDR), so a shared ISR
 // body can call this uniformly on either target. Reading RDR also clears
 // USART1's RXNE flag -- that IS the interrupt acknowledgment on this

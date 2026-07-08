@@ -9,7 +9,7 @@
 // examples/common_stm32/netconfig.tkb: these QEMU examples read their MAC
 // from the virtio-net device itself at runtime (net_read_mac(), which on
 // this backend calls virtio_net_read_mac() -- see
-// examples/common/virtio_mmio.tkb), not a fixed constant, so there is
+// examples/common_qemu/virtio_mmio.tkb), not a fixed constant, so there is
 // nothing to share.
 //
 // our_ip: 192.0.2.1, RFC 5737 TEST-NET-1 -- reserved for exactly this kind

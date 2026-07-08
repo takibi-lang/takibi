@@ -1,4 +1,4 @@
-// Atomic operation demo using semaphores (examples/common/sem_asm.S /
+// Atomic operation demo using semaphores (examples/common_qemu/sem_asm.S /
 // examples/common_stm32/sem_asm.S -- ldaxr/stlxr vs ldrex/strex+dmb, same
 // sem_wait/sem_post extern names on both). task_a and task_b each
 // increment shared.count 3 times under mutex protection; a final value of

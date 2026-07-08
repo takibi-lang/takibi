@@ -15,7 +15,7 @@ fn enable_eth_irq() {
 }
 
 // UART RX interrupt enable, split into a setup half and an unmask half --
-// see examples/common/gic.tkb's version of these two functions for why.
+// see examples/common_qemu/gic.tkb's version of these two functions for why.
 fn irq_uart_rx_setup() {
     enable_usart1_irq();
 }

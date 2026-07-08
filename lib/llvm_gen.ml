@@ -106,7 +106,7 @@ let di_file_for (dib : Llvm_debuginfo.lldibuilder) (filename : string) : Llvm.ll
   | None ->
       (* Every DIFile's directory must be absolute. DWARF resolves a *relative*
          directory by joining it onto the DICompileUnit's own (single) comp_dir,
-         so two files in different relative directories -- e.g. examples/common/uart.tkb
+         so two files in different relative directories -- e.g. examples/common_qemu/uart.tkb
          and examples/fizzbuzz/fizzbuzz.tkb -- would otherwise get concatenated into
          one bogus path (observed: "examples/common/examples/fizzbuzz/fizzbuzz.tkb")
          by addr2line/llvm-dwarfdump. Making every directory absolute sidesteps

@@ -1,5 +1,5 @@
 // STM32F746G-DISCOVERY real Ethernet MAC/DMA driver + LAN8742A PHY bring-up
-// over RMII. First real-hardware counterpart to examples/common/virtio_mmio.tkb
+// over RMII. First real-hardware counterpart to examples/common_qemu/virtio_mmio.tkb
 // -- unlike virtio-net (QEMU-only), this drives the actual STM32F7 Ethernet
 // MAC IP block, so there is no device to negotiate features with: instead we
 // configure clocks/GPIO/SYSCFG, soft-reset the MAC/DMA, bring up the PHY over
@@ -294,7 +294,7 @@ fn eth_tx_ring_init() {
 //
 // Named net_init/net_rx_acquire/net_rx_frame/net_transmit/net_rx_release/
 // net_read_mac (not eth_*) so this file exposes the exact same driver API
-// as examples/common/virtio_mmio.tkb -- see that file's matching functions.
+// as examples/common_qemu/virtio_mmio.tkb -- see that file's matching functions.
 // This is what lets application-level examples (net_echo.tkb, etc.) be a
 // single shared .tkb file for both the QEMU/virtio-net and STM32/real-MAC
 // targets, mirroring how uart.tkb/print.tkb already share identical
@@ -428,7 +428,7 @@ fn net_rx_release(frame: *NetRxCpuOwned) {
 // Transmits len bytes starting at buf. Synchronous: sleeps on the retained
 // interrupt event until the DMA finishes reading buf, so the caller can safely reuse or
 // release buf (e.g. via net_rx_release()) immediately afterward -- same
-// completion-ordering guarantee examples/common/virtio_mmio.tkb's net_echo
+// completion-ordering guarantee examples/common_qemu/virtio_mmio.tkb's net_echo
 // consumer relies on before re-posting an RX descriptor.
 fn net_transmit(buf: *u8, len: i32) {
     let desc: *EthDmaDesc = tx_desc_ptr(eth_tx_cur);
@@ -462,7 +462,7 @@ fn net_transmit(buf: *u8, len: i32) {
 
 // Fills mac_out with this board's fixed MAC address (examples/common_stm32/
 // netconfig.tkb's OUR_MAC) -- the STM32 counterpart to
-// examples/common/virtio_mmio.tkb's net_read_mac, which instead reads the
+// examples/common_qemu/virtio_mmio.tkb's net_read_mac, which instead reads the
 // virtio-net device's Config space at runtime. Adds netconfig.tkb (for
 // OUR_MAC) and netutil.tkb (for bytes_copy) as build dependencies for every
 // consumer of this file, including net_echo_stm32 (which never calls this

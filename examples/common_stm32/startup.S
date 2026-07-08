@@ -6,7 +6,7 @@
    table: the CPU auto-loads the initial SP from word 0 and the reset PC
    from word 1 at power-on, and every later exception dispatches through a
    plain function-pointer table entry (no manual all-GPR-save/eret dance
-   like examples/common/startup.S's irq_entry -- the hardware auto-stacks
+   like examples/common_qemu/startup.S's irq_entry -- the hardware auto-stacks
    r0-r3/r12/lr/pc/xPSR on entry). This board boots straight from flash at
    0x08000000, which is also where the vector table must live, so no
    explicit VTOR write is needed.
@@ -70,7 +70,7 @@ Reset_Handler:
     b       .Lcopy_data_loop
 .Lcopy_data_done:
 
-    /* Zero-initialise BSS (same idea as examples/common/startup.S, same
+    /* Zero-initialise BSS (same idea as examples/common_qemu/startup.S, same
        symbol names, just 32-bit word stores instead of 64-bit). */
     ldr     r0, =__bss_start
     ldr     r1, =__bss_end
@@ -207,7 +207,7 @@ Default_Handler:
    process stack on exception entry -- this only needs to additionally save
    r4-r11 (the registers the hardware doesn't save), call the takibi-defined
    `fn pendsv_dispatch(current_sp: usize) -> usize` (exact same shape as
-   examples/common/startup.S's irq_dispatch: argument/return both in r0,
+   examples/common_qemu/startup.S's irq_dispatch: argument/return both in r0,
    which lines up naturally since stmdb leaves the decremented SP in r0
    already, and bl's return value is also in r0 per AAPCS), then restore
    r4-r11 from the (possibly different) returned frame and switch PSP to it.
@@ -229,7 +229,7 @@ PendSV_Handler:
    so pendsv_dispatch must resolve even for the ~35 examples that never use
    PendSV at all (harmless: nothing sets PENDSVSET unless a program enables
    SysTick, so this default is simply never called in those cases). Returns
-   r0 (the current sp) unchanged, mirroring examples/common/startup.S's
+   r0 (the current sp) unchanged, mirroring examples/common_qemu/startup.S's
    `.weak irq_dispatch` default. */
     .weak   pendsv_dispatch
     .thumb_func

@@ -23,7 +23,7 @@ let OUR_MAC: [u8; 6] = {0x00, 0x80, 0xE1, 0x00, 0x00, 0x00};
 // this machine (curl, a real browser for http_server_stm32, etc.) can just
 // reach 192.168.10.2 straight over the wire via ordinary ARP, no extra
 // route needed. Deliberately NOT the RFC 5737 TEST-NET-1 address
-// (192.0.2.1) the QEMU/virtio-net examples use (examples/common/netconfig.tkb)
+// (192.0.2.1) the QEMU/virtio-net examples use (examples/common_qemu/netconfig.tkb)
 // -- those only ever talk to hand-crafted raw-socket test scripts that
 // address frames directly by MAC, so routability was never a requirement
 // there. If this machine's point-to-point interface or its subnet ever
@@ -34,7 +34,7 @@ let OUR_MAC: [u8; 6] = {0x00, 0x80, 0xE1, 0x00, 0x00, 0x00};
 let OUR_IP: [u8; 4] = {192, 168, 10, 2};
 
 // examples/http_server/http_server.tkb's dedicated constant (see
-// examples/common/netconfig.tkb's comment for why it doesn't just use
+// examples/common_qemu/netconfig.tkb's comment for why it doesn't just use
 // OUR_IP) -- no SLIRP-style constraint exists on real hardware, so this
 // is simply the same value as OUR_IP above, just under the name
 // http_server.tkb actually references so its app_main() needs no branch to

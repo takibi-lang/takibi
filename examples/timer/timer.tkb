@@ -1,5 +1,5 @@
 // Demo of a 1-second polling delay using the RTC. Portable across the QEMU
-// (examples/common/rtc.tkb) and STM32 (examples/common_stm32/rtc.tkb) HALs
+// (examples/common_qemu/rtc.tkb) and STM32 (examples/common_stm32/rtc.tkb) HALs
 // -- see examples/rtc/rtc.tkb for why rtc_read_seconds()'s value is never
 // subtracted (STM32's is raw BCD, not a linear counter): waits for n
 // individual ticks instead of comparing a difference.

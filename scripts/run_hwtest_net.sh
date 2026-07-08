@@ -48,7 +48,7 @@ run_net_hw_test() {
     local tmp_flash_log
     tmp_flash_log=$(mktemp)
 
-    if ! st-flash write "$bin" "$FLASH_ADDR" > "$tmp_flash_log" 2>&1; then
+    if ! st-flash --connect-under-reset write "$bin" "$FLASH_ADDR" > "$tmp_flash_log" 2>&1; then
         printf "${RED}FAIL${RST}  %s  (st-flash write failed)\n" "$name"
         sed 's/^/       /' "$tmp_flash_log"
         FAIL=$((FAIL + 1))

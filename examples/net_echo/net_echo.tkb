@@ -5,7 +5,7 @@
 // otherwise. No ARP, no IP -- this only proves the underlying network
 // driver's RX/TX/DMA plumbing works.
 //
-// Single shared file for both targets: examples/common/virtio_mmio.tkb
+// Single shared file for both targets: examples/common_qemu/virtio_mmio.tkb
 // (QEMU/virtio-net) and examples/common_stm32/eth.tkb (STM32 real
 // Ethernet MAC) expose the identical net_init/net_rx_acquire/net_rx_frame/
 // net_transmit/net_rx_release API, so this file never needs to know which

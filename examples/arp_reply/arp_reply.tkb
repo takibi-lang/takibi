@@ -11,7 +11,7 @@
 // header comment for why. our_mac is filled by net_read_mac() (virtio-net's
 // Config space at runtime for QEMU, the fixed OUR_MAC constant for STM32 --
 // see each backend's net_read_mac()). OUR_IP is a plain shared constant
-// (examples/common/netconfig.tkb for QEMU, examples/common_stm32/netconfig.tkb
+// (examples/common_qemu/netconfig.tkb for QEMU, examples/common_stm32/netconfig.tkb
 // for STM32 -- same symbol, different value per target, see either file's
 // comment for why).
 //

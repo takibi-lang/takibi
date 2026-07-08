@@ -44,8 +44,6 @@ fn uart_print(v: u8) { uart_print_u32_core(v as u32); }
 fn uart_print(v: u16) { uart_print_u32_core(v as u32); }
 fn uart_print(v: u32) { uart_print_u32_core(v); }
 fn uart_print(v: u64) { uart_print_u64_core(v); }
-fn uart_print(v: isize) { uart_print_i64_core(v as i64); }
-fn uart_print(v: usize) { uart_print_u64_core(v as u64); }
 
 fn uart_println(v: bool) { uart_print(v); uart_puts("\r\n"); }
 fn uart_println(v: i8) { uart_print(v); uart_puts("\r\n"); }
@@ -56,8 +54,6 @@ fn uart_println(v: u8) { uart_print(v); uart_puts("\r\n"); }
 fn uart_println(v: u16) { uart_print(v); uart_puts("\r\n"); }
 fn uart_println(v: u32) { uart_print(v); uart_puts("\r\n"); }
 fn uart_println(v: u64) { uart_print(v); uart_puts("\r\n"); }
-fn uart_println(v: isize) { uart_print(v); uart_puts("\r\n"); }
-fn uart_println(v: usize) { uart_print(v); uart_puts("\r\n"); }
 
 fn uart_print_hex_digit(n: i32) {
     if (n < 10) { uart_putc((n + '0') as u8); }

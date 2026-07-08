@@ -175,7 +175,7 @@ run_hw_test() {
     tmp_drain=$(mktemp)
     tmp_flash_log=$(mktemp)
 
-    if ! st-flash write "$bin" "$FLASH_ADDR" > "$tmp_flash_log" 2>&1; then
+    if ! st-flash --connect-under-reset write "$bin" "$FLASH_ADDR" > "$tmp_flash_log" 2>&1; then
         printf "${RED}FAIL${RST}  %s  (st-flash write failed)\n" "$name"
         sed 's/^/       /' "$tmp_flash_log"
         FAIL=$((FAIL + 1))
@@ -222,7 +222,7 @@ run_hw_test_stdin() {
     tmp_drain=$(mktemp)
     tmp_flash_log=$(mktemp)
 
-    if ! st-flash write "$bin" "$FLASH_ADDR" > "$tmp_flash_log" 2>&1; then
+    if ! st-flash --connect-under-reset write "$bin" "$FLASH_ADDR" > "$tmp_flash_log" 2>&1; then
         printf "${RED}FAIL${RST}  %s  (st-flash write failed)\n" "$name"
         sed 's/^/       /' "$tmp_flash_log"
         FAIL=$((FAIL + 1))
