@@ -147,7 +147,7 @@ stm32build: $(STM32_BINS) $(STM32_EXTRA_BINS) $(STM32_CHECKSUM_BINS)
 ## unlike stm32build, this needs physical hardware, so it stays runnable-
 ## only-when-available rather than a requirement for every clone of this repo.
 hwcheck: stm32build
-	@bash scripts/run_hwtest.sh
+	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/run_hwtest.sh
 
 ## hwcheck-net: run all STM32 real-Ethernet hardware tests (net_echo today,
 ## more as they're ported -- see scripts/run_hwtest_net.sh) over a physical
@@ -158,7 +158,7 @@ hwcheck: stm32build
 ## UART capture/diff, and need CAP_NET_RAW (run with sudo) plus
 ## ETH_TEST_IFACE set to the wired interface if it isn't the default.
 hwcheck-net: stm32build
-	@bash scripts/run_hwtest_net.sh
+	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/run_hwtest_net.sh
 
 ## langcheck: verify that all source files contain only ASCII characters
 langcheck:

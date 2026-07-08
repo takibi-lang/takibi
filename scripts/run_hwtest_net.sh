@@ -15,9 +15,15 @@
 set -euo pipefail
 
 FLASH_ADDR=0x08000000
+: "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run 'make hwcheck-net' or set it explicitly}"
+SERIAL_DEV="$STM32_SERIAL_DEV"
 PASS=0
 FAIL=0
 FAILED_TESTS=()
+
+# shellcheck source=scripts/stm32_hw_claim.sh
+source "$(dirname "$0")/stm32_hw_claim.sh"
+claim_stm32_hardware "$SERIAL_DEV"
 
 if [ -t 1 ]; then
     GRN='\033[32m' RED='\033[31m' RST='\033[0m'

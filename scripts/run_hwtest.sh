@@ -6,14 +6,24 @@
 # on any clone of this repo with no physical hardware attached.
 set -euo pipefail
 
-# Default is /dev-host, not /dev: .devcontainer/devcontainer.json bind-mounts
-# the host's /dev read-only at /dev-host (not /dev/ttyACM0 directly), so the
-# devcontainer can build/start without the ST-LINK plugged in, and a board
-# plugged in afterward is picked up with no container restart -- see that
-# file's runArgs comment.
-SERIAL_DEV="${STM32_SERIAL_DEV:-/dev-host/ttyACM0}"
+# Makefile is the single source of truth for the device path and passes it to
+# this script explicitly. Direct script invocation must provide the same env
+# variable rather than silently acquiring a different default device.
+: "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run 'make hwcheck' or set it explicitly}"
+SERIAL_DEV="$STM32_SERIAL_DEV"
 BAUD=115200
 FLASH_ADDR=0x08000000
+ACTIVE_READER_PID=""
+
+cleanup_reader() {
+    if [ -n "$ACTIVE_READER_PID" ]; then
+        kill "$ACTIVE_READER_PID" 2>/dev/null || true
+        wait "$ACTIVE_READER_PID" 2>/dev/null || true
+        ACTIVE_READER_PID=""
+    fi
+}
+trap cleanup_reader EXIT
+trap 'cleanup_reader; exit 130' INT TERM HUP
 
 # Idle-detection polling constants (see read_until_quiet below). These
 # examples finish -- and the UART goes idle -- in well under a second, so
@@ -49,6 +59,10 @@ if [ ! -e "$SERIAL_DEV" ]; then
     exit 1
 fi
 
+# shellcheck source=scripts/stm32_hw_claim.sh
+source "$(dirname "$0")/stm32_hw_claim.sh"
+claim_stm32_hardware "$SERIAL_DEV"
+
 if ! st-info --probe > /dev/null 2>&1; then
     echo "error: st-info --probe failed -- is the ST-LINK debug interface accessible?" >&2
     exit 1
@@ -74,8 +88,9 @@ fi
 read_until_quiet() {
     local outfile="$1" max_secs="$2" stable_polls_needed="$3" wait_for_data="$4" post_start_cmd="${5:-}"
     : > "$outfile"
-    cat "$SERIAL_DEV" > "$outfile" 2>/dev/null &
+    cat "$SERIAL_DEV" > "$outfile" 2>/dev/null 9>&- &
     local catpid=$!
+    ACTIVE_READER_PID=$catpid
     if [ -n "$post_start_cmd" ]; then
         sleep 0.1
         eval "$post_start_cmd"
@@ -98,6 +113,7 @@ read_until_quiet() {
     done
     kill "$catpid" 2>/dev/null || true
     wait "$catpid" 2>/dev/null || true
+    ACTIVE_READER_PID=""
 }
 
 # capture_matches EXPECTED ACTUAL
@@ -220,8 +236,9 @@ run_hw_test_stdin() {
     rm -f "$tmp_drain"
 
     : > "$tmp_out"
-    cat "$SERIAL_DEV" > "$tmp_out" 2>/dev/null &
+    cat "$SERIAL_DEV" > "$tmp_out" 2>/dev/null 9>&- &
     local catpid=$!
+    ACTIVE_READER_PID=$catpid
     sleep 0.1
     st-flash reset > /dev/null 2>&1
 
@@ -252,6 +269,7 @@ run_hw_test_stdin() {
     done
     kill "$catpid" 2>/dev/null || true
     wait "$catpid" 2>/dev/null || true
+    ACTIVE_READER_PID=""
 
     if capture_matches "$expected" "$tmp_out"; then
         printf "${GRN}PASS${RST}  %s\n" "$name"
