@@ -137,6 +137,18 @@ capture_matches() {
              END { exit(found ? 0 : 1) }'
 }
 
+reset_stm32_target() {
+    local reset_log
+    reset_log=$(mktemp)
+    if ! st-flash --connect-under-reset reset > "$reset_log" 2>&1; then
+        echo "error: st-flash reset failed" >&2
+        sed 's/^/       /' "$reset_log" >&2
+        rm -f "$reset_log"
+        return 1
+    fi
+    rm -f "$reset_log"
+}
+
 # run_hw_test NAME BIN EXPECTED [MAX_SECS] [STABLE_POLLS]
 #
 # Flashes BIN at FLASH_ADDR, resets, and captures UART output, diffing
@@ -189,7 +201,7 @@ run_hw_test() {
     rm -f "$tmp_drain"
 
     read_until_quiet "$tmp_out" "$max_secs" "$stable_polls" 1 \
-        "st-flash reset > /dev/null 2>&1"
+        "reset_stm32_target"
 
     if capture_matches "$expected" "$tmp_out"; then
         printf "${GRN}PASS${RST}  %s\n" "$name"
@@ -240,7 +252,7 @@ run_hw_test_stdin() {
     local catpid=$!
     ACTIVE_READER_PID=$catpid
     sleep 0.1
-    st-flash reset > /dev/null 2>&1
+    reset_stm32_target
 
     local max_wait_polls waited=0 size
     max_wait_polls=$(awk -v m="$CAPTURE_MAX_SECS" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')

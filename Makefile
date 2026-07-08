@@ -700,7 +700,7 @@ stm32-http-server: examples/http_server/kernel_stm32.bin
 	cat $(STM32_SERIAL_DEV) & \
 	catpid=$$!; \
 	sleep 0.2; \
-	st-flash reset > /dev/null 2>&1; \
+	st-flash --connect-under-reset reset > /dev/null 2>&1; \
 	wait $$catpid
 
 ## profile-http-server: rough execution profile of http_server.tkb under QEMU

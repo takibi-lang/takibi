@@ -56,7 +56,14 @@ run_net_hw_test() {
         rm -f "$tmp_flash_log"
         return
     fi
-    st-flash reset > /dev/null 2>&1
+    if ! st-flash --connect-under-reset reset > "$tmp_flash_log" 2>&1; then
+        printf "${RED}FAIL${RST}  %s  (st-flash reset failed)\n" "$name"
+        sed 's/^/       /' "$tmp_flash_log"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+        rm -f "$tmp_flash_log"
+        return
+    fi
 
     echo "-- $name --"
     if sudo python3 "$test_script"; then
