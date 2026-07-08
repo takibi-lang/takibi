@@ -2816,20 +2816,17 @@ the normal (always `-g`-free) build outputs.
   sleeps rather than spins, but retains the caller until DMA completion. Fully
   asynchronous TX needs an affine `NetTxInFlight` handle (or equivalent buffer
   ownership token) before callers may safely reuse memory.
-- **`uart_print_uint` / `print_uint` take `i32`, not `u32`** (`examples/common/print.tkb`): the name promises unsigned
-  semantics but the parameter type does not enforce non-negativity, and `%`/`/` on `i32` use signed `srem`/`sdiv`. A
-  genuinely negative argument prints garbage (e.g. `-5 % 10 = -5` in LLVM, not the mathematical `5`). No current
-  caller passes a negative value, so this has not manifested as a bug. Fixing the type to `u32` is a mechanical but
-  wide-reaching change (every call site needs an explicit `i32 -> u32` cast, similar in scope to the global
-  `let`/`let mut` migration). **Deferred**: the better fix is likely function overloading (same name, dispatch on
-  parameter type -- `print(n: u32)` and `print(n: i32)` coexisting), so a `u32`-only rename now would likely be
-  reshaped again once that lands. Revisit when a concrete number-to-string design is undertaken; a `printf`-style
-  variadic/format-string approach was explicitly ruled out (runtime format parsing, no `void*`/generics, and a
-  security-sensitive parser this project doesn't want in a bare-metal image).
-- **No function overloading**: only one definition per function name is allowed (`fenv` is keyed by bare name). A
-  `u32`/`i32`/`u8` family of `print`-like functions would need this. Estimated to be a moderate addition: `fenv`
-  becomes name -> list of signatures, `Call` picks the best match by argument types, and `llvm_gen.ml` needs to
-  mangle LLVM symbol names per overload (today one takibi name maps to exactly one LLVM function symbol).
+- **Function overloading uses exact parameter types.** Same-named functions are collected as overload sets and
+  emitted under `_TK_<name>__<type-codes>` linkage names. Calls perform no implicit conversion or ranking. An
+  unconstrained integer literal therefore makes an overloaded call an error; annotate it or use `as T`. Overloaded
+  functions used as bare function-pointer values are rejected until an expected-type-based selector is added.
+  `extern fn` is deliberately not overloadable because its unmangled symbol name is an external ABI contract.
+  DWARF records the source name as `name` and the mangled symbol as `linkageName`, so source-level debuggers display
+  the original overload name while `nm`/linkers see unique symbols.
+- **Primitive UART decimal printing is overloaded.** `uart_print` and `uart_println` accept `bool` and every signed
+  or unsigned primitive integer width, including `isize`/`usize`. Narrow types share 32-bit conversion cores and
+  wide types share 64-bit cores; signed minimum values are converted through unsigned subtraction to avoid
+  overflow. The old `uart_print_int`/`uart_print_uint` names remain compatibility wrappers.
 - **`isize` (signed pointer-sized integer) is implemented** -- it is the pointer-sized signed integer used for raw
   pointer arithmetic and pointer differences (`ptr - ptr` returns `isize`).
 - **`sizeof(T)` cannot be used as an array size** (`[T; sizeof(Foo)]`) -- see the `sizeof(T)` section above for why

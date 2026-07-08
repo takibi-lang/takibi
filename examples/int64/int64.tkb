@@ -6,9 +6,9 @@
 // different code paths (eval_const/eval_const_int for the global,
 // gen_expr's IntLit case for the other two).
 //
-// print_u64_hex is a local helper: the project's shared print.tkb only has
-// i32-width printers (see CLAUDE.md's "no function overloading" known
-// limitation), so this file prints a u64 as two hex halves instead.
+// print_u64_hex remains a local hexadecimal helper.  Shared print.tkb now
+// overloads decimal printing for every primitive integer type; its legacy
+// uart_print_hex API still intentionally formats one i32 word.
 //
 // QEMU expected output:
 //   global   : 0xffffffff:0xffffffff

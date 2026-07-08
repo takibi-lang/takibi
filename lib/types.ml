@@ -240,6 +240,11 @@ type program_types = {
   functions : func_info StringMap.t;
   structs   : (string * Ast.type_expr) list StringMap.t;
   enums     : enum_info StringMap.t;
+  call_targets : string StringMap.t;
   (* struct name -> ordered field list [(field_name, field_type)] *)
   (* enum name  -> underlying type + variant list                 *)
 }
+
+let loc_key (loc : Ast.loc) =
+  Printf.sprintf "%s:%d:%d" loc.Lexing.pos_fname loc.Lexing.pos_lnum
+    (loc.Lexing.pos_cnum - loc.Lexing.pos_bol)
