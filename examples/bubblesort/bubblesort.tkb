@@ -8,7 +8,7 @@ struct IntSlice {
 fn print_arr(s: *IntSlice) {
     let arr: *i32 = s.data;
     for i in 0..<s.len {
-        uart_print_uint(arr[i]);
+        uart_print(arr[i]);
         if (i < s.len - 1) {
             uart_putc(' ');
         }

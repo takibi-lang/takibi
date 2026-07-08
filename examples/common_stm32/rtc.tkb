@@ -1,4 +1,4 @@
-// STM32F746 RTC HAL. Same public signatures as examples/common/rtc.tkb so
+// STM32F746 RTC HAL. Same public signatures as examples/common_qemu/rtc.tkb so
 // examples/rtc/rtc.tkb is portable across both HALs.
 //
 // Uses LSI (internal ~32kHz RC oscillator) as the RTC clock source, not

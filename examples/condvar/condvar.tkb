@@ -108,10 +108,10 @@ fn app_main() {
     scheduler_disable();
     sched_done = 1;
     uart_puts("produced: ");
-    print_uint(produced);
+    uart_print(produced);
     uart_puts("\r\n");
     uart_puts("consumed: ");
-    print_uint(consumed);
+    uart_print(consumed);
     uart_puts("\r\n");
     uart_puts("done\r\n");
 }

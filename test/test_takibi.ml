@@ -2355,6 +2355,25 @@ let infer_tests = [
     (expect_type_error "requires a named struct"
        "fn offset_non_struct() { let n: usize = offsetof(i32, x); }");
 
+  Alcotest.test_case "overload resolution requires an exact inferred argument type" `Quick
+    (expect_ok
+       "fn overload_exact(v: i32) -> i32 { return v; }
+        fn overload_exact(v: u32) -> u32 { return v; }
+        fn overload_exact_use(a: i32, b: u32) -> i32 {
+          return overload_exact(a) + (overload_exact(b) as i32);
+        }");
+
+  Alcotest.test_case "an unconstrained literal does not acquire a default type during overload resolution" `Quick
+    (expect_type_error "argument type is not determined"
+       "fn overload_no_default(v: i32) -> i32 { return v; }
+        fn overload_no_default(v: u32) -> u32 { return v; }
+        fn overload_no_default_use() -> i32 { return overload_no_default(0); }");
+
+  Alcotest.test_case "duplicate overload signatures are rejected" `Quick
+    (expect_type_error "duplicate overload"
+       "fn overload_duplicate(v: i32) {}
+        fn overload_duplicate(v: i32) {}");
+
 ]
 
 (* -- Codegen tests ----------------------------------------------------------
@@ -2367,6 +2386,26 @@ let infer_tests = [
    checks runtime behavior, not just "the IR verifies"). *)
 
 let codegen_tests = [
+
+  Alcotest.test_case "overloads emit mangled symbols and direct calls use the selected symbol" `Quick
+    (fun () ->
+       gen_codegen
+         "fn codegen_overload(v: i32) -> i32 { return v; }
+          fn codegen_overload(v: u32) -> u32 { return v; }
+          fn codegen_overload_use(a: i32, b: u32) -> i32 {
+            return codegen_overload(a) + (codegen_overload(b) as i32);
+          }";
+       Alcotest.(check bool) "i32 symbol" true
+         (Hashtbl.mem Llvm_gen.functions "_TK_codegen_overload__i32");
+       Alcotest.(check bool) "u32 symbol" true
+         (Hashtbl.mem Llvm_gen.functions "_TK_codegen_overload__u32");
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_overload_use" with
+         | Some (_, fn) -> fn | None -> Alcotest.fail "caller was not emitted" in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check bool) "calls i32 overload" true
+         (contains_substring ir "@_TK_codegen_overload__i32");
+       Alcotest.(check bool) "calls u32 overload" true
+         (contains_substring ir "@_TK_codegen_overload__u32"));
 
   Alcotest.test_case
     "offsetof uses the target DataLayout for normal and packed structs"

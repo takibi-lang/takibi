@@ -1591,7 +1591,7 @@ combining two constants (`QNUM * RX_BUF_SIZE`, `ETH_RX_DESC_COUNT * ETH_DESC_SIZ
 hand-computed into a literal, with a comment recording the formula so a future edit to either
 constant wouldn't silently leave the array size out of sync (exactly the drift risk "Global
 Constant Folding" below closes for a global's *value*, just on the *array-size* side instead).
-`examples/common/virtio_mmio.tkb`'s `rx_queue_mem`/`tx_queue_mem`/`rx_bufs` and
+`examples/common_qemu/virtio_mmio.tkb`'s `rx_queue_mem`/`tx_queue_mem`/`rx_bufs` and
 `examples/common_stm32/eth.tkb`'s `eth_rx_descs`/`eth_tx_descs`/`eth_rx_bufs` all had exactly
 this shape before this feature.
 
@@ -1614,7 +1614,7 @@ ETH_DESC_WORDS * 4;` still fails with "unsupported constant expression" today, o
 `let mut eth_rx_descs: [u8; ETH_RX_DESC_COUNT * ETH_DESC_SIZE];` (the array-size position) is
 fixed by this feature. Likewise, a few remaining hand-computed literals with an explanatory
 comment are deliberately NOT touched by this feature because they are not in the array-size
-grammar position at all -- e.g. `examples/common/virtio_mmio.tkb`'s and
+grammar position at all -- e.g. `examples/common_qemu/virtio_mmio.tkb`'s and
 `examples/common_stm32/eth.tkb`'s `min(net_last_rx_desc_idx, 7)` / `min(eth_rx_cur, 3)` calls,
 where the `7`/`3` is a plain function-call argument that needs to be recognized as a
 compile-time constant by `Const_env.bound_value` (used by the refined-type range machinery),
@@ -1623,7 +1623,7 @@ not arithmetic, so `min(idx, QNUM - 1)` there still does not resolve to a proven
 Extending `Const_env.bound_value` the same way is a natural, still-open follow-up, not done as
 part of this feature.
 
-Files: `lib/parser.mly` (`array_size` grammar), `examples/common/virtio_mmio.tkb` +
+Files: `lib/parser.mly` (`array_size` grammar), `examples/common_qemu/virtio_mmio.tkb` +
 `examples/common_stm32/eth.tkb` (hand-computed literals replaced with their formulas), 7 new
 parser unit tests in `test/test_takibi.ml` (product/difference of named constants, operator
 precedence without and with explicit parentheses, division, division-by-zero error, and an
@@ -2166,7 +2166,7 @@ un-migrated callers and http_server's response island.
 
 Files: `lib/type_inf.ml` + `lib/llvm_gen.ml` (SliceOf rework, Cast
 additions, Index const-name rule), `examples/common/netutil.tkb`,
-`examples/common/virtio_mmio.tkb`, `examples/common_stm32/eth.tkb`,
+`examples/common_qemu/virtio_mmio.tkb`, `examples/common_stm32/eth.tkb`,
 `examples/http_server/http_server.tkb`, `_p` renames in the four
 un-migrated examples, 5 unit-test cases + 2 updated to the new checked
 semantics.
@@ -2645,7 +2645,7 @@ under direct pressure to eliminate every remaining `unsafe`, the type
 system's non-relational toolkit closed everything except this single,
 already-diagnosed correlation.
 
-Files: `examples/common/virtio_mmio.tkb` + `examples/common_stm32/
+Files: `examples/common_qemu/virtio_mmio.tkb` + `examples/common_stm32/
 eth.tkb` (`net_rx_frame()` rewritten, unsafe removed), `lib/type_inf.ml`
 + `lib/llvm_gen.ml` (Mul's Const_env-constant fix), `examples/tcp_echo/
 tcp_echo.tkb` (one site fixed, one site's necessity reinforced with the
@@ -2816,20 +2816,17 @@ the normal (always `-g`-free) build outputs.
   sleeps rather than spins, but retains the caller until DMA completion. Fully
   asynchronous TX needs an affine `NetTxInFlight` handle (or equivalent buffer
   ownership token) before callers may safely reuse memory.
-- **`uart_print_uint` / `print_uint` take `i32`, not `u32`** (`examples/common/print.tkb`): the name promises unsigned
-  semantics but the parameter type does not enforce non-negativity, and `%`/`/` on `i32` use signed `srem`/`sdiv`. A
-  genuinely negative argument prints garbage (e.g. `-5 % 10 = -5` in LLVM, not the mathematical `5`). No current
-  caller passes a negative value, so this has not manifested as a bug. Fixing the type to `u32` is a mechanical but
-  wide-reaching change (every call site needs an explicit `i32 -> u32` cast, similar in scope to the global
-  `let`/`let mut` migration). **Deferred**: the better fix is likely function overloading (same name, dispatch on
-  parameter type -- `print(n: u32)` and `print(n: i32)` coexisting), so a `u32`-only rename now would likely be
-  reshaped again once that lands. Revisit when a concrete number-to-string design is undertaken; a `printf`-style
-  variadic/format-string approach was explicitly ruled out (runtime format parsing, no `void*`/generics, and a
-  security-sensitive parser this project doesn't want in a bare-metal image).
-- **No function overloading**: only one definition per function name is allowed (`fenv` is keyed by bare name). A
-  `u32`/`i32`/`u8` family of `print`-like functions would need this. Estimated to be a moderate addition: `fenv`
-  becomes name -> list of signatures, `Call` picks the best match by argument types, and `llvm_gen.ml` needs to
-  mangle LLVM symbol names per overload (today one takibi name maps to exactly one LLVM function symbol).
+- **Function overloading uses exact parameter types.** Same-named functions are collected as overload sets and
+  emitted under `_TK_<name>__<type-codes>` linkage names. Calls perform no implicit conversion or ranking. An
+  unconstrained integer literal therefore makes an overloaded call an error; annotate it or use `as T`. Overloaded
+  functions used as bare function-pointer values are rejected until an expected-type-based selector is added.
+  `extern fn` is deliberately not overloadable because its unmangled symbol name is an external ABI contract.
+  DWARF records the source name as `name` and the mangled symbol as `linkageName`, so source-level debuggers display
+  the original overload name while `nm`/linkers see unique symbols.
+- **Primitive UART decimal printing is overloaded.** `uart_print` and `uart_println` accept `bool` and every signed
+  or unsigned primitive integer width, including `isize`/`usize`. Narrow types share 32-bit conversion cores and
+  wide types share 64-bit cores; signed minimum values are converted through unsigned subtraction to avoid
+  overflow. The old `uart_print_int`/`uart_print_uint` names remain compatibility wrappers.
 - **`isize` (signed pointer-sized integer) is implemented** -- it is the pointer-sized signed integer used for raw
   pointer arithmetic and pointer differences (`ptr - ptr` returns `isize`).
 - **`sizeof(T)` cannot be used as an array size** (`[T; sizeof(Foo)]`) -- see the `sizeof(T)` section above for why
@@ -2860,7 +2857,7 @@ the normal (always `-g`-free) build outputs.
   descriptor-ring driver + MDIO-based LAN8742A PHY init over RMII (RMII pins, PHY bring-up, and the DMA
   descriptor ring design are documented in that file's header comment).
 
-  **Unified driver API**: `eth.tkb` and `examples/common/virtio_mmio.tkb` both expose the identical
+  **Unified driver API**: `eth.tkb` and `examples/common_qemu/virtio_mmio.tkb` both expose the identical
   `net_init() -> i32` / `net_rx_wait()` / `net_rx_acquire() -> *NetRxCpuOwned` /
   `net_rx_len(borrow *NetRxCpuOwned) -> i32` /
   `net_rx_frame(borrow *NetRxCpuOwned) -> [u8; 1514..]` / `net_transmit(buf, len)` /
@@ -2880,7 +2877,7 @@ the normal (always `-g`-free) build outputs.
   `00:80:E1:00:00:00`, matching ST's own STM32CubeF7 LwIP example convention (hardcoded, not derived from
   the chip's unique ID -- see that file's comment for the tradeoff). IP is `192.168.10.2`, the same /24 as
   this devcontainer's point-to-point NIC (`enp4s0`, `192.168.10.1/24`), chosen so the board is reachable
-  with zero host-side routing changes. `examples/common/netconfig.tkb` holds the QEMU-side counterpart:
+  with zero host-side routing changes. `examples/common_qemu/netconfig.tkb` holds the QEMU-side counterpart:
   `OUR_IP` = `192.0.2.1` (RFC 5737 TEST-NET-1) for `arp_reply`/`icmp_echo`/`tcp_echo` (MAC is deliberately
   NOT in this file -- `net_read_mac()`'s virtio-net backend reads it from the device at runtime, nothing to
   share). `http_server.tkb` reads a third constant, `HTTP_SERVER_IP`, instead of `OUR_IP`: on the QEMU side
@@ -3041,7 +3038,7 @@ model aren't the same shape behind different addresses -- unlike the networking 
 (where polling replaced interrupts entirely, making the dispatch mechanism invisible to
 the app), here the interrupt *entry-point names themselves* are dictated by each
 platform's assembly: QEMU's is always `irq_dispatch(frame_sp) -> frame_sp`
-(`examples/common/startup.S`'s `irq_entry`); STM32's is `USART1_IRQHandler()` (`irq`) or
+(`examples/common_qemu/startup.S`'s `irq_entry`); STM32's is `USART1_IRQHandler()` (`irq`) or
 `SysTick_Handler()` + `pendsv_dispatch(sp) -> sp` (the other five), vectored directly by
 `examples/common_stm32/startup.S`'s hardware vector table. The fix: define **both**
 platforms' entry points unconditionally in the one shared file (`examples/preempt/
@@ -3050,14 +3047,14 @@ the target being built is simply dead code there, same idea as `OUR_MAC` sitting
 in `net_echo`'s STM32 binary. Three small pieces of shared infrastructure make both
 definitions actually *compile* on both targets:
 - **`scheduler_init()`/`scheduler_disable()`/`scheduler_rearm_tick()`** (uniform names,
-  real implementations in both `examples/common/timer.tkb` and `examples/common_stm32/
+  real implementations in both `examples/common_qemu/timer.tkb` and `examples/common_stm32/
   scheduler.tkb`) hide the one genuine naming/arity mismatch found: STM32's
   `systick_init()` needs an explicit reload value `timer_init()` has no parameter for,
   and the ARM Generic Timer needs re-arming every tick where SysTick auto-reloads and
   doesn't. `app_main()` calls these three uniformly, no per-platform branch needed for any
   of it. (The `249999` reload value used to be duplicated at every STM32 example's call
   site; hoisting it into `scheduler_init()` removed that too.)
-- **`examples/common/stm32_stub.tkb`** (QEMU-only): a no-op stand-in for
+- **`examples/common_qemu/stm32_stub.tkb`** (QEMU-only): a no-op stand-in for
   `pendsv_trigger()` -- an STM32-only function that a shared file's dead-under-QEMU
   code (`SysTick_Handler`'s body) still references. Never actually invoked; exists
   solely so compilation succeeds under `aarch64-none-elf` too.
@@ -3071,7 +3068,7 @@ definitions actually *compile* on both targets:
   (GICv2 init+SPI-routing vs. NVIC line enable, then a final unmask done after the
   "ready" message so nothing can arrive before the handler is wired up) is handled the
   same way: **`irq_uart_rx_setup()`/`irq_uart_rx_unmask()`** -- uniform names, real
-  implementations in `examples/common/gic.tkb` and `examples/common_stm32/nvic.tkb`
+  implementations in `examples/common_qemu/gic.tkb` and `examples/common_stm32/nvic.tkb`
   (not `uart.tkb`, even though they're UART-interrupt related: `uart.tkb` is
   concatenated into *every* example's build, including ones that never touch GIC/NVIC
   at all, so a function defined there calling `gic_init()`/`enable_usart1_irq()` would
@@ -3202,7 +3199,7 @@ virtio protocol itself.
   release; if legacy mode disappears, this driver needs a rewrite against
   the modern register layout.
 - **The virtio-mmio slot is discovered at boot, not hardcoded**
-  (`virtio_net_find()` in `examples/common/virtio_mmio.tkb`). A lone
+  (`virtio_net_find()` in `examples/common_qemu/virtio_mmio.tkb`). A lone
   `-device virtio-net-device` does NOT land on slot 0: empirically, under
   this devcontainer's QEMU 8.2.2, it landed on slot 31 (base `0x0a003e00`).
   The driver scans all 32 slots for `DeviceID == 1` (network), derives both

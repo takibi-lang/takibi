@@ -1,59 +1,73 @@
-fn print_uint(n: i32) {
+// Primitive UART formatting.  Decimal conversion is shared by width; the
+// overloaded public entry points only perform the required extension/cast.
+
+fn uart_print_u32_core(n: u32) {
     if (n >= 10) {
-        print_uint(n / 10);
+        uart_print_u32_core(n / 10);
     }
-    uart_putc((n - (n / 10) * 10 + '0') as u8);
+    uart_putc(((n % 10) as u8) + '0');
 }
 
-fn uart_print_uint(n: i32) {
+fn uart_print_u64_core(n: u64) {
     if (n >= 10) {
-        uart_print_uint(n / 10);
+        uart_print_u64_core(n / 10);
     }
-    uart_putc((n % 10 + '0') as u8);
+    uart_putc(((n % 10) as u8) + '0');
 }
+
+fn uart_print_i32_core(n: i32) {
+    if (n < 0) {
+        uart_putc('-');
+        // Unsigned subtraction also handles i32::MIN without overflow.
+        uart_print_u32_core(0 - (n as u32));
+    } else {
+        uart_print_u32_core(n as u32);
+    }
+}
+
+fn uart_print_i64_core(n: i64) {
+    if (n < 0) {
+        uart_putc('-');
+        // Unsigned subtraction also handles i64::MIN without overflow.
+        uart_print_u64_core(0 - (n as u64));
+    } else {
+        uart_print_u64_core(n as u64);
+    }
+}
+
+fn uart_print(v: bool) { if (v) { uart_puts("true"); } else { uart_puts("false"); } }
+fn uart_print(v: i8) { uart_print_i32_core(v as i32); }
+fn uart_print(v: i16) { uart_print_i32_core(v as i32); }
+fn uart_print(v: i32) { uart_print_i32_core(v); }
+fn uart_print(v: i64) { uart_print_i64_core(v); }
+fn uart_print(v: u8) { uart_print_u32_core(v as u32); }
+fn uart_print(v: u16) { uart_print_u32_core(v as u32); }
+fn uart_print(v: u32) { uart_print_u32_core(v); }
+fn uart_print(v: u64) { uart_print_u64_core(v); }
+
+fn uart_println(v: bool) { uart_print(v); uart_puts("\r\n"); }
+fn uart_println(v: i8) { uart_print(v); uart_puts("\r\n"); }
+fn uart_println(v: i16) { uart_print(v); uart_puts("\r\n"); }
+fn uart_println(v: i32) { uart_print(v); uart_puts("\r\n"); }
+fn uart_println(v: i64) { uart_print(v); uart_puts("\r\n"); }
+fn uart_println(v: u8) { uart_print(v); uart_puts("\r\n"); }
+fn uart_println(v: u16) { uart_print(v); uart_puts("\r\n"); }
+fn uart_println(v: u32) { uart_print(v); uart_puts("\r\n"); }
+fn uart_println(v: u64) { uart_print(v); uart_puts("\r\n"); }
 
 fn uart_print_hex_digit(n: i32) {
-    if (n < 10) {
-        uart_putc((n + '0') as u8);
-    } else {
-        uart_putc((n - 10 + 'a') as u8);
-    }
+    if (n < 10) { uart_putc((n + '0') as u8); }
+    else { uart_putc((n - 10 + 'a') as u8); }
 }
 
 fn uart_print_hex(n: i32) {
     uart_puts("0x");
-    for i in 0..<8 {
-        uart_print_hex_digit((n >> (28 - i * 4)) & 15);
-    }
+    for i in 0..<8 { uart_print_hex_digit((n >> (28 - i * 4)) & 15); }
 }
 
 fn uart_print_hex16(n: i32) {
     uart_puts("0x");
-    for i in 0..<4 {
-        uart_print_hex_digit((n >> (12 - i * 4)) & 15);
-    }
+    for i in 0..<4 { uart_print_hex_digit((n >> (12 - i * 4)) & 15); }
 }
 
-fn uart_print_int(n: i32) {
-    if (n < 0) {
-        uart_putc('-');
-        print_uint(-n);
-    } else {
-        print_uint(n);
-    }
-}
-
-fn uart_println_uint(n: i32) {
-    uart_print_uint(n);
-    uart_puts("\r\n");
-}
-
-fn uart_println_hex(n: i32) {
-    uart_print_hex(n);
-    uart_puts("\r\n");
-}
-
-fn uart_println_int(n: i32) {
-    uart_print_int(n);
-    uart_puts("\r\n");
-}
+fn uart_println_hex(n: i32) { uart_print_hex(n); uart_puts("\r\n"); }

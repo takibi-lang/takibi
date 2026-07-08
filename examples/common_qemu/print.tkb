@@ -1,0 +1,6 @@
+// Native-width overloads for the current AArch64 QEMU virt target.
+// isize/usize are 64-bit here, so reuse the fixed-width 64-bit cores.
+fn uart_print(v: isize) { uart_print_i64_core(v as i64); }
+fn uart_print(v: usize) { uart_print_u64_core(v as u64); }
+fn uart_println(v: isize) { uart_print(v); uart_puts("\r\n"); }
+fn uart_println(v: usize) { uart_print(v); uart_puts("\r\n"); }

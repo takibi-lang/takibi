@@ -124,7 +124,7 @@ fn app_main() {
     wdt.done = 1;
 
     uart_puts("watchdog: task ");
-    print_uint(hung_task);
+    uart_print(hung_task);
     uart_puts(" timed out\r\n");
     uart_puts("done\r\n");
 }

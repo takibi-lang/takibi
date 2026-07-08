@@ -62,7 +62,7 @@ fn app_main() {
     let s = buf as []u8;    // [u8; 16..]
     fill8(s);
     uart_puts("len=");
-    uart_print_uint(s.len as i32);
+    uart_print(s.len);
     uart_puts(" data=");
     print4(s[0..<4]);
     print4(s[4..<8]);
@@ -71,6 +71,6 @@ fn app_main() {
     uart_puts(" head=");
     uart_putc(head_or_zero(s));
     uart_puts(" sum=");
-    uart_print_uint(sum8(s));
+    uart_print(sum8(s));
     uart_puts("\r\n");
 }

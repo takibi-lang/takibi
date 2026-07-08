@@ -1,5 +1,5 @@
 // Demo of waiting for the RTC to tick once. Portable across the QEMU
-// (examples/common/rtc.tkb, PL011/PL031) and STM32
+// (examples/common_qemu/rtc.tkb, PL011/PL031) and STM32
 // (examples/common_stm32/rtc.tkb, real RTC peripheral) HALs -- see those
 // files for why rtc_read_seconds()'s value is never subtracted (STM32's is
 // raw BCD, not a linear counter): the loop below already guarantees exactly

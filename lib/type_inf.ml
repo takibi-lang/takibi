@@ -242,6 +242,10 @@ let intlit_opt (e : Ast.expr) : int option =
    and unit tests run many compilations in one process. *)
 let unsafe_depth = ref 0
 
+(* Direct calls are resolved during inference.  Codegen must consume this
+   exact decision rather than attempting a second overload resolution. *)
+let resolved_call_targets = ref StringMap.empty
+
 let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
@@ -259,7 +263,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | None ->
            (* Function name used as a value (function pointer) *)
            match StringMap.find_opt name fenv with
-           | Some ft -> ft
+           | Some [(_, ft)] -> ft
+           | Some _ ->
+               raise (TypeError (e.loc, Printf.sprintf
+                 "overloaded function '%s' needs an expected function type; use an explicit wrapper" name))
            | None ->
                raise (TypeError (e.loc,
                  Printf.sprintf "Unbound variable: %s" name)))
@@ -1000,11 +1007,36 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            Printf.sprintf "%s expects 2 arguments: %s(a, b)" fname fname)))
 
   | Call (fname, args) ->
-      (* Try direct call (function name -> fenv) first *)
-      let ft_opt = match StringMap.find_opt fname fenv with
-        | Some ft -> Some ft
+      let direct = StringMap.find_opt fname fenv in
+      let ft_opt = match direct with
+        | Some [(target, ft)] ->
+            resolved_call_targets := StringMap.add (loc_key e.loc) target !resolved_call_targets;
+            Some ft
+        | Some candidates ->
+            let arg_tys = List.map (infer_expr senv eenv tyenv fenv) args in
+            let exact (_, ft) = match repr ft with
+              | TFun (ps, _) when List.length ps = List.length arg_tys ->
+                  List.for_all2 (fun at pt ->
+                    match repr at with
+                    | TVar { contents = Unbound _ } -> false
+                    | TRefinedInt (_, _, base) -> repr base = repr pt
+                    | actual -> actual = repr pt
+                  ) arg_tys ps
+              | _ -> false
+            in
+            (match List.filter exact candidates with
+             | [(target, ft)] ->
+                 resolved_call_targets := StringMap.add (loc_key e.loc) target !resolved_call_targets;
+                 Some ft
+             | [] ->
+                 let unresolved = List.exists (fun t -> match repr t with
+                   | TVar { contents = Unbound _ } -> true | _ -> false) arg_tys in
+                 let why = if unresolved then
+                   "argument type is not determined; add an explicit type annotation or 'as' cast"
+                 else "no overload has exactly matching parameter types" in
+                 raise (TypeError (e.loc, Printf.sprintf "cannot resolve overload '%s': %s" fname why))
+             | _ -> raise (TypeError (e.loc, Printf.sprintf "ambiguous overload call '%s'" fname)))
         | None ->
-            (* Try function pointer variable (tyenv) *)
             match StringMap.find_opt fname tyenv with
             | Some (t, _) -> Some t
             | None -> None
@@ -1661,6 +1693,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
 
 let infer_program (prog : Ast.toplevel list) : program_types =
   unsafe_depth := 0;  (* see its comment: fresh per compilation / per unit test *)
+  resolved_call_targets := StringMap.empty;
   let opaque_names = List.fold_left (fun names -> function
     | Ast.OpaqueStructDef (name, _) -> StringSet.add name names
     | _ -> names
@@ -1785,17 +1818,78 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       raise (TypeError (loc,
         Printf.sprintf "'%s' is a compiler builtin and cannot be redefined" name))
   in
+  let type_code t =
+    match t with
+    | Ast.TypeBool -> "bool"
+    | Ast.TypeI8 -> "i8" | Ast.TypeI16 -> "i16" | Ast.TypeI32 -> "i32" | Ast.TypeI64 -> "i64"
+    | Ast.TypeU8 -> "u8" | Ast.TypeU16 -> "u16" | Ast.TypeU32 -> "u32" | Ast.TypeU64 -> "u64"
+    | Ast.TypeIsize -> "isize" | Ast.TypeUsize -> "usize" | Ast.TypeVoid -> "void"
+    | _ ->
+        let source = Types.to_string (Types.of_ast t) in
+        let b = Buffer.create (1 + String.length source * 2) in
+        Buffer.add_char b 'x';
+        String.iter (fun c -> Buffer.add_string b (Printf.sprintf "%02x" (Char.code c))) source;
+        Buffer.contents b
+  in
+  let add_signature m name params =
+        let signature = String.concat "_" (List.map (fun (_, t) ->
+          match t with Some t -> type_code t | None -> "?") params) in
+        let old = Option.value (StringMap.find_opt name m) ~default:StringSet.empty in
+        StringMap.add name (StringSet.add signature old) m
+  in
+  let signatures = List.fold_left (fun m -> function
+    | Ast.FuncDef f -> add_signature m f.name f.params
+    | Ast.ExternFuncDef (name, params, _) -> add_signature m name params
+    | _ -> m
+  ) StringMap.empty prog in
+  let fn_counts = StringMap.map StringSet.cardinal signatures in
+  let fn_occurrences = List.fold_left (fun m -> function
+    | Ast.FuncDef f ->
+        StringMap.add f.name (1 + Option.value (StringMap.find_opt f.name m) ~default:0) m
+    | Ast.ExternFuncDef (name, _, _) ->
+        StringMap.add name (1 + Option.value (StringMap.find_opt name m) ~default:0) m
+    | _ -> m
+  ) StringMap.empty prog in
+  let overload_key name params =
+    if Option.value (StringMap.find_opt name fn_counts) ~default:0 <= 1 then name
+    else begin
+      if List.exists (fun (_, t) -> t = None) params then
+        raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+          "overloaded function '%s' requires explicit parameter types" name));
+      "_TK_" ^ name ^ "__" ^ String.concat "_" (List.map (fun (_, t) ->
+        type_code (Option.get t)) params)
+    end
+  in
+  let definition_files : (string, string) Hashtbl.t = Hashtbl.create 32 in
+  let register_definition loc key name =
+    let file = loc.Lexing.pos_fname in
+    match Hashtbl.find_opt definition_files key with
+    | Some previous when previous = file ->
+        raise (TypeError (loc, Printf.sprintf "duplicate overload '%s'" name))
+    | _ -> Hashtbl.replace definition_files key file
+  in
   let fenv = List.fold_left (fun m -> function
     | Ast.FuncDef fdef ->
         check_reserved_fn fdef.def_loc fdef.name;
         let pts = List.map (fun (_, t) -> of_ast_opt t) fdef.params in
         let rt  = ret_of_ast_opt fdef.ret_type in
-        StringMap.add fdef.name (TFun (pts, rt)) m
+        let key = overload_key fdef.name fdef.params in
+        register_definition fdef.def_loc key fdef.name;
+        let old = Option.value (StringMap.find_opt fdef.name m) ~default:[] in
+        let old = List.filter (fun (k, _) -> k <> key) old in
+        StringMap.add fdef.name ((key, TFun (pts, rt)) :: old) m
     | Ast.ExternFuncDef (name, params, ret_ty) ->
         check_reserved_fn Lexing.dummy_pos name;
+        if Option.value (StringMap.find_opt name fn_occurrences) ~default:0 > 1 then
+          raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+            "extern function '%s' cannot be overloaded" name));
         let pts = List.map (fun (_, t) -> of_ast_opt t) params in
         let rt  = ret_of_ast_opt ret_ty in
-        StringMap.add name (TFun (pts, rt)) m
+        let key = overload_key name params in
+        register_definition Lexing.dummy_pos key name;
+        let old = Option.value (StringMap.find_opt name m) ~default:[] in
+        let old = List.filter (fun (k, _) -> k <> key) old in
+        StringMap.add name ((key, TFun (pts, rt)) :: old) m
     | Ast.LetDef _    -> m
     | Ast.StructDef _ -> m
     | Ast.OpaqueStructDef _ -> m
@@ -1852,7 +1946,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   (* Pass 3: infer function bodies *)
   let functions = List.fold_left (fun m -> function
     | Ast.FuncDef fdef ->
-        StringMap.add fdef.name (infer_func senv eenv fenv genv fdef) m
+        let key = overload_key fdef.name fdef.params in
+        StringMap.add key (infer_func senv eenv fenv genv fdef) m
     | _ -> m
   ) StringMap.empty prog in
   (* Restricted affine checking for pointers to `affine opaque struct`.
@@ -1869,12 +1964,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> false
   in
   let call_params = List.fold_left (fun m -> function
-    | Ast.FuncDef f -> StringMap.add f.name (List.map snd f.params) m
+    | Ast.FuncDef f ->
+        StringMap.add (overload_key f.name f.params) (List.map snd f.params) m
     | Ast.ExternFuncDef (name, params, _) -> StringMap.add name (List.map snd params) m
     | _ -> m
   ) StringMap.empty prog in
   let check_affine_func fdef =
-    let finfo = StringMap.find fdef.Ast.name functions in
+    let finfo = StringMap.find (overload_key fdef.Ast.name fdef.params) functions in
     let var_types = ref finfo.local_types in
     List.iter2 (fun (name, _) (_, ty) ->
       var_types := StringMap.add name ty !var_types
@@ -1894,7 +1990,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           require_available e.loc moved name;
           if consume && is_affine_var name then StringSet.add name moved else moved
       | Ast.Call (name, args) ->
-          let params = Option.value (StringMap.find_opt name call_params) ~default:[] in
+          let target = Option.value
+            (StringMap.find_opt (loc_key e.loc) !resolved_call_targets) ~default:name in
+          let params = Option.value (StringMap.find_opt target call_params) ~default:[] in
           let rec check_args moved args params = match args with
             | [] -> moved
             | arg :: rest ->
@@ -2024,4 +2122,5 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     functions;
     structs   = senv;
     enums;
+    call_targets = !resolved_call_targets;
   }

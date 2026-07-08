@@ -32,10 +32,10 @@ fn fill() {
 fn app_main() {
     fill();
     uart_puts("QUEUE_SIZE = ");
-    uart_print_uint(QUEUE_SIZE as i32);
+    uart_print(QUEUE_SIZE);
     uart_puts("\r\n");
     for i in 0..<QUEUE_SIZE {
-        uart_print_uint(ring[i]);
+        uart_print(ring[i]);
         uart_puts(" ");
     }
     uart_puts("\r\n");

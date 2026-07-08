@@ -32,21 +32,21 @@ fn app_main() {
     rb_push(&rb, 4);
 
     uart_puts("pop: ");
-    uart_print_uint(rb_pop(&rb));
+    uart_print(rb_pop(&rb));
     uart_puts(" ");
-    uart_print_uint(rb_pop(&rb));
+    uart_print(rb_pop(&rb));
     uart_puts("\r\n");
 
     rb_push(&rb, 5);
     rb_push(&rb, 6);
 
     uart_puts("pop: ");
-    uart_print_uint(rb_pop(&rb));
+    uart_print(rb_pop(&rb));
     uart_puts(" ");
-    uart_print_uint(rb_pop(&rb));
+    uart_print(rb_pop(&rb));
     uart_puts(" ");
-    uart_print_uint(rb_pop(&rb));
+    uart_print(rb_pop(&rb));
     uart_puts(" ");
-    uart_print_uint(rb_pop(&rb));
+    uart_print(rb_pop(&rb));
     uart_puts("\r\n");
 }

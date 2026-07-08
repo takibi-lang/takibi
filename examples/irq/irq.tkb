@@ -4,7 +4,7 @@
 // unified into one name/signature --
 //   - QEMU (GICv2): one shared IRQ vector with software dispatch by ID.
 //     `irq_dispatch(frame_sp) -> frame_sp` (called from
-//     examples/common/startup.S's irq_entry) reads GICC_IAR, looks the ID
+//     examples/common_qemu/startup.S's irq_entry) reads GICC_IAR, looks the ID
 //     up in a small dispatch table (register_irq/irq_tbl), and writes
 //     GICC_EOIR to acknowledge. IRQ #33 (SPI #1) = PL011 UART RX.
 //   - STM32 (NVIC): USART1's interrupt (IRQ37) vectors directly to
@@ -20,7 +20,7 @@
 // app_main()'s enable sequence itself needs no per-platform branch either:
 // irq_uart_rx_setup()/irq_uart_rx_unmask() are uniformly-named functions
 // with a real, different-shaped implementation in each of
-// examples/common/gic.tkb and examples/common_stm32/nvic.tkb (same
+// examples/common_qemu/gic.tkb and examples/common_stm32/nvic.tkb (same
 // pattern as scheduler_init() elsewhere in this project) -- register_irq()
 // itself is harmless to call unconditionally too, since it just writes
 // into irq_tbl, which the STM32 side's USART1_IRQHandler never consults.

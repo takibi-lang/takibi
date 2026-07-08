@@ -35,7 +35,7 @@ let mut a_step: i32 = 0;
 fn task_a() {
     if (a_step < 3) {
         uart_puts("A: step ");
-        print_uint(a_step + 1);
+        uart_print(a_step + 1);
         uart_puts("\r\n");
         a_step = a_step + 1;
         if (a_step == 3) {
@@ -49,7 +49,7 @@ let mut b_step: i32 = 0;
 fn task_b() {
     if (b_step < 3) {
         uart_puts("B: step ");
-        print_uint(b_step + 1);
+        uart_print(b_step + 1);
         uart_puts("\r\n");
         b_step = b_step + 1;
         if (b_step == 3) {

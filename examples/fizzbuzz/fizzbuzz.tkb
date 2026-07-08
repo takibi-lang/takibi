@@ -9,7 +9,7 @@ fn app_main() {
         } else if (i % 5 == 0) {
             uart_puts("Buzz\r\n");
         } else {
-            uart_print_uint(i);
+            uart_print(i);
             uart_puts("\r\n");
         }
     }

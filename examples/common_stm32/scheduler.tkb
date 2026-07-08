@@ -1,7 +1,7 @@
 // Cortex-M preemptive-scheduler primitives: SysTick (periodic tick source)
 // + PendSV (context switch, see examples/common_stm32/startup.S's
 // PendSv_Handler) replacing the QEMU/AArch64 side's ARM Generic Timer +
-// GIC timer PPI (examples/common/timer_asm.S / timer.tkb).
+// GIC timer PPI (examples/common_qemu/timer_asm.S / timer.tkb).
 //
 // setup_task_stack keeps the exact same name/signature as the AArch64
 // version so callers (tcb_sp[i] = setup_task_stack(stack, task_fn)) don't
@@ -9,7 +9,7 @@
 // frame (8 words hardware-shaped: r0-r3,r12,LR,PC,xPSR; 8 words
 // software-shaped below it: r4-r11) instead of AArch64's 272-byte one.
 // task_exit_stub is plain takibi (an infinite loop) -- Cortex-M needs no
-// `wfe` assembly stub for this, unlike examples/common/timer_asm.S's.
+// `wfe` assembly stub for this, unlike examples/common_qemu/timer_asm.S's.
 
 fn task_exit_stub() {
     while (true) {}
@@ -60,7 +60,7 @@ fn pendsv_trigger() {
     *icsr = *icsr | (1 << 28); // ICSR.PENDSVSET
 }
 
-// Uniform names shared with examples/common/timer.tkb's scheduler_init()/
+// Uniform names shared with examples/common_qemu/timer.tkb's scheduler_init()/
 // scheduler_disable() -- lets a single shared app-level example
 // (preempt.tkb, etc.) call the same two functions on either target
 // without branching. The 249999 reload value (~1/64s tick @ 16MHz HSI,
@@ -74,7 +74,7 @@ fn scheduler_disable() {
     systick_disable();
 }
 
-// See examples/common/timer.tkb's scheduler_rearm_tick(): SysTick
+// See examples/common_qemu/timer.tkb's scheduler_rearm_tick(): SysTick
 // auto-reloads from LOAD every period, so there is nothing to do here --
 // this only exists so a shared example's tick handler can call the same
 // name on either target.

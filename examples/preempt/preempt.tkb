@@ -3,7 +3,7 @@
 // identical, but the two platforms trigger and structure it differently --
 //   - QEMU (ARM Generic Timer, PPI #30): `irq_dispatch(frame_sp) -> next_sp`
 //     does the tick bookkeeping AND the round-robin switch in one function,
-//     called directly from examples/common/startup.S's irq_entry.
+//     called directly from examples/common_qemu/startup.S's irq_entry.
 //   - STM32 (SysTick + PendSV): `SysTick_Handler()` does the tick
 //     bookkeeping then requests a switch via pendsv_trigger(); the actual
 //     switch happens in `pendsv_dispatch(frame_sp) -> next_sp`, called from
@@ -12,7 +12,7 @@
 // examples/net_echo/net_echo.tkb's header comment for the general
 // pattern) -- whichever isn't relevant to the target being built is dead
 // code there. scheduler_init()/scheduler_disable()/scheduler_rearm_tick()
-// (examples/common/timer.tkb / examples/common_stm32/scheduler.tkb) hide
+// (examples/common_qemu/timer.tkb / examples/common_stm32/scheduler.tkb) hide
 // the remaining per-platform differences (STM32's systick_init() needs an
 // explicit reload value timer_init() has no equivalent for; the ARM
 // Generic Timer needs re-arming every tick, SysTick auto-reloads and
@@ -93,13 +93,13 @@ fn app_main() {
     while (*pd == 0) {}
     let tc: *i32 = sched.tick_counts;
     uart_puts("main: ");
-    print_uint(tc[0]);
+    uart_print(tc[0]);
     uart_puts(" ticks\r\n");
     uart_puts("task_a: ");
-    print_uint(tc[1]);
+    uart_print(tc[1]);
     uart_puts(" ticks\r\n");
     uart_puts("task_b: ");
-    print_uint(tc[2]);
+    uart_print(tc[2]);
     uart_puts(" ticks\r\n");
     uart_puts("done\r\n");
 }

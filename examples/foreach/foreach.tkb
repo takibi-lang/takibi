@@ -64,7 +64,7 @@ fn app_main() {
     let sb = b as []u8;
 
     uart_puts("copied=");
-    uart_print_uint(slice_copy(sb, sa) as i32);
+    uart_print(slice_copy(sb, sa));
 
     uart_puts(" eq=");
     if (slice_eq(sa, sb)) { uart_puts("yes"); } else { uart_puts("no"); }
@@ -74,13 +74,13 @@ fn app_main() {
     if (slice_eq(sa, sb)) { uart_puts("yes"); } else { uart_puts("no"); }
 
     uart_puts(" sum=");
-    uart_print_uint(sum_slice(sa));       // 'A'+...+'H' = 65+...+72
+    uart_print(sum_slice(sa));       // 'A'+...+'H' = 65+...+72
 
     uart_puts(" ck=");
-    uart_print_uint(checksum_slice(sa));  // one's-complement sum of ABCDEFGH
+    uart_print(checksum_slice(sa));  // one's-complement sum of ABCDEFGH
 
     uart_puts(" part=");
-    uart_print_uint(slice_copy(sb[0..<4], sa) as i32);  // min(4, 8) = 4
+    uart_print(slice_copy(sb[0..<4], sa));  // min(4, 8) = 4
 
     uart_puts("\r\n");
 }

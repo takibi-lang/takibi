@@ -6,14 +6,24 @@
 # on any clone of this repo with no physical hardware attached.
 set -euo pipefail
 
-# Default is /dev-host, not /dev: .devcontainer/devcontainer.json bind-mounts
-# the host's /dev read-only at /dev-host (not /dev/ttyACM0 directly), so the
-# devcontainer can build/start without the ST-LINK plugged in, and a board
-# plugged in afterward is picked up with no container restart -- see that
-# file's runArgs comment.
-SERIAL_DEV="${STM32_SERIAL_DEV:-/dev-host/ttyACM0}"
+# Makefile is the single source of truth for the device path and passes it to
+# this script explicitly. Direct script invocation must provide the same env
+# variable rather than silently acquiring a different default device.
+: "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run 'make hwcheck' or set it explicitly}"
+SERIAL_DEV="$STM32_SERIAL_DEV"
 BAUD=115200
 FLASH_ADDR=0x08000000
+ACTIVE_READER_PID=""
+
+cleanup_reader() {
+    if [ -n "$ACTIVE_READER_PID" ]; then
+        kill "$ACTIVE_READER_PID" 2>/dev/null || true
+        wait "$ACTIVE_READER_PID" 2>/dev/null || true
+        ACTIVE_READER_PID=""
+    fi
+}
+trap cleanup_reader EXIT
+trap 'cleanup_reader; exit 130' INT TERM HUP
 
 # Idle-detection polling constants (see read_until_quiet below). These
 # examples finish -- and the UART goes idle -- in well under a second, so
@@ -23,8 +33,13 @@ FLASH_ADDR=0x08000000
 # quiescence instead cuts a ~4s/test fixed cost down to however long the
 # board actually takes to respond.
 POLL_INTERVAL=0.05
-DRAIN_MAX_SECS=0.5
-DRAIN_STABLE_POLLS=2      # ~100ms of no growth
+# ST-LINK's USB-CDC path can deliver a short tail well after st-flash exits
+# (and occasionally includes 0xff line noise while SWD owns reset).  Requiring
+# only 100ms of silence let that tail escape the drain and prefix the next
+# program's otherwise-correct capture.  300ms is still cheap compared with a
+# hardware flash, while covering the observed delayed delivery.
+DRAIN_MAX_SECS=1.0
+DRAIN_STABLE_POLLS=6      # ~300ms of no growth
 CAPTURE_MAX_SECS=2        # safety cap if a test hangs/never produces output
 CAPTURE_STABLE_POLLS=4    # ~200ms of no growth after output starts
 
@@ -43,6 +58,10 @@ if [ ! -e "$SERIAL_DEV" ]; then
     echo "error: $SERIAL_DEV not found -- is the STM32F746G-DISCOVERY board connected?" >&2
     exit 1
 fi
+
+# shellcheck source=scripts/stm32_hw_claim.sh
+source "$(dirname "$0")/stm32_hw_claim.sh"
+claim_stm32_hardware "$SERIAL_DEV"
 
 if ! st-info --probe > /dev/null 2>&1; then
     echo "error: st-info --probe failed -- is the ST-LINK debug interface accessible?" >&2
@@ -69,8 +88,9 @@ fi
 read_until_quiet() {
     local outfile="$1" max_secs="$2" stable_polls_needed="$3" wait_for_data="$4" post_start_cmd="${5:-}"
     : > "$outfile"
-    cat "$SERIAL_DEV" > "$outfile" 2>/dev/null &
+    cat "$SERIAL_DEV" > "$outfile" 2>/dev/null 9>&- &
     local catpid=$!
+    ACTIVE_READER_PID=$catpid
     if [ -n "$post_start_cmd" ]; then
         sleep 0.1
         eval "$post_start_cmd"
@@ -93,6 +113,40 @@ read_until_quiet() {
     done
     kill "$catpid" 2>/dev/null || true
     wait "$catpid" 2>/dev/null || true
+    ACTIVE_READER_PID=""
+}
+
+# capture_matches EXPECTED ACTUAL
+#
+# Normal success is byte-for-byte equality.  ST-LINK/V2-1 can occasionally
+# prepend a deterministic flash/reset artifact (0xff bytes, sometimes with a
+# stray printable byte between them) even after its VCP was drained. Accept
+# that case only when ACTUAL ends with the complete EXPECTED payload and the
+# extra prefix contains at least one 0xff. Missing output, changed output, and
+# ordinary printable prefixes remain failures.
+capture_matches() {
+    local expected="$1" actual="$2" expected_size actual_size prefix_size
+    cmp -s "$expected" "$actual" && return 0
+    expected_size=$(stat -c%s "$expected")
+    actual_size=$(stat -c%s "$actual")
+    [ "$actual_size" -gt "$expected_size" ] || return 1
+    tail -c "$expected_size" "$actual" | cmp -s "$expected" - || return 1
+    prefix_size=$((actual_size - expected_size))
+    head -c "$prefix_size" "$actual" | od -An -v -tu1 |
+        awk '{ for (i = 1; i <= NF; i++) if ($i == 255) found = 1 }
+             END { exit(found ? 0 : 1) }'
+}
+
+reset_stm32_target() {
+    local reset_log
+    reset_log=$(mktemp)
+    if ! st-flash --connect-under-reset reset > "$reset_log" 2>&1; then
+        echo "error: st-flash reset failed" >&2
+        sed 's/^/       /' "$reset_log" >&2
+        rm -f "$reset_log"
+        return 1
+    fi
+    rm -f "$reset_log"
 }
 
 # run_hw_test NAME BIN EXPECTED [MAX_SECS] [STABLE_POLLS]
@@ -133,7 +187,7 @@ run_hw_test() {
     tmp_drain=$(mktemp)
     tmp_flash_log=$(mktemp)
 
-    if ! st-flash write "$bin" "$FLASH_ADDR" > "$tmp_flash_log" 2>&1; then
+    if ! st-flash --connect-under-reset write "$bin" "$FLASH_ADDR" > "$tmp_flash_log" 2>&1; then
         printf "${RED}FAIL${RST}  %s  (st-flash write failed)\n" "$name"
         sed 's/^/       /' "$tmp_flash_log"
         FAIL=$((FAIL + 1))
@@ -147,9 +201,9 @@ run_hw_test() {
     rm -f "$tmp_drain"
 
     read_until_quiet "$tmp_out" "$max_secs" "$stable_polls" 1 \
-        "st-flash reset > /dev/null 2>&1"
+        "reset_stm32_target"
 
-    if diff -q "$expected" "$tmp_out" > /dev/null 2>&1; then
+    if capture_matches "$expected" "$tmp_out"; then
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else
@@ -180,7 +234,7 @@ run_hw_test_stdin() {
     tmp_drain=$(mktemp)
     tmp_flash_log=$(mktemp)
 
-    if ! st-flash write "$bin" "$FLASH_ADDR" > "$tmp_flash_log" 2>&1; then
+    if ! st-flash --connect-under-reset write "$bin" "$FLASH_ADDR" > "$tmp_flash_log" 2>&1; then
         printf "${RED}FAIL${RST}  %s  (st-flash write failed)\n" "$name"
         sed 's/^/       /' "$tmp_flash_log"
         FAIL=$((FAIL + 1))
@@ -194,10 +248,11 @@ run_hw_test_stdin() {
     rm -f "$tmp_drain"
 
     : > "$tmp_out"
-    cat "$SERIAL_DEV" > "$tmp_out" 2>/dev/null &
+    cat "$SERIAL_DEV" > "$tmp_out" 2>/dev/null 9>&- &
     local catpid=$!
+    ACTIVE_READER_PID=$catpid
     sleep 0.1
-    st-flash reset > /dev/null 2>&1
+    reset_stm32_target
 
     local max_wait_polls waited=0 size
     max_wait_polls=$(awk -v m="$CAPTURE_MAX_SECS" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
@@ -226,8 +281,9 @@ run_hw_test_stdin() {
     done
     kill "$catpid" 2>/dev/null || true
     wait "$catpid" 2>/dev/null || true
+    ACTIVE_READER_PID=""
 
-    if diff -q "$expected" "$tmp_out" > /dev/null 2>&1; then
+    if capture_matches "$expected" "$tmp_out"; then
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else

@@ -2,21 +2,44 @@
 
 fn app_main() {
     uart_puts("=== uart_print_int test ===\r\n");
-    uart_print_int(0);
+    uart_print(0 as i32);
     uart_putc('\r');
     uart_putc('\n');
-    uart_print_int(42);
+    uart_print(42 as i32);
     uart_putc('\r');
     uart_putc('\n');
-    uart_print_int(12345);
+    uart_print(12345 as i32);
     uart_putc('\r');
     uart_putc('\n');
-    uart_print_int(-7);
+    uart_print(-7 as i32);
     uart_putc('\r');
     uart_putc('\n');
-    uart_print_int(-999);
+    uart_print(-999 as i32);
     uart_putc('\r');
     uart_putc('\n');
+    let b: bool = true;
+    let i8v: i8 = -8;
+    let i16v: i16 = -16;
+    let i32v: i32 = -32;
+    let i64v: i64 = -64;
+    let u8v: u8 = 8;
+    let u16v: u16 = 16;
+    let u32v: u32 = 32;
+    let u64v: u64 = 0xffffffffffffffff;
+    let isizev: isize = -128;
+    let usizev: usize = 128;
+    let i64min: i64 = 0x8000000000000000;
+    uart_println(b);
+    uart_println(i8v);
+    uart_println(i16v);
+    uart_println(i32v);
+    uart_println(i64v);
+    uart_println(u8v);
+    uart_println(u16v);
+    uart_println(u32v);
+    uart_println(u64v);
+    uart_println(isizev);
+    uart_println(usizev);
+    uart_println(i64min);
     uart_puts("done\r\n");
 }
-

@@ -24,15 +24,15 @@ fn bar(a: i32, b: i32) i32 {
 
 fn app_main() {
     uart_puts("foo(5)=");
-    uart_print_int(foo(5));
+    uart_print(foo(5));
     uart_putc('\r');
     uart_putc('\n');
     uart_puts("bar(3,4)=");
-    uart_print_int(bar(3, 4));
+    uart_print(bar(3, 4));
     uart_putc('\r');
     uart_putc('\n');
     uart_puts("bar(1,10)=");
-    uart_print_int(bar(1, 10));
+    uart_print(bar(1, 10));
     uart_putc('\r');
     uart_putc('\n');
 }

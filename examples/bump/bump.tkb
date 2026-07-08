@@ -31,6 +31,6 @@ fn app_main() {
     uart_puts("\r\n");
 
     uart_puts("used: ");
-    uart_print_uint(alloc.offset as i32);
+    uart_print(alloc.offset);
     uart_puts(" bytes\r\n");
 }

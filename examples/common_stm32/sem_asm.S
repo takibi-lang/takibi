@@ -9,7 +9,7 @@
    (ldaxr/stlxr) -- ARMv7-M uses plain ldrex/strex plus an explicit dmb
    (data memory barrier), placed after the successful acquire and before
    the release store, per ARM's Cortex-M synchronization-primitives
-   guidance. Same calling convention as examples/common/sem_asm.S: r0 =
+   guidance. Same calling convention as examples/common_qemu/sem_asm.S: r0 =
    pointer to the i32 counter, same retry-loop shape.
 
    sem_wait(s: *int): spins until the counter is positive, decrements it,

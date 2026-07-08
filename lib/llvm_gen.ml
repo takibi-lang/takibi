@@ -19,6 +19,7 @@ let functions   : (string, lltype * llvalue) Hashtbl.t = Hashtbl.create 16
 let func_ret_ast_types : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 16
 (* Stores the parameter AST types for each function (needed for function-as-value) *)
 let func_param_ast_types : (string, Ast.type_expr list) Hashtbl.t = Hashtbl.create 16
+let current_program_types : Types.program_types option ref = ref None
 (* Struct type registry: name -> LLVM struct lltype *)
 let struct_lltypes : (string, lltype) Hashtbl.t = Hashtbl.create 8
 (* Struct field registry: name -> ordered [(field_name, field_ast_type)] *)
@@ -105,7 +106,7 @@ let di_file_for (dib : Llvm_debuginfo.lldibuilder) (filename : string) : Llvm.ll
   | None ->
       (* Every DIFile's directory must be absolute. DWARF resolves a *relative*
          directory by joining it onto the DICompileUnit's own (single) comp_dir,
-         so two files in different relative directories -- e.g. examples/common/uart.tkb
+         so two files in different relative directories -- e.g. examples/common_qemu/uart.tkb
          and examples/fizzbuzz/fizzbuzz.tkb -- would otherwise get concatenated into
          one bogus path (observed: "examples/common/examples/fizzbuzz/fizzbuzz.tkb")
          by addr2line/llvm-dwarfdump. Making every directory absolute sidesteps
@@ -908,6 +909,26 @@ let resolve_ret_ast (pt : Types.program_types option) fname ty_opt =
       match Types.StringMap.find_opt fname pt.Types.functions with
       | None    -> fallback
       | Some fi -> fi.Types.ret_type
+
+let function_key (pt : Types.program_types option) (fdef : Ast.func) =
+  match pt with
+  | None -> fdef.name
+  | Some pt ->
+      let declared = List.map snd fdef.params in
+      let rec abi_type = function TypeBorrow t -> abi_type t | t -> t in
+      let matches _ fi =
+        List.length declared = List.length fi.Types.param_types &&
+        List.for_all2 (fun d (_, actual) -> match d with
+          | Some t -> abi_type t = actual | None -> true) declared fi.Types.param_types
+      in
+      let candidates = Types.StringMap.bindings pt.Types.functions
+        |> List.filter (fun (key, fi) ->
+             (key = fdef.name || String.starts_with ~prefix:("_TK_" ^ fdef.name ^ "__") key)
+             && matches key fi)
+      in
+      match candidates with
+      | [(key, _)] -> key
+      | _ -> fdef.name
 
 (* -- Runtime trap checks -------------------------------------------------- *)
 (* Branch to llvm.trap when [bad] is true, then continue at a fresh block.
@@ -2052,9 +2073,15 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (ret_ty, build_select cmp av bv "mm_res" builder)
 
   | Call (fname, args) ->
-      (match Hashtbl.find_opt functions fname with
+      let direct_name = match !current_program_types with
+        | Some pt -> Option.value
+            (Types.StringMap.find_opt (Types.loc_key e.loc) pt.Types.call_targets)
+            ~default:fname
+        | None -> fname
+      in
+      (match Hashtbl.find_opt functions direct_name with
        | Some (ft, callee) ->
-           let param_asts = match Hashtbl.find_opt func_param_ast_types fname with
+           let param_asts = match Hashtbl.find_opt func_param_ast_types direct_name with
              | Some ps -> ps | None -> []
            in
            let arg_vals =
@@ -2067,7 +2094,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let ret_lty = return_type ft in
            let call_name = if ret_lty = void_type context then "" else "calltmp" in
            let v = build_call ft callee arg_vals call_name builder in
-           let ast_ret = match Hashtbl.find_opt func_ret_ast_types fname with
+           let ast_ret = match Hashtbl.find_opt func_ret_ast_types direct_name with
              | Some t -> t | None -> TypeI32
            in
            (ast_ret, v)
@@ -2105,24 +2132,25 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
 (* -- Function codegen ---------------------------------------------------- *)
 
 let gen_func ?prog_types fdef =
-  let res name ty_opt = resolve_local_ast prog_types fdef.name name ty_opt in
+  let key = function_key prog_types fdef in
+  let res name ty_opt = resolve_local_ast prog_types key name ty_opt in
 
   let (_, f) =
-    match Hashtbl.find_opt functions fdef.name with
+    match Hashtbl.find_opt functions key with
     | Some x -> x
     | None ->
         let param_ast = List.map (fun (n, t) -> res n t) fdef.params in
         let param_lls = List.map ltype_of_ast param_ast |> Array.of_list in
-        let ret_ast   = resolve_ret_ast prog_types fdef.name fdef.ret_type in
+        let ret_ast   = resolve_ret_ast prog_types key fdef.ret_type in
         let ret_ll    = ltype_of_ret_ast ret_ast in
         let ft        = function_type ret_ll param_lls in
-        let f         = declare_function fdef.name ft the_module in
-        Hashtbl.add functions fdef.name (ft, f);
-        Hashtbl.add func_ret_ast_types fdef.name ret_ast;
+        let f         = declare_function key ft the_module in
+        Hashtbl.add functions key (ft, f);
+        Hashtbl.add func_ret_ast_types key ret_ast;
         (ft, f)
   in
 
-  let ret_ast = match Hashtbl.find_opt func_ret_ast_types fdef.name with
+  let ret_ast = match Hashtbl.find_opt func_ret_ast_types key with
     | Some t -> t
     | None   -> TypeI32
   in
@@ -2150,7 +2178,7 @@ let gen_func ?prog_types fdef =
       in
       let sp =
         Llvm_debuginfo.dibuild_create_function dib
-          ~scope:cu ~name:fdef.name ~linkage_name:fdef.name ~file ~line_no:line
+          ~scope:cu ~name:fdef.name ~linkage_name:key ~file ~line_no:line
           ~ty:subroutine_ty ~is_local_to_unit:false ~is_definition:true
           ~scope_line:line ~flags:(Llvm_debuginfo.diflags_get Llvm_debuginfo.DIFlag.Zero)
           ~is_optimized:true
@@ -2878,20 +2906,22 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable =
   Hashtbl.add global_vars name (ast_ty, gvar)
 
 let declare_func ?prog_types fdef =
-  if not (Hashtbl.mem functions fdef.name) then begin
-    let res name ty_opt = resolve_local_ast prog_types fdef.name name ty_opt in
+  let key = function_key prog_types fdef in
+  if not (Hashtbl.mem functions key) then begin
+    let res name ty_opt = resolve_local_ast prog_types key name ty_opt in
     let param_ast = List.map (fun (n, t) -> res n t) fdef.params in
     let param_lls = List.map ltype_of_ast param_ast |> Array.of_list in
-    let ret_ast   = resolve_ret_ast prog_types fdef.name fdef.ret_type in
+    let ret_ast   = resolve_ret_ast prog_types key fdef.ret_type in
     let ret_ll    = ltype_of_ret_ast ret_ast in
     let ft        = function_type ret_ll param_lls in
-    let f         = declare_function fdef.name ft the_module in
-    Hashtbl.add functions fdef.name (ft, f);
-    Hashtbl.add func_ret_ast_types fdef.name ret_ast;
-    Hashtbl.add func_param_ast_types fdef.name param_ast
+    let f         = declare_function key ft the_module in
+    Hashtbl.add functions key (ft, f);
+    Hashtbl.add func_ret_ast_types key ret_ast;
+    Hashtbl.add func_param_ast_types key param_ast
   end
 
 let gen_program ?prog_types prog =
+  current_program_types := prog_types;
   trap_sites := [];  (* fresh per compilation (and per unit test) *)
   unsafe_depth := 0;
   (* Pass 0: register struct and enum types -- must precede ltype_of_ast for TypeNamed *)

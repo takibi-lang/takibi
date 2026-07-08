@@ -1,6 +1,6 @@
 // STM32F746G-DISCOVERY UART HAL, over the ST-LINK/V2-1 virtual COM port.
 // The board wires USART1 (TX = PA9, RX = PB7) to the ST-LINK's VCP.
-// Same public signatures as examples/common/uart.tkb (uart_putc/uart_puts and
+// Same public signatures as examples/common_qemu/uart.tkb (uart_putc/uart_puts and
 // platform hooks) so application files stay unchanged across the QEMU and
 // STM32 HALs. QEMU's platform hooks are currently empty because its PL011
 // model needs no setup.
@@ -23,8 +23,20 @@ fn uart_init() {
     let rcc_ahb1enr: *io u32 = 0x40023830; // RCC_AHB1ENR
     let rcc_apb2enr: *io u32 = 0x40023844; // RCC_APB2ENR
     let nvic_iser1: *io u32 = 0xE000E104;  // IRQ37 USART1
+    let nvic_icer1: *io u32 = 0xE000E184;
+    let nvic_icpr1: *io u32 = 0xE000E284;
+    let usart1_cr1: *io u32 = 0x40011000;
     *rcc_ahb1enr = *rcc_ahb1enr | (1 | (1 << 1)); // GPIOAEN | GPIOBEN
     *rcc_apb2enr = *rcc_apb2enr | (1 << 4);       // USART1EN
+
+    // Quiesce the peripheral before PA9 is switched to AF7.  A debugger
+    // reset does not give software a useful ordering guarantee between the
+    // old USART/NVIC state and GPIO reconfiguration; exposing AF7 first can
+    // put a transient byte stream (observed as repeatable 0xff noise on the
+    // ST-LINK VCP) on TX before BRR/CR1 have their new values.
+    *nvic_icer1 = 1 << 5;
+    *usart1_cr1 = 0;
+    *nvic_icpr1 = 1 << 5;
 
     // PA9 -> AF7 (USART1_TX): 2-bit MODER field = 0b10 (alternate function)
     let gpioa_moder: *io u32 = 0x40020000;
@@ -44,12 +56,12 @@ fn uart_init() {
     // mantissa/fraction packing needed.
     // BRR = round(16_000_000 / 115200) = 139 = 0x8B
     let usart1_brr: *io u32 = 0x4001100C;
-    let usart1_cr1: *io u32 = 0x40011000;
     uart_tx_head = 0;
     uart_tx_tail = 0;
     uart_rx_handler = uart_rx_discard;
     *usart1_brr = 139;
     *usart1_cr1 = 1 | (1 << 2) | (1 << 3); // UE | RE | TE
+    *nvic_icpr1 = 1 << 5;
     *nvic_iser1 = *nvic_iser1 | (1 << 5);
 }
 
@@ -75,7 +87,7 @@ fn uart_puts(s: *u8) {
 
 // Reads one byte directly, no polling -- only valid when called from an
 // RX-interrupt handler that already knows a byte is waiting (examples/irq/
-// irq.tkb). Shares its name with examples/common/uart.tkb's version, which
+// irq.tkb). Shares its name with examples/common_qemu/uart.tkb's version, which
 // reads a different register (PL011 DR, not USART1 RDR), so a shared ISR
 // body can call this uniformly on either target. Reading RDR also clears
 // USART1's RXNE flag -- that IS the interrupt acknowledgment on this

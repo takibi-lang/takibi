@@ -15,9 +15,15 @@
 set -euo pipefail
 
 FLASH_ADDR=0x08000000
+: "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run 'make hwcheck-net' or set it explicitly}"
+SERIAL_DEV="$STM32_SERIAL_DEV"
 PASS=0
 FAIL=0
 FAILED_TESTS=()
+
+# shellcheck source=scripts/stm32_hw_claim.sh
+source "$(dirname "$0")/stm32_hw_claim.sh"
+claim_stm32_hardware "$SERIAL_DEV"
 
 if [ -t 1 ]; then
     GRN='\033[32m' RED='\033[31m' RST='\033[0m'
@@ -42,7 +48,7 @@ run_net_hw_test() {
     local tmp_flash_log
     tmp_flash_log=$(mktemp)
 
-    if ! st-flash write "$bin" "$FLASH_ADDR" > "$tmp_flash_log" 2>&1; then
+    if ! st-flash --connect-under-reset write "$bin" "$FLASH_ADDR" > "$tmp_flash_log" 2>&1; then
         printf "${RED}FAIL${RST}  %s  (st-flash write failed)\n" "$name"
         sed 's/^/       /' "$tmp_flash_log"
         FAIL=$((FAIL + 1))
@@ -50,7 +56,14 @@ run_net_hw_test() {
         rm -f "$tmp_flash_log"
         return
     fi
-    st-flash reset > /dev/null 2>&1
+    if ! st-flash --connect-under-reset reset > "$tmp_flash_log" 2>&1; then
+        printf "${RED}FAIL${RST}  %s  (st-flash reset failed)\n" "$name"
+        sed 's/^/       /' "$tmp_flash_log"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+        rm -f "$tmp_flash_log"
+        return
+    fi
 
     echo "-- $name --"
     if sudo python3 "$test_script"; then

@@ -110,17 +110,32 @@ def build_frame(client_mac: bytes, client_port: int, seq: int, ack: int, flags: 
 
 
 def recv_reply(sock: socket.socket, sent_frame: bytes, timeout: float):
-    """Reads until a genuine reply arrives (skipping our own outgoing frame,
-    which AF_PACKET can loop back to us) or timeout elapses. Returns None on
-    timeout."""
+    """Reads until a genuine server-to-client reply arrives or timeout.
+
+    AF_PACKET can report our outgoing frame with padding or other link-layer
+    differences, so byte-for-byte comparison with ``sent_frame`` is not a
+    sufficient direction filter.  A bound raw socket can also see unrelated
+    IPv4 traffic on the interface.  Filter both explicitly before handing a
+    frame to the protocol-specific checks below.
+    """
     deadline = time.monotonic() + timeout
+    client_mac = sent_frame[6:12]
     while time.monotonic() < deadline:
         sock.settimeout(max(deadline - time.monotonic(), 0.001))
         try:
-            reply = sock.recv(2000)
+            reply, addr = sock.recvfrom(2000)
         except socket.timeout:
             return None
-        if reply[: len(sent_frame)] == sent_frame:
+        # sockaddr_ll tuple: (ifname, proto, pkttype, hatype, addr).
+        # PACKET_OUTGOING is 4 on Linux; getattr keeps this usable on Python
+        # builds that do not expose the symbolic constant.
+        if len(addr) >= 3 and addr[2] == getattr(socket, "PACKET_OUTGOING", 4):
+            continue
+        if len(reply) < 14:
+            continue
+        if reply[0:6] != client_mac or reply[6:12] != SERVER_MAC:
+            continue
+        if reply[12:14] != bytes([0x08, 0x00]):
             continue
         return reply
     return None
