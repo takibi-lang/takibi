@@ -103,7 +103,7 @@ fn task_consumer() {
     for i: i32 in 0..<5 {
         let v: i32 = mq_recv();
         uart_puts("recv: ");
-        print_uint(v);
+        uart_print(v);
         uart_puts("\r\n");
     }
     consumer_done = 1;

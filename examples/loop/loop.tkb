@@ -12,7 +12,7 @@ fn app_main() -> i32 {
     // Part 1: find first multiple of 3 in 0..<10 using break.
     for i: i32 in 0..<10 {
         if (i % 3 == 0 && i != 0) {
-            uart_println_int(i);
+            uart_println(i);
             break;
         }
     }
@@ -22,7 +22,7 @@ fn app_main() -> i32 {
         if (i % 2 != 0) {
             continue;
         }
-        uart_println_int(i);
+        uart_println(i);
     }
 
     return 0;

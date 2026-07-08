@@ -33,27 +33,27 @@ struct packed PackedOffsetHdr {
 
 fn app_main() {
     uart_puts("sizeof(i32)         = ");
-    uart_print_uint(sizeof(i32) as i32);
+    uart_print(sizeof(i32));
     uart_puts("\r\n");
 
     uart_puts("sizeof(Hdr)         = ");
-    uart_print_uint(sizeof(Hdr) as i32);
+    uart_print(sizeof(Hdr));
     uart_puts("\r\n");
 
     uart_puts("sizeof(PackedHdr)   = ");
-    uart_print_uint(sizeof(PackedHdr) as i32);
+    uart_print(sizeof(PackedHdr));
     uart_puts("\r\n");
 
     uart_puts("sizeof(Aligned16)   = ");
-    uart_print_uint(sizeof(Aligned16) as i32);
+    uart_print(sizeof(Aligned16));
     uart_puts("\r\n");
 
     uart_puts("offsetof(OffsetHdr, value)       = ");
-    uart_print_uint(offsetof(OffsetHdr, value) as i32);
+    uart_print(offsetof(OffsetHdr, value));
     uart_puts("\r\n");
 
     uart_puts("offsetof(PackedOffsetHdr, value) = ");
-    uart_print_uint(offsetof(PackedOffsetHdr, value) as i32);
+    uart_print(offsetof(PackedOffsetHdr, value));
     uart_puts("\r\n");
 
     // A realistic usage: guarding a length check before parsing a header.

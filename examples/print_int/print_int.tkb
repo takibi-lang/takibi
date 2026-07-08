@@ -2,19 +2,19 @@
 
 fn app_main() {
     uart_puts("=== uart_print_int test ===\r\n");
-    uart_print_int(0);
+    uart_print(0 as i32);
     uart_putc('\r');
     uart_putc('\n');
-    uart_print_int(42);
+    uart_print(42 as i32);
     uart_putc('\r');
     uart_putc('\n');
-    uart_print_int(12345);
+    uart_print(12345 as i32);
     uart_putc('\r');
     uart_putc('\n');
-    uart_print_int(-7);
+    uart_print(-7 as i32);
     uart_putc('\r');
     uart_putc('\n');
-    uart_print_int(-999);
+    uart_print(-999 as i32);
     uart_putc('\r');
     uart_putc('\n');
     let b: bool = true;

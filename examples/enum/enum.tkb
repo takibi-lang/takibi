@@ -65,7 +65,7 @@ fn app_main() {
     uart_puts(direction_name(d));
 
     let raw: u8 = c as u8;
-    uart_print_uint(raw as i32);
+    uart_print(raw);
     uart_puts("\r\n");
 
     let c2: Color = raw as Color;

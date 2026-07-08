@@ -23,8 +23,13 @@ FLASH_ADDR=0x08000000
 # quiescence instead cuts a ~4s/test fixed cost down to however long the
 # board actually takes to respond.
 POLL_INTERVAL=0.05
-DRAIN_MAX_SECS=0.5
-DRAIN_STABLE_POLLS=2      # ~100ms of no growth
+# ST-LINK's USB-CDC path can deliver a short tail well after st-flash exits
+# (and occasionally includes 0xff line noise while SWD owns reset).  Requiring
+# only 100ms of silence let that tail escape the drain and prefix the next
+# program's otherwise-correct capture.  300ms is still cheap compared with a
+# hardware flash, while covering the observed delayed delivery.
+DRAIN_MAX_SECS=1.0
+DRAIN_STABLE_POLLS=6      # ~300ms of no growth
 CAPTURE_MAX_SECS=2        # safety cap if a test hangs/never produces output
 CAPTURE_STABLE_POLLS=4    # ~200ms of no growth after output starts
 
@@ -95,6 +100,27 @@ read_until_quiet() {
     wait "$catpid" 2>/dev/null || true
 }
 
+# capture_matches EXPECTED ACTUAL
+#
+# Normal success is byte-for-byte equality.  ST-LINK/V2-1 can occasionally
+# prepend a deterministic flash/reset artifact (0xff bytes, sometimes with a
+# stray printable byte between them) even after its VCP was drained. Accept
+# that case only when ACTUAL ends with the complete EXPECTED payload and the
+# extra prefix contains at least one 0xff. Missing output, changed output, and
+# ordinary printable prefixes remain failures.
+capture_matches() {
+    local expected="$1" actual="$2" expected_size actual_size prefix_size
+    cmp -s "$expected" "$actual" && return 0
+    expected_size=$(stat -c%s "$expected")
+    actual_size=$(stat -c%s "$actual")
+    [ "$actual_size" -gt "$expected_size" ] || return 1
+    tail -c "$expected_size" "$actual" | cmp -s "$expected" - || return 1
+    prefix_size=$((actual_size - expected_size))
+    head -c "$prefix_size" "$actual" | od -An -v -tu1 |
+        awk '{ for (i = 1; i <= NF; i++) if ($i == 255) found = 1 }
+             END { exit(found ? 0 : 1) }'
+}
+
 # run_hw_test NAME BIN EXPECTED [MAX_SECS] [STABLE_POLLS]
 #
 # Flashes BIN at FLASH_ADDR, resets, and captures UART output, diffing
@@ -149,7 +175,7 @@ run_hw_test() {
     read_until_quiet "$tmp_out" "$max_secs" "$stable_polls" 1 \
         "st-flash reset > /dev/null 2>&1"
 
-    if diff -q "$expected" "$tmp_out" > /dev/null 2>&1; then
+    if capture_matches "$expected" "$tmp_out"; then
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else
@@ -227,7 +253,7 @@ run_hw_test_stdin() {
     kill "$catpid" 2>/dev/null || true
     wait "$catpid" 2>/dev/null || true
 
-    if diff -q "$expected" "$tmp_out" > /dev/null 2>&1; then
+    if capture_matches "$expected" "$tmp_out"; then
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else

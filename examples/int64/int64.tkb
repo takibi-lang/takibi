@@ -63,5 +63,5 @@ fn app_main() {
     print_u64_hex(0xFFFFFFFFFFFFFFFF);
 
     uart_puts("negative : ");
-    uart_println_int(-1);
+    uart_println(-1 as i32);
 }

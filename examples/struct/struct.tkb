@@ -32,24 +32,24 @@ let mut points: [Point; 2];
 
 fn app_main() {
     uart_puts("global sum: ");
-    print_uint(point_sum(&g));
+    uart_print(point_sum(&g));
     uart_puts("\r\n");
 
     let mut p: Point = {3, 4};
     uart_puts("local sum: ");
-    print_uint(point_sum(&p));
+    uart_print(point_sum(&p));
     uart_puts("\r\n");
 
     point_swap(&p);
     uart_puts("after swap x: ");
-    print_uint(p.x);
+    uart_print(p.x);
     uart_puts(" y: ");
-    print_uint(p.y);
+    uart_print(p.y);
     uart_puts("\r\n");
 
     let mut r: Rect = {0, 1, 5, 6};
     uart_puts("rect area: ");
-    print_uint(rect_area(&r));
+    uart_print(rect_area(&r));
     uart_puts("\r\n");
 
     points[0].x = 7;
@@ -58,8 +58,8 @@ fn app_main() {
     points[1].y = 5;
     points[1].x += 5;
     uart_puts("indexed sums: ");
-    print_uint(points[0].x + points[0].y);
+    uart_print(points[0].x + points[0].y);
     uart_puts(" ");
-    print_uint(points[1].x + points[1].y);
+    uart_print(points[1].x + points[1].y);
     uart_puts("\r\n");
 }

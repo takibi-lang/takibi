@@ -30,13 +30,13 @@
 // forbid_trap_tcp_parse).
 
 fn print_ip(p: [u8; 4..]) {
-    uart_print_uint(p[0] as i32);
+    uart_print(p[0]);
     uart_putc('.');
-    uart_print_uint(p[1] as i32);
+    uart_print(p[1]);
     uart_putc('.');
-    uart_print_uint(p[2] as i32);
+    uart_print(p[2]);
     uart_putc('.');
-    uart_print_uint(p[3] as i32);
+    uart_print(p[3]);
 }
 
 fn print_tcp_flags(flags: u8) {
@@ -107,13 +107,13 @@ fn parse_tcp(ip: [u8; 40..], ihl: {20..<21 as u16}) {
     let ip_total_len: u16 = read_u16be(ip[2..<4]) as u16;
 
     uart_puts("TCP segment:\r\n");
-    uart_puts("  src_port:    "); uart_println_uint(src_port as i32);
-    uart_puts("  dst_port:    "); uart_println_uint(dst_port as i32);
+    uart_puts("  src_port:    "); uart_println(src_port);
+    uart_puts("  dst_port:    "); uart_println(dst_port);
     uart_puts("  seq:         "); uart_println_hex(seq as i32);
     uart_puts("  ack:         "); uart_println_hex(ack as i32);
-    uart_puts("  data_offset: "); uart_println_uint(data_offset as i32);
+    uart_puts("  data_offset: "); uart_println(data_offset);
     uart_puts("  flags:       "); print_tcp_flags(flags); uart_puts("\r\n");
-    uart_puts("  window:      "); uart_println_uint(window as i32);
+    uart_puts("  window:      "); uart_println(window);
     uart_puts("  src_ip:      "); print_ip(ip[12..<16]); uart_puts("\r\n");
     uart_puts("  dst_ip:      "); print_ip(ip[16..<20]); uart_puts("\r\n");
     uart_puts("  checksum:    ");

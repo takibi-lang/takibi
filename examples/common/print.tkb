@@ -74,10 +74,4 @@ fn uart_print_hex16(n: i32) {
     for i in 0..<4 { uart_print_hex_digit((n >> (12 - i * 4)) & 15); }
 }
 
-// Compatibility names used by existing examples.
-fn print_uint(n: i32) { uart_print_u32_core(n as u32); }
-fn uart_print_uint(n: i32) { uart_print_u32_core(n as u32); }
-fn uart_print_int(n: i32) { uart_print_i32_core(n); }
-fn uart_println_uint(n: i32) { uart_print_uint(n); uart_puts("\r\n"); }
 fn uart_println_hex(n: i32) { uart_print_hex(n); uart_puts("\r\n"); }
-fn uart_println_int(n: i32) { uart_print_int(n); uart_puts("\r\n"); }

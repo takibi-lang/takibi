@@ -93,13 +93,13 @@ fn app_main() {
     while (*pd == 0) {}
     let tc: *i32 = sched.tick_counts;
     uart_puts("main: ");
-    print_uint(tc[0]);
+    uart_print(tc[0]);
     uart_puts(" ticks\r\n");
     uart_puts("task_a: ");
-    print_uint(tc[1]);
+    uart_print(tc[1]);
     uart_puts(" ticks\r\n");
     uart_puts("task_b: ");
-    print_uint(tc[2]);
+    uart_print(tc[2]);
     uart_puts(" ticks\r\n");
     uart_puts("done\r\n");
 }

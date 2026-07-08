@@ -95,7 +95,7 @@ fn app_main() {
     scheduler_disable();
     sched_done = 1;
     uart_puts("shared_count: ");
-    print_uint(shared.count);
+    uart_print(shared.count);
     uart_puts("\r\n");
     uart_puts("done\r\n");
 }
