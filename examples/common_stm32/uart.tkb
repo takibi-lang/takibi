@@ -14,6 +14,36 @@ let mut uart_tx_head: io usize;
 let mut uart_tx_tail: io usize;
 let mut uart_rx_handler: fn() -> void;
 
+// The 4.3" RK043FN48H-CT672B panel is left lit white by default (backlight
+// on, panel enabled) even though nothing in this project ever touches the
+// LTDC peripheral -- presumably however a prior bootloader/factory demo, or
+// the board's external pull resistors, leave GPIOI/GPIOK by the time our
+// firmware starts. LCD_DISP (PI12) and LCD_BL_CTRL (PK3) are independent,
+// manually-controlled GPIOs, NOT wired to LTDC's own enable logic -- ST's
+// official BSP (stm32746g_discovery_lcd.c's BSP_LCD_DisplayOn/Off) just
+// drives these two pins directly, active-high -- so turning the screen off
+// needs no LTDC setup at all, just driving both pins low. Called from
+// platform_init() below so every STM32 example gets this uniformly, with no
+// startup.S/startup_ram.S changes needed on either the Flash or
+// RAM-execution boot path.
+fn lcd_off() {
+    let rcc_ahb1enr: *io u32 = 0x40023830; // RCC_AHB1ENR
+    *rcc_ahb1enr = *rcc_ahb1enr | (1 << 8) | (1 << 10); // GPIOIEN | GPIOKEN
+
+    // PI12 (LCD_DISP): MODER bits [25:24] = 0b01 (output). BSRR's upper
+    // half atomically resets a pin without a read-modify-write on ODR.
+    let gpioi_moder: *io u32 = 0x40022000;
+    let gpioi_bsrr:  *io u32 = 0x40022018;
+    *gpioi_moder = (*gpioi_moder & ~(3 << 24)) | (1 << 24);
+    *gpioi_bsrr = 1 << (12 + 16); // reset PI12
+
+    // PK3 (LCD_BL_CTRL): MODER bits [7:6] = 0b01 (output).
+    let gpiok_moder: *io u32 = 0x40022800;
+    let gpiok_bsrr:  *io u32 = 0x40022818;
+    *gpiok_moder = (*gpiok_moder & ~(3 << 6)) | (1 << 6);
+    *gpiok_bsrr = 1 << (3 + 16); // reset PK3
+}
+
 fn uart_rx_discard() {
     let usart1_rdr: *io u8 = 0x40011024;
     let discarded: u8 = *usart1_rdr;
@@ -148,6 +178,7 @@ fn uart_shutdown() {
 
 // Generic hooks called by examples/common/runtime.tkb's high-level main.
 fn platform_init() {
+    lcd_off();
     uart_init();
 }
 
