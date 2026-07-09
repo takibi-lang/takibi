@@ -307,6 +307,21 @@ size.
   overflow. The old `uart_print_int`/`uart_print_uint` names remain compatibility wrappers.
 - **`isize` (signed pointer-sized integer) is implemented** -- it is the pointer-sized signed integer used for raw
   pointer arithmetic and pointer differences (`ptr - ptr` returns `isize`).
+- **A scoped form of refinement-type inference is implemented (GitHub issue #72)**: a bare `x as <base>` cast (no
+  explicit `{lo..<hi as base}` range) now infers the tightest refined type on its own whenever `x`'s range is
+  already known (via if-narrowing, an exact-match refined parameter, Mul/Add/Sub propagation, etc.) and fits the
+  target base -- e.g. `ihl as usize` behaves exactly like the old `ihl as {20..<21 as usize}` when `ihl` is already
+  `{20..<21 as u16}`. This is deliberately NOT general "never write a refinement type again" inference (that
+  problem is undecidable without SMT-scale machinery even in mature systems like Liquid Haskell/F*, which still
+  require explicit boundary annotations) -- it only ever widens what an already-provable cast can skip restating.
+  Function PARAMETER and RETURN types, and global `let` declarations, are function/module BOUNDARIES and still
+  require an explicit annotation; this was a deliberate scope decision, not a gap (see HISTORY.md's issue #72
+  entry for the audit of examples/'s actual annotation burden that motivated scoping it this way -- roughly half
+  of every explicit refinement-type annotation across `examples/` turned out to be this exact "restate an
+  already-known range across a base change" pattern, and the other half was boundary annotations inference
+  can't help with regardless of implementation effort). A cast whose source range does NOT fit the target base
+  (a genuine narrowing/truncating cast) is unaffected -- falls back to exactly today's plain-unrefined-target
+  behavior, same as before this feature existed.
 - **`sizeof(T)` cannot be used as an array size** (`[T; sizeof(Foo)]`) -- see the `sizeof(T)` section above for why
   (parser-time vs. codegen-time resolution mismatch) and what combining them would require.
 - **Lightweight `use "path/to/file.tkb";` file dependencies are implemented (GitHub issue #55)** -- a `.tkb` file

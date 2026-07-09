@@ -91,7 +91,7 @@ fn print_tcp_flags(flags: u8) {
 // "Explicit-Base {lo..<hi as base}" section for why this file's ihl
 // can't be u8 the way ip_parse.tkb's local ihl is).
 fn parse_tcp(ip: [u8; 40..], ihl: {20..<21 as u16}) {
-    let ihl_idx: usize = ihl as {20..<21 as usize};
+    let ihl_idx: usize = ihl as usize;
     let hdr: [u8; 20..] = ip[ihl_idx..<ihl_idx + 20];
     let src_port: u16 = read_u16be(hdr[0..<2]) as u16;
     let dst_port: u16 = read_u16be(hdr[2..<4]) as u16;
@@ -132,7 +132,7 @@ fn parse_tcp(ip: [u8; 40..], ihl: {20..<21 as u16}) {
     // closes `ip[ihl..<ihl+tcp_len]` outright.
     if (ip_total_len >= ihl && ip_total_len <= 40) {
         let tcp_len: u16 = ip_total_len - ihl;
-        let tcp_len_idx: usize = tcp_len as {0..<21 as usize};
+        let tcp_len_idx: usize = tcp_len as usize;
 
         // TCP checksum covers the pseudo-header (src IP, dst IP, zero
         // byte, protocol, TCP length) followed by the TCP segment itself

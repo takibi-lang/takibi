@@ -3640,3 +3640,159 @@ global declarations refined from `io usize` to
 `takibi` invocation lines), `scripts/run_qemutest.sh` (`run_no_trap_test`
 function and its invocation loop deleted; 7 redundant
 `run_forbid_trap_ok_test` registrations deleted).
+
+### Issue #72: Scoped Refinement-Type-Inference for Bare Casts
+
+The ask was framed as "type inference for refinement types" in general,
+which is a research-scale problem (Liquid Haskell/F*-class systems still
+require explicit function-boundary annotations; full inference of
+refinement types across function boundaries without them is undecidable
+in general, not just hard to implement here). Rather than attempt that,
+this was scoped down the same way issue #55 was (Part A/B split): audit
+the ACTUAL annotation burden in `examples/` first, then implement only
+the piece the data justified.
+
+**The audit** (before writing any inference code): grepped every
+`{lo..<hi as base}` occurrence across `examples/` (86 `.tkb` files total,
+14 containing at least one, 52 real code occurrences after excluding
+comments). Classified into three buckets:
+1. **Function/global boundary declarations** (~16): parameter types,
+   return types, `io`-qualified globals -- e.g. `ihl: {20..<21 as u16}`,
+   repeated identically 8 times across 5 files, and `uart_tx_head`/
+   `uart_tx_tail`'s newly-refined globals from the issue #79 work just
+   above. Left untouched -- these are exactly the boundary annotations no
+   known refinement-type system escapes either.
+2. **Literal-only local `let` annotations** (~6): mostly in dedicated
+   demo/fixture files (`refined.tkb`, the `refined_*_mismatch` compiler-
+   feature fixtures) -- low real burden, mostly pedagogical.
+3. **Bridge casts restating an ALREADY-known range across a base change**
+   (~29, roughly HALF of every occurrence in the whole tree): `ihl as
+   {20..<21 as usize}` (8x, always identical), `len_n as {NN..<1515 as
+   u16}` (3x), `n as {0..<NNN as usize}` (2x), `tcp_len`/`data_off`/
+   `data_len as {...}` (5x), `max(min(x,N),0) as {0..<N+1 as usize}` (2x,
+   eth.tkb/virtio_mmio.tkb), `(doff * 4) as {20..<61 as u16}` (2x,
+   initially assumed to need extra external narrowing beyond what Mul
+   propagation proves -- rechecked by hand and confirmed the u8-based Mul
+   result, {5..<16}*4, already IS exactly {20..<61}; the explicit cast
+   was pure base-conversion after all, no different from the others),
+   plus a few one-offs in `ip_parse.tkb`/`narrow.tkb`/`refined.tkb`/
+   `tcp_parse.tkb`. Every one of these has the same shape: the cast's
+   SOURCE already has a compiler-known range (via if-narrowing, an
+   exact-match refined parameter, or arithmetic propagation), and the
+   only thing the explicit `{lo..<hi as base}` is doing is restating that
+   range in a different base -- a purely mechanical, LOCAL fact the
+   compiler already has in hand, not a boundary/generalization problem.
+
+**Scope decision**: implement inference for bucket 3 only, leave buckets
+1 and 2 exactly as they are today. This is local (never crosses a
+function signature), needs no SMT/constraint solver, and reuses existing
+range-propagation machinery verbatim -- explicitly NOT the general
+"never write a refinement type" goal the issue's title suggested, which
+would have been the same kind of open-ended, YAGNI-violating scope issue
+#55 was split away from.
+
+**Design**: a bare cast `x as <base>` (target_ty syntactically a plain
+integer base name, not an explicit `{lo..<hi as base}`) now infers
+`{lo..<hi as base}` automatically whenever `x`'s current type is already
+`TRefinedInt(lo, hi, _)` and `[lo, hi)` fits `<base>`'s native
+representable range. A cast that does NOT fit (a genuine narrowing/
+truncating cast, e.g. `{0..<1481}` into `u8`) is completely unaffected --
+falls through to exactly today's plain-unrefined-target behavior, silent
+truncation, no error, no change in generated code.
+
+**Implementation touches both passes independently, matching this
+project's established sizeof/offsetof-style "computed twice, must
+agree" discipline** -- confirmed by direct investigation that
+type_inf.ml and llvm_gen.ml are genuinely separate AST walks that do NOT
+share inferred-type state through the AST itself (llvm_gen.ml re-derives
+what it needs, e.g. `narrowing_ctx` is populated entirely inside
+llvm_gen.ml's own walk, never by type_inf.ml), so a fix needed in only
+one pass would silently fail to help (or silently break --forbid-trap
+soundness in) the other:
+- `type_inf.ml`'s `Cast` case (the final `TRefinedInt (lo, hi, _)` arm on
+  `repr src_ty`, inside the existing `None, None` / non-enum branch):
+  when `tgt` (from `of_ast target_ty`) is one of the plain integer base
+  variants (never true when target_ty was already an explicit
+  `TypeRefined`, since then `tgt` is already a `TRefinedInt`, so this
+  never double-wraps), `try unify src_ty tgt` -- reusing `unify`'s
+  existing `TRefinedInt`-into-bare-base subtyping arms as the single
+  source of truth for "does this range fit", rather than re-deriving a
+  second copy of that logic that could drift -- and returns
+  `TRefinedInt (lo, hi, tgt)` on success, or falls back to plain `tgt` on
+  `Unify_error` (an intentional narrowing cast, left exactly as before).
+- `llvm_gen.ml`'s `Cast` case: right after `src_ty` is computed (with its
+  existing `narrowing_ctx` substitution for a bare `Var` source, already
+  needed for the pre-existing explicit-refined-cast path), `target_ty` is
+  rewritten in place -- from a bare `TypeI8..TypeUsize` to
+  `TypeRefined (lo, hi, target_ty)` -- whenever `src_ty` is already
+  `TypeRefined` and the range fits (a small local `fits` predicate,
+  hand-mirrored from types.ml's `unify` subtyping arms with a comment
+  cross-referencing them so a future change to one is easy to notice
+  needs the other updated too). This is the ONLY change needed in
+  llvm_gen.ml: once `target_ty` has this shape, the EXISTING
+  `TypeRefined (lo, hi, _) -> ...` branch (already there for an
+  explicitly-written `{lo..<hi as base}` cast) handles everything else
+  unchanged, including its own "proven -> no runtime check" logic --
+  confirming the rewrite is a pure upstream massage, not a new code path.
+
+**Verified empirically at each step, not just by code review**: a
+standalone if-narrowed bare cast (`buf[v as usize]` with `v` narrowed by
+`if (v >= 0 && v < 8)`) compiles clean under `--forbid-trap` with no
+explicit range; a bare cast whose source has NO known range still
+requires a runtime check under `--forbid-trap` (rejected, as before,
+confirming the feature doesn't invent proofs from nothing); a bare cast
+whose source range doesn't fit the target base (`{0..<1481}` into `u8`)
+still compiles as a plain silent-truncating cast with no explicit range
+needed and no runtime check added (confirming the feature never
+regresses today's narrowing-cast behavior either).
+
+**All ~27 real bridge-cast occurrences in `examples/` were then actually
+rewritten** to the bare form, as the concrete deliverable proving the
+inference works against real code, not just synthetic test snippets:
+`icmp_echo.tkb`, `tcp_echo.tkb`, `http_server.tkb`, `tcp_parse.tkb`,
+`ip_parse.tkb`, `common_stm32/eth.tkb`, `common_qemu/virtio_mmio.tkb`
+all dropped their explicit `{lo..<hi as base}` ranges in favor of `as
+<base>`. `narrow.tkb` and `refined.tkb` (dedicated pedagogical demos
+whose whole point was showing this exact manual-cast idiom) had their
+comments rewritten to explain that the bridge is now free to WRITE, not
+just free to RUN -- while Approach 1's genuinely-boundary annotations
+(`fill_pair(i: {0..<7 as usize}, ...)`) stayed untouched, since those
+demonstrate exactly the case this feature deliberately does not
+automate. `http_server.tkb`/`tcp_echo.tkb` also had a stale inline
+comment corrected: it used to say a plain `as u16` on the Mul-derived
+`doff * 4` "would silently discard the range... reintroducing a trap
+site" -- true before this feature, false after, rewritten to explain
+both states rather than leaving a comment that now reads as flatly
+wrong.
+
+**5 new unit tests** lock in the feature at the codegen level
+(`test/test_takibi.ml`, `expect_trap_sites`): the exact-match-parameter
+bridge, the if-narrowed-value bridge, the Mul-derived-narrower-than-
+native-range bridge (the `doff * 4` case, confirmed by hand-checking the
+arithmetic that {5..<16}(u8) * 4 already IS exactly {20..<61}, not the
+{20..<64} first assumed from a too-hasty read of the file's own old
+comment), and two negative controls (source range doesn't fit the target
+base; source has no known range at all) confirming the feature only ever
+WIDENS what a cast can prove, never invents unsound proofs and never
+silently changes narrowing-cast semantics.
+
+**Verification**: `make clean && make check` (langcheck, 467 unit tests
+-- up from 462, +5 for this feature -- stm32build, all 70 QEMU
+integration/compile-error tests, all under the issue #79 `--forbid-trap`
+-baked-into-every-build regime from immediately before this issue) passes
+with zero regressions, confirming all ~27 rewritten examples still prove
+fully trap-free on both targets with the shorter syntax.
+
+**Issue #72 is considered closed by this work** -- scoped to exactly
+bucket 3 above, per explicit agreement before implementation started;
+buckets 1 and 2 (function-boundary annotations) are a deliberate,
+permanent design boundary, not a follow-up.
+
+**Files**: `lib/type_inf.ml` (`Cast` case, new `TRefinedInt` arm),
+`lib/llvm_gen.ml` (`Cast` case, `target_ty` rewrite before the existing
+dispatch), `test/test_takibi.ml` (5 new codegen tests), `examples/
+icmp_echo/icmp_echo.tkb`, `examples/tcp_echo/tcp_echo.tkb`, `examples/
+http_server/http_server.tkb`, `examples/tcp_parse/tcp_parse.tkb`,
+`examples/ip_parse/ip_parse.tkb`, `examples/common_stm32/eth.tkb`,
+`examples/common_qemu/virtio_mmio.tkb`, `examples/narrow/narrow.tkb`,
+`examples/refined/refined.tkb` (comments + bridge-cast rewrites).

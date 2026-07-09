@@ -4233,6 +4233,79 @@ let codegen_tests = [
        expect_codegen_error "interrupt event wait/notify is not implemented"
          "fn riscv_event_wait_is_rejected() { interrupt_wait(); }" ());
 
+  (* GitHub issue #72: a BARE cast (`x as usize`, not the explicit
+     `x as {lo..<hi as usize}` form) now infers the tightest refined type
+     on its own whenever the source's range is already known and fits the
+     target base -- see type_inf.ml's Cast case (issue #72 comment) and
+     llvm_gen.ml's matching target_ty rewrite just before its own Cast
+     dispatch. These lock in the examples/ rewrite done alongside this
+     feature (icmp_echo.tkb/tcp_echo.tkb/http_server.tkb/tcp_parse.tkb/
+     ip_parse.tkb/narrow.tkb/refined.tkb/eth.tkb/virtio_mmio.tkb all
+     dropped their explicit ranges in favor of this inference). *)
+  Alcotest.test_case
+    "issue #72: a bare cast from an exact-match refined PARAMETER (the \
+     `ihl: {20..<21 as u16}` idiom) infers {20..<21 as usize} on its own, \
+     proving a subslice with zero trap sites -- same as if `ihl as \
+     {20..<21 as usize}` had been spelled out by hand" `Quick
+    (expect_trap_sites 0
+       "fn refnum72_param_bridge(ip: [u8; 20..], ihl: {20..<21 as u16}) -> []u8 {
+          return ip[0..<ihl as usize];
+        }");
+
+  Alcotest.test_case
+    "issue #72: a bare cast from an if-narrowed i32 (the narrow.tkb/\
+     refined.tkb idiom) infers {0..<8 as usize} on its own, proving an \
+     array index with zero trap sites -- same as if `v as {0..<8 as \
+     usize}` had been spelled out by hand" `Quick
+    (expect_trap_sites 0
+       "fn refnum72_narrow_bridge(v: i32, c: u8) {
+          let mut buf: [u8; 8];
+          if (v >= 0 && v < 8) {
+            buf[v as usize] = c;
+          }
+        }");
+
+  Alcotest.test_case
+    "issue #72: a bare cast from a Mul-derived, narrower-than-native-Mul-\
+     bound refined value (the tcp_echo.tkb/http_server.tkb `(doff * 4) as \
+     u16` idiom, doff: {5..<16 as u8} so doff*4 already proves {20..<61 \
+     as u8}, tighter than doff's own native u8 range) carries that exact \
+     range across the width change with zero trap sites" `Quick
+    (expect_trap_sites 0
+       "fn refnum72_mul_bridge(doff: u8) -> u16 {
+          if (doff >= 5 && doff <= 15) {
+            let tcp_hdr_len: u16 = (doff * 4) as u16;
+            return tcp_hdr_len;
+          }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "issue #72 negative control: a bare cast whose source range does NOT \
+     fit the target base (here {0..<1481} into u8) is left exactly as \
+     before this feature -- a plain unrefined target, no false claim of \
+     safety, no runtime check added or removed by this feature either \
+     way" `Quick
+    (expect_codegen_ok
+       "fn refnum72_no_fit(v: i32) -> u8 {
+          if (v >= 0 && v < 1481) {
+            return v as u8;
+          }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "issue #72 negative control: a bare cast from an UNPROVEN i32 (no \
+     if-narrowing in scope) still requires the same runtime bounds check \
+     it always did -- this feature only widens what an ALREADY-proven \
+     cast can skip restating, it never invents a proof from nothing" `Quick
+    (expect_trap_sites 1
+       "fn refnum72_unproven(v: i32) -> u8 {
+          let mut buf: [u8; 8];
+          buf[v as usize] = 1;
+          return buf[0];
+        }");
+
 ]
 
 (* GitHub issue #55: Use_resolver's DFS closure algorithm, tested against

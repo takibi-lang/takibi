@@ -31,12 +31,14 @@
 // "Explicit-Base {lo..<hi as base}" sections): ihl/total_len/
 // ip_len_in_frame/icmp_len are all u16-based, not i32 -- `len` (from
 // net_rx_len(), a deliberately-unconstrained i32 device-reported length)
-// is bridged into the u16 world with ONE explicit refined cast
-// (`len_n as {42..<1515 as u16}`) right after the length is validated;
-// everything downstream inherits u16-based refined ranges through
-// ordinary Add/Sub/comparison propagation from there, with no further
-// hardcoded-bounds casts needed. The bridge cast's own bounds must be
-// kept in sync with the `len >= 42 && len <= 1514` check just above it --
+// is bridged into the u16 world with ONE bridge cast (`len_n as u16`)
+// right after the length is validated -- GitHub issue #72 lets this cast
+// infer its range from len_n's own already-validated range, rather than
+// restating it by hand as `len_n as {42..<1515 as u16}`. Everything
+// downstream inherits u16-based refined ranges through ordinary
+// Add/Sub/comparison propagation from there, with no further
+// hardcoded-bounds casts needed. The VALIDATION bounds (`len >= 42 &&
+// len <= 1514` just above it) still have to be kept in sync by hand --
 // if they ever drift, --forbid-trap catches it immediately as a
 // reintroduced trap site (a caught regression, not a silent one).
 //
@@ -81,7 +83,7 @@ fn build_echo_reply(eth: [u8; 42..], ihl: {20..<21 as u16}, icmp_seg: [u8; 8..])
     ip[IP_TTL] = 64 as u8;
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
     write_u16be(ip[IP_CHECKSUM..<IP_SRC],
-                inet_checksum(ip[0..<ihl as {20..<21 as usize}]));
+                inet_checksum(ip[0..<ihl as usize]));
 
     // ICMP: type request -> reply, identifier/sequence/data unchanged,
     // recompute checksum (it covers the type byte, which just changed).
@@ -111,7 +113,7 @@ fn app_main() {
             // 14 (eth) + 20 (min IPv4) + 8 (min ICMP) = 42
             if (len >= 42 && len <= 1514) {
                 // Snapshot into an immutable local: the explicit refined
-                // cast below (len_n as {42..<1515 as u16}) needs to see
+                // cast below (len_n as u16) needs to see
                 // len's CURRENT narrowed range, but a function PARAMETER
                 // (always a Mut binding) only exposes its narrowed range
                 // through the separate narrowing_ctx side-table, which a
@@ -136,7 +138,7 @@ fn app_main() {
                         // u16 -- see the header comment. A free coercion
                         // (no runtime check): the source range already
                         // implies the target range exactly.
-                        let len16: u16 = len_n as {42..<1515 as u16};
+                        let len16: u16 = len_n as u16;
                         let total_len:       u16 = read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
                         let ip_len_in_frame: u16 = len16 - 14;
 
@@ -146,7 +148,7 @@ fn app_main() {
                         // size the ICMP checksum read below.
                         if (total_len <= ip_len_in_frame && total_len >= ihl) {
                             if (ip[IP_PROTOCOL] == PROTO_ICMP &&
-                                inet_checksum(ip[0..<ihl as {20..<21 as usize}]) == 0) {
+                                inet_checksum(ip[0..<ihl as usize]) == 0) {
                                 if (slice_eq(ip[IP_DST..<20], OUR_IP as []u8)) {
                                     let icmp_len: u16 = total_len - ihl;
 
@@ -164,7 +166,7 @@ fn app_main() {
                                     // of 0.
                                     if (icmp_len >= 8 && icmp_len <= 1480) {
                                         let icmp_len_idx: usize =
-                                            icmp_len as {8..<1481 as usize};
+                                            icmp_len as usize;
                                         let icmp_seg = frame[34..<34 + icmp_len_idx];
                                         if (icmp_seg[ICMP_TYPE] == ICMP_ECHO_REQUEST &&
                                             icmp_seg[ICMP_CODE] == 0 &&

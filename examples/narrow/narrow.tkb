@@ -8,11 +8,20 @@
 //   the compiler treats v as {0..<8}.
 //   -> Array/slice indexing is usize-only (see CLAUDE.md's "Array/Slice
 //      Indices Must Be usize"), so the narrowed {0..<8} (base i32, since v
-//      itself is i32) needs one explicit `as {0..<8 as usize}` cast to
-//      bridge into the index/parameter's required base -- a FREE coercion
-//      (zero runtime cost) since the bounds already match exactly.
+//      itself is i32) still needs a `v as usize` cast to bridge into the
+//      index/parameter's required base -- but GitHub issue #72 made that
+//      bridge free to WRITE, not just free to RUN: a bare `as usize` (no
+//      explicit range) now infers {0..<8 as usize} automatically from v's
+//      already-narrowed range, exactly as if `as {0..<8 as usize}` had
+//      been spelled out by hand. This is a local inference, not a general
+//      "guess any type" one -- it only ever widens what a cast already
+//      proves (an out-of-range/unrefined source still needs the runtime
+//      check it always needed; see CLAUDE.md's issue #72 entry).
 //   -> v can be passed to write_entry(i: {0..<8 as usize}), which requires
-//      an EXACT (bounds AND base) match, not just a proven-safe range
+//      an EXACT (bounds AND base) match, not just a proven-safe range --
+//      that PARAMETER annotation itself is a function-boundary type and
+//      still has to be written by hand (issue #72 deliberately does not
+//      attempt to infer those; see CLAUDE.md for why).
 //
 // QEMU expected output: ABCDEFGH\r\n
 
@@ -35,9 +44,10 @@ fn print_buf() {
 // The if-condition performs a runtime check; in the then-branch v is narrowed to {0..<8}.
 fn fill_from_unknown(v: i32, c: u8) {
     if (v >= 0 && v < 8) {
-        // Inside here, v is typed as {0..<8}; bridge to usize (free coercion)
-        write_entry(v as {0..<8 as usize}, c);   // pass to refined argument: compiles OK (already narrowed)
-        buf[v as {0..<8 as usize}] = c;          // direct array access: bounds check elided
+        // Inside here, v is typed as {0..<8}; `as usize` infers {0..<8 as
+        // usize} automatically (issue #72) -- no explicit range to restate.
+        write_entry(v as usize, c);   // pass to refined argument: compiles OK (already narrowed)
+        buf[v as usize] = c;          // direct array access: bounds check elided
     }
     // Outside the if-block, v is i32 again (narrowing does not escape the block)
 }

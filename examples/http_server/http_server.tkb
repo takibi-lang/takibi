@@ -123,10 +123,12 @@ let TCP_URGENT:      usize = 18;
 // Indices Must Be usize" section). ihl/total_len/tcp_len/tcp_hdr_len/data_len/data_off
 // below are ALSO u16-based: `len` (net_rx_len()'s deliberately
 // -unconstrained i32 device-reported length) is bridged into u16 with
-// ONE explicit refined cast right after its own range is established,
+// ONE bridge cast (`as u16`) right after its own range is established,
 // and everything downstream inherits u16-based refined ranges through
 // ordinary Add/Sub/comparison propagation from there (same technique as
-// tcp_echo.tkb).
+// tcp_echo.tkb). GitHub issue #72: every bridge cast in this file is
+// written as a bare `as <base>` -- the target range is inferred from the
+// source's own already-proven range rather than restated by hand.
 let TCP_FLAG_FIN: u8 = 0x01;
 let TCP_FLAG_SYN: u8 = 0x02;
 let TCP_FLAG_RST: u8 = 0x04;
@@ -227,7 +229,7 @@ fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
     write_u16be(ip[IP_CHECKSUM..<IP_SRC],
-                inet_checksum(ip[0..<ihl as {20..<21 as usize}]));
+                inet_checksum(ip[0..<ihl as usize]));
 
     let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
     write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
@@ -255,7 +257,7 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
     write_u16be(ip[IP_CHECKSUM..<IP_SRC],
-                inet_checksum(ip[0..<ihl as {20..<21 as usize}]));
+                inet_checksum(ip[0..<ihl as usize]));
 
     let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
     write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
@@ -301,7 +303,7 @@ fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
         // refined_v's range), so plain arithmetic on `n` below is fully
         // visible to codegen with no gap.
         let n: i32 = wire_len;
-        let n_idx: usize = n as {0..<701 as usize};
+        let n_idx: usize = n as usize;
 
         slice_copy(eth[0..<6], eth[6..<12]);
         slice_copy(eth[6..<12], our_mac as []u8);
@@ -321,7 +323,7 @@ fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
         write_u16be(ip[IP_TOTAL_LEN..<4], (ihl as i32) + 20 + n);
         write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
         write_u16be(ip[IP_CHECKSUM..<IP_SRC],
-                    inet_checksum(ip[0..<ihl as {20..<21 as usize}]));
+                    inet_checksum(ip[0..<ihl as usize]));
 
         let client_port: u16 = read_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
         write_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
@@ -378,7 +380,7 @@ fn app_main() {
                 // checksum span) is allowed to trust it.
                 //
                 // Snapshot into an immutable local: the explicit refined
-                // cast below (len_n as {54..<1515 as u16}) needs to see
+                // cast below (len_n as u16) needs to see
                 // len's CURRENT narrowed range, but a function PARAMETER
                 // (always Mut) only exposes its narrowed range through
                 // the separate narrowing_ctx side-table, which a bare
@@ -398,13 +400,13 @@ fn app_main() {
                     // the target range exactly). This bound must be kept
                     // in sync with the `len >= 54 && len <= 1514` check
                     // above.
-                    let len16: u16 = len_n as {54..<1515 as u16};
+                    let len16: u16 = len_n as u16;
                     let total_len:       u16 = read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
                     let ip_len_in_frame: u16 = len16 - 14;
 
                     if (total_len <= ip_len_in_frame && total_len >= ihl &&
                         ip[IP_PROTOCOL] == PROTO_TCP &&
-                        inet_checksum(ip[0..<ihl as {20..<21 as usize}]) == 0) {
+                        inet_checksum(ip[0..<ihl as usize]) == 0) {
                         if (slice_eq(ip[IP_DST..<20], our_ip as []u8)) {
                             let tcp:     [u8; 20..] = frame[34..<54];
                             let tcp_len: u16 = total_len - ihl;
@@ -415,8 +417,8 @@ fn app_main() {
                             // TCP's own byte-scale field, never combined
                             // with the ihl/tcp_len chain directly --
                             // genuinely u8 (tcp_hdr_len carries its proven
-                            // range across an explicit refined cast to
-                            // u16 below to match tcp_len).
+                            // range across a bridge cast to u16 below to
+                            // match tcp_len).
                             let doff: u8 = tcp[TCP_DATA_OFFSET] >> 4;
 
                             // doff must be narrowed to {5..<16} BEFORE
@@ -427,19 +429,22 @@ fn app_main() {
                             // pointer-based code's order) would leave it
                             // unrefined and fall back to a runtime check.
                             // `doff * 4` on the narrowed (u8-based) doff
-                            // proves {20..<61 as u8}; the explicit refined
-                            // cast to {20..<61 as u16} carries that EXACT
-                            // proven range across the width change (a free
+                            // proves {20..<61 as u8}; the bridge cast to
+                            // u16 below (GitHub issue #72: bare `as u16`,
+                            // no explicit range) carries that EXACT proven
+                            // range across the width change (a free
                             // coercion, not a runtime check, since the
-                            // bounds match exactly) -- a plain `as u16`
-                            // would have discarded the range entirely
-                            // (Cast to a non-refined-syntax target always
-                            // does), which silently reintroduces a trap
-                            // site at data_off's subslice below (found via
-                            // --forbid-trap while first doing this
-                            // rewrite -- see CLAUDE.md).
+                            // bounds match exactly). Before issue #72, a
+                            // bare `as u16` here silently discarded the
+                            // range (Cast to a non-refined-syntax target
+                            // always did), reintroducing a trap site at
+                            // data_off's subslice below -- found via
+                            // --forbid-trap while first doing this rewrite
+                            // (see CLAUDE.md's issue #72 entry) -- and had
+                            // to be spelled out by hand as `as {20..<61 as
+                            // u16}` until the inference existed.
                             if (tcp_len >= 20 && doff >= 5 && doff <= 15) {
-                            let tcp_hdr_len: u16 = (doff * 4) as {20..<61 as u16};
+                            let tcp_hdr_len: u16 = (doff * 4) as u16;
 
                             if (tcp_len >= tcp_hdr_len) {
                                 let mut pseudo: [u8; 12];
@@ -450,7 +455,7 @@ fn app_main() {
                                 write_u16be(pseudo[10..<12], tcp_len);
                                 let sum: i32 = checksum_add(pseudo as []u8, 0);
                                 let tcp_len_idx: usize =
-                                    tcp_len as {0..<1481 as usize};
+                                    tcp_len as usize;
                                 let tcp_seg = frame[34..<34 + tcp_len_idx];
 
                                 if (checksum_fold(checksum_add(tcp_seg, sum)) == 0) {
@@ -501,7 +506,7 @@ fn app_main() {
                                                     let data_len: u16 = max(tcp_len - tcp_hdr_len, 0);
                                                     let data_off: u16 = 34 + tcp_hdr_len;
                                                     let data_off_idx: usize =
-                                                        data_off as {54..<95 as usize};
+                                                        data_off as usize;
                                                     if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
                                                         conn_rcv_nxt = conn_rcv_nxt + 1;
                                                         build_fin_ack(frame, ihl);

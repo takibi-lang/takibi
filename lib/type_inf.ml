@@ -626,6 +626,33 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                        Printf.sprintf
                          "cannot cast a slice to %s (only `as *T` is allowed)"
                          (to_string tgt))))
+            | TRefinedInt (lo, hi, _) ->
+                (* GitHub issue #72: a BARE cast target (`x as usize`, not the
+                   explicit `x as {lo..<hi as usize}` form) still infers the
+                   tightest possible refined type when x's own range is
+                   already known and fits the target base -- e.g. `ihl as
+                   usize` when ihl: {20..<21 as u16} now behaves exactly like
+                   the old `ihl as {20..<21 as usize}` did, with no explicit
+                   range restated by hand. This only ever WIDENS what the
+                   cast proves (never narrows/weakens): `tgt` is one of the
+                   plain integer base variants here (an explicit TypeRefined
+                   target_ty already produced a TRefinedInt tgt above, so it
+                   never reaches this arm), and unify's existing TRefinedInt
+                   subtyping rule is reused as the single source of truth
+                   for "does this range fit the target base", so this can
+                   never drift from the manual-annotation path's own rules.
+                   A range that does NOT fit (a genuine narrowing/truncating
+                   cast, e.g. a {0..<1481}-typed value cast to u8) falls
+                   through unchanged to today's behavior: a plain unrefined
+                   `tgt`, silently truncating, exactly as before this
+                   feature existed. *)
+                (match tgt with
+                 | TI8 | TI16 | TI32 | TI64
+                 | TU8 | TU16 | TU32 | TU64
+                 | TIsize | TUsize ->
+                     (try unify src_ty tgt; TRefinedInt (lo, hi, tgt)
+                      with Unify_error _ -> tgt)
+                 | _ -> tgt)
             | _ -> tgt)))
 
   | FieldGet (base_expr, fname) ->

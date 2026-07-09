@@ -51,7 +51,7 @@ fn parse_ipv4(pkt: [u8; 20..], len: i32) {
     // packets always have the real IHL == 20 (no options), so clamping to
     // 20 (pkt's full size) never actually truncates anything here.
     let ihl: u8 = min((pkt[0] & 0x0f) * 4, 20);
-    let ihl_idx: usize = ihl as {0..<21 as usize};
+    let ihl_idx: usize = ihl as usize;
     let total_len: u16 = ((pkt[2] as u16) << 8) | (pkt[3] as u16);
     let ttl:      u8 = pkt[8];
     let protocol: u8 = pkt[9];

@@ -351,7 +351,7 @@ fn net_rx_frame(frame: borrow *NetRxCpuOwned) -> [u8; 1514..] {
     // them (see CLAUDE.md's "global let initializers can't constant-fold"
     // limitation), so `QNUM - 1` here would lose the range min() needs.
     // Update this literal if QNUM (declared above) ever changes.
-    let idx: usize = max(min(net_last_rx_desc_idx, 7), 0) as {0..<8 as usize};
+    let idx: usize = max(min(net_last_rx_desc_idx, 7), 0) as usize;
     let offset: usize = idx * RX_BUF_SIZE_USIZE + 10;
     return rx_bufs[offset..<offset + 1514];
 }

@@ -20,9 +20,11 @@
 //   Approach 3: if narrowing (Step 3.5-if)
 //     if (v >= 0 && v < 8) -- converts a runtime check into a type proof.
 //     v itself stays i32 (the point of this demo is narrowing an unknown
-//     -range i32), so buf[v] needs one explicit `as {0..<8 as usize}` cast
-//     to bridge the narrowed range across the base change -- a FREE
-//     coercion (zero runtime cost) since the bounds already match exactly.
+//     -range i32), so buf[v] needs an `as usize` cast to bridge the
+//     narrowed range across the base change -- a FREE coercion (zero
+//     runtime cost) since the bounds already match exactly, and (GitHub
+//     issue #72) the bare `as usize` infers {0..<8 as usize} on its own
+//     from v's already-narrowed range, with no explicit range to restate.
 //
 // QEMU expected output:
 //   ABCDEFGH\r\n  (approach 1)
@@ -58,7 +60,7 @@ fn fill_loop() {
 // --- Approach 3: if narrowing (Step 3.5-if) -------------------------------
 fn fill_cond(v: i32, c: u8) {
     if (v >= 0 && v < 8) {
-        buf[v as {0..<8 as usize}] = c;
+        buf[v as usize] = c;
     }
 }
 

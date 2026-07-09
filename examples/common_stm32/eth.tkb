@@ -409,7 +409,7 @@ fn net_rx_frame(frame: borrow *NetRxCpuOwned) -> [u8; 1514..] {
     // constant-fold" limitation), so a computed bound here would lose the
     // range min() needs. Update this literal if ETH_RX_DESC_COUNT
     // (declared above) ever changes.
-    let idx: usize = max(min(eth_rx_cur, 3), 0) as {0..<4 as usize};
+    let idx: usize = max(min(eth_rx_cur, 3), 0) as usize;
     let offset: usize = idx * ETH_BUF_SIZE_USIZE;
     return eth_rx_bufs[offset..<offset + 1514];
 }

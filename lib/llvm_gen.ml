@@ -1483,6 +1483,35 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                     | Some t -> t | None -> src_ty_raw)
         | _ -> src_ty_raw
       in
+      (* GitHub issue #72: a BARE cast target (`x as usize`, not the
+         explicit `x as {lo..<hi as usize}` form) is upgraded to the exact
+         TypeRefined target type_inf.ml's Cast case now also infers,
+         whenever src_ty is already refined and its range fits the target
+         base's native representable range -- this is what lets the
+         TypeRefined branch below elide the runtime check exactly as it
+         already does for an explicitly-written `{lo..<hi as base}` cast,
+         with no other change needed anywhere in this function. The
+         fits-check below must stay in sync with types.ml's unify
+         TRefinedInt-subtyping arms (same independently-computed-twice
+         discipline this project already uses for sizeof/offsetof -- see
+         llvm_gen.ml's const_type_size/const_field_offset comment). *)
+      let target_ty =
+        match target_ty, src_ty with
+        | (TypeI8|TypeI16|TypeI32|TypeI64|TypeU8|TypeU16|TypeU32|TypeU64
+          |TypeIsize|TypeUsize),
+          TypeRefined (lo, hi, _) ->
+            let fits = match target_ty with
+              | TypeI32 | TypeI64 | TypeIsize      -> true
+              | TypeU8                             -> lo >= 0 && hi <= 256
+              | TypeU16                             -> lo >= 0 && hi <= 65536
+              | TypeU32 | TypeU64 | TypeUsize       -> lo >= 0
+              | TypeI8                              -> lo >= -128   && hi <= 128
+              | TypeI16                             -> lo >= -32768 && hi <= 32768
+              | _                                   -> false
+            in
+            if fits then TypeRefined (lo, hi, target_ty) else target_ty
+        | _ -> target_ty
+      in
       (match target_ty with
        | TypeNamed ename when Hashtbl.mem enum_underlying ename ->
            let ut    = Hashtbl.find enum_underlying ename in
