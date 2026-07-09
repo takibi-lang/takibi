@@ -4022,3 +4022,42 @@ identical wire behavior) passes with zero regressions.
 check), `examples/tcp_echo/tcp_echo.tkb`, `examples/http_server/
 http_server.tkb` (redundant offset-constant blocks deleted),
 `test/test_takibi.ml` (2 new tests).
+
+### Issue #79 Follow-up, Continued Again: One Flat Namespace for Functions and Globals
+
+The third case flagged (deliberately left open) at the end of the two
+fixes above: a global `let` and a `fn` sharing a name (e.g. `let mut foo:
+i32 = 1; fn foo() {}`) also compiled with no error. Discussed with the
+user before fixing rather than assumed: should takibi have separate
+namespaces for functions and variables (as some languages do), or one
+flat namespace? Agreed on one flat namespace, deliberately -- takibi
+already behaves like C here in every other respect (globals are all
+static storage, one flat top-level symbol space), and C itself has no
+separate function/variable namespace either (`int foo; void foo();` is a
+real conflict there too). A genuine module/namespace system is
+explicitly out of scope until (if ever) actually needed -- YAGNI, per
+this file's own top-level design principle -- not designed for
+speculatively now.
+
+**Fix**: `genv`'s fold (already carrying the `seen_globals` duplicate
+check from the entry just above) also checks `StringMap.mem name fenv`
+for each `LetDef` and raises `"'%s' is already defined as a function"`
+if found. This catches BOTH orderings (`let` after `fn`, and `fn` after
+`let`) with the same single check, because `fenv` is fully built (every
+`FuncDef`/`ExternFuncDef` in the whole program processed) before `genv`'s
+fold ever starts -- so by the time any `LetDef` is examined, `fenv`
+already reflects the complete function set regardless of which line
+came first in source order. Confirmed both orderings are rejected with
+two standalone throwaway examples before writing the corresponding unit
+tests, not assumed from reading the fold order alone.
+
+**Verification**: `make clean && make check` (langcheck, 474 unit tests
+-- up from 472, +2 for this fix -- stm32build, all 70 QEMU integration/
+compile-error tests) passes with zero regressions; no existing example
+anywhere in the tree has a function/global name collision, so this was a
+purely latent gap, not something already lurking in `examples/` the way
+the previous two checks in this session's follow-up turned out to be.
+
+**Files**: `lib/type_inf.ml` (`genv` fold, `fenv` cross-check added
+alongside the existing `seen_globals` check), `test/test_takibi.ml` (2
+new tests, one per ordering).

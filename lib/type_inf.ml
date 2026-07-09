@@ -2043,6 +2043,22 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         if Hashtbl.mem seen_globals name then
           raise (TypeError (Lexing.dummy_pos,
             Printf.sprintf "duplicate global '%s'" name));
+        (* Takibi deliberately has ONE flat namespace for every top-level
+           name, functions and globals alike (matching how a `let mut`
+           global and a `fn` would collide as the same linker symbol in
+           C, which has no separate namespace for them either) -- a
+           global `let` sharing a name with an already-defined `fn` is
+           rejected here regardless of which one appears first in source
+           order, since `fenv` (checked via StringMap.mem below) is
+           already fully built by the time this fold runs at all. See
+           HISTORY.md's issue #79 follow-up for the two same-kind checks
+           (function/function, global/global) this one completes; a
+           genuine module/namespace system, if this project ever needs
+           one, is a different and much larger feature -- deliberately
+           not attempted here. *)
+        if StringMap.mem name fenv then
+          raise (TypeError (Lexing.dummy_pos,
+            Printf.sprintf "'%s' is already defined as a function" name));
         Hashtbl.add seen_globals name ();
         StringMap.add name (of_ast_opt ty_opt, is_mutable) m
     | Ast.FuncDef _                -> m

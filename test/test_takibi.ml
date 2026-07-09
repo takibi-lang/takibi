@@ -2537,6 +2537,29 @@ let infer_tests = [
        | exception Types.TypeError (_, msg) ->
            Alcotest.failf "expected this to type-check cleanly, got: %s" msg);
 
+  (* Session follow-up to the two checks above: Takibi deliberately has
+     ONE flat namespace for every top-level name (functions and globals
+     alike), matching how C has no separate namespace for them either --
+     a `let` global and a `fn` sharing a name is rejected regardless of
+     which one appears first in source order (fenv is fully built before
+     genv's fold ever runs, so both orderings are caught by the same
+     check). See HISTORY.md's issue #79 follow-up. *)
+  Alcotest.test_case
+    "a global `let` sharing a name with an already-defined `fn` is \
+     rejected (let AFTER fn)" `Quick
+    (expect_type_error "already defined as a function"
+       "fn ns_collide_a() {}
+        let mut ns_collide_a: i32 = 1;
+        fn use_ns_collide_a() { ns_collide_a = 2; }");
+
+  Alcotest.test_case
+    "a `fn` sharing a name with an already-defined global `let` is \
+     rejected too (fn AFTER let -- the other ordering)" `Quick
+    (expect_type_error "already defined as a function"
+       "let mut ns_collide_b: i32 = 1;
+        fn ns_collide_b() {}
+        fn use_ns_collide_b() { ns_collide_b = 2; }");
+
 ]
 
 (* -- Codegen tests ----------------------------------------------------------

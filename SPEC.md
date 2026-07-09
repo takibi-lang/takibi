@@ -19,7 +19,15 @@ File extension: `.tkb`. Compiler invocation: `takibi <file1.tkb>
 [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features
 <features>] [-g] [--forbid-trap] [--version]`. Multiple `.tkb` files are
 concatenated (flat global namespace) before compilation -- there is no
-module/import system (see "Known Limitations" below).
+module/import system beyond `use` (see "Known Limitations" below).
+
+Functions and globals share this ONE flat namespace, deliberately (like
+C, which has no separate namespace for them either): a global `let` and
+a `fn` sharing a name is a compile error, regardless of which one is
+defined first or which of the two (or more) files it comes from. The
+same applies to two functions with the identical name+parameter-type
+signature (not a valid overload, a duplicate) and two globals sharing a
+name, whether both are in the same file or different files.
 
 ## Design Principle
 
