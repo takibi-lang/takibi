@@ -2,7 +2,8 @@
   "image": "cuihtlauac/ocaml-devcontainer:latest",
   "features": {
     "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {},
-    "ghcr.io/sliekens/devcontainer-features/codex:1": {}
+    "ghcr.io/sliekens/devcontainer-features/codex:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {}
   },
   "customizations": {
     "vscode": {
@@ -28,6 +29,7 @@
   "containerEnv": {
     "LANG": "en_US.UTF-8",
     "LC_ALL": "en_US.UTF-8",
-    "OPAMYES": "true"
+    "OPAMYES": "true",
+    "GH_TOKEN": "${localEnv:GH_READONLY_TOKEN}"
   }
 }
