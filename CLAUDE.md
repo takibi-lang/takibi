@@ -195,9 +195,15 @@ examples/
                      -registration hook (see common_stm32/uart.tkb) has nothing to do here
     print.tkb     -- isize/usize uart_print/uart_println overloads at this target's
                      native 64-bit width (see common/print.tkb above)
-    gic.tkb       -- GicRegs struct, gic_init, gic_enable_timer_ppi, gic_enable_uart_spi,
-                     irq_uart_rx_setup/_unmask (uniform names shared with
-                     common_stm32/nvic.tkb, see the STM32 section below)
+    gic_regs.tkb  -- GicRegs struct + the `gic` global only, split out of gic.tkb
+                     (GitHub issue #79 follow-up) so a shared file needing just the
+                     type (irq.tkb/echo.tkb's dead-on-STM32 irq_dispatch) can `use`
+                     it without also pulling in gic.tkb's functions -- see that
+                     file's header comment for the cross-file duplicate-definition
+                     bug this split fixes
+    gic.tkb       -- `use`s gic_regs.tkb; gic_init, gic_enable_timer_ppi,
+                     gic_enable_uart_spi, irq_uart_rx_setup/_unmask (uniform names
+                     shared with common_stm32/nvic.tkb, see the STM32 section below)
     timer.tkb     -- extern fn timer stubs, setup_task_stack, timer_init (depends on gic.tkb),
                      scheduler_init/_disable/_rearm_tick (uniform names shared with
                      common_stm32/scheduler.tkb, see the STM32 section below)
@@ -301,6 +307,33 @@ size.
   `extern fn` is deliberately not overloadable because its unmangled symbol name is an external ABI contract.
   DWARF records the source name as `name` and the mangled symbol as `linkageName`, so source-level debuggers display
   the original overload name while `nm`/linkers see unique symbols.
+- **Every top-level definition (`fn`, global `let`, `struct`, `opaque struct`, `enum`) shares ONE flat namespace,
+  and any duplicate/cross-kind collision is a compile error (GitHub issue #79 follow-up)**: two functions with the
+  identical name+parameter-signature (not a valid overload), two globals/structs/enums sharing a name, and any
+  cross-kind collision (a `struct` and a `fn`, an `enum` and a global `let`, an `opaque struct` and a concrete
+  `struct`, etc.) are all rejected, regardless of which file(s) they come from or which one is defined first.
+  Implemented as one shared mechanism, `claim_toplevel_name` (a single pass over the whole program, run before
+  `senv`/`eenv`/`fenv`/`genv` exist), not a separate ad-hoc check per kind -- deliberately consolidated after the
+  third of what would have been five near-identical one-off checks. This closes a real gap found while auditing
+  the `use`-based Makefile migration: two DIFFERENT files defining the same function signature used to compile
+  silently (`llvm_gen.ml`'s Pass 1 `declare_func` only registers the first occurrence per key; Pass 2 `gen_func`
+  then unconditionally appends a second, unreachable "entry" block onto that same llvalue for every later
+  occurrence -- valid LLVM IR, so the verifier never complains), with whichever definition happened to come first
+  in file-concatenation order silently winning and the other silently dead-coded. Found in practice:
+  `examples/common_qemu/gic.tkb` and `examples/common_stm32/nvic.tkb` both defining
+  `irq_uart_rx_setup`/`irq_uart_rx_unmask` under the same STM32 build of `examples/irq/irq.tkb`/`examples/echo/
+  echo.tkb` (fixed by splitting the `GicRegs` struct out into `examples/common_qemu/gic_regs.tkb`, `use`d
+  unconditionally, from `gic.tkb`'s actual functions, which only the QEMU build still needs) -- and separately,
+  `examples/tcp_echo/tcp_echo.tkb`/`examples/http_server/http_server.tkb` redeclaring their own hardcoded
+  `IP_TOTAL_LEN`/`TCP_*`/`ARP_*` offset constants, silently redundant with `examples/common/netutil.tkb`'s
+  `offsetof`-based versions of the same names ever since issue #77's refactor added them there (fixed by deleting
+  the redundant blocks). The struct/enum extension itself was purely latent -- no existing example had this
+  collision. See HISTORY.md's issue #79 follow-up entries for the full investigation, including a comparison of
+  how C (separate tag namespace), Rust (separate type/value namespaces), and Zig (one flat namespace per scope,
+  types are ordinary compile-time values -- the closest existing analogue to takibi's own model here) each handle
+  this, discussed with the user before implementing. LOCAL (function-body-scoped) namespacing is explicitly left
+  open/undecided -- moot today since takibi has no local `struct`/`enum`/`fn` definitions, only local `let`; a
+  real module/namespace system is likewise out of scope until actually needed.
 - **Primitive UART decimal printing is overloaded.** `uart_print` and `uart_println` accept `bool` and every signed
   or unsigned primitive integer width, including `isize`/`usize`. Narrow types share 32-bit conversion cores and
   wide types share 64-bit cores; signed minimum values are converted through unsigned subtraction to avoid

@@ -1793,6 +1793,46 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
 let infer_program (prog : Ast.toplevel list) : program_types =
   unsafe_depth := 0;  (* see its comment: fresh per compilation / per unit test *)
   resolved_call_targets := StringMap.empty;
+  (* GitHub issue #79 follow-up: ONE flat namespace for every top-level
+     name, not just functions and globals (the two kinds fixed earlier in
+     this same follow-up) -- struct, opaque struct, and enum names now
+     collide the same way. A single self-contained pass over the whole
+     program, run before senv/eenv/fenv/genv exist, rather than one
+     more scattered ad-hoc Hashtbl bolted onto each of those folds
+     individually: the earlier two fixes each needed their own separate
+     check (a same-file-only guard for functions, a StringMap.mem check
+     against fenv for globals), and finding the struct/enum gap
+     immediately after landing those two was the concrete signal that
+     one shared, exhaustive mechanism is less error-prone than adding a
+     fourth and fifth one-off check the same way. Functions are the one
+     special case: two functions sharing a name is fine on ITS OWN (a
+     valid overload, or a genuine duplicate signature -- both already
+     handled by register_definition/fenv's own signature-aware logic
+     further down); this registry only rejects a function name colliding
+     with a NON-function kind, or two non-function kinds (struct, enum,
+     global) colliding with each other or themselves. `Lexing.dummy_pos`
+     for the same reason noted on the two earlier checks: `Ast.toplevel`
+     carries no location except via `FuncDef`'s own `func.def_loc`. *)
+  let toplevel_names : (string, string) Hashtbl.t = Hashtbl.create 32 in
+  let article_for kind = if kind = "enum" then "an" else "a" in
+  let claim_toplevel_name name kind =
+    match Hashtbl.find_opt toplevel_names name with
+    | Some "function" when kind = "function" -> ()
+    | Some existing ->
+        raise (TypeError (Lexing.dummy_pos,
+          Printf.sprintf "'%s' is already defined as %s %s"
+            name (article_for existing) existing))
+    | None -> Hashtbl.add toplevel_names name kind
+  in
+  List.iter (function
+    | Ast.FuncDef fdef          -> claim_toplevel_name fdef.name "function"
+    | Ast.ExternFuncDef (n, _, _) -> claim_toplevel_name n "function"
+    | Ast.LetDef (n, _, _, _, _)  -> claim_toplevel_name n "global"
+    | Ast.StructDef (n, _, _, _)  -> claim_toplevel_name n "struct"
+    | Ast.OpaqueStructDef (n, _)  -> claim_toplevel_name n "struct"
+    | Ast.EnumDef (n, _, _, _)    -> claim_toplevel_name n "enum"
+    | Ast.UseDef _              -> ()
+  ) prog;
   let opaque_names = List.fold_left (fun names -> function
     | Ast.OpaqueStructDef (name, _) -> StringSet.add name names
     | _ -> names
@@ -2020,46 +2060,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   ) StringMap.empty prog in
   (* Global mutability: plain `let` = immutable compile-time constant, `let mut` = variable.
      Reuses the same tyenv-based mutability check as local variables (Assign/AddrOf).
-     GitHub issue #79 follow-up: two global `let`s sharing a name used to
-     compile silently too -- StringMap.add here just overwrote the earlier
-     binding in genv's own type-checking view, and llvm_gen.ml's
-     `Hashtbl.add global_vars` (also non-overwriting, LLVM auto-renames the
-     second `define_global` call to "name.1" at the IR level) meant the two
-     initializers landed in TWO SEPARATE globals rather than one -- the
-     first one's storage silently orphaned (never read from), the second
-     one silently live under a mangled name, with no verifier error either
-     (both are individually well-formed IR). Same root cause and same fix
-     shape as the FuncDef case just above (register_definition): reject at
-     the point of definition instead of silently keeping only the last one
-     kept. `Ast.LetDef` (like `Ast.ExternFuncDef`) carries no location in
-     the AST -- `toplevel` has no `{ desc; loc }` wrapper the way
-     `expr`/`stmt` do, only `FuncDef` gets one via `func.def_loc` -- so
-     this raises at `Lexing.dummy_pos`, the same convention
-     `ExternFuncDef`'s own "cannot be overloaded" error already uses one
-     line below. *)
-  let seen_globals : (string, unit) Hashtbl.t = Hashtbl.create 32 in
+     GitHub issue #79 follow-up: duplicate/cross-kind global names are
+     already rejected by claim_toplevel_name above (a single pass over
+     the whole program, run before this fold), so this fold itself no
+     longer needs its own duplicate guard -- by the time it runs, every
+     name reaching here is already known unique across the whole
+     program. *)
   let genv = List.fold_left (fun m -> function
     | Ast.LetDef (name, ty_opt, _, _, is_mutable) ->
-        if Hashtbl.mem seen_globals name then
-          raise (TypeError (Lexing.dummy_pos,
-            Printf.sprintf "duplicate global '%s'" name));
-        (* Takibi deliberately has ONE flat namespace for every top-level
-           name, functions and globals alike (matching how a `let mut`
-           global and a `fn` would collide as the same linker symbol in
-           C, which has no separate namespace for them either) -- a
-           global `let` sharing a name with an already-defined `fn` is
-           rejected here regardless of which one appears first in source
-           order, since `fenv` (checked via StringMap.mem below) is
-           already fully built by the time this fold runs at all. See
-           HISTORY.md's issue #79 follow-up for the two same-kind checks
-           (function/function, global/global) this one completes; a
-           genuine module/namespace system, if this project ever needs
-           one, is a different and much larger feature -- deliberately
-           not attempted here. *)
-        if StringMap.mem name fenv then
-          raise (TypeError (Lexing.dummy_pos,
-            Printf.sprintf "'%s' is already defined as a function" name));
-        Hashtbl.add seen_globals name ();
         StringMap.add name (of_ast_opt ty_opt, is_mutable) m
     | Ast.FuncDef _                -> m
     | Ast.ExternFuncDef _          -> m

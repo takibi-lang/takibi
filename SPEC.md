@@ -21,13 +21,24 @@ File extension: `.tkb`. Compiler invocation: `takibi <file1.tkb>
 concatenated (flat global namespace) before compilation -- there is no
 module/import system beyond `use` (see "Known Limitations" below).
 
-Functions and globals share this ONE flat namespace, deliberately (like
-C, which has no separate namespace for them either): a global `let` and
-a `fn` sharing a name is a compile error, regardless of which one is
-defined first or which of the two (or more) files it comes from. The
-same applies to two functions with the identical name+parameter-type
-signature (not a valid overload, a duplicate) and two globals sharing a
-name, whether both are in the same file or different files.
+Every top-level definition -- `fn`, global `let`, `struct`, `opaque
+struct`, and `enum` -- shares this ONE flat namespace, deliberately.
+Unlike C (which has a separate TAG namespace for `struct`/`union`/`enum`,
+reached only via the keyword, e.g. `struct Foo`, distinct from the
+"ordinary identifier" namespace functions/variables/typedefs share) or
+Rust (which has a separate TYPE namespace for struct/enum/trait from the
+VALUE namespace for fn/static/let), takibi's model is closer to Zig's:
+one identifier, one meaning, no keyword needed to disambiguate which
+namespace a bare name refers to. Two top-level definitions sharing a
+name is a compile error regardless of which KIND each one is, which one
+is defined first, or which of the two (or more) files each comes from
+-- `struct Foo {...}` colliding with `fn Foo() {}`, `enum Foo {...}`,
+`opaque struct Foo;`, or `let Foo` are all rejected the same way a
+`struct`/`struct` or `let`/`let` collision is. The one exception:
+`fn`/`fn` sharing a name is fine when the parameter types genuinely
+differ (a valid overload, see "Function Pointers, extern fn, and
+Overloading" below) -- only an identical name+signature pair, or a
+function colliding with a non-function kind, is rejected.
 
 ## Design Principle
 

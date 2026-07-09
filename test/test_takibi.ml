@@ -2519,7 +2519,7 @@ let infer_tests = [
     "duplicate global `let` declarations are rejected (regression for \
      the real tcp_echo.tkb/http_server.tkb redundant-offset-constant bug \
      this check caught -- see HISTORY.md's issue #79 follow-up)" `Quick
-    (expect_type_error "duplicate global"
+    (expect_type_error "already defined as a global"
        "let mut global_dup_counter: i32 = 1;
         let mut global_dup_counter: i32 = 2;
         fn use_global_dup_counter() { global_dup_counter = global_dup_counter + 1; }");
@@ -2541,9 +2541,11 @@ let infer_tests = [
      ONE flat namespace for every top-level name (functions and globals
      alike), matching how C has no separate namespace for them either --
      a `let` global and a `fn` sharing a name is rejected regardless of
-     which one appears first in source order (fenv is fully built before
-     genv's fold ever runs, so both orderings are caught by the same
-     check). See HISTORY.md's issue #79 follow-up. *)
+     which one appears first in source order. The reported "already
+     defined as a <kind>" names whichever kind was seen FIRST in program
+     order (claim_toplevel_name's single linear pass), so which exact
+     message appears depends on ordering even though both orderings are
+     equally rejected. See HISTORY.md's issue #79 follow-up. *)
   Alcotest.test_case
     "a global `let` sharing a name with an already-defined `fn` is \
      rejected (let AFTER fn)" `Quick
@@ -2555,10 +2557,57 @@ let infer_tests = [
   Alcotest.test_case
     "a `fn` sharing a name with an already-defined global `let` is \
      rejected too (fn AFTER let -- the other ordering)" `Quick
-    (expect_type_error "already defined as a function"
+    (expect_type_error "already defined as a global"
        "let mut ns_collide_b: i32 = 1;
         fn ns_collide_b() {}
         fn use_ns_collide_b() { ns_collide_b = 2; }");
+
+  (* GitHub issue #79 follow-up, same session: the struct/enum gap found
+     immediately after the two fixes above, closed by the SAME
+     claim_toplevel_name mechanism rather than two more one-off checks
+     (see infer_program's own header comment for why a shared mechanism
+     was chosen at this point instead). Confirmed with a throwaway
+     example per combination before writing these, not assumed:
+     struct/struct, enum/enum, struct/fn, struct/enum, struct/global,
+     opaque-struct/struct, opaque-struct/fn, enum/fn, enum/global all
+     rejected; a valid function overload and two differently-named
+     structs both still compile clean (not tested standalone here --
+     already covered by existing overload/struct tests elsewhere in this
+     file; these tests only cover the NEW cross-kind combinations). *)
+  Alcotest.test_case "duplicate struct definitions are rejected" `Quick
+    (expect_type_error "already defined as a struct"
+       "struct NsStructDup { x: i32; }
+        struct NsStructDup { y: i32; }
+        fn use_ns_struct_dup() {}");
+
+  Alcotest.test_case "duplicate enum definitions are rejected" `Quick
+    (expect_type_error "already defined as an enum"
+       "enum NsEnumDup: u8 { A; }
+        enum NsEnumDup: u8 { B; }
+        fn use_ns_enum_dup() {}");
+
+  Alcotest.test_case
+    "a struct and a function sharing a name are rejected (cross-kind, \
+     not just same-kind duplicates)" `Quick
+    (expect_type_error "already defined as a struct"
+       "struct NsStructFn { x: i32; }
+        fn NsStructFn() {}
+        fn use_ns_struct_fn() {}");
+
+  Alcotest.test_case
+    "a struct and an enum sharing a name are rejected (cross-kind)" `Quick
+    (expect_type_error "already defined as a struct"
+       "struct NsStructEnum { x: i32; }
+        enum NsStructEnum: u8 { A; }
+        fn use_ns_struct_enum() {}");
+
+  Alcotest.test_case
+    "an opaque struct and a concrete struct sharing a name are rejected \
+     (opaque structs share the struct namespace, not a separate one)" `Quick
+    (expect_type_error "already defined as a struct"
+       "opaque struct NsOpaqueStruct;
+        struct NsOpaqueStruct { x: i32; }
+        fn use_ns_opaque_struct(p: *NsOpaqueStruct) {}");
 
 ]
 

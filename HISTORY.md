@@ -4061,3 +4061,84 @@ the previous two checks in this session's follow-up turned out to be.
 **Files**: `lib/type_inf.ml` (`genv` fold, `fenv` cross-check added
 alongside the existing `seen_globals` check), `test/test_takibi.ml` (2
 new tests, one per ordering).
+
+### Issue #79 Follow-up, Consolidated: `claim_toplevel_name`, One Mechanism for the Whole Family
+
+Immediately after landing the three checks above (function/function,
+global/global, function/global), verified whether the same gap existed
+for `struct`/`enum`/`opaque struct` too -- it did, confirmed empirically
+with throwaway examples for each combination (struct/struct, enum/enum,
+struct/fn) before writing any fix, not assumed from the shape of the
+earlier three bugs. Reported this to the user as a "next session"
+finding; the user asked to close it in the same session instead, and
+confirmed the design direction: ONE flat namespace for every GLOBAL
+definition (matching C, which the project already resembles in every
+other respect -- all globals are static storage, one flat top-level
+symbol space), deliberately leaving how LOCAL (function-body-scoped)
+definitions should be namespaced as an open question -- moot for now,
+since takibi has no local `struct`/`enum`/`fn` definitions today, only
+local `let`/`let mut` bindings.
+
+**Discussed C/Rust/Zig for context before implementing** (user asked
+specifically): C actually has a TAG namespace separate from the
+"ordinary identifier" namespace (`struct Foo` needs the `struct` keyword
+to reach the tag; `typedef struct Foo Foo;` is the common idiom for
+aliasing the tag into the ordinary-identifier namespace so the keyword
+can be dropped) -- takibi does NOT replicate this split; a struct name
+and a function name share the space, no keyword needed to disambiguate.
+Rust has a genuinely separate TYPE namespace (struct/enum/trait/type
+alias/module) from the VALUE namespace (fn/static/const/let), which is
+why `struct Foo; fn Foo() {}` is legal Rust. Zig is the closest existing
+analogue to what was just built here: types are ordinary compile-time
+values bound via the same `const`/`var` mechanism as everything else
+(`const Foo = struct {...};`), so Zig has one flat identifier namespace
+per scope with no type/value split at all -- and, separately but
+relatedly, Zig explicitly DISALLOWS shadowing an outer-scope identifier
+in an inner scope (a deliberate safety choice, not a limitation), unlike
+C/Rust's permissive shadowing.
+
+**Consolidation, not just an N-th one-off check**: rather than bolt a
+fourth and fifth ad-hoc `Hashtbl` onto `senv`'s and `eenv`'s own build
+folds (mirroring how the function and global checks were each added
+separately), the two existing checks (the same-file-only `fenv`
+`register_definition` guard, and `genv`'s own `seen_globals` +
+`StringMap.mem name fenv` check) were replaced with ONE shared mechanism:
+`claim_toplevel_name`, a single `(string, string) Hashtbl.t` mapping
+name to a human-readable kind string ("function"/"global"/"struct"/
+"enum"), populated by ONE self-contained pass over the whole program
+run at the very top of `infer_program`, before `senv`/`eenv`/`fenv`/
+`genv` exist at all. Functions are the one special case threaded through
+it: two functions sharing a name is fine ON ITS OWN (a valid overload,
+or a genuine duplicate signature -- both still handled by
+`register_definition`/`fenv`'s existing signature-aware logic
+unchanged, further down); `claim_toplevel_name` only rejects a function
+name colliding with a NON-function kind, or two non-function kinds
+colliding with each other or themselves. `genv`'s own fold had its now-
+redundant `seen_globals`/`fenv`-membership check removed accordingly --
+every name reaching that fold is already known globally unique by the
+time it runs.
+
+**Opaque structs share the struct namespace, deliberately**: `struct
+Foo {...}` and `opaque struct Foo;` are treated as the same kind
+("struct") for this check, so they collide with each other exactly like
+two concrete structs would -- confirmed with a dedicated test, since
+this project has no forward-declare-then-define pattern for opaque
+structs (they exist specifically for permanently-incomplete types used
+only behind a pointer, never later completed), so there was no
+legitimate use case to preserve by keeping them separate.
+
+**Verification**: `make clean && make check` (langcheck, 479 unit tests
+-- up from 474, +5 for the new struct/enum/cross-kind coverage, 2 of the
+earlier fn/global tests updated in place since their expected message
+text changed from the ad-hoc wording to the new unified "already defined
+as a <kind>" phrasing -- stm32build, all 70 QEMU integration/compile-
+error tests) passes with zero regressions. No existing example anywhere
+in the tree has a struct/enum/opaque-struct name collision (unlike the
+earlier two checks in this follow-up, which both found real bugs in
+`examples/`) -- this one was purely latent.
+
+**Files**: `lib/type_inf.ml` (`claim_toplevel_name` + the single pass at
+the top of `infer_program`; `genv`'s fold simplified back down, its
+redundant checks removed), `test/test_takibi.ml` (2 existing tests'
+expected message text updated, 5 new tests for the struct/enum/cross-
+kind combinations).
