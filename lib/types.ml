@@ -238,7 +238,9 @@ type enum_info = {
 type program_types = {
   globals   : Ast.type_expr StringMap.t;
   functions : func_info StringMap.t;
-  structs   : (string * Ast.type_expr) list StringMap.t;
+  structs   : ((string * Ast.type_expr) list * bool * int option) StringMap.t;
+    (* fields, is_packed, align_bytes -- see lib/type_inf.ml's senv, which
+       this is a direct passthrough of. *)
   enums     : enum_info StringMap.t;
   call_targets : string StringMap.t;
   (* struct name -> ordered field list [(field_name, field_type)] *)

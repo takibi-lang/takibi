@@ -5,8 +5,64 @@ module StringSet = Set.Make (String)
 (* Type environment: immutable map from variable name to (type, is_mutable) *)
 type tyenv = (ty * bool) StringMap.t
 
-(* Struct environment: maps struct name to its ordered field list [(name, ast_type)] *)
-type senv = (string * Ast.type_expr) list StringMap.t
+(* Struct environment: maps struct name to (ordered field list, is_packed,
+   align_bytes) -- is_packed/align_bytes are needed by const_type_size/
+   const_field_offset below (see their comment for why). *)
+type senv = ((string * Ast.type_expr) list * bool * int option) StringMap.t
+
+(* sizeof(T)/offsetof(T, field) are only ever a genuine OCaml-computable
+   compile-time constant here when the layout cannot depend on
+   target-specific DataLayout: fixed-width primitive integers/bool, fixed
+   -size arrays of such, and PACKED structs (with no align(N) -- tail
+   padding is a deliberately deferred extension, not a hard limit; see
+   the GitHub issue #77 fix this was added for) composed entirely of such
+   fields, recursively. Every other type (pointers, usize/isize, enums,
+   non-packed structs, aligned structs) keeps sizeof/offsetof's existing
+   plain TUsize type, unrefined -- exactly the pre-existing behavior,
+   deferring the actual value to codegen's DataLayout lookup as before.
+   This computation is later re-verified against the real DataLayout in
+   lib/llvm_gen.ml (sync rule, like every other type_inf/llvm_gen pair in
+   this project) rather than trusted silently. *)
+let rec const_type_size (senv : senv) (ty : Ast.type_expr) : int option =
+  match ty with
+  | Ast.TypeBool | Ast.TypeU8 | Ast.TypeI8 -> Some 1
+  | Ast.TypeU16 | Ast.TypeI16 -> Some 2
+  | Ast.TypeU32 | Ast.TypeI32 -> Some 4
+  | Ast.TypeU64 | Ast.TypeI64 -> Some 8
+  | Ast.TypeArray (elem, n) ->
+      (match const_type_size senv elem with
+       | Some sz -> Some (sz * n)
+       | None -> None)
+  | Ast.TypeNamed name ->
+      (match StringMap.find_opt name senv with
+       | Some (fields, true, None) ->
+           List.fold_left (fun acc (_, fty) ->
+             match acc, const_type_size senv fty with
+             | Some a, Some b -> Some (a + b)
+             | _ -> None
+           ) (Some 0) fields
+       | _ -> None)
+  | _ -> None
+
+(* Cumulative byte offset of `field` within packed struct `sname`, i.e.
+   const_type_size of every field strictly before it. Tail padding from
+   align(N) is irrelevant here even in principle (it is only ever
+   appended AFTER the last real field -- see lib/llvm_gen.ml's Pass 0
+   comment), but this still requires align_opt = None, matching
+   const_type_size's scope exactly so the two never disagree about which
+   structs are "safe". *)
+let const_field_offset (senv : senv) (sname : string) (field : string) : int option =
+  match StringMap.find_opt sname senv with
+  | Some (fields, true, None) ->
+      let rec go = function
+        | [] -> None
+        | (fname, _) :: _ when fname = field -> Some 0
+        | (_, fty) :: rest ->
+            (match const_type_size senv fty, go rest with
+             | Some a, Some b -> Some (a + b)
+             | _ -> None)
+      in go fields
+  | _ -> None
 
 (* Enum environment: maps enum name to (underlying_ast_type, [(variant_name, value)]) *)
 type eenv = (Ast.type_expr * (string * int) list) StringMap.t
@@ -447,7 +503,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                    fname (to_string bt)))
            in
            let fields = match StringMap.find_opt sname senv with
-             | Some fs -> fs
+             | Some (fs, _, _) -> fs
              | None -> raise (TypeError (e.loc,
                  Printf.sprintf "unknown struct type '%s'" sname))
            in
@@ -587,7 +643,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 fname (to_string bt)))
       in
       let fields = match StringMap.find_opt sname senv with
-        | Some fs -> fs
+        | Some (fs, _, _) -> fs
         | None ->
             raise (TypeError (e.loc,
               Printf.sprintf "unknown struct type '%s'" sname))
@@ -837,24 +893,40 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Ast.TypeNamed name when not (StringMap.mem name senv) && not (StringMap.mem name eenv) ->
            raise (TypeError (e.loc, Printf.sprintf "unknown type '%s' in sizeof" name))
        | _ -> ());
-      TUsize
+      (* GitHub issue #77: when the size is genuinely target-independent
+         (see const_type_size's comment), carry the actual value as a
+         refined singleton range instead of a bare TUsize -- this is what
+         lets it survive being threaded through a `let`/global and still
+         be usable to prove a subslice bound, exactly like any other
+         refined constant already does. Falls back to the original plain
+         TUsize (unrefined, value deferred to codegen) whenever the value
+         isn't computable here, e.g. non-packed or align(N) structs,
+         pointers, usize/isize fields -- no behavior change for those. *)
+      (match const_type_size senv ty with
+       | Some v -> TRefinedInt (v, v + 1, TUsize)
+       | None -> TUsize)
 
   | OffsetOf (ty, field) ->
       (* offsetof is meaningful only for a named struct. Validate both the
          type and field here so source errors do not become codegen errors. *)
-      (match ty with
+      let sname = (match ty with
        | Ast.TypeNamed name ->
            (match StringMap.find_opt name senv with
             | None ->
                 raise (TypeError (e.loc,
                   Printf.sprintf "unknown struct '%s' in offsetof" name))
-            | Some fields when not (List.mem_assoc field fields) ->
+            | Some (fields, _, _) when not (List.mem_assoc field fields) ->
                 raise (TypeError (e.loc,
                   Printf.sprintf "unknown field '%s' in struct '%s'" field name))
-            | Some _ -> ())
+            | Some _ -> name)
        | _ ->
-           raise (TypeError (e.loc, "offsetof requires a named struct type")));
-      TUsize
+           raise (TypeError (e.loc, "offsetof requires a named struct type")))
+      in
+      (* Same GitHub issue #77 fix as SizeOf above -- see const_field_offset's
+         comment for the exact scope (packed, no align(N)). *)
+      (match const_field_offset senv sname field with
+       | Some v -> TRefinedInt (v, v + 1, TUsize)
+       | None -> TUsize)
 
   | StructLit _ ->
       raise (TypeError (e.loc,
@@ -1077,7 +1149,7 @@ let rec check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : unit =
       List.iter (fun ei -> check_expr senv eenv tyenv fenv ei elem_ty) exprs
   | StructLit exprs, TStruct sname ->
       let fields = match StringMap.find_opt sname senv with
-        | Some fs -> fs
+        | Some (fs, _, _) -> fs
         | None -> raise (TypeError (e.loc,
             Printf.sprintf "unknown struct type '%s'" sname))
       in
@@ -1309,7 +1381,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                 fname (to_string bt)))
       in
       let fields = match StringMap.find_opt sname senv with
-        | Some fs -> fs
+        | Some (fs, _, _) -> fs
         | None ->
             raise (TypeError (s.loc,
               Printf.sprintf "unknown struct type '%s'" sname))
@@ -1793,7 +1865,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.OpaqueStructDef _ | Ast.EnumDef _ -> ()) prog;
   (* Pass 0: collect struct and enum definitions *)
   let senv = List.fold_left (fun m -> function
-    | Ast.StructDef (name, fields, _, _) -> StringMap.add name fields m
+    | Ast.StructDef (name, fields, is_packed, align_opt) ->
+        StringMap.add name (fields, is_packed, align_opt) m
     | _ -> m
   ) StringMap.empty prog in
   let eenv = List.fold_left (fun m -> function

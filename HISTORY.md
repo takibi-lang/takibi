@@ -2967,3 +2967,143 @@ comment expanded), `Makefile` (`hwcheck-net`'s prerequisites gained
 `examples/http_server/kernel_stm32.bin`). No changes to
 `examples/common_stm32/eth.tkb`, `startup.S`, or any linker script --
 this entry is purely about test coverage, not behavior.
+
+### GitHub Issue #77: sizeof(...)/offsetof(...) Lost Compile-Time-Constant
+### Status When Threaded Through Lets/Globals Into Subslice Bounds
+
+**The bug, reproduced before touching any code**: `sizeof(T)`/`offsetof(T,
+field)` type-checked and evaluated to correct numeric constants, but using
+one -- directly, or via a `let`/global -- as a slice subslice bound
+(`s[0..<sizeof(Hdr)]`) fell back to a runtime bounds check under
+`--forbid-trap`, even for a packed struct whose layout is fully known at
+compile time. Reproduced with three shapes (direct use, `sizeof` via a
+local `let`, `offsetof` via a local `let`) matching the issue's own
+description exactly -- all three emitted `subslice bounds check remains`
+under `--forbid-trap` before this fix, zero after.
+
+**Root cause, confirmed by reading the code rather than assumed**:
+`SizeOf`/`OffsetOf` in `lib/type_inf.ml` always returned the bare type
+`TUsize` -- never a `TRefinedInt`. Every subslice-bound proof in this
+compiler (`SliceOf`'s `bound_range` in both `type_inf.ml` and
+`llvm_gen.ml`) recognizes a bound as "known" only via `Const_env`
+(bare `IntLit`/named-literal-global) or via the expression's own
+`TRefinedInt`-shaped type -- a bare `TUsize`, no matter how it arrived,
+looks identical to "an arbitrary unconstrained usize value" to that
+machinery, which is exactly "the compiler losing the fact that the value
+is a compile-time constant" the issue describes. This was not a
+propagation bug (nothing was failing to THREAD an already-known fact
+through lets) -- `sizeof`/`offsetof` simply never became refined in the
+first place, at the one place (`type_inf.ml`, before any target/
+DataLayout is set up) that decides the type.
+
+**Why "before any target is set up" is the crux of the fix's scope**:
+`sizeof`/`offsetof`'s true numeric value for an ordinary (non-packed)
+struct depends on target-specific alignment/padding (`Llvm_target.
+DataLayout`), which genuinely is not available during type inference --
+this is exactly why `sizeof(T)` was never usable as an array size either
+(see that section above). But a PACKED struct (`struct packed Name {
+...}`) composed entirely of fixed-width primitive fields (u8/u16/u32/u64/
+i8/i16/i32/i64/bool, or fixed arrays/nested packed structs of such) has a
+size and field offsets that are target-INDEPENDENT by construction --
+packed structs have zero implicit padding, by LLVM's own definition, on
+every target. This is exactly the shape of every real protocol header in
+`examples/common/netutil.tkb` (EthHdr/ArpHdr/Ipv4Hdr/TcpHdr/IcmpHdr, all
+`u8`/`[u8;N]` fields, no `align(N)`) -- the issue's own motivating case.
+
+**The fix**: `lib/type_inf.ml` gained `const_type_size`/
+`const_field_offset`, a pair of pure-OCaml functions computing sizeof/
+offsetof by hand for exactly this restricted shape (packed struct, no
+`align(N)`, every field's size itself computable the same way,
+recursively) and returning `None` for anything else (non-packed structs,
+`align(N)` structs -- tail padding is a deliberately deferred extension,
+not a hard wall, see the function's own comment -- pointers, usize/isize
+fields, enums). `SizeOf`/`OffsetOf` now return `TRefinedInt (v, v+1,
+TUsize)` (a singleton range -- "exactly this value") when computable,
+falling back to the original plain `TUsize` otherwise -- zero behavior
+change for every case this doesn't cover. Once typed as a genuine
+`TRefinedInt`, `sizeof`/`offsetof` values thread through `let`/global
+bindings and interval arithmetic (`+`) automatically, via machinery this
+project already built for every other refined constant -- no changes were
+needed to the subslice-proof logic itself, only to what type `SizeOf`/
+`OffsetOf` report.
+
+**`lib/llvm_gen.ml` needed the identical restriction independently
+implemented (sync rule)**, not because it lacks the real answer -- codegen
+already has genuine `Llvm_target.DataLayout` access and could in
+principle compute a correct value for ANY struct shape -- but because this
+project's `--forbid-trap` guarantee is deliberately type-level, not
+codegen-level (see that section's own "the judgment is deliberately
+type-level, not post-optimizer" note): codegen must never prove a WIDER
+class of bounds than type inference already decided, or the two phases'
+notions of "provable" would silently diverge. `struct_is_packed` (new
+Hashtbl, populated in Pass 0 alongside the existing `struct_fields`/
+`struct_alignments`) and mirror `const_type_size`/`const_field_offset`
+functions (operating purely on `Ast.type_expr`, never touching
+`DataLayout`) reproduce type_inf.ml's decision exactly.
+
+**A genuine soundness cross-check, not defensive boilerplate**: since two
+independent implementations (OCaml hand-arithmetic vs. real DataLayout)
+now both compute a numeric value for the same packed-struct case, `lib/
+llvm_gen.ml`'s `SizeOf`/`OffsetOf` codegen compares them and raises a
+"BUG:" `Error` if they ever disagree, rather than trusting the OCaml
+formula silently. This is the same "codegen re-verifies rather than
+trusts type_inf" discipline `SliceOf` codegen already uses elsewhere in
+this file, applied to a new pair of functions whose correctness this
+change's whole soundness argument depends on -- if the hand-rolled
+byte-size arithmetic ever had a bug (e.g. missing a primitive type case,
+or getting bool's size wrong on some future target), this assertion
+would fail loudly on the very next test exercising a packed struct's
+sizeof, rather than silently proving an unsound bound.
+
+**Verified, not just implemented**:
+- The three originally-reported shapes (direct, sizeof-via-let,
+  offsetof-via-let) now compile clean under `--forbid-trap` (zero trap
+  sites; previously three).
+- Negative controls confirmed the fix does not over-claim: a non-packed
+  struct's `sizeof`, and a packed-but-`align(N)` struct's `sizeof`, both
+  still correctly require a runtime check (one recorded trap site each) --
+  no regression in soundness for the cases deliberately left out of scope.
+- The actual `netutil.tkb` header shapes (`EthHdr`, `Ipv4Hdr`) were tried
+  directly, including the realistic chained pattern the issue's own
+  protocol-example refactor needs (`f[ip_off..<ip_off + sizeof(Ipv4Hdr)]`
+  where `ip_off` is itself `sizeof(EthHdr)`, plus `offsetof(Ipv4Hdr,
+  total_len)` through a `let`) -- compiles clean under `--forbid-trap`.
+- 6 new unit tests (3 type-level, checking the exact inferred type for
+  primitive/packed/non-packed/aligned-packed sizeof and packed offsetof;
+  2 codegen-level, using `expect_trap_sites` to check the issue's exact
+  repro shapes prove with zero trap sites and the non-packed negative
+  control still records one) plus 1 existing test updated (it asserted
+  `sizeof(i32)` -- a primitive, now correctly refined -- had bare
+  `TUsize`; that assertion was the old under-refined behavior this issue
+  is about, not a case this fix needed to preserve). Full `make check`
+  (langcheck, 453 unit tests, stm32build, all 125 qemutest cases) passes
+  with zero regressions.
+
+**Deliberately not addressed** (per this project's usual practice of not
+generalizing ahead of a concrete need, and because widening scope here
+directly trades against the soundness argument's simplicity): `align(N)`
+tail padding (the round-up arithmetic is pure and target-independent in
+principle -- `sz + (n - sz mod n) mod n`, matching `llvm_gen.ml`'s own
+Pass 0 formula exactly -- so this is a natural, low-risk future
+extension, not a hard architectural wall, just not something any current
+example needs); non-packed structs in general (would require type
+inference to know target-specific alignment rules, a materially bigger
+change); enum fields, nested non-packed structs, and pointer/usize/isize
+fields within an otherwise-packed struct (all correctly fall through to
+the existing unrefined `TUsize` today).
+
+**Actually replacing netutil.tkb's hand-maintained offset constants
+(`ETH_HDR_LEN`, `IP_TOTAL_LEN_OFF`, etc.) with `sizeof(...)`/`offsetof
+(...)` expressions using this now-working machinery** is a natural
+follow-up this fix unblocks, but was not done as part of it -- the issue
+itself is scoped to the compiler gap, not the examples refactor that
+surfaced it.
+
+**Files**: `lib/type_inf.ml` (`senv`'s value type extended to `(fields,
+is_packed, align_bytes)`, `const_type_size`/`const_field_offset`,
+`SizeOf`/`OffsetOf` cases), `lib/llvm_gen.ml` (`struct_is_packed`,
+mirror `const_type_size`/`const_field_offset`, `SizeOf`/`OffsetOf`
+cases with the BUG cross-check), `lib/types.ml` (`program_types.structs`'
+type updated to match `senv`'s new shape -- constructed but not
+consumed anywhere else in the codebase today), `test/test_takibi.ml`
+(1 test updated, 6 new).

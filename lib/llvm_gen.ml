@@ -26,6 +26,59 @@ let struct_lltypes : (string, lltype) Hashtbl.t = Hashtbl.create 8
 let struct_fields  : (string, (string * Ast.type_expr) list) Hashtbl.t = Hashtbl.create 8
 (* Struct type-level alignment registry: name -> N (set when struct has align(N)) *)
 let struct_alignments : (string, int) Hashtbl.t = Hashtbl.create 4
+(* Struct packed-ness registry: name -> is_packed. Used only by
+   const_type_size/const_field_offset below (GitHub issue #77) -- every
+   other codegen use of "is this struct packed" already goes through
+   struct_lltypes (packed_struct_type vs. struct_type), so this table
+   exists solely to let those two OCaml-arithmetic helpers answer the
+   question without touching LLVM at all, mirroring type_inf.ml's senv. *)
+let struct_is_packed : (string, bool) Hashtbl.t = Hashtbl.create 8
+
+(* Mirrors lib/type_inf.ml's const_type_size/const_field_offset exactly
+   (GitHub issue #77 -- sync rule, change together). Operates purely on
+   Ast.type_expr + struct_fields/struct_is_packed/struct_alignments,
+   never on Llvm_target.DataLayout, so its answer for "is this value
+   target-independent" matches type_inf.ml's decision by construction --
+   codegen must never claim a wider class of sizeof/offsetof expressions
+   provable than type inference already did (see SizeOf/OffsetOf's
+   gen_expr case below, which cross-checks this against the real
+   DataLayout-computed value and raises a BUG error on any disagreement,
+   the same "codegen re-verifies rather than trusts" discipline this
+   file already uses for SliceOf). *)
+let rec const_type_size (ty : Ast.type_expr) : int option =
+  match ty with
+  | Ast.TypeBool | Ast.TypeU8 | Ast.TypeI8 -> Some 1
+  | Ast.TypeU16 | Ast.TypeI16 -> Some 2
+  | Ast.TypeU32 | Ast.TypeI32 -> Some 4
+  | Ast.TypeU64 | Ast.TypeI64 -> Some 8
+  | Ast.TypeArray (elem, n) ->
+      (match const_type_size elem with
+       | Some sz -> Some (sz * n)
+       | None -> None)
+  | Ast.TypeNamed name ->
+      (match Hashtbl.find_opt struct_is_packed name, Hashtbl.find_opt struct_fields name with
+       | Some true, Some fields when not (Hashtbl.mem struct_alignments name) ->
+           List.fold_left (fun acc (_, fty) ->
+             match acc, const_type_size fty with
+             | Some a, Some b -> Some (a + b)
+             | _ -> None
+           ) (Some 0) fields
+       | _ -> None)
+  | _ -> None
+
+let const_field_offset (sname : string) (field : string) : int option =
+  match Hashtbl.find_opt struct_is_packed sname, Hashtbl.find_opt struct_fields sname with
+  | Some true, Some fields when not (Hashtbl.mem struct_alignments sname) ->
+      let rec go = function
+        | [] -> None
+        | (fname, _) :: _ when fname = field -> Some 0
+        | (_, fty) :: rest ->
+            (match const_type_size fty, go rest with
+             | Some a, Some b -> Some (a + b)
+             | _ -> None)
+      in go fields
+  | _ -> None
+
 (* Target data layout -- set by setup_target; used for struct tail-padding computation *)
 let target_data : Llvm_target.DataLayout.t option ref = ref None
 (* Enum underlying type registry: enum name -> underlying Ast type (u8/u16/u32/u64) *)
@@ -1370,7 +1423,22 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         | None -> raise (Error "sizeof: target data layout not initialized")
       in
       let sz = Int64.to_int (Llvm_target.DataLayout.abi_size elem_llty dl) in
-      (TypeUsize, const_int (ltype_of_ast TypeUsize) sz)
+      (* GitHub issue #77: same restricted refined-type treatment as
+         type_inf.ml's SizeOf case (sync rule) -- see const_type_size's
+         comment. The disagreement check below is a genuine soundness
+         guard, not defensive boilerplate: if it ever fires, the
+         OCaml-arithmetic formula and the real DataLayout have diverged,
+         which would otherwise mean SliceOf could prove a bound using a
+         value narrower than what actually gets emitted. *)
+      let result_ty = match const_type_size ty with
+        | Some v when v <> sz ->
+            raise (Error (Printf.sprintf
+              "BUG: sizeof(%s) OCaml-computed value %d disagrees with DataLayout value %d"
+              (Ast.show_type_expr ty) v sz))
+        | Some v -> TypeRefined (v, v + 1, TypeUsize)
+        | None -> TypeUsize
+      in
+      (result_ty, const_int (ltype_of_ast TypeUsize) sz)
 
   | OffsetOf (ty, field) ->
       let (name, llty) = match ty with
@@ -1383,7 +1451,19 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         | None -> raise (Error "offsetof: target data layout not initialized")
       in
       let offset = Llvm_target.DataLayout.offset_of_element llty field_index dl in
-      (TypeUsize, const_of_int64 (ltype_of_ast TypeUsize) offset false)
+      (* GitHub issue #77: same restricted refined-type treatment as
+         type_inf.ml's OffsetOf case (sync rule) -- see const_field_offset's
+         comment and SizeOf's disagreement-check comment just above. *)
+      let offset_int = Int64.to_int offset in
+      let result_ty = match const_field_offset name field with
+        | Some v when v <> offset_int ->
+            raise (Error (Printf.sprintf
+              "BUG: offsetof(%s, %s) OCaml-computed value %d disagrees with DataLayout value %d"
+              name field v offset_int))
+        | Some v -> TypeRefined (v, v + 1, TypeUsize)
+        | None -> TypeUsize
+      in
+      (result_ty, const_of_int64 (ltype_of_ast TypeUsize) offset false)
 
   | Cast (target_ty, src_e) ->
       let (src_ty_raw, v) = gen_expr locals src_e in
@@ -2951,6 +3031,7 @@ let gen_program ?prog_types prog =
         in
         Hashtbl.add struct_lltypes name llty;
         Hashtbl.add struct_fields  name fields;
+        Hashtbl.add struct_is_packed name is_packed;
         (match align_opt with Some n -> Hashtbl.add struct_alignments name n | None -> ())
     | EnumDef (name, ty_opt, variants, is_ne) ->
         let underlying = match ty_opt with Some t -> t | None -> TypeU32 in

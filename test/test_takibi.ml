@@ -2309,11 +2309,64 @@ let infer_tests = [
 
   (* -- sizeof ------------------------------------------------------------ *)
 
-  Alcotest.test_case "sizeof(T) has type usize" `Quick (fun () ->
+  (* GitHub issue #77: sizeof(T) is genuinely target-independent for a
+     primitive fixed-width type (i32 is always 4 bytes on every target
+     this compiler supports), so it now carries that value as a refined
+     singleton range rather than a bare usize -- this is what lets it
+     survive being threaded through a let/global and still prove a
+     subslice bound later, instead of the compiler forgetting it was ever
+     a compile-time constant. See "sizeof(non-packed struct) still has
+     type usize" below for the case that deliberately keeps the old,
+     unrefined behavior (the value there genuinely depends on target
+     DataLayout). *)
+  Alcotest.test_case "sizeof(T) of a primitive type is a refined usize singleton" `Quick (fun () ->
     let pt = infer "fn f() { let n: usize = sizeof(i32); }" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
+    Alcotest.check type_t "n has type {4..<5} (usize-based)"
+      (Ast.TypeRefined (4, 5, Ast.TypeUsize))
+      (Types.StringMap.find "n" fi.Types.local_types)
+  );
+
+  Alcotest.test_case "sizeof(non-packed struct) still has type usize" `Quick (fun () ->
+    (* Ordinary (non-packed) struct layout depends on target-specific
+       alignment/padding, which type inference cannot know (no target is
+       set up yet at this stage) -- so this deliberately stays unrefined,
+       matching the pre-#77 behavior exactly for this case. *)
+    let pt = infer "struct Hdr { a: i32; b: i16; }
+                    fn f() { let n: usize = sizeof(Hdr); }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "n has type usize"
       Ast.TypeUsize
+      (Types.StringMap.find "n" fi.Types.local_types)
+  );
+
+  Alcotest.test_case "sizeof(packed struct) is a refined usize singleton" `Quick (fun () ->
+    let pt = infer "struct packed Hdr { a: u8; b: u8; c: u16; }
+                    fn f() { let n: usize = sizeof(Hdr); }" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
+    Alcotest.check type_t "n has type {4..<5} (usize-based)"
+      (Ast.TypeRefined (4, 5, Ast.TypeUsize))
+      (Types.StringMap.find "n" fi.Types.local_types)
+  );
+
+  Alcotest.test_case "sizeof(packed struct align(N)) still has type usize" `Quick (fun () ->
+    (* align(N) tail padding is deliberately out of scope for this fix
+       (see const_type_size's comment in lib/type_inf.ml) -- stays
+       unrefined even though the struct itself is packed. *)
+    let pt = infer "struct packed Hdr align(16) { a: u8; b: u8; }
+                    fn f() { let n: usize = sizeof(Hdr); }" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
+    Alcotest.check type_t "n has type usize"
+      Ast.TypeUsize
+      (Types.StringMap.find "n" fi.Types.local_types)
+  );
+
+  Alcotest.test_case "offsetof(packed struct, field) is a refined usize singleton" `Quick (fun () ->
+    let pt = infer "struct packed Hdr { tag: u8; value: i32; }
+                    fn f() { let n: usize = offsetof(Hdr, value); }" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
+    Alcotest.check type_t "n has type {1..<2} (usize-based)"
+      (Ast.TypeRefined (1, 2, Ast.TypeUsize))
       (Types.StringMap.find "n" fi.Types.local_types)
   );
 
@@ -2429,6 +2482,54 @@ let codegen_tests = [
          (contains_substring (function_ir "offset_normal_value") "ret i64 4");
        Alcotest.(check bool) "packed field offset has no padding" true
          (contains_substring (function_ir "offset_packed_value") "ret i64 1"));
+
+  (* GitHub issue #77: sizeof(...)/offsetof(...) from a packed struct must
+     prove a subslice bound with zero trap sites, whether used directly or
+     threaded through a local `let` -- reproduces the exact shapes reported
+     as failing (direct use, sizeof via a let, offsetof via a let). *)
+  Alcotest.test_case
+    "issue #77: sizeof/offsetof from a packed struct prove subslice bounds \
+     (direct, via let, offsetof via let)"
+    `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
+       in
+       expect_trap_sites 0
+         "struct packed Issue77Hdr { a: u8; b: u8; c: u16; }
+          let mut issue77_buf: [u8; 64];
+          fn issue77_direct() {
+            let s: []u8 = issue77_buf as []u8;
+            let sub = s[0..<sizeof(Issue77Hdr)];
+          }
+          fn issue77_sizeof_via_let() {
+            let s: []u8 = issue77_buf as []u8;
+            let n: usize = sizeof(Issue77Hdr);
+            let sub = s[0..<n];
+          }
+          fn issue77_offsetof_via_let() {
+            let s: []u8 = issue77_buf as []u8;
+            let off: usize = offsetof(Issue77Hdr, c);
+            let sub = s[off..<off + 2];
+          }" ());
+
+  (* Negative control: a NON-packed struct's sizeof (target-dependent
+     layout) must still require a runtime check -- confirms the #77 fix
+     does not over-claim provability for cases it cannot actually know. *)
+  Alcotest.test_case
+    "issue #77 negative control: sizeof of a non-packed struct still traps"
+    `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
+       in
+       expect_trap_sites 1
+         "struct Issue77NonPacked { a: i32; b: i16; }
+          let mut issue77_np_buf: [u8; 64];
+          fn issue77_non_packed() {
+            let s: []u8 = issue77_np_buf as []u8;
+            let sub = s[0..<sizeof(Issue77NonPacked)];
+          }" ());
 
   Alcotest.test_case
     "DMA/device barriers lower to AArch64 DSB intrinsics" `Quick
