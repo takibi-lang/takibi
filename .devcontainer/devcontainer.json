@@ -25,7 +25,7 @@
     "--device-cgroup-rule=c 189:* rmw",
     "--network=host"
   ],
-  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude && sudo apt-get update && sudo apt-get install -y cmake llvm-19-dev libzstd-dev lld-19 qemu-system-arm gdb-multiarch openocd stlink-tools bubblewrap && sudo usermod -aG plugdev,dialout vscode && opam update && opam install -y ppx_deriving llvm",
+  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude && sudo apt-get update && sudo apt-get install -y cmake llvm-19-dev libzstd-dev lld-19 qemu-system-arm gdb-multiarch openocd stlink-tools bubblewrap mtools && sudo usermod -aG plugdev,dialout vscode && opam update && opam install -y ppx_deriving llvm",
   "containerEnv": {
     "LANG": "en_US.UTF-8",
     "LC_ALL": "en_US.UTF-8",
