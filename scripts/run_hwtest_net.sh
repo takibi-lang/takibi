@@ -2,12 +2,16 @@
 # STM32 Ethernet hardware integration tests -- called from repo root via:
 # make hwcheck-net
 #
-# Separate from scripts/run_hwtest.sh (make hwcheck): these tests need a raw
-# AF_PACKET socket (CAP_NET_RAW, i.e. sudo) and a physical Ethernet cable
+# Separate from scripts/run_hwtest_ram.sh (make hwcheck): these tests need a
+# raw AF_PACKET socket (CAP_NET_RAW, i.e. sudo) and a physical Ethernet cable
 # wired directly from the STM32F746G-DISCOVERY board to this machine's NIC,
 # not just the USB/SWD connection every other hwcheck test needs. PASS/FAIL
 # is judged by each Python test script's exit code (they print their own
-# per-case detail lines), not a UART capture/diff like run_hwtest.sh.
+# per-case detail lines), not a UART capture/diff like run_hwtest_ram.sh.
+# These examples still flash over Flash/st-flash, unaffected by hwcheck's
+# move to RAM execution -- see CLAUDE.md/HISTORY.md's RAM-execution section
+# for why the 5 real-Ethernet examples were deliberately left out of that
+# migration for now.
 #
 # NOT part of `make check`/`make hwcheck`: unlike those, this can't run on an
 # arbitrary clone of this repo with just a board plugged in over USB -- it

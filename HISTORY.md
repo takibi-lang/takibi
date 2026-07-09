@@ -2573,3 +2573,133 @@ rules** (`examples/<name>/<name>.debug.o` / `kernel.debug.elf`, e.g. for
 manually-written rules outside `EXAMPLES`, not a third compilation group.
 See "Execution Profiling (QEMU)" below for why they're kept separate from
 the normal (always `-g`-free) build outputs.
+
+### STM32 Hardware Test Harness: RAM Execution Instead of Flash (make hwcheck)
+
+**The concern, raised before any code was written**: `make hwcheck` flashes
+every STM32 example over `st-flash write`. Every example binary (3KB-8KB)
+is well under Flash Sector0's 32KB, so every one of hwcheck's ~41 tests
+erases/writes that *same* physical sector on *every single run* -- one
+`make hwcheck` invocation alone burns 41 erase cycles on Sector0. STM32's
+internal Flash is generally specified at a guaranteed minimum of ~10,000
+erase cycles (standard across the STM32 family), so that is only ~200
+`make hwcheck` runs before Sector0's guaranteed lifetime is exhausted --
+not a concern for occasional manual runs, but a real one once hwcheck
+starts running frequently in CI (planned, not yet wired up). This was
+raised and discussed BEFORE any of the discussion below about consolidating
+tests to reduce flash writes -- the two ideas were evaluated independently:
+consolidating multiple examples into fewer `st-flash` calls would help
+(same physical sector, fewer erases per run), but RAM execution removes
+the constraint category entirely (SRAM has no comparable wear-out), so
+that was pursued instead, keeping the existing one-example-per-test
+granularity (deliberately NOT consolidated -- see the flash-endurance
+discussion above this entry for why fine-grained per-example tests are
+otherwise worth keeping: trivial failure attribution, and consistency
+with the same 1-example=1-artifact=1-test shape `stm32build`/`qemutest`
+already use).
+
+**AXI SRAM1 (240K, 0x20010000), not DTCM (64K, 0x20000000)** -- deliberately,
+even though DTCM would have been the simpler choice (see the earlier
+discussion of RAM execution feasibility): DTCM sits outside the Cortex-M7
+cache hierarchy entirely, so code executing there would never exercise the
+genuinely cacheable-memory code paths this project cares about (and which
+motivated asking "can this double as a way to more rigorously test cache
+behavior" in the first place). The Ethernet DMA master also cannot reach
+DTCM at all -- a real, pre-existing constraint (see `link_eth.ld`'s own
+comment), meaning DTCM is if anything the MORE restricted region once
+Ethernet is in the picture, not a safer default.
+
+**No explicit MPU region needed for AXI SRAM1** -- a genuine, and pleasant,
+finding rather than an assumption carried in from the start: ARMv7-M's
+architectural default memory map already describes the whole
+0x20000000-0x3FFFFFFF SRAM range (which covers AXI SRAM1) as Normal,
+Write-Back Write-Allocate cacheable, shareable, AND executable. This is
+exactly the "genuinely cacheable, genuinely executable" behavior wanted,
+with zero MPU configuration -- unlike `startup.S`'s existing Ethernet DMA
+window, which exists specifically to OVERRIDE this same default down to
+non-cacheable for one 64KB sub-region (see that file's comment). A single
+MPU region covering exactly AXI SRAM1's odd 240KB size at its 64KB-aligned
+base (0x20010000) isn't even expressible as one region anyway (MPU regions
+must be a power-of-two size, naturally aligned to that size) -- another
+reason the "rely on the default map, configure nothing" answer turned out
+to be the right one, not just the easy one.
+
+**The core technique -- bypassing the hardware boot-vector fetch**: Cortex-M
+always fetches its initial SP (word 0) and PC (word 1) from address 0x0 at
+reset, which is hardwired and aliased to Flash; this cannot itself be
+redirected to RAM without physically changing the board's BOOT pins.
+Instead, `examples/common_stm32/startup_ram.S` + `examples/common_stm32/
+link_ram.ld` (new files, siblings of `startup.S`/`link.ld`) target AXI
+SRAM1 for the whole image (vector table, `.text`, `.rodata`, `.data`,
+`.bss`, stack), and `scripts/run_hwtest_ram.sh` does by hand, from OpenOCD,
+exactly what silicon would have done automatically: `reset halt` (halts
+the core before any Flash code executes), `load_image` the linked ELF
+directly into AXI SRAM1 over SWD, reads the initial SP/PC back out of word
+0/word 1 of the freshly-loaded vector table, pokes them into the debug
+SP/PC registers, and `resume`s. `startup_ram.S`'s `Reset_Handler` sets
+`SCB_VTOR` to point at its own vector table as its very first instruction
+(before anything could plausibly fault or before any interrupt could be
+enabled) -- this is the one boot step the debugger cannot do by poking
+registers alone, since VTOR resets to 0x00000000 (the Flash alias) and
+nothing else would ever correct it, and every later interrupt (SysTick,
+USART1, PendSV) depends on it being right.
+
+**`reset halt`, never `reset init`, is deliberate and load-bearing**: the
+board's OpenOCD config (`board/stm32f746g-disco.cfg`) has a `reset-init`
+event handler that reprograms the clock tree to 192MHz for QSPI flash
+access -- completely incompatible with every example's `uart_init()`,
+which computes its BRR divider assuming the default 16MHz HSI clock (see
+the USART1 entry in this file's STM32 bring-up section). `reset init` is
+the OpenOCD command that fires that handler; `reset halt` performs a
+plain hardware reset with none of the vendor clock-boost logic, leaving
+the chip exactly where a real Flash boot would. Confirmed empirically,
+not just reasoned about: the first end-to-end test (`hello`) produced
+byte-exact UART output at 115200 baud with no clock mismatch.
+
+**`.data` needs no copy loop in the RAM variant, unlike `startup.S`**:
+`link_ram.ld` gives `.data` the same load address and run address (no
+`AT> FLASH` clause) -- there is no separate Flash copy for it to be
+copied out of at boot, since the debug probe writes the final bytes
+directly into RAM. `startup_ram.S` omits the copy loop entirely rather
+than keeping a now-pointless self-copy, to keep the file's intent clear.
+
+**Validated on real hardware before generalizing to all 41 tests, not
+assumed to work from the design alone**: `hello` (baseline UART output,
+no interrupts) and `preempt` (SysTick+PendSV preemptive scheduler,
+interrupt-driven, directly exercising the VTOR-relocation requirement)
+were both hand-tested via a raw `openocd -c "..."` invocation first,
+each producing byte-exact UART output matching their existing `.expected`
+files, before any Makefile/script generalization was written. After
+generalizing, a full `make hwcheck` run passed all 41 tests in ~49
+seconds (comparable to the old Flash-based ~50-60s), with zero `st-flash`
+invocations anywhere in the run.
+
+**Scope: the 5 real-Ethernet examples (`net_echo`/`arp_reply`/`icmp_echo`/
+`tcp_echo`/`http_server`) are deliberately NOT part of this migration.**
+They were never part of `make hwcheck` to begin with -- they're exercised
+separately, over real wiring, by `make hwcheck-net`/`run_hwtest_net.sh`,
+which this change does not touch at all. Migrating them to RAM execution
+later needs one more decision this session flagged but did not resolve:
+their DMA descriptor/buffer region is currently marked non-cacheable via
+an explicit MPU window specifically so cache-coherence correctness doesn't
+matter operationally (see the Ethernet DMA section of this file); a
+RAM-execution version of those examples would need to decide whether to
+keep that same non-cacheable policy (simple, but still not exercising the
+`dma_publish`/`dma_consume`/`device_fence` cache-maintenance code paths
+in anger) or make that region genuinely cacheable and rely on those
+builtins for real (closer to this session's original motivation of
+wanting to actually test cache behavior, but a bigger change to the
+driver's correctness model). Revisit when there is a concrete need to
+exercise that path specifically, per this project's usual practice of not
+generalizing ahead of one.
+
+**Files**: `examples/common_stm32/startup_ram.S` (new), `examples/
+common_stm32/link_ram.ld` (new), `scripts/run_hwtest_ram.sh` (new,
+supersedes the deleted `scripts/run_hwtest.sh`), `scripts/
+stm32_hw_claim.sh` (recognized-runner pattern updated), `Makefile`
+(`STM32_RAM_EXAMPLES`/`STM32_RAM_ELFS`/`STM32_RAM_ELFS_GENERIC`, the
+`startup_ram.o` and `kernel_stm32_ram.elf` build rules, `stm32build-ram`,
+`hwcheck`'s implementation switched over). `make check`/`make stm32build`
+(the Flash-based product/demo build) and `make hwcheck-net` are both
+unaffected -- this migration is scoped entirely to `make hwcheck`'s own
+implementation.

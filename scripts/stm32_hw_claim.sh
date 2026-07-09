@@ -52,7 +52,7 @@ stm32_stop_previous_runner() {
     [ -n "$actual_start" ] && [ "$actual_start" = "$start" ] || return 1
     [ "$workspace" = "$(pwd -P)" ] || return 1
     case "$command" in
-        *scripts/run_hwtest.sh|*scripts/run_hwtest_net.sh) ;;
+        *scripts/run_hwtest_ram.sh|*scripts/run_hwtest_net.sh) ;;
         *) return 1 ;;
     esac
     echo "Taking over STM32 hardware from PID $pid ($command)..." >&2

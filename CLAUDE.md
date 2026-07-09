@@ -206,7 +206,11 @@ examples/
                      msgqueue, got there too).
 scripts/
   run_qemutest.sh -- QEMU integration test script (FIFO sync and timing verification included)
-  run_hwtest.sh   -- STM32 hardware integration test script (flash + serial capture; see below)
+  run_hwtest_ram.sh -- STM32 hardware integration test script (make hwcheck): RAM execution
+                     over the debug port, no Flash write -- see "STM32 Hardware Test
+                     Harness: RAM Execution" below. Supersedes the deleted run_hwtest.sh.
+  run_hwtest_net.sh -- STM32 real-Ethernet hardware tests (make hwcheck-net); still flashes
+                     over st-flash (see below for why those 5 examples aren't RAM-executed yet)
 test/
   test_takibi.ml  -- Alcotest unit tests for parser / type_inf
 ```
@@ -324,7 +328,7 @@ size.
   All five are verified against a real point-to-point link via `scripts/eth_*_test.py` + `make hwcheck-net`
   (not part of `make check`/`make hwcheck` since it needs a real board wired directly to the test machine's
   NIC, plus `CAP_NET_RAW`). `make hwcheck-net` aggregates all such Ethernet hardware tests via
-  `scripts/run_hwtest_net.sh`, same PASS/FAIL-summary style as `scripts/run_hwtest.sh` -- add new Ethernet
+  `scripts/run_hwtest_net.sh`, same PASS/FAIL-summary style as `scripts/run_hwtest_ram.sh` -- add new Ethernet
   examples there as they're ported (one `run_net_hw_test NAME BIN TEST_SCRIPT` line), rather than each
   getting its own separate `make` target.
 
@@ -441,7 +445,7 @@ block read/write I/O to a character device reached through it, so `/dev-host/tty
 fully usable for serial communication. Path visibility through `/dev-host` is also not the
 same as access: the container's cgroup device policy still only allows major 166 (ttyACM)
 and 189 (USB) -- e.g. `/dev-host/sda` is visible by name but not actually readable, since
-block-device majors were never added to the allowlist. `scripts/run_hwtest.sh`'s
+block-device majors were never added to the allowlist. `scripts/run_hwtest_ram.sh`'s
 `STM32_SERIAL_DEV` env var and the Makefile's `STM32_SERIAL_DEV` variable both default to
 `/dev-host/ttyACM0` accordingly (override to plain `/dev/ttyACM0` only if running this
 Makefile outside this devcontainer, e.g. directly on a Linux host with the board attached).
@@ -574,11 +578,12 @@ region exclusively for MSP and starting PSP that much lower
 (`mrs r0,msp; sub r0,r0,#0x800; msr psp,r0`), giving each stack a genuinely separate
 region. **Any future change to this switch must keep the two stacks non-overlapping.**
 
-**Hardware test harness** (`scripts/run_hwtest.sh`, `make hwcheck`): flashes via
-`st-flash write` and captures UART output, diffing against the *same* `.expected` files
-`run_qemutest.sh` already uses (`uart_puts`/`uart_print_*` write identical bytes on
-either HAL). Two things had to be solved that QEMU's semihosting-exit model doesn't need
-to deal with:
+**Hardware test harness: Flash execution** (`scripts/run_hwtest_net.sh`, `make hwcheck-net`
+-- also how the now-deleted `scripts/run_hwtest.sh`, formerly `make hwcheck`'s
+implementation, worked): flashes via `st-flash write` and captures UART output, diffing
+against the *same* `.expected` files `run_qemutest.sh` already uses (`uart_puts`/
+`uart_print_*` write identical bytes on either HAL). Two things had to be solved that
+QEMU's semihosting-exit model doesn't need to deal with:
 - `st-flash write` itself resets and runs the newly-flashed program as a side effect,
   before the harness ever opens the serial port -- and that unread run's output doesn't
   vanish cleanly (a short tail fragment survives in a small kernel/USB-CDC buffer and
@@ -599,6 +604,26 @@ to deal with:
   first output byte (confirming the firmware's read loop has actually started, since
   USART's RDR is only 1 byte deep -- writing input any earlier risks an overrun) before
   writing the `.stdin` file to the serial port.
+
+**Hardware test harness: RAM execution** (`scripts/run_hwtest_ram.sh`, `make hwcheck`,
+current implementation): every one of hwcheck's ~41 example binaries is well under Flash
+Sector0's 32KB, so flashing all of them on every run used to erase/write that one physical
+sector 41 times per run -- against a guaranteed minimum endurance of roughly 10,000 erase
+cycles, only ~200 `make hwcheck` runs before Sector0's guaranteed lifetime is exhausted, a
+real concern once hwcheck starts running frequently in CI (not yet, but planned). Migrated
+to loading the linked ELF directly into AXI SRAM1 (0x20010000, 240K, NOT DTCM -- see below)
+over the debug port via OpenOCD instead: `reset halt` (never `reset init`, which would
+reprogram the clock tree away from the 16MHz HSI every `uart_init()` assumes), `load_image`
+the ELF, then read the initial SP/PC out of word 0/word 1 of the image's own vector table
+and poke them into the SP/PC debug registers by hand before resuming -- manually doing, once
+per test, exactly what silicon does automatically when booting from Flash. No Flash write
+happens anywhere in this path. See `examples/common_stm32/startup_ram.S`'s header comment
+for the full mechanism (including why VTOR must be set in code, not by the harness) and
+HISTORY.md's RAM-execution entry for the full design discussion (why AXI SRAM1 over DTCM,
+why no explicit MPU region is needed, the flash-endurance arithmetic, and why the 5
+real-Ethernet examples are deliberately not part of this migration yet). `hwcheck-net`
+(Ethernet) is unaffected -- it still flashes over `st-flash`, per the Flash-execution
+paragraph above.
 
 ## virtio-net Examples (examples/net_echo, examples/arp_reply, examples/icmp_echo)
 
@@ -914,7 +939,7 @@ netconfig.tkb`'s `HTTP_SERVER_IP` constant (`grep`+`tr`, no hardcoded IP in the 
 can't silently drift out of sync if that constant is ever changed. The serial reader is
 attached (backgrounded) *before* the explicit `st-flash reset`, not after, so the board's
 earliest "ready" message isn't lost to a reader that hasn't opened the port yet -- same
-ordering reasoning as `read_until_quiet`'s `WAIT_FOR_DATA` case in `scripts/run_hwtest.sh`.
+ordering reasoning as `read_until_quiet`'s `WAIT_FOR_DATA` case in `scripts/run_hwtest_ram.sh`.
 Needs the board connected and its Ethernet port wired directly to this machine's NIC (see the
 STM32 hardware bring-up section's devcontainer note for the `/dev-host/ttyACM0` serial path).
 
