@@ -10,8 +10,8 @@
 // at their reset value of 1, APB2 clock == HSI == 16MHz.
 
 let mut uart_tx_buf: [u8; 128];
-let mut uart_tx_head: io usize;
-let mut uart_tx_tail: io usize;
+let mut uart_tx_head: io {0..<128 as usize};
+let mut uart_tx_tail: io {0..<128 as usize};
 let mut uart_rx_handler: fn() -> void;
 
 // The 4.3" RK043FN48H-CT672B panel is left lit white by default (backlight

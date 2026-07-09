@@ -209,25 +209,6 @@ run_virtio_test() {
     rm -f "$qemu_log"
 }
 
-# run_no_trap_test NAME KERNEL
-#
-# Disassembles with llvm-objdump and checks that the count of brk instructions
-# (llvm.trap -> AArch64 brk #0x1) is zero. Verifies that array bounds are fully
-# proven at the type level.
-run_no_trap_test() {
-    local name="$1" kernel="$2"
-    local count
-    count=$(llvm-objdump-19 --disassemble "$kernel" 2>/dev/null | grep -c "brk" || true)
-    if [ "$count" -eq 0 ]; then
-        printf "${GRN}PASS${RST}  %s  (no brk)\n" "$name"
-        PASS=$((PASS + 1))
-    else
-        printf "${RED}FAIL${RST}  %s  ($count brk instruction(s) -- runtime trap risk)\n" "$name"
-        FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("$name")
-    fi
-}
-
 # run_dwarf_test NAME KERNEL SRC_TKB
 #
 # Verifies the DWARF line table emitted by a -g build actually resolves an
@@ -334,40 +315,6 @@ run_compile_error_test "ptr_cast_wrong"      examples/ptr_cast_wrong/ptr_cast_wr
 run_compile_error_test "const_global_wrong"  examples/const_global_wrong/const_global_wrong.tkb   examples/const_global_wrong/const_global_wrong.error
 run_compile_error_test "forbid_trap_wrong"   examples/forbid_trap_wrong/forbid_trap_wrong.tkb     examples/forbid_trap_wrong/forbid_trap_wrong.error --forbid-trap
 run_forbid_trap_ok_test "forbid_trap_ok"     examples/forbid_trap_ok/forbid_trap_ok.tkb
-run_forbid_trap_ok_test "forbid_trap_slice"  examples/common_qemu/uart.tkb examples/common/print.tkb examples/common_qemu/print.tkb examples/slice/slice.tkb
-run_forbid_trap_ok_test "forbid_trap_foreach" examples/common_qemu/uart.tkb examples/common/print.tkb examples/common_qemu/print.tkb examples/foreach/foreach.tkb
-run_forbid_trap_ok_test "forbid_trap_http_server" examples/common_qemu/uart.tkb examples/common/print.tkb examples/common_qemu/print.tkb examples/common_qemu/gic.tkb examples/common_qemu/virtio_mmio.tkb examples/common_qemu/netconfig.tkb examples/common/inet_checksum.tkb examples/common/netutil.tkb examples/http_server/http_server.tkb
-run_forbid_trap_ok_test "forbid_trap_arp_reply" examples/common_qemu/uart.tkb examples/common/print.tkb examples/common_qemu/print.tkb examples/common_qemu/gic.tkb examples/common_qemu/virtio_mmio.tkb examples/common_qemu/netconfig.tkb examples/common/netutil.tkb examples/arp_reply/arp_reply.tkb
-run_forbid_trap_ok_test "forbid_trap_icmp_echo" examples/common_qemu/uart.tkb examples/common/print.tkb examples/common_qemu/print.tkb examples/common_qemu/gic.tkb examples/common_qemu/virtio_mmio.tkb examples/common_qemu/netconfig.tkb examples/common/inet_checksum.tkb examples/common/netutil.tkb examples/icmp_echo/icmp_echo.tkb
-run_forbid_trap_ok_test "forbid_trap_ip_parse" examples/common_qemu/uart.tkb examples/common/print.tkb examples/common_qemu/print.tkb examples/common/inet_checksum.tkb examples/common/netutil.tkb examples/ip_parse/ip_parse.tkb
-run_forbid_trap_ok_test "forbid_trap_tcp_echo" examples/common_qemu/uart.tkb examples/common/print.tkb examples/common_qemu/print.tkb examples/common_qemu/gic.tkb examples/common_qemu/virtio_mmio.tkb examples/common_qemu/netconfig.tkb examples/common/inet_checksum.tkb examples/common/netutil.tkb examples/tcp_echo/tcp_echo.tkb
-run_forbid_trap_ok_test "forbid_trap_tcp_parse" examples/common_qemu/uart.tkb examples/common/print.tkb examples/common_qemu/print.tkb examples/common/inet_checksum.tkb examples/common/netutil.tkb examples/tcp_parse/tcp_parse.tkb
-
-echo ""
-echo "Running no-trap checks (brk must be zero in these kernels)..."
-echo ""
-
-# Examples whose bounds should be fully proven at the type level. If brk appears, review the type annotations.
-for e in start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci \
-          bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt \
-          semaphore condvar struct msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof_offsetof int64 net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server; do
-# enum (P4c): Color was made NON-EXHAUSTIVE (`_;`) since its one cast site
-# (`raw as Color`) has no static evidence bounding raw to {0,1,2} -- see
-# CLAUDE.md's P4c section. No trap at all now (round-trip guaranteed).
-# ip_parse (P4c-2): ihl is clamped via `min(ihl, 20)`, provably bounding
-# the checksum span against pkt's actual capacity regardless of the wire
-# byte's value -- see ip_parse.tkb's comment.
-# tcp_parse (P4c, revised): rather than assert the residual check away,
-# ip_total_len is now VALIDATED (`if (ip_total_len >= ihl && ip_total_len
-# <= 40)`) before being trusted -- what any real binary parser needs to do
-# regardless of --forbid-trap. Once narrowed, tcp_len's Sub-derived range
-# and the same-base rule close the checksum span outright, no unsafe
-# needed. See tcp_parse.tkb's comment.
-# tcp_echo (P4c-1): its two data-echo sites are wrapped in
-# `unsafe { ... }` (documented, evidence-backed assertions -- see
-# tcp_echo.tkb's comments) rather than left as silent runtime checks.
-    run_no_trap_test "$e (no-trap)" "examples/$e/kernel.elf"
-done
 
 echo ""
 echo "Running DWARF debug-info check (-g build)..."

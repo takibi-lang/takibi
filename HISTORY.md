@@ -3508,3 +3508,135 @@ common_stm32/eth.tkb`, `examples/irq/irq.tkb`, `examples/echo/echo.tkb`,
 `examples/inet_checksum/inet_checksum.tkb`, `Makefile` (variable
 definitions and ~20 recipe command lines shrunk, prerequisite lists left
 unchanged).
+
+### Issue #79: `--forbid-trap` Applied to Every Example, Both Targets
+
+Before this: only 8 of the 49 examples (`slice`, `foreach`, `http_server`,
+`arp_reply`, `icmp_echo`, `ip_parse`, `tcp_echo`, `tcp_parse`) were
+actually compiled with `--forbid-trap` (via `run_qemutest.sh`'s
+`run_forbid_trap_ok_test`, AArch64/QEMU target only). The other 41 were
+only checked by a weaker post-hoc proxy, `run_no_trap_test`: disassemble
+the linked `kernel.elf` with `llvm-objdump-19` and require zero `brk`
+instructions. This is suggestive but not equivalent to `--forbid-trap` --
+it inspects the *final linked binary* after all LLVM optimization passes,
+whereas `--forbid-trap` inspects the compiler's own frontend bookkeeping
+of which sites needed a trap check at IR-generation time, before any
+optimizer gets a chance to (in principle) fold one away. `--forbid-trap`
+had also never been applied to the STM32/Cortex-M7 target at all, for any
+example.
+
+**Investigation first, then the fix -- and the investigation surfaced a
+real gap, not just a formality.** Before touching any example, every
+example's *existing* Makefile file list (both targets) was compiled once
+with `--forbid-trap` appended, unmodified, purely to see what would
+break:
+- **QEMU/AArch64 side: all 41 previously-unverified examples passed
+  immediately, zero changes needed.** Every bound in the existing
+  AArch64-side example suite was already fully proven at the type level;
+  the weaker `run_no_trap_test` proxy had not been hiding anything on
+  this target.
+- **STM32/Cortex-M7 side: all 49 examples failed, all with the identical
+  two error sites**, both in `examples/common_stm32/uart.tkb` (a file
+  concatenated into literally every STM32 example): `uart_putc`'s
+  `uart_tx_buf[head] = c;` (line 104) and `uart_tx_isr`'s
+  `*usart1_tdr = uart_tx_buf[tail];` (line 148, at the time). Root cause:
+  `uart_tx_head`/`uart_tx_tail` were declared as plain `io usize`
+  globals, with every *write* site going through `% 128` (so the ring
+  buffer's own invariant -- these two counters only ever hold a value in
+  `[0, 128)` -- genuinely always held at runtime) but every *read* site
+  (`let head: usize = uart_tx_head;` before indexing) losing that
+  invariant, because a plain `usize` global carries no memory of the
+  refined range its writers always respect. QEMU's own `uart.tkb` never
+  hit this because it has no TX ring buffer at all -- PL011 is written
+  synchronously, one register write per byte, no buffering, no index.
+  **This is exactly the class of bug `--forbid-trap` exists to catch**:
+  correct by construction (a human reading the file can see every write
+  is `% 128`), correct in every test run to date (QEMU passing the STM32
+  examples' behavioral tests never exercises this at all, and even real
+  hardware runs never happened to overflow it), yet not *provably*
+  correct until the type itself says so -- exactly the "code with
+  remaining bounds checks = code whose type annotations are still
+  insufficient" principle from this file's own top section, caught by
+  the compiler instead of by luck.
+- **The fix was two lines**: `let mut uart_tx_head: io usize;` /
+  `let mut uart_tx_tail: io usize;` became
+  `let mut uart_tx_head: io {0..<128 as usize};` /
+  `let mut uart_tx_tail: io {0..<128 as usize};`. Every write site
+  already produced a value in that range (`0` at init, `(x + 1) % 128`
+  everywhere else) so no write site needed to change; every read site
+  automatically inherited the refined type through the existing
+  local-`let`-upgrade rule (the same mechanism issue #77's Pass 2 fix
+  relies on), which is what let the two indexing sites prove clean with
+  no further changes anywhere. Re-running the same all-49-examples sweep
+  with only this two-line fix applied: 49/49 pass under `--forbid-trap`
+  on the STM32 target too.
+
+**The fix is applied at the build-system level, not as a parallel check
+script.** Once every example (both targets) was confirmed to compile
+clean under `--forbid-trap`, `--forbid-trap` was appended directly to
+every example-compiling `takibi` invocation in the Makefile (29 recipe
+lines: the 9 QEMU-side example object groups, 4 DWARF debug builds, and
+16 STM32-side example object rules) via one targeted `sed` pass matching
+every `$(TAKIBI) ... -o $@` line (and separately the 4 `-g -o $@` debug
+lines), verified afterward by `grep` to confirm exactly the expected 29
+lines changed and nothing else (no `$(LLVM_MC)`/`$(LLD)` linking lines
+matched the same pattern). This means `make build`/`make stm32build`/
+`make check` -- literally every normal build -- now fails immediately,
+with an exact file/line list, the moment any example regresses into
+having an unproven bounds check, rather than that only being caught by a
+separate, optional, easy-to-forget verification pass. This was judged the
+right level for this specific guarantee (as opposed to keeping
+`--forbid-trap` as an opt-in flag exercised only by dedicated checks):
+the project's own stated design principle is "detect errors at compile
+time," and folding this into the default build is the most literal
+possible realization of that for this specific property, at zero ongoing
+cost (no separate script to remember to run, no drift between "what the
+build produces" and "what was verified").
+
+**Consequence: the weaker `run_no_trap_test` check is now fully
+redundant and was deleted, not just left in place alongside the stronger
+one.** If `make check`'s normal build phase already refuses to produce
+`kernel.elf` for any example with a remaining trap site, a later
+objdump-based re-check of that same binary can only ever pass (skipping
+it changes nothing, per this project's YAGNI principle: don't keep
+verifying something a step earlier already guarantees). Deleted:
+`run_qemutest.sh`'s `run_no_trap_test` function and its 41-example
+invocation loop, and the 7 now-redundant `run_forbid_trap_ok_test`
+registrations for `slice`/`foreach`/`http_server`/`arp_reply`/
+`icmp_echo`/`ip_parse`/`tcp_echo`/`tcp_parse` (the main build already
+proves this more strongly, at `make build`/`stm32build` time rather than
+only at `qemutest` time). Kept unchanged: `forbid_trap_wrong`/
+`forbid_trap_ok`, the two dedicated fixture files (not part of
+`EXAMPLES`) that test the `--forbid-trap` flag's OWN correctness --
+that a program with a genuine unproven trap is rejected, and that a
+provably-clean one is accepted -- independent of which example happens to
+exercise it.
+
+**End state matches the target set out in discussion before this work
+started**: every example the QEMU/STM32 test suites build is now
+verified via exactly one mechanism (`--forbid-trap`, baked into the
+default build) rather than a two-tier strong/weak split. The "runtime
+brk detection via objdump" category (previously a real, separate check
+category) no longer exists anywhere in this repository's test
+infrastructure.
+
+**Verification**: `make clean && make check` (langcheck, all 462 unit
+tests, stm32build, all QEMU integration/compile-error tests) passes with
+70 tests (down from 125 -- the removed 41 `run_no_trap_test` entries and
+7 redundant `run_forbid_trap_ok_test` entries account for the
+difference; no test was weakened, the coverage they provided is now a
+build precondition instead of a separate pass/fail line). Real STM32
+hardware (`make hwcheck`/`make hwcheck-net`) was not reachable in this
+session's environment (no ST-LINK USB device present); this change only
+alters which flag every existing STM32 build already used, so the
+existing hardware-verified behavior of every example is unaffected in
+principle, but a real-hardware confirmation run is still recommended
+before the next opportunity, consistent with this project's own standard
+for STM32/Ethernet-touching changes.
+
+**Files**: `examples/common_stm32/uart.tkb` (the actual bug fix -- two
+global declarations refined from `io usize` to
+`io {0..<128 as usize}`), `Makefile` (`--forbid-trap` appended to 29
+`takibi` invocation lines), `scripts/run_qemutest.sh` (`run_no_trap_test`
+function and its invocation loop deleted; 7 redundant
+`run_forbid_trap_ok_test` registrations deleted).
