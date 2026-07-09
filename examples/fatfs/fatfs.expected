@@ -1,5 +1,7 @@
+seed read: hello from mtools seed!
 format: OK
 create HELLO.TXT: OK
 create README.TXT: OK
+read-back HELLO.TXT: Hello, takibi!
 dump: OK
 done

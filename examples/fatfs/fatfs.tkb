@@ -4,14 +4,34 @@
 // issue #61: bringing up the filesystem logic and the SPI/SDIO hardware
 // timing at the same time makes failures hard to attribute to either one).
 //
-// Scope of this step (write path only): fat_format() (mkfs-equivalent) plus
-// fat_create_file() for a couple of fixed-content files. Reading an
-// existing/foreign FAT12 image back from inside takibi (directory listing,
-// file read, path lookup) is deliberately deferred to a later step --
-// `mtools` (mdir/mcopy) is this step's reader/verifier, not takibi itself.
-// The produced image is written out to a real host file via ARM
-// semihosting (dump_disk_to_host()) so scripts/fatfs_mtools_test.py can
-// hand it to mtools as an independent oracle.
+// Public API: fat_format() (mkfs-equivalent) plus a FatFs-flavored
+// (https://elm-chan.org/fsw/ff/) file-handle API -- fat_open/fat_read/
+// fat_write/fat_close (fat_ prefix instead of FatFs's f_, matching this
+// project's own naming). Scoped to exactly what the next milestone
+// (an http_server_sdcard example serving files from an SD card) needs:
+// one flat root directory, no subdirectories, no seek/rename/unlink, no
+// multiple simultaneously-open files. A later, separate, not-yet-scoped
+// milestone (a Forth REPL over a web UI with free file/directory
+// read-write) may need more; build that when it's an actual requirement,
+// not now.
+//
+// Verification is layered: fat_open/fat_read are exercised both against a
+// FAT image `fatfs.tkb` itself formatted and against one built
+// independently by real `mformat`/`mcopy` (loaded via ARM semihosting --
+// see load_seed_from_host()), and the FAT12 image `fatfs.tkb` writes is in
+// turn dumped back out to a host file (dump_disk_to_host()) for
+// scripts/fatfs_mtools_test.py to verify independently with `mdir`/`mcopy`.
+// This three-way check (takibi writes/mtools reads, mtools writes/takibi
+// reads, takibi writes/takibi reads back) is deliberately richer than
+// either direction alone.
+//
+// fat_open/fat_read assume fatfs.tkb's OWN fixed layout constants below
+// (RESERVED_SECTORS/NUM_FATS/FAT_SIZE_SECTORS/ROOT_ENTRY_COUNT) rather than
+// parsing the on-disk BPB dynamically -- fine for a self-formatted image or
+// an mformat-created one whose parameters are deliberately forced to
+// match, but would misread an arbitrarily-formatted real FAT image (e.g. a
+// factory-formatted SD card). Dynamic BPB parsing ("mount") is deferred
+// until issue #62's real SD card integration actually needs it.
 //
 // mem_block_read()/mem_block_write() are the swappable interface boundary
 // the issue asked for: when #62 adds a real SD-backed block device, only
@@ -51,6 +71,7 @@ use "examples/common/netutil.tkb";
 extern fn semihosting_open(name: *u8, name_len: i32, mode: i32) -> i32;
 extern fn semihosting_write(handle: i32, buf: *u8, len: i32) -> i32;
 extern fn semihosting_close(handle: i32) -> i32;
+extern fn semihosting_read(handle: i32, buf: *u8, len: i32) -> i32;
 
 // -- Disk geometry (placeholder constants for this in-memory phase; real
 // SD/eMMC capacity will drive these once issue #62 exists) ------------------
@@ -151,6 +172,16 @@ fn fat_flush() {
     mem_block_write(ffs as u32, fat_buf);
     mem_block_write((ffs + FAT_SIZE_SECTORS) as u32, fat_buf);
     mem_block_write(first_root_dir_sector() as u32, root_dir_buf as *u8);
+}
+
+// Syncs the in-memory fat_buf/root_dir_buf mirrors FROM disk -- the
+// counterpart to fat_flush(). fat_format() leaves both mirrors correct in
+// memory already (it just built them), so it doesn't need this; it's
+// needed whenever `disk` was populated some other way (load_seed_from_host()
+// loading a foreign image) before fat_open(FA_READ) can see its directory.
+fn fat_mount() {
+    mem_block_read(first_fat_sector() as u32, fat_buf);
+    mem_block_read(first_root_dir_sector() as u32, root_dir_buf as *u8);
 }
 
 // FAT12 packs two 12-bit entries into 3 bytes. For an even cluster N, its
@@ -267,61 +298,189 @@ fn fat_alloc_chain(num_clusters: u32) -> u32 {
     return first;
 }
 
-// name83 must point to exactly 11 bytes (8.3 short name, space-padded, no
-// dot) -- no LFN, no subdirectories, no delete/rename: none of that is
-// needed to produce one mtools-verifiable image.
-fn fat_create_file(name83: *u8, data: *u8, len: u32) -> i32 {
-    let cluster_size: u32 = SECTOR_SIZE as u32;
-    let mut num_clusters: u32 = (len + cluster_size - 1) / cluster_size;
-    if (num_clusters == 0) {
-        num_clusters = 1;
-    }
-    let first_cluster: u32 = fat_alloc_chain(num_clusters);
-    if (first_cluster == 0) {
-        return -1;
-    }
-    if (next_free_root_entry >= ROOT_ENTRY_COUNT as u32) {
-        return -1;
-    }
+// -- File-handle API (fat_open/fat_read/fat_write/fat_close), FatFs-flavored ---
+// name83 arguments must point to exactly 11 bytes (8.3 short name,
+// space-padded, no dot) -- no LFN, no subdirectories: not needed for the
+// flat, single-directory root_dir_buf this driver has.
 
-    let mut remaining: u32 = len;
-    let mut cluster: u32 = first_cluster;
-    let mut src: *u8 = data;
+struct FatFile {
+    dir_index: usize;    // root_dir_buf slot
+    start_cluster: u32;  // 0 until the first fat_write allocates one
+    cur_cluster: u32;
+    pos_in_cluster: u32; // 0..SECTOR_SIZE
+    fptr: u32;           // absolute byte position
+    fsize: u32;          // known size (read) / grows as written (write)
+    writing: bool;
+}
+
+let FA_READ: i32 = 0x01;
+let FA_WRITE: i32 = 0x02;
+let FA_CREATE_ALWAYS: i32 = 0x08;
+
+// Linear scan of root_dir_buf (checked array access) for a matching 8.3
+// name, skipping free slots (name[0] == 0, FAT's own "never used" marker).
+// Returns the slot index, or -1 if not found.
+fn fat_find_entry(name83: *u8) -> i32 {
+    for i: usize in 0..<ROOT_ENTRY_COUNT {
+        let name_p: *u8 = root_dir_buf[i].name;
+        if (name_p[0] != 0) {
+            if (bytes_eq(name_p, name83, 11) != 0) {
+                return i as i32;
+            }
+        }
+    }
+    return -1;
+}
+
+// mode is FA_READ, or (FA_WRITE | FA_CREATE_ALWAYS) -- no other combination
+// is supported (no FA_OPEN_ALWAYS/FA_OPEN_APPEND -- always create-and-
+// truncate for writing, matching what this demo's two call sites need).
+// FA_CREATE_ALWAYS always appends a fresh root_dir_buf slot -- it does not
+// check for (and overwrite) an existing entry of the same name, the same
+// limitation the old fat_create_file had (no rename/delete in scope).
+fn fat_open(fp: *FatFile, name83: *u8, mode: i32) -> i32 {
+    if ((mode & FA_CREATE_ALWAYS) != 0) {
+        if (next_free_root_entry >= ROOT_ENTRY_COUNT as u32) {
+            return -1;
+        }
+        let idx: usize = next_free_root_entry as usize;
+        bytes_copy(root_dir_buf[idx].name, name83, 11);
+        root_dir_buf[idx].attr = 0x20; // ARCHIVE
+        root_dir_buf[idx].nt_reserved = 0;
+        root_dir_buf[idx].create_time_tenth = 0;
+        root_dir_buf[idx].create_time = 0;
+        root_dir_buf[idx].create_date = 0x21; // 1980-01-01 placeholder (no RTC in this demo)
+        root_dir_buf[idx].last_access_date = 0;
+        root_dir_buf[idx].first_cluster_hi = 0;
+        root_dir_buf[idx].write_time = 0;
+        root_dir_buf[idx].write_date = 0x21;
+        root_dir_buf[idx].first_cluster_lo = 0; // filled in by fat_close once known
+        root_dir_buf[idx].file_size = 0;
+        next_free_root_entry = next_free_root_entry + 1;
+
+        fp.dir_index = idx;
+        fp.start_cluster = 0;
+        fp.cur_cluster = 0;
+        fp.pos_in_cluster = 0;
+        fp.fptr = 0;
+        fp.fsize = 0;
+        fp.writing = true;
+        return 0;
+    }
+    if ((mode & FA_READ) != 0) {
+        let found: i32 = fat_find_entry(name83);
+        if (found < 0) {
+            return -1;
+        }
+        let idx: usize = found as usize;
+        fp.dir_index = idx;
+        fp.start_cluster = root_dir_buf[idx].first_cluster_lo as u32;
+        fp.cur_cluster = fp.start_cluster;
+        fp.pos_in_cluster = 0;
+        fp.fptr = 0;
+        fp.fsize = root_dir_buf[idx].file_size;
+        fp.writing = false;
+        return 0;
+    }
+    return -1; // unsupported mode
+}
+
+// Reads up to btr bytes into buf, following the cluster chain as needed.
+// *br is set to the actual number of bytes read (less than btr at EOF --
+// that is normal, not an error).
+fn fat_read(fp: *FatFile, buf: *u8, btr: u32, br: *u32) -> i32 {
+    let avail: u32 = fp.fsize - fp.fptr;
+    let mut remaining: u32 = btr;
+    if (remaining > avail) {
+        remaining = avail;
+    }
+    let mut total: u32 = 0;
+    let mut dst: *u8 = buf;
     while (remaining > 0) {
         let mut sector_buf: [u8; SECTOR_SIZE];
-        for i: usize in 0..<SECTOR_SIZE {
-            sector_buf[i] = 0;
+        let sector_num: u32 = (first_data_sector() as u32) + (fp.cur_cluster - 2);
+        mem_block_read(sector_num, sector_buf);
+        let space_in_cluster: u32 = (SECTOR_SIZE as u32) - fp.pos_in_cluster;
+        let mut chunk: u32 = remaining;
+        if (chunk > space_in_cluster) {
+            chunk = space_in_cluster;
         }
-        let mut chunk: u32 = cluster_size;
-        if (remaining < cluster_size) {
-            chunk = remaining;
+        let src_p: *u8 = sector_buf;
+        bytes_copy(dst, src_p + (fp.pos_in_cluster as isize), chunk as isize);
+        dst = dst + (chunk as isize);
+        fp.pos_in_cluster = fp.pos_in_cluster + chunk;
+        fp.fptr = fp.fptr + chunk;
+        total = total + chunk;
+        remaining = remaining - chunk;
+        if (fp.pos_in_cluster >= SECTOR_SIZE as u32) {
+            fp.pos_in_cluster = 0;
+            fp.cur_cluster = fat_get_entry(fp.cur_cluster) as u32;
         }
-        bytes_copy(sector_buf, src, chunk as isize);
-        let sector_num: u32 = (first_data_sector() as u32) + (cluster - 2);
+    }
+    *br = total;
+    return 0;
+}
+
+// Writes btw bytes from buf, growing the file (sequential append only, no
+// seek). Allocates the first cluster lazily on the first call, and a fresh
+// one whenever the current cluster fills and more data remains. Each
+// cluster's sector is read-modify-written so multiple fat_write calls into
+// the same (still-open) cluster don't clobber each other's bytes.
+fn fat_write(fp: *FatFile, buf: *u8, btw: u32, bw: *u32) -> i32 {
+    let mut remaining: u32 = btw;
+    let mut src: *u8 = buf;
+    while (remaining > 0) {
+        if (fp.start_cluster == 0) {
+            let c: u32 = fat_alloc_chain(1);
+            if (c == 0) {
+                *bw = btw - remaining;
+                return -1;
+            }
+            fp.start_cluster = c;
+            fp.cur_cluster = c;
+            fp.pos_in_cluster = 0;
+        }
+        let mut sector_buf: [u8; SECTOR_SIZE];
+        let sector_num: u32 = (first_data_sector() as u32) + (fp.cur_cluster - 2);
+        if (fp.pos_in_cluster > 0) {
+            mem_block_read(sector_num, sector_buf); // preserve earlier bytes in this cluster
+        }
+        let space_in_cluster: u32 = (SECTOR_SIZE as u32) - fp.pos_in_cluster;
+        let mut chunk: u32 = remaining;
+        if (chunk > space_in_cluster) {
+            chunk = space_in_cluster;
+        }
+        let dst_p: *u8 = sector_buf;
+        bytes_copy(dst_p + (fp.pos_in_cluster as isize), src, chunk as isize);
         mem_block_write(sector_num, sector_buf);
         src = src + (chunk as isize);
+        fp.pos_in_cluster = fp.pos_in_cluster + chunk;
+        fp.fptr = fp.fptr + chunk;
         remaining = remaining - chunk;
-        cluster = fat_get_entry(cluster) as u32;
+        if (fp.fptr > fp.fsize) {
+            fp.fsize = fp.fptr;
+        }
+        if ((fp.pos_in_cluster >= SECTOR_SIZE as u32) && (remaining > 0)) {
+            let next: u32 = fat_alloc_chain(1);
+            if (next == 0) {
+                *bw = btw - remaining;
+                return -1;
+            }
+            fat_set_entry(fp.cur_cluster, next as u16);
+            fp.cur_cluster = next;
+            fp.pos_in_cluster = 0;
+        }
     }
+    *bw = btw;
+    return 0;
+}
 
-    // Indexing root_dir_buf (a checked [DirEntry; ROOT_ENTRY_COUNT] array)
-    // is what actually proves the slot is in range.
-    let idx: usize = next_free_root_entry as usize;
-    bytes_copy(root_dir_buf[idx].name, name83, 11);
-    root_dir_buf[idx].attr = 0x20; // ARCHIVE
-    root_dir_buf[idx].nt_reserved = 0;
-    root_dir_buf[idx].create_time_tenth = 0;
-    root_dir_buf[idx].create_time = 0;
-    root_dir_buf[idx].create_date = 0x21; // 1980-01-01, a fixed placeholder (no RTC in this demo)
-    root_dir_buf[idx].last_access_date = 0;
-    root_dir_buf[idx].first_cluster_hi = 0;
-    root_dir_buf[idx].write_time = 0;
-    root_dir_buf[idx].write_date = 0x21;
-    root_dir_buf[idx].first_cluster_lo = first_cluster as u16;
-    root_dir_buf[idx].file_size = len;
-    next_free_root_entry = next_free_root_entry + 1;
-
-    fat_flush();
+fn fat_close(fp: *FatFile) -> i32 {
+    if (fp.writing) {
+        root_dir_buf[fp.dir_index].first_cluster_lo = fp.start_cluster as u16;
+        root_dir_buf[fp.dir_index].file_size = fp.fsize;
+        fat_flush();
+    }
     return 0;
 }
 
@@ -350,13 +509,79 @@ fn dump_disk_to_host() -> i32 {
     return 0;
 }
 
+// Loads a host-created FAT image (built with real mformat/mcopy by the
+// test harness, not by fatfs.tkb) into `disk`, so fat_open/fat_read can be
+// exercised against an independently-written image. mode 1 = "rb".
+fn load_seed_from_host() -> i32 {
+    let name: *u8 = "fatfs_seed.img";
+    let handle: i32 = semihosting_open(name, cstr_len(name) as i32, 1);
+    if (handle < 0) {
+        return -1;
+    }
+    let not_read: i32 = semihosting_read(handle, disk, (SECTOR_SIZE * TOTAL_SECTORS) as i32);
+    semihosting_close(handle);
+    if (not_read != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+// Prints n raw (not necessarily NUL-terminated) bytes via UART -- for
+// printing a fat_read()'d buffer.
+fn uart_print_bytes(buf: *u8, n: u32) {
+    let mut i: u32 = 0;
+    while (i < n) {
+        uart_putc(buf[i as isize]);
+        i = i + 1;
+    }
+}
+
+// Creates name83 with the NUL-terminated content string, via
+// fat_open(create)+fat_write+fat_close -- the two demo files below share
+// this instead of repeating the three-call sequence twice.
+fn create_demo_file(name83: *u8, content: *u8) -> i32 {
+    let mut fp: FatFile;
+    if (fat_open(&fp, name83, FA_WRITE | FA_CREATE_ALWAYS) != 0) {
+        return -1;
+    }
+    let len: u32 = cstr_len(content);
+    let mut bw: u32 = 0;
+    if (fat_write(&fp, content, len, &bw) != 0) {
+        fat_close(&fp);
+        return -1;
+    }
+    return fat_close(&fp);
+}
+
 fn app_main() {
+    // Phase 1: read a file out of a FAT image built independently by real
+    // mformat/mcopy (not by fatfs.tkb) -- proves fat_open/fat_read against
+    // genuine third-party interop, not just takibi's own round trip.
+    if (load_seed_from_host() == 0) {
+        fat_mount();
+        let mut seed_fp: FatFile;
+        if (fat_open(&seed_fp, "SEED    TXT", FA_READ) == 0) {
+            let mut seed_buf: [u8; 128];
+            let mut seed_br: u32 = 0;
+            fat_read(&seed_fp, seed_buf, 128, &seed_br);
+            fat_close(&seed_fp);
+            uart_puts("seed read: ");
+            uart_print_bytes(seed_buf, seed_br);
+        } else {
+            uart_puts("seed read: FAIL (open)\r\n");
+        }
+    } else {
+        uart_puts("seed read: FAIL (load)\r\n");
+    }
+
+    // Phase 2: format the in-memory disk and create two demo files via the
+    // fat_open/fat_write/fat_close API.
     fat_format();
     uart_puts("format: OK\r\n");
 
     let hello_name: *u8 = "HELLO   TXT";
     let hello_content: *u8 = "Hello, takibi!\r\n";
-    if (fat_create_file(hello_name, hello_content, cstr_len(hello_content)) == 0) {
+    if (create_demo_file(hello_name, hello_content) == 0) {
         uart_puts("create HELLO.TXT: OK\r\n");
     } else {
         uart_puts("create HELLO.TXT: FAIL\r\n");
@@ -364,12 +589,29 @@ fn app_main() {
 
     let readme_name: *u8 = "README  TXT";
     let readme_content: *u8 = "fatfs demo file.\r\n";
-    if (fat_create_file(readme_name, readme_content, cstr_len(readme_content)) == 0) {
+    if (create_demo_file(readme_name, readme_content) == 0) {
         uart_puts("create README.TXT: OK\r\n");
     } else {
         uart_puts("create README.TXT: FAIL\r\n");
     }
 
+    // Phase 3: read HELLO.TXT back in the same process -- a same-process
+    // round trip (takibi writes, takibi reads), independent of Phase 1's
+    // external-interop check and Phase 4's external mtools check below.
+    let mut read_fp: FatFile;
+    if (fat_open(&read_fp, hello_name, FA_READ) == 0) {
+        let mut read_buf: [u8; 64];
+        let mut read_br: u32 = 0;
+        fat_read(&read_fp, read_buf, 64, &read_br);
+        fat_close(&read_fp);
+        uart_puts("read-back HELLO.TXT: ");
+        uart_print_bytes(read_buf, read_br);
+    } else {
+        uart_puts("read-back HELLO.TXT: FAIL\r\n");
+    }
+
+    // Phase 4: dump the disk out to a host file for scripts/fatfs_mtools_test.py
+    // to verify independently with mtools (mdir/mcopy).
     if (dump_disk_to_host() == 0) {
         uart_puts("dump: OK\r\n");
     } else {

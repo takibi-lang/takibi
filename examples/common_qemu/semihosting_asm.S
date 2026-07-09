@@ -54,3 +54,22 @@ semihosting_close:
     hlt     #0xf000
     add     sp, sp, #16
     ret
+
+/* fn semihosting_read(handle: i32, buf: *u8, len: i32) -> i32
+   SYS_READ (0x06): block = { handle, buf_ptr, len }.
+   Returns the number of bytes NOT read (0 = fully read len bytes). Used by
+   examples/fatfs to load a host-created (mtools) FAT image into its
+   in-memory disk buffer, proving fat_open/fat_read against an
+   independently-written image, not just what fatfs.tkb itself wrote. */
+    .global semihosting_read
+    .type   semihosting_read, %function
+semihosting_read:
+    sub     sp, sp, #32
+    str     x0, [sp, #0]      /* handle */
+    str     x1, [sp, #8]      /* buf ptr */
+    str     x2, [sp, #16]     /* len */
+    mov     x1, sp
+    mov     x0, #0x06         /* SYS_READ */
+    hlt     #0xf000
+    add     sp, sp, #32
+    ret

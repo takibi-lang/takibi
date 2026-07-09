@@ -166,20 +166,36 @@ run_forbid_trap_ok_test() {
 
 # run_fatfs_test NAME KERNEL EXPECTED MTOOLS_SCRIPT
 #
-# Like run_test (diffs QEMU's stdout against EXPECTED), but also verifies
-# the FAT12 disk image the kernel wrote out via ARM semihosting
-# (examples/fatfs/fatfs.tkb's dump_disk_to_host(), landing in QEMU's cwd as
-# "fatfs_disk.img"): QEMU is run from a scratch directory so the image has
-# a known location, then MTOOLS_SCRIPT hands it to the host's `mtools`
-# (mdir/mcopy) -- an independent oracle that the produced image is a
-# spec-valid, correctly-populated FAT12 volume, not just that fatfs.tkb's
-# own status prints claim success.
+# Like run_test (diffs QEMU's stdout against EXPECTED), but also:
+# - seeds the scratch dir with a FAT image built by REAL mformat/mcopy (not
+#   by fatfs.tkb) before QEMU even starts, containing one file (SEED.TXT),
+#   so fatfs.tkb's load_seed_from_host()+fat_open(FA_READ) is exercised
+#   against genuinely independent, third-party-written interop, not just
+#   its own round trip. mformat's flags are forced to match fatfs.tkb's
+#   fixed layout constants exactly (SECTOR_SIZE=512, TOTAL_SECTORS=128,
+#   1 sector/cluster, RESERVED_SECTORS=1, NUM_FATS=2, FAT_SIZE_SECTORS=1
+#   sector, ROOT_ENTRY_COUNT=16) -- fatfs.tkb doesn't parse the on-disk BPB
+#   dynamically (see its header comment), so the seed image's geometry must
+#   line up exactly. mtools' `-r`/`-L`/etc. flags are NOT 1:1 with these
+#   field values (e.g. `-r 1` -> 16 root entries, confirmed empirically),
+#   see the flags below.
+# - verifies the FAT12 disk image the kernel wrote out via ARM semihosting
+#   (fatfs.tkb's dump_disk_to_host(), landing in QEMU's cwd as
+#   "fatfs_disk.img"): QEMU is run from that same scratch directory so both
+#   images have a known location, then MTOOLS_SCRIPT hands the dumped image
+#   to the host's `mtools` (mdir/mcopy) -- an independent oracle that the
+#   produced image is a spec-valid, correctly-populated FAT12 volume, not
+#   just that fatfs.tkb's own status prints claim success.
 run_fatfs_test() {
     local name="$1" kernel="$2" expected="$3" mtools_script="$4"
     local kernel_abs tmp_dir tmp_out ok=1
     kernel_abs="$(pwd)/$kernel"
     tmp_dir=$(mktemp -d)
     tmp_out=$(mktemp)
+
+    printf 'hello from mtools seed!\r\n' > "$tmp_dir/seedfile.txt"
+    mformat -C -i "$tmp_dir/fatfs_seed.img" -t 2 -h 2 -n 32 -c 1 -r 1 -L 1 :: > /dev/null
+    mcopy -i "$tmp_dir/fatfs_seed.img" "$tmp_dir/seedfile.txt" ::SEED.TXT
 
     ( cd "$tmp_dir" && echo | timeout "$TIMEOUT" $QEMU $QEMU_COMMON -kernel "$kernel_abs" > "$tmp_out" 2>/dev/null )
 
