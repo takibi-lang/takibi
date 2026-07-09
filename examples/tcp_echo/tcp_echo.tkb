@@ -62,24 +62,15 @@ use "examples/common/netutil.tkb";
 
 let mut our_mac: [u8; 6];
 
-// IPv4 field offsets, relative to the start of the IP header.
-let IP_TOTAL_LEN: usize = 2;
-let IP_TTL:       usize = 8;
-let IP_PROTOCOL:  usize = 9;
-let IP_CHECKSUM:  usize = 10;
-let IP_SRC:       usize = 12;
-let IP_DST:       usize = 16;
-
-// TCP field offsets, relative to the start of the TCP header.
-let TCP_SRC_PORT:    usize = 0;
-let TCP_DST_PORT:    usize = 2;
-let TCP_SEQ:         usize = 4;
-let TCP_ACK:         usize = 8;
-let TCP_DATA_OFFSET: usize = 12;
-let TCP_FLAGS:       usize = 13;
-let TCP_WINDOW:      usize = 14;
-let TCP_CHECKSUM:    usize = 16;
-let TCP_URGENT:      usize = 18;
+// IPv4/TCP field offsets (IP_TOTAL_LEN, IP_TTL, ..., TCP_URGENT) come from
+// examples/common/netutil.tkb's `use` above -- offsetof(Ipv4Hdr/TcpHdr,
+// field)-based, not hand-maintained here (GitHub issue #79 follow-up: this
+// file used to redeclare its own copy of every one of these with the same
+// hardcoded values, silently redundant with netutil.tkb's canonical
+// versions ever since GitHub issue #77's offsetof refactor added them
+// there; harmless while duplicate globals compiled silently, but exactly
+// the kind of drift the new duplicate-global check exists to catch --
+// removed here rather than suppressed).
 
 // TCP_FLAG_*/PROTO_TCP/TCP_ECHO_PORT are wire-VALUE constants compared
 // directly against a byte/half-word field, so they take that field's

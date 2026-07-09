@@ -3942,3 +3942,83 @@ QEMU recipes get `$(COMMON_GIC)` back on their command line;
 `irq_stm32.o`/`echo_stm32.o` prerequisites switched to
 `$(COMMON_GIC_REGS)`), `test/test_takibi.ml` (`infer_files` helper, 2
 new tests).
+
+### Issue #79 Follow-up, Continued: Duplicate Global `let` Declarations
+
+Immediately after the function-duplicate fix above, checked whether the
+same gap existed for global `let` declarations -- it did, and broke
+differently. `type_inf.ml`'s `genv`-building fold did `StringMap.add name
+... m` unconditionally, no duplicate check at all (not even a same-file
+one, unlike `register_definition`'s partial guard for functions).
+Confirmed with a throwaway two-`let` example
+(`let mut counter: i32 = 1; let mut counter: i32 = 2;`) and a
+disassembly, not just read from the code: unlike the function case (one
+llvalue, second definition's blocks silently unreachable),
+`llvm_gen.ml`'s `Hashtbl.add global_vars` (also non-overwriting) plus
+LLVM's own `define_global` auto-renaming a second same-named global to
+`"name.1"` at the module level meant the two initializers landed in
+**two separate, real globals** -- `counter` (value 1) sitting in the
+binary completely unread, `counter.1` (value 2) the one every read/write
+in the program actually resolved to via `Hashtbl.find`'s "most recently
+added wins" lookup semantics. Same underlying category of bug (silent
+tolerance where a compile error belongs), different concrete failure
+mode.
+
+**Fix**: a `Hashtbl.create`-backed `seen_globals` set in the `genv` fold,
+raising `TypeError (Lexing.dummy_pos, "duplicate global '%s'")` on a
+second `LetDef` for the same name. `Lexing.dummy_pos` (no real line/
+column) is a deliberate match to the existing convention, not a
+shortcut: `Ast.toplevel` has no `{ desc; loc }` wrapper the way
+`expr`/`stmt` do (only `FuncDef` carries a location, via `func.def_loc`),
+so `LetDef`/`ExternFuncDef` genuinely have no position to report --
+`ExternFuncDef`'s own pre-existing "cannot be overloaded" error already
+uses the identical `dummy_pos` convention, confirmed side-by-side (both
+print `File "", line 0, character 0: ...`) rather than assumed to match.
+Adding a real location to `LetDef` (touching `ast.ml`, `parser.mly`, and
+every one of the ~7 pattern-match sites across `type_inf.ml`/
+`llvm_gen.ml`) was considered and set aside as disproportionate scope for
+what this fix needs -- YAGNI: the error firing correctly and naming the
+duplicate is the actual requirement, and matching an already-accepted
+lesser precedent (`ExternFuncDef`) rather than introducing new AST
+capability nothing else uses.
+
+**This one WAS live in real example code, not just latent**: rebuilding
+surfaced `examples/tcp_echo/tcp_echo.tkb` and `examples/http_server/
+http_server.tkb`, both with a `duplicate global 'IP_TOTAL_LEN'`/
+`'ARP_HTYPE'` error. Root cause: both files hand-declared their own
+`IP_TOTAL_LEN`/`IP_TTL`/.../`TCP_URGENT` (and `http_server.tkb` also
+`ARP_HTYPE`/.../`ARP_TPA`) offset constants with hardcoded literal
+values -- silently redundant with `examples/common/netutil.tkb`'s own
+`offsetof(Ipv4Hdr/TcpHdr/ArpHdr, field)`-based versions of the exact same
+names ever since GitHub issue #77's offsetof refactor added those to
+netutil.tkb (both files already `use netutil.tkb`, inherited from the
+issue #55 Makefile migration). Nothing else in `examples/` had this
+pattern (`icmp_echo.tkb`/`tcp_parse.tkb`/`ip_parse.tkb` -- also
+`netutil.tkb` consumers -- never redeclared their own copies). Fixed by
+deleting the two files' entire redundant offset-constant blocks, relying
+on `netutil.tkb`'s canonical versions instead (a pure deduplication --
+same values, confirmed by the full `tcp_echo`/`http_server` QEMU test
+suites, including the real TCP handshake/data-echo/close cycle and HTTP
+request/response cycle, passing byte-identically afterward).
+
+**A third, adjacent case was found but deliberately NOT fixed this
+session**: a global `let` and a `fn` sharing a name (e.g. `let mut foo:
+i32 = 1; fn foo() {}`) also compiles with no error today. Checked what
+actually happens at the object level (not assumed): LLVM auto-renames
+the function to `foo.1` (no raw symbol collision, unlike a naive guess),
+but the source-level name `foo` becomes ambiguous/confusing regardless.
+This lives in a different namespace/fold (`fenv` vs `genv`) than either
+fix above, so closing it would need a shared cross-namespace name
+registry, not a small extension of either existing check -- flagged for
+a future session rather than expanded into scope here mid-session.
+
+**Verification**: `make clean && make check` (langcheck, 472 unit tests
+-- up from 470, +2 for this fix -- stm32build, all 70 QEMU integration/
+compile-error tests, including the full `tcp_echo`/`http_server`
+protocol test suites re-verifying the netutil.tkb-only constants produce
+identical wire behavior) passes with zero regressions.
+
+**Files**: `lib/type_inf.ml` (`genv` fold, `seen_globals` duplicate
+check), `examples/tcp_echo/tcp_echo.tkb`, `examples/http_server/
+http_server.tkb` (redundant offset-constant blocks deleted),
+`test/test_takibi.ml` (2 new tests).

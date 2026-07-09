@@ -2499,6 +2499,44 @@ let infer_tests = [
        | exception Types.TypeError (_, msg) ->
            Alcotest.failf "expected this to type-check as two overloads, got: %s" msg);
 
+  (* GitHub issue #79 follow-up, same session, reported and fixed right
+     after the function case above: two global `let`s sharing a name used
+     to compile silently too, and broke differently from the function
+     case -- LLVM's define_global doesn't silently reuse the existing
+     global the way declare_func's Hashtbl guard did, it auto-renames the
+     second one ("name.1" at the IR level), so the two initializers ended
+     up in genuinely separate storage, with the FIRST one's silently
+     orphaned (never read from) and only the SECOND live under a mangled
+     name -- confirmed by disassembling a throwaway two-`let` example
+     before writing this fix, not assumed. Found examples/tcp_echo/
+     tcp_echo.tkb and examples/http_server/http_server.tkb had exactly
+     this: hand-maintained IP_TOTAL_LEN/TCP_*/ARP_* offset constants that
+     had been silently redundant with examples/common/netutil.tkb's own
+     offsetof-based versions of the same names ever since GitHub issue
+     #77's refactor added them there -- removed as dead duplication once
+     this check caught it. *)
+  Alcotest.test_case
+    "duplicate global `let` declarations are rejected (regression for \
+     the real tcp_echo.tkb/http_server.tkb redundant-offset-constant bug \
+     this check caught -- see HISTORY.md's issue #79 follow-up)" `Quick
+    (expect_type_error "duplicate global"
+       "let mut global_dup_counter: i32 = 1;
+        let mut global_dup_counter: i32 = 2;
+        fn use_global_dup_counter() { global_dup_counter = global_dup_counter + 1; }");
+
+  Alcotest.test_case
+    "two DIFFERENTLY-named globals are unaffected by the duplicate-global \
+     check (negative control)" `Quick
+    (fun () ->
+       match infer
+         "let mut global_a: i32 = 1;
+          let mut global_b: i32 = 2;
+          fn use_globals() { global_a = global_b; }"
+       with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.failf "expected this to type-check cleanly, got: %s" msg);
+
 ]
 
 (* -- Codegen tests ----------------------------------------------------------

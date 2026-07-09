@@ -2019,9 +2019,32 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.UseDef _    -> m
   ) StringMap.empty prog in
   (* Global mutability: plain `let` = immutable compile-time constant, `let mut` = variable.
-     Reuses the same tyenv-based mutability check as local variables (Assign/AddrOf). *)
+     Reuses the same tyenv-based mutability check as local variables (Assign/AddrOf).
+     GitHub issue #79 follow-up: two global `let`s sharing a name used to
+     compile silently too -- StringMap.add here just overwrote the earlier
+     binding in genv's own type-checking view, and llvm_gen.ml's
+     `Hashtbl.add global_vars` (also non-overwriting, LLVM auto-renames the
+     second `define_global` call to "name.1" at the IR level) meant the two
+     initializers landed in TWO SEPARATE globals rather than one -- the
+     first one's storage silently orphaned (never read from), the second
+     one silently live under a mangled name, with no verifier error either
+     (both are individually well-formed IR). Same root cause and same fix
+     shape as the FuncDef case just above (register_definition): reject at
+     the point of definition instead of silently keeping only the last one
+     kept. `Ast.LetDef` (like `Ast.ExternFuncDef`) carries no location in
+     the AST -- `toplevel` has no `{ desc; loc }` wrapper the way
+     `expr`/`stmt` do, only `FuncDef` gets one via `func.def_loc` -- so
+     this raises at `Lexing.dummy_pos`, the same convention
+     `ExternFuncDef`'s own "cannot be overloaded" error already uses one
+     line below. *)
+  let seen_globals : (string, unit) Hashtbl.t = Hashtbl.create 32 in
   let genv = List.fold_left (fun m -> function
-    | Ast.LetDef (name, ty_opt, _, _, is_mutable) -> StringMap.add name (of_ast_opt ty_opt, is_mutable) m
+    | Ast.LetDef (name, ty_opt, _, _, is_mutable) ->
+        if Hashtbl.mem seen_globals name then
+          raise (TypeError (Lexing.dummy_pos,
+            Printf.sprintf "duplicate global '%s'" name));
+        Hashtbl.add seen_globals name ();
+        StringMap.add name (of_ast_opt ty_opt, is_mutable) m
     | Ast.FuncDef _                -> m
     | Ast.ExternFuncDef _          -> m
     | Ast.StructDef _              -> m
