@@ -1,8 +1,12 @@
 // Interrupt-driven UART echo server. The platform HAL supplies uniform
 // setup/unmask helpers; QEMU dispatches through GIC while STM32 vectors
 // USART1 directly to USART1_IRQHandler.
-
-use "examples/common_qemu/gic.tkb";
+//
+// `use`s gic_regs.tkb (types only), not full gic.tkb -- see
+// examples/irq/irq.tkb's identical header comment (GitHub issue #79
+// follow-up) for why. The QEMU build still needs gic.tkb's actual
+// functions -- added back to this example's own Makefile recipe.
+use "examples/common_qemu/gic_regs.tkb";
 
 let mut echo_rx_buf: [u8; 64];
 let mut echo_rx_head: io usize;

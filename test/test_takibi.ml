@@ -11,6 +11,23 @@ let parse src =
 let infer src =
   Type_inf.infer_program (parse src)
 
+(* Parses each (filename, src) pair as if it were a distinct source file
+   (Lexing.set_filename, matching bin/main.ml's own parse_file) and
+   concatenates the results, mirroring how multiple .tkb files given to
+   takibi on the command line -- or resolved transitively via `use` --
+   become one flat AST. Const_env/Type_layout are reset once for the
+   whole group, not per file, matching bin/main.ml's own reset-once
+   discipline (cross-file constant/layout state is meant to accumulate). *)
+let infer_files files =
+  Const_env.reset ();
+  Type_layout.reset ();
+  let prog = List.concat_map (fun (filename, src) ->
+    let lexbuf = Lexing.from_string src in
+    Lexing.set_filename lexbuf filename;
+    Parser.program Lexer.read lexbuf
+  ) files in
+  Type_inf.infer_program prog
+
 (* Runs the full pipeline through LLVM codegen (no target machine, no
    object-file emission -- gen_program works without setup_target, see its
    align_opt handling). Each caller must use function/global names unique
@@ -2443,6 +2460,45 @@ let infer_tests = [
        "fn overload_duplicate(v: i32) {}
         fn overload_duplicate(v: i32) {}");
 
+  (* GitHub issue #79 follow-up: two DIFFERENT files defining the exact
+     same signature under the same name used to compile silently (the
+     first one in concatenation order silently won, the second was
+     dead-coded with no verifier error -- see HISTORY.md's issue #79
+     follow-up entry for the real bug this let slip through, found in
+     examples/common_qemu/gic.tkb vs examples/common_stm32/nvic.tkb both
+     defining irq_uart_rx_setup/irq_uart_rx_unmask). register_definition's
+     same-file-only guard is what let this through; the fix widens it to
+     any two files. *)
+  Alcotest.test_case
+    "duplicate function definitions across TWO DIFFERENT files are \
+     rejected too, not just within the same file (regression for the \
+     real gic.tkb/nvic.tkb collision -- see HISTORY.md's issue #79 \
+     follow-up)" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "fn cross_file_dup(v: i32) {}";
+         "b.tkb", "fn cross_file_dup(v: i32) {}";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "mentions the FIRST file" true
+             (contains_substring msg "a.tkb");
+           Alcotest.(check bool) "mentions 'duplicate definition'" true
+             (contains_substring msg "duplicate definition"));
+
+  Alcotest.test_case
+    "genuinely different signatures across two files are still a valid \
+     overload set, not a false-positive duplicate (negative control for \
+     the cross-file duplicate check above)" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "fn cross_file_overload(v: i32) -> i32 { return v; }";
+         "b.tkb", "fn cross_file_overload(v: u32) -> u32 { return v; }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.failf "expected this to type-check as two overloads, got: %s" msg);
+
 ]
 
 (* -- Codegen tests ----------------------------------------------------------
@@ -4232,6 +4288,29 @@ let codegen_tests = [
          (contains_substring ir "fence iorw, iorw");
        expect_codegen_error "interrupt event wait/notify is not implemented"
          "fn riscv_event_wait_is_rejected() { interrupt_wait(); }" ());
+
+  Alcotest.test_case
+    "GitHub issue #79: a refined `io` global (the common_stm32/uart.tkb \
+     ring-buffer idiom, `let mut head: io {0..<128 as usize};`) keeps its \
+     proven range across a read into a local, so `buf[head]` proves clean \
+     with zero trap sites -- regression for the real bug found while \
+     applying --forbid-trap to every example: an UNREFINED `io usize` \
+     global has every WRITE site going through `% 128` (so the value is \
+     always in range at runtime) but loses that invariant at every READ \
+     site, since a bare usize global carries no memory of the range its \
+     writers respect. Fixed in the application code by refining the \
+     global's own declared type, not by changing the compiler -- this \
+     test exists so the underlying mechanism (a refined io global's read \
+     upgrading a local let's range, the same rule issue #77's Pass 2 fix \
+     relies on for plain globals) has its own regression coverage, \
+     independent of any example rebuild finding it by accident" `Quick
+    (expect_trap_sites 0
+       "let mut ring_head: io {0..<128 as usize};
+        fn refnum79_ring_read() -> u8 {
+          let mut buf: [u8; 128];
+          let head: usize = ring_head;
+          return buf[head];
+        }");
 
   (* GitHub issue #72: a BARE cast (`x as usize`, not the explicit
      `x as {lo..<hi as usize}` form) now infers the tightest refined type

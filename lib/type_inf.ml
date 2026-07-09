@@ -1964,9 +1964,31 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let register_definition loc key name =
     let file = loc.Lexing.pos_fname in
     match Hashtbl.find_opt definition_files key with
-    | Some previous when previous = file ->
-        raise (TypeError (loc, Printf.sprintf "duplicate overload '%s'" name))
-    | _ -> Hashtbl.replace definition_files key file
+    | Some previous ->
+        (* Cross-file duplicates are rejected too, not just same-file ones
+           (GitHub issue #79 follow-up): two `.tkb` files defining the exact
+           same signature under the same overload key used to compile
+           silently, with llvm_gen.ml's declare_func/gen_func pair (Pass 1
+           registers only the FIRST FuncDef's llvalue per key; Pass 2 then
+           calls gen_func on EVERY FuncDef with that key, appending a second,
+           unreachable "entry" block onto the SAME llvalue) making whichever
+           definition happened to come first in file-concatenation order the
+           one that silently wins, with the other's body silently dead-coded
+           -- no verifier error, no warning, correct only by accident of
+           `use`/Makefile ordering. Found via examples/irq/irq.tkb's shared
+           dispatch pattern: examples/common_qemu/gic.tkb and
+           examples/common_stm32/nvic.tkb both had to be present in the same
+           STM32 build (the former only for a dead-on-STM32 type reference,
+           see gic.tkb's own header comment) and both defined
+           irq_uart_rx_setup/irq_uart_rx_unmask with the identical
+           signature -- previously silent, now a compile error pointing at
+           both locations. *)
+        if previous = file then
+          raise (TypeError (loc, Printf.sprintf "duplicate overload '%s'" name))
+        else
+          raise (TypeError (loc, Printf.sprintf
+            "duplicate definition of '%s': already defined in %s" name previous))
+    | None -> Hashtbl.replace definition_files key file
   in
   let fenv = List.fold_left (fun m -> function
     | Ast.FuncDef fdef ->

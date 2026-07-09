@@ -47,13 +47,27 @@ COMMON_PRINT_QEMU  := $(COMMON_QEMU_DIR)/print.tkb
 COMMON_PRINT       := $(COMMON_PRINT_BASE) $(COMMON_PRINT_QEMU)
 # GitHub issue #55: examples/common_qemu/virtio_mmio.tkb now `use`s this
 # file itself (it references the `gic` struct directly for its own IRQ
-# ack/EOI), and irq.tkb/echo.tkb/preempt.tkb/semaphore.tkb/watchdog.tkb/
-# condvar.tkb/msgqueue.tkb each `use` it too (their QEMU-shaped dispatch
-# entry point references `gic` even though it's dead code on STM32 --
-# see each file's header comment). COMMON_GIC is kept below purely as a
-# prerequisite for staleness tracking; no recipe passes it on the command
-# line anymore.
+# ack/EOI), and preempt.tkb/semaphore.tkb/watchdog.tkb/condvar.tkb/
+# msgqueue.tkb each `use` it too (their QEMU-shaped dispatch entry point
+# references `gic` even though it's dead code on STM32, AND their QEMU
+# build genuinely needs gic.tkb's functions too, indirectly via
+# examples/common_qemu/timer.tkb's own gic_init()/gic_enable_timer_ppi()
+# calls -- see each file's header comment). COMMON_GIC is kept below
+# purely as a prerequisite for staleness tracking for those five; no
+# recipe passes it on the command line via their own `use`.
+#
+# GitHub issue #79 follow-up: irq.tkb/echo.tkb do NOT `use` full gic.tkb
+# (unlike the five above) -- they `use` COMMON_GIC_REGS (types only)
+# instead, because their STM32 build also needs examples/common_stm32/
+# nvic.tkb's real irq_uart_rx_setup/irq_uart_rx_unmask, and gic.tkb
+# defines those same two names again (used to silently collide with
+# nvic.tkb's; now a compile error, see gic_regs.tkb's header comment for
+# the full story). COMMON_GIC is passed explicitly on the command line
+# for these two examples' QEMU builds instead (see IRQ_OBJS/GETC_OBJS
+# below), since it's no longer reachable transitively through their own
+# `use`.
 COMMON_GIC         := $(COMMON_QEMU_DIR)/gic.tkb
+COMMON_GIC_REGS    := $(COMMON_QEMU_DIR)/gic_regs.tkb
 COMMON_TIMER       := $(COMMON_QEMU_DIR)/timer.tkb
 COMMON_SYNC        := $(COMMON_DIR)/sync.tkb
 COMMON_VIRTIO_MMIO := $(COMMON_QEMU_DIR)/virtio_mmio.tkb
@@ -309,27 +323,32 @@ STANDARD_OBJS := $(filter-out $(SPECIAL_OBJS), $(EXAMPLE_OBJS))
 $(STANDARD_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
-# examples/irq/irq.tkb `use`s gic.tkb itself now (both platforms' interrupt
-# entry points are compiled regardless of target; the QEMU-shaped
-# irq_dispatch entry point references the gic struct -- see that file's
-# header comment), so COMMON_GIC is a prerequisite only, not a command-line
-# argument.
+# examples/irq/irq.tkb `use`s gic_regs.tkb (types only) itself now, but
+# needs gic.tkb's actual FUNCTIONS for the QEMU build (irq_uart_rx_setup/
+# irq_uart_rx_unmask's real implementation) -- passed explicitly here
+# since it can't be reached transitively through irq.tkb's own `use`
+# without reintroducing the cross-file duplicate-definition collision
+# with examples/common_stm32/nvic.tkb (see gic_regs.tkb's header comment,
+# GitHub issue #79 follow-up).
 $(IRQ_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_UART_IRQ_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_UART_IRQ_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_GIC) $(COMMON_UART_IRQ_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
 $(RTC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_RTC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_RTC) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
-# examples/echo/echo.tkb `use`s gic.tkb itself now, same reasoning as irq above.
+# examples/echo/echo.tkb: same reasoning as irq above.
 $(GETC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_UART_IRQ_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_UART_IRQ_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_GIC) $(COMMON_UART_IRQ_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
 # COMMON_STM32_STUB supplies pendsv_trigger() (a no-op here) so each of
 # these shared examples' STM32-shaped SysTick_Handler/pendsv_dispatch
 # entry points (dead code under QEMU) still compile -- see
 # examples/preempt/preempt.tkb's header comment. preempt.tkb/semaphore.tkb/
-# watchdog.tkb each `use` gic.tkb themselves now (same reasoning as irq
-# above), so COMMON_GIC is a prerequisite only here too.
+# watchdog.tkb each `use` full gic.tkb themselves (unlike irq.tkb/echo.tkb
+# above -- these three use examples/common_stm32/scheduler.tkb on STM32,
+# not nvic.tkb, so there's no colliding irq_uart_rx_setup/unmask name to
+# worry about; see gic_regs.tkb's header comment for the distinction), so
+# COMMON_GIC is a prerequisite only here.
 $(TIMER_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_STM32_STUB) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_TIMER) $(COMMON_STM32_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
@@ -518,12 +537,16 @@ examples/rtc/rtc_stm32.o: examples/rtc/rtc.tkb $(COMMON_STM32_UART) $(COMMON_STM
 examples/timer/timer_stm32.o: examples/timer/timer.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_RTC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_RTC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
-# examples/echo/echo.tkb `use`s gic.tkb itself now (both platforms'
-# interrupt entry points are compiled regardless of target; the
-# QEMU-shaped irq_dispatch entry point references the gic struct even
-# though it's dead code here -- see that file's header comment), so
-# COMMON_GIC is a prerequisite only, not a command-line argument.
-examples/echo/echo_stm32.o: examples/echo/echo.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_GIC) $(TAKIBI)
+# examples/echo/echo.tkb `use`s gic_regs.tkb (types only), not full
+# gic.tkb (both platforms' interrupt entry points are compiled regardless
+# of target; the QEMU-shaped irq_dispatch entry point references the gic
+# struct even though it's dead code here -- see that file's header
+# comment) -- GitHub issue #79 follow-up: full gic.tkb would redefine
+# irq_uart_rx_setup/irq_uart_rx_unmask, colliding with
+# examples/common_stm32/nvic.tkb's real versions, so COMMON_GIC_REGS is
+# the prerequisite here (not COMMON_GIC), and only for staleness
+# tracking -- neither is passed on the command line.
+examples/echo/echo_stm32.o: examples/echo/echo.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_GIC_REGS) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_NVIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # irq/preempt/semaphore/condvar/watchdog/msgqueue: each compiles the *same*
@@ -531,17 +554,21 @@ examples/echo/echo_stm32.o: examples/echo/echo.tkb $(COMMON_STM32_UART) $(COMMON
 # examples/net_echo/net_echo.tkb's header comment for the general pattern,
 # and examples/irq/irq.tkb / examples/preempt/preempt.tkb's header comments
 # for how GICv2-vs-NVIC dispatch is unified despite the two hardware models
-# genuinely differing). Each of these six files now `use`s gic.tkb itself
-# (harmless, unused on this target) so the QEMU-shaped entry point in each
-# shared file still compiles -- see examples/common_qemu/stm32_stub.tkb's
-# comment for the other half of that (QEMU needing STM32-only stand-ins).
-# COMMON_GIC is kept as a prerequisite only below, not a command-line
-# argument, for the same staleness-tracking reason noted near its
-# definition.
+# genuinely differing). Each of these six files needs SOME source of the
+# `GicRegs` type (harmless, unused on this target) so the QEMU-shaped
+# entry point in each shared file still compiles -- see
+# examples/common_qemu/stm32_stub.tkb's comment for the other half of that
+# (QEMU needing STM32-only stand-ins). irq.tkb specifically `use`s
+# gic_regs.tkb (types only, not full gic.tkb -- GitHub issue #79
+# follow-up, see that file's header comment); the other five `use` full
+# gic.tkb (no naming collision for them, see the comment above
+# $(TIMER_OBJS) on the QEMU side). COMMON_GIC/COMMON_GIC_REGS are kept as
+# prerequisites only below, not command-line arguments, for the same
+# staleness-tracking reason noted near their definitions.
 #
 # irq: NVIC vectors directly to USART1_IRQHandler, a fundamentally
 # different dispatch model from GICv2's software IAR/EOIR table.
-examples/irq/irq_stm32.o: examples/irq/irq.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_GIC) $(TAKIBI)
+examples/irq/irq_stm32.o: examples/irq/irq.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_GIC_REGS) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_NVIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # preempt: PendSV_Handler lives directly in the always-shared

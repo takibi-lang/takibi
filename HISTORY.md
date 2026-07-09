@@ -3796,3 +3796,149 @@ http_server/http_server.tkb`, `examples/tcp_parse/tcp_parse.tkb`,
 `examples/ip_parse/ip_parse.tkb`, `examples/common_stm32/eth.tkb`,
 `examples/common_qemu/virtio_mmio.tkb`, `examples/narrow/narrow.tkb`,
 `examples/refined/refined.tkb` (comments + bridge-cast rewrites).
+
+### Issue #79 Follow-up: Cross-File Duplicate Function Definitions Are Now a Compile Error
+
+Flagged during the session-end review of issue #55's Makefile migration
+work (not something either issue's own verification had caught): the
+STM32 build for `irq`/`echo` compiles BOTH `examples/common_qemu/
+gic.tkb` and `examples/common_stm32/nvic.tkb`, and both files define
+`irq_uart_rx_setup()`/`irq_uart_rx_unmask()` under the exact same name
+and signature -- yet this compiled with zero error, which was surprising
+given this project's own documented "Function overloading uses exact
+parameter types" model.
+
+**Root cause, found by reading the actual codegen path, not guessed**:
+two independent effects compound into "whichever definition comes first
+in file-concatenation order silently wins, the other is silently dead-
+coded, no verifier error":
+1. `type_inf.ml`'s `register_definition` DOES have a "duplicate" guard,
+   but it only fires `when previous = file` -- i.e. it only catches
+   copy-pasting the same function twice in ONE file, never two
+   definitions from two DIFFERENT files.
+2. `llvm_gen.ml`'s `declare_func` (Pass 1) only adds an llvalue to the
+   `functions` table `if not (Hashtbl.mem functions key)` -- so only the
+   FIRST FuncDef with a given key is ever declared. `gen_func` (Pass 2)
+   has no equivalent guard: it runs unconditionally for EVERY FuncDef,
+   looks up the SAME (single) llvalue via `Hashtbl.find_opt functions
+   key`, and unconditionally `append_block`s a fresh "entry" block into
+   it. The result is a function with the FIRST definition's blocks (the
+   real, reachable ones, since they're linked from the actual entry
+   block) followed by the SECOND definition's blocks (present in the IR,
+   but unreachable -- nothing branches into them, so they're either dead
+   or optimized away) -- valid LLVM IR, so `Llvm_analysis.verify_function`
+   never complains.
+
+Confirmed empirically, not just reasoned about: compiled `examples/irq/
+irq.tkb` for STM32 with `nvic.tkb` + `gic.tkb` both present (matching the
+actual Makefile file list before this fix) and disassembled the
+`irq_uart_rx_setup` symbol -- only `nvic.tkb`'s single-`bl`-to-
+`enable_usart1_irq` body was present; `gic.tkb`'s `gic_init`/
+`gic_enable_uart_spi` calls were entirely absent from that symbol (though
+still present as their OWN separate symbols in the object, since other
+code paths reference them). This happened to be CORRECT on this specific
+build only because `nvic.tkb` happens to come before `gic.tkb` in file-
+concatenation order (confirmed this ordering predates issue #55's
+migration -- the original Makefile line already listed
+`$(COMMON_STM32_NVIC) $(COMMON_GIC)` in that order, so issue #55 didn't
+introduce this, only inherited it) -- a hand-maintained ordering
+coincidence, not a compiler guarantee. A future reordering (a `use`
+resolution change, a Makefile edit) could silently flip which
+definition wins, with no compile error and no test catching it short of
+a real-hardware UART-interrupt test actually exercising the wrong path.
+
+**Agreed with the user's assessment: this should be a hard compile
+error, full stop** -- this is squarely the "Detect Errors at Compile
+Time" principle from this file's own top section applied to the
+compiler's own internals, not just user code. Silently keeping one of
+two conflicting definitions by accident of file order, with the other
+dead-coded and invisible, is exactly the kind of landmine that
+principle exists to eliminate.
+
+**Fix**: `type_inf.ml`'s `register_definition` now raises whenever a
+SECOND definition with the same overload key is registered, regardless
+of which file it came from -- same-file duplicates keep the existing
+`"duplicate overload '%s'"` message; cross-file duplicates get a new
+`"duplicate definition of '%s': already defined in %s"` message naming
+the first file. Since `type_inf.ml`'s `infer_program` runs to completion
+(and any `TypeError` aborts) before `llvm_gen.ml`'s `gen_program` is ever
+called (confirmed via `bin/main.ml`'s pipeline), this alone is sufficient
+-- no change needed in `llvm_gen.ml`'s declare/gen_func pair itself, since
+codegen is simply never reached once the duplicate is caught earlier.
+
+**Fixing the actual collision, not just tightening the check**: rebuilding
+with the stricter check surfaced exactly the two files predicted --
+`examples/irq/irq.tkb` and `examples/echo/echo.tkb` -- and no others (the
+other five scheduler-pattern shared files, `preempt`/`semaphore`/
+`watchdog`/`condvar`/`msgqueue`, use `examples/common_stm32/scheduler.tkb`
+on STM32, not `nvic.tkb`, and `scheduler.tkb` defines no colliding
+names, so `use`ing full `gic.tkb` unconditionally remains correct and
+necessary for them -- their QEMU build genuinely needs gic.tkb's real
+functions too, indirectly via `examples/common_qemu/timer.tkb`'s own
+`gic_init()`/`gic_enable_timer_ppi()` calls). Split
+`examples/common_qemu/gic.tkb` into two files:
+- **`examples/common_qemu/gic_regs.tkb`** (new): just the `GicRegs`
+  struct and the `gic` global -- the part `irq.tkb`/`echo.tkb`'s own
+  dead-on-STM32 `irq_dispatch` needs for its `gic.cpu_iar`/`gic.cpu_eoir`
+  references to type-check, with no functions to collide with anything.
+- **`gic.tkb`** itself: now `use`s `gic_regs.tkb` for the struct/global,
+  keeps its actual functions (`gic_init`, `gic_enable_timer_ppi`,
+  `gic_enable_uart_spi`, `irq_uart_rx_setup`, `irq_uart_rx_unmask`)
+  unchanged. Still the right thing for the five scheduler-pattern files
+  and `virtio_mmio.tkb` (QEMU-only, no collision risk at all since it's
+  never compiled for STM32) to `use` in full.
+
+`irq.tkb`/`echo.tkb` now `use "examples/common_qemu/gic_regs.tkb";`
+instead of full `gic.tkb`. Their QEMU-side Makefile recipes gained
+`$(COMMON_GIC)` back on the actual command line (no longer reachable
+transitively through their own `use`, since that now only pulls in the
+struct); their STM32-side recipes' prerequisite changed from
+`$(COMMON_GIC)` to the new `$(COMMON_GIC_REGS)` (all the STM32 build
+ever needed).
+
+**Verified the fix resolves ambiguity, not just silences the error**:
+same disassembly check as above, re-run after the split -- STM32's
+`irq_uart_rx_setup` object now contains ONLY `nvic.tkb`'s body, and
+`gic_init`/`gic_enable_uart_spi` don't appear anywhere in that object at
+all (not present, not just dead) -- STM32 genuinely never sees gic.tkb's
+functions anymore, not "wins by luck of ordering." The QEMU-side object
+was checked the same way -- contains `gic_init`/`gic_enable_timer_ppi`/
+`gic_enable_uart_spi`/`irq_uart_rx_setup`/`irq_uart_rx_unmask` (gic.tkb's
+real functions, still reachable via the explicit Makefile command-line
+argument), with no `nvic.tkb` symbols at all (STM32-only, never part of
+the QEMU build).
+
+**2 new unit tests** (`test/test_takibi.ml`, using a new `infer_files`
+helper that parses multiple sources under distinct `Lexing.set_filename`
+values and concatenates them, mirroring how `use`/multi-file compilation
+actually produces one flat AST): confirms two DIFFERENT files defining
+the identical signature under the same name is now rejected (mentioning
+the first file and "duplicate definition"), and confirms a genuinely
+different-signature overload split across two files is NOT a false
+positive (still type-checks as a valid overload set).
+
+**Verification**: `make clean && make check` (langcheck, 470 unit tests
+-- up from 468, +2 for this fix -- stm32build, all 70 QEMU integration/
+compile-error tests) passes with zero regressions. Real STM32 hardware
+(`make hwcheck`) was not reachable in this session's environment; the
+disassembly-level verification above (confirming which functions
+literally appear in each object file) is strong evidence but is not a
+substitute for an actual UART-interrupt hardware test of `irq`/`echo` --
+recommended before the next `make hwcheck` opportunity, same standing
+recommendation as issue #79's own STM32 rollout.
+
+**Follow-up not done here, flagged for a future session**: this fix
+only closes the gap for FUNCTION definitions (`register_definition`'s
+own scope). Whether an equivalent gap exists for GLOBAL `let`
+declarations (two files declaring the same-named global) was not
+audited -- worth a similar investigation if it comes up.
+
+**Files**: `lib/type_inf.ml` (`register_definition`, same-file guard
+widened to any file), `examples/common_qemu/gic_regs.tkb` (new),
+`examples/common_qemu/gic.tkb` (now `use`s gic_regs.tkb), `examples/irq/
+irq.tkb`, `examples/echo/echo.tkb` (now `use` gic_regs.tkb instead of
+full gic.tkb), `Makefile` (`COMMON_GIC_REGS` added; IRQ_OBJS/GETC_OBJS
+QEMU recipes get `$(COMMON_GIC)` back on their command line;
+`irq_stm32.o`/`echo_stm32.o` prerequisites switched to
+`$(COMMON_GIC_REGS)`), `test/test_takibi.ml` (`infer_files` helper, 2
+new tests).

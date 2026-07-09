@@ -1,0 +1,37 @@
+// GICv2 register struct + the `gic` global, split out of gic.tkb (GitHub
+// issue #79 follow-up) so a shared example file that needs ONLY the type
+// (irq.tkb/echo.tkb's own irq_dispatch, dead code on STM32 but still
+// referencing `gic.cpu_iar`/`gic.cpu_eoir` so it type-checks there) can
+// `use` this file WITHOUT also pulling in gic.tkb's functions.
+//
+// Why this split exists: gic.tkb's functions (gic_init, irq_uart_rx_setup,
+// etc.) and examples/common_stm32/nvic.tkb's functions define
+// irq_uart_rx_setup/irq_uart_rx_unmask under the IDENTICAL name and
+// signature -- correct in isolation (each is the real implementation for
+// its own target), but examples/irq/irq.tkb and examples/echo/echo.tkb are
+// the two shared files that need BOTH nvic.tkb (their real STM32 UART-IRQ
+// setup) AND something providing GicRegs (for the dead-on-STM32 QEMU-shaped
+// irq_dispatch to type-check) in the SAME STM32 build. Before this split,
+// that "something" was full gic.tkb, so both real implementations of
+// irq_uart_rx_setup/irq_uart_rx_unmask ended up defined in the same
+// compilation -- previously silently accepted (see HISTORY.md's issue #79
+// follow-up for the compiler bug this exposed), now a compile error this
+// split is what actually fixes. Every other scheduler-pattern shared file
+// (preempt/semaphore/watchdog/condvar/msgqueue) uses
+// examples/common_stm32/scheduler.tkb on STM32 instead of nvic.tkb, which
+// defines no such colliding names, so they keep `use`ing full gic.tkb
+// (its functions are genuinely needed there too, indirectly via
+// examples/common_qemu/timer.tkb's own gic_init()/gic_enable_timer_ppi()
+// calls on the QEMU side) with no conflict.
+
+struct GicRegs {
+    distr_ctlr:  *io u32;   // 0x08000000  GICD_CTLR
+    distr_isen0: *io u32;   // 0x08000100  GICD_ISENABLER0 (SGI/PPI, IRQ 0-31)
+    distr_isen1: *io u32;   // 0x08000104  GICD_ISENABLER1 (SPI,     IRQ 32-63)
+    cpu_ctlr:    *io u32;   // 0x08010000  GICC_CTLR
+    cpu_pmr:     *io u32;   // 0x08010004  GICC_PMR
+    cpu_iar:     *io u32;   // 0x0801000C  GICC_IAR
+    cpu_eoir:    *io u32;   // 0x08010010  GICC_EOIR
+}
+
+let gic: GicRegs = {0x08000000, 0x08000100, 0x08000104, 0x08010000, 0x08010004, 0x0801000C, 0x08010010};

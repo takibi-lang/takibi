@@ -1,14 +1,10 @@
-struct GicRegs {
-    distr_ctlr:  *io u32;   // 0x08000000  GICD_CTLR
-    distr_isen0: *io u32;   // 0x08000100  GICD_ISENABLER0 (SGI/PPI, IRQ 0-31)
-    distr_isen1: *io u32;   // 0x08000104  GICD_ISENABLER1 (SPI,     IRQ 32-63)
-    cpu_ctlr:    *io u32;   // 0x08010000  GICC_CTLR
-    cpu_pmr:     *io u32;   // 0x08010004  GICC_PMR
-    cpu_iar:     *io u32;   // 0x0801000C  GICC_IAR
-    cpu_eoir:    *io u32;   // 0x08010010  GICC_EOIR
-}
-
-let gic: GicRegs = {0x08000000, 0x08000100, 0x08000104, 0x08010000, 0x08010004, 0x0801000C, 0x08010010};
+// GicRegs/gic live in gic_regs.tkb now (GitHub issue #79 follow-up) so a
+// shared file needing only the type (irq.tkb/echo.tkb's dead-on-STM32
+// irq_dispatch) can `use` that alone, without also pulling in the
+// functions below -- see gic_regs.tkb's header comment for the full
+// reasoning (a real cross-file duplicate-definition bug this split
+// fixes, not just a refactor).
+use "examples/common_qemu/gic_regs.tkb";
 
 fn gic_init() {
     *(gic.distr_ctlr) = 1;

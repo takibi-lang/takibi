@@ -24,8 +24,17 @@
 // pattern as scheduler_init() elsewhere in this project) -- register_irq()
 // itself is harmless to call unconditionally too, since it just writes
 // into irq_tbl, which the STM32 side's USART1_IRQHandler never consults.
-
-use "examples/common_qemu/gic.tkb";
+//
+// `use`s gic_regs.tkb (types only), NOT full gic.tkb: this file's own
+// irq_dispatch is dead code on STM32 but still references `gic.cpu_iar`/
+// `gic.cpu_eoir`, so it needs the GicRegs type there too -- but the STM32
+// build ALSO needs examples/common_stm32/nvic.tkb's real
+// irq_uart_rx_setup/irq_uart_rx_unmask, and full gic.tkb defines those
+// same two names again (its own real QEMU implementation), which used to
+// silently collide. See gic_regs.tkb's header comment (GitHub issue #79
+// follow-up). The QEMU build still needs gic.tkb's actual functions --
+// added back to this example's own Makefile recipe.
+use "examples/common_qemu/gic_regs.tkb";
 
 struct IrqTable {
     handlers: [fn() -> void; 64];

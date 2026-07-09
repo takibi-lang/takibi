@@ -142,10 +142,18 @@ turn as many potential traps as possible into compile-time errors instead:
   parser; no separate AST node.
 - `expr as T` -- explicit cast: integer widths (including `isize`/
   `usize`), `*T -> usize`, `usize -> *T`, `*T -> *U`, refined-type
-  coercions (see below). A cast to a *non-refined-syntax* target always
-  discards any refined range the source expression had -- use `as
-  {lo..<hi as base}` (an explicit refined-cast target) instead when the
-  proof must survive the cast.
+  coercions (see below). A cast to a *bare* (non-refined-syntax) target
+  infers the tightest refined type on its own whenever the source
+  expression's range is already known and fits `T`'s representable range
+  -- e.g. `ihl as usize` behaves exactly like `ihl as {20..<21 as usize}`
+  when `ihl` is already `{20..<21 as u16}`, with no explicit range to
+  restate. A source range that does NOT fit `T` (a genuine narrowing/
+  truncating cast) falls back to a plain unrefined `T`, discarding the
+  range with no error, same as an UNPROVEN source always has. This
+  inference is local only -- it never crosses a function boundary, so
+  function parameter/return types and global `let` declarations still
+  require an explicit `{lo..<hi as base}` annotation when a refined type
+  is wanted there.
   Pointer-to-fixed-width-integer casts (`*T as i32`) are a compile error;
   only `*T as usize` and `*T as *U` are allowed (`(ptr as usize) as i32`
   makes the truncation explicit).
@@ -514,6 +522,17 @@ base.
   This cast is the deliberate bridge from unproven/differently-based
   integers into a refined type -- see "Array/Slice Indexing" below for
   why it's routinely needed at index sites.
+- **Bare-cast range inference** (`expr as base`, no explicit `{lo..<hi}`):
+  behaves exactly like the explicit form above when the source's own
+  proven range already fits `base`'s representable range -- the compiler
+  infers `{lo..<hi as base}` on its own instead of requiring it to be
+  restated by hand. This is local only (never crosses a function
+  boundary): a parameter, return type, or global `let` declaration always
+  needs an explicit `{lo..<hi as base}` annotation to be refined. A
+  source range that does NOT fit `base` falls back to a plain unrefined
+  `base`, exactly as an unproven source always has -- this inference
+  never adds a runtime check and never removes one that was actually
+  needed.
 - **Proofs survive a weaker annotation, only for immutable bindings**:
   `let x: i32 = v;` where `v: {2..<5 as i32}` keeps `x`'s proven
   `{2..<5}` range (the annotation matches `v`'s own base exactly, and `x`
@@ -549,9 +568,10 @@ require the index/bound expression's type to be `usize` (or a
 `{lo..<hi as usize}` refined value) -- not merely "some integer type". An
 unresolved bare literal or for-loop counter used this way is pinned to
 `usize` automatically. A refined value of a different base must cross
-the boundary explicitly (`ihl as {0..<21 as usize}`) to keep its proof;
-a plain `as usize` also works but discards the proof (and may leave a
-runtime check where none was needed).
+the boundary via `as usize`; a bare `ihl as usize` infers the tightest
+`{lo..<hi as usize}` on its own from `ihl`'s already-proven range (see
+"Bare-cast range inference" above), so it keeps the proof without
+needing the range restated as `ihl as {0..<21 as usize}`.
 
 Raw-pointer indexing (`p[i]`, `p[i] = v`, and `unsafe { p[lo..<hi] }`)
 is intentionally separate and requires `isize` instead, matching signed
