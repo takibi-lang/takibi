@@ -25,6 +25,35 @@ the system will silently break or run amok. Nothing is communicated to the user.
 The finished form of code is when index ranges are pinned at the type level using
 `for i: usize in 0..<n` or `{lo..<hi as usize}` annotations.
 
+## Design Principle: YAGNI (You Aren't Gonna Need It)
+
+We do not design or build functionality before it is actually needed -- not just at the
+implementation level, but at the design/planning level too. This is a durable stance for this
+project's current prototype phase (expected to hold for years, not just this session), agreed
+between the user and Claude Code, not a one-off preference to be renegotiated each time it comes
+up.
+
+- **"Needed" means driven by a real, present requirement**: an actual example that needs it, a
+  real bug it fixes, a concrete request in front of us right now. A plausible future need is not
+  a present need.
+- **When a larger architectural goal would automatically subsume a smaller interim workaround,
+  we skip the interim workaround.** Concrete precedent: after the GitHub issue #55 Part (A)
+  Makefile migration (see HISTORY.md), a "build the app_main file alone, with no other files on
+  the command line" convenience was identified as reachable via a stopgap (tiny per-target entry
+  wrapper files that just `use` the right HAL and the shared logic file). It was deliberately
+  NOT built: true separate compilation (issue #55's deferred Part B) would make it unnecessary,
+  and building it now would be pure throwaway work discarded the moment Part B lands. See that
+  HISTORY.md entry, and the outlook memo for Part B, for the reasoning this was checked against.
+- **This does not excuse skipping foundational work current features actually depend on.** The
+  refinement-type proof machinery is this project's stated core goal (see "Detect Errors at
+  Compile Time" above), not speculative scope -- YAGNI applies to optional, deferrable
+  convenience/architecture work, not to work the project's own stated purpose already requires.
+- **If a request looks like it calls for infrastructure beyond what the current, concrete task
+  needs, say so and ask before building it**, rather than defaulting to building the more
+  general/future-proof version. The user has explicitly asked for this pushback as a safeguard
+  against their own occasional over-ambitious asks -- treat a request that smells speculative as
+  a prompt to flag the tradeoff, not as an instruction to quietly build the maximal version.
+
 ## Language Specification
 
 **See `SPEC.md` for the current language specification** (types, syntax,
@@ -1166,6 +1195,7 @@ software process.
 - The user is an OCaml beginner, so explain the reason for code changes from the perspective of "why write it this way."
 - **Do not save memories to `~/.claude`.** Consolidate project-specific information in this file (it cannot be shared across environments).
 - **All text in this repository must be ASCII-only.** Never write Japanese or any other non-ASCII characters in source files, comments, documentation, or any other file. `make langcheck` enforces this and will fail if non-ASCII characters are found.
+- **Follow YAGNI (see "Design Principle: YAGNI" above).** Do not design or implement functionality beyond what the current, concrete task needs. If a request seems to call for more than that, flag the tradeoff and ask before building it.
 
 ## Dependencies
 

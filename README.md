@@ -100,6 +100,19 @@ genuine relational domain) and the case that looked like it needed one
 but didn't: the fix turned out to be a missing validation check, not a
 type-system gap.
 
+## Design Principle: YAGNI (You Aren't Gonna Need It)
+
+We do not design or build functionality before it is actually needed -- not just at the
+implementation level, but at the design/planning level too. This is a durable stance for this
+project's current prototype phase, not a one-off preference: "needed" means a real, present
+requirement (an actual example that needs it, a real bug it fixes), not a plausible future one.
+When a larger architectural goal would automatically subsume a smaller interim workaround, the
+interim workaround is skipped rather than built and later discarded -- see `CLAUDE.md`'s own
+"Design Principle: YAGNI" section for a concrete worked example. This does not excuse skipping
+foundational work current features actually depend on (the compile-time-error-detection goal
+above is this project's stated core purpose, not speculative scope) -- it applies to optional,
+deferrable convenience and architecture work.
+
 ## Current Status
 
 - A full pipeline exists: lexer -> Menhir parser -> Hindley-Milner type
