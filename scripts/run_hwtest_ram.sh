@@ -31,12 +31,12 @@
 # architectural default memory map already gives AXI SRAM1 exactly the
 # Normal/WBWA-cacheable/executable attributes this path wants.
 #
-# Scope: every example currently covered by run_hwtest.sh (none of them
-# touch Ethernet DMA -- the 5 real-Ethernet examples are exercised
-# separately, over real wiring, by hwcheck-net/run_hwtest_net.sh, which is
-# unaffected by this migration). A DMA-visible, genuinely cacheable AXI
-# SRAM1 buffer policy for those is a deliberate follow-up, not folded in
-# here -- see CLAUDE.md/HISTORY.md's RAM-execution section.
+# Scope: every example currently covered by the original run_hwtest.sh
+# (none of them touch Ethernet DMA -- the 5 real-Ethernet examples are
+# exercised separately, over real wiring, by hwcheck-net/
+# run_hwtest_net_ram.sh, which also moved to RAM execution -- including a
+# genuinely cacheable DMA buffer region -- in a later follow-up; see
+# CLAUDE.md/HISTORY.md's RAM-execution section for both).
 set -euo pipefail
 
 : "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run 'make hwcheck' or set it explicitly}"

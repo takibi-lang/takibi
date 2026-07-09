@@ -63,18 +63,6 @@ STM32_EXAMPLES := start hello print_int print_hex print_ptr mem array \
                   scheduler struct refined narrow for loop enum nonexhaustive \
                   bitops align packed struct_align const_global sizeof_offsetof slice foreach int64
 STM32_OBJS     := $(foreach e,$(STM32_EXAMPLES),examples/$(e)/$(e)_stm32.o)
-STM32_KERNELS  := $(foreach e,$(STM32_EXAMPLES),examples/$(e)/kernel_stm32.elf)
-STM32_BINS     := $(foreach e,$(STM32_EXAMPLES),examples/$(e)/kernel_stm32.bin)
-# rtc/echo/timer: ported separately (real RTC peripheral / interrupt-driven
-# serial test / rtc.tkb HAL reuse), each needs a special source set beyond
-# the generic uart+print group.
-STM32_EXTRA_BINS := examples/rtc/kernel_stm32.bin examples/echo/kernel_stm32.bin \
-                    examples/timer/kernel_stm32.bin examples/irq/kernel_stm32.bin \
-                    examples/preempt/kernel_stm32.bin examples/semaphore/kernel_stm32.bin \
-                    examples/condvar/kernel_stm32.bin examples/msgqueue/kernel_stm32.bin \
-                    examples/watchdog/kernel_stm32.bin examples/net_echo/kernel_stm32.bin \
-                    examples/arp_reply/kernel_stm32.bin examples/icmp_echo/kernel_stm32.bin \
-                    examples/tcp_echo/kernel_stm32.bin examples/http_server/kernel_stm32.bin
 
 # inet_checksum/ip_parse/tcp_parse: same CHECKSUM_OBJS group as the AArch64
 # side, but examples/common/inet_checksum.tkb and examples/common/netutil.tkb
@@ -85,31 +73,43 @@ STM32_EXTRA_BINS := examples/rtc/kernel_stm32.bin examples/echo/kernel_stm32.bin
 # the rest of STM32_EXAMPLES doesn't.
 STM32_CHECKSUM_EXAMPLES := inet_checksum ip_parse tcp_parse
 STM32_CHECKSUM_OBJS     := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/$(e)_stm32.o)
-STM32_CHECKSUM_KERNELS  := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/kernel_stm32.elf)
-STM32_CHECKSUM_BINS     := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/kernel_stm32.bin)
 
-# RAM-execution build, used only by `make hwcheck` (see scripts/
-# run_hwtest_ram.sh and examples/common_stm32/startup_ram.S for the full
-# rationale: every one of these binaries is well under Flash Sector0's
-# 32KB, so flashing all of them on every hwcheck run used to burn one
-# erase cycle per example against Sector0's ~10,000-cycle guaranteed
-# endurance -- this build instead gets loaded directly into AXI SRAM1 over
-# the debug port, so `make hwcheck` no longer touches Flash at all. Every
-# name here already has an existing examples/NAME/NAME_stm32.o rule
-# (generic or bespoke) from the groups above; this only adds a second
-# link step against link_ram.ld instead of link.ld. The 5 real-Ethernet
-# examples (net_echo/arp_reply/icmp_echo/tcp_echo/http_server, tested
-# separately by hwcheck-net) are deliberately not included here yet -- see
-# CLAUDE.md/HISTORY.md's RAM-execution section for why their DMA buffers
-# need a separate cacheability decision first.
-# semaphore/condvar/msgqueue are deliberately left out of this list -- like
-# their Flash-build counterparts, they need sem_asm.o linked in too, so
-# they get their own bespoke rules below instead of the generic pattern
-# rule (see examples/semaphore/kernel_stm32.elf's rule for the same split).
+# `stm32build` builds every STM32 example as a RAM-execution image (see
+# scripts/run_hwtest_ram.sh, scripts/run_hwtest_net_ram.sh, and
+# examples/common_stm32/startup_ram.S for the full rationale: every one of
+# these binaries is well under Flash Sector0's 32KB, so flashing all of
+# them on every hardware-test run used to burn one erase cycle per example
+# against Sector0's ~10,000-cycle guaranteed endurance -- loading directly
+# into AXI SRAM1 over the debug port instead means neither hardware test
+# target touches Flash at all). Every name here already has an existing
+# examples/NAME/NAME_stm32.o rule (generic or bespoke) from the groups
+# above; this only adds a link step against link_ram.ld.
+#
+# This used to be two separate targets (`stm32build`, Flash-only, and
+# `stm32build-ram`) -- merged into one now that RAM execution is the only
+# way any of these examples run, standalone Flash boot having no
+# remaining consumer except examples/http_server's own explicit
+# kernel_stm32.elf/.bin rule below (used only by `make stm32-http-server`,
+# a deliberately-kept exception -- see that rule's comment for why).
+#
+# The 5 real-Ethernet examples (net_echo/arp_reply/icmp_echo/tcp_echo/
+# http_server) are included here too: link_ram.ld gives them the SAME
+# uniformly-cacheable AXI SRAM1 as everything else (no MPU non-cacheable
+# window), so their DMA descriptor rings/buffers are genuinely cacheable
+# and rely on eth.tkb's existing dma_prepare_tx/dma_prepare_rx/
+# dma_finish_rx calls to actually maintain coherency -- see HISTORY.md's
+# RAM-execution entries for why this is safe (those calls were already
+# correct, just never exercised against real cacheable memory before) and
+# for the real-hardware Ethernet validation this claim is based on.
+#
+# semaphore/condvar/msgqueue are deliberately left out of this list -- they
+# need sem_asm.o linked in too, so they get their own bespoke rules below
+# instead of the generic pattern rule.
 STM32_RAM_EXAMPLES := $(STM32_EXAMPLES) rtc echo timer irq preempt watchdog \
-                       $(STM32_CHECKSUM_EXAMPLES)
+                       $(STM32_CHECKSUM_EXAMPLES) \
+                       net_echo arp_reply icmp_echo tcp_echo http_server
 # Target list for the generic $(STM32_RAM_ELFS_GENERIC) pattern rule below --
-# deliberately distinct from STM32_RAM_ELFS (stm32build-ram's full
+# deliberately distinct from STM32_RAM_ELFS (stm32build's full
 # prerequisite list, used only for building "everything", never as a
 # pattern rule's own target list): semaphore/condvar/msgqueue have their
 # own explicit rules below with an extra sem_asm.o prerequisite, and a
@@ -122,7 +122,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/msgqueue/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest stm32build stm32build-ram hwcheck hwcheck-net langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server profile-http-server profile-tcp-echo
+.PHONY: build test qemutest stm32build hwcheck hwcheck-net langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server profile-http-server profile-tcp-echo
 
 .DEFAULT_GOAL := build
 
@@ -169,20 +169,21 @@ test: build
 qemutest: $(ALL_KERNELS) examples/fizzbuzz/kernel.debug.elf examples/fibonacci/kernel.debug.elf
 	@bash scripts/run_qemutest.sh
 
-## stm32build: compile every ported STM32 example to a linked .bin, with no
-## flashing/serial capture -- unlike hwcheck, this needs no physical
+## stm32build: link every ported STM32 example as a RAM-execution image, with
+## no flashing/serial capture -- unlike hwcheck, this needs no physical
 ## hardware (only the same LLVM toolchain qemutest already requires), so it
 ## IS part of `make check`: it's the only thing that would otherwise catch
 ## a compiler regression breaking Cortex-M/Thumb2 codegen specifically
-## (qemutest only ever exercises the aarch64-none-elf path).
-stm32build: $(STM32_BINS) $(STM32_EXTRA_BINS) $(STM32_CHECKSUM_BINS)
-
-## stm32build-ram: link the RAM-execution build used by `make hwcheck`
-## (see STM32_RAM_ELFS's comment above and scripts/run_hwtest_ram.sh).
-## Reuses each example's existing examples/NAME/NAME_stm32.o (compilation
-## to object code doesn't depend on which linker script it later targets),
-## so this only adds a link step -- no new .tkb compilation.
-stm32build-ram: $(STM32_RAM_ELFS)
+## (qemutest only ever exercises the aarch64-none-elf path). See
+## STM32_RAM_EXAMPLES's comment above for why RAM execution is the only
+## build this target produces for everything else, and examples/http_server/
+## kernel_stm32.elf's own rule below for the one deliberate Flash-execution
+## exception -- included as a prerequisite here too (link-only, no
+## hardware needed) so `make check` still catches a build regression in
+## that path even on a day `make hwcheck-net` doesn't run against real
+## hardware. Without this, `stm32build`'s own "every ported example"
+## promise would be silently false for exactly one example.
+stm32build: $(STM32_RAM_ELFS) examples/http_server/kernel_stm32.bin
 
 ## hwcheck: run STM32 hardware integration tests (requires a real
 ## STM32F746G-DISCOVERY board connected via USB). NOT part of `make check` --
@@ -191,19 +192,26 @@ stm32build-ram: $(STM32_RAM_ELFS)
 ## Runs entirely from RAM (see scripts/run_hwtest_ram.sh) -- no Flash write
 ## happens anywhere in this target, so it carries no flash-endurance cost
 ## no matter how often it runs in CI.
-hwcheck: stm32build-ram
+hwcheck: stm32build
 	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/run_hwtest_ram.sh
 
 ## hwcheck-net: run all STM32 real-Ethernet hardware tests (net_echo today,
-## more as they're ported -- see scripts/run_hwtest_net.sh) over a physical
+## more as they're ported -- see scripts/run_hwtest_net_ram.sh) over a physical
 ## point-to-point link to the STM32F746G-DISCOVERY board (requires the
 ## board's Ethernet port wired directly to this machine's NIC). NOT part of
 ## hwcheck's automated UART-diff suite, and NOT part of `make check`/
 ## `make hwcheck` -- these are network tests (raw AF_PACKET sockets), not a
 ## UART capture/diff, and need CAP_NET_RAW (run with sudo) plus
 ## ETH_TEST_IFACE set to the wired interface if it isn't the default.
-hwcheck-net: stm32build
-	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/run_hwtest_net.sh
+## Runs entirely from RAM, same as `make hwcheck` -- EXCEPT http_server,
+## which is deliberately tested twice: once from RAM like everything else,
+## and once via a genuine Flash write+reset of examples/http_server/
+## kernel_stm32.bin (hence the extra prerequisite below), since that is the
+## one Flash-execution boot path left in this repository and it would
+## otherwise have zero automated coverage -- see scripts/run_hwtest_net_ram.sh's
+## header comment.
+hwcheck-net: stm32build examples/http_server/kernel_stm32.bin
+	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/run_hwtest_net_ram.sh
 
 ## langcheck: verify that all source files contain only ASCII characters
 langcheck:
@@ -404,20 +412,21 @@ examples/tcp_echo/kernel.debug.elf: $(COMMON_STARTUP_O) examples/tcp_echo/tcp_ec
 # .expected files (already used by the AArch64/QEMU run_test calls below) are
 # reused unchanged -- uart_puts/uart_print_* write the exact same bytes on
 # either HAL.
-# (STM32_TARGET/STM32_CPU/STM32_EXAMPLES/STM32_OBJS/STM32_KERNELS/STM32_BINS
+# (STM32_TARGET/STM32_CPU/STM32_EXAMPLES/STM32_OBJS/STM32_RAM_EXAMPLES
 # are defined near the top of this file, alongside EXAMPLES/ALL_KERNELS, so
 # that hwcheck's prerequisite list further up can reference them.)
 COMMON_STM32_DIR       := examples/common_stm32
 COMMON_STM32_STARTUP_S := $(COMMON_STM32_DIR)/startup.S
 COMMON_STM32_STARTUP_O := $(COMMON_STM32_DIR)/startup.o
-COMMON_STM32_LINK_LD   := $(COMMON_STM32_DIR)/link.ld
 COMMON_STM32_UART      := $(COMMON_STM32_DIR)/uart.tkb
 COMMON_STM32_PRINT     := $(COMMON_PRINT_BASE) $(COMMON_STM32_DIR)/print.tkb
-# eth.tkb's DMA descriptor rings/buffers need AXI SRAM, not the DTCM every
-# other STM32 example links into -- see link_eth.ld's own comment.
+# eth.tkb's DMA descriptor rings/buffers need AXI SRAM -- used only by
+# examples/http_server/kernel_stm32.elf's rule now (see its comment), the
+# one deliberately-kept Flash-execution example.
 COMMON_STM32_LINK_ETH_LD := $(COMMON_STM32_DIR)/link_eth.ld
-# RAM-execution variant (make hwcheck only) -- see STM32_RAM_ELFS's comment
-# and startup_ram.S's header comment for the full rationale.
+# RAM-execution variant (used by every other STM32 example -- see
+# STM32_RAM_EXAMPLES's comment above) and startup_ram.S's header comment
+# for the full rationale.
 COMMON_STM32_STARTUP_RAM_S := $(COMMON_STM32_DIR)/startup_ram.S
 COMMON_STM32_STARTUP_RAM_O := $(COMMON_STM32_DIR)/startup_ram.o
 COMMON_STM32_LINK_RAM_LD   := $(COMMON_STM32_DIR)/link_ram.ld
@@ -431,19 +440,12 @@ $(COMMON_STM32_STARTUP_RAM_O): $(COMMON_STM32_STARTUP_RAM_S)
 $(STM32_OBJS): examples/%_stm32.o: examples/%.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-$(STM32_KERNELS): examples/%/kernel_stm32.elf: \
-    $(COMMON_STM32_STARTUP_O) examples/%/$$*_stm32.o $(COMMON_STM32_LINK_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/$*/$*_stm32.o -o $@
-
 # RAM-execution link: reuses whichever examples/%/%_stm32.o rule already
 # exists (generic or bespoke, from any group above) -- only the startup
-# object and linker script differ from the Flash build.
+# object and linker script differ from a Flash build.
 $(STM32_RAM_ELFS_GENERIC): examples/%/kernel_stm32_ram.elf: \
     $(COMMON_STM32_STARTUP_RAM_O) examples/%/$$*_stm32.o $(COMMON_STM32_LINK_RAM_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) examples/$*/$*_stm32.o -o $@
-
-$(STM32_BINS): examples/%/kernel_stm32.bin: examples/%/kernel_stm32.elf
-	llvm-objcopy-19 -O binary $< $@
 
 # rtc and echo need target-specific RTC/interrupt-controller dependencies,
 # so they keep one-off rules rather than joining the generic group above.
@@ -459,32 +461,14 @@ $(COMMON_STM32_SEM_ASM_O): $(COMMON_STM32_SEM_ASM_S)
 examples/rtc/rtc_stm32.o: examples/rtc/rtc.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_RTC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_RTC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/rtc/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/rtc/rtc_stm32.o $(COMMON_STM32_LINK_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/rtc/rtc_stm32.o -o $@
-
-examples/rtc/kernel_stm32.bin: examples/rtc/kernel_stm32.elf
-	llvm-objcopy-19 -O binary $< $@
-
 # timer: turned out (during the interrupt-batch research) to need exactly
 # the same rtc.tkb HAL as rtc itself, not any interrupt/scheduler
 # infrastructure -- see examples/timer/timer.tkb's own comment.
 examples/timer/timer_stm32.o: examples/timer/timer.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_RTC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_RTC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/timer/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/timer/timer_stm32.o $(COMMON_STM32_LINK_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/timer/timer_stm32.o -o $@
-
-examples/timer/kernel_stm32.bin: examples/timer/kernel_stm32.elf
-	llvm-objcopy-19 -O binary $< $@
-
 examples/echo/echo_stm32.o: examples/echo/echo.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_GIC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
-
-examples/echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/echo/echo_stm32.o $(COMMON_STM32_LINK_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/echo/echo_stm32.o -o $@
-
-examples/echo/kernel_stm32.bin: examples/echo/kernel_stm32.elf
-	llvm-objcopy-19 -O binary $< $@
 
 # irq/preempt/semaphore/condvar/watchdog/msgqueue: each compiles the *same*
 # examples/<name>/<name>.tkb file the QEMU build uses (see
@@ -501,12 +485,6 @@ examples/echo/kernel_stm32.bin: examples/echo/kernel_stm32.elf
 examples/irq/irq_stm32.o: examples/irq/irq.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_GIC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/irq/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/irq/irq_stm32.o $(COMMON_STM32_LINK_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/irq/irq_stm32.o -o $@
-
-examples/irq/kernel_stm32.bin: examples/irq/kernel_stm32.elf
-	llvm-objcopy-19 -O binary $< $@
-
 # preempt: PendSV_Handler lives directly in the always-shared
 # common_stm32/startup.S (unlike a separate optional assembly object) --
 # harmless for every other example since nothing triggers PENDSVSET unless
@@ -515,23 +493,11 @@ examples/irq/kernel_stm32.bin: examples/irq/kernel_stm32.elf
 examples/preempt/preempt_stm32.o: examples/preempt/preempt.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/preempt/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/preempt/preempt_stm32.o $(COMMON_STM32_LINK_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/preempt/preempt_stm32.o -o $@
-
-examples/preempt/kernel_stm32.bin: examples/preempt/kernel_stm32.elf
-	llvm-objcopy-19 -O binary $< $@
-
 # semaphore: same scheduler restructure as preempt; declares its own extern
 # fn sem_wait/sem_post (no sync.tkb needed, same as the AArch64 version),
 # links against the STM32 sem_asm.o (ldrex/strex, not ldaxr/stlxr).
 examples/semaphore/semaphore_stm32.o: examples/semaphore/semaphore.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
-
-examples/semaphore/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_SEM_ASM_O) examples/semaphore/semaphore_stm32.o $(COMMON_STM32_LINK_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_SEM_ASM_O) examples/semaphore/semaphore_stm32.o -o $@
-
-examples/semaphore/kernel_stm32.bin: examples/semaphore/kernel_stm32.elf
-	llvm-objcopy-19 -O binary $< $@
 
 # condvar/msgqueue: same scheduler restructure, plus reuse
 # examples/common/sync.tkb completely unchanged (pure takibi logic calling
@@ -539,23 +505,12 @@ examples/semaphore/kernel_stm32.bin: examples/semaphore/kernel_stm32.elf
 examples/condvar/condvar_stm32.o: examples/condvar/condvar.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/condvar/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_SEM_ASM_O) examples/condvar/condvar_stm32.o $(COMMON_STM32_LINK_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_SEM_ASM_O) examples/condvar/condvar_stm32.o -o $@
-
-examples/condvar/kernel_stm32.bin: examples/condvar/kernel_stm32.elf
-	llvm-objcopy-19 -O binary $< $@
-
 examples/msgqueue/msgqueue_stm32.o: examples/msgqueue/msgqueue.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/msgqueue/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_SEM_ASM_O) examples/msgqueue/msgqueue_stm32.o $(COMMON_STM32_LINK_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_SEM_ASM_O) examples/msgqueue/msgqueue_stm32.o -o $@
-
-examples/msgqueue/kernel_stm32.bin: examples/msgqueue/kernel_stm32.elf
-	llvm-objcopy-19 -O binary $< $@
-
-# RAM-execution builds of semaphore/condvar/msgqueue -- same sem_asm.o
-# split as their Flash rules just above, target link_ram.ld instead.
+# RAM-execution builds of semaphore/condvar/msgqueue -- these three need
+# sem_asm.o linked in too, so they get their own explicit rules here
+# instead of the generic $(STM32_RAM_ELFS_GENERIC) pattern rule.
 examples/semaphore/kernel_stm32_ram.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/semaphore/semaphore_stm32.o $(COMMON_STM32_LINK_RAM_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/semaphore/semaphore_stm32.o -o $@
 
@@ -568,12 +523,6 @@ examples/msgqueue/kernel_stm32_ram.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_S
 # watchdog: same scheduler restructure as preempt, no semaphore needed.
 examples/watchdog/watchdog_stm32.o: examples/watchdog/watchdog.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
-
-examples/watchdog/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/watchdog/watchdog_stm32.o $(COMMON_STM32_LINK_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/watchdog/watchdog_stm32.o -o $@
-
-examples/watchdog/kernel_stm32.bin: examples/watchdog/kernel_stm32.elf
-	llvm-objcopy-19 -O binary $< $@
 
 # net_echo/arp_reply/icmp_echo/tcp_echo/http_server (STM32): real Ethernet
 # MAC/PHY/DMA (examples/common_stm32/eth.tkb) instead of virtio-net. Each
@@ -595,57 +544,38 @@ COMMON_STM32_NETCONFIG := $(COMMON_STM32_DIR)/netconfig.tkb
 examples/net_echo/net_echo_stm32.o: examples/net_echo/net_echo.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/net_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/net_echo/net_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/net_echo/net_echo_stm32.o -o $@
-
 examples/arp_reply/arp_reply_stm32.o: examples/arp_reply/arp_reply.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
-
-examples/arp_reply/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/arp_reply/arp_reply_stm32.o $(COMMON_STM32_LINK_ETH_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/arp_reply/arp_reply_stm32.o -o $@
-
-examples/arp_reply/kernel_stm32.bin: examples/arp_reply/kernel_stm32.elf
-	llvm-objcopy-19 -O binary $< $@
 
 examples/icmp_echo/icmp_echo_stm32.o: examples/icmp_echo/icmp_echo.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
-examples/icmp_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/icmp_echo/icmp_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/icmp_echo/icmp_echo_stm32.o -o $@
-
-examples/icmp_echo/kernel_stm32.bin: examples/icmp_echo/kernel_stm32.elf
-	llvm-objcopy-19 -O binary $< $@
-
 examples/tcp_echo/tcp_echo_stm32.o: examples/tcp_echo/tcp_echo.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
-
-examples/tcp_echo/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/tcp_echo/tcp_echo_stm32.o $(COMMON_STM32_LINK_ETH_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/tcp_echo/tcp_echo_stm32.o -o $@
-
-examples/tcp_echo/kernel_stm32.bin: examples/tcp_echo/kernel_stm32.elf
-	llvm-objcopy-19 -O binary $< $@
 
 examples/http_server/http_server_stm32.o: examples/http_server/http_server.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
+# examples/http_server is the one deliberate exception to "every STM32
+# example runs from RAM" (see STM32_RAM_EXAMPLES's comment above): flashing
+# it lets a demo unit boot the HTTP server standalone by power-on alone,
+# with no debugger attached -- `make stm32-http-server` below depends on
+# this .bin specifically. Genuinely cacheable AXI SRAM1 for its DMA
+# descriptors/buffers even in this Flash build, same as the RAM-execution
+# path -- see examples/common_stm32/startup.S's header comment for why the
+# non-cacheable MPU window this file used to configure was removed
+# entirely (both execution modes now rely on eth.tkb's dma_prepare_tx/
+# dma_prepare_rx/dma_finish_rx calls for DMA coherency, not a hardware
+# memory-attribute workaround) and HISTORY.md's RAM-execution entries for
+# the full reasoning and validation.
 examples/http_server/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/http_server/http_server_stm32.o $(COMMON_STM32_LINK_ETH_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/http_server/http_server_stm32.o -o $@
 
 examples/http_server/kernel_stm32.bin: examples/http_server/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
-examples/net_echo/kernel_stm32.bin: examples/net_echo/kernel_stm32.elf
-	llvm-objcopy-19 -O binary $< $@
-
 $(STM32_CHECKSUM_OBJS): examples/%_stm32.o: examples/%.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
-
-$(STM32_CHECKSUM_KERNELS): examples/%/kernel_stm32.elf: \
-    $(COMMON_STM32_STARTUP_O) examples/%/$$*_stm32.o $(COMMON_STM32_LINK_LD)
-	$(LLD) -T $(COMMON_STM32_LINK_LD) $(COMMON_STM32_STARTUP_O) examples/$*/$*_stm32.o -o $@
-
-$(STM32_CHECKSUM_BINS): examples/%/kernel_stm32.bin: examples/%/kernel_stm32.elf
-	llvm-objcopy-19 -O binary $< $@
 
 # -- QEMU run targets ----------------------------------------------------------
 QEMU_FLAGS := -machine virt -cpu cortex-a53 -nographic \
@@ -728,10 +658,11 @@ qemu-http-server: examples/http_server/kernel.elf
 	@echo "Open http://localhost:$(HTTP_HOST_PORT)/ in your browser (Ctrl-C to quit)"
 	$(QEMU) $(HTTP_SERVER_QEMU_FLAGS) $(HTTP_SERVER_FLAGS) -kernel $<
 
-# Same STM32_SERIAL_DEV/FLASH_ADDR convention as scripts/run_hwtest_net.sh
+# Same STM32_SERIAL_DEV convention as scripts/run_hwtest_ram.sh
 # (overridable the same way: STM32_SERIAL_DEV=/dev/ttyACM1 make ...). This
 # target still flashes over Flash/st-flash (a real device needs its
-# firmware in non-volatile storage), unlike make hwcheck's RAM execution.
+# firmware in non-volatile storage) -- unlike make hwcheck/make hwcheck-net,
+# which both run entirely from RAM.
 # Default points at /dev-host, not /dev, on purpose: .devcontainer/
 # devcontainer.json no longer bind-mounts /dev/ttyACM0 directly (that
 # required the ST-LINK to already be plugged in at container start, or the

@@ -2703,3 +2703,267 @@ stm32_hw_claim.sh` (recognized-runner pattern updated), `Makefile`
 (the Flash-based product/demo build) and `make hwcheck-net` are both
 unaffected -- this migration is scoped entirely to `make hwcheck`'s own
 implementation.
+
+### Follow-up: hwcheck-net Migrated to RAM Execution Too, DMA Buffers Made
+### Genuinely Cacheable
+
+Direct follow-up to the RAM-execution entry above, prompted by the
+question "can hwcheck-net move to RAM execution too, with the DMA buffer
+region made genuinely cacheable" -- i.e. actually doing the thing the
+previous entry's own motivation ("wanting to more rigorously test cache
+behavior") had left as an open follow-up rather than deferring it further.
+
+**Investigated before writing any code, not assumed**: whether
+`examples/common_stm32/eth.tkb`'s existing `dma_prepare_tx`/
+`dma_prepare_rx`/`dma_finish_rx` calls actually emit real cache
+maintenance, or were themselves just no-ops that happened to be harmless
+on the previously-non-cacheable window. Reading `lib/llvm_gen.ml`
+confirmed the former: on `arm`/`thumb` targets, `dma_prepare_tx` emits a
+real cache-line CLEAN loop (`emit_cortex_m_cache_range CacheClean`, via
+Cortex-M7's memory-mapped `SCB_DCCMVAC` register at `0xE000EF68`, looping
+32-byte lines across the address range) followed by a DSB; `dma_prepare_rx`
+emits INVALIDATE (`SCB_DCIMVAC`, `0xE000EF5C`) before a DMA write;
+`dma_finish_rx` does barrier+invalidate+barrier after one. This is
+genuine, already-implemented, already-correct cache-maintenance codegen --
+never exercised against real cacheable memory before this session, but not
+a stub either.
+
+**Read through every RX/TX ownership transition in `eth.tkb` before
+flipping the memory attribute**, specifically checking each CPU<->DMA
+handoff cleans (CPU writes -> device reads) or invalidates (device writes
+-> CPU reads) at the right point relative to the actual read/write, not
+just "somewhere nearby": `eth_rx_ring_init`/`net_rx_release` invalidate
+the RX buffer before handing it to DMA and clean the descriptor after
+writing OWN; `net_rx_acquire`/`dma_finish_rx` invalidate the descriptor
+before reading OWN/FL and invalidate the buffer before the caller reads
+frame data; `net_transmit` cleans both the payload buffer and the
+descriptor before kicking DMA, and invalidates the descriptor on every
+poll of the completion loop. Every site checked out -- the driver was
+written as if cache correctness already mattered, matching this project's
+own prior note that "the compiler DMA builtins... remain correct if
+buffers later move elsewhere." MMIO peripheral registers (`ETH_DMATPDR`
+etc.) are unaffected regardless of this change -- they sit in the
+`0x40000000-0x5FFFFFFF` Peripheral region, a completely different part of
+the ARMv7-M default memory map (Device, non-cacheable) than AXI SRAM1.
+
+**The change itself turned out to need no new linker script or startup
+file**: `link_ram.ld`/`startup_ram.S` (from the entry above) already put
+the *whole* image in AXI SRAM1 with no MPU region at all, relying on
+ARMv7-M's default map -- which is exactly "genuinely cacheable" already.
+The 5 Ethernet examples' existing `examples/NAME/NAME_stm32.o` objects
+(built the same way regardless of link target, same reasoning as every
+other RAM-exec example) just needed adding to `STM32_RAM_EXAMPLES` in the
+Makefile and a link against `link_ram.ld` instead of `link_eth.ld` --
+no new MPU non-cacheable window, no code change to `eth.tkb` at all.
+The Flash-shipped product build (`stm32build`, `make stm32-http-server`)
+is untouched -- it still links against `link_eth.ld`/`startup.S`'s
+existing non-cacheable window, so the shipped device's behavior does not
+change.
+
+**`scripts/run_hwtest_net_ram.sh`** (new, supersedes the deleted
+`scripts/run_hwtest_net.sh`) is the Ethernet counterpart of
+`run_hwtest_ram.sh`: same `reset halt` + `load_image` + read-vector-table
++ poke-SP/PC/VTOR + `resume` sequence, duplicated rather than shared
+(same self-contained-runner convention as before), feeding into the
+existing `sudo python3 <test_script>` raw-socket test invocation
+unchanged -- those scripts talk over the wire and have no idea how the
+firmware got onto the chip.
+
+**Validated against real hardware over the actual wired point-to-point
+link before considering this done** -- not just "compiles and the driver
+code looks right": `make hwcheck-net` (all 5 examples) passed in full,
+including `net_echo`'s varying-payload-size sweep (46 to 1486 bytes,
+spanning many cache lines each), `tcp_echo`'s complete handshake/
+data-echo/close/reconnect cycle, and `http_server`'s two-sequential-
+request counter-bump check -- i.e. real multi-frame, multi-cache-line DMA
+traffic in both directions, not a single trivial packet. Total wall time
+~17s for all 5, comparable to (slightly faster than) the old Flash-based
+run.
+
+**Files**: `Makefile` (`STM32_RAM_EXAMPLES` extended with the 5 Ethernet
+names, `hwcheck-net`'s implementation switched over), `scripts/
+run_hwtest_net_ram.sh` (new), `scripts/stm32_hw_claim.sh`
+(recognized-runner pattern updated again). No changes to `lib/llvm_gen.ml`
+or `examples/common_stm32/eth.tkb` -- the cache-maintenance codegen and
+the driver's call sites were already correct; only the memory attribute
+governing whether they matter changed, and only for this RAM-execution
+test path.
+
+### Follow-up: stm32build Itself Consolidated onto RAM Execution, with
+### examples/http_server Kept as the One Deliberate Flash Exception
+
+Direct follow-up to the two RAM-execution entries above, prompted by the
+question "should ALL STM32 code execution in this repo move to RAM, so
+every memory region is uniformly cacheable, avoiding the confusion of two
+different cache policies (Flash-build non-cacheable vs. RAM-build
+cacheable)?"
+
+**Pushed back before implementing, rather than doing what was literally
+asked.** RAM execution only exists while a debugger is actively driving
+the core over SWD (halt at reset, load into AXI SRAM1, poke SP/PC/VTOR,
+resume) -- AXI SRAM1 has no non-volatile retention, so a genuinely
+all-RAM build would mean every STM32 example, including
+`examples/http_server`, could no longer boot standalone from a power-on
+with no debugger attached. This directly conflicts with `make
+stm32-http-server`'s whole point (flash it once, then just plug in power
+and browse to it) and with this project's own stated top-level goal
+(CLAUDE.md's first paragraph: "run an HTTP server on ... STM32 bare-metal
+environments"), not just a stylistic inconsistency. Proposed the
+alternative that actually addresses the stated motivation (uniform,
+always-cacheable memory, no non-cacheable special case) without losing
+standalone boot: keep `examples/http_server`'s Flash build, but remove its
+AXI SRAM1 MPU non-cacheable window too, relying on the same ARMv7-M
+default-map reasoning already validated for the RAM-execution path. Used
+`AskUserQuestion` to make the tradeoff explicit rather than silently
+picking one interpretation of an ambiguous request whose literal reading
+would have been a significant, hard-to-reverse-in-spirit regression across
+every example in the repository.
+
+**The user's actual answer, after seeing the tradeoff, was a third option
+neither originally offered**: keep `http_server` Flash-resident (for
+standalone boot) with genuinely cacheable RAM (addressing the original
+motivation), AND separately consolidate the general `stm32build`/
+`stm32build-ram` Makefile targets into one RAM-only target for everything
+else (since nothing else in the repository has ever had a "must boot
+standalone" requirement -- only `http_server` does, via `make
+stm32-http-server`). This is narrower and more surgical than either
+original option, and is what got implemented.
+
+**Concrete changes**:
+- `examples/common_stm32/startup.S`'s MPU non-cacheable-window setup
+  (region 0, 0x20010000, 64KB, TEX=1/C=0/B=0/S=1) was deleted entirely --
+  not reconfigured, removed -- matching `startup_ram.S`'s existing
+  no-MPU-region approach exactly (same architectural-default-map
+  reasoning, same comment cross-referencing the other file). `startup.S`
+  is now used by exactly one build: `examples/http_server/kernel_stm32.elf`.
+- `examples/common_stm32/link.ld` (the DTCM-only Flash linker script) was
+  deleted -- once every non-`http_server` example dropped its Flash
+  build, nothing referenced it anymore, and this project's established
+  practice throughout its history has been to remove superseded
+  infrastructure rather than leave it unreferenced (see the earlier
+  "no `_stm32.tkb` variant exists anywhere in this repo" precedent in the
+  STM32 bring-up section).
+- `link_eth.ld` was kept unchanged (it never had a non-cacheable MPU
+  region of its own -- that lived entirely in `startup.S` -- so nothing
+  about the linker script itself needed to change for the cacheability
+  flip).
+- Every per-example Flash `kernel_stm32.elf`/`.bin` rule was deleted
+  except `examples/http_server`'s (18 rules across rtc/timer/echo/irq/
+  preempt/semaphore/condvar/msgqueue/watchdog/net_echo/arp_reply/
+  icmp_echo/tcp_echo, plus the generic `$(STM32_KERNELS)`/`$(STM32_BINS)`
+  and checksum-group pattern rules). Every example's `.o` compile rule
+  (`examples/NAME/NAME_stm32.o`) was left untouched -- compiling to
+  object code never depended on which linker script would later consume
+  it, the same reasoning that made the original RAM-execution migration
+  cheap to generalize across ~44 examples in the first place.
+- `stm32build` and `stm32build-ram` (two Makefile targets) became one:
+  `stm32build` now builds `$(STM32_RAM_ELFS)` (everything, RAM-execution),
+  and `stm32build-ram` no longer exists as a separate name. `make check`
+  (which already depended on `stm32build`) and `make hwcheck`/`make
+  hwcheck-net` (updated from depending on `stm32build-ram` to depending on
+  `stm32build`) all continue to work with no further changes, since the
+  target NAME `stm32build` was kept stable even though its underlying
+  BEHAVIOR changed.
+
+**Validated at three separate levels, not just "it compiles"**:
+1. `make check` (125 software tests, including the now-RAM-execution
+   `stm32build` as one of its prerequisites) -- unaffected, all pass.
+2. `make hwcheck` (41 tests) and `make hwcheck-net` (5 tests) against real
+   hardware -- both re-run in full after the consolidation, all pass,
+   confirming the Makefile restructuring didn't silently break anything
+   the two hardware test harnesses depend on.
+3. **The one thing neither hwcheck nor hwcheck-net actually exercises:
+   the genuinely-standalone Flash boot path itself.** Both hardware test
+   harnesses use OpenOCD's `reset halt` + register-poke technique
+   (`--connect-under-reset`-equivalent), which is NOT the same code path
+   as a real device being flashed and power-cycled/reset normally.
+   Explicitly flashed `examples/http_server/kernel_stm32.bin` via a plain
+   `st-flash write` + `st-flash reset` (the exact sequence `make
+   stm32-http-server` itself performs, deliberately NOT the debugger
+   halt-and-poke sequence used elsewhere in this session), then ran
+   `scripts/eth_http_server_test.py` against the now-standalone-booted
+   board -- both requests passed, confirming the genuinely-cacheable DMA
+   region works correctly even when the CPU reaches it via a real
+   hardware reset from Flash, not just via a debugger-mediated boot.
+
+**Files**: `examples/common_stm32/startup.S` (MPU window removed, header
+comment updated to note it's now http_server-only), `examples/
+common_stm32/link.ld` (deleted), `Makefile` (`STM32_KERNELS`/
+`STM32_BINS`/`STM32_EXTRA_BINS`/`STM32_CHECKSUM_KERNELS`/
+`STM32_CHECKSUM_BINS` variables removed; ~18 Flash build rules removed;
+`stm32build`/`stm32build-ram` merged; `hwcheck`/`hwcheck-net` updated to
+depend on the merged `stm32build`; `COMMON_STM32_LINK_LD` variable
+removed; `examples/http_server/kernel_stm32.elf`'s rule kept, with an
+expanded comment explaining why it's the one exception).
+
+### Follow-up: The Flash Boot Path Had Zero Automated Coverage -- Fixed by
+### Testing http_server Twice in hwcheck-net
+
+Found by the user re-reading the previous entry's own closing validation
+step ("verified with a genuine st-flash write + st-flash reset... followed
+by the real HTTP test script") and asking a sharp question: that
+verification was a one-off manual command run once, in this session, not
+a test that would run again on the next `make hwcheck-net`. Once every
+STM32 example except `examples/http_server` dropped its Flash build
+(previous entry), the real hardware boot-vector fetch from Flash (silicon
+reading SP/PC from address 0x0 directly) became the ONE code path in this
+entire repository that no automated test exercised at all -- every
+hardware test elsewhere uses OpenOCD's `reset halt` + debugger
+register-poke instead, a related but genuinely different mechanism (see
+the RAM-execution entries above). Before this consolidation, a regression
+in Flash-boot behavior would likely have been caught by ANY of ~45
+similar Flash-booting examples failing; after it, http_server was the
+only one left, and it had no automated coverage of that specific path.
+
+**Investigated whether this concern was actually substantive first**
+(specifically: is `startup.S`'s `.data` copy-from-Flash loop -- the most
+Flash-boot-specific piece of logic in that file -- meaningfully
+untested?), rather than assuming the gap mattered just because it existed.
+Checked `examples/http_server/kernel_stm32.elf`'s actual section sizes:
+`.data` is 0 bytes (every current example's initialized-global data ends
+up entirely in zero-initialized `.bss` instead), so the copy loop's
+bounds are equal and its body never iterates -- the loop's SHAPE runs but
+copies nothing. This weakens (but does not eliminate) the "untested code"
+argument: the genuinely irreplaceable things a Flash-execution automated
+test provides are the real hardware boot-vector fetch itself, actual
+Flash-resident instruction fetch (behind the ART accelerator, not SRAM),
+and the standalone/no-debugger-attached property -- not the empty copy
+loop specifically.
+
+**Implemented as a second, explicit test rather than replacing the
+existing RAM test**, since the two test different things: `http_server
+(stm32/ram)` continues validating driver/cacheable-DMA correctness in
+isolation (same technique as the other 4 Ethernet examples);
+`http_server (stm32/flash)` (new) validates the actual deployed boot path
+end to end. `scripts/run_hwtest_net_ram.sh` gained `run_net_hw_test_flash`,
+a `st-flash --connect-under-reset write` + `st-flash --connect-under-reset
+reset` counterpart of `run_net_hw_test` (matching `make
+stm32-http-server`'s own exact invocation, not a new third convention),
+run against the same `scripts/eth_http_server_test.py`. `hwcheck-net`'s
+Makefile prerequisites gained `examples/http_server/kernel_stm32.bin`
+accordingly (previously only implicitly built via the now-removed
+`stm32build`-includes-everything assumption, which no longer holds since
+`stm32build` dropped Flash builds).
+
+**This does reintroduce one Flash erase/write cycle into `hwcheck-net`
+specifically** (bounded to exactly the one example this project
+deliberately keeps Flash-resident, on a target that only runs
+occasionally and needs physical Ethernet wiring -- a very different
+frequency/scale concern than the original ~46-erases-per-run problem the
+whole RAM-execution migration exists to solve, see the first
+RAM-execution entry above). Judged an acceptable, narrowly-scoped
+trade-off: this is literally the one artifact whose entire reason for
+existing is to be flashed, so testing it via the same mechanism it will
+actually be used with is more correct, not less, than testing it only
+through the debugger-mediated RAM path.
+
+**Validated on real hardware**: `make hwcheck-net` now runs 6 tests
+(previously 5), all passing, total wall time ~20s (up from ~18s -- the
+one added Flash write/reset/verify cycle is the entire difference).
+
+**Files**: `scripts/run_hwtest_net_ram.sh` (`run_net_hw_test_flash`,
+`FLASH_ADDR`, the new `http_server (stm32/flash)` invocation, header
+comment expanded), `Makefile` (`hwcheck-net`'s prerequisites gained
+`examples/http_server/kernel_stm32.bin`). No changes to
+`examples/common_stm32/eth.tkb`, `startup.S`, or any linker script --
+this entry is purely about test coverage, not behavior.

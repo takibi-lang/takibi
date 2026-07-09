@@ -1,6 +1,12 @@
     .syntax unified
     .thumb
 
+/* Flash-execution startup: now used only by examples/http_server's
+   kernel_stm32.elf/.bin (see the Makefile's comment on that rule) so a
+   demo unit can boot the HTTP server standalone from power-on with no
+   debugger attached. Every other STM32 example runs from RAM instead --
+   see examples/common_stm32/startup_ram.S. */
+
 /* -- Vector table (Cortex-M7) -------------------------------------------
    Cortex-M has no analogue of AArch64's VBAR_EL1 + branch-instruction
    table: the CPU auto-loads the initial SP from word 0 and the reset PC
@@ -82,42 +88,30 @@ Reset_Handler:
     b       .Lzero_bss_loop
 .Lzero_bss_done:
 
-    /* Ethernet examples are linked into AXI SRAM starting at 0x20010000.
-       Unlike DTCM, that memory is visible to both the Cortex-M7 and the
-       Ethernet DMA master.  Keep its first 64KB non-cacheable so CPU and
-       DMA ownership transfers cannot leave descriptor or packet data in
-       different versions of a cache line.  Region attributes are:
-
-         XN=1, AP=full access, TEX=1, C=0, B=0, S=1,
-         SIZE=64KB, ENABLE=1
-
-       This is Normal, non-cacheable, shareable memory.  PRIVDEFENA keeps
-       the architectural default memory map for all addresses not covered
-       by this region (including ordinary DTCM-linked examples and flash).
-       Configure the MPU before enabling either cache. */
-    dsb
-    ldr     r0, =0xE000ED94     /* MPU_CTRL */
-    movs    r1, #0
-    str     r1, [r0]
-    ldr     r0, =0xE000ED98     /* MPU_RNR */
-    str     r1, [r0]            /* region 0 */
-    ldr     r0, =0xE000ED9C     /* MPU_RBAR */
-    ldr     r1, =0x20010000
-    str     r1, [r0]
-    ldr     r0, =0xE000EDA0     /* MPU_RASR */
-    ldr     r1, =0x130C001F
-    str     r1, [r0]
-    ldr     r0, =0xE000ED94     /* MPU_CTRL */
-    movs    r1, #5              /* PRIVDEFENA | ENABLE */
-    str     r1, [r0]
-    dsb
-    isb
+    /* No MPU region is configured (unlike an earlier version of this file,
+       which marked AXI SRAM1's first 64KB non-cacheable specifically so
+       Ethernet DMA ownership transfers couldn't leave descriptor/packet
+       data in different versions of a cache line). ARMv7-M's architectural
+       default memory map already describes 0x20000000-0x3FFFFFFF (which
+       covers both DTCM and AXI SRAM1) as Normal, Write-Back Write-Allocate
+       cacheable, shareable, executable -- exactly what's wanted here, with
+       no MPU setup at all. AXI SRAM1's DMA descriptors/buffers are
+       genuinely cacheable as a result; examples/common_stm32/eth.tkb's
+       dma_prepare_tx/dma_prepare_rx/dma_finish_rx calls (real Cortex-M7
+       cache-line clean/invalidate, not the barrier-only no-ops they were
+       against the old non-cacheable window) are what keep CPU and DMA
+       views coherent now -- see CLAUDE.md/HISTORY.md's RAM-execution
+       entries for the full reasoning and the real-hardware Ethernet
+       validation this change is based on (originally proven via the
+       RAM-execution build, then applied here to this Flash-execution
+       startup too since the same driver code and memory layout apply
+       regardless of where .text/.isr_vector themselves are fetched from).
+       examples/common_stm32/startup_ram.S (used by every other STM32
+       example) documents the identical no-MPU-needed reasoning. */
 
     /* Enable both Cortex-M7 L1 caches. The 4KB D-cache is 4-way set
        associative with 32-byte lines, so invalidate all 32 sets in all
-       four ways before setting CCR.DC. The Ethernet DMA window above is
-       non-cacheable; compiler DMA builtins still provide the ownership
-       barriers and remain correct if buffers later move elsewhere. */
+       four ways before setting CCR.DC. */
     dsb
     ldr     r0, =0xE000EF60     /* SCB_DCISW */
     movs    r1, #0
