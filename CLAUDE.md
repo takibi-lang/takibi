@@ -27,43 +27,57 @@ The finished form of code is when index ranges are pinned at the type level usin
 
 ## Development Process: Prove New `.tkb` Code Without `--forbid-trap` First, Then Turn It On
 
-**Every new example/feature under `examples/` is written and gets working WITHOUT
+**New `.tkb` work is written and gets fully working WITHOUT refinement types and WITHOUT
 `--forbid-trap` first, gets committed as that known-good baseline, and only THEN has
-`--forbid-trap` turned on as a separate, later step.** This is a durable process rule for
-all new `.tkb` work (not a one-off preference), agreed between the user and Claude Code
-while building the `fatfs` example (GitHub issue #61).
+refinement types added and `--forbid-trap` turned on, as one later, separate step.** This is
+a durable process rule (not a one-off preference), agreed between the user and Claude Code
+while building the `fatfs` example (GitHub issue #61) and its follow-on SD card integration
+(issue #62).
 
-- **Step 1 -- get it working, unrefined.** Write the new code using plain, idiomatic
-  checked array/slice indexing (`buf[i]`, not raw-pointer arithmetic) and ordinary
-  unrefined parameter types (`u32`, `usize`, etc). Do **not** pass `--forbid-trap` while
-  iterating. A runtime trap check being silently inserted is fine and expected at this
-  stage -- the goal here is purely "does the logic work," verified by actually running it
-  (QEMU, `mtools`, whatever the feature's own oracle is), not by making the compiler happy.
-  **Do not reach for raw pointers/`unsafe` merely to route around a bounds check that
-  checked array/slice indexing would have needed instead** -- that silently reintroduces
-  exactly the unproven-access risk `--forbid-trap` exists to catch, and produces a file
-  that trivially "passes" `--forbid-trap` without any of its sites ever having been
-  examined. Raw pointers stay reserved for cases that need them regardless of this process
-  (a byte-oriented hardware/block-device boundary, a struct-overlay cast onto a raw buffer,
-  a NUL-terminated scan whose length isn't known up front) -- not as a shortcut through this
-  step.
-- **Step 2 -- commit this as the baseline.** Once the feature demonstrably works end to
-  end, this version (still without `--forbid-trap`) gets committed. This snapshot is the
-  deliberate "before" side of a before/after comparison: it is expected to compile cleanly
-  without `--forbid-trap` and to be flagged by it once enabled, and that contrast is worth
-  preserving in history, not squashed away -- it is the concrete evidence for why
-  `--forbid-trap` (and the refinement-type system behind it) earns its keep, valuable for
-  anyone auditing this project's approach later (including turning it into a paper).
-- **Step 3 -- turn `--forbid-trap` on and fix only what it flags.** Add `--forbid-trap` to
-  the file's Makefile rule and recompile. Each flagged site gets fixed at its root: a
-  refined parameter/loop-bound type (`{lo..<hi as base}`, `for i: usize in 0..<n`), or, when
-  the bound genuinely depends on runtime state the type system cannot see (e.g. an
-  allocator's own bookkeeping invariant), explicit if-condition narrowing
-  (`if (v >= lo && v < hi) { ... }`) right at the point of use. Never "fix" a flagged site by
-  swapping the checked access back to a raw pointer -- that defeats the entire point of
-  running this step. This second, hardened version is committed separately from the Step 2
-  baseline, so the diff between the two commits **is** the demonstration of what
-  `--forbid-trap` found.
+**The unit this applies to is a whole working MILESTONE, not necessarily one file in
+isolation.** Concretely: `fatfs` (in-memory block device, issue #61) and the real SD/eMMC
+driver it plugs into (issue #62) are being built as one such milestone -- refinement types
+and `--forbid-trap` stay off across BOTH pieces, all the way through wiring the real SD card
+in underneath `fatfs`'s FAT12 logic, not just for `fatfs` alone. Verification during this
+whole span comes from integration tests actually exercising the code (QEMU + `mtools` for
+`fatfs` alone, then a real SD-card-backed integration test once #62 lands), not from the
+compiler. Only once the *whole* milestone (`fatfs` + real SD card, reading and writing an
+actual card) is demonstrated working end to end does refinement-typing/`--forbid-trap` get
+turned on, in one pass across everything the milestone touched -- not piecemeal after each
+intermediate piece. Ask before assuming a smaller or larger milestone boundary than this if
+it's ever unclear which pieces of a multi-issue effort are meant to land together before
+hardening.
+
+- **While `--forbid-trap` is deliberately off: write plain, idiomatic checked array/slice
+  indexing** (`buf[i]`, not raw-pointer arithmetic) and ordinary unrefined parameter types
+  (`u32`, `usize`, etc). A runtime trap check being silently inserted is fine and expected at
+  this stage -- the goal is purely "does the logic work," verified by actually running it,
+  not by making the compiler happy. **Do not reach for raw pointers/`unsafe` merely to route
+  around a bounds check that checked array/slice indexing would have needed instead** -- that
+  silently reintroduces exactly the unproven-access risk `--forbid-trap` exists to catch, and
+  produces a file that trivially "passes" `--forbid-trap` without any of its sites ever having
+  been examined. Raw pointers stay reserved for cases that need them regardless of this
+  process (a byte-oriented hardware/block-device boundary, a struct-overlay cast onto a raw
+  buffer, a NUL-terminated scan whose length isn't known up front) -- not as a shortcut
+  through this step.
+- **Each intermediate piece still gets committed as its own known-good baseline** once it
+  demonstrably works (e.g. `fatfs` alone, verified via QEMU + `mtools`, before #62 exists)--
+  this snapshot is the deliberate "before" side of a before/after comparison: it is expected
+  to compile cleanly without `--forbid-trap` and to be flagged by it once eventually enabled,
+  and that contrast is worth preserving in history, not squashed away -- it is the concrete
+  evidence for why `--forbid-trap` (and the refinement-type system behind it) earns its keep,
+  valuable for anyone auditing this project's approach later (including turning it into a
+  paper). It does NOT mean turning `--forbid-trap` on for that piece yet if the milestone it
+  belongs to isn't finished.
+- **When the milestone is finished, turn `--forbid-trap` on and fix only what it flags.** Add
+  `--forbid-trap` to each affected file's Makefile rule and recompile. Each flagged site gets
+  fixed at its root: a refined parameter/loop-bound type (`{lo..<hi as base}`,
+  `for i: usize in 0..<n`), or, when the bound genuinely depends on runtime state the type
+  system cannot see (e.g. an allocator's own bookkeeping invariant), explicit if-condition
+  narrowing (`if (v >= lo && v < hi) { ... }`) right at the point of use. Never "fix" a
+  flagged site by swapping the checked access back to a raw pointer -- that defeats the
+  entire point of running this step. This hardened version is committed separately from the
+  unrefined baseline(s), so the diff **is** the demonstration of what `--forbid-trap` found.
 - Refined-type bounds (`{lo..<hi as base}`) must be spelled as literal integers, the same
   restriction array sizes have (`examples/const_global/const_global.tkb`'s comment) --
   `{0..<TOTAL_SECTORS as usize}` referencing a named `usize` global is a syntax error, even
@@ -1292,7 +1306,7 @@ software process.
 - **Do not save memories to `~/.claude`.** Consolidate project-specific information in this file (it cannot be shared across environments).
 - **All text in this repository must be ASCII-only.** Never write Japanese or any other non-ASCII characters in source files, comments, documentation, or any other file. `make langcheck` enforces this and will fail if non-ASCII characters are found.
 - **Follow YAGNI (see "Design Principle: YAGNI" above).** Do not design or implement functionality beyond what the current, concrete task needs. If a request seems to call for more than that, flag the tradeoff and ask before building it.
-- **New `.tkb` code under `examples/`: get it working without `--forbid-trap` first, commit that baseline, then turn `--forbid-trap` on as a separate step and fix only what it flags** (see "Development Process: Prove New `.tkb` Code Without `--forbid-trap` First, Then Turn It On" above). Do not skip straight to a `--forbid-trap`-clean version, and do not "fix" a flagged site by switching it to a raw pointer.
+- **New `.tkb` code under `examples/`: get the whole milestone working without refinement types/`--forbid-trap` first, commit each working piece as a baseline, then turn `--forbid-trap` on once the milestone is done and fix only what it flags** (see "Development Process: Prove New `.tkb` Code Without `--forbid-trap` First, Then Turn It On" above -- e.g. `fatfs` + its real SD card integration are one milestone; don't harden `fatfs` alone partway through). Do not skip straight to a `--forbid-trap`-clean version, and do not "fix" a flagged site by switching it to a raw pointer.
 
 ## Dependencies
 
