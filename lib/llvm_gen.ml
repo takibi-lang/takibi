@@ -3064,6 +3064,7 @@ let gen_program ?prog_types prog =
     | StructDef _ -> ()
     | OpaqueStructDef _ -> ()
     | EnumDef _   -> ()
+    | UseDef _    -> ()
   ) prog;
   (* Pass 2: generate function bodies *)
   List.iter (function
@@ -3073,6 +3074,7 @@ let gen_program ?prog_types prog =
     | StructDef _     -> ()
     | OpaqueStructDef _ -> ()
     | EnumDef _       -> ()
+    | UseDef _        -> ()
   ) prog;
   (* Resolve any deferred/forward-referenced DI metadata. Must run after every
      gen_func call above, before the module is optimized or emitted to an object. *)

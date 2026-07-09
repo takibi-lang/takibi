@@ -95,10 +95,33 @@ let () =
   in
   if !debug_info then Llvm_gen.enable_debug_info (List.hd input_files);
 
+  let prescan_file filename =
+    let chan = open_in filename in
+    let lexbuf = Lexing.from_channel chan in
+    Lexing.set_filename lexbuf filename;
+    let result = Use_resolver.prescan_uses lexbuf in
+    close_in chan;
+    result
+  in
+
   (try
     Const_env.reset ();
     Type_layout.reset ();
-    let prog = List.concat_map parse_file input_files in
+    (* GitHub issue #55: every file named on the command line is an entry
+       point into Use_resolver's `use "path";` closure -- if none of them
+       (or anything they transitively `use`) has a single `use`
+       declaration, this resolves to exactly `input_files` in the given
+       order, so every existing Makefile invocation keeps working
+       byte-for-byte unchanged. See Use_resolver's own header comment for
+       the full design (ordering, cycle handling, why this doesn't touch
+       type_inf.ml/llvm_gen.ml at all). *)
+    let resolved =
+      try Use_resolver.resolve ~parse_file ~prescan:prescan_file input_files
+      with Use_resolver.Use_error msg ->
+        Printf.eprintf "Error: %s\n" msg;
+        exit 1
+    in
+    let prog = List.concat_map snd resolved in
 
     (* HM type inference -- catches type errors and produces resolved types *)
     let prog_types = Typechecker.infer_program prog in

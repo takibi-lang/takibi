@@ -280,16 +280,32 @@ size.
   pointer arithmetic and pointer differences (`ptr - ptr` returns `isize`).
 - **`sizeof(T)` cannot be used as an array size** (`[T; sizeof(Foo)]`) -- see the `sizeof(T)` section above for why
   (parser-time vs. codegen-time resolution mismatch) and what combining them would require.
-- **No module/import system for `.tkb` files** -- which common files get concatenated into a given example's build
-  is decided entirely by hand-maintained Makefile variable lists (`COMMON_UART`, `COMMON_GIC`, etc.), with nothing
-  in the source itself declaring "this file needs that file." Bit us directly while removing `irq.tkb`'s `IS_QEMU`
-  branch: a new helper function was first placed in `uart.tkb` (concatenated into literally every example) even
-  though its body called `gic_init()`/`enable_usart1_irq()`, symbols that only exist in a handful of builds --
-  this silently broke unrelated examples like `start` with an "Undefined function" error, not caught until
-  `make stm32build` was re-run over the whole example set. Ended up moving the functions into `gic.tkb`/`nvic.tkb`
-  instead (already only included where those symbols exist). **Deferred**: a lightweight `use <file>;`-style
-  declaration (even just "this file requires these to be present," checked at parse/link time) would catch this
-  class of mistake at the point of writing the code rather than requiring a full rebuild sweep to notice.
+- **Lightweight `use "path/to/file.tkb";` file dependencies are implemented (GitHub issue #55)** -- a `.tkb` file
+  can now declare, in source, which other files it needs; `bin/main.ml` resolves the transitive closure starting
+  from the command-line entry file(s) (`lib/use_resolver.ml`) instead of requiring every needed file to be named
+  explicitly. This directly targets the class of mistake that motivated it (see the historical incident below,
+  from before this feature existed): a helper referencing a symbol from a file never `use`d is now caught the
+  first time the referencing file is compiled at all, not only when some unrelated Makefile target's hand-curated
+  file list happens to expose the gap. Existing Makefile invocations are unaffected (a file with no `use`
+  declarations resolves to exactly its own command-line file list, unchanged) -- migrating the ~40 existing
+  Makefile rules to rely on `use` instead of manually-listed dependencies is a deliberate, separate follow-up, not
+  done as part of landing the feature itself. **What this deliberately is NOT**: real separate compilation (each
+  `.tkb` compiled to its own object file, linked by `ld.lld`). Every file in the resolved closure is still
+  concatenated into one flat AST and type-checked/codegen'd as a single whole-program unit, exactly as before --
+  `use` only changes how the FILE LIST is computed, not the compilation model itself. See HISTORY.md's issue #55
+  entries for the full design (why real separate compilation is a much larger, deliberately-deferred undertaking
+  given this project's whole-program refinement-type proof machinery, and the outlook memo written for that
+  issue).
+
+  **Historical incident that first exposed the gap** (from before this feature existed, kept here for context):
+  while removing `irq.tkb`'s `IS_QEMU` branch, a new helper function was first placed in `uart.tkb` (concatenated
+  into literally every example) even though its body called `gic_init()`/`enable_usart1_irq()`, symbols that only
+  exist in a handful of builds -- this silently broke unrelated examples like `start` with an "Undefined function"
+  error, not caught until `make stm32build` was re-run over the whole example set. Ended up moving the functions
+  into `gic.tkb`/`nvic.tkb` instead (already only included where those symbols exist) -- `use` would not have
+  prevented the underlying design mistake (putting a GIC-specific helper in a file every example shares), only
+  made the resulting undefined-symbol error appear immediately when `uart.tkb` itself was next compiled, rather
+  than only when a later, unrelated Makefile target happened to expose it.
 - **DMA/device memory-barrier builtins are implemented** -- the STM32 Ethernet DMA bring-up needed a `dsb` instruction between a
   descriptor-ring write and the "poll demand" register kick, because `*io` volatile writes alone don't guarantee the
   CPU's write buffer has retired before a subsequent register write reaches the DMA engine (see the "Hardware

@@ -1862,7 +1862,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         Option.iter validate_expr_types init
     | Ast.StructDef (_, fields, _, _) ->
         List.iter (fun (_, ty) -> validate_nonparam_type Lexing.dummy_pos ty) fields
-    | Ast.OpaqueStructDef _ | Ast.EnumDef _ -> ()) prog;
+    | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _ -> ()) prog;
   (* Pass 0: collect struct and enum definitions *)
   let senv = List.fold_left (fun m -> function
     | Ast.StructDef (name, fields, is_packed, align_opt) ->
@@ -1967,6 +1967,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.StructDef _ -> m
     | Ast.OpaqueStructDef _ -> m
     | Ast.EnumDef _   -> m
+    | Ast.UseDef _    -> m
   ) StringMap.empty prog in
   (* Global mutability: plain `let` = immutable compile-time constant, `let mut` = variable.
      Reuses the same tyenv-based mutability check as local variables (Assign/AddrOf). *)
@@ -1977,6 +1978,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.StructDef _              -> m
     | Ast.OpaqueStructDef _        -> m
     | Ast.EnumDef _                -> m
+    | Ast.UseDef _                 -> m
   ) StringMap.empty prog in
   (* Pass 2: check global initializers.
      GitHub issue #77: a plain List.iter used to be enough here, since no

@@ -743,6 +743,22 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  (* -- use "path"; (GitHub issue #55) ------------------------- *)
+
+  Alcotest.test_case "use \"path\"; parses to UseDef" `Quick (fun () ->
+    match parse "use \"examples/common/netutil.tkb\";
+                  fn f() {}" with
+    | [Ast.UseDef "examples/common/netutil.tkb"; Ast.FuncDef _] -> ()
+    | _ -> Alcotest.fail "expected [UseDef; FuncDef]"
+  );
+
+  Alcotest.test_case "use as a bare identifier is now a syntax error (reserved keyword)" `Quick
+    (fun () ->
+       match parse "fn use() {}" with
+       | _ -> Alcotest.fail "expected a syntax error"
+       | exception Parser.Error -> ()
+  );
+
   (* -- as cast ----------------------------------------------- *)
 
   Alcotest.test_case "as cast to u8" `Quick (fun () ->
@@ -1701,7 +1717,7 @@ let infer_tests = [
     (expect_ok "opaque struct Token;
                 let mut storage: u8;
                 fn get() -> *Token { return &storage as *Token; }
-                fn use(t: *Token) {}");
+                fn consume(t: *Token) {}");
 
   Alcotest.test_case "opaque struct cannot be used by value" `Quick
     (expect_type_error "incomplete"
@@ -4219,10 +4235,104 @@ let codegen_tests = [
 
 ]
 
+(* GitHub issue #55: Use_resolver's DFS closure algorithm, tested against
+   an in-memory fake "filesystem" (path -> already-parsed items) rather
+   than real files -- parse_file/prescan are dependency-injected exactly
+   so this is possible; see Use_resolver's own header comment. Each fake
+   file's source is built with the ordinary `parse` helper (reusing the
+   real lexer/parser) rather than hand-constructed Ast records, so these
+   tests exercise the same UseDef-extraction path a real file would. *)
+let use_resolver_tests =
+  let uses_of items = List.filter_map (function Ast.UseDef p -> Some p | _ -> None) items in
+  let make_fs pairs =
+    let table = List.map (fun (path, src) -> (path, parse src)) pairs in
+    let parse_file path =
+      match List.assoc_opt path table with
+      | Some items -> items
+      | None -> Alcotest.failf "fake_fs: no such file %s" path
+    in
+    let prescan path = uses_of (parse_file path) in
+    (parse_file, prescan)
+  in
+  [
+    Alcotest.test_case "resolve: single file with no use returns itself" `Quick (fun () ->
+      let (parse_file, prescan) = make_fs ["a.tkb", "fn f() {}"] in
+      let result = Use_resolver.resolve ~parse_file ~prescan ["a.tkb"] in
+      Alcotest.(check (list string)) "order" ["a.tkb"] (List.map fst result));
+
+    Alcotest.test_case "resolve: dependency comes before dependent" `Quick (fun () ->
+      let (parse_file, prescan) = make_fs [
+        "a.tkb", "use \"b.tkb\";\nfn a_fn() {}";
+        "b.tkb", "fn b_fn() {}";
+      ] in
+      let result = Use_resolver.resolve ~parse_file ~prescan ["a.tkb"] in
+      Alcotest.(check (list string)) "order" ["b.tkb"; "a.tkb"] (List.map fst result));
+
+    Alcotest.test_case "resolve: transitive A->B->C resolves in dependency order" `Quick (fun () ->
+      let (parse_file, prescan) = make_fs [
+        "a.tkb", "use \"b.tkb\";\nfn a_fn() {}";
+        "b.tkb", "use \"c.tkb\";\nfn b_fn() {}";
+        "c.tkb", "fn c_fn() {}";
+      ] in
+      let result = Use_resolver.resolve ~parse_file ~prescan ["a.tkb"] in
+      Alcotest.(check (list string)) "order" ["c.tkb"; "b.tkb"; "a.tkb"] (List.map fst result));
+
+    Alcotest.test_case "resolve: diamond dependency is visited only once" `Quick (fun () ->
+      let (parse_file, prescan) = make_fs [
+        "a.tkb", "use \"b.tkb\";\nuse \"c.tkb\";\nfn a_fn() {}";
+        "b.tkb", "use \"d.tkb\";\nfn b_fn() {}";
+        "c.tkb", "use \"d.tkb\";\nfn c_fn() {}";
+        "d.tkb", "fn d_fn() {}";
+      ] in
+      let result = Use_resolver.resolve ~parse_file ~prescan ["a.tkb"] in
+      let names = List.map fst result in
+      Alcotest.(check int) "total files" 4 (List.length names);
+      Alcotest.(check int) "d.tkb appears exactly once"
+        1 (List.length (List.filter (( = ) "d.tkb") names));
+      Alcotest.(check (option string)) "a.tkb is last (entry point, appended after all deps)"
+        (Some "a.tkb") (List.nth_opt names (List.length names - 1)));
+
+    Alcotest.test_case "resolve: a cycle does not infinite-loop and visits each file once" `Quick
+      (fun () ->
+         let (parse_file, prescan) = make_fs [
+           "a.tkb", "use \"b.tkb\";\nfn a_fn() {}";
+           "b.tkb", "use \"a.tkb\";\nfn b_fn() {}";
+         ] in
+         let result = Use_resolver.resolve ~parse_file ~prescan ["b.tkb"] in
+         let names = List.map fst result in
+         Alcotest.(check int) "total files" 2 (List.length names);
+         Alcotest.(check bool) "a.tkb present" true (List.mem "a.tkb" names);
+         Alcotest.(check bool) "b.tkb present" true (List.mem "b.tkb" names));
+
+    Alcotest.test_case
+      "resolve: no use declarations anywhere preserves command-line order exactly \
+       (backward compatibility with every pre-#55 Makefile invocation)" `Quick
+      (fun () ->
+         let (parse_file, prescan) = make_fs [
+           "x.tkb", "fn x_fn() {}";
+           "y.tkb", "fn y_fn() {}";
+         ] in
+         let result = Use_resolver.resolve ~parse_file ~prescan ["x.tkb"; "y.tkb"] in
+         Alcotest.(check (list string)) "order unchanged" ["x.tkb"; "y.tkb"] (List.map fst result));
+
+    Alcotest.test_case "resolve rejects a use declaration appearing after another item" `Quick
+      (fun () ->
+         let (parse_file, prescan) = make_fs [
+           "a.tkb", "use \"b.tkb\";\nfn a_fn() {}";
+           "b.tkb", "fn early() {}\nuse \"a.tkb\";";
+         ] in
+         match Use_resolver.resolve ~parse_file ~prescan ["a.tkb"] with
+         | _ -> Alcotest.fail "expected Use_resolver.Use_error"
+         | exception Use_resolver.Use_error msg ->
+             Alcotest.(check bool) "mentions the offending file" true
+               (contains_substring msg "b.tkb"));
+  ]
+
 (* -- Entry point ----------------------------------------------------------- *)
 
 let () = Alcotest.run "takibi" [
   "parser",   parser_tests;
   "type_inf", infer_tests;
+  "use_resolver", use_resolver_tests;
   "codegen",  codegen_tests;
 ]

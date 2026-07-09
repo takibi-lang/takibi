@@ -3229,3 +3229,133 @@ deleted; every live usize constant converted to `offsetof(...)`),
 -threading `List.fold_left`; both `unify` calls swapped to actual-first
 argument order; the local-let `bind_ty` upgrade rule mirrored for
 globals).
+
+### GitHub Issue #55: Lightweight `use "path/to/file.tkb";` File
+### Dependencies
+
+**Scoped deliberately narrower than the issue's own long-term framing**,
+via an explicit split proposed and agreed before writing any code: the
+issue conflates two differently-sized problems -- (A) letting a `.tkb`
+file declare its own dependencies so the compiler can compute the correct
+file set and catch a missing dependency immediately, and (B) genuine
+separate compilation (`.tkb` -> `.o` -> `ld.lld`, C-style), which the
+issue's own text names as the eventual goal. Implemented (A) only; (B) is
+tracked as a distinct follow-up with its own outlook memo (see the
+GitHub issue directly for that memo's full text -- it was written to be
+pasted there, not duplicated here).
+
+**Why (A) needed no change to type_inf.ml/llvm_gen.ml at all**: this
+project's whole-program compilation model (every file concatenated into
+one flat AST, type-checked and codegen'd as a single unit) is exactly
+what makes its heaviest machinery possible -- refined-type proofs
+threading through `let`/global bindings (see the issue #77 entries
+above), `Const_env`'s cross-file constant folding, `sizeof`/`offsetof`
+seeing every struct definition. Real separate compilation would need to
+either preserve all of that across compilation-unit boundaries (a
+metadata/interface-export system, architecturally equivalent in
+complexity to what a header file solves, just auto-generated instead of
+hand-maintained -- the issue explicitly does not want the maintenance
+burden of the hand-maintained kind) or accept a real reduction in proof
+power at module boundaries. (A) sidesteps this entirely by leaving the
+whole-program model untouched: `use` only changes WHICH files get
+concatenated and in WHAT ORDER, decided by the compiler instead of a
+human-maintained Makefile list, with every downstream phase unaware
+anything changed.
+
+**Syntax**: `use "path/to/file.tkb";`, a plain string literal (not a
+Rust-style `mod`/`use path::segments` with an implied namespace tree --
+this language has no module/crate namespace concept, and inventing one
+was judged out of scope for a "lightweight" feature). The path is
+resolved relative to the compiler's own working directory, the same
+convention every file already named on the command line uses -- not
+relative to the file the `use` appears in, avoiding the need for
+per-file relative-path resolution logic.
+
+**Mechanism (`lib/use_resolver.ml`, new module)**: a DFS-based closure
+resolution over `use` declarations, run in `bin/main.ml` BEFORE the real
+parse-and-concatenate step that already existed. Two phases per file,
+run in careful order for a specific reason:
+1. `prescan_uses`: a LEX-ONLY scan (calling `Lexer.read` directly, never
+   invoking `Parser.program`) for LEADING `use "path";` tokens. Lex-only
+   is not an optimization choice -- it is required for correctness:
+   `parser.mly`'s grammar actions have ordering-sensitive side effects
+   (`Const_env.define_if_literal`, `Type_layout.begin_struct`/
+   `finish_struct`/`register_enum`), so a `use`d file's own declarations
+   must be FULLY parsed (registering all of those) before the file that
+   `use`s it undergoes ITS OWN real parse. A prescan that only tokenizes
+   never triggers any of them, keeping this ordering possible.
+2. Once a file's own leading `use`s are known, each is resolved
+   recursively (dependencies fully processed, including their own
+   transitive `use`s) BEFORE the file itself is fully parsed and
+   appended to the result list. This produces exactly the "dependencies
+   first, dependents last" order every hand-written Makefile file list
+   already followed by convention (`COMMON_STM32_UART`/`COMMON_STM32_ETH`
+   first, the example's own file last) -- not a style match by
+   coincidence, but the same underlying correctness requirement:
+   `Const_env`'s "no forward references" constant resolution needs a
+   name's defining file to be parsed before anything referencing it.
+
+**Cycles are broken, not rejected**: a file already mid-resolution
+(reached again before finishing) is treated as already available rather
+than re-entered or reported as an error. Two files whose functions call
+each other are an ordinary pattern this project's flat-concatenation
+model already supports (function/struct/enum resolution is NOT order
+-sensitive, only `Const_env`-recognized constant resolution is) --
+requiring a strict DAG would reject working code for no correctness
+benefit. Verified directly (`use_resolver_tests`): a two-file mutual
+`use` with each file calling the other's function compiles cleanly.
+
+**A genuine, deliberately-chosen silent-failure trap, closed**: since
+`prescan_uses` only ever looks at LEADING tokens, a `use` declaration
+placed AFTER another item in the same file would type-check and parse
+fine as an ordinary (if oddly-placed) `UseDef` item, but would never
+actually be seen by the resolver -- silently ineffective, exactly the
+class of bug this project's "detect errors at compile time" principle
+exists to rule out. `check_uses_are_leading` rejects this outright with a
+dedicated error ("`use` declarations must appear before any other item
+in the file") rather than accepting it as a harmless no-op.
+
+**Files**: `lib/lexer.mll` (`"use"` keyword -> `USE` token -- a genuine,
+deliberately-accepted breaking change: any existing code using `use` as
+an identifier now fails to parse; found and fixed exactly one such case,
+a test fixture function named `use` unrelated to the feature it was
+testing, by renaming it), `lib/parser.mly` (`%token USE`, `USE STRING
+SEMI` production), `lib/ast.ml` (`UseDef of string`), `lib/type_inf.ml` +
+`lib/llvm_gen.ml` (every exhaustive match over `Ast.toplevel` gained a
+`UseDef _` no-op case -- OCaml's compiler flagged every site that needed
+one, per this project's usual "compiler-enforced completeness" pattern
+for this class of change), `lib/use_resolver.ml` (new), `lib/dune`
+(module list), `bin/main.ml` (wires `Use_resolver.resolve` in place of
+the old plain `List.concat_map parse_file input_files`), `test/
+test_takibi.ml` (2 parser tests, 7 `use_resolver` tests using an
+in-memory fake filesystem -- `parse_file`/`prescan` are dependency
+-injected specifically so the ordering algorithm is unit-testable
+without real files on disk -- plus the one renamed identifier-collision
+fixture).
+
+**Verified end-to-end against the real compiler, not just unit tests**:
+five scratch scenarios run through the actual `main.exe` binary before
+considering this done -- (1) an entry file with a `use` of a second file
+defining an array-size constant and a function compiles successfully
+with ONLY the entry file named on the command line; (2) the same entry
+file with the `use` declaration removed fails immediately with a clear
+"not a known compile-time integer constant" error, reproducing the
+issue's own motivating scenario (a missing dependency silently breaking
+only when something references it) but now caught at the point of
+compiling the file itself; (3) a `use` placed after another item fails
+with the dedicated leading-use error; (4) two mutually-`use`ing files
+compile cleanly (cycle tolerance); (5) a 3-level transitive chain
+(A `use`s B, B `use`s C, C defines a constant A needs) resolves
+correctly with only A named on the command line. Full `make check`
+(langcheck, 462 unit tests -- up from 453, +9 for this feature -- plus
+the one renamed fixture, stm32build, all 125 qemutest cases) passes with
+zero regressions, confirming every existing Makefile invocation (none of
+which use any `use` declarations yet) continues to resolve to exactly
+its own command-line file list, unchanged.
+
+**Deliberately not done as part of this feature**: migrating any of the
+~40 existing Makefile rules to actually rely on `use` instead of manually
+-listed file dependencies. The feature is additive and fully backward
+compatible (confirmed above), so this migration is a free-standing,
+separately-schedulable follow-up, not a requirement for the feature to
+be complete or usable on new code.

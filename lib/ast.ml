@@ -136,6 +136,18 @@ type toplevel =
   (* name, is_affine -- incomplete nominal type, usable only behind a pointer *)
   | EnumDef of string * type_expr option * (string * int option) list * bool
   (* enum Name: u16 { Variant = val; _; } -- last bool = is_nonexhaustive *)
+  | UseDef of string
+  (* use "path/to/file.tkb"; -- GitHub issue #55. Path is resolved relative
+     to the compiler's own working directory (the same convention already
+     used for every file named on the command line), not to the file the
+     `use` appears in. Consumed entirely by Use_resolver (see that
+     module's header comment) before type inference ever runs -- by the
+     time a UseDef item reaches type_inf.ml/llvm_gen.ml, it carries no
+     further meaning and both simply skip over it, matching how every
+     other whole-program pass in this codebase treats a toplevel item it
+     doesn't care about. Must appear before any other item in its file
+     (Use_resolver.resolve enforces this with a dedicated error, not a
+     silent no-op) -- see that module for why. *)
 [@@deriving show]
 
 let show_toplevel_list lst =

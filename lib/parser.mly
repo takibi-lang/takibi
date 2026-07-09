@@ -65,7 +65,7 @@ let check_refined_base_range pos lo hi base =
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE BORROW PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE
+%token FN RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE BORROW PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE
 %token DARROW COLONCOLON UNDERSCORE
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT
 %token ASSIGN DOT
@@ -143,6 +143,8 @@ item:
     { let (vs, ne) = $4 in
       Type_layout.register_enum $2 TypeU32;
       EnumDef ($2, None, vs, ne) }
+  | USE STRING SEMI
+    { UseDef $2 }
 
 struct_intro:
   | STRUCT IDENT
