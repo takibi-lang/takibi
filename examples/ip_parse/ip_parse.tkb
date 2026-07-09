@@ -7,6 +7,8 @@
 // network I/O (RX/TX over virtio-net) is exercised by examples/icmp_echo,
 // which reuses this parsing logic against live packets.
 
+use "examples/common/inet_checksum.tkb";
+
 fn print_ip(p: [u8; 4..]) {
     uart_print(p[0]);
     uart_putc('.');

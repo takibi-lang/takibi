@@ -25,6 +25,8 @@
 // scripts/eth_arp_reply_test.py (STM32 hardware), not UART output;
 // uart_puts below is purely for interactive debugging.
 
+use "examples/common/netutil.tkb";
+
 let mut our_mac: [u8; 6];
 
 // bytes_eq/bytes_copy/read_u16be/write_u16be/slice_copy/slice_eq live in

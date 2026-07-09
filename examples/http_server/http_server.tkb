@@ -77,6 +77,9 @@
 // Request parsing is minimal: any ESTABLISHED-state segment whose payload
 // starts with "GET" is answered with the same fixed page.
 
+use "examples/common/inet_checksum.tkb";
+use "examples/common/netutil.tkb";
+
 let mut our_mac: [u8; 6];
 let mut our_ip:  [u8; 4];
 

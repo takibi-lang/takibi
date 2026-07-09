@@ -3359,3 +3359,152 @@ its own command-line file list, unchanged.
 compatible (confirmed above), so this migration is a free-standing,
 separately-schedulable follow-up, not a requirement for the feature to
 be complete or usable on new code.
+
+### Issue #55 Part (A) Follow-up: Migrating the ~40 Makefile Rules to
+### Actually Rely on `use`
+
+The follow-up flagged above. Every example/common `.tkb` file that had a
+hand-maintained Makefile dependency now declares that dependency itself
+via a leading `use "path/to/file.tkb";`, and the corresponding Makefile
+recipes were shrunk to match -- the payoff isn't smaller Makefile text so
+much as moving the "which files does X need" fact from a human-maintained
+list next to the *build* rule to a machine-checked declaration next to
+the *code* that actually needs it, closing exactly the class of drift
+this project's own `irq.tkb`/`uart.tkb` incident (see the "No module/
+import system" bullet under Known Limitations) was an example of.
+
+**Where each `use` was added, and why each one is safe** (every addition
+was checked against the actual Makefile dependency lists via `grep`
+before being made, not assumed from memory):
+- `examples/common_qemu/print.tkb` / `examples/common_stm32/print.tkb`:
+  each now `use`s `examples/common/print.tkb` +
+  `examples/common/runtime.tkb` (the old `COMMON_PRINT_BASE` pair) --
+  every consumer of either file already needed both unconditionally, in
+  that order.
+- `examples/common_qemu/virtio_mmio.tkb`: `use`s
+  `examples/common_qemu/gic.tkb` -- the driver's own IRQ ack/EOI code
+  (`gic.cpu_iar`/`gic.cpu_eoir`) references the `gic` struct directly, so
+  every application file that used to need `$(COMMON_GIC)` listed
+  alongside `$(COMMON_VIRTIO_MMIO)` in the Makefile (`net_echo`,
+  `arp_reply`, `icmp_echo`, `tcp_echo`, `http_server`) gets it
+  transitively now, with no per-application `use` needed at all.
+- `examples/common_stm32/eth.tkb`: `use`s `examples/common/netutil.tkb`
+  (its own `net_read_mac`'s `bytes_copy` call),
+  `examples/common_stm32/netconfig.tkb` (`OUR_MAC`), and
+  `examples/common_stm32/nvic.tkb` (`enable_eth_irq`) -- the same
+  "the driver needs it, not the application" reasoning as virtio_mmio.tkb
+  above, closing the equivalent gap on the STM32 side for the same five
+  examples.
+- `irq.tkb`, `echo.tkb`, `preempt.tkb`, `semaphore.tkb`, `watchdog.tkb`,
+  `condvar.tkb`, `msgqueue.tkb`: each `use`s
+  `examples/common_qemu/gic.tkb` directly. Unlike virtio_mmio.tkb/eth.tkb
+  above, these are the *shared* (both-target) example files themselves,
+  and the dependency is genuinely their own: each defines a QEMU-shaped
+  interrupt entry point (`irq_dispatch`, or `SysTick_Handler`+
+  `pendsv_dispatch` for the scheduler-pattern examples) that references
+  the `gic` struct, and this entry point is compiled unconditionally on
+  *both* targets (dead code on STM32, matching every other "both entry
+  points always defined" example in this codebase) -- confirmed by
+  `grep`ping the STM32 recipes, which already listed `$(COMMON_GIC)`
+  alongside `$(COMMON_STM32_NVIC)`/`$(COMMON_STM32_SCHEDULER)` for
+  exactly this reason, before this migration. `condvar.tkb`/
+  `msgqueue.tkb` additionally `use` `examples/common/sync.tkb` (mutex/
+  condvar wrappers, pure takibi logic, already reused verbatim on both
+  targets).
+- `net_echo.tkb`/`arp_reply.tkb`: `use` `examples/common/netutil.tkb`
+  only (not gic.tkb -- confirmed via `grep` that their STM32 recipes never
+  listed `$(COMMON_GIC)`, unlike the scheduler-pattern group above; the
+  GIC dependency lives entirely inside virtio_mmio.tkb, which these files
+  don't reference `gic` from directly).
+- `icmp_echo.tkb`/`tcp_echo.tkb`/`http_server.tkb`: `use` both
+  `examples/common/inet_checksum.tkb` and `examples/common/netutil.tkb`.
+- `ip_parse.tkb`/`inet_checksum.tkb` (the example, not the shared file):
+  `use` only `examples/common/inet_checksum.tkb` -- neither ever called a
+  netutil.tkb function (confirmed by `grep`ping for
+  `bytes_eq`/`bytes_copy`/`read_u16be`/etc., all absent), even though the
+  old `CHECKSUM_OBJS` Makefile group passed netutil.tkb to all three
+  examples in the group uniformly (harmless -- one inert extra file). This
+  migration is a genuine (small) precision improvement: `ip_parse.tkb`
+  and the `inet_checksum` example no longer pull in a file they never
+  used.
+- `tcp_parse.tkb`: `use`s both (confirmed via `grep` that it does call
+  `read_u16be`/`read_u32be`/`slice_copy`/`write_u16be`).
+
+**What deliberately stays Makefile-curated, and why**: any file with no
+single path that's correct for both targets. `uart.tkb`, print.tkb's
+per-target half, `timer.tkb`/`scheduler.tkb`, `rtc.tkb`,
+`uart_irq_stub.tkb`, and `netconfig.tkb` all have this shape -- a shared
+example file that compiles for both targets cannot declare `use
+"examples/common_qemu/X.tkb"` without breaking the STM32 build, and vice
+versa. `uart_irq_stub.tkb` specifically must NOT be blanket-`use`d from
+`irq.tkb`/`echo.tkb` even on the QEMU side alone: STM32's real `uart.tkb`
+already defines a real `uart_set_rx_handler()`, and (per the
+"Function overloading uses exact parameter types" limitation) two
+identically-signed definitions reaching the same compilation unit would
+be a genuine conflict on the QEMU side too if uart_irq_stub.tkb's own
+no-op ever needed to coexist with a real one -- it stays exactly where it
+was, named only in the QEMU-only Makefile recipes.
+
+**A pre-existing, currently-harmless duplicate-definition non-error found
+while auditing this** (not changed, only confirmed and documented, since
+it's out of scope for this migration and nothing regressed): the STM32
+build for `irq`/`preempt`/`semaphore`/`condvar`/`watchdog`/`msgqueue`
+compiles BOTH `examples/common_stm32/nvic.tkb`
+(or `scheduler.tkb`) AND `examples/common_qemu/gic.tkb` together, and
+both files define functions with the exact same name and signature
+(`irq_uart_rx_setup`/`irq_uart_rx_unmask`) -- confirmed empirically (not
+just by inspection) that this compiles successfully with no duplicate-
+definition error, which was surprising given this project's own
+documented "exact parameter types" overload model. Whichever
+definition's effect actually reaches the final binary was not
+independently verified beyond "the STM32 hardware/QEMU test suite
+already passes with this exact file combination" (a pre-existing
+condition, unrelated to this migration, which only preserves it
+unchanged by continuing to pass both files on the STM32 command line).
+Worth investigating on its own if a future change ever makes the
+distinction observable.
+
+**Two-variable command-line/prerequisite split, applied everywhere in
+this migration**: every Makefile recipe touched keeps the now-redundant
+file in its PREREQUISITE list (left of the `:`) even though it was
+removed from the RECIPE's command line -- Make has no visibility into a
+`.tkb` file's own `use` declarations, only into what the Makefile lists
+explicitly, so dropping a file from the prerequisite list entirely would
+silently break staleness tracking (an edit to, say, `netutil.tkb` would
+no longer trigger a rebuild of `icmp_echo.o`). Confirmed concretely, not
+just reasoned about: touched `examples/common/netutil.tkb`'s mtime and
+ran `make -n`/`make` on `examples/icmp_echo/icmp_echo.o` afterward --
+correctly reported and performed exactly one rebuild (using the new,
+shorter command line with netutil.tkb no longer named on it), then a
+second `make` run on the same target performed no further rebuild
+(confirming the earlier one wasn't a fluke of `$(TAKIBI)`'s own
+always-checked `dune build` step, which runs on every invocation
+regardless but only actually changes `main.exe`'s mtime when the compiled
+output changes -- see this file's own Makefile section for that
+mechanism).
+
+**Verification**: `make clean && make check` (the fully honest, no-stale-
+artifact form, per this project's own established lesson from the
+undetermined-for-loop-counter incident) -- langcheck, all 462 unit tests,
+stm32build (including the RAM-execution and http_server Flash builds),
+and all 125 qemutest cases -- passes with zero regressions. Real STM32/
+Ethernet hardware (`make hwcheck`/`make hwcheck-net`) was NOT reachable
+in this session's environment (no ST-LINK USB device present), so this
+migration is verified end-to-end on the QEMU side only; the change is a
+build-dependency reorganization with no compiler or driver logic touched,
+and the STM32 RAM/Flash build outputs were confirmed to compile
+successfully (`make stm32build`), but a real-hardware UART-diff run is
+still recommended before the next `make hwcheck-net` opportunity.
+
+**Files**: `examples/common_qemu/print.tkb`, `examples/common_stm32/
+print.tkb`, `examples/common_qemu/virtio_mmio.tkb`, `examples/
+common_stm32/eth.tkb`, `examples/irq/irq.tkb`, `examples/echo/echo.tkb`,
+`examples/preempt/preempt.tkb`, `examples/semaphore/semaphore.tkb`,
+`examples/watchdog/watchdog.tkb`, `examples/condvar/condvar.tkb`,
+`examples/msgqueue/msgqueue.tkb`, `examples/net_echo/net_echo.tkb`,
+`examples/arp_reply/arp_reply.tkb`, `examples/icmp_echo/icmp_echo.tkb`,
+`examples/tcp_echo/tcp_echo.tkb`, `examples/http_server/http_server.tkb`,
+`examples/tcp_parse/tcp_parse.tkb`, `examples/ip_parse/ip_parse.tkb`,
+`examples/inet_checksum/inet_checksum.tkb`, `Makefile` (variable
+definitions and ~20 recipe command lines shrunk, prerequisite lists left
+unchanged).

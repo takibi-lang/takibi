@@ -8,6 +8,9 @@
 // example needs no per-tick bookkeeping of its own, so its irq_dispatch/
 // SysTick_Handler are simpler than preempt's: just re-arm/switch).
 
+use "examples/common/sync.tkb";
+use "examples/common_qemu/gic.tkb";
+
 struct SchedState {
     task_count:   isize;
     current_task: isize;

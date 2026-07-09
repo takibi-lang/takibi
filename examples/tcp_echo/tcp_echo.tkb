@@ -57,6 +57,9 @@
 // outright; unsafe is the deliberate, visible stand-in until that's
 // judged worthwhile.
 
+use "examples/common/inet_checksum.tkb";
+use "examples/common/netutil.tkb";
+
 let mut our_mac: [u8; 6];
 
 // IPv4 field offsets, relative to the start of the IP header.

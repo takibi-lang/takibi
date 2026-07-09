@@ -11,6 +11,8 @@
 // cross-file hook/override needed, it's just an ordinary in-file function
 // call on both platforms.
 
+use "examples/common_qemu/gic.tkb";
+
 struct SchedState {
     task_count:   isize;
     current_task: isize;

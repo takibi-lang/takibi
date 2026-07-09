@@ -33,8 +33,26 @@ COMMON_SEM_ASM_S   := $(COMMON_QEMU_DIR)/sem_asm.S
 COMMON_SEM_ASM_O   := $(COMMON_QEMU_DIR)/sem_asm.o
 COMMON_LINK_LD     := $(COMMON_QEMU_DIR)/link.ld
 COMMON_UART        := $(COMMON_QEMU_DIR)/uart.tkb
+# GitHub issue #55: examples/common_qemu/print.tkb now `use`s
+# examples/common/print.tkb + examples/common/runtime.tkb itself, so no
+# recipe needs to pass COMMON_PRINT_BASE on the takibi command line
+# anymore -- COMMON_PRINT_QEMU (just the one file) is what belongs on a
+# command line now. COMMON_PRINT/COMMON_PRINT_BASE are kept as
+# PREREQUISITES only (left of the `:`), not command-line arguments, purely
+# so Make's staleness tracking still notices when print.tkb/runtime.tkb
+# change -- Make has no visibility into a `.tkb` file's own `use`
+# declarations, only into the Makefile's explicit prerequisite list.
 COMMON_PRINT_BASE  := $(COMMON_DIR)/print.tkb $(COMMON_DIR)/runtime.tkb
-COMMON_PRINT       := $(COMMON_PRINT_BASE) $(COMMON_QEMU_DIR)/print.tkb
+COMMON_PRINT_QEMU  := $(COMMON_QEMU_DIR)/print.tkb
+COMMON_PRINT       := $(COMMON_PRINT_BASE) $(COMMON_PRINT_QEMU)
+# GitHub issue #55: examples/common_qemu/virtio_mmio.tkb now `use`s this
+# file itself (it references the `gic` struct directly for its own IRQ
+# ack/EOI), and irq.tkb/echo.tkb/preempt.tkb/semaphore.tkb/watchdog.tkb/
+# condvar.tkb/msgqueue.tkb each `use` it too (their QEMU-shaped dispatch
+# entry point references `gic` even though it's dead code on STM32 --
+# see each file's header comment). COMMON_GIC is kept below purely as a
+# prerequisite for staleness tracking; no recipe passes it on the command
+# line anymore.
 COMMON_GIC         := $(COMMON_QEMU_DIR)/gic.tkb
 COMMON_TIMER       := $(COMMON_QEMU_DIR)/timer.tkb
 COMMON_SYNC        := $(COMMON_DIR)/sync.tkb
@@ -242,14 +260,28 @@ $(COMMON_SEM_ASM_O): $(COMMON_SEM_ASM_S)
 # For examples/%.o, % matches "name/name" (including the slash).
 # Example: examples/start/start.o <- examples/start/start.tkb
 #
-# Common file sets passed to takibi:
+# GitHub issue #55: each example's own file-level `use` declarations now
+# pull in gic.tkb/timer.tkb-equivalent.../sync.tkb/virtio_mmio.tkb/
+# inet_checksum.tkb/netutil.tkb where needed (see each .tkb file's header
+# comment), so the recipes below no longer need to pass those files on the
+# takibi COMMAND LINE. They are still listed as PREREQUISITES (left of the
+# `:`) below, purely so Make's own staleness tracking keeps working when
+# one of those files changes -- Make has no visibility into a `.tkb`
+# file's own `use` declarations, only into what this Makefile lists
+# explicitly. Target-specific files with no single shared path across both
+# targets (uart.tkb, print.tkb's per-target half, timer.tkb/scheduler.tkb,
+# rtc.tkb, uart_irq_stub.tkb, netconfig.tkb) are NOT `use`-able from a
+# shared example file and stay on the command line as before -- see
+# CLAUDE.md's "No module/import system" note.
+#
+# Common file sets still passed to takibi:
 #   Standard   : uart.tkb + print.tkb                        (most examples)
-#   IRQ group  : + gic.tkb                                   (irq)
-#   Timer group: + gic.tkb + timer.tkb                       (preempt semaphore watchdog)
-#   Sync group : + gic.tkb + timer.tkb + sync.tkb            (condvar msgqueue)
-#   Net group  : + gic.tkb + virtio_mmio.tkb + netutil.tkb  (net_echo, arp_reply)
-#   Checksum group: + inet_checksum.tkb + netutil.tkb       (inet_checksum, ip_parse, tcp_parse)
-#   App group  : + gic.tkb + virtio_mmio.tkb + inet_checksum.tkb + netutil.tkb (icmp_echo, tcp_echo, http_server)
+#   IRQ group  : + uart_irq_stub.tkb                         (irq)
+#   Timer group: + timer.tkb + stm32_stub.tkb                (preempt semaphore watchdog)
+#   Sync group : + timer.tkb + stm32_stub.tkb                (condvar msgqueue)
+#   Net group  : + virtio_mmio.tkb + netconfig.tkb           (net_echo, arp_reply)
+#   Checksum group: (nothing extra -- each file `use`s what it needs)
+#   App group  : + virtio_mmio.tkb + netconfig.tkb           (icmp_echo, tcp_echo, http_server)
 .SECONDEXPANSION:
 
 IRQ_OBJS   := examples/irq/irq.o
@@ -275,44 +307,58 @@ SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS) $(NET_OBJS) $(CHECKSUM_OB
 STANDARD_OBJS := $(filter-out $(SPECIAL_OBJS), $(EXAMPLE_OBJS))
 
 $(STANDARD_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $< --target $(AARCH64_TARGET) -o $@
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -o $@
 
-# COMMON_GIC is needed because examples/irq/irq.tkb is now a single file
-# shared with the STM32 build -- see that file's header comment. Both
-# platforms' interrupt entry points are compiled regardless of target;
-# COMMON_GIC supplies the QEMU-only gic struct/functions the (real, active)
-# irq_dispatch entry point references.
+# examples/irq/irq.tkb `use`s gic.tkb itself now (both platforms' interrupt
+# entry points are compiled regardless of target; the QEMU-shaped
+# irq_dispatch entry point references the gic struct -- see that file's
+# header comment), so COMMON_GIC is a prerequisite only, not a command-line
+# argument.
 $(IRQ_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_UART_IRQ_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_UART_IRQ_STUB) $< --target $(AARCH64_TARGET) -o $@
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_UART_IRQ_STUB) $< --target $(AARCH64_TARGET) -o $@
 
 $(RTC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_RTC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_RTC) $< --target $(AARCH64_TARGET) -o $@
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_RTC) $< --target $(AARCH64_TARGET) -o $@
 
+# examples/echo/echo.tkb `use`s gic.tkb itself now, same reasoning as irq above.
 $(GETC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_UART_IRQ_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_UART_IRQ_STUB) $< --target $(AARCH64_TARGET) -o $@
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_UART_IRQ_STUB) $< --target $(AARCH64_TARGET) -o $@
 
 # COMMON_STM32_STUB supplies pendsv_trigger() (a no-op here) so each of
 # these shared examples' STM32-shaped SysTick_Handler/pendsv_dispatch
 # entry points (dead code under QEMU) still compile -- see
-# examples/preempt/preempt.tkb's header comment.
+# examples/preempt/preempt.tkb's header comment. preempt.tkb/semaphore.tkb/
+# watchdog.tkb each `use` gic.tkb themselves now (same reasoning as irq
+# above), so COMMON_GIC is a prerequisite only here too.
 $(TIMER_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_STM32_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_STM32_STUB) $< --target $(AARCH64_TARGET) -o $@
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_TIMER) $(COMMON_STM32_STUB) $< --target $(AARCH64_TARGET) -o $@
 
+# condvar.tkb/msgqueue.tkb `use` sync.tkb and gic.tkb themselves now.
 $(SYNC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) $(COMMON_STM32_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) $(COMMON_STM32_STUB) $< --target $(AARCH64_TARGET) -o $@
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_TIMER) $(COMMON_STM32_STUB) $< --target $(AARCH64_TARGET) -o $@
 
 # COMMON_NETCONFIG (OUR_IP) is unused-but-harmless for net_echo (no
 # IP awareness at all) -- it just gets one inert extra constant rather than
-# needing a split recipe group of its own. virtio_mmio.tkb owns its GIC
-# dispatch and queue interrupt flags, keeping IRQ details out of applications.
+# needing a split recipe group of its own. net_echo.tkb/arp_reply.tkb
+# `use` netutil.tkb themselves now; virtio_mmio.tkb `use`s gic.tkb itself
+# (it owns its own GIC dispatch and queue interrupt flags, keeping IRQ
+# details out of applications), so COMMON_GIC/COMMON_NETUTIL are
+# prerequisites only here.
 $(NET_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_NETUTIL) $< --target $(AARCH64_TARGET) -o $@
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $< --target $(AARCH64_TARGET) -o $@
 
+# inet_checksum.tkb/ip_parse.tkb/tcp_parse.tkb each `use` exactly the
+# subset of inet_checksum.tkb/netutil.tkb they actually need themselves
+# now (ip_parse never needed netutil at all), so neither is passed on the
+# command line here anymore.
 $(CHECKSUM_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(AARCH64_TARGET) -o $@
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -o $@
 
+# icmp_echo.tkb/tcp_echo.tkb/http_server.tkb each `use` inet_checksum.tkb
+# and netutil.tkb themselves now; virtio_mmio.tkb `use`s gic.tkb itself
+# (see NET_OBJS above).
 $(APP_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(AARCH64_TARGET) -o $@
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $< --target $(AARCH64_TARGET) -o $@
 
 # -- example.o + startup.o -> kernel.elf ---------------------------------------
 # For examples/%/kernel.elf, % matches "name" (no slash).
@@ -352,7 +398,7 @@ $(SEM_KERNELS): examples/%/kernel.elf: \
 # and addr2line), using fizzbuzz.tkb's fixed, well-known shape (fn app_main() at
 # line 3, for at line 4, final uart_puts at line 13) as the expected answer.
 examples/fizzbuzz/fizzbuzz.debug.o: examples/fizzbuzz/fizzbuzz.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $< --target $(AARCH64_TARGET) -g -o $@
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -g -o $@
 
 examples/fizzbuzz/kernel.debug.elf: $(COMMON_STARTUP_O) examples/fizzbuzz/fizzbuzz.debug.o $(COMMON_LINK_LD)
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/fizzbuzz/fizzbuzz.debug.o -o $@
@@ -362,7 +408,7 @@ examples/fizzbuzz/kernel.debug.elf: $(COMMON_STARTUP_O) examples/fizzbuzz/fizzbu
 # the no-debug build) give run_dwarf_var_test something to check that
 # fizzbuzz -- which has no `let mut` of its own -- doesn't exercise.
 examples/fibonacci/fibonacci.debug.o: examples/fibonacci/fibonacci.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $< --target $(AARCH64_TARGET) -g -o $@
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -g -o $@
 
 examples/fibonacci/kernel.debug.elf: $(COMMON_STARTUP_O) examples/fibonacci/fibonacci.debug.o $(COMMON_LINK_LD)
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/fibonacci/fibonacci.debug.o -o $@
@@ -375,7 +421,7 @@ examples/fibonacci/kernel.debug.elf: $(COMMON_STARTUP_O) examples/fibonacci/fibo
 # the manual qemu-* targets below).
 examples/http_server/http_server.debug.o: examples/http_server/http_server.tkb \
     $(COMMON_UART) $(COMMON_PRINT) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) \
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) \
 	          $< --target $(AARCH64_TARGET) -g -o $@
 
 examples/http_server/kernel.debug.elf: $(COMMON_STARTUP_O) examples/http_server/http_server.debug.o $(COMMON_LINK_LD)
@@ -387,7 +433,7 @@ examples/http_server/kernel.debug.elf: $(COMMON_STARTUP_O) examples/http_server/
 # with a workload built to keep the server continuously busy instead.
 examples/tcp_echo/tcp_echo.debug.o: examples/tcp_echo/tcp_echo.tkb \
     $(COMMON_UART) $(COMMON_PRINT) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) \
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) \
 	          $< --target $(AARCH64_TARGET) -g -o $@
 
 examples/tcp_echo/kernel.debug.elf: $(COMMON_STARTUP_O) examples/tcp_echo/tcp_echo.debug.o $(COMMON_LINK_LD)
@@ -419,7 +465,12 @@ COMMON_STM32_DIR       := examples/common_stm32
 COMMON_STM32_STARTUP_S := $(COMMON_STM32_DIR)/startup.S
 COMMON_STM32_STARTUP_O := $(COMMON_STM32_DIR)/startup.o
 COMMON_STM32_UART      := $(COMMON_STM32_DIR)/uart.tkb
-COMMON_STM32_PRINT     := $(COMMON_PRINT_BASE) $(COMMON_STM32_DIR)/print.tkb
+# Same COMMON_PRINT_QEMU/COMMON_PRINT split as the QEMU side above:
+# examples/common_stm32/print.tkb now `use`s COMMON_PRINT_BASE itself, so
+# COMMON_STM32_PRINT_ONLY (just the one file) belongs on the command
+# line; COMMON_STM32_PRINT (kept, unchanged) stays a prerequisite only.
+COMMON_STM32_PRINT_ONLY := $(COMMON_STM32_DIR)/print.tkb
+COMMON_STM32_PRINT     := $(COMMON_PRINT_BASE) $(COMMON_STM32_PRINT_ONLY)
 # eth.tkb's DMA descriptor rings/buffers need AXI SRAM -- used only by
 # examples/http_server/kernel_stm32.elf's rule now (see its comment), the
 # one deliberately-kept Flash-execution example.
@@ -438,7 +489,7 @@ $(COMMON_STM32_STARTUP_RAM_O): $(COMMON_STM32_STARTUP_RAM_S)
 	$(LLVM_MC) --triple=$(STM32_TARGET) --filetype=obj $< -o $@
 
 $(STM32_OBJS): examples/%_stm32.o: examples/%.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 # RAM-execution link: reuses whichever examples/%/%_stm32.o rule already
 # exists (generic or bespoke, from any group above) -- only the startup
@@ -459,31 +510,39 @@ $(COMMON_STM32_SEM_ASM_O): $(COMMON_STM32_SEM_ASM_S)
 	$(LLVM_MC) --triple=$(STM32_TARGET) --filetype=obj $< -o $@
 
 examples/rtc/rtc_stm32.o: examples/rtc/rtc.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_RTC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_RTC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_RTC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 # timer: turned out (during the interrupt-batch research) to need exactly
 # the same rtc.tkb HAL as rtc itself, not any interrupt/scheduler
 # infrastructure -- see examples/timer/timer.tkb's own comment.
 examples/timer/timer_stm32.o: examples/timer/timer.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_RTC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_RTC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_RTC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
+# examples/echo/echo.tkb `use`s gic.tkb itself now (both platforms'
+# interrupt entry points are compiled regardless of target; the
+# QEMU-shaped irq_dispatch entry point references the gic struct even
+# though it's dead code here -- see that file's header comment), so
+# COMMON_GIC is a prerequisite only, not a command-line argument.
 examples/echo/echo_stm32.o: examples/echo/echo.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_GIC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_NVIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 # irq/preempt/semaphore/condvar/watchdog/msgqueue: each compiles the *same*
 # examples/<name>/<name>.tkb file the QEMU build uses (see
 # examples/net_echo/net_echo.tkb's header comment for the general pattern,
 # and examples/irq/irq.tkb / examples/preempt/preempt.tkb's header comments
 # for how GICv2-vs-NVIC dispatch is unified despite the two hardware models
-# genuinely differing). COMMON_GIC is included for all six (harmless,
-# unused on this target) so the QEMU-shaped entry point in each shared file
-# still compiles -- see examples/common_qemu/stm32_stub.tkb's comment for the
-# other half of that (QEMU needing STM32-only stand-ins).
+# genuinely differing). Each of these six files now `use`s gic.tkb itself
+# (harmless, unused on this target) so the QEMU-shaped entry point in each
+# shared file still compiles -- see examples/common_qemu/stm32_stub.tkb's
+# comment for the other half of that (QEMU needing STM32-only stand-ins).
+# COMMON_GIC is kept as a prerequisite only below, not a command-line
+# argument, for the same staleness-tracking reason noted near its
+# definition.
 #
 # irq: NVIC vectors directly to USART1_IRQHandler, a fundamentally
 # different dispatch model from GICv2's software IAR/EOIR table.
 examples/irq/irq_stm32.o: examples/irq/irq.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_GIC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_NVIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 # preempt: PendSV_Handler lives directly in the always-shared
 # common_stm32/startup.S (unlike a separate optional assembly object) --
@@ -491,22 +550,23 @@ examples/irq/irq_stm32.o: examples/irq/irq.tkb $(COMMON_STM32_UART) $(COMMON_STM
 # a program enables SysTick, so no extra object needs linking here beyond
 # the usual startup.o.
 examples/preempt/preempt_stm32.o: examples/preempt/preempt.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 # semaphore: same scheduler restructure as preempt; declares its own extern
 # fn sem_wait/sem_post (no sync.tkb needed, same as the AArch64 version),
 # links against the STM32 sem_asm.o (ldrex/strex, not ldaxr/stlxr).
 examples/semaphore/semaphore_stm32.o: examples/semaphore/semaphore.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 # condvar/msgqueue: same scheduler restructure, plus reuse
 # examples/common/sync.tkb completely unchanged (pure takibi logic calling
-# only sem_wait/sem_post), linked against the STM32 sem_asm.o.
+# only sem_wait/sem_post), linked against the STM32 sem_asm.o. Both files
+# `use` sync.tkb and gic.tkb themselves now.
 examples/condvar/condvar_stm32.o: examples/condvar/condvar.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 examples/msgqueue/msgqueue_stm32.o: examples/msgqueue/msgqueue.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 # RAM-execution builds of semaphore/condvar/msgqueue -- these three need
 # sem_asm.o linked in too, so they get their own explicit rules here
@@ -522,7 +582,7 @@ examples/msgqueue/kernel_stm32_ram.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_S
 
 # watchdog: same scheduler restructure as preempt, no semaphore needed.
 examples/watchdog/watchdog_stm32.o: examples/watchdog/watchdog.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 # net_echo/arp_reply/icmp_echo/tcp_echo/http_server (STM32): real Ethernet
 # MAC/PHY/DMA (examples/common_stm32/eth.tkb) instead of virtio-net. Each
@@ -533,28 +593,30 @@ examples/watchdog/watchdog_stm32.o: examples/watchdog/watchdog.tkb $(COMMON_STM3
 # len/frame/release API plus net_init/net_transmit/net_read_mac
 # examples/common_qemu/virtio_mmio.tkb does. Links against
 # COMMON_STM32_LINK_ETH_LD (AXI SRAM), not the shared DTCM-based link.ld.
-# netconfig.tkb (OUR_MAC/OUR_IP) and netutil.tkb (bytes_eq/
-# bytes_copy/read_u16be/write_u16be, needed by net_read_mac's bytes_copy
-# call) are included for all five, even net_echo (which never references
-# either symbol) -- harmless, matching the same "one inert extra file
-# rather than a split recipe group" choice the QEMU-side NET_OBJS makes.
+# eth.tkb now `use`s nvic.tkb (enable_eth_irq), netconfig.tkb (OUR_MAC),
+# and netutil.tkb (bytes_copy, for net_read_mac) itself -- see its header
+# comment -- so none of COMMON_STM32_NVIC/COMMON_STM32_NETCONFIG/
+# COMMON_NETUTIL need to be passed on the command line for any of these
+# five examples anymore; icmp_echo.tkb/tcp_echo.tkb/http_server.tkb
+# additionally `use` inet_checksum.tkb themselves. All are kept as
+# prerequisites only, for staleness tracking.
 COMMON_STM32_ETH       := $(COMMON_STM32_DIR)/eth.tkb
 COMMON_STM32_NETCONFIG := $(COMMON_STM32_DIR)/netconfig.tkb
 
 examples/net_echo/net_echo_stm32.o: examples/net_echo/net_echo.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 examples/arp_reply/arp_reply_stm32.o: examples/arp_reply/arp_reply.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 examples/icmp_echo/icmp_echo_stm32.o: examples/icmp_echo/icmp_echo.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 examples/tcp_echo/tcp_echo_stm32.o: examples/tcp_echo/tcp_echo.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 examples/http_server/http_server_stm32.o: examples/http_server/http_server.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 # examples/http_server is the one deliberate exception to "every STM32
 # example runs from RAM" (see STM32_RAM_EXAMPLES's comment above): flashing
@@ -574,8 +636,12 @@ examples/http_server/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/http_s
 examples/http_server/kernel_stm32.bin: examples/http_server/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
+# inet_checksum.tkb/ip_parse.tkb/tcp_parse.tkb each `use` exactly the
+# subset of inet_checksum.tkb/netutil.tkb they actually need themselves
+# now (same as the QEMU-side CHECKSUM_OBJS rule above), so neither is
+# passed on the command line here anymore.
 $(STM32_CHECKSUM_OBJS): examples/%_stm32.o: examples/%.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 # -- QEMU run targets ----------------------------------------------------------
 QEMU_FLAGS := -machine virt -cpu cortex-a53 -nographic \

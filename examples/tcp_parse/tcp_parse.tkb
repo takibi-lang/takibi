@@ -29,6 +29,9 @@
 // --forbid-trap clean; see scripts/run_qemutest.sh's
 // forbid_trap_tcp_parse).
 
+use "examples/common/inet_checksum.tkb";
+use "examples/common/netutil.tkb";
+
 fn print_ip(p: [u8; 4..]) {
     uart_print(p[0]);
     uart_putc('.');

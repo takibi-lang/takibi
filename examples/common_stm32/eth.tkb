@@ -23,6 +23,10 @@
 // objects are isolated on 32-byte cache lines and every CPU/device ownership
 // transition below performs explicit clean/invalidate maintenance.
 
+use "examples/common/netutil.tkb";
+use "examples/common_stm32/netconfig.tkb";
+use "examples/common_stm32/nvic.tkb";
+
 // -- RCC / SYSCFG -----------------------------------------------------------
 let RCC_AHB1ENR: *io u32 = 0x40023830;
 let RCC_APB2ENR: *io u32 = 0x40023844;

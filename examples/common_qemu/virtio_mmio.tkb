@@ -24,6 +24,8 @@
 // interrupt and records queue-work flags. Descriptor ownership and packet
 // processing remain in normal context inside the API below.
 
+use "examples/common_qemu/gic.tkb";
+
 let VIRTIO_DEVICE_ID:        i32 = 0x08;
 let VIRTIO_HOST_FEATURES:    i32 = 0x10;
 let VIRTIO_GUEST_FEATURES:   i32 = 0x20;

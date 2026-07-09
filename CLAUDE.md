@@ -286,10 +286,15 @@ size.
   explicitly. This directly targets the class of mistake that motivated it (see the historical incident below,
   from before this feature existed): a helper referencing a symbol from a file never `use`d is now caught the
   first time the referencing file is compiled at all, not only when some unrelated Makefile target's hand-curated
-  file list happens to expose the gap. Existing Makefile invocations are unaffected (a file with no `use`
-  declarations resolves to exactly its own command-line file list, unchanged) -- migrating the ~40 existing
-  Makefile rules to rely on `use` instead of manually-listed dependencies is a deliberate, separate follow-up, not
-  done as part of landing the feature itself. **What this deliberately is NOT**: real separate compilation (each
+  file list happens to expose the gap. The ~40 existing Makefile rules now rely on `use` declarations inside each
+  `.tkb` file for every dependency that has a single path valid on both targets (gic.tkb, sync.tkb,
+  inet_checksum.tkb, netutil.tkb, virtio_mmio.tkb's own gic.tkb need, eth.tkb's own netutil.tkb/netconfig.tkb/
+  nvic.tkb needs); Makefile recipes keep those files as prerequisites (for staleness tracking, since Make cannot
+  see into a `.tkb` file's own `use` declarations) but no longer pass them on the takibi command line. Files with
+  no single path valid for both targets (uart.tkb, print.tkb's per-target half, timer.tkb/scheduler.tkb, rtc.tkb,
+  uart_irq_stub.tkb, netconfig.tkb) remain Makefile-curated, since a shared example file cannot `use` a
+  target-specific path without breaking the other target. See HISTORY.md's issue #55 Makefile-migration entry for
+  the full per-file reasoning. **What this deliberately is NOT**: real separate compilation (each
   `.tkb` compiled to its own object file, linked by `ld.lld`). Every file in the resolved closure is still
   concatenated into one flat AST and type-checked/codegen'd as a single whole-program unit, exactly as before --
   `use` only changes how the FILE LIST is computed, not the compilation model itself. See HISTORY.md's issue #55

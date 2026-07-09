@@ -1,5 +1,16 @@
+use "examples/common/print.tkb";
+use "examples/common/runtime.tkb";
+
 // Native-width overloads for the current AArch64 QEMU virt target.
 // isize/usize are 64-bit here, so reuse the fixed-width 64-bit cores.
+// GitHub issue #55: every consumer of this file already needed
+// examples/common/print.tkb (the fixed-width uart_print/uart_println
+// cores these isize/usize overloads call) and examples/common/
+// runtime.tkb (the shared platform_init/app_main/platform_shutdown
+// main wrapper) unconditionally, in that order, per the old
+// COMMON_PRINT_BASE Makefile variable -- declaring them here instead
+// means every Makefile rule that lists this file no longer needs to
+// separately list those two as well.
 fn uart_print(v: isize) { uart_print_i64_core(v as i64); }
 fn uart_print(v: usize) { uart_print_u64_core(v as u64); }
 fn uart_println(v: isize) { uart_print(v); uart_puts("\r\n"); }

@@ -44,6 +44,9 @@
 // scripts/eth_icmp_echo_test.py (STM32 hardware), not UART output;
 // uart_puts below is purely for interactive debugging.
 
+use "examples/common/inet_checksum.tkb";
+use "examples/common/netutil.tkb";
+
 let mut our_mac: [u8; 6];
 
 // Wire-VALUE constants compared/written directly against a byte field --

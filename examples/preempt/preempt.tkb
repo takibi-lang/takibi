@@ -18,6 +18,8 @@
 // Generic Timer needs re-arming every tick, SysTick auto-reloads and
 // doesn't) behind matching names, so app_main() needs no per-platform branch at all.
 
+use "examples/common_qemu/gic.tkb";
+
 struct SchedState {
     task_count:   isize;
     current_task: isize;

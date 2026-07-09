@@ -1,6 +1,11 @@
+use "examples/common/print.tkb";
+use "examples/common/runtime.tkb";
+
 // Native-width overloads for the current 32-bit STM32 target.
 // Keep isize/usize formatting on native 32-bit division rather than routing
 // these calls through the wider u64/i64 conversion path.
+// GitHub issue #55: see examples/common_qemu/print.tkb's matching
+// comment -- same reasoning, same two files, same order.
 fn uart_print(v: isize) { uart_print_i32_core(v as i32); }
 fn uart_print(v: usize) { uart_print_u32_core(v as u32); }
 fn uart_println(v: isize) { uart_print(v); uart_puts("\r\n"); }

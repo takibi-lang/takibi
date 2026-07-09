@@ -25,6 +25,8 @@
 // itself is harmless to call unconditionally too, since it just writes
 // into irq_tbl, which the STM32 side's USART1_IRQHandler never consults.
 
+use "examples/common_qemu/gic.tkb";
+
 struct IrqTable {
     handlers: [fn() -> void; 64];
 }

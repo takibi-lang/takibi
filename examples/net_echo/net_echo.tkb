@@ -16,6 +16,8 @@
 // scripts/eth_net_echo_test.py (STM32 hardware), not UART output --
 // uart_puts below is purely for interactive bring-up debugging.
 
+use "examples/common/netutil.tkb";
+
 fn swap_mac(frame: *u8) {
     for i in 0..<ETH_MAC_LEN {
         let a: u8 = frame[ETH_DST_OFF + i];
