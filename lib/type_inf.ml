@@ -1978,21 +1978,38 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.OpaqueStructDef _        -> m
     | Ast.EnumDef _                -> m
   ) StringMap.empty prog in
-  (* Pass 2: check global initializers *)
-  List.iter (function
+  (* Pass 2: check global initializers.
+     GitHub issue #77: a plain List.iter used to be enough here, since no
+     global initializer had ever needed to change genv's own STORED type
+     for that global -- but sizeof/offsetof's new refined-singleton types
+     (see the SizeOf/OffsetOf cases above) mean an immutable global's
+     initializer can now be genuinely MORE REFINED than its own bare
+     annotation (e.g. `let ETH_DST: usize = offsetof(EthHdr, dst);`).
+     Mirroring local lets' `bind_ty` ("proofs are only lost at mutation
+     points, never at annotation" -- see that comment), this global's
+     entry in genv is upgraded to the refined type when the annotation's
+     type exactly matches the refined value's own base, so every LATER
+     consumer of genv sees it -- Pass 3 function bodies referencing this
+     global by name (this is what actually lets e.g. arp_reply.tkb's
+     `ip[IP_SRC..<IP_DST]` prove statically), and program_types.globals
+     below. Now a List.fold_left threading an updated genv forward
+     (instead of a plain List.iter) for exactly this reason. *)
+  let genv = List.fold_left (fun genv item -> match item with
     | Ast.LetDef (name, _, expr_opt, _, is_mutable) ->
         let (ty, _) = StringMap.find name genv in
         (match expr_opt with
          | None ->
              if not is_mutable then
                raise (TypeError (Lexing.dummy_pos,
-                 Printf.sprintf "immutable global '%s' must have an initializer; use 'let mut' for uninitialized globals" name))
+                 Printf.sprintf "immutable global '%s' must have an initializer; use 'let mut' for uninitialized globals" name));
+             genv
          | Some { desc = Ast.StructLit exprs; loc } ->
              (match repr ty with
               | (TStruct _ | TArray _) as expected ->
                   check_expr senv eenv genv fenv { desc = Ast.StructLit exprs; loc } expected
               | _ -> raise (TypeError (loc,
-                  "literal { ... } requires a struct or array type annotation")))
+                  "literal { ... } requires a struct or array type annotation")));
+             genv
          | Some { desc = Ast.Var vname; loc } ->
              (* Bypass infer_expr's ordinary Var case here: it decays array
                 types to a pointer (the right behavior for array VALUES used
@@ -2006,16 +2023,61 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 scalar references (which never decayed anyway) unaffected. *)
              (match StringMap.find_opt vname genv with
               | Some (vty, _) ->
-                  (try unify (strip_io ty) (strip_io vty)
-                   with Unify_error m -> raise (TypeError (loc, m)))
+                  (* GitHub issue #77: actual (referenced global's own
+                     type) first, declared annotation second -- see the
+                     comment on the plain-expression case just below for
+                     why argument order matters here, not just style. *)
+                  (try unify (strip_io vty) (strip_io ty)
+                   with Unify_error m -> raise (TypeError (loc, m)));
+                  (* Same bind_ty upgrade as the plain-expression case:
+                     `let B: usize = A;` where A is itself refined should
+                     let B inherit that range too. *)
+                  let bind_ty =
+                    if is_mutable then ty
+                    else match repr ty, repr (strip_io vty) with
+                      | t_ann, (TRefinedInt (_, _, base) as r) when t_ann = repr base -> r
+                      | _ -> ty
+                  in
+                  if bind_ty == ty then genv
+                  else StringMap.add name (bind_ty, is_mutable) genv
               | None ->
                   raise (TypeError (loc, Printf.sprintf "Unbound variable: %s" vname)))
          | Some e ->
              let et = infer_expr senv eenv genv fenv e in
-             (try unify (strip_io ty) et
-              with Unify_error m -> raise (TypeError (e.loc, m))))
-    | _ -> ()
-  ) prog;
+             (* GitHub issue #77: `unify et (strip_io ty)` -- actual
+                (initializer) type first, declared annotation second --
+                matching the "actual, expected" convention every other
+                unify/unify_at call site in this file already uses (e.g.
+                unify_at e2.loc t2 TIsize). This file's global-initializer
+                check previously called `unify (strip_io ty) et` (backwards:
+                declared FIRST), which was never noticed because no global
+                initializer had ever produced a genuinely MORE REFINED type
+                than its own bare annotation before now: `unify TUsize
+                (TRefinedInt (v, v+1, TUsize))` hits unify's anti-subtyping
+                guard (`t1, TRefinedInt (lo, hi, base) when t1 = repr
+                base`), which exists to reject an UNPROVEN base-typed value
+                flowing into a position that demands the refined type --
+                backwards from what is actually happening here (a PROVEN
+                refined value flowing into a weaker plain-type annotation,
+                which every TRefinedInt-into-base-type subtyping rule
+                already allows once the arguments are the right way
+                round). *)
+             (try unify et (strip_io ty)
+              with Unify_error m -> raise (TypeError (e.loc, m)));
+             (* Mirrors local lets' bind_ty exactly (see that comment) --
+                this is the piece that actually matters for issue #77: not
+                just "does this type-check" but "does the global keep the
+                proof for later use". *)
+             let bind_ty =
+               if is_mutable then ty
+               else match repr ty, repr et with
+                 | t_ann, (TRefinedInt (_, _, base) as r) when t_ann = repr base -> r
+                 | _ -> ty
+             in
+             if bind_ty == ty then genv
+             else StringMap.add name (bind_ty, is_mutable) genv)
+    | _ -> genv
+  ) genv prog in
   (* Pass 3: infer function bodies *)
   let functions = List.fold_left (fun m -> function
     | Ast.FuncDef fdef ->

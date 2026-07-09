@@ -69,79 +69,62 @@ struct packed IcmpHdr {
     rest: [u8; 4];
 }
 
-let ETH_HDR_LEN: isize = 14;
+// ETH_MAC_LEN/ETH_DST_OFF/ETH_SRC_OFF (isize) stay hand-maintained: they
+// feed raw-pointer/for-loop arithmetic in examples/net_echo/net_echo.tkb,
+// not a slice bound, so sizeof/offsetof's usize result buys nothing there
+// (raw pointers have no bounds proof in this language regardless -- see
+// CLAUDE.md's "isize and Raw Pointer Arithmetic" section) and would only
+// add an unneeded `as isize` cast. Every OTHER offset constant below is
+// now offsetof(...)-derived instead of a hand-maintained literal --
+// GitHub issue #77's fix is what makes this provable at all: these are
+// exactly the packed-struct-field-offset shape that fix targets, and
+// each remains fully usable as a proven slice index or subslice bound
+// (verified per-consumer under --forbid-trap, not just "it type-checks" --
+// see HISTORY.md's issue #77 follow-up entry). The now-unused isize
+// "_OFF"/"_HDR_LEN" literals this replaced (ETH_HDR_LEN, ETH_TYPE_OFF,
+// ARP_HDR_LEN, ARP_*_OFF, IP_HDR_LEN, IP_ADDR_LEN, IP_*_OFF, TCP_HDR_LEN,
+// TCP_*_OFF, ICMP_HDR_LEN, ICMP_*_OFF) had zero callers anywhere in this
+// repository -- dead code left behind when the pointer-based `*_p`
+// wrappers were deleted in the P4b migration wave (see CLAUDE.md), not
+// something this change needed to preserve.
 let ETH_MAC_LEN: isize = 6;
 let ETH_DST_OFF: isize = 0;
 let ETH_SRC_OFF: isize = 6;
-let ETH_TYPE_OFF: isize = 12;
-let ETH_DST: usize = 0;
-let ETH_SRC: usize = 6;
-let ETH_TYPE: usize = 12;
+let ETH_DST: usize = offsetof(EthHdr, dst);
+let ETH_SRC: usize = offsetof(EthHdr, src);
+let ETH_TYPE: usize = offsetof(EthHdr, ethertype);
 
-let ARP_HDR_LEN: isize = 28;
-let ARP_HTYPE_OFF: isize = 0;
-let ARP_PTYPE_OFF: isize = 2;
-let ARP_HLEN_OFF: isize = 4;
-let ARP_PLEN_OFF: isize = 5;
-let ARP_OPER_OFF: isize = 6;
-let ARP_SHA_OFF: isize = 8;
-let ARP_SPA_OFF: isize = 14;
-let ARP_THA_OFF: isize = 18;
-let ARP_TPA_OFF: isize = 24;
-let ARP_HTYPE: usize = 0;
-let ARP_PTYPE: usize = 2;
-let ARP_HLEN: usize = 4;
-let ARP_PLEN: usize = 5;
-let ARP_OPER: usize = 6;
-let ARP_SHA: usize = 8;
-let ARP_SPA: usize = 14;
-let ARP_THA: usize = 18;
-let ARP_TPA: usize = 24;
+let ARP_HTYPE: usize = offsetof(ArpHdr, htype);
+let ARP_PTYPE: usize = offsetof(ArpHdr, ptype);
+let ARP_HLEN: usize = offsetof(ArpHdr, hlen);
+let ARP_PLEN: usize = offsetof(ArpHdr, plen);
+let ARP_OPER: usize = offsetof(ArpHdr, oper);
+let ARP_SHA: usize = offsetof(ArpHdr, sha);
+let ARP_SPA: usize = offsetof(ArpHdr, spa);
+let ARP_THA: usize = offsetof(ArpHdr, tha);
+let ARP_TPA: usize = offsetof(ArpHdr, tpa);
 
-let IP_HDR_LEN: isize = 20;
-let IP_ADDR_LEN: isize = 4;
-let IP_VERSION_IHL_OFF: isize = 0;
-let IP_TOTAL_LEN_OFF: isize = 2;
-let IP_TTL_OFF: isize = 8;
-let IP_PROTOCOL_OFF: isize = 9;
-let IP_CHECKSUM_OFF: isize = 10;
-let IP_SRC_OFF: isize = 12;
-let IP_DST_OFF: isize = 16;
-let IP_VERSION_IHL: usize = 0;
-let IP_TOTAL_LEN: usize = 2;
-let IP_TTL: usize = 8;
-let IP_PROTOCOL: usize = 9;
-let IP_CHECKSUM: usize = 10;
-let IP_SRC: usize = 12;
-let IP_DST: usize = 16;
+let IP_VERSION_IHL: usize = offsetof(Ipv4Hdr, version_ihl);
+let IP_TOTAL_LEN: usize = offsetof(Ipv4Hdr, total_len);
+let IP_TTL: usize = offsetof(Ipv4Hdr, ttl);
+let IP_PROTOCOL: usize = offsetof(Ipv4Hdr, protocol);
+let IP_CHECKSUM: usize = offsetof(Ipv4Hdr, checksum);
+let IP_SRC: usize = offsetof(Ipv4Hdr, src);
+let IP_DST: usize = offsetof(Ipv4Hdr, dst);
 
-let TCP_HDR_LEN: isize = 20;
-let TCP_SRC_PORT_OFF: isize = 0;
-let TCP_DST_PORT_OFF: isize = 2;
-let TCP_SEQ_OFF: isize = 4;
-let TCP_ACK_OFF: isize = 8;
-let TCP_DATA_OFFSET_OFF: isize = 12;
-let TCP_FLAGS_OFF: isize = 13;
-let TCP_WINDOW_OFF: isize = 14;
-let TCP_CHECKSUM_OFF: isize = 16;
-let TCP_URGENT_OFF: isize = 18;
-let TCP_SRC_PORT: usize = 0;
-let TCP_DST_PORT: usize = 2;
-let TCP_SEQ: usize = 4;
-let TCP_ACK: usize = 8;
-let TCP_DATA_OFFSET: usize = 12;
-let TCP_FLAGS: usize = 13;
-let TCP_WINDOW: usize = 14;
-let TCP_CHECKSUM: usize = 16;
-let TCP_URGENT: usize = 18;
+let TCP_SRC_PORT: usize = offsetof(TcpHdr, src_port);
+let TCP_DST_PORT: usize = offsetof(TcpHdr, dst_port);
+let TCP_SEQ: usize = offsetof(TcpHdr, seq);
+let TCP_ACK: usize = offsetof(TcpHdr, ack);
+let TCP_DATA_OFFSET: usize = offsetof(TcpHdr, data_offset);
+let TCP_FLAGS: usize = offsetof(TcpHdr, flags);
+let TCP_WINDOW: usize = offsetof(TcpHdr, window);
+let TCP_CHECKSUM: usize = offsetof(TcpHdr, checksum);
+let TCP_URGENT: usize = offsetof(TcpHdr, urgent);
 
-let ICMP_HDR_LEN: isize = 8;
-let ICMP_TYPE_OFF: isize = 0;
-let ICMP_CODE_OFF: isize = 1;
-let ICMP_CHECKSUM_OFF: isize = 2;
-let ICMP_TYPE: usize = 0;
-let ICMP_CODE: usize = 1;
-let ICMP_CHECKSUM: usize = 2;
+let ICMP_TYPE: usize = offsetof(IcmpHdr, ty);
+let ICMP_CODE: usize = offsetof(IcmpHdr, code);
+let ICMP_CHECKSUM: usize = offsetof(IcmpHdr, checksum);
 
 fn bytes_eq(a: *u8, b: *u8, n: isize) -> i32 {
     for i in 0..<n {

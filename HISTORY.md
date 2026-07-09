@@ -3107,3 +3107,125 @@ cases with the BUG cross-check), `lib/types.ml` (`program_types.structs`'
 type updated to match `senv`'s new shape -- constructed but not
 consumed anywhere else in the codebase today), `test/test_takibi.ml`
 (1 test updated, 6 new).
+
+### Follow-up: The netutil.tkb Migration to sizeof(...)/offsetof(...), and a
+### Second, Deeper Bug Found Along the Way (Global Initializers)
+
+Direct follow-up to the issue #77 fix above -- actually doing the
+netutil.tkb refactor the issue's own motivating example described, rather
+than leaving it as a hypothetical the compiler fix merely unblocked.
+
+**Scoping check done before writing any code**: grepped every offset/
+length constant netutil.tkb defined against all consumers repository
+-wide. Found the `isize`-typed "_OFF"/"_HDR_LEN" constants (`ETH_HDR_LEN`,
+`ARP_HDR_LEN`, every `ARP_*_OFF`, `IP_HDR_LEN`, `IP_ADDR_LEN`, every
+`IP_*_OFF`, `TCP_HDR_LEN`, every `TCP_*_OFF`, `ICMP_HDR_LEN`, every
+`ICMP_*_OFF`) had ZERO callers anywhere in the repository -- dead code
+left behind when the P4b migration wave deleted the pointer-based `*_p`
+wrappers that used to consume them, never cleaned up at the time. Only
+the `usize`-typed field-offset constants (`ETH_DST`, `ARP_SHA`, `IP_SRC`,
+`TCP_FLAGS`, etc.) are actually used, exclusively as slice indices/
+subslice bounds in the 5 protocol examples. A further check found those
+`usize` constants were ALREADY provable before this fix, via `Const_env`
+recognizing their bare-`IntLit` initializers directly -- meaning this
+refactor's value is single-source-of-truth/drift-prevention against the
+packed struct definitions, not fixing broken proofs (those constants were
+never broken). `ETH_MAC_LEN`/`ETH_DST_OFF`/`ETH_SRC_OFF` (isize) were kept
+as hand-maintained literals rather than converted: they feed
+`examples/net_echo/net_echo.tkb`'s raw-pointer/for-loop arithmetic, not a
+slice bound, so a `usize`-producing `sizeof`/`offsetof` would only add an
+unneeded `as isize` cast for no proof benefit (raw pointers carry no
+bounds proof in this language regardless).
+
+**The refactor itself**: every live `usize` constant's bare-literal
+initializer was replaced with the matching `offsetof(StructName, field)`
+call against `EthHdr`/`ArpHdr`/`Ipv4Hdr`/`TcpHdr`/`IcmpHdr` (the packed
+struct definitions already present in the file, previously decorative --
+see the "Shared protocol layouts" comment predating this change). The 34
+confirmed-dead isize constants were deleted outright, not converted --
+matching this project's established practice of removing superseded code
+rather than leaving it unreferenced.
+
+**A second, deeper bug found immediately on the first compile attempt, not
+assumed away**: `let ETH_DST: usize = offsetof(EthHdr, dst);` failed to
+type-check at all, with an error ("cannot pass unproven usize where
+{0..<1} is required") that traced to a genuinely different, pre-existing
+gap than the one issue #77's compiler fix addressed -- one specific to
+GLOBAL initializers, never triggered before because no global initializer
+had ever produced a type more refined than its own bare annotation prior
+to sizeof/offsetof gaining refined-singleton types. Two distinct problems,
+found and fixed in sequence:
+
+1. **Argument order**: `infer_program`'s Pass 2 (global initializer
+   checking) called `unify (strip_io ty) et` -- declared annotation FIRST,
+   initializer's actual type SECOND -- backwards from the "actual,
+   expected" convention every other `unify`/`unify_at` call site in this
+   file already follows (e.g. `unify_at e2.loc t2 TIsize`). Because
+   `unify`'s `TRefinedInt` rules are directional (refined-into-wider
+   succeeds; the reverse hits an anti-subtyping guard meant to catch an
+   UNPROVEN base-typed value flowing into a position demanding a refined
+   type), the backwards order made `unify TUsize (TRefinedInt (0, 1,
+   TUsize))` incorrectly fire that guard -- rejecting a case that is
+   actually the opposite of what the guard exists to catch (a PROVEN
+   refined value flowing into a permissive plain-type annotation, which
+   every TRefinedInt-into-base-type subtyping rule already allows once
+   the arguments are the right way round). Fixed by swapping both
+   `unify` calls in Pass 2 (the plain-expression case, and the `Var
+   vname` cross-global-reference case) to actual-first.
+
+2. **The argument-order fix alone was not sufficient**, confirmed
+   empirically rather than assumed: `arp_reply.tkb` progressed past the
+   crash but then failed a DIFFERENT check (`ip[IP_SRC..<IP_DST]` produced
+   an unproven `[]u8` instead of `[u8; 2..]`). Root cause: fixing the
+   `unify` call only stopped Pass 2 from REJECTING the refined initializer
+   -- for two already-concrenete, non-`TVar` types, `unify` performs a
+   validation with no mutation, so `genv`'s STORED type for `ETH_DST`
+   remained the original bare `TUsize` from Pass 1, never upgraded to the
+   refined type `unify` had just confirmed was valid. Every later
+   consumer of `genv` (Pass 3's function-body inference -- the actual
+   mechanism that lets `arp_reply.tkb` prove its subslice bounds -- and
+   the final `program_types.globals`) therefore still saw the unrefined
+   type. Fixed by restructuring Pass 2 from a plain `List.iter` into a
+   `List.fold_left` threading an updated `genv` forward, applying the
+   exact same `bind_ty` upgrade rule local lets already use ("proofs are
+   only lost at mutation points, never at annotation" -- an immutable
+   global's entry is upgraded to its initializer's refined type when the
+   annotation's own type exactly matches the refined value's base),
+   applied symmetrically to both the plain-expression case and the `Var
+   vname` global-aliases-global case.
+
+**Both fixes needed to be found via a REAL compile attempt against REAL
+protocol-header code, not anticipated from reading the type_inf.ml diff
+in isolation** -- this is the same lesson the original P4a-c migration
+waves repeatedly recorded: a refined-type improvement in one place
+reliably surfaces latent gaps in adjacent machinery that never had a
+reason to be exercised before.
+
+**Verified at every level available**, not just "it type-checks":
+- All 6 protocol example files (`arp_reply`, `icmp_echo`, `ip_parse`,
+  `tcp_echo`, `tcp_parse`, `http_server`) compile clean under
+  `--forbid-trap` with the refactored `netutil.tkb` (zero trap sites,
+  same as before the refactor -- confirming no proof was lost, and the
+  originally-broken direct/let-threaded sizeof/offsetof cases from the
+  first issue #77 fix remain fixed).
+- Full `make check` (langcheck, 453 unit tests -- unchanged from the
+  compiler-fix commit, confirming this refactor needed no new unit tests
+  of its own -- stm32build, all 125 qemutest cases including every live
+  protocol test: ARP reply correctness, ICMP checksum validation
+  including the deliberately-malformed-checksum rejection case, the full
+  TCP handshake/data-echo/close/reconnect cycle, and the HTTP
+  request-counter bump) passes with zero regressions -- confirming the
+  offsetof()-derived values are BYTE-IDENTICAL to the literals they
+  replaced, not just type-compatible.
+- `make hwcheck-net` (6 tests: all 5 examples via RAM execution plus
+  `http_server`'s genuine Flash boot) re-run on real hardware over the
+  actual wired Ethernet link -- all pass, confirming the refactor holds
+  under real wire traffic on both execution paths, not just QEMU's
+  synthetic dgram transport.
+
+**Files**: `examples/common/netutil.tkb` (34 dead isize constants
+deleted; every live usize constant converted to `offsetof(...)`),
+`lib/type_inf.ml` (Pass 2 restructured from `List.iter` to a genv
+-threading `List.fold_left`; both `unify` calls swapped to actual-first
+argument order; the local-let `bind_ty` upgrade rule mirrored for
+globals).
