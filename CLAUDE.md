@@ -25,6 +25,54 @@ the system will silently break or run amok. Nothing is communicated to the user.
 The finished form of code is when index ranges are pinned at the type level using
 `for i: usize in 0..<n` or `{lo..<hi as usize}` annotations.
 
+## Development Process: Prove New `.tkb` Code Without `--forbid-trap` First, Then Turn It On
+
+**Every new example/feature under `examples/` is written and gets working WITHOUT
+`--forbid-trap` first, gets committed as that known-good baseline, and only THEN has
+`--forbid-trap` turned on as a separate, later step.** This is a durable process rule for
+all new `.tkb` work (not a one-off preference), agreed between the user and Claude Code
+while building the `fatfs` example (GitHub issue #61).
+
+- **Step 1 -- get it working, unrefined.** Write the new code using plain, idiomatic
+  checked array/slice indexing (`buf[i]`, not raw-pointer arithmetic) and ordinary
+  unrefined parameter types (`u32`, `usize`, etc). Do **not** pass `--forbid-trap` while
+  iterating. A runtime trap check being silently inserted is fine and expected at this
+  stage -- the goal here is purely "does the logic work," verified by actually running it
+  (QEMU, `mtools`, whatever the feature's own oracle is), not by making the compiler happy.
+  **Do not reach for raw pointers/`unsafe` merely to route around a bounds check that
+  checked array/slice indexing would have needed instead** -- that silently reintroduces
+  exactly the unproven-access risk `--forbid-trap` exists to catch, and produces a file
+  that trivially "passes" `--forbid-trap` without any of its sites ever having been
+  examined. Raw pointers stay reserved for cases that need them regardless of this process
+  (a byte-oriented hardware/block-device boundary, a struct-overlay cast onto a raw buffer,
+  a NUL-terminated scan whose length isn't known up front) -- not as a shortcut through this
+  step.
+- **Step 2 -- commit this as the baseline.** Once the feature demonstrably works end to
+  end, this version (still without `--forbid-trap`) gets committed. This snapshot is the
+  deliberate "before" side of a before/after comparison: it is expected to compile cleanly
+  without `--forbid-trap` and to be flagged by it once enabled, and that contrast is worth
+  preserving in history, not squashed away -- it is the concrete evidence for why
+  `--forbid-trap` (and the refinement-type system behind it) earns its keep, valuable for
+  anyone auditing this project's approach later (including turning it into a paper).
+- **Step 3 -- turn `--forbid-trap` on and fix only what it flags.** Add `--forbid-trap` to
+  the file's Makefile rule and recompile. Each flagged site gets fixed at its root: a
+  refined parameter/loop-bound type (`{lo..<hi as base}`, `for i: usize in 0..<n`), or, when
+  the bound genuinely depends on runtime state the type system cannot see (e.g. an
+  allocator's own bookkeeping invariant), explicit if-condition narrowing
+  (`if (v >= lo && v < hi) { ... }`) right at the point of use. Never "fix" a flagged site by
+  swapping the checked access back to a raw pointer -- that defeats the entire point of
+  running this step. This second, hardened version is committed separately from the Step 2
+  baseline, so the diff between the two commits **is** the demonstration of what
+  `--forbid-trap` found.
+- Refined-type bounds (`{lo..<hi as base}`) must be spelled as literal integers, the same
+  restriction array sizes have (`examples/const_global/const_global.tkb`'s comment) --
+  `{0..<TOTAL_SECTORS as usize}` referencing a named `usize` global is a syntax error, even
+  when that global has a literal initializer. Only a bare `for`-loop counter over a literal
+  range, an `if`-narrowed value, or a literal assigned directly to an explicitly
+  refined-typed local reliably carries a provable range across a function-call argument
+  boundary -- a global `let`'s own literal initializer does not, by itself, make *reads* of
+  that global provably ranged at their use site.
+
 ## Design Principle: YAGNI (You Aren't Gonna Need It)
 
 We do not design or build functionality before it is actually needed -- not just at the
@@ -1244,6 +1292,7 @@ software process.
 - **Do not save memories to `~/.claude`.** Consolidate project-specific information in this file (it cannot be shared across environments).
 - **All text in this repository must be ASCII-only.** Never write Japanese or any other non-ASCII characters in source files, comments, documentation, or any other file. `make langcheck` enforces this and will fail if non-ASCII characters are found.
 - **Follow YAGNI (see "Design Principle: YAGNI" above).** Do not design or implement functionality beyond what the current, concrete task needs. If a request seems to call for more than that, flag the tradeoff and ask before building it.
+- **New `.tkb` code under `examples/`: get it working without `--forbid-trap` first, commit that baseline, then turn `--forbid-trap` on as a separate step and fix only what it flags** (see "Development Process: Prove New `.tkb` Code Without `--forbid-trap` First, Then Turn It On" above). Do not skip straight to a `--forbid-trap`-clean version, and do not "fix" a flagged site by switching it to a raw pointer.
 
 ## Dependencies
 

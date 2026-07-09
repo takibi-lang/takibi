@@ -31,6 +31,8 @@ COMMON_TIMER_ASM_S := $(COMMON_QEMU_DIR)/timer_asm.S
 COMMON_TIMER_ASM_O := $(COMMON_QEMU_DIR)/timer_asm.o
 COMMON_SEM_ASM_S   := $(COMMON_QEMU_DIR)/sem_asm.S
 COMMON_SEM_ASM_O   := $(COMMON_QEMU_DIR)/sem_asm.o
+COMMON_SEMIHOSTING_ASM_S := $(COMMON_QEMU_DIR)/semihosting_asm.S
+COMMON_SEMIHOSTING_ASM_O := $(COMMON_QEMU_DIR)/semihosting_asm.o
 COMMON_LINK_LD     := $(COMMON_QEMU_DIR)/link.ld
 COMMON_UART        := $(COMMON_QEMU_DIR)/uart.tkb
 # GitHub issue #55: examples/common_qemu/print.tkb now `use`s
@@ -80,7 +82,7 @@ COMMON_STM32_STUB  := $(COMMON_QEMU_DIR)/stm32_stub.tkb
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
 # Convention: examples/<name>/<name>.tkb -> examples/<name>/kernel.elf
-EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof_offsetof slice foreach int64 net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server
+EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof_offsetof slice foreach int64 net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server fatfs
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
@@ -270,6 +272,9 @@ $(COMMON_TIMER_ASM_O): $(COMMON_TIMER_ASM_S)
 $(COMMON_SEM_ASM_O): $(COMMON_SEM_ASM_S)
 	$(LLVM_MC) --triple=aarch64-none-elf --filetype=obj $< -o $@
 
+$(COMMON_SEMIHOSTING_ASM_O): $(COMMON_SEMIHOSTING_ASM_S)
+	$(LLVM_MC) --triple=aarch64-none-elf --filetype=obj $< -o $@
+
 # -- .tkb -> .o  (static pattern rules) ----------------------------------------
 # For examples/%.o, % matches "name/name" (including the slash).
 # Example: examples/start/start.o <- examples/start/start.tkb
@@ -316,8 +321,9 @@ APP_OBJS   := examples/icmp_echo/icmp_echo.o examples/tcp_echo/tcp_echo.o \
 # joins this group too.
 RTC_OBJS   := examples/rtc/rtc.o examples/timer/timer.o
 GETC_OBJS  := examples/echo/echo.o
+FATFS_OBJS := examples/fatfs/fatfs.o
 SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS) $(NET_OBJS) $(CHECKSUM_OBJS) $(APP_OBJS) \
-                $(RTC_OBJS) $(GETC_OBJS)
+                $(RTC_OBJS) $(GETC_OBJS) $(FATFS_OBJS)
 STANDARD_OBJS := $(filter-out $(SPECIAL_OBJS), $(EXAMPLE_OBJS))
 
 $(STANDARD_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
@@ -373,6 +379,20 @@ $(NET_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMO
 $(CHECKSUM_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
+# fatfs.tkb `use`s netutil.tkb itself (bytes_copy for FAT12 field/name
+# writes), so only COMMON_NETUTIL as a staleness prerequisite is needed,
+# same reasoning as CHECKSUM_OBJS above.
+#
+# Deliberately NOT --forbid-trap yet, unlike every other STANDARD_OBJS-style
+# rule (see CLAUDE.md's "New .tkb Code: Prove It Without --forbid-trap
+# First, Then Turn It On" -- a new example gets its first working version
+# with plain checked-array/slice access and no --forbid-trap, committed as
+# that known-good baseline, THEN --forbid-trap is turned on in a follow-up
+# change and whatever it flags gets fixed with real refined types). Flip
+# this on once fatfs.tkb's remaining unproven bounds checks are addressed.
+$(FATFS_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -o $@
+
 # icmp_echo.tkb/tcp_echo.tkb/http_server.tkb each `use` inet_checksum.tkb
 # and netutil.tkb themselves now; virtio_mmio.tkb `use`s gic.tkb itself
 # (see NET_OBJS above).
@@ -392,7 +412,9 @@ TIMER_KERNELS := examples/preempt/kernel.elf examples/watchdog/kernel.elf
 # timer_asm.o + sem_asm.o (semaphore, condvar, msgqueue all need both)
 SEM_KERNELS   := examples/semaphore/kernel.elf \
                  examples/condvar/kernel.elf examples/msgqueue/kernel.elf
-GENERIC_KERNELS := $(filter-out $(TIMER_KERNELS) $(SEM_KERNELS), $(ALL_KERNELS))
+# semihosting_asm.o only (fatfs.tkb's extern fn semihosting_open/write/close)
+FATFS_KERNELS := examples/fatfs/kernel.elf
+GENERIC_KERNELS := $(filter-out $(TIMER_KERNELS) $(SEM_KERNELS) $(FATFS_KERNELS), $(ALL_KERNELS))
 
 $(GENERIC_KERNELS): examples/%/kernel.elf: \
     $(COMMON_STARTUP_O) examples/%/$$*.o $(COMMON_LINK_LD)
@@ -406,6 +428,11 @@ $(TIMER_KERNELS): examples/%/kernel.elf: \
 $(SEM_KERNELS): examples/%/kernel.elf: \
     $(COMMON_STARTUP_O) $(COMMON_TIMER_ASM_O) $(COMMON_SEM_ASM_O) examples/%/$$*.o $(COMMON_LINK_LD)
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) $(COMMON_TIMER_ASM_O) $(COMMON_SEM_ASM_O) \
+	       examples/$*/$*.o -o $@
+
+$(FATFS_KERNELS): examples/%/kernel.elf: \
+    $(COMMON_STARTUP_O) $(COMMON_SEMIHOSTING_ASM_O) examples/%/$$*.o $(COMMON_LINK_LD)
+	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) $(COMMON_SEMIHOSTING_ASM_O) \
 	       examples/$*/$*.o -o $@
 
 # -- DWARF debug-info regression check ------------------------------------------

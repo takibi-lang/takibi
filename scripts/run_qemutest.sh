@@ -164,6 +164,49 @@ run_forbid_trap_ok_test() {
     rm -f "$tmp_err" "$tmp_obj"
 }
 
+# run_fatfs_test NAME KERNEL EXPECTED MTOOLS_SCRIPT
+#
+# Like run_test (diffs QEMU's stdout against EXPECTED), but also verifies
+# the FAT12 disk image the kernel wrote out via ARM semihosting
+# (examples/fatfs/fatfs.tkb's dump_disk_to_host(), landing in QEMU's cwd as
+# "fatfs_disk.img"): QEMU is run from a scratch directory so the image has
+# a known location, then MTOOLS_SCRIPT hands it to the host's `mtools`
+# (mdir/mcopy) -- an independent oracle that the produced image is a
+# spec-valid, correctly-populated FAT12 volume, not just that fatfs.tkb's
+# own status prints claim success.
+run_fatfs_test() {
+    local name="$1" kernel="$2" expected="$3" mtools_script="$4"
+    local kernel_abs tmp_dir tmp_out ok=1
+    kernel_abs="$(pwd)/$kernel"
+    tmp_dir=$(mktemp -d)
+    tmp_out=$(mktemp)
+
+    ( cd "$tmp_dir" && echo | timeout "$TIMEOUT" $QEMU $QEMU_COMMON -kernel "$kernel_abs" > "$tmp_out" 2>/dev/null )
+
+    if ! diff -q "$expected" "$tmp_out" > /dev/null 2>&1; then
+        printf "${RED}FAIL${RST}  %s (output mismatch)\n" "$name"
+        printf "       expected bytes: %s\n" "$(od -An -c "$expected" | tr -s ' \n' ' ')"
+        printf "       got bytes:      %s\n" "$(od -An -c "$tmp_out"  | tr -s ' \n' ' ')"
+        ok=0
+    fi
+
+    if [ "$ok" -eq 1 ] && ! python3 "$(dirname "$0")/$mtools_script" "$tmp_dir/fatfs_disk.img"; then
+        printf "${RED}FAIL${RST}  %s (mtools verification failed)\n" "$name"
+        ok=0
+    fi
+
+    if [ "$ok" -eq 1 ]; then
+        printf "${GRN}PASS${RST}  %s\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+    fi
+
+    rm -f "$tmp_out"
+    rm -rf "$tmp_dir"
+}
+
 # run_virtio_test NAME KERNEL SCRIPT
 #
 # Launches QEMU with a virtio-net-device backed by a UDP -netdev dgram
@@ -383,6 +426,7 @@ run_virtio_test "arp_reply"  examples/arp_reply/kernel.elf  arp_test.py
 run_virtio_test "icmp_echo"  examples/icmp_echo/kernel.elf  icmp_echo_test.py
 run_virtio_test "tcp_echo"   examples/tcp_echo/kernel.elf   tcp_echo_test.py
 run_virtio_test "http_server" examples/http_server/kernel.elf http_server_test.py
+run_fatfs_test "fatfs" examples/fatfs/kernel.elf examples/fatfs/fatfs.expected fatfs_mtools_test.py
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then
