@@ -715,10 +715,20 @@ See `CLAUDE.md`'s "Known Limitations / Deferred Design Decisions" for
 the full, continuously-updated list including hardware/driver-specific
 items. The ones most likely to matter when writing new `.tkb` code:
 
-- **No module/import system.** Which shared `.tkb` files get
-  concatenated into a given build is decided entirely by hand-maintained
-  Makefile variable lists; nothing in the source declares "this file
-  needs that file."
+- **No real module system, but source-level file dependencies exist.**
+  `use "path/to/file.tkb";` (a top-level item, GitHub issue #55) lets a
+  `.tkb` file declare which other files it needs; the compiler resolves
+  the transitive closure from the command-line entry file(s) itself, so
+  a missing dependency is caught the first time the referencing file is
+  compiled, not only when some unrelated Makefile target's hand-curated
+  file list happens to expose the gap (Makefile variable lists still list
+  every file for staleness tracking, and files with no single path valid
+  across every build target still can't `use` each other). What this is
+  NOT: real separate compilation -- every file in the resolved closure is
+  still concatenated into one flat AST and type-checked/codegen'd as a
+  single whole-program unit; `use` only changes how the file list is
+  computed, not the compilation model itself. See CLAUDE.md's issue #55
+  entries for the full design.
 - **`sizeof`/`offsetof` cannot appear in an array-size position**
   (`[T; sizeof(Foo)]`) -- array sizes resolve in the parser, before
   struct layout exists.

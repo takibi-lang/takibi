@@ -296,8 +296,9 @@ examples/
                      Execution" below
     link_ram.ld   -- MEMORY {RAM} linker script, AXI SRAM1 (0x20010000, 240K), no Flash
                      region at all -- pairs with startup_ram.S
-    uart.tkb      -- uart_init, platform_init/platform_shutdown, interrupt-driven
-                     TX ring (uart_putc/uart_puts), unified USART1 RX/TX ISR and
+    uart.tkb      -- uart_init, platform_init/platform_shutdown, ring-buffered
+                     TX drained via DMA2 Stream7/Channel4 + completion interrupt
+                     (uart_putc/uart_puts -- issue #101), USART1 RX ISR and
                      RX callback registration (PA9/PB7, AF7), uart_isr_getc
     rtc.tkb       -- rtc_init, rtc_is_running, rtc_read_seconds (real RTC peripheral, LSI)
     nvic.tkb      -- enable_usart1_irq, irq_uart_rx_setup/_unmask

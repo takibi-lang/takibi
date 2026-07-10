@@ -155,17 +155,21 @@ deferrable convenience and architecture work.
 - A full pipeline exists: lexer -> Menhir parser -> Hindley-Milner type
   inference -> LLVM 19 IR generation -> native object code.
 - The example suite compiles and runs today (see `examples/`),
-  covering arithmetic, control flow, structs (packed / aligned), enums with
-  exhaustiveness checking, function pointers, MMIO/volatile access,
-  compile-time-checked array bounds via refinement types, semaphores,
-  mutexes, condition variables, a preemptive round-robin scheduler, a
-  hand-written TCP/IP stack, and a FAT12 filesystem driver (`examples/fatfs`,
-  verified against real `mtools`-created images on both QEMU and real
-  STM32 hardware; real SD/eMMC card integration is still pending).
+  covering arithmetic, control flow, structs (packed / aligned, and now
+  with refined-type fields), enums with exhaustiveness checking, function
+  pointers, MMIO/volatile access, compile-time-checked array bounds via
+  refinement types, semaphores, mutexes, condition variables, a preemptive
+  round-robin scheduler, a hand-written TCP/IP stack, and a FAT12
+  filesystem driver both in-memory (`examples/fatfs`, verified against
+  real `mtools`-created images) and on a real SD card
+  (`examples/fatfs_sdcard`, real SDMMC1 DMA+interrupt driver), on both
+  QEMU and real STM32 hardware.
 - DMA/device ordering is expressed through compiler builtins rather than
-  handwritten assembly. The STM32 port also performs cache maintenance,
-  places DMA memory in an MPU non-cacheable window, and uses affine opaque
-  receive handles to reject double release and use-after-release.
+  handwritten assembly. The STM32 port also performs cache maintenance
+  (AXI SRAM1 is genuinely cacheable; `dma_prepare_tx`/`dma_prepare_rx`/
+  `dma_finish_rx` do real cache-line clean/invalidate, not an MPU-window
+  no-op) and uses affine opaque receive handles to reject double release
+  and use-after-release.
 - Ethernet and STM32 UART I/O are interrupt-driven. ARM/AArch64 retained
   events (`wfe`/`sev`) avoid both idle busy-spins and check-then-sleep lost
   wakeups.

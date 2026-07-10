@@ -5152,3 +5152,105 @@ base case, plus the global-initializer scalar path), `test/test_takibi.ml`
 (new example), `Makefile`, `scripts/run_qemutest.sh`,
 `scripts/run_hwtest_ram.sh` (wired the new example into both suites),
 `SPEC.md` (documented refined struct fields under "Structs").
+
+## GitHub Issue #102: Provable Pointer Alignment -- Filed, Not Started
+
+Follow-up from issue #100's investigation: `examples/common_stm32/
+sdmmc.tkb`'s `disk_read` cannot safely call `dma_prepare_rx`/
+`dma_finish_rx` (cache-line INVALIDATE operations) directly on the
+caller's own `buf: *u8` parameter, because a raw pointer carries no
+alignment guarantee the type system can check -- see this file's issue
+#101-follow-up entry above for the real HardFault this caused and the
+`align(32)` bounce-buffer workaround it needed instead. The user asked
+whether this points at a real future language feature: a pointer
+analogue of a refined integer's `{lo..<hi as base}` -- i.e. a type that
+lets a function REQUIRE "this pointer is provably N-byte aligned" and
+have the compiler check it, the same way `{lo..<hi as base}` lets a
+function require a provable integer range today.
+
+Discussed but deliberately NOT scoped or started this session (YAGNI --
+no concrete driving requirement beyond `disk_read`'s bounce buffer, which
+already works without it). Genuinely large in scope if pursued: unlike
+integer range tracking (which only needs to reason about arithmetic on
+plain values), alignment propagation through pointer arithmetic,
+aliasing, struct-embedded pointers, and casts is a different and harder
+proof problem -- neither Rust's `#[repr(align(N))]`/`std::ptr::is_aligned`
+nor C/C++'s `alignas`/`assume_aligned` attempt to statically PROVE
+alignment survives arbitrary pointer arithmetic; they only let a
+programmer assert it (checked, if at all, at runtime). Filed as GitHub
+issue #102 ("Provable pointer alignment (safe pointers follow-up)") to
+record the motivating case and revisit only when a second, real driving
+need shows up -- not as a "let's go build it" backlog item.
+
+**Files**: none (issue filed on GitHub only, no code or doc changes this
+session beyond this entry).
+
+## GitHub Issue #103: `IntLit` Literals Carry No Value Into `unify()` -- Systemic Alternative to Issue #100's Per-Call-Site Fix, Tried and Reverted
+
+Issue #100's actual fix (`check_literal_fits_refined`, see that entry
+above) is an ENUMERATED list of 9 call sites, not a structural guarantee
+-- a future call site (new syntax, a new AST case) needs someone to
+remember to add the check there too. The user asked how hard the
+structurally-sound alternative would be: instead of `IntLit _ -> fresh
+()` (a literal's inferred type is a plain, unconstrained type variable,
+see `type_inf.ml`'s `infer_expr`), give a literal `k` the type
+`TRefinedInt (k, k+1, fresh_base)` at the point of inference -- the
+value becomes part of the type itself, so `unify`'s EXISTING
+`TRefinedInt`-vs-target subtyping rules would validate it automatically,
+everywhere `unify` is ever called, with no enumerated list to maintain
+or ever fall behind.
+
+**Tried as a one-line, fully-reverted experiment** (`IntLit k -> (match
+Ast.int_of_intlit k with Some v -> TRefinedInt (v, v + 1, fresh ()) |
+None -> fresh ())`, `dune test` run, then the change reverted in full --
+`git diff` on `lib/type_inf.ml` confirmed clean afterward). Result: 27 of
+491 unit tests failed, exposing three independent, non-trivial problems,
+not one:
+
+1. **`check_undetermined_lets` doesn't see through the wrapper.** It
+   tests for a bare unbound type variable to decide whether a `let`
+   needs an explicit type annotation; a literal's type is now
+   `TRefinedInt (_, _, TVar (Unbound _))`, so the check stops recognizing
+   the undetermined case correctly (`let x = 5;` with no other use
+   determining `x`'s type wrongly demanded an annotation it didn't need
+   before). Fixable in isolation, but its own piece of work.
+2. **`TRefinedInt`'s bounds are native OCaml `int` (63-bit), not
+   `Int64`.** A full-width 64-bit literal (e.g. `0xFFFFFFFFFFFFFFFF`)
+   computing `v + 1` for the new upper bound overflows OCaml's own
+   arithmetic, producing nonsense ranges like `{-1..<0}` (confirmed via
+   `"cannot unify {-1..<0} with u64"` errors on the existing 64-bit-
+   literal test suite). `IntLit`'s own AST payload is already `Int64.t`
+   for exactly this reason (see this file's "64-bit Integer Literals"
+   entry) -- `TRefinedInt` never had to be, until this experiment.
+3. **The most serious: `TRefinedInt`-vs-`TRefinedInt` unification
+   requires an EXACT bounds match** (`lo1 = lo2 && hi1 = hi2`), a
+   deliberate issue #72 design decision needed so a refined value
+   crossing a function-parameter boundary can't silently widen or narrow
+   its proof. A literal's own range under this experiment is always a
+   singleton `{k..<k+1}`. Assigning it to any WIDER refined target
+   (`{0..<8}`, the overwhelmingly common real-world case) now failed
+   outright: `f.idx = 3;` where `idx: {0..<8 as usize}` -- ordinary,
+   currently-working code, not an edge case -- broke with `"refined int
+   range mismatch: {3..<4} vs {0..<8}"`. Making this work would require
+   changing `TRefinedInt`-vs-`TRefinedInt` unification from exact-match
+   to interval-containment (subtyping) for at least this direction,
+   risking a weakening of the exact-match guarantee issue #72
+   deliberately put in place for parameter boundaries -- a second,
+   independently large redesign question uncovered by the same
+   one-line experiment, not a detail to patch around.
+
+**Conclusion**: not a quick follow-up to issue #100. Three separately-
+hard sub-problems, each touching a different part of the type system
+(undetermined-type detection, `TRefinedInt`'s internal representation,
+and the core subtyping rule for refined-to-refined unification), and
+problem 3 specifically conflicts with an existing, deliberate design
+decision (issue #72's exact-match rule) that would need to be
+re-examined, not just patched around. Filed as GitHub issue #103 with
+this full writeup so a future session can pick the investigation back up
+without re-deriving it from scratch. Decision for now: keep the
+enumerated `check_literal_fits_refined` approach from issue #100;
+revisit the systemic fix only as its own dedicated, scoped effort.
+
+**Files**: none in the final state (`lib/type_inf.ml`'s `IntLit` case is
+back to `IntLit _ -> fresh ()`, unchanged from before this experiment;
+issue filed on GitHub only).
