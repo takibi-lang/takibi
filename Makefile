@@ -153,7 +153,8 @@ STM32_RAM_ELFS_GENERIC := $(foreach e,$(STM32_RAM_EXAMPLES),examples/$(e)/kernel
 STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/semaphore/kernel_stm32_ram.elf \
                    examples/condvar/kernel_stm32_ram.elf \
-                   examples/msgqueue/kernel_stm32_ram.elf
+                   examples/msgqueue/kernel_stm32_ram.elf \
+                   examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
 .PHONY: build test qemutest stm32build hwcheck hwcheck-net langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server profile-http-server profile-tcp-echo
@@ -555,6 +556,12 @@ COMMON_STM32_SEM_ASM_O := $(COMMON_STM32_DIR)/sem_asm.o
 $(COMMON_STM32_SEM_ASM_O): $(COMMON_STM32_SEM_ASM_S)
 	$(LLVM_MC) --triple=$(STM32_TARGET) --filetype=obj $< -o $@
 
+COMMON_STM32_SEMIHOSTING_STUB_S := $(COMMON_STM32_DIR)/semihosting_stub.S
+COMMON_STM32_SEMIHOSTING_STUB_O := $(COMMON_STM32_DIR)/semihosting_stub.o
+
+$(COMMON_STM32_SEMIHOSTING_STUB_O): $(COMMON_STM32_SEMIHOSTING_STUB_S)
+	$(LLVM_MC) --triple=$(STM32_TARGET) --filetype=obj $< -o $@
+
 examples/rtc/rtc_stm32.o: examples/rtc/rtc.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_RTC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_RTC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
@@ -622,6 +629,16 @@ examples/condvar/condvar_stm32.o: examples/condvar/condvar.tkb $(COMMON_STM32_UA
 examples/msgqueue/msgqueue_stm32.o: examples/msgqueue/msgqueue.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
+# fatfs: `use`s netutil.tkb itself (same as the QEMU build), needs no
+# STM32-specific HAL beyond uart+print. Deliberately NOT --forbid-trap,
+# same milestone-wide reason as the QEMU-side FATFS_OBJS rule (see
+# CLAUDE.md's "Development Process: Prove New .tkb Code Without
+# --forbid-trap First, Then Turn It On" -- fatfs + real SD card is one
+# milestone, and --forbid-trap stays off across all of it until the whole
+# thing works against real hardware).
+examples/fatfs/fatfs_stm32.o: examples/fatfs/fatfs.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+
 # RAM-execution builds of semaphore/condvar/msgqueue -- these three need
 # sem_asm.o linked in too, so they get their own explicit rules here
 # instead of the generic $(STM32_RAM_ELFS_GENERIC) pattern rule.
@@ -633,6 +650,12 @@ examples/condvar/kernel_stm32_ram.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_ST
 
 examples/msgqueue/kernel_stm32_ram.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/msgqueue/msgqueue_stm32.o $(COMMON_STM32_LINK_RAM_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/msgqueue/msgqueue_stm32.o -o $@
+
+# fatfs: needs semihosting_stub.o linked in too (fatfs.tkb's extern fn
+# semihosting_open/read/write/close), so it gets its own explicit rule
+# instead of the generic $(STM32_RAM_ELFS_GENERIC) pattern rule.
+examples/fatfs/kernel_stm32_ram.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEMIHOSTING_STUB_O) examples/fatfs/fatfs_stm32.o $(COMMON_STM32_LINK_RAM_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEMIHOSTING_STUB_O) examples/fatfs/fatfs_stm32.o -o $@
 
 # watchdog: same scheduler restructure as preempt, no semaphore needed.
 examples/watchdog/watchdog_stm32.o: examples/watchdog/watchdog.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $(TAKIBI)

@@ -460,6 +460,17 @@ size.
   The cache-aware `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` operations maintain Cortex-M7 cache lines,
   so application examples do not manually select barriers. The RX API now uses an affine opaque CPU-ownership
   handle to reject use-after-release and double-release statically without changing the source-level barrier semantics.
+- **QEMU (TCG mode, which is all this project uses -- no KVM) does not model caches as physically separate storage
+  from RAM, so cache-coherency bugs are invisible there and can ONLY be found on real hardware.** Found again
+  while bringing up `examples/fatfs` on the STM32 board: the hardware test harness injects/extracts the `disk`
+  array's live RAM directly over the debug port with OpenOCD (`load_image`/`dump_image`), which -- like a real DMA
+  engine -- bypasses the CPU's D-cache entirely; without an explicit `dma_finish_rx`/`dma_prepare_tx` around that
+  boundary, the CPU could read stale cached data (or the debugger could dump stale un-flushed RAM) despite the
+  exact same test passing cleanly under QEMU every time, because QEMU's single unified memory model has no cache
+  to go stale in the first place. Same reasoning applies to any future genuinely concurrent hardware feature
+  (multi-core, issue #6, still Backlog): a missing memory barrier or cache-maintenance op between cores can look
+  perfectly correct in QEMU and fail only on real silicon, so that kind of work should get real-hardware
+  integration testing early, not just as a final check once "everything already works in QEMU."
 - **STM32 Ethernet: all five examples are ported -- `net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo`,
   and `http_server` all run on real hardware with real MAC/PHY/DMA, and are the *same source file* as
   their QEMU/virtio-net counterparts.** `examples/common_stm32/eth.tkb` is a from-scratch MAC/DMA-

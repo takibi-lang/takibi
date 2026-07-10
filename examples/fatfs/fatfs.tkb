@@ -554,24 +554,47 @@ fn create_demo_file(name83: *u8, content: *u8) -> i32 {
 }
 
 fn app_main() {
+    // On STM32, `disk` sits in cacheable RAM (link_ram.ld's AXI SRAM1), and
+    // the hardware test harness (scripts/run_hwtest_ram.sh) writes the seed
+    // image directly into that physical RAM over the debug port via OpenOCD
+    // -- entirely bypassing the CPU's D-cache. Without this, the CPU could
+    // still see stale (pre-seed) cached data for `disk` when Phase 1 reads
+    // it below. dma_finish_rx (an existing builtin, already used by
+    // examples/common_stm32/eth.tkb for the analogous "external DMA writer,
+    // CPU reader" case) invalidates the D-cache over `disk`'s whole range
+    // on ARM/Thumb targets; on QEMU/AArch64 it lowers to a harmless barrier
+    // (no cache op implemented there, none needed -- semihosting_read is an
+    // ordinary CPU-issued write, already cache-coherent with this same
+    // core's later reads).
+    dma_finish_rx(disk, SECTOR_SIZE * TOTAL_SECTORS);
+
     // Phase 1: read a file out of a FAT image built independently by real
     // mformat/mcopy (not by fatfs.tkb) -- proves fat_open/fat_read against
     // genuine third-party interop, not just takibi's own round trip.
-    if (load_seed_from_host() == 0) {
-        fat_mount();
-        let mut seed_fp: FatFile;
-        if (fat_open(&seed_fp, "SEED    TXT", FA_READ) == 0) {
-            let mut seed_buf: [u8; 128];
-            let mut seed_br: u32 = 0;
-            fat_read(&seed_fp, seed_buf, 128, &seed_br);
-            fat_close(&seed_fp);
-            uart_puts("seed read: ");
-            uart_print_bytes(seed_buf, seed_br);
-        } else {
-            uart_puts("seed read: FAIL (open)\r\n");
-        }
+    //
+    // load_seed_from_host()'s return value is deliberately ignored: on QEMU
+    // it really does perform a host file read via ARM semihosting, but on
+    // STM32 (no semihosting available) it is a stub that always reports
+    // failure even when the hardware test harness has already placed the
+    // seed bytes directly into disk's RAM over the debug port (via a
+    // breakpoint-timed OpenOCD load_image, see scripts/run_hwtest_ram.sh) --
+    // gating on this call's result would misreport a genuinely successful
+    // hardware run as a failure. fat_mount()+fat_open() below are the real
+    // proof either way: they only succeed if disk's bytes are actually a
+    // valid FAT12 image containing SEED.TXT, regardless of how they got
+    // there.
+    load_seed_from_host();
+    fat_mount();
+    let mut seed_fp: FatFile;
+    if (fat_open(&seed_fp, "SEED    TXT", FA_READ) == 0) {
+        let mut seed_buf: [u8; 128];
+        let mut seed_br: u32 = 0;
+        fat_read(&seed_fp, seed_buf, 128, &seed_br);
+        fat_close(&seed_fp);
+        uart_puts("seed read: ");
+        uart_print_bytes(seed_buf, seed_br);
     } else {
-        uart_puts("seed read: FAIL (load)\r\n");
+        uart_puts("seed read: FAIL (open)\r\n");
     }
 
     // Phase 2: format the in-memory disk and create two demo files via the
@@ -611,7 +634,17 @@ fn app_main() {
     }
 
     // Phase 4: dump the disk out to a host file for scripts/fatfs_mtools_test.py
-    // to verify independently with mtools (mdir/mcopy).
+    // to verify independently with mtools (mdir/mcopy). On STM32, the
+    // hardware test harness reads `disk`'s physical RAM directly with
+    // OpenOCD's dump_image (dump_disk_to_host() is a stub there -- see
+    // examples/common_stm32/semihosting_stub.S), which bypasses the CPU's
+    // D-cache the same way the seed injection above did, just in the
+    // opposite direction: any of this run's writes still sitting dirty in
+    // cache need to be written back to physical RAM first, or the harness's
+    // external read would miss them. dma_prepare_tx (the write-back/"clean"
+    // counterpart of dma_finish_rx above) does exactly that on ARM/Thumb;
+    // a harmless barrier on QEMU/AArch64, same reasoning as above.
+    dma_prepare_tx(disk, SECTOR_SIZE * TOTAL_SECTORS);
     if (dump_disk_to_host() == 0) {
         uart_puts("dump: OK\r\n");
     } else {

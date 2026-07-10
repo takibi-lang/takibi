@@ -183,6 +183,148 @@ ram_load_and_run() {
     fi
 }
 
+# ram_load_and_run_seeded ELF SEED_IMG
+#
+# examples/fatfs-only variant of ram_load_and_run: STM32 has no ARM
+# semihosting host-file I/O, so fatfs.tkb's load_seed_from_host() is a
+# stub on this target (examples/common_stm32/semihosting_stub.S) -- the
+# seed FAT image instead gets written directly into the `disk` array's
+# live RAM here, over the debug port, timed by a hardware breakpoint at
+# app_main() so it lands after Reset_Handler's BSS-clear (which would
+# otherwise zero out an earlier injection) but before fatfs.tkb's own
+# Phase 1 (fat_mount()+fat_open(FA_READ, "SEED    TXT", ...)) reads it.
+# `disk`/`app_main`'s addresses come from the linked ELF itself via
+# llvm-nm-19, not hardcoded -- confirmed unmangled in both the QEMU and
+# STM32 builds (takibi's _TK_... mangling only applies to actually
+# -overloaded names, and neither is).
+ram_load_and_run_seeded() {
+    local elf="$1" seed_img="$2"
+    local disk_addr app_main_addr
+    disk_addr="0x$(llvm-nm-19 "$elf" | awk '$3=="disk"{print $1}')"
+    app_main_addr="0x$(llvm-nm-19 "$elf" | awk '$3=="app_main"{print $1}')"
+    RAM_LOAD_LOG=$(mktemp)
+    if openocd -f "$OPENOCD_BOARD_CFG" \
+        -c "init" \
+        -c "reset halt" \
+        -c "load_image $elf 0 elf" \
+        -c "set vec0 [mrw 0x20010000]" \
+        -c "set vec1 [mrw 0x20010004]" \
+        -c "set pcval [expr {\$vec1 & ~1}]" \
+        -c "reg sp \$vec0" \
+        -c "reg pc \$pcval" \
+        -c "bp $app_main_addr 2 hw" \
+        -c "resume" \
+        -c "wait_halt 5000" \
+        -c "load_image $seed_img $disk_addr" \
+        -c "rbp $app_main_addr" \
+        -c "resume" \
+        -c "shutdown" > "$RAM_LOAD_LOG" 2>&1
+    then
+        RAM_LOAD_OK=1
+    else
+        RAM_LOAD_OK=0
+    fi
+}
+
+# dump_disk_image ELF OUT_IMG
+#
+# Companion to ram_load_and_run_seeded: after the target has run to
+# completion (detected the same way run_hw_test_ram_fatfs detects it --
+# UART output going quiet) and is idling, halts it (NOT reset -- must not
+# lose the FAT12 state just written) and pulls the `disk` array's live RAM
+# straight to a host file for scripts/fatfs_mtools_test.py, mirroring what
+# examples/fatfs/fatfs.tkb's dump_disk_to_host() does via semihosting on
+# QEMU (also not available on this target -- see semihosting_stub.S).
+# 65536 = SECTOR_SIZE * TOTAL_SECTORS, the same fixed placeholder
+# constants fatfs.tkb itself uses.
+dump_disk_image() {
+    local elf="$1" out_img="$2"
+    local disk_addr dump_log
+    disk_addr="0x$(llvm-nm-19 "$elf" | awk '$3=="disk"{print $1}')"
+    dump_log=$(mktemp)
+    local ok=1
+    openocd -f "$OPENOCD_BOARD_CFG" \
+        -c "init" \
+        -c "halt" \
+        -c "dump_image $out_img $disk_addr 65536" \
+        -c "shutdown" > "$dump_log" 2>&1 || ok=0
+    if [ "$ok" -ne 1 ]; then
+        cat "$dump_log" >&2
+    fi
+    rm -f "$dump_log"
+    return $((1 - ok))
+}
+
+# run_hw_test_ram_fatfs NAME ELF EXPECTED MTOOLS_SCRIPT
+#
+# Combines run_hw_test_ram's capture/diff with the QEMU run_fatfs_test's
+# mtools cross-check: builds the same mformat/mcopy seed image
+# scripts/run_qemutest.sh's run_fatfs_test uses (verbatim, not re-derived),
+# runs the target via ram_load_and_run_seeded, diffs UART output against
+# EXPECTED, then (once quiescent) dumps `disk`'s RAM out and hands it to
+# MTOOLS_SCRIPT the same way the QEMU test does.
+run_hw_test_ram_fatfs() {
+    local name="$1" elf="$2" expected="$3" mtools_script="$4"
+    local tmp_out tmp_dir seed_img dump_img
+    tmp_out=$(mktemp)
+    tmp_dir=$(mktemp -d)
+    seed_img="$tmp_dir/fatfs_seed.img"
+    dump_img="$tmp_dir/fatfs_disk.img"
+
+    printf 'hello from mtools seed!\r\n' > "$tmp_dir/seedfile.txt"
+    mformat -C -i "$seed_img" -t 2 -h 2 -n 32 -c 1 -r 1 -L 1 :: > /dev/null
+    mcopy -i "$seed_img" "$tmp_dir/seedfile.txt" ::SEED.TXT
+
+    stty -F "$SERIAL_DEV" "$BAUD" raw -echo
+    local tmp_drain
+    tmp_drain=$(mktemp)
+    read_until_quiet "$tmp_drain" "$DRAIN_MAX_SECS" "$DRAIN_STABLE_POLLS" 0
+    rm -f "$tmp_drain"
+
+    read_until_quiet "$tmp_out" "$CAPTURE_MAX_SECS" "$CAPTURE_STABLE_POLLS" 1 \
+        "ram_load_and_run_seeded '$elf' '$seed_img'"
+
+    if [ "$RAM_LOAD_OK" != "1" ]; then
+        printf "${RED}FAIL${RST}  %s  (openocd RAM load failed)\n" "$name"
+        sed 's/^/       /' "$RAM_LOAD_LOG"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+        rm -f "$tmp_out" "$RAM_LOAD_LOG"
+        rm -rf "$tmp_dir"
+        return
+    fi
+    rm -f "$RAM_LOAD_LOG"
+
+    local ok=1
+    if ! capture_matches "$expected" "$tmp_out"; then
+        printf "${RED}FAIL${RST}  %s (output mismatch)\n" "$name"
+        printf "       expected bytes: %s\n" "$(od -An -c "$expected" | tr -s ' \n' ' ')"
+        printf "       got bytes:      %s\n" "$(od -An -c "$tmp_out"  | tr -s ' \n' ' ')"
+        ok=0
+    fi
+
+    if [ "$ok" -eq 1 ]; then
+        if ! dump_disk_image "$elf" "$dump_img"; then
+            printf "${RED}FAIL${RST}  %s (openocd dump_image failed)\n" "$name"
+            ok=0
+        elif ! python3 "$(dirname "$0")/$mtools_script" "$dump_img"; then
+            printf "${RED}FAIL${RST}  %s (mtools verification failed)\n" "$name"
+            ok=0
+        fi
+    fi
+
+    if [ "$ok" -eq 1 ]; then
+        printf "${GRN}PASS${RST}  %s\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+    fi
+
+    rm -f "$tmp_out"
+    rm -rf "$tmp_dir"
+}
+
 # run_hw_test_ram NAME ELF EXPECTED [MAX_SECS] [STABLE_POLLS]
 #
 # RAM-execution counterpart of run_hwtest.sh's run_hw_test. Unlike that
@@ -368,6 +510,12 @@ run_hw_test_ram "watchdog (stm32/ram)"  examples/watchdog/kernel_stm32_ram.elf  
 run_hw_test_ram "inet_checksum (stm32/ram)" examples/inet_checksum/kernel_stm32_ram.elf examples/inet_checksum/inet_checksum.expected
 run_hw_test_ram "ip_parse (stm32/ram)"      examples/ip_parse/kernel_stm32_ram.elf      examples/ip_parse/ip_parse.expected
 run_hw_test_ram "tcp_parse (stm32/ram)"     examples/tcp_parse/kernel_stm32_ram.elf     examples/tcp_parse/tcp_parse.expected
+
+# fatfs: seeded RAM load (breakpoint-timed OpenOCD load_image of a real
+# mformat/mcopy image into `disk`) + post-run dump_image/mtools check --
+# see run_hw_test_ram_fatfs's own comment above.
+run_hw_test_ram_fatfs "fatfs (stm32/ram)" examples/fatfs/kernel_stm32_ram.elf \
+    examples/fatfs/fatfs_stm32.expected fatfs_mtools_test.py
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then
