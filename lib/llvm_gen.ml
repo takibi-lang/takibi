@@ -915,7 +915,7 @@ let field_info struct_name fname =
 let rec collect_lets stmts =
   List.concat_map (fun s ->
     match s.desc with
-    | Let (true, name, ty_opt, _) -> [(name, ty_opt, s.loc)]
+    | Let (true, name, ty_opt, _, align_opt) -> [(name, ty_opt, s.loc, align_opt)]
     | Block ss                    -> collect_lets ss
     | If (_, t, e)                -> collect_lets t @ collect_lets e
     | While (_, b)                -> collect_lets b
@@ -926,8 +926,8 @@ let rec collect_lets stmts =
            `None` here is a dead fallback, never actually consulted, but
            kept `None` (rather than the old hardcoded `Some TypeI32`) so
            it doesn't misleadingly suggest i32 is still the answer. *)
-        ("__for_" ^ name, None, s.loc) :: collect_lets body
-    | ForEach (name, _, body)     -> ("__foreach_" ^ name, Some TypeUsize, s.loc) :: collect_lets body
+        ("__for_" ^ name, None, s.loc, None) :: collect_lets body
+    | ForEach (name, _, body)     -> ("__foreach_" ^ name, Some TypeUsize, s.loc, None) :: collect_lets body
     | Match (_, arms)             ->
         List.concat_map (fun arm ->
           match arm with
@@ -2403,11 +2403,16 @@ let gen_func ?prog_types fdef =
   ) fdef.params;
 
   (* Pre-alloca every mutable Let declared in the body *)
-  List.iter (fun (name, ty_opt, let_loc) ->
+  List.iter (fun (name, ty_opt, let_loc, align_opt) ->
     if not (Hashtbl.mem locals name) then begin
       let ast_ty = res name ty_opt in
       let ptr    = build_alloca (ltype_of_ast ast_ty) name builder in
-      apply_struct_align ast_ty ptr;
+      (* An explicit `let ... align(N)` wins over the type's own struct-level
+         alignment (if any) -- same precedence as the global case (see
+         gen_global's eff_align). *)
+      (match align_opt with
+       | Some n -> set_alignment n ptr
+       | None   -> apply_struct_align ast_ty ptr);
       Hashtbl.add locals name (Mut (ast_ty, ptr));
       if not (is_for_counter name) then
         declare_var ~is_param:false ~argno:0 ~name ~ast_ty
@@ -2626,7 +2631,7 @@ let gen_func ?prog_types fdef =
         if through_io || (match field_ty with TypeIo _ -> true | _ -> false)
         then set_volatile true inst
 
-    | Let (true, name, _, expr_opt) ->
+    | Let (true, name, _, expr_opt, _) ->
         (* Mutable: alloca was pre-allocated; store the initial value via init_memory *)
         (match Hashtbl.find_opt locals name with
          | None -> raise (Error (Printf.sprintf "BUG: no alloca for %s" name))
@@ -2635,7 +2640,7 @@ let gen_func ?prog_types fdef =
          | Some (Imm _) ->
              raise (Error (Printf.sprintf "BUG: %s marked mutable but stored as Imm" name)))
 
-    | Let (false, name, ty_opt, expr_opt) ->
+    | Let (false, name, ty_opt, expr_opt, _) ->
         (* Immutable: evaluate the init expr and store the SSA value directly *)
         (match expr_opt with
          | None ->

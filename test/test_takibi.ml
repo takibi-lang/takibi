@@ -425,7 +425,7 @@ let parser_tests = [
     match parse "fn f() { let x = 5; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Let (false, "x", None, Some { desc = Ast.IntLit 5L; _ }) -> ()
+         | Ast.Let (false, "x", None, Some { desc = Ast.IntLit 5L; _ }, None) -> ()
          | _ -> Alcotest.fail "expected Let(false, x, None, IntLit 5)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -434,7 +434,7 @@ let parser_tests = [
     match parse "fn f() { let mut x = 5; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Let (true, "x", None, Some { desc = Ast.IntLit 5L; _ }) -> ()
+         | Ast.Let (true, "x", None, Some { desc = Ast.IntLit 5L; _ }, None) -> ()
          | _ -> Alcotest.fail "expected Let(true, x, None, IntLit 5)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -577,7 +577,7 @@ let parser_tests = [
     match parse "fn f() { let mut x = 0; let p = &x; }" with
     | [Ast.FuncDef { body = [_; s]; _ }] ->
         (match s.desc with
-         | Ast.Let (_, _, _, Some { desc = Ast.AddrOf { desc = Ast.Var "x"; _ }; _ }) -> ()
+         | Ast.Let (_, _, _, Some { desc = Ast.AddrOf { desc = Ast.Var "x"; _ }; _ }, _) -> ()
          | _ -> Alcotest.fail "expected Let(_, AddrOf x)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -642,7 +642,7 @@ let parser_tests = [
     | [Ast.FuncDef { body = [s1; s2; s3]; _ }] ->
         let check name expected s =
           match s.Ast.desc with
-          | Ast.Let (_, _, _, Some { desc = Ast.IntLit n; _ }) ->
+          | Ast.Let (_, _, _, Some { desc = Ast.IntLit n; _ }, _) ->
               Alcotest.(check int) name expected (Int64.to_int n)
           | _ -> Alcotest.failf "%s: expected Let with IntLit" name
         in
@@ -954,7 +954,7 @@ let parser_tests = [
     match parse "fn f() { let mut buf: [u8; 8]; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Let (true, "buf", Some (Ast.TypeArray (Ast.TypeU8, 8)), None) -> ()
+         | Ast.Let (true, "buf", Some (Ast.TypeArray (Ast.TypeU8, 8)), None, None) -> ()
          | _ -> Alcotest.fail "expected Let(mut, buf, TypeArray(u8,8), None)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1003,7 +1003,7 @@ let parser_tests = [
     match parse "fn foo() {} fn f() { let h: fn() -> void = foo; }" with
     | [Ast.FuncDef _; Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Let (false, "h", Some (Ast.TypeFn ([], Ast.TypeVoid)), Some _) -> ()
+         | Ast.Let (false, "h", Some (Ast.TypeFn ([], Ast.TypeVoid)), Some _, None) -> ()
          | _ -> Alcotest.fail "expected Let(h, TypeFn([], void), Some(foo))")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1141,7 +1141,7 @@ let parser_tests = [
     match parse "enum Color: u8 { Red = 0; } fn f() { let c = Color::Red; }" with
     | [Ast.EnumDef _; Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Let (_, _, _, Some { desc = Ast.EnumVariant ("Color", "Red"); _ }) -> ()
+         | Ast.Let (_, _, _, Some { desc = Ast.EnumVariant ("Color", "Red"); _ }, _) -> ()
          | _ -> Alcotest.fail "expected Let(_, EnumVariant(Color, Red))")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1188,7 +1188,7 @@ let parser_tests = [
     match parse "fn f() { let s = \"hello\"; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Let (_, _, _, Some { desc = Ast.StringLit "hello"; _ }) -> ()
+         | Ast.Let (_, _, _, Some { desc = Ast.StringLit "hello"; _ }, _) -> ()
          | _ -> Alcotest.fail "expected Let(_, StringLit \"hello\")")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1208,7 +1208,7 @@ let parser_tests = [
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Let (true, "p", Some (Ast.TypeNamed "P"),
-                    Some { desc = Ast.StructLit [_; _]; _ }) -> ()
+                    Some { desc = Ast.StructLit [_; _]; _ }, None) -> ()
          | _ -> Alcotest.fail "expected Let(mut, p, TypeNamed P, StructLit [_, _])")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1247,7 +1247,7 @@ let parser_tests = [
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Let (_, _, _, Some { desc = Ast.AddrOf
-             { desc = Ast.FieldGet _; _ }; _ }) -> ()
+             { desc = Ast.FieldGet _; _ }; _ }, _) -> ()
          | _ -> Alcotest.fail "expected Let(_, AddrOf(FieldGet(...)))")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1258,7 +1258,7 @@ let parser_tests = [
     match parse "fn f() { let t = '\\t'; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Let (_, _, _, Some { desc = Ast.IntLit 9L; _ }) -> ()
+         | Ast.Let (_, _, _, Some { desc = Ast.IntLit 9L; _ }, _) -> ()
          | _ -> Alcotest.fail "expected IntLit 9 (tab = ASCII 9)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1267,7 +1267,7 @@ let parser_tests = [
     match parse "fn f() { let bs = '\\\\'; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Let (_, _, _, Some { desc = Ast.IntLit 92L; _ }) -> ()
+         | Ast.Let (_, _, _, Some { desc = Ast.IntLit 92L; _ }, _) -> ()
          | _ -> Alcotest.fail "expected IntLit 92 (backslash = ASCII 92)")
     | _ -> Alcotest.fail "unexpected structure"
   );

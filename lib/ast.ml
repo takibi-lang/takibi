@@ -90,7 +90,7 @@ and stmt_desc =
   | AssignField of expr * string * expr  (* base.field = rhs -- write a struct field *)
   | AssignIndex of ident * expr * expr  (* arr[idx] = rhs -- indexed write with bounds check *)
   | Block of stmt list
-  | Let of bool * ident * type_expr option * expr option  (* is_mutable, name, type, init *)
+  | Let of bool * ident * type_expr option * expr option * int option  (* is_mutable, name, type, init, align *)
   | If of expr * stmt list * stmt list
   | While of expr * stmt list
   | For of ident * type_expr option * expr * expr * stmt list
@@ -214,7 +214,7 @@ let written_names (stmts : stmt list) : string list =
     | AssignIndex (n, i, e)  -> add n; go_expr i; go_expr e
     | AssignDeref (p, e)     -> go_expr p; go_expr e
     | AssignField (b, _, e)  -> go_expr b; go_expr e
-    | Let (_, n, _, init)    -> add n; (match init with
+    | Let (_, n, _, init, _) -> add n; (match init with
                                         | Some e -> go_expr e | None -> ())
     | Expr e | Return e      -> go_expr e
     | Block ss               -> List.iter go_stmt ss

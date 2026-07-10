@@ -1,16 +1,27 @@
-// Global variable alignment demo: let x: T align(N)
+// Variable alignment demo: let x: T align(N), both global and local
+// (GitHub issue #27).
 //
-// align(N) requests N-byte alignment for a global variable.
-// Useful for DMA descriptor rings (4096B), cache-line buffers (64B), etc.
+// align(N) requests N-byte alignment for a variable. Useful for DMA
+// descriptor rings (4096B), cache-line buffers (64B), etc. Local-variable
+// alignment (`let mut x: T align(N);` inside a function body) exists
+// specifically for stack-resident DMA buffers that must never share a
+// cache line with unrelated data -- see examples/common_stm32/sdmmc.tkb's
+// disk_read_bounce for the real driver motivating this (a cache-line
+// INVALIDATE on an unaligned buffer can silently discard adjacent live
+// stack data). Only `let mut` locals can be aligned: an immutable local
+// is an SSA value with no memory location for LLVM's alignment attribute
+// to attach to (unlike a global, which is always memory-backed regardless
+// of mutability).
 //
-// This demo verifies at runtime that the aligned buffer's address
-// satisfies the alignment requirement.  usize holds the full 64-bit
+// This demo verifies at runtime that each aligned buffer's address
+// satisfies its alignment requirement.  usize holds the full 64-bit
 // address on AArch64, so no precision is lost.  The alignment mask
 // result fits in i32, so the final cast is safe.
 //
 // Expected QEMU output:
 //   0x00000000   buf64 address is 64-byte aligned (lower 6 bits = 0)
 //   0x00000000   buf4096 address is 4096-byte aligned (lower 12 bits = 0)
+//   0x00000000   local_buf32 address is 32-byte aligned (lower 5 bits = 0)
 
 let mut buf64:   [u8; 64]   align(64);
 let mut buf4096: [u8; 4096] align(4096);
@@ -20,5 +31,9 @@ fn app_main() -> i32 {
     let addr4096: usize = (&buf4096) as usize;
     uart_println_hex((addr64   & 63)   as i32);   // 0x00000000
     uart_println_hex((addr4096 & 4095) as i32);   // 0x00000000
+
+    let mut local_buf32: [u8; 32] align(32);
+    let local_addr32: usize = (&local_buf32) as usize;
+    uart_println_hex((local_addr32 & 31) as i32); // 0x00000000
     return 0;
 }

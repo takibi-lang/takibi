@@ -132,9 +132,20 @@ turn as many potential traps as possible into compile-time errors instead:
   512]` about to be filled by a block-device read, or a struct about to be
   populated field-by-field) where a throwaway initializer would just be
   immediately discarded work.
-- `let mut x: T align(N);` -- N-byte-aligned global (N must be a power of
-  two; not enforced by the compiler beyond an LLVM assertion at codegen
-  time). Optional initializer. Local-variable alignment is not supported.
+- `let mut x: T align(N);` -- N-byte-aligned global or (GitHub issue #27)
+  **local** variable (N must be a power of two; not enforced by the
+  compiler beyond an LLVM assertion at codegen time). Optional initializer
+  (`let mut x: T align(N) = e;`). Local alignment requires `mut`: an
+  immutable local is an SSA value with no memory location for LLVM's
+  alignment attribute to attach to, unlike a global (always memory-backed
+  regardless of mutability). An explicit `align(N)` on a variable of a
+  struct type with its own `align(M)` (see "Structs" below) overrides that
+  struct's alignment for this one variable. Typical use: a stack-resident
+  DMA buffer that must never share a cache line with unrelated data (a
+  cache-line invalidate on an unaligned buffer can silently discard
+  adjacent live stack data -- see `examples/common_stm32/sdmmc.tkb`'s
+  `disk_read_bounce`, though that one is a global; `examples/align/
+  align.tkb` demonstrates the local form).
 - **Undetermined types are a compile error, not a silent `i32` default.**
   If nothing pins a bare `let`/`let mut`'s type (no annotation, and no
   later use that determines it), the compiler rejects it rather than

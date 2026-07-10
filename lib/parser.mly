@@ -208,9 +208,21 @@ stmt:
     { let loc = $symbolstartpos in
       { desc = Expr { desc = Call (fname, args); loc }; loc } }
   | LET id = IDENT rhs = let_rhs SEMI
-    { { desc = Let (false, id, fst rhs, snd rhs); loc = $symbolstartpos } }
+    { { desc = Let (false, id, fst rhs, snd rhs, None); loc = $symbolstartpos } }
   | LET MUT id = IDENT rhs = let_rhs SEMI
-    { { desc = Let (true, id, fst rhs, snd rhs); loc = $symbolstartpos } }
+    { { desc = Let (true, id, fst rhs, snd rhs, None); loc = $symbolstartpos } }
+  | LET MUT IDENT COLON type_expr ALIGN LPAREN INT RPAREN SEMI
+    (* `align(N)` on a local requires `mut`: an immutable local is an SSA
+       value with no alloca/memory location for LLVM's set_alignment to
+       apply to (unlike a global, which is always memory-backed regardless
+       of mutability) -- see SPEC.md's "Local-variable alignment" note. *)
+    { { desc = Let (true, $3, Some $5, None,
+                     Some (narrow_int64 $symbolstartpos "alignment" $8));
+        loc = $symbolstartpos } }
+  | LET MUT IDENT COLON type_expr ALIGN LPAREN INT RPAREN ASSIGN expr SEMI
+    { { desc = Let (true, $3, Some $5, Some $11,
+                     Some (narrow_int64 $symbolstartpos "alignment" $8));
+        loc = $symbolstartpos } }
   | LBRACE s = stmts RBRACE { { desc = Block s; loc = $symbolstartpos } }
   | IF LPAREN c = expr RPAREN LBRACE t = stmts RBRACE p = else_part
     { { desc = If(c, t, p); loc = $symbolstartpos } }

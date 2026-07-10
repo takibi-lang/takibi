@@ -4882,3 +4882,76 @@ DMA+interrupt with an `align(32)` bounce buffer; `SDMMC_FIFO`/
 `STA_RXFIFOHF`, only ever used by the old polling implementation, removed
 as dead code; header comment and `disk_read`'s own comment rewritten),
 `README.md` (updated to describe the fix instead of the open issue).
+
+## GitHub Issue #27: Local-Variable `align(N)`
+
+The `disk_read` bounce-buffer bug above (an unaligned STACK-local buffer
+being passed to `dma_finish_rx`'s cache-line invalidate) was exactly the
+motivating use case long tracked as issue #27 ("Alignment of stack
+value"), previously deprioritized for lack of a concrete driving need --
+this session's real hardware bug was that concrete need, so it was
+implemented immediately afterward.
+
+**Design**: mirrors the existing global `let mut x: T align(N);` syntax
+(added earlier for struct-level/global alignment) but for a local
+declaration inside a function body. Restricted to `let mut` only (no plain
+`let`): an immutable local in this compiler's codegen is an SSA value with
+no `alloca`/memory location at all (see `gen_stmt`'s `Let (false, ...)`
+case, which stores the initializer's LLVM value directly into the
+`locals` table, never calling `build_alloca`) -- there is nothing for
+LLVM's `set_alignment` to attach to. A `mut` local, by contrast, is always
+pre-allocated via `collect_lets`/`build_alloca` regardless of alignment,
+so this restriction only narrows syntax, it does not require new codegen
+machinery for the immutable case.
+
+**Files touched** (5, the same shape as every other language-level
+feature's "N files" pattern documented elsewhere in this file):
+1. `lib/ast.ml` -- `Let` gained a 5th field, `int option` (align), matching
+   `LetDef`'s existing 4th field for the global case. Every existing
+   pattern match on `Ast.Let` across `lib/type_inf.ml`, `lib/llvm_gen.ml`,
+   and `test/test_takibi.ml` needed a trailing wildcard/field added (a
+   compile error at every site until fixed -- OCaml's exhaustiveness
+   checking caught all of them mechanically).
+2. `lib/parser.mly` -- two new `stmt` productions,
+   `LET MUT IDENT COLON type_expr ALIGN LPAREN INT RPAREN SEMI` and the
+   `ASSIGN expr` variant, mirroring the existing global `item`-level
+   productions exactly (down to reusing `narrow_int64` for the alignment
+   literal). No grammar conflicts: the token immediately following
+   `type_expr` (`ALIGN` vs. `SEMI`/`ASSIGN` from the existing `let_rhs`-
+   based productions) disambiguates cleanly under the parser's existing
+   LALR(1) lookahead, the same way the global case already did.
+3. `lib/type_inf.ml` -- no new logic; every existing `Ast.Let` match site
+   just threads the new field through unused (`_`). Alignment doesn't
+   affect a variable's TYPE, only its storage, so nothing here needed to
+   inspect the new field at all.
+4. `lib/llvm_gen.ml` -- `collect_lets` (the pre-scan that pre-allocates
+   every mutable local's `alloca` at function entry, before any statement
+   codegen) now also returns each local's `align_opt`, threaded from the
+   4-tuple to a new 4th element. The pre-alloca loop in `gen_func` applies
+   `set_alignment n ptr` when `align_opt = Some n`, falling back to the
+   existing `apply_struct_align` (the struct type's own registered
+   alignment, if any) otherwise -- an explicit local `align(N)` takes
+   precedence over the type's own struct-level alignment, mirroring
+   `gen_global`'s existing `eff_align` precedence rule for the global case
+   exactly (kept as a documented "sync rule" comment at the local site).
+5. `examples/align/align.tkb` -- extended with a third check: a local
+   `let mut local_buf32: [u8; 32] align(32);`, address-masked and printed
+   the same way as the two existing global checks. `examples/align/
+   align.expected` gained the corresponding third `0x00000000` line.
+
+**Verification**: `dune test` (479/479 unit tests, after mechanically
+fixing every `Ast.Let` pattern match the added field broke), `make check`
+(71/71, includes the extended `align` QEMU + `--forbid-trap` STM32 build),
+and a real-hardware run of `align (stm32/ram)` all pass. No change was made
+to `examples/common_stm32/sdmmc.tkb`'s `disk_read_bounce` (already a
+correctly-`align(32)`-annotated GLOBAL, unaffected either way) or to
+`examples/sdcard/sdcard.tkb`'s own stack-local `wbuf`/`rbuf` (already made
+safe regardless of alignment by `disk_read`'s bounce-buffer copy, per the
+entry above) -- this feature closes the general language-level gap, not a
+specific remaining call site.
+
+**Files**: `lib/ast.ml`, `lib/parser.mly`, `lib/type_inf.ml`,
+`lib/llvm_gen.ml`, `test/test_takibi.ml` (mechanical pattern-match fixes),
+`examples/align/align.tkb` + `align.expected` (new local-align check),
+`SPEC.md` (removed the "local-variable alignment is not supported" note,
+documented the new syntax and its `mut`-only restriction).

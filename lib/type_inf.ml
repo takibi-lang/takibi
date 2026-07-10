@@ -1423,7 +1423,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       (* Assignment to io field: check compatibility with T (io is a storage qualifier, strip it) *)
       unify_at val_expr.loc vt (strip_io field_ty);
       (tyenv, raw_locals)
-  | Let (is_mut, name, ty_opt, expr_opt) ->
+  | Let (is_mut, name, ty_opt, expr_opt, _align_opt) ->
       let ty = of_ast_opt ty_opt in
       let init_ty_opt =
         match expr_opt with
@@ -1711,7 +1711,7 @@ let check_const_shadowing (fdef : Ast.func) =
     if Const_env.find pname <> None then reject fdef.def_loc pname
   ) fdef.params;
   let rec go_stmt (s : Ast.stmt) = match s.desc with
-    | Ast.Let (_, name, _, _) ->
+    | Ast.Let (_, name, _, _, _) ->
         if Const_env.find name <> None then reject s.loc name
     | Ast.Block ss | Ast.While (_, ss) -> List.iter go_stmt ss
     | Ast.If (_, t, e) -> List.iter go_stmt t; List.iter go_stmt e
@@ -1753,8 +1753,8 @@ let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
     | _ -> ()
   in
   let rec go_stmt (s : Ast.stmt) = match s.desc with
-    | Ast.Let (_, name, None, _) -> check s.loc name
-    | Ast.Let (_, _, Some _, _) -> ()
+    | Ast.Let (_, name, None, _, _) -> check s.loc name
+    | Ast.Let (_, _, Some _, _, _) -> ()
     | Ast.Block ss | Ast.While (_, ss) -> List.iter go_stmt ss
     | Ast.If (_, t, e) -> List.iter go_stmt t; List.iter go_stmt e
     | Ast.For (_, _, _, _, body) | Ast.ForEach (_, _, body) -> List.iter go_stmt body
@@ -1891,7 +1891,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      | Ast.EnumVariant _ -> ())
   and validate_stmt_types (s : Ast.stmt) =
     (match s.desc with
-     | Ast.Let (_, _, ty, init) ->
+     | Ast.Let (_, _, ty, init, _) ->
          Option.iter (validate_nonparam_type s.loc) ty;
          Option.iter validate_expr_types init
      | Ast.For (_, ty, lo, hi, body) ->
@@ -2275,7 +2275,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (check_expr (check_expr moved false a) false b, declared)
       | Ast.AssignIndex (_, i, v) ->
           (check_expr (check_expr moved false i) false v, declared)
-      | Ast.Let (_, name, _, init) ->
+      | Ast.Let (_, name, _, init, _) ->
           let moved = match init with
             | Some e -> check_expr moved (is_affine_var name) e
             | None -> moved
