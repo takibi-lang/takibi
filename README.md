@@ -89,14 +89,23 @@ issued after ~129 prior writes, an issue that survived three fixes
 cross-checked against ChibiOS's proven STM32 SDMMCv1 driver and remains
 genuinely unresolved (root cause not identified; possibly this driver,
 possibly an STM32F7 quirk, possibly specific to the individual board or
-SD card used). Separately, `fatfs_sdcard`'s real-hardware test
-occasionally shows a single dropped UART byte, also unresolved and also
-confirmed unrelated to `--forbid-trap` itself (reproduces identically on
-the pre-`--forbid-trap` version too) -- suspected to be a rare race in
-`uart.tkb`'s interrupt-driven TX path. See `sdmmc.tkb`'s and `uart.tkb`'s
-own header comments and HISTORY.md for the full bring-up stories,
-including a separate, resolved TXUNDERR bug in `disk_write`, root-caused
-by cross-checking the same ChibiOS driver. A few tools do almost all of the work: refined integer ranges
+SD card used). Separately, `fatfs_sdcard`'s real-hardware test used to
+occasionally show a single dropped UART byte (GitHub issue #101) --
+confirmed unrelated to `--forbid-trap` itself (reproduced identically on
+the pre-`--forbid-trap` version too). Root-caused to a UART TX
+architecture mismatch, not a single race condition: `uart.tkb`'s TX used
+to be per-byte-interrupt driven while `sdmmc.tkb`'s `disk_write` is
+DMA+interrupt driven, an asymmetric combination that let heavy SDMMC1 DMA
+activity intermittently starve/corrupt the UART's own interrupt-driven
+drain. Fixed by switching UART TX to DMA+interrupt too (DMA2 Stream7/
+Channel4), matching `sdmmc.tkb`/`eth.tkb`'s own shape and ChibiOS/RT's
+convention of using DMA+interrupt for both peripherals -- verified with
+30 consecutive clean runs of the exact reproduction pattern (previously
+~1-in-6-10 failure) plus the full `make hwcheck`/`make hwcheck-net`
+suites. See `uart.tkb`'s and `sdmmc.tkb`'s own header comments and
+HISTORY.md for the full bring-up stories, including a separate, resolved
+TXUNDERR bug in `disk_write`, root-caused by cross-checking the same
+ChibiOS driver. A few tools do almost all of the work: refined integer ranges
 that propagate through ordinary arithmetic and bitwise masking (so a
 value like a wire-derived header length carries a real bound with no
 extra code), `min`/`max` builtins that provably clamp a value against a

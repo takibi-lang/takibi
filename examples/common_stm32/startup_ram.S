@@ -49,7 +49,7 @@ _vector_table:
     .word   0                   /* Reserved    */
     .word   PendSV_Handler      /* PendSV      */
     .word   SysTick_Handler     /* SysTick     */
-    /* External interrupts through IRQ61 (Ethernet) -- same layout as
+    /* External interrupts through IRQ70 (DMA2_Stream7) -- same layout as
        startup.S, kept identical even though no RAM-execution example uses
        IRQ37/IRQ61 yet, so a future Ethernet migration changes nothing here. */
     .rept   37                  /* IRQ0-36 */
@@ -64,6 +64,10 @@ _vector_table:
     .word   Default_Handler
     .endr
     .word   ETH_IRQHandler      /* IRQ61 */
+    .rept   8                   /* IRQ62-69 */
+    .word   Default_Handler
+    .endr
+    .word   DMA2_Stream7_IRQHandler /* IRQ70 */
 
     .section .text
     .thumb_func
@@ -186,4 +190,9 @@ ETH_IRQHandler:
     .weak   SDMMC1_IRQHandler
     .thumb_func
 SDMMC1_IRQHandler:
+    bx      lr
+
+    .weak   DMA2_Stream7_IRQHandler
+    .thumb_func
+DMA2_Stream7_IRQHandler:
     bx      lr

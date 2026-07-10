@@ -21,7 +21,8 @@
    Cortex-M context-switch mechanism (see PendSV_Handler's comment), shared
    by every preemptive-scheduler example, harmless to include unconditionally
    since nothing ever sets ICSR.PENDSVSET unless a program explicitly enables
-   SysTick. SysTick, USART1 (IRQ37), SDMMC1 (IRQ49), and Ethernet (IRQ61)
+   SysTick. SysTick, USART1 (IRQ37), SDMMC1 (IRQ49), Ethernet (IRQ61), and
+   DMA2_Stream7 (IRQ70, USART1 TX DMA completion -- see uart.tkb)
    (every peripheral interrupt source a shared example currently uses) are
    `.weak`, defaulting to a no-op return rather than Default_Handler's
    infinite loop -- unlike a genuine fault, these only fire if a program
@@ -48,7 +49,7 @@ _vector_table:
     .word   0                   /* Reserved    */
     .word   PendSV_Handler      /* PendSV      */
     .word   SysTick_Handler     /* SysTick     */
-    /* External interrupts through IRQ61 (Ethernet). */
+    /* External interrupts through IRQ70 (DMA2_Stream7, USART1 TX DMA). */
     .rept   37                  /* IRQ0-36 */
     .word   Default_Handler
     .endr
@@ -61,6 +62,10 @@ _vector_table:
     .word   Default_Handler
     .endr
     .word   ETH_IRQHandler      /* IRQ61 */
+    .rept   8                   /* IRQ62-69 */
+    .word   Default_Handler
+    .endr
+    .word   DMA2_Stream7_IRQHandler /* IRQ70 */
 
     .section .text
     .thumb_func
@@ -252,4 +257,9 @@ ETH_IRQHandler:
     .weak   SDMMC1_IRQHandler
     .thumb_func
 SDMMC1_IRQHandler:
+    bx      lr
+
+    .weak   DMA2_Stream7_IRQHandler
+    .thumb_func
+DMA2_Stream7_IRQHandler:
     bx      lr

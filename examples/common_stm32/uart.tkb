@@ -9,27 +9,65 @@
 // keeps this first bring-up minimal. USART1 is on APB2; with all prescalers
 // at their reset value of 1, APB2 clock == HSI == 16MHz.
 //
-// **Known open issue, found during issue #98's real-hardware testing, not
-// yet root-caused or fixed**: `examples/fatfs_sdcard`'s first uart_puts()
-// call after `fat_format()`'s ~128 disk_write calls (each interrupt-driven
-// via examples/common_stm32/sdmmc.tkb) occasionally (roughly 1 in 6-10 runs
-// observed) loses exactly one byte from the transmitted string entirely
-// (not corrupted -- genuinely absent), specifically right after that burst
-// of unrelated SDMMC1 interrupt activity. Confirmed independent of issue
-// #98's own --forbid-trap refinement-type changes (reproduces identically
-// on the pre-refinement-type committed version and the --forbid-trap-clean
-// version). Suspected but unconfirmed: a race in uart_putc's
-// `*usart1_cr1 = *usart1_cr1 | TXEIE` read-modify-write against
-// uart_tx_isr's own read-modify-write of the same register, or an NVIC
-// priority interaction between USART1 and SDMMC1 -- not diagnosed further
-// yet. See HISTORY.md's issue #98 entry. Treat an occasional
-// `fatfs_sdcard (stm32/ram)` hwcheck failure with a single missing byte as
-// this known issue, not a new regression, until it's actually fixed.
+// **GitHub issue #101 ("Drop char on UART"), resolved by switching TX from
+// per-byte interrupt to DMA+interrupt.** The bug: `examples/fatfs_sdcard`'s
+// first uart_puts() call after `fat_format()`'s ~128 disk_write calls (each
+// interrupt-driven via examples/common_stm32/sdmmc.tkb) occasionally (roughly
+// 1 in 6-10 runs observed) lost exactly one byte from the transmitted string
+// entirely (not corrupted -- genuinely absent), specifically right after
+// that burst of unrelated SDMMC1 interrupt activity. Confirmed independent
+// of issue #98's own --forbid-trap refinement-type changes (reproduced
+// identically before and after those). This board's silicon was confirmed
+// via OpenOCD to be Cortex-M7 r0p1, an early revision affected by ARM
+// erratum 837070 ("Increasing priority using a write to BASEPRI does not
+// take effect immediately") -- ChibiOS/RT's own ARMv7-M port special-cases
+// exactly this revision (`__CM7_REV <= 1`) when using BASEPRI for its kernel
+// lock. Two PRIMASK-based critical-section fix attempts around the old
+// per-byte uart_putc/uart_tx_isr CR1 read-modify-write were tried and
+// measurably reduced failures on a simplified synthetic stress test, but did
+// NOT generalize to the real fatfs_sdcard scenario (still ~50% failure
+// there) -- a genuine dead end, not merely an unfinished fix.
+//
+// The actual fix follows a different, architectural observation instead:
+// ChibiOS/RT uses DMA+interrupt for BOTH the UART and the SD card, while
+// this project's UART TX used per-byte interrupt while SDMMC1 already used
+// DMA+interrupt -- an asymmetric combination rarely exercised by other
+// STM32 codebases (most either use DMA+interrupt for everything, or don't
+// combine a DMA-heavy peripheral with a byte-interrupt UART under heavy
+// load), which would explain why this specific race is obscure. Verified
+// experimentally before committing to this rewrite: a throwaway one-shot
+// DMA-based UART TX (never wired into this file) run against the exact
+// realistic reproduction pattern (128 ascending disk_write calls immediately
+// followed by a UART print, repeated 60x per run) showed 0 failures across
+// 4 independent runs (240 total iterations), versus ~47-50% failure with
+// the old per-byte-interrupt uart_putc/uart_tx_isr on the identical
+// pattern. TX now uses DMA2 Stream7/Channel4 (SDMMC1 already owns DMA2
+// Stream3/Channel4 -- different stream, no conflict); the ring buffer and
+// its head/tail producer/consumer protocol are unchanged, only how a
+// buffered run of bytes is drained to hardware changed (one DMA burst per
+// contiguous ring run instead of one interrupt per byte).
+//
+// As with the abandoned PRIMASK attempts, the possibility that this is
+// (or was, in part) a board-individual defect in this specific physical
+// unit, or an issue specific to the SD card in use, cannot be fully ruled
+// out -- but the fix's dramatic, repeatable effect on the exact reproduction
+// pattern, combined with the architectural asymmetry it corrects, is strong
+// enough evidence to treat this as resolved. See HISTORY.md's issue #101
+// entry for the full investigation.
 
 let mut uart_tx_buf: [u8; 128];
 let mut uart_tx_head: io {0..<128 as usize};
 let mut uart_tx_tail: io {0..<128 as usize};
 let mut uart_rx_handler: fn() -> void;
+
+// Set right before DMA2 Stream7 is enabled, cleared by its completion ISR --
+// gates whether uart_putc/the ISR itself may kick a new burst (see
+// dma_uart_tx_kick's comment). dma_tx_len records the in-flight burst's
+// length so the completion ISR knows how far to advance uart_tx_tail
+// (NDTR counts down to 0 and gives no direct "how much did I send" readback
+// once the transfer is complete).
+let mut dma_tx_active: io bool;
+let mut dma_tx_len: io usize;
 
 // The 4.3" RK043FN48H-CT672B panel is left lit white by default (backlight
 // on, panel enabled) even though nothing in this project ever touches the
@@ -72,8 +110,11 @@ fn uart_init() {
     let nvic_iser1: *io u32 = 0xE000E104;  // IRQ37 USART1
     let nvic_icer1: *io u32 = 0xE000E184;
     let nvic_icpr1: *io u32 = 0xE000E284;
+    let nvic_iser2: *io u32 = 0xE000E108;  // IRQ70 DMA2_Stream7
+    let nvic_icpr2: *io u32 = 0xE000E288;
     let usart1_cr1: *io u32 = 0x40011000;
-    *rcc_ahb1enr = *rcc_ahb1enr | (1 | (1 << 1)); // GPIOAEN | GPIOBEN
+    let usart1_cr3: *io u32 = 0x40011008;
+    *rcc_ahb1enr = *rcc_ahb1enr | (1 | (1 << 1) | (1 << 22)); // GPIOAEN | GPIOBEN | DMA2EN
     *rcc_apb2enr = *rcc_apb2enr | (1 << 4);       // USART1EN
 
     // Quiesce the peripheral before PA9 is switched to AF7.  A debugger
@@ -105,11 +146,87 @@ fn uart_init() {
     let usart1_brr: *io u32 = 0x4001100C;
     uart_tx_head = 0;
     uart_tx_tail = 0;
+    dma_tx_active = false;
+    dma_tx_len = 0;
     uart_rx_handler = uart_rx_discard;
     *usart1_brr = 139;
+    *usart1_cr3 = *usart1_cr3 | (1 << 7); // DMAT: USART1 TX requests drive DMA2 Stream7
     *usart1_cr1 = 1 | (1 << 2) | (1 << 3); // UE | RE | TE
     *nvic_icpr1 = 1 << 5;
     *nvic_iser1 = *nvic_iser1 | (1 << 5);
+
+    *nvic_icpr2 = 1 << 6; // IRQ70 - 64 = bit 6 within ISER2/ICPR2
+    *nvic_iser2 = *nvic_iser2 | (1 << 6);
+}
+
+// Starts one DMA burst draining the ring buffer's next contiguous run (from
+// uart_tx_tail up to uart_tx_head, or up to the buffer's physical end if
+// that comes first -- wraparound is handled by the completion ISR simply
+// calling this again, which naturally starts a fresh burst at tail 0). A
+// no-op whenever a burst is already in flight (dma_tx_active) or the ring is
+// empty; the in-flight burst's own completion ISR is what drains the rest.
+// Safe to call from either thread context (uart_putc, after enqueuing) or
+// interrupt context (the completion ISR, to chain the next burst): while
+// dma_tx_active is false, DMA2 Stream7 cannot be mid-transfer, so nothing
+// else can be touching these registers concurrently.
+fn dma_uart_tx_kick() {
+    // No bare `return;` (illegal in a void function -- see SPEC.md), so the
+    // "nothing to do" cases are expressed as nested-if guards instead of
+    // early returns.
+    if (dma_tx_active == false) {
+        let tail: usize = uart_tx_tail;
+        let head: usize = uart_tx_head;
+        if (tail != head) {
+            let mut burst_len: usize = 128 - tail;
+            if (head > tail) {
+                // Explicit `as usize` (rather than a bare `head - tail`)
+                // sidesteps the range tracker's {-127..<128} interval for
+                // this subtraction (sound bookkeeping, but not directly
+                // assignable to a plain usize local) -- see the bare-cast
+                // fallback rule in SPEC.md's "Bare-cast range inference".
+                burst_len = (head - tail) as usize;
+            }
+
+            let buf_ptr: *u8 = uart_tx_buf;
+            let src_ptr: *u8 = buf_ptr + (tail as isize);
+
+            let dma2_s7cr:   *io u32 = 0x400264B8;
+            let dma2_s7ndtr: *io u32 = 0x400264BC;
+            let dma2_s7par:  *io u32 = 0x400264C0;
+            let dma2_s7m0ar: *io u32 = 0x400264C4;
+            let dma2_s7fcr:  *io u32 = 0x400264CC;
+            let dma2_hifcr:  *io u32 = 0x4002640C;
+            let usart1_tdr:  u32 = 0x40011028; // plain u32: only ever used as DMA2's peripheral address
+
+            dma_tx_len = burst_len;
+            dma_tx_active = true;
+            signal_fence();
+
+            // AXI SRAM1 is genuinely cacheable (see CLAUDE.md's RAM-execution
+            // notes): uart_putc's plain CPU stores into uart_tx_buf can still
+            // be sitting in the D-cache, invisible to DMA2 (which reads
+            // physical RAM directly). Without this clean, DMA2 can read stale
+            // (pre-write, often zeroed) bytes instead of what uart_putc just
+            // wrote -- found by exactly that symptom on real hardware.
+            dma_prepare_tx(src_ptr, burst_len);
+
+            *dma2_s7cr = 0;
+            while ((*dma2_s7cr & 1) != 0) {}
+            // clear FEIF7 | DMEIF7 | TEIF7 | HTIF7 | TCIF7
+            *dma2_hifcr = (1 << 22) | (1 << 24) | (1 << 25) | (1 << 26) | (1 << 27);
+
+            *dma2_s7par  = usart1_tdr;
+            *dma2_s7m0ar = (src_ptr as usize) as u32;
+            *dma2_s7ndtr = burst_len as u32;
+            *dma2_s7fcr  = 0; // direct mode, byte-at-a-time (matches USART1_TDR's own byte size)
+
+            *dma2_s7cr = (1 << 4)   // TCIE: notify DMA2_Stream7_IRQHandler on completion
+                       | (1 << 6)   // DIR = mem-to-periph
+                       | (1 << 10)  // MINC
+                       | (4 << 25)  // CHSEL = channel 4 (USART1_TX)
+                       | 1;         // EN
+        }
+    }
 }
 
 fn uart_putc(c: u8) {
@@ -121,8 +238,7 @@ fn uart_putc(c: u8) {
     uart_tx_buf[head] = c;
     signal_fence();
     uart_tx_head = next;
-    let usart1_cr1: *io u32 = 0x40011000;
-    *usart1_cr1 = *usart1_cr1 | (1 << 7); // TXEIE: ISR drains the ring
+    dma_uart_tx_kick();
 }
 
 fn uart_puts(s: *u8) {
@@ -153,44 +269,52 @@ fn uart_set_rx_handler(handler: fn() -> void) {
     uart_rx_handler = handler;
 }
 
-// Called by the driver-owned USART1_IRQHandler below.
-// One byte per interrupt keeps ISR latency bounded. Disabling TXEIE when the
-// ring becomes empty prevents the level-sensitive TXE source from retriggering.
-fn uart_tx_isr() {
-    let usart1_cr1: *io u32 = 0x40011000;
-    let usart1_tdr: *io u8 = 0x40011028;
-    let tail: usize = uart_tx_tail;
-    if (tail != uart_tx_head) {
-        signal_fence();
-        *usart1_tdr = uart_tx_buf[tail];
-        uart_tx_tail = (tail + 1) % 128;
-        interrupt_notify();
-    } else {
-        *usart1_cr1 = *usart1_cr1 & ~(1 << 7); // TXEIE
-    }
-}
-
-// USART1 owns one NVIC vector for both RXNE and TXE. Keep this dispatch in
-// the driver rather than startup.S; applications register only their RX
-// callback, while TX ring service remains an internal driver concern.
+// USART1's own NVIC vector now only ever needs to service RX -- TX
+// completion is DMA2_Stream7_IRQHandler's job below (see uart_init's DMAT
+// bit and dma_uart_tx_kick).
 fn USART1_IRQHandler() {
     if (uart_rx_ready()) {
         uart_rx_handler();
     }
-    uart_tx_isr();
+}
+
+// DMA2 Stream7's completion interrupt: advances the ring's tail past the
+// burst that just finished, wakes anything blocked in uart_putc's
+// ring-full wait, and chains the next burst if more data is queued.
+fn DMA2_Stream7_IRQHandler() {
+    let dma2_hisr:  *io u32 = 0x40026404;
+    let dma2_hifcr: *io u32 = 0x4002640C;
+    if ((*dma2_hisr & (1 << 27)) != 0) { // TCIF7
+        *dma2_hifcr = (1 << 22) | (1 << 24) | (1 << 25) | (1 << 26) | (1 << 27);
+        let sent: usize = dma_tx_len;
+        let tail: usize = uart_tx_tail;
+        uart_tx_tail = (tail + sent) % 128;
+        dma_tx_active = false;
+        interrupt_notify();
+        dma_uart_tx_kick();
+    }
 }
 
 // Used by platform_shutdown after a finite app_main() returns. Wait until
-// every queued byte has reached TDR, then quiesce USART1 interrupts before a
-// debugger installs its next flash loader. Long-running servers never return.
+// every queued byte has reached TDR (uart_tx_tail only advances once
+// DMA2 Stream7's completion ISR has fired, so this also covers "DMA still
+// mid-burst"), then quiesce USART1/DMA2 Stream7 interrupts before a
+// debugger installs its next flash loader.  Long-running servers never
+// return.
 fn uart_shutdown() {
     while (uart_tx_tail != uart_tx_head) {
         interrupt_wait();
     }
     let usart1_cr1: *io u32 = 0x40011000;
+    let usart1_cr3: *io u32 = 0x40011008;
     let nvic_icer1: *io u32 = 0xE000E184;
-    *usart1_cr1 = *usart1_cr1 & ~((1 << 7) | (1 << 5)); // TXEIE | RXNEIE
-    *nvic_icer1 = 1 << 5; // disable IRQ37
+    let nvic_icer2: *io u32 = 0xE000E188;
+    let dma2_s7cr:  *io u32 = 0x400264B8;
+    *usart1_cr1 = *usart1_cr1 & ~(1 << 5); // RXNEIE
+    *usart1_cr3 = *usart1_cr3 & ~(1 << 7); // DMAT
+    *dma2_s7cr = *dma2_s7cr & ~1;          // disable DMA2 Stream7
+    *nvic_icer1 = 1 << 5; // disable IRQ37 (USART1)
+    *nvic_icer2 = 1 << 6; // disable IRQ70 (DMA2_Stream7)
 }
 
 // Generic hooks called by examples/common/runtime.tkb's high-level main.

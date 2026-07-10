@@ -4684,3 +4684,106 @@ fatfs_sdcard_stm32.o`).
 all five files. Full real-hardware suite (`make hwcheck`) passes except for
 `fatfs_sdcard`'s pre-existing, now-documented intermittent single-byte UART
 issue described above, unrelated to the refinement-type work in this pass.
+
+## GitHub Issue #101 ("Drop char on UART, race condition?") -- Investigated and Fixed
+
+Follow-up to the intermittent single-byte UART loss found above. Filed as
+issue #101 and investigated as its own dedicated pass.
+
+**First confirmed the board's exact silicon**: OpenOCD reports this specific
+board as Cortex-M7 **r0p1**, an early revision. This matters because ARM
+errata 837070 ("Increasing priority using a write to BASEPRI does not take
+effect immediately") affects exactly r0p0/r0p1 (fixed in r0p2), and ChibiOS's
+own ARMv7-M port (`chcore.h`) has a `#if __CM7_REV <= 1` special case
+wrapping its BASEPRI-based kernel lock with `CPSID i`/`CPSIE i` specifically
+for this silicon family. This looked like a strong, well-documented lead.
+
+**Two PRIMASK-based critical-section fix attempts, both genuine dead ends.**
+Added `extern fn disable_irq()/restore_irq(saved)` (hand-written Thumb
+`mrs/cpsid/bx` and `msr/bx`) wrapping `uart_putc`'s `USART1->CR1` TXEIE
+read-modify-write:
+- Plain PRIMASK save/restore, no barriers: made the bug catastrophically
+  worse (~99% failure on a simple synthetic stress test, up from ~11%).
+- Same, with `dsb`+`isb` added around the PRIMASK writes (following the
+  errata's spirit, even though ARM's own text says PRIMASK itself -- unlike
+  BASEPRI -- is not affected by 837070): reduced the simple synthetic test
+  to a deterministic 2/300 failures, a large apparent improvement. But
+  against the REAL `fatfs_sdcard` reproduction (not the simplified
+  synthetic one), the same fix showed ~50% failure -- worse than baseline,
+  not better. A fix that improves a simplified stress test but does not
+  generalize to the real target scenario is not a fix; both attempts were
+  reverted (`git checkout <pre-#101 commit> -- uart.tkb startup.S
+  startup_ram.S`) rather than kept as a partial improvement.
+
+**The actual fix: an architectural change, not a critical section.** The
+user's own hypothesis, offered explicitly as "weak evidence" but worth
+testing: this project's UART TX was per-byte-interrupt driven while
+`sdmmc.tkb`'s `disk_write` was already DMA+interrupt driven -- an asymmetric
+combination most STM32 codebases don't exercise (either everything uses
+DMA+interrupt, as ChibiOS/RT does for both UART and SD, or a byte-interrupt
+UART is never combined with DMA-heavy traffic on another peripheral under
+load), which would explain why this race is obscure rather than a
+well-known errata. Tested with a throwaway one-shot DMA-based UART TX
+experiment (never wired into the real driver) against the exact realistic
+reproduction pattern (128 ascending `disk_write` calls immediately followed
+by a UART print, x60 iterations per run): **0 failures across 4 independent
+runs (240 total iterations)**, versus ~47-50% failure with the existing
+per-byte-interrupt `uart_putc`/`uart_tx_isr` on the identical pattern. A
+dramatic, repeatable result.
+
+**Production implementation** (`examples/common_stm32/uart.tkb`): TX moved
+to DMA2 Stream7/Channel4 (SDMMC1 already owns DMA2 Stream3/Channel4 --
+different stream, no conflict). The existing 128-byte ring buffer and its
+head/tail producer/consumer protocol are unchanged; only how a buffered run
+of bytes is drained to hardware changed -- one DMA burst per contiguous
+ring run (split at the buffer's physical wraparound point when needed)
+instead of one interrupt per byte. `dma_uart_tx_kick()` starts a burst
+whenever the ring is non-empty and no burst is already in flight; the new
+`DMA2_Stream7_IRQHandler` (added at IRQ70, both `startup.S` and
+`startup_ram.S` gained the vector table entry plus a `.weak` no-op default,
+same pattern as `SDMMC1_IRQHandler`) advances the tail on completion and
+chains the next burst. `USART1_IRQHandler` now only services RX; TXEIE and
+the old per-byte drain (`uart_tx_isr`) are gone entirely.
+
+**A second real bug found and fixed during bring-up, distinct from the
+byte-loss race itself**: the first working version of the DMA rewrite
+compiled cleanly and passed `make check`/`make stm32build`, but every real
+hardware test failed completely (`hello`'s "Hello, World!\n" came back as
+all-zero bytes) -- not an intermittent byte loss, total silence. Root cause:
+AXI SRAM1 is genuinely cacheable (see the RAM-execution notes elsewhere in
+this file), and `uart_putc`'s plain CPU stores into `uart_tx_buf` were
+sitting in the D-cache, invisible to DMA2 reading physical RAM directly --
+exactly the class of bug this project's own `dma_prepare_tx`/`dma_prepare_rx`/
+`dma_finish_rx` builtins exist to prevent, and exactly the kind flagged
+elsewhere in this file as only reproducible on real hardware, never in
+QEMU. Missed initially because the throwaway DMA experiment above never
+hit it by luck (its buffer's cache state happened to already be clean at
+the point DMA read it). Fixed with one `dma_prepare_tx(src_ptr, burst_len)`
+call in `dma_uart_tx_kick()`, right before the DMA registers are armed --
+after which `hello` and every other test passed immediately. Confirmed via
+`llvm-objdump` disassembly of `dma_uart_tx_kick` that every register write
+(DMA2 S7CR/NDTR/PAR/M0AR/FCR, HIFCR clear mask) matched the intended values
+bit-for-bit before looking for a cache explanation, ruling out a codegen or
+register-address mistake first.
+
+**Verification**: the exact issue #101 reproduction (`fatfs_sdcard` real-
+hardware test) run 30 consecutive times with **0 failures** (previously
+roughly 1 failure in 6-10 runs). Full `make check` (71/71), `make
+stm32build` (all STM32 examples, since `uart.tkb` is shared by every one of
+them), `make hwcheck` (44/44 real hardware), and `make hwcheck-net` (6/6,
+including the Flash-execution `http_server` boot path) all pass with no
+regressions.
+
+As with the abandoned PRIMASK attempts, the possibility that the original
+bug was, in part, specific to this individual physical board or this
+specific SD card cannot be fully excluded -- but the fix's dramatic,
+repeatable effect on the exact reproduction pattern, combined with the
+architectural asymmetry it corrects (and which matches ChibiOS/RT's own
+design choice), is strong enough evidence to treat this as resolved rather
+than coincidentally masked.
+
+**Files**: `examples/common_stm32/uart.tkb` (TX rewritten to DMA2 Stream7/
+Channel4 + interrupt), `examples/common_stm32/startup.S` and
+`examples/common_stm32/startup_ram.S` (new `DMA2_Stream7_IRQHandler` vector
+at IRQ70, `.weak` no-op default), `README.md` (updated to describe the fix
+instead of the open issue).
