@@ -8,6 +8,23 @@
 // Deliberately uses the default HSI (16MHz) clock, no PLL/clock-tree setup --
 // keeps this first bring-up minimal. USART1 is on APB2; with all prescalers
 // at their reset value of 1, APB2 clock == HSI == 16MHz.
+//
+// **Known open issue, found during issue #98's real-hardware testing, not
+// yet root-caused or fixed**: `examples/fatfs_sdcard`'s first uart_puts()
+// call after `fat_format()`'s ~128 disk_write calls (each interrupt-driven
+// via examples/common_stm32/sdmmc.tkb) occasionally (roughly 1 in 6-10 runs
+// observed) loses exactly one byte from the transmitted string entirely
+// (not corrupted -- genuinely absent), specifically right after that burst
+// of unrelated SDMMC1 interrupt activity. Confirmed independent of issue
+// #98's own --forbid-trap refinement-type changes (reproduces identically
+// on the pre-refinement-type committed version and the --forbid-trap-clean
+// version). Suspected but unconfirmed: a race in uart_putc's
+// `*usart1_cr1 = *usart1_cr1 | TXEIE` read-modify-write against
+// uart_tx_isr's own read-modify-write of the same register, or an NVIC
+// priority interaction between USART1 and SDMMC1 -- not diagnosed further
+// yet. See HISTORY.md's issue #98 entry. Treat an occasional
+// `fatfs_sdcard (stm32/ram)` hwcheck failure with a single missing byte as
+// this known issue, not a new regression, until it's actually fixed.
 
 let mut uart_tx_buf: [u8; 128];
 let mut uart_tx_head: io {0..<128 as usize};

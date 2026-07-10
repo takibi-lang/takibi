@@ -151,27 +151,39 @@ fn fat_mount() {
 // entry occupies the low 12 bits of the 3-byte group at byte offset
 // N + N/2; for an odd cluster, the high 12 bits. This is the one genuinely
 // fiddly piece of FAT12 -- everything else in this file is byte-aligned.
+// cluster's real invariant (a valid FAT12 cluster number for this small,
+// self-formatted volume) is bookkeeping the type system cannot see across
+// this function's callers (next_free_cluster, an on-disk stored field, or
+// a previous fat_get_entry result) -- explicit if-narrowing on `off`
+// itself right at the point of use, per this project's established
+// pattern for exactly this class of bound, closes the trap without
+// weakening cluster's own parameter type.
 fn fat_get_entry(cluster: u32) -> u16 {
     let off: usize = (cluster + cluster / 2) as usize;
-    let b0: u16 = fat_buf[off] as u16;
-    let b1: u16 = fat_buf[off + 1] as u16;
-    if (cluster % 2 == 0) {
-        return b0 | ((b1 & 0x0F) << 8);
-    } else {
-        return (b0 >> 4) | (b1 << 4);
+    if (off >= 0 && off < 511) {
+        let b0: u16 = fat_buf[off] as u16;
+        let b1: u16 = fat_buf[off + 1] as u16;
+        if (cluster % 2 == 0) {
+            return b0 | ((b1 & 0x0F) << 8);
+        } else {
+            return (b0 >> 4) | (b1 << 4);
+        }
     }
+    return 0x0FFF; // out of range should not happen in correct operation; treat as EOC
 }
 
 fn fat_set_entry(cluster: u32, val: u16) {
     let off: usize = (cluster + cluster / 2) as usize;
-    if (cluster % 2 == 0) {
-        fat_buf[off] = val as u8;
-        let hi: u8 = fat_buf[off + 1];
-        fat_buf[off + 1] = (hi & 0xF0) | (((val >> 8) as u8) & 0x0F);
-    } else {
-        let lo: u8 = fat_buf[off];
-        fat_buf[off] = (lo & 0x0F) | (((val << 4) as u8) & 0xF0);
-        fat_buf[off + 1] = (val >> 4) as u8;
+    if (off >= 0 && off < 511) {
+        if (cluster % 2 == 0) {
+            fat_buf[off] = val as u8;
+            let hi: u8 = fat_buf[off + 1];
+            fat_buf[off + 1] = (hi & 0xF0) | (((val >> 8) as u8) & 0x0F);
+        } else {
+            let lo: u8 = fat_buf[off];
+            fat_buf[off] = (lo & 0x0F) | (((val << 4) as u8) & 0xF0);
+            fat_buf[off + 1] = (val >> 4) as u8;
+        }
     }
 }
 
@@ -303,47 +315,59 @@ fn fat_find_entry(name83: *u8) -> i32 {
 // limitation the old fat_create_file had (no rename/delete in scope).
 fn fat_open(fp: *FatFile, name83: *u8, mode: i32) -> i32 {
     if ((mode & FA_CREATE_ALWAYS) != 0) {
-        if (next_free_root_entry >= ROOT_ENTRY_COUNT as u32) {
-            return -1;
-        }
-        let idx: usize = next_free_root_entry as usize;
-        bytes_copy(root_dir_buf[idx].name, name83, 11);
-        root_dir_buf[idx].attr = 0x20; // ARCHIVE
-        root_dir_buf[idx].nt_reserved = 0;
-        root_dir_buf[idx].create_time_tenth = 0;
-        root_dir_buf[idx].create_time = 0;
-        root_dir_buf[idx].create_date = 0x21; // 1980-01-01 placeholder (no RTC in this demo)
-        root_dir_buf[idx].last_access_date = 0;
-        root_dir_buf[idx].first_cluster_hi = 0;
-        root_dir_buf[idx].write_time = 0;
-        root_dir_buf[idx].write_date = 0x21;
-        root_dir_buf[idx].first_cluster_lo = 0; // filled in by fat_close once known
-        root_dir_buf[idx].file_size = 0;
-        next_free_root_entry = next_free_root_entry + 1;
+        // If-narrowing needs the two-sided `v >= lo && v < hi` form (SPEC.md
+        // "If-condition narrowing") wrapping the actual use, not a negated
+        // early-return guard -- and compared against a literal (16), not
+        // `ROOT_ENTRY_COUNT as u32` (a named global's own literal
+        // initializer does not, by itself, make this provable; the global
+        // is still used for the array's own size).
+        if ((next_free_root_entry >= 0) && (next_free_root_entry < 16)) {
+            let idx: usize = next_free_root_entry as usize;
+            bytes_copy(root_dir_buf[idx].name, name83, 11);
+            root_dir_buf[idx].attr = 0x20; // ARCHIVE
+            root_dir_buf[idx].nt_reserved = 0;
+            root_dir_buf[idx].create_time_tenth = 0;
+            root_dir_buf[idx].create_time = 0;
+            root_dir_buf[idx].create_date = 0x21; // 1980-01-01 placeholder (no RTC in this demo)
+            root_dir_buf[idx].last_access_date = 0;
+            root_dir_buf[idx].first_cluster_hi = 0;
+            root_dir_buf[idx].write_time = 0;
+            root_dir_buf[idx].write_date = 0x21;
+            root_dir_buf[idx].first_cluster_lo = 0; // filled in by fat_close once known
+            root_dir_buf[idx].file_size = 0;
+            next_free_root_entry = next_free_root_entry + 1;
 
-        fp.dir_index = idx;
-        fp.start_cluster = 0;
-        fp.cur_cluster = 0;
-        fp.pos_in_cluster = 0;
-        fp.fptr = 0;
-        fp.fsize = 0;
-        fp.writing = true;
-        return 0;
+            fp.dir_index = idx;
+            fp.start_cluster = 0;
+            fp.cur_cluster = 0;
+            fp.pos_in_cluster = 0;
+            fp.fptr = 0;
+            fp.fsize = 0;
+            fp.writing = true;
+            return 0;
+        }
+        return -1;
     }
     if ((mode & FA_READ) != 0) {
         let found: i32 = fat_find_entry(name83);
-        if (found < 0) {
-            return -1;
+        // fat_find_entry's own body proves its for-loop counter is
+        // {0..<16}, but that proof does not cross the function-call
+        // boundary through a plain (unrefined) `-> i32` return -- so
+        // narrow explicitly here (two-sided form, literal 16, same
+        // reasoning as the FA_CREATE_ALWAYS branch above) rather than
+        // widen the return type.
+        if ((found >= 0) && (found < 16)) {
+            let idx: usize = found as usize;
+            fp.dir_index = idx;
+            fp.start_cluster = root_dir_buf[idx].first_cluster_lo as u32;
+            fp.cur_cluster = fp.start_cluster;
+            fp.pos_in_cluster = 0;
+            fp.fptr = 0;
+            fp.fsize = root_dir_buf[idx].file_size;
+            fp.writing = false;
+            return 0;
         }
-        let idx: usize = found as usize;
-        fp.dir_index = idx;
-        fp.start_cluster = root_dir_buf[idx].first_cluster_lo as u32;
-        fp.cur_cluster = fp.start_cluster;
-        fp.pos_in_cluster = 0;
-        fp.fptr = 0;
-        fp.fsize = root_dir_buf[idx].file_size;
-        fp.writing = false;
-        return 0;
+        return -1;
     }
     return -1; // unsupported mode
 }
@@ -439,9 +463,16 @@ fn fat_write(fp: *FatFile, buf: *u8, btw: u32, bw: *u32) -> i32 {
 }
 
 fn fat_close(fp: *FatFile) -> i32 {
-    if (fp.writing) {
-        root_dir_buf[fp.dir_index].first_cluster_lo = fp.start_cluster as u16;
-        root_dir_buf[fp.dir_index].file_size = fp.fsize;
+    // fp.dir_index was assigned from an already-bounds-checked idx in
+    // fat_open (either branch), but a struct field carries no refined
+    // type across the assignment, and if-narrowing tracks a plain
+    // variable, not a repeated field-access expression -- bind it to a
+    // local first, then narrow that (two-sided form, literal 16, same
+    // reasoning as fat_open's own two narrowing sites).
+    let idx: usize = fp.dir_index;
+    if (fp.writing && (idx >= 0) && (idx < 16)) {
+        root_dir_buf[idx].first_cluster_lo = fp.start_cluster as u16;
+        root_dir_buf[idx].file_size = fp.fsize;
         fat_flush();
     }
     return 0;

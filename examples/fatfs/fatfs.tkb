@@ -50,17 +50,26 @@ extern fn semihosting_read(handle: i32, buf: *u8, len: i32) -> i32;
 // -- Block device: in-memory backing store ----------------------------------
 let mut disk: [u8; SECTOR_SIZE * TOTAL_SECTORS];
 
+// sector's real invariant (a valid sector number on this small, fixed-size
+// disk) is bookkeeping fat12.tkb's own callers establish, not something
+// this function's plain `u32` parameter type can see -- if-narrow
+// explicitly (two-sided form, literal TOTAL_SECTORS value) so `off`'s
+// range closes the trap on the indexed access below.
 fn mem_block_read(sector: u32, buf: *u8) {
-    let off: usize = (sector as usize) * SECTOR_SIZE;
-    for i in 0..<SECTOR_SIZE {
-        buf[i as isize] = disk[off + i];
+    if ((sector >= 0) && (sector < 128)) {
+        let off: usize = (sector as usize) * SECTOR_SIZE;
+        for i in 0..<SECTOR_SIZE {
+            buf[i as isize] = disk[off + i];
+        }
     }
 }
 
 fn mem_block_write(sector: u32, buf: *u8) {
-    let off: usize = (sector as usize) * SECTOR_SIZE;
-    for i in 0..<SECTOR_SIZE {
-        disk[off + i] = buf[i as isize];
+    if ((sector >= 0) && (sector < 128)) {
+        let off: usize = (sector as usize) * SECTOR_SIZE;
+        for i in 0..<SECTOR_SIZE {
+            disk[off + i] = buf[i as isize];
+        }
     }
 }
 

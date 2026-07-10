@@ -385,15 +385,13 @@ $(CHECKSUM_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(
 # writes), so only COMMON_NETUTIL as a staleness prerequisite is needed,
 # same reasoning as CHECKSUM_OBJS above.
 #
-# Deliberately NOT --forbid-trap yet, unlike every other STANDARD_OBJS-style
-# rule (see CLAUDE.md's "New .tkb Code: Prove It Without --forbid-trap
-# First, Then Turn It On" -- a new example gets its first working version
-# with plain checked-array/slice access and no --forbid-trap, committed as
-# that known-good baseline, THEN --forbid-trap is turned on in a follow-up
-# change and whatever it flags gets fixed with real refined types). Flip
-# this on once fatfs.tkb's remaining unproven bounds checks are addressed.
+# --forbid-trap: the fatfs+SD-card milestone (issues #61/#62/#98) is now
+# proven working end to end on real hardware (see HISTORY.md's issue #98
+# entry), so this is the first STANDARD_OBJS-style rule in the group to
+# turn the flag on, per CLAUDE.md's "New .tkb Code: Prove It Without
+# --forbid-trap First, Then Turn It On" process.
 $(FATFS_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -o $@
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
 # icmp_echo.tkb/tcp_echo.tkb/http_server.tkb each `use` inet_checksum.tkb
 # and netutil.tkb themselves now; virtio_mmio.tkb `use`s gic.tkb itself
@@ -631,14 +629,10 @@ examples/msgqueue/msgqueue_stm32.o: examples/msgqueue/msgqueue.tkb $(COMMON_STM3
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # fatfs: `use`s fat12.tkb (which itself `use`s netutil.tkb) directly, needs
-# no STM32-specific HAL beyond uart+print. Deliberately NOT --forbid-trap,
-# same milestone-wide reason as the QEMU-side FATFS_OBJS rule (see
-# CLAUDE.md's "Development Process: Prove New .tkb Code Without
-# --forbid-trap First, Then Turn It On" -- fatfs + real SD card is one
-# milestone, and --forbid-trap stays off across all of it until the whole
-# thing works against real hardware).
+# no STM32-specific HAL beyond uart+print. --forbid-trap enabled, same
+# milestone-wide reason as the QEMU-side FATFS_OBJS rule.
 examples/fatfs/fatfs_stm32.o: examples/fatfs/fatfs.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # RAM-execution builds of semaphore/condvar/msgqueue -- these three need
 # sem_asm.o linked in too, so they get their own explicit rules here
@@ -700,11 +694,11 @@ examples/http_server/http_server_stm32.o: examples/http_server/http_server.tkb $
 # sdcard: GitHub issue #62, real SDMMC1 microSD driver, built and verified
 # entirely independently of examples/fatfs (see sdmmc.tkb's header comment).
 # STM32-only -- no QEMU build exists (no virtual SD controller in this
-# project's QEMU setup). Deliberately NOT --forbid-trap yet, same
-# milestone-wide reason as examples/fatfs (CLAUDE.md's "Development
-# Process" section).
+# project's QEMU setup). --forbid-trap enabled: already compiled clean
+# under it with no changes needed (sdcard.tkb's own fixed-size loops were
+# already fully provable).
 examples/sdcard/sdcard_stm32.o: examples/sdcard/sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SDMMC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SDMMC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SDMMC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # fatfs_sdcard: GitHub issue #98, wires fat12.tkb's FAT12 logic (issue #61)
 # onto sdmmc.tkb's real SD card driver (issue #62) -- see fatfs_sdcard.tkb's
@@ -712,10 +706,10 @@ examples/sdcard/sdcard_stm32.o: examples/sdcard/sdcard.tkb $(COMMON_STM32_UART) 
 # uart+print need to be on the command line; the other two are listed here
 # purely for Make's own staleness tracking. STM32-only, same reasoning as
 # sdcard (no virtual SD controller in this project's QEMU setup).
-# Deliberately NOT --forbid-trap yet, same milestone-wide reason as
-# examples/fatfs and examples/sdcard.
+# --forbid-trap enabled, same milestone-wide reason as examples/fatfs and
+# examples/sdcard.
 examples/fatfs_sdcard/fatfs_sdcard_stm32.o: examples/fatfs_sdcard/fatfs_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SDMMC) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # examples/http_server is the one deliberate exception to "every STM32
 # example runs from RAM" (see STM32_RAM_EXAMPLES's comment above): flashing

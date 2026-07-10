@@ -4609,3 +4609,78 @@ full real-hardware suite (`make hwcheck`, 44/44 including the new
 pass with zero regressions. `fatfs_sdcard` itself confirmed reliable across
 3 independent real-hardware runs (format + create + read-back, all matching)
 before being wired into the automated suite.
+
+#### Follow-up: `--forbid-trap` Enabled Across the Whole Milestone, and a Third, Separate Bug Found -- Not Fixed
+
+With `fatfs_sdcard` proven working end to end, the user asked to complete
+the milestone by turning `--forbid-trap` on across all five affected files
+(`examples/fatfs/fatfs.tkb`, `examples/common/fat12.tkb`,
+`examples/common_stm32/sdmmc.tkb`, `examples/fatfs_sdcard/fatfs_sdcard.tkb`,
+and `examples/sdcard/sdcard.tkb`, since it also calls `sdmmc.tkb`'s
+`disk_read`/`disk_write` directly), per CLAUDE.md's already-agreed process.
+A dry run (`--forbid-trap` added to each compile command without committing
+to fixes yet) found `sdcard.tkb` already clean (its own fixed-size loops
+were already fully provable) and 26 flagged sites across `fat12.tkb` and
+`fatfs.tkb`'s `mem_block_read`/`mem_block_write`.
+
+**All 26 sites shared the same shape**: a value whose real invariant (a
+valid FAT12 cluster number, root-directory slot index, or sector number for
+this small, self-formatted volume) is bookkeeping this project's own
+callers establish at runtime, not something a plain `u32`/`usize`
+parameter's type lets the compiler see. Fixed with explicit if-narrowing at
+the point of use (`if (v >= lo && v < hi) { ... }`, SPEC.md's documented
+form) rather than widening any parameter or return type -- discovered
+along the way that this two-sided form is required for the narrowing to
+actually take hold: a single-sided `if (off < 511)` did **not** close the
+trap (even though `off: usize` is unsigned and thus trivially `>= 0`);
+writing it as `if (off >= 0 && off < 511)` did. Also discovered that
+if-narrowing tracks a plain variable, not a repeated struct-field-access
+expression (`fp.dir_index` had to be bound to a local first, then that
+local narrowed, for `fat_close`'s access to close). And confirmed again
+the already-documented literal-only restriction on comparisons feeding
+narrowing: `next_free_root_entry >= ROOT_ENTRY_COUNT as u32` (a named
+global) did not narrow the following code at all; only rewriting the
+comparison against the literal `16` did (the array's own `[DirEntry;
+ROOT_ENTRY_COUNT]` size declaration was left using the named constant --
+only the *narrowing comparison* needs the literal). `fat_get_entry`/
+`fat_set_entry` additionally gained a real (if practically unreachable)
+out-of-range fallback (`return 0x0FFF` / a no-op) instead of assuming the
+caller's cluster number is always valid, since narrowing here has no
+natural "return -1" error path to reuse.
+
+All five files' Makefile rules gained `--forbid-trap`. `make check` (71/71)
+passed immediately. **The real-hardware suite did not**, but not because of
+any of the above: `fatfs_sdcard (stm32/ram)` intermittently failed with
+exactly one byte missing from the captured output -- the colon in
+`format: OK`, appearing as `format OK` instead, roughly 1 run in 6-10.
+Bisected carefully before concluding anything: temporarily checked out the
+pre-`--forbid-trap` committed version of `fat12.tkb` (via `git checkout
+<commit> -- examples/common/fat12.tkb`, rebuilt, tested, then restored the
+fixed version) and reproduced the *identical* single-byte drop on that
+version too, at a similar rate. This rules out the `--forbid-trap` fixes
+above as the cause -- **a third, genuinely separate, pre-existing bug**,
+apparently a rare race somewhere in the interrupt-driven UART TX path
+(`examples/common_stm32/uart.tkb`) or an NVIC priority interaction with
+SDMMC1, that this session's testing happened to surface only now because
+`fatfs_sdcard` is the first example to put this much interrupt-driven
+SDMMC1 traffic immediately before a UART print. Documented as an open,
+unresolved issue in `uart.tkb`'s own header comment (suspected mechanism: a
+read-modify-write race between `uart_putc`'s and `uart_tx_isr`'s shared
+`USART1->CR1` TXEIE bit access) rather than guessed at further -- per
+explicit user direction, this pass closes out with `--forbid-trap` itself
+done and verified, and treats hunting down this new bug as its own,
+separate follow-up. An occasional single-missing-byte
+`fatfs_sdcard (stm32/ram)` hwcheck failure should be read as this known,
+already-flagged issue, not a fresh regression, until it is actually fixed.
+
+**Files**: `examples/common/fat12.tkb`, `examples/fatfs/fatfs.tkb`
+(if-narrowing fixes), `examples/common_stm32/uart.tkb` (new header comment
+documenting the UART byte-loss issue, unfixed), `Makefile` (`--forbid-trap`
+added to `FATFS_OBJS`, `examples/fatfs/fatfs_stm32.o`,
+`examples/sdcard/sdcard_stm32.o`, `examples/fatfs_sdcard/
+fatfs_sdcard_stm32.o`).
+
+**Verification**: `make check` (71/71) with `--forbid-trap` enabled across
+all five files. Full real-hardware suite (`make hwcheck`) passes except for
+`fatfs_sdcard`'s pre-existing, now-documented intermittent single-byte UART
+issue described above, unrelated to the refinement-type work in this pass.

@@ -75,25 +75,28 @@ read).
 `--forbid-trap` is expected to grow into a family: per-category strictness
 options (array-bounds trap freedom, checked-cast freedom, safe-pointer
 enforcement outside `unsafe`, ...) with one umbrella flag enabling them
-all. Today's single flag is the first member. **The example suite --
-including the full TCP/IP stack and HTTP server -- compiles trap-free
-under it, with one deliberate, temporary exception: `examples/fatfs`,
-`examples/common/fat12.tkb`, `examples/common_stm32/sdmmc.tkb`, and
-`examples/fatfs_sdcard` (issues #61/#62/#98 -- FAT12 on a real SD card,
-now working end to end) are one milestone that is intentionally not yet
-built with `--forbid-trap`; see CLAUDE.md's "Development Process"
-section.** `examples/common_stm32/sdmmc.tkb`'s SDMMC1 driver
-(issue #62) is deliberately asymmetric: `disk_write` is DMA + interrupt
-driven, matching `eth.tkb`'s own DMA+interrupt shape, but `disk_read` is
-plain polling -- a DMA `disk_read` was built and tested but reliably
-corrupted memory once issued after ~129 prior writes, an issue that
-survived three fixes cross-checked against ChibiOS's proven STM32
-SDMMCv1 driver and remains genuinely unresolved (root cause not
-identified; possibly this driver, possibly an STM32F7 quirk, possibly
-specific to the individual board or SD card used). See that file's
-header comment and HISTORY.md for both bring-up stories in full (a
-separate, resolved TXUNDERR bug in `disk_write`, root-caused by
-cross-checking the same ChibiOS driver). A few tools do almost all of the work: refined integer ranges
+all. Today's single flag is the first member. **The entire example suite
+-- including the full TCP/IP stack, HTTP server, and the FAT12-on-real-SD-
+card milestone (`examples/fatfs`, `examples/common/fat12.tkb`,
+`examples/common_stm32/sdmmc.tkb`, `examples/sdcard`,
+`examples/fatfs_sdcard` -- issues #61/#62/#98) now compiles trap-free
+under it,** with no remaining exceptions. `examples/common_stm32/
+sdmmc.tkb`'s SDMMC1 driver (issue #62) is deliberately asymmetric:
+`disk_write` is DMA + interrupt driven, matching `eth.tkb`'s own
+DMA+interrupt shape, but `disk_read` is plain polling -- a DMA
+`disk_read` was built and tested but reliably corrupted memory once
+issued after ~129 prior writes, an issue that survived three fixes
+cross-checked against ChibiOS's proven STM32 SDMMCv1 driver and remains
+genuinely unresolved (root cause not identified; possibly this driver,
+possibly an STM32F7 quirk, possibly specific to the individual board or
+SD card used). Separately, `fatfs_sdcard`'s real-hardware test
+occasionally shows a single dropped UART byte, also unresolved and also
+confirmed unrelated to `--forbid-trap` itself (reproduces identically on
+the pre-`--forbid-trap` version too) -- suspected to be a rare race in
+`uart.tkb`'s interrupt-driven TX path. See `sdmmc.tkb`'s and `uart.tkb`'s
+own header comments and HISTORY.md for the full bring-up stories,
+including a separate, resolved TXUNDERR bug in `disk_write`, root-caused
+by cross-checking the same ChibiOS driver. A few tools do almost all of the work: refined integer ranges
 that propagate through ordinary arithmetic and bitwise masking (so a
 value like a wire-derived header length carries a real bound with no
 extra code), `min`/`max` builtins that provably clamp a value against a
