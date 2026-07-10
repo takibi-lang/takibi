@@ -21,12 +21,13 @@
    Cortex-M context-switch mechanism (see PendSV_Handler's comment), shared
    by every preemptive-scheduler example, harmless to include unconditionally
    since nothing ever sets ICSR.PENDSVSET unless a program explicitly enables
-   SysTick. SysTick, USART1 (IRQ37), and Ethernet (IRQ61)
-   example currently uses) are `.weak`, defaulting to a no-op return rather
-   than Default_Handler's infinite loop -- unlike a genuine fault, these only
-   fire if a program deliberately enabled them, so hanging is not the safe
-   default here. IRQ0-36 are never used by anything; Default_Handler's loop
-   is the appropriate catch-all for those (and for real faults). */
+   SysTick. SysTick, USART1 (IRQ37), SDMMC1 (IRQ49), and Ethernet (IRQ61)
+   (every peripheral interrupt source a shared example currently uses) are
+   `.weak`, defaulting to a no-op return rather than Default_Handler's
+   infinite loop -- unlike a genuine fault, these only fire if a program
+   deliberately enabled them, so hanging is not the safe default here.
+   IRQ0-36 are never used by anything; Default_Handler's loop is the
+   appropriate catch-all for those (and for real faults). */
     .section .isr_vector, "a"
     .align  2
     .global _vector_table
@@ -52,7 +53,11 @@ _vector_table:
     .word   Default_Handler
     .endr
     .word   USART1_IRQHandler   /* IRQ37 */
-    .rept   23                  /* IRQ38-60 */
+    .rept   11                  /* IRQ38-48 */
+    .word   Default_Handler
+    .endr
+    .word   SDMMC1_IRQHandler   /* IRQ49 */
+    .rept   11                  /* IRQ50-60 */
     .word   Default_Handler
     .endr
     .word   ETH_IRQHandler      /* IRQ61 */
@@ -242,4 +247,9 @@ SysTick_Handler:
     .weak   ETH_IRQHandler
     .thumb_func
 ETH_IRQHandler:
+    bx      lr
+
+    .weak   SDMMC1_IRQHandler
+    .thumb_func
+SDMMC1_IRQHandler:
     bx      lr

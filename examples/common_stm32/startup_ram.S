@@ -56,7 +56,11 @@ _vector_table:
     .word   Default_Handler
     .endr
     .word   USART1_IRQHandler   /* IRQ37 */
-    .rept   23                  /* IRQ38-60 */
+    .rept   11                  /* IRQ38-48 */
+    .word   Default_Handler
+    .endr
+    .word   SDMMC1_IRQHandler   /* IRQ49 */
+    .rept   11                  /* IRQ50-60 */
     .word   Default_Handler
     .endr
     .word   ETH_IRQHandler      /* IRQ61 */
@@ -177,4 +181,9 @@ SysTick_Handler:
     .weak   ETH_IRQHandler
     .thumb_func
 ETH_IRQHandler:
+    bx      lr
+
+    .weak   SDMMC1_IRQHandler
+    .thumb_func
+SDMMC1_IRQHandler:
     bx      lr

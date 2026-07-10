@@ -21,10 +21,32 @@
 // whole milestone works" process): SD cards only (SDSC/SDHC/SDXC via
 // CMD8+ACMD41's HCS bit), not eMMC (eMMC's init sequence has no CMD8/ACMD41
 // dance -- a separate concern for whenever eMMC hardware is in front of us).
-// 1-bit bus width (D0 only) and polling-only command/data transfer (no DMA,
-// no interrupts) -- simplest correct path; 4-bit bus width and DMA are
-// straightforward follow-ups once this works. Single 512-byte block
-// transfer only.
+// 1-bit bus width (D0 only) -- 4-bit bus width is a straightforward follow-up
+// once this works. Single 512-byte block transfer only.
+//
+// disk_read/disk_write's bulk 512-byte data phase is DMA + interrupt driven
+// (DMA2 Stream3/Channel4), mirroring examples/common_stm32/eth.tkb's own
+// DMA-transfer-plus-interrupt-completion shape: the CPU sleeps via
+// interrupt_wait() while DMA moves data between SDMMC1's FIFO and the
+// caller's buffer, woken by SDMMC1_IRQHandler (NVIC IRQ49) on DATAEND or a
+// data-phase error. The command/response phase (CMD0..CMD16, CMD13 busy
+// polling) stays plain STA polling. DMA2/channel/PFCTRL/FIFO configuration
+// and the NVIC IRQ number were cross-checked against ChibiOS's STM32
+// SDMMCv1 driver (os/hal/ports/STM32/LLD/SDMMCv1/hal_sdc_lld.c) and its
+// official STM32F746G-DISCOVERY demo config (DMA2 Stream3/Channel4,
+// STM32_DMA_STREAM_ID(2,3)) -- confirming both the stream/channel choice
+// and, critically, the ORDER of operations: the DMA stream is configured
+// and enabled, and SDMMC_MASK/DLEN armed, BEFORE the read/write command
+// (CMD17/CMD24) is even sent -- giving the DMA controller the full
+// command/response round trip to settle before DCTRL.DTEN starts real
+// data flow, rather than enabling DMA immediately before DTEN. An earlier
+// attempt at this feature used the opposite order (arm DMA only after the
+// command's response) and reliably got TXUNDERR a few words before the end
+// of every write; see CLAUDE.md's "Known Limitations" section for that
+// investigation. ChibiOS's ISR also does NOT clear SDMMC_ICR itself
+// (only MASK=0, waking the waiter) -- Thread-mode reads STA once woken to
+// decide success/failure, then clears ICR itself; this driver follows the
+// same split.
 //
 // Register offsets and bit positions below were cross-checked against ST's
 // official CMSIS device header (cmsis_device_f7/Include/stm32f745xx.h),
@@ -89,7 +111,24 @@ let SDMMC_DLEN:    *io u32 = 0x40012C28;
 let SDMMC_DCTRL:   *io u32 = 0x40012C2C;
 let SDMMC_STA:     *io u32 = 0x40012C34;
 let SDMMC_ICR:     *io u32 = 0x40012C38;
-let SDMMC_FIFO:    *io u32 = 0x40012C80;
+let SDMMC_MASK:    *io u32 = 0x40012C3C;
+let SDMMC_FIFO_ADDR: u32 = 0x40012C80; // plain u32, not *io -- only ever used as DMA2's peripheral address
+
+// -- DMA2 Stream3, Channel4 (SDMMC1's DMA request mapping on STM32F7,
+// confirmed via ChibiOS's STM32F746G-DISCOVERY demo mcuconf.h:
+// STM32_SDC_SDMMC1_DMA_STREAM = STM32_DMA_STREAM_ID(2, 3)) --------------
+// DMA2_BASE = AHB1PERIPH_BASE + 0x6400 = 0x40026400. Stream registers start
+// at base+0x10, 0x18 bytes apart (CR/NDTR/PAR/M0AR/M1AR/FCR per stream); for
+// stream 3 that is base + 0x10 + 0x18*3 = base + 0x58. Status/clear flags for
+// streams 0-3 live in the "Low" registers (LISR/LIFCR), not "High"
+// (streams 4-7) -- stream3's own 6 flag bits (FEIF3/DMEIF3/TEIF3/HTIF3/TCIF3,
+// bit 23 reserved) sit at bits 22-27 of LISR/LIFCR.
+let DMA2_LIFCR:  *io u32 = 0x40026408;
+let DMA2_S3CR:   *io u32 = 0x40026458;
+let DMA2_S3NDTR: *io u32 = 0x4002645C;
+let DMA2_S3PAR:  *io u32 = 0x40026460;
+let DMA2_S3M0AR: *io u32 = 0x40026464;
+let DMA2_S3FCR:  *io u32 = 0x4002646C;
 
 // STA flags this driver checks/clears (see header comment for provenance).
 // Spelled as literal hex values, matching each flag's Msk from the CMSIS
@@ -106,8 +145,7 @@ let STA_RXOVERR:  u32 = 0x20;
 let STA_CMDREND:  u32 = 0x40;
 let STA_CMDSENT:  u32 = 0x80;
 let STA_DATAEND:  u32 = 0x100;
-let STA_TXFIFOHE: u32 = 0x4000;
-let STA_RXFIFOHF: u32 = 0x8000;
+let STA_STBITERR: u32 = 0x200;
 
 // Broad "clear every static flag this driver ever sets" mask for ICR --
 // bits 0..10 (CCRCFAIL..DBCKEND).
@@ -120,6 +158,55 @@ let WAITRESP_LONG:  u32 = 3;
 let mut sd_ready: i32;  // 0 = not initialized, 1 = ready (module state)
 let mut sd_hc: i32;     // 1 = block-addressed (SDHC/SDXC), 0 = byte-addressed (SDSC)
 let mut card_rca: u32;  // relative card address, captured once at CMD3
+
+let mut sdmmc1_irq_flag: io u32; // set by SDMMC1_IRQHandler, cleared by the waiter
+
+fn enable_sdmmc1_irq() {
+    let nvic_iser1: *io u32 = 0xE000E104; // NVIC_ISER1, IRQ32-63
+    *nvic_iser1 = *nvic_iser1 | (1 << 17); // IRQ49 = SDMMC1 (49 - 32 = bit 17)
+}
+
+// Matches ChibiOS's SDMMC1 ISR exactly: disarm MASK and wake the waiter,
+// nothing else. STA/ICR are deliberately left untouched here -- Thread-mode
+// reads STA once woken (still valid: nothing else runs between the
+// interrupt firing and the waiter checking it) to distinguish DATAEND from
+// an error, then clears ICR itself. Clearing status inside the ISR was
+// this driver's original approach and is one of the two things changed
+// after cross-checking ChibiOS's proven implementation (see this file's
+// header comment for the other -- arming DMA/MASK before the command).
+fn SDMMC1_IRQHandler() {
+    *SDMMC_MASK = 0;
+    sdmmc1_irq_flag = 1;
+    interrupt_notify(); // retained event closes the flag-check/sleep race
+}
+
+// Configures DMA2 Stream3/Channel4 for one 512-byte SDMMC1 FIFO transfer.
+// dir_mem_to_periph selects direction: 0 = read (FIFO -> buf), 1 = write
+// (buf -> FIFO). PFCTRL (bit5) makes SDMMC1's own data-path state machine
+// the flow controller; FIFO mode (DMDIS=1) with a full (4-word) threshold
+// and INCR4 bursts on both sides matches ChibiOS's own configuration for
+// this peripheral pairing.
+fn sd_dma_config(buf: *u8, dir_mem_to_periph: u32) {
+    *DMA2_S3CR = 0; // must be disabled before reconfiguring
+    while ((*DMA2_S3CR & 1) != 0) {}
+    *DMA2_LIFCR = (1 << 22) | (1 << 24) | (1 << 25) | (1 << 26) | (1 << 27); // clear stale stream3 flags
+
+    *DMA2_S3PAR = SDMMC_FIFO_ADDR;
+    *DMA2_S3M0AR = (buf as usize) as u32;
+    *DMA2_S3NDTR = 128; // 128 words = 512 bytes
+    *DMA2_S3FCR = (1 << 2) | 3; // DMDIS | FTH=full
+
+    let dir_bit: u32 = dir_mem_to_periph << 6;
+    *DMA2_S3CR = dir_bit
+               | (1 << 5)    // PFCTRL
+               | (1 << 10)   // MINC
+               | (2 << 11)   // PSIZE = word
+               | (2 << 13)   // MSIZE = word
+               | (1 << 21)   // PBURST = INCR4
+               | (1 << 23)   // MBURST = INCR4
+               | (4 << 25)   // CHSEL = channel 4
+               | 1;          // EN
+}
 
 fn sd_gpio_init() {
     *RCC_AHB1ENR = *RCC_AHB1ENR | (1 << 2) | (1 << 3); // GPIOCEN | GPIODEN
@@ -139,6 +226,7 @@ fn sd_gpio_init() {
 
 fn sd_clock_init() {
     *RCC_APB2ENR = *RCC_APB2ENR | (1 << 11);   // SDMMC1EN
+    *RCC_AHB1ENR = *RCC_AHB1ENR | (1 << 22);   // DMA2EN
     *RCC_DCKCFGR2 = *RCC_DCKCFGR2 | (1 << 28); // SDMMC1SEL = 1 (SYSCLK, not PLL48CLK)
 }
 
@@ -280,6 +368,7 @@ fn sd_wait_not_busy() -> i32 {
 fn disk_initialize() -> i32 {
     sd_gpio_init();
     sd_clock_init();
+    enable_sdmmc1_irq(); // MASK stays 0 until a transfer arms it
 
     *SDMMC_POWER = 0; // power off first
     let mut i: i32 = 0;
@@ -344,33 +433,38 @@ fn disk_read(sector: u32, buf: *u8) -> i32 {
     if (disk_status() != 0) {
         return -1;
     }
+    dma_prepare_rx(buf, 512); // invalidate up front so the DMA-written bytes aren't shadowed by a stale dirty line
+
+    // Arm DMA + MASK + DLEN BEFORE sending the command -- ChibiOS ordering,
+    // see this file's header comment for why.
+    sd_dma_config(buf, 0); // peripheral -> memory
+
     *SDMMC_DTIMER = 0xFFFFFFFF;
     *SDMMC_DLEN = 512;
-    *SDMMC_DCTRL = (9 << 4) | (1 << 1) | 1; // DBLOCKSIZE=512 | DTDIR=card->host | DTEN
+    *SDMMC_ICR = ICR_CLEAR_ALL; // clear stale status before unmasking below
+    sdmmc1_irq_flag = 0;
+    *SDMMC_MASK = STA_DATAEND | STA_DCRCFAIL | STA_DTIMEOUT | STA_RXOVERR | STA_STBITERR;
 
     sd_send_cmd(17, sd_block_arg(sector), WAITRESP_SHORT); // CMD17 READ_SINGLE_BLOCK
     if (sd_wait_resp() != 0) {
+        *SDMMC_MASK = 0;
         return -1;
     }
 
-    let dst: *u32 = buf as *u32;
-    let mut words: isize = 0;
-    while (words < 128) { // 128 * 4 bytes = 512
-        while ((*SDMMC_STA & (STA_RXFIFOHF | STA_DATAEND | STA_DCRCFAIL | STA_DTIMEOUT | STA_RXOVERR)) == 0) {}
-        if ((*SDMMC_STA & (STA_DCRCFAIL | STA_DTIMEOUT | STA_RXOVERR)) != 0) {
-            return -1;
-        }
-        let mut n: isize = 0;
-        while ((n < 8) && (words < 128)) {
-            dst[words] = *SDMMC_FIFO;
-            words = words + 1;
-            n = n + 1;
-        }
+    *SDMMC_DCTRL = (9 << 4) | (1 << 1) | (1 << 3) | 1; // DBLOCKSIZE=512 | DTDIR=card->host | DMAEN | DTEN
+
+    while (sdmmc1_irq_flag == 0) {
+        interrupt_wait();
     }
-    while ((*SDMMC_STA & (STA_DATAEND | STA_DCRCFAIL | STA_DTIMEOUT)) == 0) {}
-    if ((*SDMMC_STA & (STA_DCRCFAIL | STA_DTIMEOUT)) != 0) {
+
+    // The ISR only disarmed MASK; STA still reflects whatever ended the
+    // transfer (DATAEND, or an error) -- check it here, then clear it.
+    let sta: u32 = *SDMMC_STA;
+    *SDMMC_ICR = ICR_CLEAR_ALL;
+    if ((sta & STA_DATAEND) == 0) {
         return -1;
     }
+    dma_finish_rx(buf, 512); // invalidate again so the CPU sees the fresh DMA-written bytes, not a stale cache hit
     return 0;
 }
 
@@ -378,33 +472,36 @@ fn disk_write(sector: u32, buf: *u8) -> i32 {
     if (disk_status() != 0) {
         return -1;
     }
+    dma_prepare_tx(buf, 512); // flush so DMA reads the CPU's latest writes, not a stale RAM copy
+
+    // Arm DMA + MASK + DLEN BEFORE sending the command -- ChibiOS ordering,
+    // see this file's header comment for why.
+    sd_dma_config(buf, 1); // memory -> peripheral
+
     *SDMMC_DTIMER = 0xFFFFFFFF;
     *SDMMC_DLEN = 512;
+    *SDMMC_ICR = ICR_CLEAR_ALL; // clear stale status before unmasking below
+    sdmmc1_irq_flag = 0;
+    *SDMMC_MASK = STA_DATAEND | STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR | STA_STBITERR;
 
     sd_send_cmd(24, sd_block_arg(sector), WAITRESP_SHORT); // CMD24 WRITE_BLOCK
     if (sd_wait_resp() != 0) {
+        *SDMMC_MASK = 0;
         return -1;
     }
-    *SDMMC_DCTRL = (9 << 4) | 1; // DBLOCKSIZE=512 | DTDIR=host->card | DTEN
 
-    let src: *u32 = buf as *u32;
-    let mut words: isize = 0;
-    while (words < 128) {
-        while ((*SDMMC_STA & (STA_TXFIFOHE | STA_DATAEND | STA_TXUNDERR)) == 0) {}
-        if ((*SDMMC_STA & STA_TXUNDERR) != 0) {
-            return -1;
-        }
-        let mut n: isize = 0;
-        while ((n < 8) && (words < 128)) {
-            *SDMMC_FIFO = src[words];
-            words = words + 1;
-            n = n + 1;
-        }
+    *SDMMC_DCTRL = (9 << 4) | (1 << 3) | 1; // DBLOCKSIZE=512 | DTDIR=host->card | DMAEN | DTEN
+
+    while (sdmmc1_irq_flag == 0) {
+        interrupt_wait();
     }
-    while ((*SDMMC_STA & (STA_DATAEND | STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR)) == 0) {}
-    if ((*SDMMC_STA & (STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR)) != 0) {
+
+    let sta: u32 = *SDMMC_STA;
+    *SDMMC_ICR = ICR_CLEAR_ALL;
+    if ((sta & STA_DATAEND) == 0) {
         return -1;
     }
+
     // The card enters a busy/programming state after this write; the next
     // command (e.g. the following sector's CMD24) will otherwise time out
     // waiting for a response while the card is still busy -- confirmed on

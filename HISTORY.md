@@ -4367,3 +4367,132 @@ regressions. `make hwcheck`'s new `fatfs (stm32/ram)` test passed twice
 in a row on the real STM32F746G-DISCOVERY board, both before and after
 the cache-coherency fix (confirming the fix didn't just get lucky a
 second time either).
+
+### GitHub Issue #62: `examples/sdcard` -- a Real SDMMC1 Driver, Built Independently of `fatfs`
+
+New example, `examples/sdcard/sdcard.tkb` and `examples/common_stm32/
+sdmmc.tkb`: a from-scratch SDMMC1 (native SD mode, not SPI) driver for the
+STM32F746G-DISCOVERY's onboard microSD slot, exposing the same scoped-down
+FatFs Media Access Interface naming as issue #61's Application Interface
+choice (`disk_initialize`/`disk_status`/`disk_read`/`disk_write`, no
+`pdrv`/`count`/`disk_ioctl` -- exactly one drive, one block size, nothing
+else needed yet). Deliberately built and hardware-verified as its own
+independent example, **not** wired into `examples/fatfs` yet -- the user's
+own explicit reasoning, mirroring why `fatfs` itself came before real SD
+hardware in the first place: a bug in either FAT12 logic or the SD driver
+should be attributable to one integration test, not conflated into a single
+"everything touches SD card" test. 1-bit bus width, SD (not eMMC) only,
+single 512-byte block transfers, no `--forbid-trap`/refinement types yet
+(same milestone-wide reason as `fatfs`).
+
+**Hardware test harness is fully automated, no card swap needed** (the
+user's own explicit request, trading some rigor for full automation):
+`scripts/sdcard_test.py` + `run_hw_test_ram_sdcard` in
+`scripts/run_hwtest_ram.sh` write a fixed, deterministic byte pattern
+(`(sector + i) & 0xFF`) into a handful of sectors via `disk_write`, read it
+back via `disk_read`, and check the hex dump the firmware prints over UART
+against the same pattern computed independently host-side -- no `mtools`,
+no filesystem at this layer at all, and the card's previous contents are
+destroyed every run (confirmed acceptable by the user in advance).
+
+**Three real hardware/driver bugs found via live openocd/gdb-multiarch
+debugging during the initial (polling-only) bring-up**, same technique
+`eth.tkb`'s own bring-up needed:
+- A card physically not fully seated in the slot (`CTIMEOUT` on CMD8,
+  confirmed via reading GPIOC_IDR's card-detect bit) -- a user-side fix
+  (re-seat the card), not a code bug.
+- `sd_cmd7()` (SELECT_CARD) passed the RCA value straight through as
+  CMD7's argument, but `sd_cmd3()` had already right-shifted it down out of
+  bits 31:16 when extracting it from CMD3's R6 response -- CMD7 needs the
+  RCA back in bits 31:16, same as CMD55's `rca << 16`. Fixed by adding the
+  missing `<< 16` in `sd_cmd7`.
+- The second consecutive `disk_write` (sector 1) timed out on its CMD24
+  command: the card is still in its post-write busy/programming state and
+  won't respond to a new command yet. Fixed by adding `sd_cmd13()`
+  (SEND_STATUS) and `sd_wait_not_busy()` (polls CMD13's R1 response until
+  READY_FOR_DATA/bit8), called at the end of `disk_write`.
+
+#### Follow-up: DMA + Interrupt-Driven Transfers, a Real TXUNDERR Bug, and Cross-Checking ChibiOS
+
+Once the polling-only driver was hardware-verified and committed as a
+baseline, the user asked (explicitly flagging it as possibly premature)
+to try converting `disk_read`/`disk_write`'s bulk
+512-byte transfer to DMA + interrupt-driven completion, mirroring
+`eth.tkb`'s own shape: `interrupt_wait()`/`interrupt_notify()`, an
+`SDMMC1_IRQHandler` wired into NVIC (IRQ49) and the RAM/Flash vector
+tables (`startup.S`/`startup_ram.S`, split IRQ38-60's `.rept 23` block to
+insert the new handler at IRQ49, keeping both files' vector tables
+identical per their existing convention).
+
+**First attempt (DMA2 Stream3/Channel4, then Stream6/Channel4, PFCTRL +
+FIFO-burst and later plain direct-mode transfers) reliably failed**: every
+`disk_write` got a `TXUNDERR` a handful of words short of the end of the
+512-byte block (confirmed via live register dumps: `DCOUNT` stuck at
+`0x10` with 496 of 512 bytes already transferred). Live debugging
+confirmed everything *except* the actual data flow was correct -- the NVIC
+vector table entry, ISR entry/exit (`EXC_RETURN` value unchanged
+throughout, confirmed by breakpointing both the ISR's first and last
+instruction), and MASK/STA interrupt gating were all provably right, and
+reading back DMA2's own `SxCR`/`SxPAR`/`SxM0AR` showed the stream
+configured exactly as programmed. Reverting to the polling-only driver on
+the exact same card/board immediately passed all 4 sectors again, ruling
+out a card/hardware fault. Web research (`WebSearch`/`WebFetch`) turned up
+multiple independent ST community forum reports of this *exact* symptom
+(a DMA-driven SDIO/SDMMC transfer stalling a few words before completion)
+across the F4/F7/H7 family, including one engineer who spent "many hours"
+on it and gave up, reverting to polling -- looking like a genuinely hard,
+easy-to-get-subtly-wrong timing interaction, not an obviously wrong
+register value.
+
+**Root cause found by reading ChibiOS's own STM32 SDMMCv1 driver**
+(`os/hal/ports/STM32/LLD/SDMMCv1/hal_sdc_lld.c`, fetched from
+`github.com/ChibiOS/ChibiOS` via `gh api`/`WebFetch` -- the user
+specifically trusts this RTOS's STM32 support and asked for it to be
+checked), cross-referenced against its own official STM32F746G-DISCOVERY
+demo (`demos/STM32/RT-STM32F746G-DISCOVERY/cfg/mcuconf.h`, confirming DMA2
+Stream3/Channel4 -- `STM32_DMA_STREAM_ID(2, 3)` -- matching this project's
+*first* attempt, not the second Stream6 guess). ChibiOS's
+`sdc_lld_read_aligned`/`sdc_lld_write_aligned` configure and **enable the
+DMA stream, and arm `SDMMC_MASK`/`DLEN`, BEFORE sending the read/write
+command (CMD17/CMD24) at all** -- only `DCTRL`'s `DMAEN`/`DTEN` bits are
+set after the command's response comes back. This project's driver had
+the DMA arm/enable step happening *after* the command response, giving
+the DMA controller only a handful of CPU instructions' worth of time to
+settle before `DTEN` immediately started real data flow, instead of a full
+command/response round trip. Also noticed: ChibiOS's SDMMC ISR does
+`SDMMC1->MASK = 0;` and wakes the waiting thread -- **nothing else** --
+deliberately leaving `STA`/`ICR` untouched so the woken thread can inspect
+`STA` itself to distinguish `DATAEND` from an error; this project's ISR
+had been clearing `ICR` itself instead.
+
+**Fix**: reordered `disk_read`/`disk_write` to configure+enable DMA and
+arm `MASK`/`DLEN` before `sd_send_cmd`, matching ChibiOS exactly, and
+changed `SDMMC1_IRQHandler` to only clear `MASK` and set the wake flag,
+moving the `STA` check and `ICR` clear into `disk_read`/`disk_write`
+themselves after waking. Also added `STA_STBITERR` to the armed mask,
+matching ChibiOS's own mask contents. Result: DMA+interrupt-driven
+`disk_read`/`disk_write` passed all 4 sectors, confirmed reliable across 3
+consecutive hardware runs, then across the full `make hwcheck` (43/43) and
+`make check` (71/71) with zero regressions elsewhere.
+
+**Lesson worth keeping**: when a from-scratch peripheral driver hits a
+hard-to-diagnose hardware timing bug, checking a mature, widely-deployed
+RTOS's driver for the *same* IP block (not just the reference manual) can
+surface an ordering/sequencing requirement the reference manual doesn't
+spell out explicitly -- the register-level configuration here was already
+provably correct; the bug was purely about *when*, relative to the
+command, the DMA stream got armed.
+
+**Files**: `examples/common_stm32/sdmmc.tkb` (new driver, both the
+polling-only baseline and the later DMA+interrupt rewrite),
+`examples/sdcard/sdcard.tkb` (new standalone test/demo, no filesystem),
+`scripts/sdcard_test.py` (new, byte-pattern verification), `scripts/
+run_hwtest_ram.sh` (`run_hw_test_ram_sdcard`), `examples/common_stm32/
+startup.S`/`startup_ram.S` (new `SDMMC1_IRQHandler` NVIC vector table
+entry and weak default), `Makefile` (`examples/sdcard/sdcard_stm32.o`
+rule, STM32-only, no `--forbid-trap`).
+
+**Verification**: `make check` (71/71) and the full real-hardware suite
+(`make hwcheck`, 43/43 including `sdcard (stm32/ram)`) both pass with zero
+regressions; the DMA+interrupt `disk_read`/`disk_write` path was confirmed
+reliable across 3 independent hardware runs before being treated as done.
