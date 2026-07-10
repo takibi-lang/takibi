@@ -4496,3 +4496,116 @@ rule, STM32-only, no `--forbid-trap`).
 (`make hwcheck`, 43/43 including `sdcard (stm32/ram)`) both pass with zero
 regressions; the DMA+interrupt `disk_read`/`disk_write` path was confirmed
 reliable across 3 independent hardware runs before being treated as done.
+
+### GitHub Issue #98: `examples/fatfs_sdcard` -- FAT12 on the Real SD Card, and a Second, Unresolved `disk_read` DMA Bug
+
+With `fatfs` (issue #61, in-memory block device) and `sdcard` (issue #62, real
+SDMMC1 driver) each independently hardware-verified, this issue wired them
+together: mount a real FAT12 filesystem on the real SD card through `fatfs`'s
+own API, the same thing a normal PC or RTOS does. Three hard constraints from
+the user drove the design: `examples/fatfs` and `examples/sdcard` both had to
+remain **exactly as they were**, unmodified and independently testable, and a
+**new** example would provide the combination.
+
+**Design**: `examples/fatfs/fatfs.tkb`'s FAT12 core -- everything that only
+ever touches storage through `mem_block_read(sector, buf)`/
+`mem_block_write(sector, buf)`, never the `disk` array directly -- was moved
+verbatim into a new shared `examples/common/fat12.tkb` (geometry constants,
+`Fat12BootSector`/`DirEntry`, `fat_open`/`fat_read`/`fat_write`/`fat_close`/
+`fat_format`/`fat_mount`, plus `cstr_len`/`create_demo_file`/
+`uart_print_bytes`, also backend-agnostic). `fatfs.tkb` itself shrank to just
+its in-memory `mem_block_read`/`mem_block_write` and its QEMU/host-interop
+test harness (`use "examples/common/fat12.tkb";` in place of the moved code)
+-- confirmed byte-identical via its existing QEMU `.expected` diff and
+`run_hw_test_ram_fatfs`, both unchanged. The new `examples/fatfs_sdcard/
+fatfs_sdcard.tkb` (STM32-only, no QEMU build, same reasoning as `sdcard`)
+supplies `mem_block_read`/`mem_block_write` as two-line adapters over
+`sdmmc.tkb`'s real `disk_read`/`disk_write` -- exactly the seam issue #61's
+own header comment had anticipated. `disk_read`/`disk_write` return `i32`
+(can fail) but `mem_block_read`/`mem_block_write` are `void`; the adapter
+silently discards a real I/O failure, matching `fatfs.tkb`'s own existing
+"assume success" scope -- a deliberate, named limitation, not an oversight,
+left for whenever a real caller needs the error to actually propagate.
+`app_main()` does `disk_initialize`/`disk_status`, `fat_format()`, creates one
+file via `fat_open`(create)+`fat_write`+`fat_close`, then reads it back via
+`fat_open`(read)+`fat_read` in the same process -- deliberately *not*
+`fatfs.tkb`'s own mtools cross-check or semihosting dump/seed, since neither
+reaches real SD card content and `fatfs.tkb` already covers that check
+thoroughly.
+
+**A second, more elusive real-hardware bug, this time in `disk_read`
+specifically, and never fully root-caused.** Bringing the new example up
+immediately reproduced a crash: `disk_initialize`/`disk_status`/`format`/
+`create HELLO.TXT` all succeeded, then the very first `disk_read` (via
+`fat_open(FA_READ)`+`fat_read`) hung, and a live register dump showed a
+genuine `HardFault` (`INVSTATE`/`IACCVIOL` depending on the exact run) with
+`DMA2_S3NDTR` (the transfer's own remaining-word counter) wrapped hundreds of
+counts past its expected 128-word value -- the DMA had kept writing past the
+caller's 512-byte buffer into whatever memory followed it (the stack,
+corrupting a saved return address). Bisected with a series of throwaway
+scratch `.tkb` programs (no existing example touched) down to an exact,
+reproducible threshold: 128 prior `disk_write` calls then a `disk_read`
+always worked; 129 always corrupted memory and crashed, regardless of which
+sectors were used, whether any were repeated, an inserted multi-second delay
+before the read, or whether the 130th operation was a write instead (writes
+kept succeeding indefinitely). Three fixes cross-checked against ChibiOS's
+own proven `hal_sdc_lld.c` were tried and did **not** resolve it: explicitly
+clearing `SDMMC_DCTRL` to 0 after every transaction (matching ChibiOS's
+unconditional `sdc_lld_wait_transaction_end`/`sdc_lld_error_cleanup`),
+draining `SDMMC_STA`'s `RXDAVL` bit before disabling the data path (matching
+ChibiOS's own read-completion handling, present specifically because
+`DATAEND` can fire before the FIFO is fully drained), and, as a more
+invasive fourth experiment, disabling `PFCTRL` entirely so DMA itself (not
+SDMMC1) decides when to stop via a fixed `NDTR` count -- this one did stop
+the crash, but traded it for a different failure (some transfers cut off
+early, `DATAEND` never arriving). None of the four pointed at a clear root
+cause.
+
+**Resolution: `disk_read` reverted to plain STA/FIFO polling (its original,
+already-hardware-verified pre-DMA implementation from earlier in issue #62),
+kept deliberately asymmetric with `disk_write`, which stays DMA+interrupt
+driven and continues to pass every existing test reliably** (confirmed via
+`examples/sdcard`'s own existing automated hardware test, unaffected by any
+of this). This is recorded as a genuinely **unresolved, open issue** in
+`sdmmc.tkb`'s own header comment, not quietly worked around: it is not known
+whether the root cause is a real bug in this driver's DMA2/SDMMC1 pairing, an
+undocumented STM32F7 silicon quirk, something specific to the individual
+STM32F746G-DISCOVERY board this was debugged on, or something specific to the
+individual microSD card used for testing -- none of these have been ruled
+out. Worth noting as its own small data point: `disk_write`'s DMA+interrupt
+path, under the exact same configuration/ordering, has never shown this
+failure across (at time of writing) hundreds of consecutive calls in this
+session's own testing -- only `disk_read`, and only after a specific prior
+write count. Revisit only with a genuinely new, concrete lead (a documented
+silicon erratum, a logic-analyzer trace, or a second STM32 board/SD card to
+compare against), not by re-trying more register combinations blind.
+
+**Files**: `examples/common/fat12.tkb` (new, shared FAT12 core),
+`examples/fatfs/fatfs.tkb` (shrunk to its in-memory backend + test harness,
+confirmed byte-identical), `examples/fatfs_sdcard/fatfs_sdcard.tkb` (new),
+`examples/fatfs_sdcard/fatfs_sdcard.expected` (new, captured from a real
+verified hardware run), `examples/common_stm32/sdmmc.tkb` (`disk_read`
+reverted to polling, `disk_write` unchanged; new header comment documenting
+the open issue), `Makefile` (`COMMON_FAT12` variable, `fatfs_sdcard` added to
+`STM32_RAM_EXAMPLES`, new `examples/fatfs_sdcard/fatfs_sdcard_stm32.o` rule,
+no `--forbid-trap`), `scripts/run_hwtest_ram.sh` (new `fatfs_sdcard
+(stm32/ram)` entry, using the plain `run_hw_test_ram` expected-output diff
+with a longer 15s/40-poll capture window since `fat_format()`'s ~128 real
+`disk_write` calls, each with its own CMD13 busy-wait, take noticeably longer
+than the default window -- same reasoning as `rtc`/`timer`'s own override).
+
+**Scope note**: per explicit user direction, `--forbid-trap`/refinement
+types were deliberately **not** enabled in this pass, even though this
+combination is what CLAUDE.md's existing "Development Process" text
+describes as the milestone-completion trigger for doing so across
+`fatfs.tkb`/`fat12.tkb`/`sdmmc.tkb`/`fatfs_sdcard.tkb` together -- treated
+as a separate, later checkpoint instead of bundled into this already-large
+change.
+
+**Verification**: `make check` (71/71, including the QEMU `fatfs` test
+confirming the `fat12.tkb` extraction changed nothing observable) and the
+full real-hardware suite (`make hwcheck`, 44/44 including the new
+`fatfs_sdcard (stm32/ram)` and the still-passing `sdcard (stm32/ram)`) both
+pass with zero regressions. `fatfs_sdcard` itself confirmed reliable across
+3 independent real-hardware runs (format + create + read-back, all matching)
+before being wired into the automated suite.

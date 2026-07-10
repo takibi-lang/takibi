@@ -24,8 +24,8 @@
 // 1-bit bus width (D0 only) -- 4-bit bus width is a straightforward follow-up
 // once this works. Single 512-byte block transfer only.
 //
-// disk_read/disk_write's bulk 512-byte data phase is DMA + interrupt driven
-// (DMA2 Stream3/Channel4), mirroring examples/common_stm32/eth.tkb's own
+// disk_write's bulk 512-byte data phase is DMA + interrupt driven (DMA2
+// Stream3/Channel4), mirroring examples/common_stm32/eth.tkb's own
 // DMA-transfer-plus-interrupt-completion shape: the CPU sleeps via
 // interrupt_wait() while DMA moves data between SDMMC1's FIFO and the
 // caller's buffer, woken by SDMMC1_IRQHandler (NVIC IRQ49) on DATAEND or a
@@ -42,11 +42,51 @@
 // data flow, rather than enabling DMA immediately before DTEN. An earlier
 // attempt at this feature used the opposite order (arm DMA only after the
 // command's response) and reliably got TXUNDERR a few words before the end
-// of every write; see CLAUDE.md's "Known Limitations" section for that
-// investigation. ChibiOS's ISR also does NOT clear SDMMC_ICR itself
-// (only MASK=0, waking the waiter) -- Thread-mode reads STA once woken to
-// decide success/failure, then clears ICR itself; this driver follows the
-// same split.
+// of every write; see HISTORY.md's issue #62 entry for that investigation.
+// ChibiOS's ISR also does NOT clear SDMMC_ICR itself (only MASK=0, waking
+// the waiter) -- Thread-mode reads STA once woken to decide success/
+// failure, then clears ICR itself; this driver follows the same split.
+//
+// **Known open issue: disk_read is deliberately polling-only, NOT DMA/
+// interrupt-driven like disk_write above -- this asymmetry is intentional,
+// not an oversight.** A DMA+interrupt disk_read was built using the exact
+// same configuration/ordering as disk_write (which works reliably), and
+// reliably corrupted memory instead: DMA2_S3NDTR (the transfer's own
+// remaining-word counter) ran away past its expected 128-word count
+// specifically once a read was issued after roughly 129 or more prior
+// disk_write calls (bisected precisely: 128 prior writes then a read
+// always worked; 129 always corrupted memory and crashed) -- SDMMC1
+// apparently stopped correctly telling DMA2 when to end the transfer,
+// so DMA (trusting SDMMC1 as flow controller, per PFCTRL) kept writing
+// past the caller's 512-byte buffer into whatever memory followed it
+// (typically the stack, corrupting a saved return address and crashing
+// with a HardFault). Three separate fixes cross-checked against ChibiOS's
+// own driver were tried and did NOT resolve it: arming DMA/MASK before
+// the command (already the baseline here), explicitly clearing SDMMC_DCTRL
+// to 0 after every transaction (matching ChibiOS's unconditional
+// sdc_lld_wait_transaction_end/sdc_lld_error_cleanup), and draining
+// SDMMC_STA's RXDAVL bit before disabling the data path (matching
+// ChibiOS's own read-completion handling, which explicitly waits for this
+// because DATAEND can fire before the FIFO is fully drained). As a fourth,
+// more invasive experiment, disabling PFCTRL entirely (making DMA itself,
+// not SDMMC1, the authority on when to stop, via a fixed NDTR count) did
+// stop the crash, but traded it for a different failure: some transfers
+// were then cut off early (DATAEND never arrived, treated as a clean
+// failure, not a crash, but still not a working read). The root cause was
+// not identified. It is not yet known whether this is a genuine SDMMC1/
+// DMA2 interaction bug in this driver, an undocumented STM32F7 silicon
+// quirk, an issue specific to the individual STM32F746G-DISCOVERY board
+// this was debugged on, or an issue specific to the individual microSD
+// card used for testing -- none of these have been ruled out. disk_read
+// was reverted to plain STA/FIFO polling (this driver's original,
+// hardware-verified approach from before DMA was added, unaffected by
+// whatever this is) so real work (issue #98, wiring this driver under
+// examples/fatfs's FAT12 logic) would not stay blocked on it. See
+// HISTORY.md's issue #62 DMA follow-up entry for the full investigation
+// log. Revisit only with a genuinely new, concrete lead (a documented
+// silicon erratum, a logic analyzer trace, or a second STM32 board/SD
+// card to test against for comparison) -- not by re-trying more register
+// combinations blind.
 //
 // Register offsets and bit positions below were cross-checked against ST's
 // official CMSIS device header (cmsis_device_f7/Include/stm32f745xx.h),
@@ -113,6 +153,7 @@ let SDMMC_STA:     *io u32 = 0x40012C34;
 let SDMMC_ICR:     *io u32 = 0x40012C38;
 let SDMMC_MASK:    *io u32 = 0x40012C3C;
 let SDMMC_FIFO_ADDR: u32 = 0x40012C80; // plain u32, not *io -- only ever used as DMA2's peripheral address
+let SDMMC_FIFO:    *io u32 = 0x40012C80; // disk_read's own polling fallback reads this directly -- see its header comment
 
 // -- DMA2 Stream3, Channel4 (SDMMC1's DMA request mapping on STM32F7,
 // confirmed via ChibiOS's STM32F746G-DISCOVERY demo mcuconf.h:
@@ -146,6 +187,7 @@ let STA_CMDREND:  u32 = 0x40;
 let STA_CMDSENT:  u32 = 0x80;
 let STA_DATAEND:  u32 = 0x100;
 let STA_STBITERR: u32 = 0x200;
+let STA_RXFIFOHF: u32 = 0x8000; // disk_read's polling fallback only
 
 // Broad "clear every static flag this driver ever sets" mask for ICR --
 // bits 0..10 (CCRCFAIL..DBCKEND).
@@ -429,42 +471,54 @@ fn sd_block_arg(sector: u32) -> u32 {
     return sector * 512;
 }
 
+// disk_read is DELIBERATELY POLLING-ONLY, not DMA/interrupt-driven like
+// disk_write below -- this asymmetry is a known, open, unresolved issue,
+// not an oversight. See the header comment's "Known open issue" paragraph
+// for the full story: a DMA+interrupt version of disk_read was built,
+// matched ChibiOS's proven configuration and ordering exactly, and still
+// reliably corrupted memory (DMA2_S3NDTR ran away past its expected count)
+// specifically when a read followed roughly 129+ prior disk_write calls.
+// Three ChibiOS-informed fixes (arm-before-command ordering, explicit
+// DCTRL=0 after every transaction, draining RXDAVL before disabling the
+// data path) did not resolve it, and disabling PFCTRL (DMA, not SDMMC,
+// decides when to stop) traded the crash for a different failure (some
+// transfers cut off early). Root cause not identified; falling back to
+// plain STA/FIFO polling here (this driver's original, hardware-verified
+// approach, unaffected by whatever this is) so real work (issue #98) is
+// not blocked on it. Revisit with a logic analyzer or an actual STM32
+// hardware erratum reference before trying to re-enable DMA here again.
 fn disk_read(sector: u32, buf: *u8) -> i32 {
     if (disk_status() != 0) {
         return -1;
     }
-    dma_prepare_rx(buf, 512); // invalidate up front so the DMA-written bytes aren't shadowed by a stale dirty line
-
-    // Arm DMA + MASK + DLEN BEFORE sending the command -- ChibiOS ordering,
-    // see this file's header comment for why.
-    sd_dma_config(buf, 0); // peripheral -> memory
-
     *SDMMC_DTIMER = 0xFFFFFFFF;
     *SDMMC_DLEN = 512;
-    *SDMMC_ICR = ICR_CLEAR_ALL; // clear stale status before unmasking below
-    sdmmc1_irq_flag = 0;
-    *SDMMC_MASK = STA_DATAEND | STA_DCRCFAIL | STA_DTIMEOUT | STA_RXOVERR | STA_STBITERR;
+    *SDMMC_DCTRL = (9 << 4) | (1 << 1) | 1; // DBLOCKSIZE=512 | DTDIR=card->host | DTEN
 
     sd_send_cmd(17, sd_block_arg(sector), WAITRESP_SHORT); // CMD17 READ_SINGLE_BLOCK
     if (sd_wait_resp() != 0) {
-        *SDMMC_MASK = 0;
         return -1;
     }
 
-    *SDMMC_DCTRL = (9 << 4) | (1 << 1) | (1 << 3) | 1; // DBLOCKSIZE=512 | DTDIR=card->host | DMAEN | DTEN
-
-    while (sdmmc1_irq_flag == 0) {
-        interrupt_wait();
+    let dst: *u32 = buf as *u32;
+    let mut words: isize = 0;
+    while (words < 128) { // 128 * 4 bytes = 512
+        while ((*SDMMC_STA & (STA_RXFIFOHF | STA_DATAEND | STA_DCRCFAIL | STA_DTIMEOUT | STA_RXOVERR)) == 0) {}
+        if ((*SDMMC_STA & (STA_DCRCFAIL | STA_DTIMEOUT | STA_RXOVERR)) != 0) {
+            return -1;
+        }
+        let mut n: isize = 0;
+        while ((n < 8) && (words < 128)) {
+            dst[words] = *SDMMC_FIFO;
+            words = words + 1;
+            n = n + 1;
+        }
     }
-
-    // The ISR only disarmed MASK; STA still reflects whatever ended the
-    // transfer (DATAEND, or an error) -- check it here, then clear it.
-    let sta: u32 = *SDMMC_STA;
-    *SDMMC_ICR = ICR_CLEAR_ALL;
-    if ((sta & STA_DATAEND) == 0) {
+    while ((*SDMMC_STA & (STA_DATAEND | STA_DCRCFAIL | STA_DTIMEOUT)) == 0) {}
+    if ((*SDMMC_STA & (STA_DCRCFAIL | STA_DTIMEOUT)) != 0) {
         return -1;
     }
-    dma_finish_rx(buf, 512); // invalidate again so the CPU sees the fresh DMA-written bytes, not a stale cache hit
+    *SDMMC_DCTRL = 0; // disable the data path, matching disk_write's own post-transaction discipline
     return 0;
 }
 
@@ -497,6 +551,11 @@ fn disk_write(sector: u32, buf: *u8) -> i32 {
     }
 
     let sta: u32 = *SDMMC_STA;
+    // Explicitly disable the data path after every transaction, matching
+    // ChibiOS's own sdc_lld_wait_transaction_end/sdc_lld_error_cleanup
+    // (both unconditionally clear DCTRL) -- see disk_read's own comment on
+    // its RXDAVL wait for the read-side bug this class of fix addresses.
+    *SDMMC_DCTRL = 0;
     *SDMMC_ICR = ICR_CLEAR_ALL;
     if ((sta & STA_DATAEND) == 0) {
         return -1;

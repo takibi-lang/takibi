@@ -77,14 +77,23 @@ options (array-bounds trap freedom, checked-cast freedom, safe-pointer
 enforcement outside `unsafe`, ...) with one umbrella flag enabling them
 all. Today's single flag is the first member. **The example suite --
 including the full TCP/IP stack and HTTP server -- compiles trap-free
-under it, with one deliberate, temporary exception: `examples/fatfs` is
-mid-milestone (real SD card integration still pending, see CLAUDE.md's
-"Development Process" section) and is intentionally not yet built with
-`--forbid-trap`.** `examples/sdcard`'s SDMMC1 driver (issue #62) is DMA +
-interrupt driven for its bulk 512-byte transfers, matching `eth.tkb`'s own
-DMA+interrupt shape -- see that file's header comment for the design and
-HISTORY.md for the bring-up story (a real TXUNDERR bug, root-caused by
-cross-checking ChibiOS's proven STM32 SDMMCv1 driver). A few tools do almost all of the work: refined integer ranges
+under it, with one deliberate, temporary exception: `examples/fatfs`,
+`examples/common/fat12.tkb`, `examples/common_stm32/sdmmc.tkb`, and
+`examples/fatfs_sdcard` (issues #61/#62/#98 -- FAT12 on a real SD card,
+now working end to end) are one milestone that is intentionally not yet
+built with `--forbid-trap`; see CLAUDE.md's "Development Process"
+section.** `examples/common_stm32/sdmmc.tkb`'s SDMMC1 driver
+(issue #62) is deliberately asymmetric: `disk_write` is DMA + interrupt
+driven, matching `eth.tkb`'s own DMA+interrupt shape, but `disk_read` is
+plain polling -- a DMA `disk_read` was built and tested but reliably
+corrupted memory once issued after ~129 prior writes, an issue that
+survived three fixes cross-checked against ChibiOS's proven STM32
+SDMMCv1 driver and remains genuinely unresolved (root cause not
+identified; possibly this driver, possibly an STM32F7 quirk, possibly
+specific to the individual board or SD card used). See that file's
+header comment and HISTORY.md for both bring-up stories in full (a
+separate, resolved TXUNDERR bug in `disk_write`, root-caused by
+cross-checking the same ChibiOS driver). A few tools do almost all of the work: refined integer ranges
 that propagate through ordinary arithmetic and bitwise masking (so a
 value like a wire-derived header length carries a real bound with no
 extra code), `min`/`max` builtins that provably clamp a value against a

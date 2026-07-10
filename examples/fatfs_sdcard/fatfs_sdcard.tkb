@@ -1,0 +1,94 @@
+// GitHub issue #98: wires examples/common/fat12.tkb's FAT12 filesystem logic
+// (issue #61) directly onto examples/common_stm32/sdmmc.tkb's real SDMMC1
+// driver (issue #62) -- a real "format a card, create a file, read it back"
+// test, the same thing a normal PC or RTOS does when it mounts a FAT
+// filesystem on removable storage.
+//
+// Deliberately does NOT touch examples/fatfs (still the in-memory-only
+// filesystem test, unchanged) or examples/sdcard (still the raw-block-only
+// SD card test, unchanged) -- see fat12.tkb's own header comment for why
+// splitting them stayed possible: fat12.tkb's FAT12 logic only ever reaches
+// storage through mem_block_read(sector: u32, buf: *u8) / mem_block_write
+// (sector: u32, buf: *u8), and the two functions below are a THIN adapter
+// over sdmmc.tkb's disk_read/disk_write, nothing more.
+//
+// mem_block_read/mem_block_write are void (can't report failure), but
+// disk_read/disk_write return i32 and can genuinely fail on real hardware
+// (a bad card, a bus glitch, ...) -- this adapter silently ignores that
+// return value, exactly matching examples/fatfs.tkb's own existing
+// "assume success" scope (its in-memory mem_block_read/write can't fail at
+// all, so this was never a question there). This is a deliberate, named
+// scope limitation for this first working version, not an oversight:
+// threading a real error return up through fat_read/fat_write/fat_open/
+// fat_format's signatures is a genuine, separate design change with no
+// current caller needing it (YAGNI) -- revisit if a real I/O failure ever
+// needs to surface as something other than a silently wrong read/write.
+//
+// STM32-only: there is no virtual SD controller in this project's QEMU
+// setup (no QEMU build for this example), matching examples/sdcard's own
+// no-QEMU status.
+//
+// Deliberately written without --forbid-trap/refinement types, matching
+// this project's process for new .tkb work (see CLAUDE.md's "Development
+// Process" section) -- this is still part of the fatfs+SD-card milestone
+// that fat12.tkb/sdmmc.tkb are also still part of; all four get
+// --forbid-trap turned on together in one later pass, not piecemeal now.
+
+use "examples/common/fat12.tkb";
+use "examples/common_stm32/sdmmc.tkb";
+
+fn mem_block_read(sector: u32, buf: *u8) {
+    disk_read(sector, buf);
+}
+
+fn mem_block_write(sector: u32, buf: *u8) {
+    disk_write(sector, buf);
+}
+
+fn app_main() {
+    let mut init_ok: bool = false;
+    if (disk_initialize() == 0) {
+        uart_puts("disk_initialize: OK\r\n");
+        init_ok = true;
+    } else {
+        uart_puts("disk_initialize: FAIL\r\n");
+    }
+
+    if (init_ok) {
+        if (disk_status() == 0) {
+            uart_puts("disk_status: OK\r\n");
+        } else {
+            uart_puts("disk_status: FAIL\r\n");
+        }
+
+        fat_format();
+        uart_puts("format: OK\r\n");
+
+        let hello_name: *u8 = "HELLO   TXT";
+        let hello_content: *u8 = "Hello from a real SD card!\r\n";
+        if (create_demo_file(hello_name, hello_content) == 0) {
+            uart_puts("create HELLO.TXT: OK\r\n");
+        } else {
+            uart_puts("create HELLO.TXT: FAIL\r\n");
+        }
+
+        // Read HELLO.TXT back -- a same-process round trip through the FAT12
+        // API, but this time actually stored on and re-read from the real
+        // SD card, not an in-memory array (examples/fatfs.tkb already covers
+        // the mtools cross-check and pure in-memory round trip; this is the
+        // one new thing this example proves).
+        let mut read_fp: FatFile;
+        if (fat_open(&read_fp, hello_name, FA_READ) == 0) {
+            let mut read_buf: [u8; 64];
+            let mut read_br: u32 = 0;
+            fat_read(&read_fp, read_buf, 64, &read_br);
+            fat_close(&read_fp);
+            uart_puts("read-back HELLO.TXT: ");
+            uart_print_bytes(read_buf, read_br);
+        } else {
+            uart_puts("read-back HELLO.TXT: FAIL\r\n");
+        }
+    }
+
+    uart_puts("done\r\n");
+}

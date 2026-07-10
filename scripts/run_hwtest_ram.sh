@@ -568,6 +568,16 @@ run_hw_test_ram_sdcard "sdcard (stm32/ram)" examples/sdcard/kernel_stm32_ram.elf
 run_hw_test_ram_fatfs "fatfs (stm32/ram)" examples/fatfs/kernel_stm32_ram.elf \
     examples/fatfs/fatfs_stm32.expected fatfs_mtools_test.py
 
+# fatfs_sdcard: GitHub issue #98 -- fat12.tkb's FAT12 logic wired onto the
+# real SD card via sdmmc.tkb (issue #62). Fully deterministic output (no
+# timestamps, no varying data), so a plain expected-output diff suffices --
+# no bespoke Python checker needed like sdcard's own hex-dump-based test.
+# fat_format() alone issues ~128 real disk_write calls (each with its own
+# CMD13 busy-wait poll), taking noticeably longer than the default 2s/4-poll
+# capture window -- same reasoning as rtc/timer's own longer override below.
+run_hw_test_ram "fatfs_sdcard (stm32/ram)" examples/fatfs_sdcard/kernel_stm32_ram.elf \
+    examples/fatfs_sdcard/fatfs_sdcard.expected 15 40
+
 echo ""
 if [ "$FAIL" -eq 0 ]; then
     printf "${GRN}All $PASS hardware test(s) passed.${RST}\n"
