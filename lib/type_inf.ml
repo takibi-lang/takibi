@@ -1285,27 +1285,47 @@ let narrow_from_cond tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
   let bounds = collect_bounds tyenv cond in
   let env =
     StringMap.fold (fun name (lo_opt, hi_opt) env ->
-      match lo_opt, hi_opt with
-      | Some lo, Some hi when not (List.mem name killed) ->
-          (match StringMap.find_opt name env with
-           (* Already refined (e.g. an immutable let whose initializer was
-              itself refined, kept via the "proofs survive weaker
-              annotations" rule -- see check_bound_shadowing/B-plan) --
-              INTERSECT rather than no-op. Without this, a variable that
-              arrives at the if already-refined (very common once P4a's
-              interval propagation is in play) would silently keep its
-              WIDER pre-existing range instead of the tighter one the
-              condition just proved, e.g. `icmp_len: {0..<1481}` at entry
-              plus `if (icmp_len >= 8 && icmp_len <= 1480)` must become
-              {8..<1481}, not stay {0..<1481}. *)
-           | Some (TRefinedInt (elo, ehi, base), is_mut) ->
-               StringMap.add name (TRefinedInt (max lo elo, min hi ehi, base), is_mut) env
-           (* Any plain primitive integer type can be narrowed, not just
-              TI32 -- a u8/u16/u32/u64/usize/i8/i16/i64-typed variable
-              narrowed by an if-condition keeps ITS OWN type as the
-              refined range's base (see types.ml's TRefinedInt comment). *)
-           | Some ((TI8|TI16|TI32|TI64|TU8|TU16|TU32|TU64|TIsize|TUsize) as base, is_mut) ->
-               StringMap.add name (TRefinedInt (lo, hi, base), is_mut) env
+      if List.mem name killed then env
+      else match StringMap.find_opt name env with
+      (* Already refined (e.g. an immutable let whose initializer was
+         itself refined, kept via the "proofs survive weaker
+         annotations" rule -- see check_bound_shadowing/B-plan) --
+         INTERSECT rather than no-op. Without this, a variable that
+         arrives at the if already-refined (very common once P4a's
+         interval propagation is in play) would silently keep its
+         WIDER pre-existing range instead of the tighter one the
+         condition just proved, e.g. `icmp_len: {0..<1481}` at entry
+         plus `if (icmp_len >= 8 && icmp_len <= 1480)` must become
+         {8..<1481}, not stay {0..<1481}.
+         GitHub issue #99: a single-sided `hi`-only condition (lo_opt =
+         None) still narrows here, falling back to the variable's OWN
+         already-proven `elo` as the effective lower bound -- sound
+         unconditionally, since `elo` was already established as a valid
+         lower bound before this condition was even reached. *)
+      | Some (TRefinedInt (elo, ehi, base), is_mut) ->
+          (match lo_opt, hi_opt with
+           | Some lo, Some hi -> StringMap.add name (TRefinedInt (max lo elo, min hi ehi, base), is_mut) env
+           | None, Some hi    -> StringMap.add name (TRefinedInt (elo, min hi ehi, base), is_mut) env
+           | Some lo, None    -> StringMap.add name (TRefinedInt (max lo elo, ehi, base), is_mut) env
+           | None, None       -> env)
+      (* Any plain primitive integer type can be narrowed, not just
+         TI32 -- a u8/u16/u32/u64/usize/i8/i16/i64-typed variable
+         narrowed by an if-condition keeps ITS OWN type as the
+         refined range's base (see types.ml's TRefinedInt comment).
+         GitHub issue #99: for an UNSIGNED base with no lo_opt from the
+         condition (e.g. `if (off < 511)`, not `if (off >= 0 && off <
+         511)`), 0 is already a sound lower bound regardless of the
+         condition -- every unsigned value is trivially >= 0 -- so the
+         redundant explicit `>= 0` check is no longer required to trigger
+         narrowing. Signed bases still require an explicit lo (no implicit
+         floor exists for them). *)
+      | Some ((TI8|TI16|TI32|TI64|TU8|TU16|TU32|TU64|TIsize|TUsize) as base, is_mut) ->
+          let lo_opt = match lo_opt with
+            | Some _ -> lo_opt
+            | None -> if is_unsigned_ty base then Some 0 else None
+          in
+          (match lo_opt, hi_opt with
+           | Some lo, Some hi -> StringMap.add name (TRefinedInt (lo, hi, base), is_mut) env
            | _ -> env)
       | _ -> env
     ) bounds tyenv

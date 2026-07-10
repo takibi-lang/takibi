@@ -566,6 +566,20 @@ base.
   redeclaration or a `for`/`for-in` counter of the same name) -- the
   kill check is flow-insensitive within the branch (a write anywhere
   kills the whole branch body, not just after the write).
+  A **hi-only condition** (`if (v < hi)`, no explicit lower bound) also
+  narrows when a sound lower bound is available without the condition:
+  `v` of an unsigned base (`u8`/`u16`/`u32`/`u64`/`usize`) implicitly
+  gets `lo = 0` (GitHub issue #99 -- an unsigned value is trivially
+  non-negative, so a redundant explicit `v >= 0` conjunct is no longer
+  required), and a `v` that already carries a proven range from outside
+  the branch keeps its own existing lower bound as the intersection
+  floor. A signed base (`i8`/`i16`/`i32`/`i64`/`isize`) with no incoming
+  range and no explicit lower bound in the condition is NOT narrowed by
+  a hi-only condition -- it could still be negative, so both sides must
+  be written out by hand (`examples/refined/refined.tkb` and
+  `examples/narrow/narrow.tkb` demonstrate this signed case
+  deliberately, including a negative input that the two-sided check
+  correctly rejects).
 - **Same-base subslice rule**: `s[v + j ..< v + k]` for the *same*
   variable `v` and constant (or non-negative-lower-bounded) offsets `j`,
   `k` has a provable length `k - j` and a provable `lo <= hi`,

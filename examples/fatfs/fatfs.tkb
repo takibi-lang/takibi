@@ -53,10 +53,12 @@ let mut disk: [u8; SECTOR_SIZE * TOTAL_SECTORS];
 // sector's real invariant (a valid sector number on this small, fixed-size
 // disk) is bookkeeping fat12.tkb's own callers establish, not something
 // this function's plain `u32` parameter type can see -- if-narrow
-// explicitly (two-sided form, literal TOTAL_SECTORS value) so `off`'s
-// range closes the trap on the indexed access below.
+// explicitly (literal TOTAL_SECTORS value) so `off`'s range closes the
+// trap on the indexed access below. sector is u32, so a hi-only condition
+// is enough to narrow (GitHub issue #99 -- an unsigned value is trivially
+// >= 0).
 fn mem_block_read(sector: u32, buf: *u8) {
-    if ((sector >= 0) && (sector < 128)) {
+    if (sector < 128) {
         let off: usize = (sector as usize) * SECTOR_SIZE;
         for i in 0..<SECTOR_SIZE {
             buf[i as isize] = disk[off + i];
@@ -65,7 +67,7 @@ fn mem_block_read(sector: u32, buf: *u8) {
 }
 
 fn mem_block_write(sector: u32, buf: *u8) {
-    if ((sector >= 0) && (sector < 128)) {
+    if (sector < 128) {
         let off: usize = (sector as usize) * SECTOR_SIZE;
         for i in 0..<SECTOR_SIZE {
             disk[off + i] = buf[i as isize];

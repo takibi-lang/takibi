@@ -4633,7 +4633,11 @@ form) rather than widening any parameter or return type -- discovered
 along the way that this two-sided form is required for the narrowing to
 actually take hold: a single-sided `if (off < 511)` did **not** close the
 trap (even though `off: usize` is unsigned and thus trivially `>= 0`);
-writing it as `if (off >= 0 && off < 511)` did. Also discovered that
+writing it as `if (off >= 0 && off < 511)` did. **Filed as GitHub issue
+#99 and fixed in a later session** (see this file's own issue #99 entry
+below) -- these sites, and every other unsigned-base site this pattern
+touched, were simplified back to the hi-only form once the fix landed.
+Also discovered that
 if-narrowing tracks a plain variable, not a repeated struct-field-access
 expression (`fp.dir_index` had to be bound to a local first, then that
 local narrowed, for `fat_close`'s access to close). And confirmed again
@@ -4955,3 +4959,77 @@ specific remaining call site.
 `examples/align/align.tkb` + `align.expected` (new local-align check),
 `SPEC.md` (removed the "local-variable alignment is not supported" note,
 documented the new syntax and its `mut`-only restriction).
+
+## GitHub Issue #99: Hi-Only If-Narrowing for Unsigned Bases
+
+Closes the gap found and documented while enabling `--forbid-trap` across
+the fatfs+SD-card milestone (see this file's earlier entry): `if (v < hi)`
+alone did not narrow `v`, even when `v`'s own base type (`u8`/`u16`/`u32`/
+`u64`/`usize`) already makes `v >= 0` true unconditionally, forcing every
+call site to spell out the redundant `v >= 0 &&` conjunct by hand.
+
+**Fix, in both `type_inf.ml` (proof) and `llvm_gen.ml` (codegen -- these
+two must always agree per this project's "sync rule" convention)**: the
+narrowing fold now looks up the variable's *current* type first, then
+computes an effective lower bound before matching on `(lo, hi)`:
+- If the condition itself supplied a `lo` (the two-sided or
+  `lo`-only form), it wins, unchanged from before.
+- Otherwise, if the variable's base is one of the five unsigned primitive
+  types, the lower bound implicitly defaults to `0`.
+- Otherwise (a signed base, or an unsigned base that's already refined
+  and thus already carries its own proven `elo`), the variable's own
+  currently-proven lower bound (if any) is reused as the floor -- sound
+  unconditionally, since that bound was already established as valid
+  before the new condition was even reached. A signed base with no
+  incoming range and no explicit lower bound in the condition still gets
+  no lower bound at all and is correctly NOT narrowed by a hi-only
+  condition (it could still be negative).
+
+This same restructuring (look up current type, compute effective lo, THEN
+match) also fixes a smaller pre-existing gap for free: previously, an
+already-refined variable narrowed further by a hi-only or lo-only
+condition wasn't narrowed at all (the code required both `lo_opt` and
+`hi_opt` present from the condition itself); it now correctly intersects
+using whichever bound the condition supplies plus the variable's existing
+proven range for the other side, mirrored identically across
+`type_inf.ml`'s `narrow_from_cond`, `llvm_gen.ml`'s `apply_narrowing`
+(immutable locals), and `apply_narrowing_mut` (mutable locals, via
+`narrowing_ctx`).
+
+**Verified with two throwaway compile tests** before touching any real
+example: an unsigned `usize` parameter narrowed by a bare `if (off <
+511) { buf[off] ... }` compiled clean under `--forbid-trap` (both an
+immutable and a `let mut` variant); a signed `i32` parameter with the
+identical hi-only condition still correctly produced a `--forbid-trap`
+error (`array bounds check remains`), confirming the fix is properly
+scoped to unsigned bases and did not weaken the existing signed-type
+behavior. `examples/refined/refined.tkb` and `examples/narrow/narrow.tkb`
+were deliberately left untouched -- both use a genuinely signed `i32` for
+their if-narrowing demo specifically to show the two-sided form rejecting
+a negative input (`fill_from_unknown(-1, 'X')`), which remains correct
+and necessary.
+
+**Every existing unsigned-base site using the old two-sided form was
+simplified back to hi-only**, closing the gap the earlier fatfs+SD-card
+`--forbid-trap` pass had to work around by hand: `examples/common/
+fat12.tkb` (`fat_get_entry`/`fat_set_entry`'s `off: usize`,
+`fat_open`'s `next_free_root_entry: u32`, `fat_close`'s `idx: usize`),
+`examples/fatfs/fatfs.tkb` (`mem_block_read`/`mem_block_write`'s
+`sector: u32`), and `examples/tcp_echo/tcp_echo.tkb` (`build_data_echo`'s
+`data_len: u16`). Sites using a genuinely SIGNED type were identified and
+deliberately left alone, since `>= 0` is load-bearing there: `fat12.tkb`'s
+`fat_open`'s `found: i32` (a `-1` "not found" sentinel),
+`http_server.tkb`'s `len`/`wire_len: isize`/`i32` and `payload_len: i32`.
+
+**Verification**: `dune test` (479/479), `make check` (71/71, every
+simplified site still compiles trap-free), `make hwcheck` (44/44,
+including `fatfs`/`fatfs_sdcard` which exercise the simplified
+`fat12.tkb`/`fatfs.tkb` sites), `make hwcheck-net` (6/6, including
+`tcp_echo`'s simplified site), and `make langcheck` all pass with no
+regressions.
+
+**Files**: `lib/type_inf.ml` (`narrow_from_cond`), `lib/llvm_gen.ml`
+(`apply_narrowing`, `apply_narrowing_mut`, new `is_unsigned_ast_ty`
+helper), `SPEC.md` (documented the hi-only unsigned case and the signed
+negative control), `examples/common/fat12.tkb`, `examples/fatfs/
+fatfs.tkb`, `examples/tcp_echo/tcp_echo.tkb` (simplified narrowing sites).

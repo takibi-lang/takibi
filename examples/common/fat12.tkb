@@ -157,10 +157,12 @@ fn fat_mount() {
 // a previous fat_get_entry result) -- explicit if-narrowing on `off`
 // itself right at the point of use, per this project's established
 // pattern for exactly this class of bound, closes the trap without
-// weakening cluster's own parameter type.
+// weakening cluster's own parameter type. `off` is `usize`, so a single
+// hi-only condition (`off < 511`, no `off >= 0`) is enough to narrow
+// (GitHub issue #99 -- an unsigned value is trivially >= 0).
 fn fat_get_entry(cluster: u32) -> u16 {
     let off: usize = (cluster + cluster / 2) as usize;
-    if (off >= 0 && off < 511) {
+    if (off < 511) {
         let b0: u16 = fat_buf[off] as u16;
         let b1: u16 = fat_buf[off + 1] as u16;
         if (cluster % 2 == 0) {
@@ -174,7 +176,7 @@ fn fat_get_entry(cluster: u32) -> u16 {
 
 fn fat_set_entry(cluster: u32, val: u16) {
     let off: usize = (cluster + cluster / 2) as usize;
-    if (off >= 0 && off < 511) {
+    if (off < 511) {
         if (cluster % 2 == 0) {
             fat_buf[off] = val as u8;
             let hi: u8 = fat_buf[off + 1];
@@ -315,13 +317,14 @@ fn fat_find_entry(name83: *u8) -> i32 {
 // limitation the old fat_create_file had (no rename/delete in scope).
 fn fat_open(fp: *FatFile, name83: *u8, mode: i32) -> i32 {
     if ((mode & FA_CREATE_ALWAYS) != 0) {
-        // If-narrowing needs the two-sided `v >= lo && v < hi` form (SPEC.md
-        // "If-condition narrowing") wrapping the actual use, not a negated
-        // early-return guard -- and compared against a literal (16), not
-        // `ROOT_ENTRY_COUNT as u32` (a named global's own literal
-        // initializer does not, by itself, make this provable; the global
-        // is still used for the array's own size).
-        if ((next_free_root_entry >= 0) && (next_free_root_entry < 16)) {
+        // If-narrowing must wrap the actual use, not a negated early-return
+        // guard (SPEC.md "If-condition narrowing") -- and compared against
+        // a literal (16), not `ROOT_ENTRY_COUNT as u32` (a named global's
+        // own literal initializer does not, by itself, make this provable;
+        // the global is still used for the array's own size).
+        // next_free_root_entry is u32, so a hi-only condition is enough to
+        // narrow (GitHub issue #99).
+        if (next_free_root_entry < 16) {
             let idx: usize = next_free_root_entry as usize;
             bytes_copy(root_dir_buf[idx].name, name83, 11);
             root_dir_buf[idx].attr = 0x20; // ARCHIVE
@@ -467,10 +470,11 @@ fn fat_close(fp: *FatFile) -> i32 {
     // fat_open (either branch), but a struct field carries no refined
     // type across the assignment, and if-narrowing tracks a plain
     // variable, not a repeated field-access expression -- bind it to a
-    // local first, then narrow that (two-sided form, literal 16, same
-    // reasoning as fat_open's own two narrowing sites).
+    // local first, then narrow that (literal 16, same reasoning as
+    // fat_open's own two narrowing sites). idx is usize, so a hi-only
+    // condition is enough to narrow (GitHub issue #99).
     let idx: usize = fp.dir_index;
-    if (fp.writing && (idx >= 0) && (idx < 16)) {
+    if (fp.writing && (idx < 16)) {
         root_dir_buf[idx].first_cluster_lo = fp.start_cluster as u16;
         root_dir_buf[idx].file_size = fp.fsize;
         fat_flush();

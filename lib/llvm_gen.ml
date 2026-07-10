@@ -296,6 +296,15 @@ let collect_bounds_cond (locals : (string, local_binding) Hashtbl.t)
   in
   go cond Types.StringMap.empty
 
+(* True for unsigned primitive integer AST types -- an unsigned value is
+   trivially >= 0, so a hi-only if-condition can still narrow it (GitHub
+   issue #99) without an explicit, redundant `>= 0` conjunct. Sync rule:
+   mirrors type_inf.ml's is_unsigned_ty (same primitive set, Ast.type_expr
+   form instead of Types.ty). *)
+let is_unsigned_ast_ty = function
+  | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64 | Ast.TypeUsize -> true
+  | _ -> false
+
 (* Temporarily narrow Imm locals based on condition bounds.
    Only Imm (immutable) bindings are narrowed; Mut bindings are skipped.
    Returns saved bindings for restoration after the then-branch.
@@ -308,25 +317,36 @@ let apply_narrowing (locals : (string, local_binding) Hashtbl.t)
   let bounds = collect_bounds_cond locals cond in
   let saved =
     Types.StringMap.fold (fun name (lo_opt, hi_opt) saved ->
-      match lo_opt, hi_opt with
-      | Some lo, Some hi when not (List.mem name killed) ->
-          (match Hashtbl.find_opt locals name with
-           | Some (Imm (TypeSlice _, _)) -> saved  (* handled below *)
-           | Some (Imm (TypeRefined (elo, ehi, base), v) as old) ->
-               (* Already refined (sync rule with type_inf.ml's
-                  narrow_from_cond): INTERSECT, don't just overwrite --
-                  needed so an if-condition that's true but WIDER than an
-                  already-proven fact (e.g. a redundant re-check) can never
-                  discard precision codegen would otherwise disagree with
-                  type_inf about. *)
-               Hashtbl.replace locals name (Imm (TypeRefined (max lo elo, min hi ehi, base), v));
-               (name, old) :: saved
-           | Some (Imm (((TypeI8|TypeI16|TypeI32|TypeI64|TypeIsize
-                         |TypeU8|TypeU16|TypeU32|TypeU64|TypeUsize) as base), v) as old) ->
-               (* Any plain primitive integer type can be narrowed, not
-                  just TypeI32 (sync rule with type_inf.ml's
-                  narrow_from_cond) -- the variable's OWN type becomes the
-                  refined range's base. *)
+      if List.mem name killed then saved
+      else match Hashtbl.find_opt locals name with
+      | Some (Imm (TypeSlice _, _)) -> saved  (* handled below *)
+      | Some (Imm (TypeRefined (elo, ehi, base), v) as old) ->
+          (* Already refined (sync rule with type_inf.ml's
+             narrow_from_cond): INTERSECT, don't just overwrite --
+             needed so an if-condition that's true but WIDER than an
+             already-proven fact (e.g. a redundant re-check) can never
+             discard precision codegen would otherwise disagree with
+             type_inf about. GitHub issue #99: a hi-only condition
+             (lo_opt = None) still narrows, falling back to the
+             already-proven `elo`. *)
+          (match lo_opt, hi_opt with
+           | Some lo, Some hi -> Hashtbl.replace locals name (Imm (TypeRefined (max lo elo, min hi ehi, base), v)); (name, old) :: saved
+           | None, Some hi    -> Hashtbl.replace locals name (Imm (TypeRefined (elo, min hi ehi, base), v)); (name, old) :: saved
+           | Some lo, None    -> Hashtbl.replace locals name (Imm (TypeRefined (max lo elo, ehi, base), v)); (name, old) :: saved
+           | None, None       -> saved)
+      | Some (Imm (((TypeI8|TypeI16|TypeI32|TypeI64|TypeIsize
+                    |TypeU8|TypeU16|TypeU32|TypeU64|TypeUsize) as base), v) as old) ->
+          (* Any plain primitive integer type can be narrowed, not
+             just TypeI32 (sync rule with type_inf.ml's
+             narrow_from_cond) -- the variable's OWN type becomes the
+             refined range's base. GitHub issue #99: an unsigned base
+             with no lo_opt defaults to 0. *)
+          let lo_opt = match lo_opt with
+            | Some _ -> lo_opt
+            | None -> if is_unsigned_ast_ty base then Some 0 else None
+          in
+          (match lo_opt, hi_opt with
+           | Some lo, Some hi ->
                Hashtbl.replace locals name (Imm (TypeRefined (lo, hi, base), v));
                (name, old) :: saved
            | _ -> saved)
@@ -362,27 +382,47 @@ let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t)
   let bounds = collect_bounds_cond locals cond in
   let saved =
     Types.StringMap.fold (fun name (lo_opt, hi_opt) saved ->
-      match lo_opt, hi_opt with
-      | Some lo, Some hi when not (List.mem name killed) ->
-          (match Hashtbl.find_opt locals name with
-           | Some (Mut (((TypeI8|TypeI16|TypeI32|TypeI64|TypeIsize
-                         |TypeU8|TypeU16|TypeU32|TypeU64|TypeUsize) as base), _)) ->
-               let old = Hashtbl.find_opt narrowing_ctx name in
-               (* An outer if may have already narrowed this Mut variable
-                  (nested ifs): INTERSECT with any existing narrowing_ctx
-                  entry rather than overwriting it, mirroring type_inf.ml's
-                  tyenv-threading (an inner narrow_from_cond naturally sees
-                  the outer narrowing already applied) -- sync rule. Any
-                  plain primitive integer type can be narrowed, not just
-                  TypeI32 -- the variable's OWN type becomes the refined
-                  range's base. *)
+      if List.mem name killed then saved
+      else match Hashtbl.find_opt locals name with
+      | Some (Mut (((TypeI8|TypeI16|TypeI32|TypeI64|TypeIsize
+                    |TypeU8|TypeU16|TypeU32|TypeU64|TypeUsize) as base), _)) ->
+          let old = Hashtbl.find_opt narrowing_ctx name in
+          (* An outer if may have already narrowed this Mut variable
+             (nested ifs): INTERSECT with any existing narrowing_ctx
+             entry rather than overwriting it, mirroring type_inf.ml's
+             tyenv-threading (an inner narrow_from_cond naturally sees
+             the outer narrowing already applied) -- sync rule. Any
+             plain primitive integer type can be narrowed, not just
+             TypeI32 -- the variable's OWN type becomes the refined
+             range's base. GitHub issue #99: an unsigned base with no
+             lo_opt from the condition defaults to 0 (trivially sound);
+             a signed base with no lo_opt falls back to any existing
+             narrowing_ctx lower bound instead, same as the hi-only case. *)
+          let lo_opt = match lo_opt with
+            | Some _ -> lo_opt
+            | None -> if is_unsigned_ast_ty base then Some 0 else None
+          in
+          (match lo_opt, hi_opt with
+           | Some lo, Some hi ->
                let (nlo, nhi) = match old with
                  | Some (TypeRefined (elo, ehi, _)) -> (max lo elo, min hi ehi)
                  | _ -> (lo, hi)
                in
                Hashtbl.replace narrowing_ctx name (TypeRefined (nlo, nhi, base));
                (name, old) :: saved
-           | _ -> saved)
+           | None, Some hi ->
+               (match old with
+                | Some (TypeRefined (elo, ehi, _)) ->
+                    Hashtbl.replace narrowing_ctx name (TypeRefined (elo, min hi ehi, base));
+                    (name, old) :: saved
+                | _ -> saved)
+           | Some lo, None ->
+               (match old with
+                | Some (TypeRefined (elo, ehi, _)) ->
+                    Hashtbl.replace narrowing_ctx name (TypeRefined (max lo elo, ehi, base));
+                    (name, old) :: saved
+                | _ -> saved)
+           | None, None -> saved)
       | _ -> saved
     ) bounds []
   in

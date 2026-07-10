@@ -193,8 +193,9 @@ fn build_data_echo(eth: [u8; 1514..], ihl: {20..<21 as u16}, data: []u8, data_le
     // comment for why). This mirrors http_server's HTTP_MAX_PAYLOAD
     // pattern: the check both PROVES tcp_seg's minimum (>= 20, needed by
     // fix_tcp_checksum) and fails safe if data_len is ever larger than
-    // this responder's single-segment design supports.
-    if (data_len >= 0 && data_len <= TCP_MAX_PAYLOAD) {
+    // this responder's single-segment design supports. data_len is u16,
+    // so a hi-only condition is enough to narrow (GitHub issue #99).
+    if (data_len <= TCP_MAX_PAYLOAD) {
         let n: u16 = data_len;
         let n_idx: usize = n as usize;
         let tcp_seg = eth[34..<54 + n_idx];
