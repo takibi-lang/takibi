@@ -1,0 +1,22 @@
+// Shared MMIO register addresses `use`d by both examples/common_stm32/
+// eth.tkb and examples/common_stm32/sdmmc.tkb. Extracted here (GitHub
+// issue #97 follow-up) after examples/http_server_sdcard/
+// http_server_sdcard.tkb became the first program to need both HALs at
+// once, exposing latent duplicate-global collisions (RCC_AHB1ENR/
+// RCC_APB2ENR, and GPIOC_MODER/GPIOC_OSPEEDR -- both files independently
+// configure GPIOC pins, eth.tkb for RMII, sdmmc.tkb for SDMMC1 D0..D3/CLK)
+// that eth.tkb's and sdmmc.tkb's own independent declarations had never
+// triggered before (the two files had never previously been compiled
+// together). Same fix shape as examples/common_qemu/gic_regs.tkb's own
+// split, for the same "one flat namespace" reason (see CLAUDE.md's issue
+// #79 follow-up entry).
+//
+// Registers each file still declares on its own (not moved here) are the
+// ones that do NOT collide: GPIOA/GPIOG (eth.tkb only), GPIOD/GPIOC_PUPDR
+// (sdmmc.tkb only), and each file's own distinct GPIOC alternate-function
+// register (GPIOC_AFRL vs. GPIOC_AFRH -- different bytes of the same
+// 32-bit-pair AFR block, not actually the same address).
+let RCC_AHB1ENR:   *io u32 = 0x40023830;
+let RCC_APB2ENR:   *io u32 = 0x40023844;
+let GPIOC_MODER:   *io u32 = 0x40020800;
+let GPIOC_OSPEEDR: *io u32 = 0x40020808;

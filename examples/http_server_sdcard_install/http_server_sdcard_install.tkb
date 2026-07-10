@@ -1,0 +1,100 @@
+// GitHub issue #97: test/provisioning-only firmware that writes a real
+// FAT12 image onto examples/http_server_sdcard's actual SD card via
+// sdmmc.tkb's disk_write -- so both `make hwcheck-net` and
+// `make stm32-http-server-sdcard` can provision known file content on the
+// card with no human ever touching it. See scripts/
+// provision_http_server_sdcard.sh for the harness side (used by both of
+// those Makefile targets, not duplicated between them).
+//
+// Mirrors scripts/run_hwtest_ram.sh's existing ram_load_and_run_seeded
+// technique (which injects a host-built seed image directly into
+// examples/fatfs's in-memory `disk` array over the debug port), but
+// relays the injected bytes onward through the real SDMMC1 driver instead
+// of just leaving them in RAM for the CPU to read: the harness injects the
+// image into `staging` below (timed at a breakpoint on app_main, after
+// BSS-clear but before anything reads it), then this program copies it
+// sector-by-sector onto the real card. install_done() is called as the
+// very last statement, giving the harness a second breakpoint address that
+// is only ever reached once every disk_write has genuinely completed --
+// `wait_halt` on that breakpoint is a hard synchronization point, not a
+// UART-quietness guess. install_result is read back at that same halt
+// (via OpenOCD's mrw, not UART) so the harness can tell a genuine write
+// failure or "no card inserted" apart from a successful provisioning run
+// -- see that variable's own comment.
+//
+// STM32-only (matches examples/fatfs_sdcard/fatfs_sdcard.tkb -- no virtual
+// SD controller under QEMU). Never run interactively; exists solely as
+// provisioning infrastructure for http_server_sdcard.tkb, part of the
+// same milestone.
+//
+// Deliberately written without --forbid-trap/refinement types, matching
+// this project's process for new .tkb work (see CLAUDE.md's Development
+// Process section).
+//
+// SECTOR_SIZE/TOTAL_SECTORS are duplicated from examples/common/fat12.tkb
+// rather than `use`d from it: this file only ever writes raw sectors via
+// disk_write and never touches the FAT12 API (fat_open/fat_read/...), so
+// pulling in fat12.tkb would need throwaway mem_block_read/mem_block_write
+// adapters this file has no other use for.
+
+use "examples/common_stm32/sdmmc.tkb";
+
+let SECTOR_SIZE: usize = 512;
+let TOTAL_SECTORS: usize = 128;
+
+// The test harness injects a real mtools-built FAT12 image here via
+// OpenOCD's load_image, timed at a breakpoint on app_main -- same
+// technique scripts/run_hwtest_ram.sh's ram_load_and_run_seeded already
+// uses for examples/fatfs's `disk` array.
+let mut staging: [u8; SECTOR_SIZE * TOTAL_SECTORS];
+
+// Result code the harness reads back with OpenOCD's `mrw` once execution
+// halts at install_done() -- a precise, deterministic status instead of
+// scraping UART text. 0 = never set (should not be observable -- means
+// the harness read this before install_done() ran); 1 = every disk_write
+// succeeded; 2 = disk_initialize() failed (most likely: no card in the
+// slot); 3 = disk_initialize() succeeded but at least one disk_write
+// failed (card present but a write genuinely failed).
+let mut install_result: u32 = 0;
+
+fn install_done() {
+    uart_puts("install: done\r\n");
+}
+
+fn app_main() {
+    uart_puts("install: start\r\n");
+
+    if (disk_initialize() == 0) {
+        // The harness wrote `staging` directly over the debug port,
+        // bypassing the D-cache -- invalidate before this CPU reads it
+        // back (same reasoning as examples/fatfs/fatfs.tkb's Phase 1
+        // dma_finish_rx call).
+        dma_finish_rx(staging, SECTOR_SIZE * TOTAL_SECTORS);
+
+        let mut sector_buf: [u8; SECTOR_SIZE];
+        let mut all_ok: bool = true;
+        let mut s: u32 = 0;
+        while (s < (TOTAL_SECTORS as u32)) {
+            let off: usize = (s as usize) * SECTOR_SIZE;
+            for i: usize in 0..<SECTOR_SIZE {
+                sector_buf[i] = staging[off + i];
+            }
+            if (disk_write(s, sector_buf) != 0) {
+                all_ok = false;
+            }
+            s = s + 1;
+        }
+
+        if (all_ok) {
+            install_result = 1;
+            uart_puts("install: OK\r\n");
+        } else {
+            install_result = 3;
+            uart_puts("install: FAIL\r\n");
+        }
+    } else {
+        install_result = 2;
+        uart_puts("install: disk_initialize FAIL\r\n");
+    }
+    install_done();
+}

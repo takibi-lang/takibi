@@ -45,6 +45,13 @@
 # an arbitrary clone of this repo with just a board plugged in over USB --
 # it needs the Ethernet cable actually wired to this machine and
 # CAP_NET_RAW.
+#
+# http_server_sdcard (GitHub issue #97) additionally needs no human to
+# ever touch the SD card: before that test runs, this script shells out to
+# scripts/provision_http_server_sdcard.sh, which provisions the card with
+# a real mtools-built FAT12 image via examples/http_server_sdcard_install/
+# http_server_sdcard_install.tkb -- shared with `make stm32-http-server-
+# sdcard` (see that script's own header comment), not duplicated here.
 set -euo pipefail
 
 : "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run 'make hwcheck-net' or set it explicitly}"
@@ -187,6 +194,77 @@ run_net_hw_test "http_server (stm32/ram)" examples/http_server/kernel_stm32_ram.
 # file's header comment and run_net_hw_test_flash's comment for why this
 # is deliberately NOT redundant with the RAM test just above).
 run_net_hw_test_flash "http_server (stm32/flash)" examples/http_server/kernel_stm32.bin scripts/eth_http_server_test.py
+
+# http_server_sdcard (GitHub issue #97): provisions the real SD card with
+# a genuine mtools-built FAT12 image (no human touches the card), then
+# runs http_server_sdcard.tkb and verifies over HTTP that the served page
+# really is the SD card's own file content. See
+# examples/http_server_sdcard/http_server_sdcard.tkb's header comment for
+# the milestone (--forbid-trap deliberately off for now).
+sdcard_expected_text="Hello from a real SD card, served over HTTP!"
+sdcard_name="http_server_sdcard (stm32/ram)"
+sdcard_provision_log=$(mktemp)
+if ! bash scripts/provision_http_server_sdcard.sh \
+        examples/http_server_sdcard_install/kernel_stm32_ram.elf \
+        "$sdcard_expected_text" > "$sdcard_provision_log" 2>&1; then
+    printf "${RED}FAIL${RST}  %s  (SD card provisioning failed)\n" "$sdcard_name"
+    sed 's/^/       /' "$sdcard_provision_log"
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("$sdcard_name")
+elif ! ram_load_and_run examples/http_server_sdcard/kernel_stm32_ram.elf; then
+    printf "${RED}FAIL${RST}  %s  (openocd RAM load failed)\n" "$sdcard_name"
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("$sdcard_name")
+else
+    # SDCARD_EXPECTED_TEXT must be passed on sudo's OWN command line (not
+    # just exported in this shell) -- sudo's default env_reset strips
+    # ordinary environment variables that aren't in env_keep, confirmed
+    # empirically before writing this.
+    echo "-- $sdcard_name --"
+    if sudo SDCARD_EXPECTED_TEXT="$sdcard_expected_text" python3 scripts/eth_http_server_sdcard_test.py; then
+        printf "${GRN}PASS${RST}  %s\n" "$sdcard_name"
+        PASS=$((PASS + 1))
+    else
+        printf "${RED}FAIL${RST}  %s\n" "$sdcard_name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$sdcard_name")
+    fi
+fi
+
+# http_server_sdcard only: also exercise the real Flash boot path (same
+# reasoning as http_server's own two-test split just above). The SD card
+# itself is untouched by which firmware image is running on the MCU --
+# it was already provisioned once, above, via
+# scripts/provision_http_server_sdcard.sh -- so this reuses that same
+# content rather than re-provisioning it.
+# run_net_hw_test_flash is not reused here (unlike http_server's own Flash
+# test) because SDCARD_EXPECTED_TEXT has to be passed on sudo's own
+# command line (see the comment above), which that shared helper's plain
+# `sudo python3` call does not do.
+sdcard_flash_name="http_server_sdcard (stm32/flash)"
+tmp_sdcard_flash_log=$(mktemp)
+if ! st-flash --connect-under-reset write examples/http_server_sdcard/kernel_stm32.bin "$FLASH_ADDR" > "$tmp_sdcard_flash_log" 2>&1; then
+    printf "${RED}FAIL${RST}  %s  (st-flash write failed)\n" "$sdcard_flash_name"
+    sed 's/^/       /' "$tmp_sdcard_flash_log"
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("$sdcard_flash_name")
+elif ! st-flash --connect-under-reset reset > "$tmp_sdcard_flash_log" 2>&1; then
+    printf "${RED}FAIL${RST}  %s  (st-flash reset failed)\n" "$sdcard_flash_name"
+    sed 's/^/       /' "$tmp_sdcard_flash_log"
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("$sdcard_flash_name")
+else
+    echo "-- $sdcard_flash_name --"
+    if sudo SDCARD_EXPECTED_TEXT="$sdcard_expected_text" python3 scripts/eth_http_server_sdcard_test.py; then
+        printf "${GRN}PASS${RST}  %s\n" "$sdcard_flash_name"
+        PASS=$((PASS + 1))
+    else
+        printf "${RED}FAIL${RST}  %s\n" "$sdcard_flash_name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$sdcard_flash_name")
+    fi
+fi
+rm -f "$tmp_sdcard_flash_log" "$sdcard_provision_log"
 
 # Add new Ethernet hardware tests here as they're ported.
 

@@ -109,17 +109,19 @@
 // is selected -- much slower than a typical 24-48MHz design, acceptable
 // for this milestone's polling-only, single-block-at-a-time driver.
 
+use "examples/common_stm32/eth_sdmmc_regs.tkb";
+
 // -- RCC --------------------------------------------------------------------
-let RCC_AHB1ENR:  *io u32 = 0x40023830;
-let RCC_APB2ENR:  *io u32 = 0x40023844;
+// RCC_AHB1ENR/RCC_APB2ENR/GPIOC_MODER/GPIOC_OSPEEDR come from
+// eth_sdmmc_regs.tkb's `use` above (GitHub issue #97 follow-up -- shared
+// with examples/common_stm32/eth.tkb).
+// RCC_DCKCFGR2 is unique to this file (eth.tkb has no need for it).
 let RCC_DCKCFGR2: *io u32 = 0x40023890;
 
 // -- GPIO (MODER/OSPEEDR/PUPDR/AFRL/AFRH), same read-modify-write idiom as
 // examples/common_stm32/eth.tkb -- PC8..PC12 (D0..D3, CLK) and PD2 (CMD),
 // all AF12. Card detect (PC13) is not used by this driver (no hot-swap
 // support; a card is assumed present at disk_initialize() time). ---------
-let GPIOC_MODER:   *io u32 = 0x40020800;
-let GPIOC_OSPEEDR: *io u32 = 0x40020808;
 let GPIOC_PUPDR:   *io u32 = 0x4002080C;
 let GPIOC_AFRH:    *io u32 = 0x40020824;
 

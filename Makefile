@@ -142,7 +142,8 @@ STM32_CHECKSUM_OBJS     := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/
 # instead of the generic pattern rule.
 STM32_RAM_EXAMPLES := $(STM32_EXAMPLES) rtc echo timer irq preempt watchdog \
                        $(STM32_CHECKSUM_EXAMPLES) \
-                       net_echo arp_reply icmp_echo tcp_echo http_server sdcard fatfs_sdcard
+                       net_echo arp_reply icmp_echo tcp_echo http_server sdcard fatfs_sdcard \
+                       http_server_sdcard http_server_sdcard_install
 # Target list for the generic $(STM32_RAM_ELFS_GENERIC) pattern rule below --
 # deliberately distinct from STM32_RAM_ELFS (stm32build's full
 # prerequisite list, used only for building "everything", never as a
@@ -158,7 +159,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest stm32build hwcheck hwcheck-net langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server profile-http-server profile-tcp-echo
+.PHONY: build test qemutest stm32build hwcheck hwcheck-net langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server stm32-http-server-sdcard profile-http-server profile-tcp-echo
 
 .DEFAULT_GOAL := build
 
@@ -219,7 +220,7 @@ qemutest: $(ALL_KERNELS) examples/fizzbuzz/kernel.debug.elf examples/fibonacci/k
 ## that path even on a day `make hwcheck-net` doesn't run against real
 ## hardware. Without this, `stm32build`'s own "every ported example"
 ## promise would be silently false for exactly one example.
-stm32build: $(STM32_RAM_ELFS) examples/http_server/kernel_stm32.bin
+stm32build: $(STM32_RAM_ELFS) examples/http_server/kernel_stm32.bin examples/http_server_sdcard/kernel_stm32.bin
 
 ## hwcheck: run STM32 hardware integration tests (requires a real
 ## STM32F746G-DISCOVERY board connected via USB). NOT part of `make check` --
@@ -246,7 +247,7 @@ hwcheck: stm32build
 ## one Flash-execution boot path left in this repository and it would
 ## otherwise have zero automated coverage -- see scripts/run_hwtest_net_ram.sh's
 ## header comment.
-hwcheck-net: stm32build examples/http_server/kernel_stm32.bin
+hwcheck-net: stm32build examples/http_server/kernel_stm32.bin examples/http_server_sdcard/kernel_stm32.bin
 	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/run_hwtest_net_ram.sh
 
 ## langcheck: verify that all source files contain only ASCII characters
@@ -711,6 +712,32 @@ examples/sdcard/sdcard_stm32.o: examples/sdcard/sdcard.tkb $(COMMON_STM32_UART) 
 examples/fatfs_sdcard/fatfs_sdcard_stm32.o: examples/fatfs_sdcard/fatfs_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SDMMC) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
+COMMON_STM32_ETH_SDMMC_REGS := $(COMMON_STM32_DIR)/eth_sdmmc_regs.tkb
+
+# http_server_sdcard: GitHub issue #97, combines http_server.tkb's TCP/IP +
+# HTTP state machine with fatfs_sdcard.tkb's real SD card access -- see
+# http_server_sdcard.tkb's own header comment. `use`s fat12.tkb and
+# sdmmc.tkb itself (same pattern as fatfs_sdcard.tkb), so only
+# uart+print+eth need to be on the command line; the rest are listed here
+# purely for Make's own staleness tracking. STM32-only (no virtual SD
+# controller under QEMU, same reasoning as fatfs_sdcard/sdcard).
+#
+# --forbid-trap deliberately OMITTED: this is new milestone work (see
+# CLAUDE.md's Development Process section) -- gets turned on in a later
+# pass once the whole milestone (this file + the installer below) is
+# verified working end-to-end against real hardware.
+examples/http_server_sdcard/http_server_sdcard_stm32.o: examples/http_server_sdcard/http_server_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+
+# http_server_sdcard_install: test-only helper (make hwcheck-net) that
+# writes a real mtools-built FAT12 image onto the SD card via disk_write,
+# so the hardware test needs no human to touch the card -- see that file's
+# own header comment and scripts/run_hwtest_net_ram.sh's
+# install_sdcard_image. Never `use`s fat12.tkb (writes raw sectors only).
+# Same --forbid-trap-omitted reasoning as http_server_sdcard above.
+examples/http_server_sdcard_install/http_server_sdcard_install_stm32.o: examples/http_server_sdcard_install/http_server_sdcard_install.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SDMMC) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+
 # examples/http_server is the one deliberate exception to "every STM32
 # example runs from RAM" (see STM32_RAM_EXAMPLES's comment above): flashing
 # it lets a demo unit boot the HTTP server standalone by power-on alone,
@@ -727,6 +754,19 @@ examples/http_server/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/http_s
 	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/http_server/http_server_stm32.o -o $@
 
 examples/http_server/kernel_stm32.bin: examples/http_server/kernel_stm32.elf
+	llvm-objcopy-19 -O binary $< $@
+
+# examples/http_server_sdcard gets the same deliberate Flash-execution
+# exception as examples/http_server (see that rule's comment just above,
+# and `make stm32-http-server-sdcard` below): a demo unit should be able
+# to boot the SD-card-backed HTTP server standalone from power-on, with no
+# debugger attached -- RAM execution cannot do this at all, since AXI
+# SRAM1 loses its contents when power is removed. Same genuinely-cacheable
+# AXI SRAM1 DMA policy as http_server's own Flash build.
+examples/http_server_sdcard/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/http_server_sdcard/http_server_sdcard_stm32.o $(COMMON_STM32_LINK_ETH_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/http_server_sdcard/http_server_sdcard_stm32.o -o $@
+
+examples/http_server_sdcard/kernel_stm32.bin: examples/http_server_sdcard/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
 # inet_checksum.tkb/ip_parse.tkb/tcp_parse.tkb each `use` exactly the
@@ -855,7 +895,52 @@ stm32-http-server: examples/http_server/kernel_stm32.bin
 	    exit 1; \
 	fi
 	st-flash --connect-under-reset write $< $(STM32_FLASH_ADDR)
-	@ip=$$(grep -m1 '^let HTTP_SERVER_IP' examples/common_stm32/netconfig.tkb | grep -oP '\{[^}]*\}' | tr -d '{} ' | tr ',' '.'); \
+	@rhs=$$(grep -m1 '^let HTTP_SERVER_IP:' examples/common_stm32/netconfig.tkb | grep -oP '= \K.*(?=;)'); \
+	case "$$rhs" in \
+	  \{*) lit="$$rhs" ;; \
+	  *) lit=$$(grep -m1 "^let $$rhs:" examples/common_stm32/netconfig.tkb | grep -oP '= \K.*(?=;)') ;; \
+	esac; \
+	ip=$$(echo "$$lit" | tr -d '{} ' | tr ',' '.'); \
+	echo "Open http://$$ip/ in your browser (Ctrl-C to quit)"; \
+	stty -F $(STM32_SERIAL_DEV) 115200 raw -echo; \
+	cat $(STM32_SERIAL_DEV) & \
+	catpid=$$!; \
+	sleep 0.2; \
+	st-flash --connect-under-reset reset > /dev/null 2>&1; \
+	wait $$catpid
+
+## stm32-http-server-sdcard: flash and run the SD-card-backed HTTP server
+## demo (GitHub issue #97) on the real board, same UX/mechanics as
+## stm32-http-server just above (see that target's comment) but for
+## examples/http_server_sdcard/kernel_stm32.bin instead.
+##
+## Fully self-contained -- does NOT depend on `make hwcheck-net` having
+## run first. Before flashing anything, this target itself provisions the
+## real SD card with a fresh mtools-built FAT12 image via
+## scripts/provision_http_server_sdcard.sh (same script `make hwcheck-net`
+## uses, not duplicated). If that fails -- most commonly no card inserted
+## in the STM32F746G-DISCOVERY's microSD slot -- this target stops right
+## there with a clear error message; it deliberately does NOT go on to
+## flash and boot a server that would only ever be able to answer "404:
+## INDEX.TXT not found" to every request, leaving a human staring at a
+## browser tab with no idea the card was ever missing.
+stm32-http-server-sdcard: examples/http_server_sdcard/kernel_stm32.bin examples/http_server_sdcard_install/kernel_stm32_ram.elf
+	@if [ ! -e "$(STM32_SERIAL_DEV)" ]; then \
+	    echo "error: $(STM32_SERIAL_DEV) not found -- is the STM32F746G-DISCOVERY board connected?" >&2; \
+	    exit 1; \
+	fi
+	@if ! st-info --probe > /dev/null 2>&1; then \
+	    echo "error: st-info --probe failed -- is the ST-LINK debug interface accessible?" >&2; \
+	    exit 1; \
+	fi
+	bash scripts/provision_http_server_sdcard.sh examples/http_server_sdcard_install/kernel_stm32_ram.elf
+	st-flash --connect-under-reset write $< $(STM32_FLASH_ADDR)
+	@rhs=$$(grep -m1 '^let HTTP_SERVER_IP:' examples/common_stm32/netconfig.tkb | grep -oP '= \K.*(?=;)'); \
+	case "$$rhs" in \
+	  \{*) lit="$$rhs" ;; \
+	  *) lit=$$(grep -m1 "^let $$rhs:" examples/common_stm32/netconfig.tkb | grep -oP '= \K.*(?=;)') ;; \
+	esac; \
+	ip=$$(echo "$$lit" | tr -d '{} ' | tr ',' '.'); \
 	echo "Open http://$$ip/ in your browser (Ctrl-C to quit)"; \
 	stty -F $(STM32_SERIAL_DEV) 115200 raw -echo; \
 	cat $(STM32_SERIAL_DEV) & \

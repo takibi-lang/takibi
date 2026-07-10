@@ -1,0 +1,445 @@
+// GitHub issue #97: serves the real content of a file stored on a real SD
+// card over HTTP -- the payoff of combining two already-working pieces:
+// examples/http_server's ARP/TCP/HTTP state machine (real Ethernet
+// MAC/PHY/DMA, --forbid-trap clean) and examples/fatfs_sdcard's real FAT12
+// access over SDMMC1 (also --forbid-trap clean). See CLAUDE.md's decision
+// log for why this milestone was picked over Simple RTOS (issue #66): both
+// UART and Ethernet and SD card are already interrupt/DMA-driven
+// individually, so no scheduler is needed to combine them safely -- this
+// file's app_main() is a single flat loop, exactly like http_server.tkb's
+// own.
+//
+// STAGE 1 SCOPE (deliberately incremental, see the design discussion):
+// any GET request gets the SAME fixed file's content back (SD_FILE_NAME
+// below), read fresh from the card on every request via fat_open/fat_read
+// -- no request-path parsing, no directory listing, no multiple files yet.
+// This proves the real wiring (HTTP -> FAT12 -> SDMMC1 -> real card bytes
+// -> HTTP response) end to end before growing into directory listing +
+// multi-file serving as a later increment.
+//
+// Explicitly OUT OF SCOPE for this milestone (see design discussion):
+// images/binary content. This file's TCP layer (inherited unchanged from
+// http_server.tkb) replies in exactly ONE TCP segment / one Ethernet frame
+// -- no fragmentation or multi-segment TX exists yet -- so response bodies
+// stay small text, capped by HTTP_MAX_PAYLOAD same as before. Serving
+// larger files needs multi-segment TX, which is real, separate work left
+// for a future issue.
+//
+// SD card provisioning is fully automated, no human touches the card:
+// examples/http_server_sdcard_install/http_server_sdcard_install.tkb
+// writes a real mtools-built FAT12 image onto the card via disk_write
+// before every `make hwcheck-net` run (see that file's header comment and
+// scripts/run_hwtest_net_ram.sh's install_sdcard_image). This file's own
+// app_main() only ever fat_mount()s -- it deliberately does NOT
+// fat_format() the card (unlike fatfs_sdcard.tkb), since the whole point
+// is showing the card's real, externally-provisioned content.
+//
+// Deliberately written WITHOUT --forbid-trap for this first working
+// version, per CLAUDE.md's Development Process section: this is new
+// milestone work (combining fatfs_sdcard's real-SD access with
+// http_server's proven TCP/HTTP layer in a genuinely new way -- reading
+// file bytes into the reply instead of the static html_body), verified by
+// actually running it against real hardware, not by making the compiler
+// happy. --forbid-trap gets turned on in a later, separate pass once this
+// works end to end (see examples/http_server_sdcard_install/
+// http_server_sdcard_install.tkb, part of the same milestone).
+//
+// STM32-only: there is no virtual SD controller in this project's QEMU
+// setup (matches examples/fatfs_sdcard and examples/sdcard's own
+// no-QEMU status).
+
+use "examples/common/inet_checksum.tkb";
+use "examples/common/netutil.tkb";
+use "examples/common/fat12.tkb";
+use "examples/common_stm32/sdmmc.tkb";
+
+fn mem_block_read(sector: u32, buf: *u8) {
+    disk_read(sector, buf);
+}
+
+fn mem_block_write(sector: u32, buf: *u8) {
+    disk_write(sector, buf);
+}
+
+let mut our_mac: [u8; 6];
+let mut our_ip:  [u8; 4];
+
+// ARP/IPv4/TCP field offsets (ARP_HTYPE, ..., ARP_TPA, IP_TOTAL_LEN, ...,
+// TCP_URGENT) come from examples/common/netutil.tkb's `use` above --
+// offsetof(ArpHdr/Ipv4Hdr/TcpHdr, field)-based, matching http_server.tkb.
+
+let TCP_FLAG_FIN: u8 = 0x01;
+let TCP_FLAG_SYN: u8 = 0x02;
+let TCP_FLAG_RST: u8 = 0x04;
+let TCP_FLAG_PSH: u8 = 0x08;
+let TCP_FLAG_ACK: u8 = 0x10;
+
+let PROTO_TCP: u8 = 6;
+let HTTP_PORT: u16 = 80;
+
+let OUR_ISN: u32 = 0x00001000;
+
+enum ConnState: u8 {
+    Listen;
+    SynRcvd;
+    Established;
+    LastAck;
+}
+
+let mut conn_state:       ConnState = ConnState::Listen;
+let mut conn_remote_ip:   [u8; 4];
+let mut conn_remote_port: u16 = 0;
+let mut conn_snd_nxt:     u32 = 0;
+let mut conn_rcv_nxt:     u32 = 0;
+
+// Staging buffer for the response body -- read fresh from the SD card on
+// every request (see build_body_from_sdcard), then copied after the
+// headers into the reply segment (see build_http_response_fin).
+let mut html_body: [u8; 512];
+
+// Safe upper bound on the total reply payload (headers + body), checked
+// explicitly in build_http_response_fin before anything downstream trusts
+// it -- same mechanism as http_server.tkb's own HTTP_MAX_PAYLOAD. Headers
+// here are shorter (no request counter to print), so 512 (matching
+// html_body's own size, the real limiting factor) plus a comfortable
+// headers margin is enough.
+let HTTP_MAX_PAYLOAD: i32 = 700;
+
+// Reads SD_FILE_NAME fresh from the real SD card into html_body. Returns
+// the byte count on success. On any FAT12 failure (card not mounted, file
+// missing, ...) falls back to a short in-memory error message instead --
+// keeps the HTTP server itself always answering, even with no/blank card
+// inserted, rather than refusing to serve at all.
+fn build_body_from_sdcard() -> isize {
+    // 8.3 name, padded to 11 bytes, matching fat12.tkb's fat_find_entry
+    // format. Provisioned onto the real card by
+    // http_server_sdcard_install.tkb before every hardware test run (see
+    // this file's header comment). Local, not global -- no existing
+    // global `*u8` string-literal precedent in this codebase (globals
+    // with literal initializers are integer-only, see const_global.tkb).
+    let sd_file_name: *u8 = "INDEX   TXT";
+    let mut fp: FatFile;
+    if (fat_open(&fp, sd_file_name, FA_READ) != 0) {
+        let msg: *u8 = "404: INDEX.TXT not found on SD card.\n";
+        return copy_str(html_body, msg);
+    }
+    let mut br: u32 = 0;
+    fat_read(&fp, html_body, 512, &br);
+    fat_close(&fp);
+    return br as isize;
+}
+
+// Rewrites a received ARP request into a reply in place. Identical to
+// http_server.tkb's own build_arp_reply -- see that file for the proof
+// commentary.
+fn build_arp_reply(eth: [u8; 42..]) {
+    let arp = eth[14..<42];
+
+    slice_copy(eth[0..<6], eth[6..<12]);
+    slice_copy(eth[6..<12], our_mac as []u8);
+
+    slice_copy(arp[ARP_THA..<ARP_TPA], arp[ARP_SHA..<ARP_SPA]);
+    slice_copy(arp[ARP_TPA..<28],      arp[ARP_SPA..<ARP_THA]);
+    slice_copy(arp[ARP_SHA..<ARP_SPA], our_mac as []u8);
+    slice_copy(arp[ARP_SPA..<ARP_THA], our_ip as []u8);
+    write_u16be(arp[ARP_OPER..<ARP_SHA], 2);
+}
+
+// Identical to http_server.tkb's own fix_tcp_checksum.
+fn fix_tcp_checksum(ip: [u8; 20..], tcp_seg: [u8; 20..]) {
+    write_u16be(tcp_seg[TCP_CHECKSUM..<TCP_URGENT], 0);
+    let mut pseudo: [u8; 12];
+    slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
+    slice_copy(pseudo[4..<8], ip[IP_DST..<20]);
+    pseudo[8] = 0 as u8;
+    pseudo[9] = PROTO_TCP;
+    write_u16be(pseudo[10..<12], tcp_seg.len as i32);
+    let sum: i32 = checksum_add(pseudo as []u8, 0);
+    write_u16be(tcp_seg[TCP_CHECKSUM..<TCP_URGENT],
+                checksum_fold(checksum_add(tcp_seg, sum)));
+}
+
+// Identical to http_server.tkb's own build_syn_ack.
+fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
+    slice_copy(eth[0..<6], eth[6..<12]);
+    slice_copy(eth[6..<12], our_mac as []u8);
+
+    let ip  = eth[14..<34];
+    let tcp = eth[34..<54];
+
+    slice_copy(ip[IP_DST..<20],      ip[IP_SRC..<IP_DST]);
+    slice_copy(ip[IP_SRC..<IP_DST],  our_ip as []u8);
+    ip[IP_TTL] = 64 as u8;
+    write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                inet_checksum(ip[0..<ihl as usize]));
+
+    let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
+    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
+    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
+    write_u32be(tcp[TCP_SEQ..<TCP_ACK], OUR_ISN as i32);
+    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
+    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
+    tcp[TCP_FLAGS] = TCP_FLAG_SYN | TCP_FLAG_ACK;
+    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
+    write_u16be(tcp[TCP_URGENT..<20], 0);
+
+    fix_tcp_checksum(ip, tcp);
+}
+
+// Identical to http_server.tkb's own build_fin_ack.
+fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
+    slice_copy(eth[0..<6], eth[6..<12]);
+    slice_copy(eth[6..<12], our_mac as []u8);
+
+    let ip  = eth[14..<34];
+    let tcp = eth[34..<54];
+
+    slice_copy(ip[IP_DST..<20],     ip[IP_SRC..<IP_DST]);
+    slice_copy(ip[IP_SRC..<IP_DST], our_ip as []u8);
+    ip[IP_TTL] = 64 as u8;
+    write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                inet_checksum(ip[0..<ihl as usize]));
+
+    let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
+    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
+    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
+    write_u32be(tcp[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
+    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
+    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
+    tcp[TCP_FLAGS] = TCP_FLAG_FIN | TCP_FLAG_ACK;
+    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
+    write_u16be(tcp[TCP_URGENT..<20], 0);
+
+    fix_tcp_checksum(ip, tcp);
+}
+
+// Builds "HTTP/1.1 200 OK ... <file bytes>" into the payload area
+// (overwriting the request that was there), combined with our own FIN --
+// same structure as http_server.tkb's build_http_response_fin, except the
+// body comes from build_body_from_sdcard() (real SD card bytes) instead of
+// a templated HTML page, and Content-Type is text/plain (raw file bytes,
+// not necessarily HTML markup).
+fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
+    let body_len: isize = build_body_from_sdcard();
+
+    let payload: *u8 = (eth as *u8) + 54;
+    let mut len: isize = 0;
+    len = len + copy_str(payload + len,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=us-ascii\r\nContent-Length: ");
+    len = len + write_udec(payload + len, body_len as i32);
+    len = len + copy_str(payload + len, "\r\nConnection: close\r\n\r\n");
+    bytes_copy(payload + len, html_body as *u8, body_len);
+    len = len + body_len;
+
+    let wire_len: i32 = len as i32;
+    if (len >= 0 && len <= (HTTP_MAX_PAYLOAD as isize)
+        && wire_len >= 0 && wire_len <= HTTP_MAX_PAYLOAD) {
+        // Snapshot into an immutable local -- see http_server.tkb's
+        // identical comment for why this matters for narrowing.
+        let n: i32 = wire_len;
+        let n_idx: usize = n as usize;
+
+        slice_copy(eth[0..<6], eth[6..<12]);
+        slice_copy(eth[6..<12], our_mac as []u8);
+
+        let ip      = eth[14..<34];
+        let tcp_seg = eth[34..<54 + n_idx];
+
+        slice_copy(ip[IP_DST..<20],     ip[IP_SRC..<IP_DST]);
+        slice_copy(ip[IP_SRC..<IP_DST], our_ip as []u8);
+        ip[IP_TTL] = 64 as u8;
+        write_u16be(ip[IP_TOTAL_LEN..<4], (ihl as i32) + 20 + n);
+        write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
+        write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                    inet_checksum(ip[0..<ihl as usize]));
+
+        let client_port: u16 = read_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
+        write_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
+        write_u16be(tcp_seg[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
+        write_u32be(tcp_seg[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
+        write_u32be(tcp_seg[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
+        tcp_seg[TCP_DATA_OFFSET] = (5 << 4) as u8;
+        tcp_seg[TCP_FLAGS] = TCP_FLAG_ACK | TCP_FLAG_PSH | TCP_FLAG_FIN;
+        write_u16be(tcp_seg[TCP_WINDOW..<TCP_CHECKSUM], 65535);
+        write_u16be(tcp_seg[TCP_URGENT..<20], 0);
+
+        fix_tcp_checksum(ip, tcp_seg);
+        return n;
+    }
+    return -1;
+}
+
+fn app_main() {
+    uart_puts("http_server_sdcard: init\r\n");
+
+    if (net_init() == 0) {
+        uart_puts("http_server_sdcard: device/link not found\r\n");
+    } else {
+        net_read_mac(our_mac as *u8);
+        slice_copy(our_ip as []u8, HTTP_SERVER_IP as []u8);
+
+        if (disk_initialize() != 0) {
+            uart_puts("http_server_sdcard: disk_initialize FAIL\r\n");
+        }
+        // Mount only -- never format. This card's real, externally
+        // provisioned content is the whole point (see this file's header
+        // comment); a fat_open() below simply fails if the card is
+        // missing/blank/unmounted, and build_body_from_sdcard() falls
+        // back to a short error message rather than the server refusing
+        // to answer.
+        fat_mount();
+
+        uart_puts("http_server_sdcard: ready\r\n");
+
+        while (1) {
+            net_rx_wait();
+            let acquired: *NetRxCpuOwned = net_rx_acquire();
+            if ((acquired as usize) != 0) {
+            let len: i32 = net_rx_len(acquired);
+            let mut should_tx: i32 = 0;
+            let mut tx_len: i32 = 0;
+            let frame = net_rx_frame(acquired);
+            let ethertype: i32 = read_u16be(frame[12..<14]);
+
+            if (len >= 42 && ethertype == 0x0806) {
+                let arp = frame[14..<42];
+                if (read_u16be(arp[ARP_HTYPE..<ARP_PTYPE]) == 1 &&
+                    read_u16be(arp[ARP_PTYPE..<ARP_HLEN]) == 0x0800 &&
+                    arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
+                    read_u16be(arp[ARP_OPER..<ARP_SHA]) == 1) {
+                    if (slice_eq(arp[ARP_TPA..<28], our_ip as []u8)) {
+                        build_arp_reply(frame);
+                        should_tx = 1;
+                        tx_len = 14 + 28;
+                    }
+                }
+            } else if (len >= 54 && len <= 1514 && ethertype == 0x0800) {
+                let len_n: i32 = len;
+                let ip = frame[14..<34];
+                let version: u8 = ip[0] >> 4;
+                let ihl:     u16 = (ip[0] & 0x0f) * 4;
+
+                if (version == 4 && ihl == 20) {
+                    let len16: u16 = len_n as u16;
+                    let total_len:       u16 = read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
+                    let ip_len_in_frame: u16 = len16 - 14;
+
+                    if (total_len <= ip_len_in_frame && total_len >= ihl &&
+                        ip[IP_PROTOCOL] == PROTO_TCP &&
+                        inet_checksum(ip[0..<ihl as usize]) == 0) {
+                        if (slice_eq(ip[IP_DST..<20], our_ip as []u8)) {
+                            let tcp:     [u8; 20..] = frame[34..<54];
+                            let tcp_len: u16 = total_len - ihl;
+                            let doff: u8 = tcp[TCP_DATA_OFFSET] >> 4;
+
+                            if (tcp_len >= 20 && doff >= 5 && doff <= 15) {
+                            let tcp_hdr_len: u16 = (doff * 4) as u16;
+
+                            if (tcp_len >= tcp_hdr_len) {
+                                let mut pseudo: [u8; 12];
+                                slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
+                                slice_copy(pseudo[4..<8], ip[IP_DST..<20]);
+                                pseudo[8] = 0 as u8;
+                                pseudo[9] = PROTO_TCP;
+                                write_u16be(pseudo[10..<12], tcp_len);
+                                let sum: i32 = checksum_add(pseudo as []u8, 0);
+                                let tcp_len_idx: usize =
+                                    tcp_len as usize;
+                                let tcp_seg = frame[34..<34 + tcp_len_idx];
+
+                                if (checksum_fold(checksum_add(tcp_seg, sum)) == 0) {
+                                    let dst_port: u16 = read_u16be(tcp[TCP_DST_PORT..<TCP_SEQ]) as u16;
+                                    let src_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
+                                    let flags:    u8  = tcp[TCP_FLAGS];
+                                    let seq:      u32 = read_u32be(tcp[TCP_SEQ..<TCP_ACK]) as u32;
+                                    let ack:      u32 = read_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET]) as u32;
+
+                                    if (dst_port == HTTP_PORT) {
+                                        if (conn_state == ConnState::Listen) {
+                                            if ((flags & TCP_FLAG_SYN) != 0) {
+                                                slice_copy(conn_remote_ip as []u8, ip[IP_SRC..<IP_DST]);
+                                                conn_remote_port = src_port;
+                                                conn_rcv_nxt = seq + 1;
+                                                conn_snd_nxt = OUR_ISN + 1;
+
+                                                build_syn_ack(frame, ihl);
+                                                should_tx = 1;
+                                                tx_len = 14 + ihl + 20;
+                                                conn_state = ConnState::SynRcvd;
+                                            }
+                                        } else {
+                                            if (slice_eq(ip[IP_SRC..<IP_DST], conn_remote_ip as []u8) &&
+                                                src_port == conn_remote_port) {
+                                                if ((flags & TCP_FLAG_RST) != 0) {
+                                                    conn_state = ConnState::Listen;
+                                                } else if (conn_state == ConnState::SynRcvd) {
+                                                    if ((flags & TCP_FLAG_ACK) != 0 &&
+                                                        (flags & TCP_FLAG_SYN) == 0 &&
+                                                        ack == conn_snd_nxt && seq == conn_rcv_nxt) {
+                                                        conn_state = ConnState::Established;
+                                                    }
+                                                } else if (conn_state == ConnState::Established) {
+                                                    let data_len: u16 = max(tcp_len - tcp_hdr_len, 0);
+                                                    let data_off: u16 = 34 + tcp_hdr_len;
+                                                    let data_off_idx: usize =
+                                                        data_off as usize;
+                                                    if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
+                                                        conn_rcv_nxt = conn_rcv_nxt + 1;
+                                                        build_fin_ack(frame, ihl);
+                                                        should_tx = 1;
+                                                        tx_len = 14 + ihl + 20;
+                                                        conn_snd_nxt = conn_snd_nxt + 1;
+                                                        conn_state = ConnState::LastAck;
+                                                    } else if (data_len >= 3 &&
+                                                               (flags & TCP_FLAG_ACK) != 0 &&
+                                                               seq == conn_rcv_nxt) {
+                                                        let data3 = frame[data_off_idx..<data_off_idx + 3];
+                                                        if (data3[0] == 'G' as u8 &&
+                                                            data3[1] == 'E' as u8 &&
+                                                            data3[2] == 'T' as u8) {
+                                                            conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
+                                                            let payload_len: i32 =
+                                                                build_http_response_fin(frame, ihl);
+                                                            if (payload_len >= 0) {
+                                                                should_tx = 1;
+                                                                tx_len = 14 + (ihl as i32) + 20 + payload_len;
+                                                                conn_snd_nxt = conn_snd_nxt + (payload_len as u32) + 1;
+                                                                conn_state = ConnState::LastAck;
+                                                            }
+                                                            // else: page unexpectedly
+                                                            // exceeded HTTP_MAX_PAYLOAD --
+                                                            // drop the reply and stay
+                                                            // ESTABLISHED so the client's
+                                                            // TCP stack can retry.
+                                                        }
+                                                    }
+                                                } else if (conn_state == ConnState::LastAck) {
+                                                    if ((flags & TCP_FLAG_ACK) != 0 && ack == conn_snd_nxt) {
+                                                        conn_state = ConnState::Listen;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (should_tx == 1) {
+                net_transmit(frame as *u8, tx_len);
+            }
+            if ((acquired as usize) != 0) {
+                net_rx_release(acquired);
+            }
+            }
+        }
+    }
+}

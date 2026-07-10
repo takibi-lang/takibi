@@ -26,10 +26,12 @@
 use "examples/common/netutil.tkb";
 use "examples/common_stm32/netconfig.tkb";
 use "examples/common_stm32/nvic.tkb";
+use "examples/common_stm32/eth_sdmmc_regs.tkb";
 
 // -- RCC / SYSCFG -----------------------------------------------------------
-let RCC_AHB1ENR: *io u32 = 0x40023830;
-let RCC_APB2ENR: *io u32 = 0x40023844;
+// RCC_AHB1ENR/RCC_APB2ENR/GPIOC_MODER/GPIOC_OSPEEDR come from
+// eth_sdmmc_regs.tkb's `use` above (GitHub issue #97 follow-up -- shared
+// with examples/common_stm32/sdmmc.tkb).
 let SYSCFG_PMC:  *io u32 = 0x40013804;
 
 // -- GPIO (MODER/OSPEEDR/AFRL/AFRH), same read-modify-write idiom as
@@ -38,8 +40,6 @@ let GPIOA_MODER:   *io u32 = 0x40020000;
 let GPIOA_OSPEEDR: *io u32 = 0x40020008;
 let GPIOA_AFRL:    *io u32 = 0x40020020;
 
-let GPIOC_MODER:   *io u32 = 0x40020800;
-let GPIOC_OSPEEDR: *io u32 = 0x40020808;
 let GPIOC_AFRL:    *io u32 = 0x40020820;
 
 let GPIOG_MODER:   *io u32 = 0x40021800;
