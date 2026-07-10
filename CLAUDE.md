@@ -345,6 +345,30 @@ size.
   check-then-sleep race. AMD64 and RISC-V code generation deliberately rejects
   these builtins until an equally race-free wake protocol (not a bare `hlt` or
   `wfi`) is designed with the interrupt controller/runtime.
+- **`examples/sdcard`'s `disk_read`/`disk_write` (SDMMC1 driver, GitHub issue #62) are
+  deliberately polling-only, not DMA/interrupt-driven -- this was tried and abandoned.**
+  A DMA2 (Stream3/Channel4, then Stream6/Channel4 -- both documented SDIO/SDMMC DMA
+  mappings on this MCU family) + SDMMC1-interrupt-driven version was built (mirroring
+  `eth.tkb`'s DMA+interrupt shape: `interrupt_wait()`/`interrupt_notify()`, an
+  `SDMMC1_IRQHandler` wired into the NVIC vector table). Live hardware debugging
+  (openocd register/memory inspection) confirmed the NVIC vector table entry, ISR
+  entry/exit (`EXC_RETURN` value), and MASK/STA interrupt gating were all provably
+  correct, and reading back DMA2's own `SxCR`/`SxPAR`/`SxM0AR` showed the stream
+  configured exactly as programmed (PFCTRL, direction, MINC, PSIZE/MSIZE, CHSEL) -- yet
+  every `disk_write` stalled a few words short of the end of the 512-byte block with a
+  `TXUNDERR`, identically under both DMA stream choices and under both FIFO-burst and
+  plain direct-mode transfer configurations. Reverting to the polling-only driver (no
+  code change) on the exact same card/board immediately passed all 4 sectors again,
+  ruling out a card/hardware fault. Web research turned up multiple independent ST
+  community reports of this exact symptom (transfer stalling a handful of words before
+  completion) across the F4/F7/H7 SDIO/SDMMC + DMA combination, including one engineer
+  who spent "many hours" on it and gave up, reverting to polling -- this looks like a
+  genuinely hard, seemingly unresolved SDMMC/DMA timing interaction, not a simple
+  register misconfiguration on this project's part. The DMA+interrupt attempt was fully
+  reverted (`git checkout --` on `sdmmc.tkb`/`startup.S`/`startup_ram.S`), confirmed
+  passing on real hardware again before moving on. Revisit only with a concrete new
+  lead (e.g. a documented erratum, or ST's own HAL source for this exact IP block),
+  not by re-guessing register combinations.
 - **Hardware bring-up waits still need bounded timeouts.** STM32 MDIO busy,
   MAC software reset, PHY reset/autonegotiation, and RTC initialization poll
   status bits during startup. These are not steady-state CPU-spin paths and

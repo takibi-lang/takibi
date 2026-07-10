@@ -80,7 +80,10 @@ including the full TCP/IP stack and HTTP server -- compiles trap-free
 under it, with one deliberate, temporary exception: `examples/fatfs` is
 mid-milestone (real SD card integration still pending, see CLAUDE.md's
 "Development Process" section) and is intentionally not yet built with
-`--forbid-trap`.** A few tools do almost all of the work: refined integer ranges
+`--forbid-trap`.** `examples/sdcard`'s SDMMC1 driver (issue #62) is polling-only
+by design -- a DMA+interrupt-driven version was tried and abandoned after hitting
+a hard-to-pin-down hardware timing issue; see CLAUDE.md's "Known Limitations"
+section for the full story. A few tools do almost all of the work: refined integer ranges
 that propagate through ordinary arithmetic and bitwise masking (so a
 value like a wire-derived header length carries a real bound with no
 extra code), `min`/`max` builtins that provably clamp a value against a
