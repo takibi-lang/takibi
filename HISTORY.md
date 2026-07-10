@@ -4787,3 +4787,98 @@ Channel4 + interrupt), `examples/common_stm32/startup.S` and
 `examples/common_stm32/startup_ram.S` (new `DMA2_Stream7_IRQHandler` vector
 at IRQ70, `.weak` no-op default), `README.md` (updated to describe the fix
 instead of the open issue).
+
+## Issue #101 Follow-up: `disk_read` Also Rebuilt as DMA+Interrupt (`examples/common_stm32/sdmmc.tkb`)
+
+After closing #101, the user drew a broader lesson from it: matching a
+proven reference implementation's actual usage pattern (ChibiOS/RT using
+DMA+interrupt uniformly, not mixing it with polling on an adjacent
+peripheral) avoids obscure silicon/driver interaction bugs that a novel
+combination can trip over. `disk_read` in `sdmmc.tkb` was the one other
+place in the codebase matching this asymmetric shape -- polling-only,
+sitting right next to `disk_write`'s DMA+interrupt path -- and had its own
+long, unresolved history (see the issue #62/#98 entries above): a first
+DMA+interrupt `disk_read` attempt reliably corrupted memory (`DMA2_S3NDTR`
+running away past its expected 128-word count) once issued after roughly
+129 or more prior `disk_write` calls, survived four separate ChibiOS-
+informed fixes, and was reverted to polling as a genuinely unresolved dead
+end.
+
+**Revisited specifically because issue #101 supplied a new, previously-
+untried angle**: none of the four earlier fixes had touched cache
+maintenance around `disk_read`'s destination buffer, and issue #101's own
+UART investigation had just found a real, previously-missed cache-
+coherency bug in this project's DMA code elsewhere (a DMA source buffer
+never flushed from the D-cache before the DMA engine read it). `disk_read`
+was rebuilt to mirror `disk_write`'s DMA+interrupt structure exactly
+(same `sd_dma_config`/arm-before-command ordering, same `SDMMC1_IRQHandler`
+wakeup protocol), with `dma_prepare_rx`/`dma_finish_rx` added around the
+DMA destination -- something none of the earlier attempts had tried.
+
+**A second, distinct bug found during bring-up, not the same mechanism as
+the original NDTR-runaway mystery.** The first version of this rebuild
+called `dma_prepare_rx`/`dma_finish_rx` directly on the caller's own `buf`
+parameter (mirroring `disk_write`'s `dma_prepare_tx(buf, 512)` exactly) and
+immediately HardFaulted on real hardware, even on the ordinary 4-sector
+`examples/sdcard` test -- far short of the historical 129-write threshold,
+so this was clearly a different bug from the one being chased.
+`llvm_gen.ml`'s cache-maintenance codegen (`emit_cortex_m_cache_range`)
+documents the mechanism directly in its own comment: it operates on whole
+32-byte cache lines, rounding the requested `[ptr, ptr+len)` range OUTWARD
+to line boundaries, and warns "callers must still ensure that DMA buffers
+do not share cache lines with unrelated mutable data." `dma_finish_rx` (and
+`dma_prepare_rx`) lower to an INVALIDATE (`DCIMVAC`), which discards
+whatever is currently in a touched cache line with no writeback -- unlike
+`dma_prepare_tx`'s CLEAN (`DCCMVAC`), which only flushes a line's existing
+value to RAM and therefore cannot destroy data even if its own rounding
+spills into an unrelated live cache line. `examples/sdcard/sdcard.tkb`
+passes a plain stack-local `[u8; 512]` as `disk_read`'s `buf` argument, and
+per SPEC.md, **local-variable alignment is not supported by this language
+at all** -- so that stack buffer had no 32-byte alignment guarantee, and
+invalidating its (possibly unaligned) address range could silently discard
+adjacent live stack data (a saved register, a return address), producing
+exactly the observed real-hardware HardFault. `examples/common_stm32/
+eth.tkb` never hits this because its own `dma_prepare_rx`/`dma_finish_rx`
+calls are always on `eth_rx_bufs`, a driver-owned GLOBAL declared
+`align(32)` -- `disk_read`'s public API, unlike `eth.tkb`'s, hands DMA
+ownership of an arbitrary CALLER-supplied buffer, which cannot be assumed
+aligned.
+
+**Fix**: `disk_read` no longer touches the caller's `buf` with any cache-
+maintenance call at all. A new driver-owned `disk_read_bounce: [u8; 512]
+align(32)` global is the actual DMA destination; `dma_prepare_rx`/
+`dma_finish_rx` run against `disk_read_bounce` (always safe, since it is
+correctly aligned and driver-private), and the 512 bytes are copied into
+the caller's `buf` with a plain byte loop only after `dma_finish_rx` has
+completed -- so `buf` itself can be any alignment, preserving `disk_read`'s
+existing public contract. `disk_write` needed no equivalent bounce buffer:
+`dma_prepare_tx` being a CLEAN rather than an INVALIDATE means it cannot
+corrupt data regardless of the source buffer's alignment.
+
+**Verification**: with the bounce buffer in place, `examples/sdcard`'s
+existing hardware test passed 15/15 consecutive runs (previously HardFault-
+ing 100% of the time on the very first read). A dedicated stress test
+mirroring the exact historical reproduction (150 ascending `disk_write`
+calls -- comfortably past the old 129 threshold -- immediately followed by
+a `disk_read`, x5 rounds per run) passed **20/20 rounds with zero
+failures** across 4 independent runs; an earlier apparent hang on this same
+test turned out to be the test harness's own idle-quiet capture timeout
+firing during a legitimate multi-second pause (150 real card writes with no
+UART output in between), not a firmware problem -- resolved by widening the
+capture's stable-quiet threshold, the same class of harness tuning issue
+CLAUDE.md's `rtc`/`timer` entries already document. Full `make check`
+(71/71), `make hwcheck` (44/44, including `fatfs_sdcard` which exercises
+`disk_read` through `fat_read`), and `make hwcheck-net` (6/6) all pass with
+no regressions.
+
+It remains possible the original NDTR-runaway crash was never purely a
+cache-coherency issue and this rewrite's exact register sequence differs
+from the original failing attempt in some other, unidentified way -- but
+the fix has now held across extensive, repeated real-hardware testing
+targeting the precise historical failure condition.
+
+**Files**: `examples/common_stm32/sdmmc.tkb` (`disk_read` rewritten to
+DMA+interrupt with an `align(32)` bounce buffer; `SDMMC_FIFO`/
+`STA_RXFIFOHF`, only ever used by the old polling implementation, removed
+as dead code; header comment and `disk_read`'s own comment rewritten),
+`README.md` (updated to describe the fix instead of the open issue).

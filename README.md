@@ -81,26 +81,35 @@ card milestone (`examples/fatfs`, `examples/common/fat12.tkb`,
 `examples/common_stm32/sdmmc.tkb`, `examples/sdcard`,
 `examples/fatfs_sdcard` -- issues #61/#62/#98) now compiles trap-free
 under it,** with no remaining exceptions. `examples/common_stm32/
-sdmmc.tkb`'s SDMMC1 driver (issue #62) is deliberately asymmetric:
-`disk_write` is DMA + interrupt driven, matching `eth.tkb`'s own
-DMA+interrupt shape, but `disk_read` is plain polling -- a DMA
-`disk_read` was built and tested but reliably corrupted memory once
-issued after ~129 prior writes, an issue that survived three fixes
-cross-checked against ChibiOS's proven STM32 SDMMCv1 driver and remains
-genuinely unresolved (root cause not identified; possibly this driver,
-possibly an STM32F7 quirk, possibly specific to the individual board or
-SD card used). Separately, `fatfs_sdcard`'s real-hardware test used to
-occasionally show a single dropped UART byte (GitHub issue #101) --
-confirmed unrelated to `--forbid-trap` itself (reproduced identically on
-the pre-`--forbid-trap` version too). Root-caused to a UART TX
-architecture mismatch, not a single race condition: `uart.tkb`'s TX used
-to be per-byte-interrupt driven while `sdmmc.tkb`'s `disk_write` is
-DMA+interrupt driven, an asymmetric combination that let heavy SDMMC1 DMA
-activity intermittently starve/corrupt the UART's own interrupt-driven
-drain. Fixed by switching UART TX to DMA+interrupt too (DMA2 Stream7/
-Channel4), matching `sdmmc.tkb`/`eth.tkb`'s own shape and ChibiOS/RT's
-convention of using DMA+interrupt for both peripherals -- verified with
-30 consecutive clean runs of the exact reproduction pattern (previously
+sdmmc.tkb`'s SDMMC1 driver (issue #62) is now symmetric: both
+`disk_write` and `disk_read` are DMA + interrupt driven, matching
+`eth.tkb`'s own DMA+interrupt shape and ChibiOS/RT's own convention of
+using DMA+interrupt for both directions. `disk_read` was DMA-driven for
+a long time (a first attempt reliably corrupted memory once issued after
+~129 prior writes, survived three ChibiOS-cross-checked fixes and stayed
+unresolved), but issue #101's investigation below found a general lesson
+that applied here too: `disk_read` was rebuilt with `dma_prepare_rx`/
+`dma_finish_rx` cache maintenance around its DMA destination, verified
+clean against the exact historical reproduction (150 writes immediately
+followed by a read, well past the old 129 threshold, x5 rounds x4 runs
+with zero failures). That rebuild also surfaced a second, distinct bug --
+`dma_finish_rx` is a cache-line INVALIDATE, not a clean, and this
+language's local variables cannot be `align(32)`, so invalidating a
+caller-supplied stack buffer directly (as `examples/sdcard/sdcard.tkb`
+does) could silently discard unrelated live stack data. Fixed with an
+internal `align(32)` bounce buffer inside `disk_read`, copied out to the
+caller's buffer only after `dma_finish_rx` has run -- so the caller's
+`buf` can be any alignment, matching `disk_write`'s existing contract.
+Separately, `fatfs_sdcard`'s real-hardware test used to occasionally show
+a single dropped UART byte (GitHub issue #101) -- confirmed unrelated to
+`--forbid-trap` itself (reproduced identically on the pre-`--forbid-trap`
+version too). Root-caused to a UART TX architecture mismatch, not a
+single race condition: `uart.tkb`'s TX used to be per-byte-interrupt
+driven while `sdmmc.tkb`'s `disk_write` is DMA+interrupt driven, an
+asymmetric combination that let heavy SDMMC1 DMA activity intermittently
+starve/corrupt the UART's own interrupt-driven drain. Fixed by switching
+UART TX to DMA+interrupt too (DMA2 Stream7/Channel4) -- verified with 30
+consecutive clean runs of the exact reproduction pattern (previously
 ~1-in-6-10 failure) plus the full `make hwcheck`/`make hwcheck-net`
 suites. See `uart.tkb`'s and `sdmmc.tkb`'s own header comments and
 HISTORY.md for the full bring-up stories, including a separate, resolved
