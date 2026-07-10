@@ -519,6 +519,7 @@ run_hw_test_ram "djb2 (stm32/ram)"          examples/djb2/kernel_stm32_ram.elf  
 run_hw_test_ram "bump (stm32/ram)"          examples/bump/kernel_stm32_ram.elf          examples/bump/bump.expected
 run_hw_test_ram "scheduler (stm32/ram)"     examples/scheduler/kernel_stm32_ram.elf     examples/scheduler/scheduler.expected
 run_hw_test_ram "struct (stm32/ram)"        examples/struct/kernel_stm32_ram.elf        examples/struct/struct.expected
+run_hw_test_ram "struct_refined (stm32/ram)" examples/struct_refined/kernel_stm32_ram.elf examples/struct_refined/struct_refined.expected
 run_hw_test_ram "refined (stm32/ram)"       examples/refined/kernel_stm32_ram.elf       examples/refined/refined.expected
 run_hw_test_ram "narrow (stm32/ram)"        examples/narrow/kernel_stm32_ram.elf        examples/narrow/narrow.expected
 run_hw_test_ram "for (stm32/ram)"           examples/for/kernel_stm32_ram.elf           examples/for/for.expected

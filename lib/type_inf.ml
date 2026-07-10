@@ -81,6 +81,38 @@ let unify_at loc t1 t2 =
   try unify t1 t2
   with Unify_error msg -> raise (TypeError (loc, msg))
 
+(* GitHub issue #100 follow-up: a bare integer literal's inferred type is a
+   polymorphic, unbound type variable (see IntLit's own case below,
+   `fresh ()`), so `unify_at` alone lets it bind STRUCTURALLY against any
+   refined target -- e.g. `let v: {0..<8 as usize} = 20;` -- without ever
+   checking whether the literal's actual VALUE fits {lo..<hi}. That is a
+   genuine soundness hole, not just a missing diagnostic: downstream code
+   (an array index, a narrowed subslice, ...) trusts `v`'s declared
+   {0..<8} range to elide its own bounds check, so an out-of-range literal
+   silently "proving" a range it doesn't satisfy lets --forbid-trap accept
+   code with a real, unchecked out-of-bounds access at runtime. Checked
+   here at every site where a literal-or-Const_env-constant expression
+   flows into an already-known target type (Let, Assign, AssignDeref,
+   AssignIndex, AssignField, Return, Call arguments, StructLit fields) --
+   reuses Const_env.bound_value, the same "is this expression a
+   compile-time-known integer" resolver already used throughout this file
+   (e.g. collect_bounds's range_of), so bare literals and named constants
+   are both covered identically. A non-constant expression (a variable, a
+   computed value) is left alone: unify's existing anti-subtyping guard
+   (`t1, TRefinedInt (lo, hi, base) when t1 = repr base -> ...`) already
+   correctly rejects an unproven plain-base value flowing into a refined
+   target, so there is nothing extra to check there. *)
+let check_literal_fits_refined loc (e : Ast.expr) (target : ty) =
+  match repr target with
+  | TRefinedInt (lo, hi, _) ->
+      (match Const_env.bound_value e with
+       | Some k when k < lo || k >= hi ->
+           raise (TypeError (loc, Printf.sprintf
+             "constant value %d does not fit the refined type {%d..<%d}"
+             k lo hi))
+       | _ -> ())
+  | _ -> ()
+
 (* -- Expression inference -------------------------------------------------- *)
 
 (* True for all unsigned integer types (including usize) *)
@@ -653,7 +685,16 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                      (try unify src_ty tgt; TRefinedInt (lo, hi, tgt)
                       with Unify_error _ -> tgt)
                  | _ -> tgt)
-            | _ -> tgt)))
+            | _ ->
+                (* GitHub issue #100 follow-up: an EXPLICIT `x as {lo..<hi
+                   as base}` cast target reaches here for any source that
+                   isn't itself a pointer/slice/already-refined value (in
+                   particular, a bare integer literal) -- same gap as
+                   Let/Assign/etc: `tgt` was already computed from the
+                   written syntax with no check against a literal source's
+                   actual value. *)
+                check_literal_fits_refined e.loc e tgt;
+                tgt)))
 
   | FieldGet (base_expr, fname) ->
       let bt = infer_expr senv eenv tyenv fenv base_expr in
@@ -1157,7 +1198,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  fname (List.length param_tys) (List.length args)));
            List.iter2 (fun arg pt ->
              let at = infer_expr senv eenv tyenv fenv arg in
-             unify_at arg.loc at pt
+             unify_at arg.loc at pt;
+             check_literal_fits_refined arg.loc arg pt
            ) args param_tys;
            ret_ty)
 
@@ -1190,7 +1232,8 @@ let rec check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : unit =
   | _ ->
       let te = infer_expr senv eenv tyenv fenv e in
       (* If expected type is io T: check compatibility with T (strip the storage qualifier) *)
-      unify_at e.loc te (strip_io expected)
+      unify_at e.loc te (strip_io expected);
+      check_literal_fits_refined e.loc e (strip_io expected)
 
 (* -- Flow-sensitive type narrowing ----------------------------------------- *)
 
@@ -1360,6 +1403,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
   | Return e ->
       let t = infer_expr senv eenv tyenv fenv e in
       unify_at e.loc t ret_ty;
+      check_literal_fits_refined e.loc e ret_ty;
       (tyenv, raw_locals)
   | Expr e ->
       ignore (infer_expr senv eenv tyenv fenv e);
@@ -1373,6 +1417,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       (* Assignment: match as "actual(rhs) is a subtype of expected(lhs)".
          TRefinedInt -> TI32 is OK (assigning with loss of precision). Reverse is NG. *)
       unify_at e.loc ety (strip_io vty);
+      check_literal_fits_refined e.loc e (strip_io vty);
       (tyenv, raw_locals)
   | AssignDeref (ptr_expr, val_expr) ->
       let pt = infer_expr senv eenv tyenv fenv ptr_expr in
@@ -1387,6 +1432,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       in
       let vt = infer_expr senv eenv tyenv fenv val_expr in
       unify_at val_expr.loc vt inner;
+      check_literal_fits_refined val_expr.loc val_expr inner;
       (tyenv, raw_locals)
   | AssignIndex (id, idx, rhs) ->
       (* Dispatch on the variable's original type ([T; N] vs *T). tyenv holds the pre-decay type *)
@@ -1414,6 +1460,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
             Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))
       in
       unify_at rhs.loc rt elem_ty;
+      check_literal_fits_refined rhs.loc rhs elem_ty;
       (tyenv, raw_locals)
 
   | AssignField (base_expr, fname, val_expr) ->
@@ -1442,6 +1489,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       let vt = infer_expr senv eenv tyenv fenv val_expr in
       (* Assignment to io field: check compatibility with T (io is a storage qualifier, strip it) *)
       unify_at val_expr.loc vt (strip_io field_ty);
+      check_literal_fits_refined val_expr.loc val_expr (strip_io field_ty);
       (tyenv, raw_locals)
   | Let (is_mut, name, ty_opt, expr_opt, _align_opt) ->
       let ty = of_ast_opt ty_opt in
@@ -1467,6 +1515,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
             let et = infer_expr senv eenv tyenv fenv e in
             (* Initialization: match actual(expr) as a subtype of expected(type annotation) *)
             unify_at e.loc et (strip_io ty);
+            check_literal_fits_refined e.loc e (strip_io ty);
             Some et
       in
       (* Proofs are only lost at mutation points, never at annotation
@@ -2188,6 +2237,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 round). *)
              (try unify et (strip_io ty)
               with Unify_error m -> raise (TypeError (e.loc, m)));
+             check_literal_fits_refined e.loc e (strip_io ty);
              (* Mirrors local lets' bind_ty exactly (see that comment) --
                 this is the piece that actually matters for issue #77: not
                 just "does this type-check" but "does the global keep the

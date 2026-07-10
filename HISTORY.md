@@ -5033,3 +5033,122 @@ regressions.
 helper), `SPEC.md` (documented the hi-only unsigned case and the signed
 negative control), `examples/common/fat12.tkb`, `examples/fatfs/
 fatfs.tkb`, `examples/tcp_echo/tcp_echo.tkb` (simplified narrowing sites).
+
+## GitHub Issue #100: Refinement Type on Struct Field -- and a Bigger Soundness Hole Found While Scoping It
+
+The user asked how heavy issue #100 ("Refinement type on struct field")
+would be before committing to it. Investigated by direct compilation
+tests rather than reading code and guessing: a `struct Foo { idx: {0..<8
+as usize}; }` field, read directly, through a pointer, through an array
+element, passed to an exact-match refined parameter, or read repeatedly,
+**already compiled clean under `--forbid-trap`** -- the core mechanism
+needed no new code at all. `struct_fields`'s grammar rule already used
+the general `type_expr` production (which includes `TypeRefined`), and
+`FieldGet`/`AssignField`'s existing `unify_at` calls already handled a
+refined field type correctly for every read/pass-through case tried.
+
+**While probing for the actual gap that must have motivated the issue,
+found something far more serious**: an out-of-range integer LITERAL
+assigned to (or initialized against, or passed as an argument for) a
+refined-type target was **silently accepted with no check and no trap,
+even under `--forbid-trap`**. `let v: {0..<8 as usize} = 20;` followed by
+an unchecked `buf[v]` compiled with zero trap sites and would genuinely
+read/write out of bounds at runtime -- a real violation of
+`--forbid-trap`'s core promise ("zero trap sites remain because the type
+system already proved safety"), not merely a missing diagnostic. Verified
+this was general, not struct-field-specific, by reproducing it identically
+across `let` initializers, plain `Assign`, function call arguments,
+`AssignField` (struct fields, the issue #100 case), and struct literals.
+Also confirmed a DIFFERENT, lower-severity case (`let x: u8 = 300;`, a
+non-refined narrow type) was unaffected by design -- silent truncation
+there is a usability wart, not a `--forbid-trap` soundness violation,
+since no bounds-check elision is involved.
+
+**Root cause**: `IntLit`'s inferred type is `fresh ()`, an unconstrained,
+polymorphic type variable (so a bare literal can unify with whichever
+concrete integer type context demands) -- `unify`'s `TRefinedInt`
+subtyping rules only ever check that the SOURCE TYPE's *shape* fits the
+target (e.g. "some already-u8-range-shaped value unifies with u8"), they
+have no way to see the literal's actual numeric VALUE, since by the time
+`unify` runs, the literal has already degraded to an unbound type
+variable carrying no value information at all.
+
+**Rejected fix approach**: making `IntLit`'s inferred type immediately
+`TRefinedInt (k, k+1, fresh_base)` (encoding the literal's exact value
+into its OWN type, so `unify`'s existing machinery would see it
+naturally) was considered and set aside as too invasive for this pass --
+several of `unify`'s existing `TRefinedInt`-vs-concrete-type rules (e.g.
+`TRefinedInt (lo, hi, _), TU8 when ... -> ()`) explicitly discard the
+refined value's base position without binding it, so a `TRefinedInt`
+wrapping a still-unresolved inner type variable could leak an unbound
+TVar through to codegen with no clear resolution point -- a genuinely
+structural change with much wider blast radius than this fix needed.
+
+**Actual fix**: a new `check_literal_fits_refined loc e target` helper in
+`type_inf.ml`, called immediately alongside `unify_at` at every site where
+an expression flows into an already-declared target type: `Let`,
+`Assign`, `AssignDeref`, `AssignIndex`, `AssignField`, `Return`, function
+call arguments, and (via `check_expr`'s existing recursive base case, so
+nested/array struct literals are covered automatically) `StructLit`
+fields. Reuses `Const_env.bound_value` -- already the file's standard
+"is this expression a compile-time-known integer" resolver (e.g.
+`collect_bounds`'s `range_of`) -- rather than adding a second, parallel
+literal-detection mechanism: if `target`'s `repr` is `TRefinedInt (lo, hi,
+_)` and the expression resolves to a known constant `k` outside
+`[lo, hi)`, this is now a compile-time `TypeError` naming the actual
+value and the range it failed to fit. A non-constant expression (a
+variable, a computed value) is left entirely alone -- the PRE-EXISTING
+anti-subtyping guard (`t1, TRefinedInt (lo, hi, base) when t1 = repr
+base -> ...`) already correctly rejects an unproven plain-base value
+flowing into a refined target, confirmed still working via its own
+negative-control test below.
+
+**A 9th site found on a deliberate follow-up completeness audit, after
+the user asked what a "fix every call site by hand" approach actually
+guarantees vs. a structural one.** Re-walked every `unify`/`unify_at`
+call site in `type_inf.ml` by hand (not just the ones noticed while
+writing the fix) to check whether the enumerated-list approach had truly
+covered every "value flows into an already-declared refined type"
+boundary. Found one real gap: `Cast`'s handling of an EXPLICIT `x as
+{lo..<hi as base}` target (as opposed to the *bare*-cast-inference form
+issue #72 added) fell through to a final `| _ -> tgt` arm that returned
+the written target type with no check against the source at all --
+`20 as {0..<8 as usize}` compiled cleanly, same bug, 9th call site.
+Fixed the same way as the other 8. Also specifically checked the global-
+initializer "reference another global by name" path (`let B: {0..<8 as
+usize} = SOME_OTHER_GLOBAL;`) since it has its own separate `unify` call
+outside the general expression case -- confirmed this one was already
+safe without needing the new check: an unrefined global reference hits
+the pre-existing anti-subtyping guard and is correctly rejected already
+(with a less precise error message than the new check would give, but
+soundly rejected either way), so it was left alone. This 9th find is
+itself the concrete answer to "how do you know the enumerated list is
+complete": it wasn't, on the first pass -- the fix only reaches the
+soundness guarantee for sites someone actually thought to check, not
+automatically for the whole class, which is exactly the tradeoff
+against the rejected "change IntLit's own type" approach discussed with
+the user.
+
+**Verification**: 12 unit tests in `test/test_takibi.ml` (one per call
+site including the 9th, plus a positive control confirming the already-
+working struct-field mechanism keeps compiling with zero trap sites, plus
+a negative control confirming the pre-existing unproven-value rejection
+is untouched) -- `dune test` 491/491. A new example,
+`examples/struct_refined/struct_refined.tkb`, demonstrates the feature
+end to end (a refined struct field written/read directly, through a
+pointer, and through an array element, all with zero trap sites) and was
+added to both the QEMU suite (`scripts/run_qemutest.sh`) and the STM32
+hardware suite (`scripts/run_hwtest_ram.sh`), verified passing on real
+hardware. `make check` (72/72), `make hwcheck` (45/45), and
+`make langcheck` all pass with no regressions -- no existing example in
+the whole codebase had ever accidentally relied on the unsound literal-
+acceptance behavior.
+
+**Files**: `lib/type_inf.ml` (new `check_literal_fits_refined`, called
+from 9 sites: `Call`, `Return`, `Assign`, `AssignDeref`, `AssignIndex`,
+`AssignField`, `Let`, `Cast`'s explicit-refined-target arm, `check_expr`'s
+base case, plus the global-initializer scalar path), `test/test_takibi.ml`
+(12 new tests), `examples/struct_refined/struct_refined.tkb` + `.expected`
+(new example), `Makefile`, `scripts/run_qemutest.sh`,
+`scripts/run_hwtest_ram.sh` (wired the new example into both suites),
+`SPEC.md` (documented refined struct fields under "Structs").

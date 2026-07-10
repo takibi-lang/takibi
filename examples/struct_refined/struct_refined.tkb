@@ -1,0 +1,64 @@
+// Refinement type on a struct field (GitHub issue #100).
+//
+// A struct field's declared type may itself be a refined `{lo..<hi as
+// base}`, not just a plain scalar. A read (direct, through a pointer, or
+// through an array element) carries that proven range forward exactly
+// like a refined local or parameter -- usable directly as an array index
+// or passed to an exact-match refined parameter, with zero runtime
+// bounds checks. This demo writes and reads an 8-byte buffer entirely
+// through a struct field typed {0..<8 as usize}; the whole program
+// compiles with zero llvm.trap sites (verified by examples/refined's
+// same "no brk #0 in the generated machine code" goal).
+//
+// Also fixed alongside this feature: an out-of-range literal assigned to
+// a refined struct field (or any other refined-type target) used to be
+// silently accepted with no check at all -- a real soundness hole, since
+// --forbid-trap would then elide a genuinely-needed bounds check
+// downstream. `slot.idx = 20;` for a `{0..<8 as usize}` field is now a
+// compile error; see test/test_takibi.ml's issue #100 tests for the
+// full set of call sites this covers (let, assign, call argument,
+// return, array element, pointer write, struct literal).
+//
+// Expected QEMU output:
+//   ABCD\r\n
+
+struct Slot {
+    idx: {0..<8 as usize};
+}
+
+let mut buf: [u8; 8];
+let mut slots: [Slot; 3];
+
+// A refined struct field, passed by value, unifies EXACTLY with a
+// same-range refined parameter -- no cast needed at the call site.
+fn write_at(i: {0..<8 as usize}, c: u8) {
+    buf[i] = c;
+}
+
+// Reading a refined field through a pointer to the struct carries the
+// same proven range as a direct read.
+fn read_via_ptr(s: *Slot) -> u8 {
+    return buf[s.idx];
+}
+
+fn app_main() {
+    let mut s: Slot;
+    s.idx = 3;
+    buf[s.idx] = 'D';       // direct field-as-index write
+    let d: u8 = read_via_ptr(&s); // read through a pointer to the struct
+
+    // Array of structs: each element's refined field still proves its
+    // own range after the bounds-checked element GEP.
+    slots[0].idx = 0;
+    slots[1].idx = 1;
+    slots[2].idx = 2;
+    write_at(slots[0].idx, 'A'); // pass an array-of-structs field to a refined parameter
+    buf[slots[1].idx] = 'B';
+    buf[slots[2].idx] = 'C';
+
+    uart_putc(buf[0]);
+    uart_putc(buf[1]);
+    uart_putc(buf[2]);
+    uart_putc(d);
+    uart_puts("\r\n");
+}

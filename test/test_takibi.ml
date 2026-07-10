@@ -4495,6 +4495,148 @@ let codegen_tests = [
           return buf[0];
         }");
 
+  (* GitHub issue #100 follow-up: an out-of-range integer literal used to
+     unify SILENTLY against a refined target -- IntLit's own inferred type
+     is a polymorphic, unbound type variable (see type_inf.ml's `IntLit _
+     -> fresh ()`), which unify() lets bind structurally to ANY target,
+     including TRefinedInt, with no check on the literal's actual VALUE.
+     A genuinely out-of-range literal therefore "proved" a range it did
+     not satisfy, and --forbid-trap then elided a real bounds check
+     downstream -- a true soundness hole (found while investigating issue
+     #100, "Refinement type on struct field": struct field reads/writes
+     already worked correctly, but this literal-value gap affected EVERY
+     refined-type target, not just struct fields). Fixed by
+     check_literal_fits_refined, called alongside unify_at at every site
+     where a literal-or-Const_env-constant expression flows into an
+     already-declared target type. One test per call site below. *)
+  Alcotest.test_case
+    "issue #100: an out-of-range literal `let` initializer against a \
+     refined target is now a compile error, not a silently-accepted false \
+     proof" `Quick
+    (expect_type_error "does not fit the refined type"
+       "fn refnum100_let() {
+          let v: {0..<8 as usize} = 20;
+        }");
+
+  Alcotest.test_case
+    "issue #100: an out-of-range literal `Assign` (not just the \
+     initializer) to an already-refined mutable local is now a compile \
+     error" `Quick
+    (expect_type_error "does not fit the refined type"
+       "fn refnum100_assign() {
+          let mut v: {0..<8 as usize} = 3;
+          v = 20;
+        }");
+
+  Alcotest.test_case
+    "issue #100: an out-of-range literal function-call argument against a \
+     refined parameter is now a compile error" `Quick
+    (expect_type_error "does not fit the refined type"
+       "fn refnum100_callee(i: {0..<8 as usize}) {}
+        fn refnum100_call() {
+          refnum100_callee(20);
+        }");
+
+  Alcotest.test_case
+    "issue #100: an out-of-range literal `return` value against a refined \
+     return type is now a compile error" `Quick
+    (expect_type_error "does not fit the refined type"
+       "fn refnum100_ret() -> {0..<8 as usize} {
+          return 20;
+        }");
+
+  Alcotest.test_case
+    "issue #100: an out-of-range literal array-element assignment against \
+     a refined element type is now a compile error" `Quick
+    (expect_type_error "does not fit the refined type"
+       "fn refnum100_arr() {
+          let mut arr: [{0..<8 as usize}; 4];
+          arr[0] = 20;
+        }");
+
+  Alcotest.test_case
+    "issue #100: an out-of-range literal write through a pointer to a \
+     refined type is now a compile error" `Quick
+    (expect_type_error "does not fit the refined type"
+       "fn refnum100_deref(p: *{0..<8 as usize}) {
+          *p = 20;
+        }");
+
+  Alcotest.test_case
+    "issue #100: an out-of-range literal cast to an EXPLICIT refined \
+     target (`x as {lo..<hi as base}`, a 9th call site found only after \
+     the first 8 were already fixed and reported) is now a compile \
+     error too" `Quick
+    (expect_type_error "does not fit the refined type"
+       "fn refnum100_cast() -> usize {
+          return 20 as {0..<8 as usize};
+        }");
+
+  Alcotest.test_case
+    "issue #100 positive control: an in-range literal cast to an explicit \
+     refined target still compiles with zero trap sites" `Quick
+    (expect_trap_sites 0
+       "fn refnum100_cast_ok() -> usize {
+          return 3 as {0..<8 as usize};
+        }");
+
+  Alcotest.test_case
+    "issue #100: an out-of-range literal struct-field ASSIGNMENT (the \
+     motivating case -- a refined struct field, e.g. `struct Foo { idx: \
+     {0..<8 as usize}; }`) is now a compile error" `Quick
+    (expect_type_error "does not fit the refined type"
+       "struct Refnum100Foo { idx: {0..<8 as usize}; }
+        fn refnum100_field_assign() {
+          let mut f: Refnum100Foo;
+          f.idx = 20;
+        }");
+
+  Alcotest.test_case
+    "issue #100: an out-of-range literal in a STRUCT LITERAL field is now \
+     a compile error, including through check_expr's recursive handling \
+     (not just the top-level scalar case)" `Quick
+    (expect_type_error "does not fit the refined type"
+       "struct Refnum100Foo { idx: {0..<8 as usize}; }
+        fn refnum100_struct_lit() {
+          let mut f: Refnum100Foo = {20};
+        }");
+
+  Alcotest.test_case
+    "issue #100 positive control: an IN-RANGE literal struct field \
+     (declare, assign, read as an array index, pass to a refined \
+     parameter, read through a pointer) compiles with zero trap sites -- \
+     this basic mechanism already worked before the literal-value fix; \
+     this regression-covers it staying that way" `Quick
+    (expect_trap_sites 0
+       "struct Refnum100Foo { idx: {0..<8 as usize}; }
+        let mut refnum100_buf: [u8; 8];
+        fn refnum100_takes_refined(i: {0..<8 as usize}) -> u8 {
+          return refnum100_buf[i];
+        }
+        fn refnum100_via_ptr(p: *Refnum100Foo) -> u8 {
+          return refnum100_buf[p.idx];
+        }
+        fn refnum100_ok() -> u8 {
+          let mut f: Refnum100Foo;
+          f.idx = 3;
+          refnum100_buf[f.idx] = 'A';
+          let x: u8 = refnum100_takes_refined(f.idx);
+          let y: u8 = refnum100_via_ptr(&f);
+          return refnum100_buf[f.idx];
+        }");
+
+  Alcotest.test_case
+    "issue #100 negative control: an UNPROVEN runtime (non-constant) \
+     value assigned to a refined struct field is still rejected by the \
+     PRE-EXISTING anti-subtyping guard -- check_literal_fits_refined only \
+     ever adds a NEW rejection for compile-time-known values, it must not \
+     weaken this existing, unrelated check" `Quick
+    (expect_type_error "cannot pass unproven"
+       "struct Refnum100Foo { idx: {0..<8 as usize}; }
+        fn refnum100_unproven(f: *Refnum100Foo, n: usize) {
+          f.idx = n;
+        }");
+
 ]
 
 (* GitHub issue #55: Use_resolver's DFS closure algorithm, tested against

@@ -262,6 +262,20 @@ affine opaque struct Name;                   // opaque + ownership-handle semant
   whole_array`) or reading the field to pass/index elsewhere (`let p: *u8
   = s.field; p[i] = v;`) work.
 - `&s` -- address of a struct variable, type `*Name`.
+- **A field's declared `type` may itself be a refined `{lo..<hi as
+  base}`** (GitHub issue #100), e.g. `struct Name { idx: {0..<8 as
+  usize}; }`. A read (`s.field`, including through `s: *Name`, an array
+  element `arr[i].field`, or repeated reads of the same field) carries
+  that proven range forward exactly like a refined local or parameter,
+  usable directly as an array index or passed to an exact-match refined
+  parameter with no runtime check. A write (`s.field = v`, a struct
+  literal's positional field value, or an assignment through a pointer)
+  is checked the same way as any other refined-typed target: an
+  already-proven value or a compile-time constant that fits `{lo..<hi}`
+  is accepted with no runtime check; an unproven runtime value is
+  rejected at compile time (narrow it first, e.g. `if (v >= lo && v <
+  hi) { s.field = v; }`); a compile-time constant that does NOT fit is a
+  compile error, not silently truncated.
 - **`opaque struct Name;`** has no constructible value, fields, or size
   -- usable only behind a pointer. Intended for driver-owned state
   handles the application never inspects directly. Two distinct opaque
