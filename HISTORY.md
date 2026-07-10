@@ -4142,3 +4142,228 @@ the top of `infer_program`; `genv`'s fold simplified back down, its
 redundant checks removed), `test/test_takibi.ml` (2 existing tests'
 expected message text updated, 5 new tests for the struct/enum/cross-
 kind combinations).
+
+### GitHub Issue #61: `fatfs` -- FAT12 on an In-Memory Block Device, Then on the Real STM32 Board
+
+New example, `examples/fatfs/fatfs.tkb`: a from-scratch FAT12 filesystem
+driver, deliberately built and verified against an in-memory block device
+(no real SD/eMMC hardware, that's the separate, deferred issue #62) before
+any real storage hardware exists -- discussed and agreed with the user on
+the issue itself before starting: bringing up the filesystem logic and the
+SD card's SPI/SDIO timing at the same time would make failures hard to
+attribute to either one, the same reasoning that put `ip_parse`/`tcp_parse`
+before `icmp_echo`/`tcp_echo` earlier in this project's history.
+
+**New durable process, established mid-session, not just for this
+feature**: this work is what prompted `CLAUDE.md`'s "Development Process:
+Prove New `.tkb` Code Without `--forbid-trap` First, Then Turn It On"
+section -- write and fully verify new `.tkb` work with plain checked
+array/slice indexing and ordinary unrefined types first (no raw pointers
+used just to dodge a bounds check, no `--forbid-trap`), commit that as a
+known-good baseline, and only turn refinement types/`--forbid-trap` on
+once the *whole milestone* (`fatfs` + real SD card) works end to end. The
+first draft of this file actually *did* reach directly for raw-pointer
+arithmetic everywhere specifically to make `--forbid-trap` pass trivially
+-- the user caught this immediately ("that's not in the spirit of what I
+asked for") and had it rewritten to plain checked-array indexing before
+continuing; see that `CLAUDE.md` section for the full rule and reasoning,
+including the literal-only restriction on `{lo..<hi as base}` bounds that
+made some of the checked-array rewrite awkward (documented properly in
+`SPEC.md` afterward too, see below).
+
+**FAT12 core** (`examples/fatfs/fatfs.tkb`): `mem_block_read`/
+`mem_block_write` are the swappable block-device boundary the issue asked
+for (only these two need a different implementation once issue #62 wires
+up real SD/eMMC hardware); everything else operates on `disk` (a global
+`[u8; SECTOR_SIZE * TOTAL_SECTORS]`, currently a 64KB placeholder disk)
+only through them. `Fat12BootSector`/`DirEntry` are `struct packed`
+overlays (same `sector_buf as *Fat12BootSector`-style cast
+`examples/common_qemu/virtio_mmio.tkb` already uses for its own
+descriptor rings) with plain `u16`/`u32` fields, not `[u8;N]` + explicit
+endian helpers like the network protocol structs in
+`examples/common/netutil.tkb` -- FAT12 is little-endian on disk and this
+target is little-endian, so a plain scalar field's native store already
+produces the correct bytes (same argument already used for
+`VirtqDesc`/`VirtqAvail`). `fat_get_entry`/`fat_set_entry` handle FAT12's
+one genuinely fiddly piece (two 12-bit entries packed into 3 bytes).
+`root_dir_buf` is a checked `[DirEntry; ROOT_ENTRY_COUNT]` array (not a
+byte buffer + a `*DirEntry` overlay cast) so indexing an entry by slot
+number is a real, checked array access, only reinterpreted as raw bytes at
+the `mem_block_write` boundary.
+
+**Public API tracks elm-chan's FatFs (https://elm-chan.org/fsw/ff/)
+Application Interface naming, `fat_` prefix instead of `f_`** -- the
+user's explicit request, driven by the concrete next milestone
+(`http_server_sdcard`, combining `fatfs` with `http_server` to serve files
+from an SD card; the further-out "ultimate demo" goal is a Forth
+interpreter on STM32 with its REPL exposed through that same HTTP server,
+letting a browser user freely read/write files and directories -- explicitly
+scoped OUT of this issue, a separate not-yet-started milestone). Scope was
+deliberately kept to exactly what `http_server_sdcard` needs and no more
+(discussed and agreed as a YAGNI call): a flat root directory only, no
+subdirectories/seek/rename/unlink/multiple-open-files. The original
+one-shot `fat_create_file(name, data, len)` (needs the whole content and
+length up front) was replaced with a real file-handle API --
+`struct FatFile` (`dir_index`, `start_cluster`, `cur_cluster`,
+`pos_in_cluster`, `fptr`, `fsize`, `writing`) plus `fat_open`/`fat_read`/
+`fat_write`/`fat_close`/`fat_find_entry`, `FA_READ`/`FA_WRITE`/
+`FA_CREATE_ALWAYS` mode flags -- `fat_write` allocates clusters lazily and
+chains them as needed instead of computing the whole chain up front,
+closer to what a streamed HTTP response body or a Forth REPL would
+actually need later.
+
+**Verification is three-way, not just "does it compile"**: real
+`mformat`/`mcopy` write a seed image, `fatfs.tkb`'s own
+`fat_open`(`FA_READ`)/`fat_read` reads it back (loaded into `disk` via a
+new ARM semihosting `SYS_READ` stub, `semihosting_read`, added to
+`examples/common_qemu/semihosting_asm.S` alongside the existing
+`SYS_OPEN`/`SYS_WRITE`/`SYS_CLOSE` stubs); `fatfs.tkb` creates/writes two
+files and reads one straight back in the same process (a same-process
+round trip); `fatfs.tkb` dumps the whole disk back out via semihosting,
+and `scripts/fatfs_mtools_test.py` (new) verifies it independently with
+real `mdir`/`mcopy`. `scripts/run_qemutest.sh`'s new `run_fatfs_test`
+builds the seed image with `mformat -C -i ... -t 2 -h 2 -n 32 -c 1 -r 1
+-L 1 ::` -- mtools' own flags turned out not to map 1:1 onto BPB field
+values empirically (`-r 1` produces 16 root directory entries, not 1;
+confirmed by dumping the produced boot sector's actual bytes before
+trusting any flag's effect) -- forced to match `fatfs.tkb`'s own fixed
+layout constants exactly, since the driver assumes its own compile-time
+layout rather than parsing the on-disk BPB dynamically (a known,
+deliberately deferred limitation -- fine for a self-formatted image or a
+geometry-matched `mformat` image, would misread an arbitrary real FAT
+image such as a factory-formatted SD card; revisit if issue #62 needs it).
+
+**Bug #1, found by actually running the seeded-read test, not by
+`--forbid-trap`** (worth being precise about, since it was almost
+mis-attributed in conversation): `fat_open(FA_READ, ...)` came back
+"not found" against a freshly-loaded seed image. Root cause: `fat_buf`/
+`root_dir_buf` are in-memory mirrors that `fat_flush()` only ever writes
+*to* disk, never reads *from* it -- after `load_seed_from_host()`
+populated `disk` from the host file, the mirrors were still BSS-zero, so
+`fat_find_entry` was searching an empty in-memory directory that never
+saw the loaded bytes at all. Fixed by adding `fat_mount()` (the
+`fat_flush()` counterpart: two `mem_block_read`s instead of two
+`mem_block_write`s), called once after `load_seed_from_host()` succeeds
+and before the first `fat_open`. This has nothing to do with array-bounds
+proofs or `--forbid-trap` -- it is an ordinary "forgot to load the cache"
+logic bug, caught by the QEMU+`mtools` integration test doing its job.
+
+**STM32 hardware bring-up** (`examples/fatfs/kernel_stm32_ram.elf`, RAM
+execution, same pattern as every other STM32 example per the "STM32
+Hardware Test Harness: RAM Execution" section below): STM32 has no ARM
+semihosting host-file I/O, so `examples/common_stm32/semihosting_stub.S`
+(new) provides trivial Thumb-2 stand-ins for the four `extern fn`
+symbols `fatfs.tkb` declares (`semihosting_open` always returns `-1`;
+`semihosting_read`/`semihosting_write` return their `len` argument
+unchanged, ARM semihosting's own "0 bytes transferred" convention;
+`semihosting_close` returns `0`) -- same idea as
+`examples/common_qemu/stm32_stub.tkb`'s no-op stand-in for a symbol only
+the other target's code path calls, just the reverse direction and in
+assembly since these are `extern fn` (an unmangled symbol is an external
+ABI contract, not overloadable).
+
+The user explicitly wanted the seeded-read test (mtools writes, takibi
+reads) exercised on real hardware too, not just stubbed out as
+"unsupported" -- issue #61's own original discussion had already proposed
+the technique: export/import a memory range as a raw binary with
+OpenOCD's `dump_image`/`load_image`. `app_main()`'s Phase 1 was
+restructured to stop gating on `load_seed_from_host()`'s return value
+(the STM32 stub always reports failure regardless of whether the harness
+actually seeded `disk`, since there's no real host-file-read happening
+either way from the on-target code's point of view) and instead always
+attempt `fat_mount()`+`fat_open(FA_READ, ...)` -- the real proof either
+way, succeeding only if `disk`'s bytes are genuinely a valid FAT12 image.
+`scripts/run_hwtest_ram.sh`'s new `ram_load_and_run_seeded` (a variant of
+the existing `ram_load_and_run`) sets a hardware breakpoint at `app_main`
+(address found via `llvm-nm-19` on the linked ELF -- confirmed both
+`disk` and `app_main` are emitted unmangled, since takibi's `_TK_...`
+mangling only applies to actually-overloaded names and neither is),
+`resume`s, `wait_halt`s for it to hit (so `Reset_Handler`'s BSS-clear has
+already run but `fatfs.tkb` hasn't touched `disk` yet), `load_image`s the
+seed file directly into `disk`'s live RAM, removes the breakpoint, and
+resumes again. This breakpoint+`wait_halt` sequencing is new to this
+project's hardware scripts -- every other existing hardware test only
+ever pokes SP/PC once, at the very start. A new `dump_disk_image`
+(separate `halt`, i.e. NOT `reset halt`, + `dump_image`, run once UART
+output goes quiet) extracts `disk` afterward for
+`scripts/fatfs_mtools_test.py` to verify the same way the QEMU test does.
+Passed on the real board on the first attempt, and again on a repeat run.
+
+**Bug #2, found only by the user asking a follow-up question, not by any
+test passing or failing**: neither the seed injection nor the post-run
+dump accounted for the STM32F7's D-cache. `link_ram.ld`'s AXI SRAM1 is
+cacheable (see the RAM-execution section below), and OpenOCD's
+`load_image`/`dump_image` write/read physical RAM directly over the debug
+port, bypassing the CPU's cache entirely -- exactly the same class of
+problem `examples/common_stm32/eth.tkb`'s real DMA engine already has,
+just with the debug port standing in for the DMA engine as the "external"
+memory agent. Without an explicit invalidate, the CPU could still see
+stale pre-seed cached data when Phase 1 reads `disk`; without an explicit
+clean/write-back, the harness's post-run dump could read stale
+pre-write-back RAM, missing the CPU's own not-yet-flushed writes. Both
+hardware test runs had already passed *before* this fix -- almost
+certainly because `disk` (64KB) vastly exceeds the STM32F7's D-cache
+(a few KB), so ordinary cache eviction pressure over the run had already
+displaced the relevant lines by the time it mattered, not because the
+code was actually correct. Fixed by reusing the exact existing
+cache-maintenance builtins `eth.tkb` already relies on for this same
+external-agent-vs-cache pattern: `dma_finish_rx(disk, SECTOR_SIZE *
+TOTAL_SECTORS)` as the first statement in `app_main()` (D-cache
+invalidate on ARM/Thumb before Phase 1 reads the seeded data; a harmless
+barrier on QEMU/AArch64, where semihosting reads are an ordinary
+same-core CPU write with nothing to invalidate), and
+`dma_prepare_tx(disk, SECTOR_SIZE * TOTAL_SECTORS)` right before Phase 4's
+`dump_disk_to_host()` (D-cache clean/write-back before the harness's
+external dump; likewise a harmless barrier on QEMU). Verified this
+doesn't change QEMU's output at all (still an exact `fatfs.expected`
+match) and that the hardware test still passes with the fix in place --
+this time for the right reason, not by size-driven luck. Also prompted a
+`CLAUDE.md` addition explaining *why* QEMU can never catch this class of
+bug at all: QEMU here runs in TCG (software) mode, which has no separate
+cache storage to go stale in the first place -- guest memory is a single
+unified representation, so cache-coherency bugs are invisible under QEMU
+regardless of how thorough the test is, and can only be found on real
+silicon. Flagged as directly relevant to the still-Backlog multi-core
+issue (#6) for whenever that work starts: get real-hardware integration
+testing into the loop early for anything involving genuinely concurrent
+hardware state, not just as a final check once "it already works in
+QEMU."
+
+**`SPEC.md` corrections made in the course of writing this file**
+(discovered empirically while working around each, then verified against
+the actual compiler before writing anything down, not assumed): `let mut
+x: T;` (no initializer) was documented as global-scope-only, but a local
+uninitialized `let mut` (scalar, array, or struct) has in fact always
+type-checked (already covered by an existing unit test,
+`test/test_takibi.ml`'s "let mut local without initializer type-checks")
+-- SPEC.md's own wording was simply stale, now corrected to describe both
+cases (global: BSS-zeroed; local: undefined content). Also newly
+documented, none of them previously written down anywhere: `&arr[i]`
+(address of an array/slice element, as opposed to `&ident`/`&s.field`) is
+a compile error; `s.field[i] = v` (assigning into an indexed array field
+reached through a struct) is a syntax error even though the reverse
+`arr[i].field = v` already works and was already documented; `if`/`else`
+is a statement only, with no if-expression/ternary form at all; and
+`{lo..<hi as base}`'s `lo`/`hi` must be bare integer literals, unlike an
+array size or a `for` loop's bounds, which both also accept a name
+resolving to a literal via the array-size-constant mechanism.
+
+**Files**: `examples/fatfs/fatfs.tkb`, `examples/fatfs/fatfs.expected`,
+`examples/fatfs/fatfs_stm32.expected`, `examples/common_qemu/
+semihosting_asm.S`, `examples/common_stm32/semihosting_stub.S`,
+`scripts/fatfs_mtools_test.py`, `scripts/run_qemutest.sh`
+(`run_fatfs_test`), `scripts/run_hwtest_ram.sh` (`ram_load_and_run_seeded`,
+`dump_disk_image`, `run_hw_test_ram_fatfs`), `Makefile` (QEMU + STM32
+build/link rules for `fatfs`, deliberately without `--forbid-trap`),
+`CLAUDE.md` (new "Development Process" section, the QEMU-cache-model
+note), `SPEC.md` (the five corrections/additions above), `README.md`
+(fatfs mentioned in "Current Status," the "entire suite is
+`--forbid-trap`-clean" claim corrected to note this one deliberate,
+temporary exception).
+
+**Verification**: `make check` (langcheck, unit tests, `stm32build`,
+71 QEMU integration tests including `fatfs`) passes with zero
+regressions. `make hwcheck`'s new `fatfs (stm32/ram)` test passed twice
+in a row on the real STM32F746G-DISCOVERY board, both before and after
+the cache-coherency fix (confirming the fix didn't just get lucky a
+second time either).

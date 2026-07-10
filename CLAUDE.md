@@ -594,8 +594,11 @@ size.
 
 ## STM32F746G-DISCOVERY Bare-Metal (Cortex-M7)
 
-Real-hardware port, running alongside (not replacing) the QEMU/AArch64 build. All 38
-examples are now ported, including `net_echo`/`arp_reply`/`icmp_echo`/`tcp_echo`/
+Real-hardware port, running alongside (not replacing) the QEMU/AArch64 build. Nearly every
+example is now ported (50 as of this writing, per `Makefile`'s `STM32_RAM_ELFS` -- check
+that variable directly rather than trusting this number, since it drifts as examples are
+added; this project has a history of this exact count going stale), including
+`net_echo`/`arp_reply`/`icmp_echo`/`tcp_echo`/
 `http_server` (real Ethernet MAC+PHY driver, `examples/common_stm32/eth.tkb` -- see the
 "STM32 Ethernet" entry under Known Limitations/Deferred Design Decisions above for the
 full story) and `irq`/`preempt`/`semaphore`/`condvar`/`watchdog`/`msgqueue` (NVIC +

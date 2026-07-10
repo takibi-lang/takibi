@@ -75,9 +75,12 @@ read).
 `--forbid-trap` is expected to grow into a family: per-category strictness
 options (array-bounds trap freedom, checked-cast freedom, safe-pointer
 enforcement outside `unsafe`, ...) with one umbrella flag enabling them
-all. Today's single flag is the first member. **The current example suite --
+all. Today's single flag is the first member. **The example suite --
 including the full TCP/IP stack and HTTP server -- compiles trap-free
-under it.** A few tools do almost all of the work: refined integer ranges
+under it, with one deliberate, temporary exception: `examples/fatfs` is
+mid-milestone (real SD card integration still pending, see CLAUDE.md's
+"Development Process" section) and is intentionally not yet built with
+`--forbid-trap`.** A few tools do almost all of the work: refined integer ranges
 that propagate through ordinary arithmetic and bitwise masking (so a
 value like a wire-derived header length carries a real bound with no
 extra code), `min`/`max` builtins that provably clamp a value against a
@@ -121,8 +124,10 @@ deferrable convenience and architecture work.
   covering arithmetic, control flow, structs (packed / aligned), enums with
   exhaustiveness checking, function pointers, MMIO/volatile access,
   compile-time-checked array bounds via refinement types, semaphores,
-  mutexes, condition variables, a preemptive round-robin scheduler, and a
-  hand-written TCP/IP stack.
+  mutexes, condition variables, a preemptive round-robin scheduler, a
+  hand-written TCP/IP stack, and a FAT12 filesystem driver (`examples/fatfs`,
+  verified against real `mtools`-created images on both QEMU and real
+  STM32 hardware; real SD/eMMC card integration is still pending).
 - DMA/device ordering is expressed through compiler builtins rather than
   handwritten assembly. The STM32 port also performs cache maintenance,
   places DMA memory in an MPU non-cacheable window, and uses affine opaque

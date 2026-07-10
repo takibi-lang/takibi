@@ -122,8 +122,16 @@ turn as many potential traps as possible into compile-time errors instead:
 - At **global** scope: plain `let NAME: T = e;` is an immutable
   compile-time constant (reassignment and `&NAME` are compile errors, and
   it must have an initializer); `let mut NAME: T = e;` is a mutable
-  global variable. `let mut x: T;` (no initializer) is allowed only at
-  global scope, relying on BSS zero-clearing.
+  global variable. `let mut x: T;` (no initializer) is allowed at global
+  scope, relying on BSS zero-clearing.
+- `let mut x: T;` (no initializer) is *also* allowed at **local** scope,
+  for any `T` including scalars, arrays, and structs -- unlike the global
+  case, the initial content is undefined (whatever was already on the
+  stack), not zero-cleared. Useful for a scratch buffer/struct about to be
+  fully overwritten by the next few statements (e.g. a sector-sized `[u8;
+  512]` about to be filled by a block-device read, or a struct about to be
+  populated field-by-field) where a throwaway initializer would just be
+  immediately discarded work.
 - `let mut x: T align(N);` -- N-byte-aligned global (N must be a power of
   two; not enforced by the compiler beyond an LLVM assertion at codegen
   time). Optional initializer. Local-variable alignment is not supported.
@@ -143,7 +151,10 @@ turn as many potential traps as possible into compile-time errors instead:
   loop. Compile error outside a loop. For `for`, `continue` increments
   the counter first.
 - `if (cond) { ... }`, `if (cond) { ... } else { ... }`, `if (cond) { ...
-  } else if (cond) { ... } else { ... }`.
+  } else if (cond) { ... } else { ... }`. `if`/`else` is a **statement
+  only** -- there is no if-expression/ternary form (`let x = if (c) {a}
+  else {b};` is a syntax error). Assign a `let mut` from each branch
+  instead: `let mut x: T = default; if (c) { x = a; }`.
 - Assignment: `x = e`, `*p = v`, `arr[i] = v`, `s.field = v`. Compound
   assignments `+=` `-=` `|=` `&=` `^=` `<<=` `>>=` desugar to `x = x op
   rhs` and are supported on all five assignable forms above (`*p`,
@@ -189,7 +200,12 @@ turn as many potential traps as possible into compile-time errors instead:
 - Function call, `*expr` (dereference), `&ident` (address-of; taking the
   address of an immutable *local* variable is a compile error, but
   `&global_var` is always allowed since globals are always mutable
-  storage).
+  storage). `&` only accepts a bare variable or a struct field (`&s`,
+  `&s.field`) -- `&arr[i]` (address of an array/slice *element*) is a
+  compile error ("& requires a variable or struct field"); index into a
+  pointer already obtained from the array/variable instead (e.g. `let p:
+  *T = arr; ... p[i] ...`, since an array decays to `*T` when used as an
+  ordinary expression).
 - `min(a, b)` / `max(a, b)` -- compiler builtins (reserved names; defining
   a user `fn`/`extern fn` with either name is a compile error). Clamp a
   value's provable range: `min(x, LITERAL)` proves an upper bound of
@@ -228,7 +244,12 @@ affine opaque struct Name;                   // opaque + ownership-handle semant
 - `s.field = v` -- field write (direct dot-assignment to a bare variable
   name; not valid as the left side of a larger expression). `arr[i].field
   = v` also works (bounds-checked element GEP, then field GEP);
-  `ptr[i].field = v` on a raw pointer skips the array bounds check.
+  `ptr[i].field = v` on a raw pointer skips the array bounds check. The
+  reverse nesting is **not** supported: `s.field[i] = v`, assigning into
+  an indexed array/slice *field* reached through a struct (value or
+  pointer), is a syntax error -- only whole-field assignment (`s.field =
+  whole_array`) or reading the field to pass/index elsewhere (`let p: *u8
+  = s.field; p[i] = v;`) work.
 - `&s` -- address of a struct variable, type `*Name`.
 - **`opaque struct Name;`** has no constructible value, fields, or size
   -- usable only behind a pointer. Intended for driver-owned state
@@ -496,6 +517,14 @@ at codegen time rather than silently lowering to a racy `wfi`.
 `{lo..<hi}` form (no explicit base) is rejected -- always spell out the
 base.
 
+- **`lo` and `hi` must be bare integer literals** -- unlike an array size
+  (`[T; N]`) or a `for i in lo..<hi` range, which both also accept a name
+  resolving to a literal via the array-size-constant mechanism (a global
+  `let NAME: T = LITERAL;`), `{lo..<hi as base}` naming a constant instead
+  of restating the literal (e.g. `{0..<TOTAL_SECTORS as usize}`) is a
+  syntax error, even when `TOTAL_SECTORS` itself has a literal
+  initializer. Restate the literal value directly (with a comment noting
+  which named constant it must track, if one exists).
 - Bounds are validated against the chosen base's own representable range
   at parse time (e.g. `{0..<300 as u8}` is a compile error; `i64`/`u64`
   impose no upper-bound check, since their true range doesn't fit the
