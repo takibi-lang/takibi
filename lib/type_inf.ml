@@ -1921,8 +1921,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         List.iter (fun (_, ty) -> Option.iter (validate_param_type f.def_loc) ty) f.params;
         Option.iter (validate_nonparam_type f.def_loc) f.ret_type;
         List.iter validate_stmt_types f.body
-    | Ast.ExternFuncDef (_, params, ret) ->
-        List.iter (fun (_, ty) -> Option.iter (validate_param_type Lexing.dummy_pos) ty) params;
+    | Ast.ExternFuncDef (name, params, ret) ->
+        List.iter (fun (pname, ty) -> match ty with
+          | Some t -> validate_param_type Lexing.dummy_pos t
+          | None -> raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+              "extern fn '%s' parameter '%s' has no type annotation; extern fn \
+               parameters must be explicitly typed (there is no function body \
+               to infer them from)" name pname))
+        ) params;
         Option.iter (validate_nonparam_type Lexing.dummy_pos) ret
     | Ast.LetDef (_, ty, init, _, _) ->
         Option.iter (validate_nonparam_type Lexing.dummy_pos) ty;

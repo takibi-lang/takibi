@@ -1,0 +1,414 @@
+// STM32F746G-DISCOVERY real microSD card driver (SDMMC1, native SD mode, not
+// SPI mode -- the board's onboard microSD slot is wired to SDMMC1, not a
+// generic SPI header). Exposes elm-chan's FatFs (https://elm-chan.org/fsw/ff/)
+// Media Access Interface subset -- disk_initialize/disk_status/disk_read/
+// disk_write -- scoped down from the real interface for this project's
+// single-drive, single-block-size needs: no `pdrv` (exactly one drive
+// exists), no `count` (single 512-byte block only, matching every transfer
+// this project needs so far), no `disk_ioctl` (nothing today needs
+// CTRL_SYNC/GET_SECTOR_COUNT/etc -- add it when a real caller needs it).
+//
+// GitHub issue #62. Built and integration-tested as its own independent
+// example (examples/sdcard) before being wired into examples/fatfs, per the
+// same "verify each piece in isolation first" reasoning that put fatfs
+// (issue #61) before this driver in the first place -- a future bug in
+// either fatfs's FAT12 logic or this driver can be isolated to one
+// integration test instead of conflated into one "everything touches SD
+// card" test.
+//
+// Scope for this first working version (minimal effort, matching this
+// project's established "no --forbid-trap/no refinement types until the
+// whole milestone works" process): SD cards only (SDSC/SDHC/SDXC via
+// CMD8+ACMD41's HCS bit), not eMMC (eMMC's init sequence has no CMD8/ACMD41
+// dance -- a separate concern for whenever eMMC hardware is in front of us).
+// 1-bit bus width (D0 only) and polling-only command/data transfer (no DMA,
+// no interrupts) -- simplest correct path; 4-bit bus width and DMA are
+// straightforward follow-ups once this works. Single 512-byte block
+// transfer only.
+//
+// Register offsets and bit positions below were cross-checked against ST's
+// official CMSIS device header (cmsis_device_f7/Include/stm32f745xx.h),
+// not guessed -- SDMMC1_BASE=0x40012C00 (APB2PERIPH_BASE+0x2C00), the
+// SDMMC_TypeDef register order/offsets (POWER=0x00, CLKCR=0x04, ARG=0x08,
+// CMD=0x0C, RESPCMD=0x10, RESP1..4=0x14/0x18/0x1C/0x20, DTIMER=0x24,
+// DLEN=0x28, DCTRL=0x2C, DCOUNT=0x30, STA=0x34, ICR=0x38, FIFO=0x80), and
+// every bit position used below (RCC_APB2ENR_SDMMC1EN=11,
+// RCC_AHB1ENR_GPIOCEN=2/GPIODEN=3, RCC_DCKCFGR2_SDMMC1SEL=28,
+// SDMMC_CLKCR_CLKDIV=0..7/CLKEN=8/WIDBUS=11..12, SDMMC_CMD_CMDINDEX=0..5/
+// WAITRESP=6..7/CPSMEN=10, SDMMC_DCTRL_DTEN=0/DTDIR=1/DBLOCKSIZE=4..7,
+// SDMMC_STA_CCRCFAIL=0/DCRCFAIL=1/CTIMEOUT=2/DTIMEOUT=3/TXUNDERR=4/
+// RXOVERR=5/CMDREND=6/CMDSENT=7/DATAEND=8/TXFIFOHE=14/RXFIFOHF=15) were
+// each individually confirmed against that header. Like
+// examples/common_stm32/eth.tkb's own bring-up, which found a real
+// hardware timing bug only through live debugging despite careful
+// reference-manual work, expect this to need real-hardware iteration
+// (openocd/gdb-multiarch register/status inspection) before it works --
+// this is the starting architecture, not a guarantee of first-try success.
+//
+// Clock note: SDMMC1's kernel clock defaults to the 48MHz PLL48CLK (per
+// RCC_DCKCFGR2_SDMMC1SEL's reset value 0), but this project deliberately
+// never configures the PLL (examples/common_stm32/uart.tkb's baud rate is
+// computed for the default 16MHz HSI, and nothing else in this project
+// touches the clock tree) -- PLL48CLK is simply not running. Rather than
+// bring up a PLL just for this, RCC_DCKCFGR2_SDMMC1SEL is set to 1
+// (SYSCLK, i.e. HSI at 16MHz here) instead, giving SDMMC1 a valid if slow
+// kernel clock with no other clock-tree changes. SDMMC_CK is then
+// SDMMCCLK/(2+CLKDIV): ~400kHz (CLKDIV=38) during card identification,
+// then the fastest this clock tree allows (CLKDIV=0, ~8MHz) once the card
+// is selected -- much slower than a typical 24-48MHz design, acceptable
+// for this milestone's polling-only, single-block-at-a-time driver.
+
+// -- RCC --------------------------------------------------------------------
+let RCC_AHB1ENR:  *io u32 = 0x40023830;
+let RCC_APB2ENR:  *io u32 = 0x40023844;
+let RCC_DCKCFGR2: *io u32 = 0x40023890;
+
+// -- GPIO (MODER/OSPEEDR/PUPDR/AFRL/AFRH), same read-modify-write idiom as
+// examples/common_stm32/eth.tkb -- PC8..PC12 (D0..D3, CLK) and PD2 (CMD),
+// all AF12. Card detect (PC13) is not used by this driver (no hot-swap
+// support; a card is assumed present at disk_initialize() time). ---------
+let GPIOC_MODER:   *io u32 = 0x40020800;
+let GPIOC_OSPEEDR: *io u32 = 0x40020808;
+let GPIOC_PUPDR:   *io u32 = 0x4002080C;
+let GPIOC_AFRH:    *io u32 = 0x40020824;
+
+let GPIOD_MODER:   *io u32 = 0x40020C00;
+let GPIOD_OSPEEDR: *io u32 = 0x40020C08;
+let GPIOD_PUPDR:   *io u32 = 0x40020C0C;
+let GPIOD_AFRL:    *io u32 = 0x40020C20;
+
+// -- SDMMC1 (SDMMC1_BASE = APB2PERIPH_BASE + 0x2C00 = 0x40012C00) ------------
+let SDMMC_POWER:   *io u32 = 0x40012C00;
+let SDMMC_CLKCR:   *io u32 = 0x40012C04;
+let SDMMC_ARG:     *io u32 = 0x40012C08;
+let SDMMC_CMD:     *io u32 = 0x40012C0C;
+let SDMMC_RESPCMD: *io u32 = 0x40012C10;
+let SDMMC_RESP1:   *io u32 = 0x40012C14;
+let SDMMC_DTIMER:  *io u32 = 0x40012C24;
+let SDMMC_DLEN:    *io u32 = 0x40012C28;
+let SDMMC_DCTRL:   *io u32 = 0x40012C2C;
+let SDMMC_STA:     *io u32 = 0x40012C34;
+let SDMMC_ICR:     *io u32 = 0x40012C38;
+let SDMMC_FIFO:    *io u32 = 0x40012C80;
+
+// STA flags this driver checks/clears (see header comment for provenance).
+// Spelled as literal hex values, matching each flag's Msk from the CMSIS
+// header directly -- a global `let`'s initializer must be a bare literal
+// (general arithmetic like `1 << N` between two literals is not supported
+// as a global constant-folding form, see SPEC.md's "Global Constant
+// Folding" section).
+let STA_CCRCFAIL: u32 = 0x1;
+let STA_DCRCFAIL: u32 = 0x2;
+let STA_CTIMEOUT: u32 = 0x4;
+let STA_DTIMEOUT: u32 = 0x8;
+let STA_TXUNDERR: u32 = 0x10;
+let STA_RXOVERR:  u32 = 0x20;
+let STA_CMDREND:  u32 = 0x40;
+let STA_CMDSENT:  u32 = 0x80;
+let STA_DATAEND:  u32 = 0x100;
+let STA_TXFIFOHE: u32 = 0x4000;
+let STA_RXFIFOHF: u32 = 0x8000;
+
+// Broad "clear every static flag this driver ever sets" mask for ICR --
+// bits 0..10 (CCRCFAIL..DBCKEND).
+let ICR_CLEAR_ALL: u32 = 0x7FF;
+
+let WAITRESP_NONE:  u32 = 0;
+let WAITRESP_SHORT: u32 = 1;
+let WAITRESP_LONG:  u32 = 3;
+
+let mut sd_ready: i32;  // 0 = not initialized, 1 = ready (module state)
+let mut sd_hc: i32;     // 1 = block-addressed (SDHC/SDXC), 0 = byte-addressed (SDSC)
+let mut card_rca: u32;  // relative card address, captured once at CMD3
+
+fn sd_gpio_init() {
+    *RCC_AHB1ENR = *RCC_AHB1ENR | (1 << 2) | (1 << 3); // GPIOCEN | GPIODEN
+
+    // PC8..PC12: AF mode (MODER=10), very high speed, pull-up, AF12.
+    *GPIOC_MODER   = (*GPIOC_MODER & ~(0x3FF << 16)) | (0x2AA << 16);
+    *GPIOC_OSPEEDR = *GPIOC_OSPEEDR | (0x3FF << 16);
+    *GPIOC_PUPDR   = (*GPIOC_PUPDR & ~(0x3FF << 16)) | (0x155 << 16);
+    *GPIOC_AFRH    = (*GPIOC_AFRH & ~0xFFFFF) | 0xCCCCC;
+
+    // PD2: AF mode, very high speed, pull-up, AF12.
+    *GPIOD_MODER   = (*GPIOD_MODER & ~(3 << 4)) | (2 << 4);
+    *GPIOD_OSPEEDR = *GPIOD_OSPEEDR | (3 << 4);
+    *GPIOD_PUPDR   = (*GPIOD_PUPDR & ~(3 << 4)) | (1 << 4);
+    *GPIOD_AFRL    = (*GPIOD_AFRL & ~(0xF << 8)) | (0xC << 8);
+}
+
+fn sd_clock_init() {
+    *RCC_APB2ENR = *RCC_APB2ENR | (1 << 11);   // SDMMC1EN
+    *RCC_DCKCFGR2 = *RCC_DCKCFGR2 | (1 << 28); // SDMMC1SEL = 1 (SYSCLK, not PLL48CLK)
+}
+
+// clkdiv: SDMMC_CK = SDMMCCLK / (2 + clkdiv). 38 -> ~400kHz identification
+// clock (16MHz/40); 0 -> ~8MHz data-phase clock (16MHz/2), the fastest this
+// clock tree allows without a PLL.
+fn sd_set_clock(clkdiv: u32) {
+    *SDMMC_CLKCR = clkdiv | (1 << 8); // CLKDIV | CLKEN, WIDBUS=00 (1-bit)
+}
+
+fn sd_send_cmd(cmd_index: u32, arg: u32, waitresp: u32) {
+    *SDMMC_ICR = ICR_CLEAR_ALL;
+    *SDMMC_ARG = arg;
+    *SDMMC_CMD = cmd_index | (waitresp << 6) | (1 << 10); // CMDINDEX | WAITRESP | CPSMEN
+}
+
+// Waits for a no-response command (CMD0) to finish. Returns 0 on success.
+fn sd_wait_no_resp() -> i32 {
+    while ((*SDMMC_STA & (STA_CMDSENT | STA_CTIMEOUT)) == 0) {}
+    if ((*SDMMC_STA & STA_CTIMEOUT) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+// Waits for a command expecting a response. CRC failures are tolerated here
+// (R3's OCR response has no valid CRC by design; this driver does not
+// distinguish R3 from other short/long responses at this layer) -- only a
+// timeout is treated as failure. Returns 0 on success.
+fn sd_wait_resp() -> i32 {
+    while ((*SDMMC_STA & (STA_CMDREND | STA_CCRCFAIL | STA_CTIMEOUT)) == 0) {}
+    if ((*SDMMC_STA & STA_CTIMEOUT) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+fn sd_cmd0() -> i32 {
+    sd_send_cmd(0, 0, WAITRESP_NONE);
+    return sd_wait_no_resp();
+}
+
+// CMD8 (SEND_IF_COND): arg = voltage window (2.7-3.6V) | check pattern 0xAA.
+// Confirms an SD v2+ card (SDv1/MMC cards do not respond; not handled here).
+fn sd_cmd8() -> i32 {
+    sd_send_cmd(8, 0x1AA, WAITRESP_SHORT);
+    if (sd_wait_resp() != 0) {
+        return -1;
+    }
+    if ((*SDMMC_RESP1 & 0xFF) != 0xAA) {
+        return -1;
+    }
+    return 0;
+}
+
+fn sd_cmd55() -> i32 {
+    sd_send_cmd(55, 0, WAITRESP_SHORT); // rca=0: only valid before CMD3 assigns one
+    return sd_wait_resp();
+}
+
+// ACMD41 (SD_SEND_OP_COND): polls until the card leaves the busy state
+// (OCR bit31), with HCS (bit30 of the argument) set to request high-capacity
+// support. OCR bit30 in the response then reports whether the card is
+// SDHC/SDXC (block-addressed) or SDSC (byte-addressed).
+fn sd_acmd41() -> i32 {
+    let mut tries: u32 = 0;
+    while (tries < 1000000) {
+        if (sd_cmd55() != 0) {
+            return -1;
+        }
+        sd_send_cmd(41, 0x40FF8000, WAITRESP_SHORT);
+        sd_wait_resp(); // CRC failure expected/ignored for R3
+        let ocr: u32 = *SDMMC_RESP1;
+        if ((ocr & 0x80000000) != 0) {
+            if ((ocr & 0x40000000) != 0) {
+                sd_hc = 1;
+            } else {
+                sd_hc = 0;
+            }
+            return 0;
+        }
+        tries = tries + 1;
+    }
+    return -1;
+}
+
+fn sd_cmd2() -> i32 {
+    sd_send_cmd(2, 0, WAITRESP_LONG); // R2 (CID); content unused by this driver
+    return sd_wait_resp();
+}
+
+fn sd_cmd3() -> i32 {
+    sd_send_cmd(3, 0, WAITRESP_SHORT); // R6
+    if (sd_wait_resp() != 0) {
+        return -1;
+    }
+    return (*SDMMC_RESP1 >> 16) as i32; // RCA in the upper 16 bits
+}
+
+// rca is the plain (already right-shifted by sd_cmd3) RCA value -- CMD7's
+// own argument format needs it back in the upper 16 bits (bits 31:16),
+// stuff bits 0 in the lower 16, same as CMD55's `rca << 16`.
+fn sd_cmd7(rca: u32) -> i32 {
+    sd_send_cmd(7, rca << 16, WAITRESP_SHORT);
+    return sd_wait_resp();
+}
+
+// SDSC only, strictly speaking (HC/XC cards are fixed at 512 already), but
+// harmless to send unconditionally -- simpler than branching on sd_hc here.
+fn sd_cmd16() -> i32 {
+    sd_send_cmd(16, 512, WAITRESP_SHORT);
+    return sd_wait_resp();
+}
+
+// CMD13 (SEND_STATUS): R1 response, card status in bit31:0 of RESP1.
+// READY_FOR_DATA is bit8 -- clear while the card is still busy
+// programming (writing) the previous block to flash. Native SD mode has
+// no automatic "wait for not-busy" in this driver's polling-only design
+// (unlike SPI mode, where the host can watch the data line go non-zero);
+// CMD13 polling is the standard alternative.
+fn sd_cmd13() -> i32 {
+    sd_send_cmd(13, card_rca << 16, WAITRESP_SHORT);
+    return sd_wait_resp();
+}
+
+fn sd_wait_not_busy() -> i32 {
+    let mut tries: u32 = 0;
+    while (tries < 1000000) {
+        if (sd_cmd13() == 0) {
+            if ((*SDMMC_RESP1 & 0x100) != 0) {
+                return 0;
+            }
+        }
+        tries = tries + 1;
+    }
+    return -1;
+}
+
+fn disk_initialize() -> i32 {
+    sd_gpio_init();
+    sd_clock_init();
+
+    *SDMMC_POWER = 0; // power off first
+    let mut i: i32 = 0;
+    while (i < 10000) {
+        i = i + 1;
+    } // brief settle delay
+    *SDMMC_POWER = 3; // power on (PWRCTRL = 11)
+    sd_set_clock(38); // ~400kHz identification clock
+    i = 0;
+    while (i < 10000) {
+        i = i + 1;
+    } // >= 74 SDMMC_CK cycles before the first command
+
+    if (sd_cmd0() != 0) {
+        return -1;
+    }
+    let is_v2: i32 = sd_cmd8();
+    if (is_v2 != 0) {
+        return -1; // SDv1/MMC cards not supported by this driver yet
+    }
+    if (sd_acmd41() != 0) {
+        return -1;
+    }
+    if (sd_cmd2() != 0) {
+        return -1;
+    }
+    let rca: i32 = sd_cmd3();
+    if (rca < 0) {
+        return -1;
+    }
+    card_rca = rca as u32;
+    if (sd_cmd7(rca as u32) != 0) {
+        return -1;
+    }
+    if (sd_cmd16() != 0) {
+        return -1;
+    }
+
+    sd_set_clock(0); // ~8MHz data-phase clock (fastest available without a PLL)
+    sd_ready = 1;
+    return 0;
+}
+
+fn disk_status() -> i32 {
+    if (sd_ready == 1) {
+        return 0;
+    }
+    return -1;
+}
+
+// sector is always a 0-based block number from this driver's callers'
+// point of view; converted to a byte address for SDSC cards (block
+// addressing is native for SDHC/SDXC).
+fn sd_block_arg(sector: u32) -> u32 {
+    if (sd_hc == 1) {
+        return sector;
+    }
+    return sector * 512;
+}
+
+fn disk_read(sector: u32, buf: *u8) -> i32 {
+    if (disk_status() != 0) {
+        return -1;
+    }
+    *SDMMC_DTIMER = 0xFFFFFFFF;
+    *SDMMC_DLEN = 512;
+    *SDMMC_DCTRL = (9 << 4) | (1 << 1) | 1; // DBLOCKSIZE=512 | DTDIR=card->host | DTEN
+
+    sd_send_cmd(17, sd_block_arg(sector), WAITRESP_SHORT); // CMD17 READ_SINGLE_BLOCK
+    if (sd_wait_resp() != 0) {
+        return -1;
+    }
+
+    let dst: *u32 = buf as *u32;
+    let mut words: isize = 0;
+    while (words < 128) { // 128 * 4 bytes = 512
+        while ((*SDMMC_STA & (STA_RXFIFOHF | STA_DATAEND | STA_DCRCFAIL | STA_DTIMEOUT | STA_RXOVERR)) == 0) {}
+        if ((*SDMMC_STA & (STA_DCRCFAIL | STA_DTIMEOUT | STA_RXOVERR)) != 0) {
+            return -1;
+        }
+        let mut n: isize = 0;
+        while ((n < 8) && (words < 128)) {
+            dst[words] = *SDMMC_FIFO;
+            words = words + 1;
+            n = n + 1;
+        }
+    }
+    while ((*SDMMC_STA & (STA_DATAEND | STA_DCRCFAIL | STA_DTIMEOUT)) == 0) {}
+    if ((*SDMMC_STA & (STA_DCRCFAIL | STA_DTIMEOUT)) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+fn disk_write(sector: u32, buf: *u8) -> i32 {
+    if (disk_status() != 0) {
+        return -1;
+    }
+    *SDMMC_DTIMER = 0xFFFFFFFF;
+    *SDMMC_DLEN = 512;
+
+    sd_send_cmd(24, sd_block_arg(sector), WAITRESP_SHORT); // CMD24 WRITE_BLOCK
+    if (sd_wait_resp() != 0) {
+        return -1;
+    }
+    *SDMMC_DCTRL = (9 << 4) | 1; // DBLOCKSIZE=512 | DTDIR=host->card | DTEN
+
+    let src: *u32 = buf as *u32;
+    let mut words: isize = 0;
+    while (words < 128) {
+        while ((*SDMMC_STA & (STA_TXFIFOHE | STA_DATAEND | STA_TXUNDERR)) == 0) {}
+        if ((*SDMMC_STA & STA_TXUNDERR) != 0) {
+            return -1;
+        }
+        let mut n: isize = 0;
+        while ((n < 8) && (words < 128)) {
+            *SDMMC_FIFO = src[words];
+            words = words + 1;
+            n = n + 1;
+        }
+    }
+    while ((*SDMMC_STA & (STA_DATAEND | STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR)) == 0) {}
+    if ((*SDMMC_STA & (STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR)) != 0) {
+        return -1;
+    }
+    // The card enters a busy/programming state after this write; the next
+    // command (e.g. the following sector's CMD24) will otherwise time out
+    // waiting for a response while the card is still busy -- confirmed on
+    // real hardware (a second consecutive disk_write failed with a command
+    // timeout until this wait was added).
+    return sd_wait_not_busy();
+}

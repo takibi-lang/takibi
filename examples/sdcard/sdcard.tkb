@@ -1,0 +1,106 @@
+// Standalone test/demo for examples/common_stm32/sdmmc.tkb's Media Access
+// Interface (disk_initialize/disk_status/disk_read/disk_write) -- GitHub
+// issue #62, built and verified entirely independently of examples/fatfs
+// (see sdmmc.tkb's header comment for why). No filesystem exists at this
+// layer at all: this writes a fixed, deterministic byte pattern into a
+// handful of sectors, reads them back, and checks the bytes in place --
+// proving the real SD card read/write path works before fatfs.tkb's FAT12
+// logic (already proven separately against an in-memory block device under
+// QEMU) is ever combined with it.
+//
+// STM32-only: there is no virtual SD controller in this project's QEMU
+// setup (no QEMU build for this example), matching how net_echo/etc.'s
+// real-Ethernet-specific STM32 hardware behavior is exercised only via
+// `make hwcheck-net`, not `make qemutest`.
+//
+// Deliberately written without --forbid-trap/refinement types, matching
+// this project's process for new .tkb work (see CLAUDE.md's "Development
+// Process" section) -- plain checked array indexing throughout.
+
+let TEST_SECTORS: u32 = 4; // a handful, enough to exercise multiple disk_write calls
+
+// Deterministic per-byte pattern, so both this program and the host-side
+// test script (which only sees the hex dump below) can independently
+// compute the same expected value.
+fn pattern_byte(sector: u32, i: u32) -> u8 {
+    return ((sector + i) & 0xFF) as u8;
+}
+
+fn uart_print_byte_hex(b: u8) {
+    uart_print_hex_digit(((b >> 4) & 0xF) as i32);
+    uart_print_hex_digit((b & 0xF) as i32);
+}
+
+fn app_main() {
+    let mut init_ok: bool = false;
+    if (disk_initialize() == 0) {
+        uart_puts("disk_initialize: OK\r\n");
+        init_ok = true;
+    } else {
+        uart_puts("disk_initialize: FAIL\r\n");
+    }
+
+    if (init_ok) {
+        if (disk_status() == 0) {
+            uart_puts("disk_status: OK\r\n");
+        } else {
+            uart_puts("disk_status: FAIL\r\n");
+        }
+
+        let mut all_ok: bool = true;
+
+        let mut s: u32 = 0;
+        while (s < TEST_SECTORS) {
+            let mut wbuf: [u8; 512];
+            for i: usize in 0..<512 {
+                wbuf[i] = pattern_byte(s, i as u32);
+            }
+            if (disk_write(s, wbuf) != 0) {
+                uart_puts("write sector ");
+                uart_print(s);
+                uart_puts(": FAIL\r\n");
+                all_ok = false;
+            }
+            s = s + 1;
+        }
+
+        s = 0;
+        while (s < TEST_SECTORS) {
+            let mut rbuf: [u8; 512];
+            if (disk_read(s, rbuf) == 0) {
+                let mut sector_ok: bool = true;
+                for i: usize in 0..<512 {
+                    if (rbuf[i] != pattern_byte(s, i as u32)) {
+                        sector_ok = false;
+                    }
+                }
+                uart_puts("sector ");
+                uart_print(s);
+                if (sector_ok) {
+                    uart_puts(": PASS\r\n");
+                } else {
+                    uart_puts(": MISMATCH\r\n");
+                    all_ok = false;
+                }
+                uart_puts("SDDUMP:");
+                for i: usize in 0..<512 {
+                    uart_print_byte_hex(rbuf[i]);
+                }
+                uart_puts("\r\n");
+            } else {
+                uart_puts("read sector ");
+                uart_print(s);
+                uart_puts(": FAIL\r\n");
+                all_ok = false;
+            }
+            s = s + 1;
+        }
+
+        if (all_ok) {
+            uart_puts("sdcard: ALL PASS\r\n");
+        } else {
+            uart_puts("sdcard: FAIL\r\n");
+        }
+    }
+    uart_puts("done\r\n");
+}

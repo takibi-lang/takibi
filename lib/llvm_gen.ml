@@ -939,28 +939,54 @@ let rec collect_lets stmts =
 
 (* -- resolve helpers: map AST annotation -> Ast.type_expr using HM results -- *)
 
+(* `pt = None` (no type-inference results at all) is a genuine, supported
+   mode -- unit tests build IR via gen_program with no prior inference pass
+   (see usize_lltype's own comment for the same convention) -- so THAT
+   fallback stays a graceful default, not a bug.
+
+   Once `pt = Some _` (a fully type-checked program IS available), the
+   ENCLOSING FUNCTION (`fname`) failing to resolve within it is an internal
+   inconsistency: gen_program's Pass 1 registers every function's signature
+   before Pass 2 ever asks to resolve one of its locals, so this should be
+   structurally unreachable -- raise loudly rather than silently guessing.
+
+   A specific LOCAL/PARAMETER `name` failing to resolve within an
+   otherwise-found function is different: llvm_gen.ml's own `collect_lets`
+   synthesizes names type_inf.ml never registers at all (e.g.
+   `"__foreach_" ^ name` for a for-in loop's slice index, paired with an
+   explicit `Some TypeUsize` hint) purely for DWARF variable declarations
+   -- a real, legitimate case, not a bug. So `ty_opt` (an explicit hint
+   from the caller) is still honored here; only "neither inference nor an
+   explicit hint has anything to say" is the truly-unreachable case worth
+   raising on. *)
 let resolve_local_ast (pt : Types.program_types option) fname name ty_opt =
-  let fallback = match ty_opt with Some t -> t | None -> TypeI32 in
   match pt with
-  | None -> fallback
+  | None -> (match ty_opt with Some t -> t | None -> TypeI32)
   | Some pt ->
       match Types.StringMap.find_opt fname pt.Types.functions with
-      | None -> fallback
+      | None -> raise (Error (Printf.sprintf
+          "BUG: resolve_local_ast: function '%s' not found in type-checked program" fname))
       | Some fi ->
           (match List.assoc_opt name fi.Types.param_types with
            | Some t -> t
            | None ->
                match Types.StringMap.find_opt name fi.Types.local_types with
                | Some t -> t
-               | None   -> fallback)
+               | None ->
+                   match ty_opt with
+                   | Some t -> t
+                   | None -> raise (Error (Printf.sprintf
+                       "BUG: resolve_local_ast: '%s' in function '%s' not found in \
+                        type-checked program and no explicit type hint was given"
+                       name fname)))
 
 let resolve_ret_ast (pt : Types.program_types option) fname ty_opt =
-  let fallback = match ty_opt with Some t -> t | None -> TypeVoid in
   match pt with
-  | None -> fallback
+  | None -> (match ty_opt with Some t -> t | None -> TypeVoid)
   | Some pt ->
       match Types.StringMap.find_opt fname pt.Types.functions with
-      | None    -> fallback
+      | None -> raise (Error (Printf.sprintf
+          "BUG: resolve_ret_ast: function '%s' not found in type-checked program" fname))
       | Some fi -> fi.Types.ret_type
 
 let function_key (pt : Types.program_types option) (fdef : Ast.func) =
@@ -2190,12 +2216,26 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       in
       (match Hashtbl.find_opt functions direct_name with
        | Some (ft, callee) ->
+           (* declare_func/gen_func always populate functions,
+              func_ret_ast_types, and func_param_ast_types together (see
+              gen_func's own comment) -- direct_name being in `functions`
+              guarantees the other two, so a miss below is an internal
+              inconsistency, not a legitimate "unknown signature" case. *)
            let param_asts = match Hashtbl.find_opt func_param_ast_types direct_name with
-             | Some ps -> ps | None -> []
+             | Some ps -> ps
+             | None -> raise (Error (Printf.sprintf
+                 "BUG: Call: '%s' has no func_param_ast_types entry despite being declared"
+                 direct_name))
            in
            let arg_vals =
              List.mapi (fun i a ->
-               let param_ast = (try List.nth param_asts i with _ -> TypeI32) in
+               let param_ast = match List.nth_opt param_asts i with
+                 | Some t -> t
+                 | None -> raise (Error (Printf.sprintf
+                     "BUG: Call: '%s' called with more arguments (index %d) than its \
+                      %d declared parameter(s) -- type_inf should have rejected this arity \
+                      mismatch" direct_name i (List.length param_asts)))
+               in
                let (_, av) = gen_expr ~expected_ty:param_ast locals a in
                coerce av param_ast
              ) args |> Array.of_list
@@ -2204,9 +2244,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let call_name = if ret_lty = void_type context then "" else "calltmp" in
            let v = build_call ft callee arg_vals call_name builder in
            let ast_ret = match Hashtbl.find_opt func_ret_ast_types direct_name with
-             | Some t -> t | None -> TypeI32
+             | Some t -> t
+             | None -> raise (Error (Printf.sprintf
+                 "BUG: Call: '%s' has no func_ret_ast_types entry despite being declared"
+                 direct_name))
            in
-           (ast_ret, v)
+           (ast_ret, to_arith_width ast_ret v)
        | None ->
            (* Indirect call: local or global function pointer variable *)
            let (fn_ast_ty, fn_ptr) =
@@ -2233,7 +2276,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 in
                 let call_name = if ret_ll = void_type context then "" else "calltmp" in
                 let v = build_call ft fn_ptr arg_vals call_name builder in
-                (ret_ast, v)
+                (ret_ast, to_arith_width ret_ast v)
             | _ ->
                 raise (Error (Printf.sprintf
                   "'%s' is not a function or function pointer" fname))))
@@ -2244,24 +2287,26 @@ let gen_func ?prog_types fdef =
   let key = function_key prog_types fdef in
   let res name ty_opt = resolve_local_ast prog_types key name ty_opt in
 
+  (* gen_program's Pass 1 (declare_func) registers every FuncDef's signature
+     -- in `functions`, `func_ret_ast_types`, AND `func_param_ast_types`
+     together -- before Pass 2 calls gen_func on that same fdef; this
+     function is never invoked any other way (confirmed: test_takibi.ml's
+     codegen tests always go through gen_program, never gen_func directly).
+     A missing entry here would mean gen_func ran for a function Pass 1
+     never saw -- raise instead of quietly re-declaring it (which used to
+     populate `functions`/`func_ret_ast_types` but not
+     `func_param_ast_types`, a real asymmetry masked by this fallback). *)
   let (_, f) =
     match Hashtbl.find_opt functions key with
     | Some x -> x
-    | None ->
-        let param_ast = List.map (fun (n, t) -> res n t) fdef.params in
-        let param_lls = List.map ltype_of_ast param_ast |> Array.of_list in
-        let ret_ast   = resolve_ret_ast prog_types key fdef.ret_type in
-        let ret_ll    = ltype_of_ret_ast ret_ast in
-        let ft        = function_type ret_ll param_lls in
-        let f         = declare_function key ft the_module in
-        Hashtbl.add functions key (ft, f);
-        Hashtbl.add func_ret_ast_types key ret_ast;
-        (ft, f)
+    | None -> raise (Error (Printf.sprintf
+        "BUG: gen_func: '%s' not declared by Pass 1 (declare_func)" key))
   in
 
   let ret_ast = match Hashtbl.find_opt func_ret_ast_types key with
     | Some t -> t
-    | None   -> TypeI32
+    | None -> raise (Error (Printf.sprintf
+        "BUG: gen_func: '%s' has no func_ret_ast_types entry despite being declared" key))
   in
 
   let entry_bb = append_block context "entry" f in

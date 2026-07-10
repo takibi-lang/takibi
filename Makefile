@@ -141,7 +141,7 @@ STM32_CHECKSUM_OBJS     := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/
 # instead of the generic pattern rule.
 STM32_RAM_EXAMPLES := $(STM32_EXAMPLES) rtc echo timer irq preempt watchdog \
                        $(STM32_CHECKSUM_EXAMPLES) \
-                       net_echo arp_reply icmp_echo tcp_echo http_server
+                       net_echo arp_reply icmp_echo tcp_echo http_server sdcard
 # Target list for the generic $(STM32_RAM_ELFS_GENERIC) pattern rule below --
 # deliberately distinct from STM32_RAM_ELFS (stm32build's full
 # prerequisite list, used only for building "everything", never as a
@@ -679,6 +679,7 @@ examples/watchdog/watchdog_stm32.o: examples/watchdog/watchdog.tkb $(COMMON_STM3
 # prerequisites only, for staleness tracking.
 COMMON_STM32_ETH       := $(COMMON_STM32_DIR)/eth.tkb
 COMMON_STM32_NETCONFIG := $(COMMON_STM32_DIR)/netconfig.tkb
+COMMON_STM32_SDMMC     := $(COMMON_STM32_DIR)/sdmmc.tkb
 
 examples/net_echo/net_echo_stm32.o: examples/net_echo/net_echo.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
@@ -694,6 +695,15 @@ examples/tcp_echo/tcp_echo_stm32.o: examples/tcp_echo/tcp_echo.tkb $(COMMON_STM3
 
 examples/http_server/http_server_stm32.o: examples/http_server/http_server.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+
+# sdcard: GitHub issue #62, real SDMMC1 microSD driver, built and verified
+# entirely independently of examples/fatfs (see sdmmc.tkb's header comment).
+# STM32-only -- no QEMU build exists (no virtual SD controller in this
+# project's QEMU setup). Deliberately NOT --forbid-trap yet, same
+# milestone-wide reason as examples/fatfs (CLAUDE.md's "Development
+# Process" section).
+examples/sdcard/sdcard_stm32.o: examples/sdcard/sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SDMMC) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SDMMC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
 
 # examples/http_server is the one deliberate exception to "every STM32
 # example runs from RAM" (see STM32_RAM_EXAMPLES's comment above): flashing

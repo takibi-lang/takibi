@@ -449,6 +449,53 @@ run_hw_test_ram_stdin() {
     rm -f "$tmp_out"
 }
 
+# run_hw_test_ram_sdcard NAME ELF SCRIPT
+#
+# GitHub issue #62's real SDMMC1 microSD driver (examples/sdcard) -- no
+# filesystem exists at this layer, so there's nothing for `mtools` to parse
+# the way examples/fatfs's own hardware test uses it. sdcard.tkb writes a
+# fixed, deterministic byte pattern into a few sectors, reads them back,
+# and prints both a PASS/FAIL summary and a hex dump of what it read over
+# UART; SCRIPT (scripts/sdcard_test.py) independently recomputes the same
+# pattern and checks the dumped bytes against it -- same "byte round trip
+# through the real hardware, checked independently" principle as the
+# fatfs/mtools check, just without a filesystem in the way. Destroys
+# whatever was previously on the card every run (confirmed acceptable).
+run_hw_test_ram_sdcard() {
+    local name="$1" elf="$2" script="$3"
+    local tmp_out
+    tmp_out=$(mktemp)
+
+    stty -F "$SERIAL_DEV" "$BAUD" raw -echo
+    local tmp_drain
+    tmp_drain=$(mktemp)
+    read_until_quiet "$tmp_drain" "$DRAIN_MAX_SECS" "$DRAIN_STABLE_POLLS" 0
+    rm -f "$tmp_drain"
+
+    read_until_quiet "$tmp_out" 15 8 1 "ram_load_and_run '$elf'"
+
+    if [ "$RAM_LOAD_OK" != "1" ]; then
+        printf "${RED}FAIL${RST}  %s  (openocd RAM load failed)\n" "$name"
+        sed 's/^/       /' "$RAM_LOAD_LOG"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+        rm -f "$tmp_out" "$RAM_LOAD_LOG"
+        return
+    fi
+    rm -f "$RAM_LOAD_LOG"
+
+    if python3 "$(dirname "$0")/$script" "$tmp_out"; then
+        printf "${GRN}PASS${RST}  %s\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        printf "${RED}FAIL${RST}  %s\n" "$name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+    fi
+
+    rm -f "$tmp_out"
+}
+
 echo "Running STM32 hardware integration tests (RAM execution) against $SERIAL_DEV..."
 echo ""
 
@@ -510,6 +557,10 @@ run_hw_test_ram "watchdog (stm32/ram)"  examples/watchdog/kernel_stm32_ram.elf  
 run_hw_test_ram "inet_checksum (stm32/ram)" examples/inet_checksum/kernel_stm32_ram.elf examples/inet_checksum/inet_checksum.expected
 run_hw_test_ram "ip_parse (stm32/ram)"      examples/ip_parse/kernel_stm32_ram.elf      examples/ip_parse/ip_parse.expected
 run_hw_test_ram "tcp_parse (stm32/ram)"     examples/tcp_parse/kernel_stm32_ram.elf     examples/tcp_parse/tcp_parse.expected
+
+# sdcard: real SDMMC1 microSD driver (GitHub issue #62) -- see
+# run_hw_test_ram_sdcard's own comment above.
+run_hw_test_ram_sdcard "sdcard (stm32/ram)" examples/sdcard/kernel_stm32_ram.elf sdcard_test.py
 
 # fatfs: seeded RAM load (breakpoint-timed OpenOCD load_image of a real
 # mformat/mcopy image into `disk`) + post-run dump_image/mtools check --
