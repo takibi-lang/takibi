@@ -272,6 +272,7 @@ llvm-19 OCaml bindings (llvm, llvm.analysis, llvm.target, llvm.all_backends,
 ppx_deriving.show
 llvm-mc-19, ld.lld-19     (bare-metal assembling/linking)
 qemu-system-aarch64       (QEMU execution)
+mtools                    (FAT12 image creation/verification for examples/fatfs)
 gdb-multiarch             (AArch64-capable gdb, for profiling/hardware debugging)
 openocd, stlink-tools     (STM32F746G-DISCOVERY flashing/debugging)
 ```

@@ -399,7 +399,8 @@ size.
 - **Primitive UART decimal printing is overloaded.** `uart_print` and `uart_println` accept `bool` and every signed
   or unsigned primitive integer width, including `isize`/`usize`. Narrow types share 32-bit conversion cores and
   wide types share 64-bit cores; signed minimum values are converted through unsigned subtraction to avoid
-  overflow. The old `uart_print_int`/`uart_print_uint` names remain compatibility wrappers.
+  overflow. The old decimal-print helper names (`uart_print_int`, `uart_print_uint`, and their `println` variants)
+  have been removed from the examples; use the overloaded entry points instead.
 - **`isize` (signed pointer-sized integer) is implemented** -- it is the pointer-sized signed integer used for raw
   pointer arithmetic and pointer differences (`ptr - ptr` returns `isize`).
 - **A scoped form of refinement-type inference is implemented (GitHub issue #72)**: a bare `x as <base>` cast (no
@@ -1067,8 +1068,8 @@ clearly paid for itself. Also added `read_u32be`/`write_u32be` for TCP's
 reasoning as the 16-bit versions. Note `read_u32be` can produce a
 "negative" `i32` bit pattern for seq numbers >= `0x80000000` (i32 is
 signed) -- harmless for display (print via `uart_print_hex`, which shows
-the bit pattern regardless of sign, not `uart_print_uint`, which assumes
-non-negative) and harmless for the modular arithmetic TCP sequence
+the bit pattern regardless of sign, not decimal `uart_print`) and harmless
+for the modular arithmetic TCP sequence
 numbers actually need, but worth remembering if a future step adds
 seq-number *comparisons* (`<`, `>`) -- those need wraparound-aware
 comparison logic, not a plain signed or unsigned `<`.
@@ -1144,7 +1145,7 @@ though its raw transport doesn't technically require it.
 buffer, returns length -- same idea as `uart_puts` but targeting memory
 instead of streaming to UART) and `write_udec(buf, n)` (writes decimal
 digits with no leading zeros, returns digit count -- same recursive
-approach as `print.tkb`'s `uart_print_uint`, targeting a buffer). Needed
+approach as `print.tkb`'s unsigned decimal core, targeting a buffer). Needed
 because the response's `Content-Length` and the request counter are both
 variable-width at runtime, so the response has to be *built* (body first,
 into a staging buffer `html_body`, to learn its length; then headers,

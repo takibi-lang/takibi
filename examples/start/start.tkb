@@ -1,5 +1,5 @@
 // Basic demo of global variables, if/else/while, function calls, and UART output.
-// uart_print_int recursively prints a signed integer in decimal.
+// uart_print is the overloaded decimal printer for primitive values.
 let g_int = 1;
 let g_char: u8 = 0;
 
@@ -36,4 +36,3 @@ fn app_main() {
     uart_putc('\r');
     uart_putc('\n');
 }
-

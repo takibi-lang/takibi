@@ -188,7 +188,7 @@ fn copy_str(dst: *u8, src: *u8) -> isize {
 
 // Writes the decimal digits of n (n must be >= 0) into buf, with no
 // leading zeros, and returns the digit count. Same recursive-digit
-// approach as print.tkb's uart_print_uint, just targeting a memory
+// approach as print.tkb's unsigned decimal core, just targeting a memory
 // buffer instead of streaming to UART one byte at a time.
 fn write_udec(buf: *u8, n: i32) -> isize {
     if (n >= 10) {
