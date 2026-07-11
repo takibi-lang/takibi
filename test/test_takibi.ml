@@ -1959,6 +1959,49 @@ let infer_tests = [
     (expect_type_error "sink is only valid"
        "fn bad(x: sink *u8) {}");
 
+  (* GitHub issue #15 follow-up: casting a non-literal integer to an
+     AFFINE OPAQUE pointer type requires `unsafe` -- scoped narrowly to
+     affine targets after a broader "any pointer" version was measured
+     against the whole example suite and found to falsely flag legitimate
+     runtime-computed MMIO addresses (see lib/type_inf.ml's Cast case
+     comment and HISTORY.md's issue #15 entry). *)
+  Alcotest.test_case "casting a non-literal integer to an affine handle requires unsafe" `Quick
+    (expect_type_error "casting a non-literal integer to an affine handle"
+       "affine opaque struct Token;
+        fn f(idx: usize) { let t: *Token = idx as *Token; }");
+
+  Alcotest.test_case "unsafe marks a computed cast to an affine handle" `Quick
+    (expect_ok "affine opaque struct Token;
+                fn release(t: sink *Token) {}
+                fn f(idx: usize) {
+                    let t: *Token = unsafe { idx as *Token };
+                    release(t);
+                }");
+
+  Alcotest.test_case "a literal cast to an affine handle needs no unsafe" `Quick
+    (expect_ok "affine opaque struct Token;
+                fn release(t: sink *Token) {}
+                fn f() {
+                    let t: *Token = 0 as usize as *Token;
+                    release(t);
+                }");
+
+  Alcotest.test_case "an address-of cast to an affine handle needs no unsafe" `Quick
+    (expect_ok "affine opaque struct Token;
+                let mut storage: u8;
+                fn release(t: sink *Token) {}
+                fn f() {
+                    let t: *Token = &storage as *Token;
+                    release(t);
+                }");
+
+  (* Negative control: casting a non-literal integer to an ORDINARY
+     (non-affine) pointer stays legal -- this is the real driver pattern
+     (a runtime-discovered MMIO base address, offset and cast to a plain
+     `*io T`) the affine-only scoping exists to preserve. *)
+  Alcotest.test_case "casting a non-literal integer to a non-affine pointer needs no unsafe" `Quick
+    (expect_ok "fn f(base: usize, offset: usize) { let p: *io u32 = (base + offset) as *io u32; }");
+
   Alcotest.test_case "borrow is rejected for ordinary parameter types" `Quick
     (expect_type_error "borrow is only valid"
        "fn bad(x: borrow *u8) {}");

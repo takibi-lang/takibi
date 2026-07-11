@@ -382,6 +382,25 @@ let intlit_opt (e : Ast.expr) : int option =
   | IntLit k -> Ast.int_of_intlit k
   | _ -> None
 
+(* Is this expression built up entirely from compile-time integer
+   LITERALS or a real object's address (`IntLit`, `&x`, casts of a
+   literal/address-derived value, +/-/* combining two such values)? Used
+   to decide whether a cast to an AFFINE OPAQUE pointer type needs
+   `unsafe` -- see infer_expr's Cast case, which deliberately checks this
+   ONLY for that narrow target (not pointers in general -- see that
+   comment for why). Recognizes `0 as usize as *Token`-style null/
+   singleton-token sentinels and `&fat_file_token_storage as *FatFile`
+   -style singleton addresses -- but deliberately NOT a `let`-bound
+   variable, a function's return value, or any other runtime-computed
+   quantity. *)
+let rec is_literal_derived (e : Ast.expr) : bool =
+  match e.desc with
+  | IntLit _ -> true
+  | AddrOf _ -> true
+  | Cast (_, inner) -> is_literal_derived inner
+  | BinOp ((Add | Sub | Mul), a, b) -> is_literal_derived a && is_literal_derived b
+  | _ -> false
+
 (* Nesting depth of `unsafe { ... }` expressions around the expression
    currently being inferred. Compilation is single-threaded, so a module
    -level counter is safe (same pattern as llvm_gen's narrowing_ctx).
@@ -390,9 +409,37 @@ let intlit_opt (e : Ast.expr) : int option =
    and unit tests run many compilations in one process. *)
 let unsafe_depth = ref 0
 
+(* Names of every `affine opaque struct`, set once near the start of
+   infer_program (before Pass 3 runs) and read from deep inside infer_expr's
+   Cast case -- same "module-level ref set once per compilation" pattern as
+   unsafe_depth/resolved_call_targets, needed because infer_expr is a
+   separate top-level function with no closure access to infer_program's
+   own locals. See infer_expr's Cast case for why only AFFINE-opaque
+   pointer targets consult this (GitHub issue #15 follow-up). *)
+let affine_opaque_names = ref StringSet.empty
+
 (* Direct calls are resolved during inference.  Codegen must consume this
    exact decision rather than attempting a second overload resolution. *)
 let resolved_call_targets = ref StringMap.empty
+
+(* GitHub issue #15 follow-up: require `unsafe` for a cast that builds an
+   AFFINE OPAQUE pointer from anything other than a compile-time literal or
+   a real object's address -- see is_literal_derived's comment for the
+   full reasoning and why this is scoped to affine targets only, not
+   pointer casts in general. Called from infer_expr's Cast case for BOTH
+   ways a source integer can reach that point (a plain unrefined base, or
+   a TRefinedInt -- e.g. a refined `{0..<4 as usize}` loop-proven index),
+   since those are two separate match arms there and neither should skip
+   this check. *)
+let check_affine_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
+  match tgt with
+  | TPtr (TStruct sname) when StringSet.mem sname !affine_opaque_names ->
+      if !unsafe_depth = 0 && not (is_literal_derived src_expr) then
+        raise (TypeError (loc,
+          "casting a non-literal integer to an affine handle asserts it is \
+           valid with no evidence; write `unsafe { ... as "
+          ^ to_string tgt ^ " }` to mark it"))
+  | _ -> ()
 
 let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
@@ -744,8 +791,44 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  | TIsize | TUsize ->
                      (try unify src_ty tgt; TRefinedInt (lo, hi, tgt)
                       with Unify_error _ -> tgt)
-                 | _ -> tgt)
+                 | _ ->
+                     (* A refined integer (e.g. a for-loop-proven
+                        `{0..<4 as usize}` index) cast straight to a
+                        pointer -- same GitHub issue #15 check as the
+                        catch-all case below, needed here too since this
+                        is a SEPARATE match arm reached whenever the
+                        source already carries a refined range. *)
+                     check_affine_ptr_cast_needs_unsafe e.loc e tgt;
+                     tgt)
             | _ ->
+                (* GitHub issue #15 follow-up: casting a non-literal integer
+                   to a pointer to an AFFINE OPAQUE struct type asserts
+                   "this bit pattern is a valid handle" with no evidence at
+                   all (check_affine_ptr_cast_needs_unsafe, above). This
+                   deliberately covers only affine-opaque targets, not
+                   pointer casts in general: an earlier, broader version of
+                   this check (any integer -> any pointer type) was
+                   measured against the whole example suite and rejected --
+                   this codebase's real MMIO drivers routinely cast a
+                   runtime-DISCOVERED hardware base address, offset by a
+                   computed value, straight to a plain `*io T` pointer
+                   (examples/common_qemu/virtio_mmio.tkb's `(virtio_base +
+                   offset) as *io i32`, `virtio_base` itself found by
+                   scanning device slots at boot) -- a legitimate pattern
+                   with no realistic way to tell apart syntactically from a
+                   genuinely bogus cast, so it must stay unmarked. An affine
+                   opaque handle is different in kind: nothing legitimate
+                   ever needs to fabricate one from an arbitrary computed
+                   integer (every real handle in this codebase already
+                   comes from that type's own constructor, e.g.
+                   `fat_open()`/`net_rx_acquire()`), so a cast building one
+                   from anything other than a literal or a real object's
+                   address (`&x`) is exactly the `examples/
+                   affine_escape_via_index.tkb`-style misuse (a table index
+                   smuggled through a pointer purely to get affine tracking)
+                   this check exists to flag -- see HISTORY.md's issue #15
+                   entry for the full before/after measurement. *)
+                check_affine_ptr_cast_needs_unsafe e.loc e tgt;
                 (* GitHub issue #100 follow-up: an EXPLICIT `x as {lo..<hi
                    as base}` cast target reaches here for any source that
                    isn't itself a pointer/slice/already-refined value (in
@@ -1994,6 +2077,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.OpaqueStructDef (name, true) -> StringSet.add name names
     | _ -> names
   ) StringSet.empty prog in
+  affine_opaque_names := affine_names;
   let rec validate_complete_type loc behind_ptr = function
     | Ast.TypeNamed name when StringSet.mem name opaque_names && not behind_ptr ->
         raise (TypeError (loc, Printf.sprintf

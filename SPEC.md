@@ -760,7 +760,7 @@ all, regardless of type.
 cannot itself prove, and produces **no trap** -- it is a checkless
 assertion the compiler is told to trust, distinct from a runtime check
 (a check the compiler still doubts, which *does* generate a trap).
-Currently gates exactly two things:
+Currently gates exactly three things:
 
 - Slice construction from a raw pointer, `unsafe { p[lo..<hi] }` -- the
   length assertion at a driver boundary.
@@ -770,12 +770,26 @@ Currently gates exactly two things:
   plain interval reasoning cannot see (see CLAUDE.md's P4c section for
   the two confirmed real-world cases and why a more general relational
   domain wasn't built for them).
+- Casting a non-literal integer to a pointer whose pointee is an
+  `affine opaque struct` type (GitHub issue #15 follow-up) -- see
+  "Affine Opaque Structs" above and HISTORY.md's issue #15 entry.
+  Deliberately scoped to affine targets only, not pointer casts in
+  general: a cast built entirely from compile-time integer literals or a
+  real object's address (`&x`) needs no `unsafe`, which is what keeps
+  every existing `0 as usize as *Name` / `&storage as *Name` sentinel
+  pattern in this codebase legal, but any OTHER pointer cast (including
+  a non-literal integer cast to an ordinary, non-affine pointer, e.g. a
+  runtime-discovered MMIO base address offset and cast to `*io T`) stays
+  legal without `unsafe` too -- narrowed to affine targets specifically
+  because a broader version was measured against this codebase's real
+  MMIO drivers and found to demand `unsafe` on essentially every
+  hardware register access, which would have made `unsafe` too common to
+  carry any audit signal.
 
-`unsafe` is **not** currently extended to integer-literal-to-pointer
-coercions, general pointer arithmetic/dereference, or an exhaustive
-enum's runtime variant check (the last of those is deliberately left
-checked: skipping it risks LLVM `unreachable`-based undefined behavior,
-not merely a redundant check).
+`unsafe` is **not** currently extended to general pointer
+arithmetic/dereference, or an exhaustive enum's runtime variant check
+(the latter is deliberately left checked: skipping it risks LLVM
+`unreachable`-based undefined behavior, not merely a redundant check).
 
 ## --forbid-trap
 

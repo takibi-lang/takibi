@@ -51,7 +51,18 @@
 affine opaque struct SlotLease;
 
 fn slot_lease(idx: {0..<4 as usize}) -> *SlotLease {
-    return idx as *SlotLease;
+    // GitHub issue #15 follow-up: this is exactly the cast the audit
+    // boundary now exists to flag -- idx is real DATA (a table slot
+    // number), not a genuine address, smuggled through a pointer type
+    // purely to get affine tracking. Without `unsafe` here this is now a
+    // compile error ("casting a non-literal integer to an affine handle
+    // asserts it is valid with no evidence"); a fixed literal or a real
+    // object's address (`&x`) would not need it (see FatFile/
+    // NetRxCpuOwned/MutexGuard's own `0 as usize as *T` / `&storage as
+    // *T` sentinels elsewhere in this codebase, neither of which needs
+    // `unsafe`). Left unsafe rather than "fixed" -- that IS the point of
+    // this file; see HISTORY.md's issue #15 entry.
+    return unsafe { idx as *SlotLease };
 }
 
 fn slot_unlease(lease: sink *SlotLease) {

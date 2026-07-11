@@ -6101,3 +6101,97 @@ affine_escape_via_index.tkb` + `.expected` (new); `Makefile` (added to
 `EXAMPLES`, QEMU-only for now -- no STM32 build, since this is validation
 work, not a driver being ported); `scripts/run_qemutest.sh` (one new
 `run_test` registration).
+
+## GitHub Issue #15 Follow-up: Integer-to-Affine-Pointer Cast Audit Boundary (`unsafe` Required, Narrowly Scoped)
+
+Follow-up to a design discussion (with Fable) about issues #15 ("Safe
+pointer") and #102 ("Provable pointer alignment"): rather than tackling
+"Safe pointer" as one monolithic feature, break it along its real
+dependency lines (range: already solved by slices; alignment: #102,
+no dependency, real driving need already hit -- see the sdmmc.tkb HardFault
+entry elsewhere in this file; null safety: needs #20 variant enum first;
+dangling: impossible without a heap, needs #26 first; forged pointers:
+no dependency, cheap). This entry is the "forged pointers" piece, chosen
+as the first, cheapest step, and directly motivated by
+`examples/affine_escape_via_index/affine_escape_via_index.tkb`'s own
+`idx as *SlotLease` (see that file's own entry above) -- a small integer
+that was never a real address, cast to a pointer purely to smuggle it
+through affine tracking.
+
+**What it does**: casting a non-literal integer to a pointer whose
+pointee is an `affine opaque struct` type now requires `unsafe { ... }`,
+mirroring the existing "unchecked assertion must be visibly marked"
+pattern SliceOf already uses for raw-pointer-to-slice construction. A
+cast built entirely from compile-time literals or a real object's address
+(`&x`) stays legal without `unsafe` -- this keeps every existing sentinel
+pattern in the codebase working unchanged: `0 as usize as *FatFile` /
+`*NetRxCpuOwned` / `*MutexGuard` / `*Token` (null-style "nothing
+acquired" sentinels) and `&fat_file_token_storage as *FatFile` /
+`&net_rx_token_storage as *NetRxCpuOwned` (singleton addresses).
+
+**The scoping decision was found empirically, not assumed.** The first
+version applied to ANY integer -> ANY pointer cast, not just affine
+targets, on the theory that it would be "nearly free" (per the design
+discussion). Measuring it against the actual codebase immediately proved
+that wrong: `examples/common_qemu/virtio_mmio.tkb`'s `virtio_net_find()`
+discovers a device's MMIO base address at BOOT TIME by scanning slots
+(`let mut virtio_base: i32 = 0; ... virtio_base = base;`), and the whole
+driver then routinely does `(virtio_base + offset) as *io i32` --  a
+completely legitimate, unavoidable hardware-address computation that is
+syntactically indistinguishable from a bogus cast (both are "some
+non-literal integer cast to a pointer"). The broad version would have
+required sprinkling `unsafe` across essentially every MMIO register
+access in `virtio_mmio.tkb`/`gic.tkb`/`eth.tkb`, which would have made
+`unsafe` too common to carry any audit signal at all -- confirmed
+concretely via two existing, correct unit tests that started failing
+against the broad version (`usize as pointer type-checks`, and a codegen
+test with a genuine `pointer -> usize -> pointer` round-trip through a
+named local), both legitimate patterns with no realistic way to
+distinguish them syntactically from a forged pointer.
+
+Narrowing to affine-opaque targets only removes this tension entirely,
+for a principled reason, not just to dodge the measurement: nothing
+legitimate ever needs to fabricate a NEW affine handle from an arbitrary
+computed integer -- every real handle in this codebase already comes from
+that type's own constructor (`fat_open()`, `net_rx_acquire()`,
+`mutex_lock()`), so a cast building one any other way (not literal, not a
+real address) is exactly the kind of misuse this check exists to catch,
+with none of plain-pointer MMIO access's legitimate-but-syntactically-
+identical cases to worry about. Re-measured after narrowing: `make check`
+(76/76) -- ONLY `affine_escape_via_index.tkb`'s own `idx as *SlotLease`
+was flagged; every other example (`net_echo`/`arp_reply`/`icmp_echo`/
+`tcp_echo`/`http_server`/`fatfs` and their real `NetRxCpuOwned`/`FatFile`
+sentinel casts, the STM32 build, `virtio_mmio.tkb`'s runtime MMIO
+addressing) compiled completely unchanged. Fixed by wrapping that one
+cast in `unsafe { ... }` with a comment explaining why it's deliberately
+left marked rather than "fixed" -- flagging it clearly is the actual
+point of that file.
+
+**Implementation**: a new `is_literal_derived` predicate (`IntLit`, `&x`,
+casts/`+`/`-`/`*` of literal-derived values) and a module-level
+`affine_opaque_names : StringSet.t ref` (same pattern as `unsafe_depth`/
+`resolved_call_targets` -- `infer_expr` is a separate top-level function
+with no closure access to `infer_program`'s own locals, so the set,
+computed once near the start of `infer_program` before Pass 3 runs, has
+to be threaded through a ref rather than a parameter). The actual check
+(`check_affine_ptr_cast_needs_unsafe`) had to be called from TWO separate
+match arms in `infer_expr`'s `Cast` case, not one: a plain unrefined
+integer source and a `TRefinedInt` source (e.g. a for-loop-proven
+`{0..<4 as usize}` index, exactly `affine_escape_via_index.tkb`'s own
+`idx`) take different branches of the existing `match repr src_ty with`
+structure, and the first attempt only wired the check into the plain-
+integer branch -- confirmed missed by trying `idx as *SlotLease` again
+after the "fix" and seeing it still compile clean, not by inspection alone.
+
+**Test coverage**: 5 new unit tests (a non-literal cast to an affine
+handle rejected; `unsafe` accepting the same cast; a literal cast needing
+no `unsafe`; an address-of cast needing no `unsafe`; a negative control
+confirming a non-literal cast to a NON-affine pointer, the `virtio_base`
+shape, stays legal). `make test` (518) and `make check` (76/76) both pass.
+
+**Files**: `lib/type_inf.ml` (`is_literal_derived`,
+`affine_opaque_names`, `check_affine_ptr_cast_needs_unsafe`, wired into
+both `Cast` match arms); `test/test_takibi.ml` (5 new unit tests);
+`examples/affine_escape_via_index/affine_escape_via_index.tkb`
+(`slot_lease`'s cast wrapped in `unsafe`, with a comment explaining why
+that's the intended end state, not a placeholder).
