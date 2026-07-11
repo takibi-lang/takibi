@@ -419,7 +419,7 @@ fn net_rx_frame(frame: borrow *NetRxCpuOwned) -> [u8; 1514..] {
 // Must receive the CPU-owned handle returned by net_rx_acquire(), once the
 // caller no longer needs net_rx_frame()'s contents (e.g. after net_transmit() has
 // already copied/sent them out, since net_transmit() is synchronous).
-fn net_rx_release(frame: *NetRxCpuOwned) {
+fn net_rx_release(frame: sink *NetRxCpuOwned) {
     let desc: *EthDmaDesc = rx_desc_ptr(eth_rx_cur);
     dma_prepare_rx(eth_rx_bufs + eth_rx_cur * ETH_BUF_SIZE,
                    ETH_BUF_SIZE as usize);

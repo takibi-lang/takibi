@@ -499,7 +499,7 @@ fn fat_write(fp: borrow *FatFile, buf: *u8, btw: u32, bw: *u32) -> i32 {
     return 0;
 }
 
-fn fat_close(fp: *FatFile) -> i32 {
+fn fat_close(fp: sink *FatFile) -> i32 {
     // ff_dir_index was assigned from an already-bounds-checked idx in
     // fat_open (either branch), but if-narrowing tracks a plain local
     // variable, not a repeated global reference -- bind it to a local

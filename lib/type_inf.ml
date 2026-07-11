@@ -1982,11 +1982,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         List.iter (validate_complete_type loc false) args;
         validate_complete_type loc false ret
     | Ast.TypeRefined (_, _, base) -> validate_complete_type loc false base
-    | Ast.TypeBorrow inner -> validate_complete_type loc behind_ptr inner
+    | Ast.TypeBorrow inner | Ast.TypeSink inner -> validate_complete_type loc behind_ptr inner
     | _ -> ()
   in
   let rec contains_borrow = function
-    | Ast.TypeBorrow _ -> true
+    | Ast.TypeBorrow _ | Ast.TypeSink _ -> true
     | Ast.TypePtr t | Ast.TypeIo t -> contains_borrow t
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> contains_borrow t
     | Ast.TypeFn (args, ret) -> List.exists contains_borrow args || contains_borrow ret
@@ -1999,11 +1999,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeBorrow _ ->
         raise (TypeError (loc,
           "borrow is only valid on a pointer to an affine opaque struct parameter"))
+    | Ast.TypeSink (Ast.TypePtr (Ast.TypeNamed name) as inner)
+      when StringSet.mem name affine_names -> validate_complete_type loc false inner
+    | Ast.TypeSink _ ->
+        raise (TypeError (loc,
+          "sink is only valid on a pointer to an affine opaque struct parameter"))
     | ty -> validate_complete_type loc false ty
   in
   let validate_nonparam_type loc ty =
     if contains_borrow ty then
-      raise (TypeError (loc, "borrow is only valid in function parameter types"));
+      raise (TypeError (loc, "borrow/sink is only valid in function parameter types"));
     validate_complete_type loc false ty
   in
   let rec validate_expr_types (e : Ast.expr) =
@@ -2323,9 +2328,19 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      This deliberately stops short of a general ownership system: affine
      values may be dropped, but a consuming call/return/assignment moves a
      named local and any later use is rejected. `borrow T` is parameter-only
-     and makes calls through that parameter non-consuming. *)
+     and makes calls through that parameter non-consuming. `sink T` is also
+     parameter-only and DOES consume at the call site (like a plain owning
+     parameter), but marks the callee as this value's designated terminal
+     consumer -- see check_affine_func's parameter-consumption check below
+     for why plain owning parameters need this counterpart (GitHub issue
+     #89: a purely syntactic "was this parameter forwarded to another
+     consuming call" check cannot tell a genuine release function like
+     mutex_unlock/fat_close/net_rx_release apart from an accidental no-op
+     that silently drops the handle -- `sink` makes that distinction an
+     explicit, checkable declaration instead of something the checker has
+     to infer). *)
   let rec strip_borrow = function
-    | Ast.TypeBorrow t -> strip_borrow t
+    | Ast.TypeBorrow t | Ast.TypeSink t -> strip_borrow t
     | t -> t
   in
   let is_affine_type ty = match strip_borrow ty with
@@ -2493,9 +2508,31 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (arm_moved, declared)
       | Ast.Break | Ast.Continue -> (moved, declared)
     in
-    ignore (check_stmts StringSet.empty
+    let (final_moved, _) = check_stmts StringSet.empty
       (List.fold_left (fun d (name, _) -> StringSet.add name d)
-         StringSet.empty fdef.params) fdef.body)
+         StringSet.empty fdef.params) fdef.body
+    in
+    (* GitHub issue #89 "problem 2": a plain (non-`borrow`, non-`sink`)
+       affine PARAMETER must also be consumed somewhere within the
+       callee's own body (forwarded to another consuming call, passed to
+       a `sink` parameter, or returned) -- otherwise the callee can
+       silently swallow a handle its caller already gave up (the caller's
+       own obligation IS satisfied by the call itself, so this is a
+       distinct, callee-side check). `borrow`/`sink` parameters are
+       exempt: `borrow` never takes ownership, and `sink` is the
+       designated terminal consumer, with nothing further to forward. *)
+    List.iter (fun (name, ty_opt) ->
+      let is_owned_affine = match ty_opt with
+        | Some (Ast.TypeBorrow _) | Some (Ast.TypeSink _) -> false
+        | Some ty -> is_affine_type ty
+        | None -> false
+      in
+      if is_owned_affine && not (StringSet.mem name final_moved) then
+        raise (TypeError (fdef.def_loc, Printf.sprintf
+          "affine parameter '%s' is never consumed by this function \
+           (forward it, or take it as `sink` if this function is meant \
+           to be its terminal consumer)" name))
+    ) fdef.params
   in
   List.iter (function Ast.FuncDef f -> check_affine_func f | _ -> ()) prog;
   (* Deferred until AFTER Pass 3, same reasoning as check_undetermined_lets

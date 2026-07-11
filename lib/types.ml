@@ -188,7 +188,7 @@ let rec of_ast = function
   | Ast.TypeNamed s      -> TStruct s
   | Ast.TypeRefined (lo, hi, base) -> TRefinedInt (lo, hi, of_ast base)
   | Ast.TypeSlice (t, n) -> TSlice (of_ast t, n)
-  | Ast.TypeBorrow t -> of_ast t
+  | Ast.TypeBorrow t | Ast.TypeSink t -> of_ast t
 
 (* None -> fresh unification variable *)
 let of_ast_opt = function

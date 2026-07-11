@@ -41,6 +41,12 @@ type type_expr =
                                       The runtime length is always >= the minimum; index
                                       proofs and constant subslices check against it. *)
   | TypeBorrow of type_expr        (* parameter-only, non-consuming affine borrow *)
+  | TypeSink of type_expr
+    (* parameter-only affine "sink": like a plain (owning) affine parameter
+       at the call site (the argument IS consumed there), but marks this
+       function as the designated terminal consumer of the value, so the
+       callee's own body is NOT required to forward/consume it further
+       (GitHub issue #89's "sink" design -- see HISTORY.md). *)
 [@@deriving show]
 
 type expr = expr_desc located

@@ -360,7 +360,7 @@ fn net_rx_frame(frame: borrow *NetRxCpuOwned) -> [u8; 1514..] {
 // Hands the current RX descriptor back to the device and advances the
 // ring. Must receive the CPU-owned handle returned by net_rx_acquire(), after
 // the caller no longer needs net_rx_frame()'s contents.
-fn net_rx_release(frame: *NetRxCpuOwned) {
+fn net_rx_release(frame: sink *NetRxCpuOwned) {
     let rx_slot: isize = rx_avail_idx % QNUM;
     avail_ring_set(rx_queue_mem as *u8, rx_slot, net_last_rx_desc_idx);
     rx_avail_idx = rx_avail_idx + 1;

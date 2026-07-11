@@ -1,0 +1,23 @@
+// This file is expected to produce a compile error.
+// A plain (non-`borrow`, non-`sink`) affine PARAMETER must also be
+// consumed somewhere within the callee's own body -- the caller's own
+// obligation is already satisfied just by making the call, but a callee
+// that silently swallows the handle it was just handed (never forwards
+// it, never releases it) is still a leak. Mark the parameter `sink`
+// instead if this function IS meant to be the value's designated
+// terminal consumer (GitHub issue #89's "sink" design -- see
+// HISTORY.md). See SPEC.md's "Affine Opaque Structs" section.
+affine opaque struct Token;
+
+fn make() -> *Token {
+    return 0 as usize as *Token;
+}
+
+fn drop_silently(t: *Token) {
+}
+
+fn app_main() -> i32 {
+    let t: *Token = make();
+    drop_silently(t);
+    return 0;
+}

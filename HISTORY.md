@@ -5748,3 +5748,159 @@ re-deriving all of this from scratch.
 
 **Files**: `scripts/run_qemutest.sh` (`run_dwarf_test "fizzbuzz (dwarf)"`
 line commented out with investigation notes in place).
+
+## GitHub Issue #89: "Must Be Consumed" Implemented (Locals and Parameters), via a New `sink` Parameter Kind
+
+Two-session arc closing out the first concrete slice of issue #89 ("affine,
+not linear" -- a handle may be silently dropped, never consumed, with no
+error). Landed in two increments plus a design pivot found by direct
+implementation, not by discussion alone.
+
+**Increment 1: never-consumed LOCALS.** At the end of every block-like
+scope (function body, `if`/`else` branch, loop body, `match` arm), an
+affine local `let`-declared directly in that scope must appear in the
+double-consume checker's existing `moved` set by scope-end, or it is a
+compile error ("affine value 'NAME' is never consumed"). The first
+implementation used a SEPARATE `must`-consumed set combined with
+INTERSECTION at `if`/`match` joins (the textbook "consumed on every path"
+definite-assignment dual of `moved`'s union) -- and immediately misfired on
+every real affine-using example in the repo (`net_echo`, `arp_reply`,
+`icmp_echo`, `tcp_echo`, `http_server`, `fatfs`, `fatfs_sdcard`,
+`http_server_sdcard`), which all share this shape:
+
+```
+let acquired: *NetRxCpuOwned = net_rx_acquire();
+if ((acquired as usize) != 0) { ... use acquired ... }
+if ((acquired as usize) != 0) { net_rx_release(acquired); }
+```
+
+The release is reachable only behind the same nullness check gating every
+other use, but the checker cannot know the two `if` conditions are the same
+predicate without real relational reasoning (the same class of gap as the
+tcp_echo `data_off + data_len` correlation documented elsewhere in this
+file -- VC+SMT territory, not something an interval/same-base checker can
+see). Reverted to reusing the plain `moved` set (union at joins) instead --
+"consumed on AT LEAST ONE path," not "on every path." This still catches a
+value never consumed anywhere in its scope (the actual target), at the
+known, accepted cost of not catching a leak on only one branch of a
+multi-way conditional release.
+
+**Validated against a real driver rewrite, not just a toy example**:
+`examples/common/sync.tkb`'s `mutex_lock`/`mutex_unlock`/`cond_wait` were
+rewritten to return/consume a new `affine opaque struct MutexGuard` (a pure
+compile-time marker -- the real mutex is still the caller-owned `*i32`
+semaphore, passed alongside the guard), and `examples/condvar/condvar.tkb`
++ `examples/msgqueue/msgqueue.tkb` were updated to the guard-passing API,
+including `cond_wait`'s drop-and-reacquire pattern
+(`g = cond_wait(seq, g, m);` inside a `while` loop). `make check` (73/73 at
+the time, including real QEMU execution of `condvar`/`msgqueue` and STM32
+cross-build) passed unchanged. A deliberately introduced missing
+`mutex_unlock` in `task_producer` was correctly rejected at the
+`let mut g = mutex_lock(...)` declaration site; restoring it compiled
+clean. The loop-reacquire pattern interacts correctly for what looks like
+an accidental but welcome reason: reassigning `g` inside the `while` clears
+its "moved" status (pre-existing behavior), which happens to satisfy the
+pre-existing "cannot consume a value declared outside a loop inside that
+loop" restriction with no changes needed there.
+
+**Attempted next, and immediately reverted: the same check extended to
+PARAMETERS ("problem 2").** Requiring a plain (non-`borrow`) affine
+PARAMETER to also be consumed somewhere within its own function body, using
+the identical mechanism, misfired immediately and fundamentally -- not on
+edge cases, but on `mutex_unlock`, `fat_close`, and `net_rx_release`
+themselves, plus the very first existing affine unit test. These functions
+**are** the consuming operation from their caller's point of view, but
+their own body has no *further* affine call to make with the parameter
+they just discharged (they call `sem_post`/write a hardware register/etc.,
+not another function taking the same affine pointer type). The checker has
+no syntactic way to distinguish a genuine terminal "sink" function from an
+accidental no-op that silently swallows the handle (`fn
+drop_silently(t: *Token) {}`) -- both look identical to a purely syntactic
+consumption-graph checker: a plain affine parameter that is simply never
+passed onward. Reverted cleanly; the finding was written up as an interim
+report (session notes, drafted for GitHub issue #89 -- posted by the user
+directly, since this container's token lacked `Issues: write`).
+
+**Design pivot, proposed in a follow-up session (consulted with Fable) and
+implemented the same session: a new `sink` parameter kind closes exactly
+this gap.** The insight: "this parameter's obligation ends here" is not
+information a purely syntactic consumption-graph analysis can recover by
+inference -- every mature approach to this problem (Rust's `Drop` bound to
+a type, Linear Haskell's multiplicity-annotated arrows, ATS2's
+signature-level views) makes it a **declaration**, not a derived fact.
+`sink *Name` is that declaration, minimal and parameter-only (mirrors
+`borrow`'s own restriction -- valid only on a pointer to an affine opaque
+struct parameter, same error wording with "sink" substituted for
+"borrow"): it consumes the argument at the call site exactly like a plain
+`*Name` parameter, but tells the "must be consumed by the callee" check
+that THIS function is the value's designated terminal consumer, so its own
+body is exempt from needing to forward it further. With `sink` in place,
+the parameter-consumption check from the reverted attempt was reimplemented
+unchanged and now works: `net_rx_release` (both backends), `fat_close`, and
+`mutex_unlock` were marked `sink` on their consuming parameter; a plain
+affine parameter that is never consumed anywhere in its own function body
+is now correctly rejected ("affine parameter 'NAME' is never consumed by
+this function"). `cond_wait`'s own `g` parameter needed no `sink` marking
+at all -- its body already forwards `g` to `mutex_unlock(g, m)`, a
+consuming call, which already satisfies the check once `mutex_unlock`
+itself is marked `sink`.
+
+**Implementation footprint**: `TypeSink of type_expr` (`lib/ast.ml`,
+mirroring `TypeBorrow` exactly), a new `sink` keyword (`lib/lexer.mll`,
+`lib/parser.mly`), and every existing `TypeBorrow` match arm across
+`lib/types.ml`, `lib/type_layout.ml`, and `lib/llvm_gen.ml` extended to
+also match `TypeSink` (both erase to their inner type at the LLVM/
+unification level -- `sink`, like `borrow`, is purely a compile-time
+parameter annotation with no runtime representation). `lib/type_inf.ml`:
+`strip_borrow` strips both wrappers; the parameter-position-only,
+affine-opaque-pointer-only validation (`validate_param_type`,
+`contains_borrow`) gained a parallel `TypeSink` case with its own error
+message; `check_affine_func` gained the parameter-completeness check
+described above, gated to skip both `TypeBorrow` and `TypeSink` parameters.
+
+**Test coverage added at both layers**: `test/test_takibi.ml` gained unit
+tests for the never-consumed-local check (including the null-check-gated
+release pattern and the loop-reacquire pattern, both regression-proofing
+the union-vs-intersection finding), the never-consumed-parameter check, and
+`sink`'s own parameter-only/affine-opaque-only restriction. Two new
+CLI-level compile-error fixtures were added alongside the pre-existing
+`examples/affine_double_consume` (same convention: a minimal `Token`-based
+`.tkb`/`.error` pair wired into `scripts/run_qemutest.sh`'s
+`run_compile_error_test`, no Makefile changes needed): `examples/
+affine_never_consumed` (a local acquired and never consumed) and
+`examples/affine_param_never_consumed` (a plain-parameter callee that
+silently drops the handle it was handed, the exact `drop_silently` shape
+that motivated `sink`). `make check` (75/75, including the two new
+compile-error tests and every real example touched by the `sink`
+retrofit) passes; `make langcheck` passes.
+
+**Deliberately still open**: full "consumed on every path" analysis
+(would need real relational reasoning to avoid the null-check-gated-release
+false positive found in increment 1 -- likely belongs with issue #13's
+Z3/VC work, not a standalone effort); the `return`-terminated-branch
+union-imprecision noted in earlier issue #89 comments (an `if` branch that
+always `return`s should not be unioned into the continuation state, a
+smaller, self-contained CFG precision fix); and affine handles escaping a
+single function body by being stored into a data structure (a process
+table holding open file handles, the literal shape a real Unix-like
+kernel's fd table needs) -- the session's discussion favored, when a real
+driving example arrives, first trying the classic embedded-C workaround of
+storing a refined-type INDEX into a static table rather than the affine
+pointer itself (turning the escape problem into an instance of this
+project's existing range-proof strength), and treating true affine-field
+struct storage (decoupling `affine` from `opaque`) as the fallback only if
+that turns out to be insufficient.
+
+**Files**: `lib/ast.ml`, `lib/lexer.mll`, `lib/parser.mly`, `lib/types.ml`,
+`lib/type_layout.ml`, `lib/llvm_gen.ml`, `lib/type_inf.ml` (the `sink`
+feature and both consumption checks); `test/test_takibi.ml` (new/updated
+unit tests); `examples/common/sync.tkb`, `examples/condvar/condvar.tkb`,
+`examples/msgqueue/msgqueue.tkb` (`MutexGuard` retrofit); `examples/
+common/fat12.tkb`, `examples/common_stm32/eth.tkb`, `examples/common_qemu/
+virtio_mmio.tkb` (`sink` added to `fat_close`/`net_rx_release`);
+`examples/affine_double_consume`, `examples/affine_never_consumed`
+(`sink` added so these fixtures test what they say they test, not the new
+parameter check); `examples/affine_param_never_consumed` (new fixture);
+`scripts/run_qemutest.sh` (two new compile-error test registrations);
+`SPEC.md` ("Affine Opaque Structs" section rewritten for `sink` and the
+"must be consumed" rules).

@@ -132,6 +132,7 @@ let rec show_type = function
   | Ast.TypeSlice (t, 0) -> Printf.sprintf "[]%s" (show_type t)
   | Ast.TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (show_type t) n
   | Ast.TypeBorrow t -> "borrow " ^ show_type t
+  | Ast.TypeSink t -> "sink " ^ show_type t
 
 let type_t : Ast.type_expr Alcotest.testable =
   Alcotest.testable (fun fmt t -> Format.pp_print_string fmt (show_type t)) (=)
@@ -1795,24 +1796,24 @@ let infer_tests = [
                 let mut byte: u8;
                 fn make() -> *Token { return &byte as *Token; }
                 fn inspect(t: borrow *Token) -> usize { return t as usize; }
-                fn release(t: *Token) {}
+                fn release(t: sink *Token) {}
                 fn good() { let t: *Token = make(); inspect(t); inspect(t); release(t); }");
 
   Alcotest.test_case "affine handle cannot be consumed twice" `Quick
-    (expect_type_error "already consumed"
+    (expect_type_error "affine value 't' was already consumed"
        "affine opaque struct Token;
         let mut byte: u8;
         fn make() -> *Token { return &byte as *Token; }
-        fn release(t: *Token) {}
+        fn release(t: sink *Token) {}
         fn bad() { let t: *Token = make(); release(t); release(t); }");
 
   Alcotest.test_case "affine handle cannot be used after consumption" `Quick
-    (expect_type_error "already consumed"
+    (expect_type_error "affine value 't' was already consumed"
        "affine opaque struct Token;
         let mut byte: u8;
         fn make() -> *Token { return &byte as *Token; }
         fn inspect(t: borrow *Token) {}
-        fn release(t: *Token) {}
+        fn release(t: sink *Token) {}
         fn bad() { let t: *Token = make(); release(t); inspect(t); }");
 
   (* GitHub issue #89's "must eventually be consumed" half, first
@@ -1824,7 +1825,7 @@ let infer_tests = [
      see the next two tests and lib/type_inf.ml's check_affine_func
      comment for why the stricter version was tried and reverted. *)
   Alcotest.test_case "affine local never consumed is a compile error" `Quick
-    (expect_type_error "is never consumed"
+    (expect_type_error "affine value 't' is never consumed"
        "affine opaque struct Token;
         let mut byte: u8;
         fn make() -> *Token { return &byte as *Token; }
@@ -1850,7 +1851,7 @@ let infer_tests = [
     (expect_ok "affine opaque struct Token;
                 let mut byte: u8;
                 fn make() -> *Token { return &byte as *Token; }
-                fn release(t: *Token) {}
+                fn release(t: sink *Token) {}
                 fn good() {
                     let t: *Token = make();
                     if ((t as usize) != 0) {
@@ -1869,8 +1870,8 @@ let infer_tests = [
     (expect_ok "affine opaque struct Token;
                 let mut byte: u8;
                 fn make() -> *Token { return &byte as *Token; }
-                fn reacquire(t: *Token) -> *Token { return make(); }
-                fn release(t: *Token) {}
+                fn reacquire(t: sink *Token) -> *Token { return make(); }
+                fn release(t: sink *Token) {}
                 fn good(cond: bool) {
                     let mut g: *Token = make();
                     while (cond) {
@@ -1879,19 +1880,35 @@ let infer_tests = [
                     release(g);
                 }");
 
-  (* Documents the still-open half of issue #89, deliberately NOT covered
-     by this increment: an affine value arriving as a plain (non-borrow)
-     PARAMETER is never required to be consumed by the callee. The
-     caller's own obligation is still satisfied (passing `x` to a plain
-     parameter consumes `x` in the CALLER's scope), but `drop_silently`
-     itself can silently drop the handle it was handed with no error --
-     see lib/type_inf.ml's check_affine_func comment. *)
-  Alcotest.test_case "affine parameter is not yet required to be consumed by the callee" `Quick
+  (* Second increment of issue #89's "must eventually be consumed": a
+     plain (non-`borrow`, non-`sink`) affine PARAMETER must also be
+     consumed somewhere within the callee's own body. The caller's own
+     obligation is separately satisfied just by making the call (passing
+     `x` to a plain parameter consumes `x` in the CALLER's scope) --
+     this is a distinct, callee-side requirement, catching a callee that
+     silently swallows a handle its caller already gave up. See
+     lib/type_inf.ml's check_affine_func comment for why this needed the
+     `sink` marker to exist first: a purely syntactic "was it forwarded"
+     check can't otherwise tell a genuine terminal release function
+     apart from an accidental no-op. *)
+  Alcotest.test_case "affine parameter never consumed by the callee is a compile error" `Quick
+    (expect_type_error "affine parameter 't' is never consumed by this function"
+       "affine opaque struct Token;
+        let mut byte: u8;
+        fn make() -> *Token { return &byte as *Token; }
+        fn drop_silently(t: *Token) {}
+        fn caller() { let x: *Token = make(); drop_silently(x); }");
+
+  Alcotest.test_case "sink parameter is not required to be forwarded further" `Quick
     (expect_ok "affine opaque struct Token;
                 let mut byte: u8;
                 fn make() -> *Token { return &byte as *Token; }
-                fn drop_silently(t: *Token) {}
-                fn caller() { let x: *Token = make(); drop_silently(x); }");
+                fn release(t: sink *Token) {}
+                fn caller() { let x: *Token = make(); release(x); }");
+
+  Alcotest.test_case "sink is rejected on a type that is not an affine opaque pointer" `Quick
+    (expect_type_error "sink is only valid"
+       "fn bad(x: sink *u8) {}");
 
   Alcotest.test_case "borrow is rejected for ordinary parameter types" `Quick
     (expect_type_error "borrow is only valid"

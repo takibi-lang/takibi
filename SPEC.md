@@ -308,7 +308,7 @@ affine opaque struct Token;
 
 fn make() -> *Token { ... }
 fn inspect(t: borrow *Token) -> usize { ... }   // non-consuming
-fn release(t: *Token) { ... }                    // consuming
+fn release(t: sink *Token) { ... }               // consuming, and the designated terminal consumer
 
 fn good() {
     let t: *Token = make();
@@ -318,6 +318,9 @@ fn good() {
     // release(t);     // would be a compile error: "affine value 't' was already consumed"
     // inspect(t);     // likewise, after release
 }
+
+// fn bad() { let t: *Token = make(); }
+// would be a compile error: "affine value 't' is never consumed"
 ```
 
 **Consequence of `opaque` implying no fields**: since an opaque struct can
@@ -350,12 +353,12 @@ motivating case is a network RX descriptor: `net_rx_acquire() ->
 `examples/common_qemu/virtio_mmio.tkb` / `examples/common_stm32/eth.tkb`).
 
 - A function parameter of plain affine-pointer type (`t: *Name`, no
-  `borrow`) **consumes** the argument: after such a call, using the same
-  local variable/parameter again anywhere in the function (another call,
-  a `return`, another consuming use) is a compile error ("affine value
-  'NAME' was already consumed"). A `return` of the affine value itself
-  consumes it, exactly like passing it to a consuming parameter, when
-  the function's own return type is affine.
+  `borrow`/`sink`) **consumes** the argument: after such a call, using the
+  same local variable/parameter again anywhere in the function (another
+  call, a `return`, another consuming use) is a compile error ("affine
+  value 'NAME' was already consumed"). A `return` of the affine value
+  itself consumes it, exactly like passing it to a consuming parameter,
+  when the function's own return type is affine.
 - **`borrow *Name`** -- valid **only** as a function parameter type, and
   only for a pointer to an affine opaque type. Calling through a
   `borrow *Name` parameter does **not** consume the argument, so it may
@@ -363,22 +366,64 @@ motivating case is a network RX descriptor: `net_rx_acquire() ->
   being consumed. Using `borrow` on any other parameter type is a
   compile error ("borrow is only valid on a pointer to an affine opaque
   struct parameter" / "...only valid in function parameter types").
-- **Affine, not linear**: a handle may be silently **dropped** (never
-  consumed) with no error -- this facility only catches *too many*
-  consumptions, never *too few*. There is no destructor/`defer`
-  mechanism.
+- **`sink *Name`** -- also valid **only** as a function parameter type,
+  and only for a pointer to an affine opaque type (same restriction as
+  `borrow`, same error wording with "sink" in place of "borrow"). Unlike
+  `borrow`, a `sink *Name` parameter **does** consume the argument at the
+  call site, exactly like a plain `*Name` parameter -- the difference is
+  entirely on the CALLEE's side (see "must be consumed" below): `sink`
+  declares that this function is the designated terminal consumer of the
+  value, so its own body is not required to forward it anywhere further.
+  Use `sink` on a release/close/unlock-style function that performs the
+  real cleanup itself (calls an extern function, writes a hardware
+  register, etc.) and has no further affine call to make with the value
+  it just received -- see `examples/common/sync.tkb`'s `mutex_unlock`,
+  `examples/common/fat12.tkb`'s `fat_close`, and `examples/common_qemu/
+  virtio_mmio.tkb` / `examples/common_stm32/eth.tkb`'s `net_rx_release`.
+- **Must be consumed** (GitHub issue #89): both a local `let`-declared
+  affine handle and a plain (non-`borrow`, non-`sink`) affine parameter
+  must be consumed somewhere before their scope ends, or it is a compile
+  error:
+  - A local never consumed anywhere in its declaring scope (function
+    body, `if`/`else` branch, loop body, `match` arm) is rejected:
+    "affine value 'NAME' is never consumed".
+  - A plain parameter never consumed anywhere in the callee's own body
+    (forwarded to another consuming call, passed to a `sink` parameter,
+    or returned) is rejected: "affine parameter 'NAME' is never consumed
+    by this function". `borrow` and `sink` parameters are exempt --
+    `borrow` never takes ownership, and `sink` is itself the terminal
+    consumer.
+  - Both checks are deliberately **union-based** ("consumed on AT LEAST
+    ONE path"), not a full "consumed on EVERY path" analysis: a value
+    conventionally released behind the same nullness check that gates
+    every other use (`if (v != 0) { ...; release(v); }`, with no `else`)
+    is common in this codebase's drivers and must keep compiling: the
+    checker has no way to know two `if` conditions are the same
+    predicate without real relational reasoning. This means a leak on
+    only ONE branch of a multi-way conditional release is not yet
+    caught -- only a value that is *never* consumed on *any* path is.
+  - An explicit pointer cast out of the affine type (`t as *OtherType`,
+    `t as usize`) remains an unchecked escape hatch from this check too,
+    same as from double-consume tracking below.
 - **Loop restriction**: consuming an affine value that was declared
   *outside* a loop (`while`/`for`/`for-in`) from *inside* that loop's
   body is conservatively rejected at compile time ("cannot consume an
   affine value declared outside a loop inside that loop"), since a real
   loop could otherwise consume the same handle on more than one
   iteration. A handle both declared and consumed inside the same loop
-  iteration is fine.
+  iteration is fine. A `let mut` handle reassigned to a fresh value on
+  every iteration (e.g. `examples/common/sync.tkb`'s `cond_wait`
+  drop-and-reacquire pattern, `g = cond_wait(seq, g, m);` inside a
+  `while`) is also fine: reassignment clears the variable's consumed
+  status, so the loop-restriction check never sees it as "consumed
+  inside the loop" in the first place.
 - **`if`/`else` and `match`**: consuming a handle in only one branch is
   allowed; after the branch, the value is conservatively treated as
   "possibly consumed" (the moved-sets of every branch/arm are unioned),
   so a later use after only-one-branch-consumed code is still rejected
-  even on the path that didn't consume it.
+  even on the path that didn't consume it. The same union is what the
+  "must be consumed" check above reads, which is why it accepts
+  consumption on just one branch rather than requiring it on every path.
 - **Deliberately restricted, not a general ownership/borrow-checker
   system**: this tracking is local to a single function body (no
   cross-function or struct-field-level tracking), applies only to

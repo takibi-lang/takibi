@@ -65,7 +65,7 @@ let check_refined_base_range pos lo hi base =
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE BORROW PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE
+%token FN RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE
 %token DARROW COLONCOLON UNDERSCORE
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT
 %token ASSIGN DOT
@@ -452,6 +452,7 @@ array_size:
 type_expr:
   | base_type_expr { $1 }
   | BORROW t = type_expr { TypeBorrow t }
+  | SINK t = type_expr { TypeSink t }
   | LBRACE lo = INT DOTDOTLT hi = INT RBRACE
     { (* Reserved for future contextual base inference. Until the AST and
          signature inference can represent an unresolved refinement base,

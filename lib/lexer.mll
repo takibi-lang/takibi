@@ -48,6 +48,7 @@ rule read = parse
   | "opaque"  { OPAQUE }
   | "affine"  { AFFINE }
   | "borrow"  { BORROW }
+  | "sink"    { SINK }
   | "packed"  { PACKED }
   | "io"      { IO }
   | "enum"    { ENUM }
