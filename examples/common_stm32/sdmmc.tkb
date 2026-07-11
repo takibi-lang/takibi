@@ -330,8 +330,7 @@ fn sd_cmd55() -> i32 {
 // support. OCR bit30 in the response then reports whether the card is
 // SDHC/SDXC (block-addressed) or SDSC (byte-addressed).
 fn sd_acmd41() -> i32 {
-    let mut tries: u32 = 0;
-    while (tries < 1000000) {
+    for tries: u32 in 0..<1000000 {
         if (sd_cmd55() != 0) {
             return -1;
         }
@@ -346,7 +345,6 @@ fn sd_acmd41() -> i32 {
             }
             return 0;
         }
-        tries = tries + 1;
     }
     return -1;
 }
@@ -391,14 +389,12 @@ fn sd_cmd13() -> i32 {
 }
 
 fn sd_wait_not_busy() -> i32 {
-    let mut tries: u32 = 0;
-    while (tries < 1000000) {
+    for tries: u32 in 0..<1000000 {
         if (sd_cmd13() == 0) {
             if ((*SDMMC_RESP1 & 0x100) != 0) {
                 return 0;
             }
         }
-        tries = tries + 1;
     }
     return -1;
 }
@@ -409,16 +405,10 @@ fn disk_initialize() -> i32 {
     enable_sdmmc1_irq(); // MASK stays 0 until a transfer arms it
 
     *SDMMC_POWER = 0; // power off first
-    let mut i: i32 = 0;
-    while (i < 10000) {
-        i = i + 1;
-    } // brief settle delay
+    for i: i32 in 0..<10000 {} // brief settle delay
     *SDMMC_POWER = 3; // power on (PWRCTRL = 11)
     sd_set_clock(38); // ~400kHz identification clock
-    i = 0;
-    while (i < 10000) {
-        i = i + 1;
-    } // >= 74 SDMMC_CK cycles before the first command
+    for i: i32 in 0..<10000 {} // >= 74 SDMMC_CK cycles before the first command
 
     if (sd_cmd0() != 0) {
         return -1;

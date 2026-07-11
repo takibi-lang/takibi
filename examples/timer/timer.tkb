@@ -5,11 +5,9 @@
 // individual ticks instead of comparing a difference.
 
 fn delay_seconds(n: i32) {
-    let mut i: i32 = 0;
-    while (i < n) {
+    for i: i32 in 0..<n {
         let t0: i32 = rtc_read_seconds();
         while (rtc_read_seconds() == t0) {}
-        i = i + 1;
     }
 }
 

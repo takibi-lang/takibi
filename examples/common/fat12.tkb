@@ -243,10 +243,8 @@ fn fat_format() {
     for i: usize in 0..<SECTOR_SIZE {
         zero_buf[i] = 0;
     }
-    let mut s: usize = first_data_sector();
-    while (s < TOTAL_SECTORS) {
+    for s: usize in first_data_sector()..<TOTAL_SECTORS {
         mem_block_write(s as u32, zero_buf);
-        s = s + 1;
     }
 
     next_free_cluster = 2;
@@ -261,8 +259,7 @@ fn fat_alloc_chain(num_clusters: u32) -> u32 {
         return 0;
     }
     let first: u32 = next_free_cluster;
-    let mut i: u32 = 0;
-    while (i < num_clusters) {
+    for i: u32 in 0..<num_clusters {
         let cluster: u32 = next_free_cluster;
         if (i == num_clusters - 1) {
             fat_set_entry(cluster, 0x0FFF);
@@ -270,7 +267,6 @@ fn fat_alloc_chain(num_clusters: u32) -> u32 {
             fat_set_entry(cluster, (cluster + 1) as u16);
         }
         next_free_cluster = next_free_cluster + 1;
-        i = i + 1;
     }
     return first;
 }
@@ -493,10 +489,8 @@ fn cstr_len(s: *u8) -> u32 {
 // Prints n raw (not necessarily NUL-terminated) bytes via UART -- for
 // printing a fat_read()'d buffer.
 fn uart_print_bytes(buf: *u8, n: u32) {
-    let mut i: u32 = 0;
-    while (i < n) {
+    for i: u32 in 0..<n {
         uart_putc(buf[i as isize]);
-        i = i + 1;
     }
 }
 

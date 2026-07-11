@@ -49,8 +49,7 @@ fn app_main() {
 
         let mut all_ok: bool = true;
 
-        let mut s: u32 = 0;
-        while (s < TEST_SECTORS) {
+        for s: u32 in 0..<TEST_SECTORS {
             let mut wbuf: [u8; 512];
             for i: usize in 0..<512 {
                 wbuf[i] = pattern_byte(s, i as u32);
@@ -61,11 +60,9 @@ fn app_main() {
                 uart_puts(": FAIL\r\n");
                 all_ok = false;
             }
-            s = s + 1;
         }
 
-        s = 0;
-        while (s < TEST_SECTORS) {
+        for s: u32 in 0..<TEST_SECTORS {
             let mut rbuf: [u8; 512];
             if (disk_read(s, rbuf) == 0) {
                 let mut sector_ok: bool = true;
@@ -93,7 +90,6 @@ fn app_main() {
                 uart_puts(": FAIL\r\n");
                 all_ok = false;
             }
-            s = s + 1;
         }
 
         if (all_ok) {
