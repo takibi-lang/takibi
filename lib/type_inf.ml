@@ -2383,9 +2383,45 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.SizeOf _ | Ast.OffsetOf _ | Ast.IntLit _ | Ast.BoolLit _
       | Ast.StringLit _ | Ast.EnumVariant _ -> moved
     in
+    (* Never-consumed check (GitHub issue #89's "must eventually be
+       consumed" half, first increment): at the end of every block-like
+       scope (function body, if/else branch, loop body, match arm), any
+       affine LOCAL declared directly in that scope (not a parameter --
+       an affine value arriving as a plain parameter is deliberately not
+       required to be consumed by the callee yet, a separate, harder
+       question left for later) must appear in `moved` by then.
+       Deliberately reuses the SAME union-combined `moved` set the
+       double-consume checker above already computes (consumed on AT
+       LEAST ONE path counts) rather than a stricter "consumed on EVERY
+       path" (intersection) analysis: an earlier version of this check
+       used intersection and immediately misfired on every existing
+       affine-using example (net_echo.tkb etc.), which all share the
+       pattern `let acquired = net_rx_acquire(); if (acquired != 0) {
+       ... net_rx_release(acquired); }` -- release is only reachable
+       behind the very same nullness check that gates every other use,
+       but the checker has no way to see the two checks are the same
+       condition without real relational reasoning (see HISTORY.md's
+       relational-analysis findings). The weaker union-based check still
+       catches a local that is NEVER consumed on ANY path (this
+       increment's actual target -- see the affine_leak_probe scratch
+       files), at the cost of not catching a local released on only ONE
+       of several branches. `decl_locs` records each affine local's own
+       `let` site so the error points at the declaration. *)
+    let decl_locs = ref StringMap.empty in
     let rec check_stmts moved declared stmts =
-      List.fold_left (fun (moved, declared) s -> check_stmt moved declared s)
-        (moved, declared) stmts
+      let initial_declared = declared in
+      let (moved, declared) =
+        List.fold_left (fun (moved, declared) s -> check_stmt moved declared s)
+          (moved, declared) stmts
+      in
+      let newly_declared = StringSet.diff declared initial_declared in
+      StringSet.iter (fun name ->
+        if is_affine_var name && not (StringSet.mem name moved) then
+          let loc = Option.value (StringMap.find_opt name !decl_locs) ~default:fdef.def_loc in
+          raise (TypeError (loc, Printf.sprintf
+            "affine value '%s' is never consumed" name))
+      ) newly_declared;
+      (moved, declared)
     and check_stmt moved declared (s : Ast.stmt) =
       match s.desc with
       | Ast.Return e ->
@@ -2406,6 +2442,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.AssignIndex (_, i, v) ->
           (check_expr (check_expr moved false i) false v, declared)
       | Ast.Let (_, name, _, init, _) ->
+          decl_locs := StringMap.add name s.loc !decl_locs;
           let moved = match init with
             | Some e -> check_expr moved (is_affine_var name) e
             | None -> moved

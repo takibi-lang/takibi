@@ -1,0 +1,22 @@
+// This file is expected to produce a compile error.
+// An affine opaque handle that is acquired but never consumed on any
+// path before its declaring scope ends is rejected at compile time
+// (GitHub issue #89's "must eventually be consumed" check, first
+// increment -- see HISTORY.md). Real APIs following this pattern
+// (examples/common/fat12.tkb's fat_open/fat_close, examples/common_stm32/
+// eth.tkb's net_rx_acquire/net_rx_release, examples/common/sync.tkb's
+// mutex_lock/mutex_unlock) would otherwise let a resource silently leak
+// with no error or warning at all. See SPEC.md's "Affine Types" section.
+affine opaque struct Token;
+
+fn make() -> *Token {
+    return 0 as usize as *Token;
+}
+
+fn release(t: *Token) {
+}
+
+fn app_main() -> i32 {
+    let t: *Token = make();
+    return 0;
+}

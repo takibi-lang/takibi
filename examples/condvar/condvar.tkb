@@ -69,15 +69,15 @@ fn pendsv_dispatch(frame_sp: usize) -> usize {
 
 fn task_producer() {
     for i: i32 in 0..<5 {
-        mutex_lock(&ch.mutex);
+        let mut g: *MutexGuard = mutex_lock(&ch.mutex);
         while (ch.item_count >= 1) {
-            cond_wait(&ch.not_full, &ch.mutex);
+            g = cond_wait(&ch.not_full, g, &ch.mutex);
         }
         ch.item       = i;
         ch.item_count = 1;
         produced = produced + 1;
         cond_signal(&ch.not_empty);
-        mutex_unlock(&ch.mutex);
+        mutex_unlock(g, &ch.mutex);
     }
     task_a_done = 1;
     let p: *io i32 = &sched_done;
@@ -86,14 +86,14 @@ fn task_producer() {
 
 fn task_consumer() {
     for i: i32 in 0..<5 {
-        mutex_lock(&ch.mutex);
+        let mut g: *MutexGuard = mutex_lock(&ch.mutex);
         while (ch.item_count == 0) {
-            cond_wait(&ch.not_empty, &ch.mutex);
+            g = cond_wait(&ch.not_empty, g, &ch.mutex);
         }
         consumed      = consumed + 1;
         ch.item_count = 0;
         cond_signal(&ch.not_full);
-        mutex_unlock(&ch.mutex);
+        mutex_unlock(g, &ch.mutex);
     }
     task_b_done = 1;
     let p: *io i32 = &sched_done;

@@ -376,6 +376,7 @@ run_compile_error_test "forbid_trap_wrong"   examples/forbid_trap_wrong/forbid_t
 run_forbid_trap_ok_test "forbid_trap_ok"     examples/forbid_trap_ok/forbid_trap_ok.tkb
 run_compile_error_test "cond_not_bool"         examples/cond_not_bool/cond_not_bool.tkb                 examples/cond_not_bool/cond_not_bool.error
 run_compile_error_test "affine_double_consume" examples/affine_double_consume/affine_double_consume.tkb examples/affine_double_consume/affine_double_consume.error
+run_compile_error_test "affine_never_consumed" examples/affine_never_consumed/affine_never_consumed.tkb examples/affine_never_consumed/affine_never_consumed.error
 
 echo ""
 echo "Running DWARF debug-info check (-g build)..."

@@ -31,29 +31,29 @@ struct MsgQueue {
 let mut mq: MsgQueue = {1, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 4};
 
 fn mq_send(val: i32) {
-    mutex_lock(&mq.mutex);
+    let mut g: *MutexGuard = mutex_lock(&mq.mutex);
     while (mq.count >= mq.cap) {
-        cond_wait(&mq.not_full, &mq.mutex);
+        g = cond_wait(&mq.not_full, g, &mq.mutex);
     }
     let buf: *i32 = mq.buf;
     buf[mq.tail] = val;
     mq.tail  = (mq.tail  + 1) % mq.cap;
     mq.count = mq.count + 1;
     cond_signal(&mq.not_empty);
-    mutex_unlock(&mq.mutex);
+    mutex_unlock(g, &mq.mutex);
 }
 
 fn mq_recv() -> i32 {
-    mutex_lock(&mq.mutex);
+    let mut g: *MutexGuard = mutex_lock(&mq.mutex);
     while (mq.count == 0) {
-        cond_wait(&mq.not_empty, &mq.mutex);
+        g = cond_wait(&mq.not_empty, g, &mq.mutex);
     }
     let buf: *i32 = mq.buf;
     let val: i32 = buf[mq.head];
     mq.head  = (mq.head  + 1) % mq.cap;
     mq.count = mq.count - 1;
     cond_signal(&mq.not_full);
-    mutex_unlock(&mq.mutex);
+    mutex_unlock(g, &mq.mutex);
     return val;
 }
 

@@ -1815,6 +1815,84 @@ let infer_tests = [
         fn release(t: *Token) {}
         fn bad() { let t: *Token = make(); release(t); inspect(t); }");
 
+  (* GitHub issue #89's "must eventually be consumed" half, first
+     increment (see HISTORY.md): a local affine handle that is never
+     consumed on ANY path before its declaring scope (function body,
+     if/else branch, loop body, match arm) ends is now a compile error.
+     Deliberately a union-based check (was it consumed SOMEWHERE in
+     scope), not a full per-path "consumed on EVERY path" analysis --
+     see the next two tests and lib/type_inf.ml's check_affine_func
+     comment for why the stricter version was tried and reverted. *)
+  Alcotest.test_case "affine local never consumed is a compile error" `Quick
+    (expect_type_error "is never consumed"
+       "affine opaque struct Token;
+        let mut byte: u8;
+        fn make() -> *Token { return &byte as *Token; }
+        fn bad() { let t: *Token = make(); }");
+
+  Alcotest.test_case "affine local returned directly counts as consumed" `Quick
+    (expect_ok "affine opaque struct Token;
+                let mut byte: u8;
+                fn make() -> *Token { return &byte as *Token; }
+                fn forward() -> *Token { let t: *Token = make(); return t; }");
+
+  (* Real-world motivating case (examples/net_echo/net_echo.tkb's
+     `net_rx_acquire`/`net_rx_release` pair): a handle that may or may not
+     be a "real" acquisition (signaled by a null/zero address) is
+     conventionally released behind the SAME null check that gates every
+     other use. The checker cannot see the two `if` conditions are the
+     same predicate without real relational reasoning (see HISTORY.md's
+     relational-analysis findings), so consumption inside just ONE
+     conditional branch, with no `else`, must still be accepted -- this
+     is exactly why the check is union-based rather than requiring
+     consumption on every path. *)
+  Alcotest.test_case "affine local consumed inside a null-check branch is allowed" `Quick
+    (expect_ok "affine opaque struct Token;
+                let mut byte: u8;
+                fn make() -> *Token { return &byte as *Token; }
+                fn release(t: *Token) {}
+                fn good() {
+                    let t: *Token = make();
+                    if ((t as usize) != 0) {
+                        release(t);
+                    }
+                }");
+
+  (* examples/common/sync.tkb's cond_wait-style pattern: a loop reassigns
+     a `let mut` affine local to a fresh value on every iteration
+     (dropping the mutex and reacquiring it), then the local is consumed
+     once after the loop. Exercises the never-consumed check together
+     with the pre-existing "declared outside a loop, consumed inside"
+     restriction, which reassignment resets around (see that restriction's
+     own tests below). *)
+  Alcotest.test_case "affine local reassigned across loop iterations then consumed is allowed" `Quick
+    (expect_ok "affine opaque struct Token;
+                let mut byte: u8;
+                fn make() -> *Token { return &byte as *Token; }
+                fn reacquire(t: *Token) -> *Token { return make(); }
+                fn release(t: *Token) {}
+                fn good(cond: bool) {
+                    let mut g: *Token = make();
+                    while (cond) {
+                        g = reacquire(g);
+                    }
+                    release(g);
+                }");
+
+  (* Documents the still-open half of issue #89, deliberately NOT covered
+     by this increment: an affine value arriving as a plain (non-borrow)
+     PARAMETER is never required to be consumed by the callee. The
+     caller's own obligation is still satisfied (passing `x` to a plain
+     parameter consumes `x` in the CALLER's scope), but `drop_silently`
+     itself can silently drop the handle it was handed with no error --
+     see lib/type_inf.ml's check_affine_func comment. *)
+  Alcotest.test_case "affine parameter is not yet required to be consumed by the callee" `Quick
+    (expect_ok "affine opaque struct Token;
+                let mut byte: u8;
+                fn make() -> *Token { return &byte as *Token; }
+                fn drop_silently(t: *Token) {}
+                fn caller() { let x: *Token = make(); drop_silently(x); }");
+
   Alcotest.test_case "borrow is rejected for ordinary parameter types" `Quick
     (expect_type_error "borrow is only valid"
        "fn bad(x: borrow *u8) {}");
