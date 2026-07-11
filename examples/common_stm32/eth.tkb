@@ -239,7 +239,7 @@ fn phy_init() -> i32 {
     mdio_write(PHY_ANAR, PHY_ANAR_ADVERTISE_ALL);
     mdio_write(PHY_BCR, PHY_BCR_AUTONEG_EN | PHY_BCR_RESTART_AN);
 
-    while (1) {
+    while (true) {
         let bsr: u32 = mdio_read(PHY_BSR);
         if ((bsr & PHY_BSR_AUTONEG_DONE) != 0) {
             if ((bsr & PHY_BSR_LINK_UP) != 0) {

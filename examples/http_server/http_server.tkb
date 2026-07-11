@@ -332,7 +332,7 @@ fn app_main() {
 
         uart_puts("http_server: ready\r\n");
 
-        while (1) {
+        while (true) {
             net_rx_wait();
             let acquired: *NetRxCpuOwned = net_rx_acquire();
             if ((acquired as usize) != 0) {

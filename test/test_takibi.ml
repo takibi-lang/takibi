@@ -2186,10 +2186,10 @@ let infer_tests = [
   (* -- break and continue ---------------------------------------------------- *)
 
   Alcotest.test_case "break in while parses and type-checks" `Quick
-    (expect_ok "fn f() { while (1) { break; } }");
+    (expect_ok "fn f() { while (true) { break; } }");
 
   Alcotest.test_case "continue in while parses and type-checks" `Quick
-    (expect_ok "fn f() { while (1) { continue; } }");
+    (expect_ok "fn f() { while (true) { continue; } }");
 
   Alcotest.test_case "break in for parses and type-checks" `Quick
     (expect_ok "fn f() { for i: i32 in 0..<10 { break; } }");
@@ -2198,7 +2198,7 @@ let infer_tests = [
     (expect_ok "fn f() { for i: i32 in 0..<10 { continue; } }");
 
   Alcotest.test_case "break inside if inside while type-checks" `Quick
-    (expect_ok "fn f(x: i32) { while (1) { if (x == 0) { break; } } }");
+    (expect_ok "fn f(x: i32) { while (true) { if (x == 0) { break; } } }");
 
   Alcotest.test_case "continue inside if inside for type-checks" `Quick
     (expect_ok "fn f(x: i32) { for i: i32 in 0..<10 { if (x == 0) { continue; } } }");

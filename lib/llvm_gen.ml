@@ -929,10 +929,17 @@ let to_index_width ~is_signed v =
    Replaces to_i32 for new explicit-width types. *)
 let to_arith_width (ast_ty : Ast.type_expr) v = widen_load ast_ty v
 
-(* Build an i1 condition from an integer or comparison result *)
+(* All 4 call sites (If/While condition codegen, Or/And operand codegen)
+   correspond exactly to type_inf.ml's check_cond call sites, which now
+   requires TBool (i1) unconditionally -- no more C-style int-truthy
+   fallback (see check_cond's own comment). A non-i1 value here would mean
+   the type checker's invariant was violated, not a legitimate case to
+   silently coerce via `icmp ne 0` like the old fallback did. *)
 let as_cond v =
   if type_of v = i1_type context then v
-  else build_icmp Icmp.Ne v (const_int (i32_type context) 0) "tobool" builder
+  else raise (Error (Printf.sprintf
+    "internal error: as_cond expected i1 (bool), got %s -- type checker's \
+     bool-only condition invariant was violated" (string_of_lltype (type_of v))))
 
 (* Look up a struct field by name; returns (field_index, field_ast_type) *)
 let field_info struct_name fname =

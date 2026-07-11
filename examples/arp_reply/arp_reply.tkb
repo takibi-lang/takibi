@@ -42,7 +42,7 @@ fn app_main() {
 
         uart_puts("arp_reply: ready\r\n");
 
-        while (1) {
+        while (true) {
             net_rx_wait();
             let acquired: *NetRxCpuOwned = net_rx_acquire();
             let mut len: i32 = 0;

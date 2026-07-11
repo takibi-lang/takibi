@@ -139,11 +139,46 @@ let min_max_sentinel base =
   | t when is_unsigned_ty t -> (0, 1_000_000_000)
   | _ -> (-1_000_000_000, 1_000_000_000)
 
-(* Accept bool or any integer type as a condition (for if/while) *)
+(* if/while/&&/|| conditions must be bool, matching Rust/Zig -- no C-style
+   implicit int-truthy coercion. Previously fell back to `unify_at loc ct
+   TI32` for anything non-bool (originally just to let `while (1)` work as
+   an infinite-loop idiom), but that fallback only ever unified against
+   TI32 specifically -- u8/u32/u64/usize conditions were ALREADY rejected
+   ("cannot unify u32 with i32"), so it was never truly a general
+   C-style-truthy rule, just an inconsistent i32-only special case with no
+   real hardware-interfacing benefit (MMIO/register checks in this
+   codebase already always write an explicit bit-mask/comparison, e.g.
+   `if ((ocr & 0x80000000) != 0)` in sdmmc.tkb, never relied on this
+   fallback). Removing it closes off the classic C `if (x = 5)`
+   assignment-vs-comparison-typo class of bug at compile time, matching
+   this project's "detect errors at compile time" design principle.
+   `while (1)`-style infinite loops now write `while (true)` instead (see
+   CLAUDE.md's decision log).
+
+   A bare (or bare-arithmetic, e.g. `1 + 1`) integer LITERAL needs its own
+   explicit branch, not just `unify_at ct TBool`: per IntLit's own case
+   above (`fresh ()`, "polymorphic: unifies with any integer type via
+   context"), a literal's inferred type is a genuinely UNCONSTRAINED type
+   variable, which happily unifies STRUCTURALLY with TBool even though a
+   literal is never actually a legitimate bool value -- the same class of
+   soundness gap check_literal_fits_refined exists to close for refined
+   targets (see that function's own comment), just for a boolean target
+   instead of a numeric range. Left unchecked, `while (1)` would silently
+   "type-check" (the unresolved TVar binds to TBool) and then crash at
+   codegen instead (`as_cond` receiving an i32 constant where an i1 was
+   promised) -- found by testing this exact case by hand after this
+   change, not by an existing test. A CONCRETE non-bool type (a real
+   variable/expression whose type was pinned by something else, e.g. `x:
+   i32`) is not affected -- unify_at already rejects those correctly
+   ("cannot unify i32 with bool"), so only the genuinely-unresolved case
+   needs its own branch here. *)
 let check_cond loc ct =
   match repr ct with
-  | TBool -> ()
-  | _ -> unify_at loc ct TI32
+  | TVar { contents = Unbound _ } ->
+      raise (TypeError (loc,
+        "condition must be bool -- a bare integer literal has no boolean \
+         value; use `true`/`false` or an explicit comparison"))
+  | _ -> unify_at loc ct TBool
 
 (* Widen TRefinedInt to its OWN base type; leave explicit-width types
    unchanged. Used by arithmetic ops that do not propagate range

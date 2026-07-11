@@ -42,7 +42,7 @@ fn app_main() {
     echo_rx_tail = 0;
     irq_uart_rx_unmask();
     let mut prev: u8 = 0;
-    while (1) {
+    while (true) {
         while (echo_rx_tail == echo_rx_head) {
             interrupt_wait();
         }
