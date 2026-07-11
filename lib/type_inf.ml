@@ -2423,6 +2423,35 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        of several branches. `decl_locs` records each affine local's own
        `let` site so the error points at the declaration. *)
     let decl_locs = ref StringMap.empty in
+    (* Purely syntactic "does this statement list always return" check
+       (GitHub issue #89 comment thread's "return-terminated branch" gap):
+       a branch that unconditionally returns never reaches the code after
+       its enclosing `if`/`match`, so whatever it consumed must NOT be
+       unioned into what continues past that `if`/`match` -- unioning it
+       anyway is exactly what made
+       `if (fat_write(fp,...) != 0) { fat_close(fp); return -1; }
+        return fat_close(fp);`
+       (examples/common/fat12.tkb's create_demo_file, before this fix)
+       falsely report "affine value 'fp' was already consumed": the first
+       branch's own `fat_close(fp)` had no business being visible to the
+       second `fat_close(fp)` at all, since the two are on mutually
+       exclusive paths. Deliberately conservative in the safe direction
+       (may say "does not always terminate" when it actually does, never
+       the other way around): loops are never treated as terminators here
+       (an infinite `while (true) {}` really does always terminate
+       fall-through, but reasoning about loop termination is out of scope
+       for this syntactic check -- treating it as "does not terminate"
+       just falls back to today's existing, safe-but-imprecise union
+       behavior for that case, not a new unsoundness). *)
+    let rec stmt_always_terminates (s : Ast.stmt) = match s.desc with
+      | Ast.Return _ -> true
+      | Ast.If (_, yes, no) -> always_terminates yes && always_terminates no
+      | Ast.Match (_, arms) -> List.for_all (fun arm ->
+          let body = match arm with Ast.ArmVariant (_, _, b) | Ast.ArmWild b -> b in
+          always_terminates body) arms
+      | Ast.Block body -> always_terminates body
+      | _ -> false
+    and always_terminates stmts = List.exists stmt_always_terminates stmts in
     let rec check_stmts moved declared stmts =
       let initial_declared = declared in
       let (moved, declared) =
@@ -2470,7 +2499,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let moved = check_expr moved false cond in
           let (ym, _) = check_stmts moved declared yes in
           let (nm, _) = check_stmts moved declared no in
-          (StringSet.union ym nm, declared)
+          let combined = match always_terminates yes, always_terminates no with
+            | true, false -> nm  (* "yes" always returns: only "no" continues past this `if` *)
+            | false, true -> ym  (* symmetric case *)
+            | _, _ -> StringSet.union ym nm
+              (* neither terminates (today's existing behavior), or BOTH
+                 do (nothing continues past this `if` at all, so which
+                 set we report is moot -- union is harmless) *)
+          in
+          (combined, declared)
       | Ast.While (cond, body) ->
           let moved = check_expr moved false cond in
           let (body_moved, _) = check_stmts moved declared body in
@@ -2498,13 +2535,20 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (moved, declared)
       | Ast.Match (e, arms) ->
           let moved = check_expr moved false e in
-          let arm_moved = List.fold_left (fun acc arm ->
+          let results = List.map (fun arm ->
             let body = match arm with
               | Ast.ArmVariant (_, _, b) | Ast.ArmWild b -> b
             in
-            let (am, _) = check_stmts moved declared body in
-            StringSet.union acc am
-          ) moved arms in
+            (always_terminates body, fst (check_stmts moved declared body))
+          ) arms in
+          (* Same reasoning as `If` above: a terminating arm never
+             reaches code after the `match`, so its consumption must not
+             be unioned into what continues -- unless EVERY arm
+             terminates, in which case nothing continues anyway and
+             unioning everything is harmless. *)
+          let non_terminating = List.filter (fun (terminates, _) -> not terminates) results in
+          let contributing = if non_terminating = [] then results else non_terminating in
+          let arm_moved = List.fold_left (fun acc (_, am) -> StringSet.union acc am) moved contributing in
           (arm_moved, declared)
       | Ast.Break | Ast.Continue -> (moved, declared)
     in

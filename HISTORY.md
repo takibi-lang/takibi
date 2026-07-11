@@ -5877,10 +5877,7 @@ retrofit) passes; `make langcheck` passes.
 **Deliberately still open**: full "consumed on every path" analysis
 (would need real relational reasoning to avoid the null-check-gated-release
 false positive found in increment 1 -- likely belongs with issue #13's
-Z3/VC work, not a standalone effort); the `return`-terminated-branch
-union-imprecision noted in earlier issue #89 comments (an `if` branch that
-always `return`s should not be unioned into the continuation state, a
-smaller, self-contained CFG precision fix); and affine handles escaping a
+Z3/VC work, not a standalone effort); and affine handles escaping a
 single function body by being stored into a data structure (a process
 table holding open file handles, the literal shape a real Unix-like
 kernel's fd table needs) -- the session's discussion favored, when a real
@@ -5889,7 +5886,9 @@ storing a refined-type INDEX into a static table rather than the affine
 pointer itself (turning the escape problem into an instance of this
 project's existing range-proof strength), and treating true affine-field
 struct storage (decoupling `affine` from `opaque`) as the fallback only if
-that turns out to be insufficient.
+that turns out to be insufficient. (The `return`-terminated-branch
+union-imprecision noted in earlier issue #89 comments, once on this list
+too, is now fixed -- see the follow-up entry immediately below.)
 
 **Files**: `lib/ast.ml`, `lib/lexer.mll`, `lib/parser.mly`, `lib/types.ml`,
 `lib/type_layout.ml`, `lib/llvm_gen.ml`, `lib/type_inf.ml` (the `sink`
@@ -5904,3 +5903,53 @@ parameter check); `examples/affine_param_never_consumed` (new fixture);
 `scripts/run_qemutest.sh` (two new compile-error test registrations);
 `SPEC.md` ("Affine Opaque Structs" section rewritten for `sink` and the
 "must be consumed" rules).
+
+## GitHub Issue #89 Follow-up: `return`-Terminated Branches No Longer Leak Into the Union
+
+Closed the smaller, self-contained gap left open by the entry above: the
+affine checker's `If`/`Match` cases unioned every branch's/arm's own
+consumed-set unconditionally, with no awareness that a branch/arm ending in
+`return` on every one of ITS OWN paths can never reach the code after the
+enclosing `if`/`match` at all. Concretely, this used to force an
+`else` where none should have been needed:
+
+```
+if (fat_write(fp, ...) != 0) {
+    fat_close(fp);
+    return -1;
+}
+return fat_close(fp);   // used to be rejected: "affine value 'fp' was already consumed"
+```
+
+Added a purely syntactic `always_terminates : Ast.stmt list -> bool` helper
+(a statement list terminates if any statement in it does: `Return`
+unconditionally; a nested `If` where BOTH branches terminate; a nested
+`Match` where EVERY arm terminates; a `Block` whose body terminates;
+anything else, including loops, conservatively `false` -- reasoning about
+loop termination is out of scope and false just falls back to today's
+existing union behavior, never a new unsoundness). `If`'s combination logic
+now unions both branches only when neither (or both) terminate; when
+exactly one does, only the non-terminating branch's consumption continues
+past the `if`. `Match` got the same treatment across all arms, with the
+same "if every arm terminates, union everything anyway" fallback (nothing
+continues past the `match` in that case, so it's moot which set is
+reported).
+
+Verified both directions, not just the fix: the `fat_close` shape above now
+compiles with no `else` at all (confirmed via a scratch probe before
+touching real code), and `examples/common/fat12.tkb`'s `create_demo_file`
+-- which had carried the `if { ... } else { return fat_close(fp); }`
+workaround, with a comment explaining exactly why, since the affine
+opaque-struct work that first found this gap -- was simplified back to the
+natural early-return form and reverified end-to-end (`make check` 75/75,
+including `fatfs`'s real QEMU + `mtools` verification of the file this
+function writes). A negative control (`if (cond) { release(t); }
+release(t);` -- a branch that does NOT terminate, sharing a value with the
+code after it) confirmed the pre-existing double-consume detection is
+unaffected: still correctly rejected, since neither branch here returns.
+
+**Files**: `lib/type_inf.ml` (`always_terminates` plus the `If`/`Match`
+combination fix); `test/test_takibi.ml` (3 new unit tests: the fixed
+pattern, the both-branches-terminate case, and the non-terminating-branch
+negative control); `examples/common/fat12.tkb` (`create_demo_file`
+simplified, workaround comment removed).

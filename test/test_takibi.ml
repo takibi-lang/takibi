@@ -1880,6 +1880,55 @@ let infer_tests = [
                     release(g);
                 }");
 
+  (* GitHub issue #89 comment thread's "return-terminated branch" gap:
+     an `if` branch that always `return`s never reaches the code after
+     the `if`, so whatever it consumed must not be unioned into what
+     continues -- otherwise this exact shape (examples/common/fat12.tkb's
+     create_demo_file, before this fix) falsely reports "already
+     consumed" even though the two `release(t)` calls are on mutually
+     exclusive paths. *)
+  Alcotest.test_case "consuming in a branch that always returns does not leak into the continuation" `Quick
+    (expect_ok "affine opaque struct Token;
+                let mut byte: u8;
+                fn make() -> *Token { return &byte as *Token; }
+                fn release(t: sink *Token) -> i32 { return 0; }
+                fn f(cond: bool) -> i32 {
+                    let t: *Token = make();
+                    if (cond) {
+                        release(t);
+                        return -1;
+                    }
+                    return release(t);
+                }");
+
+  Alcotest.test_case "both branches always returning is still accepted (nothing continues)" `Quick
+    (expect_ok "affine opaque struct Token;
+                let mut byte: u8;
+                fn make() -> *Token { return &byte as *Token; }
+                fn release(t: sink *Token) -> i32 { return 0; }
+                fn f(cond: bool) -> i32 {
+                    let t: *Token = make();
+                    if (cond) {
+                        return release(t);
+                    } else {
+                        return release(t);
+                    }
+                }");
+
+  Alcotest.test_case "a non-terminating branch still shares consumption with what follows" `Quick
+    (expect_type_error "affine value 't' was already consumed"
+       "affine opaque struct Token;
+        let mut byte: u8;
+        fn make() -> *Token { return &byte as *Token; }
+        fn release(t: sink *Token) {}
+        fn f(cond: bool) {
+            let t: *Token = make();
+            if (cond) {
+                release(t);
+            }
+            release(t);
+        }");
+
   (* Second increment of issue #89's "must eventually be consumed": a
      plain (non-`borrow`, non-`sink`) affine PARAMETER must also be
      consumed somewhere within the callee's own body. The caller's own

@@ -424,6 +424,16 @@ motivating case is a network RX descriptor: `net_rx_acquire() ->
   even on the path that didn't consume it. The same union is what the
   "must be consumed" check above reads, which is why it accepts
   consumption on just one branch rather than requiring it on every path.
+  A branch/arm that always `return`s on every one of its own paths is
+  excluded from this union: it can never reach the code after the
+  enclosing `if`/`match`, so what it consumed does not carry forward.
+  This is what lets `if (cond) { release(t); return -1; } return
+  release(t);` compile with no `else` needed -- the two `release(t)`
+  calls are on mutually exclusive paths, and the checker can now see
+  that syntactically (`Return`, an `If` where both branches return, a
+  `Match` where every arm returns, and `Block` are recognized as
+  terminating; anything else, including loops, conservatively is not,
+  falling back to the plain union above).
 - **Deliberately restricted, not a general ownership/borrow-checker
   system**: this tracking is local to a single function body (no
   cross-function or struct-field-level tracking), applies only to

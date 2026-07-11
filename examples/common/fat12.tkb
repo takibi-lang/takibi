@@ -542,16 +542,9 @@ fn create_demo_file(name83: *u8, content: *u8) -> i32 {
     }
     let len: u32 = cstr_len(content);
     let mut bw: u32 = 0;
-    // Both branches below explicitly consume fp (one via fat_close then
-    // return, the other via fat_close's own return value) -- the affine
-    // checker's If case unions each branch's consumed-set independently,
-    // so an early-return-then-consume-later shape (no else) would
-    // wrongly read as "fp already consumed" on the surviving path; an
-    // explicit else avoids that (confirmed by hand before writing this).
     if (fat_write(fp, content, len, &bw) != 0) {
         fat_close(fp);
         return -1;
-    } else {
-        return fat_close(fp);
     }
+    return fat_close(fp);
 }
