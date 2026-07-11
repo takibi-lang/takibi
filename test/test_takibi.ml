@@ -1424,6 +1424,50 @@ let infer_tests = [
     (expect_type_error "cannot unify"
        "fn f(a: i32, b: u8) -> bool { return a == 1 && b; }");
 
+  (* -- Bool-only conditions: no C-style int-truthy coercion ------------- *)
+  (* while (1)/if (1) used to silently "type-check" (a bare integer
+     literal's inferred type is an unconstrained type variable that
+     unifies STRUCTURALLY with TBool) and then crash at codegen instead --
+     see check_cond's own comment. Fixed by rejecting an unresolved
+     condition type outright rather than unifying it away. *)
+
+  Alcotest.test_case "while (1) is a type error, not a silent i32 coercion" `Quick
+    (expect_type_error "condition must be bool"
+       "fn f() { while (1) { } }");
+
+  Alcotest.test_case "if (1) is a type error" `Quick
+    (expect_type_error "condition must be bool"
+       "fn f() { if (1) { } }");
+
+  Alcotest.test_case "while (true) still works" `Quick
+    (expect_ok "fn f() { while (true) { break; } }");
+
+  Alcotest.test_case "if condition: a concretely-typed i32 variable is still rejected" `Quick
+    (expect_type_error "cannot unify"
+       "fn f(x: i32) { if (x) { } }");
+
+  (* -- check_literal_fits_refined's TBool arm: the same unbound-type
+     -variable hole, but for any literal-flows-into-a-known-type site, not
+     just if/while conditions (Let, Return, Call arguments, ...). *)
+
+  Alcotest.test_case "let x: bool = 1 is a type error, not a silent coercion" `Quick
+    (expect_type_error "cannot use integer literal"
+       "fn f() { let x: bool = 1; }");
+
+  Alcotest.test_case "let x: bool = true still works" `Quick
+    (expect_ok "fn f() { let x: bool = true; }");
+
+  Alcotest.test_case "return 1 from a -> bool function is a type error" `Quick
+    (expect_type_error "cannot use integer literal"
+       "fn f() -> bool { return 1; }");
+
+  Alcotest.test_case "passing an integer literal for a bool parameter is a type error" `Quick
+    (expect_type_error "cannot use integer literal"
+       "fn f(b: bool) { } fn g() { f(1); }");
+
+  Alcotest.test_case "passing a genuine bool expression for a bool parameter still works" `Quick
+    (expect_ok "fn f(b: bool) { } fn g(x: i32) { f(x == 0); }");
+
   Alcotest.test_case "if/else branches both valid" `Quick
     (expect_ok "fn abs(x: i32) i32 {
                   if (x > 0) { return x; } else { return 0; } }");

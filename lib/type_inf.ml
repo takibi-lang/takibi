@@ -101,7 +101,25 @@ let unify_at loc t1 t2 =
    computed value) is left alone: unify's existing anti-subtyping guard
    (`t1, TRefinedInt (lo, hi, base) when t1 = repr base -> ...`) already
    correctly rejects an unproven plain-base value flowing into a refined
-   target, so there is nothing extra to check there. *)
+   target, so there is nothing extra to check there.
+
+   TBool branch added while fixing check_cond's own instance of this same
+   root cause (`while (1)` silently "type-checking" then crashing at
+   codegen, see check_cond's comment): the exact same unbound-type-variable
+   hole means `let x: bool = 1;`, `return 1;` from a `-> bool` function,
+   `f(1)` for a `bool` parameter, a `bool`-typed struct field initialized
+   with `1`, etc. ALL silently accept an integer literal today, for the
+   identical reason -- confirmed by hand (`let x: bool = 1;` compiles with
+   no error, pre-existing and independent of check_cond). Every one of
+   those flows into an already-known target type through one of this
+   function's own existing call sites, so adding one match arm here closes
+   all of them at once rather than needing a separate fix at each site.
+   Unlike the TRefinedInt case, there is no "value fits the range" check to
+   make -- ANY integer literal is invalid for a bool target, so this
+   rejects unconditionally once Const_env.bound_value confirms `e` really
+   is a compile-time integer (not, say, an already-bool-typed expression
+   that happens to reach this function with a TBool target, which
+   Const_env.bound_value correctly returns None for). *)
 let check_literal_fits_refined loc (e : Ast.expr) (target : ty) =
   match repr target with
   | TRefinedInt (lo, hi, _) ->
@@ -111,6 +129,13 @@ let check_literal_fits_refined loc (e : Ast.expr) (target : ty) =
              "constant value %d does not fit the refined type {%d..<%d}"
              k lo hi))
        | _ -> ())
+  | TBool ->
+      (match Const_env.bound_value e with
+       | Some k ->
+           raise (TypeError (loc, Printf.sprintf
+             "cannot use integer literal %d where bool is expected; use true/false"
+             k))
+       | None -> ())
   | _ -> ()
 
 (* -- Expression inference -------------------------------------------------- *)
