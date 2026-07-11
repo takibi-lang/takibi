@@ -2001,6 +2001,52 @@ let infer_tests = [
        "struct S { x: i32; }
         fn f(p: *i32) { let mut s: S = {p}; }");
 
+  (* Found while building examples/affine_escape_via_index (GitHub issue
+     #89's escape idiom): a struct returned BY VALUE from a function used
+     to produce invalid LLVM IR (`ret ptr %p` from a function declared to
+     return the aggregate `{i32,i32}` itself) -- coerce's TypeNamed case
+     passed the struct's pointer representation straight through instead
+     of loading the aggregate value at this boundary. Fixed in coerce
+     (lib/llvm_gen.ml), which also fixed the symmetric case (a struct
+     passed BY VALUE as a call argument, `sum(p)` below). *)
+  Alcotest.test_case "struct returned by value from a function codegens correctly" `Quick
+    (expect_codegen_ok
+       "struct Process { fd_a: i32; fd_b: i32; }
+        fn open_two() -> Process {
+            let mut p: Process = {10, 20};
+            return p;
+        }
+        fn sum(p: Process) -> i32 { return p.fd_a + p.fd_b; }
+        fn app_main() -> i32 {
+            let mut proc: Process = open_two();
+            return sum(proc);
+        }");
+
+  (* The second half of the same bug: an IMMUTABLE `let` has no alloca
+     (see llvm_gen.ml's Let(false, ...) case), so a struct-typed
+     immutable binding has no address for later field access to GEP into
+     -- this was already rejected for a struct LITERAL initializer
+     (`struct literal requires let mut` above) but not for any OTHER
+     struct-typed initializer, such as this function-call result, which
+     used to reach codegen and crash there instead of being caught here. *)
+  Alcotest.test_case "immutable let of a non-literal struct-typed value is a type error" `Quick
+    (expect_type_error "requires `let mut proc: Name"
+       "struct Process { fd_a: i32; fd_b: i32; }
+        fn open_two() -> Process {
+            let mut p: Process = {10, 20};
+            return p;
+        }
+        fn f() { let proc: Process = open_two(); }");
+
+  (* Negative control: an enum-typed value shares `Types.ty`'s TStruct
+     representation with real structs (Types.of_ast's `TypeNamed s ->
+     TStruct s`) but is just an integer at the LLVM level (no field
+     access, no address needed) -- must NOT be caught by the check above. *)
+  Alcotest.test_case "immutable let of an enum-typed value is still fine" `Quick
+    (expect_ok "enum Color: u8 { Red = 0; Green = 1; Blue = 2; }
+                fn make() -> Color { return Color::Red; }
+                fn f() { let c: Color = make(); }");
+
   (* -- Commutative pointer arithmetic: isize + ptr --------------------------- *)
 
   Alcotest.test_case "isize + ptr commutative pointer arithmetic type-checks" `Quick

@@ -1,0 +1,156 @@
+// Proof-of-concept for GitHub issue #89's "escape" problem. Deliberately
+// small and possibly throwaway -- built to answer one question (does this
+// idiom actually compile clean under --forbid-trap, with the index
+// genuinely escaping its acquiring function) before deciding whether to
+// roll it out to any real driver. See HISTORY.md's issue #89 entries.
+//
+// An `affine opaque struct` handle (examples/common/fat12.tkb's FatFile,
+// examples/common_stm32/eth.tkb's NetRxCpuOwned) cannot be stored into a
+// data structure that outlives the acquiring function: the affine
+// checker's tracking is function-local only, and `opaque` forbids fields,
+// so the pattern is a global SINGLETON -- only one live instance can
+// exist system-wide (see SPEC.md's "Affine Opaque Structs" section).
+// A real Unix-like kernel's fd table (a process holding several open
+// files at once) cannot be built directly on that pattern.
+//
+// Idiom demonstrated here: don't make the escaping, storable identity an
+// affine pointer at all. Make it a plain integer INDEX into a
+// fixed-size table of REAL per-slot state. A plain usize/i32 has none of
+// the escape problem -- it is an ordinary value, freely stored in
+// structs, arrays, returned, copied -- and takibi's range-proof
+// machinery (not the affine checker) is what can keep table access safe.
+//
+// Trade made: double-close / use-after-close on the ESCAPED identity is
+// no longer a compile-time error, only a runtime `in_use` flag check --
+// the same pattern FatFile already uses internally (`ff_is_open`) to
+// guard against a second fat_open() before fat_close(), since the affine
+// checker has no visibility across two independently acquired handles of
+// the same type either. Multi-instance + escape, in exchange for losing
+// affine's static double-free guarantee on the escaped value itself.
+//
+// A second, NOMINAL layer (`SlotLease`, below) puts affine tracking back
+// on top of the index, scoped to a single momentary operation instead of
+// the escaping identity itself -- see that type's own comment for what
+// it is (and is not) meant to demonstrate.
+
+// NOMINAL affine layer, added on purpose only in form, not because this
+// single-threaded demo needs it: `SlotLease` marks "the CPU is currently
+// touching this slot", proof-carrying only for the DURATION of one
+// read/write/close, entirely separate from the long-lived, escaping
+// `idx`. This is the hybrid shape a real RTOS would plausibly want --
+// the index solves "can this identifier live in a process's fd table
+// across function calls", while a lease would be where real mutual-
+// exclusion (a per-slot lock, once genuine concurrency/preemption
+// exists) would eventually attach. Today `slot_lease`/`slot_unlease` do
+// no real synchronization at all -- they exist purely so this file has
+// a concrete affine-plus-escaping-index shape to argue from once RTOS
+// work starts, rather than a purely hypothetical one. See this file's
+// header and HISTORY.md's issue #89 entries for the open question this
+// is meant to anchor: keep this two-tier shape, extend `affine` itself
+// (decouple it from `opaque`) instead, or something else entirely.
+affine opaque struct SlotLease;
+
+fn slot_lease(idx: {0..<4 as usize}) -> *SlotLease {
+    return idx as *SlotLease;
+}
+
+fn slot_unlease(lease: sink *SlotLease) {
+}
+
+let SLOT_COUNT: usize = 4;
+
+struct Slot {
+    in_use: bool;
+    value:  i32;
+}
+
+let mut slots: [Slot; SLOT_COUNT];
+
+// Returns -1 if the table is full, else an index in [0, SLOT_COUNT).
+fn slot_open(initial: i32) -> i32 {
+    for i in 0..<SLOT_COUNT {
+        if (slots[i].in_use == false) {
+            slots[i].in_use = true;
+            slots[i].value  = initial;
+            return i as i32;
+        }
+    }
+    return -1;
+}
+
+// Each of these takes `lease: borrow *SlotLease` -- proof that the
+// caller went through slot_lease() first -- purely to shape-check the
+// idiom; it adds no real safety over the runtime `in_use` flag today.
+fn slot_read(idx: {0..<4 as usize}, lease: borrow *SlotLease) -> i32 {
+    return slots[idx].value;
+}
+
+fn slot_write(idx: {0..<4 as usize}, v: i32, lease: borrow *SlotLease) {
+    slots[idx].value = v;
+}
+
+fn slot_close(idx: {0..<4 as usize}, lease: borrow *SlotLease) {
+    slots[idx].in_use = false;
+}
+
+// The actual "escape": a struct holding table INDICES (ordinary i32
+// fields, not affine pointers) that outlives the function that acquired
+// them -- exactly the process/fd-table shape a real kernel needs, and
+// exactly what a plain `affine opaque struct` handle cannot express.
+// `proc` is a GLOBAL, filled in place by open_two() and read/closed
+// later from app_main() -- the clearest possible demonstration that the
+// index has escaped the acquiring function's own stack frame entirely.
+struct Process {
+    fd_a: i32;
+    fd_b: i32;
+}
+
+let mut proc: Process;
+
+fn open_two() {
+    proc.fd_a = slot_open(10);
+    proc.fd_b = slot_open(20);
+}
+
+fn app_main() {
+    open_two();
+    uart_puts("opened: ");
+    uart_print(proc.fd_a);
+    uart_puts(" ");
+    uart_print(proc.fd_b);
+    uart_puts("\r\n");
+
+    // if-narrowing tracks a plain local variable, not a repeated struct
+    // field read (examples/common/fat12.tkb's fat_close has the same
+    // comment) -- bind the field to a local first, then narrow that.
+    let a: i32 = proc.fd_a;
+    if (a >= 0 && a < 4) {
+        let idx = a as usize;
+        let lease: *SlotLease = slot_lease(idx);
+        slot_write(idx, 99, lease);
+        uart_puts("fd_a value: ");
+        uart_print(slot_read(idx, lease));
+        uart_puts("\r\n");
+        slot_close(idx, lease);
+        slot_unlease(lease);
+    }
+    let b: i32 = proc.fd_b;
+    if (b >= 0 && b < 4) {
+        let idx = b as usize;
+        let lease: *SlotLease = slot_lease(idx);
+        uart_puts("fd_b value: ");
+        uart_print(slot_read(idx, lease));
+        uart_puts("\r\n");
+        slot_close(idx, lease);
+        slot_unlease(lease);
+    }
+
+    // A third acquisition after both closes should reuse a freed slot
+    // (proves in_use is actually tracked, not just a decoration).
+    let c: i32 = slot_open(30);
+    uart_puts("reused slot: ");
+    uart_print(c);
+    uart_puts("\r\n");
+
+    uart_puts("done\r\n");
+}

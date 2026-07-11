@@ -5953,3 +5953,151 @@ combination fix); `test/test_takibi.ml` (3 new unit tests: the fixed
 pattern, the both-branches-terminate case, and the non-terminating-branch
 negative control); `examples/common/fat12.tkb` (`create_demo_file`
 simplified, workaround comment removed).
+
+## Bug Found and Fixed While Building the Escape-Idiom Proof-of-Concept: Struct Returned By Value
+
+Found by accident while writing `examples/affine_escape_via_index/
+affine_escape_via_index.tkb` (see the follow-up entry right after this one
+for that file itself): a function returning a `struct` type BY VALUE (not
+`*Struct`) crashed the compiler with an internal-compiler-error, not a
+normal `TypeError` -- `Llvm_gen.Error("internal compiler error: invalid
+LLVM IR generated for function 'open_two' ... ret ptr %p ...")` from a
+function LLVM had declared to return the aggregate `{i32,i32}` itself.
+
+**Root cause 1 (codegen)**: every struct-typed local/parameter is
+represented internally as a pointer to its own alloca (`Var`'s `TypeNamed
+_ -> (ast_ty, ptr)` case in `lib/llvm_gen.ml` -- this is what makes
+`.field` access, passing to `*Struct`-typed parameters, etc. all work).
+`coerce` (the function every value-producing boundary funnels through --
+`Return`, and a call argument matched against its declared parameter
+type) had a `TypeNamed _ -> v` case that passed this pointer straight
+through unchanged instead of loading the aggregate value, which is what
+both of those two boundaries actually need when the destination type is
+the bare struct (not `*Struct`). Fixed by loading whenever the source
+value is a pointer but the destination LLVM type is the first-class
+aggregate itself -- one fix in `coerce` closes both the `Return` case and
+the symmetric struct-by-value call-argument case at once, confirmed with
+a probe exercising both (`sum(p: Process)` called with a struct-by-value
+argument).
+
+**Root cause 2 (missed type-check), found immediately after by re-running
+the same probe**: fixing codegen surfaced a second, deeper bug at the next
+line: `let proc: Process = open_two();` (immutable, no `mut`) still
+crashed codegen, this time on the FIELD ACCESS (`proc.fd_a`) with an
+equally invalid `getelementptr` directly on the raw returned aggregate
+SSA value (not a pointer). Cause: an immutable `let` has no alloca at all
+(`Let(false, ...)` in `lib/llvm_gen.ml` just stores the raw SSA value under
+an `Imm` binding) -- but `type_inf.ml` only rejected this for a struct
+LITERAL initializer (`"struct literal requires `let mut ...`"`, existing,
+pre-this-session check), not for ANY OTHER struct-typed initializer (a
+function-call result, a field read, etc.), so this shape reached codegen
+and crashed there instead of being caught as an ordinary compile error.
+Extended the same restriction to any immutable `let` whose initializer's
+type is a real struct. Had to distinguish real structs from enums
+carefully: `Types.ty` represents BOTH as `TStruct sname` (`Types.of_ast`'s
+`TypeNamed s -> TStruct s`), so the new check additionally requires
+`sname` to be registered in `senv` (populated only from `StructDef`, not
+`EnumDef`) -- an enum value is just an integer at the LLVM level and
+remains fine immutable. Missing this distinction was caught immediately by
+an existing, unrelated unit test ("refined int subtype cast to enum...")
+that started failing against the first, too-broad version of the check.
+
+Verified end-to-end after both fixes: a function returning a struct by
+value, called from an immutable-let-turned-`let mut` binding, with a
+subsequent `.field` read AND the struct passed by value to a second
+function (`sum(p: Process) -> i32`), all compile and run correctly under
+QEMU (confirmed the actual field values round-trip correctly, not just
+"compiles").
+
+**Files**: `lib/llvm_gen.ml` (`coerce`'s `TypeNamed` case); `lib/
+type_inf.ml` (`Let`'s non-literal struct-typed-immutable check);
+`test/test_takibi.ml` (3 new unit tests: the fixed round-trip via
+`expect_codegen_ok`, the immutable-non-literal-struct negative control,
+and an enum negative control confirming the `senv` distinction).
+
+## GitHub Issue #89 Follow-up: `examples/affine_escape_via_index` -- a Small, Deliberately Possibly-Throwaway Proof-of-Concept for the "Escape" Problem
+
+Direct follow-up to the "Deliberately still open" list two entries above
+(affine handles escaping a single function body by being stored into a
+data structure -- the literal shape a real Unix-like kernel's fd table
+needs, and something neither `FatFile` nor `NetRxCpuOwned` can do today,
+both being global-singleton `affine opaque struct` handles). Discussed
+with the user (and, in an earlier round, with Fable) before building
+anything: given RTOS work is expected soon and will likely want some kind
+of filesystem, is it worth spending time on this NOW, ahead of a concrete
+driving example? Landed on yes, specifically because the idiom under
+test -- a fixed-size table of real per-slot state, addressed by a plain
+refined-type INDEX rather than an affine pointer -- uses ZERO new
+compiler features. It is purely a way of using EXISTING machinery
+(structs, arrays, refined `{lo..<hi as base}` parameter types) in a new
+combination, so the cost of it turning out to be the wrong shape once
+RTOS's real requirements are known is just deleting one `.tkb` file, not
+unwinding compiler/parser/type-system changes the way `sink` would have
+been.
+
+**What it demonstrates**: `examples/affine_escape_via_index/
+affine_escape_via_index.tkb` -- a 4-slot table of `Slot { in_use: bool;
+value: i32; }`, `slot_open()/slot_read()/slot_write()/slot_close()`
+operating on it, and a GLOBAL `Process { fd_a: i32; fd_b: i32; }` filled
+by one function (`open_two()`) and read/written/closed from a completely
+different one (`app_main()`) -- the plainest possible demonstration that
+the identifier has escaped its acquiring function's own stack frame.
+Written first without refined types (CLAUDE.md's development process),
+verified functionally correct via real QEMU execution, THEN hardened:
+`slot_read`/`slot_write`/`slot_close` take `idx: {0..<4 as usize}`
+(literal bound -- a named `SLOT_COUNT` global in that position is a
+parser-time error, per the const_global.tkb-documented restriction), and
+the whole file compiles with zero trap sites under `--forbid-trap`.
+`make check` (76/76, real QEMU output verified against `.expected`) is
+the actual, current proof this compiles and runs, not just an assertion.
+
+**Two smaller gotchas hit and fixed while writing it, unrelated to the
+idiom itself**: no `!` (logical-not) operator exists in this language at
+all (`~` is bitwise NOT only) -- `slots[i].in_use == false` instead. And
+if-narrowing only tracks a plain LOCAL variable, not a repeated struct
+FIELD read (`examples/common/fat12.tkb`'s `fat_close` already carries the
+same comment) -- `proc.fd_a` had to be bound to a local (`let a: i32 =
+proc.fd_a;`) before `if (a >= 0 && a < 4) { ... a as usize ... }` would
+narrow it tightly enough to satisfy `slot_read`'s refined parameter.
+
+**The actual trade being surfaced for later discussion, not resolved
+here**: this idiom buys multi-instance + escape, but LOSES the
+compile-time double-close/use-after-close guarantee on the escaped
+identity itself -- only a runtime `in_use` flag catches that class of bug
+now (confirmed by design, not by accident: the third `slot_open(30)` in
+the demo, run after both earlier slots are closed, correctly reuses slot
+0, proving `in_use` is a real, load-bearing check, not decoration). This
+is the concrete question a real RTOS+filesystem milestone will force: is
+that trade acceptable for a real driver, or does it call for extending
+`affine` itself (decoupling it from `opaque`, letting an affine value
+carry real per-instance fields, a bigger and still-undesigned language
+change) instead? Left open on purpose -- see the user's own framing: keep
+this file as a proof-of-concept and discussion anchor, not a template to
+copy into `fat12.tkb`/`eth.tkb` yet.
+
+**Follow-up in the same session: a second, NOMINAL affine layer added on
+top, specifically so this file has a concrete two-tier shape to argue
+from later, not a purely hypothetical one.** `affine opaque struct
+SlotLease;` plus `slot_lease(idx) -> *SlotLease` / `slot_unlease(lease:
+sink *SlotLease)` mark "the CPU is currently touching this slot", scoped
+to the duration of one read/write/close -- entirely separate from the
+long-lived, escaping `idx`. `slot_read`/`slot_write`/`slot_close` now
+also take `lease: borrow *SlotLease` as proof-carrying evidence a lease
+was taken first. Deliberately does no real synchronization (single-
+threaded demo; a real per-slot lock would attach here once genuine
+concurrency/preemption exists) -- this is form, not function, by
+explicit request. Verified it is not purely decorative, though: a
+deliberately introduced missing `slot_unlease(lease)` (scratch probe, not
+committed) was correctly rejected by this session's own never-consumed
+check ("affine value 'lease' is never consumed"), and restoring it
+compiles and runs identically to before (`make check` 76/76 unchanged;
+`.expected` output byte-identical). This is the concrete shape meant to
+anchor the later RTOS-time discussion: keep this two-tier (escaping index
++ momentary lease) idiom, extend `affine`/`opaque` decoupling instead, or
+something else -- see the trade-off paragraph above.
+
+**Files**: `examples/affine_escape_via_index/
+affine_escape_via_index.tkb` + `.expected` (new); `Makefile` (added to
+`EXAMPLES`, QEMU-only for now -- no STM32 build, since this is validation
+work, not a driver being ported); `scripts/run_qemutest.sh` (one new
+`run_test` registration).

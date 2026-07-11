@@ -895,7 +895,24 @@ let rec coerce v (dst : Ast.type_expr) =
   | TypeVoid    -> v
   | TypeArray _ -> v
   | TypeFn _    -> v
-  | TypeNamed _ -> v
+  | TypeNamed _ ->
+      (* A struct-typed value is always carried internally as a pointer
+         to its alloca (see Var's TypeNamed case) -- field access, struct
+         arguments to `*Struct`-typed parameters, etc. all want that
+         pointer, so coerce leaves it alone in every context except the
+         two places the ABI genuinely needs the AGGREGATE value itself:
+         `return <struct-local>;` from a function whose own return type
+         is that struct (by value, not `*Struct`), and passing a struct
+         local to a by-value (not `*Struct`) call argument. Both funnel
+         through this same coerce call. Loading here whenever the source
+         is a pointer but the destination is the bare aggregate type
+         fixes both without a separate special case at either call site.
+         Enum-typed destinations never reach this branch: Var already
+         yields the loaded underlying integer for an enum (not a
+         pointer), so `vty = dst_ll` is already true above and this
+         whole match arm is skipped. *)
+      if vty = pointer_type context then build_load dst_ll v "structval" builder
+      else v
   | TypeRefined (_, _, base) -> coerce v base
   | TypeSlice _ -> v   (* fat values are never numerically coerced *)
   | TypeBorrow t | TypeSink t -> coerce v t

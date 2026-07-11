@@ -1576,6 +1576,30 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
             (* Initialization: match actual(expr) as a subtype of expected(type annotation) *)
             unify_at e.loc et (strip_io ty);
             check_literal_fits_refined e.loc e (strip_io ty);
+            (* Same restriction as the struct-literal case just above, but
+               for any OTHER struct-typed initializer (a function call
+               returning a struct by value, a field/array read, etc.): an
+               immutable `let` has no alloca (see llvm_gen.ml's Let(false,
+               ...) case), so it has no memory location to hand `.field`
+               access a pointer into -- codegen would otherwise emit a
+               `getelementptr` directly on the raw aggregate SSA value,
+               which is not a pointer and produces invalid LLVM IR. Found
+               via examples/affine_escape_via_index/affine_escape_via_index.tkb's
+               `let proc: Process = open_two();` during GitHub issue #89's
+               escape-idiom work; see HISTORY.md. *)
+            (match repr et with
+             (* `Types.ty` represents both real structs AND enums as
+                `TStruct sname` (see Types.of_ast's `TypeNamed s -> TStruct
+                s`) -- only names registered in `senv` (populated from
+                `StructDef`, not `EnumDef`) are actual structs needing an
+                address for field access; an enum value is fine immutable
+                (it's just an integer at the LLVM level, see llvm_gen.ml's
+                enum_underlying handling). *)
+             | TStruct sname when (not is_mut) && StringMap.mem sname senv ->
+                 raise (TypeError (e.loc, Printf.sprintf
+                   "struct-typed value requires `let mut %s: Name = ...` \
+                    (an immutable let has no address for later field access)" name))
+             | _ -> ());
             Some et
       in
       (* Proofs are only lost at mutation points, never at annotation
