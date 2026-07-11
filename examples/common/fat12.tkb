@@ -120,14 +120,20 @@ struct packed DirEntry {
 // directory. Both fit in exactly one sector at this disk size, so keeping
 // them resident avoids any multi-sector random-access bookkeeping; flushed
 // to disk by fat_flush(). -----------------------------------------------------
-let mut fat_buf: [u8; SECTOR_SIZE];
+// align(32): mem_block_read/mem_block_write (GitHub issue #102 Stage 2)
+// now require a PROVEN *align(32) u8 pointer, since examples/fatfs_sdcard's
+// real adapter forwards straight into sdmmc.tkb's disk_read/disk_write,
+// which no longer stage through a bounce buffer -- see that file's own
+// comment for the cache-invalidate hazard this closes.
+let mut fat_buf: [u8; SECTOR_SIZE] align(32);
 // A checked array of DirEntry (not [u8; SECTOR_SIZE] + a *DirEntry overlay
 // cast) -- DirEntry is 32 bytes and ROOT_ENTRY_COUNT is 16, so this is
 // still exactly one SECTOR_SIZE sector; indexing an entry by slot number
 // stays a genuine checked array access, only reinterpreted as raw bytes at
-// the mem_block_write boundary below (`as *u8`), the same byte-oriented
-// interface mem_block_write always needed regardless of this type.
-let mut root_dir_buf: [DirEntry; ROOT_ENTRY_COUNT];
+// the mem_block_write boundary below (`as *align(32) u8`), the same
+// byte-oriented interface mem_block_write always needed regardless of
+// this type. align(32): same reason as fat_buf above.
+let mut root_dir_buf: [DirEntry; ROOT_ENTRY_COUNT] align(32);
 let mut next_free_cluster: u32;
 let mut next_free_root_entry: u32;
 
@@ -135,7 +141,7 @@ fn fat_flush() {
     let ffs: usize = first_fat_sector();
     mem_block_write(ffs as u32, fat_buf);
     mem_block_write((ffs + FAT_SIZE_SECTORS) as u32, fat_buf);
-    mem_block_write(first_root_dir_sector() as u32, root_dir_buf as *u8);
+    mem_block_write(first_root_dir_sector() as u32, root_dir_buf as *align(32) u8);
 }
 
 // Syncs the in-memory fat_buf/root_dir_buf mirrors FROM disk -- the
@@ -146,7 +152,7 @@ fn fat_flush() {
 // can see its directory.
 fn fat_mount() {
     mem_block_read(first_fat_sector() as u32, fat_buf);
-    mem_block_read(first_root_dir_sector() as u32, root_dir_buf as *u8);
+    mem_block_read(first_root_dir_sector() as u32, root_dir_buf as *align(32) u8);
 }
 
 // FAT12 packs two 12-bit entries into 3 bytes. For an even cluster N, its
@@ -192,7 +198,7 @@ fn fat_set_entry(cluster: u32, val: u16) {
 }
 
 fn fat_format() {
-    let mut sector_buf: [u8; SECTOR_SIZE];
+    let mut sector_buf: [u8; SECTOR_SIZE] align(32);
     for i: usize in 0..<SECTOR_SIZE {
         sector_buf[i] = 0;
     }
@@ -241,7 +247,7 @@ fn fat_format() {
 
     fat_flush();
 
-    let mut zero_buf: [u8; SECTOR_SIZE];
+    let mut zero_buf: [u8; SECTOR_SIZE] align(32);
     for i: usize in 0..<SECTOR_SIZE {
         zero_buf[i] = 0;
     }
@@ -421,7 +427,7 @@ fn fat_read(fp: borrow *FatFile, buf: *u8, btr: u32, br: *u32) -> i32 {
     let mut total: u32 = 0;
     let mut dst: *u8 = buf;
     while (remaining > 0) {
-        let mut sector_buf: [u8; SECTOR_SIZE];
+        let mut sector_buf: [u8; SECTOR_SIZE] align(32);
         let sector_num: u32 = (first_data_sector() as u32) + (ff_cur_cluster - 2);
         mem_block_read(sector_num, sector_buf);
         let space_in_cluster: u32 = (SECTOR_SIZE as u32) - ff_pos_in_cluster;
@@ -464,7 +470,7 @@ fn fat_write(fp: borrow *FatFile, buf: *u8, btw: u32, bw: *u32) -> i32 {
             ff_cur_cluster = c;
             ff_pos_in_cluster = 0;
         }
-        let mut sector_buf: [u8; SECTOR_SIZE];
+        let mut sector_buf: [u8; SECTOR_SIZE] align(32);
         let sector_num: u32 = (first_data_sector() as u32) + (ff_cur_cluster - 2);
         if (ff_pos_in_cluster > 0) {
             mem_block_read(sector_num, sector_buf); // preserve earlier bytes in this cluster

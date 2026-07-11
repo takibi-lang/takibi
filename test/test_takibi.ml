@@ -3895,8 +3895,16 @@ let codegen_tests = [
 
   Alcotest.test_case "DMA cache builtins require pointer and usize length" `Quick
     (fun () ->
+       (* GitHub issue #102 Stage 2: dma_prepare_rx/dma_finish_rx are
+          cache-line INVALIDATE operations and now require a PROVEN
+          *align(32) pointer (examples/common_stm32/sdmmc.tkb's disk_read
+          no longer needs its own bounce buffer as a result); an aligned
+          pointer still widens into dma_prepare_tx's plain *u8 -- a CLEAN
+          (writeback), which stays safe on any alignment and does not
+          require one. See the dedicated test group below for the
+          negative/positive alignment cases in isolation. *)
        expect_ok
-         "fn cache_ops(p: *u8, n: usize) {
+         "fn cache_ops(p: *align(32) u8, n: usize) {
             dma_prepare_tx(p, n);
             dma_prepare_rx(p, n);
             dma_finish_rx(p, n);
@@ -3904,7 +3912,13 @@ let codegen_tests = [
        expect_type_error "raw pointer"
          "fn bad_cache_ptr(n: usize) { dma_prepare_tx(n, n); }" ();
        expect_type_error "cannot unify"
-         "fn bad_cache_len(p: *u8, n: i32) { dma_finish_rx(p, n); }" ());
+         "fn bad_cache_len(p: *align(32) u8, n: i32) { dma_finish_rx(p, n); }" ());
+
+  Alcotest.test_case "dma_finish_rx rejects an unproven pointer, dma_prepare_tx accepts it" `Quick
+    (fun () ->
+       expect_type_error "cannot pass unproven"
+         "fn f(p: *u8) { dma_finish_rx(p, 512); }" ();
+       expect_ok "fn f(p: *u8) { dma_prepare_tx(p, 512); }" ());
 
   Alcotest.test_case "signal_fence emits a compiler memory clobber only" `Quick
     (fun () ->
@@ -4158,7 +4172,7 @@ let codegen_tests = [
     "DMA cache builtins lower to Cortex-M7 SCB line maintenance loops" `Quick
     (fun () ->
        let _ = gen_codegen
-         "fn codegen_dma_cache(p: *u8, n: usize) {
+         "fn codegen_dma_cache(p: *align(32) u8, n: usize) {
             dma_prepare_tx(p, n);
             dma_prepare_rx(p, n);
             dma_finish_rx(p, n);

@@ -48,7 +48,10 @@ extern fn semihosting_close(handle: i32) -> i32;
 extern fn semihosting_read(handle: i32, buf: *u8, len: i32) -> i32;
 
 // -- Block device: in-memory backing store ----------------------------------
-let mut disk: [u8; SECTOR_SIZE * TOTAL_SECTORS];
+// align(32): dma_prepare_tx/dma_finish_rx (GitHub issue #102 Stage 2) now
+// require a PROVEN *align(32) pointer for the cache-maintenance-sensitive
+// calls below, same as every other DMA-touched buffer in this codebase.
+let mut disk: [u8; SECTOR_SIZE * TOTAL_SECTORS] align(32);
 
 // sector's real invariant (a valid sector number on this small, fixed-size
 // disk) is bookkeeping fat12.tkb's own callers establish, not something

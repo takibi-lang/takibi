@@ -61,7 +61,7 @@ let TOTAL_SECTORS: usize = 128;
 // OpenOCD's load_image, timed at a breakpoint on app_main -- same
 // technique scripts/run_hwtest_ram.sh's ram_load_and_run_seeded already
 // uses for examples/fatfs's `disk` array.
-let mut staging: [u8; SECTOR_SIZE * TOTAL_SECTORS];
+let mut staging: [u8; SECTOR_SIZE * TOTAL_SECTORS] align(32);
 
 // Result code the harness reads back with OpenOCD's `mrw` once execution
 // halts at install_done() -- a precise, deterministic status instead of

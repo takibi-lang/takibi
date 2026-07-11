@@ -37,11 +37,15 @@
 use "examples/common/fat12.tkb";
 use "examples/common_stm32/sdmmc.tkb";
 
-fn mem_block_read(sector: u32, buf: *u8) {
+// buf: *align(32) u8 (GitHub issue #102 Stage 2): disk_read/disk_write no
+// longer stage through a bounce buffer, so this adapter must forward a
+// PROVEN *align(32) u8 pointer -- every real caller through fat12.tkb's
+// fat_buf/root_dir_buf/sector_buf/zero_buf is now align(32) itself.
+fn mem_block_read(sector: u32, buf: *align(32) u8) {
     disk_read(sector, buf);
 }
 
-fn mem_block_write(sector: u32, buf: *u8) {
+fn mem_block_write(sector: u32, buf: *align(32) u8) {
     disk_write(sector, buf);
 }
 

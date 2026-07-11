@@ -476,6 +476,25 @@ let rec provable_multiple_of (e : Ast.expr) : int option =
        | _ -> None)
   | _ -> None
 
+(* GitHub issue #102 Stage 2: is EVERY element of this pointee type
+   itself guaranteed to start N bytes apart? If the pointee is a struct
+   declared with its OWN `align(M)` where M is a multiple of N, GEP's
+   element-wise stride (sizeof(struct), itself a multiple of M because
+   struct `align(M)` tail-pads to it -- see Type_layout) means ANY
+   integer element offset preserves *align(N) T, not just an offset
+   PROVABLY a multiple of N in bytes (provable_multiple_of, above) --
+   distinct proof source, needed for `eth_rx_descs + i` (examples/
+   common_stm32/eth.tkb's `rx_desc_ptr`/`tx_desc_ptr`: EthDmaDesc is
+   `align(32)`, so stepping by whole elements, for ANY `i`, never
+   crosses into the middle of a cache line). *)
+let elem_stride_aligned (senv : senv) (n : int) (elem : ty) : bool =
+  match elem with
+  | TStruct sname ->
+      (match StringMap.find_opt sname senv with
+       | Some (_, _, Some m) -> m mod n = 0
+       | _ -> false)
+  | _ -> false
+
 (* GitHub issue #15 follow-up: require `unsafe` for a cast that builds an
    AFFINE OPAQUE pointer from anything other than a compile-time literal or
    a real object's address -- see is_literal_derived's comment for the
@@ -568,20 +587,25 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 raise (TypeError (e.loc, "cannot add two pointers"))
             | TAlignedPtr (n, elem), _ ->
                 (* GitHub issue #102: aligned_ptr + offset stays *align(N) T
-                   only when offset is PROVABLY a multiple of N (the
+                   when EITHER the pointee's own element stride is itself a
+                   multiple of N (elem_stride_aligned -- any offset works,
+                   `eth_rx_descs + i`'s shape) OR offset is PROVABLY a
+                   multiple of N in bytes (provable_multiple_of -- the
                    eth_rx_bufs + eth_rx_cur * ETH_BUF_SIZE shape); silently
                    decays to plain *T otherwise -- same "lose the proof,
                    don't error" style TRefinedInt's own arithmetic below
                    already uses when it can't keep a tighter range. *)
                 unify_at e2.loc t2 TIsize;
-                (match provable_multiple_of e2 with
-                 | Some k when k mod n = 0 -> TAlignedPtr (n, elem)
-                 | _ -> TPtr elem)
+                if elem_stride_aligned senv n elem then TAlignedPtr (n, elem)
+                else (match provable_multiple_of e2 with
+                      | Some k when k mod n = 0 -> TAlignedPtr (n, elem)
+                      | _ -> TPtr elem)
             | _, TAlignedPtr (n, elem) ->
                 unify_at e1.loc t1 TIsize;
-                (match provable_multiple_of e1 with
-                 | Some k when k mod n = 0 -> TAlignedPtr (n, elem)
-                 | _ -> TPtr elem)
+                if elem_stride_aligned senv n elem then TAlignedPtr (n, elem)
+                else (match provable_multiple_of e1 with
+                      | Some k when k mod n = 0 -> TAlignedPtr (n, elem)
+                      | _ -> TPtr elem)
             | TPtr _, _ ->
                 unify_at e2.loc t2 TIsize;
                 t1
@@ -635,13 +659,15 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 unify_at e.loc inner1 inner2;
                 TIsize
             | TAlignedPtr (n, elem), _ ->
-                (* aligned_ptr - offset stays *align(N) T only when offset
-                   is PROVABLY a multiple of N -- same reasoning as Add's
-                   own TAlignedPtr case above (kept together, sync rule). *)
+                (* aligned_ptr - offset stays *align(N) T when either the
+                   element stride or the offset itself proves it -- same
+                   reasoning as Add's own TAlignedPtr case above (kept
+                   together, sync rule). *)
                 unify_at e2.loc t2 TIsize;
-                (match provable_multiple_of e2 with
-                 | Some k when k mod n = 0 -> TAlignedPtr (n, elem)
-                 | _ -> TPtr elem)
+                if elem_stride_aligned senv n elem then TAlignedPtr (n, elem)
+                else (match provable_multiple_of e2 with
+                      | Some k when k mod n = 0 -> TAlignedPtr (n, elem)
+                      | _ -> TPtr elem)
             | TPtr _, _ ->
                 unify_at e2.loc t2 TIsize;
                 t1
@@ -760,7 +786,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | FieldGet (base_expr, fname) ->
            let bt = infer_expr senv eenv tyenv fenv base_expr in
            let sname = match repr bt with
-             | TStruct s | TPtr (TStruct s) | TPtr (TIo (TStruct s)) -> s
+             | TStruct s | TPtr (TStruct s) | TPtr (TIo (TStruct s))
+             | TAlignedPtr (_, TStruct s) -> s
              | _ -> raise (TypeError (base_expr.loc,
                  Printf.sprintf "field address '.%s' on non-struct type '%s'"
                    fname (to_string bt)))
@@ -865,20 +892,45 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                            literal, or slice source"))))
             | _ ->
            (match repr src_ty with
-            | TPtr _ ->
+            | TPtr _ | TAlignedPtr _ ->
+                (* TAlignedPtr src (GitHub issue #102) shares TPtr's cast
+                   rules exactly: `as usize` or `as *T` always widens/
+                   drops the proof (an explicit cast to a WEAKER pointer
+                   type is always allowed, same as passing an aligned
+                   pointer where a plain one is expected elsewhere); `as
+                   *align(N) T` is the one case needing its own check,
+                   just below. *)
                 (match tgt with
                  | TUsize | TPtr _ -> tgt
-                 | TAlignedPtr _ ->
+                 | TAlignedPtr (n_dst, _) ->
                      (* GitHub issue #102: an explicit cast asserting
                         alignment on an already-pointer source -- allowed
-                        unconditionally inside `unsafe`, otherwise must be
-                        a genuine subtype (same rule as an implicit
-                        assignment/call-argument use: src_ty is itself
-                        *align(K) T with N | K, matched via unify's own
-                        TAlignedPtr/TPtr cases in types.ml). *)
-                     if !unsafe_depth > 0 then tgt
-                     else (try unify src_ty tgt; tgt
-                           with Unify_error msg -> raise (TypeError (e.loc, msg)))
+                        unconditionally inside `unsafe`, otherwise only
+                        checks the ALIGNMENT NUMBER (src's own N must be a
+                        multiple of n_dst), deliberately NOT full `unify`
+                        against tgt: unlike an implicit assignment/call
+                        argument (which must keep the exact same pointee
+                        type), an explicit cast is exactly where a
+                        REINTERPRET across pointee types is meant to stay
+                        legal (e.g. `root_dir_buf as *align(32) u8`,
+                        examples/common/fat12.tkb's own DirEntry-array ->
+                        byte-pointer bridge, same as any other `*T as *U`
+                        cast) -- only whether the alignment PROOF survives
+                        is in question here, not the pointee type. *)
+                     let src_n = match repr src_ty with
+                       | TAlignedPtr (n, _) -> Some n
+                       | _ -> None
+                     in
+                     (match src_n with
+                      | Some n when n mod n_dst = 0 -> tgt
+                      | _ when !unsafe_depth > 0 -> tgt
+                      | _ -> raise (TypeError (e.loc, Printf.sprintf
+                          "cannot cast unproven %s to %s; use `&x` on an \
+                           align(%d) variable, a literal address, pointer \
+                           arithmetic by a multiple of %d, or \
+                           `unsafe { ... as %s }` to mark it"
+                          (to_string src_ty) (to_string tgt) n_dst n_dst
+                          (to_string tgt))))
                  | _ ->
                      raise (TypeError (e.loc,
                        Printf.sprintf
@@ -985,6 +1037,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
         | TStruct s                      -> s
         | TPtr   (TStruct s)             -> s
         | TPtr   (TIo (TStruct s))       -> s   (* field read through *io Struct *)
+        | TAlignedPtr (_, TStruct s)     -> s   (* GitHub issue #102 *)
         | _ ->
             raise (TypeError (base_expr.loc,
               Printf.sprintf "field access '.%s' on non-struct type '%s'"
@@ -1303,9 +1356,24 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | [ptr; len] ->
            let pt = infer_expr senv eenv tyenv fenv ptr in
            let lt = infer_expr senv eenv tyenv fenv len in
-           (match repr pt with
-            | TPtr _ | TAlignedPtr _ -> ()
-            | _ -> raise (TypeError (ptr.loc, Printf.sprintf
+           (match fname, repr pt with
+            (* GitHub issue #102 Stage 2: dma_prepare_rx/dma_finish_rx are
+               cache-line INVALIDATE operations -- an unaligned range can
+               silently discard live neighboring data (the real HardFault
+               examples/common_stm32/sdmmc.tkb's own comment documents),
+               so require a PROVEN *align(32) T pointer directly, closing
+               the gap that file's disk_read_bounce bounce buffer used to
+               work around. dma_prepare_tx is a CLEAN (writeback), which
+               cannot lose data even when its rounding spills into an
+               unrelated live cache line (same file's comment) -- stays
+               accepting any raw pointer, unaffected. *)
+            | ("dma_prepare_rx" | "dma_finish_rx"), (TPtr elem | TAlignedPtr (_, elem)) ->
+                unify_at ptr.loc pt (TAlignedPtr (32, elem))
+            | ("dma_prepare_rx" | "dma_finish_rx"), _ ->
+                raise (TypeError (ptr.loc, Printf.sprintf
+                  "%s expects a raw pointer as its first argument" fname))
+            | _, (TPtr _ | TAlignedPtr _) -> ()
+            | _, _ -> raise (TypeError (ptr.loc, Printf.sprintf
                 "%s expects a raw pointer as its first argument" fname)));
            unify_at len.loc lt TUsize;
            TVoid
@@ -1757,6 +1825,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         | TStruct s                      -> s
         | TPtr   (TStruct s)             -> s
         | TPtr   (TIo (TStruct s))       -> s
+        | TAlignedPtr (_, TStruct s)     -> s   (* GitHub issue #102 *)
         | _ ->
             raise (TypeError (base_expr.loc,
               Printf.sprintf "field assignment '.%s' on non-struct type '%s'"

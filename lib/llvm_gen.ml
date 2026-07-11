@@ -1341,6 +1341,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let sname = match base_ty with
              | TypeNamed s        -> s
              | TypePtr (TypeNamed s) -> s
+             | TypeAlignedPtr (_, TypeNamed s) -> s   (* GitHub issue #102 *)
              | _ -> raise (Error (Printf.sprintf
                  "field address '.%s' on non-struct type" fname))
            in
@@ -1376,13 +1377,25 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (* GitHub issue #102: TypeAlignedPtr is also a pointer at the LLVM
          level (see ltype_of_ast) but carries a proof that may or may not
          survive THIS SPECIFIC addition/subtraction -- mirrors (sync rule)
-         type_inf.ml's own Add/Sub cases, which use the same
-         Type_inf.provable_multiple_of check to decide the same thing. *)
+         type_inf.ml's own Add/Sub cases: either the pointee's own element
+         stride is itself a multiple of N (Type_layout's struct_alignments
+         -- struct `align(M)` tail-pads sizeof to M, so GEP's per-element
+         stride preserves *align(N) T for ANY integer offset when M is a
+         multiple of N, `eth_rx_descs + i`'s shape) or the offset itself is
+         Type_inf.provable_multiple_of N. *)
+      let elem_stride_aligned n inner = match inner with
+        | TypeNamed sname ->
+            (match Hashtbl.find_opt struct_alignments sname with
+             | Some m -> m mod n = 0
+             | None -> false)
+        | _ -> false
+      in
       let ptr_result_ty original_ty offset_expr = match original_ty with
         | TypeAlignedPtr (n, inner) ->
-            (match Type_inf.provable_multiple_of offset_expr with
-             | Some k when k mod n = 0 -> original_ty
-             | _ -> TypePtr inner)
+            if elem_stride_aligned n inner then original_ty
+            else (match Type_inf.provable_multiple_of offset_expr with
+                  | Some k when k mod n = 0 -> original_ty
+                  | _ -> TypePtr inner)
         | t -> t
       in
       (match op with
@@ -1759,6 +1772,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         | TypeNamed s                      -> (s, false)
         | TypePtr   (TypeNamed s)          -> (s, false)
         | TypePtr   (TypeIo (TypeNamed s)) -> (s, true)   (* field access through *io Struct is volatile *)
+        | TypeAlignedPtr (_, TypeNamed s)  -> (s, false)  (* GitHub issue #102 *)
         | _ -> raise (Error (Printf.sprintf
             "field access '.%s' on non-struct type" fname))
       in
@@ -2718,6 +2732,7 @@ let gen_func ?prog_types fdef =
           | TypeNamed s                      -> (s, false)
           | TypePtr (TypeNamed s)            -> (s, false)
           | TypePtr (TypeIo (TypeNamed s))   -> (s, true)
+          | TypeAlignedPtr (_, TypeNamed s)  -> (s, false)   (* GitHub issue #102 *)
           | _ -> raise (Error (Printf.sprintf
               "field assignment '.%s' on non-struct type" fname))
         in

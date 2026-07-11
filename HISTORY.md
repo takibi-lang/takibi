@@ -6348,3 +6348,156 @@ align_ptr_proof/` (new, `.tkb` + `.expected`); `examples/
 align_ptr_unproven/` (new compile-error fixture); `Makefile` (both added
 to `EXAMPLES`); `scripts/run_qemutest.sh` (two new test registrations);
 `SPEC.md` (new `*align(N) T` subsection).
+
+## GitHub Issue #102 Stage 2: DMA Builtins Retrofitted, `disk_read`'s Bounce Buffer Removed
+
+The payoff Stage 1 was explicitly built toward: `dma_prepare_rx`/
+`dma_finish_rx` (cache-line INVALIDATE operations -- the real HardFault
+class this whole feature exists to catch at compile time instead of on
+real hardware, see this file's issue #101-follow-up and issue #102
+"Filed, Not Started" entries) now REQUIRE a proven `*align(32)` pointer,
+and `examples/common_stm32/sdmmc.tkb`'s `disk_read` no longer stages
+through its own `disk_read_bounce` driver-owned buffer -- it DMAs
+directly into the caller's own buffer, exactly the elimination the type
+system was supposed to make possible once it could express "this pointer
+is provably aligned". `dma_prepare_tx` (a CLEAN/writeback, safe on any
+alignment per this file's own established understanding) intentionally
+still accepts any raw pointer.
+
+**Measured first, exactly like Stage 1 and the issue #15 cast-audit-
+boundary work**: requiring alignment on all THREE builtins uniformly was
+tried first and immediately broke every single STM32 example, because
+`examples/common_stm32/uart.tkb`'s own TX-DMA `uart_puts` implementation
+(included in literally every STM32 build) calls `dma_prepare_tx` on a
+ring-buffer byte offset that is never aligned to 32 by construction.
+Re-confirmed directly from this file's own already-recorded reasoning
+(the sdmmc.tkb comment already explained TX/CLEAN doesn't need it) rather
+than re-deriving it from scratch -- scoping the requirement to
+`dma_prepare_rx`/`dma_finish_rx` only immediately fixed it.
+
+**Real blast radius, found by iterating `make check` to a fixed point**
+(same discipline as every other feature this session): six real call
+sites needed fixing, each a genuine instance of a small number of
+recurring patterns, not six unrelated bugs:
+- **Explicit `: *u8` annotations discarding an already-provable
+  alignment** -- `examples/common_stm32/eth.tkb`'s `let buf: *u8 =
+  eth_rx_bufs + ptr_i * ETH_BUF_SIZE;` and `sdmmc.tkb`'s own `let bounce:
+  *u8 = disk_read_bounce;` both had a RHS that would have inferred
+  `*align(32) u8` on its own, truncated right back down by a stale
+  annotation -- the exact "explicit type beats inference" trap already
+  seen with `affine_escape_via_index.tkb`'s `idx` this session. Fixed by
+  writing the annotation as `*align(32) T` (not by removing it, since
+  these are explicit `let` bindings elsewhere in the same functions).
+- **A function's own declared RETURN type is a boundary** -- `eth.tkb`'s
+  `rx_desc_ptr`/`tx_desc_ptr` returned plain `*EthDmaDesc` even though
+  their bodies (`eth_rx_descs + i`) already proved alignment internally;
+  the proof does not cross a function boundary unless the signature says
+  so, same rule as everywhere else in this type system. Fixed by
+  declaring `-> *align(32) EthDmaDesc`.
+- **An unnecessary `as *u8` cast discarding the proof for no reason** --
+  `desc as *u8` (twice in `eth.tkb`) cast a genuinely `*align(32)
+  EthDmaDesc` value down to a plain pointer immediately before passing it
+  to `dma_finish_rx`, which only needed SOME pointer type, not
+  specifically `*u8` -- `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx`
+  destructure whatever pointee type they're given. Fixed by passing
+  `desc` directly, no cast at all.
+- **Genuinely unaligned buffers with no prior driving reason to be
+  aligned** -- `examples/fatfs/fatfs.tkb`'s in-memory `disk` array and
+  `examples/http_server_sdcard_install/http_server_sdcard_install.tkb`'s
+  `staging` array (the harness's OpenOCD-injected image buffer) had never
+  needed `align(32)` before (no real DMA touched the former; the latter's
+  own `dma_finish_rx` call is what surfaced the need). Fixed by adding
+  `align(32)` directly -- both are driver/test-owned globals with no
+  caller-supplied-buffer complication.
+- **The real cascade**: `examples/common/fat12.tkb`'s `fat_buf`/
+  `root_dir_buf` (globals) and three separate local `sector_buf`/
+  `zero_buf` declarations all needed `align(32)` -- these are the buffers
+  that actually reach `disk_read`/`disk_write` through
+  `examples/fatfs_sdcard/fatfs_sdcard.tkb`'s and `examples/
+  http_server_sdcard/http_server_sdcard.tkb`'s `mem_block_read`/
+  `mem_block_write` adapters, both updated to require `*align(32) u8` on
+  their own `buf` parameter (uniformly for both read and write, even
+  though `disk_write`'s own `buf` doesn't strictly need it either --
+  matching alignment on both keeps the adapter's contract simple, costs
+  nothing once the backing buffers are aligned anyway). `examples/
+  fatfs/fatfs.tkb`'s OWN in-memory `mem_block_read`/`mem_block_write`
+  needed NO signature change: an aligned argument widens into its
+  existing plain `*u8` parameters for free. `examples/sdcard/sdcard.tkb`
+  (the raw-block test, bypassing fat12.tkb entirely) has its own local
+  `rbuf` (fed to `disk_read`) that needed `align(32)` directly; its `wbuf`
+  (fed only to `disk_write`) did not.
+
+**Two real bugs found in Stage 1's own implementation, only by trying to
+retrofit real code, not by further unit testing of the feature in
+isolation**:
+- The `desc as *u8` fix above (cast FROM `*align(32) EthDmaDesc`) exposed
+  that `infer_expr`'s `Cast` case had no `TAlignedPtr` branch on the
+  SOURCE side at all -- it fell through to the catch-all (integer-cast-
+  oriented) branch, which happened to produce the right VALUE by
+  accident (none of that branch's checks fire for a plain-pointer
+  target) but for the wrong reason, and would have mishandled any other
+  target. Fixed by extending the existing `TPtr _ ->` cast-source branch
+  to `TPtr _ | TAlignedPtr _ ->`, sharing its widening rules exactly.
+- That fix's FIRST version called plain `unify src_ty tgt` to check an
+  `*align(N) T` source against an `*align(M) T` target -- immediately
+  broke `examples/common/fat12.tkb`'s `root_dir_buf as *align(32) u8`
+  (`"cannot unify DirEntry with u8"`), because `unify` also enforces the
+  POINTEE type stays identical, which is wrong for an explicit cast (a
+  REINTERPRET across pointee types, e.g. a `DirEntry` array reinterpreted
+  as raw bytes, is exactly what `as *U` is supposed to allow -- same as
+  any ordinary `*T as *U`). Fixed by checking only the alignment NUMBER
+  directly (source's own N must be a multiple of the target's) instead of
+  calling `unify`, leaving the pointee type free to change. This same
+  fix pass also caught that its own FIRST draft had silently dropped the
+  `unsafe_depth` check entirely (copy-paste from the pointer-source-cast
+  logic lost the `if !unsafe_depth > 0 then ...` wrapper) -- caught
+  immediately by one of Stage 1's own existing unit tests
+  ("unsafe marks an unproven cast to *align(N) T") failing, not by new
+  code added for Stage 2, a concrete example of why the existing test
+  suite earns its keep across supposedly-unrelated later changes.
+- **A second new proof source, not anticipated in the Stage 1 plan**:
+  `eth_rx_descs + i` (`eth.tkb`'s `rx_desc_ptr`) needed a genuinely NEW
+  rule, not just fixing an existing one -- `EthDmaDesc` is `align(32)`,
+  so GEP's own per-element stride (`sizeof(EthDmaDesc)`, itself tail-
+  padded to a multiple of 32 by that struct's own `align(32)`) already
+  guarantees alignment for ANY integer `i`, not just an `i` provably a
+  multiple of 32 in BYTES the way `provable_multiple_of` alone could see.
+  Added `elem_stride_aligned` (queries `senv`'s existing struct-align
+  bookkeeping in `type_inf.ml`, `struct_alignments` in `llvm_gen.ml`) as
+  a second, independent proof source alongside `provable_multiple_of` in
+  both `BinOp (Add | Sub, ...)` cases (both files, sync rule).
+
+**Verification**: `make test` (530, 3 new + 1 fixed-in-place from the
+DMA-signature change breaking two pre-existing DMA-builtin tests that
+predate this whole feature), `make check` (78/78, full STM32 cross-build
+of every retrofitted file included), `make langcheck` all pass.
+**Explicitly NOT verified on real hardware in this session** -- this
+project's own established practice (see the "QEMU (TCG mode)... does not
+model caches" principle elsewhere in this file) is that cache-coherency
+changes exactly like this one can ONLY be confirmed on real silicon, and
+this exact codepath has a documented HISTORY of a real HardFault that
+QEMU could never have caught. `examples/sdcard`/`examples/fatfs_sdcard`
+are exercised by `make hwcheck`; `examples/http_server_sdcard` by `make
+hwcheck-net` -- running these against a real STM32F746G-DISCOVERY board
+with a real SD card is the one remaining step before trusting this
+change, and was left to the user to run in this environment (no hardware
+attached to this container).
+
+**Files**: `lib/type_inf.ml` (Cast's `TAlignedPtr` source handling and
+its two bugs above; `elem_stride_aligned`; the `dma_prepare_rx`/
+`dma_finish_rx`-only alignment requirement); `lib/llvm_gen.ml`
+(`elem_stride_aligned`'s codegen-side mirror); `test/test_takibi.ml`
+(2 pre-existing DMA-builtin tests updated for the new signature, 1 new
+test for the tx-vs-rx/finish asymmetry); `examples/common/fat12.tkb`
+(`fat_buf`/`root_dir_buf`/`sector_buf` x3/`zero_buf` all `align(32)`,
+two `root_dir_buf as *align(32) u8` casts); `examples/common_stm32/
+eth.tkb` (`rx_desc_ptr`/`tx_desc_ptr` return type, two `desc` locals,
+two unnecessary `as *u8` casts removed); `examples/common_stm32/
+sdmmc.tkb` (`disk_read`'s signature and body, `disk_read_bounce` removed
+entirely); `examples/fatfs_sdcard/fatfs_sdcard.tkb` + `examples/
+http_server_sdcard/http_server_sdcard.tkb` (`mem_block_read`/
+`mem_block_write` signatures); `examples/fatfs/fatfs.tkb` (`disk`
+array `align(32)`); `examples/http_server_sdcard_install/
+http_server_sdcard_install.tkb` (`staging` array `align(32)`); `examples/
+sdcard/sdcard.tkb` (`rbuf` local `align(32)`); `SPEC.md` (element-stride
+proof source documented, Stage 2 scope note updated).

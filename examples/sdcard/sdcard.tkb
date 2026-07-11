@@ -64,7 +64,10 @@ fn app_main() {
         }
 
         for s: u32 in 0..<TEST_SECTORS {
-            let mut rbuf: [u8; 512];
+            // align(32): disk_read (GitHub issue #102 Stage 2) now
+            // requires a PROVEN *align(32) u8 pointer -- it no longer
+            // stages through its own internal bounce buffer.
+            let mut rbuf: [u8; 512] align(32);
             if (disk_read(s, rbuf) == 0) {
                 let mut sector_ok: bool = true;
                 for i: usize in 0..<512 {

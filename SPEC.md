@@ -185,16 +185,26 @@ turn as many potential traps as possible into compile-time errors instead:
     aligned `*align(K) T`) used where `*align(N) T` is required is a
     compile error pointing at the proof sources above and `unsafe` as the
     escape hatch.
-  - **Scope of this first increment**: only a LOCAL or GLOBAL variable's
-    own `&`/bare-name proof is a source -- a struct field of an
-    `align(N)`-declared struct type is not (yet) automatically proven,
-    even though every instance is in fact that aligned. See
-    `examples/align_ptr_proof/align_ptr_proof.tkb` for a worked example
-    (mirrors `examples/common_stm32/eth.tkb`'s real DMA descriptor-ring
-    pointer arithmetic) and HISTORY.md's issue #102 entry for why real
-    drivers (`examples/common_stm32/sdmmc.tkb`'s `dma_prepare_rx`/
-    `dma_finish_rx`) are not yet retrofitted onto this type -- a
-    deliberately separate, later decision.
+  - **Element-stride proof** (Stage 2): `aligned_array + i` for ANY
+    integer `i` (not just a provable multiple of N) stays `*align(N) T`
+    when the pointee is a struct declared with its own `align(M)` where
+    `M` is a multiple of N -- struct `align(M)` tail-pads `sizeof` to `M`
+    (see "Structs" above), so GEP's per-element stride is itself always a
+    multiple of N regardless of the index. This is what proves
+    `eth_rx_descs + i` in `examples/common_stm32/eth.tkb`'s real DMA
+    descriptor ring (`EthDmaDesc` is `align(32)`), distinct from the
+    literal/named-constant offset proof above (which reasons about a byte
+    OFFSET, not an element TYPE's own size).
+  - **Scope still open**: a struct FIELD read through an `align(N)`
+    struct is not automatically proven (only the struct's own instances/
+    array elements are); general symbolic congruence beyond literal/
+    named-constant multipliers and this element-stride rule remains out
+    of scope. See `examples/align_ptr_proof/align_ptr_proof.tkb` for a
+    worked example and HISTORY.md's issue #102 entries for the full
+    design history, including Stage 2's retrofit of
+    `examples/common_stm32/sdmmc.tkb`'s `disk_read` (no longer needs its
+    own bounce buffer) and every real caller reaching it through
+    `examples/common/fat12.tkb`.
 - **Undetermined types are a compile error, not a silent `i32` default.**
   If nothing pins a bare `let`/`let mut`'s type (no annotation, and no
   later use that determines it), the compiler rejects it rather than

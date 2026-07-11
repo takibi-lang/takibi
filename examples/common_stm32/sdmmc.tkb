@@ -194,13 +194,6 @@ let mut card_rca: u32;  // relative card address, captured once at CMD3
 
 let mut sdmmc1_irq_flag: io u32; // set by SDMMC1_IRQHandler, cleared by the waiter
 
-// disk_read's own cache-line-aligned staging buffer -- see disk_read's
-// comment for why the DMA destination cannot safely be the caller's own
-// `buf` in general (local-variable alignment is not supported by this
-// language at all, so a stack-local caller buffer, exactly what
-// examples/sdcard/sdcard.tkb passes, has no alignment guarantee).
-let mut disk_read_bounce: [u8; 512] align(32);
-
 fn enable_sdmmc1_irq() {
     let nvic_iser1: *io u32 = 0xE000E104; // NVIC_ISER1, IRQ32-63
     *nvic_iser1 = *nvic_iser1 | (1 << 17); // IRQ49 = SDMMC1 (49 - 32 = bit 17)
@@ -477,49 +470,36 @@ fn sd_block_arg(sector: u32) -> u32 {
 // engine read it), which prompted revisiting this dropped disk_read
 // attempt with cache maintenance specifically in view.
 //
-// DMA does NOT target the caller's own `buf` directly. `dma_finish_rx`
-// (like `dma_prepare_rx`) is an INVALIDATE, not a clean -- it discards
-// whatever is in every 32-byte cache line the [ptr, ptr+len) range
-// touches, rounding OUTWARD to line boundaries. At the time this was
-// found, this language's local variables could not be `align(32)` at all
-// (since fixed, GitHub issue #27), so a caller's own stack buffer (exactly
-// what examples/sdcard/sdcard.tkb passes) had no alignment guarantee;
-// invalidating an unaligned range can silently discard unrelated live
-// stack data (a saved register, a return address) sharing a boundary
-// cache line -- confirmed on real hardware as a genuine HardFault the
-// first time this was tried directly against sdcard.tkb's buffers,
-// distinct from and found only after fixing the historical DMA2_S3NDTR
-// bug's own symptom below. `disk_read_bounce` (an `align(32)`, driver-
-// owned global, always safe to invalidate on its own) is the actual DMA
-// destination; the 512 bytes are copied into the caller's `buf` only
-// after `dma_finish_rx` has run, so `buf` itself is never touched by any
-// cache-maintenance call and can be any alignment. **Deliberately kept
-// even after issue #27 fixed local-variable alignment**: `buf: *u8` is a
-// raw pointer, and this language has no way to encode "this pointer is
-// N-byte aligned" as a provable, function-boundary-crossing property (the
-// pointer analogue of a refined integer's `{lo..<hi as base}`) -- so
-// `disk_read`'s only two options are trust every past and future caller
-// to remember an unenforced alignment convention (fragile: examples/
-// common/fat12.tkb's fat_buf/root_dir_buf, reached here via
-// examples/fatfs_sdcard's mem_block_read adapter, are NOT currently
-// aligned, and nothing would catch a future caller getting this wrong),
-// or keep the bounce buffer, which is safe unconditionally. Revisit only
-// if this language ever gains a provable-pointer-alignment type -- tracked
-// as its own future topic, GitHub issue #102. disk_write has no
-// equivalent bounce buffer: `dma_prepare_tx` is a CLEAN (writeback), which
-// cannot discard data even when its rounding spills into an unrelated
-// live cache line, so `buf` there is safe to use
-// directly regardless of alignment.
-fn disk_read(sector: u32, buf: *u8) -> i32 {
+// DMA targets the caller's own `buf` directly. `dma_finish_rx` (like
+// `dma_prepare_rx`) is an INVALIDATE, not a clean -- it discards whatever
+// is in every 32-byte cache line the [ptr, ptr+len) range touches,
+// rounding OUTWARD to line boundaries; invalidating an unaligned range can
+// silently discard unrelated live data sharing a boundary cache line --
+// confirmed on real hardware as a genuine HardFault the first time this
+// was tried directly against an unaligned stack buffer (examples/sdcard/
+// sdcard.tkb's own buffer, before it was given align(32) -- see below).
+//
+// **GitHub issue #102 Stage 2: `buf: *align(32) u8` closes this for real**,
+// replacing the `disk_read_bounce` driver-owned staging buffer + extra
+// copy this function used to need instead (see git history / HISTORY.md
+// for that version): the type system now REQUIRES every caller to prove
+// alignment before this function will even compile against it, rather
+// than trusting an unenforced convention. Every real caller reaching this
+// function through examples/common/fat12.tkb's fat_buf/root_dir_buf/
+// sector_buf/zero_buf, or examples/sdcard/sdcard.tkb's own `rbuf`, is now
+// align(32) itself. disk_write needs no equivalent: `dma_prepare_tx` is a
+// CLEAN (writeback), which cannot discard data even when its rounding
+// spills into an unrelated live cache line, so its own `buf` stays safe
+// to use directly regardless of alignment.
+fn disk_read(sector: u32, buf: *align(32) u8) -> i32 {
     if (disk_status() != 0) {
         return -1;
     }
-    let bounce: *u8 = disk_read_bounce;
-    dma_prepare_rx(bounce, 512); // invalidate stale/dirty cache lines before DMA writes into the bounce buffer
+    dma_prepare_rx(buf, 512); // invalidate stale/dirty cache lines before DMA writes into buf
 
     // Arm DMA + MASK + DLEN BEFORE sending the command -- same ChibiOS
     // ordering as disk_write, see this file's header comment for why.
-    sd_dma_config(bounce, 0); // peripheral -> memory
+    sd_dma_config(buf, 0); // peripheral -> memory
 
     *SDMMC_DTIMER = 0xFFFFFFFF;
     *SDMMC_DLEN = 512;
@@ -548,11 +528,7 @@ fn disk_read(sector: u32, buf: *u8) -> i32 {
         return -1;
     }
 
-    dma_finish_rx(bounce, 512); // invalidate again so the CPU sees DMA's fresh data, not a stale cached copy
-
-    for i: isize in 0..<512 {
-        buf[i] = bounce[i];
-    }
+    dma_finish_rx(buf, 512); // invalidate again so the CPU sees DMA's fresh data, not a stale cached copy
     return 0;
 }
 
