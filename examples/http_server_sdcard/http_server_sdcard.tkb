@@ -125,14 +125,14 @@ fn build_body_from_sdcard() -> isize {
     // global `*u8` string-literal precedent in this codebase (globals
     // with literal initializers are integer-only, see const_global.tkb).
     let sd_file_name: *u8 = "INDEX   TXT";
-    let mut fp: FatFile;
-    if (fat_open(&fp, sd_file_name, FA_READ) != 0) {
+    let fp: *FatFile = fat_open(sd_file_name, FA_READ);
+    if ((fp as usize) == 0) {
         let msg: *u8 = "404: INDEX.TXT not found on SD card.\n";
         return copy_str(html_body, msg);
     }
     let mut br: u32 = 0;
-    fat_read(&fp, html_body, 512, &br);
-    fat_close(&fp);
+    fat_read(fp, html_body, 512, &br);
+    fat_close(fp);
     return br as isize;
 }
 

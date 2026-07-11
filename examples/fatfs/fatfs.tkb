@@ -141,12 +141,12 @@ fn app_main() {
     // there.
     load_seed_from_host();
     fat_mount();
-    let mut seed_fp: FatFile;
-    if (fat_open(&seed_fp, "SEED    TXT", FA_READ) == 0) {
+    let seed_fp: *FatFile = fat_open("SEED    TXT", FA_READ);
+    if ((seed_fp as usize) != 0) {
         let mut seed_buf: [u8; 128];
         let mut seed_br: u32 = 0;
-        fat_read(&seed_fp, seed_buf, 128, &seed_br);
-        fat_close(&seed_fp);
+        fat_read(seed_fp, seed_buf, 128, &seed_br);
+        fat_close(seed_fp);
         uart_puts("seed read: ");
         uart_print_bytes(seed_buf, seed_br);
     } else {
@@ -177,12 +177,12 @@ fn app_main() {
     // Phase 3: read HELLO.TXT back in the same process -- a same-process
     // round trip (takibi writes, takibi reads), independent of Phase 1's
     // external-interop check and Phase 4's external mtools check below.
-    let mut read_fp: FatFile;
-    if (fat_open(&read_fp, hello_name, FA_READ) == 0) {
+    let read_fp: *FatFile = fat_open(hello_name, FA_READ);
+    if ((read_fp as usize) != 0) {
         let mut read_buf: [u8; 64];
         let mut read_br: u32 = 0;
-        fat_read(&read_fp, read_buf, 64, &read_br);
-        fat_close(&read_fp);
+        fat_read(read_fp, read_buf, 64, &read_br);
+        fat_close(read_fp);
         uart_puts("read-back HELLO.TXT: ");
         uart_print_bytes(read_buf, read_br);
     } else {

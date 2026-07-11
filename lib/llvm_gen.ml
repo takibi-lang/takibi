@@ -3048,6 +3048,15 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable =
         const_inttoptr (const_of_int64 (usize_lltype ()) i true) (pointer_type context)
     | IntLit i, _ ->
         const_of_int64 (ltype_of_ast ft) i true
+    | BoolLit b, TypeBool ->
+        (* Same i1 constant gen_expr's own BoolLit case builds (see that
+           case above) -- gen_global's compile-time constant folding never
+           exercised a bare `true`/`false` global initializer before
+           (every prior affine-token-style global was an integer/pointer),
+           so this arm was simply missing rather than deliberately
+           unsupported. Found while adding examples/common/fat12.tkb's
+           `let mut ff_is_open: bool = false;`. *)
+        const_int (ltype_of_ast ft) (if b then 1 else 0)
     | EnumVariant (ename, _), TypeNamed target_name when ename = target_name ->
         let underlying = match Hashtbl.find_opt enum_underlying ename with
           | Some underlying -> underlying
