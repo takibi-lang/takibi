@@ -1,0 +1,50 @@
+// Proof-of-concept for GitHub issue #102 ("Provable pointer alignment"):
+// *align(N) T, the pointer analogue of a refined integer's
+// {lo..<hi as base}. Deliberately small and self-contained -- built to
+// answer one question (does the type actually work end-to-end: proof
+// sources, subtyping, pointer arithmetic, --forbid-trap) before deciding
+// whether to retrofit any real driver onto it. See HISTORY.md's issue
+// #102 entry.
+//
+// Mirrors the actual motivating shape, examples/common_stm32/eth.tkb's
+// DMA descriptor ring: `eth_rx_bufs + eth_rx_cur * ETH_BUF_SIZE`, an
+// align(32)-declared buffer array sliced into fixed-size SLOTS by pointer
+// arithmetic whose step (SLOT_SIZE) is a compile-time constant multiple
+// of 32 -- provably aligned REGARDLESS of the (runtime, unbounded) slot
+// index. touch_slot/read_slot require *align(32) u8, the same guarantee
+// examples/common_stm32/sdmmc.tkb's disk_read needs (and currently works
+// around with a driver-owned bounce buffer instead) to safely call
+// dma_prepare_rx/dma_finish_rx directly on a caller-supplied buffer --
+// see that file's own comment. This proof-of-concept does not touch
+// sdmmc.tkb/eth.tkb: whether to retrofit either onto *align(N) T is a
+// separate, later decision (Stage 2, deliberately not part of this pass).
+
+let SLOT_SIZE:  isize = 32;
+let SLOT_COUNT: isize = 4;
+
+let mut bufs: [u8; 128] align(32);  // SLOT_COUNT * SLOT_SIZE bytes
+
+fn touch_slot(p: *align(32) u8, v: u8) {
+    p[0] = v;
+}
+
+fn read_slot(p: *align(32) u8) -> u8 {
+    return p[0];
+}
+
+fn app_main() {
+    let mut i: isize = 0;
+    while (i < SLOT_COUNT) {
+        touch_slot(bufs + i * SLOT_SIZE, (i as u8) + 10);
+        i = i + 1;
+    }
+
+    i = 0;
+    while (i < SLOT_COUNT) {
+        uart_print(read_slot(bufs + i * SLOT_SIZE));
+        uart_puts(" ");
+        i = i + 1;
+    }
+    uart_puts("\r\n");
+    uart_puts("done\r\n");
+}

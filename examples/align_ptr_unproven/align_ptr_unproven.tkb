@@ -1,0 +1,18 @@
+// This file is expected to produce a compile error.
+// A plain, unproven pointer cannot be passed where *align(N) T is
+// required -- alignment must come from `&x` on an align(N) variable, a
+// literal address, provable pointer arithmetic (aligned_ptr + a
+// compile-time-constant multiple of N), or an explicit
+// `unsafe { ... as *align(N) T }` (GitHub issue #102 -- see HISTORY.md).
+// See SPEC.md's "*align(N) T" section.
+fn touch(p: *align(32) u8) {
+    p[0] = 1;
+}
+
+fn caller(buf: *u8) {
+    touch(buf);
+}
+
+fn app_main() -> i32 {
+    return 0;
+}

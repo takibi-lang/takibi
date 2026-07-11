@@ -34,6 +34,15 @@ type ty =
        TIsize-based refinements. *)
   | TSlice of ty * int    (* []T / [T; N..] -- fat pointer (ptr + usize len);
                              int = compile-time minimum length (0 = unknown) *)
+  | TAlignedPtr of int * ty
+    (* *align(N) T -- a pointer PROVABLY a multiple of N bytes (GitHub issue
+       #102). The pointer analogue of TRefinedInt: N is a compile-time
+       constant, never a unification variable (enforced by construction,
+       same discipline as TRefinedInt's own lo/hi/base). Subtyping (see
+       unify below) mirrors TRefinedInt's one-directional pattern exactly:
+       *align(N) T flows freely into a plain *T (widening) or a
+       *align(K) T where K divides N; a plain *T or an insufficiently
+       aligned pointer flowing into a *align(N) T position is rejected. *)
 
 and tv =
   | Unbound of int  (* unresolved unification variable *)
@@ -68,6 +77,7 @@ let rec to_string t =
   | TArray (t, n) -> Printf.sprintf "[%s; %d]" (to_string t) n
   | TSlice (t, 0) -> Printf.sprintf "[]%s" (to_string t)
   | TSlice (t, n) -> Printf.sprintf "[%s; %d..]" (to_string t) n
+  | TAlignedPtr (n, t) -> Printf.sprintf "*align(%d) %s" n (to_string t)
   | TFun (ps, r) ->
       Printf.sprintf "(%s) -> %s"
         (String.concat ", " (List.map to_string ps)) (to_string r)
@@ -88,6 +98,7 @@ let rec occurs rv = function
   | TIo    t                   -> occurs rv t
   | TArray (t, _)              -> occurs rv t
   | TSlice (t, _)              -> occurs rv t
+  | TAlignedPtr (_, t)         -> occurs rv t
   | TStruct _                  -> false
   | _                          -> false
 
@@ -156,6 +167,28 @@ let rec unify t1 t2 =
         "cannot pass unproven %s where {%d..<%d} is required; \
          use if (v >= %d && v < %d) { ... } to narrow the range"
         (to_string t1) lo hi lo hi))
+  (* Pointer alignment (GitHub issue #102): same one-directional subtyping
+     shape as TRefinedInt just above. *align(N) T* proves the address is a
+     multiple of N; a stricter proof (N a multiple of the required K) or a
+     widening to a plain, unqualified *T* is always fine. An UNPROVEN plain
+     pointer (or one proven to a non-multiple alignment) flowing into an
+     *align(N) T* position is rejected with a hint toward this type's three
+     proof sources (see infer_expr's Cast/AddrOf/BinOp handling in
+     type_inf.ml) rather than the generic "cannot unify" fallback. *)
+  | TAlignedPtr (n1, t1), TAlignedPtr (n2, t2) ->
+      if n1 mod n2 <> 0 then
+        raise (Unify_error (Printf.sprintf
+          "cannot pass *align(%d) %s where *align(%d) %s is required \
+           (%d is not a multiple of %d)"
+          n1 (to_string t1) n2 (to_string t2) n1 n2));
+      unify t1 t2
+  | TAlignedPtr (_, t1), TPtr t2 -> unify t1 t2  (* widening to a plain pointer is always OK *)
+  | TPtr t1, TAlignedPtr (n, t2) when t1 = repr t2 ->
+      raise (Unify_error (Printf.sprintf
+        "cannot pass unproven %s where *align(%d) %s is required; use `&x` \
+         on an align(%d) variable, a literal address, pointer arithmetic by \
+         a multiple of %d, or `unsafe { ... as *align(%d) %s }` to mark it"
+        (to_string (TPtr t1)) n (to_string t2) n n n (to_string t2)))
   | TStruct s1, TStruct s2 ->
       if s1 <> s2 then
         raise (Unify_error (Printf.sprintf "struct type mismatch: %s vs %s" s1 s2))
@@ -189,6 +222,7 @@ let rec of_ast = function
   | Ast.TypeRefined (lo, hi, base) -> TRefinedInt (lo, hi, of_ast base)
   | Ast.TypeSlice (t, n) -> TSlice (of_ast t, n)
   | Ast.TypeBorrow t | Ast.TypeSink t -> of_ast t
+  | Ast.TypeAlignedPtr (n, t) -> TAlignedPtr (n, of_ast t)
 
 (* None -> fresh unification variable *)
 let of_ast_opt = function
@@ -217,6 +251,7 @@ let rec to_ast t =
   | TStruct s     -> Ast.TypeNamed s
   | TRefinedInt (lo, hi, base) -> Ast.TypeRefined (lo, hi, to_ast base)
   | TSlice (t, n) -> Ast.TypeSlice (to_ast t, n)
+  | TAlignedPtr (n, t) -> Ast.TypeAlignedPtr (n, to_ast t)
   | TVar { contents = Unbound _ } -> Ast.TypeI32
   | TVar { contents = Link _ }    -> assert false
 

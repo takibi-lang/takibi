@@ -403,6 +403,8 @@ base_type_expr:
   | USIZE_TYPE { TypeUsize }
   | IO         type_expr { TypeIo  $2 }
   | TIMES      type_expr { TypePtr $2 }
+  | TIMES ALIGN LPAREN n = INT RPAREN t = type_expr
+    { TypeAlignedPtr (narrow_int64 $symbolstartpos "alignment" n, t) }
   | LBRACKET t = type_expr SEMI n = array_size RBRACKET { TypeArray (t, n) }
   | LBRACKET RBRACKET t = type_expr { TypeSlice (t, 0) }
     (* []T -- slice with no compile-time minimum length *)

@@ -5185,6 +5185,11 @@ need shows up -- not as a "let's go build it" backlog item.
 **Files**: none (issue filed on GitHub only, no code or doc changes this
 session beyond this entry).
 
+**Superseded**: see the later "`*align(N) T` -- Provable Pointer
+Alignment Implemented" entry near the end of this file for the actual
+Stage 1 implementation, once a second driving discussion (with Fable)
+made the case for building the type now rather than continuing to wait.
+
 ## GitHub Issue #103: `IntLit` Literals Carry No Value Into `unify()` -- Systemic Alternative to Issue #100's Per-Call-Site Fix, Tried and Reverted
 
 Issue #100's actual fix (`check_literal_fits_refined`, see that entry
@@ -6195,3 +6200,151 @@ both `Cast` match arms); `test/test_takibi.ml` (5 new unit tests);
 `examples/affine_escape_via_index/affine_escape_via_index.tkb`
 (`slot_lease`'s cast wrapped in `unsafe`, with a comment explaining why
 that's the intended end state, not a placeholder).
+
+## GitHub Issue #102: `*align(N) T` -- Provable Pointer Alignment Implemented (Stage 1, Deliberately Staged)
+
+The type this project's design principle has been pointing at since
+`examples/common_stm32/sdmmc.tkb`'s bounce-buffer workaround was written
+(see this file's earlier "Filed, Not Started" entry): a pointer
+analogue of a refined integer's `{lo..<hi as base}`, proving a pointer is
+N-byte aligned instead of just asserting it by convention. Picked up
+again in a design discussion with Fable (issues #15 and #102 together,
+alongside the RTOS-timing question of what to build next) and PLANNED
+before implementation (`EnterPlanMode`, given the size -- this session's
+prior features, `sink` and the cast-audit-boundary, had already
+established both the pattern for how a feature like this should be built
+in this codebase and the discipline of measuring blast radius before
+trusting a design).
+
+**Explicitly staged, matching the plan's own scope boundary**: Stage 1
+(this entry) is the type itself -- parser through codegen, proof rules,
+a self-contained demo, verified to have ZERO effect on existing code.
+Stage 2 -- retrofitting `dma_prepare_rx`/`dma_finish_rx`/`dma_prepare_tx`
+to actually REQUIRE `*align(32)` and removing `sdmmc.tkb`'s
+`disk_read_bounce` workaround -- is explicitly NOT part of this pass; the
+plan named 15+ existing call sites across `eth.tkb`/`sdmmc.tkb`/
+`uart.tkb`/`fatfs.tkb`/`http_server_sdcard_install.tkb` as needing their
+own measurement first, the same "looked cheap, measured larger" risk the
+issue #15 work hit today.
+
+**Design**: `*align(N) T` (Zig-style spelling, agreed with the user/
+Fable in advance), congruence-domain semantics scoped to the actual need
+(provably a multiple of N, not a general `x = c mod m` domain). Four
+proof sources: `&x`/an array's own bare name when the variable was
+declared `align(N)` (issue #27's existing mechanism); a literal address
+cast, checked directly against its own value; pointer arithmetic
+(`aligned_ptr + offset`) when `offset` is provably a multiple of N;
+`unsafe { ... as *align(N) T }` for everything else. Subtyping mirrors
+`TRefinedInt`'s existing one-directional pattern in `lib/types.ml`
+exactly (widen to plain `*T` always OK; `*align(K) T` OK when `K` divides
+`N`; an unproven or insufficiently-aligned pointer flowing the other way
+is rejected with a message pointing at the proof sources and `unsafe`).
+
+**Implementation footprint**: `Ast.TypeAlignedPtr`/`Types.TAlignedPtr`,
+structurally parallel to `TypePtr`/`TPtr` (not a wrapper like
+`TypeBorrow`/`TypeSink`, since `align(N)` modifies the pointer sigil
+itself per the agreed syntax) -- integrated into `types.ml`'s `unify`
+following `TRefinedInt`'s own template line-for-line. Erases to a plain
+`pointer_type context` everywhere `TypePtr` already does in
+`type_layout.ml`/`llvm_gen.ml` (size/align, `ltype_of_ast`,
+`ditype_of_ast`, `coerce`, `abi_type`) -- no runtime representation, same
+treatment `sink`/`borrow` got earlier this session. The proof engine
+(`lib/type_inf.ml`): `provable_multiple_of` (a literal or
+`Const_env`-resolvable named constant is a multiple of itself; `_ * K` or
+`K * _` a multiple of K regardless of the other operand; a sum/difference
+of two provable multiples a multiple of their gcd -- deliberately not a
+general symbolic solver); a two-tier `var_align_bytes` table (global
+baseline populated once in `infer_program`, reseeded at the start of
+every `infer_func` call and updated incrementally as that function's own
+`align(N)` locals are processed, so a local correctly shadows an aligned
+global of the same name and no function's locals leak into the next);
+the literal-or-`unsafe` cast check (`check_aligned_ptr_cast_needs_unsafe`,
+built as a structural sibling to the issue #15 affine-cast check); and
+`BinOp (Add | Sub, ...)` cases threading `provable_multiple_of` through
+pointer arithmetic, placed BEFORE the existing plain-`TPtr` cases (an
+`*align(N) T` operand needs its own decision -- keep the proof or decay --
+that a plain pointer's fixed "always return t1 unchanged" rule doesn't
+make).
+
+**Gaps found only by building an actual codegen test, not by reading the
+type-checker alone** -- exactly why `expect_codegen_ok` tests (not just
+`expect_ok`/`expect_type_error`) were written for this feature from the
+start:
+- `lib/llvm_gen.ml`'s own `BinOp (Add | Sub, ...)` codegen (distinct from
+  type_inf.ml's copy -- this codebase's established "sync rule" duplication
+  between the two) pattern-matched `TypePtr` specifically for deciding
+  GEP-vs-integer-add. An `*align(N) T` value reaching this code fell
+  through to the INTEGER-arithmetic branch instead (LLVM `add` on an
+  actual `ptr`-typed SSA value) -- caught by the exact codegen test
+  mirroring `eth_rx_bufs + eth_rx_cur * ETH_BUF_SIZE`, not by any of the
+  purely-type-level tests, which cannot see codegen-only bugs by
+  construction. Fixed by adding `TypeAlignedPtr` alongside every
+  `TypePtr` match arm in both the Add and Sub cases, plus a shared
+  `ptr_result_ty` helper mirroring `provable_multiple_of` on the codegen
+  side (same sync-rule duplication the existing `TypeRefined` arithmetic
+  already lives with).
+- `Index`/`AssignIndex` (`p[i]`, `p[i] = v`) needed the identical
+  `TypeAlignedPtr` treatment in BOTH `type_inf.ml` (the type-checking
+  side, "index operator on non-array/pointer type") and `llvm_gen.ml`
+  (codegen's own, separate `locals`/`global_vars` pattern matches, "is
+  not an array or pointer") -- found the same way, by the codegen test's
+  `p[0] = 1;` line failing first at the type-checking layer, then again
+  (after that fix) at the codegen layer, confirming both needed
+  independent fixes rather than one covering the other.
+- **A real regression in ALREADY-WORKING code, found only by running the
+  FULL suite (not just the new feature's own tests)**: once `eth_rx_bufs`
+  (an `align(32)`-declared global in `examples/common_stm32/eth.tkb`)
+  started decaying to `*align(32) u8` instead of plain `*u8`, the
+  existing `dma_prepare_rx`/`dma_finish_rx`/`dma_prepare_tx` compiler
+  builtins -- whose own argument type-check required exactly `TPtr _` --
+  started rejecting `eth.tkb`'s own `dma_finish_rx(eth_rx_bufs +
+  eth_rx_cur * ETH_BUF_SIZE, ...)` call, breaking `net_echo`/
+  `arp_reply`/`icmp_echo`'s STM32 builds. This is exactly the kind of
+  gap `make check`'s full-suite pass count exists to catch (per the
+  plan's own verification section) -- found there, not anywhere in the
+  new feature's own tests, since none of them happened to route an
+  aligned pointer through one of these three builtins. Fixed by widening
+  that one check to `TPtr _ | TAlignedPtr _ -> ()`: accepting an aligned
+  pointer as a valid "raw pointer" argument requires no alignment
+  reasoning on the builtins' own part (Stage 2's job, not this one's) --
+  it only needed to stop rejecting a strictly MORE-informative pointer
+  type than what it already accepted.
+
+**Verification**: `examples/align_ptr_proof/align_ptr_proof.tkb` --
+mirrors `eth_rx_bufs + eth_rx_cur * ETH_BUF_SIZE` exactly (an
+`align(32)` buffer array, slots addressed by pointer arithmetic with a
+NAMED constant step, `SLOT_SIZE = 32`, resolved through `Const_env`, the
+same mechanism the real driver's `ETH_BUF_SIZE` would use), passed to a
+function requiring `*align(32) u8`, read and written through it via
+`p[0]`. Compiles with ZERO trap sites under `--forbid-trap` and produces
+the correct values (`10 11 12 13`) under real QEMU execution --
+`make check` (78/78, real output verified against `.expected`) is the
+actual, current proof, not just a claim. `examples/align_ptr_unproven/`
+(new compile-error fixture, same convention as `examples/
+affine_never_consumed` etc.) demonstrates an unproven `*u8` rejected
+where `*align(32) u8` is required, with `unsafe` shown as the fix. 12 new
+unit tests in `test/test_takibi.ml` cover every proof source, both
+subtyping directions, the `unsafe` escape hatch, and the pointer-
+arithmetic positive/negative cases. `make test` (529), `make check`
+(78/78, confirmed unchanged from before this feature except for the two
+new examples -- the DMA-builtin regression above was the one real
+exception, caught and fixed), and `make langcheck` all pass.
+
+**Deliberately still open (Stage 2 and beyond)**: retrofitting
+`dma_prepare_rx`/`dma_finish_rx`/`dma_prepare_tx` to REQUIRE
+`*align(32)` and removing `sdmmc.tkb`'s bounce buffer -- needs its own
+measurement pass across every real call site first, per the plan; a
+struct field of an `align(N)`-declared struct type is not yet an
+automatic proof source (only a variable's own `&`/bare-name is); and
+general symbolic congruence reasoning beyond literal/named-constant
+multipliers remains out of scope, same YAGNI calibration as
+`provable_multiple_of`'s own comment explains.
+
+**Files**: `lib/ast.ml`, `lib/lexer.mll`, `lib/parser.mly`, `lib/types.ml`,
+`lib/type_layout.ml`, `lib/llvm_gen.ml`, `lib/type_inf.ml` (the
+`*align(N) T` type, its proof engine, and the DMA-builtin regression
+fix); `test/test_takibi.ml` (12 new unit tests); `examples/
+align_ptr_proof/` (new, `.tkb` + `.expected`); `examples/
+align_ptr_unproven/` (new compile-error fixture); `Makefile` (both added
+to `EXAMPLES`); `scripts/run_qemutest.sh` (two new test registrations);
+`SPEC.md` (new `*align(N) T` subsection).

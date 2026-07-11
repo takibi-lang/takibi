@@ -142,6 +142,7 @@ let rec ty_str = function
   | TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (ty_str t) n
   | TypeBorrow t -> "borrow " ^ ty_str t
   | TypeSink t -> "sink " ^ ty_str t
+  | TypeAlignedPtr (n, t) -> Printf.sprintf "*align(%d) %s" n (ty_str t)
 
 (* ---- DWARF debug info (opt-in via -g; see enable_debug_info) ----
    Everything DI-related elsewhere in this file (gen_func / gen_stmt / gen_program)
@@ -656,6 +657,7 @@ let rec ltype_of_ast = function
            | Some llty -> llty
            | None -> raise (Error (Printf.sprintf "Unknown named type: %s" sname)))
   | TypeBorrow t | TypeSink t -> ltype_of_ast t
+  | TypeAlignedPtr _ -> pointer_type context
 
 (* DWARF Attribute Type Encoding constants (DWARF5 spec section 7.8, table 7.11).
    Llvm_debuginfo has no named enum for these -- they're stable spec constants,
@@ -704,6 +706,9 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
       (* modeled as a pointer for now: enough for gdb to follow the data;
          a real {ptr, len} DICompositeType needs the member-offset plumbing
          deliberately skipped for structs (see the comment above) *)
+  | TypeAlignedPtr (_, t) -> ditype_of_ast dib file (TypePtr t)
+      (* alignment is a compile-time-only proof (see ltype_of_ast); gdb
+         just sees an ordinary pointer *)
   | TypeIo t       -> ditype_of_ast dib file t       (* io T is a value type at the LLVM level too; see ltype_of_ast *)
   | TypePtr t ->
       let ptr_bits = integer_bitwidth (usize_lltype ()) in
@@ -842,7 +847,7 @@ let rec coerce v (dst : Ast.type_expr) =
   let dst_ll = ltype_of_ast dst in
   if vty = dst_ll then v
   else match dst with
-  | TypePtr _ ->
+  | TypePtr _ | TypeAlignedPtr _ ->
       (* inttoptr auto-truncates/zero-extends the source integer to the
          pointer width per the LLVM LangRef, so no manual width-matching
          step is needed -- this works whether the pointer is 32-bit
@@ -1059,7 +1064,10 @@ let function_key (pt : Types.program_types option) (fdef : Ast.func) =
   | None -> fdef.name
   | Some pt ->
       let declared = List.map snd fdef.params in
-      let rec abi_type = function TypeBorrow t | TypeSink t -> abi_type t | t -> t in
+      let rec abi_type = function
+        | TypeBorrow t | TypeSink t | TypeAlignedPtr (_, t) -> abi_type t
+        | t -> t
+      in
       let matches _ fi =
         List.length declared = List.length fi.Types.param_types &&
         List.for_all2 (fun d (_, actual) -> match d with
@@ -1365,16 +1373,28 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         else
           (ty1, v1, ty2, v2)
       in
+      (* GitHub issue #102: TypeAlignedPtr is also a pointer at the LLVM
+         level (see ltype_of_ast) but carries a proof that may or may not
+         survive THIS SPECIFIC addition/subtraction -- mirrors (sync rule)
+         type_inf.ml's own Add/Sub cases, which use the same
+         Type_inf.provable_multiple_of check to decide the same thing. *)
+      let ptr_result_ty original_ty offset_expr = match original_ty with
+        | TypeAlignedPtr (n, inner) ->
+            (match Type_inf.provable_multiple_of offset_expr with
+             | Some k when k mod n = 0 -> original_ty
+             | _ -> TypePtr inner)
+        | t -> t
+      in
       (match op with
        | Add ->
            (* Pointer arithmetic: ptr + isize -> GEP. *io T = TypePtr(TypeIo T) also matches TypePtr *)
            (match ty1 with
-            | TypePtr inner ->
-                (ty1, build_gep (ltype_of_ast inner) v1 [|v2|] "ptradd" builder)
+            | TypePtr inner | TypeAlignedPtr (_, inner) ->
+                (ptr_result_ty ty1 e2, build_gep (ltype_of_ast inner) v1 [|v2|] "ptradd" builder)
             | _ ->
                 (match ty2 with
-                 | TypePtr inner ->
-                     (ty2, build_gep (ltype_of_ast inner) v2 [|v1|] "ptradd" builder)
+                 | TypePtr inner | TypeAlignedPtr (_, inner) ->
+                     (ptr_result_ty ty2 e1, build_gep (ltype_of_ast inner) v2 [|v1|] "ptradd" builder)
                  | _ ->
                      (* Range propagation (interval arithmetic; sync rule
                         with type_inf.ml's Add case, change together):
@@ -1395,11 +1415,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            (* Pointer difference is measured in elements; pointer - isize
               remains element-addressed GEP with a negated index. *)
            (match ty1, ty2 with
-            | TypePtr inner1, TypePtr _ ->
+            | (TypePtr inner1 | TypeAlignedPtr (_, inner1)), (TypePtr _ | TypeAlignedPtr _) ->
                 (TypeIsize, build_ptrdiff (ltype_of_ast inner1) v1 v2 "ptrdiff" builder)
-            | TypePtr inner, _ ->
+            | (TypePtr inner | TypeAlignedPtr (_, inner)), _ ->
                 let neg = build_neg v2 "negtmp" builder in
-                (ty1, build_gep (ltype_of_ast inner) v1 [|neg|] "ptrsub" builder)
+                (ptr_result_ty ty1 e2, build_gep (ltype_of_ast inner) v1 [|neg|] "ptrsub" builder)
             | _, _ ->
                 (* Range propagation (sync rule with type_inf.ml's Sub):
                    {a..<b}-{c..<d} -> {a-d+1..<b-c}; {a..<b}-k -> shift *)
@@ -1828,16 +1848,20 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            load_from_slice elem_ty (effective_slice_min id m) fat
        | Some (Imm (TypeSlice (elem_ty, m), fat)) ->
            load_from_slice elem_ty m fat
-       | Some (Mut (TypePtr (TypeIo elem_ty), alloca_ptr)) ->
+       | Some (Mut (TypePtr (TypeIo elem_ty), alloca_ptr))
+       | Some (Mut (TypeAlignedPtr (_, TypeIo elem_ty), alloca_ptr)) ->
            (* *io T variable: load pointer value from alloca, then volatile access *)
            let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
            load_through_ptr elem_ty ptr_v true
-       | Some (Mut (TypePtr elem_ty, alloca_ptr)) ->
+       | Some (Mut (TypePtr elem_ty, alloca_ptr))
+       | Some (Mut (TypeAlignedPtr (_, elem_ty), alloca_ptr)) ->
            let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
            load_through_ptr elem_ty ptr_v false
-       | Some (Imm (TypePtr (TypeIo elem_ty), ptr_v)) ->
+       | Some (Imm (TypePtr (TypeIo elem_ty), ptr_v))
+       | Some (Imm (TypeAlignedPtr (_, TypeIo elem_ty), ptr_v)) ->
            load_through_ptr elem_ty ptr_v true
-       | Some (Imm (TypePtr elem_ty, ptr_v)) ->
+       | Some (Imm (TypePtr elem_ty, ptr_v))
+       | Some (Imm (TypeAlignedPtr (_, elem_ty), ptr_v)) ->
            load_through_ptr elem_ty ptr_v false
        | Some _ ->
            raise (Error (Printf.sprintf "Index: '%s' is not an array or pointer" id))
@@ -1848,10 +1872,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
             | Some (TypeSlice (elem_ty, m), gptr) ->
                 let fat = build_load (ltype_of_ast (TypeSlice (elem_ty, m))) gptr id builder in
                 load_from_slice elem_ty (effective_slice_min id m) fat
-            | Some (TypePtr (TypeIo elem_ty), gptr) ->
+            | Some (TypePtr (TypeIo elem_ty), gptr)
+            | Some (TypeAlignedPtr (_, TypeIo elem_ty), gptr) ->
                 let ptr_v = build_load (pointer_type context) gptr id builder in
                 load_through_ptr elem_ty ptr_v true
-            | Some (TypePtr elem_ty, gptr) ->
+            | Some (TypePtr elem_ty, gptr)
+            | Some (TypeAlignedPtr (_, elem_ty), gptr) ->
                 let ptr_v = build_load (pointer_type context) gptr id builder in
                 load_through_ptr elem_ty ptr_v false
             | Some _ ->
@@ -2605,7 +2631,11 @@ let gen_func ?prog_types fdef =
           | Some (Mut (TypePtr (TypeIo elem_ty), _))
           | Some (Mut (TypePtr elem_ty, _))
           | Some (Imm (TypePtr (TypeIo elem_ty), _))
-          | Some (Imm (TypePtr elem_ty, _)) -> Some elem_ty
+          | Some (Imm (TypePtr elem_ty, _))
+          | Some (Mut (TypeAlignedPtr (_, TypeIo elem_ty), _))
+          | Some (Mut (TypeAlignedPtr (_, elem_ty), _))
+          | Some (Imm (TypeAlignedPtr (_, TypeIo elem_ty), _))
+          | Some (Imm (TypeAlignedPtr (_, elem_ty), _)) -> Some elem_ty
           | _ -> None
         in
         let (_, rhs_v) = gen_expr ?expected_ty:elem_ty_hint locals rhs in
@@ -2646,15 +2676,19 @@ let gen_func ?prog_types fdef =
              store_to_slice el (effective_slice_min id m) fat
          | Some (Imm (TypeSlice (el, m), fat)) ->
              store_to_slice el m fat
-         | Some (Mut (TypePtr (TypeIo elem_ty), alloca_ptr)) ->
+         | Some (Mut (TypePtr (TypeIo elem_ty), alloca_ptr))
+         | Some (Mut (TypeAlignedPtr (_, TypeIo elem_ty), alloca_ptr)) ->
              let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
              store_through_ptr elem_ty ptr_v true
-         | Some (Mut (TypePtr elem_ty, alloca_ptr)) ->
+         | Some (Mut (TypePtr elem_ty, alloca_ptr))
+         | Some (Mut (TypeAlignedPtr (_, elem_ty), alloca_ptr)) ->
              let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
              store_through_ptr elem_ty ptr_v false
-         | Some (Imm (TypePtr (TypeIo elem_ty), ptr_v)) ->
+         | Some (Imm (TypePtr (TypeIo elem_ty), ptr_v))
+         | Some (Imm (TypeAlignedPtr (_, TypeIo elem_ty), ptr_v)) ->
              store_through_ptr elem_ty ptr_v true
-         | Some (Imm (TypePtr elem_ty, ptr_v)) ->
+         | Some (Imm (TypePtr elem_ty, ptr_v))
+         | Some (Imm (TypeAlignedPtr (_, elem_ty), ptr_v)) ->
              store_through_ptr elem_ty ptr_v false
          | Some _ ->
              raise (Error (Printf.sprintf "AssignIndex: '%s' is not an array or pointer" id))
@@ -2665,10 +2699,12 @@ let gen_func ?prog_types fdef =
               | Some (TypeSlice (el, m), gptr) ->
                   let fat = build_load (ltype_of_ast (TypeSlice (el, m))) gptr id builder in
                   store_to_slice el (effective_slice_min id m) fat
-              | Some (TypePtr (TypeIo elem_ty), gptr) ->
+              | Some (TypePtr (TypeIo elem_ty), gptr)
+              | Some (TypeAlignedPtr (_, TypeIo elem_ty), gptr) ->
                   let ptr_v = build_load (pointer_type context) gptr id builder in
                   store_through_ptr elem_ty ptr_v true
-              | Some (TypePtr elem_ty, gptr) ->
+              | Some (TypePtr elem_ty, gptr)
+              | Some (TypeAlignedPtr (_, elem_ty), gptr) ->
                   let ptr_v = build_load (pointer_type context) gptr id builder in
                   store_through_ptr elem_ty ptr_v false
               | Some _ ->
@@ -3015,7 +3051,7 @@ let rec eval_const_int (e : Ast.expr) : Int64.t =
   | Cast (target_ty, inner) ->
       let v = eval_const_int inner in
       (match target_ty with
-       | TypePtr _ -> v  (* address value; no integer width to mask against *)
+       | TypePtr _ | TypeAlignedPtr _ -> v  (* address value; no integer width to mask against *)
        | _ -> mask_to_bits (int_bits_of_ast target_ty) v)
   | BinOp (Sub, { desc = IntLit 0L; _ }, inner) ->
       (* Unary minus is desugared to this exact shape in the parser (see

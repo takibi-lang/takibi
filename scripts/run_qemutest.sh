@@ -378,6 +378,7 @@ run_compile_error_test "cond_not_bool"         examples/cond_not_bool/cond_not_b
 run_compile_error_test "affine_double_consume" examples/affine_double_consume/affine_double_consume.tkb examples/affine_double_consume/affine_double_consume.error
 run_compile_error_test "affine_never_consumed" examples/affine_never_consumed/affine_never_consumed.tkb examples/affine_never_consumed/affine_never_consumed.error
 run_compile_error_test "affine_param_never_consumed" examples/affine_param_never_consumed/affine_param_never_consumed.tkb examples/affine_param_never_consumed/affine_param_never_consumed.error
+run_compile_error_test "align_ptr_unproven" examples/align_ptr_unproven/align_ptr_unproven.tkb examples/align_ptr_unproven/align_ptr_unproven.error
 
 echo ""
 echo "Running DWARF debug-info check (-g build)..."
@@ -455,6 +456,7 @@ run_test "slice"         examples/slice/kernel.elf         examples/slice/slice.
 run_test "foreach"       examples/foreach/kernel.elf       examples/foreach/foreach.expected
 run_test "int64"         examples/int64/kernel.elf         examples/int64/int64.expected
 run_test "affine_escape_via_index" examples/affine_escape_via_index/kernel.elf examples/affine_escape_via_index/affine_escape_via_index.expected
+run_test "align_ptr_proof" examples/align_ptr_proof/kernel.elf examples/align_ptr_proof/align_ptr_proof.expected
 run_test "inet_checksum" examples/inet_checksum/kernel.elf examples/inet_checksum/inet_checksum.expected
 run_test "ip_parse"      examples/ip_parse/kernel.elf      examples/ip_parse/ip_parse.expected
 run_test "tcp_parse"     examples/tcp_parse/kernel.elf     examples/tcp_parse/tcp_parse.expected

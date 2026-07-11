@@ -422,6 +422,60 @@ let affine_opaque_names = ref StringSet.empty
    exact decision rather than attempting a second overload resolution. *)
 let resolved_call_targets = ref StringMap.empty
 
+(* GitHub issue #102: per-variable align(N) info, consulted by AddrOf/Var
+   (array decay) in infer_expr to prove *align(N) T for `&x` / an aligned
+   array's own name. Two-tier, mirroring how tyenv itself already models
+   local-shadows-global: `global_align_bytes_baseline` is populated once,
+   early in infer_program (globals are visible everywhere, and their
+   names are already guaranteed unique by the toplevel-name-collision
+   pass), and `var_align_bytes` is RESEEDED from that baseline at the
+   start of every infer_func call, then updated incrementally as that
+   function's own `let ... align(N)` locals are processed by infer_stmt's
+   Let case -- so a local shadowing an aligned global's name (by
+   overwriting the same key) is handled correctly, and no function's
+   local aligned variables leak into the NEXT function's inference (the
+   reseed discards them). infer_func calls are sequential and never
+   nested (Pass 3's own fold), which is what makes this reset discipline
+   sound. A function PARAMETER cannot itself be declared align(N) (no
+   such syntax exists) so nothing further is needed for parameters. *)
+let global_align_bytes_baseline : int StringMap.t ref = ref StringMap.empty
+let var_align_bytes : int StringMap.t ref = ref StringMap.empty
+
+let rec gcd a b = if b = 0 then abs a else gcd b (a mod b)
+
+(* Is this integer expression PROVABLY a multiple of some compile-time-
+   known k > 0 (and if so, the largest such k this simple analysis finds)?
+   Used by infer_expr's pointer-arithmetic case to decide whether
+   `aligned_ptr + offset` stays *align(N) T (offset must be provably a
+   multiple of N -- see that case's own comment). Deliberately NOT a
+   general symbolic/congruence solver: a literal OR a named compile-time
+   constant (Const_env.bound_value, the same resolver the Mul range-
+   propagation case above already uses for e.g. `idx * RX_BUF_SIZE`) is a
+   multiple of itself; `_ * K` or `K * _` is a multiple of that K
+   regardless of the other (unknown) operand's value -- the concrete case
+   this exists for, `eth_rx_bufs + eth_rx_cur * ETH_BUF_SIZE`; and a sum/
+   difference of two independently-provable multiples is a multiple of
+   their gcd. Any other shape (a bare non-constant variable, a function
+   call, multiplying two non-constant operands, ...) yields None -- the
+   caller then requires `unsafe`, same as everywhere else this scoped-not
+   -general style of proof falls short in this codebase. *)
+let rec provable_multiple_of (e : Ast.expr) : int option =
+  match Const_env.bound_value e with
+  | Some n when n <> 0 -> Some (abs n)
+  | _ ->
+  match e.desc with
+  | Cast (_, inner) -> provable_multiple_of inner
+  | BinOp (Mul, a, b) ->
+      (match Const_env.bound_value a, Const_env.bound_value b with
+       | Some n, _ when n <> 0 -> Some (abs n)
+       | _, Some n when n <> 0 -> Some (abs n)
+       | _ -> None)
+  | BinOp ((Add | Sub), a, b) ->
+      (match provable_multiple_of a, provable_multiple_of b with
+       | Some ka, Some kb -> Some (gcd ka kb)
+       | _ -> None)
+  | _ -> None
+
 (* GitHub issue #15 follow-up: require `unsafe` for a cast that builds an
    AFFINE OPAQUE pointer from anything other than a compile-time literal or
    a real object's address -- see is_literal_derived's comment for the
@@ -441,6 +495,29 @@ let check_affine_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
           ^ to_string tgt ^ " }` to mark it"))
   | _ -> ()
 
+(* GitHub issue #102: casting an INTEGER expression to *align(N) T requires
+   either `unsafe` or a compile-time proof the value is actually a multiple
+   of N (provable_multiple_of, above) -- same "unchecked assertion must be
+   visibly marked" reasoning as check_affine_ptr_cast_needs_unsafe just
+   above, applied to alignment instead of affine-handle identity. Called
+   from infer_expr's Cast case for integer sources (both the plain and
+   TRefinedInt match arms); a POINTER source casting to *align(N) T is a
+   separate case, handled inline via `unify` where TPtr src is matched,
+   since that is a widening/narrowing check between two pointer types, not
+   an "is this integer's value provably X" question. *)
+let check_aligned_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
+  match tgt with
+  | TAlignedPtr (n, _) ->
+      if !unsafe_depth = 0 then
+        (match provable_multiple_of src_expr with
+         | Some k when k mod n = 0 -> ()
+         | _ ->
+             raise (TypeError (loc, Printf.sprintf
+               "casting a non-literal integer to %s asserts alignment with \
+                no evidence; write `unsafe { ... as %s }` to mark it"
+               (to_string tgt) (to_string tgt))))
+  | _ -> ()
+
 let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
@@ -452,7 +529,15 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Some (t, _) ->
            (* Array types decay to pointer. io T is a value type: return T (volatile handled in codegen) *)
            (match repr t with
-            | TArray (inner, _) -> TPtr inner
+            | TArray (inner, _) ->
+                (* GitHub issue #102: an array declared `align(N)` decays to
+                   a PROVEN *align(N) T, not a plain *T -- this is the
+                   actual motivating shape (examples/common_stm32/eth.tkb's
+                   `eth_rx_bufs`, a DMA buffer array used bare as its own
+                   base address). *)
+                (match StringMap.find_opt name !var_align_bytes with
+                 | Some n -> TAlignedPtr (n, inner)
+                 | None -> TPtr inner)
             | TIo    inner      -> inner
             | _                 -> t)
        | None ->
@@ -476,8 +561,27 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 {a..<b} + {c..<d} -> {a+c..<b+d-1}
                 {a..<b} + k       -> {a+k..<b+k}   (and symmetric) *)
            (match repr t1, repr t2 with
-            | TPtr _, TPtr _ ->
+            | TPtr _, TPtr _
+            | TAlignedPtr _, TPtr _
+            | TPtr _, TAlignedPtr _
+            | TAlignedPtr _, TAlignedPtr _ ->
                 raise (TypeError (e.loc, "cannot add two pointers"))
+            | TAlignedPtr (n, elem), _ ->
+                (* GitHub issue #102: aligned_ptr + offset stays *align(N) T
+                   only when offset is PROVABLY a multiple of N (the
+                   eth_rx_bufs + eth_rx_cur * ETH_BUF_SIZE shape); silently
+                   decays to plain *T otherwise -- same "lose the proof,
+                   don't error" style TRefinedInt's own arithmetic below
+                   already uses when it can't keep a tighter range. *)
+                unify_at e2.loc t2 TIsize;
+                (match provable_multiple_of e2 with
+                 | Some k when k mod n = 0 -> TAlignedPtr (n, elem)
+                 | _ -> TPtr elem)
+            | _, TAlignedPtr (n, elem) ->
+                unify_at e1.loc t1 TIsize;
+                (match provable_multiple_of e1 with
+                 | Some k when k mod n = 0 -> TAlignedPtr (n, elem)
+                 | _ -> TPtr elem)
             | TPtr _, _ ->
                 unify_at e2.loc t2 TIsize;
                 t1
@@ -519,9 +623,25 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                                       "remaining room" for a chained clamp,
                                       see CLAUDE.md's P4c section) *)
            (match repr t1, repr t2 with
-            | TPtr inner1, TPtr inner2 ->
+            | TPtr inner1, TPtr inner2
+            | TAlignedPtr (_, inner1), TPtr inner2
+            | TPtr inner1, TAlignedPtr (_, inner2)
+            | TAlignedPtr (_, inner1), TAlignedPtr (_, inner2) ->
+                (* GitHub issue #102: pointer difference (result TIsize) is
+                   unaffected by alignment on either side -- checked BEFORE
+                   the "aligned_ptr - offset" case below, since that case's
+                   own pattern (TAlignedPtr, _) would otherwise also match
+                   a pointer second operand. *)
                 unify_at e.loc inner1 inner2;
                 TIsize
+            | TAlignedPtr (n, elem), _ ->
+                (* aligned_ptr - offset stays *align(N) T only when offset
+                   is PROVABLY a multiple of N -- same reasoning as Add's
+                   own TAlignedPtr case above (kept together, sync rule). *)
+                unify_at e2.loc t2 TIsize;
+                (match provable_multiple_of e2 with
+                 | Some k when k mod n = 0 -> TAlignedPtr (n, elem)
+                 | _ -> TPtr elem)
             | TPtr _, _ ->
                 unify_at e2.loc t2 TIsize;
                 t1
@@ -632,7 +752,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            if not is_mut then
              raise (TypeError (e.loc,
                Printf.sprintf "cannot take address of immutable variable '%s'" name));
-           TPtr t
+           (* GitHub issue #102: &x on an align(N)-declared variable proves
+              *align(N) T, same source as the array-decay case above. *)
+           (match StringMap.find_opt name !var_align_bytes with
+            | Some n -> TAlignedPtr (n, t)
+            | None -> TPtr t)
        | FieldGet (base_expr, fname) ->
            let bt = infer_expr senv eenv tyenv fenv base_expr in
            let sname = match repr bt with
@@ -744,6 +868,17 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | TPtr _ ->
                 (match tgt with
                  | TUsize | TPtr _ -> tgt
+                 | TAlignedPtr _ ->
+                     (* GitHub issue #102: an explicit cast asserting
+                        alignment on an already-pointer source -- allowed
+                        unconditionally inside `unsafe`, otherwise must be
+                        a genuine subtype (same rule as an implicit
+                        assignment/call-argument use: src_ty is itself
+                        *align(K) T with N | K, matched via unify's own
+                        TAlignedPtr/TPtr cases in types.ml). *)
+                     if !unsafe_depth > 0 then tgt
+                     else (try unify src_ty tgt; tgt
+                           with Unify_error msg -> raise (TypeError (e.loc, msg)))
                  | _ ->
                      raise (TypeError (e.loc,
                        Printf.sprintf
@@ -794,11 +929,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  | _ ->
                      (* A refined integer (e.g. a for-loop-proven
                         `{0..<4 as usize}` index) cast straight to a
-                        pointer -- same GitHub issue #15 check as the
+                        pointer -- same GitHub issue #15/#102 checks as the
                         catch-all case below, needed here too since this
                         is a SEPARATE match arm reached whenever the
                         source already carries a refined range. *)
                      check_affine_ptr_cast_needs_unsafe e.loc e tgt;
+                     check_aligned_ptr_cast_needs_unsafe e.loc e tgt;
                      tgt)
             | _ ->
                 (* GitHub issue #15 follow-up: casting a non-literal integer
@@ -829,6 +965,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                    this check exists to flag -- see HISTORY.md's issue #15
                    entry for the full before/after measurement. *)
                 check_affine_ptr_cast_needs_unsafe e.loc e tgt;
+                check_aligned_ptr_cast_needs_unsafe e.loc e tgt;
                 (* GitHub issue #100 follow-up: an EXPLICIT `x as {lo..<hi
                    as base}` cast target reaches here for any source that
                    isn't itself a pointer/slice/already-refined value (in
@@ -899,6 +1036,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | TPtr   elem      ->
            require_isize_offset idx.loc it;
            strip_io elem     (* *T or *io T -> returns T (bounds unknown) *)
+       | TAlignedPtr (_, elem) ->
+           (* GitHub issue #102: indexing an aligned pointer is exactly as
+              (un)checked as indexing a plain one -- alignment says nothing
+              about how many elements are actually there, so this does not
+              itself prove anything about the index. *)
+           require_isize_offset idx.loc it;
+           strip_io elem
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt))))
 
@@ -1160,7 +1304,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let pt = infer_expr senv eenv tyenv fenv ptr in
            let lt = infer_expr senv eenv tyenv fenv len in
            (match repr pt with
-            | TPtr _ -> ()
+            | TPtr _ | TAlignedPtr _ -> ()
             | _ -> raise (TypeError (ptr.loc, Printf.sprintf
                 "%s expects a raw pointer as its first argument" fname)));
            unify_at len.loc lt TUsize;
@@ -1599,6 +1743,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
             elem
         | TSlice (elem, _) -> require_usize_index idx.loc it; elem
         | TPtr   elem      -> require_isize_offset idx.loc it; strip_io elem
+        | TAlignedPtr (_, elem) -> require_isize_offset idx.loc it; strip_io elem
         | _ -> raise (TypeError (s.loc,
             Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))
       in
@@ -1634,7 +1779,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       unify_at val_expr.loc vt (strip_io field_ty);
       check_literal_fits_refined val_expr.loc val_expr (strip_io field_ty);
       (tyenv, raw_locals)
-  | Let (is_mut, name, ty_opt, expr_opt, _align_opt) ->
+  | Let (is_mut, name, ty_opt, expr_opt, align_opt) ->
       let ty = of_ast_opt ty_opt in
       let init_ty_opt =
         match expr_opt with
@@ -1728,6 +1873,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          check instead runs once, in infer_func, after the WHOLE body has
          been processed and every constraint has had a chance to fire --
          see check_undetermined_lets. *)
+      (match align_opt with
+       | Some n -> var_align_bytes := StringMap.add name n !var_align_bytes
+       | None -> ());
       ( StringMap.add name (bind_ty, is_mut) tyenv,
         StringMap.add name bind_ty raw_locals )
   | Block stmts ->
@@ -2005,6 +2153,7 @@ let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
 
 let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
   check_const_shadowing fdef;
+  var_align_bytes := !global_align_bytes_baseline;  (* see its own comment *)
   let param_tys = List.map (fun (_, ty_opt) -> of_ast_opt ty_opt) fdef.params in
   let ret_ty    = ret_of_ast_opt fdef.ret_type in
   (* Start with globals visible, then shadow them with params (params are mutable) *)
@@ -2078,6 +2227,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> names
   ) StringSet.empty prog in
   affine_opaque_names := affine_names;
+  global_align_bytes_baseline := List.fold_left (fun m -> function
+    | Ast.LetDef (name, _, _, Some n, _) -> StringMap.add name n m
+    | _ -> m
+  ) StringMap.empty prog;
   let rec validate_complete_type loc behind_ptr = function
     | Ast.TypeNamed name when StringSet.mem name opaque_names && not behind_ptr ->
         raise (TypeError (loc, Printf.sprintf

@@ -146,6 +146,55 @@ turn as many potential traps as possible into compile-time errors instead:
   adjacent live stack data -- see `examples/common_stm32/sdmmc.tkb`'s
   `disk_read_bounce`, though that one is a global; `examples/align/
   align.tkb` demonstrates the local form).
+- **`*align(N) T`** -- a pointer PROVABLY a multiple of N bytes (GitHub
+  issue #102), the pointer analogue of a refined integer's
+  `{lo..<hi as base}`. `align(N)` sits between the pointer sigil and the
+  pointee type (Zig-style), distinct from the `let ... align(N)` variable
+  syntax just above, which this type's proof sources build on:
+  ```
+  fn touch(p: *align(32) u8) { ... }
+
+  let mut buf: [u8; 128] align(32);
+  touch(buf);                        // OK: buf's own name is *align(32) u8
+  touch(&some_align32_scalar);       // OK: &x on an align(N) variable
+  touch(0x1000 as *align(32) u8);    // OK: literal address, 0x1000 % 32 == 0
+  touch(buf + i * 32);               // OK: offset provably a multiple of 32
+                                      //     (i's own value does not matter)
+  touch(some_plain_ptr);             // compile error: unproven
+  touch(unsafe { some_plain_ptr as *align(32) u8 });  // OK: marked unsafe
+  ```
+  - **Proof sources**: `&x` or an array's own bare name, when `x`/the array
+    was declared `align(N)` (or a stricter multiple of N); a literal
+    address cast (`LITERAL as *align(N) T`, checked against N directly);
+    pointer arithmetic `aligned_ptr + offset` (or `-`) when `offset` is
+    provably a multiple of N -- a compile-time literal or named constant
+    (`Const_env`-resolvable, e.g. `idx * BUF_SIZE` the same way a for-loop
+    bound or `Mul`'s own range propagation already resolves named
+    constants), or a sum/difference of two such provable multiples;
+    `unsafe { ... as *align(N) T }` for everything else. Deliberately NOT
+    a general symbolic/congruence solver -- an offset built from anything
+    else (a bare non-constant variable, a function call, multiplying two
+    non-constant operands) simply does not prove alignment, and
+    `aligned_ptr + unproven_offset` silently DECAYS to a plain `*T`
+    (not an error) rather than requiring `unsafe`, the same way refined
+    integer arithmetic elsewhere in this language loses a tight range
+    without erroring when it can't keep one.
+  - **Subtyping**: `*align(N) T` is usable anywhere a plain `*T` is
+    expected (always-safe widening); usable where `*align(K) T` is
+    expected when `K` divides `N`; a plain `*T` (or an insufficiently
+    aligned `*align(K) T`) used where `*align(N) T` is required is a
+    compile error pointing at the proof sources above and `unsafe` as the
+    escape hatch.
+  - **Scope of this first increment**: only a LOCAL or GLOBAL variable's
+    own `&`/bare-name proof is a source -- a struct field of an
+    `align(N)`-declared struct type is not (yet) automatically proven,
+    even though every instance is in fact that aligned. See
+    `examples/align_ptr_proof/align_ptr_proof.tkb` for a worked example
+    (mirrors `examples/common_stm32/eth.tkb`'s real DMA descriptor-ring
+    pointer arithmetic) and HISTORY.md's issue #102 entry for why real
+    drivers (`examples/common_stm32/sdmmc.tkb`'s `dma_prepare_rx`/
+    `dma_finish_rx`) are not yet retrofitted onto this type -- a
+    deliberately separate, later decision.
 - **Undetermined types are a compile error, not a silent `i32` default.**
   If nothing pins a bare `let`/`let mut`'s type (no annotation, and no
   later use that determines it), the compiler rejects it rather than

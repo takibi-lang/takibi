@@ -47,6 +47,13 @@ type type_expr =
        function as the designated terminal consumer of the value, so the
        callee's own body is NOT required to forward/consume it further
        (GitHub issue #89's "sink" design -- see HISTORY.md). *)
+  | TypeAlignedPtr of int * type_expr
+    (* *align(N) T -- a pointer PROVABLY a multiple of N bytes, the pointer
+       analogue of a refined integer's {lo..<hi as base} (GitHub issue #102
+       -- see HISTORY.md/SPEC.md). Structurally parallel to TypePtr, not a
+       wrapper like TypeBorrow/TypeSink: align(N) modifies the pointer
+       sigil itself, matching the already-existing align(N) local/global
+       variable and struct-level syntax. *)
 [@@deriving show]
 
 type expr = expr_desc located

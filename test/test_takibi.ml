@@ -133,6 +133,7 @@ let rec show_type = function
   | Ast.TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (show_type t) n
   | Ast.TypeBorrow t -> "borrow " ^ show_type t
   | Ast.TypeSink t -> "sink " ^ show_type t
+  | Ast.TypeAlignedPtr (n, t) -> Printf.sprintf "*align(%d) %s" n (show_type t)
 
 let type_t : Ast.type_expr Alcotest.testable =
   Alcotest.testable (fun fmt t -> Format.pp_print_string fmt (show_type t)) (=)
@@ -2001,6 +2002,60 @@ let infer_tests = [
      `*io T`) the affine-only scoping exists to preserve. *)
   Alcotest.test_case "casting a non-literal integer to a non-affine pointer needs no unsafe" `Quick
     (expect_ok "fn f(base: usize, offset: usize) { let p: *io u32 = (base + offset) as *io u32; }");
+
+  (* -- GitHub issue #102: provable pointer alignment, *align(N) T ---- *)
+
+  Alcotest.test_case "&x on an align(N) global proves *align(N) T" `Quick
+    (expect_ok "let mut buf: u8 align(32);
+                fn f() { let p: *align(32) u8 = &buf; }");
+
+  Alcotest.test_case "&x on an align(N) local proves *align(N) T" `Quick
+    (expect_ok "fn f() { let mut x: u8 align(16); let p: *align(16) u8 = &x; }");
+
+  Alcotest.test_case "an align(N) array's own name decays to *align(N) T" `Quick
+    (expect_ok "let mut bufs: [u8; 64] align(32);
+                fn f() { let p: *align(32) u8 = bufs; }");
+
+  Alcotest.test_case "a literal address cast proves *align(N) T from its own value" `Quick
+    (expect_ok "fn f() { let p: *align(4) u32 = 0x1000 as *align(4) u32; }");
+
+  Alcotest.test_case "aligned_ptr + (i * literal-multiple-of-N) stays *align(N) T" `Quick
+    (expect_ok "let mut bufs: [u8; 1536] align(32);
+                fn f(i: isize) { let p: *align(32) u8 = bufs + i * 32; }");
+
+  Alcotest.test_case "aligned_ptr + an unproven offset decays to plain *T" `Quick
+    (expect_type_error "cannot pass unproven"
+       "let mut bufs: [u8; 64] align(32);
+        fn f(i: isize) { let p: *align(32) u8 = bufs + i; }");
+
+  Alcotest.test_case "*align(N) T widens to a plain *T with no unsafe" `Quick
+    (expect_ok "let mut buf: [u8; 64] align(32);
+                fn f() { let p: *u8 = buf; }");
+
+  Alcotest.test_case "*align(N) T subtypes into *align(K) T when K divides N" `Quick
+    (expect_ok "let mut buf: [u8; 64] align(32);
+                fn f() { let p: *align(16) u8 = buf; }");
+
+  Alcotest.test_case "a plain *T is rejected where *align(N) T is required" `Quick
+    (expect_type_error "cannot pass unproven"
+       "fn f(p: *u8) { let q: *align(32) u8 = p; }");
+
+  Alcotest.test_case "unsafe marks an unproven cast to *align(N) T" `Quick
+    (expect_ok "fn f(p: *u8) -> *align(32) u8 { return unsafe { p as *align(32) u8 }; }");
+
+  (* Real end-to-end codegen: array decay + pointer arithmetic by a
+     literal multiple of N (the examples/common_stm32/eth.tkb `eth_rx_bufs
+     + eth_rx_cur * ETH_BUF_SIZE` shape) + passing the result as a
+     function argument + indexed read/write through the parameter. *)
+  Alcotest.test_case "aligned pointer arithmetic and indexing codegens correctly" `Quick
+    (expect_codegen_ok
+       "let mut bufs: [u8; 1536] align(32);
+        fn touch(p: *align(32) u8) {
+            p[0] = 1;
+        }
+        fn app_main_align_codegen(i: isize) {
+            touch(bufs + i * 32);
+        }");
 
   Alcotest.test_case "borrow is rejected for ordinary parameter types" `Quick
     (expect_type_error "borrow is only valid"

@@ -62,6 +62,7 @@ let rec size_align_of_type pos seen ty =
   | TypeIsize | TypeUsize -> primitive_size_align ty
   | TypeVoid -> fail pos "sizeof(void) is not allowed"
   | TypeBorrow t | TypeSink t -> size_align_of_type pos seen t
+  | TypeAlignedPtr _ -> ptr_size_align ()
   | TypePtr _ | TypeFn _ -> ptr_size_align ()
   | TypeIo t -> size_align_of_type pos seen t
   | TypeRefined (_, _, base) -> size_align_of_type pos seen base
