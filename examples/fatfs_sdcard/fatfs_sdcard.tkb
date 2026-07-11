@@ -28,11 +28,11 @@
 // setup (no QEMU build for this example), matching examples/sdcard's own
 // no-QEMU status.
 //
-// Deliberately written without --forbid-trap/refinement types, matching
-// this project's process for new .tkb work (see CLAUDE.md's "Development
-// Process" section) -- this is still part of the fatfs+SD-card milestone
-// that fat12.tkb/sdmmc.tkb are also still part of; all four get
-// --forbid-trap turned on together in one later pass, not piecemeal now.
+// --forbid-trap enabled: this file, fat12.tkb, and sdmmc.tkb were first
+// written without --forbid-trap/refinement types, matching this project's
+// process for new .tkb work (see CLAUDE.md's "Development Process"
+// section), then hardened together in one pass once the fatfs+SD-card
+// milestone worked end to end on real hardware -- not piecemeal.
 
 use "examples/common/fat12.tkb";
 use "examples/common_stm32/sdmmc.tkb";

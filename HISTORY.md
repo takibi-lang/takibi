@@ -5254,3 +5254,497 @@ revisit the systemic fix only as its own dedicated, scoped effort.
 **Files**: none in the final state (`lib/type_inf.ml`'s `IntLit` case is
 back to `IntLit _ -> fresh ()`, unchanged from before this experiment;
 issue filed on GitHub only).
+
+## GitHub Issue #97: `http_server_sdcard` -- Real SD Card Content Served Over HTTP, Fully Automated Provisioning
+
+The TCP/IP stack goal (`examples/http_server`) and the FAT12-on-real-SD-card
+milestone (issues #61/#62/#98, `examples/fatfs_sdcard`) meet here:
+`examples/http_server_sdcard` serves the real content of a file on the
+STM32F746G-DISCOVERY board's SD card, over HTTP, to a real browser.
+
+**Milestone choice over Simple RTOS (issue #66)**: the user had been leaning
+toward building a Takibi-native RTOS next, motivated by a real incident
+(issue #101's UART/SD card interaction bug, which stemmed from a
+polling-based wait -- a pattern this project has since eliminated
+everywhere). Investigated and recommended `http_server_sdcard` first
+instead, on the grounds that: (1) UART, Ethernet, and SD card are all
+already interrupt/DMA-driven individually, so combining them needs no
+scheduler at all -- verified concretely by reading `interrupt_wait()`'s
+actual implementation (a global retained wfe/sev event; each driver sets
+its own flag and re-checks it after waking, so spurious cross-device
+wakeups are already handled correctly); (2) issue #66 itself already had a
+detailed self-analysis on file concluding that the project's existing
+preempt/semaphore/condvar/msgqueue/watchdog examples already ARE an RTOS's
+core primitives, and that building further RTOS features without a
+concrete driving requirement would be premature (YAGNI). `http_server_sdcard`
+was judged more likely to surface a *genuine* concrete RTOS requirement (if
+any) than building one speculatively first -- confirmed true: the milestone
+shipped with a single flat `app_main()` loop, no scheduler needed.
+
+**Stage 1 scope (deliberately incremental)**: any GET request returns the
+same fixed file's content (`INDEX.TXT`), read fresh from the card on every
+request. No path parsing, no directory listing, no multiple files -- proves
+the wiring (HTTP -> FAT12 -> SDMMC1 -> real card bytes -> HTTP response) end
+to end first. Directory listing / multi-file serving is a deliberately
+deferred stage 2 (no driving requirement yet). Serving images/JS is
+deliberately out of scope for a different, harder reason: `http_server.tkb`'s
+TCP layer (inherited unchanged) replies in exactly one TCP segment / one
+Ethernet frame -- there is no multi-segment TX yet, so response bodies are
+capped by `HTTP_MAX_PAYLOAD` regardless of what's on the card. Real
+multi-segment TX is separate, unscoped future work.
+
+**SD card content is mounted, never formatted** (`fat_mount()`, not
+`fat_format()`) -- unlike `fatfs_sdcard.tkb`, which formats and writes fixed
+demo content on every run. The whole point of this milestone is showing the
+card's own, externally-provisioned content. Verified end to end by hand:
+loaded real content onto the card, served it over HTTP to a real Firefox
+tab, then physically removed the card, mounted it on a PC, and confirmed the
+served file (`INDEX.TXT`) was exactly what a normal file manager also saw --
+real interop with a real filesystem, not just an internal round trip.
+
+**Fully automated SD card provisioning -- no human ever touches the card**,
+for both `make hwcheck-net` and the interactive `make stm32-http-server-sdcard`
+demo target. This went through two designs before landing:
+
+1. First idea: have the demo binary itself write the card at boot
+   (`fat_format()` + fixed content, matching `fatfs_sdcard.tkb`'s own
+   approach). Rejected -- the whole point of this milestone is showing a
+   real, externally-provisioned card's content, not manufacturing fake
+   content on every boot.
+2. Physically swapping the card into a host-side reader and writing it with
+   `mformat`/`mcopy` (the same mtools workflow `examples/fatfs`'s own test
+   harness already uses) was considered next, and explicitly rejected by the
+   user: this project's hardware test suites (`make hwcheck`/`make
+   hwcheck-net`) are a hard requirement to run unattended, with zero human
+   intervention, matching every other test in this repo.
+3. Landed on: `scripts/provision_http_server_sdcard.sh` builds a real FAT12
+   image on the host with `mformat`/`mcopy` (same geometry as
+   `examples/common/fat12.tkb`'s own `SECTOR_SIZE`/`TOTAL_SECTORS`), then
+   runs a small new firmware, `examples/http_server_sdcard_install/
+   http_server_sdcard_install.tkb`, via OpenOCD -- the exact same
+   RAM-injection technique `scripts/run_hwtest_ram.sh`'s existing
+   `ram_load_and_run_seeded` already uses for `examples/fatfs`'s in-memory
+   `disk` array (a breakpoint at `app_main`'s own entry, `load_image` the
+   host-built FAT image directly into a `staging` global's RAM address,
+   remove the breakpoint, resume), except this firmware then *relays* the
+   staged bytes onward through the real SDMMC1 driver (`disk_write`,
+   sector by sector) instead of just leaving them in RAM for the CPU to
+   read directly. A second breakpoint, on a dedicated `install_done()`
+   function called only after every `disk_write` has returned, gives the
+   harness a hard synchronization point (`wait_halt`) for "the real SD
+   card write has genuinely finished" -- no UART-quietness guessing needed.
+   `install_result` (a `u32` global: 1 = OK, 2 = `disk_initialize()` failed
+   -- most likely no card in the slot, 3 = a `disk_write` genuinely
+   failed) is read back at that same halt via OpenOCD's `mrw`, giving the
+   harness a precise, deterministic status instead of scraping UART text.
+   `scripts/provision_http_server_sdcard.sh` is shared, not duplicated,
+   between `make hwcheck-net` (`scripts/run_hwtest_net_ram.sh`) and the
+   standalone `make stm32-http-server-sdcard` Makefile target -- the latter
+   is fully self-contained (does not depend on `hwcheck-net` having run
+   first) and stops with a clear error message (not a silent 404 the user
+   would have to debug from a browser tab) if the card is missing or a
+   write genuinely fails.
+
+**Latent duplicate-global collision found and fixed**: `examples/common_stm32/
+eth.tkb` and `examples/common_stm32/sdmmc.tkb` had never been compiled
+into the same program before this milestone (no prior example needed both
+Ethernet and SD card). `http_server_sdcard.tkb` is the first to `use` both,
+which exposed that both files independently declared `RCC_AHB1ENR`/
+`RCC_APB2ENR` (both configure RCC peripheral-enable bits) and `GPIOC_MODER`/
+`GPIOC_OSPEEDR` (both configure GPIOC pins -- `eth.tkb` for RMII,
+`sdmmc.tkb` for SDMMC1 D0..D3/CLK) at identical addresses -- caught
+immediately by the existing GitHub issue #79 duplicate-global-name check.
+Fixed the same way `examples/common_qemu/gic_regs.tkb` was split out of
+`gic.tkb` for the same reason: extracted the four colliding declarations
+into a new shared file, `examples/common_stm32/eth_sdmmc_regs.tkb`, `use`d
+by both `eth.tkb` and `sdmmc.tkb`. Confirmed the other 7 existing consumers
+of either file (5 real-Ethernet examples, `sdcard`, `fatfs_sdcard`) still
+build and pass their hardware tests unchanged.
+
+**`stm32-http-server-sdcard`'s URL display was broken from the start**
+(found while building its own version of `stm32-http-server`'s existing
+URL-announcing logic, which turned out to already be broken too):
+`netconfig.tkb`'s `HTTP_SERVER_IP` had at some point been refactored from a
+literal `{192, 168, 10, 2}` initializer to `= OUR_IP` (an alias, to prevent
+the two constants drifting apart -- see the STM32 Ethernet section), but
+the Makefile's `grep -oP '\{[^}]*\}'` IP-extraction one-liner was never
+updated to follow that indirection, so `make stm32-http-server` had been
+silently printing `Open http:///` (empty) ever since that refactor landed.
+Fixed by resolving one level of `Var` aliasing in the shell extraction
+logic before falling back to the literal-array pattern; applied to both
+Makefile targets since they share the exact same broken one-liner.
+Confirmed fixed by hand (`Open http://192.168.10.2/` now prints correctly
+for both).
+
+**--forbid-trap**: written and verified against real hardware without it
+first (per this project's established process), then turned on once the
+whole milestone (both `http_server_sdcard.tkb` and the installer) worked
+end to end. `http_server_sdcard.tkb` itself needed zero fixes (its only new
+logic is a fixed-size `fat_read` into a 512-byte buffer matching that
+buffer's own declared size; everything else reuses `http_server.tkb`'s
+already-proven slice-based logic unchanged). The installer needed one: its
+sector-copy loop (`staging[off + i]`, `off = s * SECTOR_SIZE`) used a
+plain `while (s < TOTAL_SECTORS as u32)` loop, giving `s` no provable
+range. Fixed by converting to `for s: usize in 0..<TOTAL_SECTORS` (matching
+`TOTAL_SECTORS`'s own declared `usize` type -- a `for s: u32 in
+0..<TOTAL_SECTORS` loop does NOT typecheck, since `TOTAL_SECTORS` is
+`usize`-typed from its own declaration and this language has no implicit
+int-width coercion; nothing for-loop-specific about that failure, `let s:
+u32 = TOTAL_SECTORS;` without a cast fails identically), with a single `as
+u32` cast only where `disk_write`'s signature needs it. This is the same
+if-narrowed-multiplier-times-for-loop-offset proof shape `examples/common/
+fat12.tkb`'s own `mem_block_read`/`mem_block_write` already use for the
+identical "byte i of sector s in a flat buffer" pattern -- confirmed the
+Mul/Add interval-propagation math is exact here (not the naive lo*c..hi*c
+scaling one might assume), matching the `doff * 4` example already
+documented elsewhere in this file.
+
+**Files**: `examples/http_server_sdcard/http_server_sdcard.tkb` (new),
+`examples/http_server_sdcard_install/http_server_sdcard_install.tkb` (new),
+`examples/common_stm32/eth_sdmmc_regs.tkb` (new), `examples/common_stm32/
+eth.tkb` / `examples/common_stm32/sdmmc.tkb` (duplicate-global split),
+`scripts/provision_http_server_sdcard.sh` (new), `scripts/
+eth_http_server_sdcard_test.py` (new), `scripts/run_hwtest_net_ram.sh`
+(new test entries, both RAM and Flash variants), `Makefile`
+(`STM32_RAM_EXAMPLES`, new `.o`/`.elf`/`.bin` rules, `stm32-http-server-sdcard`
+target, IP-extraction fix applied to both HTTP demo targets).
+
+## Bool-Only `if`/`while`/`&&`/`||` Conditions (No C-Style Int-Truthy Coercion)
+
+Found while reviewing `http_server_sdcard`'s design: `check_cond` (the
+function gating `if`/`while`/`&&`/`||` operand types) accepted `bool` OR
+unified the condition against `TI32` -- not general C-style "any integer is
+truthy" (a genuinely non-bool-typed variable like `u32`/`u8`/`u64` was
+ALREADY rejected: `cannot unify u32 with i32`), just an inconsistent,
+i32-only special case whose only real effect was letting `while (1)`
+-style integer literals work as an infinite-loop idiom. Compared against
+Rust and Zig (both strictly bool-only, no exception for literals either --
+`while true {}` is the only spelling in both) and against this project's
+own MMIO-heavy code, which already always writes explicit bit-mask/
+comparison checks (`if ((ocr & 0x80000000) != 0)` in `sdmmc.tkb`) rather
+than relying on any implicit truthiness -- the hardware-interfacing
+argument for keeping C's looser rule didn't hold up. Decision: match
+Rust/Zig, bool-only, closing off the classic C `if (x = 5)`
+assignment-vs-comparison-typo class of bug at compile time (this project's
+explicit "detect errors at compile time" design principle). Migration
+scope was small and fully mechanical: exactly 8 `while (1) { ... }` sites
+across the whole example suite (all the same "infinite main loop" idiom:
+`net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo`, `http_server`,
+`http_server_sdcard`, `echo`, `eth.tkb`), all converted to `while (true)`
+with no logic changes.
+
+**A genuine soundness gap found while implementing the naive fix.** The
+first attempt, `check_cond loc ct = unify_at loc ct TBool` (replacing the
+old `TBool -> () | _ -> unify_at loc ct TI32` match), made `while (1)`
+"type-check" -- WRONG -- and then crash at codegen instead
+(`Fatal error: ... as_cond expected i1 (bool), got i32`). Root cause: a
+bare integer literal's inferred type (`IntLit _ -> fresh ()`, "polymorphic:
+unifies with any integer type via context") is a genuinely UNCONSTRAINED
+type variable at that point, not merely integer-flavored -- `unify_at ct
+TBool` happily binds it to `TBool` structurally, same underlying mechanism
+already documented for issue #100's refined-range soundness hole
+(`check_literal_fits_refined`'s own header comment), just manifesting for a
+`bool` target instead of a numeric range. Confirmed via a minimal repro
+(`let x: bool = 1;` -- a completely unrelated code path from `check_cond`,
+also silently accepted, also pre-existing and unrelated to this session's
+changes) that this is a structural gap in how `IntLit`'s `fresh()` type
+variable interacts with unification generally, not something specific to
+condition-checking.
+
+**Fixed at both the narrow site and the general one.** `check_cond` gained
+an explicit branch: `TVar { contents = Unbound _ }` (an expression whose
+type was never pinned by anything -- which, empirically, only a bare or
+bare-arithmetic literal expression can produce by the time a condition is
+checked) is rejected directly with a purpose-written message
+("condition must be bool -- a bare integer literal has no boolean value;
+use `true`/`false` or an explicit comparison"), never reaching `unify_at`
+at all. Separately, and more generally: `check_literal_fits_refined`
+(issue #100's existing "does a literal-or-Const_env-constant expression
+flowing into an already-known target type actually fit" check, already
+wired into 10 call sites -- `Let`, `Assign`, `AssignDeref`, `AssignIndex`,
+`AssignField`, `Return`, `Call` arguments, `StructLit` fields) gained a
+`TBool` arm alongside its existing `TRefinedInt` one: any integer literal
+flowing into a `bool`-typed target is rejected unconditionally (unlike the
+`TRefinedInt` case, there's no "does the value fit" question -- ANY
+integer literal is invalid for `bool`). Because it reuses `Const_env.
+bound_value` (the same "is this expression a compile-time integer"
+resolver issue #100 already established) at sites that already existed,
+this ONE match arm closes every instance of the gap at once: `let x: bool
+= 1;`, `return 1;` from a `-> bool` function, and passing a literal for a
+`bool` parameter were all confirmed broken before the fix and fixed after,
+with zero changes needed anywhere else. Confirmed the whole example suite
+(72 QEMU + 45 hardware + 8 Ethernet-hardware tests, at the time) still
+passes unchanged -- neither new check found an actual logic bug anywhere
+in existing example code, only the 8 syntactic `while (1)` sites needed
+touching.
+
+**A second, unrelated compiler bug found while writing new code for this
+session** (not found BY either of the above checks -- found because new
+`.tkb` code exercised a code path nothing had ever exercised before):
+`lib/llvm_gen.ml`'s `gen_global` has its own separate compile-time-constant
+folding function (distinct from the top-level `eval_const_int`, which
+already had a working `BoolLit b -> if b then 1L else 0L` case) with no
+case for `BoolLit` at all -- so `let mut flag: bool = false;` (or `true`)
+as a GLOBAL initializer failed with `"global initializer: unsupported
+constant expression"`, regardless of the value. Nobody had ever written a
+literal-initialized `bool` global in this codebase before (every existing
+`bool` global was either uninitialized/BSS-zeroed, like
+`ff_writing`-style flags added later, or assigned via an enum-style
+non-literal expression) -- first hit while adding `examples/common/
+fat12.tkb`'s `ff_is_open: bool = false;` (see the `FatFile` entry below).
+Fixed with one added match arm, `BoolLit b, TypeBool -> const_int
+(ltype_of_ast ft) (if b then 1 else 0)`, mirroring `gen_expr`'s own
+`BoolLit` case exactly.
+
+**New permanent regression coverage** (this codebase's existing
+`run_compile_error_test` convention -- a `.tkb` file paired with a
+`.error` file containing an expected error substring, wired into
+`scripts/run_qemutest.sh`, e.g. `refined_assign_mismatch`,
+`forbid_trap_wrong`): `examples/cond_not_bool` (the `while (1)` case) and
+`examples/affine_double_consume` (a first-ever permanent negative test for
+the affine-handle double-consume/use-after-release checker itself -- it
+had unit-test coverage in `test/test_takibi.ml` since it was built, but no
+examples-level end-to-end test until now). Also added 9 new unit tests to
+`test/test_takibi.ml` directly covering the bool-only-condition change
+(both the `check_cond` and the `check_literal_fits_refined` fixes,
+positive and negative cases).
+
+**Files**: `lib/type_inf.ml` (`check_cond`, `check_literal_fits_refined`),
+`lib/llvm_gen.ml` (`gen_global`'s `eval_const`, `as_cond` simplified to
+assert i1 rather than silently coerce -- its old int-to-i1 `icmp ne 0`
+fallback is now genuinely unreachable, since every one of its 4 call sites
+corresponds exactly to a `check_cond` site that now guarantees `TBool`),
+`test/test_takibi.ml` (9 new tests), the 8 `while (1)` -> `while (true)`
+sites listed above, `examples/cond_not_bool/` (new), `examples/
+affine_double_consume/` (new), `scripts/run_qemutest.sh` (2 new
+registrations), `SPEC.md` (documented the rule, which had never been
+written down).
+
+## GitHub Issue #97 Follow-up: `FatFile` as an Affine Opaque Handle, and the Single-Instance Consequence It Surfaced
+
+Prompted by a direct question about whether `examples/common/fat12.tkb`'s
+`fat_open`/`fat_close` could get ATS2-style linear-file-handle guarantees:
+`fat_close` only reachable on a value `fat_open` actually produced, no
+double-close, no use-after-close. `examples/common_stm32/eth.tkb`'s
+existing `NetRxCpuOwned` (`affine opaque struct`, built for issue #62-era
+RX descriptor ownership) was already exactly this pattern for a different
+resource, and needed zero new compiler features to reuse.
+
+**Refactor**: `FatFile` changed from a plain (non-opaque, real-fields)
+struct with an output-parameter `fat_open(fp: *FatFile, ...) -> i32` API to
+`affine opaque struct FatFile;` with `fat_open(...) -> *FatFile` (a token
+pointer, `0 as usize as *FatFile` on failure -- matching `net_rx_acquire`'s
+own null-on-unavailable convention exactly), `fat_read`/`fat_write` taking
+`borrow *FatFile` (non-consuming, callable any number of times), and
+`fat_close(fp: *FatFile) -> i32` consuming it. Confirmed by hand that all
+three violations are now compile errors instead of silent bugs: a bare
+`let mut fp: FatFile;` ("opaque struct 'FatFile' is incomplete and may
+only be used behind a pointer"), `fat_close(fp); fat_close(fp);` a second
+time ("affine value 'fp' was already consumed"), and using `fp` in
+`fat_read`/`fat_write` after `fat_close(fp)` (same error). All 4 existing
+callers (`examples/common/fat12.tkb`'s own `create_demo_file`,
+`examples/fatfs/fatfs.tkb` x2, `examples/fatfs_sdcard/fatfs_sdcard.tkb`,
+`examples/http_server_sdcard/http_server_sdcard.tkb`) updated to the new
+pointer-returning, null-checked call shape.
+
+**Realization, prompted directly by the user, not found independently
+while implementing**: `NetRxCpuOwned` has the *identical* structural
+limitation `FatFile` was about to gain, and this had gone unremarked
+during its own original implementation. Root cause: `affine opaque struct`
+is, by grammar, ALWAYS field-less (`AFFINE OPAQUE STRUCT IDENT SEMI` --
+there is no syntax to give it a field list, even within the declaring
+file), so any real per-instance state has nowhere to live except ordinary
+globals, and every `make()`-style constructor built on this pattern
+(`net_rx_acquire`, now `fat_open`) hands back the SAME fixed address every
+time (`&net_rx_token_storage`, `&fat_file_token_storage`). Consequence:
+only one live (acquired-but-unreleased) handle of a given type can exist
+system-wide at once. For `NetRxCpuOwned` this happens to match its real
+requirement exactly (the RX descriptor ring, not this CPU-ownership token,
+is where buffering depth actually lives -- the driver only ever has one
+CPU-owned frame in flight by design). For `FatFile`, it matches
+`fat12.tkb`'s own pre-existing, already-documented scope ("no multiple
+simultaneously-open files" was stated in that file's header comment before
+this refactor too) -- nothing regressed, but the limit is now type-enforced
+rather than by-convention, and additionally required a new explicit guard
+(`ff_is_open: bool`, checked at the start of `fat_open`) since the affine
+checker itself has no way to see across two independently-acquired handles
+of the same type -- without it, a second `fat_open()` before the first
+`fat_close()` would silently corrupt the still-open first handle's state
+by overwriting the shared `ff_*` globals.
+
+**Design discussion, deliberately not acted on**: whether to pursue
+extending the language to decouple `affine` from `opaque` (letting an
+affine type carry real, per-instance fields) so multiple concurrent
+instances become possible. A pool-of-N-tokens workaround (encode a slot
+index into the token pointer's own numeric value via pointer arithmetic)
+was proposed and explicitly rejected as actively counterproductive --
+routing real structure through a pointer's bare numeric identity would
+have to be torn out again once a real fix exists, not be a step toward
+one. The harder, genuinely open question surfaced by that discussion: even
+decoupling `affine` from `opaque` only solves "no more than one instance,"
+not "was this value actually produced by `fat_open`" -- with real, visible
+fields, nothing would stop a caller declaring a garbage/uninitialized
+`FatFile` and passing it straight to `fat_read`. Rust solves that
+specific problem with a THIRD, independent mechanism (module-private
+fields + a smart constructor), not affine-ness itself -- a form of
+file-scoped field visibility this language does not have today, entangled
+with neither `affine` nor `opaque` as currently implemented. Also
+discussed and left open: whether "must eventually be consumed" (the
+still-missing linear/drop-check half of issue #89) should be RAII-style
+(auto-inserted cleanup at scope exit, unless explicitly moved out --
+Rust's `Drop`, requires real move-aware analysis to correctly recognize
+"returned, so no cleanup needed on this path," a case a naive
+scope-exit-insertion rule would get wrong) versus something closer to
+ATS2's at-views (a function's return TYPE explicitly documents which
+obligations it hands to the caller, rather than relying on implicit
+scope-based insertion or a separate whole-body "was it dropped" proof
+pass) -- raised specifically because a legitimate, common embedded-C
+pattern (a function that opens a resource and returns it, unclosed, *by
+design*, for the caller to close later) needs to keep compiling cleanly,
+and the user's own experience was that Rust's default RAII posture reads
+as too rigid for that pattern even though a properly move-aware
+implementation would in fact handle it correctly. Recorded as a comment on
+GitHub issue #89 (by the user directly, not via an automated post) rather
+than acted on now -- only two real use cases exist in this codebase so
+far, enough to see the *structural* problem (the `affine`/`opaque`
+coupling being an implementation shortcut, not a fundamental necessity)
+but not enough to responsibly design a general resource-typestate
+mechanism around. `fat12.tkb` and `eth.tkb` keep the pragmatic "global
+variables + `affine opaque struct`" approach for now.
+
+**A concrete control-flow gap found while restructuring `create_demo_file`
+for the new API**, relevant to any future "must consume" design: the
+current checker's `If` case unions each branch's consumed-set
+unconditionally, with no awareness that a `return`-terminated branch can't
+affect code after the `if`. `if (fat_write(fp,...) != 0) { fat_close(fp);
+return -1; } return fat_close(fp);` (no `else`) is rejected ("affine value
+'fp' was already consumed") even though the two `fat_close(fp)` calls are
+on mutually exclusive paths -- confirmed by minimal repro before touching
+the real code. Worked around by making the `else` explicit (`if { ... }
+else { return fat_close(fp); }`), which the checker handles correctly
+(confirmed separately: unioning two branches that EACH independently
+consume the value, with nothing after the `if` at all, works fine). This
+exact behavior turned out to already be correctly documented in `SPEC.md`'s
+Affine Opaque Structs section ("consuming a handle in only one branch is
+allowed; ... the moved-sets of every branch/arm are unioned") -- the gap
+was in this session's own awareness of that documented rule, not in the
+documentation itself.
+
+**Files**: `examples/common/fat12.tkb` (`FatFile` struct removed, replaced
+by `ff_*` globals + `affine opaque struct FatFile;` + `fat_file_token_storage`
++ `ff_is_open` guard; `fat_open`/`fat_read`/`fat_write`/`fat_close`/
+`create_demo_file` signatures and bodies), `examples/fatfs/fatfs.tkb`,
+`examples/fatfs_sdcard/fatfs_sdcard.tkb`, `examples/http_server_sdcard/
+http_server_sdcard.tkb` (all 4 call sites updated to the pointer-returning
+API), `lib/llvm_gen.ml` (the `BoolLit` global-initializer fix, needed by
+`ff_is_open`'s own `= false` initializer -- see the entry above), `SPEC.md`
+(documented the field-less-opaque-implies-global-singleton consequence,
+which had never been written down despite `NetRxCpuOwned` already
+exhibiting it).
+
+## Documentation Audit: Stale `--forbid-trap` Headers, Broken Cross-References, Drifted Counts
+
+Prompted by a direct request to review `README.md`/`SPEC.md`/`CLAUDE.md`/
+`HISTORY.md` for staleness following the `http_server_sdcard` milestone.
+Found one concrete stale item early (`examples/fatfs_sdcard/fatfs_sdcard.tkb`'s
+header still described `--forbid-trap` as a future step, even though the
+Makefile already had it enabled before this session started), then commissioned
+a systematic audit (a background agent, verifying each candidate claim
+against the live repo rather than trusting wording alone) once the pattern
+looked likely to recur elsewhere. Confirmed findings, all fixed:
+
+- **Four more files with the identical stale-header pattern**: `examples/fatfs/
+  fatfs.tkb`, `examples/sdcard/sdcard.tkb`, `examples/common/fat12.tkb`, and
+  `examples/common_stm32/sdmmc.tkb` all still described `--forbid-trap` as
+  "not yet turned on" in prose, despite the Makefile having enabled it for
+  all of them since the original fatfs+SD-card milestone (issues #61/#62/#98)
+  closed. All five headers (including `fatfs_sdcard.tkb`) rewritten to past
+  tense, describing what was actually done rather than what was still planned.
+- **`CLAUDE.md`'s Directory Layout was missing several files**, some
+  pre-dating this session entirely: `lib/type_layout.ml` (struct/enum layout
+  table backing `sizeof`/`offsetof`, issue #40) and `lib/use_resolver.ml`
+  (`use` dependency resolution, issue #55) were absent from the `lib/`
+  listing; `examples/common/fat12.tkb`, `examples/common_qemu/
+  semihosting_asm.S`, `examples/common_stm32/sdmmc.tkb`, and `examples/
+  common_stm32/semihosting_stub.S` were all absent from their respective
+  directory listings. All added, plus today's new `eth_sdmmc_regs.tkb` and
+  `scripts/provision_http_server_sdcard.sh` (the new example directories
+  themselves, `http_server_sdcard`/`http_server_sdcard_install`, needed no
+  new entries -- the existing `<name>/` catch-all line already covers every
+  individual example directory generically).
+- **A dangling cross-reference**: `CLAUDE.md`'s `sizeof(T)` bullet said "see
+  the `sizeof(T)` section above," but that section was moved to `HISTORY.md`
+  during the 2026-07-08 CLAUDE.md/HISTORY.md split and the pointer was never
+  updated -- fixed to point at HISTORY.md's actual "sizeof(T) Spans 4 Files"
+  entry.
+- **Two drifted counts**: `STM32_RAM_ELFS`'s "50 as of this writing" is now
+  55 (the passage already told readers to verify the variable directly
+  rather than trust the number, so this was low-severity, but the literal
+  figure was still updated); "all five [STM32 Ethernet] examples" is now six
+  (`http_server_sdcard` added today) and a "all 6 `hwcheck-net` tests pass"
+  historical claim (accurate at the time it was written, about
+  `http_server`'s Flash-boot test addition) is now 8 -- reworded to make
+  clear it was a point-in-time count, not a claim about today's total.
+
+Deliberately kept every `CLAUDE.md` addition to a one- or two-line pointer
+(net growth: 1347 -> 1373 lines, +26, despite 8 distinct fixes) -- the
+substantive narrative for all of today's work lives here in HISTORY.md
+instead, per this project's existing 2026-07-08 split rationale (keep
+CLAUDE.md inside Claude Code's context budget).
+
+**Files**: `examples/fatfs_sdcard/fatfs_sdcard.tkb`, `examples/fatfs/
+fatfs.tkb`, `examples/sdcard/sdcard.tkb`, `examples/common/fat12.tkb`,
+`examples/common_stm32/sdmmc.tkb` (header comments), `CLAUDE.md` (Directory
+Layout, `sizeof(T)` cross-reference, two count corrections).
+
+## Intermittent DWARF Test Failure: Disabled, Not Retried-Around
+
+`scripts/run_qemutest.sh`'s `run_dwarf_test "fizzbuzz (dwarf)"` (checks that
+`llvm-dwarfdump-19 --debug-line` on a `-g` build's `kernel.debug.elf`
+contains `fizzbuzz.tkb` in its `file_names` table) turned out to be
+intermittently flaky, discovered by chance across several `make check`/
+`make qemutest` runs earlier in this session (retried and passed both
+times, which is exactly the kind of "it went away, move on" response that
+was then explicitly flagged and rejected: retrying without understanding
+hides whatever the real timing issue is, rather than fixing or even
+confirming it).
+
+**Investigated properly instead of retried around**: reproduced directly
+with `make clean && make qemutest` in a loop (2 failures in 3 consecutive
+runs -- not a rare one-off). The failure is `"fizzbuzz.tkb missing from
+DWARF file_names table"`. Critically, inspecting the exact `kernel.debug.elf`
+left on disk by a failing run, by hand, immediately afterward, with no
+rebuild, found `fizzbuzz.tkb` correctly present in `file_names[5]` --
+**the generated DWARF data is correct**; only the test's read of it,
+happening immediately after `ld.lld-19` finishes linking, sometimes doesn't
+see it. This rules out a compiler/DWARF-emission bug.
+
+An initial hypothesis (devcontainer/overlayfs-specific filesystem
+coherency, given the timing sensitivity and the container's storage
+driver) was raised and then corrected by the user with direct
+counter-evidence: the identical intermittent failure also reproduces on
+`make check` on a bare/native Linux install with no container involved at
+all. Whatever the actual mechanism is, it is not specific to this
+project's devcontainer.
+
+**Disabled outright** (`run_dwarf_test`'s line commented out in
+`scripts/run_qemutest.sh`, not deleted, with the reproduction evidence and
+open questions written in place as a comment) rather than retried or
+worked around, per explicit instruction: a masking fix would make the
+suite green again without anyone finding out whether the underlying
+timing issue is real or could affect anything else that reads a
+just-produced build artifact soon after another process finishes writing
+it. Judged an acceptable, low-cost stopgap specifically because DWARF
+debug-info emission (`-g`) is not otherwise relied on by any current
+project workflow (no current use of gdb to inspect `.tkb` source-level
+variables through it) -- this is different from disabling a check that
+guards something actually in use. A GitHub issue write-up (reproduction
+steps, the evidence ruling out a DWARF-emission bug, the corrected
+not-container-specific finding, and suggested next steps -- `strace` on
+both the linker and dwarfdump processes, trying `make -j1` to see if
+serialization changes the reproduction rate) was drafted for the user to
+file, to give a future investigation a running start instead of
+re-deriving all of this from scratch.
+
+**Files**: `scripts/run_qemutest.sh` (`run_dwarf_test "fizzbuzz (dwarf)"`
+line commented out with investigation notes in place).

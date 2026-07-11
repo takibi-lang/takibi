@@ -3,11 +3,16 @@
 **takibi** is a from-scratch programming language and compiler, implemented in
 OCaml, that generates native machine code through an LLVM backend.
 
-The language is designed for **bare-metal embedded programming**, where a
-runtime panic or trap is not an acceptable failure mode. The long-term goal of
-this project is to implement a TCP/IP stack and run an HTTP server on
-bare-metal targets -- and that goal is already reached today on both QEMU
-(AArch64) and real
+The language is designed for **bare-metal and kernel-space programming**, where
+a runtime panic, trap, or silent memory corruption is not an acceptable failure
+mode. The long-term goal of this project is to demonstrate that runtime errors
+in a monolithic, Unix-like kernel -- in the spirit of Linux or NetBSD -- can be
+lifted into compile-time errors, using type-system features C never had
+(refinement types, affine/linear ownership, and eventually SMT-backed proof
+obligations).
+
+As a first waypoint toward that goal, takibi already implements a TCP/IP stack
+and runs an HTTP server on bare-metal targets, on both QEMU (AArch64) and real
 [STM32F746G-DISCOVERY](https://www.st.com/en/evaluation-tools/32f746gdiscovery.html)
 (Cortex-M7) hardware.
 
@@ -178,6 +183,13 @@ deferrable convenience and architecture work.
   from an actual web browser, both under QEMU (via a virtio-net driver) and on
   real STM32F746G-DISCOVERY hardware (via a from-scratch Ethernet MAC/PHY/DMA
   driver in `examples/common_stm32/eth.tkb`).
+- **The TCP/IP stack and the FAT12 filesystem driver now meet**:
+  `examples/http_server_sdcard` serves the real content of a file stored on
+  a real SD card over HTTP, reachable from an actual web browser, on real
+  STM32F746G-DISCOVERY hardware -- SD card provisioning is fully automated
+  (`make hwcheck-net` / `make stm32-http-server-sdcard`, no human ever
+  touches the card) via OpenOCD-injected mtools images relayed onto the
+  card through the real SDMMC1 driver.
 - Every ported example is a **single `.tkb` application source file** that
   compiles unchanged for QEMU/AArch64 and STM32/Cortex-M7. Platform-specific
   behavior is supplied by same-signature HAL files selected by the Makefile.

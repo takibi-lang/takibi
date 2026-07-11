@@ -25,14 +25,14 @@
 // reads, takibi writes/takibi reads back) is deliberately richer than
 // either direction alone.
 //
-// Development process note: this file is deliberately written WITHOUT
-// --forbid-trap for its first working version -- disk access uses plain
-// checked array indexing (sector*SECTOR_SIZE+i into `disk`) rather than
-// reaching for raw-pointer arithmetic just to dodge bounds checks. Once the
-// whole milestone (this file + fat12.tkb + sdmmc.tkb + fatfs_sdcard.tkb)
-// works end-to-end against real SD hardware, --forbid-trap gets turned on
-// across all of them in one pass and whatever it flags is fixed with proper
-// refined parameter/loop-bound types at exactly those call sites -- not by
+// Development process note: --forbid-trap is enabled. This file was first
+// written without it -- disk access uses plain checked array indexing
+// (sector*SECTOR_SIZE+i into `disk`) rather than reaching for raw-pointer
+// arithmetic just to dodge bounds checks -- then, once the whole milestone
+// (this file + fat12.tkb + sdmmc.tkb + fatfs_sdcard.tkb) worked end-to-end
+// against real SD hardware, --forbid-trap was turned on across all of them
+// in one pass and whatever it flagged was fixed with proper refined
+// parameter/loop-bound types at exactly those call sites -- not by
 // switching the flagged access back to an unchecked raw pointer, which would
 // only hide the proof gap instead of closing it. Raw pointers stay limited to
 // the places that genuinely need them regardless: the mem_block_read/write

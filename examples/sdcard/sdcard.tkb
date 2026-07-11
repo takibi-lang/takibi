@@ -13,9 +13,10 @@
 // real-Ethernet-specific STM32 hardware behavior is exercised only via
 // `make hwcheck-net`, not `make qemutest`.
 //
-// Deliberately written without --forbid-trap/refinement types, matching
-// this project's process for new .tkb work (see CLAUDE.md's "Development
-// Process" section) -- plain checked array indexing throughout.
+// --forbid-trap enabled: first written without it, matching this project's
+// process for new .tkb work (see CLAUDE.md's "Development Process"
+// section), then compiled clean under it with no changes needed (this
+// file's own fixed-size loops were already fully provable).
 
 let TEST_SECTORS: u32 = 4; // a handful, enough to exercise multiple disk_write calls
 

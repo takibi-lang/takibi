@@ -166,6 +166,16 @@ turn as many potential traps as possible into compile-time errors instead:
   only** -- there is no if-expression/ternary form (`let x = if (c) {a}
   else {b};` is a syntax error). Assign a `let mut` from each branch
   instead: `let mut x: T = default; if (c) { x = a; }`.
+- **`cond` (in `if`/`while`, and both operands of `&&`/`||`) must be
+  `bool`** -- no C-style implicit int-truthy coercion. `while (1) { ... }`
+  and `if (0) { ... }` are compile errors ("condition must be bool -- a
+  bare integer literal has no boolean value"), matching Rust/Zig rather
+  than C; write `while (true) { ... }` / `if (x != 0) { ... }` instead. A
+  concretely-typed non-bool value (e.g. `if (x)` where `x: i32`) is
+  likewise rejected ("cannot unify i32 with bool"). The same rule applies
+  anywhere else a bare integer literal flows into a `bool`-typed target
+  (`let x: bool = 1;`, `return 1;` from a `-> bool` function, passing a
+  literal for a `bool` parameter) -- all rejected the same way.
 - Assignment: `x = e`, `*p = v`, `arr[i] = v`, `s.field = v`. Compound
   assignments `+=` `-=` `|=` `&=` `^=` `<<=` `>>=` desugar to `x = x op
   rhs` and are supported on all five assignable forms above (`*p`,
@@ -175,7 +185,8 @@ turn as many potential traps as possible into compile-time errors instead:
 ## Expressions and Operators
 
 - Arithmetic: `+` `-` `*` `/` `%`. Comparison: `<` `>` `<=` `>=` `==`
-  `!=`. Logical: `||`, `&&` (via `if`/`while` condition context).
+  `!=`. Logical: `||`, `&&` -- both operands and the result are `bool`
+  (see the `cond` rule under "Statements" above).
   Bitwise: `~` (unary NOT), `>>` (right shift -- arithmetic/sign-extending
   for signed types, logical/zero-extending for unsigned), `<<`, `&`, `|`,
   `^`. Both operands of a bitwise op must be the same integer type.
@@ -308,6 +319,27 @@ fn good() {
     // inspect(t);     // likewise, after release
 }
 ```
+
+**Consequence of `opaque` implying no fields**: since an opaque struct can
+never have fields (see "no constructible value, fields, or size" above),
+any *real* per-instance state a driver built on this pattern needs (e.g.
+which file is open, which descriptor is acquired) has nowhere to live
+except ordinary global variables -- `make()`-style constructors typically
+return the address of one fixed global "token" object
+(`&some_token_storage as *Name`), the same address every time. This makes
+the pattern a **global singleton**: only one live (acquired-but-not-yet-
+released) handle of a given `affine opaque struct` type can meaningfully
+exist at once, system-wide, since a second acquisition before the first
+handle is released would silently overwrite the same backing state. Both
+of this project's real uses of the pattern (`examples/common_stm32/
+eth.tkb`'s `NetRxCpuOwned`, `examples/common/fat12.tkb`'s `FatFile`) are
+single-instance for exactly this reason -- `FatFile`'s driver additionally
+guards against a second `fat_open()` before the first `fat_close()` with
+its own `bool` flag, since the affine checker itself has no way to see
+across two independently acquired handles of the same type. Supporting
+genuinely concurrent instances (e.g. two files open at once) is not
+possible with this pattern alone and would need a different mechanism
+(not yet designed -- see GitHub issue #89's discussion).
 
 `affine opaque struct Name;` marks pointers to that type (`*Name`) as
 affine handles: this is the type-level tool for statically rejecting

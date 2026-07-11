@@ -40,15 +40,17 @@
 // applied to examples/common_qemu/virtio_mmio.tkb's VirtqDesc/VirtqAvail
 // (virtio's legacy layout is native-endian by the same argument).
 //
-// Development process note: this file is deliberately written WITHOUT
-// --forbid-trap -- disk/FAT/root-dir access uses plain checked array/
+// Development process note: --forbid-trap is enabled. This file was first
+// written without it -- disk/FAT/root-dir access uses plain checked array/
 // struct-array indexing (sector*SECTOR_SIZE+i into a caller's buffer,
 // cluster-derived offsets into fat_buf, next_free_root_entry into
 // root_dir_buf) rather than reaching for raw-pointer arithmetic just to
-// dodge bounds checks. See CLAUDE.md's "Development Process" section --
-// --forbid-trap is enabled across this file, fatfs.tkb, sdmmc.tkb, and
-// fatfs_sdcard.tkb together, in one pass, once the whole milestone (FAT12
-// on a real SD card) is demonstrated working end to end, not before.
+// dodge bounds checks (see CLAUDE.md's "Development Process" section) --
+// then --forbid-trap was turned on across this file, fatfs.tkb, sdmmc.tkb,
+// and fatfs_sdcard.tkb together, in one pass, once the whole milestone
+// (FAT12 on a real SD card) was demonstrated working end to end. The later
+// `http_server_sdcard`/`FatFile`-affine-handle work (see HISTORY.md) kept
+// this file --forbid-trap clean throughout.
 
 use "examples/common/netutil.tkb";
 

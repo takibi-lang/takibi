@@ -374,12 +374,29 @@ run_compile_error_test "ptr_cast_wrong"      examples/ptr_cast_wrong/ptr_cast_wr
 run_compile_error_test "const_global_wrong"  examples/const_global_wrong/const_global_wrong.tkb   examples/const_global_wrong/const_global_wrong.error
 run_compile_error_test "forbid_trap_wrong"   examples/forbid_trap_wrong/forbid_trap_wrong.tkb     examples/forbid_trap_wrong/forbid_trap_wrong.error --forbid-trap
 run_forbid_trap_ok_test "forbid_trap_ok"     examples/forbid_trap_ok/forbid_trap_ok.tkb
+run_compile_error_test "cond_not_bool"         examples/cond_not_bool/cond_not_bool.tkb                 examples/cond_not_bool/cond_not_bool.error
+run_compile_error_test "affine_double_consume" examples/affine_double_consume/affine_double_consume.tkb examples/affine_double_consume/affine_double_consume.error
 
 echo ""
 echo "Running DWARF debug-info check (-g build)..."
 echo ""
 
-run_dwarf_test "fizzbuzz (dwarf)" examples/fizzbuzz/kernel.debug.elf examples/fizzbuzz/fizzbuzz.tkb 3
+# DISABLED (2026-07-11): intermittently fails with "fizzbuzz.tkb missing
+# from DWARF file_names table" on a clean `make qemutest` run -- reproduced
+# directly (2 failures in 3 consecutive `make clean && make qemutest`
+# runs). Confirmed NOT a real bug in the generated DWARF: manually running
+# llvm-dwarfdump-19 against the exact kernel.debug.elf left on disk by a
+# failing run finds fizzbuzz.tkb in file_names[5] correctly. The content is
+# right; only this specific read of it, done immediately after ld.lld-19
+# finishes linking, sometimes doesn't see it -- and reproduces on bare
+# Linux (no container) too, so it is not a devcontainer/overlayfs artifact.
+# See GitHub issue for the reproduction writeup and open root-cause
+# question. Not retried/worked around here on purpose (a retry would hide
+# the underlying timing issue rather than fix or understand it) --
+# disabled outright until either root-caused or DWARF becomes something
+# this project actually relies on (no current workflow uses gdb to inspect
+# .tkb variables through it yet).
+# run_dwarf_test "fizzbuzz (dwarf)" examples/fizzbuzz/kernel.debug.elf examples/fizzbuzz/fizzbuzz.tkb 3
 
 FIB_DEBUG_ELF=examples/fibonacci/kernel.debug.elf
 run_dwarf_var_test "fibonacci a (dwarf var)"   "$FIB_DEBUG_ELF" a   DW_TAG_variable          fibonacci.tkb 4 i32

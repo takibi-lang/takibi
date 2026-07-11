@@ -1,7 +1,28 @@
 # takibi
 
 A self-made language compiler written in OCaml 5.4.0. Generates native machine code via an LLVM 19 backend.
-The ultimate goal is to implement a TCP/IP stack and run an HTTP server on Raspberry Pi 3 / RISC-V / STM32 bare-metal environments.
+
+**The ultimate goal of this project is to demonstrate that runtime errors in a monolithic,
+Unix-like kernel -- in the spirit of Linux or NetBSD -- can be lifted into compile-time errors,
+by using type-system features C never had** (refinement types, affine/linear ownership, and
+eventually SMT-backed proof obligations). This is motivated directly by kernel-space
+experience: a userspace SEGV is recoverable (debug it, restart the process), but the
+equivalent fault in monolithic kernel space usually does not trap at all -- it silently
+corrupts memory and can become a security hole. A great deal of static-verification research
+over the last decade has targeted userspace; this project's premise is that kernel space
+needs it more, not less. Rust's ownership model was evaluated and judged insufficiently
+suited to bare-metal kernel code for this purpose; extending a simpler base language (in the
+spirit of ATS2's proof-driven style and its at-view mechanism, generalized past pointers to
+arbitrary linear/affine resources) toward that stated goal was judged more tractable than
+retrofitting it onto an existing systems language.
+
+The TCP/IP stack + bare-metal HTTP server (Raspberry Pi 3 / RISC-V / STM32) was the first
+waypoint on the way there, and is already implemented and running -- see the QEMU/AArch64 and
+STM32F746G-DISCOVERY sections below. It exists to prove takibi can express real, nontrivial
+systems code at all; the harder, ongoing work is proving that code's runtime-error surface can
+be pushed to compile time, which the `--forbid-trap` refinement-type work below is the first
+concrete step toward, on the way to expressing Unix-like kernel constructs (schedulers,
+virtual memory, drivers, syscall boundaries) with the same discipline.
 
 **Looking for the current language syntax/grammar (types, statements, expressions)?
 See `SPEC.md`.** This file is the engineering log -- design rationale, bugs found
@@ -211,8 +232,10 @@ lib/
   parser.mly      -- Menhir (includes pointer types, array types, function pointer types, prefix * / & / unary -, as cast)
   types.ml        -- internal type (ty) + HM type inference output types + StringMap
   type_inf.ml     -- Hindley-Milner type inference (immutable StringMap based)
+  type_layout.ml  -- struct/enum layout table (fields, packed, align) backing sizeof/offsetof (issue #40)
   typechecker.ml  -- external wrapper (called from main.ml)
   llvm_gen.ml     -- LLVM IR generation and object file output
+  use_resolver.ml -- resolves `use "path/to/file.tkb";` into the flat file list (issue #55)
 bin/
   main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--forbid-trap] [--version]`)
                      Multiple .tkb files are concatenated (flat global namespace) before compilation.
@@ -242,6 +265,11 @@ examples/
                      shared by every protocol example on both targets
     inet_checksum.tkb -- RFC 1071 Internet checksum (checksum_add/checksum_fold),
                      pure compute, no MMIO
+    fat12.tkb     -- FAT12 filesystem core (issue #61/#98): fat_format/fat_open/fat_read/
+                     fat_write/fat_close over mem_block_read/mem_block_write, which callers
+                     (fatfs.tkb's in-memory `disk`, fatfs_sdcard.tkb's/http_server_sdcard.tkb's
+                     real SDMMC1 adapter) supply. FatFile is an `affine opaque struct` --
+                     see HISTORY.md's issue #97 follow-up entry
   common_qemu/    -- QEMU/AArch64-only HAL: startup assembly, linker script, and every
                      MMIO-backed driver (UART, GIC, timer, virtio-net). Split out from
                      common/ once enough of common/ turned out to be genuinely
@@ -276,6 +304,9 @@ examples/
                      HTTP_SERVER_IP (http_server's own IP, see "Network config" below)
     stm32_stub.tkb -- no-op stand-ins for STM32-only symbols a shared example's dead
                      QEMU-side code still references (see the STM32 section below)
+    semihosting_asm.S -- ARM semihosting file-I/O stubs (semihosting_open/write/close/read),
+                     used by examples/fatfs to dump its in-memory disk image to a host file
+                     for mtools to verify
   common_stm32/   -- STM32F746G-DISCOVERY (Cortex-M7) HAL, mirroring common_qemu's
                      function names/signatures so every example .tkb file is a single
                      file shared by both targets -- see "STM32F746G-DISCOVERY Bare-Metal
@@ -307,8 +338,16 @@ examples/
     sem_asm.S     -- atomic semaphore: sem_wait/sem_post (ldrex/strex/dmb)
     eth.tkb       -- net_init/net_rx_acquire/net_rx_frame/net_transmit/net_rx_release/net_read_mac
                      (real Ethernet MAC/PHY/DMA driver, see "STM32 Ethernet" above)
+    eth_sdmmc_regs.tkb -- RCC_AHB1ENR/RCC_APB2ENR/GPIOC_MODER/GPIOC_OSPEEDR, split out of
+                     eth.tkb and sdmmc.tkb (issue #97 follow-up) once http_server_sdcard.tkb
+                     became the first program to need both HALs and exposed the duplicate --
+                     see HISTORY.md
     netconfig.tkb -- OUR_MAC/OUR_IP (STM32 board's fixed network identity),
                      HTTP_SERVER_IP (same value as OUR_IP here, see "Network config" below)
+    sdmmc.tkb     -- disk_initialize/disk_status/disk_read/disk_write (real SDMMC1 microSD
+                     driver, DMA+interrupt both directions, issue #62)
+    semihosting_stub.S -- no-op stand-ins for examples/fatfs's semihosting extern fns on
+                     this target (no ARM semihosting on real hardware)
   <name>/         -- each directory: see the leading comment in <name>.tkb for a description.
                      Every example is now a single file compiled for both targets -- no
                      `<name>_stm32.tkb` exists anywhere in this repo (see the STM32 section
@@ -323,6 +362,10 @@ scripts/
                      execution as run_hwtest_ram.sh, over a genuinely cacheable AXI SRAM1
                      DMA region -- see "STM32 Hardware Test Harness: RAM Execution" below.
                      Supersedes the deleted run_hwtest_net.sh.
+  provision_http_server_sdcard.sh -- writes a real mtools-built FAT12 image onto
+                     http_server_sdcard's SD card via OpenOCD + the real SDMMC1 driver, no
+                     human involved; shared by make hwcheck-net and make stm32-http-server-sdcard
+                     (issue #97, see HISTORY.md)
 test/
   test_takibi.ml  -- Alcotest unit tests for parser / type_inf
 ```
@@ -419,8 +462,8 @@ size.
   can't help with regardless of implementation effort). A cast whose source range does NOT fit the target base
   (a genuine narrowing/truncating cast) is unaffected -- falls back to exactly today's plain-unrefined-target
   behavior, same as before this feature existed.
-- **`sizeof(T)` cannot be used as an array size** (`[T; sizeof(Foo)]`) -- see the `sizeof(T)` section above for why
-  (parser-time vs. codegen-time resolution mismatch) and what combining them would require.
+- **`sizeof(T)` cannot be used as an array size** (`[T; sizeof(Foo)]`) -- see HISTORY.md's "sizeof(T) Spans 4 Files"
+  entry for why (parser-time vs. codegen-time resolution mismatch) and what combining them would require.
 - **Lightweight `use "path/to/file.tkb";` file dependencies are implemented (GitHub issue #55)** -- a `.tkb` file
   can now declare, in source, which other files it needs; `bin/main.ml` resolves the transitive closure starting
   from the command-line entry file(s) (`lib/use_resolver.ml`) instead of requiring every needed file to be named
@@ -473,11 +516,13 @@ size.
   (multi-core, issue #6, still Backlog): a missing memory barrier or cache-maintenance op between cores can look
   perfectly correct in QEMU and fail only on real silicon, so that kind of work should get real-hardware
   integration testing early, not just as a final check once "everything already works in QEMU."
-- **STM32 Ethernet: all five examples are ported -- `net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo`,
+- **STM32 Ethernet: five examples are ported -- `net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo`,
   and `http_server` all run on real hardware with real MAC/PHY/DMA, and are the *same source file* as
   their QEMU/virtio-net counterparts.** `examples/common_stm32/eth.tkb` is a from-scratch MAC/DMA-
   descriptor-ring driver + MDIO-based LAN8742A PHY init over RMII (RMII pins, PHY bring-up, and the DMA
-  descriptor ring design are documented in that file's header comment).
+  descriptor ring design are documented in that file's header comment). A sixth, `http_server_sdcard`
+  (GitHub issue #97, see HISTORY.md for the full milestone), also uses `eth.tkb` but is STM32-only (no
+  QEMU counterpart, since it also needs the real SD card).
 
   **Unified driver API**: `eth.tkb` and `examples/common_qemu/virtio_mmio.tkb` both expose the identical
   `net_init() -> i32` / `net_rx_wait()` / `net_rx_acquire() -> *NetRxCpuOwned` /
@@ -597,7 +642,7 @@ size.
 ## STM32F746G-DISCOVERY Bare-Metal (Cortex-M7)
 
 Real-hardware port, running alongside (not replacing) the QEMU/AArch64 build. Nearly every
-example is now ported (50 as of this writing, per `Makefile`'s `STM32_RAM_ELFS` -- check
+example is now ported (55 as of this writing, per `Makefile`'s `STM32_RAM_ELFS` -- check
 that variable directly rather than trusting this number, since it drifts as examples are
 added; this project has a history of this exact count going stale), including
 `net_echo`/`arp_reply`/`icmp_echo`/`tcp_echo`/
@@ -866,8 +911,10 @@ now runs http_server TWICE: `http_server (stm32/ram)` (unchanged) and a new
 `examples/http_server/kernel_stm32.bin` (the exact sequence `make stm32-http-server`
 itself performs, `--connect-under-reset` included) before running the same
 `eth_http_server_test.py`. `hwcheck-net`'s own prerequisites gained
-`examples/http_server/kernel_stm32.bin` accordingly. Confirmed on real hardware: all 6
-`hwcheck-net` tests pass, adding only ~2s to the suite's total runtime.
+`examples/http_server/kernel_stm32.bin` accordingly. Confirmed on real hardware: all
+`hwcheck-net` tests pass at the time (6 then; more have been added since, e.g.
+`http_server_sdcard`'s own RAM+Flash pair -- see HISTORY.md), adding only ~2s to the
+suite's total runtime.
 
 ## virtio-net Examples (examples/net_echo, examples/arp_reply, examples/icmp_echo)
 

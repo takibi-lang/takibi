@@ -16,13 +16,15 @@
 // integration test instead of conflated into one "everything touches SD
 // card" test.
 //
-// Scope for this first working version (minimal effort, matching this
-// project's established "no --forbid-trap/no refinement types until the
-// whole milestone works" process): SD cards only (SDSC/SDHC/SDXC via
-// CMD8+ACMD41's HCS bit), not eMMC (eMMC's init sequence has no CMD8/ACMD41
-// dance -- a separate concern for whenever eMMC hardware is in front of us).
-// 1-bit bus width (D0 only) -- 4-bit bus width is a straightforward follow-up
-// once this works. Single 512-byte block transfer only.
+// Scope for this first working version (minimal effort -- first written
+// without --forbid-trap/refinement types, matching this project's
+// established process, then --forbid-trap was turned on once the whole
+// fatfs+SD-card milestone worked end to end): SD cards only (SDSC/SDHC/
+// SDXC via CMD8+ACMD41's HCS bit), not eMMC (eMMC's init sequence has no
+// CMD8/ACMD41 dance -- a separate concern for whenever eMMC hardware is in
+// front of us). 1-bit bus width (D0 only) -- 4-bit bus width is a
+// straightforward follow-up once this works. Single 512-byte block
+// transfer only.
 //
 // Both disk_write's and disk_read's bulk 512-byte data phases are DMA +
 // interrupt driven (DMA2 Stream3/Channel4, direction selected per call),
