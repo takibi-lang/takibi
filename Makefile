@@ -722,21 +722,25 @@ COMMON_STM32_ETH_SDMMC_REGS := $(COMMON_STM32_DIR)/eth_sdmmc_regs.tkb
 # purely for Make's own staleness tracking. STM32-only (no virtual SD
 # controller under QEMU, same reasoning as fatfs_sdcard/sdcard).
 #
-# --forbid-trap deliberately OMITTED: this is new milestone work (see
-# CLAUDE.md's Development Process section) -- gets turned on in a later
-# pass once the whole milestone (this file + the installer below) is
-# verified working end-to-end against real hardware.
+# --forbid-trap enabled: this file and the installer below were first
+# built and verified against real hardware WITHOUT --forbid-trap (see
+# CLAUDE.md's Development Process section), then hardened together in one
+# pass once the whole milestone worked end to end -- see
+# http_server_sdcard.tkb's own header comment for what --forbid-trap did
+# and did not flag.
 examples/http_server_sdcard/http_server_sdcard_stm32.o: examples/http_server_sdcard/http_server_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
-# http_server_sdcard_install: test-only helper (make hwcheck-net) that
-# writes a real mtools-built FAT12 image onto the SD card via disk_write,
-# so the hardware test needs no human to touch the card -- see that file's
-# own header comment and scripts/run_hwtest_net_ram.sh's
-# install_sdcard_image. Never `use`s fat12.tkb (writes raw sectors only).
-# Same --forbid-trap-omitted reasoning as http_server_sdcard above.
+# http_server_sdcard_install: provisioning-only helper (make hwcheck-net,
+# make stm32-http-server-sdcard) that writes a real mtools-built FAT12
+# image onto the SD card via disk_write, so neither target needs a human
+# to touch the card -- see that file's own header comment and
+# scripts/provision_http_server_sdcard.sh. Never `use`s fat12.tkb (writes
+# raw sectors only). --forbid-trap enabled, same milestone-wide reason as
+# http_server_sdcard above -- see that file's own header comment for the
+# one site --forbid-trap flagged here and how it was fixed.
 examples/http_server_sdcard_install/http_server_sdcard_install_stm32.o: examples/http_server_sdcard_install/http_server_sdcard_install.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SDMMC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # examples/http_server is the one deliberate exception to "every STM32
 # example runs from RAM" (see STM32_RAM_EXAMPLES's comment above): flashing

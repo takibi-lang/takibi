@@ -27,9 +27,24 @@
 // provisioning infrastructure for http_server_sdcard.tkb, part of the
 // same milestone.
 //
-// Deliberately written without --forbid-trap/refinement types, matching
-// this project's process for new .tkb work (see CLAUDE.md's Development
-// Process section).
+// --forbid-trap clean: first written and verified against real hardware
+// without --forbid-trap, per CLAUDE.md's Development Process section,
+// then hardened in one pass together with http_server_sdcard.tkb once
+// the whole milestone worked end to end. The one site --forbid-trap
+// flagged here: `staging[off + i]` inside the sector-copy loop, where
+// `off = s * SECTOR_SIZE` and s came from a `while (s < TOTAL_SECTORS as
+// u32)` loop -- a plain runtime u32 with no provable range, unlike a
+// `for` loop counter. Fixed by turning that into `for s: usize in
+// 0..<TOTAL_SECTORS` (matching TOTAL_SECTORS's own declared type; a `for
+// s: u32 in 0..<TOTAL_SECTORS` loop fails to typecheck instead, since
+// TOTAL_SECTORS is usize-typed from its own declaration and takibi has
+// no implicit int-width coercion -- the same "cannot unify usize with
+// u32" error `let s: u32 = TOTAL_SECTORS;` without a cast would give;
+// nothing for-loop-specific about it), with disk_write's own u32
+// parameter satisfied by a single `s as u32` at its call site. Same
+// if-narrowed-multiplier-times-for-loop-offset shape examples/common/
+// fat12.tkb's own mem_block_read/mem_block_write already use for the
+// identical "byte i of sector s in a flat buffer" proof.
 //
 // SECTOR_SIZE/TOTAL_SECTORS are duplicated from examples/common/fat12.tkb
 // rather than `use`d from it: this file only ever writes raw sectors via
@@ -73,16 +88,23 @@ fn app_main() {
 
         let mut sector_buf: [u8; SECTOR_SIZE];
         let mut all_ok: bool = true;
-        let mut s: u32 = 0;
-        while (s < (TOTAL_SECTORS as u32)) {
-            let off: usize = (s as usize) * SECTOR_SIZE;
+        // Loop counter is usize, matching TOTAL_SECTORS's own declared
+        // type (needed for `staging`'s array size above) -- takibi has no
+        // implicit int-width coercion, so a `for s: u32 in 0..<
+        // TOTAL_SECTORS` loop would conflict with TOTAL_SECTORS's own
+        // usize type at unification time (same error `let s: u32 =
+        // TOTAL_SECTORS;` without a cast would give). Casting only the
+        // one value disk_write actually needs as u32, right at its call
+        // site, keeps TOTAL_SECTORS as the single source of truth instead
+        // of duplicating its value as a second literal to keep in sync.
+        for s: usize in 0..<TOTAL_SECTORS {
+            let off: usize = s * SECTOR_SIZE;
             for i: usize in 0..<SECTOR_SIZE {
                 sector_buf[i] = staging[off + i];
             }
-            if (disk_write(s, sector_buf) != 0) {
+            if (disk_write(s as u32, sector_buf) != 0) {
                 all_ok = false;
             }
-            s = s + 1;
         }
 
         if (all_ok) {

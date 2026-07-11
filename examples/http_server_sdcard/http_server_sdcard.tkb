@@ -27,22 +27,29 @@
 //
 // SD card provisioning is fully automated, no human touches the card:
 // examples/http_server_sdcard_install/http_server_sdcard_install.tkb
-// writes a real mtools-built FAT12 image onto the card via disk_write
-// before every `make hwcheck-net` run (see that file's header comment and
-// scripts/run_hwtest_net_ram.sh's install_sdcard_image). This file's own
-// app_main() only ever fat_mount()s -- it deliberately does NOT
-// fat_format() the card (unlike fatfs_sdcard.tkb), since the whole point
-// is showing the card's real, externally-provisioned content.
+// writes a real mtools-built FAT12 image onto the card via disk_write,
+// run by scripts/provision_http_server_sdcard.sh -- shared by both
+// `make hwcheck-net` (scripts/run_hwtest_net_ram.sh) and
+// `make stm32-http-server-sdcard` (Makefile), see that script's header
+// comment. This file's own app_main() only ever fat_mount()s -- it
+// deliberately does NOT fat_format() the card (unlike fatfs_sdcard.tkb),
+// since the whole point is showing the card's real, externally
+// -provisioned content.
 //
-// Deliberately written WITHOUT --forbid-trap for this first working
-// version, per CLAUDE.md's Development Process section: this is new
-// milestone work (combining fatfs_sdcard's real-SD access with
-// http_server's proven TCP/HTTP layer in a genuinely new way -- reading
-// file bytes into the reply instead of the static html_body), verified by
-// actually running it against real hardware, not by making the compiler
-// happy. --forbid-trap gets turned on in a later, separate pass once this
-// works end to end (see examples/http_server_sdcard_install/
-// http_server_sdcard_install.tkb, part of the same milestone).
+// --forbid-trap clean: this file was first written and verified against
+// real hardware WITHOUT --forbid-trap, per CLAUDE.md's Development
+// Process section (new milestone work -- combining fatfs_sdcard's
+// real-SD access with http_server's proven TCP/HTTP layer in a genuinely
+// new way, reading file bytes into the reply instead of the static
+// html_body). Once the whole milestone (this file + the installer) was
+// demonstrated working end to end -- verified over real HTTP via a real
+// browser, and by physically removing the card and confirming INDEX.TXT
+// with a normal PC file manager -- --forbid-trap was turned on in one
+// pass; no sites needed fixing here (every new access is either a fixed-
+// size fat_read into html_body, matching its own declared 512-byte size,
+// or reuses http_server.tkb's already-proven slice-based logic
+// unchanged). See http_server_sdcard_install.tkb, part of the same
+// milestone, for the one file that DID need a fix.
 //
 // STM32-only: there is no virtual SD controller in this project's QEMU
 // setup (matches examples/fatfs_sdcard and examples/sdcard's own
