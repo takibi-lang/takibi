@@ -76,6 +76,7 @@ COMMON_VIRTIO_MMIO := $(COMMON_QEMU_DIR)/virtio_mmio.tkb
 COMMON_INET_CKSUM  := $(COMMON_DIR)/inet_checksum.tkb
 COMMON_NETUTIL     := $(COMMON_DIR)/netutil.tkb
 COMMON_FAT12       := $(COMMON_DIR)/fat12.tkb
+COMMON_RTOS        := $(COMMON_DIR)/rtos.tkb
 COMMON_RTC         := $(COMMON_QEMU_DIR)/rtc.tkb
 COMMON_NETCONFIG   := $(COMMON_QEMU_DIR)/netconfig.tkb
 COMMON_STM32_STUB  := $(COMMON_QEMU_DIR)/stm32_stub.tkb
@@ -83,7 +84,7 @@ COMMON_STM32_STUB  := $(COMMON_QEMU_DIR)/stm32_stub.tkb
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
 # Convention: examples/<name>/<name>.tkb -> examples/<name>/kernel.elf
-EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct struct_refined msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof_offsetof slice foreach int64 net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server fatfs affine_escape_via_index align_ptr_proof klock_guard percpu chan_rendezvous
+EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct struct_refined msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof_offsetof slice foreach int64 net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server fatfs affine_escape_via_index align_ptr_proof klock_guard percpu chan_rendezvous rtos_demo
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
@@ -312,6 +313,7 @@ COMMON_UART_IRQ_STUB := $(COMMON_QEMU_DIR)/uart_irq_stub.tkb
 TIMER_OBJS := examples/preempt/preempt.o examples/semaphore/semaphore.o \
               examples/watchdog/watchdog.o
 SYNC_OBJS  := examples/condvar/condvar.o examples/msgqueue/msgqueue.o examples/chan_rendezvous/chan_rendezvous.o
+RTOS_OBJS  := examples/rtos_demo/rtos_demo.o
 NET_OBJS   := examples/net_echo/net_echo.o examples/arp_reply/arp_reply.o
 CHECKSUM_OBJS := examples/inet_checksum/inet_checksum.o examples/ip_parse/ip_parse.o \
                  examples/tcp_parse/tcp_parse.o
@@ -325,7 +327,7 @@ APP_OBJS   := examples/icmp_echo/icmp_echo.o examples/tcp_echo/tcp_echo.o \
 RTC_OBJS   := examples/rtc/rtc.o examples/timer/timer.o
 GETC_OBJS  := examples/echo/echo.o
 FATFS_OBJS := examples/fatfs/fatfs.o
-SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS) $(NET_OBJS) $(CHECKSUM_OBJS) $(APP_OBJS) \
+SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS) $(RTOS_OBJS) $(NET_OBJS) $(CHECKSUM_OBJS) $(APP_OBJS) \
                 $(RTC_OBJS) $(GETC_OBJS) $(FATFS_OBJS)
 STANDARD_OBJS := $(filter-out $(SPECIAL_OBJS), $(EXAMPLE_OBJS))
 
@@ -361,8 +363,15 @@ $(GETC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMM
 $(TIMER_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_STM32_STUB) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_TIMER) $(COMMON_STM32_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
-# condvar.tkb/msgqueue.tkb `use` sync.tkb and gic.tkb themselves now.
+# condvar.tkb/msgqueue.tkb/chan_rendezvous.tkb `use` sync.tkb and gic.tkb themselves now.
 $(SYNC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) $(COMMON_STM32_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_TIMER) $(COMMON_STM32_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
+
+# rtos_demo.tkb `use`s common/rtos.tkb, which itself `use`s sync.tkb and
+# gic.tkb -- COMMON_RTOS is listed here purely for Make's own staleness
+# tracking (Make cannot see into a .tkb file's own `use` declarations),
+# same reasoning as every other COMMON_* prerequisite in this file.
+$(RTOS_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_STM32_STUB) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_TIMER) $(COMMON_STM32_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
 # COMMON_NETCONFIG (OUR_IP) is unused-but-harmless for net_echo (no
@@ -412,7 +421,8 @@ $(APP_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMO
 TIMER_KERNELS := examples/preempt/kernel.elf examples/watchdog/kernel.elf
 # timer_asm.o + sem_asm.o (semaphore, condvar, msgqueue all need both)
 SEM_KERNELS   := examples/semaphore/kernel.elf \
-                 examples/condvar/kernel.elf examples/msgqueue/kernel.elf examples/chan_rendezvous/kernel.elf
+                 examples/condvar/kernel.elf examples/msgqueue/kernel.elf examples/chan_rendezvous/kernel.elf \
+                 examples/rtos_demo/kernel.elf
 # semihosting_asm.o only (fatfs.tkb's extern fn semihosting_open/write/close)
 FATFS_KERNELS := examples/fatfs/kernel.elf
 GENERIC_KERNELS := $(filter-out $(TIMER_KERNELS) $(SEM_KERNELS) $(FATFS_KERNELS), $(ALL_KERNELS))

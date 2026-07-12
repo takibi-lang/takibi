@@ -462,6 +462,7 @@ run_test "align_ptr_proof" examples/align_ptr_proof/kernel.elf examples/align_pt
 run_test "klock_guard" examples/klock_guard/kernel.elf examples/klock_guard/klock_guard.expected
 run_test "percpu" examples/percpu/kernel.elf examples/percpu/percpu.expected
 run_test "chan_rendezvous" examples/chan_rendezvous/kernel.elf examples/chan_rendezvous/chan_rendezvous.expected
+run_test "rtos_demo" examples/rtos_demo/kernel.elf examples/rtos_demo/rtos_demo.expected
 run_test "inet_checksum" examples/inet_checksum/kernel.elf examples/inet_checksum/inet_checksum.expected
 run_test "ip_parse"      examples/ip_parse/kernel.elf      examples/ip_parse/ip_parse.expected
 run_test "tcp_parse"     examples/tcp_parse/kernel.elf     examples/tcp_parse/tcp_parse.expected

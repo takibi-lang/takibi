@@ -6706,3 +6706,119 @@ proposed alongside the original API) is the next step, not yet started
 -- to be confirmed with the user before starting, since it is a genuine
 consolidation/design step rather than a straightforward continuation of
 the same PoC pattern.
+
+## Simple RTOS (issue #66): combining the 3 PoCs into `examples/common/rtos.tkb`
+
+Along the way, discussed with the user (exploratory, not implementation)
+why `examples/chan_rendezvous` uses an unbuffered (capacity-0) channel
+rather than a bounded queue like FreeRTOS's `xQueueSend`/`xQueueReceive`.
+Recorded here since the reasoning wasn't fully spelled out in that PoC's
+own entry above: there are genuinely two separate justifications, not
+one. (1) Takibi-specific: a buffered queue of pointers, for a future
+zero-copy v2, would need per-slot ownership tracking -- exactly issue
+#89's still-open affine multi-instance wall. A copy-based rendezvous
+channel has no live buffer to own, sidestepping the problem by
+construction; this reason doesn't actually bite yet for v1's plain
+`i32`-by-value channels. (2) General CSP theory: an unbuffered
+send/recv pair is a single atomic joint event, keeping both manual and
+model-checked (FDR-style) reasoning tractable -- a bounded queue adds an
+extra "how many items queued" state dimension per channel, and splits a
+simple safety property (did the handshake happen) from a separate
+liveness property (will it eventually drain). Buffering is a real,
+legitimate throughput optimization (fewer forced context switches, burst
+absorption) -- not added now because nothing currently measures a need
+for it; `examples/msgqueue` already demonstrates the buffered end of
+this same design space, so both points already exist as PoCs if a
+future comparison is needed.
+
+**Integration**: `examples/common/rtos.tkb` combines all three PoCs
+verbatim (KLock/KGuard/klock/kunlock from `klock_guard`, `cpu_id()` from
+`percpu`, Chan/chan_send/chan_recv from `chan_rendezvous`) plus new
+generic task-registration/scheduling glue the PoCs didn't have:
+`rtos_task_add(id, sp)` / `rtos_start()` / `task_self()`, generalizing
+the fixed-3-task `SchedState`/`irq_dispatch`/`SysTick_Handler`/
+`pendsv_dispatch` pattern every prior scheduler-using example (
+`preempt`, `msgqueue`, `chan_rendezvous`) had duplicated inline into one
+NTASKS=4-sized shared definition (task 0 is always `app_main()` itself,
+tasks 1..3 available via `rtos_task_add`).
+
+**`task_yield()` deliberately excluded from this pass**, per an explicit
+check-in with the user before starting: no PoC or demo needs voluntary
+task switching (every task already blocks correctly via `chan_send`/
+`chan_recv`/spin-on-flag, released at the next scheduler tick), and it
+would need a genuinely new mechanism (SVC or PendSV-kick-based voluntary
+switch) nothing in this codebase has today. User chose to defer it
+(matching the recommended option) until a concrete task actually needs
+it, rather than build it speculatively alongside the rest of this file.
+`task_self()` was kept in this pass (the other half of that same
+check-in question) since it is nearly free -- a narrowed getter over
+`sched.current_task`, no new mechanism -- and the proposed API already
+named it.
+
+**Two real bugs found integrating, neither visible in any individual
+PoC**:
+1. Raw-pointer indexing requires the index to be `isize` specifically,
+   not merely a provably-in-range `usize` -- `rtos_task_add`'s
+   `t[id]` (`id: {0..<4 as usize}`, `t: *usize`) was rejected with
+   `raw-pointer index/offset must be isize, got '{0..<4}'`. None of the
+   three individual PoCs hit this because none of them index a raw
+   pointer with a refined-`usize`-typed value from a FUNCTION PARAMETER
+   -- `klock_guard`/`percpu`/`chan_rendezvous` only ever index with a
+   local `isize` field (`sched.current_task`) or a genuine `[T; N]`
+   array (which the array-indexing path, not raw-pointer indexing,
+   accepts a `usize`/refined type for). Fixed with an explicit
+   `id as isize`. Worth remembering: raw-pointer (`*T`) indexing in this
+   language is unchecked C-style pointer arithmetic with a fixed
+   required index type (`isize`), a genuinely different code path from
+   bounds-checked `[T; N]` array indexing (which is where the refined-
+   type/`--forbid-trap` machinery actually applies) -- confirmed by
+   noting `examples/preempt/preempt.tkb`'s own equivalent `sp[sched.current_task]`
+   already compiles under `--forbid-trap` today specifically because it
+   is raw-pointer arithmetic with no bounds check inserted at all, not
+   because the index was ever proven in range.
+2. A fixed `task_count = 4` (matching the new `NTASKS`-sized `tcb_sp`
+   array) hung the demo silently: the round-robin switch in `irq_dispatch`
+   /`pendsv_dispatch` visits every slot up to `task_count`, but
+   `rtos_demo.tkb` only calls `rtos_task_add` for ids 1 and 2 (a 3-task
+   demo, like `preempt`/`msgqueue`/`chan_rendezvous` before it), leaving
+   slot 3 permanently zero -- the scheduler eventually switched to a
+   task with stack pointer 0 and hung with no further UART output.
+   Fixed by starting `sched.task_count` at 1 (just task 0) and having
+   `rtos_task_add` raise it to `id + 1` whenever a higher id is
+   registered, so `task_count` always tracks exactly how many task slots
+   have actually been initialized, matching the original per-PoC
+   fixed-3 SchedStates automatically for a 3-task demo with no separate
+   task-count argument needed anywhere in the API.
+
+**Verified via real QEMU execution** of `examples/rtos_demo` (two tasks,
+ping/pong over two Chans exactly like `chan_rendezvous`, but each also
+bumping a `KLock`-protected `Shared.counter` on every iteration to prove
+the lock and the channel are independent, composable primitives rather
+than accidentally depending on each other; `cpu_id()` printed from
+`app_main` and `task_self()` printed after the scheduler stops, the
+latter confirming `app_main` is genuinely task 0). Output (`cpu_id: 0`,
+`ping got: 0/10/20/30/40`, `shared counter: 10` [5 iterations x 2 tasks
+x 1 each], `task_self: 0`, `done`) confirmed deterministic across 3
+repeated runs, matching every other value already independently
+confirmed by the 3 individual PoCs. Compiled `--forbid-trap`-clean
+(after the `isize` cast fix above -- no unrefined-first pass needed,
+same reasoning as every RTOS PoC before it: no unproven array indexing
+anywhere in the combined file).
+
+**Files**: `examples/common/rtos.tkb` (new), `examples/rtos_demo/
+rtos_demo.tkb` + `.expected` (new), `Makefile` (new `COMMON_RTOS`
+variable, new `RTOS_OBJS` group with its own compile rule -- kept
+separate from `SYNC_OBJS` rather than folded in, since `COMMON_RTOS` is
+only a real prerequisite for `rtos_demo.o`, not `condvar.o`/
+`msgqueue.o`/`chan_rendezvous.o`; `rtos_demo.o` added to `SEM_KERNELS`
+for linking, needing the same `sem_asm.o` as every other `sync.tkb`-
+based example; `EXAMPLES` list), `scripts/run_qemutest.sh` (1 new
+registration). `make check` (84/84) and `make langcheck` pass.
+
+This closes out the three-PoC RTOS exploration the user asked to see
+"one at a time" -- all three are now both independently verified AND
+integrated into one reusable file with a working combined demo. Further
+RTOS work (task_yield, fine-grained locking beyond the giant lock,
+issue #108's module-private visibility gap, real multi-core once issue
+#6 has hardware) is left for whenever a concrete next need arises, per
+this project's YAGNI principle.

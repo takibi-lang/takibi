@@ -1,0 +1,103 @@
+// Combined demo for examples/common/rtos.tkb (GitHub issue #66),
+// exercising all three integrated PoCs together on the existing
+// preempt scheduler:
+//   - rtos_task_add/rtos_start replace each PoC's own inline
+//     SchedState/sp[1]/sp[2] wiring (examples/klock_guard didn't need
+//     the scheduler at all; examples/percpu didn't either; only
+//     examples/chan_rendezvous did, and did it inline).
+//   - Two tasks (ping/pong) rendezvous over two Chans (examples/
+//     chan_rendezvous's own ping-pong, unchanged in shape) while ALSO
+//     both bumping a KLock-protected shared counter (examples/
+//     klock_guard's accessor idiom) on every iteration -- proving the
+//     kernel lock and the channel are independent, composable
+//     primitives rather than accidentally depending on each other.
+//   - cpu_id() (examples/percpu) is printed once from app_main and once
+//     from task_self() at the end, the latter confirming app_main is
+//     genuinely task 0 by the time the scheduler stops.
+use "examples/common/rtos.tkb";
+
+let mut the_lock: KLock;
+
+struct Shared {
+    counter: i32;
+}
+
+let mut shared: Shared;
+
+fn shared_add(g: borrow *KGuard, delta: i32) {
+    shared.counter = shared.counter + delta;
+}
+
+fn shared_get(g: borrow *KGuard) -> i32 {
+    return shared.counter;
+}
+
+let mut chan_ab: Chan = {1, 0, 0, 0, 0};
+let mut chan_ba: Chan = {1, 0, 0, 0, 0};
+
+let mut ping_done: io i32 = 0;
+let mut pong_done: io i32 = 0;
+let mut rtos_done: io i32 = 0;
+
+let mut stack_a: [u8; 4096];
+let mut stack_b: [u8; 4096];
+
+fn task_ping() {
+    for i: i32 in 0..<5 {
+        let g: *KGuard = klock(&the_lock);
+        shared_add(g, 1);
+        kunlock(g, &the_lock);
+
+        chan_send(&chan_ab, i);
+        let v: i32 = chan_recv(&chan_ba);
+        uart_puts("ping got: ");
+        uart_print(v);
+        uart_puts("\r\n");
+    }
+    ping_done = 1;
+    let p: *io i32 = &rtos_done;
+    while (*p == 0) {}
+}
+
+fn task_pong() {
+    for i: i32 in 0..<5 {
+        let v: i32 = chan_recv(&chan_ab);
+
+        let g: *KGuard = klock(&the_lock);
+        shared_add(g, 1);
+        kunlock(g, &the_lock);
+
+        chan_send(&chan_ba, v * 10);
+    }
+    pong_done = 1;
+    let p: *io i32 = &rtos_done;
+    while (*p == 0) {}
+}
+
+fn app_main() {
+    uart_puts("cpu_id: ");
+    uart_print(cpu_id());
+    uart_puts("\r\n");
+
+    rtos_task_add(1, setup_task_stack(stack_a + 4096, task_ping));
+    rtos_task_add(2, setup_task_stack(stack_b + 4096, task_pong));
+    rtos_start();
+
+    let pp: *io i32 = &ping_done;
+    let pc: *io i32 = &pong_done;
+    while (*pp == 0 || *pc == 0) {}
+    scheduler_disable();
+    rtos_done = 1;
+
+    let g: *KGuard = klock(&the_lock);
+    uart_puts("shared counter: ");
+    uart_print(shared_get(g));
+    uart_puts("\r\n");
+    kunlock(g, &the_lock);
+
+    uart_puts("task_self: ");
+    uart_print(task_self());
+    uart_puts("\r\n");
+
+    uart_puts("done\r\n");
+}

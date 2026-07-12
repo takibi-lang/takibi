@@ -1,0 +1,9 @@
+cpu_id: 0
+ping got: 0
+ping got: 10
+ping got: 20
+ping got: 30
+ping got: 40
+shared counter: 10
+task_self: 0
+done
