@@ -270,6 +270,14 @@ examples/
                      (fatfs.tkb's in-memory `disk`, fatfs_sdcard.tkb's/http_server_sdcard.tkb's
                      real SDMMC1 adapter) supply. FatFile is an `affine opaque struct` --
                      see HISTORY.md's issue #97 follow-up entry
+    rtos.tkb      -- Simple RTOS (issue #66) task-facing API: cpu_id() (examples/percpu),
+                     KLock/KGuard/klock/kunlock (examples/klock_guard), Chan/chan_send/
+                     chan_recv (examples/chan_rendezvous), plus generic rtos_task_add/
+                     rtos_start/task_self scheduling glue generalized from the fixed-3-task
+                     pattern examples/preempt/examples/msgqueue duplicated inline. QEMU-only
+                     today (not yet in STM32_RAM_EXAMPLES) -- see HISTORY.md's RTOS entries.
+                     task_yield() intentionally not implemented yet (YAGNI -- no task needs
+                     voluntary switching today, see that file's header comment)
   common_qemu/    -- QEMU/AArch64-only HAL: startup assembly, linker script, and every
                      MMIO-backed driver (UART, GIC, timer, virtio-net). Split out from
                      common/ once enough of common/ turned out to be genuinely
