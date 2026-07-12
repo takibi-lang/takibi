@@ -7,13 +7,10 @@
 // the protocol state machine remains unchanged, but the storage subsystem is
 // now behind a task boundary.
 //
-// STAGE 1 SCOPE (deliberately incremental, see the design discussion):
-// any GET request gets the SAME fixed file's content back (SD_FILE_NAME
-// below), read fresh from the card on every request via fat_open/fat_read
-// -- no request-path parsing, no directory listing, no multiple files yet.
-// This proves the real wiring (HTTP -> FAT12 -> SDMMC1 -> real card bytes
-// -> HTTP response) end to end before growing into directory listing +
-// multi-file serving as a later increment.
+// STAGE 2 SCOPE: GET / maps to INDEX.HTM, and simple single-component
+// 8.3 paths such as /ABOUT.HTM map to their corresponding FAT12 names.
+// Directory listings, long filenames, nested paths, and large multi-
+// segment responses remain out of scope.
 //
 // Explicitly OUT OF SCOPE for this milestone (see design discussion):
 // images/binary content. This file's TCP layer (inherited unchanged from
@@ -41,7 +38,7 @@
 // new way, reading file bytes into the reply instead of the static
 // response-body buffer). Once the whole milestone (this file + the installer) was
 // demonstrated working end to end -- verified over real HTTP via a real
-// browser, and by physically removing the card and confirming INDEX.TXT
+// browser, and by physically removing the card and confirming INDEX.HTM
 // with a normal PC file manager -- --forbid-trap was turned on in one
 // pass; no sites needed fixing here (every new access is either a fixed-
 // size fat_read into the caller-owned response buffer, matching its own
@@ -108,6 +105,7 @@ let SD_REQ_READ_INDEX: i32 = 2;
 let mut sd_request_ch: Chan = {1, 0, 0, 0, 0};
 let mut sd_response_ch: Chan = {1, 0, 0, 0, 0};
 let mut sd_buffer_ch: WordChan = {1, 0, 0, 0, 0};
+let mut sd_name_ch: WordChan = {1, 0, 0, 0, 0};
 let mut sd_stack: [u8; 8192];
 
 // Safe upper bound on the total reply payload (headers + body), checked
@@ -118,17 +116,10 @@ let mut sd_stack: [u8; 8192];
 // comfortable headers margin is enough.
 let HTTP_MAX_PAYLOAD: i32 = 700;
 
-fn sd_read_index_file(dst: *u8) -> isize {
-    // 8.3 name, padded to 11 bytes, matching fat12.tkb's fat_find_entry
-    // format. Provisioned onto the real card by
-    // http_server_sdcard_install.tkb before every hardware test run (see
-    // this file's header comment). Local, not global -- no existing
-    // global `*u8` string-literal precedent in this codebase (globals
-    // with literal initializers are integer-only, see const_global.tkb).
-    let sd_file_name: *u8 = "INDEX   TXT";
-    let fp: *FatFile = fat_open(sd_file_name, FA_READ);
+fn sd_read_file(name83: *u8, dst: *u8) -> isize {
+    let fp: *FatFile = fat_open(name83, FA_READ);
     if ((fp as usize) == 0) {
-        let msg: *u8 = "404: INDEX.TXT not found on SD card.\n";
+        let msg: *u8 = "404: file not found on SD card.\n";
         return copy_str(dst, msg);
     }
     let mut br: u32 = 0;
@@ -151,7 +142,9 @@ fn sd_worker() {
             chan_send(&sd_response_ch, ok);
         } else if (req == SD_REQ_READ_INDEX) {
             let dst_addr: usize = chan_word_recv(&sd_buffer_ch);
-            chan_send(&sd_response_ch, sd_read_index_file(dst_addr as *u8) as i32);
+            let name_addr: usize = chan_word_recv(&sd_name_ch);
+            chan_send(&sd_response_ch,
+                      sd_read_file(name_addr as *u8, dst_addr as *u8) as i32);
         }
     }
 }
@@ -160,9 +153,16 @@ fn sd_worker() {
 // through the SD worker task. Returns the byte count, or a short fallback
 // body length on failure (same external behavior as the flat
 // http_server_sdcard baseline).
-fn build_body_from_sdcard(dst: *u8) -> isize {
+fn build_body_from_sdcard(req: *u8, req_len: isize, dst: *u8) -> isize {
+    let mut name83: [u8; 11];
+    if (http_request_path_to_name83(req, req_len, name83) == false) {
+        let msg: *u8 = "400: unsupported path\n";
+        return copy_str(dst, msg);
+    }
+
     chan_send(&sd_request_ch, SD_REQ_READ_INDEX);
     chan_word_send(&sd_buffer_ch, dst as usize);
+    chan_word_send(&sd_name_ch, name83 as usize);
     return chan_recv(&sd_response_ch) as isize;
 }
 
@@ -258,16 +258,16 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
 // (overwriting the request that was there), combined with our own FIN --
 // same structure as http_server.tkb's build_http_response_fin, except the
 // body comes from build_body_from_sdcard() (real SD card bytes) instead of
-// a templated HTML page, and Content-Type is text/plain (raw file bytes,
-// not necessarily HTML markup).
-fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
+// a templated HTML page.
+fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16},
+                           req: *u8, req_len: u16) -> i32 {
     let mut body: [u8; 512];
-    let body_len: isize = build_body_from_sdcard(body);
+    let body_len: isize = build_body_from_sdcard(req, req_len as isize, body);
 
     let payload: *u8 = (eth as *u8) + 54;
     let mut len: isize = 0;
     len = len + copy_str(payload + len,
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=us-ascii\r\nContent-Length: ");
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=us-ascii\r\nContent-Length: ");
     len = len + write_udec(payload + len, body_len as i32);
     len = len + copy_str(payload + len, "\r\nConnection: close\r\n\r\n");
     bytes_copy(payload + len, body as *u8, body_len);
@@ -439,8 +439,10 @@ fn app_main() {
                                                             data3[1] == 'E' as u8 &&
                                                             data3[2] == 'T' as u8) {
                                                             conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
+                                                            let req: *u8 =
+                                                                (frame as *u8) + (data_off_idx as isize);
                                                             let payload_len: i32 =
-                                                                build_http_response_fin(frame, ihl);
+                                                                build_http_response_fin(frame, ihl, req, data_len);
                                                             if (payload_len >= 0) {
                                                                 should_tx = 1;
                                                                 tx_len = 14 + (ihl as i32) + 20 + payload_len;

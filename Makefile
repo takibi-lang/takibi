@@ -979,7 +979,7 @@ stm32-http-server: examples/http_server/kernel_stm32.bin
 ## in the STM32F746G-DISCOVERY's microSD slot -- this target stops right
 ## there with a clear error message; it deliberately does NOT go on to
 ## flash and boot a server that would only ever be able to answer "404:
-## INDEX.TXT not found" to every request, leaving a human staring at a
+## file not found" to every request, leaving a human staring at a
 ## browser tab with no idea the card was ever missing.
 stm32-http-server-sdcard: examples/http_server_sdcard/kernel_stm32.bin examples/http_server_sdcard_install/kernel_stm32_ram.elf
 	@if [ ! -e "$(STM32_SERIAL_DEV)" ]; then \

@@ -6,13 +6,11 @@
 #
 # Unlike http_server's own test (which checks a request counter embedded
 # in a templated HTML page), this checks that the response body is the
-# REAL content of examples/http_server_sdcard_install/
-# http_server_sdcard_install.tkb's freshly-provisioned INDEX.TXT file --
+# REAL content of the freshly-provisioned examples/sdcard_content files --
 # the whole point of this milestone (GitHub issue #97) is that the page
-# came from the SD card, not a compiled-in template. The exact expected
-# text is passed in via SDCARD_EXPECTED_TEXT (set by
-# scripts/run_hwtest_net_ram.sh to the same string it wrote onto the card
-# with mtools, so this script never hardcodes a copy that could drift).
+# came from the SD card, not a compiled-in template. Expected bodies are
+# read from the same content directory used by the provisioning script, so
+# the checker does not keep a duplicate copy of page contents.
 #
 # Flushes the ARP neighbor entry first, same cold-start reasoning as
 # eth_http_server_test.py.
@@ -48,6 +46,7 @@ import time
 IFACE = os.environ.get("ETH_TEST_IFACE", "enp4s0")
 SERVER_IP = "192.168.10.2"  # must match netconfig.tkb's OUR_IP
 SERVER_PORT = 80
+CONTENT_DIR = os.environ.get("SDCARD_CONTENT_DIR", "examples/sdcard_content")
 
 REQUEST_TIMEOUT_SECS = 5
 RETRY_TOTAL_SECS = 10
@@ -61,11 +60,11 @@ def flush_arp_entry():
     )
 
 
-def fetch() -> tuple:
+def fetch(path: str) -> tuple:
     """Returns (status, content_type, body) or raises on transport failure."""
     conn = http.client.HTTPConnection(SERVER_IP, SERVER_PORT, timeout=REQUEST_TIMEOUT_SECS)
     try:
-        conn.request("GET", "/")
+        conn.request("GET", path)
         resp = conn.getresponse()
         body = resp.read().decode("us-ascii")
         return resp.status, resp.getheader("Content-Type"), body
@@ -73,42 +72,52 @@ def fetch() -> tuple:
         conn.close()
 
 
-def fetch_with_retry() -> tuple:
+def fetch_with_retry(path: str) -> tuple:
     deadline = time.monotonic() + RETRY_TOTAL_SECS
     last_err = None
     while time.monotonic() < deadline:
         flush_arp_entry()
         try:
-            return fetch()
+            return fetch(path)
         except OSError as e:
             last_err = e
             time.sleep(RETRY_INTERVAL_SECS)
     raise last_err
 
 
-def main() -> int:
-    expected = os.environ.get("SDCARD_EXPECTED_TEXT")
-    if not expected:
-        print("  SDCARD_EXPECTED_TEXT is required (set by run_hwtest_net_ram.sh)")
-        return 1
-
+def check_path(path: str, expected: str) -> bool:
     try:
-        status, ctype, body = fetch_with_retry()
+        status, ctype, body = fetch_with_retry(path)
     except OSError as e:
-        print(f"  request failed after {RETRY_TOTAL_SECS}s of retries: {e}")
-        return 1
+        print(f"  request {path} failed after {RETRY_TOTAL_SECS}s of retries: {e}")
+        return False
 
     ok = (
         status == 200 and
-        ctype is not None and ctype.startswith("text/plain") and
-        expected in body
+        ctype is not None and ctype.startswith("text/html") and
+        body == expected
     )
-    print("  GET / returns real SD card content: %s" % ("PASS" if ok else "FAIL"))
+    print("  GET %s returns real SD card content: %s" %
+          (path, "PASS" if ok else "FAIL"))
     if not ok:
         print(f"  status={status} content-type={ctype!r}")
-        print(f"  expected substring={expected!r}")
+        print(f"  expected body={expected!r}")
         print(f"  body={body!r}")
+    return ok
 
+
+def main() -> int:
+    try:
+        with open(os.path.join(CONTENT_DIR, "INDEX.HTM"), encoding="ascii") as f:
+            index_expected = f.read()
+        with open(os.path.join(CONTENT_DIR, "ABOUT.HTM"), encoding="ascii") as f:
+            about_expected = f.read()
+    except OSError as e:
+        print(f"  failed to read SD card content directory {CONTENT_DIR!r}: {e}")
+        return 1
+
+    ok = check_path("/", index_expected)
+    ok = check_path("/ABOUT.HTM", about_expected) and ok
     return 0 if ok else 1
 
 

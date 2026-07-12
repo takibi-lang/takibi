@@ -201,12 +201,12 @@ run_net_hw_test_flash "http_server (stm32/flash)" examples/http_server/kernel_st
 # really is the SD card's own file content. See
 # examples/http_server_sdcard/http_server_sdcard.tkb's header comment for
 # the milestone (--forbid-trap deliberately off for now).
-sdcard_expected_text="Hello from a real SD card, served over HTTP!"
+sdcard_content_dir="examples/sdcard_content"
 sdcard_name="http_server_sdcard (stm32/ram)"
 sdcard_provision_log=$(mktemp)
 if ! bash scripts/provision_http_server_sdcard.sh \
         examples/http_server_sdcard_install/kernel_stm32_ram.elf \
-        "$sdcard_expected_text" > "$sdcard_provision_log" 2>&1; then
+        "$sdcard_content_dir" > "$sdcard_provision_log" 2>&1; then
     printf "${RED}FAIL${RST}  %s  (SD card provisioning failed)\n" "$sdcard_name"
     sed 's/^/       /' "$sdcard_provision_log"
     FAIL=$((FAIL + 1))
@@ -216,12 +216,13 @@ elif ! ram_load_and_run examples/http_server_sdcard/kernel_stm32_ram.elf; then
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("$sdcard_name")
 else
-    # SDCARD_EXPECTED_TEXT must be passed on sudo's OWN command line (not
+    # SDCARD_CONTENT_DIR must be passed on sudo's OWN command line (not
     # just exported in this shell) -- sudo's default env_reset strips
     # ordinary environment variables that aren't in env_keep, confirmed
     # empirically before writing this.
     echo "-- $sdcard_name --"
-    if sudo SDCARD_EXPECTED_TEXT="$sdcard_expected_text" python3 scripts/eth_http_server_sdcard_test.py; then
+    if sudo SDCARD_CONTENT_DIR="$sdcard_content_dir" \
+            python3 scripts/eth_http_server_sdcard_test.py; then
         printf "${GRN}PASS${RST}  %s\n" "$sdcard_name"
         PASS=$((PASS + 1))
     else
@@ -238,7 +239,8 @@ if ! ram_load_and_run examples/http_server_sdcard_rtos/kernel_stm32_ram.elf; the
     FAILED_TESTS+=("$sdcard_rtos_name")
 else
     echo "-- $sdcard_rtos_name --"
-    if sudo SDCARD_EXPECTED_TEXT="$sdcard_expected_text" python3 scripts/eth_http_server_sdcard_test.py; then
+    if sudo SDCARD_CONTENT_DIR="$sdcard_content_dir" \
+            python3 scripts/eth_http_server_sdcard_test.py; then
         printf "${GRN}PASS${RST}  %s\n" "$sdcard_rtos_name"
         PASS=$((PASS + 1))
     else
@@ -255,7 +257,7 @@ fi
 # scripts/provision_http_server_sdcard.sh -- so this reuses that same
 # content rather than re-provisioning it.
 # run_net_hw_test_flash is not reused here (unlike http_server's own Flash
-# test) because SDCARD_EXPECTED_TEXT has to be passed on sudo's own
+# test) because SDCARD_CONTENT_DIR has to be passed on sudo's own
 # command line (see the comment above), which that shared helper's plain
 # `sudo python3` call does not do.
 sdcard_flash_name="http_server_sdcard (stm32/flash)"
@@ -272,7 +274,8 @@ elif ! st-flash --connect-under-reset reset > "$tmp_sdcard_flash_log" 2>&1; then
     FAILED_TESTS+=("$sdcard_flash_name")
 else
     echo "-- $sdcard_flash_name --"
-    if sudo SDCARD_EXPECTED_TEXT="$sdcard_expected_text" python3 scripts/eth_http_server_sdcard_test.py; then
+    if sudo SDCARD_CONTENT_DIR="$sdcard_content_dir" \
+            python3 scripts/eth_http_server_sdcard_test.py; then
         printf "${GRN}PASS${RST}  %s\n" "$sdcard_flash_name"
         PASS=$((PASS + 1))
     else

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Provisions examples/http_server_sdcard's real SD card with a genuine
-# mtools-built FAT12 image containing INDEX.TXT, via
+# mtools-built FAT12 image populated from examples/sdcard_content/, via
 # examples/http_server_sdcard_install/http_server_sdcard_install.tkb --
 # so no human ever needs to touch the card. Shared by both
 # `make hwcheck-net` (scripts/run_hwtest_net_ram.sh) and
@@ -9,12 +9,10 @@
 # two-breakpoint OpenOCD sequence (see http_server_sdcard_install.tkb's
 # own header comment for why it's shaped this way).
 #
-# Usage: provision_http_server_sdcard.sh [INSTALLER_ELF] [EXPECTED_TEXT]
+# Usage: provision_http_server_sdcard.sh [INSTALLER_ELF] [CONTENT_DIR]
 #   INSTALLER_ELF  defaults to examples/http_server_sdcard_install/kernel_stm32_ram.elf
-#   EXPECTED_TEXT  defaults to a generic demo message; a caller that will
-#                  later verify the HTTP response (e.g.
-#                  scripts/eth_http_server_sdcard_test.py) can override it
-#                  to whatever it checks against.
+#   CONTENT_DIR    defaults to examples/sdcard_content and is copied into
+#                  the FAT12 root directory. Keep filenames 8.3-compatible.
 #
 # On success: prints a confirmation and exits 0.
 # On failure: prints a specific diagnostic to stderr and exits 1 --
@@ -27,12 +25,17 @@
 set -euo pipefail
 
 INSTALLER_ELF="${1:-examples/http_server_sdcard_install/kernel_stm32_ram.elf}"
-EXPECTED_TEXT="${2:-Hello from a real SD card, served over HTTP!}"
+CONTENT_DIR="${2:-examples/sdcard_content}"
 
 OPENOCD_BOARD_CFG="board/stm32f746g-disco.cfg"
 
 if [ ! -e "$INSTALLER_ELF" ]; then
     echo "error: $INSTALLER_ELF not found -- run 'make stm32build' first" >&2
+    exit 1
+fi
+
+if [ ! -d "$CONTENT_DIR" ]; then
+    echo "error: $CONTENT_DIR not found -- SD card content directory is required" >&2
     exit 1
 fi
 
@@ -50,9 +53,33 @@ tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
 
 seed_img="$tmp_dir/seed.img"
-printf '%s' "$EXPECTED_TEXT" > "$tmp_dir/index.txt"
 mformat -C -i "$seed_img" -t 2 -h 2 -n 32 -c 1 -r 1 -L 1 :: > /dev/null
-mcopy -i "$seed_img" "$tmp_dir/index.txt" ::INDEX.TXT
+copied=0
+while IFS= read -r -d '' file; do
+    base=$(basename "$file")
+    case "$base" in
+        *[!A-Za-z0-9._-]* | *.*.* | .* | "")
+            echo "error: unsupported SD card content filename: $base" >&2
+            exit 1
+            ;;
+    esac
+    stem=${base%.*}
+    ext=${base##*.}
+    if [ "$stem" = "$base" ]; then
+        ext=""
+    fi
+    if [ "${#stem}" -gt 8 ] || [ "${#ext}" -gt 3 ]; then
+        echo "error: SD card content filename is not 8.3-compatible: $base" >&2
+        exit 1
+    fi
+    mcopy -i "$seed_img" "$file" "::$base"
+    copied=$((copied + 1))
+done < <(find "$CONTENT_DIR" -maxdepth 1 -type f -print0 | sort -z)
+
+if [ "$copied" -eq 0 ]; then
+    echo "error: $CONTENT_DIR contains no files to copy" >&2
+    exit 1
+fi
 
 staging_addr="0x$(llvm-nm-19 "$INSTALLER_ELF" | awk '$3=="staging"{print $1}')"
 app_main_addr="0x$(llvm-nm-19 "$INSTALLER_ELF" | awk '$3=="app_main"{print $1}')"
@@ -96,7 +123,7 @@ result=${result_hex:+$((result_hex))}
 
 case "$result" in
     1)
-        echo "SD card provisioned: INDEX.TXT written."
+        echo "SD card provisioned from $CONTENT_DIR ($copied file(s))."
         ;;
     2)
         echo "error: SD card not detected (disk_initialize failed) -- is a card inserted in the STM32F746G-DISCOVERY's microSD slot?" >&2

@@ -141,6 +141,91 @@ fn bytes_copy(dst: *u8, src: *u8, n: isize) {
     }
 }
 
+fn http_name83_index(name83: *u8) {
+    bytes_copy(name83, "INDEX   HTM", 11);
+}
+
+fn http_path_char_to_fat(c: u8) -> u8 {
+    if (c >= 'a' as u8 && c <= 'z' as u8) {
+        return c - 32;
+    }
+    return c;
+}
+
+fn http_path_char_ok(c: u8) -> bool {
+    let u: u8 = http_path_char_to_fat(c);
+    return ((u >= 'A' as u8 && u <= 'Z' as u8) ||
+            (u >= '0' as u8 && u <= '9' as u8) ||
+            u == '_' as u8 || u == '-' as u8);
+}
+
+// Maps a deliberately small HTTP path subset to a FAT12 8.3 name:
+//   GET /           -> INDEX   HTM
+//   GET /ABOUT.HTM  -> ABOUT   HTM
+// Only one path component is accepted. Long names, subdirectories, query
+// strings, and other characters are rejected by returning false.
+fn http_request_path_to_name83(req: *u8, len: isize, name83: *u8) -> bool {
+    if (len < 6) {
+        return false;
+    }
+    if (req[0] != 'G' as u8 || req[1] != 'E' as u8 ||
+        req[2] != 'T' as u8 || req[3] != ' ' as u8 ||
+        req[4] != '/' as u8) {
+        return false;
+    }
+
+    if (req[5] == ' ' as u8) {
+        http_name83_index(name83);
+        return true;
+    }
+
+    for i: isize in 0..<11 {
+        name83[i] = ' ' as u8;
+    }
+
+    let mut i: isize = 5;
+    let mut base_len: isize = 0;
+    let mut ext_len: isize = 0;
+    let mut in_ext: bool = false;
+    let mut saw_space: bool = false;
+    while (i < len) {
+        let c: u8 = req[i];
+        if (c == ' ' as u8) {
+            saw_space = true;
+            break;
+        }
+        if (c == '/' as u8 || c == '?' as u8 || c == '#' as u8) {
+            return false;
+        }
+        if (c == '.' as u8) {
+            if (in_ext || base_len == 0) {
+                return false;
+            }
+            in_ext = true;
+        } else if (http_path_char_ok(c)) {
+            let u: u8 = http_path_char_to_fat(c);
+            if (in_ext) {
+                if (ext_len >= 3) {
+                    return false;
+                }
+                name83[8 + ext_len] = u;
+                ext_len = ext_len + 1;
+            } else {
+                if (base_len >= 8) {
+                    return false;
+                }
+                name83[base_len] = u;
+                base_len = base_len + 1;
+            }
+        } else {
+            return false;
+        }
+        i = i + 1;
+    }
+
+    return saw_space && base_len > 0 && (in_ext == false || ext_len > 0);
+}
+
 // Manually composes/decomposes a big-endian 16-bit integer from individual
 // byte reads/writes, rather than loading/storing 2 bytes at once through a
 // cast pointer. Network fields are big-endian on the wire; this target is

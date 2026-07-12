@@ -9,13 +9,10 @@
 // file's app_main() is a single flat loop, exactly like http_server.tkb's
 // own.
 //
-// STAGE 1 SCOPE (deliberately incremental, see the design discussion):
-// any GET request gets the SAME fixed file's content back (SD_FILE_NAME
-// below), read fresh from the card on every request via fat_open/fat_read
-// -- no request-path parsing, no directory listing, no multiple files yet.
-// This proves the real wiring (HTTP -> FAT12 -> SDMMC1 -> real card bytes
-// -> HTTP response) end to end before growing into directory listing +
-// multi-file serving as a later increment.
+// STAGE 2 SCOPE: GET / maps to INDEX.HTM, and simple single-component
+// 8.3 paths such as /ABOUT.HTM map to their corresponding FAT12 names.
+// Directory listings, long filenames, nested paths, and large multi-
+// segment responses remain out of scope.
 //
 // Explicitly OUT OF SCOPE for this milestone (see design discussion):
 // images/binary content. This file's TCP layer (inherited unchanged from
@@ -43,7 +40,7 @@
 // new way, reading file bytes into the reply instead of the static
 // html_body). Once the whole milestone (this file + the installer) was
 // demonstrated working end to end -- verified over real HTTP via a real
-// browser, and by physically removing the card and confirming INDEX.TXT
+// browser, and by physically removing the card and confirming INDEX.HTM
 // with a normal PC file manager -- --forbid-trap was turned on in one
 // pass; no sites needed fixing here (every new access is either a fixed-
 // size fat_read into html_body, matching its own declared 512-byte size,
@@ -115,22 +112,19 @@ let mut html_body: [u8; 512];
 // headers margin is enough.
 let HTTP_MAX_PAYLOAD: i32 = 700;
 
-// Reads SD_FILE_NAME fresh from the real SD card into html_body. Returns
-// the byte count on success. On any FAT12 failure (card not mounted, file
-// missing, ...) falls back to a short in-memory error message instead --
-// keeps the HTTP server itself always answering, even with no/blank card
-// inserted, rather than refusing to serve at all.
-fn build_body_from_sdcard() -> isize {
-    // 8.3 name, padded to 11 bytes, matching fat12.tkb's fat_find_entry
-    // format. Provisioned onto the real card by
-    // http_server_sdcard_install.tkb before every hardware test run (see
-    // this file's header comment). Local, not global -- no existing
-    // global `*u8` string-literal precedent in this codebase (globals
-    // with literal initializers are integer-only, see const_global.tkb).
-    let sd_file_name: *u8 = "INDEX   TXT";
-    let fp: *FatFile = fat_open(sd_file_name, FA_READ);
+// Reads the requested 8.3 path fresh from the real SD card into html_body.
+// Unsupported paths and FAT12 failures fall back to short in-memory
+// messages so the HTTP server still answers deterministically.
+fn build_body_from_sdcard(req: *u8, req_len: isize) -> isize {
+    let mut name83: [u8; 11];
+    if (http_request_path_to_name83(req, req_len, name83) == false) {
+        let msg: *u8 = "400: unsupported path\n";
+        return copy_str(html_body, msg);
+    }
+
+    let fp: *FatFile = fat_open(name83, FA_READ);
     if ((fp as usize) == 0) {
-        let msg: *u8 = "404: INDEX.TXT not found on SD card.\n";
+        let msg: *u8 = "404: file not found on SD card.\n";
         return copy_str(html_body, msg);
     }
     let mut br: u32 = 0;
@@ -231,15 +225,15 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
 // (overwriting the request that was there), combined with our own FIN --
 // same structure as http_server.tkb's build_http_response_fin, except the
 // body comes from build_body_from_sdcard() (real SD card bytes) instead of
-// a templated HTML page, and Content-Type is text/plain (raw file bytes,
-// not necessarily HTML markup).
-fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
-    let body_len: isize = build_body_from_sdcard();
+// a templated HTML page.
+fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16},
+                           req: *u8, req_len: u16) -> i32 {
+    let body_len: isize = build_body_from_sdcard(req, req_len as isize);
 
     let payload: *u8 = (eth as *u8) + 54;
     let mut len: isize = 0;
     len = len + copy_str(payload + len,
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=us-ascii\r\nContent-Length: ");
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=us-ascii\r\nContent-Length: ");
     len = len + write_udec(payload + len, body_len as i32);
     len = len + copy_str(payload + len, "\r\nConnection: close\r\n\r\n");
     bytes_copy(payload + len, html_body as *u8, body_len);
@@ -412,8 +406,10 @@ fn app_main() {
                                                             data3[1] == 'E' as u8 &&
                                                             data3[2] == 'T' as u8) {
                                                             conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
+                                                            let req: *u8 =
+                                                                (frame as *u8) + (data_off_idx as isize);
                                                             let payload_len: i32 =
-                                                                build_http_response_fin(frame, ihl);
+                                                                build_http_response_fin(frame, ihl, req, data_len);
                                                             if (payload_len >= 0) {
                                                                 should_tx = 1;
                                                                 tx_len = 14 + (ihl as i32) + 20 + payload_len;
