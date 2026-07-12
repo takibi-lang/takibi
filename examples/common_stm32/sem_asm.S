@@ -44,3 +44,20 @@ sem_post:
     cmp     r3, #0
     bne     .Lp_retry
     bx      lr
+
+/* RTOS giant-lock v1 helpers used by examples/common/rtos.tkb's
+   klock()/kunlock(). These mirror the QEMU side's interrupt mask helpers
+   at the public Takibi level, but use Cortex-M's PRIMASK instructions. */
+    .thumb_func
+    .global disable_irq
+disable_irq:
+    cpsid   i
+    dsb
+    isb
+    bx      lr
+
+    .thumb_func
+    .global enable_irq
+enable_irq:
+    cpsie   i
+    bx      lr

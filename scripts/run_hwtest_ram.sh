@@ -544,15 +544,16 @@ run_hw_test_ram_stdin "echo (stm32/ram)" examples/echo/kernel_stm32_ram.elf exam
 run_hw_test_ram_stdin "irq (stm32/ram)" examples/irq/kernel_stm32_ram.elf examples/irq/irq.expected \
     examples/irq/irq.stdin
 
-# preempt/semaphore/condvar/msgqueue/watchdog: SysTick+PendSV scheduler
-# core -- exercises the VTOR relocation this whole path depends on for
-# correct interrupt dispatch (startup_ram.S points VTOR at the RAM vector
-# table before enabling anything that could interrupt).
+# preempt/semaphore/condvar/msgqueue/watchdog/rtos_demo: SysTick+PendSV
+# scheduler core -- exercises the VTOR relocation this whole path depends
+# on for correct interrupt dispatch (startup_ram.S points VTOR at the RAM
+# vector table before enabling anything that could interrupt).
 run_hw_test_ram "preempt (stm32/ram)" examples/preempt/kernel_stm32_ram.elf examples/preempt/preempt.expected
 run_hw_test_ram "semaphore (stm32/ram)" examples/semaphore/kernel_stm32_ram.elf examples/semaphore/semaphore.expected
 run_hw_test_ram "condvar (stm32/ram)"   examples/condvar/kernel_stm32_ram.elf   examples/condvar/condvar.expected
 run_hw_test_ram "msgqueue (stm32/ram)"  examples/msgqueue/kernel_stm32_ram.elf  examples/msgqueue/msgqueue.expected
 run_hw_test_ram "watchdog (stm32/ram)"  examples/watchdog/kernel_stm32_ram.elf  examples/watchdog/watchdog.expected
+run_hw_test_ram "rtos_demo (stm32/ram)" examples/rtos_demo/kernel_stm32_ram.elf examples/rtos_demo/rtos_demo.expected
 
 # inet_checksum/ip_parse/tcp_parse: pure compute, no MMIO beyond UART.
 run_hw_test_ram "inet_checksum (stm32/ram)" examples/inet_checksum/kernel_stm32_ram.elf examples/inet_checksum/inet_checksum.expected
