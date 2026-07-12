@@ -39,12 +39,13 @@
 // Process section (new milestone work -- combining fatfs_sdcard's
 // real-SD access with http_server's proven TCP/HTTP layer in a genuinely
 // new way, reading file bytes into the reply instead of the static
-// html_body). Once the whole milestone (this file + the installer) was
+// response-body buffer). Once the whole milestone (this file + the installer) was
 // demonstrated working end to end -- verified over real HTTP via a real
 // browser, and by physically removing the card and confirming INDEX.TXT
 // with a normal PC file manager -- --forbid-trap was turned on in one
 // pass; no sites needed fixing here (every new access is either a fixed-
-// size fat_read into html_body, matching its own declared 512-byte size,
+// size fat_read into the caller-owned response buffer, matching its own
+// declared 512-byte size,
 // or reuses http_server.tkb's already-proven slice-based logic
 // unchanged). See http_server_sdcard_install.tkb, part of the same
 // milestone, for the one file that DID need a fix.
@@ -101,11 +102,6 @@ let mut conn_remote_port: u16 = 0;
 let mut conn_snd_nxt:     u32 = 0;
 let mut conn_rcv_nxt:     u32 = 0;
 
-// Staging buffer for the response body -- read fresh from the SD card on
-// every request (see build_body_from_sdcard), then copied after the
-// headers into the reply segment (see build_http_response_fin).
-let mut html_body: [u8; 512];
-
 let SD_REQ_INIT: i32 = 1;
 let SD_REQ_READ_INDEX: i32 = 2;
 
@@ -113,15 +109,51 @@ let mut sd_request_ch: Chan = {1, 0, 0, 0, 0};
 let mut sd_response_ch: Chan = {1, 0, 0, 0, 0};
 let mut sd_stack: [u8; 8192];
 
+struct UsizeChan {
+    mutex:      i32;
+    slot_full:  io i32;
+    slot_taken: io i32;
+    full:       i32;
+    value:      usize;
+}
+
+let mut sd_buffer_ch: UsizeChan = {1, 0, 0, 0, 0};
+
+fn usize_chan_send(ch: *UsizeChan, m: usize) {
+    let mut g: *MutexGuard = mutex_lock(&ch.mutex);
+    while (ch.full != 0) {
+        g = cond_wait(&ch.slot_taken, g, &ch.mutex);
+    }
+    ch.value = m;
+    ch.full = 1;
+    cond_signal(&ch.slot_full);
+    while (ch.full != 0) {
+        g = cond_wait(&ch.slot_taken, g, &ch.mutex);
+    }
+    mutex_unlock(g, &ch.mutex);
+}
+
+fn usize_chan_recv(ch: *UsizeChan) -> usize {
+    let mut g: *MutexGuard = mutex_lock(&ch.mutex);
+    while (ch.full == 0) {
+        g = cond_wait(&ch.slot_full, g, &ch.mutex);
+    }
+    let v: usize = ch.value;
+    ch.full = 0;
+    cond_signal(&ch.slot_taken);
+    mutex_unlock(g, &ch.mutex);
+    return v;
+}
+
 // Safe upper bound on the total reply payload (headers + body), checked
 // explicitly in build_http_response_fin before anything downstream trusts
 // it -- same mechanism as http_server.tkb's own HTTP_MAX_PAYLOAD. Headers
 // here are shorter (no request counter to print), so 512 (matching
-// html_body's own size, the real limiting factor) plus a comfortable
-// headers margin is enough.
+// response body's own 512-byte size, the real limiting factor) plus a
+// comfortable headers margin is enough.
 let HTTP_MAX_PAYLOAD: i32 = 700;
 
-fn sd_read_index_file() -> isize {
+fn sd_read_index_file(dst: *u8) -> isize {
     // 8.3 name, padded to 11 bytes, matching fat12.tkb's fat_find_entry
     // format. Provisioned onto the real card by
     // http_server_sdcard_install.tkb before every hardware test run (see
@@ -132,10 +164,10 @@ fn sd_read_index_file() -> isize {
     let fp: *FatFile = fat_open(sd_file_name, FA_READ);
     if ((fp as usize) == 0) {
         let msg: *u8 = "404: INDEX.TXT not found on SD card.\n";
-        return copy_str(html_body, msg);
+        return copy_str(dst, msg);
     }
     let mut br: u32 = 0;
-    fat_read(fp, html_body, 512, &br);
+    fat_read(fp, dst, 512, &br);
     fat_close(fp);
     return br as isize;
 }
@@ -153,16 +185,19 @@ fn sd_worker() {
             }
             chan_send(&sd_response_ch, ok);
         } else if (req == SD_REQ_READ_INDEX) {
-            chan_send(&sd_response_ch, sd_read_index_file() as i32);
+            let dst_addr: usize = usize_chan_recv(&sd_buffer_ch);
+            chan_send(&sd_response_ch, sd_read_index_file(dst_addr as *u8) as i32);
         }
     }
 }
 
-// Reads SD_FILE_NAME fresh from the real SD card into html_body through the
-// SD worker task. Returns the byte count, or a short fallback body length on
-// failure (same external behavior as the flat http_server_sdcard baseline).
-fn build_body_from_sdcard() -> isize {
+// Reads SD_FILE_NAME fresh from the real SD card into caller-owned `dst`
+// through the SD worker task. Returns the byte count, or a short fallback
+// body length on failure (same external behavior as the flat
+// http_server_sdcard baseline).
+fn build_body_from_sdcard(dst: *u8) -> isize {
     chan_send(&sd_request_ch, SD_REQ_READ_INDEX);
+    usize_chan_send(&sd_buffer_ch, dst as usize);
     return chan_recv(&sd_response_ch) as isize;
 }
 
@@ -261,7 +296,8 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
 // a templated HTML page, and Content-Type is text/plain (raw file bytes,
 // not necessarily HTML markup).
 fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
-    let body_len: isize = build_body_from_sdcard();
+    let mut body: [u8; 512];
+    let body_len: isize = build_body_from_sdcard(body);
 
     let payload: *u8 = (eth as *u8) + 54;
     let mut len: isize = 0;
@@ -269,7 +305,7 @@ fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=us-ascii\r\nContent-Length: ");
     len = len + write_udec(payload + len, body_len as i32);
     len = len + copy_str(payload + len, "\r\nConnection: close\r\n\r\n");
-    bytes_copy(payload + len, html_body as *u8, body_len);
+    bytes_copy(payload + len, body as *u8, body_len);
     len = len + body_len;
 
     let wire_len: i32 = len as i32;

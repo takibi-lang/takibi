@@ -164,7 +164,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest stm32build hwcheck hwcheck-net langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server stm32-http-server-sdcard profile-http-server profile-tcp-echo
+.PHONY: build test qemutest stm32build hwcheck hwcheck-net langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo
 
 .DEFAULT_GOAL := build
 
@@ -225,7 +225,7 @@ qemutest: $(ALL_KERNELS) examples/fizzbuzz/kernel.debug.elf examples/fibonacci/k
 ## that path even on a day `make hwcheck-net` doesn't run against real
 ## hardware. Without this, `stm32build`'s own "every ported example"
 ## promise would be silently false for exactly one example.
-stm32build: $(STM32_RAM_ELFS) examples/http_server/kernel_stm32.bin examples/http_server_sdcard/kernel_stm32.bin
+stm32build: $(STM32_RAM_ELFS) examples/http_server/kernel_stm32.bin examples/http_server_sdcard/kernel_stm32.bin examples/http_server_sdcard_rtos/kernel_stm32.bin
 
 ## hwcheck: run STM32 hardware integration tests (requires a real
 ## STM32F746G-DISCOVERY board connected via USB). NOT part of `make check` --
@@ -806,9 +806,10 @@ examples/http_server/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples/http_s
 examples/http_server/kernel_stm32.bin: examples/http_server/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
-# examples/http_server_sdcard gets the same deliberate Flash-execution
-# exception as examples/http_server (see that rule's comment just above,
-# and `make stm32-http-server-sdcard` below): a demo unit should be able
+# examples/http_server_sdcard and examples/http_server_sdcard_rtos get the
+# same deliberate Flash-execution exception as examples/http_server (see
+# that rule's comment just above, and `make stm32-http-server-sdcard` /
+# `make stm32-http-server-sdcard-rtos` below): a demo unit should be able
 # to boot the SD-card-backed HTTP server standalone from power-on, with no
 # debugger attached -- RAM execution cannot do this at all, since AXI
 # SRAM1 loses its contents when power is removed. Same genuinely-cacheable
@@ -817,6 +818,12 @@ examples/http_server_sdcard/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) examples
 	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) examples/http_server_sdcard/http_server_sdcard_stm32.o -o $@
 
 examples/http_server_sdcard/kernel_stm32.bin: examples/http_server_sdcard/kernel_stm32.elf
+	llvm-objcopy-19 -O binary $< $@
+
+examples/http_server_sdcard_rtos/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_SEM_ASM_O) examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.o $(COMMON_STM32_LINK_ETH_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_ETH_LD) $(COMMON_STM32_STARTUP_O) $(COMMON_STM32_SEM_ASM_O) examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.o -o $@
+
+examples/http_server_sdcard_rtos/kernel_stm32.bin: examples/http_server_sdcard_rtos/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
 # inet_checksum.tkb/ip_parse.tkb/tcp_parse.tkb each `use` exactly the
@@ -975,6 +982,35 @@ stm32-http-server: examples/http_server/kernel_stm32.bin
 ## INDEX.TXT not found" to every request, leaving a human staring at a
 ## browser tab with no idea the card was ever missing.
 stm32-http-server-sdcard: examples/http_server_sdcard/kernel_stm32.bin examples/http_server_sdcard_install/kernel_stm32_ram.elf
+	@if [ ! -e "$(STM32_SERIAL_DEV)" ]; then \
+	    echo "error: $(STM32_SERIAL_DEV) not found -- is the STM32F746G-DISCOVERY board connected?" >&2; \
+	    exit 1; \
+	fi
+	@if ! st-info --probe > /dev/null 2>&1; then \
+	    echo "error: st-info --probe failed -- is the ST-LINK debug interface accessible?" >&2; \
+	    exit 1; \
+	fi
+	bash scripts/provision_http_server_sdcard.sh examples/http_server_sdcard_install/kernel_stm32_ram.elf
+	st-flash --connect-under-reset write $< $(STM32_FLASH_ADDR)
+	@rhs=$$(grep -m1 '^let HTTP_SERVER_IP:' examples/common_stm32/netconfig.tkb | grep -oP '= \K.*(?=;)'); \
+	case "$$rhs" in \
+	  \{*) lit="$$rhs" ;; \
+	  *) lit=$$(grep -m1 "^let $$rhs:" examples/common_stm32/netconfig.tkb | grep -oP '= \K.*(?=;)') ;; \
+	esac; \
+	ip=$$(echo "$$lit" | tr -d '{} ' | tr ',' '.'); \
+	echo "Open http://$$ip/ in your browser (Ctrl-C to quit)"; \
+	stty -F $(STM32_SERIAL_DEV) 115200 raw -echo; \
+	cat $(STM32_SERIAL_DEV) & \
+	catpid=$$!; \
+	sleep 0.2; \
+	st-flash --connect-under-reset reset > /dev/null 2>&1; \
+	wait $$catpid
+
+## stm32-http-server-sdcard-rtos: flash and run the RTOS variant of the
+## SD-card-backed HTTP server. Same provisioning and browser UX as
+## stm32-http-server-sdcard, but flashes
+## examples/http_server_sdcard_rtos/kernel_stm32.bin.
+stm32-http-server-sdcard-rtos: examples/http_server_sdcard_rtos/kernel_stm32.bin examples/http_server_sdcard_install/kernel_stm32_ram.elf
 	@if [ ! -e "$(STM32_SERIAL_DEV)" ]; then \
 	    echo "error: $(STM32_SERIAL_DEV) not found -- is the STM32F746G-DISCOVERY board connected?" >&2; \
 	    exit 1; \
