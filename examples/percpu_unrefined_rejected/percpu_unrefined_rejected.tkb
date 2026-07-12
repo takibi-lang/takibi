@@ -1,0 +1,31 @@
+// This file is expected to produce a compile error under --forbid-trap.
+// Negative contrast for examples/percpu: the exact same percpu[id]
+// array access, but with cpu_id() returning plain `usize` instead of
+// the refined {0..<1 as usize}. Without the refined return type the
+// compiler has no way to prove `id` is in range, so the array access
+// keeps a runtime bounds check -- rejected under --forbid-trap, exactly
+// like examples/forbid_trap_wrong's buf[v]. This is the concrete
+// evidence that percpu.tkb's clean --forbid-trap compile comes from
+// cpu_id()'s refined return type doing real work, not from NCPU
+// happening to be 1.
+let NCPU: usize = 1;
+
+fn cpu_id() -> usize {
+    return 0;
+}
+
+struct PerCpuState {
+    counter: i32;
+}
+
+let mut percpu: [PerCpuState; NCPU];
+
+fn percpu_bump() -> i32 {
+    let id = cpu_id();
+    percpu[id].counter = percpu[id].counter + 1;   // id: usize (unproven range) -> bounds check remains -> rejected
+    return percpu[id].counter;
+}
+
+fn app_main() -> i32 {
+    return percpu_bump();
+}

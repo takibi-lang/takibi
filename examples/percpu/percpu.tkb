@@ -1,0 +1,52 @@
+// PoC 2/3 toward a Simple RTOS (GitHub issue #66), following
+// examples/klock_guard (PoC 1/3). See HISTORY.md's RTOS design entries
+// for the full API discussion.
+//
+// What this file proves at compile time: `cpu_id()`'s refined return
+// type, `{0..<1 as usize}`, is what lets `percpu[cpu_id()]` compile
+// clean under --forbid-trap with ZERO runtime bounds check -- the
+// refined range exactly matches percpu's own declared size (NCPU),
+// so the array access is proven in range at every call site with no
+// annotation burden on the caller. See examples/percpu_unrefined_rejected
+// for the negative contrast: the exact same array access, but with
+// cpu_id() returning plain `usize` instead, is REJECTED under
+// --forbid-trap -- demonstrating this is the refined return type doing
+// real work, not an accident of NCPU currently being 1.
+//
+// This also demonstrates why the RTOS design deliberately widens NCPU
+// (today: 1) instead of dropping cpu_id()'s refinement once real
+// multi-core hardware (GitHub issue #6, e.g. Raspberry Pi 3) exists:
+// `{0..<NCPU as usize}` stays --forbid-trap-clean for every existing
+// percpu[cpu_id()] call site with NO code change there -- only
+// cpu_id()'s own body (today: always `return 0;`) needs to change to
+// read a real per-core ID register.
+let NCPU: usize = 1;
+
+fn cpu_id() -> {0..<1 as usize} {
+    return 0;
+}
+
+struct PerCpuState {
+    counter: i32;
+}
+
+let mut percpu: [PerCpuState; NCPU];
+
+fn percpu_bump() -> i32 {
+    let id = cpu_id();
+    percpu[id].counter = percpu[id].counter + 1;
+    return percpu[id].counter;
+}
+
+fn app_main() {
+    uart_puts("cpu_id: ");
+    uart_print(cpu_id());
+    uart_puts("\r\n");
+    uart_puts("bump: ");
+    uart_print(percpu_bump());
+    uart_puts("\r\n");
+    uart_puts("bump: ");
+    uart_print(percpu_bump());
+    uart_puts("\r\n");
+    uart_puts("done\r\n");
+}

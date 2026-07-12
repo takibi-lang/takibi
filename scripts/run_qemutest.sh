@@ -380,6 +380,7 @@ run_compile_error_test "affine_never_consumed" examples/affine_never_consumed/af
 run_compile_error_test "affine_param_never_consumed" examples/affine_param_never_consumed/affine_param_never_consumed.tkb examples/affine_param_never_consumed/affine_param_never_consumed.error
 run_compile_error_test "align_ptr_unproven" examples/align_ptr_unproven/align_ptr_unproven.tkb examples/align_ptr_unproven/align_ptr_unproven.error
 run_compile_error_test "klock_guard_forgot_unlock" examples/klock_guard_forgot_unlock/klock_guard_forgot_unlock.tkb examples/klock_guard_forgot_unlock/klock_guard_forgot_unlock.error
+run_compile_error_test "percpu_unrefined_rejected" examples/percpu_unrefined_rejected/percpu_unrefined_rejected.tkb examples/percpu_unrefined_rejected/percpu_unrefined_rejected.error --forbid-trap
 
 echo ""
 echo "Running DWARF debug-info check (-g build)..."
@@ -459,6 +460,8 @@ run_test "int64"         examples/int64/kernel.elf         examples/int64/int64.
 run_test "affine_escape_via_index" examples/affine_escape_via_index/kernel.elf examples/affine_escape_via_index/affine_escape_via_index.expected
 run_test "align_ptr_proof" examples/align_ptr_proof/kernel.elf examples/align_ptr_proof/align_ptr_proof.expected
 run_test "klock_guard" examples/klock_guard/kernel.elf examples/klock_guard/klock_guard.expected
+run_test "percpu" examples/percpu/kernel.elf examples/percpu/percpu.expected
+run_test "chan_rendezvous" examples/chan_rendezvous/kernel.elf examples/chan_rendezvous/chan_rendezvous.expected
 run_test "inet_checksum" examples/inet_checksum/kernel.elf examples/inet_checksum/inet_checksum.expected
 run_test "ip_parse"      examples/ip_parse/kernel.elf      examples/ip_parse/ip_parse.expected
 run_test "tcp_parse"     examples/tcp_parse/kernel.elf     examples/tcp_parse/tcp_parse.expected

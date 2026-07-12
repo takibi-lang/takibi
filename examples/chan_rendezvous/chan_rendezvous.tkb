@@ -1,0 +1,150 @@
+// PoC 3/3 toward a Simple RTOS (GitHub issue #66), following
+// examples/klock_guard (PoC 1/3) and examples/percpu (PoC 2/3). See
+// HISTORY.md's RTOS design entries for the full API discussion.
+//
+// A rendezvous (CSP-style synchronous) channel: chan_send() does not
+// return until a chan_recv() on the same channel has actually taken the
+// value -- unlike examples/msgqueue's bounded ring buffer (capacity 4,
+// producer/consumer can run ahead of each other up to that bound), there
+// is no buffer here at all, only a single one-shot "slot". This is the
+// deliberately simpler v1 semantics proposed for the RTOS API's
+// chan_send/chan_recv: it sidesteps buffer-ownership problems by
+// construction (see the API sketch in HISTORY.md -- a real zero-copy/
+// lease-style channel is an explicitly deferred v2, blocked on issue
+// #89's still-open affine multi-instance problem).
+//
+// Built on examples/common/sync.tkb's MutexGuard/mutex_lock/mutex_unlock
+// and sequence-counter condvars (cond_wait/cond_signal), the exact same
+// primitives examples/condvar and examples/msgqueue already use --
+// chan_send/chan_recv below is a small, generic (channel-object-taking)
+// wrapper around them, not a new synchronization primitive. Two
+// condvars per channel: slot_full (signaled when a sender has placed a
+// value, wakes a waiting receiver) and slot_taken (signaled when a
+// receiver has taken the value, wakes a waiting sender -- this second
+// wakeup is what makes chan_send a true rendezvous rather than a
+// fire-and-forget mailbox: the sender blocks a second time, after
+// placing the value, until the ack).
+//
+// Verified with a genuine two-task ping-pong on the existing preempt
+// scheduler (examples/preempt/preempt.tkb's round-robin tick switch,
+// reused unchanged) over TWO channels (chan_ab: ping->pong,
+// chan_ba: pong->ping) -- exercising both directions, not just one
+// producer and one consumer as examples/msgqueue does.
+
+use "examples/common/sync.tkb";
+use "examples/common_qemu/gic.tkb";
+
+struct SchedState {
+    task_count:   isize;
+    current_task: isize;
+    tcb_sp:       [usize; 3];
+}
+
+struct Chan {
+    mutex:      i32;
+    slot_full:  io i32;
+    slot_taken: io i32;
+    full:       i32;
+    value:      i32;
+}
+
+let mut chan_ab: Chan = {1, 0, 0, 0, 0};
+let mut chan_ba: Chan = {1, 0, 0, 0, 0};
+
+fn chan_send(ch: *Chan, m: i32) {
+    let mut g: *MutexGuard = mutex_lock(&ch.mutex);
+    while (ch.full != 0) {
+        g = cond_wait(&ch.slot_taken, g, &ch.mutex);
+    }
+    ch.value = m;
+    ch.full = 1;
+    cond_signal(&ch.slot_full);
+    while (ch.full != 0) {
+        g = cond_wait(&ch.slot_taken, g, &ch.mutex);
+    }
+    mutex_unlock(g, &ch.mutex);
+}
+
+fn chan_recv(ch: *Chan) -> i32 {
+    let mut g: *MutexGuard = mutex_lock(&ch.mutex);
+    while (ch.full == 0) {
+        g = cond_wait(&ch.slot_full, g, &ch.mutex);
+    }
+    let v: i32 = ch.value;
+    ch.full = 0;
+    cond_signal(&ch.slot_taken);
+    mutex_unlock(g, &ch.mutex);
+    return v;
+}
+
+let mut sched: SchedState = {3, 0, {0, 0, 0}};
+
+fn irq_dispatch(frame_sp: usize) -> usize {
+    let id: u32 = *gic.cpu_iar;
+    if (id == 30) {
+        scheduler_rearm_tick();
+        let sp: *usize = sched.tcb_sp;
+        sp[sched.current_task] = frame_sp;
+        sched.current_task = (sched.current_task + 1) % sched.task_count;
+        *(gic.cpu_eoir) = id;
+        let sp2: *usize = sched.tcb_sp;
+        return sp2[sched.current_task];
+    }
+    *(gic.cpu_eoir) = id;
+    return frame_sp;
+}
+
+fn SysTick_Handler() {
+    pendsv_trigger();
+}
+
+fn pendsv_dispatch(frame_sp: usize) -> usize {
+    let sp: *usize = sched.tcb_sp;
+    sp[sched.current_task] = frame_sp;
+    sched.current_task = (sched.current_task + 1) % sched.task_count;
+    let sp2: *usize = sched.tcb_sp;
+    return sp2[sched.current_task];
+}
+
+let mut ping_done: io i32 = 0;
+let mut pong_done: io i32 = 0;
+let mut sched_done: io i32 = 0;
+
+let mut stack_a: [u8; 4096];
+let mut stack_b: [u8; 4096];
+
+fn task_ping() {
+    for i: i32 in 0..<5 {
+        chan_send(&chan_ab, i);
+        let v: i32 = chan_recv(&chan_ba);
+        uart_puts("ping got: ");
+        uart_print(v);
+        uart_puts("\r\n");
+    }
+    ping_done = 1;
+    let p: *io i32 = &sched_done;
+    while (*p == 0) {}
+}
+
+fn task_pong() {
+    for i: i32 in 0..<5 {
+        let v: i32 = chan_recv(&chan_ab);
+        chan_send(&chan_ba, v * 10);
+    }
+    pong_done = 1;
+    let p: *io i32 = &sched_done;
+    while (*p == 0) {}
+}
+
+fn app_main() {
+    let sp: *usize = sched.tcb_sp;
+    sp[1] = setup_task_stack(stack_a + 4096, task_ping);
+    sp[2] = setup_task_stack(stack_b + 4096, task_pong);
+    scheduler_init();
+    let pp: *io i32 = &ping_done;
+    let pc: *io i32 = &pong_done;
+    while (*pp == 0 || *pc == 0) {}
+    scheduler_disable();
+    sched_done = 1;
+    uart_puts("done\r\n");
+}

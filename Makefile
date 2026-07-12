@@ -83,7 +83,7 @@ COMMON_STM32_STUB  := $(COMMON_QEMU_DIR)/stm32_stub.tkb
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
 # Convention: examples/<name>/<name>.tkb -> examples/<name>/kernel.elf
-EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct struct_refined msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof_offsetof slice foreach int64 net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server fatfs affine_escape_via_index align_ptr_proof klock_guard
+EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct struct_refined msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof_offsetof slice foreach int64 net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server fatfs affine_escape_via_index align_ptr_proof klock_guard percpu chan_rendezvous
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
@@ -311,7 +311,7 @@ COMMON_UART_IRQ_STUB := $(COMMON_QEMU_DIR)/uart_irq_stub.tkb
 # semaphore.tkb declares its own extern fn sem_wait/sem_post, so no sync.tkb needed here
 TIMER_OBJS := examples/preempt/preempt.o examples/semaphore/semaphore.o \
               examples/watchdog/watchdog.o
-SYNC_OBJS  := examples/condvar/condvar.o examples/msgqueue/msgqueue.o
+SYNC_OBJS  := examples/condvar/condvar.o examples/msgqueue/msgqueue.o examples/chan_rendezvous/chan_rendezvous.o
 NET_OBJS   := examples/net_echo/net_echo.o examples/arp_reply/arp_reply.o
 CHECKSUM_OBJS := examples/inet_checksum/inet_checksum.o examples/ip_parse/ip_parse.o \
                  examples/tcp_parse/tcp_parse.o
@@ -412,7 +412,7 @@ $(APP_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMO
 TIMER_KERNELS := examples/preempt/kernel.elf examples/watchdog/kernel.elf
 # timer_asm.o + sem_asm.o (semaphore, condvar, msgqueue all need both)
 SEM_KERNELS   := examples/semaphore/kernel.elf \
-                 examples/condvar/kernel.elf examples/msgqueue/kernel.elf
+                 examples/condvar/kernel.elf examples/msgqueue/kernel.elf examples/chan_rendezvous/kernel.elf
 # semihosting_asm.o only (fatfs.tkb's extern fn semihosting_open/write/close)
 FATFS_KERNELS := examples/fatfs/kernel.elf
 GENERIC_KERNELS := $(filter-out $(TIMER_KERNELS) $(SEM_KERNELS) $(FATFS_KERNELS), $(ALL_KERNELS))

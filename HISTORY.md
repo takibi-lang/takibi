@@ -6598,3 +6598,111 @@ multi-instance-affine design, not attempted here.
 (2 new registrations). Zero compiler changes -- this PoC, like
 `affine_escape_via_index`, is pure application of already-landed
 features. `make check` (80/80) and `make langcheck` pass.
+
+**Follow-up: filed as its own issue rather than a footnote here.** The
+user asked whether the "accessor idiom is naming convention only, not
+enforced" limitation above should be appended to an existing issue or
+get a dedicated one. Recommended a dedicated issue: it is a distinct
+concern from #89 (#89 tracks *consumption* discipline for a value
+already in hand; this is about *reachability* -- whether a value can be
+touched at all without going through a designated entry point), and it
+had already surfaced once before (the `FatFile`/issue #97 follow-up
+entry above, "Rust solves that specific problem with a THIRD,
+independent mechanism... a form of file-scoped field visibility this
+language does not have today") -- two independent occurrences of the
+same gap is a real pattern, not a one-off worth burying in either
+feature's own issue. Filed as **issue #108**, "No module-private field
+visibility -- accessor idioms (KGuard, FatFile) are naming convention
+only, not enforced." Explicitly scoped as evidence-collection, not an
+implementation request (YAGNI) -- no concrete feature needs this to ship
+yet; becomes relevant once the RTOS work moves past a giant lock into
+real fine-grained per-resource locking, or `FatFile`-style
+constructor-validity becomes a concrete need.
+
+## Simple RTOS (issue #66), PoC 2/3: `examples/percpu`
+
+Second of the three proposed RTOS-API proof-of-concept examples (see
+PoC 1's entry above for the full API and design rationale). Proves that
+`cpu_id()`'s refined return type, `{0..<1 as usize}` (NCPU = 1 today),
+is what lets `percpu[cpu_id()]` compile clean under `--forbid-trap` with
+*zero* runtime bounds check -- the refined range exactly matches
+`percpu`'s own declared array size, so the access is proven in range at
+every call site with no annotation burden on the caller. Verified via
+real QEMU execution (`cpu_id: 0` / `bump: 1` / `bump: 2` / `done`) and
+compiled `--forbid-trap`-clean on the first attempt (no unrefined-first
+pass needed, same reasoning as PoC 1 -- a single, already-refined array
+index, no raw pointer arithmetic).
+
+Also demonstrates why the RTOS design widens `NCPU` (rather than
+dropping `cpu_id()`'s refinement) once real multi-core hardware (issue
+#6) exists: `{0..<NCPU as usize}` stays `--forbid-trap`-clean for every
+existing `percpu[cpu_id()]` call site with no code change there at all
+-- only `cpu_id()`'s own body needs to change to read a real per-core ID
+register.
+
+**Negative contrast, not just a positive demo**: `examples/
+percpu_unrefined_rejected` is the identical `percpu[id]` access, but
+with `cpu_id()` declared to return plain `usize` instead of the refined
+type. Rejected under `--forbid-trap`
+(`array bounds check remains: index type usize cannot prove range
+{0..<1}`, same message shape as the pre-existing `forbid_trap_wrong`
+fixture) -- concrete evidence that PoC 1's clean compile comes from the
+refined return type doing real work, not from `NCPU` merely happening to
+be 1 today.
+
+**Files**: `examples/percpu/percpu.tkb` + `.expected` (new), `examples/
+percpu_unrefined_rejected/percpu_unrefined_rejected.tkb` + `.error`
+(new), `Makefile` (`EXAMPLES` list), `scripts/run_qemutest.sh` (2 new
+registrations, the error-fixture one passing `--forbid-trap` through
+like `forbid_trap_wrong` does). Zero compiler changes. `make check`
+(82/82) and `make langcheck` pass.
+
+## Simple RTOS (issue #66), PoC 3/3: `examples/chan_rendezvous`
+
+Third and final planned PoC (see PoC 1's entry above for the full API
+and design rationale). Proves a CSP-style synchronous (rendezvous)
+channel -- `chan_send()` does not return until a `chan_recv()` on the
+same channel has actually taken the value -- built as a small, generic
+`chan_send(ch: *Chan, m: i32)`/`chan_recv(ch: *Chan) -> i32` wrapper
+around the exact same primitives `examples/condvar`/`examples/msgqueue`
+already use (`examples/common/sync.tkb`'s `MutexGuard`/`mutex_lock`/
+`mutex_unlock`, sequence-counter `cond_wait`/`cond_signal`) -- no new
+synchronization primitive, no compiler changes. Unlike `msgqueue`'s
+bounded ring buffer (capacity 4, producer/consumer can run ahead of each
+other), a `Chan` has no buffer at all, only a one-shot `full`-flagged
+slot: `chan_send` waits on `slot_taken` twice (once before placing a
+value, to wait for the slot to be free; once after, to wait for the
+receiver's ack), `chan_recv` waits on `slot_full` and then signals
+`slot_taken`. This second wait inside `chan_send` is what makes it a
+true rendezvous rather than a fire-and-forget mailbox.
+
+Verified with a genuine two-task ping-pong on the existing preempt
+scheduler (`examples/preempt/preempt.tkb`'s round-robin tick switch,
+reused byte-for-byte -- same `SchedState`/`irq_dispatch`/
+`SysTick_Handler`/`pendsv_dispatch` shape as `msgqueue.tkb`), over TWO
+channels (`chan_ab`: ping -> pong, `chan_ba`: pong -> ping), exercising
+both directions rather than one producer and one consumer as
+`examples/msgqueue` does: `task_ping` sends `0..5`, `task_pong` replies
+with each value times 10, `task_ping` prints what comes back. Compiled
+`--forbid-trap`-clean on the first attempt (same reasoning as PoC 1/2 --
+no raw pointer arithmetic, only literal-range `for` loops and struct
+field access through a pointer parameter, an already-established pattern
+this session from the `*align(N) T` work). Real QEMU output
+(`ping got: 0/10/20/30/40`, `done`) matches expectations and was
+confirmed deterministic across 5 repeated runs -- worth checking
+explicitly since this is new preemption-plus-synchronization code, not
+just new sequential logic.
+
+**Files**: `examples/chan_rendezvous/chan_rendezvous.tkb` + `.expected`
+(new), `Makefile` (`SYNC_OBJS`/`SEM_KERNELS`/`EXAMPLES`), `scripts/
+run_qemutest.sh` (1 new registration). Zero compiler changes. `make
+check` (83/83) and `make langcheck` pass.
+
+All three planned RTOS PoCs (`klock_guard`, `percpu`, `chan_rendezvous`)
+are now individually built and verified. Combining them into one
+`examples/common/rtos.tkb` (integrating with the existing `scheduler`/
+`semaphore`/`msgqueue` examples, per the PoC-to-file mapping table
+proposed alongside the original API) is the next step, not yet started
+-- to be confirmed with the user before starting, since it is a genuine
+consolidation/design step rather than a straightforward continuation of
+the same PoC pattern.
