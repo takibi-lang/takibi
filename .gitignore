@@ -33,7 +33,6 @@ takibi.opam
 _opam/
 
 # Claude
-.claude/settings.json
 .claude/settings.local.json
 
 # Python
