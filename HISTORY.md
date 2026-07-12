@@ -6501,3 +6501,100 @@ array `align(32)`); `examples/http_server_sdcard_install/
 http_server_sdcard_install.tkb` (`staging` array `align(32)`); `examples/
 sdcard/sdcard.tkb` (`rbuf` local `align(32)`); `SPEC.md` (element-stride
 proof source documented, Stage 2 scope note updated).
+
+## Simple RTOS (GitHub issue #66) and Multiple Core (issue #6): design discussion, then PoC 1/3 -- `examples/klock_guard`
+
+Following issue #102's completion, discussed (with the Fable persona) how
+far to design ahead for a future Simple RTOS given `io`'s existing
+single-core assumption, and whether an SMP kernel realistically needs
+message-passing (Barrelfish/multikernel-style) or can stay shared-memory
+with fine-grained locks -- referencing seL4's "big lock is fine" result
+(noted as a CONDITIONAL claim specific to microkernels with short kernel
+residency, not a universal one applicable to Takibi's monolithic-Unix-
+kernel goal) and CertiKOS (Coq-verified concurrent kernel with per-CPU
+locks, counter-evidence that message-passing-only is not the sole path
+to verifiability) against Hubris/QNX/RTIC as reference points for a
+static-tasks-plus-synchronous-IPC design. Conclusion, recorded in issues
+#66 and #6 (filed by the user from this discussion, translated to
+English) rather than repeated here: start with a giant kernel lock
+(interrupt-disable, single-core-honest) but name the LOCK OBJECT from
+day one in the API (`klock(lk: *KLock)`, not a bare Linux-BKL-style
+no-argument lock/unlock) specifically so fine-graining later is a body
+change, not an API rewrite; defer real SMP/message-passing entirely
+until issue #6's actual hardware need (RPi3) exists.
+
+Proposed (and the user accepted) a minimal RTOS task-facing API in
+Takibi syntax, to be proven out as a series of small, self-contained
+proof-of-concept examples (same convention as `examples/
+affine_escape_via_index`) before being combined into one
+`examples/common/rtos.tkb`:
+
+```
+fn cpu_id() -> {0..<1 as usize};          // today: NCPU=1
+
+struct KLock { word: i32; }
+affine opaque struct KGuard;
+fn klock(lk: *KLock) -> *KGuard;
+fn kunlock(g: sink *KGuard, lk: *KLock);
+// accessor idiom: fn <name>(g: borrow *KGuard) -> *<ProtectedData>;
+
+fn rtos_task_add(id: {0..<4 as usize}, sp: usize);
+fn rtos_start();
+fn task_self() -> {0..<4 as usize};
+fn task_yield();
+
+struct Msg { kind: u32; len: u32; body: [u8; 56]; }
+fn chan_send(ch: {0..<4 as usize}, m: *Msg);
+fn chan_recv(ch: {0..<4 as usize}, out: *Msg);
+```
+
+Channels use COPY/rendezvous semantics (synchronous send-blocks-until-
+receiver-ready) specifically to sidestep buffer-ownership problems by
+construction -- no buffer exists to alias or leak. Zero-copy/lease-style
+(Hubris-inspired) is an explicitly deferred v2, blocked on issue #89's
+still-open affine-multi-instance problem (the SAME wall `SlotLease` in
+`affine_escape_via_index.tkb` was built to explore). `cpu_id()`'s
+refined return type today (`{0..<1 as usize}`) is deliberate: it is what
+lets a future per-CPU array index (`percpu_state[cpu_id()]`) become
+`--forbid-trap`-clean the moment NCPU grows, with no code change at the
+call site.
+
+**PoC 1 of 3: `examples/klock_guard`** (this entry's actual deliverable
+-- `percpu` and `chan_rendezvous` are follow-on PoCs, not yet started).
+`struct KLock { word: i32; }` (word is an unused placeholder for future
+per-lock state -- v1's real exclusion is `disable_irq`/`enable_irq`,
+already present as raw asm symbols in `examples/common_qemu/startup.S`
+but never previously declared as a takibi `extern fn` from any `.tkb`
+file), `affine opaque struct KGuard;`, `klock(lk: *KLock) -> *KGuard`,
+`kunlock(g: sink *KGuard, lk: *KLock)`, and an accessor pair
+(`shared_get`/`shared_add`, each taking `g: borrow *KGuard`) binding a
+`Shared { counter: i32; }` global to the lock. Verified via real QEMU
+execution (`counter: 15` / `counter: 115` / `done`, matching 5+10 then
++100) -- compiled `--forbid-trap`-clean immediately with no unrefined-
+first pass needed, unlike the `fatfs`/SD-card milestone: this PoC has no
+array indexing or raw-pointer arithmetic at all, so there was no bounds-
+check surface for `--forbid-trap` to ever flag.
+
+Two properties genuinely PROVEN at compile time, verified with real
+fixtures: (1) forgetting `kunlock()` is rejected -- new negative fixture
+`examples/klock_guard_forgot_unlock` (`affine value 'g' is never
+consumed`), reusing issue #89's existing never-consumed check with no
+compiler changes; (2) double-unlock is rejected -- the existing double-
+consume check, since `kunlock` takes `sink`, also with no compiler
+changes needed (not given its own redundant fixture, since that
+mechanism already has generic coverage from `affine_double_consume`).
+One property explicitly documented as NOT proven, to avoid overclaiming:
+the accessor idiom (routing access to `shared` through `shared_get`/
+`shared_add`) is a NAMING CONVENTION only -- takibi has no module-private
+field visibility (the same gap noted in this file's `FatFile`/issue #97
+follow-up entry), so nothing stops `shared.counter = 42;` written
+directly, bypassing `klock()` entirely. Closing that gap is exactly the
+kind of fine-grained-access-control work deferred to a later, real
+multi-instance-affine design, not attempted here.
+
+**Files**: `examples/klock_guard/klock_guard.tkb` + `.expected` (new),
+`examples/klock_guard_forgot_unlock/klock_guard_forgot_unlock.tkb` +
+`.error` (new), `Makefile` (`EXAMPLES` list), `scripts/run_qemutest.sh`
+(2 new registrations). Zero compiler changes -- this PoC, like
+`affine_escape_via_index`, is pure application of already-landed
+features. `make check` (80/80) and `make langcheck` pass.

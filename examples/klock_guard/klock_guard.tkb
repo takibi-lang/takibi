@@ -1,0 +1,100 @@
+// PoC 1/3 toward a Simple RTOS (GitHub issue #66), building on today's
+// affine `sink`/never-consumed machinery (issue #89) the same way
+// examples/affine_escape_via_index does. Fable-proposed API (see
+// HISTORY.md's RTOS design entries): a kernel lock `KLock` guarding a
+// piece of shared state, an affine `KGuard` token proving the lock is
+// held, and an "accessor" idiom (a function taking `borrow *KGuard`)
+// binding the guard to the specific data it protects.
+//
+// What this file actually PROVES at compile time (verified below):
+//   1. Forgetting kunlock() is a compile error -- the never-consumed
+//      check (issue #89) rejects a KGuard that never reaches a sink
+//      parameter before its declaring scope ends. In a kernel lock this
+//      is the difference between "held slightly too long" and "held
+//      forever" (a permanently disabled-interrupts system).
+//   2. Double-unlock is a compile error -- the existing double-consume
+//      check, since kunlock takes its guard as `sink`.
+// What this file does NOT prove, and is honest about not proving: the
+// accessor idiom (shared_get/shared_add below requiring `borrow
+// *KGuard`) is a NAMING CONVENTION, not an enforced privacy boundary --
+// takibi has no module-private field visibility (see HISTORY.md's issue
+// #97 FatFile follow-up for the same gap noted there), so nothing stops
+// a function from writing `shared.value = 42;` directly, bypassing
+// klock() entirely. Only a real fine-grained-lock design (deferred,
+// tracked in the RTOS discussion) could close that gap; today it is
+// "don't do that", the same way MutexGuard (examples/common/sync.tkb)
+// already relies on callers going through mutex_lock/mutex_unlock by
+// convention.
+//
+// v1 implementation is a placeholder Giant Lock: klock()/kunlock() just
+// disable/enable IRQs (examples/common_qemu/startup.S's disable_irq/
+// enable_irq), so only one KGuard can usefully exist system-wide at a
+// time regardless of how many KLock instances are declared -- this
+// mirrors KGuard's own opaque-struct singleton nature (SPEC.md's
+// "Affine Opaque Structs"). What matters for future fine-graining is
+// that klock/kunlock already take the specific KLock being acquired as
+// an explicit argument (unlike a classic Big Kernel Lock, which takes
+// none) -- swapping the body for a real per-lock primitive later is
+// then a change to klock/kunlock's IMPLEMENTATION, not their signature
+// or any caller.
+extern fn disable_irq();
+extern fn enable_irq();
+
+struct KLock {
+    // Placeholder for real per-lock state (e.g. a ticket/futex word)
+    // once fine-grained locking replaces the giant-lock body below.
+    // Unused today -- v1's actual exclusion is disable_irq/enable_irq.
+    word: i32;
+}
+
+affine opaque struct KGuard;
+
+fn klock(lk: *KLock) -> *KGuard {
+    disable_irq();
+    return 0 as usize as *KGuard;
+}
+
+fn kunlock(g: sink *KGuard, lk: *KLock) {
+    enable_irq();
+}
+
+// The protected data, and its accessor idiom: reaching `shared` through
+// these two functions requires already holding a KGuard (a `borrow
+// *KGuard` parameter), documenting at every call site which lock a
+// given piece of state is meant to be read/written under.
+struct Shared {
+    counter: i32;
+}
+
+let mut shared: Shared;
+
+fn shared_get(g: borrow *KGuard) -> i32 {
+    return shared.counter;
+}
+
+fn shared_add(g: borrow *KGuard, delta: i32) {
+    shared.counter = shared.counter + delta;
+}
+
+let mut the_lock: KLock;
+
+fn app_main() {
+    let g: *KGuard = klock(&the_lock);
+    shared_add(g, 5);
+    shared_add(g, 10);
+    uart_puts("counter: ");
+    uart_print(shared_get(g));
+    uart_puts("\r\n");
+    kunlock(g, &the_lock);
+
+    // Lock again after a full unlock, proving the lock is genuinely
+    // reusable rather than a one-shot token.
+    let g2: *KGuard = klock(&the_lock);
+    shared_add(g2, 100);
+    uart_puts("counter: ");
+    uart_print(shared_get(g2));
+    uart_puts("\r\n");
+    kunlock(g2, &the_lock);
+
+    uart_puts("done\r\n");
+}

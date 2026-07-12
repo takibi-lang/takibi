@@ -1,0 +1,33 @@
+// This file is expected to produce a compile error.
+// Companion negative fixture for examples/klock_guard: a KGuard acquired
+// via klock() but never passed to kunlock() before its declaring scope
+// ends is rejected at compile time (GitHub issue #89's "must eventually
+// be consumed" check -- see HISTORY.md). For a kernel lock this is the
+// single most important bug class to catch: forgetting to release a
+// giant lock means every other task -- and every interrupt, since v1's
+// klock/kunlock are disable_irq/enable_irq -- is blocked forever, with
+// no crash or warning to point at why.
+extern fn disable_irq();
+extern fn enable_irq();
+
+struct KLock {
+    word: i32;
+}
+
+affine opaque struct KGuard;
+
+fn klock(lk: *KLock) -> *KGuard {
+    disable_irq();
+    return 0 as usize as *KGuard;
+}
+
+fn kunlock(g: sink *KGuard, lk: *KLock) {
+    enable_irq();
+}
+
+let mut the_lock: KLock;
+
+fn app_main() {
+    let g: *KGuard = klock(&the_lock);
+    // kunlock(g, &the_lock); -- forgotten on purpose
+}
