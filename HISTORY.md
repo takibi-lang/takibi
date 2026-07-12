@@ -6822,3 +6822,259 @@ RTOS work (task_yield, fine-grained locking beyond the giant lock,
 issue #108's module-private visibility gap, real multi-core once issue
 #6 has hardware) is left for whenever a concrete next need arises, per
 this project's YAGNI principle.
+
+### The `use` Feature's Motivating Incident: A GIC-Specific Helper Placed in a Shared File
+
+**Historical incident that first exposed the gap** (from before the `use` feature existed, kept here for context):
+while removing `irq.tkb`'s `IS_QEMU` branch, a new helper function was first placed in `uart.tkb` (concatenated
+into literally every example) even though its body called `gic_init()`/`enable_usart1_irq()`, symbols that only
+exist in a handful of builds -- this silently broke unrelated examples like `start` with an "Undefined function"
+error, not caught until `make stm32build` was re-run over the whole example set. Ended up moving the functions
+into `gic.tkb`/`nvic.tkb` instead (already only included where those symbols exist) -- `use` would not have
+prevented the underlying design mistake (putting a GIC-specific helper in a file every example shares), only
+made the resulting undefined-symbol error appear immediately when `uart.tkb` itself was next compiled, rather
+than only when a later, unrelated Makefile target happened to expose it.
+
+### IPv4/ICMP: split into 3 deliberately small steps (examples/inet_checksum, examples/ip_parse, examples/icmp_echo)
+
+The original ask was "an IPv4 echo server" (ICMP ping responder), but that
+bundles two genuinely new things at once -- the Internet checksum
+algorithm (RFC 1071) and real virtio-net RX/TX of a new protocol -- making
+failures hard to attribute to one or the other. Split into three
+increasingly-integrated steps instead:
+
+1. **`examples/inet_checksum`** -- the checksum algorithm alone, no
+   networking I/O at all, following the exact same pure-compute demo
+   pattern as `crc8.tkb`/`djb2.tkb` (operate on a fixed buffer, print a
+   hex result, diff against a `.expected` file). Test vector is a real
+   20-byte IPv4 header, verified independently in Python before being
+   committed: checksumming it with its correct checksum field in place
+   yields `0x0000` (how a receiver verifies a packet); checksumming it
+   with that field zeroed yields `0xb1e6`, the value that belongs there
+   (how a sender computes it). The function itself lives in
+   `examples/common/inet_checksum.tkb` so `ip_parse` and `icmp_echo` can
+   both reuse it rather than duplicating it.
+2. **`examples/ip_parse`** -- IPv4 header field extraction and checksum
+   *validation* only, no reply, and deliberately **not** wired to
+   virtio-net at all: it parses two canned buffers baked into the binary
+   (one valid, one with a corrupted TTL so the checksum no longer
+   verifies) and prints the results. The virtqueue/IRQ plumbing was
+   already fully proven by `net_echo`/`arp_reply`; re-exercising it here
+   would test the same thing twice while adding nothing to what's new in
+   this step (the parsing logic itself). Scope is intentionally narrow:
+   only headers with no IP options (IHL must be exactly 5/20 bytes).
+3. **`examples/icmp_echo`** -- the real thing: live virtio-net RX/TX
+   (same pattern as `net_echo`/`arp_reply`) combined with IPv4/ICMP
+   parsing and, for the first time, checksum *construction* (not just
+   validation) for the reply. Validates the request's IP and ICMP
+   checksums independently before replying and silently drops anything
+   that fails either check, isn't addressed to `our_ip`, or isn't a
+   well-formed echo request -- `scripts/icmp_echo_test.py` explicitly
+   tests a corrupted-checksum request is dropped, not just that a valid
+   one is answered. Builds the reply in place (swap MACs, swap IPs, fresh
+   TTL, ICMP type 8->0, identifier/sequence/payload untouched) and
+   recomputes both checksums from scratch with `inet_checksum` rather
+   than attempting an incremental update -- simpler and reuses the
+   already-verified function instead of a second, subtler algorithm.
+- **`run_qemutest.sh` prints a `Failed: name1 name2 ...` line in its final
+  summary** (via a `FAILED_TESTS` array appended to on every failure
+  branch) rather than stopping at the first failure. Deliberate: QEMU
+  boot cost makes fail-fast expensive to iterate against in CI (you'd only
+  learn about the next failure after fixing and re-running), so the
+  script always runs everything and reports the full failure list at the
+  end instead.
+
+### TCP: examples/tcp_parse (parse-only) + examples/tcp_echo (grown incrementally)
+
+TCP is being split differently than IPv4/ICMP was, because TCP itself
+splits into two genuinely different kinds of step:
+
+- **`examples/tcp_parse`** is a one-shot separate example, exactly
+  mirroring `ip_parse`: canned buffers, no virtio-net, just field
+  extraction and checksum validation. This is a clean split because
+  header parsing is a self-contained concern independent of connection
+  state.
+- **`examples/tcp_echo`** (handshake -> data echo -> close) is deliberately
+  **one example grown incrementally**, not a separate example per stage:
+  unlike ARP/ICMP (stateless, one-frame-in-one-frame-out), TCP's stages
+  share a connection, so a standalone "handshake-only" binary wouldn't be
+  a real artifact. Regression granularity instead comes from accumulating
+  test *functions* in `scripts/tcp_echo_test.py` (mirrors
+  `icmp_echo_test.py`'s multi-function structure), one per stage --
+  `test_handshake_only`, `test_data_echo`, `test_close`,
+  `test_reconnect_after_close`. **These functions are not independent**:
+  `tcp_echo.tkb` supports exactly one connection, so
+  `test_data_echo()`/`test_close()` continue the *same* connection
+  `test_handshake_only()` established (shared module-level constants:
+  `HANDSHAKE_CLIENT_PORT`/`HANDSHAKE_CLIENT_ISN`/`SERVER_ISN`) and must run
+  in that order (`app_main()`'s `ok4 = ok3 and test_data_echo()` chain). Each
+  still prints its own labeled PASS/FAIL line, so per-stage regression
+  attribution still works even though execution is a chain, not
+  independent calls. `test_reconnect_after_close()` is the one function
+  that *is* independent -- a brand new connection after `test_close()` --
+  specifically to catch a "close looks right but forgot to reset
+  `conn_state`" bug that `test_close()` alone can't see (it only checks
+  the reply, not that the server is usable again afterward).
+
+  State cycle: `TCP_LISTEN` -> `TCP_SYN_RCVD` -> `TCP_ESTABLISHED` ->
+  `TCP_LAST_ACK` -> back to `TCP_LISTEN`. No separate `CLOSE_WAIT`/
+  `FIN_WAIT`: the server never has queued outbound data by the time a
+  client FINs, so it ACKs the FIN and sends its own FIN in the same
+  segment (`build_fin_ack`) rather than as two events.
+
+**TCP checksum needs a "pseudo-header"** (12 bytes: src IP, dst IP, a
+zero byte, protocol, TCP length) that is never actually transmitted but
+is included in the checksum computation, prepended to the TCP header+data.
+This doesn't fit `inet_checksum`'s single-contiguous-buffer signature, so
+`examples/common/inet_checksum.tkb` was split into `checksum_add(data,
+len, sum_in)` (accumulates an *unfolded* running sum, chainable across
+non-contiguous buffers) and `checksum_fold(sum)` (carries + one's
+complement, done once at the end) -- `inet_checksum` itself is now just
+`checksum_fold(checksum_add(data, len, 0))`, so `ip_parse`/`icmp_echo`
+needed no changes. The two-chunk chaining is valid per RFC 1071 because
+the pseudo-header is exactly 12 bytes (a whole number of 16-bit words),
+so only the *last* chunk (the actual TCP segment) can be odd-length and
+need padding -- see `checksum_add`'s comment.
+
+**`bytes_eq`/`bytes_copy`/`read_u16be`/`write_u16be` were extracted into
+`examples/common/netutil.tkb`** at this point too (previously duplicated
+verbatim in both `arp_reply.tkb` and `icmp_echo.tkb`) -- three call sites
+needing the same four helpers was the threshold where deduplication
+clearly paid for itself. Also added `read_u32be`/`write_u32be` for TCP's
+32-bit sequence/acknowledgment numbers, same big-endian-byte-by-byte
+reasoning as the 16-bit versions. Note `read_u32be` can produce a
+"negative" `i32` bit pattern for seq numbers >= `0x80000000` (i32 is
+signed) -- harmless for display (print via `uart_print_hex`, which shows
+the bit pattern regardless of sign, not decimal `uart_print`) and harmless
+for the modular arithmetic TCP sequence
+numbers actually need, but worth remembering if a future step adds
+seq-number *comparisons* (`<`, `>`) -- those need wraparound-aware
+comparison logic, not a plain signed or unsigned `<`.
+
+## HTTP Server (examples/http_server) -- the TCP/IP progression's payoff
+
+Serves a single styled HTML page (inline CSS, dark/monospace theme) with
+a live request counter on port 80. Built on `tcp_echo`'s state machine
+(same LISTEN/SYN_RCVD/ESTABLISHED/LAST_ACK cycle), but is the first
+example that is genuinely usable from a real browser, not just the
+`-netdev dgram` synthetic test transport -- and getting that working
+surfaced two real bugs/gaps that no earlier example's automated tests had
+caught, because those tests only ever talked to *themselves*
+(hand-crafted Python packets, never a real TCP/IP stack):
+
+- **QEMU's `-netdev user` (SLIRP) refuses to deliver any IP packet until
+  the guest has answered an ARP request for its address.** `net_echo`'s
+  and `arp_reply`'s own tests never needed this, because `-netdev dgram`
+  is a raw point-to-point pipe where the python script already knows the
+  guest's MAC -- there's no link layer to resolve. A real network path
+  always has one. Consequence: `http_server.tkb` has to combine ARP
+  response (reused from `arp_reply.tkb`) and TCP/HTTP handling in the
+  *same* kernel, dispatching on ethertype, since only one kernel can run
+  at a time. Discovered by writing a throwaway probe kernel that just
+  logged every received frame's ethertype under `-netdev user` -- only
+  ARP frames showed up until ARP response was added.
+- **Real TCP clients (SLIRP's kernel-grade TCP stack, and any real
+  browser) always include a TCP options block on the SYN** (at minimum an
+  MSS option, making the header 24 bytes / data offset 6, not the bare
+  20-byte / data-offset-5 header `tcp_echo.tkb` and `tcp_parse.tkb`
+  originally required). Since `scripts/*_test.py` construct every packet
+  by hand and never bothered with options, this was completely invisible
+  to `make qemutest` -- it only surfaced once tested against a real
+  client. Fixed in both `http_server.tkb` and (for consistency,
+  afterward) `tcp_echo.tkb`: compute `tcp_hdr_len` from the segment's
+  actual data offset (accepting doff 5..15) and use it to locate where
+  data starts, rather than hardcoding the no-options 20-byte assumption;
+  options themselves are never parsed, just skipped over.
+  `tcp_parse.tkb` turned out not to need this fix at all -- it already
+  computed and *displayed* `data_offset` generically, it just never used
+  it to locate anything (no reply construction, so nothing was ever
+  assumed to start at a fixed offset).
+
+  **The fix is not just "accept a wider range of doff values"; the data
+  itself has to move.** `tcp_echo.tkb`'s echo reply always writes a clean
+  20-byte header (no options) starting at `tcp+0`, so if the *received*
+  segment had a 24-byte header, its payload sits at `tcp+24`, not
+  `tcp+20` -- reusing the same buffer in place without shifting the
+  payload down would silently prepend 4 bytes of stale option data and
+  truncate the last 4 bytes of the real payload. `build_data_echo` now
+  takes the actual data pointer and `bytes_copy`s it down to `tcp+20`
+  first when they differ; safe even though the ranges can overlap,
+  because the destination never leads the source and the copy loop goes
+  forward (same direction requirement as `memmove` for this case -- see
+  the function's comment). Loosening the acceptance check *without* this
+  shift would have silently swapped "reject options-bearing segments" for
+  "corrupt them," which is worse. `scripts/tcp_echo_test.py` gained
+  `test_syn_with_options_accepted()` (sends a SYN with a real 4-byte MSS
+  option, verifies a normal SYN-ACK, then RSTs the half-open connection
+  so it doesn't hold the single connection slot for the rest of the
+  file's tests) so this doesn't silently regress again.
+
+**our_ip is `10.0.2.15`, not the `192.0.2.1` TEST-NET-1 address every
+earlier example uses.** SLIRP's `hostfwd` rule routes to a fixed default
+guest address (confirmed empirically, not just from memory -- see the
+probe kernel above), and the guest must actually own that address for
+the connection to land anywhere. `scripts/http_server_test.py` (still a
+`-netdev dgram` test) uses the same `10.0.2.15` for consistency even
+though its raw transport doesn't technically require it.
+
+**Response construction needed two new `netutil.tkb` primitives**:
+`copy_str(dst, src)` (copies a NUL-terminated string literal into a
+buffer, returns length -- same idea as `uart_puts` but targeting memory
+instead of streaming to UART) and `write_udec(buf, n)` (writes decimal
+digits with no leading zeros, returns digit count -- same recursive
+approach as `print.tkb`'s unsigned decimal core, targeting a buffer). Needed
+because the response's `Content-Length` and the request counter are both
+variable-width at runtime, so the response has to be *built* (body first,
+into a staging buffer `html_body`, to learn its length; then headers,
+using that now-known length; then the body copied in after) rather than
+templated with a fixed size like every earlier fixed-format reply
+(SYN-ACK, ICMP echo reply, etc.) was.
+
+**Manual browser access**: `make qemu-http-server` (uses `-netdev
+user,hostfwd=tcp::$(HTTP_HOST_PORT)-:80` instead of the automated tests'
+`-netdev dgram`; `HTTP_HOST_PORT` defaults to 18080 -- not 8080, which
+immediately collided with Syncthing on a real dev machine the first time
+this was tried outside the devcontainer; override with e.g.
+`make qemu-http-server HTTP_HOST_PORT=8081` if 18080 is also taken), then
+open `http://localhost:18080/` in a real browser. Reloading the page
+re-runs the whole connect/request/respond/close cycle and the counter
+visibly increments -- this is deliberately *not* something
+`make qemutest` exercises (see the request-counter determinism note
+below), since it depends on a human clicking reload, not a scripted
+sequence.
+
+`qemu-http-server` quits on plain **Ctrl-C** (every other `qemu-*` target
+needs QEMU's Ctrl-A X escape instead) -- see `HTTP_SERVER_QEMU_FLAGS` in
+the Makefile for the full reasoning (raw-mode terminal pass-through vs.
+`-serial file:/dev/stdout`, confirmed via `kill -INT` rather than assumed).
+The Makefile target also echoes the actual browser URL right before
+launching QEMU, since the guest has no way to know the host-side
+`HTTP_HOST_PORT`.
+
+**`make stm32-http-server`**: same demo, on the real STM32F746G-DISCOVERY board instead of
+QEMU (flashes `examples/http_server/kernel_stm32.bin` via `st-flash`, prints the URL to open,
+then streams the board's own UART log lines until Ctrl-C). Unlike `qemu-http-server`'s fixed
+`localhost:$(HTTP_HOST_PORT)`, the printed URL is parsed live from `examples/common_stm32/
+netconfig.tkb`'s `HTTP_SERVER_IP` constant (`grep`+`tr`, no hardcoded IP in the Makefile), so it
+can't silently drift out of sync if that constant is ever changed. The serial reader is
+attached (backgrounded) *before* the explicit `st-flash reset`, not after, so the board's
+earliest "ready" message isn't lost to a reader that hasn't opened the port yet -- same
+ordering reasoning as `read_until_quiet`'s `WAIT_FOR_DATA` case in `scripts/run_hwtest_ram.sh`.
+Needs the board connected and its Ethernet port wired directly to this machine's NIC (see the
+STM32 hardware bring-up section's devcontainer note for the `/dev-host/ttyACM0` serial path).
+
+**Request counter determinism** (flagged as a concern before
+implementation, worth recording why it's actually safe): `make qemutest`
+boots a fresh QEMU process per test, so `request_count` always starts at
+0. `scripts/http_server_test.py` sends exactly two real, sequential
+requests and asserts the counter reads 1 then 2 -- deterministic, not
+timing-dependent. The one way this *could* have been flaky is if a
+network-level retry (see `send_and_wait`, used for the SYN and the GET in
+case a packet is lost before the guest finishes booting) caused the
+server to process the same logical request twice; it can't, because the
+retry resends the identical frame bytes (same sequence number), and the
+server only acts on a segment when its `seq` matches `conn_rcv_nxt`
+exactly -- a resent duplicate's `seq` is already stale by the time a
+retry would fire, so it's silently ignored. This is the same
+duplicate-suppression property `tcp_echo_test.py` already depends on,
+just relied on for a new reason here.

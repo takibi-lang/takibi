@@ -678,7 +678,12 @@ at codegen time rather than silently lowering to a racy `wfi`.
   expected-type-based selector yet).
 - `uart_print`/`uart_println` (in `examples/common/print.tkb`) are the
   standard example of this: overloaded for `bool` and every
-  signed/unsigned integer width including `isize`/`usize`.
+  signed/unsigned integer width including `isize`/`usize`. Narrow types
+  share 32-bit conversion cores and wide types share 64-bit cores;
+  signed minimum values are converted through unsigned subtraction to
+  avoid overflow. The old non-overloaded helper names (`uart_print_int`,
+  `uart_print_uint`, and their `println` variants) have been removed --
+  use the overloaded entry points instead.
 
 ## Refined Integer Types
 
@@ -826,7 +831,7 @@ Currently gates exactly three things:
 - A slice/array-base subslice whose bounds fail the interval/same-base
   proof (`unsafe { s[a..<b] }` when `s` is already a slice) -- skips the
   runtime check entirely, for the rare case that is correlated in a way
-  plain interval reasoning cannot see (see CLAUDE.md's P4c section for
+  plain interval reasoning cannot see (see HISTORY.md's P4c section for
   the two confirmed real-world cases and why a more general relational
   domain wasn't built for them).
 - Casting a non-literal integer to a pointer whose pointee is an
@@ -871,9 +876,14 @@ from.
 
 ## Known Limitations (Language-Level)
 
-See `CLAUDE.md`'s "Known Limitations / Deferred Design Decisions" for
-the full, continuously-updated list including hardware/driver-specific
-items. The ones most likely to matter when writing new `.tkb` code:
+This is the canonical, current-behavior list of language-level known
+limitations (function overloading, the flat top-level namespace,
+`isize`, and scoped refinement-type inference are documented in their
+own dedicated sections above instead of repeated here). For
+hardware/driver-specific known limitations (interrupt builtins,
+platform lifecycle, DMA barriers, etc.), see `CLAUDE.md`'s own "Known
+Limitations / Deferred Design Decisions" section. For the design
+investigations behind any of these, see `HISTORY.md`.
 
 - **No real module system, but source-level file dependencies exist.**
   `use "path/to/file.tkb";` (a top-level item, GitHub issue #55) lets a
@@ -887,11 +897,13 @@ items. The ones most likely to matter when writing new `.tkb` code:
   NOT: real separate compilation -- every file in the resolved closure is
   still concatenated into one flat AST and type-checked/codegen'd as a
   single whole-program unit; `use` only changes how the file list is
-  computed, not the compilation model itself. See CLAUDE.md's issue #55
+  computed, not the compilation model itself. See HISTORY.md's issue #55
   entries for the full design.
 - **`sizeof`/`offsetof` cannot appear in an array-size position**
   (`[T; sizeof(Foo)]`) -- array sizes resolve in the parser, before
-  struct layout exists.
+  struct layout exists. See HISTORY.md's "sizeof(T) Spans 4 Files" entry
+  for why (parser-time vs. codegen-time resolution mismatch) and what
+  combining them would require.
 - **No general constant-expression arithmetic** between two named
   globals (`let X: i32 = A + B;`) -- see "Global Constant Folding" above
   for exactly what *is* supported.
@@ -899,6 +911,6 @@ items. The ones most likely to matter when writing new `.tkb` code:
   -allocated.
 - Relational/correlated-bounds reasoning (two variables whose sum or
   relationship is invariant, but which the type system tracks as
-  independent ranges) is not supported -- see CLAUDE.md's P4c section.
+  independent ranges) is not supported -- see HISTORY.md's P4c section.
   `unsafe` is the current escape hatch for the rare case this actually
   blocks a proof.

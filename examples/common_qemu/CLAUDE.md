@@ -46,7 +46,7 @@ protocol layer on top of the same virtqueue/DMA/IRQ plumbing:
 - `icmp_echo`: answers ICMP echo requests (ping) addressed to 192.0.2.1
   with an echo reply, preserving identifier/sequence/payload. First
   example needing a *correct* checksum on the wire (not just a validated
-  one) -- see CLAUDE.md's "IPv4/ICMP: split into 3 deliberately small steps" section for the two smaller
+  one) -- see HISTORY.md's "IPv4/ICMP: split into 3 deliberately small steps" entry for the two smaller
   steps this was deliberately split from.
 
 `virtio-net` doesn't exist on real hardware (RPi3/RISC-V/STM32 will need

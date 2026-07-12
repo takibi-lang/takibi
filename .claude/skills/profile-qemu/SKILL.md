@@ -76,7 +76,7 @@ segment-accept condition), meaning at most one unacknowledged segment can
 ever be in flight -- there is no client-side trick that can queue up
 several packets' worth of continuous processing, because the server's own
 state machine has no pipelining/sliding-window support (a deliberate
-simplicity choice, see CLAUDE.md's "TCP: examples/tcp_parse..." section). So for *both* examples, the
+simplicity choice, see HISTORY.md's "TCP: examples/tcp_parse..." entry). So for *both* examples, the
 actual per-packet compute (checksum, copy, header rewrite) is real but
 far too short relative to 75ms to ever get sampled -- this is a resolution
 mismatch, not something fixable by taking more samples or generating more
