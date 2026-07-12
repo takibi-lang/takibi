@@ -580,6 +580,11 @@ run_hw_test_ram_fatfs "fatfs (stm32/ram)" examples/fatfs/kernel_stm32_ram.elf \
 run_hw_test_ram "fatfs_sdcard (stm32/ram)" examples/fatfs_sdcard/kernel_stm32_ram.elf \
     examples/fatfs_sdcard/fatfs_sdcard.expected 15 40
 
+# rtos_fatfs_sdcard: same real SD/FAT path as fatfs_sdcard, but the work
+# runs inside an RTOS task and app_main receives completion over a Chan.
+run_hw_test_ram "rtos_fatfs_sdcard (stm32/ram)" examples/rtos_fatfs_sdcard/kernel_stm32_ram.elf \
+    examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard.expected 15 40
+
 echo ""
 if [ "$FAIL" -eq 0 ]; then
     printf "${GRN}All $PASS hardware test(s) passed.${RST}\n"

@@ -1,0 +1,7 @@
+disk_initialize: OK
+disk_status: OK
+format: OK
+create HELLO.TXT: OK
+read-back HELLO.TXT: Hello from a real SD card under RTOS!
+sd task result: 0
+done

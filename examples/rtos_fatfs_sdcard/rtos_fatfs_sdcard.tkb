@@ -1,0 +1,95 @@
+// RTOS + real SD-card/FAT12 integration demo.
+//
+// This is deliberately a NEW example instead of changing
+// examples/fatfs_sdcard: the original flat app_main() remains the
+// single-threaded baseline, while this file proves the same SD/FAT work can
+// live behind the Simple RTOS task/channel boundary. The first increment is
+// intentionally narrow: app_main starts one SD worker task, then waits for
+// its completion over a Chan. A later HTTP+SD RTOS example can keep the HTTP
+// task mostly unchanged and replace build_body_from_sdcard() with the same
+// "ask the SD worker and wait for the reply" shape proven here.
+//
+// STM32-only: there is no virtual SD controller in this project's QEMU setup.
+
+use "examples/common/rtos.tkb";
+use "examples/common/fat12.tkb";
+use "examples/common_stm32/sdmmc.tkb";
+
+// buf: *align(32) u8, matching examples/fatfs_sdcard's real-SD adapter.
+fn mem_block_read(sector: u32, buf: *align(32) u8) {
+    disk_read(sector, buf);
+}
+
+fn mem_block_write(sector: u32, buf: *align(32) u8) {
+    disk_write(sector, buf);
+}
+
+let mut done_ch: Chan = {1, 0, 0, 0, 0};
+let mut rtos_done: io i32 = 0;
+let mut sd_stack: [u8; 8192];
+
+fn sd_worker() {
+    let mut result: i32 = 0;
+    let mut init_ok: bool = false;
+
+    if (disk_initialize() == 0) {
+        uart_puts("disk_initialize: OK\r\n");
+        init_ok = true;
+    } else {
+        uart_puts("disk_initialize: FAIL\r\n");
+        result = -1;
+    }
+
+    if (init_ok) {
+        if (disk_status() == 0) {
+            uart_puts("disk_status: OK\r\n");
+        } else {
+            uart_puts("disk_status: FAIL\r\n");
+            result = -1;
+        }
+
+        fat_format();
+        uart_puts("format: OK\r\n");
+
+        let hello_name: *u8 = "HELLO   TXT";
+        let hello_content: *u8 = "Hello from a real SD card under RTOS!\r\n";
+        if (create_demo_file(hello_name, hello_content) == 0) {
+            uart_puts("create HELLO.TXT: OK\r\n");
+        } else {
+            uart_puts("create HELLO.TXT: FAIL\r\n");
+            result = -1;
+        }
+
+        let read_fp: *FatFile = fat_open(hello_name, FA_READ);
+        if ((read_fp as usize) != 0) {
+            let mut read_buf: [u8; 80];
+            let mut read_br: u32 = 0;
+            fat_read(read_fp, read_buf, 80, &read_br);
+            fat_close(read_fp);
+            uart_puts("read-back HELLO.TXT: ");
+            uart_print_bytes(read_buf, read_br);
+        } else {
+            uart_puts("read-back HELLO.TXT: FAIL\r\n");
+            result = -1;
+        }
+    }
+
+    chan_send(&done_ch, result);
+
+    let p: *io i32 = &rtos_done;
+    while (*p == 0) {}
+}
+
+fn app_main() {
+    rtos_task_add(1, setup_task_stack(sd_stack + 8192, sd_worker));
+    rtos_start();
+
+    let result: i32 = chan_recv(&done_ch);
+    scheduler_disable();
+    rtos_done = 1;
+
+    uart_puts("sd task result: ");
+    uart_print(result);
+    uart_puts("\r\n");
+    uart_puts("done\r\n");
+}
