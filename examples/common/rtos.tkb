@@ -112,6 +112,44 @@ fn chan_recv(ch: *Chan) -> i32 {
     return v;
 }
 
+// Word-sized rendezvous channel for task APIs that need to hand off a
+// pointer-sized token before language-level generics exist. This keeps
+// task code on the RTOS channel boundary instead of exposing mutex/condvar
+// directly, while preserving Chan's existing i32 API for current examples.
+struct WordChan {
+    mutex:      i32;
+    slot_full:  io i32;
+    slot_taken: io i32;
+    full:       i32;
+    value:      usize;
+}
+
+fn chan_word_send(ch: *WordChan, m: usize) {
+    let mut g: *MutexGuard = mutex_lock(&ch.mutex);
+    while (ch.full != 0) {
+        g = cond_wait(&ch.slot_taken, g, &ch.mutex);
+    }
+    ch.value = m;
+    ch.full = 1;
+    cond_signal(&ch.slot_full);
+    while (ch.full != 0) {
+        g = cond_wait(&ch.slot_taken, g, &ch.mutex);
+    }
+    mutex_unlock(g, &ch.mutex);
+}
+
+fn chan_word_recv(ch: *WordChan) -> usize {
+    let mut g: *MutexGuard = mutex_lock(&ch.mutex);
+    while (ch.full == 0) {
+        g = cond_wait(&ch.slot_full, g, &ch.mutex);
+    }
+    let v: usize = ch.value;
+    ch.full = 0;
+    cond_signal(&ch.slot_taken);
+    mutex_unlock(g, &ch.mutex);
+    return v;
+}
+
 // -- Task registration and round-robin scheduling -----------------------
 // Generalized from the fixed-3-task pattern examples/preempt,
 // examples/msgqueue, and examples/chan_rendezvous each duplicated

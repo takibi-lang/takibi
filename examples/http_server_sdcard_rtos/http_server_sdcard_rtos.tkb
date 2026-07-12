@@ -107,43 +107,8 @@ let SD_REQ_READ_INDEX: i32 = 2;
 
 let mut sd_request_ch: Chan = {1, 0, 0, 0, 0};
 let mut sd_response_ch: Chan = {1, 0, 0, 0, 0};
+let mut sd_buffer_ch: WordChan = {1, 0, 0, 0, 0};
 let mut sd_stack: [u8; 8192];
-
-struct UsizeChan {
-    mutex:      i32;
-    slot_full:  io i32;
-    slot_taken: io i32;
-    full:       i32;
-    value:      usize;
-}
-
-let mut sd_buffer_ch: UsizeChan = {1, 0, 0, 0, 0};
-
-fn usize_chan_send(ch: *UsizeChan, m: usize) {
-    let mut g: *MutexGuard = mutex_lock(&ch.mutex);
-    while (ch.full != 0) {
-        g = cond_wait(&ch.slot_taken, g, &ch.mutex);
-    }
-    ch.value = m;
-    ch.full = 1;
-    cond_signal(&ch.slot_full);
-    while (ch.full != 0) {
-        g = cond_wait(&ch.slot_taken, g, &ch.mutex);
-    }
-    mutex_unlock(g, &ch.mutex);
-}
-
-fn usize_chan_recv(ch: *UsizeChan) -> usize {
-    let mut g: *MutexGuard = mutex_lock(&ch.mutex);
-    while (ch.full == 0) {
-        g = cond_wait(&ch.slot_full, g, &ch.mutex);
-    }
-    let v: usize = ch.value;
-    ch.full = 0;
-    cond_signal(&ch.slot_taken);
-    mutex_unlock(g, &ch.mutex);
-    return v;
-}
 
 // Safe upper bound on the total reply payload (headers + body), checked
 // explicitly in build_http_response_fin before anything downstream trusts
@@ -185,7 +150,7 @@ fn sd_worker() {
             }
             chan_send(&sd_response_ch, ok);
         } else if (req == SD_REQ_READ_INDEX) {
-            let dst_addr: usize = usize_chan_recv(&sd_buffer_ch);
+            let dst_addr: usize = chan_word_recv(&sd_buffer_ch);
             chan_send(&sd_response_ch, sd_read_index_file(dst_addr as *u8) as i32);
         }
     }
@@ -197,7 +162,7 @@ fn sd_worker() {
 // http_server_sdcard baseline).
 fn build_body_from_sdcard(dst: *u8) -> isize {
     chan_send(&sd_request_ch, SD_REQ_READ_INDEX);
-    usize_chan_send(&sd_buffer_ch, dst as usize);
+    chan_word_send(&sd_buffer_ch, dst as usize);
     return chan_recv(&sd_response_ch) as isize;
 }
 
