@@ -138,9 +138,10 @@ STM32_CHECKSUM_OBJS     := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/
 # correct, just never exercised against real cacheable memory before) and
 # for the real-hardware Ethernet validation this claim is based on.
 #
-# semaphore/condvar/msgqueue/rtos_demo/rtos_fatfs_sdcard are deliberately
-# left out of this list -- they need sem_asm.o linked in too, so they get
-# their own bespoke rules below instead of the generic pattern rule.
+# semaphore/condvar/msgqueue/rtos_demo/rtos_fatfs_sdcard/
+# http_server_sdcard_rtos are deliberately left out of this list -- they
+# need sem_asm.o linked in too, so they get their own bespoke rules below
+# instead of the generic pattern rule.
 STM32_RAM_EXAMPLES := $(STM32_EXAMPLES) rtc echo timer irq preempt watchdog \
                        $(STM32_CHECKSUM_EXAMPLES) \
                        net_echo arp_reply icmp_echo tcp_echo http_server sdcard fatfs_sdcard \
@@ -149,9 +150,9 @@ STM32_RAM_EXAMPLES := $(STM32_EXAMPLES) rtc echo timer irq preempt watchdog \
 # deliberately distinct from STM32_RAM_ELFS (stm32build's full
 # prerequisite list, used only for building "everything", never as a
 # pattern rule's own target list): semaphore/condvar/msgqueue/rtos_demo/
-# rtos_fatfs_sdcard have their own explicit rules below with an extra
-# sem_asm.o prerequisite, and a static pattern rule and an explicit rule
-# may not both target the same file.
+# rtos_fatfs_sdcard/http_server_sdcard_rtos have their own explicit rules
+# below with an extra sem_asm.o prerequisite, and a static pattern rule and
+# an explicit rule may not both target the same file.
 STM32_RAM_ELFS_GENERIC := $(foreach e,$(STM32_RAM_EXAMPLES),examples/$(e)/kernel_stm32_ram.elf)
 STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/semaphore/kernel_stm32_ram.elf \
@@ -159,6 +160,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/msgqueue/kernel_stm32_ram.elf \
                    examples/rtos_demo/kernel_stm32_ram.elf \
                    examples/rtos_fatfs_sdcard/kernel_stm32_ram.elf \
+                   examples/http_server_sdcard_rtos/kernel_stm32_ram.elf \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
@@ -370,11 +372,13 @@ $(SYNC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMM
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_TIMER) $(COMMON_STM32_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
 # rtos_demo.tkb `use`s common/rtos.tkb, which itself `use`s sync.tkb and
-# gic.tkb -- COMMON_RTOS is listed here purely for Make's own staleness
-# tracking (Make cannot see into a .tkb file's own `use` declarations),
-# same reasoning as every other COMMON_* prerequisite in this file.
+# gic_regs.tkb. QEMU still passes full gic.tkb explicitly because
+# common_qemu/timer.tkb calls gic_init()/gic_enable_timer_ppi() by name.
+# COMMON_RTOS is listed here purely for Make's own staleness tracking (Make
+# cannot see into a .tkb file's own `use` declarations), same reasoning as
+# every other COMMON_* prerequisite in this file.
 $(RTOS_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_STM32_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_TIMER) $(COMMON_STM32_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_STM32_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
 # COMMON_NETCONFIG (OUR_IP) is unused-but-harmless for net_echo (no
 # IP awareness at all) -- it just gets one inert extra constant rather than
@@ -644,7 +648,7 @@ examples/msgqueue/msgqueue_stm32.o: examples/msgqueue/msgqueue.tkb $(COMMON_STM3
 # rtos_demo.tkb `use`s common/rtos.tkb, which itself `use`s sync.tkb and
 # gic.tkb. The STM32 build provides the target-specific scheduler.tkb on
 # the command line exactly like preempt/condvar/msgqueue do.
-examples/rtos_demo/rtos_demo_stm32.o: examples/rtos_demo/rtos_demo.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC) $(TAKIBI)
+examples/rtos_demo/rtos_demo_stm32.o: examples/rtos_demo/rtos_demo.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 COMMON_STM32_SDMMC := $(COMMON_STM32_DIR)/sdmmc.tkb
@@ -654,7 +658,7 @@ COMMON_STM32_ETH_SDMMC_REGS := $(COMMON_STM32_DIR)/eth_sdmmc_regs.tkb
 # with fat12.tkb and the real SDMMC1 driver. Like rtos_demo it needs the
 # target-specific scheduler.tkb on the command line; like fatfs_sdcard it
 # reaches sdmmc.tkb through its own use declaration.
-examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard_stm32.o: examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC) $(COMMON_FAT12) $(COMMON_NETUTIL) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(TAKIBI)
+examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard_stm32.o: examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_FAT12) $(COMMON_NETUTIL) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # fatfs: `use`s fat12.tkb (which itself `use`s netutil.tkb) directly, needs
@@ -664,8 +668,8 @@ examples/fatfs/fatfs_stm32.o: examples/fatfs/fatfs.tkb $(COMMON_STM32_UART) $(CO
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # RAM-execution builds of semaphore/condvar/msgqueue/rtos_demo/
-# rtos_fatfs_sdcard -- these need sem_asm.o linked in too, so they get
-# their own explicit rules here instead of the generic
+# rtos_fatfs_sdcard/http_server_sdcard_rtos -- these need sem_asm.o linked
+# in too, so they get their own explicit rules here instead of the generic
 # $(STM32_RAM_ELFS_GENERIC) pattern rule.
 examples/semaphore/kernel_stm32_ram.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/semaphore/semaphore_stm32.o $(COMMON_STM32_LINK_RAM_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/semaphore/semaphore_stm32.o -o $@
@@ -681,6 +685,9 @@ examples/rtos_demo/kernel_stm32_ram.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_
 
 examples/rtos_fatfs_sdcard/kernel_stm32_ram.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard_stm32.o $(COMMON_STM32_LINK_RAM_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard_stm32.o -o $@
+
+examples/http_server_sdcard_rtos/kernel_stm32_ram.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.o $(COMMON_STM32_LINK_RAM_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.o -o $@
 
 # fatfs: needs semihosting_stub.o linked in too (fatfs.tkb's extern fn
 # semihosting_open/read/write/close), so it gets its own explicit rule
@@ -762,6 +769,13 @@ examples/fatfs_sdcard/fatfs_sdcard_stm32.o: examples/fatfs_sdcard/fatfs_sdcard.t
 # and did not flag.
 examples/http_server_sdcard/http_server_sdcard_stm32.o: examples/http_server_sdcard/http_server_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+
+# http_server_sdcard_rtos: same HTTP+SD server as http_server_sdcard, but
+# SD/FAT operations run behind a Simple RTOS worker task. It needs both
+# target-specific Ethernet and scheduler implementations on the command
+# line, and links with sem_asm.o via its explicit RAM target above.
+examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # http_server_sdcard_install: provisioning-only helper (make hwcheck-net,
 # make stm32-http-server-sdcard) that writes a real mtools-built FAT12

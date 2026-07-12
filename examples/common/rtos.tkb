@@ -26,7 +26,7 @@
 // pieces below together (two tasks synchronizing over a Chan while both
 // also updating a KLock-protected counter).
 
-use "examples/common_qemu/gic.tkb";
+use "examples/common_qemu/gic_regs.tkb";
 use "examples/common/sync.tkb";
 
 // -- Per-CPU identity (examples/percpu) ---------------------------------

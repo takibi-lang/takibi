@@ -231,6 +231,23 @@ else
     fi
 fi
 
+sdcard_rtos_name="http_server_sdcard_rtos (stm32/ram)"
+if ! ram_load_and_run examples/http_server_sdcard_rtos/kernel_stm32_ram.elf; then
+    printf "${RED}FAIL${RST}  %s  (openocd RAM load failed)\n" "$sdcard_rtos_name"
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("$sdcard_rtos_name")
+else
+    echo "-- $sdcard_rtos_name --"
+    if sudo SDCARD_EXPECTED_TEXT="$sdcard_expected_text" python3 scripts/eth_http_server_sdcard_test.py; then
+        printf "${GRN}PASS${RST}  %s\n" "$sdcard_rtos_name"
+        PASS=$((PASS + 1))
+    else
+        printf "${RED}FAIL${RST}  %s\n" "$sdcard_rtos_name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$sdcard_rtos_name")
+    fi
+fi
+
 # http_server_sdcard only: also exercise the real Flash boot path (same
 # reasoning as http_server's own two-test split just above). The SD card
 # itself is untouched by which firmware image is running on the MCU --
