@@ -1,0 +1,363 @@
+// Shared ARP/IPv4/TCP state machine for the simple HTTP server examples.
+//
+// The including example owns HTTP response generation and must provide:
+//   fn http_start_response(eth: [u8; 1514..], ihl: {20..<21 as u16},
+//                          req: *u8, req_len: u16) -> i32
+//   fn http_continue_response(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32
+//   fn http_response_done() -> bool
+
+let TCP_FLAG_FIN: u8 = 0x01;
+let TCP_FLAG_SYN: u8 = 0x02;
+let TCP_FLAG_RST: u8 = 0x04;
+let TCP_FLAG_PSH: u8 = 0x08;
+let TCP_FLAG_ACK: u8 = 0x10;
+
+let PROTO_TCP: u8 = 6;
+let HTTP_PORT: u16 = 80;
+
+let OUR_ISN: u32 = 0x00001000;
+
+enum ConnState: u8 {
+    Listen;
+    SynRcvd;
+    Established;
+    Sending;
+    LastAck;
+}
+
+let mut conn_state:       ConnState = ConnState::Listen;
+let mut conn_remote_ip:   [u8; 4];
+let mut conn_remote_port: u16 = 0;
+let mut conn_snd_nxt:     u32 = 0;
+let mut conn_rcv_nxt:     u32 = 0;
+
+let HTTP_SEGMENT_PAYLOAD_MAX: i32 = 1400;
+
+fn build_arp_reply(eth: [u8; 42..]) {
+    let arp = eth[14..<42];
+
+    slice_copy(eth[0..<6], eth[6..<12]);
+    slice_copy(eth[6..<12], our_mac as []u8);
+
+    slice_copy(arp[ARP_THA..<ARP_TPA], arp[ARP_SHA..<ARP_SPA]);
+    slice_copy(arp[ARP_TPA..<28],      arp[ARP_SPA..<ARP_THA]);
+    slice_copy(arp[ARP_SHA..<ARP_SPA], our_mac as []u8);
+    slice_copy(arp[ARP_SPA..<ARP_THA], our_ip as []u8);
+    write_u16be(arp[ARP_OPER..<ARP_SHA], 2);
+}
+
+fn fix_tcp_checksum(ip: [u8; 20..], tcp_seg: [u8; 20..]) {
+    write_u16be(tcp_seg[TCP_CHECKSUM..<TCP_URGENT], 0);
+    let mut pseudo: [u8; 12];
+    slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
+    slice_copy(pseudo[4..<8], ip[IP_DST..<20]);
+    pseudo[8] = 0 as u8;
+    pseudo[9] = PROTO_TCP;
+    write_u16be(pseudo[10..<12], tcp_seg.len as i32);
+    let sum: i32 = checksum_add(pseudo as []u8, 0);
+    write_u16be(tcp_seg[TCP_CHECKSUM..<TCP_URGENT],
+                checksum_fold(checksum_add(tcp_seg, sum)));
+}
+
+fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
+    slice_copy(eth[0..<6], eth[6..<12]);
+    slice_copy(eth[6..<12], our_mac as []u8);
+
+    let ip  = eth[14..<34];
+    let tcp = eth[34..<54];
+
+    slice_copy(ip[IP_DST..<20],      ip[IP_SRC..<IP_DST]);
+    slice_copy(ip[IP_SRC..<IP_DST],  our_ip as []u8);
+    ip[IP_TTL] = 64 as u8;
+    write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                inet_checksum(ip[0..<ihl as usize]));
+
+    let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
+    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
+    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
+    write_u32be(tcp[TCP_SEQ..<TCP_ACK], OUR_ISN as i32);
+    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
+    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
+    tcp[TCP_FLAGS] = TCP_FLAG_SYN | TCP_FLAG_ACK;
+    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
+    write_u16be(tcp[TCP_URGENT..<20], 0);
+
+    fix_tcp_checksum(ip, tcp);
+}
+
+fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
+    slice_copy(eth[0..<6], eth[6..<12]);
+    slice_copy(eth[6..<12], our_mac as []u8);
+
+    let ip  = eth[14..<34];
+    let tcp = eth[34..<54];
+
+    slice_copy(ip[IP_DST..<20],     ip[IP_SRC..<IP_DST]);
+    slice_copy(ip[IP_SRC..<IP_DST], our_ip as []u8);
+    ip[IP_TTL] = 64 as u8;
+    write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                inet_checksum(ip[0..<ihl as usize]));
+
+    let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
+    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
+    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
+    write_u32be(tcp[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
+    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
+    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
+    tcp[TCP_FLAGS] = TCP_FLAG_FIN | TCP_FLAG_ACK;
+    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
+    write_u16be(tcp[TCP_URGENT..<20], 0);
+
+    fix_tcp_checksum(ip, tcp);
+}
+
+fn build_rst_from_ack(eth: [u8; 54..], ihl: {20..<21 as u16}, seq_out: u32) {
+    slice_copy(eth[0..<6], eth[6..<12]);
+    slice_copy(eth[6..<12], our_mac as []u8);
+
+    let ip  = eth[14..<34];
+    let tcp = eth[34..<54];
+
+    slice_copy(ip[IP_DST..<20],     ip[IP_SRC..<IP_DST]);
+    slice_copy(ip[IP_SRC..<IP_DST], our_ip as []u8);
+    ip[IP_TTL] = 64 as u8;
+    write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                inet_checksum(ip[0..<ihl as usize]));
+
+    let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
+    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
+    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
+    write_u32be(tcp[TCP_SEQ..<TCP_ACK], seq_out as i32);
+    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], 0);
+    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
+    tcp[TCP_FLAGS] = TCP_FLAG_RST;
+    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 0);
+    write_u16be(tcp[TCP_URGENT..<20], 0);
+
+    fix_tcp_checksum(ip, tcp);
+}
+
+fn build_tcp_payload(eth: [u8; 1514..], ihl: {20..<21 as u16},
+                     len: isize, tcp_flags: u8) -> i32 {
+    let wire_len: i32 = len as i32;
+    if (len >= 0 && len <= (HTTP_SEGMENT_PAYLOAD_MAX as isize)
+        && wire_len >= 0 && wire_len <= HTTP_SEGMENT_PAYLOAD_MAX) {
+        let n: i32 = wire_len;
+        let n_idx: usize = n as usize;
+
+        slice_copy(eth[0..<6], eth[6..<12]);
+        slice_copy(eth[6..<12], our_mac as []u8);
+
+        let ip      = eth[14..<34];
+        let tcp_seg = eth[34..<54 + n_idx];
+
+        slice_copy(ip[IP_DST..<20],     ip[IP_SRC..<IP_DST]);
+        slice_copy(ip[IP_SRC..<IP_DST], our_ip as []u8);
+        ip[IP_TTL] = 64 as u8;
+        write_u16be(ip[IP_TOTAL_LEN..<4], (ihl as i32) + 20 + n);
+        write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
+        write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                    inet_checksum(ip[0..<ihl as usize]));
+
+        let client_port: u16 = read_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
+        write_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
+        write_u16be(tcp_seg[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
+        write_u32be(tcp_seg[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
+        write_u32be(tcp_seg[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
+        tcp_seg[TCP_DATA_OFFSET] = (5 << 4) as u8;
+        tcp_seg[TCP_FLAGS] = tcp_flags;
+        write_u16be(tcp_seg[TCP_WINDOW..<TCP_CHECKSUM], 65535);
+        write_u16be(tcp_seg[TCP_URGENT..<20], 0);
+
+        fix_tcp_checksum(ip, tcp_seg);
+        return n;
+    }
+    return -1;
+}
+
+fn http_server_poll_once() {
+    net_rx_wait();
+    let acquired: *NetRxCpuOwned = net_rx_acquire();
+    if ((acquired as usize) != 0) {
+        let len: i32 = net_rx_len(acquired);
+        let mut should_tx: i32 = 0;
+        let mut tx_len: i32 = 0;
+        let frame = net_rx_frame(acquired);
+        let ethertype: i32 = read_u16be(frame[12..<14]);
+
+        if (len >= 42 && ethertype == 0x0806) {
+            let arp = frame[14..<42];
+            if (read_u16be(arp[ARP_HTYPE..<ARP_PTYPE]) == 1 &&
+                read_u16be(arp[ARP_PTYPE..<ARP_HLEN]) == 0x0800 &&
+                arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
+                read_u16be(arp[ARP_OPER..<ARP_SHA]) == 1) {
+                if (slice_eq(arp[ARP_TPA..<28], our_ip as []u8)) {
+                    build_arp_reply(frame);
+                    should_tx = 1;
+                    tx_len = 14 + 28;
+                }
+            }
+        } else if (len >= 54 && len <= 1514 && ethertype == 0x0800) {
+            let len_n: i32 = len;
+            let ip = frame[14..<34];
+            let version: u8 = ip[0] >> 4;
+            let ihl:     u16 = (ip[0] & 0x0f) * 4;
+
+            if (version == 4 && ihl == 20) {
+                let len16: u16 = len_n as u16;
+                let total_len:       u16 = read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
+                let ip_len_in_frame: u16 = len16 - 14;
+
+                if (total_len <= ip_len_in_frame && total_len >= ihl &&
+                    ip[IP_PROTOCOL] == PROTO_TCP &&
+                    inet_checksum(ip[0..<ihl as usize]) == 0) {
+                    if (slice_eq(ip[IP_DST..<20], our_ip as []u8)) {
+                        let tcp:     [u8; 20..] = frame[34..<54];
+                        let tcp_len: u16 = total_len - ihl;
+                        let doff: u8 = tcp[TCP_DATA_OFFSET] >> 4;
+
+                        if (tcp_len >= 20 && doff >= 5 && doff <= 15) {
+                        let tcp_hdr_len: u16 = (doff * 4) as u16;
+
+                        if (tcp_len >= tcp_hdr_len) {
+                            let mut pseudo: [u8; 12];
+                            slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
+                            slice_copy(pseudo[4..<8], ip[IP_DST..<20]);
+                            pseudo[8] = 0 as u8;
+                            pseudo[9] = PROTO_TCP;
+                            write_u16be(pseudo[10..<12], tcp_len);
+                            let sum: i32 = checksum_add(pseudo as []u8, 0);
+                            let tcp_len_idx: usize =
+                                tcp_len as usize;
+                            let tcp_seg = frame[34..<34 + tcp_len_idx];
+
+                            if (checksum_fold(checksum_add(tcp_seg, sum)) == 0) {
+                                let dst_port: u16 = read_u16be(tcp[TCP_DST_PORT..<TCP_SEQ]) as u16;
+                                let src_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
+                                let flags:    u8  = tcp[TCP_FLAGS];
+                                let seq:      u32 = read_u32be(tcp[TCP_SEQ..<TCP_ACK]) as u32;
+                                let ack:      u32 = read_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET]) as u32;
+
+                                if (dst_port == HTTP_PORT) {
+	                                    if (conn_state == ConnState::Listen) {
+	                                        if ((flags & TCP_FLAG_SYN) != 0) {
+	                                            slice_copy(conn_remote_ip as []u8, ip[IP_SRC..<IP_DST]);
+	                                            conn_remote_port = src_port;
+	                                            conn_rcv_nxt = seq + 1;
+                                            conn_snd_nxt = OUR_ISN + 1;
+
+                                            build_syn_ack(frame, ihl);
+	                                            should_tx = 1;
+	                                            tx_len = 14 + ihl + 20;
+	                                            conn_state = ConnState::SynRcvd;
+	                                        } else if ((flags & TCP_FLAG_RST) == 0 &&
+	                                                   (flags & TCP_FLAG_ACK) != 0) {
+	                                            build_rst_from_ack(frame, ihl, ack);
+	                                            should_tx = 1;
+	                                            tx_len = 14 + ihl + 20;
+	                                        }
+	                                    } else {
+                                        if (slice_eq(ip[IP_SRC..<IP_DST], conn_remote_ip as []u8) &&
+                                            src_port == conn_remote_port) {
+                                            if ((flags & TCP_FLAG_RST) != 0) {
+                                                conn_state = ConnState::Listen;
+                                            } else if (conn_state == ConnState::SynRcvd) {
+                                                if ((flags & TCP_FLAG_ACK) != 0 &&
+                                                    (flags & TCP_FLAG_SYN) == 0 &&
+                                                    ack == conn_snd_nxt && seq == conn_rcv_nxt) {
+                                                    conn_state = ConnState::Established;
+                                                }
+                                            } else if (conn_state == ConnState::Established) {
+                                                let data_len: u16 = max(tcp_len - tcp_hdr_len, 0);
+                                                let data_off: u16 = 34 + tcp_hdr_len;
+                                                let data_off_idx: usize =
+                                                    data_off as usize;
+                                                if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
+                                                    conn_rcv_nxt = conn_rcv_nxt + 1;
+                                                    build_fin_ack(frame, ihl);
+                                                    should_tx = 1;
+                                                    tx_len = 14 + ihl + 20;
+                                                    conn_snd_nxt = conn_snd_nxt + 1;
+                                                    conn_state = ConnState::LastAck;
+                                                } else if (data_len >= 3 &&
+                                                           (flags & TCP_FLAG_ACK) != 0 &&
+                                                           seq == conn_rcv_nxt) {
+                                                    let data3 = frame[data_off_idx..<data_off_idx + 3];
+                                                    if (data3[0] == 'G' as u8 &&
+                                                        data3[1] == 'E' as u8 &&
+                                                        data3[2] == 'T' as u8) {
+                                                        conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
+                                                        let req: *u8 =
+                                                            (frame as *u8) + (data_off_idx as isize);
+                                                        let payload_len: i32 =
+                                                            http_start_response(frame, ihl, req, data_len);
+                                                        if (payload_len >= 0) {
+                                                            should_tx = 1;
+                                                            tx_len = 14 + (ihl as i32) + 20 + payload_len;
+                                                            conn_snd_nxt = conn_snd_nxt + (payload_len as u32);
+                                                            if (http_response_done()) {
+                                                                conn_snd_nxt = conn_snd_nxt + 1;
+                                                                conn_state = ConnState::LastAck;
+                                                            } else {
+                                                                conn_state = ConnState::Sending;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            } else if (conn_state == ConnState::Sending) {
+                                                if ((flags & TCP_FLAG_ACK) != 0 &&
+                                                    seq == conn_rcv_nxt && ack == conn_snd_nxt) {
+                                                    let payload_len: i32 =
+                                                        http_continue_response(frame, ihl);
+                                                    if (payload_len >= 0) {
+                                                        should_tx = 1;
+                                                        tx_len = 14 + (ihl as i32) + 20 + payload_len;
+                                                        conn_snd_nxt = conn_snd_nxt + (payload_len as u32);
+                                                        if (http_response_done()) {
+                                                            conn_snd_nxt = conn_snd_nxt + 1;
+                                                            conn_state = ConnState::LastAck;
+                                                        }
+                                                    }
+                                                }
+                                            } else if (conn_state == ConnState::LastAck) {
+                                                if ((flags & TCP_FLAG_FIN) != 0 &&
+                                                    (flags & TCP_FLAG_ACK) != 0 &&
+                                                    seq == conn_rcv_nxt && ack == conn_snd_nxt) {
+                                                    conn_rcv_nxt = conn_rcv_nxt + 1;
+                                                    let payload_len: i32 =
+                                                        build_tcp_payload(frame, ihl, 0,
+                                                                          TCP_FLAG_ACK);
+                                                    if (payload_len >= 0) {
+                                                        should_tx = 1;
+                                                        tx_len = 14 + (ihl as i32) + 20 + payload_len;
+                                                        conn_state = ConnState::Listen;
+                                                    }
+                                                } else if ((flags & TCP_FLAG_ACK) != 0 && ack == conn_snd_nxt) {
+                                                    conn_state = ConnState::Listen;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (should_tx == 1) {
+            net_transmit(frame as *u8, tx_len);
+        }
+        if ((acquired as usize) != 0) {
+            net_rx_release(acquired);
+        }
+    }
+}

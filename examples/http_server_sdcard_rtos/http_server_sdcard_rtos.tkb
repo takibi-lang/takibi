@@ -168,7 +168,7 @@ fn app_main() {
         }
 
         while (true) {
-            http_sdcard_poll_once();
+            http_server_poll_once();
         }
     }
 }

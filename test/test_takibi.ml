@@ -4069,6 +4069,22 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
+    "DWARF debug info (-g): function pointer parameters are described as \
+     pointer-to-subroutine types, not bare subroutine types"
+    `Quick
+    (expect_codegen_ok
+       "fn codegen_debug_info_fnptr_target() {
+        }
+
+        fn codegen_debug_info_fnptr_param(handler: fn() -> void) {
+          handler();
+        }
+
+        fn codegen_debug_info_fnptr_call() {
+          codegen_debug_info_fnptr_param(codegen_debug_info_fnptr_target);
+        }");
+
+  Alcotest.test_case
     "pointer difference codegens as an isize element count"
     `Quick
     (expect_codegen_ok

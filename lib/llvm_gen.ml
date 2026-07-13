@@ -725,9 +725,14 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
   | TypeFn (params, ret) ->
       let ret_ty = ditype_of_ast dib file ret in
       let param_tys = List.map (ditype_of_ast dib file) params in
-      Llvm_debuginfo.dibuild_create_subroutine_type dib ~file
-        ~param_types:(Array.of_list (ret_ty :: param_tys))
-        (Llvm_debuginfo.diflags_get Llvm_debuginfo.DIFlag.Zero)
+      let sub_ty =
+        Llvm_debuginfo.dibuild_create_subroutine_type dib ~file
+          ~param_types:(Array.of_list (ret_ty :: param_tys))
+          (Llvm_debuginfo.diflags_get Llvm_debuginfo.DIFlag.Zero)
+      in
+      let ptr_bits = integer_bitwidth (usize_lltype ()) in
+      Llvm_debuginfo.dibuild_create_pointer_type dib ~pointee_ty:sub_ty
+        ~size_in_bits:ptr_bits ~align_in_bits:ptr_bits ~address_space:0 ~name:""
   | TypeNamed sname ->
       (match Hashtbl.find_opt enum_underlying sname with
        | Some ut -> ditype_of_ast dib file ut  (* enum: same as ltype_of_ast, no separate enum DIType *)

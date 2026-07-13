@@ -79,6 +79,7 @@
 
 use "examples/common/inet_checksum.tkb";
 use "examples/common/netutil.tkb";
+use "examples/common/http_server_common.tkb";
 
 let mut our_mac: [u8; 6];
 let mut our_ip:  [u8; 4];
@@ -95,43 +96,6 @@ let mut our_ip:  [u8; 4];
 // suppressed). Adjacent netutil.tkb constants still double as subslice
 // bounds the same way (arp[ARP_SHA..<ARP_SPA] is exactly the 6-byte
 // sender MAC field).
-
-// TCP_FLAG_*/PROTO_TCP/HTTP_PORT are wire-VALUE constants compared
-// directly against a byte/half-word field, so they take that field's
-// natural width -- unlike the pure offset constants above, which are
-// usize (array/slice indices are usize-only, see CLAUDE.md's "Array/Slice
-// Indices Must Be usize" section). ihl/total_len/tcp_len/tcp_hdr_len/data_len/data_off
-// below are ALSO u16-based: `len` (net_rx_len()'s deliberately
-// -unconstrained i32 device-reported length) is bridged into u16 with
-// ONE bridge cast (`as u16`) right after its own range is established,
-// and everything downstream inherits u16-based refined ranges through
-// ordinary Add/Sub/comparison propagation from there (same technique as
-// tcp_echo.tkb). GitHub issue #72: every bridge cast in this file is
-// written as a bare `as <base>` -- the target range is inferred from the
-// source's own already-proven range rather than restated by hand.
-let TCP_FLAG_FIN: u8 = 0x01;
-let TCP_FLAG_SYN: u8 = 0x02;
-let TCP_FLAG_RST: u8 = 0x04;
-let TCP_FLAG_PSH: u8 = 0x08;
-let TCP_FLAG_ACK: u8 = 0x10;
-
-let PROTO_TCP: u8 = 6;
-let HTTP_PORT: u16 = 80;
-
-let OUR_ISN: u32 = 0x00001000;
-
-enum ConnState: u8 {
-    Listen;
-    SynRcvd;
-    Established;
-    LastAck;
-}
-
-let mut conn_state:       ConnState = ConnState::Listen;
-let mut conn_remote_ip:   [u8; 4];
-let mut conn_remote_port: u16 = 0;
-let mut conn_snd_nxt:     u32 = 0;
-let mut conn_rcv_nxt:     u32 = 0;
 
 let mut request_count: i32 = 0;
 
@@ -156,100 +120,6 @@ fn build_html_body() -> isize {
     len = len + write_udec(html_body + len, request_count);
     len = len + copy_str(html_body + len, "</span> since boot.</p></body></html>");
     return len;
-}
-
-// Rewrites a received ARP request into a reply in place. Only called
-// after the caller has already verified this is a "who-has our_ip"
-// request. Every access below is a compile-time-proven subslice of the
-// >= 42-byte view the caller narrowed.
-fn build_arp_reply(eth: [u8; 42..]) {
-    let arp = eth[14..<42];
-
-    slice_copy(eth[0..<6], eth[6..<12]);
-    slice_copy(eth[6..<12], our_mac as []u8);
-
-    slice_copy(arp[ARP_THA..<ARP_TPA], arp[ARP_SHA..<ARP_SPA]);
-    slice_copy(arp[ARP_TPA..<28],      arp[ARP_SPA..<ARP_THA]);
-    slice_copy(arp[ARP_SHA..<ARP_SPA], our_mac as []u8);
-    slice_copy(arp[ARP_SPA..<ARP_THA], our_ip as []u8);
-    write_u16be(arp[ARP_OPER..<ARP_SHA], 2);
-}
-
-// Recomputes the TCP checksum over the pseudo-header implied by `ip` and
-// the full segment `tcp_seg` (header + data -- ITS OWN LENGTH, read back
-// via tcp_seg.len, is what goes in the pseudo-header's length field, so
-// this can never disagree with the segment it's actually checksumming).
-// Must be called last, after every other TCP field has its final value.
-// tcp_seg's declared minimum (20) only needs to cover the fixed header
-// fields written below; checksum_add's `for b in tcp_seg` walks the
-// segment's REAL runtime length regardless of that static minimum.
-fn fix_tcp_checksum(ip: [u8; 20..], tcp_seg: [u8; 20..]) {
-    write_u16be(tcp_seg[TCP_CHECKSUM..<TCP_URGENT], 0);
-    let mut pseudo: [u8; 12];
-    slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
-    slice_copy(pseudo[4..<8], ip[IP_DST..<20]);
-    pseudo[8] = 0 as u8;
-    pseudo[9] = PROTO_TCP;
-    write_u16be(pseudo[10..<12], tcp_seg.len as i32);
-    let sum: i32 = checksum_add(pseudo as []u8, 0);
-    write_u16be(tcp_seg[TCP_CHECKSUM..<TCP_URGENT],
-                checksum_fold(checksum_add(tcp_seg, sum)));
-}
-
-fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
-    slice_copy(eth[0..<6], eth[6..<12]);
-    slice_copy(eth[6..<12], our_mac as []u8);
-
-    let ip  = eth[14..<34];
-    let tcp = eth[34..<54];
-
-    slice_copy(ip[IP_DST..<20],      ip[IP_SRC..<IP_DST]);
-    slice_copy(ip[IP_SRC..<IP_DST],  our_ip as []u8);
-    ip[IP_TTL] = 64 as u8;
-    write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
-                inet_checksum(ip[0..<ihl as usize]));
-
-    let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
-    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
-    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
-    write_u32be(tcp[TCP_SEQ..<TCP_ACK], OUR_ISN as i32);
-    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
-    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
-    tcp[TCP_FLAGS] = TCP_FLAG_SYN | TCP_FLAG_ACK;
-    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
-    write_u16be(tcp[TCP_URGENT..<20], 0);
-
-    fix_tcp_checksum(ip, tcp);
-}
-
-fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
-    slice_copy(eth[0..<6], eth[6..<12]);
-    slice_copy(eth[6..<12], our_mac as []u8);
-
-    let ip  = eth[14..<34];
-    let tcp = eth[34..<54];
-
-    slice_copy(ip[IP_DST..<20],     ip[IP_SRC..<IP_DST]);
-    slice_copy(ip[IP_SRC..<IP_DST], our_ip as []u8);
-    ip[IP_TTL] = 64 as u8;
-    write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
-                inet_checksum(ip[0..<ihl as usize]));
-
-    let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
-    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
-    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
-    write_u32be(tcp[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
-    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
-    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
-    tcp[TCP_FLAGS] = TCP_FLAG_FIN | TCP_FLAG_ACK;
-    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
-    write_u16be(tcp[TCP_URGENT..<20], 0);
-
-    fix_tcp_checksum(ip, tcp);
 }
 
 // Builds "HTTP/1.1 200 OK ... <html>...</html>" into the payload area
@@ -321,6 +191,20 @@ fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
     return -1;
 }
 
+fn http_start_response(eth: [u8; 1514..], ihl: {20..<21 as u16},
+                       req: *u8, req_len: u16) -> i32 {
+    request_count = request_count + 1;
+    return build_http_response_fin(eth, ihl);
+}
+
+fn http_continue_response(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
+    return -1;
+}
+
+fn http_response_done() -> bool {
+    return true;
+}
+
 fn app_main() {
     uart_puts("http_server: init\r\n");
 
@@ -333,232 +217,7 @@ fn app_main() {
         uart_puts("http_server: ready\r\n");
 
         while (true) {
-            net_rx_wait();
-            let acquired: *NetRxCpuOwned = net_rx_acquire();
-            if ((acquired as usize) != 0) {
-            let len: i32 = net_rx_len(acquired);
-            let mut should_tx: i32 = 0;
-            let mut tx_len: i32 = 0;
-            let frame = net_rx_frame(acquired);   // only read when len proves acquisition
-            let ethertype: i32 = read_u16be(frame[12..<14]);
-
-            if (len >= 42 && ethertype == 0x0806) {
-                let arp = frame[14..<42];
-                if (read_u16be(arp[ARP_HTYPE..<ARP_PTYPE]) == 1 &&
-                    read_u16be(arp[ARP_PTYPE..<ARP_HLEN]) == 0x0800 &&
-                    arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
-                    read_u16be(arp[ARP_OPER..<ARP_SHA]) == 1) {
-                    if (slice_eq(arp[ARP_TPA..<28], our_ip as []u8)) {
-                        build_arp_reply(frame);
-                        should_tx = 1;
-                        tx_len = 14 + 28;
-                    }
-                }
-            } else if (len >= 54 && len <= 1514 && ethertype == 0x0800) {
-                // len <= 1514 clamps the DEVICE-reported length to the RX
-                // view's capacity before total_len (and through it every
-                // checksum span) is allowed to trust it.
-                //
-                // Snapshot into an immutable local: the explicit refined
-                // cast below (len_n as u16) needs to see
-                // len's CURRENT narrowed range, but a function PARAMETER
-                // (always Mut) only exposes its narrowed range through
-                // the separate narrowing_ctx side-table, which a bare
-                // Cast does not consult -- an immutable snapshot's type
-                // inherits the narrowing directly (same "B-plan"
-                // mechanism used elsewhere), so the cast proves clean.
-                let len_n: i32 = len;
-                let ip = frame[14..<34];
-                // version is standalone (compared only to a literal) --
-                // safely u8.
-                let version: u8 = ip[0] >> 4;
-                let ihl:     u16 = (ip[0] & 0x0f) * 4;
-
-                if (version == 4 && ihl == 20) {
-                    // Bridge len_n's proven {54..<1515} range into u16
-                    // (a free coercion: the source range already implies
-                    // the target range exactly). This bound must be kept
-                    // in sync with the `len >= 54 && len <= 1514` check
-                    // above.
-                    let len16: u16 = len_n as u16;
-                    let total_len:       u16 = read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
-                    let ip_len_in_frame: u16 = len16 - 14;
-
-                    if (total_len <= ip_len_in_frame && total_len >= ihl &&
-                        ip[IP_PROTOCOL] == PROTO_TCP &&
-                        inet_checksum(ip[0..<ihl as usize]) == 0) {
-                        if (slice_eq(ip[IP_DST..<20], our_ip as []u8)) {
-                            let tcp:     [u8; 20..] = frame[34..<54];
-                            let tcp_len: u16 = total_len - ihl;
-                            // Data offset in 32-bit words (5..15 -- 20..60
-                            // byte header). Real TCP stacks always include
-                            // at least an MSS option on the SYN; options
-                            // are never parsed, just skipped over. doff is
-                            // TCP's own byte-scale field, never combined
-                            // with the ihl/tcp_len chain directly --
-                            // genuinely u8 (tcp_hdr_len carries its proven
-                            // range across a bridge cast to u16 below to
-                            // match tcp_len).
-                            let doff: u8 = tcp[TCP_DATA_OFFSET] >> 4;
-
-                            // doff must be narrowed to {5..<16} BEFORE
-                            // tcp_hdr_len = doff * 4 is computed, so that
-                            // Mul propagation gives tcp_hdr_len (and later
-                            // data_off) a real range -- computing
-                            // tcp_hdr_len first (matching the original
-                            // pointer-based code's order) would leave it
-                            // unrefined and fall back to a runtime check.
-                            // `doff * 4` on the narrowed (u8-based) doff
-                            // proves {20..<61 as u8}; the bridge cast to
-                            // u16 below (GitHub issue #72: bare `as u16`,
-                            // no explicit range) carries that EXACT proven
-                            // range across the width change (a free
-                            // coercion, not a runtime check, since the
-                            // bounds match exactly). Before issue #72, a
-                            // bare `as u16` here silently discarded the
-                            // range (Cast to a non-refined-syntax target
-                            // always did), reintroducing a trap site at
-                            // data_off's subslice below -- found via
-                            // --forbid-trap while first doing this rewrite
-                            // (see CLAUDE.md's issue #72 entry) -- and had
-                            // to be spelled out by hand as `as {20..<61 as
-                            // u16}` until the inference existed.
-                            if (tcp_len >= 20 && doff >= 5 && doff <= 15) {
-                            let tcp_hdr_len: u16 = (doff * 4) as u16;
-
-                            if (tcp_len >= tcp_hdr_len) {
-                                let mut pseudo: [u8; 12];
-                                slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
-                                slice_copy(pseudo[4..<8], ip[IP_DST..<20]);
-                                pseudo[8] = 0 as u8;
-                                pseudo[9] = PROTO_TCP;
-                                write_u16be(pseudo[10..<12], tcp_len);
-                                let sum: i32 = checksum_add(pseudo as []u8, 0);
-                                let tcp_len_idx: usize =
-                                    tcp_len as usize;
-                                let tcp_seg = frame[34..<34 + tcp_len_idx];
-
-                                if (checksum_fold(checksum_add(tcp_seg, sum)) == 0) {
-                                    let dst_port: u16 = read_u16be(tcp[TCP_DST_PORT..<TCP_SEQ]) as u16;
-                                    let src_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
-                                    let flags:    u8  = tcp[TCP_FLAGS];
-                                    let seq:      u32 = read_u32be(tcp[TCP_SEQ..<TCP_ACK]) as u32;
-                                    let ack:      u32 = read_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET]) as u32;
-
-                                    if (dst_port == HTTP_PORT) {
-                                        if (conn_state == ConnState::Listen) {
-                                            if ((flags & TCP_FLAG_SYN) != 0) {
-                                                slice_copy(conn_remote_ip as []u8, ip[IP_SRC..<IP_DST]);
-                                                conn_remote_port = src_port;
-                                                conn_rcv_nxt = seq + 1;
-                                                conn_snd_nxt = OUR_ISN + 1;
-
-                                                build_syn_ack(frame, ihl);
-                                                should_tx = 1;
-                                                tx_len = 14 + ihl + 20;
-                                                conn_state = ConnState::SynRcvd;
-                                            }
-                                        } else {
-                                            if (slice_eq(ip[IP_SRC..<IP_DST], conn_remote_ip as []u8) &&
-                                                src_port == conn_remote_port) {
-                                                if ((flags & TCP_FLAG_RST) != 0) {
-                                                    conn_state = ConnState::Listen;
-                                                } else if (conn_state == ConnState::SynRcvd) {
-                                                    if ((flags & TCP_FLAG_ACK) != 0 &&
-                                                        (flags & TCP_FLAG_SYN) == 0 &&
-                                                        ack == conn_snd_nxt && seq == conn_rcv_nxt) {
-                                                        conn_state = ConnState::Established;
-                                                    }
-                                                } else if (conn_state == ConnState::Established) {
-                                                    // data_len/data_off are u16 (matching tcp_len/
-                                                    // tcp_hdr_len's base), needed for the `data_off + 3`
-                                                    // same-base subslice below to type-check.
-                                                    // max(.., 0): tcp_len - tcp_hdr_len's raw Sub-derived
-                                                    // range has a spuriously negative lower bound (the
-                                                    // type system can't see the tcp_len >= tcp_hdr_len
-                                                    // guard above that makes a genuinely negative result
-                                                    // impossible) -- harmless when data_len targeted i32
-                                                    // (unconditional subtyping), but u16's subtyping
-                                                    // requires lo >= 0, so the clamp is now required, not
-                                                    // just documentation (found via this rewrite; see
-                                                    // tcp_echo.tkb's identical, already-existing clamp and
-                                                    // comment for why this doesn't change behavior).
-                                                    let data_len: u16 = max(tcp_len - tcp_hdr_len, 0);
-                                                    let data_off: u16 = 34 + tcp_hdr_len;
-                                                    let data_off_idx: usize =
-                                                        data_off as usize;
-                                                    if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
-                                                        conn_rcv_nxt = conn_rcv_nxt + 1;
-                                                        build_fin_ack(frame, ihl);
-                                                        should_tx = 1;
-                                                        tx_len = 14 + ihl + 20;
-                                                        conn_snd_nxt = conn_snd_nxt + 1;
-                                                        conn_state = ConnState::LastAck;
-                                                    } else if (data_len >= 3 &&
-                                                               (flags & TCP_FLAG_ACK) != 0 &&
-                                                               seq == conn_rcv_nxt) {
-                                                        // Proven via the same-base subslice
-                                                        // rule: data_off's exact value is
-                                                        // unconstrained, but the length (3)
-                                                        // and lo<=hi are syntactic facts.
-                                                        let data3 = frame[data_off_idx..<data_off_idx + 3];
-                                                        if (data3[0] == 'G' as u8 &&
-                                                            data3[1] == 'E' as u8 &&
-                                                            data3[2] == 'T' as u8) {
-                                                            // data_len is u16 (matches tcp_len/tcp_hdr_len);
-                                                            // payload_len stays i32 (an app-level byte
-                                                            // count, not a wire-width field, matching
-                                                            // request_count/body_len elsewhere in this
-                                                            // file); conn_rcv_nxt/conn_snd_nxt are u32
-                                                            // (sequence numbers). Casting here is harmless
-                                                            // -- neither counter is ever used as a slice
-                                                            // bound/index, so no proof depends on their
-                                                            // refined-ness.
-                                                            conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
-                                                            request_count = request_count + 1;
-                                                            let payload_len: i32 =
-                                                                build_http_response_fin(frame, ihl);
-                                                            if (payload_len >= 0) {
-                                                                should_tx = 1;
-                                                                // ihl (u16) needs an explicit upcast to
-                                                                // combine with payload_len (i32) here --
-                                                                // ihl's refined-ness isn't needed for this
-                                                                // VALUE computation.
-                                                                tx_len = 14 + (ihl as i32) + 20 + payload_len;
-                                                                conn_snd_nxt = conn_snd_nxt + (payload_len as u32) + 1;
-                                                                conn_state = ConnState::LastAck;
-                                                            }
-                                                            // else: page unexpectedly exceeded
-                                                            // HTTP_MAX_PAYLOAD (never happens
-                                                            // with the current fixed page) --
-                                                            // drop the reply and stay
-                                                            // ESTABLISHED so the client's TCP
-                                                            // stack can retry.
-                                                        }
-                                                    }
-                                                } else if (conn_state == ConnState::LastAck) {
-                                                    if ((flags & TCP_FLAG_ACK) != 0 && ack == conn_snd_nxt) {
-                                                        conn_state = ConnState::Listen;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (should_tx == 1) {
-                net_transmit(frame as *u8, tx_len);
-            }
-            if ((acquired as usize) != 0) {
-                net_rx_release(acquired);
-            }
-            }
+            http_server_poll_once();
         }
     }
 }
