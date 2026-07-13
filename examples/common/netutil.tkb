@@ -258,6 +258,16 @@ fn write_u32be(s: [u8; 4..], v: i32) {
     s[3] = v as u8;
 }
 
+fn print_ip(p: [u8; 4..]) {
+    uart_print(p[0]);
+    uart_putc('.');
+    uart_print(p[1]);
+    uart_putc('.');
+    uart_print(p[2]);
+    uart_putc('.');
+    uart_print(p[3]);
+}
+
 // Copies a NUL-terminated string (as produced by a string literal) into
 // dst and returns the number of bytes copied (the NUL itself is not
 // copied) -- used to build a response body/headers into a buffer instead

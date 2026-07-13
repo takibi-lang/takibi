@@ -394,8 +394,7 @@ $(NET_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMO
 
 # inet_checksum.tkb/ip_parse.tkb/tcp_parse.tkb each `use` exactly the
 # subset of inet_checksum.tkb/netutil.tkb they actually need themselves
-# now (ip_parse never needed netutil at all), so neither is passed on the
-# command line here anymore.
+# now, so neither is passed on the command line here anymore.
 $(CHECKSUM_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 

@@ -32,16 +32,6 @@
 use "examples/common/inet_checksum.tkb";
 use "examples/common/netutil.tkb";
 
-fn print_ip(p: [u8; 4..]) {
-    uart_print(p[0]);
-    uart_putc('.');
-    uart_print(p[1]);
-    uart_putc('.');
-    uart_print(p[2]);
-    uart_putc('.');
-    uart_print(p[3]);
-}
-
 fn print_tcp_flags(flags: u8) {
     let mut first: i32 = 1;
     if ((flags & 0x02) != 0) {

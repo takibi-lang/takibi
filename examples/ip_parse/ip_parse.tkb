@@ -8,16 +8,7 @@
 // which reuses this parsing logic against live packets.
 
 use "examples/common/inet_checksum.tkb";
-
-fn print_ip(p: [u8; 4..]) {
-    uart_print(p[0]);
-    uart_putc('.');
-    uart_print(p[1]);
-    uart_putc('.');
-    uart_print(p[2]);
-    uart_putc('.');
-    uart_print(p[3]);
-}
+use "examples/common/netutil.tkb";
 
 fn print_protocol_name(proto: u8) {
     if (proto == 1) {
