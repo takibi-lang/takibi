@@ -419,7 +419,7 @@ run_dwarf_gdb_global_set_test() {
         timeout "$TIMEOUT" gdb-multiarch -q -batch "$kernel" \
             -ex "target remote :$port" \
             -ex "break app_main" \
-            -ex "break examples/dwarf_debug/dwarf_debug.tkb:26" \
+            -ex "break examples/dwarf_debug/dwarf_debug.tkb:27" \
             -ex "continue" \
             -ex "p dwarf_global_state" \
             -ex "p dwarf_global_pair" \
@@ -503,8 +503,8 @@ run_dwarf_gdb_global_set_test() {
         ' "$gdb_out"
         awk '
           /^DBG_PAIR_SNAPSHOT$/ { in_pair = 1; next }
-          in_pair && /^\$[0-9][0-9]* = \{state = DwarfState::Idle, count = 99\}$/ {
-            print "p pair_snapshot => {state = DwarfState::Idle, count = 99}"
+          in_pair && /^\$[0-9][0-9]* = \{state = DwarfState::Idle, count = 123\}$/ {
+            print "p pair_snapshot => {state = DwarfState::Idle, count = 123}"
             in_pair = 0
           }
         ' "$gdb_out"

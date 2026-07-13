@@ -13,5 +13,5 @@ p tcp_hdr_len => 20
 p frame => {ptr = 0x0, len = 0}
 p frame.ptr => 0x0
 p frame.len => 0
-p pair_snapshot => {state = DwarfState::Idle, count = 99}
+p pair_snapshot => {state = DwarfState::Idle, count = 123}
 qemu output => 99
