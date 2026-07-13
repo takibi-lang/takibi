@@ -5,6 +5,10 @@ ptype dwarf_global_slice => struct [u8; 4..] {
     usize len;
 }
 p dwarf_global_pair after => {state = DwarfState::Idle, count = 99}
+step => dwarf_locals_probe:30
+bt locals #0 => dwarf_locals_probe:30
+bt locals #1 => app_main:46
+next => dwarf_locals_probe:31
 p flags => 18
 p seq => 287454020
 p ack => 1432778632
@@ -14,4 +18,14 @@ p frame => {ptr = 0x0, len = 0}
 p frame.ptr => 0x0
 p frame.len => 0
 p pair_snapshot => {state = DwarfState::Idle, count = 123}
+p *local_words@3 => {7, 8, 9}
+p local_words[0] => 7
+p nested_snapshot.pair => {state = DwarfState::Busy, count = 88}
+p *nested_snapshot.words@2 => {10, 20}
+p nested_snapshot.marker => 305419896
+p arg_pair => {state = DwarfState::Idle, count = 99}
+p arg_frame => {ptr = 0x0, len = 0}
+p arg_frame.len => 0
+bt args #0 => dwarf_args_probe:42
+bt args #1 => app_main:47
 qemu output => 99
