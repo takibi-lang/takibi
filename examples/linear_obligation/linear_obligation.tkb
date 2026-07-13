@@ -1,0 +1,87 @@
+// Stage 1 PoC for the `linear` kind (OWNERSHIP_KERNEL.md, GitHub issue
+// #117): a `linear opaque struct` value is an OBLIGATION -- it must be
+// consumed exactly once on EVERY control-flow path, unlike `affine`
+// (at most once, and the weak must-consume check accepts consumption on
+// just one branch). This is the positive example: everything here
+// compiles and runs precisely because every path discharges its
+// obligation. Each rejected shape (never consumed, one branch missed,
+// cast away, overwritten) has its own companion compile-error example:
+// examples/linear_never_consumed, examples/linear_branch_missed,
+// examples/linear_cast_discard, examples/linear_overwrite.
+//
+// What "consume" means (the same three events as affine): pass it as a
+// plain (non-borrow) argument, pass it to a `sink` parameter, or return
+// it. `borrow` parameters inspect without consuming. Branching AROUND a
+// linear value is free -- if/match may discharge it differently per arm
+// -- what is impossible is branching ON the token itself (`t as usize`
+// is a compile error: casting a linear value away would silently discard
+// the obligation, so linear tokens are never null and never conditional).
+
+linear opaque struct Obligation;
+
+fn obtain() -> *Obligation {
+    return 0 as usize as *Obligation;
+}
+
+fn fulfill_a(t: sink *Obligation) {
+    uart_puts("fulfilled: a\r\n");
+}
+
+fn fulfill_b(t: sink *Obligation) {
+    uart_puts("fulfilled: b\r\n");
+}
+
+// borrow: inspect without consuming -- the caller still owes the
+// obligation afterwards.
+fn inspect(t: borrow *Obligation) {
+    uart_puts("inspected\r\n");
+}
+
+// A plain (owning) linear parameter: this function accepts the
+// obligation and must itself discharge it on every path -- here by
+// returning it (return-forwarding is consumption).
+fn forward(t: *Obligation) -> *Obligation {
+    return t;
+}
+
+// if/else: each branch discharges the one obligation exactly once.
+fn handle_if(selector: i32) {
+    let t: *Obligation = obtain();
+    inspect(t);
+    if (selector == 0) {
+        fulfill_a(t);
+    } else {
+        fulfill_b(t);
+    }
+}
+
+enum Choice {
+    A;
+    B;
+}
+
+// match: every arm discharges -- an arm that silently did nothing would
+// be a compile error, which is exactly the protocol-event guarantee this
+// kind exists for (issue #117's silent-swallow bug class).
+fn handle_match(c: Choice) {
+    let t: *Obligation = obtain();
+    match c {
+        Choice::A => { fulfill_a(t); }
+        Choice::B => { fulfill_b(t); }
+    }
+}
+
+fn app_main() {
+    handle_if(0);
+    handle_if(1);
+    handle_match(Choice::A);
+    handle_match(Choice::B);
+
+    // Self-transform idiom: the RHS consumes the old obligation, the
+    // variable then holds the fresh one returned by forward().
+    let mut t: *Obligation = obtain();
+    t = forward(t);
+    fulfill_a(t);
+
+    uart_puts("done\r\n");
+}

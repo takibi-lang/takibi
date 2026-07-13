@@ -1233,13 +1233,13 @@ let parser_tests = [
 
   Alcotest.test_case "opaque struct declaration parses" `Quick (fun () ->
     match parse "opaque struct Token;" with
-    | [Ast.OpaqueStructDef ("Token", false)] -> ()
+    | [Ast.OpaqueStructDef ("Token", Ast.KindPlain)] -> ()
     | _ -> Alcotest.fail "expected OpaqueStructDef(Token)"
   );
 
   Alcotest.test_case "affine opaque struct and borrow parameter parse" `Quick (fun () ->
     match parse "affine opaque struct Token; fn inspect(t: borrow *Token) {}" with
-    | [Ast.OpaqueStructDef ("Token", true);
+    | [Ast.OpaqueStructDef ("Token", Ast.KindAffine);
        Ast.FuncDef { params = [("t", Some (Ast.TypeBorrow (Ast.TypePtr
          (Ast.TypeNamed "Token"))))]; _ }] -> ()
     | _ -> Alcotest.fail "expected affine opaque Token and borrowed pointer"
@@ -1989,7 +1989,7 @@ let infer_tests = [
      runtime-computed MMIO addresses (see lib/type_inf.ml's Cast case
      comment and HISTORY.md's issue #15 entry). *)
   Alcotest.test_case "casting a non-literal integer to an affine handle requires unsafe" `Quick
-    (expect_type_error "casting a non-literal integer to an affine handle"
+    (expect_type_error "casting a non-literal integer to an affine/linear handle"
        "affine opaque struct Token;
         fn f(idx: usize) { let t: *Token = idx as *Token; }");
 
@@ -3056,6 +3056,211 @@ let infer_tests = [
        | _ -> ()
        | exception Types.TypeError (_, msg) ->
            Alcotest.failf "expected a non-private global to stay unrestricted, got: %s" msg);
+
+  (* -- Linear kind (OWNERSHIP_KERNEL.md Stage 1, GitHub issue #117) -------
+     `linear opaque struct` = exactly-once-on-every-path obligations.
+     Prelude shared by most cases below: a token type, a mint, a sink. *)
+
+  Alcotest.test_case "linear: create + sink on the straight-line path is fine" `Quick
+    (fun () ->
+       match infer "linear opaque struct LinTok;
+                    fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+                    fn lsink(t: sink *LinTok) {}
+                    fn lin_ok() { let t: *LinTok = lmint(); lsink(t); }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "linear: consuming on BOTH branches of an if/else is fine \
+                      (branching around a linear value is legal)" `Quick
+    (fun () ->
+       match infer "linear opaque struct LinTok;
+                    fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+                    fn lsink_a(t: sink *LinTok) {}
+                    fn lsink_b(t: sink *LinTok) {}
+                    fn lin_both(c: bool) {
+                      let t: *LinTok = lmint();
+                      if (c) { lsink_a(t); } else { lsink_b(t); }
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "linear: never consumed is a compile error" `Quick
+    (expect_type_error "linear value 't' is never consumed"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lin_leak() { let t: *LinTok = lmint(); }");
+
+  Alcotest.test_case "linear: consumed in only ONE branch is a compile error \
+                      (the case affine's union check cannot catch)" `Quick
+    (expect_type_error "consumed on some paths but not on every path"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lsink(t: sink *LinTok) {}
+        fn lin_missed(c: bool) {
+          let t: *LinTok = lmint();
+          if (c) { lsink(t); }
+        }");
+
+  Alcotest.test_case "negative control: the same one-branch consumption on an \
+                      AFFINE value still compiles (union semantics unchanged)" `Quick
+    (fun () ->
+       match infer "affine opaque struct AffTok2;
+                    fn amint2() -> *AffTok2 { return 0 as usize as *AffTok2; }
+                    fn asink2(t: sink *AffTok2) {}
+                    fn aff_missed(c: bool) {
+                      let t: *AffTok2 = amint2();
+                      if (c) { asink2(t); }
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "linear: casting a linear value away is a compile error" `Quick
+    (expect_type_error "cannot cast a linear value"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lin_cast() { let t: *LinTok = lmint(); let x: usize = t as usize; }");
+
+  Alcotest.test_case "linear: assigning over an undischarged obligation is a \
+                      compile error" `Quick
+    (expect_type_error "would discard its obligation"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lsink(t: sink *LinTok) {}
+        fn lin_overwrite() {
+          let mut t: *LinTok = lmint();
+          t = lmint();
+          lsink(t);
+        }");
+
+  Alcotest.test_case "linear: the self-transform idiom `t = transform(t)` is \
+                      fine (RHS consumes the old obligation first)" `Quick
+    (fun () ->
+       match infer "linear opaque struct LinTok;
+                    fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+                    fn ltransform(t: *LinTok) -> *LinTok { return t; }
+                    fn lsink(t: sink *LinTok) {}
+                    fn lin_transform() {
+                      let mut t: *LinTok = lmint();
+                      t = ltransform(t);
+                      lsink(t);
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "linear: an uninitialized linear let is a compile error" `Quick
+    (expect_type_error "must be initialized at its declaration"
+       "linear opaque struct LinTok;
+        fn lin_uninit() { let mut t: *LinTok; }");
+
+  Alcotest.test_case "linear: a pending obligation at an early return is a \
+                      compile error" `Quick
+    (expect_type_error "still pending at this return"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lsink(t: sink *LinTok) {}
+        fn lin_early(c: bool) -> i32 {
+          let t: *LinTok = lmint();
+          if (c) { return -1; }
+          lsink(t);
+          return 0;
+        }");
+
+  Alcotest.test_case "linear: a pending obligation at a break is a compile error" `Quick
+    (expect_type_error "still pending at this break"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lsink(t: sink *LinTok) {}
+        fn lin_break() {
+          while (true) {
+            let t: *LinTok = lmint();
+            break;
+          }
+        }");
+
+  Alcotest.test_case "linear: returning the obligation itself IS consumption \
+                      (return-forward compiles)" `Quick
+    (fun () ->
+       match infer "linear opaque struct LinTok;
+                    fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+                    fn lin_forward() -> *LinTok {
+                      let t: *LinTok = lmint();
+                      return t;
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "linear: a plain linear parameter consumed on only some \
+                      paths is a compile error" `Quick
+    (expect_type_error "still pending at this return"
+       "linear opaque struct LinTok;
+        fn lsink(t: sink *LinTok) {}
+        fn lin_param(c: bool, t: *LinTok) -> i32 {
+          if (c) { return -1; }
+          lsink(t);
+          return 0;
+        }");
+
+  Alcotest.test_case "linear: a plain linear parameter never consumed at all is \
+                      a compile error (fall-through path)" `Quick
+    (expect_type_error "linear parameter 't' is not consumed on every path"
+       "linear opaque struct LinTok;
+        fn lin_swallow(t: *LinTok) {}");
+
+  Alcotest.test_case "linear: a sink parameter needs no further forwarding \
+                      (terminal consumer compiles)" `Quick
+    (fun () ->
+       match infer "linear opaque struct LinTok;
+                    fn lin_terminal(t: sink *LinTok) {}" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "linear: double consume is a compile error" `Quick
+    (expect_type_error "linear value 't' was already consumed"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lsink(t: sink *LinTok) {}
+        fn lin_double() {
+          let t: *LinTok = lmint();
+          lsink(t);
+          lsink(t);
+        }");
+
+  Alcotest.test_case "linear: taking the address of a linear value is a \
+                      compile error" `Quick
+    (expect_type_error "cannot take the address of linear value"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lsink(t: sink *LinTok) {}
+        fn lin_addr() {
+          let mut t: *LinTok = lmint();
+          let p: usize = (&t) as usize;
+          lsink(t);
+        }");
+
+  Alcotest.test_case "linear: storing into a struct field is rejected at the \
+                      field declaration" `Quick
+    (expect_type_error "cannot hold a linear value"
+       "linear opaque struct LinTok;
+        struct LinHolder { tok: *LinTok; }");
+
+  Alcotest.test_case "linear: an array of linear values is rejected" `Quick
+    (expect_type_error "cannot live inside an array/slice"
+       "linear opaque struct LinTok;
+        fn lin_arr() { let mut a: [*LinTok; 2]; }");
+
+  Alcotest.test_case "linear: a linear-typed global is rejected" `Quick
+    (expect_type_error "cannot hold a linear value"
+       "linear opaque struct LinTok;
+        let mut g_tok: *LinTok = 0 as usize as *LinTok;");
+
+  Alcotest.test_case "linear: storing through a pointer is a compile error" `Quick
+    (expect_type_error "cannot store a linear value through a pointer"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lin_store(pp: **LinTok) {
+          let t: *LinTok = lmint();
+          *pp = t;
+        }");
 
 ]
 

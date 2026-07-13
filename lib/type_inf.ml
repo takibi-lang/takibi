@@ -418,6 +418,26 @@ let unsafe_depth = ref 0
    pointer targets consult this (GitHub issue #15 follow-up). *)
 let affine_opaque_names = ref StringSet.empty
 
+(* Names of every `linear opaque struct` (OWNERSHIP_KERNEL.md Stage 1,
+   GitHub issue #117): exactly-once-on-every-path obligations. Kept as a
+   separate set from affine (not a bool upgrade) because the two kinds
+   differ at every checking site: merge semantics (intersection vs union),
+   cast rules (a linear value may never be cast away), reassignment
+   (overwriting a live linear obligation is an error), and early exits
+   (return/break/continue with a pending obligation are errors). *)
+let linear_opaque_names = ref StringSet.empty
+
+(* Dual consumption tracking (OWNERSHIP_KERNEL.md Stage 1): c_any is the
+   union-combined moved set affine checking has always used (governs
+   double-consume for both kinds, and affine's weak must-consume); c_all
+   is the intersection-combined set (membership = consumed on EVERY path
+   reaching this point), which the linear kind's checks read. *)
+type consume_sets = { c_any : StringSet.t; c_all : StringSet.t }
+
+let is_linear_ptr_ty t = match repr t with
+  | TPtr (TStruct n) -> StringSet.mem n !linear_opaque_names
+  | _ -> false
+
 (* Direct calls are resolved during inference.  Codegen must consume this
    exact decision rather than attempting a second overload resolution. *)
 let resolved_call_targets = ref StringMap.empty
@@ -536,12 +556,33 @@ let elem_stride_aligned (senv : senv) (n : int) (elem : ty) : bool =
    this check. *)
 let check_affine_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
   match tgt with
-  | TPtr (TStruct sname) when StringSet.mem sname !affine_opaque_names ->
+  | TPtr (TStruct sname) when StringSet.mem sname !affine_opaque_names
+                           || StringSet.mem sname !linear_opaque_names ->
       if !unsafe_depth = 0 && not (is_literal_derived src_expr) then
         raise (TypeError (loc,
-          "casting a non-literal integer to an affine handle asserts it is \
-           valid with no evidence; write `unsafe { ... as "
+          "casting a non-literal integer to an affine/linear handle asserts \
+           it is valid with no evidence; write `unsafe { ... as "
           ^ to_string tgt ^ " }` to mark it"))
+  | _ -> ()
+
+(* OWNERSHIP_KERNEL.md Stage 1 (GitHub issue #117): a linear value may
+   never be cast to ANYTHING (`as usize`, `as *Other`, even `as` its own
+   type) -- casting away is the direction that silently discards the
+   obligation, and there is deliberately no `unsafe` escape in v1. The
+   reverse direction (integer -> linear pointer, i.e. minting a fresh
+   obligation) stays legal under the same rules as affine, because a
+   forged obligation must itself be consumed on every path -- forging is
+   the safe direction. This ban is also what makes the all-paths
+   (intersection) consumption check exact with plain dataflow: the
+   `(p as usize) != 0` null-test idiom is inexpressible for linear values,
+   so consumption can never be legitimately conditional (see the memo's
+   4.6 for why this dodges the relational-reasoning wall issue #89 hit). *)
+let check_linear_cast_away loc (src_ty : ty) =
+  match repr src_ty with
+  | TPtr (TStruct sname) when StringSet.mem sname !linear_opaque_names ->
+      raise (TypeError (loc, Printf.sprintf
+        "cannot cast a linear value (*%s) to anything: casting away would \
+         silently discard its obligation" sname))
   | _ -> ()
 
 (* GitHub issue #102: casting an INTEGER expression to *align(N) T requires
@@ -807,6 +848,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Var name ->
            check_private_global_access e.loc name;
            let (t, is_mut) = lookup_binding e.loc name tyenv in
+           if is_linear_ptr_ty t then
+             raise (TypeError (e.loc, Printf.sprintf
+               "cannot take the address of linear value '%s': an alias would \
+                escape obligation tracking" name));
            if not is_mut then
              raise (TypeError (e.loc,
                Printf.sprintf "cannot take address of immutable variable '%s'" name));
@@ -837,6 +882,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            raise (TypeError (e.loc, "& requires a variable or struct field")))
   | Cast (target_ty, e) ->
       let src_ty = infer_expr senv eenv tyenv fenv e in
+      check_linear_cast_away e.loc src_ty;
       let src_enum = match repr src_ty with
         | TStruct sn when StringMap.mem sn eenv -> Some sn
         | _ -> None
@@ -1821,6 +1867,10 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
             inner
       in
       let vt = infer_expr senv eenv tyenv fenv val_expr in
+      if is_linear_ptr_ty vt then
+        raise (TypeError (val_expr.loc,
+          "cannot store a linear value through a pointer: it would escape \
+           obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will lift this)"));
       unify_at val_expr.loc vt inner;
       check_literal_fits_refined val_expr.loc val_expr inner;
       (tyenv, raw_locals)
@@ -1851,6 +1901,10 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         | _ -> raise (TypeError (s.loc,
             Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))
       in
+      if is_linear_ptr_ty rt then
+        raise (TypeError (rhs.loc,
+          "cannot store a linear value into an array/slice element: it would \
+           escape obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will lift this)"));
       unify_at rhs.loc rt elem_ty;
       check_literal_fits_refined rhs.loc rhs elem_ty;
       (tyenv, raw_locals)
@@ -1880,6 +1934,10 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
               Printf.sprintf "no field '%s' in struct '%s'" fname sname))
       in
       let vt = infer_expr senv eenv tyenv fenv val_expr in
+      if is_linear_ptr_ty vt then
+        raise (TypeError (val_expr.loc,
+          "cannot store a linear value into a struct field: it would escape \
+           obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will lift this)"));
       (* Assignment to io field: check compatibility with T (io is a storage qualifier, strip it) *)
       unify_at val_expr.loc vt (strip_io field_ty);
       check_literal_fits_refined val_expr.loc val_expr (strip_io field_ty);
@@ -2328,10 +2386,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> names
   ) StringSet.empty prog in
   let affine_names = List.fold_left (fun names -> function
-    | Ast.OpaqueStructDef (name, true) -> StringSet.add name names
+    | Ast.OpaqueStructDef (name, Ast.KindAffine) -> StringSet.add name names
     | _ -> names
   ) StringSet.empty prog in
   affine_opaque_names := affine_names;
+  let linear_names = List.fold_left (fun names -> function
+    | Ast.OpaqueStructDef (name, Ast.KindLinear) -> StringSet.add name names
+    | _ -> names
+  ) StringSet.empty prog in
+  linear_opaque_names := linear_names;
   global_align_bytes_baseline := List.fold_left (fun m -> function
     | Ast.LetDef (name, _, _, Some n, _, _, _) -> StringMap.add name n m
     | _ -> m
@@ -2365,22 +2428,50 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeRefined (_, _, base) -> contains_borrow base
     | _ -> false
   in
+  let is_kinded name =
+    StringSet.mem name affine_names || StringSet.mem name linear_names in
+  (* OWNERSHIP_KERNEL.md Stage 1 storage bans, declaration side: a linear
+     pointer may not appear in any type that IS storage (struct fields,
+     globals) or that nests it inside a container (arrays, slices --
+     anywhere, including locals). Bare `*L` locals/params are the only
+     legal homes until Stage 3's place tracking. The store-side runtime
+     checks (AssignField/AssignIndex/AssignDeref) in infer_stmt are the
+     load-bearing enforcement; these declaration bans reject the storage
+     shapes up front so the error points at the declaration. *)
+  let rec type_mentions_linear = function
+    | Ast.TypeNamed n -> StringSet.mem n linear_names
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_linear t
+    | _ -> false
+  in
+  let rec linear_inside_container = function
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_linear t
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t) ->
+        linear_inside_container t
+    | _ -> false
+  in
   let validate_param_type loc = function
     | Ast.TypeBorrow (Ast.TypePtr (Ast.TypeNamed name) as inner)
-      when StringSet.mem name affine_names -> validate_complete_type loc false inner
+      when is_kinded name -> validate_complete_type loc false inner
     | Ast.TypeBorrow _ ->
         raise (TypeError (loc,
-          "borrow is only valid on a pointer to an affine opaque struct parameter"))
+          "borrow is only valid on a pointer to an affine/linear opaque struct parameter"))
     | Ast.TypeSink (Ast.TypePtr (Ast.TypeNamed name) as inner)
-      when StringSet.mem name affine_names -> validate_complete_type loc false inner
+      when is_kinded name -> validate_complete_type loc false inner
     | Ast.TypeSink _ ->
         raise (TypeError (loc,
-          "sink is only valid on a pointer to an affine opaque struct parameter"))
+          "sink is only valid on a pointer to an affine/linear opaque struct parameter"))
     | ty -> validate_complete_type loc false ty
   in
   let validate_nonparam_type loc ty =
     if contains_borrow ty then
       raise (TypeError (loc, "borrow/sink is only valid in function parameter types"));
+    if linear_inside_container ty then
+      raise (TypeError (loc,
+        "a linear value cannot live inside an array/slice: it would escape \
+         obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will lift this)"));
     validate_complete_type loc false ty
   in
   let rec validate_expr_types (e : Ast.expr) =
@@ -2436,11 +2527,23 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                to infer them from)" name pname))
         ) params;
         Option.iter (validate_nonparam_type Lexing.dummy_pos) ret
-    | Ast.LetDef (_, ty, init, _, _, _, _) ->
-        Option.iter (validate_nonparam_type Lexing.dummy_pos) ty;
+    | Ast.LetDef (gname, ty, init, _, _, _, gloc) ->
+        Option.iter (fun t ->
+          if type_mentions_linear t then
+            raise (TypeError (gloc, Printf.sprintf
+              "global '%s' cannot hold a linear value: it would escape \
+               obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will lift this)"
+              gname));
+          validate_nonparam_type gloc t) ty;
         Option.iter validate_expr_types init
-    | Ast.StructDef (_, fields, _, _) ->
-        List.iter (fun (_, ty) -> validate_nonparam_type Lexing.dummy_pos ty) fields
+    | Ast.StructDef (sname, fields, _, _) ->
+        List.iter (fun (fname, ty) ->
+          if type_mentions_linear ty then
+            raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+              "struct field '%s.%s' cannot hold a linear value: it would \
+               escape obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will \
+               lift this)" sname fname));
+          validate_nonparam_type Lexing.dummy_pos ty) fields
     | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _ -> ()) prog;
   (* Pass 0: collect struct and enum definitions *)
   let senv = List.fold_left (fun m -> function
@@ -2696,21 +2799,37 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add key (infer_func senv eenv fenv genv fdef) m
     | _ -> m
   ) StringMap.empty prog in
-  (* Restricted affine checking for pointers to `affine opaque struct`.
-     This deliberately stops short of a general ownership system: affine
-     values may be dropped, but a consuming call/return/assignment moves a
-     named local and any later use is rejected. `borrow T` is parameter-only
-     and makes calls through that parameter non-consuming. `sink T` is also
-     parameter-only and DOES consume at the call site (like a plain owning
-     parameter), but marks the callee as this value's designated terminal
-     consumer -- see check_affine_func's parameter-consumption check below
-     for why plain owning parameters need this counterpart (GitHub issue
-     #89: a purely syntactic "was this parameter forwarded to another
-     consuming call" check cannot tell a genuine release function like
-     mutex_unlock/fat_close/net_rx_release apart from an accidental no-op
-     that silently drops the handle -- `sink` makes that distinction an
-     explicit, checkable declaration instead of something the checker has
-     to infer). *)
+  (* Restricted affine/linear checking for pointers to `affine opaque
+     struct` / `linear opaque struct`. This deliberately stops short of a
+     general ownership system: values are tracked per named local within a
+     single function. `borrow T` is parameter-only and makes calls through
+     that parameter non-consuming. `sink T` is also parameter-only and DOES
+     consume at the call site (like a plain owning parameter), but marks
+     the callee as this value's designated terminal consumer -- see
+     check_affine_func's parameter-consumption check below for why plain
+     owning parameters need this counterpart (GitHub issue #89: a purely
+     syntactic "was this parameter forwarded" check cannot tell a genuine
+     release function apart from an accidental no-op that silently drops
+     the handle -- `sink` makes that distinction an explicit declaration).
+
+     AFFINE: use at most once; must be consumed on at least one path
+     (union semantics -- the null-sentinel conditional-consumption idiom,
+     `if ((p as usize) != 0) { release(p); }`, depends on this weakness;
+     see the scope-end check's comment below).
+     LINEAR (OWNERSHIP_KERNEL.md Stage 1, GitHub issue #117): use exactly
+     once on EVERY path (intersection semantics). Additional linear-only
+     rules enforced here: reassignment over a live obligation is rejected;
+     a pending obligation at return/break/continue is rejected (affine's
+     union check silently accepts leak-on-early-exit; linear cannot);
+     uninitialized `let` of a linear local is rejected. The cast-away ban
+     and the storage bans (fields/slots/globals) live in infer_expr/
+     infer_stmt where full types are available, not in this walk.
+
+     Both kinds share one walk carrying a `consume_sets` pair: c_any is
+     the union-at-merges moved set affine has always used (governs
+     double-consume for both kinds, and affine's weak must-consume);
+     c_all is the intersection-at-merges set (membership = consumed on
+     every path reaching this point), which every linear check reads. *)
   let rec strip_borrow = function
     | Ast.TypeBorrow t | Ast.TypeSink t -> strip_borrow t
     | t -> t
@@ -2719,6 +2838,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypePtr (Ast.TypeNamed name) -> StringSet.mem name affine_names
     | _ -> false
   in
+  let is_linear_type ty = match strip_borrow ty with
+    | Ast.TypePtr (Ast.TypeNamed name) -> StringSet.mem name linear_names
+    | _ -> false
+  in
+  let is_tracked_type ty = is_affine_type ty || is_linear_type ty in
   let call_params = List.fold_left (fun m -> function
     | Ast.FuncDef f ->
         StringMap.add (overload_key f.name f.params) (List.map snd f.params) m
@@ -2731,20 +2855,59 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     List.iter2 (fun (name, _) (_, ty) ->
       var_types := StringMap.add name ty !var_types
     ) fdef.params finfo.param_types;
-    let is_affine_var name = match StringMap.find_opt name !var_types with
-      | Some ty -> is_affine_type ty
-      | None -> false
+    let var_kind name = match StringMap.find_opt name !var_types with
+      | Some ty when is_linear_type ty -> Some Ast.KindLinear
+      | Some ty when is_affine_type ty -> Some Ast.KindAffine
+      | _ -> None
     in
+    let is_tracked_var name = var_kind name <> None in
+    let is_linear_var name = var_kind name = Some Ast.KindLinear in
+    let kind_word name = if is_linear_var name then "linear" else "affine" in
+    (* `sink`/`borrow` parameters carry no callee-side obligation: sink is
+       the terminal consumer (nothing further to forward), borrow never
+       owns. Everything else linear-typed in scope must be discharged on
+       every path, which the early-exit checks below enforce. *)
+    let exempt_params = List.fold_left (fun s (name, ty_opt) ->
+      match ty_opt with
+      | Some (Ast.TypeBorrow _) | Some (Ast.TypeSink _) -> StringSet.add name s
+      | _ -> s
+    ) StringSet.empty fdef.params in
+    let mv_empty = { c_any = StringSet.empty; c_all = StringSet.empty } in
+    let mv_consume name m =
+      { c_any = StringSet.add name m.c_any; c_all = StringSet.add name m.c_all } in
+    let mv_clear name m =
+      { c_any = StringSet.remove name m.c_any; c_all = StringSet.remove name m.c_all } in
+    let mv_merge a b =
+      { c_any = StringSet.union a.c_any b.c_any;
+        c_all = StringSet.inter a.c_all b.c_all } in
     let require_available loc moved name =
-      if is_affine_var name && StringSet.mem name moved then
+      if is_tracked_var name && StringSet.mem name moved.c_any then
         raise (TypeError (loc, Printf.sprintf
-          "affine value '%s' was already consumed" name))
+          "%s value '%s' was already consumed" (kind_word name) name))
+    in
+    (* Linear early-exit rule (OWNERSHIP_KERNEL.md 4.2): wherever control
+       leaves the region that owes the obligations (return, break,
+       continue), every linear variable in scope must already be
+       definitely consumed. A returned linear value is consumed by the
+       return expression's own walk before this runs, so no exemption is
+       needed. Deliberately conservative for break/continue: an obligation
+       declared OUTSIDE the loop that would have been consumed after it is
+       also rejected -- v1 does not track loop boundaries (restructure:
+       consume before the loop, or avoid break). *)
+    let require_no_pending_linear loc what moved declared =
+      StringSet.iter (fun name ->
+        if is_linear_var name && not (StringSet.mem name exempt_params)
+           && not (StringSet.mem name moved.c_all) then
+          raise (TypeError (loc, Printf.sprintf
+            "linear value '%s' is still pending at this %s (it must be \
+             consumed on every path)" name what))
+      ) declared
     in
     let rec check_expr moved consume (e : Ast.expr) =
       match e.desc with
       | Ast.Var name ->
           require_available e.loc moved name;
-          if consume && is_affine_var name then StringSet.add name moved else moved
+          if consume && is_tracked_var name then mv_consume name moved else moved
       | Ast.Call (name, args) ->
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets) ~default:name in
@@ -2753,7 +2916,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             | [] -> moved
             | arg :: rest ->
             let consume_arg = match params with
-              | Some ty :: _ when is_affine_type ty ->
+              | Some ty :: _ when is_tracked_type ty ->
                   (match ty with Ast.TypeBorrow _ -> false | _ -> true)
               | _ -> false
             in
@@ -2770,51 +2933,29 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.SizeOf _ | Ast.OffsetOf _ | Ast.IntLit _ | Ast.BoolLit _
       | Ast.StringLit _ | Ast.EnumVariant _ -> moved
     in
-    (* Never-consumed check (GitHub issue #89's "must eventually be
-       consumed" half, first increment): at the end of every block-like
-       scope (function body, if/else branch, loop body, match arm), any
-       affine LOCAL declared directly in that scope (not a parameter --
-       an affine value arriving as a plain parameter is deliberately not
-       required to be consumed by the callee yet, a separate, harder
-       question left for later) must appear in `moved` by then.
-       Deliberately reuses the SAME union-combined `moved` set the
-       double-consume checker above already computes (consumed on AT
-       LEAST ONE path counts) rather than a stricter "consumed on EVERY
-       path" (intersection) analysis: an earlier version of this check
-       used intersection and immediately misfired on every existing
-       affine-using example (net_echo.tkb etc.), which all share the
-       pattern `let acquired = net_rx_acquire(); if (acquired != 0) {
-       ... net_rx_release(acquired); }` -- release is only reachable
-       behind the very same nullness check that gates every other use,
-       but the checker has no way to see the two checks are the same
-       condition without real relational reasoning (see HISTORY.md's
-       relational-analysis findings). The weaker union-based check still
-       catches a local that is NEVER consumed on ANY path (this
-       increment's actual target -- see the affine_leak_probe scratch
-       files), at the cost of not catching a local released on only ONE
-       of several branches. `decl_locs` records each affine local's own
-       `let` site so the error points at the declaration. *)
+    (* Scope-end checks. AFFINE keeps its deliberately union-based
+       never-consumed check (GitHub issue #89's first increment): consumed
+       on AT LEAST ONE path counts, because affine's idiomatic
+       null-sentinel pattern (`let p = acquire(); if ((p as usize) != 0) {
+       ...; release(p); }`) makes consumption legitimately conditional in
+       a way plain dataflow cannot correlate with the nullness test (an
+       earlier intersection-based attempt misfired on every existing
+       affine example -- see HISTORY.md's relational-analysis findings).
+       LINEAR reads c_all instead: the cast-away ban makes the
+       null-sentinel pattern inexpressible for linear values, so
+       consumption can never be legitimately conditional and the
+       intersection check is exact with no relational reasoning needed
+       (OWNERSHIP_KERNEL.md 4.6). `decl_locs` records each tracked local's
+       own `let` site so errors point at the declaration. *)
     let decl_locs = ref StringMap.empty in
     (* Purely syntactic "does this statement list always return" check
        (GitHub issue #89 comment thread's "return-terminated branch" gap):
        a branch that unconditionally returns never reaches the code after
-       its enclosing `if`/`match`, so whatever it consumed must NOT be
-       unioned into what continues past that `if`/`match` -- unioning it
-       anyway is exactly what made
-       `if (fat_write(fp,...) != 0) { fat_close(fp); return -1; }
-        return fat_close(fp);`
-       (examples/common/fat12.tkb's create_demo_file, before this fix)
-       falsely report "affine value 'fp' was already consumed": the first
-       branch's own `fat_close(fp)` had no business being visible to the
-       second `fat_close(fp)` at all, since the two are on mutually
-       exclusive paths. Deliberately conservative in the safe direction
-       (may say "does not always terminate" when it actually does, never
-       the other way around): loops are never treated as terminators here
-       (an infinite `while (true) {}` really does always terminate
-       fall-through, but reasoning about loop termination is out of scope
-       for this syntactic check -- treating it as "does not terminate"
-       just falls back to today's existing, safe-but-imprecise union
-       behavior for that case, not a new unsoundness). *)
+       its enclosing `if`/`match`, so what it consumed must not be merged
+       into what continues past that `if`/`match` (in EITHER set: not
+       unioned into c_any, not intersected into c_all). Deliberately
+       conservative in the safe direction: loops are never treated as
+       terminators here. *)
     let rec stmt_always_terminates (s : Ast.stmt) = match s.desc with
       | Ast.Return _ -> true
       | Ast.If (_, yes, no) -> always_terminates yes && always_terminates no
@@ -2832,25 +2973,48 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       in
       let newly_declared = StringSet.diff declared initial_declared in
       StringSet.iter (fun name ->
-        if is_affine_var name && not (StringSet.mem name moved) then
-          let loc = Option.value (StringMap.find_opt name !decl_locs) ~default:fdef.def_loc in
-          raise (TypeError (loc, Printf.sprintf
-            "affine value '%s' is never consumed" name))
+        let loc () =
+          Option.value (StringMap.find_opt name !decl_locs) ~default:fdef.def_loc in
+        match var_kind name with
+        | Some Ast.KindAffine when not (StringSet.mem name moved.c_any) ->
+            raise (TypeError (loc (), Printf.sprintf
+              "affine value '%s' is never consumed" name))
+        | Some Ast.KindLinear when not (StringSet.mem name moved.c_all) ->
+            if StringSet.mem name moved.c_any then
+              raise (TypeError (loc (), Printf.sprintf
+                "linear value '%s' is consumed on some paths but not on \
+                 every path" name))
+            else
+              raise (TypeError (loc (), Printf.sprintf
+                "linear value '%s' is never consumed" name))
+        | _ -> ()
       ) newly_declared;
       (moved, declared)
     and check_stmt moved declared (s : Ast.stmt) =
       match s.desc with
       | Ast.Return e ->
           let consumes = match fdef.ret_type with
-            | Some ty -> is_affine_type ty
+            | Some ty -> is_tracked_type ty
             | None -> false
           in
-          (check_expr moved consumes e, declared)
+          let moved = check_expr moved consumes e in
+          require_no_pending_linear s.loc "return" moved declared;
+          (moved, declared)
       | Ast.Expr e -> (check_expr moved false e, declared)
       | Ast.Assign (name, e) ->
           require_available s.loc moved name;
-          let moved = check_expr moved (is_affine_var name) e in
-          (StringSet.remove name moved, StringSet.add name declared)
+          let moved = check_expr moved (is_tracked_var name) e in
+          (* A linear local/parameter still holding its obligation may not
+             be overwritten -- that would silently discard it. Note the
+             RHS walk runs FIRST, so the self-transform idiom
+             `p = transform(p);` (RHS consumes the old p) passes: by the
+             time this check runs, the old obligation is discharged. *)
+          if is_linear_var name && StringSet.mem name declared
+             && not (StringSet.mem name moved.c_all) then
+            raise (TypeError (s.loc, Printf.sprintf
+              "assigning over linear value '%s' would discard its \
+               obligation (consume it first)" name));
+          (mv_clear name moved, StringSet.add name declared)
       | Ast.AssignDeref (a, b) ->
           (check_expr (check_expr moved false a) false b, declared)
       | Ast.AssignField (a, _, b) ->
@@ -2859,11 +3023,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (check_expr (check_expr moved false i) false v, declared)
       | Ast.Let (_, name, _, init, _) ->
           decl_locs := StringMap.add name s.loc !decl_locs;
+          (match init with
+           | None when is_linear_var name ->
+               raise (TypeError (s.loc, Printf.sprintf
+                 "linear value '%s' must be initialized at its declaration" name))
+           | _ -> ());
           let moved = match init with
-            | Some e -> check_expr moved (is_affine_var name) e
+            | Some e -> check_expr moved (is_tracked_var name) e
             | None -> moved
           in
-          (StringSet.remove name moved, StringSet.add name declared)
+          (mv_clear name moved, StringSet.add name declared)
       | Ast.Block body ->
           let (out, _) = check_stmts moved declared body in
           (out, declared)
@@ -2874,36 +3043,38 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let combined = match always_terminates yes, always_terminates no with
             | true, false -> nm  (* "yes" always returns: only "no" continues past this `if` *)
             | false, true -> ym  (* symmetric case *)
-            | _, _ -> StringSet.union ym nm
-              (* neither terminates (today's existing behavior), or BOTH
-                 do (nothing continues past this `if` at all, so which
-                 set we report is moot -- union is harmless) *)
+            | _, _ -> mv_merge ym nm
+              (* neither terminates, or BOTH do (nothing continues past
+                 this `if` at all, so which set we report is moot) *)
           in
           (combined, declared)
       | Ast.While (cond, body) ->
           let moved = check_expr moved false cond in
           let (body_moved, _) = check_stmts moved declared body in
-          let newly_moved_outer = StringSet.inter declared (StringSet.diff body_moved moved) in
+          let newly_moved_outer =
+            StringSet.inter declared (StringSet.diff body_moved.c_any moved.c_any) in
           if not (StringSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
-              "cannot consume an affine value declared outside a loop inside that loop"));
+              "cannot consume an affine/linear value declared outside a loop inside that loop"));
           (moved, declared)
       | Ast.For (name, _, lo, hi, body) ->
           let moved = check_expr (check_expr moved false lo) false hi in
           let declared_body = StringSet.add name declared in
           let (body_moved, _) = check_stmts moved declared_body body in
-          let newly_moved_outer = StringSet.inter declared (StringSet.diff body_moved moved) in
+          let newly_moved_outer =
+            StringSet.inter declared (StringSet.diff body_moved.c_any moved.c_any) in
           if not (StringSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
-              "cannot consume an affine value declared outside a loop inside that loop"));
+              "cannot consume an affine/linear value declared outside a loop inside that loop"));
           (moved, declared)
       | Ast.ForEach (name, collection, body) ->
           let moved = check_expr moved false collection in
           let (body_moved, _) = check_stmts moved (StringSet.add name declared) body in
-          let newly_moved_outer = StringSet.inter declared (StringSet.diff body_moved moved) in
+          let newly_moved_outer =
+            StringSet.inter declared (StringSet.diff body_moved.c_any moved.c_any) in
           if not (StringSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
-              "cannot consume an affine value declared outside a loop inside that loop"));
+              "cannot consume an affine/linear value declared outside a loop inside that loop"));
           (moved, declared)
       | Ast.Match (e, arms) ->
           let moved = check_expr moved false e in
@@ -2913,41 +3084,59 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             in
             (always_terminates body, fst (check_stmts moved declared body))
           ) arms in
-          (* Same reasoning as `If` above: a terminating arm never
-             reaches code after the `match`, so its consumption must not
-             be unioned into what continues -- unless EVERY arm
-             terminates, in which case nothing continues anyway and
-             unioning everything is harmless. *)
+          (* Same reasoning as `If` above: a terminating arm never reaches
+             code after the `match`, so its consumption must not be merged
+             into what continues -- unless EVERY arm terminates, in which
+             case nothing continues anyway and the merge is moot. *)
           let non_terminating = List.filter (fun (terminates, _) -> not terminates) results in
           let contributing = if non_terminating = [] then results else non_terminating in
-          let arm_moved = List.fold_left (fun acc (_, am) -> StringSet.union acc am) moved contributing in
+          let arm_moved = match contributing with
+            | [] -> moved
+            | (_, first) :: rest ->
+                List.fold_left (fun acc (_, am) -> mv_merge acc am) first rest
+          in
           (arm_moved, declared)
-      | Ast.Break | Ast.Continue -> (moved, declared)
+      | Ast.Break ->
+          require_no_pending_linear s.loc "break" moved declared;
+          (moved, declared)
+      | Ast.Continue ->
+          require_no_pending_linear s.loc "continue" moved declared;
+          (moved, declared)
     in
-    let (final_moved, _) = check_stmts StringSet.empty
+    let (final_moved, _) = check_stmts mv_empty
       (List.fold_left (fun d (name, _) -> StringSet.add name d)
          StringSet.empty fdef.params) fdef.body
     in
     (* GitHub issue #89 "problem 2": a plain (non-`borrow`, non-`sink`)
-       affine PARAMETER must also be consumed somewhere within the
-       callee's own body (forwarded to another consuming call, passed to
-       a `sink` parameter, or returned) -- otherwise the callee can
-       silently swallow a handle its caller already gave up (the caller's
-       own obligation IS satisfied by the call itself, so this is a
-       distinct, callee-side check). `borrow`/`sink` parameters are
-       exempt: `borrow` never takes ownership, and `sink` is the
-       designated terminal consumer, with nothing further to forward. *)
+       affine/linear PARAMETER must also be consumed within the callee's
+       own body (forwarded to another consuming call, passed to a `sink`
+       parameter, or returned) -- otherwise the callee can silently swallow
+       a handle its caller already gave up. `borrow`/`sink` are exempt:
+       `borrow` never takes ownership, `sink` is the designated terminal
+       consumer. Affine reads c_any (at least one path); linear reads
+       c_all (every path -- a linear parameter is an accepted obligation,
+       and its early-return paths are already covered by
+       require_no_pending_linear above, so this is the fall-through
+       check). *)
     List.iter (fun (name, ty_opt) ->
-      let is_owned_affine = match ty_opt with
-        | Some (Ast.TypeBorrow _) | Some (Ast.TypeSink _) -> false
-        | Some ty -> is_affine_type ty
-        | None -> false
+      let owned_kind = match ty_opt with
+        | Some (Ast.TypeBorrow _) | Some (Ast.TypeSink _) -> None
+        | Some ty when is_linear_type ty -> Some Ast.KindLinear
+        | Some ty when is_affine_type ty -> Some Ast.KindAffine
+        | _ -> None
       in
-      if is_owned_affine && not (StringSet.mem name final_moved) then
-        raise (TypeError (fdef.def_loc, Printf.sprintf
-          "affine parameter '%s' is never consumed by this function \
-           (forward it, or take it as `sink` if this function is meant \
-           to be its terminal consumer)" name))
+      match owned_kind with
+      | Some Ast.KindAffine when not (StringSet.mem name final_moved.c_any) ->
+          raise (TypeError (fdef.def_loc, Printf.sprintf
+            "affine parameter '%s' is never consumed by this function \
+             (forward it, or take it as `sink` if this function is meant \
+             to be its terminal consumer)" name))
+      | Some Ast.KindLinear when not (StringSet.mem name final_moved.c_all) ->
+          raise (TypeError (fdef.def_loc, Printf.sprintf
+            "linear parameter '%s' is not consumed on every path of this \
+             function (forward it on every path, or take it as `sink` if \
+             this function is meant to be its terminal consumer)" name))
+      | _ -> ()
     ) fdef.params
   in
   List.iter (function Ast.FuncDef f -> check_affine_func f | _ -> ()) prog;

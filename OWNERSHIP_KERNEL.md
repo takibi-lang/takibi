@@ -87,6 +87,26 @@ Consumption events (same three as affine):
   - passing it to a `sink *L` parameter,
   - returning it (when the function's return type is `*L`).
 
+To be explicit about what IS allowed (review feedback): linear values pass
+through function signatures freely -- taking them as parameters and
+returning them are not restrictions but the very definition of
+consumption. Branching AROUND a linear value is also fine:
+`if (cond) { sink_a(p); } else { sink_b(p); }` satisfies the all-paths
+rule (each path consumes once). What is excluded is branching ON the
+token itself -- its bits (nullness) or its contents (it is opaque). The
+idiom for content-dependent dispatch is a companion plain enum traveling
+beside the obligation (TcpEvent beside PendingTcpEvent): branch on the
+data, discharge the obligation in every arm. When the token itself needs
+to carry data, that is Stage 4's linear variant enums, where `match`
+becomes the fourth consumption event (destructuring consumption, as in
+Rust's match on an owned enum) -- a planned extension of these semantics,
+not a redesign.
+
+Initialization: a linear local must be initialized at its declaration
+(`let p: *L;` with no initializer is an error). This keeps the
+reassignment-discard rule below simple: every linear variable holds a
+live obligation from birth.
+
 The all-paths rule: at the end of the scope that declared it (function
 body, if/else branch, match arm, loop body, block), a linear local must be
 DEFINITELY consumed -- consumed on every path that reaches the scope end.
@@ -112,6 +132,21 @@ numbers per issue #107):
 Loops: identical restriction to affine (a linear value declared outside a
 loop cannot be consumed inside it; declared-and-consumed within one
 iteration is fine, enforced by the loop body being a scope).
+
+Early exits (soundness holes affine tolerates but linear must not --
+found while working out the checker; each control-flow exit needs its own
+check, since the scope-end check only covers falling off the end):
+  - `return` anywhere: every linear variable in scope that is not
+    definitely consumed by that point (other than the value being
+    returned, which the return itself consumes) is an error. Affine's
+    union check silently accepts a return path that leaks; linear cannot.
+  - `break`/`continue`: any linear variable pending (declared, not
+    definitely consumed) at the statement is an error. Deliberately
+    conservative: this also rejects a pending obligation declared OUTSIDE
+    the loop that would have been consumed after it -- v1 does not track
+    loop-boundary ownership precisely; restructure (consume before the
+    loop, or avoid break) if this fires. Documented limitation, revisit
+    only if it bites a real example.
 
 Reassignment: assigning to a variable that holds a NOT-yet-definitely-
 consumed linear value is an error (`assigning over linear value 'x' would
@@ -268,15 +303,21 @@ Drop makes silent discard a feature, the opposite of an obligation).
 Linear Haskell: multiplicity-on-arrows is the closest formal treatment of
 "exactly once", but its laziness interactions are irrelevant here.
 
-## 9. Open questions (for review before implementation)
+## 9. Open questions -- RESOLVED in review (2026-07-13)
 
-1. Keyword: `linear` (this memo) vs something more intention-revealing
-   like `must_use`/`obligation`. `linear` matches the literature and the
-   affine keyword's register; leaning `linear`.
-2. Should `tcp_event_ignored` carry a reason argument (a plain enum) so
-   greps can classify deliberate ignores? Leaning yes but deferring to
-   the application commit.
-3. Does the Stage 1 never-consumed check for linear PARAMETERS (plain
-   `*L` into a callee) reuse affine's existing parameter check as-is
-   (union) or the all-paths rule? Leaning all-paths for consistency --
-   a linear parameter is an accepted obligation.
+1. Keyword: `linear`. Matches the literature, greppable, same register as
+   `affine`.
+2. `tcp_event_ignored` reason argument: REJECTED (user review). A runtime
+   enum nobody reads is dead data; for debugging, a breakpoint on
+   tcp_event_ignored plus the stack trace identifies the call site, and
+   the call site IS the reason. Source-level classification is served by
+   call-site comments. If runtime observability of ignores is ever really
+   needed (e.g. stale-segment counters), that is a separate feature with
+   its own driver.
+3. Linear parameters: all-paths strength confirmed. A function's
+   signature makes a BINARY promise per linear parameter: `borrow` =
+   never consumes, plain/`sink` = consumes on every path. "Conditionally
+   consumes" is deliberately inexpressible -- allowing it would push
+   effect annotations into signatures, the exact ATS2-plumbing slope the
+   tripwire guards against. Same binary Rust uses (by-value always moves,
+   reference never does).

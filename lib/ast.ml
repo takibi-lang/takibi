@@ -136,6 +136,9 @@ type func = {
 }
 [@@deriving show]
 
+type opaque_kind = KindPlain | KindAffine | KindLinear
+[@@deriving show]
+
 type toplevel =
   | FuncDef of func
   | LetDef of ident * type_expr option * expr option * int option * bool * bool * loc
@@ -149,8 +152,12 @@ type toplevel =
   (* extern fn name(params) -> ret; -- body is provided by external assembly *)
   | StructDef of string * (string * type_expr) list * bool * int option
   (* name, fields, is_packed, align_bytes -- align_bytes = Some N means type-level align(N) *)
-  | OpaqueStructDef of string * bool
-  (* name, is_affine -- incomplete nominal type, usable only behind a pointer *)
+  | OpaqueStructDef of string * opaque_kind
+  (* name, kind -- incomplete nominal type, usable only behind a pointer.
+     KindAffine: use at most once, must be consumed on at least one path
+     (union semantics -- see SPEC.md's Affine Types). KindLinear: use
+     exactly once on EVERY path (intersection semantics -- OWNERSHIP_KERNEL.md
+     Stage 1, GitHub issue #117); casting a linear value away is rejected. *)
   | EnumDef of string * type_expr option * (string * int option) list * bool
   (* enum Name: u16 { Variant = val; _; } -- last bool = is_nonexhaustive *)
   | UseDef of string
