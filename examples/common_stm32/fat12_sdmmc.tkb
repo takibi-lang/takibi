@@ -1,0 +1,20 @@
+// Shared FAT12-on-real-SD adapter for STM32 examples.
+//
+// examples/common/fat12.tkb is deliberately backend-agnostic and reaches
+// storage only through mem_block_read/mem_block_write. Every STM32 example
+// that mounts FAT12 on the real SDMMC1 card needs the same thin adapter
+// below, forwarding those calls to examples/common_stm32/sdmmc.tkb.
+
+use "examples/common/fat12.tkb";
+use "examples/common_stm32/sdmmc.tkb";
+
+// buf: *align(32) u8 (GitHub issue #102 Stage 2): disk_read/disk_write no
+// longer stage through a bounce buffer, so callers must pass a PROVEN
+// *align(32) pointer. fat12.tkb's own sector buffers satisfy that.
+fn mem_block_read(sector: u32, buf: *align(32) u8) {
+    disk_read(sector, buf);
+}
+
+fn mem_block_write(sector: u32, buf: *align(32) u8) {
+    disk_write(sector, buf);
+}

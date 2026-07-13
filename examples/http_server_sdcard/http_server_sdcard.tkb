@@ -53,20 +53,8 @@
 
 use "examples/common/inet_checksum.tkb";
 use "examples/common/netutil.tkb";
-use "examples/common/fat12.tkb";
 use "examples/common/http_sdcard_server.tkb";
-use "examples/common_stm32/sdmmc.tkb";
-
-// buf: *align(32) u8 (GitHub issue #102 Stage 2): disk_read no longer
-// stages through a bounce buffer -- see examples/fatfs_sdcard/
-// fatfs_sdcard.tkb's identical adapter for the full reasoning.
-fn mem_block_read(sector: u32, buf: *align(32) u8) {
-    disk_read(sector, buf);
-}
-
-fn mem_block_write(sector: u32, buf: *align(32) u8) {
-    disk_write(sector, buf);
-}
+use "examples/common_stm32/fat12_sdmmc.tkb";
 
 let mut our_mac: [u8; 6];
 let mut our_ip:  [u8; 4];

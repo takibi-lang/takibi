@@ -655,12 +655,13 @@ examples/rtos_demo/rtos_demo_stm32.o: examples/rtos_demo/rtos_demo.tkb $(COMMON_
 
 COMMON_STM32_SDMMC := $(COMMON_STM32_DIR)/sdmmc.tkb
 COMMON_STM32_ETH_SDMMC_REGS := $(COMMON_STM32_DIR)/eth_sdmmc_regs.tkb
+COMMON_STM32_FAT12_SDMMC := $(COMMON_STM32_DIR)/fat12_sdmmc.tkb
 
 # rtos_fatfs_sdcard: STM32-only SD/FAT worker task, combining common/rtos.tkb
 # with fat12.tkb and the real SDMMC1 driver. Like rtos_demo it needs the
 # target-specific scheduler.tkb on the command line; like fatfs_sdcard it
-# reaches sdmmc.tkb through its own use declaration.
-examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard_stm32.o: examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_FAT12) $(COMMON_NETUTIL) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(TAKIBI)
+# reaches sdmmc.tkb through the shared fat12_sdmmc.tkb adapter.
+examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard_stm32.o: examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_FAT12) $(COMMON_NETUTIL) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # fatfs: `use`s fat12.tkb (which itself `use`s netutil.tkb) directly, needs
@@ -758,22 +759,22 @@ examples/sdcard/sdcard_stm32.o: examples/sdcard/sdcard.tkb $(COMMON_STM32_UART) 
 
 # fatfs_sdcard: GitHub issue #98, wires fat12.tkb's FAT12 logic (issue #61)
 # onto sdmmc.tkb's real SD card driver (issue #62) -- see fatfs_sdcard.tkb's
-# own header comment. `use`s both fat12.tkb and sdmmc.tkb itself, so only
-# uart+print need to be on the command line; the other two are listed here
-# purely for Make's own staleness tracking. STM32-only, same reasoning as
-# sdcard (no virtual SD controller in this project's QEMU setup).
+# own header comment. `use`s the shared fat12_sdmmc.tkb adapter, so only
+# uart+print need to be on the command line; the storage/FAT files are listed
+# here purely for Make's own staleness tracking. STM32-only, same reasoning
+# as sdcard (no virtual SD controller in this project's QEMU setup).
 # --forbid-trap enabled, same milestone-wide reason as examples/fatfs and
 # examples/sdcard.
-examples/fatfs_sdcard/fatfs_sdcard_stm32.o: examples/fatfs_sdcard/fatfs_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SDMMC) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
+examples/fatfs_sdcard/fatfs_sdcard_stm32.o: examples/fatfs_sdcard/fatfs_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SDMMC) $(COMMON_FAT12) $(COMMON_NETUTIL) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # http_server_sdcard: GitHub issue #97, combines http_server.tkb's TCP/IP +
 # HTTP state machine with fatfs_sdcard.tkb's real SD card access -- see
-# http_server_sdcard.tkb's own header comment. `use`s fat12.tkb and
-# sdmmc.tkb itself (same pattern as fatfs_sdcard.tkb), so only
-# uart+print+eth need to be on the command line; the rest are listed here
-# purely for Make's own staleness tracking. STM32-only (no virtual SD
-# controller under QEMU, same reasoning as fatfs_sdcard/sdcard).
+# http_server_sdcard.tkb's own header comment. `use`s fat12_sdmmc.tkb for the
+# FAT12/SDMMC storage boundary, so only uart+print+eth need to be on the
+# command line; the rest are listed here purely for Make's own staleness
+# tracking. STM32-only (no virtual SD controller under QEMU, same reasoning
+# as fatfs_sdcard/sdcard).
 #
 # --forbid-trap enabled: this file and the installer below were first
 # built and verified against real hardware WITHOUT --forbid-trap (see
@@ -781,20 +782,20 @@ examples/fatfs_sdcard/fatfs_sdcard_stm32.o: examples/fatfs_sdcard/fatfs_sdcard.t
 # pass once the whole milestone worked end to end -- see
 # http_server_sdcard.tkb's own header comment for what --forbid-trap did
 # and did not flag.
-examples/http_server_sdcard/http_server_sdcard_stm32.o: examples/http_server_sdcard/http_server_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(TAKIBI)
+examples/http_server_sdcard/http_server_sdcard_stm32.o: examples/http_server_sdcard/http_server_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
-examples/http_server_sdcard/http_server_sdcard_stm32.debug.o: examples/http_server_sdcard/http_server_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(TAKIBI)
+examples/http_server_sdcard/http_server_sdcard_stm32.debug.o: examples/http_server_sdcard/http_server_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -g -o $@ --forbid-trap
 
 # http_server_sdcard_rtos: same HTTP+SD server as http_server_sdcard, but
 # SD/FAT operations run behind a Simple RTOS worker task. It needs both
 # target-specific Ethernet and scheduler implementations on the command
 # line, and links with sem_asm.o via its explicit RAM target above.
-examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(TAKIBI)
+examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
-examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.debug.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(TAKIBI)
+examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.debug.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -g -o $@ --forbid-trap
 
 # http_server_sdcard_install: provisioning-only helper (make hwcheck-net,
