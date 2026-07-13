@@ -66,7 +66,7 @@ def fetch(path: str) -> tuple:
     try:
         conn.request("GET", path)
         resp = conn.getresponse()
-        body = resp.read().decode("us-ascii")
+        body = resp.read()
         return resp.status, resp.getheader("Content-Type"), body
     finally:
         conn.close()
@@ -85,7 +85,7 @@ def fetch_with_retry(path: str) -> tuple:
     raise last_err
 
 
-def check_path(path: str, expected: str) -> bool:
+def check_path(path: str, expected: bytes, content_type: str) -> bool:
     try:
         status, ctype, body = fetch_with_retry(path)
     except OSError as e:
@@ -94,7 +94,7 @@ def check_path(path: str, expected: str) -> bool:
 
     ok = (
         status == 200 and
-        ctype is not None and ctype.startswith("text/html") and
+        ctype is not None and ctype.startswith(content_type) and
         body == expected
     )
     print("  GET %s returns real SD card content: %s" %
@@ -108,16 +108,19 @@ def check_path(path: str, expected: str) -> bool:
 
 def main() -> int:
     try:
-        with open(os.path.join(CONTENT_DIR, "INDEX.HTM"), encoding="ascii") as f:
+        with open(os.path.join(CONTENT_DIR, "INDEX.HTM"), "rb") as f:
             index_expected = f.read()
-        with open(os.path.join(CONTENT_DIR, "ABOUT.HTM"), encoding="ascii") as f:
+        with open(os.path.join(CONTENT_DIR, "ABOUT.HTM"), "rb") as f:
             about_expected = f.read()
+        with open(os.path.join(CONTENT_DIR, "ICON.PNG"), "rb") as f:
+            icon_expected = f.read()
     except OSError as e:
         print(f"  failed to read SD card content directory {CONTENT_DIR!r}: {e}")
         return 1
 
-    ok = check_path("/", index_expected)
-    ok = check_path("/ABOUT.HTM", about_expected) and ok
+    ok = check_path("/", index_expected, "text/html")
+    ok = check_path("/ABOUT.HTM", about_expected, "text/html") and ok
+    ok = check_path("/ICON.PNG", icon_expected, "image/png") and ok
     return 0 if ok else 1
 
 

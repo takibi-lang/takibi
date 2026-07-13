@@ -344,6 +344,77 @@ fn fat_find_entry(name83: *u8) -> i32 {
     return -1;
 }
 
+fn fat_file_exists(name83: *u8) -> bool {
+    return fat_find_entry(name83) >= 0;
+}
+
+fn fat_file_size(name83: *u8) -> u32 {
+    let found: i32 = fat_find_entry(name83);
+    if ((found >= 0) && (found < 16)) {
+        let idx: usize = found as usize;
+        return root_dir_buf[idx].file_size;
+    }
+    return 0;
+}
+
+// Random-position read helper for HTTP multi-segment serving. This keeps
+// the normal FatFile affine API sequential, while avoiding an O(n^2)
+// "reopen and read-discard from byte 0" loop when a large response is sent
+// one TCP segment at a time.
+fn fat_read_at(name83: *u8, off: u32, buf: *u8, btr: u32, br: *u32) -> i32 {
+    let found: i32 = fat_find_entry(name83);
+    if ((found >= 0) && (found < 16)) {
+        let idx: usize = found as usize;
+        let fsize: u32 = root_dir_buf[idx].file_size;
+        if (off >= fsize) {
+            *br = 0;
+            return 0;
+        }
+
+        let mut remaining: u32 = btr;
+        let avail: u32 = fsize - off;
+        if (remaining > avail) {
+            remaining = avail;
+        }
+
+        let mut cluster: u32 = root_dir_buf[idx].first_cluster_lo as u32;
+        let skip_clusters: u32 = off / (SECTOR_SIZE as u32);
+        for i: u32 in 0..<skip_clusters {
+            cluster = fat_get_entry(cluster) as u32;
+        }
+
+        let mut pos_in_cluster: u32 = off - skip_clusters * (SECTOR_SIZE as u32);
+        let mut total: u32 = 0;
+        let mut dst: *u8 = buf;
+        while (remaining > 0) {
+            let mut sector_buf: [u8; SECTOR_SIZE] align(32);
+            let sector_num: u32 = (first_data_sector() as u32) + (cluster - 2);
+            mem_block_read(sector_num, sector_buf);
+
+            let space_in_cluster: u32 = (SECTOR_SIZE as u32) - pos_in_cluster;
+            let mut chunk: u32 = remaining;
+            if (chunk > space_in_cluster) {
+                chunk = space_in_cluster;
+            }
+
+            let src_p: *u8 = sector_buf;
+            bytes_copy(dst, src_p + (pos_in_cluster as isize), chunk as isize);
+            dst = dst + (chunk as isize);
+            total = total + chunk;
+            remaining = remaining - chunk;
+            pos_in_cluster = pos_in_cluster + chunk;
+            if (pos_in_cluster >= SECTOR_SIZE as u32) {
+                pos_in_cluster = 0;
+                cluster = fat_get_entry(cluster) as u32;
+            }
+        }
+        *br = total;
+        return 0;
+    }
+    *br = 0;
+    return -1;
+}
+
 // mode is FA_READ, or (FA_WRITE | FA_CREATE_ALWAYS) -- no other combination
 // is supported (no FA_OPEN_ALWAYS/FA_OPEN_APPEND -- always create-and-
 // truncate for writing, matching what this demo's two call sites need).

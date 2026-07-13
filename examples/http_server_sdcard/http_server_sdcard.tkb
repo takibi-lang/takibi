@@ -11,16 +11,15 @@
 //
 // STAGE 2 SCOPE: GET / maps to INDEX.HTM, and simple single-component
 // 8.3 paths such as /ABOUT.HTM map to their corresponding FAT12 names.
-// Directory listings, long filenames, nested paths, and large multi-
-// segment responses remain out of scope.
+// Directory listings, long filenames, and nested paths remain out of
+// scope. Larger files are sent as multiple TCP segments, one chunk per
+// client ACK, still with one connection at a time and Connection: close.
 //
-// Explicitly OUT OF SCOPE for this milestone (see design discussion):
-// images/binary content. This file's TCP layer (inherited unchanged from
-// http_server.tkb) replies in exactly ONE TCP segment / one Ethernet frame
-// -- no fragmentation or multi-segment TX exists yet -- so response bodies
-// stay small text, capped by HTTP_MAX_PAYLOAD same as before. Serving
-// larger files needs multi-segment TX, which is real, separate work left
-// for a future issue.
+// Multi-segment scope: still one TCP connection at a time and still
+// HTTP/1.1 Connection: close, but a response body may span multiple TCP
+// segments. The server sends headers plus the first chunk immediately,
+// then sends each later chunk only after the previous segment is ACKed.
+// FIN is attached to the final chunk.
 //
 // SD card provisioning is fully automated, no human touches the card:
 // examples/http_server_sdcard_install/http_server_sdcard_install.tkb
@@ -90,6 +89,7 @@ enum ConnState: u8 {
     Listen;
     SynRcvd;
     Established;
+    Sending;
     LastAck;
 }
 
@@ -99,38 +99,34 @@ let mut conn_remote_port: u16 = 0;
 let mut conn_snd_nxt:     u32 = 0;
 let mut conn_rcv_nxt:     u32 = 0;
 
-// Staging buffer for the response body -- read fresh from the SD card on
-// every request (see build_body_from_sdcard), then copied after the
-// headers into the reply segment (see build_http_response_fin).
+// Staging buffer for short error bodies. Normal file responses are read
+// directly from the SD card into each outgoing TCP payload chunk.
 let mut html_body: [u8; 512];
+let mut resp_name83: [u8; 11];
+let mut resp_size: u32 = 0;
+let mut resp_sent: u32 = 0;
+let mut resp_content_type: i32 = 0;
 
-// Safe upper bound on the total reply payload (headers + body), checked
-// explicitly in build_http_response_fin before anything downstream trusts
-// it -- same mechanism as http_server.tkb's own HTTP_MAX_PAYLOAD. Headers
-// here are shorter (no request counter to print), so 512 (matching
-// html_body's own size, the real limiting factor) plus a comfortable
-// headers margin is enough.
-let HTTP_MAX_PAYLOAD: i32 = 700;
+let RESP_TYPE_HTML: i32 = 1;
+let RESP_TYPE_PNG: i32 = 2;
+let HTTP_SEGMENT_PAYLOAD_MAX: i32 = 1000;
 
-// Reads the requested 8.3 path fresh from the real SD card into html_body.
-// Unsupported paths and FAT12 failures fall back to short in-memory
-// messages so the HTTP server still answers deterministically.
-fn build_body_from_sdcard(req: *u8, req_len: isize) -> isize {
-    let mut name83: [u8; 11];
-    if (http_request_path_to_name83(req, req_len, name83) == false) {
-        let msg: *u8 = "400: unsupported path\n";
-        return copy_str(html_body, msg);
+fn content_type_for_name83(name83: *u8) -> i32 {
+    if (name83[8] == 'P' as u8 && name83[9] == 'N' as u8 &&
+        name83[10] == 'G' as u8) {
+        return RESP_TYPE_PNG;
     }
+    return RESP_TYPE_HTML;
+}
 
-    let fp: *FatFile = fat_open(name83, FA_READ);
-    if ((fp as usize) == 0) {
-        let msg: *u8 = "404: file not found on SD card.\n";
-        return copy_str(html_body, msg);
-    }
-    let mut br: u32 = 0;
-    fat_read(fp, html_body, 512, &br);
-    fat_close(fp);
-    return br as isize;
+fn copy_response_name(name83: *u8) {
+    bytes_copy(resp_name83, name83, 11);
+}
+
+fn read_file_chunk(name83: *u8, off: u32, dst: *u8, want: u32) -> u32 {
+    let mut got: u32 = 0;
+    fat_read_at(name83, off, dst, want, &got);
+    return got;
 }
 
 // Rewrites a received ARP request into a reply in place. Identical to
@@ -221,29 +217,11 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     fix_tcp_checksum(ip, tcp);
 }
 
-// Builds "HTTP/1.1 200 OK ... <file bytes>" into the payload area
-// (overwriting the request that was there), combined with our own FIN --
-// same structure as http_server.tkb's build_http_response_fin, except the
-// body comes from build_body_from_sdcard() (real SD card bytes) instead of
-// a templated HTML page.
-fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16},
-                           req: *u8, req_len: u16) -> i32 {
-    let body_len: isize = build_body_from_sdcard(req, req_len as isize);
-
-    let payload: *u8 = (eth as *u8) + 54;
-    let mut len: isize = 0;
-    len = len + copy_str(payload + len,
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=us-ascii\r\nContent-Length: ");
-    len = len + write_udec(payload + len, body_len as i32);
-    len = len + copy_str(payload + len, "\r\nConnection: close\r\n\r\n");
-    bytes_copy(payload + len, html_body as *u8, body_len);
-    len = len + body_len;
-
+fn build_tcp_payload(eth: [u8; 1514..], ihl: {20..<21 as u16},
+                     len: isize, tcp_flags: u8) -> i32 {
     let wire_len: i32 = len as i32;
-    if (len >= 0 && len <= (HTTP_MAX_PAYLOAD as isize)
-        && wire_len >= 0 && wire_len <= HTTP_MAX_PAYLOAD) {
-        // Snapshot into an immutable local -- see http_server.tkb's
-        // identical comment for why this matters for narrowing.
+    if (len >= 0 && len <= (HTTP_SEGMENT_PAYLOAD_MAX as isize)
+        && wire_len >= 0 && wire_len <= HTTP_SEGMENT_PAYLOAD_MAX) {
         let n: i32 = wire_len;
         let n_idx: usize = n as usize;
 
@@ -267,7 +245,7 @@ fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16},
         write_u32be(tcp_seg[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
         write_u32be(tcp_seg[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
         tcp_seg[TCP_DATA_OFFSET] = (5 << 4) as u8;
-        tcp_seg[TCP_FLAGS] = TCP_FLAG_ACK | TCP_FLAG_PSH | TCP_FLAG_FIN;
+        tcp_seg[TCP_FLAGS] = tcp_flags;
         write_u16be(tcp_seg[TCP_WINDOW..<TCP_CHECKSUM], 65535);
         write_u16be(tcp_seg[TCP_URGENT..<20], 0);
 
@@ -275,6 +253,76 @@ fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16},
         return n;
     }
     return -1;
+}
+
+fn build_error_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16},
+                            msg: *u8) -> i32 {
+    let body_len: isize = copy_str(html_body, msg);
+    let payload: *u8 = (eth as *u8) + 54;
+    let mut len: isize = 0;
+    len = len + copy_str(payload + len,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=us-ascii\r\nContent-Length: ");
+    len = len + write_udec(payload + len, body_len as i32);
+    len = len + copy_str(payload + len, "\r\nConnection: close\r\n\r\n");
+    bytes_copy(payload + len, html_body as *u8, body_len);
+    len = len + body_len;
+    return build_tcp_payload(eth, ihl, len, TCP_FLAG_ACK | TCP_FLAG_PSH | TCP_FLAG_FIN);
+}
+
+fn build_response_segment(eth: [u8; 1514..], ihl: {20..<21 as u16},
+                          first: bool) -> i32 {
+    let payload: *u8 = (eth as *u8) + 54;
+    let mut len: isize = 0;
+    if (first) {
+        len = len + copy_str(payload + len,
+            "HTTP/1.1 200 OK\r\nContent-Type: ");
+        if (resp_content_type == RESP_TYPE_PNG) {
+            len = len + copy_str(payload + len, "image/png");
+        } else {
+            len = len + copy_str(payload + len, "text/html; charset=us-ascii");
+        }
+        len = len + copy_str(payload + len, "\r\nContent-Length: ");
+        len = len + write_udec(payload + len, resp_size as i32);
+        len = len + copy_str(payload + len, "\r\nConnection: close\r\n\r\n");
+    }
+
+    let room: u32 = (HTTP_SEGMENT_PAYLOAD_MAX as u32) - (len as u32);
+    let mut want: u32 = resp_size - resp_sent;
+    if (want > room) {
+        want = room;
+    }
+    let got: u32 = read_file_chunk(resp_name83, resp_sent, payload + len, want);
+    len = len + (got as isize);
+    resp_sent = resp_sent + got;
+
+    let mut flags: u8 = TCP_FLAG_ACK | TCP_FLAG_PSH;
+    if (resp_sent >= resp_size) {
+        flags = flags | TCP_FLAG_FIN;
+    }
+    return build_tcp_payload(eth, ihl, len, flags);
+}
+
+fn start_http_response(eth: [u8; 1514..], ihl: {20..<21 as u16},
+                       req: *u8, req_len: u16) -> i32 {
+    let mut name83: [u8; 11];
+    if (http_request_path_to_name83(req, req_len as isize, name83) == false) {
+        let msg: *u8 = "400: unsupported path\n";
+        resp_size = 0;
+        resp_sent = 0;
+        return build_error_response_fin(eth, ihl, msg);
+    }
+    if (fat_file_exists(name83) == false) {
+        let msg: *u8 = "404: file not found on SD card.\n";
+        resp_size = 0;
+        resp_sent = 0;
+        return build_error_response_fin(eth, ihl, msg);
+    }
+
+    copy_response_name(name83);
+    resp_size = fat_file_size(name83);
+    resp_sent = 0;
+    resp_content_type = content_type_for_name83(name83);
+    return build_response_segment(eth, ihl, true);
 }
 
 fn app_main() {
@@ -409,18 +457,36 @@ fn app_main() {
                                                             let req: *u8 =
                                                                 (frame as *u8) + (data_off_idx as isize);
                                                             let payload_len: i32 =
-                                                                build_http_response_fin(frame, ihl, req, data_len);
+                                                                start_http_response(frame, ihl, req, data_len);
                                                             if (payload_len >= 0) {
                                                                 should_tx = 1;
                                                                 tx_len = 14 + (ihl as i32) + 20 + payload_len;
-                                                                conn_snd_nxt = conn_snd_nxt + (payload_len as u32) + 1;
+                                                                conn_snd_nxt = conn_snd_nxt + (payload_len as u32);
+                                                                if (resp_sent >= resp_size) {
+                                                                    conn_snd_nxt = conn_snd_nxt + 1;
+                                                                    conn_state = ConnState::LastAck;
+                                                                } else {
+                                                                    conn_state = ConnState::Sending;
+                                                                }
+                                                            }
+                                                            // else: drop the reply and stay
+                                                            // ESTABLISHED so the client's TCP
+                                                            // stack can retry.
+                                                        }
+                                                    }
+                                                } else if (conn_state == ConnState::Sending) {
+                                                    if ((flags & TCP_FLAG_ACK) != 0 &&
+                                                        seq == conn_rcv_nxt && ack == conn_snd_nxt) {
+                                                        let payload_len: i32 =
+                                                            build_response_segment(frame, ihl, false);
+                                                        if (payload_len >= 0) {
+                                                            should_tx = 1;
+                                                            tx_len = 14 + (ihl as i32) + 20 + payload_len;
+                                                            conn_snd_nxt = conn_snd_nxt + (payload_len as u32);
+                                                            if (resp_sent >= resp_size) {
+                                                                conn_snd_nxt = conn_snd_nxt + 1;
                                                                 conn_state = ConnState::LastAck;
                                                             }
-                                                            // else: page unexpectedly
-                                                            // exceeded HTTP_MAX_PAYLOAD --
-                                                            // drop the reply and stay
-                                                            // ESTABLISHED so the client's
-                                                            // TCP stack can retry.
                                                         }
                                                     }
                                                 } else if (conn_state == ConnState::LastAck) {
