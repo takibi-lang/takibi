@@ -133,14 +133,18 @@ item:
     { ExternFuncDef ($3, $5, Some $8) }
   | struct_intro LBRACE struct_fields RBRACE
     { let (name, is_packed, align_opt) = $1 in
-      Type_layout.finish_struct name $3 is_packed align_opt;
-      StructDef (name, $3, is_packed, align_opt) }
-  | OPAQUE STRUCT IDENT SEMI
-    { OpaqueStructDef ($3, KindPlain) }
-  | AFFINE OPAQUE STRUCT IDENT SEMI
-    { OpaqueStructDef ($4, KindAffine) }
-  | LINEAR OPAQUE STRUCT IDENT SEMI
-    { OpaqueStructDef ($4, KindLinear) }
+      let fields = List.map (fun (fname, ty, _) -> (fname, ty)) $3 in
+      let private_fields =
+        List.filter_map (fun (fname, _, is_priv) ->
+          if is_priv then Some fname else None) $3 in
+      Type_layout.finish_struct name fields is_packed align_opt;
+      StructDef (name, fields, is_packed, align_opt, private_fields, $symbolstartpos) }
+  | p = private_flag OPAQUE STRUCT IDENT SEMI
+    { OpaqueStructDef ($4, KindPlain, p, $symbolstartpos) }
+  | p = private_flag AFFINE OPAQUE STRUCT IDENT SEMI
+    { OpaqueStructDef ($5, KindAffine, p, $symbolstartpos) }
+  | p = private_flag LINEAR OPAQUE STRUCT IDENT SEMI
+    { OpaqueStructDef ($5, KindLinear, p, $symbolstartpos) }
   | ENUM IDENT COLON base_type_expr LBRACE enum_variants RBRACE
     { let (vs, ne) = $6 in
       Type_layout.register_enum $2 $4;
@@ -170,7 +174,8 @@ struct_intro:
 
 struct_fields:
   | /* empty */ { [] }
-  | IDENT COLON type_expr SEMI struct_fields { ($1, $3) :: $5 }
+  | IDENT COLON type_expr SEMI struct_fields { ($1, $3, false) :: $5 }
+  | PRIVATE IDENT COLON type_expr SEMI struct_fields { ($2, $4, true) :: $6 }
 
 enum_variants:
   | /* empty */                         { ([], false) }

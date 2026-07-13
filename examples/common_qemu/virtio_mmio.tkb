@@ -56,7 +56,7 @@ let VIRTIO_MMIO_FIRST_SPI: i32 = 48;
 
 let QNUM: isize = 8; // virtqueue depth for both the RX and TX queues
 
-affine opaque struct NetRxCpuOwned;
+private affine opaque struct NetRxCpuOwned;
 let mut net_rx_token_storage: u8;
 let mut net_rx_acquired_len: i32;
 

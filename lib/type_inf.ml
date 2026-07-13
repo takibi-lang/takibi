@@ -491,6 +491,76 @@ let check_private_global_access (use_loc : Ast.loc) (name : string) : unit =
          from that same file" name decl_file))
   | _ -> ()
 
+(* OWNERSHIP_KERNEL.md Stage 2 (GitHub issue #108) tables, populated once
+   per infer_program run, same discipline as private_globals above. *)
+
+(* `private ... opaque struct` name -> declaring file. Construction (any
+   cast whose TARGET type mentions the name) is declaring-file-only;
+   naming the type in annotations stays legal everywhere, so values can
+   still be held and passed around outside -- they just cannot be
+   conjured there. *)
+let private_opaque_types : (string, string) Hashtbl.t = Hashtbl.create 8
+
+(* (struct name, private field name) -> declaring file. *)
+let private_struct_fields : (string * string, string) Hashtbl.t = Hashtbl.create 8
+
+(* struct name -> declaring file, present iff the struct has at least one
+   private field: constructing such a struct via a struct literal writes
+   every field, private ones included, so the literal itself is
+   declaring-file-only (this is what makes smart constructors real). *)
+let private_struct_lit : (string, string) Hashtbl.t = Hashtbl.create 8
+
+(* Every opaque struct name of any kind, for the pointer-arithmetic
+   completeness check (Stage 2 Part C): arithmetic on a pointer needs the
+   pointee's size, which an opaque (incomplete) type does not have. Found
+   via a user-review probe: `t + 1` on an affine handle passed BOTH type
+   inference and kind checking (BinOp operands are non-consuming, so the
+   result was a second tracked value conjured without consuming the
+   first) and died only as an invalid-LLVM-IR internal error. *)
+let opaque_struct_names_all = ref StringSet.empty
+
+let check_private_type_construction (loc : Ast.loc) (target : Ast.type_expr) =
+  let rec walk = function
+    | Ast.TypeNamed n ->
+        (match Hashtbl.find_opt private_opaque_types n with
+         | Some file when file <> loc.Lexing.pos_fname ->
+             raise (TypeError (loc, Printf.sprintf
+               "cannot construct a value of private type '%s' outside its \
+                declaring file '%s' (that file's functions are the only \
+                legal source)" n file))
+         | _ -> ())
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> walk t
+    | _ -> ()
+  in
+  walk target
+
+let check_private_field_access (loc : Ast.loc) (sname : string) (fname : string) =
+  match Hashtbl.find_opt private_struct_fields (sname, fname) with
+  | Some file when file <> loc.Lexing.pos_fname ->
+      raise (TypeError (loc, Printf.sprintf
+        "field '%s.%s' is private to '%s'; go through that file's accessor \
+         functions" sname fname file))
+  | _ -> ()
+
+let check_private_struct_literal (loc : Ast.loc) (sname : string) =
+  match Hashtbl.find_opt private_struct_lit sname with
+  | Some file when file <> loc.Lexing.pos_fname ->
+      raise (TypeError (loc, Printf.sprintf
+        "cannot construct struct '%s' with a literal outside '%s': it has \
+         private fields (use that file's constructor functions)" sname file))
+  | _ -> ()
+
+let check_ptr_arith_complete (loc : Ast.loc) (t : ty) =
+  match repr t with
+  | TPtr (TStruct n) | TAlignedPtr (_, TStruct n)
+    when StringSet.mem n !opaque_struct_names_all ->
+      raise (TypeError (loc, Printf.sprintf
+        "pointer arithmetic/indexing on '*%s' is not allowed: '%s' is an \
+         opaque (incomplete) type with no size" n n))
+  | _ -> ()
+
 let rec gcd a b = if b = 0 then abs a else gcd b (a mod b)
 
 (* Is this integer expression PROVABLY a multiple of some compile-time-
@@ -583,6 +653,24 @@ let check_linear_cast_away loc (src_ty : ty) =
       raise (TypeError (loc, Printf.sprintf
         "cannot cast a linear value (*%s) to anything: casting away would \
          silently discard its obligation" sname))
+  | _ -> ()
+
+(* OWNERSHIP_KERNEL.md Stage 2 Part C (GitHub issue #15 direction):
+   casting an AFFINE handle to another POINTER type launders it out of
+   kind tracking into a differently-typed alias, so it must be visibly
+   marked with `unsafe { ... }`. The `t as usize` null-check idiom stays
+   ungated: it reads bits and aliases nothing usable (re-minting the bits
+   into a handle is construction, gated separately), and it is the
+   codebase's sanctioned Option encoding until issue #20 -- see the memo's
+   recorded ratchet for banning it then. Linear values already reject
+   every cast (check_linear_cast_away above), so this is affine-only. *)
+let check_affine_ptr_launder loc (src_ty : ty) (target : Ast.type_expr) =
+  match repr src_ty, target with
+  | TPtr (TStruct sname), (Ast.TypePtr _ | Ast.TypeAlignedPtr _)
+    when StringSet.mem sname !affine_opaque_names && !unsafe_depth = 0 ->
+      raise (TypeError (loc, Printf.sprintf
+        "casting an affine handle (*%s) to another pointer type launders it \
+         out of tracking; write `unsafe { ... }` to mark it" sname))
   | _ -> ()
 
 (* GitHub issue #102: casting an INTEGER expression to *align(N) T requires
@@ -679,9 +767,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                       | Some k when k mod n = 0 -> TAlignedPtr (n, elem)
                       | _ -> TPtr elem)
             | TPtr _, _ ->
+                check_ptr_arith_complete e.loc t1;
                 unify_at e2.loc t2 TIsize;
                 t1
             | _, TPtr _ ->
+                check_ptr_arith_complete e.loc t2;
                 unify_at e1.loc t1 TIsize;
                 t2
             | TRefinedInt (a, b, base1), TRefinedInt (c, d, base2) ->
@@ -728,6 +818,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                    the "aligned_ptr - offset" case below, since that case's
                    own pattern (TAlignedPtr, _) would otherwise also match
                    a pointer second operand. *)
+                check_ptr_arith_complete e.loc t1;
+                check_ptr_arith_complete e.loc t2;
                 unify_at e.loc inner1 inner2;
                 TIsize
             | TAlignedPtr (n, elem), _ ->
@@ -741,6 +833,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                       | Some k when k mod n = 0 -> TAlignedPtr (n, elem)
                       | _ -> TPtr elem)
             | TPtr _, _ ->
+                check_ptr_arith_complete e.loc t1;
                 unify_at e2.loc t2 TIsize;
                 t1
             | TRefinedInt (a, b, base), _ ->
@@ -874,6 +967,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              | None -> raise (TypeError (e.loc,
                  Printf.sprintf "unknown struct type '%s'" sname))
            in
+           check_private_field_access e.loc sname fname;
            (match List.assoc_opt fname fields with
             | Some ft -> TPtr (of_ast ft)
             | None -> raise (TypeError (e.loc,
@@ -883,6 +977,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | Cast (target_ty, e) ->
       let src_ty = infer_expr senv eenv tyenv fenv e in
       check_linear_cast_away e.loc src_ty;
+      check_affine_ptr_launder e.loc src_ty target_ty;
+      check_private_type_construction e.loc target_ty;
       let src_enum = match repr src_ty with
         | TStruct sn when StringMap.mem sn eenv -> Some sn
         | _ -> None
@@ -1127,6 +1223,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             raise (TypeError (e.loc,
               Printf.sprintf "unknown struct type '%s'" sname))
       in
+      check_private_field_access e.loc sname fname;
       (match List.assoc_opt fname fields with
        | Some ft ->
            (match of_ast ft with
@@ -1166,6 +1263,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            elem  (* runtime length; codegen elides the check
                     only when idx's range fits the MINIMUM *)
        | TPtr   elem      ->
+           check_ptr_arith_complete e.loc (repr vt);
            require_isize_offset idx.loc it;
            strip_io elem     (* *T or *io T -> returns T (bounds unknown) *)
        | TAlignedPtr (_, elem) ->
@@ -1173,6 +1271,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               (un)checked as indexing a plain one -- alignment says nothing
               about how many elements are actually there, so this does not
               itself prove anything about the index. *)
+           check_ptr_arith_complete e.loc (repr vt);
            require_isize_offset idx.loc it;
            strip_io elem
        | _ -> raise (TypeError (e.loc,
@@ -1410,6 +1509,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ ->
            raise (TypeError (e.loc, "offsetof requires a named struct type")))
       in
+      check_private_field_access e.loc sname field;
       (* Same GitHub issue #77 fix as SizeOf above -- see const_field_offset's
          comment for the exact scope (packed, no align(N)). *)
       (match const_field_offset senv sname field with
@@ -1657,6 +1757,7 @@ let rec check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : unit =
         | None -> raise (TypeError (e.loc,
             Printf.sprintf "unknown struct type '%s'" sname))
       in
+      check_private_struct_literal e.loc sname;
       if List.length fields <> List.length exprs then
         raise (TypeError (e.loc, Printf.sprintf
           "struct '%s' has %d fields but literal has %d values"
@@ -1896,8 +1997,12 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
              | _ -> ());
             elem
         | TSlice (elem, _) -> require_usize_index idx.loc it; elem
-        | TPtr   elem      -> require_isize_offset idx.loc it; strip_io elem
-        | TAlignedPtr (_, elem) -> require_isize_offset idx.loc it; strip_io elem
+        | TPtr   elem      ->
+            check_ptr_arith_complete s.loc (repr vt);
+            require_isize_offset idx.loc it; strip_io elem
+        | TAlignedPtr (_, elem) ->
+            check_ptr_arith_complete s.loc (repr vt);
+            require_isize_offset idx.loc it; strip_io elem
         | _ -> raise (TypeError (s.loc,
             Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))
       in
@@ -1927,6 +2032,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
             raise (TypeError (s.loc,
               Printf.sprintf "unknown struct type '%s'" sname))
       in
+      check_private_field_access s.loc sname fname;
       let field_ty = match List.assoc_opt fname fields with
         | Some ft -> of_ast ft
         | None ->
@@ -2376,22 +2482,22 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.FuncDef fdef          -> claim_toplevel_name fdef.name "function"
     | Ast.ExternFuncDef (n, _, _) -> claim_toplevel_name n "function"
     | Ast.LetDef (n, _, _, _, _, _, _)  -> claim_toplevel_name n "global"
-    | Ast.StructDef (n, _, _, _)  -> claim_toplevel_name n "struct"
-    | Ast.OpaqueStructDef (n, _)  -> claim_toplevel_name n "struct"
+    | Ast.StructDef (n, _, _, _, _, _)  -> claim_toplevel_name n "struct"
+    | Ast.OpaqueStructDef (n, _, _, _)  -> claim_toplevel_name n "struct"
     | Ast.EnumDef (n, _, _, _)    -> claim_toplevel_name n "enum"
     | Ast.UseDef _              -> ()
   ) prog;
   let opaque_names = List.fold_left (fun names -> function
-    | Ast.OpaqueStructDef (name, _) -> StringSet.add name names
+    | Ast.OpaqueStructDef (name, _, _, _) -> StringSet.add name names
     | _ -> names
   ) StringSet.empty prog in
   let affine_names = List.fold_left (fun names -> function
-    | Ast.OpaqueStructDef (name, Ast.KindAffine) -> StringSet.add name names
+    | Ast.OpaqueStructDef (name, Ast.KindAffine, _, _) -> StringSet.add name names
     | _ -> names
   ) StringSet.empty prog in
   affine_opaque_names := affine_names;
   let linear_names = List.fold_left (fun names -> function
-    | Ast.OpaqueStructDef (name, Ast.KindLinear) -> StringSet.add name names
+    | Ast.OpaqueStructDef (name, Ast.KindLinear, _, _) -> StringSet.add name names
     | _ -> names
   ) StringSet.empty prog in
   linear_opaque_names := linear_names;
@@ -2403,6 +2509,20 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   List.iter (function
     | Ast.LetDef (name, _, _, _, _, true, loc) ->
         Hashtbl.replace private_globals name loc.Lexing.pos_fname
+    | _ -> ()
+  ) prog;
+  opaque_struct_names_all := opaque_names;
+  Hashtbl.reset private_opaque_types;
+  Hashtbl.reset private_struct_fields;
+  Hashtbl.reset private_struct_lit;
+  List.iter (function
+    | Ast.OpaqueStructDef (name, _, true, loc) ->
+        Hashtbl.replace private_opaque_types name loc.Lexing.pos_fname
+    | Ast.StructDef (sname, _, _, _, privs, loc) when privs <> [] ->
+        Hashtbl.replace private_struct_lit sname loc.Lexing.pos_fname;
+        List.iter (fun f ->
+          Hashtbl.replace private_struct_fields (sname, f) loc.Lexing.pos_fname
+        ) privs
     | _ -> ()
   ) prog;
   let rec validate_complete_type loc behind_ptr = function
@@ -2536,7 +2656,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               gname));
           validate_nonparam_type gloc t) ty;
         Option.iter validate_expr_types init
-    | Ast.StructDef (sname, fields, _, _) ->
+    | Ast.StructDef (sname, fields, _, _, _, _) ->
         List.iter (fun (fname, ty) ->
           if type_mentions_linear ty then
             raise (TypeError (Lexing.dummy_pos, Printf.sprintf
@@ -2547,7 +2667,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _ -> ()) prog;
   (* Pass 0: collect struct and enum definitions *)
   let senv = List.fold_left (fun m -> function
-    | Ast.StructDef (name, fields, is_packed, align_opt) ->
+    | Ast.StructDef (name, fields, is_packed, align_opt, _, _) ->
         StringMap.add name (fields, is_packed, align_opt) m
     | _ -> m
   ) StringMap.empty prog in

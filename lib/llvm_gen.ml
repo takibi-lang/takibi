@@ -3419,9 +3419,9 @@ let gen_program ?prog_types prog =
   unsafe_depth := 0;
   (* Pass 0: register struct and enum types -- must precede ltype_of_ast for TypeNamed *)
   List.iter (function
-    | OpaqueStructDef (name, _) ->
+    | OpaqueStructDef (name, _, _, _) ->
         Hashtbl.add struct_lltypes name (named_struct_type context name)
-    | StructDef (name, fields, is_packed, align_opt) ->
+    | StructDef (name, fields, is_packed, align_opt, _, _) ->
         let field_lltys = List.map (fun (_, ty) -> ltype_of_ast ty) fields
                           |> Array.of_list in
         let mk_struct fltys = if is_packed then packed_struct_type context fltys

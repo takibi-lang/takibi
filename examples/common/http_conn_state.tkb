@@ -57,7 +57,7 @@ fn tcp_conn_state() -> ConnState {
 // responder functions below. Silently swallowing a protocol event (the
 // shape of issue #116's original bug) is now a compile error, and every
 // deliberate non-response is a greppable tcp_event_ignored call.
-linear opaque struct PendingTcpEvent;
+private linear opaque struct PendingTcpEvent;
 
 fn tcp_event_accepted() -> *PendingTcpEvent {
     return 0 as usize as *PendingTcpEvent;

@@ -14,7 +14,7 @@ extern fn sem_post(s: *i32);
 // it), which the "must be consumed by the callee too" check (also
 // issue #89) needs told explicitly -- see that check's comment for why
 // it cannot infer this on its own.
-affine opaque struct MutexGuard;
+private affine opaque struct MutexGuard;
 
 fn mutex_lock(m: *i32) -> *MutexGuard {
     sem_wait(m);

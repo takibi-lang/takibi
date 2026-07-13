@@ -150,14 +150,25 @@ type toplevel =
      declaration's own position, needed to know which file "declared" it. *)
   | ExternFuncDef of ident * (ident * type_expr option) list * type_expr option
   (* extern fn name(params) -> ret; -- body is provided by external assembly *)
-  | StructDef of string * (string * type_expr) list * bool * int option
-  (* name, fields, is_packed, align_bytes -- align_bytes = Some N means type-level align(N) *)
-  | OpaqueStructDef of string * opaque_kind
-  (* name, kind -- incomplete nominal type, usable only behind a pointer.
+  | StructDef of string * (string * type_expr) list * bool * int option * string list * loc
+  (* name, fields, is_packed, align_bytes, private_field_names, loc --
+     align_bytes = Some N means type-level align(N). private_field_names
+     (OWNERSHIP_KERNEL.md Stage 2, GitHub issue #108): fields listed here
+     may be read/written/offsetof'd -- and the struct constructed via a
+     struct literal -- only from the file this declaration's loc names.
+     Kept as a parallel name list rather than widening the field tuples,
+     so Type_layout/codegen/senv consumers stay untouched (privacy is a
+     type-checking concern with zero layout footprint). *)
+  | OpaqueStructDef of string * opaque_kind * bool * loc
+  (* name, kind, is_private, loc -- incomplete nominal type, usable only
+     behind a pointer.
      KindAffine: use at most once, must be consumed on at least one path
      (union semantics -- see SPEC.md's Affine Types). KindLinear: use
      exactly once on EVERY path (intersection semantics -- OWNERSHIP_KERNEL.md
-     Stage 1, GitHub issue #117); casting a linear value away is rejected. *)
+     Stage 1, GitHub issue #117); casting a linear value away is rejected.
+     is_private (Stage 2, issue #108): value CONSTRUCTION -- any cast whose
+     target type mentions this type -- is legal only in loc's file; naming
+     the type stays legal everywhere. *)
   | EnumDef of string * type_expr option * (string * int option) list * bool
   (* enum Name: u16 { Variant = val; _; } -- last bool = is_nonexhaustive *)
   | UseDef of string

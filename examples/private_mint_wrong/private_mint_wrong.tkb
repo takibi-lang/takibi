@@ -1,0 +1,20 @@
+// This file is expected to produce a compile error.
+// A `private ... opaque struct` (OWNERSHIP_KERNEL.md Stage 2, GitHub
+// issue #108) may only be CONSTRUCTED -- via any cast whose target
+// mentions it -- in its declaring file. Forging a handle from another
+// file, previously a one-line greppable-but-legal act, is now rejected;
+// the declaring file's functions are the only source. Naming the type
+// (annotations, passing values through) stays legal everywhere -- see
+// seal_relay below, which is fine; only the forging cast is the error.
+use "examples/private_mint_wrong/private_mint_seal.tkb";
+
+fn seal_relay() {
+    let t: *SealTok = seal_mint();
+    seal_sink(t);
+}
+
+fn app_main() -> i32 {
+    let forged: *SealTok = 0 as usize as *SealTok;
+    seal_sink(forged);
+    return 0;
+}

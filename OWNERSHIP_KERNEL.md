@@ -263,15 +263,135 @@ either reach a coupling function or contain an explicit, greppable
 `tcp_event_ignored(pending)`. Silent swallowing of a protocol event stops
 compiling; that is this stage's payoff for issue #117.
 
-## 5. Stage 2 outlook: private types and fields (#108) + cast tightening (#15)
+## 5. Stage 2: private types and fields (#108) + cast tightening (#15)
+## (normative once approved)
 
-`private` extends from top-level globals to type declarations (a private
-type's name -- and thus integer-to-pointer mints of it -- usable only in
-its declaring file) and to struct fields (readable/writable only in the
-declaring file; the KGuard/FatFile accessor idiom becomes enforced).
-Combined with 4.3, this makes obligations non-forgeable outside the
-trusted file. Cast rules for kind-carrying values tighten per issue #15's
-audit direction.
+Goal: turn the trusted-narrow-file methodology from convention into
+language guarantee. Usage survey before design (2026-07-14): every
+existing mint site (`N as usize as *Handle`, `&global as *Handle`)
+already lives in the file that declares its handle type -- fat12.tkb
+mints FatFile, eth.tkb/virtio_mmio.tkb mint NetRxCpuOwned, rtos.tkb
+mints KGuard, http_conn_state.tkb mints PendingTcpEvent -- and there are
+ZERO pointer-to-pointer cast-aways from affine handles anywhere. Stage 2
+therefore breaks no existing code: it makes the boundary everyone
+already respects impossible to stop respecting.
+
+### 5.1 Part A: `private` on opaque struct declarations
+
+    private linear opaque struct PendingTcpEvent;
+    private affine opaque struct KGuard;
+
+Semantics: value CONSTRUCTION of a private opaque type -- any cast whose
+TARGET type mentions it (`N as usize as *T`, `&x as *T`) -- is legal only
+in the declaring file. NAMING the type stays legal everywhere
+(annotations, parameter types, passing values around): the wide file must
+still be able to write `let pending: *PendingTcpEvent = ...` and hold the
+value; what it cannot do is conjure one. Combined with 4.3's rules this
+closes cross-file forgery completely: outside the declaring file, the
+only sources of a private handle are the declaring file's own exported
+functions. Scope note: `private` applies to OPAQUE struct declarations
+only (all three kinds) -- type-level privacy for regular structs/enums
+has no driver today and waits for one (fields get their own mechanism,
+Part B).
+
+### 5.2 Part B: `private` on struct fields
+
+    struct Chan {
+        private seq:  u32;
+        private slot: i32;
+    }
+
+Semantics: a field marked `private` may be read (FieldGet, including
+through `&s.f`), written (AssignField), or named in `offsetof` only from
+the struct's declaring file. Constructing a struct that HAS any private
+field via a struct literal is likewise declaring-file-only (a positional
+literal writes every field, private ones included -- this is what makes
+smart constructors real: issue #108's original "hand-assembled FatFile"
+gap, applied to non-opaque structs). This turns the accessor idiom
+(KGuard's `borrow`-gated getters, documented since examples/klock_guard
+as "naming convention only") into an enforced boundary.
+
+Implementation note: privacy is per-field, recorded beside the field
+list (the AST's StructDef gains the private-field names and its own
+declaration loc; Type_layout and codegen are unaffected -- privacy is a
+type-checking concern only, with zero layout/runtime footprint).
+
+### 5.3 Part C: cast and arithmetic tightening (#15 direction)
+
+Revised in review (2026-07-14) after the user asked "can you do
+arithmetic on an affine/linear pointer?" and a probe confirmed a real
+hole: `let q: *Tok = t + 1;` PASSES type inference and kind checking
+(BinOp operands are walked non-consuming, so `q` is a second tracked
+value conjured without consuming `t` -- kind-level duplication), and is
+stopped only by an ACCIDENT: opaque types have no layout, so LLVM's GEP
+is invalid and the compiler dies with an internal error instead of a
+diagnostic. Two tightenings:
+
+1. **Pointer arithmetic requires a complete (sized) pointee.** `p + n` /
+   `p - n` / `p[i]` on a pointer to ANY opaque struct (plain, affine, or
+   linear) is a type error -- the same rule C has for incomplete types.
+   This closes the kind-duplication hole for every handle type (all
+   kind-carrying types are opaque today) and turns the ICE into a real
+   diagnostic for plain opaque pointers too. Hard error, no `unsafe`
+   escape: there is no legitimate use (survey: zero occurrences).
+2. **Casting an AFFINE handle to another POINTER type** (`t as *Other`
+   -- kind laundering into a differently-typed alias) requires
+   `unsafe { ... }`. Zero existing uses; SPEC.md itself documented the
+   hole.
+
+The null-check idiom `t as usize` on AFFINE handles stays untouched: it
+is memory-safe (reads bits, aliases nothing usable -- re-minting the
+bits back into a handle is construction, gated by Part A/4.3), and it is
+the codebase's sanctioned encoding of "acquired or not". **Recorded
+ratchet**: that idiom exists only because takibi lacks Option/Result
+(issue #20) -- acquire-may-fail has no other encoding. When Stage 4
+lands variant enums and acquisition returns Option-shaped values,
+`as usize` on affine handles should be banned too, at which point affine
+handles become as bit-opaque as linear ones already are (linear's total
+cast ban means a linear token's pointer-ness is observationally
+invisible today -- it is already, in effect, the value-less unit
+capability).
+
+### 5.3.1 Recorded design note: should handles carry values? (user review)
+
+Two populations exist in today's code: pure tokens whose bit pattern is
+meaningless (KGuard, PendingTcpEvent, SlotLease) and identity-carrying
+handles (FatFile = the address of real storage, NetRxCpuOwned = a
+descriptor identity). At the TYPE level both are pure tokens: `opaque`
+means no one -- owner included -- can touch the pointee from takibi
+source, so resource state lives in module-private storage and the
+module's functions (which demand the handle) are the only access path.
+"Ownership gates access" is thus implemented INDIRECTLY today: handle =
+capability witness, functions = the gate.
+
+The user's model for the direct version -- a handle that really carries
+a pointer, where (a) the pointer value is immutable from mint to
+consumption and (b) the POINTEE is readable/writable exactly while the
+handle is owned -- is the correct spec for content-carrying handles
+(zero-copy channel payload buffers want precisely this), and it is the
+"decouple affine from opaque" question already recorded in
+affine_escape_via_index's header. It belongs to Stage 3's place-tracking
+neighborhood (an `affine struct` WITH fields whose access requires the
+live handle), with ATS2's at-view and Rust's Box/&mut as the prior art.
+Until then, tokens that are "really just a usize" stay encoded as opaque
+pointers for one honest reason: the tracking machinery is keyed on
+pointer-to-nominal-struct types, and introducing a separate value-less
+token kind now would duplicate machinery that Stage 4's payload-less
+linear variant enums subsume anyway.
+
+### 5.4 Application (acceptance gate)
+
+- `private` on PendingTcpEvent (http_conn_state.tkb): minting outside
+  the trusted file becomes a compile error -- negative-test it from
+  http_server_common.tkb.
+- rtos.tkb: `private` on KGuard's type and on Chan/KLock internal fields
+  -- the RTOS task-facing API's internals become untouchable from every
+  example that uses it, which is the syscall-surface discipline issue
+  #108's discussion with issue #67 called for.
+- Existing suite stays green untouched (per the survey); PoC compile-
+  error examples for: cross-file mint of a private opaque type,
+  cross-file read/write of a private field, cross-file struct literal,
+  un-unsafe'd affine ptr-to-ptr cast.
 
 ## 6. Stage 3 outlook: places (#89 Hurdle 3)
 

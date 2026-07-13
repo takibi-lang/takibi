@@ -1,0 +1,13 @@
+// This file is expected to produce a compile error.
+// A `private` struct field (OWNERSHIP_KERNEL.md Stage 2, GitHub issue
+// #108) may be read/written only from the struct's declaring file --
+// the accessor idiom (examples/klock_guard's KGuard getters, documented
+// as "naming convention only" since it was written) is now enforced.
+// The non-private `tag` field stays freely accessible from here.
+use "examples/private_field_wrong/private_field_holder.tkb";
+
+fn app_main() -> i32 {
+    the_counter.tag = 7;
+    the_counter.count = 999;
+    return counter_bump();
+}

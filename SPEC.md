@@ -558,6 +558,54 @@ See examples/linear_obligation (positive) and examples/
 linear_never_consumed, linear_branch_missed, linear_cast_discard,
 linear_overwrite (compile-error companions).
 
+## File-Granular Privacy (`private`)
+
+The file is takibi's module and trust boundary (GitHub issue #108,
+OWNERSHIP_KERNEL.md Stage 2): a narrow, human-reviewed file can force
+everything outside it to go through its functions. `private` appears in
+three places, all checked at compile time against the referencing
+expression's own source file, with zero runtime/layout footprint:
+
+```
+private let mut conn_state: ConnState = ConnState::Listen;   // global
+private linear opaque struct PendingTcpEvent;                // opaque type
+struct Chan { private mutex: i32; ... }                      // struct field
+```
+
+- **Global**: every reference (read, write, index, slice, address-of) to
+  a `private let` global must come from its declaring file.
+- **Opaque type** (any kind: plain/affine/linear): value CONSTRUCTION --
+  any cast whose target type mentions the name (`0 as usize as *T`,
+  `&x as *T`) -- must come from the declaring file. NAMING the type stays
+  legal everywhere (annotations, parameters, passing values through), so
+  other files can hold and relay handles; they just cannot forge them.
+  The declaring file's functions are the only source.
+- **Struct field**: reading (`s.f`, `&s.f`), writing, and `offsetof` on a
+  `private` field must come from the struct's declaring file; so must
+  constructing the struct via a struct literal when it has ANY private
+  field (a positional literal writes every field). Non-private fields of
+  the same struct stay freely accessible. This is what turns the accessor
+  idiom (a getter taking `borrow *KGuard`) and smart constructors
+  (`chan_init` establishing Chan's rendezvous invariant) from convention
+  into guarantee.
+
+Two related hardening rules land with this feature (OWNERSHIP_KERNEL.md
+Stage 2 Part C):
+
+- **Pointer arithmetic/indexing on a pointer to any opaque struct is a
+  type error** (`t + 1`, `t[i]`): an opaque type has no size, and for
+  affine/linear handles the arithmetic result would be a second tracked
+  value conjured without consuming the first.
+- **Casting an affine handle to another pointer type requires
+  `unsafe { ... }`** (kind laundering). The `t as usize` null-check idiom
+  stays ungated -- it is the sanctioned affine Option encoding until
+  variant enums exist (GitHub issue #20).
+
+Known limitation (shared with private globals): checks are by name/type
+identity, not by resolved binding; and the declaring file itself remains
+the trusted island -- privacy narrows the audit surface to that file, it
+does not verify the file's own bodies.
+
 ## Enums
 
 ```

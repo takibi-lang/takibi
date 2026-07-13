@@ -577,7 +577,7 @@ let parser_tests = [
 
   Alcotest.test_case "io type in struct field parses" `Quick (fun () ->
     match parse "struct S { done: io i32; }" with
-    | [Ast.StructDef (_, [(_, t)], _, _)] ->
+    | [Ast.StructDef (_, [(_, t)], _, _, _, _)] ->
         Alcotest.check type_t "field type is io i32" (Ast.TypeIo Ast.TypeI32) t
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1030,7 +1030,7 @@ let parser_tests = [
 
   Alcotest.test_case "struct definition parses" `Quick (fun () ->
     match parse "struct Point { x: i32; y: i32; }" with
-    | [Ast.StructDef ("Point", fields, false, None)] ->
+    | [Ast.StructDef ("Point", fields, false, None, _, _)] ->
         Alcotest.(check int) "field count" 2 (List.length fields);
         let (n0, t0) = List.nth fields 0 in
         let (n1, t1) = List.nth fields 1 in
@@ -1105,27 +1105,27 @@ let parser_tests = [
 
   Alcotest.test_case "packed struct definition parses with is_packed=true" `Quick (fun () ->
     match parse "struct packed Hdr { a: u8; b: u16; }" with
-    | [Ast.StructDef ("Hdr", fields, true, None)] ->
+    | [Ast.StructDef ("Hdr", fields, true, None, _, _)] ->
         Alcotest.(check int) "field count" 2 (List.length fields)
     | _ -> Alcotest.fail "expected StructDef(Hdr, [...], true)"
   );
 
   Alcotest.test_case "normal struct definition parses with is_packed=false" `Quick (fun () ->
     match parse "struct Hdr { a: u8; b: u16; }" with
-    | [Ast.StructDef ("Hdr", _, false, None)] -> ()
+    | [Ast.StructDef ("Hdr", _, false, None, _, _)] -> ()
     | _ -> Alcotest.fail "expected is_packed=false"
   );
 
   Alcotest.test_case "struct align(N) parses with align_bytes=Some N" `Quick (fun () ->
     match parse "struct Vec4 align(16) { x: i32; y: i32; z: i32; w: i32; }" with
-    | [Ast.StructDef ("Vec4", fields, false, Some 16)] ->
+    | [Ast.StructDef ("Vec4", fields, false, Some 16, _, _)] ->
         Alcotest.(check int) "field count" 4 (List.length fields)
     | _ -> Alcotest.fail "expected StructDef(Vec4, [...], false, Some 16)"
   );
 
   Alcotest.test_case "struct packed align(N) parses with both flags" `Quick (fun () ->
     match parse "struct packed Hdr align(4) { a: u8; b: u16; }" with
-    | [Ast.StructDef ("Hdr", _, true, Some 4)] -> ()
+    | [Ast.StructDef ("Hdr", _, true, Some 4, _, _)] -> ()
     | _ -> Alcotest.fail "expected is_packed=true, align_bytes=Some 4"
   );
 
@@ -1233,13 +1233,13 @@ let parser_tests = [
 
   Alcotest.test_case "opaque struct declaration parses" `Quick (fun () ->
     match parse "opaque struct Token;" with
-    | [Ast.OpaqueStructDef ("Token", Ast.KindPlain)] -> ()
+    | [Ast.OpaqueStructDef ("Token", Ast.KindPlain, _, _)] -> ()
     | _ -> Alcotest.fail "expected OpaqueStructDef(Token)"
   );
 
   Alcotest.test_case "affine opaque struct and borrow parameter parse" `Quick (fun () ->
     match parse "affine opaque struct Token; fn inspect(t: borrow *Token) {}" with
-    | [Ast.OpaqueStructDef ("Token", Ast.KindAffine);
+    | [Ast.OpaqueStructDef ("Token", Ast.KindAffine, _, _);
        Ast.FuncDef { params = [("t", Some (Ast.TypeBorrow (Ast.TypePtr
          (Ast.TypeNamed "Token"))))]; _ }] -> ()
     | _ -> Alcotest.fail "expected affine opaque Token and borrowed pointer"
@@ -3261,6 +3261,187 @@ let infer_tests = [
           let t: *LinTok = lmint();
           *pp = t;
         }");
+
+  (* -- Stage 2 (OWNERSHIP_KERNEL.md, GitHub issues #108/#15) --------------
+     private opaque types (construction is declaring-file-only), private
+     struct fields, opaque pointer arithmetic ban, affine ptr-laundering
+     unsafe gate. *)
+
+  Alcotest.test_case "private type: minting in the declaring file is fine" `Quick
+    (fun () ->
+       match infer_files [
+         "seal.tkb", "private affine opaque struct SealTok;
+                      fn seal_mint() -> *SealTok { return 0 as usize as *SealTok; }
+                      fn seal_sink(t: sink *SealTok) {}";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "private type: minting from ANOTHER file is a compile error" `Quick
+    (fun () ->
+       match infer_files [
+         "seal.tkb", "private affine opaque struct SealTok;
+                      fn seal_sink(t: sink *SealTok) {}";
+         "b.tkb", "fn forge() { let t: *SealTok = 0 as usize as *SealTok; seal_sink(t); }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the type" true
+             (contains_substring msg "private type 'SealTok'"));
+
+  Alcotest.test_case "private type: NAMING it from another file stays legal \
+                      (annotations/pass-through -- only construction is gated)" `Quick
+    (fun () ->
+       match infer_files [
+         "seal.tkb", "private affine opaque struct SealTok;
+                      fn seal_mint() -> *SealTok { return 0 as usize as *SealTok; }
+                      fn seal_sink(t: sink *SealTok) {}";
+         "b.tkb", "fn relay() { let t: *SealTok = seal_mint(); seal_sink(t); }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "private field: same-file access is fine" `Quick
+    (fun () ->
+       match infer_files [
+         "holder.tkb", "struct Sealed { private inner: i32; pub_tag: i32; }
+                        let mut sealed_box: Sealed;
+                        fn sealed_get() -> i32 { return sealed_box.inner; }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "private field: cross-file READ is a compile error" `Quick
+    (fun () ->
+       match infer_files [
+         "holder.tkb", "struct Sealed { private inner: i32; pub_tag: i32; }
+                        let mut sealed_box: Sealed;";
+         "b.tkb", "fn peek() -> i32 { return sealed_box.inner; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the field" true
+             (contains_substring msg "'Sealed.inner' is private"));
+
+  Alcotest.test_case "private field: cross-file WRITE is a compile error" `Quick
+    (fun () ->
+       match infer_files [
+         "holder.tkb", "struct Sealed { private inner: i32; pub_tag: i32; }
+                        let mut sealed_box: Sealed;";
+         "b.tkb", "fn poke() { sealed_box.inner = 42; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the field" true
+             (contains_substring msg "'Sealed.inner' is private"));
+
+  Alcotest.test_case "private field: cross-file &s.f is a compile error" `Quick
+    (fun () ->
+       match infer_files [
+         "holder.tkb", "struct Sealed { private inner: i32; pub_tag: i32; }
+                        let mut sealed_box: Sealed;";
+         "b.tkb", "fn alias() -> *i32 { return &sealed_box.inner; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the field" true
+             (contains_substring msg "'Sealed.inner' is private"));
+
+  Alcotest.test_case "private field: cross-file offsetof is a compile error" `Quick
+    (fun () ->
+       match infer_files [
+         "holder.tkb", "struct Sealed { private inner: i32; pub_tag: i32; }";
+         "b.tkb", "fn off() -> usize { return offsetof(Sealed, inner); }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the field" true
+             (contains_substring msg "'Sealed.inner' is private"));
+
+  Alcotest.test_case "private field: cross-file struct LITERAL is a compile error \
+                      (smart constructors become real)" `Quick
+    (fun () ->
+       match infer_files [
+         "holder.tkb", "struct Sealed { private inner: i32; pub_tag: i32; }";
+         "b.tkb", "fn forge() { let mut s: Sealed = { 1, 2 }; s.pub_tag = 3; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "mentions private fields" true
+             (contains_substring msg "it has private fields"));
+
+  Alcotest.test_case "private field: a NON-private field of the same struct \
+                      stays freely accessible cross-file" `Quick
+    (fun () ->
+       match infer_files [
+         "holder.tkb", "struct Sealed { private inner: i32; pub_tag: i32; }
+                        let mut sealed_box: Sealed;";
+         "b.tkb", "fn tag() -> i32 { sealed_box.pub_tag = 7; return sealed_box.pub_tag; }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "opaque ptr arithmetic: `t + 1` on an affine handle is a \
+                      compile error (kind-duplication hole, user-review probe)" `Quick
+    (expect_type_error "pointer arithmetic/indexing on '*ArithTok'"
+       "affine opaque struct ArithTok;
+        fn amk() -> *ArithTok { return 0 as usize as *ArithTok; }
+        fn asnk(t: sink *ArithTok) {}
+        fn dup() {
+          let t: *ArithTok = amk();
+          let q: *ArithTok = t + 1;
+          asnk(t);
+          asnk(q);
+        }");
+
+  Alcotest.test_case "opaque ptr arithmetic: indexing a PLAIN opaque pointer is \
+                      a compile error too (was an internal compiler error)" `Quick
+    (expect_type_error "pointer arithmetic/indexing on '*Blob'"
+       "opaque struct Blob;
+        fn blob_peek(p: *Blob) -> i32 { return 0; }
+        fn walk(p: *Blob) -> i32 { return blob_peek(p[1]); }");
+
+  Alcotest.test_case "affine ptr laundering: `t as *Other` without unsafe is a \
+                      compile error" `Quick
+    (expect_type_error "launders it out of tracking"
+       "affine opaque struct LaunTok;
+        opaque struct OtherBlob;
+        fn lmk() -> *LaunTok { return 0 as usize as *LaunTok; }
+        fn lsnk(t: sink *LaunTok) {}
+        fn launder() {
+          let t: *LaunTok = lmk();
+          let o: *OtherBlob = t as *OtherBlob;
+          lsnk(t);
+        }");
+
+  Alcotest.test_case "affine ptr laundering: unsafe marks it legal" `Quick
+    (fun () ->
+       match infer "affine opaque struct LaunTok2;
+                    opaque struct OtherBlob2;
+                    fn lmk2() -> *LaunTok2 { return 0 as usize as *LaunTok2; }
+                    fn lsnk2(t: sink *LaunTok2) {}
+                    fn launder2() {
+                      let t: *LaunTok2 = lmk2();
+                      let o: *OtherBlob2 = unsafe { t as *OtherBlob2 };
+                      lsnk2(t);
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "negative control: `t as usize` on an affine handle stays \
+                      legal (the sanctioned null-check idiom)" `Quick
+    (fun () ->
+       match infer "affine opaque struct NullTok;
+                    fn nmk() -> *NullTok { return 0 as usize as *NullTok; }
+                    fn nsnk(t: sink *NullTok) {}
+                    fn nullcheck() {
+                      let t: *NullTok = nmk();
+                      if ((t as usize) != 0) {
+                        nsnk(t);
+                      }
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
 
 ]
 

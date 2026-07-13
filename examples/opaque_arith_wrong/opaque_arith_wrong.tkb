@@ -1,0 +1,24 @@
+// This file is expected to produce a compile error.
+// Pointer arithmetic/indexing on a pointer to ANY opaque struct is
+// rejected (OWNERSHIP_KERNEL.md Stage 2 Part C): an opaque type has no
+// size, and -- found via a user-review probe (GitHub issue #117) -- for
+// an affine/linear handle the arithmetic result was a SECOND tracked
+// value conjured without consuming the first (kind-level duplication),
+// stopped before this rule only by an accidental invalid-LLVM-IR
+// internal compiler error.
+affine opaque struct ArithTok;
+
+fn amk() -> *ArithTok {
+    return 0 as usize as *ArithTok;
+}
+
+fn asnk(t: sink *ArithTok) {
+}
+
+fn app_main() -> i32 {
+    let t: *ArithTok = amk();
+    let q: *ArithTok = t + 1;
+    asnk(t);
+    asnk(q);
+    return 0;
+}
