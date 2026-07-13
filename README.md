@@ -200,11 +200,11 @@ deferrable convenience and architecture work.
 - Applications expose `app_main()`. A shared high-level runtime `main()` calls
   `platform_init()`, `app_main()`, and `platform_shutdown()`; startup assembly
   remains independent of individual device drivers.
-- DWARF debug-info emission (`-g`) and a small gdbstub-based sampling
-  profiler are implemented, along with STM32/RAM debug ELF targets for
-  OpenOCD + GDB debugging of the HTTP examples and an analysis of what
-  this profiling technique is (and is not) useful for on interrupt-driven
-  I/O code.
+- DWARF debug-info emission (`-g`) is covered by a live QEMU/GDB
+  regression fixture for globals, locals, aggregates, arguments,
+  stepping, and backtraces. A small gdbstub-based sampling profiler is
+  also implemented, along with STM32/RAM debug ELF targets for OpenOCD +
+  GDB debugging of the HTTP examples.
 
 See [`SPEC.md`](SPEC.md) for the current language syntax and grammar, and
 `CLAUDE.md` for the full, continuously-updated engineering log of design
@@ -325,7 +325,7 @@ ppx_deriving.show
 llvm-mc-19, ld.lld-19     (bare-metal assembling/linking)
 qemu-system-aarch64       (QEMU execution)
 mtools                    (FAT12 image creation/verification for examples/fatfs)
-gdb-multiarch             (AArch64-capable gdb, for profiling/hardware debugging)
+gdb-multiarch             (AArch64-capable gdb, for DWARF regression tests, profiling, and hardware debugging)
 openocd, stlink-tools     (STM32F746G-DISCOVERY flashing/debugging)
 ```
 

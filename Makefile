@@ -211,7 +211,7 @@ test: build
 	dune test
 
 ## qemutest: run QEMU integration tests (build all examples and verify automatically)
-qemutest: $(ALL_KERNELS) examples/fizzbuzz/kernel.debug.elf examples/fibonacci/kernel.debug.elf examples/dwarf_debug/kernel.debug.elf
+qemutest: $(ALL_KERNELS) examples/fibonacci/kernel.debug.elf examples/dwarf_debug/kernel.debug.elf
 	@bash scripts/run_qemutest.sh
 
 ## stm32build: link every ported STM32 example as a RAM-execution image, with
@@ -454,24 +454,12 @@ $(FATFS_KERNELS): examples/%/kernel.elf: \
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) $(COMMON_SEMIHOSTING_ASM_O) \
 	       examples/$*/$*.o -o $@
 
-# -- DWARF debug-info regression check ------------------------------------------
-# A dedicated -g build of ONE example (fizzbuzz), entirely separate from the
-# always-g-free rules above (its own .debug.o / kernel.debug.elf, so it can't
-# collide with or affect examples/fizzbuzz/kernel.elf). Exists so that
-# scripts/run_qemutest.sh's run_dwarf_test can verify the emitted DWARF line
-# table actually resolves to the correct source line (via llvm-dwarfdump-19
-# and addr2line), using fizzbuzz.tkb's fixed, well-known shape (fn app_main() at
-# line 3, for at line 4, final uart_puts at line 13) as the expected answer.
-examples/fizzbuzz/fizzbuzz.debug.o: examples/fizzbuzz/fizzbuzz.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -g -o $@ --forbid-trap
-
-examples/fizzbuzz/kernel.debug.elf: $(COMMON_STARTUP_O) examples/fizzbuzz/fizzbuzz.debug.o $(COMMON_LINK_LD)
-	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/fizzbuzz/fizzbuzz.debug.o -o $@
-
-# Same pattern, second example (fibonacci): its `let mut a/b/tmp` locals and
-# uart_putc's `c` parameter (uart.tkb is compiled in alongside it, same as
-# the no-debug build) give run_dwarf_var_test something to check that
-# fizzbuzz -- which has no `let mut` of its own -- doesn't exercise.
+# -- DWARF debug-info regression checks -----------------------------------------
+# Dedicated -g builds, entirely separate from the always-g-free rules above
+# (their own .debug.o / kernel.debug.elf outputs, so they cannot collide
+# with or affect normal kernels). Fibonacci gives run_dwarf_var_test a small
+# dwarfdump-level variable smoke test; dwarf_debug is the live QEMU/GDB
+# source-level fixture.
 examples/fibonacci/fibonacci.debug.o: examples/fibonacci/fibonacci.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -g -o $@ --forbid-trap
 
@@ -479,8 +467,9 @@ examples/fibonacci/kernel.debug.elf: $(COMMON_STARTUP_O) examples/fibonacci/fibo
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/fibonacci/fibonacci.debug.o -o $@
 
 # Dedicated -g fixture for a live GDB check: typed globals, enum display,
-# struct member layout, slice fat-value layout, and `set variable` against
-# QEMU's gdbstub.
+# struct member layout, slice fat-value layout, aggregate locals/arguments,
+# scoped locals, step/next/backtrace, and `set variable` against QEMU's
+# gdbstub.
 examples/dwarf_debug/dwarf_debug.debug.o: examples/dwarf_debug/dwarf_debug.tkb examples/common/runtime.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
 	$(TAKIBI) examples/common/runtime.tkb $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -g -o $@ --forbid-trap
 

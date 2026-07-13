@@ -21,6 +21,11 @@ File extension: `.tkb`. Compiler invocation: `takibi <file1.tkb>
 concatenated (flat global namespace) before compilation -- there is no
 module/import system beyond `use` (see "Known Limitations" below).
 
+`-g` emits full DWARF debug information for source-level debugging. The
+current implementation prioritizes practical GDB value inspection, so it
+may preserve extra debug-only storage compared with an optimized build
+without `-g`.
+
 Every top-level definition -- `fn`, global `let`, `struct`, `opaque
 struct`, and `enum` -- shares this ONE flat namespace, deliberately.
 Unlike C (which has a separate TAG namespace for `struct`/`union`/`enum`,

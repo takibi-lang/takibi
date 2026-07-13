@@ -2603,14 +2603,10 @@ let gen_func ?prog_types fdef =
   in
   let di_subprogram = Option.map (fun (_, _, sp) -> sp) di_ctx in
 
-  (* Emit an llvm.dbg.declare for a Mut (alloca-backed) parameter/local so it
-     shows up with a real value in gdb. Only Mut bindings can be described
-     this way -- Llvm_debuginfo exposes dbg.declare insertion but not
-     dbg.value, so an Imm (immutable `let`, no alloca) binding has no memory
-     location to point a declare at and is simply left with no debug info
-     (gdb would just report it as unavailable, same as any other aggressively
-     optimized value in a real toolchain). declare_var is only ever called
-     with a Mut's own alloca pointer, so this limitation never applies here. *)
+  (* Emit an llvm.dbg.declare for an alloca-backed parameter/local so it shows
+     up with a real value in gdb. Llvm_debuginfo exposes dbg.declare insertion
+     but not dbg.value, so immutable SSA lets get debug-only allocas under -g;
+     without those, gdb would have no stable location to inspect. *)
   let declare_var ~is_param ~argno ~name ~ast_ty ~line ~ptr =
     match di_ctx with
     | None -> ()
