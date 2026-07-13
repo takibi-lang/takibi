@@ -22,6 +22,7 @@ fn dwarf_locals_probe() {
     let tcp_len: u16 = 40;
     let tcp_hdr_len: u16 = 20;
     let frame = dwarf_global_slice;
+    let mut pair_snapshot: DwarfPair = dwarf_global_pair;
     dwarf_global_pair.count = dwarf_global_pair.count + ((tcp_len - tcp_hdr_len) as u32) - 20;
 }
 

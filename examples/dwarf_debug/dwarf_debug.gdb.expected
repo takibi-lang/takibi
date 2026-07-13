@@ -10,4 +10,8 @@ p seq => 287454020
 p ack => 1432778632
 p tcp_len => 40
 p tcp_hdr_len => 20
+p frame => {ptr = 0x0, len = 0}
+p frame.ptr => 0x0
+p frame.len => 0
+p pair_snapshot => {state = DwarfState::Idle, count = 99}
 qemu output => 99

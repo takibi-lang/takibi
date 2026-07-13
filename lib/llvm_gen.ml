@@ -2648,6 +2648,18 @@ let gen_func ?prog_types fdef =
     | _ -> ()
   in
 
+  let rec is_debug_aggregate_ty = function
+    | TypeArray _ | TypeSlice _ -> true
+    | TypeNamed sname -> not (Hashtbl.mem enum_underlying sname)
+    | TypeRefined (_, _, base)
+    | TypeBorrow base
+    | TypeSink base
+    | TypeIo base -> is_debug_aggregate_ty base
+    | TypeAlignedPtr _ | TypePtr _ | TypeFn _
+    | TypeI8 | TypeU8 | TypeI16 | TypeU16 | TypeI32 | TypeU32
+    | TypeI64 | TypeU64 | TypeUsize | TypeIsize | TypeBool | TypeVoid -> false
+  in
+
   (* Alloca + store for every parameter (params are always mutable) *)
   List.iteri (fun i (name, ty_opt) ->
     let ast_ty = res name ty_opt in
@@ -2693,7 +2705,7 @@ let gen_func ?prog_types fdef =
 
   (* Recursively initialize a memory location from a possibly-nested literal.
      Handles nested StructLit for struct/array fields; falls back to gen_expr+store. *)
-  let rec init_memory (ptr : llvalue) (ast_ty : Ast.type_expr) (e : Ast.expr) =
+  let rec init_memory ?(preserve_for_debug = false) (ptr : llvalue) (ast_ty : Ast.type_expr) (e : Ast.expr) =
     match e.desc, ast_ty with
     | StructLit exprs, TypeNamed sname ->
         let llty = Hashtbl.find struct_lltypes sname in
@@ -2702,7 +2714,7 @@ let gen_func ?prog_types fdef =
           let fptr = build_in_bounds_gep llty ptr
             [| const_int (i32_type context) 0; const_int (i32_type context) i |]
             ("fld" ^ string_of_int i) builder in
-          init_memory fptr ft ei
+          init_memory ~preserve_for_debug fptr ft ei
         ) (List.combine fields exprs)
     | StructLit exprs, TypeArray (elem_ty, n) ->
         let arr_ll = array_type (ltype_of_ast elem_ty) n in
@@ -2710,11 +2722,12 @@ let gen_func ?prog_types fdef =
           let ep = build_in_bounds_gep arr_ll ptr
             [| const_int (i32_type context) 0; const_int (i32_type context) i |]
             ("elem" ^ string_of_int i) builder in
-          init_memory ep elem_ty ei
+          init_memory ~preserve_for_debug ep elem_ty ei
         ) exprs
     | _ ->
         let (_, v) = gen_expr ~expected_ty:ast_ty locals e in
-        ignore (build_store (coerce v ast_ty) ptr builder)
+        let inst = build_store (coerce v ast_ty) ptr builder in
+        if preserve_for_debug then set_volatile true inst
   in
 
   (* Stack of (break_bb, continue_bb) for the innermost enclosing loop.
@@ -2918,7 +2931,8 @@ let gen_func ?prog_types fdef =
         (match Hashtbl.find_opt locals name with
          | None -> raise (Error (Printf.sprintf "BUG: no alloca for %s" name))
          | Some (Mut (ast_ty, ptr)) ->
-             Option.iter (init_memory ptr ast_ty) expr_opt
+             let preserve_for_debug = !debug_info_enabled && is_debug_aggregate_ty ast_ty in
+             Option.iter (init_memory ~preserve_for_debug ptr ast_ty) expr_opt
          | Some (Imm _) ->
              raise (Error (Printf.sprintf "BUG: %s marked mutable but stored as Imm" name)))
 
@@ -2932,7 +2946,9 @@ let gen_func ?prog_types fdef =
              let (_, v) = gen_expr ~expected_ty:ast_ty locals e in
              let coerced = coerce v ast_ty in
              (match Hashtbl.find_opt debug_immutable_allocas name with
-              | Some (_, ptr) -> ignore (build_store coerced ptr builder)
+              | Some (_, ptr) ->
+                  let inst = build_store coerced ptr builder in
+                  if is_debug_aggregate_ty ast_ty then set_volatile true inst
               | None -> ());
              Hashtbl.add locals name (Imm (ast_ty, coerced)))
 
