@@ -212,7 +212,7 @@ let parser_tests = [
 
   Alcotest.test_case "global let without type" `Quick (fun () ->
     match parse "let x = 1;" with
-    | [Ast.LetDef (name, ty, init, _, _)] ->
+    | [Ast.LetDef (name, ty, init, _, _, _, _)] ->
         Alcotest.(check string)        "name"    "x"   name;
         Alcotest.(check (option type_t)) "type"    None  ty;
         (match init with
@@ -223,7 +223,7 @@ let parser_tests = [
 
   Alcotest.test_case "global let with type annotation" `Quick (fun () ->
     match parse "let g: u8 = 0;" with
-    | [Ast.LetDef (name, ty, _, _, _)] ->
+    | [Ast.LetDef (name, ty, _, _, _, _, _)] ->
         Alcotest.(check string)        "name" "g" name;
         Alcotest.(check (option type_t)) "type" (Some Ast.TypeU8) ty
     | _ -> Alcotest.fail "expected single LetDef"
@@ -231,55 +231,55 @@ let parser_tests = [
 
   Alcotest.test_case "global let with align(N) no init parses" `Quick (fun () ->
     match parse "let buf: [u8; 16] align(64);" with
-    | [Ast.LetDef ("buf", Some (Ast.TypeArray (Ast.TypeU8, 16)), None, Some 64, false)] -> ()
+    | [Ast.LetDef ("buf", Some (Ast.TypeArray (Ast.TypeU8, 16)), None, Some 64, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected LetDef with align 64"
   );
 
   Alcotest.test_case "global let with align(N) and init parses" `Quick (fun () ->
     match parse "let x: i32 align(16) = 0;" with
-    | [Ast.LetDef ("x", Some Ast.TypeI32, Some _, Some 16, false)] -> ()
+    | [Ast.LetDef ("x", Some Ast.TypeI32, Some _, Some 16, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected LetDef with align 16 and init"
   );
 
   Alcotest.test_case "usize type parses" `Quick (fun () ->
     match parse "let addr: usize;" with
-    | [Ast.LetDef ("addr", Some Ast.TypeUsize, None, None, false)] -> ()
+    | [Ast.LetDef ("addr", Some Ast.TypeUsize, None, None, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected LetDef with TypeUsize"
   );
 
   Alcotest.test_case "isize type parses" `Quick (fun () ->
     match parse "let offset: isize;" with
-    | [Ast.LetDef ("offset", Some Ast.TypeIsize, None, None, false)] -> ()
+    | [Ast.LetDef ("offset", Some Ast.TypeIsize, None, None, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected LetDef with TypeIsize"
   );
 
   Alcotest.test_case "bare global let parses as immutable (is_mutable=false)" `Quick (fun () ->
     match parse "let N: i32 = 16;" with
-    | [Ast.LetDef ("N", Some Ast.TypeI32, Some _, None, false)] -> ()
+    | [Ast.LetDef ("N", Some Ast.TypeI32, Some _, None, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected is_mutable=false"
   );
 
   Alcotest.test_case "global let mut parses as mutable (is_mutable=true)" `Quick (fun () ->
     match parse "let mut g: i32 = 0;" with
-    | [Ast.LetDef ("g", Some Ast.TypeI32, Some _, None, true)] -> ()
+    | [Ast.LetDef ("g", Some Ast.TypeI32, Some _, None, true, _, _)] -> ()
     | _ -> Alcotest.fail "expected is_mutable=true"
   );
 
   Alcotest.test_case "global let mut with align(N) parses" `Quick (fun () ->
     match parse "let mut buf: [u8; 16] align(64);" with
-    | [Ast.LetDef ("buf", Some (Ast.TypeArray (Ast.TypeU8, 16)), None, Some 64, true)] -> ()
+    | [Ast.LetDef ("buf", Some (Ast.TypeArray (Ast.TypeU8, 16)), None, Some 64, true, _, _)] -> ()
     | _ -> Alcotest.fail "expected LetDef with is_mutable=true and align 64"
   );
 
   Alcotest.test_case "array size via named compile-time constant resolves" `Quick (fun () ->
     match parse "let N: i32 = 4; let ring: [u8; N];" with
-    | [Ast.LetDef _; Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 4)), None, None, false)] -> ()
+    | [Ast.LetDef _; Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 4)), None, None, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected array size resolved to 4"
   );
 
   Alcotest.test_case "array size via sizeof(Struct) resolves" `Quick (fun () ->
     match parse "struct Foo { a: u32; b: u32; } let buf: [u8; sizeof(Foo)];" with
-    | [Ast.StructDef _; Ast.LetDef ("buf", Some (Ast.TypeArray (Ast.TypeU8, 8)), None, None, false)] -> ()
+    | [Ast.StructDef _; Ast.LetDef ("buf", Some (Ast.TypeArray (Ast.TypeU8, 8)), None, None, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected array size resolved to 8"
   );
 
@@ -302,32 +302,32 @@ let parser_tests = [
   Alcotest.test_case "array size formula: product of two named constants" `Quick (fun () ->
     match parse "let QNUM: i32 = 8; let RX_BUF_SIZE: i32 = 1536; \
                  let bufs: [u8; QNUM * RX_BUF_SIZE];" with
-    | [_; _; Ast.LetDef ("bufs", Some (Ast.TypeArray (Ast.TypeU8, 12288)), None, None, false)] -> ()
+    | [_; _; Ast.LetDef ("bufs", Some (Ast.TypeArray (Ast.TypeU8, 12288)), None, None, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected array size resolved to 12288"
   );
 
   Alcotest.test_case "array size formula: difference of a named constant and a literal" `Quick (fun () ->
     match parse "let COUNT: i32 = 4; let ring: [u8; COUNT - 1];" with
-    | [_; Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 3)), None, None, false)] -> ()
+    | [_; Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 3)), None, None, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected array size resolved to 3"
   );
 
   Alcotest.test_case "array size formula: parentheses and operator precedence \
                        (a + b * c, not (a + b) * c)" `Quick (fun () ->
     match parse "let ring: [u8; 2 + 3 * 4];" with
-    | [Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 14)), None, None, false)] -> ()
+    | [Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 14)), None, None, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected array size resolved to 14 (2 + 12), not 20"
   );
 
   Alcotest.test_case "array size formula: explicit parentheses override precedence" `Quick (fun () ->
     match parse "let ring: [u8; (2 + 3) * 4];" with
-    | [Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 20)), None, None, false)] -> ()
+    | [Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 20)), None, None, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected array size resolved to 20"
   );
 
   Alcotest.test_case "array size formula: division by a named constant" `Quick (fun () ->
     match parse "let PAGE_SIZE: i32 = 4096; let bufs: [u8; (2 * PAGE_SIZE) / 2];" with
-    | [_; Ast.LetDef ("bufs", Some (Ast.TypeArray (Ast.TypeU8, 4096)), None, None, false)] -> ()
+    | [_; Ast.LetDef ("bufs", Some (Ast.TypeArray (Ast.TypeU8, 4096)), None, None, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected array size resolved to 4096"
   );
 
@@ -536,7 +536,7 @@ let parser_tests = [
     let prog = parse "let x = 0; fn f() {} fn g() i32 { return 1; }" in
     Alcotest.(check int) "item count" 3 (List.length prog);
     (match List.nth prog 0 with
-     | Ast.LetDef ("x", _, _, _, _) -> ()
+     | Ast.LetDef ("x", _, _, _, _, _, _) -> ()
      | _ -> Alcotest.fail "first item should be LetDef x");
     (match List.nth prog 1 with
      | Ast.FuncDef { name = "f"; _ } -> ()
@@ -570,7 +570,7 @@ let parser_tests = [
 
   Alcotest.test_case "bare io type in global let parses" `Quick (fun () ->
     match parse "let flag: io i32;" with
-    | [Ast.LetDef (_, Some t, None, _, _)] ->
+    | [Ast.LetDef (_, Some t, None, _, _, _, _)] ->
         Alcotest.check type_t "type is io i32" (Ast.TypeIo Ast.TypeI32) t
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -2969,6 +2969,93 @@ let infer_tests = [
        "opaque struct NsOpaqueStruct;
         struct NsOpaqueStruct { x: i32; }
         fn use_ns_opaque_struct(p: *NsOpaqueStruct) {}");
+
+  (* GitHub issue #108: `private let` restricts a global to references from
+     its own declaring file. Discovered via examples/common/http_server_common.tkb's
+     conn_state et al -- see HISTORY.md's issue #117 follow-up entry. *)
+  Alcotest.test_case
+    "private global: read from the SAME file it was declared in is fine" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "private let mut priv_g: i32 = 0;
+                   fn a_reads() -> i32 { return priv_g; }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.failf "expected same-file read to type-check, got: %s" msg);
+
+  Alcotest.test_case
+    "private global: write from the SAME file it was declared in is fine" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "private let mut priv_g: i32 = 0;
+                   fn a_writes() { priv_g = 5; }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.failf "expected same-file write to type-check, got: %s" msg);
+
+  Alcotest.test_case
+    "private global: reading it (Var) from a DIFFERENT file is a compile error" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "private let mut priv_g: i32 = 0;";
+         "b.tkb", "fn b_reads() -> i32 { return priv_g; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "mentions the global's name" true
+             (contains_substring msg "priv_g");
+           Alcotest.(check bool) "mentions the declaring file" true
+             (contains_substring msg "a.tkb"));
+
+  Alcotest.test_case
+    "private global: writing it (Assign) from a DIFFERENT file is a compile error" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "private let mut priv_g: i32 = 0;";
+         "b.tkb", "fn b_writes() { priv_g = 1; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "mentions the global's name" true
+             (contains_substring msg "priv_g"));
+
+  Alcotest.test_case
+    "private global: indexing it (arr[i]) from a DIFFERENT file is a compile error" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "private let mut priv_arr: [u8; 4];";
+         "b.tkb", "fn b_indexes() -> u8 { return priv_arr[0]; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "mentions the global's name" true
+             (contains_substring msg "priv_arr"));
+
+  Alcotest.test_case
+    "private global: taking its address (&x) from a DIFFERENT file is a compile error" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "private let mut priv_g: i32 = 0;";
+         "b.tkb", "fn b_addr() -> *i32 { return &priv_g; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "mentions the global's name" true
+             (contains_substring msg "priv_g"));
+
+  Alcotest.test_case
+    "negative control: a NON-private global is still freely readable/writable \
+     across files (private is opt-in, not a default restriction)" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "let mut plain_g: i32 = 0;";
+         "b.tkb", "fn b_touches() { plain_g = plain_g + 1; }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.failf "expected a non-private global to stay unrestricted, got: %s" msg);
 
 ]
 

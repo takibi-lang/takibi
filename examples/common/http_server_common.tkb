@@ -8,22 +8,35 @@
 
 use "examples/common/inet_checksum.tkb";
 use "examples/common/netutil.tkb";
+use "examples/common/http_conn_state.tkb";
 
 let HTTP_PORT: u16 = 80;
 
-enum ConnState: u8 {
-    Listen;
-    SynRcvd;
-    Established;
-    Sending;
-    LastAck;
+// GitHub issue #108: private (this file only). The connection's PHASE
+// (conn_state) lives in http_conn_state.tkb behind designated transition
+// functions -- even this file cannot assign it directly. What stays here is
+// the wire bookkeeping: the peer's identity and both sequence numbers. The
+// only legitimate external READ need (an including example's
+// http_start_response building a response segment's TCP header) goes through
+// the tcp_conn_snd_nxt/tcp_conn_rcv_nxt accessors just below instead of
+// touching these directly -- see HISTORY.md's issue #117 follow-up entry for
+// why this stopped being just a naming-convention accessor idiom.
+private let mut conn_remote_ip:   [u8; 4];
+private let mut conn_remote_port: u16 = 0;
+private let mut conn_snd_nxt:     u32 = 0;
+private let mut conn_rcv_nxt:     u32 = 0;
+
+// Read accessors for the one legitimate external need: an including
+// example's http_start_response (e.g. examples/http_server/http_server.tkb)
+// builds its own response segment's TCP header directly and needs today's
+// sequence numbers to do it.
+fn tcp_conn_snd_nxt() -> u32 {
+    return conn_snd_nxt;
 }
 
-let mut conn_state:       ConnState = ConnState::Listen;
-let mut conn_remote_ip:   [u8; 4];
-let mut conn_remote_port: u16 = 0;
-let mut conn_snd_nxt:     u32 = 0;
-let mut conn_rcv_nxt:     u32 = 0;
+fn tcp_conn_rcv_nxt() -> u32 {
+    return conn_rcv_nxt;
+}
 
 let HTTP_SEGMENT_PAYLOAD_MAX: i32 = 1400;
 let mut html_body: [u8; 512];
@@ -36,7 +49,7 @@ let mut html_body: [u8; 512];
 // not part of this classification.
 //
 // This enum plus ConnState below are matched against each other
-// two-deep (match conn_state { ... => match ev { ... } ... }) in
+// two-deep (match tcp_conn_state() { ... => match ev { ... } ... }) in
 // http_server_poll_once, so every (state, event) cell is an explicit,
 // exhaustiveness-checked line instead of an if-else chain that can
 // silently fall through an unconsidered combination. That silent
@@ -70,24 +83,31 @@ fn tcp_remote_matches(ip: [u8; 20..], src_port: u16) -> bool {
            src_port == conn_remote_port;
 }
 
-// Witness token (issue #117): proves the closing ACK for a LastAck ->
-// Listen transition was actually built and queued for transmission
-// before the connection is allowed to forget about it -- the compile-
-// time form of the fix for issue #116's incident, where that transition
-// happened without the corresponding ACK ever being sent. Same idiom as
-// examples/klock_guard's KGuard and fat12.tkb's FatFile: an affine
-// opaque sentinel produced only by the function that performs the real
-// action, consumed only by the function that is allowed to act on
-// having done so.
-affine opaque struct AckSent;
-
-fn tcp_mark_final_ack_sent() -> *AckSent {
-    return 0 as usize as *AckSent;
-}
-
-fn tcp_close_connection(proof: sink *AckSent) {
-    conn_state = ConnState::Listen;
-}
+// Witness tokens (issue #117): each state transition that pairs "build/queue
+// a segment to transmit" with "move the connection phase forward" is gated
+// by its own affine opaque token, and -- this is the load-bearing part --
+// **the token is returned by the function that actually builds the
+// segment**, not minted separately next to it. An earlier iteration of
+// this file had standalone tcp_mark_*_sent() mint functions called by
+// convention right after each builder; that only proved "the programmer
+// claimed the segment was built", since deleting the builder call and
+// keeping the mint still compiled. With the builder itself as the token's
+// only producer (ATS2-style "the action returns its own proof", the same
+// move fat_open already makes by returning FatFile), code that skips the
+// build has no way to obtain the token short of a bare forgery cast
+// (`N as usize as *Token`), which remains possible (SPEC.md's documented
+// affine escape hatch) but is a one-line, greppable, review-visible act
+// rather than an accident. Fallible builders return a null token on
+// failure (the NetRxCpuOwned null-sentinel precedent) so the token is
+// only ever non-null on the success path, and the segment length travels
+// through an out-parameter since this language has no tuples.
+//
+// The token types, the conn_state phase variable, and the transition
+// functions that consume the tokens all live in http_conn_state.tkb (see
+// its header for why that split exists: `private` is file-granular, so
+// isolating them makes even THIS file unable to move the phase without a
+// token). This file keeps the builders (token producers) and all
+// sequence-number bookkeeping.
 
 fn build_arp_reply(eth: [u8; 42..]) {
     let arp = eth[14..<42];
@@ -115,7 +135,7 @@ fn fix_tcp_checksum(ip: [u8; 20..], tcp_seg: [u8; 20..]) {
                 checksum_fold(checksum_add(tcp_seg, sum)));
 }
 
-fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
+fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) -> *SynAckSent {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 
@@ -141,9 +161,10 @@ fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     write_u16be(tcp[TCP_URGENT..<20], 0);
 
     fix_tcp_checksum(ip, tcp);
+    return 1 as usize as *SynAckSent;
 }
 
-fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
+fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) -> *FinSent {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 
@@ -169,6 +190,7 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     write_u16be(tcp[TCP_URGENT..<20], 0);
 
     fix_tcp_checksum(ip, tcp);
+    return 1 as usize as *FinSent;
 }
 
 fn build_rst_from_ack(eth: [u8; 54..], ihl: {20..<21 as u16}, seq_out: u32) {
@@ -237,6 +259,42 @@ fn build_tcp_payload(eth: [u8; 1514..], ihl: {20..<21 as u16},
     return -1;
 }
 
+// Fallible token-returning builders (see the witness-token comment above):
+// each wraps the underlying payload builder, translating its "length or -1"
+// return convention into "non-null token + length via out_len, or null
+// token". The token is only ever non-null when the wrapped builder actually
+// reported success, so a caller holding a non-null token holds evidence the
+// segment really was built. build_tcp_payload itself keeps its generic
+// signature (http_sdcard_server.tkb calls it directly for data segments
+// that are not tied to any state transition).
+fn build_http_response(eth: [u8; 1514..], ihl: {20..<21 as u16},
+                       req: *u8, req_len: u16, out_len: *i32) -> *ResponseSent {
+    let n: i32 = http_start_response(eth, ihl, req, req_len);
+    if (n >= 0) {
+        *out_len = n;
+        return 1 as usize as *ResponseSent;
+    }
+    return 0 as usize as *ResponseSent;
+}
+
+fn build_http_continuation(eth: [u8; 1514..], ihl: {20..<21 as u16},
+                           out_len: *i32) -> *ContinuationSent {
+    let n: i32 = http_continue_response(eth, ihl);
+    if (n >= 0) {
+        *out_len = n;
+        return 1 as usize as *ContinuationSent;
+    }
+    return 0 as usize as *ContinuationSent;
+}
+
+fn build_final_ack(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> *AckSent {
+    let n: i32 = build_tcp_payload(eth, ihl, 0, TCP_FLAG_ACK);
+    if (n >= 0) {
+        return 1 as usize as *AckSent;
+    }
+    return 0 as usize as *AckSent;
+}
+
 fn http_server_poll_once() {
     net_rx_wait();
     let acquired: *NetRxCpuOwned = net_rx_acquire();
@@ -303,7 +361,7 @@ fn http_server_poll_once() {
                                 if (dst_port == HTTP_PORT) {
                                     let ev: TcpEvent = classify_tcp_event(flags);
 
-                                    match conn_state {
+                                    match tcp_conn_state() {
                                         ConnState::Listen => {
                                             match ev {
                                                 TcpEvent::Syn => {
@@ -312,10 +370,10 @@ fn http_server_poll_once() {
                                                     conn_rcv_nxt = seq + 1;
                                                     conn_snd_nxt = TCP_INITIAL_SEQ + 1;
 
-                                                    build_syn_ack(frame, ihl);
+                                                    let proof: *SynAckSent = build_syn_ack(frame, ihl);
                                                     should_tx = 1;
                                                     tx_len = 14 + ihl + 20;
-                                                    conn_state = ConnState::SynRcvd;
+                                                    tcp_accept_connection(proof);
                                                 }
                                                 TcpEvent::Ack => {
                                                     // Unsolicited ACK on a listening socket: send a
@@ -337,12 +395,12 @@ fn http_server_poll_once() {
                                             if (tcp_remote_matches(ip, src_port)) {
                                                 match ev {
                                                     TcpEvent::Rst => {
-                                                        conn_state = ConnState::Listen;
+                                                        tcp_reset_to_listen();
                                                     }
                                                     TcpEvent::Ack => {
                                                         if ((flags & TCP_FLAG_SYN) == 0 &&
                                                             ack == conn_snd_nxt && seq == conn_rcv_nxt) {
-                                                            conn_state = ConnState::Established;
+                                                            tcp_handshake_complete();
                                                         }
                                                         // else: invalid handshake ACK. Ignore.
                                                     }
@@ -361,16 +419,16 @@ fn http_server_poll_once() {
                                             if (tcp_remote_matches(ip, src_port)) {
                                                 match ev {
                                                     TcpEvent::Rst => {
-                                                        conn_state = ConnState::Listen;
+                                                        tcp_reset_to_listen();
                                                     }
                                                     TcpEvent::FinAck => {
                                                         if (seq == conn_rcv_nxt) {
                                                             conn_rcv_nxt = conn_rcv_nxt + 1;
-                                                            build_fin_ack(frame, ihl);
+                                                            let proof: *FinSent = build_fin_ack(frame, ihl);
                                                             should_tx = 1;
                                                             tx_len = 14 + ihl + 20;
                                                             conn_snd_nxt = conn_snd_nxt + 1;
-                                                            conn_state = ConnState::LastAck;
+                                                            tcp_begin_close(proof);
                                                         }
                                                         // else: stale FIN, wrong seq. Ignore.
                                                     }
@@ -387,17 +445,18 @@ fn http_server_poll_once() {
                                                                 conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
                                                                 let req: *u8 =
                                                                     (frame as *u8) + (data_off_idx as isize);
-                                                                let payload_len: i32 =
-                                                                    http_start_response(frame, ihl, req, data_len);
-                                                                if (payload_len >= 0) {
+                                                                let mut resp_len: i32 = 0;
+                                                                let proof: *ResponseSent =
+                                                                    build_http_response(frame, ihl, req, data_len, &resp_len);
+                                                                if ((proof as usize) != 0) {
                                                                     should_tx = 1;
-                                                                    tx_len = 14 + (ihl as i32) + 20 + payload_len;
-                                                                    conn_snd_nxt = conn_snd_nxt + (payload_len as u32);
+                                                                    tx_len = 14 + (ihl as i32) + 20 + resp_len;
+                                                                    conn_snd_nxt = conn_snd_nxt + (resp_len as u32);
                                                                     if (http_response_done()) {
                                                                         conn_snd_nxt = conn_snd_nxt + 1;
-                                                                        conn_state = ConnState::LastAck;
+                                                                        tcp_response_complete(proof);
                                                                     } else {
-                                                                        conn_state = ConnState::Sending;
+                                                                        tcp_response_continues(proof);
                                                                     }
                                                                 }
                                                                 // else: response build failed. Ignore.
@@ -419,22 +478,25 @@ fn http_server_poll_once() {
                                             if (tcp_remote_matches(ip, src_port)) {
                                                 match ev {
                                                     TcpEvent::Rst => {
-                                                        conn_state = ConnState::Listen;
+                                                        tcp_reset_to_listen();
                                                     }
                                                     TcpEvent::Ack => {
                                                         if (seq == conn_rcv_nxt && ack == conn_snd_nxt) {
-                                                            let payload_len: i32 =
-                                                                http_continue_response(frame, ihl);
-                                                            if (payload_len >= 0) {
+                                                            let mut cont_len: i32 = 0;
+                                                            let proof: *ContinuationSent =
+                                                                build_http_continuation(frame, ihl, &cont_len);
+                                                            if ((proof as usize) != 0) {
                                                                 should_tx = 1;
-                                                                tx_len = 14 + (ihl as i32) + 20 + payload_len;
-                                                                conn_snd_nxt = conn_snd_nxt + (payload_len as u32);
+                                                                tx_len = 14 + (ihl as i32) + 20 + cont_len;
+                                                                conn_snd_nxt = conn_snd_nxt + (cont_len as u32);
                                                                 if (http_response_done()) {
                                                                     conn_snd_nxt = conn_snd_nxt + 1;
-                                                                    conn_state = ConnState::LastAck;
+                                                                    tcp_continuation_complete(proof);
                                                                 }
                                                                 // else: more segments queued. Stay
-                                                                // Sending.
+                                                                // Sending (proof dropped unconsumed:
+                                                                // affine = at most once, and no
+                                                                // transition happens here to need it).
                                                             }
                                                             // else: response build failed. Ignore.
                                                         }
@@ -455,23 +517,20 @@ fn http_server_poll_once() {
                                             if (tcp_remote_matches(ip, src_port)) {
                                                 match ev {
                                                     TcpEvent::Rst => {
-                                                        conn_state = ConnState::Listen;
+                                                        tcp_reset_to_listen();
                                                     }
                                                     TcpEvent::FinAck => {
                                                         if (seq == conn_rcv_nxt && ack == conn_snd_nxt) {
                                                             conn_rcv_nxt = conn_rcv_nxt + 1;
-                                                            let payload_len: i32 =
-                                                                build_tcp_payload(frame, ihl, 0,
-                                                                                  TCP_FLAG_ACK);
-                                                            if (payload_len >= 0) {
+                                                            // Witness token (issue #117): the token is
+                                                            // only non-null once the closing ACK was
+                                                            // actually built, so the Listen transition
+                                                            // below is unreachable without it -- the
+                                                            // compile-time form of issue #116's fix.
+                                                            let proof: *AckSent = build_final_ack(frame, ihl);
+                                                            if ((proof as usize) != 0) {
                                                                 should_tx = 1;
-                                                                tx_len = 14 + (ihl as i32) + 20 + payload_len;
-                                                                // Witness token (issue #117): forces
-                                                                // this transition to only be reachable
-                                                                // right after the closing ACK above was
-                                                                // actually built and queued -- see
-                                                                // AckSent's declaration comment.
-                                                                let proof: *AckSent = tcp_mark_final_ack_sent();
+                                                                tx_len = 14 + (ihl as i32) + 20;
                                                                 tcp_close_connection(proof);
                                                             }
                                                             // else: build failed (should not happen
@@ -482,7 +541,7 @@ fn http_server_poll_once() {
                                                     }
                                                     TcpEvent::Ack => {
                                                         if (ack == conn_snd_nxt) {
-                                                            conn_state = ConnState::Listen;
+                                                            tcp_reset_to_listen();
                                                         }
                                                         // else: stale ACK. Ignore.
                                                     }

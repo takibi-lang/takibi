@@ -138,9 +138,13 @@ type func = {
 
 type toplevel =
   | FuncDef of func
-  | LetDef of ident * type_expr option * expr option * int option * bool
-  (* name, type, init, align_bytes, is_mutable -- align_bytes = Some N means global align(N).
-     is_mutable: `let mut` = true (variable), plain `let` = false (compile-time constant). *)
+  | LetDef of ident * type_expr option * expr option * int option * bool * bool * loc
+  (* name, type, init, align_bytes, is_mutable, is_private, loc -- align_bytes = Some N means
+     global align(N). is_mutable: `let mut` = true (variable), plain `let` = false (compile-time
+     constant). is_private (GitHub issue #108): `private let ...` restricts every reference to
+     this global (read or write, via Var/Assign) to expressions/statements whose own source file
+     (loc.pos_fname) matches this declaration's own loc -- enforced in type_inf.ml. loc is this
+     declaration's own position, needed to know which file "declared" it. *)
   | ExternFuncDef of ident * (ident * type_expr option) list * type_expr option
   (* extern fn name(params) -> ret; -- body is provided by external assembly *)
   | StructDef of string * (string * type_expr) list * bool * int option

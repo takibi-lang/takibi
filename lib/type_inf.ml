@@ -441,6 +441,36 @@ let resolved_call_targets = ref StringMap.empty
 let global_align_bytes_baseline : int StringMap.t ref = ref StringMap.empty
 let var_align_bytes : int StringMap.t ref = ref StringMap.empty
 
+(* GitHub issue #108: `private let` global name -> the source file (loc.pos_fname)
+   it was declared in. Populated once, early in infer_program (globals are visible
+   everywhere and already uniqueness-checked by claim_toplevel_name), then consulted
+   by every ident-based reference site below (Var, Assign, Index, AssignIndex,
+   SliceOf -- every AST construct that can name a global directly) to reject a
+   reference whose OWN loc.pos_fname differs from the declaring file. This is a
+   whole-program table rather than a closure-local one for the same reason
+   affine_opaque_names/global_align_bytes_baseline above are: infer_expr/infer_stmt
+   are top-level functions with no access to infer_program's own locals. *)
+let private_globals : (string, string) Hashtbl.t = Hashtbl.create 8
+
+(* Known limitation: this checks by NAME only, not by resolved binding, so a
+   local variable/parameter in a different file that happens to share a
+   private global's exact name would be misidentified as a violation (a
+   false-positive compile error, not a silent miscompilation -- the safe
+   failure direction, but still worth fixing if it ever bites). Distinguishing
+   "this Var resolves to the shadowing local" from "this Var resolves to the
+   global" would need threading a locally-bound-names set through
+   infer_expr/infer_stmt, which no other check in this file needs today. Not
+   done here since it is not needed by any currently-compiled-together file
+   (verified: no other file's local declares any of the 5 names this feature
+   currently protects) -- see GitHub issue #108. *)
+let check_private_global_access (use_loc : Ast.loc) (name : string) : unit =
+  match Hashtbl.find_opt private_globals name with
+  | Some decl_file when decl_file <> use_loc.Lexing.pos_fname ->
+      raise (TypeError (use_loc, Printf.sprintf
+        "'%s' is a private global declared in '%s'; it may only be referenced \
+         from that same file" name decl_file))
+  | _ -> ()
+
 let rec gcd a b = if b = 0 then abs a else gcd b (a mod b)
 
 (* Is this integer expression PROVABLY a multiple of some compile-time-
@@ -543,6 +573,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | BoolLit _   -> TBool
   | StringLit _ -> TPtr TU8
   | Var name ->
+      check_private_global_access e.loc name;
       (* Check local/global variables first *)
       (match StringMap.find_opt name tyenv with
        | Some (t, _) ->
@@ -774,6 +805,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | AddrOf inner ->
       (match inner.desc with
        | Var name ->
+           check_private_global_access e.loc name;
            let (t, is_mut) = lookup_binding e.loc name tyenv in
            if not is_mut then
              raise (TypeError (e.loc,
@@ -1060,6 +1092,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              Printf.sprintf "no field '%s' in struct '%s'" fname sname))))
 
   | Index (id, idx) ->
+      check_private_global_access e.loc id;
       (* Get the variable's original type (no array decay, unlike Var) *)
       let vt = lookup e.loc id tyenv in
       let it = infer_expr senv eenv tyenv fenv idx in
@@ -1100,6 +1133,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt))))
 
   | SliceOf (id, lo_e, hi_e) ->
+      check_private_global_access e.loc id;
       let vt = lookup e.loc id tyenv in
       let lo_t = infer_expr senv eenv tyenv fenv lo_e in
       let hi_t = infer_expr senv eenv tyenv fenv hi_e in
@@ -1764,6 +1798,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       ignore (infer_expr senv eenv tyenv fenv e);
       (tyenv, raw_locals)
   | Assign (name, e) ->
+      check_private_global_access s.loc name;
       let (vty, is_mut) = lookup_binding s.loc name tyenv in
       if not is_mut then
         raise (TypeError (s.loc,
@@ -1790,6 +1825,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       check_literal_fits_refined val_expr.loc val_expr inner;
       (tyenv, raw_locals)
   | AssignIndex (id, idx, rhs) ->
+      check_private_global_access s.loc id;
       (* Dispatch on the variable's original type ([T; N] vs *T). tyenv holds the pre-decay type *)
       let vt = lookup s.loc id tyenv in
       let it = infer_expr senv eenv tyenv fenv idx in
@@ -2281,7 +2317,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   List.iter (function
     | Ast.FuncDef fdef          -> claim_toplevel_name fdef.name "function"
     | Ast.ExternFuncDef (n, _, _) -> claim_toplevel_name n "function"
-    | Ast.LetDef (n, _, _, _, _)  -> claim_toplevel_name n "global"
+    | Ast.LetDef (n, _, _, _, _, _, _)  -> claim_toplevel_name n "global"
     | Ast.StructDef (n, _, _, _)  -> claim_toplevel_name n "struct"
     | Ast.OpaqueStructDef (n, _)  -> claim_toplevel_name n "struct"
     | Ast.EnumDef (n, _, _, _)    -> claim_toplevel_name n "enum"
@@ -2297,9 +2333,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   ) StringSet.empty prog in
   affine_opaque_names := affine_names;
   global_align_bytes_baseline := List.fold_left (fun m -> function
-    | Ast.LetDef (name, _, _, Some n, _) -> StringMap.add name n m
+    | Ast.LetDef (name, _, _, Some n, _, _, _) -> StringMap.add name n m
     | _ -> m
   ) StringMap.empty prog;
+  Hashtbl.reset private_globals;
+  List.iter (function
+    | Ast.LetDef (name, _, _, _, _, true, loc) ->
+        Hashtbl.replace private_globals name loc.Lexing.pos_fname
+    | _ -> ()
+  ) prog;
   let rec validate_complete_type loc behind_ptr = function
     | Ast.TypeNamed name when StringSet.mem name opaque_names && not behind_ptr ->
         raise (TypeError (loc, Printf.sprintf
@@ -2394,7 +2436,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                to infer them from)" name pname))
         ) params;
         Option.iter (validate_nonparam_type Lexing.dummy_pos) ret
-    | Ast.LetDef (_, ty, init, _, _) ->
+    | Ast.LetDef (_, ty, init, _, _, _, _) ->
         Option.iter (validate_nonparam_type Lexing.dummy_pos) ty;
         Option.iter validate_expr_types init
     | Ast.StructDef (_, fields, _, _) ->
@@ -2537,7 +2579,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      name reaching here is already known unique across the whole
      program. *)
   let genv = List.fold_left (fun m -> function
-    | Ast.LetDef (name, ty_opt, _, _, is_mutable) ->
+    | Ast.LetDef (name, ty_opt, _, _, is_mutable, _, _) ->
         StringMap.add name (of_ast_opt ty_opt, is_mutable) m
     | Ast.FuncDef _                -> m
     | Ast.ExternFuncDef _          -> m
@@ -2563,7 +2605,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      below. Now a List.fold_left threading an updated genv forward
      (instead of a plain List.iter) for exactly this reason. *)
   let genv = List.fold_left (fun genv item -> match item with
-    | Ast.LetDef (name, _, expr_opt, _, is_mutable) ->
+    | Ast.LetDef (name, _, expr_opt, _, is_mutable, _, _) ->
         let (ty, _) = StringMap.find name genv in
         (match expr_opt with
          | None ->
@@ -2916,15 +2958,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      only ever determined by f's own return-type unification, which Pass
      3 performs). Checking right after Pass 2 (as first attempted)
      rejected that as a false positive; checking here, after everything
-     that could ever constrain a global has run, does not. LetDef/genv
-     carry no source location (see the Lexing.dummy_pos precedent in Pass
-     2, for the same underlying reason), so this reports the same
-     placeholder position other whole-program global checks already do. *)
+     that could ever constrain a global has run, does not. LetDef now
+     carries its own declaration loc (issue #108's private-global
+     enforcement needed it), so this reports the real position instead of
+     the Lexing.dummy_pos placeholder other whole-program global checks
+     still use. *)
   List.iter (function
-    | Ast.LetDef (name, None, _, _, _) ->
+    | Ast.LetDef (name, None, _, _, _, _, loc) ->
         (match StringMap.find_opt name genv with
          | Some (ty, _) when is_undetermined ty ->
-             raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+             raise (TypeError (loc, Printf.sprintf
                "cannot determine a concrete type for global '%s': add an \
                 explicit type annotation (e.g. `: i32`) -- this language \
                 does not default an undetermined integer type" name))

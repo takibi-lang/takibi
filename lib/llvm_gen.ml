@@ -3256,7 +3256,7 @@ let gen_program ?prog_types prog =
   (* Pass 1: register all globals and function signatures *)
   List.iter (function
     | FuncDef fdef                    -> declare_func ?prog_types fdef
-    | LetDef (name, ty_opt, expr_opt, align_opt, is_mutable) ->
+    | LetDef (name, ty_opt, expr_opt, align_opt, is_mutable, _, _) ->
         gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable
     | ExternFuncDef (name, params, ret_ty) ->
         if not (Hashtbl.mem functions name) then begin

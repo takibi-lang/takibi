@@ -1,0 +1,103 @@
+// TCP connection-state (phase) variable and its ONLY legal writers, isolated
+// in their own file (GitHub issues #108 + #117).
+//
+// Why a separate file: `private` enforces at FILE granularity, so keeping
+// `conn_state` and the designated transition functions here -- and nothing
+// else -- makes "every state change goes through a designated transition
+// function" a COMPILE ERROR to violate from the state-machine logic in
+// http_server_common.tkb, not a naming convention. Before this split, any
+// function in http_server_common.tkb could still write `conn_state = ...`
+// directly, silently bypassing the witness-token discipline; the type
+// system's trusted island is now exactly the one-line bodies below plus
+// the token forgery cast (`N as usize as *Token`, SPEC.md's documented
+// affine escape hatch) -- both greppable, both confined to review-sized
+// surface. Verifying these bodies SEMANTICALLY (that each writes the state
+// its name claims) is out of scope for the type system today; that residue
+// is issue #13 (SMT) territory, per the layering discussed on issue #117.
+//
+// Transitions whose trigger obliges us to SEND something take an affine
+// witness token produced only by the corresponding segment builder in
+// http_server_common.tkb (see the witness-token comment there). Transitions
+// with no send obligation (peer RST, final ACK of our FIN, handshake ACK
+// received) are plain designated functions -- still the only syntactic path
+// to the write, just with nothing to prove first.
+//
+// Deliberately NOT here: conn_snd_nxt/conn_rcv_nxt sequence-number
+// bookkeeping (stays private to http_server_common.tkb -- it is wire
+// arithmetic, not phase), and any protocol logic. This file should stay
+// small enough to audit at a glance.
+
+enum ConnState: u8 {
+    Listen;
+    SynRcvd;
+    Established;
+    Sending;
+    LastAck;
+}
+
+private let mut conn_state: ConnState = ConnState::Listen;
+
+// Witness tokens: one distinct affine opaque type per send-obliged
+// transition. Produced only by the segment builders in
+// http_server_common.tkb (the action returns its own proof); consumed only
+// here.
+affine opaque struct SynAckSent;
+affine opaque struct FinSent;
+affine opaque struct ResponseSent;
+affine opaque struct ContinuationSent;
+affine opaque struct AckSent;
+
+// The one read path for dispatching on the current state.
+fn tcp_conn_state() -> ConnState {
+    return conn_state;
+}
+
+// -- Send-obliged transitions (token required) ---------------------------
+
+// Listen -> SynRcvd: a SYN-ACK for the new connection was built and queued.
+fn tcp_accept_connection(proof: sink *SynAckSent) {
+    conn_state = ConnState::SynRcvd;
+}
+
+// Established -> LastAck: the peer sent FIN; our FIN+ACK was built and queued.
+fn tcp_begin_close(proof: sink *FinSent) {
+    conn_state = ConnState::LastAck;
+}
+
+// Established -> LastAck: a single-segment response (with FIN) was built and
+// queued, closing our side.
+fn tcp_response_complete(proof: sink *ResponseSent) {
+    conn_state = ConnState::LastAck;
+}
+
+// Established -> Sending: the first segment of a multi-segment response was
+// built and queued; more segments remain.
+fn tcp_response_continues(proof: sink *ResponseSent) {
+    conn_state = ConnState::Sending;
+}
+
+// Sending -> LastAck: the final continuation segment (with FIN) was built
+// and queued.
+fn tcp_continuation_complete(proof: sink *ContinuationSent) {
+    conn_state = ConnState::LastAck;
+}
+
+// LastAck -> Listen: the ACK answering the peer's FIN+ACK was built and
+// queued -- the compile-time form of issue #116's fix.
+fn tcp_close_connection(proof: sink *AckSent) {
+    conn_state = ConnState::Listen;
+}
+
+// -- Transitions with no send obligation ----------------------------------
+
+// SynRcvd -> Established: the peer's valid handshake ACK arrived; nothing
+// to send.
+fn tcp_handshake_complete() {
+    conn_state = ConnState::Established;
+}
+
+// Any state -> Listen with nothing owed to the peer: an incoming RST, or the
+// peer's plain ACK of our FIN in LastAck.
+fn tcp_reset_to_listen() {
+    conn_state = ConnState::Listen;
+}

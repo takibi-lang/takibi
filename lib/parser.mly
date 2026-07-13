@@ -65,7 +65,7 @@ let check_refined_base_range pos lo hi base =
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE
+%token FN RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
 %token DARROW COLONCOLON UNDERSCORE
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT
 %token ASSIGN DOT
@@ -114,15 +114,19 @@ items:
   | /* empty */ { false }
   | MUT         { true }
 
+%inline private_flag:
+  | /* empty */ { false }
+  | PRIVATE     { true }
+
 item:
   | func_def { FuncDef $1 }
-  | LET m = mut_flag IDENT let_rhs SEMI
-    { Const_env.define_if_literal m $3 (snd $4);
-      LetDef ($3, fst $4, snd $4, None, m) }
-  | LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN INT RPAREN SEMI
-    { LetDef ($3, Some $5, None, Some (narrow_int64 $symbolstartpos "alignment" $8), m) }
-  | LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN INT RPAREN ASSIGN expr SEMI
-    { LetDef ($3, Some $5, Some $11, Some (narrow_int64 $symbolstartpos "alignment" $8), m) }
+  | p = private_flag LET m = mut_flag IDENT let_rhs SEMI
+    { Const_env.define_if_literal m $4 (snd $5);
+      LetDef ($4, fst $5, snd $5, None, m, p, $symbolstartpos) }
+  | p = private_flag LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN INT RPAREN SEMI
+    { LetDef ($4, Some $6, None, Some (narrow_int64 $symbolstartpos "alignment" $9), m, p, $symbolstartpos) }
+  | p = private_flag LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN INT RPAREN ASSIGN expr SEMI
+    { LetDef ($4, Some $6, Some $12, Some (narrow_int64 $symbolstartpos "alignment" $9), m, p, $symbolstartpos) }
   | EXTERN FN IDENT LPAREN params RPAREN SEMI
     { ExternFuncDef ($3, $5, None) }
   | EXTERN FN IDENT LPAREN params RPAREN ARROW type_expr SEMI
