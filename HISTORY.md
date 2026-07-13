@@ -7167,3 +7167,48 @@ a checker could make missing `(state, event)` cases like `LastAck +
 FIN|ACK` visible at compile time. A separate future effect/latency check
 could flag latency-sensitive TCP paths that synchronously call blocking SD
 or channel operations.
+
+## GitHub Issue #46: DWARF for Practical GDB Use
+
+The DWARF work moved from "metadata exists" to a live QEMU/GDB regression
+fixture in `examples/dwarf_debug`. The fixture now checks:
+
+- typed globals, enum names, struct member layout, slice fat-value layout,
+  and `set variable` through QEMU's gdbstub;
+- scalar locals, immutable locals preserved through debug-only allocas,
+  slice locals, mutable aggregate locals, updated aggregate values, fixed
+  arrays, and nested aggregates;
+- aggregate function arguments after the prologue stores them into
+  stack-backed debug locations;
+- `step`, `next`, and basic `bt` usability;
+- locals declared in `if`, `else`, `while`, `match`, wildcard match arms,
+  nested blocks, `for`, and `foreach`.
+
+The live GDB output is normalized and compared against
+`examples/dwarf_debug/dwarf_debug.gdb.expected`. This is intentionally more
+readable than a pile of independent greps: a failure shows the expected
+debugger transcript shape and the diff. The old intermittent
+`run_dwarf_test "fizzbuzz (dwarf)"` line-table-only check was deleted
+because it exercised a weaker proxy than the live GDB test and had already
+proven flaky for reasons outside Takibi DWARF emission.
+
+Several compromises are intentional and tracked separately:
+
+- Takibi shadowing semantics are not decided, so same-name local lexical
+  scope behavior is deferred to GitHub issue #122.
+- LLVM's OCaml bindings do not expose the APIs Takibi would need for the
+  clean implementation: `dbg.value`-style value locations for SSA/register
+  values and subrange/subscript metadata construction for natural fixed
+  array display. Current workarounds use debug-only allocas, volatile
+  debug-preservation stores, prologue stepping for aggregate parameters,
+  and GDB artificial array expressions. This is tracked in GitHub issue
+  #123.
+- Current `-g` prioritizes debugger usability and can change code
+  generation compared with an optimized no-debug build. A separate
+  "debug the exact optimized binary, even with poorer variable visibility"
+  mode is tracked in GitHub issue #124.
+
+The DWARF work also found one compiler bug while adding STM32 RAM debug ELF
+targets for HTTP examples: function pointer parameters were emitted as bare
+DWARF subroutine types instead of pointer-to-subroutine types. That is fixed
+in `lib/llvm_gen.ml`, with a regression in `test/test_takibi.ml`.

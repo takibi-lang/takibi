@@ -239,7 +239,9 @@ lib/
 bin/
   main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--forbid-trap] [--version]`)
                      Multiple .tkb files are concatenated (flat global namespace) before compilation.
-                     -g emits DWARF debug info -- see the `profile-qemu` skill for the full profiling workflow.
+                     -g emits full DWARF debug info. QEMU/GDB source-level regression coverage lives in
+                     examples/dwarf_debug and scripts/run_qemutest.sh; the PC-sampling profiler is a
+                     separate use of the same gdbstub plumbing.
                      --version prints the version from dune-project's `(version ...)` field via
                      the `dune-build-info` library (`Build_info.V1.version ()`) and exits 0 --
                      bump `dune-project`'s package version to change what this prints, nothing in
@@ -482,12 +484,18 @@ for `http_server` -- now lives in `HISTORY.md`. See
 examples share, and each example's own header comment for a
 one-line description of what it does.
 
-## Execution Profiling (QEMU)
+## Debug Info and Execution Profiling (QEMU)
 
-DWARF debug-info emission and the gdbstub-based sampling profiler --
-including the finding that this technique only works for CPU-bound code,
-not network/interrupt-driven I/O -- now live in the **`profile-qemu`**
-skill. Invoke that skill rather than reading the details here.
+`-g` emits full DWARF intended to be useful in real `gdb-multiarch`
+sessions, not just to satisfy `llvm-dwarfdump`. The live QEMU/GDB
+regression fixture is `examples/dwarf_debug/dwarf_debug.tkb`, with
+normalized expected output in `examples/dwarf_debug/dwarf_debug.gdb.expected`
+and the harness in `scripts/run_qemutest.sh`.
+
+The same QEMU gdbstub plumbing is also used by the sampling profilers for
+HTTP/TCP experiments. That technique is useful for CPU-bound code, but it
+is a poor fit for network/interrupt-driven I/O where idle wait time can
+dominate samples.
 
 ## Instructions for Claude Code
 
@@ -512,9 +520,9 @@ qemu-system-aarch64     (for QEMU execution)
 gdb-multiarch           (AArch64-capable gdb; stock `gdb` on this platform is x86_64-only and
                          cannot parse QEMU's AArch64 target-description XML over the remote
                          protocol -- confirmed by the "unknown architecture aarch64" / truncated
-                         register errors it raises. Needed for gdb-remote-based tooling, e.g. a
-                         QEMU-based sampling profiler; not needed for DWARF emission itself.
-                         Also used for STM32 hardware debugging via openocd's gdbstub.)
+                         register errors it raises. Needed by the live DWARF/GDB regression,
+                         QEMU-based sampling profilers, and STM32 hardware debugging via
+                         openocd's gdbstub.)
 openocd, stlink-tools   (for STM32F746G-DISCOVERY: openocd for SWD debug/register inspection,
                          `st-flash`/`st-info` (stlink-tools) for flashing -- see "STM32F746G-
                          DISCOVERY Bare-Metal" above. Requires USB passthrough set up in

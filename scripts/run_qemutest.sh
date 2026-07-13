@@ -287,56 +287,6 @@ run_virtio_test() {
     rm -f "$qemu_log"
 }
 
-# run_dwarf_test NAME KERNEL SRC_TKB
-#
-# Verifies the DWARF line table emitted by a -g build actually resolves an
-# address back to the correct source line, using two independent tools so a
-# bug in either one alone wouldn't slip through:
-#   - llvm-dwarfdump-19 --debug-line: checks SRC_TKB's basename appears in
-#     the file_names table (proves the compile unit references the right
-#     source file at all).
-#   - addr2line, pointed at the address of `app_main` (found via llvm-nm-19):
-#     checks the resolved "file:line" is an ABSOLUTE path ending in
-#     ":<MAIN_LINE>". Requiring an absolute path guards against the exact
-#     bug this check was written for: DIFile directories left relative get
-#     silently concatenated onto the compile unit's comp_dir by these tools,
-#     e.g. "examples/common/examples/fizzbuzz/fizzbuzz.tkb" instead of
-#     ".../examples/fizzbuzz/fizzbuzz.tkb" (see lib/llvm_gen.ml's
-#     di_file_for comment for the fix).
-# MAIN_LINE (the source line `fn app_main()` is declared on) is passed explicitly
-# rather than grepped out of SRC_TKB, so this check fails loudly if fizzbuzz.tkb
-# is ever edited without updating it, instead of silently checking the wrong line.
-run_dwarf_test() {
-    local name="$1" kernel="$2" src_tkb="$3" main_line="$4"
-    local src_base main_addr resolved
-
-    if ! llvm-dwarfdump-19 --debug-line "$kernel" 2>/dev/null | grep -qF "name: \"$(basename "$src_tkb")\""; then
-        printf "${RED}FAIL${RST}  %s  (%s missing from DWARF file_names table)\n" "$name" "$(basename "$src_tkb")"
-        FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("$name")
-        return
-    fi
-
-    main_addr=$(llvm-nm-19 "$kernel" 2>/dev/null | awk '$3 == "app_main" { print "0x" $1; exit }')
-    if [ -z "$main_addr" ]; then
-        printf "${RED}FAIL${RST}  %s  (could not find 'app_main' symbol via llvm-nm-19)\n" "$name"
-        FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("$name")
-        return
-    fi
-
-    resolved=$(addr2line -e "$kernel" -f -C "$main_addr" 2>/dev/null | tail -n1)
-    if [[ "$resolved" == /* && "$resolved" == *":$main_line" ]]; then
-        printf "${GRN}PASS${RST}  %s  (app_main -> %s)\n" "$name" "$resolved"
-        PASS=$((PASS + 1))
-    else
-        printf "${RED}FAIL${RST}  %s  (expected an absolute path ending \":%s\", got \"%s\")\n" \
-            "$name" "$main_line" "$resolved"
-        FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("$name")
-    fi
-}
-
 # run_dwarf_var_test NAME KERNEL VARNAME TAG DECL_FILE_SUBSTR DECL_LINE TYPE_NAME
 #
 # Verifies a parameter/local variable (added to DWARF via gen_func's
@@ -777,23 +727,6 @@ run_compile_error_test "percpu_unrefined_rejected" examples/percpu_unrefined_rej
 echo ""
 echo "Running DWARF debug-info check (-g build)..."
 echo ""
-
-# DISABLED (2026-07-11): intermittently fails with "fizzbuzz.tkb missing
-# from DWARF file_names table" on a clean `make qemutest` run -- reproduced
-# directly (2 failures in 3 consecutive `make clean && make qemutest`
-# runs). Confirmed NOT a real bug in the generated DWARF: manually running
-# llvm-dwarfdump-19 against the exact kernel.debug.elf left on disk by a
-# failing run finds fizzbuzz.tkb in file_names[5] correctly. The content is
-# right; only this specific read of it, done immediately after ld.lld-19
-# finishes linking, sometimes doesn't see it -- and reproduces on bare
-# Linux (no container) too, so it is not a devcontainer/overlayfs artifact.
-# See GitHub issue for the reproduction writeup and open root-cause
-# question. Not retried/worked around here on purpose (a retry would hide
-# the underlying timing issue rather than fix or understand it) --
-# disabled outright until either root-caused or DWARF becomes something
-# this project actually relies on (no current workflow uses gdb to inspect
-# .tkb variables through it yet).
-# run_dwarf_test "fizzbuzz (dwarf)" examples/fizzbuzz/kernel.debug.elf examples/fizzbuzz/fizzbuzz.tkb 3
 
 FIB_DEBUG_ELF=examples/fibonacci/kernel.debug.elf
 run_dwarf_var_test "fibonacci a (dwarf var)"   "$FIB_DEBUG_ELF" a   DW_TAG_variable          fibonacci.tkb 4 i32
