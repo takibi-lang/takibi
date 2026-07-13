@@ -265,6 +265,12 @@ examples/
                      shared by every protocol example on both targets
     inet_checksum.tkb -- RFC 1071 Internet checksum (checksum_add/checksum_fold),
                      pure compute, no MMIO
+    http_server_common.tkb -- shared ARP/IPv4/TCP state machine for the HTTP
+                     examples; response generation is supplied by callbacks in
+                     the including example
+    http_sdcard_server.tkb -- shared SD-card-backed HTTP response generator,
+                     including path-to-8.3 mapping, content type selection, and
+                     multi-segment file streaming over the common TCP core
     fat12.tkb     -- FAT12 filesystem core (issue #61/#98): fat_format/fat_open/fat_read/
                      fat_write/fat_close over mem_block_read/mem_block_write, which callers
                      (fatfs.tkb's in-memory `disk`, fatfs_sdcard.tkb's/http_server_sdcard.tkb's
@@ -274,8 +280,9 @@ examples/
                      KLock/KGuard/klock/kunlock (examples/klock_guard), Chan/chan_send/
                      chan_recv (examples/chan_rendezvous), plus generic rtos_task_add/
                      rtos_start/task_self scheduling glue generalized from the fixed-3-task
-                     pattern examples/preempt/examples/msgqueue duplicated inline. QEMU-only
-                     today (not yet in STM32_RAM_EXAMPLES) -- see HISTORY.md's RTOS entries.
+                     pattern examples/preempt/examples/msgqueue duplicated inline. Used by
+                     both QEMU RTOS examples and STM32 RAM RTOS examples such as
+                     rtos_fatfs_sdcard/http_server_sdcard_rtos -- see HISTORY.md's RTOS entries.
                      task_yield() intentionally not implemented yet (YAGNI -- no task needs
                      voluntary switching today, see that file's header comment)
   common_qemu/    -- QEMU/AArch64-only HAL: startup assembly, linker script, and every
@@ -372,7 +379,9 @@ scripts/
                      Supersedes the deleted run_hwtest_net.sh.
   provision_http_server_sdcard.sh -- writes a real mtools-built FAT12 image onto
                      http_server_sdcard's SD card via OpenOCD + the real SDMMC1 driver, no
-                     human involved; shared by make hwcheck-net and make stm32-http-server-sdcard
+                     human involved; shared by make hwcheck-net,
+                     make stm32-http-server-sdcard, and
+                     make stm32-http-server-sdcard-rtos
                      (issue #97, see HISTORY.md)
 test/
   test_takibi.ml  -- Alcotest unit tests for parser / type_inf

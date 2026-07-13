@@ -186,10 +186,14 @@ deferrable convenience and architecture work.
 - **The TCP/IP stack and the FAT12 filesystem driver now meet**:
   `examples/http_server_sdcard` serves the real content of a file stored on
   a real SD card over HTTP, reachable from an actual web browser, on real
-  STM32F746G-DISCOVERY hardware -- SD card provisioning is fully automated
-  (`make hwcheck-net` / `make stm32-http-server-sdcard`, no human ever
-  touches the card) via OpenOCD-injected mtools images relayed onto the
-  card through the real SDMMC1 driver.
+  STM32F746G-DISCOVERY hardware. It serves multiple SD-card files
+  (`INDEX.HTM`, `ABOUT.HTM`, `ICON.PNG`) with multi-segment responses for
+  larger content. SD card provisioning is fully automated (`make
+  hwcheck-net` / `make stm32-http-server-sdcard`, no human ever touches
+  the card) via OpenOCD-injected mtools images relayed onto the card
+  through the real SDMMC1 driver. `examples/http_server_sdcard_rtos`
+  exercises the same HTTP+SD path with SD/FAT work behind an RTOS task
+  boundary and is also covered by `make hwcheck-net`.
 - Every ported example is a **single `.tkb` application source file** that
   compiles unchanged for QEMU/AArch64 and STM32/Cortex-M7. Platform-specific
   behavior is supplied by same-signature HAL files selected by the Makefile.
@@ -197,8 +201,10 @@ deferrable convenience and architecture work.
   `platform_init()`, `app_main()`, and `platform_shutdown()`; startup assembly
   remains independent of individual device drivers.
 - DWARF debug-info emission (`-g`) and a small gdbstub-based sampling
-  profiler are implemented, along with an analysis of what this profiling
-  technique is (and is not) useful for on interrupt-driven I/O code.
+  profiler are implemented, along with STM32/RAM debug ELF targets for
+  OpenOCD + GDB debugging of the HTTP examples and an analysis of what
+  this profiling technique is (and is not) useful for on interrupt-driven
+  I/O code.
 
 See [`SPEC.md`](SPEC.md) for the current language syntax and grammar, and
 `CLAUDE.md` for the full, continuously-updated engineering log of design

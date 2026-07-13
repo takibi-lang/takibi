@@ -41,11 +41,11 @@
 // demonstrated working end to end -- verified over real HTTP via a real
 // browser, and by physically removing the card and confirming INDEX.HTM
 // with a normal PC file manager -- --forbid-trap was turned on in one
-// pass; no sites needed fixing here (every new access is either a fixed-
-// size fat_read into html_body, matching its own declared 512-byte size,
-// or reuses http_server.tkb's already-proven slice-based logic
-// unchanged). See http_server_sdcard_install.tkb, part of the same
-// milestone, for the one file that DID need a fix.
+// pass; no sites needed fixing here. Later multi-segment support moved SD
+// response generation into shared helpers, and file data is now streamed
+// through caller-owned response buffers. See http_server_sdcard_install.tkb,
+// part of the same milestone, for the one file that DID need a fix during
+// the original issue #97 work.
 //
 // STM32-only: there is no virtual SD controller in this project's QEMU
 // setup (matches examples/fatfs_sdcard and examples/sdcard's own

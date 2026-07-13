@@ -9,8 +9,9 @@
 //
 // STAGE 2 SCOPE: GET / maps to INDEX.HTM, and simple single-component
 // 8.3 paths such as /ABOUT.HTM map to their corresponding FAT12 names.
-// Directory listings, long filenames, nested paths, and large multi-
-// segment responses remain out of scope.
+// Directory listings, long filenames, and nested paths remain out of
+// scope. Larger files are sent as multiple TCP segments, one chunk per
+// client ACK, still with one connection at a time and Connection: close.
 //
 // Multi-segment scope: still one TCP connection at a time and still
 // HTTP/1.1 Connection: close, but a response body may span multiple TCP
@@ -40,10 +41,10 @@
 // with a normal PC file manager -- --forbid-trap was turned on in one
 // pass; no sites needed fixing here (every new access is either a fixed-
 // size fat_read into the caller-owned response buffer, matching its own
-// declared 512-byte size,
-// or reuses http_server.tkb's already-proven slice-based logic
-// unchanged). See http_server_sdcard_install.tkb, part of the same
-// milestone, for the one file that DID need a fix.
+// declared size, or reuses the shared HTTP/TCP and SD-card response
+// helpers). See http_server_sdcard_install.tkb, part of the same
+// milestone, for the one file that DID need a fix during the original
+// issue #97 work.
 //
 // STM32-only: there is no virtual SD controller in this project's QEMU
 // setup (matches examples/fatfs_sdcard and examples/sdcard's own

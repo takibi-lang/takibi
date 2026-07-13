@@ -103,7 +103,7 @@ def expect_silence(sock: socket.socket, frame: bytes) -> bool:
 def do_request(sock: socket.socket, client_port: int, client_isn: int,
                 expected_count: int) -> bool:
     """SYN -> SYN-ACK -> ACK -> GET -> verify HTTP response (with the
-    expected request counter value) + FIN -> ACK -> verify silence."""
+    expected request counter value) + FIN -> peer FIN+ACK -> final ACK."""
     syn = build_frame(client_port, client_isn, 0, FLAG_SYN)
     reply = send_and_wait(sock, syn)
     if reply is None:
@@ -166,17 +166,44 @@ def do_request(sock: socket.socket, client_port: int, client_isn: int,
         print("  body:", body[:200])
         return False
 
-    # Server actively closed (FIN piggybacked on the response) -- ACK it
-    # and confirm silence, matching tcp_echo's active-close convention.
+    # Server actively closed (FIN piggybacked on the response). Real TCP
+    # clients typically answer with FIN|ACK when the application closes the
+    # socket after reading the response. This must be ACKed by the server:
+    # failing to do so leaves the host retransmitting stale FINs, which was
+    # the root cause of the intermittent http_server_sdcard_rtos /ICON.PNG
+    # timeout found while debugging issue #116.
+    #
     # The ack value must cover the *entire* response payload (headers +
     # body), not just the FIN -- getting this wrong leaves the server
     # stuck in TCP_LAST_ACK forever (it never sees ack == conn_snd_nxt),
     # which silently breaks every later connection for the rest of the
     # boot, not just this one.
     response_payload_len = len(tcp2) - tcp_hdr_len
-    final_ack = build_frame(client_port, client_isn + 1 + len(request),
-                             rseq + response_payload_len + 1, FLAG_ACK)
-    return expect_silence(sock, final_ack)
+    client_fin_seq = client_isn + 1 + len(request)
+    client_fin_ack = rseq + response_payload_len + 1
+    peer_fin = build_frame(client_port, client_fin_seq, client_fin_ack,
+                           FLAG_FIN | FLAG_ACK)
+    reply3 = send_and_wait(sock, peer_fin)
+    if reply3 is None:
+        print("  no final ACK for client FIN")
+        return False
+
+    ip3 = reply3[14:34]
+    tcp3 = reply3[34:]
+    src_port3, dst_port3, rseq3, rack3, _doff_res3, flags3 = struct.unpack("!HHIIBB", tcp3[0:14])
+    pseudo3 = ip3[12:16] + ip3[16:20] + bytes([0, 6]) + struct.pack("!H", len(tcp3))
+    close_ok = (
+        src_port3 == SERVER_PORT and dst_port3 == client_port and
+        flags3 == FLAG_ACK and
+        rseq3 == client_fin_ack and
+        rack3 == client_fin_seq + 1 and
+        checksum_fold(checksum_add(ip3)) == 0 and
+        checksum_fold(checksum_add(pseudo3 + tcp3)) == 0
+    )
+    if not close_ok:
+        print("  bad final ACK: flags=0x%02x seq=%d ack=%d" %
+              (flags3, rseq3, rack3))
+    return close_ok
 
 
 def test_single_request() -> bool:

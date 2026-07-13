@@ -5286,17 +5286,18 @@ was judged more likely to surface a *genuine* concrete RTOS requirement (if
 any) than building one speculatively first -- confirmed true: the milestone
 shipped with a single flat `app_main()` loop, no scheduler needed.
 
-**Stage 1 scope (deliberately incremental)**: any GET request returns the
-same fixed file's content (`INDEX.TXT`), read fresh from the card on every
-request. No path parsing, no directory listing, no multiple files -- proves
-the wiring (HTTP -> FAT12 -> SDMMC1 -> real card bytes -> HTTP response) end
-to end first. Directory listing / multi-file serving is a deliberately
-deferred stage 2 (no driving requirement yet). Serving images/JS is
-deliberately out of scope for a different, harder reason: `http_server.tkb`'s
-TCP layer (inherited unchanged) replies in exactly one TCP segment / one
-Ethernet frame -- there is no multi-segment TX yet, so response bodies are
-capped by `HTTP_MAX_PAYLOAD` regardless of what's on the card. Real
-multi-segment TX is separate, unscoped future work.
+**Original Stage 1 scope (deliberately incremental)**: any GET request
+returned the same fixed file's content (`INDEX.TXT`), read fresh from the
+card on every request. No path parsing, no directory listing, no multiple
+files -- it proved the wiring (HTTP -> FAT12 -> SDMMC1 -> real card bytes
+-> HTTP response) end to end first.
+
+**Current scope after the later HTTP+SD follow-ups**: GET `/` maps to
+`INDEX.HTM`, simple single-component 8.3 paths such as `/ABOUT.HTM` and
+`/ICON.PNG` map to their corresponding FAT12 names, and larger responses
+are streamed as multiple TCP segments (one chunk per client ACK, still one
+connection at a time and `Connection: close`). Directory listings, long
+filenames, nested paths, and richer MIME handling remain out of scope.
 
 **SD card content is mounted, never formatted** (`fat_mount()`, not
 `fat_format()`) -- unlike `fatfs_sdcard.tkb`, which formats and writes fixed
@@ -5304,8 +5305,10 @@ demo content on every run. The whole point of this milestone is showing the
 card's own, externally-provisioned content. Verified end to end by hand:
 loaded real content onto the card, served it over HTTP to a real Firefox
 tab, then physically removed the card, mounted it on a PC, and confirmed the
-served file (`INDEX.TXT`) was exactly what a normal file manager also saw --
-real interop with a real filesystem, not just an internal round trip.
+then-served file (`INDEX.TXT` at the original stage, later replaced by
+`INDEX.HTM`/`ABOUT.HTM`/`ICON.PNG`) was exactly what a normal file manager
+also saw -- real interop with a real filesystem, not just an internal round
+trip.
 
 **Fully automated SD card provisioning -- no human ever touches the card**,
 for both `make hwcheck-net` and the interactive `make stm32-http-server-sdcard`
@@ -7078,3 +7081,89 @@ exactly -- a resent duplicate's `seq` is already stale by the time a
 retry would fire, so it's silently ignored. This is the same
 duplicate-suppression property `tcp_echo_test.py` already depends on,
 just relied on for a new reason here.
+
+## HTTP/SD/RTOS Follow-up: Shared HTTP Core, Multi-Segment SD Content, and TCP Close Regression
+
+The HTTP examples were refactored after `http_server_sdcard_rtos` grew
+large enough that the duplicated TCP/IP state machine and SD-card response
+code became a maintenance risk.
+
+**Shared code now lives in two common files**:
+
+- `examples/common/http_server_common.tkb`: ARP/IPv4/TCP state machine,
+  including SYN/SYN-ACK, request dispatch, ACK-driven multi-segment
+  response progress, FIN/ACK close handling, and stale closed-connection
+  RST handling.
+- `examples/common/http_sdcard_server.tkb`: HTTP path mapping to FAT 8.3
+  names, content type selection (`text/html` and `image/png`), response
+  header generation, and multi-segment reads through example-supplied
+  `http_file_size` / `http_read_chunk` callbacks.
+
+`examples/http_server/http_server.tkb`, `examples/http_server_sdcard/
+http_server_sdcard.tkb`, and `examples/http_server_sdcard_rtos/
+http_server_sdcard_rtos.tkb` now provide only their response/storage
+callbacks and a short `app_main()` loop. The SD-card examples share the
+same real SD-card content directory, `examples/sdcard_content`, containing
+`INDEX.HTM`, `ABOUT.HTM`, and `ICON.PNG`; the hardware test reads expected
+bodies from those files instead of duplicating the contents in Python.
+
+**STM32/RAM debug ELF targets were added for the HTTP examples**:
+
+- `examples/http_server/kernel_stm32_ram.debug.elf`
+- `examples/http_server_sdcard/kernel_stm32_ram.debug.elf`
+- `examples/http_server_sdcard_rtos/kernel_stm32_ram.debug.elf`
+
+These are intended for OpenOCD + `gdb-multiarch` debugging of RAM-loaded
+firmware without changing the normal hardware-test flow. Adding these
+targets exposed a compiler/DWARF bug: function pointer parameters were
+emitted as bare DWARF subroutine types instead of pointer-to-subroutine
+types. `lib/llvm_gen.ml` now wraps `TypeFn` debug types in a pointer type,
+and `test/test_takibi.ml` has a regression test for that shape.
+
+**Intermittent `http_server_sdcard_rtos (stm32/ram)` `/ICON.PNG` timeout
+debugging**: the failure initially looked like possible RTOS stack
+corruption because it appeared only in the RTOS + SD + multi-segment path.
+GDB showed otherwise:
+
+- the target was stopped in `net_rx_wait()`, not in a fault handler;
+- `CFSR` and `HFSR` were zero;
+- the TCP state had returned to `Listen`;
+- raw frame inspection and a host-side packet capture showed the client
+  eventually sent RST during the PNG transfer.
+
+The root cause was TCP close handling, not stack layout. After the server
+sent its response with FIN, a real host TCP stack sent `FIN|ACK` after
+reading the response. The common HTTP state machine did not ACK that
+client FIN before returning to `Listen`, so the host kept retransmitting
+old FINs from closed connections. In the RTOS variant, the HTTP task
+performs synchronous SD-card read RPCs through the SD worker task; while
+those reads are in progress, the HTTP/TCP state machine cannot promptly
+drain noisy stale traffic or answer new connection attempts. Under repeated
+tests that delay was enough for `/ICON.PNG` to time out and reset.
+
+Fixes:
+
+- in `LastAck`, ACK a client `FIN|ACK` and then return to `Listen`;
+- in `Listen`, answer stale non-RST ACK traffic for closed connections
+  with a stateless RST, so the host stops retransmitting old FINs;
+- raise `HTTP_SEGMENT_PAYLOAD_MAX` from 1000 to 1400 bytes, reducing the
+  number of ACK-driven SD read RPCs needed for the PNG response.
+
+`scripts/http_server_test.py` now explicitly sends a client `FIN|ACK` after
+the server's response+FIN and verifies the final pure ACK. That makes the
+specific close-handshake regression visible in the QEMU integration suite
+instead of relying on a long real-hardware RTOS stress path to surface it.
+
+Validation at the time of the fix:
+
+- 30 consecutive `eth_http_server_sdcard_test.py` runs against the RTOS RAM
+  debug build passed;
+- `make check` passed;
+- `make hwcheck-net` passed: all 9 Ethernet hardware tests passed.
+
+This incident motivated GitHub issue #117: start with a practical
+typestate/state-machine checker before attempting full session types. Such
+a checker could make missing `(state, event)` cases like `LastAck +
+FIN|ACK` visible at compile time. A separate future effect/latency check
+could flag latency-sensitive TCP paths that synchronously call blocking SD
+or channel operations.
