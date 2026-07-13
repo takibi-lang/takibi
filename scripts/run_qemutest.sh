@@ -104,17 +104,19 @@ run_test_timed() {
 
 # run_compile_error_test NAME TKB_FILE ERROR_FILE [EXTRA_TAKIBI_FLAGS...]
 #
-# Verifies that compilation fails and that stderr contains the contents of ERROR_FILE
-# as a substring. QEMU is not needed. Integration-tests the full compiler error detection pipeline.
+# Verifies that compilation fails, stderr contains each non-empty line in
+# ERROR_FILE as a diagnostic substring, and at least one diagnostic includes
+# a source location. QEMU is not needed. Integration-tests the full compiler
+# error detection pipeline while keeping ERROR_FILE stable against line-number
+# churn in the negative fixture source.
 # Trailing arguments are passed through to takibi (e.g. --forbid-trap for a
 # test that only fails under a specific mode).
 run_compile_error_test() {
     local name="$1" tkb="$2" error_file="$3"
     shift 3
-    local tmp_err tmp_obj expected_msg
+    local tmp_err tmp_obj
     tmp_err=$(mktemp)
     tmp_obj=$(mktemp --suffix=.o)
-    expected_msg=$(cat "$error_file")
 
     if "$TAKIBI" "$tkb" --target aarch64-none-elf -o "$tmp_obj" "$@" >"$tmp_err" 2>&1; then
         printf "${RED}FAIL${RST}  %s\n" "$name"
@@ -122,13 +124,30 @@ run_compile_error_test() {
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
     else
-        if grep -qF "$expected_msg" "$tmp_err"; then
+        local msg_ok=1 loc_ok=1 expected_line
+        while IFS= read -r expected_line || [ -n "$expected_line" ]; do
+            if [ -n "$expected_line" ] && ! grep -qF "$expected_line" "$tmp_err"; then
+                msg_ok=0
+                break
+            fi
+        done < "$error_file"
+        if ! grep -Eq '^File "[^"]+", line [0-9]+, character [0-9]+: ' "$tmp_err"; then
+            loc_ok=0
+        fi
+
+        if [ "$msg_ok" -eq 1 ] && [ "$loc_ok" -eq 1 ]; then
             printf "${GRN}PASS${RST}  %s\n" "$name"
             PASS=$((PASS + 1))
         else
             printf "${RED}FAIL${RST}  %s\n" "$name"
-            printf "       expected: %s\n" "$expected_msg"
-            printf "       got:      %s\n" "$(cat "$tmp_err")"
+            if [ "$msg_ok" -ne 1 ]; then
+                printf "       expected diagnostic substring: %s\n" "$expected_line"
+            fi
+            if [ "$loc_ok" -ne 1 ]; then
+                printf "       expected at least one source location diagnostic: File \"...\", line N, character M: ...\n"
+            fi
+            printf "       got:\n"
+            sed 's/^/       /' "$tmp_err"
             FAIL=$((FAIL + 1))
             FAILED_TESTS+=("$name")
         fi

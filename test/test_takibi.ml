@@ -157,6 +157,22 @@ let expect_type_error fragment src () =
               in scan 0)
       then Alcotest.failf "TypeError %S does not contain %S" msg fragment
 
+let expect_type_error_at ?filename line column fragment src () =
+  match infer src with
+  | _ ->
+      Alcotest.failf "expected TypeError containing %S at %d:%d, but inference succeeded"
+        fragment line column
+  | exception Types.TypeError (loc, msg) ->
+      (match filename with
+       | Some expected ->
+           Alcotest.(check string) "error filename" expected loc.Lexing.pos_fname
+       | None -> ());
+      Alcotest.(check int) "error line" line loc.Lexing.pos_lnum;
+      Alcotest.(check int) "error column" column
+        (loc.Lexing.pos_cnum - loc.Lexing.pos_bol + 1);
+      if not (contains_substring msg fragment)
+      then Alcotest.failf "TypeError %S does not contain %S" msg fragment
+
 (* Expect inference to succeed *)
 let expect_ok src () =
   match infer src with
@@ -1437,6 +1453,12 @@ let infer_tests = [
     (expect_type_error "condition must be bool"
        "fn f() { while (1) { } }");
 
+  Alcotest.test_case "condition TypeError location points at condition expression" `Quick
+    (expect_type_error_at 2 18 "condition must be bool"
+       "fn f() {
+          while (1) { }
+        }");
+
   Alcotest.test_case "if (1) is a type error" `Quick
     (expect_type_error "condition must be bool"
        "fn f() { if (1) { } }");
@@ -2293,6 +2315,13 @@ let infer_tests = [
   Alcotest.test_case "OOB error message includes index and array size" `Quick
     (expect_type_error "index 5 is out of bounds for array of size 4"
        "fn f() i32 { let mut arr: [i32; 4]; return arr[5]; }");
+
+  Alcotest.test_case "TypeError location points at the bad expression" `Quick
+    (expect_type_error_at 3 22 "out of bounds"
+       "fn f() i32 {
+          let mut arr: [i32; 4];
+          return arr[5];
+        }");
 
   (* -- TypeRefined syntax (Step 3.1 / 3.2) ----------------------- *)
 
