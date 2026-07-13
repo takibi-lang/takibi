@@ -419,13 +419,28 @@ run_dwarf_gdb_global_set_test() {
         timeout "$TIMEOUT" gdb-multiarch -q -batch "$kernel" \
             -ex "target remote :$port" \
             -ex "break app_main" \
-            -ex "break examples/dwarf_debug/dwarf_debug.tkb:27" \
+            -ex "break examples/dwarf_debug/dwarf_debug.tkb:38" \
+            -ex "break dwarf_args_probe" \
+            -ex "break examples/dwarf_debug/dwarf_debug.tkb:52" \
+            -ex "break examples/dwarf_debug/dwarf_debug.tkb:59" \
+            -ex "break examples/dwarf_debug/dwarf_debug.tkb:67" \
+            -ex "break examples/dwarf_debug/dwarf_debug.tkb:73" \
+            -ex "break examples/dwarf_debug/dwarf_debug.tkb:88" \
+            -ex "break examples/dwarf_debug/dwarf_debug.tkb:93" \
+            -ex "break examples/dwarf_debug/dwarf_debug.tkb:97" \
+            -ex "break examples/dwarf_debug/dwarf_debug.tkb:103" \
             -ex "continue" \
             -ex "p dwarf_global_state" \
             -ex "p dwarf_global_pair" \
             -ex "ptype dwarf_global_slice" \
             -ex "set variable dwarf_global_pair.count = 99" \
             -ex "p dwarf_global_pair" \
+            -ex "echo DBG_STEP\\n" \
+            -ex "step" \
+            -ex "echo DBG_BT\\n" \
+            -ex "bt" \
+            -ex "echo DBG_NEXT\\n" \
+            -ex "next" \
             -ex "continue" \
             -ex "p flags" \
             -ex "p seq" \
@@ -438,6 +453,59 @@ run_dwarf_gdb_global_set_test() {
             -ex "p frame.len" \
             -ex "echo DBG_PAIR_SNAPSHOT\\n" \
             -ex "p pair_snapshot" \
+            -ex "echo DBG_ARRAY_NESTED\\n" \
+            -ex "p *local_words@3" \
+            -ex "p local_words[0]" \
+            -ex "p nested_snapshot.pair" \
+            -ex "p *nested_snapshot.words@2" \
+            -ex "p nested_snapshot.marker" \
+            -ex "continue" \
+            -ex "stepi" \
+            -ex "stepi" \
+            -ex "stepi" \
+            -ex "stepi" \
+            -ex "stepi" \
+            -ex "stepi" \
+            -ex "stepi" \
+            -ex "stepi" \
+            -ex "echo DBG_ARGS\\n" \
+            -ex "p arg_pair" \
+            -ex "p arg_frame" \
+            -ex "p arg_frame.len" \
+            -ex "bt" \
+            -ex "continue" \
+            -ex "echo DBG_IF_LOCAL\\n" \
+            -ex "p if_local" \
+            -ex "bt" \
+            -ex "continue" \
+            -ex "echo DBG_LOOP_LOCAL\\n" \
+            -ex "p loop_local" \
+            -ex "p loop_i" \
+            -ex "bt" \
+            -ex "continue" \
+            -ex "echo DBG_ELSE_LOCAL\\n" \
+            -ex "p else_local" \
+            -ex "bt" \
+            -ex "continue" \
+            -ex "echo DBG_MATCH_LOCAL\\n" \
+            -ex "p match_local" \
+            -ex "bt" \
+            -ex "continue" \
+            -ex "echo DBG_MATCH_WILD_LOCAL\\n" \
+            -ex "p match_wild_seen" \
+            -ex "bt" \
+            -ex "continue" \
+            -ex "echo DBG_BLOCK_LOCAL\\n" \
+            -ex "p block_local" \
+            -ex "bt" \
+            -ex "continue" \
+            -ex "echo DBG_FOR_LOCAL\\n" \
+            -ex "p for_local" \
+            -ex "bt" \
+            -ex "continue" \
+            -ex "echo DBG_FOREACH_LOCAL\\n" \
+            -ex "p foreach_local" \
+            -ex "bt" \
             -ex "continue" \
             > "$gdb_out" 2>&1 || ok=0
     fi
@@ -475,6 +543,30 @@ run_dwarf_gdb_global_set_test() {
             done = 1
           }
         ' "$gdb_out"
+        awk '
+          /^DBG_STEP$/ { in_step = 1; next }
+          in_step && /^dwarf_locals_probe \(\) at .*dwarf_debug\.tkb:27$/ {
+            print "step => dwarf_locals_probe:27"
+            in_step = 0
+          }
+        ' "$gdb_out"
+        awk '
+          /^DBG_BT$/ { in_bt = 1; next }
+          /^DBG_NEXT$/ { in_bt = 0 }
+          in_bt && /^#0  dwarf_locals_probe \(\) at .*dwarf_debug\.tkb:27$/ {
+            print "bt locals #0 => dwarf_locals_probe:27"
+          }
+          in_bt && /^#1  .* in app_main \(\) at .*dwarf_debug\.tkb:109$/ {
+            print "bt locals #1 => app_main:109"
+          }
+        ' "$gdb_out"
+        awk '
+          /^DBG_NEXT$/ { in_next = 1; next }
+          in_next && /^28[[:space:]]+let seq:/ {
+            print "next => dwarf_locals_probe:28"
+            in_next = 0
+          }
+        ' "$gdb_out"
         sed -n 's/^\$[0-9][0-9]* = 18.*$/p flags => 18/p' "$gdb_out"
         sed -n 's/^\$[0-9][0-9]* = 287454020$/p seq => 287454020/p' "$gdb_out"
         sed -n 's/^\$[0-9][0-9]* = 1432778632$/p ack => 1432778632/p' "$gdb_out"
@@ -506,6 +598,128 @@ run_dwarf_gdb_global_set_test() {
           in_pair && /^\$[0-9][0-9]* = \{state = DwarfState::Idle, count = 123\}$/ {
             print "p pair_snapshot => {state = DwarfState::Idle, count = 123}"
             in_pair = 0
+          }
+        ' "$gdb_out"
+        awk '
+          /^DBG_ARRAY_NESTED$/ { in_agg = 1; next }
+          /^DBG_ARGS$/ { in_agg = 0 }
+          in_agg && /^\$[0-9][0-9]* = \{7, 8, 9\}$/ {
+            print "p *local_words@3 => {7, 8, 9}"
+          }
+          in_agg && /^\$[0-9][0-9]* = 7$/ {
+            print "p local_words[0] => 7"
+          }
+          in_agg && /^\$[0-9][0-9]* = \{state = DwarfState::Busy, count = 88\}$/ {
+            print "p nested_snapshot.pair => {state = DwarfState::Busy, count = 88}"
+          }
+          in_agg && /^\$[0-9][0-9]* = \{10, 20\}$/ {
+            print "p *nested_snapshot.words@2 => {10, 20}"
+          }
+          in_agg && /^\$[0-9][0-9]* = 305419896$/ {
+            print "p nested_snapshot.marker => 305419896"
+          }
+        ' "$gdb_out"
+        awk '
+          /^DBG_ARGS$/ { in_args = 1; next }
+          in_args && /^\$[0-9][0-9]* = \{state = DwarfState::Idle, count = 99\}$/ {
+            print "p arg_pair => {state = DwarfState::Idle, count = 99}"
+          }
+          in_args && /^\$[0-9][0-9]* = \{ptr = 0x[0-9a-f][0-9a-f]*, len = 0\}$/ {
+            line = $0
+            sub(/^\$[0-9][0-9]* = /, "p arg_frame => ", line)
+            print line
+          }
+          in_args && /^\$[0-9][0-9]* = 0$/ {
+            print "p arg_frame.len => 0"
+          }
+          in_args && /^#0  .*dwarf_args_probe .*dwarf_debug\.tkb:42$/ {
+            print "bt args #0 => dwarf_args_probe:42"
+          }
+          in_args && /^#1  .* in app_main \(\) at .*dwarf_debug\.tkb:110$/ {
+            print "bt args #1 => app_main:110"
+            in_args = 0
+          }
+        ' "$gdb_out"
+        awk '
+          /^DBG_IF_LOCAL$/ { in_if = 1; next }
+          /^DBG_LOOP_LOCAL$/ { in_if = 0 }
+          in_if && /^\$[0-9][0-9]* = 201$/ {
+            print "p if_local => 201"
+          }
+          in_if && /^#0  dwarf_scope_probe .* at .*dwarf_debug\.tkb:52$/ {
+            print "bt if #0 => dwarf_scope_probe:52"
+          }
+        ' "$gdb_out"
+        awk '
+          /^DBG_LOOP_LOCAL$/ { in_loop = 1; next }
+          /^DBG_ELSE_LOCAL$/ { in_loop = 0 }
+          in_loop && /^\$[0-9][0-9]* = 202$/ {
+            print "p loop_local => 202"
+          }
+          in_loop && /^#0  dwarf_scope_probe .* at .*dwarf_debug\.tkb:59$/ {
+            print "bt loop #0 => dwarf_scope_probe:59"
+          }
+        ' "$gdb_out"
+        awk '
+          /^DBG_ELSE_LOCAL$/ { in_else = 1; next }
+          /^DBG_MATCH_LOCAL$/ { in_else = 0 }
+          in_else && /^\$[0-9][0-9]* = 208$/ {
+            print "p else_local => 208"
+          }
+          in_else && /^#0  dwarf_scope_probe .* at .*dwarf_debug\.tkb:69$/ {
+            print "bt else #0 => dwarf_scope_probe:69"
+          }
+        ' "$gdb_out"
+        awk '
+          /^DBG_MATCH_LOCAL$/ { in_match = 1; next }
+          /^DBG_MATCH_WILD_LOCAL$/ { in_match = 0 }
+          in_match && /^\$[0-9][0-9]* = 203$/ {
+            print "p match_local => 203"
+          }
+          in_match && /^#0  dwarf_scope_probe .* at .*dwarf_debug\.tkb:73$/ {
+            print "bt match #0 => dwarf_scope_probe:73"
+            in_match = 0
+          }
+        ' "$gdb_out"
+        awk '
+          /^DBG_MATCH_WILD_LOCAL$/ { in_wild = 1; next }
+          /^DBG_BLOCK_LOCAL$/ { in_wild = 0 }
+          in_wild && /^\$[0-9][0-9]* = 204$/ {
+            print "p match_wild_seen => 204"
+          }
+          in_wild && /^#0  dwarf_scope_probe .* at .*dwarf_debug\.tkb:92$/ {
+            print "bt match wild #0 => dwarf_scope_probe:92"
+          }
+        ' "$gdb_out"
+        awk '
+          /^DBG_BLOCK_LOCAL$/ { in_block = 1; next }
+          /^DBG_FOR_LOCAL$/ { in_block = 0 }
+          in_block && /^\$[0-9][0-9]* = 207$/ {
+            print "p block_local => 207"
+          }
+          in_block && /^#0  dwarf_scope_probe .* at .*dwarf_debug\.tkb:95$/ {
+            print "bt block #0 => dwarf_scope_probe:95"
+          }
+        ' "$gdb_out"
+        awk '
+          /^DBG_FOR_LOCAL$/ { in_for = 1; next }
+          /^DBG_FOREACH_LOCAL$/ { in_for = 0 }
+          in_for && /^\$[0-9][0-9]* = 206$/ {
+            print "p for_local => 206"
+          }
+          in_for && /^#0  dwarf_scope_probe .* at .*dwarf_debug\.tkb:99$/ {
+            print "bt for #0 => dwarf_scope_probe:99"
+          }
+        ' "$gdb_out"
+        awk '
+          /^DBG_FOREACH_LOCAL$/ { in_foreach = 1; next }
+          in_foreach && /^\$[0-9][0-9]* = 205$/ {
+            print "p foreach_local => 205"
+            next
+          }
+          in_foreach && /^#0  dwarf_scope_probe .* at .*dwarf_debug\.tkb:103$/ {
+            print "bt foreach #0 => dwarf_scope_probe:103"
+            in_foreach = 0
           }
         ' "$gdb_out"
         printf "qemu output => %s\n" "$(tr -d '\r' < "$qemu_out")"

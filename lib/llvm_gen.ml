@@ -2665,7 +2665,8 @@ let gen_func ?prog_types fdef =
     let ast_ty = res name ty_opt in
     let ptr    = build_alloca (ltype_of_ast ast_ty) name builder in
     apply_struct_align ast_ty ptr;
-    ignore (build_store (param f i) ptr builder);
+    let inst = build_store (param f i) ptr builder in
+    if !debug_info_enabled && is_debug_aggregate_ty ast_ty then set_volatile true inst;
     Hashtbl.add locals name (Mut (ast_ty, ptr));
     declare_var ~is_param:true ~argno:(i + 1) ~name ~ast_ty
       ~line:fdef.def_loc.Lexing.pos_lnum ~ptr
@@ -2948,7 +2949,7 @@ let gen_func ?prog_types fdef =
              (match Hashtbl.find_opt debug_immutable_allocas name with
               | Some (_, ptr) ->
                   let inst = build_store coerced ptr builder in
-                  if is_debug_aggregate_ty ast_ty then set_volatile true inst
+                  set_volatile true inst
               | None -> ());
              Hashtbl.add locals name (Imm (ast_ty, coerced)))
 
