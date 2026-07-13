@@ -99,10 +99,6 @@ let mut our_ip:  [u8; 4];
 
 let mut request_count: i32 = 0;
 
-// Staging buffer for the HTML body (built once per request, then copied
-// after the headers into the reply segment -- see build_http_response_fin).
-let mut html_body: [u8; 512];
-
 // Safe upper bound on the total reply payload (headers + body), checked
 // explicitly in build_http_response_fin before anything downstream trusts
 // it. Exact worst case with the current fixed page and a 10-digit (i32

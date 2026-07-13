@@ -126,6 +126,15 @@ let ICMP_TYPE: usize = offsetof(IcmpHdr, ty);
 let ICMP_CODE: usize = offsetof(IcmpHdr, code);
 let ICMP_CHECKSUM: usize = offsetof(IcmpHdr, checksum);
 
+let TCP_FLAG_FIN: u8 = 0x01;
+let TCP_FLAG_SYN: u8 = 0x02;
+let TCP_FLAG_RST: u8 = 0x04;
+let TCP_FLAG_PSH: u8 = 0x08;
+let TCP_FLAG_ACK: u8 = 0x10;
+
+let PROTO_TCP: u8 = 6;
+let TCP_INITIAL_SEQ: u32 = 0x00001000;
+
 fn bytes_eq(a: *u8, b: *u8, n: isize) -> i32 {
     for i in 0..<n {
         if (a[i] != b[i]) {

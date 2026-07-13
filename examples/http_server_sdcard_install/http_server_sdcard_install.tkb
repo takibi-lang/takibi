@@ -46,16 +46,8 @@
 // fat12.tkb's own mem_block_read/mem_block_write already use for the
 // identical "byte i of sector s in a flat buffer" proof.
 //
-// SECTOR_SIZE/TOTAL_SECTORS are duplicated from examples/common/fat12.tkb
-// rather than `use`d from it: this file only ever writes raw sectors via
-// disk_write and never touches the FAT12 API (fat_open/fat_read/...), so
-// pulling in fat12.tkb would need throwaway mem_block_read/mem_block_write
-// adapters this file has no other use for.
-
+use "examples/common/fat12_geometry.tkb";
 use "examples/common_stm32/sdmmc.tkb";
-
-let SECTOR_SIZE: usize = 512;
-let TOTAL_SECTORS: usize = 128;
 
 // The test harness injects a real mtools-built FAT12 image here via
 // OpenOCD's load_image, timed at a breakpoint on app_main -- same

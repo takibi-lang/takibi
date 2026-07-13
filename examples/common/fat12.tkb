@@ -52,12 +52,11 @@
 // `http_server_sdcard`/`FatFile`-affine-handle work (see HISTORY.md) kept
 // this file --forbid-trap clean throughout.
 
+use "examples/common/fat12_geometry.tkb";
 use "examples/common/netutil.tkb";
 
 // -- Disk geometry (this small 64KB volume is what both fatfs.tkb's in-memory
 // backend and fatfs_sdcard.tkb's real-SD-card backend format and use) --------
-let SECTOR_SIZE: usize = 512;
-let TOTAL_SECTORS: usize = 128; // 64KB total disk
 let NUM_FATS: usize = 2;
 let FAT_SIZE_SECTORS: usize = 1; // 512 bytes holds ~341 FAT12 entries; ample for TOTAL_SECTORS this small
 let RESERVED_SECTORS: usize = 1; // boot sector only
