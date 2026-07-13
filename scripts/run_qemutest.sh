@@ -419,12 +419,19 @@ run_dwarf_gdb_global_set_test() {
         timeout "$TIMEOUT" gdb-multiarch -q -batch "$kernel" \
             -ex "target remote :$port" \
             -ex "break app_main" \
+            -ex "break examples/dwarf_debug/dwarf_debug.tkb:25" \
             -ex "continue" \
             -ex "p dwarf_global_state" \
             -ex "p dwarf_global_pair" \
             -ex "ptype dwarf_global_slice" \
             -ex "set variable dwarf_global_pair.count = 99" \
             -ex "p dwarf_global_pair" \
+            -ex "continue" \
+            -ex "p flags" \
+            -ex "p seq" \
+            -ex "p ack" \
+            -ex "p tcp_len" \
+            -ex "p tcp_hdr_len" \
             -ex "continue" \
             > "$gdb_out" 2>&1 || ok=0
     fi
@@ -456,6 +463,11 @@ run_dwarf_gdb_global_set_test() {
           }
         ' "$gdb_out"
         sed -n 's/^\$[0-9][0-9]* = \({state = DwarfState::Idle, count = 99}\)$/p dwarf_global_pair after => \1/p' "$gdb_out"
+        sed -n 's/^\$[0-9][0-9]* = 18.*$/p flags => 18/p' "$gdb_out"
+        sed -n 's/^\$[0-9][0-9]* = 287454020$/p seq => 287454020/p' "$gdb_out"
+        sed -n 's/^\$[0-9][0-9]* = 1432778632$/p ack => 1432778632/p' "$gdb_out"
+        sed -n 's/^\$[0-9][0-9]* = 40$/p tcp_len => 40/p' "$gdb_out"
+        sed -n 's/^\$[0-9][0-9]* = 20$/p tcp_hdr_len => 20/p' "$gdb_out"
         printf "qemu output => %s\n" "$(tr -d '\r' < "$qemu_out")"
     } > "$gdb_norm"
 

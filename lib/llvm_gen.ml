@@ -1134,6 +1134,30 @@ let rec collect_lets stmts =
     | _                           -> []
   ) stmts
 
+(* Immutable `let` bindings normally stay as SSA values (Imm) so codegen can
+   keep using the existing narrowing/range machinery. Under -g, however, GDB
+   needs a stable address for `info locals` / `p name`; Llvm_debuginfo exposes
+   dbg.declare but not dbg.value. collect_immutable_lets lets gen_func create
+   a debug-only alloca for each immutable binding while leaving the real
+   codegen binding as Imm. *)
+let rec collect_immutable_lets stmts =
+  List.concat_map (fun s ->
+    match s.desc with
+    | Let (false, name, ty_opt, Some _, _) -> [(name, ty_opt, s.loc)]
+    | Block ss                    -> collect_immutable_lets ss
+    | If (_, t, e)                -> collect_immutable_lets t @ collect_immutable_lets e
+    | While (_, b)                -> collect_immutable_lets b
+    | For (_, _, _, _, body)      -> collect_immutable_lets body
+    | ForEach (_, _, body)        -> collect_immutable_lets body
+    | Match (_, arms)             ->
+        List.concat_map (fun arm ->
+          match arm with
+          | ArmVariant (_, _, body) -> collect_immutable_lets body
+          | ArmWild body            -> collect_immutable_lets body
+        ) arms
+    | _                           -> []
+  ) stmts
+
 (* -- resolve helpers: map AST annotation -> Ast.type_expr using HM results -- *)
 
 (* `pt = None` (no type-inference results at all) is a genuine, supported
@@ -2612,6 +2636,7 @@ let gen_func ?prog_types fdef =
 
   (* locals maps name -> local_binding *)
   let locals : (string, local_binding) Hashtbl.t = Hashtbl.create 16 in
+  let debug_immutable_allocas : (string, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 16 in
 
   (* Apply struct type-level alignment to an alloca if the type has one registered. *)
   let apply_struct_align ast_ty ptr =
@@ -2651,6 +2676,20 @@ let gen_func ?prog_types fdef =
           ~line:let_loc.Lexing.pos_lnum ~ptr
     end
   ) (collect_lets fdef.body);
+
+  (* Debug-only storage for immutable lets. The real codegen binding remains
+     Imm/SSA; this alloca exists solely so GDB has a concrete location. *)
+  if !debug_info_enabled then
+    List.iter (fun (name, ty_opt, let_loc) ->
+      if not (Hashtbl.mem debug_immutable_allocas name) then begin
+        let ast_ty = res name ty_opt in
+        let ptr = build_alloca (ltype_of_ast ast_ty) (name ^ ".dbg") builder in
+        apply_struct_align ast_ty ptr;
+        Hashtbl.add debug_immutable_allocas name (ast_ty, ptr);
+        declare_var ~is_param:false ~argno:0 ~name ~ast_ty
+          ~line:let_loc.Lexing.pos_lnum ~ptr
+      end
+    ) (collect_immutable_lets fdef.body);
 
   (* Recursively initialize a memory location from a possibly-nested literal.
      Handles nested StructLit for struct/array fields; falls back to gen_expr+store. *)
@@ -2891,7 +2930,11 @@ let gen_func ?prog_types fdef =
          | Some e ->
              let ast_ty = res name ty_opt in
              let (_, v) = gen_expr ~expected_ty:ast_ty locals e in
-             Hashtbl.add locals name (Imm (ast_ty, coerce v ast_ty)))
+             let coerced = coerce v ast_ty in
+             (match Hashtbl.find_opt debug_immutable_allocas name with
+              | Some (_, ptr) -> ignore (build_store coerced ptr builder)
+              | None -> ());
+             Hashtbl.add locals name (Imm (ast_ty, coerced)))
 
     | Block stmts ->
         List.iter gen_stmt stmts

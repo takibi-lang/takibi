@@ -15,7 +15,18 @@ let mut dwarf_global_state: DwarfState = DwarfState::Busy;
 let mut dwarf_global_pair: DwarfPair = { DwarfState::Idle, 42 };
 let mut dwarf_global_slice: [u8; 4..];
 
+fn dwarf_locals_probe() {
+    let flags: u8 = 18;
+    let seq: u32 = 287454020;
+    let ack: u32 = 1432778632;
+    let tcp_len: u16 = 40;
+    let tcp_hdr_len: u16 = 20;
+    let frame = dwarf_global_slice;
+    dwarf_global_pair.count = dwarf_global_pair.count + ((tcp_len - tcp_hdr_len) as u32) - 20;
+}
+
 fn app_main() {
+    dwarf_locals_probe();
     uart_print(dwarf_global_pair.count);
     uart_puts("\r\n");
 }

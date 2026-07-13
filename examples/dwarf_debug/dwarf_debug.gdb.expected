@@ -5,4 +5,9 @@ ptype dwarf_global_slice => struct [u8; 4..] {
     usize len;
 }
 p dwarf_global_pair after => {state = DwarfState::Idle, count = 99}
+p flags => 18
+p seq => 287454020
+p ack => 1432778632
+p tcp_len => 40
+p tcp_hdr_len => 20
 qemu output => 99
