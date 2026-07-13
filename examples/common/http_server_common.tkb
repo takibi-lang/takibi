@@ -28,6 +28,67 @@ let mut conn_rcv_nxt:     u32 = 0;
 let HTTP_SEGMENT_PAYLOAD_MAX: i32 = 1400;
 let mut html_body: [u8; 512];
 
+// Wire-level TCP event, classified from flag bits alone (see
+// classify_tcp_event below), independent of connection state.
+// Sequence/ack-number validity and payload content (e.g. whether an ACK
+// segment happens to carry a GET request) are state-dependent
+// preconditions checked inside each match arm in http_server_poll_once,
+// not part of this classification.
+//
+// This enum plus ConnState below are matched against each other
+// two-deep (match conn_state { ... => match ev { ... } ... }) in
+// http_server_poll_once, so every (state, event) cell is an explicit,
+// exhaustiveness-checked line instead of an if-else chain that can
+// silently fall through an unconsidered combination. That silent
+// fallthrough was the shape of the issue #116 incident: LastAck
+// receiving a FinAck was handled, but the transition back to Listen
+// did not ACK it first, and nothing forced that omission into view.
+// See issue #117 for the design discussion.
+enum TcpEvent: u8 {
+    Rst;
+    Syn;
+    FinAck;
+    Ack;
+    Other;
+}
+
+fn classify_tcp_event(flags: u8) -> TcpEvent {
+    if ((flags & TCP_FLAG_RST) != 0) {
+        return TcpEvent::Rst;
+    } else if ((flags & TCP_FLAG_SYN) != 0) {
+        return TcpEvent::Syn;
+    } else if ((flags & TCP_FLAG_FIN) != 0 && (flags & TCP_FLAG_ACK) != 0) {
+        return TcpEvent::FinAck;
+    } else if ((flags & TCP_FLAG_ACK) != 0) {
+        return TcpEvent::Ack;
+    }
+    return TcpEvent::Other;
+}
+
+fn tcp_remote_matches(ip: [u8; 20..], src_port: u16) -> bool {
+    return slice_eq(ip[IP_SRC..<IP_DST], conn_remote_ip as []u8) &&
+           src_port == conn_remote_port;
+}
+
+// Witness token (issue #117): proves the closing ACK for a LastAck ->
+// Listen transition was actually built and queued for transmission
+// before the connection is allowed to forget about it -- the compile-
+// time form of the fix for issue #116's incident, where that transition
+// happened without the corresponding ACK ever being sent. Same idiom as
+// examples/klock_guard's KGuard and fat12.tkb's FatFile: an affine
+// opaque sentinel produced only by the function that performs the real
+// action, consumed only by the function that is allowed to act on
+// having done so.
+affine opaque struct AckSent;
+
+fn tcp_mark_final_ack_sent() -> *AckSent {
+    return 0 as usize as *AckSent;
+}
+
+fn tcp_close_connection(proof: sink *AckSent) {
+    conn_state = ConnState::Listen;
+}
+
 fn build_arp_reply(eth: [u8; 42..]) {
     let arp = eth[14..<42];
 
@@ -240,101 +301,195 @@ fn http_server_poll_once() {
                                 let ack:      u32 = read_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET]) as u32;
 
                                 if (dst_port == HTTP_PORT) {
-	                                    if (conn_state == ConnState::Listen) {
-	                                        if ((flags & TCP_FLAG_SYN) != 0) {
-	                                            slice_copy(conn_remote_ip as []u8, ip[IP_SRC..<IP_DST]);
-	                                            conn_remote_port = src_port;
-	                                            conn_rcv_nxt = seq + 1;
-                                            conn_snd_nxt = TCP_INITIAL_SEQ + 1;
+                                    let ev: TcpEvent = classify_tcp_event(flags);
 
-                                            build_syn_ack(frame, ihl);
-	                                            should_tx = 1;
-	                                            tx_len = 14 + ihl + 20;
-	                                            conn_state = ConnState::SynRcvd;
-	                                        } else if ((flags & TCP_FLAG_RST) == 0 &&
-	                                                   (flags & TCP_FLAG_ACK) != 0) {
-	                                            build_rst_from_ack(frame, ihl, ack);
-	                                            should_tx = 1;
-	                                            tx_len = 14 + ihl + 20;
-	                                        }
-	                                    } else {
-                                        if (slice_eq(ip[IP_SRC..<IP_DST], conn_remote_ip as []u8) &&
-                                            src_port == conn_remote_port) {
-                                            if ((flags & TCP_FLAG_RST) != 0) {
-                                                conn_state = ConnState::Listen;
-                                            } else if (conn_state == ConnState::SynRcvd) {
-                                                if ((flags & TCP_FLAG_ACK) != 0 &&
-                                                    (flags & TCP_FLAG_SYN) == 0 &&
-                                                    ack == conn_snd_nxt && seq == conn_rcv_nxt) {
-                                                    conn_state = ConnState::Established;
-                                                }
-                                            } else if (conn_state == ConnState::Established) {
-                                                let data_len: u16 = max(tcp_len - tcp_hdr_len, 0);
-                                                let data_off: u16 = 34 + tcp_hdr_len;
-                                                let data_off_idx: usize =
-                                                    data_off as usize;
-                                                if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
-                                                    conn_rcv_nxt = conn_rcv_nxt + 1;
-                                                    build_fin_ack(frame, ihl);
+                                    match conn_state {
+                                        ConnState::Listen => {
+                                            match ev {
+                                                TcpEvent::Syn => {
+                                                    slice_copy(conn_remote_ip as []u8, ip[IP_SRC..<IP_DST]);
+                                                    conn_remote_port = src_port;
+                                                    conn_rcv_nxt = seq + 1;
+                                                    conn_snd_nxt = TCP_INITIAL_SEQ + 1;
+
+                                                    build_syn_ack(frame, ihl);
                                                     should_tx = 1;
                                                     tx_len = 14 + ihl + 20;
-                                                    conn_snd_nxt = conn_snd_nxt + 1;
-                                                    conn_state = ConnState::LastAck;
-                                                } else if (data_len >= 3 &&
-                                                           (flags & TCP_FLAG_ACK) != 0 &&
-                                                           seq == conn_rcv_nxt) {
-                                                    let data3 = frame[data_off_idx..<data_off_idx + 3];
-                                                    if (data3[0] == 'G' as u8 &&
-                                                        data3[1] == 'E' as u8 &&
-                                                        data3[2] == 'T' as u8) {
-                                                        conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
-                                                        let req: *u8 =
-                                                            (frame as *u8) + (data_off_idx as isize);
-                                                        let payload_len: i32 =
-                                                            http_start_response(frame, ihl, req, data_len);
-                                                        if (payload_len >= 0) {
-                                                            should_tx = 1;
-                                                            tx_len = 14 + (ihl as i32) + 20 + payload_len;
-                                                            conn_snd_nxt = conn_snd_nxt + (payload_len as u32);
-                                                            if (http_response_done()) {
-                                                                conn_snd_nxt = conn_snd_nxt + 1;
-                                                                conn_state = ConnState::LastAck;
-                                                            } else {
-                                                                conn_state = ConnState::Sending;
-                                                            }
-                                                        }
-                                                    }
+                                                    conn_state = ConnState::SynRcvd;
                                                 }
-                                            } else if (conn_state == ConnState::Sending) {
-                                                if ((flags & TCP_FLAG_ACK) != 0 &&
-                                                    seq == conn_rcv_nxt && ack == conn_snd_nxt) {
-                                                    let payload_len: i32 =
-                                                        http_continue_response(frame, ihl);
-                                                    if (payload_len >= 0) {
-                                                        should_tx = 1;
-                                                        tx_len = 14 + (ihl as i32) + 20 + payload_len;
-                                                        conn_snd_nxt = conn_snd_nxt + (payload_len as u32);
-                                                        if (http_response_done()) {
+                                                TcpEvent::Ack => {
+                                                    // Unsolicited ACK on a listening socket: send a
+                                                    // stateless RST so the peer stops retrying.
+                                                    build_rst_from_ack(frame, ihl, ack);
+                                                    should_tx = 1;
+                                                    tx_len = 14 + ihl + 20;
+                                                }
+                                                TcpEvent::Rst => {
+                                                    // Unsolicited RST: nothing to reset yet. Ignore.
+                                                }
+                                                TcpEvent::FinAck => {
+                                                    // No connection to close. Ignore.
+                                                }
+                                                TcpEvent::Other => {}
+                                            }
+                                        }
+                                        ConnState::SynRcvd => {
+                                            if (tcp_remote_matches(ip, src_port)) {
+                                                match ev {
+                                                    TcpEvent::Rst => {
+                                                        conn_state = ConnState::Listen;
+                                                    }
+                                                    TcpEvent::Ack => {
+                                                        if ((flags & TCP_FLAG_SYN) == 0 &&
+                                                            ack == conn_snd_nxt && seq == conn_rcv_nxt) {
+                                                            conn_state = ConnState::Established;
+                                                        }
+                                                        // else: invalid handshake ACK. Ignore.
+                                                    }
+                                                    TcpEvent::Syn => {
+                                                        // Retransmitted SYN or simultaneous open:
+                                                        // not supported. Ignore.
+                                                    }
+                                                    TcpEvent::FinAck => {
+                                                        // Unexpected before Established. Ignore.
+                                                    }
+                                                    TcpEvent::Other => {}
+                                                }
+                                            }
+                                        }
+                                        ConnState::Established => {
+                                            if (tcp_remote_matches(ip, src_port)) {
+                                                match ev {
+                                                    TcpEvent::Rst => {
+                                                        conn_state = ConnState::Listen;
+                                                    }
+                                                    TcpEvent::FinAck => {
+                                                        if (seq == conn_rcv_nxt) {
+                                                            conn_rcv_nxt = conn_rcv_nxt + 1;
+                                                            build_fin_ack(frame, ihl);
+                                                            should_tx = 1;
+                                                            tx_len = 14 + ihl + 20;
                                                             conn_snd_nxt = conn_snd_nxt + 1;
                                                             conn_state = ConnState::LastAck;
                                                         }
+                                                        // else: stale FIN, wrong seq. Ignore.
                                                     }
+                                                    TcpEvent::Ack => {
+                                                        let data_len: u16 = max(tcp_len - tcp_hdr_len, 0);
+                                                        let data_off: u16 = 34 + tcp_hdr_len;
+                                                        let data_off_idx: usize =
+                                                            data_off as usize;
+                                                        if (data_len >= 3 && seq == conn_rcv_nxt) {
+                                                            let data3 = frame[data_off_idx..<data_off_idx + 3];
+                                                            if (data3[0] == 'G' as u8 &&
+                                                                data3[1] == 'E' as u8 &&
+                                                                data3[2] == 'T' as u8) {
+                                                                conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
+                                                                let req: *u8 =
+                                                                    (frame as *u8) + (data_off_idx as isize);
+                                                                let payload_len: i32 =
+                                                                    http_start_response(frame, ihl, req, data_len);
+                                                                if (payload_len >= 0) {
+                                                                    should_tx = 1;
+                                                                    tx_len = 14 + (ihl as i32) + 20 + payload_len;
+                                                                    conn_snd_nxt = conn_snd_nxt + (payload_len as u32);
+                                                                    if (http_response_done()) {
+                                                                        conn_snd_nxt = conn_snd_nxt + 1;
+                                                                        conn_state = ConnState::LastAck;
+                                                                    } else {
+                                                                        conn_state = ConnState::Sending;
+                                                                    }
+                                                                }
+                                                                // else: response build failed. Ignore.
+                                                            }
+                                                            // else: request is not GET. Ignore (no
+                                                            // other verb is supported).
+                                                        }
+                                                        // else: plain ACK with no/insufficient data,
+                                                        // or stale seq. Ignore.
+                                                    }
+                                                    TcpEvent::Syn => {
+                                                        // Retransmitted SYN after handshake. Ignore.
+                                                    }
+                                                    TcpEvent::Other => {}
                                                 }
-                                            } else if (conn_state == ConnState::LastAck) {
-                                                if ((flags & TCP_FLAG_FIN) != 0 &&
-                                                    (flags & TCP_FLAG_ACK) != 0 &&
-                                                    seq == conn_rcv_nxt && ack == conn_snd_nxt) {
-                                                    conn_rcv_nxt = conn_rcv_nxt + 1;
-                                                    let payload_len: i32 =
-                                                        build_tcp_payload(frame, ihl, 0,
-                                                                          TCP_FLAG_ACK);
-                                                    if (payload_len >= 0) {
-                                                        should_tx = 1;
-                                                        tx_len = 14 + (ihl as i32) + 20 + payload_len;
+                                            }
+                                        }
+                                        ConnState::Sending => {
+                                            if (tcp_remote_matches(ip, src_port)) {
+                                                match ev {
+                                                    TcpEvent::Rst => {
                                                         conn_state = ConnState::Listen;
                                                     }
-                                                } else if ((flags & TCP_FLAG_ACK) != 0 && ack == conn_snd_nxt) {
-                                                    conn_state = ConnState::Listen;
+                                                    TcpEvent::Ack => {
+                                                        if (seq == conn_rcv_nxt && ack == conn_snd_nxt) {
+                                                            let payload_len: i32 =
+                                                                http_continue_response(frame, ihl);
+                                                            if (payload_len >= 0) {
+                                                                should_tx = 1;
+                                                                tx_len = 14 + (ihl as i32) + 20 + payload_len;
+                                                                conn_snd_nxt = conn_snd_nxt + (payload_len as u32);
+                                                                if (http_response_done()) {
+                                                                    conn_snd_nxt = conn_snd_nxt + 1;
+                                                                    conn_state = ConnState::LastAck;
+                                                                }
+                                                                // else: more segments queued. Stay
+                                                                // Sending.
+                                                            }
+                                                            // else: response build failed. Ignore.
+                                                        }
+                                                        // else: stale/duplicate ACK. Ignore.
+                                                    }
+                                                    TcpEvent::Syn => {
+                                                        // Ignore.
+                                                    }
+                                                    TcpEvent::FinAck => {
+                                                        // Client closing early mid-transfer: not
+                                                        // handled, same as before this restructuring.
+                                                    }
+                                                    TcpEvent::Other => {}
+                                                }
+                                            }
+                                        }
+                                        ConnState::LastAck => {
+                                            if (tcp_remote_matches(ip, src_port)) {
+                                                match ev {
+                                                    TcpEvent::Rst => {
+                                                        conn_state = ConnState::Listen;
+                                                    }
+                                                    TcpEvent::FinAck => {
+                                                        if (seq == conn_rcv_nxt && ack == conn_snd_nxt) {
+                                                            conn_rcv_nxt = conn_rcv_nxt + 1;
+                                                            let payload_len: i32 =
+                                                                build_tcp_payload(frame, ihl, 0,
+                                                                                  TCP_FLAG_ACK);
+                                                            if (payload_len >= 0) {
+                                                                should_tx = 1;
+                                                                tx_len = 14 + (ihl as i32) + 20 + payload_len;
+                                                                // Witness token (issue #117): forces
+                                                                // this transition to only be reachable
+                                                                // right after the closing ACK above was
+                                                                // actually built and queued -- see
+                                                                // AckSent's declaration comment.
+                                                                let proof: *AckSent = tcp_mark_final_ack_sent();
+                                                                tcp_close_connection(proof);
+                                                            }
+                                                            // else: build failed (should not happen
+                                                            // for a zero-length ACK); stay in LastAck
+                                                            // and rely on the peer's retransmit.
+                                                        }
+                                                        // else: stale FIN+ACK, wrong seq/ack. Ignore.
+                                                    }
+                                                    TcpEvent::Ack => {
+                                                        if (ack == conn_snd_nxt) {
+                                                            conn_state = ConnState::Listen;
+                                                        }
+                                                        // else: stale ACK. Ignore.
+                                                    }
+                                                    TcpEvent::Syn => {
+                                                        // Ignore.
+                                                    }
+                                                    TcpEvent::Other => {}
                                                 }
                                             }
                                         }
