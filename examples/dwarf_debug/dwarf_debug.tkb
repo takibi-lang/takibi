@@ -20,6 +20,7 @@ struct DwarfNested {
 let mut dwarf_global_state: DwarfState = DwarfState::Busy;
 let mut dwarf_global_pair: DwarfPair = { DwarfState::Idle, 42 };
 let mut dwarf_global_slice: [u8; 4..];
+let mut dwarf_debug_io_sink: io u32;
 
 fn dwarf_locals_probe() {
     let flags: u8 = 18;
@@ -42,9 +43,36 @@ fn dwarf_args_probe(arg_pair: DwarfPair, arg_frame: [u8; 4..]) {
     dwarf_global_pair.count = arg_after;
 }
 
+fn dwarf_scope_probe(scope_state: DwarfState) {
+    let mut loop_i: u32 = 0;
+    if (dwarf_global_pair.count == 99) {
+        let if_local: u32 = 201;
+        dwarf_global_pair.count = if_local;
+    }
+    while (loop_i < 1) {
+        let loop_local: u32 = 202;
+        dwarf_global_pair.count = loop_local;
+        loop_i = loop_i + 1;
+    }
+    match scope_state {
+        DwarfState::Busy => {
+            let match_local: u32 = dwarf_global_pair.count + loop_i;
+            dwarf_debug_io_sink = match_local;
+            dwarf_global_pair.count = match_local;
+        }
+        _ => {
+            let match_wild_local: u32 = dwarf_global_pair.count + loop_i + 1;
+            dwarf_debug_io_sink = match_wild_local;
+            dwarf_global_pair.count = match_wild_local;
+        }
+    }
+    dwarf_global_pair.count = dwarf_global_pair.count - 104;
+}
+
 fn app_main() {
     dwarf_locals_probe();
     dwarf_args_probe(dwarf_global_pair, dwarf_global_slice);
+    dwarf_scope_probe(dwarf_global_state);
     uart_print(dwarf_global_pair.count);
     uart_puts("\r\n");
 }

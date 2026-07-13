@@ -2949,7 +2949,7 @@ let gen_func ?prog_types fdef =
              (match Hashtbl.find_opt debug_immutable_allocas name with
               | Some (_, ptr) ->
                   let inst = build_store coerced ptr builder in
-                  if is_debug_aggregate_ty ast_ty then set_volatile true inst
+                  set_volatile true inst
               | None -> ());
              Hashtbl.add locals name (Imm (ast_ty, coerced)))
 

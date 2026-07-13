@@ -5,10 +5,10 @@ ptype dwarf_global_slice => struct [u8; 4..] {
     usize len;
 }
 p dwarf_global_pair after => {state = DwarfState::Idle, count = 99}
-step => dwarf_locals_probe:30
-bt locals #0 => dwarf_locals_probe:30
-bt locals #1 => app_main:46
-next => dwarf_locals_probe:31
+step => dwarf_locals_probe:26
+bt locals #0 => dwarf_locals_probe:26
+bt locals #1 => app_main:73
+next => dwarf_locals_probe:27
 p flags => 18
 p seq => 287454020
 p ack => 1432778632
@@ -26,6 +26,12 @@ p nested_snapshot.marker => 305419896
 p arg_pair => {state = DwarfState::Idle, count = 99}
 p arg_frame => {ptr = 0x0, len = 0}
 p arg_frame.len => 0
-bt args #0 => dwarf_args_probe:42
-bt args #1 => app_main:47
+bt args #0 => dwarf_args_probe:40
+bt args #1 => app_main:74
+p if_local => 201
+bt if #0 => dwarf_scope_probe:50
+p loop_local => 202
+bt loop #0 => dwarf_scope_probe:54
+p match_local => 203
+bt match #0 => dwarf_scope_probe:61
 qemu output => 99
