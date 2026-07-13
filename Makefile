@@ -211,7 +211,7 @@ test: build
 	dune test
 
 ## qemutest: run QEMU integration tests (build all examples and verify automatically)
-qemutest: $(ALL_KERNELS) examples/fizzbuzz/kernel.debug.elf examples/fibonacci/kernel.debug.elf
+qemutest: $(ALL_KERNELS) examples/fizzbuzz/kernel.debug.elf examples/fibonacci/kernel.debug.elf examples/dwarf_debug/kernel.debug.elf
 	@bash scripts/run_qemutest.sh
 
 ## stm32build: link every ported STM32 example as a RAM-execution image, with
@@ -477,6 +477,15 @@ examples/fibonacci/fibonacci.debug.o: examples/fibonacci/fibonacci.tkb $(COMMON_
 
 examples/fibonacci/kernel.debug.elf: $(COMMON_STARTUP_O) examples/fibonacci/fibonacci.debug.o $(COMMON_LINK_LD)
 	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/fibonacci/fibonacci.debug.o -o $@
+
+# Dedicated -g fixture for a live GDB check: typed globals, enum display,
+# struct member layout, slice fat-value layout, and `set variable` against
+# QEMU's gdbstub.
+examples/dwarf_debug/dwarf_debug.debug.o: examples/dwarf_debug/dwarf_debug.tkb examples/common/runtime.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
+	$(TAKIBI) examples/common/runtime.tkb $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -g -o $@ --forbid-trap
+
+examples/dwarf_debug/kernel.debug.elf: $(COMMON_STARTUP_O) examples/dwarf_debug/dwarf_debug.debug.o $(COMMON_LINK_LD)
+	$(LLD) -T $(COMMON_LINK_LD) $(COMMON_STARTUP_O) examples/dwarf_debug/dwarf_debug.debug.o -o $@
 
 # Third dedicated -g build, this time for the "App group" common files
 # (see the compilation-groups comment above IRQ_OBJS): needed so

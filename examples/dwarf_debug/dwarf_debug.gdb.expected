@@ -1,0 +1,8 @@
+p dwarf_global_state => DwarfState::Busy
+p dwarf_global_pair before => {state = DwarfState::Idle, count = 42}
+ptype dwarf_global_slice => struct [u8; 4..] {
+    u8 *ptr;
+    usize len;
+}
+p dwarf_global_pair after => {state = DwarfState::Idle, count = 99}
+qemu output => 99

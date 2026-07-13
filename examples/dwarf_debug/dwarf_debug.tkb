@@ -1,0 +1,21 @@
+// DWARF/GDB regression fixture. scripts/run_qemutest.sh stops at app_main,
+// rewrites dwarf_global_pair.count through GDB, then lets this print it.
+
+enum DwarfState: u8 {
+    Idle = 0;
+    Busy = 3;
+}
+
+struct DwarfPair {
+    state: DwarfState;
+    count: u32;
+}
+
+let mut dwarf_global_state: DwarfState = DwarfState::Busy;
+let mut dwarf_global_pair: DwarfPair = { DwarfState::Idle, 42 };
+let mut dwarf_global_slice: [u8; 4..];
+
+fn app_main() {
+    uart_print(dwarf_global_pair.count);
+    uart_puts("\r\n");
+}
