@@ -4139,7 +4139,21 @@ let codegen_tests = [
     (fun () ->
        Llvm_gen.enable_debug_info "test.tkb";
        expect_codegen_ok
-         "fn codegen_debug_info(n: i32) -> i32 {
+         "enum DwarfState: u8 {
+            Idle = 0;
+            Busy = 3;
+          }
+
+          struct DwarfPair {
+            state: DwarfState;
+            count: u32;
+          }
+
+          let mut dwarf_global_state: DwarfState = DwarfState::Busy;
+          let mut dwarf_global_pair: DwarfPair = { DwarfState::Idle, 42 };
+          let mut dwarf_global_slice: [u8; 4..];
+
+          fn codegen_debug_info(n: i32) -> i32 {
             let mut total: i32 = 0;
             let mut i: i32 = 0;
             while (i < n) {
@@ -4149,7 +4163,20 @@ let codegen_tests = [
               i = i + 1;
             }
             return total;
-          }" ());
+          }" ();
+       let ir = Llvm.string_of_llmodule Llvm_gen.the_module in
+       Alcotest.(check bool) "DIGlobalVariableExpression exists"
+         true (contains_substring ir "!DIGlobalVariableExpression");
+       Alcotest.(check bool) "enum DIType is named"
+         true (contains_substring ir "!DICompositeType(tag: DW_TAG_enumeration_type, name: \"DwarfState\"");
+       Alcotest.(check bool) "enum variants are symbolic"
+         true (contains_substring ir "!DIEnumerator(name: \"DwarfState::Busy\", value: 3");
+       Alcotest.(check bool) "struct DIType is named"
+         true (contains_substring ir "!DICompositeType(tag: DW_TAG_structure_type, name: \"DwarfPair\"");
+       Alcotest.(check bool) "struct member state is present"
+         true (contains_substring ir "!DIDerivedType(tag: DW_TAG_member, name: \"state\"");
+       Alcotest.(check bool) "slice fat-value members are present"
+         true (contains_substring ir "!DIDerivedType(tag: DW_TAG_member, name: \"len\""));
 
   (* Companion to the test above, covering the parts of ditype_of_ast
      (lib/llvm_gen.ml) that one only exercises with a pointer-to-struct

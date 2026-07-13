@@ -374,6 +374,165 @@ run_dwarf_var_test() {
     fi
 }
 
+# run_dwarf_gdb_global_set_test NAME KERNEL EXPECTED
+#
+# Exercises the part llvm-dwarfdump-only checks cannot cover: GDB must be
+# able to print typed Takibi globals, display enum/struct/slice types, write a
+# struct member through `set variable`, and have that write affect subsequent
+# target behavior. The fixture prints dwarf_global_pair.count from app_main;
+# GDB rewrites it at the app_main breakpoint, then QEMU should print the new
+# value.
+run_dwarf_gdb_global_set_test() {
+    local name="$1" kernel="$2" expected="$3"
+    local qemu_out gdb_out gdb_norm gdb_diff port qpid ok=1
+
+    if ! command -v gdb-multiarch >/dev/null 2>&1; then
+        printf "${RED}FAIL${RST}  %s  (gdb-multiarch not found)\n" "$name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+        return
+    fi
+
+    qemu_out=$(mktemp)
+    gdb_out=$(mktemp)
+    gdb_norm=$(mktemp)
+    gdb_diff=$(mktemp)
+    port=$((23000 + RANDOM % 1000))
+
+    $QEMU $QEMU_COMMON -S -gdb "tcp::$port" -kernel "$kernel" > "$qemu_out" 2>&1 &
+    qpid=$!
+
+    local ready=0
+    for _ in $(seq 1 50); do
+        if gdb-multiarch -q -batch "$kernel" \
+              -ex "target remote :$port" -ex "disconnect" >/dev/null 2>&1; then
+            ready=1
+            break
+        fi
+        sleep 0.1
+    done
+
+    if [ "$ready" -ne 1 ]; then
+        ok=0
+        printf "gdbstub did not become ready\n" > "$gdb_out"
+    else
+        timeout "$TIMEOUT" gdb-multiarch -q -batch "$kernel" \
+            -ex "target remote :$port" \
+            -ex "break app_main" \
+            -ex "break examples/dwarf_debug/dwarf_debug.tkb:27" \
+            -ex "continue" \
+            -ex "p dwarf_global_state" \
+            -ex "p dwarf_global_pair" \
+            -ex "ptype dwarf_global_slice" \
+            -ex "set variable dwarf_global_pair.count = 99" \
+            -ex "p dwarf_global_pair" \
+            -ex "continue" \
+            -ex "p flags" \
+            -ex "p seq" \
+            -ex "p ack" \
+            -ex "p tcp_len" \
+            -ex "p tcp_hdr_len" \
+            -ex "echo DBG_FRAME\\n" \
+            -ex "p frame" \
+            -ex "p frame.ptr" \
+            -ex "p frame.len" \
+            -ex "echo DBG_PAIR_SNAPSHOT\\n" \
+            -ex "p pair_snapshot" \
+            -ex "continue" \
+            > "$gdb_out" 2>&1 || ok=0
+    fi
+
+    for _ in $(seq 1 50); do
+        if ! kill -0 "$qpid" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+    if kill -0 "$qpid" 2>/dev/null; then
+        ok=0
+        kill "$qpid" 2>/dev/null || true
+    fi
+    wait "$qpid" 2>/dev/null || true
+
+    {
+        sed -n 's/^\$[0-9][0-9]* = \(DwarfState::Busy\)$/p dwarf_global_state => \1/p' "$gdb_out"
+        sed -n '0,/count = 42/s/^\$[0-9][0-9]* = \({state = DwarfState::Idle, count = 42}\)$/p dwarf_global_pair before => \1/p' "$gdb_out"
+        awk '
+          /^type = struct \[u8; 4\.\.\] \{$/ {
+            print "ptype dwarf_global_slice => struct [u8; 4..] {"
+            in_block = 1
+            next
+          }
+          in_block {
+            print
+            if ($0 == "}") in_block = 0
+          }
+        ' "$gdb_out"
+        awk '
+          /^DBG_FRAME$/ { exit }
+          !done && /^\$[0-9][0-9]* = \{state = DwarfState::Idle, count = 99\}$/ {
+            print "p dwarf_global_pair after => {state = DwarfState::Idle, count = 99}"
+            done = 1
+          }
+        ' "$gdb_out"
+        sed -n 's/^\$[0-9][0-9]* = 18.*$/p flags => 18/p' "$gdb_out"
+        sed -n 's/^\$[0-9][0-9]* = 287454020$/p seq => 287454020/p' "$gdb_out"
+        sed -n 's/^\$[0-9][0-9]* = 1432778632$/p ack => 1432778632/p' "$gdb_out"
+        sed -n 's/^\$[0-9][0-9]* = 40$/p tcp_len => 40/p' "$gdb_out"
+        sed -n 's/^\$[0-9][0-9]* = 20$/p tcp_hdr_len => 20/p' "$gdb_out"
+        awk '
+          /^DBG_FRAME$/ { in_frame = 1; next }
+          in_frame == 1 && /^\$[0-9][0-9]* = \{ptr = 0x[0-9a-f][0-9a-f]*, len = 0\}$/ {
+            line = $0
+            sub(/^\$[0-9][0-9]* = /, "p frame => ", line)
+            print line
+            in_frame = 2
+            next
+          }
+          in_frame == 2 && /^\$[0-9][0-9]* = \(u8 \*\) 0x[0-9a-f][0-9a-f]*$/ {
+            line = $0
+            sub(/^\$[0-9][0-9]* = \(u8 \*\) /, "p frame.ptr => ", line)
+            print line
+            in_frame = 3
+            next
+          }
+          in_frame == 3 && /^\$[0-9][0-9]* = 0$/ {
+            print "p frame.len => 0"
+            in_frame = 0
+          }
+        ' "$gdb_out"
+        awk '
+          /^DBG_PAIR_SNAPSHOT$/ { in_pair = 1; next }
+          in_pair && /^\$[0-9][0-9]* = \{state = DwarfState::Idle, count = 123\}$/ {
+            print "p pair_snapshot => {state = DwarfState::Idle, count = 123}"
+            in_pair = 0
+          }
+        ' "$gdb_out"
+        printf "qemu output => %s\n" "$(tr -d '\r' < "$qemu_out")"
+    } > "$gdb_norm"
+
+    if ! diff -u "$expected" "$gdb_norm" > "$gdb_diff"; then
+        ok=0
+    fi
+
+    if [ "$ok" -eq 1 ]; then
+        printf "${GRN}PASS${RST}  %s\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        printf "${RED}FAIL${RST}  %s  (GDB global print/set regression)\n" "$name"
+        printf "       normalized diff:\n"
+        sed 's/^/       /' "$gdb_diff"
+        printf "       gdb output:\n"
+        sed 's/^/       /' "$gdb_out"
+        printf "       qemu output:\n"
+        sed 's/^/       /' "$qemu_out"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+    fi
+
+    rm -f "$qemu_out" "$gdb_out" "$gdb_norm" "$gdb_diff"
+}
+
 echo "Running compile-error tests (no QEMU required)..."
 echo ""
 
@@ -427,6 +586,7 @@ run_dwarf_var_test "fibonacci a (dwarf var)"   "$FIB_DEBUG_ELF" a   DW_TAG_varia
 run_dwarf_var_test "fibonacci b (dwarf var)"   "$FIB_DEBUG_ELF" b   DW_TAG_variable          fibonacci.tkb 5 i32
 run_dwarf_var_test "fibonacci tmp (dwarf var)" "$FIB_DEBUG_ELF" tmp DW_TAG_variable          fibonacci.tkb 6 i32
 run_dwarf_var_test "uart_putc c (dwarf param)" "$FIB_DEBUG_ELF" c   DW_TAG_formal_parameter  uart.tkb      1 u8
+run_dwarf_gdb_global_set_test "typed globals via gdb (dwarf)" examples/dwarf_debug/kernel.debug.elf examples/dwarf_debug/dwarf_debug.gdb.expected
 
 echo ""
 echo "Running QEMU integration tests..."

@@ -667,21 +667,57 @@ let dw_ate_signed         = 0x05
 let dw_ate_unsigned       = 0x07
 let dw_tag_structure_type = 0x13
 
-(* One memberless forward-declaration DIType per struct name, built lazily
-   and cached (mirrors di_files' caching). *)
+(* One DIType cache per named aggregate/enum. Structs also keep a permanent
+   forward declaration so self-referential pointer fields can terminate
+   without requiring LLVM's temporary-node RAUW API, which the OCaml binding
+   does not expose. *)
 let di_struct_placeholders : (string, llmetadata) Hashtbl.t = Hashtbl.create 8
+let di_struct_types : (string, llmetadata) Hashtbl.t = Hashtbl.create 8
+let di_struct_in_progress : (string, unit) Hashtbl.t = Hashtbl.create 8
+let di_enum_types : (string, llmetadata) Hashtbl.t = Hashtbl.create 8
+let di_slice_types : (string, llmetadata) Hashtbl.t = Hashtbl.create 8
 
-(* DIType for a variable's declared type (parameters / `let mut` locals --
-   see gen_func). Scalars, pointers, arrays, and enums (as their underlying
-   int type) are modeled in full. TypeNamed struct types -- whether used
-   directly or through any number of pointer indirections -- always resolve
-   to a memberless forward declaration instead of a real DICompositeType.
-   This is a deliberate simplification: expanding real members needs each
-   field's byte offset (more DataLayout plumbing) and, more importantly,
-   self-referential structs (struct Node { next: *Node; }) would recurse
-   forever without LLVM's replaceable-composite-type/RAUW machinery. Neither
-   is needed for line-level profiling or for inspecting scalar/pointer
-   locals in gdb, so it's left for future work. *)
+let di_size_align_bits (ty : lltype) : int * int =
+  match !target_data with
+  | Some dl ->
+      (Int64.to_int (Llvm_target.DataLayout.abi_size ty dl) * 8,
+       Llvm_target.DataLayout.abi_align ty dl * 8)
+  | None ->
+      let bits =
+        match classify_type ty with
+        | TypeKind.Integer -> integer_bitwidth ty
+        | TypeKind.Pointer -> integer_bitwidth (usize_lltype ())
+        | _ -> 0
+      in
+      (bits, bits)
+
+let di_struct_placeholder dib file sname =
+  match Hashtbl.find_opt di_struct_placeholders sname with
+  | Some placeholder -> placeholder
+  | None ->
+      let (size_bits, align_bits) =
+        match Hashtbl.find_opt struct_lltypes sname with
+        | Some llty -> di_size_align_bits llty
+        | None -> (0, 0)
+      in
+      let placeholder =
+        Llvm_debuginfo.dibuild_create_forward_decl dib ~tag:dw_tag_structure_type
+          ~name:sname ~scope:file ~file ~line:0 ~runtime_lang:0
+          ~size_in_bits:size_bits ~align_in_bits:align_bits
+          ~unique_identifier:("takibi.struct.fwd." ^ sname)
+      in
+      Hashtbl.add di_struct_placeholders sname placeholder;
+      placeholder
+
+let rec di_is_unsigned = function
+  | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeUsize -> true
+  | TypeRefined (_, _, base) -> di_is_unsigned base
+  | _ -> false
+
+(* DIType for a variable's declared type (parameters / `let mut` locals /
+   globals). This intentionally favors debugger usability over just enough
+   metadata for line tables: globals get named enum types, structs get member
+   layout, and slices are represented as their actual {ptr,len} fat value. *)
 let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty : Ast.type_expr) : llmetadata =
   let basic_int name bits encoding =
     Llvm_debuginfo.dibuild_create_basic_type dib ~name ~size_in_bits:bits ~encoding
@@ -701,11 +737,7 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
   | TypeUsize -> basic_int "usize" (integer_bitwidth (usize_lltype ())) dw_ate_unsigned
   | TypeVoid  -> Llvm_debuginfo.llmetadata_null ()
   | TypeRefined (_, _, base) -> ditype_of_ast dib file base  (* same LLVM-level representation as its base; see ltype_of_ast *)
-  | TypeSlice (t, _) -> ditype_of_ast dib file (TypePtr t)
   | TypeBorrow t | TypeSink t -> ditype_of_ast dib file t
-      (* modeled as a pointer for now: enough for gdb to follow the data;
-         a real {ptr, len} DICompositeType needs the member-offset plumbing
-         deliberately skipped for structs (see the comment above) *)
   | TypeAlignedPtr (_, t) -> ditype_of_ast dib file (TypePtr t)
       (* alignment is a compile-time-only proof (see ltype_of_ast); gdb
          just sees an ordinary pointer *)
@@ -733,25 +765,115 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
       let ptr_bits = integer_bitwidth (usize_lltype ()) in
       Llvm_debuginfo.dibuild_create_pointer_type dib ~pointee_ty:sub_ty
         ~size_in_bits:ptr_bits ~align_in_bits:ptr_bits ~address_space:0 ~name:""
+  | TypeSlice (elem_ty, min_len) ->
+      let name =
+        if min_len = 0
+        then Printf.sprintf "[]%s" (ty_str elem_ty)
+        else Printf.sprintf "[%s; %d..]" (ty_str elem_ty) min_len
+      in
+      (match Hashtbl.find_opt di_slice_types name with
+       | Some slice_ty -> slice_ty
+       | None ->
+           let llty = ltype_of_ast ty in
+           let (size_bits, align_bits) = di_size_align_bits llty in
+           let ptr_bits = integer_bitwidth (usize_lltype ()) in
+           let ptr_ty = ditype_of_ast dib file (TypePtr elem_ty) in
+           let len_ty = ditype_of_ast dib file TypeUsize in
+           let flags = Llvm_debuginfo.diflags_get Llvm_debuginfo.DIFlag.Zero in
+           let ptr_member =
+             Llvm_debuginfo.dibuild_create_member_type dib ~scope:file ~name:"ptr"
+               ~file ~line_number:0 ~size_in_bits:ptr_bits ~align_in_bits:ptr_bits
+               ~offset_in_bits:0 flags ~ty:ptr_ty
+           in
+           let len_member =
+             Llvm_debuginfo.dibuild_create_member_type dib ~scope:file ~name:"len"
+               ~file ~line_number:0 ~size_in_bits:ptr_bits ~align_in_bits:ptr_bits
+               ~offset_in_bits:ptr_bits flags ~ty:len_ty
+           in
+           let slice_ty =
+             Llvm_debuginfo.dibuild_create_struct_type dib ~scope:file ~name ~file
+               ~line_number:0 ~size_in_bits:size_bits ~align_in_bits:align_bits
+               flags ~derived_from:(Llvm_debuginfo.llmetadata_null ())
+               ~elements:[| ptr_member; len_member |]
+               Llvm_debuginfo.DWARFSourceLanguageKind.C
+               ~vtable_holder:(Llvm_debuginfo.llmetadata_null ())
+               ~unique_id:("takibi.slice." ^ name)
+           in
+           Hashtbl.add di_slice_types name slice_ty;
+           slice_ty)
   | TypeNamed sname ->
       (match Hashtbl.find_opt enum_underlying sname with
-       | Some ut -> ditype_of_ast dib file ut  (* enum: same as ltype_of_ast, no separate enum DIType *)
+       | Some ut ->
+           (match Hashtbl.find_opt di_enum_types sname with
+            | Some enum_ty -> enum_ty
+            | None ->
+                let llty = ltype_of_ast ut in
+                let (size_bits, align_bits) = di_size_align_bits llty in
+                let elements =
+                  Hashtbl.find enum_variants_tbl sname
+                  |> List.map (fun (vname, value) ->
+                    Llvm_debuginfo.dibuild_create_enumerator dib
+                      ~name:(sname ^ "::" ^ vname)
+                      ~value
+                      ~is_unsigned:(di_is_unsigned ut))
+                  |> Array.of_list
+                in
+                let enum_ty =
+                  Llvm_debuginfo.dibuild_create_enumeration_type dib
+                    ~scope:file ~name:sname ~file ~line_number:0
+                    ~size_in_bits:size_bits ~align_in_bits:align_bits
+                    ~elements ~class_ty:(Llvm_debuginfo.llmetadata_null ())
+                in
+                Hashtbl.add di_enum_types sname enum_ty;
+                enum_ty)
        | None ->
-           match Hashtbl.find_opt di_struct_placeholders sname with
-           | Some placeholder -> placeholder
+           match Hashtbl.find_opt di_struct_types sname with
+           | Some struct_ty -> struct_ty
+           | None when Hashtbl.mem di_struct_in_progress sname ->
+               di_struct_placeholder dib file sname
            | None ->
-               let size_bits =
-                 match Hashtbl.find_opt struct_lltypes sname, !target_data with
-                 | Some llty, Some dl -> Int64.to_int (Llvm_target.DataLayout.abi_size llty dl) * 8
-                 | _ -> 0
+               let llty = match Hashtbl.find_opt struct_lltypes sname with
+                 | Some llty -> llty
+                 | None -> raise (Error (Printf.sprintf "Unknown named type: %s" sname))
                in
-               let placeholder =
-                 Llvm_debuginfo.dibuild_create_forward_decl dib ~tag:dw_tag_structure_type
-                   ~name:sname ~scope:file ~file ~line:0 ~runtime_lang:0
-                   ~size_in_bits:size_bits ~align_in_bits:0 ~unique_identifier:sname
+               let fields = match Hashtbl.find_opt struct_fields sname with
+                 | Some fields -> fields
+                 | None -> []
                in
-               Hashtbl.add di_struct_placeholders sname placeholder;
-               placeholder)
+               Hashtbl.add di_struct_in_progress sname ();
+               let (size_bits, align_bits) = di_size_align_bits llty in
+               let flags = Llvm_debuginfo.diflags_get Llvm_debuginfo.DIFlag.Zero in
+               let elements =
+                 fields
+                 |> List.mapi (fun i (fname, fty) ->
+                   let f_llty = ltype_of_ast fty in
+                   let (f_size_bits, f_align_bits) = di_size_align_bits f_llty in
+                   let offset_bits =
+                     match !target_data with
+                     | Some dl -> Int64.to_int (Llvm_target.DataLayout.offset_of_element llty i dl) * 8
+                     | None ->
+                         (match const_field_offset sname fname with
+                          | Some off -> off * 8
+                          | None -> 0)
+                   in
+                   Llvm_debuginfo.dibuild_create_member_type dib
+                     ~scope:file ~name:fname ~file ~line_number:0
+                     ~size_in_bits:f_size_bits ~align_in_bits:f_align_bits
+                     ~offset_in_bits:offset_bits flags ~ty:(ditype_of_ast dib file fty))
+                 |> Array.of_list
+               in
+               let struct_ty =
+                 Llvm_debuginfo.dibuild_create_struct_type dib ~scope:file ~name:sname ~file
+                   ~line_number:0 ~size_in_bits:size_bits ~align_in_bits:align_bits
+                   flags ~derived_from:(Llvm_debuginfo.llmetadata_null ())
+                   ~elements
+                   Llvm_debuginfo.DWARFSourceLanguageKind.C
+                   ~vtable_holder:(Llvm_debuginfo.llmetadata_null ())
+                   ~unique_id:("takibi.struct." ^ sname)
+               in
+               Hashtbl.remove di_struct_in_progress sname;
+               Hashtbl.add di_struct_types sname struct_ty;
+               struct_ty)
 
 (* True for unsigned integer types (use udiv/urem/icmp ult etc.). Recurses
    into a refined type's own base -- this is what fixes the BinOp i32/i64
@@ -1008,6 +1130,30 @@ let rec collect_lets stmts =
           match arm with
           | ArmVariant (_, _, body) -> collect_lets body
           | ArmWild body            -> collect_lets body
+        ) arms
+    | _                           -> []
+  ) stmts
+
+(* Immutable `let` bindings normally stay as SSA values (Imm) so codegen can
+   keep using the existing narrowing/range machinery. Under -g, however, GDB
+   needs a stable address for `info locals` / `p name`; Llvm_debuginfo exposes
+   dbg.declare but not dbg.value. collect_immutable_lets lets gen_func create
+   a debug-only alloca for each immutable binding while leaving the real
+   codegen binding as Imm. *)
+let rec collect_immutable_lets stmts =
+  List.concat_map (fun s ->
+    match s.desc with
+    | Let (false, name, ty_opt, Some _, _) -> [(name, ty_opt, s.loc)]
+    | Block ss                    -> collect_immutable_lets ss
+    | If (_, t, e)                -> collect_immutable_lets t @ collect_immutable_lets e
+    | While (_, b)                -> collect_immutable_lets b
+    | For (_, _, _, _, body)      -> collect_immutable_lets body
+    | ForEach (_, _, body)        -> collect_immutable_lets body
+    | Match (_, arms)             ->
+        List.concat_map (fun arm ->
+          match arm with
+          | ArmVariant (_, _, body) -> collect_immutable_lets body
+          | ArmWild body            -> collect_immutable_lets body
         ) arms
     | _                           -> []
   ) stmts
@@ -2490,6 +2636,7 @@ let gen_func ?prog_types fdef =
 
   (* locals maps name -> local_binding *)
   let locals : (string, local_binding) Hashtbl.t = Hashtbl.create 16 in
+  let debug_immutable_allocas : (string, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 16 in
 
   (* Apply struct type-level alignment to an alloca if the type has one registered. *)
   let apply_struct_align ast_ty ptr =
@@ -2499,6 +2646,18 @@ let gen_func ?prog_types fdef =
          | Some n -> set_alignment n ptr
          | None   -> ())
     | _ -> ()
+  in
+
+  let rec is_debug_aggregate_ty = function
+    | TypeArray _ | TypeSlice _ -> true
+    | TypeNamed sname -> not (Hashtbl.mem enum_underlying sname)
+    | TypeRefined (_, _, base)
+    | TypeBorrow base
+    | TypeSink base
+    | TypeIo base -> is_debug_aggregate_ty base
+    | TypeAlignedPtr _ | TypePtr _ | TypeFn _
+    | TypeI8 | TypeU8 | TypeI16 | TypeU16 | TypeI32 | TypeU32
+    | TypeI64 | TypeU64 | TypeUsize | TypeIsize | TypeBool | TypeVoid -> false
   in
 
   (* Alloca + store for every parameter (params are always mutable) *)
@@ -2530,9 +2689,23 @@ let gen_func ?prog_types fdef =
     end
   ) (collect_lets fdef.body);
 
+  (* Debug-only storage for immutable lets. The real codegen binding remains
+     Imm/SSA; this alloca exists solely so GDB has a concrete location. *)
+  if !debug_info_enabled then
+    List.iter (fun (name, ty_opt, let_loc) ->
+      if not (Hashtbl.mem debug_immutable_allocas name) then begin
+        let ast_ty = res name ty_opt in
+        let ptr = build_alloca (ltype_of_ast ast_ty) (name ^ ".dbg") builder in
+        apply_struct_align ast_ty ptr;
+        Hashtbl.add debug_immutable_allocas name (ast_ty, ptr);
+        declare_var ~is_param:false ~argno:0 ~name ~ast_ty
+          ~line:let_loc.Lexing.pos_lnum ~ptr
+      end
+    ) (collect_immutable_lets fdef.body);
+
   (* Recursively initialize a memory location from a possibly-nested literal.
      Handles nested StructLit for struct/array fields; falls back to gen_expr+store. *)
-  let rec init_memory (ptr : llvalue) (ast_ty : Ast.type_expr) (e : Ast.expr) =
+  let rec init_memory ?(preserve_for_debug = false) (ptr : llvalue) (ast_ty : Ast.type_expr) (e : Ast.expr) =
     match e.desc, ast_ty with
     | StructLit exprs, TypeNamed sname ->
         let llty = Hashtbl.find struct_lltypes sname in
@@ -2541,7 +2714,7 @@ let gen_func ?prog_types fdef =
           let fptr = build_in_bounds_gep llty ptr
             [| const_int (i32_type context) 0; const_int (i32_type context) i |]
             ("fld" ^ string_of_int i) builder in
-          init_memory fptr ft ei
+          init_memory ~preserve_for_debug fptr ft ei
         ) (List.combine fields exprs)
     | StructLit exprs, TypeArray (elem_ty, n) ->
         let arr_ll = array_type (ltype_of_ast elem_ty) n in
@@ -2549,11 +2722,12 @@ let gen_func ?prog_types fdef =
           let ep = build_in_bounds_gep arr_ll ptr
             [| const_int (i32_type context) 0; const_int (i32_type context) i |]
             ("elem" ^ string_of_int i) builder in
-          init_memory ep elem_ty ei
+          init_memory ~preserve_for_debug ep elem_ty ei
         ) exprs
     | _ ->
         let (_, v) = gen_expr ~expected_ty:ast_ty locals e in
-        ignore (build_store (coerce v ast_ty) ptr builder)
+        let inst = build_store (coerce v ast_ty) ptr builder in
+        if preserve_for_debug then set_volatile true inst
   in
 
   (* Stack of (break_bb, continue_bb) for the innermost enclosing loop.
@@ -2757,7 +2931,8 @@ let gen_func ?prog_types fdef =
         (match Hashtbl.find_opt locals name with
          | None -> raise (Error (Printf.sprintf "BUG: no alloca for %s" name))
          | Some (Mut (ast_ty, ptr)) ->
-             Option.iter (init_memory ptr ast_ty) expr_opt
+             let preserve_for_debug = !debug_info_enabled && is_debug_aggregate_ty ast_ty in
+             Option.iter (init_memory ~preserve_for_debug ptr ast_ty) expr_opt
          | Some (Imm _) ->
              raise (Error (Printf.sprintf "BUG: %s marked mutable but stored as Imm" name)))
 
@@ -2769,7 +2944,13 @@ let gen_func ?prog_types fdef =
          | Some e ->
              let ast_ty = res name ty_opt in
              let (_, v) = gen_expr ~expected_ty:ast_ty locals e in
-             Hashtbl.add locals name (Imm (ast_ty, coerce v ast_ty)))
+             let coerced = coerce v ast_ty in
+             (match Hashtbl.find_opt debug_immutable_allocas name with
+              | Some (_, ptr) ->
+                  let inst = build_store coerced ptr builder in
+                  if is_debug_aggregate_ty ast_ty then set_volatile true inst
+              | None -> ());
+             Hashtbl.add locals name (Imm (ast_ty, coerced)))
 
     | Block stmts ->
         List.iter gen_stmt stmts
@@ -3106,7 +3287,29 @@ let rec eval_const_int (e : Ast.expr) : Int64.t =
       Llvm_target.DataLayout.offset_of_element llty field_index dl
   | _ -> raise (Error "global initializer: unsupported constant expression")
 
-let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable =
+let attach_global_debug name ast_ty decl_loc gvar =
+  if !debug_info_enabled then
+    let dib = match !dibuilder_opt with Some d -> d | None -> assert false in
+    let cu  = match !di_compile_unit with Some c -> c | None -> assert false in
+    let file = di_file_for dib decl_loc.Lexing.pos_fname in
+    let line = decl_loc.Lexing.pos_lnum in
+    let ty = ditype_of_ast dib file ast_ty in
+    let align_bits =
+      match alignment gvar with
+      | 0 -> snd (di_size_align_bits (ltype_of_ast ast_ty))
+      | n -> n * 8
+    in
+    let gve =
+      Llvm_debuginfo.dibuild_create_global_variable_expression dib
+        ~scope:cu ~name ~linkage:name ~file ~line ~ty
+        ~is_local_to_unit:false
+        ~expr:(Llvm_debuginfo.dibuild_expression dib [||])
+        ~decl:(Llvm_debuginfo.llmetadata_null ())
+        ~align_in_bits:align_bits
+    in
+    ignore gve
+
+let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable decl_loc =
   let ast_ty = match prog_types with
     | None -> (match ty_opt with Some t -> t | None -> TypeI32)
     | Some (pt : Types.program_types) ->
@@ -3192,6 +3395,7 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable =
   in
   (match eff_align with Some n -> set_alignment n gvar | None -> ());
   if not is_mutable then set_global_constant true gvar;
+  attach_global_debug name ast_ty decl_loc gvar;
   Hashtbl.add global_vars name (ast_ty, gvar)
 
 let declare_func ?prog_types fdef =
@@ -3256,8 +3460,8 @@ let gen_program ?prog_types prog =
   (* Pass 1: register all globals and function signatures *)
   List.iter (function
     | FuncDef fdef                    -> declare_func ?prog_types fdef
-    | LetDef (name, ty_opt, expr_opt, align_opt, is_mutable, _, _) ->
-        gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable
+    | LetDef (name, ty_opt, expr_opt, align_opt, is_mutable, _, loc) ->
+        gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable loc
     | ExternFuncDef (name, params, ret_ty) ->
         if not (Hashtbl.mem functions name) then begin
           let param_ast = List.map (fun (_, t) -> match t with Some t -> t | None -> TypeI32) params in
