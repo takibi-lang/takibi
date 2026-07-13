@@ -5,27 +5,33 @@
 // `conn_state` and the designated transition functions here -- and nothing
 // else -- makes "every state change goes through a designated transition
 // function" a COMPILE ERROR to violate from the state-machine logic in
-// http_server_common.tkb, not a naming convention. Before this split, any
-// function in http_server_common.tkb could still write `conn_state = ...`
-// directly, silently bypassing the witness-token discipline; the type
-// system's trusted island is now exactly the one-line bodies below plus
-// the token forgery cast (`N as usize as *Token`, SPEC.md's documented
-// affine escape hatch) -- both greppable, both confined to review-sized
-// surface. Verifying these bodies SEMANTICALLY (that each writes the state
-// its name claims) is out of scope for the type system today; that residue
-// is issue #13 (SMT) territory, per the layering discussed on issue #117.
+// http_server_common.tkb, not a naming convention.
 //
-// Transitions whose trigger obliges us to SEND something take an affine
-// witness token produced only by the corresponding segment builder in
-// http_server_common.tkb (see the witness-token comment there). Transitions
-// with no send obligation (peer RST, final ACK of our FIN, handshake ACK
-// received) are plain designated functions -- still the only syntactic path
-// to the write, just with nothing to prove first.
+// Why each transition CALLS its obliged action itself (issue #117's
+// "co-location" doctrine, replacing the earlier witness-token round-trip):
+// a token produced in the wide, less-reviewed file and consumed here only
+// proved that SOME code performed the minting cast -- the cast
+// (`1 as usize as *Token`) lived outside this file's review boundary, so
+// the enforcement direction was inverted (the wide scope granted itself
+// its own proofs). With the action call and the phase write side by side
+// in a function small enough to review at a glance, the coupling needs no
+// token at all: there is no syntactic path to the phase write that does
+// not pass the action call two lines above it. Affine witness tokens
+// remain the right tool where co-location is impossible -- ownership
+// handed across tasks/ISRs/time (channels, in-flight DMA, issue #87) --
+// not across same-file call sites.
+//
+// What this file does NOT verify: that each body writes the phase its
+// name claims, and that the builders it calls really emit the segments
+// THEY claim. That residue is human review of this file (kept small on
+// purpose -- this file IS the trusted island) and, eventually, issue #13
+// (SMT). Everything outside this file is FORCED to go through it: reads
+// via tcp_conn_state(), writes via nothing else at all.
 //
 // Deliberately NOT here: conn_snd_nxt/conn_rcv_nxt sequence-number
-// bookkeeping (stays private to http_server_common.tkb -- it is wire
-// arithmetic, not phase), and any protocol logic. This file should stay
-// small enough to audit at a glance.
+// bookkeeping (stays private to http_server_common.tkb -- wire arithmetic,
+// not phase), TX flagging (should_tx/tx_len, derived at the call site from
+// these functions' i32 length returns), and packet parsing/validation.
 
 enum ConnState: u8 {
     Listen;
@@ -37,55 +43,67 @@ enum ConnState: u8 {
 
 private let mut conn_state: ConnState = ConnState::Listen;
 
-// Witness tokens: one distinct affine opaque type per send-obliged
-// transition. Produced only by the segment builders in
-// http_server_common.tkb (the action returns its own proof); consumed only
-// here.
-affine opaque struct SynAckSent;
-affine opaque struct FinSent;
-affine opaque struct ResponseSent;
-affine opaque struct ContinuationSent;
-affine opaque struct AckSent;
-
 // The one read path for dispatching on the current state.
 fn tcp_conn_state() -> ConnState {
     return conn_state;
 }
 
-// -- Send-obliged transitions (token required) ---------------------------
+// -- Transitions with a send obligation ----------------------------------
+// Each calls its obliged segment builder itself, then moves the phase;
+// fallible builders gate the phase write on their own success return.
+// Callers derive should_tx/tx_len and sequence-number updates from the
+// returned length (and, for response completion, from tcp_conn_state()).
 
-// Listen -> SynRcvd: a SYN-ACK for the new connection was built and queued.
-fn tcp_accept_connection(proof: sink *SynAckSent) {
+// Listen -> SynRcvd: reachable only by building the SYN-ACK.
+fn tcp_accept_via_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
+    build_syn_ack(eth, ihl);
     conn_state = ConnState::SynRcvd;
 }
 
-// Established -> LastAck: the peer sent FIN; our FIN+ACK was built and queued.
-fn tcp_begin_close(proof: sink *FinSent) {
+// Established -> LastAck (peer sent FIN): reachable only by building our
+// FIN+ACK reply.
+fn tcp_begin_close_via_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
+    build_fin_ack(eth, ihl);
     conn_state = ConnState::LastAck;
 }
 
-// Established -> LastAck: a single-segment response (with FIN) was built and
-// queued, closing our side.
-fn tcp_response_complete(proof: sink *ResponseSent) {
-    conn_state = ConnState::LastAck;
+// Established -> LastAck or Sending: reachable only by the including
+// example actually building a response segment (http_start_response's
+// contract: a return >= 0 means a segment now sits in the frame). Which
+// phase follows depends on whether that response is already complete.
+fn tcp_respond(eth: [u8; 1514..], ihl: {20..<21 as u16},
+               req: *u8, req_len: u16) -> i32 {
+    let n: i32 = http_start_response(eth, ihl, req, req_len);
+    if (n >= 0) {
+        if (http_response_done()) {
+            conn_state = ConnState::LastAck;
+        } else {
+            conn_state = ConnState::Sending;
+        }
+    }
+    return n;
 }
 
-// Established -> Sending: the first segment of a multi-segment response was
-// built and queued; more segments remain.
-fn tcp_response_continues(proof: sink *ResponseSent) {
-    conn_state = ConnState::Sending;
+// Sending -> LastAck, or stay Sending: reachable only by building the
+// next continuation segment.
+fn tcp_continue(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
+    let n: i32 = http_continue_response(eth, ihl);
+    if (n >= 0) {
+        if (http_response_done()) {
+            conn_state = ConnState::LastAck;
+        }
+    }
+    return n;
 }
 
-// Sending -> LastAck: the final continuation segment (with FIN) was built
-// and queued.
-fn tcp_continuation_complete(proof: sink *ContinuationSent) {
-    conn_state = ConnState::LastAck;
-}
-
-// LastAck -> Listen: the ACK answering the peer's FIN+ACK was built and
-// queued -- the compile-time form of issue #116's fix.
-fn tcp_close_connection(proof: sink *AckSent) {
-    conn_state = ConnState::Listen;
+// LastAck -> Listen: reachable only by building the final ACK answering
+// the peer's FIN+ACK -- the compile-time form of issue #116's fix.
+fn tcp_close_via_final_ack(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
+    let n: i32 = build_tcp_payload(eth, ihl, 0, TCP_FLAG_ACK);
+    if (n >= 0) {
+        conn_state = ConnState::Listen;
+    }
+    return n;
 }
 
 // -- Transitions with no send obligation ----------------------------------
@@ -96,8 +114,8 @@ fn tcp_handshake_complete() {
     conn_state = ConnState::Established;
 }
 
-// Any state -> Listen with nothing owed to the peer: an incoming RST, or the
-// peer's plain ACK of our FIN in LastAck.
+// Any state -> Listen with nothing owed to the peer: an incoming RST, or
+// the peer's plain ACK of our FIN in LastAck.
 fn tcp_reset_to_listen() {
     conn_state = ConnState::Listen;
 }

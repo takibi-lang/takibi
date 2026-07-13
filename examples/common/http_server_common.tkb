@@ -83,31 +83,16 @@ fn tcp_remote_matches(ip: [u8; 20..], src_port: u16) -> bool {
            src_port == conn_remote_port;
 }
 
-// Witness tokens (issue #117): each state transition that pairs "build/queue
-// a segment to transmit" with "move the connection phase forward" is gated
-// by its own affine opaque token, and -- this is the load-bearing part --
-// **the token is returned by the function that actually builds the
-// segment**, not minted separately next to it. An earlier iteration of
-// this file had standalone tcp_mark_*_sent() mint functions called by
-// convention right after each builder; that only proved "the programmer
-// claimed the segment was built", since deleting the builder call and
-// keeping the mint still compiled. With the builder itself as the token's
-// only producer (ATS2-style "the action returns its own proof", the same
-// move fat_open already makes by returning FatFile), code that skips the
-// build has no way to obtain the token short of a bare forgery cast
-// (`N as usize as *Token`), which remains possible (SPEC.md's documented
-// affine escape hatch) but is a one-line, greppable, review-visible act
-// rather than an accident. Fallible builders return a null token on
-// failure (the NetRxCpuOwned null-sentinel precedent) so the token is
-// only ever non-null on the success path, and the segment length travels
-// through an out-parameter since this language has no tuples.
-//
-// The token types, the conn_state phase variable, and the transition
-// functions that consume the tokens all live in http_conn_state.tkb (see
-// its header for why that split exists: `private` is file-granular, so
-// isolating them makes even THIS file unable to move the phase without a
-// token). This file keeps the builders (token producers) and all
-// sequence-number bookkeeping.
+// Connection-phase transitions (issue #117): every conn_state change is
+// performed by a coupling function in http_conn_state.tkb that CALLS the
+// obliged segment builder itself and then writes the phase, side by side
+// (the "co-location" doctrine -- see that file's header for why this
+// replaced the earlier witness-token round-trip, whose minting casts
+// lived in this wide file and so proved nothing this file's own code
+// could not forge). This file cannot write conn_state at all
+// (`private`, enforced at file granularity); it keeps the raw segment
+// builders below (invoked FROM the trusted file), the wire parsing, and
+// all sequence-number bookkeeping.
 
 fn build_arp_reply(eth: [u8; 42..]) {
     let arp = eth[14..<42];
@@ -135,7 +120,7 @@ fn fix_tcp_checksum(ip: [u8; 20..], tcp_seg: [u8; 20..]) {
                 checksum_fold(checksum_add(tcp_seg, sum)));
 }
 
-fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) -> *SynAckSent {
+fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 
@@ -161,10 +146,9 @@ fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) -> *SynAckSent {
     write_u16be(tcp[TCP_URGENT..<20], 0);
 
     fix_tcp_checksum(ip, tcp);
-    return 1 as usize as *SynAckSent;
 }
 
-fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) -> *FinSent {
+fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 
@@ -190,7 +174,6 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) -> *FinSent {
     write_u16be(tcp[TCP_URGENT..<20], 0);
 
     fix_tcp_checksum(ip, tcp);
-    return 1 as usize as *FinSent;
 }
 
 fn build_rst_from_ack(eth: [u8; 54..], ihl: {20..<21 as u16}, seq_out: u32) {
@@ -257,42 +240,6 @@ fn build_tcp_payload(eth: [u8; 1514..], ihl: {20..<21 as u16},
         return n;
     }
     return -1;
-}
-
-// Fallible token-returning builders (see the witness-token comment above):
-// each wraps the underlying payload builder, translating its "length or -1"
-// return convention into "non-null token + length via out_len, or null
-// token". The token is only ever non-null when the wrapped builder actually
-// reported success, so a caller holding a non-null token holds evidence the
-// segment really was built. build_tcp_payload itself keeps its generic
-// signature (http_sdcard_server.tkb calls it directly for data segments
-// that are not tied to any state transition).
-fn build_http_response(eth: [u8; 1514..], ihl: {20..<21 as u16},
-                       req: *u8, req_len: u16, out_len: *i32) -> *ResponseSent {
-    let n: i32 = http_start_response(eth, ihl, req, req_len);
-    if (n >= 0) {
-        *out_len = n;
-        return 1 as usize as *ResponseSent;
-    }
-    return 0 as usize as *ResponseSent;
-}
-
-fn build_http_continuation(eth: [u8; 1514..], ihl: {20..<21 as u16},
-                           out_len: *i32) -> *ContinuationSent {
-    let n: i32 = http_continue_response(eth, ihl);
-    if (n >= 0) {
-        *out_len = n;
-        return 1 as usize as *ContinuationSent;
-    }
-    return 0 as usize as *ContinuationSent;
-}
-
-fn build_final_ack(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> *AckSent {
-    let n: i32 = build_tcp_payload(eth, ihl, 0, TCP_FLAG_ACK);
-    if (n >= 0) {
-        return 1 as usize as *AckSent;
-    }
-    return 0 as usize as *AckSent;
 }
 
 fn http_server_poll_once() {
@@ -370,10 +317,9 @@ fn http_server_poll_once() {
                                                     conn_rcv_nxt = seq + 1;
                                                     conn_snd_nxt = TCP_INITIAL_SEQ + 1;
 
-                                                    let proof: *SynAckSent = build_syn_ack(frame, ihl);
+                                                    tcp_accept_via_syn_ack(frame, ihl);
                                                     should_tx = 1;
                                                     tx_len = 14 + ihl + 20;
-                                                    tcp_accept_connection(proof);
                                                 }
                                                 TcpEvent::Ack => {
                                                     // Unsolicited ACK on a listening socket: send a
@@ -424,11 +370,10 @@ fn http_server_poll_once() {
                                                     TcpEvent::FinAck => {
                                                         if (seq == conn_rcv_nxt) {
                                                             conn_rcv_nxt = conn_rcv_nxt + 1;
-                                                            let proof: *FinSent = build_fin_ack(frame, ihl);
+                                                            tcp_begin_close_via_fin_ack(frame, ihl);
                                                             should_tx = 1;
                                                             tx_len = 14 + ihl + 20;
                                                             conn_snd_nxt = conn_snd_nxt + 1;
-                                                            tcp_begin_close(proof);
                                                         }
                                                         // else: stale FIN, wrong seq. Ignore.
                                                     }
@@ -445,18 +390,16 @@ fn http_server_poll_once() {
                                                                 conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
                                                                 let req: *u8 =
                                                                     (frame as *u8) + (data_off_idx as isize);
-                                                                let mut resp_len: i32 = 0;
-                                                                let proof: *ResponseSent =
-                                                                    build_http_response(frame, ihl, req, data_len, &resp_len);
-                                                                if ((proof as usize) != 0) {
+                                                                let resp_len: i32 =
+                                                                    tcp_respond(frame, ihl, req, data_len);
+                                                                if (resp_len >= 0) {
                                                                     should_tx = 1;
                                                                     tx_len = 14 + (ihl as i32) + 20 + resp_len;
                                                                     conn_snd_nxt = conn_snd_nxt + (resp_len as u32);
-                                                                    if (http_response_done()) {
+                                                                    if (tcp_conn_state() == ConnState::LastAck) {
+                                                                        // Response completed with FIN:
+                                                                        // our FIN consumes one seq number.
                                                                         conn_snd_nxt = conn_snd_nxt + 1;
-                                                                        tcp_response_complete(proof);
-                                                                    } else {
-                                                                        tcp_response_continues(proof);
                                                                     }
                                                                 }
                                                                 // else: response build failed. Ignore.
@@ -482,21 +425,18 @@ fn http_server_poll_once() {
                                                     }
                                                     TcpEvent::Ack => {
                                                         if (seq == conn_rcv_nxt && ack == conn_snd_nxt) {
-                                                            let mut cont_len: i32 = 0;
-                                                            let proof: *ContinuationSent =
-                                                                build_http_continuation(frame, ihl, &cont_len);
-                                                            if ((proof as usize) != 0) {
+                                                            let cont_len: i32 = tcp_continue(frame, ihl);
+                                                            if (cont_len >= 0) {
                                                                 should_tx = 1;
                                                                 tx_len = 14 + (ihl as i32) + 20 + cont_len;
                                                                 conn_snd_nxt = conn_snd_nxt + (cont_len as u32);
-                                                                if (http_response_done()) {
+                                                                if (tcp_conn_state() == ConnState::LastAck) {
+                                                                    // Final segment included FIN: it
+                                                                    // consumes one seq number.
                                                                     conn_snd_nxt = conn_snd_nxt + 1;
-                                                                    tcp_continuation_complete(proof);
                                                                 }
                                                                 // else: more segments queued. Stay
-                                                                // Sending (proof dropped unconsumed:
-                                                                // affine = at most once, and no
-                                                                // transition happens here to need it).
+                                                                // Sending.
                                                             }
                                                             // else: response build failed. Ignore.
                                                         }
@@ -522,16 +462,14 @@ fn http_server_poll_once() {
                                                     TcpEvent::FinAck => {
                                                         if (seq == conn_rcv_nxt && ack == conn_snd_nxt) {
                                                             conn_rcv_nxt = conn_rcv_nxt + 1;
-                                                            // Witness token (issue #117): the token is
-                                                            // only non-null once the closing ACK was
-                                                            // actually built, so the Listen transition
-                                                            // below is unreachable without it -- the
-                                                            // compile-time form of issue #116's fix.
-                                                            let proof: *AckSent = build_final_ack(frame, ihl);
-                                                            if ((proof as usize) != 0) {
+                                                            // The Listen transition happens inside
+                                                            // tcp_close_via_final_ack, right after it
+                                                            // builds the closing ACK -- the co-located
+                                                            // form of issue #116's fix.
+                                                            let ack_len: i32 = tcp_close_via_final_ack(frame, ihl);
+                                                            if (ack_len >= 0) {
                                                                 should_tx = 1;
-                                                                tx_len = 14 + (ihl as i32) + 20;
-                                                                tcp_close_connection(proof);
+                                                                tx_len = 14 + (ihl as i32) + 20 + ack_len;
                                                             }
                                                             // else: build failed (should not happen
                                                             // for a zero-length ACK); stay in LastAck
