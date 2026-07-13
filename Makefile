@@ -76,6 +76,7 @@ COMMON_VIRTIO_MMIO := $(COMMON_QEMU_DIR)/virtio_mmio.tkb
 COMMON_INET_CKSUM  := $(COMMON_DIR)/inet_checksum.tkb
 COMMON_NETUTIL     := $(COMMON_DIR)/netutil.tkb
 COMMON_FAT12       := $(COMMON_DIR)/fat12.tkb
+COMMON_HTTP_SDCARD := $(COMMON_DIR)/http_sdcard_server.tkb
 COMMON_RTOS        := $(COMMON_DIR)/rtos.tkb
 COMMON_RTC         := $(COMMON_QEMU_DIR)/rtc.tkb
 COMMON_NETCONFIG   := $(COMMON_QEMU_DIR)/netconfig.tkb
@@ -767,14 +768,14 @@ examples/fatfs_sdcard/fatfs_sdcard_stm32.o: examples/fatfs_sdcard/fatfs_sdcard.t
 # pass once the whole milestone worked end to end -- see
 # http_server_sdcard.tkb's own header comment for what --forbid-trap did
 # and did not flag.
-examples/http_server_sdcard/http_server_sdcard_stm32.o: examples/http_server_sdcard/http_server_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12) $(TAKIBI)
+examples/http_server_sdcard/http_server_sdcard_stm32.o: examples/http_server_sdcard/http_server_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12) $(COMMON_HTTP_SDCARD) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # http_server_sdcard_rtos: same HTTP+SD server as http_server_sdcard, but
 # SD/FAT operations run behind a Simple RTOS worker task. It needs both
 # target-specific Ethernet and scheduler implementations on the command
 # line, and links with sem_asm.o via its explicit RAM target above.
-examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12) $(TAKIBI)
+examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12) $(COMMON_HTTP_SDCARD) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # http_server_sdcard_install: provisioning-only helper (make hwcheck-net,
