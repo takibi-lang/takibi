@@ -9,6 +9,7 @@
 MAKEFLAGS += -j$(shell nproc)
 
 AARCH64_TARGET := aarch64-none-elf
+LINUX_AMD64_TARGET := x86_64-pc-linux-gnu
 
 # Invoke the built binary directly rather than "dune exec takibi --": dune
 # exec re-checks/re-locks the workspace on every call, which serializes
@@ -83,6 +84,17 @@ COMMON_RTC         := $(COMMON_QEMU_DIR)/rtc.tkb
 COMMON_NETCONFIG   := $(COMMON_QEMU_DIR)/netconfig.tkb
 COMMON_STM32_STUB  := $(COMMON_QEMU_DIR)/stm32_stub.tkb
 COMMON_FAT12_GEOMETRY := $(COMMON_DIR)/fat12_geometry.tkb
+
+# -- Linux/AMD64 user-space support files -------------------------------------
+COMMON_LINUX_DIR       := examples/common_linux
+COMMON_LINUX_STARTUP_S := $(COMMON_LINUX_DIR)/startup.S
+COMMON_LINUX_STARTUP_O := $(COMMON_LINUX_DIR)/startup.o
+COMMON_LINUX_SYSCALL_S := $(COMMON_LINUX_DIR)/syscall.S
+COMMON_LINUX_SYSCALL_O := $(COMMON_LINUX_DIR)/syscall.o
+COMMON_LINUX_UART      := $(COMMON_LINUX_DIR)/uart.tkb
+COMMON_LINUX_PRINT     := $(COMMON_LINUX_DIR)/print.tkb
+LINUX_EXAMPLES         := linux_hello
+LINUX_BINS             := $(foreach e,$(LINUX_EXAMPLES),examples/$(e)/$(e).linux)
 
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
@@ -167,7 +179,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest stm32build hwcheck hwcheck-net langcheck check allcheck clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo
+.PHONY: build test qemutest stm32build linuxbuild linuxcheck hwcheck hwcheck-net langcheck check allcheck clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo
 
 .DEFAULT_GOAL := build
 
@@ -270,8 +282,28 @@ langcheck:
 	fi
 	@echo "OK: all files are ASCII-clean"
 
-## check: run unit tests + QEMU integration tests + STM32 build check + ASCII check
-check: langcheck test stm32build qemutest
+## check: run unit tests + QEMU/Linux integration tests + STM32 build check + ASCII check
+check: langcheck test stm32build qemutest linuxcheck
+
+## linuxbuild: build Linux/AMD64 user-space examples (no libc, _start -> app_main)
+linuxbuild: $(LINUX_BINS)
+
+## linuxcheck: run Linux/AMD64 user-space examples and diff expected stdout
+linuxcheck: linuxbuild
+	@set -eu; \
+	for e in $(LINUX_EXAMPLES); do \
+	  out=$$(mktemp); \
+	  if examples/$$e/$$e.linux > $$out; then \
+	    if diff -u examples/$$e/$$e.expected $$out; then \
+	      printf "PASS  %s (linux amd64)\n" "$$e"; \
+	    else \
+	      rm -f $$out; exit 1; \
+	    fi; \
+	  else \
+	    status=$$?; rm -f $$out; exit $$status; \
+	  fi; \
+	  rm -f $$out; \
+	done
 
 ## allcheck: clean build artifacts, then run software and hardware checks
 allcheck:
@@ -292,6 +324,18 @@ $(COMMON_SEM_ASM_O): $(COMMON_SEM_ASM_S)
 
 $(COMMON_SEMIHOSTING_ASM_O): $(COMMON_SEMIHOSTING_ASM_S)
 	$(LLVM_MC) --triple=aarch64-none-elf --filetype=obj $< -o $@
+
+$(COMMON_LINUX_STARTUP_O): $(COMMON_LINUX_STARTUP_S)
+	$(LLVM_MC) --triple=$(LINUX_AMD64_TARGET) --filetype=obj $< -o $@
+
+$(COMMON_LINUX_SYSCALL_O): $(COMMON_LINUX_SYSCALL_S)
+	$(LLVM_MC) --triple=$(LINUX_AMD64_TARGET) --filetype=obj $< -o $@
+
+examples/linux_hello/linux_hello_linux.o: examples/linux_hello/linux_hello.tkb $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_PRINT_BASE) $(TAKIBI)
+	$(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $< --target $(LINUX_AMD64_TARGET) -o $@ --forbid-trap
+
+examples/linux_hello/linux_hello.linux: $(COMMON_LINUX_STARTUP_O) $(COMMON_LINUX_SYSCALL_O) examples/linux_hello/linux_hello_linux.o
+	$(LLD) -static -nostdlib -e _start $^ -o $@
 
 # -- .tkb -> .o  (static pattern rules) ----------------------------------------
 # For examples/%.o, % matches "name/name" (including the slash).
@@ -1082,5 +1126,7 @@ profile-tcp-echo: examples/tcp_echo/kernel.debug.elf
 clean:
 	dune clean
 	rm -f $(COMMON_STARTUP_O) $(COMMON_TIMER_ASM_O) $(COMMON_SEM_ASM_O) \
+	      $(COMMON_LINUX_STARTUP_O) $(COMMON_LINUX_SYSCALL_O) \
 	      $(COMMON_DIR)/*.o $(COMMON_QEMU_DIR)/*.o $(COMMON_STM32_DIR)/*.o \
-	      $(foreach e,$(EXAMPLES),examples/$(e)/*.o examples/$(e)/*.elf examples/$(e)/*.bin)
+	      $(foreach e,$(EXAMPLES),examples/$(e)/*.o examples/$(e)/*.elf examples/$(e)/*.bin) \
+	      $(foreach e,$(LINUX_EXAMPLES),examples/$(e)/*.o examples/$(e)/*.linux)

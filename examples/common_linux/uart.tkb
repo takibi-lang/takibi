@@ -1,0 +1,23 @@
+extern fn linux_write(fd: i32, buf: *u8, len: usize) -> isize;
+extern fn linux_exit(code: i32) -> void;
+
+fn uart_putc(c: u8) {
+    let mut byte: u8 = c;
+    linux_write(1, &byte, 1);
+}
+
+fn uart_puts(s: *u8) {
+    let start: *u8 = s;
+    let mut len: usize = 0;
+    while (*s != 0) {
+        len = len + 1;
+        s = s + 1;
+    }
+    linux_write(1, start, len);
+}
+
+fn platform_init() {
+}
+
+fn platform_shutdown() {
+}

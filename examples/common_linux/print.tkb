@@ -1,0 +1,7 @@
+use "examples/common/print.tkb";
+use "examples/common/runtime.tkb";
+
+fn uart_print(v: isize) { uart_print_i64_core(v as i64); }
+fn uart_print(v: usize) { uart_print_u64_core(v as u64); }
+fn uart_println(v: isize) { uart_print(v); uart_puts("\n"); }
+fn uart_println(v: usize) { uart_print(v); uart_puts("\n"); }

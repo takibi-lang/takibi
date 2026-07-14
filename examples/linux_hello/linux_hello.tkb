@@ -1,0 +1,6 @@
+fn app_main() {
+    uart_puts("hello from takibi linux amd64\n");
+    uart_puts("answer: ");
+    uart_print(42 as i32);
+    uart_puts("\n");
+}
