@@ -1,0 +1,11 @@
+// Helper for examples/private_mint_wrong (not an example itself): declares
+// a private affine handle type and its only legal source. See the main
+// file's header comment.
+private affine opaque struct SealTok;
+
+fn seal_mint() -> *SealTok {
+    return 0 as usize as *SealTok;
+}
+
+fn seal_sink(t: sink *SealTok) {
+}

@@ -301,7 +301,7 @@ fn fat_alloc_chain(num_clusters: u32) -> u32 {
 // still NOT enforced (a real, separate compiler gap, tracked as GitHub
 // issue #89): actually calling fat_close() at all. Forgetting to close a
 // handle still compiles clean today -- only double-use is caught.
-affine opaque struct FatFile;
+private affine opaque struct FatFile;
 
 let mut ff_dir_index:      usize = 0; // root_dir_buf slot
 let mut ff_start_cluster:  u32 = 0;   // 0 until the first fat_write allocates one

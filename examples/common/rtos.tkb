@@ -56,11 +56,13 @@ extern fn enable_irq();
 
 struct KLock {
     // Placeholder for real per-lock state once fine-grained locking
-    // replaces the giant-lock body below. Unused today.
-    word: i32;
+    // replaces the giant-lock body below. Unused today. private (issue
+    // #108 / OWNERSHIP_KERNEL.md Stage 2): lock internals are this
+    // file's business only.
+    private word: i32;
 }
 
-affine opaque struct KGuard;
+private affine opaque struct KGuard;
 
 fn klock(lk: *KLock) -> *KGuard {
     disable_irq();
@@ -78,12 +80,40 @@ fn kunlock(g: sink *KGuard, lk: *KLock) {
 // it sidesteps the buffer-ownership tracking issue #89 would otherwise
 // need for a future zero-copy version (no live buffer exists to own),
 // and keeps the send/recv coupling a single atomic joint event.
+// Smart constructors (issue #108 / OWNERSHIP_KERNEL.md Stage 2): channel
+// internals are private above, so these are the ONE place the rendezvous
+// invariant (mutex free = 1, slot empty = all else 0) is established.
+// Before Stage 2, every example duplicated that invariant as a struct
+// literal `{1, 0, 0, 0, 0}` -- knowledge that was never theirs to own.
+// Call once per channel before rtos_start()/first use.
+fn chan_init(ch: *Chan) {
+    ch.mutex = 1;
+    ch.slot_full = 0;
+    ch.slot_taken = 0;
+    ch.full = 0;
+    ch.value = 0;
+}
+
+fn chan_word_init(ch: *WordChan) {
+    ch.mutex = 1;
+    ch.slot_full = 0;
+    ch.slot_taken = 0;
+    ch.full = 0;
+    ch.value = 0;
+}
+
 struct Chan {
-    mutex:      i32;
-    slot_full:  io i32;
-    slot_taken: io i32;
-    full:       i32;
-    value:      i32;
+    // All private (issue #108 / OWNERSHIP_KERNEL.md Stage 2):
+    // chan_send/chan_recv below are the ONLY code that may touch channel
+    // internals -- a task poking at the rendezvous slot or its
+    // synchronization words directly is now a compile error, not a
+    // convention. Examples still declare `let mut ch: Chan;` freely
+    // (naming the type is not gated, only its internals are).
+    private mutex:      i32;
+    private slot_full:  io i32;
+    private slot_taken: io i32;
+    private full:       i32;
+    private value:      i32;
 }
 
 fn chan_send(ch: *Chan, m: i32) {
@@ -117,11 +147,12 @@ fn chan_recv(ch: *Chan) -> i32 {
 // task code on the RTOS channel boundary instead of exposing mutex/condvar
 // directly, while preserving Chan's existing i32 API for current examples.
 struct WordChan {
-    mutex:      i32;
-    slot_full:  io i32;
-    slot_taken: io i32;
-    full:       i32;
-    value:      usize;
+    // Same privacy rationale as Chan above.
+    private mutex:      i32;
+    private slot_full:  io i32;
+    private slot_taken: io i32;
+    private full:       i32;
+    private value:      usize;
 }
 
 fn chan_word_send(ch: *WordChan, m: usize) {

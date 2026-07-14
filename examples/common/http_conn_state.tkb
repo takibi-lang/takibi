@@ -48,6 +48,34 @@ fn tcp_conn_state() -> ConnState {
     return conn_state;
 }
 
+// The event-response obligation (OWNERSHIP_KERNEL.md Stage 1 / 4.10,
+// GitHub issue #117): one PendingTcpEvent is minted per accepted TCP
+// segment, and the `linear` kind's all-paths rule forces every
+// (state x event) dispatch arm in http_server_common.tkb -- including
+// every previously-implicit ignore path (stale seq, unknown peer,
+// unsupported verb) -- to discharge it through exactly one of the
+// responder functions below. Silently swallowing a protocol event (the
+// shape of issue #116's original bug) is now a compile error, and every
+// deliberate non-response is a greppable tcp_event_ignored call.
+private linear opaque struct PendingTcpEvent;
+
+fn tcp_event_accepted() -> *PendingTcpEvent {
+    return 0 as usize as *PendingTcpEvent;
+}
+
+// The one legal way to deliberately not respond. The call site IS the
+// reason (a breakpoint here plus the stack trace identifies which arm
+// ignored what); see issue #117 for why this carries no reason argument.
+fn tcp_event_ignored(pending: sink *PendingTcpEvent) {
+}
+
+// Respond to an unsolicited ACK on a listening socket with a stateless
+// RST (no phase change, but a real response -- distinct from ignoring).
+fn tcp_reject_with_rst(pending: sink *PendingTcpEvent,
+                       eth: [u8; 54..], ihl: {20..<21 as u16}, ack_seq: u32) {
+    build_rst_from_ack(eth, ihl, ack_seq);
+}
+
 // -- Transitions with a send obligation ----------------------------------
 // Each calls its obliged segment builder itself, then moves the phase;
 // fallible builders gate the phase write on their own success return.
@@ -55,14 +83,16 @@ fn tcp_conn_state() -> ConnState {
 // returned length (and, for response completion, from tcp_conn_state()).
 
 // Listen -> SynRcvd: reachable only by building the SYN-ACK.
-fn tcp_accept_via_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
+fn tcp_accept_via_syn_ack(pending: sink *PendingTcpEvent,
+                          eth: [u8; 54..], ihl: {20..<21 as u16}) {
     build_syn_ack(eth, ihl);
     conn_state = ConnState::SynRcvd;
 }
 
 // Established -> LastAck (peer sent FIN): reachable only by building our
 // FIN+ACK reply.
-fn tcp_begin_close_via_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
+fn tcp_begin_close_via_fin_ack(pending: sink *PendingTcpEvent,
+                               eth: [u8; 54..], ihl: {20..<21 as u16}) {
     build_fin_ack(eth, ihl);
     conn_state = ConnState::LastAck;
 }
@@ -71,7 +101,8 @@ fn tcp_begin_close_via_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
 // example actually building a response segment (http_start_response's
 // contract: a return >= 0 means a segment now sits in the frame). Which
 // phase follows depends on whether that response is already complete.
-fn tcp_respond(eth: [u8; 1514..], ihl: {20..<21 as u16},
+fn tcp_respond(pending: sink *PendingTcpEvent,
+               eth: [u8; 1514..], ihl: {20..<21 as u16},
                req: *u8, req_len: u16) -> i32 {
     let n: i32 = http_start_response(eth, ihl, req, req_len);
     if (n >= 0) {
@@ -86,7 +117,8 @@ fn tcp_respond(eth: [u8; 1514..], ihl: {20..<21 as u16},
 
 // Sending -> LastAck, or stay Sending: reachable only by building the
 // next continuation segment.
-fn tcp_continue(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
+fn tcp_continue(pending: sink *PendingTcpEvent,
+                eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
     let n: i32 = http_continue_response(eth, ihl);
     if (n >= 0) {
         if (http_response_done()) {
@@ -98,7 +130,8 @@ fn tcp_continue(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
 
 // LastAck -> Listen: reachable only by building the final ACK answering
 // the peer's FIN+ACK -- the compile-time form of issue #116's fix.
-fn tcp_close_via_final_ack(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
+fn tcp_close_via_final_ack(pending: sink *PendingTcpEvent,
+                           eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
     let n: i32 = build_tcp_payload(eth, ihl, 0, TCP_FLAG_ACK);
     if (n >= 0) {
         conn_state = ConnState::Listen;
@@ -110,12 +143,12 @@ fn tcp_close_via_final_ack(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
 
 // SynRcvd -> Established: the peer's valid handshake ACK arrived; nothing
 // to send.
-fn tcp_handshake_complete() {
+fn tcp_handshake_complete(pending: sink *PendingTcpEvent) {
     conn_state = ConnState::Established;
 }
 
 // Any state -> Listen with nothing owed to the peer: an incoming RST, or
 // the peer's plain ACK of our FIN in LastAck.
-fn tcp_reset_to_listen() {
+fn tcp_reset_to_listen(pending: sink *PendingTcpEvent) {
     conn_state = ConnState::Listen;
 }

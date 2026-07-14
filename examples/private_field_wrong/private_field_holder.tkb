@@ -1,0 +1,13 @@
+// Helper for examples/private_field_wrong (not an example itself): a
+// struct whose invariant-bearing field is private, plus its accessors.
+struct SealedCounter {
+    private count: i32;
+    tag:           i32;
+}
+
+let mut the_counter: SealedCounter;
+
+fn counter_bump() -> i32 {
+    the_counter.count = the_counter.count + 1;
+    return the_counter.count;
+}

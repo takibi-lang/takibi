@@ -719,6 +719,17 @@ run_forbid_trap_ok_test "forbid_trap_ok"     examples/forbid_trap_ok/forbid_trap
 run_compile_error_test "cond_not_bool"         examples/cond_not_bool/cond_not_bool.tkb                 examples/cond_not_bool/cond_not_bool.error
 run_compile_error_test "affine_double_consume" examples/affine_double_consume/affine_double_consume.tkb examples/affine_double_consume/affine_double_consume.error
 run_compile_error_test "affine_never_consumed" examples/affine_never_consumed/affine_never_consumed.tkb examples/affine_never_consumed/affine_never_consumed.error
+run_compile_error_test "linear_never_consumed" examples/linear_never_consumed/linear_never_consumed.tkb examples/linear_never_consumed/linear_never_consumed.error
+run_compile_error_test "linear_branch_missed" examples/linear_branch_missed/linear_branch_missed.tkb examples/linear_branch_missed/linear_branch_missed.error
+run_compile_error_test "linear_cast_discard" examples/linear_cast_discard/linear_cast_discard.tkb examples/linear_cast_discard/linear_cast_discard.error
+run_compile_error_test "linear_overwrite" examples/linear_overwrite/linear_overwrite.tkb examples/linear_overwrite/linear_overwrite.error
+run_compile_error_test "private_mint_wrong" examples/private_mint_wrong/private_mint_wrong.tkb examples/private_mint_wrong/private_mint_wrong.error
+run_compile_error_test "private_field_wrong" examples/private_field_wrong/private_field_wrong.tkb examples/private_field_wrong/private_field_wrong.error
+run_compile_error_test "opaque_arith_wrong" examples/opaque_arith_wrong/opaque_arith_wrong.tkb examples/opaque_arith_wrong/opaque_arith_wrong.error
+run_compile_error_test "affine_launder_wrong" examples/affine_launder_wrong/affine_launder_wrong.tkb examples/affine_launder_wrong/affine_launder_wrong.error
+run_compile_error_test "tuple_linear_leak_wrong" examples/tuple_linear_leak_wrong/tuple_linear_leak_wrong.tkb examples/tuple_linear_leak_wrong/tuple_linear_leak_wrong.error
+run_compile_error_test "tuple_field_wrong" examples/tuple_field_wrong/tuple_field_wrong.tkb examples/tuple_field_wrong/tuple_field_wrong.error
+run_compile_error_test "tuple_cast_wrong" examples/tuple_cast_wrong/tuple_cast_wrong.tkb examples/tuple_cast_wrong/tuple_cast_wrong.error
 run_compile_error_test "affine_param_never_consumed" examples/affine_param_never_consumed/affine_param_never_consumed.tkb examples/affine_param_never_consumed/affine_param_never_consumed.error
 run_compile_error_test "align_ptr_unproven" examples/align_ptr_unproven/align_ptr_unproven.tkb examples/align_ptr_unproven/align_ptr_unproven.error
 run_compile_error_test "klock_guard_forgot_unlock" examples/klock_guard_forgot_unlock/klock_guard_forgot_unlock.tkb examples/klock_guard_forgot_unlock/klock_guard_forgot_unlock.error
@@ -784,6 +795,8 @@ run_test "slice"         examples/slice/kernel.elf         examples/slice/slice.
 run_test "foreach"       examples/foreach/kernel.elf       examples/foreach/foreach.expected
 run_test "int64"         examples/int64/kernel.elf         examples/int64/int64.expected
 run_test "affine_escape_via_index" examples/affine_escape_via_index/kernel.elf examples/affine_escape_via_index/affine_escape_via_index.expected
+run_test "linear_obligation" examples/linear_obligation/kernel.elf examples/linear_obligation/linear_obligation.expected
+run_test "tuple_pair" examples/tuple_pair/kernel.elf examples/tuple_pair/tuple_pair.expected
 run_test "align_ptr_proof" examples/align_ptr_proof/kernel.elf examples/align_ptr_proof/align_ptr_proof.expected
 run_test "klock_guard" examples/klock_guard/kernel.elf examples/klock_guard/klock_guard.expected
 run_test "percpu" examples/percpu/kernel.elf examples/percpu/percpu.expected

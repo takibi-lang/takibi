@@ -134,6 +134,8 @@ let rec show_type = function
   | Ast.TypeBorrow t -> "borrow " ^ show_type t
   | Ast.TypeSink t -> "sink " ^ show_type t
   | Ast.TypeAlignedPtr (n, t) -> Printf.sprintf "*align(%d) %s" n (show_type t)
+  | Ast.TypeTuple ts ->
+      Printf.sprintf "(%s)" (String.concat ", " (List.map show_type ts))
 
 let type_t : Ast.type_expr Alcotest.testable =
   Alcotest.testable (fun fmt t -> Format.pp_print_string fmt (show_type t)) (=)
@@ -577,7 +579,7 @@ let parser_tests = [
 
   Alcotest.test_case "io type in struct field parses" `Quick (fun () ->
     match parse "struct S { done: io i32; }" with
-    | [Ast.StructDef (_, [(_, t)], _, _)] ->
+    | [Ast.StructDef (_, [(_, t)], _, _, _, _)] ->
         Alcotest.check type_t "field type is io i32" (Ast.TypeIo Ast.TypeI32) t
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1030,7 +1032,7 @@ let parser_tests = [
 
   Alcotest.test_case "struct definition parses" `Quick (fun () ->
     match parse "struct Point { x: i32; y: i32; }" with
-    | [Ast.StructDef ("Point", fields, false, None)] ->
+    | [Ast.StructDef ("Point", fields, false, None, _, _)] ->
         Alcotest.(check int) "field count" 2 (List.length fields);
         let (n0, t0) = List.nth fields 0 in
         let (n1, t1) = List.nth fields 1 in
@@ -1105,27 +1107,27 @@ let parser_tests = [
 
   Alcotest.test_case "packed struct definition parses with is_packed=true" `Quick (fun () ->
     match parse "struct packed Hdr { a: u8; b: u16; }" with
-    | [Ast.StructDef ("Hdr", fields, true, None)] ->
+    | [Ast.StructDef ("Hdr", fields, true, None, _, _)] ->
         Alcotest.(check int) "field count" 2 (List.length fields)
     | _ -> Alcotest.fail "expected StructDef(Hdr, [...], true)"
   );
 
   Alcotest.test_case "normal struct definition parses with is_packed=false" `Quick (fun () ->
     match parse "struct Hdr { a: u8; b: u16; }" with
-    | [Ast.StructDef ("Hdr", _, false, None)] -> ()
+    | [Ast.StructDef ("Hdr", _, false, None, _, _)] -> ()
     | _ -> Alcotest.fail "expected is_packed=false"
   );
 
   Alcotest.test_case "struct align(N) parses with align_bytes=Some N" `Quick (fun () ->
     match parse "struct Vec4 align(16) { x: i32; y: i32; z: i32; w: i32; }" with
-    | [Ast.StructDef ("Vec4", fields, false, Some 16)] ->
+    | [Ast.StructDef ("Vec4", fields, false, Some 16, _, _)] ->
         Alcotest.(check int) "field count" 4 (List.length fields)
     | _ -> Alcotest.fail "expected StructDef(Vec4, [...], false, Some 16)"
   );
 
   Alcotest.test_case "struct packed align(N) parses with both flags" `Quick (fun () ->
     match parse "struct packed Hdr align(4) { a: u8; b: u16; }" with
-    | [Ast.StructDef ("Hdr", _, true, Some 4)] -> ()
+    | [Ast.StructDef ("Hdr", _, true, Some 4, _, _)] -> ()
     | _ -> Alcotest.fail "expected is_packed=true, align_bytes=Some 4"
   );
 
@@ -1233,13 +1235,13 @@ let parser_tests = [
 
   Alcotest.test_case "opaque struct declaration parses" `Quick (fun () ->
     match parse "opaque struct Token;" with
-    | [Ast.OpaqueStructDef ("Token", false)] -> ()
+    | [Ast.OpaqueStructDef ("Token", Ast.KindPlain, _, _)] -> ()
     | _ -> Alcotest.fail "expected OpaqueStructDef(Token)"
   );
 
   Alcotest.test_case "affine opaque struct and borrow parameter parse" `Quick (fun () ->
     match parse "affine opaque struct Token; fn inspect(t: borrow *Token) {}" with
-    | [Ast.OpaqueStructDef ("Token", true);
+    | [Ast.OpaqueStructDef ("Token", Ast.KindAffine, _, _);
        Ast.FuncDef { params = [("t", Some (Ast.TypeBorrow (Ast.TypePtr
          (Ast.TypeNamed "Token"))))]; _ }] -> ()
     | _ -> Alcotest.fail "expected affine opaque Token and borrowed pointer"
@@ -1989,7 +1991,7 @@ let infer_tests = [
      runtime-computed MMIO addresses (see lib/type_inf.ml's Cast case
      comment and HISTORY.md's issue #15 entry). *)
   Alcotest.test_case "casting a non-literal integer to an affine handle requires unsafe" `Quick
-    (expect_type_error "casting a non-literal integer to an affine handle"
+    (expect_type_error "casting a non-literal integer to an affine/linear handle"
        "affine opaque struct Token;
         fn f(idx: usize) { let t: *Token = idx as *Token; }");
 
@@ -3056,6 +3058,548 @@ let infer_tests = [
        | _ -> ()
        | exception Types.TypeError (_, msg) ->
            Alcotest.failf "expected a non-private global to stay unrestricted, got: %s" msg);
+
+  (* -- Linear kind (OWNERSHIP_KERNEL.md Stage 1, GitHub issue #117) -------
+     `linear opaque struct` = exactly-once-on-every-path obligations.
+     Prelude shared by most cases below: a token type, a mint, a sink. *)
+
+  Alcotest.test_case "linear: create + sink on the straight-line path is fine" `Quick
+    (fun () ->
+       match infer "linear opaque struct LinTok;
+                    fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+                    fn lsink(t: sink *LinTok) {}
+                    fn lin_ok() { let t: *LinTok = lmint(); lsink(t); }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "linear: consuming on BOTH branches of an if/else is fine \
+                      (branching around a linear value is legal)" `Quick
+    (fun () ->
+       match infer "linear opaque struct LinTok;
+                    fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+                    fn lsink_a(t: sink *LinTok) {}
+                    fn lsink_b(t: sink *LinTok) {}
+                    fn lin_both(c: bool) {
+                      let t: *LinTok = lmint();
+                      if (c) { lsink_a(t); } else { lsink_b(t); }
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "linear: never consumed is a compile error" `Quick
+    (expect_type_error "linear value 't' is never consumed"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lin_leak() { let t: *LinTok = lmint(); }");
+
+  Alcotest.test_case "linear: consumed in only ONE branch is a compile error \
+                      (the case affine's union check cannot catch)" `Quick
+    (expect_type_error "consumed on some paths but not on every path"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lsink(t: sink *LinTok) {}
+        fn lin_missed(c: bool) {
+          let t: *LinTok = lmint();
+          if (c) { lsink(t); }
+        }");
+
+  Alcotest.test_case "negative control: the same one-branch consumption on an \
+                      AFFINE value still compiles (union semantics unchanged)" `Quick
+    (fun () ->
+       match infer "affine opaque struct AffTok2;
+                    fn amint2() -> *AffTok2 { return 0 as usize as *AffTok2; }
+                    fn asink2(t: sink *AffTok2) {}
+                    fn aff_missed(c: bool) {
+                      let t: *AffTok2 = amint2();
+                      if (c) { asink2(t); }
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "linear: casting a linear value away is a compile error" `Quick
+    (expect_type_error "cannot cast a linear value"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lin_cast() { let t: *LinTok = lmint(); let x: usize = t as usize; }");
+
+  Alcotest.test_case "linear: assigning over an undischarged obligation is a \
+                      compile error" `Quick
+    (expect_type_error "would discard its obligation"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lsink(t: sink *LinTok) {}
+        fn lin_overwrite() {
+          let mut t: *LinTok = lmint();
+          t = lmint();
+          lsink(t);
+        }");
+
+  Alcotest.test_case "linear: the self-transform idiom `t = transform(t)` is \
+                      fine (RHS consumes the old obligation first)" `Quick
+    (fun () ->
+       match infer "linear opaque struct LinTok;
+                    fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+                    fn ltransform(t: *LinTok) -> *LinTok { return t; }
+                    fn lsink(t: sink *LinTok) {}
+                    fn lin_transform() {
+                      let mut t: *LinTok = lmint();
+                      t = ltransform(t);
+                      lsink(t);
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "linear: an uninitialized linear let is a compile error" `Quick
+    (expect_type_error "must be initialized at its declaration"
+       "linear opaque struct LinTok;
+        fn lin_uninit() { let mut t: *LinTok; }");
+
+  Alcotest.test_case "linear: a pending obligation at an early return is a \
+                      compile error" `Quick
+    (expect_type_error "still pending at this return"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lsink(t: sink *LinTok) {}
+        fn lin_early(c: bool) -> i32 {
+          let t: *LinTok = lmint();
+          if (c) { return -1; }
+          lsink(t);
+          return 0;
+        }");
+
+  Alcotest.test_case "linear: a pending obligation at a break is a compile error" `Quick
+    (expect_type_error "still pending at this break"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lsink(t: sink *LinTok) {}
+        fn lin_break() {
+          while (true) {
+            let t: *LinTok = lmint();
+            break;
+          }
+        }");
+
+  Alcotest.test_case "linear: returning the obligation itself IS consumption \
+                      (return-forward compiles)" `Quick
+    (fun () ->
+       match infer "linear opaque struct LinTok;
+                    fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+                    fn lin_forward() -> *LinTok {
+                      let t: *LinTok = lmint();
+                      return t;
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "linear: a plain linear parameter consumed on only some \
+                      paths is a compile error" `Quick
+    (expect_type_error "still pending at this return"
+       "linear opaque struct LinTok;
+        fn lsink(t: sink *LinTok) {}
+        fn lin_param(c: bool, t: *LinTok) -> i32 {
+          if (c) { return -1; }
+          lsink(t);
+          return 0;
+        }");
+
+  Alcotest.test_case "linear: a plain linear parameter never consumed at all is \
+                      a compile error (fall-through path)" `Quick
+    (expect_type_error "linear parameter 't' is not consumed on every path"
+       "linear opaque struct LinTok;
+        fn lin_swallow(t: *LinTok) {}");
+
+  Alcotest.test_case "linear: a sink parameter needs no further forwarding \
+                      (terminal consumer compiles)" `Quick
+    (fun () ->
+       match infer "linear opaque struct LinTok;
+                    fn lin_terminal(t: sink *LinTok) {}" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "linear: double consume is a compile error" `Quick
+    (expect_type_error "linear value 't' was already consumed"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lsink(t: sink *LinTok) {}
+        fn lin_double() {
+          let t: *LinTok = lmint();
+          lsink(t);
+          lsink(t);
+        }");
+
+  Alcotest.test_case "linear: taking the address of a linear value is a \
+                      compile error" `Quick
+    (expect_type_error "cannot take the address of linear value"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lsink(t: sink *LinTok) {}
+        fn lin_addr() {
+          let mut t: *LinTok = lmint();
+          let p: usize = (&t) as usize;
+          lsink(t);
+        }");
+
+  Alcotest.test_case "linear: storing into a struct field is rejected at the \
+                      field declaration" `Quick
+    (expect_type_error "cannot hold a linear value"
+       "linear opaque struct LinTok;
+        struct LinHolder { tok: *LinTok; }");
+
+  Alcotest.test_case "linear: an array of linear values is rejected" `Quick
+    (expect_type_error "cannot live inside an array/slice"
+       "linear opaque struct LinTok;
+        fn lin_arr() { let mut a: [*LinTok; 2]; }");
+
+  Alcotest.test_case "linear: a linear-typed global is rejected" `Quick
+    (expect_type_error "cannot hold a linear value"
+       "linear opaque struct LinTok;
+        let mut g_tok: *LinTok = 0 as usize as *LinTok;");
+
+  Alcotest.test_case "linear: storing through a pointer is a compile error" `Quick
+    (expect_type_error "cannot store a linear value through a pointer"
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lin_store(pp: **LinTok) {
+          let t: *LinTok = lmint();
+          *pp = t;
+        }");
+
+  (* -- Stage 2 (OWNERSHIP_KERNEL.md, GitHub issues #108/#15) --------------
+     private opaque types (construction is declaring-file-only), private
+     struct fields, opaque pointer arithmetic ban, affine ptr-laundering
+     unsafe gate. *)
+
+  Alcotest.test_case "private type: minting in the declaring file is fine" `Quick
+    (fun () ->
+       match infer_files [
+         "seal.tkb", "private affine opaque struct SealTok;
+                      fn seal_mint() -> *SealTok { return 0 as usize as *SealTok; }
+                      fn seal_sink(t: sink *SealTok) {}";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "private type: minting from ANOTHER file is a compile error" `Quick
+    (fun () ->
+       match infer_files [
+         "seal.tkb", "private affine opaque struct SealTok;
+                      fn seal_sink(t: sink *SealTok) {}";
+         "b.tkb", "fn forge() { let t: *SealTok = 0 as usize as *SealTok; seal_sink(t); }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the type" true
+             (contains_substring msg "private type 'SealTok'"));
+
+  Alcotest.test_case "private type: NAMING it from another file stays legal \
+                      (annotations/pass-through -- only construction is gated)" `Quick
+    (fun () ->
+       match infer_files [
+         "seal.tkb", "private affine opaque struct SealTok;
+                      fn seal_mint() -> *SealTok { return 0 as usize as *SealTok; }
+                      fn seal_sink(t: sink *SealTok) {}";
+         "b.tkb", "fn relay() { let t: *SealTok = seal_mint(); seal_sink(t); }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "private field: same-file access is fine" `Quick
+    (fun () ->
+       match infer_files [
+         "holder.tkb", "struct Sealed { private inner: i32; pub_tag: i32; }
+                        let mut sealed_box: Sealed;
+                        fn sealed_get() -> i32 { return sealed_box.inner; }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "private field: cross-file READ is a compile error" `Quick
+    (fun () ->
+       match infer_files [
+         "holder.tkb", "struct Sealed { private inner: i32; pub_tag: i32; }
+                        let mut sealed_box: Sealed;";
+         "b.tkb", "fn peek() -> i32 { return sealed_box.inner; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the field" true
+             (contains_substring msg "'Sealed.inner' is private"));
+
+  Alcotest.test_case "private field: cross-file WRITE is a compile error" `Quick
+    (fun () ->
+       match infer_files [
+         "holder.tkb", "struct Sealed { private inner: i32; pub_tag: i32; }
+                        let mut sealed_box: Sealed;";
+         "b.tkb", "fn poke() { sealed_box.inner = 42; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the field" true
+             (contains_substring msg "'Sealed.inner' is private"));
+
+  Alcotest.test_case "private field: cross-file &s.f is a compile error" `Quick
+    (fun () ->
+       match infer_files [
+         "holder.tkb", "struct Sealed { private inner: i32; pub_tag: i32; }
+                        let mut sealed_box: Sealed;";
+         "b.tkb", "fn alias() -> *i32 { return &sealed_box.inner; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the field" true
+             (contains_substring msg "'Sealed.inner' is private"));
+
+  Alcotest.test_case "private field: cross-file offsetof is a compile error" `Quick
+    (fun () ->
+       match infer_files [
+         "holder.tkb", "struct Sealed { private inner: i32; pub_tag: i32; }";
+         "b.tkb", "fn off() -> usize { return offsetof(Sealed, inner); }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the field" true
+             (contains_substring msg "'Sealed.inner' is private"));
+
+  Alcotest.test_case "private field: cross-file struct LITERAL is a compile error \
+                      (smart constructors become real)" `Quick
+    (fun () ->
+       match infer_files [
+         "holder.tkb", "struct Sealed { private inner: i32; pub_tag: i32; }";
+         "b.tkb", "fn forge() { let mut s: Sealed = { 1, 2 }; s.pub_tag = 3; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "mentions private fields" true
+             (contains_substring msg "it has private fields"));
+
+  Alcotest.test_case "private field: a NON-private field of the same struct \
+                      stays freely accessible cross-file" `Quick
+    (fun () ->
+       match infer_files [
+         "holder.tkb", "struct Sealed { private inner: i32; pub_tag: i32; }
+                        let mut sealed_box: Sealed;";
+         "b.tkb", "fn tag() -> i32 { sealed_box.pub_tag = 7; return sealed_box.pub_tag; }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "opaque ptr arithmetic: `t + 1` on an affine handle is a \
+                      compile error (kind-duplication hole, user-review probe)" `Quick
+    (expect_type_error "pointer arithmetic/indexing on '*ArithTok'"
+       "affine opaque struct ArithTok;
+        fn amk() -> *ArithTok { return 0 as usize as *ArithTok; }
+        fn asnk(t: sink *ArithTok) {}
+        fn dup() {
+          let t: *ArithTok = amk();
+          let q: *ArithTok = t + 1;
+          asnk(t);
+          asnk(q);
+        }");
+
+  Alcotest.test_case "opaque ptr arithmetic: indexing a PLAIN opaque pointer is \
+                      a compile error too (was an internal compiler error)" `Quick
+    (expect_type_error "pointer arithmetic/indexing on '*Blob'"
+       "opaque struct Blob;
+        fn blob_peek(p: *Blob) -> i32 { return 0; }
+        fn walk(p: *Blob) -> i32 { return blob_peek(p[1]); }");
+
+  Alcotest.test_case "affine ptr laundering: `t as *Other` without unsafe is a \
+                      compile error" `Quick
+    (expect_type_error "launders it out of tracking"
+       "affine opaque struct LaunTok;
+        opaque struct OtherBlob;
+        fn lmk() -> *LaunTok { return 0 as usize as *LaunTok; }
+        fn lsnk(t: sink *LaunTok) {}
+        fn launder() {
+          let t: *LaunTok = lmk();
+          let o: *OtherBlob = t as *OtherBlob;
+          lsnk(t);
+        }");
+
+  Alcotest.test_case "affine ptr laundering: unsafe marks it legal" `Quick
+    (fun () ->
+       match infer "affine opaque struct LaunTok2;
+                    opaque struct OtherBlob2;
+                    fn lmk2() -> *LaunTok2 { return 0 as usize as *LaunTok2; }
+                    fn lsnk2(t: sink *LaunTok2) {}
+                    fn launder2() {
+                      let t: *LaunTok2 = lmk2();
+                      let o: *OtherBlob2 = unsafe { t as *OtherBlob2 };
+                      lsnk2(t);
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "negative control: `t as usize` on an affine handle stays \
+                      legal (the sanctioned null-check idiom)" `Quick
+    (fun () ->
+       match infer "affine opaque struct NullTok;
+                    fn nmk() -> *NullTok { return 0 as usize as *NullTok; }
+                    fn nsnk(t: sink *NullTok) {}
+                    fn nullcheck() {
+                      let t: *NullTok = nmk();
+                      if ((t as usize) != 0) {
+                        nsnk(t);
+                      }
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  (* -- Tuples (OWNERSHIP_KERNEL.md 5.9, GitHub issue #120) ----------------
+     Function-local product values; join-kind semantics; destructuring is
+     the only elimination; banned from all storage and casts. *)
+
+  Alcotest.test_case "tuple: a plain (unrestricted) tuple return + destructure \
+                      compiles and needs no consumption" `Quick
+    (fun () ->
+       match infer "fn make_pair() -> (i32, i32) { return (1, 2); }
+                    fn use_pair() -> i32 {
+                      let (a, b) = make_pair();
+                      return a + b;
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "tuple: (data, linear-obligation) pair returned, \
+                      destructured, and the obligation consumed -- the \
+                      motivating shape for this issue" `Quick
+    (fun () ->
+       match infer "linear opaque struct TupOb;
+                    fn tmint() -> *TupOb { return 0 as usize as *TupOb; }
+                    fn tsnk(t: sink *TupOb) {}
+                    fn make_pair() -> (i32, *TupOb) { return (42, tmint()); }
+                    fn use_pair() {
+                      let (n, t) = make_pair();
+                      tsnk(t);
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "tuple join-kind: a tuple containing a linear component \
+                      IS linear -- never consuming it is a compile error" `Quick
+    (expect_type_error "linear value 'p' is still pending"
+       "linear opaque struct TupOb2;
+        fn tmint2() -> *TupOb2 { return 0 as usize as *TupOb2; }
+        fn leak() -> i32 {
+          let p: (i32, *TupOb2) = (1, tmint2());
+          return 0;
+        }");
+
+  Alcotest.test_case "tuple join-kind: consuming the tuple on only ONE branch \
+                      is a compile error (inherits linear's all-paths rule)" `Quick
+    (expect_type_error "consumed on some paths but not on every path"
+       "linear opaque struct TupOb3;
+        fn tmint3() -> *TupOb3 { return 0 as usize as *TupOb3; }
+        fn tsnk3(t: sink *TupOb3) {}
+        fn use_pair(c: bool, x: i32) {
+          let p: (i32, *TupOb3) = (x, tmint3());
+          if (c) {
+            let (n, t) = p;
+            tsnk3(t);
+          }
+        }");
+
+  Alcotest.test_case "tuple join-kind: a discarded tuple literal consumes \
+                      nothing that flows past it -- an unconsumed component \
+                      is still caught at the LOCAL that captured it" `Quick
+    (expect_type_error "linear value 'p' is still pending"
+       "linear opaque struct TupOb4;
+        fn tmint4() -> *TupOb4 { return 0 as usize as *TupOb4; }
+        fn make_pair4() -> (i32, *TupOb4) { return (1, tmint4()); }
+        fn leak4() -> i32 {
+          let p: (i32, *TupOb4) = make_pair4();
+          return 0;
+        }");
+
+  Alcotest.test_case "tuple: a plain (i32, i32) tuple type cannot be cast" `Quick
+    (expect_type_error "cannot cast a tuple to anything"
+       "fn make_pair5() -> (i32, i32) { return (1, 2); }
+        fn app_main() -> i32 {
+          let p: (i32, i32) = make_pair5();
+          let x: usize = p as usize;
+          return 0;
+        }");
+
+  Alcotest.test_case "tuple: casting TO a tuple type is a compile error" `Quick
+    (expect_type_error "cannot cast to a tuple type"
+       "fn app_main() -> i32 {
+          let x: i32 = 0;
+          let p: (i32, i32) = x as (i32, i32);
+          return 0;
+        }");
+
+  Alcotest.test_case "tuple: a struct field of tuple type is a compile error" `Quick
+    (expect_type_error "cannot hold a tuple"
+       "struct BadHolder { pair: (i32, i32); }
+        fn app_main() -> i32 { return 0; }");
+
+  Alcotest.test_case "tuple: a global of tuple type is a compile error" `Quick
+    (expect_type_error "cannot hold a tuple"
+       "let mut g_pair: (i32, i32) = (1, 2);
+        fn app_main() -> i32 { return 0; }");
+
+  Alcotest.test_case "tuple: an array of tuples is a compile error \
+                      (tuple cannot live behind indirection)" `Quick
+    (expect_type_error "tuple cannot live behind a pointer or inside an array/slice"
+       "fn app_main() -> i32 {
+          let mut a: [(i32, i32); 2];
+          return 0;
+        }");
+
+  Alcotest.test_case "tuple: a pointer-to-tuple type annotation is a compile \
+                      error (tuples cannot live behind indirection)" `Quick
+    (expect_type_error "tuple cannot live behind a pointer or inside an array/slice"
+       "fn make_pair6() -> (i32, i32) { return (1, 2); }
+        fn app_main() -> i32 {
+          let mut p: (i32, i32) = make_pair6();
+          let pp: *(i32, i32) = &p;
+          return 0;
+        }");
+
+  Alcotest.test_case "tuple: destructuring arity mismatch is a compile error" `Quick
+    (expect_type_error "tuple has 2 components but the pattern binds 3 names"
+       "fn make_pair7() -> (i32, i32) { return (1, 2); }
+        fn app_main() -> i32 {
+          let (a, b, c) = make_pair7();
+          return 0;
+        }");
+
+  Alcotest.test_case "tuple: destructuring a non-tuple expression is a compile error" `Quick
+    (expect_type_error "destructuring `let (...) = ...` needs a tuple right-hand side"
+       "fn app_main() -> i32 {
+          let (a, b) = 5;
+          return 0;
+        }");
+
+  Alcotest.test_case "tuple: duplicate names in a destructuring pattern are \
+                      a compile error" `Quick
+    (expect_type_error "duplicate name 'a' in tuple pattern"
+       "fn make_pair8() -> (i32, i32) { return (1, 2); }
+        fn app_main() -> i32 {
+          let (a, a) = make_pair8();
+          return 0;
+        }");
+
+  Alcotest.test_case "negative control: `(5)` stays plain parenthesized \
+                      grouping, not a 1-tuple (no comma = no tuple)" `Quick
+    (fun () ->
+       match infer "fn app_main() -> i32 {
+                      let x: i32 = (5);
+                      return x;
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "tuple: nesting is allowed (uniform recursion)" `Quick
+    (fun () ->
+       match infer "fn make_nested() -> (i32, (i32, i32)) { return (1, (2, 3)); }
+                    fn use_nested() -> i32 {
+                      let (a, inner) = make_nested();
+                      let (b, c) = inner;
+                      return a + b + c;
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
 
 ]
 

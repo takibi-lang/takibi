@@ -87,6 +87,26 @@ Consumption events (same three as affine):
   - passing it to a `sink *L` parameter,
   - returning it (when the function's return type is `*L`).
 
+To be explicit about what IS allowed (review feedback): linear values pass
+through function signatures freely -- taking them as parameters and
+returning them are not restrictions but the very definition of
+consumption. Branching AROUND a linear value is also fine:
+`if (cond) { sink_a(p); } else { sink_b(p); }` satisfies the all-paths
+rule (each path consumes once). What is excluded is branching ON the
+token itself -- its bits (nullness) or its contents (it is opaque). The
+idiom for content-dependent dispatch is a companion plain enum traveling
+beside the obligation (TcpEvent beside PendingTcpEvent): branch on the
+data, discharge the obligation in every arm. When the token itself needs
+to carry data, that is Stage 4's linear variant enums, where `match`
+becomes the fourth consumption event (destructuring consumption, as in
+Rust's match on an owned enum) -- a planned extension of these semantics,
+not a redesign.
+
+Initialization: a linear local must be initialized at its declaration
+(`let p: *L;` with no initializer is an error). This keeps the
+reassignment-discard rule below simple: every linear variable holds a
+live obligation from birth.
+
 The all-paths rule: at the end of the scope that declared it (function
 body, if/else branch, match arm, loop body, block), a linear local must be
 DEFINITELY consumed -- consumed on every path that reaches the scope end.
@@ -112,6 +132,21 @@ numbers per issue #107):
 Loops: identical restriction to affine (a linear value declared outside a
 loop cannot be consumed inside it; declared-and-consumed within one
 iteration is fine, enforced by the loop body being a scope).
+
+Early exits (soundness holes affine tolerates but linear must not --
+found while working out the checker; each control-flow exit needs its own
+check, since the scope-end check only covers falling off the end):
+  - `return` anywhere: every linear variable in scope that is not
+    definitely consumed by that point (other than the value being
+    returned, which the return itself consumes) is an error. Affine's
+    union check silently accepts a return path that leaks; linear cannot.
+  - `break`/`continue`: any linear variable pending (declared, not
+    definitely consumed) at the statement is an error. Deliberately
+    conservative: this also rejects a pending obligation declared OUTSIDE
+    the loop that would have been consumed after it -- v1 does not track
+    loop-boundary ownership precisely; restructure (consume before the
+    loop, or avoid break) if this fires. Documented limitation, revisit
+    only if it bites a real example.
 
 Reassignment: assigning to a variable that holds a NOT-yet-definitely-
 consumed linear value is an error (`assigning over linear value 'x' would
@@ -228,15 +263,187 @@ either reach a coupling function or contain an explicit, greppable
 `tcp_event_ignored(pending)`. Silent swallowing of a protocol event stops
 compiling; that is this stage's payoff for issue #117.
 
-## 5. Stage 2 outlook: private types and fields (#108) + cast tightening (#15)
+## 5. Stage 2: private types and fields (#108) + cast tightening (#15)
+## (normative once approved)
 
-`private` extends from top-level globals to type declarations (a private
-type's name -- and thus integer-to-pointer mints of it -- usable only in
-its declaring file) and to struct fields (readable/writable only in the
-declaring file; the KGuard/FatFile accessor idiom becomes enforced).
-Combined with 4.3, this makes obligations non-forgeable outside the
-trusted file. Cast rules for kind-carrying values tighten per issue #15's
-audit direction.
+Goal: turn the trusted-narrow-file methodology from convention into
+language guarantee. Usage survey before design (2026-07-14): every
+existing mint site (`N as usize as *Handle`, `&global as *Handle`)
+already lives in the file that declares its handle type -- fat12.tkb
+mints FatFile, eth.tkb/virtio_mmio.tkb mint NetRxCpuOwned, rtos.tkb
+mints KGuard, http_conn_state.tkb mints PendingTcpEvent -- and there are
+ZERO pointer-to-pointer cast-aways from affine handles anywhere. Stage 2
+therefore breaks no existing code: it makes the boundary everyone
+already respects impossible to stop respecting.
+
+### 5.1 Part A: `private` on opaque struct declarations
+
+    private linear opaque struct PendingTcpEvent;
+    private affine opaque struct KGuard;
+
+Semantics: value CONSTRUCTION of a private opaque type -- any cast whose
+TARGET type mentions it (`N as usize as *T`, `&x as *T`) -- is legal only
+in the declaring file. NAMING the type stays legal everywhere
+(annotations, parameter types, passing values around): the wide file must
+still be able to write `let pending: *PendingTcpEvent = ...` and hold the
+value; what it cannot do is conjure one. Combined with 4.3's rules this
+closes cross-file forgery completely: outside the declaring file, the
+only sources of a private handle are the declaring file's own exported
+functions. Scope note: `private` applies to OPAQUE struct declarations
+only (all three kinds) -- type-level privacy for regular structs/enums
+has no driver today and waits for one (fields get their own mechanism,
+Part B).
+
+### 5.2 Part B: `private` on struct fields
+
+    struct Chan {
+        private seq:  u32;
+        private slot: i32;
+    }
+
+Semantics: a field marked `private` may be read (FieldGet, including
+through `&s.f`), written (AssignField), or named in `offsetof` only from
+the struct's declaring file. Constructing a struct that HAS any private
+field via a struct literal is likewise declaring-file-only (a positional
+literal writes every field, private ones included -- this is what makes
+smart constructors real: issue #108's original "hand-assembled FatFile"
+gap, applied to non-opaque structs). This turns the accessor idiom
+(KGuard's `borrow`-gated getters, documented since examples/klock_guard
+as "naming convention only") into an enforced boundary.
+
+Implementation note: privacy is per-field, recorded beside the field
+list (the AST's StructDef gains the private-field names and its own
+declaration loc; Type_layout and codegen are unaffected -- privacy is a
+type-checking concern only, with zero layout/runtime footprint).
+
+### 5.3 Part C: cast and arithmetic tightening (#15 direction)
+
+Revised in review (2026-07-14) after the user asked "can you do
+arithmetic on an affine/linear pointer?" and a probe confirmed a real
+hole: `let q: *Tok = t + 1;` PASSES type inference and kind checking
+(BinOp operands are walked non-consuming, so `q` is a second tracked
+value conjured without consuming `t` -- kind-level duplication), and is
+stopped only by an ACCIDENT: opaque types have no layout, so LLVM's GEP
+is invalid and the compiler dies with an internal error instead of a
+diagnostic. Two tightenings:
+
+1. **Pointer arithmetic requires a complete (sized) pointee.** `p + n` /
+   `p - n` / `p[i]` on a pointer to ANY opaque struct (plain, affine, or
+   linear) is a type error -- the same rule C has for incomplete types.
+   This closes the kind-duplication hole for every handle type (all
+   kind-carrying types are opaque today) and turns the ICE into a real
+   diagnostic for plain opaque pointers too. Hard error, no `unsafe`
+   escape: there is no legitimate use (survey: zero occurrences).
+2. **Casting an AFFINE handle to another POINTER type** (`t as *Other`
+   -- kind laundering into a differently-typed alias) requires
+   `unsafe { ... }`. Zero existing uses; SPEC.md itself documented the
+   hole.
+
+The null-check idiom `t as usize` on AFFINE handles stays untouched: it
+is memory-safe (reads bits, aliases nothing usable -- re-minting the
+bits back into a handle is construction, gated by Part A/4.3), and it is
+the codebase's sanctioned encoding of "acquired or not". **Recorded
+ratchet**: that idiom exists only because takibi lacks Option/Result
+(issue #20) -- acquire-may-fail has no other encoding. When Stage 4
+lands variant enums and acquisition returns Option-shaped values,
+`as usize` on affine handles should be banned too, at which point affine
+handles become as bit-opaque as linear ones already are (linear's total
+cast ban means a linear token's pointer-ness is observationally
+invisible today -- it is already, in effect, the value-less unit
+capability).
+
+### 5.3.1 Recorded design note: should handles carry values? (user review)
+
+Two populations exist in today's code: pure tokens whose bit pattern is
+meaningless (KGuard, PendingTcpEvent, SlotLease) and identity-carrying
+handles (FatFile = the address of real storage, NetRxCpuOwned = a
+descriptor identity). At the TYPE level both are pure tokens: `opaque`
+means no one -- owner included -- can touch the pointee from takibi
+source, so resource state lives in module-private storage and the
+module's functions (which demand the handle) are the only access path.
+"Ownership gates access" is thus implemented INDIRECTLY today: handle =
+capability witness, functions = the gate.
+
+The user's model for the direct version -- a handle that really carries
+a pointer, where (a) the pointer value is immutable from mint to
+consumption and (b) the POINTEE is readable/writable exactly while the
+handle is owned -- is the correct spec for content-carrying handles
+(zero-copy channel payload buffers want precisely this), and it is the
+"decouple affine from opaque" question already recorded in
+affine_escape_via_index's header. It belongs to Stage 3's place-tracking
+neighborhood (an `affine struct` WITH fields whose access requires the
+live handle), with ATS2's at-view and Rust's Box/&mut as the prior art.
+Until then, tokens that are "really just a usize" stay encoded as opaque
+pointers for one honest reason: the tracking machinery is keyed on
+pointer-to-nominal-struct types, and introducing a separate value-less
+token kind now would duplicate machinery that Stage 4's payload-less
+linear variant enums subsume anyway.
+
+### 5.4 Application (acceptance gate)
+
+- `private` on PendingTcpEvent (http_conn_state.tkb): minting outside
+  the trusted file becomes a compile error -- negative-test it from
+  http_server_common.tkb.
+- rtos.tkb: `private` on KGuard's type and on Chan/KLock internal fields
+  -- the RTOS task-facing API's internals become untouchable from every
+  example that uses it, which is the syscall-surface discipline issue
+  #108's discussion with issue #67 called for.
+- Existing suite stays green untouched (per the survey); PoC compile-
+  error examples for: cross-file mint of a private opaque type,
+  cross-file read/write of a private field, cross-file struct literal,
+  un-unsafe'd affine ptr-to-ptr cast.
+
+## 5.9 Interlude between Stages 2 and 3: function-local tuples (#120)
+## (normative once approved -- user-driven design reversal, 2026-07-14)
+
+Issue #120 originally recommended Go-style multiple returns over
+first-class tuples, to sidestep the container/place question. User
+review reversed this, with an argument that stands: the roadmap for
+content-carrying handles is (1) kinds carry no content today, (2) pair
+the kind token with its data behind a tuple while usage patterns
+accumulate, (3) design native content-carrying from those observed
+patterns. Go-style multi-return generates NO observations for (3) --
+the pair exists only at the call boundary and scatters into separate
+locals at every receiver, so "which pairs travel together, and how" is
+never visible in code. The pair must be a first-class value INSIDE
+function bodies for the experiment to produce data.
+
+The container objection is neutralized by construction, not by place
+tracking:
+
+- **Join-kind rule**: kind(tuple) = max of component kinds
+  (unrestricted < affine < linear). A linear-containing tuple IS a
+  linear value and inherits every Stage 1 rule at the granularity of
+  the tuple variable itself: all-paths consumption, no cast, no
+  storage, no overwrite while live, early-exit checks.
+- **Destructuring is the only elimination** (v1): `let (a, b) = e;`
+  consumes the tuple and births each component as a fresh tracked
+  binding (inference records component types in raw_locals, so
+  unannotated destructured obligations stay tracked). No `.0`/`.1`
+  projection: projecting out of a kinded tuple is partial access,
+  i.e. exactly the place-tracking question Stage 3 owns; banning it
+  keeps tracking variable-granular and function-local.
+- **Tuples are values, not storage**: allowed as function return types,
+  parameter types, locals, and literals `(e1, e2)`; rejected in struct
+  fields, arrays/slices, globals, writes through pointers, and casts
+  (either direction). Stage 3 revisits.
+- **Construction moves**: a tracked component of a tuple literal is
+  consumed exactly when the literal itself flows into a consuming
+  position (bound, passed, returned); a discarded literal consumes
+  nothing, so obligations never vanish into a dropped temporary.
+
+Codegen: an LLVM literal struct; construction by insertvalue,
+destructuring by extractvalue; ABI lowering for by-value aggregates is
+LLVM's problem and verified on both targets.
+
+Resolved-by-default in review (flag if wrong): no projection (above);
+no annotations on destructure bindings (types come from the RHS); no
+`mut` destructure bindings; nesting allowed (uniform recursion); no
+1-tuples or unit tuples. Honest limit, recorded: tuples are products --
+"consume on success, hand back on failure" (tcp_respond's real
+signature) still needs a SUM (#20, Stage 4); what tuples unlock now is
+try-style APIs that always return the obligation paired with data, and
+mint/recv APIs returning (data, obligation).
 
 ## 6. Stage 3 outlook: places (#89 Hurdle 3)
 
@@ -268,15 +475,21 @@ Drop makes silent discard a feature, the opposite of an obligation).
 Linear Haskell: multiplicity-on-arrows is the closest formal treatment of
 "exactly once", but its laziness interactions are irrelevant here.
 
-## 9. Open questions (for review before implementation)
+## 9. Open questions -- RESOLVED in review (2026-07-13)
 
-1. Keyword: `linear` (this memo) vs something more intention-revealing
-   like `must_use`/`obligation`. `linear` matches the literature and the
-   affine keyword's register; leaning `linear`.
-2. Should `tcp_event_ignored` carry a reason argument (a plain enum) so
-   greps can classify deliberate ignores? Leaning yes but deferring to
-   the application commit.
-3. Does the Stage 1 never-consumed check for linear PARAMETERS (plain
-   `*L` into a callee) reuse affine's existing parameter check as-is
-   (union) or the all-paths rule? Leaning all-paths for consistency --
-   a linear parameter is an accepted obligation.
+1. Keyword: `linear`. Matches the literature, greppable, same register as
+   `affine`.
+2. `tcp_event_ignored` reason argument: REJECTED (user review). A runtime
+   enum nobody reads is dead data; for debugging, a breakpoint on
+   tcp_event_ignored plus the stack trace identifies the call site, and
+   the call site IS the reason. Source-level classification is served by
+   call-site comments. If runtime observability of ignores is ever really
+   needed (e.g. stale-segment counters), that is a separate feature with
+   its own driver.
+3. Linear parameters: all-paths strength confirmed. A function's
+   signature makes a BINARY promise per linear parameter: `borrow` =
+   never consumes, plain/`sink` = consumes on every path. "Conditionally
+   consumes" is deliberately inexpressible -- allowing it would push
+   effect annotations into signatures, the exact ATS2-plumbing slope the
+   tripwire guards against. Same binary Rust uses (by-value always moves,
+   reference never does).

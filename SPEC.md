@@ -504,6 +504,160 @@ motivating case is a network RX descriptor: `net_rx_acquire() ->
   pointers to a type explicitly declared `affine opaque struct`, and an
   explicit pointer cast (`t as *OtherType`, `t as usize`) remains an
   unchecked escape hatch that silently drops out of affine tracking.
+  (The cast escape hatch is affine-only: the `linear` kind below bans it.)
+
+## Linear Opaque Structs (Obligations)
+
+```
+linear opaque struct PendingEvent;
+```
+
+The stronger sibling of `affine opaque struct` (OWNERSHIP_KERNEL.md
+Stage 1, GitHub issue #117): a pointer to a `linear opaque struct` is an
+OBLIGATION that must be consumed **exactly once on EVERY control-flow
+path**, where affine means "at most once, consumed on at least one
+path". Use linear when dropping the value must be impossible (a protocol
+event that must be answered, a received buffer that must be processed or
+forwarded); use affine when conditional acquisition/release via the
+null-sentinel idiom is part of the pattern (NetRxCpuOwned, FatFile,
+KGuard).
+
+Consumption events are the same three as affine (pass as a plain
+non-`borrow` argument, pass to `sink`, return it), and `borrow`/`sink`
+parameter modes work identically. Everything else is stricter:
+
+- **All-paths consumption**: at every scope end, branch merges use
+  intersection, not union -- `if (c) { discharge(t); }` with no `else`
+  discharge is a compile error ("consumed on some paths but not on every
+  path"). Consuming differently per branch/arm is fine; every branch/arm
+  must consume.
+- **Early exits**: a pending (not definitely consumed) linear value at a
+  `return`, `break`, or `continue` is a compile error. (The
+  break/continue rule is deliberately conservative: it also rejects a
+  pending obligation declared outside the loop -- restructure, or avoid
+  break, if it fires.)
+- **No cast-away**: casting a linear value to anything (`t as usize`,
+  `t as *Other`) is a compile error with no `unsafe` escape -- it would
+  silently discard the obligation. Consequence: the affine null-sentinel
+  test `(t as usize) != 0` is inexpressible; linear values are never
+  null and consumption is never conditional, which is exactly what keeps
+  the all-paths check a plain, exact dataflow analysis. Minting
+  (integer -> `*L`) follows affine's existing rules (literals fine,
+  computed values need `unsafe`) -- a forged obligation must itself be
+  consumed everywhere, so forging is the safe direction.
+- **No storage**: a linear value cannot be stored into a struct field,
+  array/slice element, global, or through a pointer, and `&t` is
+  rejected -- all of these would escape the function-local tracking
+  (OWNERSHIP_KERNEL.md Stage 3 lifts this with place tracking).
+- **No silent overwrite**: assigning over a linear variable whose
+  obligation is undischarged is a compile error; the self-transform
+  idiom `t = transform(t);` stays legal because the right-hand side
+  consumes the old obligation first. A linear `let` must be initialized
+  at its declaration.
+- **Plain linear parameters** promise consumption on every path of the
+  callee (the signature is a binary contract: `borrow` = never consumes,
+  plain/`sink` = always consumes; "conditionally consumes" is
+  deliberately inexpressible).
+
+See examples/linear_obligation (positive) and examples/
+linear_never_consumed, linear_branch_missed, linear_cast_discard,
+linear_overwrite (compile-error companions).
+
+## File-Granular Privacy (`private`)
+
+The file is takibi's module and trust boundary (GitHub issue #108,
+OWNERSHIP_KERNEL.md Stage 2): a narrow, human-reviewed file can force
+everything outside it to go through its functions. `private` appears in
+three places, all checked at compile time against the referencing
+expression's own source file, with zero runtime/layout footprint:
+
+```
+private let mut conn_state: ConnState = ConnState::Listen;   // global
+private linear opaque struct PendingTcpEvent;                // opaque type
+struct Chan { private mutex: i32; ... }                      // struct field
+```
+
+- **Global**: every reference (read, write, index, slice, address-of) to
+  a `private let` global must come from its declaring file.
+- **Opaque type** (any kind: plain/affine/linear): value CONSTRUCTION --
+  any cast whose target type mentions the name (`0 as usize as *T`,
+  `&x as *T`) -- must come from the declaring file. NAMING the type stays
+  legal everywhere (annotations, parameters, passing values through), so
+  other files can hold and relay handles; they just cannot forge them.
+  The declaring file's functions are the only source.
+- **Struct field**: reading (`s.f`, `&s.f`), writing, and `offsetof` on a
+  `private` field must come from the struct's declaring file; so must
+  constructing the struct via a struct literal when it has ANY private
+  field (a positional literal writes every field). Non-private fields of
+  the same struct stay freely accessible. This is what turns the accessor
+  idiom (a getter taking `borrow *KGuard`) and smart constructors
+  (`chan_init` establishing Chan's rendezvous invariant) from convention
+  into guarantee.
+
+Two related hardening rules land with this feature (OWNERSHIP_KERNEL.md
+Stage 2 Part C):
+
+- **Pointer arithmetic/indexing on a pointer to any opaque struct is a
+  type error** (`t + 1`, `t[i]`): an opaque type has no size, and for
+  affine/linear handles the arithmetic result would be a second tracked
+  value conjured without consuming the first.
+- **Casting an affine handle to another pointer type requires
+  `unsafe { ... }`** (kind laundering). The `t as usize` null-check idiom
+  stays ungated -- it is the sanctioned affine Option encoding until
+  variant enums exist (GitHub issue #20).
+
+Known limitation (shared with private globals): checks are by name/type
+identity, not by resolved binding; and the declaring file itself remains
+the trusted island -- privacy narrows the audit surface to that file, it
+does not verify the file's own bodies.
+
+## Tuples
+
+```
+(T1, T2, ...)         // tuple type, 2+ components
+(e1, e2, ...)         // tuple literal
+let (a, b) = e;       // destructuring -- the ONLY elimination
+```
+
+Function-local product values (OWNERSHIP_KERNEL.md 5.9, GitHub issue
+#120): legal as return types, parameter types, and local `let`
+annotations; a bare (untyped) `let (a, b) = e;` also works when `e`'s
+type is already concrete (e.g. from a function call whose return type is
+annotated). Rejected everywhere storage would be involved: struct fields,
+array/slice elements, globals, behind a pointer (either direction), and
+casts (to or from a tuple). At least 2 components (`(x)` stays plain
+parenthesized grouping, not a 1-tuple). Nesting is allowed at the
+type/value level (`(i32, (i32, i32))`), but destructuring itself is not
+recursive -- unpack one level per `let`, then destructure the inner tuple
+with a second `let`.
+
+**Kind = join of component kinds**: a tuple containing an `affine` or
+`linear` component is itself that kind, and inherits every relevant rule
+(for `linear`: all-paths consumption, no cast, no storage, no overwrite
+while live) at the granularity of the tuple variable -- not per
+component. This is what makes returning `(data, obligation)` together
+safe: the pair travels as one value through a function boundary and must
+be destructured and its tracked component discharged, exactly as if it
+had been returned alone.
+
+**Why destructuring only, no `.0`/`.1` projection**: projecting a single
+component out of a kinded tuple is partial access -- the same
+place-tracking question OWNERSHIP_KERNEL.md's Stage 3 (struct
+fields/array slots holding affine/linear values) is scoped to answer.
+Restricting v1 to whole-tuple destructuring keeps kind tracking
+variable-granular and function-local, with no new machinery.
+
+This was deliberately chosen over Go-style "multiple return values" that
+never exist as a value (only at a call boundary): the whole point of
+pairing data with an obligation is to observe how the pair is actually
+used in real code, which requires the pair to be a value manipulable
+inside function bodies, not one that scatters into separate locals at
+every call site.
+
+See examples/tuple_pair (positive: try-style `(bool, i32)`, a
+`(data, obligation)` pair, and nesting) and examples/
+tuple_linear_leak_wrong, tuple_field_wrong, tuple_cast_wrong
+(compile-error companions).
 
 ## Enums
 

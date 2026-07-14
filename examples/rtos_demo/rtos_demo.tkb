@@ -32,8 +32,8 @@ fn shared_get(g: borrow *KGuard) -> i32 {
     return shared.counter;
 }
 
-let mut chan_ab: Chan = {1, 0, 0, 0, 0};
-let mut chan_ba: Chan = {1, 0, 0, 0, 0};
+let mut chan_ab: Chan;
+let mut chan_ba: Chan;
 
 let mut ping_done: io i32 = 0;
 let mut pong_done: io i32 = 0;
@@ -75,6 +75,9 @@ fn task_pong() {
 }
 
 fn app_main() {
+    chan_init(&chan_ab);
+    chan_init(&chan_ba);
+
     uart_puts("cpu_id: ");
     uart_print(cpu_id());
     uart_puts("\r\n");

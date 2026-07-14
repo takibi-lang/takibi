@@ -14,7 +14,7 @@
 use "examples/common/rtos.tkb";
 use "examples/common_stm32/fat12_sdmmc.tkb";
 
-let mut done_ch: Chan = {1, 0, 0, 0, 0};
+let mut done_ch: Chan;
 let mut rtos_done: io i32 = 0;
 let mut sd_stack: [u8; 8192];
 
@@ -71,6 +71,8 @@ fn sd_worker() {
 }
 
 fn app_main() {
+    chan_init(&done_ch);
+
     rtos_task_add(1, setup_task_stack(sd_stack + 8192, sd_worker));
     rtos_start();
 

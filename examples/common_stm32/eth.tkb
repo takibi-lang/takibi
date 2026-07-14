@@ -93,7 +93,7 @@ let PHY_AN_10_HALF:  u32 = 0x0020;
 
 let ETH_RX_DESC_COUNT: isize = 4;
 let ETH_TX_DESC_COUNT: isize = 4;
-affine opaque struct NetRxCpuOwned;
+private affine opaque struct NetRxCpuOwned;
 let mut net_rx_token_storage: u8;
 let mut net_rx_acquired_len: i32;
 let mut eth_rx_irq_flag: io u32;

@@ -67,12 +67,12 @@ let SD_REQ_INIT: i32 = 1;
 let SD_REQ_READ_CHUNK: i32 = 2;
 let SD_REQ_FILE_SIZE: i32 = 3;
 
-let mut sd_request_ch: Chan = {1, 0, 0, 0, 0};
-let mut sd_response_ch: Chan = {1, 0, 0, 0, 0};
-let mut sd_buffer_ch: WordChan = {1, 0, 0, 0, 0};
-let mut sd_name_ch: WordChan = {1, 0, 0, 0, 0};
-let mut sd_offset_ch: WordChan = {1, 0, 0, 0, 0};
-let mut sd_len_ch: WordChan = {1, 0, 0, 0, 0};
+let mut sd_request_ch: Chan;
+let mut sd_response_ch: Chan;
+let mut sd_buffer_ch: WordChan;
+let mut sd_name_ch: WordChan;
+let mut sd_offset_ch: WordChan;
+let mut sd_len_ch: WordChan;
 let mut sd_stack: [u8; 8192];
 
 fn sd_read_file_chunk(name83: *u8, off: u32, dst: *u8, want: u32) -> u32 {
@@ -136,6 +136,13 @@ fn http_read_chunk(name83: *u8, off: u32, dst: *u8, want: u32) -> u32 {
 }
 
 fn app_main() {
+    chan_init(&sd_request_ch);
+    chan_init(&sd_response_ch);
+    chan_word_init(&sd_buffer_ch);
+    chan_word_init(&sd_name_ch);
+    chan_word_init(&sd_offset_ch);
+    chan_word_init(&sd_len_ch);
+
     uart_puts("http_server_sdcard_rtos: init\r\n");
 
     if (net_init() == 0) {

@@ -1,0 +1,24 @@
+// This file is expected to produce a compile error.
+// Assigning over a linear variable whose obligation has not been
+// discharged is rejected (OWNERSHIP_KERNEL.md Stage 1): the overwrite
+// would silently discard the old obligation. Note the contrast with
+// affine, where reassignment legitimately clears consumed status (the
+// cond_wait drop-and-reacquire idiom in examples/common/sync.tkb), and
+// with the LEGAL linear self-transform idiom `t = transform(t);` -- there
+// the right-hand side consumes the old obligation before the assignment
+// lands, so nothing is discarded.
+linear opaque struct Duty;
+
+fn take_on() -> *Duty {
+    return 0 as usize as *Duty;
+}
+
+fn discharge(t: sink *Duty) {
+}
+
+fn app_main() -> i32 {
+    let mut t: *Duty = take_on();
+    t = take_on();
+    discharge(t);
+    return 0;
+}

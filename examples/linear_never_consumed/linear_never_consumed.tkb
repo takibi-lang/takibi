@@ -1,0 +1,24 @@
+// This file is expected to produce a compile error.
+// A `linear opaque struct` value that is created and never consumed on
+// ANY path is rejected -- same shape as examples/affine_never_consumed,
+// but for the linear kind (OWNERSHIP_KERNEL.md Stage 1, GitHub issue
+// #117). The real-world shape this guards: an obligation (a protocol
+// event that must be answered, a received buffer that must be processed
+// or forwarded) silently dropped on the floor.
+linear opaque struct Duty;
+
+fn take_on() -> *Duty {
+    return 0 as usize as *Duty;
+}
+
+fn discharge(t: sink *Duty) {
+}
+
+fn leak() {
+    let t: *Duty = take_on();
+}
+
+fn app_main() -> i32 {
+    leak();
+    return 0;
+}

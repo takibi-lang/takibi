@@ -65,7 +65,7 @@ let check_refined_base_range pos lo hi base =
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
+%token FN RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
 %token DARROW COLONCOLON UNDERSCORE
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT
 %token ASSIGN DOT
@@ -133,12 +133,18 @@ item:
     { ExternFuncDef ($3, $5, Some $8) }
   | struct_intro LBRACE struct_fields RBRACE
     { let (name, is_packed, align_opt) = $1 in
-      Type_layout.finish_struct name $3 is_packed align_opt;
-      StructDef (name, $3, is_packed, align_opt) }
-  | OPAQUE STRUCT IDENT SEMI
-    { OpaqueStructDef ($3, false) }
-  | AFFINE OPAQUE STRUCT IDENT SEMI
-    { OpaqueStructDef ($4, true) }
+      let fields = List.map (fun (fname, ty, _) -> (fname, ty)) $3 in
+      let private_fields =
+        List.filter_map (fun (fname, _, is_priv) ->
+          if is_priv then Some fname else None) $3 in
+      Type_layout.finish_struct name fields is_packed align_opt;
+      StructDef (name, fields, is_packed, align_opt, private_fields, $symbolstartpos) }
+  | p = private_flag OPAQUE STRUCT IDENT SEMI
+    { OpaqueStructDef ($4, KindPlain, p, $symbolstartpos) }
+  | p = private_flag AFFINE OPAQUE STRUCT IDENT SEMI
+    { OpaqueStructDef ($5, KindAffine, p, $symbolstartpos) }
+  | p = private_flag LINEAR OPAQUE STRUCT IDENT SEMI
+    { OpaqueStructDef ($5, KindLinear, p, $symbolstartpos) }
   | ENUM IDENT COLON base_type_expr LBRACE enum_variants RBRACE
     { let (vs, ne) = $6 in
       Type_layout.register_enum $2 $4;
@@ -168,7 +174,8 @@ struct_intro:
 
 struct_fields:
   | /* empty */ { [] }
-  | IDENT COLON type_expr SEMI struct_fields { ($1, $3) :: $5 }
+  | IDENT COLON type_expr SEMI struct_fields { ($1, $3, false) :: $5 }
+  | PRIVATE IDENT COLON type_expr SEMI struct_fields { ($2, $4, true) :: $6 }
 
 enum_variants:
   | /* empty */                         { ([], false) }
@@ -213,6 +220,11 @@ stmt:
       { desc = Expr { desc = Call (fname, args); loc }; loc } }
   | LET id = IDENT rhs = let_rhs SEMI
     { { desc = Let (false, id, fst rhs, snd rhs, None); loc = $symbolstartpos } }
+  | LET LPAREN id1 = IDENT COMMA id2 = IDENT ids = ident_rest RPAREN ASSIGN e = expr SEMI
+    (* let (a, b, ...) = e; -- tuple destructuring, 2+ names
+       (OWNERSHIP_KERNEL.md 5.9, GitHub issue #120), the ONLY tuple
+       elimination. Same "mandatory second element" shape as above. *)
+    { { desc = LetTuple (id1 :: id2 :: ids, e); loc = $symbolstartpos } }
   | LET MUT id = IDENT rhs = let_rhs SEMI
     { { desc = Let (true, id, fst rhs, snd rhs, None); loc = $symbolstartpos } }
   | LET MUT IDENT COLON type_expr ALIGN LPAREN INT RPAREN SEMI
@@ -364,6 +376,13 @@ expr:
   | OFFSETOF LPAREN t = type_expr COMMA field = IDENT RPAREN
     { { desc = OffsetOf (t, field); loc = $symbolstartpos } }
   | LPAREN e = expr RPAREN { e }
+  | LPAREN e1 = expr COMMA e2 = expr es = rest_args RPAREN
+    (* (e1, e2, ...) -- tuple literal, 2+ components (OWNERSHIP_KERNEL.md
+       5.9, GitHub issue #120). Same "mandatory second element" shape as
+       the tuple-type rule above, for the same reason (rest_args's own
+       leading COMMA, reused as-is for elements after e2). Unambiguous
+       with the grouping-parens rule just above: that one has no comma. *)
+    { { desc = TupleLit (e1 :: e2 :: es); loc = $symbolstartpos } }
   | e = expr AS t = type_expr
     { { desc = Cast (t, e); loc = $symbolstartpos } }
   | id = IDENT LBRACKET idx = expr RBRACKET
@@ -389,6 +408,10 @@ args:
 rest_args:
   | /* empty */ { [] }
   | COMMA expr rest_args { $2 :: $3 }
+
+ident_rest:
+  | /* empty */ { [] }
+  | COMMA id = IDENT ids = ident_rest { id :: ids }
 
 let_rhs:
   | /* empty */ { (None, None) }
@@ -416,6 +439,16 @@ base_type_expr:
     (* [T; N..] -- slice whose runtime length is at least N *)
   | FN LPAREN fn_type_params RPAREN ARROW type_expr { TypeFn ($3, $6) }
   | FN LPAREN fn_type_params RPAREN                 { TypeFn ($3, TypeVoid) }
+  | LPAREN t1 = type_expr COMMA t2 = type_expr ts = fn_type_params_rest RPAREN
+    (* (T1, T2, ...) -- tuple type, 2+ components (OWNERSHIP_KERNEL.md 5.9,
+       GitHub issue #120). The mandatory t2 both enforces "at least 2
+       components" at the grammar level and avoids double-consuming a
+       comma against fn_type_params_rest's own leading COMMA (that rest
+       nonterminal is "(COMMA type_expr)*", reused as-is for any further
+       components after t2). Unambiguous with a plain parenthesized type
+       (no such grouping form exists in base_type_expr today) since a
+       COMMA is required. *)
+    { TypeTuple (t1 :: t2 :: ts) }
   | IDENT { TypeNamed $1 }
 
 (* Array size: a compile-time integer constant expression -- a literal, the

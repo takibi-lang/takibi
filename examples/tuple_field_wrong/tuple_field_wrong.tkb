@@ -1,0 +1,13 @@
+// This file is expected to produce a compile error.
+// Tuples are function-local VALUES, not storage (OWNERSHIP_KERNEL.md
+// 5.9, GitHub issue #120): a struct field of tuple type is rejected, the
+// same way a field of linear type is rejected in Stage 1 -- the
+// container/place-tracking question that would raise is deliberately
+// deferred to Stage 3.
+struct Holder {
+    pair: (i32, i32);
+}
+
+fn app_main() -> i32 {
+    return 0;
+}
