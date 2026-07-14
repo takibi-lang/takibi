@@ -545,6 +545,42 @@ means, with only its usage contract enforced by types") -- rather than
 attempting full interprocedural ownership/alias analysis, which this
 project has repeatedly and deliberately ruled out.
 
+**Experiment tried and ruled out (2026-07-14): pairing `(idx, lease)` as
+a tuple.** Before designing further, the user asked whether
+`affine_escape_via_index.tkb`'s `slot_read(idx: {0..<4 as usize}, lease:
+borrow *SlotLease)`-shaped signatures would become easier to reason
+about if `idx` and `lease` traveled together as one tuple. Tried
+mechanically, both ways:
+
+- `fn slot_read(session: borrow (usize, *SlotLease)) -> i32` does not
+  compile: `borrow`/`sink` are gated to a pointer-to-opaque-struct
+  parameter type only (Stage 1/2's own restriction), not tuples, so
+  "borrow a tuple" is not expressible today.
+- `fn slot_read(session: (usize, *SlotLease)) -> i32` (owning) compiles,
+  but `slot_read` then consumes the whole pair, including the lease
+  inside it -- so the SAME idx+lease cannot be handed to the following
+  `slot_write`/`slot_close` calls (the actual usage shape in the
+  example) without re-leasing or threading the tuple back out of every
+  call. Strictly worse ceremony than today's two-plain-parameters form.
+
+**Why this is still a useful negative result, not a dead end.** The
+failure exposes what was actually being asked for, more precisely than
+before: not "co-locate idx and lease as one value" (a tuple gives only
+syntactic bundling) but "make `lease` provably ABOUT `idx`" (a semantic
+binding). A tuple does not enforce that relationship either --
+`(3, lease_that_was_actually_minted_for_slot_1)` type-checks fine as a
+tuple, exactly as it does as two loose parameters today; nothing changed.
+What would actually enforce the relationship is `SlotLease` carrying
+`idx` AS DATA inside itself (so `slot_read` reads the slot number off
+the lease it was handed, instead of trusting two independently-supplied
+arguments to agree) -- which is precisely section 5.3.1's still-open
+question ("should handles carry values, decoupled from `opaque`") aimed
+at a Stage 3b driver instead of an abstractly-motivated one. **Tuples
+were valuable here as an experiment, not as the mechanism**: pairing
+data is not the same problem as binding data, and Stage 3b's design
+should start from 5.3.1 (content-carrying handles) rather than from
+tuples, when it resumes.
+
 ## 7. Stage 4 outlook: channel v2 (#113) + variant enums (#20)
 
 Consumers of Stages 1-3: zero-copy channel send transfers an
