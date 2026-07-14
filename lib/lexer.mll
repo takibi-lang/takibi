@@ -31,6 +31,7 @@ rule read = parse
   | "/*"           { read_block_comment lexbuf }
 
   | "fn"      { FN }
+  | "inline"  { INLINE }
   | "return"  { RETURN }
   | "let"     { LET }
   | "mut"     { MUT }

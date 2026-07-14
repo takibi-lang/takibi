@@ -1,0 +1,20 @@
+// Optimizer fixture for Takibi's explicit `inline fn` marker.
+//
+// This is intentionally not a QEMU example. `make optimizercheck` compiles the
+// object and inspects relocations so the test is independent of larger examples'
+// helper names and internal structure.
+
+let mut inline_check_sink: i32 = 0;
+
+inline fn inline_helper(x: i32) -> i32 {
+    return x + 7;
+}
+
+fn normal_helper(x: i32) -> i32 {
+    return x + 3;
+}
+
+fn app_main() {
+    let x: i32 = inline_helper(10);
+    inline_check_sink = normal_helper(x);
+}

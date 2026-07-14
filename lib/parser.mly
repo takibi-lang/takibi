@@ -65,7 +65,7 @@ let check_refined_base_range pos lo hi base =
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
+%token FN INLINE RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
 %token DARROW COLONCOLON UNDERSCORE
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT
 %token ASSIGN DOT
@@ -188,7 +188,11 @@ enum_variants:
 func_def:
   | FN IDENT LPAREN params RPAREN ret_type_opt LBRACE stmts RBRACE
     {
-      Ast.{ name = $2; params = $4; ret_type = $6; body = $8; def_loc = $symbolstartpos }
+      Ast.{ name = $2; params = $4; ret_type = $6; body = $8; is_inline = false; def_loc = $symbolstartpos }
+    }
+  | INLINE FN IDENT LPAREN params RPAREN ret_type_opt LBRACE stmts RBRACE
+    {
+      Ast.{ name = $3; params = $5; ret_type = $7; body = $9; is_inline = true; def_loc = $symbolstartpos }
     }
 
 param:

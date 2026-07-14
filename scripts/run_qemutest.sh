@@ -183,6 +183,80 @@ run_forbid_trap_ok_test() {
     rm -f "$tmp_err" "$tmp_obj"
 }
 
+# run_linux_binary_test NAME BINARY EXPECTED
+#
+# Executes a host Linux/AMD64 user-space Takibi binary and diffs stdout against
+# EXPECTED. QEMU is not involved, but this lives in the same harness as the
+# compile-only tests so `make check` gets one coloured PASS/FAIL stream.
+run_linux_binary_test() {
+    local name="$1" binary="$2" expected="$3"
+    local tmp_out
+    tmp_out=$(mktemp)
+
+    if "$binary" > "$tmp_out"; then
+        if diff -q "$expected" "$tmp_out" > /dev/null 2>&1; then
+            printf "${GRN}PASS${RST}  %s\n" "$name"
+            PASS=$((PASS + 1))
+        else
+            printf "${RED}FAIL${RST}  %s\n" "$name"
+            printf "       expected bytes: %s\n" "$(od -An -c "$expected" | tr -s ' \n' ' ')"
+            printf "       got bytes:      %s\n" "$(od -An -c "$tmp_out"  | tr -s ' \n' ' ')"
+            FAIL=$((FAIL + 1))
+            FAILED_TESTS+=("$name")
+        fi
+    else
+        local status=$?
+        printf "${RED}FAIL${RST}  %s\n" "$name"
+        printf "       process exited with status %d\n" "$status"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+    fi
+
+    rm -f "$tmp_out"
+}
+
+# run_inline_optimizer_test NAME OBJECT
+#
+# Verifies the explicit `inline fn` contract on a purpose-built object:
+# inline_helper must have no call relocation, while normal_helper must still
+# have one. This avoids coupling optimizer regression coverage to a larger
+# example's private helper names.
+run_inline_optimizer_test() {
+    local name="$1" obj="$2"
+    local objdump_out nm_out ok=1
+    objdump_out=$(mktemp)
+    nm_out=$(mktemp)
+
+    llvm-objdump-19 -dr "$obj" > "$objdump_out"
+    if grep -Eq 'R_AARCH64_CALL26[[:space:]]+inline_helper$' "$objdump_out"; then
+        ok=0
+        printf "${RED}FAIL${RST}  %s\n" "$name"
+        printf "       inline_helper was not inlined despite inline fn\n"
+    elif ! grep -Eq 'R_AARCH64_CALL26[[:space:]]+normal_helper$' "$objdump_out"; then
+        ok=0
+        printf "${RED}FAIL${RST}  %s\n" "$name"
+        printf "       normal_helper was unexpectedly inlined without inline fn\n"
+    else
+        llvm-nm-19 --undefined-only "$obj" > "$nm_out"
+        if grep -Eq '[[:space:]]U[[:space:]]+(memcpy|memset|memmove|bzero)$' "$nm_out"; then
+            ok=0
+            printf "${RED}FAIL${RST}  %s\n" "$name"
+            printf "       optimizer introduced a libc memory-call dependency\n"
+            sed 's/^/       /' "$nm_out"
+        fi
+    fi
+
+    if [ "$ok" -eq 1 ]; then
+        printf "${GRN}PASS${RST}  %s\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+    fi
+
+    rm -f "$objdump_out" "$nm_out"
+}
+
 # run_fatfs_test NAME KERNEL EXPECTED MTOOLS_SCRIPT
 #
 # Like run_test (diffs QEMU's stdout against EXPECTED), but also:
@@ -733,6 +807,13 @@ run_dwarf_gdb_global_set_test() {
     rm -f "$qemu_out" "$gdb_out" "$gdb_norm" "$gdb_diff"
 }
 
+echo "Running host integration tests (no QEMU required)..."
+echo ""
+
+run_linux_binary_test "linux_hello (linux amd64)" examples/linux_hello/linux_hello.linux examples/linux_hello/linux_hello.expected
+run_inline_optimizer_test "inline_check" examples/inline_check/inline_check.o
+
+echo ""
 echo "Running compile-error tests (no QEMU required)..."
 echo ""
 

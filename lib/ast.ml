@@ -148,6 +148,7 @@ type func = {
   params: (ident * type_expr option) list;
   ret_type : type_expr option;
   body : stmt list;
+  is_inline : bool;
   def_loc : loc [@printer pp_loc];  (* location of the "fn" keyword -- used for DWARF DISubprogram *)
 }
 [@@deriving show]

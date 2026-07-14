@@ -538,18 +538,26 @@ let setup_target ?(triple = "") ?(cpu = "") ?(features = "") () =
      * mem2reg              : promote allocas to SSA registers (prerequisite for later passes)
      * early-cse            : basic common subexpression elimination
      * simplifycfg          : dead branch elimination for constant OOB (icmp uge const,const -> false -> block removed)
-     * instcombine          : constant folding and redundant instruction elimination
      * correlated-propagation: propagate i<N inside while(i<N){ arr[i] } loop bodies,
                                folding bounds-check icmp uge i, N to false
      * constraint-elimination: stronger constraint-based elimination (deduplicates range checks)
+     * always-inline        : honor Takibi `inline fn` without enabling default<O2>/loop-idiom
+                              (disabled for -g builds to keep GDB stepping/locals stable)
      * simplifycfg          : final cleanup of dead blocks *)
 let run_optimizations machine =
   let opts = Llvm_passbuilder.create_passbuilder_options () in
   Llvm_passbuilder.passbuilder_options_set_loop_vectorization opts false;
   Llvm_passbuilder.passbuilder_options_set_slp_vectorization opts false;
   let pipeline =
-    "function(mem2reg,early-cse,simplifycfg,\
-              correlated-propagation,constraint-elimination,simplifycfg)"
+    if !debug_info_enabled then
+      "function(mem2reg,early-cse,simplifycfg,\
+                correlated-propagation,constraint-elimination,simplifycfg)"
+    else
+      "function(mem2reg,early-cse,simplifycfg,\
+                correlated-propagation,constraint-elimination,simplifycfg),\
+       always-inline,\
+       function(mem2reg,early-cse,simplifycfg,\
+                correlated-propagation,constraint-elimination,simplifycfg)"
   in
   (match Llvm_passbuilder.run_passes the_module pipeline machine opts with
    | Ok ()    -> ()
@@ -3474,6 +3482,8 @@ let declare_func ?prog_types fdef =
     let ret_ll    = ltype_of_ret_ast ret_ast in
     let ft        = function_type ret_ll param_lls in
     let f         = declare_function key ft the_module in
+    if fdef.is_inline then
+      add_function_attr f (create_enum_attr context "alwaysinline" 0L) AttrIndex.Function;
     Hashtbl.add functions key (ft, f);
     Hashtbl.add func_ret_ast_types key ret_ast;
     Hashtbl.add func_param_ast_types key param_ast

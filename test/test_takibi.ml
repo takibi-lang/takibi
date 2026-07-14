@@ -212,6 +212,12 @@ let parser_tests = [
     | _ -> Alcotest.fail "expected single FuncDef"
   );
 
+  Alcotest.test_case "inline function parses" `Quick (fun () ->
+    match parse "inline fn add1(a: i32) i32 { return a + 1; }" with
+    | [Ast.FuncDef { name = "add1"; is_inline = true; _ }] -> ()
+    | _ -> Alcotest.fail "expected inline FuncDef"
+  );
+
   Alcotest.test_case "global let without type" `Quick (fun () ->
     match parse "let x = 1;" with
     | [Ast.LetDef (name, ty, init, _, _, _, _)] ->

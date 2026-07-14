@@ -65,7 +65,7 @@ enum TcpEvent: u8 {
     Other;
 }
 
-fn classify_tcp_event(flags: u8) -> TcpEvent {
+inline fn classify_tcp_event(flags: u8) -> TcpEvent {
     if ((flags & TCP_FLAG_RST) != 0) {
         return TcpEvent::Rst;
     } else if ((flags & TCP_FLAG_SYN) != 0) {

@@ -222,8 +222,8 @@ $(TAKIBI): FORCE
 test: build
 	dune test
 
-## qemutest: run QEMU integration tests (build all examples and verify automatically)
-qemutest: $(ALL_KERNELS) examples/fibonacci/kernel.debug.elf examples/dwarf_debug/kernel.debug.elf
+## qemutest: run QEMU plus host-side integration tests and verify automatically
+qemutest: $(ALL_KERNELS) examples/fibonacci/kernel.debug.elf examples/dwarf_debug/kernel.debug.elf $(LINUX_BINS) examples/inline_check/inline_check.o
 	@bash scripts/run_qemutest.sh
 
 ## stm32build: link every ported STM32 example as a RAM-execution image, with
@@ -282,28 +282,12 @@ langcheck:
 	fi
 	@echo "OK: all files are ASCII-clean"
 
-## check: run unit tests + QEMU/Linux integration tests + STM32 build check + ASCII check
-check: langcheck test stm32build qemutest linuxcheck
+## check: run unit tests + QEMU/host integration tests + STM32 build check + ASCII check
+check: langcheck test stm32build qemutest
 
-## linuxbuild: build Linux/AMD64 user-space examples (no libc, _start -> app_main)
-linuxbuild: $(LINUX_BINS)
-
-## linuxcheck: run Linux/AMD64 user-space examples and diff expected stdout
-linuxcheck: linuxbuild
-	@set -eu; \
-	for e in $(LINUX_EXAMPLES); do \
-	  out=$$(mktemp); \
-	  if examples/$$e/$$e.linux > $$out; then \
-	    if diff -u examples/$$e/$$e.expected $$out; then \
-	      printf "PASS  %s (linux amd64)\n" "$$e"; \
-	    else \
-	      rm -f $$out; exit 1; \
-	    fi; \
-	  else \
-	    status=$$?; rm -f $$out; exit $$status; \
-	  fi; \
-	  rm -f $$out; \
-	done
+## optimizercheck: inspect generated objects for backend optimization regressions
+examples/inline_check/inline_check.o: examples/inline_check/inline_check.tkb $(TAKIBI)
+	$(TAKIBI) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
 ## allcheck: clean build artifacts, then run software and hardware checks
 allcheck:
