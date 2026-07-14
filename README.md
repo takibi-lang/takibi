@@ -357,7 +357,7 @@ code is written once.
 
 ## Acknowledgements
 
-The most implementation were written with assistance from Claude Code.
+The most implementation were written with assistance from Claude Code and Codex.
 
 ## License
 
