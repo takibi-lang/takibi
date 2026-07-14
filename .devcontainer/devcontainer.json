@@ -17,6 +17,7 @@
   "mounts": [
     "source=${localEnv:HOME}/claude/dot.claude,target=/home/vscode/.claude,type=bind",
     "source=${localEnv:HOME}/claude/dot.claude.json,target=/home/vscode/.claude.json,type=bind"
+    "source=${localEnv:HOME}/gemini/dot.config/google-gemini-cli,target=/home/vscode/.config/google-gemini-cli,type=bind"
   ],
   "runArgs": [
     "-v", "/dev:/dev-host:ro",
@@ -25,11 +26,12 @@
     "--device-cgroup-rule=c 189:* rmw",
     "--network=host"
   ],
-  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude && sudo apt-get update && sudo apt-get install -y cmake llvm-19-dev libzstd-dev lld-19 qemu-system-arm gdb-multiarch openocd stlink-tools bubblewrap mtools && sudo usermod -aG plugdev,dialout vscode && opam update && opam install -y ppx_deriving llvm",
+  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude && sudo apt-get update && sudo apt-get install -y cmake llvm-19-dev libzstd-dev lld-19 qemu-system-arm gdb-multiarch openocd stlink-tools bubblewrap mtools && sudo usermod -aG plugdev,dialout vscode && sudo npm install -g @google/gemini-cli && opam update && opam install -y ppx_deriving llvm",
   "containerEnv": {
     "LANG": "en_US.UTF-8",
     "LC_ALL": "en_US.UTF-8",
     "OPAMYES": "true",
+    "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}",
     "GH_TOKEN": "${localEnv:GH_READONLY_TOKEN}"
   }
 }
