@@ -1163,6 +1163,7 @@ let rec collect_immutable_lets stmts =
   List.concat_map (fun s ->
     match s.desc with
     | Let (false, name, ty_opt, Some _, _) -> [(name, ty_opt, s.loc)]
+    | LetTuple (names, _)          -> List.map (fun name -> (name, None, s.loc)) names
     | Block ss                    -> collect_immutable_lets ss
     | If (_, t, e)                -> collect_immutable_lets t @ collect_immutable_lets e
     | While (_, b)                -> collect_immutable_lets b
@@ -2736,11 +2737,14 @@ let gen_func ?prog_types fdef =
     List.iter (fun (name, ty_opt, let_loc) ->
       if not (Hashtbl.mem debug_immutable_allocas name) then begin
         let ast_ty = res name ty_opt in
-        let ptr = build_alloca (ltype_of_ast ast_ty) (name ^ ".dbg") builder in
-        apply_struct_align ast_ty ptr;
-        Hashtbl.add debug_immutable_allocas name (ast_ty, ptr);
-        declare_var ~is_param:false ~argno:0 ~name ~ast_ty
-          ~line:let_loc.Lexing.pos_lnum ~ptr
+        match ast_ty with
+        | TypeTuple _ -> ()
+        | _ ->
+            let ptr = build_alloca (ltype_of_ast ast_ty) (name ^ ".dbg") builder in
+            apply_struct_align ast_ty ptr;
+            Hashtbl.add debug_immutable_allocas name (ast_ty, ptr);
+            declare_var ~is_param:false ~argno:0 ~name ~ast_ty
+              ~line:let_loc.Lexing.pos_lnum ~ptr
       end
     ) (collect_immutable_lets fdef.body);
 
@@ -3006,6 +3010,11 @@ let gen_func ?prog_types fdef =
         List.iteri (fun i n ->
           let cty = List.nth comp_tys i in
           let cv = build_extractvalue v i ("tup_" ^ n) builder in
+          (match Hashtbl.find_opt debug_immutable_allocas n with
+           | Some (_, ptr) ->
+               let inst = build_store cv ptr builder in
+               set_volatile true inst
+           | None -> ());
           Hashtbl.add locals n (Imm (cty, cv))
         ) names
 

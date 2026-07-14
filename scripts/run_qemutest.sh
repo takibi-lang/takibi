@@ -379,6 +379,7 @@ run_dwarf_gdb_global_set_test() {
             -ex "break examples/dwarf_debug/dwarf_debug.tkb:93" \
             -ex "break examples/dwarf_debug/dwarf_debug.tkb:97" \
             -ex "break examples/dwarf_debug/dwarf_debug.tkb:103" \
+            -ex "break dwarf_tuple_stop" \
             -ex "continue" \
             -ex "p dwarf_global_state" \
             -ex "p dwarf_global_pair" \
@@ -457,6 +458,14 @@ run_dwarf_gdb_global_set_test() {
             -ex "p foreach_local" \
             -ex "bt" \
             -ex "continue" \
+            -ex "echo DBG_TUPLE_LOCAL\\n" \
+            -ex "p tuple_stop_arg" \
+            -ex "select-frame 1" \
+            -ex "p tuple_ok" \
+            -ex "p tuple_value" \
+            -ex "p tuple_total" \
+            -ex "bt" \
+            -ex "continue" \
             > "$gdb_out" 2>&1 || ok=0
     fi
 
@@ -506,8 +515,8 @@ run_dwarf_gdb_global_set_test() {
           in_bt && /^#0  dwarf_locals_probe \(\) at .*dwarf_debug\.tkb:27$/ {
             print "bt locals #0 => dwarf_locals_probe:27"
           }
-          in_bt && /^#1  .* in app_main \(\) at .*dwarf_debug\.tkb:109$/ {
-            print "bt locals #1 => app_main:109"
+          in_bt && /^#1  .* in app_main \(\) at .*dwarf_debug\.tkb:123$/ {
+            print "bt locals #1 => app_main:123"
           }
         ' "$gdb_out"
         awk '
@@ -585,8 +594,8 @@ run_dwarf_gdb_global_set_test() {
           in_args && /^#0  .*dwarf_args_probe .*dwarf_debug\.tkb:42$/ {
             print "bt args #0 => dwarf_args_probe:42"
           }
-          in_args && /^#1  .* in app_main \(\) at .*dwarf_debug\.tkb:110$/ {
-            print "bt args #1 => app_main:110"
+          in_args && /^#1  .* in app_main \(\) at .*dwarf_debug\.tkb:124$/ {
+            print "bt args #1 => app_main:124"
             in_args = 0
           }
         ' "$gdb_out"
@@ -670,6 +679,33 @@ run_dwarf_gdb_global_set_test() {
           in_foreach && /^#0  dwarf_scope_probe .* at .*dwarf_debug\.tkb:103$/ {
             print "bt foreach #0 => dwarf_scope_probe:103"
             in_foreach = 0
+          }
+        ' "$gdb_out"
+        awk '
+          /^DBG_TUPLE_LOCAL$/ { in_tuple = 1; next }
+          in_tuple && /^\$[0-9][0-9]* = 380$/ && !saw_stop {
+            print "p tuple_stop_arg => 380"
+            saw_stop = 1
+            next
+          }
+          in_tuple && /^\$[0-9][0-9]* = true$/ {
+            print "p tuple_ok => true"
+          }
+          in_tuple && /^\$[0-9][0-9]* = 314$/ {
+            print "p tuple_value => 314"
+          }
+          in_tuple && /^\$[0-9][0-9]* = 380$/ {
+            print "p tuple_total => 380"
+          }
+          in_tuple && /^#0  dwarf_tuple_stop .* at .*dwarf_debug\.tkb:113$/ {
+            print "bt tuple #0 => dwarf_tuple_stop:113"
+          }
+          in_tuple && /^#1  .*dwarf_tuple_probe \(\) at .*dwarf_debug\.tkb:119$/ {
+            print "bt tuple #1 => dwarf_tuple_probe:119"
+          }
+          in_tuple && /^#2  .* in app_main \(\) at .*dwarf_debug\.tkb:126$/ {
+            print "bt tuple #2 => app_main:126"
+            in_tuple = 0
           }
         ' "$gdb_out"
         printf "qemu output => %s\n" "$(tr -d '\r' < "$qemu_out")"

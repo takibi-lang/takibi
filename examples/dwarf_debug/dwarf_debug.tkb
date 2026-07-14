@@ -105,10 +105,25 @@ fn dwarf_scope_probe(scope_state: DwarfState, wild_state: DwarfState) {
     dwarf_global_pair.count = dwarf_global_pair.count - 104;
 }
 
+fn dwarf_tuple_pair() -> (bool, u32) {
+    return (true, 314);
+}
+
+fn dwarf_tuple_stop(tuple_stop_arg: u32) {
+    dwarf_debug_io_sink = tuple_stop_arg;
+}
+
+fn dwarf_tuple_probe() {
+    let (tuple_ok, tuple_value) = dwarf_tuple_pair();
+    let tuple_total: u32 = tuple_value + 66;
+    dwarf_tuple_stop(tuple_total);
+}
+
 fn app_main() {
     dwarf_locals_probe();
     dwarf_args_probe(dwarf_global_pair, dwarf_global_slice);
     dwarf_scope_probe(dwarf_global_state, dwarf_global_idle_state);
+    dwarf_tuple_probe();
     uart_print(dwarf_global_pair.count);
     uart_puts("\r\n");
 }

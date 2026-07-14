@@ -7,7 +7,7 @@ ptype dwarf_global_slice => struct [u8; 4..] {
 p dwarf_global_pair after => {state = DwarfState::Idle, count = 99}
 step => dwarf_locals_probe:27
 bt locals #0 => dwarf_locals_probe:27
-bt locals #1 => app_main:109
+bt locals #1 => app_main:123
 next => dwarf_locals_probe:28
 p flags => 18
 p seq => 287454020
@@ -27,7 +27,7 @@ p arg_pair => {state = DwarfState::Idle, count = 99}
 p arg_frame => {ptr = 0x0, len = 0}
 p arg_frame.len => 0
 bt args #0 => dwarf_args_probe:42
-bt args #1 => app_main:110
+bt args #1 => app_main:124
 p if_local => 201
 bt if #0 => dwarf_scope_probe:52
 p loop_local => 202
@@ -44,4 +44,11 @@ p for_local => 206
 bt for #0 => dwarf_scope_probe:99
 p foreach_local => 205
 bt foreach #0 => dwarf_scope_probe:103
+p tuple_stop_arg => 380
+p tuple_ok => true
+p tuple_value => 314
+p tuple_total => 380
+bt tuple #0 => dwarf_tuple_stop:113
+bt tuple #1 => dwarf_tuple_probe:119
+bt tuple #2 => app_main:126
 qemu output => 99

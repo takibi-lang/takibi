@@ -475,8 +475,8 @@ examples/fibonacci/kernel.debug.elf: $(COMMON_STARTUP_O) examples/fibonacci/fibo
 
 # Dedicated -g fixture for a live GDB check: typed globals, enum display,
 # struct member layout, slice fat-value layout, aggregate locals/arguments,
-# scoped locals, step/next/backtrace, and `set variable` against QEMU's
-# gdbstub.
+# tuple-destructured locals, scoped locals, step/next/backtrace, and
+# `set variable` against QEMU's gdbstub.
 examples/dwarf_debug/dwarf_debug.debug.o: examples/dwarf_debug/dwarf_debug.tkb examples/common/runtime.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
 	$(TAKIBI) examples/common/runtime.tkb $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -g -o $@ --forbid-trap
 
