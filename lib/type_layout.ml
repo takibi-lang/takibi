@@ -76,6 +76,19 @@ let rec size_align_of_type pos seen ty =
       let off = align_up off lalign + lsz in
       let align = max palign lalign in
       (align_up off align, align)
+  | TypeTuple ts ->
+      (* Function-local product value (OWNERSHIP_KERNEL.md 5.9): laid out
+         like a plain (non-packed) struct's fields, in declaration order,
+         matching ltype_of_ast's ordinary LLVM struct_type. sizeof/offsetof
+         on a bare tuple TYPE has no real use today (tuples are values,
+         not named types), but this keeps size_align_of_type total rather
+         than failing on a type that legitimately exists in the language. *)
+      let (off, max_align) = List.fold_left (fun (offset, max_align) t ->
+        let (tsz, talign) = size_align_of_type pos seen t in
+        let offset = align_up offset talign in
+        (offset + tsz, max max_align talign)
+      ) (0, 1) ts in
+      (align_up off max_align, max_align)
   | TypeNamed name ->
       (match Hashtbl.find_opt enums name with
        | Some underlying -> size_align_of_type pos seen underlying

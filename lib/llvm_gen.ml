@@ -143,6 +143,8 @@ let rec ty_str = function
   | TypeBorrow t -> "borrow " ^ ty_str t
   | TypeSink t -> "sink " ^ ty_str t
   | TypeAlignedPtr (n, t) -> Printf.sprintf "*align(%d) %s" n (ty_str t)
+  | TypeTuple ts ->
+      Printf.sprintf "(%s)" (String.concat ", " (List.map ty_str ts))
 
 (* ---- DWARF debug info (opt-in via -g; see enable_debug_info) ----
    Everything DI-related elsewhere in this file (gen_func / gen_stmt / gen_program)
@@ -656,6 +658,12 @@ let rec ltype_of_ast = function
            match Hashtbl.find_opt struct_lltypes sname with
            | Some llty -> llty
            | None -> raise (Error (Printf.sprintf "Unknown named type: %s" sname)))
+  | TypeTuple ts ->
+      (* Function-local product value (OWNERSHIP_KERNEL.md 5.9): an
+         anonymous struct, passed/returned by value like TypeSlice's fat
+         value just above -- LLVM's ABI lowering handles by-value
+         aggregates on both targets. *)
+      struct_type context (Array.of_list (List.map ltype_of_ast ts))
   | TypeBorrow t | TypeSink t -> ltype_of_ast t
   | TypeAlignedPtr _ -> pointer_type context
 
@@ -737,6 +745,9 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
   | TypeUsize -> basic_int "usize" (integer_bitwidth (usize_lltype ())) dw_ate_unsigned
   | TypeVoid  -> Llvm_debuginfo.llmetadata_null ()
   | TypeRefined (_, _, base) -> ditype_of_ast dib file base  (* same LLVM-level representation as its base; see ltype_of_ast *)
+  | TypeTuple _ -> Llvm_debuginfo.llmetadata_null ()
+    (* v1: no DWARF type for tuples (function-local values; -g builds work,
+       tuple-typed variables just carry no type info in gdb) *)
   | TypeBorrow t | TypeSink t -> ditype_of_ast dib file t
   | TypeAlignedPtr (_, t) -> ditype_of_ast dib file (TypePtr t)
       (* alignment is a compile-time-only proof (see ltype_of_ast); gdb
@@ -974,6 +985,14 @@ let rec coerce v (dst : Ast.type_expr) =
   let dst_ll = ltype_of_ast dst in
   if vty = dst_ll then v
   else match dst with
+  | TypeTuple ts ->
+      (* Element-wise re-coercion: a tuple built from unhinted literals can
+         carry narrower component widths than the destination expects. *)
+      let (agg, _) = List.fold_left (fun (agg, i) t ->
+        let cv = build_extractvalue v i "tupc" builder in
+        (build_insertvalue agg (coerce cv t) i "tupc" builder, i + 1))
+        (undef dst_ll, 0) ts in
+      agg
   | TypePtr _ | TypeAlignedPtr _ ->
       (* inttoptr auto-truncates/zero-extends the source integer to the
          pointer width per the LLVM LangRef, so no manual width-matching
@@ -2261,6 +2280,31 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
   | StructLit _ ->
       raise (Error "BUG: StructLit must be handled in gen_stmt / gen_global, not gen_expr")
 
+  | TupleLit exprs ->
+      (* OWNERSHIP_KERNEL.md 5.9 (GitHub issue #120): build the anonymous
+         aggregate via insertvalue. When the consumer's tuple type is known
+         (let/return/call argument), thread per-component expected types so
+         literal components land at the right width. *)
+      let expected_comps = match expected_ty with
+        | Some (TypeTuple ts) when List.length ts = List.length exprs ->
+            List.map (fun t -> Some t) ts
+        | _ -> List.map (fun _ -> None) exprs
+      in
+      let comps = List.map2 (fun x hint ->
+        match hint with
+        | Some t ->
+            let (_, v) = gen_expr ~expected_ty:t locals x in
+            (t, coerce v t)
+        | None -> gen_expr locals x
+      ) exprs expected_comps in
+      let comp_tys = List.map fst comps in
+      let tuple_ty = TypeTuple comp_tys in
+      let agg_llty = ltype_of_ast tuple_ty in
+      let (agg, _) = List.fold_left (fun (agg, i) (_, cv) ->
+        (build_insertvalue agg cv i "tup" builder, i + 1)
+      ) (undef agg_llty, 0) comps in
+      (tuple_ty, agg)
+
   | Call ("dma_publish", []) ->
       emit_device_barrier DmaPublish;
       (TypeVoid, const_null (i1_type context))
@@ -2649,7 +2693,7 @@ let gen_func ?prog_types fdef =
   in
 
   let rec is_debug_aggregate_ty = function
-    | TypeArray _ | TypeSlice _ -> true
+    | TypeArray _ | TypeSlice _ | TypeTuple _ -> true
     | TypeNamed sname -> not (Hashtbl.mem enum_underlying sname)
     | TypeRefined (_, _, base)
     | TypeBorrow base
@@ -2951,6 +2995,22 @@ let gen_func ?prog_types fdef =
                   if is_debug_aggregate_ty ast_ty then set_volatile true inst
               | None -> ());
              Hashtbl.add locals name (Imm (ast_ty, coerced)))
+
+    | LetTuple (names, rhs) ->
+        (* OWNERSHIP_KERNEL.md 5.9: destructure a tuple value into
+           immutable SSA bindings via extractvalue -- one Imm binding per
+           component, mirroring Let(false, ...) above. Component types come
+           from local_types (res with no annotation), the same source any
+           unannotated let uses, so kind tracking and codegen agree. *)
+        let comp_tys = List.map (fun n -> res n None) names in
+        let tuple_ty = TypeTuple comp_tys in
+        let (_, v) = gen_expr ~expected_ty:tuple_ty locals rhs in
+        let v = coerce v tuple_ty in
+        List.iteri (fun i n ->
+          let cty = List.nth comp_tys i in
+          let cv = build_extractvalue v i ("tup_" ^ n) builder in
+          Hashtbl.add locals n (Imm (cty, cv))
+        ) names
 
     | Block stmts ->
         List.iter gen_stmt stmts

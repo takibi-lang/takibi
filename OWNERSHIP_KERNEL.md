@@ -393,6 +393,58 @@ linear variant enums subsume anyway.
   cross-file read/write of a private field, cross-file struct literal,
   un-unsafe'd affine ptr-to-ptr cast.
 
+## 5.9 Interlude between Stages 2 and 3: function-local tuples (#120)
+## (normative once approved -- user-driven design reversal, 2026-07-14)
+
+Issue #120 originally recommended Go-style multiple returns over
+first-class tuples, to sidestep the container/place question. User
+review reversed this, with an argument that stands: the roadmap for
+content-carrying handles is (1) kinds carry no content today, (2) pair
+the kind token with its data behind a tuple while usage patterns
+accumulate, (3) design native content-carrying from those observed
+patterns. Go-style multi-return generates NO observations for (3) --
+the pair exists only at the call boundary and scatters into separate
+locals at every receiver, so "which pairs travel together, and how" is
+never visible in code. The pair must be a first-class value INSIDE
+function bodies for the experiment to produce data.
+
+The container objection is neutralized by construction, not by place
+tracking:
+
+- **Join-kind rule**: kind(tuple) = max of component kinds
+  (unrestricted < affine < linear). A linear-containing tuple IS a
+  linear value and inherits every Stage 1 rule at the granularity of
+  the tuple variable itself: all-paths consumption, no cast, no
+  storage, no overwrite while live, early-exit checks.
+- **Destructuring is the only elimination** (v1): `let (a, b) = e;`
+  consumes the tuple and births each component as a fresh tracked
+  binding (inference records component types in raw_locals, so
+  unannotated destructured obligations stay tracked). No `.0`/`.1`
+  projection: projecting out of a kinded tuple is partial access,
+  i.e. exactly the place-tracking question Stage 3 owns; banning it
+  keeps tracking variable-granular and function-local.
+- **Tuples are values, not storage**: allowed as function return types,
+  parameter types, locals, and literals `(e1, e2)`; rejected in struct
+  fields, arrays/slices, globals, writes through pointers, and casts
+  (either direction). Stage 3 revisits.
+- **Construction moves**: a tracked component of a tuple literal is
+  consumed exactly when the literal itself flows into a consuming
+  position (bound, passed, returned); a discarded literal consumes
+  nothing, so obligations never vanish into a dropped temporary.
+
+Codegen: an LLVM literal struct; construction by insertvalue,
+destructuring by extractvalue; ABI lowering for by-value aggregates is
+LLVM's problem and verified on both targets.
+
+Resolved-by-default in review (flag if wrong): no projection (above);
+no annotations on destructure bindings (types come from the RHS); no
+`mut` destructure bindings; nesting allowed (uniform recursion); no
+1-tuples or unit tuples. Honest limit, recorded: tuples are products --
+"consume on success, hand back on failure" (tcp_respond's real
+signature) still needs a SUM (#20, Stage 4); what tuples unlock now is
+try-style APIs that always return the obligation paired with data, and
+mint/recv APIs returning (data, obligation).
+
 ## 6. Stage 3 outlook: places (#89 Hurdle 3)
 
 Kind tracking extends from named locals to PLACES: struct fields, array

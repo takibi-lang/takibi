@@ -134,6 +134,8 @@ let rec show_type = function
   | Ast.TypeBorrow t -> "borrow " ^ show_type t
   | Ast.TypeSink t -> "sink " ^ show_type t
   | Ast.TypeAlignedPtr (n, t) -> Printf.sprintf "*align(%d) %s" n (show_type t)
+  | Ast.TypeTuple ts ->
+      Printf.sprintf "(%s)" (String.concat ", " (List.map show_type ts))
 
 let type_t : Ast.type_expr Alcotest.testable =
   Alcotest.testable (fun fmt t -> Format.pp_print_string fmt (show_type t)) (=)
@@ -3439,6 +3441,162 @@ let infer_tests = [
                       if ((t as usize) != 0) {
                         nsnk(t);
                       }
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  (* -- Tuples (OWNERSHIP_KERNEL.md 5.9, GitHub issue #120) ----------------
+     Function-local product values; join-kind semantics; destructuring is
+     the only elimination; banned from all storage and casts. *)
+
+  Alcotest.test_case "tuple: a plain (unrestricted) tuple return + destructure \
+                      compiles and needs no consumption" `Quick
+    (fun () ->
+       match infer "fn make_pair() -> (i32, i32) { return (1, 2); }
+                    fn use_pair() -> i32 {
+                      let (a, b) = make_pair();
+                      return a + b;
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "tuple: (data, linear-obligation) pair returned, \
+                      destructured, and the obligation consumed -- the \
+                      motivating shape for this issue" `Quick
+    (fun () ->
+       match infer "linear opaque struct TupOb;
+                    fn tmint() -> *TupOb { return 0 as usize as *TupOb; }
+                    fn tsnk(t: sink *TupOb) {}
+                    fn make_pair() -> (i32, *TupOb) { return (42, tmint()); }
+                    fn use_pair() {
+                      let (n, t) = make_pair();
+                      tsnk(t);
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "tuple join-kind: a tuple containing a linear component \
+                      IS linear -- never consuming it is a compile error" `Quick
+    (expect_type_error "linear value 'p' is still pending"
+       "linear opaque struct TupOb2;
+        fn tmint2() -> *TupOb2 { return 0 as usize as *TupOb2; }
+        fn leak() -> i32 {
+          let p: (i32, *TupOb2) = (1, tmint2());
+          return 0;
+        }");
+
+  Alcotest.test_case "tuple join-kind: consuming the tuple on only ONE branch \
+                      is a compile error (inherits linear's all-paths rule)" `Quick
+    (expect_type_error "consumed on some paths but not on every path"
+       "linear opaque struct TupOb3;
+        fn tmint3() -> *TupOb3 { return 0 as usize as *TupOb3; }
+        fn tsnk3(t: sink *TupOb3) {}
+        fn use_pair(c: bool, x: i32) {
+          let p: (i32, *TupOb3) = (x, tmint3());
+          if (c) {
+            let (n, t) = p;
+            tsnk3(t);
+          }
+        }");
+
+  Alcotest.test_case "tuple join-kind: a discarded tuple literal consumes \
+                      nothing that flows past it -- an unconsumed component \
+                      is still caught at the LOCAL that captured it" `Quick
+    (expect_type_error "linear value 'p' is still pending"
+       "linear opaque struct TupOb4;
+        fn tmint4() -> *TupOb4 { return 0 as usize as *TupOb4; }
+        fn make_pair4() -> (i32, *TupOb4) { return (1, tmint4()); }
+        fn leak4() -> i32 {
+          let p: (i32, *TupOb4) = make_pair4();
+          return 0;
+        }");
+
+  Alcotest.test_case "tuple: a plain (i32, i32) tuple type cannot be cast" `Quick
+    (expect_type_error "cannot cast a tuple to anything"
+       "fn make_pair5() -> (i32, i32) { return (1, 2); }
+        fn app_main() -> i32 {
+          let p: (i32, i32) = make_pair5();
+          let x: usize = p as usize;
+          return 0;
+        }");
+
+  Alcotest.test_case "tuple: casting TO a tuple type is a compile error" `Quick
+    (expect_type_error "cannot cast to a tuple type"
+       "fn app_main() -> i32 {
+          let x: i32 = 0;
+          let p: (i32, i32) = x as (i32, i32);
+          return 0;
+        }");
+
+  Alcotest.test_case "tuple: a struct field of tuple type is a compile error" `Quick
+    (expect_type_error "cannot hold a tuple"
+       "struct BadHolder { pair: (i32, i32); }
+        fn app_main() -> i32 { return 0; }");
+
+  Alcotest.test_case "tuple: a global of tuple type is a compile error" `Quick
+    (expect_type_error "cannot hold a tuple"
+       "let mut g_pair: (i32, i32) = (1, 2);
+        fn app_main() -> i32 { return 0; }");
+
+  Alcotest.test_case "tuple: an array of tuples is a compile error \
+                      (tuple cannot live behind indirection)" `Quick
+    (expect_type_error "tuple cannot live behind a pointer or inside an array/slice"
+       "fn app_main() -> i32 {
+          let mut a: [(i32, i32); 2];
+          return 0;
+        }");
+
+  Alcotest.test_case "tuple: a pointer-to-tuple type annotation is a compile \
+                      error (tuples cannot live behind indirection)" `Quick
+    (expect_type_error "tuple cannot live behind a pointer or inside an array/slice"
+       "fn make_pair6() -> (i32, i32) { return (1, 2); }
+        fn app_main() -> i32 {
+          let mut p: (i32, i32) = make_pair6();
+          let pp: *(i32, i32) = &p;
+          return 0;
+        }");
+
+  Alcotest.test_case "tuple: destructuring arity mismatch is a compile error" `Quick
+    (expect_type_error "tuple has 2 components but the pattern binds 3 names"
+       "fn make_pair7() -> (i32, i32) { return (1, 2); }
+        fn app_main() -> i32 {
+          let (a, b, c) = make_pair7();
+          return 0;
+        }");
+
+  Alcotest.test_case "tuple: destructuring a non-tuple expression is a compile error" `Quick
+    (expect_type_error "destructuring `let (...) = ...` needs a tuple right-hand side"
+       "fn app_main() -> i32 {
+          let (a, b) = 5;
+          return 0;
+        }");
+
+  Alcotest.test_case "tuple: duplicate names in a destructuring pattern are \
+                      a compile error" `Quick
+    (expect_type_error "duplicate name 'a' in tuple pattern"
+       "fn make_pair8() -> (i32, i32) { return (1, 2); }
+        fn app_main() -> i32 {
+          let (a, a) = make_pair8();
+          return 0;
+        }");
+
+  Alcotest.test_case "negative control: `(5)` stays plain parenthesized \
+                      grouping, not a 1-tuple (no comma = no tuple)" `Quick
+    (fun () ->
+       match infer "fn app_main() -> i32 {
+                      let x: i32 = (5);
+                      return x;
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "tuple: nesting is allowed (uniform recursion)" `Quick
+    (fun () ->
+       match infer "fn make_nested() -> (i32, (i32, i32)) { return (1, (2, 3)); }
+                    fn use_nested() -> i32 {
+                      let (a, inner) = make_nested();
+                      let (b, c) = inner;
+                      return a + b + c;
                     }" with
        | _ -> ()
        | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);

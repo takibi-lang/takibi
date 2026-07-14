@@ -220,6 +220,11 @@ stmt:
       { desc = Expr { desc = Call (fname, args); loc }; loc } }
   | LET id = IDENT rhs = let_rhs SEMI
     { { desc = Let (false, id, fst rhs, snd rhs, None); loc = $symbolstartpos } }
+  | LET LPAREN id1 = IDENT COMMA id2 = IDENT ids = ident_rest RPAREN ASSIGN e = expr SEMI
+    (* let (a, b, ...) = e; -- tuple destructuring, 2+ names
+       (OWNERSHIP_KERNEL.md 5.9, GitHub issue #120), the ONLY tuple
+       elimination. Same "mandatory second element" shape as above. *)
+    { { desc = LetTuple (id1 :: id2 :: ids, e); loc = $symbolstartpos } }
   | LET MUT id = IDENT rhs = let_rhs SEMI
     { { desc = Let (true, id, fst rhs, snd rhs, None); loc = $symbolstartpos } }
   | LET MUT IDENT COLON type_expr ALIGN LPAREN INT RPAREN SEMI
@@ -371,6 +376,13 @@ expr:
   | OFFSETOF LPAREN t = type_expr COMMA field = IDENT RPAREN
     { { desc = OffsetOf (t, field); loc = $symbolstartpos } }
   | LPAREN e = expr RPAREN { e }
+  | LPAREN e1 = expr COMMA e2 = expr es = rest_args RPAREN
+    (* (e1, e2, ...) -- tuple literal, 2+ components (OWNERSHIP_KERNEL.md
+       5.9, GitHub issue #120). Same "mandatory second element" shape as
+       the tuple-type rule above, for the same reason (rest_args's own
+       leading COMMA, reused as-is for elements after e2). Unambiguous
+       with the grouping-parens rule just above: that one has no comma. *)
+    { { desc = TupleLit (e1 :: e2 :: es); loc = $symbolstartpos } }
   | e = expr AS t = type_expr
     { { desc = Cast (t, e); loc = $symbolstartpos } }
   | id = IDENT LBRACKET idx = expr RBRACKET
@@ -396,6 +408,10 @@ args:
 rest_args:
   | /* empty */ { [] }
   | COMMA expr rest_args { $2 :: $3 }
+
+ident_rest:
+  | /* empty */ { [] }
+  | COMMA id = IDENT ids = ident_rest { id :: ids }
 
 let_rhs:
   | /* empty */ { (None, None) }
@@ -423,6 +439,16 @@ base_type_expr:
     (* [T; N..] -- slice whose runtime length is at least N *)
   | FN LPAREN fn_type_params RPAREN ARROW type_expr { TypeFn ($3, $6) }
   | FN LPAREN fn_type_params RPAREN                 { TypeFn ($3, TypeVoid) }
+  | LPAREN t1 = type_expr COMMA t2 = type_expr ts = fn_type_params_rest RPAREN
+    (* (T1, T2, ...) -- tuple type, 2+ components (OWNERSHIP_KERNEL.md 5.9,
+       GitHub issue #120). The mandatory t2 both enforces "at least 2
+       components" at the grammar level and avoids double-consuming a
+       comma against fn_type_params_rest's own leading COMMA (that rest
+       nonterminal is "(COMMA type_expr)*", reused as-is for any further
+       components after t2). Unambiguous with a plain parenthesized type
+       (no such grouping form exists in base_type_expr today) since a
+       COMMA is required. *)
+    { TypeTuple (t1 :: t2 :: ts) }
   | IDENT { TypeNamed $1 }
 
 (* Array size: a compile-time integer constant expression -- a literal, the

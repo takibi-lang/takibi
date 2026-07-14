@@ -32,6 +32,11 @@ type ty =
        counter follows its bounds/annotation base. Array and slice indices
        therefore use TUsize-based refinements, while raw-pointer offsets use
        TIsize-based refinements. *)
+  | TTuple of ty list     (* (T1, T2, ...) -- function-local product value
+                             (OWNERSHIP_KERNEL.md 5.9, GitHub issue #120):
+                             exists in returns/params/locals/literals only,
+                             never in storage (fields/arrays/globals). Kind
+                             = join of component kinds -- see type_inf. *)
   | TSlice of ty * int    (* []T / [T; N..] -- fat pointer (ptr + usize len);
                              int = compile-time minimum length (0 = unknown) *)
   | TAlignedPtr of int * ty
@@ -82,6 +87,8 @@ let rec to_string t =
       Printf.sprintf "(%s) -> %s"
         (String.concat ", " (List.map to_string ps)) (to_string r)
   | TStruct s -> s
+  | TTuple ts ->
+      Printf.sprintf "(%s)" (String.concat ", " (List.map to_string ts))
   | TRefinedInt (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
   | TVar { contents = Unbound id } -> Printf.sprintf "'t%d" id
   | TVar { contents = Link _ }     -> assert false
@@ -99,6 +106,7 @@ let rec occurs rv = function
   | TArray (t, _)              -> occurs rv t
   | TSlice (t, _)              -> occurs rv t
   | TAlignedPtr (_, t)         -> occurs rv t
+  | TTuple ts                  -> List.exists (occurs rv) ts
   | TStruct _                  -> false
   | _                          -> false
 
@@ -189,6 +197,12 @@ let rec unify t1 t2 =
          on an align(%d) variable, a literal address, pointer arithmetic by \
          a multiple of %d, or `unsafe { ... as *align(%d) %s }` to mark it"
         (to_string (TPtr t1)) n (to_string t2) n n n (to_string t2)))
+  | TTuple ts1, TTuple ts2 ->
+      if List.length ts1 <> List.length ts2 then
+        raise (Unify_error (Printf.sprintf
+          "tuple arity mismatch: %s vs %s"
+          (to_string (TTuple ts1)) (to_string (TTuple ts2))));
+      List.iter2 unify ts1 ts2
   | TStruct s1, TStruct s2 ->
       if s1 <> s2 then
         raise (Unify_error (Printf.sprintf "struct type mismatch: %s vs %s" s1 s2))
@@ -221,6 +235,7 @@ let rec of_ast = function
   | Ast.TypeNamed s      -> TStruct s
   | Ast.TypeRefined (lo, hi, base) -> TRefinedInt (lo, hi, of_ast base)
   | Ast.TypeSlice (t, n) -> TSlice (of_ast t, n)
+  | Ast.TypeTuple ts -> TTuple (List.map of_ast ts)
   | Ast.TypeBorrow t | Ast.TypeSink t -> of_ast t
   | Ast.TypeAlignedPtr (n, t) -> TAlignedPtr (n, of_ast t)
 
@@ -252,6 +267,7 @@ let rec to_ast t =
   | TRefinedInt (lo, hi, base) -> Ast.TypeRefined (lo, hi, to_ast base)
   | TSlice (t, n) -> Ast.TypeSlice (to_ast t, n)
   | TAlignedPtr (n, t) -> Ast.TypeAlignedPtr (n, to_ast t)
+  | TTuple ts -> Ast.TypeTuple (List.map to_ast ts)
   | TVar { contents = Unbound _ } -> Ast.TypeI32
   | TVar { contents = Link _ }    -> assert false
 

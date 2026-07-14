@@ -1,0 +1,77 @@
+// Stage "5.9" PoC for function-local tuples (OWNERSHIP_KERNEL.md, GitHub
+// issue #120): the motivating shape is pairing DATA with an affine/linear
+// OBLIGATION so a receiver can see and consume both together, instead of
+// a multi-return scattering the pair into separate locals at every call
+// site (the reason Go-style multiple returns were rejected in favor of
+// first-class tuples -- see the issue for the full argument). Tuples are
+// join-kind: a tuple containing a linear component IS linear and inherits
+// every OWNERSHIP_KERNEL.md Stage 1 rule (all-paths consumption, no cast,
+// no storage) at the granularity of the tuple value itself. Destructuring
+// `let (a, b) = e;` is the only elimination -- no .0/.1 projection, so
+// tracking stays variable-granular (no place tracking needed).
+
+linear opaque struct Obligation;
+
+fn mint() -> *Obligation {
+    return 0 as usize as *Obligation;
+}
+
+fn fulfill(t: sink *Obligation) {
+    uart_puts("fulfilled\r\n");
+}
+
+// A "try"-style API returning (status, data) -- a plain (unrestricted)
+// tuple. No obligation involved yet: needs no consumption at all.
+fn try_divide(a: i32, b: i32) -> (bool, i32) {
+    if (b == 0) {
+        return (false, 0);
+    }
+    return (true, a / b);
+}
+
+// (data, obligation) pair: the shape this issue exists for. The caller
+// receives 42 and a linear witness together, in one value, and must
+// discharge the obligation.
+fn acquire_with_proof() -> (i32, *Obligation) {
+    return (42, mint());
+}
+
+// Nested tuple type: uniform recursion at the type/value level (a bare
+// tuple literal needs a concrete type context -- see make_nested's own
+// return-type annotation -- since untyped int literals inside it would
+// otherwise stay polymorphic with no let-tuple annotation slot to pin
+// them, the same reason a bare `let x = 1;` needs later usage to settle
+// its type).
+fn make_nested() -> (i32, (i32, i32)) {
+    return (1, (2, 3));
+}
+
+fn app_main() {
+    let (ok, q) = try_divide(10, 2);
+    if (ok) {
+        uart_puts("10 / 2 = ");
+        uart_print(q);
+        uart_puts("\r\n");
+    }
+
+    let (bad_ok, _bad_q) = try_divide(10, 0);
+    if (bad_ok == false) {
+        uart_puts("division by zero rejected\r\n");
+    }
+
+    let (n, proof) = acquire_with_proof();
+    uart_puts("acquired: ");
+    uart_print(n);
+    uart_puts("\r\n");
+    fulfill(proof);
+
+    // Nesting: destructuring stays one level per let, so a nested tuple
+    // is unpacked with a second let (no nested patterns like
+    // `let (a, (b, c)) = ...;` in v1).
+    let (a, inner) = make_nested();
+    let (b, c) = inner;
+    uart_print(a + b + c);
+    uart_puts("\r\n");
+
+    uart_puts("done\r\n");
+}

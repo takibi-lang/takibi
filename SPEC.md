@@ -606,6 +606,54 @@ identity, not by resolved binding; and the declaring file itself remains
 the trusted island -- privacy narrows the audit surface to that file, it
 does not verify the file's own bodies.
 
+## Tuples
+
+```
+(T1, T2, ...)         // tuple type, 2+ components
+(e1, e2, ...)         // tuple literal
+let (a, b) = e;       // destructuring -- the ONLY elimination
+```
+
+Function-local product values (OWNERSHIP_KERNEL.md 5.9, GitHub issue
+#120): legal as return types, parameter types, and local `let`
+annotations; a bare (untyped) `let (a, b) = e;` also works when `e`'s
+type is already concrete (e.g. from a function call whose return type is
+annotated). Rejected everywhere storage would be involved: struct fields,
+array/slice elements, globals, behind a pointer (either direction), and
+casts (to or from a tuple). At least 2 components (`(x)` stays plain
+parenthesized grouping, not a 1-tuple). Nesting is allowed at the
+type/value level (`(i32, (i32, i32))`), but destructuring itself is not
+recursive -- unpack one level per `let`, then destructure the inner tuple
+with a second `let`.
+
+**Kind = join of component kinds**: a tuple containing an `affine` or
+`linear` component is itself that kind, and inherits every relevant rule
+(for `linear`: all-paths consumption, no cast, no storage, no overwrite
+while live) at the granularity of the tuple variable -- not per
+component. This is what makes returning `(data, obligation)` together
+safe: the pair travels as one value through a function boundary and must
+be destructured and its tracked component discharged, exactly as if it
+had been returned alone.
+
+**Why destructuring only, no `.0`/`.1` projection**: projecting a single
+component out of a kinded tuple is partial access -- the same
+place-tracking question OWNERSHIP_KERNEL.md's Stage 3 (struct
+fields/array slots holding affine/linear values) is scoped to answer.
+Restricting v1 to whole-tuple destructuring keeps kind tracking
+variable-granular and function-local, with no new machinery.
+
+This was deliberately chosen over Go-style "multiple return values" that
+never exist as a value (only at a call boundary): the whole point of
+pairing data with an obligation is to observe how the pair is actually
+used in real code, which requires the pair to be a value manipulable
+inside function bodies, not one that scatters into separate locals at
+every call site.
+
+See examples/tuple_pair (positive: try-style `(bool, i32)`, a
+`(data, obligation)` pair, and nesting) and examples/
+tuple_linear_leak_wrong, tuple_field_wrong, tuple_cast_wrong
+(compile-error companions).
+
 ## Enums
 
 ```

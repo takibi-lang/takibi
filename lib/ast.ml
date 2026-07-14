@@ -47,6 +47,12 @@ type type_expr =
        function as the designated terminal consumer of the value, so the
        callee's own body is NOT required to forward/consume it further
        (GitHub issue #89's "sink" design -- see HISTORY.md). *)
+  | TypeTuple of type_expr list
+    (* (T1, T2, ...) -- function-local product (OWNERSHIP_KERNEL.md 5.9,
+       GitHub issue #120). Legal in function return types, parameter
+       types, and local `let` annotations; rejected in struct fields,
+       arrays/slices, globals, and casts (either direction). Kind = join
+       of component kinds -- a linear-containing tuple is itself linear. *)
   | TypeAlignedPtr of int * type_expr
     (* *align(N) T -- a pointer PROVABLY a multiple of N bytes, the pointer
        analogue of a refined integer's {lo..<hi as base} (GitHub issue #102
@@ -78,6 +84,11 @@ and expr_desc =
   | Cast of type_expr * expr  (* expr as T -- explicit type cast *)
   | FieldGet of expr * string  (* expr.field -- read a struct field *)
   | StructLit of expr list     (* { e, e, ... } -- positional struct literal *)
+  | TupleLit of expr list      (* (e1, e2, ...) -- 2+ components; a tracked
+                                  (affine/linear) component is consumed
+                                  exactly when the literal itself flows into
+                                  a consuming position (bound/passed/
+                                  returned) -- see check_affine_func *)
   | Index of ident * expr      (* arr[idx] -- preserves array/pointer type for bounds checking *)
   | SliceOf of ident * expr * expr  (* s[lo..<hi] -- subslice of a slice/array (compile-time
                                        constant bounds, proven against the min length) or
@@ -119,6 +130,11 @@ and stmt_desc =
          like For's bounds); x is an immutable per-iteration element value.
          Safe by construction: the compiler generates the counter and the
          in-bounds access itself, so no index proof is ever needed. *)
+  | LetTuple of ident list * expr
+      (* let (a, b) = e; -- destructuring, the ONLY tuple elimination
+         (no .0/.1 projection -- that is Stage 3's partial-access
+         question). Consumes the tuple; each component becomes a fresh
+         immutable binding, kind-tracked via its inferred type. *)
   | Break
   | Continue
   | Match of expr * match_arm list  (* match expr { EName::V => {...} _ => {...} } *)
@@ -237,7 +253,7 @@ let written_names (stmts : stmt list) : string list =
     | Unsafe e1 ->
         go_expr e1
     | BinOp (_, a, b) -> go_expr a; go_expr b
-    | Call (_, args) | StructLit args -> List.iter go_expr args
+    | Call (_, args) | StructLit args | TupleLit args -> List.iter go_expr args
     | Index (_, idx) -> go_expr idx
     | SliceOf (_, lo, hi) -> go_expr lo; go_expr hi
     | IntLit _ | BoolLit _ | StringLit _ | Var _ | EnumVariant _ | SizeOf _
@@ -251,6 +267,7 @@ let written_names (stmts : stmt list) : string list =
     | AssignField (b, _, e)  -> go_expr b; go_expr e
     | Let (_, n, _, init, _) -> add n; (match init with
                                         | Some e -> go_expr e | None -> ())
+    | LetTuple (ns, e)       -> List.iter add ns; go_expr e
     | Expr e | Return e      -> go_expr e
     | Block ss               -> List.iter go_stmt ss
     | If (c, t, el)          -> go_expr c;

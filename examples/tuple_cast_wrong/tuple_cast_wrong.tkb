@@ -1,0 +1,14 @@
+// This file is expected to produce a compile error.
+// Tuples cannot be cast to or from anything (OWNERSHIP_KERNEL.md 5.9,
+// GitHub issue #120) -- there is no legitimate reinterpretation of a
+// function-local aggregate value, and allowing it would reopen the same
+// kind-laundering hole Stage 2 closed for affine pointers.
+fn make_pair() -> (i32, i32) {
+    return (1, 2);
+}
+
+fn app_main() -> i32 {
+    let p: (i32, i32) = make_pair();
+    let x: usize = p as usize;
+    return 0;
+}

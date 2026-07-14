@@ -438,6 +438,10 @@ let is_linear_ptr_ty t = match repr t with
   | TPtr (TStruct n) -> StringSet.mem n !linear_opaque_names
   | _ -> false
 
+let is_tuple_ty t = match repr t with
+  | TTuple _ -> true
+  | _ -> false
+
 (* Direct calls are resolved during inference.  Codegen must consume this
    exact decision rather than attempting a second overload resolution. *)
 let resolved_call_targets = ref StringMap.empty
@@ -532,6 +536,7 @@ let check_private_type_construction (loc : Ast.loc) (target : Ast.type_expr) =
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> walk t
+    | Ast.TypeTuple ts -> List.iter walk ts
     | _ -> ()
   in
   walk target
@@ -979,6 +984,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       check_linear_cast_away e.loc src_ty;
       check_affine_ptr_launder e.loc src_ty target_ty;
       check_private_type_construction e.loc target_ty;
+      (match target_ty with
+       | Ast.TypeTuple _ ->
+           raise (TypeError (e.loc, "cannot cast to a tuple type"))
+       | _ -> ());
+      (match repr src_ty with
+       | TTuple _ ->
+           raise (TypeError (e.loc, "cannot cast a tuple to anything"))
+       | _ -> ());
       let src_enum = match repr src_ty with
         | TStruct sn when StringMap.mem sn eenv -> Some sn
         | _ -> None
@@ -1520,6 +1533,15 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       raise (TypeError (e.loc,
         "struct literal requires a type annotation: `let mut x: Name = {...}`"))
 
+  | TupleLit exprs ->
+      (* OWNERSHIP_KERNEL.md 5.9 (GitHub issue #120): a function-local
+         product value. Kind handling lives in check_affine_func (a
+         tracked component is consumed exactly when the literal itself
+         flows into a consuming position). *)
+      if List.length exprs < 2 then
+        raise (TypeError (e.loc, "a tuple literal needs at least 2 components"));
+      TTuple (List.map (fun x -> infer_expr senv eenv tyenv fenv x) exprs)
+
   | Call (("dma_publish" | "dma_consume" | "device_fence" | "signal_fence"
           | "interrupt_wait" | "interrupt_notify") as fname, args) ->
       (* Target-independent DMA/device ordering builtins. Their hardware
@@ -1968,6 +1990,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
             inner
       in
       let vt = infer_expr senv eenv tyenv fenv val_expr in
+      if is_tuple_ty vt then
+        raise (TypeError (val_expr.loc,
+          "cannot store a tuple through a pointer: tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
       if is_linear_ptr_ty vt then
         raise (TypeError (val_expr.loc,
           "cannot store a linear value through a pointer: it would escape \
@@ -2006,6 +2031,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         | _ -> raise (TypeError (s.loc,
             Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))
       in
+      if is_tuple_ty rt then
+        raise (TypeError (rhs.loc,
+          "cannot store a tuple into an array/slice element: tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
       if is_linear_ptr_ty rt then
         raise (TypeError (rhs.loc,
           "cannot store a linear value into an array/slice element: it would \
@@ -2040,6 +2068,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
               Printf.sprintf "no field '%s' in struct '%s'" fname sname))
       in
       let vt = infer_expr senv eenv tyenv fenv val_expr in
+      if is_tuple_ty vt then
+        raise (TypeError (val_expr.loc,
+          "cannot store a tuple into a struct field: tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
       if is_linear_ptr_ty vt then
         raise (TypeError (val_expr.loc,
           "cannot store a linear value into a struct field: it would escape \
@@ -2147,6 +2178,43 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
        | None -> ());
       ( StringMap.add name (bind_ty, is_mut) tyenv,
         StringMap.add name bind_ty raw_locals )
+  | LetTuple (names, rhs) ->
+      (* OWNERSHIP_KERNEL.md 5.9 (GitHub issue #120): destructuring is the
+         ONLY tuple elimination. Bindings are immutable; component types
+         come from the RHS and are recorded in raw_locals, so kind
+         tracking sees unannotated destructured obligations. *)
+      let seen = Hashtbl.create 4 in
+      List.iter (fun n ->
+        if Hashtbl.mem seen n then
+          raise (TypeError (s.loc, Printf.sprintf
+            "duplicate name '%s' in tuple pattern" n));
+        Hashtbl.add seen n ()) names;
+      let rt = infer_expr senv eenv tyenv fenv rhs in
+      let comp_tys = match repr rt with
+        | TTuple ts -> ts
+        | other -> raise (TypeError (rhs.loc, Printf.sprintf
+            "destructuring `let (...) = ...` needs a tuple right-hand side, \
+             got '%s'" (to_string other)))
+      in
+      if List.length names <> List.length comp_tys then
+        raise (TypeError (s.loc, Printf.sprintf
+          "tuple has %d components but the pattern binds %d names"
+          (List.length comp_tys) (List.length names)));
+      (* Same restriction as Let's immutable-struct rule above: an
+         immutable binding has no alloca, so a by-value struct component
+         would have no address for later field access. *)
+      List.iter (fun t ->
+        match repr t with
+        | TStruct sname when StringMap.mem sname senv ->
+            raise (TypeError (rhs.loc, Printf.sprintf
+              "tuple component of struct type '%s' cannot be destructured \
+               into an immutable binding (no address for later field \
+               access)" sname))
+        | _ -> ()) comp_tys;
+      ( List.fold_left2 (fun env n t -> StringMap.add n (t, false) env)
+          tyenv names comp_tys,
+        List.fold_left2 (fun m n t -> StringMap.add n t m)
+          raw_locals names comp_tys )
   | Block stmts ->
       (* Let bindings extend the inner env but do not escape the block *)
       let (_, raw_locals') = List.fold_left
@@ -2543,6 +2611,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let rec contains_borrow = function
     | Ast.TypeBorrow _ | Ast.TypeSink _ -> true
     | Ast.TypePtr t | Ast.TypeIo t -> contains_borrow t
+    | Ast.TypeTuple ts -> List.exists contains_borrow ts
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> contains_borrow t
     | Ast.TypeFn (args, ret) -> List.exists contains_borrow args || contains_borrow ret
     | Ast.TypeRefined (_, _, base) -> contains_borrow base
@@ -2563,6 +2632,28 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_linear t
+    | Ast.TypeTuple ts -> List.exists type_mentions_linear ts
+    | _ -> false
+  in
+  (* OWNERSHIP_KERNEL.md 5.9: tuples are values, not storage. A tuple type
+     may appear only at the top level of a return type, parameter type, or
+     local let annotation -- never under a pointer/array/slice/io (and, via
+     the LetDef/StructDef checks below, never as a global or field). *)
+  let rec tuple_under_indirection inside = function
+    | Ast.TypeTuple ts ->
+        inside || List.exists (tuple_under_indirection inside) ts
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeAlignedPtr (_, t)
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) ->
+        tuple_under_indirection true t
+    | Ast.TypeBorrow t | Ast.TypeSink t | Ast.TypeRefined (_, _, t) ->
+        tuple_under_indirection inside t
+    | _ -> false
+  in
+  let rec type_mentions_tuple = function
+    | Ast.TypeTuple _ -> true
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_tuple t
     | _ -> false
   in
   let rec linear_inside_container = function
@@ -2570,6 +2661,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t) ->
         linear_inside_container t
+    | Ast.TypeTuple ts -> List.exists linear_inside_container ts
     | _ -> false
   in
   let validate_param_type loc = function
@@ -2583,11 +2675,20 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeSink _ ->
         raise (TypeError (loc,
           "sink is only valid on a pointer to an affine/linear opaque struct parameter"))
-    | ty -> validate_complete_type loc false ty
+    | ty ->
+        if tuple_under_indirection false ty then
+          raise (TypeError (loc,
+            "a tuple cannot live behind a pointer or inside an array/slice: \
+             tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
+        validate_complete_type loc false ty
   in
   let validate_nonparam_type loc ty =
     if contains_borrow ty then
       raise (TypeError (loc, "borrow/sink is only valid in function parameter types"));
+    if tuple_under_indirection false ty then
+      raise (TypeError (loc,
+        "a tuple cannot live behind a pointer or inside an array/slice: \
+         tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
     if linear_inside_container ty then
       raise (TypeError (loc,
         "a linear value cannot live inside an array/slice: it would escape \
@@ -2601,7 +2702,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      | Ast.BinOp (_, a, b) -> validate_expr_types a; validate_expr_types b
      | Ast.Bnot x | Ast.Deref x | Ast.AddrOf x | Ast.FieldGet (x, _)
      | Ast.Unsafe x -> validate_expr_types x
-     | Ast.Call (_, xs) | Ast.StructLit xs -> List.iter validate_expr_types xs
+     | Ast.Call (_, xs) | Ast.StructLit xs | Ast.TupleLit xs -> List.iter validate_expr_types xs
      | Ast.Index (_, i) -> validate_expr_types i
      | Ast.SliceOf (_, lo, hi) -> validate_expr_types lo; validate_expr_types hi
      | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.Var _
@@ -2616,6 +2717,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          validate_expr_types lo; validate_expr_types hi;
          List.iter validate_stmt_types body
      | Ast.Return e | Ast.Expr e -> validate_expr_types e
+     | Ast.LetTuple (_, e) -> validate_expr_types e
      | Ast.Assign (_, e) -> validate_expr_types e
      | Ast.AssignDeref (a, b) | Ast.AssignField (a, _, b)
      | Ast.AssignIndex (_, a, b) -> validate_expr_types a; validate_expr_types b
@@ -2654,16 +2756,24 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               "global '%s' cannot hold a linear value: it would escape \
                obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will lift this)"
               gname));
+          if type_mentions_tuple t then
+            raise (TypeError (gloc, Printf.sprintf
+              "global '%s' cannot hold a tuple: tuples are values, not \
+               storage (OWNERSHIP_KERNEL.md 5.9)" gname));
           validate_nonparam_type gloc t) ty;
         Option.iter validate_expr_types init
-    | Ast.StructDef (sname, fields, _, _, _, _) ->
+    | Ast.StructDef (sname, fields, _, _, _, sloc) ->
         List.iter (fun (fname, ty) ->
           if type_mentions_linear ty then
-            raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+            raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot hold a linear value: it would \
                escape obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will \
                lift this)" sname fname));
-          validate_nonparam_type Lexing.dummy_pos ty) fields
+          if type_mentions_tuple ty then
+            raise (TypeError (sloc, Printf.sprintf
+              "struct field '%s.%s' cannot hold a tuple: tuples are values, \
+               not storage (OWNERSHIP_KERNEL.md 5.9)" sname fname));
+          validate_nonparam_type sloc ty) fields
     | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _ -> ()) prog;
   (* Pass 0: collect struct and enum definitions *)
   let senv = List.fold_left (fun m -> function
@@ -2954,12 +3064,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeBorrow t | Ast.TypeSink t -> strip_borrow t
     | t -> t
   in
-  let is_affine_type ty = match strip_borrow ty with
+  let rec is_affine_type ty = match strip_borrow ty with
     | Ast.TypePtr (Ast.TypeNamed name) -> StringSet.mem name affine_names
+    | Ast.TypeTuple ts -> List.exists is_affine_type ts
     | _ -> false
   in
-  let is_linear_type ty = match strip_borrow ty with
+  let rec is_linear_type ty = match strip_borrow ty with
     | Ast.TypePtr (Ast.TypeNamed name) -> StringSet.mem name linear_names
+    | Ast.TypeTuple ts -> List.exists is_linear_type ts
     | _ -> false
   in
   let is_tracked_type ty = is_affine_type ty || is_linear_type ty in
@@ -3048,6 +3160,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Bnot a | Ast.Deref a | Ast.AddrOf a | Ast.Cast (_, a)
       | Ast.FieldGet (a, _) | Ast.Unsafe a -> check_expr moved false a
       | Ast.StructLit xs -> List.fold_left (fun m x -> check_expr m false x) moved xs
+      | Ast.TupleLit xs ->
+          (* A tracked component moves into the tuple exactly when the
+             tuple itself is being consumed (bound/passed/returned); a
+             discarded literal consumes nothing, so obligations never
+             vanish into a dropped temporary (OWNERSHIP_KERNEL.md 5.9). *)
+          List.fold_left (fun m x -> check_expr m consume x) moved xs
       | Ast.Index (_, i) -> check_expr moved false i
       | Ast.SliceOf (_, lo, hi) -> check_expr (check_expr moved false lo) false hi
       | Ast.SizeOf _ | Ast.OffsetOf _ | Ast.IntLit _ | Ast.BoolLit _
@@ -3153,6 +3271,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             | None -> moved
           in
           (mv_clear name moved, StringSet.add name declared)
+      | Ast.LetTuple (names, rhs) ->
+          List.iter (fun n ->
+            decl_locs := StringMap.add n s.loc !decl_locs) names;
+          (* Destructuring consumes the tuple (consume=true moves an RHS
+             variable, or propagates into a direct TupleLit's tracked
+             components); each bound name starts as a fresh obligation/
+             handle of its component type. *)
+          let moved = check_expr moved true rhs in
+          let moved = List.fold_left (fun m n -> mv_clear n m) moved names in
+          (moved, List.fold_left (fun d n -> StringSet.add n d) declared names)
       | Ast.Block body ->
           let (out, _) = check_stmts moved declared body in
           (out, declared)
