@@ -7212,3 +7212,37 @@ The DWARF work also found one compiler bug while adding STM32 RAM debug ELF
 targets for HTTP examples: function pointer parameters were emitted as bare
 DWARF subroutine types instead of pointer-to-subroutine types. That is fixed
 in `lib/llvm_gen.ml`, with a regression in `test/test_takibi.ml`.
+
+## GitHub Issue #118: Explicit `inline fn` and Host-Side Integration Checks
+
+Issue #118 started from a concrete code-generation observation:
+`examples/common/http_server_common.tkb`'s small `classify_tcp_event`
+helper survived as a standalone call in `http_server_poll_once`
+(`R_AARCH64_CALL26 classify_tcp_event`). The first tempting fix was to add
+a general LLVM inliner to the custom optimization pipeline, but that was
+too broad for Takibi's embedded-first defaults: it would make every helper
+subject to optimizer heuristics, and it also disturbed the live DWARF/GDB
+fixture when applied to `-g` builds.
+
+The implemented design is explicit instead:
+
+- the language accepts `inline fn name(...) { ... }`;
+- the AST records `is_inline`;
+- codegen maps only those functions to LLVM's `alwaysinline` attribute;
+- the optimizer runs `always-inline`, not the general module inliner;
+- `-g` builds skip the inlining pass so debugger stepping and local-variable
+  visibility stay stable.
+
+`classify_tcp_event` is now marked `inline fn`, which removes the call
+relocation in normal builds while keeping the source-level intent visible.
+
+The regression test deliberately does **not** depend on `http_server`'s
+internal helper names. A dedicated `examples/inline_check/inline_check.tkb`
+fixture defines both `inline_helper` and `normal_helper`; the host-side
+integration harness verifies that only the former loses its call relocation.
+That same host-side section also runs the Linux/AMD64 `linux_hello` binary,
+so `make qemutest`/`make check` now report these non-QEMU checks through the
+same coloured PASS/FAIL stream as compile-error, DWARF, and QEMU tests.
+
+Validation: `make qemutest` and `make check` both passed with 103 total
+integration cases after the change.

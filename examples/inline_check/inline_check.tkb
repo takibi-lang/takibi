@@ -1,8 +1,8 @@
 // Optimizer fixture for Takibi's explicit `inline fn` marker.
 //
-// This is intentionally not a QEMU example. `make optimizercheck` compiles the
-// object and inspects relocations so the test is independent of larger examples'
-// helper names and internal structure.
+// This is intentionally not a QEMU example. The host-side integration harness
+// compiles the object and inspects relocations so the test is independent of
+// larger examples' helper names and internal structure.
 
 let mut inline_check_sink: i32 = 0;
 

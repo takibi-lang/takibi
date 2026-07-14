@@ -14,6 +14,8 @@ TIMEOUT=10
 # failures in run_compile_error_test below). The Makefile already ensures
 # _build/default/bin/main.exe exists and is current before this script runs.
 TAKIBI="_build/default/bin/main.exe"
+HOST_ONLY="${1:-}"
+HOST_ONLY_NAME="${2:-}"
 
 PASS=0
 FAIL=0
@@ -255,6 +257,16 @@ run_inline_optimizer_test() {
     fi
 
     rm -f "$objdump_out" "$nm_out"
+}
+
+run_host_integration_tests() {
+    local only="${1:-}"
+    if [ -z "$only" ] || [ "$only" = "linux_hello" ]; then
+        run_linux_binary_test "linux_hello (linux amd64)" examples/linux_hello/linux_hello.linux examples/linux_hello/linux_hello.expected
+    fi
+    if [ -z "$only" ] || [ "$only" = "inline_check" ]; then
+        run_inline_optimizer_test "inline_check" examples/inline_check/inline_check.o
+    fi
 }
 
 # run_fatfs_test NAME KERNEL EXPECTED MTOOLS_SCRIPT
@@ -807,11 +819,16 @@ run_dwarf_gdb_global_set_test() {
     rm -f "$qemu_out" "$gdb_out" "$gdb_norm" "$gdb_diff"
 }
 
+if [ "$HOST_ONLY" = "--host-only" ]; then
+    run_host_integration_tests "$HOST_ONLY_NAME"
+    [ "$FAIL" -eq 0 ]
+    exit $?
+fi
+
 echo "Running host integration tests (no QEMU required)..."
 echo ""
 
-run_linux_binary_test "linux_hello (linux amd64)" examples/linux_hello/linux_hello.linux examples/linux_hello/linux_hello.expected
-run_inline_optimizer_test "inline_check" examples/inline_check/inline_check.o
+run_host_integration_tests
 
 echo ""
 echo "Running compile-error tests (no QEMU required)..."

@@ -844,6 +844,13 @@ at codegen time rather than silently lowering to a racy `wfi`.
   (assembly-implemented) function, emitting an LLVM `declare`. `extern
   fn` is **not** overloadable -- its unmangled symbol name is an external
   ABI contract.
+- `inline fn name(params) -> ret { ... }` marks a Takibi-defined function
+  as an explicit inlining request. In normal optimized builds the backend
+  emits LLVM's `alwaysinline` function attribute and runs the corresponding
+  `always-inline` pass. Takibi does not otherwise inline ordinary `fn`
+  definitions implicitly. `-g` builds currently disable the inlining pass
+  to keep GDB stepping and local-variable visibility stable; use a
+  non-`-g` build when checking object-code inlining behavior.
 - **Function overloading**: multiple `fn` definitions sharing a name are
   collected into an overload set and compiled under mangled linkage names
   (`_TK_<name>__<type-codes>`); DWARF still records the original,

@@ -151,7 +151,7 @@ description drift between the two files.
 ```bash
 make build          # build the compiler (takibi) only (= dune build)
 make test           # run unit tests
-make qemutest       # run QEMU integration tests (build all examples and verify automatically)
+make qemutest       # run QEMU plus host-side integration tests (build and verify automatically)
 make stm32build     # cross-compile every ported example for STM32F746G-DISCOVERY (no hardware needed)
 make check          # run langcheck + test + stm32build + qemutest together
 make hwcheck        # like stm32build, but also loads into RAM + UART-diffs against real STM32 hardware
@@ -371,7 +371,8 @@ examples/
                      below for how the hardest cases, irq/preempt/semaphore/condvar/watchdog/
                      msgqueue, got there too).
 scripts/
-  run_qemutest.sh -- QEMU integration test script (FIFO sync and timing verification included)
+  run_qemutest.sh -- integration test script: host-side checks plus QEMU tests
+                     (FIFO sync and timing verification included)
   run_hwtest_ram.sh -- STM32 hardware integration test script (make hwcheck): RAM execution
                      over the debug port, no Flash write -- see "STM32 Hardware Test
                      Harness: RAM Execution" below. Supersedes the deleted run_hwtest.sh.

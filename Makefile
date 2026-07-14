@@ -179,7 +179,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest stm32build linuxbuild linuxcheck hwcheck hwcheck-net langcheck check allcheck clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo
+.PHONY: build test qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck hwcheck-net langcheck check allcheck clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo
 
 .DEFAULT_GOAL := build
 
@@ -285,9 +285,19 @@ langcheck:
 ## check: run unit tests + QEMU/host integration tests + STM32 build check + ASCII check
 check: langcheck test stm32build qemutest
 
+## linuxbuild: build Linux/AMD64 user-space examples (no libc, _start -> app_main)
+linuxbuild: $(LINUX_BINS)
+
+## linuxcheck: run Linux/AMD64 user-space examples and diff expected stdout
+linuxcheck: linuxbuild
+	@bash scripts/run_qemutest.sh --host-only linux_hello
+
 ## optimizercheck: inspect generated objects for backend optimization regressions
 examples/inline_check/inline_check.o: examples/inline_check/inline_check.tkb $(TAKIBI)
 	$(TAKIBI) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
+
+optimizercheck: examples/inline_check/inline_check.o
+	@bash scripts/run_qemutest.sh --host-only inline_check
 
 ## allcheck: clean build artifacts, then run software and hardware checks
 allcheck:
@@ -1109,8 +1119,4 @@ profile-tcp-echo: examples/tcp_echo/kernel.debug.elf
 ## clean: remove dune build artifacts and linker outputs
 clean:
 	dune clean
-	rm -f $(COMMON_STARTUP_O) $(COMMON_TIMER_ASM_O) $(COMMON_SEM_ASM_O) \
-	      $(COMMON_LINUX_STARTUP_O) $(COMMON_LINUX_SYSCALL_O) \
-	      $(COMMON_DIR)/*.o $(COMMON_QEMU_DIR)/*.o $(COMMON_STM32_DIR)/*.o \
-	      $(foreach e,$(EXAMPLES),examples/$(e)/*.o examples/$(e)/*.elf examples/$(e)/*.bin) \
-	      $(foreach e,$(LINUX_EXAMPLES),examples/$(e)/*.o examples/$(e)/*.linux)
+	find examples -type f \( -name '*.o' -o -name '*.elf' -o -name '*.bin' -o -name '*.linux' \) -delete

@@ -306,7 +306,7 @@ log. The board itself keeps serving until it's powered off or reflashed.
 ```bash
 make build          # build the compiler (takibi) only
 make test           # run unit tests
-make qemutest        # build every example and verify it under QEMU (AArch64)
+make qemutest        # build examples and run QEMU + host-side integration tests
 make stm32build      # cross-compile every ported example for STM32 (no hardware needed)
 make check           # langcheck + test + stm32build + qemutest
 make hwcheck          # like stm32build, but also flashes + verifies against real STM32 hardware
