@@ -1,0 +1,27 @@
+// This file is expected to produce a compile error.
+// Path tracking through struct fields (OWNERSHIP_KERNEL.md section 6,
+// GitHub issue #89 Hurdle 3, Stage 3a): consuming the SAME field twice
+// is now rejected exactly like double-consuming a bare variable would
+// be. Before this stage this compiled with NO error at all -- confirmed
+// via a direct probe before this stage was designed; this is the
+// concrete hole Stage 3a exists to close.
+affine opaque struct Lease2;
+
+fn acquire2() -> *Lease2 {
+    return 0 as usize as *Lease2;
+}
+
+fn release2(t: sink *Lease2) {
+}
+
+struct Holder2 {
+    t: *Lease2;
+}
+
+fn app_main() -> i32 {
+    let mut h: Holder2;
+    h.t = acquire2();
+    release2(h.t);
+    release2(h.t);
+    return 0;
+}

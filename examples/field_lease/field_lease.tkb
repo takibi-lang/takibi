@@ -1,0 +1,59 @@
+// Stage 3a PoC for path tracking through struct fields (OWNERSHIP_KERNEL.md
+// section 6, GitHub issue #89 Hurdle 3). Before this stage, storing an
+// affine handle in a struct field (already legal syntax) was completely
+// UNTRACKED: double-consuming or never-consuming a field silently
+// compiled with no error at all -- confirmed with a direct probe before
+// this stage was designed. `h.t` is now tracked the same way a bare
+// local `t` is, but only through ONE level of field projection on a bare
+// local/parameter (`h.t`, not `f().t` or `arr[i].t` -- those have no
+// stable syntactic identity without relational reasoning, left for a
+// future increment once a concrete need shows up).
+//
+// This does not yet solve issue #89's actual fd-table shape (an escaping
+// index into a table living past the acquiring function -- see
+// examples/affine_escape_via_index for that pattern, still the right
+// idiom for cross-function escape). What this closes is the SAME-FUNCTION
+// hole: a struct local holding a handle field, read/consumed more than
+// once, or never consumed, purely within the one function that owns it.
+
+affine opaque struct Lease;
+
+fn acquire() -> *Lease {
+    return 0 as usize as *Lease;
+}
+
+fn release(t: sink *Lease) {
+    uart_puts("released\r\n");
+}
+
+fn inspect(t: borrow *Lease) {
+    uart_puts("inspected\r\n");
+}
+
+struct Holder {
+    t: *Lease;
+}
+
+fn app_main() {
+    let mut h: Holder;
+    h.t = acquire();
+    inspect(h.t);
+    release(h.t);
+
+    // Two DIFFERENT struct locals of the same type: independent paths,
+    // no false cross-aliasing between h and h2.
+    let mut h2: Holder;
+    h2.t = acquire();
+    release(h2.t);
+
+    // Consuming on only one branch is fine -- affine's existing
+    // at-least-one-path semantics apply through fields too, unchanged.
+    let mut h3: Holder;
+    h3.t = acquire();
+    let c: bool = true;
+    if (c) {
+        release(h3.t);
+    }
+
+    uart_puts("done\r\n");
+}

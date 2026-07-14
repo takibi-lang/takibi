@@ -427,12 +427,31 @@ let affine_opaque_names = ref StringSet.empty
    (return/break/continue with a pending obligation are errors). *)
 let linear_opaque_names = ref StringSet.empty
 
+(* A trackable place (OWNERSHIP_KERNEL.md Stage 3a, GitHub issue #89
+   Hurdle 3): either a bare local/parameter, or ONE level of field
+   projection through a bare local/parameter (`h.t`, base must itself be
+   a plain identifier -- `f().t`, `arr[i].t` have no stable syntactic
+   identity to key tracking on, so they are deliberately NOT paths and
+   fall back to the pre-Stage-3 untracked behavior). Array/slice elements
+   are also deliberately excluded: a runtime index has no proof of
+   distinctness from another index without relational reasoning (the same
+   wall documented for affine's null-sentinel idiom) -- that is Stage 3b
+   territory, not this increment. *)
+type path = PVar of string | PField of string * string
+
+let path_to_string = function
+  | PVar n -> n
+  | PField (b, f) -> b ^ "." ^ f
+
+module PathSet = Set.Make(struct type t = path let compare = compare end)
+
 (* Dual consumption tracking (OWNERSHIP_KERNEL.md Stage 1): c_any is the
    union-combined moved set affine checking has always used (governs
    double-consume for both kinds, and affine's weak must-consume); c_all
    is the intersection-combined set (membership = consumed on EVERY path
-   reaching this point), which the linear kind's checks read. *)
-type consume_sets = { c_any : StringSet.t; c_all : StringSet.t }
+   reaching this point), which the linear kind's checks read. Stage 3a
+   widened the key from a bare variable name to `path` (above). *)
+type consume_sets = { c_any : PathSet.t; c_all : PathSet.t }
 
 let is_linear_ptr_ty t = match repr t with
   | TPtr (TStruct n) -> StringSet.mem n !linear_opaque_names
@@ -3092,54 +3111,114 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Some ty when is_affine_type ty -> Some Ast.KindAffine
       | _ -> None
     in
-    let is_tracked_var name = var_kind name <> None in
-    let is_linear_var name = var_kind name = Some Ast.KindLinear in
-    let kind_word name = if is_linear_var name then "linear" else "affine" in
+    (* OWNERSHIP_KERNEL.md Stage 3a (GitHub issue #89 Hurdle 3): a field
+       access `h.t` through a bare local/parameter `h` is trackable the
+       SAME way `h` itself is, when `h`'s own type is a struct (not
+       itself an affine/linear handle -- a handle's own pointee has no
+       fields reachable from takibi source, `opaque` forbids that) and
+       field `t` has an AFFINE pointer type. LINEAR fields stay banned at
+       the declaration level (validate_nonparam_type's linear_inside_container/
+       type_mentions_linear checks, unchanged) -- extending linear's
+       stronger all-paths guarantee through fields needs a form of
+       definite-assignment analysis for partially-consumed structs, a
+       materially bigger step reserved for a future increment once a
+       concrete need for it shows up (the same "prove it with a real
+       driver first" discipline every other stage here has followed).
+       This function is intentionally the ONLY place struct field types
+       get read for kind purposes -- no interprocedural reasoning, no
+       aliasing between two different local variables of the same struct
+       type (each `path` is keyed by the LOCAL NAME, not a resolved
+       address, so `h1.t` and `h2.t` are always distinct paths even if
+       they happened to alias at runtime through pointers -- a real but
+       narrow gap, honestly the same shape as Stage 1's affine
+       restriction to named locals, not solved here). *)
+    let field_affine_type base_name fname =
+      match StringMap.find_opt base_name !var_types with
+      | None -> None
+      | Some base_ty ->
+          let sname = match strip_borrow base_ty with
+            | Ast.TypeNamed s -> Some s
+            | Ast.TypePtr (Ast.TypeNamed s) -> Some s
+            | Ast.TypeIo (Ast.TypeNamed s) -> Some s
+            | Ast.TypePtr (Ast.TypeIo (Ast.TypeNamed s)) -> Some s
+            | _ -> None
+          in
+          (match sname with
+           | None -> None
+           | Some sname ->
+               (match StringMap.find_opt sname senv with
+                | None -> None
+                | Some (fields, _, _) ->
+                    (match List.assoc_opt fname fields with
+                     | Some fty when is_affine_type fty -> Some fty
+                     | _ -> None)))
+    in
+    let path_kind = function
+      | PVar name -> var_kind name
+      | PField (base, fname) ->
+          (match field_affine_type base fname with
+           | Some _ -> Some Ast.KindAffine
+           | None -> None)
+    in
+    let is_tracked_path p = path_kind p <> None in
+    let is_linear_path p = path_kind p = Some Ast.KindLinear in
+    let kind_word p = if is_linear_path p then "linear" else "affine" in
     (* `sink`/`borrow` parameters carry no callee-side obligation: sink is
        the terminal consumer (nothing further to forward), borrow never
        owns. Everything else linear-typed in scope must be discharged on
        every path, which the early-exit checks below enforce. *)
     let exempt_params = List.fold_left (fun s (name, ty_opt) ->
       match ty_opt with
-      | Some (Ast.TypeBorrow _) | Some (Ast.TypeSink _) -> StringSet.add name s
+      | Some (Ast.TypeBorrow _) | Some (Ast.TypeSink _) -> PathSet.add (PVar name) s
       | _ -> s
-    ) StringSet.empty fdef.params in
-    let mv_empty = { c_any = StringSet.empty; c_all = StringSet.empty } in
-    let mv_consume name m =
-      { c_any = StringSet.add name m.c_any; c_all = StringSet.add name m.c_all } in
-    let mv_clear name m =
-      { c_any = StringSet.remove name m.c_any; c_all = StringSet.remove name m.c_all } in
+    ) PathSet.empty fdef.params in
+    let mv_empty = { c_any = PathSet.empty; c_all = PathSet.empty } in
+    let mv_consume p m =
+      { c_any = PathSet.add p m.c_any; c_all = PathSet.add p m.c_all } in
+    let mv_clear p m =
+      { c_any = PathSet.remove p m.c_any; c_all = PathSet.remove p m.c_all } in
     let mv_merge a b =
-      { c_any = StringSet.union a.c_any b.c_any;
-        c_all = StringSet.inter a.c_all b.c_all } in
-    let require_available loc moved name =
-      if is_tracked_var name && StringSet.mem name moved.c_any then
+      { c_any = PathSet.union a.c_any b.c_any;
+        c_all = PathSet.inter a.c_all b.c_all } in
+    let require_available loc moved p =
+      if is_tracked_path p && PathSet.mem p moved.c_any then
         raise (TypeError (loc, Printf.sprintf
-          "%s value '%s' was already consumed" (kind_word name) name))
+          "%s value '%s' was already consumed" (kind_word p) (path_to_string p)))
     in
     (* Linear early-exit rule (OWNERSHIP_KERNEL.md 4.2): wherever control
        leaves the region that owes the obligations (return, break,
-       continue), every linear variable in scope must already be
-       definitely consumed. A returned linear value is consumed by the
-       return expression's own walk before this runs, so no exemption is
-       needed. Deliberately conservative for break/continue: an obligation
+       continue), every linear PATH in scope must already be definitely
+       consumed. A returned linear value is consumed by the return
+       expression's own walk before this runs, so no exemption is needed.
+       Deliberately conservative for break/continue: an obligation
        declared OUTSIDE the loop that would have been consumed after it is
        also rejected -- v1 does not track loop boundaries (restructure:
-       consume before the loop, or avoid break). *)
+       consume before the loop, or avoid break). In Stage 3a this only
+       ever fires for PVar paths (linear fields stay banned), but is kept
+       path-generic rather than re-special-cased, so a future lift of that
+       ban needs no change here. *)
     let require_no_pending_linear loc what moved declared =
-      StringSet.iter (fun name ->
-        if is_linear_var name && not (StringSet.mem name exempt_params)
-           && not (StringSet.mem name moved.c_all) then
+      PathSet.iter (fun p ->
+        if is_linear_path p && not (PathSet.mem p exempt_params)
+           && not (PathSet.mem p moved.c_all) then
           raise (TypeError (loc, Printf.sprintf
             "linear value '%s' is still pending at this %s (it must be \
-             consumed on every path)" name what))
+             consumed on every path)" (path_to_string p) what))
       ) declared
     in
     let rec check_expr moved consume (e : Ast.expr) =
       match e.desc with
       | Ast.Var name ->
-          require_available e.loc moved name;
-          if consume && is_tracked_var name then mv_consume name moved else moved
+          let p = PVar name in
+          require_available e.loc moved p;
+          if consume && is_tracked_path p then mv_consume p moved else moved
+      | Ast.FieldGet (base_expr, fname) ->
+          (match base_expr.desc with
+           | Ast.Var base_name when is_tracked_path (PField (base_name, fname)) ->
+               let p = PField (base_name, fname) in
+               require_available e.loc moved p;
+               if consume then mv_consume p moved else moved
+           | _ -> check_expr moved false base_expr)
       | Ast.Call (name, args) ->
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets) ~default:name in
@@ -3158,7 +3237,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           check_args moved args params
       | Ast.BinOp (_, a, b) -> check_expr (check_expr moved false a) false b
       | Ast.Bnot a | Ast.Deref a | Ast.AddrOf a | Ast.Cast (_, a)
-      | Ast.FieldGet (a, _) | Ast.Unsafe a -> check_expr moved false a
+      | Ast.Unsafe a -> check_expr moved false a
       | Ast.StructLit xs -> List.fold_left (fun m x -> check_expr m false x) moved xs
       | Ast.TupleLit xs ->
           (* A tracked component moves into the tuple exactly when the
@@ -3183,9 +3262,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        null-sentinel pattern inexpressible for linear values, so
        consumption can never be legitimately conditional and the
        intersection check is exact with no relational reasoning needed
-       (OWNERSHIP_KERNEL.md 4.6). `decl_locs` records each tracked local's
-       own `let` site so errors point at the declaration. *)
-    let decl_locs = ref StringMap.empty in
+       (OWNERSHIP_KERNEL.md 4.6). `decl_locs` records each tracked path's
+       own declaring site (a `let` for PVar, the producing AssignField for
+       PField) so errors point at the declaration. *)
+    let decl_locs : (path, Ast.loc) Hashtbl.t = Hashtbl.create 16 in
+    let set_decl_loc p l = Hashtbl.replace decl_locs p l in
     (* Purely syntactic "does this statement list always return" check
        (GitHub issue #89 comment thread's "return-terminated branch" gap):
        a branch that unconditionally returns never reaches the code after
@@ -3209,22 +3290,21 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         List.fold_left (fun (moved, declared) s -> check_stmt moved declared s)
           (moved, declared) stmts
       in
-      let newly_declared = StringSet.diff declared initial_declared in
-      StringSet.iter (fun name ->
-        let loc () =
-          Option.value (StringMap.find_opt name !decl_locs) ~default:fdef.def_loc in
-        match var_kind name with
-        | Some Ast.KindAffine when not (StringSet.mem name moved.c_any) ->
+      let newly_declared = PathSet.diff declared initial_declared in
+      PathSet.iter (fun p ->
+        let loc () = Option.value (Hashtbl.find_opt decl_locs p) ~default:fdef.def_loc in
+        match path_kind p with
+        | Some Ast.KindAffine when not (PathSet.mem p moved.c_any) ->
             raise (TypeError (loc (), Printf.sprintf
-              "affine value '%s' is never consumed" name))
-        | Some Ast.KindLinear when not (StringSet.mem name moved.c_all) ->
-            if StringSet.mem name moved.c_any then
+              "affine value '%s' is never consumed" (path_to_string p)))
+        | Some Ast.KindLinear when not (PathSet.mem p moved.c_all) ->
+            if PathSet.mem p moved.c_any then
               raise (TypeError (loc (), Printf.sprintf
                 "linear value '%s' is consumed on some paths but not on \
-                 every path" name))
+                 every path" (path_to_string p)))
             else
               raise (TypeError (loc (), Printf.sprintf
-                "linear value '%s' is never consumed" name))
+                "linear value '%s' is never consumed" (path_to_string p)))
         | _ -> ()
       ) newly_declared;
       (moved, declared)
@@ -3240,47 +3320,64 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (moved, declared)
       | Ast.Expr e -> (check_expr moved false e, declared)
       | Ast.Assign (name, e) ->
-          require_available s.loc moved name;
-          let moved = check_expr moved (is_tracked_var name) e in
+          let p = PVar name in
+          require_available s.loc moved p;
+          let moved = check_expr moved (is_tracked_path p) e in
           (* A linear local/parameter still holding its obligation may not
              be overwritten -- that would silently discard it. Note the
              RHS walk runs FIRST, so the self-transform idiom
              `p = transform(p);` (RHS consumes the old p) passes: by the
              time this check runs, the old obligation is discharged. *)
-          if is_linear_var name && StringSet.mem name declared
-             && not (StringSet.mem name moved.c_all) then
+          if is_linear_path p && PathSet.mem p declared
+             && not (PathSet.mem p moved.c_all) then
             raise (TypeError (s.loc, Printf.sprintf
               "assigning over linear value '%s' would discard its \
                obligation (consume it first)" name));
-          (mv_clear name moved, StringSet.add name declared)
+          (mv_clear p moved, PathSet.add p declared)
       | Ast.AssignDeref (a, b) ->
           (check_expr (check_expr moved false a) false b, declared)
-      | Ast.AssignField (a, _, b) ->
-          (check_expr (check_expr moved false a) false b, declared)
+      | Ast.AssignField (base_expr, fname, rhs) ->
+          (match base_expr.desc with
+           | Ast.Var base_name when is_tracked_path (PField (base_name, fname)) ->
+               (* Stage 3a: this field is the producing site for a fresh
+                  obligation, the field-path equivalent of a `let`. The
+                  RHS is consumed if it is itself a tracked expression
+                  (e.g. `h.t = some_other_handle;`), same as a plain
+                  Assign's RHS. Linear fields cannot reach this branch
+                  (banned at declaration), so no overwrite-ban check is
+                  needed here yet -- kept path-generic in is_tracked_path/
+                  is_linear_path above so lifting that ban later is a
+                  small diff, not a redesign. *)
+               let p = PField (base_name, fname) in
+               set_decl_loc p s.loc;
+               let moved = check_expr moved true rhs in
+               (mv_clear p moved, PathSet.add p declared)
+           | _ ->
+               (check_expr (check_expr moved false base_expr) false rhs, declared))
       | Ast.AssignIndex (_, i, v) ->
           (check_expr (check_expr moved false i) false v, declared)
       | Ast.Let (_, name, _, init, _) ->
-          decl_locs := StringMap.add name s.loc !decl_locs;
+          let p = PVar name in
+          set_decl_loc p s.loc;
           (match init with
-           | None when is_linear_var name ->
+           | None when is_linear_path p ->
                raise (TypeError (s.loc, Printf.sprintf
                  "linear value '%s' must be initialized at its declaration" name))
            | _ -> ());
           let moved = match init with
-            | Some e -> check_expr moved (is_tracked_var name) e
+            | Some e -> check_expr moved (is_tracked_path p) e
             | None -> moved
           in
-          (mv_clear name moved, StringSet.add name declared)
+          (mv_clear p moved, PathSet.add p declared)
       | Ast.LetTuple (names, rhs) ->
-          List.iter (fun n ->
-            decl_locs := StringMap.add n s.loc !decl_locs) names;
+          List.iter (fun n -> set_decl_loc (PVar n) s.loc) names;
           (* Destructuring consumes the tuple (consume=true moves an RHS
              variable, or propagates into a direct TupleLit's tracked
              components); each bound name starts as a fresh obligation/
              handle of its component type. *)
           let moved = check_expr moved true rhs in
-          let moved = List.fold_left (fun m n -> mv_clear n m) moved names in
-          (moved, List.fold_left (fun d n -> StringSet.add n d) declared names)
+          let moved = List.fold_left (fun m n -> mv_clear (PVar n) m) moved names in
+          (moved, List.fold_left (fun d n -> PathSet.add (PVar n) d) declared names)
       | Ast.Block body ->
           let (out, _) = check_stmts moved declared body in
           (out, declared)
@@ -3300,27 +3397,27 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let moved = check_expr moved false cond in
           let (body_moved, _) = check_stmts moved declared body in
           let newly_moved_outer =
-            StringSet.inter declared (StringSet.diff body_moved.c_any moved.c_any) in
-          if not (StringSet.is_empty newly_moved_outer) then
+            PathSet.inter declared (PathSet.diff body_moved.c_any moved.c_any) in
+          if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
           (moved, declared)
       | Ast.For (name, _, lo, hi, body) ->
           let moved = check_expr (check_expr moved false lo) false hi in
-          let declared_body = StringSet.add name declared in
+          let declared_body = PathSet.add (PVar name) declared in
           let (body_moved, _) = check_stmts moved declared_body body in
           let newly_moved_outer =
-            StringSet.inter declared (StringSet.diff body_moved.c_any moved.c_any) in
-          if not (StringSet.is_empty newly_moved_outer) then
+            PathSet.inter declared (PathSet.diff body_moved.c_any moved.c_any) in
+          if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
           (moved, declared)
       | Ast.ForEach (name, collection, body) ->
           let moved = check_expr moved false collection in
-          let (body_moved, _) = check_stmts moved (StringSet.add name declared) body in
+          let (body_moved, _) = check_stmts moved (PathSet.add (PVar name) declared) body in
           let newly_moved_outer =
-            StringSet.inter declared (StringSet.diff body_moved.c_any moved.c_any) in
-          if not (StringSet.is_empty newly_moved_outer) then
+            PathSet.inter declared (PathSet.diff body_moved.c_any moved.c_any) in
+          if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
           (moved, declared)
@@ -3352,8 +3449,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (moved, declared)
     in
     let (final_moved, _) = check_stmts mv_empty
-      (List.fold_left (fun d (name, _) -> StringSet.add name d)
-         StringSet.empty fdef.params) fdef.body
+      (List.fold_left (fun d (name, _) -> PathSet.add (PVar name) d)
+         PathSet.empty fdef.params) fdef.body
     in
     (* GitHub issue #89 "problem 2": a plain (non-`borrow`, non-`sink`)
        affine/linear PARAMETER must also be consumed within the callee's
@@ -3374,12 +3471,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         | _ -> None
       in
       match owned_kind with
-      | Some Ast.KindAffine when not (StringSet.mem name final_moved.c_any) ->
+      | Some Ast.KindAffine when not (PathSet.mem (PVar name) final_moved.c_any) ->
           raise (TypeError (fdef.def_loc, Printf.sprintf
             "affine parameter '%s' is never consumed by this function \
              (forward it, or take it as `sink` if this function is meant \
              to be its terminal consumer)" name))
-      | Some Ast.KindLinear when not (StringSet.mem name final_moved.c_all) ->
+      | Some Ast.KindLinear when not (PathSet.mem (PVar name) final_moved.c_all) ->
           raise (TypeError (fdef.def_loc, Printf.sprintf
             "linear parameter '%s' is not consumed on every path of this \
              function (forward it on every path, or take it as `sink` if \

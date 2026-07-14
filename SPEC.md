@@ -500,11 +500,29 @@ motivating case is a network RX descriptor: `net_rx_acquire() ->
   falling back to the plain union above).
 - **Deliberately restricted, not a general ownership/borrow-checker
   system**: this tracking is local to a single function body (no
-  cross-function or struct-field-level tracking), applies only to
-  pointers to a type explicitly declared `affine opaque struct`, and an
-  explicit pointer cast (`t as *OtherType`, `t as usize`) remains an
-  unchecked escape hatch that silently drops out of affine tracking.
-  (The cast escape hatch is affine-only: the `linear` kind below bans it.)
+  cross-function tracking -- an identity that escapes into a struct/array
+  that outlives the acquiring function needs a refined-index-plus-table
+  idiom instead, see `examples/affine_escape_via_index`), applies only to
+  pointers to a type
+  explicitly declared `affine opaque struct`, and an explicit pointer
+  cast (`t as *OtherType`, `t as usize`) remains an unchecked escape
+  hatch that silently drops out of affine tracking. (The cast escape
+  hatch is affine-only: the `linear` kind below bans it.)
+- **Struct-field tracking (OWNERSHIP_KERNEL.md Stage 3a, GitHub issue
+  #89 Hurdle 3)**: `h.t` -- one level of field projection through a bare
+  local/parameter `h` -- is tracked exactly like a bare variable would
+  be, when `h`'s field `t` has an affine pointer type. This closes a real
+  hole: before Stage 3a, storing an affine handle in a struct field was
+  legal but completely untracked (double-consuming the same field
+  compiled with no error). Any deeper or less direct access
+  (`f().t`, `arr[i].t`, `h.a.b`) still falls outside tracking -- these
+  have no stable syntactic identity without relational reasoning, the
+  same wall the null-sentinel idiom above depends on staying inside of.
+  Two different local variables of the same struct type are always
+  distinct paths (keyed by name, not a resolved address). LINEAR fields
+  stay banned outright (see "Linear Opaque Structs" below) -- extending
+  linear's all-paths guarantee through fields is a larger step reserved
+  for a future increment.
 
 ## Linear Opaque Structs (Obligations)
 

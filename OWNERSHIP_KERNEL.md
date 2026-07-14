@@ -445,14 +445,105 @@ signature) still needs a SUM (#20, Stage 4); what tuples unlock now is
 try-style APIs that always return the obligation paired with data, and
 mint/recv APIs returning (data, obligation).
 
-## 6. Stage 3 outlook: places (#89 Hurdle 3)
+## 6. Stage 3: places (#89 Hurdle 3)
 
-Kind tracking extends from named locals to PLACES: struct fields, array
-slots, and designated globals. Unlocks: FatFile tables (fd-table),
-channel slots holding tokens, multi-instance guards. This is the hard
-stage; its design constraint is already fixed by Stage 1: place-stored
-linear values keep the all-paths discipline at the granularity of "slot
-occupied/vacated", which is what a rendezvous channel slot needs.
+### 6.1 Finding that reframed this stage (2026-07-14, user-directed probe)
+
+Before any design work, a direct probe asked: what actually happens
+today if an affine handle is stored in a struct field? Answer: it
+already compiles (SPEC's "deliberately restricted" bullet only says the
+CHECKER doesn't track it, not that storage is syntactically banned), and
+it is completely UNTRACKED -- consuming the same field twice compiled
+with no error at all. So Stage 3 is not "lifting a ban", it is closing a
+real, silent double-consume hole that exists in the language today. This
+reframing is why the stage was split:
+
+- **Stage 3a** (this section, implemented): intraprocedural PATH
+  tracking, closing the concrete hole above with the SAME machinery
+  Stage 1 already built, generalized to a slightly richer key. No new
+  concepts, no interprocedural reasoning.
+- **Stage 3b** (still outlook, section 6.5): the genuinely hard part --
+  identities that escape the acquiring function (the fd-table shape).
+  Deferred until Stage 3a has real usage to observe, per the same
+  "prove it with a driver before designing further" discipline every
+  earlier stage followed. User decision (2026-07-14): implement 3a now,
+  revisit 3b once 3a has concrete examples.
+
+### 6.2 Stage 3a: intraprocedural field-path tracking (normative, implemented)
+
+**Scope, deliberately narrow.** A `path` is either a bare local/parameter
+name, or ONE level of field projection through a bare local/parameter
+name (`h.t`). `f().t`, `arr[i].t`, and any deeper chain (`h.a.b`) are NOT
+paths -- they have no stable syntactic identity to key tracking on
+without either an alloca-address analysis or relational reasoning about
+index equality (the same wall that keeps affine's null-sentinel idiom
+union-based, see 4.6). Expressions of this shape simply fall back to
+pre-Stage-3a behavior (untracked), exactly as before -- this is not a
+new hole, it is the existing hole left unaddressed outside the newly
+covered shape.
+
+**AFFINE only.** LINEAR struct fields remain banned at the type
+declaration (Stage 1's `type_mentions_linear` check, unchanged).
+Extending linear's stronger ALL-PATHS guarantee through fields needs a
+form of definite-assignment/partial-move analysis (was every field of a
+partially-consumed struct discharged by scope end?) -- a materially
+bigger step than affine's weaker union check gets for free by reusing
+the existing machinery. Left for its own increment if a concrete need
+appears (no driver for it today: the one real use of struct-field-shaped
+storage in this codebase, `examples/affine_escape_via_index`, stores a
+plain integer index specifically BECAUSE affine escape wasn't
+trackable -- see 6.1's finding for why that pattern remains correct for
+cross-function escape regardless of this stage).
+
+**Mechanics.** The single `moved : StringSet.t`-keyed tracking Stage 1/2
+built now keys on `path = PVar of string | PField of string * string`
+instead of a bare `string`. `FieldGet(Var base, fname)` and
+`AssignField(Var base, fname, rhs)` are checked exactly like `Var
+name`/`Assign` were, when `(base, fname)` resolves (via `senv`, the same
+struct-field environment `infer_expr` already uses) to a field of AFFINE
+pointer type. Every other Stage 1/2 rule (double-consume, never-consumed
+union check, the return/break/continue early-exit checks, loop
+restrictions) applies to `PField` paths exactly as it already applies to
+`PVar` paths -- no new rules, only a richer key.
+
+**A finding worth keeping, not a limitation:** returning the WHOLE
+containing struct (`fn f() -> Holder { ...; return h; }`) does NOT
+discharge a still-pending field obligation, and this is correct, not an
+oversight -- `Holder` itself is a plain, untracked type, so if returning
+it silently satisfied `h.t`'s obligation, the obligation would vanish at
+the caller with no further enforcement anywhere. Confirmed by test
+during implementation (an initial test assumed this should compile;
+it correctly does not).
+
+**Two-different-locals soundness note.** `h1.t` and `h2.t` (two
+variables of the same struct type) are always distinct paths, keyed by
+the LOCAL NAME, not a resolved address -- correct for the common case
+(two genuinely separate local structs), but not a full aliasing proof:
+if two names somehow denoted the SAME storage (e.g. through pointer
+aliasing this checker does not reason about), tracking could be fooled.
+This is the same class of restriction Stage 1 already accepted for
+plain locals (SPEC's "no cross-function or struct-field-level tracking,"
+now narrowed rather than removed) -- not a new gap introduced here.
+
+Validation: 8 new unit tests, 3 QEMU PoC examples (field_lease positive;
+field_double_consume_wrong, field_never_consumed_wrong negative), full
+suite green (600 unit / 101 qemutest / stm32build / langcheck).
+
+### 6.5 Stage 3b outlook: escaping identities (the fd-table shape)
+
+Still open, deliberately not designed further until 3a produces real
+examples to observe (per the user's explicit sequencing decision). The
+existing answer, `examples/affine_escape_via_index`'s index + runtime
+`in_use`-flag idiom, remains the correct pattern for this shape in the
+meantime -- Stage 3a does not change or supersede it. Candidate framing
+for whenever this is revisited: codify that hand-written idiom
+(escaping identity = plain refined index, real state = a slot table,
+occupancy = a checked runtime flag) into a compiler-recognized shape,
+consistent with the #66 doctrine's third reduction ("what remains
+genuinely shared is a small fixed vocabulary, verified once by non-type
+means, with only its usage contract enforced by types") -- rather than
+attempting full interprocedural ownership/alias analysis, which this
+project has repeatedly and deliberately ruled out.
 
 ## 7. Stage 4 outlook: channel v2 (#113) + variant enums (#20)
 

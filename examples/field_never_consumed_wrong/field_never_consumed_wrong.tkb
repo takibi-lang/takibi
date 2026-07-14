@@ -1,0 +1,20 @@
+// This file is expected to produce a compile error.
+// Path tracking through struct fields (OWNERSHIP_KERNEL.md section 6,
+// GitHub issue #89 Hurdle 3, Stage 3a): a field produced but never
+// consumed anywhere in the function is now rejected, the field-path
+// counterpart of examples/affine_never_consumed.
+affine opaque struct Lease3;
+
+fn acquire3() -> *Lease3 {
+    return 0 as usize as *Lease3;
+}
+
+struct Holder3 {
+    t: *Lease3;
+}
+
+fn app_main() -> i32 {
+    let mut h: Holder3;
+    h.t = acquire3();
+    return 0;
+}

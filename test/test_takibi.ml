@@ -3601,6 +3601,130 @@ let infer_tests = [
        | _ -> ()
        | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
 
+  (* -- Stage 3a: path tracking through one-level struct fields
+     (OWNERSHIP_KERNEL.md, GitHub issue #89 Hurdle 3) ----------------------
+     Before this stage, an affine value stored in a struct field (already
+     legal syntax) was completely untracked -- double-consume and
+     never-consumed through a field silently compiled. `h.t` is now
+     tracked the same way a bare variable `t` is, but ONLY when `h` is a
+     bare local/parameter name (no `f().t`, no `arr[i].t` -- those have no
+     stable syntactic identity without relational reasoning). *)
+
+  Alcotest.test_case "field path: consuming a field once via a sink call \
+                      compiles" `Quick
+    (fun () ->
+       match infer "affine opaque struct FTok;
+                    fn fmk() -> *FTok { return 0 as usize as *FTok; }
+                    fn fsnk(t: sink *FTok) {}
+                    struct FHolder { t: *FTok; }
+                    fn use_field() {
+                      let mut h: FHolder;
+                      h.t = fmk();
+                      fsnk(h.t);
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "field path: double-consuming the SAME field is now a \
+                      compile error (the concrete hole this stage closes)" `Quick
+    (expect_type_error "affine value 'h.t' was already consumed"
+       "affine opaque struct FTok2;
+        fn fmk2() -> *FTok2 { return 0 as usize as *FTok2; }
+        fn fsnk2(t: sink *FTok2) {}
+        struct FHolder2 { t: *FTok2; }
+        fn double_consume() {
+          let mut h: FHolder2;
+          h.t = fmk2();
+          fsnk2(h.t);
+          fsnk2(h.t);
+        }");
+
+  Alcotest.test_case "field path: a field produced but never consumed is a \
+                      compile error" `Quick
+    (expect_type_error "affine value 'h.t' is never consumed"
+       "affine opaque struct FTok3;
+        fn fmk3() -> *FTok3 { return 0 as usize as *FTok3; }
+        struct FHolder3 { t: *FTok3; }
+        fn leak_field() {
+          let mut h: FHolder3;
+          h.t = fmk3();
+        }");
+
+  Alcotest.test_case "field path: consuming on only ONE branch is fine \
+                      (affine keeps its union/at-least-one-path semantics \
+                      through fields too)" `Quick
+    (fun () ->
+       match infer "affine opaque struct FTok4;
+                    fn fmk4() -> *FTok4 { return 0 as usize as *FTok4; }
+                    fn fsnk4(t: sink *FTok4) {}
+                    struct FHolder4 { t: *FTok4; }
+                    fn maybe_consume(c: bool) {
+                      let mut h: FHolder4;
+                      h.t = fmk4();
+                      if (c) { fsnk4(h.t); }
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "field path: TWO DIFFERENT struct locals of the same \
+                      type are independent paths (no false cross-aliasing)" `Quick
+    (fun () ->
+       match infer "affine opaque struct FTok5;
+                    fn fmk5() -> *FTok5 { return 0 as usize as *FTok5; }
+                    fn fsnk5(t: sink *FTok5) {}
+                    struct FHolder5 { t: *FTok5; }
+                    fn two_holders() {
+                      let mut h1: FHolder5;
+                      let mut h2: FHolder5;
+                      h1.t = fmk5();
+                      h2.t = fmk5();
+                      fsnk5(h1.t);
+                      fsnk5(h2.t);
+                    }" with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+
+  Alcotest.test_case "field path: reassigning a field's RHS through another \
+                      tracked variable consumes that variable too" `Quick
+    (expect_type_error "affine value 'src' was already consumed"
+       "affine opaque struct FTok6;
+        fn fmk6() -> *FTok6 { return 0 as usize as *FTok6; }
+        fn fsnk6(t: sink *FTok6) {}
+        struct FHolder6 { t: *FTok6; }
+        fn move_into_field() {
+          let src: *FTok6 = fmk6();
+          let mut h: FHolder6;
+          h.t = src;
+          fsnk6(src);
+          fsnk6(h.t);
+        }");
+
+  Alcotest.test_case "field path: returning the WHOLE containing struct \
+                      does NOT discharge its tracked field's obligation \
+                      (a real finding, not a limitation): FHolder7 itself \
+                      is a plain, untracked type, so letting `return h;` \
+                      silently satisfy h.t's obligation would let it \
+                      vanish at the caller with no further enforcement \
+                      anywhere -- exactly the leak this stage exists to \
+                      close" `Quick
+    (expect_type_error "affine value 'h.t' is never consumed"
+       "affine opaque struct FTok7;
+        fn fmk7() -> *FTok7 { return 0 as usize as *FTok7; }
+        struct FHolder7 { t: *FTok7; }
+        fn make_holder() -> FHolder7 {
+          let mut h: FHolder7;
+          h.t = fmk7();
+          return h;
+        }");
+
+  Alcotest.test_case "negative control: struct fields of LINEAR type stay \
+                      banned at declaration (Stage 3a scoped to affine \
+                      only -- see OWNERSHIP_KERNEL.md section 6)" `Quick
+    (expect_type_error "cannot hold a linear value"
+       "linear opaque struct FTok8;
+        struct FHolder8 { t: *FTok8; }
+        fn app_main() -> i32 { return 0; }");
+
 ]
 
 (* -- Codegen tests ----------------------------------------------------------
