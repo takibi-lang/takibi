@@ -638,24 +638,34 @@ and the fork it forces is the actual content of this stage. The design space, la
   issue #89's own original self-critique of this idiom ("smuggling data through pointer bits ...
   is not a design I'd call good"; recorded here again rather than re-litigated).
 
-**Why E0 is not throwaway, and is the resolution of a real disagreement worked out this
-session**: initial framing treated E0 as a temporary shim to be discarded once B2 lands. Pushback
-(correct) noted that if B2 = B1's shape, E0 teaches nothing en route to it and both would need
-throwing away together. Resolution: because B2 is NOT B1 (the index never appears in an ordinary
-call site's signature either way), E0 and B2 present the IDENTICAL external interface --
-`slot_read(lease: borrow *SlotLease) -> i32`, no index parameter, callers unchanged. Only the
-few lines INSIDE the trusted file differ (E0: recover `idx` from the pointer's bits at runtime,
-range-check it; B2: the index is a static, mint-time-fixed refinement, no runtime recovery
-needed). E0 pins down the interface shape B2 will keep, and lets real usage surface which
-recovered properties call sites actually need (so far: a RANGE proof for bounds-check elimination
--- already expressible today via a refined return type from the recovery step -- not yet an
-IDENTITY proof across multiple simultaneously-live leases, which only becomes a real question
-once something needs two leases alive at once, e.g. concurrent RTOS access to an fd-style table).
-That concurrency trigger is the concrete signal to actually start B2's design, not a calendar
-date or an examples count.
+**E0 result after implementation attempt (2026-07-14): useful as an API-shape
+experiment, not as a safety solution.** Implementing E0 in
+`affine_escape_via_index.tkb` did confirm one useful fact: callers can be moved to the desired
+module-mediated shape (`slot_read(lease)`, `slot_write(v, lease)`, `slot_close(lease)`) with no
+ordinary call-site `idx` parameter. That is the interface B2 should preserve if/when B2 is
+designed.
 
-**Status**: user is taking a day to think this over before authorizing implementation. E0 is
-proposed but NOT YET IMPLEMENTED as of this entry -- do not start without explicit go-ahead.
+The attempt also exposed E0's hard limit. Recovering `idx` with `lease as usize` inside the
+trusted file yields an ordinary runtime integer, not a type-level fact carried by the affine
+handle. To index `slots`, the implementation still needs either a runtime range check or a
+fallback path. A fallback such as returning `0` for an out-of-range recovered value is not a real
+proof -- a forged/corrupted lease would silently operate on slot 0. Returning `-1`, no-oping, or
+returning `(ok, idx)` only moves the problem into dynamic error handling; it does not make
+`lease` statically ABOUT a particular slot.
+
+So E0 should be recorded as a negative/clarifying experiment:
+
+- It validates the external interface shape: no `idx` parameter should appear on ordinary
+  operations.
+- It does NOT validate static safety: the recovered index is not a refinement owned by the
+  affine handle.
+- The real solution, if this project wants compile-time enforcement of the relationship, is B2:
+  a mint-time-fixed refinement living in the handle's type/identity, not a proof parameter
+  threaded through application signatures and not a runtime bit-recovery check.
+
+B2's exact design remains a separate discussion. The key lesson from E0 is narrower but important:
+escaping the loose `idx, lease` pair by hiding `idx` in pointer bits does not avoid the need for
+refinement-bearing affine handles; it demonstrates why they are needed.
 
 ## 7. Stage 4 outlook: channel v2 (#113) + variant enums (#20)
 
