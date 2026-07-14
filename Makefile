@@ -167,7 +167,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest stm32build hwcheck hwcheck-net langcheck check clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo
+.PHONY: build test qemutest stm32build hwcheck hwcheck-net langcheck check allcheck clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo
 
 .DEFAULT_GOAL := build
 
@@ -272,6 +272,13 @@ langcheck:
 
 ## check: run unit tests + QEMU integration tests + STM32 build check + ASCII check
 check: langcheck test stm32build qemutest
+
+## allcheck: clean build artifacts, then run software and hardware checks
+allcheck:
+	$(MAKE) clean
+	$(MAKE) check
+	$(MAKE) hwcheck
+	$(MAKE) hwcheck-net
 
 # -- Shared assembly objects ---------------------------------------------------
 $(COMMON_STARTUP_O): $(COMMON_STARTUP_S)
