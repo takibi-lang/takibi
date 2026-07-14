@@ -581,6 +581,82 @@ data is not the same problem as binding data, and Stage 3b's design
 should start from 5.3.1 (content-carrying handles) rather than from
 tuples, when it resumes.
 
+### 6.6 Evidence re-assessed, and the design fork this stage actually faces (2026-07-14)
+
+**On whether "real examples" are needed before starting**: settled. The user's counter-argument
+is accepted -- the codebase does not need a NEW driver beyond `affine_escape_via_index.tkb`,
+because the SYSTEMIC evidence is already there: `FatFile` (global-singleton via the
+`&file_storage` trick), `NetRxCpuOwned` (hard-coded to one live slot), `KGuard` (a giant lock
+standing in for what should be N independent locks) are three unrelated features that all hit
+the SAME wall (`affine opaque` cannot express multiple simultaneous instances) and all took the
+SAME workaround (collapse to a singleton). Leaving `affine opaque` as-is guarantees this pattern
+keeps reproducing. That is sufficient grounds to proceed with design.
+
+**The real question raised: is this stage secretly reinventing Rust ownership?** Valid concern,
+and the fork it forces is the actual content of this stage. The design space, laid out honestly:
+
+- **(A) Content-carrying handles with owned field access** -- `affine struct Lease { idx: usize
+  }`, fields readable only while the handle is live. This genuinely IS a slice of Rust's
+  ownership model (an owned record with move semantics), and the slope behind it is real: field
+  access invites wanting borrows of fields, which invites re-borrowing, which invites lifetimes
+  -- the Rust-shaped mirror of the ATS2 at-view slope the project already rejected once (CLAUDE.md
+  records Rust's ownership model as evaluated and judged unsuited to bare-metal kernel code for
+  this project's purpose). **Not adopted.** No driver in this codebase has ever needed owned
+  field access -- every existing affine handle (FatFile, NetRxCpuOwned, KGuard) is accessed
+  exclusively through module-mediated functions (`fat_read(fp)`, `net_rx_frame(acquired)`), never
+  by reading a field directly. Revisit only if a concrete case defeats function-mediated access.
+- **(B1) ATS2-style dependent/indexed typing** -- a static index variable `n` universally
+  quantified and threaded through every signature that touches the resource
+  (`idx: int(n), lease: !slot_lease(n)`). This is what "type-level index binding" naturally means
+  in the ATS2 tradition the project cites as ancestor. **Explicitly ruled out**: this is exactly
+  the proof-parameter-threading-through-ordinary-signatures shape the issue #117 tripwire exists
+  to stop. B1 is not a future destination, it is the thing the tripwire was built to prevent this
+  project from drifting into.
+- **(B2) Index living IN the handle's type, not threaded through call sites** -- e.g.
+  `fn slot_lease(idx: {0..<4 as usize}) -> *SlotLease{idx}`, where the refinement is fixed at
+  mint time inside the trusted file and every other function just carries `lease: borrow
+  *SlotLease` with no index parameter anywhere in its signature. This is takibi's actual
+  destination for "type-level index binding" -- structurally different from B1 despite the
+  surface-level resemblance, precisely because ordinary application code never sees or threads a
+  static index. **Committed as the direction**, not yet implemented (needs its own design pass:
+  how a mint-time refinement attaches to an opaque handle type, and how much of "same idx across
+  calls" can be proven by plain flow-sensitive tracking -- reusing the SAME invalidation
+  machinery `written_names`/narrowing already use for refined locals -- versus needing #90's
+  relational constraints or #13's SMT once the index is stored across a function boundary rather
+  than tracked flow-sensitively within one).
+- **(C) Hardware capabilities (CHERI-style)** -- pointers that carry bounds/permission checked in
+  hardware. No target this project builds for has the silicon. Noted as existing in the wider
+  design space, not pursued.
+- **(E0) Function-mediated bit-recovery, available today with zero language changes** -- observed
+  directly in `affine_escape_via_index.tkb`'s own `slot_lease`: `unsafe { idx as *SlotLease }`
+  already makes the lease's bit pattern equal to `idx`. The binding already exists at the
+  representation level; what today's example fails to do is recover it, instead threading `idx`
+  as a SEPARATE, unenforced parameter alongside the lease. Fix: move the recovery inside the
+  trusted file (`let idx: usize = lease as usize;`, the sanctioned affine `as usize` cast, per
+  Stage 2's private-type discipline) and drop `idx` from every function's signature entirely --
+  `fn slot_read(lease: borrow *SlotLease) -> i32` alone. Honest limitation carried over from
+  issue #89's own original self-critique of this idiom ("smuggling data through pointer bits ...
+  is not a design I'd call good"; recorded here again rather than re-litigated).
+
+**Why E0 is not throwaway, and is the resolution of a real disagreement worked out this
+session**: initial framing treated E0 as a temporary shim to be discarded once B2 lands. Pushback
+(correct) noted that if B2 = B1's shape, E0 teaches nothing en route to it and both would need
+throwing away together. Resolution: because B2 is NOT B1 (the index never appears in an ordinary
+call site's signature either way), E0 and B2 present the IDENTICAL external interface --
+`slot_read(lease: borrow *SlotLease) -> i32`, no index parameter, callers unchanged. Only the
+few lines INSIDE the trusted file differ (E0: recover `idx` from the pointer's bits at runtime,
+range-check it; B2: the index is a static, mint-time-fixed refinement, no runtime recovery
+needed). E0 pins down the interface shape B2 will keep, and lets real usage surface which
+recovered properties call sites actually need (so far: a RANGE proof for bounds-check elimination
+-- already expressible today via a refined return type from the recovery step -- not yet an
+IDENTITY proof across multiple simultaneously-live leases, which only becomes a real question
+once something needs two leases alive at once, e.g. concurrent RTOS access to an fd-style table).
+That concurrency trigger is the concrete signal to actually start B2's design, not a calendar
+date or an examples count.
+
+**Status**: user is taking a day to think this over before authorizing implementation. E0 is
+proposed but NOT YET IMPLEMENTED as of this entry -- do not start without explicit go-ahead.
+
 ## 7. Stage 4 outlook: channel v2 (#113) + variant enums (#20)
 
 Consumers of Stages 1-3: zero-copy channel send transfers an
