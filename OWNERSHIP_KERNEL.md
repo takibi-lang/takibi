@@ -46,9 +46,12 @@ implementation so every stage lands with its own PoC examples.
   explode faster than test enumeration; coverage is the type system's and
   the reviewed file's job, not the test suite's.
 - **The tripwire.** If kind-carrying values start needing to cross function
-  boundaries as threaded parameters in ordinary application logic (the
-  ATS2 at-view plumbing burden), stop and reconsider checker-level flow
-  analysis instead of threading harder.
+  boundaries as threaded proof parameters in ordinary application logic
+  (the ATS2 at-view plumbing burden), stop. The lesson is not "never use
+  dependent/indexed information internally"; it is "do not expose the
+  proof plumbing as the ordinary programming model." Prefer inference,
+  implicit arguments, existential packaging, and module-mediated APIs over
+  making every call site thread proofs by hand.
 
 ## 3. The kind lattice
 
@@ -606,24 +609,27 @@ and the fork it forces is the actual content of this stage. The design space, la
   exclusively through module-mediated functions (`fat_read(fp)`, `net_rx_frame(acquired)`), never
   by reading a field directly. Revisit only if a concrete case defeats function-mediated access.
 - **(B1) ATS2-style dependent/indexed typing** -- a static index variable `n` universally
-  quantified and threaded through every signature that touches the resource
-  (`idx: int(n), lease: !slot_lease(n)`). This is what "type-level index binding" naturally means
-  in the ATS2 tradition the project cites as ancestor. **Explicitly ruled out**: this is exactly
-  the proof-parameter-threading-through-ordinary-signatures shape the issue #117 tripwire exists
-  to stop. B1 is not a future destination, it is the thing the tripwire was built to prevent this
-  project from drifting into.
+  quantified at function boundaries and attached to both the runtime value and the resource
+  view/proof (`idx: int(n), lease: !slot_lease(n)`). This is what "type-level index binding"
+  naturally means in the ATS2 tradition the project cites as ancestor. The original objection
+  remains valid: exposing this shape literally would recreate the proof-parameter-threading
+  burden that issue #117 warned against. Re-assessed after the E0/B2 discussion below, however,
+  B1 should NOT be ruled out as the INTERNAL representation. It is the cleanest place to give
+  the checker a vocabulary (`n`, `m`, `n == m`, `0 <= n < 4`) that can later be sent to #13's
+  SMT path or discharged by explicit lemmas.
 - **(B2) Index living IN the handle's type, not threaded through call sites** -- e.g.
   `fn slot_lease(idx: {0..<4 as usize}) -> *SlotLease{idx}`, where the refinement is fixed at
-  mint time inside the trusted file and every other function just carries `lease: borrow
-  *SlotLease` with no index parameter anywhere in its signature. This is takibi's actual
-  destination for "type-level index binding" -- structurally different from B1 despite the
-  surface-level resemblance, precisely because ordinary application code never sees or threads a
-  static index. **Committed as the direction**, not yet implemented (needs its own design pass:
-  how a mint-time refinement attaches to an opaque handle type, and how much of "same idx across
-  calls" can be proven by plain flow-sensitive tracking -- reusing the SAME invalidation
-  machinery `written_names`/narrowing already use for refined locals -- versus needing #90's
-  relational constraints or #13's SMT once the index is stored across a function boundary rather
-  than tracked flow-sensitively within one).
+  mint time inside the trusted file and ordinary operations aim to look like
+  `fn slot_read(lease: borrow *SlotLease) -> i32`. This remains the desired SURFACE shape:
+  ordinary application code should not thread `idx` or proof terms through every call. But B2
+  is no longer treated as an independent type-theory destination. Once the refined index is
+  hidden inside an affine handle, today's refinement type is erased from the visible type
+  environment; if two hidden handles need to be related later, the checker has no static names
+  to mention in constraints. Reintroducing those names via projection, equality witnesses,
+  existential opening, or path-dependent types is precisely dependent/indexed typing again.
+  Therefore B2 is best understood as sugar/elaboration over a B1-like core: implicit universal
+  parameters where inference can recover them, existential packaging where an API wants to hide
+  them, and explicit proof/view terms only at the boundary cases that actually need them.
 - **(C) Hardware capabilities (CHERI-style)** -- pointers that carry bounds/permission checked in
   hardware. No target this project builds for has the silicon. Noted as existing in the wider
   design space, not pursued.
@@ -659,13 +665,48 @@ So E0 should be recorded as a negative/clarifying experiment:
   operations.
 - It does NOT validate static safety: the recovered index is not a refinement owned by the
   affine handle.
-- The real solution, if this project wants compile-time enforcement of the relationship, is B2:
-  a mint-time-fixed refinement living in the handle's type/identity, not a proof parameter
-  threaded through application signatures and not a runtime bit-recovery check.
+- The real solution, if this project wants compile-time enforcement of the relationship, must
+  preserve the mint-time refinement in the static language. The desired surface is B2-like
+  (`slot_read(lease)`, no ordinary `idx` argument), but the representation underneath needs a
+  B1-like indexed core rather than runtime bit recovery.
 
-B2's exact design remains a separate discussion. The key lesson from E0 is narrower but important:
-escaping the loose `idx, lease` pair by hiding `idx` in pointer bits does not avoid the need for
-refinement-bearing affine handles; it demonstrates why they are needed.
+B2's exact design remains a separate discussion, but the direction changed after this
+discussion. The key lesson from E0 is narrower but important: escaping the loose `idx, lease`
+pair by hiding `idx` in pointer bits does not avoid the need for refinement-bearing affine
+handles; it demonstrates why they are needed.
+
+**Direction re-assessed after the B2 discussion (2026-07-14): B1 core, B2 surface.** The
+minimal B2 sketch ("put the slot index inside `SlotLease` and stop passing `idx`") fails unless
+the language gains a way to preserve the original refinement. In today's syntax,
+`idx: {0..<4 as usize}` gives the checker a usable fact. Once that value is hidden inside
+`*SlotLease`, the visible type becomes only an affine handle; the range proof and the symbolic
+name of the index are gone. A trusted implementation of `slot_read(lease)` can recover a runtime
+integer from representation, but it cannot recover a static fact of type `{0..<4 as usize}`.
+
+That erasure is not just a range-check inconvenience. It is a design limitation for future
+solver integration: if two affine handles hide their refinements independently, the constraint
+generator has no names with which to ask Z3 (or a later theorem prover) whether their indices are
+equal, distinct, ordered, or in range. Adding projection/equality witnesses/existential opening
+to make those relations expressible is effectively reintroducing B1's dependent/indexed core.
+
+So the staged climb from here is:
+
+1. Treat B1-like indexed/refinement typing as the semantic core, but do not expose ATS2-level
+   proof plumbing as the normal surface language.
+2. Add only the syntax needed by current examples: static integer indices, indexed affine
+   resource types such as `SlotLease(n)`, implicit universal quantification on functions, and
+   existential packaging when an API intentionally hides the index.
+3. Let simple call sites elaborate to the core automatically. A surface
+   `slot_read(lease)` can elaborate to something like
+   `slot_read {n}(lease: borrow *SlotLease(n))` once `n` is known from the handle's type.
+4. Use the SMT/prover path incrementally: first equality, range, and linear integer constraints;
+   require explicit lemmas/proof values for relationships outside that decidable fragment.
+5. Preserve the issue #117 tripwire as a surface-language constraint: if ordinary application
+   logic starts manually carrying proof terms through every call, stop and add inference,
+   packaging, or a narrower API instead of normalizing that burden.
+
+This means the project is no longer choosing between "B1 or B2" as two peer designs. B2 is the
+ergonomic API shape expected from successful elaboration over a B1-capable internal language.
 
 ## 7. Stage 4 outlook: channel v2 (#113) + variant enums (#20)
 
@@ -682,7 +723,9 @@ why #20 waits for Stage 3.
 Austral: the closest existing design -- linear types without a borrow
 checker, spec small enough to review; validates the "kernel" framing.
 ATS2: proof/view discipline is the ancestor of the witness/obligation
-idea; its at-view plumbing burden is what the tripwire exists to avoid.
+idea and now the reference point for the internal indexed core; its
+at-view plumbing burden is what the surface-language tripwire exists to
+avoid.
 Rust: rejected as the base model previously (affine-only, no linear;
 Drop makes silent discard a feature, the opposite of an obligation).
 Linear Haskell: multiplicity-on-arrows is the closest formal treatment of
