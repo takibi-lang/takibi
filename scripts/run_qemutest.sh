@@ -262,7 +262,7 @@ run_inline_optimizer_test() {
 run_host_integration_tests() {
     local only="${1:-}"
     if [ -z "$only" ] || [ "$only" = "linux_hello" ]; then
-        run_linux_binary_test "linux_hello (linux amd64)" examples/linux_hello/linux_hello.linux examples/linux_hello/linux_hello.expected
+        run_linux_binary_test "linux_hello (linux amd64)" examples/linux_hello/linux_hello.exe examples/linux_hello/linux_hello.expected
     fi
     if [ -z "$only" ] || [ "$only" = "inline_check" ]; then
         run_inline_optimizer_test "inline_check" examples/inline_check/inline_check.o

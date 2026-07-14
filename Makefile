@@ -94,7 +94,7 @@ COMMON_LINUX_SYSCALL_O := $(COMMON_LINUX_DIR)/syscall.o
 COMMON_LINUX_UART      := $(COMMON_LINUX_DIR)/uart.tkb
 COMMON_LINUX_PRINT     := $(COMMON_LINUX_DIR)/print.tkb
 LINUX_EXAMPLES         := linux_hello
-LINUX_BINS             := $(foreach e,$(LINUX_EXAMPLES),examples/$(e)/$(e).linux)
+LINUX_BINS             := $(foreach e,$(LINUX_EXAMPLES),examples/$(e)/$(e).exe)
 
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
@@ -325,10 +325,10 @@ $(COMMON_LINUX_STARTUP_O): $(COMMON_LINUX_STARTUP_S)
 $(COMMON_LINUX_SYSCALL_O): $(COMMON_LINUX_SYSCALL_S)
 	$(LLVM_MC) --triple=$(LINUX_AMD64_TARGET) --filetype=obj $< -o $@
 
-examples/linux_hello/linux_hello_linux.o: examples/linux_hello/linux_hello.tkb $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_PRINT_BASE) $(TAKIBI)
+examples/linux_hello/linux_hello_exe.o: examples/linux_hello/linux_hello.tkb $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_PRINT_BASE) $(TAKIBI)
 	$(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $< --target $(LINUX_AMD64_TARGET) -o $@ --forbid-trap
 
-examples/linux_hello/linux_hello.linux: $(COMMON_LINUX_STARTUP_O) $(COMMON_LINUX_SYSCALL_O) examples/linux_hello/linux_hello_linux.o
+examples/linux_hello/linux_hello.exe: $(COMMON_LINUX_STARTUP_O) $(COMMON_LINUX_SYSCALL_O) examples/linux_hello/linux_hello_exe.o
 	$(LLD) -static -nostdlib -e _start $^ -o $@
 
 # -- .tkb -> .o  (static pattern rules) ----------------------------------------
@@ -1119,4 +1119,4 @@ profile-tcp-echo: examples/tcp_echo/kernel.debug.elf
 ## clean: remove dune build artifacts and linker outputs
 clean:
 	dune clean
-	find examples -type f \( -name '*.o' -o -name '*.elf' -o -name '*.bin' -o -name '*.linux' \) -delete
+	find examples -type f \( -name '*.o' -o -name '*.elf' -o -name '*.bin' -o -name '*.exe' \) -delete
