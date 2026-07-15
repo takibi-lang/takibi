@@ -253,11 +253,11 @@ ret_type_opt:
   | base_type_expr       { Some $1 }   (* fn foo() int  backward-compatible; {lo..<hi} cannot be written without -> *)
 
 effects_opt:
-  | /* empty */ { [] }
-  | BANG LBRACE effects RBRACE { $3 }
+  | /* empty */ { None }
+  | BANG LBRACE effects RBRACE { Some $3 }
 
 effects:
-  | separated_nonempty_list(COMMA, IDENT) { $1 }
+  | separated_list(COMMA, IDENT) { $1 }
 
 stmts:
   | /* empty */ { [] }
@@ -494,8 +494,10 @@ base_type_expr:
     (* []T -- slice with no compile-time minimum length *)
   | LBRACKET t = type_expr SEMI n = array_size DOTDOT RBRACKET { TypeSlice (t, n) }
     (* [T; N..] -- slice whose runtime length is at least N *)
-  | FN LPAREN fn_type_params RPAREN ARROW type_expr { TypeFn ($3, $6) }
-  | FN LPAREN fn_type_params RPAREN                 { TypeFn ($3, TypeVoid) }
+  | FN effects_opt LPAREN fn_type_params RPAREN ARROW type_expr
+    { TypeFn ($4, $7, $2) }
+  | FN effects_opt LPAREN fn_type_params RPAREN
+    { TypeFn ($4, TypeVoid, $2) }
   | LPAREN t1 = type_expr COMMA t2 = type_expr ts = fn_type_params_rest RPAREN
     (* (T1, T2, ...) -- tuple type, 2+ components (OWNERSHIP_KERNEL.md 5.9,
        GitHub issue #120). The mandatory t2 both enforces "at least 2

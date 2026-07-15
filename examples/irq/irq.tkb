@@ -37,27 +37,36 @@
 use "examples/common_qemu/gic_regs.tkb";
 
 struct IrqTable {
-    handlers: [fn() -> void; 64];
+    handlers: [fn !{}() -> void; 64];
 }
 let mut irq_tbl: IrqTable;
 let mut irq_done: io i32;
+let mut irq_rx_buf: [u8; 64];
+let mut irq_rx_head: io usize;
+let mut irq_rx_tail: io usize;
 
-fn register_irq(id: isize, h: fn() -> void) {
-    let t: *fn() -> void = irq_tbl.handlers;
+fn register_irq(id: isize, h: fn !{}() -> void) {
+    let t: *fn !{}() -> void = irq_tbl.handlers;
     t[id] = h;
 }
 
-fn uart_rx_isr() {
+// The callback runs in interrupt context on both targets. It only publishes
+// bytes to a ring; echoing through STM32 uart_putc could block when its TX
+// ring is full, so thread context below performs all output.
+fn uart_rx_isr() !{} {
     let c: u8 = uart_isr_getc();
-    uart_putc(c);
-    if (c == '\r') {
-        uart_putc('\n');
-        irq_done = 1;
+    let head: usize = irq_rx_head;
+    let next: usize = (head + 1) % 64;
+    if (next != irq_rx_tail) {
+        let ring: *u8 = irq_rx_buf;
+        ring[head as isize] = c;
+        signal_fence();
+        irq_rx_head = next;
     }
     interrupt_notify();
 }
 
-fn irq_dispatch(frame_sp: i32) -> i32 {
+fn irq_dispatch(frame_sp: i32) -> i32 !{interrupt} {
     let id: i32 = (*gic.cpu_iar) as i32; // GICC_IAR is u32; the ID itself fits
                                           // comfortably in i32 and is used as
                                           // an array index below (which
@@ -65,8 +74,8 @@ fn irq_dispatch(frame_sp: i32) -> i32 {
                                           // Index case).
     if (id < 64) {
         let index: isize = id as isize;
-        let t: *fn() -> void = irq_tbl.handlers;
-        let h: fn() -> void = t[index];
+        let t: *fn !{}() -> void = irq_tbl.handlers;
+        let h: fn !{}() -> void = t[index];
         h();
         *(gic.cpu_eoir) = id as u32;
     }
@@ -78,15 +87,29 @@ fn app_main() {
     irq_uart_rx_setup();
     uart_set_rx_handler(uart_rx_isr);
     uart_puts("irq ready\r\n");
+    irq_rx_head = 0;
+    irq_rx_tail = 0;
+    irq_done = 0;
 
     // Unmask the interrupt source last, after setup and the ready message,
     // so nothing can arrive before everything needed to handle it is in
     // place.
     irq_uart_rx_unmask();
 
-    let p: *io i32 = &irq_done;
-    while (*p == 0) {
-        interrupt_wait();
+    while (irq_done == 0) {
+        while (irq_rx_tail == irq_rx_head) {
+            interrupt_wait();
+        }
+        signal_fence();
+        let tail: usize = irq_rx_tail;
+        let ring: *u8 = irq_rx_buf;
+        let c: u8 = ring[tail as isize];
+        irq_rx_tail = (tail + 1) % 64;
+        uart_putc(c);
+        if (c == '\r') {
+            uart_putc('\n');
+            irq_done = 1;
+        }
     }
     uart_puts("done\r\n");
 }

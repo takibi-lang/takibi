@@ -31,7 +31,9 @@ type type_expr =
   | TypePtr of type_expr           (* *T     -- regular pointer, non-volatile *)
   | TypeIo  of type_expr           (* io T   -- volatile-qualified value type; *io T = TypePtr(TypeIo T) *)
   | TypeArray of type_expr * int   (* [T; N] *)
-  | TypeFn of type_expr list * type_expr  (* fn(T...) -> R *)
+  | TypeFn of type_expr list * type_expr * ident list option
+    (* fn [!{effects}](T...) -> R. None means the call effect is unknown;
+       Some [] is an explicit non-blocking contract. Checker-only. *)
   | TypeNamed of string            (* struct type by name *)
   | TypeView of string
     (* Elaborated erased view type. Source annotations use the declared
@@ -183,9 +185,9 @@ type func = {
   name : ident;
   params: (ident * type_expr option) list;
   ret_type : type_expr option;
-  effects : ident list;
-  (* Slice 4 checker effects. `may_block` is propagated through direct
-     calls; `interrupt` marks a root that must not reach may_block. *)
+  effects : ident list option;
+  (* Checker effect contract. None means inferred/unannotated; Some [] is
+     an explicit non-blocking contract; `interrupt` marks a checked root. *)
   body : stmt list;
   is_inline : bool;
   def_loc : loc [@printer pp_loc];  (* location of the "fn" keyword -- used for DWARF DISubprogram *)
@@ -205,7 +207,7 @@ type toplevel =
      (loc.pos_fname) matches this declaration's own loc -- enforced in type_inf.ml. loc is this
      declaration's own position, needed to know which file "declared" it. *)
   | ExternFuncDef of ident * (ident * type_expr option) list * type_expr option
-      * ident list
+      * ident list option
   (* extern fn name(params) -> ret !{effects}; -- body is external. *)
   | StructDef of string * (string * type_expr) list * bool * int option * string list * loc
   (* name, fields, is_packed, align_bytes, private_field_names, loc --

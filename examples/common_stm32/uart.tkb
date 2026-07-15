@@ -58,7 +58,7 @@
 let mut uart_tx_buf: [u8; 128];
 let mut uart_tx_head: io {0..<128 as usize};
 let mut uart_tx_tail: io {0..<128 as usize};
-let mut uart_rx_handler: fn() -> void;
+let mut uart_rx_handler: fn !{}() -> void;
 
 // Set right before DMA2 Stream7 is enabled, cleared by its completion ISR --
 // gates whether uart_putc/the ISR itself may kick a new burst (see
@@ -99,7 +99,7 @@ fn lcd_off() {
     *gpiok_bsrr = 1 << (3 + 16); // reset PK3
 }
 
-fn uart_rx_discard() {
+fn uart_rx_discard() !{} {
     let usart1_rdr: *io u8 = 0x40011024;
     let discarded: u8 = *usart1_rdr;
 }
@@ -265,14 +265,14 @@ fn uart_rx_ready() -> bool {
     return (*usart1_isr & (1 << 5)) != 0; // RXNE
 }
 
-fn uart_set_rx_handler(handler: fn() -> void) {
+fn uart_set_rx_handler(handler: fn !{}() -> void) !{} {
     uart_rx_handler = handler;
 }
 
 // USART1's own NVIC vector now only ever needs to service RX -- TX
 // completion is DMA2_Stream7_IRQHandler's job below (see uart_init's DMAT
 // bit and dma_uart_tx_kick).
-fn USART1_IRQHandler() {
+fn USART1_IRQHandler() !{interrupt} {
     if (uart_rx_ready()) {
         uart_rx_handler();
     }

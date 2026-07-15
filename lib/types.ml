@@ -7,7 +7,9 @@ type ty =
   | TIsize  (* pointer-sized signed integer *)
   | TUsize  (* pointer-sized unsigned integer; maps to i64 on 64-bit targets *)
   | TVoid
-  | TFun of ty list * ty  (* param types, return type *)
+  | TFun of ty list * ty * string list option
+    (* param types, return type, checker-only call-effect contract.
+       None = unknown; Some [] = explicitly non-blocking. *)
   | TVar of tv ref
   | TPtr of ty            (* *T    -- regular pointer, non-volatile *)
   | TIo  of ty            (* io T  -- volatile-qualified value type; *io T = TPtr(TIo T) *)
@@ -142,9 +144,13 @@ let rec to_string t =
   | TSlice (t, 0) -> Printf.sprintf "[]%s" (to_string t)
   | TSlice (t, n) -> Printf.sprintf "[%s; %d..]" (to_string t) n
   | TAlignedPtr (n, t) -> Printf.sprintf "*align(%d) %s" n (to_string t)
-  | TFun (ps, r) ->
-      Printf.sprintf "(%s) -> %s"
-        (String.concat ", " (List.map to_string ps)) (to_string r)
+  | TFun (ps, r, effects) ->
+      let suffix = match effects with
+        | None -> ""
+        | Some es -> Printf.sprintf " !{%s}" (String.concat ", " es)
+      in
+      Printf.sprintf "(%s) -> %s%s"
+        (String.concat ", " (List.map to_string ps)) (to_string r) suffix
   | TStruct s -> s
   | TView s -> Printf.sprintf "view %s" s
   | TVariant s -> Printf.sprintf "variant %s" s
@@ -169,7 +175,7 @@ exception Unify_error of string
 let rec occurs rv = function
   | TVar { contents = Link t } -> occurs rv t
   | TVar r                     -> r == rv
-  | TFun (ps, r)               -> List.exists (occurs rv) ps || occurs rv r
+  | TFun (ps, r, _)            -> List.exists (occurs rv) ps || occurs rv r
   | TPtr   t                   -> occurs rv t
   | TIo    t                   -> occurs rv t
   | TArray (t, _)              -> occurs rv t
@@ -182,6 +188,27 @@ let rec occurs rv = function
   | TStruct _ | TView _ | TVariant _ -> false
   | _                          -> false
 
+let rec function_effect_rows t =
+  match repr t with
+  | TFun (params, ret, effects) ->
+      effects
+      :: (List.concat_map function_effect_rows params
+          @ function_effect_rows ret)
+  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
+  | TAlignedPtr (_, t) | TSingleton (t, _) -> function_effect_rows t
+  | TTuple ts -> List.concat_map function_effect_rows ts
+  | TExists (_, _, _, body) -> function_effect_rows body
+  | _ -> []
+
+let require_writable_pointer_effect_invariance t1 t2 =
+  let rows1 = function_effect_rows t1 in
+  let rows2 = function_effect_rows t2 in
+  if rows1 <> rows2
+     && (List.exists Option.is_some rows1 || List.exists Option.is_some rows2)
+  then
+    raise (Unify_error
+      "function-pointer effect contracts are invariant behind writable pointers")
+
 let rec unify t1 t2 =
   match repr t1, repr t2 with
   | TBool, TBool | TVoid, TVoid -> ()
@@ -189,17 +216,32 @@ let rec unify t1 t2 =
   | TU8,  TU8  | TU16, TU16 | TU32, TU32 | TU64, TU64 -> ()
   | TIsize, TIsize -> ()
   | TUsize, TUsize -> ()
-  | TPtr t1, TPtr t2 -> unify t1 t2
+  | TPtr t1, TPtr t2 ->
+      require_writable_pointer_effect_invariance t1 t2;
+      unify t1 t2
   | TIo  t1, TIo  t2 -> unify t1 t2
   | TArray (t1, n1), TArray (t2, n2) ->
       if n1 <> n2 then
         raise (Unify_error (Printf.sprintf "array size mismatch: %d vs %d" n1 n2));
       unify t1 t2
-  | TFun (ps1, r1), TFun (ps2, r2) ->
+  | TFun (ps1, r1, effects1), TFun (ps2, r2, effects2) ->
       if List.length ps1 <> List.length ps2 then
         raise (Unify_error "argument count mismatch");
       List.iter2 unify ps1 ps2;
-      unify r1 r2
+      unify r1 r2;
+      (match effects1, effects2 with
+       | _, None -> ()
+       | None, Some _ ->
+           raise (Unify_error
+             "function pointer has unknown effects; an explicit effect contract is required here")
+       | Some actual, Some expected ->
+           let unexpected = List.filter (fun eff ->
+             not (List.mem eff expected)) actual in
+           if unexpected <> [] then
+             raise (Unify_error (Printf.sprintf
+               "function pointer may have effect%s %s, which the destination contract does not allow"
+               (if List.length unexpected = 1 then "" else "s")
+               (String.concat ", " unexpected))))
   | TRefinedInt (lo1, hi1, base1), TRefinedInt (lo2, hi2, base2) ->
       if lo1 <> lo2 || hi1 <> hi2 then
         raise (Unify_error (Printf.sprintf
@@ -261,8 +303,11 @@ let rec unify t1 t2 =
           "cannot pass *align(%d) %s where *align(%d) %s is required \
            (%d is not a multiple of %d)"
           n1 (to_string t1) n2 (to_string t2) n1 n2));
+      require_writable_pointer_effect_invariance t1 t2;
       unify t1 t2
-  | TAlignedPtr (_, t1), TPtr t2 -> unify t1 t2  (* widening to a plain pointer is always OK *)
+  | TAlignedPtr (_, t1), TPtr t2 ->
+      require_writable_pointer_effect_invariance t1 t2;
+      unify t1 t2  (* widening to a plain pointer is always OK *)
   | TPtr t1, TAlignedPtr (n, t2) when t1 = repr t2 ->
       raise (Unify_error (Printf.sprintf
         "cannot pass unproven %s where *align(%d) %s is required; use `&x` \
@@ -324,8 +369,9 @@ let rec unify t1 t2 =
         | _, term -> term
       and subst_ty old replacement t =
         match repr t with
-        | TFun (ps, r) -> TFun (List.map (subst_ty old replacement) ps,
-                                subst_ty old replacement r)
+        | TFun (ps, r, effects) ->
+            TFun (List.map (subst_ty old replacement) ps,
+                  subst_ty old replacement r, effects)
         | TPtr t -> TPtr (subst_ty old replacement t)
         | TIo t -> TIo (subst_ty old replacement t)
         | TArray (t, n) -> TArray (subst_ty old replacement t, n)
@@ -387,7 +433,9 @@ let rec of_ast_in_scope scope = function
   | Ast.TypePtr   t      -> TPtr   (of_ast_in_scope scope t)
   | Ast.TypeIo    t      -> TIo (of_ast_in_scope scope t)
   | Ast.TypeArray (t, n) -> TArray (of_ast_in_scope scope t, n)
-  | Ast.TypeFn (ps, r)   -> TFun (List.map (of_ast_in_scope scope) ps, of_ast_in_scope scope r)
+  | Ast.TypeFn (ps, r, effects) ->
+      TFun (List.map (of_ast_in_scope scope) ps,
+            of_ast_in_scope scope r, effects)
   | Ast.TypeNamed s      -> TStruct s
   | Ast.TypeView s       -> TView s
   | Ast.TypeVariant s    -> TVariant s
@@ -443,7 +491,7 @@ let instantiate_static_params ty =
              t)
   and inst t =
     match repr t with
-    | TFun (ps, r) -> TFun (List.map inst ps, inst r)
+    | TFun (ps, r, effects) -> TFun (List.map inst ps, inst r, effects)
     | TPtr t -> TPtr (inst t)
     | TIo t -> TIo (inst t)
     | TArray (t, n) -> TArray (inst t, n)
@@ -472,7 +520,7 @@ let rec to_ast t =
   | TPtr   t      -> Ast.TypePtr  (to_ast t)
   | TIo    t      -> Ast.TypeIo   (to_ast t)
   | TArray (t, n) -> Ast.TypeArray (to_ast t, n)
-  | TFun (ps, r)  -> Ast.TypeFn (List.map to_ast ps, to_ast r)
+  | TFun (ps, r, effects) -> Ast.TypeFn (List.map to_ast ps, to_ast r, effects)
   | TStruct s     -> Ast.TypeNamed s
   | TView s       -> Ast.TypeView s
   | TVariant s    -> Ast.TypeVariant s

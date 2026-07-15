@@ -1,0 +1,16 @@
+// This file is expected to produce a compile error.
+// `register_nonblocking` promises that every stored callback is safe to call
+// from interrupt context. A callback with `may_block` cannot be weakened to
+// that contract, so the checker rejects the registration before runtime.
+extern fn blocking_wait() !{may_block};
+
+fn blocking_callback() !{may_block} {
+    blocking_wait();
+}
+
+fn register_nonblocking(callback: fn !{}() -> void) {
+}
+
+fn install_bad_callback() {
+    register_nonblocking(blocking_callback);
+}

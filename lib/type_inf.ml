@@ -60,8 +60,9 @@ let rec resolve_declared_type = function
   | Ast.TypePtr t -> Ast.TypePtr (resolve_declared_type t)
   | Ast.TypeIo t -> Ast.TypeIo (resolve_declared_type t)
   | Ast.TypeArray (t, n) -> Ast.TypeArray (resolve_declared_type t, n)
-  | Ast.TypeFn (args, ret) ->
-      Ast.TypeFn (List.map resolve_declared_type args, resolve_declared_type ret)
+  | Ast.TypeFn (args, ret, effects) ->
+      Ast.TypeFn
+        (List.map resolve_declared_type args, resolve_declared_type ret, effects)
   | Ast.TypeRefined (lo, hi, base) ->
       Ast.TypeRefined (lo, hi, resolve_declared_type base)
   | Ast.TypeSlice (t, n) -> Ast.TypeSlice (resolve_declared_type t, n)
@@ -616,7 +617,7 @@ let rec contains_singleton_ty t = match repr t with
   | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
   | TAlignedPtr (_, t) -> contains_singleton_ty t
   | TTuple ts -> List.exists contains_singleton_ty ts
-  | TFun (args, ret) ->
+  | TFun (args, ret, _) ->
       List.exists contains_singleton_ty args || contains_singleton_ty ret
   | _ -> false
 
@@ -625,7 +626,7 @@ let rec contains_view_ty t = match repr t with
   | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
   | TAlignedPtr (_, t) | TSingleton (t, _) -> contains_view_ty t
   | TTuple ts -> List.exists contains_view_ty ts
-  | TFun (args, ret) ->
+  | TFun (args, ret, _) ->
       List.exists contains_view_ty args || contains_view_ty ret
   | TExists (_, _, _, body) -> contains_view_ty body
   | _ -> false
@@ -635,10 +636,33 @@ let rec contains_variant_ty t = match repr t with
   | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
   | TAlignedPtr (_, t) | TSingleton (t, _) -> contains_variant_ty t
   | TTuple ts -> List.exists contains_variant_ty ts
-  | TFun (args, ret) ->
+  | TFun (args, ret, _) ->
       List.exists contains_variant_ty args || contains_variant_ty ret
   | TExists (_, _, _, body) -> contains_variant_ty body
   | _ -> false
+
+let type_has_explicit_function_effect senv ty =
+  let rec visit seen = function
+    | Ast.TypeFn (args, ret, effects) ->
+        Option.is_some effects
+        || List.exists (visit seen) args || visit seen ret
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+    | Ast.TypeSink t | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
+    | Ast.TypeSlice (t, _) -> visit seen t
+    | Ast.TypeTuple ts -> List.exists (visit seen) ts
+    | Ast.TypeExists (_, sort, body) -> visit seen sort || visit seen body
+    | Ast.TypeNamed name | Ast.TypeIndexed (name, _) ->
+        if StringSet.mem name seen then false
+        else
+          (match StringMap.find_opt name senv with
+           | Some (fields, _, _) ->
+               let seen = StringSet.add name seen in
+               List.exists (fun (_, field_ty) -> visit seen field_ty) fields
+           | None -> false)
+    | _ -> false
+  in
+  visit StringSet.empty (resolve_declared_type ty)
 
 let is_tuple_ty t = match repr t with
   | TTuple _ -> true
@@ -651,6 +675,8 @@ let is_variant_ty t = match repr t with
 (* Direct calls are resolved during inference.  Codegen must consume this
    exact decision rather than attempting a second overload resolution. *)
 let resolved_call_targets = ref StringMap.empty
+let resolved_indirect_call_effects : string list option StringMap.t ref =
+  ref StringMap.empty
 
 (* GitHub issue #102: per-variable align(N) info, consulted by AddrOf/Var
    (array decay) in infer_expr to prove *align(N) T for `&x` / an aligned
@@ -1246,6 +1272,15 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | TTuple _ ->
            raise (TypeError (e.loc, "cannot cast a tuple to anything"))
        | _ -> ());
+      let tgt_ty = of_ast target_ty in
+      if type_has_explicit_function_effect senv (to_ast src_ty)
+         || type_has_explicit_function_effect senv target_ty
+      then
+        (try unify src_ty tgt_ty
+         with Unify_error reason ->
+           raise (TypeError (e.loc, Printf.sprintf
+             "cannot cast through an explicit function-pointer effect contract: %s"
+             reason)));
       let src_enum = match repr src_ty with
         | TStruct sn when StringMap.mem sn eenv -> Some sn
         | _ -> None
@@ -1280,7 +1315,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                   (to_string src_ty) ename (to_string expected) (to_string expected))));
            of_ast target_ty
        | None, None ->
-           let tgt = of_ast target_ty in
+           let tgt = tgt_ty in
            (match target_ty with
             | Ast.TypeSlice (el_ast, want_min) ->
                 (* Slice creation cast. Sources:
@@ -2012,7 +2047,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               (target, instantiate_static_params ft)) candidates in
             let arg_tys = List.map (infer_expr senv eenv tyenv fenv) args in
             let exact (_, ft) = match repr ft with
-              | TFun (ps, _) when List.length ps = List.length arg_tys ->
+              | TFun (ps, _, _) when List.length ps = List.length arg_tys ->
                   List.for_all2 (fun at pt ->
                     match repr at with
                     | TVar { contents = Unbound _ } -> false
@@ -2043,12 +2078,15 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            raise (TypeError (e.loc,
              Printf.sprintf "Undefined function: %s" fname))
        | Some ft ->
-           let (param_tys, ret_ty) = match repr ft with
-             | TFun (ps, r) -> (ps, r)
+           let (param_tys, ret_ty, call_effects) = match repr ft with
+             | TFun (ps, r, effects) -> (ps, r, effects)
              | _ ->
                  raise (TypeError (e.loc,
                    Printf.sprintf "'%s' is not a function or function pointer" fname))
            in
+           if not (StringMap.mem (loc_key e.loc) !resolved_call_targets) then
+             resolved_indirect_call_effects := StringMap.add
+               (loc_key e.loc) call_effects !resolved_indirect_call_effects;
            if List.length args <> List.length param_tys then
              raise (TypeError (e.loc,
                Printf.sprintf "%s expects %d argument(s), got %d"
@@ -2995,7 +3033,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
       param_types = List.map2 (fun (name, _) ty -> (name, to_ast ty))
                       fdef.params param_tys;
       local_types = StringMap.map to_ast raw_locals;
-      effects     = fdef.effects;
+      effects     = Option.value fdef.effects ~default:[];
     })
 
 (* -- Whole-program inference ----------------------------------------------- *)
@@ -3003,6 +3041,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
 let infer_program (prog : Ast.toplevel list) : program_types =
   unsafe_depth := 0;  (* see its comment: fresh per compilation / per unit test *)
   resolved_call_targets := StringMap.empty;
+  resolved_indirect_call_effects := StringMap.empty;
   (* GitHub issue #79 follow-up: ONE flat namespace for every top-level
      name, not just functions and globals (the two kinds fixed earlier in
      this same follow-up) -- struct, opaque struct, and enum names now
@@ -3118,7 +3157,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeTuple ts ->
         List.fold_left (fun kind t -> join_kind kind (payload_kind t))
           Ast.KindPlain ts
-    | Ast.TypeFn (args, ret) ->
+    | Ast.TypeFn (args, ret, _) ->
         List.fold_left (fun kind t -> join_kind kind (payload_kind t))
           (payload_kind ret) args
     | _ -> Ast.KindPlain
@@ -3207,6 +3246,25 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   "static name '%s' is not bound by this function signature or struct"
                   name))))
   in
+  let validate_effects ~allow_interrupt loc kind name effects =
+    let seen = ref StringSet.empty in
+    List.iter (fun eff ->
+      if eff <> "may_block" && eff <> "interrupt" then
+        raise (TypeError (loc, Printf.sprintf
+          "unknown effect '%s' on %s '%s'; supported effects are may_block and interrupt"
+          eff kind name));
+      if eff = "interrupt" && not allow_interrupt then
+        raise (TypeError (loc,
+          "'interrupt' is a function declaration role, not a function-pointer call effect"));
+      if StringSet.mem eff !seen then
+        raise (TypeError (loc, Printf.sprintf
+          "duplicate effect '%s' on %s '%s'" eff kind name));
+      seen := StringSet.add eff !seen
+    ) effects;
+    if StringSet.mem "may_block" !seen && StringSet.mem "interrupt" !seen then
+      raise (TypeError (loc, Printf.sprintf
+        "%s '%s' cannot be both interrupt and may_block" kind name))
+  in
   let rec validate_static_type loc ty =
     match ty with
     | Ast.TypeExists _ ->
@@ -3235,7 +3293,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> validate_static_type loc t
-    | Ast.TypeFn (args, ret) ->
+    | Ast.TypeFn (args, ret, effects) ->
+        Option.iter
+          (validate_effects ~allow_interrupt:false loc "function pointer type" "fn")
+          effects;
         List.iter (validate_static_type loc) args;
         validate_static_type loc ret
     | Ast.TypeTuple ts -> List.iter (validate_static_type loc) ts
@@ -3249,7 +3310,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeIo inner -> validate_complete_type loc behind_ptr inner
     | Ast.TypeArray (inner, _) | Ast.TypeSlice (inner, _) ->
         validate_complete_type loc false inner
-    | Ast.TypeFn (args, ret) ->
+    | Ast.TypeFn (args, ret, _) ->
         List.iter (validate_complete_type loc false) args;
         validate_complete_type loc false ret
     | Ast.TypeRefined (_, _, base) -> validate_complete_type loc false base
@@ -3264,7 +3325,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypePtr t | Ast.TypeIo t -> contains_borrow t
     | Ast.TypeTuple ts -> List.exists contains_borrow ts
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> contains_borrow t
-    | Ast.TypeFn (args, ret) -> List.exists contains_borrow args || contains_borrow ret
+    | Ast.TypeFn (args, ret, _) ->
+        List.exists contains_borrow args || contains_borrow ret
     | Ast.TypeRefined (_, _, base) | Ast.TypeSingleton (base, _) -> contains_borrow base
     | Ast.TypeExists (_, _, body) -> contains_borrow body
     | _ -> false
@@ -3302,7 +3364,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
     | Ast.TypeSlice (t, _) -> type_mentions_view t
     | Ast.TypeTuple ts -> List.exists type_mentions_view ts
-    | Ast.TypeFn (args, ret) ->
+    | Ast.TypeFn (args, ret, _) ->
         List.exists type_mentions_view args || type_mentions_view ret
     | Ast.TypeExists (_, _, body) -> type_mentions_view body
     | _ -> false
@@ -3320,7 +3382,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
     | Ast.TypeSlice (t, _) -> type_mentions_variant t
     | Ast.TypeTuple ts -> List.exists type_mentions_variant ts
-    | Ast.TypeFn (args, ret) ->
+    | Ast.TypeFn (args, ret, _) ->
         List.exists type_mentions_variant args || type_mentions_variant ret
     | Ast.TypeExists (_, _, body) -> type_mentions_variant body
     | _ -> false
@@ -3337,7 +3399,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
     | Ast.TypeSlice (t, _) -> type_mentions_exists t
     | Ast.TypeTuple ts -> List.exists type_mentions_exists ts
-    | Ast.TypeFn (args, ret) ->
+    | Ast.TypeFn (args, ret, _) ->
         List.exists type_mentions_exists args || type_mentions_exists ret
     | _ -> false
   in
@@ -3349,7 +3411,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
     | Ast.TypeSlice (t, _) -> type_mentions_indexed_owner t
     | Ast.TypeTuple ts -> List.exists type_mentions_indexed_owner ts
-    | Ast.TypeFn (args, ret) ->
+    | Ast.TypeFn (args, ret, _) ->
         List.exists type_mentions_indexed_owner args || type_mentions_indexed_owner ret
     | Ast.TypeExists (_, _, body) -> type_mentions_indexed_owner body
     | _ -> false
@@ -3361,7 +3423,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_singleton t
     | Ast.TypeTuple ts -> List.exists type_mentions_singleton ts
-    | Ast.TypeFn (args, ret) ->
+    | Ast.TypeFn (args, ret, _) ->
         List.exists type_mentions_singleton args || type_mentions_singleton ret
     | Ast.TypeExists (_, _, body) -> type_mentions_singleton body
     | _ -> false
@@ -3375,7 +3437,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeRefined (_, _, t) ->
         singleton_under_storage inside t
     | Ast.TypeTuple ts -> List.exists (singleton_under_storage inside) ts
-    | Ast.TypeFn (args, ret) ->
+    | Ast.TypeFn (args, ret, _) ->
         List.exists (singleton_under_storage false) args
         || singleton_under_storage false ret
     | _ -> false
@@ -3385,7 +3447,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) ->
         indexed_owner_under_indirection true t
-    | Ast.TypeFn (args, ret) ->
+    | Ast.TypeFn (args, ret, _) ->
         List.exists (indexed_owner_under_indirection true) args
         || indexed_owner_under_indirection true ret
     | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
@@ -3567,29 +3629,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            List.iter validate_stmt_types b) arms
      | Ast.Break | Ast.Continue -> ())
   in
-  let validate_effects loc kind name effects =
-    let seen = ref StringSet.empty in
-    List.iter (fun eff ->
-      if eff <> "may_block" && eff <> "interrupt" then
-        raise (TypeError (loc, Printf.sprintf
-          "unknown effect '%s' on %s '%s'; supported effects are may_block and interrupt"
-          eff kind name));
-      if StringSet.mem eff !seen then
-        raise (TypeError (loc, Printf.sprintf
-          "duplicate effect '%s' on %s '%s'" eff kind name));
-      seen := StringSet.add eff !seen
-    ) effects;
-    if StringSet.mem "may_block" !seen && StringSet.mem "interrupt" !seen then
-      raise (TypeError (loc, Printf.sprintf
-        "%s '%s' cannot be both interrupt and may_block" kind name));
-    if kind = "extern function" && StringSet.mem "interrupt" !seen then
-      raise (TypeError (loc, Printf.sprintf
-        "extern function '%s' cannot be an interrupt root because it has no body to check"
-        name))
-  in
   List.iter (function
     | Ast.FuncDef f ->
-        validate_effects f.def_loc "function" f.name f.effects;
+        Option.iter
+          (validate_effects ~allow_interrupt:true f.def_loc "function" f.name)
+          f.effects;
         let scope = Hashtbl.create 8 in
         validation_static_scope := Some scope;
         allow_implicit_static := true;
@@ -3598,7 +3642,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         allow_implicit_static := false;
         List.iter validate_stmt_types f.body
     | Ast.ExternFuncDef (name, params, ret, effects) ->
-        validate_effects Lexing.dummy_pos "extern function" name effects;
+        Option.iter (fun effects ->
+          validate_effects ~allow_interrupt:true Lexing.dummy_pos
+            "extern function" name effects;
+          if List.mem "interrupt" effects then
+            raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+              "extern function '%s' cannot be an interrupt root because it has no body to check"
+              name))
+        ) effects;
         validation_static_scope := Some (Hashtbl.create 8);
         allow_implicit_static := true;
         List.iter (fun (pname, ty) -> match ty with
@@ -3802,8 +3853,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeBorrowMut t -> Ast.TypeBorrowMut (erase_static_for_abi t)
     | Ast.TypeSink t -> Ast.TypeSink (erase_static_for_abi t)
     | Ast.TypeAlignedPtr (n, t) -> Ast.TypeAlignedPtr (n, erase_static_for_abi t)
-    | Ast.TypeFn (args, ret) ->
-        Ast.TypeFn (List.map erase_static_for_abi args, erase_static_for_abi ret)
+    | Ast.TypeFn (args, ret, effects) ->
+        Ast.TypeFn
+          (List.map erase_static_for_abi args, erase_static_for_abi ret, effects)
     | Ast.TypeTuple ts -> Ast.TypeTuple (List.map erase_static_for_abi ts)
     | Ast.TypeRefined (lo, hi, base) ->
         Ast.TypeRefined (lo, hi, erase_static_for_abi base)
@@ -3893,8 +3945,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         register_definition fdef.def_loc key fdef.name;
         let old = Option.value (StringMap.find_opt fdef.name m) ~default:[] in
         let old = List.filter (fun (k, _) -> k <> key) old in
-        StringMap.add fdef.name ((key, TFun (pts, rt)) :: old) m
-    | Ast.ExternFuncDef (name, params, ret_ty, _) ->
+        let call_effects = Option.map (fun effects ->
+          if List.mem "may_block" effects then ["may_block"] else [])
+          fdef.effects in
+        StringMap.add fdef.name ((key, TFun (pts, rt, call_effects)) :: old) m
+    | Ast.ExternFuncDef (name, params, ret_ty, effects_for_extern) ->
         check_reserved_fn Lexing.dummy_pos name;
         if Option.value (StringMap.find_opt name fn_occurrences) ~default:0 > 1 then
           raise (TypeError (Lexing.dummy_pos, Printf.sprintf
@@ -3906,7 +3961,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         register_definition Lexing.dummy_pos key name;
         let old = Option.value (StringMap.find_opt name m) ~default:[] in
         let old = List.filter (fun (k, _) -> k <> key) old in
-        StringMap.add name ((key, TFun (pts, rt)) :: old) m
+        let call_effects = match effects_for_extern with
+          | None -> Some []
+          | Some effects ->
+              Some (if List.mem "may_block" effects then ["may_block"] else [])
+        in
+        StringMap.add name ((key, TFun (pts, rt, call_effects)) :: old) m
     | Ast.LetDef _    -> m
     | Ast.StructDef _ -> m
     | Ast.OwnedStructDef _ -> m
@@ -4606,11 +4666,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     ) fdef.params
   in
   List.iter (function Ast.FuncDef f -> check_affine_func f | _ -> ()) prog;
-  (* Slice 4 effects are checker-only facts. `may_block` is a transitive
-     property of the resolved direct-call graph; `interrupt` is a root
-     assertion that the reachable graph is non-blocking. Function-pointer
-     types do not carry effects yet, so an indirect call reachable from an
-     interrupt root is conservatively rejected instead of guessed safe. *)
+  (* Effects are checker-only facts. `may_block` is a transitive property of
+     direct calls and effect-contracted indirect calls; `interrupt` is a root
+     assertion that the reachable graph is non-blocking. An unannotated
+     function-pointer type remains unknown and is rejected below a checked
+     non-blocking root rather than guessed safe. *)
   let (declared_effects, effect_names, effect_locs) =
     List.fold_left (fun (effects, names, locs) -> function
       | Ast.FuncDef f ->
@@ -4631,6 +4691,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let summarize_effect_body body =
     let callees = ref StringSet.empty in
     let calls_interrupt_wait = ref false in
+    let calls_blocking_indirect = ref false in
     let has_unknown_indirect_call = ref false in
     let rec visit_expr (e : Ast.expr) =
       match e.desc with
@@ -4645,7 +4706,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             if StringSet.mem target callable_keys then
               callees := StringSet.add target !callees
             else if not (is_compiler_builtin name) then
-              has_unknown_indirect_call := true
+              (match StringMap.find_opt (loc_key e.loc)
+                       !resolved_indirect_call_effects with
+               | Some (Some effects) ->
+                   if List.mem "may_block" effects then
+                     calls_blocking_indirect := true
+               | Some None | None -> has_unknown_indirect_call := true)
       | Ast.VariantCtor (_, _, payload) -> visit_expr payload
       | Ast.BinOp (_, left, right) -> visit_expr left; visit_expr right
       | Ast.Bnot x | Ast.Deref x | Ast.AddrOf x | Ast.Cast (_, x)
@@ -4680,7 +4746,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Break | Ast.Continue -> ()
     in
     List.iter visit_stmt body;
-    (!callees, !calls_interrupt_wait, !has_unknown_indirect_call)
+    (!callees, !calls_interrupt_wait, !calls_blocking_indirect,
+     !has_unknown_indirect_call)
   in
   let effect_summaries = List.fold_left (fun summaries -> function
     | Ast.FuncDef f ->
@@ -4689,12 +4756,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> summaries
   ) StringMap.empty prog in
   let explicit_may_block = StringMap.fold (fun key effects blocked ->
-    if List.mem "may_block" effects then StringSet.add key blocked else blocked
+    match effects with
+    | Some effects when List.mem "may_block" effects -> StringSet.add key blocked
+    | _ -> blocked
   ) declared_effects StringSet.empty in
   let close_property seed direct_property =
     let rec loop current =
-      let next = StringMap.fold (fun caller (callees, waits, indirect) acc ->
-        if direct_property waits indirect
+      let next = StringMap.fold
+        (fun caller (callees, waits, blocking_indirect, unknown_indirect) acc ->
+        if direct_property waits blocking_indirect unknown_indirect
            || StringSet.exists (fun callee -> StringSet.mem callee acc) callees
         then StringSet.add caller acc
         else acc
@@ -4704,9 +4774,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     loop seed
   in
   let may_block = close_property explicit_may_block
-    (fun waits _ -> waits) in
+    (fun waits blocking_indirect _ -> waits || blocking_indirect) in
   let may_reach_unknown = close_property StringSet.empty
-    (fun _ indirect -> indirect) in
+    (fun _ _ unknown_indirect -> unknown_indirect) in
   let display_effect_key key = Option.value
     (StringMap.find_opt key effect_names) ~default:key in
   let rec find_blocking_path visited key =
@@ -4716,9 +4786,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     else
       let visited = StringSet.add key visited in
       match StringMap.find_opt key effect_summaries with
-      | Some (_, true, _) ->
+      | Some (_, true, _, _) ->
           Some [display_effect_key key; "interrupt_wait"]
-      | Some (callees, false, _) ->
+      | Some (_, false, true, _) ->
+          Some [display_effect_key key; "<indirect call !{may_block}>"]
+      | Some (callees, false, false, _) ->
           let rec search = function
             | [] -> None
             | callee :: rest ->
@@ -4736,9 +4808,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     else
       let visited = StringSet.add key visited in
       match StringMap.find_opt key effect_summaries with
-      | Some (_, _, true) ->
+      | Some (_, _, _, true) ->
           Some [display_effect_key key; "<indirect call>"]
-      | Some (callees, _, false) ->
+      | Some (callees, _, _, false) ->
           let rec search = function
             | [] -> None
             | callee :: rest ->
@@ -4751,7 +4823,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           search (StringSet.elements callees)
       | None -> None
   in
-  StringMap.iter (fun key effects ->
+  StringMap.iter (fun key effects_opt ->
+    let effects = Option.value effects_opt ~default:[] in
     if List.mem "interrupt" effects then begin
       if StringSet.mem key may_block then begin
         let path = Option.value (find_blocking_path StringSet.empty key)
@@ -4767,11 +4840,28 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           "interrupt function '%s' reaches a call with unknown effects via %s"
           (display_effect_key key) (String.concat " -> " path)))
       end
+    end else if effects_opt = Some [] then begin
+      if StringSet.mem key may_block then begin
+        let path = Option.value (find_blocking_path StringSet.empty key)
+          ~default:[display_effect_key key] in
+        raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+          "function '%s' violates its explicit !{} non-blocking contract via %s"
+          (display_effect_key key) (String.concat " -> " path)))
+      end;
+      if StringSet.mem key may_reach_unknown then begin
+        let path = Option.value (find_unknown_path StringSet.empty key)
+          ~default:[display_effect_key key; "<indirect call>"] in
+        raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+          "function '%s' cannot verify its explicit !{} non-blocking contract: unknown effects via %s"
+          (display_effect_key key) (String.concat " -> " path)))
+      end
     end
   ) declared_effects;
   let functions = StringMap.mapi (fun key info ->
-    let declared = Option.value (StringMap.find_opt key declared_effects)
-      ~default:[] in
+    let declared = match StringMap.find_opt key declared_effects with
+      | Some (Some effects) -> effects
+      | Some None | None -> []
+    in
     let effects =
       (if List.mem "interrupt" declared then ["interrupt"] else [])
       @ (if StringSet.mem key may_block then ["may_block"] else [])

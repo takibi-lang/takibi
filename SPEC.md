@@ -87,10 +87,11 @@ turn as many potential traps as possible into compile-time errors instead:
   carrying a compile-time-known *minimum* length. `[]T` means "minimum 0,
   length unknown at compile time"; `[T; N..]` means "at least N elements,
   guaranteed". See "Slices" below.
-- **`fn(T...) -> R`** is a function pointer type. LLVM 19 has a single
-  opaque pointer kind, so all function pointers are the same `ptr` at the
-  LLVM level; takibi's type checker is what enforces signature
-  compatibility.
+- **`fn(T...) -> R`** is a function pointer with unknown call effects.
+  **`fn !{}(T...) -> R`** is explicitly non-blocking and
+  **`fn !{may_block}(T...) -> R`** may block. LLVM 19 has a single opaque
+  pointer kind, so signatures and effect contracts are checker-only; every
+  form is the same runtime `ptr`.
 - **`{lo..<hi as base}`** is a refined integer subtype: a value of type
   `base` statically known to lie in `[lo, hi)`. See "Refined Integer
   Types" below. The bare form `{lo..<hi}` (no explicit `as base`) is
@@ -837,7 +838,7 @@ This is intentionally not a general borrow checker: projections and
 temporaries cannot be mutably borrowed, borrows cannot escape a direct call,
 and indexed owners still cannot live in arbitrary storage.
 
-## Blocking and Interrupt Effects (Takibi Core Slice 4)
+## Blocking and Interrupt Effects (Takibi Core Slices 4-5)
 
 Checker effects are written after the return type:
 
@@ -845,6 +846,7 @@ Checker effects are written after the return type:
 extern fn sem_wait(s: *i32) !{may_block};
 fn mutex_lock(m: *i32) -> *MutexGuard !{may_block} { ... }
 fn IRQ_Handler() !{interrupt} { acknowledge_irq(); }
+fn poll_callback() !{} { acknowledge_irq(); }
 ```
 
 `may_block` is inferred transitively through resolved direct calls. An
@@ -853,10 +855,39 @@ annotation on every caller. `interrupt` marks a root whose complete reachable
 direct-call graph must not contain `may_block`; `interrupt_wait()` is
 intrinsically blocking. Diagnostics include one offending call path.
 
-Function-pointer types do not carry effects yet. Consequently, an indirect
-call reachable from an `interrupt` root is rejected as effect-unknown. An
-extern without `may_block` is a trusted non-blocking contract. Effects erase
-completely: they add no LLVM parameter, field, instruction, or metadata.
+Slice 5 adds explicit call-effect contracts to first-class function types:
+
+```takibi
+let mut uart_rx_handler: fn !{}() -> void;
+
+fn uart_set_rx_handler(handler: fn !{}() -> void) !{} {
+    uart_rx_handler = handler;
+}
+
+fn USART1_IRQHandler() !{interrupt} {
+    uart_rx_handler();
+}
+```
+
+The row follows `fn` in a function-pointer type so it cannot be confused
+with the enclosing function declaration's postfix row. No row means
+**unknown**, not non-blocking. `!{}` is a checked non-blocking contract;
+`!{may_block}` permits blocking. `interrupt` is a declaration role and is
+not legal in a function-pointer row.
+
+A callback's actual effects must be a subset of the destination contract. A
+non-blocking callback may therefore enter a `may_block` slot, but the reverse
+is rejected. An unannotated Takibi function cannot enter a `fn !{}(...)`
+slot until its declaration states `!{}`; that assertion is checked against
+its complete body/call graph. An extern without `may_block` remains a trusted
+non-blocking contract.
+
+Indirect calls use their function-pointer row during transitive effect
+analysis. An unannotated function pointer remains effect-unknown and is
+rejected below `!{interrupt}` or `!{}`. Effect rows cannot be invented with a
+cast, and are invariant behind writable pointers so an alias cannot replace a
+non-blocking callback with a blocking one. Effects still erase completely:
+they add no LLVM parameter, field, instruction, or metadata.
 
 ## File-Granular Privacy (`private`)
 
@@ -1118,8 +1149,9 @@ at codegen time rather than silently lowering to a racy `wfi`.
 
 ## Function Pointers, extern fn, and Overloading
 
-- `fn(T...) -> R` is a first-class function pointer type (see "Types"
-  above).
+- `fn(T...) -> R`, `fn !{}(T...) -> R`, and
+  `fn !{may_block}(T...) -> R` are first-class function pointer types (see
+  "Blocking and Interrupt Effects" above).
 - `extern fn name(params) -> ret;` declares an externally-defined
   (assembly-implemented) function, emitting an LLVM `declare`. `extern
   fn` is **not** overloadable -- its unmangled symbol name is an external

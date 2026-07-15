@@ -7417,11 +7417,12 @@ error. Effects do not change LLVM signatures or generated instructions.
 Mutex/channel APIs, RTOS scheduler roots, direct Ethernet/virtio/SDMMC/DMA
 handlers, and blocking wait/transmit APIs now state their contracts.
 
-Function-pointer types still lack effect rows. This is visible in the UART RX
-callback ISR: it remains outside the checked interrupt-root set until a
-non-blocking callback contract can be represented in its type. General place
-borrowing, stored indexed owners, lock invariants, and quantified view change
-remain later slices rather than being implied by `borrow mut`.
+At this Slice 4 checkpoint, function-pointer types still lacked effect rows.
+The UART RX callback ISR therefore remained outside the checked
+interrupt-root set until a non-blocking callback contract could be represented
+in its type; Slice 5 below closes that gap. General place borrowing, stored
+indexed owners, lock invariants, and quantified view change remain later
+slices rather than being implied by `borrow mut`.
 
 Focused compile-error examples document both new failure modes in English:
 `mutable_borrow_shared_wrong` and `effect_interrupt_blocks_wrong`. Unit tests
@@ -7429,4 +7430,35 @@ cover parser forms, mutable-borrow flow and ABI, transitive effect inference,
 intrinsic blocking, safe recursion, unknown indirect calls, and effect
 erasure. Validation: all 683 Alcotest cases passed. The full `make check`
 passed all 111 host, compile-error, DWARF, and QEMU integration cases, every
+STM32 cross-build, and the network/FAT examples under `--forbid-trap`.
+
+## 2026-07-15: Takibi Core Slice 5, Function-Pointer Effect Contracts
+
+Function-pointer types now retain checker-only effect contracts. The
+unannotated `fn(T...) -> R` form remains effect-unknown;
+`fn !{}(T...) -> R` promises non-blocking calls, and
+`fn !{may_block}(T...) -> R` permits blocking. Explicit `!{}` function
+declarations are verified against their transitive call graph. Non-blocking
+callbacks can widen to a may-block slot, while blocking or unknown callbacks
+cannot enter a non-blocking slot.
+
+Indirect calls now participate in effect propagation using their type's row.
+Unknown calls remain conservative errors below interrupt/non-blocking roots.
+Effect contracts cannot be introduced by casts and are invariant behind
+writable pointers, preventing a weakened alias from replacing a safe callback
+with a blocking one. Rows remain absent from LLVM types, fields, parameters,
+instructions, and DWARF ABI shape.
+
+The STM32 UART RX callback is now `fn !{}() -> void`, and
+`USART1_IRQHandler` is a checked interrupt root. This exposed a real blocking
+path in the shared IRQ demo: the ISR called STM32 `uart_putc`, whose TX ring
+may block. The ISR now publishes bytes to a receive ring and the application
+thread echoes them. The QEMU callback table and dispatch root carry the same
+contract. `effect_callback_contract_wrong` documents the rejected blocking
+registration in English.
+
+General place borrowing, arbitrary indexed-owner storage, lock invariants,
+quantified view change, and solver/prover discharge remain explicit later
+slices. Validation: all 695 Alcotest cases passed. The full `make check`
+passed all 112 host, compile-error, DWARF, and QEMU integration cases, every
 STM32 cross-build, and the network/FAT examples under `--forbid-trap`.

@@ -64,9 +64,9 @@ let rec resolve_special_type = function
   | TypePtr t -> TypePtr (resolve_special_type t)
   | TypeIo t -> TypeIo (resolve_special_type t)
   | TypeArray (t, n) -> TypeArray (resolve_special_type t, n)
-  | TypeFn (args, ret) ->
+  | TypeFn (args, ret, effects) ->
       TypeFn (List.map resolve_special_type args,
-              resolve_special_type ret)
+              resolve_special_type ret, effects)
   | TypeRefined (lo, hi, base) ->
       TypeRefined (lo, hi, resolve_special_type base)
   | TypeSlice (t, n) -> TypeSlice (resolve_special_type t, n)
@@ -876,7 +876,7 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
       in
       Llvm_debuginfo.dibuild_create_array_type dib ~size:(elem_bits * n) ~align_in_bits:0
         ~ty:(ditype_of_ast dib file t) ~subscripts:[||]
-  | TypeFn (params, ret) ->
+  | TypeFn (params, ret, _) ->
       let ret_ty = ditype_of_ast dib file ret in
       let param_tys = List.map (ditype_of_ast dib file) params in
       let sub_ty =
@@ -1661,7 +1661,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                     let ret_ast = match Hashtbl.find_opt func_ret_ast_types name with
                       | Some r -> r | None -> TypeVoid
                     in
-                    (TypeFn (param_asts, ret_ast), f)
+                    (TypeFn (param_asts, ret_ast, None), f)
                 | None ->
                     raise (Error (Printf.sprintf "Undefined variable: %s" name))))
 
@@ -2804,7 +2804,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                      raise (Error (Printf.sprintf "Undefined function: %s" fname))
            in
            (match fn_ast_ty with
-            | TypeFn (param_asts, ret_ast) ->
+            | TypeFn (param_asts, ret_ast, _) ->
                 let param_lls = List.map ltype_of_ast param_asts |> Array.of_list in
                 let ret_ll    = ltype_of_ret_ast ret_ast in
                 let ft        = function_type ret_ll param_lls in

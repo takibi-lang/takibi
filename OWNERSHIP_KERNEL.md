@@ -3,12 +3,13 @@
 Status: LIVING DESIGN MEMO, not the language spec. Stages 1, 2, the tuple
 interlude, and Stage 3a are implemented; their actual behavior lives in
 SPEC.md. The long-term architecture and remaining vertical slices live in
-TAKIBI_CORE.md; its Slice 0 Core boundary, Slice 1 indexed runtime
-owner, Slice 2 non-indexed erased views, and Slice 3
-variants/existentials/standard affine semantics are implemented. Indexed
-views, general propositions, solver/prover integration, mutable borrowing,
-and effects remain outlook. As each surface slice lands, SPEC.md stays
-authoritative for the language that actually exists.
+TAKIBI_CORE.md; Slices 0 through 5 are implemented: the Core boundary,
+indexed runtime owners, erased views, variants/restricted existentials,
+standard affine semantics, scoped mutable owner borrows, checker effects,
+and function-pointer effect contracts. Indexed views, general place/storage
+tracking, lock invariants, general propositions, and solver/prover integration
+remain outlook. As each surface slice lands, SPEC.md stays authoritative for
+the language that actually exists.
 
 Sections 4 through 6 preserve the decision path that led here. Statements in
 those historical stage descriptions about affine requiring one-path
@@ -955,25 +956,65 @@ that must not reach a blocker, and diagnostics show an offending call path.
 Mutex/channel APIs and direct QEMU/STM32 ISR roots now use these annotations.
 Both effects erase completely and leave function ABI unchanged.
 
-The conservative boundary is explicit: function-pointer types do not yet
-carry effects, so an indirect call reached from an interrupt root is rejected
-as unknown. `USART1_IRQHandler`, whose callback is stored in a function
-pointer, cannot become a checked root until that contract has a type-level
-surface. General place borrowing, stored owners, lock invariants, quantified
-views, and solver/prover discharge are also not implied by this slice.
+At the Slice 4 boundary, function-pointer types did not yet carry effects, so
+an indirect call reached from an interrupt root was rejected as unknown.
+`USART1_IRQHandler`, whose callback is stored in a function pointer, could not
+become a checked root until that contract had a type-level surface. Slice 5
+below closes that specific gap. General place borrowing, stored owners, lock
+invariants, quantified views, and solver/prover discharge were not implied by
+Slice 4 and remain separate work.
 
 Focused negative examples explain immutable-payload mutable borrowing and a
 transitive blocking ISR path in English. The effect tests also cover safe
 recursion, intrinsic blocking, unknown/duplicate annotations, and conservative
 indirect calls.
 
-## 7. Next outlook: channel v2 (#113), function effects, and view change
+#### 6.7.6 Slice 5 implementation result (2026-07-15)
+
+Slice 5 closes Slice 4's concrete epsilon gap. Function-pointer types now
+distinguish three source contracts:
+
+```takibi
+fn() -> void                 // effect unknown
+fn !{}() -> void             // checked non-blocking
+fn !{may_block}() -> void    // blocking permitted
+```
+
+An explicit function declaration `!{}` is verified against the same
+transitive call graph used for interrupt roots. Function values obey effect
+subtyping: non-blocking may flow into a `may_block` slot, while `may_block`
+or unknown cannot flow into a non-blocking slot. Indirect calls contribute
+their declared row to epsilon propagation. Casts cannot invent a row, and
+rows are invariant behind writable pointers so a weakened alias cannot write
+a blocking callback into non-blocking storage. All rows erase from LLVM.
+
+`USART1_IRQHandler` is now a checked `!{interrupt}` root and its stored UART
+callback has type `fn !{}() -> void`. Applying that contract found a real
+violation in the shared IRQ example: its callback called STM32
+`uart_putc !{may_block}`. The callback now only publishes received bytes to a
+ring and thread context performs the echo. The QEMU IRQ dispatch table uses
+the same non-blocking callback type and its dispatcher is checked as an
+interrupt root too.
+
+The remaining Core work is explicit and is not hidden behind this slice:
+
+- general place borrowing beyond a bare local/parameter;
+- indexed owners stored in arbitrary fields, arrays, globals, or other
+  stable places;
+- lock invariants and heap/region predicates;
+- static parameters on views, quantified view change, and existential state
+  dispatch;
+- solver/prover discharge over propositions retained in Phi.
+
+## 7. Next outlook: stable places, channel v2 (#113), and view change
 
 Variant-carried ownership is now available for channel results and transfer
 APIs. Zero-copy channel storage still needs stable place/invariant tracking
 before a linear payload can safely live in a slot. Function-pointer effects
-are the next concrete epsilon gap exposed by the UART callback ISR. Indexed
-view change for TCP remains the next Delta/Phi state-transition driver.
+are now closed by Slice 5. Indexed view change for TCP remains the next
+Delta/Phi state-transition driver; arbitrary stored owners and lock
+invariants should be introduced only with the concrete channel/driver that
+needs each one.
 
 ## 8. Prior art notes
 

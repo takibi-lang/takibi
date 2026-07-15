@@ -5,14 +5,16 @@ syntax accepted by the compiler today. `SPEC.md` remains authoritative for
 implemented Takibi. `OWNERSHIP_KERNEL.md` records the history and limitations
 of the current affine/linear checker.
 
-Implementation status (2026-07-15): Slices 0 through 3 are implemented. The
+Implementation status (2026-07-15): Slices 0 through 5 are implemented. The
 `Takibi_core` module owns the four-layer vocabulary, the current checker uses
 `Delta.Legacy_flow`, and the indexed runtime-owner subset described in 3.1 is
 accepted. Non-indexed erased affine/linear views are also accepted and erased
 before LLVM ABI lowering. Closed kind-carrying variants, restricted
 existential indexed-owner payloads, and standard affine weakening are
-accepted. Indexed views, general quantifiers/propositions, solver hooks,
-mutable borrowing, and effects remain design targets.
+accepted. Scoped mutable owner borrows, direct/indirect blocking effects, and
+function-pointer effect contracts are accepted and erase before LLVM.
+Indexed views, general place/storage tracking, lock invariants, general
+quantifiers/propositions, and solver hooks remain design targets.
 
 The examples in this document are elaboration fixtures. Their contracts and
 runtime representations are decisions; punctuation may change when a fixture
@@ -621,14 +623,39 @@ Implemented scope:
 - `!{may_block}` contracts propagate through the resolved direct-call graph.
   `!{interrupt}` roots reject any transitive blocker, including the intrinsic
   `interrupt_wait`, and report a call path;
-- effect-unknown indirect calls are rejected below interrupt roots. Function
-  pointer effect signatures remain a later extension;
+- at the Slice 4 boundary, effect-unknown indirect calls were rejected below
+  interrupt roots and function-pointer signatures remained for Slice 5;
 - mutex/channel APIs and direct ISR roots now carry concrete annotations.
   Lock invariants remain deferred because no concurrent example yet needs a
   heap predicate beyond the existing private API boundary.
 
+### Slice 5: function-pointer effect contracts (implemented 2026-07-15)
+
+Implemented scope:
+
+- `fn !{}(T...) -> R` is an explicitly non-blocking callback type;
+  `fn !{may_block}(T...) -> R` permits blocking; an unannotated
+  `fn(T...) -> R` remains effect-unknown;
+- explicit `fn f() !{} { ... }` declarations are checked against their
+  transitive direct and indirect call graph;
+- function effect subtyping permits non-blocking-to-`may_block` widening but
+  rejects blocking or unknown callbacks at a non-blocking boundary;
+- indirect calls feed their row into epsilon propagation. Unknown indirect
+  calls remain rejected below `interrupt` and explicit non-blocking roots;
+- casts cannot invent effect contracts, and contracted callback types are
+  invariant behind writable pointers;
+- `USART1_IRQHandler` and both QEMU IRQ dispatch paths are checked interrupt
+  roots. The IRQ demo moves potentially blocking UART echoing out of its ISR
+  callback and into thread context;
+- effect rows erase completely and do not change the function-pointer ABI.
+
 ### Later slices
 
+- General place borrowing and stable storage for indexed owners, introduced
+  with a concrete owner container rather than as an unconstrained borrow
+  checker.
+- Lock invariants and heap/region predicates once a multicore or zero-copy
+  example requires them.
 - `TcpConn[conn, state]` view change and existential state dispatch.
 - Zero-copy typed channels (#113) and ownership transfer through variants.
 - Aliasing/region predicates (#106), asynchronous TX ownership (#87), and

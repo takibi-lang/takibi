@@ -124,9 +124,13 @@ let rec show_type = function
   | Ast.TypePtr t       -> "*" ^ show_type t
   | Ast.TypeIo  t       -> "io " ^ show_type t
   | Ast.TypeArray (t,n) -> Printf.sprintf "[%s; %d]" (show_type t) n
-  | Ast.TypeFn (ps, r)  ->
-      Printf.sprintf "fn(%s) -> %s"
-        (String.concat ", " (List.map show_type ps)) (show_type r)
+  | Ast.TypeFn (ps, r, effects) ->
+      let suffix = match effects with
+        | None -> ""
+        | Some es -> Printf.sprintf " !{%s}" (String.concat ", " es)
+      in
+      Printf.sprintf "fn(%s) -> %s%s"
+        (String.concat ", " (List.map show_type ps)) (show_type r) suffix
   | Ast.TypeNamed s     -> s
   | Ast.TypeView s      -> "view " ^ s
   | Ast.TypeVariant s   -> s
@@ -281,9 +285,11 @@ let parser_tests = [
     (fun () ->
       match parse
         "extern fn parsed_wait() !{may_block};
-         fn parsed_irq() !{interrupt} {}" with
-      | [Ast.ExternFuncDef ("parsed_wait", [], None, ["may_block"]);
-         Ast.FuncDef { name = "parsed_irq"; effects = ["interrupt"]; _ }] -> ()
+         fn parsed_irq() !{interrupt} {}
+         fn parsed_nonblocking() !{} {}" with
+      | [Ast.ExternFuncDef ("parsed_wait", [], None, Some ["may_block"]);
+         Ast.FuncDef { name = "parsed_irq"; effects = Some ["interrupt"]; _ };
+         Ast.FuncDef { name = "parsed_nonblocking"; effects = Some []; _ }] -> ()
       | _ -> Alcotest.fail "expected may_block and interrupt effect annotations");
 
 
@@ -1121,19 +1127,19 @@ let parser_tests = [
 
   Alcotest.test_case "fn pointer type with no args parses" `Quick (fun () ->
     match parse "fn f(h: fn() -> void) {}" with
-    | [Ast.FuncDef { params = [("h", Some (Ast.TypeFn ([], Ast.TypeVoid)))]; _ }] -> ()
+    | [Ast.FuncDef { params = [("h", Some (Ast.TypeFn ([], Ast.TypeVoid, None)))]; _ }] -> ()
     | _ -> Alcotest.fail "expected param h: fn() -> void"
   );
 
   Alcotest.test_case "fn pointer type with one arg parses" `Quick (fun () ->
     match parse "fn f(h: fn(i32) -> u8) {}" with
-    | [Ast.FuncDef { params = [("h", Some (Ast.TypeFn ([Ast.TypeI32], Ast.TypeU8)))]; _ }] -> ()
+    | [Ast.FuncDef { params = [("h", Some (Ast.TypeFn ([Ast.TypeI32], Ast.TypeU8, None)))]; _ }] -> ()
     | _ -> Alcotest.fail "expected param h: fn(i32) -> u8"
   );
 
   Alcotest.test_case "fn pointer type with multiple args parses" `Quick (fun () ->
     match parse "fn f(h: fn(i32, u8) -> i32) {}" with
-    | [Ast.FuncDef { params = [("h", Some (Ast.TypeFn ([Ast.TypeI32; Ast.TypeU8], Ast.TypeI32)))]; _ }] -> ()
+    | [Ast.FuncDef { params = [("h", Some (Ast.TypeFn ([Ast.TypeI32; Ast.TypeU8], Ast.TypeI32, None)))]; _ }] -> ()
     | _ -> Alcotest.fail "expected param h: fn(i32, u8) -> i32"
   );
 
@@ -1141,9 +1147,20 @@ let parser_tests = [
     match parse "fn foo() {} fn f() { let h: fn() -> void = foo; }" with
     | [Ast.FuncDef _; Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Let (false, "h", Some (Ast.TypeFn ([], Ast.TypeVoid)), Some _, None) -> ()
+         | Ast.Let (false, "h", Some (Ast.TypeFn ([], Ast.TypeVoid, None)), Some _, None) -> ()
          | _ -> Alcotest.fail "expected Let(h, TypeFn([], void), Some(foo))")
     | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "Slice 5 function pointer effect contracts parse" `Quick (fun () ->
+    match parse
+      "fn f(safe: fn !{}() -> void,
+            blocking: fn !{may_block}(i32) -> i32) {}" with
+    | [Ast.FuncDef { params =
+          [("safe", Some (Ast.TypeFn ([], Ast.TypeVoid, Some [])));
+           ("blocking", Some (Ast.TypeFn
+             ([Ast.TypeI32], Ast.TypeI32, Some ["may_block"])))]; _ }] -> ()
+    | _ -> Alcotest.fail "expected explicit function-pointer effect rows"
   );
 
   (* -- Struct syntax ------------------------------------------------ *)
@@ -1310,13 +1327,13 @@ let parser_tests = [
 
   Alcotest.test_case "extern fn without return type parses" `Quick (fun () ->
     match parse "extern fn uart_putc(c: u8);" with
-    | [Ast.ExternFuncDef ("uart_putc", [("c", Some Ast.TypeU8)], None, [])] -> ()
+    | [Ast.ExternFuncDef ("uart_putc", [("c", Some Ast.TypeU8)], None, None)] -> ()
     | _ -> Alcotest.fail "expected ExternFuncDef(uart_putc, [c:u8], None)"
   );
 
   Alcotest.test_case "extern fn with return type parses" `Quick (fun () ->
     match parse "extern fn uart_getc() -> u8;" with
-    | [Ast.ExternFuncDef ("uart_getc", [], Some Ast.TypeU8, [])] -> ()
+    | [Ast.ExternFuncDef ("uart_getc", [], Some Ast.TypeU8, None)] -> ()
     | _ -> Alcotest.fail "expected ExternFuncDef(uart_getc, [], Some u8)"
   );
 
@@ -4439,6 +4456,75 @@ let infer_tests = [
           if (n > 0) { effect_recur21(n - 1); }
         }");
 
+  Alcotest.test_case "Slice 5: interrupt accepts a contracted non-blocking callback" `Quick
+    (expect_ok
+       "fn effect_callback22() !{} { interrupt_notify(); }
+        fn effect_irq22(callback: fn !{}() -> void) !{interrupt} {
+          callback();
+        }
+        fn effect_install22() { effect_irq22(effect_callback22); }");
+
+  Alcotest.test_case "Slice 5: interrupt rejects a may-block callback contract" `Quick
+    (expect_type_error "<indirect call !{may_block}>"
+       "fn effect_irq23(callback: fn !{may_block}() -> void) !{interrupt} {
+          callback();
+        }");
+
+  Alcotest.test_case "Slice 5: blocking function cannot enter a non-blocking slot" `Quick
+    (expect_type_error "destination contract does not allow"
+       "fn effect_blocking24() !{may_block} {}
+        fn effect_register24(callback: fn !{}() -> void) {}
+        fn effect_bad24() { effect_register24(effect_blocking24); }");
+
+  Alcotest.test_case "Slice 5: unknown function effect cannot enter a non-blocking slot" `Quick
+    (expect_type_error "function pointer has unknown effects"
+       "fn effect_unknown25() {}
+        fn effect_register25(callback: fn !{}() -> void) {}
+        fn effect_bad25() { effect_register25(effect_unknown25); }");
+
+  Alcotest.test_case "Slice 5: non-blocking callback widens to a may-block slot" `Quick
+    (fun () ->
+      let types = infer
+        "fn effect_safe26() !{} {}
+         fn effect_run26(callback: fn !{may_block}() -> void) {
+           callback();
+         }
+         fn effect_use26() { effect_run26(effect_safe26); }" in
+      let run = Types.StringMap.find "effect_run26" types.functions in
+      let use = Types.StringMap.find "effect_use26" types.functions in
+      Alcotest.(check (list string)) "indirect caller effects"
+        ["may_block"] run.effects;
+      Alcotest.(check (list string)) "transitive caller effects"
+        ["may_block"] use.effects);
+
+  Alcotest.test_case "Slice 5: explicit non-blocking function contract is checked" `Quick
+    (expect_type_error "violates its explicit !{} non-blocking contract"
+       "extern fn effect_wait27() !{may_block};
+        fn effect_helper27() { effect_wait27(); }
+        fn effect_bad27() !{} { effect_helper27(); }");
+
+  Alcotest.test_case "Slice 5: explicit non-blocking contract rejects unknown indirect effects" `Quick
+    (expect_type_error "cannot verify its explicit !{} non-blocking contract"
+       "fn effect_bad28(callback: fn() -> void) !{} { callback(); }");
+
+  Alcotest.test_case "Slice 5: interrupt is not a function-pointer call effect" `Quick
+    (expect_type_error "not a function-pointer call effect"
+       "fn effect_bad29(callback: fn !{interrupt}() -> void) {}");
+
+  Alcotest.test_case "Slice 5: a cast cannot invent a non-blocking contract" `Quick
+    (expect_type_error "cannot cast through an explicit function-pointer effect contract"
+       "fn effect_unknown30() {}
+        fn effect_bad30() {
+          let callback: fn !{}() -> void =
+            effect_unknown30 as fn !{}() -> void;
+        }");
+
+  Alcotest.test_case "Slice 5: callback effects are invariant behind writable pointers" `Quick
+    (expect_type_error "invariant behind writable pointers"
+       "fn effect_bad31(slot: *fn !{}() -> void) {
+          let widened: *fn() -> void = slot;
+        }");
+
 ]
 
 (* -- Codegen tests ----------------------------------------------------------
@@ -4451,6 +4537,24 @@ let infer_tests = [
    checks runtime behavior, not just "the IR verifies"). *)
 
 let codegen_tests = [
+  Alcotest.test_case
+    "Slice 5 ABI: function pointer effect contracts erase" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "fn cgeffect_target5() !{} {}
+         fn cgeffect_indirect5(callback: fn !{}() -> void) !{} {
+           callback();
+         }");
+      match Hashtbl.find_opt Llvm_gen.functions "cgeffect_indirect5" with
+      | Some (_, f) ->
+          Alcotest.(check int) "only the runtime callback parameter remains"
+            1 (Array.length (Llvm.params f));
+          Alcotest.(check bool) "callback parameter is an opaque pointer"
+            true
+            (Llvm.classify_type (Llvm.type_of (Llvm.param f 0)) =
+             Llvm.TypeKind.Pointer)
+      | None -> Alcotest.fail "function 'cgeffect_indirect5' not found");
+
   Alcotest.test_case
     "Slice 4 ABI: checker effects add no runtime parameters" `Quick
     (fun () ->
