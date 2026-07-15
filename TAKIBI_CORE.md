@@ -5,11 +5,12 @@ syntax accepted by the compiler today. `SPEC.md` remains authoritative for
 implemented Takibi. `OWNERSHIP_KERNEL.md` records the history and limitations
 of the current affine/linear checker.
 
-Implementation status (2026-07-15): Slices 0 and 1 are implemented. The
+Implementation status (2026-07-15): Slices 0 through 2 are implemented. The
 `Takibi_core` module owns the four-layer vocabulary, the current checker uses
 `Delta.Legacy_flow`, and the indexed runtime-owner subset described in 3.1 is
-accepted. Views, explicit existentials, general propositions, solver hooks,
-and effects remain design targets.
+accepted. Non-indexed erased affine/linear views are also accepted and erased
+before LLVM ABI lowering. Indexed views, explicit existentials, general
+propositions, solver hooks, and effects remain design targets.
 
 The examples in this document are elaboration fixtures. Their contracts and
 runtime representations are decisions; punctuation may change when a fixture
@@ -527,12 +528,39 @@ static addresses/enums, `where`, `prop`, `view`, mutable references, solver
 discharge, or effects. Those remain later slices rather than being simulated
 by ad hoc syntax.
 
-### Slice 2: erased linear view (`PendingTcpEvent`, issue #117)
+### Slice 2: erased linear view (`PendingTcpEvent`, issue #117; implemented 2026-07-15)
 
 - Add `view` declarations and explicit erasure.
 - Rewrite `PendingTcpEvent` without dummy pointer minting.
 - Demonstrate that LLVM signatures contain no token parameter/result and
   that all-path discharge diagnostics remain source-level precise.
+
+Implemented scope:
+
+- non-indexed `affine view Name;` and `linear view Name;` declarations, with
+  optional file-granular `private` mint authority;
+- explicit `view Name` production and a distinct internal `TypeView`/`TView`
+  constructor, so erased permissions cannot be confused with runtime named
+  structs;
+- direct local, parameter, and result flow, including plain ownership,
+  `borrow`, `sink`, move checking, branch joins, early exits, overwrite, and
+  explicit-return checks;
+- rejection of casts, address-taking, `sizeof`/`offsetof`, globals, fields,
+  arrays, slices, tuples, pointers, function-pointer nesting, and indirect
+  stores: an erased view has no runtime place or layout;
+- LLVM ABI erasure: view parameters and call operands are omitted, a view
+  result lowers to `void`, and local view bindings allocate no stack/debug
+  storage;
+- `PendingTcpEvent` now uses `private linear view` rather than a forged null
+  opaque pointer, and `view_linear_branch_missed` is its focused all-paths
+  negative fixture.
+
+The declaring file remains a trusted minting boundary. Slice 2 checks every
+minted value's affine/linear flow but does not prove that trusted code mints a
+permission only when the corresponding external event really occurred.
+Static view parameters, `forall`/`exists`, view change, propositions, and
+solver discharge remain later slices; Slice 2 does not fake them with names
+or runtime token bits.
 
 ### Slice 3: variants/existentials and standard multiplicity
 

@@ -313,7 +313,7 @@ fn http_server_poll_once() {
                                     // IMPLICIT ignore path (stale seq, unknown peer, unsupported
                                     // verb) -- consume it via exactly one responder function in
                                     // http_conn_state.tkb, or this file stops compiling.
-                                    let pending: *PendingTcpEvent = tcp_event_accepted();
+                                    let pending: PendingTcpEvent = tcp_event_accepted();
 
                                     match tcp_conn_state() {
                                         ConnState::Listen => {

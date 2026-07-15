@@ -8,18 +8,11 @@
 // http_server_common.tkb, not a naming convention.
 //
 // Why each transition CALLS its obliged action itself (issue #117's
-// "co-location" doctrine, replacing the earlier witness-token round-trip):
-// a token produced in the wide, less-reviewed file and consumed here only
-// proved that SOME code performed the minting cast -- the cast
-// (`1 as usize as *Token`) lived outside this file's review boundary, so
-// the enforcement direction was inverted (the wide scope granted itself
-// its own proofs). With the action call and the phase write side by side
-// in a function small enough to review at a glance, the coupling needs no
-// token at all: there is no syntactic path to the phase write that does
-// not pass the action call two lines above it. Affine witness tokens
-// remain the right tool where co-location is impossible -- ownership
-// handed across tasks/ISRs/time (channels, in-flight DMA, issue #87) --
-// not across same-file call sites.
+// "co-location" doctrine): with the action call and phase write side by
+// side in a function small enough to review, there is no syntactic path to
+// the phase write that omits the action. The separate PendingTcpEvent view
+// below serves a different purpose: it proves that every accepted event is
+// disposed on every dispatch path, including paths that do not transition.
 //
 // What this file does NOT verify: that each body writes the phase its
 // name claims, and that the builders it calls really emit the segments
@@ -56,22 +49,25 @@ fn tcp_conn_state() -> ConnState {
 // unsupported verb) -- to discharge it through exactly one of the
 // responder functions below. Silently swallowing a protocol event (the
 // shape of issue #116's original bug) is now a compile error, and every
-// deliberate non-response is a greppable tcp_event_ignored call.
-private linear opaque struct PendingTcpEvent;
+// deliberate non-response is a greppable tcp_event_ignored call. This is
+// an erased view, not a runtime handle: it has no pointer, storage, argument,
+// or return value in generated LLVM. `view PendingTcpEvent` only introduces
+// a compile-time obligation into Delta.
+private linear view PendingTcpEvent;
 
-fn tcp_event_accepted() -> *PendingTcpEvent {
-    return 0 as usize as *PendingTcpEvent;
+fn tcp_event_accepted() -> PendingTcpEvent {
+    return view PendingTcpEvent;
 }
 
 // The one legal way to deliberately not respond. The call site IS the
 // reason (a breakpoint here plus the stack trace identifies which arm
 // ignored what); see issue #117 for why this carries no reason argument.
-fn tcp_event_ignored(pending: sink *PendingTcpEvent) {
+fn tcp_event_ignored(pending: sink PendingTcpEvent) {
 }
 
 // Respond to an unsolicited ACK on a listening socket with a stateless
 // RST (no phase change, but a real response -- distinct from ignoring).
-fn tcp_reject_with_rst(pending: sink *PendingTcpEvent,
+fn tcp_reject_with_rst(pending: sink PendingTcpEvent,
                        eth: [u8; 54..], ihl: {20..<21 as u16}, ack_seq: u32) {
     build_rst_from_ack(eth, ihl, ack_seq);
 }
@@ -83,7 +79,7 @@ fn tcp_reject_with_rst(pending: sink *PendingTcpEvent,
 // returned length (and, for response completion, from tcp_conn_state()).
 
 // Listen -> SynRcvd: reachable only by building the SYN-ACK.
-fn tcp_accept_via_syn_ack(pending: sink *PendingTcpEvent,
+fn tcp_accept_via_syn_ack(pending: sink PendingTcpEvent,
                           eth: [u8; 54..], ihl: {20..<21 as u16}) {
     build_syn_ack(eth, ihl);
     conn_state = ConnState::SynRcvd;
@@ -91,7 +87,7 @@ fn tcp_accept_via_syn_ack(pending: sink *PendingTcpEvent,
 
 // Established -> LastAck (peer sent FIN): reachable only by building our
 // FIN+ACK reply.
-fn tcp_begin_close_via_fin_ack(pending: sink *PendingTcpEvent,
+fn tcp_begin_close_via_fin_ack(pending: sink PendingTcpEvent,
                                eth: [u8; 54..], ihl: {20..<21 as u16}) {
     build_fin_ack(eth, ihl);
     conn_state = ConnState::LastAck;
@@ -101,7 +97,7 @@ fn tcp_begin_close_via_fin_ack(pending: sink *PendingTcpEvent,
 // example actually building a response segment (http_start_response's
 // contract: a return >= 0 means a segment now sits in the frame). Which
 // phase follows depends on whether that response is already complete.
-fn tcp_respond(pending: sink *PendingTcpEvent,
+fn tcp_respond(pending: sink PendingTcpEvent,
                eth: [u8; 1514..], ihl: {20..<21 as u16},
                req: *u8, req_len: u16) -> i32 {
     let n: i32 = http_start_response(eth, ihl, req, req_len);
@@ -117,7 +113,7 @@ fn tcp_respond(pending: sink *PendingTcpEvent,
 
 // Sending -> LastAck, or stay Sending: reachable only by building the
 // next continuation segment.
-fn tcp_continue(pending: sink *PendingTcpEvent,
+fn tcp_continue(pending: sink PendingTcpEvent,
                 eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
     let n: i32 = http_continue_response(eth, ihl);
     if (n >= 0) {
@@ -130,7 +126,7 @@ fn tcp_continue(pending: sink *PendingTcpEvent,
 
 // LastAck -> Listen: reachable only by building the final ACK answering
 // the peer's FIN+ACK -- the compile-time form of issue #116's fix.
-fn tcp_close_via_final_ack(pending: sink *PendingTcpEvent,
+fn tcp_close_via_final_ack(pending: sink PendingTcpEvent,
                            eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
     let n: i32 = build_tcp_payload(eth, ihl, 0, TCP_FLAG_ACK);
     if (n >= 0) {
@@ -143,12 +139,12 @@ fn tcp_close_via_final_ack(pending: sink *PendingTcpEvent,
 
 // SynRcvd -> Established: the peer's valid handshake ACK arrived; nothing
 // to send.
-fn tcp_handshake_complete(pending: sink *PendingTcpEvent) {
+fn tcp_handshake_complete(pending: sink PendingTcpEvent) {
     conn_state = ConnState::Established;
 }
 
 // Any state -> Listen with nothing owed to the peer: an incoming RST, or
 // the peer's plain ACK of our FIN in LastAck.
-fn tcp_reset_to_listen(pending: sink *PendingTcpEvent) {
+fn tcp_reset_to_listen(pending: sink PendingTcpEvent) {
     conn_state = ConnState::Listen;
 }

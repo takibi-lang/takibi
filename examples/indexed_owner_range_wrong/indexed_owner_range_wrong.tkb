@@ -1,3 +1,7 @@
+// Compile-error fixture for Slice 1 range checking at owner construction.
+// SlotLease accepts only indices in [0, 4); passing 4 must be rejected
+// before an owner carrying an invalid runtime index can be minted.
+// Expected diagnostic: "constant value 4 does not fit the refined type {0..<4}".
 private linear struct SlotLease[n: usize] {
     private idx: {0..<4 as usize} @ n;
 }
@@ -11,6 +15,7 @@ fn slot_unlease(lease: sink SlotLease[n]) {
 }
 
 fn app_main() {
+    // The upper bound is exclusive, so 4 is the first invalid index.
     let lease = slot_lease(4);
     slot_unlease(lease);
 }

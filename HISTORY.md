@@ -7288,3 +7288,38 @@ permission/view slice must enforce the latter.
 Validation: all 630 Alcotest cases passed; `make qemutest` and the full
 `make check` passed all 105 host, compile-error, DWARF, QEMU, and STM32 build
 checks.
+
+## 2026-07-15: Takibi Core Slice 2, Erased Affine/Linear Views
+
+Implemented the first explicitly erased `Delta` resource. Takibi now accepts
+non-indexed `affine view Name;` and `linear view Name;` declarations plus the
+explicit mint expression `view Name`. Views have a distinct AST/inference type
+from runtime named structs. They flow directly through locals, parameters,
+returns, `borrow`, and `sink`, using the existing any-path/all-path resource
+analysis. Private declarations restrict minting to the declaring file.
+
+The runtime boundary is enforced rather than conventional: views cannot be
+cast, addressed, measured, placed in globals/fields/arrays/slices/tuples or
+behind pointers/function pointers, or written through runtime storage. A
+view-returning function must explicitly return on every path, and a producing
+call result cannot be discarded. LLVM removes view parameters and call
+operands, lowers view results to `void`, and creates no alloca or DWARF local
+for them. Unit tests inspect the generated signatures and call sites directly.
+
+`PendingTcpEvent` in `examples/common/http_conn_state.tkb` now uses
+`private linear view` and `return view PendingTcpEvent`; the dummy
+`0 as usize as *PendingTcpEvent` representation and every pointer-shaped
+parameter are gone. `examples/view_linear_branch_missed` is the focused
+compile-error companion and explains in English why its missing branch must
+fail.
+
+Slice 2 deliberately has no static view indices, quantifiers, existential
+opening, view change, propositions, solver integration, or effects. The
+declaring file is still trusted to mint only when the external event actually
+exists; this slice proves flow after minting, not the truth of that assertion.
+
+Validation: all 647 Alcotest cases passed, including parser, privacy,
+resource-flow, storage-ban, return-totality, runtime-operator, and LLVM ABI
+regressions. The full `make check` passed all 106 host, compile-error, DWARF,
+and QEMU tests, plus every STM32 cross-build, including the migrated HTTP
+server under `--forbid-trap`.

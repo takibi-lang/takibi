@@ -65,7 +65,7 @@ let check_refined_base_range pos lo hi base =
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN INLINE RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
+%token FN INLINE RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR VIEW BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
 %token DARROW COLONCOLON UNDERSCORE
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
 %token ASSIGN DOT
@@ -151,6 +151,8 @@ item:
       OwnedStructDef
         (name, kind, static_params, fields, false, None, private_fields,
          is_private, $symbolstartpos) }
+  | p = private_flag k = owned_kind VIEW name = IDENT SEMI
+    { ViewDef (name, k, p, $symbolstartpos) }
   | p = private_flag OPAQUE STRUCT IDENT SEMI
     { OpaqueStructDef ($4, KindPlain, p, $symbolstartpos) }
   | p = private_flag AFFINE OPAQUE STRUCT IDENT SEMI
@@ -398,6 +400,8 @@ expr:
   | TRUE   { { desc = BoolLit true;   loc = $symbolstartpos } }
   | FALSE  { { desc = BoolLit false;  loc = $symbolstartpos } }
   | STRING { { desc = StringLit $1;   loc = $symbolstartpos } }
+  | VIEW name = IDENT
+    { { desc = ViewLit name; loc = $symbolstartpos } }
   | IDENT { { desc = Var $1; loc = $symbolstartpos } }
   | IDENT LPAREN args RPAREN { { desc = Call ($1, $3); loc = $symbolstartpos } }
   | IDENT COLONCOLON IDENT

@@ -3,8 +3,9 @@
 Status: LIVING DESIGN MEMO, not the language spec. Stages 1, 2, the tuple
 interlude, and Stage 3a are implemented; their actual behavior lives in
 SPEC.md. The long-term architecture and Stage 3b's next vertical slice now
-live in TAKIBI_CORE.md; its Slice 0 Core boundary and Slice 1 indexed runtime
-owner are implemented. View/variant/solver work remains outlook. As each
+live in TAKIBI_CORE.md; its Slice 0 Core boundary, Slice 1 indexed runtime
+owner, and Slice 2 non-indexed erased views are implemented. Indexed
+view/variant/solver work remains outlook. As each
 surface slice lands, SPEC.md stays authoritative for the language that
 actually exists.
 
@@ -803,6 +804,52 @@ rejected rather than pretending function-local resource tracking covers
 them. Singleton values are likewise non-addressable and excluded from
 ordinary mutable storage, because a widened pointer could otherwise mutate
 the runtime value while the `@ n` fact survived.
+
+#### 6.7.3 Slice 2 implementation result (2026-07-15)
+
+The first erased-permission slice is now implemented. The surface distinction
+that prompted the four-layer design is concrete:
+
+```takibi
+private linear view PendingTcpEvent;
+
+fn tcp_event_accepted() -> PendingTcpEvent {
+    return view PendingTcpEvent;
+}
+
+fn tcp_event_ignored(pending: sink PendingTcpEvent) {}
+```
+
+`PendingTcpEvent` has moved from `private linear opaque struct` plus a forged
+null pointer to this form. It is tracked in `Delta`, not bundled with a
+`Gamma` value. Its source binding is still subject to the same exact all-paths
+linear discharge rule, but LLVM lowers the producer to `void ()`, omits the
+consumer's view parameter and every corresponding call operand, and creates
+no alloca or DWARF variable for the binding. Runtime packet/state values remain
+ordinary independent arguments.
+
+This resolves the earlier representation ambiguity without adding a second
+ownership logic. Indexed runtime owners such as `SlotLease[n]` carry data and
+static identity; erased views carry authority only. Both flow through the same
+affine/linear checker and `borrow`/`sink` contracts. The compiler's internal
+types distinguish `TView` from a named runtime struct, and reject every route
+that would pretend a view had storage: casts, address-taking, layout queries,
+globals, fields, arrays/slices, tuples, pointers, function pointers, and
+indirect stores.
+
+`private` makes the declaring file the explicit mint authority. That is still
+a trusted boundary: the compiler proves that every minted permission flows
+correctly, not that trusted code minted it only after a real event. The same
+trust qualification applies to Slice 1's private owner constructors.
+
+This slice intentionally stops before the ATS2-strength part of the long-term
+destination. Views cannot yet take static parameters, so no `View[n]`, view
+change, quantified state, existential package, proposition, or solver goal is
+being simulated. Those additions must reuse the indexed Core introduced by
+Slice 1 rather than encode identities in runtime token bits. The focused
+`view_linear_branch_missed` fixture records the all-paths failure with an
+English source comment and expected diagnostic; the real HTTP server remains
+the positive integration fixture.
 
 ## 7. Stage 4 outlook: channel v2 (#113) + variant enums (#20)
 

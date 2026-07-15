@@ -49,6 +49,7 @@ rule read = parse
   | "opaque"  { OPAQUE }
   | "affine"  { AFFINE }
   | "linear"  { LINEAR }
+  | "view"    { VIEW }
   | "borrow"  { BORROW }
   | "sink"    { SINK }
   | "private" { PRIVATE }

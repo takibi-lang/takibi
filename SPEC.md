@@ -499,16 +499,13 @@ motivating case is a network RX descriptor: `net_rx_acquire() ->
   value 'NAME' was already consumed"). A `return` of the affine value
   itself consumes it, exactly like passing it to a consuming parameter,
   when the function's own return type is affine.
-- **`borrow *Name`** -- valid **only** as a function parameter type, and
-  only for a pointer to an affine opaque type. Calling through a
+- **`borrow T`** -- valid **only** as a function parameter type, where `T`
+  is an affine/linear opaque pointer, indexed owner, or erased view. Calling through a
   `borrow *Name` parameter does **not** consume the argument, so it may
   be borrowed an unlimited number of times before (or without ever)
-  being consumed. Using `borrow` on any other parameter type is a
-  compile error ("borrow is only valid on a pointer to an affine opaque
-  struct parameter" / "...only valid in function parameter types").
-- **`sink *Name`** -- also valid **only** as a function parameter type,
-  and only for a pointer to an affine opaque type (same restriction as
-  `borrow`, same error wording with "sink" in place of "borrow"). Unlike
+  being consumed. The `*Name` spelling shown here is the opaque-handle case.
+- **`sink T`** -- has the same parameter-only/kinded-type restriction.
+  Unlike
   `borrow`, a `sink *Name` parameter **does** consume the argument at the
   call site, exactly like a plain `*Name` parameter -- the difference is
   entirely on the CALLEE's side (see "must be consumed" below): `sink`
@@ -657,6 +654,63 @@ See examples/linear_obligation (positive) and examples/
 linear_never_consumed, linear_branch_missed, linear_cast_discard,
 linear_overwrite (compile-error companions).
 
+## Erased Affine/Linear Views (Takibi Core Slice 2)
+
+An erased view is a compile-time permission or obligation with no runtime
+payload:
+
+```
+private linear view PendingEvent;
+
+fn accept_event() -> PendingEvent {
+    return view PendingEvent;
+}
+
+fn inspect_event(p: borrow PendingEvent) {}  // non-consuming
+fn finish_event(p: sink PendingEvent) {}     // terminal consumer
+
+fn dispatch() {
+    let pending: PendingEvent = accept_event();
+    inspect_event(pending);
+    finish_event(pending);
+}
+```
+
+Slice 2 supports non-indexed `affine view Name;` and `linear view Name;`.
+`view Name` explicitly mints a value. If the declaration is `private`, only
+expressions in the declaring file may mint it; other files may name, receive,
+borrow, forward, and sink it. A non-private view can be minted wherever it is
+visible. Minting is a trusted assertion: the compiler checks the subsequent
+affine/linear flow, not whether an external event really occurred.
+
+Views use the same resource-flow rules as other kinded values. A plain
+parameter takes ownership, `borrow` does not consume, `sink` is a terminal
+consumer, and returning a view moves it to the caller. A `linear view` must be
+consumed exactly once on every path, including early exits. A function whose
+result is a view must explicitly return on every path. A producing call cannot
+be used as a discarded expression. `affine view` currently retains Takibi's
+existing affine rule: no double use and consumption on at least one path.
+
+The representation rule is strict:
+
+- a view has no fields, size, alignment, address, null value, or integer/pointer
+  cast;
+- it cannot appear in a global, struct field, array, slice, tuple, pointer, or
+  function-pointer type, nor be stored indirectly;
+- direct local bindings, direct function parameters, and direct function
+  results are the supported positions;
+- LLVM omits view parameters and their call operands, lowers a view result to
+  `void`, and allocates no local or debug storage for a view.
+
+Thus `fn f(p: sink PendingEvent, n: i32) -> PendingEvent` has runtime ABI
+`void f(i32)`. Source evaluation order and runtime side effects of calls are
+preserved even when their view inputs/results erase.
+
+Static parameters (`View[n]`), explicit `forall`/`exists`, existential opening,
+view change, propositions, and solver discharge are not part of Slice 2. See
+`examples/common/http_conn_state.tkb` for the real `PendingTcpEvent` use and
+`examples/view_linear_branch_missed` for its focused compile-error companion.
+
 ## File-Granular Privacy (`private`)
 
 The file is takibi's module and trust boundary (GitHub issue #108,
@@ -668,6 +722,7 @@ expression's own source file, with zero runtime/layout footprint:
 ```
 private let mut conn_state: ConnState = ConnState::Listen;   // global
 private linear opaque struct PendingTcpEvent;                // opaque type
+private linear view EventPending;                            // erased view
 struct Chan { private mutex: i32; ... }                      // struct field
 ```
 
@@ -679,6 +734,9 @@ struct Chan { private mutex: i32; ... }                      // struct field
   legal everywhere (annotations, parameters, passing values through), so
   other files can hold and relay handles; they just cannot forge them.
   The declaring file's functions are the only source.
+- **View**: `view Name` minting must occur in the declaration's file. Naming
+  and moving the erased permission across files stays legal, like opaque
+  handles; only the explicit production site is private.
 - **Struct field**: reading (`s.f`, `&s.f`), writing, and `offsetof` on a
   `private` field must come from the struct's declaring file; so must
   constructing the struct via a struct literal when it has ANY private

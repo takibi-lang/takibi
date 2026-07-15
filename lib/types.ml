@@ -13,6 +13,7 @@ type ty =
   | TIo  of ty            (* io T  -- volatile-qualified value type; *io T = TPtr(TIo T) *)
   | TArray of ty * int    (* array type: [T; N] *)
   | TStruct of string     (* named struct type *)
+  | TView of string       (* erased affine/linear permission value *)
   | TIndexedStruct of string * static_term list
     (* First-class runtime struct carrying erased static indices. *)
   | TSingleton of ty * static_term
@@ -141,6 +142,7 @@ let rec to_string t =
       Printf.sprintf "(%s) -> %s"
         (String.concat ", " (List.map to_string ps)) (to_string r)
   | TStruct s -> s
+  | TView s -> Printf.sprintf "view %s" s
   | TIndexedStruct (s, args) ->
       Printf.sprintf "%s[%s]" s
         (String.concat ", " (List.map static_to_string args))
@@ -168,7 +170,7 @@ let rec occurs rv = function
   | TTuple ts                  -> List.exists (occurs rv) ts
   | TIndexedStruct _           -> false
   | TSingleton (t, _)          -> occurs rv t
-  | TStruct _                  -> false
+  | TStruct _ | TView _        -> false
   | _                          -> false
 
 let rec unify t1 t2 =
@@ -296,6 +298,9 @@ let rec unify t1 t2 =
   | TStruct s1, TStruct s2 ->
       if s1 <> s2 then
         raise (Unify_error (Printf.sprintf "struct type mismatch: %s vs %s" s1 s2))
+  | TView s1, TView s2 ->
+      if s1 <> s2 then
+        raise (Unify_error (Printf.sprintf "view type mismatch: %s vs %s" s1 s2))
   | TVar rv, t | t, TVar rv ->
       (match !rv with
        | Link t' -> unify t' t
@@ -340,6 +345,7 @@ let rec of_ast_in_scope scope = function
   | Ast.TypeArray (t, n) -> TArray (of_ast_in_scope scope t, n)
   | Ast.TypeFn (ps, r)   -> TFun (List.map (of_ast_in_scope scope) ps, of_ast_in_scope scope r)
   | Ast.TypeNamed s      -> TStruct s
+  | Ast.TypeView s       -> TView s
   | Ast.TypeIndexed (s, args) ->
       TIndexedStruct (s, List.map (static_of_ast scope) args)
   | Ast.TypeSingleton (base, n) ->
@@ -416,6 +422,7 @@ let rec to_ast t =
   | TArray (t, n) -> Ast.TypeArray (to_ast t, n)
   | TFun (ps, r)  -> Ast.TypeFn (List.map to_ast ps, to_ast r)
   | TStruct s     -> Ast.TypeNamed s
+  | TView s       -> Ast.TypeView s
   | TIndexedStruct (s, args) ->
       Ast.TypeIndexed (s, List.map static_to_ast args)
   | TSingleton (base, n) -> Ast.TypeSingleton (to_ast base, static_to_ast n)

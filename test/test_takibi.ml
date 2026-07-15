@@ -128,6 +128,7 @@ let rec show_type = function
       Printf.sprintf "fn(%s) -> %s"
         (String.concat ", " (List.map show_type ps)) (show_type r)
   | Ast.TypeNamed s     -> s
+  | Ast.TypeView s      -> "view " ^ s
   | Ast.TypeIndexed (s, args) ->
       let arg = function
         | Ast.StaticName n -> n
@@ -197,6 +198,17 @@ let expect_ok src () =
 (* -- Parser tests ---------------------------------------------------------- *)
 
 let parser_tests = [
+  Alcotest.test_case "erased view declaration and mint expression parse" `Quick
+    (fun () ->
+      match parse
+        "private linear view ParsedPending;
+         fn parsed_mint() -> ParsedPending { return view ParsedPending; }" with
+      | [Ast.ViewDef ("ParsedPending", Ast.KindLinear, true, _);
+         Ast.FuncDef { ret_type = Some (Ast.TypeNamed "ParsedPending");
+                       body = [{ desc = Ast.Return
+                         { desc = Ast.ViewLit "ParsedPending"; _ }; _ }]; _ }] -> ()
+      | _ -> Alcotest.fail "expected a private linear ViewDef and ViewLit");
+
   Alcotest.test_case "indexed linear struct and singleton syntax parse" `Quick (fun () ->
     match parse
       "private linear struct PLease[n: usize] { private idx: {0..<4 as usize} @ n; }
@@ -3967,6 +3979,142 @@ let infer_tests = [
         struct FHolder8 { t: *FTok8; }
         fn app_main() -> i32 { return 0; }");
 
+  (* -- Takibi Core Slice 2: erased affine/linear views -------------------- *)
+
+  Alcotest.test_case "erased view: mint, borrow, and sink compile" `Quick
+    (expect_ok
+       "private linear view ViewPending1;
+        fn view_mint1() -> ViewPending1 { return view ViewPending1; }
+        fn view_peek1(p: borrow ViewPending1) {}
+        fn view_sink1(p: sink ViewPending1) {}
+        fn view_use1() {
+          let p: ViewPending1 = view_mint1();
+          view_peek1(p);
+          view_sink1(p);
+        }");
+
+  Alcotest.test_case "erased linear view: both branches may choose different sinks" `Quick
+    (expect_ok
+       "linear view ViewPending2;
+        fn view_mint2() -> ViewPending2 { return view ViewPending2; }
+        fn view_sink2a(p: sink ViewPending2) {}
+        fn view_sink2b(p: sink ViewPending2) {}
+        fn view_use2(c: bool) {
+          let p: ViewPending2 = view_mint2();
+          if (c) { view_sink2a(p); } else { view_sink2b(p); }
+        }");
+
+  Alcotest.test_case "erased linear view: one branch may not forget the obligation" `Quick
+    (expect_type_error "consumed on some paths but not on every path"
+       "linear view ViewPending3;
+        fn view_mint3() -> ViewPending3 { return view ViewPending3; }
+        fn view_sink3(p: sink ViewPending3) {}
+        fn view_use3(c: bool) {
+          let p: ViewPending3 = view_mint3();
+          if (c) { view_sink3(p); }
+        }");
+
+  Alcotest.test_case "erased view: a producing call result cannot be discarded" `Quick
+    (expect_type_error "must be moved into an owning binding or consumer"
+       "linear view ViewPending4;
+        fn view_mint4() -> ViewPending4 { return view ViewPending4; }
+        fn view_discard4() { view_mint4(); }");
+
+  Alcotest.test_case "erased view: casting cannot mint a permission" `Quick
+    (expect_type_error "cannot construct erased view 'ViewPending5' with a cast"
+       "linear view ViewPending5;
+        fn view_sink5(p: sink ViewPending5) {}
+        fn view_cast5() {
+          let p: ViewPending5 = 0 as ViewPending5;
+          view_sink5(p);
+        }");
+
+  Alcotest.test_case "erased view: address-of is rejected because there is no storage" `Quick
+    (expect_type_error "cannot take the address of erased view"
+       "linear view ViewPending6;
+        fn view_mint6() -> ViewPending6 { return view ViewPending6; }
+        fn view_sink6(p: sink ViewPending6) {}
+        fn view_addr6() {
+          let mut p: ViewPending6 = view_mint6();
+          let raw: usize = (&p) as usize;
+          view_sink6(p);
+        }");
+
+  Alcotest.test_case "erased view: globals and struct fields cannot store it" `Quick
+    (fun () ->
+      expect_type_error "global 'view_global7' cannot hold an erased view"
+        "linear view ViewPending7;
+         let mut view_global7: ViewPending7;" ();
+      expect_type_error "struct field 'ViewHolder7.p' cannot hold an erased view"
+        "linear view ViewPending7b;
+         struct ViewHolder7 { p: ViewPending7b; }" ());
+
+  Alcotest.test_case "erased view: runtime containers and sizeof are rejected" `Quick
+    (fun () ->
+      expect_type_error "cannot live inside a runtime container"
+        "linear view ViewPending8;
+         fn view_array8(a: [ViewPending8; 2]) {}" ();
+      expect_type_error "has no runtime size or layout"
+        "linear view ViewPending8b;
+         fn view_size8() -> usize { return sizeof(ViewPending8b); }" ());
+
+  Alcotest.test_case "erased view: runtime comparison is rejected" `Quick
+    (expect_type_error "cannot be operands of runtime operators"
+       "linear view ViewPending8c;
+        fn view_mint8c() -> ViewPending8c { return view ViewPending8c; }
+        fn view_sink8c(p: sink ViewPending8c) {}
+        fn view_compare8c() -> bool {
+          let p: ViewPending8c = view_mint8c();
+          let same: bool = p == p;
+          view_sink8c(p);
+          return same;
+        }");
+
+  Alcotest.test_case "erased view: runtime min/max is rejected" `Quick
+    (expect_type_error "cannot be operands of runtime min/max"
+       "linear view ViewPending8e;
+        fn view_mint8e() -> ViewPending8e { return view ViewPending8e; }
+        fn view_min8e() {
+          let p: ViewPending8e = view_mint8e();
+          // Views carry static obligations only, so min cannot inspect one.
+          let q = min(p, p);
+        }");
+
+  Alcotest.test_case "erased view: a view-taking function is not a runtime function pointer" `Quick
+    (expect_type_error "cannot be used as a runtime function pointer"
+       "linear view ViewPending8d;
+        fn view_sink8d(p: sink ViewPending8d) {}
+        fn view_fnptr8d() {
+          let f = view_sink8d;
+        }");
+
+  Alcotest.test_case "erased view: a local must be initialized" `Quick
+    (expect_type_error "must be initialized at its declaration"
+       "linear view ViewPending9;
+        fn view_uninit9() { let mut p: ViewPending9; }");
+
+  Alcotest.test_case "erased view: a producing function cannot fall through" `Quick
+    (expect_type_error "must return explicitly on every path"
+       "linear view ViewPending10;
+        fn view_missing_return10() -> ViewPending10 {}");
+
+  Alcotest.test_case "private erased view: only its declaring file may mint it" `Quick
+    (fun () ->
+      match infer_files [
+        "view_owner.tkb",
+          "private linear view PrivatePending11;
+           fn private_sink11(p: sink PrivatePending11) {}";
+        "view_forge.tkb",
+          "fn private_forge11() {
+             let p: PrivatePending11 = view PrivatePending11;
+             private_sink11(p);
+           }";
+      ] with
+      | _ -> Alcotest.fail "expected cross-file view minting to fail"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) "diagnostic names private view" true
+            (contains_substring msg "cannot mint private view 'PrivatePending11'"));
+
 ]
 
 (* -- Codegen tests ----------------------------------------------------------
@@ -4027,6 +4175,76 @@ let codegen_tests = [
           let ir = Llvm.string_of_llvalue f in
           Alcotest.(check bool) "field store uses aggregate storage" true
             (contains_substring ir "getelementptr" && contains_substring ir "store i32"));
+
+  Alcotest.test_case
+    "Slice 2 ABI: erased views occupy no parameter, return, alloca, or call operand" `Quick
+    (fun () ->
+      let src =
+        "private linear view CgPendingView;
+         fn cgv_mint() -> CgPendingView { return view CgPendingView; }
+         fn cgv_consume(p: sink CgPendingView, value: i32) -> i32 {
+           return value;
+         }
+         fn cgv_use(value: i32) -> i32 {
+           let p: CgPendingView = cgv_mint();
+           return cgv_consume(p, value);
+         }" in
+      ignore (gen_codegen src);
+      let find name = match Hashtbl.find_opt Llvm_gen.functions name with
+        | Some (_, f) -> f
+        | None -> Alcotest.failf "%s not found" name
+      in
+      let mint = find "cgv_mint" in
+      let consume = find "cgv_consume" in
+      let use = find "cgv_use" in
+      Alcotest.(check int) "mint has zero runtime parameters"
+        0 (Array.length (Llvm.params mint));
+      Alcotest.(check int) "consume keeps only its i32 parameter"
+        1 (Array.length (Llvm.params consume));
+      let mint_ir = Llvm.string_of_llvalue mint in
+      let consume_ir = Llvm.string_of_llvalue consume in
+      let use_ir = Llvm.string_of_llvalue use in
+      Alcotest.(check bool) "mint lowers to void" true
+        (contains_substring mint_ir "define void @cgv_mint()");
+      Alcotest.(check bool) "mint has no token alloca" false
+        (contains_substring mint_ir "alloca" || contains_substring mint_ir "i1");
+      Alcotest.(check bool) "consumer signature has no token" false
+        (contains_substring consume_ir "i1");
+      Alcotest.(check bool) "use calls zero-ABI mint" true
+        (contains_substring use_ir "call void @cgv_mint()");
+      Alcotest.(check bool) "use passes only the runtime i32" true
+        (contains_substring use_ir "call i32 @cgv_consume(i32"));
+
+  Alcotest.test_case
+    "Slice 2 ABI: mutable view self-transforms remain storage-free" `Quick
+    (fun () ->
+      let src =
+        "linear view CgMutableView;
+         fn cgvm_mint() -> CgMutableView { return view CgMutableView; }
+         fn cgvm_transform(p: CgMutableView) -> CgMutableView { return p; }
+         fn cgvm_consume(p: sink CgMutableView) {}
+         fn cgvm_use() {
+           let mut p: CgMutableView = cgvm_mint();
+           p = cgvm_transform(p);
+           cgvm_consume(p);
+         }" in
+      ignore (gen_codegen src);
+      let find name = match Hashtbl.find_opt Llvm_gen.functions name with
+        | Some (_, f) -> f
+        | None -> Alcotest.failf "%s not found" name
+      in
+      let transform = find "cgvm_transform" in
+      let use = find "cgvm_use" in
+      Alcotest.(check int) "transform has no runtime parameters"
+        0 (Array.length (Llvm.params transform));
+      let transform_ir = Llvm.string_of_llvalue transform in
+      let use_ir = Llvm.string_of_llvalue use in
+      Alcotest.(check bool) "transform lowers to void" true
+        (contains_substring transform_ir "define void @cgvm_transform()");
+      Alcotest.(check bool) "mutable view has no runtime slot" false
+        (contains_substring use_ir "alloca" || contains_substring use_ir "i1");
+      Alcotest.(check bool) "self-transform is still emitted as a call" true
+        (contains_substring use_ir "call void @cgvm_transform()"));
 
 
   Alcotest.test_case "overloads emit mangled symbols and direct calls use the selected symbol" `Quick

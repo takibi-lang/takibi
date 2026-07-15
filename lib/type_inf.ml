@@ -16,12 +16,42 @@ type senv = ((string * Ast.type_expr) list * bool * int option) StringMap.t
 let active_static_scope : static_scope option ref = ref None
 let value_static_identities : static_term StringMap.t ref = ref StringMap.empty
 
+let view_kinds : (string, Ast.opaque_kind) Hashtbl.t = Hashtbl.create 8
+
+let rec resolve_view_type = function
+  | Ast.TypeNamed name when Hashtbl.mem view_kinds name -> Ast.TypeView name
+  | Ast.TypePtr t -> Ast.TypePtr (resolve_view_type t)
+  | Ast.TypeIo t -> Ast.TypeIo (resolve_view_type t)
+  | Ast.TypeArray (t, n) -> Ast.TypeArray (resolve_view_type t, n)
+  | Ast.TypeFn (args, ret) ->
+      Ast.TypeFn (List.map resolve_view_type args, resolve_view_type ret)
+  | Ast.TypeRefined (lo, hi, base) ->
+      Ast.TypeRefined (lo, hi, resolve_view_type base)
+  | Ast.TypeSlice (t, n) -> Ast.TypeSlice (resolve_view_type t, n)
+  | Ast.TypeBorrow t -> Ast.TypeBorrow (resolve_view_type t)
+  | Ast.TypeSink t -> Ast.TypeSink (resolve_view_type t)
+  | Ast.TypeAlignedPtr (n, t) -> Ast.TypeAlignedPtr (n, resolve_view_type t)
+  | Ast.TypeTuple ts -> Ast.TypeTuple (List.map resolve_view_type ts)
+  | Ast.TypeSingleton (t, n) -> Ast.TypeSingleton (resolve_view_type t, n)
+  | t -> t
+
+let of_ast_in_view_scope scope t =
+  of_ast_in_scope scope (resolve_view_type t)
+
 let of_ast t = match !active_static_scope with
-  | Some scope -> of_ast_in_scope scope t
-  | None -> Types.of_ast t
+  | Some scope -> of_ast_in_view_scope scope t
+  | None -> Types.of_ast (resolve_view_type t)
 
 let of_ast_opt = function Some t -> of_ast t | None -> fresh ()
 let ret_of_ast_opt = function Some t -> of_ast t | None -> TVoid
+
+let of_ast_opt_in_view_scope scope = function
+  | Some t -> of_ast_in_view_scope scope t
+  | None -> fresh ()
+
+let ret_of_ast_opt_in_view_scope scope = function
+  | Some t -> of_ast_in_view_scope scope t
+  | None -> TVoid
 
 let indexed_struct_params : (string, Ast.static_param list) Hashtbl.t =
   Hashtbl.create 8
@@ -31,7 +61,7 @@ let indexed_struct_kinds : (string, Ast.opaque_kind) Hashtbl.t =
 
 let field_type_for_instance sname args field_ast =
   match Hashtbl.find_opt indexed_struct_params sname with
-  | None -> Types.of_ast field_ast
+  | None -> Types.of_ast (resolve_view_type field_ast)
   | Some formals ->
       if List.length formals <> List.length args then
         raise (Unify_error (Printf.sprintf
@@ -40,7 +70,7 @@ let field_type_for_instance sname args field_ast =
       let scope = create_static_scope () in
       List.iter2 (fun (name, _) value -> bind_static scope name value)
         formals args;
-      of_ast_in_scope scope field_ast
+      of_ast_in_view_scope scope field_ast
 
 let struct_instance = function
   | TStruct s -> Some (s, [])
@@ -551,6 +581,15 @@ let rec contains_singleton_ty t = match repr t with
       List.exists contains_singleton_ty args || contains_singleton_ty ret
   | _ -> false
 
+let rec contains_view_ty t = match repr t with
+  | TView _ -> true
+  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
+  | TAlignedPtr (_, t) | TSingleton (t, _) -> contains_view_ty t
+  | TTuple ts -> List.exists contains_view_ty ts
+  | TFun (args, ret) ->
+      List.exists contains_view_ty args || contains_view_ty ret
+  | _ -> false
+
 let is_tuple_ty t = match repr t with
   | TTuple _ -> true
   | _ -> false
@@ -626,6 +665,18 @@ let private_struct_fields : (string * string, string) Hashtbl.t = Hashtbl.create
    every field, private ones included, so the literal itself is
    declaring-file-only (this is what makes smart constructors real). *)
 let private_struct_lit : (string, string) Hashtbl.t = Hashtbl.create 8
+
+(* private erased view name -> declaring file. Naming remains public; only
+   the explicit `view Name` mint expression is restricted. *)
+let private_views : (string, string) Hashtbl.t = Hashtbl.create 8
+
+let check_private_view_construction (loc : Ast.loc) name =
+  match Hashtbl.find_opt private_views name with
+  | Some file when file <> loc.Lexing.pos_fname ->
+      raise (TypeError (loc, Printf.sprintf
+        "cannot mint private view '%s' outside its declaring file '%s'"
+        name file))
+  | _ -> ()
 
 (* Every opaque struct name of any kind, for the pointer-arithmetic
    completeness check (Stage 2 Part C): arithmetic on a pointer needs the
@@ -775,6 +826,10 @@ let check_affine_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
    4.6 for why this dodges the relational-reasoning wall issue #89 hit). *)
 let check_linear_cast_away loc (src_ty : ty) =
   match repr src_ty with
+  | TView name ->
+      raise (TypeError (loc, Printf.sprintf
+        "cannot cast erased view '%s': views have no runtime representation"
+        name))
   | TIndexedStruct (sname, _) ->
       raise (TypeError (loc, Printf.sprintf
         "cannot cast indexed owner '%s': use its declaring module's constructor/accessor functions"
@@ -831,6 +886,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
   | BoolLit _   -> TBool
   | StringLit _ -> TPtr TU8
+  | ViewLit name ->
+      if not (Hashtbl.mem view_kinds name) then
+        raise (TypeError (e.loc, Printf.sprintf "unknown erased view '%s'" name));
+      check_private_view_construction e.loc name;
+      TView name
   | Var name ->
       check_private_global_access e.loc name;
       (* Check local/global variables first *)
@@ -852,7 +912,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | None ->
            (* Function name used as a value (function pointer) *)
            match StringMap.find_opt name fenv with
-           | Some [(_, ft)] -> instantiate_static_params ft
+           | Some [(_, ft)] ->
+               let ft = instantiate_static_params ft in
+               if contains_view_ty ft then
+                 raise (TypeError (e.loc, Printf.sprintf
+                   "function '%s' has erased view parameters/results and cannot be used as a runtime function pointer in Slice 2"
+                   name));
+               ft
            | Some _ ->
                raise (TypeError (e.loc, Printf.sprintf
                  "overloaded function '%s' needs an expected function type; use an explicit wrapper" name))
@@ -862,6 +928,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | BinOp (op, e1, e2) ->
       let t1 = infer_expr senv eenv tyenv fenv e1 in
       let t2 = infer_expr senv eenv tyenv fenv e2 in
+      if contains_view_ty t1 || contains_view_ty t2 then
+        raise (TypeError (e.loc,
+          "erased views cannot be operands of runtime operators"));
       (match op with
        | Add ->
            (* Pointer arithmetic: ptr + isize -> returns the same pointer type. TIo is a value type, excluded.
@@ -1055,6 +1124,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            ct1)
   | Bnot e1 ->
       let t1 = infer_expr senv eenv tyenv fenv e1 in
+      if contains_view_ty t1 then
+        raise (TypeError (e.loc,
+          "erased views cannot be operands of runtime operators"));
       canon_ty t1
   | Deref e1 ->
       let t1 = infer_expr senv eenv tyenv fenv e1 in
@@ -1079,6 +1151,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              raise (TypeError (e.loc, Printf.sprintf
                "cannot take the address of indexed owner '%s': an alias would \
                 escape obligation tracking" name));
+           if contains_view_ty t then
+             raise (TypeError (e.loc, Printf.sprintf
+               "cannot take the address of erased view '%s': views have no runtime storage"
+               name));
            if contains_singleton_ty t then
              raise (TypeError (e.loc, Printf.sprintf
                "cannot take the address of singleton value '%s': mutation \
@@ -1118,7 +1194,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       check_linear_cast_away e.loc src_ty;
       check_affine_ptr_launder e.loc src_ty target_ty;
       check_private_type_construction e.loc target_ty;
-      (match target_ty with
+      (match resolve_view_type target_ty with
+       | Ast.TypeView name ->
+           raise (TypeError (e.loc, Printf.sprintf
+             "cannot construct erased view '%s' with a cast; use `view %s`"
+             name name))
        | Ast.TypeIndexed (name, _) ->
            raise (TypeError (e.loc, Printf.sprintf
              "cannot construct indexed owner '%s' with a cast; use its constructor"
@@ -1675,7 +1755,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
          flows into a consuming position). *)
       if List.length exprs < 2 then
         raise (TypeError (e.loc, "a tuple literal needs at least 2 components"));
-      TTuple (List.map (fun x -> infer_expr senv eenv tyenv fenv x) exprs)
+      let ts = List.map (fun x -> infer_expr senv eenv tyenv fenv x) exprs in
+      if List.exists contains_view_ty ts then
+        raise (TypeError (e.loc,
+          "an erased view cannot be stored in a runtime tuple in Slice 2"));
+      TTuple ts
 
   | Call (("dma_publish" | "dma_consume" | "device_fence" | "signal_fence"
           | "interrupt_wait" | "interrupt_notify") as fname, args) ->
@@ -1787,6 +1871,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | [a; b] ->
            let at = infer_expr senv eenv tyenv fenv a in
            let bt = infer_expr senv eenv tyenv fenv b in
+           if contains_view_ty at || contains_view_ty bt then
+             raise (TypeError (e.loc,
+               "erased views cannot be operands of runtime min/max"));
            (* Both arguments must agree on a base type, same as any other
               binary numeric operation (Add/Sub/etc.) -- previously
               hardcoded TI32 for both, independently, which meant
@@ -2147,6 +2234,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       in
       let vt = infer_expr senv eenv tyenv fenv val_expr in
       let vt = adapt_actual_to_expected tyenv val_expr vt inner in
+      if contains_view_ty vt then
+        raise (TypeError (val_expr.loc,
+          "cannot store an erased view through a pointer"));
       if is_tuple_ty vt then
         raise (TypeError (val_expr.loc,
           "cannot store a tuple through a pointer: tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
@@ -2192,6 +2282,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
             Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))
       in
       let rt = adapt_actual_to_expected tyenv rhs rt elem_ty in
+      if contains_view_ty rt then
+        raise (TypeError (rhs.loc,
+          "cannot store an erased view into an array/slice element"));
       if is_tuple_ty rt then
         raise (TypeError (rhs.loc,
           "cannot store a tuple into an array/slice element: tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
@@ -2243,6 +2336,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       in
       let vt = infer_expr senv eenv tyenv fenv val_expr in
       let vt = adapt_actual_to_expected tyenv val_expr vt (strip_io field_ty) in
+      if contains_view_ty vt then
+        raise (TypeError (val_expr.loc,
+          "cannot store an erased view into a struct field"));
       if is_tuple_ty vt then
         raise (TypeError (val_expr.loc,
           "cannot store a tuple into a struct field: tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
@@ -2739,9 +2835,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.OwnedStructDef (n, _, _, _, _, _, _, _, _) ->
         claim_toplevel_name n "struct"
     | Ast.OpaqueStructDef (n, _, _, _)  -> claim_toplevel_name n "struct"
+    | Ast.ViewDef (n, _, _, _)          -> claim_toplevel_name n "view"
     | Ast.EnumDef (n, _, _, _)    -> claim_toplevel_name n "enum"
     | Ast.UseDef _              -> ()
   ) prog;
+  Hashtbl.reset view_kinds;
+  List.iter (function
+    | Ast.ViewDef (name, kind, _, _) -> Hashtbl.replace view_kinds name kind
+    | _ -> ()) prog;
   Hashtbl.reset indexed_struct_params;
   Hashtbl.reset indexed_struct_kinds;
   List.iter (function
@@ -2757,6 +2858,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.OpaqueStructDef (name, Ast.KindAffine, _, _) -> StringSet.add name names
     | Ast.OwnedStructDef (name, Ast.KindAffine, _, _, _, _, _, _, _) ->
         StringSet.add name names
+    | Ast.ViewDef (name, Ast.KindAffine, _, _) -> StringSet.add name names
     | _ -> names
   ) StringSet.empty prog in
   affine_opaque_names := affine_names;
@@ -2764,6 +2866,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.OpaqueStructDef (name, Ast.KindLinear, _, _) -> StringSet.add name names
     | Ast.OwnedStructDef (name, Ast.KindLinear, _, _, _, _, _, _, _) ->
         StringSet.add name names
+    | Ast.ViewDef (name, Ast.KindLinear, _, _) -> StringSet.add name names
     | _ -> names
   ) StringSet.empty prog in
   linear_opaque_names := linear_names;
@@ -2781,6 +2884,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset private_opaque_types;
   Hashtbl.reset private_struct_fields;
   Hashtbl.reset private_struct_lit;
+  Hashtbl.reset private_views;
   List.iter (function
     | Ast.OpaqueStructDef (name, _, true, loc) ->
         Hashtbl.replace private_opaque_types name loc.Lexing.pos_fname
@@ -2795,6 +2899,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         List.iter (fun f ->
           Hashtbl.replace private_struct_fields (sname, f) loc.Lexing.pos_fname
         ) privs
+    | Ast.ViewDef (name, _, true, loc) ->
+        Hashtbl.replace private_views name loc.Lexing.pos_fname
     | _ -> ()
   ) prog;
   let validation_static_scope : (string, Ast.type_expr) Hashtbl.t option ref =
@@ -2906,13 +3012,29 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      load-bearing enforcement; these declaration bans reject the storage
      shapes up front so the error points at the declaration. *)
   let rec type_mentions_linear = function
-    | Ast.TypeNamed n -> StringSet.mem n linear_names
+    | Ast.TypeNamed n | Ast.TypeView n -> StringSet.mem n linear_names
     | Ast.TypeIndexed (n, _) -> StringSet.mem n linear_names
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_linear t
     | Ast.TypeTuple ts -> List.exists type_mentions_linear ts
+    | _ -> false
+  in
+  let rec type_mentions_view = function
+    | Ast.TypeView _ -> true
+    | Ast.TypeNamed name -> Hashtbl.mem view_kinds name
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
+    | Ast.TypeSlice (t, _) -> type_mentions_view t
+    | Ast.TypeTuple ts -> List.exists type_mentions_view ts
+    | Ast.TypeFn (args, ret) ->
+        List.exists type_mentions_view args || type_mentions_view ret
+    | _ -> false
+  in
+  let is_direct_view_type ty = match resolve_view_type ty with
+    | Ast.TypeView _ -> true
     | _ -> false
   in
   let rec type_mentions_indexed_owner = function
@@ -2997,24 +3119,35 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let validate_param_type loc ty =
     validate_static_type loc ty;
     match ty with
+    | Ast.TypeBorrow (Ast.TypeNamed name as inner)
+      when Hashtbl.mem view_kinds name -> validate_complete_type loc false inner
+    | Ast.TypeBorrow (Ast.TypeView name as inner)
+      when Hashtbl.mem view_kinds name -> validate_complete_type loc false inner
     | Ast.TypeBorrow (Ast.TypePtr (Ast.TypeNamed name) as inner)
       when is_kinded name -> validate_complete_type loc false inner
     | Ast.TypeBorrow (Ast.TypeIndexed (name, _) as inner)
       when is_kinded name -> validate_complete_type loc false inner
     | Ast.TypeBorrow _ ->
         raise (TypeError (loc,
-          "borrow is only valid on an affine/linear opaque pointer or indexed owner parameter"))
+          "borrow is only valid on an affine/linear opaque pointer, indexed owner, or erased view parameter"))
+    | Ast.TypeSink (Ast.TypeNamed name as inner)
+      when Hashtbl.mem view_kinds name -> validate_complete_type loc false inner
+    | Ast.TypeSink (Ast.TypeView name as inner)
+      when Hashtbl.mem view_kinds name -> validate_complete_type loc false inner
     | Ast.TypeSink (Ast.TypePtr (Ast.TypeNamed name) as inner)
       when is_kinded name -> validate_complete_type loc false inner
     | Ast.TypeSink (Ast.TypeIndexed (name, _) as inner)
       when is_kinded name -> validate_complete_type loc false inner
     | Ast.TypeSink _ ->
         raise (TypeError (loc,
-          "sink is only valid on an affine/linear opaque pointer or indexed owner parameter"))
+          "sink is only valid on an affine/linear opaque pointer, indexed owner, or erased view parameter"))
     | ty ->
         if contains_borrow ty then
           raise (TypeError (loc,
             "borrow/sink must wrap the entire function parameter type"));
+        if type_mentions_view ty && not (is_direct_view_type ty) then
+          raise (TypeError (loc,
+            "an erased view must be the entire function parameter type; it cannot live inside a runtime container or function pointer"));
         if tuple_under_indirection false ty then
           raise (TypeError (loc,
             "a tuple cannot live behind a pointer or inside an array/slice: \
@@ -3031,6 +3164,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     validate_static_type loc ty;
     if contains_borrow ty then
       raise (TypeError (loc, "borrow/sink is only valid in function parameter types"));
+    if type_mentions_view ty && not (is_direct_view_type ty) then
+      raise (TypeError (loc,
+        "an erased view cannot live inside a runtime container or function pointer"));
     if tuple_under_indirection false ty then
       raise (TypeError (loc,
         "a tuple cannot live behind a pointer or inside an array/slice: \
@@ -3050,7 +3186,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let rec validate_expr_types (e : Ast.expr) =
     (match e.desc with
      | Ast.Cast (ty, x) -> validate_nonparam_type e.loc ty; validate_expr_types x
-     | Ast.SizeOf ty | Ast.OffsetOf (ty, _) -> validate_nonparam_type e.loc ty
+     | Ast.SizeOf ty | Ast.OffsetOf (ty, _) ->
+         if type_mentions_view ty then
+           raise (TypeError (e.loc,
+             "an erased view has no runtime size or layout"));
+         validate_nonparam_type e.loc ty
      | Ast.BinOp (_, a, b) -> validate_expr_types a; validate_expr_types b
      | Ast.Bnot x | Ast.Deref x | Ast.AddrOf x | Ast.FieldGet (x, _)
      | Ast.Unsafe x -> validate_expr_types x
@@ -3058,7 +3198,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      | Ast.Index (_, i) -> validate_expr_types i
      | Ast.SliceOf (_, lo, hi) -> validate_expr_types lo; validate_expr_types hi
      | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.Var _
-     | Ast.EnumVariant _ -> ())
+     | Ast.EnumVariant _ | Ast.ViewLit _ -> ())
   and validate_stmt_types (s : Ast.stmt) =
     (match s.desc with
      | Ast.Let (_, _, ty, init, _) ->
@@ -3111,6 +3251,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         validation_static_scope := None;
         allow_implicit_static := false;
         Option.iter (fun t ->
+          if type_mentions_view t then
+            raise (TypeError (gloc, Printf.sprintf
+              "global '%s' cannot hold an erased view" gname));
           if type_mentions_indexed_owner t then
             raise (TypeError (gloc, Printf.sprintf
               "global '%s' cannot hold an indexed owner" gname));
@@ -3132,6 +3275,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         validation_static_scope := None;
         allow_implicit_static := false;
         List.iter (fun (fname, ty) ->
+          if type_mentions_view ty then
+            raise (TypeError (sloc, Printf.sprintf
+              "struct field '%s.%s' cannot hold an erased view" sname fname));
           if type_mentions_indexed_owner ty then
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot hold an indexed owner" sname fname));
@@ -3160,6 +3306,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         validation_static_scope := Some scope;
         allow_implicit_static := false;
         List.iter (fun (fname, ty) ->
+          if type_mentions_view ty then
+            raise (TypeError (sloc, Printf.sprintf
+              "struct field '%s.%s' cannot hold a nested erased view"
+              sname fname));
           if type_mentions_indexed_owner ty then
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot hold a nested indexed owner"
@@ -3176,7 +3326,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               "indexed owner field '%s.%s' cannot nest a singleton inside storage"
               sname fname));
           validate_nonparam_type sloc ty) fields
-    | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _ -> ()) prog;
+    | Ast.OpaqueStructDef _ | Ast.ViewDef _ | Ast.EnumDef _ | Ast.UseDef _ -> ()) prog;
   (* Pass 0: collect struct and enum definitions *)
   let senv = List.fold_left (fun m -> function
     | Ast.StructDef (name, fields, is_packed, align_opt, _, _) ->
@@ -3301,8 +3451,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.FuncDef fdef ->
         check_reserved_fn fdef.def_loc fdef.name;
         let scope = create_static_scope () in
-        let pts = List.map (fun (_, t) -> of_ast_opt_in_scope scope t) fdef.params in
-        let rt  = ret_of_ast_opt_in_scope scope fdef.ret_type in
+        let pts = List.map (fun (_, t) -> of_ast_opt_in_view_scope scope t) fdef.params in
+        let rt  = ret_of_ast_opt_in_view_scope scope fdef.ret_type in
         let key = overload_key fdef.name fdef.params in
         register_definition fdef.def_loc key fdef.name;
         let old = Option.value (StringMap.find_opt fdef.name m) ~default:[] in
@@ -3314,8 +3464,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           raise (TypeError (Lexing.dummy_pos, Printf.sprintf
             "extern function '%s' cannot be overloaded" name));
         let scope = create_static_scope () in
-        let pts = List.map (fun (_, t) -> of_ast_opt_in_scope scope t) params in
-        let rt  = ret_of_ast_opt_in_scope scope ret_ty in
+        let pts = List.map (fun (_, t) -> of_ast_opt_in_view_scope scope t) params in
+        let rt  = ret_of_ast_opt_in_view_scope scope ret_ty in
         let key = overload_key name params in
         register_definition Lexing.dummy_pos key name;
         let old = Option.value (StringMap.find_opt name m) ~default:[] in
@@ -3325,6 +3475,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.StructDef _ -> m
     | Ast.OwnedStructDef _ -> m
     | Ast.OpaqueStructDef _ -> m
+    | Ast.ViewDef _ -> m
     | Ast.EnumDef _   -> m
     | Ast.UseDef _    -> m
   ) StringMap.empty prog in
@@ -3344,6 +3495,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.StructDef _              -> m
     | Ast.OwnedStructDef _         -> m
     | Ast.OpaqueStructDef _        -> m
+    | Ast.ViewDef _                -> m
     | Ast.EnumDef _                -> m
     | Ast.UseDef _                 -> m
   ) StringMap.empty prog in
@@ -3413,6 +3565,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   raise (TypeError (loc, Printf.sprintf "Unbound variable: %s" vname)))
          | Some e ->
              let et = infer_expr senv eenv genv fenv e in
+             if contains_view_ty et then
+               raise (TypeError (e.loc, Printf.sprintf
+                 "global '%s' cannot hold an erased view" name));
              (* GitHub issue #77: `unify et (strip_io ty)` -- actual
                 (initializer) type first, declared annotation second --
                 matching the "actual, expected" convention every other
@@ -3493,18 +3648,28 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let rec is_affine_type ty = match strip_borrow ty with
     | Ast.TypePtr (Ast.TypeNamed name) -> StringSet.mem name affine_names
     | Ast.TypeIndexed (name, _) -> StringSet.mem name affine_names
+    | Ast.TypeNamed name | Ast.TypeView name ->
+        Hashtbl.find_opt view_kinds name = Some Ast.KindAffine
     | Ast.TypeTuple ts -> List.exists is_affine_type ts
     | _ -> false
   in
   let rec is_linear_type ty = match strip_borrow ty with
     | Ast.TypePtr (Ast.TypeNamed name) -> StringSet.mem name linear_names
     | Ast.TypeIndexed (name, _) -> StringSet.mem name linear_names
+    | Ast.TypeNamed name | Ast.TypeView name ->
+        Hashtbl.find_opt view_kinds name = Some Ast.KindLinear
     | Ast.TypeTuple ts -> List.exists is_linear_type ts
     | _ -> false
   in
   let rec contains_indexed_owner_type ty = match strip_borrow ty with
     | Ast.TypeIndexed _ -> true
     | Ast.TypeTuple ts -> List.exists contains_indexed_owner_type ts
+    | _ -> false
+  in
+  let rec contains_erased_view_type ty = match strip_borrow ty with
+    | Ast.TypeView _ -> true
+    | Ast.TypeNamed name -> Hashtbl.mem view_kinds name
+    | Ast.TypeTuple ts -> List.exists contains_erased_view_type ts
     | _ -> false
   in
   let is_tracked_type ty = is_affine_type ty || is_linear_type ty in
@@ -3592,6 +3757,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            | None -> false)
       | PField _ -> false
     in
+    let contains_erased_view_path = function
+      | PVar name ->
+          (match StringMap.find_opt name !var_types with
+           | Some ty -> contains_erased_view_type ty
+           | None -> false)
+      | PField _ -> false
+    in
     let kind_word p = if is_linear_path p then "linear" else "affine" in
     (* `sink`/`borrow` parameters carry no callee-side obligation: sink is
        the terminal consumer (nothing further to forward), borrow never
@@ -3644,6 +3816,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     in
     let rec check_expr moved consume (e : Ast.expr) =
       match e.desc with
+      | Ast.ViewLit name ->
+          if not consume then
+            raise (TypeError (e.loc, Printf.sprintf
+              "erased view '%s' must be moved into an owning binding or consumer"
+              name));
+          moved
       | Ast.Var name ->
           let p = PVar name in
           require_available e.loc moved p;
@@ -3787,7 +3965,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              discard it. Note the RHS walk runs FIRST, so the self-transform idiom
              `p = transform(p);` (RHS consumes the old p) passes: by the
              time this check runs, the old obligation is discharged. *)
-          if (is_linear_path p || contains_indexed_owner_path p)
+          if (is_linear_path p || contains_indexed_owner_path p
+              || contains_erased_view_path p)
              && PathSet.mem p declared
              && not (ResourceFlow.is_consumed_on_all_paths p moved) then
             raise (TypeError (s.loc, Printf.sprintf
@@ -3820,7 +3999,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let p = PVar name in
           set_decl_loc p s.loc;
           (match init with
-           | None when is_linear_path p || contains_indexed_owner_path p ->
+           | None when is_linear_path p || contains_indexed_owner_path p
+                       || contains_erased_view_path p ->
                raise (TypeError (s.loc, Printf.sprintf
                  "%s value '%s' must be initialized at its declaration"
                  (kind_word p) name))
@@ -3915,6 +4095,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           require_no_pending_linear s.loc "continue" moved declared;
           (moved, declared)
     in
+    if contains_erased_view_type finfo.ret_type
+       && not (always_terminates fdef.body) then
+      raise (TypeError (fdef.def_loc, Printf.sprintf
+        "function '%s' returns an erased view and must return explicitly on every path"
+        fdef.name));
     let (final_moved, _) = check_stmts mv_empty
       (List.fold_left (fun d (name, _) -> PathSet.add (PVar name) d)
          PathSet.empty fdef.params) fdef.body

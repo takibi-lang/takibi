@@ -61,6 +61,8 @@ let rec size_align_of_type pos seen ty =
   | TypeU8 | TypeU16 | TypeU32 | TypeU64
   | TypeIsize | TypeUsize -> primitive_size_align ty
   | TypeVoid -> fail pos "sizeof(void) is not allowed"
+  | TypeView name -> fail pos (Printf.sprintf
+      "erased view '%s' has no runtime size or alignment" name)
   | TypeBorrow t | TypeSink t | TypeSingleton (t, _) ->
       size_align_of_type pos seen t
   | TypeAlignedPtr _ -> ptr_size_align ()

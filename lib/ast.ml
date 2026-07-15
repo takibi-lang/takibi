@@ -33,6 +33,10 @@ type type_expr =
   | TypeArray of type_expr * int   (* [T; N] *)
   | TypeFn of type_expr list * type_expr  (* fn(T...) -> R *)
   | TypeNamed of string            (* struct type by name *)
+  | TypeView of string
+    (* Elaborated erased view type. Source annotations use the declared
+       bare name; type inference resolves it to this distinct constructor
+       so runtime structs and Delta-only views cannot be confused. *)
   | TypeIndexed of string * static_arg list
     (* Name[n, ...] -- a runtime named value indexed by erased static
        integers. The named value keeps its ordinary runtime layout; only
@@ -90,6 +94,9 @@ and expr_desc =
   | BoolLit of bool
   | StringLit of string     (* "..."  -- null-terminated *char constant *)
   | Var of ident
+  | ViewLit of ident
+    (* `view Name` -- explicitly mint an erased permission value. It has
+       no runtime representation; privacy and kind flow are checked later. *)
   | Call of ident * expr list
   | BinOp of binop * expr * expr
   | Bnot of expr               (* ~expr -- bitwise NOT *)
@@ -196,6 +203,9 @@ type toplevel =
      layout flags, private field names, is_private, loc. Unlike an opaque
      handle this is a first-class runtime aggregate; only its static
      parameters are erased. *)
+  | ViewDef of string * opaque_kind * bool * loc
+  (* name, affine/linear kind, is_private, loc. A view has no fields,
+     size, address, or runtime ABI representation. *)
   | OpaqueStructDef of string * opaque_kind * bool * loc
   (* name, kind, is_private, loc -- incomplete nominal type, usable only
      behind a pointer.
@@ -277,7 +287,8 @@ let written_names (stmts : stmt list) : string list =
     | Call (_, args) | StructLit args | TupleLit args -> List.iter go_expr args
     | Index (_, idx) -> go_expr idx
     | SliceOf (_, lo, hi) -> go_expr lo; go_expr hi
-    | IntLit _ | BoolLit _ | StringLit _ | Var _ | EnumVariant _ | SizeOf _
+    | IntLit _ | BoolLit _ | StringLit _ | Var _ | ViewLit _
+    | EnumVariant _ | SizeOf _
     | OffsetOf _ ->
         ()
   in
