@@ -1,10 +1,10 @@
 # Ownership Kernel -- Design Memo
 
-Status: DESIGN MEMO, not yet language spec. Stage 1 below is written to be
-normative once approved; Stages 2-4 are outlooks recorded so Stage 1's
-semantics are not designed into a corner. As each stage lands, its final
-behavior moves into SPEC.md (the authoritative description of the language
-as it exists) and this memo's corresponding section shrinks to a pointer.
+Status: LIVING DESIGN MEMO, not the language spec. Stages 1, 2, the tuple
+interlude, and Stage 3a are implemented; their actual behavior lives in
+SPEC.md. Stage 3b is now the first slice of the indexed-resource direction
+decided in 6.7. Later view/variant/solver work remains outlook. As each slice
+lands, SPEC.md stays authoritative for the language that actually exists.
 
 Driving issues: #117 (witness tokens / protocol obligations -- where this
 plan was drawn up), #89 (affine drop/escape/inter-function), #108
@@ -69,7 +69,7 @@ kind you pick when you want the stronger promise -- and its rules make the
 null-sentinel pattern inexpressible, which is exactly what keeps its
 checker a plain dataflow analysis.
 
-## 4. Stage 1: the `linear` kind (normative once approved)
+## 4. Stage 1: the `linear` kind (implemented)
 
 ### 4.1 Syntax
 
@@ -267,7 +267,7 @@ either reach a coupling function or contain an explicit, greppable
 compiling; that is this stage's payoff for issue #117.
 
 ## 5. Stage 2: private types and fields (#108) + cast tightening (#15)
-## (normative once approved)
+## (implemented)
 
 Goal: turn the trusted-narrow-file methodology from convention into
 language guarantee. Usage survey before design (2026-07-14): every
@@ -397,7 +397,7 @@ linear variant enums subsume anyway.
   un-unsafe'd affine ptr-to-ptr cast.
 
 ## 5.9 Interlude between Stages 2 and 3: function-local tuples (#120)
-## (normative once approved -- user-driven design reversal, 2026-07-14)
+## (implemented -- user-driven design reversal, 2026-07-14)
 
 Issue #120 originally recommended Go-style multiple returns over
 first-class tuples, to sidestep the container/place question. User
@@ -465,12 +465,12 @@ reframing is why the stage was split:
   tracking, closing the concrete hole above with the SAME machinery
   Stage 1 already built, generalized to a slightly richer key. No new
   concepts, no interprocedural reasoning.
-- **Stage 3b** (still outlook, section 6.5): the genuinely hard part --
+- **Stage 3b** (next implementation slice, sections 6.5-6.7): the genuinely hard part --
   identities that escape the acquiring function (the fd-table shape).
-  Deferred until Stage 3a has real usage to observe, per the same
-  "prove it with a driver before designing further" discipline every
-  earlier stage followed. User decision (2026-07-14): implement 3a now,
-  revisit 3b once 3a has concrete examples.
+  The initial defer-until-more-evidence decision was superseded after the
+  E0/B2 experiment and the cross-example review: the existing SlotLease,
+  FatFile, RX, and guard examples are sufficient evidence. Section 6.7 now
+  fixes the destination and the first implementation slice.
 
 ### 6.2 Stage 3a: intraprocedural field-path tracking (normative, implemented)
 
@@ -532,21 +532,17 @@ Validation: 8 new unit tests, 3 QEMU PoC examples (field_lease positive;
 field_double_consume_wrong, field_never_consumed_wrong negative), full
 suite green (600 unit / 101 qemutest / stm32build / langcheck).
 
-### 6.5 Stage 3b outlook: escaping identities (the fd-table shape)
+### 6.5 Stage 3b: escaping identities (the fd-table shape)
 
-Still open, deliberately not designed further until 3a produces real
-examples to observe (per the user's explicit sequencing decision). The
-existing answer, `examples/affine_escape_via_index`'s index + runtime
-`in_use`-flag idiom, remains the correct pattern for this shape in the
-meantime -- Stage 3a does not change or supersede it. Candidate framing
-for whenever this is revisited: codify that hand-written idiom
-(escaping identity = plain refined index, real state = a slot table,
-occupancy = a checked runtime flag) into a compiler-recognized shape,
-consistent with the #66 doctrine's third reduction ("what remains
-genuinely shared is a small fixed vocabulary, verified once by non-type
-means, with only its usage contract enforced by types") -- rather than
-attempting full interprocedural ownership/alias analysis, which this
-project has repeatedly and deliberately ruled out.
+This began as an outlook deliberately deferred until Stage 3a produced
+more evidence. That sequencing decision has now been satisfied and
+superseded: the E0 experiment plus the review of `FatFile`, both RX
+drivers, and both guard APIs established that the same missing indexed
+identity recurs independently. The existing
+`examples/affine_escape_via_index` index + runtime `in_use` flag remains
+the honest behavior of the current compiler, but is now the migration
+driver for 6.7's indexed-resource core rather than the intended endpoint.
+Stage 3b still does not attempt full interprocedural alias analysis.
 
 **Experiment tried and ruled out (2026-07-14): pairing `(idx, lease)` as
 a tuple.** Before designing further, the user asked whether
@@ -707,6 +703,229 @@ So the staged climb from here is:
 
 This means the project is no longer choosing between "B1 or B2" as two peer designs. B2 is the
 ergonomic API shape expected from successful elaboration over a B1-capable internal language.
+
+### 6.7 Long-term destination (decision, 2026-07-15)
+
+The project has reached the point where adding only the next locally useful checker rule is no
+longer enough guidance. `FatFile`, `NetRxCpuOwned`, `KGuard`/`MutexGuard`, and `SlotLease` now all
+ask for the same missing relation in different domains. Continuing without a destination would
+risk growing affine flow analysis, refinement ranges, typestate, and future solver support as
+four unrelated systems.
+
+The destination is therefore:
+
+> An ATS-inspired core of dependent indices and linear resource views, elaborated from a surface
+> language that hides routine quantifiers and proof terms. Refinement constraints are discharged
+> automatically in a deliberately small decidable fragment, with SMT and explicit proof
+> boundaries added only after the program has generated a concrete proposition to solve.
+
+In terms of the alternatives considered during review:
+
+- Rust-style ownership of content-carrying packages is not the base model. It handles exclusive
+  access well, but the examples primarily need relations to immovable external state (MMIO, DMA
+  descriptors, table slots, locks, and protocol phases). Following that model far enough would
+  also import field borrowing, reborrowing, and lifetime questions that Takibi has no present
+  need to answer.
+- ATS2-style indexed values and views are the semantic base, but ATS2's explicit proof plumbing
+  is not the intended ordinary surface syntax.
+- General separation logic is not the initial user-facing verification model. Abstract linear
+  views may later grow selected separation-logic predicates (`Cell`, `Array`, recursive ownership)
+  when a real heap structure requires them; that is an extension of the view language, not a
+  second ownership system.
+- Sugar, inference, existential packaging, and solver integration are how the core becomes the
+  Takibi language. They are not substitutes for a core that first retains the static names and
+  propositions involved.
+
+This changes how YAGNI is applied, not whether it is applied. The destination fixes the direction
+of travel; examples still decide which part is implemented next. A proposed feature is in scope
+only when it both serves a current example and elaborates monotonically toward this core.
+
+#### 6.7.1 Static vocabulary the core must eventually support
+
+The minimum common vocabulary is:
+
+- static sorts for integer indices, object/resource identities, addresses, and finite protocol
+  states;
+- singleton/refined dynamic values whose runtime value is named statically;
+- indexed affine/linear resource types such as `SlotLease[n]`, `MutexGuard[lock]`, and
+  `RxOwned[desc]`;
+- implicit universal quantification in signatures and existential packaging when acquisition
+  chooses an identity at runtime;
+- linear views and view change, including a resource whose runtime representation lives outside
+  the Takibi value (`RxDesc[desc, Device] >> RxDesc[desc, Cpu]`);
+- equality, disequality, range, and linear-integer constraints as the first automatically solved
+  fragment;
+- explicit abstract predicates and proof boundaries outside that fragment.
+
+Static indices and views erase at runtime unless a dynamic value genuinely needs to carry data.
+Erasure must never be confused with forgetting the proposition in the type checker. Conversely,
+a static index cannot be materialized as a runtime integer by wishful thinking: a no-index call
+such as `slot_read(lease)` requires either a real hidden runtime representation in `lease`, a
+pointer that directly identifies the slot, or module-private state that can recover it safely.
+
+#### 6.7.2 Provisional surface notation
+
+The examples below are design fixtures, not accepted parser syntax yet. Square brackets denote
+static indices, `@ n` gives a runtime value a static singleton name, unbound static names in a
+function signature are implicitly universally quantified, and `exists` packages an identity
+chosen at runtime. `resource` denotes a module-constructed affine/linear value whose private
+runtime representation may contain ordinary data; callers can use it only through functions.
+
+The notation deliberately distinguishes the long-term surface from the lower-level elaborated
+core. Exact punctuation may change during parser implementation; the contracts must not.
+
+**Table slot: the first driver.** The caller supplies the index only at acquisition. Operations
+recover the runtime slot from the resource's private representation, while the static `n` remains
+available to the checker and future solver.
+
+```takibi
+private affine resource SlotLease[n: usize] {
+    private idx: {0..<4 as usize} @ n;
+}
+
+fn slot_lease(idx: {0..<4 as usize} @ n) -> SlotLease[n] {
+    return SlotLease { idx };
+}
+
+fn slot_read(lease: borrow SlotLease[n]) -> i32 {
+    return slots[lease.idx].value;
+}
+
+fn slot_write(v: i32, lease: borrow SlotLease[n]) {
+    slots[lease.idx].value = v;
+}
+
+fn slot_unlease(lease: sink SlotLease[n]) {}
+
+let lease = slot_lease(idx);
+slot_write(99, lease);
+uart_print(slot_read(lease));
+slot_unlease(lease);
+```
+
+Outside the declaring file, `lease.idx` and `SlotLease { ... }` are inaccessible. The application
+does not thread `n`, `idx`, or a range proof through ordinary operations. In the core, the three
+operations are universally quantified over the same inferred `n`.
+
+**Lock guard: identity relation plus an all-paths obligation.** Infallible lock acquisition should
+produce a linear guard, not today's weak union-based affine handle. Keeping the runtime lock
+argument on `kunlock` is acceptable data flow; the index makes passing the wrong lock a type
+error.
+
+```takibi
+private linear resource MutexGuard[lock: addr];
+
+fn mutex_lock(m: *i32 @ lock) -> MutexGuard[lock];
+fn mutex_unlock(g: sink MutexGuard[lock], m: *i32 @ lock);
+
+let g = mutex_lock(&a);
+mutex_unlock(g, &a); // accepted
+// mutex_unlock(g, &b); // rejected: guard and mutex identities differ
+```
+
+This also states the present limitation precisely: today's `affine MutexGuard` catches never-use
+and double-use, but not omission on one branch, and it does not relate the guard to its mutex.
+
+**DMA receive: fallible existential acquisition.** A descriptor selected at runtime is hidden in
+the successful variant. Once opened, its identity is stable through frame access and release.
+
+```takibi
+private linear resource NetRxCpuOwned[desc: usize];
+
+fn net_rx_acquire()
+    -> Option[exists desc where desc < RX_DESC_COUNT. NetRxCpuOwned[desc]];
+fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..];
+fn net_rx_release(frame: sink NetRxCpuOwned[desc]);
+
+match net_rx_acquire() {
+    Some(frame) => {
+        let bytes = net_rx_frame(frame);
+        process(bytes);
+        net_rx_release(frame);
+    }
+    None => {}
+}
+```
+
+The variant removes the nullable-affine exception that currently forces affine's weak
+"consumed on at least one path" rule. Inside `Some`, the resource is genuinely linear. This
+depends on kind-carrying variant payloads, so its implementation follows the first indexed
+resource slice rather than being smuggled into it.
+
+**Protocol state: view change is separate from event discharge.** `PendingTcpEvent` says that an
+accepted event receives an explicit disposition. A connection view says which state transition
+that disposition performs. Neither replaces the other.
+
+```takibi
+linear view TcpConn[conn: addr, state: TcpState];
+
+fn tcp_accept_via_syn_ack(
+    pending: sink PendingTcpEvent,
+    conn: TcpConn[c, Listen],
+    eth: [u8; 54..]
+) -> TcpConn[c, SynRcvd];
+
+fn tcp_event_ignored(
+    pending: sink PendingTcpEvent,
+    conn: TcpConn[c, s]
+) -> TcpConn[c, s];
+```
+
+After runtime dispatch, the poll loop generally holds `exists s. TcpConn[c, s]`; matching the
+state opens that package and each transition returns the next package. This is the concrete
+reason universal and existential quantification belong in the destination rather than being
+treated as optional theorem-prover syntax.
+
+#### 6.7.3 Implementation order from the current compiler
+
+The first implementation slice is intentionally smaller than all four fixtures:
+
+1. Add named singleton binding for the existing refined integer values (`value @ n`) and indexed
+   opaque resource identities (`Handle[n]`) to the typed AST/internal types.
+2. Add implicit universal variables in function signatures and equality/range constraint
+   generation. Discharge only syntactic equality and the interval facts the compiler already
+   knows; no Z3 dependency in this slice.
+3. Implement one private, module-mediated indexed resource representation sufficient to rewrite
+   `affine_escape_via_index`: mint with a refined index, call `slot_read(lease)` without a loose
+   index, and preserve the index/range fact inside the trusted implementation.
+4. Add negative examples proving that independently minted `SlotLease[n]`/`SlotLease[m]` cannot
+   be substituted where equality is required and that an unrefined/out-of-range index cannot
+   mint the resource.
+5. Only then generalize `borrow`/`sink` from pointers to first-class resources and migrate one
+   guard. Variant/existential payloads, protocol views, SMT, and external prover artifacts are
+   subsequent example-driven slices.
+
+The first slice is DONE only when the replacement for `affine_escape_via_index` has the desired
+ordinary call sites, no runtime fallback that aliases an invalid handle to slot zero, no
+pointer-bit data smuggling, and compile-error companions for range and identity mismatch. Merely
+parsing `SlotLease[n]`, or retaining a separate unchecked `idx` argument, is not completion.
+
+#### 6.7.4 Solver and prover boundary
+
+Z3 is a constraint discharger, not a relation-recovery mechanism. It enters only after the typed
+core can generate named propositions such as `0 <= n`, `n < N`, and `n == m`. The initial solver
+fragment should be quantifier-free equality and linear integer arithmetic; solver failure means
+"not proven", never permission to emit a runtime fallback silently.
+
+A later `prove` boundary should name its assumptions and conclusion and consume a checkable proof
+artifact. Lean may generate that artifact, but interactive Lean integration is not on the critical
+path for indexed resources. The proof language, artifact format, axiom inventory, reproducible
+build behavior, and trusted computing base must be designed before `prove` becomes accepted
+source syntax.
+
+#### 6.7.5 Issue #89 exit condition
+
+Issue #89 should not remain open until Takibi has implemented the whole destination above. It has
+already delivered affine never-consumed checks, parameter transfer, terminating-branch handling,
+linear obligations, and Stage 3a field paths. Its remaining coherent responsibility is the first
+escaping indexed resource.
+
+Close #89 when the Stage 3b slot driver in 6.7.3 is implemented and specified: the index is fixed
+at mint time, preserved in the resource identity, hidden from ordinary operation call sites, and
+checked by positive and negative examples. Extract variant-carried resources, general protocol
+views, SMT integration, separation predicates, and external proof artifacts into their own
+example-driven work. Treating all of those as one issue would recreate the lack of a finish line
+that made #89 difficult to advance.
 
 ## 7. Stage 4 outlook: channel v2 (#113) + variant enums (#20)
 
