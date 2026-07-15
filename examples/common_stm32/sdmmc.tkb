@@ -207,7 +207,7 @@ fn enable_sdmmc1_irq() {
 // this driver's original approach and is one of the two things changed
 // after cross-checking ChibiOS's proven implementation (see this file's
 // header comment for the other -- arming DMA/MASK before the command).
-fn SDMMC1_IRQHandler() {
+fn SDMMC1_IRQHandler() !{interrupt} {
     *SDMMC_MASK = 0;
     sdmmc1_irq_flag = 1;
     interrupt_notify(); // retained event closes the flag-check/sleep race
@@ -491,7 +491,7 @@ fn sd_block_arg(sector: u32) -> u32 {
 // CLEAN (writeback), which cannot discard data even when its rounding
 // spills into an unrelated live cache line, so its own `buf` stays safe
 // to use directly regardless of alignment.
-fn disk_read(sector: u32, buf: *align(32) u8) -> i32 {
+fn disk_read(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
     if (disk_status() != 0) {
         return -1;
     }
@@ -532,7 +532,7 @@ fn disk_read(sector: u32, buf: *align(32) u8) -> i32 {
     return 0;
 }
 
-fn disk_write(sector: u32, buf: *u8) -> i32 {
+fn disk_write(sector: u32, buf: *u8) -> i32 !{may_block} {
     if (disk_status() != 0) {
         return -1;
     }

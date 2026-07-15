@@ -7387,3 +7387,46 @@ fixtures are now positive compile-only checks for standard weakening.
 Validation: all 666 Alcotest cases passed. The full `make check` passed all
 109 host, compile-error, DWARF, and QEMU integration cases, every STM32
 cross-build, and the network/FAT examples under `--forbid-trap`.
+
+## 2026-07-15: Takibi Core Slice 4, Mutable Runtime Owners and Effects
+
+Added the narrow mutable borrow needed by real indexed owners. A parameter may
+now use `borrow mut Owner[n]`; calls require a bare mutable local/parameter,
+reject aliasing the same place through another argument, and cannot upgrade a
+shared borrow. Existential variant payloads opt into mutable storage with
+`Case(mut owner)`. The borrow is scoped to one direct call and LLVM lowers it
+to a pointer to the caller's aggregate storage. Static indices and the borrow
+itself add no runtime fields. Mutable payload allocas are placed in the
+function entry block, including when the match occurs inside a loop.
+
+FAT12 now uses a real `private linear struct FatFile[file: usize]`. Its
+range-proven directory index, cluster/cursor, byte position, size, and mode
+are per-owner fields; the `ff_*` globals, `ff_is_open`, and dummy token storage
+are gone. `FatOpenResult::Opened` existentially packages this owner,
+`fat_read`/`fat_write` borrow it mutably, and `fat_close` consumes it. The FAT
+integration example keeps HELLO and README open simultaneously and interleaves
+reads, directly exercising cursor independence while preserving its existing
+expected output and `--forbid-trap` build.
+
+Added checker-only `!{may_block}` and `!{interrupt}` effects. Explicit
+`may_block` contracts and intrinsic `interrupt_wait()` propagate to callers
+over resolved direct calls. An interrupt root that reaches one is rejected
+with a concrete call path. Unknown/duplicate effects are rejected, and an
+effect-unknown indirect call below an interrupt root is conservatively an
+error. Effects do not change LLVM signatures or generated instructions.
+Mutex/channel APIs, RTOS scheduler roots, direct Ethernet/virtio/SDMMC/DMA
+handlers, and blocking wait/transmit APIs now state their contracts.
+
+Function-pointer types still lack effect rows. This is visible in the UART RX
+callback ISR: it remains outside the checked interrupt-root set until a
+non-blocking callback contract can be represented in its type. General place
+borrowing, stored indexed owners, lock invariants, and quantified view change
+remain later slices rather than being implied by `borrow mut`.
+
+Focused compile-error examples document both new failure modes in English:
+`mutable_borrow_shared_wrong` and `effect_interrupt_blocks_wrong`. Unit tests
+cover parser forms, mutable-borrow flow and ABI, transitive effect inference,
+intrinsic blocking, safe recursion, unknown indirect calls, and effect
+erasure. Validation: all 683 Alcotest cases passed. The full `make check`
+passed all 111 host, compile-error, DWARF, and QEMU integration cases, every
+STM32 cross-build, and the network/FAT examples under `--forbid-trap`.

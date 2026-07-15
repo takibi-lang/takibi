@@ -229,7 +229,7 @@ fn dma_uart_tx_kick() {
     }
 }
 
-fn uart_putc(c: u8) {
+fn uart_putc(c: u8) !{may_block} {
     let head: usize = uart_tx_head;
     let next: usize = (head + 1) % 128;
     while (next == uart_tx_tail) {
@@ -281,7 +281,7 @@ fn USART1_IRQHandler() {
 // DMA2 Stream7's completion interrupt: advances the ring's tail past the
 // burst that just finished, wakes anything blocked in uart_putc's
 // ring-full wait, and chains the next burst if more data is queued.
-fn DMA2_Stream7_IRQHandler() {
+fn DMA2_Stream7_IRQHandler() !{interrupt} {
     let dma2_hisr:  *io u32 = 0x40026404;
     let dma2_hifcr: *io u32 = 0x4002640C;
     if ((*dma2_hisr & (1 << 27)) != 0) { // TCIF7
@@ -301,7 +301,7 @@ fn DMA2_Stream7_IRQHandler() {
 // mid-burst"), then quiesce USART1/DMA2 Stream7 interrupts before a
 // debugger installs its next flash loader.  Long-running servers never
 // return.
-fn uart_shutdown() {
+fn uart_shutdown() !{may_block} {
     while (uart_tx_tail != uart_tx_head) {
         interrupt_wait();
     }

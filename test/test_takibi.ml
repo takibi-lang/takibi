@@ -148,6 +148,7 @@ let rec show_type = function
   | Ast.TypeSlice (t, 0) -> Printf.sprintf "[]%s" (show_type t)
   | Ast.TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (show_type t) n
   | Ast.TypeBorrow t -> "borrow " ^ show_type t
+  | Ast.TypeBorrowMut t -> "borrow mut " ^ show_type t
   | Ast.TypeSink t -> "sink " ^ show_type t
   | Ast.TypeAlignedPtr (n, t) -> Printf.sprintf "*align(%d) %s" n (show_type t)
   | Ast.TypeTuple ts ->
@@ -254,8 +255,36 @@ let parser_tests = [
            { desc = Ast.VariantCtor ("ParsedMaybe", "Some", _); _ }; _ }]; _ };
          Ast.FuncDef { body = [{ desc = Ast.Match (_,
            [Ast.ArmVariant ("ParsedMaybe", "None", None, []);
-            Ast.ArmVariant ("ParsedMaybe", "Some", Some "owner", [])]); _ }]; _ }] -> ()
+            Ast.ArmVariant ("ParsedMaybe", "Some", Some ("owner", false), [])]); _ }]; _ }] -> ()
       | _ -> Alcotest.fail "expected Slice 3 variant AST nodes");
+
+  Alcotest.test_case "Slice 4 mutable borrow and mutable payload binder parse" `Quick
+    (fun () ->
+      match parse
+        "linear struct ParsedMutable[n: usize] { value: i32; }
+         variant ParsedMutableResult {
+           Value(exists n: usize. ParsedMutable[n]);
+         }
+         fn parsed_change(x: borrow mut ParsedMutable[n]) {}
+         fn parsed_open(x: ParsedMutableResult) {
+           match x { ParsedMutableResult::Value(mut owner) => {} }
+         }" with
+      | [Ast.OwnedStructDef _; Ast.VariantDef _;
+         Ast.FuncDef { params = [("x", Some (Ast.TypeBorrowMut
+           (Ast.TypeIndexed ("ParsedMutable", [Ast.StaticName "n"]))))]; _ };
+         Ast.FuncDef { body = [{ desc = Ast.Match (_,
+           [Ast.ArmVariant ("ParsedMutableResult", "Value",
+             Some ("owner", true), [])]); _ }]; _ }] -> ()
+      | _ -> Alcotest.fail "expected borrow mut and Case(mut payload) AST nodes");
+
+  Alcotest.test_case "Slice 4 checker effects parse on functions and externs" `Quick
+    (fun () ->
+      match parse
+        "extern fn parsed_wait() !{may_block};
+         fn parsed_irq() !{interrupt} {}" with
+      | [Ast.ExternFuncDef ("parsed_wait", [], None, ["may_block"]);
+         Ast.FuncDef { name = "parsed_irq"; effects = ["interrupt"]; _ }] -> ()
+      | _ -> Alcotest.fail "expected may_block and interrupt effect annotations");
 
 
   Alcotest.test_case "empty function body" `Quick (fun () ->
@@ -1281,13 +1310,13 @@ let parser_tests = [
 
   Alcotest.test_case "extern fn without return type parses" `Quick (fun () ->
     match parse "extern fn uart_putc(c: u8);" with
-    | [Ast.ExternFuncDef ("uart_putc", [("c", Some Ast.TypeU8)], None)] -> ()
+    | [Ast.ExternFuncDef ("uart_putc", [("c", Some Ast.TypeU8)], None, [])] -> ()
     | _ -> Alcotest.fail "expected ExternFuncDef(uart_putc, [c:u8], None)"
   );
 
   Alcotest.test_case "extern fn with return type parses" `Quick (fun () ->
     match parse "extern fn uart_getc() -> u8;" with
-    | [Ast.ExternFuncDef ("uart_getc", [], Some Ast.TypeU8)] -> ()
+    | [Ast.ExternFuncDef ("uart_getc", [], Some Ast.TypeU8, [])] -> ()
     | _ -> Alcotest.fail "expected ExternFuncDef(uart_getc, [], Some u8)"
   );
 
@@ -4287,6 +4316,129 @@ let infer_tests = [
         }
         fn variant_drop9() { let value: VariantMaybe9 = variant_mint9(); }");
 
+  (* -- Takibi Core Slice 4: scoped mutable owner borrows ----------------- *)
+
+  Alcotest.test_case "Slice 4: a mutable existential owner can be changed and then consumed" `Quick
+    (expect_ok
+       "linear struct MutableOwner10[n: usize] {
+          idx: usize @ n;
+          value: i32;
+        }
+        variant MutableResult10 {
+          None;
+          Opened(exists n: usize. MutableOwner10[n]);
+        }
+        fn mutable_make10(idx: usize @ n) -> MutableOwner10[n] {
+          let mut owner: MutableOwner10[n] = { idx, 0 };
+          return owner;
+        }
+        fn mutable_set10(owner: borrow mut MutableOwner10[n], value: i32) {
+          owner.value = value;
+        }
+        fn mutable_drop10(owner: sink MutableOwner10[n]) {}
+        fn mutable_use10(idx: usize) {
+          let result: MutableResult10 = MutableResult10::Opened(mutable_make10(idx));
+          match result {
+            MutableResult10::None => {}
+            MutableResult10::Opened(mut owner) => {
+              mutable_set10(owner, 7);
+              mutable_drop10(owner);
+            }
+          }
+        }");
+
+  Alcotest.test_case "Slice 4: shared borrow cannot mutate an owner" `Quick
+    (expect_type_error "cannot mutate shared-borrow parameter 'owner'"
+       "linear struct MutableOwner11[n: usize] { value: i32; }
+        fn mutable_bad11(owner: borrow MutableOwner11[n]) {
+          owner.value = 1;
+        }");
+
+  Alcotest.test_case "Slice 4: mutable borrow requires a mutable place" `Quick
+    (expect_type_error "cannot mutably borrow immutable value 'owner'"
+       "linear struct MutableOwner12[n: usize] { idx: usize @ n; value: i32; }
+        variant MutableResult12 {
+          Opened(exists n: usize. MutableOwner12[n]);
+        }
+        fn mutable_set12(owner: borrow mut MutableOwner12[n]) {}
+        fn mutable_drop12(owner: sink MutableOwner12[n]) {}
+        fn mutable_bad12(result: MutableResult12) {
+          match result {
+            MutableResult12::Opened(owner) => {
+              mutable_set12(owner);
+              mutable_drop12(owner);
+            }
+          }
+        }");
+
+  Alcotest.test_case "Slice 4: mutable borrow cannot overlap another call argument" `Quick
+    (expect_type_error "mutable borrow of 'owner' overlaps another argument"
+       "linear struct MutableOwner13[n: usize] { value: i32; }
+        fn mutable_alias13(a: borrow mut MutableOwner13[n],
+                           b: borrow MutableOwner13[n]) {}
+        fn mutable_drop13(owner: sink MutableOwner13[n]) {}
+        fn mutable_bad13(owner: MutableOwner13[n]) {
+          mutable_alias13(owner, owner);
+          mutable_drop13(owner);
+        }");
+
+  Alcotest.test_case "Slice 4: mutable borrow overlap includes owner projections" `Quick
+    (expect_type_error "mutable borrow of 'owner' overlaps another argument"
+       "linear struct MutableOwner13b[n: usize] { value: i32; }
+        fn mutable_alias13b(a: borrow mut MutableOwner13b[n], value: i32) {}
+        fn mutable_drop13b(owner: sink MutableOwner13b[n]) {}
+        fn mutable_bad13b(owner: MutableOwner13b[n]) {
+          mutable_alias13b(owner, owner.value);
+          mutable_drop13b(owner);
+        }");
+
+  Alcotest.test_case "Slice 4: may_block is inferred through direct calls" `Quick
+    (fun () ->
+      let types = infer
+        "extern fn effect_wait14() !{may_block};
+         fn effect_leaf14() { effect_wait14(); }
+         fn effect_top14() { effect_leaf14(); }" in
+      let leaf = Types.StringMap.find "effect_leaf14" types.functions in
+      let top = Types.StringMap.find "effect_top14" types.functions in
+      Alcotest.(check (list string)) "leaf effects" ["may_block"] leaf.effects;
+      Alcotest.(check (list string)) "caller effects" ["may_block"] top.effects);
+
+  Alcotest.test_case "Slice 4: interrupt root rejects a transitive blocking call" `Quick
+    (expect_type_error
+       "effect_irq15 -> effect_helper15 -> effect_wait15"
+       "extern fn effect_wait15() !{may_block};
+        fn effect_helper15() { effect_wait15(); }
+        fn effect_irq15() !{interrupt} { effect_helper15(); }");
+
+  Alcotest.test_case "Slice 4: interrupt_wait is intrinsically blocking" `Quick
+    (expect_type_error "effect_irq16 -> interrupt_wait"
+       "fn effect_irq16() !{interrupt} { interrupt_wait(); }");
+
+  Alcotest.test_case "Slice 4: a non-blocking interrupt call graph is accepted" `Quick
+    (expect_ok
+       "fn effect_leaf17() { interrupt_notify(); }
+        fn effect_irq17() !{interrupt} { effect_leaf17(); }");
+
+  Alcotest.test_case "Slice 4: an unknown effect is rejected" `Quick
+    (expect_type_error "unknown effect 'does_io'"
+       "fn effect_bad18() !{does_io} {}");
+
+  Alcotest.test_case "Slice 4: duplicate effects are rejected" `Quick
+    (expect_type_error "duplicate effect 'may_block'"
+       "fn effect_bad19() !{may_block, may_block} {}");
+
+  Alcotest.test_case "Slice 4: interrupt rejects effect-unknown indirect calls" `Quick
+    (expect_type_error "<indirect call>"
+       "fn effect_bad20(callback: fn() -> i32) -> i32 !{interrupt} {
+          return callback();
+        }");
+
+  Alcotest.test_case "Slice 4: recursive non-blocking interrupt graph terminates" `Quick
+    (expect_ok
+       "fn effect_recur21(n: i32) !{interrupt} {
+          if (n > 0) { effect_recur21(n - 1); }
+        }");
+
 ]
 
 (* -- Codegen tests ----------------------------------------------------------
@@ -4299,6 +4451,59 @@ let infer_tests = [
    checks runtime behavior, not just "the IR verifies"). *)
 
 let codegen_tests = [
+  Alcotest.test_case
+    "Slice 4 ABI: checker effects add no runtime parameters" `Quick
+    (fun () ->
+      ignore (gen_codegen "fn cgeffect4() !{may_block} {}");
+      match Hashtbl.find_opt Llvm_gen.functions "cgeffect4" with
+      | Some (_, f) ->
+          Alcotest.(check int) "runtime parameter count" 0
+            (Array.length (Llvm.params f))
+      | None -> Alcotest.fail "function 'cgeffect4' not found");
+
+  Alcotest.test_case
+    "Slice 4 ABI: borrow mut passes the caller's owner storage by pointer" `Quick
+    (fun () ->
+      let src =
+        "linear struct CgMutableOwner4[n: usize] { idx: usize @ n; value: i32; }
+         variant CgMutableResult4 {
+           Opened(exists n: usize. CgMutableOwner4[n]);
+         }
+         fn cgm4_make(idx: usize @ n) -> CgMutableOwner4[n] {
+           let mut owner: CgMutableOwner4[n] = { idx, 0 };
+           return owner;
+         }
+         fn cgm4_set(owner: borrow mut CgMutableOwner4[n], value: i32) {
+           owner.value = value;
+         }
+         fn cgm4_drop(owner: sink CgMutableOwner4[n]) {}
+         fn cgm4_use(idx: usize) {
+           let result: CgMutableResult4 = CgMutableResult4::Opened(cgm4_make(idx));
+           match result {
+             CgMutableResult4::Opened(mut owner) => {
+               cgm4_set(owner, 9);
+               cgm4_drop(owner);
+             }
+           }
+         }" in
+      ignore (gen_codegen src);
+      let find name = match Hashtbl.find_opt Llvm_gen.functions name with
+        | Some (_, f) -> f
+        | None -> Alcotest.failf "%s not found" name
+      in
+      let set = find "cgm4_set" in
+      let use = find "cgm4_use" in
+      Alcotest.(check int) "mutable borrow plus value parameters"
+        2 (Array.length (Llvm.params set));
+      Alcotest.(check bool) "first parameter is an opaque pointer"
+        true (Llvm.classify_type (Llvm.type_of (Llvm.param set 0)) = Llvm.TypeKind.Pointer);
+      let set_ir = Llvm.string_of_llvalue set in
+      let use_ir = Llvm.string_of_llvalue use in
+      Alcotest.(check bool) "callee writes through borrowed storage" true
+        (contains_substring set_ir "getelementptr" && contains_substring set_ir "store i32");
+      Alcotest.(check bool) "caller passes a pointer, not an aggregate copy" true
+        (contains_substring use_ir "call void @cgm4_set(ptr"));
+
   Alcotest.test_case
     "Slice 1 ABI: static indices erase while the runtime index stays in the aggregate" `Quick
     (fun () ->

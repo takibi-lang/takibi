@@ -7,9 +7,9 @@
 // The original issue #89 probe used an affine opaque pointer and a loose
 // integer index. Slice 1 replaced that endpoint with the indexed runtime
 // owner below, so this file now records both the historical motivation and
-// the implemented solution. Opaque handles such as FatFile still carry no
-// runtime fields; NetRxCpuOwned has since migrated to the same indexed-owner
-// model demonstrated here.
+// the implemented solution. NetRxCpuOwned and FatFile have since migrated
+// to the same indexed-owner model demonstrated here; opaque guards such as
+// KGuard and MutexGuard intentionally remain fieldless capabilities.
 //
 // Idiom demonstrated here: don't make the escaping, storable identity an
 // affine pointer at all. Make it a plain integer INDEX into a
@@ -18,16 +18,10 @@
 // structs, arrays, returned, copied -- and takibi's range-proof
 // machinery is what keeps table access safe.
 //
-// Trade made: double-close / use-after-close on the ESCAPED identity is
-// no longer a compile-time error, only a runtime `in_use` flag check --
-// the same pattern FatFile already uses internally (`ff_is_open`) to
-// guard against a second fat_open() before fat_close(), since the affine
-// checker has no visibility across two independently acquired handles of
-// the same type either. Multi-instance + escape, in exchange for losing
-// affine's static double-free guarantee on the escaped value itself.
-//
-// The nominal `SlotLease[n]` below now carries that index directly and is
-// linear, eliminating the loose call-site index while preserving its range.
+// The historical loose-index workaround traded static close/use-after-close
+// checking for a runtime `in_use` flag. The nominal `SlotLease[n]` below is
+// the replacement: it carries the runtime index directly and remains linear,
+// restoring static single-consumption without losing multi-instance support.
 
 // The runtime index and its erased static identity now travel together.
 // LLVM sees this as a one-field `{ usize }` aggregate; `n` and `@ n` have

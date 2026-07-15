@@ -66,7 +66,7 @@ let check_refined_base_range pos lo hi base =
 %token <string> IDENT
 %token <string> STRING
 %token FN INLINE RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT EXISTS BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
-%token DARROW COLONCOLON UNDERSCORE
+%token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
 %token ASSIGN DOT
 %token IF ELSE WHILE FOR IN BREAK CONTINUE
@@ -129,10 +129,8 @@ item:
     { LetDef ($4, Some $6, None, Some (narrow_int64 $symbolstartpos "alignment" $9), m, p, $symbolstartpos) }
   | p = private_flag LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN INT RPAREN ASSIGN expr SEMI
     { LetDef ($4, Some $6, Some $12, Some (narrow_int64 $symbolstartpos "alignment" $9), m, p, $symbolstartpos) }
-  | EXTERN FN IDENT LPAREN params RPAREN SEMI
-    { ExternFuncDef ($3, $5, None) }
-  | EXTERN FN IDENT LPAREN params RPAREN ARROW type_expr SEMI
-    { ExternFuncDef ($3, $5, Some $8) }
+  | EXTERN FN IDENT LPAREN params RPAREN ret_type_opt effects_opt SEMI
+    { ExternFuncDef ($3, $5, $7, $8) }
   | struct_intro LBRACE struct_fields RBRACE
     { let (name, is_packed, align_opt) = $1 in
       let fields = List.map (fun (fname, ty, _) -> (fname, ty)) $3 in
@@ -226,13 +224,15 @@ variant_cases:
     { (name, Some payload) :: rest }
 
 func_def:
-  | FN IDENT LPAREN params RPAREN ret_type_opt LBRACE stmts RBRACE
+  | FN IDENT LPAREN params RPAREN ret_type_opt effects_opt LBRACE stmts RBRACE
     {
-      Ast.{ name = $2; params = $4; ret_type = $6; body = $8; is_inline = false; def_loc = $symbolstartpos }
+      Ast.{ name = $2; params = $4; ret_type = $6; effects = $7;
+            body = $9; is_inline = false; def_loc = $symbolstartpos }
     }
-  | INLINE FN IDENT LPAREN params RPAREN ret_type_opt LBRACE stmts RBRACE
+  | INLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt LBRACE stmts RBRACE
     {
-      Ast.{ name = $3; params = $5; ret_type = $7; body = $9; is_inline = true; def_loc = $symbolstartpos }
+      Ast.{ name = $3; params = $5; ret_type = $7; effects = $8;
+            body = $10; is_inline = true; def_loc = $symbolstartpos }
     }
 
 param:
@@ -251,6 +251,13 @@ ret_type_opt:
   | /* empty */          { None }
   | ARROW type_expr      { Some $2 }   (* fn foo() -> int  preferred form *)
   | base_type_expr       { Some $1 }   (* fn foo() int  backward-compatible; {lo..<hi} cannot be written without -> *)
+
+effects_opt:
+  | /* empty */ { [] }
+  | BANG LBRACE effects RBRACE { $3 }
+
+effects:
+  | separated_nonempty_list(COMMA, IDENT) { $1 }
 
 stmts:
   | /* empty */ { [] }
@@ -379,8 +386,8 @@ match_arms:
 match_arm:
   | IDENT COLONCOLON IDENT DARROW LBRACE stmts RBRACE
     { ArmVariant ($1, $3, None, $6) }
-  | IDENT COLONCOLON IDENT LPAREN binding = IDENT RPAREN DARROW LBRACE stmts RBRACE
-    { ArmVariant ($1, $3, Some binding, $9) }
+  | IDENT COLONCOLON IDENT LPAREN mutable_ = mut_flag binding = IDENT RPAREN DARROW LBRACE stmts RBRACE
+    { ArmVariant ($1, $3, Some (binding, mutable_), $10) }
   | UNDERSCORE DARROW LBRACE stmts RBRACE
     { ArmWild $4 }
 
@@ -547,6 +554,7 @@ array_size:
 type_expr:
   | base_type_expr %prec TYPE_BASE { $1 }
   | t = base_type_expr AT n = static_arg { TypeSingleton (t, n) }
+  | BORROW MUT t = type_expr { TypeBorrowMut t }
   | BORROW t = type_expr { TypeBorrow t }
   | SINK t = type_expr { TypeSink t }
   | EXISTS name = IDENT COLON sort = int_base_type_expr DOT body = type_expr

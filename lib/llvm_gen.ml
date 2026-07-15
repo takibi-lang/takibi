@@ -71,6 +71,7 @@ let rec resolve_special_type = function
       TypeRefined (lo, hi, resolve_special_type base)
   | TypeSlice (t, n) -> TypeSlice (resolve_special_type t, n)
   | TypeBorrow t -> TypeBorrow (resolve_special_type t)
+  | TypeBorrowMut t -> TypeBorrowMut (resolve_special_type t)
   | TypeSink t -> TypeSink (resolve_special_type t)
   | TypeAlignedPtr (n, t) -> TypeAlignedPtr (n, resolve_special_type t)
   | TypeTuple ts -> TypeTuple (List.map resolve_special_type ts)
@@ -82,7 +83,7 @@ let rec resolve_special_type = function
 let rec is_erased_view_type = function
   | TypeView _ -> true
   | TypeExists (_, _, body) -> is_erased_view_type body
-  | TypeBorrow t | TypeSink t -> is_erased_view_type t
+  | TypeBorrow t | TypeBorrowMut t | TypeSink t -> is_erased_view_type t
   | _ -> false
 
 let rec runtime_payload_type = function
@@ -220,6 +221,7 @@ let rec ty_str = function
   | TypeSlice (t, 0) -> Printf.sprintf "[]%s" (ty_str t)
   | TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (ty_str t) n
   | TypeBorrow t -> "borrow " ^ ty_str t
+  | TypeBorrowMut t -> "borrow mut " ^ ty_str t
   | TypeSink t -> "sink " ^ ty_str t
   | TypeAlignedPtr (n, t) -> Printf.sprintf "*align(%d) %s" n (ty_str t)
   | TypeTuple ts ->
@@ -764,6 +766,7 @@ let rec ltype_of_ast = function
          aggregates on both targets. *)
       struct_type context (Array.of_list (List.map ltype_of_ast ts))
   | TypeBorrow t | TypeSink t -> ltype_of_ast t
+  | TypeBorrowMut _ -> pointer_type context
   | TypeAlignedPtr _ -> pointer_type context
 
 (* DWARF Attribute Type Encoding constants (DWARF5 spec section 7.8, table 7.11).
@@ -856,6 +859,7 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
     (* v1: no DWARF type for tuples (function-local values; -g builds work,
        tuple-typed variables just carry no type info in gdb) *)
   | TypeBorrow t | TypeSink t -> ditype_of_ast dib file t
+  | TypeBorrowMut t -> ditype_of_ast dib file (TypePtr t)
   | TypeAlignedPtr (_, t) -> ditype_of_ast dib file (TypePtr t)
       (* alignment is a compile-time-only proof (see ltype_of_ast); gdb
          just sees an ordinary pointer *)
@@ -1189,6 +1193,7 @@ let rec coerce v (dst : Ast.type_expr) =
   | TypeRefined (_, _, base) -> coerce v base
   | TypeSlice _ -> v   (* fat values are never numerically coerced *)
   | TypeBorrow t | TypeSink t -> coerce v t
+  | TypeBorrowMut _ -> v
   | TypeView _ -> v
 
 (* Normalize an index/offset value to usize width for use as a GEP index --
@@ -1274,6 +1279,46 @@ let rec collect_lets stmts =
           | ArmWild body            -> collect_lets body
         ) arms
     | _                           -> []
+  ) stmts
+
+let mutable_pattern_key loc vtype cname name =
+  Printf.sprintf "%s:%s:%s:%s" (Types.loc_key loc) vtype cname name
+
+(* Mutable variant payloads need stable storage because `borrow mut` passes
+   their address to callees. Pre-collect them just like mutable lets so a
+   match inside a loop does not execute an alloca on every iteration. *)
+let rec collect_mutable_pattern_binders stmts =
+  List.concat_map (fun (s : Ast.stmt) ->
+    match s.desc with
+    | Block body | While (_, body) | For (_, _, _, _, body)
+    | ForEach (_, _, body) -> collect_mutable_pattern_binders body
+    | If (_, yes, no) ->
+        collect_mutable_pattern_binders yes
+        @ collect_mutable_pattern_binders no
+    | Match (_, arms) ->
+        List.concat_map (fun arm ->
+          match arm with
+          | ArmVariant (vtype, cname, binding, body) ->
+              let here = match binding with
+                | Some (name, true) ->
+                    let layout = variant_case vtype cname in
+                    let schema = match layout.variant_payload with
+                      | Some schema -> schema
+                      | None -> raise (Error (Printf.sprintf
+                          "BUG: nullary variant %s::%s has a mutable binder"
+                          vtype cname))
+                    in
+                    let payload_ty = runtime_payload_type schema in
+                    if is_erased_view_type payload_ty then []
+                    else [(mutable_pattern_key s.loc vtype cname name,
+                           name, payload_ty, s.loc)]
+                | _ -> []
+              in
+              here @ collect_mutable_pattern_binders body
+          | ArmWild body -> collect_mutable_pattern_binders body
+        ) arms
+    | Let _ | LetTuple _ | Return _ | Expr _ | Assign _ | AssignDeref _
+    | AssignField _ | AssignIndex _ | Break | Continue -> []
   ) stmts
 
 (* Immutable `let` bindings normally stay as SSA values (Imm) so codegen can
@@ -1368,7 +1413,8 @@ let function_key (pt : Types.program_types option) (fdef : Ast.func) =
         | TypeView name -> TypeView name
         | TypeVariant name -> TypeVariant name
         | TypeExists (_, _, body) -> abi_type body
-        | TypeBorrow t | TypeSink t | TypeAlignedPtr (_, t) -> abi_type t
+        | TypeBorrow t | TypeBorrowMut t | TypeSink t
+        | TypeAlignedPtr (_, t) -> abi_type t
         | TypeSingleton (t, _) -> abi_type t
         | TypeIndexed (name, _) -> TypeIndexed (name, [])
         | t -> t
@@ -2709,9 +2755,23 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                  "BUG: Call: '%s' called with %d argument(s), expected %d -- type_inf should have rejected this arity mismatch"
                  direct_name (List.length args) (List.length param_asts)));
              List.map2 (fun a param_ast ->
-               let (_, av) = gen_expr ~expected_ty:param_ast locals a in
-               if is_erased_view_type param_ast then None
-               else Some (coerce av param_ast)
+               if is_erased_view_type param_ast then begin
+                 ignore (gen_expr locals a);
+                 None
+               end else match param_ast with
+               | TypeBorrowMut _ ->
+                   (match a.desc with
+                    | Var name ->
+                        (match Hashtbl.find_opt locals name with
+                         | Some (Mut (_, ptr)) -> Some ptr
+                         | _ -> raise (Error (Printf.sprintf
+                             "BUG: borrow mut argument '%s' has no mutable storage"
+                             name)))
+                    | _ -> raise (Error
+                        "BUG: borrow mut argument is not a bare variable"))
+               | _ ->
+                   let (_, av) = gen_expr ~expected_ty:param_ast locals a in
+                   Some (coerce av param_ast)
              ) args param_asts
              |> List.filter_map Fun.id
              |> Array.of_list
@@ -2803,7 +2863,8 @@ let gen_func ?prog_types fdef =
       let file = di_file_for dib fdef.def_loc.Lexing.pos_fname in
       let line = fdef.def_loc.Lexing.pos_lnum in
       let param_ast_for_di =
-        List.map (fun (n, t) -> res n t) fdef.params
+        Option.value (Hashtbl.find_opt func_param_ast_types key)
+          ~default:(List.map (fun (n, t) -> res n t) fdef.params)
         |> List.filter (fun t -> not (is_erased_view_type t))
       in
       let subroutine_ty =
@@ -2859,6 +2920,8 @@ let gen_func ?prog_types fdef =
   (* locals maps name -> local_binding *)
   let locals : (string, local_binding) Hashtbl.t = Hashtbl.create 16 in
   let debug_immutable_allocas : (string, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 16 in
+  let mutable_pattern_allocas : (string, Ast.type_expr * llvalue) Hashtbl.t =
+    Hashtbl.create 8 in
 
   (* Apply struct type-level alignment to an alloca if the type has one registered. *)
   let apply_struct_align ast_ty ptr =
@@ -2879,6 +2942,7 @@ let gen_func ?prog_types fdef =
     | TypeRefined (_, _, base)
     | TypeSingleton (base, _)
     | TypeBorrow base
+    | TypeBorrowMut base
     | TypeSink base
     | TypeIo base -> is_debug_aggregate_ty base
     | TypeView _ | TypeAlignedPtr _ | TypePtr _ | TypeFn _
@@ -2889,22 +2953,32 @@ let gen_func ?prog_types fdef =
   (* Runtime parameters use allocas as before. Erased view parameters occupy
      neither an LLVM parameter slot nor stack/debug storage. *)
   let runtime_param_index = ref 0 in
-  List.iter (fun (name, ty_opt) ->
+  let param_abi_types = Option.value
+    (Hashtbl.find_opt func_param_ast_types key)
+    ~default:(List.map (fun (name, ty) -> res name ty) fdef.params) in
+  List.iter2 (fun (name, ty_opt) abi_ty ->
     let ast_ty = res name ty_opt in
-    if is_erased_view_type ast_ty then
+    if is_erased_view_type abi_ty then
       Hashtbl.add locals name (Imm (ast_ty, erased_view_value ()))
     else begin
       let i = !runtime_param_index in
       incr runtime_param_index;
-      let ptr = build_alloca (ltype_of_ast ast_ty) name builder in
-      apply_struct_align ast_ty ptr;
-      let inst = build_store (param f i) ptr builder in
-      if !debug_info_enabled && is_debug_aggregate_ty ast_ty then set_volatile true inst;
-      Hashtbl.add locals name (Mut (ast_ty, ptr));
-      declare_var ~is_param:true ~argno:(i + 1) ~name ~ast_ty
-        ~line:fdef.def_loc.Lexing.pos_lnum ~ptr
+      match abi_ty with
+      | TypeBorrowMut _ ->
+          let ptr = param f i in
+          Hashtbl.add locals name (Mut (ast_ty, ptr));
+          declare_var ~is_param:true ~argno:(i + 1) ~name ~ast_ty
+            ~line:fdef.def_loc.Lexing.pos_lnum ~ptr
+      | _ ->
+          let ptr = build_alloca (ltype_of_ast ast_ty) name builder in
+          apply_struct_align ast_ty ptr;
+          let inst = build_store (param f i) ptr builder in
+          if !debug_info_enabled && is_debug_aggregate_ty ast_ty then set_volatile true inst;
+          Hashtbl.add locals name (Mut (ast_ty, ptr));
+          declare_var ~is_param:true ~argno:(i + 1) ~name ~ast_ty
+            ~line:fdef.def_loc.Lexing.pos_lnum ~ptr
     end
-  ) fdef.params;
+  ) fdef.params param_abi_types;
 
   (* Pre-alloca every mutable Let declared in the body *)
   List.iter (fun (name, ty_opt, let_loc, align_opt) ->
@@ -2925,6 +2999,14 @@ let gen_func ?prog_types fdef =
       end
     end
   ) (collect_lets fdef.body);
+
+  List.iter (fun (pattern_key, name, ast_ty, _) ->
+    if not (Hashtbl.mem mutable_pattern_allocas pattern_key) then begin
+      let ptr = build_alloca (ltype_of_ast ast_ty) (name ^ ".payload") builder in
+      apply_struct_align ast_ty ptr;
+      Hashtbl.add mutable_pattern_allocas pattern_key (ast_ty, ptr)
+    end
+  ) (collect_mutable_pattern_binders fdef.body);
 
   (* Debug-only storage for immutable lets. The real codegen binding remains
      Imm/SSA; this alloca exists solely so GDB has a concrete location. *)
@@ -3470,7 +3552,7 @@ let gen_func ?prog_types fdef =
           (match arm with
            | ArmVariant (vtype, cname, binding, body) ->
                (match variant_name, binding with
-                | Some _, Some name ->
+                | Some _, Some (name, is_mutable) ->
                     let layout = variant_case vtype cname in
                     let schema = match layout.variant_payload with
                       | Some schema -> schema
@@ -3486,7 +3568,17 @@ let gen_func ?prog_types fdef =
                       | None -> erased_view_value ()
                     in
                     let old = Hashtbl.find_opt locals name in
-                    Hashtbl.replace locals name (Imm (payload_ty, payload_v));
+                    if is_mutable && not (is_erased_view_type payload_ty) then begin
+                      let pattern_key = mutable_pattern_key s.loc vtype cname name in
+                      let (_, ptr) = match Hashtbl.find_opt mutable_pattern_allocas pattern_key with
+                        | Some entry -> entry
+                        | None -> raise (Error (Printf.sprintf
+                            "BUG: mutable variant binder '%s' was not pre-allocated" name))
+                      in
+                      ignore (build_store (coerce payload_v payload_ty) ptr builder);
+                      Hashtbl.replace locals name (Mut (payload_ty, ptr))
+                    end else
+                      Hashtbl.replace locals name (Imm (payload_ty, payload_v));
                     List.iter gen_stmt body;
                     (match old with
                      | Some prior -> Hashtbl.replace locals name prior
@@ -3736,7 +3828,12 @@ let declare_func ?prog_types fdef =
   let key = function_key prog_types fdef in
   if not (Hashtbl.mem functions key) then begin
     let res name ty_opt = resolve_local_ast prog_types key name ty_opt in
-    let param_ast = List.map (fun (n, t) -> res n t) fdef.params in
+    let param_ast = List.map (fun (n, annotation) ->
+      let resolved = res n annotation in
+      match annotation with
+      | Some (TypeBorrowMut _) -> TypeBorrowMut resolved
+      | _ -> resolved
+    ) fdef.params in
     let param_lls = param_ast
       |> List.filter (fun t -> not (is_erased_view_type t))
       |> List.map ltype_of_ast |> Array.of_list in
@@ -3843,7 +3940,7 @@ let gen_program ?prog_types prog =
     | FuncDef fdef                    -> declare_func ?prog_types fdef
     | LetDef (name, ty_opt, expr_opt, align_opt, is_mutable, _, loc) ->
         gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable loc
-    | ExternFuncDef (name, params, ret_ty) ->
+    | ExternFuncDef (name, params, ret_ty, _) ->
         if not (Hashtbl.mem functions name) then begin
           let param_ast = List.map (fun (_, t) ->
             resolve_special_type

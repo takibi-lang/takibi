@@ -163,7 +163,7 @@ fn gic_enable_virtio_irq() {
     *itargetsr = 1 as u8;
 }
 
-fn virtio_irq_handler() {
+fn virtio_irq_handler() !{interrupt} {
     let status: i32 = *(vreg(VIRTIO_INTERRUPT_STATUS));
     *(vreg(VIRTIO_INTERRUPT_ACK)) = status;
     // Legacy virtio-mmio reports a queue-wide notification, not which queue
@@ -173,7 +173,7 @@ fn virtio_irq_handler() {
     interrupt_notify(); // retained event closes the flag-check/sleep race
 }
 
-fn irq_dispatch(frame_sp: usize) -> usize {
+fn irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
     let id: u32 = *(gic.cpu_iar);
     if (id == (virtio_gic_irq as u32)) {
         virtio_irq_handler();
@@ -330,7 +330,7 @@ fn net_rx_acquire() -> NetRxAcquire {
     return NetRxAcquire::Acquired(net_rx_owned(index, frame_total_len - 10));
 }
 
-fn net_rx_wait() {
+fn net_rx_wait() !{may_block} {
     while (virtio_rx_irq_flag == 0) {
         interrupt_wait();
     }
@@ -375,7 +375,7 @@ fn net_rx_release(frame: sink NetRxCpuOwned[desc]) {
 // the device itself wrote it on receive). Synchronous: sleeps on the retained
 // interrupt event until the device finishes reading buf, so the caller can safely
 // release buf (net_rx_release()) immediately afterward.
-fn net_transmit(buf: *u8, len: i32) {
+fn net_transmit(buf: *u8, len: i32) !{may_block} {
     desc_set(tx_queue_mem as *u8, 0, (buf - 10) as usize, (len + 10) as isize, 0);
     avail_ring_set(tx_queue_mem as *u8, 0, 0);
     tx_avail_idx = tx_avail_idx + 1;

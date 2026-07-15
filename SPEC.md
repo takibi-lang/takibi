@@ -475,10 +475,9 @@ kind of any component/payload (`linear > affine > unrestricted`).
 
 An opaque struct still has no fields or size. Real per-instance state cannot
 live in `*Token`; a driver using that representation must keep it elsewhere.
-`FatFile` currently remains such a private singleton token. Resources whose
-runtime identity matters should use an indexed runtime owner such as
-`SlotLease[n]` or `NetRxCpuOwned[desc]`, whose private runtime fields travel
-with the ownership permission.
+Resources whose runtime identity matters use an indexed runtime owner such as
+`SlotLease[n]`, `NetRxCpuOwned[desc]`, or `FatFile[file]`, whose private
+runtime fields travel with the ownership permission.
 
 `affine opaque struct Name;` marks pointers to that type (`*Name`) as
 affine handles. It statically rejects use after move and double move while
@@ -496,6 +495,12 @@ allowing deliberate abandonment.
   `borrow *Name` parameter does **not** consume the argument, so it may
   be borrowed an unlimited number of times before (or without ever)
   being consumed. The `*Name` spelling shown here is the opaque-handle case.
+- **`borrow mut T`** -- valid only for an affine/linear indexed runtime-owner
+  parameter. It grants scoped exclusive mutation without consuming ownership.
+  A call argument must be a bare mutable local/parameter; use
+  `Case(mut owner)` for a variant payload. The same place cannot also occur in
+  another argument of that call, and a shared-borrow parameter cannot be
+  forwarded as mutable. The scope ends when the direct call returns.
 - **`sink T`** -- has the same parameter-only/kinded-type restriction.
   Unlike `borrow`, it consumes at the call site. For affine values it is
   an explicit API marker for terminal intent; for linear values it also
@@ -675,7 +680,7 @@ payload storage:
 ```
 variant FatOpenResult {
     Error(i32);
-    Opened(*FatFile);
+    Opened(exists file: usize. FatFile[file]);
 }
 
 fn consume(result: FatOpenResult) -> i32 {
@@ -705,7 +710,8 @@ The variant's kind is the strongest kind among its payloads. Matching a
 kinded variant consumes the package. The selected payload then becomes a new
 arm-local value with the same affine/linear rules as if it had been returned
 directly. In particular, every arm that opens a linear payload must consume
-it on every path.
+it on every path. A payload binder is immutable by default; write
+`Case(mut payload)` when it must be passed to `borrow mut`.
 
 An existential payload hides a static identity while retaining its runtime
 owner:
@@ -780,14 +786,77 @@ examples:
   `borrow`/`sink`;
 - existential opening occurs only through `match`.
 
-These restrictions keep ownership tracking honest while place tracking,
-general quantifiers, mutable borrowing, and solver/prover integration remain
-future Core slices. Real positive uses are `NetRxAcquire` in the QEMU and
+These restrictions keep ownership tracking honest while general place
+tracking, quantifiers, and solver/prover integration remain future Core
+slices. Slice 4 adds the narrow mutable-owner borrow described below without
+lifting the variant storage restrictions. Real positive uses are
+`NetRxAcquire` in the QEMU and
 STM32 Ethernet drivers and `FatOpenResult` in FAT12. Focused failures live in
 `examples/variant_linear_payload_missed`,
 `variant_existential_identity_wrong`, and
 `variant_nonexhaustive_wrong`; each source explains the rejected rule in
 English.
+
+## Scoped Mutable Owner Borrows (Takibi Core Slice 4)
+
+`borrow mut` exposes the caller's indexed runtime-owner place for one direct
+call. It is distinct from ownership transfer and from an erased view:
+
+```takibi
+private linear struct FatFile[file: usize] {
+    private dir_index: {0..<16 as usize} @ file;
+    private cursor: u32;
+    private size: u32;
+}
+
+fn fat_read(fp: borrow mut FatFile[file], buf: *u8, n: u32) -> i32 {
+    fp.cursor = fp.cursor + n;
+    return 0;
+}
+
+fn read_then_close(name: *u8, buf: *u8) {
+    match fat_open(name, FA_READ) {
+        FatOpenResult::Opened(mut fp) => {
+            fat_read(fp, buf, 64);
+            fat_close(fp);
+        }
+        FatOpenResult::Error(err) => {}
+    }
+}
+```
+
+At runtime an indexed owner is its ordinary aggregate with all static indices
+erased. A shared `borrow` currently passes that aggregate read-only by value;
+`borrow mut` instead lowers to a pointer to the caller's owner storage, so
+field writes are visible after return. It adds no runtime token, index, or
+borrow object. `FatFile[file]` uses this representation for its directory
+index, cluster/cursor, size, and write mode, allowing simultaneous open files
+without `ff_*` singleton globals.
+
+This is intentionally not a general borrow checker: projections and
+temporaries cannot be mutably borrowed, borrows cannot escape a direct call,
+and indexed owners still cannot live in arbitrary storage.
+
+## Blocking and Interrupt Effects (Takibi Core Slice 4)
+
+Checker effects are written after the return type:
+
+```takibi
+extern fn sem_wait(s: *i32) !{may_block};
+fn mutex_lock(m: *i32) -> *MutexGuard !{may_block} { ... }
+fn IRQ_Handler() !{interrupt} { acknowledge_irq(); }
+```
+
+`may_block` is inferred transitively through resolved direct calls. An
+explicit annotation is therefore an API contract and a seed, not a required
+annotation on every caller. `interrupt` marks a root whose complete reachable
+direct-call graph must not contain `may_block`; `interrupt_wait()` is
+intrinsically blocking. Diagnostics include one offending call path.
+
+Function-pointer types do not carry effects yet. Consequently, an indirect
+call reachable from an `interrupt` root is rejected as effect-unknown. An
+extern without `may_block` is a trusted non-blocking contract. Effects erase
+completely: they add no LLVM parameter, field, instruction, or metadata.
 
 ## File-Granular Privacy (`private`)
 

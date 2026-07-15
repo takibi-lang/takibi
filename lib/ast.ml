@@ -61,7 +61,10 @@ type type_expr =
                                       int = compile-time MINIMUM length (0 = unknown).
                                       The runtime length is always >= the minimum; index
                                       proofs and constant subslices check against it. *)
-  | TypeBorrow of type_expr        (* parameter-only, non-consuming kinded borrow *)
+  | TypeBorrow of type_expr        (* parameter-only, shared non-consuming borrow *)
+  | TypeBorrowMut of type_expr
+    (* parameter-only scoped mutable borrow. The callee receives exclusive
+       access to the caller's runtime place; ownership remains with caller. *)
   | TypeSink of type_expr
     (* parameter-only kinded "sink": like a plain owning parameter
        at the call site (the argument IS consumed there), but marks this
@@ -171,8 +174,8 @@ and stmt_desc =
   | Match of expr * match_arm list
       (* match expr { Name::Case(binding) => {...} Name::None => {...} } *)
 and match_arm =
-  | ArmVariant of string * string * ident option * stmt list
-      (* Name::Case[(payload_name)] => { stmts } *)
+  | ArmVariant of string * string * (ident * bool) option * stmt list
+      (* Name::Case[(payload_name)] => { stmts }; bool means `mut` binding. *)
   | ArmWild    of stmt list                    (* _ => { stmts } *)
 [@@deriving show]
 
@@ -180,6 +183,9 @@ type func = {
   name : ident;
   params: (ident * type_expr option) list;
   ret_type : type_expr option;
+  effects : ident list;
+  (* Slice 4 checker effects. `may_block` is propagated through direct
+     calls; `interrupt` marks a root that must not reach may_block. *)
   body : stmt list;
   is_inline : bool;
   def_loc : loc [@printer pp_loc];  (* location of the "fn" keyword -- used for DWARF DISubprogram *)
@@ -199,7 +205,8 @@ type toplevel =
      (loc.pos_fname) matches this declaration's own loc -- enforced in type_inf.ml. loc is this
      declaration's own position, needed to know which file "declared" it. *)
   | ExternFuncDef of ident * (ident * type_expr option) list * type_expr option
-  (* extern fn name(params) -> ret; -- body is provided by external assembly *)
+      * ident list
+  (* extern fn name(params) -> ret !{effects}; -- body is external. *)
   | StructDef of string * (string * type_expr) list * bool * int option * string list * loc
   (* name, fields, is_packed, align_bytes, private_field_names, loc --
      align_bytes = Some N means type-level align(N). private_field_names
@@ -329,7 +336,7 @@ let written_names (stmts : stmt list) : string list =
         go_expr d;
         List.iter (function
           | ArmVariant (_, _, binding, b) ->
-              Option.iter add binding;
+              Option.iter (fun (name, _) -> add name) binding;
               List.iter go_stmt b
           | ArmWild b -> List.iter go_stmt b
         ) arms

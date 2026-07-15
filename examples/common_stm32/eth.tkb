@@ -138,7 +138,7 @@ let ETH_DMASR_TS:  u32 = 0x00000001;
 let ETH_DMASR_RS:  u32 = 0x00000040;
 let ETH_DMASR_NIS: u32 = 0x00010000;
 
-fn ETH_IRQHandler() {
+fn ETH_IRQHandler() !{interrupt} {
     let status: u32 = *ETH_DMASR;
     *ETH_DMASR = status; // W1C: acknowledge every latched DMA source
     if ((status & ETH_DMASR_RS) != 0) {
@@ -389,7 +389,7 @@ fn net_rx_acquire() -> NetRxAcquire {
     return NetRxAcquire::Acquired(net_rx_owned(index, len));
 }
 
-fn net_rx_wait() {
+fn net_rx_wait() !{may_block} {
     while (eth_rx_irq_flag == 0) {
         interrupt_wait();
     }
@@ -435,7 +435,7 @@ fn net_rx_release(frame: sink NetRxCpuOwned[desc]) {
 // release buf (e.g. via net_rx_release()) immediately afterward -- same
 // completion-ordering guarantee examples/common_qemu/virtio_mmio.tkb's net_echo
 // consumer relies on before re-posting an RX descriptor.
-fn net_transmit(buf: *u8, len: i32) {
+fn net_transmit(buf: *u8, len: i32) !{may_block} {
     let desc: *align(32) EthDmaDesc = tx_desc_ptr(eth_tx_cur);
 
     desc.word2 = ptr_to_u32(buf);

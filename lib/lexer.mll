@@ -99,6 +99,7 @@ rule read = parse
   | ">=" { GE }
   | "==" { EQ }
   | "!=" { NE }
+  | '!'  { BANG }
   | "||" { OR }
   | "|=" { PIPE_EQ }
   | '|'  { PIPE }

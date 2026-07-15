@@ -51,7 +51,7 @@ fn sd_worker() {
         }
 
         match fat_open(hello_name, FA_READ) {
-            FatOpenResult::Opened(read_fp) => {
+            FatOpenResult::Opened(mut read_fp) => {
                 let mut read_buf: [u8; 80];
                 let mut read_br: u32 = 0;
                 fat_read(read_fp, read_buf, 80, &read_br);

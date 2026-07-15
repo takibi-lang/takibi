@@ -916,13 +916,64 @@ linear payload, non-exhaustive matching, and accidental equality between two
 existential openings. The real network and FAT examples are the positive
 integration coverage.
 
-## 7. Next outlook: channel v2 (#113), mutable owners, and effects
+#### 6.7.5 Slice 4 implementation result (2026-07-15)
+
+Slice 4 removes the last dummy-capability design from FAT12. `FatFile` is now
+an indexed linear runtime owner:
+
+```takibi
+private linear struct FatFile[file: usize] {
+    private dir_index: {0..<16 as usize} @ file;
+    private start_cluster: u32;
+    private cur_cluster: u32;
+    private pos_in_cluster: u32;
+    private fptr: u32;
+    private fsize: u32;
+    private writing: bool;
+}
+
+variant FatOpenResult {
+    Error(i32);
+    Opened(exists file: usize. FatFile[file]);
+}
+```
+
+The directory index, cursor, size, and mode survive at runtime in each owner;
+`file`, its singleton equality/range proof, and the linear obligation do not.
+`fat_read` and `fat_write` take `borrow mut FatFile[file]`, while `fat_close`
+takes `sink FatFile[file]`. The mutable borrow lowers to a pointer to the
+caller's aggregate storage and ends at the direct call return. Calls require a
+bare mutable place, reject same-call overlap, and cannot upgrade a shared
+borrow. `Case(mut fp)` is the only new match syntax. The FAT integration test
+keeps two files open and interleaves reads, so it would fail under the removed
+singleton `ff_*` cursor design.
+
+Slice 4 also gives epsilon its first surface form. `!{may_block}` is a
+checker-only contract propagated through resolved direct calls;
+`interrupt_wait()` is intrinsically blocking. `!{interrupt}` marks a root
+that must not reach a blocker, and diagnostics show an offending call path.
+Mutex/channel APIs and direct QEMU/STM32 ISR roots now use these annotations.
+Both effects erase completely and leave function ABI unchanged.
+
+The conservative boundary is explicit: function-pointer types do not yet
+carry effects, so an indirect call reached from an interrupt root is rejected
+as unknown. `USART1_IRQHandler`, whose callback is stored in a function
+pointer, cannot become a checked root until that contract has a type-level
+surface. General place borrowing, stored owners, lock invariants, quantified
+views, and solver/prover discharge are also not implied by this slice.
+
+Focused negative examples explain immutable-payload mutable borrowing and a
+transitive blocking ISR path in English. The effect tests also cover safe
+recursion, intrinsic blocking, unknown/duplicate annotations, and conservative
+indirect calls.
+
+## 7. Next outlook: channel v2 (#113), function effects, and view change
 
 Variant-carried ownership is now available for channel results and transfer
-APIs. The next drivers are moving `FatFile` state into a runtime owner with
-scoped mutable access, then expressing blocking/interrupt constraints for
-mutexes, channels, and ISRs. Zero-copy channel storage still needs stable
-place/invariant tracking before a linear payload can safely live in a slot.
+APIs. Zero-copy channel storage still needs stable place/invariant tracking
+before a linear payload can safely live in a slot. Function-pointer effects
+are the next concrete epsilon gap exposed by the UART callback ISR. Indexed
+view change for TCP remains the next Delta/Phi state-transition driver.
 
 ## 8. Prior art notes
 

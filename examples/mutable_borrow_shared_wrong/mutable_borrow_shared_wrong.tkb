@@ -1,0 +1,28 @@
+// This file is expected to produce a compile error.
+// An existential payload binder is immutable unless the arm says `mut`.
+// Passing this shared binding to `change_owner` would expose mutable access
+// without an exclusive scoped place, so the checker rejects the call.
+linear struct MutableExampleOwner[n: usize] {
+    index: usize @ n;
+    value: i32;
+}
+
+variant MutableExampleResult {
+    Opened(exists n: usize. MutableExampleOwner[n]);
+}
+
+fn change_owner(owner: borrow mut MutableExampleOwner[n]) {
+    owner.value = 1;
+}
+
+fn drop_owner(owner: sink MutableExampleOwner[n]) {
+}
+
+fn bad_shared_binder(result: MutableExampleResult) {
+    match result {
+        MutableExampleResult::Opened(owner) => {
+            change_owner(owner);
+            drop_owner(owner);
+        }
+    }
+}

@@ -145,7 +145,7 @@ fn app_main() {
     load_seed_from_host();
     fat_mount();
     match fat_open("SEED    TXT", FA_READ) {
-        FatOpenResult::Opened(seed_fp) => {
+        FatOpenResult::Opened(mut seed_fp) => {
             let mut seed_buf: [u8; 128];
             let mut seed_br: u32 = 0;
             fat_read(seed_fp, seed_buf, 128, &seed_br);
@@ -179,17 +179,39 @@ fn app_main() {
         uart_puts("create README.TXT: FAIL\r\n");
     }
 
-    // Phase 3: read HELLO.TXT back in the same process -- a same-process
-    // round trip (takibi writes, takibi reads), independent of Phase 1's
-    // external-interop check and Phase 4's external mtools check below.
+    // Phase 3: keep HELLO.TXT and README.TXT open at the same time. HELLO is
+    // read in two pieces with a README read between them, so this is also a
+    // runtime regression test that each FatFile owns an independent cursor.
+    // The old singleton ff_* state would switch HELLO's second read to the
+    // README cursor and corrupt the unchanged expected output below.
     match fat_open(hello_name, FA_READ) {
-        FatOpenResult::Opened(read_fp) => {
-            let mut read_buf: [u8; 64];
-            let mut read_br: u32 = 0;
-            fat_read(read_fp, read_buf, 64, &read_br);
-            fat_close(read_fp);
-            uart_puts("read-back HELLO.TXT: ");
-            uart_print_bytes(read_buf, read_br);
+        FatOpenResult::Opened(mut hello_fp) => {
+            match fat_open(readme_name, FA_READ) {
+                FatOpenResult::Opened(mut readme_fp) => {
+                    let mut read_buf: [u8; 64];
+                    let mut hello_first_br: u32 = 0;
+                    fat_read(hello_fp, read_buf, 5, &hello_first_br);
+
+                    let mut readme_probe: [u8; 4];
+                    let mut readme_br: u32 = 0;
+                    fat_read(readme_fp, readme_probe, 4, &readme_br);
+
+                    let mut hello_rest_br: u32 = 0;
+                    fat_read(hello_fp,
+                             read_buf + (hello_first_br as isize),
+                             59, &hello_rest_br);
+                    fat_close(readme_fp);
+                    fat_close(hello_fp);
+
+                    uart_puts("read-back HELLO.TXT: ");
+                    uart_print_bytes(read_buf,
+                                     hello_first_br + hello_rest_br);
+                }
+                FatOpenResult::Error(err) => {
+                    fat_close(hello_fp);
+                    uart_puts("read-back HELLO.TXT: FAIL\r\n");
+                }
+            }
         }
         FatOpenResult::Error(err) => {
             uart_puts("read-back HELLO.TXT: FAIL\r\n");

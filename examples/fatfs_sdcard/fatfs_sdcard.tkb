@@ -69,7 +69,7 @@ fn app_main() {
         // the mtools cross-check and pure in-memory round trip; this is the
         // one new thing this example proves).
         match fat_open(hello_name, FA_READ) {
-            FatOpenResult::Opened(read_fp) => {
+            FatOpenResult::Opened(mut read_fp) => {
                 let mut read_buf: [u8; 64];
                 let mut read_br: u32 = 0;
                 fat_read(read_fp, read_buf, 64, &read_br);

@@ -116,7 +116,7 @@ struct Chan {
     private value:      i32;
 }
 
-fn chan_send(ch: *Chan, m: i32) {
+fn chan_send(ch: *Chan, m: i32) !{may_block} {
     let mut g: *MutexGuard = mutex_lock(&ch.mutex);
     while (ch.full != 0) {
         g = cond_wait(&ch.slot_taken, g, &ch.mutex);
@@ -130,7 +130,7 @@ fn chan_send(ch: *Chan, m: i32) {
     mutex_unlock(g, &ch.mutex);
 }
 
-fn chan_recv(ch: *Chan) -> i32 {
+fn chan_recv(ch: *Chan) -> i32 !{may_block} {
     let mut g: *MutexGuard = mutex_lock(&ch.mutex);
     while (ch.full == 0) {
         g = cond_wait(&ch.slot_full, g, &ch.mutex);
@@ -155,7 +155,7 @@ struct WordChan {
     private value:      usize;
 }
 
-fn chan_word_send(ch: *WordChan, m: usize) {
+fn chan_word_send(ch: *WordChan, m: usize) !{may_block} {
     let mut g: *MutexGuard = mutex_lock(&ch.mutex);
     while (ch.full != 0) {
         g = cond_wait(&ch.slot_taken, g, &ch.mutex);
@@ -169,7 +169,7 @@ fn chan_word_send(ch: *WordChan, m: usize) {
     mutex_unlock(g, &ch.mutex);
 }
 
-fn chan_word_recv(ch: *WordChan) -> usize {
+fn chan_word_recv(ch: *WordChan) -> usize !{may_block} {
     let mut g: *MutexGuard = mutex_lock(&ch.mutex);
     while (ch.full == 0) {
         g = cond_wait(&ch.slot_full, g, &ch.mutex);
@@ -206,7 +206,7 @@ struct SchedState {
 // round-robin switch also visit an empty, never-initialized slot 3.
 let mut sched: SchedState = {1, 0, {0, 0, 0, 0}};
 
-fn irq_dispatch(frame_sp: usize) -> usize {
+fn irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
     let id: u32 = *gic.cpu_iar;
     if (id == 30) {
         scheduler_rearm_tick();
@@ -221,11 +221,11 @@ fn irq_dispatch(frame_sp: usize) -> usize {
     return frame_sp;
 }
 
-fn SysTick_Handler() {
+fn SysTick_Handler() !{interrupt} {
     pendsv_trigger();
 }
 
-fn pendsv_dispatch(frame_sp: usize) -> usize {
+fn pendsv_dispatch(frame_sp: usize) -> usize !{interrupt} {
     let sp: *usize = sched.tcb_sp;
     sp[sched.current_task] = frame_sp;
     sched.current_task = (sched.current_task + 1) % sched.task_count;

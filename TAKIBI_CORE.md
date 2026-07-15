@@ -319,18 +319,22 @@ API.
 are runtime state and should not remain unrelated singleton globals:
 
 ```takibi
-private linear struct FatFile[file: id] {
-    private dir_index: usize;
+private linear struct FatFile[file: usize] {
+    private dir_index: {0..<16 as usize} @ file;
     private start_cluster: u32;
     private cur_cluster: u32;
     private pos_in_cluster: u32;
-    private offset: u32;
-    private size: u32;
+    private fptr: u32;
+    private fsize: u32;
     private writing: bool;
 }
 
-fn fat_open(name83: *u8, mode: i32)
-    -> Result[exists file. FatFile[file], FatError];
+variant FatOpenResult {
+    Error(i32);
+    Opened(exists file: usize. FatFile[file]);
+}
+
+fn fat_open(name83: *u8, mode: i32) -> FatOpenResult;
 fn fat_read(fp: borrow mut FatFile[file], buf: *u8,
             requested: u32, read: *u32) -> i32;
 fn fat_close(fp: sink FatFile[file]) -> i32;
@@ -600,13 +604,28 @@ payload per case, no concrete struct/array aggregate payloads, and
 existentials only around a direct indexed runtime owner. These are
 ownership-tracking limits, not claims about the final Core.
 
-### Slice 4: runtime mutable owners and effects
+### Slice 4: runtime mutable owners and effects (implemented 2026-07-15)
 
-- Move `FatFile` state into a runtime owner and add scoped mutable borrow.
-- Add `may_block`/interrupt-context checking to `mutex`, channel, and ISR
-  examples.
-- Introduce lock invariants or richer views only when a concurrent example
-  needs them.
+Implemented scope:
+
+- `borrow mut Owner[n]` is a parameter-only scoped exclusive borrow for an
+  affine/linear indexed runtime owner. Calls require a bare mutable place and
+  reject overlap with another argument; `Case(mut owner)` makes an opened
+  existential payload mutable;
+- LLVM passes `borrow mut` as a pointer to caller-owned aggregate storage.
+  Static indices and the borrow itself erase; checker effects also have zero
+  runtime representation;
+- `FatFile[file]` now owns the directory index, cluster/cursor, size, and mode.
+  `FatOpenResult::Opened(exists file. FatFile[file])` supports simultaneous
+  files, while `fat_read`/`fat_write` borrow mutably and `fat_close` consumes;
+- `!{may_block}` contracts propagate through the resolved direct-call graph.
+  `!{interrupt}` roots reject any transitive blocker, including the intrinsic
+  `interrupt_wait`, and report a call path;
+- effect-unknown indirect calls are rejected below interrupt roots. Function
+  pointer effect signatures remain a later extension;
+- mutex/channel APIs and direct ISR roots now carry concrete annotations.
+  Lock invariants remain deferred because no concurrent example yet needs a
+  heap predicate beyond the existing private API boundary.
 
 ### Later slices
 
@@ -626,7 +645,6 @@ Replace rather than preserve indefinitely:
 - ownership being synonymous with `*OpaqueMarker`;
 - integer-to-token and dummy-storage minting;
 - pointer-only `borrow`/`sink`;
-- singleton global state behind `FatFile`'s opaque token;
 - local-name/one-field-only tracking as the semantic endpoint;
 - proof-carrying runtime data and erased views sharing one ambiguous
   `resource` spelling;

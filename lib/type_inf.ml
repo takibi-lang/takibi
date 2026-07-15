@@ -2,6 +2,36 @@ open Types
 
 module StringSet = Set.Make (String)
 
+let compiler_builtins = StringSet.of_list [
+  "slice_copy"; "slice_eq"; "min"; "max";
+  "dma_publish"; "dma_consume"; "device_fence"; "signal_fence";
+  "interrupt_wait"; "interrupt_notify";
+  "dma_prepare_tx"; "dma_prepare_rx"; "dma_finish_rx";
+]
+
+let is_compiler_builtin name = StringSet.mem name compiler_builtins
+
+let rec count_var_occurrences name (e : Ast.expr) =
+  let count_all xs = List.fold_left (fun n x ->
+    n + count_var_occurrences name x) 0 xs in
+  match e.desc with
+  | Ast.Var other -> if other = name then 1 else 0
+  | Ast.Call (callee, args) ->
+      (if callee = name then 1 else 0) + count_all args
+  | Ast.VariantCtor (_, _, payload) -> count_var_occurrences name payload
+  | Ast.BinOp (_, left, right) ->
+      count_var_occurrences name left + count_var_occurrences name right
+  | Ast.Bnot x | Ast.Deref x | Ast.AddrOf x | Ast.Cast (_, x)
+  | Ast.FieldGet (x, _) | Ast.Unsafe x -> count_var_occurrences name x
+  | Ast.StructLit xs | Ast.TupleLit xs -> count_all xs
+  | Ast.Index (base, index) ->
+      (if base = name then 1 else 0) + count_var_occurrences name index
+  | Ast.SliceOf (base, lo, hi) ->
+      (if base = name then 1 else 0)
+      + count_var_occurrences name lo + count_var_occurrences name hi
+  | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.ViewLit _
+  | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.OffsetOf _ -> 0
+
 (* Type environment: immutable map from variable name to (type, is_mutable) *)
 type tyenv = (ty * bool) StringMap.t
 
@@ -15,6 +45,9 @@ type senv = ((string * Ast.type_expr) list * bool * int option) StringMap.t
    scope and are instantiated freshly at each call site. *)
 let active_static_scope : static_scope option ref = ref None
 let value_static_identities : static_term StringMap.t ref = ref StringMap.empty
+let active_readonly_borrows : StringSet.t ref = ref StringSet.empty
+let function_param_modes : Ast.type_expr option list StringMap.t ref =
+  ref StringMap.empty
 
 let view_kinds : (string, Ast.opaque_kind) Hashtbl.t = Hashtbl.create 8
 let variant_defs : (string, (string * Ast.type_expr option) list) Hashtbl.t =
@@ -33,6 +66,7 @@ let rec resolve_declared_type = function
       Ast.TypeRefined (lo, hi, resolve_declared_type base)
   | Ast.TypeSlice (t, n) -> Ast.TypeSlice (resolve_declared_type t, n)
   | Ast.TypeBorrow t -> Ast.TypeBorrow (resolve_declared_type t)
+  | Ast.TypeBorrowMut t -> Ast.TypeBorrowMut (resolve_declared_type t)
   | Ast.TypeSink t -> Ast.TypeSink (resolve_declared_type t)
   | Ast.TypeAlignedPtr (n, t) -> Ast.TypeAlignedPtr (n, resolve_declared_type t)
   | Ast.TypeTuple ts -> Ast.TypeTuple (List.map resolve_declared_type ts)
@@ -717,7 +751,8 @@ let check_private_type_construction (loc : Ast.loc) (target : Ast.type_expr) =
                 declaring file '%s' (that file's functions are the only \
                 legal source)" n file))
          | _ -> ())
-    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+    | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeSingleton (t, _)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> walk t
@@ -2018,6 +2053,37 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              raise (TypeError (e.loc,
                Printf.sprintf "%s expects %d argument(s), got %d"
                  fname (List.length param_tys) (List.length args)));
+           let target = Option.value
+             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
+             ~default:fname in
+           let modes = Option.value
+             (StringMap.find_opt target !function_param_modes)
+             ~default:(List.map (fun _ -> None) param_tys) in
+           let mutable_places = List.filter_map (fun ((arg : Ast.expr), mode) ->
+             match mode, arg.desc with
+             | Some (Ast.TypeBorrowMut _), Ast.Var name -> Some (name, arg.loc)
+             | Some (Ast.TypeBorrowMut _), _ ->
+                 raise (TypeError (arg.loc,
+                   "borrow mut requires a bare mutable local or parameter; temporaries and projections have no scoped owner place"))
+             | _ -> None
+           ) (List.combine args modes) in
+           List.iter (fun (name, loc) ->
+             let (_, is_mutable) = lookup_binding loc name tyenv in
+             if not is_mutable then
+               raise (TypeError (loc, Printf.sprintf
+                 "cannot mutably borrow immutable value '%s'; bind it with `let mut` or `Case(mut %s)`"
+                 name name));
+             if StringSet.mem name !active_readonly_borrows then
+               raise (TypeError (loc, Printf.sprintf
+                 "cannot mutably borrow shared-borrow parameter '%s'; declare the parameter `borrow mut` to forward mutable access"
+                 name));
+             let uses = List.fold_left (fun count arg ->
+               count + count_var_occurrences name arg) 0 args in
+             if uses > 1 then
+               raise (TypeError (loc, Printf.sprintf
+                 "mutable borrow of '%s' overlaps another argument in the same call"
+                 name))
+           ) mutable_places;
            List.iter2 (fun arg pt ->
              let at = infer_expr senv eenv tyenv fenv arg in
              let at = adapt_actual_to_expected tyenv arg at pt in
@@ -2251,6 +2317,10 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       (tyenv, raw_locals)
   | Assign (name, e) ->
       check_private_global_access s.loc name;
+      if StringSet.mem name !active_readonly_borrows then
+        raise (TypeError (s.loc, Printf.sprintf
+          "cannot assign to borrowed value '%s'; use `borrow mut` for scoped mutation"
+          name));
       let (vty, is_mut) = lookup_binding s.loc name tyenv in
       if not is_mut then
         raise (TypeError (s.loc,
@@ -2352,6 +2422,10 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
        | TIndexedStruct _ ->
            (match base_expr.desc with
             | Var name ->
+                if StringSet.mem name !active_readonly_borrows then
+                  raise (TypeError (base_expr.loc, Printf.sprintf
+                    "cannot mutate shared-borrow parameter '%s'; use `borrow mut` for scoped mutation"
+                    name));
                 let (_, is_mut) = lookup_binding base_expr.loc name tyenv in
                 if not is_mut then
                   raise (TypeError (base_expr.loc, Printf.sprintf
@@ -2772,7 +2846,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                       "variant case '%s::%s' has no payload" vtype cname))
                   | Some _, None -> raise (TypeError (s.loc, Printf.sprintf
                       "variant case '%s::%s' must bind its payload" vtype cname))
-                  | Some schema, Some name ->
+                  | Some schema, Some (name, is_mutable) ->
                       if Const_env.find name <> None then
                         raise (TypeError (s.loc, Printf.sprintf
                           "'%s' shadows a global constant of the same name" name));
@@ -2781,7 +2855,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                           "variant payload binding '%s' shadows an existing value; choose a fresh arm-local name"
                           name));
                       let payload_ty = open_payload schema in
-                      let env = StringMap.add name (payload_ty, false) tyenv in
+                      let env = StringMap.add name (payload_ty, is_mutable) tyenv in
                       (* The binder is arm-local, unlike ordinary `let`
                          entries accumulated in the function-wide raw-local
                          map. Resource checking reopens the case schema for
@@ -2843,7 +2917,7 @@ let check_const_shadowing (fdef : Ast.func) =
     | Ast.Match (_, arms) ->
         List.iter (function
           | Ast.ArmVariant (_, _, binding, b) ->
-              Option.iter (fun name ->
+              Option.iter (fun (name, _) ->
                 if Const_env.find name <> None then reject s.loc name) binding;
               List.iter go_stmt b
           | Ast.ArmWild b            -> List.iter go_stmt b
@@ -2891,9 +2965,16 @@ let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
 
 let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
   let previous_scope = !active_static_scope in
+  let previous_readonly = !active_readonly_borrows in
   let scope = create_static_scope () in
   active_static_scope := Some scope;
-  Fun.protect ~finally:(fun () -> active_static_scope := previous_scope) (fun () ->
+  active_readonly_borrows := List.fold_left (fun names (name, ty) ->
+    match ty with
+    | Some (Ast.TypeBorrow _) -> StringSet.add name names
+    | _ -> names) StringSet.empty fdef.params;
+  Fun.protect ~finally:(fun () ->
+    active_static_scope := previous_scope;
+    active_readonly_borrows := previous_readonly) (fun () ->
     check_const_shadowing fdef;
     value_static_identities := StringMap.empty;
     var_align_bytes := !global_align_bytes_baseline;  (* see its own comment *)
@@ -2914,6 +2995,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
       param_types = List.map2 (fun (name, _) ty -> (name, to_ast ty))
                       fdef.params param_tys;
       local_types = StringMap.map to_ast raw_locals;
+      effects     = fdef.effects;
     })
 
 (* -- Whole-program inference ----------------------------------------------- *)
@@ -2954,7 +3036,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   List.iter (function
     | Ast.FuncDef fdef          -> claim_toplevel_name fdef.name "function"
-    | Ast.ExternFuncDef (n, _, _) -> claim_toplevel_name n "function"
+    | Ast.ExternFuncDef (n, _, _, _) -> claim_toplevel_name n "function"
     | Ast.LetDef (n, _, _, _, _, _, _)  -> claim_toplevel_name n "global"
     | Ast.StructDef (n, _, _, _, _, _)  -> claim_toplevel_name n "struct"
     | Ast.OwnedStructDef (n, _, _, _, _, _, _, _, _) ->
@@ -3029,7 +3111,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         if StringSet.mem name linear_names then Ast.KindLinear
         else if StringSet.mem name affine_names then Ast.KindAffine
         else Ast.KindPlain
-    | Ast.TypeBorrow t | Ast.TypeSink t | Ast.TypeIo t
+    | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t | Ast.TypeIo t
     | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypePtr t
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> payload_kind t
@@ -3149,7 +3231,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeSingleton (base, arg) ->
         validate_static_type loc base;
         check_static_arg loc (static_sort_of_value loc base) arg
-    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+    | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> validate_static_type loc t
     | Ast.TypeFn (args, ret) ->
@@ -3170,14 +3253,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         List.iter (validate_complete_type loc false) args;
         validate_complete_type loc false ret
     | Ast.TypeRefined (_, _, base) -> validate_complete_type loc false base
-    | Ast.TypeBorrow inner | Ast.TypeSink inner
+    | Ast.TypeBorrow inner | Ast.TypeBorrowMut inner | Ast.TypeSink inner
     | Ast.TypeSingleton (inner, _) -> validate_complete_type loc behind_ptr inner
     | Ast.TypeExists (_, _, inner) -> validate_complete_type loc behind_ptr inner
     | Ast.TypeIndexed _ -> ()
     | _ -> ()
   in
   let rec contains_borrow = function
-    | Ast.TypeBorrow _ | Ast.TypeSink _ -> true
+    | Ast.TypeBorrow _ | Ast.TypeBorrowMut _ | Ast.TypeSink _ -> true
     | Ast.TypePtr t | Ast.TypeIo t -> contains_borrow t
     | Ast.TypeTuple ts -> List.exists contains_borrow ts
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> contains_borrow t
@@ -3199,7 +3282,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let rec type_mentions_linear = function
     | Ast.TypeNamed n | Ast.TypeView n -> StringSet.mem n linear_names
     | Ast.TypeIndexed (n, _) -> StringSet.mem n linear_names
-    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+    | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_linear t
@@ -3212,7 +3296,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let rec type_mentions_view = function
     | Ast.TypeView _ -> true
     | Ast.TypeNamed name -> Hashtbl.mem view_kinds name
-    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+    | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
     | Ast.TypeSlice (t, _) -> type_mentions_view t
@@ -3229,7 +3314,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let rec type_mentions_variant = function
     | Ast.TypeVariant _ -> true
     | Ast.TypeNamed name -> Hashtbl.mem variant_defs name
-    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+    | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
     | Ast.TypeSlice (t, _) -> type_mentions_variant t
@@ -3245,7 +3331,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   let rec type_mentions_exists = function
     | Ast.TypeExists _ -> true
-    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+    | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
     | Ast.TypeSlice (t, _) -> type_mentions_exists t
@@ -3256,7 +3343,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   let rec type_mentions_indexed_owner = function
     | Ast.TypeIndexed (name, _) -> Hashtbl.mem indexed_struct_kinds name
-    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+    | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
     | Ast.TypeSlice (t, _) -> type_mentions_indexed_owner t
@@ -3268,7 +3356,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   let rec type_mentions_singleton = function
     | Ast.TypeSingleton _ -> true
-    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+    | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_singleton t
     | Ast.TypeTuple ts -> List.exists type_mentions_singleton ts
@@ -3282,7 +3371,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) ->
         singleton_under_storage true t
-    | Ast.TypeBorrow t | Ast.TypeSink t | Ast.TypeRefined (_, _, t) ->
+    | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
+    | Ast.TypeRefined (_, _, t) ->
         singleton_under_storage inside t
     | Ast.TypeTuple ts -> List.exists (singleton_under_storage inside) ts
     | Ast.TypeFn (args, ret) ->
@@ -3298,7 +3388,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeFn (args, ret) ->
         List.exists (indexed_owner_under_indirection true) args
         || indexed_owner_under_indirection true ret
-    | Ast.TypeBorrow t | Ast.TypeSink t | Ast.TypeRefined (_, _, t)
+    | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
+    | Ast.TypeRefined (_, _, t)
     | Ast.TypeSingleton (t, _) -> indexed_owner_under_indirection inside t
     | Ast.TypeTuple ts -> List.exists (indexed_owner_under_indirection inside) ts
     | _ -> false
@@ -3313,14 +3404,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) ->
         tuple_under_indirection true t
-    | Ast.TypeBorrow t | Ast.TypeSink t | Ast.TypeRefined (_, _, t) ->
+    | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
+    | Ast.TypeRefined (_, _, t) ->
         tuple_under_indirection inside t
     | Ast.TypeSingleton (t, _) -> tuple_under_indirection inside t
     | _ -> false
   in
   let rec type_mentions_tuple = function
     | Ast.TypeTuple _ -> true
-    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+    | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeSingleton (t, _)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_tuple t
@@ -3329,7 +3422,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   let rec linear_inside_container = function
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_linear t
-    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+    | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t) ->
         linear_inside_container t
     | Ast.TypeSingleton (t, _) -> linear_inside_container t
@@ -3354,6 +3448,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeBorrow _ ->
         raise (TypeError (loc,
           "borrow is only valid on an affine/linear opaque pointer, indexed owner, erased view, or kinded variant parameter"))
+    | Ast.TypeBorrowMut (Ast.TypeIndexed (name, _) as inner)
+      when is_kinded name -> validate_complete_type loc false inner
+    | Ast.TypeBorrowMut _ ->
+        raise (TypeError (loc,
+          "borrow mut is only valid on an affine/linear indexed runtime owner parameter"))
     | Ast.TypeSink (Ast.TypeNamed name as inner)
       when Hashtbl.mem view_kinds name -> validate_complete_type loc false inner
     | Ast.TypeSink (Ast.TypeView name as inner)
@@ -3468,8 +3567,29 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            List.iter validate_stmt_types b) arms
      | Ast.Break | Ast.Continue -> ())
   in
+  let validate_effects loc kind name effects =
+    let seen = ref StringSet.empty in
+    List.iter (fun eff ->
+      if eff <> "may_block" && eff <> "interrupt" then
+        raise (TypeError (loc, Printf.sprintf
+          "unknown effect '%s' on %s '%s'; supported effects are may_block and interrupt"
+          eff kind name));
+      if StringSet.mem eff !seen then
+        raise (TypeError (loc, Printf.sprintf
+          "duplicate effect '%s' on %s '%s'" eff kind name));
+      seen := StringSet.add eff !seen
+    ) effects;
+    if StringSet.mem "may_block" !seen && StringSet.mem "interrupt" !seen then
+      raise (TypeError (loc, Printf.sprintf
+        "%s '%s' cannot be both interrupt and may_block" kind name));
+    if kind = "extern function" && StringSet.mem "interrupt" !seen then
+      raise (TypeError (loc, Printf.sprintf
+        "extern function '%s' cannot be an interrupt root because it has no body to check"
+        name))
+  in
   List.iter (function
     | Ast.FuncDef f ->
+        validate_effects f.def_loc "function" f.name f.effects;
         let scope = Hashtbl.create 8 in
         validation_static_scope := Some scope;
         allow_implicit_static := true;
@@ -3477,7 +3597,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         Option.iter (validate_nonparam_type f.def_loc) f.ret_type;
         allow_implicit_static := false;
         List.iter validate_stmt_types f.body
-    | Ast.ExternFuncDef (name, params, ret) ->
+    | Ast.ExternFuncDef (name, params, ret, effects) ->
+        validate_effects Lexing.dummy_pos "extern function" name effects;
         validation_static_scope := Some (Hashtbl.create 8);
         allow_implicit_static := true;
         List.iter (fun (pname, ty) -> match ty with
@@ -3666,10 +3787,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      BEFORE consulting fenv, so a same-named user/extern function would be
      silently unreachable -- reject the definition instead. *)
   let check_reserved_fn loc name =
-    if name = "slice_copy" || name = "slice_eq" || name = "min" || name = "max"
-       || name = "dma_publish" || name = "dma_consume" || name = "device_fence"
-       || name = "signal_fence" || name = "interrupt_wait" || name = "interrupt_notify"
-       || name = "dma_prepare_tx" || name = "dma_prepare_rx" || name = "dma_finish_rx" then
+    if is_compiler_builtin name then
       raise (TypeError (loc,
         Printf.sprintf "'%s' is a compiler builtin and cannot be redefined" name))
   in
@@ -3681,6 +3799,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeArray (t, n) -> Ast.TypeArray (erase_static_for_abi t, n)
     | Ast.TypeSlice (t, n) -> Ast.TypeSlice (erase_static_for_abi t, n)
     | Ast.TypeBorrow t -> Ast.TypeBorrow (erase_static_for_abi t)
+    | Ast.TypeBorrowMut t -> Ast.TypeBorrowMut (erase_static_for_abi t)
     | Ast.TypeSink t -> Ast.TypeSink (erase_static_for_abi t)
     | Ast.TypeAlignedPtr (n, t) -> Ast.TypeAlignedPtr (n, erase_static_for_abi t)
     | Ast.TypeFn (args, ret) ->
@@ -3713,14 +3832,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   let signatures = List.fold_left (fun m -> function
     | Ast.FuncDef f -> add_signature m f.name f.params
-    | Ast.ExternFuncDef (name, params, _) -> add_signature m name params
+    | Ast.ExternFuncDef (name, params, _, _) -> add_signature m name params
     | _ -> m
   ) StringMap.empty prog in
   let fn_counts = StringMap.map StringSet.cardinal signatures in
   let fn_occurrences = List.fold_left (fun m -> function
     | Ast.FuncDef f ->
         StringMap.add f.name (1 + Option.value (StringMap.find_opt f.name m) ~default:0) m
-    | Ast.ExternFuncDef (name, _, _) ->
+    | Ast.ExternFuncDef (name, _, _, _) ->
         StringMap.add name (1 + Option.value (StringMap.find_opt name m) ~default:0) m
     | _ -> m
   ) StringMap.empty prog in
@@ -3775,7 +3894,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let old = Option.value (StringMap.find_opt fdef.name m) ~default:[] in
         let old = List.filter (fun (k, _) -> k <> key) old in
         StringMap.add fdef.name ((key, TFun (pts, rt)) :: old) m
-    | Ast.ExternFuncDef (name, params, ret_ty) ->
+    | Ast.ExternFuncDef (name, params, ret_ty, _) ->
         check_reserved_fn Lexing.dummy_pos name;
         if Option.value (StringMap.find_opt name fn_occurrences) ~default:0 > 1 then
           raise (TypeError (Lexing.dummy_pos, Printf.sprintf
@@ -3925,6 +4044,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              else StringMap.add name (bind_ty, is_mutable) genv)
     | _ -> genv
   ) genv prog in
+  (* Preserve source-level parameter modes for call-site checks. Ordinary
+     HM types intentionally erase borrow/sink wrappers, but `borrow mut`
+     still needs the caller's place mutability and exclusivity checked. *)
+  function_param_modes := List.fold_left (fun modes -> function
+    | Ast.FuncDef f ->
+        StringMap.add (overload_key f.name f.params) (List.map snd f.params) modes
+    | Ast.ExternFuncDef (name, params, _, _) ->
+        StringMap.add (overload_key name params) (List.map snd params) modes
+    | _ -> modes
+  ) StringMap.empty prog;
   (* Pass 3: infer function bodies *)
   let functions = List.fold_left (fun m -> function
     | Ast.FuncDef fdef ->
@@ -3960,7 +4089,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      for both kinds), while its must-be-consumed component is intersected
      (governing linear discharge on every path). *)
   let rec strip_borrow = function
-    | Ast.TypeBorrow t | Ast.TypeSink t -> strip_borrow t
+    | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t -> strip_borrow t
     | t -> t
   in
   let rec is_affine_type ty = match strip_borrow ty with
@@ -3985,7 +4114,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let call_params = List.fold_left (fun m -> function
     | Ast.FuncDef f ->
         StringMap.add (overload_key f.name f.params) (List.map snd f.params) m
-    | Ast.ExternFuncDef (name, params, _) -> StringMap.add name (List.map snd params) m
+    | Ast.ExternFuncDef (name, params, _, _) -> StringMap.add name (List.map snd params) m
     | _ -> m
   ) StringMap.empty prog in
   let call_returns = List.fold_left (fun m -> function
@@ -3993,7 +4122,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let key = overload_key f.name f.params in
         let ret = (StringMap.find key functions).ret_type in
         StringMap.add key ret m
-    | Ast.ExternFuncDef (name, _, ret) ->
+    | Ast.ExternFuncDef (name, _, ret, _) ->
         StringMap.add name (Option.value ret ~default:Ast.TypeVoid) m
     | _ -> m
   ) StringMap.empty prog in
@@ -4066,12 +4195,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        every path, which the early-exit checks below enforce. *)
     let exempt_params = List.fold_left (fun s (name, ty_opt) ->
       match ty_opt with
-      | Some (Ast.TypeBorrow _) | Some (Ast.TypeSink _) -> PathSet.add (PVar name) s
+      | Some (Ast.TypeBorrow _) | Some (Ast.TypeBorrowMut _)
+      | Some (Ast.TypeSink _) -> PathSet.add (PVar name) s
       | _ -> s
     ) PathSet.empty fdef.params in
     let borrowed_params = List.fold_left (fun s (name, ty_opt) ->
       match ty_opt with
-      | Some (Ast.TypeBorrow _) -> PathSet.add (PVar name) s
+      | Some (Ast.TypeBorrow _) | Some (Ast.TypeBorrowMut _) ->
+          PathSet.add (PVar name) s
       | _ -> s
     ) PathSet.empty fdef.params in
     let sink_params = List.fold_left (fun s (name, ty_opt) ->
@@ -4142,7 +4273,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             | arg :: rest ->
             let consume_arg = match params with
               | Some ty :: _ when is_tracked_type ty ->
-                  (match ty with Ast.TypeBorrow _ -> false | _ -> true)
+                  (match ty with
+                   | Ast.TypeBorrow _ | Ast.TypeBorrowMut _ -> false
+                   | _ -> true)
               | _ -> false
             in
             let moved = check_expr moved consume_arg arg in
@@ -4381,16 +4514,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               | Ast.ArmWild b -> (None, None, b)
             in
             let previous_binding_ty = match binding with
-              | Some name -> StringMap.find_opt name !var_types
+              | Some (name, _) -> StringMap.find_opt name !var_types
               | None -> None
             in
             (match binding, binding_ty with
-             | Some name, Some ty ->
+             | Some (name, _), Some ty ->
                  var_types := StringMap.add name ty !var_types
              | _ -> ());
             let (arm_moved, arm_declared, binding_path) = match binding with
               | None -> (moved, declared, None)
-              | Some name ->
+              | Some (name, _) ->
                   let p = PVar name in
                   set_decl_loc p s.loc;
                   (mv_clear p moved, PathSet.add p declared, Some p)
@@ -4413,7 +4546,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               | None -> out
             in
             (match binding with
-             | Some name ->
+             | Some (name, _) ->
                  var_types := (match previous_binding_ty with
                    | Some ty -> StringMap.add name ty !var_types
                    | None -> StringMap.remove name !var_types)
@@ -4457,7 +4590,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        parameters may be dropped; borrow never owns and sink is terminal. *)
     List.iter (fun (name, ty_opt) ->
       let owned_kind = match ty_opt with
-        | Some (Ast.TypeBorrow _) | Some (Ast.TypeSink _) -> None
+        | Some (Ast.TypeBorrow _) | Some (Ast.TypeBorrowMut _)
+        | Some (Ast.TypeSink _) -> None
         | Some ty when is_linear_type ty -> Some Ast.KindLinear
         | _ -> None
       in
@@ -4472,6 +4606,178 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     ) fdef.params
   in
   List.iter (function Ast.FuncDef f -> check_affine_func f | _ -> ()) prog;
+  (* Slice 4 effects are checker-only facts. `may_block` is a transitive
+     property of the resolved direct-call graph; `interrupt` is a root
+     assertion that the reachable graph is non-blocking. Function-pointer
+     types do not carry effects yet, so an indirect call reachable from an
+     interrupt root is conservatively rejected instead of guessed safe. *)
+  let (declared_effects, effect_names, effect_locs) =
+    List.fold_left (fun (effects, names, locs) -> function
+      | Ast.FuncDef f ->
+          let key = overload_key f.name f.params in
+          (StringMap.add key f.effects effects,
+           StringMap.add key f.name names,
+           StringMap.add key f.def_loc locs)
+      | Ast.ExternFuncDef (name, params, _, effects_for_extern) ->
+          let key = overload_key name params in
+          (StringMap.add key effects_for_extern effects,
+           StringMap.add key name names,
+           StringMap.add key Lexing.dummy_pos locs)
+      | _ -> (effects, names, locs)
+    ) (StringMap.empty, StringMap.empty, StringMap.empty) prog
+  in
+  let callable_keys = StringMap.fold (fun key _ keys ->
+    StringSet.add key keys) declared_effects StringSet.empty in
+  let summarize_effect_body body =
+    let callees = ref StringSet.empty in
+    let calls_interrupt_wait = ref false in
+    let has_unknown_indirect_call = ref false in
+    let rec visit_expr (e : Ast.expr) =
+      match e.desc with
+      | Ast.Call (name, args) ->
+          List.iter visit_expr args;
+          if name = "interrupt_wait" then
+            calls_interrupt_wait := true
+          else
+            let target = Option.value
+              (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
+              ~default:name in
+            if StringSet.mem target callable_keys then
+              callees := StringSet.add target !callees
+            else if not (is_compiler_builtin name) then
+              has_unknown_indirect_call := true
+      | Ast.VariantCtor (_, _, payload) -> visit_expr payload
+      | Ast.BinOp (_, left, right) -> visit_expr left; visit_expr right
+      | Ast.Bnot x | Ast.Deref x | Ast.AddrOf x | Ast.Cast (_, x)
+      | Ast.FieldGet (x, _) | Ast.Unsafe x -> visit_expr x
+      | Ast.StructLit xs | Ast.TupleLit xs -> List.iter visit_expr xs
+      | Ast.Index (_, index) -> visit_expr index
+      | Ast.SliceOf (_, lo, hi) -> visit_expr lo; visit_expr hi
+      | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.Var _
+      | Ast.ViewLit _ | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.OffsetOf _ -> ()
+    and visit_stmt (s : Ast.stmt) =
+      match s.desc with
+      | Ast.Return e | Ast.Expr e | Ast.LetTuple (_, e)
+      | Ast.Assign (_, e) -> visit_expr e
+      | Ast.AssignDeref (left, right) | Ast.AssignField (left, _, right)
+      | Ast.AssignIndex (_, left, right) ->
+          visit_expr left; visit_expr right
+      | Ast.Block stmts -> List.iter visit_stmt stmts
+      | Ast.Let (_, _, _, init, _) -> Option.iter visit_expr init
+      | Ast.If (condition, yes, no) ->
+          visit_expr condition; List.iter visit_stmt yes; List.iter visit_stmt no
+      | Ast.While (condition, stmts) ->
+          visit_expr condition; List.iter visit_stmt stmts
+      | Ast.For (_, _, lo, hi, stmts) ->
+          visit_expr lo; visit_expr hi; List.iter visit_stmt stmts
+      | Ast.ForEach (_, collection, stmts) ->
+          visit_expr collection; List.iter visit_stmt stmts
+      | Ast.Match (subject, arms) ->
+          visit_expr subject;
+          List.iter (function
+            | Ast.ArmVariant (_, _, _, stmts) | Ast.ArmWild stmts ->
+                List.iter visit_stmt stmts) arms
+      | Ast.Break | Ast.Continue -> ()
+    in
+    List.iter visit_stmt body;
+    (!callees, !calls_interrupt_wait, !has_unknown_indirect_call)
+  in
+  let effect_summaries = List.fold_left (fun summaries -> function
+    | Ast.FuncDef f ->
+        StringMap.add (overload_key f.name f.params)
+          (summarize_effect_body f.body) summaries
+    | _ -> summaries
+  ) StringMap.empty prog in
+  let explicit_may_block = StringMap.fold (fun key effects blocked ->
+    if List.mem "may_block" effects then StringSet.add key blocked else blocked
+  ) declared_effects StringSet.empty in
+  let close_property seed direct_property =
+    let rec loop current =
+      let next = StringMap.fold (fun caller (callees, waits, indirect) acc ->
+        if direct_property waits indirect
+           || StringSet.exists (fun callee -> StringSet.mem callee acc) callees
+        then StringSet.add caller acc
+        else acc
+      ) effect_summaries current in
+      if StringSet.equal current next then current else loop next
+    in
+    loop seed
+  in
+  let may_block = close_property explicit_may_block
+    (fun waits _ -> waits) in
+  let may_reach_unknown = close_property StringSet.empty
+    (fun _ indirect -> indirect) in
+  let display_effect_key key = Option.value
+    (StringMap.find_opt key effect_names) ~default:key in
+  let rec find_blocking_path visited key =
+    if StringSet.mem key visited then None
+    else if StringSet.mem key explicit_may_block then
+      Some [display_effect_key key]
+    else
+      let visited = StringSet.add key visited in
+      match StringMap.find_opt key effect_summaries with
+      | Some (_, true, _) ->
+          Some [display_effect_key key; "interrupt_wait"]
+      | Some (callees, false, _) ->
+          let rec search = function
+            | [] -> None
+            | callee :: rest ->
+                if StringSet.mem callee may_block then
+                  (match find_blocking_path visited callee with
+                   | Some path -> Some (display_effect_key key :: path)
+                   | None -> search rest)
+                else search rest
+          in
+          search (StringSet.elements callees)
+      | None -> None
+  in
+  let rec find_unknown_path visited key =
+    if StringSet.mem key visited then None
+    else
+      let visited = StringSet.add key visited in
+      match StringMap.find_opt key effect_summaries with
+      | Some (_, _, true) ->
+          Some [display_effect_key key; "<indirect call>"]
+      | Some (callees, _, false) ->
+          let rec search = function
+            | [] -> None
+            | callee :: rest ->
+                if StringSet.mem callee may_reach_unknown then
+                  (match find_unknown_path visited callee with
+                   | Some path -> Some (display_effect_key key :: path)
+                   | None -> search rest)
+                else search rest
+          in
+          search (StringSet.elements callees)
+      | None -> None
+  in
+  StringMap.iter (fun key effects ->
+    if List.mem "interrupt" effects then begin
+      if StringSet.mem key may_block then begin
+        let path = Option.value (find_blocking_path StringSet.empty key)
+          ~default:[display_effect_key key] in
+        raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+          "interrupt function '%s' may block via %s"
+          (display_effect_key key) (String.concat " -> " path)))
+      end;
+      if StringSet.mem key may_reach_unknown then begin
+        let path = Option.value (find_unknown_path StringSet.empty key)
+          ~default:[display_effect_key key; "<indirect call>"] in
+        raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+          "interrupt function '%s' reaches a call with unknown effects via %s"
+          (display_effect_key key) (String.concat " -> " path)))
+      end
+    end
+  ) declared_effects;
+  let functions = StringMap.mapi (fun key info ->
+    let declared = Option.value (StringMap.find_opt key declared_effects)
+      ~default:[] in
+    let effects =
+      (if List.mem "interrupt" declared then ["interrupt"] else [])
+      @ (if StringSet.mem key may_block then ["may_block"] else [])
+    in
+    { info with effects }
+  ) functions in
   (* Deferred until AFTER Pass 3, same reasoning as check_undetermined_lets
      for locals: a global's type can be pinned not only by another global
      (the `Var vname` cross-reference case above) but also by a FUNCTION

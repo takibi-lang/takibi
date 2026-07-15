@@ -404,7 +404,8 @@ let rec of_ast_in_scope scope = function
       TRefinedInt (lo, hi, of_ast_in_scope scope base)
   | Ast.TypeSlice (t, n) -> TSlice (of_ast_in_scope scope t, n)
   | Ast.TypeTuple ts -> TTuple (List.map (of_ast_in_scope scope) ts)
-  | Ast.TypeBorrow t | Ast.TypeSink t -> of_ast_in_scope scope t
+  | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t ->
+      of_ast_in_scope scope t
   | Ast.TypeAlignedPtr (n, t) -> TAlignedPtr (n, of_ast_in_scope scope t)
 
 let of_ast t = of_ast_in_scope (create_static_scope ()) t
@@ -502,6 +503,8 @@ type func_info = {
   ret_type    : Ast.type_expr;
   param_types : (string * Ast.type_expr) list;
   local_types : Ast.type_expr StringMap.t;
+  effects     : string list;
+  (* Inferred checker effects. These have no runtime representation. *)
 }
 
 type enum_info = {

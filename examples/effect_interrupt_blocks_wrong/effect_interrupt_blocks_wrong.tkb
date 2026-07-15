@@ -1,0 +1,14 @@
+// This file is expected to produce a compile error.
+// `blocking_wait` declares the external operation as potentially blocking.
+// That effect propagates through `blocking_helper`, so the interrupt root
+// cannot call it even though the blocking operation is not lexically inside
+// the interrupt function itself.
+extern fn blocking_wait() !{may_block};
+
+fn blocking_helper() {
+    blocking_wait();
+}
+
+fn bad_interrupt() !{interrupt} {
+    blocking_helper();
+}

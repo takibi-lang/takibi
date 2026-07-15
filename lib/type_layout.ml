@@ -78,6 +78,7 @@ let rec size_align_of_type pos seen ty =
   | TypeExists (_, _, body) -> size_align_of_type pos seen body
   | TypeBorrow t | TypeSink t | TypeSingleton (t, _) ->
       size_align_of_type pos seen t
+  | TypeBorrowMut _ -> ptr_size_align ()
   | TypeAlignedPtr _ -> ptr_size_align ()
   | TypePtr _ | TypeFn _ -> ptr_size_align ()
   | TypeIo t -> size_align_of_type pos seen t
