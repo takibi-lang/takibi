@@ -5911,9 +5911,49 @@ let use_resolver_tests =
                (contains_substring msg "b.tkb"));
   ]
 
+(* Takibi Core Slice 0: the existing surface checker's branch lattice is
+   extracted behind Delta.Legacy_flow before any surface semantics change. *)
+module Core_test_place = struct
+  type t = string
+  let compare = String.compare
+end
+
+module Core_test_flow = Takibi_core.Delta.Legacy_flow (Core_test_place)
+
+let core_tests = [
+  Alcotest.test_case "legacy flow: consume and produce" `Quick (fun () ->
+    let consumed = Core_test_flow.consume "lease" Core_test_flow.empty in
+    Alcotest.(check bool) "maybe consumed after consume" true
+      (Core_test_flow.may_be_consumed "lease" consumed);
+    Alcotest.(check bool) "consumed on all paths after consume" true
+      (Core_test_flow.is_consumed_on_all_paths "lease" consumed);
+    let produced = Core_test_flow.produce "lease" consumed in
+    Alcotest.(check bool) "available after produce" false
+      (Core_test_flow.may_be_consumed "lease" produced));
+
+  Alcotest.test_case "legacy flow: one-branch consume is maybe, not must" `Quick
+    (fun () ->
+      let yes = Core_test_flow.consume "guard" Core_test_flow.empty in
+      let joined = Core_test_flow.join_branches yes Core_test_flow.empty in
+      Alcotest.(check bool) "union component" true
+        (Core_test_flow.may_be_consumed "guard" joined);
+      Alcotest.(check bool) "intersection component" false
+        (Core_test_flow.is_consumed_on_all_paths "guard" joined));
+
+  Alcotest.test_case "legacy flow: both-branch consume is must" `Quick (fun () ->
+    let left = Core_test_flow.consume "pending" Core_test_flow.empty in
+    let right = Core_test_flow.consume "pending" Core_test_flow.empty in
+    let joined = Core_test_flow.join_branches left right in
+    Alcotest.(check bool) "union component" true
+      (Core_test_flow.may_be_consumed "pending" joined);
+    Alcotest.(check bool) "intersection component" true
+      (Core_test_flow.is_consumed_on_all_paths "pending" joined));
+]
+
 (* -- Entry point ----------------------------------------------------------- *)
 
 let () = Alcotest.run "takibi" [
+  "core",     core_tests;
   "parser",   parser_tests;
   "type_inf", infer_tests;
   "use_resolver", use_resolver_tests;

@@ -18,6 +18,10 @@ and runs an HTTP server on bare-metal targets, on both QEMU (AArch64) and real
 
 For the current language syntax and grammar (types, statements,
 expressions), see [`SPEC.md`](SPEC.md).
+For the long-term type-system architecture and its example-driven migration
+plan, see [`TAKIBI_CORE.md`](TAKIBI_CORE.md). The history and exact limitations
+of the current affine/linear checker remain in
+[`OWNERSHIP_KERNEL.md`](OWNERSHIP_KERNEL.md).
 
 ## Design Principle: Detect Errors at Compile Time
 
@@ -142,18 +146,21 @@ genuine relational domain) and the case that looked like it needed one
 but didn't: the fix turned out to be a missing validation check, not a
 type-system gap.
 
-## Design Principle: YAGNI (You Aren't Gonna Need It)
+## Design Principle: Directed YAGNI
 
-We do not design or build functionality before it is actually needed -- not just at the
-implementation level, but at the design/planning level too. This is a durable stance for this
-project's current prototype phase, not a one-off preference: "needed" means a real, present
-requirement (an actual example that needs it, a real bug it fixes), not a plausible future one.
-When a larger architectural goal would automatically subsume a smaller interim workaround, the
-interim workaround is skipped rather than built and later discarded -- see `CLAUDE.md`'s own
-"Design Principle: YAGNI" section for a concrete worked example. This does not excuse skipping
-foundational work current features actually depend on (the compile-time-error-detection goal
-above is this project's stated core purpose, not speculative scope) -- it applies to optional,
-deferrable convenience and architecture work.
+Examples still decide which compiler slice is implemented next: a feature
+needs a present driver, a positive program, and focused negative cases. What
+changed in July 2026 is that YAGNI no longer forbids choosing an architectural
+destination. Repeated ownership workarounds in `FatFile`, `NetRxCpuOwned`,
+guards, protocol obligations, and indexed slots showed that local checker
+increments without a shared model would create rework.
+
+[`TAKIBI_CORE.md`](TAKIBI_CORE.md) therefore fixes the long-term direction:
+runtime values, linear permissions, pure propositions, and effects form one
+Core judgement. Implementations remain incremental and example-driven, but
+each slice must elaborate monotonically toward that Core. Speculative
+convenience remains out of scope; foundational representation work required
+by a current example does not.
 
 ## Current Status
 

@@ -2,14 +2,16 @@
 
 Status: LIVING DESIGN MEMO, not the language spec. Stages 1, 2, the tuple
 interlude, and Stage 3a are implemented; their actual behavior lives in
-SPEC.md. Stage 3b is now the first slice of the indexed-resource direction
-decided in 6.7. Later view/variant/solver work remains outlook. As each slice
+SPEC.md. The long-term architecture and Stage 3b's next vertical slice now
+live in TAKIBI_CORE.md; its Slice 0 Core boundary is implemented. Later
+indexed-owner/view/variant/solver work remains outlook. As each surface slice
 lands, SPEC.md stays authoritative for the language that actually exists.
 
 Driving issues: #117 (witness tokens / protocol obligations -- where this
 plan was drawn up), #89 (affine drop/escape/inter-function), #108
 (private visibility), #15 (safe pointer / cast audit), #113 (channel v2),
-#20 (variant enums), #106 (aliasing), #87 (async TX ownership).
+#66 (Simple RTOS), #20 (variant enums), #106 (aliasing), #87 (async TX
+ownership), #6 (multiple cores).
 
 ## 1. Motivation: one wall, four axes
 
@@ -704,228 +706,59 @@ So the staged climb from here is:
 This means the project is no longer choosing between "B1 or B2" as two peer designs. B2 is the
 ergonomic API shape expected from successful elaboration over a B1-capable internal language.
 
-### 6.7 Long-term destination (decision, 2026-07-15)
+### 6.7 Long-term destination (decision superseded and refined, 2026-07-15)
 
-The project has reached the point where adding only the next locally useful checker rule is no
-longer enough guidance. `FatFile`, `NetRxCpuOwned`, `KGuard`/`MutexGuard`, and `SlotLease` now all
-ask for the same missing relation in different domains. Continuing without a destination would
-risk growing affine flow analysis, refinement ranges, typestate, and future solver support as
-four unrelated systems.
+The ownership discussion reached its limit as a section inside this migration
+memo. The normative long-term architecture, concrete example fixtures,
+runtime-erasure rules, and implementation slices now live in
+[`TAKIBI_CORE.md`](TAKIBI_CORE.md). `SPEC.md` remains the authority for
+features that actually compile.
 
-The destination is therefore:
+The decision trail retained here is:
 
-> An ATS-inspired core of dependent indices and linear resource views, elaborated from a surface
-> language that hides routine quantifiers and proof terms. Refinement constraints are discharged
-> automatically in a deliberately small decidable fragment, with SMT and explicit proof
-> boundaries added only after the program has generated a concrete proposition to solve.
+1. Rust-style content-carrying ownership, ATS2-style indexed values/views,
+   and separation logic were first compared as competing destinations.
+2. E0 (recovering an index from handle pointer bits inside a trusted
+   function) produced the desired call shape but lost the refinement. It
+   could not prove range or identity and was rejected as a safety model.
+3. Minimal B2 (hide the index inside an unindexed handle type) had the same
+   static-information loss. Relating two hidden handles later would leave no
+   names with which to state a Z3 goal.
+4. This led to "B1 core, B2 surface": retain universal/existential static
+   identities and views internally, while inference, implicit arguments, and
+   packaging keep routine proof plumbing out of application code.
+5. Reviewing `FatFile`, `MutexGuard`, `NetRxCpuOwned`, `PendingTcpEvent`, TCP
+   state, slices, and future channels exposed one remaining ambiguity: some
+   handles must carry runtime data while others are compile-time authority
+   only. One `resource` spelling could not state that distinction honestly.
+6. The refined destination is one four-layer judgement: runtime values
+   (`Gamma`), affine/linear permissions (`Delta`), duplicable pure facts
+   (`Phi`), and effects (`epsilon`). Runtime affine/linear `struct` values and
+   erased `view` values are explicit, distinct surface forms that elaborate
+   to that same Core.
 
-In terms of the alternatives considered during review:
+This is not a policy of asking programmers to choose among several logics.
+Rust-like bundling, ATS-like separated views, selected separation predicates,
+refinement solving, and typestate are projections of the same Core. The API
+author chooses whether a fact needs runtime representation; ordinary callers
+follow the resulting `struct`, `view`, refinement, and effect signature.
 
-- Rust-style ownership of content-carrying packages is not the base model. It handles exclusive
-  access well, but the examples primarily need relations to immovable external state (MMIO, DMA
-  descriptors, table slots, locks, and protocol phases). Following that model far enough would
-  also import field borrowing, reborrowing, and lifetime questions that Takibi has no present
-  need to answer.
-- ATS2-style indexed values and views are the semantic base, but ATS2's explicit proof plumbing
-  is not the intended ordinary surface syntax.
-- General separation logic is not the initial user-facing verification model. Abstract linear
-  views may later grow selected separation-logic predicates (`Cell`, `Array`, recursive ownership)
-  when a real heap structure requires them; that is an extension of the view language, not a
-  second ownership system.
-- Sugar, inference, existential packaging, and solver integration are how the core becomes the
-  Takibi language. They are not substitutes for a core that first retains the static names and
-  propositions involved.
+YAGNI still controls implementation order, but no longer controls the
+destination. A feature lands only when a current example drives it and its
+elaboration is monotonic toward `TAKIBI_CORE.md`.
 
-This changes how YAGNI is applied, not whether it is applied. The destination fixes the direction
-of travel; examples still decide which part is implemented next. A proposed feature is in scope
-only when it both serves a current example and elaborates monotonically toward this core.
+#### 6.7.1 Issue #89 exit condition
 
-#### 6.7.1 Static vocabulary the core must eventually support
+Issue #89 should not remain open until the entire Core exists. Its remaining
+coherent vertical slice is the indexed runtime `SlotLease` fixture in
+`TAKIBI_CORE.md`: mint from a refined index, preserve that index as both real
+private data and a static identity, omit the loose `idx` from ordinary
+operations, and check positive plus range/identity-negative examples.
 
-The minimum common vocabulary is:
-
-- static sorts for integer indices, object/resource identities, addresses, and finite protocol
-  states;
-- singleton/refined dynamic values whose runtime value is named statically;
-- indexed affine/linear resource types such as `SlotLease[n]`, `MutexGuard[lock]`, and
-  `RxOwned[desc]`;
-- implicit universal quantification in signatures and existential packaging when acquisition
-  chooses an identity at runtime;
-- linear views and view change, including a resource whose runtime representation lives outside
-  the Takibi value (`RxDesc[desc, Device] >> RxDesc[desc, Cpu]`);
-- equality, disequality, range, and linear-integer constraints as the first automatically solved
-  fragment;
-- explicit abstract predicates and proof boundaries outside that fragment.
-
-Static indices and views erase at runtime unless a dynamic value genuinely needs to carry data.
-Erasure must never be confused with forgetting the proposition in the type checker. Conversely,
-a static index cannot be materialized as a runtime integer by wishful thinking: a no-index call
-such as `slot_read(lease)` requires either a real hidden runtime representation in `lease`, a
-pointer that directly identifies the slot, or module-private state that can recover it safely.
-
-#### 6.7.2 Provisional surface notation
-
-The examples below are design fixtures, not accepted parser syntax yet. Square brackets denote
-static indices, `@ n` gives a runtime value a static singleton name, unbound static names in a
-function signature are implicitly universally quantified, and `exists` packages an identity
-chosen at runtime. `resource` denotes a module-constructed affine/linear value whose private
-runtime representation may contain ordinary data; callers can use it only through functions.
-
-The notation deliberately distinguishes the long-term surface from the lower-level elaborated
-core. Exact punctuation may change during parser implementation; the contracts must not.
-
-**Table slot: the first driver.** The caller supplies the index only at acquisition. Operations
-recover the runtime slot from the resource's private representation, while the static `n` remains
-available to the checker and future solver.
-
-```takibi
-private affine resource SlotLease[n: usize] {
-    private idx: {0..<4 as usize} @ n;
-}
-
-fn slot_lease(idx: {0..<4 as usize} @ n) -> SlotLease[n] {
-    return SlotLease { idx };
-}
-
-fn slot_read(lease: borrow SlotLease[n]) -> i32 {
-    return slots[lease.idx].value;
-}
-
-fn slot_write(v: i32, lease: borrow SlotLease[n]) {
-    slots[lease.idx].value = v;
-}
-
-fn slot_unlease(lease: sink SlotLease[n]) {}
-
-let lease = slot_lease(idx);
-slot_write(99, lease);
-uart_print(slot_read(lease));
-slot_unlease(lease);
-```
-
-Outside the declaring file, `lease.idx` and `SlotLease { ... }` are inaccessible. The application
-does not thread `n`, `idx`, or a range proof through ordinary operations. In the core, the three
-operations are universally quantified over the same inferred `n`.
-
-**Lock guard: identity relation plus an all-paths obligation.** Infallible lock acquisition should
-produce a linear guard, not today's weak union-based affine handle. Keeping the runtime lock
-argument on `kunlock` is acceptable data flow; the index makes passing the wrong lock a type
-error.
-
-```takibi
-private linear resource MutexGuard[lock: addr];
-
-fn mutex_lock(m: *i32 @ lock) -> MutexGuard[lock];
-fn mutex_unlock(g: sink MutexGuard[lock], m: *i32 @ lock);
-
-let g = mutex_lock(&a);
-mutex_unlock(g, &a); // accepted
-// mutex_unlock(g, &b); // rejected: guard and mutex identities differ
-```
-
-This also states the present limitation precisely: today's `affine MutexGuard` catches never-use
-and double-use, but not omission on one branch, and it does not relate the guard to its mutex.
-
-**DMA receive: fallible existential acquisition.** A descriptor selected at runtime is hidden in
-the successful variant. Once opened, its identity is stable through frame access and release.
-
-```takibi
-private linear resource NetRxCpuOwned[desc: usize];
-
-fn net_rx_acquire()
-    -> Option[exists desc where desc < RX_DESC_COUNT. NetRxCpuOwned[desc]];
-fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..];
-fn net_rx_release(frame: sink NetRxCpuOwned[desc]);
-
-match net_rx_acquire() {
-    Some(frame) => {
-        let bytes = net_rx_frame(frame);
-        process(bytes);
-        net_rx_release(frame);
-    }
-    None => {}
-}
-```
-
-The variant removes the nullable-affine exception that currently forces affine's weak
-"consumed on at least one path" rule. Inside `Some`, the resource is genuinely linear. This
-depends on kind-carrying variant payloads, so its implementation follows the first indexed
-resource slice rather than being smuggled into it.
-
-**Protocol state: view change is separate from event discharge.** `PendingTcpEvent` says that an
-accepted event receives an explicit disposition. A connection view says which state transition
-that disposition performs. Neither replaces the other.
-
-```takibi
-linear view TcpConn[conn: addr, state: TcpState];
-
-fn tcp_accept_via_syn_ack(
-    pending: sink PendingTcpEvent,
-    conn: TcpConn[c, Listen],
-    eth: [u8; 54..]
-) -> TcpConn[c, SynRcvd];
-
-fn tcp_event_ignored(
-    pending: sink PendingTcpEvent,
-    conn: TcpConn[c, s]
-) -> TcpConn[c, s];
-```
-
-After runtime dispatch, the poll loop generally holds `exists s. TcpConn[c, s]`; matching the
-state opens that package and each transition returns the next package. This is the concrete
-reason universal and existential quantification belong in the destination rather than being
-treated as optional theorem-prover syntax.
-
-#### 6.7.3 Implementation order from the current compiler
-
-The first implementation slice is intentionally smaller than all four fixtures:
-
-1. Add named singleton binding for the existing refined integer values (`value @ n`) and indexed
-   opaque resource identities (`Handle[n]`) to the typed AST/internal types.
-2. Add implicit universal variables in function signatures and equality/range constraint
-   generation. Discharge only syntactic equality and the interval facts the compiler already
-   knows; no Z3 dependency in this slice.
-3. Implement one private, module-mediated indexed resource representation sufficient to rewrite
-   `affine_escape_via_index`: mint with a refined index, call `slot_read(lease)` without a loose
-   index, and preserve the index/range fact inside the trusted implementation.
-4. Add negative examples proving that independently minted `SlotLease[n]`/`SlotLease[m]` cannot
-   be substituted where equality is required and that an unrefined/out-of-range index cannot
-   mint the resource.
-5. Only then generalize `borrow`/`sink` from pointers to first-class resources and migrate one
-   guard. Variant/existential payloads, protocol views, SMT, and external prover artifacts are
-   subsequent example-driven slices.
-
-The first slice is DONE only when the replacement for `affine_escape_via_index` has the desired
-ordinary call sites, no runtime fallback that aliases an invalid handle to slot zero, no
-pointer-bit data smuggling, and compile-error companions for range and identity mismatch. Merely
-parsing `SlotLease[n]`, or retaining a separate unchecked `idx` argument, is not completion.
-
-#### 6.7.4 Solver and prover boundary
-
-Z3 is a constraint discharger, not a relation-recovery mechanism. It enters only after the typed
-core can generate named propositions such as `0 <= n`, `n < N`, and `n == m`. The initial solver
-fragment should be quantifier-free equality and linear integer arithmetic; solver failure means
-"not proven", never permission to emit a runtime fallback silently.
-
-A later `prove` boundary should name its assumptions and conclusion and consume a checkable proof
-artifact. Lean may generate that artifact, but interactive Lean integration is not on the critical
-path for indexed resources. The proof language, artifact format, axiom inventory, reproducible
-build behavior, and trusted computing base must be designed before `prove` becomes accepted
-source syntax.
-
-#### 6.7.5 Issue #89 exit condition
-
-Issue #89 should not remain open until Takibi has implemented the whole destination above. It has
-already delivered affine never-consumed checks, parameter transfer, terminating-branch handling,
-linear obligations, and Stage 3a field paths. Its remaining coherent responsibility is the first
-escaping indexed resource.
-
-Close #89 when the Stage 3b slot driver in 6.7.3 is implemented and specified: the index is fixed
-at mint time, preserved in the resource identity, hidden from ordinary operation call sites, and
-checked by positive and negative examples. Extract variant-carried resources, general protocol
-views, SMT integration, separation predicates, and external proof artifacts into their own
-example-driven work. Treating all of those as one issue would recreate the lack of a finish line
-that made #89 difficult to advance.
+Close #89 once that slice is implemented and specified. Variant-carried RX
+resources, erased general views, protocol transitions, SMT, separation
+predicates, and external proof artifacts should have separate issues and
+their own example-driven acceptance criteria.
 
 ## 7. Stage 4 outlook: channel v2 (#113) + variant enums (#20)
 

@@ -443,15 +443,17 @@ let path_to_string = function
   | PVar n -> n
   | PField (b, f) -> b ^ "." ^ f
 
-module PathSet = Set.Make(struct type t = path let compare = compare end)
+module ResourceFlow = Takibi_core.Delta.Legacy_flow(struct
+  type t = path
+  let compare = compare
+end)
 
-(* Dual consumption tracking (OWNERSHIP_KERNEL.md Stage 1): c_any is the
-   union-combined moved set affine checking has always used (governs
-   double-consume for both kinds, and affine's weak must-consume); c_all
-   is the intersection-combined set (membership = consumed on EVERY path
-   reaching this point), which the linear kind's checks read. Stage 3a
-   widened the key from a bare variable name to `path` (above). *)
-type consume_sets = { c_any : PathSet.t; c_all : PathSet.t }
+module PathSet = ResourceFlow.Places
+
+(* The current dual consumption lattice now lives behind Takibi Core's
+   explicitly transitional Delta.Legacy_flow boundary. Stage 3a widened its
+   key from a bare variable name to `path` (above). *)
+type consume_sets = ResourceFlow.t
 
 let is_linear_ptr_ty t = match repr t with
   | TPtr (TStruct n) -> StringSet.mem n !linear_opaque_names
@@ -3074,11 +3076,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      and the storage bans (fields/slots/globals) live in infer_expr/
      infer_stmt where full types are available, not in this walk.
 
-     Both kinds share one walk carrying a `consume_sets` pair: c_any is
-     the union-at-merges moved set affine has always used (governs
-     double-consume for both kinds, and affine's weak must-consume);
-     c_all is the intersection-at-merges set (membership = consumed on
-     every path reaching this point), which every linear check reads. *)
+     Both kinds share one walk carrying a `consume_sets` value. Its
+     maybe-consumed component is unioned at merges (governing double-use
+     for both kinds and affine's weak must-consume), while its
+     must-be-consumed component is intersected (membership means consumed
+     on every path reaching this point). *)
   let rec strip_borrow = function
     | Ast.TypeBorrow t | Ast.TypeSink t -> strip_borrow t
     | t -> t
@@ -3172,16 +3174,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Some (Ast.TypeBorrow _) | Some (Ast.TypeSink _) -> PathSet.add (PVar name) s
       | _ -> s
     ) PathSet.empty fdef.params in
-    let mv_empty = { c_any = PathSet.empty; c_all = PathSet.empty } in
-    let mv_consume p m =
-      { c_any = PathSet.add p m.c_any; c_all = PathSet.add p m.c_all } in
-    let mv_clear p m =
-      { c_any = PathSet.remove p m.c_any; c_all = PathSet.remove p m.c_all } in
-    let mv_merge a b =
-      { c_any = PathSet.union a.c_any b.c_any;
-        c_all = PathSet.inter a.c_all b.c_all } in
+    let mv_empty = ResourceFlow.empty in
+    let mv_consume = ResourceFlow.consume in
+    let mv_clear = ResourceFlow.produce in
+    let mv_merge = ResourceFlow.join_branches in
     let require_available loc moved p =
-      if is_tracked_path p && PathSet.mem p moved.c_any then
+      if is_tracked_path p && ResourceFlow.may_be_consumed p moved then
         raise (TypeError (loc, Printf.sprintf
           "%s value '%s' was already consumed" (kind_word p) (path_to_string p)))
     in
@@ -3200,7 +3198,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let require_no_pending_linear loc what moved declared =
       PathSet.iter (fun p ->
         if is_linear_path p && not (PathSet.mem p exempt_params)
-           && not (PathSet.mem p moved.c_all) then
+           && not (ResourceFlow.is_consumed_on_all_paths p moved) then
           raise (TypeError (loc, Printf.sprintf
             "linear value '%s' is still pending at this %s (it must be \
              consumed on every path)" (path_to_string p) what))
@@ -3258,7 +3256,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        a way plain dataflow cannot correlate with the nullness test (an
        earlier intersection-based attempt misfired on every existing
        affine example -- see HISTORY.md's relational-analysis findings).
-       LINEAR reads c_all instead: the cast-away ban makes the
+       LINEAR reads the all-path component instead: the cast-away ban makes the
        null-sentinel pattern inexpressible for linear values, so
        consumption can never be legitimately conditional and the
        intersection check is exact with no relational reasoning needed
@@ -3272,7 +3270,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        a branch that unconditionally returns never reaches the code after
        its enclosing `if`/`match`, so what it consumed must not be merged
        into what continues past that `if`/`match` (in EITHER set: not
-       unioned into c_any, not intersected into c_all). Deliberately
+       unioned into maybe-consumed, not intersected into must-be-consumed).
+       Deliberately
        conservative in the safe direction: loops are never treated as
        terminators here. *)
     let rec stmt_always_terminates (s : Ast.stmt) = match s.desc with
@@ -3294,11 +3293,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       PathSet.iter (fun p ->
         let loc () = Option.value (Hashtbl.find_opt decl_locs p) ~default:fdef.def_loc in
         match path_kind p with
-        | Some Ast.KindAffine when not (PathSet.mem p moved.c_any) ->
+        | Some Ast.KindAffine when not (ResourceFlow.may_be_consumed p moved) ->
             raise (TypeError (loc (), Printf.sprintf
               "affine value '%s' is never consumed" (path_to_string p)))
-        | Some Ast.KindLinear when not (PathSet.mem p moved.c_all) ->
-            if PathSet.mem p moved.c_any then
+        | Some Ast.KindLinear when
+            not (ResourceFlow.is_consumed_on_all_paths p moved) ->
+            if ResourceFlow.may_be_consumed p moved then
               raise (TypeError (loc (), Printf.sprintf
                 "linear value '%s' is consumed on some paths but not on \
                  every path" (path_to_string p)))
@@ -3329,7 +3329,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              `p = transform(p);` (RHS consumes the old p) passes: by the
              time this check runs, the old obligation is discharged. *)
           if is_linear_path p && PathSet.mem p declared
-             && not (PathSet.mem p moved.c_all) then
+             && not (ResourceFlow.is_consumed_on_all_paths p moved) then
             raise (TypeError (s.loc, Printf.sprintf
               "assigning over linear value '%s' would discard its \
                obligation (consume it first)" name));
@@ -3397,7 +3397,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let moved = check_expr moved false cond in
           let (body_moved, _) = check_stmts moved declared body in
           let newly_moved_outer =
-            PathSet.inter declared (PathSet.diff body_moved.c_any moved.c_any) in
+            PathSet.inter declared
+              (PathSet.diff (ResourceFlow.maybe_consumed body_moved)
+                 (ResourceFlow.maybe_consumed moved)) in
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
@@ -3407,7 +3409,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let declared_body = PathSet.add (PVar name) declared in
           let (body_moved, _) = check_stmts moved declared_body body in
           let newly_moved_outer =
-            PathSet.inter declared (PathSet.diff body_moved.c_any moved.c_any) in
+            PathSet.inter declared
+              (PathSet.diff (ResourceFlow.maybe_consumed body_moved)
+                 (ResourceFlow.maybe_consumed moved)) in
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
@@ -3416,7 +3420,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let moved = check_expr moved false collection in
           let (body_moved, _) = check_stmts moved (PathSet.add (PVar name) declared) body in
           let newly_moved_outer =
-            PathSet.inter declared (PathSet.diff body_moved.c_any moved.c_any) in
+            PathSet.inter declared
+              (PathSet.diff (ResourceFlow.maybe_consumed body_moved)
+                 (ResourceFlow.maybe_consumed moved)) in
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
@@ -3458,8 +3464,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        parameter, or returned) -- otherwise the callee can silently swallow
        a handle its caller already gave up. `borrow`/`sink` are exempt:
        `borrow` never takes ownership, `sink` is the designated terminal
-       consumer. Affine reads c_any (at least one path); linear reads
-       c_all (every path -- a linear parameter is an accepted obligation,
+       consumer. Affine reads maybe-consumed (at least one path); linear
+       reads must-be-consumed (every path -- a linear parameter is an accepted obligation,
        and its early-return paths are already covered by
        require_no_pending_linear above, so this is the fall-through
        check). *)
@@ -3471,12 +3477,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         | _ -> None
       in
       match owned_kind with
-      | Some Ast.KindAffine when not (PathSet.mem (PVar name) final_moved.c_any) ->
+      | Some Ast.KindAffine when
+          not (ResourceFlow.may_be_consumed (PVar name) final_moved) ->
           raise (TypeError (fdef.def_loc, Printf.sprintf
             "affine parameter '%s' is never consumed by this function \
              (forward it, or take it as `sink` if this function is meant \
              to be its terminal consumer)" name))
-      | Some Ast.KindLinear when not (PathSet.mem (PVar name) final_moved.c_all) ->
+      | Some Ast.KindLinear when
+          not (ResourceFlow.is_consumed_on_all_paths (PVar name) final_moved) ->
           raise (TypeError (fdef.def_loc, Printf.sprintf
             "linear parameter '%s' is not consumed on every path of this \
              function (forward it on every path, or take it as `sink` if \
