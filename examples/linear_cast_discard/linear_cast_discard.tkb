@@ -1,12 +1,8 @@
 // This file is expected to produce a compile error.
-// Casting a linear value to ANYTHING is rejected with no `unsafe` escape
-// (OWNERSHIP_KERNEL.md Stage 1, 4.3): casting away is the direction that
-// silently discards the obligation. This ban is also what keeps the
-// all-paths consumption check a plain, exact dataflow analysis: the
-// affine null-sentinel idiom `if ((p as usize) != 0) { release(p); }`
-// is inexpressible for linear values, so consumption can never be
-// legitimately conditional (see the memo's 4.6 for how this dodges the
-// relational-reasoning wall GitHub issue #89 documented).
+// Casting a linear value to anything is rejected with no `unsafe` escape:
+// changing its runtime type would silently detach the linear permission from
+// the value being tracked. Slice 3 applies the same bit-opacity rule to affine
+// values and uses closed variants for fallible ownership.
 linear opaque struct Duty;
 
 fn take_on() -> *Duty {

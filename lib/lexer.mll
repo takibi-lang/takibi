@@ -49,6 +49,9 @@ rule read = parse
   | "opaque"  { OPAQUE }
   | "affine"  { AFFINE }
   | "linear"  { LINEAR }
+  | "view"    { VIEW }
+  | "variant" { VARIANT }
+  | "exists"  { EXISTS }
   | "borrow"  { BORROW }
   | "sink"    { SINK }
   | "private" { PRIVATE }
@@ -73,6 +76,7 @@ rule read = parse
   | "&&" { DAMP }   (* Logical AND. Match before '&' *)
   | "&=" { AMP_EQ }
   | '&' { AMP }
+  | '@' { AT }
   | "=>" { DARROW }    (* Match arm separator. Match before '=' *)
   | "::" { COLONCOLON }  (* Enum variant access. Match before ':' *)
 

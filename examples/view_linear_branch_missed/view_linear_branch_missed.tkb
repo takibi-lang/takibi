@@ -1,0 +1,34 @@
+// This file is expected to produce a compile error.
+//
+// EventDuty is an erased linear view: it exists only in the compile-time
+// resource context and contributes no pointer, argument, return value, or
+// storage to generated code. Even though it has zero runtime representation,
+// the linear rule still requires every minted duty to be consumed exactly once
+// on every control-flow path.
+//
+// The `false` branch below forgets `pending`. The expected diagnostic says it
+// is consumed on some paths but not every path. Adding `ignore_event(pending)`
+// in an `else` branch is the intended repair.
+linear view EventDuty;
+
+fn accept_event() -> EventDuty {
+    return view EventDuty;
+}
+
+fn answer_event(pending: sink EventDuty) {
+}
+
+fn ignore_event(pending: sink EventDuty) {
+}
+
+fn dispatch_event(should_answer: bool) {
+    let pending: EventDuty = accept_event();
+    if (should_answer) {
+        answer_event(pending);
+    }
+}
+
+fn app_main() -> i32 {
+    dispatch_event(true);
+    return 0;
+}

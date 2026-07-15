@@ -1,12 +1,6 @@
-// This file is expected to produce a compile error.
-// A plain (non-`borrow`, non-`sink`) affine PARAMETER must also be
-// consumed somewhere within the callee's own body -- the caller's own
-// obligation is already satisfied just by making the call, but a callee
-// that silently swallows the handle it was just handed (never forwards
-// it, never releases it) is still a leak. Mark the parameter `sink`
-// instead if this function IS meant to be the value's designated
-// terminal consumer (GitHub issue #89's "sink" design -- see
-// HISTORY.md). See SPEC.md's "Affine Opaque Structs" section.
+// This is a positive compile-only fixture despite its historical directory
+// name. A plain affine parameter may be dropped by its callee; passing it still
+// consumes the caller's copy, so later reuse remains a compile error.
 affine opaque struct Token;
 
 fn make() -> *Token {

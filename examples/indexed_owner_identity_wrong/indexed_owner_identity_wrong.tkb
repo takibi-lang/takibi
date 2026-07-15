@@ -1,0 +1,28 @@
+// Compile-error fixture for Slice 1 static identity checking.
+// The two leases carry different indices (0 and 1), so they cannot both
+// satisfy require_same's single universally quantified identity `n`.
+// Expected diagnostic: "static value mismatch: 1 vs 0".
+private linear struct SlotLease[n: usize] {
+    private idx: {0..<4 as usize} @ n;
+}
+
+fn slot_lease(idx: {0..<4 as usize} @ n) -> SlotLease[n] {
+    let mut lease: SlotLease[n] = { idx };
+    return lease;
+}
+
+fn require_same(a: borrow SlotLease[n], b: borrow SlotLease[n]) {
+}
+
+fn slot_unlease(lease: sink SlotLease[n]) {
+}
+
+fn app_main() {
+    let a = slot_lease(0);
+    let b = slot_lease(1);
+    // This call must fail even though both runtime values have the same
+    // SlotLease layout: their erased static identities are different.
+    require_same(a, b);
+    slot_unlease(a);
+    slot_unlease(b);
+}

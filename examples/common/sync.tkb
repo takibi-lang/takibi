@@ -1,20 +1,14 @@
 extern fn sem_wait(s: *i32);
 extern fn sem_post(s: *i32);
 
-// affine opaque struct MutexGuard: a compile-time-only marker (no real
+// linear opaque struct MutexGuard: a compile-time-only marker (no real
 // per-instance state -- the actual mutex is still the caller-owned *i32
 // semaphore, passed alongside the guard) proving mutex_lock/mutex_unlock
-// are balanced. GitHub issue #89's "must eventually be consumed" check
-// (see lib/type_inf.ml's check_affine_func) now rejects a guard that is
-// acquired and never released within its declaring scope -- see
-// examples/condvar/condvar.tkb and examples/msgqueue/msgqueue.tkb for
-// real call sites, including cond_wait's drop-and-reacquire pattern.
-// mutex_unlock takes its guard as `sink`: it IS the designated terminal
-// consumer (calls sem_post and has no further affine call to make with
-// it), which the "must be consumed by the callee too" check (also
-// issue #89) needs told explicitly -- see that check's comment for why
-// it cannot infer this on its own.
-private affine opaque struct MutexGuard;
+// are balanced on every path. See examples/condvar/condvar.tkb and
+// examples/msgqueue/msgqueue.tkb for real call sites, including cond_wait's
+// consume-and-reacquire pattern. `sink` marks mutex_unlock as the terminal
+// consumer; the linear kind makes a forgotten unlock a compile error.
+private linear opaque struct MutexGuard;
 
 fn mutex_lock(m: *i32) -> *MutexGuard {
     sem_wait(m);

@@ -1,8 +1,8 @@
 // Stage 1 PoC for the `linear` kind (OWNERSHIP_KERNEL.md, GitHub issue
 // #117): a `linear opaque struct` value is an OBLIGATION -- it must be
-// consumed exactly once on EVERY control-flow path, unlike `affine`
-// (at most once, and the weak must-consume check accepts consumption on
-// just one branch). This is the positive example: everything here
+// consumed exactly once on EVERY control-flow path, unlike standard
+// `affine` (at most once, with dropping permitted). This is the positive
+// example: everything here
 // compiles and runs precisely because every path discharges its
 // obligation. Each rejected shape (never consumed, one branch missed,
 // cast away, overwritten) has its own companion compile-error example:

@@ -62,7 +62,7 @@ struct KLock {
     private word: i32;
 }
 
-private affine opaque struct KGuard;
+private linear opaque struct KGuard;
 
 fn klock(lk: *KLock) -> *KGuard {
     disable_irq();

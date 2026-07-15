@@ -1,12 +1,7 @@
-// This file is expected to produce a compile error.
-// An affine opaque handle that is acquired but never consumed on any
-// path before its declaring scope ends is rejected at compile time
-// (GitHub issue #89's "must eventually be consumed" check, first
-// increment -- see HISTORY.md). Real APIs following this pattern
-// (examples/common/fat12.tkb's fat_open/fat_close, examples/common_stm32/
-// eth.tkb's net_rx_acquire/net_rx_release, examples/common/sync.tkb's
-// mutex_lock/mutex_unlock) would otherwise let a resource silently leak
-// with no error or warning at all. See SPEC.md's "Affine Types" section.
+// This is a positive compile-only fixture despite its historical directory
+// name. Slice 3 adopts standard affine weakening: an affine value may be used
+// at most once, but dropping it is legal. APIs that require cleanup now use a
+// linear type instead (FatFile, NetRxCpuOwned, MutexGuard, and KGuard).
 affine opaque struct Token;
 
 fn make() -> *Token {

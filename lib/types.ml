@@ -13,6 +13,15 @@ type ty =
   | TIo  of ty            (* io T  -- volatile-qualified value type; *io T = TPtr(TIo T) *)
   | TArray of ty * int    (* array type: [T; N] *)
   | TStruct of string     (* named struct type *)
+  | TView of string       (* erased affine/linear permission value *)
+  | TVariant of string    (* tagged runtime sum; kind is derived from payloads *)
+  | TExists of string * Ast.type_expr * static_term * ty
+    (* Binder name, integer sort, bound static term, payload schema. The
+       binder is erased; the payload retains its ordinary runtime layout. *)
+  | TIndexedStruct of string * static_term list
+    (* First-class runtime struct carrying erased static indices. *)
+  | TSingleton of ty * static_term
+    (* Runtime value paired with an erased static name for that value. *)
   | TRefinedInt of int * int * ty
     (* {lo..<hi} -- refined int with known range; lo <= x < hi. Third field
        is the underlying primitive type this range is tied to (always one
@@ -53,15 +62,65 @@ and tv =
   | Unbound of int  (* unresolved unification variable *)
   | Link    of ty   (* resolved: points to another type *)
 
+and static_term =
+  | SConst of int
+  | SParam of int * string
+    (* Rigid while checking a universally quantified function body. *)
+  | SVar of static_var ref
+
+and static_var =
+  | SUnbound of int
+  | SLink of static_term
+
 (* -- Unification variables ------------------------------------------------- *)
 
 exception TypeError of Ast.loc * string
 
 let next_id = ref 0
+let next_static_id = ref 0
 
 let fresh () =
   incr next_id;
   TVar (ref (Unbound !next_id))
+
+let fresh_static () =
+  incr next_static_id;
+  SVar (ref (SUnbound !next_static_id))
+
+let rigid_static name =
+  incr next_static_id;
+  SParam (!next_static_id, name)
+
+let fresh_rigid_static () =
+  incr next_static_id;
+  SParam (!next_static_id, Printf.sprintf "__value%d" !next_static_id)
+
+type static_scope = (string, static_term) Hashtbl.t
+
+let create_static_scope () : static_scope = Hashtbl.create 8
+let bind_static (scope : static_scope) name term = Hashtbl.replace scope name term
+
+let static_in_scope (scope : static_scope) name =
+  match Hashtbl.find_opt scope name with
+  | Some t -> t
+  | None ->
+      let t = rigid_static name in
+      Hashtbl.add scope name t;
+      t
+
+let rec static_repr = function
+  | SVar ({ contents = SLink t } as r) ->
+      let t' = static_repr t in
+      r := SLink t';
+      t'
+  | t -> t
+
+let static_to_string t =
+  match static_repr t with
+  | SConst n -> string_of_int n
+  | SParam (_, name) -> name
+  | SVar { contents = SUnbound id } -> Printf.sprintf "__static%d" id
+  | SVar { contents = SLink _ } -> assert false
 
 (* Follow Link chains, applying path compression *)
 let rec repr = function
@@ -87,6 +146,16 @@ let rec to_string t =
       Printf.sprintf "(%s) -> %s"
         (String.concat ", " (List.map to_string ps)) (to_string r)
   | TStruct s -> s
+  | TView s -> Printf.sprintf "view %s" s
+  | TVariant s -> Printf.sprintf "variant %s" s
+  | TExists (name, sort, _, body) ->
+      Printf.sprintf "exists %s: %s. %s" name
+        (Ast.show_type_expr sort) (to_string body)
+  | TIndexedStruct (s, args) ->
+      Printf.sprintf "%s[%s]" s
+        (String.concat ", " (List.map static_to_string args))
+  | TSingleton (base, n) ->
+      Printf.sprintf "%s @ %s" (to_string base) (static_to_string n)
   | TTuple ts ->
       Printf.sprintf "(%s)" (String.concat ", " (List.map to_string ts))
   | TRefinedInt (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
@@ -107,7 +176,10 @@ let rec occurs rv = function
   | TSlice (t, _)              -> occurs rv t
   | TAlignedPtr (_, t)         -> occurs rv t
   | TTuple ts                  -> List.exists (occurs rv) ts
-  | TStruct _                  -> false
+  | TExists (_, _, _, t)       -> occurs rv t
+  | TIndexedStruct _           -> false
+  | TSingleton (t, _)          -> occurs rv t
+  | TStruct _ | TView _ | TVariant _ -> false
   | _                          -> false
 
 let rec unify t1 t2 =
@@ -203,9 +275,76 @@ let rec unify t1 t2 =
           "tuple arity mismatch: %s vs %s"
           (to_string (TTuple ts1)) (to_string (TTuple ts2))));
       List.iter2 unify ts1 ts2
+  | TIndexedStruct (s1, args1), TIndexedStruct (s2, args2) ->
+      if s1 <> s2 then
+        raise (Unify_error (Printf.sprintf "struct type mismatch: %s vs %s" s1 s2));
+      if List.length args1 <> List.length args2 then
+        raise (Unify_error (Printf.sprintf
+          "static argument count mismatch for %s: %d vs %d"
+          s1 (List.length args1) (List.length args2)));
+      List.iter2 unify_static args1 args2
+  | TSingleton (base1, n1), TSingleton (base2, n2) ->
+      unify base1 base2;
+      unify_static n1 n2
+  | (TSingleton _ as singleton), TVar rv ->
+      (* Preserve a value's static identity when an inferred binding has
+         not acquired a type yet.  Letting the widening rule below see the
+         unresolved TVar would retain only the runtime base type, so
+         `let y = x` could silently forget `x`'s singleton fact. *)
+      (match !rv with
+       | Link t -> unify singleton t
+       | Unbound _ ->
+           if occurs rv singleton then
+             raise (Unify_error (Printf.sprintf
+               "infinite type: %s occurs in %s"
+               (to_string (TVar rv)) (to_string singleton)));
+           rv := Link singleton)
+  | TSingleton (base, _), expected ->
+      (* Forgetting a singleton fact is a safe widening. The reverse
+         direction is intentionally absent: an arbitrary runtime value
+         does not prove a requested static identity. *)
+      unify base expected
   | TStruct s1, TStruct s2 ->
       if s1 <> s2 then
         raise (Unify_error (Printf.sprintf "struct type mismatch: %s vs %s" s1 s2))
+  | TView s1, TView s2 ->
+      if s1 <> s2 then
+        raise (Unify_error (Printf.sprintf "view type mismatch: %s vs %s" s1 s2))
+  | TVariant s1, TVariant s2 ->
+      if s1 <> s2 then
+        raise (Unify_error (Printf.sprintf "variant type mismatch: %s vs %s" s1 s2))
+  | TExists (_, sort1, binder1, body1),
+    TExists (_, sort2, binder2, body2) ->
+      if sort1 <> sort2 then
+        raise (Unify_error "existential static sort mismatch");
+      let rec subst_static_term old replacement term =
+        match static_repr old, static_repr term with
+        | SParam (old_id, _), SParam (id, _) when old_id = id -> replacement
+        | SVar old_r, SVar r when old_r == r -> replacement
+        | _, term -> term
+      and subst_ty old replacement t =
+        match repr t with
+        | TFun (ps, r) -> TFun (List.map (subst_ty old replacement) ps,
+                                subst_ty old replacement r)
+        | TPtr t -> TPtr (subst_ty old replacement t)
+        | TIo t -> TIo (subst_ty old replacement t)
+        | TArray (t, n) -> TArray (subst_ty old replacement t, n)
+        | TRefinedInt (lo, hi, base) ->
+            TRefinedInt (lo, hi, subst_ty old replacement base)
+        | TTuple ts -> TTuple (List.map (subst_ty old replacement) ts)
+        | TSlice (t, n) -> TSlice (subst_ty old replacement t, n)
+        | TAlignedPtr (n, t) -> TAlignedPtr (n, subst_ty old replacement t)
+        | TIndexedStruct (name, args) ->
+            TIndexedStruct (name,
+              List.map (subst_static_term old replacement) args)
+        | TSingleton (base, n) ->
+            TSingleton (subst_ty old replacement base,
+                        subst_static_term old replacement n)
+        | TExists (name, sort, binder, body) ->
+            TExists (name, sort, binder, subst_ty old replacement body)
+        | t -> t
+      in
+      unify body1 (subst_ty binder2 binder1 body2)
   | TVar rv, t | t, TVar rv ->
       (match !rv with
        | Link t' -> unify t' t
@@ -219,25 +358,56 @@ let rec unify t1 t2 =
       raise (Unify_error (Printf.sprintf "cannot unify %s with %s"
         (to_string t1) (to_string t2)))
 
+and unify_static s1 s2 =
+  match static_repr s1, static_repr s2 with
+  | SConst a, SConst b when a = b -> ()
+  | SParam (a, _), SParam (b, _) when a = b -> ()
+  | SVar r1, SVar r2 when r1 == r2 -> ()
+  | SVar r, t | t, SVar r ->
+      (match !r with
+       | SLink t' -> unify_static t' t
+       | SUnbound _ -> r := SLink t)
+  | a, b ->
+      raise (Unify_error (Printf.sprintf "static value mismatch: %s vs %s"
+        (static_to_string a) (static_to_string b)))
+
 (* -- Conversion to/from Ast types ----------------------------------------- *)
 
-let rec of_ast = function
+let static_of_ast scope = function
+  | Ast.StaticName name -> static_in_scope scope name
+  | Ast.StaticInt n -> SConst n
+
+let rec of_ast_in_scope scope = function
   | Ast.TypeBool     -> TBool
   | Ast.TypeI8       -> TI8  | Ast.TypeI16 -> TI16 | Ast.TypeI32 -> TI32 | Ast.TypeI64 -> TI64
   | Ast.TypeU8       -> TU8  | Ast.TypeU16 -> TU16 | Ast.TypeU32 -> TU32 | Ast.TypeU64 -> TU64
   | Ast.TypeIsize    -> TIsize
   | Ast.TypeUsize    -> TUsize
   | Ast.TypeVoid     -> TVoid
-  | Ast.TypePtr   t      -> TPtr   (of_ast t)
-  | Ast.TypeIo    t      -> TIo (of_ast t)
-  | Ast.TypeArray (t, n) -> TArray (of_ast t, n)
-  | Ast.TypeFn (ps, r)   -> TFun (List.map of_ast ps, of_ast r)
+  | Ast.TypePtr   t      -> TPtr   (of_ast_in_scope scope t)
+  | Ast.TypeIo    t      -> TIo (of_ast_in_scope scope t)
+  | Ast.TypeArray (t, n) -> TArray (of_ast_in_scope scope t, n)
+  | Ast.TypeFn (ps, r)   -> TFun (List.map (of_ast_in_scope scope) ps, of_ast_in_scope scope r)
   | Ast.TypeNamed s      -> TStruct s
-  | Ast.TypeRefined (lo, hi, base) -> TRefinedInt (lo, hi, of_ast base)
-  | Ast.TypeSlice (t, n) -> TSlice (of_ast t, n)
-  | Ast.TypeTuple ts -> TTuple (List.map of_ast ts)
-  | Ast.TypeBorrow t | Ast.TypeSink t -> of_ast t
-  | Ast.TypeAlignedPtr (n, t) -> TAlignedPtr (n, of_ast t)
+  | Ast.TypeView s       -> TView s
+  | Ast.TypeVariant s    -> TVariant s
+  | Ast.TypeExists (name, sort, body) ->
+      let inner_scope = Hashtbl.copy scope in
+      let binder = rigid_static name in
+      bind_static inner_scope name binder;
+      TExists (name, sort, binder, of_ast_in_scope inner_scope body)
+  | Ast.TypeIndexed (s, args) ->
+      TIndexedStruct (s, List.map (static_of_ast scope) args)
+  | Ast.TypeSingleton (base, n) ->
+      TSingleton (of_ast_in_scope scope base, static_of_ast scope n)
+  | Ast.TypeRefined (lo, hi, base) ->
+      TRefinedInt (lo, hi, of_ast_in_scope scope base)
+  | Ast.TypeSlice (t, n) -> TSlice (of_ast_in_scope scope t, n)
+  | Ast.TypeTuple ts -> TTuple (List.map (of_ast_in_scope scope) ts)
+  | Ast.TypeBorrow t | Ast.TypeSink t -> of_ast_in_scope scope t
+  | Ast.TypeAlignedPtr (n, t) -> TAlignedPtr (n, of_ast_in_scope scope t)
+
+let of_ast t = of_ast_in_scope (create_static_scope ()) t
 
 (* None -> fresh unification variable *)
 let of_ast_opt = function
@@ -248,6 +418,45 @@ let of_ast_opt = function
 let ret_of_ast_opt = function
   | Some t -> of_ast t
   | None   -> TVoid
+
+let of_ast_opt_in_scope scope = function
+  | Some t -> of_ast_in_scope scope t
+  | None -> fresh ()
+
+let ret_of_ast_opt_in_scope scope = function
+  | Some t -> of_ast_in_scope scope t
+  | None -> TVoid
+
+let instantiate_static_params ty =
+  let subst : (int, static_term) Hashtbl.t = Hashtbl.create 8 in
+  let rec inst_static t =
+    match static_repr t with
+    | SConst _ as t -> t
+    | SVar _ as t -> t
+    | SParam (id, _) ->
+        (match Hashtbl.find_opt subst id with
+         | Some t -> t
+         | None ->
+             let t = fresh_static () in
+             Hashtbl.add subst id t;
+             t)
+  and inst t =
+    match repr t with
+    | TFun (ps, r) -> TFun (List.map inst ps, inst r)
+    | TPtr t -> TPtr (inst t)
+    | TIo t -> TIo (inst t)
+    | TArray (t, n) -> TArray (inst t, n)
+    | TRefinedInt (lo, hi, base) -> TRefinedInt (lo, hi, inst base)
+    | TTuple ts -> TTuple (List.map inst ts)
+    | TSlice (t, n) -> TSlice (inst t, n)
+    | TAlignedPtr (n, t) -> TAlignedPtr (n, inst t)
+    | TIndexedStruct (name, args) ->
+        TIndexedStruct (name, List.map inst_static args)
+    | TSingleton (base, n) -> TSingleton (inst base, inst_static n)
+    | TExists _ as t -> t
+    | t -> t
+  in
+  inst ty
 
 (* After unification, collapse to a concrete Ast type.
    Unbound variables default to int (unconstrained integer) *)
@@ -264,12 +473,26 @@ let rec to_ast t =
   | TArray (t, n) -> Ast.TypeArray (to_ast t, n)
   | TFun (ps, r)  -> Ast.TypeFn (List.map to_ast ps, to_ast r)
   | TStruct s     -> Ast.TypeNamed s
+  | TView s       -> Ast.TypeView s
+  | TVariant s    -> Ast.TypeVariant s
+  | TExists (name, sort, _, body) ->
+      Ast.TypeExists (name, sort, to_ast body)
+  | TIndexedStruct (s, args) ->
+      Ast.TypeIndexed (s, List.map static_to_ast args)
+  | TSingleton (base, n) -> Ast.TypeSingleton (to_ast base, static_to_ast n)
   | TRefinedInt (lo, hi, base) -> Ast.TypeRefined (lo, hi, to_ast base)
   | TSlice (t, n) -> Ast.TypeSlice (to_ast t, n)
   | TAlignedPtr (n, t) -> Ast.TypeAlignedPtr (n, to_ast t)
   | TTuple ts -> Ast.TypeTuple (List.map to_ast ts)
   | TVar { contents = Unbound _ } -> Ast.TypeI32
   | TVar { contents = Link _ }    -> assert false
+
+and static_to_ast t =
+  match static_repr t with
+  | SConst n -> Ast.StaticInt n
+  | SParam (_, name) -> Ast.StaticName name
+  | SVar { contents = SUnbound id } -> Ast.StaticName (Printf.sprintf "__static%d" id)
+  | SVar { contents = SLink _ } -> assert false
 
 (* -- Output structs passed to codegen ------------------------------------- *)
 

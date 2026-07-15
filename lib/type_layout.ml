@@ -8,15 +8,27 @@ type struct_info = {
 
 let structs : (string, struct_info) Hashtbl.t = Hashtbl.create 16
 let enums   : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 8
+let views   : (string, unit) Hashtbl.t = Hashtbl.create 8
+let variants :
+    (string, (string * Ast.type_expr option) list) Hashtbl.t =
+  Hashtbl.create 8
 let in_progress : (string, unit) Hashtbl.t = Hashtbl.create 16
 
 let reset () =
   Hashtbl.reset structs;
   Hashtbl.reset enums;
+  Hashtbl.reset views;
+  Hashtbl.reset variants;
   Hashtbl.reset in_progress
 
 let register_enum name underlying =
   Hashtbl.replace enums name underlying
+
+let register_view name =
+  Hashtbl.replace views name ()
+
+let register_variant name cases =
+  Hashtbl.replace variants name cases
 
 let begin_struct name =
   Hashtbl.replace in_progress name ()
@@ -61,7 +73,11 @@ let rec size_align_of_type pos seen ty =
   | TypeU8 | TypeU16 | TypeU32 | TypeU64
   | TypeIsize | TypeUsize -> primitive_size_align ty
   | TypeVoid -> fail pos "sizeof(void) is not allowed"
-  | TypeBorrow t | TypeSink t -> size_align_of_type pos seen t
+  | TypeView name -> fail pos (Printf.sprintf
+      "erased view '%s' has no runtime size or alignment" name)
+  | TypeExists (_, _, body) -> size_align_of_type pos seen body
+  | TypeBorrow t | TypeSink t | TypeSingleton (t, _) ->
+      size_align_of_type pos seen t
   | TypeAlignedPtr _ -> ptr_size_align ()
   | TypePtr _ | TypeFn _ -> ptr_size_align ()
   | TypeIo t -> size_align_of_type pos seen t
@@ -89,11 +105,40 @@ let rec size_align_of_type pos seen ty =
         (offset + tsz, max max_align talign)
       ) (0, 1) ts in
       (align_up off max_align, max_align)
-  | TypeNamed name ->
+  | TypeVariant name ->
+      (match Hashtbl.find_opt variants name with
+       | None -> fail pos (Printf.sprintf "unknown variant '%s' in sizeof" name)
+       | Some cases ->
+           let runtime_payload = function
+             | TypeExists (_, _, body) -> body
+             | payload -> payload
+           in
+           let fields = TypeI32 :: List.filter_map (fun (_, payload) ->
+             match payload with
+             | None -> None
+             | Some payload ->
+                 let payload = runtime_payload payload in
+                 (match payload with
+                  | TypeView _ -> None
+                  | TypeNamed view when Hashtbl.mem views view -> None
+                  | _ -> Some payload)
+           ) cases in
+           let (off, max_align) = List.fold_left (fun (offset, max_align) t ->
+             let (tsz, talign) = size_align_of_type pos seen t in
+             let offset = align_up offset talign in
+             (offset + tsz, max max_align talign)
+           ) (0, 1) fields in
+           (align_up off max_align, max_align))
+  | TypeNamed name | TypeIndexed (name, _) ->
       (match Hashtbl.find_opt enums name with
        | Some underlying -> size_align_of_type pos seen underlying
        | None ->
-           if List.mem name seen || Hashtbl.mem in_progress name then
+           if Hashtbl.mem variants name then
+             size_align_of_type pos seen (TypeVariant name)
+           else if Hashtbl.mem views name then
+             fail pos (Printf.sprintf
+               "erased view '%s' has no runtime size or alignment" name)
+           else if List.mem name seen || Hashtbl.mem in_progress name then
              fail pos (Printf.sprintf "recursive sizeof(%s) is not supported" name)
            else
              match Hashtbl.find_opt structs name with

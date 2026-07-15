@@ -56,9 +56,21 @@ let VIRTIO_MMIO_FIRST_SPI: i32 = 48;
 
 let QNUM: isize = 8; // virtqueue depth for both the RX and TX queues
 
-private affine opaque struct NetRxCpuOwned;
-let mut net_rx_token_storage: u8;
-let mut net_rx_acquired_len: i32;
+private linear struct NetRxCpuOwned[desc: usize] {
+    private index: {0..<8 as usize} @ desc;
+    private len: i32;
+}
+
+variant NetRxAcquire {
+    None;
+    Acquired(exists desc: usize. NetRxCpuOwned[desc]);
+}
+
+fn net_rx_owned(index: {0..<8 as usize} @ desc, len: i32)
+        -> NetRxCpuOwned[desc] {
+    let mut frame: NetRxCpuOwned[desc] = { index, len };
+    return frame;
+}
 
 struct packed VirtqDesc {
     addr: usize;
@@ -120,7 +132,6 @@ let mut rx_used_seen:        isize = 0;
 let mut tx_used_seen:        isize = 0;
 let mut rx_avail_idx:        isize = 0;
 let mut tx_avail_idx:        isize = 0;
-let mut net_last_rx_desc_idx: isize = 0;
 
 fn vreg(offset: i32) -> *io i32 {
     return (virtio_base + offset) as *io i32;
@@ -297,26 +308,26 @@ fn net_init() -> i32 {
     return 1;
 }
 
-// Converts the caller's DMA-owned token to a CPU-owned token when a frame is
-// ready, or returns null otherwise. Every non-null result must be passed
-// exactly once to net_rx_release(). The frame length is read separately via
-// net_rx_len(), so even a malformed zero/negative length cannot hide an
-// acquired descriptor and prevent its release.
-fn net_rx_acquire() -> *NetRxCpuOwned {
+// Returns None when no used-ring entry is ready. Acquired packages the
+// validated descriptor index and reported frame length with the linear owner;
+// matching it creates a fresh static descriptor identity for the caller.
+fn net_rx_acquire() -> NetRxAcquire {
     if (virtio_rx_irq_flag == 0) {
-        return 0 as usize as *NetRxCpuOwned;
+        return NetRxAcquire::None;
     }
     virtio_rx_irq_flag = 0;
     if (rx_used_seen == used_idx_get(rx_queue_mem as *u8)) {
-        return 0 as usize as *NetRxCpuOwned;
+        return NetRxAcquire::None;
     }
     virtio_rx_irq_flag = 1; // drain coalesced used-ring entries
     dma_consume(); // used-ring entry and RX payload now belong to the CPU
     let slot: isize = rx_used_seen % QNUM;
-    net_last_rx_desc_idx = used_ring_get_id(rx_queue_mem as *u8, slot);
+    // A corrupt device-reported id is clamped before it becomes the owner's
+    // singleton index, so every later buffer access is statically in bounds.
+    let index: {0..<8 as usize} =
+        max(min(used_ring_get_id(rx_queue_mem as *u8, slot), 7), 0) as usize;
     let frame_total_len: i32 = used_ring_get_len(rx_queue_mem as *u8, slot);
-    net_rx_acquired_len = frame_total_len - 10;
-    return &net_rx_token_storage as *NetRxCpuOwned;
+    return NetRxAcquire::Acquired(net_rx_owned(index, frame_total_len - 10));
 }
 
 fn net_rx_wait() {
@@ -325,8 +336,8 @@ fn net_rx_wait() {
     }
 }
 
-fn net_rx_len(frame: borrow *NetRxCpuOwned) -> i32 {
-    return net_rx_acquired_len;
+fn net_rx_len(frame: borrow NetRxCpuOwned[desc]) -> i32 {
+    return frame.len;
 }
 
 // Capacity view of the current RX buffer as a slice: 1514 bytes = the
@@ -335,23 +346,10 @@ fn net_rx_len(frame: borrow *NetRxCpuOwned) -> i32 {
 // closes the "device reports a bogus length" hole: a length outside
 // 0..1514 fails the narrowing check and the frame is dropped.
 //
-// net_last_rx_desc_idx is itself a DEVICE-REPORTED value
-// (used_ring_get_id() in net_rx_acquire(), never previously validated
-// against QNUM) -- clamping it here closes that gap too, and lets the
-// capacity view be constructed directly from rx_bufs (a real array) with
-// no unsafe pointer assertion at all: min/max prove the clamped index is
-// in [0, QNUM-1], Mul/Add propagation carry that through the byte offset
-// computation, and the same-base rule (literal offset 1514) closes the
-// subslice outright. A corrupted index degrades to reading the wrong
-// (but always in-bounds) buffer slot instead of the raw pointer
-// arithmetic construction this replaces, which had no such guarantee.
-fn net_rx_frame(frame: borrow *NetRxCpuOwned) -> [u8; 1514..] {
-    // 7 is QNUM-1 written as a literal, not a computed expression:
-    // Const_env only resolves bare literals/names, not arithmetic on
-    // them (see CLAUDE.md's "global let initializers can't constant-fold"
-    // limitation), so `QNUM - 1` here would lose the range min() needs.
-    // Update this literal if QNUM (declared above) ever changes.
-    let idx: usize = max(min(net_last_rx_desc_idx, 7), 0) as usize;
+// The descriptor singleton carried by frame preserves the range proven at
+// acquisition, so no shared global or repeated clamp is needed here.
+fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] {
+    let idx: {0..<8 as usize} = frame.index;
     let offset: usize = idx * RX_BUF_SIZE_USIZE + 10;
     return rx_bufs[offset..<offset + 1514];
 }
@@ -360,9 +358,9 @@ fn net_rx_frame(frame: borrow *NetRxCpuOwned) -> [u8; 1514..] {
 // Hands the current RX descriptor back to the device and advances the
 // ring. Must receive the CPU-owned handle returned by net_rx_acquire(), after
 // the caller no longer needs net_rx_frame()'s contents.
-fn net_rx_release(frame: sink *NetRxCpuOwned) {
+fn net_rx_release(frame: sink NetRxCpuOwned[desc]) {
     let rx_slot: isize = rx_avail_idx % QNUM;
-    avail_ring_set(rx_queue_mem as *u8, rx_slot, net_last_rx_desc_idx);
+    avail_ring_set(rx_queue_mem as *u8, rx_slot, frame.index as isize);
     rx_avail_idx = rx_avail_idx + 1;
     avail_publish(rx_queue_mem as *u8, rx_avail_idx);
     virtio_notify(0);

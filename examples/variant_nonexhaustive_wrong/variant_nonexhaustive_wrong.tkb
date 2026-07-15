@@ -1,0 +1,13 @@
+// This file is expected to produce a compile error.
+// Runtime variants are closed sums. A match without a wildcard must name every
+// declared case, so omitting Right is rejected before code generation.
+variant VariantChoice {
+    Left;
+    Right;
+}
+
+fn choose_badly(choice: VariantChoice) {
+    match choice {
+        VariantChoice::Left => {}
+    }
+}

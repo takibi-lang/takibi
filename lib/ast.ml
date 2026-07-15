@@ -16,6 +16,11 @@ type binop =
   | Or | And | Bor | Bxor | Band | Shr | Shl
 [@@deriving show]
 
+type static_arg =
+  | StaticName of string
+  | StaticInt of int
+[@@deriving show]
+
 type type_expr =
   | TypeBool
   | TypeI8  | TypeI16 | TypeI32 | TypeI64
@@ -28,6 +33,22 @@ type type_expr =
   | TypeArray of type_expr * int   (* [T; N] *)
   | TypeFn of type_expr list * type_expr  (* fn(T...) -> R *)
   | TypeNamed of string            (* struct type by name *)
+  | TypeView of string
+    (* Elaborated erased view type. Source annotations use the declared
+       bare name; type inference resolves it to this distinct constructor
+       so runtime structs and Delta-only views cannot be confused. *)
+  | TypeVariant of string
+    (* Elaborated tagged runtime variant type. Source annotations use the
+       declared bare name; payload kind is tracked separately in Delta. *)
+  | TypeExists of ident * type_expr * type_expr
+    (* exists n: Sort. T[n] -- an erased static binder around a runtime
+       payload. Slice 3 permits this only as a variant payload schema. *)
+  | TypeIndexed of string * static_arg list
+    (* Name[n, ...] -- a runtime named value indexed by erased static
+       integers. The named value keeps its ordinary runtime layout; only
+       the arguments disappear after type checking. *)
+  | TypeSingleton of type_expr * static_arg
+    (* T @ n -- a runtime T whose value is the erased static integer n. *)
   | TypeRefined of int * int * type_expr
     (* {lo..<hi} -- refined int: lo <= x < hi. Third field is the
        underlying primitive type (mirrors Types.ty's TRefinedInt -- see
@@ -40,9 +61,9 @@ type type_expr =
                                       int = compile-time MINIMUM length (0 = unknown).
                                       The runtime length is always >= the minimum; index
                                       proofs and constant subslices check against it. *)
-  | TypeBorrow of type_expr        (* parameter-only, non-consuming affine borrow *)
+  | TypeBorrow of type_expr        (* parameter-only, non-consuming kinded borrow *)
   | TypeSink of type_expr
-    (* parameter-only affine "sink": like a plain (owning) affine parameter
+    (* parameter-only kinded "sink": like a plain owning parameter
        at the call site (the argument IS consumed there), but marks this
        function as the designated terminal consumer of the value, so the
        callee's own body is NOT required to forward/consume it further
@@ -62,6 +83,9 @@ type type_expr =
        variable and struct-level syntax. *)
 [@@deriving show]
 
+type static_param = ident * type_expr
+[@@deriving show]
+
 type expr = expr_desc located
 and expr_desc =
   | IntLit of Int64.t
@@ -76,7 +100,14 @@ and expr_desc =
   | BoolLit of bool
   | StringLit of string     (* "..."  -- null-terminated *char constant *)
   | Var of ident
+  | ViewLit of ident
+    (* `view Name` -- explicitly mint an erased permission value. It has
+       no runtime representation; privacy and kind flow are checked later. *)
   | Call of ident * expr list
+  | VariantCtor of string * string * expr
+    (* Name::Case(payload) -- tagged runtime variant construction. Nullary
+       cases retain the existing EnumVariant syntax node and are resolved
+       against enum/variant declarations during type inference. *)
   | BinOp of binop * expr * expr
   | Bnot of expr               (* ~expr -- bitwise NOT *)
   | Deref of expr           (* *expr  -- read through pointer *)
@@ -137,9 +168,11 @@ and stmt_desc =
          immutable binding, kind-tracked via its inferred type. *)
   | Break
   | Continue
-  | Match of expr * match_arm list  (* match expr { EName::V => {...} _ => {...} } *)
+  | Match of expr * match_arm list
+      (* match expr { Name::Case(binding) => {...} Name::None => {...} } *)
 and match_arm =
-  | ArmVariant of string * string * stmt list  (* EnumName::Variant => { stmts } *)
+  | ArmVariant of string * string * ident option * stmt list
+      (* Name::Case[(payload_name)] => { stmts } *)
   | ArmWild    of stmt list                    (* _ => { stmts } *)
 [@@deriving show]
 
@@ -176,18 +209,30 @@ type toplevel =
      Kept as a parallel name list rather than widening the field tuples,
      so Type_layout/codegen/senv consumers stay untouched (privacy is a
      type-checking concern with zero layout footprint). *)
+  | OwnedStructDef of string * opaque_kind * static_param list
+      * (string * type_expr) list * bool * int option * string list * bool * loc
+  (* name, affine/linear kind, erased static parameters, runtime fields,
+     layout flags, private field names, is_private, loc. Unlike an opaque
+     handle this is a first-class runtime aggregate; only its static
+     parameters are erased. *)
+  | ViewDef of string * opaque_kind * bool * loc
+  (* name, affine/linear kind, is_private, loc. A view has no fields,
+     size, address, or runtime ABI representation. *)
   | OpaqueStructDef of string * opaque_kind * bool * loc
   (* name, kind, is_private, loc -- incomplete nominal type, usable only
      behind a pointer.
-     KindAffine: use at most once, must be consumed on at least one path
-     (union semantics -- see SPEC.md's Affine Types). KindLinear: use
-     exactly once on EVERY path (intersection semantics -- OWNERSHIP_KERNEL.md
-     Stage 1, GitHub issue #117); casting a linear value away is rejected.
+     KindAffine: use at most once; weakening (dropping without consuming) is
+     permitted. KindLinear: use exactly once on EVERY path (intersection
+     semantics -- OWNERSHIP_KERNEL.md Stage 1, GitHub issue #117). Casting
+     either kind away is rejected.
      is_private (Stage 2, issue #108): value CONSTRUCTION -- any cast whose
      target type mentions this type -- is legal only in loc's file; naming
      the type stays legal everywhere. *)
   | EnumDef of string * type_expr option * (string * int option) list * bool
   (* enum Name: u16 { Variant = val; _; } -- last bool = is_nonexhaustive *)
+  | VariantDef of string * (string * type_expr option) list * loc
+  (* variant Name { None; Some(T); } -- closed tagged sum. Each case has at
+     most one directly supported payload in Slice 3. *)
   | UseDef of string
   (* use "path/to/file.tkb"; -- GitHub issue #55. Path is resolved relative
      to the compiler's own working directory (the same convention already
@@ -255,9 +300,11 @@ let written_names (stmts : stmt list) : string list =
         go_expr e1
     | BinOp (_, a, b) -> go_expr a; go_expr b
     | Call (_, args) | StructLit args | TupleLit args -> List.iter go_expr args
+    | VariantCtor (_, _, payload) -> go_expr payload
     | Index (_, idx) -> go_expr idx
     | SliceOf (_, lo, hi) -> go_expr lo; go_expr hi
-    | IntLit _ | BoolLit _ | StringLit _ | Var _ | EnumVariant _ | SizeOf _
+    | IntLit _ | BoolLit _ | StringLit _ | Var _ | ViewLit _
+    | EnumVariant _ | SizeOf _
     | OffsetOf _ ->
         ()
   in
@@ -281,7 +328,10 @@ let written_names (stmts : stmt list) : string list =
     | Match (d, arms)        ->
         go_expr d;
         List.iter (function
-          | ArmVariant (_, _, b) | ArmWild b -> List.iter go_stmt b
+          | ArmVariant (_, _, binding, b) ->
+              Option.iter add binding;
+              List.iter go_stmt b
+          | ArmWild b -> List.iter go_stmt b
         ) arms
   in
   List.iter go_stmt stmts;

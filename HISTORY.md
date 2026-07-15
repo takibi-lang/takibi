@@ -7246,3 +7246,144 @@ same coloured PASS/FAIL stream as compile-error, DWARF, and QEMU tests.
 
 Validation: `make qemutest` and `make check` both passed with 103 total
 integration cases after the change.
+
+## 2026-07-15: Takibi Core Slice 1, Indexed Runtime Owners
+
+Implemented the first vertical slice of the four-layer Core described in
+`TAKIBI_CORE.md`. The language now accepts integer-indexed first-class
+`affine struct` / `linear struct` declarations, indexed types `Name[n]`, and
+singleton runtime integers `T @ n`. Static names in signatures are implicit
+universals: function bodies check them rigidly, and every call receives a
+fresh instantiation. Owner field projection substitutes the actual index, so
+runtime data, range facts, and identity constraints remain connected.
+
+`examples/affine_escape_via_index` now uses a private
+`linear struct SlotLease[n: usize]` containing the private refined runtime
+index. Its read/write/close operations no longer accept an independent
+`idx`; no `unsafe`, pointer-bit encoding, invalid-index fallback, or runtime
+bounds trap remains. LLVM lowers the owner to `{ usize }`, passes it by value,
+extracts the field in accessors, and erases only static identity and ownership
+facts.
+
+The slice deliberately rejects owner casts, address-taking, globals, nested
+fields, arrays/slices, and pointer storage until place/storage tracking is
+generalized. It also rejects moving from `borrow`. Added range- and
+identity-negative integration fixtures plus parser, inference, privacy,
+fresh-instantiation, borrow, storage, and LLVM-erasure unit regressions.
+
+Final soundness review separated call-site unification metavariables from
+generative rigid identities for unknown runtime values, preserved singleton
+facts through inferred immutable aliases, and closed uninitialized owner,
+live overwrite, borrowed/sink reassignment, discarded owned result, and
+borrowed-owned-temporary paths. Singleton values cannot be addressed or put
+in ordinary mutable storage, preventing mutation through a widened pointer
+from leaving a stale `@ n` proof. Mutable indexed-owner fields lower to real
+aggregate stores.
+
+The remaining trust boundary is explicit: a private constructor can still
+mint two owners with the same static identity. `linear` checks the lifetime of
+each minted value, not uniqueness of constructor authority; a later erased
+permission/view slice must enforce the latter.
+
+Validation: all 630 Alcotest cases passed; `make qemutest` and the full
+`make check` passed all 105 host, compile-error, DWARF, QEMU, and STM32 build
+checks.
+
+## 2026-07-15: Takibi Core Slice 2, Erased Affine/Linear Views
+
+Implemented the first explicitly erased `Delta` resource. Takibi now accepts
+non-indexed `affine view Name;` and `linear view Name;` declarations plus the
+explicit mint expression `view Name`. Views have a distinct AST/inference type
+from runtime named structs. They flow directly through locals, parameters,
+returns, `borrow`, and `sink`, using the existing any-path/all-path resource
+analysis. Private declarations restrict minting to the declaring file.
+
+The runtime boundary is enforced rather than conventional: views cannot be
+cast, addressed, measured, placed in globals/fields/arrays/slices/tuples or
+behind pointers/function pointers, or written through runtime storage. A
+view-returning function must explicitly return on every path, and a producing
+call result cannot be discarded. LLVM removes view parameters and call
+operands, lowers view results to `void`, and creates no alloca or DWARF local
+for them. Unit tests inspect the generated signatures and call sites directly.
+
+`PendingTcpEvent` in `examples/common/http_conn_state.tkb` now uses
+`private linear view` and `return view PendingTcpEvent`; the dummy
+`0 as usize as *PendingTcpEvent` representation and every pointer-shaped
+parameter are gone. `examples/view_linear_branch_missed` is the focused
+compile-error companion and explains in English why its missing branch must
+fail.
+
+Slice 2 deliberately has no static view indices, quantifiers, existential
+opening, view change, propositions, solver integration, or effects. The
+declaring file is still trusted to mint only when the external event actually
+exists; this slice proves flow after minting, not the truth of that assertion.
+
+Validation: all 647 Alcotest cases passed, including parser, privacy,
+resource-flow, storage-ban, return-totality, runtime-operator, and LLVM ABI
+regressions. The full `make check` passed all 106 host, compile-error, DWARF,
+and QEMU tests, plus every STM32 cross-build, including the migrated HTTP
+server under `--forbid-trap`.
+
+## 2026-07-15: Takibi Core Slice 3, Closed Variants and Existential Owners
+
+Implemented the conditional-resource package needed after indexed runtime
+owners and erased views. Takibi now accepts concrete closed
+`variant Name { None; Some(T); }` declarations, nullary and payload
+constructors, payload-binding match arms, duplicate/exhaustiveness checks,
+and kind propagation from payloads. Matching consumes a kinded package and
+creates a fresh obligation for the selected payload; a linear variant cannot
+hide that obligation behind a wildcard.
+
+The first existential surface form is deliberately restricted:
+`exists n: IntegerSort. Owner[n]` may appear only as the outermost payload
+of a variant case and must directly package an indexed runtime owner.
+Construction hides the owner's static index. Each match opens it with a fresh
+rigid identity, so two independently acquired resources cannot satisfy an
+API requiring the same index merely because their runtime layouts agree.
+The static binder, singleton equality, refinement facts, and ownership
+permission erase; the owner's runtime fields remain.
+
+LLVM lowers the current variant ABI to `{ i32 tag, payload0, payload1, ... }`,
+with one typed field per runtime-bearing case. Payload-less cases and erased
+view payloads add no field. This is intentionally not yet a compact union ABI
+or a stable C ABI, and full source-level tagged-union DWARF is deferred.
+`sizeof(Variant)` follows the same target layout. Variant-returning functions
+must explicitly return on every path, avoiding an invalid aggregate default.
+Concrete struct and array payloads are deferred until their value and
+ownership representation is defined; Slice 3 accepts primitive, pointer,
+slice, erased-view, and indexed-owner payloads instead.
+
+Both Ethernet backends now expose:
+
+```takibi
+variant NetRxAcquire {
+    None;
+    Acquired(exists desc: usize. NetRxCpuOwned[desc]);
+}
+```
+
+`NetRxCpuOwned[desc]` is a linear runtime owner containing the refined
+descriptor index and frame length. QEMU and STM32 callers match the package,
+use the inferred identity through accessors, and release the exact owner; the
+null token, acquired-length global, and last-descriptor global are gone.
+FAT12 similarly returns `FatOpenResult::Error(i32)` or
+`Opened(*FatFile)`, and all FAT callers close the linear token in every
+success arm.
+
+Slice 3 also completes the multiplicity migration. `affine` now has its
+standard at-most-once meaning: weakening, unused parameters, uninitialized
+locals, live overwrite, and reinitialization after move are permitted, while
+double use remains rejected. Mandatory-release examples (`FatFile`,
+`NetRxCpuOwned`, `MutexGuard`, and `KGuard`) use `linear`. Every
+ownership-bearing value is now bit-opaque; cast-away is rejected even inside
+`unsafe`, because fallible ownership is represented by a variant rather
+than a null sentinel.
+
+Three focused compile-error examples explain their failures in English:
+`variant_linear_payload_missed`, `variant_existential_identity_wrong`,
+and `variant_nonexhaustive_wrong`. Historical affine-never-consumed
+fixtures are now positive compile-only checks for standard weakening.
+
+Validation: all 666 Alcotest cases passed. The full `make check` passed all
+109 host, compile-error, DWARF, and QEMU integration cases, every STM32
+cross-build, and the network/FAT examples under `--forbid-trap`.

@@ -64,7 +64,8 @@ turn as many potential traps as possible into compile-time errors instead:
 `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `isize`,
 `usize`, `void`, `*T`, `io T`, `*io T`, `[T; N]`, `[]T` / `[T; N..]`
 (slice), `fn(T...) -> R`, `Name` (struct or enum), `{lo..<hi as base}`
-(refined integer subtype).
+(refined integer subtype), `T @ n` (runtime integer singleton), and
+`Name[n]` (indexed affine/linear runtime struct).
 
 - **`isize` / `usize`** are pointer-sized signed/unsigned integers. Their
   LLVM width follows the target's actual pointer size via LLVM
@@ -320,6 +321,8 @@ struct Name align(N) { field: type; ... }    // every instance/array element ali
 struct packed Name align(N) { ... }          // both
 opaque struct Name;                          // incomplete type, pointer-only
 affine opaque struct Name;                   // opaque + ownership-handle semantics, see below
+affine struct Name[n: usize] { field: T; }   // indexed runtime owner
+linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
 ```
 
 - `let mut s: Name;` -- struct variable (local or global; a struct
@@ -365,7 +368,80 @@ affine opaque struct Name;                   // opaque + ownership-handle semant
   tail padding automatically appended so `sizeof(struct) % N == 0`. Use
   for DMA descriptor rings, cache-line-separated data, SIMD types.
 
-## Affine Opaque Structs (Ownership Handles)
+## Indexed Runtime Owners
+
+The implemented Slice 1 subset supports first-class runtime owners whose
+types retain erased static integer identities:
+
+```takibi
+private linear struct SlotLease[n: usize] {
+    private idx: {0..<4 as usize} @ n;
+}
+
+fn slot_lease(idx: {0..<4 as usize} @ n) -> SlotLease[n] {
+    let mut lease: SlotLease[n] = { idx };
+    return lease;
+}
+
+fn slot_read(lease: borrow SlotLease[n]) -> i32 {
+    return slots[lease.idx].value;
+}
+
+fn slot_unlease(lease: sink SlotLease[n]) {}
+```
+
+- A static parameter is declared in brackets on an `affine struct` or
+  `linear struct`. Slice 1 supports primitive integer sorts only and requires
+  at least one static parameter.
+- `T @ n` is a runtime integer `T` with the compile-time equality "this
+  value is `n`". It has exactly the same LLVM representation as `T`.
+- `Name[n]` has the declared struct fields at runtime. Its static arguments
+  do not add fields or ABI words. Unbound static names in function signatures
+  are implicitly universally quantified and instantiated freshly per call.
+- Integer literals have their literal static identity. Reusing one immutable
+  runtime variable preserves one hidden rigid identity; two independent
+  unknown runtime expressions receive distinct identities. Slice 1 does not
+  equate computed expressions by arithmetic reasoning.
+- Field projection substitutes actual static arguments for the declaration's
+  formals. Thus `lease.idx` above retains both `{0..<4 as usize}` and the same
+  `n`, so indexing emits no bounds trap under `--forbid-trap`.
+- `borrow Name[n]` is non-consuming and `sink Name[n]` is the designated
+  terminal consumer. In Slice 1 both are runtime aggregate parameters passed
+  by value; the mode changes ownership checking, not ABI representation.
+- Moving a value transfers its affine/linear obligation. A borrowed owner
+  cannot be returned or passed to a consuming parameter as a second owner.
+  An owned call result must be bound, returned, or passed directly to an
+  owning consumer; it cannot be discarded or borrowed as an untracked
+  temporary. Indexed owners must be initialized, and assigning over a live
+  one is rejected for both affine and linear kinds.
+- `borrow` and `sink` may wrap only the complete parameter type, not a tuple
+  component or another nested type. Owner fields are writable only through a
+  mutable local or parameter, and singleton-typed fields can receive only the
+  same static identity.
+- `private` on the owner and private fields enforce smart construction and
+  accessor APIs across source files. Casts cannot mint or launder indexed
+  owners.
+- Constructing an owner creates a new ownership obligation. Slice 1 does not
+  require a pre-existing permission to do so, so a private constructor is part
+  of the trusted implementation of an external-resource invariant. `linear`
+  checks every value that was minted; by itself it does not prove that the
+  declaring module never mints two `SlotLease[n]` values for the same `n`.
+  A later erased-view/permission slice supplies that stronger constructor
+  precondition.
+- Until storage/place tracking is generalized, indexed owners may occur only
+  as local values, parameters, returns, and components of value tuples. They
+  cannot be addressed, cast, placed behind pointers, or stored in globals,
+  fields, arrays, or slices.
+- To prevent mutation through a widened pointer from invalidating `T @ n`,
+  singleton values cannot be addressed or placed in globals, ordinary struct
+  fields, pointer targets, arrays, or slices. A direct field of an indexed
+  owner is the supported persistent carrier in this slice.
+
+Static address/enum sorts, explicit universal or existential syntax,
+`where`/propositions, erased `view` values, mutable borrowing, and SMT/prover
+integration are not part of Slice 1.
+
+## Affine Values (Optional Ownership)
 
 ```
 affine opaque struct Token;
@@ -383,38 +459,30 @@ fn good() {
     // inspect(t);     // likewise, after release
 }
 
-// fn bad() { let t: *Token = make(); }
-// would be a compile error: "affine value 't' is never consumed"
+fn may_drop() {
+    let t: *Token = make(); // OK: affine permits weakening
+}
 ```
 
-**Consequence of `opaque` implying no fields**: since an opaque struct can
-never have fields (see "no constructible value, fields, or size" above),
-any *real* per-instance state a driver built on this pattern needs (e.g.
-which file is open, which descriptor is acquired) has nowhere to live
-except ordinary global variables -- `make()`-style constructors typically
-return the address of one fixed global "token" object
-(`&some_token_storage as *Name`), the same address every time. This makes
-the pattern a **global singleton**: only one live (acquired-but-not-yet-
-released) handle of a given `affine opaque struct` type can meaningfully
-exist at once, system-wide, since a second acquisition before the first
-handle is released would silently overwrite the same backing state. Both
-of this project's real uses of the pattern (`examples/common_stm32/
-eth.tkb`'s `NetRxCpuOwned`, `examples/common/fat12.tkb`'s `FatFile`) are
-single-instance for exactly this reason -- `FatFile`'s driver additionally
-guards against a second `fat_open()` before the first `fat_close()` with
-its own `bool` flag, since the affine checker itself has no way to see
-across two independently acquired handles of the same type. Supporting
-genuinely concurrent instances (e.g. two files open at once) is not
-possible with this pattern alone and would need a different mechanism
-(not yet designed -- see GitHub issue #89's discussion).
+`affine` has its standard structural meaning: **contraction is forbidden,
+weakening is allowed**. A value may be moved at most once, but it may be
+dropped without a terminal call. Use `linear`, not `affine`, when every
+path must release, close, answer, or forward a resource.
+
+The kind applies uniformly to opaque handles, indexed runtime-owner structs,
+erased views, tuples, and variants. A tuple or variant takes the strongest
+kind of any component/payload (`linear > affine > unrestricted`).
+
+An opaque struct still has no fields or size. Real per-instance state cannot
+live in `*Token`; a driver using that representation must keep it elsewhere.
+`FatFile` currently remains such a private singleton token. Resources whose
+runtime identity matters should use an indexed runtime owner such as
+`SlotLease[n]` or `NetRxCpuOwned[desc]`, whose private runtime fields travel
+with the ownership permission.
 
 `affine opaque struct Name;` marks pointers to that type (`*Name`) as
-affine handles: this is the type-level tool for statically rejecting
-use-after-release and double-release bugs on driver-owned resources (the
-motivating case is a network RX descriptor: `net_rx_acquire() ->
-*NetRxCpuOwned`, borrowed any number of times through `net_rx_len`/
-`net_rx_frame`, then consumed exactly once by `net_rx_release` -- see
-`examples/common_qemu/virtio_mmio.tkb` / `examples/common_stm32/eth.tkb`).
+affine handles. It statically rejects use after move and double move while
+allowing deliberate abandonment.
 
 - A function parameter of plain affine-pointer type (`t: *Name`, no
   `borrow`/`sink`) **consumes** the argument: after such a call, using the
@@ -423,56 +491,28 @@ motivating case is a network RX descriptor: `net_rx_acquire() ->
   value 'NAME' was already consumed"). A `return` of the affine value
   itself consumes it, exactly like passing it to a consuming parameter,
   when the function's own return type is affine.
-- **`borrow *Name`** -- valid **only** as a function parameter type, and
-  only for a pointer to an affine opaque type. Calling through a
+- **`borrow T`** -- valid **only** as a function parameter type, where `T`
+  is an affine/linear opaque pointer, indexed owner, or erased view. Calling through a
   `borrow *Name` parameter does **not** consume the argument, so it may
   be borrowed an unlimited number of times before (or without ever)
-  being consumed. Using `borrow` on any other parameter type is a
-  compile error ("borrow is only valid on a pointer to an affine opaque
-  struct parameter" / "...only valid in function parameter types").
-- **`sink *Name`** -- also valid **only** as a function parameter type,
-  and only for a pointer to an affine opaque type (same restriction as
-  `borrow`, same error wording with "sink" in place of "borrow"). Unlike
-  `borrow`, a `sink *Name` parameter **does** consume the argument at the
-  call site, exactly like a plain `*Name` parameter -- the difference is
-  entirely on the CALLEE's side (see "must be consumed" below): `sink`
-  declares that this function is the designated terminal consumer of the
-  value, so its own body is not required to forward it anywhere further.
-  Use `sink` on a release/close/unlock-style function that performs the
-  real cleanup itself (calls an extern function, writes a hardware
-  register, etc.) and has no further affine call to make with the value
-  it just received -- see `examples/common/sync.tkb`'s `mutex_unlock`,
-  `examples/common/fat12.tkb`'s `fat_close`, and `examples/common_qemu/
-  virtio_mmio.tkb` / `examples/common_stm32/eth.tkb`'s `net_rx_release`.
-- **Must be consumed** (GitHub issue #89): both a local `let`-declared
-  affine handle and a plain (non-`borrow`, non-`sink`) affine parameter
-  must be consumed somewhere before their scope ends, or it is a compile
-  error:
-  - A local never consumed anywhere in its declaring scope (function
-    body, `if`/`else` branch, loop body, `match` arm) is rejected:
-    "affine value 'NAME' is never consumed".
-  - A plain parameter never consumed anywhere in the callee's own body
-    (forwarded to another consuming call, passed to a `sink` parameter,
-    or returned) is rejected: "affine parameter 'NAME' is never consumed
-    by this function". `borrow` and `sink` parameters are exempt --
-    `borrow` never takes ownership, and `sink` is itself the terminal
-    consumer.
-  - Both checks are deliberately **union-based** ("consumed on AT LEAST
-    ONE path"), not a full "consumed on EVERY path" analysis: a value
-    conventionally released behind the same nullness check that gates
-    every other use (`if (v != 0) { ...; release(v); }`, with no `else`)
-    is common in this codebase's drivers and must keep compiling: the
-    checker has no way to know two `if` conditions are the same
-    predicate without real relational reasoning. This means a leak on
-    only ONE branch of a multi-way conditional release is not yet
-    caught -- only a value that is *never* consumed on *any* path is.
-  - An explicit pointer cast out of the affine type (`t as *OtherType`,
-    `t as usize`) remains an unchecked escape hatch from this check too,
-    same as from double-consume tracking below.
-- **Loop restriction**: consuming an affine value that was declared
+  being consumed. The `*Name` spelling shown here is the opaque-handle case.
+- **`sink T`** -- has the same parameter-only/kinded-type restriction.
+  Unlike `borrow`, it consumes at the call site. For affine values it is
+  an explicit API marker for terminal intent; for linear values it also
+  exempts the callee from forwarding the received obligation.
+- **Weakening**: affine locals and plain affine parameters may leave scope
+  unused. An uninitialized affine local is legal. Assigning over a live
+  affine value drops it; assigning to a binding whose prior value was moved
+  reinitializes that binding. None of these permissions allow a moved value
+  to be read or moved again.
+- **Bit opacity**: an ownership-bearing value cannot be cast to an integer,
+  pointer, or any other type, including inside `unsafe`. A cast would
+  detach its permission from resource tracking. Fallible ownership uses a
+  closed variant instead of a null sentinel.
+- **Loop restriction**: consuming an affine/linear value that was declared
   *outside* a loop (`while`/`for`/`for-in`) from *inside* that loop's
   body is conservatively rejected at compile time ("cannot consume an
-  affine value declared outside a loop inside that loop"), since a real
+  affine/linear value declared outside a loop inside that loop"), since a real
   loop could otherwise consume the same handle on more than one
   iteration. A handle both declared and consumed inside the same loop
   iteration is fine. A `let mut` handle reassigned to a fresh value on
@@ -481,13 +521,10 @@ motivating case is a network RX descriptor: `net_rx_acquire() ->
   `while`) is also fine: reassignment clears the variable's consumed
   status, so the loop-restriction check never sees it as "consumed
   inside the loop" in the first place.
-- **`if`/`else` and `match`**: consuming a handle in only one branch is
-  allowed; after the branch, the value is conservatively treated as
-  "possibly consumed" (the moved-sets of every branch/arm are unioned),
-  so a later use after only-one-branch-consumed code is still rejected
-  even on the path that didn't consume it. The same union is what the
-  "must be consumed" check above reads, which is why it accepts
-  consumption on just one branch rather than requiring it on every path.
+- **`if`/`else` and `match`**: moving an affine handle in only one branch
+  is allowed because the other branch may weaken it. After the branch, the
+  value is conservatively treated as "possibly consumed", so a later use is
+  rejected even on the runtime path that did not move it.
   A branch/arm that always `return`s on every one of its own paths is
   excluded from this union: it can never reach the code after the
   enclosing `if`/`match`, so what it consumed does not carry forward.
@@ -498,16 +535,10 @@ motivating case is a network RX descriptor: `net_rx_acquire() ->
   `Match` where every arm returns, and `Block` are recognized as
   terminating; anything else, including loops, conservatively is not,
   falling back to the plain union above).
-- **Deliberately restricted, not a general ownership/borrow-checker
-  system**: this tracking is local to a single function body (no
-  cross-function tracking -- an identity that escapes into a struct/array
-  that outlives the acquiring function needs a refined-index-plus-table
-  idiom instead, see `examples/affine_escape_via_index`), applies only to
-  pointers to a type
-  explicitly declared `affine opaque struct`, and an explicit pointer
-  cast (`t as *OtherType`, `t as usize`) remains an unchecked escape
-  hatch that silently drops out of affine tracking. (The cast escape
-  hatch is affine-only: the `linear` kind below bans it.)
+- **Deliberately restricted, not a general place/borrow checker**: current
+  flow tracking is function-local. Indexed owners and variants therefore
+  remain direct locals, parameters, and results rather than values stored
+  in globals, arrays, or arbitrary nested places.
 - **Struct-field tracking (OWNERSHIP_KERNEL.md Stage 3a, GitHub issue
   #89 Hurdle 3)**: `h.t` -- one level of field projection through a bare
   local/parameter `h` -- is tracked exactly like a bare variable would
@@ -516,13 +547,11 @@ motivating case is a network RX descriptor: `net_rx_acquire() ->
   legal but completely untracked (double-consuming the same field
   compiled with no error). Any deeper or less direct access
   (`f().t`, `arr[i].t`, `h.a.b`) still falls outside tracking -- these
-  have no stable syntactic identity without relational reasoning, the
-  same wall the null-sentinel idiom above depends on staying inside of.
+  have no stable syntactic identity in the current place analysis.
   Two different local variables of the same struct type are always
   distinct paths (keyed by name, not a resolved address). LINEAR fields
   stay banned outright (see "Linear Opaque Structs" below) -- extending
-  linear's all-paths guarantee through fields is a larger step reserved
-  for a future increment.
+  linear's all-paths guarantee through fields is a larger future step.
 
 ## Linear Opaque Structs (Obligations)
 
@@ -530,15 +559,11 @@ motivating case is a network RX descriptor: `net_rx_acquire() ->
 linear opaque struct PendingEvent;
 ```
 
-The stronger sibling of `affine opaque struct` (OWNERSHIP_KERNEL.md
-Stage 1, GitHub issue #117): a pointer to a `linear opaque struct` is an
-OBLIGATION that must be consumed **exactly once on EVERY control-flow
-path**, where affine means "at most once, consumed on at least one
-path". Use linear when dropping the value must be impossible (a protocol
-event that must be answered, a received buffer that must be processed or
-forwarded); use affine when conditional acquisition/release via the
-null-sentinel idiom is part of the pattern (NetRxCpuOwned, FatFile,
-KGuard).
+The stronger sibling of `affine` (OWNERSHIP_KERNEL.md Stage 1, GitHub
+issue #117): a linear value is an obligation that must be consumed
+**exactly once on every control-flow path**. Use linear when dropping the
+value must be impossible. Current real examples include `PendingTcpEvent`,
+`NetRxCpuOwned[desc]`, `FatFile`, `MutexGuard`, and `KGuard`.
 
 Consumption events are the same three as affine (pass as a plain
 non-`borrow` argument, pass to `sink`, return it), and `borrow`/`sink`
@@ -554,32 +579,215 @@ parameter modes work identically. Everything else is stricter:
   break/continue rule is deliberately conservative: it also rejects a
   pending obligation declared outside the loop -- restructure, or avoid
   break, if it fires.)
-- **No cast-away**: casting a linear value to anything (`t as usize`,
-  `t as *Other`) is a compile error with no `unsafe` escape -- it would
-  silently discard the obligation. Consequence: the affine null-sentinel
-  test `(t as usize) != 0` is inexpressible; linear values are never
-  null and consumption is never conditional, which is exactly what keeps
-  the all-paths check a plain, exact dataflow analysis. Minting
+- **No cast-away**: as for affine, casting a linear value to anything
+  (`t as usize`, `t as *Other`) is a compile error with no `unsafe`
+  escape. Minting an opaque handle
   (integer -> `*L`) follows affine's existing rules (literals fine,
-  computed values need `unsafe`) -- a forged obligation must itself be
-  consumed everywhere, so forging is the safe direction.
+  computed values need `unsafe`) and may be restricted to a private
+  declaring file.
 - **No storage**: a linear value cannot be stored into a struct field,
   array/slice element, global, or through a pointer, and `&t` is
   rejected -- all of these would escape the function-local tracking
-  (OWNERSHIP_KERNEL.md Stage 3 lifts this with place tracking).
+  (later place/storage work may lift selected cases).
 - **No silent overwrite**: assigning over a linear variable whose
   obligation is undischarged is a compile error; the self-transform
   idiom `t = transform(t);` stays legal because the right-hand side
   consumes the old obligation first. A linear `let` must be initialized
-  at its declaration.
+  at its declaration. Once discharged, a mutable binding may be
+  reinitialized with a fresh linear value.
 - **Plain linear parameters** promise consumption on every path of the
   callee (the signature is a binary contract: `borrow` = never consumes,
   plain/`sink` = always consumes; "conditionally consumes" is
   deliberately inexpressible).
 
-See examples/linear_obligation (positive) and examples/
-linear_never_consumed, linear_branch_missed, linear_cast_discard,
-linear_overwrite (compile-error companions).
+Matching a linear variant consumes the outer package and creates a fresh
+obligation for the selected payload. That payload must be discharged in its
+arm. See `examples/linear_obligation` (positive) and
+`examples/linear_never_consumed`, `linear_branch_missed`,
+`linear_cast_discard`, `linear_overwrite`, and
+`variant_linear_payload_missed` (compile-error companions).
+
+## Erased Affine/Linear Views (Takibi Core Slice 2)
+
+An erased view is a compile-time permission or obligation with no runtime
+payload:
+
+```
+private linear view PendingEvent;
+
+fn accept_event() -> PendingEvent {
+    return view PendingEvent;
+}
+
+fn inspect_event(p: borrow PendingEvent) {}  // non-consuming
+fn finish_event(p: sink PendingEvent) {}     // terminal consumer
+
+fn dispatch() {
+    let pending: PendingEvent = accept_event();
+    inspect_event(pending);
+    finish_event(pending);
+}
+```
+
+Slice 2 supports non-indexed `affine view Name;` and `linear view Name;`.
+`view Name` explicitly mints a value. If the declaration is `private`, only
+expressions in the declaring file may mint it; other files may name, receive,
+borrow, forward, and sink it. A non-private view can be minted wherever it is
+visible. Minting is a trusted assertion: the compiler checks the subsequent
+affine/linear flow, not whether an external event really occurred.
+
+Views use the same resource-flow rules as other kinded values. A plain
+parameter takes ownership, `borrow` does not consume, `sink` is a terminal
+consumer, and returning a view moves it to the caller. A `linear view` must be
+consumed exactly once on every path, including early exits. A function whose
+result is a view must explicitly return on every path. A producing call cannot
+be used as a discarded expression. An `affine view` may be weakened but may
+not be used after it has been moved.
+
+The representation rule is strict:
+
+- a view has no fields, size, alignment, address, null value, or integer/pointer
+  cast;
+- it cannot appear in a global, struct field, array, slice, tuple, pointer, or
+  function-pointer type, nor be stored indirectly;
+- direct local bindings, direct function parameters, and direct function
+  results are the supported positions;
+- LLVM omits view parameters and their call operands, lowers a view result to
+  `void`, and allocates no local or debug storage for a view.
+
+Thus `fn f(p: sink PendingEvent, n: i32) -> PendingEvent` has runtime ABI
+`void f(i32)`. Source evaluation order and runtime side effects of calls are
+preserved even when their view inputs/results erase.
+
+Static parameters (`View[n]`), explicit `forall`, view change,
+propositions, and solver discharge are not part of Slice 2. Slice 3 adds the
+restricted existential packages described below, not general quantified
+views. See
+`examples/common/http_conn_state.tkb` for the real `PendingTcpEvent` use and
+`examples/view_linear_branch_missed` for its focused compile-error companion.
+
+## Closed Variants and Existential Owners (Takibi Core Slice 3)
+
+`variant` declares a closed tagged sum. Unlike a numeric `enum`, it may
+carry a payload and its value is represented by a runtime tag plus runtime
+payload storage:
+
+```
+variant FatOpenResult {
+    Error(i32);
+    Opened(*FatFile);
+}
+
+fn consume(result: FatOpenResult) -> i32 {
+    match result {
+        FatOpenResult::Error(err) => { return err; }
+        FatOpenResult::Opened(file) => {
+            fat_close(file);
+            return 0;
+        }
+    }
+}
+```
+
+A case has either no payload or exactly one directly supported payload.
+Concrete struct and array payloads are deferred in Slice 3; use a pointer or
+slice when an unrestricted aggregate must cross this boundary. Construct a case with
+`Name::Case` or `Name::Case(expr)`. A payload-bearing arm must bind its
+payload, and a payload-less arm must not. A closed match without `_` must
+cover every case; duplicate cases are rejected. A wildcard is allowed for
+unrestricted or affine variants, but not for a linear variant because it
+could hide a mandatory payload obligation.
+
+A function returning a variant must explicitly return one on every
+control-flow path; there is no implicit zero/default package.
+
+The variant's kind is the strongest kind among its payloads. Matching a
+kinded variant consumes the package. The selected payload then becomes a new
+arm-local value with the same affine/linear rules as if it had been returned
+directly. In particular, every arm that opens a linear payload must consume
+it on every path.
+
+An existential payload hides a static identity while retaining its runtime
+owner:
+
+```
+private linear struct NetRxCpuOwned[desc: usize] {
+    private index: {0..<8 as usize} @ desc;
+    private len: i32;
+}
+
+variant NetRxAcquire {
+    None;
+    Acquired(exists desc: usize. NetRxCpuOwned[desc]);
+}
+```
+
+Constructing `Acquired(owner)` packages the owner's static index without
+adding runtime data. Matching `Acquired(frame)` opens the package with a
+fresh rigid identity known only through `frame`'s inferred
+`NetRxCpuOwned[desc]` type. Accessors can use that identity implicitly:
+
+```
+fn net_rx_len(frame: borrow NetRxCpuOwned[desc]) -> i32 {
+    return frame.len;
+}
+
+fn net_rx_release(frame: sink NetRxCpuOwned[desc]) { ... }
+```
+
+Two independently opened packages receive distinct identities. They cannot
+be passed to a function requiring the same static index merely because their
+runtime values happen to be equal. This is the B1/Core property that an
+index hidden at an API boundary can later constrain refinement and ownership
+operations without threading a loose runtime index through call sites.
+
+### Runtime representation
+
+The current Slice 3 ABI is explicit but provisional:
+
+- the first field is an `i32` case tag, numbered in declaration order;
+- each runtime-bearing case contributes one typed aggregate field, also in
+  declaration order;
+- payload-less cases and erased-view payloads contribute no field;
+- an `exists` binder is erased, but its indexed owner's ordinary runtime
+  fields remain;
+- normal target alignment and padding apply, and `sizeof(VariantName)`
+  observes this layout.
+
+For example, `NetRxAcquire` retains the tag plus
+`NetRxCpuOwned`'s `{index, len}` runtime aggregate; `desc`, the singleton
+equality, range proof, and linear obligation have no separate runtime field.
+A variant whose only payload is an erased view lowers to the tag alone.
+Full source-level tagged-union DWARF metadata and a compact union ABI are
+deferred; code must not treat this first implementation as a stable C ABI.
+
+### Slice 3 limits
+
+This slice intentionally implements only the shape needed by the current
+examples:
+
+- variants are concrete named types, not generic `Option[T]`/`Result[T,E]`;
+- each case has at most one payload; concrete struct/array aggregate payloads
+  are not implemented yet;
+- `exists n: IntegerType. Owner[n]` is legal only as the outermost case
+  payload and must directly package an indexed runtime owner;
+- there is no explicit `forall`; static names in function signatures remain
+  implicit universals;
+- variants are direct locals, parameters, and results only. They cannot be
+  nested in globals, structs, arrays/slices, tuples, pointers, other variants,
+  or indirect stores;
+- variants cannot be addressed or cast, and payload schemas cannot contain
+  `borrow`/`sink`;
+- existential opening occurs only through `match`.
+
+These restrictions keep ownership tracking honest while place tracking,
+general quantifiers, mutable borrowing, and solver/prover integration remain
+future Core slices. Real positive uses are `NetRxAcquire` in the QEMU and
+STM32 Ethernet drivers and `FatOpenResult` in FAT12. Focused failures live in
+`examples/variant_linear_payload_missed`,
+`variant_existential_identity_wrong`, and
+`variant_nonexhaustive_wrong`; each source explains the rejected rule in
+English.
 
 ## File-Granular Privacy (`private`)
 
@@ -592,6 +800,7 @@ expression's own source file, with zero runtime/layout footprint:
 ```
 private let mut conn_state: ConnState = ConnState::Listen;   // global
 private linear opaque struct PendingTcpEvent;                // opaque type
+private linear view EventPending;                            // erased view
 struct Chan { private mutex: i32; ... }                      // struct field
 ```
 
@@ -603,6 +812,9 @@ struct Chan { private mutex: i32; ... }                      // struct field
   legal everywhere (annotations, parameters, passing values through), so
   other files can hold and relay handles; they just cannot forge them.
   The declaring file's functions are the only source.
+- **View**: `view Name` minting must occur in the declaration's file. Naming
+  and moving the erased permission across files stays legal, like opaque
+  handles; only the explicit production site is private.
 - **Struct field**: reading (`s.f`, `&s.f`), writing, and `offsetof` on a
   `private` field must come from the struct's declaring file; so must
   constructing the struct via a struct literal when it has ANY private
@@ -612,17 +824,16 @@ struct Chan { private mutex: i32; ... }                      // struct field
   (`chan_init` establishing Chan's rendezvous invariant) from convention
   into guarantee.
 
-Two related hardening rules land with this feature (OWNERSHIP_KERNEL.md
-Stage 2 Part C):
+Two related hardening rules apply (OWNERSHIP_KERNEL.md Stage 2 Part C,
+as superseded by Slice 3):
 
 - **Pointer arithmetic/indexing on a pointer to any opaque struct is a
   type error** (`t + 1`, `t[i]`): an opaque type has no size, and for
   affine/linear handles the arithmetic result would be a second tracked
   value conjured without consuming the first.
-- **Casting an affine handle to another pointer type requires
-  `unsafe { ... }`** (kind laundering). The `t as usize` null-check idiom
-  stays ungated -- it is the sanctioned affine Option encoding until
-  variant enums exist (GitHub issue #20).
+- **Casting any affine/linear value away is rejected**, including inside
+  `unsafe`. Closed variants are the supported Option/Result-shaped
+  encoding; null-sentinel ownership is no longer sanctioned.
 
 Known limitation (shared with private globals): checks are by name/type
 identity, not by resolved binding; and the declaring file itself remains
@@ -1019,13 +1230,12 @@ Currently gates exactly three things:
   the two confirmed real-world cases and why a more general relational
   domain wasn't built for them).
 - Casting a non-literal integer to a pointer whose pointee is an
-  `affine opaque struct` type (GitHub issue #15 follow-up) -- see
-  "Affine Opaque Structs" above and HISTORY.md's issue #15 entry.
-  Deliberately scoped to affine targets only, not pointer casts in
+  `affine opaque struct` or `linear opaque struct` type (GitHub issue
+  #15 follow-up) -- see "Affine Values" above and HISTORY.md's issue #15
+  entry. Deliberately scoped to kinded targets, not pointer casts in
   general: a cast built entirely from compile-time integer literals or a
   real object's address (`&x`) needs no `unsafe`, which is what keeps
-  every existing `0 as usize as *Name` / `&storage as *Name` sentinel
-  pattern in this codebase legal, but any OTHER pointer cast (including
+  trusted opaque-token constructors legal, but any OTHER pointer cast (including
   a non-literal integer cast to an ordinary, non-affine pointer, e.g. a
   runtime-discovered MMIO base address offset and cast to `*io T`) stays
   legal without `unsafe` too -- narrowed to affine targets specifically

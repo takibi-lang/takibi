@@ -1,9 +1,8 @@
 // This file is expected to produce a compile error.
-// Casting an affine handle to another POINTER type launders it out of
-// kind tracking into a differently-typed alias, so it must be visibly
-// marked with `unsafe { ... }` (OWNERSHIP_KERNEL.md Stage 2 Part C,
-// GitHub issue #15 direction). The `t as usize` null-check idiom stays
-// ungated -- it reads bits and aliases nothing usable.
+// Slice 3 makes every ownership-bearing value bit-opaque. Casting an affine
+// handle to another pointer type would move the same permission outside its
+// nominal tracking, so it is rejected even inside `unsafe`. Fallible ownership
+// must be represented by a variant instead of a null or retyped handle.
 affine opaque struct LaunTok;
 opaque struct OtherBlob;
 

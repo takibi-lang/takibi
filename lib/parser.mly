@@ -65,9 +65,9 @@ let check_refined_base_range pos lo hi base =
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN INLINE RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
+%token FN INLINE RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT EXISTS BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
 %token DARROW COLONCOLON UNDERSCORE
-%token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT
+%token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
 %token ASSIGN DOT
 %token IF ELSE WHILE FOR IN BREAK CONTINUE
 %token EOF
@@ -92,6 +92,8 @@ let check_refined_base_range pos lo hi base =
 %left TIMES DIV PERCENT  (* multiplicative *)
 %nonassoc UNARY   (* unary * (deref), & (addrof), unary - *)
 %left DOT         (* highest: field access -- postfix, binds tighter than prefix ops *)
+%nonassoc TYPE_BASE
+%nonassoc AT
 
 %token VOID_TYPE BOOL_TYPE
 %token I8_TYPE I16_TYPE I32_TYPE I64_TYPE
@@ -139,6 +141,19 @@ item:
           if is_priv then Some fname else None) $3 in
       Type_layout.finish_struct name fields is_packed align_opt;
       StructDef (name, fields, is_packed, align_opt, private_fields, $symbolstartpos) }
+  | owned_struct_intro LBRACE struct_fields RBRACE
+    { let (name, kind, static_params, is_private) = $1 in
+      let fields = List.map (fun (fname, ty, _) -> (fname, ty)) $3 in
+      let private_fields =
+        List.filter_map (fun (fname, _, is_priv) ->
+          if is_priv then Some fname else None) $3 in
+      Type_layout.finish_struct name fields false None;
+      OwnedStructDef
+        (name, kind, static_params, fields, false, None, private_fields,
+         is_private, $symbolstartpos) }
+  | p = private_flag k = owned_kind VIEW name = IDENT SEMI
+    { Type_layout.register_view name;
+      ViewDef (name, k, p, $symbolstartpos) }
   | p = private_flag OPAQUE STRUCT IDENT SEMI
     { OpaqueStructDef ($4, KindPlain, p, $symbolstartpos) }
   | p = private_flag AFFINE OPAQUE STRUCT IDENT SEMI
@@ -153,6 +168,9 @@ item:
     { let (vs, ne) = $4 in
       Type_layout.register_enum $2 TypeU32;
       EnumDef ($2, None, vs, ne) }
+  | VARIANT name = IDENT LBRACE cases = variant_cases RBRACE
+    { Type_layout.register_variant name cases;
+      VariantDef (name, cases, $symbolstartpos) }
   | USE STRING SEMI
     { UseDef $2 }
 
@@ -172,6 +190,21 @@ struct_intro:
       Type_layout.begin_struct $3;
       ($3, true, Some align) }
 
+owned_struct_intro:
+  | p = private_flag k = owned_kind STRUCT name = IDENT ps = static_params
+    { Type_layout.begin_struct name;
+      (name, k, ps, p) }
+
+owned_kind:
+  | AFFINE { KindAffine }
+  | LINEAR { KindLinear }
+
+static_params:
+  | LBRACKET ps = separated_nonempty_list(COMMA, static_param) RBRACKET { ps }
+
+static_param:
+  | name = IDENT COLON sort = int_base_type_expr { (name, sort) }
+
 struct_fields:
   | /* empty */ { [] }
   | IDENT COLON type_expr SEMI struct_fields { ($1, $3, false) :: $5 }
@@ -184,6 +217,13 @@ enum_variants:
     { let (vs, ne) = $5 in
       (($1, Some (narrow_int64 $symbolstartpos "enum discriminant" $3)) :: vs, ne) }
   | IDENT SEMI            enum_variants { let (vs, ne) = $3 in (($1, None)    :: vs, ne) }
+
+variant_cases:
+  | /* empty */ { [] }
+  | name = IDENT SEMI rest = variant_cases
+    { (name, None) :: rest }
+  | name = IDENT LPAREN payload = type_expr RPAREN SEMI rest = variant_cases
+    { (name, Some payload) :: rest }
 
 func_def:
   | FN IDENT LPAREN params RPAREN ret_type_opt LBRACE stmts RBRACE
@@ -338,7 +378,9 @@ match_arms:
 
 match_arm:
   | IDENT COLONCOLON IDENT DARROW LBRACE stmts RBRACE
-    { ArmVariant ($1, $3, $6) }
+    { ArmVariant ($1, $3, None, $6) }
+  | IDENT COLONCOLON IDENT LPAREN binding = IDENT RPAREN DARROW LBRACE stmts RBRACE
+    { ArmVariant ($1, $3, Some binding, $9) }
   | UNDERSCORE DARROW LBRACE stmts RBRACE
     { ArmWild $4 }
 
@@ -371,10 +413,14 @@ expr:
   | TRUE   { { desc = BoolLit true;   loc = $symbolstartpos } }
   | FALSE  { { desc = BoolLit false;  loc = $symbolstartpos } }
   | STRING { { desc = StringLit $1;   loc = $symbolstartpos } }
+  | VIEW name = IDENT
+    { { desc = ViewLit name; loc = $symbolstartpos } }
   | IDENT { { desc = Var $1; loc = $symbolstartpos } }
   | IDENT LPAREN args RPAREN { { desc = Call ($1, $3); loc = $symbolstartpos } }
   | IDENT COLONCOLON IDENT
     { { desc = EnumVariant ($1, $3); loc = $symbolstartpos } }
+  | IDENT COLONCOLON IDENT LPAREN payload = expr RPAREN
+    { { desc = VariantCtor ($1, $3, payload); loc = $symbolstartpos } }
   | SIZEOF LPAREN t = type_expr RPAREN
     { { desc = SizeOf t; loc = $symbolstartpos } }
   | OFFSETOF LPAREN t = type_expr COMMA field = IDENT RPAREN
@@ -453,7 +499,13 @@ base_type_expr:
        (no such grouping form exists in base_type_expr today) since a
        COMMA is required. *)
     { TypeTuple (t1 :: t2 :: ts) }
+  | name = IDENT LBRACKET args = separated_nonempty_list(COMMA, static_arg) RBRACKET
+    { TypeIndexed (name, args) }
   | IDENT { TypeNamed $1 }
+
+static_arg:
+  | name = IDENT { StaticName name }
+  | n = INT { StaticInt (narrow_int64 $symbolstartpos "static integer" n) }
 
 (* Array size: a compile-time integer constant expression -- a literal, the
    name of an immutable global constant declared earlier (`let NAME: T =
@@ -493,9 +545,12 @@ array_size:
 
 (* type_expr: base_type_expr + TypeRefined. Used in unambiguous positions such as after : or -> *)
 type_expr:
-  | base_type_expr { $1 }
+  | base_type_expr %prec TYPE_BASE { $1 }
+  | t = base_type_expr AT n = static_arg { TypeSingleton (t, n) }
   | BORROW t = type_expr { TypeBorrow t }
   | SINK t = type_expr { TypeSink t }
+  | EXISTS name = IDENT COLON sort = int_base_type_expr DOT body = type_expr
+    { TypeExists (name, sort, body) }
   | LBRACE lo = INT DOTDOTLT hi = INT RBRACE
     { (* Reserved for future contextual base inference. Until the AST and
          signature inference can represent an unresolved refinement base,
@@ -507,7 +562,7 @@ type_expr:
           "refined type {%Ld..<%Ld} requires an explicit base; write \
            {%Ld..<%Ld as i32} (or another integer base)"
           lo hi lo hi)) }
-  | LBRACE lo = INT DOTDOTLT hi = INT AS base = int_base_type_expr RBRACE
+  | LBRACE lo = INT DOTDOTLT hi = INT AS base = int_base_type_expr RBRACE %prec TYPE_BASE
     { (* Explicit-base {lo..<hi as base} surface syntax: lets a programmer
          write a refined type whose LLVM representation genuinely is
          `base` (i8/i16/i32/i64/u8/u16/u32/u64/isize/usize), rather than only
@@ -527,6 +582,13 @@ type_expr:
       TypeRefined (narrow_int64 $symbolstartpos "refined type bound" lo,
                    narrow_int64 $symbolstartpos "refined type bound" hi,
                    base) }
+  | LBRACE lo = INT DOTDOTLT hi = INT AS base = int_base_type_expr RBRACE
+      AT n = static_arg
+    { check_refined_base_range $symbolstartpos lo hi base;
+      TypeSingleton
+        (TypeRefined (narrow_int64 $symbolstartpos "refined type bound" lo,
+                      narrow_int64 $symbolstartpos "refined type bound" hi,
+                      base), n) }
 
 (* Restricted to the primitive integer types {lo..<hi as base} is allowed
    to name -- matches the "by convention" restriction on TRefinedInt's own

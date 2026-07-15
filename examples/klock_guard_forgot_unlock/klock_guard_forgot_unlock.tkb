@@ -1,8 +1,8 @@
 // This file is expected to produce a compile error.
 // Companion negative fixture for examples/klock_guard: a KGuard acquired
 // via klock() but never passed to kunlock() before its declaring scope
-// ends is rejected at compile time (GitHub issue #89's "must eventually
-// be consumed" check -- see HISTORY.md). For a kernel lock this is the
+// ends is rejected by ordinary linear consumption checking. For a kernel
+// lock this is the
 // single most important bug class to catch: forgetting to release a
 // giant lock means every other task -- and every interrupt, since v1's
 // klock/kunlock are disable_irq/enable_irq -- is blocked forever, with
@@ -14,7 +14,7 @@ struct KLock {
     word: i32;
 }
 
-affine opaque struct KGuard;
+linear opaque struct KGuard;
 
 fn klock(lk: *KLock) -> *KGuard {
     disable_irq();

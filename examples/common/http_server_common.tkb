@@ -244,316 +244,316 @@ fn build_tcp_payload(eth: [u8; 1514..], ihl: {20..<21 as u16},
 
 fn http_server_poll_once() {
     net_rx_wait();
-    let acquired: *NetRxCpuOwned = net_rx_acquire();
-    if ((acquired as usize) != 0) {
-        let len: i32 = net_rx_len(acquired);
-        let mut should_tx: i32 = 0;
-        let mut tx_len: i32 = 0;
-        let frame = net_rx_frame(acquired);
-        let ethertype: i32 = read_u16be(frame[12..<14]);
+    match net_rx_acquire() {
+        NetRxAcquire::None => {}
+        NetRxAcquire::Acquired(acquired) => {
+            let len: i32 = net_rx_len(acquired);
+            let mut should_tx: i32 = 0;
+            let mut tx_len: i32 = 0;
+            let frame = net_rx_frame(acquired);
+            let ethertype: i32 = read_u16be(frame[12..<14]);
 
-        if (len >= 42 && ethertype == 0x0806) {
-            let arp = frame[14..<42];
-            if (read_u16be(arp[ARP_HTYPE..<ARP_PTYPE]) == 1 &&
-                read_u16be(arp[ARP_PTYPE..<ARP_HLEN]) == 0x0800 &&
-                arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
-                read_u16be(arp[ARP_OPER..<ARP_SHA]) == 1) {
-                if (slice_eq(arp[ARP_TPA..<28], our_ip as []u8)) {
-                    build_arp_reply(frame);
-                    should_tx = 1;
-                    tx_len = 14 + 28;
+            if (len >= 42 && ethertype == 0x0806) {
+                let arp = frame[14..<42];
+                if (read_u16be(arp[ARP_HTYPE..<ARP_PTYPE]) == 1 &&
+                    read_u16be(arp[ARP_PTYPE..<ARP_HLEN]) == 0x0800 &&
+                    arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
+                    read_u16be(arp[ARP_OPER..<ARP_SHA]) == 1) {
+                    if (slice_eq(arp[ARP_TPA..<28], our_ip as []u8)) {
+                        build_arp_reply(frame);
+                        should_tx = 1;
+                        tx_len = 14 + 28;
+                    }
                 }
-            }
-        } else if (len >= 54 && len <= 1514 && ethertype == 0x0800) {
-            let len_n: i32 = len;
-            let ip = frame[14..<34];
-            let version: u8 = ip[0] >> 4;
-            let ihl:     u16 = (ip[0] & 0x0f) * 4;
+            } else if (len >= 54 && len <= 1514 && ethertype == 0x0800) {
+                let len_n: i32 = len;
+                let ip = frame[14..<34];
+                let version: u8 = ip[0] >> 4;
+                let ihl:     u16 = (ip[0] & 0x0f) * 4;
 
-            if (version == 4 && ihl == 20) {
-                let len16: u16 = len_n as u16;
-                let total_len:       u16 = read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
-                let ip_len_in_frame: u16 = len16 - 14;
+                if (version == 4 && ihl == 20) {
+                    let len16: u16 = len_n as u16;
+                    let total_len:       u16 = read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
+                    let ip_len_in_frame: u16 = len16 - 14;
 
-                if (total_len <= ip_len_in_frame && total_len >= ihl &&
-                    ip[IP_PROTOCOL] == PROTO_TCP &&
-                    inet_checksum(ip[0..<ihl as usize]) == 0) {
-                    if (slice_eq(ip[IP_DST..<20], our_ip as []u8)) {
-                        let tcp:     [u8; 20..] = frame[34..<54];
-                        let tcp_len: u16 = total_len - ihl;
-                        let doff: u8 = tcp[TCP_DATA_OFFSET] >> 4;
+                    if (total_len <= ip_len_in_frame && total_len >= ihl &&
+                        ip[IP_PROTOCOL] == PROTO_TCP &&
+                        inet_checksum(ip[0..<ihl as usize]) == 0) {
+                        if (slice_eq(ip[IP_DST..<20], our_ip as []u8)) {
+                            let tcp:     [u8; 20..] = frame[34..<54];
+                            let tcp_len: u16 = total_len - ihl;
+                            let doff: u8 = tcp[TCP_DATA_OFFSET] >> 4;
 
-                        if (tcp_len >= 20 && doff >= 5 && doff <= 15) {
-                        let tcp_hdr_len: u16 = (doff * 4) as u16;
+                            if (tcp_len >= 20 && doff >= 5 && doff <= 15) {
+                            let tcp_hdr_len: u16 = (doff * 4) as u16;
 
-                        if (tcp_len >= tcp_hdr_len) {
-                            let mut pseudo: [u8; 12];
-                            slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
-                            slice_copy(pseudo[4..<8], ip[IP_DST..<20]);
-                            pseudo[8] = 0 as u8;
-                            pseudo[9] = PROTO_TCP;
-                            write_u16be(pseudo[10..<12], tcp_len);
-                            let sum: i32 = checksum_add(pseudo as []u8, 0);
-                            let tcp_len_idx: usize =
-                                tcp_len as usize;
-                            let tcp_seg = frame[34..<34 + tcp_len_idx];
+                            if (tcp_len >= tcp_hdr_len) {
+                                let mut pseudo: [u8; 12];
+                                slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
+                                slice_copy(pseudo[4..<8], ip[IP_DST..<20]);
+                                pseudo[8] = 0 as u8;
+                                pseudo[9] = PROTO_TCP;
+                                write_u16be(pseudo[10..<12], tcp_len);
+                                let sum: i32 = checksum_add(pseudo as []u8, 0);
+                                let tcp_len_idx: usize =
+                                    tcp_len as usize;
+                                let tcp_seg = frame[34..<34 + tcp_len_idx];
 
-                            if (checksum_fold(checksum_add(tcp_seg, sum)) == 0) {
-                                let dst_port: u16 = read_u16be(tcp[TCP_DST_PORT..<TCP_SEQ]) as u16;
-                                let src_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
-                                let flags:    u8  = tcp[TCP_FLAGS];
-                                let seq:      u32 = read_u32be(tcp[TCP_SEQ..<TCP_ACK]) as u32;
-                                let ack:      u32 = read_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET]) as u32;
+                                if (checksum_fold(checksum_add(tcp_seg, sum)) == 0) {
+                                    let dst_port: u16 = read_u16be(tcp[TCP_DST_PORT..<TCP_SEQ]) as u16;
+                                    let src_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
+                                    let flags:    u8  = tcp[TCP_FLAGS];
+                                    let seq:      u32 = read_u32be(tcp[TCP_SEQ..<TCP_ACK]) as u32;
+                                    let ack:      u32 = read_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET]) as u32;
 
-                                if (dst_port == HTTP_PORT) {
-                                    let ev: TcpEvent = classify_tcp_event(flags);
-                                    // Event-response obligation (issue #117, OWNERSHIP_KERNEL.md
-                                    // 4.10): minted once per accepted segment; the linear kind's
-                                    // all-paths rule makes every arm below -- and every previously
-                                    // IMPLICIT ignore path (stale seq, unknown peer, unsupported
-                                    // verb) -- consume it via exactly one responder function in
-                                    // http_conn_state.tkb, or this file stops compiling.
-                                    let pending: *PendingTcpEvent = tcp_event_accepted();
+                                    if (dst_port == HTTP_PORT) {
+                                        let ev: TcpEvent = classify_tcp_event(flags);
+                                        // Event-response obligation (issue #117, OWNERSHIP_KERNEL.md
+                                        // 4.10): minted once per accepted segment; the linear kind's
+                                        // all-paths rule makes every arm below -- and every previously
+                                        // IMPLICIT ignore path (stale seq, unknown peer, unsupported
+                                        // verb) -- consume it via exactly one responder function in
+                                        // http_conn_state.tkb, or this file stops compiling.
+                                        let pending: PendingTcpEvent = tcp_event_accepted();
 
-                                    match tcp_conn_state() {
-                                        ConnState::Listen => {
-                                            match ev {
-                                                TcpEvent::Syn => {
-                                                    slice_copy(conn_remote_ip as []u8, ip[IP_SRC..<IP_DST]);
-                                                    conn_remote_port = src_port;
-                                                    conn_rcv_nxt = seq + 1;
-                                                    conn_snd_nxt = TCP_INITIAL_SEQ + 1;
-
-                                                    tcp_accept_via_syn_ack(pending, frame, ihl);
-                                                    should_tx = 1;
-                                                    tx_len = 14 + ihl + 20;
-                                                }
-                                                TcpEvent::Ack => {
-                                                    // Unsolicited ACK on a listening socket: answer
-                                                    // with a stateless RST so the peer stops retrying.
-                                                    tcp_reject_with_rst(pending, frame, ihl, ack);
-                                                    should_tx = 1;
-                                                    tx_len = 14 + ihl + 20;
-                                                }
-                                                TcpEvent::Rst => {
-                                                    // Unsolicited RST: nothing to reset yet.
-                                                    tcp_event_ignored(pending);
-                                                }
-                                                TcpEvent::FinAck => {
-                                                    // No connection to close.
-                                                    tcp_event_ignored(pending);
-                                                }
-                                                TcpEvent::Other => {
-                                                    tcp_event_ignored(pending);
-                                                }
-                                            }
-                                        }
-                                        ConnState::SynRcvd => {
-                                            if (tcp_remote_matches(ip, src_port)) {
+                                        match tcp_conn_state() {
+                                            ConnState::Listen => {
                                                 match ev {
-                                                    TcpEvent::Rst => {
-                                                        tcp_reset_to_listen(pending);
+                                                    TcpEvent::Syn => {
+                                                        slice_copy(conn_remote_ip as []u8, ip[IP_SRC..<IP_DST]);
+                                                        conn_remote_port = src_port;
+                                                        conn_rcv_nxt = seq + 1;
+                                                        conn_snd_nxt = TCP_INITIAL_SEQ + 1;
+
+                                                        tcp_accept_via_syn_ack(pending, frame, ihl);
+                                                        should_tx = 1;
+                                                        tx_len = 14 + ihl + 20;
                                                     }
                                                     TcpEvent::Ack => {
-                                                        if ((flags & TCP_FLAG_SYN) == 0 &&
-                                                            ack == conn_snd_nxt && seq == conn_rcv_nxt) {
-                                                            tcp_handshake_complete(pending);
-                                                        } else {
-                                                            // Invalid handshake ACK.
-                                                            tcp_event_ignored(pending);
-                                                        }
+                                                        // Unsolicited ACK on a listening socket: answer
+                                                        // with a stateless RST so the peer stops retrying.
+                                                        tcp_reject_with_rst(pending, frame, ihl, ack);
+                                                        should_tx = 1;
+                                                        tx_len = 14 + ihl + 20;
                                                     }
-                                                    TcpEvent::Syn => {
-                                                        // Retransmitted SYN or simultaneous open:
-                                                        // not supported.
+                                                    TcpEvent::Rst => {
+                                                        // Unsolicited RST: nothing to reset yet.
                                                         tcp_event_ignored(pending);
                                                     }
                                                     TcpEvent::FinAck => {
-                                                        // Unexpected before Established.
+                                                        // No connection to close.
                                                         tcp_event_ignored(pending);
                                                     }
                                                     TcpEvent::Other => {
                                                         tcp_event_ignored(pending);
                                                     }
                                                 }
-                                            } else {
-                                                // Segment from an unknown peer while a connection is
-                                                // active -- previously an INVISIBLE fallthrough,
-                                                // surfaced by the obligation (issue #117).
-                                                tcp_event_ignored(pending);
                                             }
-                                        }
-                                        ConnState::Established => {
-                                            if (tcp_remote_matches(ip, src_port)) {
-                                                match ev {
-                                                    TcpEvent::Rst => {
-                                                        tcp_reset_to_listen(pending);
-                                                    }
-                                                    TcpEvent::FinAck => {
-                                                        if (seq == conn_rcv_nxt) {
-                                                            conn_rcv_nxt = conn_rcv_nxt + 1;
-                                                            tcp_begin_close_via_fin_ack(pending, frame, ihl);
-                                                            should_tx = 1;
-                                                            tx_len = 14 + ihl + 20;
-                                                            conn_snd_nxt = conn_snd_nxt + 1;
-                                                        } else {
-                                                            // Stale FIN, wrong seq.
-                                                            tcp_event_ignored(pending);
+                                            ConnState::SynRcvd => {
+                                                if (tcp_remote_matches(ip, src_port)) {
+                                                    match ev {
+                                                        TcpEvent::Rst => {
+                                                            tcp_reset_to_listen(pending);
                                                         }
-                                                    }
-                                                    TcpEvent::Ack => {
-                                                        let data_len: u16 = max(tcp_len - tcp_hdr_len, 0);
-                                                        let data_off: u16 = 34 + tcp_hdr_len;
-                                                        let data_off_idx: usize =
-                                                            data_off as usize;
-                                                        if (data_len >= 3 && seq == conn_rcv_nxt) {
-                                                            let data3 = frame[data_off_idx..<data_off_idx + 3];
-                                                            if (data3[0] == 'G' as u8 &&
-                                                                data3[1] == 'E' as u8 &&
-                                                                data3[2] == 'T' as u8) {
-                                                                conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
-                                                                let req: *u8 =
-                                                                    (frame as *u8) + (data_off_idx as isize);
-                                                                // tcp_respond consumes the obligation even
-                                                                // when the build fails (the disposition was
-                                                                // decided: rely on the peer's retransmit).
-                                                                // Handing the obligation BACK on failure
-                                                                // would need a (status, token) return --
-                                                                // tuples, GitHub issue #120.
-                                                                let resp_len: i32 =
-                                                                    tcp_respond(pending, frame, ihl, req, data_len);
-                                                                if (resp_len >= 0) {
-                                                                    should_tx = 1;
-                                                                    tx_len = 14 + (ihl as i32) + 20 + resp_len;
-                                                                    conn_snd_nxt = conn_snd_nxt + (resp_len as u32);
-                                                                    if (tcp_conn_state() == ConnState::LastAck) {
-                                                                        // Response completed with FIN:
-                                                                        // our FIN consumes one seq number.
-                                                                        conn_snd_nxt = conn_snd_nxt + 1;
-                                                                    }
-                                                                }
+                                                        TcpEvent::Ack => {
+                                                            if ((flags & TCP_FLAG_SYN) == 0 &&
+                                                                ack == conn_snd_nxt && seq == conn_rcv_nxt) {
+                                                                tcp_handshake_complete(pending);
                                                             } else {
-                                                                // Request is not GET (no other verb is
-                                                                // supported).
+                                                                // Invalid handshake ACK.
                                                                 tcp_event_ignored(pending);
                                                             }
-                                                        } else {
-                                                            // Plain ACK with no/insufficient data, or
-                                                            // stale seq.
+                                                        }
+                                                        TcpEvent::Syn => {
+                                                            // Retransmitted SYN or simultaneous open:
+                                                            // not supported.
+                                                            tcp_event_ignored(pending);
+                                                        }
+                                                        TcpEvent::FinAck => {
+                                                            // Unexpected before Established.
+                                                            tcp_event_ignored(pending);
+                                                        }
+                                                        TcpEvent::Other => {
                                                             tcp_event_ignored(pending);
                                                         }
                                                     }
-                                                    TcpEvent::Syn => {
-                                                        // Retransmitted SYN after handshake.
-                                                        tcp_event_ignored(pending);
-                                                    }
-                                                    TcpEvent::Other => {
-                                                        tcp_event_ignored(pending);
-                                                    }
+                                                } else {
+                                                    // Segment from an unknown peer while a connection is
+                                                    // active -- previously an INVISIBLE fallthrough,
+                                                    // surfaced by the obligation (issue #117).
+                                                    tcp_event_ignored(pending);
                                                 }
-                                            } else {
-                                                tcp_event_ignored(pending);
                                             }
-                                        }
-                                        ConnState::Sending => {
-                                            if (tcp_remote_matches(ip, src_port)) {
-                                                match ev {
-                                                    TcpEvent::Rst => {
-                                                        tcp_reset_to_listen(pending);
-                                                    }
-                                                    TcpEvent::Ack => {
-                                                        if (seq == conn_rcv_nxt && ack == conn_snd_nxt) {
-                                                            let cont_len: i32 = tcp_continue(pending, frame, ihl);
-                                                            if (cont_len >= 0) {
-                                                                should_tx = 1;
-                                                                tx_len = 14 + (ihl as i32) + 20 + cont_len;
-                                                                conn_snd_nxt = conn_snd_nxt + (cont_len as u32);
-                                                                if (tcp_conn_state() == ConnState::LastAck) {
-                                                                    // Final segment included FIN: it
-                                                                    // consumes one seq number.
-                                                                    conn_snd_nxt = conn_snd_nxt + 1;
-                                                                }
-                                                                // else: more segments queued. Stay
-                                                                // Sending.
-                                                            }
-                                                        } else {
-                                                            // Stale/duplicate ACK.
-                                                            tcp_event_ignored(pending);
-                                                        }
-                                                    }
-                                                    TcpEvent::Syn => {
-                                                        tcp_event_ignored(pending);
-                                                    }
-                                                    TcpEvent::FinAck => {
-                                                        // Client closing early mid-transfer: not
-                                                        // handled, same as before this restructuring.
-                                                        tcp_event_ignored(pending);
-                                                    }
-                                                    TcpEvent::Other => {
-                                                        tcp_event_ignored(pending);
-                                                    }
-                                                }
-                                            } else {
-                                                tcp_event_ignored(pending);
-                                            }
-                                        }
-                                        ConnState::LastAck => {
-                                            if (tcp_remote_matches(ip, src_port)) {
-                                                match ev {
-                                                    TcpEvent::Rst => {
-                                                        tcp_reset_to_listen(pending);
-                                                    }
-                                                    TcpEvent::FinAck => {
-                                                        if (seq == conn_rcv_nxt && ack == conn_snd_nxt) {
-                                                            conn_rcv_nxt = conn_rcv_nxt + 1;
-                                                            // The Listen transition happens inside
-                                                            // tcp_close_via_final_ack, right after it
-                                                            // builds the closing ACK -- the co-located
-                                                            // form of issue #116's fix.
-                                                            let ack_len: i32 =
-                                                                tcp_close_via_final_ack(pending, frame, ihl);
-                                                            if (ack_len >= 0) {
-                                                                should_tx = 1;
-                                                                tx_len = 14 + (ihl as i32) + 20 + ack_len;
-                                                            }
-                                                        } else {
-                                                            // Stale FIN+ACK, wrong seq/ack.
-                                                            tcp_event_ignored(pending);
-                                                        }
-                                                    }
-                                                    TcpEvent::Ack => {
-                                                        if (ack == conn_snd_nxt) {
+                                            ConnState::Established => {
+                                                if (tcp_remote_matches(ip, src_port)) {
+                                                    match ev {
+                                                        TcpEvent::Rst => {
                                                             tcp_reset_to_listen(pending);
-                                                        } else {
-                                                            // Stale ACK.
+                                                        }
+                                                        TcpEvent::FinAck => {
+                                                            if (seq == conn_rcv_nxt) {
+                                                                conn_rcv_nxt = conn_rcv_nxt + 1;
+                                                                tcp_begin_close_via_fin_ack(pending, frame, ihl);
+                                                                should_tx = 1;
+                                                                tx_len = 14 + ihl + 20;
+                                                                conn_snd_nxt = conn_snd_nxt + 1;
+                                                            } else {
+                                                                // Stale FIN, wrong seq.
+                                                                tcp_event_ignored(pending);
+                                                            }
+                                                        }
+                                                        TcpEvent::Ack => {
+                                                            let data_len: u16 = max(tcp_len - tcp_hdr_len, 0);
+                                                            let data_off: u16 = 34 + tcp_hdr_len;
+                                                            let data_off_idx: usize =
+                                                                data_off as usize;
+                                                            if (data_len >= 3 && seq == conn_rcv_nxt) {
+                                                                let data3 = frame[data_off_idx..<data_off_idx + 3];
+                                                                if (data3[0] == 'G' as u8 &&
+                                                                    data3[1] == 'E' as u8 &&
+                                                                    data3[2] == 'T' as u8) {
+                                                                    conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
+                                                                    let req: *u8 =
+                                                                        (frame as *u8) + (data_off_idx as isize);
+                                                                    // tcp_respond consumes the obligation even
+                                                                    // when the build fails (the disposition was
+                                                                    // decided: rely on the peer's retransmit).
+                                                                    // Handing the obligation back on failure
+                                                                    // would use a variant carrying `pending`;
+                                                                    // this API deliberately consumes it instead.
+                                                                    let resp_len: i32 =
+                                                                        tcp_respond(pending, frame, ihl, req, data_len);
+                                                                    if (resp_len >= 0) {
+                                                                        should_tx = 1;
+                                                                        tx_len = 14 + (ihl as i32) + 20 + resp_len;
+                                                                        conn_snd_nxt = conn_snd_nxt + (resp_len as u32);
+                                                                        if (tcp_conn_state() == ConnState::LastAck) {
+                                                                            // Response completed with FIN:
+                                                                            // our FIN consumes one seq number.
+                                                                            conn_snd_nxt = conn_snd_nxt + 1;
+                                                                        }
+                                                                    }
+                                                                } else {
+                                                                    // Request is not GET (no other verb is
+                                                                    // supported).
+                                                                    tcp_event_ignored(pending);
+                                                                }
+                                                            } else {
+                                                                // Plain ACK with no/insufficient data, or
+                                                                // stale seq.
+                                                                tcp_event_ignored(pending);
+                                                            }
+                                                        }
+                                                        TcpEvent::Syn => {
+                                                            // Retransmitted SYN after handshake.
+                                                            tcp_event_ignored(pending);
+                                                        }
+                                                        TcpEvent::Other => {
                                                             tcp_event_ignored(pending);
                                                         }
                                                     }
-                                                    TcpEvent::Syn => {
-                                                        tcp_event_ignored(pending);
-                                                    }
-                                                    TcpEvent::Other => {
-                                                        tcp_event_ignored(pending);
-                                                    }
+                                                } else {
+                                                    tcp_event_ignored(pending);
                                                 }
-                                            } else {
-                                                tcp_event_ignored(pending);
+                                            }
+                                            ConnState::Sending => {
+                                                if (tcp_remote_matches(ip, src_port)) {
+                                                    match ev {
+                                                        TcpEvent::Rst => {
+                                                            tcp_reset_to_listen(pending);
+                                                        }
+                                                        TcpEvent::Ack => {
+                                                            if (seq == conn_rcv_nxt && ack == conn_snd_nxt) {
+                                                                let cont_len: i32 = tcp_continue(pending, frame, ihl);
+                                                                if (cont_len >= 0) {
+                                                                    should_tx = 1;
+                                                                    tx_len = 14 + (ihl as i32) + 20 + cont_len;
+                                                                    conn_snd_nxt = conn_snd_nxt + (cont_len as u32);
+                                                                    if (tcp_conn_state() == ConnState::LastAck) {
+                                                                        // Final segment included FIN: it
+                                                                        // consumes one seq number.
+                                                                        conn_snd_nxt = conn_snd_nxt + 1;
+                                                                    }
+                                                                    // else: more segments queued. Stay
+                                                                    // Sending.
+                                                                }
+                                                            } else {
+                                                                // Stale/duplicate ACK.
+                                                                tcp_event_ignored(pending);
+                                                            }
+                                                        }
+                                                        TcpEvent::Syn => {
+                                                            tcp_event_ignored(pending);
+                                                        }
+                                                        TcpEvent::FinAck => {
+                                                            // Client closing early mid-transfer: not
+                                                            // handled, same as before this restructuring.
+                                                            tcp_event_ignored(pending);
+                                                        }
+                                                        TcpEvent::Other => {
+                                                            tcp_event_ignored(pending);
+                                                        }
+                                                    }
+                                                } else {
+                                                    tcp_event_ignored(pending);
+                                                }
+                                            }
+                                            ConnState::LastAck => {
+                                                if (tcp_remote_matches(ip, src_port)) {
+                                                    match ev {
+                                                        TcpEvent::Rst => {
+                                                            tcp_reset_to_listen(pending);
+                                                        }
+                                                        TcpEvent::FinAck => {
+                                                            if (seq == conn_rcv_nxt && ack == conn_snd_nxt) {
+                                                                conn_rcv_nxt = conn_rcv_nxt + 1;
+                                                                // The Listen transition happens inside
+                                                                // tcp_close_via_final_ack, right after it
+                                                                // builds the closing ACK -- the co-located
+                                                                // form of issue #116's fix.
+                                                                let ack_len: i32 =
+                                                                    tcp_close_via_final_ack(pending, frame, ihl);
+                                                                if (ack_len >= 0) {
+                                                                    should_tx = 1;
+                                                                    tx_len = 14 + (ihl as i32) + 20 + ack_len;
+                                                                }
+                                                            } else {
+                                                                // Stale FIN+ACK, wrong seq/ack.
+                                                                tcp_event_ignored(pending);
+                                                            }
+                                                        }
+                                                        TcpEvent::Ack => {
+                                                            if (ack == conn_snd_nxt) {
+                                                                tcp_reset_to_listen(pending);
+                                                            } else {
+                                                                // Stale ACK.
+                                                                tcp_event_ignored(pending);
+                                                            }
+                                                        }
+                                                        TcpEvent::Syn => {
+                                                            tcp_event_ignored(pending);
+                                                        }
+                                                        TcpEvent::Other => {
+                                                            tcp_event_ignored(pending);
+                                                        }
+                                                    }
+                                                } else {
+                                                    tcp_event_ignored(pending);
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
+                            }
                         }
                     }
                 }
             }
-        }
 
-        if (should_tx == 1) {
-            net_transmit(frame as *u8, tx_len);
-        }
-        if ((acquired as usize) != 0) {
+            if (should_tx == 1) {
+                net_transmit(frame as *u8, tx_len);
+            }
             net_rx_release(acquired);
         }
     }

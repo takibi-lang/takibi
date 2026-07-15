@@ -10,6 +10,82 @@ type tyenv = (ty * bool) StringMap.t
    const_field_offset below (see their comment for why). *)
 type senv = ((string * Ast.type_expr) list * bool * int option) StringMap.t
 
+(* Static names written in one function share a rigid scope while its body
+   is checked. Function signatures stored in fenv use a separate rigid
+   scope and are instantiated freshly at each call site. *)
+let active_static_scope : static_scope option ref = ref None
+let value_static_identities : static_term StringMap.t ref = ref StringMap.empty
+
+let view_kinds : (string, Ast.opaque_kind) Hashtbl.t = Hashtbl.create 8
+let variant_defs : (string, (string * Ast.type_expr option) list) Hashtbl.t =
+  Hashtbl.create 8
+let variant_kinds : (string, Ast.opaque_kind) Hashtbl.t = Hashtbl.create 8
+
+let rec resolve_declared_type = function
+  | Ast.TypeNamed name when Hashtbl.mem view_kinds name -> Ast.TypeView name
+  | Ast.TypeNamed name when Hashtbl.mem variant_defs name -> Ast.TypeVariant name
+  | Ast.TypePtr t -> Ast.TypePtr (resolve_declared_type t)
+  | Ast.TypeIo t -> Ast.TypeIo (resolve_declared_type t)
+  | Ast.TypeArray (t, n) -> Ast.TypeArray (resolve_declared_type t, n)
+  | Ast.TypeFn (args, ret) ->
+      Ast.TypeFn (List.map resolve_declared_type args, resolve_declared_type ret)
+  | Ast.TypeRefined (lo, hi, base) ->
+      Ast.TypeRefined (lo, hi, resolve_declared_type base)
+  | Ast.TypeSlice (t, n) -> Ast.TypeSlice (resolve_declared_type t, n)
+  | Ast.TypeBorrow t -> Ast.TypeBorrow (resolve_declared_type t)
+  | Ast.TypeSink t -> Ast.TypeSink (resolve_declared_type t)
+  | Ast.TypeAlignedPtr (n, t) -> Ast.TypeAlignedPtr (n, resolve_declared_type t)
+  | Ast.TypeTuple ts -> Ast.TypeTuple (List.map resolve_declared_type ts)
+  | Ast.TypeSingleton (t, n) -> Ast.TypeSingleton (resolve_declared_type t, n)
+  | Ast.TypeExists (name, sort, body) ->
+      Ast.TypeExists (name, resolve_declared_type sort,
+                      resolve_declared_type body)
+  | t -> t
+
+let of_ast_in_decl_scope scope t =
+  of_ast_in_scope scope (resolve_declared_type t)
+
+let of_ast t = match !active_static_scope with
+  | Some scope -> of_ast_in_decl_scope scope t
+  | None -> Types.of_ast (resolve_declared_type t)
+
+let of_ast_opt = function Some t -> of_ast t | None -> fresh ()
+let ret_of_ast_opt = function Some t -> of_ast t | None -> TVoid
+
+let of_ast_opt_in_decl_scope scope = function
+  | Some t -> of_ast_in_decl_scope scope t
+  | None -> fresh ()
+
+let ret_of_ast_opt_in_decl_scope scope = function
+  | Some t -> of_ast_in_decl_scope scope t
+  | None -> TVoid
+
+let indexed_struct_params : (string, Ast.static_param list) Hashtbl.t =
+  Hashtbl.create 8
+
+let indexed_struct_kinds : (string, Ast.opaque_kind) Hashtbl.t =
+  Hashtbl.create 8
+
+let field_type_for_instance sname args field_ast =
+  match Hashtbl.find_opt indexed_struct_params sname with
+  | None -> Types.of_ast (resolve_declared_type field_ast)
+  | Some formals ->
+      if List.length formals <> List.length args then
+        raise (Unify_error (Printf.sprintf
+          "static argument count mismatch for %s: expected %d, got %d"
+          sname (List.length formals) (List.length args)));
+      let scope = create_static_scope () in
+      List.iter2 (fun (name, _) value -> bind_static scope name value)
+        formals args;
+      of_ast_in_decl_scope scope field_ast
+
+let struct_instance = function
+  | TStruct s -> Some (s, [])
+  | TIndexedStruct (s, args) -> Some (s, args)
+  | TPtr (TStruct s) | TPtr (TIo (TStruct s))
+  | TAlignedPtr (_, TStruct s) -> Some (s, [])
+  | _ -> None
+
 (* sizeof(T)/offsetof(T, field) are only ever a genuine OCaml-computable
    compile-time constant here when the layout cannot depend on
    target-specific DataLayout: fixed-width primitive integers/bool, fixed
@@ -33,7 +109,8 @@ let rec const_type_size (senv : senv) (ty : Ast.type_expr) : int option =
       (match const_type_size senv elem with
        | Some sz -> Some (sz * n)
        | None -> None)
-  | Ast.TypeNamed name ->
+  | Ast.TypeSingleton (base, _) -> const_type_size senv base
+  | Ast.TypeNamed name | Ast.TypeIndexed (name, _) ->
       (match StringMap.find_opt name senv with
        | Some (fields, true, None) ->
            List.fold_left (fun acc (_, fty) ->
@@ -76,6 +153,10 @@ let lookup loc name env = fst (lookup_binding loc name env)
 
 (* io T is a storage qualifier; strip it to get the value type for expression checks *)
 let strip_io t = match repr t with TIo inner -> inner | _ -> t
+
+let rec strip_singleton t = match repr t with
+  | TSingleton (base, _) -> strip_singleton base
+  | t -> t
 
 let unify_at loc t1 t2 =
   try unify t1 t2
@@ -121,7 +202,7 @@ let unify_at loc t1 t2 =
    that happens to reach this function with a TBool target, which
    Const_env.bound_value correctly returns None for). *)
 let check_literal_fits_refined loc (e : Ast.expr) (target : ty) =
-  match repr target with
+  match strip_singleton target with
   | TRefinedInt (lo, hi, _) ->
       (match Const_env.bound_value e with
        | Some k when k < lo || k >= hi ->
@@ -137,6 +218,35 @@ let check_literal_fits_refined loc (e : Ast.expr) (target : ty) =
              k))
        | None -> ())
   | _ -> ()
+
+(* A singleton parameter introduces a static name for the runtime argument.
+   Literals carry their exact static integer; an already-singleton value
+   preserves its identity; every other expression receives a fresh hidden
+   identity. That hidden term can escape in an indexed return type. *)
+let adapt_actual_to_expected (tyenv : tyenv) (e : Ast.expr)
+    (actual : ty) (expected : ty) : ty =
+  match repr expected, repr actual with
+  | TSingleton _, TSingleton _ -> actual
+  | TSingleton _, _ ->
+      let n = match Const_env.bound_value e with
+        | Some k -> SConst k
+        | None ->
+            (match e.desc with
+             | Var name ->
+                 (match StringMap.find_opt name tyenv with
+                  | Some (_, false) ->
+                      (match StringMap.find_opt name !value_static_identities with
+                       | Some n -> n
+                       | None ->
+                           let n = fresh_rigid_static () in
+                           value_static_identities :=
+                             StringMap.add name n !value_static_identities;
+                           n)
+                  | _ -> fresh_rigid_static ())
+             | _ -> fresh_rigid_static ())
+      in
+      TSingleton (actual, n)
+  | _ -> actual
 
 (* -- Expression inference -------------------------------------------------- *)
 
@@ -198,7 +308,7 @@ let min_max_sentinel base =
    ("cannot unify i32 with bool"), so only the genuinely-unresolved case
    needs its own branch here. *)
 let check_cond loc ct =
-  match repr ct with
+  match strip_singleton ct with
   | TVar { contents = Unbound _ } ->
       raise (TypeError (loc,
         "condition must be bool -- a bare integer literal has no boolean \
@@ -216,7 +326,8 @@ let check_cond loc ct =
    not TI32 -- widening to the wrong (narrower or differently-signed) type
    would either lose information or produce a bogus unify error against
    the other, genuinely-u64-typed operand. *)
-let canon_ty t = match repr t with TRefinedInt (_, _, base) -> base | t -> t
+let canon_ty t =
+  match strip_singleton t with TRefinedInt (_, _, base) -> base | t -> t
 
 (* Require an integer type, WITHOUT defaulting a genuinely-unconstrained
    type variable -- only reject it if it's already resolved to something
@@ -288,7 +399,7 @@ let require_usize_index loc t =
        range across the base change"
       (to_string t)))
   in
-  match repr t with
+  match strip_singleton t with
   | TUsize -> ()
   | TVar { contents = Unbound _ } -> unify_at loc t TUsize
   | TRefinedInt (_, _, base) ->
@@ -309,7 +420,7 @@ let require_isize_offset loc t =
        as isize or cast it explicitly with `as isize`"
       (to_string t)))
   in
-  match repr t with
+  match strip_singleton t with
   | TIsize -> ()
   | TVar { contents = Unbound _ } -> unify_at loc t TIsize
   | TRefinedInt (_, _, base) ->
@@ -333,6 +444,7 @@ let require_isize_offset loc t =
 let rec is_undetermined t =
   match repr t with
   | TVar { contents = Unbound _ } -> true
+  | TSingleton (base, _) -> is_undetermined base
   | TRefinedInt (_, _, base) -> is_undetermined base
   | _ -> false
 
@@ -414,17 +526,15 @@ let unsafe_depth = ref 0
    Cast case -- same "module-level ref set once per compilation" pattern as
    unsafe_depth/resolved_call_targets, needed because infer_expr is a
    separate top-level function with no closure access to infer_program's
-   own locals. See infer_expr's Cast case for why only AFFINE-opaque
-   pointer targets consult this (GitHub issue #15 follow-up). *)
+   own locals. Integer-to-handle construction and resource-flow checks use
+   this set (GitHub issue #15 follow-up). *)
 let affine_opaque_names = ref StringSet.empty
 
 (* Names of every `linear opaque struct` (OWNERSHIP_KERNEL.md Stage 1,
    GitHub issue #117): exactly-once-on-every-path obligations. Kept as a
-   separate set from affine (not a bool upgrade) because the two kinds
-   differ at every checking site: merge semantics (intersection vs union),
-   cast rules (a linear value may never be cast away), reassignment
-   (overwriting a live linear obligation is an error), and early exits
-   (return/break/continue with a pending obligation are errors). *)
+   separate set from affine because linear adds all-path discharge,
+   no-overwrite, and early-exit obligations. Both kinds reject contraction
+   and cast-away; affine alone permits weakening. *)
 let linear_opaque_names = ref StringSet.empty
 
 (* A trackable place (OWNERSHIP_KERNEL.md Stage 3a, GitHub issue #89
@@ -435,30 +545,73 @@ let linear_opaque_names = ref StringSet.empty
    fall back to the pre-Stage-3 untracked behavior). Array/slice elements
    are also deliberately excluded: a runtime index has no proof of
    distinctness from another index without relational reasoning (the same
-   wall documented for affine's null-sentinel idiom) -- that is Stage 3b
-   territory, not this increment. *)
+   identity between arbitrary runtime indices) -- that is later place/
+   proposition work, not this increment. *)
 type path = PVar of string | PField of string * string
 
 let path_to_string = function
   | PVar n -> n
   | PField (b, f) -> b ^ "." ^ f
 
-module PathSet = Set.Make(struct type t = path let compare = compare end)
+module ResourceFlow = Takibi_core.Delta.Legacy_flow(struct
+  type t = path
+  let compare = compare
+end)
 
-(* Dual consumption tracking (OWNERSHIP_KERNEL.md Stage 1): c_any is the
-   union-combined moved set affine checking has always used (governs
-   double-consume for both kinds, and affine's weak must-consume); c_all
-   is the intersection-combined set (membership = consumed on EVERY path
-   reaching this point), which the linear kind's checks read. Stage 3a
-   widened the key from a bare variable name to `path` (above). *)
-type consume_sets = { c_any : PathSet.t; c_all : PathSet.t }
+module PathSet = ResourceFlow.Places
+
+(* The current dual consumption lattice now lives behind Takibi Core's
+   explicitly transitional Delta.Legacy_flow boundary. Stage 3a widened its
+   key from a bare variable name to `path` (above). *)
+type consume_sets = ResourceFlow.t
 
 let is_linear_ptr_ty t = match repr t with
   | TPtr (TStruct n) -> StringSet.mem n !linear_opaque_names
+  | TIndexedStruct (n, _) ->
+      Hashtbl.find_opt indexed_struct_kinds n = Some Ast.KindLinear
+  | _ -> false
+
+let rec is_indexed_owner_ty t = match repr t with
+  | TIndexedStruct _ -> true
+  | TSingleton (base, _) -> is_indexed_owner_ty base
+  | TTuple ts -> List.exists is_indexed_owner_ty ts
+  | _ -> false
+
+let rec contains_singleton_ty t = match repr t with
+  | TSingleton _ -> true
+  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
+  | TAlignedPtr (_, t) -> contains_singleton_ty t
+  | TTuple ts -> List.exists contains_singleton_ty ts
+  | TFun (args, ret) ->
+      List.exists contains_singleton_ty args || contains_singleton_ty ret
+  | _ -> false
+
+let rec contains_view_ty t = match repr t with
+  | TView _ -> true
+  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
+  | TAlignedPtr (_, t) | TSingleton (t, _) -> contains_view_ty t
+  | TTuple ts -> List.exists contains_view_ty ts
+  | TFun (args, ret) ->
+      List.exists contains_view_ty args || contains_view_ty ret
+  | TExists (_, _, _, body) -> contains_view_ty body
+  | _ -> false
+
+let rec contains_variant_ty t = match repr t with
+  | TVariant _ -> true
+  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
+  | TAlignedPtr (_, t) | TSingleton (t, _) -> contains_variant_ty t
+  | TTuple ts -> List.exists contains_variant_ty ts
+  | TFun (args, ret) ->
+      List.exists contains_variant_ty args || contains_variant_ty ret
+  | TExists (_, _, _, body) -> contains_variant_ty body
   | _ -> false
 
 let is_tuple_ty t = match repr t with
   | TTuple _ -> true
+  | _ -> false
+
+let is_variant_ty t = match repr t with
+  | TVariant _ -> true
   | _ -> false
 
 (* Direct calls are resolved during inference.  Codegen must consume this
@@ -533,6 +686,18 @@ let private_struct_fields : (string * string, string) Hashtbl.t = Hashtbl.create
    declaring-file-only (this is what makes smart constructors real). *)
 let private_struct_lit : (string, string) Hashtbl.t = Hashtbl.create 8
 
+(* private erased view name -> declaring file. Naming remains public; only
+   the explicit `view Name` mint expression is restricted. *)
+let private_views : (string, string) Hashtbl.t = Hashtbl.create 8
+
+let check_private_view_construction (loc : Ast.loc) name =
+  match Hashtbl.find_opt private_views name with
+  | Some file when file <> loc.Lexing.pos_fname ->
+      raise (TypeError (loc, Printf.sprintf
+        "cannot mint private view '%s' outside its declaring file '%s'"
+        name file))
+  | _ -> ()
+
 (* Every opaque struct name of any kind, for the pointer-arithmetic
    completeness check (Stage 2 Part C): arithmetic on a pointer needs the
    pointee's size, which an opaque (incomplete) type does not have. Found
@@ -554,7 +719,15 @@ let check_private_type_construction (loc : Ast.loc) (target : Ast.type_expr) =
          | _ -> ())
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
+    | Ast.TypeSingleton (t, _)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> walk t
+    | Ast.TypeIndexed (n, _) ->
+        (match Hashtbl.find_opt private_struct_lit n with
+         | Some file when file <> loc.Lexing.pos_fname ->
+             raise (TypeError (loc, Printf.sprintf
+               "cannot construct a value of private type '%s' outside its declaring file '%s'"
+               n file))
+         | _ -> ())
     | Ast.TypeTuple ts -> List.iter walk ts
     | _ -> ()
   in
@@ -640,7 +813,7 @@ let elem_stride_aligned (senv : senv) (n : int) (elem : ty) : bool =
   | _ -> false
 
 (* GitHub issue #15 follow-up: require `unsafe` for a cast that builds an
-   AFFINE OPAQUE pointer from anything other than a compile-time literal or
+   AFFINE/LINEAR OPAQUE pointer from anything other than a compile-time literal or
    a real object's address -- see is_literal_derived's comment for the
    full reasoning and why this is scoped to affine targets only, not
    pointer casts in general. Called from infer_expr's Cast case for BOTH
@@ -648,7 +821,7 @@ let elem_stride_aligned (senv : senv) (n : int) (elem : ty) : bool =
    a TRefinedInt -- e.g. a refined `{0..<4 as usize}` loop-proven index),
    since those are two separate match arms there and neither should skip
    this check. *)
-let check_affine_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
+let check_kinded_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
   match tgt with
   | TPtr (TStruct sname) when StringSet.mem sname !affine_opaque_names
                            || StringSet.mem sname !linear_opaque_names ->
@@ -659,48 +832,34 @@ let check_affine_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
           ^ to_string tgt ^ " }` to mark it"))
   | _ -> ()
 
-(* OWNERSHIP_KERNEL.md Stage 1 (GitHub issue #117): a linear value may
-   never be cast to ANYTHING (`as usize`, `as *Other`, even `as` its own
-   type) -- casting away is the direction that silently discards the
-   obligation, and there is deliberately no `unsafe` escape in v1. The
-   reverse direction (integer -> linear pointer, i.e. minting a fresh
-   obligation) stays legal under the same rules as affine, because a
-   forged obligation must itself be consumed on every path -- forging is
-   the safe direction. This ban is also what makes the all-paths
-   (intersection) consumption check exact with plain dataflow: the
-   `(p as usize) != 0` null-test idiom is inexpressible for linear values,
-   so consumption can never be legitimately conditional (see the memo's
-   4.6 for why this dodges the relational-reasoning wall issue #89 hit). *)
-let check_linear_cast_away loc (src_ty : ty) =
+(* Slice 3: ownership-bearing values cannot be cast away. The temporary
+   affine-to-usize exception existed only for null-sentinel acquisition;
+   kind-carrying variants replace that encoding. `unsafe` does not duplicate
+   or forget Delta permissions. *)
+let check_resource_cast_away loc (src_ty : ty) =
   match repr src_ty with
-  | TPtr (TStruct sname) when StringSet.mem sname !linear_opaque_names ->
+  | TView name ->
       raise (TypeError (loc, Printf.sprintf
-        "cannot cast a linear value (*%s) to anything: casting away would \
-         silently discard its obligation" sname))
-  | _ -> ()
-
-(* OWNERSHIP_KERNEL.md Stage 2 Part C (GitHub issue #15 direction):
-   casting an AFFINE handle to another POINTER type launders it out of
-   kind tracking into a differently-typed alias, so it must be visibly
-   marked with `unsafe { ... }`. The `t as usize` null-check idiom stays
-   ungated: it reads bits and aliases nothing usable (re-minting the bits
-   into a handle is construction, gated separately), and it is the
-   codebase's sanctioned Option encoding until issue #20 -- see the memo's
-   recorded ratchet for banning it then. Linear values already reject
-   every cast (check_linear_cast_away above), so this is affine-only. *)
-let check_affine_ptr_launder loc (src_ty : ty) (target : Ast.type_expr) =
-  match repr src_ty, target with
-  | TPtr (TStruct sname), (Ast.TypePtr _ | Ast.TypeAlignedPtr _)
-    when StringSet.mem sname !affine_opaque_names && !unsafe_depth = 0 ->
+        "cannot cast erased view '%s': views have no runtime representation"
+        name))
+  | TIndexedStruct (sname, _) ->
       raise (TypeError (loc, Printf.sprintf
-        "casting an affine handle (*%s) to another pointer type launders it \
-         out of tracking; write `unsafe { ... }` to mark it" sname))
+        "cannot cast indexed owner '%s': use its declaring module's constructor/accessor functions"
+        sname))
+  | TVariant name ->
+      raise (TypeError (loc, Printf.sprintf
+        "cannot cast variant '%s': inspect it with match" name))
+  | TPtr (TStruct sname) when StringSet.mem sname !linear_opaque_names
+                            || StringSet.mem sname !affine_opaque_names ->
+      raise (TypeError (loc, Printf.sprintf
+        "cannot cast an affine/linear value (*%s) to anything: use a variant for fallible ownership"
+        sname))
   | _ -> ()
 
 (* GitHub issue #102: casting an INTEGER expression to *align(N) T requires
    either `unsafe` or a compile-time proof the value is actually a multiple
    of N (provable_multiple_of, above) -- same "unchecked assertion must be
-   visibly marked" reasoning as check_affine_ptr_cast_needs_unsafe just
+   visibly marked" reasoning as check_kinded_ptr_cast_needs_unsafe just
    above, applied to alignment instead of affine-handle identity. Called
    from infer_expr's Cast case for integer sources (both the plain and
    TRefinedInt match arms); a POINTER source casting to *align(N) T is a
@@ -725,6 +884,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
   | BoolLit _   -> TBool
   | StringLit _ -> TPtr TU8
+  | ViewLit name ->
+      if not (Hashtbl.mem view_kinds name) then
+        raise (TypeError (e.loc, Printf.sprintf "unknown erased view '%s'" name));
+      check_private_view_construction e.loc name;
+      TView name
   | Var name ->
       check_private_global_access e.loc name;
       (* Check local/global variables first *)
@@ -746,7 +910,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | None ->
            (* Function name used as a value (function pointer) *)
            match StringMap.find_opt name fenv with
-           | Some [(_, ft)] -> ft
+           | Some [(_, ft)] ->
+               let ft = instantiate_static_params ft in
+               if contains_view_ty ft then
+                 raise (TypeError (e.loc, Printf.sprintf
+                   "function '%s' has erased view parameters/results and cannot be used as a runtime function pointer in Slice 2"
+                   name));
+               ft
            | Some _ ->
                raise (TypeError (e.loc, Printf.sprintf
                  "overloaded function '%s' needs an expected function type; use an explicit wrapper" name))
@@ -756,6 +926,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | BinOp (op, e1, e2) ->
       let t1 = infer_expr senv eenv tyenv fenv e1 in
       let t2 = infer_expr senv eenv tyenv fenv e2 in
+      if contains_view_ty t1 || contains_view_ty t2 then
+        raise (TypeError (e.loc,
+          "erased views cannot be operands of runtime operators"));
       (match op with
        | Add ->
            (* Pointer arithmetic: ptr + isize -> returns the same pointer type. TIo is a value type, excluded.
@@ -949,6 +1122,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            ct1)
   | Bnot e1 ->
       let t1 = infer_expr senv eenv tyenv fenv e1 in
+      if contains_view_ty t1 then
+        raise (TypeError (e.loc,
+          "erased views cannot be operands of runtime operators"));
       canon_ty t1
   | Deref e1 ->
       let t1 = infer_expr senv eenv tyenv fenv e1 in
@@ -969,6 +1145,23 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              raise (TypeError (e.loc, Printf.sprintf
                "cannot take the address of linear value '%s': an alias would \
                 escape obligation tracking" name));
+           if is_indexed_owner_ty t then
+             raise (TypeError (e.loc, Printf.sprintf
+               "cannot take the address of indexed owner '%s': an alias would \
+                escape obligation tracking" name));
+           if contains_view_ty t then
+             raise (TypeError (e.loc, Printf.sprintf
+               "cannot take the address of erased view '%s': views have no runtime storage"
+               name));
+           if is_variant_ty t then
+             raise (TypeError (e.loc, Printf.sprintf
+               "cannot take the address of variant '%s': an alias would escape payload ownership tracking"
+               name));
+           if contains_singleton_ty t then
+             raise (TypeError (e.loc, Printf.sprintf
+               "cannot take the address of singleton value '%s': mutation \
+                through a widened pointer would invalidate its static identity"
+               name));
            if not is_mut then
              raise (TypeError (e.loc,
                Printf.sprintf "cannot take address of immutable variable '%s'" name));
@@ -1000,10 +1193,17 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            raise (TypeError (e.loc, "& requires a variable or struct field")))
   | Cast (target_ty, e) ->
       let src_ty = infer_expr senv eenv tyenv fenv e in
-      check_linear_cast_away e.loc src_ty;
-      check_affine_ptr_launder e.loc src_ty target_ty;
+      check_resource_cast_away e.loc src_ty;
       check_private_type_construction e.loc target_ty;
-      (match target_ty with
+      (match resolve_declared_type target_ty with
+       | Ast.TypeView name ->
+           raise (TypeError (e.loc, Printf.sprintf
+             "cannot construct erased view '%s' with a cast; use `view %s`"
+             name name))
+       | Ast.TypeIndexed (name, _) ->
+           raise (TypeError (e.loc, Printf.sprintf
+             "cannot construct indexed owner '%s' with a cast; use its constructor"
+             name))
        | Ast.TypeTuple _ ->
            raise (TypeError (e.loc, "cannot cast to a tuple type"))
        | _ -> ());
@@ -1191,14 +1391,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                         catch-all case below, needed here too since this
                         is a SEPARATE match arm reached whenever the
                         source already carries a refined range. *)
-                     check_affine_ptr_cast_needs_unsafe e.loc e tgt;
+                     check_kinded_ptr_cast_needs_unsafe e.loc e tgt;
                      check_aligned_ptr_cast_needs_unsafe e.loc e tgt;
                      tgt)
             | _ ->
                 (* GitHub issue #15 follow-up: casting a non-literal integer
                    to a pointer to an AFFINE OPAQUE struct type asserts
                    "this bit pattern is a valid handle" with no evidence at
-                   all (check_affine_ptr_cast_needs_unsafe, above). This
+                   all (check_kinded_ptr_cast_needs_unsafe, above). This
                    deliberately covers only affine-opaque targets, not
                    pointer casts in general: an earlier, broader version of
                    this check (any integer -> any pointer type) was
@@ -1222,7 +1422,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                    smuggled through a pointer purely to get affine tracking)
                    this check exists to flag -- see HISTORY.md's issue #15
                    entry for the full before/after measurement. *)
-                check_affine_ptr_cast_needs_unsafe e.loc e tgt;
+                check_kinded_ptr_cast_needs_unsafe e.loc e tgt;
                 check_aligned_ptr_cast_needs_unsafe e.loc e tgt;
                 (* GitHub issue #100 follow-up: an EXPLICIT `x as {lo..<hi
                    as base}` cast target reaches here for any source that
@@ -1239,11 +1439,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       (match repr bt, fname with
        | TSlice _, "len" -> TUsize  (* s.len -- the slice's runtime length *)
        | _ ->
-      let sname = match repr bt with
-        | TStruct s                      -> s
-        | TPtr   (TStruct s)             -> s
-        | TPtr   (TIo (TStruct s))       -> s   (* field read through *io Struct *)
-        | TAlignedPtr (_, TStruct s)     -> s   (* GitHub issue #102 *)
+      let (sname, static_args) = match struct_instance (repr bt) with
+        | Some x -> x
         | _ ->
             raise (TypeError (base_expr.loc,
               Printf.sprintf "field access '.%s' on non-struct type '%s'"
@@ -1258,7 +1455,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       check_private_field_access e.loc sname fname;
       (match List.assoc_opt fname fields with
        | Some ft ->
-           (match of_ast ft with
+           (match field_type_for_instance sname static_args ft with
             | TArray (inner, _) -> TPtr inner  (* array field decays to *elem *)
             | TIo    inner      -> inner        (* io field returns value type T (volatile handled in codegen) *)
             | t                 -> t)
@@ -1496,20 +1693,57 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
 
   | EnumVariant (ename, vname) ->
       (match StringMap.find_opt ename eenv with
-       | None ->
-           raise (TypeError (e.loc, Printf.sprintf "Unknown enum: %s" ename))
        | Some (_, variants, _) ->
            if not (List.mem_assoc vname variants) then
              raise (TypeError (e.loc,
                Printf.sprintf "Unknown variant '%s' of enum '%s'" vname ename));
-           TStruct ename)
+           TStruct ename
+       | None ->
+           (match Hashtbl.find_opt variant_defs ename with
+            | None ->
+                raise (TypeError (e.loc,
+                  Printf.sprintf "unknown enum or variant '%s'" ename))
+            | Some cases ->
+                (match List.assoc_opt vname cases with
+                 | None -> raise (TypeError (e.loc, Printf.sprintf
+                     "unknown case '%s::%s'" ename vname))
+                 | Some (Some _) -> raise (TypeError (e.loc, Printf.sprintf
+                     "variant case '%s::%s' requires a payload" ename vname))
+                 | Some None -> TVariant ename)))
+
+  | VariantCtor (vtype, vname, payload) ->
+      let schema = match Hashtbl.find_opt variant_defs vtype with
+        | None -> raise (TypeError (e.loc,
+            Printf.sprintf "unknown variant '%s'" vtype))
+        | Some cases ->
+            (match List.assoc_opt vname cases with
+             | None -> raise (TypeError (e.loc,
+                 Printf.sprintf "unknown case '%s::%s'" vtype vname))
+             | Some None -> raise (TypeError (e.loc, Printf.sprintf
+                 "variant case '%s::%s' has no payload" vtype vname))
+             | Some (Some ty) -> ty)
+      in
+      let expected = match schema with
+        | Ast.TypeExists (name, _, body) ->
+            let scope = create_static_scope () in
+            bind_static scope name (fresh_static ());
+            of_ast_in_decl_scope scope body
+        | ty -> of_ast_in_decl_scope (create_static_scope ()) ty
+      in
+      let actual = infer_expr senv eenv tyenv fenv payload in
+      let actual = adapt_actual_to_expected tyenv payload actual expected in
+      unify_at payload.loc actual expected;
+      check_literal_fits_refined payload.loc payload expected;
+      TVariant vtype
 
   | SizeOf ty ->
       (* sizeof(T) is a compile-time constant of type usize. Validate named
          struct/enum types exist so unknown names are caught here rather than
          surfacing as an internal error during codegen. *)
       (match ty with
-       | Ast.TypeNamed name when not (StringMap.mem name senv) && not (StringMap.mem name eenv) ->
+       | Ast.TypeNamed name when not (StringMap.mem name senv)
+                                  && not (StringMap.mem name eenv)
+                                  && not (Hashtbl.mem variant_defs name) ->
            raise (TypeError (e.loc, Printf.sprintf "unknown type '%s' in sizeof" name))
        | _ -> ());
       (* GitHub issue #77: when the size is genuinely target-independent
@@ -1559,7 +1793,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
          flows into a consuming position). *)
       if List.length exprs < 2 then
         raise (TypeError (e.loc, "a tuple literal needs at least 2 components"));
-      TTuple (List.map (fun x -> infer_expr senv eenv tyenv fenv x) exprs)
+      let ts = List.map (fun x -> infer_expr senv eenv tyenv fenv x) exprs in
+      if List.exists contains_view_ty ts then
+        raise (TypeError (e.loc,
+          "an erased view cannot be stored in a runtime tuple in Slice 2"));
+      if List.exists contains_variant_ty ts then
+        raise (TypeError (e.loc,
+          "a variant cannot be nested in a runtime tuple in Slice 3"));
+      TTuple ts
 
   | Call (("dma_publish" | "dma_consume" | "device_fence" | "signal_fence"
           | "interrupt_wait" | "interrupt_notify") as fname, args) ->
@@ -1671,6 +1912,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | [a; b] ->
            let at = infer_expr senv eenv tyenv fenv a in
            let bt = infer_expr senv eenv tyenv fenv b in
+           if contains_view_ty at || contains_view_ty bt then
+             raise (TypeError (e.loc,
+               "erased views cannot be operands of runtime min/max"));
            (* Both arguments must agree on a base type, same as any other
               binary numeric operation (Add/Sub/etc.) -- previously
               hardcoded TI32 for both, independently, which meant
@@ -1727,8 +1971,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       let ft_opt = match direct with
         | Some [(target, ft)] ->
             resolved_call_targets := StringMap.add (loc_key e.loc) target !resolved_call_targets;
-            Some ft
+            Some (instantiate_static_params ft)
         | Some candidates ->
+            let candidates = List.map (fun (target, ft) ->
+              (target, instantiate_static_params ft)) candidates in
             let arg_tys = List.map (infer_expr senv eenv tyenv fenv) args in
             let exact (_, ft) = match repr ft with
               | TFun (ps, _) when List.length ps = List.length arg_tys ->
@@ -1774,6 +2020,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  fname (List.length param_tys) (List.length args)));
            List.iter2 (fun arg pt ->
              let at = infer_expr senv eenv tyenv fenv arg in
+             let at = adapt_actual_to_expected tyenv arg at pt in
              unify_at arg.loc at pt;
              check_literal_fits_refined arg.loc arg pt
            ) args param_tys;
@@ -1806,8 +2053,24 @@ let rec check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : unit =
       List.iter2 (fun (_, ft) ei ->
         check_expr senv eenv tyenv fenv ei (of_ast ft)
       ) fields exprs
+  | StructLit exprs, TIndexedStruct (sname, static_args) ->
+      let fields = match StringMap.find_opt sname senv with
+        | Some (fs, _, _) -> fs
+        | None -> raise (TypeError (e.loc,
+            Printf.sprintf "unknown struct type '%s'" sname))
+      in
+      check_private_struct_literal e.loc sname;
+      if List.length fields <> List.length exprs then
+        raise (TypeError (e.loc, Printf.sprintf
+          "struct '%s' has %d fields but literal has %d values"
+          sname (List.length fields) (List.length exprs)));
+      List.iter2 (fun (_, ft) ei ->
+        check_expr senv eenv tyenv fenv ei
+          (field_type_for_instance sname static_args ft)
+      ) fields exprs
   | _ ->
       let te = infer_expr senv eenv tyenv fenv e in
+      let te = adapt_actual_to_expected tyenv e te (strip_io expected) in
       (* If expected type is io T: check compatibility with T (strip the storage qualifier) *)
       unify_at e.loc te (strip_io expected);
       check_literal_fits_refined e.loc e (strip_io expected)
@@ -1979,6 +2242,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       (tyenv, raw_locals)
   | Return e ->
       let t = infer_expr senv eenv tyenv fenv e in
+      let t = adapt_actual_to_expected tyenv e t ret_ty in
       unify_at e.loc t ret_ty;
       check_literal_fits_refined e.loc e ret_ty;
       (tyenv, raw_locals)
@@ -1992,6 +2256,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         raise (TypeError (s.loc,
           Printf.sprintf "cannot assign to immutable variable '%s'; use 'let mut'" name));
       let ety = infer_expr senv eenv tyenv fenv e in
+      let ety = adapt_actual_to_expected tyenv e ety (strip_io vty) in
       (* Assignment: match as "actual(rhs) is a subtype of expected(lhs)".
          TRefinedInt -> TI32 is OK (assigning with loss of precision). Reverse is NG. *)
       unify_at e.loc ety (strip_io vty);
@@ -2009,6 +2274,13 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
             inner
       in
       let vt = infer_expr senv eenv tyenv fenv val_expr in
+      let vt = adapt_actual_to_expected tyenv val_expr vt inner in
+      if contains_view_ty vt then
+        raise (TypeError (val_expr.loc,
+          "cannot store an erased view through a pointer"));
+      if contains_variant_ty vt then
+        raise (TypeError (val_expr.loc,
+          "cannot store a variant through a pointer in Slice 3"));
       if is_tuple_ty vt then
         raise (TypeError (val_expr.loc,
           "cannot store a tuple through a pointer: tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
@@ -2016,6 +2288,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         raise (TypeError (val_expr.loc,
           "cannot store a linear value through a pointer: it would escape \
            obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will lift this)"));
+      if is_indexed_owner_ty vt then
+        raise (TypeError (val_expr.loc,
+          "cannot store an indexed owner through a pointer: it would escape obligation tracking"));
       unify_at val_expr.loc vt inner;
       check_literal_fits_refined val_expr.loc val_expr inner;
       (tyenv, raw_locals)
@@ -2050,6 +2325,13 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         | _ -> raise (TypeError (s.loc,
             Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))
       in
+      let rt = adapt_actual_to_expected tyenv rhs rt elem_ty in
+      if contains_view_ty rt then
+        raise (TypeError (rhs.loc,
+          "cannot store an erased view into an array/slice element"));
+      if contains_variant_ty rt then
+        raise (TypeError (rhs.loc,
+          "cannot store a variant into an array/slice element in Slice 3"));
       if is_tuple_ty rt then
         raise (TypeError (rhs.loc,
           "cannot store a tuple into an array/slice element: tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
@@ -2057,17 +2339,30 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         raise (TypeError (rhs.loc,
           "cannot store a linear value into an array/slice element: it would \
            escape obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will lift this)"));
+      if is_indexed_owner_ty rt then
+        raise (TypeError (rhs.loc,
+          "cannot store an indexed owner into an array/slice element: it would escape obligation tracking"));
       unify_at rhs.loc rt elem_ty;
       check_literal_fits_refined rhs.loc rhs elem_ty;
       (tyenv, raw_locals)
 
   | AssignField (base_expr, fname, val_expr) ->
       let bt = infer_expr senv eenv tyenv fenv base_expr in
-      let sname = match repr bt with
-        | TStruct s                      -> s
-        | TPtr   (TStruct s)             -> s
-        | TPtr   (TIo (TStruct s))       -> s
-        | TAlignedPtr (_, TStruct s)     -> s   (* GitHub issue #102 *)
+      (match repr bt with
+       | TIndexedStruct _ ->
+           (match base_expr.desc with
+            | Var name ->
+                let (_, is_mut) = lookup_binding base_expr.loc name tyenv in
+                if not is_mut then
+                  raise (TypeError (base_expr.loc, Printf.sprintf
+                    "cannot assign a field of immutable indexed owner '%s'; use 'let mut'"
+                    name))
+            | _ ->
+                raise (TypeError (base_expr.loc,
+                  "field assignment on an indexed owner requires a mutable local or parameter")))
+       | _ -> ());
+      let (sname, static_args) = match struct_instance (repr bt) with
+        | Some x -> x
         | _ ->
             raise (TypeError (base_expr.loc,
               Printf.sprintf "field assignment '.%s' on non-struct type '%s'"
@@ -2081,12 +2376,19 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       in
       check_private_field_access s.loc sname fname;
       let field_ty = match List.assoc_opt fname fields with
-        | Some ft -> of_ast ft
+        | Some ft -> field_type_for_instance sname static_args ft
         | None ->
             raise (TypeError (s.loc,
               Printf.sprintf "no field '%s' in struct '%s'" fname sname))
       in
       let vt = infer_expr senv eenv tyenv fenv val_expr in
+      let vt = adapt_actual_to_expected tyenv val_expr vt (strip_io field_ty) in
+      if contains_view_ty vt then
+        raise (TypeError (val_expr.loc,
+          "cannot store an erased view into a struct field"));
+      if contains_variant_ty vt then
+        raise (TypeError (val_expr.loc,
+          "cannot store a variant into a struct field in Slice 3"));
       if is_tuple_ty vt then
         raise (TypeError (val_expr.loc,
           "cannot store a tuple into a struct field: tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
@@ -2094,11 +2396,15 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         raise (TypeError (val_expr.loc,
           "cannot store a linear value into a struct field: it would escape \
            obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will lift this)"));
+      if is_indexed_owner_ty vt then
+        raise (TypeError (val_expr.loc,
+          "cannot store an indexed owner into a struct field: it would escape obligation tracking"));
       (* Assignment to io field: check compatibility with T (io is a storage qualifier, strip it) *)
       unify_at val_expr.loc vt (strip_io field_ty);
       check_literal_fits_refined val_expr.loc val_expr (strip_io field_ty);
       (tyenv, raw_locals)
   | Let (is_mut, name, ty_opt, expr_opt, align_opt) ->
+      value_static_identities := StringMap.remove name !value_static_identities;
       let ty = of_ast_opt ty_opt in
       let init_ty_opt =
         match expr_opt with
@@ -2113,13 +2419,14 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
               raise (TypeError (loc,
                 Printf.sprintf "struct literal requires `let mut %s: Name = {...}`" name));
             (match repr ty with
-             | (TStruct _ | TArray _) as expected ->
+             | (TStruct _ | TIndexedStruct _ | TArray _) as expected ->
                  check_expr senv eenv tyenv fenv { desc = StructLit exprs; loc } expected
              | _ -> raise (TypeError (loc,
                  "literal { ... } requires a struct or array type annotation")));
             None
         | Some e ->
             let et = infer_expr senv eenv tyenv fenv e in
+            let et = adapt_actual_to_expected tyenv e et (strip_io ty) in
             (* Initialization: match actual(expr) as a subtype of expected(type annotation) *)
             unify_at e.loc et (strip_io ty);
             check_literal_fits_refined e.loc e (strip_io ty);
@@ -2384,51 +2691,123 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
 
   | Match (disc, arms) ->
       let dt = infer_expr senv eenv tyenv fenv disc in
-      let ename = match repr dt with
-        | TStruct sn when StringMap.mem sn eenv -> sn
-        | t -> raise (TypeError (disc.loc,
-            Printf.sprintf "match requires an enum type, got '%s'" (to_string t)))
+      let infer_arm_body env rl body =
+        let (_, rl') = List.fold_left
+          (fun (env, locs) stmt ->
+            infer_stmt senv eenv env fenv ret_ty locs in_loop stmt)
+          (env, rl) body
+        in
+        rl'
       in
-      let (_, enum_variants, is_ne) = StringMap.find ename eenv in
-      let has_wild = ref false in
-      let covered  = Hashtbl.create 4 in
-      let raw_locals' = List.fold_left (fun rl arm ->
-        match arm with
-        | Ast.ArmVariant (aname, vname, body) ->
-            if aname <> ename then
-              raise (TypeError (s.loc,
-                Printf.sprintf "arm type '%s' does not match discriminant '%s'" aname ename));
-            (match List.assoc_opt vname enum_variants with
-             | None -> raise (TypeError (s.loc,
-                 Printf.sprintf "unknown variant '%s::%s'" ename vname))
-             | Some _ -> ());
-            Hashtbl.replace covered vname ();
-            let (_, rl') = List.fold_left
-              (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
-              (tyenv, rl) body
-            in rl'
-        | Ast.ArmWild body ->
-            has_wild := true;
-            let (_, rl') = List.fold_left
-              (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
-              (tyenv, rl) body
-            in rl'
-      ) raw_locals arms in
-      if is_ne then begin
-        (* non-exhaustive enum: _ wildcard is required because unknown values can arrive *)
-        if not !has_wild then
-          raise (TypeError (s.loc,
-            Printf.sprintf "non-exhaustive enum '%s' requires a '_' wildcard arm" ename))
-      end else begin
-        (* exhaustive enum: every variant must be covered (or _ present) *)
-        if not !has_wild then
-          List.iter (fun (vname, _) ->
-            if not (Hashtbl.mem covered vname) then
-              raise (TypeError (s.loc,
-                Printf.sprintf "non-exhaustive match: '%s::%s' not covered" ename vname))
-          ) enum_variants
-      end;
-      (tyenv, raw_locals')
+      (match repr dt with
+       | TStruct ename when StringMap.mem ename eenv ->
+           let (_, enum_variants, is_ne) = StringMap.find ename eenv in
+           let has_wild = ref false in
+           let covered = Hashtbl.create 4 in
+           let raw_locals' = List.fold_left (fun rl arm ->
+             match arm with
+             | Ast.ArmVariant (aname, vname, binding, body) ->
+                 if aname <> ename then
+                   raise (TypeError (s.loc, Printf.sprintf
+                     "arm type '%s' does not match discriminant '%s'"
+                     aname ename));
+                 if binding <> None then
+                   raise (TypeError (s.loc, Printf.sprintf
+                     "numeric enum case '%s::%s' has no payload" ename vname));
+                 (match List.assoc_opt vname enum_variants with
+                  | None -> raise (TypeError (s.loc, Printf.sprintf
+                      "unknown variant '%s::%s'" ename vname))
+                  | Some _ -> ());
+                 Hashtbl.replace covered vname ();
+                 infer_arm_body tyenv rl body
+             | Ast.ArmWild body ->
+                 has_wild := true;
+                 infer_arm_body tyenv rl body
+           ) raw_locals arms in
+           if is_ne then begin
+             if not !has_wild then
+               raise (TypeError (s.loc, Printf.sprintf
+                 "non-exhaustive enum '%s' requires a '_' wildcard arm" ename))
+           end else if not !has_wild then
+             List.iter (fun (vname, _) ->
+               if not (Hashtbl.mem covered vname) then
+                 raise (TypeError (s.loc, Printf.sprintf
+                   "non-exhaustive match: '%s::%s' not covered" ename vname))
+             ) enum_variants;
+           (tyenv, raw_locals')
+       | TVariant vtype ->
+           let cases = match Hashtbl.find_opt variant_defs vtype with
+             | Some cases -> cases
+             | None -> raise (TypeError (disc.loc, Printf.sprintf
+                 "unknown variant type '%s'" vtype))
+           in
+           let has_wild = ref false in
+           let covered = Hashtbl.create 4 in
+           let open_payload = function
+             | Ast.TypeExists (name, _, body) ->
+                 let scope = create_static_scope () in
+                 bind_static scope name (rigid_static name);
+                 of_ast_in_decl_scope scope body
+             | ty -> of_ast_in_decl_scope (create_static_scope ()) ty
+           in
+           let raw_locals' = List.fold_left (fun rl arm ->
+             match arm with
+             | Ast.ArmVariant (aname, cname, binding, body) ->
+                 if aname <> vtype then
+                   raise (TypeError (s.loc, Printf.sprintf
+                     "arm type '%s' does not match discriminant '%s'"
+                     aname vtype));
+                 if Hashtbl.mem covered cname then
+                   raise (TypeError (s.loc, Printf.sprintf
+                     "duplicate match arm '%s::%s'" vtype cname));
+                 Hashtbl.add covered cname ();
+                 let payload = match List.assoc_opt cname cases with
+                   | None -> raise (TypeError (s.loc, Printf.sprintf
+                       "unknown case '%s::%s'" vtype cname))
+                   | Some payload -> payload
+                 in
+                 (match payload, binding with
+                  | None, None -> infer_arm_body tyenv rl body
+                  | None, Some _ -> raise (TypeError (s.loc, Printf.sprintf
+                      "variant case '%s::%s' has no payload" vtype cname))
+                  | Some _, None -> raise (TypeError (s.loc, Printf.sprintf
+                      "variant case '%s::%s' must bind its payload" vtype cname))
+                  | Some schema, Some name ->
+                      if Const_env.find name <> None then
+                        raise (TypeError (s.loc, Printf.sprintf
+                          "'%s' shadows a global constant of the same name" name));
+                      if StringMap.mem name tyenv then
+                        raise (TypeError (s.loc, Printf.sprintf
+                          "variant payload binding '%s' shadows an existing value; choose a fresh arm-local name"
+                          name));
+                      let payload_ty = open_payload schema in
+                      let env = StringMap.add name (payload_ty, false) tyenv in
+                      (* The binder is arm-local, unlike ordinary `let`
+                         entries accumulated in the function-wide raw-local
+                         map. Resource checking reopens the case schema for
+                         this arm instead of flattening disjoint binders by
+                         name. *)
+                      infer_arm_body env rl body)
+             | Ast.ArmWild body ->
+                 if !has_wild then
+                   raise (TypeError (s.loc,
+                     "duplicate '_' wildcard match arm"));
+                 has_wild := true;
+                 if Hashtbl.find_opt variant_kinds vtype = Some Ast.KindLinear then
+                   raise (TypeError (s.loc, Printf.sprintf
+                     "linear variant '%s' cannot use a wildcard arm because it could hide an unconsumed payload"
+                     vtype));
+                 infer_arm_body tyenv rl body
+           ) raw_locals arms in
+           if not !has_wild then
+             List.iter (fun (cname, _) ->
+               if not (Hashtbl.mem covered cname) then
+                 raise (TypeError (s.loc, Printf.sprintf
+                   "non-exhaustive match: '%s::%s' not covered" vtype cname))
+             ) cases;
+           (tyenv, raw_locals')
+       | t -> raise (TypeError (disc.loc, Printf.sprintf
+           "match requires an enum or variant type, got '%s'" (to_string t))))
 
 (* -- Function inference ---------------------------------------------------- *)
 
@@ -2463,7 +2842,10 @@ let check_const_shadowing (fdef : Ast.func) =
         List.iter go_stmt body
     | Ast.Match (_, arms) ->
         List.iter (function
-          | Ast.ArmVariant (_, _, b) -> List.iter go_stmt b
+          | Ast.ArmVariant (_, _, binding, b) ->
+              Option.iter (fun name ->
+                if Const_env.find name <> None then reject s.loc name) binding;
+              List.iter go_stmt b
           | Ast.ArmWild b            -> List.iter go_stmt b
         ) arms
     | _ -> ()
@@ -2500,7 +2882,7 @@ let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
     | Ast.For (_, _, _, _, body) | Ast.ForEach (_, _, body) -> List.iter go_stmt body
     | Ast.Match (_, arms) ->
         List.iter (function
-          | Ast.ArmVariant (_, _, b) -> List.iter go_stmt b
+          | Ast.ArmVariant (_, _, _, b) -> List.iter go_stmt b
           | Ast.ArmWild b            -> List.iter go_stmt b
         ) arms
     | _ -> ()
@@ -2508,26 +2890,31 @@ let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
   List.iter go_stmt fdef.body
 
 let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
-  check_const_shadowing fdef;
-  var_align_bytes := !global_align_bytes_baseline;  (* see its own comment *)
-  let param_tys = List.map (fun (_, ty_opt) -> of_ast_opt ty_opt) fdef.params in
-  let ret_ty    = ret_of_ast_opt fdef.ret_type in
-  (* Start with globals visible, then shadow them with params (params are mutable) *)
-  let init_env  = List.fold_left2
-    (fun m (name, _) ty -> StringMap.add name (ty, true) m)
-    genv fdef.params param_tys
-  in
-  let (_, raw_locals) = List.fold_left
-    (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs false s)
-    (init_env, StringMap.empty) fdef.body
-  in
-  check_undetermined_lets fdef raw_locals;
-  {
-    ret_type    = to_ast ret_ty;
-    param_types = List.map2 (fun (name, _) ty -> (name, to_ast ty))
-                    fdef.params param_tys;
-    local_types = StringMap.map to_ast raw_locals;
-  }
+  let previous_scope = !active_static_scope in
+  let scope = create_static_scope () in
+  active_static_scope := Some scope;
+  Fun.protect ~finally:(fun () -> active_static_scope := previous_scope) (fun () ->
+    check_const_shadowing fdef;
+    value_static_identities := StringMap.empty;
+    var_align_bytes := !global_align_bytes_baseline;  (* see its own comment *)
+    let param_tys = List.map (fun (_, ty_opt) -> of_ast_opt ty_opt) fdef.params in
+    let ret_ty    = ret_of_ast_opt fdef.ret_type in
+    (* Start with globals visible, then shadow them with params (params are mutable) *)
+    let init_env  = List.fold_left2
+      (fun m (name, _) ty -> StringMap.add name (ty, true) m)
+      genv fdef.params param_tys
+    in
+    let (_, raw_locals) = List.fold_left
+      (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs false s)
+      (init_env, StringMap.empty) fdef.body
+    in
+    check_undetermined_lets fdef raw_locals;
+    {
+      ret_type    = to_ast ret_ty;
+      param_types = List.map2 (fun (name, _) ty -> (name, to_ast ty))
+                      fdef.params param_tys;
+      local_types = StringMap.map to_ast raw_locals;
+    })
 
 (* -- Whole-program inference ----------------------------------------------- *)
 
@@ -2570,24 +2957,99 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.ExternFuncDef (n, _, _) -> claim_toplevel_name n "function"
     | Ast.LetDef (n, _, _, _, _, _, _)  -> claim_toplevel_name n "global"
     | Ast.StructDef (n, _, _, _, _, _)  -> claim_toplevel_name n "struct"
+    | Ast.OwnedStructDef (n, _, _, _, _, _, _, _, _) ->
+        claim_toplevel_name n "struct"
     | Ast.OpaqueStructDef (n, _, _, _)  -> claim_toplevel_name n "struct"
+    | Ast.ViewDef (n, _, _, _)          -> claim_toplevel_name n "view"
     | Ast.EnumDef (n, _, _, _)    -> claim_toplevel_name n "enum"
+    | Ast.VariantDef (n, _, _)     -> claim_toplevel_name n "variant"
     | Ast.UseDef _              -> ()
   ) prog;
+  Hashtbl.reset view_kinds;
+  List.iter (function
+    | Ast.ViewDef (name, kind, _, _) -> Hashtbl.replace view_kinds name kind
+    | _ -> ()) prog;
+  Hashtbl.reset variant_defs;
+  List.iter (function
+    | Ast.VariantDef (name, cases, _) -> Hashtbl.replace variant_defs name cases
+    | _ -> ()) prog;
+  Hashtbl.reset indexed_struct_params;
+  Hashtbl.reset indexed_struct_kinds;
+  List.iter (function
+    | Ast.OwnedStructDef (name, kind, params, _, _, _, _, _, _) ->
+        Hashtbl.replace indexed_struct_params name params;
+        Hashtbl.replace indexed_struct_kinds name kind
+    | _ -> ()) prog;
   let opaque_names = List.fold_left (fun names -> function
     | Ast.OpaqueStructDef (name, _, _, _) -> StringSet.add name names
     | _ -> names
   ) StringSet.empty prog in
+  let concrete_struct_names = List.fold_left (fun names -> function
+    | Ast.StructDef (name, _, _, _, _, _)
+    | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, _) ->
+        StringSet.add name names
+    | _ -> names
+  ) StringSet.empty prog in
   let affine_names = List.fold_left (fun names -> function
     | Ast.OpaqueStructDef (name, Ast.KindAffine, _, _) -> StringSet.add name names
+    | Ast.OwnedStructDef (name, Ast.KindAffine, _, _, _, _, _, _, _) ->
+        StringSet.add name names
+    | Ast.ViewDef (name, Ast.KindAffine, _, _) -> StringSet.add name names
     | _ -> names
   ) StringSet.empty prog in
   affine_opaque_names := affine_names;
   let linear_names = List.fold_left (fun names -> function
     | Ast.OpaqueStructDef (name, Ast.KindLinear, _, _) -> StringSet.add name names
+    | Ast.OwnedStructDef (name, Ast.KindLinear, _, _, _, _, _, _, _) ->
+        StringSet.add name names
+    | Ast.ViewDef (name, Ast.KindLinear, _, _) -> StringSet.add name names
     | _ -> names
   ) StringSet.empty prog in
   linear_opaque_names := linear_names;
+  Hashtbl.reset variant_kinds;
+  let join_kind a b = match a, b with
+    | Ast.KindLinear, _ | _, Ast.KindLinear -> Ast.KindLinear
+    | Ast.KindAffine, _ | _, Ast.KindAffine -> Ast.KindAffine
+    | _ -> Ast.KindPlain
+  in
+  let rec payload_kind = function
+    | Ast.TypeExists (_, _, body) -> payload_kind body
+    | Ast.TypeNamed name | Ast.TypeView name ->
+        if StringSet.mem name linear_names then Ast.KindLinear
+        else if StringSet.mem name affine_names then Ast.KindAffine
+        else (match Hashtbl.find_opt variant_kinds name with
+          | Some kind -> kind | None -> Ast.KindPlain)
+    | Ast.TypeVariant name ->
+        Option.value (Hashtbl.find_opt variant_kinds name)
+          ~default:Ast.KindPlain
+    | Ast.TypeIndexed (name, _) ->
+        Option.value (Hashtbl.find_opt indexed_struct_kinds name)
+          ~default:Ast.KindPlain
+    | Ast.TypePtr (Ast.TypeNamed name) ->
+        if StringSet.mem name linear_names then Ast.KindLinear
+        else if StringSet.mem name affine_names then Ast.KindAffine
+        else Ast.KindPlain
+    | Ast.TypeBorrow t | Ast.TypeSink t | Ast.TypeIo t
+    | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeAlignedPtr (_, t) | Ast.TypePtr t
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> payload_kind t
+    | Ast.TypeTuple ts ->
+        List.fold_left (fun kind t -> join_kind kind (payload_kind t))
+          Ast.KindPlain ts
+    | Ast.TypeFn (args, ret) ->
+        List.fold_left (fun kind t -> join_kind kind (payload_kind t))
+          (payload_kind ret) args
+    | _ -> Ast.KindPlain
+  in
+  List.iter (function
+    | Ast.VariantDef (name, cases, _) ->
+        let kind = List.fold_left (fun kind (_, payload) ->
+          match payload with
+          | None -> kind
+          | Some ty -> join_kind kind (payload_kind ty)
+        ) Ast.KindPlain cases in
+        if kind <> Ast.KindPlain then Hashtbl.replace variant_kinds name kind
+    | _ -> ()) prog;
   global_align_bytes_baseline := List.fold_left (fun m -> function
     | Ast.LetDef (name, _, _, Some n, _, _, _) -> StringMap.add name n m
     | _ -> m
@@ -2602,6 +3064,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset private_opaque_types;
   Hashtbl.reset private_struct_fields;
   Hashtbl.reset private_struct_lit;
+  Hashtbl.reset private_views;
   List.iter (function
     | Ast.OpaqueStructDef (name, _, true, loc) ->
         Hashtbl.replace private_opaque_types name loc.Lexing.pos_fname
@@ -2610,8 +3073,91 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         List.iter (fun f ->
           Hashtbl.replace private_struct_fields (sname, f) loc.Lexing.pos_fname
         ) privs
+    | Ast.OwnedStructDef (sname, _, _, _, _, _, privs, is_private, loc) ->
+        if is_private || privs <> [] then
+          Hashtbl.replace private_struct_lit sname loc.Lexing.pos_fname;
+        List.iter (fun f ->
+          Hashtbl.replace private_struct_fields (sname, f) loc.Lexing.pos_fname
+        ) privs
+    | Ast.ViewDef (name, _, true, loc) ->
+        Hashtbl.replace private_views name loc.Lexing.pos_fname
     | _ -> ()
   ) prog;
+  let validation_static_scope : (string, Ast.type_expr) Hashtbl.t option ref =
+    ref None in
+  let allow_implicit_static = ref false in
+  let static_sort_of_value loc = function
+    | Ast.TypeRefined (_, _, base) -> base
+    | (Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32 | Ast.TypeI64
+      | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64
+      | Ast.TypeIsize | Ast.TypeUsize) as t -> t
+    | t -> raise (TypeError (loc, Printf.sprintf
+        "singleton '@' requires an integer runtime type, got %s"
+        (Types.to_string (Types.of_ast t))))
+  in
+  let check_static_const loc sort n =
+    let fits = match sort with
+      | Ast.TypeU8 -> n >= 0 && n < 256
+      | Ast.TypeU16 -> n >= 0 && n < 65536
+      | Ast.TypeU32 | Ast.TypeU64 | Ast.TypeUsize -> n >= 0
+      | Ast.TypeI8 -> n >= -128 && n < 128
+      | Ast.TypeI16 -> n >= -32768 && n < 32768
+      | Ast.TypeI32 | Ast.TypeI64 | Ast.TypeIsize -> true
+      | _ -> false
+    in
+    if not fits then raise (TypeError (loc, Printf.sprintf
+      "static integer %d does not fit its declared sort" n))
+  in
+  let check_static_arg loc sort = function
+    | Ast.StaticInt n -> check_static_const loc sort n
+    | Ast.StaticName name ->
+        (match !validation_static_scope with
+         | None -> raise (TypeError (loc, Printf.sprintf
+             "static name '%s' is not in scope" name))
+         | Some scope ->
+             (match Hashtbl.find_opt scope name with
+              | Some old when old <> sort ->
+                  raise (TypeError (loc, Printf.sprintf
+                    "static name '%s' is used with inconsistent integer sorts" name))
+              | Some _ -> ()
+              | None when !allow_implicit_static -> Hashtbl.add scope name sort
+              | None -> raise (TypeError (loc, Printf.sprintf
+                  "static name '%s' is not bound by this function signature or struct"
+                  name))))
+  in
+  let rec validate_static_type loc ty =
+    match ty with
+    | Ast.TypeExists _ ->
+        raise (TypeError (loc,
+          "exists is only valid as the outermost payload type of a variant case in Slice 3"))
+    | Ast.TypeNamed name when Hashtbl.mem indexed_struct_params name ->
+        let arity = List.length (Hashtbl.find indexed_struct_params name) in
+        raise (TypeError (loc, Printf.sprintf
+          "indexed struct '%s' requires %d static argument(s); write %s[...]"
+          name arity name))
+    | Ast.TypeIndexed (name, args) ->
+        (match Hashtbl.find_opt indexed_struct_params name with
+         | None -> raise (TypeError (loc, Printf.sprintf
+             "'%s' is not an indexed runtime struct" name))
+         | Some formals ->
+             if List.length args <> List.length formals then
+               raise (TypeError (loc, Printf.sprintf
+                 "indexed struct '%s' expects %d static argument(s), got %d"
+                 name (List.length formals) (List.length args)));
+             List.iter2 (fun arg (_, sort) -> check_static_arg loc sort arg)
+               args formals)
+    | Ast.TypeSingleton (base, arg) ->
+        validate_static_type loc base;
+        check_static_arg loc (static_sort_of_value loc base) arg
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> validate_static_type loc t
+    | Ast.TypeFn (args, ret) ->
+        List.iter (validate_static_type loc) args;
+        validate_static_type loc ret
+    | Ast.TypeTuple ts -> List.iter (validate_static_type loc) ts
+    | _ -> ()
+  in
   let rec validate_complete_type loc behind_ptr = function
     | Ast.TypeNamed name when StringSet.mem name opaque_names && not behind_ptr ->
         raise (TypeError (loc, Printf.sprintf
@@ -2624,7 +3170,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         List.iter (validate_complete_type loc false) args;
         validate_complete_type loc false ret
     | Ast.TypeRefined (_, _, base) -> validate_complete_type loc false base
-    | Ast.TypeBorrow inner | Ast.TypeSink inner -> validate_complete_type loc behind_ptr inner
+    | Ast.TypeBorrow inner | Ast.TypeSink inner
+    | Ast.TypeSingleton (inner, _) -> validate_complete_type loc behind_ptr inner
+    | Ast.TypeExists (_, _, inner) -> validate_complete_type loc behind_ptr inner
+    | Ast.TypeIndexed _ -> ()
     | _ -> ()
   in
   let rec contains_borrow = function
@@ -2633,7 +3182,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeTuple ts -> List.exists contains_borrow ts
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> contains_borrow t
     | Ast.TypeFn (args, ret) -> List.exists contains_borrow args || contains_borrow ret
-    | Ast.TypeRefined (_, _, base) -> contains_borrow base
+    | Ast.TypeRefined (_, _, base) | Ast.TypeSingleton (base, _) -> contains_borrow base
+    | Ast.TypeExists (_, _, body) -> contains_borrow body
     | _ -> false
   in
   let is_kinded name =
@@ -2647,11 +3197,110 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      load-bearing enforcement; these declaration bans reject the storage
      shapes up front so the error points at the declaration. *)
   let rec type_mentions_linear = function
-    | Ast.TypeNamed n -> StringSet.mem n linear_names
+    | Ast.TypeNamed n | Ast.TypeView n -> StringSet.mem n linear_names
+    | Ast.TypeIndexed (n, _) -> StringSet.mem n linear_names
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
+    | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_linear t
     | Ast.TypeTuple ts -> List.exists type_mentions_linear ts
+    | Ast.TypeVariant name ->
+        Hashtbl.find_opt variant_kinds name = Some Ast.KindLinear
+    | Ast.TypeExists (_, _, body) -> type_mentions_linear body
+    | _ -> false
+  in
+  let rec type_mentions_view = function
+    | Ast.TypeView _ -> true
+    | Ast.TypeNamed name -> Hashtbl.mem view_kinds name
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
+    | Ast.TypeSlice (t, _) -> type_mentions_view t
+    | Ast.TypeTuple ts -> List.exists type_mentions_view ts
+    | Ast.TypeFn (args, ret) ->
+        List.exists type_mentions_view args || type_mentions_view ret
+    | Ast.TypeExists (_, _, body) -> type_mentions_view body
+    | _ -> false
+  in
+  let is_direct_view_type ty = match resolve_declared_type ty with
+    | Ast.TypeView _ -> true
+    | _ -> false
+  in
+  let rec type_mentions_variant = function
+    | Ast.TypeVariant _ -> true
+    | Ast.TypeNamed name -> Hashtbl.mem variant_defs name
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
+    | Ast.TypeSlice (t, _) -> type_mentions_variant t
+    | Ast.TypeTuple ts -> List.exists type_mentions_variant ts
+    | Ast.TypeFn (args, ret) ->
+        List.exists type_mentions_variant args || type_mentions_variant ret
+    | Ast.TypeExists (_, _, body) -> type_mentions_variant body
+    | _ -> false
+  in
+  let is_direct_variant_type ty = match resolve_declared_type ty with
+    | Ast.TypeVariant _ -> true
+    | _ -> false
+  in
+  let rec type_mentions_exists = function
+    | Ast.TypeExists _ -> true
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
+    | Ast.TypeSlice (t, _) -> type_mentions_exists t
+    | Ast.TypeTuple ts -> List.exists type_mentions_exists ts
+    | Ast.TypeFn (args, ret) ->
+        List.exists type_mentions_exists args || type_mentions_exists ret
+    | _ -> false
+  in
+  let rec type_mentions_indexed_owner = function
+    | Ast.TypeIndexed (name, _) -> Hashtbl.mem indexed_struct_kinds name
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
+    | Ast.TypeSlice (t, _) -> type_mentions_indexed_owner t
+    | Ast.TypeTuple ts -> List.exists type_mentions_indexed_owner ts
+    | Ast.TypeFn (args, ret) ->
+        List.exists type_mentions_indexed_owner args || type_mentions_indexed_owner ret
+    | Ast.TypeExists (_, _, body) -> type_mentions_indexed_owner body
+    | _ -> false
+  in
+  let rec type_mentions_singleton = function
+    | Ast.TypeSingleton _ -> true
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
+    | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_singleton t
+    | Ast.TypeTuple ts -> List.exists type_mentions_singleton ts
+    | Ast.TypeFn (args, ret) ->
+        List.exists type_mentions_singleton args || type_mentions_singleton ret
+    | Ast.TypeExists (_, _, body) -> type_mentions_singleton body
+    | _ -> false
+  in
+  let rec singleton_under_storage inside = function
+    | Ast.TypeSingleton _ -> inside
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeAlignedPtr (_, t)
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) ->
+        singleton_under_storage true t
+    | Ast.TypeBorrow t | Ast.TypeSink t | Ast.TypeRefined (_, _, t) ->
+        singleton_under_storage inside t
+    | Ast.TypeTuple ts -> List.exists (singleton_under_storage inside) ts
+    | Ast.TypeFn (args, ret) ->
+        List.exists (singleton_under_storage false) args
+        || singleton_under_storage false ret
+    | _ -> false
+  in
+  let rec indexed_owner_under_indirection inside = function
+    | Ast.TypeIndexed (name, _) -> inside && Hashtbl.mem indexed_struct_kinds name
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeAlignedPtr (_, t)
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) ->
+        indexed_owner_under_indirection true t
+    | Ast.TypeFn (args, ret) ->
+        List.exists (indexed_owner_under_indirection true) args
+        || indexed_owner_under_indirection true ret
+    | Ast.TypeBorrow t | Ast.TypeSink t | Ast.TypeRefined (_, _, t)
+    | Ast.TypeSingleton (t, _) -> indexed_owner_under_indirection inside t
+    | Ast.TypeTuple ts -> List.exists (indexed_owner_under_indirection inside) ts
     | _ -> false
   in
   (* OWNERSHIP_KERNEL.md 5.9: tuples are values, not storage. A tuple type
@@ -2666,13 +3315,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         tuple_under_indirection true t
     | Ast.TypeBorrow t | Ast.TypeSink t | Ast.TypeRefined (_, _, t) ->
         tuple_under_indirection inside t
+    | Ast.TypeSingleton (t, _) -> tuple_under_indirection inside t
     | _ -> false
   in
   let rec type_mentions_tuple = function
     | Ast.TypeTuple _ -> true
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
+    | Ast.TypeSingleton (t, _)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_tuple t
+    | Ast.TypeExists (_, _, body) -> type_mentions_tuple body
     | _ -> false
   in
   let rec linear_inside_container = function
@@ -2680,30 +3332,81 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t) ->
         linear_inside_container t
+    | Ast.TypeSingleton (t, _) -> linear_inside_container t
     | Ast.TypeTuple ts -> List.exists linear_inside_container ts
     | _ -> false
   in
-  let validate_param_type loc = function
+  let validate_param_type loc ty =
+    validate_static_type loc ty;
+    match ty with
+    | Ast.TypeBorrow (Ast.TypeNamed name as inner)
+      when Hashtbl.mem view_kinds name -> validate_complete_type loc false inner
+    | Ast.TypeBorrow (Ast.TypeView name as inner)
+      when Hashtbl.mem view_kinds name -> validate_complete_type loc false inner
     | Ast.TypeBorrow (Ast.TypePtr (Ast.TypeNamed name) as inner)
       when is_kinded name -> validate_complete_type loc false inner
+    | Ast.TypeBorrow (Ast.TypeIndexed (name, _) as inner)
+      when is_kinded name -> validate_complete_type loc false inner
+    | Ast.TypeBorrow (Ast.TypeNamed name as inner)
+      when Hashtbl.mem variant_kinds name -> validate_complete_type loc false inner
+    | Ast.TypeBorrow (Ast.TypeVariant name as inner)
+      when Hashtbl.mem variant_kinds name -> validate_complete_type loc false inner
     | Ast.TypeBorrow _ ->
         raise (TypeError (loc,
-          "borrow is only valid on a pointer to an affine/linear opaque struct parameter"))
+          "borrow is only valid on an affine/linear opaque pointer, indexed owner, erased view, or kinded variant parameter"))
+    | Ast.TypeSink (Ast.TypeNamed name as inner)
+      when Hashtbl.mem view_kinds name -> validate_complete_type loc false inner
+    | Ast.TypeSink (Ast.TypeView name as inner)
+      when Hashtbl.mem view_kinds name -> validate_complete_type loc false inner
     | Ast.TypeSink (Ast.TypePtr (Ast.TypeNamed name) as inner)
       when is_kinded name -> validate_complete_type loc false inner
+    | Ast.TypeSink (Ast.TypeIndexed (name, _) as inner)
+      when is_kinded name -> validate_complete_type loc false inner
+    | Ast.TypeSink (Ast.TypeNamed name as inner)
+      when Hashtbl.mem variant_kinds name -> validate_complete_type loc false inner
+    | Ast.TypeSink (Ast.TypeVariant name as inner)
+      when Hashtbl.mem variant_kinds name -> validate_complete_type loc false inner
     | Ast.TypeSink _ ->
         raise (TypeError (loc,
-          "sink is only valid on a pointer to an affine/linear opaque struct parameter"))
+          "sink is only valid on an affine/linear opaque pointer, indexed owner, erased view, or kinded variant parameter"))
     | ty ->
+        if contains_borrow ty then
+          raise (TypeError (loc,
+            "borrow/sink must wrap the entire function parameter type"));
+        if type_mentions_view ty && not (is_direct_view_type ty) then
+          raise (TypeError (loc,
+            "an erased view must be the entire function parameter type; it cannot live inside a runtime container or function pointer"));
+        if type_mentions_variant ty && not (is_direct_variant_type ty) then
+          raise (TypeError (loc,
+            "a variant must be the entire function parameter type in Slice 3"));
+        if type_mentions_exists ty then
+          raise (TypeError (loc,
+            "exists is opened by matching a variant payload; it is not a direct parameter type in Slice 3"));
         if tuple_under_indirection false ty then
           raise (TypeError (loc,
             "a tuple cannot live behind a pointer or inside an array/slice: \
              tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
+        if indexed_owner_under_indirection false ty then
+          raise (TypeError (loc,
+            "an indexed owner cannot live behind a pointer or inside storage"));
+        if singleton_under_storage false ty then
+          raise (TypeError (loc,
+            "a singleton value cannot live behind a pointer or inside array/slice storage"));
         validate_complete_type loc false ty
   in
   let validate_nonparam_type loc ty =
+    validate_static_type loc ty;
     if contains_borrow ty then
       raise (TypeError (loc, "borrow/sink is only valid in function parameter types"));
+    if type_mentions_view ty && not (is_direct_view_type ty) then
+      raise (TypeError (loc,
+        "an erased view cannot live inside a runtime container or function pointer"));
+    if type_mentions_variant ty && not (is_direct_variant_type ty) then
+      raise (TypeError (loc,
+        "a variant cannot live inside another runtime container in Slice 3"));
+    if type_mentions_exists ty then
+      raise (TypeError (loc,
+        "exists is only valid as a variant payload type in Slice 3"));
     if tuple_under_indirection false ty then
       raise (TypeError (loc,
         "a tuple cannot live behind a pointer or inside an array/slice: \
@@ -2712,20 +3415,31 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       raise (TypeError (loc,
         "a linear value cannot live inside an array/slice: it would escape \
          obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will lift this)"));
+    if indexed_owner_under_indirection false ty then
+      raise (TypeError (loc,
+        "an indexed owner cannot live behind a pointer, function pointer, array, or slice"));
+    if singleton_under_storage false ty then
+      raise (TypeError (loc,
+        "a singleton value cannot live behind a pointer or inside array/slice storage"));
     validate_complete_type loc false ty
   in
   let rec validate_expr_types (e : Ast.expr) =
     (match e.desc with
      | Ast.Cast (ty, x) -> validate_nonparam_type e.loc ty; validate_expr_types x
-     | Ast.SizeOf ty | Ast.OffsetOf (ty, _) -> validate_nonparam_type e.loc ty
+     | Ast.SizeOf ty | Ast.OffsetOf (ty, _) ->
+         if type_mentions_view ty then
+           raise (TypeError (e.loc,
+             "an erased view has no runtime size or layout"));
+         validate_nonparam_type e.loc ty
      | Ast.BinOp (_, a, b) -> validate_expr_types a; validate_expr_types b
      | Ast.Bnot x | Ast.Deref x | Ast.AddrOf x | Ast.FieldGet (x, _)
      | Ast.Unsafe x -> validate_expr_types x
      | Ast.Call (_, xs) | Ast.StructLit xs | Ast.TupleLit xs -> List.iter validate_expr_types xs
+     | Ast.VariantCtor (_, _, payload) -> validate_expr_types payload
      | Ast.Index (_, i) -> validate_expr_types i
      | Ast.SliceOf (_, lo, hi) -> validate_expr_types lo; validate_expr_types hi
      | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.Var _
-     | Ast.EnumVariant _ -> ())
+     | Ast.EnumVariant _ | Ast.ViewLit _ -> ())
   and validate_stmt_types (s : Ast.stmt) =
     (match s.desc with
      | Ast.Let (_, _, ty, init, _) ->
@@ -2750,16 +3464,22 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          validate_expr_types e; List.iter validate_stmt_types body
      | Ast.Match (e, arms) ->
          validate_expr_types e;
-         List.iter (function Ast.ArmVariant (_, _, b) | Ast.ArmWild b ->
+         List.iter (function Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b ->
            List.iter validate_stmt_types b) arms
      | Ast.Break | Ast.Continue -> ())
   in
   List.iter (function
     | Ast.FuncDef f ->
+        let scope = Hashtbl.create 8 in
+        validation_static_scope := Some scope;
+        allow_implicit_static := true;
         List.iter (fun (_, ty) -> Option.iter (validate_param_type f.def_loc) ty) f.params;
         Option.iter (validate_nonparam_type f.def_loc) f.ret_type;
+        allow_implicit_static := false;
         List.iter validate_stmt_types f.body
     | Ast.ExternFuncDef (name, params, ret) ->
+        validation_static_scope := Some (Hashtbl.create 8);
+        allow_implicit_static := true;
         List.iter (fun (pname, ty) -> match ty with
           | Some t -> validate_param_type Lexing.dummy_pos t
           | None -> raise (TypeError (Lexing.dummy_pos, Printf.sprintf
@@ -2769,7 +3489,21 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         ) params;
         Option.iter (validate_nonparam_type Lexing.dummy_pos) ret
     | Ast.LetDef (gname, ty, init, _, _, _, gloc) ->
+        validation_static_scope := None;
+        allow_implicit_static := false;
         Option.iter (fun t ->
+          if type_mentions_view t then
+            raise (TypeError (gloc, Printf.sprintf
+              "global '%s' cannot hold an erased view" gname));
+          if type_mentions_variant t then
+            raise (TypeError (gloc, Printf.sprintf
+              "global '%s' cannot hold a variant in Slice 3" gname));
+          if type_mentions_indexed_owner t then
+            raise (TypeError (gloc, Printf.sprintf
+              "global '%s' cannot hold an indexed owner" gname));
+          if type_mentions_singleton t then
+            raise (TypeError (gloc, Printf.sprintf
+              "global '%s' cannot hold a singleton value in Slice 1" gname));
           if type_mentions_linear t then
             raise (TypeError (gloc, Printf.sprintf
               "global '%s' cannot hold a linear value: it would escape \
@@ -2782,7 +3516,23 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           validate_nonparam_type gloc t) ty;
         Option.iter validate_expr_types init
     | Ast.StructDef (sname, fields, _, _, _, sloc) ->
+        validation_static_scope := None;
+        allow_implicit_static := false;
         List.iter (fun (fname, ty) ->
+          if type_mentions_view ty then
+            raise (TypeError (sloc, Printf.sprintf
+              "struct field '%s.%s' cannot hold an erased view" sname fname));
+          if type_mentions_variant ty then
+            raise (TypeError (sloc, Printf.sprintf
+              "struct field '%s.%s' cannot hold a variant in Slice 3"
+              sname fname));
+          if type_mentions_indexed_owner ty then
+            raise (TypeError (sloc, Printf.sprintf
+              "struct field '%s.%s' cannot hold an indexed owner" sname fname));
+          if type_mentions_singleton ty then
+            raise (TypeError (sloc, Printf.sprintf
+              "ordinary struct field '%s.%s' cannot hold a singleton value in Slice 1"
+              sname fname));
           if type_mentions_linear ty then
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot hold a linear value: it would \
@@ -2793,10 +3543,111 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               "struct field '%s.%s' cannot hold a tuple: tuples are values, \
                not storage (OWNERSHIP_KERNEL.md 5.9)" sname fname));
           validate_nonparam_type sloc ty) fields
-    | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _ -> ()) prog;
+    | Ast.OwnedStructDef (sname, _, params, fields, _, _, _, _, sloc) ->
+        let scope = Hashtbl.create 8 in
+        List.iter (fun (name, sort) ->
+          if Hashtbl.mem scope name then
+            raise (TypeError (sloc, Printf.sprintf
+              "duplicate static parameter '%s' on struct '%s'" name sname));
+          Hashtbl.add scope name sort
+        ) params;
+        validation_static_scope := Some scope;
+        allow_implicit_static := false;
+        List.iter (fun (fname, ty) ->
+          if type_mentions_view ty then
+            raise (TypeError (sloc, Printf.sprintf
+              "struct field '%s.%s' cannot hold a nested erased view"
+              sname fname));
+          if type_mentions_variant ty then
+            raise (TypeError (sloc, Printf.sprintf
+              "struct field '%s.%s' cannot hold a nested variant"
+              sname fname));
+          if type_mentions_indexed_owner ty then
+            raise (TypeError (sloc, Printf.sprintf
+              "struct field '%s.%s' cannot hold a nested indexed owner"
+              sname fname));
+          if type_mentions_linear ty then
+            raise (TypeError (sloc, Printf.sprintf
+              "struct field '%s.%s' cannot hold a nested linear value"
+              sname fname));
+          if type_mentions_tuple ty then
+            raise (TypeError (sloc, Printf.sprintf
+              "struct field '%s.%s' cannot hold a tuple" sname fname));
+          if singleton_under_storage false ty then
+            raise (TypeError (sloc, Printf.sprintf
+              "indexed owner field '%s.%s' cannot nest a singleton inside storage"
+              sname fname));
+          validate_nonparam_type sloc ty) fields
+    | Ast.VariantDef (vname, cases, vloc) ->
+        if cases = [] then
+          raise (TypeError (vloc, Printf.sprintf
+            "variant '%s' must declare at least one case" vname));
+        let seen = Hashtbl.create 8 in
+        List.iter (fun (cname, payload) ->
+          if Hashtbl.mem seen cname then
+            raise (TypeError (vloc, Printf.sprintf
+              "duplicate case '%s::%s'" vname cname));
+          Hashtbl.add seen cname ();
+          Option.iter (fun schema ->
+            if contains_borrow schema then
+              raise (TypeError (vloc, Printf.sprintf
+                "variant payload '%s::%s' cannot contain borrow/sink"
+                vname cname));
+            if type_mentions_tuple schema then
+              raise (TypeError (vloc, Printf.sprintf
+                "variant payload '%s::%s' cannot contain a tuple in Slice 3"
+                vname cname));
+            if type_mentions_variant schema then
+              raise (TypeError (vloc, Printf.sprintf
+                "variant payload '%s::%s' cannot nest another variant in Slice 3"
+                vname cname));
+            let runtime_schema = match schema with
+              | Ast.TypeExists (_, _, body) -> resolve_declared_type body
+              | body -> resolve_declared_type body
+            in
+            (match runtime_schema with
+             | Ast.TypeNamed name when StringSet.mem name concrete_struct_names ->
+                 raise (TypeError (vloc, Printf.sprintf
+                   "variant payload '%s::%s' cannot be a concrete struct in Slice 3; aggregate payload ownership is not implemented"
+                   vname cname))
+             | Ast.TypeArray _ ->
+                 raise (TypeError (vloc, Printf.sprintf
+                   "variant payload '%s::%s' cannot be an array in Slice 3; pass a slice or pointer instead"
+                   vname cname))
+             | _ -> ());
+            (match schema with
+             | Ast.TypeExists (name, sort, body) ->
+                 (match sort with
+                  | Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32 | Ast.TypeI64
+                  | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64
+                  | Ast.TypeIsize | Ast.TypeUsize -> ()
+                  | _ -> raise (TypeError (vloc,
+                      "existential static binders require an integer sort in Slice 3")));
+                 (match resolve_declared_type body with
+                  | Ast.TypeIndexed _ -> ()
+                  | _ -> raise (TypeError (vloc, Printf.sprintf
+                      "existential payload '%s::%s' must package an indexed runtime owner in Slice 3"
+                      vname cname)));
+                 let scope = Hashtbl.create 4 in
+                 Hashtbl.add scope name sort;
+                 validation_static_scope := Some scope;
+                 allow_implicit_static := false;
+                 validate_static_type vloc body;
+                 validate_complete_type vloc false body
+             | body ->
+                 validation_static_scope := Some (Hashtbl.create 0);
+                 allow_implicit_static := false;
+                 validate_static_type vloc body;
+                 validate_complete_type vloc false body)
+          ) payload
+        ) cases;
+        validation_static_scope := None
+    | Ast.OpaqueStructDef _ | Ast.ViewDef _ | Ast.EnumDef _ | Ast.UseDef _ -> ()) prog;
   (* Pass 0: collect struct and enum definitions *)
   let senv = List.fold_left (fun m -> function
     | Ast.StructDef (name, fields, is_packed, align_opt, _, _) ->
+        StringMap.add name (fields, is_packed, align_opt) m
+    | Ast.OwnedStructDef (name, _, _, fields, is_packed, align_opt, _, _, _) ->
         StringMap.add name (fields, is_packed, align_opt) m
     | _ -> m
   ) StringMap.empty prog in
@@ -2822,7 +3673,26 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       raise (TypeError (loc,
         Printf.sprintf "'%s' is a compiler builtin and cannot be redefined" name))
   in
+  let rec erase_static_for_abi = function
+    | Ast.TypeSingleton (t, _) -> erase_static_for_abi t
+    | Ast.TypeIndexed (name, _) -> Ast.TypeNamed name
+    | Ast.TypePtr t -> Ast.TypePtr (erase_static_for_abi t)
+    | Ast.TypeIo t -> Ast.TypeIo (erase_static_for_abi t)
+    | Ast.TypeArray (t, n) -> Ast.TypeArray (erase_static_for_abi t, n)
+    | Ast.TypeSlice (t, n) -> Ast.TypeSlice (erase_static_for_abi t, n)
+    | Ast.TypeBorrow t -> Ast.TypeBorrow (erase_static_for_abi t)
+    | Ast.TypeSink t -> Ast.TypeSink (erase_static_for_abi t)
+    | Ast.TypeAlignedPtr (n, t) -> Ast.TypeAlignedPtr (n, erase_static_for_abi t)
+    | Ast.TypeFn (args, ret) ->
+        Ast.TypeFn (List.map erase_static_for_abi args, erase_static_for_abi ret)
+    | Ast.TypeTuple ts -> Ast.TypeTuple (List.map erase_static_for_abi ts)
+    | Ast.TypeRefined (lo, hi, base) ->
+        Ast.TypeRefined (lo, hi, erase_static_for_abi base)
+    | Ast.TypeExists (_, _, body) -> erase_static_for_abi body
+    | t -> t
+  in
   let type_code t =
+    let t = erase_static_for_abi t in
     match t with
     | Ast.TypeBool -> "bool"
     | Ast.TypeI8 -> "i8" | Ast.TypeI16 -> "i16" | Ast.TypeI32 -> "i32" | Ast.TypeI64 -> "i64"
@@ -2897,8 +3767,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let fenv = List.fold_left (fun m -> function
     | Ast.FuncDef fdef ->
         check_reserved_fn fdef.def_loc fdef.name;
-        let pts = List.map (fun (_, t) -> of_ast_opt t) fdef.params in
-        let rt  = ret_of_ast_opt fdef.ret_type in
+        let scope = create_static_scope () in
+        let pts = List.map (fun (_, t) -> of_ast_opt_in_decl_scope scope t) fdef.params in
+        let rt  = ret_of_ast_opt_in_decl_scope scope fdef.ret_type in
         let key = overload_key fdef.name fdef.params in
         register_definition fdef.def_loc key fdef.name;
         let old = Option.value (StringMap.find_opt fdef.name m) ~default:[] in
@@ -2909,8 +3780,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         if Option.value (StringMap.find_opt name fn_occurrences) ~default:0 > 1 then
           raise (TypeError (Lexing.dummy_pos, Printf.sprintf
             "extern function '%s' cannot be overloaded" name));
-        let pts = List.map (fun (_, t) -> of_ast_opt t) params in
-        let rt  = ret_of_ast_opt ret_ty in
+        let scope = create_static_scope () in
+        let pts = List.map (fun (_, t) -> of_ast_opt_in_decl_scope scope t) params in
+        let rt  = ret_of_ast_opt_in_decl_scope scope ret_ty in
         let key = overload_key name params in
         register_definition Lexing.dummy_pos key name;
         let old = Option.value (StringMap.find_opt name m) ~default:[] in
@@ -2918,8 +3790,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add name ((key, TFun (pts, rt)) :: old) m
     | Ast.LetDef _    -> m
     | Ast.StructDef _ -> m
+    | Ast.OwnedStructDef _ -> m
     | Ast.OpaqueStructDef _ -> m
+    | Ast.ViewDef _ -> m
     | Ast.EnumDef _   -> m
+    | Ast.VariantDef _ -> m
     | Ast.UseDef _    -> m
   ) StringMap.empty prog in
   (* Global mutability: plain `let` = immutable compile-time constant, `let mut` = variable.
@@ -2936,8 +3811,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.FuncDef _                -> m
     | Ast.ExternFuncDef _          -> m
     | Ast.StructDef _              -> m
+    | Ast.OwnedStructDef _         -> m
     | Ast.OpaqueStructDef _        -> m
+    | Ast.ViewDef _                -> m
     | Ast.EnumDef _                -> m
+    | Ast.VariantDef _             -> m
     | Ast.UseDef _                 -> m
   ) StringMap.empty prog in
   (* Pass 2: check global initializers.
@@ -3006,6 +3884,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   raise (TypeError (loc, Printf.sprintf "Unbound variable: %s" vname)))
          | Some e ->
              let et = infer_expr senv eenv genv fenv e in
+             if contains_view_ty et then
+               raise (TypeError (e.loc, Printf.sprintf
+                 "global '%s' cannot hold an erased view" name));
+             if contains_variant_ty et then
+               raise (TypeError (e.loc, Printf.sprintf
+                 "global '%s' cannot hold a variant in Slice 3" name));
              (* GitHub issue #77: `unify et (strip_io ty)` -- actual
                 (initializer) type first, declared annotation second --
                 matching the "actual, expected" convention every other
@@ -3048,7 +3932,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add key (infer_func senv eenv fenv genv fdef) m
     | _ -> m
   ) StringMap.empty prog in
-  (* Restricted affine/linear checking for pointers to `affine opaque
+  (* Function-local affine/linear checking for kinded values.
      struct` / `linear opaque struct`. This deliberately stops short of a
      general ownership system: values are tracked per named local within a
      single function. `borrow T` is parameter-only and makes calls through
@@ -3061,10 +3945,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      release function apart from an accidental no-op that silently drops
      the handle -- `sink` makes that distinction an explicit declaration).
 
-     AFFINE: use at most once; must be consumed on at least one path
-     (union semantics -- the null-sentinel conditional-consumption idiom,
-     `if ((p as usize) != 0) { release(p); }`, depends on this weakness;
-     see the scope-end check's comment below).
+     AFFINE: use at most once and may be dropped (standard weakening).
      LINEAR (OWNERSHIP_KERNEL.md Stage 1, GitHub issue #117): use exactly
      once on EVERY path (intersection semantics). Additional linear-only
      rules enforced here: reassignment over a live obligation is rejected;
@@ -3074,22 +3955,29 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      and the storage bans (fields/slots/globals) live in infer_expr/
      infer_stmt where full types are available, not in this walk.
 
-     Both kinds share one walk carrying a `consume_sets` pair: c_any is
-     the union-at-merges moved set affine has always used (governs
-     double-consume for both kinds, and affine's weak must-consume);
-     c_all is the intersection-at-merges set (membership = consumed on
-     every path reaching this point), which every linear check reads. *)
+     Both kinds share one walk carrying a `consume_sets` value. Its
+     maybe-consumed component is unioned at merges (governing double-use
+     for both kinds), while its must-be-consumed component is intersected
+     (governing linear discharge on every path). *)
   let rec strip_borrow = function
     | Ast.TypeBorrow t | Ast.TypeSink t -> strip_borrow t
     | t -> t
   in
   let rec is_affine_type ty = match strip_borrow ty with
     | Ast.TypePtr (Ast.TypeNamed name) -> StringSet.mem name affine_names
+    | Ast.TypeIndexed (name, _) -> StringSet.mem name affine_names
+    | Ast.TypeNamed name | Ast.TypeView name | Ast.TypeVariant name ->
+        Hashtbl.find_opt view_kinds name = Some Ast.KindAffine
+        || Hashtbl.find_opt variant_kinds name = Some Ast.KindAffine
     | Ast.TypeTuple ts -> List.exists is_affine_type ts
     | _ -> false
   in
   let rec is_linear_type ty = match strip_borrow ty with
     | Ast.TypePtr (Ast.TypeNamed name) -> StringSet.mem name linear_names
+    | Ast.TypeIndexed (name, _) -> StringSet.mem name linear_names
+    | Ast.TypeNamed name | Ast.TypeView name | Ast.TypeVariant name ->
+        Hashtbl.find_opt view_kinds name = Some Ast.KindLinear
+        || Hashtbl.find_opt variant_kinds name = Some Ast.KindLinear
     | Ast.TypeTuple ts -> List.exists is_linear_type ts
     | _ -> false
   in
@@ -3098,6 +3986,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.FuncDef f ->
         StringMap.add (overload_key f.name f.params) (List.map snd f.params) m
     | Ast.ExternFuncDef (name, params, _) -> StringMap.add name (List.map snd params) m
+    | _ -> m
+  ) StringMap.empty prog in
+  let call_returns = List.fold_left (fun m -> function
+    | Ast.FuncDef f ->
+        let key = overload_key f.name f.params in
+        let ret = (StringMap.find key functions).ret_type in
+        StringMap.add key ret m
+    | Ast.ExternFuncDef (name, _, ret) ->
+        StringMap.add name (Option.value ret ~default:Ast.TypeVoid) m
     | _ -> m
   ) StringMap.empty prog in
   let check_affine_func fdef =
@@ -3172,16 +4069,22 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Some (Ast.TypeBorrow _) | Some (Ast.TypeSink _) -> PathSet.add (PVar name) s
       | _ -> s
     ) PathSet.empty fdef.params in
-    let mv_empty = { c_any = PathSet.empty; c_all = PathSet.empty } in
-    let mv_consume p m =
-      { c_any = PathSet.add p m.c_any; c_all = PathSet.add p m.c_all } in
-    let mv_clear p m =
-      { c_any = PathSet.remove p m.c_any; c_all = PathSet.remove p m.c_all } in
-    let mv_merge a b =
-      { c_any = PathSet.union a.c_any b.c_any;
-        c_all = PathSet.inter a.c_all b.c_all } in
+    let borrowed_params = List.fold_left (fun s (name, ty_opt) ->
+      match ty_opt with
+      | Some (Ast.TypeBorrow _) -> PathSet.add (PVar name) s
+      | _ -> s
+    ) PathSet.empty fdef.params in
+    let sink_params = List.fold_left (fun s (name, ty_opt) ->
+      match ty_opt with
+      | Some (Ast.TypeSink _) -> PathSet.add (PVar name) s
+      | _ -> s
+    ) PathSet.empty fdef.params in
+    let mv_empty = ResourceFlow.empty in
+    let mv_consume = ResourceFlow.consume in
+    let mv_clear = ResourceFlow.produce in
+    let mv_merge = ResourceFlow.join_branches in
     let require_available loc moved p =
-      if is_tracked_path p && PathSet.mem p moved.c_any then
+      if is_tracked_path p && ResourceFlow.may_be_consumed p moved then
         raise (TypeError (loc, Printf.sprintf
           "%s value '%s' was already consumed" (kind_word p) (path_to_string p)))
     in
@@ -3200,7 +4103,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let require_no_pending_linear loc what moved declared =
       PathSet.iter (fun p ->
         if is_linear_path p && not (PathSet.mem p exempt_params)
-           && not (PathSet.mem p moved.c_all) then
+           && not (ResourceFlow.is_consumed_on_all_paths p moved) then
           raise (TypeError (loc, Printf.sprintf
             "linear value '%s' is still pending at this %s (it must be \
              consumed on every path)" (path_to_string p) what))
@@ -3208,9 +4111,20 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     in
     let rec check_expr moved consume (e : Ast.expr) =
       match e.desc with
+      | Ast.ViewLit name ->
+          if Hashtbl.find_opt view_kinds name = Some Ast.KindLinear
+             && not consume then
+            raise (TypeError (e.loc, Printf.sprintf
+              "linear erased view '%s' must be moved into an owning binding or consumer"
+              name));
+          moved
       | Ast.Var name ->
           let p = PVar name in
           require_available e.loc moved p;
+          if consume && PathSet.mem p borrowed_params then
+            raise (TypeError (e.loc, Printf.sprintf
+              "cannot move borrowed value '%s'; borrow permits non-consuming access only"
+              name));
           if consume && is_tracked_path p then mv_consume p moved else moved
       | Ast.FieldGet (base_expr, fname) ->
           (match base_expr.desc with
@@ -3234,7 +4148,23 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             let moved = check_expr moved consume_arg arg in
             check_args moved rest (match params with _ :: ps -> ps | [] -> [])
           in
-          check_args moved args params
+          let moved = check_args moved args params in
+          let returns_linear = match StringMap.find_opt target call_returns with
+            | Some ty -> is_linear_type ty
+            | None -> false
+          in
+          if returns_linear && not consume then
+            raise (TypeError (e.loc, Printf.sprintf
+              "linear result of '%s' must be moved into an owning binding or consumer"
+              name));
+          moved
+      | Ast.VariantCtor (vtype, _, payload) ->
+          if Hashtbl.find_opt variant_kinds vtype = Some Ast.KindLinear
+             && not consume then
+            raise (TypeError (e.loc, Printf.sprintf
+              "linear variant '%s' must be moved into an owning binding or matched"
+              vtype));
+          check_expr moved consume payload
       | Ast.BinOp (_, a, b) -> check_expr (check_expr moved false a) false b
       | Ast.Bnot a | Ast.Deref a | Ast.AddrOf a | Ast.Cast (_, a)
       | Ast.Unsafe a -> check_expr moved false a
@@ -3248,23 +4178,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Index (_, i) -> check_expr moved false i
       | Ast.SliceOf (_, lo, hi) -> check_expr (check_expr moved false lo) false hi
       | Ast.SizeOf _ | Ast.OffsetOf _ | Ast.IntLit _ | Ast.BoolLit _
-      | Ast.StringLit _ | Ast.EnumVariant _ -> moved
+      | Ast.StringLit _ -> moved
+      | Ast.EnumVariant (vtype, _) ->
+          if Hashtbl.find_opt variant_kinds vtype = Some Ast.KindLinear
+             && not consume then
+            raise (TypeError (e.loc, Printf.sprintf
+              "linear variant '%s' must be moved into an owning binding or matched"
+              vtype));
+          moved
     in
-    (* Scope-end checks. AFFINE keeps its deliberately union-based
-       never-consumed check (GitHub issue #89's first increment): consumed
-       on AT LEAST ONE path counts, because affine's idiomatic
-       null-sentinel pattern (`let p = acquire(); if ((p as usize) != 0) {
-       ...; release(p); }`) makes consumption legitimately conditional in
-       a way plain dataflow cannot correlate with the nullness test (an
-       earlier intersection-based attempt misfired on every existing
-       affine example -- see HISTORY.md's relational-analysis findings).
-       LINEAR reads c_all instead: the cast-away ban makes the
-       null-sentinel pattern inexpressible for linear values, so
-       consumption can never be legitimately conditional and the
-       intersection check is exact with no relational reasoning needed
-       (OWNERSHIP_KERNEL.md 4.6). `decl_locs` records each tracked path's
-       own declaring site (a `let` for PVar, the producing AssignField for
-       PField) so errors point at the declaration. *)
+    (* Scope-end checks apply only to LINEAR values. Affine permits
+       weakening by definition; maybe-consumed still rejects double use. *)
     let decl_locs : (path, Ast.loc) Hashtbl.t = Hashtbl.create 16 in
     let set_decl_loc p l = Hashtbl.replace decl_locs p l in
     (* Purely syntactic "does this statement list always return" check
@@ -3272,14 +4196,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        a branch that unconditionally returns never reaches the code after
        its enclosing `if`/`match`, so what it consumed must not be merged
        into what continues past that `if`/`match` (in EITHER set: not
-       unioned into c_any, not intersected into c_all). Deliberately
+       unioned into maybe-consumed, not intersected into must-be-consumed).
+       Deliberately
        conservative in the safe direction: loops are never treated as
        terminators here. *)
     let rec stmt_always_terminates (s : Ast.stmt) = match s.desc with
       | Ast.Return _ -> true
       | Ast.If (_, yes, no) -> always_terminates yes && always_terminates no
       | Ast.Match (_, arms) -> List.for_all (fun arm ->
-          let body = match arm with Ast.ArmVariant (_, _, b) | Ast.ArmWild b -> b in
+          let body = match arm with
+            | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b -> b in
           always_terminates body) arms
       | Ast.Block body -> always_terminates body
       | _ -> false
@@ -3294,11 +4220,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       PathSet.iter (fun p ->
         let loc () = Option.value (Hashtbl.find_opt decl_locs p) ~default:fdef.def_loc in
         match path_kind p with
-        | Some Ast.KindAffine when not (PathSet.mem p moved.c_any) ->
-            raise (TypeError (loc (), Printf.sprintf
-              "affine value '%s' is never consumed" (path_to_string p)))
-        | Some Ast.KindLinear when not (PathSet.mem p moved.c_all) ->
-            if PathSet.mem p moved.c_any then
+        | Some Ast.KindLinear when
+            not (ResourceFlow.is_consumed_on_all_paths p moved) ->
+            if ResourceFlow.may_be_consumed p moved then
               raise (TypeError (loc (), Printf.sprintf
                 "linear value '%s' is consumed on some paths but not on \
                  every path" (path_to_string p)))
@@ -3321,18 +4245,27 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Expr e -> (check_expr moved false e, declared)
       | Ast.Assign (name, e) ->
           let p = PVar name in
-          require_available s.loc moved p;
-          let moved = check_expr moved (is_tracked_path p) e in
-          (* A linear local/parameter still holding its obligation may not
-             be overwritten -- that would silently discard it. Note the
-             RHS walk runs FIRST, so the self-transform idiom
-             `p = transform(p);` (RHS consumes the old p) passes: by the
-             time this check runs, the old obligation is discharged. *)
-          if is_linear_path p && PathSet.mem p declared
-             && not (PathSet.mem p moved.c_all) then
+          if PathSet.mem p borrowed_params then
             raise (TypeError (s.loc, Printf.sprintf
-              "assigning over linear value '%s' would discard its \
-               obligation (consume it first)" name));
+              "cannot assign to borrowed value '%s'; borrow permits non-consuming access only"
+              name));
+          if PathSet.mem p sink_params then
+            raise (TypeError (s.loc, Printf.sprintf
+              "cannot assign to sink value '%s'; sink designates this parameter's terminal consumption"
+              name));
+          let moved = check_expr moved (is_tracked_path p) e in
+          (* Assignment is not a use of the old value: a binding whose value
+             was already moved may be reinitialized. The RHS walk still
+             rejects trying to read that moved value. A live affine value may
+             be weakened by overwrite; a live linear obligation may not. The
+             RHS runs first, so `p = transform(p);` discharges the old linear
+             value before this check and remains legal. *)
+          if is_linear_path p
+             && PathSet.mem p declared
+             && not (ResourceFlow.is_consumed_on_all_paths p moved) then
+            raise (TypeError (s.loc, Printf.sprintf
+              "assigning over %s value '%s' would discard its obligation \
+               (consume it first)" (kind_word p) name));
           (mv_clear p moved, PathSet.add p declared)
       | Ast.AssignDeref (a, b) ->
           (check_expr (check_expr moved false a) false b, declared)
@@ -3362,7 +4295,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (match init with
            | None when is_linear_path p ->
                raise (TypeError (s.loc, Printf.sprintf
-                 "linear value '%s' must be initialized at its declaration" name))
+                 "%s value '%s' must be initialized at its declaration"
+                 (kind_word p) name))
            | _ -> ());
           let moved = match init with
             | Some e -> check_expr moved (is_tracked_path p) e
@@ -3397,7 +4331,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let moved = check_expr moved false cond in
           let (body_moved, _) = check_stmts moved declared body in
           let newly_moved_outer =
-            PathSet.inter declared (PathSet.diff body_moved.c_any moved.c_any) in
+            PathSet.inter declared
+              (PathSet.diff (ResourceFlow.maybe_consumed body_moved)
+                 (ResourceFlow.maybe_consumed moved)) in
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
@@ -3407,7 +4343,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let declared_body = PathSet.add (PVar name) declared in
           let (body_moved, _) = check_stmts moved declared_body body in
           let newly_moved_outer =
-            PathSet.inter declared (PathSet.diff body_moved.c_any moved.c_any) in
+            PathSet.inter declared
+              (PathSet.diff (ResourceFlow.maybe_consumed body_moved)
+                 (ResourceFlow.maybe_consumed moved)) in
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
@@ -3416,18 +4354,71 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let moved = check_expr moved false collection in
           let (body_moved, _) = check_stmts moved (PathSet.add (PVar name) declared) body in
           let newly_moved_outer =
-            PathSet.inter declared (PathSet.diff body_moved.c_any moved.c_any) in
+            PathSet.inter declared
+              (PathSet.diff (ResourceFlow.maybe_consumed body_moved)
+                 (ResourceFlow.maybe_consumed moved)) in
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
           (moved, declared)
       | Ast.Match (e, arms) ->
-          let moved = check_expr moved false e in
+          let moved = check_expr moved true e in
           let results = List.map (fun arm ->
-            let body = match arm with
-              | Ast.ArmVariant (_, _, b) | Ast.ArmWild b -> b
+            let (binding, binding_ty, body) = match arm with
+              | Ast.ArmVariant (vtype, cname, binding, b) ->
+                  let payload_ty = match binding with
+                    | None -> None
+                    | Some _ ->
+                        let schema = match Hashtbl.find_opt variant_defs vtype with
+                          | Some cases -> Option.join (List.assoc_opt cname cases)
+                          | None -> None
+                        in
+                        Option.map (function
+                          | Ast.TypeExists (_, _, inner) -> inner
+                          | ty -> ty) schema
+                  in
+                  (binding, payload_ty, b)
+              | Ast.ArmWild b -> (None, None, b)
             in
-            (always_terminates body, fst (check_stmts moved declared body))
+            let previous_binding_ty = match binding with
+              | Some name -> StringMap.find_opt name !var_types
+              | None -> None
+            in
+            (match binding, binding_ty with
+             | Some name, Some ty ->
+                 var_types := StringMap.add name ty !var_types
+             | _ -> ());
+            let (arm_moved, arm_declared, binding_path) = match binding with
+              | None -> (moved, declared, None)
+              | Some name ->
+                  let p = PVar name in
+                  set_decl_loc p s.loc;
+                  (mv_clear p moved, PathSet.add p declared, Some p)
+            in
+            let out = fst (check_stmts arm_moved arm_declared body) in
+            Option.iter (fun p ->
+              if is_linear_path p
+                 && not (ResourceFlow.is_consumed_on_all_paths p out) then
+                if ResourceFlow.may_be_consumed p out then
+                  raise (TypeError (s.loc, Printf.sprintf
+                    "linear variant payload '%s' is consumed on some paths but not on every path"
+                    (path_to_string p)))
+                else
+                  raise (TypeError (s.loc, Printf.sprintf
+                    "linear variant payload '%s' is never consumed"
+                    (path_to_string p)))
+            ) binding_path;
+            let out = match binding_path with
+              | Some p -> mv_clear p out
+              | None -> out
+            in
+            (match binding with
+             | Some name ->
+                 var_types := (match previous_binding_ty with
+                   | Some ty -> StringMap.add name ty !var_types
+                   | None -> StringMap.remove name !var_types)
+             | None -> ());
+            (always_terminates body, out)
           ) arms in
           (* Same reasoning as `If` above: a terminating arm never reaches
              code after the `match`, so its consumption must not be merged
@@ -3448,35 +4439,31 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           require_no_pending_linear s.loc "continue" moved declared;
           (moved, declared)
     in
+    if not (always_terminates fdef.body) then begin
+      if is_direct_variant_type finfo.ret_type then
+        raise (TypeError (fdef.def_loc, Printf.sprintf
+          "function '%s' returns a variant and must return explicitly on every path"
+          fdef.name));
+      if is_tracked_type finfo.ret_type then
+        raise (TypeError (fdef.def_loc, Printf.sprintf
+          "function '%s' returns an affine/linear value and must return explicitly on every path"
+          fdef.name))
+    end;
     let (final_moved, _) = check_stmts mv_empty
       (List.fold_left (fun d (name, _) -> PathSet.add (PVar name) d)
          PathSet.empty fdef.params) fdef.body
     in
-    (* GitHub issue #89 "problem 2": a plain (non-`borrow`, non-`sink`)
-       affine/linear PARAMETER must also be consumed within the callee's
-       own body (forwarded to another consuming call, passed to a `sink`
-       parameter, or returned) -- otherwise the callee can silently swallow
-       a handle its caller already gave up. `borrow`/`sink` are exempt:
-       `borrow` never takes ownership, `sink` is the designated terminal
-       consumer. Affine reads c_any (at least one path); linear reads
-       c_all (every path -- a linear parameter is an accepted obligation,
-       and its early-return paths are already covered by
-       require_no_pending_linear above, so this is the fall-through
-       check). *)
+    (* A plain LINEAR parameter is an accepted all-path obligation. Affine
+       parameters may be dropped; borrow never owns and sink is terminal. *)
     List.iter (fun (name, ty_opt) ->
       let owned_kind = match ty_opt with
         | Some (Ast.TypeBorrow _) | Some (Ast.TypeSink _) -> None
         | Some ty when is_linear_type ty -> Some Ast.KindLinear
-        | Some ty when is_affine_type ty -> Some Ast.KindAffine
         | _ -> None
       in
       match owned_kind with
-      | Some Ast.KindAffine when not (PathSet.mem (PVar name) final_moved.c_any) ->
-          raise (TypeError (fdef.def_loc, Printf.sprintf
-            "affine parameter '%s' is never consumed by this function \
-             (forward it, or take it as `sink` if this function is meant \
-             to be its terminal consumer)" name))
-      | Some Ast.KindLinear when not (PathSet.mem (PVar name) final_moved.c_all) ->
+      | Some Ast.KindLinear when
+          not (ResourceFlow.is_consumed_on_all_paths (PVar name) final_moved) ->
           raise (TypeError (fdef.def_loc, Printf.sprintf
             "linear parameter '%s' is not consumed on every path of this \
              function (forward it on every path, or take it as `sink` if \
