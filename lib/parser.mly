@@ -67,7 +67,7 @@ let check_refined_base_range pos lo hi base =
 %token <string> STRING
 %token FN INLINE RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
 %token DARROW COLONCOLON UNDERSCORE
-%token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT
+%token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
 %token ASSIGN DOT
 %token IF ELSE WHILE FOR IN BREAK CONTINUE
 %token EOF
@@ -92,6 +92,8 @@ let check_refined_base_range pos lo hi base =
 %left TIMES DIV PERCENT  (* multiplicative *)
 %nonassoc UNARY   (* unary * (deref), & (addrof), unary - *)
 %left DOT         (* highest: field access -- postfix, binds tighter than prefix ops *)
+%nonassoc TYPE_BASE
+%nonassoc AT
 
 %token VOID_TYPE BOOL_TYPE
 %token I8_TYPE I16_TYPE I32_TYPE I64_TYPE
@@ -139,6 +141,16 @@ item:
           if is_priv then Some fname else None) $3 in
       Type_layout.finish_struct name fields is_packed align_opt;
       StructDef (name, fields, is_packed, align_opt, private_fields, $symbolstartpos) }
+  | owned_struct_intro LBRACE struct_fields RBRACE
+    { let (name, kind, static_params, is_private) = $1 in
+      let fields = List.map (fun (fname, ty, _) -> (fname, ty)) $3 in
+      let private_fields =
+        List.filter_map (fun (fname, _, is_priv) ->
+          if is_priv then Some fname else None) $3 in
+      Type_layout.finish_struct name fields false None;
+      OwnedStructDef
+        (name, kind, static_params, fields, false, None, private_fields,
+         is_private, $symbolstartpos) }
   | p = private_flag OPAQUE STRUCT IDENT SEMI
     { OpaqueStructDef ($4, KindPlain, p, $symbolstartpos) }
   | p = private_flag AFFINE OPAQUE STRUCT IDENT SEMI
@@ -171,6 +183,21 @@ struct_intro:
     { let align = narrow_int64 $symbolstartpos "alignment" $6 in
       Type_layout.begin_struct $3;
       ($3, true, Some align) }
+
+owned_struct_intro:
+  | p = private_flag k = owned_kind STRUCT name = IDENT ps = static_params
+    { Type_layout.begin_struct name;
+      (name, k, ps, p) }
+
+owned_kind:
+  | AFFINE { KindAffine }
+  | LINEAR { KindLinear }
+
+static_params:
+  | LBRACKET ps = separated_nonempty_list(COMMA, static_param) RBRACKET { ps }
+
+static_param:
+  | name = IDENT COLON sort = int_base_type_expr { (name, sort) }
 
 struct_fields:
   | /* empty */ { [] }
@@ -453,7 +480,13 @@ base_type_expr:
        (no such grouping form exists in base_type_expr today) since a
        COMMA is required. *)
     { TypeTuple (t1 :: t2 :: ts) }
+  | name = IDENT LBRACKET args = separated_nonempty_list(COMMA, static_arg) RBRACKET
+    { TypeIndexed (name, args) }
   | IDENT { TypeNamed $1 }
+
+static_arg:
+  | name = IDENT { StaticName name }
+  | n = INT { StaticInt (narrow_int64 $symbolstartpos "static integer" n) }
 
 (* Array size: a compile-time integer constant expression -- a literal, the
    name of an immutable global constant declared earlier (`let NAME: T =
@@ -493,7 +526,8 @@ array_size:
 
 (* type_expr: base_type_expr + TypeRefined. Used in unambiguous positions such as after : or -> *)
 type_expr:
-  | base_type_expr { $1 }
+  | base_type_expr %prec TYPE_BASE { $1 }
+  | t = base_type_expr AT n = static_arg { TypeSingleton (t, n) }
   | BORROW t = type_expr { TypeBorrow t }
   | SINK t = type_expr { TypeSink t }
   | LBRACE lo = INT DOTDOTLT hi = INT RBRACE
@@ -507,7 +541,7 @@ type_expr:
           "refined type {%Ld..<%Ld} requires an explicit base; write \
            {%Ld..<%Ld as i32} (or another integer base)"
           lo hi lo hi)) }
-  | LBRACE lo = INT DOTDOTLT hi = INT AS base = int_base_type_expr RBRACE
+  | LBRACE lo = INT DOTDOTLT hi = INT AS base = int_base_type_expr RBRACE %prec TYPE_BASE
     { (* Explicit-base {lo..<hi as base} surface syntax: lets a programmer
          write a refined type whose LLVM representation genuinely is
          `base` (i8/i16/i32/i64/u8/u16/u32/u64/isize/usize), rather than only
@@ -527,6 +561,13 @@ type_expr:
       TypeRefined (narrow_int64 $symbolstartpos "refined type bound" lo,
                    narrow_int64 $symbolstartpos "refined type bound" hi,
                    base) }
+  | LBRACE lo = INT DOTDOTLT hi = INT AS base = int_base_type_expr RBRACE
+      AT n = static_arg
+    { check_refined_base_range $symbolstartpos lo hi base;
+      TypeSingleton
+        (TypeRefined (narrow_int64 $symbolstartpos "refined type bound" lo,
+                      narrow_int64 $symbolstartpos "refined type bound" hi,
+                      base), n) }
 
 (* Restricted to the primitive integer types {lo..<hi as base} is allowed
    to name -- matches the "by convention" restriction on TRefinedInt's own

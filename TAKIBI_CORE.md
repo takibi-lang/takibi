@@ -5,10 +5,11 @@ syntax accepted by the compiler today. `SPEC.md` remains authoritative for
 implemented Takibi. `OWNERSHIP_KERNEL.md` records the history and limitations
 of the current affine/linear checker.
 
-Implementation status (2026-07-15): Slice 0 is implemented. The
-`Takibi_core` module owns the four-layer vocabulary and the current checker
-uses `Delta.Legacy_flow`; no new surface syntax in this document is accepted
-yet.
+Implementation status (2026-07-15): Slices 0 and 1 are implemented. The
+`Takibi_core` module owns the four-layer vocabulary, the current checker uses
+`Delta.Legacy_flow`, and the indexed runtime-owner subset described in 3.1 is
+accepted. Views, explicit existentials, general propositions, solver hooks,
+and effects remain design targets.
 
 The examples in this document are elaboration fixtures. Their contracts and
 runtime representations are decisions; punctuation may change when a fixture
@@ -180,7 +181,8 @@ private linear struct SlotLease[n: usize] {
 }
 
 fn slot_lease(idx: {0..<4 as usize} @ n) -> SlotLease[n] {
-    return SlotLease { idx };
+    let mut lease: SlotLease[n] = { idx };
+    return lease;
 }
 
 fn slot_read(lease: borrow SlotLease[n]) -> i32 {
@@ -205,12 +207,26 @@ Conceptual lowering:
 SlotLease[n]                          -> runtime { usize idx }
 n, 0 <= n, n < 4                     -> erased Phi
 Own(lease, SlotLease[n])              -> erased Delta
-slot_read(lease)                      -> runtime call slot_read(lease.idx)
+slot_read(lease)                      -> runtime call slot_read({ idx })
+slot_read body                        -> extractvalue idx, then index slots
 ```
 
 This fixes E0's failure: the runtime index is real data, while `@ n`
 preserves the range and identity statically. No pointer bits are used as a
 proof and no independent `idx` argument can disagree with the lease.
+
+The current Slice 1 ABI passes `SlotLease[n]`, including `borrow` and `sink`
+parameters, as its ordinary runtime aggregate by value. `borrow` changes
+`Delta` flow only: it neither transfers ownership nor creates a runtime
+reference. A later mutable-borrow slice may choose a reference ABI, but must
+spell and specify that separately.
+
+Slice 1 trusts the declaring module to issue owners correctly. Creating a
+`SlotLease[n]` literal creates a fresh `Delta` obligation; `linear` then checks
+that particular value on every path, but does not prove that the private
+constructor cannot issue a second lease for the same `n`. Requiring an erased
+permission as the constructor input is a later `view` slice, not a property
+silently claimed by this runtime-owner syntax.
 
 ### 3.2 `MutexGuard` and `KGuard`: erased views when the lock stays explicit
 
@@ -464,14 +480,14 @@ not the final meaning of affine or the final representation of `Delta`.
 
 The destination is fixed; examples still determine the order of slices.
 
-### Slice 0: Core boundary (started with this document)
+### Slice 0: Core boundary (implemented 2026-07-15)
 
 - Introduce a `Takibi_core` module and move the current any-path/all-path
   consumption lattice into `Takibi_core.Delta.Legacy_flow`.
 - Keep parser behavior and diagnostics unchanged.
 - Unit-test branch join, consume, and re-produce independently of syntax.
 
-### Slice 1: indexed runtime owner (`SlotLease`, issue #89)
+### Slice 1: indexed runtime owner (`SlotLease`, issue #89; implemented 2026-07-15)
 
 - Add static integer binders, singleton `@ n`, indexed runtime types, and
   implicit universals to the elaborated Core.
@@ -484,6 +500,32 @@ The destination is fixed; examples still determine the order of slices.
 This slice is not complete if it merely parses brackets, retains a loose
 `idx` call argument, smuggles data through pointer bits, or aliases an invalid
 index to slot zero.
+
+Implemented scope:
+
+- integer static parameters on `affine struct` / `linear struct`;
+- singleton runtime integers `T @ n`, indexed types `Name[n]`, implicit
+  universal static names in signatures, fresh call-site instantiation, and
+  generative rigid identities for independent unknown runtime values;
+- substitution of an owner's static arguments into its field types;
+- first-class aggregate flow through local variables, parameters, returns,
+  `borrow`, and `sink`;
+- private constructors/fields, range and identity rejection, and static
+  erasure in LLVM while runtime fields remain;
+- initialization, live-overwrite, borrowed-move, owned-temporary, and
+  singleton-alias safety checks; writable fields on mutable owner storage;
+- no pointer-bit minting, owner casts, address-taking, globals, fields,
+  arrays, slices, or pointer storage for indexed owners in this slice.
+
+Singleton-bearing ordinary storage is restricted for the same reason:
+address-taking or pointer/array/global/ordinary-field storage could mutate the
+runtime integer while retaining its erased equality. Direct singleton fields
+inside non-addressable indexed owners are supported.
+
+Not implemented by Slice 1: explicit `forall`/`exists`, existential opening,
+static addresses/enums, `where`, `prop`, `view`, mutable references, solver
+discharge, or effects. Those remain later slices rather than being simulated
+by ad hoc syntax.
 
 ### Slice 2: erased linear view (`PendingTcpEvent`, issue #117)
 

@@ -137,6 +137,12 @@ let rec ty_str = function
   | TypeArray (t, n) -> Printf.sprintf "[%s; %d]" (ty_str t) n
   | TypeFn _  -> "fn(...)"
   | TypeNamed s -> s
+  | TypeIndexed (s, args) ->
+      let arg = function StaticName n -> n | StaticInt n -> string_of_int n in
+      Printf.sprintf "%s[%s]" s (String.concat ", " (List.map arg args))
+  | TypeSingleton (t, arg) ->
+      let n = match arg with StaticName n -> n | StaticInt n -> string_of_int n in
+      Printf.sprintf "%s @ %s" (ty_str t) n
   | TypeRefined (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
   | TypeSlice (t, 0) -> Printf.sprintf "[]%s" (ty_str t)
   | TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (ty_str t) n
@@ -666,6 +672,11 @@ let rec ltype_of_ast = function
            match Hashtbl.find_opt struct_lltypes sname with
            | Some llty -> llty
            | None -> raise (Error (Printf.sprintf "Unknown named type: %s" sname)))
+  | TypeIndexed (sname, _) ->
+      (match Hashtbl.find_opt struct_lltypes sname with
+       | Some llty -> llty
+       | None -> raise (Error (Printf.sprintf "Unknown indexed type: %s" sname)))
+  | TypeSingleton (t, _) -> ltype_of_ast t
   | TypeTuple ts ->
       (* Function-local product value (OWNERSHIP_KERNEL.md 5.9): an
          anonymous struct, passed/returned by value like TypeSlice's fat
@@ -740,6 +751,8 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
       (Llvm_debuginfo.diflags_get Llvm_debuginfo.DIFlag.Zero)
   in
   match ty with
+  | TypeSingleton (base, _) -> ditype_of_ast dib file base
+  | TypeIndexed (name, _) -> ditype_of_ast dib file (TypeNamed name)
   | TypeBool -> basic_int "bool" 8 dw_ate_boolean
   | TypeI8    -> basic_int "i8"    8  dw_ate_signed
   | TypeI16   -> basic_int "i16"   16 dw_ate_signed
@@ -905,7 +918,12 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
 let rec is_unsigned = function
   | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeUsize -> true
   | TypeRefined (_, _, base) -> is_unsigned base
+  | TypeSingleton (base, _) -> is_unsigned base
   | _ -> false
+
+let rec erase_singleton_type = function
+  | TypeSingleton (base, _) -> erase_singleton_type base
+  | t -> t
 
 (* Sync rule with type_inf.ml's min_max_sentinel: the "unknown bound"
    placeholder must itself be a legal value of whichever base type the
@@ -929,7 +947,10 @@ let min_max_sentinel base =
    return the refined value's OWN base, not a hardcoded TypeI32, or the
    returned ast_type would disagree with the actual (possibly i64-wide)
    llvalue just computed. *)
-let canon_ty = function TypeRefined (_, _, base) -> base | t -> t
+let rec canon_ty = function
+  | TypeSingleton (base, _) -> canon_ty base
+  | TypeRefined (_, _, base) -> base
+  | t -> t
 
 (* Extract a small-number-scoped compile-time integer from an expression,
    iff it is exactly an integer literal that fits natively (see
@@ -965,6 +986,7 @@ let intlit_opt (e : Ast.expr) : int option =
    value used again in later arithmetic.) *)
 let rec widen_load (ast_ty : Ast.type_expr) v =
   match ast_ty with
+  | TypeSingleton (base, _) -> widen_load base v
   | TypeRefined (_, _, base) -> widen_load base v
   | TypeI64 | TypeU64 | TypeIsize | TypeUsize -> v
   | TypeBool -> v
@@ -1072,6 +1094,8 @@ let rec coerce v (dst : Ast.type_expr) =
          whole match arm is skipped. *)
       if vty = pointer_type context then build_load dst_ll v "structval" builder
       else v
+  | TypeIndexed _ -> v
+  | TypeSingleton (base, _) -> coerce v base
   | TypeRefined (_, _, base) -> coerce v base
   | TypeSlice _ -> v   (* fat values are never numerically coerced *)
   | TypeBorrow t | TypeSink t -> coerce v t
@@ -1245,12 +1269,14 @@ let function_key (pt : Types.program_types option) (fdef : Ast.func) =
       let declared = List.map snd fdef.params in
       let rec abi_type = function
         | TypeBorrow t | TypeSink t | TypeAlignedPtr (_, t) -> abi_type t
+        | TypeSingleton (t, _) -> abi_type t
+        | TypeIndexed (name, _) -> TypeIndexed (name, [])
         | t -> t
       in
       let matches _ fi =
         List.length declared = List.length fi.Types.param_types &&
         List.for_all2 (fun d (_, actual) -> match d with
-          | Some t -> abi_type t = actual | None -> true) declared fi.Types.param_types
+          | Some t -> abi_type t = abi_type actual | None -> true) declared fi.Types.param_types
       in
       let candidates = Types.StringMap.bindings pt.Types.functions
         |> List.filter (fun (key, fi) ->
@@ -1946,6 +1972,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (match base_ty, fname with
        | TypeSlice _, "len" ->
            (TypeUsize, slice_len base_v)
+       | TypeIndexed (sname, _), _ ->
+           let (idx, field_ty) = field_info sname fname in
+           let v = build_extractvalue base_v idx fname builder in
+           let value_ty = erase_singleton_type field_ty in
+           (value_ty, to_arith_width value_ty v)
        | _ ->
       let (sname, through_io) = match base_ty with
         | TypeNamed s                      -> (s, false)
@@ -2690,7 +2721,8 @@ let gen_func ?prog_types fdef =
   (* Apply struct type-level alignment to an alloca if the type has one registered. *)
   let apply_struct_align ast_ty ptr =
     match ast_ty with
-    | TypeNamed sname | TypeArray (TypeNamed sname, _) ->
+    | TypeNamed sname | TypeArray (TypeNamed sname, _)
+    | TypeIndexed (sname, _) ->
         (match Hashtbl.find_opt struct_alignments sname with
          | Some n -> set_alignment n ptr
          | None   -> ())
@@ -2700,7 +2732,9 @@ let gen_func ?prog_types fdef =
   let rec is_debug_aggregate_ty = function
     | TypeArray _ | TypeSlice _ | TypeTuple _ -> true
     | TypeNamed sname -> not (Hashtbl.mem enum_underlying sname)
+    | TypeIndexed _ -> true
     | TypeRefined (_, _, base)
+    | TypeSingleton (base, _)
     | TypeBorrow base
     | TypeSink base
     | TypeIo base -> is_debug_aggregate_ty base
@@ -2760,7 +2794,8 @@ let gen_func ?prog_types fdef =
      Handles nested StructLit for struct/array fields; falls back to gen_expr+store. *)
   let rec init_memory ?(preserve_for_debug = false) (ptr : llvalue) (ast_ty : Ast.type_expr) (e : Ast.expr) =
     match e.desc, ast_ty with
-    | StructLit exprs, TypeNamed sname ->
+    | StructLit exprs, TypeNamed sname
+    | StructLit exprs, TypeIndexed (sname, _) ->
         let llty = Hashtbl.find struct_lltypes sname in
         let fields = Hashtbl.find struct_fields sname in
         List.iteri (fun i ((_, ft), ei) ->
@@ -2960,18 +2995,28 @@ let gen_func ?prog_types fdef =
 
     | AssignField (base_expr, fname, val_expr) ->
         let (base_ty, base_v) = gen_expr locals base_expr in
-        let (sname, through_io) = match base_ty with
-          | TypeNamed s                      -> (s, false)
-          | TypePtr (TypeNamed s)            -> (s, false)
-          | TypePtr (TypeIo (TypeNamed s))   -> (s, true)
-          | TypeAlignedPtr (_, TypeNamed s)  -> (s, false)   (* GitHub issue #102 *)
+        let (sname, through_io, base_ptr) = match base_ty with
+          | TypeNamed s                      -> (s, false, base_v)
+          | TypePtr (TypeNamed s)            -> (s, false, base_v)
+          | TypePtr (TypeIo (TypeNamed s))   -> (s, true, base_v)
+          | TypeAlignedPtr (_, TypeNamed s)  -> (s, false, base_v)   (* GitHub issue #102 *)
+          | TypeIndexed (s, _) ->
+              (match base_expr.desc with
+               | Var name ->
+                   (match Hashtbl.find_opt locals name with
+                    | Some (Mut (TypeIndexed _, ptr)) -> (s, false, ptr)
+                    | _ -> raise (Error (Printf.sprintf
+                        "BUG: indexed owner '%s' field assignment has no mutable storage"
+                        name)))
+               | _ -> raise (Error
+                   "BUG: indexed owner field assignment has no stable base"))
           | _ -> raise (Error (Printf.sprintf
               "field assignment '.%s' on non-struct type" fname))
         in
         let (idx, field_ty) = field_info sname fname in
         let llty = Hashtbl.find struct_lltypes sname in
         let (_, val_v) = gen_expr ~expected_ty:field_ty locals val_expr in
-        let field_ptr = build_in_bounds_gep llty base_v
+        let field_ptr = build_in_bounds_gep llty base_ptr
           [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
           (fname ^ "_ptr") builder
         in
@@ -3497,7 +3542,8 @@ let gen_program ?prog_types prog =
   List.iter (function
     | OpaqueStructDef (name, _, _, _) ->
         Hashtbl.add struct_lltypes name (named_struct_type context name)
-    | StructDef (name, fields, is_packed, align_opt, _, _) ->
+    | StructDef (name, fields, is_packed, align_opt, _, _)
+    | OwnedStructDef (name, _, _, fields, is_packed, align_opt, _, _, _) ->
         let field_lltys = List.map (fun (_, ty) -> ltype_of_ast ty) fields
                           |> Array.of_list in
         let mk_struct fltys = if is_packed then packed_struct_type context fltys
@@ -3551,6 +3597,7 @@ let gen_program ?prog_types prog =
           Hashtbl.add func_param_ast_types name param_ast
         end
     | StructDef _ -> ()
+    | OwnedStructDef _ -> ()
     | OpaqueStructDef _ -> ()
     | EnumDef _   -> ()
     | UseDef _    -> ()
@@ -3561,6 +3608,7 @@ let gen_program ?prog_types prog =
     | LetDef _        -> ()
     | ExternFuncDef _ -> ()
     | StructDef _     -> ()
+    | OwnedStructDef _ -> ()
     | OpaqueStructDef _ -> ()
     | EnumDef _       -> ()
     | UseDef _        -> ()

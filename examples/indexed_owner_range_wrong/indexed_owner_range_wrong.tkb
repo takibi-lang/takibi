@@ -1,0 +1,16 @@
+private linear struct SlotLease[n: usize] {
+    private idx: {0..<4 as usize} @ n;
+}
+
+fn slot_lease(idx: {0..<4 as usize} @ n) -> SlotLease[n] {
+    let mut lease: SlotLease[n] = { idx };
+    return lease;
+}
+
+fn slot_unlease(lease: sink SlotLease[n]) {
+}
+
+fn app_main() {
+    let lease = slot_lease(4);
+    slot_unlease(lease);
+}

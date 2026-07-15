@@ -61,7 +61,8 @@ let rec size_align_of_type pos seen ty =
   | TypeU8 | TypeU16 | TypeU32 | TypeU64
   | TypeIsize | TypeUsize -> primitive_size_align ty
   | TypeVoid -> fail pos "sizeof(void) is not allowed"
-  | TypeBorrow t | TypeSink t -> size_align_of_type pos seen t
+  | TypeBorrow t | TypeSink t | TypeSingleton (t, _) ->
+      size_align_of_type pos seen t
   | TypeAlignedPtr _ -> ptr_size_align ()
   | TypePtr _ | TypeFn _ -> ptr_size_align ()
   | TypeIo t -> size_align_of_type pos seen t
@@ -89,7 +90,7 @@ let rec size_align_of_type pos seen ty =
         (offset + tsz, max max_align talign)
       ) (0, 1) ts in
       (align_up off max_align, max_align)
-  | TypeNamed name ->
+  | TypeNamed name | TypeIndexed (name, _) ->
       (match Hashtbl.find_opt enums name with
        | Some underlying -> size_align_of_type pos seen underlying
        | None ->

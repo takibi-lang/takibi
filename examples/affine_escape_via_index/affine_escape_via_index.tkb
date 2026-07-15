@@ -33,39 +33,22 @@
 // the escaping identity itself -- see that type's own comment for what
 // it is (and is not) meant to demonstrate.
 
-// NOMINAL affine layer, added on purpose only in form, not because this
-// single-threaded demo needs it: `SlotLease` marks "the CPU is currently
-// touching this slot", proof-carrying only for the DURATION of one
-// read/write/close, entirely separate from the long-lived, escaping
-// `idx`. This is the hybrid shape a real RTOS would plausibly want --
-// the index solves "can this identifier live in a process's fd table
-// across function calls", while a lease would be where real mutual-
-// exclusion (a per-slot lock, once genuine concurrency/preemption
-// exists) would eventually attach. Today `slot_lease`/`slot_unlease` do
-// no real synchronization at all -- they exist purely so this file has
-// a concrete affine-plus-escaping-index shape to argue from once RTOS
-// work starts, rather than a purely hypothetical one. See this file's
-// header and HISTORY.md's issue #89 entries for the open question this
-// is meant to anchor: keep this two-tier shape, extend `affine` itself
-// (decouple it from `opaque`) instead, or something else entirely.
-affine opaque struct SlotLease;
-
-fn slot_lease(idx: {0..<4 as usize}) -> *SlotLease {
-    // GitHub issue #15 follow-up: this is exactly the cast the audit
-    // boundary now exists to flag -- idx is real DATA (a table slot
-    // number), not a genuine address, smuggled through a pointer type
-    // purely to get affine tracking. Without `unsafe` here this is now a
-    // compile error ("casting a non-literal integer to an affine handle
-    // asserts it is valid with no evidence"); a fixed literal or a real
-    // object's address (`&x`) would not need it (see FatFile/
-    // NetRxCpuOwned/MutexGuard's own `0 as usize as *T` / `&storage as
-    // *T` sentinels elsewhere in this codebase, neither of which needs
-    // `unsafe`). Left unsafe rather than "fixed" -- that IS the point of
-    // this file; see HISTORY.md's issue #15 entry.
-    return unsafe { idx as *SlotLease };
+// The runtime index and its erased static identity now travel together.
+// LLVM sees this as a one-field `{ usize }` aggregate; `n` and `@ n` have
+// no runtime representation. `linear` requires every lease to reach the
+// designated sink on every path. The private constructor remains trusted
+// not to mint two simultaneous leases for one `n`; a future erased view
+// will be able to make that constructor authority explicit.
+private linear struct SlotLease[n: usize] {
+    private idx: {0..<4 as usize} @ n;
 }
 
-fn slot_unlease(lease: sink *SlotLease) {
+fn slot_lease(idx: {0..<4 as usize} @ n) -> SlotLease[n] {
+    let mut lease: SlotLease[n] = { idx };
+    return lease;
+}
+
+fn slot_unlease(lease: sink SlotLease[n]) {
 }
 
 let SLOT_COUNT: usize = 4;
@@ -89,19 +72,16 @@ fn slot_open(initial: i32) -> i32 {
     return -1;
 }
 
-// Each of these takes `lease: borrow *SlotLease` -- proof that the
-// caller went through slot_lease() first -- purely to shape-check the
-// idiom; it adds no real safety over the runtime `in_use` flag today.
-fn slot_read(idx: {0..<4 as usize}, lease: borrow *SlotLease) -> i32 {
-    return slots[idx].value;
+fn slot_read(lease: borrow SlotLease[n]) -> i32 {
+    return slots[lease.idx].value;
 }
 
-fn slot_write(idx: {0..<4 as usize}, v: i32, lease: borrow *SlotLease) {
-    slots[idx].value = v;
+fn slot_write(lease: borrow SlotLease[n], v: i32) {
+    slots[lease.idx].value = v;
 }
 
-fn slot_close(idx: {0..<4 as usize}, lease: borrow *SlotLease) {
-    slots[idx].in_use = false;
+fn slot_close(lease: borrow SlotLease[n]) {
+    slots[lease.idx].in_use = false;
 }
 
 // The actual "escape": a struct holding table INDICES (ordinary i32
@@ -137,22 +117,22 @@ fn app_main() {
     let a: i32 = proc.fd_a;
     if (a >= 0 && a < 4) {
         let idx = a as usize;
-        let lease: *SlotLease = slot_lease(idx);
-        slot_write(idx, 99, lease);
+        let lease = slot_lease(idx);
+        slot_write(lease, 99);
         uart_puts("fd_a value: ");
-        uart_print(slot_read(idx, lease));
+        uart_print(slot_read(lease));
         uart_puts("\r\n");
-        slot_close(idx, lease);
+        slot_close(lease);
         slot_unlease(lease);
     }
     let b: i32 = proc.fd_b;
     if (b >= 0 && b < 4) {
         let idx = b as usize;
-        let lease: *SlotLease = slot_lease(idx);
+        let lease = slot_lease(idx);
         uart_puts("fd_b value: ");
-        uart_print(slot_read(idx, lease));
+        uart_print(slot_read(lease));
         uart_puts("\r\n");
-        slot_close(idx, lease);
+        slot_close(lease);
         slot_unlease(lease);
     }
 

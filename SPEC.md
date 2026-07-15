@@ -64,7 +64,8 @@ turn as many potential traps as possible into compile-time errors instead:
 `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `isize`,
 `usize`, `void`, `*T`, `io T`, `*io T`, `[T; N]`, `[]T` / `[T; N..]`
 (slice), `fn(T...) -> R`, `Name` (struct or enum), `{lo..<hi as base}`
-(refined integer subtype).
+(refined integer subtype), `T @ n` (runtime integer singleton), and
+`Name[n]` (indexed affine/linear runtime struct).
 
 - **`isize` / `usize`** are pointer-sized signed/unsigned integers. Their
   LLVM width follows the target's actual pointer size via LLVM
@@ -320,6 +321,8 @@ struct Name align(N) { field: type; ... }    // every instance/array element ali
 struct packed Name align(N) { ... }          // both
 opaque struct Name;                          // incomplete type, pointer-only
 affine opaque struct Name;                   // opaque + ownership-handle semantics, see below
+affine struct Name[n: usize] { field: T; }   // indexed runtime owner
+linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
 ```
 
 - `let mut s: Name;` -- struct variable (local or global; a struct
@@ -364,6 +367,79 @@ affine opaque struct Name;                   // opaque + ownership-handle semant
   element of a `[Name; K]` array of that struct type to N bytes, with
   tail padding automatically appended so `sizeof(struct) % N == 0`. Use
   for DMA descriptor rings, cache-line-separated data, SIMD types.
+
+## Indexed Runtime Owners
+
+The implemented Slice 1 subset supports first-class runtime owners whose
+types retain erased static integer identities:
+
+```takibi
+private linear struct SlotLease[n: usize] {
+    private idx: {0..<4 as usize} @ n;
+}
+
+fn slot_lease(idx: {0..<4 as usize} @ n) -> SlotLease[n] {
+    let mut lease: SlotLease[n] = { idx };
+    return lease;
+}
+
+fn slot_read(lease: borrow SlotLease[n]) -> i32 {
+    return slots[lease.idx].value;
+}
+
+fn slot_unlease(lease: sink SlotLease[n]) {}
+```
+
+- A static parameter is declared in brackets on an `affine struct` or
+  `linear struct`. Slice 1 supports primitive integer sorts only and requires
+  at least one static parameter.
+- `T @ n` is a runtime integer `T` with the compile-time equality "this
+  value is `n`". It has exactly the same LLVM representation as `T`.
+- `Name[n]` has the declared struct fields at runtime. Its static arguments
+  do not add fields or ABI words. Unbound static names in function signatures
+  are implicitly universally quantified and instantiated freshly per call.
+- Integer literals have their literal static identity. Reusing one immutable
+  runtime variable preserves one hidden rigid identity; two independent
+  unknown runtime expressions receive distinct identities. Slice 1 does not
+  equate computed expressions by arithmetic reasoning.
+- Field projection substitutes actual static arguments for the declaration's
+  formals. Thus `lease.idx` above retains both `{0..<4 as usize}` and the same
+  `n`, so indexing emits no bounds trap under `--forbid-trap`.
+- `borrow Name[n]` is non-consuming and `sink Name[n]` is the designated
+  terminal consumer. In Slice 1 both are runtime aggregate parameters passed
+  by value; the mode changes ownership checking, not ABI representation.
+- Moving a value transfers its affine/linear obligation. A borrowed owner
+  cannot be returned or passed to a consuming parameter as a second owner.
+  An owned call result must be bound, returned, or passed directly to an
+  owning consumer; it cannot be discarded or borrowed as an untracked
+  temporary. Indexed owners must be initialized, and assigning over a live
+  one is rejected for both affine and linear kinds.
+- `borrow` and `sink` may wrap only the complete parameter type, not a tuple
+  component or another nested type. Owner fields are writable only through a
+  mutable local or parameter, and singleton-typed fields can receive only the
+  same static identity.
+- `private` on the owner and private fields enforce smart construction and
+  accessor APIs across source files. Casts cannot mint or launder indexed
+  owners.
+- Constructing an owner creates a new ownership obligation. Slice 1 does not
+  require a pre-existing permission to do so, so a private constructor is part
+  of the trusted implementation of an external-resource invariant. `linear`
+  checks every value that was minted; by itself it does not prove that the
+  declaring module never mints two `SlotLease[n]` values for the same `n`.
+  A later erased-view/permission slice supplies that stronger constructor
+  precondition.
+- Until storage/place tracking is generalized, indexed owners may occur only
+  as local values, parameters, returns, and components of value tuples. They
+  cannot be addressed, cast, placed behind pointers, or stored in globals,
+  fields, arrays, or slices.
+- To prevent mutation through a widened pointer from invalidating `T @ n`,
+  singleton values cannot be addressed or placed in globals, ordinary struct
+  fields, pointer targets, arrays, or slices. A direct field of an indexed
+  owner is the supported persistent carrier in this slice.
+
+Static address/enum sorts, explicit universal or existential syntax,
+`where`/propositions, erased `view` values, mutable borrowing, and SMT/prover
+integration are not part of Slice 1.
 
 ## Affine Opaque Structs (Ownership Handles)
 

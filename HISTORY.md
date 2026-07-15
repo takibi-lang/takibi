@@ -7246,3 +7246,45 @@ same coloured PASS/FAIL stream as compile-error, DWARF, and QEMU tests.
 
 Validation: `make qemutest` and `make check` both passed with 103 total
 integration cases after the change.
+
+## 2026-07-15: Takibi Core Slice 1, Indexed Runtime Owners
+
+Implemented the first vertical slice of the four-layer Core described in
+`TAKIBI_CORE.md`. The language now accepts integer-indexed first-class
+`affine struct` / `linear struct` declarations, indexed types `Name[n]`, and
+singleton runtime integers `T @ n`. Static names in signatures are implicit
+universals: function bodies check them rigidly, and every call receives a
+fresh instantiation. Owner field projection substitutes the actual index, so
+runtime data, range facts, and identity constraints remain connected.
+
+`examples/affine_escape_via_index` now uses a private
+`linear struct SlotLease[n: usize]` containing the private refined runtime
+index. Its read/write/close operations no longer accept an independent
+`idx`; no `unsafe`, pointer-bit encoding, invalid-index fallback, or runtime
+bounds trap remains. LLVM lowers the owner to `{ usize }`, passes it by value,
+extracts the field in accessors, and erases only static identity and ownership
+facts.
+
+The slice deliberately rejects owner casts, address-taking, globals, nested
+fields, arrays/slices, and pointer storage until place/storage tracking is
+generalized. It also rejects moving from `borrow`. Added range- and
+identity-negative integration fixtures plus parser, inference, privacy,
+fresh-instantiation, borrow, storage, and LLVM-erasure unit regressions.
+
+Final soundness review separated call-site unification metavariables from
+generative rigid identities for unknown runtime values, preserved singleton
+facts through inferred immutable aliases, and closed uninitialized owner,
+live overwrite, borrowed/sink reassignment, discarded owned result, and
+borrowed-owned-temporary paths. Singleton values cannot be addressed or put
+in ordinary mutable storage, preventing mutation through a widened pointer
+from leaving a stale `@ n` proof. Mutable indexed-owner fields lower to real
+aggregate stores.
+
+The remaining trust boundary is explicit: a private constructor can still
+mint two owners with the same static identity. `linear` checks the lifetime of
+each minted value, not uniqueness of constructor authority; a later erased
+permission/view slice must enforce the latter.
+
+Validation: all 630 Alcotest cases passed; `make qemutest` and the full
+`make check` passed all 105 host, compile-error, DWARF, QEMU, and STM32 build
+checks.

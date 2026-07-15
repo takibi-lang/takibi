@@ -128,6 +128,18 @@ let rec show_type = function
       Printf.sprintf "fn(%s) -> %s"
         (String.concat ", " (List.map show_type ps)) (show_type r)
   | Ast.TypeNamed s     -> s
+  | Ast.TypeIndexed (s, args) ->
+      let arg = function
+        | Ast.StaticName n -> n
+        | Ast.StaticInt n -> string_of_int n
+      in
+      Printf.sprintf "%s[%s]" s (String.concat ", " (List.map arg args))
+  | Ast.TypeSingleton (t, n) ->
+      let n = match n with
+        | Ast.StaticName n -> n
+        | Ast.StaticInt n -> string_of_int n
+      in
+      Printf.sprintf "%s @ %s" (show_type t) n
   | Ast.TypeRefined (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
   | Ast.TypeSlice (t, 0) -> Printf.sprintf "[]%s" (show_type t)
   | Ast.TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (show_type t) n
@@ -185,6 +197,20 @@ let expect_ok src () =
 (* -- Parser tests ---------------------------------------------------------- *)
 
 let parser_tests = [
+  Alcotest.test_case "indexed linear struct and singleton syntax parse" `Quick (fun () ->
+    match parse
+      "private linear struct PLease[n: usize] { private idx: {0..<4 as usize} @ n; }
+       fn p_use(x: borrow PLease[n]) {}" with
+    | [Ast.OwnedStructDef
+         ("PLease", Ast.KindLinear, [("n", Ast.TypeUsize)],
+          [("idx", Ast.TypeSingleton
+             (Ast.TypeRefined (0, 4, Ast.TypeUsize), Ast.StaticName "n"))],
+          false, None, ["idx"], true, _);
+       Ast.FuncDef
+         { params = [("x", Some (Ast.TypeBorrow
+             (Ast.TypeIndexed ("PLease", [Ast.StaticName "n"]))))]; _ }] -> ()
+    | _ -> Alcotest.fail "expected indexed linear struct and borrow PLease[n]");
+
 
   Alcotest.test_case "empty function body" `Quick (fun () ->
     match parse "fn foo() {}" with
@@ -1387,6 +1413,216 @@ let parser_tests = [
 (* -- Type inference tests -------------------------------------------------- *)
 
 let infer_tests = [
+  Alcotest.test_case
+    "Slice 1: indexed linear owner carries the range-proven runtime index" `Quick
+    (fun () ->
+      ignore (infer
+        "private linear struct InfLease[n: usize] {
+           private idx: {0..<4 as usize} @ n;
+         }
+         let mut inf_slots: [i32; 4];
+         fn inf_make(idx: {0..<4 as usize} @ n) -> InfLease[n] {
+           let mut lease: InfLease[n] = { idx };
+           return lease;
+         }
+         fn inf_read(lease: borrow InfLease[n]) -> i32 {
+           return inf_slots[lease.idx];
+         }
+         fn inf_drop(lease: sink InfLease[n]) {}
+         fn inf_ok() -> i32 {
+           let lease = inf_make(2);
+           let value = inf_read(lease);
+           inf_drop(lease);
+           return value;
+         }"));
+
+  Alcotest.test_case
+    "Slice 1: two independently indexed owners cannot satisfy one static identity" `Quick
+    (expect_type_error "static value mismatch: 1 vs 0"
+      "linear struct InfIdentity[n: usize] { idx: {0..<4 as usize} @ n; }
+       fn ii_make(idx: {0..<4 as usize} @ n) -> InfIdentity[n] {
+         let mut x: InfIdentity[n] = { idx }; return x;
+       }
+       fn ii_same(a: borrow InfIdentity[n], b: borrow InfIdentity[n]) {}
+       fn ii_drop(x: sink InfIdentity[n]) {}
+       fn ii_bad() {
+         let a = ii_make(0); let b = ii_make(1); ii_same(a, b);
+         ii_drop(a); ii_drop(b);
+       }");
+
+  Alcotest.test_case "Slice 1: range is checked before an indexed owner is minted" `Quick
+    (expect_type_error "constant value 4 does not fit the refined type {0..<4}"
+      "linear struct InfRange[n: usize] { idx: {0..<4 as usize} @ n; }
+       fn ir_make(idx: {0..<4 as usize} @ n) -> InfRange[n] {
+         let mut x: InfRange[n] = { idx }; return x;
+       }
+       fn ir_bad() { let x = ir_make(4); }");
+
+  Alcotest.test_case "Slice 1: an indexed struct cannot silently lose its static argument" `Quick
+    (expect_type_error "requires 1 static argument"
+      "linear struct InfMissing[n: usize] { idx: usize @ n; }
+       fn im_bad(x: borrow InfMissing) {} ");
+
+  Alcotest.test_case "Slice 1: implicit universals are fresh at each call" `Quick
+    (fun () ->
+      ignore (infer
+        "linear struct InfFresh[n: usize] { idx: {0..<4 as usize} @ n; }
+         fn if_make(idx: {0..<4 as usize} @ n) -> InfFresh[n] {
+           let mut x: InfFresh[n] = { idx }; return x;
+         }
+         fn if_drop(x: sink InfFresh[n]) {}
+         fn if_ok() {
+           let a = if_make(0); if_drop(a);
+           let b = if_make(1); if_drop(b);
+         }"));
+
+  Alcotest.test_case "Slice 1: one immutable runtime value keeps one static identity" `Quick
+    (fun () ->
+      ignore (infer
+        "linear struct InfStable[n: usize] { idx: {0..<4 as usize} @ n; }
+         fn is_make(idx: {0..<4 as usize} @ n) -> InfStable[n] {
+           let mut x: InfStable[n] = { idx }; return x;
+         }
+         fn is_same(a: borrow InfStable[n], b: borrow InfStable[n]) {}
+         fn is_drop(x: sink InfStable[n]) {}
+         fn is_ok() {
+           let idx: {0..<4 as usize} = 2;
+           let a = is_make(idx); let b = is_make(idx); is_same(a, b);
+           is_drop(a); is_drop(b);
+         }"));
+
+  Alcotest.test_case "Slice 1: an inferred immutable alias preserves singleton identity" `Quick
+    (fun () ->
+      ignore (infer
+        "linear struct InfAlias[n: usize] { idx: {0..<4 as usize} @ n; }
+         fn ia_make(idx: {0..<4 as usize} @ n) -> InfAlias[n] {
+           let mut x: InfAlias[n] = { idx }; return x;
+         }
+         fn ia_forward(idx: {0..<4 as usize} @ n) -> InfAlias[n] {
+           let alias = idx;
+           return ia_make(alias);
+         }
+         fn ia_drop(x: sink InfAlias[n]) {}
+         fn ia_ok() { let x = ia_forward(2); ia_drop(x); }"));
+
+  Alcotest.test_case
+    "Slice 1: independent unknown runtime values are generative, not unifiable proofs" `Quick
+    (expect_type_error "static value mismatch"
+      "linear struct InfGenerative[n: usize] { idx: {0..<4 as usize} @ n; }
+       fn ig_make(idx: {0..<4 as usize} @ n) -> InfGenerative[n] {
+         let mut x: InfGenerative[n] = { idx }; return x;
+       }
+       fn ig_same(a: borrow InfGenerative[n], b: borrow InfGenerative[n]) {}
+       fn ig_drop(x: sink InfGenerative[n]) {}
+       fn ig_bad(x: {0..<4 as usize}, y: {0..<4 as usize}) {
+         let a = ig_make(x); let b = ig_make(y); ig_same(a, b);
+         ig_drop(a); ig_drop(b);
+       }");
+
+  Alcotest.test_case "Slice 1: borrow cannot be returned as a second owner" `Quick
+    (expect_type_error "cannot move borrowed value"
+      "linear struct InfBorrow[n: usize] { idx: usize @ n; }
+       fn ib_clone(x: borrow InfBorrow[n]) -> InfBorrow[n] { return x; }");
+
+  Alcotest.test_case "Slice 1: an affine indexed owner cannot be left uninitialized" `Quick
+    (expect_type_error "affine value 'x' must be initialized"
+      "affine struct InfUninit[n: usize] { idx: usize @ n; }
+       fn iu_bad() { let mut x: InfUninit[0]; }");
+
+  Alcotest.test_case "Slice 1: assigning over a live affine indexed owner is rejected" `Quick
+    (expect_type_error "assigning over affine value 'x' would discard its obligation"
+      "affine struct InfOverwrite[n: usize] { idx: usize @ n; }
+       fn io_make(idx: usize @ n) -> InfOverwrite[n] {
+         let mut x: InfOverwrite[n] = { idx }; return x;
+       }
+       fn io_drop(x: sink InfOverwrite[n]) {}
+       fn io_bad() {
+         let mut x = io_make(0); x = io_make(0); io_drop(x);
+       }");
+
+  Alcotest.test_case "Slice 1: a borrowed indexed owner cannot be reassigned" `Quick
+    (expect_type_error "cannot assign to borrowed value 'x'"
+      "linear struct InfBorrowAssign[n: usize] { idx: usize @ n; }
+       fn iba_bad(x: borrow InfBorrowAssign[n]) { x = x; }");
+
+  Alcotest.test_case "Slice 1: borrow cannot hide inside a tuple parameter" `Quick
+    (expect_type_error "borrow/sink must wrap the entire function parameter type"
+      "linear struct InfNestedBorrow[n: usize] { idx: usize @ n; }
+       fn inb_bad(x: (borrow InfNestedBorrow[n], i32)) {}");
+
+  Alcotest.test_case "Slice 1: a sink parameter cannot be overwritten" `Quick
+    (expect_type_error "cannot assign to sink value 'x'"
+      "linear struct InfSinkAssign[n: usize] { idx: usize @ n; }
+       fn isa_bad(x: sink InfSinkAssign[n]) { x = x; }");
+
+  Alcotest.test_case "Slice 1: an indexed owner temporary cannot be borrowed and lost" `Quick
+    (expect_type_error "owned result of 'it_make' must be moved"
+      "linear struct InfTemporary[n: usize] { idx: usize @ n; }
+       fn it_make(idx: usize @ n) -> InfTemporary[n] {
+         let mut x: InfTemporary[n] = { idx }; return x;
+       }
+       fn it_read(x: borrow InfTemporary[n]) {}
+       fn it_bad() { it_read(it_make(0)); }");
+
+  Alcotest.test_case "Slice 1: an indexed owner result cannot be discarded" `Quick
+    (expect_type_error "owned result of 'id_make' must be moved"
+      "linear struct InfDiscard[n: usize] { idx: usize @ n; }
+       fn id_make(idx: usize @ n) -> InfDiscard[n] {
+         let mut x: InfDiscard[n] = { idx }; return x;
+       }
+       fn id_bad() { id_make(0); }");
+
+  Alcotest.test_case "Slice 1: singleton identity cannot be invalidated through a pointer" `Quick
+    (expect_type_error "cannot take the address of singleton value 'idx'"
+      "fn sip_write(p: *usize) { *p = 3; }
+       fn sip_bad(idx: {0..<4 as usize} @ n) { sip_write(&idx); }");
+
+  Alcotest.test_case "Slice 1: ordinary struct storage cannot retain singleton facts" `Quick
+    (expect_type_error "ordinary struct field 'InfSingletonStorage.idx' cannot hold a singleton"
+      "struct InfSingletonStorage { idx: usize @ 0; }");
+
+  Alcotest.test_case "Slice 1: arrays cannot contain singleton values" `Quick
+    (expect_type_error "singleton value cannot live behind a pointer or inside array/slice storage"
+      "fn isa_bad() { let mut xs: [usize @ 0; 2]; }");
+
+  Alcotest.test_case "Slice 1: immutable indexed owner fields cannot be assigned" `Quick
+    (expect_type_error "cannot assign a field of immutable indexed owner 'x'"
+      "linear struct InfImmutableField[n: usize] { idx: usize @ n; value: i32; }
+       fn iif_make(idx: usize @ n) -> InfImmutableField[n] {
+         let mut x: InfImmutableField[n] = { idx, 0 }; return x;
+       }
+       fn iif_drop(x: sink InfImmutableField[n]) {}
+       fn iif_bad() {
+         let x = iif_make(0); x.value = 1; iif_drop(x);
+       }");
+
+  Alcotest.test_case "Slice 1: indexed owners cannot be placed behind pointers" `Quick
+    (expect_type_error "indexed owner cannot live behind a pointer"
+      "linear struct InfPtr[n: usize] { idx: usize @ n; }
+       fn ip_bad(x: *InfPtr[0]) {}");
+
+  Alcotest.test_case "Slice 1: casts cannot mint indexed owners" `Quick
+    (expect_type_error "cannot construct indexed owner 'InfCast' with a cast"
+      "linear struct InfCast[n: usize] { idx: usize @ n; }
+       fn ic_bad(x: usize) -> InfCast[0] { return x as InfCast[0]; }");
+
+  Alcotest.test_case "Slice 1: a private indexed owner cannot be forged cross-file" `Quick
+    (fun () ->
+      match infer_files [
+        ("owner.tkb",
+         "private linear struct InfPrivate[n: usize] {
+            private idx: {0..<4 as usize} @ n;
+          }");
+        ("attacker.tkb",
+         "fn priv_forge(idx: {0..<4 as usize} @ n) -> InfPrivate[n] {
+            let mut x: InfPrivate[n] = { idx }; return x;
+          }")
+      ] with
+      | _ -> Alcotest.fail "expected cross-file private constructor rejection"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) "private constructor diagnostic" true
+            (contains_substring msg "cannot construct struct 'InfPrivate'"));
+
 
   (* -- Success cases ----------------------------------------------- *)
 
@@ -3743,6 +3979,55 @@ let infer_tests = [
    checks runtime behavior, not just "the IR verifies"). *)
 
 let codegen_tests = [
+  Alcotest.test_case
+    "Slice 1 ABI: static indices erase while the runtime index stays in the aggregate" `Quick
+    (fun () ->
+      let src =
+        "linear struct CgLease[n: usize] { idx: {0..<4 as usize} @ n; }
+         let mut cg_slots: [i32; 4];
+         fn cg_make(idx: {0..<4 as usize} @ n) -> CgLease[n] {
+           let mut x: CgLease[n] = { idx }; return x;
+         }
+         fn cg_read(x: borrow CgLease[n]) -> i32 { return cg_slots[x.idx]; }
+         fn cg_drop(x: sink CgLease[n]) {}
+         fn cg_use() -> i32 {
+           let x = cg_make(2); let v = cg_read(x); cg_drop(x); return v;
+         }" in
+      ignore (gen_codegen src);
+      Alcotest.(check int) "no bounds trap remains" 0
+        (List.length !Llvm_gen.trap_sites);
+      match Hashtbl.find_opt Llvm_gen.functions "cg_read" with
+      | None -> Alcotest.fail "cg_read not found"
+      | Some (_, f) ->
+          let ir = Llvm.string_of_llvalue f in
+          Alcotest.(check bool) "runtime field is extracted" true
+            (contains_substring ir "extractvalue");
+          Alcotest.(check bool) "no pointer-bit encoding" false
+            (contains_substring ir "inttoptr" || contains_substring ir "ptrtoint"));
+
+  Alcotest.test_case
+    "Slice 1 ABI: a mutable indexed owner field is real writable storage" `Quick
+    (fun () ->
+      let src =
+        "linear struct CgMutable[n: usize] { idx: usize @ n; value: i32; }
+         fn cgm_make(idx: usize @ n) -> CgMutable[n] {
+           let mut x: CgMutable[n] = { idx, 0 }; return x;
+         }
+         fn cgm_set(x: CgMutable[n], value: i32) -> CgMutable[n] {
+           x.value = value; return x;
+         }
+         fn cgm_drop(x: sink CgMutable[n]) {}
+         fn cgm_use() {
+           let x = cgm_make(2); let x = cgm_set(x, 7); cgm_drop(x);
+         }" in
+      ignore (gen_codegen src);
+      match Hashtbl.find_opt Llvm_gen.functions "cgm_set" with
+      | None -> Alcotest.fail "cgm_set not found"
+      | Some (_, f) ->
+          let ir = Llvm.string_of_llvalue f in
+          Alcotest.(check bool) "field store uses aggregate storage" true
+            (contains_substring ir "getelementptr" && contains_substring ir "store i32"));
+
 
   Alcotest.test_case "overloads emit mangled symbols and direct calls use the selected symbol" `Quick
     (fun () ->

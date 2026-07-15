@@ -870,6 +870,8 @@ run_compile_error_test "affine_param_never_consumed" examples/affine_param_never
 run_compile_error_test "align_ptr_unproven" examples/align_ptr_unproven/align_ptr_unproven.tkb examples/align_ptr_unproven/align_ptr_unproven.error
 run_compile_error_test "klock_guard_forgot_unlock" examples/klock_guard_forgot_unlock/klock_guard_forgot_unlock.tkb examples/klock_guard_forgot_unlock/klock_guard_forgot_unlock.error
 run_compile_error_test "percpu_unrefined_rejected" examples/percpu_unrefined_rejected/percpu_unrefined_rejected.tkb examples/percpu_unrefined_rejected/percpu_unrefined_rejected.error --forbid-trap
+run_compile_error_test "indexed_owner_identity_wrong" examples/indexed_owner_identity_wrong/indexed_owner_identity_wrong.tkb examples/indexed_owner_identity_wrong/indexed_owner_identity_wrong.error
+run_compile_error_test "indexed_owner_range_wrong" examples/indexed_owner_range_wrong/indexed_owner_range_wrong.tkb examples/indexed_owner_range_wrong/indexed_owner_range_wrong.error
 
 echo ""
 echo "Running DWARF debug-info check (-g build)..."

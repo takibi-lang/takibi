@@ -1,0 +1,22 @@
+private linear struct SlotLease[n: usize] {
+    private idx: {0..<4 as usize} @ n;
+}
+
+fn slot_lease(idx: {0..<4 as usize} @ n) -> SlotLease[n] {
+    let mut lease: SlotLease[n] = { idx };
+    return lease;
+}
+
+fn require_same(a: borrow SlotLease[n], b: borrow SlotLease[n]) {
+}
+
+fn slot_unlease(lease: sink SlotLease[n]) {
+}
+
+fn app_main() {
+    let a = slot_lease(0);
+    let b = slot_lease(1);
+    require_same(a, b);
+    slot_unlease(a);
+    slot_unlease(b);
+}

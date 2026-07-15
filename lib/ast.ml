@@ -16,6 +16,11 @@ type binop =
   | Or | And | Bor | Bxor | Band | Shr | Shl
 [@@deriving show]
 
+type static_arg =
+  | StaticName of string
+  | StaticInt of int
+[@@deriving show]
+
 type type_expr =
   | TypeBool
   | TypeI8  | TypeI16 | TypeI32 | TypeI64
@@ -28,6 +33,12 @@ type type_expr =
   | TypeArray of type_expr * int   (* [T; N] *)
   | TypeFn of type_expr list * type_expr  (* fn(T...) -> R *)
   | TypeNamed of string            (* struct type by name *)
+  | TypeIndexed of string * static_arg list
+    (* Name[n, ...] -- a runtime named value indexed by erased static
+       integers. The named value keeps its ordinary runtime layout; only
+       the arguments disappear after type checking. *)
+  | TypeSingleton of type_expr * static_arg
+    (* T @ n -- a runtime T whose value is the erased static integer n. *)
   | TypeRefined of int * int * type_expr
     (* {lo..<hi} -- refined int: lo <= x < hi. Third field is the
        underlying primitive type (mirrors Types.ty's TRefinedInt -- see
@@ -60,6 +71,9 @@ type type_expr =
        wrapper like TypeBorrow/TypeSink: align(N) modifies the pointer
        sigil itself, matching the already-existing align(N) local/global
        variable and struct-level syntax. *)
+[@@deriving show]
+
+type static_param = ident * type_expr
 [@@deriving show]
 
 type expr = expr_desc located
@@ -176,6 +190,12 @@ type toplevel =
      Kept as a parallel name list rather than widening the field tuples,
      so Type_layout/codegen/senv consumers stay untouched (privacy is a
      type-checking concern with zero layout footprint). *)
+  | OwnedStructDef of string * opaque_kind * static_param list
+      * (string * type_expr) list * bool * int option * string list * bool * loc
+  (* name, affine/linear kind, erased static parameters, runtime fields,
+     layout flags, private field names, is_private, loc. Unlike an opaque
+     handle this is a first-class runtime aggregate; only its static
+     parameters are erased. *)
   | OpaqueStructDef of string * opaque_kind * bool * loc
   (* name, kind, is_private, loc -- incomplete nominal type, usable only
      behind a pointer.

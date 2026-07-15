@@ -3,9 +3,10 @@
 Status: LIVING DESIGN MEMO, not the language spec. Stages 1, 2, the tuple
 interlude, and Stage 3a are implemented; their actual behavior lives in
 SPEC.md. The long-term architecture and Stage 3b's next vertical slice now
-live in TAKIBI_CORE.md; its Slice 0 Core boundary is implemented. Later
-indexed-owner/view/variant/solver work remains outlook. As each surface slice
-lands, SPEC.md stays authoritative for the language that actually exists.
+live in TAKIBI_CORE.md; its Slice 0 Core boundary and Slice 1 indexed runtime
+owner are implemented. View/variant/solver work remains outlook. As each
+surface slice lands, SPEC.md stays authoritative for the language that
+actually exists.
 
 Driving issues: #117 (witness tokens / protocol obligations -- where this
 plan was drawn up), #89 (affine drop/escape/inter-function), #108
@@ -759,6 +760,49 @@ Close #89 once that slice is implemented and specified. Variant-carried RX
 resources, erased general views, protocol transitions, SMT, separation
 predicates, and external proof artifacts should have separate issues and
 their own example-driven acceptance criteria.
+
+#### 6.7.2 Slice 1 implementation result (2026-07-15)
+
+The indexed runtime-owner slice is now implemented. The former
+`affine opaque struct SlotLease` plus `unsafe { idx as *SlotLease }` fixture
+has been replaced by:
+
+```takibi
+private linear struct SlotLease[n: usize] {
+    private idx: {0..<4 as usize} @ n;
+}
+```
+
+`slot_lease` returns `SlotLease[n]`; read, write, and close take only
+`borrow SlotLease[n]`; `slot_unlease` takes `sink SlotLease[n]`. There is no
+loose `idx` argument after acquisition. The positive example compiles under
+`--forbid-trap`, while dedicated fixtures reject an out-of-range mint and two
+independently indexed leases where one static identity is required.
+
+The representation result is explicit: `SlotLease[n]` is a runtime
+one-`usize` aggregate. LLVM receives that aggregate by value for ordinary,
+`borrow`, and `sink` parameters; the callee extracts `idx`. The binder `n`,
+singleton equality, range fact, and ownership obligation have no runtime
+field. No integer/pointer cast participates in minting or recovery.
+
+The exact trust boundary is also now recorded. Constructing the private
+runtime struct mints a fresh ownership obligation; `linear` enforces the
+lifetime of each minted value, but does not itself prevent trusted code in the
+declaring file from minting two `SlotLease[n]` values for the same `n`.
+Requiring a separate erased permission at `slot_lease` is future `view` work.
+Slice 1 therefore establishes runtime/static index coupling and value
+lifetime, not yet exclusive authority to mint a given resource identity.
+
+This is the first implemented evidence for the "B1 core, B2 surface"
+decision. It does not implement the entire B1 destination: explicit
+existentials, views, propositions, solver/prover integration, mutable
+borrowing, and effects remain separate slices. Indexed owners are therefore
+restricted to locals, parameters, returns, and value tuples for now; casts,
+address-taking, globals, struct fields, arrays/slices, and pointer storage are
+rejected rather than pretending function-local resource tracking covers
+them. Singleton values are likewise non-addressable and excluded from
+ordinary mutable storage, because a widened pointer could otherwise mutate
+the runtime value while the `@ n` fact survived.
 
 ## 7. Stage 4 outlook: channel v2 (#113) + variant enums (#20)
 
