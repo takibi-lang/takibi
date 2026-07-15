@@ -4,21 +4,19 @@
 // genuinely escaping its acquiring function) before deciding whether to
 // roll it out to any real driver. See HISTORY.md's issue #89 entries.
 //
-// An `affine opaque struct` handle (examples/common/fat12.tkb's FatFile,
-// examples/common_stm32/eth.tkb's NetRxCpuOwned) cannot be stored into a
-// data structure that outlives the acquiring function: the affine
-// checker's tracking is function-local only, and `opaque` forbids fields,
-// so the pattern is a global SINGLETON -- only one live instance can
-// exist system-wide (see SPEC.md's "Affine Opaque Structs" section).
-// A real Unix-like kernel's fd table (a process holding several open
-// files at once) cannot be built directly on that pattern.
+// The original issue #89 probe used an affine opaque pointer and a loose
+// integer index. Slice 1 replaced that endpoint with the indexed runtime
+// owner below, so this file now records both the historical motivation and
+// the implemented solution. Opaque handles such as FatFile still carry no
+// runtime fields; NetRxCpuOwned has since migrated to the same indexed-owner
+// model demonstrated here.
 //
 // Idiom demonstrated here: don't make the escaping, storable identity an
 // affine pointer at all. Make it a plain integer INDEX into a
 // fixed-size table of REAL per-slot state. A plain usize/i32 has none of
 // the escape problem -- it is an ordinary value, freely stored in
 // structs, arrays, returned, copied -- and takibi's range-proof
-// machinery (not the affine checker) is what can keep table access safe.
+// machinery is what keeps table access safe.
 //
 // Trade made: double-close / use-after-close on the ESCAPED identity is
 // no longer a compile-time error, only a runtime `in_use` flag check --
@@ -28,10 +26,8 @@
 // the same type either. Multi-instance + escape, in exchange for losing
 // affine's static double-free guarantee on the escaped value itself.
 //
-// A second, NOMINAL layer (`SlotLease`, below) puts affine tracking back
-// on top of the index, scoped to a single momentary operation instead of
-// the escaping identity itself -- see that type's own comment for what
-// it is (and is not) meant to demonstrate.
+// The nominal `SlotLease[n]` below now carries that index directly and is
+// linear, eliminating the loose call-site index while preserving its range.
 
 // The runtime index and its erased static identity now travel together.
 // LLVM sees this as a one-field `{ usize }` aggregate; `n` and `@ n` have

@@ -50,6 +50,8 @@ rule read = parse
   | "affine"  { AFFINE }
   | "linear"  { LINEAR }
   | "view"    { VIEW }
+  | "variant" { VARIANT }
+  | "exists"  { EXISTS }
   | "borrow"  { BORROW }
   | "sink"    { SINK }
   | "private" { PRIVATE }

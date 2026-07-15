@@ -1,10 +1,8 @@
 // This file is expected to produce a compile error.
-// THE case the linear kind exists for, and the exact case affine's
-// union-based check cannot catch (OWNERSHIP_KERNEL.md Stage 1, GitHub
-// issue #117): an obligation discharged on one branch but silently
-// dropped on the other. For an `affine opaque struct` this compiles
-// (consumption on at least one path satisfies the weak must-consume
-// check); for `linear` the intersection (all-paths) rule rejects it.
+// THE case the linear kind exists for (OWNERSHIP_KERNEL.md Stage 1, GitHub
+// issue #117): an obligation discharged on one branch but silently dropped
+// on the other. Standard affine permits that weakening; linear uses the
+// intersection (all-paths) rule and rejects it.
 // The real-world shape: a protocol state machine that answers an event
 // in one arm of a condition and swallows it in the other -- the shape of
 // GitHub issue #116's original TCP LastAck bug.

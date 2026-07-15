@@ -7323,3 +7323,67 @@ resource-flow, storage-ban, return-totality, runtime-operator, and LLVM ABI
 regressions. The full `make check` passed all 106 host, compile-error, DWARF,
 and QEMU tests, plus every STM32 cross-build, including the migrated HTTP
 server under `--forbid-trap`.
+
+## 2026-07-15: Takibi Core Slice 3, Closed Variants and Existential Owners
+
+Implemented the conditional-resource package needed after indexed runtime
+owners and erased views. Takibi now accepts concrete closed
+`variant Name { None; Some(T); }` declarations, nullary and payload
+constructors, payload-binding match arms, duplicate/exhaustiveness checks,
+and kind propagation from payloads. Matching consumes a kinded package and
+creates a fresh obligation for the selected payload; a linear variant cannot
+hide that obligation behind a wildcard.
+
+The first existential surface form is deliberately restricted:
+`exists n: IntegerSort. Owner[n]` may appear only as the outermost payload
+of a variant case and must directly package an indexed runtime owner.
+Construction hides the owner's static index. Each match opens it with a fresh
+rigid identity, so two independently acquired resources cannot satisfy an
+API requiring the same index merely because their runtime layouts agree.
+The static binder, singleton equality, refinement facts, and ownership
+permission erase; the owner's runtime fields remain.
+
+LLVM lowers the current variant ABI to `{ i32 tag, payload0, payload1, ... }`,
+with one typed field per runtime-bearing case. Payload-less cases and erased
+view payloads add no field. This is intentionally not yet a compact union ABI
+or a stable C ABI, and full source-level tagged-union DWARF is deferred.
+`sizeof(Variant)` follows the same target layout. Variant-returning functions
+must explicitly return on every path, avoiding an invalid aggregate default.
+Concrete struct and array payloads are deferred until their value and
+ownership representation is defined; Slice 3 accepts primitive, pointer,
+slice, erased-view, and indexed-owner payloads instead.
+
+Both Ethernet backends now expose:
+
+```takibi
+variant NetRxAcquire {
+    None;
+    Acquired(exists desc: usize. NetRxCpuOwned[desc]);
+}
+```
+
+`NetRxCpuOwned[desc]` is a linear runtime owner containing the refined
+descriptor index and frame length. QEMU and STM32 callers match the package,
+use the inferred identity through accessors, and release the exact owner; the
+null token, acquired-length global, and last-descriptor global are gone.
+FAT12 similarly returns `FatOpenResult::Error(i32)` or
+`Opened(*FatFile)`, and all FAT callers close the linear token in every
+success arm.
+
+Slice 3 also completes the multiplicity migration. `affine` now has its
+standard at-most-once meaning: weakening, unused parameters, uninitialized
+locals, live overwrite, and reinitialization after move are permitted, while
+double use remains rejected. Mandatory-release examples (`FatFile`,
+`NetRxCpuOwned`, `MutexGuard`, and `KGuard`) use `linear`. Every
+ownership-bearing value is now bit-opaque; cast-away is rejected even inside
+`unsafe`, because fallible ownership is represented by a variant rather
+than a null sentinel.
+
+Three focused compile-error examples explain their failures in English:
+`variant_linear_payload_missed`, `variant_existential_identity_wrong`,
+and `variant_nonexhaustive_wrong`. Historical affine-never-consumed
+fixtures are now positive compile-only checks for standard weakening.
+
+Validation: all 666 Alcotest cases passed. The full `make check` passed all
+109 host, compile-error, DWARF, and QEMU integration cases, every STM32
+cross-build, and the network/FAT examples under `--forbid-trap`.

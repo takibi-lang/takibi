@@ -1,0 +1,33 @@
+// This file is expected to produce a compile error.
+// Each match independently opens `exists n` with a fresh rigid identity.
+// The two leases therefore cannot be passed to a function that requires both
+// arguments to have the same static index, even though their runtime layouts
+// are identical.
+linear struct VariantLease[n: usize] {
+    index: usize @ n;
+}
+
+variant AnyVariantLease {
+    Lease(exists n: usize. VariantLease[n]);
+}
+
+fn require_same_variant_lease(a: borrow VariantLease[n],
+                              b: borrow VariantLease[n]) {
+}
+
+fn drop_variant_lease(lease: sink VariantLease[n]) {
+}
+
+fn compare_unknown_variant_leases(a: AnyVariantLease, b: AnyVariantLease) {
+    match a {
+        AnyVariantLease::Lease(left) => {
+            match b {
+                AnyVariantLease::Lease(right) => {
+                    require_same_variant_lease(left, right);
+                    drop_variant_lease(left);
+                    drop_variant_lease(right);
+                }
+            }
+        }
+    }
+}

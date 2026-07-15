@@ -5,12 +5,14 @@ syntax accepted by the compiler today. `SPEC.md` remains authoritative for
 implemented Takibi. `OWNERSHIP_KERNEL.md` records the history and limitations
 of the current affine/linear checker.
 
-Implementation status (2026-07-15): Slices 0 through 2 are implemented. The
+Implementation status (2026-07-15): Slices 0 through 3 are implemented. The
 `Takibi_core` module owns the four-layer vocabulary, the current checker uses
 `Delta.Legacy_flow`, and the indexed runtime-owner subset described in 3.1 is
 accepted. Non-indexed erased affine/linear views are also accepted and erased
-before LLVM ABI lowering. Indexed views, explicit existentials, general
-propositions, solver hooks, and effects remain design targets.
+before LLVM ABI lowering. Closed kind-carrying variants, restricted
+existential indexed-owner payloads, and standard affine weakening are
+accepted. Indexed views, general quantifiers/propositions, solver hooks,
+mutable borrowing, and effects remain design targets.
 
 The examples in this document are elaboration fixtures. Their contracts and
 runtime representations are decisions; punctuation may change when a fixture
@@ -76,9 +78,8 @@ linear struct MustClose[n: usize] { id: usize @ n }
 
 All fields of a `struct` have a runtime layout. `affine` means at most one
 owning use and permits dropping. `linear` means exactly one owning use on
-every exit path. These are the standard meanings; today's affine
-"consumed on at least one path" rule is a migration mechanism, not the
-destination.
+every exit path. Slice 3 implements these standard meanings; the former
+"consumed on at least one path" affine rule has been removed.
 
 An affine/linear runtime value elaborates to both:
 
@@ -558,17 +559,46 @@ Implemented scope:
 The declaring file remains a trusted minting boundary. Slice 2 checks every
 minted value's affine/linear flow but does not prove that trusted code mints a
 permission only when the corresponding external event really occurred.
-Static view parameters, `forall`/`exists`, view change, propositions, and
-solver discharge remain later slices; Slice 2 does not fake them with names
-or runtime token bits.
+Static view parameters, `forall`, view change, propositions, and solver
+discharge remain later slices; Slice 2 does not fake them with names or
+runtime token bits. Slice 3 subsequently adds only the restricted
+variant-payload `exists` form below.
 
-### Slice 3: variants/existentials and standard multiplicity
+### Slice 3: variants/existentials and standard multiplicity (implemented 2026-07-15)
 
-- Add kind-carrying `Option`/`Result` payloads and existential opening.
-- Rewrite `NetRxCpuOwned` acquisition without null tokens.
-- Change `affine` to its standard at-most-once meaning; use `linear` where
-  release is mandatory. Delete the current any-path must-consume exception
-  after its examples migrate.
+Implemented scope:
+
+- concrete closed `variant Name { None; Some(T); }` declarations, with one
+  optional payload per case, constructors, payload-binding `match` arms,
+  duplicate checks, and closed exhaustiveness;
+- kind propagation from payloads, consuming match for kinded variants, and
+  fresh arm-local obligations for selected payloads. A linear variant cannot
+  use a wildcard arm that could hide an obligation;
+- restricted `exists n: IntegerSort. Owner[n]` payloads. Construction packs
+  the static identity; each match opens it with a fresh rigid identity, so
+  independently opened resources cannot be equated accidentally;
+- standard affine weakening: affine locals, parameters, fields, views,
+  indexed owners, and variants may be dropped, while contraction/use-after-
+  move remains rejected. Mandatory-release examples now use `linear`;
+- complete bit opacity for ownership-bearing values. Cast-away is rejected
+  even in `unsafe`; fallible acquisition uses a variant rather than a null
+  sentinel;
+- `NetRxAcquire` in both Ethernet drivers now returns
+  `None | Acquired(exists desc. NetRxCpuOwned[desc])`. Descriptor index and
+  frame length remain runtime owner fields while the existential identity and
+  proofs erase;
+- `FatOpenResult` now returns `Error(i32) | Opened(*FatFile)`, eliminating
+  nullable linear ownership. `FatFile` remains a singleton opaque runtime
+  design pending Slice 4;
+- LLVM lowering to a tag plus runtime payload fields, with view payloads and
+  existential binders erased. This first layout is not yet a stable C ABI or
+  full tagged-union DWARF representation.
+
+Deliberate limits are concrete named variants, no generic
+`Option[T]`/`Result[T,E]`, no nested/container/storage variants, one
+payload per case, no concrete struct/array aggregate payloads, and
+existentials only around a direct indexed runtime owner. These are
+ownership-tracking limits, not claims about the final Core.
 
 ### Slice 4: runtime mutable owners and effects
 
@@ -595,9 +625,8 @@ Replace rather than preserve indefinitely:
 
 - ownership being synonymous with `*OpaqueMarker`;
 - integer-to-token and dummy-storage minting;
-- affine's nonstandard "consumed on at least one path" obligation;
 - pointer-only `borrow`/`sink`;
-- null as a fallible resource package;
+- singleton global state behind `FatFile`'s opaque token;
 - local-name/one-field-only tracking as the semantic endpoint;
 - proof-carrying runtime data and erased views sharing one ambiguous
   `resource` spelling;

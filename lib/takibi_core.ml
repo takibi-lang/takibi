@@ -42,11 +42,11 @@ module Delta = struct
       surface checker.
 
       [maybe_consumed] is unioned at a branch join; [must_be_consumed] is
-      intersected. The former supports today's double-use check and its
-      non-standard affine "consumed on at least one path" rule. The latter
-      supports linear all-path obligations. This is intentionally named
-      Legacy_flow: final Delta will track available permissions and explicit
-      consume/produce transitions, not encode affine semantics this way. *)
+      intersected. The former supports the at-most-once check shared by
+      affine and linear values. The latter supports linear all-path
+      obligations; standard affine weakening does not consult it. This is
+      intentionally named Legacy_flow: final Delta will track available
+      permissions and explicit consume/produce transitions. *)
   module Legacy_flow (Place : Set.OrderedType) : sig
     module Places : Set.S with type elt = Place.t
 

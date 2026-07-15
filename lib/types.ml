@@ -14,6 +14,10 @@ type ty =
   | TArray of ty * int    (* array type: [T; N] *)
   | TStruct of string     (* named struct type *)
   | TView of string       (* erased affine/linear permission value *)
+  | TVariant of string    (* tagged runtime sum; kind is derived from payloads *)
+  | TExists of string * Ast.type_expr * static_term * ty
+    (* Binder name, integer sort, bound static term, payload schema. The
+       binder is erased; the payload retains its ordinary runtime layout. *)
   | TIndexedStruct of string * static_term list
     (* First-class runtime struct carrying erased static indices. *)
   | TSingleton of ty * static_term
@@ -143,6 +147,10 @@ let rec to_string t =
         (String.concat ", " (List.map to_string ps)) (to_string r)
   | TStruct s -> s
   | TView s -> Printf.sprintf "view %s" s
+  | TVariant s -> Printf.sprintf "variant %s" s
+  | TExists (name, sort, _, body) ->
+      Printf.sprintf "exists %s: %s. %s" name
+        (Ast.show_type_expr sort) (to_string body)
   | TIndexedStruct (s, args) ->
       Printf.sprintf "%s[%s]" s
         (String.concat ", " (List.map static_to_string args))
@@ -168,9 +176,10 @@ let rec occurs rv = function
   | TSlice (t, _)              -> occurs rv t
   | TAlignedPtr (_, t)         -> occurs rv t
   | TTuple ts                  -> List.exists (occurs rv) ts
+  | TExists (_, _, _, t)       -> occurs rv t
   | TIndexedStruct _           -> false
   | TSingleton (t, _)          -> occurs rv t
-  | TStruct _ | TView _        -> false
+  | TStruct _ | TView _ | TVariant _ -> false
   | _                          -> false
 
 let rec unify t1 t2 =
@@ -301,6 +310,41 @@ let rec unify t1 t2 =
   | TView s1, TView s2 ->
       if s1 <> s2 then
         raise (Unify_error (Printf.sprintf "view type mismatch: %s vs %s" s1 s2))
+  | TVariant s1, TVariant s2 ->
+      if s1 <> s2 then
+        raise (Unify_error (Printf.sprintf "variant type mismatch: %s vs %s" s1 s2))
+  | TExists (_, sort1, binder1, body1),
+    TExists (_, sort2, binder2, body2) ->
+      if sort1 <> sort2 then
+        raise (Unify_error "existential static sort mismatch");
+      let rec subst_static_term old replacement term =
+        match static_repr old, static_repr term with
+        | SParam (old_id, _), SParam (id, _) when old_id = id -> replacement
+        | SVar old_r, SVar r when old_r == r -> replacement
+        | _, term -> term
+      and subst_ty old replacement t =
+        match repr t with
+        | TFun (ps, r) -> TFun (List.map (subst_ty old replacement) ps,
+                                subst_ty old replacement r)
+        | TPtr t -> TPtr (subst_ty old replacement t)
+        | TIo t -> TIo (subst_ty old replacement t)
+        | TArray (t, n) -> TArray (subst_ty old replacement t, n)
+        | TRefinedInt (lo, hi, base) ->
+            TRefinedInt (lo, hi, subst_ty old replacement base)
+        | TTuple ts -> TTuple (List.map (subst_ty old replacement) ts)
+        | TSlice (t, n) -> TSlice (subst_ty old replacement t, n)
+        | TAlignedPtr (n, t) -> TAlignedPtr (n, subst_ty old replacement t)
+        | TIndexedStruct (name, args) ->
+            TIndexedStruct (name,
+              List.map (subst_static_term old replacement) args)
+        | TSingleton (base, n) ->
+            TSingleton (subst_ty old replacement base,
+                        subst_static_term old replacement n)
+        | TExists (name, sort, binder, body) ->
+            TExists (name, sort, binder, subst_ty old replacement body)
+        | t -> t
+      in
+      unify body1 (subst_ty binder2 binder1 body2)
   | TVar rv, t | t, TVar rv ->
       (match !rv with
        | Link t' -> unify t' t
@@ -346,6 +390,12 @@ let rec of_ast_in_scope scope = function
   | Ast.TypeFn (ps, r)   -> TFun (List.map (of_ast_in_scope scope) ps, of_ast_in_scope scope r)
   | Ast.TypeNamed s      -> TStruct s
   | Ast.TypeView s       -> TView s
+  | Ast.TypeVariant s    -> TVariant s
+  | Ast.TypeExists (name, sort, body) ->
+      let inner_scope = Hashtbl.copy scope in
+      let binder = rigid_static name in
+      bind_static inner_scope name binder;
+      TExists (name, sort, binder, of_ast_in_scope inner_scope body)
   | Ast.TypeIndexed (s, args) ->
       TIndexedStruct (s, List.map (static_of_ast scope) args)
   | Ast.TypeSingleton (base, n) ->
@@ -403,6 +453,7 @@ let instantiate_static_params ty =
     | TIndexedStruct (name, args) ->
         TIndexedStruct (name, List.map inst_static args)
     | TSingleton (base, n) -> TSingleton (inst base, inst_static n)
+    | TExists _ as t -> t
     | t -> t
   in
   inst ty
@@ -423,6 +474,9 @@ let rec to_ast t =
   | TFun (ps, r)  -> Ast.TypeFn (List.map to_ast ps, to_ast r)
   | TStruct s     -> Ast.TypeNamed s
   | TView s       -> Ast.TypeView s
+  | TVariant s    -> Ast.TypeVariant s
+  | TExists (name, sort, _, body) ->
+      Ast.TypeExists (name, sort, to_ast body)
   | TIndexedStruct (s, args) ->
       Ast.TypeIndexed (s, List.map static_to_ast args)
   | TSingleton (base, n) -> Ast.TypeSingleton (to_ast base, static_to_ast n)

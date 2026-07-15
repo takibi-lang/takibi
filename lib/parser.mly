@@ -65,7 +65,7 @@ let check_refined_base_range pos lo hi base =
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN INLINE RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR VIEW BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
+%token FN INLINE RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT EXISTS BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
 %token DARROW COLONCOLON UNDERSCORE
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
 %token ASSIGN DOT
@@ -152,7 +152,8 @@ item:
         (name, kind, static_params, fields, false, None, private_fields,
          is_private, $symbolstartpos) }
   | p = private_flag k = owned_kind VIEW name = IDENT SEMI
-    { ViewDef (name, k, p, $symbolstartpos) }
+    { Type_layout.register_view name;
+      ViewDef (name, k, p, $symbolstartpos) }
   | p = private_flag OPAQUE STRUCT IDENT SEMI
     { OpaqueStructDef ($4, KindPlain, p, $symbolstartpos) }
   | p = private_flag AFFINE OPAQUE STRUCT IDENT SEMI
@@ -167,6 +168,9 @@ item:
     { let (vs, ne) = $4 in
       Type_layout.register_enum $2 TypeU32;
       EnumDef ($2, None, vs, ne) }
+  | VARIANT name = IDENT LBRACE cases = variant_cases RBRACE
+    { Type_layout.register_variant name cases;
+      VariantDef (name, cases, $symbolstartpos) }
   | USE STRING SEMI
     { UseDef $2 }
 
@@ -213,6 +217,13 @@ enum_variants:
     { let (vs, ne) = $5 in
       (($1, Some (narrow_int64 $symbolstartpos "enum discriminant" $3)) :: vs, ne) }
   | IDENT SEMI            enum_variants { let (vs, ne) = $3 in (($1, None)    :: vs, ne) }
+
+variant_cases:
+  | /* empty */ { [] }
+  | name = IDENT SEMI rest = variant_cases
+    { (name, None) :: rest }
+  | name = IDENT LPAREN payload = type_expr RPAREN SEMI rest = variant_cases
+    { (name, Some payload) :: rest }
 
 func_def:
   | FN IDENT LPAREN params RPAREN ret_type_opt LBRACE stmts RBRACE
@@ -367,7 +378,9 @@ match_arms:
 
 match_arm:
   | IDENT COLONCOLON IDENT DARROW LBRACE stmts RBRACE
-    { ArmVariant ($1, $3, $6) }
+    { ArmVariant ($1, $3, None, $6) }
+  | IDENT COLONCOLON IDENT LPAREN binding = IDENT RPAREN DARROW LBRACE stmts RBRACE
+    { ArmVariant ($1, $3, Some binding, $9) }
   | UNDERSCORE DARROW LBRACE stmts RBRACE
     { ArmWild $4 }
 
@@ -406,6 +419,8 @@ expr:
   | IDENT LPAREN args RPAREN { { desc = Call ($1, $3); loc = $symbolstartpos } }
   | IDENT COLONCOLON IDENT
     { { desc = EnumVariant ($1, $3); loc = $symbolstartpos } }
+  | IDENT COLONCOLON IDENT LPAREN payload = expr RPAREN
+    { { desc = VariantCtor ($1, $3, payload); loc = $symbolstartpos } }
   | SIZEOF LPAREN t = type_expr RPAREN
     { { desc = SizeOf t; loc = $symbolstartpos } }
   | OFFSETOF LPAREN t = type_expr COMMA field = IDENT RPAREN
@@ -534,6 +549,8 @@ type_expr:
   | t = base_type_expr AT n = static_arg { TypeSingleton (t, n) }
   | BORROW t = type_expr { TypeBorrow t }
   | SINK t = type_expr { TypeSink t }
+  | EXISTS name = IDENT COLON sort = int_base_type_expr DOT body = type_expr
+    { TypeExists (name, sort, body) }
   | LBRACE lo = INT DOTDOTLT hi = INT RBRACE
     { (* Reserved for future contextual base inference. Until the AST and
          signature inference can represent an unresolved refinement base,

@@ -2,12 +2,18 @@
 
 Status: LIVING DESIGN MEMO, not the language spec. Stages 1, 2, the tuple
 interlude, and Stage 3a are implemented; their actual behavior lives in
-SPEC.md. The long-term architecture and Stage 3b's next vertical slice now
-live in TAKIBI_CORE.md; its Slice 0 Core boundary, Slice 1 indexed runtime
-owner, and Slice 2 non-indexed erased views are implemented. Indexed
-view/variant/solver work remains outlook. As each
-surface slice lands, SPEC.md stays authoritative for the language that
-actually exists.
+SPEC.md. The long-term architecture and remaining vertical slices live in
+TAKIBI_CORE.md; its Slice 0 Core boundary, Slice 1 indexed runtime
+owner, Slice 2 non-indexed erased views, and Slice 3
+variants/existentials/standard affine semantics are implemented. Indexed
+views, general propositions, solver/prover integration, mutable borrowing,
+and effects remain outlook. As each surface slice lands, SPEC.md stays
+authoritative for the language that actually exists.
+
+Sections 4 through 6 preserve the decision path that led here. Statements in
+those historical stage descriptions about affine requiring one-path
+consumption, affine null sentinels, cast escape hatches, or variants being
+future work are superseded by the Slice 3 result in 6.7.4 and by SPEC.md.
 
 Driving issues: #117 (witness tokens / protocol obligations -- where this
 plan was drawn up), #89 (affine drop/escape/inter-function), #108
@@ -62,16 +68,14 @@ implementation so every stage lands with its own PoC examples.
 | kind | guarantee | check discipline | primary use |
 |---|---|---|---|
 | unrestricted (default) | none | none | plain data |
-| `affine` (exists) | used AT MOST once; must be consumed on at least one path | union of branch moved-sets | resource handles that may be conditionally acquired (NetRxCpuOwned's null sentinel, FatFile, KGuard) |
-| `linear` (Stage 1, new) | used EXACTLY once on EVERY path | intersection of branch moved-sets | obligations: "this MUST be answered/released/forwarded" (protocol events, channel receives, in-flight DMA) |
+| `affine` | used AT MOST once; dropping is permitted | union tracks possible moves and rejects later reuse | optional ownership and values whose abandonment is part of the API |
+| `linear` | used EXACTLY once on EVERY path | union rejects reuse; intersection proves all-path discharge | obligations: "this MUST be answered/released/forwarded" (protocol events, guards, in-flight DMA) |
 
-`affine` keeps its current, deliberately weak must-consume (consumed on at
-least one path counts), because its idiomatic use is inseparable from the
-null-sentinel conditional-consumption pattern, which genuinely cannot be
-checked stronger without relational reasoning (see 4.6). `linear` is the
-kind you pick when you want the stronger promise -- and its rules make the
-null-sentinel pattern inexpressible, which is exactly what keeps its
-checker a plain dataflow analysis.
+Slice 3 adopts the standard distinction: affine permits weakening; linear
+does not. Both forbid contraction and cast-away. Fallible acquisition is a
+closed variant whose successful payload carries the resource, so nullness is
+ordinary runtime data in `Gamma`, not a hidden condition on a permission in
+`Delta`.
 
 ## 4. Stage 1: the `linear` kind (implemented)
 
@@ -100,14 +104,12 @@ returning them are not restrictions but the very definition of
 consumption. Branching AROUND a linear value is also fine:
 `if (cond) { sink_a(p); } else { sink_b(p); }` satisfies the all-paths
 rule (each path consumes once). What is excluded is branching ON the
-token itself -- its bits (nullness) or its contents (it is opaque). The
-idiom for content-dependent dispatch is a companion plain enum traveling
-beside the obligation (TcpEvent beside PendingTcpEvent): branch on the
-data, discharge the obligation in every arm. When the token itself needs
-to carry data, that is Stage 4's linear variant enums, where `match`
-becomes the fourth consumption event (destructuring consumption, as in
-Rust's match on an owned enum) -- a planned extension of these semantics,
-not a redesign.
+token itself -- its bits (nullness) or its contents (it is opaque).
+Content-dependent ownership now uses Slice 3's closed variants: `match`
+consumes the package and introduces the selected payload obligation.
+`PendingTcpEvent` remains a separate erased view because its event data
+already travels independently and the permission itself has no runtime
+payload.
 
 Initialization: a linear local must be initialized at its declaration
 (`let p: *L;` with no initializer is an error). This keeps the
@@ -757,10 +759,10 @@ coherent vertical slice is the indexed runtime `SlotLease` fixture in
 private data and a static identity, omit the loose `idx` from ordinary
 operations, and check positive plus range/identity-negative examples.
 
-Close #89 once that slice is implemented and specified. Variant-carried RX
-resources, erased general views, protocol transitions, SMT, separation
-predicates, and external proof artifacts should have separate issues and
-their own example-driven acceptance criteria.
+That exit condition was met by Slice 1 and is now also exercised by Slice 3's
+variant-carried RX owner. Issue #89 need not wait for protocol transitions,
+SMT, separation predicates, or external proof artifacts; those need separate
+issues and their own example-driven acceptance criteria.
 
 #### 6.7.2 Slice 1 implementation result (2026-07-15)
 
@@ -844,22 +846,83 @@ trust qualification applies to Slice 1's private owner constructors.
 
 This slice intentionally stops before the ATS2-strength part of the long-term
 destination. Views cannot yet take static parameters, so no `View[n]`, view
-change, quantified state, existential package, proposition, or solver goal is
-being simulated. Those additions must reuse the indexed Core introduced by
-Slice 1 rather than encode identities in runtime token bits. The focused
+change, quantified view state, proposition, or solver goal is being
+simulated. Slice 3 subsequently adds existential packages only for indexed
+runtime owners. Those additions reuse the indexed Core introduced by Slice 1
+rather than encode identities in runtime token bits. The focused
 `view_linear_branch_missed` fixture records the all-paths failure with an
 English source comment and expected diagnostic; the real HTTP server remains
 the positive integration fixture.
 
-## 7. Stage 4 outlook: channel v2 (#113) + variant enums (#20)
+#### 6.7.4 Slice 3 implementation result (2026-07-15)
 
-Consumers of Stages 1-3: zero-copy channel send transfers an
-affine/linear payload into the slot (Stage 3), receive returns a linear
-obligation (Stage 1) so dropping a received buffer is a compile error;
-`Result`/`Option`-shaped variant enums (#20) replace the null-sentinel +
-out-param idiom -- with the note that variant payloads carrying
-kind-tracked values are themselves a place-tracking question, which is
-why #20 waits for Stage 3.
+The third slice resolves the conditional-resource package that had forced
+affine null sentinels:
+
+```takibi
+private linear struct NetRxCpuOwned[desc: usize] {
+    private index: {0..<8 as usize} @ desc;
+    private len: i32;
+}
+
+variant NetRxAcquire {
+    None;
+    Acquired(exists desc: usize. NetRxCpuOwned[desc]);
+}
+```
+
+Both QEMU virtio and STM32 Ethernet acquisition now return this closed
+variant. Matching `Acquired(frame)` opens a fresh rigid descriptor identity;
+the inferred owner type carries it into `net_rx_len`, `net_rx_frame`, and
+`net_rx_release` without a loose descriptor argument. The descriptor index
+and length are real private fields. The variant tag and those fields survive
+at runtime; `desc`, singleton/range facts, and the ownership obligation
+erase.
+
+FAT12 now returns `FatOpenResult::Error(i32)` or
+`FatOpenResult::Opened(*FatFile)`. Every caller matches the result and every
+success arm closes the linear file token. This removes the null cast without
+pretending the current singleton/global file cursor is a complete long-term
+owner; moving that state into a runtime owner remains a later mutable-borrow
+slice.
+
+The multiplicity migration is part of the same change. `affine` now has its
+standard at-most-once meaning and permits weakening. `FatFile`,
+`NetRxCpuOwned`, `MutexGuard`, and `KGuard` are `linear` because cleanup
+is mandatory. Historical never-consumed affine fixtures are positive
+compile-only regressions; double-use remains negative. All ownership-bearing
+values are bit-opaque: cast-away is rejected even in `unsafe`, because a
+variant now expresses fallibility without detaching `Delta` from `Gamma`.
+
+This is the concrete "B1/Core, ergonomic surface" result. Internally, an
+existential package retains a static identity and matching introduces a fresh
+rigid name. At ordinary call sites programmers only construct and match a
+closed variant; they do not write separate view/at-view proof terms. Two
+independently opened packages still fail when an API requires the same
+identity, proving that the relation remains available for future `Phi`
+solving rather than being erased by the surface sugar.
+
+Slice 3 remains intentionally narrow: concrete named variants, one payload
+per case, existentials only around direct indexed runtime owners, and no
+concrete struct/array payloads, variant nesting, or storage in
+globals/fields/arrays/pointers. LLVM currently
+uses an `i32` tag plus one field per runtime-bearing case; erased-view
+payloads and existential binders contribute no field. A compact union ABI,
+full DWARF tagged-union metadata, generic `Option[T]`/`Result[T,E]`, general
+quantifiers, indexed views, and mutable borrowing are separate work.
+
+Focused negative examples, each with an English explanation, cover a missed
+linear payload, non-exhaustive matching, and accidental equality between two
+existential openings. The real network and FAT examples are the positive
+integration coverage.
+
+## 7. Next outlook: channel v2 (#113), mutable owners, and effects
+
+Variant-carried ownership is now available for channel results and transfer
+APIs. The next drivers are moving `FatFile` state into a runtime owner with
+scoped mutable access, then expressing blocking/interrupt constraints for
+mutexes, channels, and ISRs. Zero-copy channel storage still needs stable
+place/invariant tracking before a linear payload can safely live in a slot.
 
 ## 8. Prior art notes
 

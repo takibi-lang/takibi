@@ -49,7 +49,7 @@
 // then --forbid-trap was turned on across this file, fatfs.tkb, sdmmc.tkb,
 // and fatfs_sdcard.tkb together, in one pass, once the whole milestone
 // (FAT12 on a real SD card) was demonstrated working end to end. The later
-// `http_server_sdcard`/`FatFile`-affine-handle work (see HISTORY.md) kept
+// `http_server_sdcard`/`FatFile` ownership-handle work (see HISTORY.md) kept
 // this file --forbid-trap clean throughout.
 
 use "examples/common/fat12_geometry.tkb";
@@ -283,25 +283,17 @@ fn fat_alloc_chain(num_clusters: u32) -> u32 {
 // space-padded, no dot) -- no LFN, no subdirectories: not needed for the
 // flat, single-directory root_dir_buf this driver has.
 
-// FatFile is an affine capability token, not a value the caller can
-// construct directly: `affine opaque struct` is always a zero-field
-// marker type at the language level (there is no syntax to give it real
-// fields, even within this file), so the actual per-open-file state
-// below lives in ordinary globals instead -- same "opaque token + real
-// state in ordinary globals" split as examples/common_stm32/eth.tkb's
-// NetRxCpuOwned (see net_rx_acquire/net_rx_len/net_rx_frame/
-// net_rx_release there). This gets the compiler to enforce, for free,
-// what this file's header comment already scoped by convention alone
-// ("no multiple simultaneously-open files"): fat_open() is the only way
-// to produce a *FatFile, fat_read/fat_write only ever BORROW it (can be
-// called any number of times without releasing), and fat_close()
-// CONSUMES it -- calling fat_read/fat_write/fat_close again on an
-// already-closed handle, or fabricating one without going through
-// fat_open(), is now a compile error instead of a silent bug. What is
-// still NOT enforced (a real, separate compiler gap, tracked as GitHub
-// issue #89): actually calling fat_close() at all. Forgetting to close a
-// handle still compiles clean today -- only double-use is caught.
-private affine opaque struct FatFile;
+// FatFile is a mandatory-close capability. The concrete file cursor remains
+// in the single-open-file globals below, while the linear token proves that
+// exactly one caller owns that state and must eventually call fat_close().
+// Open failure is represented by FatOpenResult::Error, never by a null value
+// of the ownership-bearing type.
+private linear opaque struct FatFile;
+
+variant FatOpenResult {
+    Error(i32);
+    Opened(*FatFile);
+}
 
 let mut ff_dir_index:      usize = 0; // root_dir_buf slot
 let mut ff_start_cluster:  u32 = 0;   // 0 until the first fat_write allocates one
@@ -314,14 +306,12 @@ let mut ff_writing:        bool = false;
 // Guards the single-file-at-a-time scope: without this, a second
 // fat_open() before the first fat_close() would silently overwrite the
 // ff_* globals above, corrupting the still-open first handle -- the
-// affine checker only rejects reusing an ALREADY-CONSUMED token, it has
-// no way to see across two independently acquired ones.
+// linear checker tracks each returned token but cannot prove that two
+// independent calls refer to the same singleton backing state.
 let mut ff_is_open: bool = false;
 
-// Dummy backing storage for the FatFile token pointer -- never
-// dereferenced (FatFile has no fields to read; see its own comment
-// above), exists purely so fat_open has a real address to hand back as
-// proof of possession, mirroring net_rx_token_storage in eth.tkb.
+// Dummy backing storage for the FatFile token pointer. It is never
+// dereferenced; only the linear ownership and close transition matter.
 let mut fat_file_token_storage: u8;
 
 let FA_READ: i32 = 0x01;
@@ -357,7 +347,7 @@ fn fat_file_size(name83: *u8) -> u32 {
 }
 
 // Random-position read helper for HTTP multi-segment serving. This keeps
-// the normal FatFile affine API sequential, while avoiding an O(n^2)
+// the normal FatFile linear API sequential, while avoiding an O(n^2)
 // "reopen and read-discard from byte 0" loop when a large response is sent
 // one TCP segment at a time.
 fn fat_read_at(name83: *u8, off: u32, buf: *u8, btr: u32, br: *u32) -> i32 {
@@ -420,9 +410,9 @@ fn fat_read_at(name83: *u8, off: u32, buf: *u8, btr: u32, br: *u32) -> i32 {
 // FA_CREATE_ALWAYS always appends a fresh root_dir_buf slot -- it does not
 // check for (and overwrite) an existing entry of the same name, the same
 // limitation the old fat_create_file had (no rename/delete in scope).
-fn fat_open(name83: *u8, mode: i32) -> *FatFile {
+fn fat_open(name83: *u8, mode: i32) -> FatOpenResult {
     if (ff_is_open) {
-        return 0 as usize as *FatFile;
+        return FatOpenResult::Error(-1);
     }
     if ((mode & FA_CREATE_ALWAYS) != 0) {
         // If-narrowing must wrap the actual use, not a negated early-return
@@ -456,9 +446,9 @@ fn fat_open(name83: *u8, mode: i32) -> *FatFile {
             ff_fsize = 0;
             ff_writing = true;
             ff_is_open = true;
-            return &fat_file_token_storage as *FatFile;
+            return FatOpenResult::Opened(&fat_file_token_storage as *FatFile);
         }
-        return 0 as usize as *FatFile;
+        return FatOpenResult::Error(-1);
     }
     if ((mode & FA_READ) != 0) {
         let found: i32 = fat_find_entry(name83);
@@ -478,11 +468,11 @@ fn fat_open(name83: *u8, mode: i32) -> *FatFile {
             ff_fsize = root_dir_buf[idx].file_size;
             ff_writing = false;
             ff_is_open = true;
-            return &fat_file_token_storage as *FatFile;
+            return FatOpenResult::Opened(&fat_file_token_storage as *FatFile);
         }
-        return 0 as usize as *FatFile;
+        return FatOpenResult::Error(-1);
     }
-    return 0 as usize as *FatFile; // unsupported mode
+    return FatOpenResult::Error(-1); // unsupported mode
 }
 
 // Reads up to btr bytes into buf, following the cluster chain as needed.
@@ -612,15 +602,16 @@ fn uart_print_bytes(buf: *u8, n: u32) {
 // fat_open(create)+fat_write+fat_close -- callers share this instead of
 // repeating the three-call sequence themselves.
 fn create_demo_file(name83: *u8, content: *u8) -> i32 {
-    let fp: *FatFile = fat_open(name83, FA_WRITE | FA_CREATE_ALWAYS);
-    if ((fp as usize) == 0) {
-        return -1;
+    match fat_open(name83, FA_WRITE | FA_CREATE_ALWAYS) {
+        FatOpenResult::Error(err) => { return err; }
+        FatOpenResult::Opened(fp) => {
+            let len: u32 = cstr_len(content);
+            let mut bw: u32 = 0;
+            if (fat_write(fp, content, len, &bw) != 0) {
+                fat_close(fp);
+                return -1;
+            }
+            return fat_close(fp);
+        }
     }
-    let len: u32 = cstr_len(content);
-    let mut bw: u32 = 0;
-    if (fat_write(fp, content, len, &bw) != 0) {
-        fat_close(fp);
-        return -1;
-    }
-    return fat_close(fp);
 }

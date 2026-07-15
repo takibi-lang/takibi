@@ -1,14 +1,14 @@
 // PoC 1/3 toward a Simple RTOS (GitHub issue #66), building on today's
-// affine `sink`/never-consumed machinery (issue #89) the same way
+// linear ownership machinery (issue #89) the same way
 // examples/affine_escape_via_index does. Fable-proposed API (see
 // HISTORY.md's RTOS design entries): a kernel lock `KLock` guarding a
-// piece of shared state, an affine `KGuard` token proving the lock is
+// piece of shared state, a linear `KGuard` token proving the lock is
 // held, and an "accessor" idiom (a function taking `borrow *KGuard`)
 // binding the guard to the specific data it protects.
 //
 // What this file actually PROVES at compile time (verified below):
-//   1. Forgetting kunlock() is a compile error -- the never-consumed
-//      check (issue #89) rejects a KGuard that never reaches a sink
+//   1. Forgetting kunlock() is a compile error -- linear checking rejects
+//      a KGuard that never reaches a sink
 //      parameter before its declaring scope ends. In a kernel lock this
 //      is the difference between "held slightly too long" and "held
 //      forever" (a permanently disabled-interrupts system).
@@ -47,7 +47,7 @@ struct KLock {
     word: i32;
 }
 
-affine opaque struct KGuard;
+linear opaque struct KGuard;
 
 fn klock(lk: *KLock) -> *KGuard {
     disable_irq();

@@ -37,19 +37,18 @@ fn app_main() {
 
         while (true) {
             net_rx_wait();
-            let acquired: *NetRxCpuOwned = net_rx_acquire();
-            let mut len: i32 = 0;
-            if ((acquired as usize) != 0) {
-                len = net_rx_len(acquired);
-            }
-            // A valid Ethernet frame needs at least a 12-byte dst+src MAC pair.
-            if (len >= 12) {
-                let frame = net_rx_frame(acquired);
-                swap_mac(frame as *u8);
-                net_transmit(frame as *u8, len);
-            }
-            if ((acquired as usize) != 0) {
-                net_rx_release(acquired);
+            match net_rx_acquire() {
+                NetRxAcquire::None => {}
+                NetRxAcquire::Acquired(acquired) => {
+                    let len: i32 = net_rx_len(acquired);
+                    // A valid Ethernet frame needs at least a 12-byte dst+src MAC pair.
+                    if (len >= 12) {
+                        let frame = net_rx_frame(acquired);
+                        swap_mac(frame as *u8);
+                        net_transmit(frame as *u8, len);
+                    }
+                    net_rx_release(acquired);
+                }
             }
         }
     }

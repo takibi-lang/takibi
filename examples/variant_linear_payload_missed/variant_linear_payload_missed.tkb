@@ -1,0 +1,19 @@
+// This file is expected to produce a compile error.
+// Matching a linear variant consumes the outer package, but the Acquired arm
+// opens a fresh linear payload obligation. Leaving that arm without passing
+// `duty` to a sink would silently lose the resource hidden in the package.
+linear view VariantFrameDuty;
+
+variant VariantFrameResult {
+    None;
+    Acquired(VariantFrameDuty);
+}
+
+fn forget_payload(result: VariantFrameResult) {
+    match result {
+        VariantFrameResult::None => {}
+        VariantFrameResult::Acquired(duty) => {
+            // The payload is deliberately not consumed.
+        }
+    }
+}

@@ -1,8 +1,7 @@
-// This file is expected to produce a compile error.
-// Path tracking through struct fields (OWNERSHIP_KERNEL.md section 6,
-// GitHub issue #89 Hurdle 3, Stage 3a): a field produced but never
-// consumed anywhere in the function is now rejected, the field-path
-// counterpart of examples/affine_never_consumed.
+// This is a positive compile-only fixture despite its historical directory
+// name. Standard affine weakening also applies to tracked field paths: the
+// field may be dropped, while field_double_consume_wrong still proves that it
+// cannot be consumed twice.
 affine opaque struct Lease3;
 
 fn acquire3() -> *Lease3 {

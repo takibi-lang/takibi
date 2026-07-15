@@ -50,17 +50,19 @@ fn sd_worker() {
             result = -1;
         }
 
-        let read_fp: *FatFile = fat_open(hello_name, FA_READ);
-        if ((read_fp as usize) != 0) {
-            let mut read_buf: [u8; 80];
-            let mut read_br: u32 = 0;
-            fat_read(read_fp, read_buf, 80, &read_br);
-            fat_close(read_fp);
-            uart_puts("read-back HELLO.TXT: ");
-            uart_print_bytes(read_buf, read_br);
-        } else {
-            uart_puts("read-back HELLO.TXT: FAIL\r\n");
-            result = -1;
+        match fat_open(hello_name, FA_READ) {
+            FatOpenResult::Opened(read_fp) => {
+                let mut read_buf: [u8; 80];
+                let mut read_br: u32 = 0;
+                fat_read(read_fp, read_buf, 80, &read_br);
+                fat_close(read_fp);
+                uart_puts("read-back HELLO.TXT: ");
+                uart_print_bytes(read_buf, read_br);
+            }
+            FatOpenResult::Error(err) => {
+                uart_puts("read-back HELLO.TXT: FAIL\r\n");
+                result = -1;
+            }
         }
     }
 

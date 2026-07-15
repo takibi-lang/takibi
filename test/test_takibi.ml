@@ -129,6 +129,9 @@ let rec show_type = function
         (String.concat ", " (List.map show_type ps)) (show_type r)
   | Ast.TypeNamed s     -> s
   | Ast.TypeView s      -> "view " ^ s
+  | Ast.TypeVariant s   -> s
+  | Ast.TypeExists (name, sort, body) ->
+      Printf.sprintf "exists %s: %s. %s" name (show_type sort) (show_type body)
   | Ast.TypeIndexed (s, args) ->
       let arg = function
         | Ast.StaticName n -> n
@@ -222,6 +225,37 @@ let parser_tests = [
          { params = [("x", Some (Ast.TypeBorrow
              (Ast.TypeIndexed ("PLease", [Ast.StaticName "n"]))))]; _ }] -> ()
     | _ -> Alcotest.fail "expected indexed linear struct and borrow PLease[n]");
+
+  Alcotest.test_case "Slice 3 variant, existential payload, constructor, and binder parse" `Quick
+    (fun () ->
+      match parse
+        "linear struct ParsedOwner[n: usize] { idx: usize @ n; }
+         variant ParsedMaybe {
+           None;
+           Some(exists n: usize. ParsedOwner[n]);
+         }
+         fn parsed_wrap(x: ParsedOwner[n]) -> ParsedMaybe {
+           return ParsedMaybe::Some(x);
+         }
+         fn parsed_match(x: ParsedMaybe) {
+           match x {
+             ParsedMaybe::None => {}
+             ParsedMaybe::Some(owner) => {}
+           }
+         }" with
+      | [Ast.OwnedStructDef _;
+         Ast.VariantDef
+           ("ParsedMaybe",
+            [("None", None);
+             ("Some", Some (Ast.TypeExists
+               ("n", Ast.TypeUsize,
+                Ast.TypeIndexed ("ParsedOwner", [Ast.StaticName "n"]))))], _);
+         Ast.FuncDef { body = [{ desc = Ast.Return
+           { desc = Ast.VariantCtor ("ParsedMaybe", "Some", _); _ }; _ }]; _ };
+         Ast.FuncDef { body = [{ desc = Ast.Match (_,
+           [Ast.ArmVariant ("ParsedMaybe", "None", None, []);
+            Ast.ArmVariant ("ParsedMaybe", "Some", Some "owner", [])]); _ }]; _ }] -> ()
+      | _ -> Alcotest.fail "expected Slice 3 variant AST nodes");
 
 
   Alcotest.test_case "empty function body" `Quick (fun () ->
@@ -328,6 +362,17 @@ let parser_tests = [
     | [Ast.StructDef _; Ast.LetDef ("buf", Some (Ast.TypeArray (Ast.TypeU8, 8)), None, None, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected array size resolved to 8"
   );
+
+  Alcotest.test_case "array size via sizeof(Variant) resolves its Slice 3 ABI" `Quick
+    (fun () ->
+      match parse
+        "variant SizedVariant { None; Value(u32); }
+         let buf: [u8; sizeof(SizedVariant)];"
+      with
+      | [Ast.VariantDef _;
+         Ast.LetDef ("buf", Some (Ast.TypeArray (Ast.TypeU8, 8)),
+                     None, None, false, _, _)] -> ()
+      | _ -> Alcotest.fail "expected variant tag plus u32 payload field size 8");
 
   Alcotest.test_case "array size referencing unknown identifier is a syntax error" `Quick (fun () ->
     match parse "let ring: [u8; UNDEFINED];" with
@@ -1215,7 +1260,7 @@ let parser_tests = [
                  fn f(c: Color) { match c { Color::Red => { let x = 0; } } }" with
     | [Ast.EnumDef _; Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Match (_, [Ast.ArmVariant ("Color", "Red", [_])]) -> ()
+         | Ast.Match (_, [Ast.ArmVariant ("Color", "Red", None, [_])]) -> ()
          | _ -> Alcotest.fail "expected Match(_, [ArmVariant(Color,Red,[_])])")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1536,13 +1581,13 @@ let infer_tests = [
       "linear struct InfBorrow[n: usize] { idx: usize @ n; }
        fn ib_clone(x: borrow InfBorrow[n]) -> InfBorrow[n] { return x; }");
 
-  Alcotest.test_case "Slice 1: an affine indexed owner cannot be left uninitialized" `Quick
-    (expect_type_error "affine value 'x' must be initialized"
+  Alcotest.test_case "Slice 3: an affine indexed owner may be left uninitialized" `Quick
+    (expect_ok
       "affine struct InfUninit[n: usize] { idx: usize @ n; }
        fn iu_bad() { let mut x: InfUninit[0]; }");
 
-  Alcotest.test_case "Slice 1: assigning over a live affine indexed owner is rejected" `Quick
-    (expect_type_error "assigning over affine value 'x' would discard its obligation"
+  Alcotest.test_case "Slice 3: assigning over a live affine indexed owner weakens it" `Quick
+    (expect_ok
       "affine struct InfOverwrite[n: usize] { idx: usize @ n; }
        fn io_make(idx: usize @ n) -> InfOverwrite[n] {
          let mut x: InfOverwrite[n] = { idx }; return x;
@@ -1568,7 +1613,7 @@ let infer_tests = [
        fn isa_bad(x: sink InfSinkAssign[n]) { x = x; }");
 
   Alcotest.test_case "Slice 1: an indexed owner temporary cannot be borrowed and lost" `Quick
-    (expect_type_error "owned result of 'it_make' must be moved"
+    (expect_type_error "linear result of 'it_make' must be moved"
       "linear struct InfTemporary[n: usize] { idx: usize @ n; }
        fn it_make(idx: usize @ n) -> InfTemporary[n] {
          let mut x: InfTemporary[n] = { idx }; return x;
@@ -1577,7 +1622,7 @@ let infer_tests = [
        fn it_bad() { it_read(it_make(0)); }");
 
   Alcotest.test_case "Slice 1: an indexed owner result cannot be discarded" `Quick
-    (expect_type_error "owned result of 'id_make' must be moved"
+    (expect_type_error "linear result of 'id_make' must be moved"
       "linear struct InfDiscard[n: usize] { idx: usize @ n; }
        fn id_make(idx: usize @ n) -> InfDiscard[n] {
          let mut x: InfDiscard[n] = { idx }; return x;
@@ -2074,7 +2119,7 @@ let infer_tests = [
     (expect_ok "affine opaque struct Token;
                 let mut byte: u8;
                 fn make() -> *Token { return &byte as *Token; }
-                fn inspect(t: borrow *Token) -> usize { return t as usize; }
+                fn inspect(t: borrow *Token) {}
                 fn release(t: sink *Token) {}
                 fn good() { let t: *Token = make(); inspect(t); inspect(t); release(t); }");
 
@@ -2095,20 +2140,28 @@ let infer_tests = [
         fn release(t: sink *Token) {}
         fn bad() { let t: *Token = make(); release(t); inspect(t); }");
 
-  (* GitHub issue #89's "must eventually be consumed" half, first
-     increment (see HISTORY.md): a local affine handle that is never
-     consumed on ANY path before its declaring scope (function body,
-     if/else branch, loop body, match arm) ends is now a compile error.
-     Deliberately a union-based check (was it consumed SOMEWHERE in
-     scope), not a full per-path "consumed on EVERY path" analysis --
-     see the next two tests and lib/type_inf.ml's check_affine_func
-     comment for why the stricter version was tried and reverted. *)
-  Alcotest.test_case "affine local never consumed is a compile error" `Quick
-    (expect_type_error "affine value 't' is never consumed"
+  (* Slice 3 adopts the standard affine meaning: weakening is legal, while
+     using the same resource twice remains illegal. Mandatory release is
+     expressed with `linear`, not by strengthening every affine value. *)
+  Alcotest.test_case "affine local may be dropped without consumption" `Quick
+    (expect_ok
        "affine opaque struct Token;
         let mut byte: u8;
         fn make() -> *Token { return &byte as *Token; }
         fn bad() { let t: *Token = make(); }");
+
+  Alcotest.test_case "a consumed affine binding may be reinitialized" `Quick
+    (expect_ok
+       "affine opaque struct Token;
+        let mut byte: u8;
+        fn make() -> *Token { return &byte as *Token; }
+        fn release(t: sink *Token) {}
+        fn good() {
+          let mut t: *Token = make();
+          release(t);
+          t = make();
+          release(t);
+        }");
 
   Alcotest.test_case "affine local returned directly counts as consumed" `Quick
     (expect_ok "affine opaque struct Token;
@@ -2116,27 +2169,15 @@ let infer_tests = [
                 fn make() -> *Token { return &byte as *Token; }
                 fn forward() -> *Token { let t: *Token = make(); return t; }");
 
-  (* Real-world motivating case (examples/net_echo/net_echo.tkb's
-     `net_rx_acquire`/`net_rx_release` pair): a handle that may or may not
-     be a "real" acquisition (signaled by a null/zero address) is
-     conventionally released behind the SAME null check that gates every
-     other use. The checker cannot see the two `if` conditions are the
-     same predicate without real relational reasoning (see HISTORY.md's
-     relational-analysis findings), so consumption inside just ONE
-     conditional branch, with no `else`, must still be accepted -- this
-     is exactly why the check is union-based rather than requiring
-     consumption on every path. *)
-  Alcotest.test_case "affine local consumed inside a null-check branch is allowed" `Quick
-    (expect_ok "affine opaque struct Token;
-                let mut byte: u8;
-                fn make() -> *Token { return &byte as *Token; }
-                fn release(t: sink *Token) {}
-                fn good() {
-                    let t: *Token = make();
-                    if ((t as usize) != 0) {
-                        release(t);
-                    }
-                }");
+  Alcotest.test_case "an affine handle cannot be cast to an integer for a null check" `Quick
+    (expect_type_error "cannot cast an affine/linear value"
+       "affine opaque struct Token;
+        let mut byte: u8;
+        fn make() -> *Token { return &byte as *Token; }
+        fn bad() {
+          let t: *Token = make();
+          let raw: usize = t as usize;
+        }");
 
   (* examples/common/sync.tkb's cond_wait-style pattern: a loop reassigns
      a `let mut` affine local to a fresh value on every iteration
@@ -2208,19 +2249,8 @@ let infer_tests = [
             release(t);
         }");
 
-  (* Second increment of issue #89's "must eventually be consumed": a
-     plain (non-`borrow`, non-`sink`) affine PARAMETER must also be
-     consumed somewhere within the callee's own body. The caller's own
-     obligation is separately satisfied just by making the call (passing
-     `x` to a plain parameter consumes `x` in the CALLER's scope) --
-     this is a distinct, callee-side requirement, catching a callee that
-     silently swallows a handle its caller already gave up. See
-     lib/type_inf.ml's check_affine_func comment for why this needed the
-     `sink` marker to exist first: a purely syntactic "was it forwarded"
-     check can't otherwise tell a genuine terminal release function
-     apart from an accidental no-op. *)
-  Alcotest.test_case "affine parameter never consumed by the callee is a compile error" `Quick
-    (expect_type_error "affine parameter 't' is never consumed by this function"
+  Alcotest.test_case "affine parameter may be dropped by the callee" `Quick
+    (expect_ok
        "affine opaque struct Token;
         let mut byte: u8;
         fn make() -> *Token { return &byte as *Token; }
@@ -3347,7 +3377,7 @@ let infer_tests = [
         fn lin_leak() { let t: *LinTok = lmint(); }");
 
   Alcotest.test_case "linear: consumed in only ONE branch is a compile error \
-                      (the case affine's union check cannot catch)" `Quick
+                      (linear forbids weakening)" `Quick
     (expect_type_error "consumed on some paths but not on every path"
        "linear opaque struct LinTok;
         fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
@@ -3357,8 +3387,8 @@ let infer_tests = [
           if (c) { lsink(t); }
         }");
 
-  Alcotest.test_case "negative control: the same one-branch consumption on an \
-                      AFFINE value still compiles (union semantics unchanged)" `Quick
+  Alcotest.test_case "negative control: one-branch affine consumption compiles \
+                      because affine permits weakening" `Quick
     (fun () ->
        match infer "affine opaque struct AffTok2;
                     fn amint2() -> *AffTok2 { return 0 as usize as *AffTok2; }
@@ -3371,7 +3401,7 @@ let infer_tests = [
        | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
 
   Alcotest.test_case "linear: casting a linear value away is a compile error" `Quick
-    (expect_type_error "cannot cast a linear value"
+    (expect_type_error "cannot cast an affine/linear value"
        "linear opaque struct LinTok;
         fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
         fn lin_cast() { let t: *LinTok = lmint(); let x: usize = t as usize; }");
@@ -3384,6 +3414,18 @@ let infer_tests = [
         fn lsink(t: sink *LinTok) {}
         fn lin_overwrite() {
           let mut t: *LinTok = lmint();
+          t = lmint();
+          lsink(t);
+        }");
+
+  Alcotest.test_case "linear: a discharged binding may be reinitialized" `Quick
+    (expect_ok
+       "linear opaque struct LinTok;
+        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+        fn lsink(t: sink *LinTok) {}
+        fn lin_reinit() {
+          let mut t: *LinTok = lmint();
+          lsink(t);
           t = lmint();
           lsink(t);
         }");
@@ -3659,7 +3701,7 @@ let infer_tests = [
 
   Alcotest.test_case "affine ptr laundering: `t as *Other` without unsafe is a \
                       compile error" `Quick
-    (expect_type_error "launders it out of tracking"
+    (expect_type_error "cannot cast an affine/linear value"
        "affine opaque struct LaunTok;
         opaque struct OtherBlob;
         fn lmk() -> *LaunTok { return 0 as usize as *LaunTok; }
@@ -3670,34 +3712,24 @@ let infer_tests = [
           lsnk(t);
         }");
 
-  Alcotest.test_case "affine ptr laundering: unsafe marks it legal" `Quick
-    (fun () ->
-       match infer "affine opaque struct LaunTok2;
-                    opaque struct OtherBlob2;
-                    fn lmk2() -> *LaunTok2 { return 0 as usize as *LaunTok2; }
-                    fn lsnk2(t: sink *LaunTok2) {}
-                    fn launder2() {
-                      let t: *LaunTok2 = lmk2();
-                      let o: *OtherBlob2 = unsafe { t as *OtherBlob2 };
-                      lsnk2(t);
-                    }" with
-       | _ -> ()
-       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+  Alcotest.test_case "affine ptr laundering remains illegal inside unsafe" `Quick
+    (expect_type_error "cannot cast an affine/linear value"
+       "affine opaque struct LaunTok2;
+        opaque struct OtherBlob2;
+        fn lmk2() -> *LaunTok2 { return 0 as usize as *LaunTok2; }
+        fn launder2() {
+          let t: *LaunTok2 = lmk2();
+          let o: *OtherBlob2 = unsafe { t as *OtherBlob2 };
+        }");
 
-  Alcotest.test_case "negative control: `t as usize` on an affine handle stays \
-                      legal (the sanctioned null-check idiom)" `Quick
-    (fun () ->
-       match infer "affine opaque struct NullTok;
-                    fn nmk() -> *NullTok { return 0 as usize as *NullTok; }
-                    fn nsnk(t: sink *NullTok) {}
-                    fn nullcheck() {
-                      let t: *NullTok = nmk();
-                      if ((t as usize) != 0) {
-                        nsnk(t);
-                      }
-                    }" with
-       | _ -> ()
-       | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
+  Alcotest.test_case "an affine handle cannot be cast to usize" `Quick
+    (expect_type_error "cannot cast an affine/linear value"
+       "affine opaque struct NullTok;
+        fn nmk() -> *NullTok { return 0 as usize as *NullTok; }
+        fn nullcheck() {
+          let t: *NullTok = nmk();
+          let raw: usize = t as usize;
+        }");
 
   (* -- Tuples (OWNERSHIP_KERNEL.md 5.9, GitHub issue #120) ----------------
      Function-local product values; join-kind semantics; destructuring is
@@ -3893,9 +3925,8 @@ let infer_tests = [
           fsnk2(h.t);
         }");
 
-  Alcotest.test_case "field path: a field produced but never consumed is a \
-                      compile error" `Quick
-    (expect_type_error "affine value 'h.t' is never consumed"
+  Alcotest.test_case "field path: an affine field may be dropped" `Quick
+    (expect_ok
        "affine opaque struct FTok3;
         fn fmk3() -> *FTok3 { return 0 as usize as *FTok3; }
         struct FHolder3 { t: *FTok3; }
@@ -3953,15 +3984,8 @@ let infer_tests = [
           fsnk6(h.t);
         }");
 
-  Alcotest.test_case "field path: returning the WHOLE containing struct \
-                      does NOT discharge its tracked field's obligation \
-                      (a real finding, not a limitation): FHolder7 itself \
-                      is a plain, untracked type, so letting `return h;` \
-                      silently satisfy h.t's obligation would let it \
-                      vanish at the caller with no further enforcement \
-                      anywhere -- exactly the leak this stage exists to \
-                      close" `Quick
-    (expect_type_error "affine value 'h.t' is never consumed"
+  Alcotest.test_case "field path: returning a plain struct may weaken its affine field" `Quick
+    (expect_ok
        "affine opaque struct FTok7;
         fn fmk7() -> *FTok7 { return 0 as usize as *FTok7; }
         struct FHolder7 { t: *FTok7; }
@@ -4115,6 +4139,154 @@ let infer_tests = [
           Alcotest.(check bool) "diagnostic names private view" true
             (contains_substring msg "cannot mint private view 'PrivatePending11'"));
 
+  (* -- Takibi Core Slice 3: closed variants and existential opening ------- *)
+
+  Alcotest.test_case "Slice 3: an existential indexed owner packs and opens through match" `Quick
+    (expect_ok
+       "linear struct VariantOwner1[n: usize] {
+          idx: {0..<4 as usize} @ n;
+        }
+        variant VariantMaybe1 {
+          None;
+          Some(exists n: usize. VariantOwner1[n]);
+        }
+        fn variant_owner_make1(idx: {0..<4 as usize} @ n) -> VariantOwner1[n] {
+          let mut owner: VariantOwner1[n] = { idx };
+          return owner;
+        }
+        fn variant_owner_drop1(owner: sink VariantOwner1[n]) {}
+        fn variant_some1(idx: {0..<4 as usize}) -> VariantMaybe1 {
+          return VariantMaybe1::Some(variant_owner_make1(idx));
+        }
+        fn variant_none1() -> VariantMaybe1 { return VariantMaybe1::None; }
+        fn variant_use1(value: VariantMaybe1) {
+          match value {
+            VariantMaybe1::None => {}
+            VariantMaybe1::Some(owner) => { variant_owner_drop1(owner); }
+          }
+        }");
+
+  Alcotest.test_case "Slice 3: a linear variant payload must be consumed" `Quick
+    (expect_type_error "linear variant payload 'permit' is never consumed"
+       "linear view VariantPermit2;
+        variant VariantMaybe2 { Empty; Held(VariantPermit2); }
+        fn variant_bad2(value: VariantMaybe2) {
+          match value {
+            VariantMaybe2::Empty => {}
+            VariantMaybe2::Held(permit) => {}
+          }
+        }");
+
+  Alcotest.test_case
+    "Slice 3: reused arm-local binder names retain each case's payload kind" `Quick
+    (expect_type_error "linear variant payload 'item' is never consumed"
+       "linear view VariantPermit2b;
+        variant VariantMixed2b {
+          Held(VariantPermit2b);
+          Plain(i32);
+        }
+        fn variant_bad2b(value: VariantMixed2b) {
+          match value {
+            VariantMixed2b::Held(item) => {}
+            VariantMixed2b::Plain(item) => {}
+          }
+        }");
+
+  Alcotest.test_case "Slice 3: independently opened existentials have distinct identities" `Quick
+    (expect_type_error "static value mismatch"
+       "linear struct VariantOwner3[n: usize] { idx: usize @ n; }
+        variant VariantMaybe3 {
+          None;
+          Some(exists n: usize. VariantOwner3[n]);
+        }
+        fn variant_same3(a: borrow VariantOwner3[n], b: borrow VariantOwner3[n]) {}
+        fn variant_drop3(x: sink VariantOwner3[n]) {}
+        fn variant_bad3(a: VariantMaybe3, b: VariantMaybe3) {
+          match a {
+            VariantMaybe3::None => {
+              match b {
+                VariantMaybe3::None => {}
+                VariantMaybe3::Some(y0) => { variant_drop3(y0); }
+              }
+            }
+            VariantMaybe3::Some(x) => {
+              match b {
+                VariantMaybe3::None => { variant_drop3(x); }
+                VariantMaybe3::Some(y) => {
+                  variant_same3(x, y);
+                  variant_drop3(x);
+                  variant_drop3(y);
+                }
+              }
+            }
+          }
+        }");
+
+  Alcotest.test_case "Slice 3: a closed variant match must be exhaustive" `Quick
+    (expect_type_error "non-exhaustive match"
+       "variant VariantPlain4 { Left; Right; }
+        fn variant_bad4(value: VariantPlain4) {
+          match value { VariantPlain4::Left => {} }
+        }");
+
+  Alcotest.test_case "Slice 3: a variant-producing function must return on every path" `Quick
+    (expect_type_error "returns a variant and must return explicitly on every path"
+       "variant VariantReturn4 { None; Some(i32); }
+        fn variant_bad_return4(c: bool) -> VariantReturn4 {
+          if (c) { return VariantReturn4::Some(1); }
+        }");
+
+  Alcotest.test_case "Slice 3: a linear variant cannot hide a payload behind wildcard" `Quick
+    (expect_type_error "linear variant 'VariantMaybe5' cannot use a wildcard arm"
+       "linear view VariantPermit5;
+        variant VariantMaybe5 { Empty; Held(VariantPermit5); }
+        fn variant_bad5(value: VariantMaybe5) { match value { _ => {} } }");
+
+  Alcotest.test_case "Slice 3: a payload binder cannot shadow an existing value" `Quick
+    (expect_type_error "variant payload binding 'owner' shadows an existing value"
+       "linear view VariantPermit6;
+        variant VariantMaybe6 { Empty; Held(VariantPermit6); }
+        fn variant_bad6(value: VariantMaybe6, owner: i32) {
+          match value {
+            VariantMaybe6::Empty => {}
+            VariantMaybe6::Held(owner) => {}
+          }
+        }");
+
+  Alcotest.test_case "Slice 3: exists is restricted to a variant payload schema" `Quick
+    (expect_type_error "exists is only valid as the outermost payload type"
+       "linear struct VariantOwner7[n: usize] { idx: usize @ n; }
+        fn variant_bad7(x: exists n: usize. VariantOwner7[n]) {}");
+
+  Alcotest.test_case "Slice 3: a concrete struct payload is rejected before codegen" `Quick
+    (expect_type_error "aggregate payload ownership is not implemented"
+       "struct VariantPair7b { left: i32; right: i32; }
+        variant VariantStruct7b { None; Pair(VariantPair7b); }");
+
+  Alcotest.test_case "Slice 3: a view payload affects kind but has no runtime data requirement" `Quick
+    (expect_ok
+       "linear view VariantPermit8;
+        variant VariantMaybe8 { Empty; Held(VariantPermit8); }
+        fn variant_mint8() -> VariantMaybe8 {
+          return VariantMaybe8::Held(view VariantPermit8);
+        }
+        fn variant_sink8(p: sink VariantPermit8) {}
+        fn variant_use8(value: VariantMaybe8) {
+          match value {
+            VariantMaybe8::Empty => {}
+            VariantMaybe8::Held(p) => { variant_sink8(p); }
+          }
+        }");
+
+  Alcotest.test_case "Slice 3: an affine payload makes an affine, droppable variant" `Quick
+    (expect_ok
+       "affine view VariantPermit9;
+        variant VariantMaybe9 { Empty; Held(VariantPermit9); }
+        fn variant_mint9() -> VariantMaybe9 {
+          return VariantMaybe9::Held(view VariantPermit9);
+        }
+        fn variant_drop9() { let value: VariantMaybe9 = variant_mint9(); }");
+
 ]
 
 (* -- Codegen tests ----------------------------------------------------------
@@ -4245,6 +4417,89 @@ let codegen_tests = [
         (contains_substring use_ir "alloca" || contains_substring use_ir "i1");
       Alcotest.(check bool) "self-transform is still emitted as a call" true
         (contains_substring use_ir "call void @cgvm_transform()"));
+
+  Alcotest.test_case
+    "Slice 3 ABI: variant keeps its tag and existential owner's runtime payload" `Quick
+    (fun () ->
+      let src =
+        "linear struct CgVariantOwner3[n: usize] {
+           idx: {0..<4 as usize} @ n;
+           len: i32;
+         }
+         variant CgVariantMaybe3 {
+           None;
+           Some(exists n: usize. CgVariantOwner3[n]);
+         }
+         fn cgv3_make(idx: {0..<4 as usize} @ n, len: i32)
+             -> CgVariantOwner3[n] {
+           let mut owner: CgVariantOwner3[n] = { idx, len };
+           return owner;
+         }
+         fn cgv3_wrap(idx: {0..<4 as usize}, len: i32) -> CgVariantMaybe3 {
+           return CgVariantMaybe3::Some(cgv3_make(idx, len));
+         }
+         fn cgv3_drop(owner: sink CgVariantOwner3[n]) {}
+         fn cgv3_use(value: CgVariantMaybe3) -> i32 {
+           match value {
+             CgVariantMaybe3::None => { return -1; }
+             CgVariantMaybe3::Some(owner) => {
+               let len: i32 = owner.len;
+               cgv3_drop(owner);
+               return len;
+             }
+           }
+         }" in
+      ignore (gen_codegen src);
+      let layout = match Hashtbl.find_opt Llvm_gen.variant_lltypes "CgVariantMaybe3" with
+        | Some llty -> llty
+        | None -> Alcotest.fail "CgVariantMaybe3 layout not found" in
+      Alcotest.(check int) "tag plus one runtime payload field" 2
+        (Array.length (Llvm.struct_element_types layout));
+      let use = match Hashtbl.find_opt Llvm_gen.functions "cgv3_use" with
+        | Some (_, f) -> f
+        | None -> Alcotest.fail "cgv3_use not found" in
+      let ir = Llvm.string_of_llvalue use in
+      Alcotest.(check bool) "match switches on the runtime tag" true
+        (contains_substring ir "switch i32");
+      Alcotest.(check bool) "Some opens the owner aggregate" true
+        (contains_substring ir "extractvalue");
+      Alcotest.(check bool) "no static identity is pointer-bit encoded" false
+        (contains_substring ir "inttoptr" || contains_substring ir "ptrtoint"));
+
+  Alcotest.test_case
+    "Slice 3 ABI: a view payload contributes kind but only the tag survives" `Quick
+    (fun () ->
+      let src =
+        "linear view CgVariantPermit3;
+         variant CgVariantViewMaybe3 {
+           Empty;
+           Held(CgVariantPermit3);
+         }
+         fn cgv_view3_wrap(c: bool) -> CgVariantViewMaybe3 {
+           if (c) { return CgVariantViewMaybe3::Empty; }
+           return CgVariantViewMaybe3::Held(view CgVariantPermit3);
+         }
+         fn cgv_view3_sink(p: sink CgVariantPermit3) {}
+         fn cgv_view3_use(value: CgVariantViewMaybe3) {
+           match value {
+             CgVariantViewMaybe3::Empty => {}
+             CgVariantViewMaybe3::Held(p) => { cgv_view3_sink(p); }
+           }
+         }" in
+      ignore (gen_codegen src);
+      let layout = match Hashtbl.find_opt Llvm_gen.variant_lltypes "CgVariantViewMaybe3" with
+        | Some llty -> llty
+        | None -> Alcotest.fail "CgVariantViewMaybe3 layout not found" in
+      Alcotest.(check int) "only the i32 tag remains" 1
+        (Array.length (Llvm.struct_element_types layout));
+      let wrap = match Hashtbl.find_opt Llvm_gen.functions "cgv_view3_wrap" with
+        | Some (_, f) -> f
+        | None -> Alcotest.fail "cgv_view3_wrap not found" in
+      let ir = Llvm.string_of_llvalue wrap in
+      Alcotest.(check bool) "runtime return is the one-field tagged aggregate" true
+        (contains_substring ir "{ i32 }");
+      Alcotest.(check bool) "no erased payload slot is emitted" false
+        (contains_substring ir "{ i32, i1 }"));
 
 
   Alcotest.test_case "overloads emit mangled symbols and direct calls use the selected symbol" `Quick
@@ -5405,6 +5660,25 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
+    "DWARF debug info (-g): a variant parameter and immutable local with a \
+     payload-binding match produce verifier-accepted IR even though Slice 3 \
+     deliberately defers source-level tagged-union DIType metadata"
+    `Quick
+    (expect_codegen_ok
+       "variant DwarfVariantResult {
+          Empty;
+          Value(i32);
+        }
+
+        fn codegen_debug_info_variant(input: DwarfVariantResult) -> i32 {
+          let current: DwarfVariantResult = input;
+          match current {
+            DwarfVariantResult::Empty => { return 0; }
+            DwarfVariantResult::Value(value) => { return value; }
+          }
+        }");
+
+  Alcotest.test_case
     "pointer difference codegens as an isize element count"
     `Quick
     (expect_codegen_ok
@@ -6414,8 +6688,9 @@ let use_resolver_tests =
                (contains_substring msg "b.tkb"));
   ]
 
-(* Takibi Core Slice 0: the existing surface checker's branch lattice is
-   extracted behind Delta.Legacy_flow before any surface semantics change. *)
+(* Takibi Core Slice 0: the surface checker's branch lattice is extracted
+   behind Delta.Legacy_flow. Slice 3 later changed which component affine
+   consults without changing this dataflow representation. *)
 module Core_test_place = struct
   type t = string
   let compare = String.compare
