@@ -101,7 +101,7 @@ fn sd_request_chan_init(ch: *SdRequestChan) {
 }
 
 fn sd_request_send(ch: *SdRequestChan, request: SdRequest) !{may_block} {
-    let mut g: MutexGuard = mutex_lock(&ch.mutex);
+    let mut g = mutex_lock(&ch.mutex);
     while (ch.full != 0) {
         g = cond_wait(&ch.slot_taken, g, &ch.mutex);
     }
@@ -115,7 +115,7 @@ fn sd_request_send(ch: *SdRequestChan, request: SdRequest) !{may_block} {
 }
 
 fn sd_request_recv(ch: *SdRequestChan) -> SdRequest !{may_block} {
-    let mut g: MutexGuard = mutex_lock(&ch.mutex);
+    let mut g = mutex_lock(&ch.mutex);
     while (ch.full == 0) {
         g = cond_wait(&ch.slot_full, g, &ch.mutex);
     }

@@ -1,6 +1,15 @@
 %{
 open Ast
 
+(* Prefix runtime qualifiers consume [type_expr], so without this small
+   normalization `*T @ place` would build `*(T @ place)`. Singleton values
+   are forbidden behind pointers; the useful and documented interpretation
+   is instead "the pointer T, indexed by place". Applying the same
+   lift through [io] makes `*io T @ place` behave consistently. *)
+let lift_singleton wrap = function
+  | TypeSingleton (base, arg) -> TypeSingleton (wrap base, arg)
+  | ty -> wrap ty
+
 (* Narrow an INT token's Int64.t value to a native int for grammar positions
    that only ever need a small, realistic value (alignment, enum
    discriminants, array sizes) -- see Ast.int_of_intlit's comment for why a
@@ -489,10 +498,11 @@ base_type_expr:
   | U8_TYPE   { TypeU8  } | U16_TYPE { TypeU16 } | U32_TYPE { TypeU32 } | U64_TYPE { TypeU64 }
   | ISIZE_TYPE { TypeIsize }
   | USIZE_TYPE { TypeUsize }
-  | IO         type_expr { TypeIo  $2 }
-  | TIMES      type_expr { TypePtr $2 }
+  | IO         type_expr { lift_singleton (fun t -> TypeIo t) $2 }
+  | TIMES      type_expr { lift_singleton (fun t -> TypePtr t) $2 }
   | TIMES ALIGN LPAREN n = INT RPAREN t = type_expr
-    { TypeAlignedPtr (narrow_int64 $symbolstartpos "alignment" n, t) }
+    { let n = narrow_int64 $symbolstartpos "alignment" n in
+      lift_singleton (fun t -> TypeAlignedPtr (n, t)) t }
   | LBRACKET t = type_expr SEMI n = array_size RBRACKET { TypeArray (t, n) }
   | LBRACKET RBRACKET t = type_expr { TypeSlice (t, 0) }
     (* []T -- slice with no compile-time minimum length *)
@@ -626,10 +636,10 @@ int_base_type_expr:
   | ISIZE_TYPE { TypeIsize }
   | USIZE_TYPE { TypeUsize }
 
-(* Static indices are either primitive integers or values of a closed enum.
-   The type checker verifies that an IDENT here names an exhaustive enum;
-   keeping that lookup out of the parser preserves declaration-order
-   independence. *)
+(* Static indices are addresses, primitive integers, or values of a closed
+   enum. `addr` and enum names both parse as IDENT; the checker distinguishes
+   the builtin sort and verifies exhaustive enums without making parsing
+   declaration-order-dependent. *)
 static_sort_expr:
   | int_base_type_expr { $1 }
   | name = IDENT { TypeNamed name }

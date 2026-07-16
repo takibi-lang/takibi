@@ -64,8 +64,12 @@ turn as many potential traps as possible into compile-time errors instead:
 `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `isize`,
 `usize`, `void`, `*T`, `io T`, `*io T`, `[T; N]`, `[]T` / `[T; N..]`
 (slice), `fn(T...) -> R`, `Name` (struct or enum), `{lo..<hi as base}`
-(refined integer subtype), `T @ n` (runtime integer singleton), and
+(refined integer subtype), `T @ n` (runtime integer or pointer singleton), and
 `Name[n]` (indexed affine/linear runtime struct or erased view).
+
+`addr` is a reserved checker-only static sort, not a runtime type. It may
+appear as a static parameter sort (`lock: addr`) but not as a variable, field,
+parameter value, or top-level declaration name.
 
 - **`isize` / `usize`** are pointer-sized signed/unsigned integers. Their
   LLVM width follows the target's actual pointer size via LLVM
@@ -398,6 +402,10 @@ fn slot_unlease(lease: sink SlotLease[n]) {}
   value is `n`". It has exactly the same LLVM representation as `T` and
   preserves any refinement range already carried by `T`; for example,
   `{0..<4 as usize} @ n` proves both identity and array bounds.
+- When `T` is a pointer, `T @ place` instead relates that pointer to a static
+  value of sort `addr`. It has the same pointer representation as `T`; the
+  address identity is checker-only. Pointer singletons are used by the
+  indexed lock guards described below.
 - `Name[n]` has the declared struct fields at runtime. Its static arguments
   do not add fields or ABI words. Unbound static names in function signatures
   are implicitly universally quantified and instantiated freshly per call.
@@ -435,10 +443,12 @@ fn slot_unlease(lease: sink SlotLease[n]) {}
   as local values, parameters, returns, and components of value tuples. They
   cannot be addressed, cast, placed behind pointers, or stored in globals,
   fields, arrays, or slices.
-- To prevent mutation through a widened pointer from invalidating `T @ n`,
-  singleton values cannot be addressed or placed in globals, ordinary struct
-  fields, pointer targets, arrays, or slices. A direct field of an indexed
-  owner is the supported persistent carrier in this slice.
+- To prevent mutation through a widened pointer from invalidating an integer
+  `T @ n`, singleton values cannot be addressed or placed in globals,
+  ordinary struct fields, pointer targets, arrays, or slices. A direct field
+  of an indexed owner is the supported persistent carrier in this slice. The
+  outer pointer singleton spelled `*T @ place` is a pointer value, not a
+  singleton stored behind that pointer.
 
 Static address/enum sorts, explicit universal or existential syntax,
 `where`/propositions, erased `view` values, mutable borrowing, and SMT/prover
@@ -662,8 +672,8 @@ fn write(permission: sink SlotWrite[slot, 0],
 }
 ```
 
-Static parameters may use the same primitive integer sorts as indexed runtime
-owners or an exhaustive enum. Enum constants are qualified, for example
+Static parameters may use a primitive integer sort, an exhaustive enum, or
+the checker-only `addr` sort. Enum constants are qualified, for example
 `TcpConn[conn, TcpState::Listen]`; a non-exhaustive enum cannot be a finite
 static sort. Enum static terms are nominal, so cases from two enum types do
 not unify merely because their runtime discriminants are equal. Static names
@@ -699,12 +709,45 @@ Thus `fn f(p: sink PendingEvent, n: i32) -> PendingEvent` has runtime ABI
 `void f(i32)`. Source evaluation order and runtime side effects of calls are
 preserved even when their view inputs/results erase.
 
-The current `MutexGuard` and `KGuard` examples are non-indexed linear views.
-Their lock pointers remain explicit runtime arguments, while lock/unlock
-balance is checked in Delta without a forged null pointer, runtime result,
-parameter, alloca, or debug value. They do not yet identify one particular
-lock: an address/static-place sort is required before `MutexGuard[lock]` can
-reject pairing a guard with the wrong explicit pointer.
+`MutexGuard` and `KGuard` are address-indexed linear views. Their lock pointers
+remain explicit runtime arguments, while lock/unlock balance and pointer
+identity are checked in Delta/Phi without a forged null pointer, runtime
+guard result, guard parameter, alloca, or debug value:
+
+```takibi
+private linear view MutexGuard[lock: addr];
+
+fn mutex_lock(m: *i32 @ lock) -> MutexGuard[lock] !{may_block} {
+    sem_wait(m);
+    return view MutexGuard[lock];
+}
+
+fn mutex_unlock(g: sink MutexGuard[lock], m: *i32 @ lock) {
+    sem_post(m);
+}
+```
+
+For pointer types, `T @ lock` is an erased address identity rather than an
+integer-value equality. At a call site the first address slice recognizes
+these stable syntactic forms:
+
+- repeated `&name` and `&name.field...` expressions in one function share a
+  rigid identity;
+- repeated use of one immutable pointer binding shares that binding's hidden
+  identity;
+- different syntactic paths are different identities. The checker does not
+  resolve aliases, dereferences, indices, or pointer arithmetic back to an
+  original place;
+- assigning a base binding invalidates identities for its field projections.
+  Taking the address of a pointer binding does the same because a callee may
+  rebind it through the resulting pointer-to-pointer;
+- unsupported pointer expressions receive a fresh identity, so failure to
+  prove equality is conservative rather than an alias claim.
+
+The singleton annotation and `addr` term erase. Both lock and unlock retain
+one ordinary runtime pointer, and the guard contributes no ABI operand or
+result. `examples/mutex_guard_identity_wrong` demonstrates rejection of a
+guard acquired from one mutex and passed with another.
 
 An indexed view may be the direct body of an outermost variant-payload
 `exists`. A closed variant can therefore retain a runtime state tag while
@@ -731,8 +774,8 @@ the focused executable state-dispatch fixture;
 all-path obligation failures.
 
 Explicit `forall`, direct/general existential types outside variant payloads,
-address/place static sorts, propositions, and solver discharge are not
-implemented. See `examples/common/http_conn_state.tkb` for the non-indexed
+propositions, and solver discharge are not implemented. See
+`examples/common/http_conn_state.tkb` for the non-indexed
 `PendingTcpEvent` use and `examples/indexed_view` for integer-indexed view
 change.
 
@@ -879,8 +922,8 @@ examples:
   are supported by value, while arrays, indexed owner structs, and structs
   containing affine/linear fields are not;
 - `exists n: StaticSort. T[n]` is legal only as the outermost case payload.
-  `StaticSort` is a primitive integer or exhaustive enum, and the body must
-  directly package an indexed runtime owner or indexed erased view;
+  `StaticSort` is `addr`, a primitive integer, or an exhaustive enum, and the
+  body must directly package an indexed runtime owner or indexed erased view;
 - there is no explicit `forall`; static names in function signatures remain
   implicit universals;
 - plain variants may additionally be fields of ordinary structs and may be
@@ -1017,7 +1060,7 @@ Checker effects are written after the return type:
 
 ```takibi
 extern fn sem_wait(s: *i32) !{may_block};
-fn mutex_lock(m: *i32) -> MutexGuard !{may_block} { ... }
+fn mutex_lock(m: *i32 @ lock) -> MutexGuard[lock] !{may_block} { ... }
 fn IRQ_Handler() !{interrupt} { acknowledge_irq(); }
 fn poll_callback() !{} { acknowledge_irq(); }
 ```

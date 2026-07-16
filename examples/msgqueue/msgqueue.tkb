@@ -31,7 +31,7 @@ struct MsgQueue {
 let mut mq: MsgQueue = {1, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 4};
 
 fn mq_send(val: i32) {
-    let mut g: MutexGuard = mutex_lock(&mq.mutex);
+    let mut g = mutex_lock(&mq.mutex);
     while (mq.count >= mq.cap) {
         g = cond_wait(&mq.not_full, g, &mq.mutex);
     }
@@ -44,7 +44,7 @@ fn mq_send(val: i32) {
 }
 
 fn mq_recv() -> i32 {
-    let mut g: MutexGuard = mutex_lock(&mq.mutex);
+    let mut g = mutex_lock(&mq.mutex);
     while (mq.count == 0) {
         g = cond_wait(&mq.not_empty, g, &mq.mutex);
     }

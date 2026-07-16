@@ -45,6 +45,9 @@ type senv = ((string * Ast.type_expr) list * bool * int option) StringMap.t
    scope and are instantiated freshly at each call site. *)
 let active_static_scope : static_scope option ref = ref None
 let value_static_identities : static_term StringMap.t ref = ref StringMap.empty
+(* Per-function identities for the stable syntactic places supported by the
+   first addr slice: &name and &name.field chains. *)
+let place_static_identities : static_term StringMap.t ref = ref StringMap.empty
 let active_readonly_borrows : StringSet.t ref = ref StringSet.empty
 let function_param_modes : Ast.type_expr option list StringMap.t ref =
   ref StringMap.empty
@@ -272,6 +275,41 @@ let check_literal_fits_refined loc (e : Ast.expr) (target : ty) =
        | None -> ())
   | _ -> ()
 
+let rec static_place_key (e : Ast.expr) =
+  match e.desc with
+  | Ast.Var name -> Some name
+  | Ast.FieldGet (base, field) ->
+      Option.map (fun key -> key ^ "." ^ field) (static_place_key base)
+  | _ -> None
+
+let static_identity_for_place place =
+  match static_place_key place with
+  | None -> fresh_rigid_static ()
+  | Some key ->
+      (match StringMap.find_opt key !place_static_identities with
+       | Some identity -> identity
+       | None ->
+           let identity = rigid_static ("&" ^ key) in
+           place_static_identities :=
+             StringMap.add key identity !place_static_identities;
+           identity)
+
+let key_has_prefix prefix key =
+  String.length key > String.length prefix
+  && String.sub key 0 (String.length prefix) = prefix
+
+let invalidate_place_binding name =
+  let prefix = name ^ "." in
+  place_static_identities := StringMap.filter (fun key _ ->
+    key <> name && not (key_has_prefix prefix key)
+  ) !place_static_identities
+
+let invalidate_place_projections name =
+  let prefix = name ^ "." in
+  place_static_identities := StringMap.filter (fun key _ ->
+    not (key_has_prefix prefix key)
+  ) !place_static_identities
+
 (* A singleton parameter introduces a static name for the runtime argument.
    Literals carry their exact static integer; an already-singleton value
    preserves its identity; every other expression receives a fresh hidden
@@ -280,23 +318,39 @@ let adapt_actual_to_expected (tyenv : tyenv) (e : Ast.expr)
     (actual : ty) (expected : ty) : ty =
   match repr expected, repr actual with
   | TSingleton _, TSingleton _ -> actual
-  | TSingleton _, _ ->
-      let n = match Const_env.bound_value e with
-        | Some k -> SConst k
-        | None ->
-            (match e.desc with
-             | Var name ->
-                 (match StringMap.find_opt name tyenv with
-                  | Some (_, false) ->
-                      (match StringMap.find_opt name !value_static_identities with
-                       | Some n -> n
-                       | None ->
-                           let n = fresh_rigid_static () in
-                           value_static_identities :=
-                             StringMap.add name n !value_static_identities;
-                           n)
-                  | _ -> fresh_rigid_static ())
-             | _ -> fresh_rigid_static ())
+  | TSingleton (expected_base, _), _ ->
+      let is_address = match repr expected_base with
+        | TPtr _ | TAlignedPtr _ -> true
+        | _ -> false
+      in
+      let identity_for_immutable_name ~is_address name =
+        match StringMap.find_opt name tyenv with
+        | Some (_, false) ->
+            (match StringMap.find_opt name !value_static_identities with
+             | Some identity -> identity
+             | None ->
+                 let identity =
+                   if is_address then rigid_static name
+                   else fresh_rigid_static ()
+                 in
+                 value_static_identities :=
+                   StringMap.add name identity !value_static_identities;
+                 identity)
+        | _ -> fresh_rigid_static ()
+      in
+      let n =
+        if is_address then
+          match e.desc with
+          | AddrOf place -> static_identity_for_place place
+          | Var name -> identity_for_immutable_name ~is_address:true name
+          | _ -> fresh_rigid_static ()
+        else
+          match Const_env.bound_value e with
+          | Some k -> SConst k
+          | None ->
+              (match e.desc with
+               | Var name -> identity_for_immutable_name ~is_address:false name
+               | _ -> fresh_rigid_static ())
       in
       TSingleton (actual, n)
   | _ -> actual
@@ -1269,6 +1323,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Var name ->
            check_private_global_access e.loc name;
            let (t, is_mut) = lookup_binding e.loc name tyenv in
+           (match repr t with
+            | TPtr _ | TAlignedPtr _ -> invalidate_place_projections name
+            | _ -> ());
            if is_linear_ptr_ty t then
              raise (TypeError (e.loc, Printf.sprintf
                "cannot take the address of linear value '%s': an alias would \
@@ -2487,6 +2544,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       (tyenv, raw_locals)
   | Assign (name, e) ->
       check_private_global_access s.loc name;
+      invalidate_place_projections name;
       if StringSet.mem name !active_readonly_borrows then
         raise (TypeError (s.loc, Printf.sprintf
           "cannot assign to borrowed value '%s'; use `borrow mut` for scoped mutation"
@@ -2662,6 +2720,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       (tyenv, raw_locals)
   | Let (is_mut, name, ty_opt, expr_opt, align_opt) ->
       value_static_identities := StringMap.remove name !value_static_identities;
+      invalidate_place_binding name;
       let ty = of_ast_opt ty_opt in
       let init_ty_opt =
         match expr_opt with
@@ -3163,6 +3222,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
     active_readonly_borrows := previous_readonly) (fun () ->
     check_const_shadowing fdef;
     value_static_identities := StringMap.empty;
+    place_static_identities := StringMap.empty;
     var_align_bytes := !global_align_bytes_baseline;  (* see its own comment *)
     let param_tys = List.map (fun (_, ty_opt) -> of_ast_opt ty_opt) fdef.params in
     let ret_ty    = ret_of_ast_opt fdef.ret_type in
@@ -3219,6 +3279,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let toplevel_names : (string, string) Hashtbl.t = Hashtbl.create 32 in
   let article_for kind = if kind = "enum" then "an" else "a" in
   let claim_toplevel_name name kind =
+    if name = "addr" then
+      raise (TypeError (Lexing.dummy_pos,
+        "'addr' is reserved for the checker-only static address sort"));
     match Hashtbl.find_opt toplevel_names name with
     | Some "function" when kind = "function" -> ()
     | Some existing ->
@@ -3433,6 +3496,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   let validate_static_sort loc = function
     | sort when is_integer_static_sort sort -> ()
+    | Ast.TypeNamed "addr" -> ()
     | Ast.TypeNamed name ->
         (match Hashtbl.find_opt static_enum_defs name with
          | Some (_, false) -> ()
@@ -3440,10 +3504,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              "non-exhaustive enum '%s' cannot be used as a finite static sort"
              name))
          | None -> raise (TypeError (loc, Printf.sprintf
-             "static sort '%s' is not a primitive integer or exhaustive enum"
+             "static sort '%s' is not addr, a primitive integer, or an exhaustive enum"
              name)))
     | sort -> raise (TypeError (loc, Printf.sprintf
-        "static sort must be a primitive integer or exhaustive enum, got %s"
+        "static sort must be addr, a primitive integer, or an exhaustive enum, got %s"
         (Types.to_string (Types.of_ast sort))))
   in
   let static_sort_of_value loc = function
@@ -3451,14 +3515,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | (Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32 | Ast.TypeI64
       | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64
       | Ast.TypeIsize | Ast.TypeUsize) as t -> t
+    | Ast.TypePtr _ | Ast.TypeAlignedPtr _ -> Ast.TypeNamed "addr"
     | t -> raise (TypeError (loc, Printf.sprintf
-        "singleton '@' requires an integer runtime type, got %s"
+        "singleton '@' requires an integer or pointer runtime type, got %s"
         (Types.to_string (Types.of_ast t))))
   in
   let check_static_const loc sort n =
     if not (is_integer_static_sort sort) then
       raise (TypeError (loc, Printf.sprintf
-        "static integer %d cannot be used where enum sort %s is required"
+        "static integer %d cannot be used where addr or enum sort %s is required"
         n (Types.to_string (Types.of_ast sort))));
     let fits = match sort with
       | Ast.TypeU8 -> n >= 0 && n < 256
@@ -3482,10 +3547,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                "static enum case '%s::%s' has sort %s, but %s is required"
                enum_name case_name enum_name expected))
          | Ast.TypeNamed expected ->
-             let cases, _ = Hashtbl.find static_enum_defs expected in
-             if not (List.mem case_name cases) then
+             if expected = "addr" then
                raise (TypeError (loc, Printf.sprintf
-                 "unknown static enum case '%s::%s'" expected case_name))
+                 "static enum case '%s::%s' cannot be used where addr is required"
+                 enum_name case_name))
+             else
+               let cases, _ = Hashtbl.find static_enum_defs expected in
+               if not (List.mem case_name cases) then
+                 raise (TypeError (loc, Printf.sprintf
+                   "unknown static enum case '%s::%s'" expected case_name))
          | _ -> raise (TypeError (loc, Printf.sprintf
              "static enum case '%s::%s' cannot be used where an integer sort is required"
              enum_name case_name)))
@@ -3497,7 +3567,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              (match Hashtbl.find_opt scope name with
               | Some old when old <> sort ->
                   raise (TypeError (loc, Printf.sprintf
-                    "static name '%s' is used with inconsistent integer sorts" name))
+                    "static name '%s' is used with inconsistent static sorts" name))
               | Some _ -> ()
               | None when !allow_implicit_static -> Hashtbl.add scope name sort
               | None -> raise (TypeError (loc, Printf.sprintf
@@ -3585,6 +3655,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> ()
   in
   let rec validate_complete_type loc behind_ptr = function
+    | Ast.TypeNamed "addr" ->
+        raise (TypeError (loc,
+          "addr is a checker-only static sort and cannot be used as a runtime type"))
     | Ast.TypeNamed name when StringSet.mem name opaque_names && not behind_ptr ->
         raise (TypeError (loc, Printf.sprintf
           "opaque struct '%s' is incomplete and may only be used behind a pointer" name))

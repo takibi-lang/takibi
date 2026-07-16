@@ -273,6 +273,20 @@ let parser_tests = [
                    Ast.StaticEnum ("ParsedTcpState", "Listen")]))))], _)] -> ()
       | _ -> Alcotest.fail "expected finite enum static-state AST nodes");
 
+  Alcotest.test_case "addr-indexed pointer keeps singleton outside pointer" `Quick
+    (fun () ->
+      match parse
+        "linear view ParseAddrGuard[lock: addr];
+         fn parse_addr_lock(m: *io i32 @ lock) -> ParseAddrGuard[lock] {}"
+      with
+      | [Ast.ViewDef _;
+         Ast.FuncDef { params = [(_, Some ty)]; _ }] ->
+          Alcotest.check type_t "pointer identity is outermost"
+            (Ast.TypeSingleton
+               (Ast.TypePtr (Ast.TypeIo Ast.TypeI32), Ast.StaticName "lock"))
+            ty
+      | _ -> Alcotest.fail "expected an addr-indexed pointer parameter");
+
   Alcotest.test_case "indexed linear struct and singleton syntax parse" `Quick (fun () ->
     match parse
       "private linear struct PLease[n: usize] { private idx: {0..<4 as usize} @ n; }
@@ -4967,6 +4981,101 @@ let infer_tests = [
     (expect_type_error "duplicate static parameter 'slot' on view 'IndexedDuplicate6'"
        "linear view IndexedDuplicate6[slot: usize, slot: usize];");
 
+  (* -- Post-Slice 6: static address/place identities -------------------- *)
+
+  Alcotest.test_case "addr identity: one global lock place balances" `Quick
+    (expect_ok
+       "private linear view AddrGuard7[lock: addr];
+        fn addr_lock7(m: *i32 @ lock) -> AddrGuard7[lock] {
+          return view AddrGuard7[lock];
+        }
+        fn addr_unlock7(g: sink AddrGuard7[lock], m: *i32 @ lock) {}
+        let mut addr_lock_word7: i32;
+        fn addr_use7() {
+          let g = addr_lock7(&addr_lock_word7);
+          addr_unlock7(g, &addr_lock_word7);
+        }");
+
+  Alcotest.test_case "addr identity: one immutable pointer binding balances" `Quick
+    (expect_ok
+       "linear view AddrPointerGuard7[lock: addr];
+        fn addr_pointer_lock7(m: *i32 @ lock) -> AddrPointerGuard7[lock] {
+          return view AddrPointerGuard7[lock];
+        }
+        fn addr_pointer_unlock7(g: sink AddrPointerGuard7[lock],
+                                m: *i32 @ lock) {}
+        let mut addr_pointer_word7: i32;
+        fn addr_pointer_use7() {
+          let pointer = &addr_pointer_word7;
+          let g = addr_pointer_lock7(pointer);
+          addr_pointer_unlock7(g, pointer);
+        }");
+
+  Alcotest.test_case "addr identity: a guard rejects a different global lock" `Quick
+    (expect_type_error "static value mismatch: &addr_lock_b7 vs &addr_lock_a7"
+       "linear view AddrWrongGuard7[lock: addr];
+        fn addr_wrong_lock7(m: *i32 @ lock) -> AddrWrongGuard7[lock] {
+          return view AddrWrongGuard7[lock];
+        }
+        fn addr_wrong_unlock7(g: sink AddrWrongGuard7[lock], m: *i32 @ lock) {}
+        let mut addr_lock_a7: i32;
+        let mut addr_lock_b7: i32;
+        fn addr_wrong_use7() {
+          let g = addr_wrong_lock7(&addr_lock_a7);
+          addr_wrong_unlock7(g, &addr_lock_b7);
+        }");
+
+  Alcotest.test_case "addr identity: one field place survives a guard transition" `Quick
+    (expect_ok
+       "linear view AddrFieldGuard7[lock: addr];
+        struct AddrFieldBox7 { mutex: i32; sequence: io i32; }
+        fn addr_field_lock7(m: *i32 @ lock) -> AddrFieldGuard7[lock] {
+          return view AddrFieldGuard7[lock];
+        }
+        fn addr_field_wait7(seq: *io i32, g: sink AddrFieldGuard7[lock],
+                            m: *i32 @ lock) -> AddrFieldGuard7[lock] {
+          return view AddrFieldGuard7[lock];
+        }
+        fn addr_field_unlock7(g: sink AddrFieldGuard7[lock], m: *i32 @ lock) {}
+        let mut addr_field_box7: AddrFieldBox7;
+        fn addr_field_use7() {
+          let mut g = addr_field_lock7(&addr_field_box7.mutex);
+          g = addr_field_wait7(&addr_field_box7.sequence, g,
+                               &addr_field_box7.mutex);
+          addr_field_unlock7(g, &addr_field_box7.mutex);
+        }");
+
+  Alcotest.test_case "addr sort rejects an integer static argument" `Quick
+    (expect_type_error "cannot be used where addr"
+       "linear view AddrLiteralGuard7[lock: addr];
+        fn addr_literal_bad7(g: sink AddrLiteralGuard7[0]) {}");
+
+  Alcotest.test_case "addr is not a runtime value type" `Quick
+    (expect_type_error "addr is a checker-only static sort"
+       "fn addr_runtime_bad7(value: addr) {}");
+
+  Alcotest.test_case "addr is reserved from runtime declarations" `Quick
+    (expect_type_error "'addr' is reserved for the checker-only static address sort"
+       "struct addr { value: i32; }");
+
+  Alcotest.test_case "addr identity: rebinding a pointer invalidates field places" `Quick
+    (expect_type_error "static value mismatch"
+       "linear view AddrRebindGuard7[lock: addr];
+        struct AddrRebindBox7 { mutex: i32; }
+        fn addr_rebind_lock7(m: *i32 @ lock) -> AddrRebindGuard7[lock] {
+          return view AddrRebindGuard7[lock];
+        }
+        fn addr_rebind_unlock7(g: sink AddrRebindGuard7[lock],
+                               m: *i32 @ lock) {}
+        let mut addr_rebind_a7: AddrRebindBox7;
+        let mut addr_rebind_b7: AddrRebindBox7;
+        fn addr_rebind_bad7() {
+          let mut box = &addr_rebind_a7;
+          let g = addr_rebind_lock7(&box.mutex);
+          box = &addr_rebind_b7;
+          addr_rebind_unlock7(g, &box.mutex);
+        }");
+
   (* -- Post-Slice 6: finite-state existential view dispatch -------------- *)
 
   Alcotest.test_case
@@ -5063,6 +5172,42 @@ let infer_tests = [
    checks runtime behavior, not just "the IR verifies"). *)
 
 let codegen_tests = [
+  Alcotest.test_case
+    "addr identity ABI: pointer remains runtime and indexed guard erases"
+    `Quick
+    (fun () ->
+      let src =
+        "linear view CgAddrGuard7[lock: addr];
+         fn cg_addr_lock7(m: *i32 @ lock) -> CgAddrGuard7[lock] {
+           return view CgAddrGuard7[lock];
+         }
+         fn cg_addr_unlock7(g: sink CgAddrGuard7[lock], m: *i32 @ lock) {}
+         let mut cg_addr_word7: i32;
+         fn cg_addr_use7() {
+           let g = cg_addr_lock7(&cg_addr_word7);
+           cg_addr_unlock7(g, &cg_addr_word7);
+         }" in
+      ignore (gen_codegen src);
+      let find name = match Hashtbl.find_opt Llvm_gen.functions name with
+        | Some (_, f) -> f
+        | None -> Alcotest.failf "%s not found" name
+      in
+      let lock = find "cg_addr_lock7" in
+      let unlock = find "cg_addr_unlock7" in
+      let use = find "cg_addr_use7" in
+      Alcotest.(check int) "lock keeps only its runtime pointer"
+        1 (Array.length (Llvm.params lock));
+      Alcotest.(check int) "unlock erases its guard and keeps its pointer"
+        1 (Array.length (Llvm.params unlock));
+      let lock_ir = Llvm.string_of_llvalue lock in
+      let use_ir = Llvm.string_of_llvalue use in
+      Alcotest.(check bool) "guard result lowers to void" true
+        (contains_substring lock_ir "define void @cg_addr_lock7(ptr");
+      Alcotest.(check bool) "no address-to-integer proof encoding" false
+        (contains_substring use_ir "ptrtoint");
+      Alcotest.(check bool) "no integer-to-address proof encoding" false
+        (contains_substring use_ir "inttoptr"));
+
   Alcotest.test_case
     "finite-state dispatch ABI: existential view payloads erase to the runtime tag"
     `Quick

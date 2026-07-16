@@ -24,11 +24,11 @@ struct Shared {
 
 let mut shared: Shared;
 
-fn shared_add(g: borrow KGuard, delta: i32) {
+fn shared_add(g: borrow KGuard[lock], delta: i32) {
     shared.counter = shared.counter + delta;
 }
 
-fn shared_get(g: borrow KGuard) -> i32 {
+fn shared_get(g: borrow KGuard[lock]) -> i32 {
     return shared.counter;
 }
 
@@ -82,7 +82,7 @@ fn owner_chan_init(ch: *OwnerChan) {
 
 fn owner_chan_send(ch: *OwnerChan,
                    message: OwnerMessage[id]) !{may_block} {
-    let mut g: MutexGuard = mutex_lock(&ch.mutex);
+    let mut g = mutex_lock(&ch.mutex);
     while (ch.full != 0) {
         g = cond_wait(&ch.slot_taken, g, &ch.mutex);
     }
@@ -105,7 +105,7 @@ fn owner_chan_send(ch: *OwnerChan,
 }
 
 fn owner_chan_recv(ch: *OwnerChan) -> OwnerSlotValue !{may_block} {
-    let mut g: MutexGuard = mutex_lock(&ch.mutex);
+    let mut g = mutex_lock(&ch.mutex);
     while (ch.full == 0) {
         g = cond_wait(&ch.slot_full, g, &ch.mutex);
     }
@@ -119,7 +119,7 @@ fn owner_chan_recv(ch: *OwnerChan) -> OwnerSlotValue !{may_block} {
 
 fn task_ping() {
     for i: i32 in 0..<5 {
-        let g: KGuard = klock(&the_lock);
+        let g = klock(&the_lock);
         shared_add(g, 1);
         kunlock(g, &the_lock);
 
@@ -146,7 +146,7 @@ fn task_pong() {
             }
         }
 
-        let g: KGuard = klock(&the_lock);
+        let g = klock(&the_lock);
         shared_add(g, 1);
         kunlock(g, &the_lock);
 
@@ -175,7 +175,7 @@ fn app_main() {
     scheduler_disable();
     rtos_done = 1;
 
-    let g: KGuard = klock(&the_lock);
+    let g = klock(&the_lock);
     uart_puts("shared counter: ");
     uart_print(shared_get(g));
     uart_puts("\r\n");

@@ -7653,3 +7653,40 @@ owner package. Validation: all 742 Alcotest cases passed. Full `make check`
 passed all 120 host, compile-error, DWARF, and QEMU integration cases,
 including `rtos_demo`, every STM32 cross-build, and all network examples under
 `--forbid-trap`.
+
+## 2026-07-16: Static Address/Place Identities for Lock Guards
+
+Implemented the next `TAKIBI_CORE.md` priority without adding a runtime guard
+object. `addr` is now a reserved checker-only static sort, and a pointer
+singleton such as `*i32 @ lock` relates the ordinary runtime pointer to the
+same erased term carried by `MutexGuard[lock]` or `KGuard[lock]`. The parser
+normalizes the documented `*T @ lock` spelling as a singleton OF the pointer,
+not a forbidden pointer TO an integer singleton.
+
+The first place language is deliberately small. Repeated `&name` and
+`&name.field...` expressions within one function share a rigid identity;
+different paths do not. An immutable pointer binding also retains one hidden
+identity. Rebinding a base invalidates its projection identities, and taking
+the address of a pointer binding invalidates them because a callee could
+rebind it. Aliases, dereferences, indices, and pointer arithmetic are not
+resolved back to an original place; unsupported expressions conservatively
+receive a fresh identity.
+
+`examples/common/sync.tkb`, both KGuard implementations, and every existing
+condvar/channel/queue/RTOS caller now use the indexed signatures. Hidden
+concrete place terms are retained by local type inference rather than being
+spelled in annotations. `mutex_guard_identity_wrong` is the focused negative
+fixture: a guard acquired for one global mutex cannot be consumed alongside a
+different global mutex.
+
+All address terms, singleton annotations, and view values erase before LLVM.
+Lock and unlock retain exactly their explicit runtime pointer; no guard
+parameter/result, `ptrtoint`, or `inttoptr` proof encoding is emitted. This
+does not make `stable_replace` a general lock invariant: that builtin still
+accepts any linear erased guard and does not relate an owner slot to a
+particular mutex field. The remaining example-driven priority is asynchronous
+TX ownership when a concrete driver keeps a DMA buffer in flight after return.
+
+Validation: all 752 Alcotest cases passed. Full `make check` passed all 121
+host, compile-error, DWARF, and QEMU integration cases, every STM32
+cross-build, and all network examples under `--forbid-trap`.

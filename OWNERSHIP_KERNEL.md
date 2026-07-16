@@ -1091,6 +1091,9 @@ English-commented negative fixture. Erased guard/permit values add no runtime
 fields or call operands; the existing RX owner's `{index, len}` remains the
 runtime data and is passed by value to the current shared-borrow TX API.
 
+The subsequent static-address increment in 6.7.10 strengthens these guards
+from non-indexed views to `MutexGuard[lock]` / `KGuard[lock]`.
+
 The RX audit also found a different hole which this consolidation must not
 hide: the ordinary slice returned by `net_rx_frame` can outlive the source
 owner in the checker. Releasing the owner and then reading that old slice is a
@@ -1144,7 +1147,28 @@ laundering within a function. See TAKIBI_CORE.md's implemented-slice entry,
 SPEC.md's "Owner-Derived Region Slices" section, and HISTORY.md's dated
 entry for details.
 
-## 7. Next outlook: static place identities and asynchronous TX
+#### 6.7.10 Static address/place identities (implemented 2026-07-16)
+
+The lock guards now use a reserved checker-only `addr` static sort. Pointer
+singletons (`*T @ lock`) connect an ordinary runtime lock pointer to the same
+static term carried by `MutexGuard[lock]` or `KGuard[lock]`. Repeated
+`&name`/`&name.field...` places within a function share a rigid identity;
+distinct paths do not unify, and rebinding a base invalidates its projection
+identities. Immutable pointer bindings also retain one identity. Arbitrary
+alias, dereference, index, and pointer-arithmetic equivalence is deliberately
+not inferred.
+
+The guard and address term erase before LLVM. The explicit lock pointer is
+still the only runtime lock/unlock operand. The focused
+`mutex_guard_identity_wrong` fixture proves that acquiring from one mutex and
+unlocking another is rejected; existing condition-variable, queue, channel,
+KLock, and RTOS examples use the indexed API.
+
+This does not make `stable_replace` a general lock invariant: that builtin
+still accepts any linear erased guard and does not relate an owner slot to a
+particular mutex field.
+
+## 7. Next outlook: asynchronous TX
 
 The post-Slice-6 sequence now includes owner-derived region slices,
 existential `TcpConn[conn, state]` dispatch, typed copy-rendezvous requests,
@@ -1156,11 +1180,11 @@ to transfer an existentially indexed `OwnerMessage[id]` between tasks.
 This is intentionally smaller than arbitrary stored-owner/place tracking.
 The declaring file still maintains the relationship between its runtime
 `full` flag and the variant tag, and any linear guard can authorize the
-exchange. The next priority is therefore an address/place static identity
-that makes `MutexGuard[lock]` and `KGuard[lock]` reject a mismatched explicit
-lock pointer. General heap predicates and arbitrary stable places remain
-demand-led; asynchronous TX remains deferred until a driver keeps a DMA
-buffer in flight after its call returns.
+exchange. Static guard identity now rejects a mismatched explicit lock
+pointer, but does not prove which mutex protects a stable slot. General heap
+predicates and arbitrary stable places remain demand-led. The remaining
+example-driven priority is asynchronous TX, deferred until a driver keeps a
+DMA buffer in flight after its call returns.
 
 ## 8. Prior art notes
 

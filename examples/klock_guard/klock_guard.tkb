@@ -14,20 +14,17 @@
 //      forever" (a permanently disabled-interrupts system).
 //   2. Double-unlock is a compile error -- the existing double-consume
 //      check, since kunlock takes its guard as `sink`.
-// What this file does NOT prove, and is honest about not proving: the
-// accessor idiom (shared_get/shared_add below requiring `borrow KGuard`)
-// does not yet associate this guard with one particular lock or open a
-// protected-state invariant. The declaring file remains the trusted boundary;
-// a later address-indexed guard and lock-invariant slice will close those
-// separate gaps.
+// The address index associates each guard with its particular lock, so using
+// another KLock at kunlock is rejected. The accessor idiom still does not
+// open a protected-state invariant: the declaring file remains the trusted
+// boundary for associating `shared` with `the_lock`.
 //
 // v1 implementation is a placeholder Giant Lock: klock()/kunlock() just
 // disable/enable IRQs (examples/common_qemu/startup.S's disable_irq/
 // enable_irq), so only one KGuard can usefully exist system-wide at a
-// time regardless of how many KLock instances are declared -- this
-// mirrors KGuard's own opaque-struct singleton nature (SPEC.md's
-// "Affine Opaque Structs"). What matters for future fine-graining is
-// that klock/kunlock already take the specific KLock being acquired as
+// time regardless of how many KLock instances are declared. The addr index
+// still distinguishes those instances statically. What matters for future
+// fine-graining is that klock/kunlock already take the specific KLock as
 // an explicit argument (unlike a classic Big Kernel Lock, which takes
 // none) -- swapping the body for a real per-lock primitive later is
 // then a change to klock/kunlock's implementation rather than to callers.
@@ -41,39 +38,39 @@ struct KLock {
     word: i32;
 }
 
-private linear view KGuard;
+private linear view KGuard[lock: addr];
 
-fn klock(lk: *KLock) -> KGuard {
+fn klock(lk: *KLock @ lock) -> KGuard[lock] {
     disable_irq();
-    return view KGuard;
+    return view KGuard[lock];
 }
 
-fn kunlock(g: sink KGuard, lk: *KLock) {
+fn kunlock(g: sink KGuard[lock], lk: *KLock @ lock) {
     enable_irq();
 }
 
 // The protected data, and its accessor idiom: reaching `shared` through
-// these two functions requires already holding a KGuard (a `borrow
-// KGuard` parameter), documenting at every call site which lock a
-// given piece of state is meant to be read/written under.
+// these two functions requires already holding a KGuard (an indexed
+// `borrow KGuard[lock]` parameter). The declaring file remains responsible
+// for the invariant associating this shared value with that lock.
 struct Shared {
     counter: i32;
 }
 
 let mut shared: Shared;
 
-fn shared_get(g: borrow KGuard) -> i32 {
+fn shared_get(g: borrow KGuard[lock]) -> i32 {
     return shared.counter;
 }
 
-fn shared_add(g: borrow KGuard, delta: i32) {
+fn shared_add(g: borrow KGuard[lock], delta: i32) {
     shared.counter = shared.counter + delta;
 }
 
 let mut the_lock: KLock;
 
 fn app_main() {
-    let g: KGuard = klock(&the_lock);
+    let g = klock(&the_lock);
     shared_add(g, 5);
     shared_add(g, 10);
     uart_puts("counter: ");
@@ -83,7 +80,7 @@ fn app_main() {
 
     // Lock again after a full unlock, proving the lock is genuinely
     // reusable rather than a one-shot token.
-    let g2: KGuard = klock(&the_lock);
+    let g2 = klock(&the_lock);
     shared_add(g2, 100);
     uart_puts("counter: ");
     uart_print(shared_get(g2));

@@ -62,16 +62,16 @@ struct KLock {
     private word: i32;
 }
 
-// The lock pointer remains explicit in every operation, so KGuard is erased.
-// A later static address identity will bind it to the particular KLock.
-private linear view KGuard;
+// The lock pointer remains explicit in every operation, so KGuard is erased;
+// its static address identity rejects pairing it with another KLock.
+private linear view KGuard[lock: addr];
 
-fn klock(lk: *KLock) -> KGuard {
+fn klock(lk: *KLock @ lock) -> KGuard[lock] {
     disable_irq();
-    return view KGuard;
+    return view KGuard[lock];
 }
 
-fn kunlock(g: sink KGuard, lk: *KLock) {
+fn kunlock(g: sink KGuard[lock], lk: *KLock @ lock) {
     enable_irq();
 }
 
@@ -111,7 +111,7 @@ struct Chan {
 }
 
 fn chan_send(ch: *Chan, m: i32) !{may_block} {
-    let mut g: MutexGuard = mutex_lock(&ch.mutex);
+    let mut g = mutex_lock(&ch.mutex);
     while (ch.full != 0) {
         g = cond_wait(&ch.slot_taken, g, &ch.mutex);
     }
@@ -125,7 +125,7 @@ fn chan_send(ch: *Chan, m: i32) !{may_block} {
 }
 
 fn chan_recv(ch: *Chan) -> i32 !{may_block} {
-    let mut g: MutexGuard = mutex_lock(&ch.mutex);
+    let mut g = mutex_lock(&ch.mutex);
     while (ch.full == 0) {
         g = cond_wait(&ch.slot_full, g, &ch.mutex);
     }

@@ -5,7 +5,7 @@ syntax accepted by the compiler today. `SPEC.md` remains authoritative for
 implemented Takibi. `OWNERSHIP_KERNEL.md` records the history and limitations
 of the current affine/linear checker.
 
-Implementation status (2026-07-16): Slices 0 through 6 and the first four
+Implementation status (2026-07-16): Slices 0 through 6 and the first five
 post-Slice-6 Core increments are implemented. The
 `Takibi_core` module owns the four-layer vocabulary, the current checker uses
 `Delta.Legacy_flow`, and the indexed runtime-owner subset described in 3.1 is
@@ -25,10 +25,12 @@ unrestricted ordinary structs by value and live in ordinary struct fields; the R
 server uses that subset for one typed copy-rendezvous request slot. Private
 stable owner slots can now hold one linear ownership-bearing variant and
 exchange it through `stable_replace` while a linear erased guard is held; the
-RTOS demo uses this for one ownership-bearing rendezvous direction. General
-linear-owner place/storage tracking, lock-to-guard identities, direct/general
-quantifiers and propositions, static address identities, and solver hooks
-remain design targets.
+RTOS demo uses this for one ownership-bearing rendezvous direction. Static
+`addr` indices now bind `MutexGuard[lock]` and `KGuard[lock]` to supported
+syntactic lock places and reject a mismatched explicit unlock pointer. General
+linear-owner place/storage tracking, arbitrary address expressions,
+direct/general quantifiers and propositions, and solver hooks remain design
+targets.
 
 The examples in this document are elaboration fixtures. Their contracts and
 runtime representations are decisions; punctuation may change when a fixture
@@ -246,25 +248,26 @@ constructor cannot issue a second lease for the same `n`. Requiring an erased
 permission as the constructor input is a later `view` slice, not a property
 silently claimed by this runtime-owner syntax.
 
-### 3.2 `MutexGuard` and `KGuard`: erased views when the lock stays explicit
+### 3.2 `MutexGuard` and `KGuard`: address-indexed erased views
 
 The mutex API passes the real mutex pointer to lock and unlock. Slice 2's
-non-indexed erased view is now used instead of a dummy guard pointer:
+erased view representation plus the later `addr` identity replace the old
+dummy guard pointer:
 
 ```takibi
-private linear view MutexGuard;
+private linear view MutexGuard[lock: addr];
 
-fn mutex_lock(m: *i32) -> MutexGuard !{may_block} {
+fn mutex_lock(m: *i32 @ lock) -> MutexGuard[lock] !{may_block} {
     sem_wait(m);
-    return view MutexGuard;
+    return view MutexGuard[lock];
 }
 
-fn mutex_unlock(held: sink MutexGuard, m: *i32) {
+fn mutex_unlock(held: sink MutexGuard[lock], m: *i32 @ lock) {
     sem_post(m);
 }
 
-fn cond_wait(seq: *io i32, held: sink MutexGuard,
-             m: *i32) -> MutexGuard !{may_block} {
+fn cond_wait(seq: *io i32, held: sink MutexGuard[lock],
+             m: *i32 @ lock) -> MutexGuard[lock] !{may_block} {
     let s = *seq;
     mutex_unlock(held, m);
     while (*seq == s) {}
@@ -273,12 +276,11 @@ fn cond_wait(seq: *io i32, held: sink MutexGuard,
 ```
 
 `MutexGuard` contributes no ABI value. `mutex_lock` takes only `m` and has no
-runtime result; `mutex_unlock` takes only `m`. This proves balanced use but
-does not yet reject pairing the guard with a different mutex pointer. The
-later address/stable-place slice should strengthen the same API to
-`MutexHeld[lock: addr]`, with `m: *i32 @ lock`. `KGuard` follows the same
-path, adding CPU/interrupt-state identity only when multicore support creates
-that concrete need.
+runtime result; `mutex_unlock` takes only `m`. The checker assigns an erased,
+rigid address identity to supported `&name` and `&name.field...` places, so a
+guard obtained for one mutex cannot be passed with another mutex pointer.
+`KGuard` uses the same contract. CPU/interrupt-state identity remains
+demand-led until multicore support creates that concrete need.
 
 If an API instead wants `mutex_unlock(guard)` with no mutex argument, use a
 runtime package explicitly:
@@ -723,14 +725,14 @@ from the indexed spelling.
 - The first concrete stable-storage subset is implemented below: a private
   BSS owner container can exchange one linear variant under an erased linear
   guard. General place borrowing and arbitrary indexed-owner storage remain.
-- The guarded exchange is the first narrow lock-invariant operation. Static
-  lock identity, general invariant predicates, and heap/region predicates
-  remain for examples that require them.
+- Static lock identity is implemented below for supported named and field
+  places. General invariant predicates, arbitrary address expressions, and
+  heap predicates remain for examples that require them.
 - Ownership transfer through one concrete synchronous channel is implemented
   below. Generic and zero-copy typed channels (#113) remain demand-led.
 - Aliasing/region predicates (#106, closed -- escape control continues as
-  #128), asynchronous TX ownership (#87), and
-  solver/proof integration, each with a concrete driver and negative tests.
+  #128), asynchronous TX ownership (#87), and solver/proof integration, each
+  with a concrete driver and negative tests.
 
 ### Post-Slice 6 example audit and consolidation (implemented 2026-07-16)
 
@@ -743,8 +745,8 @@ express:
    mutex/lock remains an explicit runtime argument. They are now non-indexed
    erased linear views. This removes integer-to-token minting
    and their LLVM parameters/results without weakening today's guarantee.
-   Binding a guard to one particular lock remains a later `addr`/stable-place
-   identity slice.
+   The later static-address increment below now binds each guard to a
+   particular supported lock place.
 2. Both network backends could previously be asked to acquire again before
    the previous `NetRxCpuOwned[desc]` was released. A private affine
    `NetRxCanAcquire` view is returned by successful `net_init`, consumed
@@ -925,21 +927,50 @@ This is a minimal invariant boundary, not a complete lock logic. The checker
 proves that the stored owner can only cross the boundary as one exchange and
 that neither side can discard or duplicate it. The declaring file remains
 responsible for maintaining its private `full` flag/tag relationship and for
-calling `stable_replace` while the actual mutex is held. Any linear erased
-guard currently satisfies the operation; tying `MutexGuard[lock]` to the
-target container's mutex is the next static-address increment.
+calling `stable_replace` while the actual mutex is held. `stable_replace`
+still accepts any linear erased guard; the checker does not yet state that a
+particular owner slot is protected by a particular mutex. The address-indexed
+mutex API below does, however, prevent that guard from being unlocked through
+a different explicit pointer.
 
 The remaining example-driven order is:
 
-1. static address/place identities for `MutexGuard[lock]` and `KGuard[lock]`,
-   including rejection of a guard paired with the wrong explicit pointer;
-2. asynchronous TX ownership only when an example actually keeps a DMA buffer
+1. asynchronous TX ownership only when an example actually keeps a DMA buffer
    in flight after the call returns (#87).
 
 General heap predicates, arbitrary-place borrowing, and generic zero-copy
 channels remain demand-led rather than being inferred from this narrow stable
-slot. The next address identity should strengthen this same concrete API
-before any broader invariant surface is added.
+slot.
+
+### Static address/place identities (implemented 2026-07-16)
+
+The fifth post-Slice-6 increment strengthens the existing erased lock guards
+without adding a runtime token:
+
+- `addr` is a checker-only, reserved static sort. A singleton pointer such as
+  `m: *i32 @ lock` relates the runtime pointer to the static `lock`; it is not
+  a runtime `addr` value and cannot be constructed from an integer static
+  argument;
+- repeated `&name` and `&name.field...` expressions within one function
+  receive the same rigid identity. Different syntactic paths receive distinct
+  identities, so a guard for `&a` cannot be consumed with `&b`;
+- reassigning a base binding invalidates identities for projections below
+  that binding. Taking the address of a pointer binding also invalidates its
+  projections because a callee could rebind it through that pointer;
+- pointer aliases are deliberately not resolved. Passing the same immutable
+  pointer binding twice preserves that binding's identity, but mixing an alias
+  with its original `&place`, or using dereference/index expressions, is
+  conservatively fresh rather than proved equal;
+- `MutexGuard[lock]`, `KGuard[lock]`, the singleton annotation, and the static
+  identity all erase. Lock/unlock retain exactly their explicit runtime pointer
+  and no `ptrtoint`/`inttoptr` proof encoding is emitted;
+- `mutex_guard_identity_wrong` is the focused negative fixture. All existing
+  condition-variable, channel, message-queue, KLock, and RTOS examples now use
+  the indexed APIs.
+
+This is static identity for a deliberately small syntactic-place language,
+not pointer provenance, alias analysis, arbitrary-place borrowing, or a lock
+invariant tying `stable_replace` to a container field.
 
 #### Solver and prover threshold
 

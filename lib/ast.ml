@@ -56,7 +56,8 @@ type type_expr =
        integers. The named value keeps its ordinary runtime layout; only
        the arguments disappear after type checking. *)
   | TypeSingleton of type_expr * static_arg
-    (* T @ n -- a runtime T whose value is the erased static integer n. *)
+    (* T @ n -- a runtime integer or pointer T whose value/identity is also
+       available as an erased static argument. *)
   | TypeRefined of int * int * type_expr
     (* {lo..<hi} -- refined int: lo <= x < hi. Third field is the
        underlying primitive type (mirrors Types.ty's TRefinedInt -- see
@@ -95,7 +96,7 @@ type type_expr =
 [@@deriving show]
 
 type static_param = ident * type_expr
-(* Static parameter sorts are primitive integers or exhaustive enums. *)
+(* Static parameter sorts are addr, primitive integers, or exhaustive enums. *)
 [@@deriving show]
 
 type expr = expr_desc located

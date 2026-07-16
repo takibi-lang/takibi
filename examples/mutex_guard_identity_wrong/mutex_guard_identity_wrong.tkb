@@ -1,0 +1,20 @@
+// This file is expected to produce a compile error.
+// The guard returned by wrong_mutex_lock is indexed by wrong_mutex_a's
+// static address identity. Passing wrong_mutex_b to wrong_mutex_unlock would
+// release a different runtime mutex, so the shared `lock` index rejects it.
+
+linear view WrongMutexGuard[lock: addr];
+
+fn wrong_mutex_lock(m: *i32 @ lock) -> WrongMutexGuard[lock] {
+    return view WrongMutexGuard[lock];
+}
+
+fn wrong_mutex_unlock(g: sink WrongMutexGuard[lock], m: *i32 @ lock) {}
+
+let mut wrong_mutex_a: i32;
+let mut wrong_mutex_b: i32;
+
+fn wrong_mutex_use() {
+    let guard = wrong_mutex_lock(&wrong_mutex_a);
+    wrong_mutex_unlock(guard, &wrong_mutex_b);
+}

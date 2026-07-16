@@ -10,20 +10,20 @@ struct KLock {
     word: i32;
 }
 
-private linear view KGuard;
+private linear view KGuard[lock: addr];
 
-fn klock(lk: *KLock) -> KGuard {
+fn klock(lk: *KLock @ lock) -> KGuard[lock] {
     disable_irq();
-    return view KGuard;
+    return view KGuard[lock];
 }
 
-fn kunlock(g: sink KGuard, lk: *KLock) {
+fn kunlock(g: sink KGuard[lock], lk: *KLock @ lock) {
     enable_irq();
 }
 
 let mut the_lock: KLock;
 
 fn app_main() {
-    let g: KGuard = klock(&the_lock);
+    let g = klock(&the_lock);
     // kunlock(g, &the_lock); -- forgotten on purpose
 }
