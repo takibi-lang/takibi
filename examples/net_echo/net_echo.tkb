@@ -47,9 +47,11 @@ fn app_main() {
                         if (len >= 12) {
                             let frame = net_rx_frame(acquired);
                             swap_mac(frame as *u8);
-                            net_transmit(acquired, len);
+                            let in_flight = net_transmit(acquired, len);
+                            ready = net_tx_complete(in_flight);
+                        } else {
+                            ready = net_rx_release(acquired);
                         }
-                        ready = net_rx_release(acquired);
                     }
                 }
             }

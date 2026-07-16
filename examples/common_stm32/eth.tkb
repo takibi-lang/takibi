@@ -98,6 +98,14 @@ private linear struct NetRxCpuOwned[desc: usize] {
     private len: i32;
 }
 
+// DMA owns the in-place frame and one TX descriptor between net_transmit and
+// net_tx_complete. The completion path retains the runtime RX index and exact
+// TX ring slot it must observe; their static RX identity remains `desc`.
+private linear struct NetTxInFlight[desc: usize] {
+    private index: {0..<4 as usize} @ desc;
+    private tx_index: isize;
+}
+
 // Exactly one permit exists while no RX descriptor is CPU-owned. It has no
 // runtime representation and prevents duplicate owner minting at the API edge.
 private affine view NetRxCanAcquire;
@@ -426,8 +434,8 @@ fn net_rx_len(frame: borrow NetRxCpuOwned[desc]) -> i32 {
 // The singleton descriptor index carried by frame is already proven in range.
 //
 // `@ desc` ties the returned slice to the borrowed owner (issue #106): a
-// caller keeping this slice (or a subslice of it) past net_rx_release is
-// reading a buffer DMA owns again, and is now a compile error.
+// caller keeping this slice (or a subslice of it) past net_rx_release or
+// net_transmit is reading a buffer DMA owns, and is now a compile error.
 fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc {
     let idx: {0..<4 as usize} = frame.index;
     let offset: usize = idx * ETH_BUF_SIZE_USIZE;
@@ -435,10 +443,8 @@ fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc {
 }
 
 
-// Hands the current RX descriptor back to the DMA and advances the ring.
-// Consuming the CPU-owned handle restores the sole acquisition permit.
-fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire {
-    let desc_index: isize = frame.index as isize;
+fn net_rx_repost(index: {0..<4 as usize} @ desc) -> NetRxCanAcquire {
+    let desc_index: isize = index as isize;
     let desc: *EthDmaDesc = rx_desc_ptr(desc_index);
     dma_prepare_rx(eth_rx_bufs + desc_index * ETH_BUF_SIZE,
                    ETH_BUF_SIZE as usize);
@@ -449,14 +455,21 @@ fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire {
     return view NetRxCanAcquire;
 }
 
-// Transmits len bytes from this owned RX descriptor. Deriving buf here makes
-// the in-place-reply requirement structural rather than a raw-pointer calling
-// convention. The operation is synchronous, so the caller can release the RX
-// owner immediately afterward. This is the same completion-ordering guarantee
-// the QEMU backend provides before re-posting an RX descriptor.
-fn net_transmit(frame: borrow NetRxCpuOwned[desc], len: i32) !{may_block} {
+// Hands the current RX descriptor back to the DMA and advances the ring.
+// Consuming the CPU-owned handle restores the sole acquisition permit.
+fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire {
+    return net_rx_repost(frame.index);
+}
+
+// Starts transmitting len bytes from this owned RX descriptor. Deriving buf
+// here makes the in-place-reply requirement structural rather than a raw-
+// pointer calling convention. The returned linear owner represents the real
+// interval in which DMA may continue reading the buffer after this call.
+fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32)
+        -> NetTxInFlight[desc] {
     let buf: *u8 = net_rx_frame(frame) as *u8;
-    let desc: *align(32) EthDmaDesc = tx_desc_ptr(eth_tx_cur);
+    let tx_index: isize = eth_tx_cur;
+    let desc: *align(32) EthDmaDesc = tx_desc_ptr(tx_index);
 
     desc.word2 = ptr_to_u32(buf);
     desc.word1 = len as u32; // TBS1
@@ -467,6 +480,16 @@ fn net_transmit(frame: borrow NetRxCpuOwned[desc], len: i32) !{may_block} {
     eth_tx_irq_flag = 0;
     *ETH_DMATPDR = 1; // poll demand: prompt DMA to check for a ready descriptor now
 
+    let mut in_flight: NetTxInFlight[desc] = { frame.index, tx_index };
+    return in_flight;
+}
+
+// Waits for the exact descriptor retained by the in-flight owner. Only after
+// OWN clears may the frame return to RX DMA and the acquisition permit be
+// restored.
+fn net_tx_complete(in_flight: sink NetTxInFlight[desc])
+        -> NetRxCanAcquire !{may_block} {
+    let desc: *align(32) EthDmaDesc = tx_desc_ptr(in_flight.tx_index);
     // TS is a notification to re-check the descriptor, not proof that this
     // descriptor has completed: a stale/early TX status may race with the
     // handoff. OWN is the authoritative ownership state.
@@ -482,7 +505,8 @@ fn net_transmit(frame: borrow NetRxCpuOwned[desc], len: i32) !{may_block} {
         }
     }
 
-    eth_tx_cur = (eth_tx_cur + 1) % ETH_TX_DESC_COUNT;
+    eth_tx_cur = (in_flight.tx_index + 1) % ETH_TX_DESC_COUNT;
+    return net_rx_repost(in_flight.index);
 }
 
 // Fills mac_out with this board's fixed MAC address (examples/common_stm32/

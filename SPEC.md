@@ -857,14 +857,25 @@ fn net_rx_len(frame: borrow NetRxCpuOwned[desc]) -> i32 {
 }
 
 fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire { ... }
-fn net_transmit(frame: borrow NetRxCpuOwned[desc], len: i32) !{may_block} { ... }
+
+private linear struct NetTxInFlight[desc: usize] {
+    private index: {0..<8 as usize} @ desc;
+    // Backends may retain additional completion state, such as a TX slot.
+    private tx_index: isize;
+}
+
+fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32)
+    -> NetTxInFlight[desc] { ... }
+fn net_tx_complete(in_flight: sink NetTxInFlight[desc])
+    -> NetRxCanAcquire !{may_block} { ... }
 ```
 
 The two current Ethernet backends intentionally allow one CPU-owned RX frame
 at a time. Successful initialization creates the private affine
 `NetRxCanAcquire` permission. `net_rx_acquire` consumes it: `None` returns a
 replacement, while `Acquired` replaces it with the linear descriptor owner;
-only `net_rx_release` consumes that owner and restores the permission. The
+only `net_rx_release`, or TX completion after consuming that owner, restores
+the permission. The
 permission is affine because abandoning future acquisition is safe, but it
 cannot be copied or reused after move. The owner is linear because returning
 an active descriptor to DMA is mandatory. This prevents duplicate owner
@@ -875,14 +886,21 @@ can mint the initial permission. Failed device discovery or link setup leaves
 the flag clear and may be retried. Concurrent initialization is not guaranteed
 without a future atomic/lock invariant.
 
-`net_transmit` borrows the owner and derives the in-place reply buffer from its
-private descriptor index. A caller can no longer satisfy the API with an
-unrelated raw pointer. Under the current ABI this shared borrow passes the
-owner's ordinary `{index, len}` aggregate read-only by value; no `desc` or
-permission field is added. This does not yet make the slice returned by
-`net_rx_frame` owner-bounded: retaining that unrestricted slice, releasing the
-owner, and then reading it remains a known region/lifetime hole for a later
-Core slice.
+`net_transmit` consumes the RX owner, derives the in-place reply buffer from
+its private descriptor index, starts DMA, and returns immediately with a
+distinct `NetTxInFlight[desc]` owner. A caller can no longer satisfy the API
+with an unrelated raw pointer or release the RX descriptor while TX DMA may
+still read it. `net_tx_complete` consumes the in-flight owner, waits for the
+retained TX descriptor, re-posts the RX descriptor, and restores the
+acquisition permission. Under the current ABI the static `desc` erases. The
+RX index remains runtime data; STM32 also retains its selected TX descriptor
+index, while QEMU's fixed descriptor zero needs no field. The current examples
+complete directly after starting TX, but there is a real interval after
+`net_transmit` returns in which only the in-flight owner exists.
+
+The slice returned by `net_rx_frame` is separately tied to `desc` by its
+region-annotated return type. Consuming the RX owner, whether for release or
+TX start, invalidates later use of that slice in the caller.
 
 Two independently opened packages receive distinct identities. They cannot
 be passed to a function requiring the same static index merely because their

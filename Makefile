@@ -761,7 +761,7 @@ examples/watchdog/watchdog_stm32.o: examples/watchdog/watchdog.tkb $(COMMON_STM3
 # (see examples/net_echo/net_echo.tkb's header comment) -- unlike
 # irq/preempt/etc., there is no genuinely-different-shape logic here
 # anymore, eth.tkb just implements the same typed net_rx_acquire/
-# len/frame/release API plus net_init/net_transmit/net_read_mac
+# len/frame/release API plus net_init/net_transmit/net_tx_complete/net_read_mac
 # examples/common_qemu/virtio_mmio.tkb does. Links against
 # COMMON_STM32_LINK_ETH_LD (AXI SRAM), not the shared DTCM-based link.ld.
 # eth.tkb now `use`s nvic.tkb (enable_eth_irq), netconfig.tkb (OUR_MAC),

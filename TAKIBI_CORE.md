@@ -307,6 +307,12 @@ private linear struct NetRxCpuOwned[desc: usize] {
     private len: i32;
 }
 
+private linear struct NetTxInFlight[desc: usize] {
+    private index: {0..<RX_DESC_COUNT as usize} @ desc;
+    // Present only when the backend selects a runtime TX ring slot.
+    private tx_index: isize;
+}
+
 private affine view NetRxCanAcquire;
 
 variant NetInitResult {
@@ -321,8 +327,11 @@ variant NetRxAcquire {
 
 fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire;
 fn net_rx_len(frame: borrow NetRxCpuOwned[desc]) -> i32;
-fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..];
-fn net_transmit(frame: borrow NetRxCpuOwned[desc], len: i32) !{may_block};
+fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc;
+fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32)
+    -> NetTxInFlight[desc];
+fn net_tx_complete(in_flight: sink NetTxInFlight[desc])
+    -> NetRxCanAcquire !{may_block};
 fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire;
 
 match net_rx_acquire(ready) {
@@ -342,12 +351,14 @@ up future acquisition is safe, while copying or reusing it is not. This
 removes the null-sentinel exception and closes duplicate owner minting at the
 public API boundary.
 
-`net_transmit` derives the in-place reply pointer from the borrowed owner,
-rather than trusting an unrelated raw pointer. `net_rx_frame`'s returned
-slice is now tied to the borrowed owner by its region-annotated return type
+`net_transmit` consumes the RX owner, derives the in-place reply pointer, and
+returns a linear TX-in-flight owner rather than trusting an unrelated raw
+pointer or retaining an untracked borrow across return. Completion consumes
+that owner and restores the acquisition permit. `net_rx_frame`'s returned
+slice is tied to the borrowed owner by its region-annotated return type
 (`-> [u8; 1514..] @ desc`, see the implemented-slice entry below): using the
-slice, or anything derived from it, after `net_rx_release` consumes the
-owner is a compile error. A future
+slice, or anything derived from it, after either release or TX start consumes
+the owner is a compile error. A future
 multi-frame-in-flight API would need multiple indexed acquisition credits or
 an equivalent queue-capacity resource, not silent extra minting behind this
 one-permit interface.
@@ -730,9 +741,9 @@ from the indexed spelling.
   heap predicates remain for examples that require them.
 - Ownership transfer through one concrete synchronous channel is implemented
   below. Generic and zero-copy typed channels (#113) remain demand-led.
-- Aliasing/region predicates (#106, closed -- escape control continues as
-  #128), asynchronous TX ownership (#87), and solver/proof integration, each
-  with a concrete driver and negative tests.
+- Owner-derived region slices (#106) and asynchronous TX ownership (#87) are
+  implemented below. Escape control continues as #128; solver/proof
+  integration still requires its own concrete driver and negative tests.
 
 ### Post-Slice 6 example audit and consolidation (implemented 2026-07-16)
 
@@ -763,12 +774,11 @@ express:
    again is safe, while duplicating it is not. The acquired descriptor owner
    remains linear because returning it to the device is mandatory.
 3. `net_transmit` previously accepted a raw pointer with the documented but
-   unchecked precondition that it came from `net_rx_frame`. It now borrows
-   `NetRxCpuOwned[desc]` and recovers the buffer from the owner's private
-   descriptor index. Synchronous completion is unchanged. Under the current
-   Slice 3 ABI, the shared borrow passes the owner's ordinary `{index, len}`
-   runtime aggregate by value instead of passing the old raw buffer pointer;
-   `desc` and the borrow permission still erase.
+   unchecked precondition that it came from `net_rx_frame`. At this
+   consolidation checkpoint it borrowed `NetRxCpuOwned[desc]` and recovered
+   the buffer from the owner's private descriptor index. The later
+   asynchronous-TX increment below replaces that borrow with a consuming
+   transition to `NetTxInFlight[desc]`.
 
 The `net_rx_double_acquire_wrong` compile-error fixture fixes the permit's
 negative contract: reusing the consumed acquisition right is rejected. The
@@ -933,7 +943,7 @@ particular owner slot is protected by a particular mutex. The address-indexed
 mutex API below does, however, prevent that guard from being unlocked through
 a different explicit pointer.
 
-The remaining example-driven order is:
+The remaining example-driven order at this checkpoint was:
 
 1. asynchronous TX ownership only when an example actually keeps a DMA buffer
    in flight after the call returns (#87).
@@ -971,6 +981,50 @@ without adding a runtime token:
 This is static identity for a deliberately small syntactic-place language,
 not pointer provenance, alias analysis, arbitrary-place borrowing, or a lock
 invariant tying `stable_replace` to a container field.
+
+### Asynchronous TX ownership (implemented 2026-07-16)
+
+The sixth post-Slice-6 increment makes both real network backends expose the
+DMA interval that already existed inside their formerly synchronous calls:
+
+```takibi
+private linear struct NetTxInFlight[desc: usize] {
+    private index: {0..<RX_DESC_COUNT as usize} @ desc;
+    // STM32 retains this field; QEMU's fixed slot zero needs no runtime index.
+    private tx_index: isize;
+}
+
+fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32)
+    -> NetTxInFlight[desc];
+fn net_tx_complete(in_flight: sink NetTxInFlight[desc])
+    -> NetRxCanAcquire !{may_block};
+```
+
+`net_transmit` consumes the CPU-owned RX descriptor, programs and starts TX,
+and returns without waiting for the device. `NetTxInFlight[desc]` retains the
+same static RX identity and only the runtime completion state each backend
+needs.
+`net_tx_complete` consumes that owner, waits for authoritative device
+completion, re-posts the RX descriptor, and returns the sole acquisition
+permit. There is therefore no RX owner available to pass to `net_rx_release`
+while DMA may still read the in-place frame.
+
+The current applications deliberately call completion as their next network
+operation, preserving their single-frame behavior while still creating a
+real call-return interval owned by DMA. QEMU and STM32 share the same public
+contract; STM32 retains its TX slot to inspect the exact descriptor, while
+QEMU's fixed descriptor zero needs only the RX index. `desc` and the
+permit erase. No new Core rule or generic future/promise abstraction was
+added.
+
+The positive fixtures are all existing network applications on both targets.
+`net_tx_release_while_in_flight_wrong` is the focused negative: it tries to
+release the RX owner after TX start and is rejected as a second consume.
+
+After this increment there is no preselected narrow example-driven ownership
+slice. General #128 lock-data coupling, arbitrary stable places, generic
+zero-copy channels, and solver integration remain demand-led and need a
+concrete acceptance boundary before implementation.
 
 #### Solver and prover threshold
 

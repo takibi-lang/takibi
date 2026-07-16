@@ -7690,3 +7690,35 @@ TX ownership when a concrete driver keeps a DMA buffer in flight after return.
 Validation: all 752 Alcotest cases passed. Full `make check` passed all 121
 host, compile-error, DWARF, and QEMU integration cases, every STM32
 cross-build, and all network examples under `--forbid-trap`.
+
+## 2026-07-16: Asynchronous TX Ownership
+
+Implemented the last preselected example-driven ownership increment without
+adding new compiler semantics. Both network backends now split in-place TX
+into `net_transmit`, which consumes `NetRxCpuOwned[desc]`, starts DMA, and
+returns immediately with `NetTxInFlight[desc]`, and `net_tx_complete`, which
+consumes that owner, waits for authoritative device completion, re-posts the
+RX descriptor, and restores `NetRxCanAcquire`.
+
+The owner carries only completion state the backend needs. QEMU always uses
+TX descriptor zero and retains the runtime RX index alone. STM32 additionally
+retains the selected TX ring slot and checks that exact descriptor's OWN bit;
+the original RX length was deliberately not copied because completion does
+not use it. The static `desc` identity and acquisition permit erase. Existing
+applications complete on their next network operation, preserving the
+single-frame policy while creating a genuine interval after `net_transmit`
+returns in which DMA owns the buffer and the caller owns only the linear
+in-flight handle.
+
+All five shared network call paths now join ownership explicitly: reply paths
+use RX-owned -> TX-in-flight -> ready, while drop paths use RX-owned -> ready.
+The same change covers the STM32 SD-card and RTOS HTTP derivatives through
+`http_server_common`. `net_tx_release_while_in_flight_wrong` is the focused
+negative fixture and rejects reuse of the RX owner after TX start. Unit tests
+also fix the positive indexed transition and runtime aggregate/erased-permit
+ABI.
+
+Validation: all 755 Alcotest cases passed. Full `make check` passed all 122
+host, compile-error, DWARF, and QEMU integration cases, including packet-level
+net_echo, ARP, ICMP, TCP, and HTTP tests, every STM32 cross-build, and all
+network sources under `--forbid-trap`.

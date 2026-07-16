@@ -555,7 +555,8 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire {
             }
 
             if (should_tx == 1) {
-                net_transmit(acquired, tx_len);
+                let in_flight = net_transmit(acquired, tx_len);
+                return net_tx_complete(in_flight);
             }
             return net_rx_release(acquired);
         }

@@ -1,0 +1,42 @@
+// This file is expected to produce a compile error.
+// Starting asynchronous TX consumes the RX owner and replaces it with a
+// distinct in-flight owner. Releasing the old RX owner before completion
+// could hand the same buffer back to RX DMA while TX DMA still reads it.
+
+private linear struct NetRxCpuOwned[desc: usize] {
+    private index: {0..<4 as usize} @ desc;
+    private len: i32;
+}
+
+private linear struct NetTxInFlight[desc: usize] {
+    private index: {0..<4 as usize} @ desc;
+    private tx_index: isize;
+}
+
+fn net_rx_owned(index: {0..<4 as usize} @ desc, len: i32)
+        -> NetRxCpuOwned[desc] {
+    let mut frame: NetRxCpuOwned[desc] = { index, len };
+    return frame;
+}
+
+fn net_transmit(frame: sink NetRxCpuOwned[desc], tx_index: isize)
+        -> NetTxInFlight[desc] {
+    let mut in_flight: NetTxInFlight[desc] = {
+        frame.index, tx_index
+    };
+    return in_flight;
+}
+
+fn net_tx_complete(in_flight: sink NetTxInFlight[desc]) {}
+
+fn net_rx_release(frame: sink NetRxCpuOwned[desc]) {}
+
+fn release_while_tx_in_flight_wrong() {
+    let index: {0..<4 as usize} = 0;
+    let frame = net_rx_owned(index, 64);
+    let in_flight = net_transmit(frame, 0);
+    // WRONG: `frame` was consumed by net_transmit and DMA may still be using
+    // its buffer. Only net_tx_complete may consume `in_flight` now.
+    net_rx_release(frame);
+    net_tx_complete(in_flight);
+}

@@ -61,6 +61,13 @@ private linear struct NetRxCpuOwned[desc: usize] {
     private len: i32;
 }
 
+// The device owns both the in-place frame and fixed TX descriptor zero between
+// net_transmit and net_tx_complete. The indexed RX descriptor is the only
+// runtime state the completion path needs to retain.
+private linear struct NetTxInFlight[desc: usize] {
+    private index: {0..<8 as usize} @ desc;
+}
+
 // Exactly one permit exists while no RX descriptor is CPU-owned. It is erased
 // at runtime; consuming it prevents a second owner from being minted before the
 // first one is released.
@@ -366,8 +373,8 @@ fn net_rx_len(frame: borrow NetRxCpuOwned[desc]) -> i32 {
 // acquisition, so no shared global or repeated clamp is needed here.
 //
 // `@ desc` ties the returned slice to the borrowed owner (issue #106): a
-// caller keeping this slice (or a subslice of it) past net_rx_release is
-// reading a buffer DMA owns again, and is now a compile error.
+// caller keeping this slice (or a subslice of it) past net_rx_release or
+// net_transmit is reading a buffer DMA owns, and is now a compile error.
 fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc {
     let idx: {0..<8 as usize} = frame.index;
     let offset: usize = idx * RX_BUF_SIZE_USIZE + 10;
@@ -375,11 +382,9 @@ fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc {
 }
 
 
-// Hands the current RX descriptor back to the device and advances the
-// ring. Consuming the CPU-owned handle restores the sole acquisition permit.
-fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire {
+fn net_rx_repost(index: {0..<8 as usize} @ desc) -> NetRxCanAcquire {
     let rx_slot: isize = rx_avail_idx % QNUM;
-    avail_ring_set(rx_queue_mem as *u8, rx_slot, frame.index as isize);
+    avail_ring_set(rx_queue_mem as *u8, rx_slot, index as isize);
     rx_avail_idx = rx_avail_idx + 1;
     avail_publish(rx_queue_mem as *u8, rx_avail_idx);
     virtio_notify(0);
@@ -388,14 +393,20 @@ fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire {
     return view NetRxCanAcquire;
 }
 
-// Transmits len bytes from this owned RX descriptor. Deriving buf here makes
-// the in-place-reply requirement structural rather than a raw-pointer calling
-// convention. `buf - 10` lands back on the true DMA buffer start where the
-// virtio_net_hdr the device expects on TX too still sits, untouched since
-// the device itself wrote it on receive. The synchronous operation sleeps on
-// the retained interrupt event until the device finishes reading buf, so the
-// caller can safely release frame immediately afterward.
-fn net_transmit(frame: borrow NetRxCpuOwned[desc], len: i32) !{may_block} {
+// Hands the current RX descriptor back to the device and advances the
+// ring. Consuming the CPU-owned handle restores the sole acquisition permit.
+fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire {
+    return net_rx_repost(frame.index);
+}
+
+// Starts transmitting len bytes from this owned RX descriptor. Deriving buf
+// here makes the in-place-reply requirement structural rather than a raw-
+// pointer calling convention. `buf - 10` lands back on the true DMA buffer
+// start where the virtio_net_hdr the device expects on TX too still sits.
+// Returning the linear in-flight owner records that the device may continue
+// reading the buffer after this call returns.
+fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32)
+        -> NetTxInFlight[desc] {
     let buf: *u8 = net_rx_frame(frame) as *u8;
     desc_set(tx_queue_mem as *u8, 0, (buf - 10) as usize, (len + 10) as isize, 0);
     avail_ring_set(tx_queue_mem as *u8, 0, 0);
@@ -404,6 +415,15 @@ fn net_transmit(frame: borrow NetRxCpuOwned[desc], len: i32) !{may_block} {
     virtio_tx_irq_flag = 0;
     virtio_notify(1);
 
+    let mut in_flight: NetTxInFlight[desc] = { frame.index };
+    return in_flight;
+}
+
+// Waits until the device no longer reads the in-place frame, then re-posts
+// its RX descriptor. Consuming the in-flight owner is the only path back to
+// the acquisition permit, so an early net_rx_release is structurally absent.
+fn net_tx_complete(in_flight: sink NetTxInFlight[desc])
+        -> NetRxCanAcquire !{may_block} {
     while (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {
         virtio_tx_irq_flag = 0;
         if (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {
@@ -414,6 +434,7 @@ fn net_transmit(frame: borrow NetRxCpuOwned[desc], len: i32) !{may_block} {
     }
     dma_consume(); // device finished reading the transmitted buffer
     tx_used_seen = tx_used_seen + 1;
+    return net_rx_repost(in_flight.index);
 }
 
 fn net_read_mac(mac_out: *u8) {

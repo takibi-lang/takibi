@@ -1077,10 +1077,10 @@ The selected first step is the latter:
   `net_init` mints the initial permit, while a failed discovery/link attempt
   can be retried. Concurrent init is outside the current example contract and
   would need an atomic/lock invariant.
-- `net_transmit(*u8, len)` discards the relation between a transmit buffer and
-  the acquired frame. Taking `borrow NetRxCpuOwned[desc]` instead lets the
-  private driver derive the buffer from `desc`; no new lifetime machinery is
-  required for that narrower correction.
+- `net_transmit(*u8, len)` discarded the relation between a transmit buffer
+  and the acquired frame. The consolidation first took
+  `borrow NetRxCpuOwned[desc]`; the asynchronous-TX increment in 6.7.11 now
+  consumes that owner and returns `NetTxInFlight[desc]`.
 
 This consolidation is implemented in both QEMU and STM32 backends and all
 current network callers. `MutexGuard`/`KGuard` now mint `view` values rather
@@ -1168,7 +1168,25 @@ This does not make `stable_replace` a general lock invariant: that builtin
 still accepts any linear erased guard and does not relate an owner slot to a
 particular mutex field.
 
-## 7. Next outlook: asynchronous TX
+#### 6.7.11 Asynchronous TX owner transition (implemented 2026-07-16)
+
+Both network backends now split start from completion. `net_transmit` consumes
+`NetRxCpuOwned[desc]`, starts DMA, and returns `NetTxInFlight[desc]` while the
+device may still read the in-place buffer. The in-flight runtime aggregate
+retains the RX index and, on STM32, the exact TX descriptor slot; its static
+`desc` identity erases. QEMU's fixed descriptor zero requires no runtime field.
+`net_tx_complete` consumes the owner, waits for device completion, re-posts
+the RX descriptor, and restores `NetRxCanAcquire`.
+
+This is an application of existing indexed linear owners, not new Core
+machinery. It closes the concrete early-release path: the old RX owner was
+consumed at start and cannot be passed to `net_rx_release`, while the linear
+in-flight owner cannot be abandoned. Current callers complete immediately on
+the next statement, retaining the one-frame policy but leaving a genuine
+call-return interval in which DMA owns the buffer. The focused negative
+fixture is `net_tx_release_while_in_flight_wrong`.
+
+## 7. Next outlook
 
 The post-Slice-6 sequence now includes owner-derived region slices,
 existential `TcpConn[conn, state]` dispatch, typed copy-rendezvous requests,
@@ -1182,9 +1200,10 @@ The declaring file still maintains the relationship between its runtime
 `full` flag and the variant tag, and any linear guard can authorize the
 exchange. Static guard identity now rejects a mismatched explicit lock
 pointer, but does not prove which mutex protects a stable slot. General heap
-predicates and arbitrary stable places remain demand-led. The remaining
-example-driven priority is asynchronous TX, deferred until a driver keeps a
-DMA buffer in flight after its call returns.
+predicates and arbitrary stable places remain demand-led. Asynchronous TX now
+provides the previously deferred real driver and is implemented in 6.7.11.
+No broader ownership slice is selected without another concrete example and
+focused negative contract.
 
 ## 8. Prior art notes
 

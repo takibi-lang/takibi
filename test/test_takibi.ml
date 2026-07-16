@@ -1606,7 +1606,59 @@ let region_fixture =
    fn reg_release(o: sink RegOwn[d]) {}
    "
 
+(* The real network backends use this shape for asynchronous in-place TX:
+   starting DMA consumes the RX owner and returns a distinct linear owner.
+   Only the completion transition restores the erased acquisition permit. *)
+let async_tx_fixture =
+  "linear struct AsyncRx[d: usize] {
+     index: {0..<4 as usize} @ d;
+     len: i32;
+   }
+   linear struct AsyncTx[d: usize] {
+     index: {0..<4 as usize} @ d;
+     tx_index: isize;
+   }
+   affine view AsyncReady;
+   fn async_rx_make(index: {0..<4 as usize} @ d, len: i32) -> AsyncRx[d] {
+     let mut frame: AsyncRx[d] = { index, len };
+     return frame;
+   }
+   fn async_tx_start(frame: sink AsyncRx[d], tx_index: isize) -> AsyncTx[d] {
+     let mut in_flight: AsyncTx[d] = { frame.index, tx_index };
+     return in_flight;
+   }
+   fn async_tx_complete(in_flight: sink AsyncTx[d]) -> AsyncReady {
+     return view AsyncReady;
+   }
+   fn async_rx_release(frame: sink AsyncRx[d]) -> AsyncReady {
+     return view AsyncReady;
+   }
+   "
+
 let infer_tests = [
+  Alcotest.test_case
+    "async TX: RX owner becomes an indexed in-flight owner until completion" `Quick
+    (fun () ->
+      ignore (infer (async_tx_fixture ^
+        "fn async_tx_ok(index: {0..<4 as usize}, len: i32,
+                        tx_index: isize) -> AsyncReady {
+           let frame = async_rx_make(index, len);
+           let in_flight = async_tx_start(frame, tx_index);
+           return async_tx_complete(in_flight);
+         }")));
+
+  Alcotest.test_case
+    "async TX: RX owner cannot be released while TX is in flight" `Quick
+    (expect_type_error "linear value 'frame' was already consumed"
+      (async_tx_fixture ^
+        "fn async_tx_release_early(index: {0..<4 as usize}, len: i32,
+                                   tx_index: isize) {
+           let frame = async_rx_make(index, len);
+           let in_flight = async_tx_start(frame, tx_index);
+           async_rx_release(frame);
+           async_tx_complete(in_flight);
+         }"));
+
   Alcotest.test_case
     "region slice: use-then-release lifecycle is accepted" `Quick
     (fun () ->
@@ -5172,6 +5224,54 @@ let infer_tests = [
    checks runtime behavior, not just "the IR verifies"). *)
 
 let codegen_tests = [
+  Alcotest.test_case
+    "async TX ABI keeps runtime descriptor state and erases completion permit" `Quick
+    (fun () ->
+      let src =
+        "linear struct CgAsyncRx[d: usize] {
+           index: {0..<4 as usize} @ d;
+           len: i32;
+         }
+         linear struct CgAsyncTx[d: usize] {
+           index: {0..<4 as usize} @ d;
+           tx_index: isize;
+         }
+         affine view CgAsyncReady;
+         fn cg_async_tx_start(frame: sink CgAsyncRx[d], tx_index: isize)
+             -> CgAsyncTx[d] {
+           let mut in_flight: CgAsyncTx[d] = {
+             frame.index, tx_index
+           };
+           return in_flight;
+         }
+         fn cg_async_tx_complete(in_flight: sink CgAsyncTx[d])
+             -> CgAsyncReady {
+           return view CgAsyncReady;
+         }" in
+      ignore (gen_codegen src);
+      let find name = match Hashtbl.find_opt Llvm_gen.functions name with
+        | Some (_, fn) -> fn
+        | None -> Alcotest.failf "%s not found" name
+      in
+      let start = find "cg_async_tx_start" in
+      let complete = find "cg_async_tx_complete" in
+      let start_ir = Llvm.string_of_llvalue start in
+      let complete_ir = Llvm.string_of_llvalue complete in
+      let tx_layout = match Hashtbl.find_opt Llvm_gen.struct_lltypes "CgAsyncTx" with
+        | Some llty -> llty
+        | None -> Alcotest.fail "CgAsyncTx layout not found"
+      in
+      Alcotest.(check int) "RX aggregate plus TX descriptor index parameters"
+        2 (Array.length (Llvm.params start));
+      Alcotest.(check int) "completion receives the in-flight aggregate"
+        1 (Array.length (Llvm.params complete));
+      Alcotest.(check int) "in-flight owner keeps RX index and TX slot"
+        2 (Array.length (Llvm.struct_element_types tx_layout));
+      Alcotest.(check bool) "start reads RX runtime fields" true
+        (contains_substring start_ir "extractvalue");
+      Alcotest.(check bool) "completion permit erases to void" true
+        (contains_substring complete_ir "define void @cg_async_tx_complete"));
+
   Alcotest.test_case
     "addr identity ABI: pointer remains runtime and indexed guard erases"
     `Quick
