@@ -1,0 +1,24 @@
+linear view StableDropGuard;
+linear view StableDropPermit;
+
+// stable_replace moves the old linear package out of durable storage. The
+// caller must bind, return, or match that result rather than discard it.
+
+variant StableDropValue {
+    Empty;
+    Full(StableDropPermit);
+}
+
+struct StableDropSlot {
+    private value: StableDropValue;
+}
+
+private let mut stable_drop_slot: StableDropSlot;
+
+fn drop_replaced_owner(guard: borrow StableDropGuard) {
+    stable_replace(
+        guard,
+        stable_drop_slot.value,
+        StableDropValue::Empty
+    );
+}

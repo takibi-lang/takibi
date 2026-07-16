@@ -7621,3 +7621,35 @@ regression guard). Full `make check` passed (116 host, compile-error, DWARF,
 and QEMU integration cases including the new negative fixture, every STM32
 cross-build, all network examples `--forbid-trap` clean with zero app-source
 changes).
+
+## 2026-07-16: Stable Linear Owner Slots and Guarded Exchange
+
+Implemented the next `TAKIBI_CORE.md` priority as one deliberately narrow
+stable place rather than general stored-owner tracking. A private ordinary
+struct field that directly holds a linear variant is now a sealed owner slot.
+Its container is restricted to private, mutable, uninitialized global storage,
+and its variant must begin with a payload-free case so the BSS zero value is a
+defined empty state. Whole-container locals, value parameters/results, nested
+aggregates, casts, dereferences, assignments, and indirect copies are rejected.
+
+`stable_replace(guard, slot.field, replacement)` is the only field operation.
+It requires a bare linear erased-view guard, moves the replacement into the
+slot, and moves the previous linear package out. Existing Delta flow forces
+the result to be bound, returned, or matched and forces all opened payloads to
+be discharged. LLVM emits one typed aggregate load and store; the guard,
+existential binder, and static owner identity erase without a pointer/integer
+bridge.
+
+`rtos_demo` now uses this boundary for one ownership-bearing rendezvous
+direction. Ping packages an indexed `OwnerMessage[id]` into `OwnerSlotValue`,
+and pong receives, borrows, and consumes the existential owner. This remains
+a minimal trusted-module invariant: the declaring file maintains its private
+`full` flag/tag relation, and the checker does not yet prove that the guard
+belongs to the container's particular mutex. Static address/place identity is
+therefore the next priority.
+
+Focused failures cover exchange without a linear guard and discarding the old
+owner package. Validation: all 742 Alcotest cases passed. Full `make check`
+passed all 120 host, compile-error, DWARF, and QEMU integration cases,
+including `rtos_demo`, every STM32 cross-build, and all network examples under
+`--forbid-trap`.

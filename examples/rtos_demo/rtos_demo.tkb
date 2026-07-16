@@ -5,8 +5,8 @@
 //     SchedState/sp[1]/sp[2] wiring (examples/klock_guard didn't need
 //     the scheduler at all; examples/percpu didn't either; only
 //     examples/chan_rendezvous did, and did it inline).
-//   - Two tasks (ping/pong) rendezvous over two Chans (examples/
-//     chan_rendezvous's own ping-pong, unchanged in shape) while ALSO
+//   - Two tasks (ping/pong) rendezvous through an ownership-bearing channel
+//     in one direction and a plain Chan in the other while ALSO
 //     both bumping a KLock-protected shared counter (examples/
 //     klock_guard's accessor idiom) on every iteration -- proving the
 //     kernel lock and the channel are independent, composable
@@ -32,7 +32,27 @@ fn shared_get(g: borrow KGuard) -> i32 {
     return shared.counter;
 }
 
-let mut chan_ab: Chan;
+linear struct OwnerMessage[id: usize] {
+    private id: usize @ id;
+    private value: i32;
+}
+
+variant OwnerSlotValue {
+    Empty;
+    Full(exists id: usize. OwnerMessage[id]);
+}
+
+struct OwnerChan {
+    private mutex:      i32;
+    private slot_full:  io i32;
+    private slot_taken: io i32;
+    private full:       i32;
+    private value:      OwnerSlotValue;
+}
+
+// The stable owner field starts as OwnerSlotValue::Empty because private
+// uninitialized globals are BSS-zeroed and Empty is the required first case.
+private let mut owner_chan: OwnerChan;
 let mut chan_ba: Chan;
 
 let mut ping_done: io i32 = 0;
@@ -42,13 +62,68 @@ let mut rtos_done: io i32 = 0;
 let mut stack_a: [u8; 4096];
 let mut stack_b: [u8; 4096];
 
+fn owner_message_new(value: i32) -> OwnerMessage[0] {
+    let mut message: OwnerMessage[0] = { 0, value };
+    return message;
+}
+
+fn owner_message_value(message: borrow OwnerMessage[id]) -> i32 {
+    return message.value;
+}
+
+fn owner_message_drop(message: sink OwnerMessage[id]) {}
+
+fn owner_chan_init(ch: *OwnerChan) {
+    ch.mutex = 1;
+    ch.slot_full = 0;
+    ch.slot_taken = 0;
+    ch.full = 0;
+}
+
+fn owner_chan_send(ch: *OwnerChan,
+                   message: OwnerMessage[id]) !{may_block} {
+    let mut g: MutexGuard = mutex_lock(&ch.mutex);
+    while (ch.full != 0) {
+        g = cond_wait(&ch.slot_taken, g, &ch.mutex);
+    }
+
+    let previous: OwnerSlotValue = stable_replace(
+        g, ch.value, OwnerSlotValue::Full(message));
+    match previous {
+        OwnerSlotValue::Empty => {}
+        // Unreachable when the private full/slot invariant is intact. Still
+        // discharge the owner so an invariant failure cannot leak it.
+        OwnerSlotValue::Full(stale) => { owner_message_drop(stale); }
+    }
+
+    ch.full = 1;
+    cond_signal(&ch.slot_full);
+    while (ch.full != 0) {
+        g = cond_wait(&ch.slot_taken, g, &ch.mutex);
+    }
+    mutex_unlock(g, &ch.mutex);
+}
+
+fn owner_chan_recv(ch: *OwnerChan) -> OwnerSlotValue !{may_block} {
+    let mut g: MutexGuard = mutex_lock(&ch.mutex);
+    while (ch.full == 0) {
+        g = cond_wait(&ch.slot_full, g, &ch.mutex);
+    }
+    let received: OwnerSlotValue = stable_replace(
+        g, ch.value, OwnerSlotValue::Empty);
+    ch.full = 0;
+    cond_signal(&ch.slot_taken);
+    mutex_unlock(g, &ch.mutex);
+    return received;
+}
+
 fn task_ping() {
     for i: i32 in 0..<5 {
         let g: KGuard = klock(&the_lock);
         shared_add(g, 1);
         kunlock(g, &the_lock);
 
-        chan_send(&chan_ab, i);
+        owner_chan_send(&owner_chan, owner_message_new(i));
         let v: i32 = chan_recv(&chan_ba);
         uart_puts("ping got: ");
         uart_print(v);
@@ -61,7 +136,15 @@ fn task_ping() {
 
 fn task_pong() {
     for i: i32 in 0..<5 {
-        let v: i32 = chan_recv(&chan_ab);
+        let received: OwnerSlotValue = owner_chan_recv(&owner_chan);
+        let mut v: i32 = -1;
+        match received {
+            OwnerSlotValue::Empty => {}
+            OwnerSlotValue::Full(message) => {
+                v = owner_message_value(message);
+                owner_message_drop(message);
+            }
+        }
 
         let g: KGuard = klock(&the_lock);
         shared_add(g, 1);
@@ -75,7 +158,7 @@ fn task_pong() {
 }
 
 fn app_main() {
-    chan_init(&chan_ab);
+    owner_chan_init(&owner_chan);
     chan_init(&chan_ba);
 
     uart_puts("cpu_id: ");

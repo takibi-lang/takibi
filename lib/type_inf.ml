@@ -3,7 +3,7 @@ open Types
 module StringSet = Set.Make (String)
 
 let compiler_builtins = StringSet.of_list [
-  "slice_copy"; "slice_eq"; "min"; "max";
+  "slice_copy"; "slice_eq"; "stable_replace"; "min"; "max";
   "dma_publish"; "dma_consume"; "device_fence"; "signal_fence";
   "interrupt_wait"; "interrupt_notify";
   "dma_prepare_tx"; "dma_prepare_rx"; "dma_finish_rx";
@@ -775,6 +775,29 @@ let private_opaque_types : (string, string) Hashtbl.t = Hashtbl.create 8
 (* (struct name, private field name) -> declaring file. *)
 let private_struct_fields : (string * string, string) Hashtbl.t = Hashtbl.create 8
 
+(* A private field whose type is a linear variant is a stable owner
+   slot. It is never read, written, or addressed directly; stable_replace is
+   the only operation that exchanges its invariant-owned value. *)
+let stable_owner_fields : (string * string, unit) Hashtbl.t = Hashtbl.create 8
+let stable_owner_structs : (string, unit) Hashtbl.t = Hashtbl.create 8
+
+let is_stable_owner_field sname fname =
+  Hashtbl.mem stable_owner_fields (sname, fname)
+
+(* Stable owner containers are locations, not ordinary values. A pointer to
+   one is the intended API surface, but wrapping the value in another runtime
+   aggregate must not turn whole-container copies back on. *)
+let rec contains_stable_owner_value_ty t = match repr t with
+  | TStruct name -> Hashtbl.mem stable_owner_structs name
+  | TIo t | TArray (t, _) | TSlice (t, _) | TSingleton (t, _)
+  | TExists (_, _, _, t) -> contains_stable_owner_value_ty t
+  | TTuple ts -> List.exists contains_stable_owner_value_ty ts
+  | TFun (args, ret, _) ->
+      List.exists contains_stable_owner_value_ty args
+      || contains_stable_owner_value_ty ret
+  | TPtr _ | TAlignedPtr _ -> false
+  | _ -> false
+
 (* struct name -> declaring file, present iff the struct has at least one
    private field: constructing such a struct via a struct literal writes
    every field, private ones included, so the literal itself is
@@ -1228,14 +1251,19 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       canon_ty t1
   | Deref e1 ->
       let t1 = infer_expr senv eenv tyenv fenv e1 in
-      (match repr t1 with
-       | TPtr inner ->
-           (* *io T deref returns T (io is a storage qualifier; volatile handled in codegen) *)
-           strip_io inner
-       | _ ->
-           let inner = fresh () in
-           unify_at e1.loc t1 (TPtr inner);
-           inner)
+      let inner = match repr t1 with
+        | TPtr inner ->
+            (* *io T deref returns T (io is a storage qualifier; volatile handled in codegen) *)
+            strip_io inner
+        | _ ->
+            let inner = fresh () in
+            unify_at e1.loc t1 (TPtr inner);
+            inner
+      in
+      if contains_stable_owner_value_ty inner then
+        raise (TypeError (e.loc,
+          "stable owner container storage cannot be dereferenced or copied as a whole; access its ordinary fields through the pointer"));
+      inner
   | AddrOf inner ->
       (match inner.desc with
        | Var name ->
@@ -1285,6 +1313,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  Printf.sprintf "unknown struct type '%s'" sname))
            in
            check_private_field_access e.loc sname fname;
+           if is_stable_owner_field sname fname then
+             raise (TypeError (e.loc, Printf.sprintf
+               "stable owner field '%s.%s' cannot be addressed; use stable_replace while holding its guard"
+               sname fname));
            (match List.assoc_opt fname fields with
             | Some ft -> TPtr (of_ast ft)
             | None -> raise (TypeError (e.loc,
@@ -1295,6 +1327,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       let src_ty = infer_expr senv eenv tyenv fenv e in
       check_resource_cast_away e.loc src_ty;
       check_private_type_construction e.loc target_ty;
+      if contains_stable_owner_value_ty src_ty
+         || contains_stable_owner_value_ty (of_ast target_ty) then
+        raise (TypeError (e.loc,
+          "cannot cast a stable owner container value; only pointers to its private global storage may be cast"));
       (match resolve_declared_type target_ty with
        | Ast.TypeView (name, _) ->
            raise (TypeError (e.loc, Printf.sprintf
@@ -1562,6 +1598,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               Printf.sprintf "unknown struct type '%s'" sname))
       in
       check_private_field_access e.loc sname fname;
+      if is_stable_owner_field sname fname then
+        raise (TypeError (e.loc, Printf.sprintf
+          "stable owner field '%s.%s' cannot be read directly; use stable_replace while holding its guard"
+          sname fname));
       (match List.assoc_opt fname fields with
        | Some ft ->
            (match field_type_for_instance sname static_args ft with
@@ -1909,7 +1949,60 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       if List.exists contains_variant_ty ts then
         raise (TypeError (e.loc,
           "a variant cannot be nested in a runtime tuple in Slice 3"));
+      if List.exists contains_stable_owner_value_ty ts then
+        raise (TypeError (e.loc,
+          "a stable owner container cannot be nested in a runtime tuple"));
       TTuple ts
+
+  | Call ("stable_replace", args) ->
+      (match args with
+       | [guard; ({ desc = FieldGet (base_expr, fname); _ } as field_expr);
+          replacement] ->
+           (match guard.desc with
+            | Var _ -> ()
+            | _ -> raise (TypeError (guard.loc,
+                "stable_replace guard must be a bare linear view binding")));
+           let gt = infer_expr senv eenv tyenv fenv guard in
+           (match repr gt with
+            | TView (name, _)
+              when Hashtbl.find_opt view_kinds name = Some Ast.KindLinear -> ()
+            | _ -> raise (TypeError (guard.loc,
+                "stable_replace requires a linear erased-view guard")));
+           let bt = infer_expr senv eenv tyenv fenv base_expr in
+           let (sname, static_args) = match struct_instance (repr bt) with
+             | Some x -> x
+             | None -> raise (TypeError (base_expr.loc,
+                 "stable_replace target must be a struct field"))
+           in
+           check_private_field_access field_expr.loc sname fname;
+           if not (is_stable_owner_field sname fname) then
+             raise (TypeError (field_expr.loc, Printf.sprintf
+               "field '%s.%s' is not stable owner storage; stable_replace requires a private linear variant field"
+               sname fname));
+           let fields = match StringMap.find_opt sname senv with
+             | Some (fs, _, _) -> fs
+             | None -> raise (TypeError (base_expr.loc,
+                 Printf.sprintf "unknown struct type '%s'" sname))
+           in
+           let field_ty = match List.assoc_opt fname fields with
+             | Some ft -> field_type_for_instance sname static_args ft
+             | None -> raise (TypeError (field_expr.loc,
+                 Printf.sprintf "no field '%s' in struct '%s'" fname sname))
+           in
+           let rt = infer_expr senv eenv tyenv fenv replacement in
+           let rt = adapt_actual_to_expected tyenv replacement rt field_ty in
+           unify_at replacement.loc rt field_ty;
+           (match repr field_ty with
+            | TVariant name
+              when Hashtbl.find_opt variant_kinds name = Some Ast.KindLinear ->
+                field_ty
+            | _ -> raise (TypeError (field_expr.loc,
+                "stable_replace target must hold a linear variant")))
+       | [_; field; _] ->
+           raise (TypeError (field.loc,
+             "stable_replace second argument must be a stable struct field"))
+       | _ -> raise (TypeError (e.loc,
+           "stable_replace expects 3 arguments: stable_replace(guard, slot.field, replacement)")))
 
   | Call (("dma_publish" | "dma_consume" | "device_fence" | "signal_fence"
           | "interrupt_wait" | "interrupt_notify") as fname, args) ->
@@ -2399,6 +2492,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
           "cannot assign to borrowed value '%s'; use `borrow mut` for scoped mutation"
           name));
       let (vty, is_mut) = lookup_binding s.loc name tyenv in
+      if contains_stable_owner_value_ty vty then
+        raise (TypeError (s.loc,
+          "stable owner container storage cannot be assigned or copied as a whole"));
       if not is_mut then
         raise (TypeError (s.loc,
           Printf.sprintf "cannot assign to immutable variable '%s'; use 'let mut'" name));
@@ -2420,6 +2516,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
             unify_at ptr_expr.loc pt (TPtr inner);
             inner
       in
+      if contains_stable_owner_value_ty inner then
+        raise (TypeError (s.loc,
+          "stable owner container storage cannot be overwritten or copied through a pointer"));
       let vt = infer_expr senv eenv tyenv fenv val_expr in
       let vt = adapt_actual_to_expected tyenv val_expr vt inner in
       if contains_view_ty vt then
@@ -2472,6 +2571,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         | _ -> raise (TypeError (s.loc,
             Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))
       in
+      if contains_stable_owner_value_ty elem_ty then
+        raise (TypeError (s.loc,
+          "stable owner container storage cannot be overwritten or copied through an index"));
       let rt = adapt_actual_to_expected tyenv rhs rt elem_ty in
       if contains_view_ty rt then
         raise (TypeError (rhs.loc,
@@ -2526,6 +2628,10 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
               Printf.sprintf "unknown struct type '%s'" sname))
       in
       check_private_field_access s.loc sname fname;
+      if is_stable_owner_field sname fname then
+        raise (TypeError (s.loc, Printf.sprintf
+          "stable owner field '%s.%s' cannot be assigned directly; use stable_replace while holding its guard"
+          sname fname));
       let field_ty = match List.assoc_opt fname fields with
         | Some ft -> field_type_for_instance sname static_args ft
         | None ->
@@ -2642,6 +2748,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                | t_ann, (TRefinedInt (_, _, base) as r) when t_ann = repr base -> r
                | _ -> ty)
       in
+      if contains_stable_owner_value_ty bind_ty then
+        raise (TypeError (s.loc,
+          "stable owner container storage must be a private mutable global, not a local value"));
       (* Deliberately NOT checked here for is_undetermined: `let x = 1;
          return x;` is entirely ordinary, and the function's OWN return
          type (processed by a LATER statement) is what determines x's
@@ -3067,6 +3176,12 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
       (init_env, StringMap.empty) fdef.body
     in
     check_undetermined_lets fdef raw_locals;
+    List.iter2 (fun (name, _) ty ->
+      if contains_stable_owner_value_ty ty then
+        raise (TypeError (fdef.def_loc, Printf.sprintf
+          "stable owner container parameter '%s' cannot be passed by value; pass a pointer to its private global storage"
+          name))
+    ) fdef.params param_tys;
     {
       ret_type    = to_ast ret_ty;
       param_types = List.map2 (fun (name, _) ty -> (name, to_ast ty))
@@ -3270,6 +3385,43 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         Hashtbl.replace private_views name loc.Lexing.pos_fname
     | _ -> ()
   ) prog;
+  Hashtbl.reset stable_owner_fields;
+  Hashtbl.reset stable_owner_structs;
+  List.iter (function
+    | Ast.StructDef (sname, fields, _, _, private_fields, _) ->
+        List.iter (fun (fname, ty) ->
+          let variant_name = match resolve_declared_type ty with
+            | Ast.TypeVariant name -> Some name
+            | _ -> None
+          in
+          match variant_name with
+          | Some name
+            when Hashtbl.find_opt variant_kinds name = Some Ast.KindLinear
+                           && List.mem fname private_fields ->
+              Hashtbl.replace stable_owner_fields (sname, fname) ();
+              Hashtbl.replace stable_owner_structs sname ()
+          | _ -> ()
+        ) fields
+    | _ -> ()
+  ) prog;
+  let ast_is_stable_owner_struct = function
+    | Ast.TypeNamed name -> Hashtbl.mem stable_owner_structs name
+    | _ -> false
+  in
+  let rec ast_contains_stable_owner_value ty =
+    match resolve_declared_type ty with
+    | Ast.TypeNamed name -> Hashtbl.mem stable_owner_structs name
+    | Ast.TypeIo t | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _)
+    | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
+    | Ast.TypeSingleton (t, _) | Ast.TypeRefined (_, _, t)
+    | Ast.TypeExists (_, _, t) -> ast_contains_stable_owner_value t
+    | Ast.TypeTuple ts -> List.exists ast_contains_stable_owner_value ts
+    | Ast.TypeFn (args, ret, _) ->
+        List.exists ast_contains_stable_owner_value args
+        || ast_contains_stable_owner_value ret
+    | Ast.TypePtr _ | Ast.TypeAlignedPtr _ -> false
+    | _ -> false
+  in
   let validation_static_scope : (string, Ast.type_expr) Hashtbl.t option ref =
     ref None in
   let allow_implicit_static = ref false in
@@ -3678,6 +3830,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         raise (TypeError (loc,
           "sink is only valid on an affine/linear opaque pointer, indexed owner, erased view, or kinded variant parameter"))
     | ty ->
+        if ast_contains_stable_owner_value ty then
+          raise (TypeError (loc,
+            "stable owner containers cannot be passed by value; pass a pointer to their private global storage"));
         if contains_borrow ty then
           raise (TypeError (loc,
             "borrow/sink must wrap the entire function parameter type"));
@@ -3757,6 +3912,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   and validate_stmt_types (s : Ast.stmt) =
     (match s.desc with
      | Ast.Let (_, _, ty, init, _) ->
+         Option.iter (fun t ->
+           if ast_contains_stable_owner_value t then
+             raise (TypeError (s.loc,
+               "stable owner container storage must be a private mutable global, not a local value"))
+         ) ty;
          Option.iter (validate_nonparam_type s.loc) ty;
          Option.iter validate_expr_types init
      | Ast.For (_, ty, lo, hi, body) ->
@@ -3826,6 +3986,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                        static index of any borrow or borrow mut indexed-owner \
                        parameter of this function" n n));
                   validate_nonparam_type f.def_loc s)
+         | Some ret when ast_contains_stable_owner_value ret ->
+             raise (TypeError (f.def_loc,
+               "stable owner containers cannot be returned by value"))
          | ret -> Option.iter (validate_nonparam_type f.def_loc) ret);
         allow_implicit_static := false;
         List.iter validate_stmt_types f.body
@@ -3847,10 +4010,32 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                parameters must be explicitly typed (there is no function body \
                to infer them from)" name pname))
         ) params;
-        Option.iter (validate_nonparam_type Lexing.dummy_pos) ret
-    | Ast.LetDef (gname, ty, init, _, _, _, gloc) ->
+        Option.iter (fun t ->
+          if ast_contains_stable_owner_value t then
+            raise (TypeError (Lexing.dummy_pos,
+              "stable owner containers cannot be returned by value"));
+          validate_nonparam_type Lexing.dummy_pos t
+        ) ret
+    | Ast.LetDef (gname, ty, init, _, is_mutable, is_private, gloc) ->
         validation_static_scope := None;
         allow_implicit_static := false;
+        (match ty with
+         | Some t when ast_is_stable_owner_struct t ->
+             if not is_private then
+               raise (TypeError (gloc, Printf.sprintf
+                 "stable owner container global '%s' must be private" gname));
+             if not is_mutable then
+               raise (TypeError (gloc, Printf.sprintf
+                 "stable owner container global '%s' must be mutable" gname));
+             if Option.is_some init then
+               raise (TypeError (gloc, Printf.sprintf
+                 "stable owner container global '%s' must use zero-initialized storage without an initializer"
+                 gname))
+         | Some t when ast_contains_stable_owner_value t ->
+             raise (TypeError (gloc, Printf.sprintf
+               "global '%s' cannot contain stable owner storage inside another value"
+               gname))
+         | _ -> ());
         Option.iter (fun t ->
           if type_mentions_view t then
             raise (TypeError (gloc, Printf.sprintf
@@ -3882,10 +4067,26 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           if type_mentions_view ty then
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot hold an erased view" sname fname));
-          if type_mentions_kinded_variant ty then
+          if type_mentions_kinded_variant ty then begin
+            if not (is_stable_owner_field sname fname) then
+              raise (TypeError (sloc, Printf.sprintf
+                "struct field '%s.%s' cannot hold an affine/linear variant; stable owner storage requires a private linear variant field"
+                sname fname));
+            let variant_name = match resolve_declared_type ty with
+              | Ast.TypeVariant name -> name
+              | _ -> raise (TypeError (sloc,
+                  "stable owner storage must directly hold a linear variant"))
+            in
+            (match Hashtbl.find_opt variant_defs variant_name with
+             | Some ((_, None) :: _) -> ()
+             | _ -> raise (TypeError (sloc, Printf.sprintf
+                 "stable owner variant '%s' must declare a payload-free empty case first for zero initialization"
+                 variant_name)))
+          end;
+          if ast_contains_stable_owner_value ty then
             raise (TypeError (sloc, Printf.sprintf
-              "struct field '%s.%s' cannot hold an affine/linear variant"
-              sname fname));
+              "struct field '%s.%s' cannot contain stable owner storage '%s'"
+              sname fname (Ast.show_type_expr ty)));
           if type_mentions_indexed_owner ty then
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot hold an indexed owner" sname fname));
@@ -3915,6 +4116,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         validation_static_scope := Some scope;
         allow_implicit_static := false;
         List.iter (fun (fname, ty) ->
+          if ast_contains_stable_owner_value ty then
+            raise (TypeError (sloc, Printf.sprintf
+              "struct field '%s.%s' cannot contain stable owner storage '%s'"
+              sname fname (Ast.show_type_expr ty)));
           if type_mentions_view ty then
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot hold a nested erased view"
@@ -3950,6 +4155,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               "duplicate case '%s::%s'" vname cname));
           Hashtbl.add seen cname ();
           Option.iter (fun schema ->
+            if ast_contains_stable_owner_value schema then
+              raise (TypeError (vloc, Printf.sprintf
+                "variant payload '%s::%s' cannot contain stable owner storage"
+                vname cname));
             if contains_borrow schema then
               raise (TypeError (vloc, Printf.sprintf
                 "variant payload '%s::%s' cannot contain borrow/sink"
@@ -4618,6 +4827,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                require_available e.loc moved p;
                if consume then mv_consume p moved else moved
            | _ -> check_expr taints moved false base_expr)
+      | Ast.Call ("stable_replace", [guard; field; replacement]) ->
+          if not consume then
+            raise (TypeError (e.loc,
+              "linear result of 'stable_replace' must be moved into an owning binding, returned, or matched"));
+          let moved = check_expr taints moved false guard in
+          let moved = match field.desc with
+            | Ast.FieldGet (base, _) -> check_expr taints moved false base
+            | _ -> moved
+          in
+          check_expr taints moved true replacement
       | Ast.Call (name, args) ->
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets) ~default:name in

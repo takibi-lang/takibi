@@ -5,7 +5,7 @@ syntax accepted by the compiler today. `SPEC.md` remains authoritative for
 implemented Takibi. `OWNERSHIP_KERNEL.md` records the history and limitations
 of the current affine/linear checker.
 
-Implementation status (2026-07-16): Slices 0 through 6 and the first three
+Implementation status (2026-07-16): Slices 0 through 6 and the first four
 post-Slice-6 Core increments are implemented. The
 `Takibi_core` module owns the four-layer vocabulary, the current checker uses
 `Delta.Legacy_flow`, and the indexed runtime-owner subset described in 3.1 is
@@ -22,9 +22,13 @@ are implemented: `net_rx_frame`'s slice is now unusable after release.
 Finite-enum static states and existential indexed-view payloads now support
 closed `TcpConn[conn, state]` runtime dispatch. Plain variants can now carry
 unrestricted ordinary structs by value and live in ordinary struct fields; the RTOS SD
-server uses that subset for one typed copy-rendezvous request slot. General
-linear-owner place/storage tracking, lock invariants, direct/general quantifiers and propositions,
-static address identities, and solver hooks remain design targets.
+server uses that subset for one typed copy-rendezvous request slot. Private
+stable owner slots can now hold one linear ownership-bearing variant and
+exchange it through `stable_replace` while a linear erased guard is held; the
+RTOS demo uses this for one ownership-bearing rendezvous direction. General
+linear-owner place/storage tracking, lock-to-guard identities, direct/general
+quantifiers and propositions, static address identities, and solver hooks
+remain design targets.
 
 The examples in this document are elaboration fixtures. Their contracts and
 runtime representations are decisions; punctuation may change when a fixture
@@ -716,14 +720,14 @@ from the indexed spelling.
 
 ### Later slices
 
-- General place borrowing and stable storage for indexed owners, introduced
-  with a concrete owner container rather than as an unconstrained borrow
-  checker.
-- Lock invariants and heap/region predicates once a multicore or zero-copy
-  example requires them.
-- Zero-copy typed channels (#113), stable linear payload storage, and
-  ownership transfer through variants. Plain copy-rendezvous requests are
-  implemented below.
+- The first concrete stable-storage subset is implemented below: a private
+  BSS owner container can exchange one linear variant under an erased linear
+  guard. General place borrowing and arbitrary indexed-owner storage remain.
+- The guarded exchange is the first narrow lock-invariant operation. Static
+  lock identity, general invariant predicates, and heap/region predicates
+  remain for examples that require them.
+- Ownership transfer through one concrete synchronous channel is implemented
+  below. Generic and zero-copy typed channels (#113) remain demand-led.
 - Aliasing/region predicates (#106, closed -- escape control continues as
   #128), asynchronous TX ownership (#87), and
   solver/proof integration, each with a concrete driver and negative tests.
@@ -887,21 +891,55 @@ linear owner, transfer an ownership-bearing variant, provide a generic
 channel, or formalize the mutex invariant as an openable `Delta` predicate.
 Those are the next owner-container slice, not hidden claims of this one.
 
+### Stable linear owner slots (implemented 2026-07-16)
+
+The next priority increment introduces the smallest stable place needed to
+put a real linear owner behind a lock. It deliberately does not generalize
+ordinary field borrowing or make every global a resource-tracked place:
+
+- a private field that directly holds a linear variant is a stable owner
+  slot. Its variant must start with a payload-free case, so an uninitialized
+  BSS container has a defined empty value;
+- the containing ordinary struct may exist only as a private, mutable,
+  uninitialized global. It cannot be copied, returned, passed by value,
+  nested in another value, or allocated as a local. A pointer to that one
+  stable location is the supported API surface;
+- direct read, assignment, and address-of on the owner field are rejected.
+  `stable_replace(guard, container.field, replacement)` is the only operation:
+  it moves the replacement into invariant-owned storage and returns the old
+  linear variant, which existing Delta flow requires the caller to bind,
+  return, or match and discharge;
+- `guard` must be a bare binding of a linear erased view. The operation keeps
+  that guard live, so an owner channel can exchange its slot between
+  `Empty` and `Full(exists id. Owner[id])` while the surrounding mutex API
+  retains its ordinary lock/unlock obligation;
+- LLVM lowers the exchange to one typed aggregate load and store. Static
+  indices, existential binders, and the erased guard add no runtime operands,
+  and ownership is never encoded in pointer or integer bits;
+- `examples/rtos_demo` replaces its ping-to-pong integer channel with
+  `OwnerChan`. Ping moves an indexed `OwnerMessage[id]` into the stable slot;
+  pong opens the existential package, reads the message under borrow, and
+  consumes it. The reverse response remains a plain copied integer channel.
+
+This is a minimal invariant boundary, not a complete lock logic. The checker
+proves that the stored owner can only cross the boundary as one exchange and
+that neither side can discard or duplicate it. The declaring file remains
+responsible for maintaining its private `full` flag/tag relationship and for
+calling `stable_replace` while the actual mutex is held. Any linear erased
+guard currently satisfies the operation; tying `MutexGuard[lock]` to the
+target container's mutex is the next static-address increment.
+
 The remaining example-driven order is:
 
-1. stable linear owner storage and the first open/close lock invariant, driven
-   by a concrete ownership-bearing channel/container rather than by the now
-   completed copy-request RPC (#113);
-2. static address/place identities for `MutexHeld[lock]` and `KGuard[lock]`,
-   unless the channel slice needs them earlier;
-3. asynchronous TX ownership only when an example actually keeps a DMA buffer
+1. static address/place identities for `MutexGuard[lock]` and `KGuard[lock]`,
+   including rejection of a guard paired with the wrong explicit pointer;
+2. asynchronous TX ownership only when an example actually keeps a DMA buffer
    in flight after the call returns (#87).
 
-Full lock invariants are not a standalone prerequisite for the current
-single-core, copy-based channels. They should land with the first owner stored
-behind a lock, where opening and closing the invariant has observable proof
-work to do. Likewise, general arbitrary-place borrowing must not be added
-without one of the concrete owner containers above.
+General heap predicates, arbitrary-place borrowing, and generic zero-copy
+channels remain demand-led rather than being inferred from this narrow stable
+slot. The next address identity should strengthen this same concrete API
+before any broader invariant surface is added.
 
 #### Solver and prover threshold
 

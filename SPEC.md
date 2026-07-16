@@ -884,19 +884,19 @@ examples:
 - there is no explicit `forall`; static names in function signatures remain
   implicit universals;
 - plain variants may additionally be fields of ordinary structs and may be
-  copied through those fields. Affine/linear variants remain forbidden in
-  storage, and variants cannot otherwise be nested in arrays/slices, tuples,
-  pointers, other variants, or direct globals;
+  copied through those fields. A linear variant has only the private stable
+  owner-slot exception described below; variants cannot otherwise be nested
+  in arrays/slices, tuples, pointers, other variants, or direct globals;
 - variants cannot be addressed or cast, and payload schemas cannot contain
   `borrow`/`sink`;
 - existential opening occurs only through `match`.
 
 These restrictions keep ownership tracking honest while general place
 tracking, quantifiers, and solver/prover integration remain future Core
-slices. Slice 4 adds the narrow mutable-owner borrow described below. A later
+slices. Slice 4 adds the narrow mutable-owner borrow described below. The
 copy-channel increment lifts only the plain struct-payload and ordinary-field
-storage restrictions; it does not permit ownership-bearing variants in
-storage. Real positive uses are
+storage restrictions; the stable owner-slot increment adds the one sealed
+linear-variant exception described below. Real positive uses are
 `NetRxAcquire` in the QEMU and
 STM32 Ethernet drivers, `FatOpenResult` in FAT12, and `TcpConnDispatch` in
 `examples/tcp_conn_view`. `http_server_sdcard_rtos` additionally uses a
@@ -908,6 +908,68 @@ the response remains the existing `i32` rendezvous channel. Focused failures liv
 `variant_existential_identity_wrong`, and
 `variant_nonexhaustive_wrong`, plus the two `tcp_conn_*_wrong` fixtures; each
 source explains the rejected rule in English.
+
+## Stable Owner Slots and `stable_replace`
+
+A stable owner slot is the implemented narrow exception to the general ban on
+linear values in durable storage. It is declared as a private ordinary-struct
+field whose direct type is a linear variant:
+
+```takibi
+linear struct OwnerMessage[id: usize] {
+    private id: usize @ id;
+    private value: i32;
+}
+
+variant OwnerSlotValue {
+    Empty;
+    Full(exists id: usize. OwnerMessage[id]);
+}
+
+struct OwnerChan {
+    private mutex: i32;
+    private full: i32;
+    private value: OwnerSlotValue;
+}
+
+private let mut owner_chan: OwnerChan;
+```
+
+The first variant case must have no payload. Stable containers are
+zero-initialized globals without an explicit initializer, so declaration-order
+tag zero is the empty state. The container itself must be a `private let mut`
+global. It cannot be local, passed or returned by value, assigned as a whole,
+or contained in an array, slice, tuple, variant, or another struct. Passing a
+pointer to its stable global location is supported.
+
+The owner field cannot be read, assigned, or addressed directly. Its only
+operation is the reserved compiler builtin:
+
+```takibi
+stable_replace(guard, container.value, replacement)
+```
+
+It requires exactly three operands. `guard` is a bare variable whose type is
+a linear erased view, `container.value` names a registered stable owner field,
+and `replacement` has that field's linear variant type. The replacement is
+moved into the slot and the previous value is returned. The returned linear
+variant cannot be discarded: it must be placed in an owning binding, returned,
+or matched, after which the usual all-path rules apply to every payload.
+`stable_replace` borrows rather than consumes the guard.
+
+The LLVM operation is one typed load of the old aggregate followed by one
+typed store of the replacement. The guard, static indices, and existential
+binders erase; there is no pointer/integer ownership encoding. The operation
+is not a hardware atomic primitive. The declaring module must call it under
+the runtime lock whose guard it was given.
+
+This first invariant is intentionally limited. It statically seals the owner
+field and makes every transfer across the boundary explicit and linear, but
+it does not yet associate the guard with a particular lock address or prove a
+private runtime flag equivalent to the variant tag. `examples/rtos_demo`
+provides the positive ownership-bearing rendezvous; the focused failures are
+`examples/stable_owner_without_guard_wrong` and
+`examples/stable_owner_result_dropped_wrong`.
 
 ## Scoped Mutable Owner Borrows (Takibi Core Slice 4)
 

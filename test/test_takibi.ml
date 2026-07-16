@@ -4564,6 +4564,111 @@ let infer_tests = [
         struct VariantEnvelope7d { token: *VariantToken7d; }
         variant VariantHidden7d { Held(VariantEnvelope7d); }");
 
+  Alcotest.test_case "stable owner slot exchanges one existential linear owner under a guard" `Quick
+    (expect_ok
+       "linear view StableGuard7e;
+        linear struct StableOwner7e[n: usize] {
+          id: usize @ n;
+          value: i32;
+        }
+        variant StableValue7e {
+          Empty;
+          Full(exists n: usize. StableOwner7e[n]);
+        }
+        struct StableSlot7e { private value: StableValue7e; }
+        private let mut stable_slot7e: StableSlot7e;
+        fn stable_new7e(value: i32) -> StableOwner7e[0] {
+          let mut owner: StableOwner7e[0] = { 0, value };
+          return owner;
+        }
+        fn stable_drop7e(owner: sink StableOwner7e[n]) {}
+        fn stable_use7e(guard: borrow StableGuard7e) {
+          let previous: StableValue7e = stable_replace(
+            guard, stable_slot7e.value, StableValue7e::Full(stable_new7e(7)));
+          match previous {
+            StableValue7e::Empty => {}
+            StableValue7e::Full(stale) => { stable_drop7e(stale); }
+          }
+          let current: StableValue7e = stable_replace(
+            guard, stable_slot7e.value, StableValue7e::Empty);
+          match current {
+            StableValue7e::Empty => {}
+            StableValue7e::Full(owner) => { stable_drop7e(owner); }
+          }
+        }");
+
+  Alcotest.test_case "stable owner field must be private" `Quick
+    (expect_type_error "stable owner storage requires a private linear variant field"
+       "linear view StablePermit7f;
+        variant StableValue7f { Empty; Full(StablePermit7f); }
+        struct StableSlot7f { value: StableValue7f; }");
+
+  Alcotest.test_case "stable owner field requires an empty zero case first" `Quick
+    (expect_type_error "must declare a payload-free empty case first"
+       "linear view StablePermit7g;
+        variant StableValue7g { Full(StablePermit7g); Empty; }
+        struct StableSlot7g { private value: StableValue7g; }");
+
+  Alcotest.test_case "stable owner container must be a private global" `Quick
+    (expect_type_error "must be private"
+       "linear view StablePermit7h;
+        variant StableValue7h { Empty; Full(StablePermit7h); }
+        struct StableSlot7h { private value: StableValue7h; }
+        let mut stable_slot7h: StableSlot7h;");
+
+  Alcotest.test_case "stable owner field rejects direct reads" `Quick
+    (expect_type_error "cannot be read directly"
+       "linear view StablePermit7i;
+        variant StableValue7i { Empty; Full(StablePermit7i); }
+        struct StableSlot7i { private value: StableValue7i; }
+        private let mut stable_slot7i: StableSlot7i;
+        fn stable_read7i() -> StableValue7i { return stable_slot7i.value; }");
+
+  Alcotest.test_case "stable_replace requires a linear view guard" `Quick
+    (expect_type_error "requires a linear erased-view guard"
+       "linear view StablePermit7j;
+        variant StableValue7j { Empty; Full(StablePermit7j); }
+        struct StableSlot7j { private value: StableValue7j; }
+        private let mut stable_slot7j: StableSlot7j;
+        fn stable_bad_guard7j(x: i32) -> StableValue7j {
+          return stable_replace(x, stable_slot7j.value, StableValue7j::Empty);
+        }");
+
+  Alcotest.test_case "stable_replace result cannot be discarded" `Quick
+    (expect_type_error "linear result of 'stable_replace' must be moved"
+       "linear view StableGuard7k;
+        linear view StablePermit7k;
+        variant StableValue7k { Empty; Full(StablePermit7k); }
+        struct StableSlot7k { private value: StableValue7k; }
+        private let mut stable_slot7k: StableSlot7k;
+        fn stable_drop_result7k(guard: borrow StableGuard7k) {
+          stable_replace(guard, stable_slot7k.value, StableValue7k::Empty);
+        }");
+
+  Alcotest.test_case "stable owner containers cannot be local copies" `Quick
+    (expect_type_error "not a local value"
+       "linear view StablePermit7l;
+        variant StableValue7l { Empty; Full(StablePermit7l); }
+        struct StableSlot7l { private value: StableValue7l; }
+        fn stable_local7l() { let mut slot: StableSlot7l; }");
+
+  Alcotest.test_case "stable owner containers cannot hide inside local arrays" `Quick
+    (expect_type_error "not a local value"
+       "linear view StablePermit7m;
+        variant StableValue7m { Empty; Full(StablePermit7m); }
+        struct StableSlot7m { private value: StableValue7m; }
+        fn stable_array7m() { let mut slots: [StableSlot7m; 2]; }");
+
+  Alcotest.test_case "stable owner containers cannot be copied through dereference" `Quick
+    (expect_type_error "cannot be dereferenced or copied as a whole"
+       "linear view StablePermit7n;
+        variant StableValue7n { Empty; Full(StablePermit7n); }
+        struct StableSlot7n { private value: StableValue7n; }
+        private let mut stable_slot7n: StableSlot7n;
+        fn stable_copy7n(slot: *StableSlot7n) {
+          if (*slot == *slot) {}
+        }");
+
   Alcotest.test_case "Slice 3: a view payload affects kind but has no runtime data requirement" `Quick
     (expect_ok
        "linear view VariantPermit8;
@@ -5395,6 +5500,42 @@ let codegen_tests = [
       Alcotest.(check bool) "request transport uses no integer-pointer bridge" false
         (contains_substring put_ir "inttoptr"
          || contains_substring put_ir "ptrtoint"));
+
+  Alcotest.test_case
+    "stable owner exchange lowers to one typed load and store under an erased guard" `Quick
+    (fun () ->
+      let src =
+        "linear view CgStableGuard3c;
+         linear struct CgStableOwner3c[n: usize] {
+           id: usize @ n;
+           value: i32;
+         }
+         variant CgStableValue3c {
+           Empty;
+           Full(exists n: usize. CgStableOwner3c[n]);
+         }
+         struct CgStableSlot3c { private value: CgStableValue3c; }
+         private let mut cg_stable_slot3c: CgStableSlot3c;
+         fn cg_stable_exchange3c(guard: borrow CgStableGuard3c,
+                                 replacement: CgStableValue3c)
+             -> CgStableValue3c {
+           return stable_replace(guard, cg_stable_slot3c.value, replacement);
+         }" in
+      ignore (gen_codegen src);
+      let exchange = match Hashtbl.find_opt Llvm_gen.functions
+          "cg_stable_exchange3c" with
+        | Some (_, fn) -> fn
+        | None -> Alcotest.fail "cg_stable_exchange3c not found"
+      in
+      let ir = Llvm.string_of_llvalue exchange in
+      Alcotest.(check int) "erased guard leaves only the replacement parameter"
+        1 (Array.length (Llvm.params exchange));
+      Alcotest.(check bool) "stable slot loads the old owner package" true
+        (contains_substring ir "stable_old = load");
+      Alcotest.(check bool) "stable slot stores the replacement package" true
+        (contains_substring ir "store {");
+      Alcotest.(check bool) "stable exchange does not encode ownership in pointer bits" false
+        (contains_substring ir "inttoptr" || contains_substring ir "ptrtoint"));
 
 
   Alcotest.test_case "overloads emit mangled symbols and direct calls use the selected symbol" `Quick

@@ -2594,6 +2594,37 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       emit_interrupt_event true;
       (TypeVoid, const_null (i1_type context))
 
+  | Call ("stable_replace",
+          [guard_e; { desc = FieldGet (base_e, fname); _ }; replacement_e]) ->
+      (* The erased guard has no ABI value, but evaluate it so codegen and
+         source evaluation order remain aligned. The checker guarantees this
+         is a private linear-variant field and the only legal access path. *)
+      ignore (gen_expr locals guard_e);
+      let (base_ty, base_v) = gen_expr locals base_e in
+      let sname = match base_ty with
+        | TypeNamed name | TypePtr (TypeNamed name)
+        | TypePtr (TypeIo (TypeNamed name))
+        | TypeAlignedPtr (_, TypeNamed name) -> name
+        | _ -> raise (Error
+            "BUG: stable_replace base is not a struct place")
+      in
+      let (idx, field_ty) = field_info sname fname in
+      let llty = Hashtbl.find struct_lltypes sname in
+      if type_of base_v = llty then
+        raise (Error "BUG: stable_replace base has no stable address");
+      let field_ptr = build_in_bounds_gep llty base_v
+        [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
+        (fname ^ ".stable_ptr") builder in
+      let value_ty = resolve_special_type field_ty in
+      let (_, replacement_v) =
+        gen_expr ~expected_ty:value_ty locals replacement_e in
+      (* Argument side effects complete before the exchange observes the
+         slot, matching ordinary left-to-right call evaluation. *)
+      let old_value = build_load (ltype_of_ast value_ty) field_ptr
+        (fname ^ ".stable_old") builder in
+      ignore (build_store (coerce replacement_v value_ty) field_ptr builder);
+      (value_ty, old_value)
+
   | Call (("dma_prepare_tx" | "dma_prepare_rx" | "dma_finish_rx") as name,
           [ptr_e; len_e]) ->
       let (_, ptr) = gen_expr locals ptr_e in

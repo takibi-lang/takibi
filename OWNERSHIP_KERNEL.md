@@ -1144,16 +1144,23 @@ laundering within a function. See TAKIBI_CORE.md's implemented-slice entry,
 SPEC.md's "Owner-Derived Region Slices" section, and HISTORY.md's dated
 entry for details.
 
-## 7. Next outlook: stable places, channel v2 (#113), and view change
+## 7. Next outlook: static place identities and asynchronous TX
 
-Variant-carried ownership is now available for channel results and transfer
-APIs. Zero-copy channel storage still needs stable place/invariant tracking
-before a linear payload can safely live in a slot. Function-pointer effects
-are closed by Slice 5, and universally indexed view change is closed by Slice
-6. TCP still needs existential state packaging/dispatch and a concrete
-`TcpConn[conn, state]` migration. Arbitrary stored owners and lock invariants
-should be introduced only with the concrete channel/driver that needs each
-one.
+The post-Slice-6 sequence now includes owner-derived region slices,
+existential `TcpConn[conn, state]` dispatch, typed copy-rendezvous requests,
+and one concrete stable owner slot. A private, mutable, BSS-zeroed container
+may hold a linear variant behind a sealed field; `stable_replace` exchanges
+that value while preserving an erased linear guard, and `rtos_demo` uses it
+to transfer an existentially indexed `OwnerMessage[id]` between tasks.
+
+This is intentionally smaller than arbitrary stored-owner/place tracking.
+The declaring file still maintains the relationship between its runtime
+`full` flag and the variant tag, and any linear guard can authorize the
+exchange. The next priority is therefore an address/place static identity
+that makes `MutexGuard[lock]` and `KGuard[lock]` reject a mismatched explicit
+lock pointer. General heap predicates and arbitrary stable places remain
+demand-led; asynchronous TX remains deferred until a driver keeps a DMA
+buffer in flight after its call returns.
 
 ## 8. Prior art notes
 

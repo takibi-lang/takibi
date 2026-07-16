@@ -1,0 +1,24 @@
+linear view StableWrongPermit;
+
+// A stable owner field is sealed even inside its declaring file. Exchanging
+// it requires a held linear erased guard; an ordinary integer cannot open the
+// invariant boundary.
+
+variant StableWrongValue {
+    Empty;
+    Full(StableWrongPermit);
+}
+
+struct StableWrongSlot {
+    private value: StableWrongValue;
+}
+
+private let mut stable_wrong_slot: StableWrongSlot;
+
+fn replace_without_guard(not_a_guard: i32) -> StableWrongValue {
+    return stable_replace(
+        not_a_guard,
+        stable_wrong_slot.value,
+        StableWrongValue::Empty
+    );
+}
