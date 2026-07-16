@@ -616,7 +616,7 @@ arm. See `examples/linear_obligation` (positive) and
 `linear_cast_discard`, `linear_overwrite`, and
 `variant_linear_payload_missed` (compile-error companions).
 
-## Erased Affine/Linear Views (Takibi Core Slices 2 and 6)
+## Erased Affine/Linear Views (Takibi Core Slices 2, 6, and finite-state dispatch)
 
 An erased view is a compile-time permission or obligation with no runtime
 payload:
@@ -662,8 +662,12 @@ fn write(permission: sink SlotWrite[slot, 0],
 }
 ```
 
-Static parameters are declared with the same primitive integer sorts as
-indexed runtime owners. Static names in a function signature are implicitly
+Static parameters may use the same primitive integer sorts as indexed runtime
+owners or an exhaustive enum. Enum constants are qualified, for example
+`TcpConn[conn, TcpState::Listen]`; a non-exhaustive enum cannot be a finite
+static sort. Enum static terms are nominal, so cases from two enum types do
+not unify merely because their runtime discriminants are equal. Static names
+in a function signature are implicitly
 universally quantified and instantiated freshly at each call. The example's
 one `slot` therefore ties the erased permission to the runtime singleton
 index without a separate proof argument. Arity, literal range, static sort,
@@ -702,13 +706,35 @@ parameter, alloca, or debug value. They do not yet identify one particular
 lock: an address/static-place sort is required before `MutexGuard[lock]` can
 reject pairing a guard with the wrong explicit pointer.
 
-Explicit `forall`, existential packages around indexed views, runtime state
-dispatch, address/enum static sorts, propositions, and solver discharge are
-not implemented. Slice 3's `exists` remains restricted to indexed runtime
-owners. See `examples/common/http_conn_state.tkb` for the non-indexed
-`PendingTcpEvent` use, `examples/indexed_view` for indexed view change, and
-`examples/view_linear_branch_missed` plus
-`examples/indexed_view_identity_wrong` for focused compile-error companions.
+An indexed view may be the direct body of an outermost variant-payload
+`exists`. A closed variant can therefore retain a runtime state tag while
+each case carries an erased, state-specific permission:
+
+```takibi
+enum TcpState: u8 { Listen; SynRcvd; }
+linear view TcpConn[conn: usize, state: TcpState];
+
+variant TcpConnDispatch {
+    Listen(exists conn: usize. TcpConn[conn, TcpState::Listen]);
+    SynRcvd(exists conn: usize. TcpConn[conn, TcpState::SynRcvd]);
+}
+```
+
+Matching consumes the dispatch package and opens a fresh connection identity
+with the case's exact static state. Every arm must preserve, transition, or
+sink that linear view. The variant's tag remains at runtime; the existential
+binder, view payload, connection identity, and enum static state all erase.
+The HTTP server's private `tcp_conn_dispatch` is the exhaustive bridge from
+its runtime `ConnState` byte into this package. `examples/tcp_conn_view` is
+the focused executable state-dispatch fixture;
+`tcp_conn_state_wrong` and `tcp_conn_dispatch_missed_wrong` fix the state and
+all-path obligation failures.
+
+Explicit `forall`, direct/general existential types outside variant payloads,
+address/place static sorts, propositions, and solver discharge are not
+implemented. See `examples/common/http_conn_state.tkb` for the non-indexed
+`PendingTcpEvent` use and `examples/indexed_view` for integer-indexed view
+change.
 
 ## Closed Variants and Existential Owners (Takibi Core Slice 3)
 
@@ -734,9 +760,10 @@ fn consume(result: FatOpenResult) -> i32 {
 ```
 
 A case has either no payload or exactly one directly supported payload.
-Concrete struct and array payloads are deferred in Slice 3; use a pointer or
-slice when an unrestricted aggregate must cross this boundary. Construct a case with
-`Name::Case` or `Name::Case(expr)`. A payload-bearing arm must bind its
+An unrestricted ordinary concrete struct may be copied as a payload; arrays,
+indexed owner structs, and structs containing affine/linear fields are still
+rejected. Construct a case with `Name::Case` or
+`Name::Case(expr)`. A payload-bearing arm must bind its
 payload, and a payload-less arm must not. A closed match without `_` must
 cover every case; duplicate cases are rejected. A wildcard is allowed for
 unrestricted or affine variants, but not for a linear variant because it
@@ -827,7 +854,8 @@ The current Slice 3 ABI is explicit but provisional:
 - the first field is an `i32` case tag, numbered in declaration order;
 - each runtime-bearing case contributes one typed aggregate field, also in
   declaration order;
-- payload-less cases and erased-view payloads contribute no field;
+- payload-less cases, erased-view payloads, and existential erased-view
+  payloads contribute no field;
 - an `exists` binder is erased, but its indexed owner's ordinary runtime
   fields remain;
 - normal target alignment and padding apply, and `sizeof(VariantName)`
@@ -847,29 +875,39 @@ This slice intentionally implements only the shape needed by the current
 examples:
 
 - variants are concrete named types, not generic `Option[T]`/`Result[T,E]`;
-- each case has at most one payload; concrete struct/array aggregate payloads
-  are not implemented yet;
-- `exists n: IntegerType. Owner[n]` is legal only as the outermost case
-  payload and must directly package an indexed runtime owner;
+- each case has at most one payload; unrestricted ordinary concrete structs
+  are supported by value, while arrays, indexed owner structs, and structs
+  containing affine/linear fields are not;
+- `exists n: StaticSort. T[n]` is legal only as the outermost case payload.
+  `StaticSort` is a primitive integer or exhaustive enum, and the body must
+  directly package an indexed runtime owner or indexed erased view;
 - there is no explicit `forall`; static names in function signatures remain
   implicit universals;
-- variants are direct locals, parameters, and results only. They cannot be
-  nested in globals, structs, arrays/slices, tuples, pointers, other variants,
-  or indirect stores;
+- plain variants may additionally be fields of ordinary structs and may be
+  copied through those fields. Affine/linear variants remain forbidden in
+  storage, and variants cannot otherwise be nested in arrays/slices, tuples,
+  pointers, other variants, or direct globals;
 - variants cannot be addressed or cast, and payload schemas cannot contain
   `borrow`/`sink`;
 - existential opening occurs only through `match`.
 
 These restrictions keep ownership tracking honest while general place
 tracking, quantifiers, and solver/prover integration remain future Core
-slices. Slice 4 adds the narrow mutable-owner borrow described below without
-lifting the variant storage restrictions. Real positive uses are
+slices. Slice 4 adds the narrow mutable-owner borrow described below. A later
+copy-channel increment lifts only the plain struct-payload and ordinary-field
+storage restrictions; it does not permit ownership-bearing variants in
+storage. Real positive uses are
 `NetRxAcquire` in the QEMU and
-STM32 Ethernet drivers and `FatOpenResult` in FAT12. Focused failures live in
+STM32 Ethernet drivers, `FatOpenResult` in FAT12, and `TcpConnDispatch` in
+`examples/tcp_conn_view`. `http_server_sdcard_rtos` additionally uses a
+private `SdRequestChan` whose slot copies the plain
+`Init | ReadChunk(SdReadChunkRequest) | FileSize(*u8)` variant under its mutex.
+This replaces the former multi-channel pointer-to-`usize` request encoding;
+the response remains the existing `i32` rendezvous channel. Focused failures live in
 `examples/variant_linear_payload_missed`,
 `variant_existential_identity_wrong`, and
-`variant_nonexhaustive_wrong`; each source explains the rejected rule in
-English.
+`variant_nonexhaustive_wrong`, plus the two `tcp_conn_*_wrong` fixtures; each
+source explains the rejected rule in English.
 
 ## Scoped Mutable Owner Borrows (Takibi Core Slice 4)
 

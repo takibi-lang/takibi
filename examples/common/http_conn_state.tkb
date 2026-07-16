@@ -14,13 +14,14 @@
 // below serves a different purpose: it proves that every accepted event is
 // disposed on every dispatch path, including paths that do not transition.
 //
-// What this file does NOT verify: that each body writes the phase its name
-// claims, and that the builders really emit the segments they claim. Indexed
-// TcpConn[conn, state] view changes, not SMT, are the future mechanism for the
-// first protocol-authority gap. Builder correctness needs a functional spec
-// and remains human review until such a prover-level contract exists. Pure SMT
-// is reserved for arithmetic facts in Phi. Everything outside this file is
-// forced through it: reads via tcp_conn_state(), writes via nothing else.
+// TcpConn[conn, state] now makes the source phase of every transition a
+// checked input: http_server_common cannot call a Listen-only transition from
+// a SynRcvd arm. What this still does NOT verify is that each trusted body
+// writes the target phase its name claims, or that a builder emits the segment
+// it claims. Those need a state-to-storage invariant and a functional packet
+// spec respectively, not bare SMT. Everything outside this file is forced
+// through it: dispatch via tcp_conn_dispatch(), read-back for response
+// bookkeeping via tcp_conn_state(), and writes via nothing else.
 //
 // Deliberately NOT here: conn_snd_nxt/conn_rcv_nxt sequence-number
 // bookkeeping (stays private to http_server_common.tkb -- wire arithmetic,
@@ -35,11 +36,48 @@ enum ConnState: u8 {
     LastAck;
 }
 
+// The runtime state remains conn_state below. TcpConn is its erased,
+// state-specific dispatch authority. This HTTP server has one connection
+// slot, so tcp_conn_dispatch packages the fixed identity 0 existentially;
+// matching outside this trusted file reveals only the current state case.
+private linear view TcpConn[conn: usize, state: ConnState];
+
+variant TcpConnDispatch {
+    Listen(exists conn: usize. TcpConn[conn, ConnState::Listen]);
+    SynRcvd(exists conn: usize. TcpConn[conn, ConnState::SynRcvd]);
+    Established(exists conn: usize. TcpConn[conn, ConnState::Established]);
+    Sending(exists conn: usize. TcpConn[conn, ConnState::Sending]);
+    LastAck(exists conn: usize. TcpConn[conn, ConnState::LastAck]);
+}
+
 private let mut conn_state: ConnState = ConnState::Listen;
 
 // The one read path for dispatching on the current state.
 fn tcp_conn_state() -> ConnState {
     return conn_state;
+}
+
+// Convert the private runtime state into the closed dispatch package. The
+// exhaustive enum match is the single trusted bridge between Gamma's state
+// byte and Delta's state-specific permission.
+fn tcp_conn_dispatch() -> TcpConnDispatch {
+    match conn_state {
+        ConnState::Listen => {
+            return TcpConnDispatch::Listen(view TcpConn[0, ConnState::Listen]);
+        }
+        ConnState::SynRcvd => {
+            return TcpConnDispatch::SynRcvd(view TcpConn[0, ConnState::SynRcvd]);
+        }
+        ConnState::Established => {
+            return TcpConnDispatch::Established(view TcpConn[0, ConnState::Established]);
+        }
+        ConnState::Sending => {
+            return TcpConnDispatch::Sending(view TcpConn[0, ConnState::Sending]);
+        }
+        ConnState::LastAck => {
+            return TcpConnDispatch::LastAck(view TcpConn[0, ConnState::LastAck]);
+        }
+    }
 }
 
 // The event-response obligation (OWNERSHIP_KERNEL.md Stage 1 / 4.10,
@@ -63,12 +101,14 @@ fn tcp_event_accepted() -> PendingTcpEvent {
 // The one legal way to deliberately not respond. The call site IS the
 // reason (a breakpoint here plus the stack trace identifies which arm
 // ignored what); see issue #117 for why this carries no reason argument.
-fn tcp_event_ignored(pending: sink PendingTcpEvent) {
+fn tcp_event_ignored(pending: sink PendingTcpEvent,
+                     conn: sink TcpConn[c, state]) {
 }
 
 // Respond to an unsolicited ACK on a listening socket with a stateless
 // RST (no phase change, but a real response -- distinct from ignoring).
 fn tcp_reject_with_rst(pending: sink PendingTcpEvent,
+                       conn: sink TcpConn[c, ConnState::Listen],
                        eth: [u8; 54..], ihl: {20..<21 as u16}, ack_seq: u32) {
     build_rst_from_ack(eth, ihl, ack_seq);
 }
@@ -81,6 +121,7 @@ fn tcp_reject_with_rst(pending: sink PendingTcpEvent,
 
 // Listen -> SynRcvd: reachable only by building the SYN-ACK.
 fn tcp_accept_via_syn_ack(pending: sink PendingTcpEvent,
+                          conn: sink TcpConn[c, ConnState::Listen],
                           eth: [u8; 54..], ihl: {20..<21 as u16}) {
     build_syn_ack(eth, ihl);
     conn_state = ConnState::SynRcvd;
@@ -89,6 +130,7 @@ fn tcp_accept_via_syn_ack(pending: sink PendingTcpEvent,
 // Established -> LastAck (peer sent FIN): reachable only by building our
 // FIN+ACK reply.
 fn tcp_begin_close_via_fin_ack(pending: sink PendingTcpEvent,
+                               conn: sink TcpConn[c, ConnState::Established],
                                eth: [u8; 54..], ihl: {20..<21 as u16}) {
     build_fin_ack(eth, ihl);
     conn_state = ConnState::LastAck;
@@ -99,6 +141,7 @@ fn tcp_begin_close_via_fin_ack(pending: sink PendingTcpEvent,
 // contract: a return >= 0 means a segment now sits in the frame). Which
 // phase follows depends on whether that response is already complete.
 fn tcp_respond(pending: sink PendingTcpEvent,
+               conn: sink TcpConn[c, ConnState::Established],
                eth: [u8; 1514..], ihl: {20..<21 as u16},
                req: *u8, req_len: u16) -> i32 {
     let n: i32 = http_start_response(eth, ihl, req, req_len);
@@ -115,6 +158,7 @@ fn tcp_respond(pending: sink PendingTcpEvent,
 // Sending -> LastAck, or stay Sending: reachable only by building the
 // next continuation segment.
 fn tcp_continue(pending: sink PendingTcpEvent,
+                conn: sink TcpConn[c, ConnState::Sending],
                 eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
     let n: i32 = http_continue_response(eth, ihl);
     if (n >= 0) {
@@ -128,6 +172,7 @@ fn tcp_continue(pending: sink PendingTcpEvent,
 // LastAck -> Listen: reachable only by building the final ACK answering
 // the peer's FIN+ACK -- the compile-time form of issue #116's fix.
 fn tcp_close_via_final_ack(pending: sink PendingTcpEvent,
+                           conn: sink TcpConn[c, ConnState::LastAck],
                            eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
     let n: i32 = build_tcp_payload(eth, ihl, 0, TCP_FLAG_ACK);
     if (n >= 0) {
@@ -140,12 +185,14 @@ fn tcp_close_via_final_ack(pending: sink PendingTcpEvent,
 
 // SynRcvd -> Established: the peer's valid handshake ACK arrived; nothing
 // to send.
-fn tcp_handshake_complete(pending: sink PendingTcpEvent) {
+fn tcp_handshake_complete(pending: sink PendingTcpEvent,
+                          conn: sink TcpConn[c, ConnState::SynRcvd]) {
     conn_state = ConnState::Established;
 }
 
 // Any state -> Listen with nothing owed to the peer: an incoming RST, or
 // the peer's plain ACK of our FIN in LastAck.
-fn tcp_reset_to_listen(pending: sink PendingTcpEvent) {
+fn tcp_reset_to_listen(pending: sink PendingTcpEvent,
+                       conn: sink TcpConn[c, state]) {
     conn_state = ConnState::Listen;
 }

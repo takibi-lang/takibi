@@ -2,7 +2,7 @@
 //
 // The HTTP/TCP state machine is intentionally kept in app_main's task, while
 // SD/FAT initialization and per-request file reads live in sd_worker and are
-// reached through synchronous Chan RPC. This is the smallest useful step from
+// reached through a synchronous typed request RPC. This is the smallest useful step from
 // the flat http_server_sdcard baseline toward an RTOS-shaped HTTP+SD server:
 // the protocol state machine remains unchanged, but the storage subsystem is
 // now behind a task boundary.
@@ -63,17 +63,68 @@ let mut our_ip:  [u8; 4];
 // TCP_URGENT) come from examples/common/netutil.tkb's `use` above --
 // offsetof(ArpHdr/Ipv4Hdr/TcpHdr, field)-based, matching http_server.tkb.
 
-let SD_REQ_INIT: i32 = 1;
-let SD_REQ_READ_CHUNK: i32 = 2;
-let SD_REQ_FILE_SIZE: i32 = 3;
+struct SdReadChunkRequest {
+    private name83: *u8;
+    private off: u32;
+    private dst: *u8;
+    private want: u32;
+}
 
-let mut sd_request_ch: Chan;
+variant SdRequest {
+    Init;
+    ReadChunk(SdReadChunkRequest);
+    FileSize(*u8);
+}
+
+// The private slot is the complete channel invariant: full == 0 means value
+// is ignored; full == 1 means value holds one complete typed request. Both
+// transitions happen while mutex is held, and send waits for recv to copy the
+// value out before returning.
+struct SdRequestChan {
+    private mutex:      i32;
+    private slot_full:  io i32;
+    private slot_taken: io i32;
+    private full:       i32;
+    private value:      SdRequest;
+}
+
+let mut sd_request_ch: SdRequestChan;
 let mut sd_response_ch: Chan;
-let mut sd_buffer_ch: WordChan;
-let mut sd_name_ch: WordChan;
-let mut sd_offset_ch: WordChan;
-let mut sd_len_ch: WordChan;
 let mut sd_stack: [u8; 8192];
+
+fn sd_request_chan_init(ch: *SdRequestChan) {
+    ch.mutex = 1;
+    ch.slot_full = 0;
+    ch.slot_taken = 0;
+    ch.full = 0;
+    ch.value = SdRequest::Init;
+}
+
+fn sd_request_send(ch: *SdRequestChan, request: SdRequest) !{may_block} {
+    let mut g: MutexGuard = mutex_lock(&ch.mutex);
+    while (ch.full != 0) {
+        g = cond_wait(&ch.slot_taken, g, &ch.mutex);
+    }
+    ch.value = request;
+    ch.full = 1;
+    cond_signal(&ch.slot_full);
+    while (ch.full != 0) {
+        g = cond_wait(&ch.slot_taken, g, &ch.mutex);
+    }
+    mutex_unlock(g, &ch.mutex);
+}
+
+fn sd_request_recv(ch: *SdRequestChan) -> SdRequest !{may_block} {
+    let mut g: MutexGuard = mutex_lock(&ch.mutex);
+    while (ch.full == 0) {
+        g = cond_wait(&ch.slot_full, g, &ch.mutex);
+    }
+    let request: SdRequest = ch.value;
+    ch.full = 0;
+    cond_signal(&ch.slot_taken);
+    mutex_unlock(g, &ch.mutex);
+    return request;
+}
 
 fn sd_read_file_chunk(name83: *u8, off: u32, dst: *u8, want: u32) -> u32 {
     let mut got: u32 = 0;
@@ -83,47 +134,42 @@ fn sd_read_file_chunk(name83: *u8, off: u32, dst: *u8, want: u32) -> u32 {
 
 fn sd_worker() {
     while (true) {
-        let req: i32 = chan_recv(&sd_request_ch);
-        if (req == SD_REQ_INIT) {
-            let mut ok: i32 = 0;
-            if (disk_initialize() != 0) {
-                uart_puts("http_server_sdcard_rtos: disk_initialize FAIL\r\n");
-                ok = -1;
-            } else {
-                fat_mount();
+        let request: SdRequest = sd_request_recv(&sd_request_ch);
+        match request {
+            SdRequest::Init => {
+                let mut ok: i32 = 0;
+                if (disk_initialize() != 0) {
+                    uart_puts("http_server_sdcard_rtos: disk_initialize FAIL\r\n");
+                    ok = -1;
+                } else {
+                    fat_mount();
+                }
+                chan_send(&sd_response_ch, ok);
             }
-            chan_send(&sd_response_ch, ok);
-        } else if (req == SD_REQ_READ_CHUNK) {
-            let dst_addr: usize = chan_word_recv(&sd_buffer_ch);
-            let name_addr: usize = chan_word_recv(&sd_name_ch);
-            let off: usize = chan_word_recv(&sd_offset_ch);
-            let want: usize = chan_word_recv(&sd_len_ch);
-            chan_send(&sd_response_ch,
-                      sd_read_file_chunk(name_addr as *u8, off as u32,
-                                         dst_addr as *u8, want as u32) as i32);
-        } else if (req == SD_REQ_FILE_SIZE) {
-            let name_addr: usize = chan_word_recv(&sd_name_ch);
-            if (fat_file_exists(name_addr as *u8)) {
-                chan_send(&sd_response_ch, fat_file_size(name_addr as *u8) as i32);
-            } else {
-                chan_send(&sd_response_ch, -1);
+            SdRequest::ReadChunk(read) => {
+                chan_send(&sd_response_ch,
+                          sd_read_file_chunk(read.name83, read.off,
+                                             read.dst, read.want) as i32);
+            }
+            SdRequest::FileSize(name83) => {
+                if (fat_file_exists(name83)) {
+                    chan_send(&sd_response_ch, fat_file_size(name83) as i32);
+                } else {
+                    chan_send(&sd_response_ch, -1);
+                }
             }
         }
     }
 }
 
 fn sd_file_size_rpc(name83: *u8) -> i32 {
-    chan_send(&sd_request_ch, SD_REQ_FILE_SIZE);
-    chan_word_send(&sd_name_ch, name83 as usize);
+    sd_request_send(&sd_request_ch, SdRequest::FileSize(name83));
     return chan_recv(&sd_response_ch);
 }
 
 fn sd_read_chunk_rpc(name83: *u8, off: u32, dst: *u8, want: u32) -> u32 {
-    chan_send(&sd_request_ch, SD_REQ_READ_CHUNK);
-    chan_word_send(&sd_buffer_ch, dst as usize);
-    chan_word_send(&sd_name_ch, name83 as usize);
-    chan_word_send(&sd_offset_ch, off as usize);
-    chan_word_send(&sd_len_ch, want as usize);
+    let mut request: SdReadChunkRequest = { name83, off, dst, want };
+    sd_request_send(&sd_request_ch, SdRequest::ReadChunk(request));
     return chan_recv(&sd_response_ch) as u32;
 }
 
@@ -136,12 +182,8 @@ fn http_read_chunk(name83: *u8, off: u32, dst: *u8, want: u32) -> u32 {
 }
 
 fn app_main() {
-    chan_init(&sd_request_ch);
+    sd_request_chan_init(&sd_request_ch);
     chan_init(&sd_response_ch);
-    chan_word_init(&sd_buffer_ch);
-    chan_word_init(&sd_name_ch);
-    chan_word_init(&sd_offset_ch);
-    chan_word_init(&sd_len_ch);
 
     uart_puts("http_server_sdcard_rtos: init\r\n");
 
@@ -156,7 +198,7 @@ fn app_main() {
             rtos_task_add(1, setup_task_stack(sd_stack + 8192, sd_worker));
             rtos_start();
 
-            chan_send(&sd_request_ch, SD_REQ_INIT);
+            sd_request_send(&sd_request_ch, SdRequest::Init);
             let sd_init_result: i32 = chan_recv(&sd_response_ch);
 
             if (sd_init_result == 0) {

@@ -1,0 +1,18 @@
+// A state-specific transition cannot consume a connection permission opened
+// from a different runtime dispatch case, even when its connection identity
+// is otherwise the same.
+
+enum WrongTcpState: u8 {
+    Listen;
+    SynRcvd;
+}
+
+linear view WrongTcpConn[conn: usize, state: WrongTcpState];
+
+fn require_listen(c: sink WrongTcpConn[conn, WrongTcpState::Listen]) {
+}
+
+fn wrong_state() {
+    let c = view WrongTcpConn[0, WrongTcpState::SynRcvd];
+    require_listen(c);
+}

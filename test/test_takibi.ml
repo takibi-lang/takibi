@@ -137,6 +137,7 @@ let rec show_type = function
       let arg = function
         | Ast.StaticName n -> n
         | Ast.StaticInt n -> string_of_int n
+        | Ast.StaticEnum (name, case) -> name ^ "::" ^ case
       in
       Printf.sprintf "view %s[%s]" s
         (String.concat ", " (List.map arg args))
@@ -147,12 +148,14 @@ let rec show_type = function
       let arg = function
         | Ast.StaticName n -> n
         | Ast.StaticInt n -> string_of_int n
+        | Ast.StaticEnum (name, case) -> name ^ "::" ^ case
       in
       Printf.sprintf "%s[%s]" s (String.concat ", " (List.map arg args))
   | Ast.TypeSingleton (t, n) ->
       let n = match n with
         | Ast.StaticName n -> n
         | Ast.StaticInt n -> string_of_int n
+        | Ast.StaticEnum (name, case) -> name ^ "::" ^ case
       in
       Printf.sprintf "%s @ %s" (show_type t) n
   | Ast.TypeRefined (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
@@ -245,6 +248,30 @@ let parser_tests = [
                    ("ParsedPhase", [Ast.StaticName "id"; Ast.StaticInt 1]); _ };
                _ }]; _ }] -> ()
       | _ -> Alcotest.fail "expected indexed ViewDef, type, and ViewLit nodes");
+
+  Alcotest.test_case "finite enum static sort and qualified state argument parse" `Quick
+    (fun () ->
+      match parse
+        "enum ParsedTcpState: u8 { Listen; SynRcvd; }
+         linear view ParsedTcpConn[conn: usize, state: ParsedTcpState];
+         variant ParsedTcpDispatch {
+           Listen(exists conn: usize.
+             ParsedTcpConn[conn, ParsedTcpState::Listen]);
+         }" with
+      | [Ast.EnumDef ("ParsedTcpState", _, _, false);
+         Ast.ViewDef
+           ("ParsedTcpConn", Ast.KindLinear,
+            [("conn", Ast.TypeUsize);
+             ("state", Ast.TypeNamed "ParsedTcpState")], false, _);
+         Ast.VariantDef
+           ("ParsedTcpDispatch",
+            [("Listen", Some (Ast.TypeExists
+              ("conn", Ast.TypeUsize,
+               Ast.TypeIndexed
+                 ("ParsedTcpConn",
+                  [Ast.StaticName "conn";
+                   Ast.StaticEnum ("ParsedTcpState", "Listen")]))))], _)] -> ()
+      | _ -> Alcotest.fail "expected finite enum static-state AST nodes");
 
   Alcotest.test_case "indexed linear struct and singleton syntax parse" `Quick (fun () ->
     match parse
@@ -4510,10 +4537,32 @@ let infer_tests = [
        "linear struct VariantOwner7[n: usize] { idx: usize @ n; }
         fn variant_bad7(x: exists n: usize. VariantOwner7[n]) {}");
 
-  Alcotest.test_case "Slice 3: a concrete struct payload is rejected before codegen" `Quick
-    (expect_type_error "aggregate payload ownership is not implemented"
+  Alcotest.test_case "plain variant storage accepts a concrete struct payload" `Quick
+    (expect_ok
        "struct VariantPair7b { left: i32; right: i32; }
-        variant VariantStruct7b { None; Pair(VariantPair7b); }");
+        variant VariantStruct7b { None; Pair(VariantPair7b); }
+        struct VariantSlot7b { value: VariantStruct7b; }
+        fn variant_slot_put7b(slot: *VariantSlot7b, value: VariantStruct7b) {
+          slot.value = value;
+        }
+        fn variant_pair_sum7b(value: VariantStruct7b) -> i32 {
+          match value {
+            VariantStruct7b::None => { return 0; }
+            VariantStruct7b::Pair(pair) => { return pair.left + pair.right; }
+          }
+        }");
+
+  Alcotest.test_case "linear variant storage remains forbidden" `Quick
+    (expect_type_error "cannot hold an affine/linear variant"
+       "linear view VariantPermit7c;
+        variant VariantLinear7c { Held(VariantPermit7c); }
+        struct VariantSlot7c { value: VariantLinear7c; }");
+
+  Alcotest.test_case "struct variant payload cannot hide affine ownership" `Quick
+    (expect_type_error "concrete struct must be unrestricted"
+       "affine opaque struct VariantToken7d;
+        struct VariantEnvelope7d { token: *VariantToken7d; }
+        variant VariantHidden7d { Held(VariantEnvelope7d); }");
 
   Alcotest.test_case "Slice 3: a view payload affects kind but has no runtime data requirement" `Quick
     (expect_ok
@@ -4813,6 +4862,90 @@ let infer_tests = [
     (expect_type_error "duplicate static parameter 'slot' on view 'IndexedDuplicate6'"
        "linear view IndexedDuplicate6[slot: usize, slot: usize];");
 
+  (* -- Post-Slice 6: finite-state existential view dispatch -------------- *)
+
+  Alcotest.test_case
+    "finite-state dispatch: existential indexed views preserve identity across transitions"
+    `Quick
+    (expect_ok
+       "enum TcpState7: u8 { Listen; SynRcvd; Established; }
+        private linear view TcpConn7[conn: usize, state: TcpState7];
+        variant TcpDispatch7 {
+          Listen(exists conn: usize. TcpConn7[conn, TcpState7::Listen]);
+          SynRcvd(exists conn: usize. TcpConn7[conn, TcpState7::SynRcvd]);
+          Established(exists conn: usize. TcpConn7[conn, TcpState7::Established]);
+        }
+        fn tcp_syn7(c: sink TcpConn7[conn, TcpState7::Listen])
+            -> TcpConn7[conn, TcpState7::SynRcvd] {
+          return view TcpConn7[conn, TcpState7::SynRcvd];
+        }
+        fn tcp_establish7(c: sink TcpConn7[conn, TcpState7::SynRcvd])
+            -> TcpConn7[conn, TcpState7::Established] {
+          return view TcpConn7[conn, TcpState7::Established];
+        }
+        fn tcp_dispatch_new7() -> TcpDispatch7 {
+          return TcpDispatch7::Listen(view TcpConn7[0, TcpState7::Listen]);
+        }
+        fn tcp_dispatch_step7(value: TcpDispatch7) -> TcpDispatch7 {
+          match value {
+            TcpDispatch7::Listen(c) => {
+              return TcpDispatch7::SynRcvd(tcp_syn7(c));
+            }
+            TcpDispatch7::SynRcvd(c) => {
+              return TcpDispatch7::Established(tcp_establish7(c));
+            }
+            TcpDispatch7::Established(c) => {
+              return TcpDispatch7::Established(c);
+            }
+          }
+        }");
+
+  Alcotest.test_case
+    "finite-state dispatch: a state-specific transition rejects the wrong enum state"
+    `Quick
+    (expect_type_error "static value mismatch"
+       "enum TcpStateWrong7: u8 { Listen; SynRcvd; }
+        linear view TcpConnWrong7[conn: usize, state: TcpStateWrong7];
+        fn tcp_expect_listen7(c: sink TcpConnWrong7[conn, TcpStateWrong7::Listen]) {}
+        fn tcp_wrong_state7() {
+          let c = view TcpConnWrong7[0, TcpStateWrong7::SynRcvd];
+          tcp_expect_listen7(c);
+        }");
+
+  Alcotest.test_case
+    "finite-state dispatch: existential view payload remains a linear obligation"
+    `Quick
+    (expect_type_error "linear variant payload 'c' is never consumed"
+       "enum TcpStatePending7: u8 { Listen; }
+        linear view TcpConnPending7[conn: usize, state: TcpStatePending7];
+        variant TcpDispatchPending7 {
+          Listen(exists conn: usize.
+            TcpConnPending7[conn, TcpStatePending7::Listen]);
+        }
+        fn tcp_pending_new7() -> TcpDispatchPending7 {
+          return TcpDispatchPending7::Listen(
+            view TcpConnPending7[0, TcpStatePending7::Listen]);
+        }
+        fn tcp_pending_bad7(value: TcpDispatchPending7) {
+          match value { TcpDispatchPending7::Listen(c) => {} }
+        }");
+
+  Alcotest.test_case
+    "finite-state dispatch: enum states are nominal across static sorts" `Quick
+    (expect_type_error "has sort TcpStateNominalB7, but TcpStateNominalA7 is required"
+       "enum TcpStateNominalA7: u8 { Ready; }
+        enum TcpStateNominalB7: u8 { Ready; }
+        linear view TcpNominal7[state: TcpStateNominalA7];
+        fn tcp_nominal_bad7() {
+          let p = view TcpNominal7[TcpStateNominalB7::Ready];
+        }");
+
+  Alcotest.test_case
+    "finite-state dispatch: an open enum is not a finite static sort" `Quick
+    (expect_type_error "non-exhaustive enum 'TcpOpenState7' cannot be used"
+       "enum TcpOpenState7: u8 { Known; _; }
+        linear view TcpOpenView7[state: TcpOpenState7];");
+
 ]
 
 (* -- Codegen tests ----------------------------------------------------------
@@ -4825,6 +4958,53 @@ let infer_tests = [
    checks runtime behavior, not just "the IR verifies"). *)
 
 let codegen_tests = [
+  Alcotest.test_case
+    "finite-state dispatch ABI: existential view payloads erase to the runtime tag"
+    `Quick
+    (fun () ->
+      let src =
+        "enum CgTcpState7: u8 { Listen; SynRcvd; }
+         linear view CgTcpConn7[conn: usize, state: CgTcpState7];
+         variant CgTcpDispatch7 {
+           Listen(exists conn: usize.
+             CgTcpConn7[conn, CgTcpState7::Listen]);
+           SynRcvd(exists conn: usize.
+             CgTcpConn7[conn, CgTcpState7::SynRcvd]);
+         }
+         fn cg_tcp_syn7(c: sink CgTcpConn7[conn, CgTcpState7::Listen])
+             -> CgTcpConn7[conn, CgTcpState7::SynRcvd] {
+           return view CgTcpConn7[conn, CgTcpState7::SynRcvd];
+         }
+         fn cg_tcp_step7(value: CgTcpDispatch7) -> CgTcpDispatch7 {
+           match value {
+             CgTcpDispatch7::Listen(c) => {
+               return CgTcpDispatch7::SynRcvd(cg_tcp_syn7(c));
+             }
+             CgTcpDispatch7::SynRcvd(c) => {
+               return CgTcpDispatch7::SynRcvd(c);
+             }
+           }
+         }" in
+      ignore (gen_codegen src);
+      let layout = match Hashtbl.find_opt Llvm_gen.variant_lltypes "CgTcpDispatch7" with
+        | Some llty -> llty
+        | None -> Alcotest.fail "CgTcpDispatch7 layout not found" in
+      Alcotest.(check int) "only the i32 runtime state tag remains" 1
+        (Array.length (Llvm.struct_element_types layout));
+      let step = match Hashtbl.find_opt Llvm_gen.functions "cg_tcp_step7" with
+        | Some (_, f) -> f
+        | None -> Alcotest.fail "cg_tcp_step7 not found" in
+      let transition = match Hashtbl.find_opt Llvm_gen.functions "cg_tcp_syn7" with
+        | Some (_, f) -> f
+        | None -> Alcotest.fail "cg_tcp_syn7 not found" in
+      Alcotest.(check int) "state transition has no runtime view parameter"
+        0 (Array.length (Llvm.params transition));
+      let ir = Llvm.string_of_llvalue step in
+      Alcotest.(check bool) "dispatch switches on the retained runtime tag" true
+        (contains_substring ir "switch i32");
+      Alcotest.(check bool) "no erased view payload is extracted" false
+        (contains_substring ir "variant.c"));
+
   Alcotest.test_case
     "Slice 6 ABI: indexed view transitions erase every static and Delta operand" `Quick
     (fun () ->
@@ -5174,6 +5354,47 @@ let codegen_tests = [
         (contains_substring ir "{ i32 }");
       Alcotest.(check bool) "no erased payload slot is emitted" false
         (contains_substring ir "{ i32, i1 }"));
+
+  Alcotest.test_case
+    "plain variant storage copies a typed struct payload without pointer encoding" `Quick
+    (fun () ->
+      let src =
+        "struct CgRequestArgs3b { left: i32; right: i32; }
+         variant CgRequest3b { Stop; Add(CgRequestArgs3b); }
+         struct CgRequestSlot3b { value: CgRequest3b; }
+         fn cgr3b_make(left: i32, right: i32) -> CgRequest3b {
+           let mut args: CgRequestArgs3b = { left, right };
+           return CgRequest3b::Add(args);
+         }
+         fn cgr3b_put(slot: *CgRequestSlot3b, value: CgRequest3b) {
+           slot.value = value;
+         }
+         fn cgr3b_take(slot: *CgRequestSlot3b) -> CgRequest3b {
+           return slot.value;
+         }
+         fn cgr3b_sum(value: CgRequest3b) -> i32 {
+           match value {
+             CgRequest3b::Stop => { return 0; }
+             CgRequest3b::Add(args) => { return args.left + args.right; }
+           }
+         }" in
+      ignore (gen_codegen src);
+      let find name = match Hashtbl.find_opt Llvm_gen.functions name with
+        | Some (_, fn) -> fn
+        | None -> Alcotest.failf "%s not found" name
+      in
+      let put_ir = Llvm.string_of_llvalue (find "cgr3b_put") in
+      let take_ir = Llvm.string_of_llvalue (find "cgr3b_take") in
+      let sum_ir = Llvm.string_of_llvalue (find "cgr3b_sum") in
+      Alcotest.(check bool) "slot stores the tagged aggregate" true
+        (contains_substring put_ir "store {");
+      Alcotest.(check bool) "slot loads the tagged aggregate" true
+        (contains_substring take_ir "load {");
+      Alcotest.(check bool) "payload fields are read from the copied value" true
+        (contains_substring sum_ir "extractvalue");
+      Alcotest.(check bool) "request transport uses no integer-pointer bridge" false
+        (contains_substring put_ir "inttoptr"
+         || contains_substring put_ir "ptrtoint"));
 
 
   Alcotest.test_case "overloads emit mangled symbols and direct calls use the selected symbol" `Quick

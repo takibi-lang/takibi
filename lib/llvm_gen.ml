@@ -211,17 +211,29 @@ let rec ty_str = function
   | TypeNamed s -> s
   | TypeView (s, []) -> "view " ^ s
   | TypeView (s, args) ->
-      let arg = function StaticName n -> n | StaticInt n -> string_of_int n in
+      let arg = function
+        | StaticName n -> n
+        | StaticInt n -> string_of_int n
+        | StaticEnum (name, case) -> name ^ "::" ^ case
+      in
       Printf.sprintf "view %s[%s]" s
         (String.concat ", " (List.map arg args))
   | TypeVariant s -> s
   | TypeExists (name, sort, body) ->
       Printf.sprintf "exists %s: %s. %s" name (ty_str sort) (ty_str body)
   | TypeIndexed (s, args) ->
-      let arg = function StaticName n -> n | StaticInt n -> string_of_int n in
+      let arg = function
+        | StaticName n -> n
+        | StaticInt n -> string_of_int n
+        | StaticEnum (name, case) -> name ^ "::" ^ case
+      in
       Printf.sprintf "%s[%s]" s (String.concat ", " (List.map arg args))
   | TypeSingleton (t, arg) ->
-      let n = match arg with StaticName n -> n | StaticInt n -> string_of_int n in
+      let n = match arg with
+        | StaticName n -> n
+        | StaticInt n -> string_of_int n
+        | StaticEnum (name, case) -> name ^ "::" ^ case
+      in
       Printf.sprintf "%s @ %s" (ty_str t) n
   | TypeRefined (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
   | TypeSlice (t, 0) -> Printf.sprintf "[]%s" (ty_str t)
@@ -754,7 +766,10 @@ let rec ltype_of_ast = function
          pairs on both targets. *)
       struct_type context [| pointer_type context; usize_lltype () |]
   | TypeNamed sname ->
-      (match Hashtbl.find_opt enum_underlying sname with
+      (match Hashtbl.find_opt variant_lltypes sname with
+       | Some llty -> llty
+       | None ->
+      match Hashtbl.find_opt enum_underlying sname with
        | Some ut -> ltype_of_ast ut   (* enum: integer type of the underlying type *)
        | None ->
            match Hashtbl.find_opt struct_lltypes sname with
@@ -2186,11 +2201,20 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       in
       let (idx, field_ty) = field_info sname fname in
       let llty = Hashtbl.find struct_lltypes sname in
-      let field_ptr = build_in_bounds_gep llty base_v
-        [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
-        (fname ^ "_ptr") builder
-      in
-      (match field_ty with
+      if type_of base_v = llty then begin
+        let value_ty = resolve_special_type field_ty in
+        let v = build_extractvalue base_v idx fname builder in
+        (value_ty, to_arith_width value_ty v)
+      end else begin
+        let field_ptr = build_in_bounds_gep llty base_v
+          [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
+          (fname ^ "_ptr") builder
+        in
+        (match field_ty with
+       | TypeNamed name when Hashtbl.mem variant_defs name ->
+           let v = build_load (ltype_of_ast field_ty) field_ptr fname builder in
+           if through_io then set_volatile true v;
+           (TypeVariant name, v)
        | TypeNamed _ ->
            (* Nested struct field: return the pointer as-is (same approach as array decay) *)
            (TypePtr field_ty, field_ptr)
@@ -2204,7 +2228,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | _ ->
            let v = build_load (ltype_of_ast field_ty) field_ptr fname builder in
            if through_io then set_volatile true v;
-           (field_ty, to_arith_width field_ty v)))
+           (field_ty, to_arith_width field_ty v))
+      end)
 
   | Index (id, idx) ->
       let (idx_ty_raw, idx_raw) = gen_expr locals idx in
@@ -3530,6 +3555,7 @@ let gen_func ?prog_types fdef =
         let switch_ll_ty = type_of switch_v in
         let merge_bb = append_block context "match_merge" f in
         let dead_bb  = append_block context "match_dead"  f in
+        let merge_reachable = ref false in
         (* Build per-arm basic blocks *)
         let arm_bbs = List.map (fun arm ->
           match arm with
@@ -3604,13 +3630,20 @@ let gen_func ?prog_types fdef =
                 | None, Some _ -> raise (Error
                     "BUG: numeric enum match arm has a payload binder"))
            | ArmWild body            -> List.iter gen_stmt body);
-          if block_terminator (insertion_block builder) = None then
+          if block_terminator (insertion_block builder) = None then begin
+            merge_reachable := true;
             ignore (build_br merge_bb builder)
+          end
         ) arm_bbs;
         (* dead_bb: only reachable when no wildcard and match is fully exhaustive *)
         position_at_end dead_bb builder;
         ignore (build_unreachable builder);
-        position_at_end merge_bb builder
+        position_at_end merge_bb builder;
+        (* A fully terminating match still needs an LLVM terminator on its
+           synthetic merge block even though no arm branches there. Leaving
+           it open made gen_func's generic scalar fallback try to return an
+           integer zero from aggregate-returning functions. *)
+        if not !merge_reachable then ignore (build_unreachable builder)
   in
 
   List.iter gen_stmt fdef.body;
@@ -3876,36 +3909,10 @@ let gen_program ?prog_types prog =
     | ViewDef (name, _, _, _, _) -> Hashtbl.replace erased_view_names name ()
     | VariantDef (name, cases, _) -> Hashtbl.replace variant_defs name cases
     | _ -> ()) prog;
-  (* Pass 0: register struct and enum types -- must precede ltype_of_ast for TypeNamed *)
+  (* Pass 0a: enums and opaque structs do not depend on aggregate layout. *)
   List.iter (function
     | OpaqueStructDef (name, _, _, _) ->
         Hashtbl.add struct_lltypes name (named_struct_type context name)
-    | StructDef (name, fields, is_packed, align_opt, _, _)
-    | OwnedStructDef (name, _, _, fields, is_packed, align_opt, _, _, _) ->
-        let field_lltys = List.map (fun (_, ty) -> ltype_of_ast ty) fields
-                          |> Array.of_list in
-        let mk_struct fltys = if is_packed then packed_struct_type context fltys
-                              else struct_type context fltys in
-        let llty = mk_struct field_lltys in
-        (* Tail-pad the struct so that sizeof(struct) is a multiple of align(N).
-           Without this, elements 1, 2, ... of a [Name; N] array would be misaligned.
-           C compilers handle this automatically; here we add an explicit [i8; pad] field. *)
-        let llty = match align_opt with
-          | None   -> llty
-          | Some n ->
-              (match !target_data with
-               | None    -> llty  (* setup_target not called yet -- unit tests; no padding *)
-               | Some dl ->
-                   let sz  = Int64.to_int (Llvm_target.DataLayout.abi_size llty dl) in
-                   let pad = (n - (sz mod n)) mod n in
-                   if pad = 0 then llty
-                   else mk_struct (Array.append field_lltys
-                                     [| array_type (i8_type context) pad |]))
-        in
-        Hashtbl.add struct_lltypes name llty;
-        Hashtbl.add struct_fields  name fields;
-        Hashtbl.add struct_is_packed name is_packed;
-        (match align_opt with Some n -> Hashtbl.add struct_alignments name n | None -> ())
     | EnumDef (name, ty_opt, variants, is_ne) ->
         let underlying = match ty_opt with Some t -> t | None -> TypeU32 in
         let (_, resolved) = List.fold_left (fun (next, acc) (vname, vopt) ->
@@ -3915,9 +3922,55 @@ let gen_program ?prog_types prog =
         Hashtbl.add enum_underlying    name underlying;
         Hashtbl.add enum_variants_tbl  name resolved;
         Hashtbl.add enum_nonexhaustive name is_ne
-    | VariantDef _ -> ()
     | _ -> ()
   ) prog;
+  let rec ast_mentions_variant = function
+    | TypeVariant _ -> true
+    | TypeNamed name -> Hashtbl.mem variant_defs name
+    | TypePtr t | TypeIo t | TypeArray (t, _) | TypeSlice (t, _)
+    | TypeBorrow t | TypeBorrowMut t | TypeSink t
+    | TypeRefined (_, _, t) | TypeAlignedPtr (_, t)
+    | TypeSingleton (t, _) -> ast_mentions_variant t
+    | TypeFn (args, ret, _) ->
+        List.exists ast_mentions_variant args || ast_mentions_variant ret
+    | TypeTuple ts -> List.exists ast_mentions_variant ts
+    | TypeExists (_, _, body) -> ast_mentions_variant body
+    | _ -> false
+  in
+  let register_struct name fields is_packed align_opt =
+    let field_lltys = List.map (fun (_, ty) -> ltype_of_ast ty) fields
+                      |> Array.of_list in
+    let mk_struct fltys = if is_packed then packed_struct_type context fltys
+                          else struct_type context fltys in
+    let llty = mk_struct field_lltys in
+    (* Tail-pad the struct so sizeof(struct) is a multiple of align(N). *)
+    let llty = match align_opt with
+      | None -> llty
+      | Some n ->
+          (match !target_data with
+           | None -> llty
+           | Some dl ->
+               let sz = Int64.to_int (Llvm_target.DataLayout.abi_size llty dl) in
+               let pad = (n - (sz mod n)) mod n in
+               if pad = 0 then llty
+               else mk_struct (Array.append field_lltys
+                     [| array_type (i8_type context) pad |]))
+    in
+    Hashtbl.add struct_lltypes name llty;
+    Hashtbl.add struct_fields name fields;
+    Hashtbl.add struct_is_packed name is_packed;
+    Option.iter (fun n -> Hashtbl.add struct_alignments name n) align_opt
+  in
+  let register_struct_if has_variant = function
+    | StructDef (name, fields, is_packed, align_opt, _, _)
+    | OwnedStructDef (name, _, _, fields, is_packed, align_opt, _, _, _)
+      when List.exists (fun (_, ty) -> ast_mentions_variant ty) fields
+           = has_variant ->
+        register_struct name fields is_packed align_opt
+    | _ -> ()
+  in
+  (* Variants may carry ordinary structs by value, so those layouts come first. *)
+  List.iter (register_struct_if false) prog;
   (* A Slice 3 variant is a compact tagged aggregate in the semantic sense,
      but deliberately uses one LLVM field per runtime-bearing case for now:
      `{ i32 tag, payload0, payload1, ... }`.  This is target-independent,
@@ -3951,6 +4004,8 @@ let gen_program ?prog_types prog =
         Hashtbl.replace variant_lltypes name (struct_type context fields);
         Hashtbl.replace variant_cases_tbl name layouts
     | _ -> ()) prog;
+  (* Plain variants may in turn be held in ordinary struct storage. *)
+  List.iter (register_struct_if true) prog;
   (* Pass 1: register all globals and function signatures *)
   List.iter (function
     | FuncDef fdef                    -> declare_func ?prog_types fdef

@@ -96,14 +96,6 @@ fn chan_init(ch: *Chan) {
     ch.value = 0;
 }
 
-fn chan_word_init(ch: *WordChan) {
-    ch.mutex = 1;
-    ch.slot_full = 0;
-    ch.slot_taken = 0;
-    ch.full = 0;
-    ch.value = 0;
-}
-
 struct Chan {
     // All private (issue #108 / OWNERSHIP_KERNEL.md Stage 2):
     // chan_send/chan_recv below are the ONLY code that may touch channel
@@ -138,45 +130,6 @@ fn chan_recv(ch: *Chan) -> i32 !{may_block} {
         g = cond_wait(&ch.slot_full, g, &ch.mutex);
     }
     let v: i32 = ch.value;
-    ch.full = 0;
-    cond_signal(&ch.slot_taken);
-    mutex_unlock(g, &ch.mutex);
-    return v;
-}
-
-// Word-sized rendezvous channel for task APIs that need to hand off a
-// pointer-sized token before language-level generics exist. This keeps
-// task code on the RTOS channel boundary instead of exposing mutex/condvar
-// directly, while preserving Chan's existing i32 API for current examples.
-struct WordChan {
-    // Same privacy rationale as Chan above.
-    private mutex:      i32;
-    private slot_full:  io i32;
-    private slot_taken: io i32;
-    private full:       i32;
-    private value:      usize;
-}
-
-fn chan_word_send(ch: *WordChan, m: usize) !{may_block} {
-    let mut g: MutexGuard = mutex_lock(&ch.mutex);
-    while (ch.full != 0) {
-        g = cond_wait(&ch.slot_taken, g, &ch.mutex);
-    }
-    ch.value = m;
-    ch.full = 1;
-    cond_signal(&ch.slot_full);
-    while (ch.full != 0) {
-        g = cond_wait(&ch.slot_taken, g, &ch.mutex);
-    }
-    mutex_unlock(g, &ch.mutex);
-}
-
-fn chan_word_recv(ch: *WordChan) -> usize !{may_block} {
-    let mut g: MutexGuard = mutex_lock(&ch.mutex);
-    while (ch.full == 0) {
-        g = cond_wait(&ch.slot_full, g, &ch.mutex);
-    }
-    let v: usize = ch.value;
     ch.full = 0;
     cond_signal(&ch.slot_taken);
     mutex_unlock(g, &ch.mutex);

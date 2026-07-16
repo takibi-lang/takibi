@@ -5,7 +5,8 @@ syntax accepted by the compiler today. `SPEC.md` remains authoritative for
 implemented Takibi. `OWNERSHIP_KERNEL.md` records the history and limitations
 of the current affine/linear checker.
 
-Implementation status (2026-07-16): Slices 0 through 6 are implemented. The
+Implementation status (2026-07-16): Slices 0 through 6 and the first three
+post-Slice-6 Core increments are implemented. The
 `Takibi_core` module owns the four-layer vocabulary, the current checker uses
 `Delta.Legacy_flow`, and the indexed runtime-owner subset described in 3.1 is
 accepted. Non-indexed erased affine/linear views are also accepted and erased
@@ -17,10 +18,13 @@ Integer-indexed erased views and implicitly universal view transitions are
 accepted. The post-Slice 6 examples now use erased guard views, an affine RX
 acquisition permission, and owner-mediated synchronous TX. Owner-derived
 region slices (`-> [T; N..] @ owner_index`, backed by `Delta.Region_taint`)
-are implemented: `net_rx_frame`'s slice is now unusable after release. General
-place/storage tracking, lock invariants, existential
-view state dispatch, explicit/general quantifiers and propositions, and
-solver hooks remain design targets.
+are implemented: `net_rx_frame`'s slice is now unusable after release.
+Finite-enum static states and existential indexed-view payloads now support
+closed `TcpConn[conn, state]` runtime dispatch. Plain variants can now carry
+unrestricted ordinary structs by value and live in ordinary struct fields; the RTOS SD
+server uses that subset for one typed copy-rendezvous request slot. General
+linear-owner place/storage tracking, lock invariants, direct/general quantifiers and propositions,
+static address identities, and solver hooks remain design targets.
 
 The examples in this document are elaboration fixtures. Their contracts and
 runtime representations are decisions; punctuation may change when a fixture
@@ -629,10 +633,13 @@ Implemented scope:
   existential binders erased. This first layout is not yet a stable C ABI or
   full tagged-union DWARF representation.
 
-Deliberate limits are concrete named variants, no generic
-`Option[T]`/`Result[T,E]`, no nested/container/storage variants, one
-payload per case, no concrete struct/array aggregate payloads, and
-existentials only around a direct indexed runtime owner. These are
+At the Slice 3 checkpoint, deliberate limits were concrete named variants,
+no generic `Option[T]`/`Result[T,E]`, no nested/container/storage variants,
+one payload per case, no concrete struct/array aggregate payloads, and
+existentials only around a direct indexed runtime owner. The later typed-copy
+channel increment lifts unrestricted ordinary struct payloads and
+plain-variant struct fields only. Arrays, indexed-owner payload structs,
+ownership-bearing aggregate payloads, and affine/linear variant storage remain
 ownership-tracking limits, not claims about the final Core.
 
 ### Slice 4: runtime mutable owners and effects (implemented 2026-07-15)
@@ -714,10 +721,9 @@ from the indexed spelling.
   checker.
 - Lock invariants and heap/region predicates once a multicore or zero-copy
   example requires them.
-- existentially packaged indexed views and runtime state dispatch, with
-  `TcpConn[conn, state]` as the concrete driver. The universal transition
-  basis is now provided by Slice 6.
-- Zero-copy typed channels (#113) and ownership transfer through variants.
+- Zero-copy typed channels (#113), stable linear payload storage, and
+  ownership transfer through variants. Plain copy-rendezvous requests are
+  implemented below.
 - Aliasing/region predicates (#106, closed -- escape control continues as
   #128), asynchronous TX ownership (#87), and
   solver/proof integration, each with a concrete driver and negative tests.
@@ -811,16 +817,84 @@ through wrappers, and no owner-tied slice crossing a function boundary in
 either direction. Those stay demand-led, the same tripwire discipline as
 every other slice.
 
+### Finite-state existential view dispatch (implemented 2026-07-16)
+
+The next priority increment adds the finite-state vocabulary needed by
+`TcpConn[conn, state]` without adding general quantifiers or a solver. The
+HTTP server now dispatches through this permission, and
+`examples/tcp_conn_view` is its focused executable fixture: the closed
+`TcpConnDispatch` variant retains the runtime state tag, while each case
+packages `exists conn: usize. TcpConn[conn, TcpState::Case]`.
+
+Implemented scope:
+
+- an erased view or indexed runtime owner may declare an exhaustive enum as a
+  static parameter sort; case arguments use the nominal qualified form
+  `Enum::Case`;
+- non-exhaustive enums are rejected as static sorts, and equal discriminants
+  from distinct enum types do not unify;
+- an outermost variant payload `exists` may directly package an indexed
+  erased view as well as the existing indexed runtime-owner form. Its binder
+  sort may be an integer or exhaustive enum;
+- matching the closed dispatch variant opens a fresh existential identity and
+  a case-specific linear view. Existing all-path flow requires every arm to
+  preserve, transition, or sink it;
+- state transitions remain ordinary universal consume-and-produce functions.
+  Passing a view in the wrong enum state is a static-value mismatch;
+- `examples/common/http_conn_state.tkb` is the trusted exhaustive bridge from
+  its private runtime `ConnState` byte to `TcpConnDispatch`. Every
+  `(state, event)` arm in `http_server_common.tkb` must consume both its
+  `PendingTcpEvent` and its state-specific `TcpConn` permission;
+- the closed variant tag is the complete runtime representation when all
+  payloads are views. Existential binders, enum static states, indices, and
+  view values add no fields, parameters, results, or pointer encodings;
+- `tcp_conn_state_wrong` and `tcp_conn_dispatch_missed_wrong` are the focused
+  negative fixtures. The latter verifies that opening the runtime case cannot
+  discard its linear state permission.
+
+The implemented surface uses one closed variant case per runtime state. A
+direct first-class `exists state. TcpConn[c, state]` outside a variant payload,
+arbitrary existential elimination, address sorts, and storage of the linear
+dispatch package remain outside this increment.
+
+### Typed copy-rendezvous requests (implemented 2026-07-16)
+
+The next priority increment removes the untyped request transport from
+`http_server_sdcard_rtos` without pretending that linear owner storage is
+already solved. Its focused language change is deliberately narrower than a
+generic or zero-copy channel:
+
+- a plain variant may carry an unrestricted ordinary concrete struct by value.
+  Arrays, indexed owner structs, and structs containing affine/linear fields
+  remain rejected as aggregate payloads;
+- a plain variant may be an ordinary struct field and may be copied into or
+  out of that field. A variant whose payload makes it affine or linear remains
+  forbidden in storage, with a focused negative unit test;
+- LLVM lays out payload structs before variants and variant-containing structs
+  after variants. Copying and matching the aggregate uses typed
+  `store`/`load`/`extractvalue`; no pointer-to-integer representation is used;
+- the RTOS SD server now sends one `SdRequest` value:
+  `Init | ReadChunk(SdReadChunkRequest) | FileSize(*u8)`. The former integer
+  tag plus four `WordChan` values and every request-side `as usize`/back-cast
+  are removed;
+- `SdRequestChan` has one private mutex-protected slot. Its complete current
+  invariant is `full == 0` means the value is ignored, while `full == 1`
+  means the slot contains one complete request. Send publishes the copied
+  value while holding the mutex and waits until receive has copied it out.
+
+This is a typed, synchronous, copy-based request channel. It does not store a
+linear owner, transfer an ownership-bearing variant, provide a generic
+channel, or formalize the mutex invariant as an openable `Delta` predicate.
+Those are the next owner-container slice, not hidden claims of this one.
+
 The remaining example-driven order is:
 
-1. finite-enum static states plus existentially packaged indexed views for
-   the HTTP server's `TcpConn[conn, state]` dispatch;
-2. stable linear owner storage, typed request variants, and the smallest lock
-   invariant needed to replace `WordChan` pointer-to-`usize` RPC in
-   `http_server_sdcard_rtos` (#113);
-3. static address/place identities for `MutexHeld[lock]` and `KGuard[lock]`,
+1. stable linear owner storage and the first open/close lock invariant, driven
+   by a concrete ownership-bearing channel/container rather than by the now
+   completed copy-request RPC (#113);
+2. static address/place identities for `MutexHeld[lock]` and `KGuard[lock]`,
    unless the channel slice needs them earlier;
-4. asynchronous TX ownership only when an example actually keeps a DMA buffer
+3. asynchronous TX ownership only when an example actually keeps a DMA buffer
    in flight after the call returns (#87).
 
 Full lock invariants are not a standalone prerequisite for the current

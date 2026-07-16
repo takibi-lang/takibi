@@ -19,8 +19,9 @@ type ty =
     (* Erased affine/linear permission value with checker-only indices. *)
   | TVariant of string    (* tagged runtime sum; kind is derived from payloads *)
   | TExists of string * Ast.type_expr * static_term * ty
-    (* Binder name, integer sort, bound static term, payload schema. The
-       binder is erased; the payload retains its ordinary runtime layout. *)
+    (* Binder name, static sort, bound static term, payload schema. The
+       binder is erased; a runtime owner retains its ordinary layout and an
+       erased-view payload contributes no runtime field. *)
   | TIndexedStruct of string * static_term list
     (* First-class runtime struct carrying erased static indices. *)
   | TSingleton of ty * static_term
@@ -67,6 +68,10 @@ and tv =
 
 and static_term =
   | SConst of int
+  | SEnum of string * string
+    (* Nominal finite-enum state. The runtime discriminant is deliberately
+       not used as its identity: A::Ready and B::Ready remain distinct even
+       if both happen to lower to zero. *)
   | SParam of int * string
     (* Rigid while checking a universally quantified function body. *)
   | SVar of static_var ref
@@ -121,6 +126,7 @@ let rec static_repr = function
 let static_to_string t =
   match static_repr t with
   | SConst n -> string_of_int n
+  | SEnum (name, case) -> Printf.sprintf "%s::%s" name case
   | SParam (_, name) -> name
   | SVar { contents = SUnbound id } -> Printf.sprintf "__static%d" id
   | SVar { contents = SLink _ } -> assert false
@@ -418,6 +424,8 @@ let rec unify t1 t2 =
 and unify_static s1 s2 =
   match static_repr s1, static_repr s2 with
   | SConst a, SConst b when a = b -> ()
+  | SEnum (enum1, case1), SEnum (enum2, case2)
+      when enum1 = enum2 && case1 = case2 -> ()
   | SParam (a, _), SParam (b, _) when a = b -> ()
   | SVar r1, SVar r2 when r1 == r2 -> ()
   | SVar r, t | t, SVar r ->
@@ -433,6 +441,7 @@ and unify_static s1 s2 =
 let static_of_ast scope = function
   | Ast.StaticName name -> static_in_scope scope name
   | Ast.StaticInt n -> SConst n
+  | Ast.StaticEnum (name, case) -> SEnum (name, case)
 
 let rec of_ast_in_scope scope = function
   | Ast.TypeBool     -> TBool
@@ -492,7 +501,7 @@ let instantiate_static_params ty =
   let subst : (int, static_term) Hashtbl.t = Hashtbl.create 8 in
   let rec inst_static t =
     match static_repr t with
-    | SConst _ as t -> t
+    | (SConst _ | SEnum _) as t -> t
     | SVar _ as t -> t
     | SParam (id, _) ->
         (match Hashtbl.find_opt subst id with
@@ -552,6 +561,7 @@ let rec to_ast t =
 and static_to_ast t =
   match static_repr t with
   | SConst n -> Ast.StaticInt n
+  | SEnum (name, case) -> Ast.StaticEnum (name, case)
   | SParam (_, name) -> Ast.StaticName name
   | SVar { contents = SUnbound id } -> Ast.StaticName (Printf.sprintf "__static%d" id)
   | SVar { contents = SLink _ } -> assert false

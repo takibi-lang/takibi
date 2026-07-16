@@ -1,0 +1,20 @@
+// Opening a runtime state case creates the indexed view obligation. The arm
+// must transition, preserve, or explicitly sink it before leaving.
+
+enum MissedTcpState: u8 {
+    Listen;
+}
+
+linear view MissedTcpConn[conn: usize, state: MissedTcpState];
+
+variant MissedTcpDispatch {
+    Listen(exists conn: usize.
+        MissedTcpConn[conn, MissedTcpState::Listen]);
+}
+
+fn forget_connection(value: MissedTcpDispatch) {
+    match value {
+        MissedTcpDispatch::Listen(conn) => {
+        }
+    }
+}

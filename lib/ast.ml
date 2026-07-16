@@ -19,6 +19,10 @@ type binop =
 type static_arg =
   | StaticName of string
   | StaticInt of int
+  | StaticEnum of string * string
+    (* Enum::Case -- a nominal finite-state constant used only by the
+       checker. Unlike StaticInt, equal runtime discriminants from different
+       enums are not interchangeable. *)
 [@@deriving show]
 
 type type_expr =
@@ -44,8 +48,9 @@ type type_expr =
     (* Elaborated tagged runtime variant type. Source annotations use the
        declared bare name; payload kind is tracked separately in Delta. *)
   | TypeExists of ident * type_expr * type_expr
-    (* exists n: Sort. T[n] -- an erased static binder around a runtime
-       payload. Slice 3 permits this only as a variant payload schema. *)
+    (* exists n: Sort. T[n] -- an erased static binder around a variant
+       payload. Sort may be an integer or a finite enum; the payload may be
+       an indexed runtime owner or an indexed erased view. *)
   | TypeIndexed of string * static_arg list
     (* Name[n, ...] -- a runtime named value indexed by erased static
        integers. The named value keeps its ordinary runtime layout; only
@@ -90,6 +95,7 @@ type type_expr =
 [@@deriving show]
 
 type static_param = ident * type_expr
+(* Static parameter sorts are primitive integers or exhaustive enums. *)
 [@@deriving show]
 
 type expr = expr_desc located

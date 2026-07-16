@@ -205,7 +205,7 @@ view_static_params:
   | ps = static_params { ps }
 
 static_param:
-  | name = IDENT COLON sort = int_base_type_expr { (name, sort) }
+  | name = IDENT COLON sort = static_sort_expr { (name, sort) }
 
 struct_fields:
   | /* empty */ { [] }
@@ -519,6 +519,8 @@ base_type_expr:
 static_arg:
   | name = IDENT { StaticName name }
   | n = INT { StaticInt (narrow_int64 $symbolstartpos "static integer" n) }
+  | enum_name = IDENT COLONCOLON case_name = IDENT
+    { StaticEnum (enum_name, case_name) }
 
 view_static_args:
   | /* empty */ { [] }
@@ -567,7 +569,7 @@ type_expr:
   | BORROW MUT t = type_expr { TypeBorrowMut t }
   | BORROW t = type_expr { TypeBorrow t }
   | SINK t = type_expr { TypeSink t }
-  | EXISTS name = IDENT COLON sort = int_base_type_expr DOT body = type_expr
+  | EXISTS name = IDENT COLON sort = static_sort_expr DOT body = type_expr
     { TypeExists (name, sort, body) }
   | LBRACE lo = INT DOTDOTLT hi = INT RBRACE
     { (* Reserved for future contextual base inference. Until the AST and
@@ -623,6 +625,14 @@ int_base_type_expr:
   | U64_TYPE   { TypeU64 }
   | ISIZE_TYPE { TypeIsize }
   | USIZE_TYPE { TypeUsize }
+
+(* Static indices are either primitive integers or values of a closed enum.
+   The type checker verifies that an IDENT here names an exhaustive enum;
+   keeping that lookup out of the parser preserves declaration-order
+   independence. *)
+static_sort_expr:
+  | int_base_type_expr { $1 }
+  | name = IDENT { TypeNamed name }
 
 fn_type_params:
   | /* empty */                              { [] }

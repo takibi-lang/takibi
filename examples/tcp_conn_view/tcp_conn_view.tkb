@@ -1,0 +1,100 @@
+// Finite-state indexed view dispatch. The closed variant retains the runtime
+// TCP state tag, while every existential TcpConn payload and both of its
+// static arguments erase. Matching a case opens a state-specific linear
+// permission; the only way to leave the arm is to preserve or transition it.
+
+enum TcpState: u8 {
+    Listen;
+    SynRcvd;
+    Established;
+    Sending;
+    LastAck;
+}
+
+private linear view TcpConn[conn: usize, state: TcpState];
+
+variant TcpConnDispatch {
+    Listen(exists conn: usize. TcpConn[conn, TcpState::Listen]);
+    SynRcvd(exists conn: usize. TcpConn[conn, TcpState::SynRcvd]);
+    Established(exists conn: usize. TcpConn[conn, TcpState::Established]);
+    Sending(exists conn: usize. TcpConn[conn, TcpState::Sending]);
+    LastAck(exists conn: usize. TcpConn[conn, TcpState::LastAck]);
+}
+
+fn tcp_accept(c: sink TcpConn[conn, TcpState::Listen])
+        -> TcpConn[conn, TcpState::SynRcvd] {
+    return view TcpConn[conn, TcpState::SynRcvd];
+}
+
+fn tcp_establish(c: sink TcpConn[conn, TcpState::SynRcvd])
+        -> TcpConn[conn, TcpState::Established] {
+    return view TcpConn[conn, TcpState::Established];
+}
+
+fn tcp_start_response(c: sink TcpConn[conn, TcpState::Established])
+        -> TcpConn[conn, TcpState::Sending] {
+    return view TcpConn[conn, TcpState::Sending];
+}
+
+fn tcp_finish_response(c: sink TcpConn[conn, TcpState::Sending])
+        -> TcpConn[conn, TcpState::LastAck] {
+    return view TcpConn[conn, TcpState::LastAck];
+}
+
+fn tcp_close(c: sink TcpConn[conn, TcpState::LastAck])
+        -> TcpConn[conn, TcpState::Listen] {
+    return view TcpConn[conn, TcpState::Listen];
+}
+
+fn tcp_conn_new() -> TcpConnDispatch {
+    return TcpConnDispatch::Listen(view TcpConn[0, TcpState::Listen]);
+}
+
+fn tcp_conn_step(value: TcpConnDispatch) -> TcpConnDispatch {
+    match value {
+        TcpConnDispatch::Listen(c) => {
+            uart_putc('L');
+            return TcpConnDispatch::SynRcvd(tcp_accept(c));
+        }
+        TcpConnDispatch::SynRcvd(c) => {
+            uart_putc('Y');
+            return TcpConnDispatch::Established(tcp_establish(c));
+        }
+        TcpConnDispatch::Established(c) => {
+            uart_putc('E');
+            return TcpConnDispatch::Sending(tcp_start_response(c));
+        }
+        TcpConnDispatch::Sending(c) => {
+            uart_putc('S');
+            return TcpConnDispatch::LastAck(tcp_finish_response(c));
+        }
+        TcpConnDispatch::LastAck(c) => {
+            uart_putc('A');
+            return TcpConnDispatch::Listen(tcp_close(c));
+        }
+    }
+}
+
+fn tcp_conn_sink(c: sink TcpConn[conn, state]) {
+}
+
+fn tcp_conn_drop(value: TcpConnDispatch) {
+    match value {
+        TcpConnDispatch::Listen(c) => { tcp_conn_sink(c); }
+        TcpConnDispatch::SynRcvd(c) => { tcp_conn_sink(c); }
+        TcpConnDispatch::Established(c) => { tcp_conn_sink(c); }
+        TcpConnDispatch::Sending(c) => { tcp_conn_sink(c); }
+        TcpConnDispatch::LastAck(c) => { tcp_conn_sink(c); }
+    }
+}
+
+fn app_main() {
+    let c0 = tcp_conn_new();
+    let c1 = tcp_conn_step(c0);
+    let c2 = tcp_conn_step(c1);
+    let c3 = tcp_conn_step(c2);
+    let c4 = tcp_conn_step(c3);
+    let c5 = tcp_conn_step(c4);
+    tcp_conn_drop(c5);
+    uart_putc('\n');
+}

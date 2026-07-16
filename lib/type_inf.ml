@@ -665,6 +665,17 @@ let rec contains_variant_ty t = match repr t with
   | TExists (_, _, _, body) -> contains_variant_ty body
   | _ -> false
 
+let rec contains_kinded_variant_ty t = match repr t with
+  | TVariant name -> Hashtbl.mem variant_kinds name
+  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
+  | TAlignedPtr (_, t) | TSingleton (t, _) -> contains_kinded_variant_ty t
+  | TTuple ts -> List.exists contains_kinded_variant_ty ts
+  | TFun (args, ret, _) ->
+      List.exists contains_kinded_variant_ty args
+      || contains_kinded_variant_ty ret
+  | TExists (_, _, _, body) -> contains_kinded_variant_ty body
+  | _ -> false
+
 let type_has_explicit_function_effect senv ty =
   let rec visit seen = function
     | Ast.TypeFn (args, ret, effects) ->
@@ -2526,9 +2537,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       if contains_view_ty vt then
         raise (TypeError (val_expr.loc,
           "cannot store an erased view into a struct field"));
-      if contains_variant_ty vt then
+      if contains_kinded_variant_ty vt then
         raise (TypeError (val_expr.loc,
-          "cannot store a variant into a struct field in Slice 3"));
+          "cannot store an affine/linear variant into a struct field"));
       if is_tuple_ty vt then
         raise (TypeError (val_expr.loc,
           "cannot store a tuple into a struct field: tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
@@ -3114,6 +3125,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.VariantDef (n, _, _)     -> claim_toplevel_name n "variant"
     | Ast.UseDef _              -> ()
   ) prog;
+  (* Closed enums are finite static sorts. Keep their nominal case names,
+     rather than their machine discriminants, so equal integer encodings in
+     unrelated enums cannot satisfy one another's state contracts. *)
+  let static_enum_defs : (string, string list * bool) Hashtbl.t =
+    Hashtbl.create 8 in
+  List.iter (function
+    | Ast.EnumDef (name, _, cases, is_nonexhaustive) ->
+        Hashtbl.replace static_enum_defs name
+          (List.map fst cases, is_nonexhaustive)
+    | _ -> ()) prog;
   Hashtbl.reset view_kinds;
   Hashtbl.reset view_params;
   List.iter (function
@@ -3142,6 +3163,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringSet.add name names
     | _ -> names
   ) StringSet.empty prog in
+  let ordinary_struct_fields = List.fold_left (fun defs -> function
+    | Ast.StructDef (name, fields, _, _, _, _) ->
+        StringMap.add name fields defs
+    | _ -> defs
+  ) StringMap.empty prog in
   let affine_names = List.fold_left (fun names -> function
     | Ast.OpaqueStructDef (name, Ast.KindAffine, _, _) -> StringSet.add name names
     | Ast.OwnedStructDef (name, Ast.KindAffine, _, _, _, _, _, _, _) ->
@@ -3170,7 +3196,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         if StringSet.mem name linear_names then Ast.KindLinear
         else if StringSet.mem name affine_names then Ast.KindAffine
         else (match Hashtbl.find_opt variant_kinds name with
-          | Some kind -> kind | None -> Ast.KindPlain)
+          | Some kind -> kind
+          | None ->
+              (match StringMap.find_opt name ordinary_struct_fields with
+               | Some fields ->
+                   List.fold_left (fun kind (_, ty) ->
+                     join_kind kind (payload_kind ty)
+                   ) Ast.KindPlain fields
+               | None -> Ast.KindPlain))
     | Ast.TypeVariant name ->
         Option.value (Hashtbl.find_opt variant_kinds name)
           ~default:Ast.KindPlain
@@ -3240,6 +3273,27 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let validation_static_scope : (string, Ast.type_expr) Hashtbl.t option ref =
     ref None in
   let allow_implicit_static = ref false in
+  let is_integer_static_sort = function
+    | Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32 | Ast.TypeI64
+    | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64
+    | Ast.TypeIsize | Ast.TypeUsize -> true
+    | _ -> false
+  in
+  let validate_static_sort loc = function
+    | sort when is_integer_static_sort sort -> ()
+    | Ast.TypeNamed name ->
+        (match Hashtbl.find_opt static_enum_defs name with
+         | Some (_, false) -> ()
+         | Some (_, true) -> raise (TypeError (loc, Printf.sprintf
+             "non-exhaustive enum '%s' cannot be used as a finite static sort"
+             name))
+         | None -> raise (TypeError (loc, Printf.sprintf
+             "static sort '%s' is not a primitive integer or exhaustive enum"
+             name)))
+    | sort -> raise (TypeError (loc, Printf.sprintf
+        "static sort must be a primitive integer or exhaustive enum, got %s"
+        (Types.to_string (Types.of_ast sort))))
+  in
   let static_sort_of_value loc = function
     | Ast.TypeRefined (_, _, base) -> base
     | (Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32 | Ast.TypeI64
@@ -3250,6 +3304,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         (Types.to_string (Types.of_ast t))))
   in
   let check_static_const loc sort n =
+    if not (is_integer_static_sort sort) then
+      raise (TypeError (loc, Printf.sprintf
+        "static integer %d cannot be used where enum sort %s is required"
+        n (Types.to_string (Types.of_ast sort))));
     let fits = match sort with
       | Ast.TypeU8 -> n >= 0 && n < 256
       | Ast.TypeU16 -> n >= 0 && n < 65536
@@ -3264,6 +3322,21 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   let check_static_arg loc sort = function
     | Ast.StaticInt n -> check_static_const loc sort n
+    | Ast.StaticEnum (enum_name, case_name) ->
+        validate_static_sort loc sort;
+        (match sort with
+         | Ast.TypeNamed expected when expected <> enum_name ->
+             raise (TypeError (loc, Printf.sprintf
+               "static enum case '%s::%s' has sort %s, but %s is required"
+               enum_name case_name enum_name expected))
+         | Ast.TypeNamed expected ->
+             let cases, _ = Hashtbl.find static_enum_defs expected in
+             if not (List.mem case_name cases) then
+               raise (TypeError (loc, Printf.sprintf
+                 "unknown static enum case '%s::%s'" expected case_name))
+         | _ -> raise (TypeError (loc, Printf.sprintf
+             "static enum case '%s::%s' cannot be used where an integer sort is required"
+             enum_name case_name)))
     | Ast.StaticName name ->
         (match !validation_static_scope with
          | None -> raise (TypeError (loc, Printf.sprintf
@@ -3303,6 +3376,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       raise (TypeError (loc, Printf.sprintf
         "%s '%s' expects %d static argument(s), got %d"
         kind name (List.length formals) (List.length args)));
+    List.iter (fun (_, sort) -> validate_static_sort loc sort) formals;
     List.iter2 (fun arg (_, sort) -> check_static_arg loc sort arg)
       args formals
   in
@@ -3442,6 +3516,22 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeFn (args, ret, _) ->
         List.exists type_mentions_variant args || type_mentions_variant ret
     | Ast.TypeExists (_, _, body) -> type_mentions_variant body
+    | _ -> false
+  in
+  let rec type_mentions_kinded_variant = function
+    | Ast.TypeVariant name -> Hashtbl.mem variant_kinds name
+    | Ast.TypeNamed name when Hashtbl.mem variant_defs name ->
+        Hashtbl.mem variant_kinds name
+    | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+    | Ast.TypeSink t
+    | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
+    | Ast.TypeSlice (t, _) -> type_mentions_kinded_variant t
+    | Ast.TypeTuple ts -> List.exists type_mentions_kinded_variant ts
+    | Ast.TypeFn (args, ret, _) ->
+        List.exists type_mentions_kinded_variant args
+        || type_mentions_kinded_variant ret
+    | Ast.TypeExists (_, _, body) -> type_mentions_kinded_variant body
     | _ -> false
   in
   let is_direct_variant_type ty = match resolve_declared_type ty with
@@ -3717,6 +3807,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   raise (TypeError (f.def_loc, Printf.sprintf
                     "slice return annotation '@ %d': a region annotation \
                      must name a static parameter, not an integer" n))
+              | Ast.StaticEnum (enum_name, case_name) ->
+                  raise (TypeError (f.def_loc, Printf.sprintf
+                    "slice return annotation '@ %s::%s': a region annotation \
+                     must name a static parameter, not an enum case"
+                    enum_name case_name))
               | Ast.StaticName n ->
                   let names_owner_index = function
                     | Some (Ast.TypeBorrow (Ast.TypeIndexed (_, args)))
@@ -3787,9 +3882,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           if type_mentions_view ty then
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot hold an erased view" sname fname));
-          if type_mentions_variant ty then
+          if type_mentions_kinded_variant ty then
             raise (TypeError (sloc, Printf.sprintf
-              "struct field '%s.%s' cannot hold a variant in Slice 3"
+              "struct field '%s.%s' cannot hold an affine/linear variant"
               sname fname));
           if type_mentions_indexed_owner ty then
             raise (TypeError (sloc, Printf.sprintf
@@ -3811,6 +3906,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.OwnedStructDef (sname, _, params, fields, _, _, _, _, sloc) ->
         let scope = Hashtbl.create 8 in
         List.iter (fun (name, sort) ->
+          validate_static_sort sloc sort;
           if Hashtbl.mem scope name then
             raise (TypeError (sloc, Printf.sprintf
               "duplicate static parameter '%s' on struct '%s'" name sname));
@@ -3871,9 +3967,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               | body -> resolve_declared_type body
             in
             (match runtime_schema with
-             | Ast.TypeNamed name when StringSet.mem name concrete_struct_names ->
+             | Ast.TypeNamed name
+               when StringSet.mem name concrete_struct_names
+                    && Hashtbl.mem indexed_struct_kinds name ->
                  raise (TypeError (vloc, Printf.sprintf
-                   "variant payload '%s::%s' cannot be a concrete struct in Slice 3; aggregate payload ownership is not implemented"
+                   "variant payload '%s::%s' cannot be an indexed owner struct; aggregate owner transfer is not implemented"
+                   vname cname))
+             | Ast.TypeNamed name
+               when StringMap.mem name ordinary_struct_fields
+                    && payload_kind runtime_schema <> Ast.KindPlain ->
+                 raise (TypeError (vloc, Printf.sprintf
+                   "variant payload '%s::%s' concrete struct must be unrestricted; nested affine/linear ownership is not implemented"
                    vname cname))
              | Ast.TypeArray _ ->
                  raise (TypeError (vloc, Printf.sprintf
@@ -3882,16 +3986,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              | _ -> ());
             (match schema with
              | Ast.TypeExists (name, sort, body) ->
-                 (match sort with
-                  | Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32 | Ast.TypeI64
-                  | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64
-                  | Ast.TypeIsize | Ast.TypeUsize -> ()
-                  | _ -> raise (TypeError (vloc,
-                      "existential static binders require an integer sort in Slice 3")));
+                 validate_static_sort vloc sort;
                  (match resolve_declared_type body with
-                  | Ast.TypeIndexed _ -> ()
+                  | Ast.TypeIndexed _ | Ast.TypeView _ -> ()
                   | _ -> raise (TypeError (vloc, Printf.sprintf
-                      "existential payload '%s::%s' must package an indexed runtime owner in Slice 3"
+                      "existential payload '%s::%s' must package an indexed runtime owner or erased view"
                       vname cname)));
                  let scope = Hashtbl.create 4 in
                  Hashtbl.add scope name sort;
@@ -3909,7 +4008,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         validation_static_scope := None
     | Ast.ViewDef (vname, _, params, _, vloc) ->
         let seen = Hashtbl.create 8 in
-        List.iter (fun (name, _) ->
+        List.iter (fun (name, sort) ->
+          validate_static_sort vloc sort;
           if Hashtbl.mem seen name then
             raise (TypeError (vloc, Printf.sprintf
               "duplicate static parameter '%s' on view '%s'" name vname));
