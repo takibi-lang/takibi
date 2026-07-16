@@ -49,10 +49,11 @@ protocol layer on top of the same virtqueue/DMA/IRQ plumbing:
   one) -- see HISTORY.md's "IPv4/ICMP: split into 3 deliberately small steps" entry for the two smaller
   steps this was deliberately split from.
 
-`virtio-net` doesn't exist on real hardware (RPi3/RISC-V/STM32 will need
-dedicated MAC/PHY drivers later); what transfers is the ring-buffer/IRQ
-pattern and the raw-byte-offset header manipulation technique, not the
-virtio protocol itself.
+`virtio-net` doesn't exist on real hardware. STM32 now has a dedicated
+MAC/PHY/DMA backend with the same public network API; any future RPi3 or
+RISC-V hardware port would need its own equivalent backend. What transfers
+is the ring-buffer/IRQ pattern and the raw-byte-offset header manipulation
+technique, not the virtio protocol itself.
 
 - **Legacy virtio-mmio only** (`-global virtio-mmio.force-legacy=on`).
   Skips the FEATURES_OK handshake and the split 64-bit feature/queue-address

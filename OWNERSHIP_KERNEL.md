@@ -882,12 +882,13 @@ and length are real private fields. The variant tag and those fields survive
 at runtime; `desc`, singleton/range facts, and the ownership obligation
 erase.
 
-FAT12 now returns `FatOpenResult::Error(i32)` or
-`FatOpenResult::Opened(*FatFile)`. Every caller matches the result and every
-success arm closes the linear file token. This removes the null cast without
-pretending the current singleton/global file cursor is a complete long-term
-owner; moving that state into a runtime owner remains a later mutable-borrow
-slice.
+At the Slice 3 checkpoint, FAT12 returned `FatOpenResult::Error(i32)` or
+`FatOpenResult::Opened(*FatFile)`. Every caller matched the result and every
+success arm closed the linear file token. This removed the null cast while
+still leaving the singleton/global file cursor for the then-later mutable-
+borrow slice. Slice 4 replaced that checkpoint form with
+`Opened(exists file. FatFile[file])` and moved cursor/size/mode into the
+runtime owner.
 
 The multiplicity migration is part of the same change. `affine` now has its
 standard at-most-once meaning and permits weakening. `FatFile`,

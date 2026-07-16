@@ -616,9 +616,11 @@ Implemented scope:
   `None | Acquired(exists desc. NetRxCpuOwned[desc])`. Descriptor index and
   frame length remain runtime owner fields while the existential identity and
   proofs erase;
-- `FatOpenResult` now returns `Error(i32) | Opened(*FatFile)`, eliminating
-  nullable linear ownership. `FatFile` remains a singleton opaque runtime
-  design pending Slice 4;
+- at the Slice 3 checkpoint, `FatOpenResult` returned
+  `Error(i32) | Opened(*FatFile)`, eliminating nullable linear ownership
+  while leaving `FatFile` as a singleton opaque runtime design. Slice 4
+  replaced that checkpoint form with `Opened(exists file. FatFile[file])`
+  and per-owner runtime state;
 - LLVM lowering to a tag plus runtime payload fields, with view payloads and
   existential binders erased. This first layout is not yet a stable C ABI or
   full tagged-union DWARF representation.

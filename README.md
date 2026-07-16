@@ -180,8 +180,9 @@ by a current example does not.
   handwritten assembly. The STM32 port also performs cache maintenance
   (AXI SRAM1 is genuinely cacheable; `dma_prepare_tx`/`dma_prepare_rx`/
   `dma_finish_rx` do real cache-line clean/invalidate, not an MPU-window
-  no-op) and uses affine opaque receive handles to reject double release
-  and use-after-release.
+  no-op). Network RX ownership is expressed with an erased affine
+  acquisition permission plus a linear indexed descriptor owner, rejecting
+  double acquisition, double release, and use-after-release patterns.
 - Ethernet and STM32 UART I/O are interrupt-driven. ARM/AArch64 retained
   events (`wfe`/`sev`) avoid both idle busy-spins and check-then-sleep lost
   wakeups.

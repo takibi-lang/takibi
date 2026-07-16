@@ -16,12 +16,12 @@ spirit of ATS2's proof-driven style and its at-view mechanism, generalized past 
 arbitrary linear/affine resources) toward that stated goal was judged more tractable than
 retrofitting it onto an existing systems language.
 
-The TCP/IP stack + bare-metal HTTP server (Raspberry Pi 3 / RISC-V / STM32) was the first
-waypoint on the way there, and is already implemented and running -- see the QEMU/AArch64 and
-STM32F746G-DISCOVERY sections below. It exists to prove takibi can express real, nontrivial
-systems code at all; the harder, ongoing work is proving that code's runtime-error surface can
-be pushed to compile time, which the `--forbid-trap` refinement-type work below is the first
-concrete step toward, on the way to expressing Unix-like kernel constructs (schedulers,
+The TCP/IP stack + bare-metal HTTP server was the first waypoint on the way there, and is
+already implemented and running on QEMU/AArch64 and STM32F746G-DISCOVERY -- see the target
+sections below. It exists to prove takibi can express real, nontrivial systems code at all; the
+harder, ongoing work is proving that code's runtime-error surface can be pushed to compile time,
+which the `--forbid-trap` refinement-type work and the Takibi Core ownership slices are the
+first concrete steps toward, on the way to expressing Unix-like kernel constructs (schedulers,
 virtual memory, drivers, syscall boundaries) with the same discipline.
 
 **Looking for the current language syntax/grammar (types, statements, expressions)?
@@ -276,8 +276,9 @@ examples/
     fat12.tkb     -- FAT12 filesystem core (issue #61/#98): fat_format/fat_open/fat_read/
                      fat_write/fat_close over mem_block_read/mem_block_write, which callers
                      (fatfs.tkb's in-memory `disk`, fatfs_sdcard.tkb's/http_server_sdcard.tkb's
-                     real SDMMC1 adapter) supply. FatFile is an `affine opaque struct` --
-                     see HISTORY.md's issue #97 follow-up entry
+                     real SDMMC1 adapter) supply. FatFile is now a linear indexed runtime owner
+                     with per-open cursor/size/mode state; HISTORY.md's issue #97 entry records
+                     the older affine-opaque singleton stage it replaced.
     rtos.tkb      -- Simple RTOS (issue #66) task-facing API: cpu_id() (examples/percpu),
                      KLock/KGuard/klock/kunlock (examples/klock_guard), Chan/chan_send/
                      chan_recv (examples/chan_rendezvous), plus generic rtos_task_add/
