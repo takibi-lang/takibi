@@ -7,10 +7,11 @@ TAKIBI_CORE.md; Slices 0 through 6 are implemented: the Core boundary,
 indexed runtime owners, erased views, variants/restricted existentials,
 standard affine semantics, scoped mutable owner borrows, checker effects,
 function-pointer effect contracts, and integer-indexed universally transformed
-views. General place/storage tracking, existential view state dispatch, lock
-invariants, general propositions, and solver/prover integration remain
-outlook. As each surface slice lands, SPEC.md stays authoritative for the
-language that actually exists.
+views. Owner-derived region slices (the post-Slice-6 RX hole, 6.7.9 below)
+are implemented too. General place/storage tracking, existential view state
+dispatch, lock invariants, general propositions, and solver/prover
+integration remain outlook. As each surface slice lands, SPEC.md stays
+authoritative for the language that actually exists.
 
 Sections 4 through 6 preserve the decision path that led here. Statements in
 those historical stage descriptions about affine requiring one-path
@@ -20,7 +21,8 @@ future work are superseded by the Slice 3 result in 6.7.4 and by SPEC.md.
 Driving issues: #117 (witness tokens / protocol obligations -- where this
 plan was drawn up), #89 (affine drop/escape/inter-function), #108
 (private visibility), #15 (safe pointer / cast audit), #113 (channel v2),
-#66 (Simple RTOS), #20 (variant enums), #106 (aliasing), #87 (async TX
+#66 (Simple RTOS), #20 (variant enums), #106 (aliasing; closed after the
+region-slice slice, remaining escape control moved to #128), #87 (async TX
 ownership), #6 (multiple cores).
 
 ## 1. Motivation: one wall, four axes
@@ -1120,6 +1122,27 @@ driver: packet-builder correctness would need a functional specification and
 memory model before a proof artifact could mean anything. The resulting order
 is consolidation, RX regions, existential TCP state, channel storage/invariant,
 then the solver goal; async TX and external proof artifacts remain demand-led.
+
+#### 6.7.9 Owner-derived region slices (implemented 2026-07-16)
+
+The RX region hole recorded in 6.7.8 is closed. A slice return type may now
+carry `@ name` naming a borrow/borrow-mut indexed-owner parameter's static
+index (`net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..]
+@ desc` in both backends); the caller-side checker taints the bound result
+and everything derived from it (aliases, subslices) with the owner's path
+and rejects any use once the owner is possibly consumed. Return and durable
+storage of a tied slice are rejected outright; `as *u8` deliberately exits
+tracking. The taint lattice is `Takibi_core.Delta.Region_taint`, a sibling
+of `Legacy_flow` with pointwise-union joins, and the check is lazy against
+`maybe_consumed`, so branch handling required no new merge semantics. The
+annotation strips before HM typing and has no runtime footprint. All five
+network examples compile unchanged -- their hand-maintained use-then-release
+ordering is now compiler-enforced. Deliberately NOT implemented: region
+variables/polymorphism, tied slices crossing function boundaries (callee
+retention stays unchecked, function-local honesty), and tuple/variant
+laundering within a function. See TAKIBI_CORE.md's implemented-slice entry,
+SPEC.md's "Owner-Derived Region Slices" section, and HISTORY.md's dated
+entry for details.
 
 ## 7. Next outlook: stable places, channel v2 (#113), and view change
 

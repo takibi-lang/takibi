@@ -1,0 +1,38 @@
+// This file is expected to produce a compile error.
+// net_rx_frame's return type ties the frame slice to the borrowed owner
+// (`-> [u8; 1514..] @ desc`). Releasing the owner hands the buffer back to
+// DMA, so a caller that kept the slice (or any subslice of it) and reads it
+// afterwards is reading memory the device owns again. The owner-derived
+// region check rejects that use at compile time; every read of the frame
+// must happen before net_rx_release.
+
+private linear struct NetRxCpuOwned[desc: usize] {
+    private index: {0..<4 as usize} @ desc;
+    private len: i32;
+}
+
+let mut rx_bufs: [u8; 8192];
+
+fn net_rx_owned(index: {0..<4 as usize} @ desc, len: i32) -> NetRxCpuOwned[desc] {
+    let mut owned: NetRxCpuOwned[desc] = { index, len };
+    return owned;
+}
+
+fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc {
+    let idx: {0..<4 as usize} = frame.index;
+    let offset: usize = idx * 2048;
+    return rx_bufs[offset..<offset + 1514];
+}
+
+fn net_rx_release(frame: sink NetRxCpuOwned[desc]) {
+}
+
+fn read_after_release_wrong() -> i32 {
+    let index: {0..<4 as usize} = 0;
+    let owned = net_rx_owned(index, 64);
+    let frame = net_rx_frame(owned);
+    net_rx_release(owned);
+    // WRONG: the owner was released above, so this slice may already be
+    // overwritten by device DMA. The compiler rejects this read.
+    return frame[0] as i32;
+}

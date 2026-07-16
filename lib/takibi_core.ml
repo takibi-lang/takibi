@@ -1,9 +1,10 @@
 (** Shared vocabulary for the long-term Takibi Core.
 
-    Only [Delta.Legacy_flow] is wired into the surface checker today. The
-    other types establish the boundary that later elaboration slices will
-    target; they deliberately do not claim that the current surface AST has
-    already been elaborated into Core. See TAKIBI_CORE.md. *)
+    Only [Delta.Legacy_flow] and [Delta.Region_taint] are wired into the
+    surface checker today. The other types establish the boundary that later
+    elaboration slices will target; they deliberately do not claim that the
+    current surface AST has already been elaborated into Core. See
+    TAKIBI_CORE.md. *)
 
 module Multiplicity = struct
   type t = Unrestricted | Affine | Linear
@@ -95,6 +96,38 @@ module Delta = struct
 
     let maybe_consumed flow = flow.maybe_consumed
     let must_be_consumed flow = flow.must_be_consumed
+  end
+
+  (** Owner-derived region taint for the surface checker (TAKIBI_CORE.md
+      post-Slice-6 order item 1, issue #106).
+
+      Maps a local variable NAME to the set of owner places its value was
+      derived from (via a call whose return type carries a region annotation,
+      or by alias/subslice propagation from such a value). The check itself
+      is lazy: a tainted name is rejected at USE time when any of its owner
+      places is in Legacy_flow's [maybe_consumed], so branch joins need only
+      the pointwise union below -- consumption merging is already handled by
+      Legacy_flow's own union. Function-local by construction, like the rest
+      of the current Delta tracking. *)
+  module Region_taint (Places : Set.S) : sig
+    type t
+
+    val empty : t
+    val get : string -> t -> Places.t
+    val set : string -> Places.t -> t -> t
+    val join_branches : t -> t -> t
+  end = struct
+    module M = Map.Make (String)
+
+    type t = Places.t M.t
+
+    let empty = M.empty
+    let get name taints =
+      Option.value (M.find_opt name taints) ~default:Places.empty
+    let set name places taints =
+      if Places.is_empty places then M.remove name taints
+      else M.add name places taints
+    let join_branches = M.union (fun _ a b -> Some (Places.union a b))
   end
 end
 

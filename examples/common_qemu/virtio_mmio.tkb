@@ -364,7 +364,11 @@ fn net_rx_len(frame: borrow NetRxCpuOwned[desc]) -> i32 {
 //
 // The descriptor singleton carried by frame preserves the range proven at
 // acquisition, so no shared global or repeated clamp is needed here.
-fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] {
+//
+// `@ desc` ties the returned slice to the borrowed owner (issue #106): a
+// caller keeping this slice (or a subslice of it) past net_rx_release is
+// reading a buffer DMA owns again, and is now a compile error.
+fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc {
     let idx: {0..<8 as usize} = frame.index;
     let offset: usize = idx * RX_BUF_SIZE_USIZE + 10;
     return rx_bufs[offset..<offset + 1514];

@@ -15,8 +15,10 @@ accepted. Scoped mutable owner borrows, direct/indirect blocking effects, and
 function-pointer effect contracts are accepted and erase before LLVM.
 Integer-indexed erased views and implicitly universal view transitions are
 accepted. The post-Slice 6 examples now use erased guard views, an affine RX
-acquisition permission, and owner-mediated synchronous TX. General
-place/storage tracking, owner-derived regions, lock invariants, existential
+acquisition permission, and owner-mediated synchronous TX. Owner-derived
+region slices (`-> [T; N..] @ owner_index`, backed by `Delta.Region_taint`)
+are implemented: `net_rx_frame`'s slice is now unusable after release. General
+place/storage tracking, lock invariants, existential
 view state dispatch, explicit/general quantifiers and propositions, and
 solver hooks remain design targets.
 
@@ -331,9 +333,11 @@ removes the null-sentinel exception and closes duplicate owner minting at the
 public API boundary.
 
 `net_transmit` derives the in-place reply pointer from the borrowed owner,
-rather than trusting an unrelated raw pointer. `net_rx_frame` still returns
-an unrestricted slice which can outlive that owner in the checker; tying the
-slice's region to the owner is the next distinct Core problem. A future
+rather than trusting an unrelated raw pointer. `net_rx_frame`'s returned
+slice is now tied to the borrowed owner by its region-annotated return type
+(`-> [u8; 1514..] @ desc`, see the implemented-slice entry below): using the
+slice, or anything derived from it, after `net_rx_release` consumes the
+owner is a compile error. A future
 multi-frame-in-flight API would need multiple indexed acquisition credits or
 an equivalent queue-capacity resource, not silent extra minting behind this
 one-permit interface.
@@ -714,7 +718,8 @@ from the indexed spelling.
   `TcpConn[conn, state]` as the concrete driver. The universal transition
   basis is now provided by Slice 6.
 - Zero-copy typed channels (#113) and ownership transfer through variants.
-- Aliasing/region predicates (#106), asynchronous TX ownership (#87), and
+- Aliasing/region predicates (#106, closed -- escape control continues as
+  #128), asynchronous TX ownership (#87), and
   solver/proof integration, each with a concrete driver and negative tests.
 
 ### Post-Slice 6 example audit and consolidation (implemented 2026-07-16)
@@ -754,27 +759,68 @@ express:
    `desc` and the borrow permission still erase.
 
 The `net_rx_double_acquire_wrong` compile-error fixture fixes the permit's
-negative contract: reusing the consumed acquisition right is rejected. These
-changes deliberately do not claim to close the RX region problem.
-`net_rx_frame(frame)` returns an unrestricted runtime slice today, so source
-can retain that slice, release `frame`, and then access memory which DMA owns
-again. The first genuinely new post-consolidation Core slice should tie a
-derived slice/region borrow to the owner and reject moving or releasing the
-owner while that borrow remains usable. Its positive fixture is ordinary
-packet processing; its negative fixture releases the frame and then reads the
-old slice.
+negative contract: reusing the consumed acquisition right is rejected. The
+RX region problem that consolidation deliberately left open is now closed by
+the owner-derived region slice below.
+
+### Owner-derived region slices (implemented 2026-07-16)
+
+The first genuinely new post-consolidation slice ties `net_rx_frame`'s
+returned slice to the borrowed owner, exactly as specified above: the
+positive fixture is ordinary packet processing (all five network examples,
+unchanged), and the negative fixture
+(`examples/net_rx_use_after_release_wrong`) releases the frame and then
+reads the old slice.
+
+Implemented scope:
+
+- a slice RETURN type may carry `@ name`, where `name` must be a static
+  index of some `borrow`/`borrow mut` indexed-owner parameter of the same
+  function; both backends' `net_rx_frame` now declare
+  `-> [u8; 1514..] @ desc`;
+- the annotation is a caller-side restriction only. The callee body has no
+  new proof obligation (both real backends return a slice of a global
+  buffer); an over-applied annotation is conservative, never unsound. The
+  grammar already parsed the form via the singleton `@` rule -- return
+  position is now the one place a slice base is accepted, and every other
+  position keeps its existing rejection;
+- checker-side, `Delta.Region_taint` (a sibling of `Legacy_flow` in
+  `Takibi_core`) maps local names to the owner paths their value derives
+  from. Binding a region call result, immutable aliasing, and subslicing
+  (including under `unsafe`) propagate the tie; reassignment clears it. The
+  kill is lazy: any use of a tied name after its owner is possibly consumed
+  (branch-merge union, same conservatism as affine double-use) is rejected
+  with "slice 'f' is derived from linear value 'o' and cannot be used after
+  'o' is consumed";
+- escapes are rejected: returning a tied slice from the enclosing function,
+  or storing one into a global, struct field, array element, or through a
+  pointer;
+- the annotation strips before HM unification and has zero LLVM/ABI/DWARF
+  footprint;
+- documented v1 holes, all function-local like the rest of Delta tracking:
+  `as *u8` exits tracking (raw pointers are outside every safety story;
+  `net_transmit` uses exactly this internally), callee retention of a
+  passed slice is unchecked, tuple/variant laundering within one function
+  is untracked, and owner-name rebinding clears the tie (Stage 3a's
+  name-keying limitation).
+
+This deliberately does not implement general region/lifetime polymorphism:
+there is no region variable a caller can name, no function signature that
+propagates "returns a slice tied to THIS parameter's region" transitively
+through wrappers, and no owner-tied slice crossing a function boundary in
+either direction. Those stay demand-led, the same tripwire discipline as
+every other slice.
 
 The remaining example-driven order is:
 
-1. owner-derived region borrowing for `NetRxCpuOwned` (#106);
-2. finite-enum static states plus existentially packaged indexed views for
+1. finite-enum static states plus existentially packaged indexed views for
    the HTTP server's `TcpConn[conn, state]` dispatch;
-3. stable linear owner storage, typed request variants, and the smallest lock
+2. stable linear owner storage, typed request variants, and the smallest lock
    invariant needed to replace `WordChan` pointer-to-`usize` RPC in
    `http_server_sdcard_rtos` (#113);
-4. static address/place identities for `MutexHeld[lock]` and `KGuard[lock]`,
+3. static address/place identities for `MutexHeld[lock]` and `KGuard[lock]`,
    unless the channel slice needs them earlier;
-5. asynchronous TX ownership only when an example actually keeps a DMA buffer
+4. asynchronous TX ownership only when an example actually keeps a DMA buffer
    in flight after the call returns (#87).
 
 Full lock invariants are not a standalone prerequisite for the current
@@ -863,7 +909,8 @@ independently:
 | #66 Simple RTOS | lock/task identities in Delta plus `may_block`, scheduling, and interrupt constraints in epsilon |
 | #20 variant enums | kind-carrying runtime variants and existential resource payloads |
 | #6 multiple cores | CPU-indexed guards, per-CPU state, and interrupt permissions |
-| #106 aliasing | place identity, region/view predicates, and disjointness propositions |
+| #106 aliasing (closed; #128 carries the rest) | place identity, region/view predicates, and disjointness propositions; owner-derived region slices were its first closed slice |
+| #128 escape control (lock-data coupling) | authority-bound pointer lifetimes: guard-tied accessor returns via static lock identities, extending region ties beyond slice returns |
 | #87 asynchronous TX ownership | linear in-flight buffer/descriptor states and completion transitions |
 | #15/#108 cast and visibility hardening | unforgeable constructors and module boundaries for runtime owners and views |
 | #13 future SMT path | discharge generated Phi goals only after static names and assumptions exist |

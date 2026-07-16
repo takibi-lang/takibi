@@ -1146,6 +1146,59 @@ already-proven minimum (the initializer's stronger proof survives); a
 `let mut` binding always uses its declared (possibly weaker) type, since
 reassignment can genuinely bring a shorter slice later.
 
+## Owner-Derived Region Slices
+
+```
+fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc { ... }
+```
+
+A slice RETURN type may carry `@ name` (GitHub issue #106, TAKIBI_CORE.md
+post-Slice-6 order item 1), where `name` is a static index appearing in
+some `borrow`/`borrow mut` indexed-owner parameter of the same function
+(a compile error otherwise, and an integer `@ 3` is rejected too). The
+annotation ties the returned slice to that owner: **once the owner is
+consumed (released/moved), any later use of the slice -- or of anything
+derived from it -- is a compile error** ("slice 'f' is derived from
+linear value 'o' and cannot be used after 'o' is consumed"). This is what
+makes `net_rx_frame`'s buffer unusable after `net_rx_release` hands it
+back to DMA.
+
+- **Caller-side restriction only.** The callee body has no new proof
+  obligation -- it may return a slice of a global (as both real backends
+  do). An annotation on an unrelated slice only makes callers more
+  conservative, never unsound. The annotation is therefore part of the
+  declaring driver file's reviewed API contract, consistent with the
+  trusted-file doctrine.
+- **Checker-only.** Stripped before HM typing; no LLVM/ABI/DWARF
+  footprint. Only the `->` return form can carry it (the legacy
+  no-arrow return grammar cannot). Everywhere OTHER than a whole slice
+  return type, `@` on a slice keeps its existing rejection.
+- **Taint propagation** (function-local): binding the call result
+  (`let f = net_rx_frame(o);`), an immutable alias (`let g = f;`), and a
+  subslice (`let s = f[a..<b];`, including under `unsafe`) all carry the
+  tie. Reassigning a `mut` binding to an unrelated value clears it. The
+  check itself is lazy: a tied name is rejected at USE time once the
+  owner is possibly consumed (branch merges are conservative unions,
+  like affine double-use).
+- **Escapes rejected**: returning a tied slice from the enclosing
+  function, or storing one into a global, struct field, array element,
+  or through a pointer, is a compile error -- the tie is function-local
+  and those would outlive it.
+- **Documented holes (v1)**: casting to a raw pointer (`f as *u8`) exits
+  tracking (raw pointers are outside every safety story; this is how
+  `net_transmit` internally reuses the buffer). Passing a tied slice to
+  a callee while the owner is live is allowed and the callee's own
+  retention is unchecked (all tracking is function-local). Laundering
+  through a tuple or variant payload within one function is likewise
+  untracked. Owner-name rebinding clears consumed status, so a stale
+  slice tied to the OLD same-named owner escapes (the same name-keying
+  limitation Stage 3a's field tracking accepted).
+
+See `examples/net_rx_use_after_release_wrong` for the focused
+compile-error fixture; the real positive fixtures are the network
+examples themselves, whose frame access all flows through the annotated
+`net_rx_frame`.
+
 ## Arrays and Pointers
 
 - `[T; N]` decays to `*T` when used as an ordinary value (e.g. a function

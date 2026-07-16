@@ -424,7 +424,11 @@ fn net_rx_len(frame: borrow NetRxCpuOwned[desc]) -> i32 {
 // 0..1514 fails the narrowing check and the frame is dropped.
 //
 // The singleton descriptor index carried by frame is already proven in range.
-fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] {
+//
+// `@ desc` ties the returned slice to the borrowed owner (issue #106): a
+// caller keeping this slice (or a subslice of it) past net_rx_release is
+// reading a buffer DMA owns again, and is now a compile error.
+fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc {
     let idx: {0..<4 as usize} = frame.index;
     let offset: usize = idx * ETH_BUF_SIZE_USIZE;
     return eth_rx_bufs[offset..<offset + 1514];

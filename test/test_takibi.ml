@@ -1544,7 +1544,184 @@ let parser_tests = [
 
 (* -- Type inference tests -------------------------------------------------- *)
 
+(* Shared mini fixture for owner-derived region slice tests (issue #106,
+   TAKIBI_CORE.md post-Slice-6 order item 1): a linear indexed owner, a
+   region-annotated frame accessor returning a slice of a global buffer,
+   and a sink release. Mirrors net_rx_frame/net_rx_release's real shape. *)
+let region_fixture =
+  "private linear struct RegOwn[d: usize] {
+     private idx: {0..<4 as usize} @ d;
+   }
+   let mut reg_bufs: [u8; 8192];
+   fn reg_make(idx: {0..<4 as usize} @ d) -> RegOwn[d] {
+     let mut own: RegOwn[d] = { idx };
+     return own;
+   }
+   fn reg_frame(o: borrow RegOwn[d]) -> [u8; 2048..] @ d {
+     let idx: {0..<4 as usize} = o.idx;
+     let off: usize = idx * 2048;
+     return reg_bufs[off..<off + 2048];
+   }
+   fn reg_release(o: sink RegOwn[d]) {}
+   "
+
 let infer_tests = [
+  Alcotest.test_case
+    "region slice: use-then-release lifecycle is accepted" `Quick
+    (fun () ->
+      ignore (infer (region_fixture ^
+        "fn reg_ok() -> i32 {
+           let idx: {0..<4 as usize} = 1;
+           let o = reg_make(idx);
+           let f = reg_frame(o);
+           let x: u8 = f[0];
+           let sub = f[4..<8];
+           let y: u8 = sub[0];
+           reg_release(o);
+           return (x + y) as i32;
+         }")));
+
+  Alcotest.test_case
+    "region slice: reading the slice after the owner is released is rejected" `Quick
+    (expect_type_error
+      "slice 'f' is derived from linear value 'o' and cannot be used after 'o' is consumed"
+      (region_fixture ^
+        "fn reg_bad() -> i32 {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let f = reg_frame(o);
+           reg_release(o);
+           return f[0] as i32;
+         }"));
+
+  Alcotest.test_case
+    "region slice: an immutable alias carries the taint" `Quick
+    (expect_type_error
+      "slice 'g' is derived from linear value 'o' and cannot be used after 'o' is consumed"
+      (region_fixture ^
+        "fn reg_alias_bad() -> i32 {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let f = reg_frame(o);
+           let g = f;
+           reg_release(o);
+           return g[0] as i32;
+         }"));
+
+  Alcotest.test_case
+    "region slice: a subslice carries the taint" `Quick
+    (expect_type_error
+      "slice 'sub' is derived from linear value 'o' and cannot be used after 'o' is consumed"
+      (region_fixture ^
+        "fn reg_sub_bad() -> i32 {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let f = reg_frame(o);
+           let sub = f[4..<8];
+           reg_release(o);
+           return sub[0] as i32;
+         }"));
+
+  Alcotest.test_case
+    "region slice: writing through the slice after release is rejected" `Quick
+    (expect_type_error
+      "slice 'f' is derived from linear value 'o' and cannot be used after 'o' is consumed"
+      (region_fixture ^
+        "fn reg_write_bad() {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let f = reg_frame(o);
+           reg_release(o);
+           f[0] = 1;
+         }"));
+
+  Alcotest.test_case
+    "region slice: release on only one branch still kills later use" `Quick
+    (expect_type_error
+      "slice 'f' is derived from linear value 'o' and cannot be used after 'o' is consumed"
+      (region_fixture ^
+        "fn reg_branch_bad(c: bool) -> i32 {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let f = reg_frame(o);
+           if (c) {
+             reg_release(o);
+           } else {
+             reg_release(o);
+           }
+           return f[0] as i32;
+         }"));
+
+  Alcotest.test_case
+    "region slice: reassigning the binding clears its taint" `Quick
+    (fun () ->
+      ignore (infer (region_fixture ^
+        "fn reg_reassign_ok() -> i32 {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let mut f: []u8 = reg_frame(o);
+           f = reg_bufs as []u8;
+           reg_release(o);
+           return f[0] as i32;
+         }")));
+
+  Alcotest.test_case
+    "region slice: the annotation must name a borrow owner's static index" `Quick
+    (expect_type_error
+      "does not name a static index of any borrow or borrow mut indexed-owner parameter"
+      (region_fixture ^
+        "fn reg_decl_bad(o: borrow RegOwn[d]) -> [u8; 8..] @ nosuch {
+           return reg_bufs[0..<8];
+         }"));
+
+  Alcotest.test_case
+    "region slice: the annotation cannot be a static integer" `Quick
+    (expect_type_error
+      "a region annotation must name a static parameter, not an integer"
+      (region_fixture ^
+        "fn reg_decl_int_bad(o: borrow RegOwn[d]) -> [u8; 8..] @ 3 {
+           return reg_bufs[0..<8];
+         }"));
+
+  Alcotest.test_case
+    "region slice: an owner-derived slice cannot be returned" `Quick
+    (expect_type_error
+      "owner-derived slice 'f' cannot be returned from this function"
+      (region_fixture ^
+        "fn reg_leak(o: borrow RegOwn[d]) -> []u8 {
+           let f = reg_frame(o);
+           return f;
+         }"));
+
+  Alcotest.test_case
+    "region slice: an owner-derived slice cannot be stored into a global" `Quick
+    (expect_type_error
+      "owner-derived slice 'f' cannot be stored into a global"
+      (region_fixture ^
+        "let mut reg_stash: []u8;
+         fn reg_stash_bad(o: borrow RegOwn[d]) {
+           let f = reg_frame(o);
+           reg_stash = f;
+         }"));
+
+  Alcotest.test_case
+    "region slice: casting to a raw pointer deliberately exits tracking" `Quick
+    (fun () ->
+      ignore (infer (region_fixture ^
+        "fn reg_ptr_hole() -> i32 {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let p: *u8 = reg_frame(o) as *u8;
+           reg_release(o);
+           return p[0] as i32;
+         }")));
+
+  Alcotest.test_case
+    "region slice: '@' on a slice parameter stays rejected" `Quick
+    (expect_type_error
+      "a singleton value cannot live behind a pointer or inside array/slice storage"
+      "fn reg_param_bad(s: []u8 @ d) -> i32 { return 0; }");
+
   Alcotest.test_case
     "Slice 1: indexed linear owner carries the range-proven runtime index" `Quick
     (fun () ->

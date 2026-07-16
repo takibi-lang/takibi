@@ -7544,3 +7544,80 @@ boundaries in detail.
 Validation: all 708 Alcotest cases passed. The full `make check` passed all
 115 host, compile-error, DWARF, and QEMU integration cases, every STM32
 cross-build, and all network examples under `--forbid-trap`.
+
+## 2026-07-16: Owner-Derived Region Slices (issue #106, post-Slice-6 item 1)
+
+Closed the RX region hole the consolidation entry above deliberately left
+open: `net_rx_frame` returned an unrestricted slice into a DMA buffer, so a
+caller could `net_rx_release` the linear owner and keep reading memory the
+device owned again -- the hand-maintained use-then-release ordering in every
+network example was convention, not a checked contract.
+
+Surface: an optional `@ name` on a slice RETURN type
+(`fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc`),
+where `name` must be a static index of a `borrow`/`borrow mut` indexed-owner
+parameter of the same function. The grammar needed ZERO changes -- the
+existing singleton rule (`type_expr: base_type_expr AT static_arg`) already
+parsed a slice base and was previously rejected by the "singleton '@'
+requires an integer runtime type" validation; the FuncDef return position is
+now the one place it is accepted, and every other position keeps the old
+rejection automatically through the untouched validation recursion (a unit
+test pins the parameter-position rejection as a regression guard).
+
+Semantics, decided during design review before implementation:
+
+- **Caller-side restriction only.** The callee body has no new proof
+  obligation -- both real backends return a subslice of a global buffer, and
+  an annotation on an unrelated slice merely over-restricts the caller
+  (conservative, never unsound). The annotation is part of the driver file's
+  reviewed API contract, per the trusted-file doctrine.
+- **Kill-on-consume via lazy checking, reusing existing machinery.** The
+  checker taints a binding whose initializer is a region-returning call with
+  the borrow argument's path; immutable aliases and subslices (including
+  under `unsafe`, which tcp_echo's payload subslice needs) propagate the
+  taint; reassignment clears it, mirroring how reassignment already clears
+  consumed status. A use of a tainted name is rejected when any of its owner
+  paths is in `maybe_consumed` -- checking lazily against the EXISTING
+  union-at-joins set meant branch merging needed no new semantics at all,
+  only a pointwise union of the taint maps themselves
+  (`Takibi_core.Delta.Region_taint`, a sibling functor of `Legacy_flow`,
+  per TAKIBI_CORE.md's rule that checker state lives in Core, not loose in
+  type_inf.ml).
+- **Escapes rejected; holes documented, not hidden.** Returning a tainted
+  slice or storing it into a global/field/element/pointer is a compile
+  error. `as *u8` exits tracking silently (raw pointers are outside every
+  safety story; `net_transmit`'s in-driver reuse of the buffer relies on
+  exactly this). Callee retention of a passed slice, tuple/variant
+  laundering inside one function, and owner-name rebinding remain
+  function-local holes, stated in SPEC.md rather than discovered later --
+  the same honesty Stage 3a's name-keyed field tracking established.
+
+Implementation notes worth keeping: the annotation is stripped by the two
+`ret_of_ast_opt*` helpers (their only call sites are `infer_func` and the
+fenv build), so HM unification, `call_returns`, the singleton machinery
+(`value_static_identities`, bounds lowering), and LLVM codegen never see it
+-- any future consumer of a raw `fdef.ret_type` must strip too, which is why
+`strip_region_return` lives next to those helpers with a comment. The side
+table maps `overload_key` -> borrow-parameter index, resolved per call site
+through `resolved_call_targets` exactly like `call_params`, so overloads
+cannot mismatch. The use check fires in `check_affine_func`'s Var case plus
+the three ident-based positions the expression walk does NOT visit as Var
+(`Index`/`SliceOf` bases and `AssignIndex`'s target) -- forgetting any one
+of those would silently void the check, so all four are unit-tested.
+
+Both backends' `net_rx_frame` gained `@ desc` (2 lines); all five network
+examples (net_echo, arp_reply, icmp_echo, tcp_echo, http_server via
+http_server_common, plus both http_server_sdcard variants) compile UNCHANGED
+under `--forbid-trap` -- the positive fixture is the existing suite itself,
+per TAKIBI_CORE.md's pre-registered acceptance criteria.
+`examples/net_rx_use_after_release_wrong` (self-contained mock, modeled on
+net_rx_double_acquire_wrong) is the negative fixture: release then read.
+
+Validation: all 721 Alcotest cases passed (13 new: lifecycle positive,
+use/alias/subslice/write-after-release, one-branch release, reassignment
+clears, both declaration-validation errors, return/storage escape bans, the
+deliberate `as *u8` hole as a positive, and the parameter-position
+regression guard). Full `make check` passed (116 host, compile-error, DWARF,
+and QEMU integration cases including the new negative fixture, every STM32
+cross-build, all network examples `--forbid-trap` clean with zero app-source
+changes).

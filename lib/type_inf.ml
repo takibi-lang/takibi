@@ -88,13 +88,28 @@ let of_ast t = match !active_static_scope with
   | None -> Types.of_ast (resolve_declared_type t)
 
 let of_ast_opt = function Some t -> of_ast t | None -> fresh ()
-let ret_of_ast_opt = function Some t -> of_ast t | None -> TVoid
+
+(* An owner-derived region annotation on a slice RETURN type
+   (`-> [u8; 1514..] @ desc`, TAKIBI_CORE.md post-Slice-6 order item 1)
+   is checker-only: it feeds the region_return side table consumed by
+   check_affine_func's taint tracking, and must stay invisible to HM
+   unification, call_returns, the singleton machinery, and codegen. Strip
+   it here -- these two ret_of_ast_opt* helpers are the ONLY places a
+   FuncDef's raw ret_type enters HM typing, so any future new consumer of
+   the raw AST return type must strip too. *)
+let strip_region_return = function
+  | Some (Ast.TypeSingleton ((Ast.TypeSlice _) as s, _)) -> Some s
+  | t -> t
+
+let ret_of_ast_opt t =
+  match strip_region_return t with Some t -> of_ast t | None -> TVoid
 
 let of_ast_opt_in_decl_scope scope = function
   | Some t -> of_ast_in_decl_scope scope t
   | None -> fresh ()
 
-let ret_of_ast_opt_in_decl_scope scope = function
+let ret_of_ast_opt_in_decl_scope scope t =
+  match strip_region_return t with
   | Some t -> of_ast_in_decl_scope scope t
   | None -> TVoid
 
@@ -602,6 +617,12 @@ module PathSet = ResourceFlow.Places
    explicitly transitional Delta.Legacy_flow boundary. Stage 3a widened its
    key from a bare variable name to `path` (above). *)
 type consume_sets = ResourceFlow.t
+
+(* Owner-derived region taint (issue #106): local slice-variable name ->
+   the owner paths it was derived from. Checked lazily against
+   maybe_consumed at each use, so it shares Legacy_flow's union-at-join
+   conservatism with no extra merge logic of its own. *)
+module TaintEnv = Takibi_core.Delta.Region_taint (PathSet)
 
 let is_linear_ptr_ty t = match repr t with
   | TPtr (TStruct n) -> StringSet.mem n !linear_opaque_names
@@ -3680,7 +3701,37 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         validation_static_scope := Some scope;
         allow_implicit_static := true;
         List.iter (fun (_, ty) -> Option.iter (validate_param_type f.def_loc) ty) f.params;
-        Option.iter (validate_nonparam_type f.def_loc) f.ret_type;
+        (* Owner-derived region annotation on a slice return type
+           (`-> [T; N..] @ name`, issue #106): accepted ONLY here, as the
+           whole return type of a function definition. The name must be a
+           static index of some borrow/borrow-mut indexed-owner parameter;
+           the callee body has no new obligation (the annotation restricts
+           the CALLER's use of the result, so an unrelated returned slice is
+           merely conservative, never unsound). Every other position keeps
+           the existing "singleton '@' requires an integer runtime type"
+           rejection via the untouched validation recursion below. *)
+        (match f.ret_type with
+         | Some (Ast.TypeSingleton ((Ast.TypeSlice _) as s, arg)) ->
+             (match arg with
+              | Ast.StaticInt n ->
+                  raise (TypeError (f.def_loc, Printf.sprintf
+                    "slice return annotation '@ %d': a region annotation \
+                     must name a static parameter, not an integer" n))
+              | Ast.StaticName n ->
+                  let names_owner_index = function
+                    | Some (Ast.TypeBorrow (Ast.TypeIndexed (_, args)))
+                    | Some (Ast.TypeBorrowMut (Ast.TypeIndexed (_, args))) ->
+                        List.mem (Ast.StaticName n) args
+                    | _ -> false
+                  in
+                  if not (List.exists (fun (_, ty) -> names_owner_index ty)
+                            f.params) then
+                    raise (TypeError (f.def_loc, Printf.sprintf
+                      "slice return annotation '@ %s': '%s' does not name a \
+                       static index of any borrow or borrow mut indexed-owner \
+                       parameter of this function" n n));
+                  validate_nonparam_type f.def_loc s)
+         | ret -> Option.iter (validate_nonparam_type f.def_loc) ret);
         allow_implicit_static := false;
         List.iter validate_stmt_types f.body
     | Ast.ExternFuncDef (name, params, ret, effects) ->
@@ -4237,6 +4288,31 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add name (Option.value ret ~default:Ast.TypeVoid) m
     | _ -> m
   ) StringMap.empty prog in
+  (* Owner-derived region returns (issue #106): function key -> index of the
+     borrow/borrow-mut indexed-owner parameter its returned slice is tied to.
+     Same overload_key keying as call_params, resolved per call site through
+     resolved_call_targets, so overloads cannot mismatch. The declaration
+     validation pass already guaranteed the named static index exists on
+     exactly this kind of parameter. *)
+  let region_return_owner_index = List.fold_left (fun m -> function
+    | Ast.FuncDef f ->
+        (match f.ret_type with
+         | Some (Ast.TypeSingleton (Ast.TypeSlice _, Ast.StaticName n)) ->
+             let owner_idx = ref None in
+             List.iteri (fun i (_, ty) -> match ty with
+               | Some (Ast.TypeBorrow (Ast.TypeIndexed (_, args)))
+               | Some (Ast.TypeBorrowMut (Ast.TypeIndexed (_, args)))
+                 when !owner_idx = None
+                      && List.mem (Ast.StaticName n) args ->
+                   owner_idx := Some i
+               | _ -> ()
+             ) f.params;
+             (match !owner_idx with
+              | Some i -> StringMap.add (overload_key f.name f.params) i m
+              | None -> m)
+         | _ -> m)
+    | _ -> m
+  ) StringMap.empty prog in
   let check_affine_func fdef =
     let finfo = StringMap.find (overload_key fdef.Ast.name fdef.params) functions in
     let var_types = ref finfo.local_types in
@@ -4351,7 +4427,73 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              consumed on every path)" (path_to_string p) what))
       ) declared
     in
-    let rec check_expr moved consume (e : Ast.expr) =
+    (* Owner-derived region slices (issue #106, TAKIBI_CORE.md post-Slice-6
+       order item 1). expr_taint computes which owner paths a slice-valued
+       expression is derived from: a call to a region-returning function
+       taints with the path of its borrow-owner argument; Var and SliceOf
+       propagate an existing binding's taint (through `unsafe { s[a..<b] }`
+       too); every other shape -- notably Cast -- is untainted, so
+       `s as *u8` deliberately EXITS tracking (raw pointers sit outside
+       every safety story in this language, documented in SPEC.md). *)
+    let rec expr_taint taints (e : Ast.expr) = match e.desc with
+      | Ast.Var n -> TaintEnv.get n taints
+      | Ast.SliceOf (base, _, _) -> TaintEnv.get base taints
+      | Ast.Unsafe x -> expr_taint taints x
+      | Ast.Call (name, args) ->
+          let target = Option.value
+            (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
+            ~default:name in
+          (match StringMap.find_opt target region_return_owner_index with
+           | Some i ->
+               (match List.nth_opt args i with
+                | Some { Ast.desc = Ast.Var owner; _ } ->
+                    PathSet.singleton (PVar owner)
+                | _ -> PathSet.empty)
+           | None -> PathSet.empty)
+      | _ -> PathSet.empty
+    in
+    (* The name a taint diagnostic should blame for an escaping expression. *)
+    let rec taint_source_name (e : Ast.expr) = match e.desc with
+      | Ast.Var n -> n
+      | Ast.SliceOf (base, _, _) -> base
+      | Ast.Unsafe x -> taint_source_name x
+      | Ast.Call (name, _) -> Printf.sprintf "result of '%s'" name
+      | _ -> "<slice>"
+    in
+    (* Lazy kill: a tainted name is rejected at USE time once any of its
+       owner paths may have been consumed. Checking against maybe_consumed
+       (union at branch joins) gives the same conservative "possibly
+       consumed" treatment affine double-use already has. *)
+    let require_region_live loc taints moved name =
+      PathSet.iter (fun p ->
+        if ResourceFlow.may_be_consumed p moved then
+          raise (TypeError (loc, Printf.sprintf
+            "slice '%s' is derived from %s value '%s' and cannot be used \
+             after '%s' is consumed"
+            name (kind_word p) (path_to_string p) (path_to_string p))))
+        (TaintEnv.get name taints)
+    in
+    (* v1 escape bans: an owner-derived slice must stay a function-local
+       value. Returning it or storing it anywhere durable would outlive the
+       function-local tracking that makes the kill check honest. *)
+    let require_no_taint_escape loc taints escape (e : Ast.expr) =
+      let t = expr_taint taints e in
+      if not (PathSet.is_empty t) then
+        let owner = path_to_string (PathSet.choose t) in
+        let msg = match escape with
+          | `Return -> Printf.sprintf
+              "owner-derived slice '%s' cannot be returned from this \
+               function (it is tied to owner '%s')"
+              (taint_source_name e) owner
+          | `Store -> Printf.sprintf
+              "owner-derived slice '%s' cannot be stored into a global, \
+               struct field, array element, or through a pointer (it is \
+               tied to owner '%s')"
+              (taint_source_name e) owner
+        in
+        raise (TypeError (loc, msg))
+    in
+    let rec check_expr taints moved consume (e : Ast.expr) =
       match e.desc with
       | Ast.ViewLit (name, _) ->
           if Hashtbl.find_opt view_kinds name = Some Ast.KindLinear
@@ -4363,6 +4505,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Var name ->
           let p = PVar name in
           require_available e.loc moved p;
+          require_region_live e.loc taints moved name;
           if consume && PathSet.mem p borrowed_params then
             raise (TypeError (e.loc, Printf.sprintf
               "cannot move borrowed value '%s'; borrow permits non-consuming access only"
@@ -4374,7 +4517,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                let p = PField (base_name, fname) in
                require_available e.loc moved p;
                if consume then mv_consume p moved else moved
-           | _ -> check_expr moved false base_expr)
+           | _ -> check_expr taints moved false base_expr)
       | Ast.Call (name, args) ->
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets) ~default:name in
@@ -4389,7 +4532,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                    | _ -> true)
               | _ -> false
             in
-            let moved = check_expr moved consume_arg arg in
+            let moved = check_expr taints moved consume_arg arg in
             check_args moved rest (match params with _ :: ps -> ps | [] -> [])
           in
           let moved = check_args moved args params in
@@ -4408,19 +4551,29 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             raise (TypeError (e.loc, Printf.sprintf
               "linear variant '%s' must be moved into an owning binding or matched"
               vtype));
-          check_expr moved consume payload
-      | Ast.BinOp (_, a, b) -> check_expr (check_expr moved false a) false b
+          check_expr taints moved consume payload
+      | Ast.BinOp (_, a, b) ->
+          check_expr taints (check_expr taints moved false a) false b
       | Ast.Bnot a | Ast.Deref a | Ast.AddrOf a | Ast.Cast (_, a)
-      | Ast.Unsafe a -> check_expr moved false a
-      | Ast.StructLit xs -> List.fold_left (fun m x -> check_expr m false x) moved xs
+      | Ast.Unsafe a -> check_expr taints moved false a
+      | Ast.StructLit xs ->
+          List.fold_left (fun m x -> check_expr taints m false x) moved xs
       | Ast.TupleLit xs ->
           (* A tracked component moves into the tuple exactly when the
              tuple itself is being consumed (bound/passed/returned); a
              discarded literal consumes nothing, so obligations never
              vanish into a dropped temporary (OWNERSHIP_KERNEL.md 5.9). *)
-          List.fold_left (fun m x -> check_expr m consume x) moved xs
-      | Ast.Index (_, i) -> check_expr moved false i
-      | Ast.SliceOf (_, lo, hi) -> check_expr (check_expr moved false lo) false hi
+          List.fold_left (fun m x -> check_expr taints m consume x) moved xs
+      | Ast.Index (base, i) ->
+          (* Index/SliceOf bases are bare idents in the AST and are NOT
+             visited as Var expressions, so the region use check must fire
+             here explicitly (they are how a derived frame slice is actually
+             read). *)
+          require_region_live e.loc taints moved base;
+          check_expr taints moved false i
+      | Ast.SliceOf (base, lo, hi) ->
+          require_region_live e.loc taints moved base;
+          check_expr taints (check_expr taints moved false lo) false hi
       | Ast.SizeOf _ | Ast.OffsetOf _ | Ast.IntLit _ | Ast.BoolLit _
       | Ast.StringLit _ -> moved
       | Ast.EnumVariant (vtype, _) ->
@@ -4454,11 +4607,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Block body -> always_terminates body
       | _ -> false
     and always_terminates stmts = List.exists stmt_always_terminates stmts in
-    let rec check_stmts moved declared stmts =
+    let rec check_stmts moved declared taints stmts =
       let initial_declared = declared in
-      let (moved, declared) =
-        List.fold_left (fun (moved, declared) s -> check_stmt moved declared s)
-          (moved, declared) stmts
+      let (moved, declared, taints) =
+        List.fold_left (fun (moved, declared, taints) s ->
+            check_stmt moved declared taints s)
+          (moved, declared, taints) stmts
       in
       let newly_declared = PathSet.diff declared initial_declared in
       PathSet.iter (fun p ->
@@ -4475,18 +4629,19 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 "linear value '%s' is never consumed" (path_to_string p)))
         | _ -> ()
       ) newly_declared;
-      (moved, declared)
-    and check_stmt moved declared (s : Ast.stmt) =
+      (moved, declared, taints)
+    and check_stmt moved declared taints (s : Ast.stmt) =
       match s.desc with
       | Ast.Return e ->
+          require_no_taint_escape s.loc taints `Return e;
           let consumes = match fdef.ret_type with
             | Some ty -> is_tracked_type ty
             | None -> false
           in
-          let moved = check_expr moved consumes e in
+          let moved = check_expr taints moved consumes e in
           require_no_pending_linear s.loc "return" moved declared;
-          (moved, declared)
-      | Ast.Expr e -> (check_expr moved false e, declared)
+          (moved, declared, taints)
+      | Ast.Expr e -> (check_expr taints moved false e, declared, taints)
       | Ast.Assign (name, e) ->
           let p = PVar name in
           if PathSet.mem p borrowed_params then
@@ -4497,7 +4652,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             raise (TypeError (s.loc, Printf.sprintf
               "cannot assign to sink value '%s'; sink designates this parameter's terminal consumption"
               name));
-          let moved = check_expr moved (is_tracked_path p) e in
+          (* Region taint: a GLOBAL target is durable storage the
+             function-local tracking cannot follow -- reject a tainted RHS.
+             A local target instead REPLACES its taint with the RHS's
+             (creation from a region call, alias/subslice propagation, or
+             clearing on any other RHS), mirroring how reassignment clears
+             consumed status. *)
+          let is_local_target = StringMap.mem name !var_types in
+          if not is_local_target then
+            require_no_taint_escape s.loc taints `Store e;
+          let moved = check_expr taints moved (is_tracked_path p) e in
           (* Assignment is not a use of the old value: a binding whose value
              was already moved may be reinitialized. The RHS walk still
              rejects trying to read that moved value. A live affine value may
@@ -4510,10 +4674,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             raise (TypeError (s.loc, Printf.sprintf
               "assigning over %s value '%s' would discard its obligation \
                (consume it first)" (kind_word p) name));
-          (mv_clear p moved, PathSet.add p declared)
+          let taints =
+            if is_local_target then TaintEnv.set name (expr_taint taints e) taints
+            else taints
+          in
+          (mv_clear p moved, PathSet.add p declared, taints)
       | Ast.AssignDeref (a, b) ->
-          (check_expr (check_expr moved false a) false b, declared)
+          require_no_taint_escape s.loc taints `Store b;
+          (check_expr taints (check_expr taints moved false a) false b,
+           declared, taints)
       | Ast.AssignField (base_expr, fname, rhs) ->
+          require_no_taint_escape s.loc taints `Store rhs;
           (match base_expr.desc with
            | Ast.Var base_name when is_tracked_path (PField (base_name, fname)) ->
                (* Stage 3a: this field is the producing site for a fresh
@@ -4527,12 +4698,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   small diff, not a redesign. *)
                let p = PField (base_name, fname) in
                set_decl_loc p s.loc;
-               let moved = check_expr moved true rhs in
-               (mv_clear p moved, PathSet.add p declared)
+               let moved = check_expr taints moved true rhs in
+               (mv_clear p moved, PathSet.add p declared, taints)
            | _ ->
-               (check_expr (check_expr moved false base_expr) false rhs, declared))
-      | Ast.AssignIndex (_, i, v) ->
-          (check_expr (check_expr moved false i) false v, declared)
+               (check_expr taints (check_expr taints moved false base_expr)
+                  false rhs,
+                declared, taints))
+      | Ast.AssignIndex (base, i, v) ->
+          require_region_live s.loc taints moved base;
+          require_no_taint_escape s.loc taints `Store v;
+          (check_expr taints (check_expr taints moved false i) false v,
+           declared, taints)
       | Ast.Let (_, name, _, init, _) ->
           let p = PVar name in
           set_decl_loc p s.loc;
@@ -4543,37 +4719,49 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                  (kind_word p) name))
            | _ -> ());
           let moved = match init with
-            | Some e -> check_expr moved (is_tracked_path p) e
+            | Some e -> check_expr taints moved (is_tracked_path p) e
             | None -> moved
           in
-          (mv_clear p moved, PathSet.add p declared)
+          let taints = TaintEnv.set name
+            (match init with
+             | Some e -> expr_taint taints e
+             | None -> PathSet.empty)
+            taints
+          in
+          (mv_clear p moved, PathSet.add p declared, taints)
       | Ast.LetTuple (names, rhs) ->
           List.iter (fun n -> set_decl_loc (PVar n) s.loc) names;
           (* Destructuring consumes the tuple (consume=true moves an RHS
              variable, or propagates into a direct TupleLit's tracked
              components); each bound name starts as a fresh obligation/
              handle of its component type. *)
-          let moved = check_expr moved true rhs in
+          let moved = check_expr taints moved true rhs in
           let moved = List.fold_left (fun m n -> mv_clear (PVar n) m) moved names in
-          (moved, List.fold_left (fun d n -> PathSet.add (PVar n) d) declared names)
+          let taints = List.fold_left
+            (fun t n -> TaintEnv.set n PathSet.empty t) taints names in
+          (moved,
+           List.fold_left (fun d n -> PathSet.add (PVar n) d) declared names,
+           taints)
       | Ast.Block body ->
-          let (out, _) = check_stmts moved declared body in
-          (out, declared)
+          let (out, _, taints_out) = check_stmts moved declared taints body in
+          (out, declared, taints_out)
       | Ast.If (cond, yes, no) ->
-          let moved = check_expr moved false cond in
-          let (ym, _) = check_stmts moved declared yes in
-          let (nm, _) = check_stmts moved declared no in
-          let combined = match always_terminates yes, always_terminates no with
-            | true, false -> nm  (* "yes" always returns: only "no" continues past this `if` *)
-            | false, true -> ym  (* symmetric case *)
-            | _, _ -> mv_merge ym nm
+          let moved = check_expr taints moved false cond in
+          let (ym, _, yt) = check_stmts moved declared taints yes in
+          let (nm, _, nt) = check_stmts moved declared taints no in
+          let (combined, combined_taints) =
+            match always_terminates yes, always_terminates no with
+            | true, false -> (nm, nt)  (* "yes" always returns: only "no" continues past this `if` *)
+            | false, true -> (ym, yt)  (* symmetric case *)
+            | _, _ -> (mv_merge ym nm, TaintEnv.join_branches yt nt)
               (* neither terminates, or BOTH do (nothing continues past
                  this `if` at all, so which set we report is moot) *)
           in
-          (combined, declared)
+          (combined, declared, combined_taints)
       | Ast.While (cond, body) ->
-          let moved = check_expr moved false cond in
-          let (body_moved, _) = check_stmts moved declared body in
+          let moved = check_expr taints moved false cond in
+          let (body_moved, _, body_taints) =
+            check_stmts moved declared taints body in
           let newly_moved_outer =
             PathSet.inter declared
               (PathSet.diff (ResourceFlow.maybe_consumed body_moved)
@@ -4581,11 +4769,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
-          (moved, declared)
+          (moved, declared, TaintEnv.join_branches taints body_taints)
       | Ast.For (name, _, lo, hi, body) ->
-          let moved = check_expr (check_expr moved false lo) false hi in
+          let moved = check_expr taints (check_expr taints moved false lo) false hi in
           let declared_body = PathSet.add (PVar name) declared in
-          let (body_moved, _) = check_stmts moved declared_body body in
+          (* The counter rebinds `name` for the body, so any outer taint on
+             that name must not leak into it (same rebinding treatment
+             written_names gives narrowing kills). *)
+          let body_taints_in = TaintEnv.set name PathSet.empty taints in
+          let (body_moved, _, body_taints) =
+            check_stmts moved declared_body body_taints_in body in
           let newly_moved_outer =
             PathSet.inter declared
               (PathSet.diff (ResourceFlow.maybe_consumed body_moved)
@@ -4593,10 +4786,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
-          (moved, declared)
+          (moved, declared, TaintEnv.join_branches taints body_taints)
       | Ast.ForEach (name, collection, body) ->
-          let moved = check_expr moved false collection in
-          let (body_moved, _) = check_stmts moved (PathSet.add (PVar name) declared) body in
+          let moved = check_expr taints moved false collection in
+          let body_taints_in = TaintEnv.set name PathSet.empty taints in
+          let (body_moved, _, body_taints) =
+            check_stmts moved (PathSet.add (PVar name) declared)
+              body_taints_in body in
           let newly_moved_outer =
             PathSet.inter declared
               (PathSet.diff (ResourceFlow.maybe_consumed body_moved)
@@ -4604,9 +4800,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
-          (moved, declared)
+          (moved, declared, TaintEnv.join_branches taints body_taints)
       | Ast.Match (e, arms) ->
-          let moved = check_expr moved true e in
+          let moved = check_expr taints moved true e in
           let results = List.map (fun arm ->
             let (binding, binding_ty, body) = match arm with
               | Ast.ArmVariant (vtype, cname, binding, b) ->
@@ -4639,7 +4835,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   set_decl_loc p s.loc;
                   (mv_clear p moved, PathSet.add p declared, Some p)
             in
-            let out = fst (check_stmts arm_moved arm_declared body) in
+            (* A payload binder is a fresh value, never a region slice --
+               clear any stale same-named taint for the arm body. *)
+            let arm_taints = match binding with
+              | Some (name, _) -> TaintEnv.set name PathSet.empty taints
+              | None -> taints
+            in
+            let (out, _, out_taints) =
+              check_stmts arm_moved arm_declared arm_taints body in
             Option.iter (fun p ->
               if is_linear_path p
                  && not (ResourceFlow.is_consumed_on_all_paths p out) then
@@ -4662,26 +4865,28 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                    | Some ty -> StringMap.add name ty !var_types
                    | None -> StringMap.remove name !var_types)
              | None -> ());
-            (always_terminates body, out)
+            (always_terminates body, out, out_taints)
           ) arms in
           (* Same reasoning as `If` above: a terminating arm never reaches
              code after the `match`, so its consumption must not be merged
              into what continues -- unless EVERY arm terminates, in which
              case nothing continues anyway and the merge is moot. *)
-          let non_terminating = List.filter (fun (terminates, _) -> not terminates) results in
+          let non_terminating = List.filter (fun (terminates, _, _) -> not terminates) results in
           let contributing = if non_terminating = [] then results else non_terminating in
-          let arm_moved = match contributing with
-            | [] -> moved
-            | (_, first) :: rest ->
-                List.fold_left (fun acc (_, am) -> mv_merge acc am) first rest
+          let (arm_moved, arm_taints) = match contributing with
+            | [] -> (moved, taints)
+            | (_, first, first_taints) :: rest ->
+                List.fold_left (fun (acc, acc_t) (_, am, at) ->
+                    (mv_merge acc am, TaintEnv.join_branches acc_t at))
+                  (first, first_taints) rest
           in
-          (arm_moved, declared)
+          (arm_moved, declared, arm_taints)
       | Ast.Break ->
           require_no_pending_linear s.loc "break" moved declared;
-          (moved, declared)
+          (moved, declared, taints)
       | Ast.Continue ->
           require_no_pending_linear s.loc "continue" moved declared;
-          (moved, declared)
+          (moved, declared, taints)
     in
     if not (always_terminates fdef.body) then begin
       if is_direct_variant_type finfo.ret_type then
@@ -4693,9 +4898,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           "function '%s' returns an affine/linear value and must return explicitly on every path"
           fdef.name))
     end;
-    let (final_moved, _) = check_stmts mv_empty
+    let (final_moved, _, _) = check_stmts mv_empty
       (List.fold_left (fun d (name, _) -> PathSet.add (PVar name) d)
-         PathSet.empty fdef.params) fdef.body
+         PathSet.empty fdef.params) TaintEnv.empty fdef.body
     in
     (* A plain LINEAR parameter is an accepted all-path obligation. Affine
        parameters may be dropped; borrow never owns and sink is terminal. *)
