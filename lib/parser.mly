@@ -149,9 +149,9 @@ item:
       OwnedStructDef
         (name, kind, static_params, fields, false, None, private_fields,
          is_private, $symbolstartpos) }
-  | p = private_flag k = owned_kind VIEW name = IDENT SEMI
+  | p = private_flag k = owned_kind VIEW name = IDENT ps = view_static_params SEMI
     { Type_layout.register_view name;
-      ViewDef (name, k, p, $symbolstartpos) }
+      ViewDef (name, k, ps, p, $symbolstartpos) }
   | p = private_flag OPAQUE STRUCT IDENT SEMI
     { OpaqueStructDef ($4, KindPlain, p, $symbolstartpos) }
   | p = private_flag AFFINE OPAQUE STRUCT IDENT SEMI
@@ -199,6 +199,10 @@ owned_kind:
 
 static_params:
   | LBRACKET ps = separated_nonempty_list(COMMA, static_param) RBRACKET { ps }
+
+view_static_params:
+  | /* empty */ { [] }
+  | ps = static_params { ps }
 
 static_param:
   | name = IDENT COLON sort = int_base_type_expr { (name, sort) }
@@ -420,8 +424,8 @@ expr:
   | TRUE   { { desc = BoolLit true;   loc = $symbolstartpos } }
   | FALSE  { { desc = BoolLit false;  loc = $symbolstartpos } }
   | STRING { { desc = StringLit $1;   loc = $symbolstartpos } }
-  | VIEW name = IDENT
-    { { desc = ViewLit name; loc = $symbolstartpos } }
+  | VIEW name = IDENT args = view_static_args
+    { { desc = ViewLit (name, args); loc = $symbolstartpos } }
   | IDENT { { desc = Var $1; loc = $symbolstartpos } }
   | IDENT LPAREN args RPAREN { { desc = Call ($1, $3); loc = $symbolstartpos } }
   | IDENT COLONCOLON IDENT
@@ -515,6 +519,10 @@ base_type_expr:
 static_arg:
   | name = IDENT { StaticName name }
   | n = INT { StaticInt (narrow_int64 $symbolstartpos "static integer" n) }
+
+view_static_args:
+  | /* empty */ { [] }
+  | LBRACKET args = separated_nonempty_list(COMMA, static_arg) RBRACKET { args }
 
 (* Array size: a compile-time integer constant expression -- a literal, the
    name of an immutable global constant declared earlier (`let NAME: T =

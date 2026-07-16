@@ -59,7 +59,9 @@ let variant_cases_tbl :
   Hashtbl.create 8
 
 let rec resolve_special_type = function
-  | TypeNamed name when Hashtbl.mem erased_view_names name -> TypeView name
+  | TypeNamed name when Hashtbl.mem erased_view_names name -> TypeView (name, [])
+  | TypeIndexed (name, args) when Hashtbl.mem erased_view_names name ->
+      TypeView (name, args)
   | TypeNamed name when Hashtbl.mem variant_defs name -> TypeVariant name
   | TypePtr t -> TypePtr (resolve_special_type t)
   | TypeIo t -> TypeIo (resolve_special_type t)
@@ -207,7 +209,11 @@ let rec ty_str = function
   | TypeArray (t, n) -> Printf.sprintf "[%s; %d]" (ty_str t) n
   | TypeFn _  -> "fn(...)"
   | TypeNamed s -> s
-  | TypeView s -> "view " ^ s
+  | TypeView (s, []) -> "view " ^ s
+  | TypeView (s, args) ->
+      let arg = function StaticName n -> n | StaticInt n -> string_of_int n in
+      Printf.sprintf "view %s[%s]" s
+        (String.concat ", " (List.map arg args))
   | TypeVariant s -> s
   | TypeExists (name, sort, body) ->
       Printf.sprintf "exists %s: %s. %s" name (ty_str sort) (ty_str body)
@@ -724,7 +730,7 @@ let rec ltype_of_ast = function
   | TypeIsize       -> isize_lltype ()
   | TypeUsize       -> usize_lltype ()
   | TypeVoid        -> void_type context
-  | TypeView name -> raise (Error (Printf.sprintf
+  | TypeView (name, _) -> raise (Error (Printf.sprintf
       "internal error: erased view '%s' reached runtime layout" name))
   | TypeVariant name ->
       (match Hashtbl.find_opt variant_lltypes name with
@@ -1041,6 +1047,14 @@ let rec canon_ty = function
   | TypeSingleton (base, _) -> canon_ty base
   | TypeRefined (_, _, base) -> base
   | t -> t
+
+(* A singleton adds an equality fact without discarding the range carried by
+   its runtime base. Bounds proof sites must inspect through that checker-only
+   wrapper; otherwise `{0..<N} @ n` spuriously regains a runtime trap. *)
+let rec refinement_range = function
+  | TypeSingleton (base, _) -> refinement_range base
+  | TypeRefined (lo, hi, _) -> Some (lo, hi)
+  | _ -> None
 
 (* Extract a small-number-scoped compile-time integer from an expression,
    iff it is exactly an integer literal that fits natively (see
@@ -1408,9 +1422,11 @@ let function_key (pt : Types.program_types option) (fdef : Ast.func) =
   | Some pt ->
       let declared = List.map snd fdef.params in
       let rec abi_type = function
-        | TypeNamed name when Hashtbl.mem erased_view_names name -> TypeView name
+        | TypeNamed name when Hashtbl.mem erased_view_names name -> TypeView (name, [])
+        | TypeIndexed (name, _) when Hashtbl.mem erased_view_names name ->
+            TypeView (name, [])
         | TypeNamed name when Hashtbl.mem variant_defs name -> TypeVariant name
-        | TypeView name -> TypeView name
+        | TypeView (name, _) -> TypeView (name, [])
         | TypeVariant name -> TypeVariant name
         | TypeExists (_, _, body) -> abi_type body
         | TypeBorrow t | TypeBorrowMut t | TypeSink t
@@ -1585,8 +1601,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
   | BoolLit b ->
       (TypeBool, const_int (i1_type context) (if b then 1 else 0))
 
-  | ViewLit name ->
-      (TypeView name, erased_view_value ())
+  | ViewLit (name, args) ->
+      (TypeView (name, args), erased_view_value ())
 
   | StringLit s ->
       (* Place the null-terminated byte sequence as a global constant array and return a pointer to its start *)
@@ -2207,8 +2223,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       in
       (* Array load [T; N]: skip bounds check when TypeRefined proves safety *)
       let load_from_array elem_ty n arr_ptr =
-        let needs_check = match idx_ty with
-          | TypeRefined (lo, hi, _) -> lo < 0 || hi > n
+        let needs_check = match refinement_range idx_ty with
+          | Some (lo, hi) -> lo < 0 || hi > n
           | _ -> true
         in
         if needs_check then emit_bounds_check e.loc idx_ty idx_v n;
@@ -2236,8 +2252,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          so hi <= min implies hi <= len). Otherwise check against the
          runtime length. *)
       let load_from_slice elem_ty min_len fat =
-        let proven = match idx_ty with
-          | TypeRefined (lo, hi, _) -> lo >= 0 && hi <= min_len
+        let proven = match refinement_range idx_ty with
+          | Some (lo, hi) -> lo >= 0 && hi <= min_len
           | _ -> false
         in
         if not proven then
@@ -2308,7 +2324,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         in
         let range = match Const_env.bound_value be with
           | Some k -> Some (k, k + 1)
-          | None -> (match bty with TypeRefined (a, b, _) -> Some (a, b) | _ -> None)
+          | None -> refinement_range bty
         in
         (to_index_width ~is_signed:(not (is_unsigned bty_raw)) bv, range)
       in
@@ -2689,7 +2705,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let range_of (ae : Ast.expr) (aty : Ast.type_expr) =
         match Const_env.bound_value ae with
         | Some k -> Some (k, k + 1)
-        | None -> (match aty with TypeRefined (x, y, _) -> Some (x, y) | _ -> None)
+        | None -> refinement_range aty
       in
       (* canon_ty here (not raw `at`): `at` can itself still be a
          TypeRefined wrapping the true base (e.g. one operand was already
@@ -3162,8 +3178,8 @@ let gen_func ?prog_types fdef =
         in
         let (_, rhs_v) = gen_expr ?expected_ty:elem_ty_hint locals rhs in
         let store_to_array elem_ty n arr_ptr =
-          let needs_check = match idx_ty with
-            | TypeRefined (lo, hi, _) -> lo < 0 || hi > n
+          let needs_check = match refinement_range idx_ty with
+            | Some (lo, hi) -> lo < 0 || hi > n
             | _ -> true
           in
           if needs_check then emit_bounds_check s.loc idx_ty idx_v n;
@@ -3181,8 +3197,8 @@ let gen_func ?prog_types fdef =
            idx's range fits the compile-time minimum, else check against the
            runtime length. *)
         let store_to_slice elem_ty min_len fat =
-          let proven = match idx_ty with
-            | TypeRefined (lo, hi, _) -> lo >= 0 && hi <= min_len
+          let proven = match refinement_range idx_ty with
+            | Some (lo, hi) -> lo >= 0 && hi <= min_len
             | _ -> false
           in
           if not proven then
@@ -3857,7 +3873,7 @@ let gen_program ?prog_types prog =
   Hashtbl.reset variant_lltypes;
   Hashtbl.reset variant_cases_tbl;
   List.iter (function
-    | ViewDef (name, _, _, _) -> Hashtbl.replace erased_view_names name ()
+    | ViewDef (name, _, _, _, _) -> Hashtbl.replace erased_view_names name ()
     | VariantDef (name, cases, _) -> Hashtbl.replace variant_defs name cases
     | _ -> ()) prog;
   (* Pass 0: register struct and enum types -- must precede ltype_of_ast for TypeNamed *)

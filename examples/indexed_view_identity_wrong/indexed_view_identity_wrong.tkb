@@ -1,0 +1,21 @@
+// This file is expected to produce a compile error.
+// `permission` was created for slot 0, while the runtime index passed to
+// `slot_write_wrong` is statically known to be slot 1. Both arguments must
+// share one universally quantified `slot`, so the checker rejects the call
+// instead of allowing authority for one slot to be used on another.
+
+private linear view WrongSlotWrite[slot: usize, state: u8];
+
+fn slot_begin_wrong(index: {0..<2 as usize} @ slot)
+        -> WrongSlotWrite[slot, 0] {
+    return view WrongSlotWrite[slot, 0];
+}
+
+fn slot_write_wrong(permission: sink WrongSlotWrite[slot, 0],
+                    index: {0..<2 as usize} @ slot) {
+}
+
+fn install_wrong_slot() {
+    let permission = slot_begin_wrong(0);
+    slot_write_wrong(permission, 1);
+}

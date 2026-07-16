@@ -5,7 +5,7 @@ syntax accepted by the compiler today. `SPEC.md` remains authoritative for
 implemented Takibi. `OWNERSHIP_KERNEL.md` records the history and limitations
 of the current affine/linear checker.
 
-Implementation status (2026-07-15): Slices 0 through 5 are implemented. The
+Implementation status (2026-07-15): Slices 0 through 6 are implemented. The
 `Takibi_core` module owns the four-layer vocabulary, the current checker uses
 `Delta.Legacy_flow`, and the indexed runtime-owner subset described in 3.1 is
 accepted. Non-indexed erased affine/linear views are also accepted and erased
@@ -13,8 +13,10 @@ before LLVM ABI lowering. Closed kind-carrying variants, restricted
 existential indexed-owner payloads, and standard affine weakening are
 accepted. Scoped mutable owner borrows, direct/indirect blocking effects, and
 function-pointer effect contracts are accepted and erase before LLVM.
-Indexed views, general place/storage tracking, lock invariants, general
-quantifiers/propositions, and solver hooks remain design targets.
+Integer-indexed erased views and implicitly universal view transitions are
+accepted. General place/storage tracking, lock invariants, existential view
+state dispatch, explicit/general quantifiers and propositions, and solver
+hooks remain design targets.
 
 The examples in this document are elaboration fixtures. Their contracts and
 runtime representations are decisions; punctuation may change when a fixture
@@ -649,6 +651,35 @@ Implemented scope:
   callback and into thread context;
 - effect rows erase completely and do not change the function-pointer ABI.
 
+### Slice 6: indexed erased views and universal view change (implemented 2026-07-15)
+
+Implemented scope:
+
+- an erased permission may declare primitive-integer static parameters, for
+  example `linear view SlotWrite[slot: usize, state: u8];`;
+- type uses and mint expressions carry the same arguments:
+  `SlotWrite[slot, 0]` and `view SlotWrite[slot, 0]`;
+- unbound static names in function signatures retain the existing implicit
+  universal semantics. A transition such as
+  `sink SlotWrite[slot, 0] -> SlotWrite[slot, 1]` is checked for every
+  `slot` without exposing a runtime proof argument;
+- static arity, sort, literal range, identity, and phase mismatches are
+  rejected. `examples/indexed_view` ties one such permission to a runtime
+  `{0..<2 as usize} @ slot` index and interleaves two independently indexed
+  transitions; `indexed_view_identity_wrong` rejects crossing the slots;
+- indexed views obey the existing affine/linear flow, privacy, cast, address,
+  storage, and runtime-operation bans;
+- all view values and static arguments erase. A view-only transition lowers
+  to `void ()`, while a linked runtime singleton index remains an ordinary
+  integer argument;
+- bounds lowering now preserves a refinement through its singleton wrapper,
+  so `{0..<N as usize} @ n` proves the same no-trap access as its base range.
+
+This slice does not add explicit `forall`, `exists` over views, existential
+runtime state dispatch, address/enum static sorts, propositions, or a solver.
+Those are separate surface and Core obligations rather than being inferred
+from the indexed spelling.
+
 ### Later slices
 
 - General place borrowing and stable storage for indexed owners, introduced
@@ -656,7 +687,9 @@ Implemented scope:
   checker.
 - Lock invariants and heap/region predicates once a multicore or zero-copy
   example requires them.
-- `TcpConn[conn, state]` view change and existential state dispatch.
+- existentially packaged indexed views and runtime state dispatch, with
+  `TcpConn[conn, state]` as the concrete driver. The universal transition
+  basis is now provided by Slice 6.
 - Zero-copy typed channels (#113) and ownership transfer through variants.
 - Aliasing/region predicates (#106), asynchronous TX ownership (#87), and
   solver/proof integration, each with a concrete driver and negative tests.

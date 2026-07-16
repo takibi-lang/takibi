@@ -3,13 +3,14 @@
 Status: LIVING DESIGN MEMO, not the language spec. Stages 1, 2, the tuple
 interlude, and Stage 3a are implemented; their actual behavior lives in
 SPEC.md. The long-term architecture and remaining vertical slices live in
-TAKIBI_CORE.md; Slices 0 through 5 are implemented: the Core boundary,
+TAKIBI_CORE.md; Slices 0 through 6 are implemented: the Core boundary,
 indexed runtime owners, erased views, variants/restricted existentials,
 standard affine semantics, scoped mutable owner borrows, checker effects,
-and function-pointer effect contracts. Indexed views, general place/storage
-tracking, lock invariants, general propositions, and solver/prover integration
-remain outlook. As each surface slice lands, SPEC.md stays authoritative for
-the language that actually exists.
+function-pointer effect contracts, and integer-indexed universally transformed
+views. General place/storage tracking, existential view state dispatch, lock
+invariants, general propositions, and solver/prover integration remain
+outlook. As each surface slice lands, SPEC.md stays authoritative for the
+language that actually exists.
 
 Sections 4 through 6 preserve the decision path that led here. Statements in
 those historical stage descriptions about affine requiring one-path
@@ -845,12 +846,13 @@ a trusted boundary: the compiler proves that every minted permission flows
 correctly, not that trusted code minted it only after a real event. The same
 trust qualification applies to Slice 1's private owner constructors.
 
-This slice intentionally stops before the ATS2-strength part of the long-term
-destination. Views cannot yet take static parameters, so no `View[n]`, view
-change, quantified view state, proposition, or solver goal is being
-simulated. Slice 3 subsequently adds existential packages only for indexed
-runtime owners. Those additions reuse the indexed Core introduced by Slice 1
-rather than encode identities in runtime token bits. The focused
+At the Slice 2 boundary this intentionally stopped before the ATS2-strength
+part of the long-term destination: views could not yet take static parameters.
+Slice 6 below adds `View[n]` and implicitly universal view change, while
+existential view state, propositions, and solver goals remain separate work.
+Slice 3 subsequently added existential packages only for indexed runtime
+owners. Those additions reuse the indexed Core introduced by Slice 1 rather
+than encode identities in runtime token bits. The focused
 `view_linear_branch_missed` fixture records the all-paths failure with an
 English source comment and expected diagnostic; the real HTTP server remains
 the positive integration fixture.
@@ -910,7 +912,8 @@ globals/fields/arrays/pointers. LLVM currently
 uses an `i32` tag plus one field per runtime-bearing case; erased-view
 payloads and existential binders contribute no field. A compact union ABI,
 full DWARF tagged-union metadata, generic `Option[T]`/`Result[T,E]`, general
-quantifiers, indexed views, and mutable borrowing are separate work.
+quantifiers, indexed views, and mutable borrowing were separate work at that
+checkpoint; Slice 6 later supplies integer-indexed views.
 
 Focused negative examples, each with an English explanation, cover a missed
 linear payload, non-exhaustive matching, and accidental equality between two
@@ -962,7 +965,7 @@ an indirect call reached from an interrupt root was rejected as unknown.
 become a checked root until that contract had a type-level surface. Slice 5
 below closes that specific gap. General place borrowing, stored owners, lock
 invariants, quantified views, and solver/prover discharge were not implied by
-Slice 4 and remain separate work.
+Slice 4 and remained separate work at that checkpoint.
 
 Focused negative examples explain immutable-payload mutable borrowing and a
 transitive blocking ISR path in English. The effect tests also cover safe
@@ -996,25 +999,65 @@ ring and thread context performs the echo. The QEMU IRQ dispatch table uses
 the same non-blocking callback type and its dispatcher is checked as an
 interrupt root too.
 
-The remaining Core work is explicit and is not hidden behind this slice:
+At the Slice 5 checkpoint, the remaining Core work was explicit and was not
+hidden behind that slice:
 
 - general place borrowing beyond a bare local/parameter;
 - indexed owners stored in arbitrary fields, arrays, globals, or other
   stable places;
 - lock invariants and heap/region predicates;
 - static parameters on views, quantified view change, and existential state
-  dispatch;
+  dispatch (the first two are closed by Slice 6 below);
 - solver/prover discharge over propositions retained in Phi.
+
+#### 6.7.7 Slice 6 implementation result (2026-07-15)
+
+Slice 6 composes the static-identity machinery from Slice 1 with the erased
+permissions from Slice 2:
+
+```takibi
+private linear view SlotWrite[slot: usize, state: u8];
+
+fn slot_write(permission: sink SlotWrite[slot, 0],
+              index: {0..<2 as usize} @ slot,
+              value: u8) -> SlotWrite[slot, 1] {
+    slots[index] = value;
+    return view SlotWrite[slot, 1];
+}
+```
+
+Static names in signatures remain implicitly universally quantified. One
+`slot` therefore relates a runtime singleton index, the consumed permission,
+and the produced next-state permission without a separate proof argument at
+the call site. Arity, integer sort/range, identity, and state mismatches are
+rejected by the same rigid/static unification used for indexed owners.
+Affine/linear flow, private mint authority, and all existing cast, address,
+storage, and runtime-operation bans apply unchanged.
+
+The representation remains unambiguous: `SlotWrite[slot, state]`, both static
+arguments, and the transition's view input/result all disappear before LLVM.
+A view-only transition is `void ()`; the runtime index remains an ordinary
+integer only where the source API actually takes it. The implementation also
+fixed bounds lowering to look through `T @ n`, preserving a refined base such
+as `{0..<2 as usize}` under the singleton equality.
+
+`examples/indexed_view` is the positive cross-target fixture. It interleaves
+two slot protocols and compiles under `--forbid-trap`;
+`indexed_view_identity_wrong` explains in English why authority for slot 0
+cannot access slot 1. Explicit `forall`, existential packages around views,
+dynamic state dispatch, address/enum static sorts, propositions, and solver
+discharge are deliberately not claimed by this slice.
 
 ## 7. Next outlook: stable places, channel v2 (#113), and view change
 
 Variant-carried ownership is now available for channel results and transfer
 APIs. Zero-copy channel storage still needs stable place/invariant tracking
 before a linear payload can safely live in a slot. Function-pointer effects
-are now closed by Slice 5. Indexed view change for TCP remains the next
-Delta/Phi state-transition driver; arbitrary stored owners and lock
-invariants should be introduced only with the concrete channel/driver that
-needs each one.
+are closed by Slice 5, and universally indexed view change is closed by Slice
+6. TCP still needs existential state packaging/dispatch and a concrete
+`TcpConn[conn, state]` migration. Arbitrary stored owners and lock invariants
+should be introduced only with the concrete channel/driver that needs each
+one.
 
 ## 8. Prior art notes
 

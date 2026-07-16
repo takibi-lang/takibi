@@ -50,12 +50,15 @@ let function_param_modes : Ast.type_expr option list StringMap.t ref =
   ref StringMap.empty
 
 let view_kinds : (string, Ast.opaque_kind) Hashtbl.t = Hashtbl.create 8
+let view_params : (string, Ast.static_param list) Hashtbl.t = Hashtbl.create 8
 let variant_defs : (string, (string * Ast.type_expr option) list) Hashtbl.t =
   Hashtbl.create 8
 let variant_kinds : (string, Ast.opaque_kind) Hashtbl.t = Hashtbl.create 8
 
 let rec resolve_declared_type = function
-  | Ast.TypeNamed name when Hashtbl.mem view_kinds name -> Ast.TypeView name
+  | Ast.TypeNamed name when Hashtbl.mem view_kinds name -> Ast.TypeView (name, [])
+  | Ast.TypeIndexed (name, args) when Hashtbl.mem view_kinds name ->
+      Ast.TypeView (name, args)
   | Ast.TypeNamed name when Hashtbl.mem variant_defs name -> Ast.TypeVariant name
   | Ast.TypePtr t -> Ast.TypePtr (resolve_declared_type t)
   | Ast.TypeIo t -> Ast.TypeIo (resolve_declared_type t)
@@ -899,7 +902,7 @@ let check_kinded_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
    or forget Delta permissions. *)
 let check_resource_cast_away loc (src_ty : ty) =
   match repr src_ty with
-  | TView name ->
+  | TView (name, _) ->
       raise (TypeError (loc, Printf.sprintf
         "cannot cast erased view '%s': views have no runtime representation"
         name))
@@ -945,11 +948,15 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
   | BoolLit _   -> TBool
   | StringLit _ -> TPtr TU8
-  | ViewLit name ->
+  | ViewLit (name, args) ->
       if not (Hashtbl.mem view_kinds name) then
         raise (TypeError (e.loc, Printf.sprintf "unknown erased view '%s'" name));
       check_private_view_construction e.loc name;
-      TView name
+      let scope = match !active_static_scope with
+        | Some scope -> scope
+        | None -> create_static_scope ()
+      in
+      TView (name, List.map (Types.static_of_ast scope) args)
   | Var name ->
       check_private_global_access e.loc name;
       (* Check local/global variables first *)
@@ -1257,7 +1264,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       check_resource_cast_away e.loc src_ty;
       check_private_type_construction e.loc target_ty;
       (match resolve_declared_type target_ty with
-       | Ast.TypeView name ->
+       | Ast.TypeView (name, _) ->
            raise (TypeError (e.loc, Printf.sprintf
              "cannot construct erased view '%s' with a cast; use `view %s`"
              name name))
@@ -3081,14 +3088,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.OwnedStructDef (n, _, _, _, _, _, _, _, _) ->
         claim_toplevel_name n "struct"
     | Ast.OpaqueStructDef (n, _, _, _)  -> claim_toplevel_name n "struct"
-    | Ast.ViewDef (n, _, _, _)          -> claim_toplevel_name n "view"
+    | Ast.ViewDef (n, _, _, _, _)       -> claim_toplevel_name n "view"
     | Ast.EnumDef (n, _, _, _)    -> claim_toplevel_name n "enum"
     | Ast.VariantDef (n, _, _)     -> claim_toplevel_name n "variant"
     | Ast.UseDef _              -> ()
   ) prog;
   Hashtbl.reset view_kinds;
+  Hashtbl.reset view_params;
   List.iter (function
-    | Ast.ViewDef (name, kind, _, _) -> Hashtbl.replace view_kinds name kind
+    | Ast.ViewDef (name, kind, params, _, _) ->
+        Hashtbl.replace view_kinds name kind;
+        Hashtbl.replace view_params name params
     | _ -> ()) prog;
   Hashtbl.reset variant_defs;
   List.iter (function
@@ -3115,7 +3125,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.OpaqueStructDef (name, Ast.KindAffine, _, _) -> StringSet.add name names
     | Ast.OwnedStructDef (name, Ast.KindAffine, _, _, _, _, _, _, _) ->
         StringSet.add name names
-    | Ast.ViewDef (name, Ast.KindAffine, _, _) -> StringSet.add name names
+    | Ast.ViewDef (name, Ast.KindAffine, _, _, _) -> StringSet.add name names
     | _ -> names
   ) StringSet.empty prog in
   affine_opaque_names := affine_names;
@@ -3123,7 +3133,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.OpaqueStructDef (name, Ast.KindLinear, _, _) -> StringSet.add name names
     | Ast.OwnedStructDef (name, Ast.KindLinear, _, _, _, _, _, _, _) ->
         StringSet.add name names
-    | Ast.ViewDef (name, Ast.KindLinear, _, _) -> StringSet.add name names
+    | Ast.ViewDef (name, Ast.KindLinear, _, _, _) -> StringSet.add name names
     | _ -> names
   ) StringSet.empty prog in
   linear_opaque_names := linear_names;
@@ -3135,7 +3145,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   let rec payload_kind = function
     | Ast.TypeExists (_, _, body) -> payload_kind body
-    | Ast.TypeNamed name | Ast.TypeView name ->
+    | Ast.TypeNamed name | Ast.TypeView (name, _) ->
         if StringSet.mem name linear_names then Ast.KindLinear
         else if StringSet.mem name affine_names then Ast.KindAffine
         else (match Hashtbl.find_opt variant_kinds name with
@@ -3144,8 +3154,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         Option.value (Hashtbl.find_opt variant_kinds name)
           ~default:Ast.KindPlain
     | Ast.TypeIndexed (name, _) ->
-        Option.value (Hashtbl.find_opt indexed_struct_kinds name)
-          ~default:Ast.KindPlain
+        (match Hashtbl.find_opt view_kinds name with
+         | Some kind -> kind
+         | None -> Option.value (Hashtbl.find_opt indexed_struct_kinds name)
+             ~default:Ast.KindPlain)
     | Ast.TypePtr (Ast.TypeNamed name) ->
         if StringSet.mem name linear_names then Ast.KindLinear
         else if StringSet.mem name affine_names then Ast.KindAffine
@@ -3200,7 +3212,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         List.iter (fun f ->
           Hashtbl.replace private_struct_fields (sname, f) loc.Lexing.pos_fname
         ) privs
-    | Ast.ViewDef (name, _, true, loc) ->
+    | Ast.ViewDef (name, _, _, true, loc) ->
         Hashtbl.replace private_views name loc.Lexing.pos_fname
     | _ -> ()
   ) prog;
@@ -3265,6 +3277,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       raise (TypeError (loc, Printf.sprintf
         "%s '%s' cannot be both interrupt and may_block" kind name))
   in
+  let validate_static_application loc kind name formals args =
+    if List.length args <> List.length formals then
+      raise (TypeError (loc, Printf.sprintf
+        "%s '%s' expects %d static argument(s), got %d"
+        kind name (List.length formals) (List.length args)));
+    List.iter2 (fun arg (_, sort) -> check_static_arg loc sort arg)
+      args formals
+  in
   let rec validate_static_type loc ty =
     match ty with
     | Ast.TypeExists _ ->
@@ -3275,11 +3295,26 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         raise (TypeError (loc, Printf.sprintf
           "indexed struct '%s' requires %d static argument(s); write %s[...]"
           name arity name))
-    | Ast.TypeIndexed (name, args) ->
-        (match Hashtbl.find_opt indexed_struct_params name with
+    | Ast.TypeNamed name when Hashtbl.mem view_params name ->
+        let arity = List.length (Hashtbl.find view_params name) in
+        if arity <> 0 then
+          raise (TypeError (loc, Printf.sprintf
+            "indexed view '%s' requires %d static argument(s); write %s[...]"
+            name arity name))
+    | Ast.TypeView (name, args) ->
+        (match Hashtbl.find_opt view_params name with
          | None -> raise (TypeError (loc, Printf.sprintf
-             "'%s' is not an indexed runtime struct" name))
+             "unknown erased view '%s'" name))
          | Some formals ->
+             validate_static_application loc "view" name formals args)
+    | Ast.TypeIndexed (name, args) ->
+        (match Hashtbl.find_opt view_params name,
+               Hashtbl.find_opt indexed_struct_params name with
+         | Some formals, _ ->
+             validate_static_application loc "view" name formals args
+         | None, None -> raise (TypeError (loc, Printf.sprintf
+             "'%s' is not an indexed runtime struct or view" name))
+         | None, Some formals ->
              if List.length args <> List.length formals then
                raise (TypeError (loc, Printf.sprintf
                  "indexed struct '%s' expects %d static argument(s), got %d"
@@ -3342,7 +3377,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      load-bearing enforcement; these declaration bans reject the storage
      shapes up front so the error points at the declaration. *)
   let rec type_mentions_linear = function
-    | Ast.TypeNamed n | Ast.TypeView n -> StringSet.mem n linear_names
+    | Ast.TypeNamed n | Ast.TypeView (n, _) -> StringSet.mem n linear_names
     | Ast.TypeIndexed (n, _) -> StringSet.mem n linear_names
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
@@ -3358,6 +3393,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let rec type_mentions_view = function
     | Ast.TypeView _ -> true
     | Ast.TypeNamed name -> Hashtbl.mem view_kinds name
+    | Ast.TypeIndexed (name, _) when Hashtbl.mem view_kinds name -> true
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
@@ -3497,7 +3533,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     match ty with
     | Ast.TypeBorrow (Ast.TypeNamed name as inner)
       when Hashtbl.mem view_kinds name -> validate_complete_type loc false inner
-    | Ast.TypeBorrow (Ast.TypeView name as inner)
+    | Ast.TypeBorrow (Ast.TypeView (name, _) as inner)
       when Hashtbl.mem view_kinds name -> validate_complete_type loc false inner
     | Ast.TypeBorrow (Ast.TypePtr (Ast.TypeNamed name) as inner)
       when is_kinded name -> validate_complete_type loc false inner
@@ -3517,7 +3553,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           "borrow mut is only valid on an affine/linear indexed runtime owner parameter"))
     | Ast.TypeSink (Ast.TypeNamed name as inner)
       when Hashtbl.mem view_kinds name -> validate_complete_type loc false inner
-    | Ast.TypeSink (Ast.TypeView name as inner)
+    | Ast.TypeSink (Ast.TypeView (name, _) as inner)
       when Hashtbl.mem view_kinds name -> validate_complete_type loc false inner
     | Ast.TypeSink (Ast.TypePtr (Ast.TypeNamed name) as inner)
       when is_kinded name -> validate_complete_type loc false inner
@@ -3599,8 +3635,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      | Ast.VariantCtor (_, _, payload) -> validate_expr_types payload
      | Ast.Index (_, i) -> validate_expr_types i
      | Ast.SliceOf (_, lo, hi) -> validate_expr_types lo; validate_expr_types hi
+     | Ast.ViewLit (name, args) ->
+         (match Hashtbl.find_opt view_params name with
+          | None -> raise (TypeError (e.loc, Printf.sprintf
+              "unknown erased view '%s'" name))
+          | Some formals ->
+              validate_static_application e.loc "view" name formals args)
      | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.Var _
-     | Ast.EnumVariant _ | Ast.ViewLit _ -> ())
+     | Ast.EnumVariant _ -> ())
   and validate_stmt_types (s : Ast.stmt) =
     (match s.desc with
      | Ast.Let (_, _, ty, init, _) ->
@@ -3814,7 +3856,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           ) payload
         ) cases;
         validation_static_scope := None
-    | Ast.OpaqueStructDef _ | Ast.ViewDef _ | Ast.EnumDef _ | Ast.UseDef _ -> ()) prog;
+    | Ast.ViewDef (vname, _, params, _, vloc) ->
+        let seen = Hashtbl.create 8 in
+        List.iter (fun (name, _) ->
+          if Hashtbl.mem seen name then
+            raise (TypeError (vloc, Printf.sprintf
+              "duplicate static parameter '%s' on view '%s'" name vname));
+          Hashtbl.add seen name ()
+        ) params;
+        validation_static_scope := None
+    | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _ -> ()) prog;
   (* Pass 0: collect struct and enum definitions *)
   let senv = List.fold_left (fun m -> function
     | Ast.StructDef (name, fields, is_packed, align_opt, _, _) ->
@@ -4155,7 +4206,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let rec is_affine_type ty = match strip_borrow ty with
     | Ast.TypePtr (Ast.TypeNamed name) -> StringSet.mem name affine_names
     | Ast.TypeIndexed (name, _) -> StringSet.mem name affine_names
-    | Ast.TypeNamed name | Ast.TypeView name | Ast.TypeVariant name ->
+    | Ast.TypeNamed name | Ast.TypeView (name, _) | Ast.TypeVariant name ->
         Hashtbl.find_opt view_kinds name = Some Ast.KindAffine
         || Hashtbl.find_opt variant_kinds name = Some Ast.KindAffine
     | Ast.TypeTuple ts -> List.exists is_affine_type ts
@@ -4164,7 +4215,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let rec is_linear_type ty = match strip_borrow ty with
     | Ast.TypePtr (Ast.TypeNamed name) -> StringSet.mem name linear_names
     | Ast.TypeIndexed (name, _) -> StringSet.mem name linear_names
-    | Ast.TypeNamed name | Ast.TypeView name | Ast.TypeVariant name ->
+    | Ast.TypeNamed name | Ast.TypeView (name, _) | Ast.TypeVariant name ->
         Hashtbl.find_opt view_kinds name = Some Ast.KindLinear
         || Hashtbl.find_opt variant_kinds name = Some Ast.KindLinear
     | Ast.TypeTuple ts -> List.exists is_linear_type ts
@@ -4302,7 +4353,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     in
     let rec check_expr moved consume (e : Ast.expr) =
       match e.desc with
-      | Ast.ViewLit name ->
+      | Ast.ViewLit (name, _) ->
           if Hashtbl.find_opt view_kinds name = Some Ast.KindLinear
              && not consume then
             raise (TypeError (e.loc, Printf.sprintf

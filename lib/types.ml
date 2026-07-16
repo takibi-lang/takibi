@@ -15,7 +15,8 @@ type ty =
   | TIo  of ty            (* io T  -- volatile-qualified value type; *io T = TPtr(TIo T) *)
   | TArray of ty * int    (* array type: [T; N] *)
   | TStruct of string     (* named struct type *)
-  | TView of string       (* erased affine/linear permission value *)
+  | TView of string * static_term list
+    (* Erased affine/linear permission value with checker-only indices. *)
   | TVariant of string    (* tagged runtime sum; kind is derived from payloads *)
   | TExists of string * Ast.type_expr * static_term * ty
     (* Binder name, integer sort, bound static term, payload schema. The
@@ -152,7 +153,10 @@ let rec to_string t =
       Printf.sprintf "(%s) -> %s%s"
         (String.concat ", " (List.map to_string ps)) (to_string r) suffix
   | TStruct s -> s
-  | TView s -> Printf.sprintf "view %s" s
+  | TView (s, []) -> Printf.sprintf "view %s" s
+  | TView (s, args) ->
+      Printf.sprintf "view %s[%s]" s
+        (String.concat ", " (List.map static_to_string args))
   | TVariant s -> Printf.sprintf "variant %s" s
   | TExists (name, sort, _, body) ->
       Printf.sprintf "exists %s: %s. %s" name
@@ -352,9 +356,14 @@ let rec unify t1 t2 =
   | TStruct s1, TStruct s2 ->
       if s1 <> s2 then
         raise (Unify_error (Printf.sprintf "struct type mismatch: %s vs %s" s1 s2))
-  | TView s1, TView s2 ->
+  | TView (s1, args1), TView (s2, args2) ->
       if s1 <> s2 then
-        raise (Unify_error (Printf.sprintf "view type mismatch: %s vs %s" s1 s2))
+        raise (Unify_error (Printf.sprintf "view type mismatch: %s vs %s" s1 s2));
+      if List.length args1 <> List.length args2 then
+        raise (Unify_error (Printf.sprintf
+          "static argument count mismatch for view %s: %d vs %d"
+          s1 (List.length args1) (List.length args2)));
+      List.iter2 unify_static args1 args2
   | TVariant s1, TVariant s2 ->
       if s1 <> s2 then
         raise (Unify_error (Printf.sprintf "variant type mismatch: %s vs %s" s1 s2))
@@ -383,6 +392,8 @@ let rec unify t1 t2 =
         | TIndexedStruct (name, args) ->
             TIndexedStruct (name,
               List.map (subst_static_term old replacement) args)
+        | TView (name, args) ->
+            TView (name, List.map (subst_static_term old replacement) args)
         | TSingleton (base, n) ->
             TSingleton (subst_ty old replacement base,
                         subst_static_term old replacement n)
@@ -437,7 +448,8 @@ let rec of_ast_in_scope scope = function
       TFun (List.map (of_ast_in_scope scope) ps,
             of_ast_in_scope scope r, effects)
   | Ast.TypeNamed s      -> TStruct s
-  | Ast.TypeView s       -> TView s
+  | Ast.TypeView (s, args) ->
+      TView (s, List.map (static_of_ast scope) args)
   | Ast.TypeVariant s    -> TVariant s
   | Ast.TypeExists (name, sort, body) ->
       let inner_scope = Hashtbl.copy scope in
@@ -501,6 +513,7 @@ let instantiate_static_params ty =
     | TAlignedPtr (n, t) -> TAlignedPtr (n, inst t)
     | TIndexedStruct (name, args) ->
         TIndexedStruct (name, List.map inst_static args)
+    | TView (name, args) -> TView (name, List.map inst_static args)
     | TSingleton (base, n) -> TSingleton (inst base, inst_static n)
     | TExists _ as t -> t
     | t -> t
@@ -522,7 +535,7 @@ let rec to_ast t =
   | TArray (t, n) -> Ast.TypeArray (to_ast t, n)
   | TFun (ps, r, effects) -> Ast.TypeFn (List.map to_ast ps, to_ast r, effects)
   | TStruct s     -> Ast.TypeNamed s
-  | TView s       -> Ast.TypeView s
+  | TView (s, args) -> Ast.TypeView (s, List.map static_to_ast args)
   | TVariant s    -> Ast.TypeVariant s
   | TExists (name, sort, _, body) ->
       Ast.TypeExists (name, sort, to_ast body)

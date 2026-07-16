@@ -132,7 +132,14 @@ let rec show_type = function
       Printf.sprintf "fn(%s) -> %s%s"
         (String.concat ", " (List.map show_type ps)) (show_type r) suffix
   | Ast.TypeNamed s     -> s
-  | Ast.TypeView s      -> "view " ^ s
+  | Ast.TypeView (s, []) -> "view " ^ s
+  | Ast.TypeView (s, args) ->
+      let arg = function
+        | Ast.StaticName n -> n
+        | Ast.StaticInt n -> string_of_int n
+      in
+      Printf.sprintf "view %s[%s]" s
+        (String.concat ", " (List.map arg args))
   | Ast.TypeVariant s   -> s
   | Ast.TypeExists (name, sort, body) ->
       Printf.sprintf "exists %s: %s. %s" name (show_type sort) (show_type body)
@@ -211,11 +218,33 @@ let parser_tests = [
       match parse
         "private linear view ParsedPending;
          fn parsed_mint() -> ParsedPending { return view ParsedPending; }" with
-      | [Ast.ViewDef ("ParsedPending", Ast.KindLinear, true, _);
+      | [Ast.ViewDef ("ParsedPending", Ast.KindLinear, [], true, _);
          Ast.FuncDef { ret_type = Some (Ast.TypeNamed "ParsedPending");
                        body = [{ desc = Ast.Return
-                         { desc = Ast.ViewLit "ParsedPending"; _ }; _ }]; _ }] -> ()
+                         { desc = Ast.ViewLit ("ParsedPending", []); _ }; _ }]; _ }] -> ()
       | _ -> Alcotest.fail "expected a private linear ViewDef and ViewLit");
+
+  Alcotest.test_case "Slice 6 indexed view declaration and mint expression parse" `Quick
+    (fun () ->
+      match parse
+        "linear view ParsedPhase[id: usize, state: u8];
+         fn parsed_step(p: sink ParsedPhase[id, 0]) -> ParsedPhase[id, 1] {
+           return view ParsedPhase[id, 1];
+         }" with
+      | [Ast.ViewDef
+           ("ParsedPhase", Ast.KindLinear,
+            [("id", Ast.TypeUsize); ("state", Ast.TypeU8)], false, _);
+         Ast.FuncDef
+           { params = [("p", Some (Ast.TypeSink
+               (Ast.TypeIndexed ("ParsedPhase",
+                 [Ast.StaticName "id"; Ast.StaticInt 0]))))];
+             ret_type = Some (Ast.TypeIndexed
+               ("ParsedPhase", [Ast.StaticName "id"; Ast.StaticInt 1]));
+             body = [{ desc = Ast.Return
+               { desc = Ast.ViewLit
+                   ("ParsedPhase", [Ast.StaticName "id"; Ast.StaticInt 1]); _ };
+               _ }]; _ }] -> ()
+      | _ -> Alcotest.fail "expected indexed ViewDef, type, and ViewLit nodes");
 
   Alcotest.test_case "indexed linear struct and singleton syntax parse" `Quick (fun () ->
     match parse
@@ -4525,6 +4554,88 @@ let infer_tests = [
           let widened: *fn() -> void = slot;
         }");
 
+  (* -- Takibi Core Slice 6: indexed erased views ------------------------- *)
+
+  Alcotest.test_case
+    "Slice 6: a universally indexed view changes phase without proof arguments" `Quick
+    (expect_ok
+       "private linear view IndexedPhase6[slot: usize, state: u8];
+        fn iv_begin6(index: {0..<2 as usize} @ slot)
+            -> IndexedPhase6[slot, 0] {
+          return view IndexedPhase6[slot, 0];
+        }
+        fn iv_write6(p: sink IndexedPhase6[slot, 0],
+                     index: {0..<2 as usize} @ slot)
+            -> IndexedPhase6[slot, 1] {
+          return view IndexedPhase6[slot, 1];
+        }
+        fn iv_finish6(p: sink IndexedPhase6[slot, 1],
+                      index: {0..<2 as usize} @ slot) {}
+        fn iv_use6() {
+          let p = iv_begin6(1);
+          let ready = iv_write6(p, 1);
+          iv_finish6(ready, 1);
+        }");
+
+  Alcotest.test_case
+    "Slice 6: two indexed views cannot satisfy one static identity" `Quick
+    (expect_type_error "static value mismatch: 1 vs 0"
+       "linear view IndexedIdentity6[slot: usize, state: u8];
+        fn iv_same6(a: borrow IndexedIdentity6[slot, 0],
+                    b: borrow IndexedIdentity6[slot, 0]) {}
+        fn iv_drop_identity6(p: sink IndexedIdentity6[slot, 0]) {}
+        fn iv_bad_identity6() {
+          let a: IndexedIdentity6[0, 0] = view IndexedIdentity6[0, 0];
+          let b: IndexedIdentity6[1, 0] = view IndexedIdentity6[1, 0];
+          iv_same6(a, b);
+          iv_drop_identity6(a);
+          iv_drop_identity6(b);
+        }");
+
+  Alcotest.test_case "Slice 6: a later phase cannot enter an earlier transition" `Quick
+    (expect_type_error "static value mismatch: 1 vs 0"
+       "linear view IndexedState6[slot: usize, state: u8];
+        fn iv_expect_open6(p: sink IndexedState6[slot, 0]) {}
+        fn iv_bad_state6() {
+          let p: IndexedState6[0, 1] = view IndexedState6[0, 1];
+          iv_expect_open6(p);
+        }");
+
+  Alcotest.test_case "Slice 6: indexed view arity is checked" `Quick
+    (expect_type_error "view 'IndexedArity6' expects 2 static argument(s), got 1"
+       "linear view IndexedArity6[slot: usize, state: u8];
+        fn iv_bad_arity6(p: sink IndexedArity6[slot]) {}");
+
+  Alcotest.test_case "Slice 6: indexed view literal arguments respect their sorts" `Quick
+    (expect_type_error "static integer 256 does not fit its declared sort"
+       "linear view IndexedSort6[state: u8];
+        fn iv_bad_sort6() -> IndexedSort6[256] {
+          return view IndexedSort6[256];
+        }");
+
+  Alcotest.test_case "Slice 6: an indexed view cannot omit its static arguments" `Quick
+    (expect_type_error "indexed view 'IndexedBare6' requires 1 static argument(s)"
+       "linear view IndexedBare6[slot: usize];
+        fn iv_bad_bare6(p: sink IndexedBare6) {}");
+
+  Alcotest.test_case "Slice 6: indexing does not open a cast-based mint path" `Quick
+    (expect_type_error "cannot construct erased view 'IndexedCast6' with a cast"
+       "linear view IndexedCast6[slot: usize];
+        fn iv_drop_cast6(p: sink IndexedCast6[slot]) {}
+        fn iv_bad_cast6() {
+          let p: IndexedCast6[0] = 0 as IndexedCast6[0];
+          iv_drop_cast6(p);
+        }");
+
+  Alcotest.test_case "Slice 6: indexed views remain excluded from runtime storage" `Quick
+    (expect_type_error "global 'iv_stored6' cannot hold an erased view"
+       "affine view IndexedStored6[slot: usize];
+        let mut iv_stored6: IndexedStored6[0];");
+
+  Alcotest.test_case "Slice 6: view static parameter names are unique" `Quick
+    (expect_type_error "duplicate static parameter 'slot' on view 'IndexedDuplicate6'"
+       "linear view IndexedDuplicate6[slot: usize, slot: usize];");
+
 ]
 
 (* -- Codegen tests ----------------------------------------------------------
@@ -4537,6 +4648,83 @@ let infer_tests = [
    checks runtime behavior, not just "the IR verifies"). *)
 
 let codegen_tests = [
+  Alcotest.test_case
+    "Slice 6 ABI: indexed view transitions erase every static and Delta operand" `Quick
+    (fun () ->
+      let src =
+        "linear view CgIndexedPhase6[slot: usize, state: u8];
+         fn cgiv6_begin(index: usize @ slot) -> CgIndexedPhase6[slot, 0] {
+           return view CgIndexedPhase6[slot, 0];
+         }
+         fn cgiv6_advance(p: sink CgIndexedPhase6[slot, 0])
+             -> CgIndexedPhase6[slot, 1] {
+           return view CgIndexedPhase6[slot, 1];
+         }
+         fn cgiv6_finish(p: sink CgIndexedPhase6[slot, 1]) {}
+         fn cgiv6_use(index: usize) {
+           let open = cgiv6_begin(index);
+           let ready = cgiv6_advance(open);
+           cgiv6_finish(ready);
+         }" in
+      ignore (gen_codegen src);
+      let find name = match Hashtbl.find_opt Llvm_gen.functions name with
+        | Some (_, f) -> f
+        | None -> Alcotest.failf "%s not found" name
+      in
+      let begin_fn = find "cgiv6_begin" in
+      let advance = find "cgiv6_advance" in
+      let finish = find "cgiv6_finish" in
+      let use = find "cgiv6_use" in
+      Alcotest.(check int) "begin keeps only its runtime index"
+        1 (Array.length (Llvm.params begin_fn));
+      Alcotest.(check int) "transition has no runtime view parameter"
+        0 (Array.length (Llvm.params advance));
+      Alcotest.(check int) "sink has no runtime view parameter"
+        0 (Array.length (Llvm.params finish));
+      let advance_ir = Llvm.string_of_llvalue advance in
+      let use_ir = Llvm.string_of_llvalue use in
+      Alcotest.(check bool) "transition lowers to void" true
+        (contains_substring advance_ir "define void @cgiv6_advance()");
+      Alcotest.(check bool) "use calls the erased transition with no operands" true
+        (contains_substring use_ir "call void @cgiv6_advance()");
+      Alcotest.(check bool) "use calls the erased sink with no operands" true
+        (contains_substring use_ir "call void @cgiv6_finish()"));
+
+  Alcotest.test_case
+    "Slice 6 ABI: a singleton preserves its refined range for array bounds" `Quick
+    (expect_trap_sites 0
+       "let mut cgiv6_slots: [u8; 2];
+        fn cgiv6_index(index: {0..<2 as usize} @ slot) -> u8 {
+          cgiv6_slots[index] = 'X';
+          return cgiv6_slots[index];
+        }");
+
+  Alcotest.test_case
+    "Slice 6 ABI: a fixed-index view variant payload still contributes only its tag" `Quick
+    (fun () ->
+      let src =
+        "linear view CgIndexedPermit6[slot: usize];
+         variant CgIndexedMaybe6 {
+           Empty;
+           Held(CgIndexedPermit6[0]);
+         }
+         fn cgiv6_wrap() -> CgIndexedMaybe6 {
+           return CgIndexedMaybe6::Held(view CgIndexedPermit6[0]);
+         }
+         fn cgiv6_drop(p: sink CgIndexedPermit6[0]) {}
+         fn cgiv6_open(value: CgIndexedMaybe6) {
+           match value {
+             CgIndexedMaybe6::Empty => {}
+             CgIndexedMaybe6::Held(p) => { cgiv6_drop(p); }
+           }
+         }" in
+      ignore (gen_codegen src);
+      let layout = match Hashtbl.find_opt Llvm_gen.variant_lltypes "CgIndexedMaybe6" with
+        | Some llty -> llty
+        | None -> Alcotest.fail "CgIndexedMaybe6 layout not found" in
+      Alcotest.(check int) "only the runtime tag remains" 1
+        (Array.length (Llvm.struct_element_types layout)));
+
   Alcotest.test_case
     "Slice 5 ABI: function pointer effect contracts erase" `Quick
     (fun () ->

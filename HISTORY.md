@@ -7457,8 +7457,41 @@ thread echoes them. The QEMU callback table and dispatch root carry the same
 contract. `effect_callback_contract_wrong` documents the rejected blocking
 registration in English.
 
-General place borrowing, arbitrary indexed-owner storage, lock invariants,
-quantified view change, and solver/prover discharge remain explicit later
-slices. Validation: all 695 Alcotest cases passed. The full `make check`
+At the Slice 5 checkpoint, general place borrowing, arbitrary indexed-owner
+storage, lock invariants, quantified view change, and solver/prover discharge
+remained explicit later slices; Slice 6 below closes universal indexed view
+change. Validation: all 695 Alcotest cases passed. The full `make check`
 passed all 112 host, compile-error, DWARF, and QEMU integration cases, every
 STM32 cross-build, and the network/FAT examples under `--forbid-trap`.
+
+## 2026-07-15: Takibi Core Slice 6, Indexed Erased Views
+
+Erased affine/linear views now accept primitive-integer static parameters.
+Declarations such as `linear view SlotWrite[slot: usize, state: u8];`, type
+uses such as `SlotWrite[slot, 0]`, and mint expressions such as
+`view SlotWrite[slot, 0]` retain their static arguments through checking.
+Unbound signature names use the existing implicit universal quantification,
+so a function can consume `SlotWrite[slot, 0]` and produce
+`SlotWrite[slot, 1]` for every slot without runtime or source-level proof
+arguments. Arity, static sorts, literal range, identity, and phase are checked
+by the same rigid/static unification used for indexed runtime owners.
+
+Indexed views retain all existing Delta rules: affine/linear flow, private
+mint authority, and bans on casts, addresses, runtime operations, and storage.
+Every view value and static argument still erases. A view-only transition has
+LLVM type `void ()`; only runtime values explicitly present in the API remain.
+The implementation also fixed bounds lowering to inspect through a singleton
+wrapper, so `{0..<N as usize} @ n` preserves its range proof and no longer
+emits a spurious array bounds trap under `--forbid-trap`.
+
+The new `indexed_view` example ties a runtime refined slot index to an erased
+two-state write permission, interleaves two slots, and builds for QEMU and
+STM32. `indexed_view_identity_wrong` explains in English why permission for
+slot 0 cannot be used with runtime index 1. Explicit `forall`, existential
+view packages and dynamic state dispatch, address/enum static sorts,
+propositions, solver discharge, general place borrowing/storage, and lock
+invariants remain later slices.
+
+Validation: all 708 Alcotest cases passed. The full `make check` passed all
+114 host, compile-error, DWARF, and QEMU integration cases, every STM32
+cross-build, and the network/FAT examples under `--forbid-trap`.

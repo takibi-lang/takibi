@@ -65,7 +65,7 @@ turn as many potential traps as possible into compile-time errors instead:
 `usize`, `void`, `*T`, `io T`, `*io T`, `[T; N]`, `[]T` / `[T; N..]`
 (slice), `fn(T...) -> R`, `Name` (struct or enum), `{lo..<hi as base}`
 (refined integer subtype), `T @ n` (runtime integer singleton), and
-`Name[n]` (indexed affine/linear runtime struct).
+`Name[n]` (indexed affine/linear runtime struct or erased view).
 
 - **`isize` / `usize`** are pointer-sized signed/unsigned integers. Their
   LLVM width follows the target's actual pointer size via LLVM
@@ -395,7 +395,9 @@ fn slot_unlease(lease: sink SlotLease[n]) {}
   `linear struct`. Slice 1 supports primitive integer sorts only and requires
   at least one static parameter.
 - `T @ n` is a runtime integer `T` with the compile-time equality "this
-  value is `n`". It has exactly the same LLVM representation as `T`.
+  value is `n`". It has exactly the same LLVM representation as `T` and
+  preserves any refinement range already carried by `T`; for example,
+  `{0..<4 as usize} @ n` proves both identity and array bounds.
 - `Name[n]` has the declared struct fields at runtime. Its static arguments
   do not add fields or ABI words. Unbound static names in function signatures
   are implicitly universally quantified and instantiated freshly per call.
@@ -613,7 +615,7 @@ arm. See `examples/linear_obligation` (positive) and
 `linear_cast_discard`, `linear_overwrite`, and
 `variant_linear_payload_missed` (compile-error companions).
 
-## Erased Affine/Linear Views (Takibi Core Slice 2)
+## Erased Affine/Linear Views (Takibi Core Slices 2 and 6)
 
 An erased view is a compile-time permission or obligation with no runtime
 payload:
@@ -635,12 +637,39 @@ fn dispatch() {
 }
 ```
 
-Slice 2 supports non-indexed `affine view Name;` and `linear view Name;`.
+Slice 2 introduced non-indexed `affine view Name;` and `linear view Name;`.
 `view Name` explicitly mints a value. If the declaration is `private`, only
 expressions in the declaring file may mint it; other files may name, receive,
 borrow, forward, and sink it. A non-private view can be minted wherever it is
 visible. Minting is a trusted assertion: the compiler checks the subsequent
 affine/linear flow, not whether an external event really occurred.
+
+Slice 6 adds integer-indexed views and universal view change:
+
+```takibi
+private linear view SlotWrite[slot: usize, state: u8];
+
+fn begin(index: {0..<2 as usize} @ slot) -> SlotWrite[slot, 0] {
+    return view SlotWrite[slot, 0];
+}
+
+fn write(permission: sink SlotWrite[slot, 0],
+         index: {0..<2 as usize} @ slot,
+         value: u8) -> SlotWrite[slot, 1] {
+    slots[index] = value;
+    return view SlotWrite[slot, 1];
+}
+```
+
+Static parameters are declared with the same primitive integer sorts as
+indexed runtime owners. Static names in a function signature are implicitly
+universally quantified and instantiated freshly at each call. The example's
+one `slot` therefore ties the erased permission to the runtime singleton
+index without a separate proof argument. Arity, literal range, static sort,
+identity, and state are checked; `SlotWrite[0, 0]` cannot authorize an access
+through index 1 or enter a transition requiring state 1. `view Name[args]`
+is the indexed mint expression. A declaration with static parameters cannot
+be named or minted without all of its arguments.
 
 Views use the same resource-flow rules as other kinded values. A plain
 parameter takes ownership, `borrow` does not consume, `sink` is a terminal
@@ -665,12 +694,13 @@ Thus `fn f(p: sink PendingEvent, n: i32) -> PendingEvent` has runtime ABI
 `void f(i32)`. Source evaluation order and runtime side effects of calls are
 preserved even when their view inputs/results erase.
 
-Static parameters (`View[n]`), explicit `forall`, view change,
-propositions, and solver discharge are not part of Slice 2. Slice 3 adds the
-restricted existential packages described below, not general quantified
-views. See
-`examples/common/http_conn_state.tkb` for the real `PendingTcpEvent` use and
-`examples/view_linear_branch_missed` for its focused compile-error companion.
+Explicit `forall`, existential packages around indexed views, runtime state
+dispatch, address/enum static sorts, propositions, and solver discharge are
+not implemented. Slice 3's `exists` remains restricted to indexed runtime
+owners. See `examples/common/http_conn_state.tkb` for the non-indexed
+`PendingTcpEvent` use, `examples/indexed_view` for indexed view change, and
+`examples/view_linear_branch_missed` plus
+`examples/indexed_view_identity_wrong` for focused compile-error companions.
 
 ## Closed Variants and Existential Owners (Takibi Core Slice 3)
 
@@ -912,9 +942,10 @@ struct Chan { private mutex: i32; ... }                      // struct field
   legal everywhere (annotations, parameters, passing values through), so
   other files can hold and relay handles; they just cannot forge them.
   The declaring file's functions are the only source.
-- **View**: `view Name` minting must occur in the declaration's file. Naming
-  and moving the erased permission across files stays legal, like opaque
-  handles; only the explicit production site is private.
+- **View**: `view Name` / `view Name[args]` minting must occur in the
+  declaration's file. Naming and moving the erased permission across files
+  stays legal, like opaque handles; only the explicit production site is
+  private.
 - **Struct field**: reading (`s.f`, `&s.f`), writing, and `offsetof` on a
   `private` field must come from the struct's declaring file; so must
   constructing the struct via a struct literal when it has ANY private

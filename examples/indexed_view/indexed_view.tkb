@@ -1,0 +1,43 @@
+// Takibi Core Slice 6: an indexed erased view connects a runtime slot index
+// to a linear, compile-time-only protocol state. `SlotWrite[slot, 0]` permits
+// exactly one write to that same `slot`; the write returns
+// `SlotWrite[slot, 1]`, which is the only state accepted by publication.
+//
+// The static `slot` and `state` arguments, each `permission` parameter, and
+// every SlotWrite result disappear before LLVM. The runtime `index` and
+// `value`, array access, and UART output remain. See
+// indexed_view_identity_wrong for the rejected cross-slot use.
+
+private let mut indexed_view_slots: [u8; 2];
+
+private linear view SlotWrite[slot: usize, state: u8];
+
+fn slot_begin(index: {0..<2 as usize} @ slot) -> SlotWrite[slot, 0] {
+    return view SlotWrite[slot, 0];
+}
+
+fn slot_write(permission: sink SlotWrite[slot, 0],
+              index: {0..<2 as usize} @ slot,
+              value: u8) -> SlotWrite[slot, 1] {
+    indexed_view_slots[index] = value;
+    return view SlotWrite[slot, 1];
+}
+
+fn slot_publish(permission: sink SlotWrite[slot, 1],
+                index: {0..<2 as usize} @ slot) -> u8 {
+    return indexed_view_slots[index];
+}
+
+fn app_main() {
+    let slot0 = slot_begin(0);
+    let slot1 = slot_begin(1);
+
+    // Interleave the transitions. Static identity, not source order, keeps
+    // each erased permission paired with its runtime slot.
+    let ready1 = slot_write(slot1, 1, 'B');
+    let ready0 = slot_write(slot0, 0, 'A');
+
+    uart_putc(slot_publish(ready0, 0));
+    uart_putc(slot_publish(ready1, 1));
+    uart_putc('\n');
+}

@@ -879,6 +879,7 @@ run_compile_error_test "variant_nonexhaustive_wrong" examples/variant_nonexhaust
 run_compile_error_test "mutable_borrow_shared_wrong" examples/mutable_borrow_shared_wrong/mutable_borrow_shared_wrong.tkb examples/mutable_borrow_shared_wrong/mutable_borrow_shared_wrong.error
 run_compile_error_test "effect_interrupt_blocks_wrong" examples/effect_interrupt_blocks_wrong/effect_interrupt_blocks_wrong.tkb examples/effect_interrupt_blocks_wrong/effect_interrupt_blocks_wrong.error
 run_compile_error_test "effect_callback_contract_wrong" examples/effect_callback_contract_wrong/effect_callback_contract_wrong.tkb examples/effect_callback_contract_wrong/effect_callback_contract_wrong.error
+run_compile_error_test "indexed_view_identity_wrong" examples/indexed_view_identity_wrong/indexed_view_identity_wrong.tkb examples/indexed_view_identity_wrong/indexed_view_identity_wrong.error
 
 echo ""
 echo "Running DWARF debug-info check (-g build)..."
@@ -943,6 +944,7 @@ run_test "affine_escape_via_index" examples/affine_escape_via_index/kernel.elf e
 run_test "linear_obligation" examples/linear_obligation/kernel.elf examples/linear_obligation/linear_obligation.expected
 run_test "tuple_pair" examples/tuple_pair/kernel.elf examples/tuple_pair/tuple_pair.expected
 run_test "field_lease" examples/field_lease/kernel.elf examples/field_lease/field_lease.expected
+run_test "indexed_view" examples/indexed_view/kernel.elf examples/indexed_view/indexed_view.expected
 run_test "align_ptr_proof" examples/align_ptr_proof/kernel.elf examples/align_ptr_proof/align_ptr_proof.expected
 run_test "klock_guard" examples/klock_guard/kernel.elf examples/klock_guard/klock_guard.expected
 run_test "percpu" examples/percpu/kernel.elf examples/percpu/percpu.expected

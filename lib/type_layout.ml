@@ -73,7 +73,7 @@ let rec size_align_of_type pos seen ty =
   | TypeU8 | TypeU16 | TypeU32 | TypeU64
   | TypeIsize | TypeUsize -> primitive_size_align ty
   | TypeVoid -> fail pos "sizeof(void) is not allowed"
-  | TypeView name -> fail pos (Printf.sprintf
+  | TypeView (name, _) -> fail pos (Printf.sprintf
       "erased view '%s' has no runtime size or alignment" name)
   | TypeExists (_, _, body) -> size_align_of_type pos seen body
   | TypeBorrow t | TypeSink t | TypeSingleton (t, _) ->
@@ -122,6 +122,7 @@ let rec size_align_of_type pos seen ty =
                  (match payload with
                   | TypeView _ -> None
                   | TypeNamed view when Hashtbl.mem views view -> None
+                  | TypeIndexed (view, _) when Hashtbl.mem views view -> None
                   | _ -> Some payload)
            ) cases in
            let (off, max_align) = List.fold_left (fun (offset, max_align) t ->

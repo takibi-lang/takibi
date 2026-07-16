@@ -35,10 +35,11 @@ type type_expr =
     (* fn [!{effects}](T...) -> R. None means the call effect is unknown;
        Some [] is an explicit non-blocking contract. Checker-only. *)
   | TypeNamed of string            (* struct type by name *)
-  | TypeView of string
-    (* Elaborated erased view type. Source annotations use the declared
-       bare name; type inference resolves it to this distinct constructor
-       so runtime structs and Delta-only views cannot be confused. *)
+  | TypeView of string * static_arg list
+    (* Elaborated erased view type, including checker-only static indices.
+       Source annotations use the declared bare/indexed name; type inference
+       resolves it to this distinct constructor so runtime structs and
+       Delta-only views cannot be confused. *)
   | TypeVariant of string
     (* Elaborated tagged runtime variant type. Source annotations use the
        declared bare name; payload kind is tracked separately in Delta. *)
@@ -105,9 +106,10 @@ and expr_desc =
   | BoolLit of bool
   | StringLit of string     (* "..."  -- null-terminated *char constant *)
   | Var of ident
-  | ViewLit of ident
-    (* `view Name` -- explicitly mint an erased permission value. It has
-       no runtime representation; privacy and kind flow are checked later. *)
+  | ViewLit of ident * static_arg list
+    (* `view Name[args]` -- explicitly mint an erased permission value. It
+       has no runtime representation; privacy, indices, and kind flow are
+       checked later. The brackets are omitted for a non-indexed view. *)
   | Call of ident * expr list
   | VariantCtor of string * string * expr
     (* Name::Case(payload) -- tagged runtime variant construction. Nullary
@@ -224,9 +226,9 @@ type toplevel =
      layout flags, private field names, is_private, loc. Unlike an opaque
      handle this is a first-class runtime aggregate; only its static
      parameters are erased. *)
-  | ViewDef of string * opaque_kind * bool * loc
-  (* name, affine/linear kind, is_private, loc. A view has no fields,
-     size, address, or runtime ABI representation. *)
+  | ViewDef of string * opaque_kind * static_param list * bool * loc
+  (* name, affine/linear kind, erased static parameters, is_private, loc.
+     A view has no fields, size, address, or runtime ABI representation. *)
   | OpaqueStructDef of string * opaque_kind * bool * loc
   (* name, kind, is_private, loc -- incomplete nominal type, usable only
      behind a pointer.
