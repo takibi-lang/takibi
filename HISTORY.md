@@ -7495,3 +7495,52 @@ invariants remain later slices.
 Validation: all 708 Alcotest cases passed. The full `make check` passed all
 114 host, compile-error, DWARF, and QEMU integration cases, every STM32
 cross-build, and the network/FAT examples under `--forbid-trap`.
+
+## 2026-07-16: Post-Slice 6 Example Consolidation
+
+Audited the real examples before adding another Core feature and applied the
+semantics already delivered by Slices 2-6. `MutexGuard` and both `KGuard`
+implementations are now non-indexed erased linear views instead of forged null
+opaque pointers. Their real mutex/lock arguments remain explicit, so generated
+code has no guard result, parameter, local storage, or pointer cast. Balanced
+unlock remains mandatory; associating a guard with one particular lock still
+requires the later static-address/stable-place slice.
+
+Both Ethernet backends now expose one private affine `NetRxCanAcquire` view.
+Successful `net_init` returns it in `NetInitResult::Ready`;
+`net_rx_acquire` consumes it and either returns its replacement in
+`NetRxAcquire::None` or replaces it with an existentially indexed linear
+`NetRxCpuOwned[desc]`; `net_rx_release` consumes that owner and restores the
+permission. Affine is intentional for the idle permission: abandoning future
+acquisition is safe, but copying or reusing it is not. The active descriptor
+owner remains linear because DMA release is mandatory. The English-commented
+`net_rx_double_acquire_wrong` fixture fixes the rejected second use as a
+regression contract. Each backend's private runtime initialization flag makes
+the first successful `net_init` on the current single-threaded boot path the
+only initial mint; failed setup remains retryable, while sequential
+reinitialization cannot bypass the permit protocol. Concurrent init remains a
+future atomic/lock-invariant concern rather than an unstated guarantee.
+
+`net_transmit` now borrows `NetRxCpuOwned[desc]` and derives the in-place reply
+buffer inside the private driver. Callers can no longer pass an unrelated raw
+pointer. The current shared-borrow ABI passes the owner's ordinary
+`{index, len}` aggregate read-only by value; its static identity still erases.
+This does not close the distinct lifetime hole in
+`net_rx_frame`: its unrestricted slice can still remain usable after the owner
+is released, so owner-derived region borrowing is the next new Core driver.
+The documented order after that is existential TCP state, typed channel owner
+storage plus its minimal lock invariant, static lock identities, and
+demand-led asynchronous TX.
+
+Solver/prover integration remains deferred. The repository's sole executable
+`unsafe` is the relational TCP payload bound and is a valid future SMT
+acceptance case, but Phi must first retain symbolic expressions, path
+assumptions, casts, and source-located verification conditions. No current
+example has a functional specification substantial enough to justify an
+external theorem-prover artifact. `TAKIBI_CORE.md`, `OWNERSHIP_KERNEL.md`,
+`SPEC.md`, and the STM32 backend notes record the decision and remaining
+boundaries in detail.
+
+Validation: all 708 Alcotest cases passed. The full `make check` passed all
+115 host, compile-error, DWARF, and QEMU integration cases, every STM32
+cross-build, and all network examples under `--forbid-trap`.

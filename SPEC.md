@@ -570,8 +570,9 @@ linear opaque struct PendingEvent;
 The stronger sibling of `affine` (OWNERSHIP_KERNEL.md Stage 1, GitHub
 issue #117): a linear value is an obligation that must be consumed
 **exactly once on every control-flow path**. Use linear when dropping the
-value must be impossible. Current real examples include `PendingTcpEvent`,
-`NetRxCpuOwned[desc]`, `FatFile`, `MutexGuard`, and `KGuard`.
+value must be impossible. Current runtime-owner examples include
+`NetRxCpuOwned[desc]` and `FatFile`; `PendingTcpEvent`, `MutexGuard`, and
+`KGuard` use the erased linear-view representation described below.
 
 Consumption events are the same three as affine (pass as a plain
 non-`borrow` argument, pass to `sink`, return it), and `borrow`/`sink`
@@ -694,6 +695,13 @@ Thus `fn f(p: sink PendingEvent, n: i32) -> PendingEvent` has runtime ABI
 `void f(i32)`. Source evaluation order and runtime side effects of calls are
 preserved even when their view inputs/results erase.
 
+The current `MutexGuard` and `KGuard` examples are non-indexed linear views.
+Their lock pointers remain explicit runtime arguments, while lock/unlock
+balance is checked in Delta without a forged null pointer, runtime result,
+parameter, alloca, or debug value. They do not yet identify one particular
+lock: an address/static-place sort is required before `MutexGuard[lock]` can
+reject pairing a guard with the wrong explicit pointer.
+
 Explicit `forall`, existential packages around indexed views, runtime state
 dispatch, address/enum static sorts, propositions, and solver discharge are
 not implemented. Slice 3's `exists` remains restricted to indexed runtime
@@ -753,10 +761,19 @@ private linear struct NetRxCpuOwned[desc: usize] {
     private len: i32;
 }
 
+private affine view NetRxCanAcquire;
+
+variant NetInitResult {
+    Failed;
+    Ready(NetRxCanAcquire);
+}
+
 variant NetRxAcquire {
-    None;
+    None(NetRxCanAcquire);
     Acquired(exists desc: usize. NetRxCpuOwned[desc]);
 }
+
+fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire;
 ```
 
 Constructing `Acquired(owner)` packages the owner's static index without
@@ -769,8 +786,33 @@ fn net_rx_len(frame: borrow NetRxCpuOwned[desc]) -> i32 {
     return frame.len;
 }
 
-fn net_rx_release(frame: sink NetRxCpuOwned[desc]) { ... }
+fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire { ... }
+fn net_transmit(frame: borrow NetRxCpuOwned[desc], len: i32) !{may_block} { ... }
 ```
+
+The two current Ethernet backends intentionally allow one CPU-owned RX frame
+at a time. Successful initialization creates the private affine
+`NetRxCanAcquire` permission. `net_rx_acquire` consumes it: `None` returns a
+replacement, while `Acquired` replaces it with the linear descriptor owner;
+only `net_rx_release` consumes that owner and restores the permission. The
+permission is affine because abandoning future acquisition is safe, but it
+cannot be copied or reused after move. The owner is linear because returning
+an active descriptor to DMA is mandatory. This prevents duplicate owner
+minting; the added permit contributes no runtime payload to either result
+variant. A private runtime initialization flag supplies the trusted base case:
+on the current single-threaded boot path, only the first successful `net_init`
+can mint the initial permission. Failed device discovery or link setup leaves
+the flag clear and may be retried. Concurrent initialization is not guaranteed
+without a future atomic/lock invariant.
+
+`net_transmit` borrows the owner and derives the in-place reply buffer from its
+private descriptor index. A caller can no longer satisfy the API with an
+unrelated raw pointer. Under the current ABI this shared borrow passes the
+owner's ordinary `{index, len}` aggregate read-only by value; no `desc` or
+permission field is added. This does not yet make the slice returned by
+`net_rx_frame` owner-bounded: retaining that unrestricted slice, releasing the
+owner, and then reading it remains a known region/lifetime hole for a later
+Core slice.
 
 Two independently opened packages receive distinct identities. They cannot
 be passed to a function requiring the same static index merely because their
@@ -794,7 +836,8 @@ The current Slice 3 ABI is explicit but provisional:
 For example, `NetRxAcquire` retains the tag plus
 `NetRxCpuOwned`'s `{index, len}` runtime aggregate; `desc`, the singleton
 equality, range proof, and linear obligation have no separate runtime field.
-A variant whose only payload is an erased view lowers to the tag alone.
+A variant whose only payload is an erased view lowers to the tag alone, so
+`NetInitResult` is tag-only and `NetRxAcquire::None` adds no payload field.
 Full source-level tagged-union DWARF metadata and a compact union ABI are
 deferred; code must not treat this first implementation as a stable C ABI.
 
@@ -874,7 +917,7 @@ Checker effects are written after the return type:
 
 ```takibi
 extern fn sem_wait(s: *i32) !{may_block};
-fn mutex_lock(m: *i32) -> *MutexGuard !{may_block} { ... }
+fn mutex_lock(m: *i32) -> MutexGuard !{may_block} { ... }
 fn IRQ_Handler() !{interrupt} { acknowledge_irq(); }
 fn poll_callback() !{} { acknowledge_irq(); }
 ```
@@ -951,7 +994,7 @@ struct Chan { private mutex: i32; ... }                      // struct field
   constructing the struct via a struct literal when it has ANY private
   field (a positional literal writes every field). Non-private fields of
   the same struct stay freely accessible. This is what turns the accessor
-  idiom (a getter taking `borrow *KGuard`) and smart constructors
+  idiom (a getter taking `borrow KGuard`) and smart constructors
   (`chan_init` establishing Chan's rendezvous invariant) from convention
   into guarantee.
 

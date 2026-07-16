@@ -61,8 +61,18 @@ private linear struct NetRxCpuOwned[desc: usize] {
     private len: i32;
 }
 
+// Exactly one permit exists while no RX descriptor is CPU-owned. It is erased
+// at runtime; consuming it prevents a second owner from being minted before the
+// first one is released.
+private affine view NetRxCanAcquire;
+
+variant NetInitResult {
+    Failed;
+    Ready(NetRxCanAcquire);
+}
+
 variant NetRxAcquire {
-    None;
+    None(NetRxCanAcquire);
     Acquired(exists desc: usize. NetRxCpuOwned[desc]);
 }
 
@@ -112,6 +122,9 @@ let VIRTIO_CONFIG_MAC_OFFSET: i32 = 0x100; // Config space starts right after th
 // DeviceID == 1 (network).
 let mut virtio_base: i32 = 0;
 let mut virtio_gic_irq: i32 = 0;
+// Establishes the one initial NetRxCanAcquire mint on the current single-
+// threaded boot path. Failed discovery may be retried; success is permanent.
+private let mut net_rx_initialized: i32 = 0;
 let mut virtio_rx_irq_flag: io u32;
 let mut virtio_tx_irq_flag: io u32;
 
@@ -278,12 +291,16 @@ fn used_ring_get_len(queue_mem: *u8, slot: isize) -> i32 {
 // -- Shared driver API (matches examples/common_stm32/eth.tkb) --------------
 
 // Finds the virtio-net device, negotiates features, sets up both queues,
-// and posts all RX descriptors. Returns 1 on success, 0 if no virtio-net
-// device was found.
-fn net_init() -> i32 {
-    if (virtio_net_find() == 0) {
-        return 0;
+// and posts all RX descriptors. Successful initialization creates the sole
+// erased permission from which an RX owner may be acquired.
+fn net_init() -> NetInitResult {
+    if (net_rx_initialized != 0) {
+        return NetInitResult::Failed;
     }
+    if (virtio_net_find() == 0) {
+        return NetInitResult::Failed;
+    }
+    net_rx_initialized = 1;
 
     virtio_rx_irq_flag = 0;
     virtio_tx_irq_flag = 0;
@@ -305,19 +322,18 @@ fn net_init() -> i32 {
     avail_publish(rx_queue_mem as *u8, rx_avail_idx);
     virtio_notify(0);
 
-    return 1;
+    return NetInitResult::Ready(view NetRxCanAcquire);
 }
 
-// Returns None when no used-ring entry is ready. Acquired packages the
-// validated descriptor index and reported frame length with the linear owner;
-// matching it creates a fresh static descriptor identity for the caller.
-fn net_rx_acquire() -> NetRxAcquire {
+// Consumes the one acquisition permit. None returns it unchanged; Acquired
+// replaces it with the descriptor owner until net_rx_release() restores it.
+fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
     if (virtio_rx_irq_flag == 0) {
-        return NetRxAcquire::None;
+        return NetRxAcquire::None(view NetRxCanAcquire);
     }
     virtio_rx_irq_flag = 0;
     if (rx_used_seen == used_idx_get(rx_queue_mem as *u8)) {
-        return NetRxAcquire::None;
+        return NetRxAcquire::None(view NetRxCanAcquire);
     }
     virtio_rx_irq_flag = 1; // drain coalesced used-ring entries
     dma_consume(); // used-ring entry and RX payload now belong to the CPU
@@ -356,9 +372,8 @@ fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] {
 
 
 // Hands the current RX descriptor back to the device and advances the
-// ring. Must receive the CPU-owned handle returned by net_rx_acquire(), after
-// the caller no longer needs net_rx_frame()'s contents.
-fn net_rx_release(frame: sink NetRxCpuOwned[desc]) {
+// ring. Consuming the CPU-owned handle restores the sole acquisition permit.
+fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire {
     let rx_slot: isize = rx_avail_idx % QNUM;
     avail_ring_set(rx_queue_mem as *u8, rx_slot, frame.index as isize);
     rx_avail_idx = rx_avail_idx + 1;
@@ -366,16 +381,18 @@ fn net_rx_release(frame: sink NetRxCpuOwned[desc]) {
     virtio_notify(0);
 
     rx_used_seen = rx_used_seen + 1;
+    return view NetRxCanAcquire;
 }
 
-// Transmits len bytes starting at buf (buf must be net_rx_frame()'s own
-// pointer -- every example replies in place, reusing the RX buffer, so
-// `buf - 10` always lands back on the true DMA buffer start where the
+// Transmits len bytes from this owned RX descriptor. Deriving buf here makes
+// the in-place-reply requirement structural rather than a raw-pointer calling
+// convention. `buf - 10` lands back on the true DMA buffer start where the
 // virtio_net_hdr the device expects on TX too still sits, untouched since
-// the device itself wrote it on receive). Synchronous: sleeps on the retained
-// interrupt event until the device finishes reading buf, so the caller can safely
-// release buf (net_rx_release()) immediately afterward.
-fn net_transmit(buf: *u8, len: i32) !{may_block} {
+// the device itself wrote it on receive. The synchronous operation sleeps on
+// the retained interrupt event until the device finishes reading buf, so the
+// caller can safely release frame immediately afterward.
+fn net_transmit(frame: borrow NetRxCpuOwned[desc], len: i32) !{may_block} {
+    let buf: *u8 = net_rx_frame(frame) as *u8;
     desc_set(tx_queue_mem as *u8, 0, (buf - 10) as usize, (len + 10) as isize, 0);
     avail_ring_set(tx_queue_mem as *u8, 0, 0);
     tx_avail_idx = tx_avail_idx + 1;

@@ -1,21 +1,20 @@
 extern fn sem_wait(s: *i32) !{may_block};
 extern fn sem_post(s: *i32);
 
-// linear opaque struct MutexGuard: a compile-time-only marker (no real
-// per-instance state -- the actual mutex is still the caller-owned *i32
-// semaphore, passed alongside the guard) proving mutex_lock/mutex_unlock
-// are balanced on every path. See examples/condvar/condvar.tkb and
-// examples/msgqueue/msgqueue.tkb for real call sites, including cond_wait's
-// consume-and-reacquire pattern. `sink` marks mutex_unlock as the terminal
-// consumer; the linear kind makes a forgotten unlock a compile error.
-private linear opaque struct MutexGuard;
+// MutexGuard is an erased permission: the actual mutex is the caller-owned
+// *i32 semaphore passed alongside it, so the guard needs no runtime pointer or
+// storage. It proves mutex_lock/mutex_unlock are balanced on every path. See
+// examples/condvar/condvar.tkb and examples/msgqueue/msgqueue.tkb for real call
+// sites, including cond_wait's consume-and-reacquire pattern. A future static
+// address index will additionally bind this view to one particular mutex.
+private linear view MutexGuard;
 
-fn mutex_lock(m: *i32) -> *MutexGuard !{may_block} {
+fn mutex_lock(m: *i32) -> MutexGuard !{may_block} {
     sem_wait(m);
-    return 0 as usize as *MutexGuard;
+    return view MutexGuard;
 }
 
-fn mutex_unlock(g: sink *MutexGuard, m: *i32) {
+fn mutex_unlock(g: sink MutexGuard, m: *i32) {
     sem_post(m);
 }
 
@@ -23,7 +22,7 @@ fn mutex_unlock(g: sink *MutexGuard, m: *i32) {
    (1) Read the sequence number while holding the mutex
    (2) Even if a signal arrives after unlock, the saved s from (1) still detects it
    (3) *seq is a volatile load -- the compiler will not hoist it out of the spin loop */
-fn cond_wait(seq: *io i32, g: *MutexGuard, m: *i32) -> *MutexGuard !{may_block} {
+fn cond_wait(seq: *io i32, g: sink MutexGuard, m: *i32) -> MutexGuard !{may_block} {
     let s: i32 = *seq;
     mutex_unlock(g, m);
     while (*seq == s) {}

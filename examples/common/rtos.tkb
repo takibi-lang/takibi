@@ -62,14 +62,16 @@ struct KLock {
     private word: i32;
 }
 
-private linear opaque struct KGuard;
+// The lock pointer remains explicit in every operation, so KGuard is erased.
+// A later static address identity will bind it to the particular KLock.
+private linear view KGuard;
 
-fn klock(lk: *KLock) -> *KGuard {
+fn klock(lk: *KLock) -> KGuard {
     disable_irq();
-    return 0 as usize as *KGuard;
+    return view KGuard;
 }
 
-fn kunlock(g: sink *KGuard, lk: *KLock) {
+fn kunlock(g: sink KGuard, lk: *KLock) {
     enable_irq();
 }
 
@@ -117,7 +119,7 @@ struct Chan {
 }
 
 fn chan_send(ch: *Chan, m: i32) !{may_block} {
-    let mut g: *MutexGuard = mutex_lock(&ch.mutex);
+    let mut g: MutexGuard = mutex_lock(&ch.mutex);
     while (ch.full != 0) {
         g = cond_wait(&ch.slot_taken, g, &ch.mutex);
     }
@@ -131,7 +133,7 @@ fn chan_send(ch: *Chan, m: i32) !{may_block} {
 }
 
 fn chan_recv(ch: *Chan) -> i32 !{may_block} {
-    let mut g: *MutexGuard = mutex_lock(&ch.mutex);
+    let mut g: MutexGuard = mutex_lock(&ch.mutex);
     while (ch.full == 0) {
         g = cond_wait(&ch.slot_full, g, &ch.mutex);
     }
@@ -156,7 +158,7 @@ struct WordChan {
 }
 
 fn chan_word_send(ch: *WordChan, m: usize) !{may_block} {
-    let mut g: *MutexGuard = mutex_lock(&ch.mutex);
+    let mut g: MutexGuard = mutex_lock(&ch.mutex);
     while (ch.full != 0) {
         g = cond_wait(&ch.slot_taken, g, &ch.mutex);
     }
@@ -170,7 +172,7 @@ fn chan_word_send(ch: *WordChan, m: usize) !{may_block} {
 }
 
 fn chan_word_recv(ch: *WordChan) -> usize !{may_block} {
-    let mut g: *MutexGuard = mutex_lock(&ch.mutex);
+    let mut g: MutexGuard = mutex_lock(&ch.mutex);
     while (ch.full == 0) {
         g = cond_wait(&ch.slot_full, g, &ch.mutex);
     }

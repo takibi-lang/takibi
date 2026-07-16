@@ -30,24 +30,27 @@ fn swap_mac(frame: *u8) {
 fn app_main() {
     uart_puts("net_echo: init\r\n");
 
-    if (net_init() == 0) {
-        uart_puts("net_echo: device/link not found\r\n");
-    } else {
-        uart_puts("net_echo: ready\r\n");
+    match net_init() {
+        NetInitResult::Failed => {
+            uart_puts("net_echo: device/link not found\r\n");
+        }
+        NetInitResult::Ready(mut ready) => {
+            uart_puts("net_echo: ready\r\n");
 
-        while (true) {
-            net_rx_wait();
-            match net_rx_acquire() {
-                NetRxAcquire::None => {}
-                NetRxAcquire::Acquired(acquired) => {
-                    let len: i32 = net_rx_len(acquired);
-                    // A valid Ethernet frame needs at least a 12-byte dst+src MAC pair.
-                    if (len >= 12) {
-                        let frame = net_rx_frame(acquired);
-                        swap_mac(frame as *u8);
-                        net_transmit(frame as *u8, len);
+            while (true) {
+                net_rx_wait();
+                match net_rx_acquire(ready) {
+                    NetRxAcquire::None(next) => { ready = next; }
+                    NetRxAcquire::Acquired(acquired) => {
+                        let len: i32 = net_rx_len(acquired);
+                        // A valid Ethernet frame needs at least a 12-byte dst+src MAC pair.
+                        if (len >= 12) {
+                            let frame = net_rx_frame(acquired);
+                            swap_mac(frame as *u8);
+                            net_transmit(acquired, len);
+                        }
+                        ready = net_rx_release(acquired);
                     }
-                    net_rx_release(acquired);
                 }
             }
         }

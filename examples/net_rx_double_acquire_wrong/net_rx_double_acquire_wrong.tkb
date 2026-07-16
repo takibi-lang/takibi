@@ -1,0 +1,38 @@
+// This file is expected to produce a compile error.
+// The first acquire consumes the unique affine permission. A caller must use
+// the replacement carried by None, or release the acquired linear owner, before
+// trying again. Reusing `ready` directly could mint two owners for one hardware
+// descriptor, so the ordinary use-after-consume check rejects the second call.
+
+private affine view NetRxCanAcquire;
+private linear view NetRxCpuOwned;
+
+variant NetRxAcquire {
+    None(NetRxCanAcquire);
+    Acquired(NetRxCpuOwned);
+}
+
+fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
+    return NetRxAcquire::None(view NetRxCanAcquire);
+}
+
+fn net_rx_release(frame: sink NetRxCpuOwned) -> NetRxCanAcquire {
+    return view NetRxCanAcquire;
+}
+
+fn stop_rx(ready: sink NetRxCanAcquire) {
+}
+
+fn finish_acquire(result: NetRxAcquire) {
+    match result {
+        NetRxAcquire::None(next) => { stop_rx(next); }
+        NetRxAcquire::Acquired(frame) => { stop_rx(net_rx_release(frame)); }
+    }
+}
+
+fn acquire_twice_wrong(ready: NetRxCanAcquire) {
+    let first = net_rx_acquire(ready);
+    let second = net_rx_acquire(ready);
+    finish_acquire(first);
+    finish_acquire(second);
+}

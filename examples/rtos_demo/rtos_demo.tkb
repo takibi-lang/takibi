@@ -24,11 +24,11 @@ struct Shared {
 
 let mut shared: Shared;
 
-fn shared_add(g: borrow *KGuard, delta: i32) {
+fn shared_add(g: borrow KGuard, delta: i32) {
     shared.counter = shared.counter + delta;
 }
 
-fn shared_get(g: borrow *KGuard) -> i32 {
+fn shared_get(g: borrow KGuard) -> i32 {
     return shared.counter;
 }
 
@@ -44,7 +44,7 @@ let mut stack_b: [u8; 4096];
 
 fn task_ping() {
     for i: i32 in 0..<5 {
-        let g: *KGuard = klock(&the_lock);
+        let g: KGuard = klock(&the_lock);
         shared_add(g, 1);
         kunlock(g, &the_lock);
 
@@ -63,7 +63,7 @@ fn task_pong() {
     for i: i32 in 0..<5 {
         let v: i32 = chan_recv(&chan_ab);
 
-        let g: *KGuard = klock(&the_lock);
+        let g: KGuard = klock(&the_lock);
         shared_add(g, 1);
         kunlock(g, &the_lock);
 
@@ -92,7 +92,7 @@ fn app_main() {
     scheduler_disable();
     rtos_done = 1;
 
-    let g: *KGuard = klock(&the_lock);
+    let g: KGuard = klock(&the_lock);
     uart_puts("shared counter: ");
     uart_print(shared_get(g));
     uart_puts("\r\n");

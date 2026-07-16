@@ -242,10 +242,10 @@ fn build_tcp_payload(eth: [u8; 1514..], ihl: {20..<21 as u16},
     return -1;
 }
 
-fn http_server_poll_once() {
+fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire {
     net_rx_wait();
-    match net_rx_acquire() {
-        NetRxAcquire::None => {}
+    match net_rx_acquire(ready) {
+        NetRxAcquire::None(next) => { return next; }
         NetRxAcquire::Acquired(acquired) => {
             let len: i32 = net_rx_len(acquired);
             let mut should_tx: i32 = 0;
@@ -552,9 +552,9 @@ fn http_server_poll_once() {
             }
 
             if (should_tx == 1) {
-                net_transmit(frame as *u8, tx_len);
+                net_transmit(acquired, tx_len);
             }
-            net_rx_release(acquired);
+            return net_rx_release(acquired);
         }
     }
 }

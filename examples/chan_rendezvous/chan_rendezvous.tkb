@@ -52,7 +52,7 @@ let mut chan_ab: Chan = {1, 0, 0, 0, 0};
 let mut chan_ba: Chan = {1, 0, 0, 0, 0};
 
 fn chan_send(ch: *Chan, m: i32) {
-    let mut g: *MutexGuard = mutex_lock(&ch.mutex);
+    let mut g: MutexGuard = mutex_lock(&ch.mutex);
     while (ch.full != 0) {
         g = cond_wait(&ch.slot_taken, g, &ch.mutex);
     }
@@ -66,7 +66,7 @@ fn chan_send(ch: *Chan, m: i32) {
 }
 
 fn chan_recv(ch: *Chan) -> i32 {
-    let mut g: *MutexGuard = mutex_lock(&ch.mutex);
+    let mut g: MutexGuard = mutex_lock(&ch.mutex);
     while (ch.full == 0) {
         g = cond_wait(&ch.slot_full, g, &ch.mutex);
     }

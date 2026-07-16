@@ -35,47 +35,50 @@ let mut our_mac: [u8; 6];
 fn app_main() {
     uart_puts("arp_reply: init\r\n");
 
-    if (net_init() == 0) {
-        uart_puts("arp_reply: device/link not found\r\n");
-    } else {
-        net_read_mac(our_mac as *u8);
+    match net_init() {
+        NetInitResult::Failed => {
+            uart_puts("arp_reply: device/link not found\r\n");
+        }
+        NetInitResult::Ready(mut ready) => {
+            net_read_mac(our_mac as *u8);
 
-        uart_puts("arp_reply: ready\r\n");
+            uart_puts("arp_reply: ready\r\n");
 
-        while (true) {
-            net_rx_wait();
-            match net_rx_acquire() {
-                NetRxAcquire::None => {}
-                NetRxAcquire::Acquired(acquired) => {
-                    let len: i32 = net_rx_len(acquired);
+            while (true) {
+                net_rx_wait();
+                match net_rx_acquire(ready) {
+                    NetRxAcquire::None(next) => { ready = next; }
+                    NetRxAcquire::Acquired(acquired) => {
+                        let len: i32 = net_rx_len(acquired);
 
-                    // 14 (eth) + 28 (arp) = 42
-                    if (len >= 42) {
-                        let frame = net_rx_frame(acquired);
-                        if (read_u16be(frame[12..<14]) == 0x0806) {
-                            let arp = frame[14..<42];
-                            if (read_u16be(arp[ARP_HTYPE..<ARP_PTYPE]) == 1 &&
-                                read_u16be(arp[ARP_PTYPE..<ARP_HLEN]) == 0x0800 &&
-                                arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
-                                read_u16be(arp[ARP_OPER..<ARP_SHA]) == 1) {
-                                if (slice_eq(arp[ARP_TPA..<28], OUR_IP as []u8)) {
-                                    // Ethernet: dst = old src, then src = our_mac.
-                                    slice_copy(frame[0..<6], frame[6..<12]);
-                                    slice_copy(frame[6..<12], our_mac as []u8);
+                        // 14 (eth) + 28 (arp) = 42
+                        if (len >= 42) {
+                            let frame = net_rx_frame(acquired);
+                            if (read_u16be(frame[12..<14]) == 0x0806) {
+                                let arp = frame[14..<42];
+                                if (read_u16be(arp[ARP_HTYPE..<ARP_PTYPE]) == 1 &&
+                                    read_u16be(arp[ARP_PTYPE..<ARP_HLEN]) == 0x0800 &&
+                                    arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
+                                    read_u16be(arp[ARP_OPER..<ARP_SHA]) == 1) {
+                                    if (slice_eq(arp[ARP_TPA..<28], OUR_IP as []u8)) {
+                                        // Ethernet: dst = old src, then src = our_mac.
+                                        slice_copy(frame[0..<6], frame[6..<12]);
+                                        slice_copy(frame[6..<12], our_mac as []u8);
 
-                                    // ARP: THA/TPA = old SHA/SPA.
-                                    slice_copy(arp[ARP_THA..<ARP_TPA], arp[ARP_SHA..<ARP_SPA]);
-                                    slice_copy(arp[ARP_TPA..<28],      arp[ARP_SPA..<ARP_THA]);
-                                    slice_copy(arp[ARP_SHA..<ARP_SPA], our_mac as []u8);
-                                    slice_copy(arp[ARP_SPA..<ARP_THA], OUR_IP as []u8);
-                                    write_u16be(arp[ARP_OPER..<ARP_SHA], 2);
-                                    net_transmit(frame as *u8, len);
+                                        // ARP: THA/TPA = old SHA/SPA.
+                                        slice_copy(arp[ARP_THA..<ARP_TPA], arp[ARP_SHA..<ARP_SPA]);
+                                        slice_copy(arp[ARP_TPA..<28],      arp[ARP_SPA..<ARP_THA]);
+                                        slice_copy(arp[ARP_SHA..<ARP_SPA], our_mac as []u8);
+                                        slice_copy(arp[ARP_SPA..<ARP_THA], OUR_IP as []u8);
+                                        write_u16be(arp[ARP_OPER..<ARP_SHA], 2);
+                                        net_transmit(acquired, len);
+                                    }
                                 }
                             }
                         }
+                        // Re-post the RX descriptor regardless of whether we replied.
+                        ready = net_rx_release(acquired);
                     }
-                    // Re-post the RX descriptor regardless of whether we replied.
-                    net_rx_release(acquired);
                 }
             }
         }

@@ -98,8 +98,17 @@ private linear struct NetRxCpuOwned[desc: usize] {
     private len: i32;
 }
 
+// Exactly one permit exists while no RX descriptor is CPU-owned. It has no
+// runtime representation and prevents duplicate owner minting at the API edge.
+private affine view NetRxCanAcquire;
+
+variant NetInitResult {
+    Failed;
+    Ready(NetRxCanAcquire);
+}
+
 variant NetRxAcquire {
-    None;
+    None(NetRxCanAcquire);
     Acquired(exists desc: usize. NetRxCpuOwned[desc]);
 }
 
@@ -111,6 +120,9 @@ fn net_rx_owned(index: {0..<4 as usize} @ desc, len: i32)
 
 let mut eth_rx_irq_flag: io u32;
 let mut eth_tx_irq_flag: io u32;
+// Establishes the one initial NetRxCanAcquire mint on the current single-
+// threaded boot path. Failed link setup may be retried; success is permanent.
+private let mut net_rx_initialized: i32 = 0;
 let ETH_BUF_SIZE: isize = 1536; // max 1518-byte Ethernet frame, rounded up
 let ETH_BUF_SIZE_USIZE: usize = 1536; // memory indexing counterpart
 
@@ -316,14 +328,18 @@ fn eth_tx_ring_init() {
 // single shared .tkb file for both the QEMU/virtio-net and STM32/real-MAC
 // targets, mirroring how uart.tkb/print.tkb already share identical
 // signatures across examples/common/ and examples/common_stm32/.
-fn net_init() -> i32 {
+fn net_init() -> NetInitResult {
+    if (net_rx_initialized != 0) {
+        return NetInitResult::Failed;
+    }
     eth_gpio_init();
     eth_mac_dma_reset();
 
     let link: i32 = phy_init();
     if (link < 0) {
-        return 0;
+        return NetInitResult::Failed;
     }
+    net_rx_initialized = 1;
     let speed100: i32 = link / 2;
     let fullduplex: i32 = link % 2;
 
@@ -355,14 +371,14 @@ fn net_init() -> i32 {
     *ETH_DMAOMR = (1 << 21) | (1 << 25); // TSF | RSF (store-and-forward)
     *ETH_DMAOMR = *ETH_DMAOMR | (1 << 1) | (1 << 13); // SR | ST (start RX/TX DMA)
 
-    return 1;
+    return NetInitResult::Ready(view NetRxCanAcquire);
 }
 
-// Returns None while DMA still owns the current descriptor. Acquired carries
-// both the validated descriptor index and reported length in the linear owner.
-fn net_rx_acquire() -> NetRxAcquire {
+// Consumes the one acquisition permit. None returns it unchanged; Acquired
+// replaces it with the descriptor owner until net_rx_release() restores it.
+fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
     if (eth_rx_irq_flag == 0) {
-        return NetRxAcquire::None;
+        return NetRxAcquire::None(view NetRxCanAcquire);
     }
     // Clear before inspecting the descriptor so an IRQ racing with this
     // check sets it again instead of being overwritten afterward.
@@ -373,7 +389,7 @@ fn net_rx_acquire() -> NetRxAcquire {
     dma_finish_rx(desc, sizeof(EthDmaDesc));
     let word0: u32 = desc.word0;
     if ((word0 & ETH_RDES0_OWN) != 0) {
-        return NetRxAcquire::None; // still owned by the DMA
+        return NetRxAcquire::None(view NetRxCanAcquire); // still owned by the DMA
     }
     // Keep draining already-completed descriptors from the ring even when
     // several frames were coalesced into one DMA interrupt.
@@ -416,10 +432,8 @@ fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] {
 
 
 // Hands the current RX descriptor back to the DMA and advances the ring.
-// Must receive the CPU-owned handle returned by net_rx_acquire(), once the
-// caller no longer needs net_rx_frame()'s contents (e.g. after net_transmit() has
-// already copied/sent them out, since net_transmit() is synchronous).
-fn net_rx_release(frame: sink NetRxCpuOwned[desc]) {
+// Consuming the CPU-owned handle restores the sole acquisition permit.
+fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire {
     let desc_index: isize = frame.index as isize;
     let desc: *EthDmaDesc = rx_desc_ptr(desc_index);
     dma_prepare_rx(eth_rx_bufs + desc_index * ETH_BUF_SIZE,
@@ -428,14 +442,16 @@ fn net_rx_release(frame: sink NetRxCpuOwned[desc]) {
     dma_prepare_tx(desc as *u8, sizeof(EthDmaDesc));
     *ETH_DMARPDR = 1; // poll demand: resume RX DMA if it had suspended
     eth_rx_cur = (desc_index + 1) % ETH_RX_DESC_COUNT;
+    return view NetRxCanAcquire;
 }
 
-// Transmits len bytes starting at buf. Synchronous: sleeps on the retained
-// interrupt event until the DMA finishes reading buf, so the caller can safely reuse or
-// release buf (e.g. via net_rx_release()) immediately afterward -- same
-// completion-ordering guarantee examples/common_qemu/virtio_mmio.tkb's net_echo
-// consumer relies on before re-posting an RX descriptor.
-fn net_transmit(buf: *u8, len: i32) !{may_block} {
+// Transmits len bytes from this owned RX descriptor. Deriving buf here makes
+// the in-place-reply requirement structural rather than a raw-pointer calling
+// convention. The operation is synchronous, so the caller can release the RX
+// owner immediately afterward. This is the same completion-ordering guarantee
+// the QEMU backend provides before re-posting an RX descriptor.
+fn net_transmit(frame: borrow NetRxCpuOwned[desc], len: i32) !{may_block} {
+    let buf: *u8 = net_rx_frame(frame) as *u8;
     let desc: *align(32) EthDmaDesc = tx_desc_ptr(eth_tx_cur);
 
     desc.word2 = ptr_to_u32(buf);

@@ -14,12 +14,13 @@
 // below serves a different purpose: it proves that every accepted event is
 // disposed on every dispatch path, including paths that do not transition.
 //
-// What this file does NOT verify: that each body writes the phase its
-// name claims, and that the builders it calls really emit the segments
-// THEY claim. That residue is human review of this file (kept small on
-// purpose -- this file IS the trusted island) and, eventually, issue #13
-// (SMT). Everything outside this file is FORCED to go through it: reads
-// via tcp_conn_state(), writes via nothing else at all.
+// What this file does NOT verify: that each body writes the phase its name
+// claims, and that the builders really emit the segments they claim. Indexed
+// TcpConn[conn, state] view changes, not SMT, are the future mechanism for the
+// first protocol-authority gap. Builder correctness needs a functional spec
+// and remains human review until such a prover-level contract exists. Pure SMT
+// is reserved for arithmetic facts in Phi. Everything outside this file is
+// forced through it: reads via tcp_conn_state(), writes via nothing else.
 //
 // Deliberately NOT here: conn_snd_nxt/conn_rcv_nxt sequence-number
 // bookkeeping (stays private to http_server_common.tkb -- wire arithmetic,

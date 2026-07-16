@@ -79,27 +79,30 @@ fn http_read_chunk(name83: *u8, off: u32, dst: *u8, want: u32) -> u32 {
 fn app_main() {
     uart_puts("http_server_sdcard: init\r\n");
 
-    if (net_init() == 0) {
-        uart_puts("http_server_sdcard: device/link not found\r\n");
-    } else {
-        net_read_mac(our_mac as *u8);
-        slice_copy(our_ip as []u8, HTTP_SERVER_IP as []u8);
-
-        if (disk_initialize() != 0) {
-            uart_puts("http_server_sdcard: disk_initialize FAIL\r\n");
+    match net_init() {
+        NetInitResult::Failed => {
+            uart_puts("http_server_sdcard: device/link not found\r\n");
         }
-        // Mount only -- never format. This card's real, externally
-        // provisioned content is the whole point (see this file's header
-        // comment); a fat_open() below simply fails if the card is
-        // missing/blank/unmounted, and build_body_from_sdcard() falls
-        // back to a short error message rather than the server refusing
-        // to answer.
-        fat_mount();
+        NetInitResult::Ready(mut ready) => {
+            net_read_mac(our_mac as *u8);
+            slice_copy(our_ip as []u8, HTTP_SERVER_IP as []u8);
 
-        uart_puts("http_server_sdcard: ready\r\n");
+            if (disk_initialize() != 0) {
+                uart_puts("http_server_sdcard: disk_initialize FAIL\r\n");
+            }
+            // Mount only -- never format. This card's real, externally
+            // provisioned content is the whole point (see this file's header
+            // comment); a fat_open() below simply fails if the card is
+            // missing/blank/unmounted, and build_body_from_sdcard() falls
+            // back to a short error message rather than the server refusing
+            // to answer.
+            fat_mount();
 
-        while (true) {
-            http_server_poll_once();
+            uart_puts("http_server_sdcard: ready\r\n");
+
+            while (true) {
+                ready = http_server_poll_once(ready);
+            }
         }
     }
 }

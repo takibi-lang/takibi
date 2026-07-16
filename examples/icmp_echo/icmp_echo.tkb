@@ -95,86 +95,89 @@ fn build_echo_reply(eth: [u8; 42..], ihl: {20..<21 as u16}, icmp_seg: [u8; 8..])
 fn app_main() {
     uart_puts("icmp_echo: init\r\n");
 
-    if (net_init() == 0) {
-        uart_puts("icmp_echo: device/link not found\r\n");
-    } else {
-        net_read_mac(our_mac as *u8);
+    match net_init() {
+        NetInitResult::Failed => {
+            uart_puts("icmp_echo: device/link not found\r\n");
+        }
+        NetInitResult::Ready(mut ready) => {
+            net_read_mac(our_mac as *u8);
 
-        uart_puts("icmp_echo: ready\r\n");
+            uart_puts("icmp_echo: ready\r\n");
 
-        while (true) {
-            net_rx_wait();
-            match net_rx_acquire() {
-                NetRxAcquire::None => {}
-                NetRxAcquire::Acquired(acquired) => {
-                    let len: i32 = net_rx_len(acquired);
+            while (true) {
+                net_rx_wait();
+                match net_rx_acquire(ready) {
+                    NetRxAcquire::None(next) => { ready = next; }
+                    NetRxAcquire::Acquired(acquired) => {
+                        let len: i32 = net_rx_len(acquired);
 
-                    // 14 (eth) + 20 (min IPv4) + 8 (min ICMP) = 42
-                    if (len >= 42 && len <= 1514) {
-                        // Snapshot into an immutable local: the explicit refined
-                        // cast below (len_n as u16) needs to see
-                        // len's CURRENT narrowed range, but a function PARAMETER
-                        // (always a Mut binding) only exposes its narrowed range
-                        // through the separate narrowing_ctx side-table, which a
-                        // bare Cast on a Mut variable does not consult (only
-                        // specific Index/SliceOf sites do) -- an immutable
-                        // snapshot's type inherits the narrowing directly (the
-                        // same "B-plan" mechanism used elsewhere in this codebase
-                        // for exactly this reason), so the cast proves clean
-                        // instead of falling back to a runtime check.
-                        let len_n: i32 = len;
-                        let frame = net_rx_frame(acquired);
-                        if (read_u16be(frame[12..<14]) == 0x0800) {
-                            let ip = frame[14..<34];
-                            // version is standalone (only ever compared to a
-                            // literal) -- safely u8.
-                            let version: u8 = ip[IP_VERSION_IHL] >> 4;
-                            let ihl:     u16 = (ip[IP_VERSION_IHL] & 0x0f) * 4;
+                        // 14 (eth) + 20 (min IPv4) + 8 (min ICMP) = 42
+                        if (len >= 42 && len <= 1514) {
+                            // Snapshot into an immutable local: the explicit refined
+                            // cast below (len_n as u16) needs to see
+                            // len's CURRENT narrowed range, but a function PARAMETER
+                            // (always a Mut binding) only exposes its narrowed range
+                            // through the separate narrowing_ctx side-table, which a
+                            // bare Cast on a Mut variable does not consult (only
+                            // specific Index/SliceOf sites do) -- an immutable
+                            // snapshot's type inherits the narrowing directly (the
+                            // same "B-plan" mechanism used elsewhere in this codebase
+                            // for exactly this reason), so the cast proves clean
+                            // instead of falling back to a runtime check.
+                            let len_n: i32 = len;
+                            let frame = net_rx_frame(acquired);
+                            if (read_u16be(frame[12..<14]) == 0x0800) {
+                                let ip = frame[14..<34];
+                                // version is standalone (only ever compared to a
+                                // literal) -- safely u8.
+                                let version: u8 = ip[IP_VERSION_IHL] >> 4;
+                                let ihl:     u16 = (ip[IP_VERSION_IHL] & 0x0f) * 4;
 
-                            // No IP options supported -- IHL must be exactly 20.
-                            if (version == 4 && ihl == 20) {
-                                // Bridge len_n's proven {42..<1515} range into
-                                // u16 -- see the header comment. A free coercion
-                                // (no runtime check): the source range already
-                                // implies the target range exactly.
-                                let len16: u16 = len_n as u16;
-                                let total_len:       u16 = read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
-                                let ip_len_in_frame: u16 = len16 - 14;
+                                // No IP options supported -- IHL must be exactly 20.
+                                if (version == 4 && ihl == 20) {
+                                    // Bridge len_n's proven {42..<1515} range into
+                                    // u16 -- see the header comment. A free coercion
+                                    // (no runtime check): the source range already
+                                    // implies the target range exactly.
+                                    let len16: u16 = len_n as u16;
+                                    let total_len:       u16 = read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
+                                    let ip_len_in_frame: u16 = len16 - 14;
 
-                                // total_len must fit what the device actually
-                                // delivered, and must be large enough to contain
-                                // the IPv4 header itself, before it's used to
-                                // size the ICMP checksum read below.
-                                if (total_len <= ip_len_in_frame && total_len >= ihl) {
-                                    if (ip[IP_PROTOCOL] == PROTO_ICMP &&
-                                        inet_checksum(ip[0..<ihl as usize]) == 0) {
-                                        if (slice_eq(ip[IP_DST..<20], OUR_IP as []u8)) {
-                                            let icmp_len: u16 = total_len - ihl;
+                                    // total_len must fit what the device actually
+                                    // delivered, and must be large enough to contain
+                                    // the IPv4 header itself, before it's used to
+                                    // size the ICMP checksum read below.
+                                    if (total_len <= ip_len_in_frame && total_len >= ihl) {
+                                        if (ip[IP_PROTOCOL] == PROTO_ICMP &&
+                                            inet_checksum(ip[0..<ihl as usize]) == 0) {
+                                            if (slice_eq(ip[IP_DST..<20], OUR_IP as []u8)) {
+                                                let icmp_len: u16 = total_len - ihl;
 
-                                            // The upper bound restates icmp_len's
-                                            // own already-established range (from
-                                            // total_len's narrowing above) as an
-                                            // explicit conjunct: if-narrowing only
-                                            // upgrades a variable's range when BOTH
-                                            // bounds appear in the condition, so
-                                            // this is what lets icmp_seg's proven
-                                            // subslice inherit a minimum >= 8
-                                            // (matching build_echo_reply's
-                                            // parameter) instead of falling back to
-                                            // the LET declaration's unnarrowed floor
-                                            // of 0.
-                                            if (icmp_len >= 8 && icmp_len <= 1480) {
-                                                let icmp_len_idx: usize =
-                                                    icmp_len as usize;
-                                                let icmp_seg = frame[34..<34 + icmp_len_idx];
-                                                if (icmp_seg[ICMP_TYPE] == ICMP_ECHO_REQUEST &&
-                                                    icmp_seg[ICMP_CODE] == 0 &&
-                                                    inet_checksum(icmp_seg) == 0) {
+                                                // The upper bound restates icmp_len's
+                                                // own already-established range (from
+                                                // total_len's narrowing above) as an
+                                                // explicit conjunct: if-narrowing only
+                                                // upgrades a variable's range when BOTH
+                                                // bounds appear in the condition, so
+                                                // this is what lets icmp_seg's proven
+                                                // subslice inherit a minimum >= 8
+                                                // (matching build_echo_reply's
+                                                // parameter) instead of falling back to
+                                                // the LET declaration's unnarrowed floor
+                                                // of 0.
+                                                if (icmp_len >= 8 && icmp_len <= 1480) {
+                                                    let icmp_len_idx: usize =
+                                                        icmp_len as usize;
+                                                    let icmp_seg = frame[34..<34 + icmp_len_idx];
+                                                    if (icmp_seg[ICMP_TYPE] == ICMP_ECHO_REQUEST &&
+                                                        icmp_seg[ICMP_CODE] == 0 &&
+                                                        inet_checksum(icmp_seg) == 0) {
 
-                                                    build_echo_reply(frame, ihl, icmp_seg);
+                                                        build_echo_reply(frame, ihl, icmp_seg);
 
-                                                    let reply_len: i32 = 14 + total_len;
-                                                    net_transmit(frame as *u8, reply_len);
+                                                        let reply_len: i32 = 14 + total_len;
+                                                        net_transmit(acquired, reply_len);
+                                                    }
                                                 }
                                             }
                                         }
@@ -182,10 +185,10 @@ fn app_main() {
                                 }
                             }
                         }
-                    }
 
-                    // Re-post the RX descriptor regardless of whether we replied.
-                    net_rx_release(acquired);
+                        // Re-post the RX descriptor regardless of whether we replied.
+                        ready = net_rx_release(acquired);
+                    }
                 }
             }
         }

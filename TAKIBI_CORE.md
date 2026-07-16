@@ -5,7 +5,7 @@ syntax accepted by the compiler today. `SPEC.md` remains authoritative for
 implemented Takibi. `OWNERSHIP_KERNEL.md` records the history and limitations
 of the current affine/linear checker.
 
-Implementation status (2026-07-15): Slices 0 through 6 are implemented. The
+Implementation status (2026-07-16): Slices 0 through 6 are implemented. The
 `Takibi_core` module owns the four-layer vocabulary, the current checker uses
 `Delta.Legacy_flow`, and the indexed runtime-owner subset described in 3.1 is
 accepted. Non-indexed erased affine/linear views are also accepted and erased
@@ -14,9 +14,11 @@ existential indexed-owner payloads, and standard affine weakening are
 accepted. Scoped mutable owner borrows, direct/indirect blocking effects, and
 function-pointer effect contracts are accepted and erase before LLVM.
 Integer-indexed erased views and implicitly universal view transitions are
-accepted. General place/storage tracking, lock invariants, existential view
-state dispatch, explicit/general quantifiers and propositions, and solver
-hooks remain design targets.
+accepted. The post-Slice 6 examples now use erased guard views, an affine RX
+acquisition permission, and owner-mediated synchronous TX. General
+place/storage tracking, owner-derived regions, lock invariants, existential
+view state dispatch, explicit/general quantifiers and propositions, and
+solver hooks remain design targets.
 
 The examples in this document are elaboration fixtures. Their contracts and
 runtime representations are decisions; punctuation may change when a fixture
@@ -236,36 +238,37 @@ silently claimed by this runtime-owner syntax.
 
 ### 3.2 `MutexGuard` and `KGuard`: erased views when the lock stays explicit
 
-The current mutex API already passes the real mutex pointer to lock and
-unlock. Its dummy guard pointer carries no runtime information, so the
-natural replacement is an erased view:
+The mutex API passes the real mutex pointer to lock and unlock. Slice 2's
+non-indexed erased view is now used instead of a dummy guard pointer:
 
 ```takibi
-private linear view MutexHeld[lock: addr];
+private linear view MutexGuard;
 
-fn mutex_lock(m: *i32 @ lock) -> MutexHeld[lock] !{may_block} {
+fn mutex_lock(m: *i32) -> MutexGuard !{may_block} {
     sem_wait(m);
-    return view MutexHeld[lock];
+    return view MutexGuard;
 }
 
-fn mutex_unlock(m: *i32 @ lock, held: sink MutexHeld[lock]) {
+fn mutex_unlock(held: sink MutexGuard, m: *i32) {
     sem_post(m);
 }
 
-fn cond_wait(seq: *io i32, m: *i32 @ lock,
-             held: sink MutexHeld[lock]) -> MutexHeld[lock] !{may_block} {
+fn cond_wait(seq: *io i32, held: sink MutexGuard,
+             m: *i32) -> MutexGuard !{may_block} {
     let s = *seq;
-    mutex_unlock(m, held);
+    mutex_unlock(held, m);
     while (*seq == s) {}
     return mutex_lock(m);
 }
 ```
 
-`MutexHeld[lock]` contributes no ABI value. `mutex_lock` takes only `m` and
-has no runtime result; `mutex_unlock` takes only `m`. The static `lock`
-rejects unlocking a different mutex. `KGuard` can use the same shape, with
-an additional CPU/interrupt-state index when multicore support creates that
-need.
+`MutexGuard` contributes no ABI value. `mutex_lock` takes only `m` and has no
+runtime result; `mutex_unlock` takes only `m`. This proves balanced use but
+does not yet reject pairing the guard with a different mutex pointer. The
+later address/stable-place slice should strengthen the same API to
+`MutexHeld[lock: addr]`, with `m: *i32 @ lock`. `KGuard` follows the same
+path, adding CPU/interrupt-state identity only when multicore support creates
+that concrete need.
 
 If an API instead wants `mutex_unlock(guard)` with no mutex argument, use a
 runtime package explicitly:
@@ -282,40 +285,58 @@ the representation choice.
 
 ### 3.3 `NetRxCpuOwned`: fallible existential runtime owner
 
-Supporting more than one descriptor in flight requires the successful
-handle to identify the descriptor. Descriptor and validated length should
-move out of singleton globals and into a private runtime value:
+The current backends intentionally permit one CPU-owned RX descriptor at a
+time. The successful handle identifies that descriptor, while an erased
+affine permission prevents a second acquisition until release:
 
 ```takibi
 private linear struct NetRxCpuOwned[desc: usize] {
     private index: {0..<RX_DESC_COUNT as usize} @ desc;
-    private len: {0..<1515 as usize};
+    private len: i32;
 }
 
-fn net_rx_acquire()
-    -> Option[exists desc. NetRxCpuOwned[desc]];
-fn net_rx_len(frame: borrow NetRxCpuOwned[desc]) -> usize;
-fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..];
-fn net_rx_release(frame: sink NetRxCpuOwned[desc]);
+private affine view NetRxCanAcquire;
 
-match net_rx_acquire() {
-    Some(frame) => {
+variant NetInitResult {
+    Failed;
+    Ready(NetRxCanAcquire);
+}
+
+variant NetRxAcquire {
+    None(NetRxCanAcquire);
+    Acquired(exists desc: usize. NetRxCpuOwned[desc]);
+}
+
+fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire;
+fn net_rx_len(frame: borrow NetRxCpuOwned[desc]) -> i32;
+fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..];
+fn net_transmit(frame: borrow NetRxCpuOwned[desc], len: i32) !{may_block};
+fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire;
+
+match net_rx_acquire(ready) {
+    NetRxAcquire::Acquired(frame) => {
         process(net_rx_frame(frame));
-        net_rx_release(frame);
+        ready = net_rx_release(frame);
     }
-    None => {}
+    NetRxAcquire::None(next) => { ready = next; }
 }
 ```
 
 The runtime success payload is `{index, len}` plus the variant tag. `desc`
-and its bounds are erased. The `Some` arm opens the existential and owns one
-descriptor; the `None` arm has no obligation. This removes the null-sentinel
-exception that currently distorts affine branch semantics.
+and its bounds are erased. `NetRxCanAcquire` also erases, so `None` contains
+only the tag. The `Acquired` arm opens the existential and owns one descriptor;
+its linear owner must be released. The permit itself is affine because giving
+up future acquisition is safe, while copying or reusing it is not. This
+removes the null-sentinel exception and closes duplicate owner minting at the
+public API boundary.
 
-An implementation intentionally limited to one global in-flight RX frame
-could instead use an erased view, but that choice would continue to encode
-the singleton restriction. It should not masquerade as a descriptor-indexed
-API.
+`net_transmit` derives the in-place reply pointer from the borrowed owner,
+rather than trusting an unrelated raw pointer. `net_rx_frame` still returns
+an unrestricted slice which can outlive that owner in the checker; tying the
+slice's region to the owner is the next distinct Core problem. A future
+multi-frame-in-flight API would need multiple indexed acquisition credits or
+an equivalent queue-capacity resource, not silent extra minting behind this
+one-permit interface.
 
 ### 3.4 `FatFile`: runtime state, not a dummy capability
 
@@ -693,6 +714,102 @@ from the indexed spelling.
 - Zero-copy typed channels (#113) and ownership transfer through variants.
 - Aliasing/region predicates (#106), asynchronous TX ownership (#87), and
   solver/proof integration, each with a concrete driver and negative tests.
+
+### Post-Slice 6 example audit and consolidation (implemented 2026-07-16)
+
+The first step after Slice 6 is a consolidation slice, not another expansion
+of Core semantics. Three current APIs still encode contracts less precisely
+than the already-implemented views, variants, indexed owners, and borrows can
+express:
+
+1. `MutexGuard` and `KGuard` were dummy opaque pointers even though the real
+   mutex/lock remains an explicit runtime argument. They are now non-indexed
+   erased linear views. This removes integer-to-token minting
+   and their LLVM parameters/results without weakening today's guarantee.
+   Binding a guard to one particular lock remains a later `addr`/stable-place
+   identity slice.
+2. Both network backends could previously be asked to acquire again before
+   the previous `NetRxCpuOwned[desc]` was released. A private affine
+   `NetRxCanAcquire` view is returned by successful `net_init`, consumed
+   by `net_rx_acquire`, returned in the `None` case, and reproduced only by
+   `net_rx_release` in the acquired case. This models the implementations'
+   actual one-frame-in-flight policy and prevents a caller from obtaining two
+   owners for the same descriptor.
+   Each backend also has a private process-lifetime initialization flag on the
+   current single-threaded boot path, so repeated `net_init` calls cannot
+   create a second successful initial mint; failed discovery/link setup
+   remains retryable. Concurrent initialization would require an atomic/lock
+   invariant and is not claimed by this example API.
+   Affine, rather than linear, is deliberate: abandoning the right to acquire
+   again is safe, while duplicating it is not. The acquired descriptor owner
+   remains linear because returning it to the device is mandatory.
+3. `net_transmit` previously accepted a raw pointer with the documented but
+   unchecked precondition that it came from `net_rx_frame`. It now borrows
+   `NetRxCpuOwned[desc]` and recovers the buffer from the owner's private
+   descriptor index. Synchronous completion is unchanged. Under the current
+   Slice 3 ABI, the shared borrow passes the owner's ordinary `{index, len}`
+   runtime aggregate by value instead of passing the old raw buffer pointer;
+   `desc` and the borrow permission still erase.
+
+The `net_rx_double_acquire_wrong` compile-error fixture fixes the permit's
+negative contract: reusing the consumed acquisition right is rejected. These
+changes deliberately do not claim to close the RX region problem.
+`net_rx_frame(frame)` returns an unrestricted runtime slice today, so source
+can retain that slice, release `frame`, and then access memory which DMA owns
+again. The first genuinely new post-consolidation Core slice should tie a
+derived slice/region borrow to the owner and reject moving or releasing the
+owner while that borrow remains usable. Its positive fixture is ordinary
+packet processing; its negative fixture releases the frame and then reads the
+old slice.
+
+The remaining example-driven order is:
+
+1. owner-derived region borrowing for `NetRxCpuOwned` (#106);
+2. finite-enum static states plus existentially packaged indexed views for
+   the HTTP server's `TcpConn[conn, state]` dispatch;
+3. stable linear owner storage, typed request variants, and the smallest lock
+   invariant needed to replace `WordChan` pointer-to-`usize` RPC in
+   `http_server_sdcard_rtos` (#113);
+4. static address/place identities for `MutexHeld[lock]` and `KGuard[lock]`,
+   unless the channel slice needs them earlier;
+5. asynchronous TX ownership only when an example actually keeps a DMA buffer
+   in flight after the call returns (#87).
+
+Full lock invariants are not a standalone prerequisite for the current
+single-core, copy-based channels. They should land with the first owner stored
+behind a lock, where opening and closing the invariant has observable proof
+work to do. Likewise, general arbitrary-place borrowing must not be added
+without one of the concrete owner containers above.
+
+#### Solver and prover threshold
+
+The current examples have exactly one executable `unsafe { ... }`, in
+`tcp_echo`'s payload subslice. Its missing fact is quantifier-free linear
+integer arithmetic:
+
+```text
+data_off = 34 + tcp_hdr_len
+data_len = tcp_len - tcp_hdr_len
+data_off + data_len = 34 + tcp_len
+```
+
+An SMT solver could discharge that bounds goal, but attaching Z3 alone would
+not help. Elaboration must first retain immutable symbolic expressions, branch
+assumptions, integer-cast facts, and source-located verification conditions in
+`Phi`. The acceptance criterion for a first solver slice is therefore removal
+of this specific `unsafe` with an automatically generated bounds goal and a
+negative relation that remains rejected. Runtime validation of packet- and
+device-supplied lengths must remain; SMT is not permission to assume external
+input is valid.
+
+This one site is a real future solver driver, but it does not outrank the
+resource and region holes above. No current example justifies an external
+proof artifact or a `prove` surface form. Verifying that a TCP builder emits a
+semantically correct segment would first require a functional specification,
+a memory model, and explicit lemmas; Lean integration is deferred until such a
+specification exists. A future solver slice should start with the automatic
+quantifier-free `Phi` fragment and add a visible `solve` keyword only if a real
+API cannot be discharged ergonomically without it.
 
 ## 8. What to Keep and What to Replace
 

@@ -17,10 +17,13 @@ that apply everywhere.
   QEMU counterpart, since it also needs the real SD card).
 
   **Unified driver API**: `eth.tkb` and `examples/common_qemu/virtio_mmio.tkb` both expose the identical
-  `net_init() -> i32` / `net_rx_wait()` / `net_rx_acquire() -> *NetRxCpuOwned` /
-  `net_rx_len(borrow *NetRxCpuOwned) -> i32` /
-  `net_rx_frame(borrow *NetRxCpuOwned) -> [u8; 1514..]` / `net_transmit(buf, len)` /
-  `net_rx_release(*NetRxCpuOwned)` / `net_read_mac(mac_out)` functions -- mirroring how `uart.tkb`/`print.tkb` already
+  `net_init() -> NetInitResult` / `net_rx_wait()` /
+  `net_rx_acquire(sink NetRxCanAcquire) -> NetRxAcquire` /
+  `net_rx_len(borrow NetRxCpuOwned[desc]) -> i32` /
+  `net_rx_frame(borrow NetRxCpuOwned[desc]) -> [u8; 1514..]` /
+  `net_transmit(borrow NetRxCpuOwned[desc], len)` /
+  `net_rx_release(sink NetRxCpuOwned[desc]) -> NetRxCanAcquire` /
+  `net_read_mac(mac_out)` functions -- mirroring how `uart.tkb`/`print.tkb` already
   share identical signatures across `examples/common/` and `examples/common_stm32/`. This means
   `examples/net_echo/net_echo.tkb` (and the other four) are a *single* file compiled against either
   backend depending on target, not a QEMU version plus a hand-maintained `_stm32.tkb` copy -- see that
@@ -29,7 +32,9 @@ that apply everywhere.
   STM32 vectors IRQ61 directly to `ETH_IRQHandler`, while virtio discovers its SPI from the MMIO slot and
   dispatches through GICv2. ISRs acknowledge, set `io` flags, and issue `interrupt_notify()`; normal
   context uses `interrupt_wait()` instead of spinning while idle. Used-ring/descriptor inspection,
-  cache maintenance, affine-handle creation, and packet processing remain in normal context.
+  cache maintenance, indexed-owner creation, and packet processing remain in normal context. The erased
+  affine `NetRxCanAcquire` permission enforces the current one-frame-in-flight policy; the acquired
+  descriptor owner is linear and must be returned on every path.
 
   **Network config**: `examples/common_stm32/netconfig.tkb` holds the board's MAC/IP as plain global
   constants (`OUR_MAC`/`OUR_IP`/`HTTP_SERVER_IP`, array-literal `{...}` initializers). MAC is a fixed

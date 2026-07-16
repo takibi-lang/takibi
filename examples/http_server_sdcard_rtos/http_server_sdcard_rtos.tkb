@@ -145,26 +145,29 @@ fn app_main() {
 
     uart_puts("http_server_sdcard_rtos: init\r\n");
 
-    if (net_init() == 0) {
-        uart_puts("http_server_sdcard_rtos: device/link not found\r\n");
-    } else {
-        net_read_mac(our_mac as *u8);
-        slice_copy(our_ip as []u8, HTTP_SERVER_IP as []u8);
-
-        rtos_task_add(1, setup_task_stack(sd_stack + 8192, sd_worker));
-        rtos_start();
-
-        chan_send(&sd_request_ch, SD_REQ_INIT);
-        let sd_init_result: i32 = chan_recv(&sd_response_ch);
-
-        if (sd_init_result == 0) {
-            uart_puts("http_server_sdcard_rtos: ready\r\n");
-        } else {
-            uart_puts("http_server_sdcard_rtos: ready without SD\r\n");
+    match net_init() {
+        NetInitResult::Failed => {
+            uart_puts("http_server_sdcard_rtos: device/link not found\r\n");
         }
+        NetInitResult::Ready(mut ready) => {
+            net_read_mac(our_mac as *u8);
+            slice_copy(our_ip as []u8, HTTP_SERVER_IP as []u8);
 
-        while (true) {
-            http_server_poll_once();
+            rtos_task_add(1, setup_task_stack(sd_stack + 8192, sd_worker));
+            rtos_start();
+
+            chan_send(&sd_request_ch, SD_REQ_INIT);
+            let sd_init_result: i32 = chan_recv(&sd_response_ch);
+
+            if (sd_init_result == 0) {
+                uart_puts("http_server_sdcard_rtos: ready\r\n");
+            } else {
+                uart_puts("http_server_sdcard_rtos: ready without SD\r\n");
+            }
+
+            while (true) {
+                ready = http_server_poll_once(ready);
+            }
         }
     }
 }

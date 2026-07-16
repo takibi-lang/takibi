@@ -204,16 +204,19 @@ fn http_response_done() -> bool {
 fn app_main() {
     uart_puts("http_server: init\r\n");
 
-    if (net_init() == 0) {
-        uart_puts("http_server: device/link not found\r\n");
-    } else {
-        net_read_mac(our_mac as *u8);
-        slice_copy(our_ip as []u8, HTTP_SERVER_IP as []u8);
+    match net_init() {
+        NetInitResult::Failed => {
+            uart_puts("http_server: device/link not found\r\n");
+        }
+        NetInitResult::Ready(mut ready) => {
+            net_read_mac(our_mac as *u8);
+            slice_copy(our_ip as []u8, HTTP_SERVER_IP as []u8);
 
-        uart_puts("http_server: ready\r\n");
+            uart_puts("http_server: ready\r\n");
 
-        while (true) {
-            http_server_poll_once();
+            while (true) {
+                ready = http_server_poll_once(ready);
+            }
         }
     }
 }

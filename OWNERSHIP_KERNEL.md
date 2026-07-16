@@ -1048,6 +1048,78 @@ cannot access slot 1. Explicit `forall`, existential packages around views,
 dynamic state dispatch, address/enum static sorts, propositions, and solver
 discharge are deliberately not claimed by this slice.
 
+#### 6.7.8 Post-Slice 6 audit and consolidation result (2026-07-16)
+
+Reviewing the real examples after Slice 6 separated work which needs new Core
+semantics from work which merely has not adopted semantics already present.
+The selected first step is the latter:
+
+- `MutexGuard` and `KGuard` carry no runtime data while their mutex/lock
+  pointers are passed separately. Keeping them as zero-valued opaque pointers
+  is now representation debt; non-indexed linear views express exactly the
+  current contract and erase completely. A later static address identity will
+  strengthen this to `MutexHeld[lock]` and reject unlocking the wrong lock.
+- `NetRxCpuOwned[desc]` correctly ties a runtime descriptor index to one owner,
+  but a private constructor is still trusted not to mint the same authority
+  twice. The two real drivers make that trust observable: calling acquire
+  again before release can inspect the same current descriptor because their
+  ring cursor advances only during release. An affine `NetRxCanAcquire` view
+  threaded through init, acquire, `None`, and release closes the public API
+  hole while preserving the drivers' intentional one-frame-in-flight design.
+  The permit is affine because a caller may safely abandon future acquisition;
+  it is the resulting `NetRxCpuOwned[desc]` that must stay linear so the active
+  descriptor is returned on every path.
+  A private runtime initialization flag in each backend is the trusted base
+  case on the current single-threaded boot path: only the first successful
+  `net_init` mints the initial permit, while a failed discovery/link attempt
+  can be retried. Concurrent init is outside the current example contract and
+  would need an atomic/lock invariant.
+- `net_transmit(*u8, len)` discards the relation between a transmit buffer and
+  the acquired frame. Taking `borrow NetRxCpuOwned[desc]` instead lets the
+  private driver derive the buffer from `desc`; no new lifetime machinery is
+  required for that narrower correction.
+
+This consolidation is implemented in both QEMU and STM32 backends and all
+current network callers. `MutexGuard`/`KGuard` now mint `view` values rather
+than null pointers; `NetInitResult::Ready` and `NetRxAcquire::None` carry the
+affine acquisition permission; release restores it; and transmit accepts an
+owner borrow. `net_rx_double_acquire_wrong` records the rejected reuse in an
+English-commented negative fixture. Erased guard/permit values add no runtime
+fields or call operands; the existing RX owner's `{index, len}` remains the
+runtime data and is passed by value to the current shared-borrow TX API.
+
+The RX audit also found a different hole which this consolidation must not
+hide: the ordinary slice returned by `net_rx_frame` can outlive the source
+owner in the checker. Releasing the owner and then reading that old slice is a
+DMA-ownership violation even though the backing global allocation still
+exists. Closing it requires an owner-derived region/lifetime relation and is
+the concrete driver for the next place/region slice, not something a linear
+acquire permit can prove.
+
+After that, the HTTP state island is the concrete existential-view driver.
+`TcpConn[conn, state]` should make source and destination phases part of each
+transition signature; the present comment suggesting SMT for checking which
+phase a transition writes is superseded by that `Delta` design. SMT remains
+relevant only to pure `Phi` goals, not as a substitute for missing protocol
+authority.
+
+The strongest storage driver is `http_server_sdcard_rtos`: its current
+`WordChan` RPC splits one logical request across several channels and casts
+pointers to `usize`. A typed request variant and ownership transfer through a
+channel slot require stable linear storage and the lock invariant which guards
+that slot. Full arbitrary-place tracking and full separation logic are not
+prerequisites; that one channel container is the acceptance boundary.
+
+Solver and prover work remains deliberately separate. `tcp_echo` has one real
+quantifier-free linear-arithmetic bounds goal and the repository's only
+executable `unsafe` block, so it is a valid future SMT driver. Z3 is deferred
+until `Phi` retains symbolic local expressions, branch assumptions, casts, and
+source-located verification conditions. A theorem prover has no current
+driver: packet-builder correctness would need a functional specification and
+memory model before a proof artifact could mean anything. The resulting order
+is consolidation, RX regions, existential TCP state, channel storage/invariant,
+then the solver goal; async TX and external proof artifacts remain demand-led.
+
 ## 7. Next outlook: stable places, channel v2 (#113), and view change
 
 Variant-carried ownership is now available for channel results and transfer
