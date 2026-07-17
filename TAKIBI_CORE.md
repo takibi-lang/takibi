@@ -840,11 +840,10 @@ Implemented scope:
   pointer;
 - the annotation strips before HM unification and has zero LLVM/ABI/DWARF
   footprint;
-- documented v1 holes, all function-local like the rest of Delta tracking:
-  `as *u8` exits tracking (raw pointers are outside every safety story;
-  `net_transmit` uses exactly this internally), callee retention of a
-  passed slice is unchecked. Aggregate laundering was an original v1 hole
-  and is closed by the storage barrier below.
+- the original v1 holes were all function-local like the rest of Delta
+  tracking: raw casts exited tracking, aggregate storage lost component
+  taint, and callee retention was unchecked. The representation and storage
+  barriers below close the first two; callee retention remains unchecked.
 
 This deliberately does not implement general region/lifetime polymorphism:
 there is no region variable a caller can name, no function signature that
@@ -1077,10 +1076,10 @@ pointer.
 This is deliberately not a general lock invariant. The accessor declaration
 is a reviewed module contract: the checker does not prove that its returned
 global is protected by the indexed lock. The stable exchange now has a
-separate same-container lock relation, but raw casts and indirect laundering
-retain the documented function-local region-v1 holes. The implemented
-boundary is specifically that an accessor-issued pointer cannot outlive the
-guard that authorized it.
+separate same-container lock relation. The subsequent rebinding, aggregate,
+and representation barriers close the known function-local laundering paths;
+callee retention remains unchecked. The implemented boundary is specifically
+that an accessor-issued pointer cannot outlive the guard that authorized it.
 
 The authority-rebinding barrier added below also applies to these pointers:
 assigning a fresh guard to the same local name cannot revive a pointer derived
@@ -1153,8 +1152,32 @@ default-safe boundary.
 `region_aggregate_launder_wrong` is the focused full-compiler negative. Unit
 tests cover tuple, variant payload, and struct literal paths for both slices
 and pointers. The barrier is checker-only and changes no runtime layout or
-ABI. Raw casts and callee retention remain the two explicit region-v1
-limitations.
+ABI. Raw casts and callee retention remained the two explicit region-v1
+limitations at this checkpoint.
+
+### Authority-preserving representation changes (implemented 2026-07-17)
+
+Casts now preserve `Delta.Region_taint` rather than serving as a lifetime
+escape hatch. This covers slice-to-pointer conversion, pointer
+reinterpretation, pointer-to-integer conversion and a later cast back, plus
+arithmetic and bitwise transformations of a tied address. `unsafe` continues
+to preserve the tie. Comparisons, dereferences, and field reads check their
+source while it is live but produce ordinary copied data rather than another
+address alias. Taking the address of an authority-derived local is rejected:
+otherwise a pointer-to-local could recover the tied value without direct-local
+taint tracking.
+
+This does not make raw pointers bounds- or alignment-safe. A cast may still
+discard those proofs; it simply cannot make an address outlive the owner or
+guard that authorizes it. The real QEMU and STM32 `net_transmit` paths remain
+accepted because their casts and address arithmetic precede the ownership
+handoff. `region_raw_cast_wrong` fixes the opposite full-compiler contract,
+and unit tests also cover pointer arithmetic, integer round trips, and
+guard-derived pointer reinterpretation. A focused unit negative covers the
+address-of laundering barrier.
+
+The change is checker-only and has no runtime representation or ABI effect.
+Callee retention is now the sole documented region-v1 limitation.
 
 ### Deferred solver and prover threshold (not an active slice)
 

@@ -11,7 +11,8 @@ views. Owner-derived region slices (the post-Slice-6 RX hole, 6.7.9 below)
 and guard-derived pointer lifetimes (the first #128 slice, 6.7.12) are
 implemented too. The authority-rebinding barrier in 6.7.14 prevents a fresh
 owner/guard under the same local name from reviving an old derived value;
-6.7.15 rejects untracked aggregate storage of authority-derived values.
+6.7.15 rejects untracked aggregate storage of authority-derived values, and
+6.7.16 preserves their lifetime ties across casts and address transformations.
 General place/storage tracking, lock invariants, general propositions, and
 solver/prover integration remain outlook. As each surface slice lands,
 SPEC.md stays
@@ -1138,8 +1139,9 @@ index (`net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..]
 @ desc` in both backends); the caller-side checker taints the bound result
 and everything derived from it (aliases, subslices) with the owner's path
 and rejects any use once the owner is possibly consumed. Return and durable
-storage of a tied slice are rejected outright; `as *u8` deliberately exits
-tracking. The taint lattice is `Takibi_core.Delta.Region_taint`, a sibling
+storage of a tied slice are rejected outright. At this initial checkpoint,
+`as *u8` deliberately exited tracking; 6.7.16 closes that escape hatch. The
+taint lattice is `Takibi_core.Delta.Region_taint`, a sibling
 of `Legacy_flow` with pointwise-union joins, and the check is lazy against
 `maybe_consumed`, so branch handling required no new merge semantics. The
 annotation strips before HM typing and has no runtime footprint. All five
@@ -1263,8 +1265,33 @@ polymorphism. Direct derived locals, aliases, and subslices remain supported;
 precise aggregate tracking stays demand-led until a real API requires it.
 `region_aggregate_launder_wrong` fixes the full-compiler tuple negative, while
 unit tests also cover variant and struct paths. The restriction erases and
-does not change aggregate layout or ABI. Raw casts and callee retention remain
-the explicit region limitations.
+does not change aggregate layout or ABI. Raw casts and callee retention
+remained the explicit region limitations at this checkpoint.
+
+#### 6.7.16 Authority-preserving representation changes (implemented 2026-07-17)
+
+Changing an authority-derived address's representation no longer discards its
+`Delta.Region_taint`. Casts preserve the tie through slice-to-pointer,
+pointer reinterpretation, and pointer-to-integer-to-pointer paths. Arithmetic
+and bitwise operations propagate any operand ties, covering pointer arithmetic
+and integer address adjustment. `unsafe` also preserves the tie rather than
+providing an escape hatch. Taking the address of an authority-derived local is
+rejected because the direct-local taint map cannot follow a value stored behind
+the resulting pointer-to-local.
+
+This is specifically an authority-lifetime guarantee, not a raw-pointer
+safety claim. Casts may still lose bounds and alignment proofs. Comparisons,
+dereferences, and field reads check the source lifetime at the operation and
+produce ordinary copied results. QEMU and STM32 `net_transmit` are the real
+positive drivers: their cast and address adjustment occur before the owner is
+handed off. `region_raw_cast_wrong` fixes the full-compiler negative contract;
+unit tests cover pointer arithmetic, integer round trips, and guard-derived
+pointer casts, plus the address-of laundering barrier. The check erases and
+changes no runtime representation or ABI.
+
+Callee retention is now the sole documented region-v1 limitation. Closing it
+requires a signature-level escape/retention contract rather than another
+function-local expression rule, so it remains a separate demand-led slice.
 
 ## 7. Next outlook
 
@@ -1282,9 +1309,10 @@ The declaring file still maintains the relationship between its runtime
 mutex field, or stable-slot container, while leaving guard-producer honesty as
 a trusted module obligation. Section 6.7.14 also prevents authority-place
 reuse from reviving a stale derived value, and 6.7.15 blocks untracked
-aggregate storage. General heap predicates and arbitrary stable places remain
-demand-led. No broader ownership slice is selected without another concrete
-example and focused negative contract.
+aggregate storage. Section 6.7.16 also retains authority ties through raw
+casts and address transformations. General heap predicates and arbitrary
+stable places remain demand-led. No broader ownership slice is selected
+without another concrete example and focused negative contract.
 
 ## 8. Prior art notes
 

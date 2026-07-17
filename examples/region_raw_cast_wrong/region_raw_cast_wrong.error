@@ -1,0 +1,1 @@
+pointer 'raw' is derived from linear value 'owned' and cannot be used after 'owned' is consumed

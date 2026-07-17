@@ -1366,11 +1366,21 @@ back to DMA.
   local bindings, not tuple components or variant cases; rejecting the store
   is sounder than silently losing the tie during destructuring or matching.
   Component-shaped aggregate region tracking remains demand-led.
-- **Documented holes (v1)**: casting to a raw pointer (`f as *u8`) exits
-  tracking (raw pointers are outside every safety story; this is how
-  `net_transmit` internally reuses the buffer). Passing a tied slice to
-  a callee while the owner is live is allowed and the callee's own
-  retention is unchecked (all tracking is function-local).
+- **Representation changes retain authority**: casts do not discard a
+  lifetime tie, including slice-to-pointer, pointer reinterpretation, and
+  pointer-to-integer conversion followed by a later cast back. Arithmetic
+  and bitwise transformations of a tied address value propagate the same
+  tie. A raw pointer may still discard bounds or alignment information; this
+  rule preserves only the authority lifetime, so `unsafe` does not become a
+  lifetime escape hatch.
+- **Indirect local storage rejected**: taking the address of an
+  authority-derived local is rejected. A pointer-to-local would otherwise
+  hide the tied value behind storage that the direct-local taint domain cannot
+  follow. Dereferencing a live tied pointer may still produce ordinary copied
+  data.
+- **Documented hole (v1)**: passing a tied slice or pointer to a callee while
+  the authority is live is allowed and the callee's own retention is
+  unchecked (all tracking is function-local).
 
 See `examples/net_rx_use_after_release_wrong` for the focused
 compile-error fixture; the real positive fixtures are the network
@@ -1402,10 +1412,10 @@ This is a caller-side lifetime contract, not a proved lock invariant. The
 declaring module is responsible for making the accessor return data actually
 protected by that lock. The current checker proves only that callers obtained
 the pointer through the annotated accessor and cannot use it after consuming
-the particular guard. Raw casts and callee retention have the same
-function-local v1 limitations as owner-derived slices. The authority-
-rebinding and aggregate-storage barriers apply identically to guard-derived
-pointers.
+the particular guard. Representation changes preserve this lifetime tie, and
+the authority-rebinding and aggregate-storage barriers apply identically to
+guard-derived pointers. Callee retention remains the same function-local v1
+limitation as for owner-derived slices.
 
 `examples/rtos_demo` is the real positive use: its private `Shared` value is
 reachable only through `shared_access(g)`. The focused

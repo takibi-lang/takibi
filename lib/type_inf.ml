@@ -4871,15 +4871,23 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       ) declared
     in
     (* Authority-derived region values (issues #106/#128). expr_taint
-       computes which owner/guard paths a slice or pointer expression is
-       derived from: a call to a region-returning function taints with the
-       path of its borrowed authority argument; Var and SliceOf propagate an
-       existing binding's taint. Every other shape -- notably Cast -- is
-       untainted, so a raw cast deliberately exits tracking. *)
+       computes which owner/guard paths a slice, pointer, or address-derived
+       scalar expression depends on. Casts never discard a lifetime tie:
+       changing representation (including pointer -> integer) is not
+       permission to outlive the authority. Arithmetic/bitwise transforms
+       propagate the tie as well, which covers pointer arithmetic and an
+       integer address before a later cast back. Comparisons, dereferences,
+       and field reads intentionally do NOT propagate: they check the source
+       while it is live and produce ordinary copied data, not another address
+       alias. *)
     let rec expr_taint taints (e : Ast.expr) = match e.desc with
       | Ast.Var n -> TaintEnv.get n taints
       | Ast.SliceOf (base, _, _) -> TaintEnv.get base taints
-      | Ast.Unsafe x -> expr_taint taints x
+      | Ast.Cast (_, x) | Ast.Bnot x | Ast.Unsafe x -> expr_taint taints x
+      | Ast.BinOp ((Ast.Add | Ast.Sub | Ast.Mul | Ast.Div | Ast.Mod
+                   | Ast.Bor | Ast.Bxor | Ast.Band | Ast.Shr | Ast.Shl),
+                   left, right) ->
+          PathSet.union (expr_taint taints left) (expr_taint taints right)
       | Ast.Call (name, args) ->
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
@@ -4906,6 +4914,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Var n -> Option.bind (StringMap.find_opt n !var_types) ast_region_kind
       | Ast.SliceOf _ -> Some RegionSlice
       | Ast.Unsafe x -> expr_region_kind x
+      | Ast.Cast (target, _) -> ast_region_kind target
       | Ast.Call (name, _) ->
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
@@ -4917,7 +4926,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let rec taint_source_name (e : Ast.expr) = match e.desc with
       | Ast.Var n -> n
       | Ast.SliceOf (base, _, _) -> base
-      | Ast.Unsafe x -> taint_source_name x
+      | Ast.Cast (_, x) | Ast.Bnot x | Ast.Unsafe x -> taint_source_name x
       | Ast.Call (name, _) -> Printf.sprintf "result of '%s'" name
       | _ -> "<value>"
     in
@@ -5025,6 +5034,25 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         in
         raise (TypeError (loc, msg))
     in
+    (* Taking the address of a tainted local would move the lifetime-bearing
+       value behind an untracked pointer-to-slot. Reject that laundering path
+       rather than tainting every dereference result: reading through a tied
+       pointer may legitimately produce ordinary copied scalar data. *)
+    let require_no_taint_address loc taints (e : Ast.expr) =
+      if not (PathSet.is_empty (expr_taint taints e)) then
+        let value_kind = Option.value
+          (Option.map region_kind_word (expr_region_kind e)) ~default:"value" in
+        let derived_kind =
+          if value_kind = "slice" then "owner-derived slice"
+          else if value_kind = "pointer" then "authority-derived pointer"
+          else "authority-derived value"
+        in
+        raise (TypeError (loc, Printf.sprintf
+          "cannot take the address of %s '%s'; indirect local region tracking \
+           is not implemented, so keep the derived value in a directly \
+           tracked local binding"
+          derived_kind (taint_source_name e)))
+    in
     let rec check_expr taints moved consume (e : Ast.expr) =
       match e.desc with
       | Ast.ViewLit (name, _) ->
@@ -5098,7 +5126,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           check_expr taints moved consume payload
       | Ast.BinOp (_, a, b) ->
           check_expr taints (check_expr taints moved false a) false b
-      | Ast.Bnot a | Ast.Deref a | Ast.AddrOf a | Ast.Cast (_, a)
+      | Ast.AddrOf a ->
+          require_no_taint_address e.loc taints a;
+          check_expr taints moved false a
+      | Ast.Bnot a | Ast.Deref a | Ast.Cast (_, a)
       | Ast.Unsafe a -> check_expr taints moved false a
       | Ast.StructLit xs ->
           require_no_taint_aggregate e.loc taints "struct value" xs;

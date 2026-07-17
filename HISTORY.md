@@ -7585,11 +7585,10 @@ Semantics, decided during design review before implementation:
   type_inf.ml).
 - **Escapes rejected; holes documented, not hidden.** Returning a tainted
   slice or storing it into a global/field/element/pointer is a compile
-  error. `as *u8` exits tracking silently (raw pointers are outside every
-  safety story; `net_transmit`'s in-driver reuse of the buffer relies on
-  exactly this). Callee retention, aggregate laundering inside one function,
-  and owner-name rebinding were recorded as function-local holes rather than
-  hidden; the latter two are closed by the 2026-07-17 barriers below.
+  error. At this initial checkpoint `as *u8` exited tracking silently.
+  Callee retention, aggregate laundering inside one function, and owner-name
+  rebinding were recorded as function-local holes rather than hidden. The
+  latter two and the cast escape are closed by later 2026-07-17 barriers.
 
 Implementation notes worth keeping: the annotation is stripped by the two
 `ret_of_ast_opt*` helpers (their only call sites are `infer_func` and the
@@ -7619,7 +7618,9 @@ deliberate `as *u8` hole as a positive, and the parameter-position
 regression guard). Full `make check` passed (116 host, compile-error, DWARF,
 and QEMU integration cases including the new negative fixture, every STM32
 cross-build, all network examples `--forbid-trap` clean with zero app-source
-changes).
+changes). The raw-cast positive records the deliberate limitation at that
+checkpoint rather than a permanent guarantee; the representation barrier
+below later replaces it with a negative contract.
 
 ## 2026-07-16: Stable Linear Owner Slots and Guarded Exchange
 
@@ -7742,9 +7743,10 @@ runtime guard and returns a plain pointer.
 
 This remains a reviewed accessor contract, not a general lock invariant. The
 checker does not prove that the returned global is protected by the indexed
-lock, and raw casts and indirect laundering retain the documented region-v1
-holes. The implemented guarantee is the concrete one the RTOS example needs:
-an accessor-issued pointer cannot outlive its authorizing guard.
+lock. Raw casts and indirect laundering retained the documented region-v1
+holes at this checkpoint; later 2026-07-17 barriers close them. The implemented
+guarantee is the concrete one the RTOS example needs: an accessor-issued
+pointer cannot outlive its authorizing guard.
 
 Validation: all 764 Alcotest cases passed. Full `make check` passed all 123
 host, compile-error, DWARF, and QEMU integration cases, including `rtos_demo`,
@@ -7819,8 +7821,35 @@ subslices remain supported.
 Unit tests cover tuple, variant, and struct paths across owner-derived slices
 and guard-derived pointers. The change is erased and leaves all aggregate
 runtime layouts and ABIs unchanged. Raw casts and callee retention remain the
-two explicit region-v1 limitations.
+two explicit region-v1 limitations at this checkpoint.
 
 Validation: all 775 Alcotest cases passed. Full `make check` passed all 126
+host, compile-error, DWARF, and QEMU integration cases, every STM32
+cross-build, and all network sources under `--forbid-trap`.
+
+## 2026-07-17: Authority-Preserving Representation Changes
+
+Closed the raw-cast lifetime escape in function-local authority-derived
+regions. Casts now preserve `Delta.Region_taint` through slice-to-pointer,
+pointer reinterpretation, and pointer-to-integer-to-pointer paths. Arithmetic
+and bitwise transformations propagate operand ties as well, so adjusting an
+address does not detach it from the owner or guard that authorizes it. Taking
+the address of an authority-derived local is rejected, preventing the tied
+value from being recovered through an untracked pointer-to-local.
+
+The rule preserves only authority lifetime. Raw casts may still discard bounds
+or alignment proofs, and comparisons, dereferences, and field reads produce
+ordinary copied values after checking their source. The existing QEMU and
+STM32 `net_transmit` implementations remain positive drivers because their
+casts and address arithmetic occur before ownership handoff.
+
+`region_raw_cast_wrong` records the full-compiler failure. Unit tests cover
+raw pointer conversion, pointer arithmetic, an integer round trip,
+guard-derived pointer reinterpretation, the address-of laundering barrier,
+and the accepted before-release path. The change is erased and leaves runtime
+representation and ABI unchanged. Callee retention is now the sole documented
+region-v1 limitation.
+
+Validation: all 780 Alcotest cases passed. Full `make check` passed all 127
 host, compile-error, DWARF, and QEMU integration cases, every STM32
 cross-build, and all network sources under `--forbid-trap`.

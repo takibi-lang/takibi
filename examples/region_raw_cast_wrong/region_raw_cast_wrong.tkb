@@ -1,0 +1,35 @@
+// This file is expected to produce a compile error.
+// Casting an owner-derived slice to a raw pointer drops bounds information,
+// but it must not drop the authority lifetime. The pointer still becomes
+// invalid when the owner is released.
+
+private linear struct RawCastOwned[desc: usize] {
+    private index: {0..<4 as usize} @ desc;
+}
+
+let mut raw_cast_bufs: [u8; 8192];
+
+fn raw_cast_make(index: {0..<4 as usize} @ desc) -> RawCastOwned[desc] {
+    let mut owned: RawCastOwned[desc] = { index };
+    return owned;
+}
+
+fn raw_cast_frame(owned: borrow RawCastOwned[desc])
+        -> [u8; 2048..] @ desc {
+    let index: {0..<4 as usize} = owned.index;
+    let offset: usize = index * 2048;
+    return raw_cast_bufs[offset..<offset + 2048];
+}
+
+fn raw_cast_release(owned: sink RawCastOwned[desc]) {}
+
+fn region_raw_cast_bad() -> i32 {
+    let index: {0..<4 as usize} = 0;
+    let owned = raw_cast_make(index);
+    let raw: *u8 = raw_cast_frame(owned) as *u8;
+    raw_cast_release(owned);
+
+    // WRONG: raw has no bounds proof, but still names storage governed by
+    // the consumed owner.
+    return raw[0] as i32;
+}

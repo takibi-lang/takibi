@@ -2040,16 +2040,86 @@ let infer_tests = [
          }"));
 
   Alcotest.test_case
-    "region slice: casting to a raw pointer deliberately exits tracking" `Quick
-    (fun () ->
-      ignore (infer (region_fixture ^
+    "region slice: casting to a raw pointer retains the authority tie" `Quick
+    (expect_type_error
+      "pointer 'p' is derived from linear value 'o' and cannot be used after 'o' is consumed"
+      (region_fixture ^
         "fn reg_ptr_hole() -> i32 {
            let idx: {0..<4 as usize} = 0;
            let o = reg_make(idx);
            let p: *u8 = reg_frame(o) as *u8;
            reg_release(o);
            return p[0] as i32;
+         }"));
+
+  Alcotest.test_case
+    "region pointer: pointer arithmetic retains the authority tie" `Quick
+    (expect_type_error
+      "pointer 'q' is derived from linear value 'o' and cannot be used after 'o' is consumed"
+      (region_fixture ^
+        "fn reg_ptr_arithmetic_bad() -> i32 {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let p: *u8 = reg_frame(o) as *u8;
+           let q: *u8 = p + 1;
+           reg_release(o);
+           return q[0] as i32;
+         }"));
+
+  Alcotest.test_case
+    "region pointer: pointer-integer-pointer roundtrip retains the tie" `Quick
+    (expect_type_error
+      "value 'raw' is derived from linear value 'o' and cannot be used after 'o' is consumed"
+      (region_fixture ^
+        "fn reg_ptr_integer_roundtrip_bad() -> i32 {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let raw: usize = (reg_frame(o) as *u8) as usize;
+           reg_release(o);
+           let p: *u8 = unsafe { raw as *u8 };
+           return p[0] as i32;
+         }"));
+
+  Alcotest.test_case
+    "authority pointer: pointer reinterpretation retains the guard tie" `Quick
+    (expect_type_error
+      "pointer 'bytes' is derived from linear value 'guard' and cannot be used after 'guard' is consumed"
+      (authority_pointer_fixture ^
+        "fn authority_pointer_cast_bad() -> i32 {
+           let guard = authority_lock(&authority_lock_word);
+           let data = authority_access(guard);
+           let bytes: *u8 = data as *u8;
+           authority_unlock(guard, &authority_lock_word);
+           return bytes[0] as i32;
+         }"));
+
+  Alcotest.test_case
+    "region pointer: cast and arithmetic before release remain accepted" `Quick
+    (fun () ->
+      ignore (infer (region_fixture ^
+        "fn reg_ptr_before_release_ok() -> i32 {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let p: *u8 = reg_frame(o) as *u8;
+           let q: *u8 = p + 1;
+           let x: u8 = q[0];
+           reg_release(o);
+           return x as i32;
          }")));
+
+  Alcotest.test_case
+    "region pointer: address-of cannot launder the authority tie" `Quick
+    (expect_type_error
+      "cannot take the address of authority-derived pointer 'p'; indirect local region tracking is not implemented"
+      (region_fixture ^
+        "fn reg_ptr_address_bad() -> i32 {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let mut p: *u8 = reg_frame(o) as *u8;
+           let pp: **u8 = &p;
+           reg_release(o);
+           return 0;
+         }"));
 
   Alcotest.test_case
     "region slice: '@' on a slice parameter stays rejected" `Quick
