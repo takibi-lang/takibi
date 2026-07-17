@@ -32,14 +32,24 @@
 // FIN (http_continue_response always returns -1, http_response_done always
 // true), matching examples/http_server.tkb / http_sdcard_server.tkb.
 //
-// BASELINE (GitHub issue #135, first slice): written WITHOUT refinement
-// types / --forbid-trap, per AGENTS.md's "prove without --forbid-trap
-// first" process. Every array access below is a plain checked index; the
-// only raw-pointer arithmetic is the same "pointer island" idiom
-// http_server.tkb / http_sdcard_server.tkb already use for request
-// scanning and response-body composition (copy_str/write_udec/bytes_copy
-// appending into an unbounded destination, manually bounded by the
-// explicit length checks around each call site).
+// --forbid-trap CLEAN (GitHub issue #135, first slice): written first
+// WITHOUT refinement types / --forbid-trap per AGENTS.md's "prove without
+// --forbid-trap first" process (a working QEMU baseline, deterministic
+// test, and manual curl session, all committed on their own), then
+// hardened in a follow-up pass -- see HISTORY.md's issue #135 entry for
+// exactly which sites --forbid-trap flagged and how each was fixed. Every
+// table-index access below now carries or re-establishes a proven
+// {0..<TABLE_SLOTS} / {0..<KEY_MAX} range at its point of use (an
+// if-narrowing guard immediately wrapping the access wherever the range
+// can't otherwise cross a function-return or mutable-variable boundary,
+// the same idiom fat12.tkb uses for its own allocator-bookkeeping
+// indices). The only remaining raw-pointer arithmetic is the same
+// "pointer island" idiom http_server.tkb / http_sdcard_server.tkb already
+// use for request scanning and response-body composition
+// (copy_str/write_udec/bytes_copy appending into an unbounded destination,
+// manually bounded by the explicit length checks around each call site) --
+// unlike the table, these have no fixed compile-time-provable capacity to
+// refine against.
 //
 // Store layout: PARALLEL FLAT ARRAYS, not an array of structs. Indexed
 // writes into an array-typed struct field (`arr[i].field[j] = v`) are a
@@ -169,12 +179,21 @@ fn kvs_put(key: borrow *u8, klen: isize, val: borrow *u8, vlen: isize) -> i32 {
         slot = existing as usize;
     }
 
-    kv_state[slot] = STATE_USED;
-    kv_key_len[slot] = klen as u8;
-    kv_val_len[slot] = vlen as u8;
-    bytes_copy((kv_keys as *u8) + (slot as isize) * KEY_MAX, key, klen);
-    bytes_copy((kv_vals as *u8) + (slot as isize) * VAL_MAX, val, vlen);
-    return result;
+    // slot is always in {0..<16} by construction (either `& 15` directly
+    // above, or kvs_find's internal `& 15`-derived result, cast back to
+    // usize through its i32 sentinel return type) -- but that proof does
+    // not cross the function-call/i32-sentinel boundary, so it is
+    // re-established here at the point of use, the same if-narrowing
+    // idiom fat12.tkb uses for its own allocator-bookkeeping indices.
+    if (slot < 16) {
+        kv_state[slot] = STATE_USED;
+        kv_key_len[slot] = klen as u8;
+        kv_val_len[slot] = vlen as u8;
+        bytes_copy((kv_keys as *u8) + (slot as isize) * KEY_MAX, key, klen);
+        bytes_copy((kv_vals as *u8) + (slot as isize) * VAL_MAX, val, vlen);
+        return result;
+    }
+    return -1;
 }
 
 fn kvs_del(key: borrow *u8, klen: isize) -> bool {
@@ -182,23 +201,30 @@ fn kvs_del(key: borrow *u8, klen: isize) -> bool {
     if (slot < 0) {
         return false;
     }
-    kv_state[slot as usize] = STATE_TOMBSTONE;
-    return true;
+    let s: usize = slot as usize;
+    if (s < 16) {
+        kv_state[s] = STATE_TOMBSTONE;
+        return true;
+    }
+    return false;
 }
 
 fn kvs_build_list_body() -> isize {
     let mut len: isize = 0;
-    let mut slot: u32 = 0;
-    while (slot < 16) {
-        let s: usize = slot as usize;
-        if (kv_state[s] == STATE_USED) {
-            let klen: isize = kv_key_len[s] as isize;
+    // `for slot: usize in 0..<16` (unlike an equivalent `while`-loop
+    // counter) gives slot the proven range {0..<16} directly, so
+    // kv_state[slot]/kv_key_len[slot] below need no separate narrowing.
+    for slot: usize in 0..<16 {
+        if (kv_state[slot] == STATE_USED) {
+            let klen: isize = kv_key_len[slot] as isize;
             bytes_copy(list_body + len, (kv_keys as *u8) + (slot as isize) * KEY_MAX, klen);
             len = len + klen;
-            list_body[len as usize] = '\n' as u8;
+            if (len >= 0 && len < 560) {
+                let n: isize = len;
+                list_body[n as usize] = '\n' as u8;
+            }
             len = len + 1;
         }
-        slot = slot + 1;
     }
     return len;
 }
@@ -270,13 +296,32 @@ fn kvs_parse_path(p: borrow *u8, avail: isize) -> i32 {
     let mut i: isize = 6;
     let mut klen: isize = 0;
     while (i < avail && p[i] != ' ' as u8) {
-        if (klen >= KEY_MAX) {
+        // Compared against the literal 32, not the named KEY_MAX global:
+        // a refined-type narrowing must be spelled as a literal integer
+        // (same restriction array sizes have -- see
+        // examples/const_global/const_global.tkb's comment), a named
+        // global's value does not carry a provable range at its use site
+        // even when its own initializer is a literal.
+        if (klen >= 32) {
             return -2;
         }
         if (kvs_key_char_ok(p[i]) == false) {
             return -2;
         }
-        key_buf[klen as usize] = p[i];
+        // If-narrowing only carries the proven range into the TRUE branch
+        // of the condition it guards (see kvs_put's own if-narrowing
+        // comment) -- an early return in the false branch above does not
+        // retroactively narrow klen for the code that follows, so the
+        // write is wrapped in its own (redundant at runtime, but
+        // prover-visible) guard. The cast to usize happens BEFORE the
+        // check, and the check narrows that exact usize variable -- codegen
+        // only consults if-narrowing for the precise variable named in the
+        // condition, so checking the pre-cast isize value doesn't carry
+        // over to a variable produced by casting it afterward.
+        let n_idx: usize = klen as usize;
+        if (n_idx < 32) {
+            key_buf[n_idx] = p[i];
+        }
         klen = klen + 1;
         i = i + 1;
     }
@@ -412,9 +457,13 @@ fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
             if (slot < 0) {
                 return kvs_build_response(eth, ihl, 404, "not found\n", 10);
             }
-            let vlen: isize = kv_val_len[slot as usize] as isize;
-            return kvs_build_response(eth, ihl, 200,
-                (kv_vals as *u8) + (slot as isize) * VAL_MAX, vlen);
+            let s: usize = slot as usize;
+            if (s < 16) {
+                let vlen: isize = kv_val_len[s] as isize;
+                return kvs_build_response(eth, ihl, 200,
+                    (kv_vals as *u8) + (slot as isize) * VAL_MAX, vlen);
+            }
+            return kvs_build_response(eth, ihl, 404, "not found\n", 10);
         }
         KvsMethod::Put => {
             if (hdr_end < 4) {

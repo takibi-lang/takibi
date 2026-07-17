@@ -377,14 +377,7 @@ NET_OBJS   := examples/net_echo/net_echo.o examples/arp_reply/arp_reply.o
 CHECKSUM_OBJS := examples/inet_checksum/inet_checksum.o examples/ip_parse/ip_parse.o \
                  examples/tcp_parse/tcp_parse.o
 APP_OBJS   := examples/icmp_echo/icmp_echo.o examples/tcp_echo/tcp_echo.o \
-              examples/http_server/http_server.o
-# GitHub issue #135 first slice: kvs_server.tkb is new .tkb code, so per
-# AGENTS.md's "prove without --forbid-trap first" process it gets its own
-# object group without the flag until the QEMU baseline (this working
-# example + its deterministic test + a manual curl session) is proven, at
-# which point this group is deleted and kvs_server.o moves into APP_OBJS
-# above -- see HISTORY.md for that follow-up commit once it lands.
-KVS_OBJS   := examples/kvs_server/kvs_server.o
+              examples/http_server/http_server.o examples/kvs_server/kvs_server.o
 # rtc needs one extra common file and echo needs GIC plus the UART IRQ stub,
 # so neither fits STANDARD_OBJS. timer.tkb turned out to need
 # the same rtc.tkb HAL as rtc itself (not gic.tkb/timer.tkb -- it just polls
@@ -394,7 +387,7 @@ RTC_OBJS   := examples/rtc/rtc.o examples/timer/timer.o
 GETC_OBJS  := examples/echo/echo.o
 FATFS_OBJS := examples/fatfs/fatfs.o
 SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS) $(RTOS_OBJS) $(NET_OBJS) $(CHECKSUM_OBJS) $(APP_OBJS) \
-                $(RTC_OBJS) $(GETC_OBJS) $(FATFS_OBJS) $(KVS_OBJS)
+                $(RTC_OBJS) $(GETC_OBJS) $(FATFS_OBJS)
 STANDARD_OBJS := $(filter-out $(SPECIAL_OBJS), $(EXAMPLE_OBJS))
 
 $(STANDARD_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
@@ -470,16 +463,15 @@ $(CHECKSUM_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(
 $(FATFS_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
-# icmp_echo.tkb/tcp_echo.tkb/http_server.tkb each `use` inet_checksum.tkb
-# and netutil.tkb themselves now; virtio_mmio.tkb `use`s gic.tkb itself
-# (see NET_OBJS above).
+# icmp_echo.tkb/tcp_echo.tkb/http_server.tkb/kvs_server.tkb each `use`
+# inet_checksum.tkb and netutil.tkb themselves now; virtio_mmio.tkb `use`s
+# gic.tkb itself (see NET_OBJS above). kvs_server.tkb (GitHub issue #135)
+# joined this group, --forbid-trap included from the start, once its QEMU
+# baseline (working example + deterministic test + a manual curl session,
+# all without the flag) was proven -- see HISTORY.md's issue #135 entry for
+# what --forbid-trap flagged and how it was fixed.
 $(APP_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_HTTP_SERVER) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
-
-# kvs_server.tkb: same common-file set as APP_OBJS, but deliberately no
-# --forbid-trap yet -- see KVS_OBJS's own comment above.
-$(KVS_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_HTTP_SERVER) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $< --target $(AARCH64_TARGET) -o $@
 
 # -- example.o + startup.o -> kernel.elf ---------------------------------------
 # For examples/%/kernel.elf, % matches "name" (no slash).

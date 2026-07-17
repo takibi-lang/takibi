@@ -8134,3 +8134,77 @@ timestamped trace profiler. Blocking paths such as `cond_wait` and
 `net_rx_wait` are expected to dominate when the request is waiting for the
 other RTOS task, the network, or the SD card. That is the intended tradeoff
 for this first issue #130 goal.
+
+## 2026-07-17: KVS Example --forbid-trap Hardening (Issue #135)
+
+Follow-up to the `examples/kvs_server` QEMU baseline committed earlier the
+same day ("KVS example, phase 1"): that commit deliberately built the
+example without refinement types or `--forbid-trap`, per this repo's "prove
+new `.tkb` code without `--forbid-trap` first" process. This entry covers
+turning the flag on and fixing exactly what it flagged, with `kvs_server.o`
+moving from its own temporary `KVS_OBJS` Makefile group into `APP_OBJS`
+(the same group `icmp_echo`/`tcp_echo`/`http_server` already build under
+the flag) as part of the same change.
+
+`--forbid-trap` flagged 9 runtime trap sites, all "array bounds check
+remains: index type usize cannot prove range {0..<N}" on the fixed-size
+table's arrays (`kv_state`/`kv_key_len`/`kv_val_len`/`key_buf`/
+`list_body`). Two distinct causes:
+
+- **Sentinel-return boundary loses the proof.** `kvs_find`/`kvs_put`'s
+  internal probe loops compute a slot via `(hash & 15) as usize`, which the
+  compiler proves is in `{0..<16}` directly (this specific in-line
+  computation was never flagged). But once that value crosses a function
+  boundary as a plain `i32` sentinel (`-1` for "not found"/"table full"),
+  the range does not survive the round trip back through `as usize` at the
+  call site -- fixed by re-guarding each such index at its point of use
+  with an explicit `if (slot < 16) { ...index... }`, the same if-narrowing
+  idiom `examples/common/fat12.tkb` already uses for its own
+  allocator-bookkeeping indices (`fat12.tkb:172`/`186`'s `if (off < 511)`).
+- **`while`-loop counters get no automatic range; `for i: T in lo..<hi`
+  counters do.** `kvs_build_list_body` originally used
+  `let mut slot: u32 = 0; while (slot < 16) { ...; slot = slot + 1; }`;
+  switching it to `for slot: usize in 0..<16 { ... }` gave the loop
+  variable a proven `{0..<16}` range directly, matching this project's
+  existing `for`-loop convention (`examples/for/for.tkb`), and needed no
+  further per-access narrowing.
+
+Two narrower lessons surfaced while fixing individual sites, both now
+documented inline in `kvs_server.tkb`:
+
+- If-narrowing only carries the proven range into the TRUE branch of the
+  condition that established it -- an early `return` in the FALSE branch
+  does not retroactively narrow the variable for the code that follows a
+  guard clause, unlike the intuitive "guard clause, then fall through with
+  the positive fact" idiom common in flow-sensitive languages. Each fix
+  wraps the actual array access inside its own `if`, even where a guard
+  clause immediately above already established the same fact via an early
+  return.
+- The `isize -> usize` cast must happen BEFORE the narrowing check, not
+  after: the compiler only tracks the range of the exact variable named in
+  the `if` condition, so checking a pre-cast `isize` value does not
+  transfer to a separately cast `usize` variable produced afterward
+  (`let n_idx: usize = klen as usize; if (n_idx < 32) { key_buf[n_idx] =
+  ...; }`, not `if (klen < 32) { key_buf[klen as usize] = ...; }`).
+- Comparing against the named `KEY_MAX` global (rather than the literal
+  `32`) also failed to narrow -- consistent with this project's existing
+  rule that refined-type bounds must be spelled as literal integers (the
+  same restriction array sizes have, per
+  `examples/const_global/const_global.tkb`'s comment): a named global's
+  value does not carry a provable range at its use site even when its own
+  initializer is a literal.
+
+No sites were "fixed" by converting a checked array access to a raw
+pointer -- every fix is an if-narrowing guard or a `for`-loop range, per
+this repo's rule against routing around `--forbid-trap` that way. The
+request-parsing/response-composition raw-pointer arithmetic already present
+in the baseline (`req` scanning, `copy_str`/`write_udec`/`bytes_copy`
+appends) was untouched: those have no fixed compile-time-provable capacity
+to refine against, unlike the table's arrays.
+
+Verification: `make check` (langcheck, unit tests, STM32 cross-build, and
+the full `make qemutest` suite -- 129/129, including `kvs_server`'s
+deterministic test and every pre-existing network example) passes
+unchanged after the move. The baseline-to-hardened diff is committed
+separately from the baseline itself, so the diff is the concrete evidence
+of what this milestone's `--forbid-trap` pass actually caught.
