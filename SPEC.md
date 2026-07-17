@@ -1360,13 +1360,17 @@ back to DMA.
   mistake the fresh authority for the consumed authority and revive the old
   derived value. Reassigning a mutable derived binding to an unrelated value
   clears the tie; leaving its scope also ends the restriction.
+- **Aggregate storage rejected**: an authority-derived slice or pointer
+  cannot be placed in a tuple, variant payload, or struct literal, including
+  through nested aggregate literals. The current taint domain tracks direct
+  local bindings, not tuple components or variant cases; rejecting the store
+  is sounder than silently losing the tie during destructuring or matching.
+  Component-shaped aggregate region tracking remains demand-led.
 - **Documented holes (v1)**: casting to a raw pointer (`f as *u8`) exits
   tracking (raw pointers are outside every safety story; this is how
   `net_transmit` internally reuses the buffer). Passing a tied slice to
   a callee while the owner is live is allowed and the callee's own
-  retention is unchecked (all tracking is function-local). Laundering
-  through a tuple or variant payload within one function is likewise
-  untracked.
+  retention is unchecked (all tracking is function-local).
 
 See `examples/net_rx_use_after_release_wrong` for the focused
 compile-error fixture; the real positive fixtures are the network
@@ -1398,9 +1402,9 @@ This is a caller-side lifetime contract, not a proved lock invariant. The
 declaring module is responsible for making the accessor return data actually
 protected by that lock. The current checker proves only that callers obtained
 the pointer through the annotated accessor and cannot use it after consuming
-the particular guard. Raw casts, callee retention, and tuple/variant
-laundering have the same function-local v1 limitations as owner-derived
-slices. The authority-rebinding barrier applies identically to guard-derived
+the particular guard. Raw casts and callee retention have the same
+function-local v1 limitations as owner-derived slices. The authority-
+rebinding and aggregate-storage barriers apply identically to guard-derived
 pointers.
 
 `examples/rtos_demo` is the real positive use: its private `Shared` value is

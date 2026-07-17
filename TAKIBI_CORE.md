@@ -843,8 +843,8 @@ Implemented scope:
 - documented v1 holes, all function-local like the rest of Delta tracking:
   `as *u8` exits tracking (raw pointers are outside every safety story;
   `net_transmit` uses exactly this internally), callee retention of a
-  passed slice is unchecked, tuple/variant laundering within one function
-  is untracked.
+  passed slice is unchecked. Aggregate laundering was an original v1 hole
+  and is closed by the storage barrier below.
 
 This deliberately does not implement general region/lifetime polymorphism:
 there is no region variable a caller can name, no function signature that
@@ -1131,9 +1131,30 @@ existing network and RTOS examples are the positive drivers;
 both slice and guard-derived pointer forms. The check is erased and adds no
 runtime state or ABI change.
 
-Raw casts, callee retention, and tuple/variant laundering remain the explicit
-function-local region limitations. Closing any of them requires a separate
-acceptance boundary rather than weakening this rebinding check.
+Raw casts, callee retention, and aggregate laundering were the remaining
+explicit function-local limitations at this checkpoint. The next increment
+closes aggregate laundering without weakening this rebinding check.
+
+### Authority-derived aggregate storage barrier (implemented 2026-07-17)
+
+An authority-derived slice or pointer can no longer be stored in a tuple,
+variant payload, or struct literal. The checker recursively inspects nested
+aggregate literals and reports the original directly tracked local. This
+closes the function-local path where destructuring, matching, or field access
+could recover an untainted alias after its owner/guard was consumed.
+
+This increment deliberately rejects the aggregate construction rather than
+adding tuple-component and variant-case shapes to `Delta.Region_taint`. No
+current API needs a lifetime-bearing aggregate, while direct locals, aliases,
+and subslices already cover the real network and RTOS examples. A future real
+driver may justify precise aggregate region tracking without changing this
+default-safe boundary.
+
+`region_aggregate_launder_wrong` is the focused full-compiler negative. Unit
+tests cover tuple, variant payload, and struct literal paths for both slices
+and pointers. The barrier is checker-only and changes no runtime layout or
+ABI. Raw casts and callee retention remain the two explicit region-v1
+limitations.
 
 ### Deferred solver and prover threshold (not an active slice)
 

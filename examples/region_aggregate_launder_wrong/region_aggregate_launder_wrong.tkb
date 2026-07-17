@@ -1,0 +1,37 @@
+// This file is expected to produce a compile error.
+// A tuple has runtime storage but the current function-local region tracker
+// has no per-component lifetime shape. Storing a tied slice in it must be
+// rejected rather than silently losing the owner relation on destructuring.
+
+private linear struct AggregateOwned[desc: usize] {
+    private index: {0..<4 as usize} @ desc;
+}
+
+let mut aggregate_bufs: [u8; 8192];
+
+fn aggregate_make(index: {0..<4 as usize} @ desc) -> AggregateOwned[desc] {
+    let mut owned: AggregateOwned[desc] = { index };
+    return owned;
+}
+
+fn aggregate_frame(owned: borrow AggregateOwned[desc])
+        -> [u8; 2048..] @ desc {
+    let index: {0..<4 as usize} = owned.index;
+    let offset: usize = index * 2048;
+    return aggregate_bufs[offset..<offset + 2048];
+}
+
+fn aggregate_release(owned: sink AggregateOwned[desc]) {}
+
+fn region_aggregate_launder_bad() {
+    let index: {0..<4 as usize} = 0;
+    let owned = aggregate_make(index);
+    let frame = aggregate_frame(owned);
+
+    // WRONG: destructuring this after release would recover an untracked
+    // alias to memory already returned to its external owner.
+    let pair: ([]u8, i32) = (frame, 1);
+    aggregate_release(owned);
+    let (again, marker) = pair;
+    let byte: u8 = again[0];
+}

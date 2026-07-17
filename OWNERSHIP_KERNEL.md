@@ -10,9 +10,11 @@ function-pointer effect contracts, and integer-indexed universally transformed
 views. Owner-derived region slices (the post-Slice-6 RX hole, 6.7.9 below)
 and guard-derived pointer lifetimes (the first #128 slice, 6.7.12) are
 implemented too. The authority-rebinding barrier in 6.7.14 prevents a fresh
-owner/guard under the same local name from reviving an old derived value.
+owner/guard under the same local name from reviving an old derived value;
+6.7.15 rejects untracked aggregate storage of authority-derived values.
 General place/storage tracking, lock invariants, general propositions, and
-solver/prover integration remain outlook. As each surface slice lands, SPEC.md stays
+solver/prover integration remain outlook. As each surface slice lands,
+SPEC.md stays
 authoritative for the language that actually exists.
 
 Sections 4 through 6 preserve the decision path that led here. Statements in
@@ -1144,9 +1146,9 @@ annotation strips before HM typing and has no runtime footprint. All five
 network examples compile unchanged -- their hand-maintained use-then-release
 ordering is now compiler-enforced. Deliberately NOT implemented: region
 variables/polymorphism, tied slices crossing function boundaries (callee
-retention stays unchecked, function-local honesty), and tuple/variant
-laundering within a function. The original name-rebinding limitation is now
-closed by 6.7.14. See TAKIBI_CORE.md's implemented-slice entry,
+retention stays unchecked, function-local honesty). The original name-
+rebinding and aggregate-laundering limitations are now closed by 6.7.14 and
+6.7.15. See TAKIBI_CORE.md's implemented-slice entry,
 SPEC.md's "Authority-Derived Region Returns" section, and HISTORY.md's dated
 entry for details.
 
@@ -1245,7 +1247,24 @@ single-assignment variables.
 unit tests cover owner-derived slices, guard-derived pointers, explicit taint
 clearing, and scope exit. This is a checker-only strengthening with no ABI or
 runtime representation. Raw casts, callee retention, and tuple/variant
-laundering remain separate, explicit limitations.
+laundering were separate, explicit limitations at this checkpoint.
+
+#### 6.7.15 Authority-derived aggregate storage barrier (implemented 2026-07-17)
+
+The name-keyed region domain has no honest representation for a tainted tuple
+component, variant case payload, or struct field. Those aggregates previously
+lost the tie when destructured, matched, or projected inside the same
+function. The checker now recursively inspects aggregate literals and rejects
+storing any authority-derived slice or pointer in a tuple, variant payload,
+or struct value.
+
+This is a conservative storage boundary, not component-shaped region
+polymorphism. Direct derived locals, aliases, and subslices remain supported;
+precise aggregate tracking stays demand-led until a real API requires it.
+`region_aggregate_launder_wrong` fixes the full-compiler tuple negative, while
+unit tests also cover variant and struct paths. The restriction erases and
+does not change aggregate layout or ABI. Raw casts and callee retention remain
+the explicit region limitations.
 
 ## 7. Next outlook
 
@@ -1262,9 +1281,10 @@ The declaring file still maintains the relationship between its runtime
 `full` flag and the variant tag. Section 6.7.13 now rejects a mismatched guard,
 mutex field, or stable-slot container, while leaving guard-producer honesty as
 a trusted module obligation. Section 6.7.14 also prevents authority-place
-reuse from reviving a stale derived value. General heap predicates and
-arbitrary stable places remain demand-led. No broader ownership slice is
-selected without another concrete example and focused negative contract.
+reuse from reviving a stale derived value, and 6.7.15 blocks untracked
+aggregate storage. General heap predicates and arbitrary stable places remain
+demand-led. No broader ownership slice is selected without another concrete
+example and focused negative contract.
 
 ## 8. Prior art notes
 

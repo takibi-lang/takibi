@@ -7587,10 +7587,9 @@ Semantics, decided during design review before implementation:
   slice or storing it into a global/field/element/pointer is a compile
   error. `as *u8` exits tracking silently (raw pointers are outside every
   safety story; `net_transmit`'s in-driver reuse of the buffer relies on
-  exactly this). Callee retention of a passed slice, tuple/variant
-  laundering inside one function, and owner-name rebinding were recorded as
-  function-local holes rather than hidden; the rebinding hole is closed by
-  the 2026-07-17 barrier below.
+  exactly this). Callee retention, aggregate laundering inside one function,
+  and owner-name rebinding were recorded as function-local holes rather than
+  hidden; the latter two are closed by the 2026-07-17 barriers below.
 
 Implementation notes worth keeping: the annotation is stripped by the two
 `ret_of_ast_opt*` helpers (their only call sites are `infer_func` and the
@@ -7794,10 +7793,34 @@ dependent lifetime has actually ended. The check is entirely erased.
 
 `region_authority_rebind_wrong` records the full-compiler failure. Unit tests
 cover the owner-derived slice and guard-derived pointer holes plus the two
-allowed lifetime endings. Raw casts, callee retention, and tuple/variant
-laundering remain explicit region limitations rather than being hidden by
-this narrow fix.
+allowed lifetime endings. Raw casts, callee retention, and aggregate
+laundering remained explicit region limitations at this checkpoint rather
+than being hidden by this narrow fix.
 
 Validation: all 772 Alcotest cases passed. Full `make check` passed all 125
+host, compile-error, DWARF, and QEMU integration cases, every STM32
+cross-build, and all network sources under `--forbid-trap`.
+
+## 2026-07-17: Authority-Derived Aggregate Storage Barrier
+
+Closed the next documented function-local region hole. A tied slice or
+pointer could previously be stored in a tuple or variant payload and later
+recovered without taint through destructuring or matching; a local struct
+literal provided the same untracked aggregate path.
+
+The checker now recursively inspects tuple, variant, and struct literals and
+rejects aggregate storage of an authority-derived value, naming the original
+direct local in the diagnostic. This is intentionally a conservative ban:
+`Delta.Region_taint` remains a direct-local map rather than gaining unused
+tuple-component and variant-case shape machinery. Direct aliases and
+subslices remain supported.
+
+`region_aggregate_launder_wrong` records the full-compiler tuple failure.
+Unit tests cover tuple, variant, and struct paths across owner-derived slices
+and guard-derived pointers. The change is erased and leaves all aggregate
+runtime layouts and ABIs unchanged. Raw casts and callee retention remain the
+two explicit region-v1 limitations.
+
+Validation: all 775 Alcotest cases passed. Full `make check` passed all 126
 host, compile-error, DWARF, and QEMU integration cases, every STM32
 cross-build, and all network sources under `--forbid-trap`.

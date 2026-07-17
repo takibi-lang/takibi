@@ -4921,6 +4921,42 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Call (name, _) -> Printf.sprintf "result of '%s'" name
       | _ -> "<value>"
     in
+    (* Region taint is deliberately keyed by directly tracked local names;
+       it has no component/case shape for runtime aggregates. Silently
+       accepting a tied slice/pointer inside a tuple, variant payload, or
+       struct literal would therefore lose the tie on extraction. Until a
+       real API requires aggregate region polymorphism, reject that storage
+       rather than pretending the lifetime survived. Search nested aggregate
+       literals too so wrapping a tuple in a struct (or vice versa) cannot
+       bypass the boundary. *)
+    let rec first_tainted_aggregate_value taints (e : Ast.expr) =
+      if not (PathSet.is_empty (expr_taint taints e)) then Some e
+      else match e.desc with
+        | Ast.TupleLit xs | Ast.StructLit xs ->
+            List.find_map (first_tainted_aggregate_value taints) xs
+        | Ast.VariantCtor (_, _, payload) ->
+            first_tainted_aggregate_value taints payload
+        | Ast.Unsafe x -> first_tainted_aggregate_value taints x
+        | _ -> None
+    in
+    let require_no_taint_aggregate loc taints aggregate values =
+      match List.find_map (first_tainted_aggregate_value taints) values with
+      | None -> ()
+      | Some source ->
+          let value_kind = Option.value
+            (Option.map region_kind_word (expr_region_kind source))
+            ~default:"value" in
+          let derived_kind =
+            if value_kind = "slice" then "owner-derived slice"
+            else if value_kind = "pointer" then "authority-derived pointer"
+            else "authority-derived value"
+          in
+          raise (TypeError (loc, Printf.sprintf
+            "%s '%s' cannot be stored in a %s; aggregate region tracking \
+             is not implemented, so keep the derived value in a directly \
+             tracked local binding"
+            derived_kind (taint_source_name source) aggregate))
+    in
     (* Lazy kill: a tainted name is rejected at USE time once any of its
        owner paths may have been consumed. Checking against maybe_consumed
        (union at branch joins) gives the same conservative "possibly
@@ -5053,6 +5089,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               name));
           moved
       | Ast.VariantCtor (vtype, _, payload) ->
+          require_no_taint_aggregate e.loc taints "variant payload" [payload];
           if Hashtbl.find_opt variant_kinds vtype = Some Ast.KindLinear
              && not consume then
             raise (TypeError (e.loc, Printf.sprintf
@@ -5064,8 +5101,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Bnot a | Ast.Deref a | Ast.AddrOf a | Ast.Cast (_, a)
       | Ast.Unsafe a -> check_expr taints moved false a
       | Ast.StructLit xs ->
+          require_no_taint_aggregate e.loc taints "struct value" xs;
           List.fold_left (fun m x -> check_expr taints m false x) moved xs
       | Ast.TupleLit xs ->
+          require_no_taint_aggregate e.loc taints "tuple" xs;
           (* A tracked component moves into the tuple exactly when the
              tuple itself is being consumed (bound/passed/returned); a
              discarded literal consumes nothing, so obligations never

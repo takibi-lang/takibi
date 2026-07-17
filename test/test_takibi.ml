@@ -1953,6 +1953,54 @@ let infer_tests = [
          }"));
 
   Alcotest.test_case
+    "region slice: a tied slice cannot be laundered through a tuple" `Quick
+    (expect_type_error
+      "owner-derived slice 'f' cannot be stored in a tuple"
+      (region_fixture ^
+        "fn reg_tuple_launder_bad() {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let f = reg_frame(o);
+           let pair: ([]u8, i32) = (f, 1);
+           reg_release(o);
+           let (again, n) = pair;
+           let x: u8 = again[0];
+         }"));
+
+  Alcotest.test_case
+    "authority pointer: a tied pointer cannot be laundered through a variant"
+    `Quick
+    (expect_type_error
+      "authority-derived pointer 'data' cannot be stored in a variant payload"
+      (authority_pointer_fixture ^
+        "variant AuthorityPointerBox { Empty; Data(*AuthorityData); }
+         fn authority_variant_launder_bad() {
+           let guard = authority_lock(&authority_lock_word);
+           let data = authority_access(guard);
+           let boxed: AuthorityPointerBox = AuthorityPointerBox::Data(data);
+           authority_unlock(guard, &authority_lock_word);
+           match boxed {
+             AuthorityPointerBox::Empty => {}
+             AuthorityPointerBox::Data(again) => { again.value = 1; }
+           }
+         }"));
+
+  Alcotest.test_case
+    "region slice: a tied slice cannot be laundered through a struct literal"
+    `Quick
+    (expect_type_error
+      "owner-derived slice 'f' cannot be stored in a struct value"
+      (region_fixture ^
+        "struct RegionHolder { frame: []u8; }
+         fn reg_struct_launder_bad() {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let f = reg_frame(o);
+           let mut holder: RegionHolder = { f };
+           reg_release(o);
+         }"));
+
+  Alcotest.test_case
     "region slice: the annotation must name a borrow owner's static index" `Quick
     (expect_type_error
       "does not name a static index of any borrow or borrow mut indexed-owner parameter"
