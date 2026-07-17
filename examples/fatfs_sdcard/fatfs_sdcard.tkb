@@ -33,8 +33,21 @@
 // process for new .tkb work (see CLAUDE.md's "Development Process"
 // section), then hardened together in one pass once the fatfs+SD-card
 // milestone worked end to end on real hardware -- not piecemeal.
+//
+// Overwrite verification (GitHub issue #135's Part A prerequisite): the
+// original version of this file only ever created HELLO.TXT once.
+// fat_open(FA_WRITE | FA_CREATE_ALWAYS) now overwrites an existing
+// same-name file in place (frees its old cluster chain, reuses its
+// directory slot -- see fat12.tkb's fat_open comment) instead of only
+// ever appending a fresh directory slot. app_main() below re-creates
+// HELLO.TXT OVERWRITE_ROUNDS times, more than ROOT_ENTRY_COUNT (16) --
+// under the old always-append behavior this loop would start failing
+// (FatOpenResult::Error, root directory full) partway through; it does
+// not fail with the fix, and the final read-back proves the LATEST
+// write's content is what comes back, not a stale earlier one.
 
 use "examples/common_stm32/fat12_sdmmc.tkb";
+use "examples/common/netutil.tkb";
 
 fn app_main() {
     let mut init_ok: bool = false;
@@ -79,6 +92,40 @@ fn app_main() {
             }
             FatOpenResult::Error(err) => {
                 uart_puts("read-back HELLO.TXT: FAIL\r\n");
+            }
+        }
+
+        let OVERWRITE_ROUNDS: i32 = 20;
+        let mut round: i32 = 0;
+        let mut overwrite_ok: bool = true;
+        while (round < OVERWRITE_ROUNDS) {
+            let mut content: [u8; 32];
+            let mut len: isize = 0;
+            len = len + copy_str(content + len, "overwrite round #");
+            len = len + write_udec(content + len, round);
+            len = len + copy_str(content + len, "\r\n");
+            if (create_demo_file(hello_name, content) != 0) {
+                overwrite_ok = false;
+            }
+            round = round + 1;
+        }
+        if (overwrite_ok) {
+            uart_puts("overwrite HELLO.TXT x20: OK\r\n");
+        } else {
+            uart_puts("overwrite HELLO.TXT x20: FAIL\r\n");
+        }
+
+        match fat_open(hello_name, FA_READ) {
+            FatOpenResult::Opened(mut final_fp) => {
+                let mut final_buf: [u8; 32];
+                let mut final_br: u32 = 0;
+                fat_read(final_fp, final_buf, 32, &final_br);
+                fat_close(final_fp);
+                uart_puts("read-back after overwrite: ");
+                uart_print_bytes(final_buf, final_br);
+            }
+            FatOpenResult::Error(err) => {
+                uart_puts("read-back after overwrite: FAIL\r\n");
             }
         }
     }

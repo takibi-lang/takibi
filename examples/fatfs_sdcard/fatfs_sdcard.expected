@@ -3,4 +3,6 @@ disk_status: OK
 format: OK
 create HELLO.TXT: OK
 read-back HELLO.TXT: Hello from a real SD card!
+overwrite HELLO.TXT x20: OK
+read-back after overwrite: overwrite round #19
 done

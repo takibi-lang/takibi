@@ -16,10 +16,16 @@
 // Public API: fat_format() (mkfs-equivalent) plus a FatFs-flavored
 // (https://elm-chan.org/fsw/ff/) file-handle API -- fat_open/fat_read/
 // fat_write/fat_close (fat_ prefix instead of FatFs's f_, matching this
-// project's own naming). Scoped to exactly what the next milestone
-// (an http_server_sdcard example serving files from an SD card) needs:
-// one flat root directory, no subdirectories, no seek/rename/unlink, no
-// multiple simultaneously-open files. A later, separate, not-yet-scoped
+// project's own naming). Originally scoped to exactly what the
+// http_server_sdcard example (serving files from an SD card) needed: one
+// flat root directory, no subdirectories, no seek/rename/unlink, no
+// multiple simultaneously-open files. GitHub issue #135 (a key-value store
+// persisting to the same file on every write) added one more real,
+// present need on top of that: fat_open(FA_WRITE | FA_CREATE_ALWAYS) now
+// overwrites an existing same-name file in place (fat_free_chain +
+// fat_init_dir_entry, see fat_open's own comment) instead of only ever
+// appending a fresh directory slot -- still no general rename/unlink, only
+// this one create-or-truncate path. A later, separate, not-yet-scoped
 // milestone (a Forth REPL over a web UI with free file/directory
 // read-write) may need more; build that when it's an actual requirement,
 // not now.
@@ -259,23 +265,64 @@ fn fat_format() {
 }
 
 // Allocates num_clusters clusters as one chain, terminated with the FAT12
-// EOC marker. Returns the first cluster number, or 0 if the disk is full.
+// EOC marker. Returns the first cluster number, or 0 if not enough free
+// clusters remain. Scans the FAT for entries equal to 0 (free) rather than
+// bumping a monotonic next_free_cluster counter forever -- this is what
+// lets fat_free_chain's freed clusters actually get reused, needed once
+// fat_open(FA_CREATE_ALWAYS) started overwriting existing files in place
+// (see that function's own comment). Every call site in this codebase
+// passes num_clusters == 1, so the scan never needs to roll back a
+// partially-built chain on running out of free clusters mid-loop; a future
+// caller needing an atomic multi-cluster allocation would need that added
+// here first.
 fn fat_alloc_chain(num_clusters: u32) -> u32 {
     let data_clusters: u32 = (TOTAL_SECTORS - first_data_sector()) as u32;
-    if (next_free_cluster - 2 + num_clusters > data_clusters) {
+    let mut first: u32 = 0;
+    let mut prev: u32 = 0;
+    let mut found: u32 = 0;
+    let mut c: u32 = 2;
+    while (c < 2 + data_clusters && found < num_clusters) {
+        if (fat_get_entry(c) == 0) {
+            if (first == 0) {
+                first = c;
+            } else {
+                fat_set_entry(prev, c as u16);
+            }
+            prev = c;
+            found = found + 1;
+        }
+        c = c + 1;
+    }
+    if (found < num_clusters) {
         return 0;
     }
-    let first: u32 = next_free_cluster;
-    for i: u32 in 0..<num_clusters {
-        let cluster: u32 = next_free_cluster;
-        if (i == num_clusters - 1) {
-            fat_set_entry(cluster, 0x0FFF);
-        } else {
-            fat_set_entry(cluster, (cluster + 1) as u16);
-        }
-        next_free_cluster = next_free_cluster + 1;
-    }
+    fat_set_entry(prev, 0x0FFF);
     return first;
+}
+
+// Frees every cluster in a chain (sets each FAT entry back to 0) so
+// fat_alloc_chain can reuse them. start_cluster == 0 (a file that was
+// created but never written) is a no-op. Used by fat_open(FA_CREATE_ALWAYS)
+// when overwriting an existing file.
+fn fat_free_chain(start_cluster: u32) {
+    let mut cluster: u32 = start_cluster;
+    while (cluster >= 2 && cluster < 0x0FF0) {
+        let next: u32 = fat_get_entry(cluster) as u32;
+        fat_set_entry(cluster, 0);
+        cluster = next;
+    }
+}
+
+// Checks whether sector 0 ends in the standard boot-sector signature
+// (0x55, 0xAA) that fat_format() writes last -- a lightweight way for a
+// caller to tell "this card was already formatted by this code" apart from
+// a blank/foreign card, without parsing the rest of the BPB. Not a general
+// "is this a valid FAT filesystem" check (see this file's header comment
+// on why dynamic BPB parsing/mounting a foreign image stays out of scope).
+fn fat_is_formatted() -> bool {
+    let mut sector_buf: [u8; SECTOR_SIZE] align(32);
+    mem_block_read(0, sector_buf);
+    return sector_buf[510] == 0x55 && sector_buf[511] == 0xAA;
 }
 
 // -- File-handle API (fat_open/fat_read/fat_write/fat_close), FatFs-flavored ---
@@ -409,14 +456,47 @@ fn fat_read_at(name83: *u8, off: u32, buf: borrow *u8, btr: u32,
     return -1;
 }
 
+// Resets directory slot idx to a fresh, empty entry for name83. Shared by
+// both fat_open(FA_CREATE_ALWAYS) paths below (a brand new name, and an
+// existing name being overwritten) so the field list is written once.
+fn fat_init_dir_entry(idx: {0..<16 as usize}, name83: *u8) {
+    bytes_copy(root_dir_buf[idx].name, name83, 11);
+    root_dir_buf[idx].attr = 0x20; // ARCHIVE
+    root_dir_buf[idx].nt_reserved = 0;
+    root_dir_buf[idx].create_time_tenth = 0;
+    root_dir_buf[idx].create_time = 0;
+    root_dir_buf[idx].create_date = 0x21; // 1980-01-01 placeholder (no RTC in this demo)
+    root_dir_buf[idx].last_access_date = 0;
+    root_dir_buf[idx].first_cluster_hi = 0;
+    root_dir_buf[idx].write_time = 0;
+    root_dir_buf[idx].write_date = 0x21;
+    root_dir_buf[idx].first_cluster_lo = 0; // filled in by fat_close once known
+    root_dir_buf[idx].file_size = 0;
+}
+
 // mode is FA_READ, or (FA_WRITE | FA_CREATE_ALWAYS) -- no other combination
 // is supported (no FA_OPEN_ALWAYS/FA_OPEN_APPEND -- always create-and-
 // truncate for writing, matching what this demo's two call sites need).
-// FA_CREATE_ALWAYS always appends a fresh root_dir_buf slot -- it does not
-// check for (and overwrite) an existing entry of the same name, the same
-// limitation the old fat_create_file had (no rename/delete in scope).
+// FA_CREATE_ALWAYS overwrites an existing same-name entry in place (frees
+// its old cluster chain via fat_free_chain and reuses its directory slot)
+// rather than appending a fresh root_dir_buf slot every time -- needed once
+// a caller (the KVS example, GitHub issue #135) started re-creating the
+// same file on every write; the old "always append" behavior exhausted the
+// 16-entry root directory in 16 writes and never freed a single cluster.
+// Still no general rename/unlink -- only fat_open(FA_CREATE_ALWAYS) itself
+// triggers this reuse, and only for its own exact filename match.
 fn fat_open(name83: *u8, mode: i32) -> FatOpenResult {
     if ((mode & FA_CREATE_ALWAYS) != 0) {
+        let existing: i32 = fat_find_entry(name83);
+        // Two-sided narrow (literal 16), same reasoning as the FA_READ
+        // branch below: fat_find_entry's own proof doesn't cross the
+        // function-call boundary through its unrefined `-> i32` return.
+        if ((existing >= 0) && (existing < 16)) {
+            let idx: {0..<16 as usize} = max(min(existing, 15), 0) as usize;
+            fat_free_chain(root_dir_buf[idx].first_cluster_lo as u32);
+            fat_init_dir_entry(idx, name83);
+            return FatOpenResult::Opened(fat_file_opened(idx, 0, 0, true));
+        }
         // If-narrowing must wrap the actual use, not a negated early-return
         // guard (SPEC.md "If-condition narrowing") -- and compared against
         // a literal (16), not `ROOT_ENTRY_COUNT as u32` (a named global's
@@ -427,18 +507,7 @@ fn fat_open(name83: *u8, mode: i32) -> FatOpenResult {
         if (next_free_root_entry < 16) {
             let idx: {0..<16 as usize} =
                 min(next_free_root_entry, 15) as usize;
-            bytes_copy(root_dir_buf[idx].name, name83, 11);
-            root_dir_buf[idx].attr = 0x20; // ARCHIVE
-            root_dir_buf[idx].nt_reserved = 0;
-            root_dir_buf[idx].create_time_tenth = 0;
-            root_dir_buf[idx].create_time = 0;
-            root_dir_buf[idx].create_date = 0x21; // 1980-01-01 placeholder (no RTC in this demo)
-            root_dir_buf[idx].last_access_date = 0;
-            root_dir_buf[idx].first_cluster_hi = 0;
-            root_dir_buf[idx].write_time = 0;
-            root_dir_buf[idx].write_date = 0x21;
-            root_dir_buf[idx].first_cluster_lo = 0; // filled in by fat_close once known
-            root_dir_buf[idx].file_size = 0;
+            fat_init_dir_entry(idx, name83);
             next_free_root_entry = next_free_root_entry + 1;
 
             return FatOpenResult::Opened(fat_file_opened(idx, 0, 0, true));
