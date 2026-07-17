@@ -870,11 +870,18 @@ examples/http_server_sdcard_rtos/kernel_stm32_ram.prof.elf: $(COMMON_STM32_START
 # server. RAM-only (no debug/prof/Flash variants) -- see
 # kvs_server_sdcard_rtos.tkb's own header comment for the design.
 #
-# --forbid-trap: OFF for now -- proved on real hardware first per
-# AGENTS.md's Development Process section, then turned on in one pass once
-# proven (see HISTORY.md's issue #135 entry once that lands).
+# --forbid-trap: ON. Proved working on real hardware first (including the
+# persistence-survives-a-reset check) per AGENTS.md's Development Process
+# section, committed as that baseline ("KVS server with SD card on RTOS"),
+# then this flag turned on in a follow-up pass -- the copied Phase-1 store/
+# parsing logic was already --forbid-trap clean, and the new RTOS/SD code
+# (for-loop-bounded table clearing, plain fat_write/fat_read calls with
+# literal sizes, the RPC channel mirroring http_server_sdcard_rtos.tkb's
+# already-hardened SdRequestChan) needed no fixes either -- this is the
+# rare case where the whole milestone was already trap-clean the moment
+# the flag was flipped. See HISTORY.md's issue #135 entry.
 examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.o: examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 examples/kvs_server_sdcard_rtos/kernel_stm32_ram.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.o $(COMMON_STM32_LINK_RAM_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.o -o $@

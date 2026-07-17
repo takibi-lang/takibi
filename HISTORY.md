@@ -8208,3 +8208,137 @@ deterministic test and every pre-existing network example) passes
 unchanged after the move. The baseline-to-hardened diff is committed
 separately from the baseline itself, so the diff is the concrete evidence
 of what this milestone's `--forbid-trap` pass actually caught.
+
+## 2026-07-17: KVS STM32 Milestone -- FatFs Overwrite Support, RTOS+SD Port,
+## Content-Length Off-By-One Fix
+
+Three pieces landed together as GitHub issue #135's second milestone (real
+Ethernet + SD-card persistence through FAT12 + RTOS task separation), each
+worth recording separately.
+
+**Part A -- `examples/common/fat12.tkb` create-or-truncate support.** The
+KVS write-through persistence design (save the whole table to one file on
+every PUT/DELETE) needed `fat_open(FA_WRITE | FA_CREATE_ALWAYS)` to
+overwrite an existing same-name file in place. It previously always
+appended a fresh root_dir_buf slot and never freed a cluster chain (its
+own comment said so explicitly: "no rename/delete in scope") -- with only
+16 root directory entries and no cluster reuse, a write-through KVS would
+have exhausted the volume in about 16 writes. Fixed by: (1) changing
+`fat_alloc_chain` from a monotonic `next_free_cluster` bump to a scan for
+FAT entries equal to 0 (both real call sites always request 1 cluster, so
+no partial-chain rollback case exists yet); (2) a new `fat_free_chain`
+that walks a chain via `fat_get_entry` and zeros each entry; (3)
+`fat_open`'s `FA_CREATE_ALWAYS` path now calls `fat_find_entry` first --
+if the name already exists, its old chain is freed and its directory slot
+reused via a new shared `fat_init_dir_entry` helper, instead of appending;
+otherwise the original append path runs unchanged. All three changes
+compiled `--forbid-trap` clean immediately (no separate harden pass
+needed). Verified on real hardware via `examples/fatfs_sdcard/
+fatfs_sdcard.tkb`, extended to overwrite `HELLO.TXT` 20 times (more than
+the 16-entry root directory could tolerate under the old behavior) and
+read back the latest write -- `make hwcheck`'s `fatfs_sdcard (stm32/ram)`
+case passed on real hardware (after fixing a CRLF-vs-LF mismatch in the
+first draft of the updated `.expected` file -- the file's line endings
+must match the firmware's actual `\r\n` UART output byte-for-byte, not
+just visually).
+
+**Part B -- `examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos.tkb`
+(new example).** STM32 port of `examples/kvs_server/kvs_server.tkb`,
+which is left untouched (same pattern as `fatfs_sdcard.tkb` never
+touching `fatfs.tkb`). RTOS task split mirrors `examples/
+http_server_sdcard_rtos/http_server_sdcard_rtos.tkb` exactly: task 0
+(`app_main`) runs the HTTP/TCP poll loop, task 1 (`sd_worker`) is the only
+code that touches `fat12.tkb`/`sdmmc.tkb`. Unlike that file's
+`SdRequestChan` (which threads a name/offset/length/dst payload across a
+file boundary), `sd_worker` and `http_start_response` live in the same
+file here, so the RPC (`KvsSdRequest::{Init, Save}`) carries no payload at
+all -- the five table arrays are ordinary globals `sd_worker`'s own
+functions see directly by name, safe because the network task is
+synchronously blocked in the rendezvous the whole time a Load/Save runs.
+The whole table (2608 bytes) is one file, written/read as five plain
+sequential `fat_write`/`fat_read` calls -- no manual sector packing and no
+magic/checksum header needed, since `fat_write`/`fat_read` already track
+`fptr`/`cur_cluster` across calls on the same handle, and the file's mere
+existence is "was anything ever saved" (Part A's overwrite support is
+what makes calling this after every PUT/DELETE safe rather than
+directory-exhausting). RAM stays canonical -- GET/LIST never touch the SD
+task; PUT/DELETE call a write-through `kvs_sd_save_rpc()` before
+answering, deliberately not async, so the SD-write cost stays visible to
+future profiling rather than hidden behind a lazy/buffered design. Write
+failures are logged to UART but not surfaced to the HTTP client (the RAM
+update already succeeded), matching `fat12_sdmmc.tkb`'s own documented
+scope decision.
+
+One implementation pitfall worth recording: `let X: *u8 = "literal";` as a
+plain top-level GLOBAL (not a local inside a function) fails to compile
+with `Fatal error: exception Takibi.Llvm_gen.Error("global initializer:
+unsupported constant expression")`, with no file/line attribution --
+`eval_const`'s global-constant folder has no case for `StringLit` against
+a pointer type, only `IntLit`. Every existing example that assigns a
+string literal to a `*u8` (`examples/fatfs_sdcard/fatfs_sdcard.tkb`'s
+`hello_name`, etc.) does so as a local inside a function, where ordinary
+(non-const-folded) codegen handles it -- moving the literal (or a locally
+redeclared copy of it) into each of the two call sites that needed it
+fixed this immediately.
+
+**--forbid-trap**: turned on for `kvs_server_sdcard_rtos.tkb` once proven
+working end to end on real hardware, including the persistence-survives-
+a-reset check (two back-to-back `ram_load_and_run` boots with no
+reprovisioning in between -- QEMU's own `scripts/kvs_test.py` has no
+analog for this, since a fresh QEMU process keeps no state across a
+restart at all). This turned out to need zero fixes: the copied Phase-1
+logic was already clean, and the new RTOS/SD code's only array accesses
+are either `for`-loop-bounded (`kvs_reset_table`) or plain `fat_write`/
+`fat_read` calls with literal sizes.
+
+**Content-Length off-by-one bug (both `kvs_server.tkb` and
+`kvs_server_sdcard_rtos.tkb`).** `kvs_content_length` skipped 17 bytes
+past a matched `"Content-Length: "` prefix to reach the digits, but that
+prefix is 16 bytes, not 17. For a single-digit value (e.g. `Content-
+Length: 3`), skipping one byte too many lands on the following `\r`, so
+`kvs_parse_udec` sees no digits and returns -1 (parse failure) instead of
+the real value -- which silently disabled the Content-Length-vs-actual-
+body-length mismatch check entirely, letting a request whose body arrived
+in a later TCP segment be stored as an empty/truncated value with no
+error. For multi-digit values (the only case the existing QEMU test
+covered, `content_length=100`) the same off-by-one instead produces a
+different-but-still-numeric wrong value that usually still triggers the
+mismatch check by chance, which is exactly why this shipped undetected
+through `kvs_server.tkb`'s own baseline+hardening pass and QEMU test.
+Found via real-hardware testing: Python's `http.client` reliably sends a
+PUT's headers and body as two separate `send()` calls (confirmed
+deterministic, not a timing fluke, via `conn.set_debuglevel(1)`), and this
+firmware does not reassemble a request across TCP segments (a documented,
+deliberate Phase-1 scope decision) -- the header-only first segment has a
+real single-digit Content-Length and zero body bytes, exactly the case
+the bug silently mishandled. Fixed by changing both `+17`/`-17` offsets to
+`+16`/`-16` in both files.
+
+This bug's discovery reopened a real design question: after the fix,
+every `http.client`-based PUT reliably gets a 400 (the mismatch is now
+correctly detected), not silent corruption -- but that also means any
+HTTP client library that splits header/body writes this way cannot
+successfully PUT to this server at all today. This is `kvs_server.tkb`'s
+already-documented Phase-1 scope limitation (no cross-segment body
+reassembly), now confirmed to bite a mainstream client library rather
+than only a contrived edge case, and left as a known limitation rather
+than extended -- reassembly would need a change to the shared
+`http_server_common.tkb` core (relaxing its per-segment method sniff),
+affecting every example built on it, which is out of scope for this
+milestone. `scripts/eth_kvs_server_stm32_test.py` and the new
+`scripts/kvs_stress.py` load generator (see below) both work around it by
+using raw sockets with one `sendall()` per request (headers+body
+combined), matching how `curl` avoids the same issue.
+
+**`scripts/kvs_stress.py`** (new): a thread-pool-based concurrent load
+generator, written in anticipation of eventual RTOS-based multi-connection
+support rather than against today's server alone -- `examples/common/
+http_server_common.tkb` accepts exactly one TCP connection at a time
+today, so `--concurrency > 1` mostly measures connection-level contention
+(reported separately from per-operation latency in the tool's output),
+not achieved parallelism, until that support exists. The same tool
+becomes a real concurrent-throughput benchmark with no changes needed
+once it does. A live run against real hardware showed PUT/DELETE (write-
+through SD save) at roughly 90ms p50 latency versus GET/LIST (RAM-only)
+at roughly 1ms p50 -- the first empirical measurement of write-through
+persistence's cost on this hardware.

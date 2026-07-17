@@ -60,16 +60,18 @@
 // not to thread a real disk_read/disk_write failure up through its
 // callers.
 //
-// BASELINE (no --forbid-trap yet): the copied Phase-1 store/parsing logic
-// keeps its existing refined types (stripping them out would be wasted
-// motion -- nothing new is being learned about that code). Only the
-// genuinely new code in this file (KvsSdRequest/KvsSdRequestChan,
-// sd_worker, kvs_sd_load/kvs_sd_save/kvs_reset_table, the RPC wrappers,
-// the two persist call-site insertions, and app_main) is unrefined for
-// now, per AGENTS.md's "prove without --forbid-trap first" process. Turned
-// on once this whole milestone is proven working end to end on real
-// hardware, including the persistence-survives-a-reset check -- see
-// HISTORY.md's issue #135 entry once that lands.
+// --forbid-trap CLEAN: proved working end to end on real hardware first,
+// including the persistence-survives-a-reset check, per AGENTS.md's
+// "prove without --forbid-trap first" process, and committed as that
+// baseline. The copied Phase-1 store/parsing logic already carried its
+// refined types; the new RTOS/SD code in this file (KvsSdRequest/
+// KvsSdRequestChan, sd_worker, kvs_sd_load/kvs_sd_save/kvs_reset_table,
+// the RPC wrappers, the two persist call-site insertions, and app_main)
+// turned out to need no fixes when the flag was turned on -- every array
+// access here is either a for-loop with a provable literal range
+// (kvs_reset_table) or a plain fat_write/fat_read call with a literal
+// size, and the RPC channel mirrors http_server_sdcard_rtos.tkb's already-
+// hardened SdRequestChan shape. See HISTORY.md's issue #135 entry.
 
 use "examples/common/inet_checksum.tkb";
 use "examples/common/netutil.tkb";
