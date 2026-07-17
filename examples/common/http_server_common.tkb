@@ -83,6 +83,26 @@ fn tcp_remote_matches(ip: borrow [u8; 20..], src_port: u16) -> bool {
            src_port == conn_remote_port;
 }
 
+// First 3 bytes of the request payload, matched against the verb prefixes
+// this core hands off to the including example: "GET", "PUT", or "DEL"
+// (the common prefix of "DELETE" -- both are 3 bytes, so one 3-byte sniff
+// covers all three verbs without a variable-length compare). Any other
+// payload (including a real GET/PUT/DELETE typo, or a body-only segment of
+// a request already handled by an earlier segment) is not this core's
+// concern -- see the http_start_response contract note above and
+// http_kvs_server.tkb-style includers, which recognize the exact verb again
+// from `req` themselves to build the right response.
+inline fn http_method_accepted(b0: u8, b1: u8, b2: u8) -> bool {
+    if (b0 == 'G' as u8 && b1 == 'E' as u8 && b2 == 'T' as u8) {
+        return true;
+    } else if (b0 == 'P' as u8 && b1 == 'U' as u8 && b2 == 'T' as u8) {
+        return true;
+    } else if (b0 == 'D' as u8 && b1 == 'E' as u8 && b2 == 'L' as u8) {
+        return true;
+    }
+    return false;
+}
+
 // Connection-phase transitions (issue #117): every conn_state change is
 // performed by a coupling function in http_conn_state.tkb that CALLS the
 // obliged segment builder itself and then writes the phase, side by side
@@ -377,9 +397,7 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_b
                                                                 data_off as usize;
                                                             if (data_len >= 3 && seq == conn_rcv_nxt) {
                                                                 let data3 = frame[data_off_idx..<data_off_idx + 3];
-                                                                if (data3[0] == 'G' as u8 &&
-                                                                    data3[1] == 'E' as u8 &&
-                                                                    data3[2] == 'T' as u8) {
+                                                                if (http_method_accepted(data3[0], data3[1], data3[2])) {
                                                                     conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
                                                                     let req: *u8 =
                                                                         (frame as *u8) + (data_off_idx as isize);
@@ -405,8 +423,8 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_b
                                                                         }
                                                                     }
                                                                 } else {
-                                                                    // Request is not GET (no other verb is
-                                                                    // supported).
+                                                                    // Verb not accepted (see
+                                                                    // http_method_accepted).
                                                                     tcp_event_ignored(pending, conn);
                                                                 }
                                                             } else {

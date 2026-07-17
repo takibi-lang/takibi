@@ -972,6 +972,7 @@ run_virtio_test "arp_reply"  examples/arp_reply/kernel.elf  arp_test.py
 run_virtio_test "icmp_echo"  examples/icmp_echo/kernel.elf  icmp_echo_test.py
 run_virtio_test "tcp_echo"   examples/tcp_echo/kernel.elf   tcp_echo_test.py
 run_virtio_test "http_server" examples/http_server/kernel.elf http_server_test.py
+run_virtio_test "kvs_server" examples/kvs_server/kernel.elf kvs_test.py
 run_fatfs_test "fatfs" examples/fatfs/kernel.elf examples/fatfs/fatfs.expected fatfs_mtools_test.py
 
 echo ""

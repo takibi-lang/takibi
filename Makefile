@@ -99,7 +99,7 @@ LINUX_BINS             := $(foreach e,$(LINUX_EXAMPLES),examples/$(e)/$(e).exe)
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
 # Convention: examples/<name>/<name>.tkb -> examples/<name>/kernel.elf
-EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct struct_refined msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof_offsetof slice foreach int64 net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server fatfs affine_escape_via_index align_ptr_proof klock_guard percpu chan_rendezvous rtos_demo linear_obligation tuple_pair field_lease indexed_view tcp_conn_view
+EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct struct_refined msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof_offsetof slice foreach int64 net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server fatfs affine_escape_via_index align_ptr_proof klock_guard percpu chan_rendezvous rtos_demo linear_obligation tuple_pair field_lease indexed_view tcp_conn_view kvs_server
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
@@ -180,7 +180,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck hwcheck-net perfcheck langcheck check allcheck clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos
+.PHONY: build test qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck hwcheck-net perfcheck langcheck check allcheck clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos
 
 .DEFAULT_GOAL := build
 
@@ -378,6 +378,13 @@ CHECKSUM_OBJS := examples/inet_checksum/inet_checksum.o examples/ip_parse/ip_par
                  examples/tcp_parse/tcp_parse.o
 APP_OBJS   := examples/icmp_echo/icmp_echo.o examples/tcp_echo/tcp_echo.o \
               examples/http_server/http_server.o
+# GitHub issue #135 first slice: kvs_server.tkb is new .tkb code, so per
+# AGENTS.md's "prove without --forbid-trap first" process it gets its own
+# object group without the flag until the QEMU baseline (this working
+# example + its deterministic test + a manual curl session) is proven, at
+# which point this group is deleted and kvs_server.o moves into APP_OBJS
+# above -- see HISTORY.md for that follow-up commit once it lands.
+KVS_OBJS   := examples/kvs_server/kvs_server.o
 # rtc needs one extra common file and echo needs GIC plus the UART IRQ stub,
 # so neither fits STANDARD_OBJS. timer.tkb turned out to need
 # the same rtc.tkb HAL as rtc itself (not gic.tkb/timer.tkb -- it just polls
@@ -387,7 +394,7 @@ RTC_OBJS   := examples/rtc/rtc.o examples/timer/timer.o
 GETC_OBJS  := examples/echo/echo.o
 FATFS_OBJS := examples/fatfs/fatfs.o
 SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS) $(RTOS_OBJS) $(NET_OBJS) $(CHECKSUM_OBJS) $(APP_OBJS) \
-                $(RTC_OBJS) $(GETC_OBJS) $(FATFS_OBJS)
+                $(RTC_OBJS) $(GETC_OBJS) $(FATFS_OBJS) $(KVS_OBJS)
 STANDARD_OBJS := $(filter-out $(SPECIAL_OBJS), $(EXAMPLE_OBJS))
 
 $(STANDARD_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
@@ -468,6 +475,11 @@ $(FATFS_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COM
 # (see NET_OBJS above).
 $(APP_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_HTTP_SERVER) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
+
+# kvs_server.tkb: same common-file set as APP_OBJS, but deliberately no
+# --forbid-trap yet -- see KVS_OBJS's own comment above.
+$(KVS_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_HTTP_SERVER) $(TAKIBI)
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $< --target $(AARCH64_TARGET) -o $@
 
 # -- example.o + startup.o -> kernel.elf ---------------------------------------
 # For examples/%/kernel.elf, % matches "name" (no slash).
@@ -990,6 +1002,24 @@ HTTP_SERVER_QEMU_FLAGS := -machine virt -cpu cortex-a53 -display none \
 qemu-http-server: examples/http_server/kernel.elf
 	@echo "Open http://localhost:$(HTTP_HOST_PORT)/ in your browser (Ctrl-C to quit)"
 	$(QEMU) $(HTTP_SERVER_QEMU_FLAGS) $(HTTP_SERVER_FLAGS) -kernel $<
+
+## qemu-kvs: run the key-value store (GitHub issue #135) and exercise it
+## with curl from the host (Ctrl-C to quit -- see qemu-http-server's
+## comment above for why this doesn't need Ctrl-A X). Example:
+##   make qemu-kvs
+##   curl -si -X PUT --data-binary hello http://localhost:18081/keys/foo
+##   curl -s  http://localhost:18081/keys/foo
+##   curl -si -X DELETE http://localhost:18081/keys/foo
+##   curl -s  http://localhost:18081/keys
+## If port 18081 is taken, override it: make qemu-kvs KVS_HOST_PORT=18082
+KVS_HOST_PORT ?= 18081
+KVS_FLAGS := -global virtio-mmio.force-legacy=on \
+    -netdev user,id=net0,hostfwd=tcp::$(KVS_HOST_PORT)-:80 \
+    -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56,csum=off,guest_csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ufo=off,guest_uso4=off,guest_uso6=off,mrg_rxbuf=off,ctrl_vq=off,mq=off,indirect_desc=off,event_idx=off
+
+qemu-kvs: examples/kvs_server/kernel.elf
+	@echo "KVS listening on http://localhost:$(KVS_HOST_PORT)/keys (Ctrl-C to quit)"
+	$(QEMU) $(HTTP_SERVER_QEMU_FLAGS) $(KVS_FLAGS) -kernel $<
 
 # Same STM32_SERIAL_DEV convention as scripts/run_hwtest_ram.sh
 # (overridable the same way: STM32_SERIAL_DEV=/dev/ttyACM1 make ...). This

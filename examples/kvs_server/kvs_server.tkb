@@ -1,0 +1,503 @@
+// Bare-metal network key-value store (GitHub issue #135).
+//
+// A fixed-size, statically allocated hash table (no heap) exposed over
+// plain HTTP on port 80, reusing the same ARP/IPv4/TCP core as
+// examples/http_server. Protocol:
+//   PUT    /keys/<key>   body = value  -> 201 (new) / 200 (overwrite) /
+//                                          507 (table full) / 400 (bad key,
+//                                          value too large, or a
+//                                          Content-Length that disagrees
+//                                          with the actual body size)
+//   GET    /keys/<key>                 -> 200 + value / 404
+//   DELETE /keys/<key>                 -> 200 / 404
+//   GET    /keys                       -> 200 + key names, one per line
+//   PUT/DELETE /keys                   -> 405
+//   any other path                     -> 404
+//   any other verb (e.g. POST)         -> not recognized by
+//                                          http_server_common.tkb's method
+//                                          sniff; the segment is ignored,
+//                                          same as an unsupported verb was
+//                                          before this example existed --
+//                                          the client's request simply
+//                                          times out. See that file's
+//                                          http_method_accepted for the
+//                                          full rationale.
+//
+// A request's body is never reassembled across TCP segments: the value is
+// always exactly "whatever arrived after \r\n\r\n in this one segment". A
+// Content-Length header, if present, is used only to DETECT a body that
+// arrived split across segments (a real risk for `curl -T bigfile`) and
+// reject it with 400 rather than silently storing a truncated value -- see
+// kvs_content_length. Every response is single-segment, closed with our own
+// FIN (http_continue_response always returns -1, http_response_done always
+// true), matching examples/http_server.tkb / http_sdcard_server.tkb.
+//
+// BASELINE (GitHub issue #135, first slice): written WITHOUT refinement
+// types / --forbid-trap, per AGENTS.md's "prove without --forbid-trap
+// first" process. Every array access below is a plain checked index; the
+// only raw-pointer arithmetic is the same "pointer island" idiom
+// http_server.tkb / http_sdcard_server.tkb already use for request
+// scanning and response-body composition (copy_str/write_udec/bytes_copy
+// appending into an unbounded destination, manually bounded by the
+// explicit length checks around each call site).
+//
+// Store layout: PARALLEL FLAT ARRAYS, not an array of structs. Indexed
+// writes into an array-typed struct field (`arr[i].field[j] = v`) are a
+// parser error (see SPEC.md's Structs section) -- the only workaround
+// would be a raw-pointer detour, which the baseline process forbids as a
+// bounds-check dodge. Flat arrays keep every store access a checked index.
+//
+// Collision handling: djb2 hash (examples/djb2 precedent) + linear probing
+// + tombstone deletion. Backward-shift deletion was considered and
+// rejected: it needs wraparound "distance from home" comparisons, which
+// are both more code and much harder to carry through --forbid-trap's
+// proof obligations later. A tombstone is a third slot state; lookup
+// probes through tombstones and stops at the first truly empty slot;
+// insertion reuses the earliest tombstone seen during its probe. All
+// probe loops are bounded at TABLE_SLOTS iterations regardless of
+// collisions, so tombstone buildup costs probe-loop iterations, never
+// correctness or termination.
+
+use "examples/common/inet_checksum.tkb";
+use "examples/common/netutil.tkb";
+use "examples/common/http_server_common.tkb";
+
+let mut our_mac: [u8; 6];
+let mut our_ip:  [u8; 4];
+
+// -- Store constants and layout -------------------------------------------
+
+let KEY_MAX:     isize = 32;  // key charset: [A-Za-z0-9_-], length 1..32
+let VAL_MAX:     isize = 128; // value: arbitrary bytes, length 0..128
+let TABLE_SLOTS: isize = 16;
+
+// kv_state[slot]: 0 = empty, 1 = used, 2 = tombstone. All five arrays are
+// BSS-zeroed at boot, so the table starts out entirely empty with no
+// explicit init needed.
+let mut kv_state:   [u8; 16];
+let mut kv_key_len: [u8; 16];
+let mut kv_val_len: [u8; 16];
+let mut kv_keys:    [u8; 16 * 32];   // slot i's key lives at [i*32 ..< i*32+key_len]
+let mut kv_vals:    [u8; 16 * 128];  // slot i's value lives at [i*128 ..< i*128+val_len]
+
+let STATE_EMPTY:    u8 = 0;
+let STATE_USED:     u8 = 1;
+let STATE_TOMBSTONE: u8 = 2;
+
+// -- Request-parsing scratch ------------------------------------------------
+
+// Holds the most recently parsed key (see kvs_parse_path). Owned here, not
+// by http_server_common.tkb -- same "response generation belongs to the
+// including example" split http_server.tkb/http_sdcard_server.tkb use for
+// html_body.
+let mut key_buf: [u8; 32];
+
+// Worst-case LIST body: TABLE_SLOTS * (KEY_MAX + 1 for the trailing '\n')
+// = 16 * 33 = 528 bytes. 560 leaves a small margin without materially
+// changing the (well under HTTP_SEGMENT_PAYLOAD_MAX=1400) total response
+// size budget.
+let mut list_body: [u8; 560];
+
+// -- djb2 hash + linear probing --------------------------------------------
+
+fn kvs_hash(key: borrow *u8, klen: isize) -> u32 {
+    let mut h: u32 = 5381;
+    for i in 0..<klen {
+        h = ((h << 5) + h) ^ (key[i] as u32);
+    }
+    return h;
+}
+
+// Returns the slot index of an exact (state==used, same key) entry, or -1
+// if not present. Probes at most TABLE_SLOTS slots; stops at the first
+// EMPTY slot (a tombstone does NOT end the probe chain -- the entry it
+// displaced may still be further along the same chain).
+fn kvs_find(key: borrow *u8, klen: isize) -> i32 {
+    let home: u32 = kvs_hash(key, klen) & 15;
+    let mut probe: u32 = 0;
+    while (probe < 16) {
+        let slot: usize = ((home + probe) & 15) as usize;
+        if (kv_state[slot] == STATE_EMPTY) {
+            return -1;
+        }
+        if (kv_state[slot] == STATE_USED &&
+            kv_key_len[slot] as isize == klen &&
+            bytes_eq((kv_keys as *u8) + (slot as isize) * KEY_MAX, key, klen) != 0) {
+            return slot as i32;
+        }
+        probe = probe + 1;
+    }
+    return -1;
+}
+
+// Returns 0 = inserted into a previously empty/tombstone slot, 1 =
+// overwrote an existing entry with the same key, -1 = table full (no
+// empty/tombstone slot found within TABLE_SLOTS probes, and no existing
+// entry matched).
+fn kvs_put(key: borrow *u8, klen: isize, val: borrow *u8, vlen: isize) -> i32 {
+    let existing: i32 = kvs_find(key, klen);
+    let mut slot: usize = 0;
+    let mut result: i32 = 1;
+
+    if (existing < 0) {
+        let home: u32 = kvs_hash(key, klen) & 15;
+        let mut probe: u32 = 0;
+        let mut found: i32 = -1;
+        let mut tomb: i32 = -1;
+        while (probe < 16 && found < 0) {
+            let s: usize = ((home + probe) & 15) as usize;
+            if (kv_state[s] == STATE_EMPTY) {
+                if (tomb >= 0) {
+                    found = tomb;
+                } else {
+                    found = s as i32;
+                }
+            } else if (kv_state[s] == STATE_TOMBSTONE && tomb < 0) {
+                tomb = s as i32;
+            }
+            probe = probe + 1;
+        }
+        if (found < 0) {
+            found = tomb;
+        }
+        if (found < 0) {
+            return -1;
+        }
+        slot = found as usize;
+        result = 0;
+    } else {
+        slot = existing as usize;
+    }
+
+    kv_state[slot] = STATE_USED;
+    kv_key_len[slot] = klen as u8;
+    kv_val_len[slot] = vlen as u8;
+    bytes_copy((kv_keys as *u8) + (slot as isize) * KEY_MAX, key, klen);
+    bytes_copy((kv_vals as *u8) + (slot as isize) * VAL_MAX, val, vlen);
+    return result;
+}
+
+fn kvs_del(key: borrow *u8, klen: isize) -> bool {
+    let slot: i32 = kvs_find(key, klen);
+    if (slot < 0) {
+        return false;
+    }
+    kv_state[slot as usize] = STATE_TOMBSTONE;
+    return true;
+}
+
+fn kvs_build_list_body() -> isize {
+    let mut len: isize = 0;
+    let mut slot: u32 = 0;
+    while (slot < 16) {
+        let s: usize = slot as usize;
+        if (kv_state[s] == STATE_USED) {
+            let klen: isize = kv_key_len[s] as isize;
+            bytes_copy(list_body + len, (kv_keys as *u8) + (slot as isize) * KEY_MAX, klen);
+            len = len + klen;
+            list_body[len as usize] = '\n' as u8;
+            len = len + 1;
+        }
+        slot = slot + 1;
+    }
+    return len;
+}
+
+// -- HTTP request parsing ---------------------------------------------------
+
+enum KvsMethod: u8 {
+    Get;
+    Put;
+    Delete;
+    Other;
+}
+
+// The core's http_method_accepted already sniffed the first 3 bytes as
+// GET/PUT/DEL before calling http_start_response, but that sniff doesn't
+// verify the space delimiter or (for DELETE) the remaining 4 bytes -- this
+// re-checks the full verb token independently, since it also needs to
+// know exactly where the verb ends (path_start below).
+fn kvs_classify_method(req: borrow *u8, len: isize) -> KvsMethod {
+    if (len >= 4 && req[0] == 'G' as u8 && req[1] == 'E' as u8 &&
+        req[2] == 'T' as u8 && req[3] == ' ' as u8) {
+        return KvsMethod::Get;
+    }
+    if (len >= 4 && req[0] == 'P' as u8 && req[1] == 'U' as u8 &&
+        req[2] == 'T' as u8 && req[3] == ' ' as u8) {
+        return KvsMethod::Put;
+    }
+    if (len >= 7 && req[0] == 'D' as u8 && req[1] == 'E' as u8 &&
+        req[2] == 'L' as u8 && req[3] == 'E' as u8 && req[4] == 'T' as u8 &&
+        req[5] == 'E' as u8 && req[6] == ' ' as u8) {
+        return KvsMethod::Delete;
+    }
+    return KvsMethod::Other;
+}
+
+fn kvs_key_char_ok(c: u8) -> bool {
+    return (c >= 'A' as u8 && c <= 'Z' as u8) ||
+           (c >= 'a' as u8 && c <= 'z' as u8) ||
+           (c >= '0' as u8 && c <= '9' as u8) ||
+           c == '_' as u8 || c == '-' as u8;
+}
+
+// p points just past "METHOD " (the path); avail bounds it (up to the
+// header terminator, always enough to find the trailing space that ends a
+// well-formed request line, or to hit avail's end for a malformed one).
+// Returns:
+//   -3  path doesn't start with "/keys" at all (unknown resource -> 404)
+//   -2  "/keys/" prefix present but the key is empty, too long, contains a
+//       character outside [A-Za-z0-9_-], or the request line never
+//       reaches a trailing space within `avail` (malformed -> 400)
+//   -1  path is exactly "/keys" (LIST or method-not-allowed, dispatched
+//       by the caller)
+//   >=0 key length; the key bytes are left in key_buf
+fn kvs_parse_path(p: borrow *u8, avail: isize) -> i32 {
+    if (avail < 5 || p[0] != '/' as u8 || p[1] != 'k' as u8 ||
+        p[2] != 'e' as u8 || p[3] != 'y' as u8 || p[4] != 's' as u8) {
+        return -3;
+    }
+    if (avail == 5) {
+        return -2;
+    }
+    if (p[5] == ' ' as u8) {
+        return -1;
+    }
+    if (p[5] != '/' as u8) {
+        return -3;
+    }
+
+    let mut i: isize = 6;
+    let mut klen: isize = 0;
+    while (i < avail && p[i] != ' ' as u8) {
+        if (klen >= KEY_MAX) {
+            return -2;
+        }
+        if (kvs_key_char_ok(p[i]) == false) {
+            return -2;
+        }
+        key_buf[klen as usize] = p[i];
+        klen = klen + 1;
+        i = i + 1;
+    }
+    if (klen == 0 || i >= avail) {
+        return -2;
+    }
+    return klen as i32;
+}
+
+fn kvs_starts_with(p: borrow *u8, avail: isize, lit: borrow *u8) -> bool {
+    let mut i: isize = 0;
+    while (lit[i] != 0) {
+        if (i >= avail || p[i] != lit[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn kvs_parse_udec(p: borrow *u8, avail: isize) -> i32 {
+    let mut i: isize = 0;
+    let mut v: i32 = 0;
+    while (i < avail && p[i] >= '0' as u8 && p[i] <= '9' as u8) {
+        v = v * 10 + ((p[i] - ('0' as u8)) as i32);
+        i = i + 1;
+    }
+    if (i == 0) {
+        return -1;
+    }
+    return v;
+}
+
+// Scans header lines in req[0..hdr_end) for an exact "Content-Length: "
+// prefix and parses the decimal value that follows. Returns -1 if the
+// header is absent -- a PUT with no Content-Length is accepted; its value
+// is simply "the rest of this TCP segment" (see http_start_response).
+fn kvs_content_length(req: borrow *u8, hdr_end: isize) -> i32 {
+    let mut i: isize = 0;
+    while (i < hdr_end) {
+        if (kvs_starts_with(req + i, hdr_end - i, "Content-Length: ")) {
+            return kvs_parse_udec(req + i + 17, hdr_end - i - 17);
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn kvs_find_hdr_end(req: borrow *u8, len: isize) -> isize {
+    let mut i: isize = 0;
+    while (i + 3 < len) {
+        if (req[i] == '\r' as u8 && req[i + 1] == '\n' as u8 &&
+            req[i + 2] == '\r' as u8 && req[i + 3] == '\n' as u8) {
+            return i + 4;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+// -- Response generation ------------------------------------------------
+
+fn kvs_write_status_line(payload: borrow *u8, status_id: i32) -> isize {
+    if (status_id == 201) {
+        return copy_str(payload, "HTTP/1.1 201 Created\r\n");
+    }
+    if (status_id == 400) {
+        return copy_str(payload, "HTTP/1.1 400 Bad Request\r\n");
+    }
+    if (status_id == 404) {
+        return copy_str(payload, "HTTP/1.1 404 Not Found\r\n");
+    }
+    if (status_id == 405) {
+        return copy_str(payload, "HTTP/1.1 405 Method Not Allowed\r\n");
+    }
+    if (status_id == 507) {
+        return copy_str(payload, "HTTP/1.1 507 Insufficient Storage\r\n");
+    }
+    return copy_str(payload, "HTTP/1.1 200 OK\r\n");
+}
+
+// One uniform response builder for every KVS response. Always single-
+// segment, closed with our own FIN -- see the file header. body/body_len
+// may describe zero bytes (pass "" for an empty body).
+fn kvs_build_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
+        status_id: i32, body: borrow *u8, body_len: isize) -> i32 {
+    let payload: *u8 = (eth as *u8) + 54;
+    let mut len: isize = 0;
+    len = len + kvs_write_status_line(payload + len, status_id);
+    len = len + copy_str(payload + len,
+        "Content-Type: text/plain; charset=us-ascii\r\nContent-Length: ");
+    len = len + write_udec(payload + len, body_len as i32);
+    len = len + copy_str(payload + len, "\r\nConnection: close\r\n\r\n");
+    bytes_copy(payload + len, body, body_len);
+    len = len + body_len;
+    return build_tcp_payload(eth, ihl, len, TCP_FLAG_ACK | TCP_FLAG_PSH | TCP_FLAG_FIN);
+}
+
+// -- Core callbacks -----------------------------------------------------
+
+// Must never return -1 for a verb the core already accepted (GET/PUT/
+// DELETE): http_server_common.tkb advances conn_rcv_nxt before calling
+// this callback, so a Dropped response (return -1) wedges the connection
+// rather than answering it -- see http_server_common.tkb's TcpSendOutcome
+// comment. Every parse failure below therefore produces a real HTTP error
+// response (400/404/405/507) instead.
+fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
+        req: borrow *u8, req_len: u16) -> i32 {
+    let len: isize = req_len as isize;
+    let hdr_end: isize = kvs_find_hdr_end(req, len);
+    if (hdr_end < 0) {
+        return kvs_build_response(eth, ihl, 400, "bad request\n", 12);
+    }
+
+    match kvs_classify_method(req, len) {
+        KvsMethod::Get => {
+            if (hdr_end < 4) {
+                return kvs_build_response(eth, ihl, 400, "bad request\n", 12);
+            }
+            let r: i32 = kvs_parse_path(req + 4, hdr_end - 4);
+            if (r == -3) {
+                return kvs_build_response(eth, ihl, 404, "not found\n", 10);
+            }
+            if (r == -2) {
+                return kvs_build_response(eth, ihl, 400, "bad request\n", 12);
+            }
+            if (r == -1) {
+                let blen: isize = kvs_build_list_body();
+                return kvs_build_response(eth, ihl, 200, list_body, blen);
+            }
+            let klen: isize = r as isize;
+            let slot: i32 = kvs_find(key_buf, klen);
+            if (slot < 0) {
+                return kvs_build_response(eth, ihl, 404, "not found\n", 10);
+            }
+            let vlen: isize = kv_val_len[slot as usize] as isize;
+            return kvs_build_response(eth, ihl, 200,
+                (kv_vals as *u8) + (slot as isize) * VAL_MAX, vlen);
+        }
+        KvsMethod::Put => {
+            if (hdr_end < 4) {
+                return kvs_build_response(eth, ihl, 400, "bad request\n", 12);
+            }
+            let r: i32 = kvs_parse_path(req + 4, hdr_end - 4);
+            if (r == -3) {
+                return kvs_build_response(eth, ihl, 404, "not found\n", 10);
+            }
+            if (r == -2) {
+                return kvs_build_response(eth, ihl, 400, "bad request\n", 12);
+            }
+            if (r == -1) {
+                return kvs_build_response(eth, ihl, 405, "method not allowed\n", 19);
+            }
+
+            let vlen: isize = len - hdr_end;
+            let cl: i32 = kvs_content_length(req, hdr_end);
+            if (vlen < 0 || vlen > VAL_MAX || (cl >= 0 && (cl as isize) != vlen)) {
+                return kvs_build_response(eth, ihl, 400, "bad request\n", 12);
+            }
+
+            let klen: isize = r as isize;
+            let put_result: i32 = kvs_put(key_buf, klen, req + hdr_end, vlen);
+            if (put_result < 0) {
+                return kvs_build_response(eth, ihl, 507, "table full\n", 11);
+            }
+            if (put_result == 0) {
+                return kvs_build_response(eth, ihl, 201, "", 0);
+            }
+            return kvs_build_response(eth, ihl, 200, "", 0);
+        }
+        KvsMethod::Delete => {
+            if (hdr_end < 7) {
+                return kvs_build_response(eth, ihl, 400, "bad request\n", 12);
+            }
+            let r: i32 = kvs_parse_path(req + 7, hdr_end - 7);
+            if (r == -3) {
+                return kvs_build_response(eth, ihl, 404, "not found\n", 10);
+            }
+            if (r == -2) {
+                return kvs_build_response(eth, ihl, 400, "bad request\n", 12);
+            }
+            if (r == -1) {
+                return kvs_build_response(eth, ihl, 405, "method not allowed\n", 19);
+            }
+            let klen: isize = r as isize;
+            if (kvs_del(key_buf, klen)) {
+                return kvs_build_response(eth, ihl, 200, "", 0);
+            }
+            return kvs_build_response(eth, ihl, 404, "not found\n", 10);
+        }
+        KvsMethod::Other => {
+            return kvs_build_response(eth, ihl, 400, "bad request\n", 12);
+        }
+    }
+}
+
+fn http_continue_response(eth: borrow [u8; 1514..],
+        ihl: {20..<21 as u16}) -> i32 {
+    return -1;
+}
+
+fn http_response_done() -> bool {
+    return true;
+}
+
+fn app_main() {
+    uart_puts("kvs_server: init\r\n");
+
+    match net_init() {
+        NetInitResult::Failed => {
+            uart_puts("kvs_server: device/link not found\r\n");
+        }
+        NetInitResult::Ready(mut ready) => {
+            net_read_mac(our_mac as *u8);
+            slice_copy(our_ip as []u8, HTTP_SERVER_IP as []u8);
+
+            uart_puts("kvs_server: ready\r\n");
+
+            while (true) {
+                ready = http_server_poll_once(ready);
+            }
+        }
+    }
+}
