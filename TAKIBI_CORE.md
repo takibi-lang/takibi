@@ -1296,15 +1296,17 @@ independently:
 
 | issue | Core destination |
 |---|---|
-| #89 affine escape/inter-function behavior | indexed runtime owners, stable places, and standard Delta flow; `SlotLease` is its closing slice |
-| #117 protocol action obligations | erased linear views first, then indexed `TcpConn` view change |
+| #89 affine escape/inter-function behavior (closed) | indexed runtime owners, stable places, and standard Delta flow; remaining arbitrary stored-owner places moved to #131 |
+| #117 protocol action obligations (closed) | erased linear views first, then indexed `TcpConn` view change |
 | #113 generic typed channels | runtime generic payloads in Gamma, payload ownership transfer and private channel invariants in Delta |
 | #66 Simple RTOS | lock/task identities in Delta plus `may_block`, scheduling, and interrupt constraints in epsilon |
 | #20 variant enums | kind-carrying runtime variants and existential resource payloads |
 | #6 multiple cores | CPU-indexed guards, per-CPU state, and interrupt permissions |
-| #106 aliasing (closed; #128 carries the rest) | place identity, region/view predicates, and disjointness propositions; owner-derived region slices were its first closed slice |
-| #128 escape control (first slices closed) | authority-bound pointer lifetimes extend region ties beyond slice returns, and stable exchange now names a same-container lock; general invariants remain |
-| #87 asynchronous TX ownership | linear in-flight buffer/descriptor states and completion transitions |
+| #106 aliasing (closed) | place identity, region/view predicates, and disjointness propositions; owner-derived region slices were its first closed slice |
+| #128 escape control (closed) | authority-bound pointer lifetimes extend region ties beyond slice returns, and stable exchange now names a same-container lock |
+| #87 asynchronous TX ownership (closed) | linear in-flight buffer/descriptor states and completion transitions |
+| #131 arbitrary stored indexed owners | demand-led successor for general place tracking, owner tables, and arbitrary owner-bearing storage |
+| #132 general lock/heap invariants | demand-led successor for invariant predicates, general region polymorphism, and precise lifetime-bearing aggregates |
 | #15/#108 cast and visibility hardening | unforgeable constructors and module boundaries for runtime owners and views |
 | #13 deferred SMT path (not active) | reconsider only after a required real API exceeds the built-in checker; do not implement Z3 or solver-only infrastructure from the roadmap alone |
 

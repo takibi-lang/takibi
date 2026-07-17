@@ -25,11 +25,13 @@ consumption, affine null sentinels, cast escape hatches, or variants being
 future work are superseded by the Slice 3 result in 6.7.4 and by SPEC.md.
 
 Driving issues: #117 (witness tokens / protocol obligations -- where this
-plan was drawn up), #89 (affine drop/escape/inter-function), #108
-(private visibility), #15 (safe pointer / cast audit), #113 (channel v2),
-#66 (Simple RTOS), #20 (variant enums), #106 (aliasing; closed after the
-region-slice slice, remaining escape control moved to #128), #87 (async TX
-ownership), #6 (multiple cores).
+plan was drawn up; now closed by the linear-event and `TcpConn` slices),
+#89 (affine drop/escape/inter-function; now closed, with arbitrary stored
+owner places split to #131), #108 (private visibility), #15 (safe pointer /
+cast audit), #113 (channel v2), #66 (Simple RTOS), #20 (variant enums),
+#106 (aliasing; closed after the region-slice slice), #87 (async TX
+ownership; closed), #128 (authority-bound pointer lifetimes; closed, with
+general invariants split to #132), #6 (multiple cores).
 
 ## 1. Motivation: one wall, four axes
 
@@ -1342,8 +1344,9 @@ reuse from reviving a stale derived value, and 6.7.15 blocks untracked
 aggregate storage. Section 6.7.16 also retains authority ties through raw
 casts and address transformations, while 6.7.17 verifies direct non-retaining
 calls. General heap predicates, arbitrary stable places, and general region
-polymorphism remain demand-led. No broader ownership slice is selected without
-another concrete example and focused negative contract.
+polymorphism remain demand-led and are now tracked as #131/#132 rather than
+being left inside the closed #89/#128 umbrellas. No broader ownership slice is
+selected without another concrete example and focused negative contract.
 
 ## 8. Prior art notes
 

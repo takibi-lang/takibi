@@ -280,14 +280,16 @@ examples/
                      with per-open cursor/size/mode state; HISTORY.md's issue #97 entry records
                      the older affine-opaque singleton stage it replaced.
     rtos.tkb      -- Simple RTOS (issue #66) task-facing API: cpu_id() (examples/percpu),
-                     KLock/KGuard/klock/kunlock (examples/klock_guard), Chan/chan_send/
-                     chan_recv (examples/chan_rendezvous), plus generic rtos_task_add/
-                     rtos_start/task_self scheduling glue generalized from the fixed-3-task
-                     pattern examples/preempt/examples/msgqueue duplicated inline. Used by
-                     both QEMU RTOS examples and STM32 RAM RTOS examples such as
+                     address-indexed KLock/KGuard/klock/kunlock, copy-rendezvous
+                     Chan/WordChan helpers, and rtos_task_add/rtos_start/task_self
+                     scheduling glue generalized from the fixed-task examples. Chan internals
+                     are private and initialized through constructors; ownership-bearing
+                     rendezvous in rtos_demo uses a concrete stable owner slot and
+                     stable_replace rather than a generic zero-copy channel. Used by both
+                     QEMU RTOS examples and STM32 RAM RTOS examples such as
                      rtos_fatfs_sdcard/http_server_sdcard_rtos -- see HISTORY.md's RTOS entries.
-                     task_yield() intentionally not implemented yet (YAGNI -- no task needs
-                     voluntary switching today, see that file's header comment)
+                     task_yield() intentionally remains unimplemented until a real caller
+                     needs voluntary switching.
   common_qemu/    -- QEMU/AArch64-only HAL: startup assembly, linker script, and every
                      MMIO-backed driver (UART, GIC, timer, virtio-net). Split out from
                      common/ once enough of common/ turned out to be genuinely
@@ -316,7 +318,8 @@ examples/
                      scheduler_init/_disable/_rearm_tick (uniform names shared with
                      common_stm32/scheduler.tkb, see examples/common_stm32/CLAUDE.md)
     rtc.tkb       -- PL031 RTC register access (see examples/common_qemu/CLAUDE.md)
-    virtio_mmio.tkb -- net_init/net_rx_acquire/net_rx_frame/net_transmit/net_rx_release/net_read_mac
+    virtio_mmio.tkb -- net_init/net_rx_wait/net_rx_acquire/net_rx_len/net_rx_frame/
+                     net_transmit/net_tx_complete/net_rx_release/net_read_mac
                      (uniform API shared with common_stm32/eth.tkb, see examples/common_stm32/CLAUDE.md)
     netconfig.tkb -- OUR_IP (QEMU-side static IP for arp_reply/icmp_echo/tcp_echo),
                      HTTP_SERVER_IP (http_server's own IP, see examples/common_stm32/CLAUDE.md's "Network config" entry)
@@ -436,8 +439,9 @@ size.
   `extern fn eth_dsb()`/`eth_asm.S` workaround has been removed. `dma_publish()`, `dma_consume()`, and
   `device_fence()` now lower per target and are placed inside the STM32 and virtio driver ownership transitions.
   The cache-aware `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` operations maintain Cortex-M7 cache lines,
-  so application examples do not manually select barriers. The RX API now uses an affine opaque CPU-ownership
-  handle to reject use-after-release and double-release statically without changing the source-level barrier semantics.
+  so application examples do not manually select barriers. The RX/TX API now uses indexed linear owners plus
+  authority-derived region ties to reject use-after-release, double-release, and early release while TX DMA is
+  still in flight without changing the source-level barrier semantics.
 - **QEMU (TCG mode, which is all this project uses -- no KVM) does not model caches as physically separate storage
   from RAM, so cache-coherency bugs are invisible there and can ONLY be found on real hardware.** Found again
   while bringing up `examples/fatfs` on the STM32 board: the hardware test harness injects/extracts the `disk`
