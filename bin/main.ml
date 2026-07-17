@@ -29,7 +29,7 @@ let parse_file filename =
 
 let () =
   (* Parse arguments: takibi <input>... [-o <output.o>] [--target <triple>]
-     [--cpu <cpu>] [--features <features>] [-g] *)
+     [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] *)
   let input_files  = ref [] in
   let output_file = ref "" in
   let target_triple = ref "" in
@@ -37,6 +37,7 @@ let () =
   let target_features = ref "" in
   let debug_info = ref false in
   let forbid_trap = ref false in
+  let profile_functions = ref false in
   let show_version = ref false in
   let i = ref 1 in
   while !i < Array.length Sys.argv do
@@ -71,6 +72,8 @@ let () =
          debug_info := true
      | "--forbid-trap" ->
          forbid_trap := true
+     | "--profile-functions" ->
+         profile_functions := true
      | arg ->
          input_files := arg :: !input_files);
     incr i
@@ -84,7 +87,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--forbid-trap] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -94,6 +97,7 @@ let () =
       ~features:!target_features ()
   in
   if !debug_info then Llvm_gen.enable_debug_info (List.hd input_files);
+  Llvm_gen.set_function_profiling !profile_functions;
 
   let prescan_file filename =
     let chan = open_in filename in

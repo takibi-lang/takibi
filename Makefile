@@ -180,7 +180,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck hwcheck-net langcheck check allcheck clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo
+.PHONY: build test qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck hwcheck-net perfcheck langcheck check allcheck clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos
 
 .DEFAULT_GOAL := build
 
@@ -271,6 +271,11 @@ hwcheck: stm32build
 hwcheck-net: stm32build examples/http_server/kernel_stm32.bin examples/http_server_sdcard/kernel_stm32.bin
 	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/run_hwtest_net_ram.sh
 
+## perfcheck: run real-hardware profiling smoke tests. This checks that the
+## profiler's firmware table ABI, OpenOCD dump path, and host-side decoder
+## still agree; it does not assert stable performance numbers.
+perfcheck: profile-stm32-http-server-sdcard-rtos
+
 ## langcheck: verify that all source files contain only ASCII characters
 langcheck:
 	@echo "Checking for non-ASCII characters in source files..."
@@ -305,6 +310,7 @@ allcheck:
 	$(MAKE) clean
 	$(MAKE) check
 	$(MAKE) hwcheck
+	$(MAKE) perfcheck
 	$(MAKE) hwcheck-net
 
 # -- Shared assembly objects ---------------------------------------------------
@@ -842,6 +848,12 @@ examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.o: examples/http_
 examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.debug.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -g -o $@ --forbid-trap
 
+examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.prof.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) --profile-functions -o $@ --forbid-trap
+
+examples/http_server_sdcard_rtos/kernel_stm32_ram.prof.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.prof.o $(COMMON_STM32_LINK_RAM_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.prof.o -o $@
+
 # http_server_sdcard_install: provisioning-only helper (make hwcheck-net,
 # make stm32-http-server-sdcard) that writes a real mtools-built FAT12
 # image onto the SD card via disk_write, so neither target needs a human
@@ -1115,6 +1127,12 @@ profile-http-server: examples/http_server/kernel.debug.elf
 ## alongside profile-http-server, and the same directional-only caveats).
 profile-tcp-echo: examples/tcp_echo/kernel.debug.elf
 	python3 scripts/profile_tcp_echo.py $<
+
+## profile-stm32-http-server-sdcard-rtos: run the STM32 HTTP+SD+RTOS
+## firmware from RAM with function profiling enabled, fetch /ICON.PNG with
+## curl, then halt the board and dump the profiling table through OpenOCD.
+profile-stm32-http-server-sdcard-rtos: examples/http_server_sdcard_rtos/kernel_stm32_ram.prof.elf examples/http_server_sdcard_install/kernel_stm32_ram.elf
+	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/profile_stm32_http_server_sdcard_rtos.sh
 
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts and linker outputs

@@ -186,6 +186,176 @@ let global_const_defs : (string, Ast.type_expr * Ast.expr) Hashtbl.t = Hashtbl.c
 let trap_sites : (Lexing.position * string) list ref = ref []
 let record_trap loc what = trap_sites := (loc, what) :: !trap_sites
 
+(* -- Function profiling (--profile-functions) --------------------------- *)
+let function_profiling_enabled = ref false
+let set_function_profiling enabled = function_profiling_enabled := enabled
+
+let prof_entry_ty : lltype option ref = ref None
+let prof_table : llvalue option ref = ref None
+let prof_stack_cycles : llvalue option ref = ref None
+let prof_stack_ids : llvalue option ref = ref None
+let prof_depth : llvalue option ref = ref None
+let prof_overflow : llvalue option ref = ref None
+let prof_func_ids : (string, int) Hashtbl.t = Hashtbl.create 64
+let prof_stack_capacity = 256
+
+let should_profile_function name =
+  !function_profiling_enabled
+  && name <> "pendsv_dispatch"
+  && not (String.length name >= 7
+          && String.sub name (String.length name - 7) 7 = "Handler")
+
+let require_profile_global r name =
+  match !r with
+  | Some v -> v
+  | None -> raise (Error (Printf.sprintf "BUG: profile global '%s' not initialized" name))
+
+let profile_read_cyccnt () =
+  let i32 = i32_type context in
+  let demcr = const_inttoptr (const_int i32 0xE000EDFC) (pointer_type context) in
+  let dwt_lar = const_inttoptr (const_int i32 0xE0001FB0) (pointer_type context) in
+  let dwt_ctrl = const_inttoptr (const_int i32 0xE0001000) (pointer_type context) in
+  let dwt_cyccnt = const_inttoptr (const_int i32 0xE0001004) (pointer_type context) in
+  let lar_st = build_store (const_int i32 0xC5ACCE55) dwt_lar builder in
+  set_volatile true lar_st;
+  let demcr_v = build_load i32 demcr "prof.demcr" builder in
+  set_volatile true demcr_v;
+  let demcr_enabled = build_or demcr_v (const_int i32 0x01000000) "prof.demcr_enable" builder in
+  let demcr_st = build_store demcr_enabled demcr builder in
+  set_volatile true demcr_st;
+  let ctrl = build_load i32 dwt_ctrl "prof.dwt_ctrl" builder in
+  set_volatile true ctrl;
+  let enabled = build_or ctrl (const_int i32 1) "prof.dwt_enable" builder in
+  let st = build_store enabled dwt_ctrl builder in
+  set_volatile true st;
+  let cycles = build_load i32 dwt_cyccnt "prof.cyccnt" builder in
+  set_volatile true cycles;
+  cycles
+
+let emit_profile_enter key =
+  match Hashtbl.find_opt prof_func_ids key with
+  | None -> ()
+  | Some id ->
+      let depth_g = require_profile_global prof_depth "__takibi_prof_depth" in
+      let overflow_g = require_profile_global prof_overflow "__takibi_prof_overflow" in
+      let stack_cycles_g = require_profile_global prof_stack_cycles "__takibi_prof_stack_cycles" in
+      let stack_ids_g = require_profile_global prof_stack_ids "__takibi_prof_stack_ids" in
+      let i32 = i32_type context in
+      let i64 = i64_type context in
+      let depth = build_load i32 depth_g "prof.depth" builder in
+      let cap = const_int i32 prof_stack_capacity in
+      let ok = build_icmp Icmp.Ult depth cap "prof.depth.ok" builder in
+      let cur_bb = insertion_block builder in
+      let fn = block_parent cur_bb in
+      let push_bb = append_block context "prof_enter_push" fn in
+      let overflow_bb = append_block context "prof_enter_overflow" fn in
+      let done_bb = append_block context "prof_enter_done" fn in
+      ignore (build_cond_br ok push_bb overflow_bb builder);
+      position_at_end push_bb builder;
+      let now32 = profile_read_cyccnt () in
+      let now64 = build_zext now32 i64 "prof.now64" builder in
+      let zero = const_int i32 0 in
+      let cyc_arr_ty = array_type i64 prof_stack_capacity in
+      let id_arr_ty = array_type i32 prof_stack_capacity in
+      let cyc_slot = build_in_bounds_gep cyc_arr_ty stack_cycles_g [| zero; depth |] "prof.cyc.slot" builder in
+      let id_slot = build_in_bounds_gep id_arr_ty stack_ids_g [| zero; depth |] "prof.id.slot" builder in
+      ignore (build_store now64 cyc_slot builder);
+      ignore (build_store (const_int i32 id) id_slot builder);
+      let next_depth = build_add depth (const_int i32 1) "prof.depth.next" builder in
+      ignore (build_store next_depth depth_g builder);
+      ignore (build_br done_bb builder);
+      position_at_end overflow_bb builder;
+      let overflow_old = build_load i32 overflow_g "prof.overflow" builder in
+      let overflow_new = build_add overflow_old (const_int i32 1) "prof.overflow.next" builder in
+      ignore (build_store overflow_new overflow_g builder);
+      ignore (build_br done_bb builder);
+      position_at_end done_bb builder
+
+let emit_profile_exit key =
+  match Hashtbl.find_opt prof_func_ids key with
+  | None -> ()
+  | Some id ->
+      let entry_ty = match !prof_entry_ty with
+        | Some t -> t
+        | None -> raise (Error "BUG: profile entry type not initialized")
+      in
+      let table_g = require_profile_global prof_table "__takibi_prof_table" in
+      let depth_g = require_profile_global prof_depth "__takibi_prof_depth" in
+      let stack_cycles_g = require_profile_global prof_stack_cycles "__takibi_prof_stack_cycles" in
+      let i32 = i32_type context in
+      let i64 = i64_type context in
+      let depth = build_load i32 depth_g "prof.depth" builder in
+      let zero_depth = build_icmp Icmp.Eq depth (const_int i32 0) "prof.depth.zero" builder in
+      let cur_bb = insertion_block builder in
+      let fn = block_parent cur_bb in
+      let pop_bb = append_block context "prof_exit_pop" fn in
+      let done_bb = append_block context "prof_exit_done" fn in
+      ignore (build_cond_br zero_depth done_bb pop_bb builder);
+      position_at_end pop_bb builder;
+      let new_depth = build_sub depth (const_int i32 1) "prof.depth.prev" builder in
+      ignore (build_store new_depth depth_g builder);
+      let zero = const_int i32 0 in
+      let cyc_arr_ty = array_type i64 prof_stack_capacity in
+      let start_slot = build_in_bounds_gep cyc_arr_ty stack_cycles_g [| zero; new_depth |] "prof.start.slot" builder in
+      let start = build_load i64 start_slot "prof.start" builder in
+      let now32 = profile_read_cyccnt () in
+      let now64 = build_zext now32 i64 "prof.now64" builder in
+      let elapsed = build_sub now64 start "prof.elapsed" builder in
+      let table_ty = array_type entry_ty (Hashtbl.length prof_func_ids) in
+      let entry_ptr = build_in_bounds_gep table_ty table_g [| zero; const_int i32 id |] "prof.entry" builder in
+      let calls_ptr = build_in_bounds_gep entry_ty entry_ptr [| zero; const_int i32 1 |] "prof.calls.ptr" builder in
+      let cycles_ptr = build_in_bounds_gep entry_ty entry_ptr [| zero; const_int i32 2 |] "prof.cycles.ptr" builder in
+      let calls = build_load i32 calls_ptr "prof.calls" builder in
+      ignore (build_store (build_add calls (const_int i32 1) "prof.calls.next" builder) calls_ptr builder);
+      let cycles = build_load i64 cycles_ptr "prof.cycles" builder in
+      ignore (build_store (build_add cycles elapsed "prof.cycles.next" builder) cycles_ptr builder);
+      ignore (build_br done_bb builder);
+      position_at_end done_bb builder
+
+let emit_profile_return key ret_builder =
+  emit_profile_exit key;
+  ret_builder ()
+
+let init_function_profile_table keys =
+  Hashtbl.reset prof_func_ids;
+  prof_entry_ty := None;
+  prof_table := None;
+  prof_stack_cycles := None;
+  prof_stack_ids := None;
+  prof_depth := None;
+  prof_overflow := None;
+  if !function_profiling_enabled then begin
+    let profiled =
+      keys
+      |> List.filter should_profile_function
+      |> List.sort String.compare
+    in
+    List.iteri (fun i key -> Hashtbl.add prof_func_ids key i) profiled;
+    let i32 = i32_type context in
+    let i64 = i64_type context in
+    let entry_ty = struct_type context [| i32; i32; i64 |] in
+    prof_entry_ty := Some entry_ty;
+    let entries =
+      profiled
+      |> List.mapi (fun id _key ->
+        const_struct context [| const_int i32 id; const_int i32 0; const_int i64 0 |])
+      |> Array.of_list
+    in
+    let table_init = const_array entry_ty entries in
+    let table_g = define_global "__takibi_prof_table" table_init the_module in
+    set_section ".takibi_prof" table_g;
+    prof_table := Some table_g;
+    let n_g = define_global "__takibi_prof_count" (const_int i32 (List.length profiled)) the_module in
+    set_global_constant true n_g;
+    set_section ".takibi_prof" n_g;
+    prof_depth := Some (define_global "__takibi_prof_depth" (const_int i32 0) the_module);
+    prof_overflow := Some (define_global "__takibi_prof_overflow" (const_int i32 0) the_module);
+    prof_stack_cycles := Some (define_global "__takibi_prof_stack_cycles"
+      (const_null (array_type i64 prof_stack_capacity)) the_module);
+    prof_stack_ids := Some (define_global "__takibi_prof_stack_ids"
+      (const_null (array_type i32 prof_stack_capacity)) the_module)
+  end
+
 (* Mirrors type_inf.ml's unsafe_depth (sync rule): nesting depth of
    `unsafe { ... }` around the expression currently being generated.
    Consulted by the SliceOf codegen case (P4c-1) to decide whether an
@@ -644,6 +814,8 @@ let setup_target ?(triple = "") ?(cpu = "") ?(features = "") () =
                               (disabled for -g builds to keep GDB stepping/locals stable)
      * simplifycfg          : final cleanup of dead blocks *)
 let run_optimizations machine =
+  if !function_profiling_enabled then ()
+  else
   let opts = Llvm_passbuilder.create_passbuilder_options () in
   Llvm_passbuilder.passbuilder_options_set_loop_vectorization opts false;
   Llvm_passbuilder.passbuilder_options_set_slp_vectorization opts false;
@@ -3099,6 +3271,8 @@ let gen_func ?prog_types fdef =
       end
     ) (collect_immutable_lets fdef.body);
 
+  emit_profile_enter key;
+
   (* Recursively initialize a memory location from a possibly-nested literal.
      Handles nested StructLit for struct/array fields; falls back to gen_expr+store. *)
   let rec init_memory ?(preserve_for_debug = false) (ptr : llvalue) (ast_ty : Ast.type_expr) (e : Ast.expr) =
@@ -3151,9 +3325,10 @@ let gen_func ?prog_types fdef =
     | Return e ->
         let (_, v) = gen_expr ~expected_ty:ret_ast locals e in
         if is_erased_view_type ret_ast then
-          ignore (build_ret_void builder)
+          emit_profile_return key (fun () -> ignore (build_ret_void builder))
         else
-          ignore (build_ret (coerce v ret_ast) builder)
+          let rv = coerce v ret_ast in
+          emit_profile_return key (fun () -> ignore (build_ret rv builder))
 
     | Expr e ->
         ignore (gen_expr locals e)
@@ -3684,8 +3859,10 @@ let gen_func ?prog_types fdef =
   (* Ensure the exit block has a terminator *)
   if block_terminator (insertion_block builder) = None then begin
     if ret_ast = TypeVoid || is_erased_view_type ret_ast then
-      ignore (build_ret_void builder)
-    else ignore (build_ret (const_int (ltype_of_ast ret_ast) 0) builder)
+      emit_profile_return key (fun () -> ignore (build_ret_void builder))
+    else
+      let rv = const_int (ltype_of_ast ret_ast) 0 in
+      emit_profile_return key (fun () -> ignore (build_ret rv builder))
   end;
 
   (* Use the non-aborting checker, not Llvm_analysis.assert_valid_function:
@@ -4069,6 +4246,13 @@ let gen_program ?prog_types prog =
     | VariantDef _ -> ()
     | UseDef _    -> ()
   ) prog;
+  let function_keys =
+    prog
+    |> List.filter_map (function
+      | FuncDef fdef -> Some (function_key prog_types fdef)
+      | _ -> None)
+  in
+  init_function_profile_table function_keys;
   (* Pass 2: generate function bodies *)
   List.iter (function
     | FuncDef fdef    -> ignore (gen_func ?prog_types fdef)
