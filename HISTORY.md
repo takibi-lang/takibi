@@ -8036,3 +8036,73 @@ integration tests including rtos_demo's two-task rendezvous demo, every
 STM32 cross-build including rtos_fatfs_sdcard and http_server_sdcard_rtos);
 rtos.tkb remains `--forbid-trap` clean on both targets with zero raw-pointer
 scheduler accesses.
+
+## 2026-07-17: First STM32 Function Profiler Slice
+
+Started issue #130's STM32 profiler with the smallest useful end-to-end
+target: profile the existing `http_server_sdcard_rtos` RAM demo while a host
+fetches `http://192.168.10.2/ICON.PNG`.
+
+Compiler side:
+
+- Added `takibi --profile-functions`. When enabled, codegen emits a fixed
+  `__takibi_prof_table` sized from the whole compiled program, plus a small
+  call stack in RAM. There is no replacement/eviction policy: the current
+  largest demo has only about 200 Takibi functions, so a full per-function
+  table is cheaper and more accurate.
+- Each profiled function gets an entry/exit probe using Cortex-M DWT
+  `CYCCNT`. Entries are `{ id: u32, calls: u32, inclusive_cycles: u64 }`.
+  The table is keyed by the compiler-assigned function id; the host report
+  reconstructs names by sorting the profiled object's Takibi function
+  symbols the same way codegen does.
+- Interrupt handlers and `pendsv_dispatch` are deliberately excluded in this
+  first slice to avoid making the scheduler/exception boundary part of the
+  measurement mechanism itself. Functions called from normal task code are
+  still measured.
+- `--profile-functions` skips the normal optimization pipeline. The
+  instrumented profile build is a measurement artifact, not the production
+  code shape; keeping the probes structurally intact matters more than
+  optimizing them away.
+
+Harness side:
+
+- Added `examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.prof.o`
+  and `kernel_stm32_ram.prof.elf` Makefile rules.
+- Added `make profile-stm32-http-server-sdcard-rtos`, which provisions the SD
+  card using the existing installer firmware, loads the profiled RTOS HTTP
+  server into AXI SRAM1, runs `curl` for `/ICON.PNG`, halts the core, dumps
+  `__takibi_prof_table` through OpenOCD, and prints the hottest functions by
+  inclusive cycle count.
+
+Follow-up fixes from the first real-board run:
+
+- `profile-stm32-http-server-sdcard-rtos` now passes `STM32_SERIAL_DEV` to
+  its script the same way `hwcheck`/`hwcheck-net` do; the first cut forgot
+  that environment handoff.
+- DWT `CYCCNT` reads initially reported all-zero cycle counts even though call
+  counts were increasing. The fix was to unlock DWT through the Cortex-M7 Lock
+  Access Register (`0xE0001FB0 = 0xC5ACCE55`) before setting DEMCR.TRCENA and
+  DWT_CTRL.CYCCNTENA.
+- The first curl could race PHY/ARP/server readiness, so the script retries
+  the request instead of treating the first connection refusal as a profiling
+  failure.
+
+Real-board validation: `make profile-stm32-http-server-sdcard-rtos` completed
+successfully against the STM32F746G-DISCOVERY board. The first profile of
+`/ICON.PNG` reported 195 table entries, 117 active entries, and about
+189 million inclusive cycles. The hottest entries were `net_init`/`phy_init`
+and their MDIO polling path (`mdio_read`/`mdio_wait`), followed by the
+HTTP/SD/RTOS request path (`http_server_poll_once`, `build_response_segment`,
+`http_read_chunk`, `sd_read_chunk_rpc`, `tcp_continue`,
+`http_continue_response`, and `cond_wait`).
+
+Known limitations of this first slice:
+
+- It is inclusive time only. If `A` calls `B`, `A` includes `B`.
+- A function that is still active when OpenOCD halts the core has not run its
+  exit probe yet, so its current partial interval is not included. This is
+  acceptable for the first HTTP request profile because the interesting
+  helper functions return; the long-running server loop itself is not the
+  first target.
+- Real hardware validation of future changes still requires the STM32 board,
+  SD card, and Ethernet wiring.
