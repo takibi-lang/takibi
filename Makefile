@@ -177,6 +177,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/rtos_demo/kernel_stm32_ram.elf \
                    examples/rtos_fatfs_sdcard/kernel_stm32_ram.elf \
                    examples/http_server_sdcard_rtos/kernel_stm32_ram.elf \
+                   examples/kvs_server_sdcard_rtos/kernel_stm32_ram.elf \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
@@ -857,6 +858,26 @@ examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.prof.o: examples/
 
 examples/http_server_sdcard_rtos/kernel_stm32_ram.prof.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.prof.o $(COMMON_STM32_LINK_RAM_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.prof.o -o $@
+
+# kvs_server_sdcard_rtos (GitHub issue #135): STM32 port of
+# examples/kvs_server, combining real Ethernet + SD-card persistence
+# through FAT12 + RTOS task separation as one milestone. Same shape as
+# http_server_sdcard_rtos above (SD/FAT operations run behind a Simple
+# RTOS worker task, needs both target-specific Ethernet and scheduler
+# implementations on the command line, links with sem_asm.o via its
+# explicit RAM target below) but does NOT use COMMON_HTTP_SDCARD -- this
+# is a plain HTTP REST dispatch over COMMON_HTTP_SERVER, not a file
+# server. RAM-only (no debug/prof/Flash variants) -- see
+# kvs_server_sdcard_rtos.tkb's own header comment for the design.
+#
+# --forbid-trap: OFF for now -- proved on real hardware first per
+# AGENTS.md's Development Process section, then turned on in one pass once
+# proven (see HISTORY.md's issue #135 entry once that lands).
+examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.o: examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@
+
+examples/kvs_server_sdcard_rtos/kernel_stm32_ram.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.o $(COMMON_STM32_LINK_RAM_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.o -o $@
 
 # http_server_sdcard_install: provisioning-only helper (make hwcheck-net,
 # make stm32-http-server-sdcard) that writes a real mtools-built FAT12

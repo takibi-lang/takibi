@@ -1,81 +1,86 @@
-// Bare-metal network key-value store (GitHub issue #135).
+// STM32 port of examples/kvs_server/kvs_server.tkb (GitHub issue #135),
+// combining three pieces as one milestone: real Ethernet, real SD-card
+// persistence through FAT12 (examples/common/fat12.tkb), and RTOS task
+// separation -- mirroring this project's fatfs+real-SD-card precedent (one
+// milestone, not staged) and examples/http_server_sdcard_rtos.tkb's exact
+// task-split shape (network task + a dedicated SD-worker task reached
+// through a synchronous typed-RPC channel).
 //
-// A fixed-size, statically allocated hash table (no heap) exposed over
-// plain HTTP on port 80, reusing the same ARP/IPv4/TCP core as
-// examples/http_server. Protocol:
-//   PUT    /keys/<key>   body = value  -> 201 (new) / 200 (overwrite) /
-//                                          507 (table full) / 400 (bad key,
-//                                          value too large, or a
-//                                          Content-Length that disagrees
-//                                          with the actual body size)
-//   GET    /keys/<key>                 -> 200 + value / 404
-//   DELETE /keys/<key>                 -> 200 / 404
-//   GET    /keys                       -> 200 + key names, one per line
-//   PUT/DELETE /keys                   -> 405
-//   any other path                     -> 404
-//   any other verb (e.g. POST)         -> not recognized by
-//                                          http_server_common.tkb's method
-//                                          sniff; the segment is ignored,
-//                                          same as an unsupported verb was
-//                                          before this example existed --
-//                                          the client's request simply
-//                                          times out. See that file's
-//                                          http_method_accepted for the
-//                                          full rationale.
+// Deliberately does NOT touch examples/kvs_server/kvs_server.tkb (still
+// QEMU-only, in-RAM-only, unchanged) -- matches how
+// examples/fatfs_sdcard/fatfs_sdcard.tkb never touched examples/fatfs/
+// fatfs.tkb when ITS real-SD-card milestone landed on top of it. The
+// store/parsing/response-generation logic below (constants, kv_state/
+// kv_key_len/kv_val_len/kv_keys/kv_vals, kvs_hash/kvs_find/kvs_put/
+// kvs_del/kvs_build_list_body, KvsMethod and its parsing helpers,
+// kvs_build_response, and the http_start_response/http_continue_response/
+// http_response_done dispatch) is copied from kvs_server.tkb essentially
+// verbatim -- see that file for the protocol/store design rationale this
+// file does not repeat. The two places that differ are marked below.
 //
-// A request's body is never reassembled across TCP segments: the value is
-// always exactly "whatever arrived after \r\n\r\n in this one segment". A
-// Content-Length header, if present, is used only to DETECT a body that
-// arrived split across segments (a real risk for `curl -T bigfile`) and
-// reject it with 400 rather than silently storing a truncated value -- see
-// kvs_content_length. Every response is single-segment, closed with our own
-// FIN (http_continue_response always returns -1, http_response_done always
-// true), matching examples/http_server.tkb / http_sdcard_server.tkb.
+// Persistence: RAM stays canonical (GET/LIST read kv_state/kv_key_len/
+// kv_val_len/kv_keys/kv_vals directly, unchanged from kvs_server.tkb).
+// The SD-worker task is used only at boot (one Init RPC, loading a
+// previously saved table if one exists) and after every successful PUT/
+// DELETE (one Save RPC, write-through -- the response is not sent until
+// the save completes). This is deliberately the honest, simple meaning of
+// "SD-card persistence": an async/lazy design would hide exactly the cost
+// this milestone exists to make measurable later with the existing DWT/
+// FlameGraph profiler infrastructure (a separate, future step, not built
+// here).
 //
-// --forbid-trap CLEAN (GitHub issue #135, first slice): written first
-// WITHOUT refinement types / --forbid-trap per AGENTS.md's "prove without
-// --forbid-trap first" process (a working QEMU baseline, deterministic
-// test, and manual curl session, all committed on their own), then
-// hardened in a follow-up pass -- see HISTORY.md's issue #135 entry for
-// exactly which sites --forbid-trap flagged and how each was fixed. Every
-// table-index access below now carries or re-establishes a proven
-// {0..<TABLE_SLOTS} / {0..<KEY_MAX} range at its point of use (an
-// if-narrowing guard immediately wrapping the access wherever the range
-// can't otherwise cross a function-return or mutable-variable boundary,
-// the same idiom fat12.tkb uses for its own allocator-bookkeeping
-// indices). The only remaining raw-pointer arithmetic is the same
-// "pointer island" idiom http_server.tkb / http_sdcard_server.tkb already
-// use for request scanning and response-body composition
-// (copy_str/write_udec/bytes_copy appending into an unbounded destination,
-// manually bounded by the explicit length checks around each call site) --
-// unlike the table, these have no fixed compile-time-provable capacity to
-// refine against.
+// The whole table (kv_state+kv_key_len+kv_val_len+kv_keys+kv_vals, 2608
+// bytes) is persisted as ONE file ("KVSTABLEDAT") via plain sequential
+// fat_write/fat_read calls -- no manual sector packing or magic/checksum
+// header needed: the file's mere existence is "was anything ever saved",
+// and fat_open(FA_WRITE | FA_CREATE_ALWAYS) now overwrites an existing
+// file in place (frees its old cluster chain, reuses its directory slot --
+// GitHub issue #135's Part A prerequisite, see fat12.tkb's fat_open
+// comment) instead of leaking a fresh directory slot on every write, which
+// is exactly what a write-through KVS needs.
 //
-// Store layout: PARALLEL FLAT ARRAYS, not an array of structs. Indexed
-// writes into an array-typed struct field (`arr[i].field[j] = v`) are a
-// parser error (see SPEC.md's Structs section) -- the only workaround
-// would be a raw-pointer detour, which the baseline process forbids as a
-// bounds-check dodge. Flat arrays keep every store access a checked index.
+// RTOS task design (examples/common/rtos.tkb): task 0 is app_main itself,
+// running the HTTP/TCP poll loop (same as kvs_server.tkb). Task 1 is
+// sd_worker, the only code that ever touches fat12.tkb/sdmmc.tkb (matching
+// sdmmc.tkb's own documented "no internal locking, single caller" scope).
+// Unlike http_server_sdcard_rtos.tkb's SdRequestChan (which threads a
+// name83/off/want/dst request payload across a file boundary), sd_worker
+// and http_start_response live in the SAME file here, so kv_state/etc are
+// ordinary globals sd_worker's own functions see directly by name -- no
+// pointers need to cross the RPC boundary. KvsSdRequest carries no payload
+// at all (Init, Save); safety is the same convention sdmmc.tkb itself
+// relies on: only sd_worker ever touches the five table arrays during a
+// Load/Save, because the network task is synchronously blocked in the RPC
+// rendezvous the entire time.
 //
-// Collision handling: djb2 hash (examples/djb2 precedent) + linear probing
-// + tombstone deletion. Backward-shift deletion was considered and
-// rejected: it needs wraparound "distance from home" comparisons, which
-// are both more code and much harder to carry through --forbid-trap's
-// proof obligations later. A tombstone is a third slot state; lookup
-// probes through tombstones and stops at the first truly empty slot;
-// insertion reuses the earliest tombstone seen during its probe. All
-// probe loops are bounded at TABLE_SLOTS iterations regardless of
-// collisions, so tombstone buildup costs probe-loop iterations, never
-// correctness or termination.
+// Write failures are not surfaced to the HTTP client: the RAM table update
+// already succeeded (that's what the client's response reflects), only
+// durability is at risk. UART logs the failure. This mirrors
+// examples/common_stm32/fat12_sdmmc.tkb's own documented scope decision
+// not to thread a real disk_read/disk_write failure up through its
+// callers.
+//
+// BASELINE (no --forbid-trap yet): the copied Phase-1 store/parsing logic
+// keeps its existing refined types (stripping them out would be wasted
+// motion -- nothing new is being learned about that code). Only the
+// genuinely new code in this file (KvsSdRequest/KvsSdRequestChan,
+// sd_worker, kvs_sd_load/kvs_sd_save/kvs_reset_table, the RPC wrappers,
+// the two persist call-site insertions, and app_main) is unrefined for
+// now, per AGENTS.md's "prove without --forbid-trap first" process. Turned
+// on once this whole milestone is proven working end to end on real
+// hardware, including the persistence-survives-a-reset check -- see
+// HISTORY.md's issue #135 entry once that lands.
 
 use "examples/common/inet_checksum.tkb";
 use "examples/common/netutil.tkb";
 use "examples/common/http_server_common.tkb";
+use "examples/common/rtos.tkb";
+use "examples/common_stm32/fat12_sdmmc.tkb";
 
 let mut our_mac: [u8; 6];
 let mut our_ip:  [u8; 4];
 
-// -- Store constants and layout -------------------------------------------
+// -- Store constants and layout (copied from kvs_server.tkb, unchanged) ---
 
 let KEY_MAX:     isize = 32;  // key charset: [A-Za-z0-9_-], length 1..32
 let VAL_MAX:     isize = 128; // value: arbitrary bytes, length 0..128
@@ -83,7 +88,7 @@ let TABLE_SLOTS: isize = 16;
 
 // kv_state[slot]: 0 = empty, 1 = used, 2 = tombstone. All five arrays are
 // BSS-zeroed at boot, so the table starts out entirely empty with no
-// explicit init needed.
+// explicit init needed (matching the RAM-only default before any SD load).
 let mut kv_state:   [u8; 16];
 let mut kv_key_len: [u8; 16];
 let mut kv_val_len: [u8; 16];
@@ -94,21 +99,12 @@ let STATE_EMPTY:    u8 = 0;
 let STATE_USED:     u8 = 1;
 let STATE_TOMBSTONE: u8 = 2;
 
-// -- Request-parsing scratch ------------------------------------------------
+// -- Request-parsing scratch (copied, unchanged) ---------------------------
 
-// Holds the most recently parsed key (see kvs_parse_path). Owned here, not
-// by http_server_common.tkb -- same "response generation belongs to the
-// including example" split http_server.tkb/http_sdcard_server.tkb use for
-// html_body.
 let mut key_buf: [u8; 32];
-
-// Worst-case LIST body: TABLE_SLOTS * (KEY_MAX + 1 for the trailing '\n')
-// = 16 * 33 = 528 bytes. 560 leaves a small margin without materially
-// changing the (well under HTTP_SEGMENT_PAYLOAD_MAX=1400) total response
-// size budget.
 let mut list_body: [u8; 560];
 
-// -- djb2 hash + linear probing --------------------------------------------
+// -- djb2 hash + linear probing (copied, unchanged) ------------------------
 
 fn kvs_hash(key: borrow *u8, klen: isize) -> u32 {
     let mut h: u32 = 5381;
@@ -118,10 +114,6 @@ fn kvs_hash(key: borrow *u8, klen: isize) -> u32 {
     return h;
 }
 
-// Returns the slot index of an exact (state==used, same key) entry, or -1
-// if not present. Probes at most TABLE_SLOTS slots; stops at the first
-// EMPTY slot (a tombstone does NOT end the probe chain -- the entry it
-// displaced may still be further along the same chain).
 fn kvs_find(key: borrow *u8, klen: isize) -> i32 {
     let home: u32 = kvs_hash(key, klen) & 15;
     let mut probe: u32 = 0;
@@ -140,10 +132,6 @@ fn kvs_find(key: borrow *u8, klen: isize) -> i32 {
     return -1;
 }
 
-// Returns 0 = inserted into a previously empty/tombstone slot, 1 =
-// overwrote an existing entry with the same key, -1 = table full (no
-// empty/tombstone slot found within TABLE_SLOTS probes, and no existing
-// entry matched).
 fn kvs_put(key: borrow *u8, klen: isize, val: borrow *u8, vlen: isize) -> i32 {
     let existing: i32 = kvs_find(key, klen);
     let mut slot: usize = 0;
@@ -179,12 +167,6 @@ fn kvs_put(key: borrow *u8, klen: isize, val: borrow *u8, vlen: isize) -> i32 {
         slot = existing as usize;
     }
 
-    // slot is always in {0..<16} by construction (either `& 15` directly
-    // above, or kvs_find's internal `& 15`-derived result, cast back to
-    // usize through its i32 sentinel return type) -- but that proof does
-    // not cross the function-call/i32-sentinel boundary, so it is
-    // re-established here at the point of use, the same if-narrowing
-    // idiom fat12.tkb uses for its own allocator-bookkeeping indices.
     if (slot < 16) {
         kv_state[slot] = STATE_USED;
         kv_key_len[slot] = klen as u8;
@@ -211,9 +193,6 @@ fn kvs_del(key: borrow *u8, klen: isize) -> bool {
 
 fn kvs_build_list_body() -> isize {
     let mut len: isize = 0;
-    // `for slot: usize in 0..<16` (unlike an equivalent `while`-loop
-    // counter) gives slot the proven range {0..<16} directly, so
-    // kv_state[slot]/kv_key_len[slot] below need no separate narrowing.
     for slot: usize in 0..<16 {
         if (kv_state[slot] == STATE_USED) {
             let klen: isize = kv_key_len[slot] as isize;
@@ -229,7 +208,7 @@ fn kvs_build_list_body() -> isize {
     return len;
 }
 
-// -- HTTP request parsing ---------------------------------------------------
+// -- HTTP request parsing (copied, unchanged) ------------------------------
 
 enum KvsMethod: u8 {
     Get;
@@ -238,11 +217,6 @@ enum KvsMethod: u8 {
     Other;
 }
 
-// The core's http_method_accepted already sniffed the first 3 bytes as
-// GET/PUT/DEL before calling http_start_response, but that sniff doesn't
-// verify the space delimiter or (for DELETE) the remaining 4 bytes -- this
-// re-checks the full verb token independently, since it also needs to
-// know exactly where the verb ends (path_start below).
 fn kvs_classify_method(req: borrow *u8, len: isize) -> KvsMethod {
     if (len >= 4 && req[0] == 'G' as u8 && req[1] == 'E' as u8 &&
         req[2] == 'T' as u8 && req[3] == ' ' as u8) {
@@ -267,17 +241,6 @@ fn kvs_key_char_ok(c: u8) -> bool {
            c == '_' as u8 || c == '-' as u8;
 }
 
-// p points just past "METHOD " (the path); avail bounds it (up to the
-// header terminator, always enough to find the trailing space that ends a
-// well-formed request line, or to hit avail's end for a malformed one).
-// Returns:
-//   -3  path doesn't start with "/keys" at all (unknown resource -> 404)
-//   -2  "/keys/" prefix present but the key is empty, too long, contains a
-//       character outside [A-Za-z0-9_-], or the request line never
-//       reaches a trailing space within `avail` (malformed -> 400)
-//   -1  path is exactly "/keys" (LIST or method-not-allowed, dispatched
-//       by the caller)
-//   >=0 key length; the key bytes are left in key_buf
 fn kvs_parse_path(p: borrow *u8, avail: isize) -> i32 {
     if (avail < 5 || p[0] != '/' as u8 || p[1] != 'k' as u8 ||
         p[2] != 'e' as u8 || p[3] != 'y' as u8 || p[4] != 's' as u8) {
@@ -296,28 +259,12 @@ fn kvs_parse_path(p: borrow *u8, avail: isize) -> i32 {
     let mut i: isize = 6;
     let mut klen: isize = 0;
     while (i < avail && p[i] != ' ' as u8) {
-        // Compared against the literal 32, not the named KEY_MAX global:
-        // a refined-type narrowing must be spelled as a literal integer
-        // (same restriction array sizes have -- see
-        // examples/const_global/const_global.tkb's comment), a named
-        // global's value does not carry a provable range at its use site
-        // even when its own initializer is a literal.
         if (klen >= 32) {
             return -2;
         }
         if (kvs_key_char_ok(p[i]) == false) {
             return -2;
         }
-        // If-narrowing only carries the proven range into the TRUE branch
-        // of the condition it guards (see kvs_put's own if-narrowing
-        // comment) -- an early return in the false branch above does not
-        // retroactively narrow klen for the code that follows, so the
-        // write is wrapped in its own (redundant at runtime, but
-        // prover-visible) guard. The cast to usize happens BEFORE the
-        // check, and the check narrows that exact usize variable -- codegen
-        // only consults if-narrowing for the precise variable named in the
-        // condition, so checking the pre-cast isize value doesn't carry
-        // over to a variable produced by casting it afterward.
         let n_idx: usize = klen as usize;
         if (n_idx < 32) {
             key_buf[n_idx] = p[i];
@@ -355,24 +302,13 @@ fn kvs_parse_udec(p: borrow *u8, avail: isize) -> i32 {
     return v;
 }
 
-// Scans header lines in req[0..hdr_end) for an exact "Content-Length: "
-// prefix and parses the decimal value that follows. Returns -1 if the
-// header is absent -- a PUT with no Content-Length is accepted; its value
-// is simply "the rest of this TCP segment" (see http_start_response).
 fn kvs_content_length(req: borrow *u8, hdr_end: isize) -> i32 {
     let mut i: isize = 0;
     while (i < hdr_end) {
-        // "Content-Length: " is 16 bytes (C-o-n-t-e-n-t--L-e-n-g-t-h-:-
-        // space); the value starts at +16, not +17. A stale +17 here
-        // (found via real-hardware testing: a client that splits headers
-        // and body into separate TCP segments, e.g. Python's http.client,
-        // sends a single-digit Content-Length whose one digit this then
-        // skipped entirely, landing on the following \r -- kvs_parse_udec
-        // saw no digits and returned -1, which silently disabled the
-        // mismatch check below instead of catching the split body) let a
-        // single-digit Content-Length silently defeat the check;
-        // multi-digit values usually still produced a wrong-but-different
-        // number that happened to still mismatch, masking the bug.
+        // "Content-Length: " is 16 bytes; see kvs_server.tkb's copy of
+        // this function for the real-hardware bug a stale +17 here caused
+        // (a single-digit value's one digit was skipped entirely,
+        // silently disabling this mismatch check).
         if (kvs_starts_with(req + i, hdr_end - i, "Content-Length: ")) {
             return kvs_parse_udec(req + i + 16, hdr_end - i - 16);
         }
@@ -393,7 +329,7 @@ fn kvs_find_hdr_end(req: borrow *u8, len: isize) -> isize {
     return -1;
 }
 
-// -- Response generation ------------------------------------------------
+// -- Response generation (copied, unchanged) -------------------------------
 
 fn kvs_write_status_line(payload: borrow *u8, status_id: i32) -> isize {
     if (status_id == 201) {
@@ -414,9 +350,6 @@ fn kvs_write_status_line(payload: borrow *u8, status_id: i32) -> isize {
     return copy_str(payload, "HTTP/1.1 200 OK\r\n");
 }
 
-// One uniform response builder for every KVS response. Always single-
-// segment, closed with our own FIN -- see the file header. body/body_len
-// may describe zero bytes (pass "" for an empty body).
 fn kvs_build_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
         status_id: i32, body: borrow *u8, body_len: isize) -> i32 {
     let payload: *u8 = (eth as *u8) + 54;
@@ -431,14 +364,183 @@ fn kvs_build_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
     return build_tcp_payload(eth, ihl, len, TCP_FLAG_ACK | TCP_FLAG_PSH | TCP_FLAG_FIN);
 }
 
-// -- Core callbacks -----------------------------------------------------
+// -- SD persistence (NEW) --------------------------------------------------
 
-// Must never return -1 for a verb the core already accepted (GET/PUT/
-// DELETE): http_server_common.tkb advances conn_rcv_nxt before calling
-// this callback, so a Dropped response (return -1) wedges the connection
-// rather than answering it -- see http_server_common.tkb's TcpSendOutcome
-// comment. Every parse failure below therefore produces a real HTTP error
-// response (400/404/405/507) instead.
+fn kvs_reset_table() {
+    for i: usize in 0..<16 {
+        kv_state[i] = STATE_EMPTY;
+        kv_key_len[i] = 0;
+        kv_val_len[i] = 0;
+    }
+    for i: usize in 0..<512 {
+        kv_keys[i] = 0;
+    }
+    for i: usize in 0..<2048 {
+        kv_vals[i] = 0;
+    }
+}
+
+// Overwrites (or creates) KVS_FILE_NAME with the current table state, as
+// five sequential fat_write calls -- fat_write/fat_read track fptr/
+// cur_cluster across calls on the same handle, so this needs no manual
+// sector packing. fat_open(FA_CREATE_ALWAYS) reuses the file's existing
+// directory slot/cluster chain if it already exists (GitHub issue #135
+// Part A), which is what makes calling this on every PUT/DELETE safe.
+fn kvs_sd_save() -> i32 {
+    let name: *u8 = "KVSTABLEDAT"; // 8.3: "KVSTABLE" + "DAT", no dot
+    match fat_open(name, FA_WRITE | FA_CREATE_ALWAYS) {
+        FatOpenResult::Error(err) => {
+            uart_puts("kvs_server_sdcard_rtos: SD save open FAILED\r\n");
+            return -1;
+        }
+        FatOpenResult::Opened(mut fp) => {
+            let mut bw: u32 = 0;
+            fat_write(fp, kv_state,   16,   &bw);
+            fat_write(fp, kv_key_len, 16,   &bw);
+            fat_write(fp, kv_val_len, 16,   &bw);
+            fat_write(fp, kv_keys,    512,  &bw);
+            fat_write(fp, kv_vals,    2048, &bw);
+            fat_close(fp);
+            return 0;
+        }
+    }
+}
+
+// Loads KVS_FILE_NAME into the table if it exists. Returns 0 = loaded, 1 =
+// no saved file yet (table stays/becomes empty) -- also returned if the
+// file exists but is short (a torn write from a power loss mid-save),
+// which resets the table to empty rather than trusting a partial load.
+fn kvs_sd_load() -> i32 {
+    let name: *u8 = "KVSTABLEDAT"; // 8.3: "KVSTABLE" + "DAT", no dot
+    match fat_open(name, FA_READ) {
+        FatOpenResult::Error(err) => {
+            return 1;
+        }
+        FatOpenResult::Opened(mut fp) => {
+            let mut br: u32 = 0;
+            let mut total: u32 = 0;
+            fat_read(fp, kv_state,   16,   &br); total = total + br;
+            fat_read(fp, kv_key_len, 16,   &br); total = total + br;
+            fat_read(fp, kv_val_len, 16,   &br); total = total + br;
+            fat_read(fp, kv_keys,    512,  &br); total = total + br;
+            fat_read(fp, kv_vals,    2048, &br); total = total + br;
+            fat_close(fp);
+            if (total != 2608) {
+                uart_puts("kvs_server_sdcard_rtos: SD table short-read, starting empty\r\n");
+                kvs_reset_table();
+                return 1;
+            }
+            return 0;
+        }
+    }
+}
+
+// -- RTOS task split (NEW) -------------------------------------------------
+//
+// Task 0 (app_main) runs the HTTP/TCP poll loop, same as kvs_server.tkb.
+// Task 1 (sd_worker) is the only code that ever touches fat12.tkb/
+// sdmmc.tkb; kv_state/kv_key_len/kv_val_len/kv_keys/kv_vals are ordinary
+// file-scope globals sd_worker's own functions above already see directly
+// by name, so the RPC carries no payload -- see this file's header
+// comment for why that's safe (the network task is synchronously blocked
+// in the rendezvous the whole time a Load/Save runs).
+
+variant KvsSdRequest {
+    Init;
+    Save;
+}
+
+// Same hand-duplicated Chan-shaped struct idiom as
+// http_server_sdcard_rtos.tkb's SdRequestChan (issue #113 stays
+// demand-led -- Chan is not generic).
+struct KvsSdRequestChan {
+    private mutex:      i32;
+    private slot_full:  io i32;
+    private slot_taken: io i32;
+    private full:       i32;
+    private value:      KvsSdRequest;
+}
+
+let mut kvs_sd_request_ch:  KvsSdRequestChan;
+let mut kvs_sd_response_ch: Chan; // 0=loaded / 1=empty (no file, or blank card) / -1=disk_initialize failed
+let mut sd_stack: [u8; 8192];     // same size as http_server_sdcard_rtos.tkb's sd_stack
+
+fn kvs_sd_request_chan_init(ch: *KvsSdRequestChan) {
+    ch.mutex = 1;
+    ch.slot_full = 0;
+    ch.slot_taken = 0;
+    ch.full = 0;
+    ch.value = KvsSdRequest::Init;
+}
+
+fn kvs_sd_request_send(ch: *KvsSdRequestChan, request: KvsSdRequest) !{may_block} {
+    let mut g = mutex_lock(&ch.mutex);
+    while (ch.full != 0) {
+        g = cond_wait(&ch.slot_taken, g, &ch.mutex);
+    }
+    ch.value = request;
+    ch.full = 1;
+    cond_signal(&ch.slot_full);
+    while (ch.full != 0) {
+        g = cond_wait(&ch.slot_taken, g, &ch.mutex);
+    }
+    mutex_unlock(g, &ch.mutex);
+}
+
+fn kvs_sd_request_recv(ch: *KvsSdRequestChan) -> KvsSdRequest !{may_block} {
+    let mut g = mutex_lock(&ch.mutex);
+    while (ch.full == 0) {
+        g = cond_wait(&ch.slot_full, g, &ch.mutex);
+    }
+    let request: KvsSdRequest = ch.value;
+    ch.full = 0;
+    cond_signal(&ch.slot_taken);
+    mutex_unlock(g, &ch.mutex);
+    return request;
+}
+
+fn sd_worker() {
+    while (true) {
+        let request: KvsSdRequest = kvs_sd_request_recv(&kvs_sd_request_ch);
+        match request {
+            KvsSdRequest::Init => {
+                let mut status: i32 = 0;
+                if (disk_initialize() != 0) {
+                    uart_puts("kvs_server_sdcard_rtos: disk_initialize FAIL\r\n");
+                    status = -1;
+                } else if (fat_is_formatted()) {
+                    fat_mount();
+                    status = kvs_sd_load();
+                } else {
+                    fat_format();
+                    status = 1;
+                }
+                chan_send(&kvs_sd_response_ch, status);
+            }
+            KvsSdRequest::Save => {
+                chan_send(&kvs_sd_response_ch, kvs_sd_save());
+            }
+        }
+    }
+}
+
+fn kvs_sd_init_rpc() -> i32 {
+    kvs_sd_request_send(&kvs_sd_request_ch, KvsSdRequest::Init);
+    return chan_recv(&kvs_sd_response_ch);
+}
+
+fn kvs_sd_save_rpc() -> i32 {
+    kvs_sd_request_send(&kvs_sd_request_ch, KvsSdRequest::Save);
+    return chan_recv(&kvs_sd_response_ch);
+}
+
+// -- Core callbacks -----------------------------------------------------
+//
+// Copied from kvs_server.tkb with exactly two insertions (marked NEW
+// below): a write-through kvs_sd_save_rpc() call after a successful PUT
+// and after a successful DELETE, before the response is built. GET/LIST
+// and every error path are unchanged.
+
 fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
         req: borrow *u8, req_len: u16) -> i32 {
     let len: isize = req_len as isize;
@@ -502,6 +604,7 @@ fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
             if (put_result < 0) {
                 return kvs_build_response(eth, ihl, 507, "table full\n", 11);
             }
+            kvs_sd_save_rpc(); // NEW: write-through persist before answering
             if (put_result == 0) {
                 return kvs_build_response(eth, ihl, 201, "", 0);
             }
@@ -523,6 +626,7 @@ fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
             }
             let klen: isize = r as isize;
             if (kvs_del(key_buf, klen)) {
+                kvs_sd_save_rpc(); // NEW: write-through persist before answering
                 return kvs_build_response(eth, ihl, 200, "", 0);
             }
             return kvs_build_response(eth, ihl, 404, "not found\n", 10);
@@ -543,17 +647,32 @@ fn http_response_done() -> bool {
 }
 
 fn app_main() {
-    uart_puts("kvs_server: init\r\n");
+    kvs_sd_request_chan_init(&kvs_sd_request_ch);
+    chan_init(&kvs_sd_response_ch);
+
+    uart_puts("kvs_server_sdcard_rtos: init\r\n");
 
     match net_init() {
         NetInitResult::Failed => {
-            uart_puts("kvs_server: device/link not found\r\n");
+            uart_puts("kvs_server_sdcard_rtos: device/link not found\r\n");
         }
         NetInitResult::Ready(mut ready) => {
             net_read_mac(our_mac as *u8);
             slice_copy(our_ip as []u8, HTTP_SERVER_IP as []u8);
 
-            uart_puts("kvs_server: ready\r\n");
+            rtos_task_add(1, setup_task_stack(sd_stack + 8192, sd_worker));
+            rtos_start();
+
+            let sd_init_result: i32 = kvs_sd_init_rpc();
+            if (sd_init_result == 0) {
+                uart_puts("kvs_server_sdcard_rtos: loaded table from SD\r\n");
+            } else if (sd_init_result == 1) {
+                uart_puts("kvs_server_sdcard_rtos: starting empty\r\n");
+            } else {
+                uart_puts("kvs_server_sdcard_rtos: SD init FAILED, serving RAM-only\r\n");
+            }
+
+            uart_puts("kvs_server_sdcard_rtos: ready\r\n");
 
             while (true) {
                 ready = http_server_poll_once(ready);

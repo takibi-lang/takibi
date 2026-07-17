@@ -286,6 +286,54 @@ else
 fi
 rm -f "$tmp_sdcard_flash_log" "$sdcard_provision_log"
 
+# kvs_server_sdcard_rtos (GitHub issue #135 STM32 milestone): real Ethernet
+# + real SD-card persistence through FAT12 + RTOS task separation, landed
+# together as one milestone -- see examples/kvs_server_sdcard_rtos/
+# kvs_server_sdcard_rtos.tkb's header comment. No SD provisioning step
+# runs first (unlike http_server_sdcard/_rtos's FAT12 image seeding): this
+# firmware creates its own table file on first boot if none exists, so
+# whatever the http_server_sdcard(_rtos) sub-tests above already did to
+# the card (their own FAT12 content, never a "KVSTABLEDAT" file) gives
+# this test's first boot a real, non-contrived "no saved table yet" start
+# every run.
+#
+# Run across TWO back-to-back RAM boots with NO reprovisioning between
+# them -- the actual meaningful persistence proof, which the QEMU-side
+# scripts/kvs_test.py has no analog for (a fresh QEMU process keeps no
+# state across a restart at all): the first boot (KVS_TEST_PHASE=full,
+# the script's own default) proves PUT/GET/DELETE/LIST work end to end
+# over real Ethernet through the RTOS/SD-card wiring, and leaves one extra
+# key durably written; the second boot (a genuine MCU reset via openocd,
+# SD card physically untouched) proves that key is still readable, i.e.
+# it survived a real reset, not just a RAM lifetime.
+kvs_rtos_name="kvs_server_sdcard_rtos (stm32/ram)"
+if ! ram_load_and_run examples/kvs_server_sdcard_rtos/kernel_stm32_ram.elf; then
+    printf "${RED}FAIL${RST}  %s  (openocd RAM load failed, boot 1)\n" "$kvs_rtos_name"
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("$kvs_rtos_name")
+else
+    echo "-- $kvs_rtos_name --"
+    if ! sudo python3 scripts/eth_kvs_server_stm32_test.py; then
+        printf "${RED}FAIL${RST}  %s  (protocol test failed, boot 1)\n" "$kvs_rtos_name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$kvs_rtos_name")
+    elif ! ram_load_and_run examples/kvs_server_sdcard_rtos/kernel_stm32_ram.elf; then
+        printf "${RED}FAIL${RST}  %s  (openocd RAM load failed, boot 2)\n" "$kvs_rtos_name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$kvs_rtos_name")
+    else
+        echo "-- $kvs_rtos_name (persistence-survives-reset check) --"
+        if sudo KVS_TEST_PHASE=verify_persistence python3 scripts/eth_kvs_server_stm32_test.py; then
+            printf "${GRN}PASS${RST}  %s\n" "$kvs_rtos_name"
+            PASS=$((PASS + 1))
+        else
+            printf "${RED}FAIL${RST}  %s\n" "$kvs_rtos_name"
+            FAIL=$((FAIL + 1))
+            FAILED_TESTS+=("$kvs_rtos_name")
+        fi
+    fi
+fi
+
 # Add new Ethernet hardware tests here as they're ported.
 
 echo ""
