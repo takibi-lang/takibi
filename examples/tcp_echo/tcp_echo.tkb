@@ -101,7 +101,6 @@ enum ConnState: u8 {
 }
 
 let mut conn_state:       ConnState = ConnState::Listen;
-let mut conn_remote_mac:  [u8; 6];
 let mut conn_remote_ip:   [u8; 4];
 let mut conn_remote_port: u16 = 0;
 let mut conn_snd_nxt:     u32 = 0; // our next unacknowledged sequence number
@@ -280,8 +279,11 @@ fn app_main() {
                     NetRxAcquire::None(next) => { ready = next; }
                     NetRxAcquire::Acquired(acquired) => {
                         let len: i32 = net_rx_len(acquired);
-                        let mut should_tx: i32 = 0;
-                        let mut tx_len: i32 = 0;
+                        // The disposition variant replaces the old
+                        // should_tx/tx_len integer flag pair: a reply and
+                        // its length are now one value, so "flagged but no
+                        // length" is unrepresentable.
+                        let mut plan: NetRxDisposal = NetRxDisposal::Release;
                         let frame = net_rx_frame(acquired);   // only read when len proves acquisition
 
                         // 14 (eth) + 20 (min IPv4) + 20 (min TCP) = 54
@@ -367,15 +369,13 @@ fn app_main() {
                                                     if (dst_port == TCP_ECHO_PORT) {
                                                         if (conn_state == ConnState::Listen) {
                                                             if ((flags & TCP_FLAG_SYN) != 0) {
-                                                                slice_copy(conn_remote_mac as []u8, frame[6..<12]);
                                                                 slice_copy(conn_remote_ip as []u8, ip[IP_SRC..<IP_DST]);
                                                                 conn_remote_port = src_port;
                                                                 conn_rcv_nxt = seq + 1;
                                                                 conn_snd_nxt = TCP_INITIAL_SEQ + 1;
 
                                                                 build_syn_ack(frame, ihl);
-                                                                should_tx = 1;
-                                                                tx_len = 14 + ihl + 20;
+                                                                plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20);
                                                                 conn_state = ConnState::SynRcvd;
                                                             }
                                                         } else {
@@ -397,8 +397,7 @@ fn app_main() {
                                                                     if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
                                                                         conn_rcv_nxt = conn_rcv_nxt + 1; // FIN consumes one seq number
                                                                         build_fin_ack(frame, ihl);
-                                                                        should_tx = 1;
-                                                                        tx_len = 14 + ihl + 20;
+                                                                        plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20);
                                                                         conn_snd_nxt = conn_snd_nxt + 1; // our FIN too
                                                                         conn_state = ConnState::LastAck;
                                                                     } else {
@@ -455,8 +454,7 @@ fn app_main() {
                                                                                 frame[data_off_idx..<data_off_idx + data_len_idx]
                                                                             };
                                                                             if (build_data_echo(frame, ihl, data, data_len) == 1) {
-                                                                                should_tx = 1;
-                                                                                tx_len = 14 + ihl + 20 + data_len;
+                                                                                plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20 + (data_len as i32));
                                                                                 // conn_rcv_nxt/conn_snd_nxt are u32
                                                                                 // (sequence numbers), data_len is u16 --
                                                                                 // the widening cast here is harmless
@@ -487,12 +485,7 @@ fn app_main() {
                             }
                         }
 
-                        if (should_tx == 1) {
-                            let in_flight = net_transmit(acquired, tx_len);
-                            ready = net_tx_complete(in_flight);
-                        } else {
-                            ready = net_rx_release(acquired);
-                        }
+                        ready = net_rx_finish(acquired, plan);
                     }
                 }
             }

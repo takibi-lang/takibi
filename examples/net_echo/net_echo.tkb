@@ -18,13 +18,15 @@
 
 use "examples/common/netutil.tkb";
 
-fn swap_mac(frame: borrow *u8) {
-    for i in 0..<ETH_MAC_LEN {
-        let a: u8 = frame[ETH_DST_OFF + i];
-        let b: u8 = frame[ETH_SRC_OFF + i];
-        frame[ETH_DST_OFF + i] = b;
-        frame[ETH_SRC_OFF + i] = a;
-    }
+// Swaps the destination and source MAC fields in place. The borrowed
+// slice's minimum capacity (12 = the dst+src MAC pair) makes every access
+// below compile-time proven -- this used to be a raw-pointer loop, kept
+// only because borrowed slice parameters did not exist yet.
+fn swap_mac(eth: borrow [u8; 12..]) {
+    let mut tmp: [u8; 6];
+    slice_copy(tmp as []u8, eth[ETH_DST..<ETH_SRC]);
+    slice_copy(eth[ETH_DST..<ETH_SRC], eth[ETH_SRC..<ETH_TYPE]);
+    slice_copy(eth[ETH_SRC..<ETH_TYPE], tmp as []u8);
 }
 
 fn app_main() {
@@ -46,7 +48,7 @@ fn app_main() {
                         // A valid Ethernet frame needs at least a 12-byte dst+src MAC pair.
                         if (len >= 12) {
                             let frame = net_rx_frame(acquired);
-                            swap_mac(frame as *u8);
+                            swap_mac(frame);
                             let in_flight = net_transmit(acquired, len);
                             ready = net_tx_complete(in_flight);
                         } else {

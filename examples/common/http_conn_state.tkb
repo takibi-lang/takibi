@@ -20,8 +20,11 @@
 // writes the target phase its name claims, or that a builder emits the segment
 // it claims. Those need a state-to-storage invariant and a functional packet
 // spec respectively, not bare SMT. Everything outside this file is forced
-// through it: dispatch via tcp_conn_dispatch(), read-back for response
-// bookkeeping via tcp_conn_state(), and writes via nothing else.
+// through it: dispatch via tcp_conn_dispatch(), and writes via nothing else.
+// There is no state read-back accessor anymore: the fallible transitions
+// return a TcpSendOutcome variant that already says whether the built
+// segment carried our FIN, which is the only fact callers ever derived
+// from re-reading the phase.
 //
 // Deliberately NOT here: conn_snd_nxt/conn_rcv_nxt sequence-number
 // bookkeeping (stays private to http_server_common.tkb -- wire arithmetic,
@@ -52,9 +55,18 @@ variant TcpConnDispatch {
 
 private let mut conn_state: ConnState = ConnState::Listen;
 
-// The one read path for dispatching on the current state.
-fn tcp_conn_state() -> ConnState {
-    return conn_state;
+// Result of a fallible transition that builds a response segment. Dropped
+// means the build failed and the phase did not change (the disposition is
+// still decided: rely on the peer's retransmit). Sent/SentFin carry the
+// payload length the builder produced; SentFin additionally records that
+// the segment included our FIN, which consumes one sequence number -- the
+// caller's wire bookkeeping needs exactly that one extra fact, and getting
+// it here (instead of re-reading the phase through an accessor) keeps this
+// file's state write-only to the outside.
+variant TcpSendOutcome {
+    Dropped;
+    Sent(i32);
+    SentFin(i32);
 }
 
 // Convert the private runtime state into the closed dispatch package. The
@@ -116,8 +128,8 @@ fn tcp_reject_with_rst(pending: sink PendingTcpEvent,
 // -- Transitions with a send obligation ----------------------------------
 // Each calls its obliged segment builder itself, then moves the phase;
 // fallible builders gate the phase write on their own success return.
-// Callers derive should_tx/tx_len and sequence-number updates from the
-// returned length (and, for response completion, from tcp_conn_state()).
+// Callers derive the TX disposition and sequence-number updates from the
+// returned TcpSendOutcome.
 
 // Listen -> SynRcvd: reachable only by building the SYN-ACK.
 fn tcp_accept_via_syn_ack(pending: sink PendingTcpEvent,
@@ -143,42 +155,47 @@ fn tcp_begin_close_via_fin_ack(pending: sink PendingTcpEvent,
 fn tcp_respond(pending: sink PendingTcpEvent,
                conn: sink TcpConn[c, ConnState::Established],
                eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-               req: borrow *u8, req_len: u16) -> i32 {
+               req: borrow *u8, req_len: u16) -> TcpSendOutcome {
     let n: i32 = http_start_response(eth, ihl, req, req_len);
     if (n >= 0) {
         if (http_response_done()) {
             conn_state = ConnState::LastAck;
-        } else {
-            conn_state = ConnState::Sending;
+            return TcpSendOutcome::SentFin(n);
         }
+        conn_state = ConnState::Sending;
+        return TcpSendOutcome::Sent(n);
     }
-    return n;
+    return TcpSendOutcome::Dropped;
 }
 
 // Sending -> LastAck, or stay Sending: reachable only by building the
 // next continuation segment.
 fn tcp_continue(pending: sink PendingTcpEvent,
                 conn: sink TcpConn[c, ConnState::Sending],
-                eth: borrow [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
+                eth: borrow [u8; 1514..], ihl: {20..<21 as u16}) -> TcpSendOutcome {
     let n: i32 = http_continue_response(eth, ihl);
     if (n >= 0) {
         if (http_response_done()) {
             conn_state = ConnState::LastAck;
+            return TcpSendOutcome::SentFin(n);
         }
+        // More segments queued: stay Sending.
+        return TcpSendOutcome::Sent(n);
     }
-    return n;
+    return TcpSendOutcome::Dropped;
 }
 
 // LastAck -> Listen: reachable only by building the final ACK answering
 // the peer's FIN+ACK -- the compile-time form of issue #116's fix.
 fn tcp_close_via_final_ack(pending: sink PendingTcpEvent,
                            conn: sink TcpConn[c, ConnState::LastAck],
-                           eth: borrow [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
+                           eth: borrow [u8; 1514..], ihl: {20..<21 as u16}) -> TcpSendOutcome {
     let n: i32 = build_tcp_payload(eth, ihl, 0, TCP_FLAG_ACK);
     if (n >= 0) {
         conn_state = ConnState::Listen;
+        return TcpSendOutcome::Sent(n);
     }
-    return n;
+    return TcpSendOutcome::Dropped;
 }
 
 // -- Transitions with no send obligation ----------------------------------

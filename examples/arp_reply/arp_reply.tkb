@@ -50,7 +50,11 @@ fn app_main() {
                     NetRxAcquire::None(next) => { ready = next; }
                     NetRxAcquire::Acquired(acquired) => {
                         let len: i32 = net_rx_len(acquired);
-                        let mut should_tx: i32 = 0;
+                        // The disposition variant replaces the old
+                        // should_tx integer flag: "reply of some length"
+                        // and "drop" are now one value net_rx_finish
+                        // consumes together with the frame owner.
+                        let mut plan: NetRxDisposal = NetRxDisposal::Release;
 
                         // 14 (eth) + 28 (arp) = 42
                         if (len >= 42) {
@@ -72,17 +76,12 @@ fn app_main() {
                                         slice_copy(arp[ARP_SHA..<ARP_SPA], our_mac as []u8);
                                         slice_copy(arp[ARP_SPA..<ARP_THA], OUR_IP as []u8);
                                         write_u16be(arp[ARP_OPER..<ARP_SHA], 2);
-                                        should_tx = 1;
+                                        plan = NetRxDisposal::Reply(len);
                                     }
                                 }
                             }
                         }
-                        if (should_tx == 1) {
-                            let in_flight = net_transmit(acquired, len);
-                            ready = net_tx_complete(in_flight);
-                        } else {
-                            ready = net_rx_release(acquired);
-                        }
+                        ready = net_rx_finish(acquired, plan);
                     }
                 }
             }

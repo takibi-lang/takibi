@@ -437,6 +437,33 @@ fn net_tx_complete(in_flight: sink NetTxInFlight[desc])
     return net_rx_repost(in_flight.index);
 }
 
+// One-frame poll disposition, decided by the application after inspecting
+// the acquired frame: either transmit `Reply(len)` bytes in place, or hand
+// the untouched descriptor back with `Release`. A plain unrestricted
+// variant -- the linear owner itself stays a separate net_rx_finish
+// argument, so the disposition can be built and overwritten freely inside
+// nested protocol-dispatch code without ownership ceremony.
+variant NetRxDisposal {
+    Release;
+    Reply(i32);
+}
+
+// Shared tail of every single-frame poll loop. Consuming the owner here
+// keeps the transmit -> completion pairing (the "completion is our next
+// network operation" policy, see net_tx_complete) inside the driver instead
+// of copy-pasted into each protocol example.
+fn net_rx_finish(frame: sink NetRxCpuOwned[desc], disposal: NetRxDisposal)
+        -> NetRxCanAcquire !{may_block} {
+    match disposal {
+        NetRxDisposal::Reply(len) => {
+            return net_tx_complete(net_transmit(frame, len));
+        }
+        NetRxDisposal::Release => {
+            return net_rx_release(frame);
+        }
+    }
+}
+
 fn net_read_mac(mac_out: *u8) {
     virtio_net_read_mac(mac_out);
 }

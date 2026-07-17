@@ -39,7 +39,6 @@ fn tcp_conn_rcv_nxt() -> u32 {
 }
 
 let HTTP_SEGMENT_PAYLOAD_MAX: i32 = 1400;
-let mut html_body: [u8; 512];
 
 // Wire-level TCP event, classified from flag bits alone (see
 // classify_tcp_event below), independent of connection state.
@@ -123,7 +122,14 @@ fn fix_tcp_checksum(ip: borrow [u8; 20..], tcp_seg: borrow [u8; 20..]) {
                 checksum_fold(checksum_add(tcp_seg, sum)));
 }
 
-fn build_syn_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
+// One parameterized builder for every payload-free control segment
+// (SYN-ACK, FIN-ACK, RST). These used to be three near-identical 30-line
+// functions differing only in flags/seq/ack/window; the named wrappers
+// below survive because the trusted transition file calls segments by
+// KIND while the sequence-number bookkeeping (conn_snd_nxt/conn_rcv_nxt)
+// stays private to this file.
+fn build_tcp_ctrl(eth: borrow [u8; 54..], ihl: {20..<21 as u16},
+        tcp_flags: u8, seq_out: u32, ack_out: u32, window: i32) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 
@@ -141,71 +147,31 @@ fn build_syn_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
     write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
     write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
-    write_u32be(tcp[TCP_SEQ..<TCP_ACK], TCP_INITIAL_SEQ as i32);
-    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
+    write_u32be(tcp[TCP_SEQ..<TCP_ACK], seq_out as i32);
+    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], ack_out as i32);
     tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
-    tcp[TCP_FLAGS] = TCP_FLAG_SYN | TCP_FLAG_ACK;
-    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
+    tcp[TCP_FLAGS] = tcp_flags;
+    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], window);
     write_u16be(tcp[TCP_URGENT..<20], 0);
 
     fix_tcp_checksum(ip, tcp);
+}
+
+fn build_syn_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
+    build_tcp_ctrl(eth, ihl, TCP_FLAG_SYN | TCP_FLAG_ACK,
+                   TCP_INITIAL_SEQ, conn_rcv_nxt, 65535);
 }
 
 fn build_fin_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
-    slice_copy(eth[0..<6], eth[6..<12]);
-    slice_copy(eth[6..<12], our_mac as []u8);
-
-    let ip  = eth[14..<34];
-    let tcp = eth[34..<54];
-
-    slice_copy(ip[IP_DST..<20],     ip[IP_SRC..<IP_DST]);
-    slice_copy(ip[IP_SRC..<IP_DST], our_ip as []u8);
-    ip[IP_TTL] = 64 as u8;
-    write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
-                inet_checksum(ip[0..<ihl as usize]));
-
-    let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
-    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
-    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
-    write_u32be(tcp[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
-    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
-    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
-    tcp[TCP_FLAGS] = TCP_FLAG_FIN | TCP_FLAG_ACK;
-    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
-    write_u16be(tcp[TCP_URGENT..<20], 0);
-
-    fix_tcp_checksum(ip, tcp);
+    build_tcp_ctrl(eth, ihl, TCP_FLAG_FIN | TCP_FLAG_ACK,
+                   conn_snd_nxt, conn_rcv_nxt, 65535);
 }
 
+// A RST answering an unsolicited ACK echoes that ACK's own acknowledgment
+// number as its sequence number, acks nothing, and advertises no window.
 fn build_rst_from_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16},
         seq_out: u32) {
-    slice_copy(eth[0..<6], eth[6..<12]);
-    slice_copy(eth[6..<12], our_mac as []u8);
-
-    let ip  = eth[14..<34];
-    let tcp = eth[34..<54];
-
-    slice_copy(ip[IP_DST..<20],     ip[IP_SRC..<IP_DST]);
-    slice_copy(ip[IP_SRC..<IP_DST], our_ip as []u8);
-    ip[IP_TTL] = 64 as u8;
-    write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
-    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
-                inet_checksum(ip[0..<ihl as usize]));
-
-    let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
-    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
-    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
-    write_u32be(tcp[TCP_SEQ..<TCP_ACK], seq_out as i32);
-    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], 0);
-    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
-    tcp[TCP_FLAGS] = TCP_FLAG_RST;
-    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 0);
-    write_u16be(tcp[TCP_URGENT..<20], 0);
-
-    fix_tcp_checksum(ip, tcp);
+    build_tcp_ctrl(eth, ihl, TCP_FLAG_RST, seq_out, 0, 0);
 }
 
 fn build_tcp_payload(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
@@ -246,14 +212,16 @@ fn build_tcp_payload(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
     return -1;
 }
 
-fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire {
+fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_block} {
     net_rx_wait();
     match net_rx_acquire(ready) {
         NetRxAcquire::None(next) => { return next; }
         NetRxAcquire::Acquired(acquired) => {
             let len: i32 = net_rx_len(acquired);
-            let mut should_tx: i32 = 0;
-            let mut tx_len: i32 = 0;
+            // The disposition variant replaces the old should_tx/tx_len
+            // integer flag pair: a reply and its length are now one value,
+            // consumed together with the frame owner by net_rx_finish.
+            let mut plan: NetRxDisposal = NetRxDisposal::Release;
             let frame = net_rx_frame(acquired);
             let ethertype: i32 = read_u16be(frame[12..<14]);
 
@@ -265,8 +233,7 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire {
                     read_u16be(arp[ARP_OPER..<ARP_SHA]) == 1) {
                     if (slice_eq(arp[ARP_TPA..<28], our_ip as []u8)) {
                         build_arp_reply(frame);
-                        should_tx = 1;
-                        tx_len = 14 + 28;
+                        plan = NetRxDisposal::Reply(14 + 28);
                     }
                 }
             } else if (len >= 54 && len <= 1514 && ethertype == 0x0800) {
@@ -330,15 +297,13 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire {
                                                         conn_snd_nxt = TCP_INITIAL_SEQ + 1;
 
                                                         tcp_accept_via_syn_ack(pending, conn, frame, ihl);
-                                                        should_tx = 1;
-                                                        tx_len = 14 + ihl + 20;
+                                                        plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20);
                                                     }
                                                     TcpEvent::Ack => {
                                                         // Unsolicited ACK on a listening socket: answer
                                                         // with a stateless RST so the peer stops retrying.
                                                         tcp_reject_with_rst(pending, conn, frame, ihl, ack);
-                                                        should_tx = 1;
-                                                        tx_len = 14 + ihl + 20;
+                                                        plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20);
                                                     }
                                                     TcpEvent::Rst => {
                                                         // Unsolicited RST: nothing to reset yet.
@@ -398,8 +363,7 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire {
                                                             if (seq == conn_rcv_nxt) {
                                                                 conn_rcv_nxt = conn_rcv_nxt + 1;
                                                                 tcp_begin_close_via_fin_ack(pending, conn, frame, ihl);
-                                                                should_tx = 1;
-                                                                tx_len = 14 + ihl + 20;
+                                                                plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20);
                                                                 conn_snd_nxt = conn_snd_nxt + 1;
                                                             } else {
                                                                 // Stale FIN, wrong seq.
@@ -425,16 +389,19 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire {
                                                                     // Handing the obligation back on failure
                                                                     // would use a variant carrying `pending`;
                                                                     // this API deliberately consumes it instead.
-                                                                    let resp_len: i32 =
-                                                                        tcp_respond(pending, conn, frame, ihl, req, data_len);
-                                                                    if (resp_len >= 0) {
-                                                                        should_tx = 1;
-                                                                        tx_len = 14 + (ihl as i32) + 20 + resp_len;
-                                                                        conn_snd_nxt = conn_snd_nxt + (resp_len as u32);
-                                                                        if (tcp_conn_state() == ConnState::LastAck) {
-                                                                            // Response completed with FIN:
-                                                                            // our FIN consumes one seq number.
-                                                                            conn_snd_nxt = conn_snd_nxt + 1;
+                                                                    // The returned TcpSendOutcome already says
+                                                                    // whether the segment carried our FIN, so no
+                                                                    // phase read-back is needed here.
+                                                                    match tcp_respond(pending, conn, frame, ihl, req, data_len) {
+                                                                        TcpSendOutcome::Dropped => {}
+                                                                        TcpSendOutcome::Sent(n) => {
+                                                                            plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20 + n);
+                                                                            conn_snd_nxt = conn_snd_nxt + (n as u32);
+                                                                        }
+                                                                        TcpSendOutcome::SentFin(n) => {
+                                                                            plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20 + n);
+                                                                            // Our FIN consumes one seq number.
+                                                                            conn_snd_nxt = conn_snd_nxt + (n as u32) + 1;
                                                                         }
                                                                     }
                                                                 } else {
@@ -468,18 +435,19 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire {
                                                         }
                                                         TcpEvent::Ack => {
                                                             if (seq == conn_rcv_nxt && ack == conn_snd_nxt) {
-                                                                let cont_len: i32 = tcp_continue(pending, conn, frame, ihl);
-                                                                if (cont_len >= 0) {
-                                                                    should_tx = 1;
-                                                                    tx_len = 14 + (ihl as i32) + 20 + cont_len;
-                                                                    conn_snd_nxt = conn_snd_nxt + (cont_len as u32);
-                                                                    if (tcp_conn_state() == ConnState::LastAck) {
+                                                                match tcp_continue(pending, conn, frame, ihl) {
+                                                                    TcpSendOutcome::Dropped => {}
+                                                                    TcpSendOutcome::Sent(n) => {
+                                                                        // More segments queued: stay Sending.
+                                                                        plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20 + n);
+                                                                        conn_snd_nxt = conn_snd_nxt + (n as u32);
+                                                                    }
+                                                                    TcpSendOutcome::SentFin(n) => {
                                                                         // Final segment included FIN: it
                                                                         // consumes one seq number.
-                                                                        conn_snd_nxt = conn_snd_nxt + 1;
+                                                                        plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20 + n);
+                                                                        conn_snd_nxt = conn_snd_nxt + (n as u32) + 1;
                                                                     }
-                                                                    // else: more segments queued. Stay
-                                                                    // Sending.
                                                                 }
                                                             } else {
                                                                 // Stale/duplicate ACK.
@@ -515,11 +483,20 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire {
                                                                 // tcp_close_via_final_ack, right after it
                                                                 // builds the closing ACK -- the co-located
                                                                 // form of issue #116's fix.
-                                                                let ack_len: i32 =
-                                                                    tcp_close_via_final_ack(pending, conn, frame, ihl);
-                                                                if (ack_len >= 0) {
-                                                                    should_tx = 1;
-                                                                    tx_len = 14 + (ihl as i32) + 20 + ack_len;
+                                                                match tcp_close_via_final_ack(pending, conn, frame, ihl) {
+                                                                    TcpSendOutcome::Dropped => {}
+                                                                    TcpSendOutcome::Sent(n) => {
+                                                                        plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20 + n);
+                                                                    }
+                                                                    TcpSendOutcome::SentFin(n) => {
+                                                                        // Unreachable: the closing ACK never
+                                                                        // carries a FIN (ours was already
+                                                                        // sent), but the closed variant keeps
+                                                                        // this arm total; a FIN would consume
+                                                                        // one seq number.
+                                                                        plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20 + n);
+                                                                        conn_snd_nxt = conn_snd_nxt + 1;
+                                                                    }
                                                                 }
                                                             } else {
                                                                 // Stale FIN+ACK, wrong seq/ack.
@@ -555,11 +532,7 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire {
                 }
             }
 
-            if (should_tx == 1) {
-                let in_flight = net_transmit(acquired, tx_len);
-                return net_tx_complete(in_flight);
-            }
-            return net_rx_release(acquired);
+            return net_rx_finish(acquired, plan);
         }
     }
 }

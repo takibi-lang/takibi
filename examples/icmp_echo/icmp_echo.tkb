@@ -111,8 +111,11 @@ fn app_main() {
                     NetRxAcquire::None(next) => { ready = next; }
                     NetRxAcquire::Acquired(acquired) => {
                         let len: i32 = net_rx_len(acquired);
-                        let mut should_tx: i32 = 0;
-                        let mut tx_len: i32 = 0;
+                        // The disposition variant replaces the old
+                        // should_tx/tx_len integer flag pair: a reply and
+                        // its length are now one value, so "flagged but no
+                        // length" is unrepresentable.
+                        let mut plan: NetRxDisposal = NetRxDisposal::Release;
 
                         // 14 (eth) + 20 (min IPv4) + 8 (min ICMP) = 42
                         if (len >= 42 && len <= 1514) {
@@ -179,8 +182,7 @@ fn app_main() {
                                                         build_echo_reply(frame, ihl, icmp_seg);
 
                                                         let reply_len: i32 = 14 + total_len;
-                                                        should_tx = 1;
-                                                        tx_len = reply_len;
+                                                        plan = NetRxDisposal::Reply(reply_len);
                                                     }
                                                 }
                                             }
@@ -190,12 +192,7 @@ fn app_main() {
                             }
                         }
 
-                        if (should_tx == 1) {
-                            let in_flight = net_transmit(acquired, tx_len);
-                            ready = net_tx_complete(in_flight);
-                        } else {
-                            ready = net_rx_release(acquired);
-                        }
+                        ready = net_rx_finish(acquired, plan);
                     }
                 }
             }

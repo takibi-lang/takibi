@@ -8,8 +8,8 @@
 // their own comment below) -- every caller has migrated, so no
 // transitional pointer wrapper remains here. bytes_eq/bytes_copy/
 // copy_str/write_udec stay pointer-based: bytes_eq/bytes_copy are general
-// -purpose (still used by netconfig.tkb / common_stm32/eth.tkb /
-// http_server's response-body construction), and copy_str/write_udec's
+// -purpose (still used by fat12.tkb / common_stm32/eth.tkb / the HTTP
+// response-body construction), and copy_str/write_udec's
 // unbounded-append pattern is the one deliberately-deferred item (see
 // CLAUDE.md's P4b section) -- use slice_copy/slice_eq (compiler builtins)
 // directly wherever a slice view is already in hand instead of these.
@@ -69,27 +69,16 @@ struct packed IcmpHdr {
     rest: [u8; 4];
 }
 
-// ETH_MAC_LEN/ETH_DST_OFF/ETH_SRC_OFF (isize) stay hand-maintained: they
-// feed raw-pointer/for-loop arithmetic in examples/net_echo/net_echo.tkb,
-// not a slice bound, so sizeof/offsetof's usize result buys nothing there
-// (raw pointers have no bounds proof in this language regardless -- see
-// CLAUDE.md's "isize and Raw Pointer Arithmetic" section) and would only
-// add an unneeded `as isize` cast. Every OTHER offset constant below is
-// now offsetof(...)-derived instead of a hand-maintained literal --
-// GitHub issue #77's fix is what makes this provable at all: these are
-// exactly the packed-struct-field-offset shape that fix targets, and
-// each remains fully usable as a proven slice index or subslice bound
-// (verified per-consumer under --forbid-trap, not just "it type-checks" --
-// see HISTORY.md's issue #77 follow-up entry). The now-unused isize
-// "_OFF"/"_HDR_LEN" literals this replaced (ETH_HDR_LEN, ETH_TYPE_OFF,
-// ARP_HDR_LEN, ARP_*_OFF, IP_HDR_LEN, IP_ADDR_LEN, IP_*_OFF, TCP_HDR_LEN,
-// TCP_*_OFF, ICMP_HDR_LEN, ICMP_*_OFF) had zero callers anywhere in this
-// repository -- dead code left behind when the pointer-based `*_p`
-// wrappers were deleted in the P4b migration wave (see CLAUDE.md), not
-// something this change needed to preserve.
-let ETH_MAC_LEN: isize = 6;
-let ETH_DST_OFF: isize = 0;
-let ETH_SRC_OFF: isize = 6;
+// Every offset constant below is offsetof(...)-derived instead of a
+// hand-maintained literal -- GitHub issue #77's fix is what makes this
+// provable at all: these are exactly the packed-struct-field-offset shape
+// that fix targets, and each remains fully usable as a proven slice index
+// or subslice bound (verified per-consumer under --forbid-trap, not just
+// "it type-checks" -- see HISTORY.md's issue #77 follow-up entry). The
+// last hand-maintained isize trio (ETH_MAC_LEN/ETH_DST_OFF/ETH_SRC_OFF)
+// existed only to feed net_echo's raw-pointer swap_mac loop; that
+// function now takes a borrowed slice and uses ETH_DST/ETH_SRC/ETH_TYPE
+// as proven subslice bounds instead, so the trio is gone.
 let ETH_DST: usize = offsetof(EthHdr, dst);
 let ETH_SRC: usize = offsetof(EthHdr, src);
 let ETH_TYPE: usize = offsetof(EthHdr, ethertype);

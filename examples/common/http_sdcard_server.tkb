@@ -6,6 +6,12 @@
 
 use "examples/common/http_server_common.tkb";
 
+// Scratch buffer for composing error-page bodies before they are copied
+// into the frame's payload area. Owned here (not by http_server_common.tkb):
+// the TCP core never touches response bytes -- response generation,
+// including its scratch space, belongs to the response generator.
+let mut html_body: [u8; 512];
+
 let mut resp_name83: [u8; 11];
 let mut resp_size: u32 = 0;
 let mut resp_sent: u32 = 0;

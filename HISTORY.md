@@ -7889,3 +7889,74 @@ handoff, nested aggregate-copy rejection, and pointer/slice ABI preservation.
 Validation: all 789 Alcotest cases passed. Full `make check` passed all 128
 host, compile-error, DWARF, and QEMU integration cases, every STM32
 cross-build, and all network sources under `--forbid-trap`.
+
+## 2026-07-17: Network Example Audit -- Deleting Pre-Core Auxiliary Code
+
+Follow-up to TAKIBI_CORE.md's post-Slice-6 consolidation: re-inspected
+`examples/common/http_server_common.tkb`, `http_conn_state.tkb`, and the five
+network examples for auxiliary code that predates variants, indexed owners,
+borrowed pointer/slice parameters, and effects, and deleted what those
+features now express directly. No compiler change; examples and shared
+`.tkb` files only.
+
+What was removed or replaced, and which feature obsoleted it:
+
+- **`should_tx`/`tx_len` mutable integer flag pairs** (arp_reply, icmp_echo,
+  tcp_echo, http_server_common's poll loop) were C-style out-of-band state:
+  an i32 used as a bool plus a length that was only meaningful when the flag
+  was 1. Both backends now declare a plain unrestricted
+  `variant NetRxDisposal { Release; Reply(i32); }` plus
+  `fn net_rx_finish(frame: sink NetRxCpuOwned[desc], disposal: NetRxDisposal)
+  -> NetRxCanAcquire !{may_block}`, mirroring how `NetInitResult`/
+  `NetRxAcquire` are already declared per backend. "Reply of some length"
+  and "drop" are one value; "flagged but no length" is unrepresentable; and
+  the transmit->completion pairing (the "completion is our next network
+  operation" policy) lives in the driver once instead of being copy-pasted
+  as an identical 6-line tail in four applications.
+- **The `tcp_conn_state()` read-back accessor** in http_conn_state.tkb
+  existed only so http_server_common could ask, after `tcp_respond`/
+  `tcp_continue`, whether the phase had moved to LastAck -- i.e. whether the
+  built segment carried our FIN and therefore consumed one extra sequence
+  number. The fallible transitions now return
+  `variant TcpSendOutcome { Dropped; Sent(i32); SentFin(i32); }`, so the one
+  fact callers ever derived from re-reading the phase is in the return value
+  and the trusted file's state is write-only to the outside. The
+  `tcp_close_via_final_ack` caller keeps a (commented, unreachable) SentFin
+  arm because the closed variant requires totality.
+- **`swap_mac`'s raw-pointer loop** in net_echo, and the isize
+  `ETH_MAC_LEN`/`ETH_DST_OFF`/`ETH_SRC_OFF` trio in netutil.tkb kept alive
+  solely to feed it. `swap_mac` now takes `borrow [u8; 12..]` and uses the
+  offsetof-derived `ETH_DST`/`ETH_SRC`/`ETH_TYPE` constants (previously
+  zero-caller) as proven subslice bounds -- the last hand-maintained wire
+  offsets in netutil.tkb are gone, and net_echo no longer contains a raw
+  pointer at all.
+- **Three near-identical 30-line control-segment builders**
+  (`build_syn_ack`/`build_fin_ack`/`build_rst_from_ack` in
+  http_server_common) collapsed into one parameterized `build_tcp_ctrl`
+  (flags, seq, ack, window). The named one-line wrappers survive because the
+  trusted transition file names segments by kind while
+  `conn_snd_nxt`/`conn_rcv_nxt` stay private to the wide file.
+- **`html_body`** moved out of http_server_common.tkb into the two response
+  generators that actually use it (http_server.tkb, http_sdcard_server.tkb):
+  the TCP core never touches response bytes, so it should not own response
+  scratch. The two generators are never linked together, so no duplicate
+  global arises.
+- **Dead `conn_remote_mac`** in tcp_echo (written on SYN, never read --
+  replies rewrite the Ethernet header in place) deleted.
+- **`http_server_poll_once`** now carries an explicit `!{may_block}`
+  contract, matching `net_rx_wait`/`net_tx_complete`/`net_rx_finish`.
+
+Deliberately NOT changed: tcp_echo keeps its own if-else ConnState machine
+and duplicated segment builders (it is the deliberately simpler
+pre-TcpConn-view stage of the example progression, and it never links with
+http_server_common); the `req: borrow *u8` + `req_len` pair in the response
+callback API stays a raw pointer because the payload subslice needs the same
+two-variable relational fact as tcp_echo's single documented `unsafe`, and
+this repository keeps exactly one such site; net_echo keeps the explicit
+`net_transmit`/`net_tx_complete` pair since proving that driver plumbing is
+its entire purpose.
+
+Validation: full `make check` (langcheck, Alcotest, every STM32 cross-build
+including both SD-card HTTP servers, and all QEMU integration tests
+including arp/icmp/tcp/http network tests) passed; all five network sources
+remain `--forbid-trap` clean on both targets.
