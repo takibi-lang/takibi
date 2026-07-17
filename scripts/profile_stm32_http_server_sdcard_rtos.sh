@@ -16,12 +16,16 @@ OBJ="examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.prof.o"
 INSTALLER_ELF="examples/http_server_sdcard_install/kernel_stm32_ram.elf"
 CONTENT_DIR="examples/sdcard_content"
 URL="${TAKIBI_PROFILE_URL:-http://192.168.10.2/ICON.PNG}"
+OUT_DIR="${TAKIBI_PROFILE_OUT_DIR:-_build/takibi_profile/http_server_sdcard_rtos}"
+PATH_ENTRY_SIZE=84
+PATH_ENTRY_COUNT=256
 
 # shellcheck source=scripts/stm32_hw_claim.sh
 source "$(dirname "$0")/stm32_hw_claim.sh"
 claim_stm32_hardware "$STM32_SERIAL_DEV"
 
 tmpdir=$(mktemp -d)
+mkdir -p "$OUT_DIR"
 cleanup() {
     rm -rf "$tmpdir"
 }
@@ -62,18 +66,23 @@ dump_profile_table() {
 }
 
 clear_profile_counters_and_resume() {
-    local addr="$1" count="$2" log
+    local table_addr="$1" count="$2" path_addr="$3" path_size="$4" log
     log="$tmpdir/openocd-clear.log"
     openocd -f "$OPENOCD_BOARD_CFG" \
         -c "init" \
         -c "halt" \
-        -c "set prof_base $addr" \
+        -c "set prof_base $table_addr" \
         -c "set prof_count $count" \
         -c 'for {set i 0} {$i < $prof_count} {incr i} {
                 set entry [expr {$prof_base + ($i * 16)}]
                 mww [expr {$entry + 4}] 0
                 mww [expr {$entry + 8}] 0
                 mww [expr {$entry + 12}] 0
+            }' \
+        -c "set path_base $path_addr" \
+        -c "set path_words [expr {$path_size / 4}]" \
+        -c 'for {set i 0} {$i < $path_words} {incr i} {
+                mww [expr {$path_base + ($i * 4)}] 0
             }' \
         -c "resume" \
         -c "shutdown" > "$log" 2>&1 || {
@@ -117,6 +126,11 @@ if [ -z "$table_addr" ]; then
     echo "could not find __takibi_prof_table in $ELF" >&2
     exit 1
 fi
+path_addr=$(llvm-nm-19 "$ELF" | awk '$3 == "__takibi_prof_path_table" { print "0x" $1; exit }')
+if [ -z "$path_addr" ]; then
+    echo "could not find __takibi_prof_path_table in $ELF" >&2
+    exit 1
+fi
 
 profile_count=$(python3 - "$OBJ" <<'PY'
 import subprocess
@@ -129,38 +143,42 @@ for line in out.splitlines():
     parts = line.split()
     if len(parts) >= 3 and parts[1] == "T":
         name = parts[2]
-        if name == "pendsv_dispatch" or name.endswith("Handler"):
+        if name == "pendsv_dispatch" or name.endswith("Handler") or name.startswith("__takibi_prof_"):
             continue
         names.append(name)
 print(len(sorted(names)))
 PY
 )
 table_size=$((profile_count * 16))
+path_size=$((PATH_ENTRY_COUNT * PATH_ENTRY_SIZE))
 dump="$tmpdir/takibi_prof_table.bin"
+path_dump="$tmpdir/takibi_prof_path_table.bin"
 
 fetch_icon "warm"
 
 echo "Clearing profile counters after warm-up..."
-clear_profile_counters_and_resume "$table_addr" "$profile_count"
+clear_profile_counters_and_resume "$table_addr" "$profile_count" "$path_addr" "$path_size"
 
 fetch_icon "measured"
 
 echo "Dumping $profile_count profile entries from $table_addr ..."
 dump_profile_table "$table_addr" "$table_size" "$dump"
+echo "Dumping $PATH_ENTRY_COUNT call-path entries from $path_addr ..."
+dump_profile_table "$path_addr" "$path_size" "$path_dump"
 
-python3 - "$OBJ" "$dump" <<'PY'
+python3 - "$OBJ" "$dump" "$path_dump" "$OUT_DIR/profile.folded" <<'PY'
 import struct
 import subprocess
 import sys
 
-obj, dump = sys.argv[1], sys.argv[2]
+obj, dump, path_dump, folded_out = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 out = subprocess.check_output(["llvm-nm-19", obj], text=True)
 names = []
 for line in out.splitlines():
     parts = line.split()
     if len(parts) >= 3 and parts[1] == "T":
         name = parts[2]
-        if name == "pendsv_dispatch" or name.endswith("Handler"):
+        if name == "pendsv_dispatch" or name.endswith("Handler") or name.startswith("__takibi_prof_"):
             continue
         names.append(name)
 names = sorted(names)
@@ -184,4 +202,37 @@ print("%12s %10s %7s  %s" % ("cycles", "calls", "pct", "function"))
 for cycles, calls, _func_id, name in rows[:30]:
     pct = (100.0 * cycles / total) if total else 0.0
     print("%12d %10d %6.2f%%  %s" % (cycles, calls, pct, name))
+
+path_rows = []
+with open(path_dump, "rb") as f:
+    pdata = f.read()
+ENTRY_SIZE = 84
+MAX_DEPTH = 16
+for off in range(0, len(pdata), ENTRY_SIZE):
+    chunk = pdata[off:off + ENTRY_SIZE]
+    if len(chunk) < ENTRY_SIZE:
+        break
+    h, depth, calls, cycles = struct.unpack_from("<IIIQ", chunk, 0)
+    if h == 0 or depth == 0 or cycles == 0:
+        continue
+    frames = struct.unpack_from("<" + "I" * MAX_DEPTH, chunk, 20)
+    stack = []
+    for fid in frames[:min(depth, MAX_DEPTH)]:
+        stack.append(names[fid] if fid < len(names) else "<bad-id-%d>" % fid)
+    path_rows.append((cycles, calls, stack))
+
+path_rows.sort(reverse=True, key=lambda r: r[0])
+with open(folded_out, "w") as f:
+    for cycles, _calls, stack in path_rows:
+        if stack:
+            f.write("%s %d\n" % (";".join(stack), cycles))
+
+print("")
+print("Folded stack output: %s" % folded_out)
+print("")
+print("Hottest call paths")
+print("------------------")
+for cycles, calls, stack in path_rows[:15]:
+    pct = (100.0 * cycles / total) if total else 0.0
+    print("%12d %10d %6.2f%%  %s" % (cycles, calls, pct, ";".join(stack)))
 PY
