@@ -140,7 +140,7 @@ across the entire example suite -- everywhere else it was tried, removing
 it turned out to be possible (and worth doing: two of the removals closed
 real gaps, an unvalidated device-reported ring index and a lossy
 intermediate slice reconstruction, not just cosmetic --forbid-trap
-fixes). See CLAUDE.md's P4c section for the full accounting, including
+fixes). See HISTORY.md's P4c section for the full accounting, including
 two honest negative results (reformulations that don't close without a
 genuine relational domain) and the case that looked like it needed one
 but didn't: the fix turned out to be a missing validation check, not a
@@ -211,12 +211,12 @@ by a current example does not.
   remains independent of individual device drivers.
 - DWARF debug-info emission (`-g`) is covered by a live QEMU/GDB
   regression fixture for globals, locals, aggregates, arguments,
-  stepping, and backtraces. A small gdbstub-based sampling profiler is
-  also implemented, along with STM32/RAM debug ELF targets for OpenOCD +
-  GDB debugging of the HTTP examples.
+  stepping, and backtraces. Small profiling helpers are also implemented:
+  QEMU/gdbstub PC sampling for CPU-bound experiments, and an STM32 DWT
+  cycle-count profiler for the HTTP+SD+RTOS demo.
 
 See [`SPEC.md`](SPEC.md) for the current language syntax and grammar, and
-`CLAUDE.md` for the full, continuously-updated engineering log of design
+`HISTORY.md` for the detailed engineering log of design
 decisions, hardware bring-up bugs, and the reasoning behind them.
 
 ## Demo: Serving a Real Web Page from an STM32F746G-DISCOVERY Board
@@ -320,6 +320,8 @@ make stm32build      # cross-compile every ported example for STM32 (no hardware
 make check           # langcheck + test + stm32build + qemutest
 make hwcheck          # like stm32build, but also flashes + verifies against real STM32 hardware
 make hwcheck-net      # real-Ethernet hardware tests (needs the board wired to this host's NIC)
+make perfcheck        # real-hardware profiler smoke tests
+make allcheck         # clean + check + hwcheck + perfcheck + hwcheck-net
 ```
 
 Builds run in parallel across all cores by default.

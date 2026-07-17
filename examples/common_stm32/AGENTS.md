@@ -6,13 +6,16 @@ root `AGENTS.md` first for the project's overall goals, build commands, and
 process rules that apply everywhere.
 
 
-- **STM32 Ethernet: five examples are ported -- `net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo`,
-  and `http_server` all run on real hardware with real MAC/PHY/DMA, and are the *same source file* as
-  their QEMU/virtio-net counterparts.** `examples/common_stm32/eth.tkb` is a from-scratch MAC/DMA-
-  descriptor-ring driver + MDIO-based LAN8742A PHY init over RMII (RMII pins, PHY bring-up, and the DMA
-  descriptor ring design are documented in that file's header comment). A sixth, `http_server_sdcard`
-  (GitHub issue #97, see HISTORY.md for the full milestone), also uses `eth.tkb` but is STM32-only (no
-  QEMU counterpart, since it also needs the real SD card).
+- **STM32 Ethernet examples include the shared QEMU/STM32 network demos plus STM32-only
+  SD-card HTTP variants.** `net_echo`, `arp_reply`, `icmp_echo`, `tcp_echo`, and
+  `http_server` run on real hardware with real MAC/PHY/DMA and are the *same source
+  file* as their QEMU/virtio-net counterparts. `http_server_sdcard` and
+  `http_server_sdcard_rtos` also use the STM32 Ethernet HAL, but are STM32-only
+  because they need the real SD card.
+
+  `examples/common_stm32/eth.tkb` is a from-scratch MAC/DMA-descriptor-ring driver
+  plus MDIO-based LAN8742A PHY init over RMII. RMII pins, PHY bring-up, and the DMA
+  descriptor ring design are documented in that file's header comment.
 
   **Unified driver API**: `eth.tkb` and `examples/common_qemu/virtio_mmio.tkb` both expose the identical
   `net_init() -> NetInitResult` / `net_rx_wait()` /
@@ -55,7 +58,7 @@ process rules that apply everywhere.
   section below for `irq.tkb`'s GIC-vs-NVIC enable sequence, which eliminated its own runtime branch the
   same way -- a per-target pair of definitions behind one uniform name).
 
-  All five are verified against a real point-to-point link via `scripts/eth_*_test.py` + `make hwcheck-net`
+  Ethernet examples are verified against a real point-to-point link via `scripts/eth_*_test.py` + `make hwcheck-net`
   (not part of `make check`/`make hwcheck` since it needs a real board wired directly to the test machine's
   NIC, plus `CAP_NET_RAW`). `make hwcheck-net` aggregates all such Ethernet hardware tests via
   `scripts/run_hwtest_net_ram.sh`, same PASS/FAIL-summary style as `scripts/run_hwtest_ram.sh` -- add new
@@ -340,7 +343,7 @@ for the full mechanism (including why VTOR must be set in code, not by the harne
 HISTORY.md's RAM-execution entry for the full design discussion (why AXI SRAM1 over DTCM,
 why no explicit MPU region is needed, and the flash-endurance arithmetic).
 
-**`hwcheck-net`'s 5 real-Ethernet examples migrated too, with one deliberate difference
+**`hwcheck-net`'s real-Ethernet examples migrated too, with one deliberate difference
 from every other example: their DMA descriptor rings and packet buffers are genuinely
 cacheable.** `link_ram.ld` gives them the same uniform AXI SRAM1 as everything else -- no
 MPU non-cacheable window. This makes `examples/common_stm32/eth.tkb`'s existing

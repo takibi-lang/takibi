@@ -164,6 +164,8 @@ make stm32build     # cross-compile every ported example for STM32F746G-DISCOVER
 make check          # run langcheck + test + stm32build + qemutest together
 make hwcheck        # like stm32build, but also loads into RAM + UART-diffs against real STM32 hardware
 make hwcheck-net    # real-Ethernet hardware tests (needs the board's Ethernet port wired to this host)
+make perfcheck      # real-hardware profiler smoke tests
+make allcheck       # clean + check + hwcheck + perfcheck + hwcheck-net
 make clean          # remove generated artifacts
 ```
 
@@ -511,6 +513,15 @@ The same QEMU gdbstub plumbing is also used by the sampling profilers for
 HTTP/TCP experiments. That technique is useful for CPU-bound code, but it
 is a poor fit for network/interrupt-driven I/O where idle wait time can
 dominate samples.
+
+For the real STM32 HTTP+SD+RTOS demo, `takibi --profile-functions` emits a
+fixed DWT `CYCCNT` profiler table plus a fixed call-path table. `make
+profile-stm32-http-server-sdcard-rtos` provisions the SD card, warms the
+server, profiles a measured `/ICON.PNG` fetch, dumps the tables through
+OpenOCD, and writes a FlameGraph-compatible folded stack file under
+`_build/takibi_profile/http_server_sdcard_rtos/`. The numbers are inclusive
+wall-clock cycles, so blocking paths such as `cond_wait` and `net_rx_wait`
+are expected to include wait time.
 
 ## Instructions for Coding Agents
 

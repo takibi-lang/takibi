@@ -8116,3 +8116,21 @@ Known limitations of this first slice:
   first target.
 - Real hardware validation of future changes still requires the STM32 board,
   SD card, and Ethernet wiring.
+
+Follow-up: added a fixed call-path table so the same STM32 profile run can
+also produce a FlameGraph-compatible folded stack file. The firmware now
+records per-task call stacks, using the RTOS scheduler's current task index
+when the `sched` global is present; this avoids mixing paths across task
+switches in `http_server_sdcard_rtos`. The host script clears and dumps both
+the function table and the path table through OpenOCD, then writes
+`_build/takibi_profile/http_server_sdcard_rtos/profile.folded` and prints the
+hottest aggregate call paths. The path table is intentionally fixed-size and
+hash-based. Overflow or collision is possible in principle, but this keeps
+the STM32-side mechanism small; future work should first improve host-side
+warnings before adding more firmware machinery.
+
+This remains an inclusive wall-clock latency profiler, not a CPU-time or
+timestamped trace profiler. Blocking paths such as `cond_wait` and
+`net_rx_wait` are expected to dominate when the request is waiting for the
+other RTOS task, the network, or the SD card. That is the intended tradeoff
+for this first issue #130 goal.
