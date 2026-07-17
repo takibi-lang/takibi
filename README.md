@@ -164,8 +164,9 @@ by a current example does not.
 
 ## Current Status
 
-- A full pipeline exists: lexer -> Menhir parser -> Hindley-Milner type
-  inference -> LLVM 19 IR generation -> native object code.
+- A full pipeline exists: lexer -> Menhir parser -> an HM-style inference core
+  plus Takibi-specific refinement/effect/ownership/static-index/region checks
+  -> LLVM 19 IR generation -> native object code.
 - The example suite compiles and runs today (see `examples/`),
   covering arithmetic, control flow, structs (packed / aligned, and now
   with refined-type fields), enums with exhaustiveness checking, function

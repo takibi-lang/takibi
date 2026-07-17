@@ -238,8 +238,9 @@ lib/
                      initializer), used to resolve named array sizes like [T; QUEUE_SIZE]
   lexer.mll       -- ocamllex (includes hex literals, & token, as keyword, ^ token, -> token, void keyword)
   parser.mly      -- Menhir (includes pointer types, array types, function pointer types, prefix * / & / unary -, as cast)
-  types.ml        -- internal type (ty) + HM type inference output types + StringMap
-  type_inf.ml     -- Hindley-Milner type inference (immutable StringMap based)
+  types.ml        -- internal type (ty) + HM-style inference output types + StringMap
+  type_inf.ml     -- HM-style inference core plus refinement, effect, ownership,
+                     static-index, privacy, and authority-region checks
   type_layout.ml  -- struct/enum layout table (fields, packed, align) backing sizeof/offsetof (issue #40)
   typechecker.ml  -- external wrapper (called from main.ml)
   llvm_gen.ml     -- LLVM IR generation and object file output

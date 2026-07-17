@@ -5,6 +5,11 @@ syntax accepted by the compiler today. `SPEC.md` remains authoritative for
 implemented Takibi. `OWNERSHIP_KERNEL.md` records the history and limitations
 of the current affine/linear checker.
 
+Takibi still uses Hindley-Milner-style inference as the ordinary value-typing
+core, but the Core described here is not pure HM. It layers refinement facts,
+effects, affine/linear permissions, static identities, privacy boundaries, and
+authority-region constraints into one permission-aware judgement.
+
 Implementation status (2026-07-17): Slices 0 through 6 and the currently
 selected post-Slice-6 Core increments are implemented. The
 `Takibi_core` module owns the four-layer vocabulary, the current checker uses

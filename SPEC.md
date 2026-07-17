@@ -26,6 +26,12 @@ current implementation prioritizes practical GDB value inspection, so it
 may preserve extra debug-only storage compared with an optimized build
 without `-g`.
 
+The implementation still has a Hindley-Milner-style inference core for
+ordinary values, but the language is no longer a pure HM type system:
+refinement intervals, effects, affine/linear ownership, static indices,
+file privacy, and authority-region checks add Takibi-specific static
+semantics on top.
+
 Every top-level definition -- `fn`, global `let`, `struct`, `opaque
 struct`, and `enum` -- shares this ONE flat namespace, deliberately.
 Unlike C (which has a separate TAG namespace for `struct`/`union`/`enum`,
