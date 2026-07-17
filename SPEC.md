@@ -1307,7 +1307,9 @@ already-proven minimum (the initializer's stronger proof survives); a
 `let mut` binding always uses its declared (possibly weaker) type, since
 reassignment can genuinely bring a shorter slice later.
 
-## Owner-Derived Region Slices
+## Authority-Derived Region Returns
+
+### Owner-derived slices
 
 ```
 fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc { ... }
@@ -1359,6 +1361,40 @@ See `examples/net_rx_use_after_release_wrong` for the focused
 compile-error fixture; the real positive fixtures are the network
 examples themselves, whose frame access all flows through the annotated
 `net_rx_frame`.
+
+### Guard-derived pointers
+
+```
+fn shared_access(g: borrow KGuard[lock]) -> *Shared @ lock { ... }
+```
+
+A pointer RETURN type may use the same checker-only `@ name` relation
+(GitHub issue #128), with `name` supplied by a `borrow`/`borrow mut` indexed
+owner or view parameter. The returned pointer and its local aliases become
+unusable once that authority is possibly consumed. In particular, consuming
+`g` with `kunlock` before `data.field`, `*data`, or an alias use is a compile
+error. Returning the tied pointer or storing it durably has the same escape
+rejection as a tied slice.
+
+Only return position gives `*T @ name` this region meaning. In parameter
+position it retains the static address-identity meaning described under
+"Static address/place identities": the pointer is still an ordinary runtime
+argument related to the erased `name`. A region-annotated pointer return is
+stripped before HM typing and LLVM lowering, so the accessor returns exactly
+one plain pointer and its guard parameter remains erased.
+
+This is a caller-side lifetime contract, not a proved lock invariant. The
+declaring module is responsible for making the accessor return data actually
+protected by that lock. The current checker proves only that callers obtained
+the pointer through the annotated accessor and cannot use it after consuming
+the particular guard. Raw casts, callee retention, tuple/variant laundering,
+and authority-name rebinding have the same function-local v1 limitations as
+owner-derived slices.
+
+`examples/rtos_demo` is the real positive use: its private `Shared` value is
+reachable only through `shared_access(g)`. The focused
+`examples/guard_pointer_after_unlock_wrong` fixture consumes the guard and
+then attempts a field read through the old pointer.
 
 ## Arrays and Pointers
 

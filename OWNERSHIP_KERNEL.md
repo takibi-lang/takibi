@@ -8,9 +8,10 @@ indexed runtime owners, erased views, variants/restricted existentials,
 standard affine semantics, scoped mutable owner borrows, checker effects,
 function-pointer effect contracts, and integer-indexed universally transformed
 views. Owner-derived region slices (the post-Slice-6 RX hole, 6.7.9 below)
-are implemented too. General place/storage tracking, existential view state
-dispatch, lock invariants, general propositions, and solver/prover
-integration remain outlook. As each surface slice lands, SPEC.md stays
+and guard-derived pointer lifetimes (the first #128 slice, 6.7.12) are
+implemented too. General place/storage tracking, lock invariants, general
+propositions, and solver/prover integration remain outlook. As each surface
+slice lands, SPEC.md stays
 authoritative for the language that actually exists.
 
 Sections 4 through 6 preserve the decision path that led here. Statements in
@@ -1144,7 +1145,7 @@ ordering is now compiler-enforced. Deliberately NOT implemented: region
 variables/polymorphism, tied slices crossing function boundaries (callee
 retention stays unchecked, function-local honesty), and tuple/variant
 laundering within a function. See TAKIBI_CORE.md's implemented-slice entry,
-SPEC.md's "Owner-Derived Region Slices" section, and HISTORY.md's dated
+SPEC.md's "Authority-Derived Region Returns" section, and HISTORY.md's dated
 entry for details.
 
 #### 6.7.10 Static address/place identities (implemented 2026-07-16)
@@ -1186,11 +1187,29 @@ the next statement, retaining the one-frame policy but leaving a genuine
 call-return interval in which DMA owns the buffer. The focused negative
 fixture is `net_tx_release_while_in_flight_wrong`.
 
+#### 6.7.12 Authority-bound pointer lifetimes (implemented 2026-07-16)
+
+Return-position `*T @ lock` now extends `Delta.Region_taint` to pointers
+returned by an accessor borrowing an indexed owner or view. The call result
+and its aliases are tied to the borrowed authority path. Consuming the guard
+therefore invalidates later dereference or field access, while return and
+durable-storage escapes are rejected. The annotation and guard erase, leaving
+the ordinary pointer return ABI. Parameter-position pointer singletons keep
+their existing static-address identity meaning.
+
+`rtos_demo` now keeps `Shared` private and obtains its pointer through
+`shared_access(g: borrow KGuard[lock]) -> *Shared @ lock`; the focused
+`guard_pointer_after_unlock_wrong` fixture proves that using it after unlock
+is rejected. The declaring accessor remains a trusted module contract: this
+slice does not prove which data a lock protects and does not turn
+`stable_replace` into a lock invariant.
+
 ## 7. Next outlook
 
 The post-Slice-6 sequence now includes owner-derived region slices,
 existential `TcpConn[conn, state]` dispatch, typed copy-rendezvous requests,
-and one concrete stable owner slot. A private, mutable, BSS-zeroed container
+one concrete stable owner slot, asynchronous TX ownership, and guard-derived
+pointer lifetimes. A private, mutable, BSS-zeroed container
 may hold a linear variant behind a sealed field; `stable_replace` exchanges
 that value while preserving an erased linear guard, and `rtos_demo` uses it
 to transfer an existentially indexed `OwnerMessage[id]` between tasks.
@@ -1200,10 +1219,10 @@ The declaring file still maintains the relationship between its runtime
 `full` flag and the variant tag, and any linear guard can authorize the
 exchange. Static guard identity now rejects a mismatched explicit lock
 pointer, but does not prove which mutex protects a stable slot. General heap
-predicates and arbitrary stable places remain demand-led. Asynchronous TX now
-provides the previously deferred real driver and is implemented in 6.7.11.
-No broader ownership slice is selected without another concrete example and
-focused negative contract.
+predicates and arbitrary stable places remain demand-led. Section 6.7.12
+closes the narrow pointer-after-unlock path but deliberately leaves those
+general invariants open. No broader ownership slice is selected without
+another concrete example and focused negative contract.
 
 ## 8. Prior art notes
 

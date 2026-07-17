@@ -7722,3 +7722,31 @@ Validation: all 755 Alcotest cases passed. Full `make check` passed all 122
 host, compile-error, DWARF, and QEMU integration cases, including packet-level
 net_echo, ARP, ICMP, TCP, and HTTP tests, every STM32 cross-build, and all
 network sources under `--forbid-trap`.
+
+## 2026-07-16: Authority-Bound Pointer Lifetimes
+
+Implemented the first #128 lock-data coupling slice by extending the existing
+function-local region taint from slice returns to pointer returns. In return
+position, `*T @ lock` now ties the ordinary pointer result to the static index
+of a borrowed indexed owner or view parameter. Aliases retain the tie;
+dereference and field access after the authority is consumed are rejected, as
+are return and durable-storage escapes. Parameter-position `*T @ lock` keeps
+its prior static-address identity meaning.
+
+`rtos_demo` now makes its shared counter private and exposes it through
+`shared_access(g: borrow KGuard[lock]) -> *Shared @ lock`. Both tasks and the
+final read obtain the pointer while holding the guard and stop using it before
+`kunlock`. `guard_pointer_after_unlock_wrong` is the focused full-compiler
+negative fixture. Unit tests additionally cover aliasing, return/global
+escapes, declaration errors, and the erased ABI: the accessor receives no
+runtime guard and returns a plain pointer.
+
+This remains a reviewed accessor contract, not a general lock invariant. The
+checker does not prove that the returned global is protected by the indexed
+lock, and raw casts and indirect laundering retain the documented region-v1
+holes. The implemented guarantee is the concrete one the RTOS example needs:
+an accessor-issued pointer cannot outlive its authorizing guard.
+
+Validation: all 764 Alcotest cases passed. Full `make check` passed all 123
+host, compile-error, DWARF, and QEMU integration cases, including `rtos_demo`,
+every STM32 cross-build, and all network sources under `--forbid-trap`.

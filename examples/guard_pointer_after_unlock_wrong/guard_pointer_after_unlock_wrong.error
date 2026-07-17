@@ -1,0 +1,1 @@
+pointer 'data' is derived from linear value 'guard' and cannot be used after 'guard' is consumed

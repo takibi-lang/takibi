@@ -1606,6 +1606,25 @@ let region_fixture =
    fn reg_release(o: sink RegOwn[d]) {}
    "
 
+(* Issue #128: a pointer returned by an accessor can be tied to the static
+   identity carried by a borrowed lock guard. The pointer stays ordinary
+   runtime data, but its local binding cannot outlive that authority. *)
+let authority_pointer_fixture =
+  "linear view AuthorityGuard[lock: addr];
+   struct AuthorityData { value: i32; }
+   let mut authority_lock_word: i32;
+   let mut authority_data: AuthorityData;
+   let mut authority_stash: *AuthorityData;
+   fn authority_lock(m: *i32 @ lock) -> AuthorityGuard[lock] {
+     return view AuthorityGuard[lock];
+   }
+   fn authority_unlock(g: sink AuthorityGuard[lock], m: *i32 @ lock) {}
+   fn authority_access(g: borrow AuthorityGuard[lock])
+       -> *AuthorityData @ lock {
+     return &authority_data;
+   }
+   "
+
 (* The real network backends use this shape for asynchronous in-place TX:
    starting DMA consumes the RX owner and returns a distinct linear owner.
    Only the completion transition restores the erased acquisition permit. *)
@@ -1636,6 +1655,107 @@ let async_tx_fixture =
    "
 
 let infer_tests = [
+  Alcotest.test_case
+    "authority pointer: access before guard consumption is accepted" `Quick
+    (fun () ->
+      ignore (infer (authority_pointer_fixture ^
+        "fn authority_pointer_ok() -> i32 {
+           let guard = authority_lock(&authority_lock_word);
+           let data = authority_access(guard);
+           data.value = 7;
+           let result: i32 = data.value;
+           authority_unlock(guard, &authority_lock_word);
+           return result;
+         }")));
+
+  Alcotest.test_case
+    "authority pointer: field access after unlock is rejected" `Quick
+    (expect_type_error
+      "pointer 'data' is derived from linear value 'guard' and cannot be used after 'guard' is consumed"
+      (authority_pointer_fixture ^
+        "fn authority_pointer_after_unlock_bad() -> i32 {
+           let guard = authority_lock(&authority_lock_word);
+           let data = authority_access(guard);
+           authority_unlock(guard, &authority_lock_word);
+           return data.value;
+         }"));
+
+  Alcotest.test_case
+    "authority pointer: an immutable alias carries the authority tie" `Quick
+    (expect_type_error
+      "pointer 'alias' is derived from linear value 'guard' and cannot be used after 'guard' is consumed"
+      (authority_pointer_fixture ^
+        "fn authority_pointer_alias_bad() -> i32 {
+           let guard = authority_lock(&authority_lock_word);
+           let data = authority_access(guard);
+           let alias = data;
+           authority_unlock(guard, &authority_lock_word);
+           return alias.value;
+         }"));
+
+  Alcotest.test_case
+    "authority pointer: all matching borrowed authorities constrain lifetime"
+    `Quick
+    (expect_type_error
+      "pointer 'data' is derived from linear value 'first' and cannot be used after 'first' is consumed"
+      (authority_pointer_fixture ^
+        "fn authority_access_pair(first: borrow AuthorityGuard[lock],
+                                  second: borrow AuthorityGuard[lock])
+             -> *AuthorityData @ lock {
+           return &authority_data;
+         }
+         fn authority_pointer_pair_bad() -> i32 {
+           let first = authority_lock(&authority_lock_word);
+           let second = authority_lock(&authority_lock_word);
+           let data = authority_access_pair(first, second);
+           authority_unlock(first, &authority_lock_word);
+           return data.value;
+         }"));
+
+  Alcotest.test_case
+    "authority pointer: a tied pointer cannot be returned" `Quick
+    (expect_type_error "authority-derived pointer 'data' cannot be returned"
+      (authority_pointer_fixture ^
+        "fn authority_pointer_return_bad() -> *AuthorityData {
+           let guard = authority_lock(&authority_lock_word);
+           let data = authority_access(guard);
+           authority_unlock(guard, &authority_lock_word);
+           return data;
+         }"));
+
+  Alcotest.test_case
+    "authority pointer: a tied pointer cannot be stored globally" `Quick
+    (expect_type_error
+      "authority-derived pointer 'data' cannot be stored into a global"
+      (authority_pointer_fixture ^
+        "fn authority_pointer_store_bad() {
+           let guard = authority_lock(&authority_lock_word);
+           let data = authority_access(guard);
+           authority_stash = data;
+           authority_unlock(guard, &authority_lock_word);
+         }"));
+
+  Alcotest.test_case
+    "authority pointer: the annotation must name a borrowed indexed authority"
+    `Quick
+    (expect_type_error
+      "does not name a static index of any borrow or borrow mut indexed-owner or indexed-view parameter"
+      (authority_pointer_fixture ^
+        "fn authority_pointer_decl_bad(g: borrow AuthorityGuard[lock])
+             -> *AuthorityData @ other {
+           return &authority_data;
+         }"));
+
+  Alcotest.test_case
+    "authority pointer: an integer cannot be a return-region authority" `Quick
+    (expect_type_error
+      "pointer return annotation '@ 0': a region annotation must name a static parameter"
+      (authority_pointer_fixture ^
+        "fn authority_pointer_integer_bad(g: borrow AuthorityGuard[lock])
+             -> *AuthorityData @ 0 {
+           return &authority_data;
+         }"));
+
   Alcotest.test_case
     "async TX: RX owner becomes an indexed in-flight owner until completion" `Quick
     (fun () ->
@@ -5224,6 +5344,31 @@ let infer_tests = [
    checks runtime behavior, not just "the IR verifies"). *)
 
 let codegen_tests = [
+  Alcotest.test_case
+    "authority pointer ABI erases the guard tie and returns a plain pointer" `Quick
+    (fun () ->
+      let src =
+        "linear view CgAuthorityGuard[lock: addr];
+         struct CgAuthorityData { value: i32; }
+         let mut cg_authority_data: CgAuthorityData;
+         fn cg_authority_access(g: borrow CgAuthorityGuard[lock])
+             -> *CgAuthorityData @ lock {
+           return &cg_authority_data;
+         }" in
+      ignore (gen_codegen src);
+      let access = match Hashtbl.find_opt Llvm_gen.functions
+          "cg_authority_access" with
+        | Some (_, fn) -> fn
+        | None -> Alcotest.fail "cg_authority_access not found"
+      in
+      let ir = Llvm.string_of_llvalue access in
+      Alcotest.(check int) "erased guard leaves no runtime parameter"
+        0 (Array.length (Llvm.params access));
+      Alcotest.(check bool) "accessor returns an ordinary pointer" true
+        (contains_substring ir "define ptr @cg_authority_access()");
+      Alcotest.(check bool) "authority is not encoded in pointer bits" false
+        (contains_substring ir "inttoptr" || contains_substring ir "ptrtoint"));
+
   Alcotest.test_case
     "async TX ABI keeps runtime descriptor state and erases completion permit" `Quick
     (fun () ->

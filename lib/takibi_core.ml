@@ -98,17 +98,17 @@ module Delta = struct
     let must_be_consumed flow = flow.must_be_consumed
   end
 
-  (** Owner-derived region taint for the surface checker (TAKIBI_CORE.md
-      post-Slice-6 order item 1, issue #106).
+  (** Authority-derived region taint for the surface checker (issues #106 and
+      #128).
 
-      Maps a local variable NAME to the set of owner places its value was
-      derived from (via a call whose return type carries a region annotation,
-      or by alias/subslice propagation from such a value). The check itself
-      is lazy: a tainted name is rejected at USE time when any of its owner
-      places is in Legacy_flow's [maybe_consumed], so branch joins need only
-      the pointwise union below -- consumption merging is already handled by
-      Legacy_flow's own union. Function-local by construction, like the rest
-      of the current Delta tracking. *)
+      Maps a local variable NAME to the owner or guard places its slice or
+      pointer value was derived from (via a call whose return type carries a
+      region annotation, or by alias/subslice propagation from such a value).
+      The check is lazy: a tainted name is rejected at USE time when any of
+      its authority places is in Legacy_flow's [maybe_consumed], so branch
+      joins need only the pointwise union below -- consumption merging is
+      already handled by Legacy_flow's own union. Function-local by
+      construction, like the rest of the current Delta tracking. *)
   module Region_taint (Places : Set.S) : sig
     type t
 

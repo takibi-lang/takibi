@@ -22,14 +22,18 @@ struct Shared {
     counter: i32;
 }
 
-let mut shared: Shared;
+private let mut shared: Shared;
 
-fn shared_add(g: borrow KGuard[lock], delta: i32) {
-    shared.counter = shared.counter + delta;
+fn shared_access(g: borrow KGuard[lock]) -> *Shared @ lock {
+    return &shared;
 }
 
-fn shared_get(g: borrow KGuard[lock]) -> i32 {
-    return shared.counter;
+fn shared_add(data: *Shared, delta: i32) {
+    data.counter = data.counter + delta;
+}
+
+fn shared_get(data: *Shared) -> i32 {
+    return data.counter;
 }
 
 linear struct OwnerMessage[id: usize] {
@@ -120,7 +124,8 @@ fn owner_chan_recv(ch: *OwnerChan) -> OwnerSlotValue !{may_block} {
 fn task_ping() {
     for i: i32 in 0..<5 {
         let g = klock(&the_lock);
-        shared_add(g, 1);
+        let data = shared_access(g);
+        shared_add(data, 1);
         kunlock(g, &the_lock);
 
         owner_chan_send(&owner_chan, owner_message_new(i));
@@ -147,7 +152,8 @@ fn task_pong() {
         }
 
         let g = klock(&the_lock);
-        shared_add(g, 1);
+        let data = shared_access(g);
+        shared_add(data, 1);
         kunlock(g, &the_lock);
 
         chan_send(&chan_ba, v * 10);
@@ -176,8 +182,9 @@ fn app_main() {
     rtos_done = 1;
 
     let g = klock(&the_lock);
+    let data = shared_access(g);
     uart_puts("shared counter: ");
-    uart_print(shared_get(g));
+    uart_print(shared_get(data));
     uart_puts("\r\n");
     kunlock(g, &the_lock);
 

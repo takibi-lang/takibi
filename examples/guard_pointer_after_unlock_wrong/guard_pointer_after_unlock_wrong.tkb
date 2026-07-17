@@ -1,0 +1,31 @@
+// This file is expected to produce a compile error.
+// The pointer returned by guard_pointer_access is tied to the borrowed guard,
+// so consuming that guard invalidates the pointer and all of its aliases.
+
+linear view GuardPointerGuard[lock: addr];
+
+struct GuardPointerData {
+    value: i32;
+}
+
+let mut guard_pointer_lock_word: i32;
+private let mut guard_pointer_data: GuardPointerData;
+
+fn guard_pointer_lock(m: *i32 @ lock) -> GuardPointerGuard[lock] {
+    return view GuardPointerGuard[lock];
+}
+
+fn guard_pointer_unlock(g: sink GuardPointerGuard[lock],
+                        m: *i32 @ lock) {}
+
+fn guard_pointer_access(g: borrow GuardPointerGuard[lock])
+        -> *GuardPointerData @ lock {
+    return &guard_pointer_data;
+}
+
+fn guard_pointer_bad_use() -> i32 {
+    let guard = guard_pointer_lock(&guard_pointer_lock_word);
+    let data = guard_pointer_access(guard);
+    guard_pointer_unlock(guard, &guard_pointer_lock_word);
+    return data.value;
+}

@@ -92,8 +92,21 @@ let of_ast t = match !active_static_scope with
 
 let of_ast_opt = function Some t -> of_ast t | None -> fresh ()
 
-(* An owner-derived region annotation on a slice RETURN type
-   (`-> [u8; 1514..] @ desc`, TAKIBI_CORE.md post-Slice-6 order item 1)
+type region_return_kind = RegionSlice | RegionPointer
+
+let region_return_annotation = function
+  | Ast.TypeSingleton (((Ast.TypeSlice _) as base), arg) ->
+      Some (base, arg, RegionSlice)
+  | Ast.TypeSingleton (((Ast.TypePtr _ | Ast.TypeAlignedPtr _) as base), arg) ->
+      Some (base, arg, RegionPointer)
+  | _ -> None
+
+let region_kind_word = function
+  | RegionSlice -> "slice"
+  | RegionPointer -> "pointer"
+
+(* An authority-derived region annotation on a slice or pointer RETURN type
+   (`-> [u8; 1514..] @ desc` / `-> *Shared @ lock`)
    is checker-only: it feeds the region_return side table consumed by
    check_affine_func's taint tracking, and must stay invisible to HM
    unification, call_returns, the singleton machinery, and codegen. Strip
@@ -101,8 +114,11 @@ let of_ast_opt = function Some t -> of_ast t | None -> fresh ()
    FuncDef's raw ret_type enters HM typing, so any future new consumer of
    the raw AST return type must strip too. *)
 let strip_region_return = function
-  | Some (Ast.TypeSingleton ((Ast.TypeSlice _) as s, _)) -> Some s
-  | t -> t
+  | Some t ->
+      (match region_return_annotation t with
+       | Some (base, _, _) -> Some base
+       | None -> Some t)
+  | None -> None
 
 let ret_of_ast_opt t =
   match strip_region_return t with Some t -> of_ast t | None -> TVoid
@@ -4024,45 +4040,54 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         validation_static_scope := Some scope;
         allow_implicit_static := true;
         List.iter (fun (_, ty) -> Option.iter (validate_param_type f.def_loc) ty) f.params;
-        (* Owner-derived region annotation on a slice return type
-           (`-> [T; N..] @ name`, issue #106): accepted ONLY here, as the
-           whole return type of a function definition. The name must be a
-           static index of some borrow/borrow-mut indexed-owner parameter;
-           the callee body has no new obligation (the annotation restricts
-           the CALLER's use of the result, so an unrelated returned slice is
-           merely conservative, never unsound). Every other position keeps
-           the existing "singleton '@' requires an integer runtime type"
-           rejection via the untouched validation recursion below. *)
-        (match f.ret_type with
-         | Some (Ast.TypeSingleton ((Ast.TypeSlice _) as s, arg)) ->
+        (* Authority-derived region annotation on a slice or pointer return
+           type (`-> [T; N..] @ name` / `-> *T @ name`, issues #106/#128):
+           accepted ONLY here, as the whole return type of a function
+           definition. The name must be a static index of a borrowed indexed
+           owner or view. The callee body has no new obligation; this is a
+           reviewed API contract restricting the CALLER's use of the result.
+           Pointer singleton parameters retain their ordinary addr-identity
+           meaning because this branch is return-position-only. *)
+        (match Option.bind f.ret_type region_return_annotation with
+         | Some (base, arg, kind) ->
+             let value_kind = region_kind_word kind in
              (match arg with
               | Ast.StaticInt n ->
                   raise (TypeError (f.def_loc, Printf.sprintf
-                    "slice return annotation '@ %d': a region annotation \
-                     must name a static parameter, not an integer" n))
+                    "%s return annotation '@ %d': a region annotation \
+                     must name a static parameter, not an integer"
+                    value_kind n))
               | Ast.StaticEnum (enum_name, case_name) ->
                   raise (TypeError (f.def_loc, Printf.sprintf
-                    "slice return annotation '@ %s::%s': a region annotation \
+                    "%s return annotation '@ %s::%s': a region annotation \
                      must name a static parameter, not an enum case"
-                    enum_name case_name))
+                    value_kind enum_name case_name))
               | Ast.StaticName n ->
-                  let names_owner_index = function
+                  let names_authority_index = function
                     | Some (Ast.TypeBorrow (Ast.TypeIndexed (_, args)))
                     | Some (Ast.TypeBorrowMut (Ast.TypeIndexed (_, args))) ->
                         List.mem (Ast.StaticName n) args
                     | _ -> false
                   in
-                  if not (List.exists (fun (_, ty) -> names_owner_index ty)
-                            f.params) then
+                  if not (List.exists (fun (_, ty) -> names_authority_index ty)
+                            f.params) then begin
+                    let authority_desc = match kind with
+                      | RegionSlice -> "indexed-owner parameter"
+                      | RegionPointer -> "indexed-owner or indexed-view parameter"
+                    in
                     raise (TypeError (f.def_loc, Printf.sprintf
-                      "slice return annotation '@ %s': '%s' does not name a \
-                       static index of any borrow or borrow mut indexed-owner \
-                       parameter of this function" n n));
-                  validate_nonparam_type f.def_loc s)
-         | Some ret when ast_contains_stable_owner_value ret ->
+                      "%s return annotation '@ %s': '%s' does not name a \
+                       static index of any borrow or borrow mut %s of this \
+                       function"
+                      value_kind n n authority_desc))
+                  end;
+                  validate_nonparam_type f.def_loc base)
+         | None when (match f.ret_type with
+             | Some ret -> ast_contains_stable_owner_value ret
+             | None -> false) ->
              raise (TypeError (f.def_loc,
                "stable owner containers cannot be returned by value"))
-         | ret -> Option.iter (validate_nonparam_type f.def_loc) ret);
+         | None -> Option.iter (validate_nonparam_type f.def_loc) f.ret_type);
         allow_implicit_static := false;
         List.iter validate_stmt_types f.body
     | Ast.ExternFuncDef (name, params, ret, effects) ->
@@ -4670,28 +4695,32 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add name (Option.value ret ~default:Ast.TypeVoid) m
     | _ -> m
   ) StringMap.empty prog in
-  (* Owner-derived region returns (issue #106): function key -> index of the
-     borrow/borrow-mut indexed-owner parameter its returned slice is tied to.
-     Same overload_key keying as call_params, resolved per call site through
-     resolved_call_targets, so overloads cannot mismatch. The declaration
-     validation pass already guaranteed the named static index exists on
-     exactly this kind of parameter. *)
-  let region_return_owner_index = List.fold_left (fun m -> function
+  (* Authority-derived region returns (issues #106/#128): function key ->
+     matching parameter indices plus returned value kind. Same overload_key
+     keying as call_params, resolved per call site through
+     resolved_call_targets, so overloads cannot mismatch. Declaration
+     validation already guaranteed that the named static index belongs to a
+     borrowed indexed owner/view. *)
+  let region_return_info = List.fold_left (fun m -> function
     | Ast.FuncDef f ->
         (match f.ret_type with
-         | Some (Ast.TypeSingleton (Ast.TypeSlice _, Ast.StaticName n)) ->
-             let owner_idx = ref None in
-             List.iteri (fun i (_, ty) -> match ty with
-               | Some (Ast.TypeBorrow (Ast.TypeIndexed (_, args)))
-               | Some (Ast.TypeBorrowMut (Ast.TypeIndexed (_, args)))
-                 when !owner_idx = None
-                      && List.mem (Ast.StaticName n) args ->
-                   owner_idx := Some i
-               | _ -> ()
-             ) f.params;
-             (match !owner_idx with
-              | Some i -> StringMap.add (overload_key f.name f.params) i m
-              | None -> m)
+         | Some ret ->
+             (match region_return_annotation ret with
+              | Some (_, Ast.StaticName n, kind) ->
+                  let authority_indices = ref [] in
+                  List.iteri (fun i (_, ty) -> match ty with
+                    | Some (Ast.TypeBorrow (Ast.TypeIndexed (_, args)))
+                    | Some (Ast.TypeBorrowMut (Ast.TypeIndexed (_, args))) ->
+                        if List.mem (Ast.StaticName n) args then
+                          authority_indices := i :: !authority_indices
+                    | _ -> ()
+                  ) f.params;
+                  (match List.rev !authority_indices with
+                   | _ :: _ as indices ->
+                       StringMap.add (overload_key f.name f.params)
+                         (indices, kind) m
+                   | [] -> m)
+              | _ -> m)
          | _ -> m)
     | _ -> m
   ) StringMap.empty prog in
@@ -4809,14 +4838,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              consumed on every path)" (path_to_string p) what))
       ) declared
     in
-    (* Owner-derived region slices (issue #106, TAKIBI_CORE.md post-Slice-6
-       order item 1). expr_taint computes which owner paths a slice-valued
-       expression is derived from: a call to a region-returning function
-       taints with the path of its borrow-owner argument; Var and SliceOf
-       propagate an existing binding's taint (through `unsafe { s[a..<b] }`
-       too); every other shape -- notably Cast -- is untainted, so
-       `s as *u8` deliberately EXITS tracking (raw pointers sit outside
-       every safety story in this language, documented in SPEC.md). *)
+    (* Authority-derived region values (issues #106/#128). expr_taint
+       computes which owner/guard paths a slice or pointer expression is
+       derived from: a call to a region-returning function taints with the
+       path of its borrowed authority argument; Var and SliceOf propagate an
+       existing binding's taint. Every other shape -- notably Cast -- is
+       untainted, so a raw cast deliberately exits tracking. *)
     let rec expr_taint taints (e : Ast.expr) = match e.desc with
       | Ast.Var n -> TaintEnv.get n taints
       | Ast.SliceOf (base, _, _) -> TaintEnv.get base taints
@@ -4825,14 +4852,34 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
             ~default:name in
-          (match StringMap.find_opt target region_return_owner_index with
-           | Some i ->
-               (match List.nth_opt args i with
-                | Some { Ast.desc = Ast.Var owner; _ } ->
-                    PathSet.singleton (PVar owner)
-                | _ -> PathSet.empty)
+          (match StringMap.find_opt target region_return_info with
+           | Some (indices, _) ->
+               List.fold_left (fun paths i ->
+                 match List.nth_opt args i with
+                 | Some { Ast.desc = Ast.Var authority; _ } ->
+                     PathSet.add (PVar authority) paths
+                 | _ -> paths)
+                 PathSet.empty indices
            | None -> PathSet.empty)
       | _ -> PathSet.empty
+    in
+    let rec ast_region_kind = function
+      | Ast.TypeSlice _ -> Some RegionSlice
+      | Ast.TypePtr _ | Ast.TypeAlignedPtr _ -> Some RegionPointer
+      | Ast.TypeSingleton (t, _) | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+      | Ast.TypeSink t -> ast_region_kind t
+      | _ -> None
+    in
+    let rec expr_region_kind (e : Ast.expr) = match e.desc with
+      | Ast.Var n -> Option.bind (StringMap.find_opt n !var_types) ast_region_kind
+      | Ast.SliceOf _ -> Some RegionSlice
+      | Ast.Unsafe x -> expr_region_kind x
+      | Ast.Call (name, _) ->
+          let target = Option.value
+            (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
+            ~default:name in
+          Option.map snd (StringMap.find_opt target region_return_info)
+      | _ -> None
     in
     (* The name a taint diagnostic should blame for an escaping expression. *)
     let rec taint_source_name (e : Ast.expr) = match e.desc with
@@ -4840,7 +4887,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.SliceOf (base, _, _) -> base
       | Ast.Unsafe x -> taint_source_name x
       | Ast.Call (name, _) -> Printf.sprintf "result of '%s'" name
-      | _ -> "<slice>"
+      | _ -> "<value>"
     in
     (* Lazy kill: a tainted name is rejected at USE time once any of its
        owner paths may have been consumed. Checking against maybe_consumed
@@ -4849,29 +4896,43 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let require_region_live loc taints moved name =
       PathSet.iter (fun p ->
         if ResourceFlow.may_be_consumed p moved then
+          let value_kind = Option.value
+            (Option.map region_kind_word
+               (Option.bind (StringMap.find_opt name !var_types) ast_region_kind))
+            ~default:"value" in
           raise (TypeError (loc, Printf.sprintf
-            "slice '%s' is derived from %s value '%s' and cannot be used \
+            "%s '%s' is derived from %s value '%s' and cannot be used \
              after '%s' is consumed"
-            name (kind_word p) (path_to_string p) (path_to_string p))))
+            value_kind name (kind_word p) (path_to_string p)
+            (path_to_string p))))
         (TaintEnv.get name taints)
     in
-    (* v1 escape bans: an owner-derived slice must stay a function-local
-       value. Returning it or storing it anywhere durable would outlive the
-       function-local tracking that makes the kill check honest. *)
+    (* Region-bound values must stay function-local. Returning or storing one
+       anywhere durable would outlive the tracking that makes the kill honest. *)
     let require_no_taint_escape loc taints escape (e : Ast.expr) =
       let t = expr_taint taints e in
       if not (PathSet.is_empty t) then
         let owner = path_to_string (PathSet.choose t) in
+        let value_kind = Option.value
+          (Option.map region_kind_word (expr_region_kind e)) ~default:"value" in
+        let derived_kind =
+          if value_kind = "slice" then "owner-derived slice"
+          else if value_kind = "pointer" then "authority-derived pointer"
+          else "authority-derived value"
+        in
+        let authority_kind =
+          if value_kind = "slice" then "owner" else "authority"
+        in
         let msg = match escape with
           | `Return -> Printf.sprintf
-              "owner-derived slice '%s' cannot be returned from this \
-               function (it is tied to owner '%s')"
-              (taint_source_name e) owner
+              "%s '%s' cannot be returned from this \
+               function (it is tied to %s '%s')"
+              derived_kind (taint_source_name e) authority_kind owner
           | `Store -> Printf.sprintf
-              "owner-derived slice '%s' cannot be stored into a global, \
+              "%s '%s' cannot be stored into a global, \
                struct field, array element, or through a pointer (it is \
-               tied to owner '%s')"
-              (taint_source_name e) owner
+               tied to %s '%s')"
+              derived_kind (taint_source_name e) authority_kind owner
         in
         raise (TypeError (loc, msg))
     in

@@ -5,8 +5,8 @@ syntax accepted by the compiler today. `SPEC.md` remains authoritative for
 implemented Takibi. `OWNERSHIP_KERNEL.md` records the history and limitations
 of the current affine/linear checker.
 
-Implementation status (2026-07-16): Slices 0 through 6 and the first five
-post-Slice-6 Core increments are implemented. The
+Implementation status (2026-07-16): Slices 0 through 6 and the currently
+selected post-Slice-6 Core increments are implemented. The
 `Takibi_core` module owns the four-layer vocabulary, the current checker uses
 `Delta.Legacy_flow`, and the indexed runtime-owner subset described in 3.1 is
 accepted. Non-indexed erased affine/linear views are also accepted and erased
@@ -27,8 +27,10 @@ stable owner slots can now hold one linear ownership-bearing variant and
 exchange it through `stable_replace` while a linear erased guard is held; the
 RTOS demo uses this for one ownership-bearing rendezvous direction. Static
 `addr` indices now bind `MutexGuard[lock]` and `KGuard[lock]` to supported
-syntactic lock places and reject a mismatched explicit unlock pointer. General
-linear-owner place/storage tracking, arbitrary address expressions,
+syntactic lock places and reject a mismatched explicit unlock pointer.
+Guard-derived pointer returns make `rtos_demo`'s shared data inaccessible
+after its authorizing `KGuard[lock]` is consumed. General linear-owner
+place/storage tracking, arbitrary address expressions,
 direct/general quantifiers and propositions, and solver hooks remain design
 targets.
 
@@ -741,9 +743,10 @@ from the indexed spelling.
   heap predicates remain for examples that require them.
 - Ownership transfer through one concrete synchronous channel is implemented
   below. Generic and zero-copy typed channels (#113) remain demand-led.
-- Owner-derived region slices (#106) and asynchronous TX ownership (#87) are
-  implemented below. Escape control continues as #128; solver/proof
-  integration still requires its own concrete driver and negative tests.
+- Owner-derived region slices (#106), asynchronous TX ownership (#87), and
+  the first authority-bound pointer lifetime slice (#128) are implemented
+  below. Solver/proof integration still requires its own concrete driver and
+  negative tests.
 
 ### Post-Slice 6 example audit and consolidation (implemented 2026-07-16)
 
@@ -1021,12 +1024,46 @@ The positive fixtures are all existing network applications on both targets.
 `net_tx_release_while_in_flight_wrong` is the focused negative: it tries to
 release the RX owner after TX start and is rejected as a second consume.
 
-After this increment there is no preselected narrow example-driven ownership
-slice. General #128 lock-data coupling, arbitrary stable places, generic
-zero-copy channels, and solver integration remain demand-led and need a
-concrete acceptance boundary before implementation.
+The next selected increment is the narrow #128 lifetime boundary exercised by
+`rtos_demo`: a guard-authorized accessor returns a pointer that cannot survive
+the guard. Arbitrary stable places, generic zero-copy channels, and solver
+integration remain demand-led and need a concrete acceptance boundary before
+implementation.
 
-#### Solver and prover threshold
+### Authority-bound pointer lifetimes (implemented 2026-07-16)
+
+The first #128 slice extends `Delta.Region_taint` from owner-derived slices to
+guard-derived pointer returns:
+
+```takibi
+fn shared_access(g: borrow KGuard[lock]) -> *Shared @ lock {
+    return &shared;
+}
+```
+
+In return position only, `*T @ name` is a checker-only region annotation.
+`name` must be a static index of a borrowed indexed owner or view parameter.
+At a call, the returned pointer is tied to that authority path; aliases retain
+the tie, and dereference or field access after the authority is possibly
+consumed is rejected. Returning the pointer or storing it in a global, field,
+array element, or through another pointer is also rejected. Parameter-position
+`*T @ name` remains the existing pointer/static-address identity relation.
+
+`rtos_demo` now keeps `Shared` private, obtains `*Shared` only through
+`shared_access(g)`, and uses it before `kunlock`. The focused
+`guard_pointer_after_unlock_wrong` fixture performs the opposite ordering and
+fails. The return annotation, static index, and guard parameter erase; the
+accessor's LLVM ABI is an ordinary zero-argument function returning one
+pointer.
+
+This is deliberately not a general lock invariant. The accessor declaration
+is a reviewed module contract: the checker does not prove that its returned
+global is protected by the indexed lock, nor relate `stable_replace` fields to
+a mutex. Raw casts and indirect laundering retain the documented
+function-local region-v1 holes. The implemented boundary is specifically that
+an accessor-issued pointer cannot outlive the guard that authorized it.
+
+### Solver and prover threshold
 
 The current examples have exactly one executable `unsafe { ... }`, in
 `tcp_echo`'s payload subslice. Its missing fact is quantifier-free linear
@@ -1107,7 +1144,7 @@ independently:
 | #20 variant enums | kind-carrying runtime variants and existential resource payloads |
 | #6 multiple cores | CPU-indexed guards, per-CPU state, and interrupt permissions |
 | #106 aliasing (closed; #128 carries the rest) | place identity, region/view predicates, and disjointness propositions; owner-derived region slices were its first closed slice |
-| #128 escape control (lock-data coupling) | authority-bound pointer lifetimes: guard-tied accessor returns via static lock identities, extending region ties beyond slice returns |
+| #128 escape control (first slice closed) | authority-bound pointer lifetimes now extend region ties beyond slice returns; general lock invariants remain |
 | #87 asynchronous TX ownership | linear in-flight buffer/descriptor states and completion transitions |
 | #15/#108 cast and visibility hardening | unforgeable constructors and module boundaries for runtime owners and views |
 | #13 future SMT path | discharge generated Phi goals only after static names and assumptions exist |
