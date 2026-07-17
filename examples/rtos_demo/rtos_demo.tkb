@@ -92,7 +92,7 @@ fn owner_chan_send(ch: *OwnerChan,
     }
 
     let previous: OwnerSlotValue = stable_replace(
-        g, ch.value, OwnerSlotValue::Full(message));
+        g, &ch.mutex, ch.value, OwnerSlotValue::Full(message));
     match previous {
         OwnerSlotValue::Empty => {}
         // Unreachable when the private full/slot invariant is intact. Still
@@ -114,7 +114,7 @@ fn owner_chan_recv(ch: *OwnerChan) -> OwnerSlotValue !{may_block} {
         g = cond_wait(&ch.slot_full, g, &ch.mutex);
     }
     let received: OwnerSlotValue = stable_replace(
-        g, ch.value, OwnerSlotValue::Empty);
+        g, &ch.mutex, ch.value, OwnerSlotValue::Empty);
     ch.full = 0;
     cond_signal(&ch.slot_taken);
     mutex_unlock(g, &ch.mutex);

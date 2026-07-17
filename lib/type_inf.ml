@@ -688,10 +688,10 @@ module PathSet = ResourceFlow.Places
    key from a bare variable name to `path` (above). *)
 type consume_sets = ResourceFlow.t
 
-(* Owner-derived region taint (issue #106): local slice-variable name ->
-   the owner paths it was derived from. Checked lazily against
-   maybe_consumed at each use, so it shares Legacy_flow's union-at-join
-   conservatism with no extra merge logic of its own. *)
+(* Authority-derived region taint (issues #106/#128): local slice/pointer
+   name -> the owner or guard paths it was derived from. Checked lazily
+   against maybe_consumed at each use, so it shares Legacy_flow's
+   union-at-join conservatism with no extra merge logic of its own. *)
 module TaintEnv = Takibi_core.Delta.Region_taint (PathSet)
 
 let is_linear_ptr_ty t = match repr t with
@@ -2029,18 +2029,47 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
 
   | Call ("stable_replace", args) ->
       (match args with
-       | [guard; ({ desc = FieldGet (base_expr, fname); _ } as field_expr);
+       | [guard;
+          ({ desc = AddrOf
+               ({ desc = FieldGet (lock_base, _); _ } as lock_place); _ }
+            as lock_addr);
+          ({ desc = FieldGet (base_expr, fname); _ } as field_expr);
           replacement] ->
            (match guard.desc with
             | Var _ -> ()
             | _ -> raise (TypeError (guard.loc,
                 "stable_replace guard must be a bare linear view binding")));
            let gt = infer_expr senv eenv tyenv fenv guard in
-           (match repr gt with
-            | TView (name, _)
-              when Hashtbl.find_opt view_kinds name = Some Ast.KindLinear -> ()
+           let guard_lock = match repr gt with
+            | TView (name, args)
+              when Hashtbl.find_opt view_kinds name = Some Ast.KindLinear ->
+                let formals = Option.value
+                  (Hashtbl.find_opt view_params name) ~default:[] in
+                let addr_args = List.fold_left2 (fun found (_, sort) arg ->
+                  match sort with
+                  | Ast.TypeNamed "addr" -> arg :: found
+                  | _ -> found) [] formals args in
+                (match addr_args with
+                 | [lock] -> lock
+                 | _ -> raise (TypeError (guard.loc,
+                     "stable_replace guard must carry exactly one addr index")))
             | _ -> raise (TypeError (guard.loc,
-                "stable_replace requires a linear erased-view guard")));
+                "stable_replace requires a linear erased-view guard"))
+           in
+           let lock_ty = infer_expr senv eenv tyenv fenv lock_addr in
+           (match repr lock_ty with
+            | TPtr _ | TAlignedPtr _ -> ()
+            | _ -> raise (TypeError (lock_addr.loc,
+                "stable_replace mutex argument must be a field address")));
+           (try unify_static guard_lock (static_identity_for_place lock_place)
+            with Unify_error msg ->
+              raise (TypeError (lock_addr.loc,
+                "stable_replace mutex does not match guard identity: " ^ msg)));
+           (match static_place_key lock_base, static_place_key base_expr with
+            | Some lock_key, Some owner_key when lock_key = owner_key -> ()
+            | _ -> raise (TypeError (field_expr.loc,
+                "stable_replace mutex and owner field must belong to the same \
+                 syntactic container")));
            let bt = infer_expr senv eenv tyenv fenv base_expr in
            let (sname, static_args) = match struct_instance (repr bt) with
              | Some x -> x
@@ -2071,11 +2100,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 field_ty
             | _ -> raise (TypeError (field_expr.loc,
                 "stable_replace target must hold a linear variant")))
-       | [_; field; _] ->
+       | [_; lock; { desc = FieldGet _; _ }; _] ->
+           raise (TypeError (lock.loc,
+             "stable_replace second argument must be the address of a mutex field"))
+       | [_; _; field; _] ->
            raise (TypeError (field.loc,
-             "stable_replace second argument must be a stable struct field"))
+             "stable_replace third argument must be a stable struct field"))
        | _ -> raise (TypeError (e.loc,
-           "stable_replace expects 3 arguments: stable_replace(guard, slot.field, replacement)")))
+           "stable_replace expects 4 arguments: stable_replace(guard, &container.mutex, container.owner, replacement)")))
 
   | Call (("dma_publish" | "dma_consume" | "device_fence" | "signal_fence"
           | "interrupt_wait" | "interrupt_notify") as fname, args) ->
@@ -4961,11 +4993,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                require_available e.loc moved p;
                if consume then mv_consume p moved else moved
            | _ -> check_expr taints moved false base_expr)
-      | Ast.Call ("stable_replace", [guard; field; replacement]) ->
+      | Ast.Call ("stable_replace", [guard; lock; field; replacement]) ->
           if not consume then
             raise (TypeError (e.loc,
               "linear result of 'stable_replace' must be moved into an owning binding, returned, or matched"));
           let moved = check_expr taints moved false guard in
+          let moved = check_expr taints moved false lock in
           let moved = match field.desc with
             | Ast.FieldGet (base, _) -> check_expr taints moved false base
             | _ -> moved

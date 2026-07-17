@@ -2595,11 +2595,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (TypeVoid, const_null (i1_type context))
 
   | Call ("stable_replace",
-          [guard_e; { desc = FieldGet (base_e, fname); _ }; replacement_e]) ->
-      (* The erased guard has no ABI value, but evaluate it so codegen and
-         source evaluation order remain aligned. The checker guarantees this
-         is a private linear-variant field and the only legal access path. *)
+          [guard_e; lock_e; { desc = FieldGet (base_e, fname); _ };
+           replacement_e]) ->
+      (* The erased guard has no ABI value. The lock address is evaluated for
+         ordinary left-to-right source semantics; the checker uses its static
+         place identity and guarantees it belongs to the stable container. *)
       ignore (gen_expr locals guard_e);
+      ignore (gen_expr locals lock_e);
       let (base_ty, base_v) = gen_expr locals base_e in
       let sname = match base_ty with
         | TypeNamed name | TypePtr (TypeNamed name)

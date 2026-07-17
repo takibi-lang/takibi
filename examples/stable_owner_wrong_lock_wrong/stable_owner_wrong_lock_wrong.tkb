@@ -1,0 +1,34 @@
+// This file is expected to produce a compile error.
+// The guard was acquired from stable_lock_a.mutex, but the exchange names
+// stable_lock_b.mutex. Static place identity prevents opening B's owner slot
+// with A's lock authority.
+
+linear view StableLockGuard[lock: addr];
+linear view StableLockPermit;
+
+variant StableLockValue {
+    Empty;
+    Full(StableLockPermit);
+}
+
+struct StableLockSlot {
+    private mutex: i32;
+    private value: StableLockValue;
+}
+
+private let mut stable_lock_a: StableLockSlot;
+private let mut stable_lock_b: StableLockSlot;
+
+fn stable_lock_acquire(m: *i32 @ lock) -> StableLockGuard[lock] {
+    return view StableLockGuard[lock];
+}
+
+fn stable_replace_wrong_lock() -> StableLockValue {
+    let guard = stable_lock_acquire(&stable_lock_a.mutex);
+    return stable_replace(
+        guard,
+        &stable_lock_b.mutex,
+        stable_lock_b.value,
+        StableLockValue::Empty
+    );
+}

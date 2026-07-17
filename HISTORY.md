@@ -7750,3 +7750,29 @@ an accessor-issued pointer cannot outlive its authorizing guard.
 Validation: all 764 Alcotest cases passed. Full `make check` passed all 123
 host, compile-error, DWARF, and QEMU integration cases, including `rtos_demo`,
 every STM32 cross-build, and all network sources under `--forbid-trap`.
+
+## 2026-07-17: Lock-Coupled Stable Owner Exchange
+
+Strengthened the stable owner boundary so an arbitrary linear guard can no
+longer authorize an exchange. `stable_replace` now takes the explicit form
+`stable_replace(guard, &container.mutex, container.owner, replacement)`.
+The guard must be a linear erased view carrying exactly one `addr` index;
+that identity must equal the mutex field's static place identity, and the
+mutex and owner fields must share one supported syntactic container base.
+
+`rtos_demo`'s ownership-bearing rendezvous now states this relation at both
+exchange sites. `stable_owner_wrong_lock_wrong` acquires A's guard and tries
+to exchange B's slot, fixing the full-compiler negative contract. Unit tests
+also reject pairing one container's mutex with another container's owner
+field and reject unindexed linear guards. The previous missing-guard and
+dropped-result fixtures were migrated and remain rejected.
+
+The guard and lock relation erase. LLVM still performs one typed aggregate
+load and store for the owner package and does not encode proof state in
+pointer bits. This is not a general lock invariant: the declaring module must
+still implement guard production with a real acquisition and maintain its
+private runtime `full` flag/variant-tag relationship.
+
+Validation: all 767 Alcotest cases passed. Full `make check` passed all 124
+host, compile-error, DWARF, and QEMU integration cases, including `rtos_demo`,
+every STM32 cross-build, and all network sources under `--forbid-trap`.

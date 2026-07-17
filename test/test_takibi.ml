@@ -4752,7 +4752,7 @@ let infer_tests = [
 
   Alcotest.test_case "stable owner slot exchanges one existential linear owner under a guard" `Quick
     (expect_ok
-       "linear view StableGuard7e;
+       "linear view StableGuard7e[lock: addr];
         linear struct StableOwner7e[n: usize] {
           id: usize @ n;
           value: i32;
@@ -4761,26 +4761,94 @@ let infer_tests = [
           Empty;
           Full(exists n: usize. StableOwner7e[n]);
         }
-        struct StableSlot7e { private value: StableValue7e; }
+        struct StableSlot7e {
+          private mutex: i32;
+          private value: StableValue7e;
+        }
         private let mut stable_slot7e: StableSlot7e;
+        fn stable_lock7e(m: *i32 @ lock) -> StableGuard7e[lock] {
+          return view StableGuard7e[lock];
+        }
+        fn stable_unlock7e(g: sink StableGuard7e[lock], m: *i32 @ lock) {}
         fn stable_new7e(value: i32) -> StableOwner7e[0] {
           let mut owner: StableOwner7e[0] = { 0, value };
           return owner;
         }
         fn stable_drop7e(owner: sink StableOwner7e[n]) {}
-        fn stable_use7e(guard: borrow StableGuard7e) {
+        fn stable_use7e() {
+          let guard = stable_lock7e(&stable_slot7e.mutex);
           let previous: StableValue7e = stable_replace(
-            guard, stable_slot7e.value, StableValue7e::Full(stable_new7e(7)));
+            guard, &stable_slot7e.mutex, stable_slot7e.value,
+            StableValue7e::Full(stable_new7e(7)));
           match previous {
             StableValue7e::Empty => {}
             StableValue7e::Full(stale) => { stable_drop7e(stale); }
           }
           let current: StableValue7e = stable_replace(
-            guard, stable_slot7e.value, StableValue7e::Empty);
+            guard, &stable_slot7e.mutex, stable_slot7e.value,
+            StableValue7e::Empty);
           match current {
             StableValue7e::Empty => {}
             StableValue7e::Full(owner) => { stable_drop7e(owner); }
           }
+          stable_unlock7e(guard, &stable_slot7e.mutex);
+        }");
+
+  Alcotest.test_case "stable_replace rejects a guard for another mutex" `Quick
+    (expect_type_error "stable_replace mutex does not match guard identity"
+       "linear view StableGuard7ea[lock: addr];
+        linear view StablePermit7ea;
+        variant StableValue7ea { Empty; Full(StablePermit7ea); }
+        struct StableSlot7ea {
+          private mutex: i32;
+          private value: StableValue7ea;
+        }
+        private let mut stable_slot7ea: StableSlot7ea;
+        private let mut stable_slot7eb: StableSlot7ea;
+        fn stable_lock7ea(m: *i32 @ lock) -> StableGuard7ea[lock] {
+          return view StableGuard7ea[lock];
+        }
+        fn stable_wrong_lock7ea() -> StableValue7ea {
+          let guard = stable_lock7ea(&stable_slot7ea.mutex);
+          return stable_replace(guard, &stable_slot7eb.mutex,
+            stable_slot7eb.value, StableValue7ea::Empty);
+        }");
+
+  Alcotest.test_case "stable_replace mutex and owner must share a container" `Quick
+    (expect_type_error
+       "stable_replace mutex and owner field must belong to the same syntactic container"
+       "linear view StableGuard7ec[lock: addr];
+        linear view StablePermit7ec;
+        variant StableValue7ec { Empty; Full(StablePermit7ec); }
+        struct StableSlot7ec {
+          private mutex: i32;
+          private value: StableValue7ec;
+        }
+        private let mut stable_slot7ec: StableSlot7ec;
+        private let mut stable_slot7ed: StableSlot7ec;
+        fn stable_lock7ec(m: *i32 @ lock) -> StableGuard7ec[lock] {
+          return view StableGuard7ec[lock];
+        }
+        fn stable_wrong_container7ec() -> StableValue7ec {
+          let guard = stable_lock7ec(&stable_slot7ec.mutex);
+          return stable_replace(guard, &stable_slot7ec.mutex,
+            stable_slot7ed.value, StableValue7ec::Empty);
+        }");
+
+  Alcotest.test_case "stable_replace guard requires one addr identity" `Quick
+    (expect_type_error "stable_replace guard must carry exactly one addr index"
+       "linear view StableGuard7ee;
+        linear view StablePermit7ee;
+        variant StableValue7ee { Empty; Full(StablePermit7ee); }
+        struct StableSlot7ee {
+          private mutex: i32;
+          private value: StableValue7ee;
+        }
+        private let mut stable_slot7ee: StableSlot7ee;
+        fn stable_unindexed7ee(guard: borrow StableGuard7ee)
+             -> StableValue7ee {
+          return stable_replace(guard, &stable_slot7ee.mutex,
+            stable_slot7ee.value, StableValue7ee::Empty);
         }");
 
   Alcotest.test_case "stable owner field must be private" `Quick
@@ -4814,21 +4882,27 @@ let infer_tests = [
     (expect_type_error "requires a linear erased-view guard"
        "linear view StablePermit7j;
         variant StableValue7j { Empty; Full(StablePermit7j); }
-        struct StableSlot7j { private value: StableValue7j; }
+        struct StableSlot7j { private mutex: i32; private value: StableValue7j; }
         private let mut stable_slot7j: StableSlot7j;
         fn stable_bad_guard7j(x: i32) -> StableValue7j {
-          return stable_replace(x, stable_slot7j.value, StableValue7j::Empty);
+          return stable_replace(x, &stable_slot7j.mutex,
+            stable_slot7j.value, StableValue7j::Empty);
         }");
 
   Alcotest.test_case "stable_replace result cannot be discarded" `Quick
     (expect_type_error "linear result of 'stable_replace' must be moved"
-       "linear view StableGuard7k;
+       "linear view StableGuard7k[lock: addr];
         linear view StablePermit7k;
         variant StableValue7k { Empty; Full(StablePermit7k); }
-        struct StableSlot7k { private value: StableValue7k; }
+        struct StableSlot7k { private mutex: i32; private value: StableValue7k; }
         private let mut stable_slot7k: StableSlot7k;
-        fn stable_drop_result7k(guard: borrow StableGuard7k) {
-          stable_replace(guard, stable_slot7k.value, StableValue7k::Empty);
+        fn stable_lock7k(m: *i32 @ lock) -> StableGuard7k[lock] {
+          return view StableGuard7k[lock];
+        }
+        fn stable_drop_result7k() {
+          let guard = stable_lock7k(&stable_slot7k.mutex);
+          stable_replace(guard, &stable_slot7k.mutex,
+            stable_slot7k.value, StableValue7k::Empty);
         }");
 
   Alcotest.test_case "stable owner containers cannot be local copies" `Quick
@@ -5895,7 +5969,7 @@ let codegen_tests = [
     "stable owner exchange lowers to one typed load and store under an erased guard" `Quick
     (fun () ->
       let src =
-        "linear view CgStableGuard3c;
+        "linear view CgStableGuard3c[lock: addr];
          linear struct CgStableOwner3c[n: usize] {
            id: usize @ n;
            value: i32;
@@ -5904,12 +5978,24 @@ let codegen_tests = [
            Empty;
            Full(exists n: usize. CgStableOwner3c[n]);
          }
-         struct CgStableSlot3c { private value: CgStableValue3c; }
+         struct CgStableSlot3c {
+           private mutex: i32;
+           private value: CgStableValue3c;
+         }
          private let mut cg_stable_slot3c: CgStableSlot3c;
-         fn cg_stable_exchange3c(guard: borrow CgStableGuard3c,
-                                 replacement: CgStableValue3c)
+         fn cg_stable_lock3c(m: *i32 @ lock) -> CgStableGuard3c[lock] {
+           return view CgStableGuard3c[lock];
+         }
+         fn cg_stable_unlock3c(g: sink CgStableGuard3c[lock],
+                               m: *i32 @ lock) {}
+         fn cg_stable_exchange3c(replacement: CgStableValue3c)
              -> CgStableValue3c {
-           return stable_replace(guard, cg_stable_slot3c.value, replacement);
+           let guard = cg_stable_lock3c(&cg_stable_slot3c.mutex);
+           let previous: CgStableValue3c = stable_replace(
+             guard, &cg_stable_slot3c.mutex, cg_stable_slot3c.value,
+             replacement);
+           cg_stable_unlock3c(guard, &cg_stable_slot3c.mutex);
+           return previous;
          }" in
       ignore (gen_codegen src);
       let exchange = match Hashtbl.find_opt Llvm_gen.functions

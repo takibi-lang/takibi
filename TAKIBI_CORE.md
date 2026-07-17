@@ -5,7 +5,7 @@ syntax accepted by the compiler today. `SPEC.md` remains authoritative for
 implemented Takibi. `OWNERSHIP_KERNEL.md` records the history and limitations
 of the current affine/linear checker.
 
-Implementation status (2026-07-16): Slices 0 through 6 and the currently
+Implementation status (2026-07-17): Slices 0 through 6 and the currently
 selected post-Slice-6 Core increments are implemented. The
 `Takibi_core` module owns the four-layer vocabulary, the current checker uses
 `Delta.Legacy_flow`, and the indexed runtime-owner subset described in 3.1 is
@@ -24,8 +24,9 @@ closed `TcpConn[conn, state]` runtime dispatch. Plain variants can now carry
 unrestricted ordinary structs by value and live in ordinary struct fields; the RTOS SD
 server uses that subset for one typed copy-rendezvous request slot. Private
 stable owner slots can now hold one linear ownership-bearing variant and
-exchange it through `stable_replace` while a linear erased guard is held; the
-RTOS demo uses this for one ownership-bearing rendezvous direction. Static
+exchange it through `stable_replace` while the address-indexed guard for a
+same-container mutex is held; the RTOS demo uses this for one
+ownership-bearing rendezvous direction. Static
 `addr` indices now bind `MutexGuard[lock]` and `KGuard[lock]` to supported
 syntactic lock places and reject a mismatched explicit unlock pointer.
 Guard-derived pointer returns make `rtos_demo`'s shared data inaccessible
@@ -735,9 +736,10 @@ from the indexed spelling.
 
 ### Later slices
 
-- The first concrete stable-storage subset is implemented below: a private
-  BSS owner container can exchange one linear variant under an erased linear
-  guard. General place borrowing and arbitrary indexed-owner storage remain.
+- The first concrete stable-storage subset and its same-container lock
+  coupling are implemented below: a private BSS owner container can exchange
+  one linear variant under its address-indexed erased guard. General place
+  borrowing and arbitrary indexed-owner storage remain.
 - Static lock identity is implemented below for supported named and field
   places. General invariant predicates, arbitrary address expressions, and
   heap predicates remain for examples that require them.
@@ -920,12 +922,14 @@ ordinary field borrowing or make every global a resource-tracked place:
   nested in another value, or allocated as a local. A pointer to that one
   stable location is the supported API surface;
 - direct read, assignment, and address-of on the owner field are rejected.
-  `stable_replace(guard, container.field, replacement)` is the only operation:
-  it moves the replacement into invariant-owned storage and returns the old
-  linear variant, which existing Delta flow requires the caller to bind,
-  return, or match and discharge;
-- `guard` must be a bare binding of a linear erased view. The operation keeps
-  that guard live, so an owner channel can exchange its slot between
+  `stable_replace(guard, &container.mutex, container.field, replacement)` is
+  the only operation: it moves the replacement into invariant-owned storage
+  and returns the old linear variant, which existing Delta flow requires the
+  caller to bind, return, or match and discharge;
+- `guard` must be a bare binding of a linear erased view with exactly one
+  `addr` index. The explicit mutex field must carry that same static identity
+  and share the owner field's syntactic container base. The operation keeps
+  the guard live, so an owner channel can exchange its slot between
   `Empty` and `Full(exists id. Owner[id])` while the surrounding mutex API
   retains its ordinary lock/unlock obligation;
 - LLVM lowers the exchange to one typed aggregate load and store. Static
@@ -937,14 +941,12 @@ ordinary field borrowing or make every global a resource-tracked place:
   consumes it. The reverse response remains a plain copied integer channel.
 
 This is a minimal invariant boundary, not a complete lock logic. The checker
-proves that the stored owner can only cross the boundary as one exchange and
-that neither side can discard or duplicate it. The declaring file remains
-responsible for maintaining its private `full` flag/tag relationship and for
-calling `stable_replace` while the actual mutex is held. `stable_replace`
-still accepts any linear erased guard; the checker does not yet state that a
-particular owner slot is protected by a particular mutex. The address-indexed
-mutex API below does, however, prevent that guard from being unlocked through
-a different explicit pointer.
+proves that the stored owner crosses the boundary only as one exchange, that
+neither side can discard or duplicate it, and that the exchange names the
+same-container lock whose static identity the guard carries. The declaring
+file remains responsible for maintaining its private `full` flag/tag
+relationship and for ensuring the guard producer actually acquires that
+runtime lock.
 
 The remaining example-driven order at this checkpoint was:
 
@@ -982,8 +984,9 @@ without adding a runtime token:
   the indexed APIs.
 
 This is static identity for a deliberately small syntactic-place language,
-not pointer provenance, alias analysis, arbitrary-place borrowing, or a lock
-invariant tying `stable_replace` to a container field.
+not pointer provenance, alias analysis, arbitrary-place borrowing, or a
+general lock invariant. The later lock-coupled stable-exchange increment uses
+that identity to tie `stable_replace` to a same-container mutex field.
 
 ### Asynchronous TX ownership (implemented 2026-07-16)
 
@@ -1058,10 +1061,38 @@ pointer.
 
 This is deliberately not a general lock invariant. The accessor declaration
 is a reviewed module contract: the checker does not prove that its returned
-global is protected by the indexed lock, nor relate `stable_replace` fields to
-a mutex. Raw casts and indirect laundering retain the documented
-function-local region-v1 holes. The implemented boundary is specifically that
-an accessor-issued pointer cannot outlive the guard that authorized it.
+global is protected by the indexed lock. The stable exchange now has a
+separate same-container lock relation, but raw casts and indirect laundering
+retain the documented function-local region-v1 holes. The implemented
+boundary is specifically that an accessor-issued pointer cannot outlive the
+guard that authorized it.
+
+### Lock-coupled stable owner exchange (implemented 2026-07-17)
+
+The stable owner operation now names its lock place explicitly:
+
+```takibi
+stable_replace(g, &ch.mutex, ch.value, replacement)
+```
+
+`g` must be a bare linear erased view carrying exactly one `addr` index. That
+index must equal the static identity of `&ch.mutex`, and `ch.mutex` and
+`ch.value` must share the same supported syntactic container base. Thus a
+guard acquired from `a.mutex` cannot exchange `b.value`, whether the call
+names `&b.mutex` (identity mismatch) or tries to pair `&a.mutex` with
+`b.value` (container mismatch). Pointer aliases remain conservatively outside
+the supported place language.
+
+The real positive driver is `rtos_demo`'s ownership-bearing rendezvous.
+`stable_owner_wrong_lock_wrong` fixes the cross-lock negative contract, while
+the prior missing-guard and dropped-result fixtures remain rejected. The
+guard, identity, and lock relation erase; lowering is still one typed load and
+store of the owner variant.
+
+This closes the known "any linear guard opens any stable slot" hole but is not
+a general invariant predicate. A private module can still mint a lying view,
+and it remains responsible for the runtime `full` flag/tag relationship and
+for implementing its guard producer with a real lock acquisition.
 
 ### Solver and prover threshold
 
@@ -1144,7 +1175,7 @@ independently:
 | #20 variant enums | kind-carrying runtime variants and existential resource payloads |
 | #6 multiple cores | CPU-indexed guards, per-CPU state, and interrupt permissions |
 | #106 aliasing (closed; #128 carries the rest) | place identity, region/view predicates, and disjointness propositions; owner-derived region slices were its first closed slice |
-| #128 escape control (first slice closed) | authority-bound pointer lifetimes now extend region ties beyond slice returns; general lock invariants remain |
+| #128 escape control (first slices closed) | authority-bound pointer lifetimes extend region ties beyond slice returns, and stable exchange now names a same-container lock; general invariants remain |
 | #87 asynchronous TX ownership | linear in-flight buffer/descriptor states and completion transitions |
 | #15/#108 cast and visibility hardening | unforgeable constructors and module boundaries for runtime owners and views |
 | #13 future SMT path | discharge generated Phi goals only after static names and assumptions exist |

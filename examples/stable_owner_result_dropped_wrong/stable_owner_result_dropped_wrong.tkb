@@ -1,4 +1,4 @@
-linear view StableDropGuard;
+linear view StableDropGuard[lock: addr];
 linear view StableDropPermit;
 
 // stable_replace moves the old linear package out of durable storage. The
@@ -10,14 +10,21 @@ variant StableDropValue {
 }
 
 struct StableDropSlot {
+    private mutex: i32;
     private value: StableDropValue;
 }
 
 private let mut stable_drop_slot: StableDropSlot;
 
-fn drop_replaced_owner(guard: borrow StableDropGuard) {
+fn stable_drop_lock(m: *i32 @ lock) -> StableDropGuard[lock] {
+    return view StableDropGuard[lock];
+}
+
+fn drop_replaced_owner() {
+    let guard = stable_drop_lock(&stable_drop_slot.mutex);
     stable_replace(
         guard,
+        &stable_drop_slot.mutex,
         stable_drop_slot.value,
         StableDropValue::Empty
     );

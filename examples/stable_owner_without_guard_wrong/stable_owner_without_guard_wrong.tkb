@@ -10,6 +10,7 @@ variant StableWrongValue {
 }
 
 struct StableWrongSlot {
+    private mutex: i32;
     private value: StableWrongValue;
 }
 
@@ -18,6 +19,7 @@ private let mut stable_wrong_slot: StableWrongSlot;
 fn replace_without_guard(not_a_guard: i32) -> StableWrongValue {
     return stable_replace(
         not_a_guard,
+        &stable_wrong_slot.mutex,
         stable_wrong_slot.value,
         StableWrongValue::Empty
     );

@@ -1165,9 +1165,9 @@ still the only runtime lock/unlock operand. The focused
 unlocking another is rejected; existing condition-variable, queue, channel,
 KLock, and RTOS examples use the indexed API.
 
-This does not make `stable_replace` a general lock invariant: that builtin
-still accepts any linear erased guard and does not relate an owner slot to a
-particular mutex field.
+This identity is later consumed by the lock-coupled stable owner exchange in
+6.7.13. It still does not provide a general lock invariant or prove arbitrary
+heap predicates.
 
 #### 6.7.11 Asynchronous TX owner transition (implemented 2026-07-16)
 
@@ -1201,8 +1201,28 @@ their existing static-address identity meaning.
 `shared_access(g: borrow KGuard[lock]) -> *Shared @ lock`; the focused
 `guard_pointer_after_unlock_wrong` fixture proves that using it after unlock
 is rejected. The declaring accessor remains a trusted module contract: this
-slice does not prove which data a lock protects and does not turn
-`stable_replace` into a lock invariant.
+slice does not prove which data a lock protects. Section 6.7.13 separately
+ties stable exchange to one same-container lock place.
+
+#### 6.7.13 Lock-coupled stable owner exchange (implemented 2026-07-17)
+
+`stable_replace` now takes four operands:
+`stable_replace(guard, &container.mutex, container.owner, replacement)`.
+The guard must be a linear erased view with exactly one `addr` index; that
+identity must match the mutex field address, and the mutex and owner fields
+must share one supported syntactic container base. A guard for one container
+therefore cannot exchange another container's stable owner package.
+
+The relation is checker-only. LLVM still lowers the exchange to one typed
+aggregate load and store, with no pointer/integer proof encoding. `rtos_demo`
+is the positive driver and `stable_owner_wrong_lock_wrong` is the focused
+cross-lock failure.
+
+This removes the previous "any linear guard" authorization hole, but the
+declaring module still owns two trusted obligations: its guard producer must
+perform a real runtime acquisition, and its `full` flag must agree with the
+variant tag. General lock invariants and arbitrary heap predicates remain
+outside this slice.
 
 ## 7. Next outlook
 
@@ -1216,12 +1236,10 @@ to transfer an existentially indexed `OwnerMessage[id]` between tasks.
 
 This is intentionally smaller than arbitrary stored-owner/place tracking.
 The declaring file still maintains the relationship between its runtime
-`full` flag and the variant tag, and any linear guard can authorize the
-exchange. Static guard identity now rejects a mismatched explicit lock
-pointer, but does not prove which mutex protects a stable slot. General heap
-predicates and arbitrary stable places remain demand-led. Section 6.7.12
-closes the narrow pointer-after-unlock path but deliberately leaves those
-general invariants open. No broader ownership slice is selected without
+`full` flag and the variant tag. Section 6.7.13 now rejects a mismatched guard,
+mutex field, or stable-slot container, while leaving guard-producer honesty as
+a trusted module obligation. General heap predicates and arbitrary stable
+places remain demand-led. No broader ownership slice is selected without
 another concrete example and focused negative contract.
 
 ## 8. Prior art notes

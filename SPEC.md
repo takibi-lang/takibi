@@ -1007,30 +1007,36 @@ The owner field cannot be read, assigned, or addressed directly. Its only
 operation is the reserved compiler builtin:
 
 ```takibi
-stable_replace(guard, container.value, replacement)
+stable_replace(guard, &container.mutex, container.value, replacement)
 ```
 
-It requires exactly three operands. `guard` is a bare variable whose type is
-a linear erased view, `container.value` names a registered stable owner field,
-and `replacement` has that field's linear variant type. The replacement is
-moved into the slot and the previous value is returned. The returned linear
-variant cannot be discarded: it must be placed in an owning binding, returned,
-or matched, after which the usual all-path rules apply to every payload.
-`stable_replace` borrows rather than consumes the guard.
+It requires exactly four operands. `guard` is a bare variable whose type is a
+linear erased view carrying exactly one `addr` index. The second operand must
+be the address of an ordinary field, and its static place identity must equal
+that guard index. The mutex field and registered stable owner field must have
+the same syntactic container base; aliases and unrelated containers are
+conservatively rejected. `replacement` has the owner field's linear variant
+type. It is moved into the slot and the previous value is returned. The
+returned linear variant cannot be discarded: it must be placed in an owning
+binding, returned, or matched, after which the usual all-path rules apply to
+every payload. `stable_replace` borrows rather than consumes the guard.
 
 The LLVM operation is one typed load of the old aggregate followed by one
 typed store of the replacement. The guard, static indices, and existential
-binders erase; there is no pointer/integer ownership encoding. The operation
-is not a hardware atomic primitive. The declaring module must call it under
-the runtime lock whose guard it was given.
+binders erase; there is no pointer/integer ownership encoding. The explicit
+mutex address contributes no ownership representation. The operation is not
+a hardware atomic primitive.
 
-This first invariant is intentionally limited. It statically seals the owner
-field and makes every transfer across the boundary explicit and linear, but
-it does not yet associate the guard with a particular lock address or prove a
-private runtime flag equivalent to the variant tag. `examples/rtos_demo`
-provides the positive ownership-bearing rendezvous; the focused failures are
+This invariant remains intentionally limited. It statically seals the owner
+field, makes every transfer explicit and linear, and associates the exchange
+with the same-container lock address carried by the guard. It does not prove
+that the guard-producing function actually acquired a runtime lock or that a
+private runtime flag is equivalent to the variant tag. Those remain trusted
+module obligations. `examples/rtos_demo` provides the positive
+ownership-bearing rendezvous; the focused failures are
 `examples/stable_owner_without_guard_wrong` and
-`examples/stable_owner_result_dropped_wrong`.
+`examples/stable_owner_result_dropped_wrong`, plus
+`examples/stable_owner_wrong_lock_wrong` for cross-lock exchange.
 
 ## Scoped Mutable Owner Borrows (Takibi Core Slice 4)
 
