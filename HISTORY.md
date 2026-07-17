@@ -8086,15 +8086,25 @@ Follow-up fixes from the first real-board run:
 - The first curl could race PHY/ARP/server readiness, so the script retries
   the request instead of treating the first connection refusal as a profiling
   failure.
+- The profiler script now performs a warm-up `/ICON.PNG` fetch, halts the
+  board through OpenOCD, clears only the calls/cycles fields in
+  `__takibi_prof_table`, resumes, and then fetches `/ICON.PNG` again for the
+  measured profile. The function id field is preserved. DWT `CYCCNT` is NOT
+  reset during this clear: functions such as `http_server_poll_once` or
+  `net_rx_wait` may already be active when OpenOCD halts the board, and
+  resetting CYCCNT under those live stack entries makes their later exit probe
+  underflow. Leaving CYCCNT monotonic keeps those intervals meaningful.
 
 Real-board validation: `make profile-stm32-http-server-sdcard-rtos` completed
-successfully against the STM32F746G-DISCOVERY board. The first profile of
+successfully against the STM32F746G-DISCOVERY board. The first cold profile of
 `/ICON.PNG` reported 195 table entries, 117 active entries, and about
-189 million inclusive cycles. The hottest entries were `net_init`/`phy_init`
-and their MDIO polling path (`mdio_read`/`mdio_wait`), followed by the
-HTTP/SD/RTOS request path (`http_server_poll_once`, `build_response_segment`,
-`http_read_chunk`, `sd_read_chunk_rpc`, `tcp_continue`,
-`http_continue_response`, and `cond_wait`).
+189 million inclusive cycles, dominated by `net_init`/`phy_init` and their
+MDIO polling path (`mdio_read`/`mdio_wait`). After adding the warm-up and
+OpenOCD table clear, the measured warm `/ICON.PNG` profile reported about
+72 million inclusive cycles, led by the HTTP/SD/RTOS request path:
+`http_server_poll_once`, `build_response_segment`, `http_read_chunk`,
+`sd_read_chunk_rpc`, `tcp_continue`, `http_continue_response`, and
+`cond_wait`.
 
 Known limitations of this first slice:
 

@@ -61,6 +61,47 @@ dump_profile_table() {
         }
 }
 
+clear_profile_counters_and_resume() {
+    local addr="$1" count="$2" log
+    log="$tmpdir/openocd-clear.log"
+    openocd -f "$OPENOCD_BOARD_CFG" \
+        -c "init" \
+        -c "halt" \
+        -c "set prof_base $addr" \
+        -c "set prof_count $count" \
+        -c 'for {set i 0} {$i < $prof_count} {incr i} {
+                set entry [expr {$prof_base + ($i * 16)}]
+                mww [expr {$entry + 4}] 0
+                mww [expr {$entry + 8}] 0
+                mww [expr {$entry + 12}] 0
+            }' \
+        -c "resume" \
+        -c "shutdown" > "$log" 2>&1 || {
+            echo "openocd profile clear failed:" >&2
+            sed 's/^/       /' "$log" >&2
+            return 1
+        }
+}
+
+fetch_icon() {
+    local label="$1"
+    local curl_ok=0
+    echo "Fetching $URL ($label) ..."
+    for attempt in $(seq 1 "${TAKIBI_PROFILE_CURL_ATTEMPTS:-10}"); do
+        if curl --fail --silent --show-error --max-time "${TAKIBI_PROFILE_CURL_TIMEOUT:-90}" \
+            --output "$tmpdir/ICON-$label.PNG" "$URL"; then
+            curl_ok=1
+            break
+        fi
+        echo "curl $label attempt $attempt failed; retrying..." >&2
+        sleep 1
+    done
+    if [ "$curl_ok" -ne 1 ]; then
+        echo "curl $label failed after ${TAKIBI_PROFILE_CURL_ATTEMPTS:-10} attempts" >&2
+        exit 1
+    fi
+}
+
 echo "Provisioning SD card content..."
 bash scripts/provision_http_server_sdcard.sh "$INSTALLER_ELF" "$CONTENT_DIR" > "$tmpdir/provision.log" 2>&1 || {
     echo "SD card provisioning failed:" >&2
@@ -70,22 +111,6 @@ bash scripts/provision_http_server_sdcard.sh "$INSTALLER_ELF" "$CONTENT_DIR" > "
 
 echo "Loading profiled HTTP+SD+RTOS firmware..."
 ram_load_and_run "$ELF"
-
-echo "Fetching $URL ..."
-curl_ok=0
-for attempt in $(seq 1 "${TAKIBI_PROFILE_CURL_ATTEMPTS:-10}"); do
-    if curl --fail --silent --show-error --max-time "${TAKIBI_PROFILE_CURL_TIMEOUT:-90}" \
-        --output "$tmpdir/ICON.PNG" "$URL"; then
-        curl_ok=1
-        break
-    fi
-    echo "curl attempt $attempt failed; retrying..." >&2
-    sleep 1
-done
-if [ "$curl_ok" -ne 1 ]; then
-    echo "curl failed after ${TAKIBI_PROFILE_CURL_ATTEMPTS:-10} attempts" >&2
-    exit 1
-fi
 
 table_addr=$(llvm-nm-19 "$ELF" | awk '$3 == "__takibi_prof_table" { print "0x" $1; exit }')
 if [ -z "$table_addr" ]; then
@@ -112,6 +137,13 @@ PY
 )
 table_size=$((profile_count * 16))
 dump="$tmpdir/takibi_prof_table.bin"
+
+fetch_icon "warm"
+
+echo "Clearing profile counters after warm-up..."
+clear_profile_counters_and_resume "$table_addr" "$profile_count"
+
+fetch_icon "measured"
 
 echo "Dumping $profile_count profile entries from $table_addr ..."
 dump_profile_table "$table_addr" "$table_size" "$dump"
