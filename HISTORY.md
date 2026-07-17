@@ -7960,3 +7960,79 @@ Validation: full `make check` (langcheck, Alcotest, every STM32 cross-build
 including both SD-card HTTP servers, and all QEMU integration tests
 including arp/icmp/tcp/http network tests) passed; all five network sources
 remain `--forbid-trap` clean on both targets.
+
+## 2026-07-17: RTOS Example Audit -- Scheduler State, API Boundaries, Borrow
+
+Second consolidation pass after the network-example audit above, covering
+`examples/common/rtos.tkb`, `examples/common/sync.tkb`, and the three RTOS
+examples (`rtos_demo`, `rtos_fatfs_sdcard`, `http_server_sdcard_rtos`).
+Deliberate non-goal, set up front: `Chan` is NOT genericized (issue #113
+stays demand-led); this pass organizes API boundaries, borrow contracts,
+private fields, and the stable-owner-slot usage around the machinery that
+already exists.
+
+Scheduler state (`rtos.tkb`), the main change:
+
+- `SchedState` fields are now `private` (issue #108: task code could
+  previously write `sched.current_task` directly, one convention away from
+  corrupting the round-robin) and carry refined types
+  (`task_count: {1..<5 as usize}`, `current_task: {0..<4 as usize}`).
+- The task-stack table `tcb_sp` moved out of the struct to its own private
+  global array because the grammar supports proven indexing of a plain
+  global array but not assignment through an indexed array FIELD (same
+  limitation fat12.tkb's fat_format documents). Every access is now a
+  compile-time-proven checked array access; the pre-audit version decayed
+  to a raw `*usize` indexed by an unrefined `isize` -- "trap-free" only
+  because raw pointers are never bounds-checked at all.
+- Both platforms' tick dispatchers shared their save/advance/resume body
+  only by duplication; that is now one `sched_next()`. Round-robin
+  wraparound is an `if` instead of `%`, so interval propagation plus a
+  refined-field comparison proves the next index; the two remaining
+  explicit refined casts (`as {0..<4 as usize}`, `as {1..<5 as usize}`)
+  are free width-widening coercions required because refined ASSIGNMENT
+  demands the exact declared range, not a subrange (checker behavior
+  confirmed empirically: `{1..<4}` narrowed value vs `{0..<4}` field is a
+  "refined int range mismatch" error).
+- `task_self()` lost its defensive if-narrowing dance and unreachable
+  fallback: the refined field type IS the proof now, and the function is a
+  bare field return.
+- `rtos_task_add`'s id parameter tightened from `{0..<4}` to `{1..<4}`:
+  slot 0 is always app_main itself and can no longer be clobbered by a
+  registration.
+- `chan_init` moved after `struct Chan` (it read as initializing a type
+  that had not appeared yet; flat namespace made it compile, not read).
+
+Borrow-contract boundary found and documented rather than forced:
+
+- `borrow` does NOT currently compose with a singleton-address pointer
+  type: `m: borrow *i32 @ lock` is rejected ("borrow is only valid on a
+  raw/aligned pointer, slice, ... parameter"). Since `mutex_lock`'s
+  identity-carrying `*i32 @ lock` parameter is what binds MutexGuard's
+  static address, every channel helper that locks `&ch.mutex` is thereby
+  prevented from declaring its channel pointer `borrow` (a borrowed
+  channel's derived `&ch.mutex` could not be passed onward). sync.tkb's
+  header comment and rtos.tkb's Chan comment now record this exact chain,
+  so a future borrow+singleton composition slice knows which signatures to
+  revisit.
+- What could carry the contract does: `cond_wait`/`cond_signal`'s sequence
+  pointers and the extern `sem_wait`/`sem_post` primitives are now
+  `borrow` (extern borrow is a trusted API declaration per the
+  borrowed-callee slice).
+
+RTOS examples:
+
+- rtos_demo: `Shared.counter` is now private (the guard-authorized
+  accessor idiom was already the only sanctioned path; privacy makes the
+  bypass a compile error instead of a convention). OwnerChan and
+  http_server_sdcard_rtos's SdRequestChan each carry a comment stating
+  that their duplicated rendezvous handshake is the accepted cost of not
+  genericizing Chan, and pointing at the borrow limitation above.
+- AGENTS.md's rtos.tkb entry dropped its stale WordChan mention (removed
+  by the typed copy-rendezvous slice) and records the refined scheduler
+  state.
+
+Validation: full `make check` passed (langcheck, Alcotest, all QEMU
+integration tests including rtos_demo's two-task rendezvous demo, every
+STM32 cross-build including rtos_fatfs_sdcard and http_server_sdcard_rtos);
+rtos.tkb remains `--forbid-trap` clean on both targets with zero raw-pointer
+scheduler accesses.

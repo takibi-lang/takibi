@@ -82,20 +82,14 @@ fn kunlock(g: sink KGuard[lock], lk: *KLock @ lock) {
 // it sidesteps the buffer-ownership tracking issue #89 would otherwise
 // need for a future zero-copy version (no live buffer exists to own),
 // and keeps the send/recv coupling a single atomic joint event.
-// Smart constructors (issue #108 / OWNERSHIP_KERNEL.md Stage 2): channel
-// internals are private above, so these are the ONE place the rendezvous
-// invariant (mutex free = 1, slot empty = all else 0) is established.
-// Before Stage 2, every example duplicated that invariant as a struct
-// literal `{1, 0, 0, 0, 0}` -- knowledge that was never theirs to own.
-// Call once per channel before rtos_start()/first use.
-fn chan_init(ch: *Chan) {
-    ch.mutex = 1;
-    ch.slot_full = 0;
-    ch.slot_taken = 0;
-    ch.full = 0;
-    ch.value = 0;
-}
-
+// API boundary note (2026-07-17 audit): the channel pointer parameters
+// below deliberately do NOT carry `borrow`, even though these helpers are
+// synchronous and non-retaining. `borrow` does not currently compose with
+// a singleton-address pointer type, so `&ch.mutex` derived from a borrowed
+// channel could not be passed to mutex_lock's identity-carrying
+// `m: *i32 @ lock` parameter -- see examples/common/sync.tkb's header
+// comment. If that composition lands, `ch` here (and every
+// channel-shaped struct copied from this one) should become `borrow`.
 struct Chan {
     // All private (issue #108 / OWNERSHIP_KERNEL.md Stage 2):
     // chan_send/chan_recv below are the ONLY code that may touch channel
@@ -108,6 +102,20 @@ struct Chan {
     private slot_taken: io i32;
     private full:       i32;
     private value:      i32;
+}
+
+// Smart constructor (issue #108 / OWNERSHIP_KERNEL.md Stage 2): channel
+// internals are private above, so this is the ONE place the rendezvous
+// invariant (mutex free = 1, slot empty = all else 0) is established.
+// Before Stage 2, every example duplicated that invariant as a struct
+// literal `{1, 0, 0, 0, 0}` -- knowledge that was never theirs to own.
+// Call once per channel before rtos_start()/first use.
+fn chan_init(ch: *Chan) {
+    ch.mutex = 1;
+    ch.slot_full = 0;
+    ch.slot_taken = 0;
+    ch.full = 0;
+    ch.value = 0;
 }
 
 fn chan_send(ch: *Chan, m: i32) !{may_block} {
@@ -146,31 +154,61 @@ fn chan_recv(ch: *Chan) -> i32 !{may_block} {
 // prior example's own convention -- app_main() calls rtos_task_add for
 // tasks 1..3, never for itself), tasks 1..3 are available via
 // rtos_task_add.
+// NTASKS sizes tcb_sp below; the refined field/parameter bounds ({1..<5},
+// {0..<4}, {1..<4}) must be spelled as literals (same restriction as every
+// refined type in this language) and are what actually pin the count --
+// keep them in sync with NTASKS if it ever changes.
 let NTASKS: usize = 4;
 
-struct SchedState {
-    task_count:   isize;
-    current_task: isize;
-    tcb_sp:       [usize; 4];
-}
-
+// Scheduler bookkeeping (2026-07-17 audit): fields are private (issue
+// #108 -- task code reaching into the round-robin state was previously
+// just a convention away) and carry refined types, so every tcb_sp access
+// below is a compile-time-proven ARRAY access. The pre-audit version
+// decayed tcb_sp to a raw *usize and indexed it with an unrefined isize --
+// "no trap" only because raw pointers are never checked at all.
 // task_count starts at 1 (just task 0, app_main itself) and grows as
 // rtos_task_add registers higher task ids -- see that function below.
 // This is what lets rtos_start() take no argument: a demo that only
 // ever calls rtos_task_add(1, ...) (2 tasks total) must not have the
 // round-robin switch also visit an empty, never-initialized slot 3.
-let mut sched: SchedState = {1, 0, {0, 0, 0, 0}};
+struct SchedState {
+    private task_count:   {1..<5 as usize};
+    private current_task: {0..<4 as usize};
+}
+
+private let mut sched: SchedState = {1, 0};
+
+// Task stacks live outside SchedState as their own private global: the
+// grammar supports indexing a plain global array with a proven index, but
+// not assigning through an indexed array FIELD (see fat12.tkb's
+// fat_format comment) -- and a separate array needs no pointer decay.
+private let mut tcb_sp: [usize; NTASKS];
+
+// Shared save/advance/resume step of both platforms' tick dispatchers.
+// Wraparound is an if, not `%`: current_task + 1 is {1..<5}, and the
+// comparison against task_count ({1..<5}) narrows it to {1..<4}. Refined
+// assignment requires the exact declared range, so the explicit refined
+// cast widens {1..<4} to {0..<4} -- a free coercion (source range is
+// contained in the target's), no runtime check is generated.
+fn sched_next(frame_sp: usize) -> usize {
+    tcb_sp[sched.current_task] = frame_sp;
+    let bound: usize = sched.task_count;
+    let next: usize = sched.current_task + 1;
+    if (next < bound) {
+        sched.current_task = next as {0..<4 as usize};
+    } else {
+        sched.current_task = 0;
+    }
+    return tcb_sp[sched.current_task];
+}
 
 fn irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
     let id: u32 = *gic.cpu_iar;
     if (id == 30) {
         scheduler_rearm_tick();
-        let sp: *usize = sched.tcb_sp;
-        sp[sched.current_task] = frame_sp;
-        sched.current_task = (sched.current_task + 1) % sched.task_count;
+        let next_sp: usize = sched_next(frame_sp);
         *(gic.cpu_eoir) = id;
-        let sp2: *usize = sched.tcb_sp;
-        return sp2[sched.current_task];
+        return next_sp;
     }
     *(gic.cpu_eoir) = id;
     return frame_sp;
@@ -181,27 +219,26 @@ fn SysTick_Handler() !{interrupt} {
 }
 
 fn pendsv_dispatch(frame_sp: usize) -> usize !{interrupt} {
-    let sp: *usize = sched.tcb_sp;
-    sp[sched.current_task] = frame_sp;
-    sched.current_task = (sched.current_task + 1) % sched.task_count;
-    let sp2: *usize = sched.tcb_sp;
-    return sp2[sched.current_task];
+    return sched_next(frame_sp);
 }
 
 // Registers task `id`'s initial stack pointer (from setup_task_stack)
 // before rtos_start() is called. Caller-supplied id, not auto-assigned
 // -- the caller decides which slot each task occupies, same convention
 // every prior scheduler example already used (sp[1] = ..., sp[2] = ...).
+// id is {1..<4}: slot 0 is always app_main itself and can no longer be
+// clobbered by a registration (the pre-audit {0..<4} accepted it).
 // Also raises sched.task_count to cover the newly registered id, so the
 // round-robin switch never visits a slot no rtos_task_add call has
 // initialized (a demo using only ids 1 and 2 must not also schedule an
 // empty, never-set-up id 3).
-fn rtos_task_add(id: {0..<4 as usize}, sp: usize) {
-    let t: *usize = sched.tcb_sp;
-    t[id as isize] = sp;
-    let n: isize = (id as isize) + 1;
+fn rtos_task_add(id: {1..<4 as usize}, sp: usize) {
+    tcb_sp[id] = sp;
+    // id + 1 is {2..<5}; the refined cast widens it to task_count's exact
+    // declared range (free coercion, no runtime check).
+    let n: usize = id + 1;
     if (n > sched.task_count) {
-        sched.task_count = n;
+        sched.task_count = n as {1..<5 as usize};
     }
 }
 
@@ -209,17 +246,9 @@ fn rtos_start() {
     scheduler_init();
 }
 
-// The currently running task's own id. sched.current_task is `isize`
-// (matches the modulo arithmetic above); narrowed here via an
-// if-condition (examples/affine_escape_via_index.tkb's idx narrowing
-// uses the same idiom) since a bare field read carries no provable
-// range on its own. The else path is unreachable in practice (current_task
-// is always kept in [0, task_count) by the switch logic above) but is
-// required for exhaustiveness.
+// The currently running task's own id. current_task's refined field type
+// IS the proof now; the pre-audit isize field needed a defensive
+// if-narrowing dance with an unreachable fallback return here.
 fn task_self() -> {0..<4 as usize} {
-    let t: isize = sched.current_task;
-    if (t >= 0 && t < 4) {
-        return t as usize;
-    }
-    return 0;
+    return sched.current_task;
 }

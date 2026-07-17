@@ -289,12 +289,15 @@ examples/
                      with per-open cursor/size/mode state; HISTORY.md's issue #97 entry records
                      the older affine-opaque singleton stage it replaced.
     rtos.tkb      -- Simple RTOS (issue #66) task-facing API: cpu_id() (examples/percpu),
-                     address-indexed KLock/KGuard/klock/kunlock, copy-rendezvous
-                     Chan/WordChan helpers, and rtos_task_add/rtos_start/task_self
+                     address-indexed KLock/KGuard/klock/kunlock, the copy-rendezvous
+                     Chan helpers, and rtos_task_add/rtos_start/task_self
                      scheduling glue generalized from the fixed-task examples. Chan internals
                      are private and initialized through constructors; ownership-bearing
                      rendezvous in rtos_demo uses a concrete stable owner slot and
-                     stable_replace rather than a generic zero-copy channel. Used by both
+                     stable_replace rather than a generic zero-copy channel. Scheduler
+                     bookkeeping (SchedState) is private with refined field types, so
+                     every task-table access is a proven array access (2026-07-17 RTOS
+                     audit, see HISTORY.md). Used by both
                      QEMU RTOS examples and STM32 RAM RTOS examples such as
                      rtos_fatfs_sdcard/http_server_sdcard_rtos -- see HISTORY.md's RTOS entries.
                      task_yield() intentionally remains unimplemented until a real caller

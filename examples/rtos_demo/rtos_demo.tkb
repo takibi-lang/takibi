@@ -19,7 +19,10 @@ use "examples/common/rtos.tkb";
 let mut the_lock: KLock;
 
 struct Shared {
-    counter: i32;
+    // private (issue #108): the only sanctioned path to this counter is
+    // shared_access's guard-authorized pointer plus the accessors below --
+    // all in this file, which is exactly what file-granular privacy pins.
+    private counter: i32;
 }
 
 private let mut shared: Shared;
@@ -46,6 +49,12 @@ variant OwnerSlotValue {
     Full(exists id: usize. OwnerMessage[id]);
 }
 
+// Same shape as rtos.tkb's Chan with the value field replaced by the
+// stable owner slot -- the duplication of the rendezvous handshake in
+// owner_chan_send/owner_chan_recv below is the accepted cost of NOT
+// genericizing Chan yet (issue #113 stays demand-led). The channel
+// pointer parameters stay non-borrow for the reason documented on
+// rtos.tkb's Chan.
 struct OwnerChan {
     private mutex:      i32;
     private slot_full:  io i32;

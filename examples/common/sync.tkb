@@ -1,5 +1,15 @@
-extern fn sem_wait(s: *i32) !{may_block};
-extern fn sem_post(s: *i32);
+// Non-@ pointer parameters below carry `borrow` (the checked non-retaining
+// call boundary): these are synchronous helpers that never store a pointer
+// anywhere that outlives the call, and the extern semaphore primitives are
+// declared with the same trusted contract. The mutex parameters themselves
+// (`m: *i32 @ lock`) deliberately stay plain: `borrow` does not currently
+// compose with a singleton-address pointer type, and the `@ lock` identity
+// is what binds the guard, so it wins. This is also why chan_send/chan_recv
+// (examples/common/rtos.tkb) cannot declare their channel pointer `borrow`:
+// `&ch.mutex` derived from a borrowed channel could not be passed to
+// mutex_lock's identity-carrying parameter.
+extern fn sem_wait(s: borrow *i32) !{may_block};
+extern fn sem_post(s: borrow *i32);
 
 // MutexGuard is an erased permission: the actual mutex is the caller-owned
 // *i32 semaphore passed alongside it, so the guard needs no runtime pointer or
@@ -22,7 +32,7 @@ fn mutex_unlock(g: sink MutexGuard[lock], m: *i32 @ lock) {
    (1) Read the sequence number while holding the mutex
    (2) Even if a signal arrives after unlock, the saved s from (1) still detects it
    (3) *seq is a volatile load -- the compiler will not hoist it out of the spin loop */
-fn cond_wait(seq: *io i32, g: sink MutexGuard[lock],
+fn cond_wait(seq: borrow *io i32, g: sink MutexGuard[lock],
              m: *i32 @ lock) -> MutexGuard[lock] !{may_block} {
     let s: i32 = *seq;
     mutex_unlock(g, m);
@@ -30,6 +40,6 @@ fn cond_wait(seq: *io i32, g: sink MutexGuard[lock],
     return mutex_lock(m);
 }
 
-fn cond_signal(seq: *io i32) {
+fn cond_signal(seq: borrow *io i32) {
     *seq = *seq + 1;
 }

@@ -79,6 +79,11 @@ variant SdRequest {
 // is ignored; full == 1 means value holds one complete typed request. Both
 // transitions happen while mutex is held, and send waits for recv to copy the
 // value out before returning.
+// Same shape as rtos.tkb's Chan with a typed value field -- the duplicated
+// handshake in sd_request_send/sd_request_recv below is the accepted cost
+// of NOT genericizing Chan yet (issue #113 stays demand-led), and the
+// channel pointer parameters stay non-borrow for the reason documented on
+// rtos.tkb's Chan.
 struct SdRequestChan {
     private mutex:      i32;
     private slot_full:  io i32;
