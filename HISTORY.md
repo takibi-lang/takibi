@@ -7588,9 +7588,9 @@ Semantics, decided during design review before implementation:
   error. `as *u8` exits tracking silently (raw pointers are outside every
   safety story; `net_transmit`'s in-driver reuse of the buffer relies on
   exactly this). Callee retention of a passed slice, tuple/variant
-  laundering inside one function, and owner-name rebinding remain
-  function-local holes, stated in SPEC.md rather than discovered later --
-  the same honesty Stage 3a's name-keyed field tracking established.
+  laundering inside one function, and owner-name rebinding were recorded as
+  function-local holes rather than hidden; the rebinding hole is closed by
+  the 2026-07-17 barrier below.
 
 Implementation notes worth keeping: the annotation is stripped by the two
 `ret_of_ast_opt*` helpers (their only call sites are `infer_func` and the
@@ -7776,3 +7776,28 @@ private runtime `full` flag/variant-tag relationship.
 Validation: all 767 Alcotest cases passed. Full `make check` passed all 124
 host, compile-error, DWARF, and QEMU integration cases, including `rtos_demo`,
 every STM32 cross-build, and all network sources under `--forbid-trap`.
+
+## 2026-07-17: Authority Binding Rebinding Barrier
+
+Closed a documented function-local hole in authority-derived lifetimes. The
+region tracker keyed a slice/pointer tie by its owner or guard's local name;
+after consuming that authority, assigning a fresh authority to the same name
+cleared the consumption state and incorrectly made the stale derived value
+appear usable again.
+
+`Delta.Region_taint` now reports reverse dependents. Assignment and every
+local binder form reject reuse of an authority name while an in-scope derived
+slice or pointer still depends on its current lifetime. The restriction ends
+when a mutable derived binding is replaced with an unrelated value or its
+scope ends, so legitimate authority reuse remains available after the
+dependent lifetime has actually ended. The check is entirely erased.
+
+`region_authority_rebind_wrong` records the full-compiler failure. Unit tests
+cover the owner-derived slice and guard-derived pointer holes plus the two
+allowed lifetime endings. Raw casts, callee retention, and tuple/variant
+laundering remain explicit region limitations rather than being hidden by
+this narrow fix.
+
+Validation: all 772 Alcotest cases passed. Full `make check` passed all 125
+host, compile-error, DWARF, and QEMU integration cases, every STM32
+cross-build, and all network sources under `--forbid-trap`.

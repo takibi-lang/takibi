@@ -1879,6 +1879,80 @@ let infer_tests = [
          }")));
 
   Alcotest.test_case
+    "region slice: an authority cannot be rebound while a derived slice is live"
+    `Quick
+    (expect_type_error
+      "cannot rebind authority 'o' while derived value 'f' still depends on its current lifetime"
+      (region_fixture ^
+        "fn reg_authority_rebind_bad() {
+           let idx: {0..<4 as usize} = 0;
+           let mut o = reg_make(idx);
+           let f = reg_frame(o);
+           reg_release(o);
+           o = reg_make(idx);
+           let x: u8 = f[0];
+           reg_release(o);
+         }"));
+
+  Alcotest.test_case
+    "region slice: a local binder cannot shadow a live authority" `Quick
+    (expect_type_error
+      "cannot rebind authority 'o' while derived value 'f' still depends on its current lifetime"
+      (region_fixture ^
+        "fn reg_authority_shadow_bad() {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let f = reg_frame(o);
+           let o = reg_make(idx);
+         }"));
+
+  Alcotest.test_case
+    "region slice: clearing the derived binding permits authority reuse" `Quick
+    (fun () ->
+      ignore (infer (region_fixture ^
+        "fn reg_authority_rebind_after_clear_ok() {
+           let idx: {0..<4 as usize} = 0;
+           let mut o = reg_make(idx);
+           let mut f: []u8 = reg_frame(o);
+           reg_release(o);
+           f = reg_bufs as []u8;
+           o = reg_make(idx);
+           let x: u8 = f[0];
+           reg_release(o);
+         }")));
+
+  Alcotest.test_case
+    "region slice: an ended derived scope permits authority reuse" `Quick
+    (fun () ->
+      ignore (infer (region_fixture ^
+        "fn reg_authority_rebind_after_scope_ok() {
+           let idx: {0..<4 as usize} = 0;
+           let mut o = reg_make(idx);
+           {
+             let f = reg_frame(o);
+             let x: u8 = f[0];
+           }
+           reg_release(o);
+           o = reg_make(idx);
+           reg_release(o);
+         }")));
+
+  Alcotest.test_case
+    "authority pointer: a guard cannot be rebound while a derived pointer is live"
+    `Quick
+    (expect_type_error
+      "cannot rebind authority 'guard' while derived value 'data' still depends on its current lifetime"
+      (authority_pointer_fixture ^
+        "fn authority_guard_rebind_bad() {
+           let mut guard = authority_lock(&authority_lock_word);
+           let data = authority_access(guard);
+           authority_unlock(guard, &authority_lock_word);
+           guard = authority_lock(&authority_lock_word);
+           data.value = 1;
+           authority_unlock(guard, &authority_lock_word);
+         }"));
+
+  Alcotest.test_case
     "region slice: the annotation must name a borrow owner's static index" `Quick
     (expect_type_error
       "does not name a static index of any borrow or borrow mut indexed-owner parameter"

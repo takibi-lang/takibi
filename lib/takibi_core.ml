@@ -115,6 +115,7 @@ module Delta = struct
     val empty : t
     val get : string -> t -> Places.t
     val set : string -> Places.t -> t -> t
+    val dependents : Places.elt -> t -> string list
     val join_branches : t -> t -> t
   end = struct
     module M = Map.Make (String)
@@ -127,6 +128,10 @@ module Delta = struct
     let set name places taints =
       if Places.is_empty places then M.remove name taints
       else M.add name places taints
+    let dependents authority taints =
+      M.fold (fun name authorities names ->
+        if Places.mem authority authorities then name :: names else names)
+        taints []
     let join_branches = M.union (fun _ a b -> Some (Places.union a b))
   end
 end

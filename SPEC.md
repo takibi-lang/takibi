@@ -1353,15 +1353,20 @@ back to DMA.
   function, or storing one into a global, struct field, array element,
   or through a pointer, is a compile error -- the tie is function-local
   and those would outlive it.
+- **Authority rebinding rejected**: while an in-scope local still carries a
+  tie, the owner/guard binding named by that tie cannot be assigned a fresh
+  value or reused by a `let`, tuple destructure, loop binder, `for in`
+  binder, or variant payload binder. Otherwise the name-keyed tracker could
+  mistake the fresh authority for the consumed authority and revive the old
+  derived value. Reassigning a mutable derived binding to an unrelated value
+  clears the tie; leaving its scope also ends the restriction.
 - **Documented holes (v1)**: casting to a raw pointer (`f as *u8`) exits
   tracking (raw pointers are outside every safety story; this is how
   `net_transmit` internally reuses the buffer). Passing a tied slice to
   a callee while the owner is live is allowed and the callee's own
   retention is unchecked (all tracking is function-local). Laundering
   through a tuple or variant payload within one function is likewise
-  untracked. Owner-name rebinding clears consumed status, so a stale
-  slice tied to the OLD same-named owner escapes (the same name-keying
-  limitation Stage 3a's field tracking accepted).
+  untracked.
 
 See `examples/net_rx_use_after_release_wrong` for the focused
 compile-error fixture; the real positive fixtures are the network
@@ -1393,9 +1398,10 @@ This is a caller-side lifetime contract, not a proved lock invariant. The
 declaring module is responsible for making the accessor return data actually
 protected by that lock. The current checker proves only that callers obtained
 the pointer through the annotated accessor and cannot use it after consuming
-the particular guard. Raw casts, callee retention, tuple/variant laundering,
-and authority-name rebinding have the same function-local v1 limitations as
-owner-derived slices.
+the particular guard. Raw casts, callee retention, and tuple/variant
+laundering have the same function-local v1 limitations as owner-derived
+slices. The authority-rebinding barrier applies identically to guard-derived
+pointers.
 
 `examples/rtos_demo` is the real positive use: its private `Shared` value is
 reachable only through `shared_access(g)`. The focused

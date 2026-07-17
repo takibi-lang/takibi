@@ -831,6 +831,10 @@ Implemented scope:
   (branch-merge union, same conservatism as affine double-use) is rejected
   with "slice 'f' is derived from linear value 'o' and cannot be used after
   'o' is consumed";
+- an authority binding cannot be rebound while an in-scope derived value
+  still names its lifetime. This applies to assignment and every local
+  binder form; replacing a mutable derived binding with an unrelated value,
+  or leaving its scope, ends the restriction;
 - escapes are rejected: returning a tied slice from the enclosing function,
   or storing one into a global, struct field, array element, or through a
   pointer;
@@ -840,8 +844,7 @@ Implemented scope:
   `as *u8` exits tracking (raw pointers are outside every safety story;
   `net_transmit` uses exactly this internally), callee retention of a
   passed slice is unchecked, tuple/variant laundering within one function
-  is untracked, and owner-name rebinding clears the tie (Stage 3a's
-  name-keying limitation).
+  is untracked.
 
 This deliberately does not implement general region/lifetime polymorphism:
 there is no region variable a caller can name, no function signature that
@@ -1079,6 +1082,10 @@ retain the documented function-local region-v1 holes. The implemented
 boundary is specifically that an accessor-issued pointer cannot outlive the
 guard that authorized it.
 
+The authority-rebinding barrier added below also applies to these pointers:
+assigning a fresh guard to the same local name cannot revive a pointer derived
+from the consumed guard.
+
 ### Lock-coupled stable owner exchange (implemented 2026-07-17)
 
 The stable owner operation now names its lock place explicitly:
@@ -1105,6 +1112,28 @@ This closes the known "any linear guard opens any stable slot" hole but is not
 a general invariant predicate. A private module can still mint a lying view,
 and it remains responsible for the runtime `full` flag/tag relationship and
 for implementing its guard producer with a real lock acquisition.
+
+### Authority binding rebinding barrier (implemented 2026-07-17)
+
+`Delta.Region_taint` now supports the reverse question "which live locals
+depend on this authority place?" Before assignment or any local binder reuses
+an owner/guard name, the checker rejects the operation if an in-scope derived
+slice or pointer still carries that place in its taint. This prevents a fresh
+owner or guard from clearing `Legacy_flow`'s consumed bit for the same
+name-keyed place and incorrectly reviving a value derived from the old
+lifetime.
+
+The restriction is lifetime-sensitive rather than permanent. Reassigning a
+mutable derived binding to an unrelated value clears its taint, and leaving
+the derived binding's scope removes it from the live-dependent check. The
+existing network and RTOS examples are the positive drivers;
+`region_authority_rebind_wrong` is the focused negative, and unit tests cover
+both slice and guard-derived pointer forms. The check is erased and adds no
+runtime state or ABI change.
+
+Raw casts, callee retention, and tuple/variant laundering remain the explicit
+function-local region limitations. Closing any of them requires a separate
+acceptance boundary rather than weakening this rebinding check.
 
 ### Deferred solver and prover threshold (not an active slice)
 

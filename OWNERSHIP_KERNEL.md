@@ -9,9 +9,10 @@ standard affine semantics, scoped mutable owner borrows, checker effects,
 function-pointer effect contracts, and integer-indexed universally transformed
 views. Owner-derived region slices (the post-Slice-6 RX hole, 6.7.9 below)
 and guard-derived pointer lifetimes (the first #128 slice, 6.7.12) are
-implemented too. General place/storage tracking, lock invariants, general
-propositions, and solver/prover integration remain outlook. As each surface
-slice lands, SPEC.md stays
+implemented too. The authority-rebinding barrier in 6.7.14 prevents a fresh
+owner/guard under the same local name from reviving an old derived value.
+General place/storage tracking, lock invariants, general propositions, and
+solver/prover integration remain outlook. As each surface slice lands, SPEC.md stays
 authoritative for the language that actually exists.
 
 Sections 4 through 6 preserve the decision path that led here. Statements in
@@ -1144,7 +1145,8 @@ network examples compile unchanged -- their hand-maintained use-then-release
 ordering is now compiler-enforced. Deliberately NOT implemented: region
 variables/polymorphism, tied slices crossing function boundaries (callee
 retention stays unchecked, function-local honesty), and tuple/variant
-laundering within a function. See TAKIBI_CORE.md's implemented-slice entry,
+laundering within a function. The original name-rebinding limitation is now
+closed by 6.7.14. See TAKIBI_CORE.md's implemented-slice entry,
 SPEC.md's "Authority-Derived Region Returns" section, and HISTORY.md's dated
 entry for details.
 
@@ -1224,6 +1226,27 @@ perform a real runtime acquisition, and its `full` flag must agree with the
 variant tag. General lock invariants and arbitrary heap predicates remain
 outside this slice.
 
+#### 6.7.14 Authority binding rebinding barrier (implemented 2026-07-17)
+
+The function-local region tracker keys an authority by its surface place. A
+consumed owner or guard could previously be replaced with a fresh value under
+the same local name; `Legacy_flow.produce` then cleared the place's consumed
+state and an old slice/pointer tainted with that place appeared live again.
+
+`Delta.Region_taint` now exposes reverse dependents, and every binding-
+producing statement rejects reuse of an authority name while a dependent
+slice or pointer remains in scope. Assignment, ordinary and tuple `let`, both
+loop binders, and variant payload binders share the same check. Replacing a
+mutable derived binding with an unrelated value clears its taint, and an ended
+scope is excluded, so the barrier does not turn authority names into permanent
+single-assignment variables.
+
+`region_authority_rebind_wrong` fixes the full-compiler negative contract;
+unit tests cover owner-derived slices, guard-derived pointers, explicit taint
+clearing, and scope exit. This is a checker-only strengthening with no ABI or
+runtime representation. Raw casts, callee retention, and tuple/variant
+laundering remain separate, explicit limitations.
+
 ## 7. Next outlook
 
 The post-Slice-6 sequence now includes owner-derived region slices,
@@ -1238,9 +1261,10 @@ This is intentionally smaller than arbitrary stored-owner/place tracking.
 The declaring file still maintains the relationship between its runtime
 `full` flag and the variant tag. Section 6.7.13 now rejects a mismatched guard,
 mutex field, or stable-slot container, while leaving guard-producer honesty as
-a trusted module obligation. General heap predicates and arbitrary stable
-places remain demand-led. No broader ownership slice is selected without
-another concrete example and focused negative contract.
+a trusted module obligation. Section 6.7.14 also prevents authority-place
+reuse from reviving a stale derived value. General heap predicates and
+arbitrary stable places remain demand-led. No broader ownership slice is
+selected without another concrete example and focused negative contract.
 
 ## 8. Prior art notes
 

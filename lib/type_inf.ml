@@ -4939,6 +4939,27 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             (path_to_string p))))
         (TaintEnv.get name taints)
     in
+    (* A taint names its authority by the current surface place key. Reusing
+       that key for a new owner/guard would otherwise make an old derived
+       value appear authorized by the new value and revive it after the old
+       authority was consumed. Reject that key reuse while a dependent
+       binding is still in scope. Reassigning the dependent to an unrelated
+       value clears its taint, and leaving its scope removes it from
+       [declared], so both intentional lifetime endings remain available. *)
+    let require_no_authority_rebind loc declared taints name =
+      let live_dependent =
+        List.find_opt (fun dependent ->
+          PathSet.mem (PVar dependent) declared)
+          (TaintEnv.dependents (PVar name) taints)
+      in
+      match live_dependent with
+      | Some dependent ->
+          raise (TypeError (loc, Printf.sprintf
+            "cannot rebind authority '%s' while derived value '%s' still \
+             depends on its current lifetime"
+            name dependent))
+      | None -> ()
+    in
     (* Region-bound values must stay function-local. Returning or storing one
        anywhere durable would outlive the tracking that makes the kill honest. *)
     let require_no_taint_escape loc taints escape (e : Ast.expr) =
@@ -5130,6 +5151,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Expr e -> (check_expr taints moved false e, declared, taints)
       | Ast.Assign (name, e) ->
           let p = PVar name in
+          require_no_authority_rebind s.loc declared taints name;
           if PathSet.mem p borrowed_params then
             raise (TypeError (s.loc, Printf.sprintf
               "cannot assign to borrowed value '%s'; borrow permits non-consuming access only"
@@ -5197,6 +5219,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            declared, taints)
       | Ast.Let (_, name, _, init, _) ->
           let p = PVar name in
+          require_no_authority_rebind s.loc declared taints name;
           set_decl_loc p s.loc;
           (match init with
            | None when is_linear_path p ->
@@ -5216,6 +5239,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           in
           (mv_clear p moved, PathSet.add p declared, taints)
       | Ast.LetTuple (names, rhs) ->
+          List.iter
+            (require_no_authority_rebind s.loc declared taints) names;
           List.iter (fun n -> set_decl_loc (PVar n) s.loc) names;
           (* Destructuring consumes the tuple (consume=true moves an RHS
              variable, or propagates into a direct TupleLit's tracked
@@ -5257,6 +5282,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
           (moved, declared, TaintEnv.join_branches taints body_taints)
       | Ast.For (name, _, lo, hi, body) ->
+          require_no_authority_rebind s.loc declared taints name;
           let moved = check_expr taints (check_expr taints moved false lo) false hi in
           let declared_body = PathSet.add (PVar name) declared in
           (* The counter rebinds `name` for the body, so any outer taint on
@@ -5274,6 +5300,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
           (moved, declared, TaintEnv.join_branches taints body_taints)
       | Ast.ForEach (name, collection, body) ->
+          require_no_authority_rebind s.loc declared taints name;
           let moved = check_expr taints moved false collection in
           let body_taints_in = TaintEnv.set name PathSet.empty taints in
           let (body_moved, _, body_taints) =
@@ -5310,6 +5337,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               | Some (name, _) -> StringMap.find_opt name !var_types
               | None -> None
             in
+            Option.iter (fun (name, _) ->
+              require_no_authority_rebind s.loc declared taints name)
+              binding;
             (match binding, binding_ty with
              | Some (name, _), Some ty ->
                  var_types := StringMap.add name ty !var_types

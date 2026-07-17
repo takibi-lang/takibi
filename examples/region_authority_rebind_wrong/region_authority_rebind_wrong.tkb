@@ -1,0 +1,36 @@
+// This file is expected to produce a compile error.
+// The slice is tied to the current lifetime of `owned`. Consuming that owner
+// and assigning a fresh owner to the same name must not revive the old slice:
+// it still refers to the buffer governed by the consumed lifetime.
+
+private linear struct RebindOwned[desc: usize] {
+    private index: {0..<4 as usize} @ desc;
+}
+
+let mut rebind_bufs: [u8; 8192];
+
+fn rebind_make(index: {0..<4 as usize} @ desc) -> RebindOwned[desc] {
+    let mut owned: RebindOwned[desc] = { index };
+    return owned;
+}
+
+fn rebind_frame(owned: borrow RebindOwned[desc]) -> [u8; 2048..] @ desc {
+    let index: {0..<4 as usize} = owned.index;
+    let offset: usize = index * 2048;
+    return rebind_bufs[offset..<offset + 2048];
+}
+
+fn rebind_release(owned: sink RebindOwned[desc]) {}
+
+fn region_authority_rebind_bad() {
+    let index: {0..<4 as usize} = 0;
+    let mut owned = rebind_make(index);
+    let frame = rebind_frame(owned);
+    rebind_release(owned);
+
+    // WRONG: a fresh owner with the same local name is not the authority
+    // from which `frame` was derived.
+    owned = rebind_make(index);
+    let byte: u8 = frame[0];
+    rebind_release(owned);
+}
