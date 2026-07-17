@@ -196,8 +196,14 @@ let prof_stack_cycles : llvalue option ref = ref None
 let prof_stack_ids : llvalue option ref = ref None
 let prof_depth : llvalue option ref = ref None
 let prof_overflow : llvalue option ref = ref None
+let prof_path_table : llvalue option ref = ref None
+let prof_path_overflow : llvalue option ref = ref None
+let prof_record_path_fn : llvalue option ref = ref None
 let prof_func_ids : (string, int) Hashtbl.t = Hashtbl.create 64
+let prof_task_capacity = 4
 let prof_stack_capacity = 256
+let prof_path_capacity = 256
+let prof_path_max_depth = 16
 
 let should_profile_function name =
   !function_profiling_enabled
@@ -209,6 +215,152 @@ let require_profile_global r name =
   match !r with
   | Some v -> v
   | None -> raise (Error (Printf.sprintf "BUG: profile global '%s' not initialized" name))
+
+let profile_task_id () =
+  match Hashtbl.find_opt global_vars "sched", Hashtbl.find_opt struct_lltypes "SchedState" with
+  | Some (_, sched_g), Some sched_ty ->
+      let p = build_in_bounds_gep sched_ty sched_g
+        [| const_int (i32_type context) 0; const_int (i32_type context) 1 |]
+        "prof.task.ptr" builder in
+      build_load (i32_type context) p "prof.task" builder
+  | _ -> const_int (i32_type context) 0
+
+let build_profile_path_recorder () =
+  let i32 = i32_type context in
+  let i64 = i64_type context in
+  let frames_ty = array_type i32 prof_path_max_depth in
+  let path_entry_ty = packed_struct_type context [| i32; i32; i32; i64; frames_ty |] in
+  let path_table_ty = array_type path_entry_ty prof_path_capacity in
+  let stack_ids_g = require_profile_global prof_stack_ids "__takibi_prof_stack_ids" in
+  let path_table_g = require_profile_global prof_path_table "__takibi_prof_path_table" in
+  let path_overflow_g = require_profile_global prof_path_overflow "__takibi_prof_path_overflow" in
+  let fty = function_type (void_type context) [| i32; i32; i64 |] in
+  let fn = define_function "__takibi_prof_record_path" fty the_module in
+  prof_record_path_fn := Some fn;
+
+  let task_arg = param fn 0 in
+  let depth_arg = param fn 1 in
+  let elapsed_arg = param fn 2 in
+  let entry_bb = entry_block fn in
+  position_at_end entry_bb builder;
+
+  let zero = const_int i32 0 in
+  let one = const_int i32 1 in
+  let max_depth = const_int i32 prof_path_max_depth in
+  let too_deep = build_icmp Icmp.Ugt depth_arg max_depth "path.too_deep" builder in
+  let use_depth = build_select too_deep max_depth depth_arg "path.depth" builder in
+
+  let hash_ptr = build_alloca i32 "path.hash" builder in
+  let i_ptr = build_alloca i32 "path.i" builder in
+  ignore (build_store (const_int i32 0x811c9dc5) hash_ptr builder);
+  ignore (build_store zero i_ptr builder);
+
+  let hash_cond = append_block context "hash_cond" fn in
+  let hash_body = append_block context "hash_body" fn in
+  let hash_done = append_block context "hash_done" fn in
+  ignore (build_br hash_cond builder);
+  position_at_end hash_cond builder;
+  let i = build_load i32 i_ptr "path.i" builder in
+  let more = build_icmp Icmp.Ult i use_depth "path.hash.more" builder in
+  ignore (build_cond_br more hash_body hash_done builder);
+  position_at_end hash_body builder;
+  let stack_ids_ty = array_type (array_type i32 prof_stack_capacity) prof_task_capacity in
+  let id_ptr = build_in_bounds_gep stack_ids_ty stack_ids_g [| zero; task_arg; i |] "path.stack.id.ptr" builder in
+  let id_v = build_load i32 id_ptr "path.stack.id" builder in
+  let h0 = build_load i32 hash_ptr "path.hash.old" builder in
+  let h1 = build_xor h0 id_v "path.hash.xor" builder in
+  let h2 = build_mul h1 (const_int i32 0x01000193) "path.hash.mul" builder in
+  ignore (build_store h2 hash_ptr builder);
+  ignore (build_store (build_add i one "path.i.next" builder) i_ptr builder);
+  ignore (build_br hash_cond builder);
+
+  position_at_end hash_done builder;
+  let hash_v = build_load i32 hash_ptr "path.hash.final" builder in
+  let idx_ptr = build_alloca i32 "path.idx" builder in
+  let chosen_ptr = build_alloca i32 "path.chosen" builder in
+  ignore (build_store zero idx_ptr builder);
+  ignore (build_store (const_int i32 (-1)) chosen_ptr builder);
+
+  let scan_cond = append_block context "scan_cond" fn in
+  let scan_body = append_block context "scan_body" fn in
+  let scan_next = append_block context "scan_next" fn in
+  let scan_done = append_block context "scan_done" fn in
+  ignore (build_br scan_cond builder);
+  position_at_end scan_cond builder;
+  let idx = build_load i32 idx_ptr "path.idx" builder in
+  let chosen = build_load i32 chosen_ptr "path.chosen" builder in
+  let no_choice = build_icmp Icmp.Eq chosen (const_int i32 (-1)) "path.no_choice" builder in
+  let in_range = build_icmp Icmp.Ult idx (const_int i32 prof_path_capacity) "path.in_range" builder in
+  ignore (build_cond_br (build_and no_choice in_range "path.scan.more" builder) scan_body scan_done builder);
+
+  position_at_end scan_body builder;
+  let entry_ptr = build_in_bounds_gep path_table_ty path_table_g [| zero; idx |] "path.entry" builder in
+  let e_hash_ptr = build_in_bounds_gep path_entry_ty entry_ptr [| zero; zero |] "path.e.hash.ptr" builder in
+  let e_depth_ptr = build_in_bounds_gep path_entry_ty entry_ptr [| zero; one |] "path.e.depth.ptr" builder in
+  let e_hash = build_load i32 e_hash_ptr "path.e.hash" builder in
+  let e_depth = build_load i32 e_depth_ptr "path.e.depth" builder in
+  let empty = build_icmp Icmp.Eq e_hash zero "path.empty" builder in
+  let same_hash = build_icmp Icmp.Eq e_hash hash_v "path.same_hash" builder in
+  let same_depth = build_icmp Icmp.Eq e_depth use_depth "path.same_depth" builder in
+  let matched = build_or empty (build_and same_hash same_depth "path.same" builder) "path.match" builder in
+  let choose_bb = append_block context "path_choose" fn in
+  ignore (build_cond_br matched choose_bb scan_next builder);
+  position_at_end choose_bb builder;
+  ignore (build_store idx chosen_ptr builder);
+  ignore (build_br scan_next builder);
+  position_at_end scan_next builder;
+  ignore (build_store (build_add idx one "path.idx.next" builder) idx_ptr builder);
+  ignore (build_br scan_cond builder);
+
+  position_at_end scan_done builder;
+  let chosen = build_load i32 chosen_ptr "path.chosen.final" builder in
+  let found = build_icmp Icmp.Ne chosen (const_int i32 (-1)) "path.found" builder in
+  let update_bb = append_block context "path_update" fn in
+  let overflow_bb = append_block context "path_overflow" fn in
+  let ret_bb = append_block context "path_ret" fn in
+  ignore (build_cond_br found update_bb overflow_bb builder);
+
+  position_at_end overflow_bb builder;
+  let ov = build_load i32 path_overflow_g "path.overflow.old" builder in
+  ignore (build_store (build_add ov one "path.overflow.next" builder) path_overflow_g builder);
+  ignore (build_br ret_bb builder);
+
+  position_at_end update_bb builder;
+  let entry_ptr = build_in_bounds_gep path_table_ty path_table_g [| zero; chosen |] "path.update.entry" builder in
+  let e_hash_ptr = build_in_bounds_gep path_entry_ty entry_ptr [| zero; zero |] "path.update.hash.ptr" builder in
+  let e_depth_ptr = build_in_bounds_gep path_entry_ty entry_ptr [| zero; one |] "path.update.depth.ptr" builder in
+  let e_calls_ptr = build_in_bounds_gep path_entry_ty entry_ptr [| zero; const_int i32 2 |] "path.update.calls.ptr" builder in
+  let e_cycles_ptr = build_in_bounds_gep path_entry_ty entry_ptr [| zero; const_int i32 3 |] "path.update.cycles.ptr" builder in
+  ignore (build_store hash_v e_hash_ptr builder);
+  ignore (build_store use_depth e_depth_ptr builder);
+  let calls = build_load i32 e_calls_ptr "path.calls" builder in
+  ignore (build_store (build_add calls one "path.calls.next" builder) e_calls_ptr builder);
+  let cycles = build_load i64 e_cycles_ptr "path.cycles" builder in
+  ignore (build_store (build_add cycles elapsed_arg "path.cycles.next" builder) e_cycles_ptr builder);
+
+  ignore (build_store zero i_ptr builder);
+  let copy_cond = append_block context "path_copy_cond" fn in
+  let copy_body = append_block context "path_copy_body" fn in
+  let copy_done = append_block context "path_copy_done" fn in
+  ignore (build_br copy_cond builder);
+  position_at_end copy_cond builder;
+  let i = build_load i32 i_ptr "path.copy.i" builder in
+  let more = build_icmp Icmp.Ult i use_depth "path.copy.more" builder in
+  ignore (build_cond_br more copy_body copy_done builder);
+  position_at_end copy_body builder;
+  let src = build_in_bounds_gep stack_ids_ty stack_ids_g [| zero; task_arg; i |] "path.copy.src" builder in
+  let dst_arr = build_in_bounds_gep path_entry_ty entry_ptr [| zero; const_int i32 4 |] "path.frames" builder in
+  let dst = build_in_bounds_gep frames_ty dst_arr [| zero; i |] "path.copy.dst" builder in
+  let v = build_load i32 src "path.copy.id" builder in
+  ignore (build_store v dst builder);
+  ignore (build_store (build_add i one "path.copy.next" builder) i_ptr builder);
+  ignore (build_br copy_cond builder);
+  position_at_end copy_done builder;
+  ignore (build_br ret_bb builder);
+
+  position_at_end ret_bb builder;
+  ignore (build_ret_void builder);
+  path_entry_ty
 
 let profile_read_cyccnt () =
   let i32 = i32_type context in
@@ -242,7 +394,11 @@ let emit_profile_enter key =
       let stack_ids_g = require_profile_global prof_stack_ids "__takibi_prof_stack_ids" in
       let i32 = i32_type context in
       let i64 = i64_type context in
-      let depth = build_load i32 depth_g "prof.depth" builder in
+      let task = profile_task_id () in
+      let zero = const_int i32 0 in
+      let depth_arr_ty = array_type i32 prof_task_capacity in
+      let depth_ptr = build_in_bounds_gep depth_arr_ty depth_g [| zero; task |] "prof.depth.ptr" builder in
+      let depth = build_load i32 depth_ptr "prof.depth" builder in
       let cap = const_int i32 prof_stack_capacity in
       let ok = build_icmp Icmp.Ult depth cap "prof.depth.ok" builder in
       let cur_bb = insertion_block builder in
@@ -254,15 +410,14 @@ let emit_profile_enter key =
       position_at_end push_bb builder;
       let now32 = profile_read_cyccnt () in
       let now64 = build_zext now32 i64 "prof.now64" builder in
-      let zero = const_int i32 0 in
-      let cyc_arr_ty = array_type i64 prof_stack_capacity in
-      let id_arr_ty = array_type i32 prof_stack_capacity in
-      let cyc_slot = build_in_bounds_gep cyc_arr_ty stack_cycles_g [| zero; depth |] "prof.cyc.slot" builder in
-      let id_slot = build_in_bounds_gep id_arr_ty stack_ids_g [| zero; depth |] "prof.id.slot" builder in
+      let cyc_arr_ty = array_type (array_type i64 prof_stack_capacity) prof_task_capacity in
+      let id_arr_ty = array_type (array_type i32 prof_stack_capacity) prof_task_capacity in
+      let cyc_slot = build_in_bounds_gep cyc_arr_ty stack_cycles_g [| zero; task; depth |] "prof.cyc.slot" builder in
+      let id_slot = build_in_bounds_gep id_arr_ty stack_ids_g [| zero; task; depth |] "prof.id.slot" builder in
       ignore (build_store now64 cyc_slot builder);
       ignore (build_store (const_int i32 id) id_slot builder);
       let next_depth = build_add depth (const_int i32 1) "prof.depth.next" builder in
-      ignore (build_store next_depth depth_g builder);
+      ignore (build_store next_depth depth_ptr builder);
       ignore (build_br done_bb builder);
       position_at_end overflow_bb builder;
       let overflow_old = build_load i32 overflow_g "prof.overflow" builder in
@@ -284,7 +439,11 @@ let emit_profile_exit key =
       let stack_cycles_g = require_profile_global prof_stack_cycles "__takibi_prof_stack_cycles" in
       let i32 = i32_type context in
       let i64 = i64_type context in
-      let depth = build_load i32 depth_g "prof.depth" builder in
+      let task = profile_task_id () in
+      let zero = const_int i32 0 in
+      let depth_arr_ty = array_type i32 prof_task_capacity in
+      let depth_ptr = build_in_bounds_gep depth_arr_ty depth_g [| zero; task |] "prof.depth.ptr" builder in
+      let depth = build_load i32 depth_ptr "prof.depth" builder in
       let zero_depth = build_icmp Icmp.Eq depth (const_int i32 0) "prof.depth.zero" builder in
       let cur_bb = insertion_block builder in
       let fn = block_parent cur_bb in
@@ -293,14 +452,19 @@ let emit_profile_exit key =
       ignore (build_cond_br zero_depth done_bb pop_bb builder);
       position_at_end pop_bb builder;
       let new_depth = build_sub depth (const_int i32 1) "prof.depth.prev" builder in
-      ignore (build_store new_depth depth_g builder);
-      let zero = const_int i32 0 in
-      let cyc_arr_ty = array_type i64 prof_stack_capacity in
-      let start_slot = build_in_bounds_gep cyc_arr_ty stack_cycles_g [| zero; new_depth |] "prof.start.slot" builder in
+      ignore (build_store new_depth depth_ptr builder);
+      let cyc_arr_ty = array_type (array_type i64 prof_stack_capacity) prof_task_capacity in
+      let start_slot = build_in_bounds_gep cyc_arr_ty stack_cycles_g [| zero; task; new_depth |] "prof.start.slot" builder in
       let start = build_load i64 start_slot "prof.start" builder in
       let now32 = profile_read_cyccnt () in
       let now64 = build_zext now32 i64 "prof.now64" builder in
       let elapsed = build_sub now64 start "prof.elapsed" builder in
+      (match !prof_record_path_fn with
+       | Some record_fn ->
+           let record_ty = function_type (void_type context) [| i32; i32; i64 |] in
+           let path_depth = build_add new_depth (const_int i32 1) "prof.path.depth" builder in
+           ignore (build_call record_ty record_fn [| task; path_depth; elapsed |] "" builder)
+       | None -> ());
       let table_ty = array_type entry_ty (Hashtbl.length prof_func_ids) in
       let entry_ptr = build_in_bounds_gep table_ty table_g [| zero; const_int i32 id |] "prof.entry" builder in
       let calls_ptr = build_in_bounds_gep entry_ty entry_ptr [| zero; const_int i32 1 |] "prof.calls.ptr" builder in
@@ -322,6 +486,9 @@ let init_function_profile_table keys =
   prof_table := None;
   prof_stack_cycles := None;
   prof_stack_ids := None;
+  prof_path_table := None;
+  prof_path_overflow := None;
+  prof_record_path_fn := None;
   prof_depth := None;
   prof_overflow := None;
   if !function_profiling_enabled then begin
@@ -348,12 +515,19 @@ let init_function_profile_table keys =
     let n_g = define_global "__takibi_prof_count" (const_int i32 (List.length profiled)) the_module in
     set_global_constant true n_g;
     set_section ".takibi_prof" n_g;
-    prof_depth := Some (define_global "__takibi_prof_depth" (const_int i32 0) the_module);
+    prof_depth := Some (define_global "__takibi_prof_depth"
+      (const_null (array_type i32 prof_task_capacity)) the_module);
     prof_overflow := Some (define_global "__takibi_prof_overflow" (const_int i32 0) the_module);
     prof_stack_cycles := Some (define_global "__takibi_prof_stack_cycles"
-      (const_null (array_type i64 prof_stack_capacity)) the_module);
+      (const_null (array_type (array_type i64 prof_stack_capacity) prof_task_capacity)) the_module);
     prof_stack_ids := Some (define_global "__takibi_prof_stack_ids"
-      (const_null (array_type i32 prof_stack_capacity)) the_module)
+      (const_null (array_type (array_type i32 prof_stack_capacity) prof_task_capacity)) the_module);
+    let frames_ty = array_type i32 prof_path_max_depth in
+    let path_entry_ty = packed_struct_type context [| i32; i32; i32; i64; frames_ty |] in
+    prof_path_table := Some (define_global "__takibi_prof_path_table"
+      (const_null (array_type path_entry_ty prof_path_capacity)) the_module);
+    prof_path_overflow := Some (define_global "__takibi_prof_path_overflow" (const_int i32 0) the_module);
+    ignore (build_profile_path_recorder ())
   end
 
 (* Mirrors type_inf.ml's unsafe_depth (sync rule): nesting depth of
