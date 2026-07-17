@@ -30,7 +30,9 @@ ownership-bearing rendezvous direction. Static
 `addr` indices now bind `MutexGuard[lock]` and `KGuard[lock]` to supported
 syntactic lock places and reject a mismatched explicit unlock pointer.
 Guard-derived pointer returns make `rtos_demo`'s shared data inaccessible
-after its authorizing `KGuard[lock]` is consumed. General linear-owner
+after its authorizing `KGuard[lock]` is consumed. Pointer and slice `borrow`
+parameters now form a checked non-retaining call boundary, with the network
+and RTOS helper APIs migrated to state that contract. General linear-owner
 place/storage tracking, arbitrary address expressions,
 direct/general quantifiers and propositions remain design targets. External
 solver/prover integration is not an active implementation target; Z3 and
@@ -843,14 +845,16 @@ Implemented scope:
 - the original v1 holes were all function-local like the rest of Delta
   tracking: raw casts exited tracking, aggregate storage lost component
   taint, and callee retention was unchecked. The representation and storage
-  barriers below close the first two; callee retention remains unchecked.
+  barriers below close the first two; the borrowed-callee boundary below
+  closes the direct named-call retention hole.
 
 This deliberately does not implement general region/lifetime polymorphism:
 there is no region variable a caller can name, no function signature that
 propagates "returns a slice tied to THIS parameter's region" transitively
-through wrappers, and no owner-tied slice crossing a function boundary in
-either direction. Those stay demand-led, the same tripwire discipline as
-every other slice.
+through wrappers, and no general higher-order region relation. A tied value
+may cross one direct named-call boundary only through the non-retaining
+`borrow` contract below. Broader region polymorphism stays demand-led, under
+the same tripwire discipline as every other slice.
 
 ### Finite-state existential view dispatch (implemented 2026-07-16)
 
@@ -1078,8 +1082,9 @@ is a reviewed module contract: the checker does not prove that its returned
 global is protected by the indexed lock. The stable exchange now has a
 separate same-container lock relation. The subsequent rebinding, aggregate,
 and representation barriers close the known function-local laundering paths;
-callee retention remains unchecked. The implemented boundary is specifically
-that an accessor-issued pointer cannot outlive the guard that authorized it.
+the borrowed-callee boundary below closes direct named-call retention. The
+implemented pointer-return boundary is specifically that an accessor-issued
+pointer cannot outlive the guard that authorized it.
 
 The authority-rebinding barrier added below also applies to these pointers:
 assigning a fresh guard to the same local name cannot revive a pointer derived
@@ -1177,7 +1182,45 @@ guard-derived pointer reinterpretation. A focused unit negative covers the
 address-of laundering barrier.
 
 The change is checker-only and has no runtime representation or ABI effect.
-Callee retention is now the sole documented region-v1 limitation.
+Callee retention was the sole documented region-v1 limitation at this
+checkpoint; the next increment closes it for direct named calls.
+
+### Borrowed callee retention boundary (implemented 2026-07-17)
+
+Raw pointer, aligned-pointer, and slice parameters may now be written with
+`borrow`. At a call, an authority-derived pointer or slice is rejected by an
+ordinary parameter and accepted only by the corresponding `borrow` parameter.
+The callee body starts with that parameter region-tainted, so it cannot return
+the value, store it durably, aggregate it, or forward it to another retaining
+parameter. Dereference, index, and field loads propagate taint when their
+result is another pointer or slice; scalar reads are ordinary copies. An
+aggregate containing a pointer or slice cannot be copied from borrowed
+storage, because destructuring it would exceed the direct-local taint domain.
+Borrow does not make the pointee immutable, and all modes erase before LLVM
+lowering.
+
+Compiler builtins remain a small trusted synchronous/non-retaining surface;
+address-transforming `min`/`max` propagate taint. An `extern fn` has no body to
+verify, so declaring its pointer/slice parameter `borrow` is likewise an
+explicit trusted API contract.
+
+One narrow retention shape is required by asynchronous network TX. A function
+that consumes `IndexedOwner[id, ...]` and returns a linear indexed owner with
+the identical static arguments may durably retain values derived from that
+sink. The returned owner carries the outstanding obligation. This recognizes
+both real `net_transmit` implementations without pretending to infer heap
+ownership: the signature is reviewed, and the checker does not prove which
+address was stored or that completion clears it.
+
+The network and RTOS synchronous helper APIs now use pointer/slice `borrow`.
+The SD RTOS request no longer sends the HTTP task's frame pointer through
+`Chan`; the worker fills a private bounce buffer, and the caller copies it only
+after the rendezvous response. `region_callee_retain_wrong` records the
+retaining-parameter rejection. Unit tests cover a lying `borrow` body,
+pointer-valued dereference/field aliases, scalar field copies, the indexed
+handoff, nested aggregate-copy rejection, and the unchanged pointer/slice ABI.
+This closes the documented direct named-call region-v1 hole without changing
+`Chan` or adding general region polymorphism.
 
 ### Deferred solver and prover threshold (not an active slice)
 

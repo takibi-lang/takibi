@@ -68,7 +68,8 @@ let ICMP_ECHO_REPLY:   u8 = 0;
 // icmp_seg is the full ICMP message (header + data); its own runtime
 // length (icmp_seg.len) is what the checksum walks, so it can never
 // disagree with the segment it describes.
-fn build_echo_reply(eth: [u8; 42..], ihl: {20..<21 as u16}, icmp_seg: [u8; 8..]) {
+fn build_echo_reply(eth: borrow [u8; 42..], ihl: {20..<21 as u16},
+        icmp_seg: borrow [u8; 8..]) {
     // Ethernet: dst = old src, then src = our_mac (must read old src
     // before it's overwritten).
     slice_copy(eth[0..<6], eth[6..<12]);

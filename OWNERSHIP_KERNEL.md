@@ -13,6 +13,7 @@ implemented too. The authority-rebinding barrier in 6.7.14 prevents a fresh
 owner/guard under the same local name from reviving an old derived value;
 6.7.15 rejects untracked aggregate storage of authority-derived values, and
 6.7.16 preserves their lifetime ties across casts and address transformations.
+Section 6.7.17 adds checked non-retaining pointer/slice call boundaries.
 General place/storage tracking, lock invariants, general propositions, and
 solver/prover integration remain outlook. As each surface slice lands,
 SPEC.md stays
@@ -1147,10 +1148,10 @@ of `Legacy_flow` with pointwise-union joins, and the check is lazy against
 annotation strips before HM typing and has no runtime footprint. All five
 network examples compile unchanged -- their hand-maintained use-then-release
 ordering is now compiler-enforced. Deliberately NOT implemented: region
-variables/polymorphism, tied slices crossing function boundaries (callee
-retention stays unchecked, function-local honesty). The original name-
-rebinding and aggregate-laundering limitations are now closed by 6.7.14 and
-6.7.15. See TAKIBI_CORE.md's implemented-slice entry,
+variables/polymorphism. At this checkpoint tied values could cross a call
+without a callee retention check; 6.7.17 closes that direct named-call hole.
+The original name-rebinding and aggregate-laundering limitations are now
+closed by 6.7.14 and 6.7.15. See TAKIBI_CORE.md's implemented-slice entry,
 SPEC.md's "Authority-Derived Region Returns" section, and HISTORY.md's dated
 entry for details.
 
@@ -1289,9 +1290,38 @@ unit tests cover pointer arithmetic, integer round trips, and guard-derived
 pointer casts, plus the address-of laundering barrier. The check erases and
 changes no runtime representation or ABI.
 
-Callee retention is now the sole documented region-v1 limitation. Closing it
-requires a signature-level escape/retention contract rather than another
-function-local expression rule, so it remains a separate demand-led slice.
+Callee retention was the sole documented region-v1 limitation at this
+checkpoint. Section 6.7.17 supplies the required signature-level contract.
+
+#### 6.7.17 Borrowed callee retention boundary (implemented 2026-07-17)
+
+`borrow` now accepts raw pointer, aligned-pointer, and slice parameters. An
+authority-derived argument may cross a direct named call only through one of
+those non-retaining parameters; a plain pointer/slice parameter is treated as
+potentially retaining. The callee body seeds each such parameter with a fresh
+region tie and rejects return, durable or aggregate storage, and forwarding to
+another retaining parameter. Pointer/slice aliases loaded through dereference,
+index, or field access retain the tie, while scalar copies do not. `borrow`
+does not imply pointee immutability and erases without changing the ABI. A
+pointer/slice-bearing aggregate cannot be copied from borrowed storage because
+the current direct-local domain cannot preserve component ties through later
+destructuring or matching.
+
+Compiler builtins are the existing trusted synchronous surface. Extern
+`borrow` declarations are also trusted because their bodies are unavailable.
+The single allowed retention form is a reviewed indexed-owner handoff: a
+function consuming `IndexedOwner[id, ...]` and returning a linear indexed
+owner with the same static arguments may retain values derived from that sink.
+This covers asynchronous `net_transmit`, but is not general heap inference or
+a proof of exact stored-address cleanup.
+
+The synchronous network and RTOS helpers now declare their pointer/slice
+borrows. The SD RTOS request uses a worker-owned bounce buffer rather than
+retaining a caller-frame pointer in `Chan`; the rendezvous response precedes
+the caller-side copy. `region_callee_retain_wrong` fixes the full-compiler
+negative contract, and unit coverage includes a lying borrow implementation,
+pointer-valued loaded aliases, scalar copies, nested aggregate-copy rejection,
+indexed handoff, and ABI erasure.
 
 ## 7. Next outlook
 
@@ -1310,9 +1340,10 @@ mutex field, or stable-slot container, while leaving guard-producer honesty as
 a trusted module obligation. Section 6.7.14 also prevents authority-place
 reuse from reviving a stale derived value, and 6.7.15 blocks untracked
 aggregate storage. Section 6.7.16 also retains authority ties through raw
-casts and address transformations. General heap predicates and arbitrary
-stable places remain demand-led. No broader ownership slice is selected
-without another concrete example and focused negative contract.
+casts and address transformations, while 6.7.17 verifies direct non-retaining
+calls. General heap predicates, arbitrary stable places, and general region
+polymorphism remain demand-led. No broader ownership slice is selected without
+another concrete example and focused negative contract.
 
 ## 8. Prior art notes
 

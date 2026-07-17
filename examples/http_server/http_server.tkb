@@ -124,7 +124,8 @@ fn build_html_body() -> isize {
 // it would have exceeded HTTP_MAX_PAYLOAD (never actually happens with
 // the current fixed page; the caller must check for this and drop the
 // reply rather than transmit, see app_main()'s use of the return value).
-fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
+fn build_http_response_fin(eth: borrow [u8; 1514..],
+        ihl: {20..<21 as u16}) -> i32 {
     let body_len: isize = build_html_body();
 
     let payload: *u8 = (eth as *u8) + 54;
@@ -187,13 +188,14 @@ fn build_http_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
     return -1;
 }
 
-fn http_start_response(eth: [u8; 1514..], ihl: {20..<21 as u16},
-                       req: *u8, req_len: u16) -> i32 {
+fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
+                       req: borrow *u8, req_len: u16) -> i32 {
     request_count = request_count + 1;
     return build_http_response_fin(eth, ihl);
 }
 
-fn http_continue_response(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
+fn http_continue_response(eth: borrow [u8; 1514..],
+        ihl: {20..<21 as u16}) -> i32 {
     return -1;
 }
 

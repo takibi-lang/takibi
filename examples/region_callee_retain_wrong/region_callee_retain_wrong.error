@@ -1,0 +1,1 @@
+slice 'frame' is authority-derived and cannot be passed to retaining parameter of 'callee_retain'; declare that pointer or slice parameter as `borrow`, or perform the retention inside an indexed-owner handoff

@@ -79,7 +79,7 @@ inline fn classify_tcp_event(flags: u8) -> TcpEvent {
     return TcpEvent::Other;
 }
 
-fn tcp_remote_matches(ip: [u8; 20..], src_port: u16) -> bool {
+fn tcp_remote_matches(ip: borrow [u8; 20..], src_port: u16) -> bool {
     return slice_eq(ip[IP_SRC..<IP_DST], conn_remote_ip as []u8) &&
            src_port == conn_remote_port;
 }
@@ -97,7 +97,7 @@ fn tcp_remote_matches(ip: [u8; 20..], src_port: u16) -> bool {
 // builders below (invoked FROM the trusted file), the wire parsing, and
 // all sequence-number bookkeeping.
 
-fn build_arp_reply(eth: [u8; 42..]) {
+fn build_arp_reply(eth: borrow [u8; 42..]) {
     let arp = eth[14..<42];
 
     slice_copy(eth[0..<6], eth[6..<12]);
@@ -110,7 +110,7 @@ fn build_arp_reply(eth: [u8; 42..]) {
     write_u16be(arp[ARP_OPER..<ARP_SHA], 2);
 }
 
-fn fix_tcp_checksum(ip: [u8; 20..], tcp_seg: [u8; 20..]) {
+fn fix_tcp_checksum(ip: borrow [u8; 20..], tcp_seg: borrow [u8; 20..]) {
     write_u16be(tcp_seg[TCP_CHECKSUM..<TCP_URGENT], 0);
     let mut pseudo: [u8; 12];
     slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
@@ -123,7 +123,7 @@ fn fix_tcp_checksum(ip: [u8; 20..], tcp_seg: [u8; 20..]) {
                 checksum_fold(checksum_add(tcp_seg, sum)));
 }
 
-fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
+fn build_syn_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 
@@ -151,7 +151,7 @@ fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     fix_tcp_checksum(ip, tcp);
 }
 
-fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
+fn build_fin_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 
@@ -179,7 +179,8 @@ fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
     fix_tcp_checksum(ip, tcp);
 }
 
-fn build_rst_from_ack(eth: [u8; 54..], ihl: {20..<21 as u16}, seq_out: u32) {
+fn build_rst_from_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16},
+        seq_out: u32) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 
@@ -207,7 +208,7 @@ fn build_rst_from_ack(eth: [u8; 54..], ihl: {20..<21 as u16}, seq_out: u32) {
     fix_tcp_checksum(ip, tcp);
 }
 
-fn build_tcp_payload(eth: [u8; 1514..], ihl: {20..<21 as u16},
+fn build_tcp_payload(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
                      len: isize, tcp_flags: u8) -> i32 {
     let wire_len: i32 = len as i32;
     if (len >= 0 && len <= (HTTP_SEGMENT_PAYLOAD_MAX as isize)

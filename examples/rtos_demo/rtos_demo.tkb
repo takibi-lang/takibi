@@ -28,11 +28,11 @@ fn shared_access(g: borrow KGuard[lock]) -> *Shared @ lock {
     return &shared;
 }
 
-fn shared_add(data: *Shared, delta: i32) {
+fn shared_add(data: borrow *Shared, delta: i32) {
     data.counter = data.counter + delta;
 }
 
-fn shared_get(data: *Shared) -> i32 {
+fn shared_get(data: borrow *Shared) -> i32 {
     return data.counter;
 }
 

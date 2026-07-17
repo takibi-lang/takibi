@@ -20,7 +20,7 @@
 // alternation technique from examples/foreach/foreach.tkb: odd-length
 // input naturally leaves the last byte shifted into the high half exactly
 // like the old tail-padding branch did, with zero indexing at all.
-fn checksum_add(data: []u8, sum_in: i32) -> i32 {
+fn checksum_add(data: borrow []u8, sum_in: i32) -> i32 {
     let mut sum: i32 = sum_in;
     let mut hi: i32 = 1;
     for b in data {
@@ -47,6 +47,6 @@ fn checksum_fold(sum_in: i32) -> i32 {
 
 // Convenience wrapper for the common single-buffer case (IPv4 header,
 // whole ICMP message): checksum_fold(checksum_add(data, 0)).
-fn inet_checksum(data: []u8) -> i32 {
+fn inet_checksum(data: borrow []u8) -> i32 {
     return checksum_fold(checksum_add(data, 0));
 }

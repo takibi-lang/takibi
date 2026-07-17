@@ -14,7 +14,7 @@ let mut resp_content_type: i32 = 0;
 let RESP_TYPE_HTML: i32 = 1;
 let RESP_TYPE_PNG: i32 = 2;
 
-fn content_type_for_name83(name83: *u8) -> i32 {
+fn content_type_for_name83(name83: borrow *u8) -> i32 {
     if (name83[8] == 'P' as u8 && name83[9] == 'N' as u8 &&
         name83[10] == 'G' as u8) {
         return RESP_TYPE_PNG;
@@ -22,11 +22,11 @@ fn content_type_for_name83(name83: *u8) -> i32 {
     return RESP_TYPE_HTML;
 }
 
-fn copy_response_name(name83: *u8) {
+fn copy_response_name(name83: borrow *u8) {
     bytes_copy(resp_name83, name83, 11);
 }
 
-fn build_error_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16},
+fn build_error_response_fin(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
                             msg: *u8) -> i32 {
     let body_len: isize = copy_str(html_body, msg);
     let payload: *u8 = (eth as *u8) + 54;
@@ -40,7 +40,7 @@ fn build_error_response_fin(eth: [u8; 1514..], ihl: {20..<21 as u16},
     return build_tcp_payload(eth, ihl, len, TCP_FLAG_ACK | TCP_FLAG_PSH | TCP_FLAG_FIN);
 }
 
-fn build_response_segment(eth: [u8; 1514..], ihl: {20..<21 as u16},
+fn build_response_segment(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
                           first: bool) -> i32 {
     let payload: *u8 = (eth as *u8) + 54;
     let mut len: isize = 0;
@@ -73,8 +73,8 @@ fn build_response_segment(eth: [u8; 1514..], ihl: {20..<21 as u16},
     return build_tcp_payload(eth, ihl, len, flags);
 }
 
-fn http_start_response(eth: [u8; 1514..], ihl: {20..<21 as u16},
-                       req: *u8, req_len: u16) -> i32 {
+fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
+                       req: borrow *u8, req_len: u16) -> i32 {
     let mut name83: [u8; 11];
     if (http_request_path_to_name83(req, req_len as isize, name83) == false) {
         let msg: *u8 = "400: unsupported path\n";
@@ -97,7 +97,8 @@ fn http_start_response(eth: [u8; 1514..], ihl: {20..<21 as u16},
     return build_response_segment(eth, ihl, true);
 }
 
-fn http_continue_response(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32 {
+fn http_continue_response(eth: borrow [u8; 1514..],
+        ihl: {20..<21 as u16}) -> i32 {
     return build_response_segment(eth, ihl, false);
 }
 

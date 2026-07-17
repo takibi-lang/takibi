@@ -18,7 +18,7 @@
 
 use "examples/common/netutil.tkb";
 
-fn swap_mac(frame: *u8) {
+fn swap_mac(frame: borrow *u8) {
     for i in 0..<ETH_MAC_LEN {
         let a: u8 = frame[ETH_DST_OFF + i];
         let b: u8 = frame[ETH_SRC_OFF + i];

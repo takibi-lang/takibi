@@ -66,7 +66,6 @@ let mut our_ip:  [u8; 4];
 struct SdReadChunkRequest {
     private name83: *u8;
     private off: u32;
-    private dst: *u8;
     private want: u32;
 }
 
@@ -90,6 +89,7 @@ struct SdRequestChan {
 
 let mut sd_request_ch: SdRequestChan;
 let mut sd_response_ch: Chan;
+let mut sd_chunk_buf: [u8; HTTP_SEGMENT_PAYLOAD_MAX];
 let mut sd_stack: [u8; 8192];
 
 fn sd_request_chan_init(ch: *SdRequestChan) {
@@ -147,9 +147,11 @@ fn sd_worker() {
                 chan_send(&sd_response_ch, ok);
             }
             SdRequest::ReadChunk(read) => {
+                // Do not retain the caller task's frame pointer in the request.
+                // The rendezvous response makes this bounce buffer ready to copy.
                 chan_send(&sd_response_ch,
                           sd_read_file_chunk(read.name83, read.off,
-                                             read.dst, read.want) as i32);
+                                             sd_chunk_buf, read.want) as i32);
             }
             SdRequest::FileSize(name83) => {
                 if (fat_file_exists(name83)) {
@@ -167,17 +169,21 @@ fn sd_file_size_rpc(name83: *u8) -> i32 {
     return chan_recv(&sd_response_ch);
 }
 
-fn sd_read_chunk_rpc(name83: *u8, off: u32, dst: *u8, want: u32) -> u32 {
-    let mut request: SdReadChunkRequest = { name83, off, dst, want };
+fn sd_read_chunk_rpc(name83: *u8, off: u32, dst: borrow *u8,
+        want: u32) -> u32 {
+    let mut request: SdReadChunkRequest = { name83, off, want };
     sd_request_send(&sd_request_ch, SdRequest::ReadChunk(request));
-    return chan_recv(&sd_response_ch) as u32;
+    let got: u32 = chan_recv(&sd_response_ch) as u32;
+    bytes_copy(dst, sd_chunk_buf, got as isize);
+    return got;
 }
 
 fn http_file_size(name83: *u8) -> i32 {
     return sd_file_size_rpc(name83);
 }
 
-fn http_read_chunk(name83: *u8, off: u32, dst: *u8, want: u32) -> u32 {
+fn http_read_chunk(name83: *u8, off: u32, dst: borrow *u8,
+        want: u32) -> u32 {
     return sd_read_chunk_rpc(name83, off, dst, want);
 }
 

@@ -7853,3 +7853,39 @@ region-v1 limitation.
 Validation: all 780 Alcotest cases passed. Full `make check` passed all 127
 host, compile-error, DWARF, and QEMU integration cases, every STM32
 cross-build, and all network sources under `--forbid-trap`.
+
+## 2026-07-17: Borrowed Callee Retention Boundary
+
+Closed the remaining documented direct-call hole in authority-derived
+regions. Raw pointer, aligned-pointer, and slice parameters may now declare
+`borrow`. Authority-derived arguments are rejected by ordinary potentially
+retaining parameters and accepted by those explicit non-retaining parameters.
+The callee body seeds the borrowed parameter with a fresh region tie, rejecting
+return, durable or aggregate storage, and forwarding to another retaining
+callee. Pointer/slice results loaded by dereference, index, or field retain the
+tie; scalar copies do not. Copies of pointer/slice-bearing aggregates from
+borrowed storage are rejected because the direct-local domain cannot preserve
+their component ties through destructuring or matching.
+
+Asynchronous network TX uses one narrow reviewed exception: a function that
+consumes an indexed owner and returns a linear indexed owner with identical
+static arguments may durably retain a value derived from the sink. This is a
+signature contract covering both real `net_transmit` implementations, not
+general heap inference. Compiler builtins remain trusted synchronous calls,
+and extern borrow declarations are trusted because no body is available.
+Borrow modes and region ties erase without ABI changes.
+
+Network and RTOS helper signatures now state their synchronous non-retention
+with `borrow`. The SD RTOS request stopped carrying the caller's destination
+pointer across tasks: its worker fills a private bounce buffer and the caller
+copies after receiving the rendezvous response. This keeps `Chan` unchanged
+and avoids weakening the retention check.
+
+`region_callee_retain_wrong` records the full-compiler retaining-call failure.
+Unit tests cover accepted borrowing, a lying borrow implementation, pointer
+aliases loaded through dereference and fields, scalar field copies, indexed
+handoff, nested aggregate-copy rejection, and pointer/slice ABI preservation.
+
+Validation: all 789 Alcotest cases passed. Full `make check` passed all 128
+host, compile-error, DWARF, and QEMU integration cases, every STM32
+cross-build, and all network sources under `--forbid-trap`.

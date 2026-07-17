@@ -354,7 +354,8 @@ fn fat_file_size(name83: *u8) -> u32 {
 // the normal FatFile linear API sequential, while avoiding an O(n^2)
 // "reopen and read-discard from byte 0" loop when a large response is sent
 // one TCP segment at a time.
-fn fat_read_at(name83: *u8, off: u32, buf: *u8, btr: u32, br: *u32) -> i32 {
+fn fat_read_at(name83: *u8, off: u32, buf: borrow *u8, btr: u32,
+        br: *u32) -> i32 {
     let found: i32 = fat_find_entry(name83);
     if ((found >= 0) && (found < 16)) {
         let idx: usize = found as usize;

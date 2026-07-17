@@ -112,7 +112,7 @@ let mut conn_rcv_nxt:     u32 = 0; // next sequence number we expect from remote
 // via tcp_seg.len, is what goes in the pseudo-header's length field, so
 // this can never disagree with the segment it's actually checksumming).
 // Must be called last, after every other TCP field has its final value.
-fn fix_tcp_checksum(ip: [u8; 20..], tcp_seg: [u8; 20..]) {
+fn fix_tcp_checksum(ip: borrow [u8; 20..], tcp_seg: borrow [u8; 20..]) {
     write_u16be(tcp_seg[TCP_CHECKSUM..<TCP_URGENT], 0);
     let mut pseudo: [u8; 12];
     slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
@@ -128,7 +128,7 @@ fn fix_tcp_checksum(ip: [u8; 20..], tcp_seg: [u8; 20..]) {
 // Rewrites a SYN request into a SYN-ACK reply in place. Only called from
 // TCP_LISTEN after the caller has already validated the request (IP/TCP
 // checksums, dst port, SYN flag set).
-fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
+fn build_syn_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 
@@ -173,7 +173,8 @@ fn build_syn_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
 // given the caller's own tcp_len bound, but see the explicit check below
 // for why this needs to be enforced, not assumed, to construct tcp_seg
 // with a proven minimum).
-fn build_data_echo(eth: [u8; 1514..], ihl: {20..<21 as u16}, data: []u8, data_len: u16) -> i32 {
+fn build_data_echo(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
+        data: borrow []u8, data_len: u16) -> i32 {
     // Snapshot into an immutable local after an explicit bound check: a
     // PLAIN u16 PARAMETER carries no range at all (unlike a refined local,
     // parameters can't cross a function boundary with a refined type
@@ -233,7 +234,7 @@ fn build_data_echo(eth: [u8; 1514..], ihl: {20..<21 as u16}, data: []u8, data_le
 // conn_rcv_nxt by the caller) and sends our own FIN in the same segment.
 // Only called from TCP_ESTABLISHED after the caller has already validated
 // the request and confirmed seq == conn_rcv_nxt (before incrementing it).
-fn build_fin_ack(eth: [u8; 54..], ihl: {20..<21 as u16}) {
+fn build_fin_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 

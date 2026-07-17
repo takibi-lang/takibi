@@ -3915,12 +3915,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let validate_param_type loc ty =
     validate_static_type loc ty;
     match ty with
+    | Ast.TypeBorrow ((Ast.TypePtr _ | Ast.TypeAlignedPtr _
+                      | Ast.TypeSlice _) as inner) ->
+        validate_complete_type loc false inner
     | Ast.TypeBorrow (Ast.TypeNamed name as inner)
       when Hashtbl.mem view_kinds name -> validate_complete_type loc false inner
     | Ast.TypeBorrow (Ast.TypeView (name, _) as inner)
       when Hashtbl.mem view_kinds name -> validate_complete_type loc false inner
-    | Ast.TypeBorrow (Ast.TypePtr (Ast.TypeNamed name) as inner)
-      when is_kinded name -> validate_complete_type loc false inner
     | Ast.TypeBorrow (Ast.TypeIndexed (name, _) as inner)
       when is_kinded name -> validate_complete_type loc false inner
     | Ast.TypeBorrow (Ast.TypeNamed name as inner)
@@ -3929,7 +3930,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       when Hashtbl.mem variant_kinds name -> validate_complete_type loc false inner
     | Ast.TypeBorrow _ ->
         raise (TypeError (loc,
-          "borrow is only valid on an affine/linear opaque pointer, indexed owner, erased view, or kinded variant parameter"))
+          "borrow is only valid on a raw/aligned pointer, slice, affine/linear opaque pointer, indexed owner, erased view, or kinded variant parameter"))
     | Ast.TypeBorrowMut (Ast.TypeIndexed (name, _) as inner)
       when is_kinded name -> validate_complete_type loc false inner
     | Ast.TypeBorrowMut _ ->
@@ -4840,6 +4841,22 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Some (Ast.TypeSink _) -> PathSet.add (PVar name) s
       | _ -> s
     ) PathSet.empty fdef.params in
+    (* A sink-indexed owner -> linear indexed owner transition carrying the
+       same static arguments is the narrow region-handoff shape used by the
+       network TX drivers. Within that function, durable storage derived from
+       the sink authority is covered by the returned linear owner. This is a
+       reviewed signature contract, not general heap inference. *)
+    let handoff_authorities =
+      match strip_borrow finfo.ret_type with
+      | Ast.TypeIndexed (_, ret_args) when is_linear_type finfo.ret_type ->
+          List.fold_left (fun paths (name, ty_opt) ->
+            match ty_opt with
+            | Some (Ast.TypeSink (Ast.TypeIndexed (_, in_args)))
+              when in_args = ret_args -> PathSet.add (PVar name) paths
+            | _ -> paths)
+            PathSet.empty fdef.params
+      | _ -> PathSet.empty
+    in
     let mv_empty = ResourceFlow.empty in
     let mv_consume = ResourceFlow.consume in
     let mv_clear = ResourceFlow.produce in
@@ -4876,14 +4893,97 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        changing representation (including pointer -> integer) is not
        permission to outlive the authority. Arithmetic/bitwise transforms
        propagate the tie as well, which covers pointer arithmetic and an
-       integer address before a later cast back. Comparisons, dereferences,
-       and field reads intentionally do NOT propagate: they check the source
-       while it is live and produce ordinary copied data, not another address
-       alias. *)
+       integer address before a later cast back. Comparisons and scalar loads
+       check the source while it is live and produce ordinary copied data.
+       A dereference, index, or field read whose result is itself a pointer or
+       slice does propagate, because that result is another address alias. *)
+    let rec ast_region_kind = function
+      | Ast.TypeSlice _ -> Some RegionSlice
+      | Ast.TypePtr _ | Ast.TypeAlignedPtr _ -> Some RegionPointer
+      | Ast.TypeSingleton (t, _) | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+      | Ast.TypeSink t -> ast_region_kind t
+      | _ -> None
+    in
+    let rec expr_ast_type (e : Ast.expr) = match e.desc with
+      | Ast.Var n -> StringMap.find_opt n !var_types
+      | Ast.Cast (target, _) -> Some target
+      | Ast.Unsafe x -> expr_ast_type x
+      | Ast.Deref x ->
+          (match Option.bind (expr_ast_type x) (fun ty -> Some (strip_borrow ty)) with
+           | Some (Ast.TypePtr inner) | Some (Ast.TypeAlignedPtr (_, inner)) ->
+               Some inner
+           | _ -> None)
+      | Ast.Index (base, _) ->
+          (match Option.map strip_borrow (StringMap.find_opt base !var_types) with
+           | Some (Ast.TypePtr inner) | Some (Ast.TypeAlignedPtr (_, inner))
+           | Some (Ast.TypeArray (inner, _)) | Some (Ast.TypeSlice (inner, _)) ->
+               Some inner
+           | _ -> None)
+      | Ast.FieldGet (base, field) ->
+          let named = Option.bind (expr_ast_type base) (fun ty ->
+            match strip_borrow ty with
+            | Ast.TypeNamed name -> Some name
+            | Ast.TypePtr (Ast.TypeNamed name)
+            | Ast.TypeAlignedPtr (_, Ast.TypeNamed name) -> Some name
+            | _ -> None)
+          in
+          Option.bind named (fun name ->
+            Option.bind (StringMap.find_opt name senv) (fun (fields, _, _) ->
+              List.assoc_opt field fields))
+      | _ -> None
+    in
+    let expr_has_region_result e =
+      Option.bind (expr_ast_type e) ast_region_kind <> None
+    in
+    let type_contains_region_alias ty =
+      let rec visit seen = function
+        | Ast.TypePtr _ | Ast.TypeAlignedPtr _ | Ast.TypeSlice _ -> true
+        | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
+        | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+        | Ast.TypeIo t | Ast.TypeArray (t, _) -> visit seen t
+        | Ast.TypeTuple ts -> List.exists (visit seen) ts
+        | Ast.TypeExists (_, sort, body) -> visit seen sort || visit seen body
+        | Ast.TypeNamed name | Ast.TypeIndexed (name, _) ->
+            if StringSet.mem name seen then false
+            else
+              let seen = StringSet.add name seen in
+              (match StringMap.find_opt name senv with
+               | Some (fields, _, _) ->
+                   List.exists (fun (_, field_ty) -> visit seen field_ty) fields
+               | None ->
+                   (match Hashtbl.find_opt variant_defs name with
+                    | Some cases ->
+                        List.exists (fun (_, payload) ->
+                          Option.fold ~none:false ~some:(visit seen) payload)
+                          cases
+                    | None -> false))
+        | Ast.TypeVariant name ->
+            if StringSet.mem name seen then false
+            else
+              let seen = StringSet.add name seen in
+              (match Hashtbl.find_opt variant_defs name with
+               | Some cases ->
+                   List.exists (fun (_, payload) ->
+                     Option.fold ~none:false ~some:(visit seen) payload)
+                     cases
+               | None -> false)
+        | _ -> false
+      in
+      visit StringSet.empty (strip_borrow ty)
+    in
+    let expr_copies_region_aggregate e =
+      match expr_ast_type e with
+      | Some ty -> ast_region_kind ty = None && type_contains_region_alias ty
+      | None -> false
+    in
     let rec expr_taint taints (e : Ast.expr) = match e.desc with
       | Ast.Var n -> TaintEnv.get n taints
       | Ast.SliceOf (base, _, _) -> TaintEnv.get base taints
       | Ast.Cast (_, x) | Ast.Bnot x | Ast.Unsafe x -> expr_taint taints x
+      | Ast.Deref x | Ast.FieldGet (x, _) when expr_has_region_result e ->
+          expr_taint taints x
+      | Ast.Index (base, _) when expr_has_region_result e ->
+          TaintEnv.get base taints
       | Ast.BinOp ((Ast.Add | Ast.Sub | Ast.Mul | Ast.Div | Ast.Mod
                    | Ast.Bor | Ast.Bxor | Ast.Band | Ast.Shr | Ast.Shl),
                    left, right) ->
@@ -4900,21 +5000,24 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                      PathSet.add (PVar authority) paths
                  | _ -> paths)
                  PathSet.empty indices
+           | None when target = "min" || target = "max" ->
+               List.fold_left (fun paths arg ->
+                 PathSet.union paths (expr_taint taints arg))
+                 PathSet.empty args
            | None -> PathSet.empty)
       | _ -> PathSet.empty
     in
-    let rec ast_region_kind = function
-      | Ast.TypeSlice _ -> Some RegionSlice
-      | Ast.TypePtr _ | Ast.TypeAlignedPtr _ -> Some RegionPointer
-      | Ast.TypeSingleton (t, _) | Ast.TypeBorrow t | Ast.TypeBorrowMut t
-      | Ast.TypeSink t -> ast_region_kind t
-      | _ -> None
+    let accepts_region_borrow = function
+      | Some (Ast.TypeBorrow inner) -> ast_region_kind inner <> None
+      | _ -> false
     in
     let rec expr_region_kind (e : Ast.expr) = match e.desc with
       | Ast.Var n -> Option.bind (StringMap.find_opt n !var_types) ast_region_kind
       | Ast.SliceOf _ -> Some RegionSlice
       | Ast.Unsafe x -> expr_region_kind x
       | Ast.Cast (target, _) -> ast_region_kind target
+      | Ast.Deref _ | Ast.Index _ | Ast.FieldGet _ ->
+          Option.bind (expr_ast_type e) ast_region_kind
       | Ast.Call (name, _) ->
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
@@ -4929,6 +5032,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Cast (_, x) | Ast.Bnot x | Ast.Unsafe x -> taint_source_name x
       | Ast.Call (name, _) -> Printf.sprintf "result of '%s'" name
       | _ -> "<value>"
+    in
+    let require_no_region_aggregate_load loc e taint =
+      if expr_copies_region_aggregate e && not (PathSet.is_empty taint) then
+        raise (TypeError (loc,
+          "an aggregate containing a pointer or slice cannot be copied from \
+           authority-derived storage; aggregate region tracking is not \
+           implemented, so project a scalar or direct pointer/slice value"))
     in
     (* Region taint is deliberately keyed by directly tracked local names;
        it has no component/case shape for runtime aggregates. Silently
@@ -5005,11 +5115,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             name dependent))
       | None -> ()
     in
-    (* Region-bound values must stay function-local. Returning or storing one
-       anywhere durable would outlive the tracking that makes the kill honest. *)
+    (* Region-bound values cannot escape unless the current signature performs
+       the narrow indexed-owner handoff described above. *)
     let require_no_taint_escape loc taints escape (e : Ast.expr) =
       let t = expr_taint taints e in
-      if not (PathSet.is_empty t) then
+      if not (PathSet.is_empty t)
+         && not (PathSet.subset t handoff_authorities) then
         let owner = path_to_string (PathSet.choose t) in
         let value_kind = Option.value
           (Option.map region_kind_word (expr_region_kind e)) ~default:"value" in
@@ -5072,6 +5183,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               name));
           if consume && is_tracked_path p then mv_consume p moved else moved
       | Ast.FieldGet (base_expr, fname) ->
+          require_no_region_aggregate_load e.loc e
+            (expr_taint taints base_expr);
           (match base_expr.desc with
            | Ast.Var base_name when is_tracked_path (PField (base_name, fname)) ->
                let p = PField (base_name, fname) in
@@ -5096,6 +5209,22 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let rec check_args moved args params = match args with
             | [] -> moved
             | arg :: rest ->
+            let param = match params with p :: _ -> p | [] -> None in
+            let arg_taint = expr_taint taints arg in
+            if not (PathSet.is_empty arg_taint)
+               && not (is_compiler_builtin target)
+               && not (accepts_region_borrow param)
+               && not (PathSet.subset arg_taint handoff_authorities) then begin
+              let value_kind = Option.value
+                (Option.map region_kind_word (expr_region_kind arg))
+                ~default:"value" in
+              raise (TypeError (arg.loc, Printf.sprintf
+                "%s '%s' is authority-derived and cannot be passed to \
+                 retaining parameter of '%s'; declare that pointer or slice \
+                 parameter as `borrow`, or perform the retention inside an \
+                 indexed-owner handoff"
+                value_kind (taint_source_name arg) name))
+            end;
             let consume_arg = match params with
               | Some ty :: _ when is_tracked_type ty ->
                   (match ty with
@@ -5129,8 +5258,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.AddrOf a ->
           require_no_taint_address e.loc taints a;
           check_expr taints moved false a
-      | Ast.Bnot a | Ast.Deref a | Ast.Cast (_, a)
-      | Ast.Unsafe a -> check_expr taints moved false a
+      | Ast.Deref a ->
+          require_no_region_aggregate_load e.loc e (expr_taint taints a);
+          check_expr taints moved false a
+      | Ast.Bnot a | Ast.Cast (_, a) | Ast.Unsafe a ->
+          check_expr taints moved false a
       | Ast.StructLit xs ->
           require_no_taint_aggregate e.loc taints "struct value" xs;
           List.fold_left (fun m x -> check_expr taints m false x) moved xs
@@ -5147,6 +5279,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              here explicitly (they are how a derived frame slice is actually
              read). *)
           require_region_live e.loc taints moved base;
+          require_no_region_aggregate_load e.loc e (TaintEnv.get base taints);
           check_expr taints moved false i
       | Ast.SliceOf (base, lo, hi) ->
           require_region_live e.loc taints moved base;
@@ -5484,9 +5617,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           "function '%s' returns an affine/linear value and must return explicitly on every path"
           fdef.name))
     end;
+    let initial_region_taints = List.fold_left (fun taints (name, ty_opt) ->
+      if accepts_region_borrow ty_opt then
+        TaintEnv.set name (PathSet.singleton (PVar name)) taints
+      else taints)
+      TaintEnv.empty fdef.params
+    in
     let (final_moved, _, _) = check_stmts mv_empty
       (List.fold_left (fun d (name, _) -> PathSet.add (PVar name) d)
-         PathSet.empty fdef.params) TaintEnv.empty fdef.body
+         PathSet.empty fdef.params) initial_region_taints fdef.body
     in
     (* A plain LINEAR parameter is an accepted all-path obligation. Affine
        parameters may be dropped; borrow never owns and sink is terminal. *)

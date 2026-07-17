@@ -2122,6 +2122,97 @@ let infer_tests = [
          }"));
 
   Alcotest.test_case
+    "region call: a borrow slice parameter is a verified non-retaining boundary"
+    `Quick
+    (fun () ->
+      ignore (infer (region_fixture ^
+        "fn reg_peek(f: borrow []u8) -> u8 { return f[0]; }
+         fn reg_borrow_call_ok() -> i32 {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let f = reg_frame(o);
+           let x: u8 = reg_peek(f);
+           reg_release(o);
+           return x as i32;
+         }")));
+
+  Alcotest.test_case
+    "region call: a tied slice cannot enter a retaining parameter" `Quick
+    (expect_type_error
+      "slice 'f' is authority-derived and cannot be passed to retaining parameter of 'reg_retain'"
+      (region_fixture ^
+        "fn reg_retain(f: []u8) {}
+         fn reg_retaining_call_bad() {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let f = reg_frame(o);
+           reg_retain(f);
+           reg_release(o);
+         }"));
+
+  Alcotest.test_case
+    "region call: a borrow parameter implementation cannot retain its value"
+    `Quick
+    (expect_type_error
+      "owner-derived slice 'f' cannot be stored into a global"
+      (region_fixture ^
+        "let mut reg_borrow_stash: []u8;
+         fn reg_borrow_lie(f: borrow []u8) {
+           reg_borrow_stash = f;
+         }"));
+
+  Alcotest.test_case
+    "region call: borrow pointer dereference cannot return a pointer alias"
+    `Quick
+    (expect_type_error
+      "authority-derived pointer '<value>' cannot be returned"
+      "fn borrow_deref_leak(p: borrow **u8) -> *u8 { return *p; }");
+
+  Alcotest.test_case
+    "region call: borrow pointer field cannot return a pointer alias" `Quick
+    (expect_type_error
+      "authority-derived pointer '<value>' cannot be returned"
+      "struct BorrowHolder { ptr: *u8; value: i32; }
+       fn borrow_field_leak(h: borrow *BorrowHolder) -> *u8 { return h.ptr; }");
+
+  Alcotest.test_case
+    "region call: borrow pointer field may return copied scalar data" `Quick
+    (fun () ->
+      ignore (infer
+        "struct BorrowScalarHolder { ptr: *u8; value: i32; }
+         fn borrow_scalar_copy(h: borrow *BorrowScalarHolder) -> i32 {
+           return h.value;
+         }"));
+
+  Alcotest.test_case
+    "region call: borrowed nested aggregate cannot launder a pointer field"
+    `Quick
+    (expect_type_error
+      "an aggregate containing a pointer or slice cannot be copied from authority-derived storage"
+      "struct BorrowInner { ptr: *u8; value: i32; }
+       struct BorrowOuter { inner: BorrowInner; }
+       fn borrow_nested_leak(h: borrow *BorrowOuter) -> *u8 {
+         let mut inner: BorrowInner = h.inner;
+         return inner.ptr;
+       }");
+
+  Alcotest.test_case
+    "region call: indexed owner transition may retain under returned authority"
+    `Quick
+    (fun () ->
+      ignore (infer (region_fixture ^
+        "linear struct RegTx[d: usize] {
+           idx: {0..<4 as usize} @ d;
+         }
+         let mut reg_dma_addr: usize;
+         fn reg_handoff(o: sink RegOwn[d]) -> RegTx[d] {
+           let p: *u8 = reg_frame(o) as *u8;
+           reg_dma_addr = p as usize;
+           let mut tx: RegTx[d] = { o.idx };
+           return tx;
+         }")));
+
+  Alcotest.test_case
     "region slice: '@' on a slice parameter stays rejected" `Quick
     (expect_type_error
       "a singleton value cannot live behind a pointer or inside array/slice storage"
@@ -3022,9 +3113,8 @@ let infer_tests = [
             touch(bufs + i * 32);
         }");
 
-  Alcotest.test_case "borrow is rejected for ordinary parameter types" `Quick
-    (expect_type_error "borrow is only valid"
-       "fn bad(x: borrow *u8) {}");
+  Alcotest.test_case "borrow is accepted for non-retaining raw pointer parameters" `Quick
+    (fun () -> ignore (infer "fn inspect(x: borrow *u8) { let b: u8 = x[0]; }"));
 
   (* -- extern fn --------------------------------------------------- *)
 
@@ -5913,6 +6003,31 @@ let codegen_tests = [
         (contains_substring set_ir "getelementptr" && contains_substring set_ir "store i32");
       Alcotest.(check bool) "caller passes a pointer, not an aggregate copy" true
         (contains_substring use_ir "call void @cgm4_set(ptr"));
+
+  Alcotest.test_case
+    "region borrow ABI: pointer and slice parameters keep their runtime ABI"
+    `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "fn cg_region_ptr(p: borrow *u8) -> u8 { return p[0]; }
+         fn cg_region_slice(s: borrow [u8; 4..]) -> u8 { return s[0]; }");
+      let find name = match Hashtbl.find_opt Llvm_gen.functions name with
+        | Some (_, f) -> f
+        | None -> Alcotest.failf "%s not found" name
+      in
+      let ptr = find "cg_region_ptr" in
+      let slice = find "cg_region_slice" in
+      Alcotest.check Alcotest.int "raw pointer stays one pointer" 1
+        (Array.length (Llvm.params ptr));
+      Alcotest.check Alcotest.bool "raw pointer parameter ABI" true
+        (Llvm.classify_type (Llvm.type_of (Llvm.param ptr 0)) =
+         Llvm.TypeKind.Pointer);
+      Alcotest.check Alcotest.int "slice stays one fat-value parameter" 1
+        (Array.length (Llvm.params slice));
+      Alcotest.check Alcotest.bool "slice aggregate ABI" true
+        (Llvm.classify_type (Llvm.type_of (Llvm.param slice 0)) =
+         Llvm.TypeKind.Struct))
+  ;
 
   Alcotest.test_case
     "Slice 1 ABI: static indices erase while the runtime index stays in the aggregate" `Quick

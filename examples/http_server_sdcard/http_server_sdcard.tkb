@@ -70,7 +70,8 @@ fn http_file_size(name83: *u8) -> i32 {
     return -1;
 }
 
-fn http_read_chunk(name83: *u8, off: u32, dst: *u8, want: u32) -> u32 {
+fn http_read_chunk(name83: *u8, off: u32, dst: borrow *u8,
+        want: u32) -> u32 {
     let mut got: u32 = 0;
     fat_read_at(name83, off, dst, want, &got);
     return got;

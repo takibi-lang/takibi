@@ -1376,11 +1376,35 @@ back to DMA.
 - **Indirect local storage rejected**: taking the address of an
   authority-derived local is rejected. A pointer-to-local would otherwise
   hide the tied value behind storage that the direct-local taint domain cannot
-  follow. Dereferencing a live tied pointer may still produce ordinary copied
-  data.
-- **Documented hole (v1)**: passing a tied slice or pointer to a callee while
-  the authority is live is allowed and the callee's own retention is
-  unchecked (all tracking is function-local).
+  follow. Dereferencing, indexing, or reading a field from a live tied value
+  produces ordinary copied data when the result is scalar. A pointer or slice
+  result remains tied because it is another address alias.
+- **Callee retention boundary**: an authority-derived pointer or slice may be
+  passed to a named Takibi function only when the corresponding parameter is
+  declared `borrow *T`, `borrow align(N) *T`, or `borrow [T; N..]`. A plain
+  pointer or slice parameter is potentially retaining and rejects such an
+  argument. This `borrow` means non-owning and non-retaining for the duration
+  of the call; it does not make the pointee immutable.
+- **Borrow body verification**: a `borrow` pointer/slice parameter seeds a
+  fresh function-local region tie in the callee. Returning it, storing it
+  durably, placing it in an aggregate, or forwarding it to a potentially
+  retaining parameter is rejected. Pointer/slice aliases loaded through
+  dereference, index, or field access retain the tie, while scalar copies do
+  not. Copying an aggregate that contains a pointer or slice from borrowed
+  storage is conservatively rejected because component-shaped region tracking
+  is not implemented. Compiler builtins are a trusted synchronous/non-retaining
+  set; `min`/`max` additionally propagate any address taint to their result.
+- **Indexed-owner handoff exception**: inside a function with a matching
+  `sink IndexedOwner[id, ...] -> LinearIndexedOwner[id, ...]` signature,
+  values derived from that sink may be stored durably or passed onward. The
+  returned linear owner represents the outstanding retention obligation, as
+  in `net_transmit`. This is a narrow reviewed signature contract, not general
+  heap inference or proof that a particular stored address is cleared on
+  completion.
+- **Trusted declarations and ABI**: an `extern fn` body is unavailable, so a
+  `borrow` pointer/slice parameter there is a trusted declaration. Borrow
+  modes and region ties erase; raw pointers and slices retain their ordinary
+  LLVM calling convention.
 
 See `examples/net_rx_use_after_release_wrong` for the focused
 compile-error fixture; the real positive fixtures are the network
@@ -1414,8 +1438,8 @@ protected by that lock. The current checker proves only that callers obtained
 the pointer through the annotated accessor and cannot use it after consuming
 the particular guard. Representation changes preserve this lifetime tie, and
 the authority-rebinding and aggregate-storage barriers apply identically to
-guard-derived pointers. Callee retention remains the same function-local v1
-limitation as for owner-derived slices.
+guard-derived pointers. Passing one across a direct named call is governed by
+the same verified `borrow` callee boundary as an owner-derived slice.
 
 `examples/rtos_demo` is the real positive use: its private `Shared` value is
 reachable only through `shared_access(g)`. The focused

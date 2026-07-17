@@ -1,0 +1,36 @@
+// This file is expected to produce a compile error.
+// A plain pointer/slice parameter may retain its argument. Authority-derived
+// values therefore require a verified `borrow` parameter at the call site.
+
+private linear struct CalleeOwned[desc: usize] {
+    private index: {0..<4 as usize} @ desc;
+}
+
+let mut callee_bufs: [u8; 8192];
+let mut callee_stash: []u8;
+
+fn callee_make(index: {0..<4 as usize} @ desc) -> CalleeOwned[desc] {
+    let mut owned: CalleeOwned[desc] = { index };
+    return owned;
+}
+
+fn callee_frame(owned: borrow CalleeOwned[desc])
+        -> [u8; 2048..] @ desc {
+    let index: {0..<4 as usize} = owned.index;
+    let offset: usize = index * 2048;
+    return callee_bufs[offset..<offset + 2048];
+}
+
+fn callee_retain(frame: []u8) {
+    callee_stash = frame;
+}
+
+fn callee_release(owned: sink CalleeOwned[desc]) {}
+
+fn region_callee_retain_bad() {
+    let index: {0..<4 as usize} = 0;
+    let owned = callee_make(index);
+    let frame = callee_frame(owned);
+    callee_retain(frame);
+    callee_release(owned);
+}
