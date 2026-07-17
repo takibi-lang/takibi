@@ -32,8 +32,10 @@ syntactic lock places and reject a mismatched explicit unlock pointer.
 Guard-derived pointer returns make `rtos_demo`'s shared data inaccessible
 after its authorizing `KGuard[lock]` is consumed. General linear-owner
 place/storage tracking, arbitrary address expressions,
-direct/general quantifiers and propositions, and solver hooks remain design
-targets.
+direct/general quantifiers and propositions remain design targets. External
+solver/prover integration is not an active implementation target; Z3 and
+Lean4 are only possible future tools and must not be selected merely because
+they appear in this architecture document.
 
 The examples in this document are elaboration fixtures. Their contracts and
 runtime representations are decisions; punctuation may change when a fixture
@@ -75,8 +77,9 @@ ownership review:
   `Delta` as separate source-level values.
 - Separation logic enriches `Delta` with predicates such as `Cell`, `Array`,
   disjoint composition, and lock invariants. It is not another checking mode.
-- Refinements and SMT discharge propositions already present in `Phi`. A
-  solver cannot reconstruct a relation that elaboration erased.
+- Refinements put pure propositions in `Phi`. If an external solver is ever
+  justified, it can only discharge propositions already retained there; it
+  cannot reconstruct a relation that elaboration erased.
 - Typestate and session types are indexed state transitions in `Delta`.
 - Interrupt and blocking restrictions are propagated by `epsilon`.
 
@@ -475,7 +478,8 @@ The language should teach one escalation ladder:
 4. Use `view` when authority or state must be tracked but no runtime payload
    is needed.
 5. Put arithmetic/equality obligations in `where`; the compiler handles the
-   built-in decidable fragment and `solve` may later invoke SMT.
+   built-in decidable fragment. Do not add `solve` or SMT until a real API
+   demonstrates that this fragment is insufficient.
 6. Expose an explicit lemma/proof only when the proposition is outside that
    fragment. Keep it at a trusted abstraction boundary.
 7. Annotate effects at public/unsafe boundaries; infer them within ordinary
@@ -488,20 +492,27 @@ logics before using a mutex, file, or RX frame.
 
 ## 5. Solver and Proof Boundary
 
-The first `Phi` fragment is quantifier-free equality plus linear integer
-arithmetic over named static values and existing interval refinements.
-Syntactic equality and interval propagation remain fast paths. Z3, when
-added, is only a discharger for generated verification conditions.
+**Z3 and Lean4 are deferred, non-active design possibilities. Do not implement
+either integration, their source syntax, or infrastructure whose sole driver
+is a future solver/prover until a required real example cannot be expressed
+soundly with the current built-in checker. A roadmap entry or a removable
+`unsafe` is not by itself sufficient justification.**
 
-`solve` must mean "prove the current pure goal from named assumptions". It
-must not consume or invent `Delta` resources, recover erased identities, or
-turn failure into a runtime fallback.
+If that threshold is eventually crossed, the first `Phi` fragment should be
+quantifier-free equality plus linear integer arithmetic over named static
+values and existing interval refinements. Syntactic equality and interval
+propagation should remain fast paths. Z3 would only be a discharger for
+generated verification conditions.
 
-A later `prove` boundary can export assumptions and a conclusion to a proof
-artifact checked by a small verifier. Lean may produce that artifact, but
-Lean itself need not be in the compiler's trusted computing base. The
-artifact format, allowed axioms, reproducibility, and failure behavior must
-be specified before source-level `prove` is accepted.
+A future `solve` would have to mean "prove the current pure goal from named
+assumptions". It must not consume or invent `Delta` resources, recover erased
+identities, or turn failure into a runtime fallback.
+
+Only after a concrete need exists could a `prove` boundary export assumptions
+and a conclusion to a proof artifact checked by a small verifier. Lean4 might
+produce that artifact, but it need not be in the compiler's trusted computing
+base. The artifact format, allowed axioms, reproducibility, and failure
+behavior would have to be specified before source-level `prove` is accepted.
 
 ## 6. Core IR Direction
 
@@ -747,8 +758,9 @@ from the indexed spelling.
   below. Generic and zero-copy typed channels (#113) remain demand-led.
 - Owner-derived region slices (#106), asynchronous TX ownership (#87), and
   the first authority-bound pointer lifetime slice (#128) are implemented
-  below. Solver/proof integration still requires its own concrete driver and
-  negative tests.
+  below. Solver/proof integration is explicitly not queued: it may be
+  reconsidered only after a required real API crosses the threshold in
+  section 5.
 
 ### Post-Slice 6 example audit and consolidation (implemented 2026-07-16)
 
@@ -1094,7 +1106,7 @@ a general invariant predicate. A private module can still mint a lying view,
 and it remains responsible for the runtime `full` flag/tag relationship and
 for implementing its guard producer with a real lock acquisition.
 
-### Solver and prover threshold
+### Deferred solver and prover threshold (not an active slice)
 
 The current examples have exactly one executable `unsafe { ... }`, in
 `tcp_echo`'s payload subslice. Its missing fact is quantifier-free linear
@@ -1106,23 +1118,23 @@ data_len = tcp_len - tcp_hdr_len
 data_off + data_len = 34 + tcp_len
 ```
 
-An SMT solver could discharge that bounds goal, but attaching Z3 alone would
-not help. Elaboration must first retain immutable symbolic expressions, branch
-assumptions, integer-cast facts, and source-located verification conditions in
-`Phi`. The acceptance criterion for a first solver slice is therefore removal
-of this specific `unsafe` with an automatically generated bounds goal and a
-negative relation that remains rejected. Runtime validation of packet- and
-device-supplied lengths must remain; SMT is not permission to assume external
-input is valid.
+An SMT solver could discharge that bounds goal, but this does not justify
+adding Z3 or solver-oriented `Phi` infrastructure now. The explicit `unsafe`
+is a small, visible boundary and may remain until an independently required
+real API demonstrates broader need. **Do not implement immutable symbolic
+expression retention, verification-condition generation, or an external
+solver solely to remove this site.** Runtime validation of packet- and
+device-supplied lengths must remain in any future design; SMT is not
+permission to assume external input is valid.
 
-This one site is a real future solver driver, but it does not outrank the
-resource and region holes above. No current example justifies an external
-proof artifact or a `prove` surface form. Verifying that a TCP builder emits a
-semantically correct segment would first require a functional specification,
-a memory model, and explicit lemmas; Lean integration is deferred until such a
-specification exists. A future solver slice should start with the automatic
-quantifier-free `Phi` fragment and add a visible `solve` keyword only if a real
-API cannot be discharged ergonomically without it.
+No current example justifies an external solver, proof artifact, `solve`, or
+`prove` surface form. Verifying that a TCP builder emits a semantically correct
+segment would first require a functional specification, a memory model, and
+explicit lemmas; Lean4 integration remains out of scope unless such a
+specification and a concrete compiler-facing need both exist. If the section 5
+threshold is eventually crossed, a separate design pass must define the
+automatic quantifier-free `Phi` fragment and focused negative tests before any
+tool integration begins.
 
 ## 8. What to Keep and What to Replace
 
@@ -1178,7 +1190,7 @@ independently:
 | #128 escape control (first slices closed) | authority-bound pointer lifetimes extend region ties beyond slice returns, and stable exchange now names a same-container lock; general invariants remain |
 | #87 asynchronous TX ownership | linear in-flight buffer/descriptor states and completion transitions |
 | #15/#108 cast and visibility hardening | unforgeable constructors and module boundaries for runtime owners and views |
-| #13 future SMT path | discharge generated Phi goals only after static names and assumptions exist |
+| #13 deferred SMT path (not active) | reconsider only after a required real API exceeds the built-in checker; do not implement Z3 or solver-only infrastructure from the roadmap alone |
 
 When a slice reveals a genuinely independent acceptance criterion, create a
 separate issue rather than expanding #89 or this architecture document into
