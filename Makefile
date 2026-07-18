@@ -181,7 +181,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck hwcheck-net perfcheck langcheck check allcheck clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos
+.PHONY: build test qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck hwcheck-net perfcheck langcheck check allcheck clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
 
 .DEFAULT_GOAL := build
 
@@ -867,8 +867,12 @@ examples/http_server_sdcard_rtos/kernel_stm32_ram.prof.elf: $(COMMON_STM32_START
 # implementations on the command line, links with sem_asm.o via its
 # explicit RAM target below) but does NOT use COMMON_HTTP_SDCARD -- this
 # is a plain HTTP REST dispatch over COMMON_HTTP_SERVER, not a file
-# server. RAM-only (no debug/prof/Flash variants) -- see
-# kvs_server_sdcard_rtos.tkb's own header comment for the design.
+# server. RAM-only, no Flash variant -- see kvs_server_sdcard_rtos.tkb's
+# own header comment for the design. A .prof.o/.prof.elf pair exists
+# below (profile-stm32-kvs-server-sdcard-rtos) to measure where the
+# write-through PUT/DELETE path's cycles actually go, per the stress-test
+# findings on GitHub issue #135; no .debug.o/.debug.elf pair exists yet
+# (add one the same way if source-level GDB debugging is ever needed).
 #
 # --forbid-trap: ON. Proved working on real hardware first (including the
 # persistence-survives-a-reset check) per AGENTS.md's Development Process
@@ -885,6 +889,12 @@ examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.o: examples/kvs_ser
 
 examples/kvs_server_sdcard_rtos/kernel_stm32_ram.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.o $(COMMON_STM32_LINK_RAM_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.o -o $@
+
+examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.prof.o: examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) --profile-functions -o $@ --forbid-trap
+
+examples/kvs_server_sdcard_rtos/kernel_stm32_ram.prof.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.prof.o $(COMMON_STM32_LINK_RAM_LD)
+	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.prof.o -o $@
 
 # http_server_sdcard_install: provisioning-only helper (make hwcheck-net,
 # make stm32-http-server-sdcard) that writes a real mtools-built FAT12
@@ -1183,6 +1193,15 @@ profile-tcp-echo: examples/tcp_echo/kernel.debug.elf
 ## curl, then halt the board and dump the profiling table through OpenOCD.
 profile-stm32-http-server-sdcard-rtos: examples/http_server_sdcard_rtos/kernel_stm32_ram.prof.elf examples/http_server_sdcard_install/kernel_stm32_ram.elf
 	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/profile_stm32_http_server_sdcard_rtos.sh
+
+## profile-stm32-kvs-server-sdcard-rtos: run the STM32 KVS+SD+RTOS
+## firmware from RAM with function profiling enabled, PUT to the same key
+## twice with curl (warm-up, then measured), then halt the board and dump
+## the profiling table through OpenOCD -- see GitHub issue #135's stress-
+## test findings for why PUT (the write-through SD save path) is the
+## operation being profiled here rather than GET.
+profile-stm32-kvs-server-sdcard-rtos: examples/kvs_server_sdcard_rtos/kernel_stm32_ram.prof.elf
+	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/profile_stm32_kvs_server_sdcard_rtos.sh
 
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts and linker outputs
