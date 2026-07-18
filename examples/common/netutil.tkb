@@ -124,6 +124,19 @@ let TCP_FLAG_ACK: u8 = 0x10;
 let PROTO_TCP: u8 = 6;
 let TCP_INITIAL_SEQ: u32 = 0x00001000;
 
+// GitHub issue #135's N-way concurrent connection support: TCP_INITIAL_SEQ
+// alone was harmless while only one connection could ever be open at a
+// time, but two SIMULTANEOUSLY open connections handshaking with the
+// identical ISN is a real, live collision once http_server_common.tkb
+// tracks MAX_CONNS slots. This is deliberately NOT RFC 6528-style
+// unpredictable ISN generation -- nothing here needs to be secret, only
+// distinct per slot, so a fixed per-slot offset is enough (YAGNI).
+let TCP_ISN_SLOT_STRIDE: u32 = 0x01000000;
+
+fn tcp_initial_seq(idx: {0..<4 as usize}) -> u32 {
+    return TCP_INITIAL_SEQ + (idx as u32) * TCP_ISN_SLOT_STRIDE;
+}
+
 fn bytes_eq(a: borrow *u8, b: borrow *u8, n: isize) -> i32 {
     for i in 0..<n {
         if (a[i] != b[i]) {

@@ -131,7 +131,7 @@ fn build_html_body() -> isize {
 // the current fixed page; the caller must check for this and drop the
 // reply rather than transmit, see app_main()'s use of the return value).
 fn build_http_response_fin(eth: borrow [u8; 1514..],
-        ihl: {20..<21 as u16}) -> i32 {
+        ihl: {20..<21 as u16}, idx: {0..<4 as usize}) -> i32 {
     let body_len: isize = build_html_body();
 
     let payload: *u8 = (eth as *u8) + 54;
@@ -181,8 +181,8 @@ fn build_http_response_fin(eth: borrow [u8; 1514..],
         let client_port: u16 = read_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
         write_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
         write_u16be(tcp_seg[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
-        write_u32be(tcp_seg[TCP_SEQ..<TCP_ACK], tcp_conn_snd_nxt() as i32);
-        write_u32be(tcp_seg[TCP_ACK..<TCP_DATA_OFFSET], tcp_conn_rcv_nxt() as i32);
+        write_u32be(tcp_seg[TCP_SEQ..<TCP_ACK], tcp_conn_snd_nxt(idx) as i32);
+        write_u32be(tcp_seg[TCP_ACK..<TCP_DATA_OFFSET], tcp_conn_rcv_nxt(idx) as i32);
         tcp_seg[TCP_DATA_OFFSET] = (5 << 4) as u8;
         tcp_seg[TCP_FLAGS] = TCP_FLAG_ACK | TCP_FLAG_PSH | TCP_FLAG_FIN;
         write_u16be(tcp_seg[TCP_WINDOW..<TCP_CHECKSUM], 65535);
@@ -195,17 +195,17 @@ fn build_http_response_fin(eth: borrow [u8; 1514..],
 }
 
 fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-                       req: borrow *u8, req_len: u16) -> i32 {
+                       req: borrow *u8, req_len: u16, idx: {0..<4 as usize}) -> i32 {
     request_count = request_count + 1;
-    return build_http_response_fin(eth, ihl);
+    return build_http_response_fin(eth, ihl, idx);
 }
 
 fn http_continue_response(eth: borrow [u8; 1514..],
-        ihl: {20..<21 as u16}) -> i32 {
+        ihl: {20..<21 as u16}, idx: {0..<4 as usize}) -> i32 {
     return -1;
 }
 
-fn http_response_done() -> bool {
+fn http_response_done(idx: {0..<4 as usize}) -> bool {
     return true;
 }
 

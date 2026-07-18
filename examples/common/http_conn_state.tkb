@@ -1,4 +1,4 @@
-// TCP connection-state (phase) variable and its ONLY legal writers, isolated
+// TCP connection-state (phase) storage and its ONLY legal writers, isolated
 // in their own file (GitHub issues #108 + #117).
 //
 // Why a separate file: `private` enforces at FILE granularity, so keeping
@@ -14,22 +14,60 @@
 // below serves a different purpose: it proves that every accepted event is
 // disposed on every dispatch path, including paths that do not transition.
 //
-// TcpConn[conn, state] now makes the source phase of every transition a
-// checked input: http_server_common cannot call a Listen-only transition from
-// a SynRcvd arm. What this still does NOT verify is that each trusted body
-// writes the target phase its name claims, or that a builder emits the segment
-// it claims. Those need a state-to-storage invariant and a functional packet
-// spec respectively, not bare SMT. Everything outside this file is forced
-// through it: dispatch via tcp_conn_dispatch(), and writes via nothing else.
-// There is no state read-back accessor anymore: the fallible transitions
-// return a TcpSendOutcome variant that already says whether the built
-// segment carried our FIN, which is the only fact callers ever derived
-// from re-reading the phase.
+// GitHub issue #135's N-way concurrent connection support: MAX_CONNS
+// independent connection slots, up from the original single fixed slot.
+// TcpConn[conn, state] used to be a bare `linear view` -- an erased,
+// zero-runtime-representation permission (see SPEC.md's "Erased
+// Affine/Linear Views" section) -- which was fine when `conn` was always
+// the compile-time constant 0. Once a caller genuinely needs to recover
+// WHICH of MAX_CONNS runtime slots it was handed (to index conn_state and
+// the sequence-number arrays), a bare view cannot carry that: a view has
+// no fields, no runtime storage, and nothing to read back. The fix reuses
+// a pattern this codebase already trusts and ships --
+// examples/common_qemu/virtio_mmio.tkb's NetRxCpuOwned[desc] (an INDEXED
+// OWNER STRUCT, SPEC.md's "Indexed Runtime Owners" section, storing its
+// own index as an ordinary field) -- instead of a bare view. Because
+// affine/linear struct static parameters support primitive integer sorts
+// only (not an enum sort, which only `view` supports), state and index
+// cannot both live on one declaration; this file now declares one small
+// indexed owner struct PER STATE (TcpConnListen/SynRcvd/Established/
+// Sending/LastAck) rather than the old single TcpConn[conn, state] view.
+// TcpConnDispatch keeps its original five-case shape; only what each case
+// wraps changes. Every existing `match tcp_conn_dispatch() { ... }` call
+// site is syntactically unchanged.
 //
-// Deliberately NOT here: conn_snd_nxt/conn_rcv_nxt sequence-number
-// bookkeeping (stays private to http_server_common.tkb -- wire arithmetic,
-// not phase), TX flagging (should_tx/tx_len, derived at the call site from
+// TcpConn[conn, state] used to make the source phase of every transition a
+// checked input: http_server_common cannot call a Listen-only transition
+// from a SynRcvd arm. The five-owner-struct replacement preserves this
+// exactly (now via five distinct nominal types instead of one type's
+// static state parameter). What this still does NOT verify is that each
+// trusted body writes the target phase its name claims, or that a builder
+// emits the segment it claims. Those need a state-to-storage invariant and
+// a functional packet spec respectively, not bare SMT. Everything outside
+// this file is forced through it: dispatch via tcp_conn_dispatch(), and
+// writes via nothing else. There is no state read-back accessor anymore:
+// the fallible transitions return a TcpSendOutcome variant that already
+// says whether the built segment carried our FIN, which is the only fact
+// callers ever derived from re-reading the phase.
+//
+// Deliberately NOT here: conn_remote_ip/conn_remote_port/conn_snd_nxt/
+// conn_rcv_nxt (stay private to http_server_common.tkb -- wire identity
+// and arithmetic, not phase; tcp_conn_dispatch takes borrowed slices of
+// them as plain parameters to do its own peer-matching without needing to
+// own or declare them -- passing a value across the file boundary is not
+// the same as naming/declaring it, so this does not weaken the privacy
+// boundary), TX flagging (should_tx/tx_len, derived at the call site from
 // these functions' i32 length returns), and packet parsing/validation.
+
+let MAX_CONNS: usize = 4;
+
+// Changing MAX_CONNS requires a hand-updated sweep of every literal `4` in
+// a {0..<4 as usize} refined bound in this file and http_server_common.tkb
+// -- refined-type bounds must be spelled as literal integers, never a
+// named constant, even one with a literal initializer (same restriction
+// documented on examples/kvs_server/kvs_server.tkb's KEY_MAX/TABLE_SLOTS,
+// and on examples/common/rtos.tkb's NTASKS). `grep -n '{0..<4 as usize}'`
+// across both files finds every site.
 
 enum ConnState: u8 {
     Listen;
@@ -39,21 +77,82 @@ enum ConnState: u8 {
     LastAck;
 }
 
-// The runtime state remains conn_state below. TcpConn is its erased,
-// state-specific dispatch authority. This HTTP server has one connection
-// slot, so tcp_conn_dispatch packages the fixed identity 0 existentially;
-// matching outside this trusted file reveals only the current state case.
-private linear view TcpConn[conn: usize, state: ConnState];
+private let mut conn_state: [ConnState; MAX_CONNS];
+
+// One indexed owner struct per state (see this file's header for why a
+// bare view can no longer serve this role). Each stores only its own
+// slot index; `private` keeps the field readable only via tcp_conn_slot
+// below (matches NetRxCpuOwned[desc]'s private `index` field and
+// net_rx_len's read-only accessor in virtio_mmio.tkb).
+private linear struct TcpConnListen[conn: usize]      { private idx: {0..<4 as usize} @ conn; }
+private linear struct TcpConnSynRcvd[conn: usize]     { private idx: {0..<4 as usize} @ conn; }
+private linear struct TcpConnEstablished[conn: usize] { private idx: {0..<4 as usize} @ conn; }
+private linear struct TcpConnSending[conn: usize]     { private idx: {0..<4 as usize} @ conn; }
+private linear struct TcpConnLastAck[conn: usize]     { private idx: {0..<4 as usize} @ conn; }
 
 variant TcpConnDispatch {
-    Listen(exists conn: usize. TcpConn[conn, ConnState::Listen]);
-    SynRcvd(exists conn: usize. TcpConn[conn, ConnState::SynRcvd]);
-    Established(exists conn: usize. TcpConn[conn, ConnState::Established]);
-    Sending(exists conn: usize. TcpConn[conn, ConnState::Sending]);
-    LastAck(exists conn: usize. TcpConn[conn, ConnState::LastAck]);
+    Listen(exists conn: usize. TcpConnListen[conn]);
+    SynRcvd(exists conn: usize. TcpConnSynRcvd[conn]);
+    Established(exists conn: usize. TcpConnEstablished[conn]);
+    Sending(exists conn: usize. TcpConnSending[conn]);
+    LastAck(exists conn: usize. TcpConnLastAck[conn]);
 }
 
-private let mut conn_state: ConnState = ConnState::Listen;
+// Recovers the runtime slot index a dispatched owner was opened for. Every
+// arm in http_server_common.tkb's poll loop calls the one matching its own
+// state once per match arm (mirrors net_rx_len(frame: borrow
+// NetRxCpuOwned[desc]) -> i32 in virtio_mmio.tkb) to get the index it then
+// subscripts its own conn_remote_ip/conn_remote_port/conn_snd_nxt/
+// conn_rcv_nxt arrays with.
+//
+// Five DISTINCTLY NAMED functions, not one overloaded name: confirmed by
+// direct experiment that this compiler's overload resolution does not
+// unify a freshly-opened existential owner's type (e.g. the `conn` bound
+// by `TcpConnDispatch::Listen(conn) => { ... }`) against an overload
+// candidate declared with the same structural shape but a different
+// source-level type-variable binding site -- "cannot resolve overload:
+// no overload has exactly matching parameter types" even though the
+// argument's nominal type (TcpConnListen[<fresh>]) is exactly the
+// declared parameter type modulo the existential's fresh identity. Giving
+// each function a unique name sidesteps overload resolution entirely and
+// compiles cleanly. This is a real, verified limitation of the current
+// implementation, not a style choice -- SPEC.md's "Function overloading"
+// section documents exact-parameter-type matching with no mention of this
+// existential case, and multiple sibling owner-struct types dispatched
+// from one variant did not previously exist anywhere else in this
+// codebase to have surfaced it.
+fn tcp_conn_listen_slot(conn: borrow TcpConnListen[c])           -> {0..<4 as usize} { return conn.idx; }
+fn tcp_conn_synrcvd_slot(conn: borrow TcpConnSynRcvd[c])         -> {0..<4 as usize} { return conn.idx; }
+fn tcp_conn_established_slot(conn: borrow TcpConnEstablished[c]) -> {0..<4 as usize} { return conn.idx; }
+fn tcp_conn_sending_slot(conn: borrow TcpConnSending[c])         -> {0..<4 as usize} { return conn.idx; }
+fn tcp_conn_lastack_slot(conn: borrow TcpConnLastAck[c])         -> {0..<4 as usize} { return conn.idx; }
+
+// Smart constructors: the one place each owner's invariant (idx equals the
+// slot it was opened for) is established, mirroring virtio_mmio.tkb's
+// net_rx_owned. `i`'s "hidden rigid identity" (SPEC.md's Indexed Runtime
+// Owners section -- reusing one immutable runtime variable preserves one
+// identity) is what lets the same value serve as both the struct's own
+// static bracket argument and its field's runtime value.
+fn tcp_conn_listen_open(i: {0..<4 as usize} @ conn) -> TcpConnListen[conn] {
+    let mut owner: TcpConnListen[conn] = { i };
+    return owner;
+}
+fn tcp_conn_synrcvd_open(i: {0..<4 as usize} @ conn) -> TcpConnSynRcvd[conn] {
+    let mut owner: TcpConnSynRcvd[conn] = { i };
+    return owner;
+}
+fn tcp_conn_established_open(i: {0..<4 as usize} @ conn) -> TcpConnEstablished[conn] {
+    let mut owner: TcpConnEstablished[conn] = { i };
+    return owner;
+}
+fn tcp_conn_sending_open(i: {0..<4 as usize} @ conn) -> TcpConnSending[conn] {
+    let mut owner: TcpConnSending[conn] = { i };
+    return owner;
+}
+fn tcp_conn_lastack_open(i: {0..<4 as usize} @ conn) -> TcpConnLastAck[conn] {
+    let mut owner: TcpConnLastAck[conn] = { i };
+    return owner;
+}
 
 // Result of a fallible transition that builds a response segment. Dropped
 // means the build failed and the phase did not change (the disposition is
@@ -69,27 +168,93 @@ variant TcpSendOutcome {
     SentFin(i32);
 }
 
-// Convert the private runtime state into the closed dispatch package. The
-// exhaustive enum match is the single trusted bridge between Gamma's state
-// byte and Delta's state-specific permission.
-fn tcp_conn_dispatch() -> TcpConnDispatch {
-    match conn_state {
+// Opens whatever conn_state[i] really is right now. Internal to this file
+// -- callers reach it only through tcp_conn_dispatch below.
+fn dispatch_slot(i: {0..<4 as usize}) -> TcpConnDispatch {
+    // Bind the indexed read to a local before matching: matching an array-
+    // index EXPRESSION directly (`match conn_state[i] { ... }`) generated
+    // invalid LLVM IR (a `switch` comparing the element's pointer instead
+    // of its loaded value) -- confirmed by direct experiment. Matching a
+    // plain variable load (the shape the original single-slot `match
+    // conn_state { ... }` already used, since conn_state was a scalar
+    // then) takes a codegen path that works correctly.
+    let state: ConnState = conn_state[i];
+    match state {
         ConnState::Listen => {
-            return TcpConnDispatch::Listen(view TcpConn[0, ConnState::Listen]);
+            return TcpConnDispatch::Listen(tcp_conn_listen_open(i));
         }
         ConnState::SynRcvd => {
-            return TcpConnDispatch::SynRcvd(view TcpConn[0, ConnState::SynRcvd]);
+            return TcpConnDispatch::SynRcvd(tcp_conn_synrcvd_open(i));
         }
         ConnState::Established => {
-            return TcpConnDispatch::Established(view TcpConn[0, ConnState::Established]);
+            return TcpConnDispatch::Established(tcp_conn_established_open(i));
         }
         ConnState::Sending => {
-            return TcpConnDispatch::Sending(view TcpConn[0, ConnState::Sending]);
+            return TcpConnDispatch::Sending(tcp_conn_sending_open(i));
         }
         ConnState::LastAck => {
-            return TcpConnDispatch::LastAck(view TcpConn[0, ConnState::LastAck]);
+            return TcpConnDispatch::LastAck(tcp_conn_lastack_open(i));
         }
     }
+}
+
+// The single trusted bridge between the private conn_state array and the
+// caller's state-specific permission -- now also the one place that
+// decides WHICH of MAX_CONNS slots a segment belongs to. remote_ip/
+// remote_port are http_server_common.tkb's own private identity arrays,
+// passed in as borrowed slices so this file can read them for matching
+// without declaring or owning them (crossing the file-privacy boundary by
+// value, exactly like every builder function already receives `eth`/`ip`
+// frame slices from the caller).
+//
+// Three-way outcome, checked in order:
+//   Pass 1: an ACTIVE (non-Listen) slot already tracks this exact peer ->
+//           dispatch to it, whatever its current phase.
+//   Pass 2: no active match, but this segment is a SYN and a free
+//           (Listen-phase) slot exists -> admit it there.
+//   Pass 3: no active match, and either not a SYN or no free slot (the
+//           table is genuinely full) -> open slot 0's REAL current state.
+//           The caller's own existing per-arm "unmatched peer" check
+//           (tcp_remote_matches, called with the returned slot's index)
+//           then ignores it exactly like an unrelated stray packet always
+//           has -- this is what makes Pass 3 also the table-full path,
+//           with no new mechanism (see http_server_common.tkb's poll loop
+//           and HISTORY.md's issue #135 entry for the reasoning against a
+//           stateless RST here instead).
+fn tcp_conn_dispatch(remote_ip: borrow [u8; 16..], remote_port: borrow [u16; 4..],
+                     src_ip: borrow [u8; 4..], src_port: u16,
+                     is_syn: bool) -> TcpConnDispatch {
+    // Every conn_state[i] read below is bound to a local before comparing
+    // against a ConnState variant -- same reason as dispatch_slot's own
+    // comment: comparing an array-index expression directly against an
+    // enum variant generated invalid LLVM IR (a pointer-identity compare
+    // instead of a loaded-value compare); binding to a plain local first
+    // takes the working codegen path.
+    for i: usize in 0..<4 {
+        let state: ConnState = conn_state[i];
+        // Raw-pointer bytes_eq instead of a sliced remote_ip[i*4..<i*4+4]
+        // compare: subslicing a 16-byte slice at a runtime i*4 offset
+        // cannot be proven in range by the same-base subslice rule (the
+        // two bounds share "i*4" as a compound expression, not a bare
+        // variable), which would otherwise leave a real --forbid-trap
+        // site here. Pointer indexing carries no bounds guarantee at all,
+        // so there is nothing left to prove -- the same pattern
+        // kvs_server.tkb's own kv_keys/kv_vals flat array already uses.
+        if (state != ConnState::Listen &&
+            bytes_eq((remote_ip as *u8) + (i as isize) * 4, src_ip as *u8, 4) != 0 &&
+            remote_port[i] == src_port) {
+            return dispatch_slot(i);
+        }
+    }
+    if (is_syn) {
+        for i: usize in 0..<4 {
+            let state: ConnState = conn_state[i];
+            if (state == ConnState::Listen) {
+                return dispatch_slot(i);
+            }
+        }
+    }
+    return dispatch_slot(0);
 }
 
 // The event-response obligation (OWNERSHIP_KERNEL.md Stage 1 / 4.10,
@@ -97,13 +262,13 @@ fn tcp_conn_dispatch() -> TcpConnDispatch {
 // segment, and the `linear` kind's all-paths rule forces every
 // (state x event) dispatch arm in http_server_common.tkb -- including
 // every previously-implicit ignore path (stale seq, unknown peer,
-// unsupported verb) -- to discharge it through exactly one of the
-// responder functions below. Silently swallowing a protocol event (the
-// shape of issue #116's original bug) is now a compile error, and every
-// deliberate non-response is a greppable tcp_event_ignored call. This is
-// an erased view, not a runtime handle: it has no pointer, storage, argument,
-// or return value in generated LLVM. `view PendingTcpEvent` only introduces
-// a compile-time obligation into Delta.
+// unsupported verb, and now table-full) -- to discharge it through
+// exactly one of the responder functions below. Silently swallowing a
+// protocol event (the shape of issue #116's original bug) is now a
+// compile error, and every deliberate non-response is a greppable
+// tcp_event_ignored call. This is an erased view, not a runtime handle: it
+// has no pointer, storage, argument, or return value in generated LLVM.
+// `view PendingTcpEvent` only introduces a compile-time obligation.
 private linear view PendingTcpEvent;
 
 fn tcp_event_accepted() -> PendingTcpEvent {
@@ -113,14 +278,22 @@ fn tcp_event_accepted() -> PendingTcpEvent {
 // The one legal way to deliberately not respond. The call site IS the
 // reason (a breakpoint here plus the stack trace identifies which arm
 // ignored what); see issue #117 for why this carries no reason argument.
-fn tcp_event_ignored(pending: sink PendingTcpEvent,
-                     conn: sink TcpConn[c, state]) {
-}
+// Five DISTINCTLY NAMED functions (one per owner type), not one overloaded
+// name -- see tcp_conn_listen_slot's comment above for why overloading
+// across these five owner types does not compile. Each poll-loop arm
+// calls the one matching its own state.
+fn tcp_ignore_listen(pending: sink PendingTcpEvent, conn: sink TcpConnListen[c]) {}
+fn tcp_ignore_synrcvd(pending: sink PendingTcpEvent, conn: sink TcpConnSynRcvd[c]) {}
+fn tcp_ignore_established(pending: sink PendingTcpEvent, conn: sink TcpConnEstablished[c]) {}
+fn tcp_ignore_sending(pending: sink PendingTcpEvent, conn: sink TcpConnSending[c]) {}
+fn tcp_ignore_lastack(pending: sink PendingTcpEvent, conn: sink TcpConnLastAck[c]) {}
 
 // Respond to an unsolicited ACK on a listening socket with a stateless
 // RST (no phase change, but a real response -- distinct from ignoring).
+// Needs no slot index: it echoes the peer's own ack number, which the
+// caller already extracted from the packet itself.
 fn tcp_reject_with_rst(pending: sink PendingTcpEvent,
-                       conn: sink TcpConn[c, ConnState::Listen],
+                       conn: sink TcpConnListen[c],
                        eth: borrow [u8; 54..], ihl: {20..<21 as u16}, ack_seq: u32) {
     build_rst_from_ack(eth, ihl, ack_seq);
 }
@@ -129,23 +302,28 @@ fn tcp_reject_with_rst(pending: sink PendingTcpEvent,
 // Each calls its obliged segment builder itself, then moves the phase;
 // fallible builders gate the phase write on their own success return.
 // Callers derive the TX disposition and sequence-number updates from the
-// returned TcpSendOutcome.
+// returned TcpSendOutcome. Every builder/includer-contract call below now
+// threads the recovered slot index through, since http_server_common.tkb's
+// conn_snd_nxt/conn_rcv_nxt and the includer's own connection-scoped state
+// are all MAX_CONNS-wide arrays now.
 
 // Listen -> SynRcvd: reachable only by building the SYN-ACK.
 fn tcp_accept_via_syn_ack(pending: sink PendingTcpEvent,
-                          conn: sink TcpConn[c, ConnState::Listen],
+                          conn: sink TcpConnListen[c],
                           eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
-    build_syn_ack(eth, ihl);
-    conn_state = ConnState::SynRcvd;
+    let idx: {0..<4 as usize} = conn.idx;
+    build_syn_ack(eth, ihl, idx);
+    conn_state[idx] = ConnState::SynRcvd;
 }
 
 // Established -> LastAck (peer sent FIN): reachable only by building our
 // FIN+ACK reply.
 fn tcp_begin_close_via_fin_ack(pending: sink PendingTcpEvent,
-                               conn: sink TcpConn[c, ConnState::Established],
+                               conn: sink TcpConnEstablished[c],
                                eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
-    build_fin_ack(eth, ihl);
-    conn_state = ConnState::LastAck;
+    let idx: {0..<4 as usize} = conn.idx;
+    build_fin_ack(eth, ihl, idx);
+    conn_state[idx] = ConnState::LastAck;
 }
 
 // Established -> LastAck or Sending: reachable only by the including
@@ -153,16 +331,17 @@ fn tcp_begin_close_via_fin_ack(pending: sink PendingTcpEvent,
 // contract: a return >= 0 means a segment now sits in the frame). Which
 // phase follows depends on whether that response is already complete.
 fn tcp_respond(pending: sink PendingTcpEvent,
-               conn: sink TcpConn[c, ConnState::Established],
+               conn: sink TcpConnEstablished[c],
                eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
                req: borrow *u8, req_len: u16) -> TcpSendOutcome {
-    let n: i32 = http_start_response(eth, ihl, req, req_len);
+    let idx: {0..<4 as usize} = conn.idx;
+    let n: i32 = http_start_response(eth, ihl, req, req_len, idx);
     if (n >= 0) {
-        if (http_response_done()) {
-            conn_state = ConnState::LastAck;
+        if (http_response_done(idx)) {
+            conn_state[idx] = ConnState::LastAck;
             return TcpSendOutcome::SentFin(n);
         }
-        conn_state = ConnState::Sending;
+        conn_state[idx] = ConnState::Sending;
         return TcpSendOutcome::Sent(n);
     }
     return TcpSendOutcome::Dropped;
@@ -171,12 +350,13 @@ fn tcp_respond(pending: sink PendingTcpEvent,
 // Sending -> LastAck, or stay Sending: reachable only by building the
 // next continuation segment.
 fn tcp_continue(pending: sink PendingTcpEvent,
-                conn: sink TcpConn[c, ConnState::Sending],
+                conn: sink TcpConnSending[c],
                 eth: borrow [u8; 1514..], ihl: {20..<21 as u16}) -> TcpSendOutcome {
-    let n: i32 = http_continue_response(eth, ihl);
+    let idx: {0..<4 as usize} = conn.idx;
+    let n: i32 = http_continue_response(eth, ihl, idx);
     if (n >= 0) {
-        if (http_response_done()) {
-            conn_state = ConnState::LastAck;
+        if (http_response_done(idx)) {
+            conn_state[idx] = ConnState::LastAck;
             return TcpSendOutcome::SentFin(n);
         }
         // More segments queued: stay Sending.
@@ -188,11 +368,12 @@ fn tcp_continue(pending: sink PendingTcpEvent,
 // LastAck -> Listen: reachable only by building the final ACK answering
 // the peer's FIN+ACK -- the compile-time form of issue #116's fix.
 fn tcp_close_via_final_ack(pending: sink PendingTcpEvent,
-                           conn: sink TcpConn[c, ConnState::LastAck],
+                           conn: sink TcpConnLastAck[c],
                            eth: borrow [u8; 1514..], ihl: {20..<21 as u16}) -> TcpSendOutcome {
-    let n: i32 = build_tcp_payload(eth, ihl, 0, TCP_FLAG_ACK);
+    let idx: {0..<4 as usize} = conn.idx;
+    let n: i32 = build_tcp_payload(eth, ihl, 0, TCP_FLAG_ACK, idx);
     if (n >= 0) {
-        conn_state = ConnState::Listen;
+        conn_state[idx] = ConnState::Listen;
         return TcpSendOutcome::Sent(n);
     }
     return TcpSendOutcome::Dropped;
@@ -203,13 +384,25 @@ fn tcp_close_via_final_ack(pending: sink PendingTcpEvent,
 // SynRcvd -> Established: the peer's valid handshake ACK arrived; nothing
 // to send.
 fn tcp_handshake_complete(pending: sink PendingTcpEvent,
-                          conn: sink TcpConn[c, ConnState::SynRcvd]) {
-    conn_state = ConnState::Established;
+                          conn: sink TcpConnSynRcvd[c]) {
+    conn_state[conn.idx] = ConnState::Established;
 }
 
-// Any state -> Listen with nothing owed to the peer: an incoming RST, or
-// the peer's plain ACK of our FIN in LastAck.
-fn tcp_reset_to_listen(pending: sink PendingTcpEvent,
-                       conn: sink TcpConn[c, state]) {
-    conn_state = ConnState::Listen;
+// Any BUSY state -> Listen with nothing owed to the peer: an incoming RST,
+// or the peer's plain ACK of our FIN in LastAck. Four DISTINCTLY NAMED
+// functions (Listen itself never calls this -- an RST on a listening
+// socket has nothing to reset, and is handled by tcp_ignore_listen in
+// that arm) -- see tcp_conn_listen_slot's comment above for why
+// overloading across owner types does not compile here.
+fn tcp_reset_synrcvd_to_listen(pending: sink PendingTcpEvent, conn: sink TcpConnSynRcvd[c]) {
+    conn_state[conn.idx] = ConnState::Listen;
+}
+fn tcp_reset_established_to_listen(pending: sink PendingTcpEvent, conn: sink TcpConnEstablished[c]) {
+    conn_state[conn.idx] = ConnState::Listen;
+}
+fn tcp_reset_sending_to_listen(pending: sink PendingTcpEvent, conn: sink TcpConnSending[c]) {
+    conn_state[conn.idx] = ConnState::Listen;
+}
+fn tcp_reset_lastack_to_listen(pending: sink PendingTcpEvent, conn: sink TcpConnLastAck[c]) {
+    conn_state[conn.idx] = ConnState::Listen;
 }

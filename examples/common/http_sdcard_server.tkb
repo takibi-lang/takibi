@@ -3,19 +3,34 @@
 // The including example owns the storage boundary and must provide:
 //   fn http_file_size(name83: *u8) -> i32
 //   fn http_read_chunk(name83: *u8, off: u32, dst: *u8, want: u32) -> u32
+//
+// GitHub issue #135's N-way concurrent connection support: this file's own
+// resp_name83/resp_size/resp_sent/resp_content_type used to be scalars
+// persisted ACROSS MULTIPLE poll_once calls for one connection's
+// multi-segment SD-card file download (unlike examples/http_server.tkb's
+// or examples/kvs_server*.tkb's single-segment responses, which never
+// needed to survive past one call). Two simultaneous downloads in the
+// Sending phase would otherwise corrupt each other's filename/size/
+// progress. Fanned out to [T; 4] arrays indexed by the idx every
+// http_server_common.tkb callback now carries.
 
 use "examples/common/http_server_common.tkb";
 
 // Scratch buffer for composing error-page bodies before they are copied
 // into the frame's payload area. Owned here (not by http_server_common.tkb):
 // the TCP core never touches response bytes -- response generation,
-// including its scratch space, belongs to the response generator.
+// including its scratch space, belongs to the response generator. Does
+// NOT need to fan out per connection: every error-page response here
+// completes within one poll_once call (build_error_response_fin builds and
+// sends fully in one call), and poll_once only ever handles one
+// connection's segment per call regardless of MAX_CONNS -- see
+// http_server_common.tkb's module comment.
 let mut html_body: [u8; 512];
 
-let mut resp_name83: [u8; 11];
-let mut resp_size: u32 = 0;
-let mut resp_sent: u32 = 0;
-let mut resp_content_type: i32 = 0;
+let mut resp_name83:       [u8; 44]; // 11 * MAX_CONNS; slot i at [i*11..<i*11+11]
+let mut resp_size:         [u32; 4];
+let mut resp_sent:         [u32; 4];
+let mut resp_content_type: [i32; 4];
 
 let RESP_TYPE_HTML: i32 = 1;
 let RESP_TYPE_PNG: i32 = 2;
@@ -28,12 +43,12 @@ fn content_type_for_name83(name83: borrow *u8) -> i32 {
     return RESP_TYPE_HTML;
 }
 
-fn copy_response_name(name83: borrow *u8) {
-    bytes_copy(resp_name83, name83, 11);
+fn copy_response_name(name83: borrow *u8, idx: {0..<4 as usize}) {
+    bytes_copy((resp_name83 as *u8) + (idx as isize) * 11, name83, 11);
 }
 
 fn build_error_response_fin(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-                            msg: *u8) -> i32 {
+                            msg: *u8, idx: {0..<4 as usize}) -> i32 {
     let body_len: isize = copy_str(html_body, msg);
     let payload: *u8 = (eth as *u8) + 54;
     let mut len: isize = 0;
@@ -43,71 +58,72 @@ fn build_error_response_fin(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
     len = len + copy_str(payload + len, "\r\nConnection: close\r\n\r\n");
     bytes_copy(payload + len, html_body as *u8, body_len);
     len = len + body_len;
-    return build_tcp_payload(eth, ihl, len, TCP_FLAG_ACK | TCP_FLAG_PSH | TCP_FLAG_FIN);
+    return build_tcp_payload(eth, ihl, len, TCP_FLAG_ACK | TCP_FLAG_PSH | TCP_FLAG_FIN, idx);
 }
 
 fn build_response_segment(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-                          first: bool) -> i32 {
+                          first: bool, idx: {0..<4 as usize}) -> i32 {
     let payload: *u8 = (eth as *u8) + 54;
     let mut len: isize = 0;
     if (first) {
         len = len + copy_str(payload + len,
             "HTTP/1.1 200 OK\r\nContent-Type: ");
-        if (resp_content_type == RESP_TYPE_PNG) {
+        if (resp_content_type[idx] == RESP_TYPE_PNG) {
             len = len + copy_str(payload + len, "image/png");
         } else {
             len = len + copy_str(payload + len, "text/html; charset=us-ascii");
         }
         len = len + copy_str(payload + len, "\r\nContent-Length: ");
-        len = len + write_udec(payload + len, resp_size as i32);
+        len = len + write_udec(payload + len, resp_size[idx] as i32);
         len = len + copy_str(payload + len, "\r\nConnection: close\r\n\r\n");
     }
 
     let room: u32 = (HTTP_SEGMENT_PAYLOAD_MAX as u32) - (len as u32);
-    let mut want: u32 = resp_size - resp_sent;
+    let mut want: u32 = resp_size[idx] - resp_sent[idx];
     if (want > room) {
         want = room;
     }
-    let got: u32 = http_read_chunk(resp_name83, resp_sent, payload + len, want);
+    let name_ptr: *u8 = (resp_name83 as *u8) + (idx as isize) * 11;
+    let got: u32 = http_read_chunk(name_ptr, resp_sent[idx], payload + len, want);
     len = len + (got as isize);
-    resp_sent = resp_sent + got;
+    resp_sent[idx] = resp_sent[idx] + got;
 
     let mut flags: u8 = TCP_FLAG_ACK | TCP_FLAG_PSH;
-    if (resp_sent >= resp_size) {
+    if (resp_sent[idx] >= resp_size[idx]) {
         flags = flags | TCP_FLAG_FIN;
     }
-    return build_tcp_payload(eth, ihl, len, flags);
+    return build_tcp_payload(eth, ihl, len, flags, idx);
 }
 
 fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-                       req: borrow *u8, req_len: u16) -> i32 {
+                       req: borrow *u8, req_len: u16, idx: {0..<4 as usize}) -> i32 {
     let mut name83: [u8; 11];
     if (http_request_path_to_name83(req, req_len as isize, name83) == false) {
         let msg: *u8 = "400: unsupported path\n";
-        resp_size = 0;
-        resp_sent = 0;
-        return build_error_response_fin(eth, ihl, msg);
+        resp_size[idx] = 0;
+        resp_sent[idx] = 0;
+        return build_error_response_fin(eth, ihl, msg, idx);
     }
     let size: i32 = http_file_size(name83);
     if (size < 0) {
         let msg: *u8 = "404: file not found on SD card.\n";
-        resp_size = 0;
-        resp_sent = 0;
-        return build_error_response_fin(eth, ihl, msg);
+        resp_size[idx] = 0;
+        resp_sent[idx] = 0;
+        return build_error_response_fin(eth, ihl, msg, idx);
     }
 
-    copy_response_name(name83);
-    resp_size = size as u32;
-    resp_sent = 0;
-    resp_content_type = content_type_for_name83(name83);
-    return build_response_segment(eth, ihl, true);
+    copy_response_name(name83, idx);
+    resp_size[idx] = size as u32;
+    resp_sent[idx] = 0;
+    resp_content_type[idx] = content_type_for_name83(name83);
+    return build_response_segment(eth, ihl, true, idx);
 }
 
 fn http_continue_response(eth: borrow [u8; 1514..],
-        ihl: {20..<21 as u16}) -> i32 {
-    return build_response_segment(eth, ihl, false);
+        ihl: {20..<21 as u16}, idx: {0..<4 as usize}) -> i32 {
+    return build_response_segment(eth, ihl, false, idx);
 }
 
-fn http_response_done() -> bool {
-    return resp_sent >= resp_size;
+fn http_response_done(idx: {0..<4 as usize}) -> bool {
+    return resp_sent[idx] >= resp_size[idx];
 }

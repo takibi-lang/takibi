@@ -2,9 +2,23 @@
 //
 // The including example owns HTTP response generation and must provide:
 //   fn http_start_response(eth: [u8; 1514..], ihl: {20..<21 as u16},
-//                          req: *u8, req_len: u16) -> i32
-//   fn http_continue_response(eth: [u8; 1514..], ihl: {20..<21 as u16}) -> i32
-//   fn http_response_done() -> bool
+//                          req: *u8, req_len: u16, idx: {0..<4 as usize}) -> i32
+//   fn http_continue_response(eth: [u8; 1514..], ihl: {20..<21 as u16},
+//                             idx: {0..<4 as usize}) -> i32
+//   fn http_response_done(idx: {0..<4 as usize}) -> bool
+//
+// GitHub issue #135's N-way concurrent connection support added the
+// trailing `idx` parameter to all three (identifies which of MAX_CONNS
+// connection slots this call is for -- see http_conn_state.tkb's header
+// for why a bare view could no longer carry this). An includer with truly
+// connection-scoped state of its own (e.g. examples/common/
+// http_sdcard_server.tkb's multi-segment SD-card streaming) must fan its
+// own state out to `[T; 4]` arrays indexed by `idx` too, or two
+// simultaneous connections corrupt each other's in-flight response --
+// includers whose response always completes within one poll_once call
+// (examples/http_server.tkb, examples/kvs_server*.tkb) do not need this,
+// since poll_once only ever handles one connection's segment per call
+// regardless of MAX_CONNS.
 
 use "examples/common/inet_checksum.tkb";
 use "examples/common/netutil.tkb";
@@ -15,27 +29,35 @@ let HTTP_PORT: u16 = 80;
 // GitHub issue #108: private (this file only). The connection's PHASE
 // (conn_state) lives in http_conn_state.tkb behind designated transition
 // functions -- even this file cannot assign it directly. What stays here is
-// the wire bookkeeping: the peer's identity and both sequence numbers. The
-// only legitimate external READ need (an including example's
-// http_start_response building a response segment's TCP header) goes through
-// the tcp_conn_snd_nxt/tcp_conn_rcv_nxt accessors just below instead of
-// touching these directly -- see HISTORY.md's issue #117 follow-up entry for
-// why this stopped being just a naming-convention accessor idiom.
-private let mut conn_remote_ip:   [u8; 4];
-private let mut conn_remote_port: u16 = 0;
-private let mut conn_snd_nxt:     u32 = 0;
-private let mut conn_rcv_nxt:     u32 = 0;
+// the wire bookkeeping: each slot's peer identity and both sequence
+// numbers. The only legitimate external READ need (an including example's
+// http_start_response building a response segment's TCP header) goes
+// through the tcp_conn_snd_nxt/tcp_conn_rcv_nxt accessors just below
+// instead of touching these directly -- see HISTORY.md's issue #117
+// follow-up entry for why this stopped being just a naming-convention
+// accessor idiom.
+//
+// GitHub issue #135: MAX_CONNS-wide arrays, up from single scalars --
+// slot i's IP lives at conn_remote_ip[i*4..<i*4+4] (a flat array with
+// manual offsets, not [[u8;4];4]: matches examples/kvs_server/
+// kvs_server.tkb's kv_keys/kv_vals precedent, adopted there because
+// indexed writes into a nested/structured target are not reliably
+// supported -- see that file's own header comment).
+private let mut conn_remote_ip:   [u8; 16];
+private let mut conn_remote_port: [u16; 4];
+private let mut conn_snd_nxt:     [u32; 4];
+private let mut conn_rcv_nxt:     [u32; 4];
 
 // Read accessors for the one legitimate external need: an including
 // example's http_start_response (e.g. examples/http_server/http_server.tkb)
 // builds its own response segment's TCP header directly and needs today's
-// sequence numbers to do it.
-fn tcp_conn_snd_nxt() -> u32 {
-    return conn_snd_nxt;
+// sequence numbers to do it. Now slot-indexed (issue #135).
+fn tcp_conn_snd_nxt(idx: {0..<4 as usize}) -> u32 {
+    return conn_snd_nxt[idx];
 }
 
-fn tcp_conn_rcv_nxt() -> u32 {
-    return conn_rcv_nxt;
+fn tcp_conn_rcv_nxt(idx: {0..<4 as usize}) -> u32 {
+    return conn_rcv_nxt[idx];
 }
 
 let HTTP_SEGMENT_PAYLOAD_MAX: i32 = 1400;
@@ -78,9 +100,22 @@ inline fn classify_tcp_event(flags: u8) -> TcpEvent {
     return TcpEvent::Other;
 }
 
-fn tcp_remote_matches(ip: borrow [u8; 20..], src_port: u16) -> bool {
-    return slice_eq(ip[IP_SRC..<IP_DST], conn_remote_ip as []u8) &&
-           src_port == conn_remote_port;
+// Confirms a dispatched slot really belongs to the peer that just sent
+// this segment. Still needed even though tcp_conn_dispatch's own Pass 1
+// already searched for a match (issue #135): its Pass 3 fallback
+// deliberately opens a REAL but possibly NON-matching slot (the table-full
+// / not-a-SYN case), and the caller cannot tell "Pass 1 matched" apart
+// from "Pass 3 fell back" from the TcpConnDispatch case alone -- both look
+// like e.g. Established(conn). This per-arm check is what turns a Pass-3
+// fallback into "ignore", exactly like the pre-#135 single-slot version
+// already relied on it to reject an unrelated stray packet.
+fn tcp_remote_matches(idx: {0..<4 as usize}, ip: borrow [u8; 20..], src_port: u16) -> bool {
+    // Raw-pointer bytes_eq instead of a sliced conn_remote_ip[idx*4..<idx*4+4]
+    // compare -- see tcp_conn_dispatch's own comment in http_conn_state.tkb
+    // for why the sliced form is a real --forbid-trap site here.
+    return bytes_eq((conn_remote_ip as *u8) + (idx as isize) * 4,
+                     (ip[IP_SRC..<IP_DST]) as *u8, 4) != 0 &&
+           src_port == conn_remote_port[idx];
 }
 
 // First 3 bytes of the request payload, matched against the verb prefixes
@@ -177,25 +212,26 @@ fn build_tcp_ctrl(eth: borrow [u8; 54..], ihl: {20..<21 as u16},
     fix_tcp_checksum(ip, tcp);
 }
 
-fn build_syn_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
+fn build_syn_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}, idx: {0..<4 as usize}) {
     build_tcp_ctrl(eth, ihl, TCP_FLAG_SYN | TCP_FLAG_ACK,
-                   TCP_INITIAL_SEQ, conn_rcv_nxt, 65535);
+                   tcp_initial_seq(idx), conn_rcv_nxt[idx], 65535);
 }
 
-fn build_fin_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
+fn build_fin_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}, idx: {0..<4 as usize}) {
     build_tcp_ctrl(eth, ihl, TCP_FLAG_FIN | TCP_FLAG_ACK,
-                   conn_snd_nxt, conn_rcv_nxt, 65535);
+                   conn_snd_nxt[idx], conn_rcv_nxt[idx], 65535);
 }
 
 // A RST answering an unsolicited ACK echoes that ACK's own acknowledgment
 // number as its sequence number, acks nothing, and advertises no window.
+// Needs no slot index -- it never reads a slot's own state.
 fn build_rst_from_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16},
         seq_out: u32) {
     build_tcp_ctrl(eth, ihl, TCP_FLAG_RST, seq_out, 0, 0);
 }
 
 fn build_tcp_payload(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-                     len: isize, tcp_flags: u8) -> i32 {
+                     len: isize, tcp_flags: u8, idx: {0..<4 as usize}) -> i32 {
     let wire_len: i32 = len as i32;
     if (len >= 0 && len <= (HTTP_SEGMENT_PAYLOAD_MAX as isize)
         && wire_len >= 0 && wire_len <= HTTP_SEGMENT_PAYLOAD_MAX) {
@@ -219,8 +255,8 @@ fn build_tcp_payload(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
         let client_port: u16 = read_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
         write_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT], HTTP_PORT as i32);
         write_u16be(tcp_seg[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
-        write_u32be(tcp_seg[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
-        write_u32be(tcp_seg[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
+        write_u32be(tcp_seg[TCP_SEQ..<TCP_ACK], conn_snd_nxt[idx] as i32);
+        write_u32be(tcp_seg[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt[idx] as i32);
         tcp_seg[TCP_DATA_OFFSET] = (5 << 4) as u8;
         tcp_seg[TCP_FLAGS] = tcp_flags;
         write_u16be(tcp_seg[TCP_WINDOW..<TCP_CHECKSUM], 65535);
@@ -303,18 +339,27 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_b
                                         // 4.10): minted once per accepted segment; the linear kind's
                                         // all-paths rule makes every arm below -- and every previously
                                         // IMPLICIT ignore path (stale seq, unknown peer, unsupported
-                                        // verb) -- consume it via exactly one responder function in
-                                        // http_conn_state.tkb, or this file stops compiling.
+                                        // verb, table-full) -- consume it via exactly one responder
+                                        // function in http_conn_state.tkb, or this file stops compiling.
                                         let pending: PendingTcpEvent = tcp_event_accepted();
+                                        let is_syn: bool = (ev == TcpEvent::Syn);
 
-                                        match tcp_conn_dispatch() {
+                                        match tcp_conn_dispatch(conn_remote_ip as [u8; 16..], conn_remote_port as [u16; 4..],
+                                                                ip[IP_SRC..<IP_DST], src_port, is_syn) {
                                             TcpConnDispatch::Listen(conn) => {
+                                                let idx: {0..<4 as usize} = tcp_conn_listen_slot(conn);
                                                 match ev {
                                                     TcpEvent::Syn => {
-                                                        slice_copy(conn_remote_ip as []u8, ip[IP_SRC..<IP_DST]);
-                                                        conn_remote_port = src_port;
-                                                        conn_rcv_nxt = seq + 1;
-                                                        conn_snd_nxt = TCP_INITIAL_SEQ + 1;
+                                                        // Raw-pointer bytes_copy instead of a sliced
+                                                        // conn_remote_ip[idx*4..<idx*4+4] write -- see
+                                                        // tcp_conn_dispatch's own comment in
+                                                        // http_conn_state.tkb for why the sliced form is
+                                                        // a real --forbid-trap site here.
+                                                        bytes_copy((conn_remote_ip as *u8) + (idx as isize) * 4,
+                                                                   (ip[IP_SRC..<IP_DST]) as *u8, 4);
+                                                        conn_remote_port[idx] = src_port;
+                                                        conn_rcv_nxt[idx] = seq + 1;
+                                                        conn_snd_nxt[idx] = tcp_initial_seq(idx) + 1;
 
                                                         tcp_accept_via_syn_ack(pending, conn, frame, ihl);
                                                         plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20);
@@ -327,67 +372,72 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_b
                                                     }
                                                     TcpEvent::Rst => {
                                                         // Unsolicited RST: nothing to reset yet.
-                                                        tcp_event_ignored(pending, conn);
+                                                        tcp_ignore_listen(pending, conn);
                                                     }
                                                     TcpEvent::FinAck => {
                                                         // No connection to close.
-                                                        tcp_event_ignored(pending, conn);
+                                                        tcp_ignore_listen(pending, conn);
                                                     }
                                                     TcpEvent::Other => {
-                                                        tcp_event_ignored(pending, conn);
+                                                        tcp_ignore_listen(pending, conn);
                                                     }
                                                 }
                                             }
                                             TcpConnDispatch::SynRcvd(conn) => {
-                                                if (tcp_remote_matches(ip, src_port)) {
+                                                let idx: {0..<4 as usize} = tcp_conn_synrcvd_slot(conn);
+                                                if (tcp_remote_matches(idx, ip, src_port)) {
                                                     match ev {
                                                         TcpEvent::Rst => {
-                                                            tcp_reset_to_listen(pending, conn);
+                                                            tcp_reset_synrcvd_to_listen(pending, conn);
                                                         }
                                                         TcpEvent::Ack => {
                                                             if ((flags & TCP_FLAG_SYN) == 0 &&
-                                                                ack == conn_snd_nxt && seq == conn_rcv_nxt) {
+                                                                ack == conn_snd_nxt[idx] && seq == conn_rcv_nxt[idx]) {
                                                                 tcp_handshake_complete(pending, conn);
                                                             } else {
                                                                 // Invalid handshake ACK.
-                                                                tcp_event_ignored(pending, conn);
+                                                                tcp_ignore_synrcvd(pending, conn);
                                                             }
                                                         }
                                                         TcpEvent::Syn => {
                                                             // Retransmitted SYN or simultaneous open:
                                                             // not supported.
-                                                            tcp_event_ignored(pending, conn);
+                                                            tcp_ignore_synrcvd(pending, conn);
                                                         }
                                                         TcpEvent::FinAck => {
                                                             // Unexpected before Established.
-                                                            tcp_event_ignored(pending, conn);
+                                                            tcp_ignore_synrcvd(pending, conn);
                                                         }
                                                         TcpEvent::Other => {
-                                                            tcp_event_ignored(pending, conn);
+                                                            tcp_ignore_synrcvd(pending, conn);
                                                         }
                                                     }
                                                 } else {
-                                                    // Segment from an unknown peer while a connection is
+                                                    // Segment from an unknown peer while this slot is
                                                     // active -- previously an INVISIBLE fallthrough,
-                                                    // surfaced by the obligation (issue #117).
-                                                    tcp_event_ignored(pending, conn);
+                                                    // surfaced by the obligation (issue #117). Also now
+                                                    // the table-full path (issue #135): tcp_conn_dispatch's
+                                                    // Pass 3 fallback lands here with a real but
+                                                    // non-matching slot when every slot was busy.
+                                                    tcp_ignore_synrcvd(pending, conn);
                                                 }
                                             }
                                             TcpConnDispatch::Established(conn) => {
-                                                if (tcp_remote_matches(ip, src_port)) {
+                                                let idx: {0..<4 as usize} = tcp_conn_established_slot(conn);
+                                                if (tcp_remote_matches(idx, ip, src_port)) {
                                                     match ev {
                                                         TcpEvent::Rst => {
-                                                            tcp_reset_to_listen(pending, conn);
+                                                            tcp_reset_established_to_listen(pending, conn);
                                                         }
                                                         TcpEvent::FinAck => {
-                                                            if (seq == conn_rcv_nxt) {
-                                                                conn_rcv_nxt = conn_rcv_nxt + 1;
+                                                            if (seq == conn_rcv_nxt[idx]) {
+                                                                conn_rcv_nxt[idx] = conn_rcv_nxt[idx] + 1;
                                                                 tcp_begin_close_via_fin_ack(pending, conn, frame, ihl);
                                                                 plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20);
-                                                                conn_snd_nxt = conn_snd_nxt + 1;
+                                                                conn_snd_nxt[idx] = conn_snd_nxt[idx] + 1;
                                                             } else {
                                                                 // Stale FIN, wrong seq.
-                                                                tcp_event_ignored(pending, conn);
+                                                                tcp_ignore_established(pending, conn);
                                                             }
                                                         }
                                                         TcpEvent::Ack => {
@@ -395,10 +445,10 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_b
                                                             let data_off: u16 = 34 + tcp_hdr_len;
                                                             let data_off_idx: usize =
                                                                 data_off as usize;
-                                                            if (data_len >= 3 && seq == conn_rcv_nxt) {
+                                                            if (data_len >= 3 && seq == conn_rcv_nxt[idx]) {
                                                                 let data3 = frame[data_off_idx..<data_off_idx + 3];
                                                                 if (http_method_accepted(data3[0], data3[1], data3[2])) {
-                                                                    conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
+                                                                    conn_rcv_nxt[idx] = conn_rcv_nxt[idx] + (data_len as u32);
                                                                     let req: *u8 =
                                                                         (frame as *u8) + (data_off_idx as isize);
                                                                     // tcp_respond consumes the obligation even
@@ -414,89 +464,91 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_b
                                                                         TcpSendOutcome::Dropped => {}
                                                                         TcpSendOutcome::Sent(n) => {
                                                                             plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20 + n);
-                                                                            conn_snd_nxt = conn_snd_nxt + (n as u32);
+                                                                            conn_snd_nxt[idx] = conn_snd_nxt[idx] + (n as u32);
                                                                         }
                                                                         TcpSendOutcome::SentFin(n) => {
                                                                             plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20 + n);
                                                                             // Our FIN consumes one seq number.
-                                                                            conn_snd_nxt = conn_snd_nxt + (n as u32) + 1;
+                                                                            conn_snd_nxt[idx] = conn_snd_nxt[idx] + (n as u32) + 1;
                                                                         }
                                                                     }
                                                                 } else {
                                                                     // Verb not accepted (see
                                                                     // http_method_accepted).
-                                                                    tcp_event_ignored(pending, conn);
+                                                                    tcp_ignore_established(pending, conn);
                                                                 }
                                                             } else {
                                                                 // Plain ACK with no/insufficient data, or
                                                                 // stale seq.
-                                                                tcp_event_ignored(pending, conn);
+                                                                tcp_ignore_established(pending, conn);
                                                             }
                                                         }
                                                         TcpEvent::Syn => {
                                                             // Retransmitted SYN after handshake.
-                                                            tcp_event_ignored(pending, conn);
+                                                            tcp_ignore_established(pending, conn);
                                                         }
                                                         TcpEvent::Other => {
-                                                            tcp_event_ignored(pending, conn);
+                                                            tcp_ignore_established(pending, conn);
                                                         }
                                                     }
                                                 } else {
-                                                    tcp_event_ignored(pending, conn);
+                                                    tcp_ignore_established(pending, conn);
                                                 }
                                             }
                                             TcpConnDispatch::Sending(conn) => {
-                                                if (tcp_remote_matches(ip, src_port)) {
+                                                let idx: {0..<4 as usize} = tcp_conn_sending_slot(conn);
+                                                if (tcp_remote_matches(idx, ip, src_port)) {
                                                     match ev {
                                                         TcpEvent::Rst => {
-                                                            tcp_reset_to_listen(pending, conn);
+                                                            tcp_reset_sending_to_listen(pending, conn);
                                                         }
                                                         TcpEvent::Ack => {
-                                                            if (seq == conn_rcv_nxt && ack == conn_snd_nxt) {
+                                                            if (seq == conn_rcv_nxt[idx] && ack == conn_snd_nxt[idx]) {
                                                                 match tcp_continue(pending, conn, frame, ihl) {
                                                                     TcpSendOutcome::Dropped => {}
                                                                     TcpSendOutcome::Sent(n) => {
                                                                         // More segments queued: stay Sending.
                                                                         plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20 + n);
-                                                                        conn_snd_nxt = conn_snd_nxt + (n as u32);
+                                                                        conn_snd_nxt[idx] = conn_snd_nxt[idx] + (n as u32);
                                                                     }
                                                                     TcpSendOutcome::SentFin(n) => {
                                                                         // Final segment included FIN: it
                                                                         // consumes one seq number.
                                                                         plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20 + n);
-                                                                        conn_snd_nxt = conn_snd_nxt + (n as u32) + 1;
+                                                                        conn_snd_nxt[idx] = conn_snd_nxt[idx] + (n as u32) + 1;
                                                                     }
                                                                 }
                                                             } else {
                                                                 // Stale/duplicate ACK.
-                                                                tcp_event_ignored(pending, conn);
+                                                                tcp_ignore_sending(pending, conn);
                                                             }
                                                         }
                                                         TcpEvent::Syn => {
-                                                            tcp_event_ignored(pending, conn);
+                                                            tcp_ignore_sending(pending, conn);
                                                         }
                                                         TcpEvent::FinAck => {
                                                             // Client closing early mid-transfer: not
                                                             // handled, same as before this restructuring.
-                                                            tcp_event_ignored(pending, conn);
+                                                            tcp_ignore_sending(pending, conn);
                                                         }
                                                         TcpEvent::Other => {
-                                                            tcp_event_ignored(pending, conn);
+                                                            tcp_ignore_sending(pending, conn);
                                                         }
                                                     }
                                                 } else {
-                                                    tcp_event_ignored(pending, conn);
+                                                    tcp_ignore_sending(pending, conn);
                                                 }
                                             }
                                             TcpConnDispatch::LastAck(conn) => {
-                                                if (tcp_remote_matches(ip, src_port)) {
+                                                let idx: {0..<4 as usize} = tcp_conn_lastack_slot(conn);
+                                                if (tcp_remote_matches(idx, ip, src_port)) {
                                                     match ev {
                                                         TcpEvent::Rst => {
-                                                            tcp_reset_to_listen(pending, conn);
+                                                            tcp_reset_lastack_to_listen(pending, conn);
                                                         }
                                                         TcpEvent::FinAck => {
-                                                            if (seq == conn_rcv_nxt && ack == conn_snd_nxt) {
-                                                                conn_rcv_nxt = conn_rcv_nxt + 1;
+                                                            if (seq == conn_rcv_nxt[idx] && ack == conn_snd_nxt[idx]) {
+                                                                conn_rcv_nxt[idx] = conn_rcv_nxt[idx] + 1;
                                                                 // The Listen transition happens inside
                                                                 // tcp_close_via_final_ack, right after it
                                                                 // builds the closing ACK -- the co-located
@@ -513,31 +565,31 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_b
                                                                         // this arm total; a FIN would consume
                                                                         // one seq number.
                                                                         plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20 + n);
-                                                                        conn_snd_nxt = conn_snd_nxt + 1;
+                                                                        conn_snd_nxt[idx] = conn_snd_nxt[idx] + 1;
                                                                     }
                                                                 }
                                                             } else {
                                                                 // Stale FIN+ACK, wrong seq/ack.
-                                                                tcp_event_ignored(pending, conn);
+                                                                tcp_ignore_lastack(pending, conn);
                                                             }
                                                         }
                                                         TcpEvent::Ack => {
-                                                            if (ack == conn_snd_nxt) {
-                                                                tcp_reset_to_listen(pending, conn);
+                                                            if (ack == conn_snd_nxt[idx]) {
+                                                                tcp_reset_lastack_to_listen(pending, conn);
                                                             } else {
                                                                 // Stale ACK.
-                                                                tcp_event_ignored(pending, conn);
+                                                                tcp_ignore_lastack(pending, conn);
                                                             }
                                                         }
                                                         TcpEvent::Syn => {
-                                                            tcp_event_ignored(pending, conn);
+                                                            tcp_ignore_lastack(pending, conn);
                                                         }
                                                         TcpEvent::Other => {
-                                                            tcp_event_ignored(pending, conn);
+                                                            tcp_ignore_lastack(pending, conn);
                                                         }
                                                     }
                                                 } else {
-                                                    tcp_event_ignored(pending, conn);
+                                                    tcp_ignore_lastack(pending, conn);
                                                 }
                                             }
                                         }
