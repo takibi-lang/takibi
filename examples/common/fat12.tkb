@@ -15,8 +15,10 @@
 //
 // Public API: fat_format() (mkfs-equivalent) plus a FatFs-flavored
 // (https://elm-chan.org/fsw/ff/) file-handle API -- fat_open/fat_read/
-// fat_write/fat_close (fat_ prefix instead of FatFs's f_, matching this
-// project's own naming). Originally scoped to exactly what the
+// fat_write/fat_close, plus fixed-position fat_read_at/fat_write_at
+// helpers for HTTP range serving and KVS slot updates (fat_ prefix
+// instead of FatFs's f_, matching this project's own naming). Originally
+// scoped to exactly what the
 // http_server_sdcard example (serving files from an SD card) needed: one
 // flat root directory, no subdirectories, no seek/rename/unlink, no
 // multiple simultaneously-open files. GitHub issue #135 (a key-value store
@@ -453,6 +455,69 @@ fn fat_read_at(name83: *u8, off: u32, buf: borrow *u8, btr: u32,
         return 0;
     }
     *br = 0;
+    return -1;
+}
+
+// Existing-file, fixed-position overwrite helper. This deliberately does
+// not append or grow files: callers that need a file of a known size should
+// create it with fat_open(FA_WRITE | FA_CREATE_ALWAYS) first, then use this
+// to replace bytes in place.
+fn fat_write_at(name83: *u8, off: u32, buf: borrow *u8, btw: u32,
+        bw: *u32) -> i32 {
+    let found: i32 = fat_find_entry(name83);
+    if ((found >= 0) && (found < 16)) {
+        let idx: usize = found as usize;
+        let fsize: u32 = root_dir_buf[idx].file_size;
+        if (off >= fsize) {
+            *bw = 0;
+            return -1;
+        }
+
+        let mut remaining: u32 = btw;
+        let avail: u32 = fsize - off;
+        if (remaining > avail) {
+            remaining = avail;
+        }
+
+        let mut cluster: u32 = root_dir_buf[idx].first_cluster_lo as u32;
+        let skip_clusters: u32 = off / (SECTOR_SIZE as u32);
+        for i: u32 in 0..<skip_clusters {
+            cluster = fat_get_entry(cluster) as u32;
+        }
+
+        let mut pos_in_cluster: u32 = off - skip_clusters * (SECTOR_SIZE as u32);
+        let mut total: u32 = 0;
+        let mut src: *u8 = buf;
+        while (remaining > 0) {
+            let mut sector_buf: [u8; SECTOR_SIZE] align(32);
+            let sector_num: u32 = (first_data_sector() as u32) + (cluster - 2);
+            mem_block_read(sector_num, sector_buf);
+
+            let space_in_cluster: u32 = (SECTOR_SIZE as u32) - pos_in_cluster;
+            let mut chunk: u32 = remaining;
+            if (chunk > space_in_cluster) {
+                chunk = space_in_cluster;
+            }
+
+            let dst_p: *u8 = sector_buf;
+            bytes_copy(dst_p + (pos_in_cluster as isize), src, chunk as isize);
+            mem_block_write(sector_num, sector_buf);
+            src = src + (chunk as isize);
+            total = total + chunk;
+            remaining = remaining - chunk;
+            pos_in_cluster = pos_in_cluster + chunk;
+            if (pos_in_cluster >= SECTOR_SIZE as u32) {
+                pos_in_cluster = 0;
+                cluster = fat_get_entry(cluster) as u32;
+            }
+        }
+        *bw = total;
+        if (total == btw) {
+            return 0;
+        }
+        return -1;
+    }
+    *bw = 0;
     return -1;
 }
 

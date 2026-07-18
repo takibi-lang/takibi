@@ -8386,3 +8386,28 @@ once it does. A live run against real hardware showed PUT/DELETE (write-
 through SD save) at roughly 90ms p50 latency versus GET/LIST (RAM-only)
 at roughly 1ms p50 -- the first empirical measurement of write-through
 persistence's cost on this hardware.
+
+**2026-07-18 follow-up: KVS slot-level SD persistence.** The real-hardware
+function profiler was run against `make profile-stm32-kvs-server-sdcard-rtos`
+for the measured same-key overwrite PUT path. The original whole-table
+write-through design spent most of the measured request in the synchronous
+SD persistence path: `kvs_sd_save_rpc`/`kvs_sd_save`/`fat_write` dominated,
+with 13 `disk_write` calls and about 73.8M total inclusive profiled cycles
+for the request.
+
+The fix keeps RAM canonical and keeps write-through semantics, but changes
+the on-disk KVS file from five whole-table arrays to 16 fixed-size slot
+records in `KVSREC  DAT`. PUT/DELETE now records the changed slot number
+and the SD worker overwrites only that 163-byte record via the new
+`fat_write_at` helper. First save, missing/corrupt record file, and
+one-shot migration from the legacy `KVSTABLEDAT` whole-table file still use
+a full record-file rewrite. This keeps the change demand-led: no generic
+seekable FatFile mode, no append log, no async/lazy durability policy, and
+no broader FAT API beyond the existing-file overwrite primitive the KVS
+profile directly needed.
+
+Re-running the same profiler after the change measured about 28.7M total
+inclusive cycles, with `disk_write` down from 13 calls to 2 and the hot
+storage path reduced to `kvs_sd_save_slot`/`fat_write_at`. The remaining
+large `cond_wait`/`sched_next` entries mostly represent the synchronous
+rendezvous while the network task waits for the SD worker to complete.
