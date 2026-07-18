@@ -105,14 +105,17 @@ class Metrics:
 
 def worker(stop_event: threading.Event, host: str, port: int, key_space: int,
            put_ratio: float, get_ratio: float, delete_ratio: float,
-           value_size: int, timeout: float, metrics: Metrics):
+           value_size: int, timeout: float, fixed_key: str, metrics: Metrics):
     rng = random.Random()
     value = bytes(rng.randrange(256) for _ in range(value_size))
     get_threshold = put_ratio + get_ratio
     delete_threshold = get_threshold + delete_ratio
     while not stop_event.is_set():
         r = rng.random()
-        key = "k%02d" % rng.randrange(key_space)
+        if fixed_key:
+            key = fixed_key
+        else:
+            key = "k%02d" % rng.randrange(key_space)
         if r < put_ratio:
             op = "PUT"
             status, elapsed, err = do_request(host, port, "PUT", "/keys/" + key, value, timeout)
@@ -216,6 +219,10 @@ def main() -> int:
                          help="distinct keys cycled through (default matches "
                               "TABLE_SLOTS=16, exercising collision/eviction "
                               "pressure)")
+    parser.add_argument("--fixed-key", default="",
+                         help="use one key for every operation; useful for "
+                              "connection/transport stress without filling the "
+                              "16-slot table")
     parser.add_argument("--value-size", type=int, default=64,
                          help="bytes, must be <= 128 (VAL_MAX)")
     parser.add_argument("--put-ratio", type=float, default=0.4)
@@ -242,19 +249,20 @@ def main() -> int:
     threads = [
         threading.Thread(
             target=worker,
-            args=(stop_event, args.host, args.port, args.key_space,
+                  args=(stop_event, args.host, args.port, args.key_space,
                   args.put_ratio, args.get_ratio, args.delete_ratio,
-                  args.value_size, args.timeout, metrics),
+                  args.value_size, args.timeout, args.fixed_key, metrics),
             daemon=True)
         for _ in range(args.concurrency)
     ]
 
+    key_desc = "fixed-key=%s" % args.fixed_key if args.fixed_key else "key-space=%d" % args.key_space
     print("Starting %d worker thread(s) against http://%s:%d for %.0fs "
-          "(mix: PUT=%.2f GET=%.2f DELETE=%.2f LIST=%.2f, key-space=%d, "
+          "(mix: PUT=%.2f GET=%.2f DELETE=%.2f LIST=%.2f, %s, "
           "value-size=%dB)..." %
           (args.concurrency, args.host, args.port, args.duration,
            args.put_ratio, args.get_ratio, args.delete_ratio, list_ratio,
-           args.key_space, args.value_size))
+           key_desc, args.value_size))
 
     start = time.monotonic()
     for t in threads:

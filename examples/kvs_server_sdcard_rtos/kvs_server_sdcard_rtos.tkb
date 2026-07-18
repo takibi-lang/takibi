@@ -79,7 +79,8 @@ let mut our_ip:  [u8; 4];
 const KEY_MAX:     isize = 32;  // key charset: [A-Za-z0-9_-], length 1..32
 const VAL_MAX:     isize = 128; // value: arbitrary bytes, length 0..128
 const TABLE_SLOTS: isize = 16;
-const KVS_RECORD_SIZE: usize = 163; // state + key_len + val_len + key[32] + val[128]
+const KVS_RECORD_SIZE: usize = 256; // 163 bytes of payload, padded so each slot stays within one 512-byte sector
+const KVS_RECORD_SIZE_LEGACY: usize = 163;
 const KVS_RECORD_KEY_OFF: isize = 3;
 const KVS_RECORD_VAL_OFF: isize = 35;
 
@@ -452,7 +453,9 @@ fn kvs_sd_save_slot(slot_i32: i32) -> i32 {
 
 fn kvs_sd_load_records() -> i32 {
     let name: *u8 = "KVSREC  DAT"; // 8.3: "KVSREC" + spaces + "DAT"
-    if (fat_file_size(name) != (16 * KVS_RECORD_SIZE) as u32) {
+    let fsize: u32 = fat_file_size(name);
+    if (fsize != (16 * KVS_RECORD_SIZE) as u32 &&
+        fsize != (16 * KVS_RECORD_SIZE_LEGACY) as u32) {
         return 1;
     }
     match fat_open(name, FA_READ) {
@@ -463,19 +466,29 @@ fn kvs_sd_load_records() -> i32 {
             let mut br: u32 = 0;
             let mut total: u32 = 0;
             for slot: usize in 0..<16 {
-                fat_read(fp, kvs_record_buf, KVS_RECORD_SIZE as u32, &br);
+                for i: usize in 0..<KVS_RECORD_SIZE {
+                    kvs_record_buf[i] = 0;
+                }
+                if (fsize == (16 * KVS_RECORD_SIZE_LEGACY) as u32) {
+                    fat_read(fp, kvs_record_buf, KVS_RECORD_SIZE_LEGACY as u32, &br);
+                } else {
+                    fat_read(fp, kvs_record_buf, KVS_RECORD_SIZE as u32, &br);
+                }
                 total = total + br;
-                if (br == KVS_RECORD_SIZE as u32) {
+                if (br == KVS_RECORD_SIZE as u32 || br == KVS_RECORD_SIZE_LEGACY as u32) {
                     kvs_unpack_slot(slot);
                 }
             }
             fat_close(fp);
-            if (total != (16 * KVS_RECORD_SIZE) as u32) {
+            if (total != fsize) {
                 uart_puts("kvs_server_sdcard_rtos: SD record short-read, starting empty\r\n");
                 kvs_reset_table();
                 return 1;
             }
             kvs_sd_file_ready = true;
+            if (fsize == (16 * KVS_RECORD_SIZE_LEGACY) as u32) {
+                return 2;
+            }
             return 0;
         }
     }
@@ -585,7 +598,10 @@ fn sd_worker() {
                 } else if (fat_is_formatted()) {
                     fat_mount();
                     status = kvs_sd_load_records();
-                    if (status != 0) {
+                    if (status == 2) {
+                        kvs_sd_create_record_file();
+                        status = 0;
+                    } else if (status != 0) {
                         status = kvs_sd_load_legacy();
                         if (status == 0) {
                             kvs_sd_create_record_file();

@@ -8411,3 +8411,62 @@ inclusive cycles, with `disk_write` down from 13 calls to 2 and the hot
 storage path reduced to `kvs_sd_save_slot`/`fat_write_at`. The remaining
 large `cond_wait`/`sched_next` entries mostly represent the synchronous
 rendezvous while the network task waits for the SD worker to complete.
+
+**2026-07-18 follow-up: stale TCP slot expiry under STM32 KVS stress.**
+After the slot-level persistence fix, `kvs_stress.py` was wired into the
+STM32 KVS profiler (`TAKIBI_PROFILE_LOAD=stress`) and the real board was
+tested at higher client-side concurrency. A 24-thread run is not a useful
+KVS/SD bottleneck profile by itself: without stale-slot expiry it mostly
+collapsed at the transport layer, spending essentially all profiled time
+in `http_server_poll_once`/`net_rx_wait`/`sched_next` and completing no
+application requests in one 10s run.
+
+The immediate fix is deliberately smaller than a SYN backlog: each active
+connection slot now has a packet-count idle age in `http_server_common.tkb`.
+Every accepted TCP/80 segment ages all active slots, a real peer match
+resets that slot's age, and `http_conn_state.tkb` expires non-Listen slots
+whose age reaches `TCP_CONN_IDLE_PACKET_LIMIT` (currently 16 packets). This
+is not wall-clock TCP timeout machinery; it is local resource recovery for
+the overload case this prototype actually hit, with no timer dependency
+added to the shared HTTP core.
+
+Measured effect on the 24-thread random-key stress profile was clear but
+not a complete cure: successful application requests rose from 0/48
+without expiry to 86/121 with the 16-packet limit in one 10s run, while
+transport errors remained visible. A more aggressive 8-packet limit pushed
+successes higher in one 24-thread run but introduced more resets at lower
+concurrency, so 16 was kept as the conservative default.
+
+For choosing a realistic stress level, `kvs_stress.py` also gained
+`--fixed-key`, allowing connection/transport stress without filling the
+16-slot KVS table. A live fixed-key sweep against the already-running
+board showed concurrency 1-4 as stable enough for routine profiling (4:
+238/241 successful requests over 5s, with only three transport errors),
+8 as a useful overload boundary (83/88 successful but second-scale tail
+latency), and 16/24 as stress-only settings where throughput no longer
+improves and p95 latency reaches multiple seconds. The practical default
+for repeated STM32 KVS stress profiling is therefore concurrency 4; use 8
+to probe overload behavior, and treat 16/24 as destructive stress rather
+than a realistic operating point.
+
+**2026-07-18 follow-up: c4 fixed-key profile and sector-aligned KVS records.**
+After choosing concurrency 4 as the practical STM32 stress level,
+`profile-stm32-kvs-server-sdcard-rtos` was adjusted so stress mode defaults
+to concurrency 4 and a fixed `profkey` workload. The first c4 fixed-key
+profile showed the remaining concrete storage-side inefficiency: the
+163-byte record size made some slot writes cross a 512-byte sector
+boundary, so each slot save could require two `fat_write_at` sector
+read-modify-writes. In one measured c4 fixed-key run, 48 slot saves
+produced 96 `disk_read` and 96 `disk_write` calls.
+
+The on-disk record size is now padded to 256 bytes. That keeps every slot
+record inside one sector (two records per 512-byte sector), while preserving
+the 163-byte payload layout. Boot still accepts the previous 163-byte
+record file size and migrates it by rewriting the 256-byte record file.
+The follow-up c4 fixed-key profile showed the intended effect: 58 slot
+saves produced 58 `disk_read` and 58 `disk_write` calls. The storage hot
+path is now small compared with RTOS rendezvous and scheduler/wait time;
+the remaining profile is dominated by `cond_wait`, `sched_next`,
+`http_server_poll_once`, and `kvs_sd_request_recv`, which mostly represent
+synchronous waiting and task handoff rather than one obvious KVS data-path
+copy/write loop.

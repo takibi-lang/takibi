@@ -376,6 +376,21 @@ fn tcp_close_via_final_ack(pending: sink PendingTcpEvent,
 
 // -- Transitions with no send obligation ----------------------------------
 
+// Packet-count based stale-slot expiry. This is deliberately not a TCP
+// protocol event and therefore does not consume a PendingTcpEvent: it is
+// local resource recovery for peers that stopped talking before sending
+// the RST/FIN/ACK path that would normally return the slot to Listen.
+// The caller owns the age counters because they are wire-bookkeeping, not
+// phase; this file owns the phase write because conn_state is private.
+fn tcp_expire_stale_slots(idle: borrow [u32; 4..], limit: u32) {
+    for i: usize in 0..<MAX_CONNS {
+        let state: ConnState = conn_state[i];
+        if (state != ConnState::Listen && idle[i] >= limit) {
+            conn_state[i] = ConnState::Listen;
+        }
+    }
+}
+
 // SynRcvd -> Established: the peer's valid handshake ACK arrived; nothing
 // to send.
 fn tcp_handshake_complete(pending: sink PendingTcpEvent,

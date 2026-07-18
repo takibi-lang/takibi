@@ -34,10 +34,14 @@ URL="${TAKIBI_PROFILE_URL:-http://192.168.10.2/keys/$KEY}"
 PUT_BODY="${TAKIBI_PROFILE_PUT_BODY:-takibi profile probe value}"
 OUT_DIR="${TAKIBI_PROFILE_OUT_DIR:-_build/takibi_profile/kvs_server_sdcard_rtos}"
 PROFILE_LOAD="${TAKIBI_PROFILE_LOAD:-single}"
-STRESS_CONCURRENCY="${TAKIBI_PROFILE_STRESS_CONCURRENCY:-24}"
+STRESS_CONCURRENCY="${TAKIBI_PROFILE_STRESS_CONCURRENCY:-4}"
 STRESS_DURATION="${TAKIBI_PROFILE_STRESS_DURATION:-30}"
 STRESS_VALUE_SIZE="${TAKIBI_PROFILE_STRESS_VALUE_SIZE:-64}"
 STRESS_TIMEOUT="${TAKIBI_PROFILE_STRESS_TIMEOUT:-5}"
+STRESS_FIXED_KEY="${TAKIBI_PROFILE_STRESS_FIXED_KEY:-profkey}"
+STRESS_PUT_RATIO="${TAKIBI_PROFILE_STRESS_PUT_RATIO:-0.5}"
+STRESS_GET_RATIO="${TAKIBI_PROFILE_STRESS_GET_RATIO:-0.4}"
+STRESS_DELETE_RATIO="${TAKIBI_PROFILE_STRESS_DELETE_RATIO:-0}"
 PATH_ENTRY_SIZE=84
 PATH_ENTRY_COUNT=256
 
@@ -134,13 +138,21 @@ put_key() {
 
 run_stress_load() {
     echo "Running kvs_stress.py (concurrency=$STRESS_CONCURRENCY duration=${STRESS_DURATION}s) ..."
+    local fixed_key_arg=()
+    if [ -n "$STRESS_FIXED_KEY" ]; then
+        fixed_key_arg=(--fixed-key "$STRESS_FIXED_KEY")
+    fi
     python3 scripts/kvs_stress.py \
         --host 192.168.10.2 \
         --port 80 \
         --concurrency "$STRESS_CONCURRENCY" \
         --duration "$STRESS_DURATION" \
         --value-size "$STRESS_VALUE_SIZE" \
-        --timeout "$STRESS_TIMEOUT" | tee "$OUT_DIR/stress.txt"
+        --timeout "$STRESS_TIMEOUT" \
+        --put-ratio "$STRESS_PUT_RATIO" \
+        --get-ratio "$STRESS_GET_RATIO" \
+        --delete-ratio "$STRESS_DELETE_RATIO" \
+        "${fixed_key_arg[@]}" | tee "$OUT_DIR/stress.txt"
 }
 
 echo "Loading profiled KVS+SD+RTOS firmware..."
