@@ -118,34 +118,34 @@ use "examples/common_stm32/eth_sdmmc_regs.tkb";
 // eth_sdmmc_regs.tkb's `use` above (GitHub issue #97 follow-up -- shared
 // with examples/common_stm32/eth.tkb).
 // RCC_DCKCFGR2 is unique to this file (eth.tkb has no need for it).
-const RCC_DCKCFGR2: *io u32 = 0x40023890;
+let RCC_DCKCFGR2: *io u32 = 0x40023890;
 
 // -- GPIO (MODER/OSPEEDR/PUPDR/AFRL/AFRH), same read-modify-write idiom as
 // examples/common_stm32/eth.tkb -- PC8..PC12 (D0..D3, CLK) and PD2 (CMD),
 // all AF12. Card detect (PC13) is not used by this driver (no hot-swap
 // support; a card is assumed present at disk_initialize() time). ---------
-const GPIOC_PUPDR:   *io u32 = 0x4002080C;
-const GPIOC_AFRH:    *io u32 = 0x40020824;
+let GPIOC_PUPDR:   *io u32 = 0x4002080C;
+let GPIOC_AFRH:    *io u32 = 0x40020824;
 
-const GPIOD_MODER:   *io u32 = 0x40020C00;
-const GPIOD_OSPEEDR: *io u32 = 0x40020C08;
-const GPIOD_PUPDR:   *io u32 = 0x40020C0C;
-const GPIOD_AFRL:    *io u32 = 0x40020C20;
+let GPIOD_MODER:   *io u32 = 0x40020C00;
+let GPIOD_OSPEEDR: *io u32 = 0x40020C08;
+let GPIOD_PUPDR:   *io u32 = 0x40020C0C;
+let GPIOD_AFRL:    *io u32 = 0x40020C20;
 
 // -- SDMMC1 (SDMMC1_BASE = APB2PERIPH_BASE + 0x2C00 = 0x40012C00) ------------
-const SDMMC_POWER:   *io u32 = 0x40012C00;
-const SDMMC_CLKCR:   *io u32 = 0x40012C04;
-const SDMMC_ARG:     *io u32 = 0x40012C08;
-const SDMMC_CMD:     *io u32 = 0x40012C0C;
-const SDMMC_RESPCMD: *io u32 = 0x40012C10;
-const SDMMC_RESP1:   *io u32 = 0x40012C14;
-const SDMMC_DTIMER:  *io u32 = 0x40012C24;
-const SDMMC_DLEN:    *io u32 = 0x40012C28;
-const SDMMC_DCTRL:   *io u32 = 0x40012C2C;
-const SDMMC_STA:     *io u32 = 0x40012C34;
-const SDMMC_ICR:     *io u32 = 0x40012C38;
-const SDMMC_MASK:    *io u32 = 0x40012C3C;
-const SDMMC_FIFO_ADDR: u32 = 0x40012C80; // plain u32, not *io -- only ever used as DMA2's peripheral address
+let SDMMC_POWER:   *io u32 = 0x40012C00;
+let SDMMC_CLKCR:   *io u32 = 0x40012C04;
+let SDMMC_ARG:     *io u32 = 0x40012C08;
+let SDMMC_CMD:     *io u32 = 0x40012C0C;
+let SDMMC_RESPCMD: *io u32 = 0x40012C10;
+let SDMMC_RESP1:   *io u32 = 0x40012C14;
+let SDMMC_DTIMER:  *io u32 = 0x40012C24;
+let SDMMC_DLEN:    *io u32 = 0x40012C28;
+let SDMMC_DCTRL:   *io u32 = 0x40012C2C;
+let SDMMC_STA:     *io u32 = 0x40012C34;
+let SDMMC_ICR:     *io u32 = 0x40012C38;
+let SDMMC_MASK:    *io u32 = 0x40012C3C;
+let SDMMC_FIFO_ADDR: u32 = 0x40012C80; // plain u32, not *io -- only ever used as DMA2's peripheral address
 
 // -- DMA2 Stream3, Channel4 (SDMMC1's DMA request mapping on STM32F7,
 // confirmed via ChibiOS's STM32F746G-DISCOVERY demo mcuconf.h:
@@ -156,12 +156,12 @@ const SDMMC_FIFO_ADDR: u32 = 0x40012C80; // plain u32, not *io -- only ever used
 // streams 0-3 live in the "Low" registers (LISR/LIFCR), not "High"
 // (streams 4-7) -- stream3's own 6 flag bits (FEIF3/DMEIF3/TEIF3/HTIF3/TCIF3,
 // bit 23 reserved) sit at bits 22-27 of LISR/LIFCR.
-const DMA2_LIFCR:  *io u32 = 0x40026408;
-const DMA2_S3CR:   *io u32 = 0x40026458;
-const DMA2_S3NDTR: *io u32 = 0x4002645C;
-const DMA2_S3PAR:  *io u32 = 0x40026460;
-const DMA2_S3M0AR: *io u32 = 0x40026464;
-const DMA2_S3FCR:  *io u32 = 0x4002646C;
+let DMA2_LIFCR:  *io u32 = 0x40026408;
+let DMA2_S3CR:   *io u32 = 0x40026458;
+let DMA2_S3NDTR: *io u32 = 0x4002645C;
+let DMA2_S3PAR:  *io u32 = 0x40026460;
+let DMA2_S3M0AR: *io u32 = 0x40026464;
+let DMA2_S3FCR:  *io u32 = 0x4002646C;
 
 // STA flags this driver checks/clears (see header comment for provenance).
 // Spelled as literal hex values, matching each flag's Msk from the CMSIS

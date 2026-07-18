@@ -4151,6 +4151,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.ConstDef (_gname, ty, init, gloc) ->
         validation_static_scope := None;
         allow_implicit_static := false;
+        (match ty with
+         | Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32 | Ast.TypeI64
+         | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64
+         | Ast.TypeIsize | Ast.TypeUsize -> ()
+         | _ ->
+             raise (TypeError (gloc,
+               "`const` declarations are restricted to primitive integer types; \
+                use a global `let` for pointers, io registers, arrays, structs, \
+                sizeof/offsetof-derived values, or other runtime constants")));
         validate_nonparam_type gloc ty;
         validate_expr_types init
     | Ast.LetDef (gname, ty, init, _, is_mutable, is_private, gloc) ->

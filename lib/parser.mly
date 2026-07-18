@@ -69,6 +69,16 @@ let check_refined_base_range pos lo hi base =
       Printf.sprintf
         "refined type bound {%Ld..<%Ld as %s} is out of range for %s"
         lo hi (base_type_name base) (base_type_name base)))
+
+let check_const_type pos = function
+  | TypeI8 | TypeI16 | TypeI32 | TypeI64
+  | TypeU8 | TypeU16 | TypeU32 | TypeU64
+  | TypeIsize | TypeUsize -> ()
+  | _ ->
+      raise (Types.TypeError (pos,
+        "`const` declarations are restricted to primitive integer types; \
+         use a global `let` for pointers, io registers, arrays, structs, \
+         sizeof/offsetof-derived values, or other runtime constants"))
 %}
 
 %token <Int64.t> INT
@@ -133,6 +143,7 @@ item:
   | func_def { FuncDef $1 }
   | CONST name = IDENT COLON ty = type_expr ASSIGN n = INT SEMI
     { let loc = $symbolstartpos in
+      check_const_type loc ty;
       let e = { desc = IntLit n; loc } in
       Const_env.define_if_literal name (Some e);
       ConstDef (name, ty, e, loc) }

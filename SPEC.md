@@ -136,11 +136,14 @@ parameter value, or top-level declaration name.
   required, no reassignment, `&x` is a compile error).
 - `let mut x = e` / `let mut x: T = e` -- mutable binding (reassignment
   allowed).
-- At **global** scope: `const NAME: T = INTEGER_LITERAL;` declares a
-  named compile-time integer constant. It is the only user declaration
-  form recorded for type-level integer positions such as array sizes,
-  refined integer bounds, and compile-time-proven `for` bounds. No
-  forward references or constant folding are supported here.
+- At **global** scope: `const NAME: IntType = INTEGER_LITERAL;` declares
+  a named compile-time integer constant, where `IntType` must be one of
+  the primitive integer types (`i8`/`u8`/.../`isize`/`usize`). It is the
+  only user declaration form recorded for type-level integer positions
+  such as array sizes, refined integer bounds, and compile-time-proven
+  `for` bounds. No pointers, `io`, arrays, structs, `sizeof`/`offsetof`
+  values, forward references, or constant folding are supported here; use
+  a global `let` for those runtime constants.
 - At **global** scope: plain `let NAME: T = e;` is an immutable runtime
   global (reassignment and `&NAME` are compile errors, and it must have
   an initializer); `let mut NAME: T = e;` is a mutable global variable.

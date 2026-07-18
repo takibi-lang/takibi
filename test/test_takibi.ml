@@ -462,6 +462,18 @@ let parser_tests = [
     | _ -> Alcotest.fail "expected ConstDef"
   );
 
+  Alcotest.test_case "const rejects non-integer types" `Quick (fun () ->
+    List.iter (fun src ->
+      match parse src with
+      | _ -> Alcotest.fail ("expected an error, but parsing succeeded: " ^ src)
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) "mentions primitive integer" true
+            (contains_substring msg "primitive integer"))
+      [ "const MMIO: *io u32 = 0x40000000;";
+        "const BUF: [u8; 4] = 0;";
+        "struct ConstStructBad { x: i32; } const C: ConstStructBad = 0;" ]
+  );
+
   Alcotest.test_case "array size via named compile-time constant resolves" `Quick (fun () ->
     match parse "const N: i32 = 4; let ring: [u8; N];" with
     | [Ast.ConstDef _; Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 4)), None, None, false, _, _)] -> ()

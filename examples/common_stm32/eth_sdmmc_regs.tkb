@@ -16,7 +16,7 @@
 // (sdmmc.tkb only), and each file's own distinct GPIOC alternate-function
 // register (GPIOC_AFRL vs. GPIOC_AFRH -- different bytes of the same
 // 32-bit-pair AFR block, not actually the same address).
-const RCC_AHB1ENR:   *io u32 = 0x40023830;
-const RCC_APB2ENR:   *io u32 = 0x40023844;
-const GPIOC_MODER:   *io u32 = 0x40020800;
-const GPIOC_OSPEEDR: *io u32 = 0x40020808;
+let RCC_AHB1ENR:   *io u32 = 0x40023830;
+let RCC_APB2ENR:   *io u32 = 0x40023844;
+let GPIOC_MODER:   *io u32 = 0x40020800;
+let GPIOC_OSPEEDR: *io u32 = 0x40020808;

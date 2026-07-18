@@ -1,7 +1,7 @@
 (* Tracks compile-time integer constants declared with
-   `const QUEUE_SIZE: usize = 16;`. Used by the parser to resolve array
-   sizes and refined bounds such as [T; QUEUE_SIZE] and
-   {0..<QUEUE_SIZE as usize}.
+   `const QUEUE_SIZE: usize = 16;`. Const declarations are restricted to
+   primitive integer types. Used by the parser to resolve array sizes and
+   refined bounds such as [T; QUEUE_SIZE] and {0..<QUEUE_SIZE as usize}.
 
    Constants must be declared before use: this table is populated
    incrementally as the parser consumes top-level items left to right, so a

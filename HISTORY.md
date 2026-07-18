@@ -49,8 +49,10 @@ Files touched:
 - `SPEC.md`, `test/test_takibi.ml`, and examples: updated the language docs,
   parser/codegen coverage, and existing uppercase integer constants.
 
-Important deliberate limits: no `const` expression evaluator was added; no
-forward references; no `const A = B + C`; no `sizeof`/`offsetof` in `const`.
+Important deliberate limits: `const` is restricted to primitive integer
+types only; pointers, `io` MMIO register addresses, arrays, structs, and
+`sizeof`/`offsetof`-derived values stay as global `let`. No `const`
+expression evaluator was added; no forward references; no `const A = B + C`.
 Array-size grammar still supports small arithmetic over already-declared
 `const` names, exactly where that arithmetic was already supported before.
 

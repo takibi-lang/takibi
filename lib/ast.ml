@@ -209,12 +209,13 @@ type opaque_kind = KindPlain | KindAffine | KindLinear
 type toplevel =
   | FuncDef of func
   | ConstDef of ident * type_expr * expr * loc
-  (* const NAME: T = LITERAL; -- a named compile-time integer constant.
+  (* const NAME: IntType = LITERAL; -- a named compile-time integer constant.
      Const_env records only these declarations for type-level grammar
      positions such as array sizes, for-loop literal bounds, and refined
-     integer bounds. Codegen currently emits them as immutable globals too,
-     so ordinary expression reads keep working without adding a second
-     runtime constant path. *)
+     integer bounds. IntType is restricted to primitive integer types;
+     pointers/io/arrays/structs remain global `let` territory. Codegen
+     currently emits consts as immutable globals too, so ordinary expression
+     reads keep working without adding a second runtime constant path. *)
   | LetDef of ident * type_expr option * expr option * int option * bool * bool * loc
   (* name, type, init, align_bytes, is_mutable, is_private, loc -- align_bytes = Some N means
      global align(N). is_mutable: `let mut` = true (variable), plain `let` = false (compile-time

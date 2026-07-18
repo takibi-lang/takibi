@@ -236,8 +236,8 @@ this same class of flake to come back.
 ```
 lib/
   ast.ml          -- AST definitions (includes TypePtr, TypeArray, TypeFn, Deref, AddrOf, AssignDeref, Cast)
-  const_env.ml    -- parser-time table of compile-time integer constants (immutable globals with a literal
-                     initializer), used to resolve named array sizes like [T; QUEUE_SIZE]
+  const_env.ml    -- parser-time table of explicit primitive-integer `const` declarations,
+                     used to resolve named array sizes/refined bounds like [T; QUEUE_SIZE]
   lexer.mll       -- ocamllex (includes hex literals, & token, as keyword, ^ token, -> token, void keyword)
   parser.mly      -- Menhir (includes pointer types, array types, function pointer types, prefix * / & / unary -, as cast)
   types.ml        -- internal type (ty) + HM-style inference output types + StringMap
