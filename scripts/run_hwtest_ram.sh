@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # STM32 hardware integration test runner -- RAM-execution variant, called
-# from repo root via: make hwcheck
+# from repo root via: make hwcheck-stm32
 #
 # Supersedes the original run_hwtest.sh (deleted -- git history has it),
 # which flashed every example over st-flash. This script never calls
 # st-flash and never writes anything to the chip's Flash. Every STM32
 # example binary is well under Flash
 # Sector0's 32KB, so every one of these ~41 tests used to erase/write that
-# exact same physical sector on every single `make hwcheck` run -- against
+# exact same physical sector on every single `make hwcheck-stm32` run -- against
 # a guaranteed minimum endurance of roughly 10,000 erase cycles per the
-# datasheet, that is only ~200 hwcheck runs before Sector0's guaranteed
-# lifetime is exhausted, a real concern once hwcheck starts running
+# datasheet, that is only ~200 hwcheck-stm32 runs before Sector0's guaranteed
+# lifetime is exhausted, a real concern once hwcheck-stm32 starts running
 # frequently in CI. Instead, each test here is linked against
 # examples/common_stm32/link_ram.ld + startup_ram.S (AXI SRAM1 at
 # 0x20010000, 240K on the F746NG) and loaded directly into RAM over the
@@ -33,13 +33,13 @@
 #
 # Scope: every example currently covered by the original run_hwtest.sh
 # (none of them touch Ethernet DMA -- the 5 real-Ethernet examples are
-# exercised separately, over real wiring, by hwcheck-net/
+# exercised separately, over real wiring, by hwcheck-stm32-net/
 # run_hwtest_net_ram.sh, which also moved to RAM execution -- including a
 # genuinely cacheable DMA buffer region -- in a later follow-up; see
 # CLAUDE.md/HISTORY.md's RAM-execution section for both).
 set -euo pipefail
 
-: "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run 'make hwcheck' or set it explicitly}"
+: "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run 'make hwcheck-stm32' or set it explicitly}"
 SERIAL_DEV="$STM32_SERIAL_DEV"
 BAUD=115200
 OPENOCD_BOARD_CFG="board/stm32f746g-disco.cfg"

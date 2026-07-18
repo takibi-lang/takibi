@@ -267,7 +267,7 @@ currently-compiling program keeps compiling.
 
 Stage 1 is DONE when: all five PoCs behave as specified, the full existing
 suite stays green (unit + qemutest + stm32build + langcheck), and the
-first real application below compiles and passes qemutest + hwcheck-net.
+first real application below compiles and passes qemutest + hwcheck-stm32-net.
 
 ### 4.10 First real application: PendingTcpEvent
 

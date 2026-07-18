@@ -16,7 +16,7 @@
   },
   "mounts": [
     "source=${localEnv:HOME}/claude/dot.claude,target=/home/vscode/.claude,type=bind",
-    "source=${localEnv:HOME}/claude/dot.claude.json,target=/home/vscode/.claude.json,type=bind"
+    "source=${localEnv:HOME}/claude/dot.claude.json,target=/home/vscode/.claude.json,type=bind",
     "source=${localEnv:HOME}/gemini/dot.config/google-gemini-cli,target=/home/vscode/.config/google-gemini-cli,type=bind"
   ],
   "runArgs": [

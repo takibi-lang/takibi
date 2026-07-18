@@ -162,11 +162,12 @@ make test           # run unit tests
 make qemutest       # run QEMU plus host-side integration tests (build and verify automatically)
 make stm32build     # cross-compile every ported example for STM32F746G-DISCOVERY (no hardware needed)
 make check          # run langcheck + test + stm32build + qemutest together
-make hwcheck        # like stm32build, but also loads into RAM + UART-diffs against real STM32 hardware
-make hwcheck-net    # real-Ethernet hardware tests (needs the board's Ethernet port wired to this host)
+make hwcheck-stm32        # like stm32build, but also loads into RAM + UART-diffs against real STM32 hardware
+make hwcheck-stm32-net    # real-Ethernet hardware tests (needs the board's Ethernet port wired to this host)
 make stress-stm32-kvs-server-sdcard-rtos  # opt-in STM32 KVS concurrency stress test (not in allcheck)
+make hwcheck-rpi3   # opt-in Raspberry Pi 3B JTAG hardware integration test (not in allcheck, see examples/common_rpi3/AGENTS.md)
 make perfcheck      # real-hardware profiler smoke tests
-make allcheck       # clean + check + hwcheck + perfcheck + hwcheck-net
+make allcheck       # clean + check + hwcheck-stm32 + perfcheck + hwcheck-stm32-net
 make clean          # remove generated artifacts
 ```
 
@@ -384,6 +385,13 @@ examples/
                      driver, DMA+interrupt both directions, issue #62)
     semihosting_stub.S -- no-op stand-ins for examples/fatfs's semihosting extern fns on
                      this target (no ARM semihosting on real hardware)
+  common_rpi3/    -- Raspberry Pi 3B (BCM2837) bare-metal HAL, JTAG-injection-only
+                     bring-up (issue #140) -- see examples/common_rpi3/AGENTS.md.
+    startup.S     -- core-0-only gate, stack/BSS setup, calls main(), halts on return
+    link.ld       -- load address 0x200000 (deliberately distinct from jtag_stub.ld's)
+    uart.tkb      -- UART0 (PL011) driver, GPIO14/15 ALT0 pinmux + pull disable
+    jtag_stub.S / jtag_stub.ld -- standalone spin-loop image flashed as the SD
+                     card's kernel8.img, giving JTAG a clean non-Linux catch point
   <name>/         -- each directory: see the leading comment in <name>.tkb for a description.
                      Every example is now a single file compiled for both targets -- no
                      `<name>_stm32.tkb` exists anywhere in this repo (see the STM32 section
@@ -392,16 +400,16 @@ examples/
 scripts/
   run_qemutest.sh -- integration test script: host-side checks plus QEMU tests
                      (FIFO sync and timing verification included)
-  run_hwtest_ram.sh -- STM32 hardware integration test script (make hwcheck): RAM execution
+  run_hwtest_ram.sh -- STM32 hardware integration test script (make hwcheck-stm32): RAM execution
                      over the debug port, no Flash write -- see "STM32 Hardware Test
                      Harness: RAM Execution" below. Supersedes the deleted run_hwtest.sh.
-  run_hwtest_net_ram.sh -- STM32 real-Ethernet hardware tests (make hwcheck-net): same RAM
+  run_hwtest_net_ram.sh -- STM32 real-Ethernet hardware tests (make hwcheck-stm32-net): same RAM
                      execution as run_hwtest_ram.sh, over a genuinely cacheable AXI SRAM1
                      DMA region -- see examples/common_stm32/AGENTS.md's "STM32 Hardware Test Harness: RAM Execution" entry.
                      Supersedes the deleted run_hwtest_net.sh.
   provision_http_server_sdcard.sh -- writes a real mtools-built FAT12 image onto
                      http_server_sdcard's SD card via OpenOCD + the real SDMMC1 driver, no
-                     human involved; shared by make hwcheck-net,
+                     human involved; shared by make hwcheck-stm32-net,
                      make stm32-http-server-sdcard, and
                      make stm32-http-server-sdcard-rtos
                      (issue #97, see HISTORY.md)
@@ -484,6 +492,16 @@ USART1/RTC/NVIC details), the SysTick+PendSV preemptive scheduler, the
 Ethernet MAC/PHY/DMA driver, and the RAM-execution hardware test harness
 now live in **`examples/common_stm32/AGENTS.md`** -- Coding agents that support nested guidance should load that file for work under `examples/common_stm32/`.
 
+## Raspberry Pi 3B Bare-Metal (BCM2837, JTAG-only bring-up, issue #140)
+
+Raspberry Pi 3B bring-up (JTAG/UART devcontainer USB setup, the
+JTAG-injection RAM-load model and why it differs from STM32's `reset
+halt`, the spin-stub image, the `sudo`-makes-JTAG-worse gotcha specific
+to this devcontainer, UART0/GPIO pinmux details) now lives in
+**`examples/common_rpi3/AGENTS.md`** -- Coding agents that support
+nested guidance should load that file for work under
+`examples/common_rpi3/`.
+
 ## virtio-net Examples (examples/net_echo, examples/arp_reply, examples/icmp_echo)
 
 QEMU-only stepping stones toward the TCP/IP stack goal (raw frame echo,
@@ -557,7 +575,7 @@ gdb-multiarch           (AArch64-capable gdb; stock `gdb` on this platform is x8
 openocd, stlink-tools   (for STM32F746G-DISCOVERY: openocd for SWD debug/register inspection,
                          `st-flash`/`st-info` (stlink-tools) for flashing -- see "STM32F746G-
                          DISCOVERY Bare-Metal" above. Requires USB passthrough set up in
-                         .devcontainer/devcontainer.json; `make hwcheck` needs the real board
+                         .devcontainer/devcontainer.json; `make hwcheck-stm32` needs the real board
                          connected, everything else (including `make check`'s `stm32build`)
                          does not.)
 ```

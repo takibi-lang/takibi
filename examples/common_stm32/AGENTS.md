@@ -58,9 +58,9 @@ process rules that apply everywhere.
   section below for `irq.tkb`'s GIC-vs-NVIC enable sequence, which eliminated its own runtime branch the
   same way -- a per-target pair of definitions behind one uniform name).
 
-  Ethernet examples are verified against a real point-to-point link via `scripts/eth_*_test.py` + `make hwcheck-net`
-  (not part of `make check`/`make hwcheck` since it needs a real board wired directly to the test machine's
-  NIC, plus `CAP_NET_RAW`). `make hwcheck-net` aggregates all such Ethernet hardware tests via
+  Ethernet examples are verified against a real point-to-point link via `scripts/eth_*_test.py` + `make hwcheck-stm32-net`
+  (not part of `make check`/`make hwcheck-stm32` since it needs a real board wired directly to the test machine's
+  NIC, plus `CAP_NET_RAW`). `make hwcheck-stm32-net` aggregates all such Ethernet hardware tests via
   `scripts/run_hwtest_net_ram.sh`, same PASS/FAIL-summary style as `scripts/run_hwtest_ram.sh` -- add new
   Ethernet examples there as they're ported (one `run_net_hw_test NAME ELF TEST_SCRIPT` line), rather than
   each getting its own separate `make` target.
@@ -84,11 +84,11 @@ process rules that apply everywhere.
   reachable from the devcontainer host's real TCP/IP stack (`curl http://192.168.10.2/` after flushing the
   ARP neighbor cache, forcing a genuine cold-start ARP resolution + full TCP handshake/request/close --
   request counter incremented `#1` -> `#2` across two requests as expected) and from a real Firefox on the
-  same machine. `scripts/eth_http_server_test.py` (wired into `make hwcheck-net` like the other four) is
+  same machine. `scripts/eth_http_server_test.py` (wired into `make hwcheck-stm32-net` like the other four) is
   deliberately NOT another hand-crafted raw-socket script -- it uses Python's `http.client` over ordinary
   OS sockets (the real TCP/IP stack, same path a browser takes). No `sudo`-only privilege is actually
   needed for the HTTP requests themselves (plain sockets, unlike the other four's raw `AF_PACKET`) -- only
-  the `ip neigh flush` step needs root, which `make hwcheck-net`'s existing blanket `sudo` already covers.
+  the `ip neigh flush` step needs root, which `make hwcheck-stm32-net`'s existing blanket `sudo` already covers.
 
   STM32 startup configures MPU region 0 for `0x20010000..<0x20020000` as Normal, non-cacheable,
   shareable memory before enabling the Cortex-M7 I-cache and D-cache. Ethernet images are linked at
@@ -170,7 +170,7 @@ that need one extra common file beyond the standard uart+print pair (`rtc`, `tim
 `echo`, `irq`, `preempt`, `semaphore`, `condvar`, `watchdog`, `msgqueue`) get their own
 one-off rule pairs, same reasoning as the existing `-g` debug-build rules. `make
 stm32build` links every ported example as a RAM-execution image (no hardware needed,
-part of `make check`); `make hwcheck` additionally loads and verifies each one against
+part of `make check`); `make hwcheck-stm32` additionally loads and verifies each one against
 the real board over the debug port (not part of `make check` -- needs physical
 hardware). The one exception is `examples/http_server`, which also gets a Flash-resident
 build (`examples/http_server/kernel_stm32.elf`/`.bin`) so `make stm32-http-server` can
@@ -299,8 +299,8 @@ region. **Any future change to this switch must keep the two stacks non-overlapp
 
 **Hardware test harness: Flash execution** (historical -- both hardware test targets have
 since moved to RAM execution, see below; this describes the now-deleted `scripts/
-run_hwtest.sh` and `scripts/run_hwtest_net.sh`, formerly `make hwcheck`'s and
-`make hwcheck-net`'s implementations): flashed via `st-flash write` and captured UART output, diffing
+run_hwtest.sh` and `scripts/run_hwtest_net.sh`, formerly `make hwcheck-stm32`'s and
+`make hwcheck-stm32-net`'s implementations): flashed via `st-flash write` and captured UART output, diffing
 against the *same* `.expected` files `run_qemutest.sh` already uses (`uart_puts`/
 `uart_print_*` write identical bytes on either HAL). Two things had to be solved that
 QEMU's semihosting-exit model doesn't need to deal with:
@@ -326,12 +326,12 @@ QEMU's semihosting-exit model doesn't need to deal with:
   writing the `.stdin` file to the serial port.
 
 **Hardware test harness: RAM execution** (`scripts/run_hwtest_ram.sh` + `scripts/
-run_hwtest_net_ram.sh`, `make hwcheck` + `make hwcheck-net`, current implementation for
-both): every one of hwcheck's ~41 example binaries is well under Flash
+run_hwtest_net_ram.sh`, `make hwcheck-stm32` + `make hwcheck-stm32-net`, current implementation for
+both): every one of hwcheck-stm32's ~41 example binaries is well under Flash
 Sector0's 32KB, so flashing all of them on every run used to erase/write that one physical
 sector 41 times per run -- against a guaranteed minimum endurance of roughly 10,000 erase
-cycles, only ~200 `make hwcheck` runs before Sector0's guaranteed lifetime is exhausted, a
-real concern once hwcheck starts running frequently in CI (not yet, but planned). Migrated
+cycles, only ~200 `make hwcheck-stm32` runs before Sector0's guaranteed lifetime is exhausted, a
+real concern once hwcheck-stm32 starts running frequently in CI (not yet, but planned). Migrated
 to loading the linked ELF directly into AXI SRAM1 (0x20010000, 240K, NOT DTCM -- see below)
 over the debug port via OpenOCD instead: `reset halt` (never `reset init`, which would
 reprogram the clock tree away from the 16MHz HSI every `uart_init()` assumes), `load_image`
@@ -343,14 +343,14 @@ for the full mechanism (including why VTOR must be set in code, not by the harne
 HISTORY.md's RAM-execution entry for the full design discussion (why AXI SRAM1 over DTCM,
 why no explicit MPU region is needed, and the flash-endurance arithmetic).
 
-**`hwcheck-net`'s real-Ethernet examples migrated too, with one deliberate difference
+**`hwcheck-stm32-net`'s real-Ethernet examples migrated too, with one deliberate difference
 from every other example: their DMA descriptor rings and packet buffers are genuinely
 cacheable.** `link_ram.ld` gives them the same uniform AXI SRAM1 as everything else -- no
 MPU non-cacheable window. This makes `examples/common_stm32/eth.tkb`'s existing
 `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` calls load-bearing for the first time --
 previously the non-cacheable window meant those calls' cache clean/invalidate instructions
 were architectural no-ops. Validated against real hardware over the wired point-to-point
-link (`make hwcheck-net`, all 5 examples, including varying frame payload sizes 46-1486
+link (`make hwcheck-stm32-net`, all 5 examples, including varying frame payload sizes 46-1486
 bytes and a full TCP handshake/data-echo/close/reconnect cycle) before generalizing, not
 just reasoned about from reading the driver -- see HISTORY.md's RAM-execution entries for
 the full code-reading pass that preceded this and why it was judged safe in advance.
@@ -362,14 +362,14 @@ to be a separate `stm32build-ram` target, and there is no more `link.ld` (delete
 per-example Flash `kernel_stm32.elf`/`.bin` for anything but http_server. http_server kept
 its own explicit Flash build rule (`examples/http_server/kernel_stm32.elf`/`.bin` -- NOT a
 `stm32build` prerequisite; built on demand by `make stm32-http-server` and, since the
-follow-up below, by `make hwcheck-net` too) specifically so a demo unit can boot the HTTP
+follow-up below, by `make hwcheck-stm32-net` too) specifically so a demo unit can boot the HTTP
 server standalone from power-on with no debugger attached -- RAM execution cannot do this
 at all, since AXI SRAM1 loses its contents the moment power is removed.
 `examples/common_stm32/startup.S`'s AXI SRAM1 MPU window was changed the same way as the
 RAM-execution path (non-cacheable window removed, relying on the same ARMv7-M default map)
 so this one remaining Flash build uses the identical cache policy as everything else --
 verified with a genuine `st-flash write` + `st-flash reset` (not the debugger
-halt-and-poke `--connect-under-reset` sequence hwcheck-net's own validation used) followed
+halt-and-poke `--connect-under-reset` sequence hwcheck-stm32-net's own validation used) followed
 by the real HTTP test script, confirming the standalone, non-debugger-mediated boot path
 specifically, not just the debugger-mediated one. See HISTORY.md's RAM-execution entries
 for the full reasoning behind keeping exactly this one exception and nothing more.
@@ -387,8 +387,8 @@ now runs http_server TWICE: `http_server (stm32/ram)` (unchanged) and a new
 `http_server (stm32/flash)`, which does a genuine `st-flash write` + `st-flash reset` of
 `examples/http_server/kernel_stm32.bin` (the exact sequence `make stm32-http-server`
 itself performs, `--connect-under-reset` included) before running the same
-`eth_http_server_test.py`. `hwcheck-net`'s own prerequisites gained
+`eth_http_server_test.py`. `hwcheck-stm32-net`'s own prerequisites gained
 `examples/http_server/kernel_stm32.bin` accordingly. Confirmed on real hardware: all
-`hwcheck-net` tests pass at the time (6 then; more have been added since, e.g.
+`hwcheck-stm32-net` tests pass at the time (6 then; more have been added since, e.g.
 `http_server_sdcard`'s own RAM+Flash pair -- see HISTORY.md), adding only ~2s to the
 suite's total runtime.

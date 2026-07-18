@@ -181,7 +181,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck hwcheck-net stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
+.PHONY: build test qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-rpi3 stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
 
 .DEFAULT_GOAL := build
 
@@ -229,7 +229,7 @@ qemutest: $(ALL_KERNELS) examples/fibonacci/kernel.debug.elf examples/dwarf_debu
 	@bash scripts/run_qemutest.sh
 
 ## stm32build: link every ported STM32 example as a RAM-execution image, with
-## no flashing/serial capture -- unlike hwcheck, this needs no physical
+## no flashing/serial capture -- unlike hwcheck-stm32, this needs no physical
 ## hardware (only the same LLVM toolchain qemutest already requires), so it
 ## IS part of `make check`: it's the only thing that would otherwise catch
 ## a compiler regression breaking Cortex-M/Thumb2 codegen specifically
@@ -239,37 +239,37 @@ qemutest: $(ALL_KERNELS) examples/fibonacci/kernel.debug.elf examples/dwarf_debu
 ## kernel_stm32.elf's own rule below for the one deliberate Flash-execution
 ## exception -- included as a prerequisite here too (link-only, no
 ## hardware needed) so `make check` still catches a build regression in
-## that path even on a day `make hwcheck-net` doesn't run against real
+## that path even on a day `make hwcheck-stm32-net` doesn't run against real
 ## hardware. Without this, `stm32build`'s own "every ported example"
 ## promise would be silently false for exactly one example.
 stm32build: $(STM32_RAM_ELFS) examples/http_server/kernel_stm32.bin examples/http_server_sdcard/kernel_stm32.bin examples/http_server_sdcard_rtos/kernel_stm32.bin
 
-## hwcheck: run STM32 hardware integration tests (requires a real
+## hwcheck-stm32: run STM32 hardware integration tests (requires a real
 ## STM32F746G-DISCOVERY board connected via USB). NOT part of `make check` --
 ## unlike stm32build, this needs physical hardware, so it stays runnable-
 ## only-when-available rather than a requirement for every clone of this repo.
 ## Runs entirely from RAM (see scripts/run_hwtest_ram.sh) -- no Flash write
 ## happens anywhere in this target, so it carries no flash-endurance cost
 ## no matter how often it runs in CI.
-hwcheck: stm32build
+hwcheck-stm32: stm32build
 	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/run_hwtest_ram.sh
 
-## hwcheck-net: run all STM32 real-Ethernet hardware tests (net_echo today,
+## hwcheck-stm32-net: run all STM32 real-Ethernet hardware tests (net_echo today,
 ## more as they're ported -- see scripts/run_hwtest_net_ram.sh) over a physical
 ## point-to-point link to the STM32F746G-DISCOVERY board (requires the
 ## board's Ethernet port wired directly to this machine's NIC). NOT part of
-## hwcheck's automated UART-diff suite, and NOT part of `make check`/
-## `make hwcheck` -- these are network tests (raw AF_PACKET sockets), not a
+## hwcheck-stm32's automated UART-diff suite, and NOT part of `make check`/
+## `make hwcheck-stm32` -- these are network tests (raw AF_PACKET sockets), not a
 ## UART capture/diff, and need CAP_NET_RAW (run with sudo) plus
 ## ETH_TEST_IFACE set to the wired interface if it isn't the default.
-## Runs entirely from RAM, same as `make hwcheck` -- EXCEPT http_server,
+## Runs entirely from RAM, same as `make hwcheck-stm32` -- EXCEPT http_server,
 ## which is deliberately tested twice: once from RAM like everything else,
 ## and once via a genuine Flash write+reset of examples/http_server/
 ## kernel_stm32.bin (hence the extra prerequisite below), since that is the
 ## one Flash-execution boot path left in this repository and it would
 ## otherwise have zero automated coverage -- see scripts/run_hwtest_net_ram.sh's
 ## header comment.
-hwcheck-net: stm32build examples/http_server/kernel_stm32.bin examples/http_server_sdcard/kernel_stm32.bin
+hwcheck-stm32-net: stm32build examples/http_server/kernel_stm32.bin examples/http_server_sdcard/kernel_stm32.bin
 	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/run_hwtest_net_ram.sh
 
 ## stress-stm32-kvs-server-sdcard-rtos: opt-in real-board stress run for
@@ -333,9 +333,9 @@ optimizercheck: examples/inline_check/inline_check.o
 allcheck:
 	$(MAKE) clean
 	$(MAKE) check
-	$(MAKE) hwcheck
+	$(MAKE) hwcheck-stm32
 	$(MAKE) perfcheck
-	$(MAKE) hwcheck-net
+	$(MAKE) hwcheck-stm32-net
 
 # -- Shared assembly objects ---------------------------------------------------
 $(COMMON_STARTUP_O): $(COMMON_STARTUP_S)
@@ -603,7 +603,7 @@ examples/tcp_echo/kernel.debug.elf: $(COMMON_STARTUP_O) examples/tcp_echo/tcp_ec
 # either HAL.
 # (STM32_TARGET/STM32_CPU/STM32_EXAMPLES/STM32_OBJS/STM32_RAM_EXAMPLES
 # are defined near the top of this file, alongside EXAMPLES/ALL_KERNELS, so
-# that hwcheck's prerequisite list further up can reference them.)
+# that hwcheck-stm32's prerequisite list further up can reference them.)
 COMMON_STM32_DIR       := examples/common_stm32
 COMMON_STM32_STARTUP_S := $(COMMON_STM32_DIR)/startup.S
 COMMON_STM32_STARTUP_O := $(COMMON_STM32_DIR)/startup.o
@@ -919,7 +919,7 @@ examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.prof.o: examples/kv
 examples/kvs_server_sdcard_rtos/kernel_stm32_ram.prof.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.prof.o $(COMMON_STM32_LINK_RAM_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.prof.o -o $@
 
-# http_server_sdcard_install: provisioning-only helper (make hwcheck-net,
+# http_server_sdcard_install: provisioning-only helper (make hwcheck-stm32-net,
 # make stm32-http-server-sdcard) that writes a real mtools-built FAT12
 # image onto the SD card via disk_write, so neither target needs a human
 # to touch the card -- see that file's own header comment and
@@ -1077,7 +1077,7 @@ qemu-kvs: examples/kvs_server/kernel.elf
 # Same STM32_SERIAL_DEV convention as scripts/run_hwtest_ram.sh
 # (overridable the same way: STM32_SERIAL_DEV=/dev/ttyACM1 make ...). This
 # target still flashes over Flash/st-flash (a real device needs its
-# firmware in non-volatile storage) -- unlike make hwcheck/make hwcheck-net,
+# firmware in non-volatile storage) -- unlike make hwcheck-stm32/make hwcheck-stm32-net,
 # which both run entirely from RAM.
 # Default points at /dev-host, not /dev, on purpose: .devcontainer/
 # devcontainer.json no longer bind-mounts /dev/ttyACM0 directly (that
@@ -1131,10 +1131,10 @@ stm32-http-server: examples/http_server/kernel_stm32.bin
 ## stm32-http-server just above (see that target's comment) but for
 ## examples/http_server_sdcard/kernel_stm32.bin instead.
 ##
-## Fully self-contained -- does NOT depend on `make hwcheck-net` having
+## Fully self-contained -- does NOT depend on `make hwcheck-stm32-net` having
 ## run first. Before flashing anything, this target itself provisions the
 ## real SD card with a fresh mtools-built FAT12 image via
-## scripts/provision_http_server_sdcard.sh (same script `make hwcheck-net`
+## scripts/provision_http_server_sdcard.sh (same script `make hwcheck-stm32-net`
 ## uses, not duplicated). If that fails -- most commonly no card inserted
 ## in the STM32F746G-DISCOVERY's microSD slot -- this target stops right
 ## there with a clear error message; it deliberately does NOT go on to
@@ -1226,8 +1226,74 @@ profile-stm32-http-server-sdcard-rtos: examples/http_server_sdcard_rtos/kernel_s
 profile-stm32-kvs-server-sdcard-rtos: examples/kvs_server_sdcard_rtos/kernel_stm32_ram.prof.elf
 	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/profile_stm32_kvs_server_sdcard_rtos.sh
 
+# -- Raspberry Pi 3B (BCM2837) bring-up (GitHub issue #140) --------------------
+# JTAG-only bring-up so far: examples/hello is the first example ported,
+# injected into RAM over JTAG rather than written to the SD card as a real
+# kernel8.img -- see examples/common_rpi3/AGENTS.md for the full rationale
+# (why a physical power cycle stands in for STM32's `reset halt`, why a
+# separate jtag_stub.S spin-stub image exists) and scripts/rpi3_jtag_load.sh
+# for the OpenOCD catch/load/run sequence. Deliberately not yet folded into
+# a batch EXAMPLES-style list like STM32_EXAMPLES: only one example is
+# proven on this target so far -- add more names here once each is
+# individually ported and verified, not speculatively ahead of that.
+RPI3_TARGET := aarch64-none-elf
+RPI3_CPU    := cortex-a53
+COMMON_RPI3_DIR          := examples/common_rpi3
+COMMON_RPI3_STARTUP_S    := $(COMMON_RPI3_DIR)/startup.S
+COMMON_RPI3_STARTUP_O    := $(COMMON_RPI3_DIR)/startup.o
+COMMON_RPI3_LINK_LD      := $(COMMON_RPI3_DIR)/link.ld
+COMMON_RPI3_UART         := $(COMMON_RPI3_DIR)/uart.tkb
+COMMON_RPI3_JTAG_STUB_S  := $(COMMON_RPI3_DIR)/jtag_stub.S
+COMMON_RPI3_JTAG_STUB_O  := $(COMMON_RPI3_DIR)/jtag_stub.o
+COMMON_RPI3_JTAG_STUB_LD := $(COMMON_RPI3_DIR)/jtag_stub.ld
+
+$(COMMON_RPI3_STARTUP_O): $(COMMON_RPI3_STARTUP_S)
+	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
+
+$(COMMON_RPI3_JTAG_STUB_O): $(COMMON_RPI3_JTAG_STUB_S)
+	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
+
+## examples/common_rpi3/jtag_stub.img: the SD card's kernel8.img. Raw
+## binary, not ELF -- the GPU firmware's loader expects a flat binary at a
+## fixed address, not an ELF container.
+examples/common_rpi3/jtag_stub.elf: $(COMMON_RPI3_JTAG_STUB_O) $(COMMON_RPI3_JTAG_STUB_LD)
+	$(LLD) -T $(COMMON_RPI3_JTAG_STUB_LD) $(COMMON_RPI3_JTAG_STUB_O) -o $@
+
+examples/common_rpi3/jtag_stub.img: examples/common_rpi3/jtag_stub.elf
+	llvm-objcopy-19 -O binary $< $@
+
+# hello.tkb has no `use` declarations of its own (see examples/hello/
+# hello.tkb) -- it only needs examples/common/runtime.tkb directly, for
+# main()'s platform_init/app_main/platform_shutdown wrapper, not the
+# print.tkb overloads (hello.tkb never calls uart_print/uart_println).
+examples/hello/hello_rpi3.o: examples/hello/hello.tkb $(COMMON_RPI3_UART) $(COMMON_DIR)/runtime.tkb $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_DIR)/runtime.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+
+examples/hello/kernel_rpi3.elf: $(COMMON_RPI3_STARTUP_O) examples/hello/hello_rpi3.o $(COMMON_RPI3_LINK_LD)
+	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) examples/hello/hello_rpi3.o -o $@
+
+# Examples ported to this target so far -- add names here one at a time,
+# in step with new examples/<name>/<name>_rpi3.o + kernel_rpi3.elf rules
+# above and a new line in scripts/run_hwtest_rpi3.sh, not ahead of them.
+RPI3_EXAMPLES := hello
+RPI3_KERNELS  := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
+
+## hwcheck-rpi3: run Raspberry Pi 3B (BCM2837) hardware integration tests
+## (requires a real Raspberry Pi 3B connected via JTAG + UART -- see
+## examples/common_rpi3/AGENTS.md). NOT part of `make check`/`make allcheck`:
+## unlike hwcheck-stm32, this cannot fully reset the board itself (no wired
+## JTAG system reset line on this board, see scripts/rpi3_jtag_load.sh's
+## header comment), so it needs the board already sitting in
+## examples/common_rpi3/jtag_stub.S's spin loop (a manual power cycle after
+## flashing examples/common_rpi3/jtag_stub.img as kernel8.img) before the
+## first run -- board-state-dependent hardware preconditions like this are
+## why hwcheck-stm32 itself, and stress-stm32-kvs-server-sdcard-rtos, also
+## stay out of check/allcheck.
+hwcheck-rpi3: $(RPI3_KERNELS) examples/common_rpi3/jtag_stub.img
+	@bash scripts/run_hwtest_rpi3.sh
+
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts and linker outputs
 clean:
 	dune clean
-	find examples -type f \( -name '*.o' -o -name '*.elf' -o -name '*.bin' -o -name '*.exe' \) -delete
+	find examples -type f \( -name '*.o' -o -name '*.elf' -o -name '*.bin' -o -name '*.exe' -o -name '*.img' \) -delete

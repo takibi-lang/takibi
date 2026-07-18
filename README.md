@@ -120,7 +120,7 @@ asymmetric combination that let heavy SDMMC1 DMA activity intermittently
 starve/corrupt the UART's own interrupt-driven drain. Fixed by switching
 UART TX to DMA+interrupt too (DMA2 Stream7/Channel4) -- verified with 30
 consecutive clean runs of the exact reproduction pattern (previously
-~1-in-6-10 failure) plus the full `make hwcheck`/`make hwcheck-net`
+~1-in-6-10 failure) plus the full `make hwcheck-stm32`/`make hwcheck-stm32-net`
 suites. See `uart.tkb`'s and `sdmmc.tkb`'s own header comments and
 HISTORY.md for the full bring-up stories, including a separate, resolved
 TXUNDERR bug in `disk_write`, root-caused by cross-checking the same
@@ -199,11 +199,11 @@ by a current example does not.
   STM32F746G-DISCOVERY hardware. It serves multiple SD-card files
   (`INDEX.HTM`, `ABOUT.HTM`, `ICON.PNG`) with multi-segment responses for
   larger content. SD card provisioning is fully automated (`make
-  hwcheck-net` / `make stm32-http-server-sdcard`, no human ever touches
+  hwcheck-stm32-net` / `make stm32-http-server-sdcard`, no human ever touches
   the card) via OpenOCD-injected mtools images relayed onto the card
   through the real SDMMC1 driver. `examples/http_server_sdcard_rtos`
   exercises the same HTTP+SD path with SD/FAT work behind an RTOS task
-  boundary and is also covered by `make hwcheck-net`.
+  boundary and is also covered by `make hwcheck-stm32-net`.
 - **A bare-metal network key-value store**: `examples/kvs_server` serves a
   fixed-size, statically allocated key-value table over HTTP (`PUT`/`GET`/
   `DELETE /keys/<key>`, `GET /keys` to list), with deterministic host-side
@@ -212,7 +212,7 @@ by a current example does not.
   `examples/kvs_server_sdcard_rtos` adds write-through persistence to a
   real SD card via FAT12 (sector-aligned per-key records, survives a
   reset) behind an RTOS task split (a network task and a dedicated
-  SD-worker task), covered by `make hwcheck-net` including a
+  SD-worker task), covered by `make hwcheck-stm32-net` including a
   persistence-survives-reset check. Both the HTTP server and KVS server
   families share one TCP/HTTP core
   (`examples/common/http_server_common.tkb` / `http_conn_state.tkb`)
@@ -333,11 +333,11 @@ make test           # run unit tests
 make qemutest        # build examples and run QEMU + host-side integration tests
 make stm32build      # cross-compile every ported example for STM32 (no hardware needed)
 make check           # langcheck + test + stm32build + qemutest
-make hwcheck          # like stm32build, but also flashes + verifies against real STM32 hardware
-make hwcheck-net      # real-Ethernet hardware tests (needs the board wired to this host's NIC)
+make hwcheck-stm32          # like stm32build, but also flashes + verifies against real STM32 hardware
+make hwcheck-stm32-net      # real-Ethernet hardware tests (needs the board wired to this host's NIC)
 make stress-stm32-kvs-server-sdcard-rtos  # opt-in STM32 KVS concurrency stress test
 make perfcheck        # real-hardware profiler smoke tests
-make allcheck         # clean + check + hwcheck + perfcheck + hwcheck-net
+make allcheck         # clean + check + hwcheck-stm32 + perfcheck + hwcheck-stm32-net
 ```
 
 Builds run in parallel across all cores by default.

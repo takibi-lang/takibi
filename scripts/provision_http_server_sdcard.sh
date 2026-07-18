@@ -3,7 +3,7 @@
 # mtools-built FAT12 image populated from examples/sdcard_content/, via
 # examples/http_server_sdcard_install/http_server_sdcard_install.tkb --
 # so no human ever needs to touch the card. Shared by both
-# `make hwcheck-net` (scripts/run_hwtest_net_ram.sh) and
+# `make hwcheck-stm32-net` (scripts/run_hwtest_net_ram.sh) and
 # `make stm32-http-server-sdcard` (Makefile), factored out here instead of
 # duplicated between them: both need byte-for-byte the same fiddly
 # two-breakpoint OpenOCD sequence (see http_server_sdcard_install.tkb's

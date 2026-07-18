@@ -1,0 +1,84 @@
+// Raspberry Pi 3B (BCM2837) UART0 (PL011) HAL, over GPIO14 (TXD0)/GPIO15
+// (RXD0). Same public signatures as examples/common_qemu/uart.tkb and
+// examples/common_stm32/uart.tkb (uart_putc/uart_puts/platform hooks) so
+// application files stay unchanged across every target. Deliberately
+// does not yet define uart_isr_getc/uart_rx_ready/uart_tx_isr -- nothing
+// under examples/common_rpi3/ uses interrupts yet, and BCM2837's own
+// interrupt controller is the legacy Broadcom one (not the GICv2
+// examples/common_qemu/gic.tkb targets), a separate, nontrivial driver
+// to add only once a real interrupt-driven example needs it.
+//
+// BCM2837 peripheral base is 0x3F000000 on this specific board (differs
+// from BCM2835's 0x20000000 and BCM2711's 0xFE000000 -- do not reuse
+// this file's addresses for a different Raspberry Pi model).
+//
+// GPIO14/15 must be switched from their reset-default function to ALT0
+// (UART0) before UART0's own registers do anything useful, and their
+// pull-up/down must be explicitly disabled first via the old-style
+// GPPUD/GPPUDCLK0 handshake (this SoC predates the newer per-pin
+// GPIO_PUP_PDN_CNTRL_REGn registers BCM2711 added) -- both steps follow
+// the sequence Broadcom's own peripheral datasheet documents for this
+// SoC family.
+
+fn uart_putc(c: u8) {
+    let fr: *io u32 = 0x3F201018; // UART0_FR
+    while ((*fr & (1 << 5)) != 0) { } // wait while TXFF (TX FIFO full)
+    let dr: *io u8 = 0x3F201000; // UART0_DR
+    *dr = c;
+}
+
+fn uart_puts(s: *u8) {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
+fn uart_init() {
+    let gpfsel1: *io u32 = 0x3F200004;
+    let gppud: *io u32 = 0x3F200094;
+    let gppudclk0: *io u32 = 0x3F200098;
+    let uart_cr: *io u32 = 0x3F201030;
+    let uart_ibrd: *io u32 = 0x3F201024;
+    let uart_fbrd: *io u32 = 0x3F201028;
+    let uart_lcrh: *io u32 = 0x3F20102C;
+
+    *uart_cr = 0; // disable UART0 before reconfiguring it
+
+    // GPIO14/15 -> ALT0 (UART0 TXD0/RXD0). GPFSEL1 packs GPIO10-19 as
+    // 3-bit fields; GPIO14's field starts at bit 12, GPIO15's at bit 15.
+    // ALT0 = 0b100.
+    let fsel: u32 = *gpfsel1;
+    *gpfsel1 = (fsel & ~((7 << 12) | (7 << 15))) | (4 << 12) | (4 << 15);
+
+    // Disable GPIO14/15 pull-up/down: set GPPUD, wait, latch it into the
+    // target pins via GPPUDCLK0, wait, then clear both. The ~150-cycle
+    // waits match the settle delay this codebase's own GPIO bring-up
+    // code uses elsewhere (examples/common_stm32/sdmmc.tkb's
+    // disk_initialize()).
+    *gppud = 0;
+    for i: i32 in 0..<150 { }
+    *gppudclk0 = (1 << 14) | (1 << 15);
+    for i: i32 in 0..<150 { }
+    *gppud = 0;
+    *gppudclk0 = 0;
+
+    // 115200 baud from a 48MHz UART clock (the documented default core
+    // clock the GPU firmware leaves UART0 running from before any
+    // config.txt core_freq/enable_uart override applies): divisor =
+    // 48000000/(16*115200) = 26 + 1/24. IBRD takes the integer part;
+    // FBRD takes the fractional part scaled to its 6-bit field
+    // (round((1/24) * 64) = 3).
+    *uart_ibrd = 26;
+    *uart_fbrd = 3;
+
+    *uart_lcrh = (3 << 5); // 8 bits, no parity, FIFOs disabled, 1 stop bit
+    *uart_cr = (1 << 0) | (1 << 8) | (1 << 9); // UARTEN | TXE | RXE
+}
+
+fn platform_init() {
+    uart_init();
+}
+
+fn platform_shutdown() {
+}

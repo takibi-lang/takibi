@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # STM32 Ethernet hardware integration tests -- RAM-execution variant,
-# called from repo root via: make hwcheck-net
+# called from repo root via: make hwcheck-stm32-net
 #
 # Supersedes the original run_hwtest_net.sh (deleted -- git history has
 # it), which flashed each example over st-flash. Same OpenOCD
@@ -34,14 +34,14 @@
 # automated test in this repository, since every other example dropped
 # its Flash build entirely.
 #
-# Separate from scripts/run_hwtest_ram.sh (make hwcheck): these tests need
+# Separate from scripts/run_hwtest_ram.sh (make hwcheck-stm32): these tests need
 # a raw AF_PACKET socket (CAP_NET_RAW, i.e. sudo) and a physical Ethernet
 # cable wired directly from the STM32F746G-DISCOVERY board to this
-# machine's NIC, not just the USB/SWD connection every other hwcheck test
+# machine's NIC, not just the USB/SWD connection every other hwcheck-stm32 test
 # needs. PASS/FAIL is judged by each Python test script's exit code (they
 # print their own per-case detail lines), not a UART capture/diff.
 #
-# NOT part of `make check`/`make hwcheck`: unlike those, this can't run on
+# NOT part of `make check`/`make hwcheck-stm32`: unlike those, this can't run on
 # an arbitrary clone of this repo with just a board plugged in over USB --
 # it needs the Ethernet cable actually wired to this machine and
 # CAP_NET_RAW.
@@ -54,7 +54,7 @@
 # sdcard` (see that script's own header comment), not duplicated here.
 set -euo pipefail
 
-: "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run 'make hwcheck-net' or set it explicitly}"
+: "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run 'make hwcheck-stm32-net' or set it explicitly}"
 SERIAL_DEV="$STM32_SERIAL_DEV"
 OPENOCD_BOARD_CFG="board/stm32f746g-disco.cfg"
 FLASH_ADDR=0x08000000
