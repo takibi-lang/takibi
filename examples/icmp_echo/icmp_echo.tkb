@@ -54,9 +54,9 @@ let mut our_mac: [u8; 6];
 // Wire-VALUE constants compared/written directly against a byte field --
 // u8, matching that field (unlike the OFFSET constants above, which are
 // usize -- array/slice indexing is usize-only now).
-let PROTO_ICMP:        u8 = 1;
-let ICMP_ECHO_REQUEST: u8 = 8;
-let ICMP_ECHO_REPLY:   u8 = 0;
+const PROTO_ICMP:        u8 = 1;
+const ICMP_ECHO_REQUEST: u8 = 8;
+const ICMP_ECHO_REPLY:   u8 = 0;
 
 // bytes_eq/bytes_copy/read_u16be/write_u16be/slice_copy/slice_eq/
 // checksum_add/inet_checksum live in examples/common/netutil.tkb and

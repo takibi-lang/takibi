@@ -85,13 +85,13 @@ let mut our_mac: [u8; 6];
 // GitHub issue #72: every bridge cast in this file is written as a bare
 // `as <base>` -- the target range is inferred from the source's own
 // already-proven range rather than restated by hand.
-let TCP_ECHO_PORT: u16 = 7;
+const TCP_ECHO_PORT: u16 = 7;
 
 // Safe upper bound on the echoed payload: 1514 (frame capacity) - 14
 // (eth) - 20 (IP) - 20 (TCP, no options in OUR reply) = 1460. Checked
 // explicitly in build_data_echo before constructing the reply segment --
 // see that function's comment.
-let TCP_MAX_PAYLOAD: u16 = 1460;
+const TCP_MAX_PAYLOAD: u16 = 1460;
 
 enum ConnState: u8 {
     Listen;

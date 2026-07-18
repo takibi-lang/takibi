@@ -113,7 +113,7 @@ let mut html_body: [u8; 512];
 // prefix) + 10 (digits of request_count) + 37 (HTML suffix) = 525 bytes.
 // 700 leaves a comfortable margin for editing the page without silently
 // reopening the overflow this check exists to prevent.
-let HTTP_MAX_PAYLOAD: i32 = 700;
+const HTTP_MAX_PAYLOAD: i32 = 700;
 
 fn build_html_body() -> isize {
     let mut len: isize = 0;

@@ -17,7 +17,7 @@
 //   argument : 0xffffffff:0xffffffff
 //   negative : -1
 
-let FULL_MASK: u64 = 0xFFFFFFFFFFFFFFFF;
+const FULL_MASK: u64 = 0xFFFFFFFFFFFFFFFF;
 
 fn print_u64_hex(v: u64) {
     let hi: u32 = (v >> 32) as u32;

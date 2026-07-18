@@ -20,7 +20,7 @@
 // percpu[cpu_id()] call site with NO code change there -- only
 // cpu_id()'s own body (today: always `return 0;`) needs to change to
 // read a real per-core ID register.
-let NCPU: usize = 1;
+const NCPU: usize = 1;
 
 fn cpu_id() -> {0..<1 as usize} {
     return 0;

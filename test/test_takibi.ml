@@ -456,9 +456,15 @@ let parser_tests = [
     | _ -> Alcotest.fail "expected LetDef with is_mutable=true and align 64"
   );
 
+  Alcotest.test_case "const with type annotation parses" `Quick (fun () ->
+    match parse "const N: usize = 4;" with
+    | [Ast.ConstDef ("N", Ast.TypeUsize, { desc = Ast.IntLit 4L; _ }, _)] -> ()
+    | _ -> Alcotest.fail "expected ConstDef"
+  );
+
   Alcotest.test_case "array size via named compile-time constant resolves" `Quick (fun () ->
-    match parse "let N: i32 = 4; let ring: [u8; N];" with
-    | [Ast.LetDef _; Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 4)), None, None, false, _, _)] -> ()
+    match parse "const N: i32 = 4; let ring: [u8; N];" with
+    | [Ast.ConstDef _; Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 4)), None, None, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected array size resolved to 4"
   );
 
@@ -496,14 +502,14 @@ let parser_tests = [
   );
 
   Alcotest.test_case "array size formula: product of two named constants" `Quick (fun () ->
-    match parse "let QNUM: i32 = 8; let RX_BUF_SIZE: i32 = 1536; \
+    match parse "const QNUM: i32 = 8; const RX_BUF_SIZE: i32 = 1536; \
                  let bufs: [u8; QNUM * RX_BUF_SIZE];" with
     | [_; _; Ast.LetDef ("bufs", Some (Ast.TypeArray (Ast.TypeU8, 12288)), None, None, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected array size resolved to 12288"
   );
 
   Alcotest.test_case "array size formula: difference of a named constant and a literal" `Quick (fun () ->
-    match parse "let COUNT: i32 = 4; let ring: [u8; COUNT - 1];" with
+    match parse "const COUNT: i32 = 4; let ring: [u8; COUNT - 1];" with
     | [_; Ast.LetDef ("ring", Some (Ast.TypeArray (Ast.TypeU8, 3)), None, None, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected array size resolved to 3"
   );
@@ -522,14 +528,14 @@ let parser_tests = [
   );
 
   Alcotest.test_case "array size formula: division by a named constant" `Quick (fun () ->
-    match parse "let PAGE_SIZE: i32 = 4096; let bufs: [u8; (2 * PAGE_SIZE) / 2];" with
+    match parse "const PAGE_SIZE: i32 = 4096; let bufs: [u8; (2 * PAGE_SIZE) / 2];" with
     | [_; Ast.LetDef ("bufs", Some (Ast.TypeArray (Ast.TypeU8, 4096)), None, None, false, _, _)] -> ()
     | _ -> Alcotest.fail "expected array size resolved to 4096"
   );
 
   Alcotest.test_case "array size formula: division by zero is a compile error, \
                        not a crash" `Quick (fun () ->
-    match parse "let Z: i32 = 0; let ring: [u8; 4 / Z];" with
+    match parse "const Z: i32 = 0; let ring: [u8; 4 / Z];" with
     | _ -> Alcotest.fail "expected an error, but parsing succeeded"
     | exception Types.TypeError (_, msg) ->
         Alcotest.(check bool) "mentions division by zero" true
@@ -587,6 +593,21 @@ let parser_tests = [
       (match parse "fn f(x: {0..<20 as u8}) u8 { return x; }" with
        | [Ast.FuncDef { params = [(_, Some (Ast.TypeRefined (0, 20, Ast.TypeU8)))]; _ }] -> true
        | _ -> false)
+  );
+
+  Alcotest.test_case "{lo..<CONST as usize} resolves a const bound" `Quick (fun () ->
+    match parse "const N: usize = 4; fn f(x: {0..<N as usize}) usize { return x; }" with
+    | [Ast.ConstDef _;
+       Ast.FuncDef { params = [(_, Some (Ast.TypeRefined (0, 4, Ast.TypeUsize)))]; _ }] -> ()
+    | _ -> Alcotest.fail "expected const-refined bound to resolve to 4"
+  );
+
+  Alcotest.test_case "{lo..<LET as usize} rejects an ordinary global let bound" `Quick (fun () ->
+    match parse "let N: usize = 4; fn f(x: {0..<N as usize}) usize { return x; }" with
+    | _ -> Alcotest.fail "expected an error, but parsing succeeded"
+    | exception Types.TypeError (_, msg) ->
+        Alcotest.(check bool) "mentions const" true
+          (contains_substring msg "const N")
   );
 
   Alcotest.test_case "{lo..<hi as base} accepts every primitive integer base" `Quick (fun () ->
@@ -3724,13 +3745,13 @@ let infer_tests = [
     (expect_ok "let mut g: i32 = 0; fn f() { let p: *i32 = &g; }");
 
   Alcotest.test_case "array size via named constant type-checks like a literal" `Quick
-    (expect_ok "let QUEUE_SIZE: i32 = 4;
+    (expect_ok "const QUEUE_SIZE: i32 = 4;
                 let mut ring: [u8; QUEUE_SIZE];
                 fn f() { ring[3] = 1; }");
 
   Alcotest.test_case "array size via named constant still bounds-checks" `Quick
     (expect_type_error "out of bounds"
-       "let QUEUE_SIZE: i32 = 4;
+       "const QUEUE_SIZE: i32 = 4;
         let mut ring: [u8; QUEUE_SIZE];
         fn f() { ring[4] = 1; }");
 
@@ -6639,7 +6660,7 @@ let codegen_tests = [
      `for i in 0..<SIZE` elides the check against [T; SIZE] \
      (examples/const_global's residual sites under --forbid-trap)" `Quick
     (expect_trap_sites 0
-       "let FTRAP_SIZE: usize = 4;
+       "const FTRAP_SIZE: usize = 4;
         let mut ftrap_ring: [i32; FTRAP_SIZE];
         fn ftrap_const_bound() -> i32 {
           for i: usize in 0..<FTRAP_SIZE {
@@ -6671,7 +6692,7 @@ let codegen_tests = [
      names with no scope info, so shadowing would let `for i in 0..<N` \
      refine against the global's value while looping to the local's)" `Quick
     (expect_type_error "shadows a global constant"
-       "let FTRAP_N: i32 = 4;
+       "const FTRAP_N: i32 = 4;
         let mut ftrap_arr: [i32; FTRAP_N];
         fn ftrap_shadow() -> i32 {
           let FTRAP_N: i32 = 100;
@@ -7159,7 +7180,7 @@ let codegen_tests = [
      so this gap silently blocked the exact same idiom Mul already \
      supported for a literal multiplier" `Quick
     (expect_trap_sites 0
-       "let RX_BUF_SIZE: usize = 1536;
+       "const RX_BUF_SIZE: usize = 1536;
         let mut ftp4c_buf_f: [u8; 12288];
         fn ftp4c_mul_const(raw_idx: usize) -> u8 {
           let idx: usize = max(min(raw_idx, 7), 0);   // {0..<8 as i32}

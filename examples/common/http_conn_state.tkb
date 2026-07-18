@@ -59,15 +59,10 @@
 // boundary), TX flagging (should_tx/tx_len, derived at the call site from
 // these functions' i32 length returns), and packet parsing/validation.
 
-let MAX_CONNS: usize = 4;
+const MAX_CONNS: usize = 4;
 
-// Changing MAX_CONNS requires a hand-updated sweep of every literal `4` in
-// a {0..<4 as usize} refined bound in this file and http_server_common.tkb
-// -- refined-type bounds must be spelled as literal integers, never a
-// named constant, even one with a literal initializer (same restriction
-// documented on examples/kvs_server/kvs_server.tkb's KEY_MAX/TABLE_SLOTS,
-// and on examples/common/rtos.tkb's NTASKS). `grep -n '{0..<4 as usize}'`
-// across both files finds every site.
+// MAX_CONNS is a `const`, so it can be used both for array sizes and for
+// refined connection-slot bounds such as {0..<MAX_CONNS as usize}.
 
 enum ConnState: u8 {
     Listen;
@@ -84,11 +79,11 @@ private let mut conn_state: [ConnState; MAX_CONNS];
 // slot index; `private` keeps the field readable only via tcp_conn_slot
 // below (matches NetRxCpuOwned[desc]'s private `index` field and
 // net_rx_len's read-only accessor in virtio_mmio.tkb).
-private linear struct TcpConnListen[conn: usize]      { private idx: {0..<4 as usize} @ conn; }
-private linear struct TcpConnSynRcvd[conn: usize]     { private idx: {0..<4 as usize} @ conn; }
-private linear struct TcpConnEstablished[conn: usize] { private idx: {0..<4 as usize} @ conn; }
-private linear struct TcpConnSending[conn: usize]     { private idx: {0..<4 as usize} @ conn; }
-private linear struct TcpConnLastAck[conn: usize]     { private idx: {0..<4 as usize} @ conn; }
+private linear struct TcpConnListen[conn: usize]      { private idx: {0..<MAX_CONNS as usize} @ conn; }
+private linear struct TcpConnSynRcvd[conn: usize]     { private idx: {0..<MAX_CONNS as usize} @ conn; }
+private linear struct TcpConnEstablished[conn: usize] { private idx: {0..<MAX_CONNS as usize} @ conn; }
+private linear struct TcpConnSending[conn: usize]     { private idx: {0..<MAX_CONNS as usize} @ conn; }
+private linear struct TcpConnLastAck[conn: usize]     { private idx: {0..<MAX_CONNS as usize} @ conn; }
 
 variant TcpConnDispatch {
     Listen(exists conn: usize. TcpConnListen[conn]);
@@ -121,11 +116,11 @@ variant TcpConnDispatch {
 // existential case, and multiple sibling owner-struct types dispatched
 // from one variant did not previously exist anywhere else in this
 // codebase to have surfaced it.
-fn tcp_conn_listen_slot(conn: borrow TcpConnListen[c])           -> {0..<4 as usize} { return conn.idx; }
-fn tcp_conn_synrcvd_slot(conn: borrow TcpConnSynRcvd[c])         -> {0..<4 as usize} { return conn.idx; }
-fn tcp_conn_established_slot(conn: borrow TcpConnEstablished[c]) -> {0..<4 as usize} { return conn.idx; }
-fn tcp_conn_sending_slot(conn: borrow TcpConnSending[c])         -> {0..<4 as usize} { return conn.idx; }
-fn tcp_conn_lastack_slot(conn: borrow TcpConnLastAck[c])         -> {0..<4 as usize} { return conn.idx; }
+fn tcp_conn_listen_slot(conn: borrow TcpConnListen[c])           -> {0..<MAX_CONNS as usize} { return conn.idx; }
+fn tcp_conn_synrcvd_slot(conn: borrow TcpConnSynRcvd[c])         -> {0..<MAX_CONNS as usize} { return conn.idx; }
+fn tcp_conn_established_slot(conn: borrow TcpConnEstablished[c]) -> {0..<MAX_CONNS as usize} { return conn.idx; }
+fn tcp_conn_sending_slot(conn: borrow TcpConnSending[c])         -> {0..<MAX_CONNS as usize} { return conn.idx; }
+fn tcp_conn_lastack_slot(conn: borrow TcpConnLastAck[c])         -> {0..<MAX_CONNS as usize} { return conn.idx; }
 
 // Smart constructors: the one place each owner's invariant (idx equals the
 // slot it was opened for) is established, mirroring virtio_mmio.tkb's
@@ -133,23 +128,23 @@ fn tcp_conn_lastack_slot(conn: borrow TcpConnLastAck[c])         -> {0..<4 as us
 // Owners section -- reusing one immutable runtime variable preserves one
 // identity) is what lets the same value serve as both the struct's own
 // static bracket argument and its field's runtime value.
-fn tcp_conn_listen_open(i: {0..<4 as usize} @ conn) -> TcpConnListen[conn] {
+fn tcp_conn_listen_open(i: {0..<MAX_CONNS as usize} @ conn) -> TcpConnListen[conn] {
     let mut owner: TcpConnListen[conn] = { i };
     return owner;
 }
-fn tcp_conn_synrcvd_open(i: {0..<4 as usize} @ conn) -> TcpConnSynRcvd[conn] {
+fn tcp_conn_synrcvd_open(i: {0..<MAX_CONNS as usize} @ conn) -> TcpConnSynRcvd[conn] {
     let mut owner: TcpConnSynRcvd[conn] = { i };
     return owner;
 }
-fn tcp_conn_established_open(i: {0..<4 as usize} @ conn) -> TcpConnEstablished[conn] {
+fn tcp_conn_established_open(i: {0..<MAX_CONNS as usize} @ conn) -> TcpConnEstablished[conn] {
     let mut owner: TcpConnEstablished[conn] = { i };
     return owner;
 }
-fn tcp_conn_sending_open(i: {0..<4 as usize} @ conn) -> TcpConnSending[conn] {
+fn tcp_conn_sending_open(i: {0..<MAX_CONNS as usize} @ conn) -> TcpConnSending[conn] {
     let mut owner: TcpConnSending[conn] = { i };
     return owner;
 }
-fn tcp_conn_lastack_open(i: {0..<4 as usize} @ conn) -> TcpConnLastAck[conn] {
+fn tcp_conn_lastack_open(i: {0..<MAX_CONNS as usize} @ conn) -> TcpConnLastAck[conn] {
     let mut owner: TcpConnLastAck[conn] = { i };
     return owner;
 }
@@ -170,7 +165,7 @@ variant TcpSendOutcome {
 
 // Opens whatever conn_state[i] really is right now. Internal to this file
 // -- callers reach it only through tcp_conn_dispatch below.
-fn dispatch_slot(i: {0..<4 as usize}) -> TcpConnDispatch {
+fn dispatch_slot(i: {0..<MAX_CONNS as usize}) -> TcpConnDispatch {
     // Bind the indexed read to a local before matching: matching an array-
     // index EXPRESSION directly (`match conn_state[i] { ... }`) generated
     // invalid LLVM IR (a `switch` comparing the element's pointer instead
@@ -230,7 +225,7 @@ fn tcp_conn_dispatch(remote_ip: borrow [u8; 16..], remote_port: borrow [u16; 4..
     // enum variant generated invalid LLVM IR (a pointer-identity compare
     // instead of a loaded-value compare); binding to a plain local first
     // takes the working codegen path.
-    for i: usize in 0..<4 {
+    for i: usize in 0..<MAX_CONNS {
         let state: ConnState = conn_state[i];
         // Raw-pointer bytes_eq instead of a sliced remote_ip[i*4..<i*4+4]
         // compare: subslicing a 16-byte slice at a runtime i*4 offset
@@ -247,7 +242,7 @@ fn tcp_conn_dispatch(remote_ip: borrow [u8; 16..], remote_port: borrow [u16; 4..
         }
     }
     if (is_syn) {
-        for i: usize in 0..<4 {
+        for i: usize in 0..<MAX_CONNS {
             let state: ConnState = conn_state[i];
             if (state == ConnState::Listen) {
                 return dispatch_slot(i);
@@ -311,7 +306,7 @@ fn tcp_reject_with_rst(pending: sink PendingTcpEvent,
 fn tcp_accept_via_syn_ack(pending: sink PendingTcpEvent,
                           conn: sink TcpConnListen[c],
                           eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
-    let idx: {0..<4 as usize} = conn.idx;
+    let idx: {0..<MAX_CONNS as usize} = conn.idx;
     build_syn_ack(eth, ihl, idx);
     conn_state[idx] = ConnState::SynRcvd;
 }
@@ -321,7 +316,7 @@ fn tcp_accept_via_syn_ack(pending: sink PendingTcpEvent,
 fn tcp_begin_close_via_fin_ack(pending: sink PendingTcpEvent,
                                conn: sink TcpConnEstablished[c],
                                eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
-    let idx: {0..<4 as usize} = conn.idx;
+    let idx: {0..<MAX_CONNS as usize} = conn.idx;
     build_fin_ack(eth, ihl, idx);
     conn_state[idx] = ConnState::LastAck;
 }
@@ -334,7 +329,7 @@ fn tcp_respond(pending: sink PendingTcpEvent,
                conn: sink TcpConnEstablished[c],
                eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
                req: borrow *u8, req_len: u16) -> TcpSendOutcome {
-    let idx: {0..<4 as usize} = conn.idx;
+    let idx: {0..<MAX_CONNS as usize} = conn.idx;
     let n: i32 = http_start_response(eth, ihl, req, req_len, idx);
     if (n >= 0) {
         if (http_response_done(idx)) {
@@ -352,7 +347,7 @@ fn tcp_respond(pending: sink PendingTcpEvent,
 fn tcp_continue(pending: sink PendingTcpEvent,
                 conn: sink TcpConnSending[c],
                 eth: borrow [u8; 1514..], ihl: {20..<21 as u16}) -> TcpSendOutcome {
-    let idx: {0..<4 as usize} = conn.idx;
+    let idx: {0..<MAX_CONNS as usize} = conn.idx;
     let n: i32 = http_continue_response(eth, ihl, idx);
     if (n >= 0) {
         if (http_response_done(idx)) {
@@ -370,7 +365,7 @@ fn tcp_continue(pending: sink PendingTcpEvent,
 fn tcp_close_via_final_ack(pending: sink PendingTcpEvent,
                            conn: sink TcpConnLastAck[c],
                            eth: borrow [u8; 1514..], ihl: {20..<21 as u16}) -> TcpSendOutcome {
-    let idx: {0..<4 as usize} = conn.idx;
+    let idx: {0..<MAX_CONNS as usize} = conn.idx;
     let n: i32 = build_tcp_payload(eth, ihl, 0, TCP_FLAG_ACK, idx);
     if (n >= 0) {
         conn_state[idx] = ConnState::Listen;

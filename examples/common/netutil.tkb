@@ -115,14 +115,14 @@ let ICMP_TYPE: usize = offsetof(IcmpHdr, ty);
 let ICMP_CODE: usize = offsetof(IcmpHdr, code);
 let ICMP_CHECKSUM: usize = offsetof(IcmpHdr, checksum);
 
-let TCP_FLAG_FIN: u8 = 0x01;
-let TCP_FLAG_SYN: u8 = 0x02;
-let TCP_FLAG_RST: u8 = 0x04;
-let TCP_FLAG_PSH: u8 = 0x08;
-let TCP_FLAG_ACK: u8 = 0x10;
+const TCP_FLAG_FIN: u8 = 0x01;
+const TCP_FLAG_SYN: u8 = 0x02;
+const TCP_FLAG_RST: u8 = 0x04;
+const TCP_FLAG_PSH: u8 = 0x08;
+const TCP_FLAG_ACK: u8 = 0x10;
 
-let PROTO_TCP: u8 = 6;
-let TCP_INITIAL_SEQ: u32 = 0x00001000;
+const PROTO_TCP: u8 = 6;
+const TCP_INITIAL_SEQ: u32 = 0x00001000;
 
 // GitHub issue #135's N-way concurrent connection support: TCP_INITIAL_SEQ
 // alone was harmless while only one connection could ever be open at a
@@ -131,7 +131,7 @@ let TCP_INITIAL_SEQ: u32 = 0x00001000;
 // tracks MAX_CONNS slots. This is deliberately NOT RFC 6528-style
 // unpredictable ISN generation -- nothing here needs to be secret, only
 // distinct per slot, so a fixed per-slot offset is enough (YAGNI).
-let TCP_ISN_SLOT_STRIDE: u32 = 0x01000000;
+const TCP_ISN_SLOT_STRIDE: u32 = 0x01000000;
 
 fn tcp_initial_seq(idx: {0..<4 as usize}) -> u32 {
     return TCP_INITIAL_SEQ + (idx as u32) * TCP_ISN_SLOT_STRIDE;

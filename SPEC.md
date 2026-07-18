@@ -136,11 +136,16 @@ parameter value, or top-level declaration name.
   required, no reassignment, `&x` is a compile error).
 - `let mut x = e` / `let mut x: T = e` -- mutable binding (reassignment
   allowed).
-- At **global** scope: plain `let NAME: T = e;` is an immutable
-  compile-time constant (reassignment and `&NAME` are compile errors, and
-  it must have an initializer); `let mut NAME: T = e;` is a mutable
-  global variable. `let mut x: T;` (no initializer) is allowed at global
-  scope, relying on BSS zero-clearing.
+- At **global** scope: `const NAME: T = INTEGER_LITERAL;` declares a
+  named compile-time integer constant. It is the only user declaration
+  form recorded for type-level integer positions such as array sizes,
+  refined integer bounds, and compile-time-proven `for` bounds. No
+  forward references or constant folding are supported here.
+- At **global** scope: plain `let NAME: T = e;` is an immutable runtime
+  global (reassignment and `&NAME` are compile errors, and it must have
+  an initializer); `let mut NAME: T = e;` is a mutable global variable.
+  `let mut x: T;` (no initializer) is allowed at global scope, relying on
+  BSS zero-clearing.
 - `let mut x: T;` (no initializer) is *also* allowed at **local** scope,
   for any `T` including scalars, arrays, and structs -- unlike the global
   case, the initial content is undefined (whatever was already on the
@@ -1457,10 +1462,10 @@ then attempts a field read through the old pointer.
 - `[T; N]` decays to `*T` when used as an ordinary value (e.g. a function
   argument). Can only be *declared* at local/global scope.
 - Array-size `N` may be a literal integer, the name of an earlier
-  immutable global declared with a bare literal integer initializer, or
+  `const` declared with a bare literal integer initializer, or
   `+`/`-`/`*`/`/` combining those (parentheses allowed), e.g.:
   ```
-  let QUEUE_SIZE: i32 = 16;
+  const QUEUE_SIZE: usize = 16;
   let mut ring: [T; QUEUE_SIZE];
   let mut pair: [T; QUEUE_SIZE * 2];
   ```
@@ -1569,14 +1574,13 @@ at codegen time rather than silently lowering to a racy `wfi`.
 `{lo..<hi}` form (no explicit base) is rejected -- always spell out the
 base.
 
-- **`lo` and `hi` must be bare integer literals** -- unlike an array size
-  (`[T; N]`) or a `for i in lo..<hi` range, which both also accept a name
-  resolving to a literal via the array-size-constant mechanism (a global
-  `let NAME: T = LITERAL;`), `{lo..<hi as base}` naming a constant instead
-  of restating the literal (e.g. `{0..<TOTAL_SECTORS as usize}`) is a
-  syntax error, even when `TOTAL_SECTORS` itself has a literal
-  initializer. Restate the literal value directly (with a comment noting
-  which named constant it must track, if one exists).
+- **`lo` and `hi` must be integer literals or earlier `const` names** --
+  ordinary global `let` names are deliberately not accepted here, even
+  when their initializer is a literal. For example:
+  ```
+  const MAX_CONNS: usize = 4;
+  fn f(idx: {0..<MAX_CONNS as usize}) { ... }
+  ```
 - Bounds are validated against the chosen base's own representable range
   at parse time (e.g. `{0..<300 as u8}` is a compile error; `i64`/`u64`
   impose no upper-bound check, since their true range doesn't fit the
@@ -1664,7 +1668,7 @@ the nine primitive integer bases, same set `{lo..<hi as base}` accepts).
   agree (e.g. `for i in 0..<s.len` gives `i: usize`, matching `s.len`'s
   type) -- there is no hardcoded `i32` default.
 - When *both* bounds are recognized compile-time constants (a literal,
-  or a name resolving to one via the array-size-constant mechanism), the
+  or a name resolving to an earlier `const`), the
   counter additionally carries the proven range `{lo..<hi}`.
 - `for i: T in ...` pins the counter's base explicitly. Required
   whenever nothing else in the loop determines a concrete type for `i`

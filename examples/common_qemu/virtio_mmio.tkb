@@ -26,35 +26,35 @@
 
 use "examples/common_qemu/gic.tkb";
 
-let VIRTIO_DEVICE_ID:        i32 = 0x08;
-let VIRTIO_HOST_FEATURES:    i32 = 0x10;
-let VIRTIO_GUEST_FEATURES:   i32 = 0x20;
-let VIRTIO_GUEST_PAGE_SIZE:  i32 = 0x28;
-let VIRTIO_QUEUE_SEL:        i32 = 0x30;
-let VIRTIO_QUEUE_NUM_MAX:    i32 = 0x34;
-let VIRTIO_QUEUE_NUM:        i32 = 0x38;
-let VIRTIO_QUEUE_ALIGN:      i32 = 0x3c;
-let VIRTIO_QUEUE_PFN:        i32 = 0x40;
-let VIRTIO_QUEUE_NOTIFY:     i32 = 0x50;
-let VIRTIO_INTERRUPT_STATUS: i32 = 0x60;
-let VIRTIO_INTERRUPT_ACK:    i32 = 0x64;
-let VIRTIO_STATUS:           i32 = 0x70;
+const VIRTIO_DEVICE_ID:        i32 = 0x08;
+const VIRTIO_HOST_FEATURES:    i32 = 0x10;
+const VIRTIO_GUEST_FEATURES:   i32 = 0x20;
+const VIRTIO_GUEST_PAGE_SIZE:  i32 = 0x28;
+const VIRTIO_QUEUE_SEL:        i32 = 0x30;
+const VIRTIO_QUEUE_NUM_MAX:    i32 = 0x34;
+const VIRTIO_QUEUE_NUM:        i32 = 0x38;
+const VIRTIO_QUEUE_ALIGN:      i32 = 0x3c;
+const VIRTIO_QUEUE_PFN:        i32 = 0x40;
+const VIRTIO_QUEUE_NOTIFY:     i32 = 0x50;
+const VIRTIO_INTERRUPT_STATUS: i32 = 0x60;
+const VIRTIO_INTERRUPT_ACK:    i32 = 0x64;
+const VIRTIO_STATUS:           i32 = 0x70;
 
-let VIRTIO_MAGIC_VALUE:   u32 = 0x74726976;
-let VIRTIO_DEVICE_ID_NET: u32 = 1;
+const VIRTIO_MAGIC_VALUE:   u32 = 0x74726976;
+const VIRTIO_DEVICE_ID_NET: u32 = 1;
 
-let STATUS_ACKNOWLEDGE: i32 = 1;
-let STATUS_DRIVER:      i32 = 2;
-let STATUS_DRIVER_OK:   i32 = 4;
+const STATUS_ACKNOWLEDGE: i32 = 1;
+const STATUS_DRIVER:      i32 = 2;
+const STATUS_DRIVER_OK:   i32 = 4;
 
-let PAGE_SIZE: isize = 4096;
+const PAGE_SIZE: isize = 4096;
 
-let VIRTIO_MMIO_FIRST_SLOT: i32 = 0x0a000000;
-let VIRTIO_MMIO_SLOT_STRIDE: i32 = 0x200;
-let VIRTIO_MMIO_SLOT_COUNT: i32 = 32;
-let VIRTIO_MMIO_FIRST_SPI: i32 = 48;
+const VIRTIO_MMIO_FIRST_SLOT: i32 = 0x0a000000;
+const VIRTIO_MMIO_SLOT_STRIDE: i32 = 0x200;
+const VIRTIO_MMIO_SLOT_COUNT: i32 = 32;
+const VIRTIO_MMIO_FIRST_SPI: i32 = 48;
 
-let QNUM: isize = 8; // virtqueue depth for both the RX and TX queues
+const QNUM: isize = 8; // virtqueue depth for both the RX and TX queues
 
 private linear struct NetRxCpuOwned[desc: usize] {
     private index: {0..<8 as usize} @ desc;
@@ -114,10 +114,10 @@ struct packed VirtqUsed {
 }
 
 // Descriptor flags (virtio spec).
-let VIRTQ_DESC_F_WRITE: i32 = 2; // device writes into this buffer (RX only)
+const VIRTQ_DESC_F_WRITE: i32 = 2; // device writes into this buffer (RX only)
 
-let VIRTIO_NET_F_MAC: i32 = 32; // bit 5: device exposes its MAC in Config space
-let VIRTIO_CONFIG_MAC_OFFSET: i32 = 0x100; // Config space starts right after the transport registers
+const VIRTIO_NET_F_MAC: i32 = 32; // bit 5: device exposes its MAC in Config space
+const VIRTIO_CONFIG_MAC_OFFSET: i32 = 0x100; // Config space starts right after the transport registers
 
 // Discovered at runtime: the slot base address is NOT fixed by the
 // compiler, because QEMU does not always attach a lone virtio-net-device
@@ -138,8 +138,8 @@ let mut virtio_tx_irq_flag: io u32;
 // RX_BUF_SIZE and every buffer/ring-index below are internal to this
 // driver (matching eth.tkb's encapsulation) -- the app never needs to know
 // about queue depth, PAGE_SIZE, or descriptor rings.
-let RX_BUF_SIZE: isize = 1536; // 10-byte virtio_net_hdr + max 1514-byte Ethernet frame, rounded up
-let RX_BUF_SIZE_USIZE: usize = 1536; // memory indexing counterpart
+const RX_BUF_SIZE: isize = 1536; // 10-byte virtio_net_hdr + max 1514-byte Ethernet frame, rounded up
+const RX_BUF_SIZE_USIZE: usize = 1536; // memory indexing counterpart
 
 let mut rx_queue_mem: [u8; 2 * PAGE_SIZE] align(4096);
 let mut tx_queue_mem: [u8; 2 * PAGE_SIZE] align(4096);

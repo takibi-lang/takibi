@@ -32,67 +32,67 @@ use "examples/common_stm32/eth_sdmmc_regs.tkb";
 // RCC_AHB1ENR/RCC_APB2ENR/GPIOC_MODER/GPIOC_OSPEEDR come from
 // eth_sdmmc_regs.tkb's `use` above (GitHub issue #97 follow-up -- shared
 // with examples/common_stm32/sdmmc.tkb).
-let SYSCFG_PMC:  *io u32 = 0x40013804;
+const SYSCFG_PMC:  *io u32 = 0x40013804;
 
 // -- GPIO (MODER/OSPEEDR/AFRL/AFRH), same read-modify-write idiom as
 // examples/common_stm32/uart.tkb -----------------------------------------
-let GPIOA_MODER:   *io u32 = 0x40020000;
-let GPIOA_OSPEEDR: *io u32 = 0x40020008;
-let GPIOA_AFRL:    *io u32 = 0x40020020;
+const GPIOA_MODER:   *io u32 = 0x40020000;
+const GPIOA_OSPEEDR: *io u32 = 0x40020008;
+const GPIOA_AFRL:    *io u32 = 0x40020020;
 
-let GPIOC_AFRL:    *io u32 = 0x40020820;
+const GPIOC_AFRL:    *io u32 = 0x40020820;
 
-let GPIOG_MODER:   *io u32 = 0x40021800;
-let GPIOG_OSPEEDR: *io u32 = 0x40021808;
-let GPIOG_AFRH:    *io u32 = 0x40021824;
+const GPIOG_MODER:   *io u32 = 0x40021800;
+const GPIOG_OSPEEDR: *io u32 = 0x40021808;
+const GPIOG_AFRH:    *io u32 = 0x40021824;
 
 // -- Ethernet MAC/DMA registers (ETH_BASE = AHB1PERIPH_BASE + 0x8000) ------
-let ETH_MACCR:    *io u32 = 0x40028000;
-let ETH_MACFFR:   *io u32 = 0x40028004;
-let ETH_MACMIIAR: *io u32 = 0x40028010;
-let ETH_MACMIIDR: *io u32 = 0x40028014;
+const ETH_MACCR:    *io u32 = 0x40028000;
+const ETH_MACFFR:   *io u32 = 0x40028004;
+const ETH_MACMIIAR: *io u32 = 0x40028010;
+const ETH_MACMIIDR: *io u32 = 0x40028014;
 
-let ETH_DMABMR:   *io u32 = 0x40029000;
-let ETH_DMATPDR:  *io u32 = 0x40029004;
-let ETH_DMARPDR:  *io u32 = 0x40029008;
-let ETH_DMARDLAR: *io u32 = 0x4002900C;
-let ETH_DMATDLAR: *io u32 = 0x40029010;
-let ETH_DMASR:    *io u32 = 0x40029014;
-let ETH_DMAOMR:   *io u32 = 0x40029018;
-let ETH_DMAIER:   *io u32 = 0x4002901C;
+const ETH_DMABMR:   *io u32 = 0x40029000;
+const ETH_DMATPDR:  *io u32 = 0x40029004;
+const ETH_DMARPDR:  *io u32 = 0x40029008;
+const ETH_DMARDLAR: *io u32 = 0x4002900C;
+const ETH_DMATDLAR: *io u32 = 0x40029010;
+const ETH_DMASR:    *io u32 = 0x40029014;
+const ETH_DMAOMR:   *io u32 = 0x40029018;
+const ETH_DMAIER:   *io u32 = 0x4002901C;
 
 // -- LAN8742A PHY (IEEE 802.3 clause 22 standard registers only -- avoids
 // depending on any vendor-specific register 31 bit encoding). MDIO address
 // is 0 on this board (confirmed: LAN8742's PHYAD pin strapping on the
 // STM32F746G-DISCOVERY ties it to address 0). ------------------------------
-let PHY_ADDR: u32 = 0;
-let PHY_BCR:    u32 = 0; // Basic Control Register
-let PHY_BSR:    u32 = 1; // Basic Status Register
-let PHY_ANAR:   u32 = 4; // Auto-Negotiation Advertisement Register
-let PHY_ANLPAR: u32 = 5; // Auto-Negotiation Link Partner Ability Register
+const PHY_ADDR: u32 = 0;
+const PHY_BCR:    u32 = 0; // Basic Control Register
+const PHY_BSR:    u32 = 1; // Basic Status Register
+const PHY_ANAR:   u32 = 4; // Auto-Negotiation Advertisement Register
+const PHY_ANLPAR: u32 = 5; // Auto-Negotiation Link Partner Ability Register
 
-let PHY_BCR_RESET:        u32 = 0x8000;
-let PHY_BCR_AUTONEG_EN:   u32 = 0x1000;
-let PHY_BCR_RESTART_AN:   u32 = 0x0200;
+const PHY_BCR_RESET:        u32 = 0x8000;
+const PHY_BCR_AUTONEG_EN:   u32 = 0x1000;
+const PHY_BCR_RESTART_AN:   u32 = 0x0200;
 
-let PHY_BSR_AUTONEG_DONE: u32 = 0x0020;
-let PHY_BSR_LINK_UP:      u32 = 0x0004;
+const PHY_BSR_AUTONEG_DONE: u32 = 0x0020;
+const PHY_BSR_LINK_UP:      u32 = 0x0004;
 
 // Advertise 10/100 Mbps, half/full duplex (bits 8:5) + IEEE 802.3 selector
 // field (bits 4:0 = 00001).
-let PHY_ANAR_ADVERTISE_ALL: u32 = 0x01E1;
-let PHY_AN_100_FULL: u32 = 0x0100;
-let PHY_AN_100_HALF: u32 = 0x0080;
-let PHY_AN_10_FULL:  u32 = 0x0040;
-let PHY_AN_10_HALF:  u32 = 0x0020;
+const PHY_ANAR_ADVERTISE_ALL: u32 = 0x01E1;
+const PHY_AN_100_FULL: u32 = 0x0100;
+const PHY_AN_100_HALF: u32 = 0x0080;
+const PHY_AN_10_FULL:  u32 = 0x0040;
+const PHY_AN_10_HALF:  u32 = 0x0020;
 
 // -- DMA descriptor ring geometry --------------------------------------------
 // Descriptor ownership transitions use the compiler's DMA builtins below.
 // They provide both a compiler memory boundary and the target-specific
 // hardware barrier required before doorbell/MMIO writes and after completion.
 
-let ETH_RX_DESC_COUNT: isize = 4;
-let ETH_TX_DESC_COUNT: isize = 4;
+const ETH_RX_DESC_COUNT: isize = 4;
+const ETH_TX_DESC_COUNT: isize = 4;
 private linear struct NetRxCpuOwned[desc: usize] {
     private index: {0..<4 as usize} @ desc;
     private len: i32;
@@ -131,8 +131,8 @@ let mut eth_tx_irq_flag: io u32;
 // Establishes the one initial NetRxCanAcquire mint on the current single-
 // threaded boot path. Failed link setup may be retried; success is permanent.
 private let mut net_rx_initialized: i32 = 0;
-let ETH_BUF_SIZE: isize = 1536; // max 1518-byte Ethernet frame, rounded up
-let ETH_BUF_SIZE_USIZE: usize = 1536; // memory indexing counterpart
+const ETH_BUF_SIZE: isize = 1536; // max 1518-byte Ethernet frame, rounded up
+const ETH_BUF_SIZE_USIZE: usize = 1536; // memory indexing counterpart
 
 // Four 32-bit words, exactly matching the STM32F7 chained DMA descriptor.
 // Fields are io because the DMA engine updates them asynchronously.
@@ -143,20 +143,20 @@ struct EthDmaDesc align(32) {
     word3: io u32;
 }
 
-let ETH_RDES0_OWN: u32 = 0x80000000;
-let ETH_RDES1_RCH: u32 = 0x4000;
-let ETH_RDES0_FL_SHIFT: u32 = 16;
-let ETH_RDES_FL_MASK: u32 = 0x3FFF;
+const ETH_RDES0_OWN: u32 = 0x80000000;
+const ETH_RDES1_RCH: u32 = 0x4000;
+const ETH_RDES0_FL_SHIFT: u32 = 16;
+const ETH_RDES_FL_MASK: u32 = 0x3FFF;
 
 let ETH_TDES0_OWN: u32 = ETH_RDES0_OWN; // same top-bit flag
-let ETH_TDES0_IC:  u32 = 0x40000000;
-let ETH_TDES0_LS:  u32 = 0x20000000;
-let ETH_TDES0_FS:  u32 = 0x10000000;
-let ETH_TDES0_TCH: u32 = 0x00100000;
+const ETH_TDES0_IC:  u32 = 0x40000000;
+const ETH_TDES0_LS:  u32 = 0x20000000;
+const ETH_TDES0_FS:  u32 = 0x10000000;
+const ETH_TDES0_TCH: u32 = 0x00100000;
 
-let ETH_DMASR_TS:  u32 = 0x00000001;
-let ETH_DMASR_RS:  u32 = 0x00000040;
-let ETH_DMASR_NIS: u32 = 0x00010000;
+const ETH_DMASR_TS:  u32 = 0x00000001;
+const ETH_DMASR_RS:  u32 = 0x00000040;
+const ETH_DMASR_NIS: u32 = 0x00010000;
 
 fn ETH_IRQHandler() !{interrupt} {
     let status: u32 = *ETH_DMASR;
@@ -201,7 +201,7 @@ fn ptr_to_u32(p: *u8) -> u32 {
 // 802.3 clause 22: MDC must be <= 2.5MHz) is still satisfied -- Div16 is
 // simply more conservative than its documented floor implies, not out of
 // spec.
-let MACMIIAR_CR_DIV16: u32 = 0x8;
+const MACMIIAR_CR_DIV16: u32 = 0x8;
 
 fn mdio_wait() {
     while ((*ETH_MACMIIAR & 1) != 0) {} // MB (MII busy)

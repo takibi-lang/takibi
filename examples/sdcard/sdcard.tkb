@@ -18,7 +18,7 @@
 // section), then compiled clean under it with no changes needed (this
 // file's own fixed-size loops were already fully provable).
 
-let TEST_SECTORS: u32 = 4; // a handful, enough to exercise multiple disk_write calls
+const TEST_SECTORS: u32 = 4; // a handful, enough to exercise multiple disk_write calls
 
 // Deterministic per-byte pattern, so both this program and the host-side
 // test script (which only sees the hex dump below) can independently

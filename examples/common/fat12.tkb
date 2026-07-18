@@ -63,18 +63,18 @@ use "examples/common/netutil.tkb";
 
 // -- Disk geometry (this small 64KB volume is what both fatfs.tkb's in-memory
 // backend and fatfs_sdcard.tkb's real-SD-card backend format and use) --------
-let NUM_FATS: usize = 2;
-let FAT_SIZE_SECTORS: usize = 1; // 512 bytes holds ~341 FAT12 entries; ample for TOTAL_SECTORS this small
-let RESERVED_SECTORS: usize = 1; // boot sector only
-let ROOT_ENTRY_COUNT: usize = 16;
-let ROOT_DIR_SECTORS: usize = 1; // 16 * 32 bytes == 512 bytes == 1 sector
+const NUM_FATS: usize = 2;
+const FAT_SIZE_SECTORS: usize = 1; // 512 bytes holds ~341 FAT12 entries; ample for TOTAL_SECTORS this small
+const RESERVED_SECTORS: usize = 1; // boot sector only
+const ROOT_ENTRY_COUNT: usize = 16;
+const ROOT_DIR_SECTORS: usize = 1; // 16 * 32 bytes == 512 bytes == 1 sector
 
-// Only a literal-initialized global feeds the parser's compile-time-constant
-// table (needed for [u8; SECTOR_SIZE * TOTAL_SECTORS]-style array sizes in
-// consumers); the disk layout offsets are formulas over those globals, so
-// they're plain functions computed at each call site instead of derived
-// globals (a global `let` whose own initializer is a formula isn't supported
-// as an LLVM constant initializer).
+// Only `const` feeds the parser's compile-time-constant table (needed for
+// [u8; SECTOR_SIZE * TOTAL_SECTORS]-style array sizes in consumers); the
+// disk layout offsets are formulas over those constants, so they're plain
+// functions computed at each call site instead of derived globals (a global
+// `let` whose own initializer is a formula isn't supported as an LLVM
+// constant initializer).
 fn first_fat_sector() -> usize { return RESERVED_SECTORS; }
 fn first_root_dir_sector() -> usize { return first_fat_sector() + NUM_FATS * FAT_SIZE_SECTORS; }
 fn first_data_sector() -> usize { return first_root_dir_sector() + ROOT_DIR_SECTORS; }
@@ -350,9 +350,9 @@ variant FatOpenResult {
     Opened(exists file: usize. FatFile[file]);
 }
 
-let FA_READ: i32 = 0x01;
-let FA_WRITE: i32 = 0x02;
-let FA_CREATE_ALWAYS: i32 = 0x08;
+const FA_READ: i32 = 0x01;
+const FA_WRITE: i32 = 0x02;
+const FA_CREATE_ALWAYS: i32 = 0x08;
 
 fn fat_file_opened(dir_index: {0..<16 as usize} @ file,
                    start_cluster: u32, fsize: u32,
@@ -488,20 +488,19 @@ fn fat_init_dir_entry(idx: {0..<16 as usize}, name83: *u8) {
 fn fat_open(name83: *u8, mode: i32) -> FatOpenResult {
     if ((mode & FA_CREATE_ALWAYS) != 0) {
         let existing: i32 = fat_find_entry(name83);
-        // Two-sided narrow (literal 16), same reasoning as the FA_READ
+        // Two-sided narrow, same reasoning as the FA_READ
         // branch below: fat_find_entry's own proof doesn't cross the
         // function-call boundary through its unrefined `-> i32` return.
         if ((existing >= 0) && (existing < 16)) {
-            let idx: {0..<16 as usize} = max(min(existing, 15), 0) as usize;
+            let idx: {0..<ROOT_ENTRY_COUNT as usize} = existing as usize;
             fat_free_chain(root_dir_buf[idx].first_cluster_lo as u32);
             fat_init_dir_entry(idx, name83);
             return FatOpenResult::Opened(fat_file_opened(idx, 0, 0, true));
         }
         // If-narrowing must wrap the actual use, not a negated early-return
         // guard (SPEC.md "If-condition narrowing") -- and compared against
-        // a literal (16), not `ROOT_ENTRY_COUNT as u32` (a named global's
-        // own literal initializer does not, by itself, make this provable;
-        // the global is still used for the array's own size).
+        // literal 16, because next_free_root_entry is u32 and
+        // ROOT_ENTRY_COUNT is usize for array sizes.
         // next_free_root_entry is u32, so a hi-only condition is enough to
         // narrow (GitHub issue #99).
         if (next_free_root_entry < 16) {
@@ -517,14 +516,13 @@ fn fat_open(name83: *u8, mode: i32) -> FatOpenResult {
     if ((mode & FA_READ) != 0) {
         let found: i32 = fat_find_entry(name83);
         // fat_find_entry's own body proves its for-loop counter is
-        // {0..<16}, but that proof does not cross the function-call
+        // {0..<ROOT_ENTRY_COUNT}, but that proof does not cross the function-call
         // boundary through a plain (unrefined) `-> i32` return -- so
-        // narrow explicitly here (two-sided form, literal 16, same
+        // narrow explicitly here (two-sided form, same
         // reasoning as the FA_CREATE_ALWAYS branch above) rather than
         // widen the return type.
         if ((found >= 0) && (found < 16)) {
-            let idx: {0..<16 as usize} =
-                max(min(found, 15), 0) as usize;
+            let idx: {0..<ROOT_ENTRY_COUNT as usize} = found as usize;
             let start_cluster: u32 = root_dir_buf[idx].first_cluster_lo as u32;
             let fsize: u32 = root_dir_buf[idx].file_size;
             return FatOpenResult::Opened(

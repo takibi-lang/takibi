@@ -15,6 +15,48 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-18: Explicit `const` for Type-Level Integer Constants
+
+GitHub issue #135's multi-connection HTTP/KVS work exposed a concrete
+maintenance problem: `MAX_CONNS` was already a named size constant, but
+refined slot types still had to spell `{0..<4 as usize}` directly, so the
+same connection count lived in two places. The old arrangement also mixed
+two different ideas: an immutable global `let` value and a parser-time
+integer constant usable in type-level grammar positions.
+
+Implemented a separate top-level declaration:
+
+```tkb
+const MAX_CONNS: usize = 4;
+```
+
+Only `const` declarations with a bare integer literal initializer are
+recorded in `Const_env`. Ordinary global `let` remains immutable runtime
+storage and is no longer accepted as an array-size/refinement/for-bound
+constant just because its initializer is a literal. This keeps dynamic
+runtime values and static proof constants separated while avoiding
+hand-maintained duplicate literals.
+
+Files touched:
+- `lib/ast.ml`: added `ConstDef`.
+- `lib/lexer.mll` / `lib/parser.mly`: added `const NAME: T = INT;`, changed
+  array-size diagnostics to point at `const`, and allowed refined bounds
+  such as `{0..<MAX_CONNS as usize}` via `Const_env`.
+- `lib/const_env.ml`: made the table explicitly `const`-only.
+- `lib/type_inf.ml` / `lib/llvm_gen.ml`: type-check and emit `ConstDef` as
+  immutable global constants so expression reads such as `uart_print(N)`
+  continue to work.
+- `SPEC.md`, `test/test_takibi.ml`, and examples: updated the language docs,
+  parser/codegen coverage, and existing uppercase integer constants.
+
+Important deliberate limits: no `const` expression evaluator was added; no
+forward references; no `const A = B + C`; no `sizeof`/`offsetof` in `const`.
+Array-size grammar still supports small arithmetic over already-declared
+`const` names, exactly where that arithmetic was already supported before.
+
+Verification: `make test` and `make check` passed, including all 131 QEMU
+integration tests and the new concurrent HTTP/KVS tests.
+
 ### LLVM 19 Opaque Pointers
 LLVM 19 has only one pointer type (`pointer_type context`). The element type must be passed explicitly to `build_load`.
 For this reason, `gen_expr` returns `(Ast.type_expr * llvalue)` rather than just `llvalue`.

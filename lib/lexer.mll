@@ -33,6 +33,7 @@ rule read = parse
   | "fn"      { FN }
   | "inline"  { INLINE }
   | "return"  { RETURN }
+  | "const"   { CONST }
   | "let"     { LET }
   | "mut"     { MUT }
   | "if"      { IF }

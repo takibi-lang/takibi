@@ -4393,6 +4393,8 @@ let gen_program ?prog_types prog =
   (* Pass 1: register all globals and function signatures *)
   List.iter (function
     | FuncDef fdef                    -> declare_func ?prog_types fdef
+    | ConstDef (name, ty, expr, loc) ->
+        gen_global ?prog_types name (Some ty) (Some expr) None false loc
     | LetDef (name, ty_opt, expr_opt, align_opt, is_mutable, _, loc) ->
         gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable loc
     | ExternFuncDef (name, params, ret_ty, _) ->
@@ -4430,6 +4432,7 @@ let gen_program ?prog_types prog =
   (* Pass 2: generate function bodies *)
   List.iter (function
     | FuncDef fdef    -> ignore (gen_func ?prog_types fdef)
+    | ConstDef _      -> ()
     | LetDef _        -> ()
     | ExternFuncDef _ -> ()
     | StructDef _     -> ()

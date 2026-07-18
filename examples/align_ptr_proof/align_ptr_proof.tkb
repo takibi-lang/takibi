@@ -19,8 +19,8 @@
 // sdmmc.tkb/eth.tkb: whether to retrofit either onto *align(N) T is a
 // separate, later decision (Stage 2, deliberately not part of this pass).
 
-let SLOT_SIZE:  isize = 32;
-let SLOT_COUNT: isize = 4;
+const SLOT_SIZE:  isize = 32;
+const SLOT_COUNT: isize = 4;
 
 let mut bufs: [u8; 128] align(32);  // SLOT_COUNT * SLOT_SIZE bytes
 

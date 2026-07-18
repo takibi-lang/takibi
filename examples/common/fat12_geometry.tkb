@@ -1,4 +1,4 @@
 // Shared geometry for this repository's tiny FAT12 test volume.
 
-let SECTOR_SIZE: usize = 512;
-let TOTAL_SECTORS: usize = 128; // 64KB total disk
+const SECTOR_SIZE: usize = 512;
+const TOTAL_SECTORS: usize = 128; // 64KB total disk

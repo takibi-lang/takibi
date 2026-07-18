@@ -107,14 +107,14 @@ hardening.
   flagged site by swapping the checked access back to a raw pointer -- that defeats the
   entire point of running this step. This hardened version is committed separately from the
   unrefined baseline(s), so the diff **is** the demonstration of what `--forbid-trap` found.
-- Refined-type bounds (`{lo..<hi as base}`) must be spelled as literal integers, the same
-  restriction array sizes have (`examples/const_global/const_global.tkb`'s comment) --
-  `{0..<TOTAL_SECTORS as usize}` referencing a named `usize` global is a syntax error, even
-  when that global has a literal initializer. Only a bare `for`-loop counter over a literal
-  range, an `if`-narrowed value, or a literal assigned directly to an explicitly
-  refined-typed local reliably carries a provable range across a function-call argument
-  boundary -- a global `let`'s own literal initializer does not, by itself, make *reads* of
-  that global provably ranged at their use site.
+- Refined-type bounds (`{lo..<hi as base}`) may use literal integers or earlier
+  `const` names with bare integer literal initializers, e.g.
+  `{0..<MAX_CONNS as usize}`. Ordinary global `let` declarations are deliberately
+  not type-level constants, even when their initializer is a literal. Only a bare
+  `for`-loop counter over a literal/`const` range, an `if`-narrowed value, a
+  literal/`const` assigned directly to an explicitly refined-typed local, or a
+  refined bound written with literals/`const` names reliably carries a provable
+  range across a function-call argument boundary.
 
 ## Design Principle: YAGNI (You Aren't Gonna Need It)
 

@@ -41,7 +41,7 @@ fn slot_lease(idx: {0..<4 as usize} @ n) -> SlotLease[n] {
 fn slot_unlease(lease: sink SlotLease[n]) {
 }
 
-let SLOT_COUNT: usize = 4;
+const SLOT_COUNT: usize = 4;
 
 struct Slot {
     in_use: bool;

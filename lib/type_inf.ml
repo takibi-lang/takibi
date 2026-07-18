@@ -3341,6 +3341,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   List.iter (function
     | Ast.FuncDef fdef          -> claim_toplevel_name fdef.name "function"
     | Ast.ExternFuncDef (n, _, _, _) -> claim_toplevel_name n "function"
+    | Ast.ConstDef (n, _, _, _) -> claim_toplevel_name n "constant"
     | Ast.LetDef (n, _, _, _, _, _, _)  -> claim_toplevel_name n "global"
     | Ast.StructDef (n, _, _, _, _, _)  -> claim_toplevel_name n "struct"
     | Ast.OwnedStructDef (n, _, _, _, _, _, _, _, _) ->
@@ -4147,6 +4148,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               "stable owner containers cannot be returned by value"));
           validate_nonparam_type Lexing.dummy_pos t
         ) ret
+    | Ast.ConstDef (_gname, ty, init, gloc) ->
+        validation_static_scope := None;
+        allow_implicit_static := false;
+        validate_nonparam_type gloc ty;
+        validate_expr_types init
     | Ast.LetDef (gname, ty, init, _, is_mutable, is_private, gloc) ->
         validation_static_scope := None;
         allow_implicit_static := false;
@@ -4509,6 +4515,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               Some (if List.mem "may_block" effects then ["may_block"] else [])
         in
         StringMap.add name ((key, TFun (pts, rt, call_effects)) :: old) m
+    | Ast.ConstDef _ -> m
     | Ast.LetDef _    -> m
     | Ast.StructDef _ -> m
     | Ast.OwnedStructDef _ -> m
@@ -4527,6 +4534,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      name reaching here is already known unique across the whole
      program. *)
   let genv = List.fold_left (fun m -> function
+    | Ast.ConstDef (name, ty, _, _) ->
+        StringMap.add name (of_ast ty, false) m
     | Ast.LetDef (name, ty_opt, _, _, is_mutable, _, _) ->
         StringMap.add name (of_ast_opt ty_opt, is_mutable) m
     | Ast.FuncDef _                -> m
@@ -4556,6 +4565,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      below. Now a List.fold_left threading an updated genv forward
      (instead of a plain List.iter) for exactly this reason. *)
   let genv = List.fold_left (fun genv item -> match item with
+    | Ast.ConstDef (name, _, expr, _) ->
+        let (ty, _) = StringMap.find name genv in
+        let et = infer_expr senv eenv genv fenv expr in
+        (try unify et (strip_io ty)
+         with Unify_error m -> raise (TypeError (expr.loc, m)));
+        check_literal_fits_refined expr.loc expr (strip_io ty);
+        genv
     | Ast.LetDef (name, _, expr_opt, _, is_mutable, _, _) ->
         let (ty, _) = StringMap.find name genv in
         (match expr_opt with

@@ -36,7 +36,7 @@ use "examples/common/sync.tkb";
 // index stay --forbid-trap clean with no code change at any call site
 // when NCPU grows -- only this function's own body needs to change, to
 // read a real per-core ID register instead of always returning 0.
-let NCPU: usize = 1;
+const NCPU: usize = 1;
 
 fn cpu_id() -> {0..<1 as usize} {
     return 0;
@@ -158,7 +158,7 @@ fn chan_recv(ch: *Chan) -> i32 !{may_block} {
 // {0..<4}, {1..<4}) must be spelled as literals (same restriction as every
 // refined type in this language) and are what actually pin the count --
 // keep them in sync with NTASKS if it ever changes.
-let NTASKS: usize = 4;
+const NTASKS: usize = 4;
 
 // Scheduler bookkeeping (2026-07-17 audit): fields are private (issue
 // #108 -- task code reaching into the round-robin state was previously

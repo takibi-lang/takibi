@@ -74,7 +74,7 @@ let check_refined_base_range pos lo hi base =
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN INLINE RETURN LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT EXISTS BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
+%token FN INLINE RETURN CONST LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT EXISTS BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
 %token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
 %token ASSIGN DOT
@@ -131,9 +131,13 @@ items:
 
 item:
   | func_def { FuncDef $1 }
+  | CONST name = IDENT COLON ty = type_expr ASSIGN n = INT SEMI
+    { let loc = $symbolstartpos in
+      let e = { desc = IntLit n; loc } in
+      Const_env.define_if_literal name (Some e);
+      ConstDef (name, ty, e, loc) }
   | p = private_flag LET m = mut_flag IDENT let_rhs SEMI
-    { Const_env.define_if_literal m $4 (snd $5);
-      LetDef ($4, fst $5, snd $5, None, m, p, $symbolstartpos) }
+    { LetDef ($4, fst $5, snd $5, None, m, p, $symbolstartpos) }
   | p = private_flag LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN INT RPAREN SEMI
     { LetDef ($4, Some $6, None, Some (narrow_int64 $symbolstartpos "alignment" $9), m, p, $symbolstartpos) }
   | p = private_flag LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN INT RPAREN ASSIGN expr SEMI
@@ -537,8 +541,7 @@ view_static_args:
   | LBRACKET args = separated_nonempty_list(COMMA, static_arg) RBRACKET { args }
 
 (* Array size: a compile-time integer constant expression -- a literal, the
-   name of an immutable global constant declared earlier (`let NAME: T =
-   N;`), or +/-/*// arithmetic combining those (parentheses allowed for
+   name of an earlier `const NAME: T = N;`, or +/-/*// arithmetic combining those (parentheses allowed for
    grouping), e.g. `[u8; QNUM * RX_BUF_SIZE]` or `[u8; ETH_RX_DESC_COUNT *
    ETH_DESC_SIZE]`. Evaluated directly during parsing into a plain int, the
    same as the single-literal/single-name forms already were -- this only
@@ -548,7 +551,7 @@ view_static_args:
    computed from (see CLAUDE.md's "Global Constant Folding" section for the
    same drift concern on the *value* side of a global let). No forward
    references: a referenced name must already be in Const_env's table (its
-   `let` appeared earlier in the concatenated source). *)
+   `const` appeared earlier in the concatenated source). *)
 array_size:
   | n = INT   { narrow_int64 $symbolstartpos "array size" n }
   | name = IDENT
@@ -558,7 +561,7 @@ array_size:
           raise (Types.TypeError ($symbolstartpos,
             Printf.sprintf
               "array size '%s' is not a known compile-time integer constant \
-               (declare it earlier as an immutable global `let %s: T = N;`)"
+               (declare it earlier as `const %s: T = N;`)"
               name name)) }
   | SIZEOF LPAREN t = type_expr RPAREN
     { Type_layout.sizeof_type $symbolstartpos t }
@@ -581,7 +584,7 @@ type_expr:
   | SINK t = type_expr { TypeSink t }
   | EXISTS name = IDENT COLON sort = static_sort_expr DOT body = type_expr
     { TypeExists (name, sort, body) }
-  | LBRACE lo = INT DOTDOTLT hi = INT RBRACE
+  | LBRACE lo = refined_bound DOTDOTLT hi = refined_bound RBRACE
     { (* Reserved for future contextual base inference. Until the AST and
          signature inference can represent an unresolved refinement base,
          require the programmer to state it instead of retaining the old,
@@ -589,10 +592,10 @@ type_expr:
          would make an innocent range edit silently change ABI width. *)
       raise (Types.TypeError ($symbolstartpos,
         Printf.sprintf
-          "refined type {%Ld..<%Ld} requires an explicit base; write \
-           {%Ld..<%Ld as i32} (or another integer base)"
+          "refined type {%d..<%d} requires an explicit base; write \
+           {%d..<%d as i32} (or another integer base)"
           lo hi lo hi)) }
-  | LBRACE lo = INT DOTDOTLT hi = INT AS base = int_base_type_expr RBRACE %prec TYPE_BASE
+  | LBRACE lo = refined_bound DOTDOTLT hi = refined_bound AS base = int_base_type_expr RBRACE %prec TYPE_BASE
     { (* Explicit-base {lo..<hi as base} surface syntax: lets a programmer
          write a refined type whose LLVM representation genuinely is
          `base` (i8/i16/i32/i64/u8/u16/u32/u64/isize/usize), rather than only
@@ -608,17 +611,27 @@ type_expr:
          stay i32 too, even when every one of those values was naturally
          narrower on the wire (see CLAUDE.md's protocol examples for the
          concrete case this unblocks). *)
-      check_refined_base_range $symbolstartpos lo hi base;
-      TypeRefined (narrow_int64 $symbolstartpos "refined type bound" lo,
-                   narrow_int64 $symbolstartpos "refined type bound" hi,
-                   base) }
-  | LBRACE lo = INT DOTDOTLT hi = INT AS base = int_base_type_expr RBRACE
+      let lo64 = Int64.of_int lo and hi64 = Int64.of_int hi in
+      check_refined_base_range $symbolstartpos lo64 hi64 base;
+      TypeRefined (lo, hi, base) }
+  | LBRACE lo = refined_bound DOTDOTLT hi = refined_bound AS base = int_base_type_expr RBRACE
       AT n = static_arg
-    { check_refined_base_range $symbolstartpos lo hi base;
+    { let lo64 = Int64.of_int lo and hi64 = Int64.of_int hi in
+      check_refined_base_range $symbolstartpos lo64 hi64 base;
       TypeSingleton
-        (TypeRefined (narrow_int64 $symbolstartpos "refined type bound" lo,
-                      narrow_int64 $symbolstartpos "refined type bound" hi,
-                      base), n) }
+        (TypeRefined (lo, hi, base), n) }
+
+refined_bound:
+  | n = INT { narrow_int64 $symbolstartpos "refined type bound" n }
+  | name = IDENT
+    { match Const_env.find name with
+      | Some n -> n
+      | None ->
+          raise (Types.TypeError ($symbolstartpos,
+            Printf.sprintf
+              "refined type bound '%s' is not a known compile-time integer constant \
+               (declare it earlier as `const %s: T = N;`)"
+              name name)) }
 
 (* Restricted to the primitive integer types {lo..<hi as base} is allowed
    to name -- matches the "by convention" restriction on TRefinedInt's own

@@ -2,10 +2,10 @@
 //
 // The including example owns HTTP response generation and must provide:
 //   fn http_start_response(eth: [u8; 1514..], ihl: {20..<21 as u16},
-//                          req: *u8, req_len: u16, idx: {0..<4 as usize}) -> i32
+//                          req: *u8, req_len: u16, idx: {0..<MAX_CONNS as usize}) -> i32
 //   fn http_continue_response(eth: [u8; 1514..], ihl: {20..<21 as u16},
-//                             idx: {0..<4 as usize}) -> i32
-//   fn http_response_done(idx: {0..<4 as usize}) -> bool
+//                             idx: {0..<MAX_CONNS as usize}) -> i32
+//   fn http_response_done(idx: {0..<MAX_CONNS as usize}) -> bool
 //
 // GitHub issue #135's N-way concurrent connection support added the
 // trailing `idx` parameter to all three (identifies which of MAX_CONNS
@@ -13,7 +13,7 @@
 // for why a bare view could no longer carry this). An includer with truly
 // connection-scoped state of its own (e.g. examples/common/
 // http_sdcard_server.tkb's multi-segment SD-card streaming) must fan its
-// own state out to `[T; 4]` arrays indexed by `idx` too, or two
+// own state out to `[T; MAX_CONNS]` arrays indexed by `idx` too, or two
 // simultaneous connections corrupt each other's in-flight response --
 // includers whose response always completes within one poll_once call
 // (examples/http_server.tkb, examples/kvs_server*.tkb) do not need this,
@@ -24,7 +24,7 @@ use "examples/common/inet_checksum.tkb";
 use "examples/common/netutil.tkb";
 use "examples/common/http_conn_state.tkb";
 
-let HTTP_PORT: u16 = 80;
+const HTTP_PORT: u16 = 80;
 
 // GitHub issue #108: private (this file only). The connection's PHASE
 // (conn_state) lives in http_conn_state.tkb behind designated transition
@@ -43,24 +43,24 @@ let HTTP_PORT: u16 = 80;
 // kvs_server.tkb's kv_keys/kv_vals precedent, adopted there because
 // indexed writes into a nested/structured target are not reliably
 // supported -- see that file's own header comment).
-private let mut conn_remote_ip:   [u8; 16];
-private let mut conn_remote_port: [u16; 4];
-private let mut conn_snd_nxt:     [u32; 4];
-private let mut conn_rcv_nxt:     [u32; 4];
+private let mut conn_remote_ip:   [u8; 4 * MAX_CONNS];
+private let mut conn_remote_port: [u16; MAX_CONNS];
+private let mut conn_snd_nxt:     [u32; MAX_CONNS];
+private let mut conn_rcv_nxt:     [u32; MAX_CONNS];
 
 // Read accessors for the one legitimate external need: an including
 // example's http_start_response (e.g. examples/http_server/http_server.tkb)
 // builds its own response segment's TCP header directly and needs today's
 // sequence numbers to do it. Now slot-indexed (issue #135).
-fn tcp_conn_snd_nxt(idx: {0..<4 as usize}) -> u32 {
+fn tcp_conn_snd_nxt(idx: {0..<MAX_CONNS as usize}) -> u32 {
     return conn_snd_nxt[idx];
 }
 
-fn tcp_conn_rcv_nxt(idx: {0..<4 as usize}) -> u32 {
+fn tcp_conn_rcv_nxt(idx: {0..<MAX_CONNS as usize}) -> u32 {
     return conn_rcv_nxt[idx];
 }
 
-let HTTP_SEGMENT_PAYLOAD_MAX: i32 = 1400;
+const HTTP_SEGMENT_PAYLOAD_MAX: i32 = 1400;
 
 // Wire-level TCP event, classified from flag bits alone (see
 // classify_tcp_event below), independent of connection state.
@@ -109,7 +109,7 @@ inline fn classify_tcp_event(flags: u8) -> TcpEvent {
 // like e.g. Established(conn). This per-arm check is what turns a Pass-3
 // fallback into "ignore", exactly like the pre-#135 single-slot version
 // already relied on it to reject an unrelated stray packet.
-fn tcp_remote_matches(idx: {0..<4 as usize}, ip: borrow [u8; 20..], src_port: u16) -> bool {
+fn tcp_remote_matches(idx: {0..<MAX_CONNS as usize}, ip: borrow [u8; 20..], src_port: u16) -> bool {
     // Raw-pointer bytes_eq instead of a sliced conn_remote_ip[idx*4..<idx*4+4]
     // compare -- see tcp_conn_dispatch's own comment in http_conn_state.tkb
     // for why the sliced form is a real --forbid-trap site here.
@@ -212,12 +212,12 @@ fn build_tcp_ctrl(eth: borrow [u8; 54..], ihl: {20..<21 as u16},
     fix_tcp_checksum(ip, tcp);
 }
 
-fn build_syn_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}, idx: {0..<4 as usize}) {
+fn build_syn_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}, idx: {0..<MAX_CONNS as usize}) {
     build_tcp_ctrl(eth, ihl, TCP_FLAG_SYN | TCP_FLAG_ACK,
                    tcp_initial_seq(idx), conn_rcv_nxt[idx], 65535);
 }
 
-fn build_fin_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}, idx: {0..<4 as usize}) {
+fn build_fin_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}, idx: {0..<MAX_CONNS as usize}) {
     build_tcp_ctrl(eth, ihl, TCP_FLAG_FIN | TCP_FLAG_ACK,
                    conn_snd_nxt[idx], conn_rcv_nxt[idx], 65535);
 }
@@ -231,7 +231,7 @@ fn build_rst_from_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16},
 }
 
 fn build_tcp_payload(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-                     len: isize, tcp_flags: u8, idx: {0..<4 as usize}) -> i32 {
+                     len: isize, tcp_flags: u8, idx: {0..<MAX_CONNS as usize}) -> i32 {
     let wire_len: i32 = len as i32;
     if (len >= 0 && len <= (HTTP_SEGMENT_PAYLOAD_MAX as isize)
         && wire_len >= 0 && wire_len <= HTTP_SEGMENT_PAYLOAD_MAX) {
@@ -347,7 +347,7 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_b
                                         match tcp_conn_dispatch(conn_remote_ip as [u8; 16..], conn_remote_port as [u16; 4..],
                                                                 ip[IP_SRC..<IP_DST], src_port, is_syn) {
                                             TcpConnDispatch::Listen(conn) => {
-                                                let idx: {0..<4 as usize} = tcp_conn_listen_slot(conn);
+                                                let idx: {0..<MAX_CONNS as usize} = tcp_conn_listen_slot(conn);
                                                 match ev {
                                                     TcpEvent::Syn => {
                                                         // Raw-pointer bytes_copy instead of a sliced
@@ -384,7 +384,7 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_b
                                                 }
                                             }
                                             TcpConnDispatch::SynRcvd(conn) => {
-                                                let idx: {0..<4 as usize} = tcp_conn_synrcvd_slot(conn);
+                                                let idx: {0..<MAX_CONNS as usize} = tcp_conn_synrcvd_slot(conn);
                                                 if (tcp_remote_matches(idx, ip, src_port)) {
                                                     match ev {
                                                         TcpEvent::Rst => {
@@ -423,7 +423,7 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_b
                                                 }
                                             }
                                             TcpConnDispatch::Established(conn) => {
-                                                let idx: {0..<4 as usize} = tcp_conn_established_slot(conn);
+                                                let idx: {0..<MAX_CONNS as usize} = tcp_conn_established_slot(conn);
                                                 if (tcp_remote_matches(idx, ip, src_port)) {
                                                     match ev {
                                                         TcpEvent::Rst => {
@@ -496,7 +496,7 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_b
                                                 }
                                             }
                                             TcpConnDispatch::Sending(conn) => {
-                                                let idx: {0..<4 as usize} = tcp_conn_sending_slot(conn);
+                                                let idx: {0..<MAX_CONNS as usize} = tcp_conn_sending_slot(conn);
                                                 if (tcp_remote_matches(idx, ip, src_port)) {
                                                     match ev {
                                                         TcpEvent::Rst => {
@@ -540,7 +540,7 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_b
                                                 }
                                             }
                                             TcpConnDispatch::LastAck(conn) => {
-                                                let idx: {0..<4 as usize} = tcp_conn_lastack_slot(conn);
+                                                let idx: {0..<MAX_CONNS as usize} = tcp_conn_lastack_slot(conn);
                                                 if (tcp_remote_matches(idx, ip, src_port)) {
                                                     match ev {
                                                         TcpEvent::Rst => {

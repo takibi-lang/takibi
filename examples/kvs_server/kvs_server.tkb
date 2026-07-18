@@ -77,9 +77,9 @@ let mut our_ip:  [u8; 4];
 
 // -- Store constants and layout -------------------------------------------
 
-let KEY_MAX:     isize = 32;  // key charset: [A-Za-z0-9_-], length 1..32
-let VAL_MAX:     isize = 128; // value: arbitrary bytes, length 0..128
-let TABLE_SLOTS: isize = 16;
+const KEY_MAX:     isize = 32;  // key charset: [A-Za-z0-9_-], length 1..32
+const VAL_MAX:     isize = 128; // value: arbitrary bytes, length 0..128
+const TABLE_SLOTS: isize = 16;
 
 // kv_state[slot]: 0 = empty, 1 = used, 2 = tombstone. All five arrays are
 // BSS-zeroed at boot, so the table starts out entirely empty with no
@@ -90,9 +90,9 @@ let mut kv_val_len: [u8; 16];
 let mut kv_keys:    [u8; 16 * 32];   // slot i's key lives at [i*32 ..< i*32+key_len]
 let mut kv_vals:    [u8; 16 * 128];  // slot i's value lives at [i*128 ..< i*128+val_len]
 
-let STATE_EMPTY:    u8 = 0;
-let STATE_USED:     u8 = 1;
-let STATE_TOMBSTONE: u8 = 2;
+const STATE_EMPTY:    u8 = 0;
+const STATE_USED:     u8 = 1;
+const STATE_TOMBSTONE: u8 = 2;
 
 // -- Request-parsing scratch ------------------------------------------------
 
@@ -296,13 +296,9 @@ fn kvs_parse_path(p: borrow *u8, avail: isize) -> i32 {
     let mut i: isize = 6;
     let mut klen: isize = 0;
     while (i < avail && p[i] != ' ' as u8) {
-        // Compared against the literal 32, not the named KEY_MAX global:
-        // a refined-type narrowing must be spelled as a literal integer
-        // (same restriction array sizes have -- see
-        // examples/const_global/const_global.tkb's comment), a named
-        // global's value does not carry a provable range at its use site
-        // even when its own initializer is a literal.
-        if (klen >= 32) {
+        // KEY_MAX is a const, so the narrowing sees the same static value
+        // as the flat kv_keys array-size formula.
+        if (klen >= KEY_MAX) {
             return -2;
         }
         if (kvs_key_char_ok(p[i]) == false) {
@@ -417,7 +413,7 @@ fn kvs_write_status_line(payload: borrow *u8, status_id: i32) -> isize {
 // One uniform response builder for every KVS response. Always single-
 // segment, closed with our own FIN -- see the file header. body/body_len
 // may describe zero bytes (pass "" for an empty body).
-fn kvs_build_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16}, idx: {0..<4 as usize},
+fn kvs_build_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16}, idx: {0..<MAX_CONNS as usize},
         status_id: i32, body: borrow *u8, body_len: isize) -> i32 {
     let payload: *u8 = (eth as *u8) + 54;
     let mut len: isize = 0;
@@ -440,7 +436,7 @@ fn kvs_build_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16}, idx: {0..
 // comment. Every parse failure below therefore produces a real HTTP error
 // response (400/404/405/507) instead.
 fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-        req: borrow *u8, req_len: u16, idx: {0..<4 as usize}) -> i32 {
+        req: borrow *u8, req_len: u16, idx: {0..<MAX_CONNS as usize}) -> i32 {
     let len: isize = req_len as isize;
     let hdr_end: isize = kvs_find_hdr_end(req, len);
     if (hdr_end < 0) {
@@ -534,11 +530,11 @@ fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
 }
 
 fn http_continue_response(eth: borrow [u8; 1514..],
-        ihl: {20..<21 as u16}, idx: {0..<4 as usize}) -> i32 {
+        ihl: {20..<21 as u16}, idx: {0..<MAX_CONNS as usize}) -> i32 {
     return -1;
 }
 
-fn http_response_done(idx: {0..<4 as usize}) -> bool {
+fn http_response_done(idx: {0..<MAX_CONNS as usize}) -> bool {
     return true;
 }
 

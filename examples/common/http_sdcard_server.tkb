@@ -11,7 +11,7 @@
 // or examples/kvs_server*.tkb's single-segment responses, which never
 // needed to survive past one call). Two simultaneous downloads in the
 // Sending phase would otherwise corrupt each other's filename/size/
-// progress. Fanned out to [T; 4] arrays indexed by the idx every
+// progress. Fanned out to [T; MAX_CONNS] arrays indexed by the idx every
 // http_server_common.tkb callback now carries.
 
 use "examples/common/http_server_common.tkb";
@@ -27,13 +27,13 @@ use "examples/common/http_server_common.tkb";
 // http_server_common.tkb's module comment.
 let mut html_body: [u8; 512];
 
-let mut resp_name83:       [u8; 44]; // 11 * MAX_CONNS; slot i at [i*11..<i*11+11]
-let mut resp_size:         [u32; 4];
-let mut resp_sent:         [u32; 4];
-let mut resp_content_type: [i32; 4];
+let mut resp_name83:       [u8; 11 * MAX_CONNS]; // slot i at [i*11..<i*11+11]
+let mut resp_size:         [u32; MAX_CONNS];
+let mut resp_sent:         [u32; MAX_CONNS];
+let mut resp_content_type: [i32; MAX_CONNS];
 
-let RESP_TYPE_HTML: i32 = 1;
-let RESP_TYPE_PNG: i32 = 2;
+const RESP_TYPE_HTML: i32 = 1;
+const RESP_TYPE_PNG: i32 = 2;
 
 fn content_type_for_name83(name83: borrow *u8) -> i32 {
     if (name83[8] == 'P' as u8 && name83[9] == 'N' as u8 &&
@@ -43,12 +43,12 @@ fn content_type_for_name83(name83: borrow *u8) -> i32 {
     return RESP_TYPE_HTML;
 }
 
-fn copy_response_name(name83: borrow *u8, idx: {0..<4 as usize}) {
+fn copy_response_name(name83: borrow *u8, idx: {0..<MAX_CONNS as usize}) {
     bytes_copy((resp_name83 as *u8) + (idx as isize) * 11, name83, 11);
 }
 
 fn build_error_response_fin(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-                            msg: *u8, idx: {0..<4 as usize}) -> i32 {
+                            msg: *u8, idx: {0..<MAX_CONNS as usize}) -> i32 {
     let body_len: isize = copy_str(html_body, msg);
     let payload: *u8 = (eth as *u8) + 54;
     let mut len: isize = 0;
@@ -62,7 +62,7 @@ fn build_error_response_fin(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
 }
 
 fn build_response_segment(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-                          first: bool, idx: {0..<4 as usize}) -> i32 {
+                          first: bool, idx: {0..<MAX_CONNS as usize}) -> i32 {
     let payload: *u8 = (eth as *u8) + 54;
     let mut len: isize = 0;
     if (first) {
@@ -96,7 +96,7 @@ fn build_response_segment(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
 }
 
 fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-                       req: borrow *u8, req_len: u16, idx: {0..<4 as usize}) -> i32 {
+                       req: borrow *u8, req_len: u16, idx: {0..<MAX_CONNS as usize}) -> i32 {
     let mut name83: [u8; 11];
     if (http_request_path_to_name83(req, req_len as isize, name83) == false) {
         let msg: *u8 = "400: unsupported path\n";
@@ -120,10 +120,10 @@ fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
 }
 
 fn http_continue_response(eth: borrow [u8; 1514..],
-        ihl: {20..<21 as u16}, idx: {0..<4 as usize}) -> i32 {
+        ihl: {20..<21 as u16}, idx: {0..<MAX_CONNS as usize}) -> i32 {
     return build_response_segment(eth, ihl, false, idx);
 }
 
-fn http_response_done(idx: {0..<4 as usize}) -> bool {
+fn http_response_done(idx: {0..<MAX_CONNS as usize}) -> bool {
     return resp_sent[idx] >= resp_size[idx];
 }

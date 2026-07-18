@@ -8,7 +8,7 @@
 // evidence that percpu.tkb's clean --forbid-trap compile comes from
 // cpu_id()'s refined return type doing real work, not from NCPU
 // happening to be 1.
-let NCPU: usize = 1;
+const NCPU: usize = 1;
 
 fn cpu_id() -> usize {
     return 0;
