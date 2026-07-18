@@ -181,7 +181,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck hwcheck-net perfcheck langcheck check allcheck clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
+.PHONY: build test qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck hwcheck-net stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
 
 .DEFAULT_GOAL := build
 
@@ -271,6 +271,17 @@ hwcheck: stm32build
 ## header comment.
 hwcheck-net: stm32build examples/http_server/kernel_stm32.bin examples/http_server_sdcard/kernel_stm32.bin
 	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/run_hwtest_net_ram.sh
+
+## stress-stm32-kvs-server-sdcard-rtos: opt-in real-board stress run for
+## examples/kvs_server_sdcard_rtos. This deliberately stays OUT of allcheck:
+## issue #135 found that concurrent Ethernet plus SD write-through load is
+## board/load sensitive on STM32F746G-DISCOVERY. Defaults match the practical
+## manual profile workload: concurrency 4, fixed key, 30s. Override with
+## TAKIBI_STRESS_CONCURRENCY, TAKIBI_STRESS_DURATION, TAKIBI_STRESS_FIXED_KEY,
+## TAKIBI_STRESS_PUT_RATIO, TAKIBI_STRESS_GET_RATIO, and
+## TAKIBI_STRESS_DELETE_RATIO.
+stress-stm32-kvs-server-sdcard-rtos: examples/kvs_server_sdcard_rtos/kernel_stm32_ram.elf
+	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/stress_stm32_kvs_server_sdcard_rtos.sh
 
 ## perfcheck: run real-hardware profiling smoke tests. This checks that the
 ## profiler's firmware table ABI, OpenOCD dump path, and host-side decoder

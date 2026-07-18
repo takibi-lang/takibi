@@ -8492,3 +8492,10 @@ waits synchronously for write-through SD persistence. Task splitting is still
 the right demonstration shape, but hiding this latency would require changing
 the persistence contract (for example, write-behind or batching), not just a
 small scheduler/channel tweak.
+
+Because the c4 stress workload is useful but intentionally too unstable for
+`make allcheck`, a dedicated opt-in target was added:
+`make stress-stm32-kvs-server-sdcard-rtos`. It loads the ordinary RAM
+firmware and runs `scripts/kvs_stress.py` with the practical issue #135
+defaults (concurrency 4, fixed key, 30s). The target is documented in
+`README.md`, but no aggregate check target depends on it.

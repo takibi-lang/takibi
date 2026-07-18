@@ -164,6 +164,7 @@ make stm32build     # cross-compile every ported example for STM32F746G-DISCOVER
 make check          # run langcheck + test + stm32build + qemutest together
 make hwcheck        # like stm32build, but also loads into RAM + UART-diffs against real STM32 hardware
 make hwcheck-net    # real-Ethernet hardware tests (needs the board's Ethernet port wired to this host)
+make stress-stm32-kvs-server-sdcard-rtos  # opt-in STM32 KVS concurrency stress test (not in allcheck)
 make perfcheck      # real-hardware profiler smoke tests
 make allcheck       # clean + check + hwcheck + perfcheck + hwcheck-net
 make clean          # remove generated artifacts

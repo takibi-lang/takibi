@@ -335,11 +335,20 @@ make stm32build      # cross-compile every ported example for STM32 (no hardware
 make check           # langcheck + test + stm32build + qemutest
 make hwcheck          # like stm32build, but also flashes + verifies against real STM32 hardware
 make hwcheck-net      # real-Ethernet hardware tests (needs the board wired to this host's NIC)
+make stress-stm32-kvs-server-sdcard-rtos  # opt-in STM32 KVS concurrency stress test
 make perfcheck        # real-hardware profiler smoke tests
 make allcheck         # clean + check + hwcheck + perfcheck + hwcheck-net
 ```
 
 Builds run in parallel across all cores by default.
+
+`stress-stm32-kvs-server-sdcard-rtos` is intentionally not part of
+`allcheck`: the STM32F746G-DISCOVERY becomes load-sensitive under
+concurrent Ethernet plus SD-card write-through persistence. The target
+loads the KVS+SD+RTOS firmware into RAM and runs `scripts/kvs_stress.py`
+with the practical issue #135 defaults, concurrency 4 and a fixed key.
+Override with `TAKIBI_STRESS_CONCURRENCY`, `TAKIBI_STRESS_DURATION`, or
+`TAKIBI_STRESS_FIXED_KEY` for manual characterization.
 
 ### Dependencies
 
