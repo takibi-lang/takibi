@@ -17,8 +17,9 @@
 # kvs_server_sdcard_rtos.tkb's header comment).
 #
 # The firmware is built with takibi --profile-functions, loaded into AXI
-# SRAM1, exercised by a single host curl PUT, then halted so OpenOCD can
-# dump __takibi_prof_table from RAM. The table format is fixed by
+# SRAM1, exercised by either a single host curl PUT (default) or
+# scripts/kvs_stress.py (TAKIBI_PROFILE_LOAD=stress), then halted so OpenOCD
+# can dump __takibi_prof_table from RAM. The table format is fixed by
 # lib/llvm_gen.ml:
 #   struct Entry { u32 id; u32 calls; u64 inclusive_cycles; }
 set -euo pipefail
@@ -32,6 +33,11 @@ KEY="profkey"
 URL="${TAKIBI_PROFILE_URL:-http://192.168.10.2/keys/$KEY}"
 PUT_BODY="${TAKIBI_PROFILE_PUT_BODY:-takibi profile probe value}"
 OUT_DIR="${TAKIBI_PROFILE_OUT_DIR:-_build/takibi_profile/kvs_server_sdcard_rtos}"
+PROFILE_LOAD="${TAKIBI_PROFILE_LOAD:-single}"
+STRESS_CONCURRENCY="${TAKIBI_PROFILE_STRESS_CONCURRENCY:-24}"
+STRESS_DURATION="${TAKIBI_PROFILE_STRESS_DURATION:-30}"
+STRESS_VALUE_SIZE="${TAKIBI_PROFILE_STRESS_VALUE_SIZE:-64}"
+STRESS_TIMEOUT="${TAKIBI_PROFILE_STRESS_TIMEOUT:-5}"
 PATH_ENTRY_SIZE=84
 PATH_ENTRY_COUNT=256
 
@@ -126,6 +132,17 @@ put_key() {
     fi
 }
 
+run_stress_load() {
+    echo "Running kvs_stress.py (concurrency=$STRESS_CONCURRENCY duration=${STRESS_DURATION}s) ..."
+    python3 scripts/kvs_stress.py \
+        --host 192.168.10.2 \
+        --port 80 \
+        --concurrency "$STRESS_CONCURRENCY" \
+        --duration "$STRESS_DURATION" \
+        --value-size "$STRESS_VALUE_SIZE" \
+        --timeout "$STRESS_TIMEOUT" | tee "$OUT_DIR/stress.txt"
+}
+
 echo "Loading profiled KVS+SD+RTOS firmware..."
 ram_load_and_run "$ELF"
 
@@ -170,21 +187,34 @@ put_key "warm"
 echo "Clearing profile counters after warm-up..."
 clear_profile_counters_and_resume "$table_addr" "$profile_count" "$path_addr" "$path_size"
 
-# Measured PUT overwrites the same key -- the ordinary write-through
-# overwrite path every other measurement in issue #135 used.
-put_key "measured"
+case "$PROFILE_LOAD" in
+    single)
+        # Measured PUT overwrites the same key -- the ordinary write-through
+        # overwrite path every other measurement in issue #135 used.
+        put_key "measured"
+        profile_title="PUT overwrite"
+        ;;
+    stress)
+        run_stress_load
+        profile_title="kvs_stress concurrency=$STRESS_CONCURRENCY duration=${STRESS_DURATION}s"
+        ;;
+    *)
+        echo "unknown TAKIBI_PROFILE_LOAD=$PROFILE_LOAD (expected single or stress)" >&2
+        exit 1
+        ;;
+esac
 
 echo "Dumping $profile_count profile entries from $table_addr ..."
 dump_profile_table "$table_addr" "$table_size" "$dump"
 echo "Dumping $PATH_ENTRY_COUNT call-path entries from $path_addr ..."
 dump_profile_table "$path_addr" "$path_size" "$path_dump"
 
-python3 - "$OBJ" "$dump" "$path_dump" "$OUT_DIR/profile.folded" <<'PY'
+python3 - "$OBJ" "$dump" "$path_dump" "$OUT_DIR/profile.folded" "$profile_title" <<'PY'
 import struct
 import subprocess
 import sys
 
-obj, dump, path_dump, folded_out = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+obj, dump, path_dump, folded_out, profile_title = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 out = subprocess.check_output(["llvm-nm-19", obj], text=True)
 names = []
 for line in out.splitlines():
@@ -208,7 +238,7 @@ for off in range(0, len(data), 16):
 rows.sort(reverse=True)
 total = sum(cycles for cycles, _, _, _ in rows)
 print("")
-print("Takibi STM32 function profile: inclusive cycles (PUT overwrite)")
+print("Takibi STM32 function profile: inclusive cycles (%s)" % profile_title)
 print("entries: %d, active: %d, total cycles: %d" % (len(names), len(rows), total))
 print("")
 print("%12s %10s %7s  %s" % ("cycles", "calls", "pct", "function"))
