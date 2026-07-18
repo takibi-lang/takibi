@@ -274,8 +274,20 @@ hwcheck-net: stm32build examples/http_server/kernel_stm32.bin examples/http_serv
 
 ## perfcheck: run real-hardware profiling smoke tests. This checks that the
 ## profiler's firmware table ABI, OpenOCD dump path, and host-side decoder
-## still agree; it does not assert stable performance numbers.
-perfcheck: profile-stm32-http-server-sdcard-rtos
+## still agree; it does not assert stable performance numbers -- the .tkb
+## code and compiler are both moving targets, so exact cycle counts are not
+## a meaningful regression signal here, only "did the mechanism run at all"
+## is. Each profile run claims the one physical board exclusively (see
+## scripts/stm32_hw_claim.sh); invoked as separate $(MAKE) sub-calls
+## (same pattern as allcheck below), not as parallel prerequisites, so
+## `make -jN perfcheck` can't race two profile scripts for the same
+## hardware -- listing them as ordinary prerequisites let `-j` start both
+## at once, and stm32_hw_claim.sh's takeover check doesn't recognize a
+## profile script as a safe process to interrupt, so the loser just failed
+## outright instead of queueing.
+perfcheck:
+	$(MAKE) profile-stm32-http-server-sdcard-rtos
+	$(MAKE) profile-stm32-kvs-server-sdcard-rtos
 
 ## langcheck: verify that all source files contain only ASCII characters
 langcheck:
