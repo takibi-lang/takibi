@@ -8470,3 +8470,25 @@ the remaining profile is dominated by `cond_wait`, `sched_next`,
 `http_server_poll_once`, and `kvs_sd_request_recv`, which mostly represent
 synchronous waiting and task handoff rather than one obvious KVS data-path
 copy/write loop.
+
+Follow-up experiments tried three task-split-preserving RTOS handoff
+changes and deliberately landed none of them:
+
+- Adding `task_yield()` around Chan/KVS request-channel handoff made the
+  ordinary hardware tests pass in one variant, but the profiled KVS firmware
+  stopped responding to the warm PUT. A profiling-hostile synchronization
+  primitive is not useful for this bottleneck investigation.
+- Collapsing the KVS request and response channels into one synchronous RPC
+  channel kept `make hwcheck-net` passing, but degraded the c4 fixed-key
+  profile from the previous roughly 10.5 req/s run to roughly 3.7 req/s, so
+  the old two-channel rendezvous shape remains.
+- Raising the STM32 RTOS tick from about 64Hz to about 256Hz also made the
+  profiled KVS firmware fail the warm PUT, so the scheduler tick stays at the
+  established value.
+
+The conclusion is that the STM32 KVS+SD+RTOS demo has reached the point
+where the remaining high-load bottleneck is architectural: the network task
+waits synchronously for write-through SD persistence. Task splitting is still
+the right demonstration shape, but hiding this latency would require changing
+the persistence contract (for example, write-behind or batching), not just a
+small scheduler/channel tweak.

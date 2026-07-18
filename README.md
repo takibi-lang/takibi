@@ -212,8 +212,8 @@ by a current example does not.
 - DWARF debug-info emission (`-g`) is covered by a live QEMU/GDB
   regression fixture for globals, locals, aggregates, arguments,
   stepping, and backtraces. Small profiling helpers are also implemented:
-  QEMU/gdbstub PC sampling for CPU-bound experiments, and an STM32 DWT
-  cycle-count profiler for the HTTP+SD+RTOS demo.
+  QEMU/gdbstub PC sampling for CPU-bound experiments, and STM32 DWT
+  cycle-count profilers for the HTTP+SD+RTOS and KVS+SD+RTOS demos.
 
 See [`SPEC.md`](SPEC.md) for the current language syntax and grammar, and
 `HISTORY.md` for the detailed engineering log of design
