@@ -1,10 +1,34 @@
 # Raspberry Pi 3B (BCM2837) Bare-Metal Bring-Up
 
-GitHub issue #140. Status: `examples/hello` proven working end to end
-(JTAG-injected, "Hello, World!" observed over UART0) -- the only example
-ported so far. This is a JTAG-only bring-up: nothing here writes to the
-SD card as a real `kernel8.img`; see "Why JTAG injection, not an SD card
-kernel" below.
+GitHub issue #140. Status: 33 examples ported and passing `make
+hwcheck-rpi3` (`start`/`hello`/`print_int`/`print_hex`/`print_ptr`/
+`mem`/`array`/`fizzbuzz`/`fibonacci`/`bubblesort`/`ringbuf`/`callstack`/
+`crc8`/`djb2`/`bump`/`scheduler`/`struct`/`struct_refined`/`refined`/
+`narrow`/`for`/`loop`/`enum`/`nonexhaustive`/`bitops`/`align`/`packed`/
+`struct_align`/`const_global`/`sizeof_offsetof`/`inet_checksum`/
+`ip_parse`/`tcp_parse` -- matches `hwcheck-stm32`'s own "plain compute"
+example set, see "Build" below). This is a JTAG-only bring-up: nothing
+here writes to the SD card as a real `kernel8.img`; see "Why JTAG
+injection, not an SD card kernel" below. Not yet ported:
+rtc/timer/echo/irq/preempt/semaphore/condvar/msgqueue/watchdog/
+rtos_demo (need a real BCM2837 interrupt-controller/timer driver -- a
+separate, substantially larger piece of work).
+
+## Out of scope: SD-card-storage examples
+
+STM32's `fatfs`/`sdcard`/`http_server_sdcard`/`http_server_sdcard_rtos`/
+`kvs_server_sdcard_rtos`/`rtos_fatfs_sdcard` (and equivalents) use a
+*second*, dedicated SD card wired to a separate SDMMC/SPI peripheral,
+purely as block storage -- unrelated to how the board boots. Raspberry
+Pi 3B has only one SD card slot, and it is already committed to boot
+duty here (`bootcode.bin`/`start.elf`/`fixup.dat`/`config.txt`/
+`kernel8.img`, see "Preparing the SD card" below). Porting any
+SD-card-storage example to this target would mean sharing that same
+physical card between "how the board boots" and "a FAT filesystem the
+running example reads/writes" -- a fundamentally different, riskier
+arrangement than STM32's two-independent-cards setup, and deliberately
+out of scope for this target. Do not port these, even once other
+examples using real interrupts/timers land.
 
 ## Hardware
 
@@ -56,57 +80,165 @@ scripts/rpi_uart_dev.sh   # -> /dev-host/ttyUSBn
 ## Why JTAG injection, not an SD card kernel
 
 The board's SD card currently runs a full Raspberry Pi OS (Trixie,
-arm64 lite) with `enable_jtag_gpio=1` appended to `config.txt` -- Linux
-boots normally, JTAG is just also wired up. Injecting a bare-metal
-payload's PC/SP directly into a *live* Linux core via JTAG halt+resume
-is not safe: confirmed live (read-only `halt`/`reg`/`resume`, see git
-history around 2026-07-18) that the running core sits at EL1H with the
-MMU and both caches on, executing a kernel virtual address -- our
-bare-metal code assumes MMU off and physical==virtual, so resuming into
+arm64 lite) with `enable_jtag_gpio=1`/`dtoverlay=disable-bt` appended to
+`config.txt` -- Linux boots normally, JTAG is just also wired up.
+Injecting a bare-metal payload's PC/SP directly into a *live* Linux core
+via JTAG halt+resume is not safe: confirmed live (read-only
+`halt`/`reg`/`resume`) that the running core sits at EL1H with the MMU
+and both caches on, executing a kernel virtual address -- resuming into
 it with a raw physical PC would fault or corrupt kernel state, not run
 cleanly.
 
 STM32's equivalent hardware harness (`scripts/run_hwtest_ram.sh`) avoids
 this with `reset halt`: a real hardware reset lands the CPU at a known,
 clean vector table before any Flash code has run. That option does not
-exist here -- the standard 6-pin Raspberry Pi JTAG GPIO header carries
-no system reset line, so OpenOCD's `reset` cannot restart the GPU
-firmware's boot sequence (confirmed: `target/bcm2837.cfg` defines no
-`reset_config`/SRST handling of its own).
+exist here over JTAG's `reset` command -- the standard 6-pin Raspberry
+Pi JTAG GPIO header carries no system reset line, so OpenOCD's `reset`
+cannot restart the GPU firmware's boot sequence (confirmed:
+`target/bcm2837.cfg` defines no `reset_config`/SRST handling of its
+own). `scripts/rpi3_jtag_reset.sh` gets the same end result a different
+way -- see "Resetting the board over JTAG" below.
 
 The workaround: `jtag_stub.S`, a standalone 8-byte `wfe`-loop image, is
 flashed as the SD card's `kernel8.img` in place of Raspbian. On power-up
-the GPU firmware still does its own job (DRAM/clock init) exactly as it
-would for a real OS, then jumps to this stub instead of Linux -- core 0
-parks in an infinite `wfe` with MMU/caches off and no OS state to
-protect. From there, `scripts/rpi3_jtag_load.sh` can safely `halt` and
-verify (by checking the halted core's MMU state, see "Load and run"
-below) that it caught a bare-metal image and not still-running Raspbian,
-before injecting a real payload. **A physical power cycle is required to
-reach this state at least once** -- OpenOCD alone cannot get there from
-a live Raspbian boot. After that, repeated injections in the same power
-cycle are safe without another power cycle (see "Load and run").
+(or a JTAG-triggered watchdog reset, see below) the GPU firmware still
+does its own job (DRAM/clock init) exactly as it would for a real OS,
+then jumps to this stub instead of Linux -- core 0 parks in an infinite
+`wfe` with the MMU off and no OS state to protect. From there,
+`scripts/rpi3_jtag_load.sh` can safely `halt` and verify (by checking
+the halted core's exception level, see "Load and run" below) that it
+caught a bare-metal image and not still-running Raspbian, before
+injecting a real payload.
+
+## Resetting the board over JTAG (no physical access needed)
+
+`scripts/rpi3_jtag_reset.sh` triggers a full BCM2837 chip reset purely
+over JTAG -- equivalent to a physical power cycle (the GPU firmware
+reruns from scratch, re-reading `config.txt` and `kernel8.img` off the
+SD card), with no human needed at the board. Mechanism: BCM2837's PM
+block has a watchdog-based software reset (`PM_RSTC` at `0x3F10001C`,
+`PM_WDOG` at `0x3F100024`, gated by the `0x5A000000` password magic in
+the top byte of any write -- the same mechanism Linux's own
+`bcm2835_wdt` driver and U-Boot's `bcm2835` reset driver use for
+`reboot`), poked directly via OpenOCD `mww` memory writes. The watchdog
+fires fast enough that the triggering OpenOCD session almost always
+ends with "Invalid ACK"/"JTAG-DP STICKY ERROR" (the DAP losing a stable
+connection to a chip that is actively resetting underneath it) --
+that's expected and means the reset worked, not that it failed; the
+script ignores that exit status and separately polls (reconnect +
+`halt` + `reg pc`, up to ~15s) until the chip responds again, confirming
+success by checking it lands back at `jtag_stub.S`'s spin loop (EL2H,
+PC=0x80004) before reporting success.
+
+Use this instead of asking for a physical power cycle whenever the
+board ends up in a state `scripts/rpi3_jtag_load.sh`'s EL2H check
+refuses (see "Load and run" below) or otherwise needs a clean restart --
+e.g. after directly poking system/MMU state by hand while debugging.
+`scripts/rpi3_jtag_load.sh`'s own refusal message suggests this script
+first, a physical power cycle only as the fallback (needed only if
+`kernel8.img` on the SD card isn't `jtag_stub.img` in the first place).
+
+Does NOT check what's currently running before resetting (unlike
+`rpi3_jtag_load.sh`'s injection path) -- it is explicitly a "start over"
+operation; don't run it against a board with a live Raspbian session you
+want to keep.
 
 ## Build
 
 ```
 make examples/common_rpi3/jtag_stub.img   # SD card kernel8.img (one-time flash)
-make examples/hello/kernel_rpi3.elf       # the injected payload
+make examples/hello/kernel_rpi3.elf       # an injected payload (any RPI3_EXAMPLES name)
 ```
 
-`RPI3_TARGET := aarch64-none-elf`, `RPI3_CPU := cortex-a53` (Makefile).
-Only `examples/hello` has a build rule so far -- deliberately not folded
-into a batch `EXAMPLES`-style list yet (see Makefile's comment at the
-Raspberry Pi section); add more one at a time as each is ported and
-verified, matching this project's YAGNI stance (see root AGENTS.md).
+`RPI3_TARGET := aarch64-none-elf`, `RPI3_CPU := cortex-a53`,
+`RPI3_EXAMPLES`/`RPI3_CHECKSUM_EXAMPLES` (Makefile) list the 33 examples
+currently ported, generic pattern rules (mirroring `STM32_OBJS`/
+`STM32_EXAMPLES`). Add more names there (plus a matching
+`run_hw_test_rpi3` line in `scripts/run_hwtest_rpi3.sh`) one at a time
+as each is ported and verified -- not the interrupt/timer-dependent
+group, see the top of this file.
 
 `jtag_stub.img` is a raw binary (`llvm-objcopy-19 -O binary`), not an
 ELF -- the GPU firmware's loader expects a flat binary at a fixed
 address (0x80000, `jtag_stub.ld`), not an ELF container.
 
-`examples/hello/kernel_rpi3.elf` loads at 0x200000 (`link.ld`),
-deliberately different from the stub's 0x80000, so a JTAG session's
-`load_image` target is never the same address the stub itself occupied.
+Every `kernel_rpi3.elf` loads at 0x200000 (`link.ld`), deliberately
+different from the stub's 0x80000, so a JTAG session's `load_image`
+target is never the same address the stub itself occupied.
+
+## MMU: why it's on, and why its caches deliberately are not
+
+`examples/common_rpi3/mmu.S`'s `mmu_init` (called from `startup.S`,
+after BSS clear -- see that call site's own comment for why that
+ordering specifically matters) sets up a minimal 2-level AArch64 EL2
+identity map (VA == PA, 4KB granule, T0SZ=25: 1GB per L1 entry / 2MB per
+L2 block) and enables the MMU (`SCTLR_EL2.M`) before anything else runs.
+Only L1 entry 0 is populated, covering 0x00000000-0x3FFFFFFF: L2
+entries 0-503 (0x00000000-0x3EFFFFFF) are Normal Write-Back Cacheable
+(RAM), entries 504-511 (0x3F000000-0x3FFFFFFF) are Device-nGnRnE
+(peripherals) -- 0x3F000000 is exactly 2MB-aligned, so this split falls
+on a clean block boundary.
+
+**Why the MMU is needed at all**: AArch64 architecturally treats ALL
+data accesses as Device-nGnRnE memory whenever the stage 1 MMU is
+disabled, and Device memory enforces natural alignment unconditionally
+(independent of `SCTLR_ELx.A`). Confirmed the hard way:
+`examples/packed` and `examples/inet_checksum` both faulted
+(`ESR_EL2 0x96000061` -- EC 0x25 "Data Abort, same EL", DFSC "Alignment
+fault") on a WIDE STORE THE COMPILER SYNTHESIZED from several adjacent
+1-byte source-level writes (`hdr[0]=0x45 as u8; hdr[1]=0x00 as u8; ...`
+-> a single `stur x8, [sp, #0xc]`, unaligned relative to 8 bytes) --
+`examples/packed`'s own field access is intentionally unaligned by
+design, but `inet_checksum.tkb`/`examples/common/netutil.tkb`'s
+`read_u16be`/`checksum_add` are deliberately byte-safe already (for
+endianness reasons, not alignment ones) and still hit this, because it
+is LLVM's own backend store-merging optimization creating the unaligned
+instruction, invisible at the `.tkb` source level. This is a general
+LLVM-backend phenomenon (any language using LLVM -- C/Clang, Rust, Zig
+-- is equally exposed under the same "MMU off" condition), not specific
+to takibi, and is why essentially every real-world bare-metal AArch64
+project enables the MMU during early boot.
+
+**Why `SCTLR_EL2.C`/`.I` (D-cache/I-cache) are explicitly forced OFF**,
+not just left unset: this project's specific JTAG re-injection workflow
+(`scripts/rpi3_jtag_load.sh`) writes each new payload directly into
+physical RAM over the debug port (`load_image`), bypassing the CPU's
+caches entirely -- like a DMA write. With caching enabled, this produced
+silent data corruption, confirmed twice over:
+- First: a batch run where only the very FIRST example passed and every
+  following one produced UART output that looked like raw
+  instruction/data bytes leaking out (not a clean hang, not a fault --
+  `ESR_EL2` on inspection turned out to be STALE, left over from an
+  earlier, unrelated fault, not a fresh one; the affected examples had
+  actually run to completion, just computed/transmitted wrong data).
+  Root cause: `SCTLR_EL2` is inherited state like everything else this
+  file discusses (see `startup.S`'s own comment), so `mmu_init`'s
+  original `orr x0, x0, #1 | (1<<2) | (1<<12)`-style write only ADDED
+  the M bit on top of whatever C/I state a PREVIOUS payload's own
+  `mmu_init` had left set, never clearing it -- fixed by using `bic` to
+  explicitly force C/I off on every run, not just refrain from setting
+  them.
+- Second: even after that fix, a run mixing in leftover state from an
+  UNRELATED prior manual test (built before the `bic` fix existed, with
+  caching left genuinely enabled and never cleaned before halting)
+  still showed the same corruption pattern -- consistent with dirty
+  (written-back-pending) D-cache lines from that earlier occupant
+  getting evicted and overwriting freshly JTAG-loaded memory at some
+  later point, not just serving stale reads. Confirmed resolved,
+  definitively, by resetting the board (`scripts/rpi3_jtag_reset.sh`)
+  to a genuinely clean state and re-running the full `make
+  hwcheck-rpi3` suite from there: 33/33 passed.
+
+With both C and I left off, `load_image`'s direct-to-RAM writes and this
+core's own subsequent fetches/loads are trivially coherent (no cache in
+the path to ever go stale), matching how a genuine cold boot's
+first-ever execution is always coherent by construction. The MMU alone
+(page-table memory attributes, not the cache-enable bits) is what
+actually fixes the alignment-fault problem above -- there is no known
+reason a future example would need the caches on given this project's
+specific re-injection-heavy workflow, so this is not treated as a
+temporary shortcut to revisit, just the correct tradeoff for this
+target's actual usage pattern.
 
 ## Preparing the SD card
 
@@ -139,18 +271,24 @@ scripts/rpi3_jtag_load.sh examples/hello/kernel_rpi3.elf
 
 Two-pass, both over the same `interface/ftdi/olimex-arm-usb-tiny-h.cfg`
 + `target/bcm2837.cfg`:
-1. **Read-only safety check**: `halt`, read `pc` + MMU state, `resume`
-   immediately. If the halted core's MMU is not off, the script refuses
-   to go further -- it has almost certainly caught still-running
-   Raspbian (confirmed always MMU-on), and the board is left running
+1. **Read-only safety check**: `halt`, read `pc` + current exception
+   level, `resume` immediately. If the halted core is not at EL2H, the
+   script refuses to go further -- it has almost certainly caught
+   still-running Raspbian (Linux always runs the kernel at EL1, so a
+   live boot always halts at EL1H), and the board is left running
    exactly as found (this pass never writes anything). This is
-   deliberately NOT a narrow PC-range check against `jtag_stub.S`'s
-   address alone: a *previous* injected payload's own halt loop is just
-   as safe to catch and overwrite (MMU/caches still off, `startup.S`
-   never enables them), so one power cycle covers any number of
-   subsequent injections in the same session -- this is what makes
+   deliberately NOT an MMU-state check (an earlier version used
+   "MMU off" as the signal, back when nothing here ever enabled the
+   MMU -- see "MMU" above for why every payload now enables it, which
+   made that old signal self-contradictory: our own payloads leave the
+   core with the MMU ON now too, same as Raspbian) and NOT a narrow
+   PC-range check against `jtag_stub.S`'s address alone: a *previous*
+   injected payload's own halt loop is just as safe to catch and
+   overwrite as the stub itself (both run at EL2H), so one reset
+   (physical power cycle, or `scripts/rpi3_jtag_reset.sh`) covers any
+   number of subsequent injections -- this is what makes
    `scripts/run_hwtest_rpi3.sh` (`make hwcheck-rpi3`) practical to run
-   more than once without re-flashing/re-power-cycling between examples.
+   more than once without resetting between examples.
 2. **Injection**: only reached if the check above passed. `halt`,
    `load_image` the ELF, set `sp`/`pc` from the ELF's own `stack_top`
    symbol and entry point (via `llvm-nm-19`/`llvm-readelf-19`, not
@@ -169,17 +307,19 @@ cat "$(scripts/rpi_uart_dev.sh)"
 `scripts/run_hwtest_rpi3.sh` (invoked by `make hwcheck-rpi3`) automates
 the above into a pass/fail suite, modeled on `scripts/run_hwtest_ram.sh`'s
 `read_until_quiet` idle-detection capture (reused verbatim) diffed
-against each example's existing `.expected` fixture. NOT part of `make
+against each example's existing `.expected` fixture -- every fixture is
+reused byte-for-byte from the QEMU/STM32 suites, since `uart_puts`/
+`uart_print_*` write identical bytes on every HAL. NOT part of `make
 check`/`make allcheck` -- like `make hwcheck-stm32`, it needs physical
 hardware, and unlike it, the very first run in a session additionally
-needs the board already power-cycled into `jtag_stub.S` (see "Why JTAG
-injection, not an SD card kernel" above); `scripts/run_hwtest_rpi3.sh`
-distinguishes that failure mode (JTAG injection itself failing, almost
-always the MMU-state check refusing a still-Raspbian board) from an
-actual test failure (injection succeeded, UART output didn't match), so
-the fix (power-cycle vs. a real bug) is never ambiguous from the output.
-Only `examples/hello` is wired in so far -- add one `run_hw_test_rpi3`
-line per newly-ported example, matching `RPI3_EXAMPLES` in the Makefile.
+needs the board already reset into `jtag_stub.S` (physical power cycle,
+or `scripts/rpi3_jtag_reset.sh` -- see "Why JTAG injection, not an SD
+card kernel" and "Resetting the board over JTAG" above);
+`scripts/run_hwtest_rpi3.sh` distinguishes that failure mode (JTAG
+injection itself failing, almost always the EL2H check refusing a
+still-Raspbian board) from an actual test failure (injection succeeded,
+UART output didn't match), so the fix (reset vs. a real bug) is never
+ambiguous from the output.
 
 ## `sudo` warning specific to this devcontainer
 
@@ -212,4 +352,17 @@ specific container, and is what every command above assumes.
   and BCM2837's interrupt controller is the legacy Broadcom one, not the
   GICv2 `examples/common_qemu/gic.tkb` targets. Add these only once a
   real interrupt-driven example needs them.
-- `startup.S` defines no exception vector table for the same reason.
+
+## Exception vector table (`startup.S`)
+
+Every entry just spins (`b .`) -- this is a safety net for controlled,
+debuggable behavior on any fault, not functional interrupt dispatch
+(nothing here uses interrupts yet, same reasoning as `uart.tkb` above).
+Found necessary the hard way: before this existed, `examples/packed`
+hanging left the halted PC holding raw garbage data, not a code address
+-- with `VBAR_EL2` never set, an unrelated fault's exception entry
+itself faulted (ARM Trusted Firmware's own vector table is not
+guaranteed to still be valid/mapped once our own code has been running,
+and is not ours to depend on regardless), corrupting CPU state badly
+enough that even OpenOCD's halted-PC readout stopped being a real code
+address. Add real per-entry handling only once a real example needs it.

@@ -133,11 +133,46 @@ run_hw_test_rpi3() {
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
 }
 
-# Only examples/hello is ported to this target so far (see
-# examples/common_rpi3/AGENTS.md) -- add more lines here one at a time
-# as each is ported and verified, matching this project's YAGNI stance,
-# not speculatively ahead of that.
-run_hw_test_rpi3 "hello (rpi3)" "$REPO_ROOT/examples/hello/kernel_rpi3.elf" "$REPO_ROOT/examples/hello/hello.expected"
+# Mirrors RPI3_EXAMPLES + RPI3_CHECKSUM_EXAMPLES in the Makefile -- see
+# examples/common_rpi3/AGENTS.md for what's deliberately excluded
+# (rtc/timer/echo/irq/preempt/semaphore/condvar/msgqueue/watchdog/
+# rtos_demo need a real BCM2837 interrupt-controller/timer driver;
+# SD-card-storage examples are out of scope entirely). Every .expected
+# fixture here is reused byte-for-byte from the QEMU/STM32 suites --
+# uart_puts/uart_print_* write identical bytes on every HAL.
+run_hw_test_rpi3 "start (rpi3)"          "$REPO_ROOT/examples/start/kernel_rpi3.elf"          "$REPO_ROOT/examples/start/start.expected"
+run_hw_test_rpi3 "hello (rpi3)"          "$REPO_ROOT/examples/hello/kernel_rpi3.elf"          "$REPO_ROOT/examples/hello/hello.expected"
+run_hw_test_rpi3 "print_int (rpi3)"      "$REPO_ROOT/examples/print_int/kernel_rpi3.elf"      "$REPO_ROOT/examples/print_int/print_int.expected"
+run_hw_test_rpi3 "print_hex (rpi3)"      "$REPO_ROOT/examples/print_hex/kernel_rpi3.elf"      "$REPO_ROOT/examples/print_hex/print_hex.expected"
+run_hw_test_rpi3 "print_ptr (rpi3)"      "$REPO_ROOT/examples/print_ptr/kernel_rpi3.elf"      "$REPO_ROOT/examples/print_ptr/print_ptr.expected"
+run_hw_test_rpi3 "mem (rpi3)"            "$REPO_ROOT/examples/mem/kernel_rpi3.elf"            "$REPO_ROOT/examples/mem/mem.expected"
+run_hw_test_rpi3 "array (rpi3)"          "$REPO_ROOT/examples/array/kernel_rpi3.elf"          "$REPO_ROOT/examples/array/array.expected"
+run_hw_test_rpi3 "fizzbuzz (rpi3)"       "$REPO_ROOT/examples/fizzbuzz/kernel_rpi3.elf"       "$REPO_ROOT/examples/fizzbuzz/fizzbuzz.expected"
+run_hw_test_rpi3 "fibonacci (rpi3)"      "$REPO_ROOT/examples/fibonacci/kernel_rpi3.elf"      "$REPO_ROOT/examples/fibonacci/fibonacci.expected"
+run_hw_test_rpi3 "bubblesort (rpi3)"     "$REPO_ROOT/examples/bubblesort/kernel_rpi3.elf"     "$REPO_ROOT/examples/bubblesort/bubblesort.expected"
+run_hw_test_rpi3 "ringbuf (rpi3)"        "$REPO_ROOT/examples/ringbuf/kernel_rpi3.elf"        "$REPO_ROOT/examples/ringbuf/ringbuf.expected"
+run_hw_test_rpi3 "callstack (rpi3)"      "$REPO_ROOT/examples/callstack/kernel_rpi3.elf"      "$REPO_ROOT/examples/callstack/callstack.expected"
+run_hw_test_rpi3 "crc8 (rpi3)"           "$REPO_ROOT/examples/crc8/kernel_rpi3.elf"           "$REPO_ROOT/examples/crc8/crc8.expected"
+run_hw_test_rpi3 "djb2 (rpi3)"           "$REPO_ROOT/examples/djb2/kernel_rpi3.elf"           "$REPO_ROOT/examples/djb2/djb2.expected"
+run_hw_test_rpi3 "bump (rpi3)"           "$REPO_ROOT/examples/bump/kernel_rpi3.elf"           "$REPO_ROOT/examples/bump/bump.expected"
+run_hw_test_rpi3 "scheduler (rpi3)"      "$REPO_ROOT/examples/scheduler/kernel_rpi3.elf"      "$REPO_ROOT/examples/scheduler/scheduler.expected"
+run_hw_test_rpi3 "struct (rpi3)"         "$REPO_ROOT/examples/struct/kernel_rpi3.elf"         "$REPO_ROOT/examples/struct/struct.expected"
+run_hw_test_rpi3 "struct_refined (rpi3)" "$REPO_ROOT/examples/struct_refined/kernel_rpi3.elf" "$REPO_ROOT/examples/struct_refined/struct_refined.expected"
+run_hw_test_rpi3 "refined (rpi3)"        "$REPO_ROOT/examples/refined/kernel_rpi3.elf"        "$REPO_ROOT/examples/refined/refined.expected"
+run_hw_test_rpi3 "narrow (rpi3)"         "$REPO_ROOT/examples/narrow/kernel_rpi3.elf"         "$REPO_ROOT/examples/narrow/narrow.expected"
+run_hw_test_rpi3 "for (rpi3)"            "$REPO_ROOT/examples/for/kernel_rpi3.elf"            "$REPO_ROOT/examples/for/for.expected"
+run_hw_test_rpi3 "loop (rpi3)"           "$REPO_ROOT/examples/loop/kernel_rpi3.elf"           "$REPO_ROOT/examples/loop/loop.expected"
+run_hw_test_rpi3 "enum (rpi3)"           "$REPO_ROOT/examples/enum/kernel_rpi3.elf"           "$REPO_ROOT/examples/enum/enum.expected"
+run_hw_test_rpi3 "nonexhaustive (rpi3)"  "$REPO_ROOT/examples/nonexhaustive/kernel_rpi3.elf"  "$REPO_ROOT/examples/nonexhaustive/nonexhaustive.expected"
+run_hw_test_rpi3 "bitops (rpi3)"         "$REPO_ROOT/examples/bitops/kernel_rpi3.elf"         "$REPO_ROOT/examples/bitops/bitops.expected"
+run_hw_test_rpi3 "align (rpi3)"          "$REPO_ROOT/examples/align/kernel_rpi3.elf"          "$REPO_ROOT/examples/align/align.expected"
+run_hw_test_rpi3 "packed (rpi3)"         "$REPO_ROOT/examples/packed/kernel_rpi3.elf"         "$REPO_ROOT/examples/packed/packed.expected"
+run_hw_test_rpi3 "struct_align (rpi3)"   "$REPO_ROOT/examples/struct_align/kernel_rpi3.elf"   "$REPO_ROOT/examples/struct_align/struct_align.expected"
+run_hw_test_rpi3 "const_global (rpi3)"   "$REPO_ROOT/examples/const_global/kernel_rpi3.elf"   "$REPO_ROOT/examples/const_global/const_global.expected"
+run_hw_test_rpi3 "sizeof_offsetof (rpi3)" "$REPO_ROOT/examples/sizeof_offsetof/kernel_rpi3.elf" "$REPO_ROOT/examples/sizeof_offsetof/sizeof_offsetof.expected"
+run_hw_test_rpi3 "inet_checksum (rpi3)"  "$REPO_ROOT/examples/inet_checksum/kernel_rpi3.elf"  "$REPO_ROOT/examples/inet_checksum/inet_checksum.expected"
+run_hw_test_rpi3 "ip_parse (rpi3)"       "$REPO_ROOT/examples/ip_parse/kernel_rpi3.elf"       "$REPO_ROOT/examples/ip_parse/ip_parse.expected"
+run_hw_test_rpi3 "tcp_parse (rpi3)"      "$REPO_ROOT/examples/tcp_parse/kernel_rpi3.elf"      "$REPO_ROOT/examples/tcp_parse/tcp_parse.expected"
 
 echo ""
 echo "rpi3 hardware tests: $PASS passed, $FAIL failed"

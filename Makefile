@@ -1227,27 +1227,38 @@ profile-stm32-kvs-server-sdcard-rtos: examples/kvs_server_sdcard_rtos/kernel_stm
 	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/profile_stm32_kvs_server_sdcard_rtos.sh
 
 # -- Raspberry Pi 3B (BCM2837) bring-up (GitHub issue #140) --------------------
-# JTAG-only bring-up so far: examples/hello is the first example ported,
-# injected into RAM over JTAG rather than written to the SD card as a real
-# kernel8.img -- see examples/common_rpi3/AGENTS.md for the full rationale
-# (why a physical power cycle stands in for STM32's `reset halt`, why a
-# separate jtag_stub.S spin-stub image exists) and scripts/rpi3_jtag_load.sh
-# for the OpenOCD catch/load/run sequence. Deliberately not yet folded into
-# a batch EXAMPLES-style list like STM32_EXAMPLES: only one example is
-# proven on this target so far -- add more names here once each is
-# individually ported and verified, not speculatively ahead of that.
+# JTAG-only bring-up: examples are injected into RAM over JTAG rather than
+# written to the SD card as a real kernel8.img -- see examples/common_rpi3/
+# AGENTS.md for the full rationale (why a physical power cycle stands in
+# for STM32's `reset halt`, why a separate jtag_stub.S spin-stub image
+# exists) and scripts/rpi3_jtag_load.sh for the OpenOCD catch/load/run
+# sequence.
+#
+# RPI3_EXAMPLES mirrors STM32_EXAMPLES' own "plain compute, no interrupt/
+# timer/RTC dependency" grouping (same reasoning: rtc/timer/echo/irq/
+# preempt/semaphore/condvar/msgqueue/watchdog/rtos_demo need a real
+# BCM2837 interrupt-controller/timer driver -- a separate, substantially
+# larger piece of work -- ported one at a time, not speculatively ahead
+# of that; see examples/common_rpi3/AGENTS.md). RPI3_CHECKSUM_EXAMPLES
+# mirrors STM32_CHECKSUM_EXAMPLES the same way STM32's own group does.
 RPI3_TARGET := aarch64-none-elf
 RPI3_CPU    := cortex-a53
 COMMON_RPI3_DIR          := examples/common_rpi3
 COMMON_RPI3_STARTUP_S    := $(COMMON_RPI3_DIR)/startup.S
 COMMON_RPI3_STARTUP_O    := $(COMMON_RPI3_DIR)/startup.o
+COMMON_RPI3_MMU_S        := $(COMMON_RPI3_DIR)/mmu.S
+COMMON_RPI3_MMU_O        := $(COMMON_RPI3_DIR)/mmu.o
 COMMON_RPI3_LINK_LD      := $(COMMON_RPI3_DIR)/link.ld
 COMMON_RPI3_UART         := $(COMMON_RPI3_DIR)/uart.tkb
+COMMON_RPI3_PRINT        := $(COMMON_RPI3_DIR)/print.tkb
 COMMON_RPI3_JTAG_STUB_S  := $(COMMON_RPI3_DIR)/jtag_stub.S
 COMMON_RPI3_JTAG_STUB_O  := $(COMMON_RPI3_DIR)/jtag_stub.o
 COMMON_RPI3_JTAG_STUB_LD := $(COMMON_RPI3_DIR)/jtag_stub.ld
 
 $(COMMON_RPI3_STARTUP_O): $(COMMON_RPI3_STARTUP_S)
+	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
+
+$(COMMON_RPI3_MMU_O): $(COMMON_RPI3_MMU_S)
 	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI3_JTAG_STUB_O): $(COMMON_RPI3_JTAG_STUB_S)
@@ -1262,21 +1273,32 @@ examples/common_rpi3/jtag_stub.elf: $(COMMON_RPI3_JTAG_STUB_O) $(COMMON_RPI3_JTA
 examples/common_rpi3/jtag_stub.img: examples/common_rpi3/jtag_stub.elf
 	llvm-objcopy-19 -O binary $< $@
 
-# hello.tkb has no `use` declarations of its own (see examples/hello/
-# hello.tkb) -- it only needs examples/common/runtime.tkb directly, for
-# main()'s platform_init/app_main/platform_shutdown wrapper, not the
-# print.tkb overloads (hello.tkb never calls uart_print/uart_println).
-examples/hello/hello_rpi3.o: examples/hello/hello.tkb $(COMMON_RPI3_UART) $(COMMON_DIR)/runtime.tkb $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_DIR)/runtime.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+RPI3_EXAMPLES := start hello print_int print_hex print_ptr mem array \
+                 fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump \
+                 scheduler struct struct_refined refined narrow for loop enum nonexhaustive \
+                 bitops align packed struct_align const_global sizeof_offsetof
+RPI3_OBJS     := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
-examples/hello/kernel_rpi3.elf: $(COMMON_RPI3_STARTUP_O) examples/hello/hello_rpi3.o $(COMMON_RPI3_LINK_LD)
-	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) examples/hello/hello_rpi3.o -o $@
+$(RPI3_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
 
-# Examples ported to this target so far -- add names here one at a time,
-# in step with new examples/<name>/<name>_rpi3.o + kernel_rpi3.elf rules
-# above and a new line in scripts/run_hwtest_rpi3.sh, not ahead of them.
-RPI3_EXAMPLES := hello
+# inet_checksum.tkb/ip_parse.tkb/tcp_parse.tkb each `use` exactly the
+# subset of inet_checksum.tkb/netutil.tkb they actually need themselves
+# (same reasoning as the AArch64/QEMU CHECKSUM_OBJS group above), so
+# neither is passed on the command line here, only listed as a
+# prerequisite for Make's own staleness tracking.
+RPI3_CHECKSUM_EXAMPLES := inet_checksum ip_parse tcp_parse
+RPI3_CHECKSUM_OBJS     := $(foreach e,$(RPI3_CHECKSUM_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
+
+$(RPI3_CHECKSUM_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+
+RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES)
 RPI3_KERNELS  := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
+
+$(RPI3_KERNELS): examples/%/kernel_rpi3.elf: \
+    $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
+	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) examples/$*/$*_rpi3.o -o $@
 
 ## hwcheck-rpi3: run Raspberry Pi 3B (BCM2837) hardware integration tests
 ## (requires a real Raspberry Pi 3B connected via JTAG + UART -- see

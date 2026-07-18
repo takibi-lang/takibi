@@ -386,10 +386,21 @@ examples/
     semihosting_stub.S -- no-op stand-ins for examples/fatfs's semihosting extern fns on
                      this target (no ARM semihosting on real hardware)
   common_rpi3/    -- Raspberry Pi 3B (BCM2837) bare-metal HAL, JTAG-injection-only
-                     bring-up (issue #140) -- see examples/common_rpi3/AGENTS.md.
-    startup.S     -- core-0-only gate, stack/BSS setup, calls main(), halts on return
+                     bring-up (issue #140), 33 examples ported -- see
+                     examples/common_rpi3/AGENTS.md.
+    startup.S     -- core-0-only gate, exception vector table, stack/BSS setup,
+                     calls mmu_init() then main(), halts on return
+    mmu.S         -- minimal EL2 identity-map MMU setup (2-level, 4KB granule):
+                     fixes LLVM-synthesized unaligned-store faults that occur
+                     whenever the stage 1 MMU is off (Device memory semantics);
+                     deliberately leaves the D-/I-cache off (see its own header
+                     comment -- JTAG's load_image bypasses the cache, so caching
+                     would let a previous payload's dirty lines silently corrupt
+                     the next one)
     link.ld       -- load address 0x200000 (deliberately distinct from jtag_stub.ld's)
     uart.tkb      -- UART0 (PL011) driver, GPIO14/15 ALT0 pinmux + pull disable
+    print.tkb     -- isize/usize uart_print/uart_println overloads (AArch64
+                     64-bit, byte-for-byte copy of common_qemu/print.tkb)
     jtag_stub.S / jtag_stub.ld -- standalone spin-loop image flashed as the SD
                      card's kernel8.img, giving JTAG a clean non-Linux catch point
   <name>/         -- each directory: see the leading comment in <name>.tkb for a description.

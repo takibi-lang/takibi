@@ -1,0 +1,14 @@
+use "examples/common/print.tkb";
+use "examples/common/runtime.tkb";
+
+// Native-width overloads for this Raspberry Pi 3B (BCM2837/Cortex-A53)
+// target. isize/usize are 64-bit here (AArch64, same as
+// examples/common_qemu/print.tkb, which this file is a byte-for-byte
+// copy of), so reuse the fixed-width 64-bit cores. See that file's own
+// header comment for why every consumer of this file no longer needs to
+// separately list examples/common/print.tkb / examples/common/
+// runtime.tkb on the Makefile command line.
+fn uart_print(v: isize) { uart_print_i64_core(v as i64); }
+fn uart_print(v: usize) { uart_print_u64_core(v as u64); }
+fn uart_println(v: isize) { uart_print(v); uart_puts("\r\n"); }
+fn uart_println(v: usize) { uart_print(v); uart_puts("\r\n"); }
