@@ -227,16 +227,16 @@ fn tcp_conn_dispatch(remote_ip: borrow [u8; 16..], remote_port: borrow [u16; 4..
     // takes the working codegen path.
     for i: usize in 0..<MAX_CONNS {
         let state: ConnState = conn_state[i];
-        // Raw-pointer bytes_eq instead of a sliced remote_ip[i*4..<i*4+4]
-        // compare: subslicing a 16-byte slice at a runtime i*4 offset
-        // cannot be proven in range by the same-base subslice rule (the
-        // two bounds share "i*4" as a compound expression, not a bare
-        // variable), which would otherwise leave a real --forbid-trap
-        // site here. Pointer indexing carries no bounds guarantee at all,
-        // so there is nothing left to prove -- the same pattern
-        // kvs_server.tkb's own kv_keys/kv_vals flat array already uses.
+        // Subslicing remote_ip[i*4..<i*4+4] directly fails to prove in
+        // range: the same-base subslice rule needs both bounds to share
+        // the identical VARIABLE (not "i*4" as a recomputed compound
+        // expression), so binding the offset to its own local `base`
+        // first is what actually satisfies it -- see SPEC.md's "Same-base
+        // subslice rule". AGENTS.md is explicit that a flagged site must
+        // not be "fixed" by dropping to a raw pointer instead.
+        let base: usize = i * 4;
         if (state != ConnState::Listen &&
-            bytes_eq((remote_ip as *u8) + (i as isize) * 4, src_ip as *u8, 4) != 0 &&
+            slice_eq(remote_ip[base..<base + 4], src_ip) &&
             remote_port[i] == src_port) {
             return dispatch_slot(i);
         }

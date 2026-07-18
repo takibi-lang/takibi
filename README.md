@@ -12,7 +12,8 @@ lifted into compile-time errors, using type-system features C never had
 obligations).
 
 As a first waypoint toward that goal, takibi already implements a TCP/IP stack
-and runs an HTTP server on bare-metal targets, on both QEMU (AArch64) and real
+and runs an HTTP server and a network key-value store on bare-metal targets,
+on both QEMU (AArch64) and real
 [STM32F746G-DISCOVERY](https://www.st.com/en/evaluation-tools/32f746gdiscovery.html)
 (Cortex-M7) hardware.
 
@@ -203,6 +204,20 @@ by a current example does not.
   through the real SDMMC1 driver. `examples/http_server_sdcard_rtos`
   exercises the same HTTP+SD path with SD/FAT work behind an RTOS task
   boundary and is also covered by `make hwcheck-net`.
+- **A bare-metal network key-value store**: `examples/kvs_server` serves a
+  fixed-size, statically allocated key-value table over HTTP (`PUT`/`GET`/
+  `DELETE /keys/<key>`, `GET /keys` to list), with deterministic host-side
+  tests for set/get/overwrite/delete, table-full, and parser-error cases,
+  `--forbid-trap` clean, on both QEMU and STM32.
+  `examples/kvs_server_sdcard_rtos` adds write-through persistence to a
+  real SD card via FAT12 (sector-aligned per-key records, survives a
+  reset) behind an RTOS task split (a network task and a dedicated
+  SD-worker task), covered by `make hwcheck-net` including a
+  persistence-survives-reset check. Both the HTTP server and KVS server
+  families share one TCP/HTTP core
+  (`examples/common/http_server_common.tkb` / `http_conn_state.tkb`)
+  supporting 4 simultaneous TCP connections per server, not just one at a
+  time.
 - Every ported example is a **single `.tkb` application source file** that
   compiles unchanged for QEMU/AArch64 and STM32/Cortex-M7. Platform-specific
   behavior is supplied by same-signature HAL files selected by the Makefile.

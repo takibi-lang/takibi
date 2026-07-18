@@ -125,11 +125,13 @@ inline fn classify_tcp_event(flags: u8) -> TcpEvent {
 // fallback into "ignore", exactly like the pre-#135 single-slot version
 // already relied on it to reject an unrelated stray packet.
 fn tcp_remote_matches(idx: {0..<MAX_CONNS as usize}, ip: borrow [u8; 20..], src_port: u16) -> bool {
-    // Raw-pointer bytes_eq instead of a sliced conn_remote_ip[idx*4..<idx*4+4]
-    // compare -- see tcp_conn_dispatch's own comment in http_conn_state.tkb
-    // for why the sliced form is a real --forbid-trap site here.
-    return bytes_eq((conn_remote_ip as *u8) + (idx as isize) * 4,
-                     (ip[IP_SRC..<IP_DST]) as *u8, 4) != 0 &&
+    // Same-base subslice rule via a bound local `base` -- see
+    // tcp_conn_dispatch's own comment in http_conn_state.tkb for why
+    // "idx*4" repeated in both bounds does not itself prove in range,
+    // and why the fix is this, not a raw pointer.
+    let base: usize = idx * 4;
+    let remote_ip_slice = conn_remote_ip as []u8;
+    return slice_eq(remote_ip_slice[base..<base + 4], ip[IP_SRC..<IP_DST]) &&
            src_port == conn_remote_port[idx];
 }
 
@@ -366,13 +368,16 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_b
                                                 let idx: {0..<MAX_CONNS as usize} = tcp_conn_listen_slot(conn);
                                                 match ev {
                                                     TcpEvent::Syn => {
-                                                        // Raw-pointer bytes_copy instead of a sliced
-                                                        // conn_remote_ip[idx*4..<idx*4+4] write -- see
-                                                        // tcp_conn_dispatch's own comment in
-                                                        // http_conn_state.tkb for why the sliced form is
-                                                        // a real --forbid-trap site here.
-                                                        bytes_copy((conn_remote_ip as *u8) + (idx as isize) * 4,
-                                                                   (ip[IP_SRC..<IP_DST]) as *u8, 4);
+                                                        // Same-base subslice rule via a bound local
+                                                        // `remote_ip_base` -- see tcp_conn_dispatch's
+                                                        // own comment in http_conn_state.tkb for why
+                                                        // "idx*4" repeated in both bounds does not
+                                                        // itself prove in range, and why the fix is
+                                                        // this, not a raw pointer.
+                                                        let remote_ip_base: usize = idx * 4;
+                                                        let remote_ip_slice = conn_remote_ip as []u8;
+                                                        slice_copy(remote_ip_slice[remote_ip_base..<remote_ip_base + 4],
+                                                                   ip[IP_SRC..<IP_DST]);
                                                         conn_remote_port[idx] = src_port;
                                                         conn_rcv_nxt[idx] = seq + 1;
                                                         conn_snd_nxt[idx] = tcp_initial_seq(idx) + 1;
