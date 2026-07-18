@@ -1,18 +1,22 @@
 # Raspberry Pi 3B (BCM2837) Bare-Metal Bring-Up
 
-GitHub issue #140. Status: 33 examples ported and passing `make
+GitHub issue #140. Status: 35 examples ported and passing `make
 hwcheck-rpi3` (`start`/`hello`/`print_int`/`print_hex`/`print_ptr`/
 `mem`/`array`/`fizzbuzz`/`fibonacci`/`bubblesort`/`ringbuf`/`callstack`/
 `crc8`/`djb2`/`bump`/`scheduler`/`struct`/`struct_refined`/`refined`/
 `narrow`/`for`/`loop`/`enum`/`nonexhaustive`/`bitops`/`align`/`packed`/
 `struct_align`/`const_global`/`sizeof_offsetof`/`inet_checksum`/
-`ip_parse`/`tcp_parse` -- matches `hwcheck-stm32`'s own "plain compute"
-example set, see "Build" below). This is a JTAG-only bring-up: nothing
-here writes to the SD card as a real `kernel8.img`; see "Why JTAG
-injection, not an SD card kernel" below. Not yet ported:
-rtc/timer/echo/irq/preempt/semaphore/condvar/msgqueue/watchdog/
-rtos_demo (need a real BCM2837 interrupt-controller/timer driver -- a
-separate, substantially larger piece of work).
+`ip_parse`/`tcp_parse`/`echo`/`irq` -- `hwcheck-stm32`'s "plain compute"
+set plus the two UART-RX-interrupt examples, running on real BCM2837
+interrupts via `intc.tkb`, see "Interrupts" below). This is a JTAG-only
+bring-up: nothing here writes to the SD card as a real `kernel8.img`;
+see "Why JTAG injection, not an SD card kernel" below. Not yet ported:
+rtc/timer (agreed plan: reimplement the `rtc_*` HAL on the ARM Generic
+Timer's CNTPCT/CNTFRQ counter, since this board has no RTC peripheral
+at all -- "seconds since boot" semantics instead of wall-clock) and
+preempt/semaphore/condvar/msgqueue/watchdog/rtos_demo (need timer
+interrupts plus task-switching support in `rpi3_irq_entry`, a larger
+follow-on).
 
 ## Out of scope: SD-card-storage examples
 
@@ -336,6 +340,46 @@ group, with direct `/dev/bus/usb` access via this project's
 more effective access to the USB device than `sudo` does in this
 specific container, and is what every command above assumes.
 
+## Interrupts (`intc.tkb`, `startup.S`'s `rpi3_irq_entry`)
+
+BCM2837's interrupt fabric is a 2-level cascade unlike either existing
+target: the per-core "ARM Local"/QA7 block at 0x40000000 (ARM Generic
+Timer IRQs per core, plus one pass-through "GPU IRQ" line carrying
+every peripheral interrupt as a single bit), cascading from the legacy
+72-source VC ("armctrl") controller at 0x3F00B200 (bank offsets
+confirmed against Linux's `drivers/irqchip/irq-bcm2835.c`; UART0 =
+global IRQ 57 = bit 25 of pending_2/Enable_IRQs_2). `intc.tkb` provides
+the uniformly-named `irq_uart_rx_setup()`/`irq_uart_rx_unmask()` (same
+contract as `gic.tkb`/`nvic.tkb`) and `rpi3_irq_dispatch()`, called
+from `startup.S`'s `rpi3_irq_entry` -- deliberately NOT named
+`irq_dispatch`, because `examples/echo/echo.tkb`/`examples/irq/irq.tkb`
+define that name themselves (their GICv2-shaped version, dead code here
+exactly as on STM32; this target vectors UART RX straight to
+`uart.tkb`'s `uart_irq_handler`, the STM32 `USART1_IRQHandler` pattern,
+so those shared files needed zero changes).
+
+Three hard-won findings, all rooted in the same "JTAG re-injection
+inherits state a real reset would clear" theme:
+- **`HCR_EL2.IMO` must be set** (`startup.S`): with IMO=0 the
+  architecture routes physical IRQs to EL1, and an IRQ targeting a
+  lower EL than the executing one is implicitly masked regardless of
+  PSTATE.I -- every observable layer (UART0_MIS, VC pending_2, GPU
+  routing) said "pending" while the core never vectored. Firmware
+  leaves IMO=0 because Linux takes interrupts at EL1.
+- **Inherited peripheral-interrupt state must be quiesced before
+  DAIFClr** (`startup.S`): a previous run's still-enabled,
+  still-asserted level interrupt otherwise fires the moment PSTATE.I
+  clears -- and in an example whose dispatch never acknowledges it,
+  re-fires forever (an interrupt storm indistinguishable from a silent
+  hang; took out the ENTIRE suite, including the 33 non-interrupt
+  examples, the first run after IMO was fixed). `uart_init()` also
+  drains stale RX bytes and clears PL011 ICR for the same reason.
+- **A 2MB block descriptor's output address is absolute** (`mmu.S`): see
+  the `l2_table_local` comment for the silent-wrong-mapping bug this
+  caused (QA7 reads landing in the GPU firmware's armstub8 code at
+  physical 0 -- diagnosed by recognizing the read-back "register value"
+  0xd51e4020 as an `msr elr_el3, x0` instruction).
+
 ## UART0 (PL011) driver notes (`uart.tkb`)
 
 - GPIO14/15 must be switched to ALT0 and have their pull-up/down
@@ -346,23 +390,22 @@ specific container, and is what every command above assumes.
   clock the GPU firmware leaves UART0 running from). If a future example
   changes `core_freq`/PLL settings, this divisor calculation in
   `uart_init()` needs revisiting.
-- Deliberately does not define `uart_isr_getc`/`uart_rx_ready`/
-  `uart_tx_isr` (unlike `examples/common_qemu/uart.tkb` and
-  `examples/common_stm32/uart.tkb`) -- nothing here uses interrupts yet,
-  and BCM2837's interrupt controller is the legacy Broadcom one, not the
-  GICv2 `examples/common_qemu/gic.tkb` targets. Add these only once a
-  real interrupt-driven example needs them.
+- RX interrupt support follows `examples/common_stm32/uart.tkb`'s
+  stored-handler pattern (`uart_set_rx_handler` + `uart_irq_handler`),
+  not QEMU's dispatch-by-GIC-ID -- see "Interrupts" above.
 
 ## Exception vector table (`startup.S`)
 
-Every entry just spins (`b .`) -- this is a safety net for controlled,
-debuggable behavior on any fault, not functional interrupt dispatch
-(nothing here uses interrupts yet, same reasoning as `uart.tkb` above).
-Found necessary the hard way: before this existed, `examples/packed`
-hanging left the halted PC holding raw garbage data, not a code address
--- with `VBAR_EL2` never set, an unrelated fault's exception entry
-itself faulted (ARM Trusted Firmware's own vector table is not
-guaranteed to still be valid/mapped once our own code has been running,
-and is not ours to depend on regardless), corrupting CPU state badly
-enough that even OpenOCD's halted-PC readout stopped being a real code
-address. Add real per-entry handling only once a real example needs it.
+The EL2H IRQ entry (0x280) vectors to `rpi3_irq_entry` (full x0-x30 +
+ELR/SPSR save, `bl rpi3_irq_dispatch`, restore, `eret` -- same 272-byte
+frame as `examples/common_qemu/startup.S`, but always resuming the SAME
+context: no task switching until a scheduler example needs it). Every
+other entry just spins (`b .`) as a safety net for controlled,
+debuggable behavior on any fault. Found necessary the hard way: before
+this table existed, `examples/packed` hanging left the halted PC
+holding raw garbage data, not a code address -- with `VBAR_EL2` never
+set, an unrelated fault's exception entry itself faulted (ARM Trusted
+Firmware's own vector table is not guaranteed to still be valid/mapped
+once our own code has been running, and is not ours to depend on
+regardless), corrupting CPU state badly enough that even OpenOCD's
+halted-PC readout stopped being a real code address.

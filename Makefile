@@ -1251,6 +1251,7 @@ COMMON_RPI3_MMU_O        := $(COMMON_RPI3_DIR)/mmu.o
 COMMON_RPI3_LINK_LD      := $(COMMON_RPI3_DIR)/link.ld
 COMMON_RPI3_UART         := $(COMMON_RPI3_DIR)/uart.tkb
 COMMON_RPI3_PRINT        := $(COMMON_RPI3_DIR)/print.tkb
+COMMON_RPI3_INTC         := $(COMMON_RPI3_DIR)/intc.tkb
 COMMON_RPI3_JTAG_STUB_S  := $(COMMON_RPI3_DIR)/jtag_stub.S
 COMMON_RPI3_JTAG_STUB_O  := $(COMMON_RPI3_DIR)/jtag_stub.o
 COMMON_RPI3_JTAG_STUB_LD := $(COMMON_RPI3_DIR)/jtag_stub.ld
@@ -1293,7 +1294,19 @@ RPI3_CHECKSUM_OBJS     := $(foreach e,$(RPI3_CHECKSUM_EXAMPLES),examples/$(e)/$(
 $(RPI3_CHECKSUM_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
 
-RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES)
+# examples/echo/echo.tkb and examples/irq/irq.tkb `use` COMMON_GIC_REGS
+# themselves (GicRegs type only, for their own dead-here GICv2-shaped
+# irq_dispatch() to type-check -- same reasoning as the STM32 build,
+# see examples/common_rpi3/intc.tkb's header comment) -- so it's passed
+# on the command line here too, alongside our own real
+# COMMON_RPI3_INTC implementation.
+RPI3_IRQ_EXAMPLES := echo irq
+RPI3_IRQ_OBJS      := $(foreach e,$(RPI3_IRQ_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
+
+$(RPI3_IRQ_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_INTC) $(COMMON_GIC_REGS) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_INTC) $(COMMON_GIC_REGS) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+
+RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES)
 RPI3_KERNELS  := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 
 $(RPI3_KERNELS): examples/%/kernel_rpi3.elf: \

@@ -386,10 +386,13 @@ examples/
     semihosting_stub.S -- no-op stand-ins for examples/fatfs's semihosting extern fns on
                      this target (no ARM semihosting on real hardware)
   common_rpi3/    -- Raspberry Pi 3B (BCM2837) bare-metal HAL, JTAG-injection-only
-                     bring-up (issue #140), 33 examples ported -- see
-                     examples/common_rpi3/AGENTS.md.
-    startup.S     -- core-0-only gate, exception vector table, stack/BSS setup,
-                     calls mmu_init() then main(), halts on return
+                     bring-up (issue #140), 35 examples ported (incl. echo/irq on
+                     real interrupts) -- see examples/common_rpi3/AGENTS.md.
+    startup.S     -- core-0-only gate, exception vector table + rpi3_irq_entry,
+                     HCR_EL2.IMO routing, inherited-interrupt quiescing, stack/BSS
+                     zeroing, calls mmu_init() then main(), halts on return
+    intc.tkb      -- BCM2837 2-level interrupt controller driver (QA7 ARM-local +
+                     legacy VC armctrl): irq_uart_rx_setup/unmask, rpi3_irq_dispatch
     mmu.S         -- minimal EL2 identity-map MMU setup (2-level, 4KB granule):
                      fixes LLVM-synthesized unaligned-store faults that occur
                      whenever the stage 1 MMU is off (Device memory semantics);

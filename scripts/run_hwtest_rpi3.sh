@@ -133,13 +133,89 @@ run_hw_test_rpi3() {
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
 }
 
-# Mirrors RPI3_EXAMPLES + RPI3_CHECKSUM_EXAMPLES in the Makefile -- see
-# examples/common_rpi3/AGENTS.md for what's deliberately excluded
-# (rtc/timer/echo/irq/preempt/semaphore/condvar/msgqueue/watchdog/
-# rtos_demo need a real BCM2837 interrupt-controller/timer driver;
-# SD-card-storage examples are out of scope entirely). Every .expected
-# fixture here is reused byte-for-byte from the QEMU/STM32 suites --
-# uart_puts/uart_print_* write identical bytes on every HAL.
+# run_hw_test_rpi3_stdin NAME ELF EXPECTED STDIN_FILE
+#
+# RPi3 counterpart of scripts/run_hwtest_ram.sh's run_hw_test_ram_stdin
+# (echo, irq): waits for the first output byte (confirming the
+# firmware's read loop has actually started) before writing STDIN_FILE
+# to the serial port. Same load-failure-vs-mismatch distinction as
+# run_hw_test_rpi3 above.
+run_hw_test_rpi3_stdin() {
+    local name="$1" elf="$2" expected="$3" stdin_file="$4"
+    local tmp_drain tmp_out load_log load_status_file load_status
+    tmp_drain=$(mktemp)
+    tmp_out=$(mktemp)
+    load_log=$(mktemp)
+    load_status_file=$(mktemp)
+
+    read_until_quiet "$tmp_drain" "$DRAIN_MAX_SECS" "$DRAIN_STABLE_POLLS" 0
+
+    : > "$tmp_out"
+    cat "$SERIAL_DEV" > "$tmp_out" 2>/dev/null 9>&- &
+    local catpid=$!
+    ACTIVE_READER_PID=$catpid
+    sleep 0.2
+    "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$elf" > "$load_log" 2>&1
+    load_status=$?
+    echo "$load_status" > "$load_status_file"
+
+    if [ "$load_status" = "0" ]; then
+        local max_wait_polls waited=0 size
+        max_wait_polls=$(awk -v m="$CAPTURE_MAX_SECS" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
+        while [ "$waited" -lt "$max_wait_polls" ]; do
+            sleep "$POLL_INTERVAL"
+            size=$(stat -c%s "$tmp_out" 2>/dev/null || echo 0)
+            [ "$size" -gt 0 ] && break
+            waited=$((waited + 1))
+        done
+        cat "$stdin_file" > "$SERIAL_DEV"
+
+        local max_polls last_size=-1 stable=0 poll=0
+        max_polls=$(awk -v m="$CAPTURE_MAX_SECS" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
+        while [ "$poll" -lt "$max_polls" ]; do
+            sleep "$POLL_INTERVAL"
+            size=$(stat -c%s "$tmp_out" 2>/dev/null || echo 0)
+            if [ "$size" = "$last_size" ]; then
+                stable=$((stable + 1))
+                [ "$stable" -ge "$CAPTURE_STABLE_POLLS" ] && break
+            else
+                stable=0
+            fi
+            last_size="$size"
+            poll=$((poll + 1))
+        done
+    fi
+    kill "$catpid" 2>/dev/null || true
+    wait "$catpid" 2>/dev/null || true
+    ACTIVE_READER_PID=""
+
+    if [ "$load_status" != "0" ]; then
+        printf "${RED}FAIL${RST}  %s  (JTAG injection failed -- see log below;" "$name"
+        printf " likely needs a power cycle to examples/common_rpi3/jtag_stub.img)\n"
+        sed 's/^/       /' "$load_log"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+    elif cmp -s "$expected" "$tmp_out"; then
+        printf "${GRN}PASS${RST}  %s\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        printf "${RED}FAIL${RST}  %s  (unexpected UART output)\n" "$name"
+        printf "       expected: %s\n" "$(od -An -c "$expected" | tr -s ' \n' ' ')"
+        printf "       actual:   %s\n" "$(od -An -c "$tmp_out" | tr -s ' \n' ' ')"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+    fi
+    rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
+}
+
+# Mirrors RPI3_EXAMPLES + RPI3_CHECKSUM_EXAMPLES + RPI3_IRQ_EXAMPLES in
+# the Makefile -- see examples/common_rpi3/AGENTS.md for what's still
+# deliberately excluded (rtc/timer need a real timer driver;
+# preempt/semaphore/condvar/msgqueue/watchdog/rtos_demo need a full
+# preemptive scheduler on top of that; SD-card-storage examples are out
+# of scope entirely). Every .expected/.stdin fixture here is reused
+# byte-for-byte from the QEMU/STM32 suites -- uart_puts/uart_print_*
+# write identical bytes on every HAL.
 run_hw_test_rpi3 "start (rpi3)"          "$REPO_ROOT/examples/start/kernel_rpi3.elf"          "$REPO_ROOT/examples/start/start.expected"
 run_hw_test_rpi3 "hello (rpi3)"          "$REPO_ROOT/examples/hello/kernel_rpi3.elf"          "$REPO_ROOT/examples/hello/hello.expected"
 run_hw_test_rpi3 "print_int (rpi3)"      "$REPO_ROOT/examples/print_int/kernel_rpi3.elf"      "$REPO_ROOT/examples/print_int/print_int.expected"
@@ -173,6 +249,10 @@ run_hw_test_rpi3 "sizeof_offsetof (rpi3)" "$REPO_ROOT/examples/sizeof_offsetof/k
 run_hw_test_rpi3 "inet_checksum (rpi3)"  "$REPO_ROOT/examples/inet_checksum/kernel_rpi3.elf"  "$REPO_ROOT/examples/inet_checksum/inet_checksum.expected"
 run_hw_test_rpi3 "ip_parse (rpi3)"       "$REPO_ROOT/examples/ip_parse/kernel_rpi3.elf"       "$REPO_ROOT/examples/ip_parse/ip_parse.expected"
 run_hw_test_rpi3 "tcp_parse (rpi3)"      "$REPO_ROOT/examples/tcp_parse/kernel_rpi3.elf"      "$REPO_ROOT/examples/tcp_parse/tcp_parse.expected"
+run_hw_test_rpi3_stdin "echo (rpi3)" "$REPO_ROOT/examples/echo/kernel_rpi3.elf" \
+    "$REPO_ROOT/examples/echo/echo.expected" "$REPO_ROOT/examples/echo/echo.stdin"
+run_hw_test_rpi3_stdin "irq (rpi3)"  "$REPO_ROOT/examples/irq/kernel_rpi3.elf" \
+    "$REPO_ROOT/examples/irq/irq.expected" "$REPO_ROOT/examples/irq/irq.stdin"
 
 echo ""
 echo "rpi3 hardware tests: $PASS passed, $FAIL failed"

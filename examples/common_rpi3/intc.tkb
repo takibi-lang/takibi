@@ -1,0 +1,78 @@
+// BCM2837 interrupt controller driver: a genuine 2-level cascade, unlike
+// examples/common_qemu/gic.tkb's single GICv2 or examples/common_stm32/
+// nvic.tkb's single NVIC.
+//   1. The "ARM Local" peripheral (QA7, register base 0x40000000,
+//      physically separate from the 0x3F000000 block everything else in
+//      this directory uses -- see the Raspberry Pi Foundation's
+//      "Quad-A7 control" datasheet, rev 3.4): per-core registers for
+//      the ARM Generic Timer's 4 comparator IRQs and a single
+//      passed-through "GPU IRQ" line carrying every peripheral
+//      interrupt (UART0 included) as one bit.
+//   2. The legacy "VC" (VideoCore) interrupt controller (register base
+//      0x3F00B200, same block examples/common_rpi3/uart.tkb's
+//      addresses live in): a 72-source, 3-bank pending/enable register
+//      set (confirmed against the Linux kernel's own
+//      drivers/irqchip/irq-bcm2835.c) that the GPU IRQ line above
+//      cascades from. UART0 is global IRQ 57 (bit 25 of the
+//      pending_2/Enable_IRQs_2 bank), a specific number/bit widely
+//      cited across bare-metal Raspberry Pi references and confirmed
+//      against the kernel driver's own bank-indexing scheme
+//      (57 >> 5 = bank 2, 57 & 0x1f = bit 25).
+//
+// Uniform names shared with examples/common_qemu/gic.tkb and
+// examples/common_stm32/nvic.tkb: irq_uart_rx_setup()/
+// irq_uart_rx_unmask(), so examples/echo/echo.tkb and examples/irq/
+// irq.tkb's app_main() needs no per-platform branch to call these.
+// Those two shared files' OWN irq_dispatch() (which directly pokes
+// GICv2's gic.cpu_iar/gic.cpu_eoir) stays dead code here, exactly as it
+// already is on STM32 -- this target instead vectors UART0's RX
+// interrupt to a dedicated handler
+// (examples/common_rpi3/uart.tkb's uart_irq_handler(), called from
+// startup.S's IRQ vector entry point, NOT named `irq_dispatch` to avoid
+// colliding with echo.tkb/irq.tkb's own dead GICv2-shaped definition of
+// that name), matching STM32's USART1_IRQHandler pattern rather than
+// QEMU's software-dispatch-by-ID one. See examples/common_rpi3/
+// AGENTS.md for the full register research this file is based on.
+
+fn irq_uart_rx_setup() {
+    // Route the GPU IRQ (every peripheral interrupt, UART0 included) to
+    // core 0. Written unconditionally, not assumed already 0 (the
+    // architectural reset value) -- see startup.S's comment on why
+    // system-register-shaped state here is inherited from a previous
+    // occupant of this core, not a genuine reset, under this project's
+    // JTAG re-injection workflow.
+    let gpu_int_route: *io u32 = 0x4000000C;
+    *gpu_int_route = 0; // 0b00: GPU IRQ -> core 0's IRQ input
+
+    // VC interrupt controller: enable UART0's line (global IRQ 57).
+    let enable_irqs_2: *io u32 = 0x3F00B214;
+    *enable_irqs_2 = 1 << 25;
+}
+
+fn irq_uart_rx_unmask() {
+    let uart0_imsc: *io u32 = 0x3F201038; // UART0_IMSC
+    *uart0_imsc = 1 << 4; // RXIM: unmask the RX interrupt
+}
+
+// Reads Core0's IRQ source register (bit 8 = GPU IRQ, i.e. "check the VC
+// interrupt controller") and, if set, the VC controller's own
+// pending_2 bank (bit 25 = UART0) -- called from startup.S's IRQ entry.
+// Returns true if the fired interrupt was UART0's.
+fn intc_uart_irq_pending() -> bool {
+    let core0_irq_source: *io u32 = 0x40000060;
+    if ((*core0_irq_source & (1 << 8)) == 0) {
+        return false;
+    }
+    let pending_2: *io u32 = 0x3F00B208;
+    return (*pending_2 & (1 << 25)) != 0;
+}
+
+// Called from startup.S's rpi3_irq_entry (`bl rpi3_irq_dispatch`) after
+// it has saved every register -- the only interrupt source wired up on
+// this target so far is UART0's RX line; extend this if-chain (not
+// intc_uart_irq_pending() itself) when a second source needs handling.
+fn rpi3_irq_dispatch() !{interrupt} {
+    if (intc_uart_irq_pending()) {
+        uart_irq_handler();
+    }
+}

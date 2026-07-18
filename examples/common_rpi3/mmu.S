@@ -17,14 +17,28 @@
 
    Two-level identity map (VA == PA), 4KB translation granule, T0SZ=25
    (39-bit input address -> L1 covers 1GB/entry, L2 covers 2MB/entry,
-   matching this SoC's memory map exactly). Only L1 entry 0 is populated
-   (physical 0x00000000-0x3FFFFFFF), covering both RAM and BCM2837's
-   peripheral block (0x3F000000-0x3FFFFFFF, see examples/common_rpi3/
-   uart.tkb's register addresses) in one L2 table: L2 entries 0-503
-   (0x00000000-0x3EFFFFFF) are Normal Write-Back Cacheable (RAM); L2
-   entries 504-511 (0x3F000000-0x3FFFFFFF) are Device-nGnRnE
-   (peripherals) -- 0x3F000000 / 0x200000 = 504 exactly, so this split
-   falls cleanly on a 2MB block boundary.
+   matching this SoC's memory map exactly). L1 entry 0 (physical
+   0x00000000-0x3FFFFFFF) covers RAM and BCM2837's main peripheral block
+   (0x3F000000-0x3FFFFFFF, see examples/common_rpi3/uart.tkb's register
+   addresses) in one L2 table: L2 entries 0-503 (0x00000000-0x3EFFFFFF)
+   are Normal Write-Back Cacheable (RAM); L2 entries 504-511
+   (0x3F000000-0x3FFFFFFF) are Device-nGnRnE (peripherals) -- 0x3F000000
+   / 0x200000 = 504 exactly, so this split falls cleanly on a 2MB block
+   boundary.
+
+   L1 entry 1 (physical 0x40000000-0x7FFFFFFF) covers the SEPARATE "ARM
+   Local"/QA7 peripheral block examples/common_rpi3/intc.tkb's GPU IRQ
+   routing/Core0 IRQ source registers live in (0x40000000-0x400000FF) --
+   a genuinely different physical range from the 0x3F000000 block above,
+   easy to miss (confirmed the hard way: examples/echo/examples/irq both
+   faulted with a Level 1 TRANSLATION fault, DFSC 0b000101, writing
+   0x4000000C -- an address this map simply had no entry for at all,
+   distinct from the earlier unaligned-ACCESS fault class this file's
+   own existence otherwise fixes). Only L2 entry 0 of this second table
+   is populated (Device-nGnRnE, covering 0x40000000-0x401FFFFF, more
+   than enough for the ~0x100-byte QA7 register block); entries 1-511
+   are left at their BSS-cleared all-zero (invalid) state -- nothing
+   else in that 1GB range is used.
 
    Called from examples/common_rpi3/startup.S's _start, AFTER BSS has
    already been cleared (l1_table/l2_table below live in .bss, so they
@@ -40,6 +54,8 @@ l1_table:
     .space  4096
 l2_table:
     .space  4096
+l2_table_local:
+    .space  4096
 
     .section .text
     .global mmu_init
@@ -53,6 +69,36 @@ mmu_init:
     adrp    x1, l1_table
     add     x1, x1, :lo12:l1_table
     str     x0, [x1]
+
+    /* L1 entry 1: table descriptor pointing at l2_table_local (the ARM
+       Local/QA7 block, see this file's header comment). */
+    adrp    x0, l2_table_local
+    add     x0, x0, :lo12:l2_table_local
+    orr     x0, x0, #0x3
+    str     x0, [x1, #8]
+
+    /* l2_table_local entry 0: a single Device-nGnRnE 2MB block covering
+       physical 0x40000000-0x401FFFFF. The descriptor's output-address
+       field holds the ABSOLUTE physical block base (0x40000000), not an
+       offset relative to what this table happens to cover -- an earlier
+       version of this line wrote just the attribute word 0x401 (output
+       address 0), which silently identity-UNmapped the whole QA7 block
+       onto physical 0x000000xx RAM instead: every intc.tkb register
+       read/write landed in the GPU firmware's armstub8 code at physical
+       0 (confirmed by reading VA 0x40000060 back and getting
+       0xd51e4020, an `msr elr_el3, x0` instruction -- EL3 stub code, in
+       an image that contains no EL3 instructions of its own), so
+       intc_uart_irq_pending() never saw the GPU IRQ bit and every UART
+       interrupt looped forever undispatched. The GPU->core0 routing
+       write was equally fake, and only worked because QA7's reset
+       default already routes to core 0. Attributes: AttrIndx 0 (Device)
+       | AF (bit 10) | SH=00 Non-shareable | valid+block (bits 1:0)
+       = 0x401, matching l2_table's own Device entries below. */
+    adrp    x1, l2_table_local
+    add     x1, x1, :lo12:l2_table_local
+    movz    x4, #0x401
+    movk    x4, #0x4000, lsl #16
+    str     x4, [x1]
 
     /* L2 table: 512 entries, each a 2MB block descriptor. Block
        descriptor format: bits[1:0] = 0b01 (valid, block -- not table,
