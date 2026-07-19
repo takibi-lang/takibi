@@ -1,18 +1,56 @@
 # Raspberry Pi 3B (BCM2837) Bare-Metal Bring-Up
 
-GitHub issue #140. Status: 43 examples ported and passing `make
-hwcheck-rpi3` (`start`/`hello`/`print_int`/`print_hex`/`print_ptr`/
-`mem`/`array`/`fizzbuzz`/`fibonacci`/`bubblesort`/`ringbuf`/`callstack`/
-`crc8`/`djb2`/`bump`/`scheduler`/`struct`/`struct_refined`/`refined`/
+GitHub issue #140. Status: 56 examples ported and passing `make
+hwcheck-rpi3` -- every example in the top-level `EXAMPLES` list
+EXCEPT the 6 that need real Ethernet (`net_echo`/`arp_reply`/
+`icmp_echo`/`tcp_echo`/`http_server`/`kvs_server`) and the 1 that needs
+SD-card-shaped block storage (`fatfs`) -- see "Ethernet and USB are
+required" and "Out of scope: SD-card-storage examples" below for why
+those 7 are blocked on a USB host stack this board does not have yet,
+not on anything specific to each individual example. Full list:
+`start`/`hello`/`print_int`/`print_hex`/`print_ptr`/`mem`/`array`/
+`fizzbuzz`/`fibonacci`/`bubblesort`/`ringbuf`/`callstack`/`crc8`/
+`djb2`/`bump`/`scheduler`/`struct`/`struct_refined`/`refined`/
 `narrow`/`for`/`loop`/`enum`/`nonexhaustive`/`bitops`/`align`/`packed`/
-`struct_align`/`const_global`/`sizeof_offsetof`/`inet_checksum`/
-`ip_parse`/`tcp_parse`/`rtc`/`timer`/`echo`/`irq`/`preempt`/`semaphore`/
-`condvar`/`msgqueue`/`watchdog`/`rtos_demo` -- `hwcheck-stm32`'s "plain
-compute" set plus `rtc`/`timer` (see "RTC" below) plus the two
-UART-RX-interrupt examples plus the full preemptive-scheduler group
-(see "Interrupts" below)). This is a JTAG-only bring-up: nothing here
-writes to the SD card as a real `kernel8.img`; see "Why JTAG injection,
-not an SD card kernel" below.
+`struct_align`/`const_global`/`sizeof_offsetof`/`slice`/`foreach`/
+`int64`/`indexed_view`/`tcp_conn_view`/`klock_guard`/`percpu`/
+`affine_escape_via_index`/`align_ptr_proof`/`linear_obligation`/
+`tuple_pair`/`field_lease`/`inet_checksum`/`ip_parse`/`tcp_parse`/
+`rtc`/`timer`/`echo`/`irq`/`preempt`/`semaphore`/`condvar`/`msgqueue`/
+`watchdog`/`rtos_demo`/`chan_rendezvous`. This covers `hwcheck-stm32`'s
+"plain compute" set (extended with plain-compute examples STM32
+already had but this board's own list had not picked up yet:
+`slice`/`foreach`/`int64`/`indexed_view`/`tcp_conn_view`) plus
+`rtc`/`timer` (see "RTC" below) plus the two UART-RX-interrupt examples
+plus the full preemptive-scheduler group (see "Interrupts" below) plus
+eight examples that had never been ported to ANY real hardware target
+before, QEMU-only until now (`klock_guard`/`percpu`/
+`affine_escape_via_index`/`align_ptr_proof`/`linear_obligation`/
+`tuple_pair`/`field_lease` are all pure compute or compute plus
+`disable_irq`/`enable_irq` -- no new HAL work at all;
+`chan_rendezvous` got the same `rpi3_irq_dispatch` treatment as
+`semaphore`/`condvar`/`msgqueue`, since it predates
+`examples/common/rtos.tkb` and still carries its own inline
+`SchedState`/`irq_dispatch`). This is a JTAG-only bring-up: nothing
+here writes to the SD card as a real `kernel8.img`; see "Why JTAG
+injection, not an SD card kernel" below.
+
+**Ethernet and USB are required, not optional, for this board** (per
+the project owner, 2026-07-19) -- unlike STM32F746G-DISCOVERY's
+on-chip Ethernet MAC, BCM2837 has NO on-chip Ethernet at all; its
+Ethernet is a SMSC LAN9514 chip wired behind the SoC's internal USB2
+hub, reachable only through a full USB host stack (DesignWare Hi-Speed
+USB2 OTG controller driver + USB hub enumeration + the LAN9514's own
+USB-Ethernet class protocol). Separately, this board's only SD card
+slot is already committed to holding `config.txt`/`kernel8.img` for the
+JTAG-catch boot path (see "Out of scope: SD-card-storage examples"
+below), so `fatfs`-family testing on this board will need USB mass
+storage instead of SD -- meaning the SAME USB host stack work unblocks
+both Ethernet and storage testing here. Not yet started; expect this to
+need its own dedicated design pass (USB host controller bring-up is a
+substantially different, larger piece of work than anything ported so
+far) rather than the one-file-at-a-time incremental pattern the rest of
+this document describes.
 
 ## Out of scope: SD-card-storage examples
 
@@ -27,8 +65,12 @@ SD-card-storage example to this target would mean sharing that same
 physical card between "how the board boots" and "a FAT filesystem the
 running example reads/writes" -- a fundamentally different, riskier
 arrangement than STM32's two-independent-cards setup, and deliberately
-out of scope for this target. Do not port these, even once other
-examples using real interrupts/timers land.
+out of scope for this target using the SD card. Do not port these
+against the SD card, even once other examples using real
+interrupts/timers land -- fatfs-family testing on this board is
+expected to eventually use USB mass storage instead (see this
+document's own top-of-file note on Ethernet/USB being required), once
+this board has a USB host stack at all.
 
 ## Hardware
 

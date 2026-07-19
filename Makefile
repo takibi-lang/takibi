@@ -1302,7 +1302,10 @@ examples/common_rpi3/jtag_stub.img: examples/common_rpi3/jtag_stub.elf
 RPI3_EXAMPLES := start hello print_int print_hex print_ptr mem array \
                  fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump \
                  scheduler struct struct_refined refined narrow for loop enum nonexhaustive \
-                 bitops align packed struct_align const_global sizeof_offsetof
+                 bitops align packed struct_align const_global sizeof_offsetof \
+                 slice foreach int64 indexed_view tcp_conn_view \
+                 klock_guard percpu \
+                 affine_escape_via_index align_ptr_proof linear_obligation tuple_pair field_lease
 RPI3_OBJS     := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
@@ -1368,7 +1371,7 @@ $(RPI3_RTC_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON
 # SysTick_Handler) -- reused as-is from the QEMU build's own identical
 # need for the same files, see that variable's own comment further up.
 RPI3_SCHED_EXAMPLES     := preempt watchdog
-RPI3_SCHED_SEM_EXAMPLES := semaphore condvar msgqueue rtos_demo
+RPI3_SCHED_SEM_EXAMPLES := semaphore condvar msgqueue rtos_demo chan_rendezvous
 RPI3_SCHED_OBJS         := $(foreach e,$(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_SCHED_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(TAKIBI)

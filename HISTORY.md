@@ -9069,3 +9069,68 @@ correct, now for the right reason), `semaphore`/`condvar`/`msgqueue`/
 throughout (the `rpi3_irq_entry` fix is RPi3-only code, but the shared
 `.tkb` changes -- new `rpi3_irq_dispatch` functions, `rtos.tkb`'s own,
 `enable_irq`/`disable_irq` -- all touch files QEMU/STM32 also compile).
+
+**2026-07-19 follow-up: 8 more examples (51 total), and Ethernet/USB
+confirmed as a real requirement, not a maybe.** Two small batches:
+
+`slice`/`foreach`/`int64`/`indexed_view`/`tcp_conn_view` -- five
+plain-compute examples already proven on STM32 hardware that this
+board's own `RPI3_EXAMPLES` list simply had never picked up (an
+oversight from the original 33-example port, not a deliberate
+exclusion; none of the five `use` anything beyond `uart.tkb`/
+`print.tkb`). Added to `RPI3_EXAMPLES` and `scripts/run_hwtest_rpi3.sh`
+with no other code changes needed -- all five passed `make
+hwcheck-rpi3` on the first try.
+
+`klock_guard`/`percpu`/`chan_rendezvous` -- the three RTOS
+proof-of-concept examples `examples/common/rtos.tkb` was later
+generalized from (see that file's own header comment), never before
+ported to ANY real hardware target (QEMU-only until now, not even on
+STM32). `klock_guard` and `percpu` needed zero new work: `klock_guard`
+is plain compute plus `disable_irq()`/`enable_irq()`, both already
+defined unconditionally in `startup.S` since `rtos_demo`'s port
+(`examples/common/rtos.tkb`'s `klock`/`kunlock` giant-lock
+placeholder); `percpu` is pure compute with no HAL dependency at all.
+Both simply joined `RPI3_EXAMPLES`. `chan_rendezvous` predates
+`examples/common/rtos.tkb`'s generalization and still carries its own
+inline `SchedState`/`irq_dispatch` (the same shape `semaphore`/
+`condvar`/`msgqueue` had before being generalized) -- given the exact
+same `rpi3_irq_dispatch` treatment as those three and joined
+`RPI3_SCHED_SEM_EXAMPLES`. All three passed `make hwcheck-rpi3` on the
+first try (51/51 for the full suite); `make qemutest` (131/131)
+confirmed zero regression on the shared `chan_rendezvous.tkb` change.
+
+Separately, the project owner confirmed Ethernet support on this board
+is a firm requirement, not a stretch goal -- and, in the same
+conversation, that this board's SD card slot being committed to boot
+duty (see "Out of scope: SD-card-storage examples" in
+`examples/common_rpi3/AGENTS.md`) means `fatfs`-family testing here
+will need USB mass storage instead. Both needs converge on the same
+missing piece: BCM2837 has no on-chip Ethernet MAC at all (unlike
+STM32F746's own on-chip MAC); its Ethernet is a SMSC LAN9514 chip wired
+behind the SoC's internal USB2 hub, reachable only through a full USB
+host stack (DesignWare Hi-Speed USB2 OTG controller driver, hub
+enumeration, then the LAN9514's own USB-Ethernet class protocol on top).
+A USB mass-storage-class driver over the same host stack would then
+unblock `fatfs`-family testing too. Recorded here as a scope marker,
+not started yet -- this is a substantially larger, more architecturally
+distinct piece of work than anything ported to this board so far (every
+example above builds on peripherals mapped directly into this board's
+own address space; USB host bring-up is closer in kind to the original
+MMU/interrupt-controller bring-up work than to "port one more example"),
+and is expected to need its own dedicated design pass rather than the
+incremental one-file-at-a-time pattern the rest of this board's history
+follows.
+
+Before starting that design pass, checked whether anything else could
+still be ported without it: yes -- `affine_escape_via_index`/
+`align_ptr_proof`/`linear_obligation`/`tuple_pair`/`field_lease`, five
+more pure-compute examples with zero `use`/`extern fn` dependencies
+(the same QEMU-only-until-now category `klock_guard`/`percpu` were in),
+simply never picked up by this board's example list. Joined
+`RPI3_EXAMPLES` with no other code changes, same as the five earlier in
+this entry -- all five passed on the first try (56/56 for the full
+suite). This exhausts the top-level `EXAMPLES` list except the 7
+examples genuinely blocked on Ethernet/USB (`net_echo`/`arp_reply`/
+`icmp_echo`/`tcp_echo`/`http_server`/`kvs_server`/`fatfs`) -- every
+other example in this project is now ported to this board.
