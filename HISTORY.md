@@ -9556,3 +9556,17 @@ HTTP connections, and verifies both the page and request-counter bump.
 
 Real-hardware result: `make hwcheck-rpi3-net` passes all five examples
 (5 tests passed, 0 failed), including both HTTP requests.
+
+Milestone 7, part 6: `kvs_server`, the third and final requested
+application, ported to Raspberry Pi 3B without changing the shared
+firmware. A new real-link test uses ordinary host TCP sockets but writes
+each request header and body together, preserving the server's documented
+single-segment PUT contract. It covers missing keys, create/read/
+overwrite/delete, PUT without Content-Length, parser and method errors,
+all 16 table slots, the 507 full-table response, listing, overwrite while
+full, and tombstone reuse. This completes the three sequential application
+ports; milestone hardening remains a separate follow-up as required by the
+project process.
+
+Real-hardware result: `make hwcheck-rpi3-net` passes all six examples
+(6 tests passed, 0 failed), including every KVS test group.
