@@ -23,6 +23,7 @@
     "-v", "/dev:/dev-host:ro",
     "-v", "/dev/bus/usb:/dev/bus/usb",
     "--device-cgroup-rule=c 166:* rmw",
+    "--device-cgroup-rule=c 188:* rmw",
     "--device-cgroup-rule=c 189:* rmw",
     "--network=host"
   ],
