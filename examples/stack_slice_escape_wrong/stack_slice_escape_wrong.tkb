@@ -1,0 +1,7 @@
+// This file is expected to produce a compile error.
+// A subslice of a local array points into the current stack frame and cannot
+// outlive the function, even though its bounds and minimum length are proven.
+fn stack_slice_escape_wrong() -> [u8; 4..] {
+    let mut buf: [u8; 4] = { 1, 2, 3, 4 };
+    return buf[0..<4];
+}

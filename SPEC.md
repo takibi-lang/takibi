@@ -1299,6 +1299,15 @@ length, not the exact length.
 - `s as *T` -- explicit bridge back to the raw-pointer world (the `ptr`
   half only). Casting a slice to anything else is a compile error.
 
+**Stack lifetime**: a slice derived from a local array is tied to the current
+stack frame. It may be used locally and passed through a verified `borrow`
+slice parameter, but cannot be returned, stored in a global or aggregate,
+written through a pointer, or
+passed to a potentially retaining plain slice parameter. Subslice, alias, and
+slice-to-pointer cast preserve this tie. Global-array and string-literal
+storage are not stack-tied. General stack-derived raw-pointer lifetime
+tracking is not yet part of this rule.
+
 **Indexing**: `s[i]` needs no runtime check iff `i`'s proven range
 satisfies `lo >= 0 && hi <= minimum`. Otherwise a runtime check against
 the slice's actual (runtime) `.len` is generated.

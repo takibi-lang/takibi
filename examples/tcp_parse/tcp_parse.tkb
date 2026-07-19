@@ -80,7 +80,7 @@ fn print_tcp_flags(flags: u8) {
 // single-byte width IHL would get in isolation (see CLAUDE.md's
 // "Explicit-Base {lo..<hi as base}" section for why this file's ihl
 // can't be u8 the way ip_parse.tkb's local ihl is).
-fn parse_tcp(ip: [u8; 40..], ihl: {20..<21 as u16}) {
+fn parse_tcp(ip: borrow [u8; 40..], ihl: {20..<21 as u16}) {
     let ihl_idx: usize = ihl as usize;
     let hdr: [u8; 20..] = ip[ihl_idx..<ihl_idx + 20];
     let src_port: u16 = read_u16be(hdr[0..<2]) as u16;

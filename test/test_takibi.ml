@@ -2062,6 +2062,36 @@ let infer_tests = [
          }"));
 
   Alcotest.test_case
+    "region slice: a stack-array subslice cannot be returned" `Quick
+    (expect_type_error
+      "stack-derived slice 'buf' cannot be returned from this function"
+      "fn stack_slice_leak() -> [u8; 4..] {
+         let mut buf: [u8; 4] = { 1, 2, 3, 4 };
+         return buf[0..<4];
+       }");
+
+  Alcotest.test_case
+    "region slice: stack storage may cross a verified borrow call" `Quick
+    (fun () ->
+      ignore (infer
+        "fn stack_slice_peek(s: borrow [u8; 4..]) -> u8 { return s[0]; }
+         fn stack_slice_borrow_ok() -> u8 {
+           let mut buf: [u8; 4] = { 1, 2, 3, 4 };
+           return stack_slice_peek(buf[0..<4]);
+         }"));
+
+  Alcotest.test_case
+    "region slice: an array-to-slice cast cannot escape through a retaining call"
+    `Quick
+    (expect_type_error
+      "slice 'buf' is stack-derived and cannot be passed to retaining parameter of 'stack_slice_retain'"
+      "fn stack_slice_retain(s: []u8) {}
+       fn stack_slice_call_bad() {
+         let mut buf: [u8; 4] = { 1, 2, 3, 4 };
+         stack_slice_retain(buf as []u8);
+       }");
+
+  Alcotest.test_case
     "region slice: an owner-derived slice cannot be stored into a global" `Quick
     (expect_type_error
       "owner-derived slice 'f' cannot be stored into a global"

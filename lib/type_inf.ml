@@ -4788,6 +4788,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     List.iter2 (fun (name, _) (_, ty) ->
       var_types := StringMap.add name ty !var_types
     ) fdef.params finfo.param_types;
+    let param_names = List.fold_left (fun names (name, _) ->
+      StringSet.add name names) StringSet.empty fdef.params in
+    let is_stack_local name =
+      StringMap.mem name !var_types && not (StringSet.mem name param_names)
+    in
     let var_kind name = match StringMap.find_opt name !var_types with
       | Some ty when is_linear_type ty -> Some Ast.KindLinear
       | Some ty when is_affine_type ty -> Some Ast.KindAffine
@@ -4843,6 +4848,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            | None -> None)
     in
     let is_tracked_path p = path_kind p <> None in
+    let is_stack_origin = function
+      | PVar name -> is_stack_local name && not (is_tracked_path (PVar name))
+      | PField (name, _) ->
+          is_stack_local name && not (is_tracked_path (PVar name))
+    in
     let is_linear_path p = path_kind p = Some Ast.KindLinear in
     let kind_word p = if is_linear_path p then "linear" else "affine" in
     (* `sink`/`borrow` parameters carry no callee-side obligation: sink is
@@ -5002,8 +5012,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | None -> false
     in
     let rec expr_taint taints (e : Ast.expr) = match e.desc with
-      | Ast.Var n -> TaintEnv.get n taints
+      | Ast.Var n ->
+          (match StringMap.find_opt n !var_types with
+           | Some (Ast.TypeArray _) -> PathSet.empty
+           | _ -> TaintEnv.get n taints)
       | Ast.SliceOf (base, _, _) -> TaintEnv.get base taints
+      | Ast.Cast (Ast.TypeSlice _, { Ast.desc = Ast.Var n; _ }) ->
+          TaintEnv.get n taints
       | Ast.Cast (_, x) | Ast.Bnot x | Ast.Unsafe x -> expr_taint taints x
       | Ast.Deref x | Ast.FieldGet (x, _) when expr_has_region_result e ->
           expr_taint taints x
@@ -5087,11 +5102,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       match List.find_map (first_tainted_aggregate_value taints) values with
       | None -> ()
       | Some source ->
+          let source_taint = expr_taint taints source in
+          let stack_derived = PathSet.exists is_stack_origin source_taint in
           let value_kind = Option.value
             (Option.map region_kind_word (expr_region_kind source))
             ~default:"value" in
           let derived_kind =
-            if value_kind = "slice" then "owner-derived slice"
+            if stack_derived && value_kind = "slice" then "stack-derived slice"
+            else if stack_derived && value_kind = "pointer" then "stack-derived pointer"
+            else if stack_derived then "stack-derived value"
+            else if value_kind = "slice" then "owner-derived slice"
             else if value_kind = "pointer" then "authority-derived pointer"
             else "authority-derived value"
           in
@@ -5147,15 +5167,20 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       if not (PathSet.is_empty t)
          && not (PathSet.subset t handoff_authorities) then
         let owner = path_to_string (PathSet.choose t) in
+        let stack_derived = PathSet.exists is_stack_origin t in
         let value_kind = Option.value
           (Option.map region_kind_word (expr_region_kind e)) ~default:"value" in
         let derived_kind =
-          if value_kind = "slice" then "owner-derived slice"
+          if stack_derived && value_kind = "slice" then "stack-derived slice"
+          else if stack_derived && value_kind = "pointer" then "stack-derived pointer"
+          else if stack_derived then "stack-derived value"
+          else if value_kind = "slice" then "owner-derived slice"
           else if value_kind = "pointer" then "authority-derived pointer"
           else "authority-derived value"
         in
         let authority_kind =
-          if value_kind = "slice" then "owner" else "authority"
+          if stack_derived then "stack local"
+          else if value_kind = "slice" then "owner" else "authority"
         in
         let msg = match escape with
           | `Return -> Printf.sprintf
@@ -5243,12 +5268,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               let value_kind = Option.value
                 (Option.map region_kind_word (expr_region_kind arg))
                 ~default:"value" in
+              let origin =
+                if PathSet.exists is_stack_origin arg_taint
+                then "stack-derived"
+                else "authority-derived" in
               raise (TypeError (arg.loc, Printf.sprintf
-                "%s '%s' is authority-derived and cannot be passed to \
+                "%s '%s' is %s and cannot be passed to \
                  retaining parameter of '%s'; declare that pointer or slice \
                  parameter as `borrow`, or perform the retention inside an \
                  indexed-owner handoff"
-                value_kind (taint_source_name arg) name))
+                value_kind (taint_source_name arg) origin name))
             end;
             let consume_arg = match params with
               | Some ty :: _ when is_tracked_type ty ->
@@ -5460,9 +5489,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             | None -> moved
           in
           let taints = TaintEnv.set name
-            (match init with
-             | Some e -> expr_taint taints e
-             | None -> PathSet.empty)
+            (match StringMap.find_opt name !var_types, init with
+             (* A local array is stack storage. Its value expression decays
+                to a pointer, and SliceOf builds a fat pointer into the same
+                storage, so seed the backing array itself as a region origin.
+                Globals deliberately never pass through this Let branch. *)
+             | Some (Ast.TypeArray _), _ -> PathSet.singleton (PVar name)
+             | _, Some e -> expr_taint taints e
+             | _, None -> PathSet.empty)
             taints
           in
           (mv_clear p moved, PathSet.add p declared, taints)

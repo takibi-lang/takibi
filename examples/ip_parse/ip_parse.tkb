@@ -22,7 +22,7 @@ fn print_protocol_name(proto: u8) {
     }
 }
 
-fn parse_ipv4(pkt: [u8; 20..], len: i32) {
+fn parse_ipv4(pkt: borrow [u8; 20..], len: i32) {
     // version/ihl/ttl/protocol are all single-byte wire fields -- u8 is
     // their natural type now that Refinement Numerical Type supports any
     // base (see CLAUDE.md). total_len is a 16-bit field, so u16.
