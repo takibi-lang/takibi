@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Explicit STM32 KVS+SD+RTOS stress runner.
 #
-# This is intentionally NOT part of make allcheck: issue #135 showed that
-# Ethernet plus SD-card write-through persistence on STM32F746G-DISCOVERY
-# becomes board/load sensitive under concurrent clients. Keep this as an
-# opt-in target for manual characterization and future regression work.
+# This is intentionally NOT part of make allcheck: it is a sustained real-
+# board load test, not a deterministic integration test. Concurrency 4 matches
+# the server's TCP slot count; larger values deliberately test overload.
 set -euo pipefail
 
 : "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run through make or set it explicitly}"

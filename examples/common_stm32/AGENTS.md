@@ -40,6 +40,18 @@ process rules that apply everywhere.
   returns a linear in-flight owner; completion consumes it only after DMA releases the exact TX slot,
   re-posts the RX descriptor, and restores the acquisition permission.
 
+  **RX burst capacity and suspended-DMA recovery (issue #135 follow-up)**: the RX ring has 16
+  descriptors, allocated statically at link time. Four concurrent TCP clients can produce an
+  ACK-plus-request burst of eight frames, with ARP and retransmissions arriving around it; the old
+  four-descriptor ring measurably overflowed under this load, and eight descriptors still had no
+  margin. Sixteen buffers consume about 25 KiB and produced zero DMA missed frames in the supported
+  concurrency-4 stress run. This count is sized for the MCU/server contract, not for the host's CPU
+  count. When all descriptors were temporarily CPU-owned, the STM32 DMA could set RBUS and remain
+  suspended even after descriptors had been reposted. `eth_rx_resume` now clears RBUS and issues RX
+  poll demand after publishing a descriptor; the empty-acquire path also performs this recovery so
+  an interrupt/poll race cannot leave receive asleep. Read `ETH_DMAMFBOCR` only once when diagnosing
+  loss because its missed-frame counters are read-to-clear.
+
   **Network config**: `examples/common_stm32/netconfig.tkb` holds the board's MAC/IP as plain global
   constants (`OUR_MAC`/`OUR_IP`/`HTTP_SERVER_IP`, array-literal `{...}` initializers). MAC is a fixed
   `00:80:E1:00:00:00`, matching ST's own STM32CubeF7 LwIP example convention (hardcoded, not derived from

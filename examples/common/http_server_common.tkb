@@ -62,7 +62,13 @@ fn tcp_conn_rcv_nxt(idx: {0..<MAX_CONNS as usize}) -> u32 {
 }
 
 const HTTP_SEGMENT_PAYLOAD_MAX: i32 = 1400;
-const TCP_CONN_IDLE_PACKET_LIMIT: u32 = 16;
+// This is deliberately much larger than the old value of 16. With several
+// active peers, 16 unrelated segments can arrive before Linux retransmits a
+// frame lost to a temporarily full RX ring, expiring a healthy connection
+// before it gets a chance to recover. Packet-count aging is only a fallback
+// in the absence of a target-independent clock, so favor preserving live
+// connections over reclaiming abandoned slots aggressively.
+const TCP_CONN_IDLE_PACKET_LIMIT: u32 = 4096;
 
 // No wall-clock source is available in this target-independent TCP core.
 // Age slots by accepted TCP segment count instead: overload cases keep
@@ -351,7 +357,6 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_b
                                     let ack:      u32 = read_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET]) as u32;
 
                                     if (dst_port == HTTP_PORT) {
-                                        tcp_age_slots();
                                         let ev: TcpEvent = classify_tcp_event(flags);
                                         // Event-response obligation (issue #117, OWNERSHIP_KERNEL.md
                                         // 4.10): minted once per accepted segment; the linear kind's
@@ -619,6 +624,10 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_b
                                                 }
                                             }
                                         }
+                                        // Age only after this segment has had a chance to refresh
+                                        // its matching slot. Aging before dispatch could expire a
+                                        // live slot on the very packet that should have reset it.
+                                        tcp_age_slots();
                                     }
                                 }
                             }

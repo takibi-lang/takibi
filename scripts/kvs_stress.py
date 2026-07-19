@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # Concurrent load generator for the KVS HTTP server (GitHub issue #135),
-# used to characterize the cost of write-through SD persistence and, per
-# the project roadmap, to motivate/later validate RTOS-based multi-
-# connection support -- see the "connection contention" report section
-# below for why that number specifically matters.
+# used to characterize write-through SD persistence and the N=4 concurrent
+# TCP implementation under real load.
 #
 # Uses raw sockets, one sendall() per request (request line + headers +
 # body combined), same reasoning as eth_kvs_server_stm32_test.py: this
@@ -14,17 +12,9 @@
 #
 # --concurrency N spawns N worker threads, each looping PUT/GET/DELETE/
 # LIST requests against the server for the configured duration. The
-# server's shared TCP core (examples/common/http_server_common.tkb)
-# accepts only ONE connection at a time today -- concurrency > 1 does NOT
-# achieve real parallel request servicing yet; most workers spend most of
-# their time with a connection attempt blocked/refused while one other
-# worker's request is actually being served. That is not a bug in this
-# tool: it is the current, honest state of the server, and this tool is
-# deliberately written as if the server already supported N simultaneous
-# connections so that (a) today's run quantifies the cost of NOT having
-# that (see the connection-contention count in the report), and (b) the
-# same tool becomes a genuine concurrent-throughput benchmark with no
-# changes needed once RTOS-based multi-connection support lands.
+# shared TCP core accepts MAX_CONNS=4 simultaneous connections. Higher
+# concurrency deliberately exercises overload behavior: excess SYNs may be
+# retried while all four slots are occupied.
 #
 # Works against any host:port (QEMU's qemu-kvs SLIRP hostfwd, or a real
 # board over Ethernet) -- defaults match the STM32 board's netconfig.tkb.
@@ -35,6 +25,7 @@
 import argparse
 import random
 import socket
+import struct
 import sys
 import threading
 import time
@@ -69,14 +60,24 @@ def do_request(host: str, port: int, method: str, path: str, body: bytes,
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
         try:
-            s.connect((host, port))
-            s.sendall(build_request(method, path, host, body))
-            chunks = []
-            while True:
-                chunk = s.recv(4096)
-                if not chunk:
-                    break
-                chunks.append(chunk)
+            try:
+                s.connect((host, port))
+                s.sendall(build_request(method, path, host, body))
+                chunks = []
+                while True:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+            except OSError:
+                # Do not leave a timed-out stress connection retransmitting
+                # in FIN-WAIT for the next board reload/measurement.
+                try:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                 struct.pack("ii", 1, 0))
+                except OSError:
+                    pass
+                raise
         finally:
             s.close()
         elapsed = time.monotonic() - start
@@ -171,21 +172,13 @@ def report(records, wall_secs: float):
         print("%-8s%8d%8d%8d%10.1f%10.1f%10.1f%10.1f" %
               (op, len(entries), ok, errs, p50, p95, p99, pmax))
 
-    # Connection-level contention: the server handles one TCP connection
-    # at a time (examples/common/http_server_common.tkb). Under
-    # --concurrency > 1, most of these are workers whose connect()/recv()
-    # timed out or got refused while another worker's request was being
-    # served, not application-level errors. Reported separately from the
-    # per-op table above because it's the number this tool exists to
-    # produce: it quantifies what RTOS-based multi-connection support
-    # would actually buy, both to motivate that work and, once it lands,
-    # to confirm this count drops.
+    # Keep transport failures separate from HTTP error responses. With the
+    # N=4 server these indicate packet loss, slot exhaustion, or recovery
+    # failure rather than an application-level status.
     conn_errors = [err for _, _, _, err in records if err is not None]
     if conn_errors:
         print("\n%d/%d requests failed at the connection/transport level "
-              "(timeout, refused, reset) -- consistent with the server's "
-              "current one-connection-at-a-time design serializing "
-              "concurrent clients, not request-level errors."
+              "(timeout, refused, reset); these are not HTTP status errors."
               % (len(conn_errors), total))
         print("  sample error: %r" % conn_errors[0])
 
@@ -209,11 +202,8 @@ def main() -> int:
                               "KVS_HOST_PORT for QEMU")
     parser.add_argument("--port", type=int, default=80)
     parser.add_argument("--concurrency", type=int, default=4,
-                         help="worker threads (see module comment: the server "
-                              "itself serializes to one connection at a time "
-                              "today, so this mainly measures contention cost, "
-                              "not achieved parallelism, until RTOS multi-"
-                              "connection support lands)")
+                         help="worker threads; the server has four TCP slots, "
+                              "so values above four also exercise overload")
     parser.add_argument("--duration", type=float, default=30.0, help="seconds")
     parser.add_argument("--key-space", type=int, default=16,
                          help="distinct keys cycled through (default matches "

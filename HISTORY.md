@@ -15,6 +15,38 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-18: STM32 RX Burst Capacity and DMA Recovery (Issue #135)
+
+The KVS+SD+RTOS concurrency-4 stress failure was traced below the SD task and
+TCP application state. Packet capture showed successful handshakes followed by
+lost request frames, while GDB found no Cortex-M fault. The STM32 Ethernet DMA
+missed-frame counter instead reported receive-buffer-unavailable drops. The old
+four-entry RX ring could not absorb the ACK-plus-request burst from four clients,
+and the one-frame-in-flight API holds an RX descriptor until its in-place reply
+has completed transmission.
+
+The STM32 RX ring is now 16 entries (about 25 KiB including packet buffers),
+with its indexed owner refinements derived from `ETH_RX_DESC_COUNT`. The driver
+also clears DMA status RBUS and issues receive poll demand after publishing a
+descriptor, and repeats that recovery from an otherwise-empty acquire. This
+fixes a race where DMA entered Suspended after an earlier poll write and stayed
+asleep despite every descriptor having been returned. TCP packet-count expiry
+was moved after dispatch so a recovery packet refreshes its slot before aging,
+and its fallback limit was raised from 16 to 4096 because it is not a clock.
+
+Ten-second fixed-key mixed KVS measurements after the fix gave concurrency 4:
+520/520 HTTP 200 responses, 51.6 requests/s, zero DMA missed frames, no RBUS,
+and no CPU fault. Concurrency 8 had zero DMA misses but 12/555 transport failures,
+showing that the four TCP connection slots, rather than the RX ring, are then the
+limit. A concurrency-24 run was intentionally severe overload and was unstable;
+host core count is not a valid RX-ring sizing rule. Concurrency 4 remains the
+supported stress level, while higher values are overload characterization until
+a real requirement justifies more connection slots or a SYN backlog.
+
+Verification: `make check` passed all 131 tests and
+`make hwcheck-stm32-net` passed all 10 real-Ethernet tests, including KVS
+persistence across reset.
+
 ### 2026-07-18: Explicit `const` for Type-Level Integer Constants
 
 GitHub issue #135's multi-connection HTTP/KVS work exposed a concrete
