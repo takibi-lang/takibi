@@ -1,0 +1,25 @@
+// Network configuration for RPi3's real Ethernet examples, same role as
+// examples/common_stm32/netconfig.tkb -- see that file's own header
+// comment for the full rationale (fixed MAC is fine, every hardware test
+// runs against exactly one board on a private point-to-point link).
+//
+// MAC: locally-administered (0x02 in the first octet's low bits per
+// IEEE 802 -- this board has no registered OUI of its own the way ST's
+// 00:80:E1 is for STM32), not read from the LAN9514: this board has no
+// EEPROM fitted (confirmed during the USB bring-up design pass), so the
+// chip has no factory-programmed address to read in the first place --
+// examples/common_rpi3/lan9514.tkb's own header comment covers this.
+let OUR_MAC: [u8; 6] = {0x02, 0x00, 0x20, 0x00, 0x00, 0x02};
+
+// our_ip: 192.168.20.2 -- same /24 as this devcontainer's point-to-point
+// NIC dedicated to this board (enp5s0, 192.168.20.1/24), confirmed
+// during the USB bring-up design pass. Same reasoning as STM32's own
+// 192.168.10.2 (a different /24, its own dedicated NIC, enp4s0) and
+// distinct from QEMU's RFC 5737 TEST-NET-1 address (192.0.2.1) --
+// see examples/common_stm32/netconfig.tkb's comment for the full
+// three-way rationale. If this machine's point-to-point interface or
+// its subnet ever changes, update this constant (and any matching
+// values scripts/run_hwtest_rpi3_net.sh's own test scripts hardcode).
+let OUR_IP: [u8; 4] = {192, 168, 20, 2};
+
+let HTTP_SERVER_IP: [u8; 4] = OUR_IP;

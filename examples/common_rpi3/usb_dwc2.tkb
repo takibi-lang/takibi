@@ -192,23 +192,29 @@ fn dwc2_core_init() {
 
 // dwc2_program_fifo_sizes: every bare-metal DWC2 reference explicitly
 // reprograms all three FIFOs during host init rather than trusting the
-// power-on partition (uspi's own dwhcidevice.c included) -- and under
-// JTAG re-injection the current partition is inherited state anyway.
-// 1024 words (4096 bytes) each for RX / non-periodic TX / periodic TX,
-// the same fixed generously-sized partition uspi itself uses for
-// exactly this SoC (not dynamically computed from HW_CFG3's reported
-// total depth of 4080 words -- matching the reference implementation
-// rather than deriving a tighter partition this project has no way to
-// cross-check; 3072 total fits comfortably). Layout:
+// power-on partition -- and under JTAG re-injection the current
+// partition is inherited state anyway. Values below match Linux
+// mainline's OWN BCM2835 platform parameters exactly
+// (drivers/usb/dwc2/params.c, dwc2_set_bcm_params -- the
+// production-proven configuration for this exact SoC, not uspi's more
+// generic fixed 1024/1024/1024 split this file used before): RX = 774
+// words. Linux does not override the TX FIFOs for this platform,
+// leaving them to the driver's own generic default computation from
+// whatever HW_CFG3 reports remaining after RX -- since this project
+// has no equivalent generic-default logic to port, the remaining
+// budget (HW_CFG3's own reported total, 4080 words on this chip, minus
+// RX's 774) is split generously toward non-periodic (bulk/control) TX,
+// which is the path that actually needs it (periodic/interrupt
+// transfers are not used by anything in this driver today). Layout:
 // RX_FIFO_SIZ's only field is its own depth; NPER_TX_FIFO_SIZ and
 // HOST_PER_TX_FIFO_SIZ are each (start address in low 16 bits) | (depth
 // in bits 31:16), where each FIFO's start address is the sum of every
 // earlier FIFO's size (they're laid out back-to-back in one shared SRAM).
 fn dwc2_program_fifo_sizes() {
     let host_per_tx_fifo_siz: *io u32 = 0x3F980100;
-    *dwc2_rx_fifo_siz = 1024;
-    *dwc2_nper_tx_fifo_siz = 1024 | (1024 << 16);
-    *host_per_tx_fifo_siz = 2048 | (1024 << 16);
+    *dwc2_rx_fifo_siz = 774;
+    *dwc2_nper_tx_fifo_siz = 774 | (2000 << 16);
+    *host_per_tx_fifo_siz = 2774 | (1306 << 16);
 }
 
 // dwc2_host_init: flush both FIFOs (self-clearing bits, bounded poll
@@ -343,6 +349,7 @@ fn chan_split_reg(chan: usize) -> *io u32 {
 // function only knows it is moving `len` bytes, not which direction
 // makes cleaning vs invalidating correct.
 let mut dwc2_last_status: u32 = 0;
+let mut dwc2_last_xfer_bytes: u32 = 0;
 
 fn dwc2_channel_transfer(chan: usize, dev_addr: u32, ep_num: u32, ep_type: u32,
                           direction_in: bool, max_pkt: u32, pid: u32,
@@ -413,6 +420,15 @@ fn dwc2_channel_transfer(chan: usize, dev_addr: u32, ep_num: u32, ep_type: u32,
         dwc2_last_status = halted;
         *intreg = halted;
         if ((halted & HCINT_XFER_COMPLETE) != 0) {
+            // XFERSIZ.BYTES is decremented as data streams in, so after
+            // completion it holds bytes NOT transferred -- a short IN
+            // packet (device sent less than the buffer size, the normal
+            // end-of-data signal for bulk IN) legitimately completes with
+            // this nonzero, and callers that care about the real byte
+            // count (bulk IN; control transfers already know their own
+            // fixed lengths) read it back via dwc2_last_xfer_bytes.
+            let remaining: u32 = (*xfersiz) & 0x7FFFF;
+            dwc2_last_xfer_bytes = len - remaining;
             return true;
         }
         if ((halted & HCINT_STALL) != 0) {
@@ -425,6 +441,9 @@ fn dwc2_channel_transfer(chan: usize, dev_addr: u32, ep_num: u32, ep_type: u32,
 
 fn dwc2_debug_last_status() -> u32 {
     return dwc2_last_status;
+}
+fn dwc2_last_transfer_bytes() -> u32 {
+    return dwc2_last_xfer_bytes;
 }
 
 let mut ctrl_setup_buf: [u8; 8] align(64);
@@ -518,6 +537,77 @@ fn dwc2_set_configuration(dev_addr: u32, max_pkt: u32, config: u16) -> bool {
                                   ctrl_data_buf, 0);
 }
 
+// GET_DESCRIPTOR(CONFIGURATION): descriptor type 2. Callers fetch the
+// 9-byte header first to learn wTotalLength, then re-fetch the whole
+// thing (bounded by ctrl_data_buf's 64-byte capacity -- generous for
+// any single-interface device this project talks to: the LAN9514
+// Ethernet function's own config+interface+3 endpoint descriptors are
+// 9+9+3*7 = 39 bytes).
+fn dwc2_get_config_descriptor(dev_addr: u32, max_pkt: u32, length: u32) -> bool {
+    let value: u16 = (2 as u16) << 8;
+    return dwc2_control_transfer(dev_addr, max_pkt, 0x80, 0x06, value, 0,
+                                  ctrl_data_buf, length);
+}
+fn dwc2_config_descriptor_total_length() -> u32 {
+    return (ctrl_data_buf[2] as u32) | ((ctrl_data_buf[3] as u32) << 8);
+}
+
+// dwc2_find_bulk_endpoints: walk the descriptor list ctrl_data_buf
+// already holds (a config descriptor's header immediately followed by
+// its interface/endpoint descriptors, back to back -- USB's own
+// "descriptor list" convention, not anything device-specific) looking
+// for the first bulk IN and first bulk OUT endpoint addresses.
+// Descriptor type 5 = ENDPOINT; bmAttributes low 2 bits == 2 selects
+// bulk (vs control/isoc/interrupt); bEndpointAddress bit 7 selects
+// direction. Bounded at 32 descriptors -- far more than any device
+// this project enumerates carries.
+// Each bulk endpoint's OWN wMaxPacketSize (endpoint descriptor bytes
+// 4-5) -- NOT the same as ep0's control max packet (64 for every
+// high-speed device by spec): high-speed bulk endpoints use 512-byte
+// max packets. Conflating the two was a real bug here (found the hard
+// way: bulk IN kept reporting a spurious zero-byte "success" against
+// an idle link once traffic finally needed moving) -- every bulk
+// transfer must size its channel against the ENDPOINT's own value.
+let mut dwc2_bulk_in_ep:  u32 = 0;
+let mut dwc2_bulk_out_ep: u32 = 0;
+let mut dwc2_bulk_in_mp:  u32 = 512;
+let mut dwc2_bulk_out_mp: u32 = 512;
+
+fn dwc2_find_bulk_endpoints(total_len: u32) {
+    dwc2_bulk_in_ep = 0;
+    dwc2_bulk_out_ep = 0;
+    let mut offset: usize = 0;
+    let limit: usize = total_len as usize;
+    for i: i32 in 0..<32 {
+        if (offset + 2 >= limit) {
+            break;
+        }
+        let blen: usize = ctrl_data_buf[offset] as usize;
+        if (blen == 0) {
+            break;
+        }
+        let btype: u8 = ctrl_data_buf[offset + 1];
+        if (btype == 5) {
+            if (offset + 5 < limit) {
+                let addr: u32 = ctrl_data_buf[offset + 2] as u32;
+                let attr: u32 = ctrl_data_buf[offset + 3] as u32;
+                let mp: u32 = (ctrl_data_buf[offset + 4] as u32)
+                            | ((ctrl_data_buf[offset + 5] as u32) << 8);
+                if ((attr & 3) == 2) {
+                    if ((addr & 0x80) != 0) {
+                        dwc2_bulk_in_ep = addr & 0x0F;
+                        dwc2_bulk_in_mp = mp;
+                    } else {
+                        dwc2_bulk_out_ep = addr & 0x0F;
+                        dwc2_bulk_out_mp = mp;
+                    }
+                }
+            }
+        }
+        offset = offset + blen;
+    }
+}
+
 fn dwc2_device_descriptor_max_packet0() -> u8 {
     return ctrl_data_buf[7];
 }
@@ -529,4 +619,102 @@ fn dwc2_device_descriptor_product_id() -> u16 {
 }
 fn dwc2_device_descriptor_class() -> u8 {
     return ctrl_data_buf[4];
+}
+
+// -- Bulk transfers (milestone 6) --------------------------------------------
+// Dedicated channels (1 = OUT, 2 = IN), separate from CTRL_CHANNEL, so
+// bulk traffic can never clobber in-flight control-transfer channel
+// state even though this driver's fully-synchronous design never
+// actually overlaps them today.
+//
+// Data toggle (DATA0/DATA1) is NOT hardware-managed in this buffer-DMA
+// (non-scatter/gather) mode -- unlike control transfers, which always
+// restart at a fixed PID per stage, a bulk endpoint's toggle persists
+// for the endpoint's lifetime and must alternate every successful
+// packet, tracked here in software. Both directions reset to DATA0 by
+// dwc2_bulk_reset_toggles(), called once after SET_CONFIGURATION resets
+// every endpoint's toggle on the device side too (USB 2.0 spec 9.1.1.5).
+const BULK_OUT_CHANNEL: usize = 1;
+const BULK_IN_CHANNEL:  usize = 2;
+
+let mut dwc2_bulk_out_toggle: u32 = PID_DATA0;
+let mut dwc2_bulk_in_toggle:  u32 = PID_DATA0;
+
+// Device address + ep0 max packet, recorded once so a STALL recovery
+// (CLEAR_FEATURE(ENDPOINT_HALT), a control request against ep0) can be
+// issued without every bulk_in/bulk_out caller threading those two
+// values through -- set by dwc2_bulk_reset_toggles(), called once
+// after SET_CONFIGURATION alongside the toggle reset it already does.
+let mut dwc2_bulk_dev_addr: u32 = 0;
+let mut dwc2_bulk_ep0_mp:   u32 = 8;
+
+fn dwc2_bulk_reset_toggles(dev_addr: u32, ep0_mp: u32) {
+    dwc2_bulk_out_toggle = PID_DATA0;
+    dwc2_bulk_in_toggle = PID_DATA0;
+    dwc2_bulk_dev_addr = dev_addr;
+    dwc2_bulk_ep0_mp = ep0_mp;
+}
+
+// dwc2_clear_endpoint_halt: CLEAR_FEATURE(ENDPOINT_HALT) -- bmRequestType
+// 0x02 (host-to-device | standard | endpoint recipient), bRequest 0x01,
+// wValue 0 (the ENDPOINT_HALT feature number), wIndex = the target
+// endpoint's address (direction bit + number, matching how
+// bEndpointAddress itself encodes it). Per USB 2.0 spec 9.4.5, this also
+// resets the endpoint's data toggle to DATA0 on the DEVICE side, so the
+// caller must reset its own software-tracked toggle to match -- callers
+// here do so immediately after a successful clear.
+fn dwc2_clear_endpoint_halt(ep_addr: u32) -> bool {
+    return dwc2_control_transfer(dwc2_bulk_dev_addr, dwc2_bulk_ep0_mp,
+                                  0x02, 0x01, 0, ep_addr as u16,
+                                  ctrl_data_buf, 0);
+}
+
+// On a device-side STALL (the endpoint enters a halted state until
+// explicitly cleared, USB 2.0 spec 9.4.5 -- a real, reproducible
+// response this chip gives to some large multi-packet OUT transfers,
+// see examples/common_rpi3/eth.tkb's own header comment on the current
+// known size limit), recover via CLEAR_FEATURE(ENDPOINT_HALT) and reset
+// the software toggle to match the device's own post-clear state.
+// Without this, a single oversized frame would permanently wedge every
+// later transmit for the rest of this boot, not just fail once.
+fn dwc2_bulk_out(dev_addr: u32, buf: usize, len: u32) -> bool {
+    dcache_clean_range(buf, len as usize);
+    let ok: bool = dwc2_channel_transfer(BULK_OUT_CHANNEL, dev_addr, dwc2_bulk_out_ep,
+                                          EP_TYPE_BULK, false, dwc2_bulk_out_mp,
+                                          dwc2_bulk_out_toggle, buf, len);
+    if (ok) {
+        if (dwc2_bulk_out_toggle == PID_DATA0) {
+            dwc2_bulk_out_toggle = PID_DATA1;
+        } else {
+            dwc2_bulk_out_toggle = PID_DATA0;
+        }
+    } else {
+        if ((dwc2_last_status & HCINT_STALL) != 0) {
+            dwc2_clear_endpoint_halt(dwc2_bulk_out_ep);
+            dwc2_bulk_out_toggle = PID_DATA0;
+        }
+    }
+    return ok;
+}
+
+// dwc2_bulk_in: NAK (no data ready) is the expected outcome most of the
+// time -- an idle Ethernet RX endpoint NAKs every poll until a frame
+// actually arrives. dwc2_channel_transfer's own retry-until-HALT loop
+// already treats a NAK-only halt as "retry the same stage" (see its own
+// comment), so a plain call here is correct; it simply returns false
+// once its bounded retry budget is exhausted with nothing received,
+// exactly like any other empty poll.
+fn dwc2_bulk_in(dev_addr: u32, buf: usize, len: u32) -> bool {
+    let ok: bool = dwc2_channel_transfer(BULK_IN_CHANNEL, dev_addr, dwc2_bulk_in_ep,
+                                          EP_TYPE_BULK, true, dwc2_bulk_in_mp,
+                                          dwc2_bulk_in_toggle, buf, len);
+    if (ok) {
+        dcache_invalidate_range(buf, len as usize);
+        if (dwc2_bulk_in_toggle == PID_DATA0) {
+            dwc2_bulk_in_toggle = PID_DATA1;
+        } else {
+            dwc2_bulk_in_toggle = PID_DATA0;
+        }
+    }
+    return ok;
 }

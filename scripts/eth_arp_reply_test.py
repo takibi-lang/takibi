@@ -29,12 +29,21 @@ import sys
 import time
 
 IFACE = os.environ.get("ETH_TEST_IFACE", "enp4s0")
+# ETH_TEST_SUBNET: the first three octets of the point-to-point link's
+# /24, e.g. "192.168.10" for STM32's own enp4s0 (the default, matching
+# examples/common_stm32/netconfig.tkb) or "192.168.20" for RPi3's enp5s0
+# (examples/common_rpi3/netconfig.tkb) -- see either netconfig.tkb's own
+# comment for why each target gets its own dedicated /24. Every address
+# below is derived from this one prefix so a different target only needs
+# this single override, not four separate hardcoded constants.
+SUBNET = os.environ.get("ETH_TEST_SUBNET", "192.168.10")
+_subnet_octets = [int(o) for o in SUBNET.split(".")]
 ARP_ETHERTYPE = bytes([0x08, 0x06])
 
 REQUESTER_MAC = bytes([0x02, 0x00, 0x00, 0x00, 0x00, 0x01])
-REQUESTER_IP = bytes([192, 168, 10, 55])
-TARGET_IP = bytes([192, 168, 10, 2])       # must match netconfig.tkb's OUR_IP
-OTHER_IP = bytes([192, 168, 10, 200])      # some IP arp_reply_stm32 does NOT own
+REQUESTER_IP = bytes(_subnet_octets + [55])
+TARGET_IP = bytes(_subnet_octets + [2])    # must match netconfig.tkb's OUR_IP
+OTHER_IP = bytes(_subnet_octets + [200])   # some IP arp_reply does NOT own
 BROADCAST_MAC = bytes([0xff] * 6)
 
 RETRIES = 20
@@ -132,11 +141,14 @@ def main() -> int:
     sock.bind((IFACE, 0))
     sock.settimeout(RETRY_TIMEOUT_SECS)
 
+    target_str = ".".join(str(b) for b in TARGET_IP)
+    other_str = ".".join(str(b) for b in OTHER_IP)
+
     ok1 = test_who_has_us(sock, requester_mac)
-    print("  who-has 192.168.10.2 (ours):     %s" % ("PASS" if ok1 else "FAIL"))
+    print("  who-has %s (ours):     %s" % (target_str, "PASS" if ok1 else "FAIL"))
 
     ok2 = test_who_has_other_stays_silent(sock, requester_mac)
-    print("  who-has 192.168.10.200 (silent): %s" % ("PASS" if ok2 else "FAIL"))
+    print("  who-has %s (silent): %s" % (other_str, "PASS" if ok2 else "FAIL"))
 
     return 0 if (ok1 and ok2) else 1
 

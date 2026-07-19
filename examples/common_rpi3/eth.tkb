@@ -1,0 +1,344 @@
+// Raspberry Pi 3B real-Ethernet driver -- the USB counterpart to
+// examples/common_stm32/eth.tkb (on-chip MAC) and examples/common_qemu/
+// virtio_mmio.tkb (paravirtualized), exposing the exact same
+// net_init/net_rx_*/net_transmit/net_read_mac API so
+// examples/net_echo/net_echo.tkb and siblings run completely unmodified
+// against this file too. See examples/common_rpi3/AGENTS.md's "USB host
+// stack" section for the full milestone history this consolidates:
+// mailbox power-on (mailbox.tkb) -> DWC2 core/port bring-up + control
+// transfers (usb_dwc2.tkb) -> hub bring-up (usb_hub.tkb) -> LAN9514
+// vendor protocol + PHY link (lan9514.tkb) -> this file's own bulk
+// data path, all previously proven independently through
+// examples/usb_probe/usb_probe.tkb before being consolidated here.
+//
+// Architectural difference from eth.tkb/virtio_mmio.tkb worth being
+// explicit about: those drive a real DMA descriptor ring with
+// interrupt-driven completion, decoupled from the CPU's own pace. USB
+// bulk transfers on this board are synchronous request/response
+// (dwc2_channel_transfer busy-waits for each one) -- there is no
+// hardware ring to post descriptors into, so this driver uses a single
+// fixed RX buffer and a single fixed TX buffer (desc is always 0) rather
+// than a multi-descriptor pool. The linear/affine ownership types below
+// still enforce the identical "at most one CPU-owned RX frame, exactly
+// one in-flight TX at a time" discipline the API contract promises --
+// only the mechanics underneath differ. net_transmit() therefore
+// performs the actual USB write synchronously and net_tx_complete()
+// has nothing left to wait for; this is an honest simplification, not
+// a corner cut, since there genuinely is no asynchronous hardware state
+// for it to poll.
+//
+// LAN9514 TX/RX frame wrapper format (distinct from its vendor register
+// protocol, examples/common_rpi3/lan9514.tkb's own concern) cross-checked
+// the same way: NetBSD's sys/dev/usb/if_smscreg.h (structural reference,
+// BSD-licensed) and Linux's drivers/net/usb/smsc95xx.c (protocol facts).
+
+use "examples/common/netutil.tkb";
+use "examples/common_rpi3/netconfig.tkb";
+
+const ETH_RX_BUF_SIZE: usize = 2048;
+const ETH_TX_BUF_SIZE: usize = 1536;
+const ETH_MAX_FRAME: usize = 1514;
+// RX status word is a 4-byte prefix ahead of each frame's own bytes.
+const ETH_RX_STAT_HDR: usize = 4;
+// TX command header (TX_CMD_A + TX_CMD_B) is an 8-byte prefix DWC2
+// sends immediately before the frame's own bytes in the SAME USB OUT
+// transfer.
+const ETH_TX_CMD_HDR: usize = 8;
+
+private linear struct NetRxCpuOwned[desc: usize] {
+    private slot: {0..<1 as usize} @ desc;
+    private len: i32;
+}
+private linear struct NetTxInFlight[desc: usize] {
+    // Not @ desc -- unlike NetRxCpuOwned's own `index` field (whose
+    // VALUE equals the identity desc tags), this struct's [desc] is a
+    // phantom type-level tag inherited from the RX frame that
+    // net_transmit consumed, purely for traceability; there is no
+    // separate TX descriptor ring here for a real field value to index
+    // into (this driver's TX path is a single synchronous buffer, see
+    // this file's own header comment). Matches
+    // examples/common_stm32/eth.tkb's own NetTxInFlight shape exactly
+    // (its tx_index field is plain isize, not @ desc, for the same
+    // reason).
+    private slot: {0..<1 as usize};
+}
+private affine view NetRxCanAcquire;
+
+variant NetInitResult {
+    Failed;
+    Ready(NetRxCanAcquire);
+}
+variant NetRxAcquire {
+    None(NetRxCanAcquire);
+    Acquired(exists desc: usize. NetRxCpuOwned[desc]);
+}
+variant NetRxDisposal {
+    Release;
+    Reply(i32);
+}
+
+fn net_rx_owned(slot: {0..<1 as usize} @ desc, len: i32) -> NetRxCpuOwned[desc] {
+    let mut frame: NetRxCpuOwned[desc] = { slot, len };
+    return frame;
+}
+
+let mut eth_rx_buf: [u8; 2048] align(64);
+let mut eth_tx_buf: [u8; 1536] align(64);
+
+let mut net_rx_initialized: i32 = 0;
+let mut eth_rx_flag: i32 = 0;
+let mut eth_dev_addr: u32 = 0;
+let mut eth_max_pkt: u32 = 64;
+
+// -- Root-hub + Ethernet-function bring-up, consolidating the exact
+// sequence examples/usb_probe/usb_probe.tkb already proved on real
+// hardware one milestone at a time -- see that file's own history in
+// HISTORY.md/AGENTS.md for how each individual step was verified.
+fn net_init() -> NetInitResult {
+    if (net_rx_initialized != 0) {
+        return NetInitResult::Failed;
+    }
+
+    if (mbox_power_on_usb() == false) {
+        return NetInitResult::Failed;
+    }
+    if (dwc2_soft_reset() == false) {
+        return NetInitResult::Failed;
+    }
+    dwc2_core_init();
+    if (dwc2_flush_fifos() == false) {
+        return NetInitResult::Failed;
+    }
+    dwc2_host_port_power_on();
+
+    let mut connected: bool = false;
+    for i: i32 in 0..<1000000 {
+        if (dwc2_host_port_connected()) {
+            connected = true;
+            break;
+        }
+    }
+    if (connected == false) {
+        return NetInitResult::Failed;
+    }
+    dwc2_host_port_reset();
+
+    if (dwc2_get_device_descriptor(0, 8, 8) == false) {
+        return NetInitResult::Failed;
+    }
+    let hub_mp0: u8 = dwc2_device_descriptor_max_packet0();
+    if (dwc2_set_address(1, 8) == false) {
+        return NetInitResult::Failed;
+    }
+    if (dwc2_get_device_descriptor(1, hub_mp0 as u32, 18) == false) {
+        return NetInitResult::Failed;
+    }
+    let hub_mp: u32 = hub_mp0 as u32;
+    if (dwc2_set_configuration(1, hub_mp, 1) == false) {
+        return NetInitResult::Failed;
+    }
+
+    let nports: u32 = hub_read_nports(1, hub_mp);
+    if (nports == 0) {
+        return NetInitResult::Failed;
+    }
+    hub_power_on_all_ports(1, hub_mp, nports);
+
+    let mut found_addr: u32 = 0;
+    let mut found_mp: u32 = 64;
+    let mut next_addr: u32 = 2;
+    for i: u32 in 0..<nports {
+        let port: u32 = i + 1;
+        let status: u32 = hub_port_status(1, hub_mp, port);
+        if ((status & HUB_PORT_STAT_CONNECTION) != 0) {
+            if (hub_port_reset(1, hub_mp, port)) {
+                if (dwc2_get_device_descriptor(0, 8, 8)) {
+                    let dmp: u32 = dwc2_device_descriptor_max_packet0() as u32;
+                    if (dwc2_set_address(next_addr, 8)) {
+                        if (dwc2_get_device_descriptor(next_addr, dmp, 18)) {
+                            if (dwc2_device_descriptor_vendor_id() == 0x0424) {
+                                if (dwc2_device_descriptor_product_id() == 0xEC00) {
+                                    found_addr = next_addr;
+                                    found_mp = dmp;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            next_addr = next_addr + 1;
+        }
+    }
+    if (found_addr == 0) {
+        return NetInitResult::Failed;
+    }
+
+    if (dwc2_set_configuration(found_addr, found_mp, 1) == false) {
+        return NetInitResult::Failed;
+    }
+    if (dwc2_get_config_descriptor(found_addr, found_mp, 9) == false) {
+        return NetInitResult::Failed;
+    }
+    let total_len: u32 = dwc2_config_descriptor_total_length();
+    let fetch_len: u32 = min(total_len as i32, 64) as u32;
+    if (dwc2_get_config_descriptor(found_addr, found_mp, fetch_len) == false) {
+        return NetInitResult::Failed;
+    }
+    dwc2_find_bulk_endpoints(fetch_len);
+    if (dwc2_bulk_in_ep == 0) {
+        return NetInitResult::Failed;
+    }
+    if (dwc2_bulk_out_ep == 0) {
+        return NetInitResult::Failed;
+    }
+    dwc2_bulk_reset_toggles(found_addr, found_mp);
+
+    lan9514_bind(found_addr, found_mp);
+    if (lan9514_reset() == false) {
+        return NetInitResult::Failed;
+    }
+    if (lan9514_set_mac(OUR_MAC) == false) {
+        return NetInitResult::Failed;
+    }
+    if (lan9514_phy_start_autoneg() == false) {
+        return NetInitResult::Failed;
+    }
+    if (lan9514_wait_link() == false) {
+        return NetInitResult::Failed;
+    }
+    lan9514_enable_rxtx();
+
+    eth_dev_addr = found_addr;
+    eth_max_pkt = found_mp;
+    net_rx_initialized = 1;
+    eth_rx_flag = 0;
+
+    return NetInitResult::Ready(view NetRxCanAcquire);
+}
+
+// net_rx_wait: repeatedly attempts a bulk IN read (each attempt already
+// has its own bounded NAK-retry budget inside dwc2_bulk_in ->
+// dwc2_channel_transfer -- see that function's own comment) until a
+// frame is buffered or this outer bound (20 attempts) is exhausted. An
+// idle link legitimately NAKs every poll, so exhausting this bound
+// without receiving anything is normal, not an error -- the caller's
+// own while(true) loop simply calls net_rx_wait() again.
+fn net_rx_wait() !{may_block} {
+    for i: i32 in 0..<20 {
+        if (eth_rx_flag == 0) {
+            let buf_addr: usize = eth_rx_buf as usize;
+            if (dwc2_bulk_in(eth_dev_addr, buf_addr, ETH_RX_BUF_SIZE as u32)) {
+                let got: u32 = dwc2_last_transfer_bytes();
+                if (got >= (ETH_RX_STAT_HDR as u32)) {
+                    eth_rx_flag = 1;
+                }
+            }
+        }
+        if (eth_rx_flag != 0) {
+            break;
+        }
+    }
+}
+
+fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
+    if (eth_rx_flag == 0) {
+        return NetRxAcquire::None(view NetRxCanAcquire);
+    }
+    eth_rx_flag = 0;
+    let stat: u32 = (eth_rx_buf[0] as u32)
+                  | ((eth_rx_buf[1] as u32) << 8)
+                  | ((eth_rx_buf[2] as u32) << 16)
+                  | ((eth_rx_buf[3] as u32) << 24);
+    let len: i32 = ((stat >> 16) & 0x3FFF) as i32;
+    let slot: {0..<1 as usize} = 0;
+    return NetRxAcquire::Acquired(net_rx_owned(slot, len));
+}
+
+fn net_rx_len(frame: borrow NetRxCpuOwned[desc]) -> i32 {
+    return frame.len;
+}
+
+// Same capacity-view contract as eth.tkb's own net_rx_frame (see that
+// file's comment for the full "@ desc ties the slice to the borrowed
+// owner" rationale, GitHub issue #106) -- the frame's own bytes start
+// after the 4-byte RX status header this file's header comment
+// describes.
+fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc {
+    return eth_rx_buf[4..<1518];
+}
+
+fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire {
+    return view NetRxCanAcquire;
+}
+
+// net_transmit: builds the TX_CMD_A/TX_CMD_B header (FIRST_SEG|LAST_SEG
+// both set -- this driver never segments a frame across multiple USB
+// transfers, matching every reference driver's own single-packet path;
+// OFFSET left 0; CRC/padding left enabled, matching lan9514.tkb's
+// header comment on why software never computes a CRC itself) into
+// eth_tx_buf, copies the frame bytes right after it, and performs the
+// bulk OUT transfer synchronously (see this file's own header comment
+// on why net_tx_complete has nothing further to wait for).
+fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32) -> NetTxInFlight[desc] {
+    let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
+    let copy_len: usize = safe_len as usize;
+    let rx_buf = net_rx_frame(frame);
+
+    let cmd_a: u32 = 0x00003000 | ((safe_len as u32) & 0x7FF); // FIRST_SEG|LAST_SEG|BUF_SIZE
+    let cmd_b: u32 = (safe_len as u32) & 0x7FF;                // PKT_LENGTH
+    eth_tx_buf[0] = (cmd_a & 0xFF) as u8;
+    eth_tx_buf[1] = ((cmd_a >> 8) & 0xFF) as u8;
+    eth_tx_buf[2] = ((cmd_a >> 16) & 0xFF) as u8;
+    eth_tx_buf[3] = ((cmd_a >> 24) & 0xFF) as u8;
+    eth_tx_buf[4] = (cmd_b & 0xFF) as u8;
+    eth_tx_buf[5] = ((cmd_b >> 8) & 0xFF) as u8;
+    eth_tx_buf[6] = ((cmd_b >> 16) & 0xFF) as u8;
+    eth_tx_buf[7] = ((cmd_b >> 24) & 0xFF) as u8;
+    // eth_tx_buf is a fixed array, not a slice -- a literal-bounded
+    // subslice first (matching examples/common_stm32/eth.tkb's own
+    // two-step pattern) turns it into a genuine slice value, which then
+    // allows the runtime-checked copy_len bound slice_copy needs.
+    let tx_payload = eth_tx_buf[8..<1522];
+    slice_copy(tx_payload[0..<copy_len], rx_buf[0..<copy_len]);
+
+    let buf_addr: usize = eth_tx_buf as usize;
+    // KNOWN LIMITATION (found during hardware testing, not yet root-caused):
+    // outgoing frames whose TX_CMD-wrapped USB transfer spans more than 2
+    // bulk max-size (512-byte) packets -- i.e. total wire size beyond
+    // somewhere between 534 and 1026 bytes, not yet bisected further --
+    // get a device-side STALL from the LAN9514 instead of completing.
+    // examples/common_rpi3/usb_dwc2.tkb's dwc2_bulk_out() recovers via
+    // CLEAR_FEATURE(ENDPOINT_HALT) so this does not permanently wedge
+    // later transmits, but the oversized frame itself is still dropped
+    // (net_tx_complete has no error signal to report this through -- see
+    // this file's own header comment on why TX is fire-and-forget
+    // synchronous). Confirmed via examples/net_echo/net_echo.tkb +
+    // scripts/eth_net_echo_test.py: payloads up to 512 bytes echo
+    // correctly, 1000+ byte payloads do not. Flagged for follow-up
+    // rather than blocking this milestone -- see HISTORY.md.
+    dwc2_bulk_out(eth_dev_addr, buf_addr, (ETH_TX_CMD_HDR + copy_len) as u32);
+
+    let slot: {0..<1 as usize} = 0;
+    let mut in_flight: NetTxInFlight[desc] = { slot };
+    return in_flight;
+}
+
+fn net_tx_complete(in_flight: sink NetTxInFlight[desc]) -> NetRxCanAcquire !{may_block} {
+    return view NetRxCanAcquire;
+}
+
+fn net_rx_finish(frame: sink NetRxCpuOwned[desc], disposal: NetRxDisposal)
+        -> NetRxCanAcquire !{may_block} {
+    match disposal {
+        NetRxDisposal::Reply(len) => {
+            return net_tx_complete(net_transmit(frame, len));
+        }
+        NetRxDisposal::Release => {
+            return net_rx_release(frame);
+        }
+    }
+}
+
+fn net_read_mac(mac_out: *u8) {
+    bytes_copy(mac_out, OUR_MAC as *u8, 6);
+}

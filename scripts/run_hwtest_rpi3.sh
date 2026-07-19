@@ -297,6 +297,14 @@ run_hw_test_rpi3 "chan_rendezvous (rpi3)" "$REPO_ROOT/examples/chan_rendezvous/k
 # real gap and truncated the capture before "eth link: up" arrived):
 # 20s max capture, 140 stable polls = 7s quiet threshold.
 run_hw_test_rpi3 "usb_probe (rpi3)"      "$REPO_ROOT/examples/usb_probe/kernel_rpi3.elf"      "$REPO_ROOT/examples/usb_probe/usb_probe.expected"   20 140
+# net_echo (rpi3): UART-only check that net_init() succeeds end to end
+# (mailbox -> DWC2 -> hub -> LAN9514 -> PHY link) -- the same real
+# hardware timing as usb_probe above, same override. The actual
+# network-level functional test (echo correctness over the physical
+# link) is scripts/run_hwtest_rpi3_net.sh, kept separate since it needs
+# CAP_NET_RAW and this devcontainer's dedicated enp5s0 interface, not
+# just JTAG+UART.
+run_hw_test_rpi3 "net_echo (rpi3)"       "$REPO_ROOT/examples/net_echo/kernel_rpi3.elf"       "$REPO_ROOT/examples/net_echo/net_echo.expected"     20 140
 
 echo ""
 echo "rpi3 hardware tests: $PASS passed, $FAIL failed"

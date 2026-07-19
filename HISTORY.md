@@ -9333,3 +9333,161 @@ threshold for this one test. 57/57 `make hwcheck-rpi3`; `make
 qemutest` (132/132) and `make stm32build` unaffected (RPi3-only
 files -- the QEMU count moving from 131 to 132 here is coincidental,
 unrelated to this milestone).
+
+Milestone 6: bulk data path + `net_init` HAL parity. `examples/
+common_rpi3/eth.tkb` (new) consolidates milestones 1-5's whole chain
+(mailbox -> DWC2 -> hub -> LAN9514) behind the exact `net_init`/
+`net_rx_*`/`net_transmit`/`net_read_mac` API `examples/common_stm32/
+eth.tkb`/`examples/common_qemu/virtio_mmio.tkb` already expose, so
+`examples/net_echo/net_echo.tkb` -- a genuinely shared file, zero
+changes -- compiles and runs against it. `examples/common_rpi3/
+netconfig.tkb` (new): `OUR_IP = 192.168.20.2`, a locally-administered
+`OUR_MAC` (no EEPROM on this board). `dwc2_find_bulk_endpoints()`
+(`usb_dwc2.tkb`) parses the config descriptor for the Ethernet
+function's bulk IN/OUT endpoints; `dwc2_bulk_in`/`dwc2_bulk_out` add
+persistent per-endpoint DATA0/DATA1 toggle tracking (not
+hardware-managed here, unlike control transfers) and STALL recovery
+via `CLEAR_FEATURE(ENDPOINT_HALT)`.
+
+Architectural note worth being explicit about: unlike `eth.tkb`/
+`virtio_mmio.tkb`'s real DMA descriptor rings with interrupt-driven
+completion, USB bulk transfers here are synchronous
+(`dwc2_channel_transfer` busy-waits per call) -- this driver uses a
+single fixed RX buffer and TX buffer (`desc` always 0), not a
+multi-descriptor pool, and `net_transmit()` performs the actual write
+synchronously, so `net_tx_complete()` has nothing left to wait for. An
+honest simplification given there genuinely is no asynchronous
+hardware state to poll here, not a corner cut -- the linear/affine
+ownership types still enforce the identical one-frame-at-a-time
+discipline the API contract promises.
+
+Two real bugs, both found via `net_echo` + `scripts/
+eth_net_echo_test.py` against this devcontainer's `enp5s0` (the first
+genuine data-plane test on this board, not just link-level bring-up):
+- Bulk endpoints need their OWN max-packet size (512 bytes,
+  high-speed), not ep0's (64 bytes) -- conflating them produced a
+  bizarre "successful zero-byte transfer" on every bulk IN attempt.
+  Fixed by reading `wMaxPacketSize` from each bulk endpoint's own
+  descriptor rather than reusing the control endpoint's value.
+- KNOWN LIMITATION, not yet root-caused: outgoing frames whose wrapped
+  USB transfer spans more than 2 bulk max-packet (512-byte) packets get
+  a device-side STALL from the LAN9514 instead of completing --
+  payloads up to 512 bytes echo correctly (confirmed: 46/60/128/512),
+  1000+ byte payloads do not (confirmed failing: 1000/1486). Diagnosed
+  down to "STALL, and every subsequent transmit stays broken until
+  cleared" via a temporary `dwc2_debug_last_status()` instrumentation
+  pass (added and removed the same way earlier milestones' debug prints
+  were) -- the persistence-across-later-attempts part is what revealed
+  this is a genuine device-side endpoint halt (USB 2.0 spec 9.4.5), not
+  a one-off software misread. `dwc2_bulk_out()` now recovers via
+  `CLEAR_FEATURE(ENDPOINT_HALT)` so a single oversized frame no longer
+  permanently wedges every later transmit, but the oversized frame
+  itself is still dropped. Left as a flagged follow-up rather than
+  blocking this milestone -- most protocol traffic (ARP, ICMP echo,
+  ordinary TCP segments) is comfortably under the threshold, but this
+  will need resolving before `tcp_echo`/`http_server` can be trusted
+  with larger payloads.
+
+New `scripts/run_hwtest_rpi3_net.sh` (network-functional counterpart to
+`run_hwtest_rpi3.sh`'s UART-only net_echo check, which only proves
+`net_init()` succeeds, not that frames round-trip): mirrors
+`scripts/run_hwtest_net_ram.sh`'s shape, reusing `scripts/
+eth_net_echo_test.py` unchanged against `enp5s0`. Two practical bugs in
+the HARNESS itself, both worth remembering for any future sudo+network
+test script in this repo: `sudo` resets the environment by default, so
+`ETH_TEST_IFACE` must be passed as part of the invoked command (`sudo
+ETH_TEST_IFACE=... python3 ...`), not merely exported in the wrapping
+shell script -- omitting this made the test silently fall back to
+STM32's own `enp4s0` and produced a 100%-fail run that looked exactly
+like a genuine board-side bug until traced back; and this board's
+`net_init()` (full USB enumeration, several real seconds) is
+measurably slower than STM32's MDIO-only link bring-up, so unlike
+`run_hwtest_net_ram.sh` (whose own comment explicitly says no fixed
+sleep is needed) this script needs an explicit settle sleep after the
+JTAG load -- the per-frame retry budget alone was not enough, most
+likely because sending test frames while the board is still mid-
+enumeration leaves it in a state later frames do not recover from
+within that same budget, not just a slow first reply.
+`scripts/rpi3_jtag_load.sh` never runs under `sudo` in this script --
+only the raw-socket Python test does, the same privilege separation
+`examples/common_rpi3/AGENTS.md`'s "sudo warning" section already
+requires for this devcontainer's USB-based JTAG/UART access.
+
+58/58 `make hwcheck-rpi3` (the UART-only checks, now including
+`net_echo`); `scripts/run_hwtest_rpi3_net.sh` passes 4/6 payload sizes
+(the STALL limitation above accounts for the other 2, reproducibly, not
+flakily). `make qemutest` (132/132) and `make stm32build` unaffected.
+
+Milestone 7, part 1: deeper investigation of the bulk-OUT STALL
+limitation, cross-checking against real OSS sources at the user's
+request rather than continuing to guess -- ultimately inconclusive but
+worth recording what it ruled out. Confirmed via a temporary endpoint/
+max-packet debug print that endpoint discovery itself is correct (bulk
+IN ep 1, bulk OUT ep 2, both 512-byte max packet, exactly as expected).
+Compared this driver's AHBCFG bring-up bit-for-bit against `uspi`'s own
+`DWHCIDeviceInitCore()` (`DMAENABLE | WAIT_AXI_WRITES`, `MAX_AXI_BURST`
+cleared, `AHB_SINGLE` deliberately left unset, matching uspi's own
+commented-out line and its accompanying "if DMA single mode should be
+used" note) -- identical, ruling out an AHBCFG misconfiguration.
+Fetched Linux mainline's actual BCM2835 platform parameters
+(`drivers/usb/dwc2/params.c`, `dwc2_set_bcm_params`: RX FIFO = 774
+words, no explicit non-periodic TX FIFO override) and reprogrammed this
+driver's FIFO partition to match (`dwc2_program_fifo_sizes()`, RX now
+774 words instead of `uspi`'s more generic 1024, non-periodic TX given
+a generous 2000-word share of the remaining budget) -- no change in
+behavior, ruling out FIFO sizing as the cause. Fetched U-Boot's
+`drivers/usb/eth/smsc95xx.c` `smsc95xx_send_common()` directly: it
+sends an ENTIRE Ethernet frame (up to the standard ~1518-byte maximum)
+in one `usb_bulk_msg` call, never splitting across multiple transfers
+-- confirming the LAN9514 chip itself has no inherent per-transfer size
+ceiling anywhere near where this driver's STALL appears, and ruling out
+a "device requires FIRST_SEG/LAST_SEG-based segmentation for large
+frames" theory. Re-audited `examples/common_rpi3/cache_asm.S`'s
+`dcache_clean_range`/`dcache_invalidate_range` for a range-size-
+dependent bug -- the VA-walk loop structure has no such dependency.
+Net result: packet count (>2 bulk max-packet-size packets) remains the
+only variable that correlates with the failure across every test run,
+final-packet size does not (confirmed failing with both a 2-byte and a
+498-byte final packet), and every plausible cause this project has a
+citable source for has now been checked against that source and ruled
+out. Left as a known limitation, unresolved, blocking `tcp_echo`/
+`http_server` specifically -- likely needs real USB protocol-analyzer
+hardware or substantially more trial-and-error to pin down further.
+
+Milestone 7, part 2: `arp_reply` and `icmp_echo` ported -- both are
+genuinely shared files (`examples/arp_reply/arp_reply.tkb`,
+`examples/icmp_echo/icmp_echo.tkb`), so this needed only Makefile
+wiring (`RPI3_NET_EXAMPLES += arp_reply icmp_echo`, same command-line
+group `net_echo` already established), no new RPi3-specific code.
+Deliberately chosen over continuing to chase the STALL limitation
+immediately: both protocols' payloads (ARP requests, ICMP echo
+pings/replies) stay well under the ~1024-byte threshold, so neither is
+affected by it. `scripts/eth_arp_reply_test.py`/`eth_icmp_echo_test.py`
+needed generalizing first -- both hardcoded STM32's own subnet
+(`192.168.10.x`) and MAC as plain constants (unlike
+`eth_net_echo_test.py`'s already-parameterized `ETH_TEST_IFACE`),
+which would have silently tested against the wrong address entirely on
+this board. Added `ETH_TEST_SUBNET`/`ETH_TEST_MAC` env vars to both
+(defaulting to STM32's existing values, so its own STM32 test
+invocation is unchanged), with the new RPi3 harness setting both to
+this board's own values by default. Both examples pass every sub-check
+on the first run after this fix: ARP "who-has" for our IP answered
+correctly, silence confirmed for an IP we don't own; ICMP echo to our
+IP answered correctly, silence confirmed for an IP we don't own AND for
+a request with a deliberately corrupted checksum.
+
+Also added `make hwcheck-rpi3-net` (wrapping `scripts/
+run_hwtest_rpi3_net.sh`) as a proper Makefile target alongside
+`hwcheck-rpi3`, split the same way `hwcheck-stm32`/`hwcheck-stm32-net`
+already are (user's own suggestion, prompted by noticing the STM32
+precedent) -- until this point the network harness was only reachable
+by invoking the shell script directly, an inconsistency with every
+other hardware-test entry point in this project.
+
+`make hwcheck-rpi3-net`: `arp_reply`/`icmp_echo` pass completely,
+`net_echo` still at 4/6 payload sizes on the known STALL limitation
+(2 of 3 network tests fully green). `make hwcheck-rpi3` remains 58/58
+(now including `net_echo`'s UART-only check). `make qemutest`
+(132/132) and `make stm32build` unaffected -- no shared files touched
+beyond the two Python test scripts' now-optional env-var
+generalization.

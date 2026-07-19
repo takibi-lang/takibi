@@ -1398,7 +1398,24 @@ RPI3_USB_OBJS     := $(foreach e,$(RPI3_USB_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 $(RPI3_USB_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
 
-RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES)
+# Ethernet group (milestone 6-7): examples/common_rpi3/eth.tkb wraps the
+# whole USB bring-up chain above behind the same net_init/net_rx_*/
+# net_transmit API examples/common_stm32/eth.tkb and
+# examples/common_qemu/virtio_mmio.tkb expose, so net_echo.tkb and
+# siblings compile against it unmodified -- same command-line-args-vs-
+# prerequisites split those two targets already use (COMMON_RPI3_ETH
+# alone on the command line; netconfig.tkb/netutil.tkb are pulled in
+# transitively via its own `use` lines, listed here only so Make's
+# staleness tracking notices when they change).
+COMMON_RPI3_ETH       := $(COMMON_RPI3_DIR)/eth.tkb
+COMMON_RPI3_NETCONFIG := $(COMMON_RPI3_DIR)/netconfig.tkb
+RPI3_NET_EXAMPLES := net_echo arp_reply icmp_echo
+RPI3_NET_OBJS     := $(foreach e,$(RPI3_NET_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
+
+$(RPI3_NET_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+
+RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES)
 RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 # rtc/timer/preempt/watchdog need COMMON_RPI3_TIMER_ASM_O linked in
 # (read_cntfrq() and friends -- mrs cannot be called directly from
@@ -1415,7 +1432,7 @@ RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf
 # line.
 RPI3_TIMER_ASM_KERNELS := $(foreach e,$(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 RPI3_SEM_KERNELS       := $(foreach e,$(RPI3_SCHED_SEM_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
-RPI3_USB_KERNELS       := $(foreach e,$(RPI3_USB_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
+RPI3_USB_KERNELS       := $(foreach e,$(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 RPI3_GENERIC_KERNELS   := $(filter-out $(RPI3_TIMER_ASM_KERNELS) $(RPI3_SEM_KERNELS) $(RPI3_USB_KERNELS),$(RPI3_KERNELS))
 
 $(RPI3_GENERIC_KERNELS): examples/%/kernel_rpi3.elf: \
@@ -1447,6 +1464,24 @@ $(RPI3_USB_KERNELS): examples/%/kernel_rpi3.elf: \
 ## stay out of check/allcheck.
 hwcheck-rpi3: $(RPI3_KERNELS) examples/common_rpi3/jtag_stub.img
 	@bash scripts/run_hwtest_rpi3.sh
+
+## hwcheck-rpi3-net: run all RPi3 real-Ethernet hardware tests (net_echo/
+## arp_reply/icmp_echo today, more as they're ported -- see
+## scripts/run_hwtest_rpi3_net.sh) over a physical point-to-point link to
+## the Raspberry Pi 3B (requires the board's Ethernet port, behind the
+## LAN9514 USB hub -- see examples/common_rpi3/AGENTS.md's "USB host
+## stack" section -- wired directly to this machine's NIC). Same split
+## as hwcheck-stm32/hwcheck-stm32-net and the same reasons: NOT part of
+## hwcheck-rpi3's UART-diff suite, and NOT part of `make check`/`make
+## allcheck` -- these are network tests (raw AF_PACKET sockets), not a
+## UART capture/diff, and need CAP_NET_RAW (run with sudo, which
+## scripts/run_hwtest_rpi3_net.sh already does for the Python side only
+## -- JTAG itself must never run under sudo in this devcontainer, see
+## that script's own header comment) plus ETH_TEST_IFACE/ETH_TEST_SUBNET/
+## ETH_TEST_MAC set to the wired interface/this board's own address if
+## they differ from the defaults.
+hwcheck-rpi3-net: $(RPI3_KERNELS) examples/common_rpi3/jtag_stub.img
+	@bash scripts/run_hwtest_rpi3_net.sh
 
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts and linker outputs

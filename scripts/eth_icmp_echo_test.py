@@ -22,11 +22,21 @@ import sys
 import time
 
 IFACE = os.environ.get("ETH_TEST_IFACE", "enp4s0")
+# ETH_TEST_SUBNET/ETH_TEST_MAC: see scripts/eth_arp_reply_test.py's own
+# comment on ETH_TEST_SUBNET -- same idea, extended to the MAC address
+# too since a unicast ping (unlike ARP's broadcast) needs the real
+# destination MAC to reach the board at all. Defaults match STM32's
+# examples/common_stm32/netconfig.tkb; RPi3's own values (a different
+# /24 and a locally-administered MAC, examples/common_rpi3/
+# netconfig.tkb) are passed as overrides by scripts/run_hwtest_rpi3_net.sh.
+SUBNET = os.environ.get("ETH_TEST_SUBNET", "192.168.10")
+_subnet_octets = [int(o) for o in SUBNET.split(".")]
+_default_mac = "00:80:e1:00:00:00"
+TARGET_MAC = bytes(int(b, 16) for b in os.environ.get("ETH_TEST_MAC", _default_mac).split(":"))
 
-REQUESTER_IP = bytes([192, 168, 10, 55])
-TARGET_MAC = bytes([0x00, 0x80, 0xE1, 0x00, 0x00, 0x00])  # must match netconfig.tkb's OUR_MAC
-TARGET_IP = bytes([192, 168, 10, 2])                       # must match netconfig.tkb's OUR_IP
-OTHER_IP = bytes([192, 168, 10, 200])                      # some IP icmp_echo_stm32 does NOT own
+REQUESTER_IP = bytes(_subnet_octets + [55])
+TARGET_IP = bytes(_subnet_octets + [2])    # must match netconfig.tkb's OUR_IP
+OTHER_IP = bytes(_subnet_octets + [200])   # some IP icmp_echo does NOT own
 
 RETRIES = 20
 RETRY_TIMEOUT_SECS = 0.5
@@ -150,11 +160,14 @@ def main() -> int:
     sock.bind((IFACE, 0))
     sock.settimeout(RETRY_TIMEOUT_SECS)
 
+    target_str = ".".join(str(b) for b in TARGET_IP)
+    other_str = ".".join(str(b) for b in OTHER_IP)
+
     ok1 = test_ping_us(sock, requester_mac)
-    print("  ping 192.168.10.2 (ours):             %s" % ("PASS" if ok1 else "FAIL"))
+    print("  ping %s (ours):             %s" % (target_str, "PASS" if ok1 else "FAIL"))
 
     ok2 = test_ping_other_stays_silent(sock, requester_mac)
-    print("  ping 192.168.10.200 (silent):         %s" % ("PASS" if ok2 else "FAIL"))
+    print("  ping %s (silent):         %s" % (other_str, "PASS" if ok2 else "FAIL"))
 
     ok3 = test_corrupted_checksum_dropped(sock, requester_mac)
     print("  ping with bad ICMP checksum (silent): %s" % ("PASS" if ok3 else "FAIL"))

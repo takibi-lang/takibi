@@ -1,13 +1,15 @@
 # Raspberry Pi 3B (BCM2837) Bare-Metal Bring-Up
 
-GitHub issue #140. Status: 56 examples ported and passing `make
-hwcheck-rpi3` -- every example in the top-level `EXAMPLES` list
-EXCEPT the 6 that need real Ethernet (`net_echo`/`arp_reply`/
-`icmp_echo`/`tcp_echo`/`http_server`/`kvs_server`) and the 1 that needs
-SD-card-shaped block storage (`fatfs`) -- see "Ethernet and USB are
-required" and "Out of scope: SD-card-storage examples" below for why
-those 7 are blocked on a USB host stack this board does not have yet,
-not on anything specific to each individual example. Full list:
+GitHub issue #140. Status: 59 examples ported and passing `make
+hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level
+`EXAMPLES` list EXCEPT `tcp_echo`/`http_server`/`kvs_server` (blocked on
+a still-unresolved bulk-OUT STALL limitation for transfers over ~1024
+bytes, see "USB host stack" below) and `fatfs` (needs SD-card-shaped
+block storage, see "Out of scope: SD-card-storage examples" below).
+`net_echo`/`arp_reply`/`icmp_echo` -- the Ethernet examples that fit
+under that STALL threshold -- are now ported and passing on real
+hardware, over the USB host stack this board did not have as of the
+previous status line here. Full list:
 `start`/`hello`/`print_int`/`print_hex`/`print_ptr`/`mem`/`array`/
 `fizzbuzz`/`fibonacci`/`bubblesort`/`ringbuf`/`callstack`/`crc8`/
 `djb2`/`bump`/`scheduler`/`struct`/`struct_refined`/`refined`/
@@ -17,21 +19,23 @@ not on anything specific to each individual example. Full list:
 `affine_escape_via_index`/`align_ptr_proof`/`linear_obligation`/
 `tuple_pair`/`field_lease`/`inet_checksum`/`ip_parse`/`tcp_parse`/
 `rtc`/`timer`/`echo`/`irq`/`preempt`/`semaphore`/`condvar`/`msgqueue`/
-`watchdog`/`rtos_demo`/`chan_rendezvous`. This covers `hwcheck-stm32`'s
-"plain compute" set (extended with plain-compute examples STM32
-already had but this board's own list had not picked up yet:
-`slice`/`foreach`/`int64`/`indexed_view`/`tcp_conn_view`) plus
-`rtc`/`timer` (see "RTC" below) plus the two UART-RX-interrupt examples
-plus the full preemptive-scheduler group (see "Interrupts" below) plus
-eight examples that had never been ported to ANY real hardware target
-before, QEMU-only until now (`klock_guard`/`percpu`/
-`affine_escape_via_index`/`align_ptr_proof`/`linear_obligation`/
-`tuple_pair`/`field_lease` are all pure compute or compute plus
-`disable_irq`/`enable_irq` -- no new HAL work at all;
-`chan_rendezvous` got the same `rpi3_irq_dispatch` treatment as
-`semaphore`/`condvar`/`msgqueue`, since it predates
+`watchdog`/`rtos_demo`/`chan_rendezvous`/`net_echo`/`arp_reply`/
+`icmp_echo`. This covers `hwcheck-stm32`'s "plain compute" set
+(extended with plain-compute examples STM32 already had but this
+board's own list had not picked up yet: `slice`/`foreach`/`int64`/
+`indexed_view`/`tcp_conn_view`) plus `rtc`/`timer` (see "RTC" below)
+plus the two UART-RX-interrupt examples plus the full
+preemptive-scheduler group (see "Interrupts" below) plus eight examples
+that had never been ported to ANY real hardware target before,
+QEMU-only until now (`klock_guard`/`percpu`/`affine_escape_via_index`/
+`align_ptr_proof`/`linear_obligation`/`tuple_pair`/`field_lease` are
+all pure compute or compute plus `disable_irq`/`enable_irq` -- no new
+HAL work at all; `chan_rendezvous` got the same `rpi3_irq_dispatch`
+treatment as `semaphore`/`condvar`/`msgqueue`, since it predates
 `examples/common/rtos.tkb` and still carries its own inline
-`SchedState`/`irq_dispatch`). This is a JTAG-only bring-up: nothing
+`SchedState`/`irq_dispatch`) plus the three Ethernet examples
+(`net_echo`/`arp_reply`/`icmp_echo`) the "USB host stack" section below
+covers in full. This is a JTAG-only bring-up: nothing
 here writes to the SD card as a real `kernel8.img`; see "Why JTAG
 injection, not an SD card kernel" below.
 
@@ -277,19 +281,103 @@ generous per-test override (20s max / 7s quiet) on this one
 `run_hw_test_rpi3` call. 57/57 `make hwcheck-rpi3`; `make
 qemutest`/`make stm32build` unaffected (RPi3-only files).
 
-**Milestones 6-7 (not yet done)**: bulk data path (`TX_CMD_A`/
-`TX_CMD_B` frame wrapper on TX, the RX status word's frame-length field
-on RX -- same NetBSD/Linux references as milestone 5) wired into the
-`net_init`/`net_rx_*`/`net_transmit` HAL shape `eth.tkb`/
-`virtio_mmio.tkb` already establish, plus DWC2 IRQ integration (VC bank
-1 bit 9) for steady-state completion signaling -> `net_echo`/
-`arp_reply`/`icmp_echo`/`tcp_echo` ported + a new
-`scripts/run_hwtest_rpi3_net.sh` (mirroring
-`scripts/run_hwtest_net_ram.sh`, reusing its existing `eth_*_test.py`
-raw-socket scripts against `enp5s0`) + the `--forbid-trap` hardening
-pass once proven end to end. Update this section (and HISTORY.md, and
-issue #140) after each one, per this project's established cadence --
-do not batch documentation to the end.
+**Milestone 6 (done): bulk data path + `net_init` HAL parity.**
+`examples/common_rpi3/eth.tkb` (new) consolidates the whole chain
+milestones 1-5 proved independently (mailbox -> DWC2 -> hub -> LAN9514)
+behind the exact `net_init`/`net_rx_wait`/`net_rx_acquire`/`net_rx_len`/
+`net_rx_frame`/`net_rx_release`/`net_transmit`/`net_tx_complete`/
+`net_rx_finish`/`net_read_mac` API `examples/common_stm32/eth.tkb`/
+`examples/common_qemu/virtio_mmio.tkb` already expose -- so
+`examples/net_echo/net_echo.tkb` compiles and runs against it
+completely unmodified. `examples/common_rpi3/netconfig.tkb` (new):
+`OUR_IP = 192.168.20.2`, a locally-administered `OUR_MAC` (this board
+has no EEPROM). `dwc2_find_bulk_endpoints()` (`usb_dwc2.tkb`) parses
+the config descriptor for the Ethernet function's own bulk IN/OUT
+endpoint numbers and max-packet sizes; `dwc2_bulk_in`/`dwc2_bulk_out`
+add persistent per-endpoint DATA0/DATA1 toggle tracking (not
+hardware-managed in this buffer-DMA mode, unlike control transfers)
+and STALL recovery via `CLEAR_FEATURE(ENDPOINT_HALT)`.
+
+Architectural note: unlike `eth.tkb`/`virtio_mmio.tkb`'s real DMA
+descriptor rings with interrupt-driven completion, USB bulk transfers
+here are synchronous (`dwc2_channel_transfer` busy-waits per call) --
+this driver uses a single fixed RX buffer and TX buffer (`desc` is
+always 0) rather than a multi-descriptor pool; `net_transmit()`
+performs the actual write synchronously, so `net_tx_complete()` has
+nothing further to wait for. The linear/affine ownership types still
+enforce the same "one CPU-owned RX frame, one in-flight TX" discipline
+the API contract promises.
+
+Two real bugs found via `examples/net_echo/net_echo.tkb` +
+`scripts/eth_net_echo_test.py` against this devcontainer's `enp5s0`:
+- **Bulk endpoints need their OWN max-packet size, not ep0's.** Using
+  the control endpoint's 64-byte max packet for bulk transfers (both
+  are high-speed, but bulk uses 512) produced a bizarre-looking
+  "successful zero-byte transfer" on every bulk IN attempt -- fixed by
+  reading `wMaxPacketSize` from each bulk endpoint's own descriptor.
+- **KNOWN LIMITATION, not yet root-caused**: outgoing frames whose
+  wrapped USB transfer spans more than 2 bulk max-packet-size (512-byte)
+  packets get a device-side STALL from the LAN9514 instead of
+  completing (payloads up to 512 bytes echo correctly; 1000+ byte
+  payloads do not). `dwc2_bulk_out()` recovers via
+  `CLEAR_FEATURE(ENDPOINT_HALT)` so this does not permanently wedge
+  later transmits, but the oversized frame itself is currently dropped.
+  Flagged for a follow-up investigation rather than blocking this
+  milestone -- most protocol traffic (ARP, ICMP echo, TCP segments/HTTP
+  responses under ~500 bytes) is unaffected, but this will need
+  resolving before `tcp_echo`/`http_server` can be trusted with larger
+  payloads.
+
+New `make hwcheck-rpi3-net` (`scripts/run_hwtest_rpi3_net.sh`) -- the
+network-functional counterpart to `hwcheck-rpi3`'s UART-only net_echo
+check (which only proves `net_init()` succeeds, not that frames
+round-trip), split out exactly the way `hwcheck-stm32`/
+`hwcheck-stm32-net` already are and for the same reason (network tests
+need CAP_NET_RAW + a physical cable, not just JTAG+UART, so they stay
+out of `make check`/`make allcheck`). Mirrors `run_hwtest_net_ram.sh`'s
+shape, reusing `scripts/eth_net_echo_test.py`/`eth_arp_reply_test.py`/
+`eth_icmp_echo_test.py` against `enp5s0`. Real fixes needed along the
+way, all worth remembering for any future sudo+network test script in
+this repo:
+- `sudo` resets the environment by default, so any env var a test
+  script needs must be passed as part of the invoked command (`sudo
+  ETH_TEST_IFACE=... python3 ...`), not just exported in the wrapping
+  shell script -- omitting this made the first attempt silently fall
+  back to STM32's own `enp4s0`/`192.168.10.x`/MAC and produced a
+  100%-fail run indistinguishable at first glance from a genuine board
+  bug.
+- This board's `net_init()` (full USB enumeration, several real
+  seconds) is measurably slower than STM32's MDIO-only link bring-up,
+  so unlike `run_hwtest_net_ram.sh` (whose own comment says no fixed
+  sleep is needed) this script needs an explicit settle sleep after the
+  JTAG load -- the per-frame retry budget alone was not enough.
+- `eth_arp_reply_test.py`/`eth_icmp_echo_test.py` hardcoded STM32's own
+  subnet (`192.168.10.x`) and MAC (`00:80:E1:00:00:00`) as plain
+  constants, unlike `eth_net_echo_test.py`'s already-env-var-driven
+  `ETH_TEST_IFACE` -- generalized both to `ETH_TEST_SUBNET`/
+  `ETH_TEST_MAC` env vars (defaulting to STM32's existing values, so
+  its own invocation needs no change), with `run_hwtest_rpi3_net.sh`
+  setting both to this board's own values
+  (`192.168.20`/`02:00:20:00:00:02`) by default.
+- `scripts/rpi3_jtag_load.sh` (JTAG) never runs under `sudo` in this
+  script -- only the raw-socket Python test does, the same privilege
+  separation this document's own "sudo warning" section already
+  requires for this devcontainer's USB-based JTAG/UART access.
+
+58/58 `make hwcheck-rpi3` (UART-only checks); `make hwcheck-rpi3-net`
+passes `arp_reply`/`icmp_echo` fully (both use small packets, well
+under the STALL threshold) and `net_echo` at 4/6 payload sizes (the
+STALL limitation above accounts for the other 2). `make qemutest`
+(132/132) and `make stm32build` unaffected.
+
+**Milestone 7 (in progress)**: `arp_reply`/`icmp_echo` ported and
+passing on real hardware (see above) -- `tcp_echo`/`http_server` remain
+blocked on the bulk-OUT STALL limitation (their payloads routinely
+exceed the ~2-packet/1024-byte threshold), so root-causing that is the
+next concrete step, followed by the `--forbid-trap` hardening pass once
+everything in scope is proven end to end. Update this section (and
+HISTORY.md, and issue #140) after each further step, per this
+project's established cadence -- do not batch documentation to the end.
 
 ## Hardware
 
