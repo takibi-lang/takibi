@@ -1409,10 +1409,10 @@ $(RPI3_USB_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON
 # staleness tracking notices when they change).
 COMMON_RPI3_ETH       := $(COMMON_RPI3_DIR)/eth.tkb
 COMMON_RPI3_NETCONFIG := $(COMMON_RPI3_DIR)/netconfig.tkb
-RPI3_NET_EXAMPLES := net_echo arp_reply icmp_echo tcp_echo
+RPI3_NET_EXAMPLES := net_echo arp_reply icmp_echo tcp_echo http_server
 RPI3_NET_OBJS     := $(foreach e,$(RPI3_NET_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
-$(RPI3_NET_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
+$(RPI3_NET_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_HTTP_SERVER) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
 
 RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES)
@@ -1466,7 +1466,7 @@ hwcheck-rpi3: $(RPI3_KERNELS) examples/common_rpi3/jtag_stub.img
 	@bash scripts/run_hwtest_rpi3.sh
 
 ## hwcheck-rpi3-net: run all RPi3 real-Ethernet hardware tests (net_echo/
-## arp_reply/icmp_echo/tcp_echo today, more as they're ported -- see
+## arp_reply/icmp_echo/tcp_echo/http_server today, more as ported -- see
 ## scripts/run_hwtest_rpi3_net.sh) over a physical point-to-point link to
 ## the Raspberry Pi 3B (requires the board's Ethernet port, behind the
 ## LAN9514 USB hub -- see examples/common_rpi3/AGENTS.md's "USB host

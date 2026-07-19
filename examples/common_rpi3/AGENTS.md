@@ -1,13 +1,13 @@
 # Raspberry Pi 3B (BCM2837) Bare-Metal Bring-Up
 
-GitHub issue #140. Status: 60 examples ported and passing `make
+GitHub issue #140. Status: 61 examples ported and passing `make
 hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level
-`EXAMPLES` list EXCEPT `http_server`/`kvs_server` (not wired to this
+`EXAMPLES` list EXCEPT `kvs_server` (not wired to this
 target yet, but no longer blocked: the former bulk-OUT STALL was
 root-caused and fixed in milestone 7, see "USB host stack" below) and
 `fatfs` (needs SD-card-shaped
 block storage, see "Out of scope: SD-card-storage examples" below).
-`net_echo`/`arp_reply`/`icmp_echo`/`tcp_echo` are ported and passing on real
+`net_echo`/`arp_reply`/`icmp_echo`/`tcp_echo`/`http_server` are ported and passing on real
 hardware, including `net_echo` at the maximum 1514-byte Ethernet frame
 size, over the USB host stack this board did not have as of the previous
 status line here. Full list:
@@ -21,7 +21,7 @@ status line here. Full list:
 `tuple_pair`/`field_lease`/`inet_checksum`/`ip_parse`/`tcp_parse`/
 `rtc`/`timer`/`echo`/`irq`/`preempt`/`semaphore`/`condvar`/`msgqueue`/
 `watchdog`/`rtos_demo`/`chan_rendezvous`/`net_echo`/`arp_reply`/
-`icmp_echo`/`tcp_echo`. This covers `hwcheck-stm32`'s "plain compute" set
+`icmp_echo`/`tcp_echo`/`http_server`. This covers `hwcheck-stm32`'s "plain compute" set
 (extended with plain-compute examples STM32 already had but this
 board's own list had not picked up yet: `slice`/`foreach`/`int64`/
 `indexed_view`/`tcp_conn_view`) plus `rtc`/`timer` (see "RTC" below)
@@ -370,17 +370,19 @@ this repo:
   requires for this devcontainer's USB-based JTAG/UART access.
 
 58/58 `make hwcheck-rpi3` (UART-only checks); `make hwcheck-rpi3-net`
-passes all four examples, with `net_echo` at 6/6 payload sizes plus
-complete `arp_reply`/`icmp_echo`/`tcp_echo` checks. `make qemutest` (132/132) and
+passes all five examples, with `net_echo` at 6/6 payload sizes plus
+complete `arp_reply`/`icmp_echo`/`tcp_echo`/`http_server` checks. `make qemutest` (132/132) and
 `make stm32build` unaffected.
 
-**Milestone 7 (in progress)**: `arp_reply`/`icmp_echo`/`tcp_echo` ported and
+**Milestone 7 (in progress)**: `arp_reply`/`icmp_echo`/`tcp_echo`/`http_server` ported and
 passing on real hardware, and the bulk-OUT STALL is now root-caused and
 fixed (see above). The unchanged shared `tcp_echo.tkb` passes its full
 real-link sequence: rejection cases, TCP-options SYN, handshake, data
-echo, close, and reconnect. `http_server`/`kvs_server` are therefore
-unblocked but not yet wired or hardware-tested on this target; those are
-the next concrete steps, followed by the `--forbid-trap` hardening pass
+echo, close, and reconnect. The unchanged shared `http_server.tkb` also
+passes two sequential requests through the host's real TCP/IP stack,
+including cold ARP resolution and the response-counter increment.
+`kvs_server` is unblocked but not yet wired or hardware-tested on this
+target; that is the next concrete step, followed by the `--forbid-trap` hardening pass
 once everything in scope is proven end to end. Update this section (and
 HISTORY.md, and issue #140) after each further step, per this project's
 established cadence -- do not batch documentation to the end.

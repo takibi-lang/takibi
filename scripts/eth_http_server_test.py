@@ -21,8 +21,8 @@
 # can't double-count).
 #
 # Needs root (run via sudo, or `make hwcheck-net` which already does) for
-# the `ip neigh flush` step. ETH_TEST_IFACE / SERVER_IP must match
-# examples/common_stm32/netconfig.tkb.
+# the `ip neigh flush` step. ETH_TEST_IFACE / ETH_TEST_SUBNET must match
+# the selected target's netconfig.tkb (STM32 remains the default).
 #
 # Exit code only (0 = pass, 1 = fail).
 
@@ -33,7 +33,7 @@ import subprocess
 import sys
 
 IFACE = os.environ.get("ETH_TEST_IFACE", "enp4s0")
-SERVER_IP = "192.168.10.2"  # must match netconfig.tkb's OUR_IP
+SERVER_IP = os.environ.get("ETH_TEST_SUBNET", "192.168.10") + ".2"
 SERVER_PORT = 80
 
 REQUEST_TIMEOUT_SECS = 5

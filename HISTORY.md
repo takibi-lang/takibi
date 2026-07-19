@@ -9544,3 +9544,15 @@ final hardening pass.
 Real-hardware result: `make hwcheck-rpi3-net` passes all four examples,
 including every `tcp_echo` sub-check and all six `net_echo` frame sizes
 (4 tests passed, 0 failed).
+
+Milestone 7, part 5: `http_server` ported to Raspberry Pi 3B, again with
+no target-specific application fork. The RPi3 build group now tracks the
+shared HTTP connection-state sources as Make prerequisites, and the
+existing real-stack HTTP hardware test accepts `ETH_TEST_SUBNET` while
+retaining STM32's address as its default. The RPi3 harness loads the
+shared server over JTAG, forces cold ARP resolution, performs two real
+HTTP connections, and verifies both the page and request-counter bump.
+`kvs_server` remains the final sequential port before milestone hardening.
+
+Real-hardware result: `make hwcheck-rpi3-net` passes all five examples
+(5 tests passed, 0 failed), including both HTTP requests.
