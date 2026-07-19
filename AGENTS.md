@@ -36,6 +36,23 @@ GitHub issues. This applies to all agent surfaces and all GitHub access paths,
 including `gh issue create`, `gh issue comment`, MCP tools, connectors, and
 GitHub web/API operations.
 
+## Git Workflow: Agents Commit, Humans Push
+
+Coding agents working in this repo (Claude Code, Codex, etc.) should stage and
+commit their own work as each task/change is completed, without waiting to be
+asked -- this is a standing authorization, not a one-off. Commit at a natural
+unit boundary (one milestone, one bug fix, one doc update), with a message
+that follows this repo's existing commit-message style.
+
+**Agents must never run `git push`.** Pushing to the remote is the human's
+own step, always. This split exists so the human retains a manual review/gate
+point before anything leaves the local repo, while still getting the benefit
+of a clean, incremental commit history without having to ask for each one.
+`.claude/settings.json` enforces the push half of this at the permission
+level (`git push` is denied); the commit half is enforced by this convention,
+not a technical control, since agents legitimately need to run `git commit`
+for all kinds of work.
+
 ## Design Principle: Detect Errors at Compile Time
 
 **In embedded products, zero runtime exceptions and panics is a hard requirement.**
