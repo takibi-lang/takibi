@@ -1180,13 +1180,14 @@ heap predicates.
 
 #### 6.7.11 Asynchronous TX owner transition (implemented 2026-07-16)
 
-Both network backends now split start from completion. `net_transmit` consumes
-`NetRxCpuOwned[desc]`, starts DMA, and returns `NetTxInFlight[desc]` while the
-device may still read the in-place buffer. The in-flight runtime aggregate
-retains the RX index and, on STM32, the exact TX descriptor slot; its static
-`desc` identity erases. QEMU's fixed descriptor zero requires no runtime field.
-`net_tx_complete` consumes the owner, waits for device completion, re-posts
-the RX descriptor, and restores `NetRxCanAcquire`.
+Both network backends split start from completion. `net_transmit` consumes
+`NetRxCpuOwned[desc]`, starts DMA, and returns `NetTxInFlight[desc]`. QEMU may
+still read the in-place RX buffer until completion. STM32 later gained
+dedicated TX buffers, so it copies the frame and re-posts RX before publishing
+TX. The in-flight runtime aggregate retains the completion state needed by
+each backend; its static `desc` identity erases. `net_tx_complete` consumes the
+owner, waits for device completion, re-posts RX on QEMU, and restores
+`NetRxCanAcquire` on both backends.
 
 This is an application of existing indexed linear owners, not new Core
 machinery. It closes the concrete early-release path: the old RX owner was

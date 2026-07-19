@@ -364,10 +364,12 @@ up future acquisition is safe, while copying or reusing it is not. This
 removes the null-sentinel exception and closes duplicate owner minting at the
 public API boundary.
 
-`net_transmit` consumes the RX owner, derives the in-place reply pointer, and
-returns a linear TX-in-flight owner rather than trusting an unrelated raw
-pointer or retaining an untracked borrow across return. Completion consumes
-that owner and restores the acquisition permit. `net_rx_frame`'s returned
+`net_transmit` consumes the RX owner and returns a linear TX-in-flight owner
+rather than trusting an unrelated raw pointer or retaining an untracked
+borrow across return. QEMU keeps the in-place RX buffer until completion;
+STM32 copies into a dedicated TX buffer and re-posts RX before starting TX.
+Completion consumes the in-flight owner and restores the acquisition permit.
+`net_rx_frame`'s returned
 slice is tied to the borrowed owner by its region-annotated return type
 (`-> [u8; 1514..] @ desc`, see the implemented-slice entry below): using the
 slice, or anything derived from it, after either release or TX start consumes
@@ -1031,12 +1033,14 @@ fn net_tx_complete(in_flight: sink NetTxInFlight[desc])
 
 `net_transmit` consumes the CPU-owned RX descriptor, programs and starts TX,
 and returns without waiting for the device. `NetTxInFlight[desc]` retains the
-same static RX identity and only the runtime completion state each backend
-needs.
-`net_tx_complete` consumes that owner, waits for authoritative device
-completion, re-posts the RX descriptor, and returns the sole acquisition
-permit. There is therefore no RX owner available to pass to `net_rx_release`
-while DMA may still read the in-place frame.
+same static identity and only the runtime completion state each backend
+needs. QEMU keeps the in-place RX frame until completion. STM32's later
+dedicated-TX-buffer implementation copies the frame and re-posts RX during
+`net_transmit`, before TX is published.
+`net_tx_complete` consumes the in-flight owner, waits for authoritative device
+completion, re-posts RX on QEMU, and returns the sole acquisition permit.
+There is therefore no RX owner available to pass to `net_rx_release` after TX
+start in either backend.
 
 The current applications deliberately call completion as their next network
 operation, preserving their single-frame behavior while still creating a

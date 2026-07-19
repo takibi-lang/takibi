@@ -556,8 +556,8 @@ a fixed call-path table. `make profile-stm32-http-server-sdcard-rtos`
 provisions the SD card, warms the server, profiles a measured `/ICON.PNG`
 fetch, dumps the tables through OpenOCD, and writes a FlameGraph-compatible
 folded stack file under `_build/takibi_profile/http_server_sdcard_rtos/`.
-`make profile-stm32-kvs-server-sdcard-rtos` profiles the write-through KVS
-path; set `TAKIBI_PROFILE_LOAD=stress` to drive it with `scripts/kvs_stress.py`
+`make profile-stm32-kvs-server-sdcard-rtos` profiles a KVS PUT plus its
+eventual SD write-back; set `TAKIBI_PROFILE_LOAD=stress` to drive it with `scripts/kvs_stress.py`
 (defaulting to concurrency 4 and a fixed key, the practical STM32 stress
 profile setting). The numbers are inclusive wall-clock cycles, so blocking
 paths such as `cond_wait`, `kvs_sd_request_recv`, and `net_rx_wait` are

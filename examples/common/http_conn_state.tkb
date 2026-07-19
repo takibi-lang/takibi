@@ -59,7 +59,7 @@
 // boundary), TX flagging (should_tx/tx_len, derived at the call site from
 // these functions' i32 length returns), and packet parsing/validation.
 
-const MAX_CONNS: usize = 16;
+const MAX_CONNS: usize = 24;
 
 // MAX_CONNS is a `const`, so it can be used both for array sizes and for
 // refined connection-slot bounds such as {0..<MAX_CONNS as usize}.
@@ -216,7 +216,7 @@ fn dispatch_slot(i: {0..<MAX_CONNS as usize}) -> TcpConnDispatch {
 //           with no new mechanism (see http_server_common.tkb's poll loop
 //           and HISTORY.md's issue #135 entry for the reasoning against a
 //           stateless RST here instead).
-fn tcp_conn_dispatch(remote_ip: borrow [u8; 64..], remote_port: borrow [u16; 16..],
+fn tcp_conn_dispatch(remote_ip: borrow [u8; 96..], remote_port: borrow [u16; 24..],
                      src_ip: borrow [u8; 4..], src_port: u16,
                      is_syn: bool) -> TcpConnDispatch {
     // Every conn_state[i] read below is bound to a local before comparing
@@ -382,7 +382,7 @@ fn tcp_close_via_final_ack(pending: sink PendingTcpEvent,
 // the RST/FIN/ACK path that would normally return the slot to Listen.
 // The caller owns the age counters because they are wire-bookkeeping, not
 // phase; this file owns the phase write because conn_state is private.
-fn tcp_expire_stale_slots(idle: borrow [u32; 16..], limit: u32) {
+fn tcp_expire_stale_slots(idle: borrow [u32; 24..], limit: u32) {
     for i: usize in 0..<MAX_CONNS {
         let state: ConnState = conn_state[i];
         if (state != ConnState::Listen && idle[i] >= limit) {

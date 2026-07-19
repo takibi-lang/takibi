@@ -3,8 +3,8 @@
 // persistence through FAT12 (examples/common/fat12.tkb), and RTOS task
 // separation -- mirroring this project's fatfs+real-SD-card precedent (one
 // milestone, not staged) and examples/http_server_sdcard_rtos.tkb's exact
-// task-split shape (network task + a dedicated SD-worker task reached
-// through a synchronous typed-RPC channel).
+// task-split shape (network task + a dedicated SD-worker task). Boot-time
+// initialization is synchronous; steady-state persistence is asynchronous.
 //
 // Deliberately does NOT touch examples/kvs_server/kvs_server.tkb (still
 // QEMU-only, in-RAM-only, unchanged) -- matches how
@@ -18,15 +18,17 @@
 // verbatim -- see that file for the protocol/store design rationale this
 // file does not repeat. The two places that differ are marked below.
 //
-// Persistence: RAM stays canonical (GET/LIST read kv_state/kv_key_len/
-// kv_val_len/kv_keys/kv_vals directly, unchanged from kvs_server.tkb).
-// The SD-worker task is used only at boot (one Init RPC, loading a
-// previously saved table if one exists) and after every successful PUT/
-// DELETE (one SaveSlot RPC, write-through -- the response is not sent
-// until the changed slot is durable). The on-disk file ("KVSREC  DAT")
-// stores 16 fixed-size slot records. Steady-state PUT/DELETE therefore
-// overwrites one 163-byte record with fat_write_at(), instead of rewriting
-// the entire 2608-byte table. The original whole-table file
+// Persistence: RAM is canonical and network operations are serialized by
+// task 0. Successful PUT/DELETE updates RAM, snapshots that slot into one of
+// 16 persistence-owned 256-byte shadow records under a linear MutexGuard,
+// advances its generation, marks it dirty, and returns HTTP 202 without
+// waiting for SD. Task 1 copies one dirty shadow into its private work buffer,
+// writes it, and clears dirty only if the generation is unchanged; repeated
+// updates therefore coalesce safely, and round-robin dirty scanning prevents
+// a hot slot from starving the others. A reset may lose recently accepted
+// updates that had not reached SD yet: durability is explicitly eventual,
+// while GET observes the latest RAM state. The on-disk file ("KVSREC  DAT")
+// stores 16 fixed-size slot records. The original whole-table file
 // ("KVSTABLEDAT") is still accepted once as a legacy boot-time source and
 // migrated into the record file immediately after a successful load.
 //
@@ -36,17 +38,12 @@
 // sdmmc.tkb's own documented "no internal locking, single caller" scope).
 // Unlike http_server_sdcard_rtos.tkb's SdRequestChan (which threads a
 // name83/off/want/dst request payload across a file boundary), sd_worker
-// and http_start_response live in the SAME file here, so kv_state/etc are
-// ordinary globals sd_worker's own functions see directly by name. The
-// pending dirty slot is likewise a global set immediately before SaveSlot;
-// safety is the same convention sdmmc.tkb itself relies on: only sd_worker
-// ever touches the five table arrays during a Load/SaveSlot, because the
-// network task is synchronously blocked in the RPC rendezvous the entire
-// time.
+// and http_start_response live in the SAME file here. After boot, sd_worker
+// never borrows the canonical table: it sees only shadow records copied under
+// kvs_persist_mutex, so no table reference crosses unlock or an SD wait.
 //
-// Write failures are not surfaced to the HTTP client: the RAM table update
-// already succeeded (that's what the client's response reflects), only
-// durability is at risk. UART logs the failure. This mirrors
+// Write failures are not surfaced to the HTTP client: the 202 response only
+// promises RAM acceptance. A failed slot stays dirty and is retried. This mirrors
 // examples/common_stm32/fat12_sdmmc.tkb's own documented scope decision
 // not to thread a real disk_read/disk_write failure up through its
 // callers.
@@ -54,16 +51,10 @@
 // --forbid-trap CLEAN: proved working end to end on real hardware first,
 // including the persistence-survives-a-reset check, per AGENTS.md's
 // "prove without --forbid-trap first" process, and committed as that
-// baseline. The copied Phase-1 store/parsing logic already carried its
-// refined types; the new RTOS/SD code in this file (KvsSdRequest/
-// KvsSdRequestChan, sd_worker, the KVS SD load/save helpers, the RPC
-// wrappers, the two persist call-site insertions, and app_main) turned
-// out to need no fixes when the flag was turned on -- every array
-// access here is either a for-loop with a provable literal/const range
-// (kvs_reset_table/kvs_pack_slot/kvs_unpack_slot) or a plain fat_write/
-// fat_read/fat_write_at call with a literal/const size, and the RPC
-// channel mirrors http_server_sdcard_rtos.tkb's already-hardened
-// SdRequestChan shape. See HISTORY.md's issue #135 entry.
+// baseline. The later write-back redesign was likewise proved on hardware
+// before hardening; --forbid-trap found six shadow-record slice sites, fixed
+// with a 256-byte destination contract and refined same-base subslices rather
+// than raw-pointer access. See HISTORY.md's issue #135 entries.
 
 use "examples/common/inet_checksum.tkb";
 use "examples/common/netutil.tkb";
@@ -104,6 +95,13 @@ let mut list_body: [u8; 560];
 let mut kvs_sd_file_ready: bool;
 let mut kvs_sd_pending_slot: i32;
 let mut kvs_record_buf: [u8; KVS_RECORD_SIZE] align(32);
+let mut kvs_pending_records: [u8; 16 * KVS_RECORD_SIZE] align(32);
+let mut kvs_slot_generation: [u32; 16];
+let mut kvs_slot_persisted_generation: [u32; 16];
+let mut kvs_slot_dirty: [u8; 16];
+let mut kvs_persist_scan_start: usize;
+let mut kvs_persist_mutex: i32;
+let mut kvs_persist_changed: io i32;
 
 // -- djb2 hash + linear probing (copied, unchanged) ------------------------
 
@@ -335,6 +333,9 @@ fn kvs_find_hdr_end(req: borrow *u8, len: isize) -> isize {
 // -- Response generation (copied, unchanged) -------------------------------
 
 fn kvs_write_status_line(payload: borrow *u8, status_id: i32) -> isize {
+    if (status_id == 202) {
+        return copy_str(payload, "HTTP/1.1 202 Accepted\r\n");
+    }
     if (status_id == 201) {
         return copy_str(payload, "HTTP/1.1 201 Created\r\n");
     }
@@ -384,17 +385,21 @@ fn kvs_reset_table() {
     kvs_sd_file_ready = false;
 }
 
-fn kvs_pack_slot(slot: {0..<16 as usize}) {
+fn kvs_pack_slot_to(slot: {0..<16 as usize}, dst: borrow [u8; 256..]) {
     for i: usize in 0..<KVS_RECORD_SIZE {
-        kvs_record_buf[i] = 0;
+        dst[i] = 0;
     }
-    kvs_record_buf[0] = kv_state[slot];
-    kvs_record_buf[1] = kv_key_len[slot];
-    kvs_record_buf[2] = kv_val_len[slot];
-    bytes_copy(kvs_record_buf + KVS_RECORD_KEY_OFF,
+    dst[0] = kv_state[slot];
+    dst[1] = kv_key_len[slot];
+    dst[2] = kv_val_len[slot];
+    bytes_copy((dst as *u8) + KVS_RECORD_KEY_OFF,
         (kv_keys as *u8) + (slot as isize) * KEY_MAX, KEY_MAX);
-    bytes_copy(kvs_record_buf + KVS_RECORD_VAL_OFF,
+    bytes_copy((dst as *u8) + KVS_RECORD_VAL_OFF,
         (kv_vals as *u8) + (slot as isize) * VAL_MAX, VAL_MAX);
+}
+
+fn kvs_pack_slot(slot: {0..<16 as usize}) {
+    kvs_pack_slot_to(slot, kvs_record_buf as []u8);
 }
 
 fn kvs_unpack_slot(slot: {0..<16 as usize}) {
@@ -431,14 +436,13 @@ fn kvs_sd_create_record_file() -> i32 {
     }
 }
 
-fn kvs_sd_save_slot(slot_i32: i32) -> i32 {
+fn kvs_sd_save_slot_snapshot(slot_i32: i32) -> i32 {
     let name: *u8 = "KVSREC  DAT"; // 8.3: "KVSREC" + spaces + "DAT"
     if (slot_i32 >= 0 && slot_i32 < 16) {
         if (kvs_sd_file_ready == false || fat_file_size(name) != (16 * KVS_RECORD_SIZE) as u32) {
             return kvs_sd_create_record_file();
         }
         let slot: {0..<16 as usize} = slot_i32 as usize;
-        kvs_pack_slot(slot);
         let off: u32 = (slot as u32) * (KVS_RECORD_SIZE as u32);
         let mut bw: u32 = 0;
         if (fat_write_at(name, off, kvs_record_buf, KVS_RECORD_SIZE as u32, &bw) != 0 ||
@@ -526,15 +530,11 @@ fn kvs_sd_load_legacy() -> i32 {
 //
 // Task 0 (app_main) runs the HTTP/TCP poll loop, same as kvs_server.tkb.
 // Task 1 (sd_worker) is the only code that ever touches fat12.tkb/
-// sdmmc.tkb; kv_state/kv_key_len/kv_val_len/kv_keys/kv_vals are ordinary
-// file-scope globals sd_worker's own functions above already see directly
-// by name, so the RPC carries no payload -- see this file's header
-// comment for why that's safe (the network task is synchronously blocked
-// in the rendezvous the whole time a Load/Save runs).
+// sdmmc.tkb. The one synchronous rendezvous below is boot initialization;
+// steady-state saves use the guarded shadow records above.
 
 variant KvsSdRequest {
     Init;
-    SaveSlot;
 }
 
 // Same hand-duplicated Chan-shaped struct idiom as
@@ -586,37 +586,103 @@ fn kvs_sd_request_recv(ch: *KvsSdRequestChan) -> KvsSdRequest !{may_block} {
     return request;
 }
 
-fn sd_worker() {
-    while (true) {
-        let request: KvsSdRequest = kvs_sd_request_recv(&kvs_sd_request_ch);
-        match request {
-            KvsSdRequest::Init => {
-                let mut status: i32 = 0;
-                if (disk_initialize() != 0) {
-                    uart_puts("kvs_server_sdcard_rtos: disk_initialize FAIL\r\n");
-                    status = -1;
-                } else if (fat_is_formatted()) {
-                    fat_mount();
-                    status = kvs_sd_load_records();
-                    if (status == 2) {
-                        kvs_sd_create_record_file();
-                        status = 0;
-                    } else if (status != 0) {
-                        status = kvs_sd_load_legacy();
-                        if (status == 0) {
-                            kvs_sd_create_record_file();
-                        }
-                    }
-                } else {
-                    fat_format();
-                    status = 1;
-                }
-                chan_send(&kvs_sd_response_ch, status);
-            }
-            KvsSdRequest::SaveSlot => {
-                chan_send(&kvs_sd_response_ch, kvs_sd_save_slot(kvs_sd_pending_slot));
-            }
+fn kvs_persistence_init() {
+    kvs_persist_mutex = 1;
+    kvs_persist_changed = 0;
+    kvs_persist_scan_start = 0;
+    for slot: usize in 0..<16 {
+        kvs_slot_generation[slot] = 0;
+        kvs_slot_persisted_generation[slot] = 0;
+        kvs_slot_dirty[slot] = 0;
+    }
+}
+
+// Snapshot the network task's canonical RAM state into persistence-owned
+// storage. The SD worker never borrows kv_state/kv_keys/kv_vals directly.
+fn kvs_mark_slot_dirty(slot_i32: i32) {
+    if (slot_i32 >= 0 && slot_i32 < 16) {
+        let slot: {0..<16 as usize} = max(min(slot_i32, 15), 0) as usize;
+        let base: {0..<3841 as usize} = min(slot * KVS_RECORD_SIZE, 3840);
+        let mut g = mutex_lock(&kvs_persist_mutex);
+        let pending = kvs_pending_records as [u8; 4096..];
+        let record = pending[base..<base + 256];
+        if (record.len >= 256) {
+            kvs_pack_slot_to(slot, record);
         }
+        kvs_slot_generation[slot] = kvs_slot_generation[slot] + 1;
+        kvs_slot_dirty[slot] = 1;
+        cond_signal(&kvs_persist_changed);
+        mutex_unlock(g, &kvs_persist_mutex);
+    }
+}
+
+fn kvs_find_dirty_slot() -> i32 {
+    for offset: usize in 0..<16 {
+        let slot: {0..<16 as usize} =
+            ((kvs_persist_scan_start + offset) & 15) as usize;
+        if (kvs_slot_dirty[slot] != 0) {
+            kvs_persist_scan_start = (slot + 1) & 15;
+            return slot as i32;
+        }
+    }
+    return -1;
+}
+
+fn sd_worker() {
+    let request: KvsSdRequest = kvs_sd_request_recv(&kvs_sd_request_ch);
+    match request {
+        KvsSdRequest::Init => {
+            let mut status: i32 = 0;
+            if (disk_initialize() != 0) {
+                uart_puts("kvs_server_sdcard_rtos: disk_initialize FAIL\r\n");
+                status = -1;
+            } else if (fat_is_formatted()) {
+                fat_mount();
+                status = kvs_sd_load_records();
+                if (status == 2) {
+                    kvs_sd_create_record_file();
+                    status = 0;
+                } else if (status != 0) {
+                    status = kvs_sd_load_legacy();
+                    if (status == 0) {
+                        kvs_sd_create_record_file();
+                    }
+                }
+            } else {
+                fat_format();
+                status = 1;
+            }
+            chan_send(&kvs_sd_response_ch, status);
+        }
+    }
+
+    while (true) {
+        let mut g = mutex_lock(&kvs_persist_mutex);
+        let mut slot_i32: i32 = kvs_find_dirty_slot();
+        while (slot_i32 < 0) {
+            g = cond_wait(&kvs_persist_changed, g, &kvs_persist_mutex);
+            slot_i32 = kvs_find_dirty_slot();
+        }
+
+        let slot: {0..<16 as usize} = max(min(slot_i32, 15), 0) as usize;
+        let base: {0..<3841 as usize} = min(slot * KVS_RECORD_SIZE, 3840);
+        let generation: u32 = kvs_slot_generation[slot];
+        let pending = kvs_pending_records as [u8; 4096..];
+        slice_copy(kvs_record_buf as []u8,
+                   pending[base..<base + 256]);
+        kvs_slot_dirty[slot] = 0;
+        mutex_unlock(g, &kvs_persist_mutex);
+
+        let status: i32 = kvs_sd_save_slot_snapshot(slot_i32);
+
+        g = mutex_lock(&kvs_persist_mutex);
+        if (status == 0 && kvs_slot_generation[slot] == generation) {
+            kvs_slot_persisted_generation[slot] = generation;
+        } else {
+            kvs_slot_dirty[slot] = 1;
+            cond_signal(&kvs_persist_changed);
+        }
+        mutex_unlock(g, &kvs_persist_mutex);
     }
 }
 
@@ -625,17 +691,10 @@ fn kvs_sd_init_rpc() -> i32 {
     return chan_recv(&kvs_sd_response_ch);
 }
 
-fn kvs_sd_save_slot_rpc() -> i32 {
-    kvs_sd_request_send(&kvs_sd_request_ch, KvsSdRequest::SaveSlot);
-    return chan_recv(&kvs_sd_response_ch);
-}
-
 // -- Core callbacks -----------------------------------------------------
 //
-// Copied from kvs_server.tkb with exactly two insertions (marked NEW
-// below): a write-through kvs_sd_save_slot_rpc() call after a successful
-// PUT and after a successful DELETE, before the response is built.
-// GET/LIST and every error path are unchanged.
+// GET/LIST and every error path remain aligned with kvs_server.tkb. Successful
+// PUT/DELETE differ by publishing an eventual-persistence snapshot and 202.
 
 fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
         req: borrow *u8, req_len: u16, idx: {0..<MAX_CONNS as usize}) -> i32 {
@@ -700,11 +759,8 @@ fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
             if (put_result < 0) {
                 return kvs_build_response(eth, ihl, idx, 507, "table full\n", 11);
             }
-            kvs_sd_save_slot_rpc(); // NEW: write-through persist before answering
-            if (put_result == 0) {
-                return kvs_build_response(eth, ihl, idx, 201, "", 0);
-            }
-            return kvs_build_response(eth, ihl, idx, 200, "", 0);
+            kvs_mark_slot_dirty(kvs_sd_pending_slot);
+            return kvs_build_response(eth, ihl, idx, 202, "", 0);
         }
         KvsMethod::Delete => {
             if (hdr_end < 7) {
@@ -722,8 +778,8 @@ fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
             }
             let klen: isize = r as isize;
             if (kvs_del(key_buf, klen)) {
-                kvs_sd_save_slot_rpc(); // NEW: write-through persist before answering
-                return kvs_build_response(eth, ihl, idx, 200, "", 0);
+                kvs_mark_slot_dirty(kvs_sd_pending_slot);
+                return kvs_build_response(eth, ihl, idx, 202, "", 0);
             }
             return kvs_build_response(eth, ihl, idx, 404, "not found\n", 10);
         }
@@ -745,6 +801,7 @@ fn http_response_done(idx: {0..<MAX_CONNS as usize}) -> bool {
 fn app_main() {
     kvs_sd_request_chan_init(&kvs_sd_request_ch);
     chan_init(&kvs_sd_response_ch);
+    kvs_persistence_init();
 
     uart_puts("kvs_server_sdcard_rtos: init\r\n");
 

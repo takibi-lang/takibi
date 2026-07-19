@@ -203,7 +203,10 @@ let prof_func_ids : (string, int) Hashtbl.t = Hashtbl.create 64
 let prof_task_capacity = 4
 let prof_stack_capacity = 256
 let prof_path_capacity = 256
-let prof_path_max_depth = 16
+(* Each packed call-path entry is 20 + (4 * depth) bytes. A depth of 12 covers
+   the deepest currently profiled STM32 path (10 frames) while saving 4 KiB
+   versus depth 16, which made KVS+SD+RTOS overflow AXI SRAM at link time. *)
+let prof_path_max_depth = 12
 
 let should_profile_function name =
   !function_profiling_enabled

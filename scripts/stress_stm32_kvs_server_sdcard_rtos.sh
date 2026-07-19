@@ -2,8 +2,8 @@
 # Explicit STM32 KVS+SD+RTOS stress runner.
 #
 # This is intentionally NOT part of make allcheck: it is a sustained real-
-# board load test, not a deterministic integration test. Its default remains
-# the established concurrency-4 baseline; values above 16 deliberately exceed
+# board load test, not a deterministic integration test. Its default matches
+# the measured concurrency-24 operating point; values above 24 deliberately exceed
 # the server's TCP slot count and test overload.
 set -euo pipefail
 
@@ -13,7 +13,7 @@ OPENOCD_BOARD_CFG="board/stm32f746g-disco.cfg"
 ELF="${TAKIBI_STRESS_ELF:-examples/kvs_server_sdcard_rtos/kernel_stm32_ram.elf}"
 HOST="${TAKIBI_STRESS_HOST:-192.168.10.2}"
 PORT="${TAKIBI_STRESS_PORT:-80}"
-CONCURRENCY="${TAKIBI_STRESS_CONCURRENCY:-4}"
+CONCURRENCY="${TAKIBI_STRESS_CONCURRENCY:-24}"
 DURATION="${TAKIBI_STRESS_DURATION:-30}"
 VALUE_SIZE="${TAKIBI_STRESS_VALUE_SIZE:-64}"
 TIMEOUT="${TAKIBI_STRESS_TIMEOUT:-5}"

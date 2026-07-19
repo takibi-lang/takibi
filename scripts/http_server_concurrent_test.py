@@ -6,7 +6,7 @@
 # open simultaneously (different client_port values multiplexed over the
 # same one-frame-per-UDP-datagram transport http_server_test.py already
 # uses -- see that file's header) to exercise http_conn_state.tkb's
-# MAX_CONNS=16 slot table: independent admission, independent per-slot
+# MAX_CONNS=24 slot table: independent admission, independent per-slot
 # sequence-number state, table-full silent-ignore, and slot reuse after
 # close.
 #
@@ -33,7 +33,7 @@ SERVER_MAC = bytes([0x52, 0x54, 0x00, 0x12, 0x34, 0x56])  # must match run_qemut
 SERVER_IP = bytes([10, 0, 2, 15])                          # must match http_server.tkb's our_ip
 SERVER_PORT = 80                                            # must match http_server.tkb's HTTP_PORT
 
-MAX_CONNS = 16  # must match http_conn_state.tkb's MAX_CONNS
+MAX_CONNS = 24  # must match http_conn_state.tkb's MAX_CONNS
 
 RETRIES = 20
 RETRY_TIMEOUT_SECS = 0.5
@@ -301,9 +301,9 @@ def test_interleaved_handshakes_and_gets_stay_independent() -> bool:
         sock.close()
 
 
-def test_table_full_seventeenth_syn_silently_ignored() -> bool:
-    """Fill all MAX_CONNS=16 slots with un-closed connections, then confirm
-    a 17th SYN gets no reply at all (the existing "unknown peer, ignore"
+def test_table_full_twenty_fifth_syn_silently_ignored() -> bool:
+    """Fill all MAX_CONNS=24 slots with un-closed connections, then confirm
+    a 25th SYN gets no reply at all (the existing "unknown peer, ignore"
     path -- see http_conn_state.tkb's tcp_conn_dispatch Pass 3)."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((QEMU_HOST, LOCAL_PORT))
@@ -324,7 +324,7 @@ def test_table_full_seventeenth_syn_silently_ignored() -> bool:
         sock.settimeout(SILENCE_TIMEOUT_SECS)
         try:
             stray = sock.recvfrom(2000)[0]
-            print("  unexpected reply to 17th SYN:", stray.hex())
+            print("  unexpected reply to 25th SYN:", stray.hex())
             ok = False
         except socket.timeout:
             pass
@@ -373,8 +373,8 @@ def main() -> int:
     ok2 = test_interleaved_handshakes_and_gets_stay_independent()
     print("  interleaved handshakes + GETs stay independent: %s" % ("PASS" if ok2 else "FAIL"))
 
-    ok3 = test_table_full_seventeenth_syn_silently_ignored()
-    print("  table full: 17th SYN silently ignored:         %s" % ("PASS" if ok3 else "FAIL"))
+    ok3 = test_table_full_twenty_fifth_syn_silently_ignored()
+    print("  table full: 25th SYN silently ignored:         %s" % ("PASS" if ok3 else "FAIL"))
 
     ok4 = test_slots_reusable_after_close()
     print("  slots reusable after close:                    %s" % ("PASS" if ok4 else "FAIL"))

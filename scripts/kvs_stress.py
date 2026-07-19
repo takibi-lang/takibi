@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Concurrent load generator for the KVS HTTP server (GitHub issue #135),
-# used to characterize write-through SD persistence and the N=4 concurrent
-# TCP implementation under real load.
+# used to characterize eventual SD persistence and the concurrent TCP
+# implementation under real load.
 #
 # Uses raw sockets, one sendall() per request (request line + headers +
 # body combined), same reasoning as eth_kvs_server_stm32_test.py: this
@@ -12,9 +12,9 @@
 #
 # --concurrency N spawns N worker threads, each looping PUT/GET/DELETE/
 # LIST requests against the server for the configured duration. The
-# shared TCP core accepts MAX_CONNS=16 simultaneous connections. Higher
+# shared TCP core accepts MAX_CONNS=24 simultaneous connections. Higher
 # concurrency deliberately exercises overload behavior: excess SYNs may be
-# retried while all sixteen slots are occupied.
+# retried while all twenty-four slots are occupied.
 #
 # Works against any host:port (QEMU's qemu-kvs SLIRP hostfwd, or a real
 # board over Ethernet) -- defaults match the STM32 board's netconfig.tkb.
@@ -173,7 +173,7 @@ def report(records, wall_secs: float):
               (op, len(entries), ok, errs, p50, p95, p99, pmax))
 
     # Keep transport failures separate from HTTP error responses. With the
-    # N=4 server these indicate packet loss, slot exhaustion, or recovery
+    # N=24 server these indicate packet loss, slot exhaustion, or recovery
     # failure rather than an application-level status.
     conn_errors = [err for _, _, _, err in records if err is not None]
     if conn_errors:
@@ -202,8 +202,8 @@ def main() -> int:
                               "KVS_HOST_PORT for QEMU")
     parser.add_argument("--port", type=int, default=80)
     parser.add_argument("--concurrency", type=int, default=4,
-                         help="worker threads; the server has sixteen TCP slots, "
-                              "so values above sixteen also exercise overload")
+                         help="worker threads; the server has twenty-four TCP slots, "
+                              "so values above twenty-four also exercise overload")
     parser.add_argument("--duration", type=float, default=30.0, help="seconds")
     parser.add_argument("--key-space", type=int, default=16,
                          help="distinct keys cycled through (default matches "
