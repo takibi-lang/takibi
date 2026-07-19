@@ -387,10 +387,10 @@ examples/
     semihosting_stub.S -- no-op stand-ins for examples/fatfs's semihosting extern fns on
                      this target (no ARM semihosting on real hardware)
   common_rpi3/    -- Raspberry Pi 3B (BCM2837) bare-metal HAL, JTAG-injection-only
-                     bring-up (issue #140), 59 examples ported (incl. rtc/timer,
-                     echo/irq on real interrupts, the preemptive-scheduler group,
-                     and net_echo/arp_reply/icmp_echo over a from-scratch USB host
-                     stack) -- see examples/common_rpi3/AGENTS.md.
+                     bring-up (issue #140), 62 top-level examples ported (all
+                     except fatfs: rtc/timer, real interrupts, the preemptive
+                     scheduler group, and net_echo through kvs_server over a
+                     from-scratch USB host stack) -- see its AGENTS.md.
     startup.S     -- core-0-only gate, exception vector table + rpi3_irq_entry,
                      HCR_EL2.IMO routing, inherited-interrupt quiescing, stack/BSS
                      zeroing, calls mmu_init() then main(), halts on return

@@ -48,10 +48,9 @@ USB-Ethernet class protocol). Separately, this board's only SD card
 slot is already committed to holding `config.txt`/`kernel8.img` for the
 JTAG-catch boot path (see "Out of scope: SD-card-storage examples"
 below), so `fatfs`-family testing on this board will need USB mass
-storage instead of SD -- meaning the SAME USB host stack work unblocks
-both Ethernet and storage testing here. The dedicated design pass has
-now started, scoped to Ethernet first (USB mass storage is a deliberate
-follow-on) -- see "USB host stack (Ethernet milestone)" below.
+storage instead of SD. The Ethernet half of the shared USB-host
+foundation is now complete; USB mass storage is the deliberate next
+storage milestone -- see "USB host stack (Ethernet milestone)" below.
 
 ## Out of scope: SD-card-storage examples
 
@@ -69,9 +68,9 @@ arrangement than STM32's two-independent-cards setup, and deliberately
 out of scope for this target using the SD card. Do not port these
 against the SD card, even once other examples using real
 interrupts/timers land -- fatfs-family testing on this board is
-expected to eventually use USB mass storage instead (see this
-document's own top-of-file note on Ethernet/USB being required), once
-this board has a USB host stack at all.
+expected to use USB mass storage instead. The DWC2/hub foundation now
+exists; the remaining work is USB Mass Storage Bulk-Only Transport,
+the minimal SCSI command set, and a 512-byte block-device adapter.
 
 ## USB host stack (Ethernet milestone)
 
@@ -115,8 +114,8 @@ Confirmed facts, load-bearing for every milestone below:
   DWC2 bring-up can skip (see "Milestone 1" below).
 - Ethernet test setup already exists: RPi3's Ethernet port is a
   physical point-to-point link to this devcontainer host's `enp5s0`
-  (`192.168.20.1/24`). `examples/common_rpi3/netconfig.tkb` (once it
-  exists) will use `OUR_IP = 192.168.20.2`, following
+  (`192.168.20.1/24`). `examples/common_rpi3/netconfig.tkb` uses
+  `OUR_IP = 192.168.20.2`, following
   `examples/common_stm32/netconfig.tkb`'s exact established
   point-to-point convention (STM32 uses its own dedicated NIC,
   `enp4s0`/`192.168.10.2`; QEMU uses `192.0.2.1` via SLIRP).
@@ -339,7 +338,9 @@ round-trip), split out exactly the way `hwcheck-stm32`/
 need CAP_NET_RAW + a physical cable, not just JTAG+UART, so they stay
 out of `make check`/`make allcheck`). Mirrors `run_hwtest_net_ram.sh`'s
 shape, reusing `scripts/eth_net_echo_test.py`/`eth_arp_reply_test.py`/
-`eth_icmp_echo_test.py` against `enp5s0`. Real fixes needed along the
+`eth_icmp_echo_test.py`/`eth_tcp_echo_test.py`/
+`eth_http_server_test.py`/`eth_kvs_server_test.py` against `enp5s0`.
+Real fixes needed along the
 way, all worth remembering for any future sudo+network test script in
 this repo:
 - `sudo` resets the environment by default, so any env var a test
@@ -382,11 +383,13 @@ passes two sequential requests through the host's real TCP/IP stack,
 including cold ARP resolution and the response-counter increment.
 The unchanged shared `kvs_server.tkb` passes set/get/overwrite/delete,
 parser errors, full-table/list, and tombstone-reuse tests. The three
-requested application ports are therefore complete; the separate
-`--forbid-trap` hardening pass is the next milestone step
-once everything in scope is proven end to end. Update this section (and
-HISTORY.md, and issue #140) after each further step, per this project's
-established cadence -- do not batch documentation to the end.
+requested application ports are therefore complete. Their shared
+application sources already build under `--forbid-trap` in the existing
+QEMU/STM32 rules; a future RPi3-driver hardening milestone must turn the
+flag on for the RPi3 HAL as a separate, explicit baseline-to-hardened
+pass. Update this section (and HISTORY.md, and issue #140) after each
+further step, per this project's established cadence -- do not batch
+documentation to the end.
 
 ## Hardware
 

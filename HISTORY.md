@@ -9570,3 +9570,14 @@ project process.
 
 Real-hardware result: `make hwcheck-rpi3-net` passes all six examples
 (6 tests passed, 0 failed), including every KVS test group.
+
+Session-close documentation/test audit: no compiler behavior changed, so
+`test/test_takibi.ml` needs no new unit case. The three new RPi3 application
+ports are already covered by `scripts/run_hwtest_rpi3_net.sh`, while their
+shared application logic remains covered by the existing QEMU integration
+tests in `make check`. Updated current-state documentation that still said
+59 examples, described `netconfig.tkb` as future, or said the USB host stack
+did not yet exist. Historical entries above deliberately retain their
+then-current failed-test counts and unresolved-STALL narrative; later entries
+record the resolution, so deleting those observations would lose useful
+diagnostic history rather than correct current documentation.
