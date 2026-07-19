@@ -93,15 +93,26 @@ read_until_quiet() {
     ACTIVE_READER_PID=""
 }
 
-# run_hw_test_rpi3 NAME ELF EXPECTED
+# run_hw_test_rpi3 NAME ELF EXPECTED [MAX_SECS] [STABLE_POLLS]
 #
 # Distinguishes two different failure modes rather than collapsing them
 # into one UART mismatch: (1) rpi3_jtag_load.sh itself failing (almost
-# always the MMU-state safety check refusing a still-Raspbian board --
-# actionable: power-cycle and retry) vs (2) injection succeeding but the
-# captured UART output not matching -- an actual test failure.
+# always the EL2H safety check refusing a still-Raspbian board --
+# actionable: power-cycle/scripts/rpi3_jtag_reset.sh and retry) vs
+# (2) injection succeeding but the captured UART output not matching --
+# an actual test failure.
+#
+# Optional MAX_SECS/STABLE_POLLS override the module-level
+# CAPTURE_MAX_SECS/CAPTURE_STABLE_POLLS defaults -- needed for
+# examples/rtc and examples/timer, which wait up to a real 1-second ARM
+# Generic Timer tick between two print statements (see
+# examples/common_rpi3/rtc.tkb): the default ~0.3s idle-quiet threshold
+# mistakes that in-test pause for completion and truncates the capture
+# before the second print arrives, same gotcha
+# examples/common_stm32/AGENTS.md documents for the STM32 harness.
 run_hw_test_rpi3() {
-    local name="$1" elf="$2" expected="$3"
+    local name="$1" elf="$2" expected="$3" \
+          max_secs="${4:-$CAPTURE_MAX_SECS}" stable_polls="${5:-$CAPTURE_STABLE_POLLS}"
     local tmp_drain tmp_out load_log load_status_file load_status
     tmp_drain=$(mktemp)
     tmp_out=$(mktemp)
@@ -109,7 +120,7 @@ run_hw_test_rpi3() {
     load_status_file=$(mktemp)
 
     read_until_quiet "$tmp_drain" "$DRAIN_MAX_SECS" "$DRAIN_STABLE_POLLS" 0
-    read_until_quiet "$tmp_out" "$CAPTURE_MAX_SECS" "$CAPTURE_STABLE_POLLS" 1 \
+    read_until_quiet "$tmp_out" "$max_secs" "$stable_polls" 1 \
         "\"$REPO_ROOT/scripts/rpi3_jtag_load.sh\" \"$elf\" > \"$load_log\" 2>&1; echo \$? > \"$load_status_file\""
 
     load_status=$(cat "$load_status_file" 2>/dev/null || echo 1)
@@ -208,14 +219,17 @@ run_hw_test_rpi3_stdin() {
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
 }
 
-# Mirrors RPI3_EXAMPLES + RPI3_CHECKSUM_EXAMPLES + RPI3_IRQ_EXAMPLES in
-# the Makefile -- see examples/common_rpi3/AGENTS.md for what's still
-# deliberately excluded (rtc/timer need a real timer driver;
-# preempt/semaphore/condvar/msgqueue/watchdog/rtos_demo need a full
-# preemptive scheduler on top of that; SD-card-storage examples are out
-# of scope entirely). Every .expected/.stdin fixture here is reused
-# byte-for-byte from the QEMU/STM32 suites -- uart_puts/uart_print_*
-# write identical bytes on every HAL.
+# Mirrors RPI3_EXAMPLES + RPI3_CHECKSUM_EXAMPLES + RPI3_IRQ_EXAMPLES +
+# RPI3_RTC_EXAMPLES in the Makefile -- see examples/common_rpi3/AGENTS.md
+# for what's still deliberately excluded
+# (preempt/semaphore/condvar/msgqueue/watchdog/rtos_demo need a full
+# preemptive scheduler on top of timer interrupts; SD-card-storage
+# examples are out of scope entirely). Every .expected/.stdin fixture
+# here is reused byte-for-byte from the QEMU/STM32 suites --
+# uart_puts/uart_print_* write identical bytes on every HAL, even though
+# rtc/timer's underlying time source here (the ARM Generic Timer's
+# free-running counter, not a real RTC peripheral) differs -- both
+# fixtures only ever check that time advances, never an absolute value.
 run_hw_test_rpi3 "start (rpi3)"          "$REPO_ROOT/examples/start/kernel_rpi3.elf"          "$REPO_ROOT/examples/start/start.expected"
 run_hw_test_rpi3 "hello (rpi3)"          "$REPO_ROOT/examples/hello/kernel_rpi3.elf"          "$REPO_ROOT/examples/hello/hello.expected"
 run_hw_test_rpi3 "print_int (rpi3)"      "$REPO_ROOT/examples/print_int/kernel_rpi3.elf"      "$REPO_ROOT/examples/print_int/print_int.expected"
@@ -249,6 +263,8 @@ run_hw_test_rpi3 "sizeof_offsetof (rpi3)" "$REPO_ROOT/examples/sizeof_offsetof/k
 run_hw_test_rpi3 "inet_checksum (rpi3)"  "$REPO_ROOT/examples/inet_checksum/kernel_rpi3.elf"  "$REPO_ROOT/examples/inet_checksum/inet_checksum.expected"
 run_hw_test_rpi3 "ip_parse (rpi3)"       "$REPO_ROOT/examples/ip_parse/kernel_rpi3.elf"       "$REPO_ROOT/examples/ip_parse/ip_parse.expected"
 run_hw_test_rpi3 "tcp_parse (rpi3)"      "$REPO_ROOT/examples/tcp_parse/kernel_rpi3.elf"      "$REPO_ROOT/examples/tcp_parse/tcp_parse.expected"
+run_hw_test_rpi3 "rtc (rpi3)"            "$REPO_ROOT/examples/rtc/kernel_rpi3.elf"            "$REPO_ROOT/examples/rtc/rtc.expected"       5 30
+run_hw_test_rpi3 "timer (rpi3)"          "$REPO_ROOT/examples/timer/kernel_rpi3.elf"          "$REPO_ROOT/examples/timer/timer.expected"   5 30
 run_hw_test_rpi3_stdin "echo (rpi3)" "$REPO_ROOT/examples/echo/kernel_rpi3.elf" \
     "$REPO_ROOT/examples/echo/echo.expected" "$REPO_ROOT/examples/echo/echo.stdin"
 run_hw_test_rpi3_stdin "irq (rpi3)"  "$REPO_ROOT/examples/irq/kernel_rpi3.elf" \

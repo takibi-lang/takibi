@@ -1,0 +1,38 @@
+// Raspberry Pi 3B (BCM2837) "RTC" HAL, over the ARM Generic Timer's
+// free-running physical counter (CNTPCT_EL0/CNTFRQ_EL0) rather than a
+// real RTC peripheral -- this board has no battery-backed real-time
+// clock at all (a well-known Raspberry Pi hardware limitation; even
+// Raspbian itself has no wall-clock time until it fetches one over the
+// network at boot). Same public signatures as examples/common_qemu/
+// rtc.tkb and examples/common_stm32/rtc.tkb so examples/rtc/rtc.tkb and
+// examples/timer/timer.tkb are portable unchanged, but
+// rtc_read_seconds() here means "seconds since this core started
+// counting" (effectively "seconds since boot", since the counter is
+// running by the time any code -- ours or Linux's -- gets control), not
+// wall-clock time. Agreed tradeoff (see GitHub issue #140): both
+// examples this HAL serves only ever check that time advances, never
+// an absolute value, so this substitution satisfies their actual
+// behavior even though the semantics genuinely differ from a real RTC.
+//
+// CNTPCT_EL0 is a 64-bit free-running counter with no separate enable
+// step of its own (unlike CNTP_CTL_EL0, the one-shot comparator
+// examples/common_rpi3/uart.tkb's future timer-interrupt work would
+// use instead) -- it is already counting by the time any bare-metal
+// code here gets control, so rtc_init() has nothing to do, matching
+// examples/common_qemu/rtc.tkb's own no-op rtc_init() (QEMU's PL031
+// needs no setup either, for an unrelated reason: it's a real modeled
+// RTC that's simply always running).
+
+extern fn read_cntfrq() -> i64;
+extern fn read_cntpct() -> i64;
+
+fn rtc_init() {
+}
+
+fn rtc_is_running() -> bool {
+    return read_cntfrq() != 0;
+}
+
+fn rtc_read_seconds() -> i32 {
+    return (read_cntpct() / read_cntfrq()) as i32;
+}

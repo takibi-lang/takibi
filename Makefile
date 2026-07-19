@@ -1252,6 +1252,9 @@ COMMON_RPI3_LINK_LD      := $(COMMON_RPI3_DIR)/link.ld
 COMMON_RPI3_UART         := $(COMMON_RPI3_DIR)/uart.tkb
 COMMON_RPI3_PRINT        := $(COMMON_RPI3_DIR)/print.tkb
 COMMON_RPI3_INTC         := $(COMMON_RPI3_DIR)/intc.tkb
+COMMON_RPI3_RTC          := $(COMMON_RPI3_DIR)/rtc.tkb
+COMMON_RPI3_TIMER_ASM_S  := $(COMMON_RPI3_DIR)/timer_asm.S
+COMMON_RPI3_TIMER_ASM_O  := $(COMMON_RPI3_DIR)/timer_asm.o
 COMMON_RPI3_JTAG_STUB_S  := $(COMMON_RPI3_DIR)/jtag_stub.S
 COMMON_RPI3_JTAG_STUB_O  := $(COMMON_RPI3_DIR)/jtag_stub.o
 COMMON_RPI3_JTAG_STUB_LD := $(COMMON_RPI3_DIR)/jtag_stub.ld
@@ -1260,6 +1263,9 @@ $(COMMON_RPI3_STARTUP_O): $(COMMON_RPI3_STARTUP_S)
 	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI3_MMU_O): $(COMMON_RPI3_MMU_S)
+	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
+
+$(COMMON_RPI3_TIMER_ASM_O): $(COMMON_RPI3_TIMER_ASM_S)
 	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI3_JTAG_STUB_O): $(COMMON_RPI3_JTAG_STUB_S)
@@ -1306,12 +1312,33 @@ RPI3_IRQ_OBJS      := $(foreach e,$(RPI3_IRQ_EXAMPLES),examples/$(e)/$(e)_rpi3.o
 $(RPI3_IRQ_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_INTC) $(COMMON_GIC_REGS) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_INTC) $(COMMON_GIC_REGS) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
 
-RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES)
-RPI3_KERNELS  := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
+# rtc.tkb/timer.tkb need read_cntfrq()/read_cntpct() (COMMON_RPI3_TIMER_ASM_O,
+# an assembly stub -- mrs cannot be called directly from takibi), so they
+# get their own link rule below (COMMON_RPI3_TIMER_ASM_O is an EXTRA link
+# input, not one every RPi3 example needs) -- same reasoning as QEMU's own
+# TIMER_KERNELS/GENERIC_KERNELS split further up this file. This board has
+# no RTC peripheral at all; rtc.tkb reimplements the shared rtc_* HAL on
+# the ARM Generic Timer's free-running counter instead (seconds-since-boot,
+# not wall-clock -- see rtc.tkb's own header comment for the full
+# rationale, agreed in GitHub issue #140).
+RPI3_RTC_EXAMPLES := rtc timer
+RPI3_RTC_OBJS     := $(foreach e,$(RPI3_RTC_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
-$(RPI3_KERNELS): examples/%/kernel_rpi3.elf: \
+$(RPI3_RTC_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_RTC) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_RTC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+
+RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES)
+RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
+RPI3_RTC_KERNELS   := $(foreach e,$(RPI3_RTC_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
+RPI3_GENERIC_KERNELS := $(filter-out $(RPI3_RTC_KERNELS),$(RPI3_KERNELS))
+
+$(RPI3_GENERIC_KERNELS): examples/%/kernel_rpi3.elf: \
     $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
 	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) examples/$*/$*_rpi3.o -o $@
+
+$(RPI3_RTC_KERNELS): examples/%/kernel_rpi3.elf: \
+    $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_TIMER_ASM_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
+	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_TIMER_ASM_O) examples/$*/$*_rpi3.o -o $@
 
 ## hwcheck-rpi3: run Raspberry Pi 3B (BCM2837) hardware integration tests
 ## (requires a real Raspberry Pi 3B connected via JTAG + UART -- see

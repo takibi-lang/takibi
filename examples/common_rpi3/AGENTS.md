@@ -1,21 +1,19 @@
 # Raspberry Pi 3B (BCM2837) Bare-Metal Bring-Up
 
-GitHub issue #140. Status: 35 examples ported and passing `make
+GitHub issue #140. Status: 37 examples ported and passing `make
 hwcheck-rpi3` (`start`/`hello`/`print_int`/`print_hex`/`print_ptr`/
 `mem`/`array`/`fizzbuzz`/`fibonacci`/`bubblesort`/`ringbuf`/`callstack`/
 `crc8`/`djb2`/`bump`/`scheduler`/`struct`/`struct_refined`/`refined`/
 `narrow`/`for`/`loop`/`enum`/`nonexhaustive`/`bitops`/`align`/`packed`/
 `struct_align`/`const_global`/`sizeof_offsetof`/`inet_checksum`/
-`ip_parse`/`tcp_parse`/`echo`/`irq` -- `hwcheck-stm32`'s "plain compute"
-set plus the two UART-RX-interrupt examples, running on real BCM2837
-interrupts via `intc.tkb`, see "Interrupts" below). This is a JTAG-only
-bring-up: nothing here writes to the SD card as a real `kernel8.img`;
-see "Why JTAG injection, not an SD card kernel" below. Not yet ported:
-rtc/timer (agreed plan: reimplement the `rtc_*` HAL on the ARM Generic
-Timer's CNTPCT/CNTFRQ counter, since this board has no RTC peripheral
-at all -- "seconds since boot" semantics instead of wall-clock) and
-preempt/semaphore/condvar/msgqueue/watchdog/rtos_demo (need timer
-interrupts plus task-switching support in `rpi3_irq_entry`, a larger
+`ip_parse`/`tcp_parse`/`rtc`/`timer`/`echo`/`irq` -- `hwcheck-stm32`'s
+"plain compute" set plus `rtc`/`timer` (see "RTC" below) plus the two
+UART-RX-interrupt examples (see "Interrupts" below)). This is a
+JTAG-only bring-up: nothing here writes to the SD card as a real
+`kernel8.img`; see "Why JTAG injection, not an SD card kernel" below.
+Not yet ported: preempt/semaphore/condvar/msgqueue/watchdog/rtos_demo
+(need timer *interrupts* -- distinct from `rtc.tkb`'s polled counter
+read below -- plus task-switching support in `rpi3_irq_entry`, a larger
 follow-on).
 
 ## Out of scope: SD-card-storage examples
@@ -339,6 +337,32 @@ group, with direct `/dev/bus/usb` access via this project's
 `.devcontainer/devcontainer.json` `--device-cgroup-rule`) has strictly
 more effective access to the USB device than `sudo` does in this
 specific container, and is what every command above assumes.
+
+## RTC (`rtc.tkb`) -- no real RTC peripheral on this board
+
+`examples/rtc/rtc.tkb` and `examples/timer/timer.tkb` are ported onto
+the ARM Generic Timer's free-running physical counter
+(`CNTPCT_EL0`/`CNTFRQ_EL0`, read via `examples/common_rpi3/
+timer_asm.S`'s `read_cntpct()`/`read_cntfrq()` stubs -- `mrs` cannot be
+called directly from takibi) rather than a real RTC. Raspberry Pi 3B has
+no battery-backed real-time clock at all; `rtc_read_seconds()` here
+means "seconds since this core started counting" (effectively "seconds
+since boot"), not wall-clock time. Agreed tradeoff (issue #140): both
+examples only ever check that time *advances*, never an absolute value,
+so this substitution satisfies their actual behavior even though the
+semantics genuinely differ from QEMU's PL031/STM32's real RTC
+peripheral. `rtc_init()` is a no-op -- the counter needs no enable step
+of its own, already running by the time any code gets control.
+
+`scripts/run_hwtest_rpi3.sh`'s `run_hw_test_rpi3` needed the same fix
+`examples/common_stm32/AGENTS.md` documents for its own harness: these
+two examples pause for a real 1-second tick *between* two print
+statements, and the default ~0.3s idle-quiet capture threshold mistook
+that in-test pause for the test finishing, truncating the capture
+before the second line ever arrived. Fixed with optional
+`MAX_SECS`/`STABLE_POLLS` overrides on `run_hw_test_rpi3` (5s / 30
+polls = 1.5s quiet threshold for these two call sites only, comfortably
+longer than the 1s pause without materially slowing every other test).
 
 ## Interrupts (`intc.tkb`, `startup.S`'s `rpi3_irq_entry`)
 

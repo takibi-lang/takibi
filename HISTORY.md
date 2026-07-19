@@ -8850,12 +8850,45 @@ hardware) and like `stress-stm32-kvs-server-sdcard-rtos` (needs
 board-state preconditions `make check`/`make allcheck` cannot
 guarantee) -- not part of either aggregate target.
 
-Not yet ported: `rtc`/`timer` (this board has no RTC peripheral at all;
-agreed plan is to reimplement the shared `rtc_*` HAL on the ARM Generic
-Timer's `CNTPCT_EL0`/`CNTFRQ_EL0` counter, giving "seconds since boot"
-semantics instead of wall-clock time, rather than excluding these two
-examples the way SD-card-storage examples are excluded outright) and the
-full preemptive-scheduler group (`preempt`/`semaphore`/`condvar`/
-`msgqueue`/`watchdog`/`rtos_demo`), which needs timer interrupts plus
-task-switching support added to `rpi3_irq_entry` (currently always
-resumes the same context, unlike QEMU's `irq_entry`).
+Not yet ported: the full preemptive-scheduler group
+(`preempt`/`semaphore`/`condvar`/`msgqueue`/`watchdog`/`rtos_demo`),
+which needs timer *interrupts* plus task-switching support added to
+`rpi3_irq_entry` (currently always resumes the same context, unlike
+QEMU's `irq_entry`).
+
+**2026-07-19 follow-up: `rtc`/`timer` (37 examples total).** This board
+has no RTC peripheral at all, so `examples/common_rpi3/rtc.tkb`
+reimplements the shared `rtc_*` HAL (same signatures as
+`examples/common_qemu/rtc.tkb`/`examples/common_stm32/rtc.tkb`) on the
+ARM Generic Timer's free-running physical counter instead
+(`CNTPCT_EL0`/`CNTFRQ_EL0`, via a new `examples/common_rpi3/
+timer_asm.S`'s `read_cntpct()`/`read_cntfrq()` stubs -- `mrs` cannot be
+called directly from takibi, same reason
+`examples/common_qemu/timer_asm.S` exists) -- "seconds since boot"
+semantics rather than wall-clock time. Agreed as the right substitution
+rather than excluding these two examples outright (the way SD-card-
+storage examples are excluded): both `examples/rtc/rtc.tkb` and
+`examples/timer/timer.tkb` only ever check that time *advances*, never
+an absolute value, so the difference in semantics does not change
+whether their existing, unmodified `.expected` fixtures still hold.
+`rtc_init()` is a no-op, matching QEMU's own no-op (for an unrelated
+reason: QEMU's modeled PL031 needs no setup either) -- the counter has
+no separate enable step, already running by the time any code gets
+control.
+
+One test-harness fix needed: both examples pause for a real 1-second
+tick between two `uart_puts` calls, and `scripts/run_hwtest_rpi3.sh`'s
+default ~0.3s idle-quiet capture threshold mistook that in-test pause
+for the test finishing, truncating the capture before the second line
+ever arrived -- the exact gotcha `examples/common_stm32/AGENTS.md`
+already documents for the STM32 harness, hit here for the first time
+since every RPi3 example ported before this one produced all its output
+in one uninterrupted burst. Fixed the same way: `run_hw_test_rpi3`
+gained optional `MAX_SECS`/`STABLE_POLLS` overrides (5s / 30 polls =
+1.5s quiet threshold for these two call sites only).
+
+Ported without any new root-cause surprises -- confirmed 37/37 passing
+`make hwcheck-rpi3` on the first full run after wiring `rtc`/`timer` in
+(the MMU/interrupt-inherited-state lessons from the entry above all
+still held: `read_cntpct`/`read_cntfrq` are pure system-register reads,
+no new MMIO mapping or peripheral-state quiescing needed).
