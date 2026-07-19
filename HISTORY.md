@@ -8600,3 +8600,262 @@ Because the c4 stress workload is useful but intentionally too unstable for
 firmware and runs `scripts/kvs_stress.py` with the practical issue #135
 defaults (concurrency 4, fixed key, 30s). The target is documented in
 `README.md`, but no aggregate check target depends on it.
+
+**2026-07-18: Raspberry Pi 3B bring-up begins (issue #140).** A third
+hardware target, alongside QEMU/AArch64 and STM32F746G-DISCOVERY. Full
+technical reference (register addresses, build commands, the JTAG
+injection/reset workflow) lives in `examples/common_rpi3/AGENTS.md`,
+kept current rather than duplicated here; this entry is the chronological
+narrative of how it was reached and the root causes found along the way.
+
+*Hardware access.* JTAG (Olimex ARM-USB-TINY-H) and a standalone
+Prolific USB-serial UART cable are both visible from this devcontainer.
+Two environment-specific traps found early:
+- **`sudo` breaks JTAG inside this devcontainer.** Counter-intuitively,
+  root via `sudo` has Docker's default *reduced* capability set
+  (confirmed via `/proc/self/status` `CapEff`, missing
+  `CAP_SYS_ADMIN`/`CAP_SYS_RAWIO` among others), which corrupts DAP-level
+  JTAG transactions ("Invalid ACK (7)") even though the simpler IDCODE
+  scan still succeeds. The unprivileged `vscode` user (in the `plugdev`
+  group, with `/dev/bus/usb` access via this project's
+  `.devcontainer/devcontainer.json` `--device-cgroup-rule`) has strictly
+  *more* effective access than `sudo` does here.
+- **`/dev/serial/by-id` naming, not device numbering, is the only stable
+  way to tell the JTAG probe's own auxiliary UART channel apart from the
+  board's real console cable** -- USB enumeration order for
+  `ttyUSB0`/`ttyUSB1` is not stable across replug.
+  `scripts/rpi_uart_dev.sh` resolves this by scanning
+  `/dev-host/serial/by-id/usb-*` and excluding anything whose label
+  contains "JTAG" (a plain ttyUSB can never carry actual JTAG signaling
+  anyway -- JTAG needs 4 lines, a ttyUSB exposes 2 -- so this is a naming
+  heuristic, not a protocol distinction).
+
+*UART0 vs Bluetooth.* On Raspberry Pi 3B, UART0 (PL011, the peripheral
+`examples/common_rpi3/uart.tkb` drives) is internally routed to the
+onboard Bluetooth module by default -- correct GPIO14/15 ALT0 pinmux is
+necessary but not sufficient. Confirmed empirically: with the overlay
+missing, every UART0 register read back exactly as `uart_init()` had
+written it (including FR's TXFE=1, transmit-complete) yet nothing
+reached the header pins. Fixed with `config.txt`'s
+`dtoverlay=disable-bt`, applied by the GPU firmware while processing
+`config.txt`, before it jumps to `kernel8.img` -- confirmed to take
+effect for a bare-metal image exactly as it would for Linux, even
+though nothing here ever parses a device tree.
+
+*Deliberately not vendoring Raspberry Pi firmware.* Considered and
+rejected: bundling `bootcode.bin`/`start.elf`/`fixup.dat`/
+`overlays/disable-bt.dtbo` into this repo for a fully from-scratch
+"format an SD card and copy this directory" bring-up path. These are
+closed Broadcom/Raspberry Pi Foundation binaries that get periodic
+upstream updates; `scripts/rpi3_prepare_sdcard.sh` instead overlays only
+`kernel8.img` plus two `config.txt` lines onto an SD card the user has
+already `dd`'d from an official Raspberry Pi OS image, so firmware
+updates are picked up by re-`dd`ing upstream rather than by this project
+tracking a vendored copy that goes stale.
+
+*The JTAG-injection model.* Unlike STM32's `scripts/run_hwtest_ram.sh`,
+which uses a genuine hardware reset (`reset halt`) to reach a known-clean
+state before every test, this board's 6-pin GPIO JTAG header carries no
+system reset line, so OpenOCD's `reset` cannot restart the GPU firmware's
+boot sequence. The workaround: `examples/common_rpi3/jtag_stub.S`, an
+8-byte `wfe`-loop image, is flashed as the SD card's `kernel8.img` in
+place of Raspbian. On power-up the GPU firmware still does its own job
+(DRAM/clock init), then jumps to this stub instead of Linux, parking core
+0 in a clean, inspectable state. `scripts/rpi3_jtag_load.sh` then
+`halt`s, verifies the catch is safe, `load_image`s the real payload
+directly into RAM over the debug port, pokes PC/SP from the ELF's own
+symbols, and `resume`s.
+
+The safety check evolved twice as the target grew. It started as a
+narrow PC-range check against the stub's own address. Once the MMU work
+below made every payload leave the core in a clean state (not just the
+stub), that check became "does the halted core report MMU off" instead,
+letting a *previous payload's own halt loop* be just as safe to catch as
+the stub -- meaning one boot covers any number of subsequent injections,
+which is what makes `scripts/run_hwtest_rpi3.sh` (`make hwcheck-rpi3`)
+practical to run as a real suite. Once the interrupt work further below
+made every payload enable the MMU too (see the MMU entry), "MMU off"
+stopped distinguishing "one of ours" from "still-running Raspbian" (both
+now MMU-on), so the check changed a second time to the halted core's
+*exception level*: Raspbian always runs Linux at EL1H, every bare-metal
+payload here always runs at EL2H (the GPU firmware/ARM Trusted Firmware
+hands off at EL2 and nothing here ever changes level), which is the
+signal actually used today.
+
+*JTAG-triggered full chip reset, no physical access needed*
+(`scripts/rpi3_jtag_reset.sh`). BCM2837 has a watchdog-based software
+reset (`PM_RSTC` at `0x3F10001C`, `PM_WDOG` at `0x3F100024`, gated by
+the `0x5A000000` password magic in the top byte of any write -- the same
+mechanism Linux's `bcm2835_wdt` driver and U-Boot's `bcm2835` reset
+driver use for `reboot`), poked directly via OpenOCD `mww`. The
+triggering OpenOCD session almost always ends with "Invalid ACK"/"JTAG-DP
+STICKY ERROR" (the DAP losing a stable connection to a chip actively
+resetting underneath it) -- confirmed to correlate with success, not
+failure; the script ignores that exit status and polls (reconnect + halt
++ read PC, up to ~15s -- full SD-card boot takes noticeably longer than
+the reset itself) until the board responds again, confirming it landed
+back at the spin stub before reporting success. This turns "the board
+ended up in a state the safety check refuses" from "ask a human to
+unplug/replug power" into a ~4-second unattended recovery, and is now
+`rpi3_jtag_load.sh`'s own first suggestion in its refusal message.
+
+*Porting `hwcheck-stm32`'s plain-compute example set (33 examples).*
+Generic `RPI3_EXAMPLES`/`RPI3_CHECKSUM_EXAMPLES` pattern rules mirror
+`STM32_OBJS`/`STM32_EXAMPLES`. One real bug found along the way:
+`examples/packed` and `examples/inet_checksum` both faulted
+(`ESR_EL2 0x96000061` -- EC 0x25 "Data Abort, same EL", DFSC "Alignment
+fault") on a store the LLVM backend itself synthesized by merging
+several adjacent 1-byte source-level writes into one wide, unaligned
+one -- invisible at the `.tkb` source level (both `examples/packed`'s
+own intentionally-unaligned field access AND
+`examples/common/netutil.tkb`'s deliberately byte-safe `read_u16be`
+hit this, the latter for a reason that has nothing to do with its own
+careful byte-at-a-time design). Root cause: AArch64 architecturally
+treats *all* data accesses as Device-nGnRnE memory whenever the stage 1
+MMU is disabled, and Device memory enforces natural alignment
+unconditionally, independent of `SCTLR_ELx.A`. This is a general
+LLVM-backend phenomenon -- C/Clang, Rust, Zig are equally exposed under
+the same "MMU off" condition -- not a takibi-specific bug, and is why
+essentially every real-world bare-metal AArch64 project enables the MMU
+during early boot; this project simply had not needed to yet, since
+QEMU's TCG emulation does not enforce the same rule and STM32/Cortex-M
+has no equivalent restriction at all.
+
+`examples/common_rpi3/mmu.S` now sets up a minimal 2-level EL2 identity
+map (confirmed against ARM's own TCR_EL2 register reference for the two
+RES1 bits, and cross-checked against public reference MMU-setup code)
+before anything else runs. It deliberately enables the MMU
+(`SCTLR_EL2.M`) but leaves the D-cache and I-cache off -- found
+necessary, not stylistic: `rpi3_jtag_load.sh`'s `load_image` writes each
+payload directly into physical RAM over the debug port, bypassing the
+CPU's caches like a DMA write. With caching on, this produced silent
+data corruption confirmed twice over -- first, a batch run where only
+the very first example passed and every following one produced UART
+output that looked like raw instruction/data bytes leaking out (not a
+clean hang or fault; `ESR_EL2` on inspection turned out to be *stale*,
+left over from an earlier unrelated fault -- the affected examples had
+actually run to completion, just computed/transmitted wrong data),
+traced to `SCTLR_EL2` being inherited state like everything else in this
+entry, so an `orr`-only enable sequence only ever added the M bit on top
+of whatever C/I state a previous payload's own `mmu_init` had left set,
+never clearing it; second, even after switching to explicit `bic`,
+leftover state from an unrelated prior manual test (built before that
+fix existed) still corrupted a run, consistent with dirty
+(written-back-pending) D-cache lines from that earlier occupant getting
+evicted and overwriting freshly-loaded memory later, not just serving
+stale reads. Confirmed resolved, definitively, by resetting the board to
+a genuinely clean state and re-running the full suite from there: 33/33
+passed. With both caches off, `load_image`'s direct-to-RAM writes and
+the core's own subsequent fetches/loads are trivially coherent, matching
+how a genuine cold boot's first-ever execution always is by
+construction -- treated as the correct tradeoff for this project's
+specific re-injection-heavy workflow going forward, not a temporary
+shortcut.
+
+A second, unrelated flake surfaced during this same MMU work:
+`examples/packed`'s `.expected` fixture assumes a struct's padding byte
+reads as `0x00`, true whenever RAM starts genuinely zeroed (QEMU's cold
+boot, STM32's own reset-adjacent behavior) but not under JTAG
+re-injection, which reuses whatever RAM the *previous* example left
+behind -- the padding byte sat at a stack address a prior run's deeper
+call/IRQ frames had scribbled on, observed failing nondeterministically
+with different stray values (`0x07`/`0x17`/`0x9c`/`0xa2`) across runs.
+Fixed by extending `startup.S`'s zero loop from `__bss_end` through
+`stack_top` (link.ld places `.stack` directly after `.bss`, so one loop
+covers both, and it is safe at that point: SP was just set to
+`stack_top` and nothing has been pushed yet) -- restores the same
+deterministic all-zero initial state every other target's run
+effectively starts from, on every injection, not just the first.
+
+*Interrupts: `examples/echo`/`examples/irq` on real BCM2837 hardware
+(35 examples total).* BCM2837's interrupt fabric is a 2-level cascade
+unlike either existing target: the per-core "ARM Local"/QA7 block at
+`0x40000000` (confirmed against the Raspberry Pi Foundation's own
+"Quad-A7 control" datasheet, rev 3.4 -- GPU IRQ routing at offset
+`0x0C`, per-core IRQ source at `0x60` + `4*core`) cascading from the
+legacy 72-source VC ("armctrl") controller at `0x3F00B200` (bank offsets
+confirmed against Linux's `drivers/irqchip/irq-bcm2835.c`; UART0 =
+global IRQ 57 = bit 25 of pending_2/Enable_IRQs_2). The new
+`examples/common_rpi3/intc.tkb` provides the uniformly-named
+`irq_uart_rx_setup()`/`irq_uart_rx_unmask()` (same contract as
+`examples/common_qemu/gic.tkb`/`examples/common_stm32/nvic.tkb`) and
+vectors UART RX straight to a dedicated handler
+(`examples/common_rpi3/uart.tkb`'s `uart_irq_handler`, the STM32
+`USART1_IRQHandler` pattern) rather than QEMU's software-dispatch-by-ID
+`irq_dispatch` -- deliberately, since `examples/echo/echo.tkb`/
+`examples/irq/irq.tkb` define that exact name themselves with GICv2-
+specific logic (`gic.cpu_iar`/`gic.cpu_eoir`) that has no BCM2837
+equivalent; the new dispatch routine is named `rpi3_irq_dispatch`
+instead, specifically to avoid colliding with it, so both shared files
+needed zero changes (their own `irq_dispatch` stays dead code here,
+exactly as it already is on STM32).
+
+Three more root causes, all further variations of the same "JTAG
+re-injection inherits state a genuine reset would clear" theme that
+runs through this whole entry:
+- **`HCR_EL2.IMO` (and FMO) must be set explicitly.** With IMO=0 the
+  architecture routes physical IRQs to EL1, and an interrupt targeting a
+  lower EL than the one currently executing is implicitly masked no
+  matter what `PSTATE.I` says. Diagnosed from a full contradiction: after
+  sending UART input, `UART0_MIS` showed the RX interrupt asserted, the
+  VC controller's `pending_2` showed UART0's bit set, GPU routing pointed
+  at core 0, `DAIF.I` was clear -- every observable layer said "pending"
+  while the core never vectored, the exact signature of this rule. The
+  GPU firmware leaves IMO=0 because Linux takes its own interrupts at
+  EL1; code that stays at EL2 throughout, as everything in
+  `examples/common_rpi3/` does, must set it itself, on every run (again:
+  inherited, not reset, state).
+- **Inherited peripheral-interrupt state must be quiesced *before*
+  unmasking `PSTATE.I`.** The very first run after fixing IMO took out
+  the entire suite -- all 35 examples, including the 33 that never touch
+  interrupts, produced empty output. A previous run's still-enabled,
+  still-asserted level-triggered UART interrupt fired the instant
+  `DAIF.I` cleared; for the 33 examples whose (weak, no-op) dispatch
+  never acknowledges it, that single stale interrupt re-fires forever --
+  an interrupt storm indistinguishable, from the UART side, from a
+  silent hang. Fixed by having `startup.S` mask `UART0_IMSC` and write
+  all-ones to the VC controller's three Disable-bank registers
+  immediately before `DAIFClr` (which also moved to after MMU setup, so
+  these MMIO writes go through the same Device mapping normal driver
+  code uses), and by having `uart_init()` drain any stale unread RX byte
+  and clear PL011's ICR for the same inherited-state reason.
+- **A 2MB block descriptor's output-address field holds the absolute
+  physical block base, not an offset relative to what the table
+  happens to cover.** The QA7/ARM-local mapping's block descriptor was
+  first written as attributes-only (output address left at 0), which
+  silently identity-mapped VA `0x40000000` onto physical RAM at address
+  0 instead of the real QA7 register block -- every `intc.tkb` register
+  read landed in the GPU firmware's own `armstub8` boot code. Diagnosed
+  by recognizing the "register value" read back from what should have
+  been the Core0 IRQ source register (`0xd51e4020`) as an
+  `msr elr_el3, x0` instruction -- EL3 stub code, in an image that
+  contains no EL3 instructions of its own, which was the tell that the
+  read was landing somewhere entirely wrong rather than returning a
+  plausible-but-incorrect bitmask. The GPU-IRQ-routing write from the
+  same mapping bug was equally ineffective and went unnoticed on its own
+  only because the QA7 block's reset default already routes the GPU IRQ
+  to core 0.
+
+`scripts/run_hwtest_rpi3.sh` gained `run_hw_test_rpi3_stdin` (mirroring
+`scripts/run_hwtest_ram.sh`'s `run_hw_test_ram_stdin`: wait for the
+first output byte, then write the example's `.stdin` fixture to the
+serial port) to exercise `echo`/`irq` end to end, reusing the existing
+QEMU/STM32 `.expected`/`.stdin` fixtures unchanged.
+
+Renamed `hwcheck`/`hwcheck-net` to `hwcheck-stm32`/`hwcheck-stm32-net`
+in the same pass this target was added (the old names predated a second
+hardware target and no longer made sense once one existed) and added
+`hwcheck-rpi3`, opt-in like `hwcheck-stm32` itself (needs physical
+hardware) and like `stress-stm32-kvs-server-sdcard-rtos` (needs
+board-state preconditions `make check`/`make allcheck` cannot
+guarantee) -- not part of either aggregate target.
+
+Not yet ported: `rtc`/`timer` (this board has no RTC peripheral at all;
+agreed plan is to reimplement the shared `rtc_*` HAL on the ARM Generic
+Timer's `CNTPCT_EL0`/`CNTFRQ_EL0` counter, giving "seconds since boot"
+semantics instead of wall-clock time, rather than excluding these two
+examples the way SD-card-storage examples are excluded outright) and the
+full preemptive-scheduler group (`preempt`/`semaphore`/`condvar`/
+`msgqueue`/`watchdog`/`rtos_demo`), which needs timer interrupts plus
+task-switching support added to `rpi3_irq_entry` (currently always
+resumes the same context, unlike QEMU's `irq_entry`).
