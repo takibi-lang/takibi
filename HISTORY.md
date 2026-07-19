@@ -9528,3 +9528,19 @@ real future endpoint STALL, but no longer fires as a workaround for
 this bug. `tcp_echo`/`http_server`/`kvs_server` are now unblocked; they
 remain a separate follow-on port-and-hardware-test step before this
 milestone's eventual `--forbid-trap` hardening pass.
+
+Milestone 7, part 4: `tcp_echo` ported to Raspberry Pi 3B. The example
+itself remains byte-for-byte shared: adding it to `RPI3_NET_EXAMPLES`
+was sufficient to compile and link it against the existing RPi3 USB
+Ethernet HAL. `scripts/eth_tcp_echo_test.py` previously hardcoded the
+STM32 subnet and MAC, so it now accepts the same `ETH_TEST_SUBNET` and
+`ETH_TEST_MAC` overrides already used by the ARP/ICMP hardware tests,
+while retaining the STM32 values as defaults. The RPi3 network harness
+now runs its complete rejection/options/handshake/data-echo/close/
+reconnect sequence over the physical LAN9514 link. `http_server` and
+`kvs_server` remain the next two sequential ports before this milestone's
+final hardening pass.
+
+Real-hardware result: `make hwcheck-rpi3-net` passes all four examples,
+including every `tcp_echo` sub-check and all six `net_echo` frame sizes
+(4 tests passed, 0 failed).

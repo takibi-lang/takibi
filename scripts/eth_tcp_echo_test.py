@@ -21,6 +21,8 @@
 #
 # Needs CAP_NET_RAW (run via sudo, or `make hwcheck-net` which already does)
 # and ETH_TEST_IFACE pointed at the wired interface (default enp4s0).
+# ETH_TEST_SUBNET/ETH_TEST_MAC optionally select another target while
+# retaining STM32's existing defaults (used by the Raspberry Pi 3 port).
 #
 # Exit code only (0 = pass, 1 = fail).
 
@@ -32,9 +34,10 @@ import time
 
 IFACE = os.environ.get("ETH_TEST_IFACE", "enp4s0")
 
-CLIENT_IP = bytes([192, 168, 10, 55])
-SERVER_MAC = bytes([0x00, 0x80, 0xE1, 0x00, 0x00, 0x00])  # must match netconfig.tkb's OUR_MAC
-SERVER_IP = bytes([192, 168, 10, 2])                       # must match netconfig.tkb's OUR_IP
+SUBNET = [int(part) for part in os.environ.get("ETH_TEST_SUBNET", "192.168.10").split(".")]
+SERVER_MAC = bytes.fromhex(os.environ.get("ETH_TEST_MAC", "00:80:e1:00:00:00").replace(":", ""))
+CLIENT_IP = bytes(SUBNET + [55])
+SERVER_IP = bytes(SUBNET + [2])
 SERVER_PORT = 7                                            # must match tcp_echo_stm32.tkb's TCP_ECHO_PORT
 
 RETRIES = 20

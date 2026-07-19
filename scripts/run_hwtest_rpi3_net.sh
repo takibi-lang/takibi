@@ -105,6 +105,7 @@ run_rpi3_net_test() {
 run_rpi3_net_test "net_echo (rpi3)"   "$REPO_ROOT/examples/net_echo/kernel_rpi3.elf"   "$REPO_ROOT/scripts/eth_net_echo_test.py"
 run_rpi3_net_test "arp_reply (rpi3)"  "$REPO_ROOT/examples/arp_reply/kernel_rpi3.elf"  "$REPO_ROOT/scripts/eth_arp_reply_test.py"
 run_rpi3_net_test "icmp_echo (rpi3)"  "$REPO_ROOT/examples/icmp_echo/kernel_rpi3.elf"  "$REPO_ROOT/scripts/eth_icmp_echo_test.py"
+run_rpi3_net_test "tcp_echo (rpi3)"   "$REPO_ROOT/examples/tcp_echo/kernel_rpi3.elf"   "$REPO_ROOT/scripts/eth_tcp_echo_test.py"
 
 echo ""
 echo "rpi3 network hardware tests: $PASS passed, $FAIL failed"
