@@ -37,8 +37,9 @@ process rules that apply everywhere.
   cache maintenance, indexed-owner creation, and packet processing remain in normal context. The erased
   affine `NetRxCanAcquire` permission enforces the current one-frame-in-flight policy; the acquired
   descriptor owner is linear and must be returned on every path. TX start consumes that owner and
-  returns a linear in-flight owner; completion consumes it only after DMA releases the exact TX slot,
-  re-posts the RX descriptor, and restores the acquisition permission.
+  returns a linear in-flight owner after copying to a dedicated TX buffer and re-posting the RX
+  descriptor; completion consumes the in-flight owner only after DMA releases the exact TX slot and
+  restores the acquisition permission.
 
   **RX burst capacity and suspended-DMA recovery (issue #135 follow-up)**: the RX ring has 56
   descriptors, allocated statically at link time. Twenty-four concurrent TCP clients can produce a

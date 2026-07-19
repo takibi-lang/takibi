@@ -900,17 +900,19 @@ can mint the initial permission. Failed device discovery or link setup leaves
 the flag clear and may be retried. Concurrent initialization is not guaranteed
 without a future atomic/lock invariant.
 
-`net_transmit` consumes the RX owner, derives the in-place reply buffer from
-its private descriptor index, starts DMA, and returns immediately with a
-distinct `NetTxInFlight[desc]` owner. A caller can no longer satisfy the API
-with an unrelated raw pointer or release the RX descriptor while TX DMA may
-still read it. `net_tx_complete` consumes the in-flight owner, waits for the
-retained TX descriptor, re-posts the RX descriptor, and restores the
-acquisition permission. Under the current ABI the static `desc` erases. The
-RX index remains runtime data; STM32 also retains its selected TX descriptor
-index, while QEMU's fixed descriptor zero needs no field. The current examples
-complete directly after starting TX, but there is a real interval after
-`net_transmit` returns in which only the in-flight owner exists.
+`net_transmit` consumes the RX owner and returns immediately with a distinct
+`NetTxInFlight[desc]` owner. QEMU transmits the in-place reply and therefore
+keeps the RX descriptor until completion. STM32 copies the reply to a
+dedicated TX buffer and re-posts the RX descriptor before starting TX, which
+lets RX DMA absorb new traffic while TX is in flight. In both backends a
+caller can no longer satisfy the API with an unrelated raw pointer or release
+the consumed owner. `net_tx_complete` consumes the in-flight owner, waits for
+the retained TX descriptor, re-posts the RX descriptor on QEMU, and restores
+the acquisition permission. Under the current ABI the static `desc` erases.
+STM32 retains its selected TX descriptor index, while QEMU's fixed descriptor
+zero needs only the RX index. The current examples complete directly after
+starting TX, but there is a real interval after `net_transmit` returns in
+which only the in-flight owner exists.
 
 The slice returned by `net_rx_frame` is separately tied to `desc` by its
 region-annotated return type. Consuming the RX owner, whether for release or
