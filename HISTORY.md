@@ -15,6 +15,46 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-19: Sixteen TCP Slots and a 64-Entry STM32 RX Ring (Issue #135)
+
+The eight-slot, 16-entry-ring result left two independently measured limits:
+connection-table exhaustion above concurrency 8 and DMA missed frames during
+synchronous SD write-through. A 32-entry RX ring removed all missed frames at
+concurrency 8 (1866/1866 requests over 30 seconds, 61.9 requests/s), but at
+concurrency 16 it still recorded 22 missed frames while TCP retransmission
+recovered all 1803 requests. Sixteen clients can create a 32-frame
+ACK-plus-request burst before ARP and retransmissions, so the ring had no
+headroom.
+
+`MAX_CONNS` is now 16 and the STM32 RX ring is 64 entries. The KVS RAM image is
+148,162 bytes total, still within the STM32F746's 240 KiB AXI SRAM region. The
+Flash Ethernet linker script still carried an obsolete assertion restricting
+images to the first 64 KiB from the removed non-cacheable-MPU design; it now
+checks the real 240 KiB cacheable AXI SRAM region, whose DMA coherency is
+provided by `eth.tkb`'s cache-maintenance ownership transitions.
+
+With the final configuration, concurrency 16 completed 1842/1842 requests in
+30.3 seconds (60.9 requests/s), with zero DMA missed frames, no RBUS, and no CPU
+fault. Concurrency 24 completed 1781/1829 and had 48 transport timeouts despite
+zero DMA missed frames. Throughput was already flat at 60.5 requests/s, so this
+cleanly isolates the remaining failure to the sixteen-slot admission limit and
+shows that adding more slots would not improve storage-limited throughput.
+A SYN backlog or more connection slots is therefore deferred until a real need
+exists beyond overload testing; asynchronous/deferred response generation would
+be the architectural change needed to process network traffic during strict
+write-through SD waits.
+
+The existing all-function profiler was also attempted at concurrency 8, but its
+instrumented firmware failed to complete even the warm-up PUT within 90 seconds;
+it is too intrusive for this larger 16 MHz image. Earlier successful profiles
+already identified `kvs_sd_save_slot`/`fat_write_at` and the network task's
+`cond_wait` as dominant, and the DMA counters plus ring-sizing experiment give
+the non-instrumented causal measurement needed here.
+
+Verification: `make check` passed all 131 tests and
+`make hwcheck-stm32-net` passed all 10 real-Ethernet tests, including KVS
+persistence across reset.
+
 ### 2026-07-19: Eight TCP Slots and Separate STM32 TX Buffers (Issue #135)
 
 The next measured concurrency step increased `MAX_CONNS` from 4 to 8 and

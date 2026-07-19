@@ -3,7 +3,7 @@
 #
 # This is intentionally NOT part of make allcheck: it is a sustained real-
 # board load test, not a deterministic integration test. Its default remains
-# the established concurrency-4 baseline; values above 8 deliberately exceed
+# the established concurrency-4 baseline; values above 16 deliberately exceed
 # the server's TCP slot count and test overload.
 set -euo pipefail
 

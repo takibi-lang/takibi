@@ -33,7 +33,7 @@ SERVER_MAC = bytes([0x52, 0x54, 0x00, 0x12, 0x34, 0x56])  # must match run_qemut
 SERVER_IP = bytes([10, 0, 2, 15])                          # must match kvs_server.tkb's our_ip
 SERVER_PORT = 80                                            # must match http_server_common.tkb's HTTP_PORT
 
-MAX_CONNS = 8  # must match http_conn_state.tkb's MAX_CONNS
+MAX_CONNS = 16  # must match http_conn_state.tkb's MAX_CONNS
 
 RETRIES = 20
 RETRY_TIMEOUT_SECS = 0.5

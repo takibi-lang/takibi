@@ -40,11 +40,11 @@ process rules that apply everywhere.
   returns a linear in-flight owner; completion consumes it only after DMA releases the exact TX slot,
   re-posts the RX descriptor, and restores the acquisition permission.
 
-  **RX burst capacity and suspended-DMA recovery (issue #135 follow-up)**: the RX ring has 16
-  descriptors, allocated statically at link time. Eight concurrent TCP clients can produce a burst
-  larger than the old four-descriptor ring, with ARP and retransmissions arriving around it; eight
-  descriptors still had no margin. Sixteen RX buffers consume about 25 KiB. This count is sized for
-  the MCU/server contract, not for the host's CPU count. When all descriptors were temporarily CPU-owned,
+  **RX burst capacity and suspended-DMA recovery (issue #135 follow-up)**: the RX ring has 64
+  descriptors, allocated statically at link time. Sixteen concurrent TCP clients can produce a
+  32-frame ACK-plus-request burst before ARP and retransmissions; the measured 32-entry ring had no
+  margin during synchronous SD write-through. Sixty-four RX buffers consume about 100 KiB. This count
+  is sized for the MCU/server contract, not for the host's CPU count. When all descriptors were temporarily CPU-owned,
   the STM32 DMA could set RBUS and remain
   suspended even after descriptors had been reposted. `eth_rx_resume` now clears RBUS and issues RX
   poll demand after publishing a descriptor; the empty-acquire path also performs this recovery so
@@ -57,9 +57,10 @@ process rules that apply everywhere.
   linear `NetTxInFlight[desc]` owner and `NetRxCanAcquire` permit still prevent normal context from
   processing another frame before TX completion, so the cross-platform driver API is unchanged,
   while RX DMA can fill the returned descriptor during that interval. The extra BSS cost is about
-  6.2 KiB. With eight TCP slots, concurrency 8 completed a 30-second KVS+SD+RTOS run with 1872/1872
-  successful requests, although 13 DMA missed frames show that synchronous SD waits can still fill
-  the 16-entry ring. Concurrency above 8 remains overload rather than a supported operating point.
+  6.2 KiB. With sixteen TCP slots and the 64-entry RX ring, concurrency 16 completed a 30-second
+  KVS+SD+RTOS run with 1842/1842 successful requests and zero DMA missed frames. Concurrency 24
+  still had 48 transport failures despite zero DMA loss, isolating the remaining overload boundary
+  to the sixteen-slot connection table rather than Ethernet DMA.
 
   **Network config**: `examples/common_stm32/netconfig.tkb` holds the board's MAC/IP as plain global
   constants (`OUR_MAC`/`OUR_IP`/`HTTP_SERVER_IP`, array-literal `{...}` initializers). MAC is a fixed
@@ -111,12 +112,10 @@ process rules that apply everywhere.
   needed for the HTTP requests themselves (plain sockets, unlike the other four's raw `AF_PACKET`) -- only
   the `ip neigh flush` step needs root, which `make hwcheck-stm32-net`'s existing blanket `sudo` already covers.
 
-  STM32 startup configures MPU region 0 for `0x20010000..<0x20020000` as Normal, non-cacheable,
-  shareable memory before enabling the Cortex-M7 I-cache and D-cache. Ethernet images are linked at
-  `0x20010000`; `link_eth.ld` asserts that their data plus stack remain inside this 64KB window so future
-  growth cannot silently place DMA-visible globals in cacheable AXI SRAM. Descriptors remain padded/aligned
-  to one 32-byte cache line and RX/TX ownership transitions retain explicit cache-maintenance builtins and
-  barriers, keeping the driver contract valid if its placement strategy changes later.
+  STM32 startup leaves AXI SRAM under ARMv7-M's default Normal, cacheable mapping before enabling the
+  Cortex-M7 caches. Ethernet images are linked at `0x20010000`; `link_eth.ld` asserts that data plus
+  stack remain inside the full 240 KiB AXI SRAM region. Descriptors remain padded/aligned to one
+  32-byte cache line, and RX/TX ownership transitions perform explicit cache maintenance and barriers.
 
   **Hardware bring-up bug worth knowing about**: the very first working version had every DMA descriptor field
   byte-for-byte correct (verified live via openocd/gdb-multiarch register+memory dumps) yet the TX descriptor's
@@ -371,7 +370,7 @@ MPU non-cacheable window. This makes `examples/common_stm32/eth.tkb`'s existing
 `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` calls load-bearing for the first time --
 previously the non-cacheable window meant those calls' cache clean/invalidate instructions
 were architectural no-ops. Validated against real hardware over the wired point-to-point
-link (`make hwcheck-stm32-net`, all 5 examples, including varying frame payload sizes 46-1486
+link (`make hwcheck-stm32-net`, including varying frame payload sizes 46-1486
 bytes and a full TCP handshake/data-echo/close/reconnect cycle) before generalizing, not
 just reasoned about from reading the driver -- see HISTORY.md's RAM-execution entries for
 the full code-reading pass that preceded this and why it was judged safe in advance.
