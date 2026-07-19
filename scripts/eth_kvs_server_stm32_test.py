@@ -141,9 +141,9 @@ def expect(desc: str, method: str, path: str, body: bytes,
 def run_full() -> bool:
     ok = True
     ok &= expect("GET missing key", "GET", "/keys/nope", None, 404, b"not found\n")
-    ok &= expect("PUT alpha=one (new)", "PUT", "/keys/alpha", b"one", 201, b"")
+    ok &= expect("PUT alpha=one (new)", "PUT", "/keys/alpha", b"one", 202, b"")
     ok &= expect("GET alpha", "GET", "/keys/alpha", None, 200, b"one")
-    ok &= expect("PUT alpha=two (overwrite)", "PUT", "/keys/alpha", b"two", 200, b"")
+    ok &= expect("PUT alpha=two (overwrite)", "PUT", "/keys/alpha", b"two", 202, b"")
     ok &= expect("GET alpha after overwrite", "GET", "/keys/alpha", None, 200, b"two")
 
     status, list_body = request_with_retry("GET", "/keys")
@@ -151,13 +151,16 @@ def run_full() -> bool:
         print("  [GET /keys] FAIL: status=%s body=%r" % (status, list_body))
         ok = False
 
-    ok &= expect("DELETE alpha", "DELETE", "/keys/alpha", None, 200, b"")
+    ok &= expect("DELETE alpha", "DELETE", "/keys/alpha", None, 202, b"")
     ok &= expect("GET alpha after delete", "GET", "/keys/alpha", None, 404, b"not found\n")
 
     # Left behind on purpose -- verify_persistence checks this survives a
     # real board reset with no reprovisioning in between.
     ok &= expect("PUT persist_probe (left behind)", "PUT", "/keys/" + PERSIST_KEY,
-                 PERSIST_VALUE, 201, b"")
+                 PERSIST_VALUE, 202, b"")
+    # 202 means accepted into RAM and queued for eventual persistence. Give
+    # the SD worker time to flush before the harness immediately resets MCU.
+    time.sleep(1.0)
     return ok
 
 
@@ -166,7 +169,7 @@ def run_verify_persistence() -> bool:
     ok &= expect("GET persist_probe (after reset)", "GET", "/keys/" + PERSIST_KEY,
                  None, 200, PERSIST_VALUE)
     ok &= expect("DELETE persist_probe (cleanup)", "DELETE", "/keys/" + PERSIST_KEY,
-                 None, 200, b"")
+                 None, 202, b"")
     return ok
 
 

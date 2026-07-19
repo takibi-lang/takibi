@@ -80,7 +80,7 @@ fn tcp_age_slots() {
             conn_idle_ticks[i] = conn_idle_ticks[i] + 1;
         }
     }
-    tcp_expire_stale_slots(conn_idle_ticks as [u32; 16..], TCP_CONN_IDLE_PACKET_LIMIT);
+    tcp_expire_stale_slots(conn_idle_ticks as [u32; 24..], TCP_CONN_IDLE_PACKET_LIMIT);
 }
 
 // Wire-level TCP event, classified from flag bits alone (see
@@ -367,7 +367,7 @@ fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_b
                                         let pending: PendingTcpEvent = tcp_event_accepted();
                                         let is_syn: bool = (ev == TcpEvent::Syn);
 
-                                        match tcp_conn_dispatch(conn_remote_ip as [u8; 64..], conn_remote_port as [u16; 16..],
+                                        match tcp_conn_dispatch(conn_remote_ip as [u8; 96..], conn_remote_port as [u16; 24..],
                                                                 ip[IP_SRC..<IP_DST], src_port, is_syn) {
                                             TcpConnDispatch::Listen(conn) => {
                                                 let idx: {0..<MAX_CONNS as usize} = tcp_conn_listen_slot(conn);

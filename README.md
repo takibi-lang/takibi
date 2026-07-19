@@ -209,14 +209,14 @@ by a current example does not.
   `DELETE /keys/<key>`, `GET /keys` to list), with deterministic host-side
   tests for set/get/overwrite/delete, table-full, and parser-error cases,
   `--forbid-trap` clean, on both QEMU and STM32.
-  `examples/kvs_server_sdcard_rtos` adds write-through persistence to a
-  real SD card via FAT12 (sector-aligned per-key records, survives a
-  reset) behind an RTOS task split (a network task and a dedicated
-  SD-worker task), covered by `make hwcheck-stm32-net` including a
-  persistence-survives-reset check. Both the HTTP server and KVS server
+  `examples/kvs_server_sdcard_rtos` adds generation-tracked eventual
+  persistence to a real SD card via FAT12. PUT/DELETE return 202 after the
+  RAM update and dirty-record snapshot; a dedicated RTOS SD worker coalesces
+  and flushes records asynchronously. It is covered by `make hwcheck-stm32-net`,
+  including an explicit settle-then-reset persistence check. Both server
   families share one TCP/HTTP core
   (`examples/common/http_server_common.tkb` / `http_conn_state.tkb`)
-  supporting 4 simultaneous TCP connections per server, not just one at a
+  supporting 24 simultaneous TCP connections per server, not just one at a
   time.
 - Every ported example is a **single `.tkb` application source file** that
   compiles unchanged for QEMU/AArch64 and STM32/Cortex-M7. Platform-specific
@@ -345,10 +345,9 @@ Builds run in parallel across all cores by default.
 `stress-stm32-kvs-server-sdcard-rtos` is intentionally not part of
 `allcheck`: it is a sustained real-board load test rather than a deterministic
 integration test. The target loads the KVS+SD+RTOS firmware into RAM and runs
-`scripts/kvs_stress.py` with the conservative issue #135 defaults, concurrency
-4 and a fixed key. The server has sixteen TCP connection slots; concurrency 16
-passed the measured 30-second load with no DMA loss, but the lower default keeps
-the opt-in smoke workload conservative. Values above 16 are overload
+`scripts/kvs_stress.py` with the measured issue #135 defaults, concurrency 24
+and a fixed key. The server has twenty-four TCP connection slots; concurrency
+24 passed the measured 30-second load with no DMA loss. Values above 24 are overload
 experiments, not a supported-concurrency regression level.
 Override with `TAKIBI_STRESS_CONCURRENCY`, `TAKIBI_STRESS_DURATION`, or
 `TAKIBI_STRESS_FIXED_KEY` for manual characterization.

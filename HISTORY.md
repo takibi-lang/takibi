@@ -15,6 +15,60 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-19: STM32 Profiler Memory Headroom Restored
+
+The eventual-persistence KVS image still fits in the STM32F746's 240 KiB AXI
+SRAM, but enabling function profiling adds fixed call-stack and call-path
+tables. The original 256-entry, 16-frame call-path table made the profiled
+KVS+SD+RTOS image overflow the linker region by 2,504 bytes. Reducing the entry
+count was considered, but retaining 256 entries gives future profiles more
+distinct-path headroom.
+
+The profiler now retains all 256 path entries and reduces the stored maximum
+depth from 16 to 12. Existing KVS and HTTP hardware profiles reached only 9 and
+10 frames respectively. Since a packed path entry is 20 bytes plus four bytes
+per frame, this saves exactly 4 KiB while retaining two frames of observed
+headroom. Both STM32 profiler scripts use the matching 68-byte entry layout.
+This work also found that their warm-up reset cleared the path table but not
+its overflow counter. They now clear that counter and fail a profile run if the
+measured interval overflows. Both current hardware profiles complete with zero
+overflow.
+
+### 2026-07-19: Eventual KVS Persistence and Stable 24-Way Load (Issue #135)
+
+Strict write-through made the network task retain its RX owner while blocked in
+`kvs_sd_save_slot_rpc`, limiting throughput to about 61 requests/s and forcing a
+large RX ring to buffer traffic. The KVS contract is now RAM-linearizable with
+eventual durability: PUT/DELETE update RAM, snapshot the changed slot under a
+linear `MutexGuard`, increment a per-slot generation, mark it dirty, and return
+HTTP 202. The SD worker copies shadow state into its private 256-byte buffer and
+clears dirty only when the generation it wrote is still current. Updates to one
+slot coalesce, failed writes remain dirty, and round-robin scanning prevents a
+hot low-numbered slot from starving other records. No borrowed canonical-table
+reference survives unlock or crosses an SD wait.
+
+The persistence state costs about 4.3 KiB: sixteen 256-byte shadow records plus
+generation, persisted-generation, dirty, lock, and scan metadata. `MAX_CONNS`
+grew from 16 to 24. The unrefined baseline was tested first on hardware; the
+subsequent `--forbid-trap` pass found six shadow slice accesses and hardened
+them with a 256-byte destination contract and refined same-base bounds, without
+raw pointers. The hardware test now expects 202 and waits one second before its
+reset, explicitly testing eventual rather than immediate durability.
+
+At 24 clients and a 64-entry ring, a fixed-key 30-second run completed
+9741/9741 requests at 324.0 requests/s with zero DMA loss. Ring sizing was then
+remeasured: 32 entries caused 343 DMA misses and 19 transport failures; 48
+entries completed all requests but still had five DMA misses; 56 entries
+completed 9696/9696 at 322.6 requests/s with zero DMA loss. The final 56-entry
+configuration uses 140,542 bytes for the KVS image, about 12.5 KiB less than 64.
+A correctly distributed 16-key run then completed 10296/10296 at 342.6
+requests/s, again with zero DMA loss, RBUS, transport errors, or CPU faults.
+Compared with synchronous write-through, throughput improved by roughly 5.3x.
+
+Verification: `make check` passed all 131 tests and
+`make hwcheck-stm32-net` passed all 10 real-Ethernet tests, including eventual
+persistence across reset.
+
 ### 2026-07-19: Sixteen TCP Slots and a 64-Entry STM32 RX Ring (Issue #135)
 
 The eight-slot, 16-entry-ring result left two independently measured limits:

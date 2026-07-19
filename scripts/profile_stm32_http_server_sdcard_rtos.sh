@@ -17,7 +17,8 @@ INSTALLER_ELF="examples/http_server_sdcard_install/kernel_stm32_ram.elf"
 CONTENT_DIR="examples/sdcard_content"
 URL="${TAKIBI_PROFILE_URL:-http://192.168.10.2/ICON.PNG}"
 OUT_DIR="${TAKIBI_PROFILE_OUT_DIR:-_build/takibi_profile/http_server_sdcard_rtos}"
-PATH_ENTRY_SIZE=84
+# Must match prof_path_max_depth/capacity in lib/llvm_gen.ml.
+PATH_ENTRY_SIZE=68
 PATH_ENTRY_COUNT=256
 
 # shellcheck source=scripts/stm32_hw_claim.sh
@@ -66,7 +67,7 @@ dump_profile_table() {
 }
 
 clear_profile_counters_and_resume() {
-    local table_addr="$1" count="$2" path_addr="$3" path_size="$4" log
+    local table_addr="$1" count="$2" path_addr="$3" path_size="$4" overflow_addr="$5" log
     log="$tmpdir/openocd-clear.log"
     openocd -f "$OPENOCD_BOARD_CFG" \
         -c "init" \
@@ -84,6 +85,7 @@ clear_profile_counters_and_resume() {
         -c 'for {set i 0} {$i < $path_words} {incr i} {
                 mww [expr {$path_base + ($i * 4)}] 0
             }' \
+        -c "mww $overflow_addr 0" \
         -c "resume" \
         -c "shutdown" > "$log" 2>&1 || {
             echo "openocd profile clear failed:" >&2
@@ -131,6 +133,11 @@ if [ -z "$path_addr" ]; then
     echo "could not find __takibi_prof_path_table in $ELF" >&2
     exit 1
 fi
+overflow_addr=$(llvm-nm-19 "$ELF" | awk '$3 == "__takibi_prof_path_overflow" { print "0x" $1; exit }')
+if [ -z "$overflow_addr" ]; then
+    echo "could not find __takibi_prof_path_overflow in $ELF" >&2
+    exit 1
+fi
 
 profile_count=$(python3 - "$OBJ" <<'PY'
 import subprocess
@@ -153,11 +160,12 @@ table_size=$((profile_count * 16))
 path_size=$((PATH_ENTRY_COUNT * PATH_ENTRY_SIZE))
 dump="$tmpdir/takibi_prof_table.bin"
 path_dump="$tmpdir/takibi_prof_path_table.bin"
+overflow_dump="$tmpdir/takibi_prof_path_overflow.bin"
 
 fetch_icon "warm"
 
 echo "Clearing profile counters after warm-up..."
-clear_profile_counters_and_resume "$table_addr" "$profile_count" "$path_addr" "$path_size"
+clear_profile_counters_and_resume "$table_addr" "$profile_count" "$path_addr" "$path_size" "$overflow_addr"
 
 fetch_icon "measured"
 
@@ -165,6 +173,12 @@ echo "Dumping $profile_count profile entries from $table_addr ..."
 dump_profile_table "$table_addr" "$table_size" "$dump"
 echo "Dumping $PATH_ENTRY_COUNT call-path entries from $path_addr ..."
 dump_profile_table "$path_addr" "$path_size" "$path_dump"
+dump_profile_table "$overflow_addr" 4 "$overflow_dump"
+overflow_count=$(od -An -tu4 "$overflow_dump" | tr -d ' ')
+if [ "$overflow_count" -ne 0 ]; then
+    echo "call-path table overflowed $overflow_count times" >&2
+    exit 1
+fi
 
 python3 - "$OBJ" "$dump" "$path_dump" "$OUT_DIR/profile.folded" <<'PY'
 import struct
@@ -206,8 +220,8 @@ for cycles, calls, _func_id, name in rows[:30]:
 path_rows = []
 with open(path_dump, "rb") as f:
     pdata = f.read()
-ENTRY_SIZE = 84
-MAX_DEPTH = 16
+ENTRY_SIZE = 68
+MAX_DEPTH = 12
 for off in range(0, len(pdata), ENTRY_SIZE):
     chunk = pdata[off:off + ENTRY_SIZE]
     if len(chunk) < ENTRY_SIZE:

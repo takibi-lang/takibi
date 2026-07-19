@@ -40,10 +40,11 @@ process rules that apply everywhere.
   returns a linear in-flight owner; completion consumes it only after DMA releases the exact TX slot,
   re-posts the RX descriptor, and restores the acquisition permission.
 
-  **RX burst capacity and suspended-DMA recovery (issue #135 follow-up)**: the RX ring has 64
-  descriptors, allocated statically at link time. Sixteen concurrent TCP clients can produce a
-  32-frame ACK-plus-request burst before ARP and retransmissions; the measured 32-entry ring had no
-  margin during synchronous SD write-through. Sixty-four RX buffers consume about 100 KiB. This count
+  **RX burst capacity and suspended-DMA recovery (issue #135 follow-up)**: the RX ring has 56
+  descriptors, allocated statically at link time. Twenty-four concurrent TCP clients can produce a
+  48-frame ACK-plus-request burst before ARP and retransmissions; 48 descriptors still measured five
+  missed frames, while 56 measured zero. The KVS SD worker is asynchronous, so network normal context
+  no longer stalls behind write-through. This count
   is sized for the MCU/server contract, not for the host's CPU count. When all descriptors were temporarily CPU-owned,
   the STM32 DMA could set RBUS and remain
   suspended even after descriptors had been reposted. `eth_rx_resume` now clears RBUS and issues RX
@@ -57,10 +58,9 @@ process rules that apply everywhere.
   linear `NetTxInFlight[desc]` owner and `NetRxCanAcquire` permit still prevent normal context from
   processing another frame before TX completion, so the cross-platform driver API is unchanged,
   while RX DMA can fill the returned descriptor during that interval. The extra BSS cost is about
-  6.2 KiB. With sixteen TCP slots and the 64-entry RX ring, concurrency 16 completed a 30-second
-  KVS+SD+RTOS run with 1842/1842 successful requests and zero DMA missed frames. Concurrency 24
-  still had 48 transport failures despite zero DMA loss, isolating the remaining overload boundary
-  to the sixteen-slot connection table rather than Ethernet DMA.
+  6.2 KiB. With twenty-four TCP slots and the 56-entry RX ring, concurrency 24 completed both
+  fixed-key and 16-key-distributed 30-second KVS+SD+RTOS runs with zero transport failures and
+  zero DMA missed frames. The final KVS image is about 140.5 KiB.
 
   **Network config**: `examples/common_stm32/netconfig.tkb` holds the board's MAC/IP as plain global
   constants (`OUR_MAC`/`OUR_IP`/`HTTP_SERVER_IP`, array-literal `{...}` initializers). MAC is a fixed
