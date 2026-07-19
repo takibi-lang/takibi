@@ -9491,3 +9491,40 @@ other hardware-test entry point in this project.
 (132/132) and `make stm32build` unaffected -- no shared files touched
 beyond the two Python test scripts' now-optional env-var
 generalization.
+
+Milestone 7, part 3: the bulk-OUT STALL is root-caused and fixed. The
+size correlation recorded above was a sequence effect from incorrect
+DATA0/DATA1 bookkeeping, not a three-packet limit in DWC2 or LAN9514.
+`dwc2_bulk_in()` and `dwc2_bulk_out()` each saved one software toggle
+and unconditionally flipped it once after a successful call. A DWC2
+channel call can transfer several USB packets, however; after an even
+count the next PID must stay unchanged. The first 534-byte record in
+`eth_net_echo_test.py` (512-byte payload + Ethernet/TX wrapper) used two
+bulk packets and left the device expecting the original PID while the
+driver incorrectly selected the other one. Subsequent traffic was then
+out of phase, accounting for the apparent later large-frame failures
+and the LAN9514 STALL recovery path firing on a malformed TX stream.
+
+This is explicitly handled by every production reference checked:
+Linux mainline's `dwc2_hcd_save_data_toggle()` and Raspberry Pi Linux's
+legacy `dwc_otg_hcd_save_data_toggle()` read the hardware-updated
+HCTSIZ.PID at channel completion; U-Boot's `wait_for_chhltd()` returns
+that same field as the next toggle; USPi/Circle's `USBEndpointSkipPID()`
+changes the saved PID only when the number of actually transferred
+packets is odd. `dwc2_channel_transfer()` now captures HCTSIZ.PID every
+time the channel halts (including abort/error paths), and the bulk IN
+and OUT wrappers persist that authoritative value for their next call.
+This also handles short IN packets without trying to infer whether a
+zero-byte result consumed a real ZLP from the byte count alone.
+
+Real-hardware confirmation used the existing test unchanged, which is
+important because its sequence already contains odd-, even-, and
+three-packet transfers: `make hwcheck-rpi3-net` now passes `net_echo`
+at all 6 payload sizes (46/60/128/512/1000/1486, including a maximum
+1514-byte Ethernet frame), plus every `arp_reply` and `icmp_echo`
+check -- 3 tests passed, 0 failed. The generic
+`CLEAR_FEATURE(ENDPOINT_HALT)` recovery remains correct defense for a
+real future endpoint STALL, but no longer fires as a workaround for
+this bug. `tcp_echo`/`http_server`/`kvs_server` are now unblocked; they
+remain a separate follow-on port-and-hardware-test step before this
+milestone's eventual `--forbid-trap` hardening pass.

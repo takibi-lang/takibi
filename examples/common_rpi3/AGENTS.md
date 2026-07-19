@@ -2,14 +2,15 @@
 
 GitHub issue #140. Status: 59 examples ported and passing `make
 hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level
-`EXAMPLES` list EXCEPT `tcp_echo`/`http_server`/`kvs_server` (blocked on
-a still-unresolved bulk-OUT STALL limitation for transfers over ~1024
-bytes, see "USB host stack" below) and `fatfs` (needs SD-card-shaped
+`EXAMPLES` list EXCEPT `tcp_echo`/`http_server`/`kvs_server` (not wired
+to this target yet, but no longer blocked: the former bulk-OUT STALL was
+root-caused and fixed in milestone 7, see "USB host stack" below) and
+`fatfs` (needs SD-card-shaped
 block storage, see "Out of scope: SD-card-storage examples" below).
-`net_echo`/`arp_reply`/`icmp_echo` -- the Ethernet examples that fit
-under that STALL threshold -- are now ported and passing on real
-hardware, over the USB host stack this board did not have as of the
-previous status line here. Full list:
+`net_echo`/`arp_reply`/`icmp_echo` are ported and passing on real
+hardware, including `net_echo` at the maximum 1514-byte Ethernet frame
+size, over the USB host stack this board did not have as of the previous
+status line here. Full list:
 `start`/`hello`/`print_int`/`print_hex`/`print_ptr`/`mem`/`array`/
 `fizzbuzz`/`fibonacci`/`bubblesort`/`ringbuf`/`callstack`/`crc8`/
 `djb2`/`bump`/`scheduler`/`struct`/`struct_refined`/`refined`/
@@ -294,9 +295,10 @@ completely unmodified. `examples/common_rpi3/netconfig.tkb` (new):
 has no EEPROM). `dwc2_find_bulk_endpoints()` (`usb_dwc2.tkb`) parses
 the config descriptor for the Ethernet function's own bulk IN/OUT
 endpoint numbers and max-packet sizes; `dwc2_bulk_in`/`dwc2_bulk_out`
-add persistent per-endpoint DATA0/DATA1 toggle tracking (not
-hardware-managed in this buffer-DMA mode, unlike control transfers)
-and STALL recovery via `CLEAR_FEATURE(ENDPOINT_HALT)`.
+add persistent per-endpoint DATA0/DATA1 toggle tracking (the DWC2 core
+advances HCTSIZ.PID within one buffer-DMA channel activation; software
+must preserve its final value for the next activation) and STALL
+recovery via `CLEAR_FEATURE(ENDPOINT_HALT)`.
 
 Architectural note: unlike `eth.tkb`/`virtio_mmio.tkb`'s real DMA
 descriptor rings with interrupt-driven completion, USB bulk transfers
@@ -315,18 +317,21 @@ Two real bugs found via `examples/net_echo/net_echo.tkb` +
   are high-speed, but bulk uses 512) produced a bizarre-looking
   "successful zero-byte transfer" on every bulk IN attempt -- fixed by
   reading `wMaxPacketSize` from each bulk endpoint's own descriptor.
-- **KNOWN LIMITATION, not yet root-caused**: outgoing frames whose
-  wrapped USB transfer spans more than 2 bulk max-packet-size (512-byte)
-  packets get a device-side STALL from the LAN9514 instead of
-  completing (payloads up to 512 bytes echo correctly; 1000+ byte
-  payloads do not). `dwc2_bulk_out()` recovers via
-  `CLEAR_FEATURE(ENDPOINT_HALT)` so this does not permanently wedge
-  later transmits, but the oversized frame itself is currently dropped.
-  Flagged for a follow-up investigation rather than blocking this
-  milestone -- most protocol traffic (ARP, ICMP echo, TCP segments/HTTP
-  responses under ~500 bytes) is unaffected, but this will need
-  resolving before `tcp_echo`/`http_server` can be trusted with larger
-  payloads.
+- **Bulk DATA toggles advance per USB packet, not per whole transfer.**
+  The first implementation unconditionally flipped its saved PID once
+  after every successful bulk call. That is correct only for an odd
+  packet count. A 534-byte transfer uses two 512-byte bulk packets, so
+  the device correctly kept the same next PID while software flipped
+  it; the following transfer then started out of phase. Linux mainline
+  and Raspberry Pi's production `dwc_otg` driver both save the final
+  HCTSIZ.PID, U-Boot's `wait_for_chhltd()` does the same, and USPi/Circle
+  advance their endpoint PID only when the actual packet count is odd.
+  `dwc2_channel_transfer()` now captures the hardware-updated PID at
+  every halt and both bulk wrappers reuse it. The apparent large-frame
+  STALL limit was a sequence effect after the first even-packet frame,
+  not a LAN9514 transfer-size limit: the unchanged real-hardware test
+  now echoes all 6 payload sizes, including 1000 and the maximum 1486
+  bytes.
 
 New `make hwcheck-rpi3-net` (`scripts/run_hwtest_rpi3_net.sh`) -- the
 network-functional counterpart to `hwcheck-rpi3`'s UART-only net_echo
@@ -365,19 +370,18 @@ this repo:
   requires for this devcontainer's USB-based JTAG/UART access.
 
 58/58 `make hwcheck-rpi3` (UART-only checks); `make hwcheck-rpi3-net`
-passes `arp_reply`/`icmp_echo` fully (both use small packets, well
-under the STALL threshold) and `net_echo` at 4/6 payload sizes (the
-STALL limitation above accounts for the other 2). `make qemutest`
-(132/132) and `make stm32build` unaffected.
+passes all three examples, with `net_echo` at 6/6 payload sizes plus
+complete `arp_reply`/`icmp_echo` checks. `make qemutest` (132/132) and
+`make stm32build` unaffected.
 
 **Milestone 7 (in progress)**: `arp_reply`/`icmp_echo` ported and
-passing on real hardware (see above) -- `tcp_echo`/`http_server` remain
-blocked on the bulk-OUT STALL limitation (their payloads routinely
-exceed the ~2-packet/1024-byte threshold), so root-causing that is the
-next concrete step, followed by the `--forbid-trap` hardening pass once
-everything in scope is proven end to end. Update this section (and
-HISTORY.md, and issue #140) after each further step, per this
-project's established cadence -- do not batch documentation to the end.
+passing on real hardware, and the bulk-OUT STALL is now root-caused and
+fixed (see above). `tcp_echo`/`http_server`/`kvs_server` are therefore
+unblocked but not yet wired or hardware-tested on this target; that is
+the next concrete step, followed by the `--forbid-trap` hardening pass
+once everything in scope is proven end to end. Update this section (and
+HISTORY.md, and issue #140) after each further step, per this project's
+established cadence -- do not batch documentation to the end.
 
 ## Hardware
 

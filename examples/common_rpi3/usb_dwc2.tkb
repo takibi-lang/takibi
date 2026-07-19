@@ -350,10 +350,19 @@ fn chan_split_reg(chan: usize) -> *io u32 {
 // makes cleaning vs invalidating correct.
 let mut dwc2_last_status: u32 = 0;
 let mut dwc2_last_xfer_bytes: u32 = 0;
+// In buffer-DMA mode HCTSIZ.PID is updated by the core as packets are
+// ACKed and therefore contains the PID to start the NEXT transaction
+// with when the channel halts. This is the authoritative endpoint
+// toggle state for multi-packet and short-packet transfers: advancing a
+// software toggle once per whole transfer is wrong whenever an even
+// number of packets moved. Linux's dwc2_hcd_save_data_toggle() and
+// U-Boot's wait_for_chhltd() both preserve this exact read-back value.
+let mut dwc2_last_pid: u32 = PID_DATA0;
 
 fn dwc2_channel_transfer(chan: usize, dev_addr: u32, ep_num: u32, ep_type: u32,
                           direction_in: bool, max_pkt: u32, pid: u32,
                           buf: usize, len: u32) -> bool {
+    dwc2_last_pid = pid;
     let mut packets: u32 = (len + max_pkt - 1) / max_pkt;
     if (packets == 0) {
         packets = 1;
@@ -413,10 +422,12 @@ fn dwc2_channel_transfer(chan: usize, dev_addr: u32, ep_num: u32, ep_type: u32,
                     break;
                 }
             }
+            dwc2_last_pid = (*xfersiz >> 29) & 3;
             *intreg = 0xFFFFFFFF;
             dwc2_last_status = 0xDEAD0000;
             return false;
         }
+        dwc2_last_pid = (*xfersiz >> 29) & 3;
         dwc2_last_status = halted;
         *intreg = halted;
         if ((halted & HCINT_XFER_COMPLETE) != 0) {
@@ -627,11 +638,12 @@ fn dwc2_device_descriptor_class() -> u8 {
 // state even though this driver's fully-synchronous design never
 // actually overlaps them today.
 //
-// Data toggle (DATA0/DATA1) is NOT hardware-managed in this buffer-DMA
-// (non-scatter/gather) mode -- unlike control transfers, which always
-// restart at a fixed PID per stage, a bulk endpoint's toggle persists
-// for the endpoint's lifetime and must alternate every successful
-// packet, tracked here in software. Both directions reset to DATA0 by
+// A bulk endpoint's DATA0/DATA1 state persists for its lifetime. The
+// DWC2 core advances HCTSIZ.PID for every packet it actually transfers,
+// including a short final IN packet, but does not retain that state when
+// software programs HCTSIZ for a later channel activation. The wrappers
+// below therefore feed in the saved next PID and read it back from
+// dwc2_last_pid after every call. Both directions reset to DATA0 by
 // dwc2_bulk_reset_toggles(), called once after SET_CONFIGURATION resets
 // every endpoint's toggle on the device side too (USB 2.0 spec 9.1.1.5).
 const BULK_OUT_CHANNEL: usize = 1;
@@ -669,26 +681,19 @@ fn dwc2_clear_endpoint_halt(ep_addr: u32) -> bool {
                                   ctrl_data_buf, 0);
 }
 
-// On a device-side STALL (the endpoint enters a halted state until
-// explicitly cleared, USB 2.0 spec 9.4.5 -- a real, reproducible
-// response this chip gives to some large multi-packet OUT transfers,
-// see examples/common_rpi3/eth.tkb's own header comment on the current
-// known size limit), recover via CLEAR_FEATURE(ENDPOINT_HALT) and reset
-// the software toggle to match the device's own post-clear state.
-// Without this, a single oversized frame would permanently wedge every
-// later transmit for the rest of this boot, not just fail once.
+// On any device-side STALL (the endpoint enters a halted state until
+// explicitly cleared, USB 2.0 spec 9.4.5), recover via
+// CLEAR_FEATURE(ENDPOINT_HALT) and reset the software toggle to match
+// the device's own post-clear state. The original bulk-toggle bug made
+// this path fire reproducibly, which is why recovery remains even though
+// correctly preserving HCTSIZ.PID prevents that failure now.
 fn dwc2_bulk_out(dev_addr: u32, buf: usize, len: u32) -> bool {
     dcache_clean_range(buf, len as usize);
     let ok: bool = dwc2_channel_transfer(BULK_OUT_CHANNEL, dev_addr, dwc2_bulk_out_ep,
                                           EP_TYPE_BULK, false, dwc2_bulk_out_mp,
                                           dwc2_bulk_out_toggle, buf, len);
-    if (ok) {
-        if (dwc2_bulk_out_toggle == PID_DATA0) {
-            dwc2_bulk_out_toggle = PID_DATA1;
-        } else {
-            dwc2_bulk_out_toggle = PID_DATA0;
-        }
-    } else {
+    dwc2_bulk_out_toggle = dwc2_last_pid;
+    if (ok == false) {
         if ((dwc2_last_status & HCINT_STALL) != 0) {
             dwc2_clear_endpoint_halt(dwc2_bulk_out_ep);
             dwc2_bulk_out_toggle = PID_DATA0;
@@ -708,13 +713,9 @@ fn dwc2_bulk_in(dev_addr: u32, buf: usize, len: u32) -> bool {
     let ok: bool = dwc2_channel_transfer(BULK_IN_CHANNEL, dev_addr, dwc2_bulk_in_ep,
                                           EP_TYPE_BULK, true, dwc2_bulk_in_mp,
                                           dwc2_bulk_in_toggle, buf, len);
+    dwc2_bulk_in_toggle = dwc2_last_pid;
     if (ok) {
         dcache_invalidate_range(buf, len as usize);
-        if (dwc2_bulk_in_toggle == PID_DATA0) {
-            dwc2_bulk_in_toggle = PID_DATA1;
-        } else {
-            dwc2_bulk_in_toggle = PID_DATA0;
-        }
     }
     return ok;
 }

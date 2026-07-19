@@ -302,20 +302,10 @@ fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32) -> NetTxInFlight[desc
     slice_copy(tx_payload[0..<copy_len], rx_buf[0..<copy_len]);
 
     let buf_addr: usize = eth_tx_buf as usize;
-    // KNOWN LIMITATION (found during hardware testing, not yet root-caused):
-    // outgoing frames whose TX_CMD-wrapped USB transfer spans more than 2
-    // bulk max-size (512-byte) packets -- i.e. total wire size beyond
-    // somewhere between 534 and 1026 bytes, not yet bisected further --
-    // get a device-side STALL from the LAN9514 instead of completing.
-    // examples/common_rpi3/usb_dwc2.tkb's dwc2_bulk_out() recovers via
-    // CLEAR_FEATURE(ENDPOINT_HALT) so this does not permanently wedge
-    // later transmits, but the oversized frame itself is still dropped
-    // (net_tx_complete has no error signal to report this through -- see
-    // this file's own header comment on why TX is fire-and-forget
-    // synchronous). Confirmed via examples/net_echo/net_echo.tkb +
-    // scripts/eth_net_echo_test.py: payloads up to 512 bytes echo
-    // correctly, 1000+ byte payloads do not. Flagged for follow-up
-    // rather than blocking this milestone -- see HISTORY.md.
+    // One transfer carries the complete TX record, including a maximum
+    // 1514-byte Ethernet frame. scripts/eth_net_echo_test.py verifies the
+    // full 1486-byte payload case on real hardware; usb_dwc2.tkb preserves
+    // the DWC2-reported next DATA PID across its three USB packets.
     dwc2_bulk_out(eth_dev_addr, buf_addr, (ETH_TX_CMD_HDR + copy_len) as u32);
 
     let slot: {0..<1 as usize} = 0;
