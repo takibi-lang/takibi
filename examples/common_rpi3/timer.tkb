@@ -1,0 +1,88 @@
+// Raspberry Pi 3B (BCM2837) preemptive-scheduler timer HAL: the ARM
+// Generic Timer's comparator (CNTP_TVAL_EL0/CNTP_CTL_EL0), routed to
+// core 0 via the QA7 "ARM Local" per-core Timer Interrupt Control
+// register (0x40000040, bit 1 = CNTPNSIRQ) -- a DIRECT local interrupt,
+// unlike UART0's route through the VC controller cascade (see
+// examples/common_rpi3/intc.tkb). This file is deliberately
+// self-contained and does not `use`/depend on intc.tkb at all: the
+// scheduler group (examples/preempt, examples/semaphore, ...) never
+// touches UART interrupts, and keeping the two apart avoids two
+// different `rpi3_irq_dispatch` definitions ever needing to coexist in
+// one compilation (intc.tkb's own is scoped to examples/echo/examples/
+// irq's build only -- see its own header comment for why a single
+// shared definition cannot serve both cases).
+//
+// Same public signatures as examples/common_qemu/timer.tkb
+// (scheduler_init()/scheduler_disable()/scheduler_rearm_tick(), also
+// matching examples/common_stm32/scheduler.tkb's names), so
+// examples/preempt/preempt.tkb and its siblings need no per-platform
+// branch for setup. What DOES need a per-platform branch, unavoidably:
+// each of those files' own `irq_dispatch` bakes GICv2's `gic.cpu_iar`/
+// `gic.cpu_eoir` polling directly into the SAME function that decides
+// which task runs next -- there is no shared HAL entry point to swap
+// out the way UART's uart_irq_handler is, since the scheduling
+// DECISION itself is example-specific state, not driver logic. Each
+// scheduler-group file now ALSO defines `rpi3_irq_dispatch(frame_sp)
+// -> usize`, calling this file's `rpi3_timer_irq_pending()` instead of
+// `gic.cpu_iar`, and both platforms' dispatch functions share the
+// platform-independent tick/switch bookkeeping via a `scheduler_tick`
+// helper extracted from what used to be `irq_dispatch`'s own body -- a
+// refactor, not a behavior change, for the existing QEMU path (verified
+// unchanged via `make qemutest` before this file existed).
+
+extern fn read_cntfrq() -> i32;
+extern fn set_cntp_tval(n: i32);
+extern fn enable_cntp();
+extern fn disable_cntp();
+extern fn task_exit_stub();
+
+fn setup_task_stack(s: *u8, f: fn() -> void) -> usize {
+    let base: *u8 = s - 272;
+    for i: i32 in 0..<272 {
+        *(base + i) = 0 as u8;
+    }
+    let p_elr: *fn() -> void = (base + 256) as *fn() -> void;
+    *p_elr = f;
+    // SPSR M[3:0] = 0b1001 (EL2h), DAIF all clear (interrupts unmasked).
+    // NOT examples/common_qemu/timer.tkb's 0x05 (EL1h): every RPi3
+    // payload runs at EL2H throughout (see startup.S, confirmed
+    // repeatedly over JTAG), so a task's saved exception-return state
+    // must target the level the CPU is actually at -- `eret` into a
+    // level nothing here ever runs at would fault immediately on the
+    // first context switch.
+    let p_spsr: *i32 = (base + 264) as *i32;
+    *p_spsr = 0x09;
+    let p_x30: *fn() -> void = (base + 240) as *fn() -> void;
+    *p_x30 = task_exit_stub;
+    return base as usize;
+}
+
+// Bit 1 of Core0's IRQ source register is CNTPNSIRQ (the non-secure
+// physical timer this file's stubs control) -- confirmed against the
+// Raspberry Pi Foundation's own "Quad-A7 control" datasheet, rev 3.4,
+// section 4.10 (also used, for the same register, by
+// examples/common_rpi3/intc.tkb's UART dispatch, checking bit 8 there
+// instead).
+fn rpi3_timer_irq_pending() -> bool {
+    let core0_irq_source: *io u32 = 0x40000060;
+    return (*core0_irq_source & (1 << 1)) != 0;
+}
+
+fn timer_init() {
+    let core0_timer_irq_control: *io u32 = 0x40000040;
+    *core0_timer_irq_control = 1 << 1; // enable CNTPNSIRQ as an IRQ
+    set_cntp_tval(read_cntfrq() >> 6);
+    enable_cntp();
+}
+
+fn scheduler_init() {
+    timer_init();
+}
+
+fn scheduler_disable() {
+    disable_cntp();
+}
+
+fn scheduler_rearm_tick() {
+    set_cntp_tval(read_cntfrq() >> 6);
+}

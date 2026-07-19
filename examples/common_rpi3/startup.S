@@ -15,6 +15,61 @@
    add it only once a real preemptive-scheduler example needs it here,
    not speculatively. */
     .section .text.boot
+
+/* dcache_invalidate_all: invalidate the entire data cache (every level
+   CLIDR_EL1 reports) by set/way. INVALIDATE, not clean-and-invalidate --
+   see _start's call site below for why a write-back here would be
+   actively harmful. Standard ARMv8-A CLIDR_EL1/CSSELR_EL1/CCSIDR_EL1
+   sweep, the same shape as every real reset handler's own cache-invalidate
+   routine (U-Boot's __asm_invalidate_dcache_all, Linux's
+   flush_dcache_all, etc.) -- x10 tracks 2*level because CSSELR_EL1's
+   Level field occupies bits[3:1] (bit 0 is InD), and CLIDR_EL1's LoC
+   field (bits[26:24]) is compared pre-doubled to match. Leaf routine: no
+   nested calls, never touches SP, so it is safe to `bl` before SP is
+   initialised. Clobbers x0-x12. */
+dcache_invalidate_all:
+    mrs     x0, clidr_el1
+    and     x3, x0, #0x7000000      /* x3 = LoC field (bits 26:24) */
+    lsr     x3, x3, #23              /* x3 = LoC * 2 */
+    cbz     x3, .Ldcache_done
+    mov     x10, #0                  /* x10 = 2 * current cache level */
+.Ldcache_level_loop:
+    add     x2, x10, x10, lsr #1     /* x2 = 3 * level, indexes Ctype */
+    lsr     x1, x0, x2
+    and     x1, x1, #7               /* x1 = Ctype for this level */
+    cmp     x1, #2
+    b.lt    .Ldcache_skip            /* Ctype < 2: no data cache here */
+    msr     csselr_el1, x10          /* select this level/type */
+    isb
+    mrs     x1, ccsidr_el1
+    and     x2, x1, #7
+    add     x2, x2, #4               /* x2 = log2(line size in bytes) */
+    ubfx    x4, x1, #3, #10          /* x4 = associativity - 1 */
+    clz     w5, w4                   /* x5 = way field's bit position */
+    mov     x7, #0                   /* x7 = way counter */
+.Ldcache_way_loop:
+    ubfx    x9, x1, #13, #15         /* x9 = number of sets - 1 */
+    mov     x6, #0                   /* x6 = set counter */
+.Ldcache_set_loop:
+    lsl     x11, x7, x5
+    orr     x11, x10, x11            /* level | way */
+    lsl     x12, x6, x2
+    orr     x11, x11, x12            /* | set */
+    dc      isw, x11
+    add     x6, x6, #1
+    cmp     x6, x9
+    b.le    .Ldcache_set_loop
+    add     x7, x7, #1
+    cmp     x7, x4
+    b.le    .Ldcache_way_loop
+.Ldcache_skip:
+    add     x10, x10, #2
+    cmp     x3, x10
+    b.gt    .Ldcache_level_loop
+.Ldcache_done:
+    dsb     sy
+    ret
+
     .global _start
 _start:
     /* Only core 0 runs main() -- cores 1-3 must not also call it
@@ -42,8 +97,48 @@ _start:
        examples/ip_parse's RFC1071 16-bit-at-a-time buffer walks) behave
        the same regardless of what ran before. */
     mrs     x0, sctlr_el2
-    bic     x0, x0, #(1 << 1)
+    bic     x0, x0, #(1 << 1)        /* A: alignment-fault checking off */
+    bic     x0, x0, #(1 << 2)        /* C: D-cache off, for now -- see
+                                         dcache_invalidate_all's call site
+                                         below for why this must happen
+                                         before any cache is trusted */
+    bic     x0, x0, #(1 << 12)       /* I: I-cache off, for now */
     msr     sctlr_el2, x0
+    isb
+
+    /* Invalidate the ENTIRE cache hierarchy (D-cache all levels by
+       set/way, I-cache all) before anything below trusts memory or
+       instruction-fetch content. Why this must run first, unconditionally,
+       every entry: examples/common_rpi3/AGENTS.md's JTAG workflow
+       (scripts/rpi3_jtag_load.sh) injects each example by halting this
+       CORE and using OpenOCD's `load_image` to DMA a new payload directly
+       into physical RAM, bypassing the cache hierarchy entirely -- so if
+       caches were left enabled from a PREVIOUS run (mmu_init's own
+       steady-state below, once past this point), any cache line still
+       resident for the address range the new payload was just written
+       into holds STALE content from whatever ran here before, and normal
+       loads/instruction-fetches would silently hit that stale line
+       instead of the freshly-DMA'd bytes -- exactly the corruption
+       examples/common_rpi3/mmu.S's own comment on this history describes
+       (found via examples/packed loaded on top of examples/hello's old
+       footprint). The fix used to be "never enable caches at all"; that
+       traded this hazard for permanently losing D-cache correctness for
+       anything that depends on it (ldaxr/stlxr-based semaphores'
+       cross-attempt visibility, see examples/semaphore/semaphore.tkb),
+       so the real fix is what every genuine ARMv8 reset handler already
+       does: unconditionally invalidate (not clean -- a write-back here
+       would overwrite the fresh JTAG-loaded content with stale cached
+       garbage) the whole cache before trusting it, THEN enable it as the
+       steady state (see mmu_init's own SCTLR_EL2 write for that second
+       half). Safe to do before SP is set up below: dcache_invalidate_all
+       is a leaf routine (no nested calls) that never touches SP. `ic
+       ialluis`/`dsb ish` use the Inner-Shareable variants (not the
+       plain/local ones) so this is already correct if a future example
+       ever brings up core 1-3 too, even though only core 0 runs today
+       (see this function's own core-gate above). */
+    bl      dcache_invalidate_all
+    ic      ialluis
+    dsb     ish
     isb
 
     /* Install the exception vector table before anything else can
@@ -173,16 +268,37 @@ _start:
     wfe
     b       .Lhalt
 
+/* enable_irq()/disable_irq(): same DAIF.I-only mask as
+   examples/common_qemu/startup.S's own pair (#0x2, not the #0x3 startup
+   uses above -- FIQ is never re-masked by anything on this board). Needed
+   by examples/common/rtos.tkb's klock/kunlock giant-lock placeholder
+   (examples/rtos_demo is the first RPi3 example to pull rtos.tkb in). */
+    .global enable_irq
+enable_irq:
+    msr     DAIFClr, #0x2
+    ret
+
+    .global disable_irq
+disable_irq:
+    msr     DAIFSet, #0x2
+    ret
+
 /* -- Default (no-op) rpi3_irq_dispatch ----------------------------------------
    startup.S is shared by every RPi3 example (the plain-compute ones
    have no interrupt controller set up at all), but rpi3_irq_entry below
-   unconditionally calls rpi3_irq_dispatch -- same fix as
-   examples/common_qemu/startup.S's own weak irq_dispatch default:
-   examples/common_rpi3/intc.tkb's real (strong) definition overrides
-   this for examples/echo/examples/irq; every other example links
-   against this no-op instead, so the DAIFClr'd-but-nothing-enabled IRQ
-   line an unrelated example never unmasks has a harmless place to land
-   even if it somehow fired (it never does, since nothing unmasks it). */
+   unconditionally calls rpi3_irq_dispatch(frame_sp) -> next_sp -- same
+   fix, and same calling convention, as examples/common_qemu/startup.S's
+   own weak irq_dispatch default. x0 already holds the current frame's
+   SP on entry (rpi3_irq_entry passes it explicitly, see below), so a
+   bare `ret` correctly returns "resume the same frame" with no
+   task-switching support -- this default is what every plain-compute
+   example and examples/echo/examples/irq (via examples/common_rpi3/
+   intc.tkb's real, frame_sp-preserving override) still get.
+   examples/preempt/preempt.tkb and its scheduler-group siblings each
+   define their OWN strong override instead (returning a DIFFERENT
+   task's frame_sp on a timer tick) -- see examples/common_rpi3/
+   timer.tkb's header comment for why that dispatch logic cannot live in
+   one shared HAL file the way UART's does. */
     .weak   rpi3_irq_dispatch
 rpi3_irq_dispatch:
     ret
@@ -244,17 +360,21 @@ exception_vectors:
     b       .                   /* 0x780: SError */
 
 /* -- IRQ entry: save all general-purpose registers, dispatch, restore --------
-   Same 272-byte frame layout as examples/common_qemu/startup.S's
-   irq_entry (x0-x30 + ELR_EL2/SPSR_EL2, in that order) for the same
-   reason: an asynchronous interrupt can land with ANY register live in
-   the code it interrupted, unlike a normal call boundary where AAPCS64
-   callee-saved registers are the only ones a callee must preserve.
-   Unlike QEMU's version, this always resumes the SAME frame (no
-   task-switching support yet -- see this file's header comment) --
-   examples/common_rpi3/intc.tkb's rpi3_irq_dispatch() takes no
-   argument and returns nothing, it just runs
-   examples/common_rpi3/uart.tkb's uart_irq_handler() if BCM2837's
-   interrupt controller says UART0 is why this fired. */
+   Same 272-byte frame layout AND task-switching calling convention as
+   examples/common_qemu/startup.S's irq_entry (x0-x30 + ELR_EL2/SPSR_EL2,
+   in that order; `frame_sp` passed in x0, the RETURNED frame_sp becomes
+   the new SP before restoring from it) -- an asynchronous interrupt can
+   land with ANY register live in the code it interrupted, unlike a
+   normal call boundary where AAPCS64 callee-saved registers are the
+   only ones a callee must preserve, and resuming from whatever
+   rpi3_irq_dispatch returns (not necessarily the frame that was
+   interrupted) is what makes preemptive task switching possible at all
+   -- see examples/common_rpi3/timer.tkb's header comment for which
+   examples actually use that and why the switching DECISION cannot live
+   in one shared file the way UART dispatch does. Every OTHER example
+   still gets simple same-frame resumption for free: both the weak
+   default in this file and examples/common_rpi3/intc.tkb's real UART
+   dispatch simply return the x0 they were called with. */
 rpi3_irq_entry:
     sub     sp,  sp,  #272
     stp     x0,  x1,  [sp, #0]
@@ -277,7 +397,9 @@ rpi3_irq_entry:
     mrs     x1,  spsr_el2
     stp     x0,  x1,  [sp, #256]
 
-    bl      rpi3_irq_dispatch
+    mov     x0, sp          /* argument: SP of the current frame */
+    bl      rpi3_irq_dispatch /* return value: SP of the next frame (same if no context switch) */
+    mov     sp, x0          /* switch SP to the next task's frame */
 
     ldp     x0,  x1,  [sp, #256]
     msr     elr_el2,  x0

@@ -1,20 +1,18 @@
 # Raspberry Pi 3B (BCM2837) Bare-Metal Bring-Up
 
-GitHub issue #140. Status: 37 examples ported and passing `make
+GitHub issue #140. Status: 43 examples ported and passing `make
 hwcheck-rpi3` (`start`/`hello`/`print_int`/`print_hex`/`print_ptr`/
 `mem`/`array`/`fizzbuzz`/`fibonacci`/`bubblesort`/`ringbuf`/`callstack`/
 `crc8`/`djb2`/`bump`/`scheduler`/`struct`/`struct_refined`/`refined`/
 `narrow`/`for`/`loop`/`enum`/`nonexhaustive`/`bitops`/`align`/`packed`/
 `struct_align`/`const_global`/`sizeof_offsetof`/`inet_checksum`/
-`ip_parse`/`tcp_parse`/`rtc`/`timer`/`echo`/`irq` -- `hwcheck-stm32`'s
-"plain compute" set plus `rtc`/`timer` (see "RTC" below) plus the two
-UART-RX-interrupt examples (see "Interrupts" below)). This is a
-JTAG-only bring-up: nothing here writes to the SD card as a real
-`kernel8.img`; see "Why JTAG injection, not an SD card kernel" below.
-Not yet ported: preempt/semaphore/condvar/msgqueue/watchdog/rtos_demo
-(need timer *interrupts* -- distinct from `rtc.tkb`'s polled counter
-read below -- plus task-switching support in `rpi3_irq_entry`, a larger
-follow-on).
+`ip_parse`/`tcp_parse`/`rtc`/`timer`/`echo`/`irq`/`preempt`/`semaphore`/
+`condvar`/`msgqueue`/`watchdog`/`rtos_demo` -- `hwcheck-stm32`'s "plain
+compute" set plus `rtc`/`timer` (see "RTC" below) plus the two
+UART-RX-interrupt examples plus the full preemptive-scheduler group
+(see "Interrupts" below)). This is a JTAG-only bring-up: nothing here
+writes to the SD card as a real `kernel8.img`; see "Why JTAG injection,
+not an SD card kernel" below.
 
 ## Out of scope: SD-card-storage examples
 
@@ -153,12 +151,13 @@ make examples/hello/kernel_rpi3.elf       # an injected payload (any RPI3_EXAMPL
 ```
 
 `RPI3_TARGET := aarch64-none-elf`, `RPI3_CPU := cortex-a53`,
-`RPI3_EXAMPLES`/`RPI3_CHECKSUM_EXAMPLES` (Makefile) list the 33 examples
-currently ported, generic pattern rules (mirroring `STM32_OBJS`/
-`STM32_EXAMPLES`). Add more names there (plus a matching
+`RPI3_EXAMPLES`/`RPI3_CHECKSUM_EXAMPLES`/`RPI3_IRQ_EXAMPLES`/
+`RPI3_RTC_EXAMPLES`/`RPI3_SCHED_EXAMPLES`/`RPI3_SCHED_SEM_EXAMPLES`
+(Makefile) together list the 43 examples currently ported, each group
+its own pattern rule (mirroring `STM32_OBJS`/`STM32_EXAMPLES`'s own
+per-group split). Add more names to the relevant group (plus a matching
 `run_hw_test_rpi3` line in `scripts/run_hwtest_rpi3.sh`) one at a time
-as each is ported and verified -- not the interrupt/timer-dependent
-group, see the top of this file.
+as each is ported and verified.
 
 `jtag_stub.img` is a raw binary (`llvm-objcopy-19 -O binary`), not an
 ELF -- the GPU firmware's loader expects a flat binary at a fixed
@@ -168,7 +167,7 @@ Every `kernel_rpi3.elf` loads at 0x200000 (`link.ld`), deliberately
 different from the stub's 0x80000, so a JTAG session's `load_image`
 target is never the same address the stub itself occupied.
 
-## MMU: why it's on, and why its caches deliberately are not
+## MMU and caches: why both are on, and how JTAG re-injection stays safe
 
 `examples/common_rpi3/mmu.S`'s `mmu_init` (called from `startup.S`,
 after BSS clear -- see that call site's own comment for why that
@@ -201,12 +200,13 @@ LLVM-backend phenomenon (any language using LLVM -- C/Clang, Rust, Zig
 to takibi, and is why essentially every real-world bare-metal AArch64
 project enables the MMU during early boot.
 
-**Why `SCTLR_EL2.C`/`.I` (D-cache/I-cache) are explicitly forced OFF**,
-not just left unset: this project's specific JTAG re-injection workflow
+**`SCTLR_EL2.C`/`.I` (D-cache/I-cache) history**: for most of this
+board's bring-up, both were explicitly forced OFF, not just left unset.
+This project's specific JTAG re-injection workflow
 (`scripts/rpi3_jtag_load.sh`) writes each new payload directly into
 physical RAM over the debug port (`load_image`), bypassing the CPU's
-caches entirely -- like a DMA write. With caching enabled, this produced
-silent data corruption, confirmed twice over:
+caches entirely -- like a DMA write. With caching enabled and no other
+precaution, this produced silent data corruption, confirmed twice over:
 - First: a batch run where only the very FIRST example passed and every
   following one produced UART output that looked like raw
   instruction/data bytes leaking out (not a clean hang, not a fault --
@@ -217,9 +217,8 @@ silent data corruption, confirmed twice over:
   file discusses (see `startup.S`'s own comment), so `mmu_init`'s
   original `orr x0, x0, #1 | (1<<2) | (1<<12)`-style write only ADDED
   the M bit on top of whatever C/I state a PREVIOUS payload's own
-  `mmu_init` had left set, never clearing it -- fixed by using `bic` to
-  explicitly force C/I off on every run, not just refrain from setting
-  them.
+  `mmu_init` had left set, never clearing it -- fixed at the time by
+  using `bic` to explicitly force C/I off on every run.
 - Second: even after that fix, a run mixing in leftover state from an
   UNRELATED prior manual test (built before the `bic` fix existed, with
   caching left genuinely enabled and never cleaned before halting)
@@ -231,16 +230,33 @@ silent data corruption, confirmed twice over:
   to a genuinely clean state and re-running the full `make
   hwcheck-rpi3` suite from there: 33/33 passed.
 
-With both C and I left off, `load_image`'s direct-to-RAM writes and this
-core's own subsequent fetches/loads are trivially coherent (no cache in
-the path to ever go stale), matching how a genuine cold boot's
-first-ever execution is always coherent by construction. The MMU alone
-(page-table memory attributes, not the cache-enable bits) is what
-actually fixes the alignment-fault problem above -- there is no known
-reason a future example would need the caches on given this project's
-specific re-injection-heavy workflow, so this is not treated as a
-temporary shortcut to revisit, just the correct tradeoff for this
-target's actual usage pattern.
+**Both caches are enabled again as of the scheduler-group port
+(2026-07-19)** -- see `HISTORY.md`'s corresponding entry for the full
+story. Leaving caches off sidestepped the corruption above, but at a
+real cost once `ldaxr`/`stlxr`-based synchronization
+(`examples/semaphore` and everything built on
+`examples/common/sync.tkb`) entered scope: cache-off-forever has only
+accidental single-core correctness, and real cache-coherent visibility
+of a `sem_post` on one core to a `sem_wait` spinning on another
+fundamentally needs the coherency fabric caching provides -- worth
+having correctly in place now even though only core 0 runs today (see
+the "Only core 0 runs" gate in `startup.S`), rather than revisiting this
+file again once a future example brings up cores 1-3. The stale-cache
+hazard that originally justified leaving caches off is instead handled
+the way every real ARMv8 reset handler (ARM Trusted Firmware, U-Boot,
+Linux) already handles it: `startup.S`'s `_start` calls
+`dcache_invalidate_all` (a CLIDR_EL1/CSSELR_EL1/CCSIDR_EL1 set/way
+sweep, INVALIDATE not clean-and-invalidate -- a write-back here would
+overwrite the fresh JTAG-loaded content with stale cached garbage) plus
+`ic ialluis`, unconditionally, as the FIRST thing that runs, before BSS
+clear or `mmu_init` -- with SCTLR_EL2.C/I forced off one more time
+immediately before that (in case inherited state already had them on),
+so the invalidation itself starts from a known state. `mmu_init` then
+`orr`s C/I on (unconditionally, same "explicit override of inherited
+state" reasoning that already applied to the M bit and, before this
+change, to forcing them off) as its final step. The MMU's page-table
+memory attributes are still what fixes the alignment-fault problem
+above -- that part of the design is unchanged.
 
 ## Preparing the SD card
 
@@ -404,6 +420,28 @@ inherits state a real reset would clear" theme:
   physical 0 -- diagnosed by recognizing the read-back "register value"
   0xd51e4020 as an `msr elr_el3, x0` instruction).
 
+Not rooted in inherited state, and not caught until the scheduler group
+(2026-07-19) -- see `HISTORY.md`'s corresponding entry for the full
+diagnosis:
+- **`rpi3_irq_entry` never actually switched tasks, on any RPi3 example,
+  ever, until this was found and fixed.** Its own header comment already
+  claimed the QEMU-matching convention ("`frame_sp` passed in x0, the
+  RETURNED frame_sp becomes the new SP"), but the actual instructions
+  never did it: `bl rpi3_irq_dispatch` was missing the `mov x0, sp`
+  immediately before it (so the dispatcher was called with whatever `x0`
+  happened to hold, not the frame pointer) and the `mov sp, x0`
+  immediately after it (so the returned next-task frame was simply
+  discarded) -- every interrupt always resumed the exact context it
+  interrupted. `examples/preempt` and `examples/watchdog` had both
+  already been passing `make hwcheck-rpi3` despite this, because both
+  examples' `.expected` fixtures are derived entirely from tick-counting
+  bookkeeping the dispatcher performs regardless of whether the
+  interrupted task's own code ever runs again; `examples/semaphore` was
+  the first example whose correctness depends on a task's own code
+  actually executing (`shared.count`, incremented by `task_a`/`task_b`
+  themselves), and is what surfaced this. Fixed by adding the exact same
+  two lines `examples/common_qemu/startup.S`'s `irq_entry` already has.
+
 ## UART0 (PL011) driver notes (`uart.tkb`)
 
 - GPIO14/15 must be switched to ALT0 and have their pull-up/down
@@ -421,9 +459,12 @@ inherits state a real reset would clear" theme:
 ## Exception vector table (`startup.S`)
 
 The EL2H IRQ entry (0x280) vectors to `rpi3_irq_entry` (full x0-x30 +
-ELR/SPSR save, `bl rpi3_irq_dispatch`, restore, `eret` -- same 272-byte
-frame as `examples/common_qemu/startup.S`, but always resuming the SAME
-context: no task switching until a scheduler example needs it). Every
+ELR/SPSR save, `mov x0, sp` / `bl rpi3_irq_dispatch` / `mov sp, x0` /
+restore / `eret` -- same 272-byte frame AND task-switching calling
+convention as `examples/common_qemu/startup.S`'s `irq_entry`, resuming
+whatever frame `rpi3_irq_dispatch` returns, not necessarily the one
+that was interrupted -- see "Interrupts" above for a bug that, until
+2026-07-19, made this description true in comment only). Every
 other entry just spins (`b .`) as a safety net for controlled,
 debuggable behavior on any fault. Found necessary the hard way: before
 this table existed, `examples/packed` hanging left the halted PC

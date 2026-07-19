@@ -172,54 +172,43 @@ mmu_init:
     dsb     sy
     isb
 
-    /* Enable the MMU (SCTLR_EL2.M) only -- deliberately leave the D-cache
-       (C) and I-cache (I) disabled. This is not a performance-neutral
-       choice; it is required for correctness under this project's
-       specific JTAG re-injection workflow (scripts/rpi3_jtag_load.sh):
-       OpenOCD's `load_image` writes a new payload directly into
-       physical RAM over the debug port, bypassing the CPU's caches
-       entirely (like a DMA write) -- confirmed the hard way, with
-       caching on: the FIRST injection after enabling the MMU ran
-       correctly (nothing cached yet to go stale), but the SECOND
-       (loading examples/packed on top of the address range
-       examples/hello had just finished running from) produced garbled
-       UART output, with UART0's own registers reading back exactly the
-       values uart_init() should have produced -- i.e. the peripheral
-       side was fine, and the CPU was executing/reading stale cached
-       instructions/data left over from the PREVIOUS occupant of these
-       same physical addresses. OpenOCD's aarch64 target here does not
-       expose SCTLR_EL2 as a directly settable register (confirmed:
-       "register sctlr_el2 not found in current target"), so there is
-       no way to force a clean cache-disabled state from the JTAG side
-       before each injection either. With the D/I-cache left off,
-       `load_image`'s direct-to-RAM writes and this core's own
-       subsequent fetches/loads are trivially coherent (no cache in the
-       path to go stale), matching how a genuine cold boot's first-ever
-       execution is always coherent by construction. The MMU alone
-       (page-table memory attributes, not cache-enable bits) is what
-       actually fixes the unaligned-access fault this file exists for --
-       see this file's own header comment.
+    /* Enable the MMU (SCTLR_EL2.M) AND both caches (C, I) -- this is the
+       steady state every subsequent instruction/load in this run
+       executes under. Caches were left OFF up to this exact point
+       deliberately: startup.S's _start unconditionally invalidates the
+       entire D-cache (by set/way) and I-cache (ialluis) BEFORE this
+       function even runs, specifically so it is safe to turn them on
+       here regardless of what a previous JTAG-injected occupant of this
+       core left cached -- see that call site's own comment for the full
+       stale-cache-line hazard this sequencing avoids (OpenOCD's
+       `load_image` DMAs a new payload straight into physical RAM,
+       bypassing caches entirely, so a still-resident line from the
+       PREVIOUS occupant would otherwise shadow the fresh content).
 
-       SCTLR_EL2 is itself inherited state, same as everything else this
-       file's header discusses (see startup.S's own comment on why) --
-       explicitly CLEAR the C/I bits with BIC, not just refrain from
-       setting them with ORR: a PREVIOUS payload that had caching
-       enabled (e.g. an earlier build of this very file, before this
-       fix) leaves SCTLR_EL2.C/I set for whatever runs next, and `orr
-       x0, x0, #1` alone only adds the M bit on top of that inherited
-       state rather than overriding it -- confirmed the hard way: a
-       batch of `make hwcheck-rpi3` runs where only the very first
-       example passed and every other one produced garbage, because the
-       first example's own catch inherited stale cache-enabled state
-       from an unrelated prior manual test, and every following example
-       then inherited caching-enabled state from the ONE before it in
-       the same run (this file's old ORR-only write never cleared it
-       once set). BIC needs two separate immediates: bit 2 and bit 12
-       are not a contiguous run, so `#(1<<2)|(1<<12)` is not a valid
-       single AArch64 bitmask immediate. */
+       An earlier version of this project left C/I permanently off
+       instead of invalidating first -- simpler, but not free: with the
+       D-cache off, ldaxr/stlxr-based synchronization (examples/
+       semaphore/semaphore.tkb and the rest of the scheduler-group
+       examples that build on examples/common/sync.tkb) only has
+       single-core correctness by luck of the uniprocessor case, and
+       real multi-core cache-coherent semantics (a sem_post on one core
+       becoming visible to a sem_wait spinning on another) fundamentally
+       need the coherency fabric caching provides -- worth paying for
+       now even though only core 0 runs today (see _start's own
+       core-gate), rather than revisiting this file again once a future
+       example brings up core 1-3.
+
+       SCTLR_EL2 is itself inherited state across JTAG re-injections
+       (see startup.S's comment on why) -- explicitly SET the C/I bits
+       with ORR here for the same reason mmu.S used to explicitly CLEAR
+       them with BIC: either direction must be an unconditional
+       override, not a refinement of whatever the previous occupant left
+       behind, or a run that inherits the opposite polarity from
+       whatever ran here last would silently pick up its cache state
+       instead of this file's own intended one. */
     mrs     x0, sctlr_el2
-    bic     x0, x0, #(1 << 2)        /* SCTLR_EL2.C: force D-cache off */
-    bic     x0, x0, #(1 << 12)       /* SCTLR_EL2.I: force I-cache off */
+    orr     x0, x0, #(1 << 2)        /* SCTLR_EL2.C: enable D-cache */
+    orr     x0, x0, #(1 << 12)       /* SCTLR_EL2.I: enable I-cache */
     orr     x0, x0, #1               /* SCTLR_EL2.M: enable MMU */
     msr     sctlr_el2, x0
     isb

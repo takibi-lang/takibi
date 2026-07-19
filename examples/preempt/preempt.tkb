@@ -1,22 +1,38 @@
-// Preemptive scheduler demo. Single shared file for both targets: the
-// scheduling algorithm (tick bookkeeping + round-robin task switch) is
-// identical, but the two platforms trigger and structure it differently --
+// Preemptive scheduler demo. Single shared file for all three targets:
+// the scheduling algorithm (tick bookkeeping + round-robin task switch,
+// now factored into scheduler_tick() below) is identical, but each
+// platform triggers and structures it differently --
 //   - QEMU (ARM Generic Timer, PPI #30): `irq_dispatch(frame_sp) -> next_sp`
-//     does the tick bookkeeping AND the round-robin switch in one function,
-//     called directly from examples/common_qemu/startup.S's irq_entry.
+//     reads GICv2's gic.cpu_iar to confirm the timer fired, calls
+//     scheduler_tick(), then writes gic.cpu_eoir -- called directly from
+//     examples/common_qemu/startup.S's irq_entry.
+//   - Raspberry Pi 3B (ARM Generic Timer via BCM2837's own 2-level
+//     interrupt controller): `rpi3_irq_dispatch(frame_sp) -> next_sp`
+//     checks examples/common_rpi3/timer.tkb's rpi3_timer_irq_pending()
+//     instead (a direct per-core local IRQ, no EOI register to write --
+//     see that file's header comment for why this can't reuse gic.tkb's
+//     shape), then calls the SAME scheduler_tick() -- called directly
+//     from examples/common_rpi3/startup.S's rpi3_irq_entry.
 //   - STM32 (SysTick + PendSV): `SysTick_Handler()` does the tick
 //     bookkeeping then requests a switch via pendsv_trigger(); the actual
 //     switch happens in `pendsv_dispatch(frame_sp) -> next_sp`, called from
 //     examples/common_stm32/startup.S's PendSV_Handler.
-// Both sets of entry points are defined unconditionally below (see
+// All entry points are defined unconditionally below (see
 // examples/net_echo/net_echo.tkb's header comment for the general
 // pattern) -- whichever isn't relevant to the target being built is dead
-// code there. scheduler_init()/scheduler_disable()/scheduler_rearm_tick()
-// (examples/common_qemu/timer.tkb / examples/common_stm32/scheduler.tkb) hide
-// the remaining per-platform differences (STM32's systick_init() needs an
-// explicit reload value timer_init() has no equivalent for; the ARM
-// Generic Timer needs re-arming every tick, SysTick auto-reloads and
-// doesn't) behind matching names, so app_main() needs no per-platform branch at all.
+// code there. The unconditional `use "examples/common_qemu/gic.tkb"`
+// above already pulls in GicRegs/`gic` for every target regardless (no
+// Makefile command-line involvement needed, only as a staleness
+// prerequisite -- same reasoning the existing QEMU-side Makefile
+// comments document), so irq_dispatch type-checks identically on STM32
+// and the new RPi3 build even though neither ever calls it.
+// scheduler_init()/scheduler_disable()/scheduler_rearm_tick()
+// (examples/common_qemu/timer.tkb / examples/common_rpi3/timer.tkb /
+// examples/common_stm32/scheduler.tkb) hide the remaining per-platform
+// differences (STM32's systick_init() needs an explicit reload value
+// timer_init() has no equivalent for; the ARM Generic Timer needs
+// re-arming every tick, SysTick auto-reloads and doesn't) behind
+// matching names, so app_main() needs no per-platform branch at all.
 
 use "examples/common_qemu/gic.tkb";
 
@@ -35,25 +51,48 @@ let mut sched: SchedState = {3, 0, 6, 0, 0, {0, 0, 0}, {0, 0, 0}};
 let mut stack_a: [u8; 4096];
 let mut stack_b: [u8; 4096];
 
+// Platform-independent tick bookkeeping + round-robin switch, called
+// from each platform's own IRQ dispatch below once IT has confirmed the
+// timer is why it fired (a pure extraction of what used to be
+// irq_dispatch's own body -- QEMU's behavior is unchanged, verified via
+// `make qemutest`).
+fn scheduler_tick(frame_sp: usize) -> usize {
+    scheduler_rearm_tick();
+    sched.total_ticks = sched.total_ticks + 1;
+    let tc: *i32 = sched.tick_counts;
+    tc[sched.current_task] = tc[sched.current_task] + 1;
+    let sp: *usize = sched.tcb_sp;
+    sp[sched.current_task] = frame_sp;
+    if (sched.total_ticks >= sched.max_ticks) {
+        scheduler_disable();
+        sched.done = 1;
+    }
+    sched.current_task = (sched.current_task + 1) % sched.task_count;
+    let sp2: *usize = sched.tcb_sp;
+    return sp2[sched.current_task];
+}
+
 fn irq_dispatch(frame_sp: usize) -> usize {
     let id: u32 = *gic.cpu_iar;
     if (id == 30) {
-        scheduler_rearm_tick();
-        sched.total_ticks = sched.total_ticks + 1;
-        let tc: *i32 = sched.tick_counts;
-        tc[sched.current_task] = tc[sched.current_task] + 1;
-        let sp: *usize = sched.tcb_sp;
-        sp[sched.current_task] = frame_sp;
-        if (sched.total_ticks >= sched.max_ticks) {
-            scheduler_disable();
-            sched.done = 1;
-        }
-        sched.current_task = (sched.current_task + 1) % sched.task_count;
+        let next: usize = scheduler_tick(frame_sp);
         *(gic.cpu_eoir) = id;
-        let sp2: *usize = sched.tcb_sp;
-        return sp2[sched.current_task];
+        return next;
     }
     *(gic.cpu_eoir) = id;
+    return frame_sp;
+}
+
+// Raspberry Pi 3B: no EOI register to write (unlike GICv2's gic.cpu_eoir
+// above) -- BCM2837's local timer IRQ is a direct, level-triggered per-
+// core line that clears itself once scheduler_rearm_tick() (called
+// inside scheduler_tick()) re-arms the comparator, same as
+// examples/common_rpi3/intc.tkb's UART dispatch needs no separate ack
+// beyond servicing the peripheral.
+fn rpi3_irq_dispatch(frame_sp: usize) -> usize {
+    if (rpi3_timer_irq_pending()) {
+        return scheduler_tick(frame_sp);
+    }
     return frame_sp;
 }
 

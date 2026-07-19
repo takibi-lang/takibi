@@ -83,6 +83,7 @@ COMMON_RTOS        := $(COMMON_DIR)/rtos.tkb
 COMMON_RTC         := $(COMMON_QEMU_DIR)/rtc.tkb
 COMMON_NETCONFIG   := $(COMMON_QEMU_DIR)/netconfig.tkb
 COMMON_STM32_STUB  := $(COMMON_QEMU_DIR)/stm32_stub.tkb
+COMMON_RPI3_STUB   := $(COMMON_DIR)/rpi3_stub.tkb
 COMMON_FAT12_GEOMETRY := $(COMMON_DIR)/fat12_geometry.tkb
 
 # -- Linux/AMD64 user-space support files -------------------------------------
@@ -443,21 +444,29 @@ $(GETC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMM
 # not nvic.tkb, so there's no colliding irq_uart_rx_setup/unmask name to
 # worry about; see gic_regs.tkb's header comment for the distinction), so
 # COMMON_GIC is a prerequisite only here.
-$(TIMER_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_STM32_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_TIMER) $(COMMON_STM32_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
+$(TIMER_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_STM32_STUB) $(COMMON_RPI3_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_TIMER) $(COMMON_STM32_STUB) $(COMMON_RPI3_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
-# condvar.tkb/msgqueue.tkb/chan_rendezvous.tkb `use` sync.tkb and gic.tkb themselves now.
-$(SYNC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) $(COMMON_STM32_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_TIMER) $(COMMON_STM32_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
+# condvar.tkb/msgqueue.tkb/chan_rendezvous.tkb `use` sync.tkb and gic.tkb
+# themselves now. COMMON_RPI3_STUB supplies rpi3_timer_irq_pending()
+# (RPi3-only) for condvar.tkb/msgqueue.tkb's own dead-here rpi3_irq_dispatch
+# (chan_rendezvous.tkb has no such function yet, so the extra .tkb file is
+# simply unused there -- harmless, same reasoning as every other COMMON_*
+# prerequisite shared across a group with only partial need).
+$(SYNC_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) $(COMMON_STM32_STUB) $(COMMON_RPI3_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_TIMER) $(COMMON_STM32_STUB) $(COMMON_RPI3_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
 # rtos_demo.tkb `use`s common/rtos.tkb, which itself `use`s sync.tkb and
 # gic_regs.tkb. QEMU still passes full gic.tkb explicitly because
 # common_qemu/timer.tkb calls gic_init()/gic_enable_timer_ppi() by name.
 # COMMON_RTOS is listed here purely for Make's own staleness tracking (Make
 # cannot see into a .tkb file's own `use` declarations), same reasoning as
-# every other COMMON_* prerequisite in this file.
-$(RTOS_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_STM32_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_STM32_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
+# every other COMMON_* prerequisite in this file. COMMON_RPI3_STUB supplies
+# rpi3_timer_irq_pending() (RPi3-only, referenced by rtos.tkb's dead-here
+# rpi3_irq_dispatch) -- same reasoning as $(TIMER_OBJS)'s own identical need
+# further up.
+$(RTOS_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_STM32_STUB) $(COMMON_RPI3_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_GIC) $(COMMON_TIMER) $(COMMON_STM32_STUB) $(COMMON_RPI3_STUB) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
 # COMMON_NETCONFIG (OUR_IP) is unused-but-harmless for net_echo (no
 # IP awareness at all) -- it just gets one inert extra constant rather than
@@ -706,30 +715,36 @@ examples/irq/irq_stm32.o: examples/irq/irq.tkb $(COMMON_STM32_UART) $(COMMON_STM
 # harmless for every other example since nothing triggers PENDSVSET unless
 # a program enables SysTick, so no extra object needs linking here beyond
 # the usual startup.o.
-examples/preempt/preempt_stm32.o: examples/preempt/preempt.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+examples/preempt/preempt_stm32.o: examples/preempt/preempt.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $(COMMON_RPI3_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # semaphore: same scheduler restructure as preempt; declares its own extern
 # fn sem_wait/sem_post (no sync.tkb needed, same as the AArch64 version),
 # links against the STM32 sem_asm.o (ldrex/strex, not ldaxr/stlxr).
-examples/semaphore/semaphore_stm32.o: examples/semaphore/semaphore.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+# COMMON_RPI3_STUB: see preempt_stm32.o's own comment above -- semaphore.tkb
+# now defines its own rpi3_irq_dispatch too (examples/common_rpi3/AGENTS.md).
+examples/semaphore/semaphore_stm32.o: examples/semaphore/semaphore.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $(COMMON_RPI3_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # condvar/msgqueue: same scheduler restructure, plus reuse
 # examples/common/sync.tkb completely unchanged (pure takibi logic calling
 # only sem_wait/sem_post), linked against the STM32 sem_asm.o. Both files
-# `use` sync.tkb and gic.tkb themselves now.
-examples/condvar/condvar_stm32.o: examples/condvar/condvar.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+# `use` sync.tkb and gic.tkb themselves now, and now also define their own
+# rpi3_irq_dispatch (COMMON_RPI3_STUB, same reasoning as semaphore above).
+examples/condvar/condvar_stm32.o: examples/condvar/condvar.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) $(COMMON_RPI3_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
-examples/msgqueue/msgqueue_stm32.o: examples/msgqueue/msgqueue.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+examples/msgqueue/msgqueue_stm32.o: examples/msgqueue/msgqueue.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_GIC) $(COMMON_RPI3_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # rtos_demo.tkb `use`s common/rtos.tkb, which itself `use`s sync.tkb and
 # gic.tkb. The STM32 build provides the target-specific scheduler.tkb on
-# the command line exactly like preempt/condvar/msgqueue do.
-examples/rtos_demo/rtos_demo_stm32.o: examples/rtos_demo/rtos_demo.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+# the command line exactly like preempt/condvar/msgqueue do. COMMON_RPI3_STUB
+# supplies rpi3_timer_irq_pending() (RPi3-only, referenced by rtos.tkb's
+# dead-here rpi3_irq_dispatch) -- same reasoning as preempt_stm32.o's own
+# identical need further up.
+examples/rtos_demo/rtos_demo_stm32.o: examples/rtos_demo/rtos_demo.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_RPI3_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 COMMON_STM32_SDMMC := $(COMMON_STM32_DIR)/sdmmc.tkb
 COMMON_STM32_ETH_SDMMC_REGS := $(COMMON_STM32_DIR)/eth_sdmmc_regs.tkb
@@ -739,8 +754,9 @@ COMMON_STM32_FAT12_SDMMC := $(COMMON_STM32_DIR)/fat12_sdmmc.tkb
 # with fat12.tkb and the real SDMMC1 driver. Like rtos_demo it needs the
 # target-specific scheduler.tkb on the command line; like fatfs_sdcard it
 # reaches sdmmc.tkb through the shared fat12_sdmmc.tkb adapter.
-examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard_stm32.o: examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+# COMMON_RPI3_STUB: see rtos_demo_stm32.o's own comment above.
+examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard_stm32.o: examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # fatfs: `use`s fat12.tkb (which itself `use`s netutil.tkb) directly, needs
 # no STM32-specific HAL beyond uart+print. --forbid-trap enabled, same
@@ -786,8 +802,10 @@ examples/fatfs/kernel_stm32_ram.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM3
 	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEMIHOSTING_STUB_O) examples/fatfs/fatfs_stm32.o -o $@
 
 # watchdog: same scheduler restructure as preempt, no semaphore needed.
-examples/watchdog/watchdog_stm32.o: examples/watchdog/watchdog.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+# COMMON_RPI3_STUB: see preempt_stm32.o's own comment above -- watchdog.tkb
+# now defines its own rpi3_irq_dispatch too.
+examples/watchdog/watchdog_stm32.o: examples/watchdog/watchdog.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_GIC) $(COMMON_RPI3_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # net_echo/arp_reply/icmp_echo/tcp_echo/http_server (STM32): real Ethernet
 # MAC/PHY/DMA (examples/common_stm32/eth.tkb) instead of virtio-net. Each
@@ -870,14 +888,15 @@ examples/http_server_sdcard/http_server_sdcard_stm32.debug.o: examples/http_serv
 # SD/FAT operations run behind a Simple RTOS worker task. It needs both
 # target-specific Ethernet and scheduler implementations on the command
 # line, and links with sem_asm.o via its explicit RAM target above.
-examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+# COMMON_RPI3_STUB: see rtos_demo_stm32.o's own comment further up.
+examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
-examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.debug.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -g -o $@ --forbid-trap
+examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.debug.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -g -o $@ --forbid-trap
 
-examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.prof.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) --profile-functions -o $@ --forbid-trap
+examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.prof.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) --profile-functions -o $@ --forbid-trap
 
 examples/http_server_sdcard_rtos/kernel_stm32_ram.prof.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.prof.o $(COMMON_STM32_LINK_RAM_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.prof.o -o $@
@@ -907,14 +926,14 @@ examples/http_server_sdcard_rtos/kernel_stm32_ram.prof.elf: $(COMMON_STM32_START
 # already-hardened SdRequestChan) needed no fixes either -- this is the
 # rare case where the whole milestone was already trap-clean the moment
 # the flag was flipped. See HISTORY.md's issue #135 entry.
-examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.o: examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.o: examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 examples/kvs_server_sdcard_rtos/kernel_stm32_ram.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.o $(COMMON_STM32_LINK_RAM_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.o -o $@
 
-examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.prof.o: examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) --profile-functions -o $@ --forbid-trap
+examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.prof.o: examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) --profile-functions -o $@ --forbid-trap
 
 examples/kvs_server_sdcard_rtos/kernel_stm32_ram.prof.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.prof.o $(COMMON_STM32_LINK_RAM_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.prof.o -o $@
@@ -1327,18 +1346,61 @@ RPI3_RTC_OBJS     := $(foreach e,$(RPI3_RTC_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 $(RPI3_RTC_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_RTC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_RTC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
 
-RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES)
+# Preemptive-scheduler group: examples/preempt/watchdog need no semaphore
+# (RPI3_SCHED_EXAMPLES); examples/semaphore/condvar/msgqueue/rtos_demo
+# additionally need sem_wait/sem_post linked in (RPI3_SCHED_SEM_EXAMPLES) --
+# same TIMER_KERNELS/SEM_KERNELS split QEMU's own link section further up
+# this file already uses, for the same reason. See examples/common_rpi3/
+# AGENTS.md/timer.tkb's own header comment for why each of these files
+# needs its own rpi3_irq_dispatch -- the scheduling DECISION is
+# example-specific, unlike UART's uniformly-shared uart_irq_handler.
+# Neither gic.tkb nor gic_regs.tkb is passed on the command line for
+# preempt/watchdog/semaphore/condvar/msgqueue -- each of those files' own
+# unconditional `use "examples/common_qemu/gic.tkb"` already brings both
+# in for every target (matching the existing QEMU/STM32 Makefile
+# comments' own reasoning for the same files); rtos_demo.tkb instead
+# reaches the `gic` instance transitively through common/rtos.tkb's own
+# `use "examples/common_qemu/gic_regs.tkb"` (types + the `gic` global,
+# no functions -- see that file's own header comment), which is enough
+# for its dead-here irq_dispatch to type-check without needing full
+# gic.tkb explicitly either. COMMON_STM32_STUB supplies pendsv_trigger()
+# (STM32-only, referenced by every one of these files' dead-here
+# SysTick_Handler) -- reused as-is from the QEMU build's own identical
+# need for the same files, see that variable's own comment further up.
+RPI3_SCHED_EXAMPLES     := preempt watchdog
+RPI3_SCHED_SEM_EXAMPLES := semaphore condvar msgqueue rtos_demo
+RPI3_SCHED_OBJS         := $(foreach e,$(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
+
+$(RPI3_SCHED_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+
+RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES)
 RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
-RPI3_RTC_KERNELS   := $(foreach e,$(RPI3_RTC_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
-RPI3_GENERIC_KERNELS := $(filter-out $(RPI3_RTC_KERNELS),$(RPI3_KERNELS))
+# rtc/timer/preempt/watchdog need COMMON_RPI3_TIMER_ASM_O linked in
+# (read_cntfrq() and friends -- mrs cannot be called directly from
+# takibi); semaphore/condvar/msgqueue/rtos_demo need that PLUS
+# $(COMMON_SEM_ASM_O) for sem_wait/sem_post -- reused as-is from the QEMU
+# build (examples/common_qemu/sem_asm.S is pure ldaxr/stlxr AArch64
+# architecture code with no QEMU-specific addressing, and RPI3_TARGET is
+# the same aarch64-none-elf triple as AARCH64_TARGET, so the QEMU-built
+# object is directly link-compatible -- same reasoning already applied to
+# COMMON_STM32_STUB/COMMON_RPI3_STUB's own cross-target reuse above).
+# Everything else uses the plain startup.o+mmu.o link line.
+RPI3_TIMER_ASM_KERNELS := $(foreach e,$(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
+RPI3_SEM_KERNELS       := $(foreach e,$(RPI3_SCHED_SEM_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
+RPI3_GENERIC_KERNELS   := $(filter-out $(RPI3_TIMER_ASM_KERNELS) $(RPI3_SEM_KERNELS),$(RPI3_KERNELS))
 
 $(RPI3_GENERIC_KERNELS): examples/%/kernel_rpi3.elf: \
     $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
 	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) examples/$*/$*_rpi3.o -o $@
 
-$(RPI3_RTC_KERNELS): examples/%/kernel_rpi3.elf: \
+$(RPI3_TIMER_ASM_KERNELS): examples/%/kernel_rpi3.elf: \
     $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_TIMER_ASM_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
 	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_TIMER_ASM_O) examples/$*/$*_rpi3.o -o $@
+
+$(RPI3_SEM_KERNELS): examples/%/kernel_rpi3.elf: \
+    $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_TIMER_ASM_O) $(COMMON_SEM_ASM_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
+	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_TIMER_ASM_O) $(COMMON_SEM_ASM_O) examples/$*/$*_rpi3.o -o $@
 
 ## hwcheck-rpi3: run Raspberry Pi 3B (BCM2837) hardware integration tests
 ## (requires a real Raspberry Pi 3B connected via JTAG + UART -- see

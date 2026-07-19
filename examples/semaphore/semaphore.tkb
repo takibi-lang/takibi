@@ -4,11 +4,11 @@
 // increment shared.count 3 times under mutex protection; a final value of
 // 6 confirms no lost updates.
 //
-// Single shared file for both targets -- see examples/preempt/preempt.tkb's
-// header comment for the general dispatch-unification pattern (this
-// example needs no per-tick bookkeeping of its own, so its irq_dispatch/
-// SysTick_Handler are simpler than preempt's: just re-arm/switch, no tick
-// counting).
+// Single shared file for all three targets -- see examples/preempt/
+// preempt.tkb's header comment for the general dispatch-unification
+// pattern (this example needs no per-tick bookkeeping of its own, so its
+// irq_dispatch/rpi3_irq_dispatch/SysTick_Handler are simpler than
+// preempt's: just re-arm/switch, no tick counting).
 
 use "examples/common_qemu/gic.tkb";
 
@@ -49,6 +49,24 @@ fn irq_dispatch(frame_sp: usize) -> usize {
         return sp2[sched.current_task];
     }
     *(gic.cpu_eoir) = id;
+    return frame_sp;
+}
+
+// Raspberry Pi 3B: same rpi3_timer_irq_pending()-based dispatch as
+// examples/preempt/preempt.tkb's own (no per-tick bookkeeping here
+// either, so no separate scheduler_tick-style helper is worth extracting
+// -- this body already matches irq_dispatch above minus the GICv2
+// id/EOI plumbing, same duplication-over-abstraction convention this
+// file already uses between irq_dispatch and pendsv_dispatch below).
+fn rpi3_irq_dispatch(frame_sp: usize) -> usize {
+    if (rpi3_timer_irq_pending()) {
+        scheduler_rearm_tick();
+        let sp: *usize = sched.tcb_sp;
+        sp[sched.current_task] = frame_sp;
+        sched.current_task = (sched.current_task + 1) % sched.task_count;
+        let sp2: *usize = sched.tcb_sp;
+        return sp2[sched.current_task];
+    }
     return frame_sp;
 }
 

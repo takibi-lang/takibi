@@ -220,12 +220,12 @@ run_hw_test_rpi3_stdin() {
 }
 
 # Mirrors RPI3_EXAMPLES + RPI3_CHECKSUM_EXAMPLES + RPI3_IRQ_EXAMPLES +
-# RPI3_RTC_EXAMPLES in the Makefile -- see examples/common_rpi3/AGENTS.md
-# for what's still deliberately excluded
-# (preempt/semaphore/condvar/msgqueue/watchdog/rtos_demo need a full
-# preemptive scheduler on top of timer interrupts; SD-card-storage
-# examples are out of scope entirely). Every .expected/.stdin fixture
-# here is reused byte-for-byte from the QEMU/STM32 suites --
+# RPI3_RTC_EXAMPLES + RPI3_SCHED_EXAMPLES in the Makefile -- see
+# examples/common_rpi3/AGENTS.md for what's still deliberately excluded
+# (semaphore/condvar/msgqueue/watchdog/rtos_demo, the rest of the
+# preemptive-scheduler group examples/preempt is the first of; SD-card-
+# storage examples are out of scope entirely). Every .expected/.stdin
+# fixture here is reused byte-for-byte from the QEMU/STM32 suites --
 # uart_puts/uart_print_* write identical bytes on every HAL, even though
 # rtc/timer's underlying time source here (the ARM Generic Timer's
 # free-running counter, not a real RTC peripheral) differs -- both
@@ -269,6 +269,12 @@ run_hw_test_rpi3_stdin "echo (rpi3)" "$REPO_ROOT/examples/echo/kernel_rpi3.elf" 
     "$REPO_ROOT/examples/echo/echo.expected" "$REPO_ROOT/examples/echo/echo.stdin"
 run_hw_test_rpi3_stdin "irq (rpi3)"  "$REPO_ROOT/examples/irq/kernel_rpi3.elf" \
     "$REPO_ROOT/examples/irq/irq.expected" "$REPO_ROOT/examples/irq/irq.stdin"
+run_hw_test_rpi3 "preempt (rpi3)"        "$REPO_ROOT/examples/preempt/kernel_rpi3.elf"        "$REPO_ROOT/examples/preempt/preempt.expected"
+run_hw_test_rpi3 "semaphore (rpi3)"      "$REPO_ROOT/examples/semaphore/kernel_rpi3.elf"      "$REPO_ROOT/examples/semaphore/semaphore.expected"
+run_hw_test_rpi3 "condvar (rpi3)"        "$REPO_ROOT/examples/condvar/kernel_rpi3.elf"        "$REPO_ROOT/examples/condvar/condvar.expected"
+run_hw_test_rpi3 "msgqueue (rpi3)"       "$REPO_ROOT/examples/msgqueue/kernel_rpi3.elf"       "$REPO_ROOT/examples/msgqueue/msgqueue.expected"
+run_hw_test_rpi3 "watchdog (rpi3)"       "$REPO_ROOT/examples/watchdog/kernel_rpi3.elf"       "$REPO_ROOT/examples/watchdog/watchdog.expected"
+run_hw_test_rpi3 "rtos_demo (rpi3)"      "$REPO_ROOT/examples/rtos_demo/kernel_rpi3.elf"      "$REPO_ROOT/examples/rtos_demo/rtos_demo.expected"
 
 echo ""
 echo "rpi3 hardware tests: $PASS passed, $FAIL failed"

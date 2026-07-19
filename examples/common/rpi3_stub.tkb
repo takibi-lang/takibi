@@ -1,0 +1,18 @@
+// No-op stand-in for rpi3_timer_irq_pending(), a Raspberry Pi 3B-only
+// function that a shared example's dead (never-executed-off-RPi3) code
+// path still references: the RPi3-shaped rpi3_irq_dispatch entry point
+// in the scheduler examples (examples/preempt and future siblings) --
+// it has no QEMU/STM32-side equivalent concept at all, unlike
+// scheduler_init/scheduler_disable/scheduler_rearm_tick, which route
+// through a uniformly-named real implementation on each side instead of
+// needing a stub here. takibi has no conditional compilation, so every
+// function/branch in a shared file is compiled for every target
+// regardless of which one actually runs it -- this exists solely so
+// that compilation succeeds on QEMU/STM32; it is never actually invoked
+// there (mirrors examples/common_qemu/stm32_stub.tkb's own
+// pendsv_trigger() stub, needed for the identical reason in the
+// opposite direction). Real implementation: examples/common_rpi3/
+// timer.tkb.
+fn rpi3_timer_irq_pending() -> bool {
+    return false;
+}

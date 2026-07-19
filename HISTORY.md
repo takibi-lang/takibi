@@ -8946,3 +8946,126 @@ Ported without any new root-cause surprises -- confirmed 37/37 passing
 (the MMU/interrupt-inherited-state lessons from the entry above all
 still held: `read_cntpct`/`read_cntfrq` are pure system-register reads,
 no new MMIO mapping or peripheral-state quiescing needed).
+
+**2026-07-19 follow-up: the preemptive-scheduler group (43 examples
+total) -- and a task-switching bug that predates this group entirely.**
+Ported `echo`/`irq` first (real UART RX interrupts, uneventful), then
+`preempt` alone through to a clean `make qemutest`/`make stm32build`
+before touching RPi3 hardware, per the incremental approach agreed with
+the user. `examples/common_rpi3/timer.tkb` (new) provides the ARM
+Generic Timer comparator HAL (`CNTP_TVAL_EL0`/`CNTP_CTL_EL0`, routed
+through the QA7 per-core Timer Interrupt Control register at
+`0x40000040` bit 1 -- a direct local IRQ, unlike UART0's VC-controller
+cascade, so this file deliberately does not `use` `intc.tkb`) with the
+same `scheduler_init`/`scheduler_disable`/`scheduler_rearm_tick`/
+`setup_task_stack` names QEMU's and STM32's own scheduler HALs use.
+One real platform difference in `setup_task_stack`: the saved SPSR must
+encode EL2h (`0x09`), not QEMU's EL1h (`0x05`) -- this board runs every
+payload at EL2H throughout (see the MMU/interrupt entry above), so a
+task's `eret` target must match. Each scheduler-group `.tkb` file
+(`preempt`/`semaphore`/`condvar`/`msgqueue`/`watchdog`, plus
+`examples/common/rtos.tkb` for `rtos_demo`) needed its own
+`rpi3_irq_dispatch(frame_sp) -> usize`, calling
+`rpi3_timer_irq_pending()` instead of GICv2's `gic.cpu_iar`/
+`gic.cpu_eoir` -- the scheduling DECISION is example-specific state, not
+driver logic, so unlike UART there is no single shared HAL entry point
+to swap out. `examples/common/rpi3_stub.tkb` (new) supplies a no-op
+`rpi3_timer_irq_pending()` so QEMU/STM32 builds of these same shared
+files still type-check their now-dead-there `rpi3_irq_dispatch`, mirroring
+`examples/common_qemu/stm32_stub.tkb`'s existing `pendsv_trigger()` stub
+in the opposite direction. `examples/common_qemu/sem_asm.S` (pure
+`ldaxr`/`stlxr` AArch64 architecture code, no QEMU-specific addressing)
+is reused as-is for RPi3's `semaphore`/`condvar`/`msgqueue`/`rtos_demo`
+builds rather than duplicated, since `RPI3_TARGET` and `AARCH64_TARGET`
+are the same `aarch64-none-elf` triple. `rtos_demo` additionally needed
+real `enable_irq()`/`disable_irq()` (`examples/common/rtos.tkb`'s
+`klock`/`kunlock` giant-lock placeholder) added to
+`examples/common_rpi3/startup.S` -- the first RPi3 example to pull
+`rtos.tkb` in at all.
+
+`preempt` alone passed cleanly on real hardware (38/38 including the 37
+already-ported examples). Porting the remaining four then surfaced two
+real problems, in this order:
+
+*Problem 1 -- cache-off blocks correctness, not just performance.*
+Since the very first MMU work (see the entry above), this board has run
+with `SCTLR_EL2.C`/`I` permanently forced off, a deliberate workaround
+for JTAG's `load_image` bypassing the cache (a DMA-style write straight
+into physical RAM that a stale cache line could shadow). The user
+pushed back on this once semaphore-based examples were in scope:
+leaving caches off indefinitely trades away real correctness value
+(cache-coherent visibility of a `sem_post` on one core to a `sem_wait`
+spinning on another, once this board ever brings up cores 1-3 -- see
+the "Only core 0 runs" gate in `startup.S`) for a workaround to a
+problem that has a standard, well-understood fix: invalidate the stale
+state instead of never trusting the cache at all. Every real ARMv8
+reset handler (ARM Trusted Firmware, U-Boot, Linux) does exactly this
+at cold boot for the same class of reason (untrusted prior cache state)
+via a CLIDR_EL1/CSSELR_EL1/CCSIDR_EL1 set/way sweep -- added as
+`dcache_invalidate_all` in `examples/common_rpi3/startup.S`, called
+(alongside `ic ialluis`) as the FIRST thing `_start` does, before BSS
+clear or `mmu_init`, with SCTLR_EL2.C/I explicitly forced off one more
+time immediately beforehand (in case inherited state already had them
+on) so the invalidation itself starts from a known state. `mmu_init`
+(`examples/common_rpi3/mmu.S`) now `orr`s C/I on (unconditionally, same
+"explicit override, not a refinement of inherited state" reasoning that
+already applied to the M bit) as its own final step, instead of
+`bic`ing them off. A full `make hwcheck-rpi3` run after this change
+alone still showed 39/43 passing (the 4 semaphore-based examples
+still failing identically to before) -- proof this was a real, needed
+fix with zero regression on its own, but not what was causing the
+semaphore failures.
+
+*Problem 2 -- `rpi3_irq_entry` never actually switched tasks, on ANY
+RPi3 example, ever.* Manual JTAG investigation of the still-failing
+`semaphore` (watchpoints on `sched.tcb_sp[1]`, then temporary
+`uart_puts` instrumentation inside `rpi3_irq_dispatch` and `task_a`/
+`task_b` themselves, added and reverted via `git checkout` once done)
+showed something stark: `sched.current_task` cycled 0->1->2->0->1->2
+correctly on every tick (the dispatcher's own bookkeeping was fine),
+timer ticks fired at the expected ~16ms rate, but `task_a`/`task_b`'s
+own code NEVER executed even once -- not "livelocked inside `sem_wait`"
+as first suspected, but never reached at all. `rpi3_irq_entry`'s own
+header comment already claimed the QEMU-matching convention
+("`frame_sp` passed in x0, the RETURNED frame_sp becomes the new SP")
+-- but the actual instructions never did it: after saving ELR_EL2/
+SPSR_EL2 into the frame, `bl rpi3_irq_dispatch` was called with
+whatever `x0` happened to hold from the immediately preceding `mrs x0,
+elr_el2` (the interrupted PC, not the frame pointer), and its return
+value was simply discarded -- the code always reloaded ELR/SPSR from
+the SAME frame it had just saved and returned to it, unconditionally.
+Every interrupt on this board, across every previously-ported example,
+had been resuming the exact context it interrupted; the `tcb_sp[]`
+round-robin bookkeeping was pure decoration. The fix is the exact
+3-line pattern already used by `examples/common_qemu/startup.S`'s
+`irq_entry`, added verbatim: `mov x0, sp` immediately before
+`bl rpi3_irq_dispatch`, and `mov sp, x0` immediately after.
+
+That `preempt` and `watchdog` had already been passing `make
+hwcheck-rpi3` (including on real hardware) despite this bug is the
+uncomfortable part: both examples' `.expected` fixtures are derived
+entirely from tick-counting bookkeeping the dispatcher itself performs
+(`tick_counts[]`/`sched.total_ticks` for `preempt`;
+`wdt.tick`/`wdt.last_kick[]`/deadline comparisons for `watchdog`) --
+values that update correctly regardless of whether `task_a`/`task_b`/
+`task_healthy`/`task_hung` ever actually run, since the dispatcher's own
+round-robin accounting was never in question, only whether execution
+genuinely followed it. Neither fixture depends on any side effect only
+observable from INSIDE a task (unlike `semaphore`'s `shared.count`,
+incremented by `task_a`/`task_b` themselves), so neither test could
+have caught this. This was the exact uncertainty flagged (but not
+resolved) when `preempt` was first ported: whether `rpi3_irq_entry`'s
+task-switching convention was "fully and correctly implemented" was
+inferred from the passing test rather than verified against the actual
+instructions -- a reminder that a passing test is evidence, not proof,
+when the fixture's derivation doesn't strictly require the mechanism
+under test.
+
+After the `rpi3_irq_entry` fix, `make hwcheck-rpi3` passed 43/43 clean
+-- `preempt`/`watchdog` unaffected (their output was already numerically
+correct, now for the right reason), `semaphore`/`condvar`/`msgqueue`/
+`rtos_demo` passing for the first time. `make qemutest` (131/131) and
+`make stm32build` re-confirmed zero regression on the other two targets
+throughout (the `rpi3_irq_entry` fix is RPi3-only code, but the shared
+`.tkb` changes -- new `rpi3_irq_dispatch` functions, `rtos.tkb`'s own,
+`enable_irq`/`disable_irq` -- all touch files QEMU/STM32 also compile).

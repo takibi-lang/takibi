@@ -148,9 +148,10 @@ fn chan_recv(ch: *Chan) -> i32 !{may_block} {
 // Generalized from the fixed-3-task pattern examples/preempt,
 // examples/msgqueue, and examples/chan_rendezvous each duplicated
 // inline -- see examples/preempt/preempt.tkb's header comment for why
-// both platforms' entry points (irq_dispatch for QEMU, SysTick_Handler +
-// pendsv_dispatch for STM32) are defined unconditionally in one shared
-// file. NTASKS=4: task 0 is always app_main() itself (matches every
+// all three platforms' entry points (irq_dispatch for QEMU,
+// SysTick_Handler + pendsv_dispatch for STM32, rpi3_irq_dispatch for
+// Raspberry Pi 3B) are defined unconditionally in one shared file.
+// NTASKS=4: task 0 is always app_main() itself (matches every
 // prior example's own convention -- app_main() calls rtos_task_add for
 // tasks 1..3, never for itself), tasks 1..3 are available via
 // rtos_task_add.
@@ -211,6 +212,23 @@ fn irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
         return next_sp;
     }
     *(gic.cpu_eoir) = id;
+    return frame_sp;
+}
+
+// Raspberry Pi 3B: examples/common_rpi3/timer.tkb's rpi3_timer_irq_pending()
+// instead of GICv2's gic.cpu_iar/gic.cpu_eoir -- see examples/preempt/
+// preempt.tkb's header comment for why every scheduler-group file needs
+// its own rpi3_irq_dispatch rather than a shared one, and
+// examples/common/rpi3_stub.tkb's header comment for why
+// rpi3_timer_irq_pending() still needs a stub on QEMU/STM32 even though
+// this file otherwise stays platform-agnostic. sched_next() already
+// factors out the platform-independent save/advance/resume step shared
+// with irq_dispatch/pendsv_dispatch above.
+fn rpi3_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
+    if (rpi3_timer_irq_pending()) {
+        scheduler_rearm_tick();
+        return sched_next(frame_sp);
+    }
     return frame_sp;
 }
 

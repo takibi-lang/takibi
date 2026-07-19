@@ -67,12 +67,21 @@ fn intc_uart_irq_pending() -> bool {
     return (*pending_2 & (1 << 25)) != 0;
 }
 
-// Called from startup.S's rpi3_irq_entry (`bl rpi3_irq_dispatch`) after
-// it has saved every register -- the only interrupt source wired up on
-// this target so far is UART0's RX line; extend this if-chain (not
-// intc_uart_irq_pending() itself) when a second source needs handling.
-fn rpi3_irq_dispatch() !{interrupt} {
+// Called from startup.S's rpi3_irq_entry (`bl rpi3_irq_dispatch`, with
+// the interrupted frame's SP in x0) after it has saved every register.
+// examples/echo/examples/irq never switch tasks, so this always returns
+// the SAME frame_sp it was given -- matching the weak default in
+// startup.S exactly, just with UART0's RX line actually serviced first.
+// (examples/preempt and its scheduler-group siblings need a DIFFERENT
+// rpi3_irq_dispatch that can return a different task's frame_sp on a
+// timer tick -- see examples/common_rpi3/timer.tkb's header comment for
+// why that logic cannot live here too: this file is `use`d by
+// examples/echo/examples/irq's build, and a second, timer-driven
+// rpi3_irq_dispatch definition in the SAME compilation would collide
+// with this one, not override it.)
+fn rpi3_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
     if (intc_uart_irq_pending()) {
         uart_irq_handler();
     }
+    return frame_sp;
 }
