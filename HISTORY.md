@@ -9602,3 +9602,16 @@ start in this session because `stty -F /dev-host/ttyUSB1` returned EPERM
 despite the device ACL granting the current user read/write access; this is
 a host serial-device condition, not a firmware/test mismatch, and occurred
 before any example was injected.
+
+RPi3 hardware-runner diagnostic fix: `run_hwtest_rpi3.sh` intended to save
+the JTAG loader's exit status and distinguish injection failures from UART
+mismatches, but its `loader; echo $? > status` sequence ran under `set -e`.
+A failed loader therefore terminated the harness before either the status
+or captured OpenOCD log was printed, and `make hwcheck-rpi3` exposed only
+an unexplained `Error 1`. Status capture now uses an `if` condition (which
+is exempt from `set -e`) in both ordinary and stdin-driven paths. JTAG
+infrastructure failure prints the full loader log and exits after the first
+example instead of repeating the same failure across the suite. Verified
+against the currently unavailable Olimex probe: `make hwcheck-rpi3` now
+identifies `LIBUSB_ERROR_TIMEOUT`, the FTDI VID/PID, and the failed PC/MMU
+check before returning nonzero.

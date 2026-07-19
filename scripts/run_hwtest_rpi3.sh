@@ -121,16 +121,17 @@ run_hw_test_rpi3() {
 
     read_until_quiet "$tmp_drain" "$DRAIN_MAX_SECS" "$DRAIN_STABLE_POLLS" 0
     read_until_quiet "$tmp_out" "$max_secs" "$stable_polls" 1 \
-        "\"$REPO_ROOT/scripts/rpi3_jtag_load.sh\" \"$elf\" > \"$load_log\" 2>&1; echo \$? > \"$load_status_file\""
+        "if \"$REPO_ROOT/scripts/rpi3_jtag_load.sh\" \"$elf\" > \"$load_log\" 2>&1; then load_status=0; else load_status=\$?; fi; echo \"\$load_status\" > \"$load_status_file\""
 
     load_status=$(cat "$load_status_file" 2>/dev/null || echo 1)
 
     if [ "$load_status" != "0" ]; then
-        printf "${RED}FAIL${RST}  %s  (JTAG injection failed -- see log below;" "$name"
-        printf " likely needs a power cycle to examples/common_rpi3/jtag_stub.img)\n"
+        printf "${RED}FAIL${RST}  %s  (JTAG injection failed -- loader log follows)\n" "$name"
         sed 's/^/       /' "$load_log"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
+        exit 1
     elif cmp -s "$expected" "$tmp_out"; then
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
@@ -166,8 +167,11 @@ run_hw_test_rpi3_stdin() {
     local catpid=$!
     ACTIVE_READER_PID=$catpid
     sleep 0.2
-    "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$elf" > "$load_log" 2>&1
-    load_status=$?
+    if "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$elf" > "$load_log" 2>&1; then
+        load_status=0
+    else
+        load_status=$?
+    fi
     echo "$load_status" > "$load_status_file"
 
     if [ "$load_status" = "0" ]; then
@@ -201,11 +205,12 @@ run_hw_test_rpi3_stdin() {
     ACTIVE_READER_PID=""
 
     if [ "$load_status" != "0" ]; then
-        printf "${RED}FAIL${RST}  %s  (JTAG injection failed -- see log below;" "$name"
-        printf " likely needs a power cycle to examples/common_rpi3/jtag_stub.img)\n"
+        printf "${RED}FAIL${RST}  %s  (JTAG injection failed -- loader log follows)\n" "$name"
         sed 's/^/       /' "$load_log"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
+        exit 1
     elif cmp -s "$expected" "$tmp_out"; then
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))

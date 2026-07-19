@@ -713,6 +713,16 @@ still-Raspbian board) from an actual test failure (injection succeeded,
 UART output didn't match), so the fix (reset vs. a real bug) is never
 ambiguous from the output.
 
+The loader-status capture must remain inside an `if` condition. A former
+`loader; echo $? > status` command string ran under the harness's global
+`set -e`; any nonzero loader result exited the entire harness before the
+status file or saved OpenOCD log could be reported, leaving `make` to show
+only an unexplained `Error 1`. Both ordinary and stdin-driven tests now
+capture the status through `if loader; then ...; else ...; fi`. A JTAG
+infrastructure failure prints the complete loader log and stops after the
+first example (the same adapter failure cannot usefully be retried for all
+remaining examples); UART mismatches still accumulate normally.
+
 ## `sudo` warning specific to this devcontainer
 
 **Do not run `openocd` (or anything touching the JTAG/UART USB devices)
