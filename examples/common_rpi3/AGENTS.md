@@ -46,11 +46,9 @@ slot is already committed to holding `config.txt`/`kernel8.img` for the
 JTAG-catch boot path (see "Out of scope: SD-card-storage examples"
 below), so `fatfs`-family testing on this board will need USB mass
 storage instead of SD -- meaning the SAME USB host stack work unblocks
-both Ethernet and storage testing here. Not yet started; expect this to
-need its own dedicated design pass (USB host controller bring-up is a
-substantially different, larger piece of work than anything ported so
-far) rather than the one-file-at-a-time incremental pattern the rest of
-this document describes.
+both Ethernet and storage testing here. The dedicated design pass has
+now started, scoped to Ethernet first (USB mass storage is a deliberate
+follow-on) -- see "USB host stack (Ethernet milestone)" below.
 
 ## Out of scope: SD-card-storage examples
 
@@ -71,6 +69,227 @@ interrupts/timers land -- fatfs-family testing on this board is
 expected to eventually use USB mass storage instead (see this
 document's own top-of-file note on Ethernet/USB being required), once
 this board has a USB host stack at all.
+
+## USB host stack (Ethernet milestone)
+
+GitHub issue #140's Ethernet requirement, scoped: DWC2 host controller
++ minimal USB hub bring-up on the LAN9514's internal Ethernet port +
+the LAN9514's SMSC95xx-family vendor protocol + a `net_init`/
+`net_rx_*`/`net_transmit` HAL matching `examples/common_stm32/eth.tkb`/
+`examples/common_qemu/virtio_mmio.tkb`'s existing shape, so
+`net_echo.tkb` and siblings run unmodified. USB mass storage is a
+deliberate follow-on, not in scope here. **No QEMU/simulation model
+exists for any of this** -- unlike every other feature in this project,
+each piece below is verified directly on real hardware, one
+UART-checkable milestone at a time, before the next starts; see
+HISTORY.md's corresponding entries for the full narrative and the plan
+file this work followed. Register-level facts throughout are drawn from
+public documentation and the `uspi`/Circle bare-metal USB library (R.
+Stange, https://github.com/rsta2/uspi -- the established reference
+implementation for exactly this SoC+chip combination), not from
+anything this project had prior knowledge of.
+
+Confirmed facts, load-bearing for every milestone below:
+- LAN9514 = 5-port USB hub with the Ethernet function wired to one
+  internal port; the SoC's DWC2 controller has exactly this one device
+  on its root port -- every external USB-A port on the board is a
+  further downstream hub port of the SAME chip. USB VID:PID =
+  `0x0424:0xec00`. No EEPROM on this board, so the MAC address must be
+  assigned by software, not read from the chip.
+- DWC2 core register base `0x3F980000` (peripheral base `0x3F000000` +
+  BCM2835's known `0x980000` USB offset -- the same base-substitution
+  pattern already used for UART/VC-controller/QA7 elsewhere in this
+  directory). Host register block/channel register layout: see
+  `uspi`'s `dwhci.h` (channel stride `0x20`, up to 16 channels).
+- USB core interrupt is VC controller **bank 1**, bit 9 (`Enable_IRQs_1`/
+  `pending_1`, register `0x3F00B210`/`0x3F00B200`) -- a *different* bank
+  than UART0 (bank 2, bit 25, `intc.tkb`). Source: the same
+  `irq-bcm2835.c` IRQ table `intc.tkb`'s own header comment already
+  cites for UART0.
+- **The USB power domain must be enabled via the VideoCore mailbox
+  property interface before any DWC2 register does anything
+  meaningful** -- a genuinely new prerequisite subsystem, not something
+  DWC2 bring-up can skip (see "Milestone 1" below).
+- Ethernet test setup already exists: RPi3's Ethernet port is a
+  physical point-to-point link to this devcontainer host's `enp5s0`
+  (`192.168.20.1/24`). `examples/common_rpi3/netconfig.tkb` (once it
+  exists) will use `OUR_IP = 192.168.20.2`, following
+  `examples/common_stm32/netconfig.tkb`'s exact established
+  point-to-point convention (STM32 uses its own dedicated NIC,
+  `enp4s0`/`192.168.10.2`; QEMU uses `192.0.2.1` via SLIRP).
+
+**DMA/cache-coherency decision**: this project's `dma_prepare_tx`/
+`dma_prepare_rx`/`dma_finish_rx` compiler builtins (`examples/
+common_stm32/eth.tkb`'s existing mechanism) lower to a bare `dsb sy` on
+AArch64 targets, with no real cache clean/invalidate -- harmless on
+QEMU (no cache model) but a genuine gap now that this board's D-cache
+is on (see "MMU and caches" above). Rather than extend the compiler or
+add a dedicated non-cacheable MMU region, `examples/common_rpi3/
+cache_asm.S` (new) adds small, explicit per-range stubs --
+`dcache_clean_range`/`dcache_invalidate_range`, VA-based `dc cvac`/`dc
+ivac` loops sized via `CTR_EL0.DminLine` -- the address-range-bounded
+counterpart of `startup.S`'s existing `dcache_invalidate_all` set/way
+sweep. Every DMA hand-off in this section (mailbox buffer, later USB
+descriptor rings) calls these explicitly.
+
+**Milestone 1 (done): VideoCore mailbox.** `examples/common_rpi3/
+mailbox.tkb` (new): MMIO base `0x3F00B880` (peripheral base + BCM2835's
+known `0xB880` offset), `mbox_call()`/`mbox_power_on_usb()` (property
+tag `0x00028001`, device id 3, state bits `0x3`). Bus-address
+translation uses the `0xC0000000 | addr` alias (VideoCore's own L2
+cache DISABLED for this buffer) rather than `0x40000000` (L2 cache
+enabled) specifically because this project has no way to flush the
+GPU's own separate L2 cache from the ARM side -- see `mailbox.tkb`'s
+own header comment. New RPi3-only example `examples/usb_probe/
+usb_probe.tkb` (no QEMU/STM32 equivalent, same reasoning as
+`examples/rtc`/`examples/timer`): prints `mailbox: ok`/`fail`. Passed
+on the first real-hardware attempt. 57/57 `make hwcheck-rpi3`.
+
+**Milestone 2 (done): DWC2 core + host port bring-up.**
+`examples/common_rpi3/usb_dwc2.tkb` (new): core register base
+`0x3F980000` (Core Global CSRs) / `0x3F980400` (Host Global CSRs,
+`DWC2_CORE_BASE + 0x400` -- the standard DWC_otg layout, cross-checked
+against `uspi`'s own relative offsets: its `HOST_CFG`/`PORT`/channel-block
+offsets land exactly on the well-known `HCFG`(0x400)/`HPRT`(0x440)/
+`HCCHAR(0)`(0x500) addresses once applied relative to this base).
+`dwc2_soft_reset()`/`dwc2_core_init()` (select the built-in UTMI+ PHY,
+enable DMA mode)/`dwc2_flush_fifos()`/`dwc2_host_port_power_on()`/
+`dwc2_host_port_connected()`/`dwc2_host_port_reset()` -- every polling
+loop here uses a bounded iteration count, not an unbounded spin,
+deliberately not repeating the gap root `AGENTS.md`'s Known Limitations
+flags for STM32's own PHY/MDIO waits; the two places DWC2 itself defines
+a fixed settle time (port reset assert/recovery) use a `delay_ms()`
+busy-wait built on `read_cntfrq()`/`read_cntpct()` (reused as-is from
+`timer_asm.S`, no new assembly stub needed).
+
+`usb_probe.tkb` grew to print the vendor ID register, reset/flush
+status, and port connect/status after reset. Passed on the first real
+attempt: vendor ID `0x4f54280a` (the expected Synopsys "OT" + version
+ASCII-prefixed ID pattern, confirming the register offset), port
+detected connected, and after reset the port status
+(`0x0000100d`) shows `ENABLE` set -- meaning DWC2's own hardware state
+machine found a valid device (the LAN9514, always present on this
+board's single root port) and enabled the port on its own, one step
+further than milestone 2 set out to prove. 57/57 `make hwcheck-rpi3`;
+`make qemutest`/`make stm32build` unaffected (RPi3-only files).
+
+**Milestone 3 (done): control transfers + root-device enumeration.**
+`usb_dwc2.tkb` grew host-channel programming (channel register block at
+`DWC2_HOST_BASE + 0x100 + chan*0x20`, stride/bit layout per `uspi`'s
+`dwhci.h`) and the standard 3-stage control-transfer state machine
+(SETUP PID 3 / data stage starting DATA1 / status stage opposite the
+data direction, IN when there is no data stage). `usb_probe` runs the
+canonical enumeration: GET_DESCRIPTOR(8 bytes, addr 0, max-packet 8) ->
+learn `bMaxPacketSize0` (64) -> SET_ADDRESS(1) -> full 18-byte
+descriptor at the new address. Result: VID:PID `0424:9514`, class
+`0x09` -- the LAN9514's HUB function, not the `0424:ec00` Ethernet
+function the plan originally predicted at this stage: the root-port
+device is the hub; `ec00` is the Ethernet function device that will
+only appear behind the hub's internal port during milestone 4's
+second-level enumeration. Re-running the whole suite without a chip
+reset also proved re-injection idempotency: enumeration succeeds even
+when the previous run left the device configured at address 1 (the
+fresh soft reset + port reset returns it to address 0 every run).
+
+This milestone was the hard one -- persistent `HCINT.XACT_ERROR` on
+every transfer across many attempts. Fixed by a BATCH of changes
+applied together (root cause not isolated to a single one; ablating on
+real hardware was judged not worth the JTAG cycles): (1) completion
+detection redesigned to wait for `HCINT.HALTED` and then classify the
+accompanying bits, u-boot/CSUD-style, instead of aborting on the first
+latched `XACT_ERROR` -- in buffer-DMA mode the core retries failed
+transactions internally (3-strikes) and error bits latch per-ATTEMPT,
+so first-error-wins aborts transfers the hardware would have finished;
+timeout path force-halts the channel (`CHDIS`) so it stays reusable;
+(2) `GUSBCFG.ForceHostMode` + the Synopsys-documented 25ms mode-settle
+wait, plus explicit `PHYSEL_FS` (bit 6) clear -- both inherited-state
+hazards; (3) uspi's BCM-specific AHB tuning (`WAIT_AXI_WRITES` set, AXI
+burst field zeroed). Also in place from the failed attempts, all
+individually insufficient but all kept as correct: `PCGCCTL = 0`
+(PHY clock un-gating), explicit FIFO partition programming
+(1024/1024/1024 words), `HCCHAR.MultiCnt = 1`, VC bus-address
+translation on `HCDMA` (same `0xC0000000` alias as the mailbox),
+explicit `HCSPLT = 0`, `AHB_IDLE` polling after soft reset. Diagnostics
+that localized the problem and stay in the fixture as permanent
+liveness checks: `GINTSTS.CurMod` ("mode: host") and an HFNUM
+frame-counter delta ("sof: running"). 57/57 `make hwcheck-rpi3`; no
+shared files touched.
+
+**Milestone 4 (done): minimal hub driver + Ethernet-function
+enumeration.** `examples/common_rpi3/usb_hub.tkb` (new): just enough of
+USB 2.0 chapter 11 -- hub descriptor read (type `0x29`, `bNbrPorts`),
+`SET_PORT_FEATURE(PORT_POWER/PORT_RESET)`, `GET_PORT_STATUS`,
+change-bit clears -- to power/reset the LAN9514's ports; port numbers
+are parameters throughout so a future mass-storage milestone can reuse
+it against an external port unchanged. No hotplug polling, no
+split-transaction support for FS/LS devices behind the hub (YAGNI: the
+one target device is high-speed and permanently attached). Protocol
+encodings cross-checked against U-Boot's `common/usb_hub.c` (the
+closest-in-shape polling implementation; per the licensing-hygiene
+discussion, structural references prefer BSD-licensed NetBSD/OpenBSD
+sources where code shape rather than protocol facts is borrowed).
+Result: hub reports 5 ports; port 1 has a high-speed device (speed
+bits read AFTER port reset -- they are only valid once the port is
+enabled, a pre-reset read reports full-speed defaults); enumerated at
+address 2 as VID:PID `0424:ec00` -- the Ethernet function, exactly as
+milestone 3's corrected prediction expected.
+
+One diagnosis-by-hardware round-trip along the way:
+`SET_CONFIGURATION` (standard request 9) was originally missing
+entirely. The hub tolerated a class GET_DESCRIPTOR while still in
+Address state (returned its port count fine) but reported every port
+as empty until configured -- spec-permitted behavior for any
+class-specific functionality before the Configured state. Lesson
+recorded in `dwc2_set_configuration`'s own comment. 57/57
+`make hwcheck-rpi3`.
+
+**Milestone 5 (done): LAN9514 vendor protocol + PHY link.**
+`examples/common_rpi3/lan9514.tkb` (new): the chip has no
+memory-mapped registers at all -- every access is a USB vendor-specific
+control transfer (`bRequest` `0xA0` write / `0xA1` read, `wIndex` =
+register offset, 4-byte little-endian data stage) to the Ethernet
+FUNCTION device milestone 4 found behind the hub. Register map/bit
+layout cross-checked between NetBSD's `sys/dev/usb/if_smscreg.h`
+(BSD-licensed, preferred as the structural reference) and Linux's
+`drivers/net/usb/smsc95xx.c` (protocol facts only): `HW_CFG` lite
+reset -> `PM_CTRL` PHY reset -> software MAC assignment via
+`ADDRL`/`ADDRH` (this board has no EEPROM, confirmed earlier -- a
+locally-administered address, `02:00:20:00:00:02`, the same pattern
+`examples/common_stm32/netconfig.tkb`'s own `OUR_MAC` already uses) ->
+PHY autonegotiation through the `MII_ADDR`/`MII_DATA` bridge registers
+(the LAN95xx family's internal PHY is always MII address 1) -- same
+IEEE 802.3 clause-22 register set `eth.tkb` already drives on the
+STM32's LAN8742A, only the transport differs. Every register poll
+(lite reset, PHY reset, MII busy, BMCR reset, link-up) is bounded, none
+exceeding a few seconds.
+
+This is the first milestone whose success genuinely depends on the
+physical Ethernet cable, not just the board itself: `usb_probe` now
+autonegotiates and links up against this devcontainer's own `enp5s0`
+(see the point-to-point wiring note above), confirmed with `eth id:
+0x0000ec00` (`ID_REV`'s upper half mirrors the USB PID, a free
+consistency check) and `eth link: up`. Real hardware timing exposed the
+SAME idle-quiet-capture gotcha `rtc`/`timer` hit long ago, worse here:
+`lan9514_wait_link()`'s bounded poll can genuinely pause up to 5s with
+zero UART output while autonegotiation completes, longer than the
+capture harness's default quiet threshold -- fixed the same way, a
+generous per-test override (20s max / 7s quiet) on this one
+`run_hw_test_rpi3` call. 57/57 `make hwcheck-rpi3`; `make
+qemutest`/`make stm32build` unaffected (RPi3-only files).
+
+**Milestones 6-7 (not yet done)**: bulk data path (`TX_CMD_A`/
+`TX_CMD_B` frame wrapper on TX, the RX status word's frame-length field
+on RX -- same NetBSD/Linux references as milestone 5) wired into the
+`net_init`/`net_rx_*`/`net_transmit` HAL shape `eth.tkb`/
+`virtio_mmio.tkb` already establish, plus DWC2 IRQ integration (VC bank
+1 bit 9) for steady-state completion signaling -> `net_echo`/
+`arp_reply`/`icmp_echo`/`tcp_echo` ported + a new
+`scripts/run_hwtest_rpi3_net.sh` (mirroring
+`scripts/run_hwtest_net_ram.sh`, reusing its existing `eth_*_test.py`
+raw-socket scripts against `enp5s0`) + the `--forbid-trap` hardening
+pass once proven end to end. Update this section (and HISTORY.md, and
+issue #140) after each one, per this project's established cadence --
+do not batch documentation to the end.
 
 ## Hardware
 

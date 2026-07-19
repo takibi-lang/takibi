@@ -1,0 +1,134 @@
+// Minimal USB hub-class driver (milestone 4 of the Ethernet plan, see
+// examples/common_rpi3/AGENTS.md's "USB host stack" section): just
+// enough of USB 2.0 chapter 11 to power/reset the LAN9514 hub's ports
+// and enumerate what's behind them -- no hotplug monitoring, no
+// interrupt-endpoint status polling, no split-transaction support for
+// low/full-speed devices behind the hub (YAGNI, per root AGENTS.md: the
+// one device this project needs, the LAN9514's own internal Ethernet
+// function, is high-speed and permanently attached). Port numbers are
+// parameters throughout, not hardcoded, so a future USB-mass-storage
+// milestone can reuse the same routines against an externally-plugged
+// port unchanged.
+//
+// Protocol constants cross-checked against U-Boot's common/usb_hub.c
+// (the closest-in-shape polling implementation) and the USB 2.0 spec's
+// own chapter 11 tables; the request encodings are spec facts, not any
+// one implementation's invention. Builds entirely on
+// examples/common_rpi3/usb_dwc2.tkb's dwc2_control_transfer/
+// ctrl_data_buf machinery -- this file owns no hardware access of its
+// own, it only composes control transfers.
+
+// bmRequestType values: class-type requests aimed at the hub device
+// (0x20/0xA0) vs at one of its ports ("other" recipient, 0x23/0xA3).
+const HUB_RT_HUB_GET:  u8 = 0xA0;
+const HUB_RT_PORT_SET: u8 = 0x23;
+const HUB_RT_PORT_GET: u8 = 0xA3;
+
+const HUB_REQ_GET_STATUS:     u8 = 0;
+const HUB_REQ_CLEAR_FEATURE:  u8 = 1;
+const HUB_REQ_SET_FEATURE:    u8 = 3;
+const HUB_REQ_GET_DESCRIPTOR: u8 = 6;
+
+const HUB_DESC_TYPE: u16 = 0x29;
+
+const HUB_FEAT_PORT_RESET:        u16 = 4;
+const HUB_FEAT_PORT_POWER:        u16 = 8;
+const HUB_FEAT_C_PORT_CONNECTION: u16 = 16;
+const HUB_FEAT_C_PORT_ENABLE:     u16 = 17;
+const HUB_FEAT_C_PORT_RESET:      u16 = 20;
+
+// wPortStatus bits (low half of the 4-byte GET_PORT_STATUS result).
+const HUB_PORT_STAT_CONNECTION: u32 = 0x0001;
+const HUB_PORT_STAT_ENABLE:     u32 = 0x0002;
+const HUB_PORT_STAT_LOW_SPEED:  u32 = 0x0200;
+const HUB_PORT_STAT_HIGH_SPEED: u32 = 0x0400;
+
+// hub_read_nports: class GET_DESCRIPTOR for the hub descriptor (type
+// 0x29), bNbrPorts is byte 2. Reads 9 bytes -- enough to cover the
+// fixed header of any hub descriptor; the variable-length
+// DeviceRemovable tail is not needed.
+fn hub_read_nports(hub_addr: u32, max_pkt: u32) -> u32 {
+    let value: u16 = HUB_DESC_TYPE << 8;
+    if (dwc2_control_transfer(hub_addr, max_pkt, HUB_RT_HUB_GET,
+                               HUB_REQ_GET_DESCRIPTOR, value, 0,
+                               ctrl_data_buf, 9) == false) {
+        return 0;
+    }
+    return ctrl_data_buf[2] as u32;
+}
+
+fn hub_set_port_feature(hub_addr: u32, max_pkt: u32, port: u32, feature: u16) -> bool {
+    return dwc2_control_transfer(hub_addr, max_pkt, HUB_RT_PORT_SET,
+                                  HUB_REQ_SET_FEATURE, feature, port as u16,
+                                  ctrl_data_buf, 0);
+}
+
+fn hub_clear_port_feature(hub_addr: u32, max_pkt: u32, port: u32, feature: u16) -> bool {
+    return dwc2_control_transfer(hub_addr, max_pkt, HUB_RT_PORT_SET,
+                                  HUB_REQ_CLEAR_FEATURE, feature, port as u16,
+                                  ctrl_data_buf, 0);
+}
+
+// hub_port_status: 4-byte GET_PORT_STATUS -- wPortStatus in the low 16
+// bits of the return value, wPortChange in the high 16. Returns 0 on a
+// failed transfer, indistinguishable from "nothing connected, no
+// changes" by design: every caller here only ever asks "is bit X set",
+// and a dead hub answering nothing deserves the same treatment as an
+// empty port.
+fn hub_port_status(hub_addr: u32, max_pkt: u32, port: u32) -> u32 {
+    if (dwc2_control_transfer(hub_addr, max_pkt, HUB_RT_PORT_GET,
+                               HUB_REQ_GET_STATUS, 0, port as u16,
+                               ctrl_data_buf, 4) == false) {
+        return 0;
+    }
+    return (ctrl_data_buf[0] as u32)
+         | ((ctrl_data_buf[1] as u32) << 8)
+         | ((ctrl_data_buf[2] as u32) << 16)
+         | ((ctrl_data_buf[3] as u32) << 24);
+}
+
+// hub_port_reset: SET_PORT_FEATURE(PORT_RESET), then poll for the hub
+// to report the port enabled (the HUB itself times the reset signaling
+// per spec and sets ENABLE + C_PORT_RESET when done -- unlike the root
+// port, software never de-asserts anything). Clears the accumulated
+// change bits afterward, then the spec's 10ms post-reset settle
+// (section 7.1.7.5, same as U-Boot's own mdelay(10)) before the caller
+// may address the device. Bounded poll: 50 x 10ms = 500ms worst case,
+// far beyond the spec's own reset timing.
+fn hub_port_reset(hub_addr: u32, max_pkt: u32, port: u32) -> bool {
+    if (hub_set_port_feature(hub_addr, max_pkt, port, HUB_FEAT_PORT_RESET) == false) {
+        return false;
+    }
+    let mut enabled: bool = false;
+    for i: i32 in 0..<50 {
+        delay_ms(10);
+        let status: u32 = hub_port_status(hub_addr, max_pkt, port);
+        if ((status & HUB_PORT_STAT_ENABLE) != 0) {
+            enabled = true;
+            break;
+        }
+    }
+    if (enabled == false) {
+        return false;
+    }
+    hub_clear_port_feature(hub_addr, max_pkt, port, HUB_FEAT_C_PORT_RESET);
+    hub_clear_port_feature(hub_addr, max_pkt, port, HUB_FEAT_C_PORT_CONNECTION);
+    delay_ms(10);
+    return true;
+}
+
+// hub_power_on_all_ports: SET_PORT_FEATURE(PORT_POWER) on every port,
+// then one shared settle wait -- 100ms, matching U-Boot's own
+// "max(100ms, 2*bPwrOn2PwrGood)" floor without bothering to read the
+// hub's advertised bPwrOn2PwrGood (the floor dominates for this chip).
+fn hub_power_on_all_ports(hub_addr: u32, max_pkt: u32, nports: u32) -> bool {
+    let mut ok: bool = true;
+    for i: u32 in 0..<nports {
+        let port: u32 = i + 1; // hub ports are 1-indexed per spec
+        if (hub_set_port_feature(hub_addr, max_pkt, port, HUB_FEAT_PORT_POWER) == false) {
+            ok = false;
+        }
+    }
+    delay_ms(100);
+    return ok;
+}

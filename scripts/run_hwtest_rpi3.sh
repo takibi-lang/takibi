@@ -288,6 +288,15 @@ run_hw_test_rpi3 "msgqueue (rpi3)"       "$REPO_ROOT/examples/msgqueue/kernel_rp
 run_hw_test_rpi3 "watchdog (rpi3)"       "$REPO_ROOT/examples/watchdog/kernel_rpi3.elf"       "$REPO_ROOT/examples/watchdog/watchdog.expected"
 run_hw_test_rpi3 "rtos_demo (rpi3)"      "$REPO_ROOT/examples/rtos_demo/kernel_rpi3.elf"      "$REPO_ROOT/examples/rtos_demo/rtos_demo.expected"
 run_hw_test_rpi3 "chan_rendezvous (rpi3)" "$REPO_ROOT/examples/chan_rendezvous/kernel_rpi3.elf" "$REPO_ROOT/examples/chan_rendezvous/chan_rendezvous.expected"
+# usb_probe pauses for real hardware settle times mid-test --
+# lan9514_wait_link() polls up to 50 x 100ms = 5s of real silence
+# waiting for PHY autonegotiation against the point-to-point peer, with
+# no UART output during the wait. Same idle-quiet-threshold gotcha
+# rtc/timer hit above, same fix, but the quiet threshold itself must
+# exceed the pause (30 polls = 1.5s was still shorter than the up-to-5s
+# real gap and truncated the capture before "eth link: up" arrived):
+# 20s max capture, 140 stable polls = 7s quiet threshold.
+run_hw_test_rpi3 "usb_probe (rpi3)"      "$REPO_ROOT/examples/usb_probe/kernel_rpi3.elf"      "$REPO_ROOT/examples/usb_probe/usb_probe.expected"   20 140
 
 echo ""
 echo "rpi3 hardware tests: $PASS passed, $FAIL failed"

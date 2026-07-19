@@ -1,0 +1,221 @@
+// SMSC LAN9514 USB-Ethernet function driver, vendor-protocol layer
+// (milestone 5 of the Ethernet plan, see examples/common_rpi3/
+// AGENTS.md's "USB host stack" section). Everything below talks to the
+// 0424:ec00 Ethernet FUNCTION device enumerated behind the LAN9514's
+// own hub (examples/common_rpi3/usb_hub.tkb) -- the chip's MAC and PHY
+// registers are not memory-mapped anywhere; every access is a USB
+// vendor-specific control transfer to that device.
+//
+// Register offsets/bit layouts cross-checked between NetBSD's
+// sys/dev/usb/if_smscreg.h (BSD-licensed, used as the primary
+// structural reference per this project's licensing-hygiene practice)
+// and Linux's drivers/net/usb/smsc95xx.c (protocol facts only). The
+// vendor protocol: bRequest 0xA0 = write register, 0xA1 = read
+// register, wValue = 0, wIndex = register offset, data stage = the
+// 4-byte little-endian register value.
+//
+// No EEPROM is fitted on this board (confirmed during the design pass),
+// so the MAC address is ASSIGNED by software -- a locally-administered
+// address, not read from the chip.
+
+const LAN9514_RT_VENDOR_WRITE: u8 = 0x40;
+const LAN9514_RT_VENDOR_READ:  u8 = 0xC0;
+const LAN9514_REQ_WRITE_REG:   u8 = 0xA0;
+const LAN9514_REQ_READ_REG:    u8 = 0xA1;
+
+const LAN9514_ID_REV:  u16 = 0x000;
+const LAN9514_TX_CFG:  u16 = 0x010;
+const LAN9514_HW_CFG:  u16 = 0x014;
+const LAN9514_PM_CTRL: u16 = 0x020;
+const LAN9514_BURST_CAP:   u16 = 0x038;
+const LAN9514_BULK_IN_DLY: u16 = 0x06C;
+const LAN9514_MAC_CR:  u16 = 0x100;
+const LAN9514_ADDRH:   u16 = 0x104;
+const LAN9514_ADDRL:   u16 = 0x108;
+const LAN9514_MII_ADDR: u16 = 0x114;
+const LAN9514_MII_DATA: u16 = 0x118;
+
+const LAN9514_HW_CFG_LRST:   u32 = 0x00000008;
+const LAN9514_HW_CFG_BIR:    u32 = 0x00001000;
+const LAN9514_PM_CTRL_PHY_RST: u32 = 0x00000010;
+const LAN9514_TX_CFG_ON:     u32 = 0x00000004;
+const LAN9514_MAC_CR_TXEN:   u32 = 0x00000008;
+const LAN9514_MAC_CR_RXEN:   u32 = 0x00000004;
+
+const LAN9514_MII_BUSY:  u32 = 0x00000001;
+const LAN9514_MII_WRITE: u32 = 0x00000002;
+// The LAN95xx family's internal PHY is always MII address 1.
+const LAN9514_PHY_ID: u32 = 1;
+
+// Standard IEEE 802.3 clause-22 PHY registers -- the same set
+// examples/common_stm32/eth.tkb already drives on its LAN8742A, only
+// the transport differs (MII_ADDR/MII_DATA vendor registers over USB
+// here vs the STM32 MAC's own MDIO master there).
+const PHY_BMCR: u32 = 0;
+const PHY_BMSR: u32 = 1;
+const PHY_ADVERTISE: u32 = 4;
+const PHY_BMCR_RESET:        u32 = 0x8000;
+const PHY_BMCR_AUTONEG_EN:   u32 = 0x1000;
+const PHY_BMCR_AUTONEG_RESTART: u32 = 0x0200;
+const PHY_BMSR_LINK_UP:      u32 = 0x0004;
+// Advertise 10/100 half+full duplex over CSMA -- the standard
+// "everything a 10/100 PHY can do" word.
+const PHY_ADVERTISE_ALL: u32 = 0x01E1;
+
+// The device address/ep0 max packet the Ethernet function got during
+// hub enumeration -- recorded once by lan9514_bind() so every register
+// helper does not need them threaded through as parameters.
+let mut lan9514_addr: u32 = 0;
+let mut lan9514_mp: u32 = 64;
+
+fn lan9514_bind(dev_addr: u32, max_pkt: u32) {
+    lan9514_addr = dev_addr;
+    lan9514_mp = max_pkt;
+}
+
+fn lan9514_read_reg(reg: u16) -> u32 {
+    if (dwc2_control_transfer(lan9514_addr, lan9514_mp, LAN9514_RT_VENDOR_READ,
+                               LAN9514_REQ_READ_REG, 0, reg,
+                               ctrl_data_buf, 4) == false) {
+        return 0xFFFFFFFF;
+    }
+    return (ctrl_data_buf[0] as u32)
+         | ((ctrl_data_buf[1] as u32) << 8)
+         | ((ctrl_data_buf[2] as u32) << 16)
+         | ((ctrl_data_buf[3] as u32) << 24);
+}
+
+fn lan9514_write_reg(reg: u16, val: u32) -> bool {
+    ctrl_data_buf[0] = (val & 0xFF) as u8;
+    ctrl_data_buf[1] = ((val >> 8) & 0xFF) as u8;
+    ctrl_data_buf[2] = ((val >> 16) & 0xFF) as u8;
+    ctrl_data_buf[3] = ((val >> 24) & 0xFF) as u8;
+    return dwc2_control_transfer(lan9514_addr, lan9514_mp, LAN9514_RT_VENDOR_WRITE,
+                                  LAN9514_REQ_WRITE_REG, 0, reg,
+                                  ctrl_data_buf, 4);
+}
+
+// MII (PHY register) access through the MAC's MII_ADDR/MII_DATA
+// bridge: wait not-busy, program the operation, wait not-busy again.
+// Each wait is itself a bounded loop of USB control transfers -- slow,
+// but PHY access only happens during bring-up, never on the data path.
+fn lan9514_mii_wait() -> bool {
+    for i: i32 in 0..<100 {
+        if ((lan9514_read_reg(LAN9514_MII_ADDR) & LAN9514_MII_BUSY) == 0) {
+            return true;
+        }
+        delay_ms(1);
+    }
+    return false;
+}
+
+fn lan9514_mii_read(phy_reg: u32) -> u32 {
+    if (lan9514_mii_wait() == false) {
+        return 0xFFFFFFFF;
+    }
+    let cmd: u32 = (LAN9514_PHY_ID << 11) | ((phy_reg & 0x1F) << 6) | LAN9514_MII_BUSY;
+    lan9514_write_reg(LAN9514_MII_ADDR, cmd);
+    if (lan9514_mii_wait() == false) {
+        return 0xFFFFFFFF;
+    }
+    return lan9514_read_reg(LAN9514_MII_DATA) & 0xFFFF;
+}
+
+fn lan9514_mii_write(phy_reg: u32, val: u32) -> bool {
+    if (lan9514_mii_wait() == false) {
+        return false;
+    }
+    lan9514_write_reg(LAN9514_MII_DATA, val & 0xFFFF);
+    let cmd: u32 = (LAN9514_PHY_ID << 11) | ((phy_reg & 0x1F) << 6)
+                 | LAN9514_MII_WRITE | LAN9514_MII_BUSY;
+    lan9514_write_reg(LAN9514_MII_ADDR, cmd);
+    return lan9514_mii_wait();
+}
+
+// lan9514_reset: HW_CFG lite reset then PM_CTRL PHY reset, each
+// self-clearing and polled bounded (100 x 1ms) -- the same two-step
+// reset every reference driver performs first.
+fn lan9514_reset() -> bool {
+    lan9514_write_reg(LAN9514_HW_CFG, LAN9514_HW_CFG_LRST);
+    let mut ok: bool = false;
+    for i: i32 in 0..<100 {
+        if ((lan9514_read_reg(LAN9514_HW_CFG) & LAN9514_HW_CFG_LRST) == 0) {
+            ok = true;
+            break;
+        }
+        delay_ms(1);
+    }
+    if (ok == false) {
+        return false;
+    }
+    lan9514_write_reg(LAN9514_PM_CTRL, LAN9514_PM_CTRL_PHY_RST);
+    for i: i32 in 0..<100 {
+        if ((lan9514_read_reg(LAN9514_PM_CTRL) & LAN9514_PM_CTRL_PHY_RST) == 0) {
+            return true;
+        }
+        delay_ms(1);
+    }
+    return false;
+}
+
+// lan9514_set_mac: ADDRL = bytes 0-3 little-endian, ADDRH = bytes 4-5.
+// Verified by read-back since these two registers are the foundation
+// every RX filter decision builds on.
+fn lan9514_set_mac(mac: *u8) -> bool {
+    let addrl: u32 = (mac[0] as u32)
+                   | ((mac[1] as u32) << 8)
+                   | ((mac[2] as u32) << 16)
+                   | ((mac[3] as u32) << 24);
+    let addrh: u32 = (mac[4] as u32) | ((mac[5] as u32) << 8);
+    lan9514_write_reg(LAN9514_ADDRL, addrl);
+    lan9514_write_reg(LAN9514_ADDRH, addrh);
+    if (lan9514_read_reg(LAN9514_ADDRL) != addrl) {
+        return false;
+    }
+    return lan9514_read_reg(LAN9514_ADDRH) == addrh;
+}
+
+// lan9514_phy_start_autoneg: BMCR reset (self-clearing, bounded poll),
+// advertise 10/100 HD/FD, then enable+restart autonegotiation.
+fn lan9514_phy_start_autoneg() -> bool {
+    if (lan9514_mii_write(PHY_BMCR, PHY_BMCR_RESET) == false) {
+        return false;
+    }
+    let mut ok: bool = false;
+    for i: i32 in 0..<100 {
+        if ((lan9514_mii_read(PHY_BMCR) & PHY_BMCR_RESET) == 0) {
+            ok = true;
+            break;
+        }
+        delay_ms(1);
+    }
+    if (ok == false) {
+        return false;
+    }
+    lan9514_mii_write(PHY_ADVERTISE, PHY_ADVERTISE_ALL);
+    return lan9514_mii_write(PHY_BMCR, PHY_BMCR_AUTONEG_EN | PHY_BMCR_AUTONEG_RESTART);
+}
+
+// lan9514_wait_link: poll BMSR link-status up to ~5s (50 x 100ms) --
+// autonegotiation against the point-to-point peer (this devcontainer's
+// enp5s0) completes in 1-3s in practice. Bounded, per this project's
+// no-unbounded-hardware-waits rule.
+fn lan9514_wait_link() -> bool {
+    for i: i32 in 0..<50 {
+        if ((lan9514_mii_read(PHY_BMSR) & PHY_BMSR_LINK_UP) != 0) {
+            return true;
+        }
+        delay_ms(100);
+    }
+    return false;
+}
+
+// lan9514_enable_rxtx: MAC-level TX/RX enable plus the separate
+// TX-datapath switch -- the last step before bulk transfers (milestone
+// 6) can move real frames.
+fn lan9514_enable_rxtx() {
+    let mut cr: u32 = lan9514_read_reg(LAN9514_MAC_CR);
+    cr = cr | LAN9514_MAC_CR_TXEN | LAN9514_MAC_CR_RXEN;
+    lan9514_write_reg(LAN9514_MAC_CR, cr);
+    lan9514_write_reg(LAN9514_TX_CFG, LAN9514_TX_CFG_ON);
+}

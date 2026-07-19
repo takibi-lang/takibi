@@ -1,0 +1,106 @@
+// VideoCore mailbox property-tag interface (BCM2837). Needed before ANY
+// DWC2/USB register access does anything meaningful: this SoC's USB
+// power domain must be explicitly enabled via a mailbox "set power
+// state" property call first -- confirmed against multiple independent
+// bare-metal RPi USB references (this project has no direct precedent,
+// since nothing before examples/usb_probe has ever needed the mailbox).
+// Register layout/algorithm confirmed against a well-known bare-metal
+// RPi3 tutorial's mbox.c (bztsrc/raspi3-tutorial), cross-checked against
+// the official firmware wiki's "Accessing mailboxes" page for the
+// bus-address translation below.
+//
+// MMIO base 0x3F00B880 (peripheral base 0x3F000000 + BCM2835's known
+// mailbox offset 0xB880 -- same base-substitution pattern this
+// directory already uses everywhere else, see examples/common_rpi3/
+// AGENTS.md's own note on why 0x3F000000 replaces BCM2835's
+// 0x20000000). Only channel 8 (the property-tag interface) is used
+// here; channels 0-7 are legacy single-value mailboxes this project has
+// no use for.
+
+extern fn dcache_clean_range(addr: usize, len: usize);
+extern fn dcache_invalidate_range(addr: usize, len: usize);
+
+let mbox_read:   *io u32 = 0x3F00B880;
+let mbox_status: *io u32 = 0x3F00B898;
+let mbox_write:  *io u32 = 0x3F00B8A0;
+
+const MBOX_STATUS_FULL:  u32 = 0x80000000;
+const MBOX_STATUS_EMPTY: u32 = 0x40000000;
+const MBOX_RESPONSE_OK:  u32 = 0x80000000;
+
+const MBOX_CH_PROP: u32 = 8;
+
+// Property message buffer for a single "set power state" call:
+// [0] total size in bytes, [1] request/response code, [2] tag id,
+// [3] tag value buffer size, [4] tag request/response code,
+// [5] device id, [6] state, [7] end tag (0).
+// align(16): the low 4 bits of the mailbox message word are the
+// channel number, so the buffer's own address must already be a
+// multiple of 16 -- align(16) is the true requirement, this just uses
+// the same generous align(4096) headroom examples/common_qemu/
+// virtio_mmio.tkb's own page-aligned buffers use, since a whole page is
+// cheap and guarantees the invariant with no risk of an off-by-one.
+let mut power_msg: [u32; 8] align(4096);
+
+// Bus-address translation: the VideoCore GPU does not share the ARM
+// core's cache or its view of physical memory -- a message buffer
+// address must be translated to a "bus address" before being written
+// to the mailbox. 0xC0000000 selects the L2-cache-DISABLED alias (per
+// the official firmware wiki's "Accessing mailboxes" page): the
+// ALTERNATIVE 0x40000000 alias goes through the VideoCore's own L2
+// cache, which this project has no way to flush/invalidate from the
+// ARM side, so 0xC0000000 is the only choice that composes safely with
+// this file's own explicit dcache_clean_range/dcache_invalidate_range
+// calls (those maintain the ARM core's cache; the GPU-side cache is a
+// second, independent hazard this alias sidesteps entirely rather than
+// needing a second cache-maintenance mechanism this project doesn't
+// have). RAM on this board is identity-mapped starting at physical 0
+// (examples/common_rpi3/mmu.S), so masking off any high bits before
+// OR-ing in the alias is defensive, not load-bearing today.
+fn bus_address(addr: usize) -> u32 {
+    return ((addr & 0x3FFFFFFF) as u32) | 0xC0000000;
+}
+
+// mbox_call: send the message already written into `buf` (a
+// bus-address-translatable, align(16)-or-better buffer) on `channel`,
+// block until the matching response arrives, and report whether the
+// firmware accepted it (buf[1] == MBOX_RESPONSE_OK). Cleans the buffer
+// before sending (CPU-writes must reach real RAM before the GPU reads
+// it) and invalidates it before the caller reads the response (the GPU
+// wrote real RAM directly; the ARM cache must not serve a stale copy).
+fn mbox_call(buf: *u32, len_bytes: usize, channel: u32) -> bool {
+    let addr: usize = buf as usize;
+    dcache_clean_range(addr, len_bytes);
+
+    let msg: u32 = bus_address(addr) | (channel & 0xF);
+
+    while ((*mbox_status & MBOX_STATUS_FULL) != 0) {}
+    *mbox_write = msg;
+
+    while (true) {
+        while ((*mbox_status & MBOX_STATUS_EMPTY) != 0) {}
+        let resp: u32 = *mbox_read;
+        if (resp == msg) {
+            dcache_invalidate_range(addr, len_bytes);
+            return buf[1] == MBOX_RESPONSE_OK;
+        }
+    }
+}
+
+// mbox_power_on_usb: property tag 0x00028001 ("set power state"),
+// device id 3 (USB HCD -- the fixed VideoCore firmware device-id table,
+// same id every other bare-metal RPi USB reference uses), state bits
+// 0x3 (bit 0 = power on, bit 1 = wait for the state to actually apply
+// before responding, so a true return here means the domain is already
+// live, not just requested).
+fn mbox_power_on_usb() -> bool {
+    power_msg[0] = 8 * 4;
+    power_msg[1] = 0;
+    power_msg[2] = 0x00028001;
+    power_msg[3] = 8;
+    power_msg[4] = 0;
+    power_msg[5] = 3;
+    power_msg[6] = 3;
+    power_msg[7] = 0;
+    return mbox_call(power_msg as *u32, 8 * 4, MBOX_CH_PROP);
+}

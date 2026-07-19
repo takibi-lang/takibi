@@ -1274,6 +1274,9 @@ COMMON_RPI3_INTC         := $(COMMON_RPI3_DIR)/intc.tkb
 COMMON_RPI3_RTC          := $(COMMON_RPI3_DIR)/rtc.tkb
 COMMON_RPI3_TIMER_ASM_S  := $(COMMON_RPI3_DIR)/timer_asm.S
 COMMON_RPI3_TIMER_ASM_O  := $(COMMON_RPI3_DIR)/timer_asm.o
+COMMON_RPI3_CACHE_ASM_S  := $(COMMON_RPI3_DIR)/cache_asm.S
+COMMON_RPI3_CACHE_ASM_O  := $(COMMON_RPI3_DIR)/cache_asm.o
+COMMON_RPI3_MAILBOX      := $(COMMON_RPI3_DIR)/mailbox.tkb
 COMMON_RPI3_JTAG_STUB_S  := $(COMMON_RPI3_DIR)/jtag_stub.S
 COMMON_RPI3_JTAG_STUB_O  := $(COMMON_RPI3_DIR)/jtag_stub.o
 COMMON_RPI3_JTAG_STUB_LD := $(COMMON_RPI3_DIR)/jtag_stub.ld
@@ -1285,6 +1288,9 @@ $(COMMON_RPI3_MMU_O): $(COMMON_RPI3_MMU_S)
 	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI3_TIMER_ASM_O): $(COMMON_RPI3_TIMER_ASM_S)
+	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
+
+$(COMMON_RPI3_CACHE_ASM_O): $(COMMON_RPI3_CACHE_ASM_S)
 	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI3_JTAG_STUB_O): $(COMMON_RPI3_JTAG_STUB_S)
@@ -1377,7 +1383,22 @@ RPI3_SCHED_OBJS         := $(foreach e,$(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_E
 $(RPI3_SCHED_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
 
-RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES)
+# USB bring-up group (GitHub issue #140's Ethernet milestone -- see
+# examples/usb_probe/usb_probe.tkb's own header comment and
+# examples/common_rpi3/AGENTS.md for the full plan). Grows one milestone
+# at a time; as of milestone 2 needs COMMON_RPI3_MAILBOX (milestone 1)
+# and COMMON_RPI3_DIR/usb_dwc2.tkb (milestone 2, itself reusing
+# read_cntfrq()/read_cntpct() for delay_ms -- hence COMMON_RPI3_TIMER_ASM_O
+# joining this group's link line below, same stubs the RTC/scheduler
+# groups already share) on the command line, and COMMON_RPI3_CACHE_ASM_O
+# at link time (the mailbox buffer's CPU<->GPU cache-coherency calls).
+RPI3_USB_EXAMPLES := usb_probe
+RPI3_USB_OBJS     := $(foreach e,$(RPI3_USB_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
+
+$(RPI3_USB_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+
+RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES)
 RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 # rtc/timer/preempt/watchdog need COMMON_RPI3_TIMER_ASM_O linked in
 # (read_cntfrq() and friends -- mrs cannot be called directly from
@@ -1388,10 +1409,14 @@ RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf
 # the same aarch64-none-elf triple as AARCH64_TARGET, so the QEMU-built
 # object is directly link-compatible -- same reasoning already applied to
 # COMMON_STM32_STUB/COMMON_RPI3_STUB's own cross-target reuse above).
-# Everything else uses the plain startup.o+mmu.o link line.
+# usb_probe needs COMMON_RPI3_CACHE_ASM_O (dcache_clean_range/
+# dcache_invalidate_range, examples/common_rpi3/mailbox.tkb's own DMA
+# coherency calls). Everything else uses the plain startup.o+mmu.o link
+# line.
 RPI3_TIMER_ASM_KERNELS := $(foreach e,$(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 RPI3_SEM_KERNELS       := $(foreach e,$(RPI3_SCHED_SEM_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
-RPI3_GENERIC_KERNELS   := $(filter-out $(RPI3_TIMER_ASM_KERNELS) $(RPI3_SEM_KERNELS),$(RPI3_KERNELS))
+RPI3_USB_KERNELS       := $(foreach e,$(RPI3_USB_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
+RPI3_GENERIC_KERNELS   := $(filter-out $(RPI3_TIMER_ASM_KERNELS) $(RPI3_SEM_KERNELS) $(RPI3_USB_KERNELS),$(RPI3_KERNELS))
 
 $(RPI3_GENERIC_KERNELS): examples/%/kernel_rpi3.elf: \
     $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
@@ -1404,6 +1429,10 @@ $(RPI3_TIMER_ASM_KERNELS): examples/%/kernel_rpi3.elf: \
 $(RPI3_SEM_KERNELS): examples/%/kernel_rpi3.elf: \
     $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_TIMER_ASM_O) $(COMMON_SEM_ASM_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
 	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_TIMER_ASM_O) $(COMMON_SEM_ASM_O) examples/$*/$*_rpi3.o -o $@
+
+$(RPI3_USB_KERNELS): examples/%/kernel_rpi3.elf: \
+    $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_TIMER_ASM_O) $(COMMON_RPI3_CACHE_ASM_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
+	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_TIMER_ASM_O) $(COMMON_RPI3_CACHE_ASM_O) examples/$*/$*_rpi3.o -o $@
 
 ## hwcheck-rpi3: run Raspberry Pi 3B (BCM2837) hardware integration tests
 ## (requires a real Raspberry Pi 3B connected via JTAG + UART -- see

@@ -1,0 +1,278 @@
+// Raspberry Pi 3B USB bring-up checkpoint (GitHub issue #140's Ethernet
+// milestone, see HISTORY.md/examples/common_rpi3/AGENTS.md). RPi3-only --
+// no QEMU/STM32 equivalent exists (neither models BCM2837's DWC2 host
+// controller or the LAN9514 chip behind it), same reasoning as
+// examples/rtc/examples/timer needing their own substitute HAL rather
+// than a shared one. This file grows one milestone at a time (each
+// still verified on real hardware before the next is added, per this
+// project's usual incremental process) rather than jumping straight to
+// a full Ethernet driver -- there is no QEMU/simulation safety net for
+// any of this, unlike everything else in this project.
+//
+// Milestone 1: the VideoCore mailbox property interface. BCM2837's USB
+// power domain must be explicitly enabled via a mailbox "set power
+// state" call before any DWC2 register access means anything -- see
+// examples/common_rpi3/mailbox.tkb's own header comment for the full
+// rationale and the bus-address-translation gotcha this call already
+// handles internally.
+//
+// Milestone 2: DWC2 core + host port bring-up (examples/common_rpi3/
+// usb_dwc2.tkb) -- soft-reset the controller, select the built-in
+// UTMI+ PHY, enable DMA mode, flush both FIFOs, power on the host
+// port, and report whether a device (the LAN9514, always present --
+// see AGENTS.md) is detected as connected. Zero USB protocol traffic at
+// that point, purely electrical/register-level bring-up.
+//
+// Milestone 3 (this checkpoint): control transfer + device enumeration.
+// Standard USB enumeration sequence, not DWC2-specific: (1) GET_DESCRIPTOR
+// (device, 8 bytes) at address 0 with the safe default max packet size
+// of 8 (the real bMaxPacketSize0 is unknown until this call returns --
+// see usb_dwc2.tkb's own header comment on why 8, not 18, bytes are
+// requested here), (2) SET_ADDRESS to give the device a real address
+// (sent to the OLD address, 0 -- the device only responds at the new
+// address after this transfer's own status stage completes), (3) a
+// second GET_DESCRIPTOR(device, 18 bytes) at the NEW address, this time
+// using the real max packet size just learned, to read the full
+// descriptor including idVendor/idProduct. Result: 0424:9514, class
+// 0x09 -- the LAN9514's HUB function (the plan's original prediction of
+// 0424:ec00 at this stage was wrong in an instructive way: the root
+// device IS the hub; ec00 is the Ethernet function behind it).
+//
+// Milestone 4: minimal hub-class driver
+// (examples/common_rpi3/usb_hub.tkb) -- read the hub descriptor's port
+// count, power all ports, then walk every port: reset whatever is
+// connected, enumerate it (same GET_DESCRIPTOR/SET_ADDRESS flow as the
+// hub itself got, at the next free device address), and print its
+// VID:PID. Result: exactly one hit, the 0424:ec00 Ethernet function on
+// hub port 1 (this board's external USB-A jacks hang off the same hub
+// but are assumed empty in the .expected fixture).
+//
+// Milestone 5 (this checkpoint): the LAN9514 vendor register protocol
+// (examples/common_rpi3/lan9514.tkb) against that Ethernet function --
+// chip reset, ID_REV sanity read (expect 0xec00xxxx, the chip id
+// mirroring the USB PID), software MAC address assignment (no EEPROM on
+// this board), PHY autonegotiation via the MII bridge registers, and
+// finally link-up against the point-to-point peer (this devcontainer's
+// enp5s0) -- the first milestone whose success depends on the physical
+// Ethernet cable, not just the board itself.
+
+// Locally-administered MAC address (0x02 first octet) for milestone 5's
+// software MAC assignment -- becomes OUR_MAC in examples/common_rpi3/
+// netconfig.tkb once milestone 6 wires the full net HAL.
+let PROBE_MAC: [u8; 6] = {0x02, 0x00, 0x20, 0x00, 0x00, 0x02};
+
+fn app_main() {
+    if (mbox_power_on_usb()) {
+        uart_puts("mailbox: ok\r\n");
+    } else {
+        uart_puts("mailbox: fail\r\n");
+    }
+
+    uart_puts("dwc2 vendor id: ");
+    uart_print_hex(dwc2_read_vendor_id() as i32);
+    uart_puts("\r\n");
+
+    if (dwc2_soft_reset()) {
+        uart_puts("dwc2 reset: ok\r\n");
+    } else {
+        uart_puts("dwc2 reset: fail\r\n");
+    }
+
+    dwc2_core_init();
+
+    if (dwc2_flush_fifos()) {
+        uart_puts("dwc2 fifo flush: ok\r\n");
+    } else {
+        uart_puts("dwc2 fifo flush: fail\r\n");
+    }
+
+    dwc2_host_port_power_on();
+
+    let mut connected: bool = false;
+    for i: i32 in 0..<1000000 {
+        if (dwc2_host_port_connected()) {
+            connected = true;
+            break;
+        }
+    }
+    if (connected) {
+        uart_puts("dwc2 port: connected\r\n");
+        dwc2_host_port_reset();
+        uart_puts("dwc2 port status: ");
+        uart_print_hex(dwc2_host_port_status() as i32);
+        uart_puts("\r\n");
+    } else {
+        uart_puts("dwc2 port: not connected\r\n");
+    }
+
+    if (dwc2_is_host_mode()) {
+        uart_puts("dwc2 mode: host\r\n");
+    } else {
+        uart_puts("dwc2 mode: device\r\n");
+    }
+    // SOF liveness: two frame-number reads 2ms apart MUST differ if the
+    // host is actually driving the bus (16 high-speed microframes fit in
+    // that window). Printed as a stable yes/no, not the raw counter
+    // values -- those change every run and would break the .expected
+    // fixture.
+    let f0: u32 = dwc2_frame_number();
+    delay_ms(2);
+    let f1: u32 = dwc2_frame_number();
+    if (f1 != f0) {
+        uart_puts("dwc2 sof: running\r\n");
+    } else {
+        uart_puts("dwc2 sof: stalled\r\n");
+    }
+
+    let mut hub_ok: bool = false;
+    let mut hub_mp: u32 = 8;
+    if (connected) {
+        if (dwc2_get_device_descriptor(0, 8, 8)) {
+            let mp0: u8 = dwc2_device_descriptor_max_packet0();
+            uart_puts("dwc2 ep0 max packet: ");
+            uart_print(mp0 as i32);
+            uart_puts("\r\n");
+
+            if (dwc2_set_address(1, 8)) {
+                uart_puts("dwc2 set address: ok\r\n");
+
+                if (dwc2_get_device_descriptor(1, mp0 as u32, 18)) {
+                    uart_puts("dwc2 vid:pid: ");
+                    uart_print_hex(dwc2_device_descriptor_vendor_id() as i32);
+                    uart_puts(":");
+                    uart_print_hex(dwc2_device_descriptor_product_id() as i32);
+                    uart_puts("\r\n");
+                    uart_puts("dwc2 device class: ");
+                    uart_print_hex(dwc2_device_descriptor_class() as i32);
+                    uart_puts("\r\n");
+                    hub_ok = true;
+                    hub_mp = mp0 as u32;
+                } else {
+                    uart_puts("dwc2 get full descriptor: fail\r\n");
+                }
+            } else {
+                uart_puts("dwc2 set address: fail\r\n");
+            }
+        } else {
+            uart_puts("dwc2 get descriptor: fail\r\n");
+            uart_puts("dwc2 last status: ");
+            uart_print_hex(dwc2_debug_last_status() as i32);
+            uart_puts("\r\n");
+        }
+    }
+
+    // Milestone 4: configure the hub (class functionality is inert until
+    // SET_CONFIGURATION -- see dwc2_set_configuration's comment), then
+    // walk its ports and enumerate whatever is behind them (expected:
+    // exactly the 0424:ec00 Ethernet function).
+    if (hub_ok) {
+        if (dwc2_set_configuration(1, hub_mp, 1)) {
+            uart_puts("hub configured: ok\r\n");
+        } else {
+            uart_puts("hub configured: fail\r\n");
+        }
+        let nports: u32 = hub_read_nports(1, hub_mp);
+        uart_puts("hub ports: ");
+        uart_print(nports as i32);
+        uart_puts("\r\n");
+        let mut eth_addr: u32 = 0;
+        let mut eth_mp: u32 = 64;
+        if (nports > 0) {
+            hub_power_on_all_ports(1, hub_mp, nports);
+            let mut next_addr: u32 = 2;
+            for i: u32 in 0..<nports {
+                let port: u32 = i + 1;
+                let status: u32 = hub_port_status(1, hub_mp, port);
+                if ((status & HUB_PORT_STAT_CONNECTION) != 0) {
+                    uart_puts("hub port ");
+                    uart_print(port as i32);
+                    uart_puts(": connected\r\n");
+                    if (hub_port_reset(1, hub_mp, port)) {
+                        // Speed bits in wPortStatus are only valid once
+                        // the port is enabled (i.e. after reset) -- a
+                        // pre-reset read reports full-speed defaults.
+                        let post: u32 = hub_port_status(1, hub_mp, port);
+                        if ((post & HUB_PORT_STAT_HIGH_SPEED) != 0) {
+                            uart_puts("hub port speed: high\r\n");
+                        } else {
+                            uart_puts("hub port speed: full/low\r\n");
+                        }
+                        if (dwc2_get_device_descriptor(0, 8, 8)) {
+                            let dmp: u32 = dwc2_device_descriptor_max_packet0() as u32;
+                            if (dwc2_set_address(next_addr, 8)) {
+                                if (dwc2_get_device_descriptor(next_addr, dmp, 18)) {
+                                    uart_puts("hub dev ");
+                                    uart_print(next_addr as i32);
+                                    uart_puts(" vid:pid: ");
+                                    uart_print_hex(dwc2_device_descriptor_vendor_id() as i32);
+                                    uart_puts(":");
+                                    uart_print_hex(dwc2_device_descriptor_product_id() as i32);
+                                    uart_puts("\r\n");
+                                    if (dwc2_device_descriptor_vendor_id() == 0x0424) {
+                                        if (dwc2_device_descriptor_product_id() == 0xEC00) {
+                                            eth_addr = next_addr;
+                                            eth_mp = dmp;
+                                        }
+                                    }
+                                    next_addr = next_addr + 1;
+                                } else {
+                                    uart_puts("hub dev: full descriptor fail\r\n");
+                                }
+                            } else {
+                                uart_puts("hub dev: set address fail\r\n");
+                            }
+                        } else {
+                            uart_puts("hub dev: descriptor fail\r\n");
+                        }
+                    } else {
+                        uart_puts("hub port reset: fail\r\n");
+                    }
+                }
+            }
+        }
+
+        // Milestone 5: LAN9514 vendor protocol + PHY link against the
+        // Ethernet function found above.
+        if (eth_addr != 0) {
+            if (dwc2_set_configuration(eth_addr, eth_mp, 1)) {
+                uart_puts("eth configured: ok\r\n");
+            } else {
+                uart_puts("eth configured: fail\r\n");
+            }
+            lan9514_bind(eth_addr, eth_mp);
+
+            if (lan9514_reset()) {
+                uart_puts("eth reset: ok\r\n");
+            } else {
+                uart_puts("eth reset: fail\r\n");
+            }
+
+            // ID_REV's chip-id half mirrors the USB PID: expect
+            // 0xec00xxxx (revision in the low half, masked off for the
+            // fixture's sake).
+            uart_puts("eth id: ");
+            uart_print_hex(((lan9514_read_reg(0x000) >> 16) & 0xFFFF) as i32);
+            uart_puts("\r\n");
+
+            if (lan9514_set_mac(PROBE_MAC)) {
+                uart_puts("eth mac set: ok\r\n");
+            } else {
+                uart_puts("eth mac set: fail\r\n");
+            }
+
+            if (lan9514_phy_start_autoneg()) {
+                uart_puts("eth autoneg: started\r\n");
+            } else {
+                uart_puts("eth autoneg: fail\r\n");
+            }
+
+            if (lan9514_wait_link()) {
+                uart_puts("eth link: up\r\n");
+            } else {
+                uart_puts("eth link: down\r\n");
+            }
+        }
+    }
+
+    uart_puts("done\r\n");
+}

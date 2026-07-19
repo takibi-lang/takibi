@@ -1,0 +1,532 @@
+// DWC2 (DesignWare Hi-Speed USB2 OTG) host controller driver for
+// BCM2837's single on-SoC USB port -- see examples/common_rpi3/
+// AGENTS.md's "USB host stack (Ethernet milestone)" section for the
+// full plan this file is one piece of, and why every register-level
+// fact here is drawn from public documentation and the uspi/Circle
+// bare-metal USB library (R. Stange, https://github.com/rsta2/uspi)
+// rather than anything this project had prior knowledge of -- there is
+// no QEMU/simulation model for this hardware, so this file grows one
+// real-hardware-verified milestone at a time via examples/usb_probe/
+// usb_probe.tkb, not all at once.
+//
+// examples/common_rpi3/mailbox.tkb's mbox_power_on_usb() MUST be called
+// before anything in this file -- BCM2837's USB power domain is off by
+// default and every register read below is meaningless until it is on.
+//
+// Register base: 0x3F980000 (peripheral base 0x3F000000 + BCM2835's
+// known 0x980000 USB offset, the same base-substitution pattern already
+// used for UART/VC-controller/QA7 elsewhere in this directory -- see
+// AGENTS.md's own note on why 0x3F000000 replaces BCM2835's
+// 0x20000000). The Core Global CSR block starts at this base; the Host
+// Global CSR block starts 0x400 further in (the standard DWC_otg
+// register map layout: Core CSRs occupy 0x000-0x3FF, Host CSRs and
+// beyond start at 0x400) -- cross-checked against uspi's own
+// ARM_USB_HOST_BASE offsets (its HOST_CFG/PORT/channel-block offsets,
+// applied relative to 0x400, land exactly on the well-known DWC_otg
+// HCFG (0x400) / HPRT (0x440) / HCCHAR(0) (0x500) register addresses).
+
+extern fn read_cntfrq() -> i64;
+extern fn read_cntpct() -> i64;
+
+const DWC2_CORE_BASE: usize = 0x3F980000;
+const DWC2_HOST_BASE: usize = 0x3F980400;
+
+let dwc2_vendor_id: *io u32 = 0x3F980040;
+let dwc2_ahb_cfg:   *io u32 = 0x3F980008;
+let dwc2_usb_cfg:   *io u32 = 0x3F98000C;
+let dwc2_reset:     *io u32 = 0x3F980010;
+let dwc2_hw_cfg2:   *io u32 = 0x3F980048;
+let dwc2_rx_fifo_siz:       *io u32 = 0x3F980024;
+let dwc2_nper_tx_fifo_siz:  *io u32 = 0x3F980028;
+
+let dwc2_host_cfg:  *io u32 = 0x3F980400;
+let dwc2_host_port: *io u32 = 0x3F980440;
+let dwc2_pcgcctl:   *io u32 = 0x3F980E00;
+
+const RESET_SOFT_RESET:    u32 = 0x00000001;
+const RESET_RX_FIFO_FLUSH: u32 = 0x00000010;
+const RESET_TX_FIFO_FLUSH: u32 = 0x00000020;
+const RESET_AHB_IDLE:      u32 = 0x80000000;
+
+const AHB_CFG_GLOBALINT_MASK:  u32 = 0x00000001;
+const AHB_CFG_MAX_AXI_BURST:   u32 = 0x00000006;
+const AHB_CFG_WAIT_AXI_WRITES: u32 = 0x00000010;
+const AHB_CFG_DMAENABLE:       u32 = 0x00000020;
+
+const USB_CFG_PHYIF:          u32 = 0x00000008;
+const USB_CFG_ULPI_UTMI_SEL:  u32 = 0x00000010;
+const USB_CFG_PHYSEL_FS:      u32 = 0x00000040;
+const USB_CFG_FORCE_HOST:     u32 = 0x20000000;
+const USB_CFG_FORCE_DEVICE:   u32 = 0x40000000;
+
+const PORT_CONNECT: u32 = 0x00000001;
+const PORT_ENABLE:  u32 = 0x00000004;
+const PORT_RESET:   u32 = 0x00000100;
+const PORT_POWER:   u32 = 0x00001000;
+
+// delay_ms: busy-wait using the ARM Generic Timer's free-running
+// counter (already proven by examples/common_rpi3/rtc.tkb/timer.tkb --
+// no new assembly stub needed, read_cntfrq/read_cntpct are reused
+// as-is). Every polling loop in this file uses a BOUNDED iteration
+// count instead (see e.g. dwc2_soft_reset below), not this function, to
+// avoid repeating the unbounded-timeout gap root AGENTS.md's Known
+// Limitations already flags for STM32's own PHY/MDIO polls -- delay_ms
+// is reserved for the two places the DWC2 hardware itself defines a
+// fixed settle time (port reset assertion/recovery), not as a general
+// polling primitive.
+fn delay_ms(ms: i32) {
+    let freq: i64 = read_cntfrq();
+    let ticks: i64 = (freq / 1000) * (ms as i64);
+    let start: i64 = read_cntpct();
+    while ((read_cntpct() - start) < ticks) {}
+}
+
+fn dwc2_read_vendor_id() -> u32 {
+    return *dwc2_vendor_id;
+}
+
+fn dwc2_read_ahb_cfg() -> u32 {
+    return *dwc2_ahb_cfg;
+}
+fn dwc2_read_hw_cfg2() -> u32 {
+    return *dwc2_hw_cfg2;
+}
+fn dwc2_read_hw_cfg3() -> u32 {
+    let hw_cfg3: *io u32 = 0x3F98004C;
+    return *hw_cfg3;
+}
+fn dwc2_read_gnptxsts() -> u32 {
+    let gnptxsts: *io u32 = 0x3F980020;
+    return *gnptxsts;
+}
+// GINTSTS bit 0 = CurMod: 1 = host mode, 0 = device mode. Host channel
+// registers are inert in device mode, so this is the first thing to
+// check when transactions fail silently.
+fn dwc2_is_host_mode() -> bool {
+    let gintsts: *io u32 = 0x3F980014;
+    return (*gintsts & 1) != 0;
+}
+fn dwc2_read_usb_cfg() -> u32 {
+    return *dwc2_usb_cfg;
+}
+// HFNUM low 16 bits = current frame/microframe number, incremented by
+// the host's own SOF generation (every 125us at high speed). Two reads
+// a millisecond apart differing is direct proof the host is actively
+// driving the bus; frozen means SOFs are not being generated and no
+// transaction can possibly succeed.
+fn dwc2_frame_number() -> u32 {
+    let hfnum: *io u32 = 0x3F980408;
+    return *hfnum & 0xFFFF;
+}
+
+// dwc2_soft_reset: RESET.SOFT_RESET, poll until the core clears it, THEN
+// poll RESET.AHB_IDLE (the AHB bus master interface's own "safe to
+// touch registers now" signal -- distinct from SOFT_RESET clearing,
+// which only means the reset sequence itself finished) before letting
+// the caller proceed. Both bounded (100000 attempts each -- generous
+// headroom over what every reference implementation's own reset poll
+// needs in practice, while still being a real bound, not an infinite
+// spin).
+fn dwc2_soft_reset() -> bool {
+    *dwc2_reset = RESET_SOFT_RESET;
+    let mut reset_done: bool = false;
+    for i: i32 in 0..<100000 {
+        if ((*dwc2_reset & RESET_SOFT_RESET) == 0) {
+            reset_done = true;
+            break;
+        }
+    }
+    if (reset_done == false) {
+        return false;
+    }
+    for i: i32 in 0..<100000 {
+        if ((*dwc2_reset & RESET_AHB_IDLE) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// dwc2_core_init: select the built-in UTMI+ PHY and configure the AHB
+// bus master, matching what uspi/u-boot/CSUD all do for this SoC.
+// Every write here is an explicit override of INHERITED state (the
+// usual JTAG-re-injection reasoning, see startup.S) -- nothing is
+// assumed to still hold its reset default.
+fn dwc2_core_init() {
+    // PCGCCTL (Power and Clock Gating Control): explicitly 0 so the PHY
+    // clock is not gated -- port connect SENSING works even gated (a
+    // simpler always-on circuit), so milestone 2 could not have caught
+    // this; real transactions need the clock running.
+    *dwc2_pcgcctl = 0;
+
+    // USB_CFG: clear ULPI_UTMI_SEL + PHYIF (built-in UTMI+ 8-bit PHY,
+    // no external ULPI on this SoC), clear PHYSEL_FS (bit 6 -- if
+    // inherited set, the core drives the FULL-SPEED serial transceiver
+    // instead of the high-speed UTMI+ one, and every transaction
+    // against a high-speed device dies with XACT_ERROR), clear
+    // FORCE_DEVICE and set FORCE_HOST (this controller is OTG-capable;
+    // host-channel registers are inert while the core sits in device
+    // mode, so force the mode rather than trusting the ID pin state
+    // the previous occupant left behind. The Synopsys-documented mode
+    // transition time is up to 25ms -- see the delay below).
+    let mut cfg: u32 = *dwc2_usb_cfg;
+    cfg = cfg & ~USB_CFG_ULPI_UTMI_SEL;
+    cfg = cfg & ~USB_CFG_PHYIF;
+    cfg = cfg & ~USB_CFG_PHYSEL_FS;
+    cfg = cfg & ~USB_CFG_FORCE_DEVICE;
+    cfg = cfg | USB_CFG_FORCE_HOST;
+    *dwc2_usb_cfg = cfg;
+    delay_ms(25);
+
+    // AHB_CFG: DMA mode on, plus uspi's BCM-specific AXI bridge tuning
+    // for exactly this SoC: wait-for-AXI-writes on, AXI burst length
+    // field zeroed.
+    let mut ahb: u32 = *dwc2_ahb_cfg;
+    ahb = ahb | AHB_CFG_DMAENABLE;
+    ahb = ahb | AHB_CFG_WAIT_AXI_WRITES;
+    ahb = ahb & ~AHB_CFG_MAX_AXI_BURST;
+    *dwc2_ahb_cfg = ahb;
+
+    dwc2_program_fifo_sizes();
+}
+
+// dwc2_program_fifo_sizes: every bare-metal DWC2 reference explicitly
+// reprograms all three FIFOs during host init rather than trusting the
+// power-on partition (uspi's own dwhcidevice.c included) -- and under
+// JTAG re-injection the current partition is inherited state anyway.
+// 1024 words (4096 bytes) each for RX / non-periodic TX / periodic TX,
+// the same fixed generously-sized partition uspi itself uses for
+// exactly this SoC (not dynamically computed from HW_CFG3's reported
+// total depth of 4080 words -- matching the reference implementation
+// rather than deriving a tighter partition this project has no way to
+// cross-check; 3072 total fits comfortably). Layout:
+// RX_FIFO_SIZ's only field is its own depth; NPER_TX_FIFO_SIZ and
+// HOST_PER_TX_FIFO_SIZ are each (start address in low 16 bits) | (depth
+// in bits 31:16), where each FIFO's start address is the sum of every
+// earlier FIFO's size (they're laid out back-to-back in one shared SRAM).
+fn dwc2_program_fifo_sizes() {
+    let host_per_tx_fifo_siz: *io u32 = 0x3F980100;
+    *dwc2_rx_fifo_siz = 1024;
+    *dwc2_nper_tx_fifo_siz = 1024 | (1024 << 16);
+    *host_per_tx_fifo_siz = 2048 | (1024 << 16);
+}
+
+// dwc2_host_init: flush both FIFOs (self-clearing bits, bounded poll
+// same as dwc2_soft_reset) then power on the host port.
+fn dwc2_flush_fifos() -> bool {
+    *dwc2_reset = RESET_RX_FIFO_FLUSH | RESET_TX_FIFO_FLUSH;
+    for i: i32 in 0..<100000 {
+        let r: u32 = *dwc2_reset;
+        if ((r & (RESET_RX_FIFO_FLUSH | RESET_TX_FIFO_FLUSH)) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn dwc2_host_port_power_on() {
+    let mut port: u32 = *dwc2_host_port;
+    // PORT is write-1-to-clear on its status bits (CONNECT/ENABLE
+    // change detect, same convention as every DWC2 reference) -- mask
+    // those off before read-modify-write so setting POWER does not
+    // accidentally also clear a status bit that was legitimately set.
+    port = port & ~(PORT_ENABLE | PORT_CONNECT);
+    port = port | PORT_POWER;
+    *dwc2_host_port = port;
+}
+
+fn dwc2_host_port_connected() -> bool {
+    return (*dwc2_host_port & PORT_CONNECT) != 0;
+}
+
+// dwc2_host_port_reset: assert PORT_RESET for 50ms (this board's fixed
+// USB2 root-port reset duration, not a polled condition -- delay_ms is
+// the right tool here, see its own comment above), release, then allow
+// 20ms recovery time before the port is trusted.
+fn dwc2_host_port_reset() {
+    let mut port: u32 = *dwc2_host_port;
+    port = port & ~(PORT_ENABLE | PORT_CONNECT);
+    port = port | PORT_RESET;
+    *dwc2_host_port = port;
+    delay_ms(50);
+
+    port = *dwc2_host_port;
+    port = port & ~(PORT_ENABLE | PORT_CONNECT | PORT_RESET);
+    *dwc2_host_port = port;
+    // USB2.0 spec's own recommended reset recovery time (TRSTRCY) is a
+    // 10ms minimum; 20ms plus this extra 100ms settle gives real
+    // hardware (LAN9514's own internal firmware/PHY) generous headroom
+    // to be genuinely ready for the first SETUP token, not just
+    // electrically enabled -- added after the first enumeration attempt
+    // failed with HCINT.XACT_ERROR.
+    delay_ms(20);
+    delay_ms(100);
+}
+
+fn dwc2_host_port_status() -> u32 {
+    return *dwc2_host_port;
+}
+
+// -- Host channels + control transfers (milestone 3) ------------------------
+// Bit-field values below are the standard DWC_otg/DWC2 host-channel
+// register layout, cross-checked directly against uspi's own dwhci.h
+// constants (not general USB-spec trivia -- these specific shift
+// amounts/PID codes are Synopsys-IP-specific). Channel 0 is dedicated
+// to control transfers during enumeration; later milestones reuse
+// dwc2_channel_transfer for other channels/endpoint types (bulk IN/OUT
+// for the Ethernet function), which is why it takes the channel number
+// as a parameter rather than being hardwired to channel 0.
+
+// dcache_clean_range/dcache_invalidate_range are already declared by
+// examples/common_rpi3/mailbox.tkb, which this file is always compiled
+// alongside (see the Makefile's RPI3_USB_OBJS rule) -- takibi rejects a
+// second extern fn declaration of the same symbol as an overload
+// attempt, so this file just uses them without redeclaring.
+// bus_address() (mailbox.tkb) is reused the same way -- DWC2's own DMA
+// engine is a bus master exactly like the VideoCore GPU is, so its
+// CHAN_DMA_ADDR register needs the same ARM-physical-to-VC-bus-address
+// translation the mailbox buffer already needs, not a raw physical
+// address.
+
+const CTRL_CHANNEL: usize = 0;
+
+const EP_TYPE_CONTROL: u32 = 0;
+const EP_TYPE_BULK:    u32 = 2;
+
+// Multi Count (bits 21:20): "number of transactions per microframe" --
+// meaningless for non-periodic (control/bulk) transfers in the sense
+// its name suggests, but the hardware still requires it set to 1, not
+// left 0, for ANY transfer to complete without HCINT.XACT_ERROR --
+// confirmed the hard way (every control transfer failed until this was
+// added) and cross-checked against uspi's own DWHCIDeviceStartChannel,
+// which unconditionally sets it to 1 for every channel type.
+const CHAN_CHAR_MULTI_CNT_1: u32 = 0x00100000;
+
+const CHAN_CHAR_DIRECTION_IN: u32 = 0x00008000;
+const CHAN_CHAR_DISABLE:      u32 = 0x40000000;
+const CHAN_CHAR_ENABLE:       u32 = 0x80000000;
+
+// PID codes are NOT 0=DATA0,1=DATA1 the way you'd guess -- DWC2 encodes
+// them as DATA0=0, DATA2=1, DATA1=2, MDATA/SETUP=3 (uspi's own
+// dwhci.h). Only DATA0/DATA1/SETUP are used here; DATA2/MDATA are
+// isochronous-only, never needed for control or bulk transfers.
+const PID_DATA0: u32 = 0;
+const PID_DATA1: u32 = 2;
+const PID_SETUP: u32 = 3;
+
+const HCINT_XFER_COMPLETE: u32 = 0x00000001;
+const HCINT_HALTED:        u32 = 0x00000002;
+const HCINT_STALL:         u32 = 0x00000008;
+const HCINT_NAK:           u32 = 0x00000010;
+const HCINT_XACT_ERROR:    u32 = 0x00000080;
+
+fn chan_char_reg(chan: usize) -> *io u32 {
+    return (DWC2_HOST_BASE + 0x100 + chan * 0x20 + 0x00) as *io u32;
+}
+fn chan_int_reg(chan: usize) -> *io u32 {
+    return (DWC2_HOST_BASE + 0x100 + chan * 0x20 + 0x08) as *io u32;
+}
+fn chan_xfersiz_reg(chan: usize) -> *io u32 {
+    return (DWC2_HOST_BASE + 0x100 + chan * 0x20 + 0x10) as *io u32;
+}
+fn chan_dmaaddr_reg(chan: usize) -> *io u32 {
+    return (DWC2_HOST_BASE + 0x100 + chan * 0x20 + 0x14) as *io u32;
+}
+fn chan_split_reg(chan: usize) -> *io u32 {
+    return (DWC2_HOST_BASE + 0x100 + chan * 0x20 + 0x04) as *io u32;
+}
+
+// dwc2_channel_transfer: program `chan` for ONE transfer stage (DMA
+// mode -- CHAN_DMA_ADDR holds the physical buffer address directly, no
+// FIFO push/pop) and busy-wait for completion. Cache maintenance is the
+// CALLER's responsibility (see dwc2_control_transfer below): this
+// function only knows it is moving `len` bytes, not which direction
+// makes cleaning vs invalidating correct.
+let mut dwc2_last_status: u32 = 0;
+
+fn dwc2_channel_transfer(chan: usize, dev_addr: u32, ep_num: u32, ep_type: u32,
+                          direction_in: bool, max_pkt: u32, pid: u32,
+                          buf: usize, len: u32) -> bool {
+    let mut packets: u32 = (len + max_pkt - 1) / max_pkt;
+    if (packets == 0) {
+        packets = 1;
+    }
+
+    let xfersiz:  *io u32 = chan_xfersiz_reg(chan);
+    let dmaaddr:  *io u32 = chan_dmaaddr_reg(chan);
+    let intreg:   *io u32 = chan_int_reg(chan);
+    let charreg:  *io u32 = chan_char_reg(chan);
+    let splitreg: *io u32 = chan_split_reg(chan);
+
+    *xfersiz = (len & 0x7FFFF) | ((packets & 0x3FF) << 19) | ((pid & 3) << 29);
+    *dmaaddr = bus_address(buf);
+    *intreg = 0xFFFFFFFF;
+    *splitreg = 0; // no split transaction -- the LAN9514 is this board's
+                    // only device, directly on the root port, never
+                    // behind another hub (see AGENTS.md)
+
+    let mut char_val: u32 = max_pkt & 0x7FF;
+    char_val = char_val | ((ep_num & 0xF) << 11);
+    if (direction_in) {
+        char_val = char_val | CHAN_CHAR_DIRECTION_IN;
+    }
+    char_val = char_val | ((ep_type & 3) << 18);
+    char_val = char_val | CHAN_CHAR_MULTI_CNT_1;
+    char_val = char_val | ((dev_addr & 0x7F) << 22);
+    char_val = char_val | CHAN_CHAR_ENABLE;
+
+    // Completion detection follows u-boot/CSUD, not first-error-wins:
+    // wait for HCINT.HALTED (the channel actually stopping), THEN
+    // classify by which bits accompany it. In buffer-DMA mode the core
+    // retries failing transactions internally (up to 3 consecutive
+    // errors) before halting, and individual HCINT error bits latch
+    // per-ATTEMPT along the way -- treating the first latched
+    // XACT_ERROR as fatal (this function's original shape) aborts
+    // transfers the hardware would have completed on its own retry.
+    // A halt WITHOUT XFER_COMPLETE (NAK burst, error limit, etc.) gets
+    // the whole stage re-armed, bounded at 8 attempts; a poll timeout
+    // disables the channel explicitly (DISABLE|ENABLE, then wait for
+    // the halt to land) so the next caller finds it free.
+    for attempt: i32 in 0..<8 {
+        *intreg = 0xFFFFFFFF;
+        *charreg = char_val;
+        let mut halted: u32 = 0;
+        for i: i32 in 0..<300000 {
+            let status: u32 = *intreg;
+            if ((status & HCINT_HALTED) != 0) {
+                halted = status;
+                break;
+            }
+        }
+        if (halted == 0) {
+            // Timeout: force-halt the channel so it is reusable.
+            *charreg = char_val | CHAN_CHAR_DISABLE;
+            for i: i32 in 0..<300000 {
+                if ((*intreg & HCINT_HALTED) != 0) {
+                    break;
+                }
+            }
+            *intreg = 0xFFFFFFFF;
+            dwc2_last_status = 0xDEAD0000;
+            return false;
+        }
+        dwc2_last_status = halted;
+        *intreg = halted;
+        if ((halted & HCINT_XFER_COMPLETE) != 0) {
+            return true;
+        }
+        if ((halted & HCINT_STALL) != 0) {
+            return false;
+        }
+        // NAK / transaction-error halt: re-arm and retry this stage.
+    }
+    return false;
+}
+
+fn dwc2_debug_last_status() -> u32 {
+    return dwc2_last_status;
+}
+
+let mut ctrl_setup_buf: [u8; 8] align(64);
+let mut ctrl_data_buf: [u8; 64] align(64);
+
+// dwc2_control_transfer: the 3-stage setup/data/status control
+// transfer sequence, per the USB2.0 spec's own state machine (not
+// DWC2-specific): the data stage always starts DATA1 (the very first
+// data packet after SETUP is defined to be DATA1, never DATA0); the
+// status stage is the OPPOSITE direction of the data stage, or IN if
+// there is no data stage at all (e.g. SET_ADDRESS). `data`/`len`
+// describe the caller's own buffer (ctrl_data_buf here, always) --
+// cache maintenance direction depends on request_type's direction bit
+// (bit 7: device-to-host = 0x80).
+fn dwc2_control_transfer(dev_addr: u32, max_pkt: u32,
+                          request_type: u8, request: u8, value: u16, index: u16,
+                          data: *u8, len: u32) -> bool {
+    ctrl_setup_buf[0] = request_type;
+    ctrl_setup_buf[1] = request;
+    ctrl_setup_buf[2] = (value & 0xFF) as u8;
+    ctrl_setup_buf[3] = ((value >> 8) & 0xFF) as u8;
+    ctrl_setup_buf[4] = (index & 0xFF) as u8;
+    ctrl_setup_buf[5] = ((index >> 8) & 0xFF) as u8;
+    ctrl_setup_buf[6] = (len & 0xFF) as u8;
+    ctrl_setup_buf[7] = (((len >> 8) as u16) & 0xFF) as u8;
+
+    let setup_addr: usize = ctrl_setup_buf as usize;
+    dcache_clean_range(setup_addr, 8);
+    if (dwc2_channel_transfer(CTRL_CHANNEL, dev_addr, 0, EP_TYPE_CONTROL,
+                               false, max_pkt, PID_SETUP, setup_addr, 8) == false) {
+        return false;
+    }
+
+    let is_in: bool = (request_type & 0x80) != 0;
+    let mut had_data_stage: bool = false;
+
+    if (len > 0) {
+        had_data_stage = true;
+        let data_addr: usize = data as usize;
+        if (is_in == false) {
+            dcache_clean_range(data_addr, len as usize);
+        }
+        if (dwc2_channel_transfer(CTRL_CHANNEL, dev_addr, 0, EP_TYPE_CONTROL,
+                                   is_in, max_pkt, PID_DATA1, data_addr, len) == false) {
+            return false;
+        }
+        if (is_in) {
+            dcache_invalidate_range(data_addr, len as usize);
+        }
+    }
+
+    let mut status_in: bool = true;
+    if (had_data_stage) {
+        status_in = is_in == false;
+    }
+    return dwc2_channel_transfer(CTRL_CHANNEL, dev_addr, 0, EP_TYPE_CONTROL,
+                                  status_in, max_pkt, PID_DATA1, setup_addr, 0);
+}
+
+// GET_DESCRIPTOR(device): bmRequestType 0x80 (device-to-host | standard
+// | device recipient), bRequest 0x06, wValue = (descriptor_type << 8) |
+// index, wIndex 0. Result lands in ctrl_data_buf (up to 64 bytes,
+// generous headroom over the 18-byte device descriptor and the largest
+// config descriptor this milestone needs).
+fn dwc2_get_device_descriptor(dev_addr: u32, max_pkt: u32, length: u32) -> bool {
+    let value: u16 = (1 as u16) << 8; // descriptor type 1 = DEVICE, index 0
+    return dwc2_control_transfer(dev_addr, max_pkt, 0x80, 0x06, value, 0,
+                                  ctrl_data_buf, length);
+}
+
+// SET_ADDRESS: bmRequestType 0x00 (host-to-device | standard | device
+// recipient), bRequest 0x05, wValue = new address, no data stage. Per
+// spec this is sent to the device's CURRENT address (0 during
+// enumeration) -- the device only starts responding at the new address
+// after this transfer's status stage completes.
+fn dwc2_set_address(new_addr: u32, max_pkt: u32) -> bool {
+    return dwc2_control_transfer(0, max_pkt, 0x00, 0x05, new_addr as u16, 0,
+                                  ctrl_data_buf, 0);
+}
+
+// SET_CONFIGURATION: bmRequestType 0x00, bRequest 0x09, wValue = the
+// configuration value (1 for every device this project touches), no
+// data stage. REQUIRED before any class-specific functionality works:
+// a device sitting in Address state is only obliged to answer standard
+// requests -- the LAN9514 hub tolerated a class GET_DESCRIPTOR while
+// unconfigured (returned its port count fine) but reported every port
+// as empty until configured, which is exactly the spec-permitted
+// behavior and cost one hardware round-trip to diagnose.
+fn dwc2_set_configuration(dev_addr: u32, max_pkt: u32, config: u16) -> bool {
+    return dwc2_control_transfer(dev_addr, max_pkt, 0x00, 0x09, config, 0,
+                                  ctrl_data_buf, 0);
+}
+
+fn dwc2_device_descriptor_max_packet0() -> u8 {
+    return ctrl_data_buf[7];
+}
+fn dwc2_device_descriptor_vendor_id() -> u16 {
+    return (ctrl_data_buf[8] as u16) | ((ctrl_data_buf[9] as u16) << 8);
+}
+fn dwc2_device_descriptor_product_id() -> u16 {
+    return (ctrl_data_buf[10] as u16) | ((ctrl_data_buf[11] as u16) << 8);
+}
+fn dwc2_device_descriptor_class() -> u8 {
+    return ctrl_data_buf[4];
+}
