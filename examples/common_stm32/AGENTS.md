@@ -41,16 +41,25 @@ process rules that apply everywhere.
   re-posts the RX descriptor, and restores the acquisition permission.
 
   **RX burst capacity and suspended-DMA recovery (issue #135 follow-up)**: the RX ring has 16
-  descriptors, allocated statically at link time. Four concurrent TCP clients can produce an
-  ACK-plus-request burst of eight frames, with ARP and retransmissions arriving around it; the old
-  four-descriptor ring measurably overflowed under this load, and eight descriptors still had no
-  margin. Sixteen buffers consume about 25 KiB and produced zero DMA missed frames in the supported
-  concurrency-4 stress run. This count is sized for the MCU/server contract, not for the host's CPU
-  count. When all descriptors were temporarily CPU-owned, the STM32 DMA could set RBUS and remain
+  descriptors, allocated statically at link time. Eight concurrent TCP clients can produce a burst
+  larger than the old four-descriptor ring, with ARP and retransmissions arriving around it; eight
+  descriptors still had no margin. Sixteen RX buffers consume about 25 KiB. This count is sized for
+  the MCU/server contract, not for the host's CPU count. When all descriptors were temporarily CPU-owned,
+  the STM32 DMA could set RBUS and remain
   suspended even after descriptors had been reposted. `eth_rx_resume` now clears RBUS and issues RX
   poll demand after publishing a descriptor; the empty-acquire path also performs this recovery so
   an interrupt/poll race cannot leave receive asleep. Read `ETH_DMAMFBOCR` only once when diagnosing
   loss because its missed-frame counters are read-to-clear.
+
+  STM32 TX no longer transmits directly from the currently CPU-owned RX buffer. Four dedicated
+  1536-byte TX buffers mirror the TX descriptor ring; `net_transmit` copies only the proven-safe
+  frame length, reposts the RX descriptor immediately, and then publishes the TX descriptor. The
+  linear `NetTxInFlight[desc]` owner and `NetRxCanAcquire` permit still prevent normal context from
+  processing another frame before TX completion, so the cross-platform driver API is unchanged,
+  while RX DMA can fill the returned descriptor during that interval. The extra BSS cost is about
+  6.2 KiB. With eight TCP slots, concurrency 8 completed a 30-second KVS+SD+RTOS run with 1872/1872
+  successful requests, although 13 DMA missed frames show that synchronous SD waits can still fill
+  the 16-entry ring. Concurrency above 8 remains overload rather than a supported operating point.
 
   **Network config**: `examples/common_stm32/netconfig.tkb` holds the board's MAC/IP as plain global
   constants (`OUR_MAC`/`OUR_IP`/`HTTP_SERVER_IP`, array-literal `{...}` initializers). MAC is a fixed

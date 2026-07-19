@@ -102,11 +102,11 @@ private linear struct NetRxCpuOwned[desc: usize] {
     private len: i32;
 }
 
-// DMA owns the in-place frame and one TX descriptor between net_transmit and
-// net_tx_complete. The completion path retains the runtime RX index and exact
-// TX ring slot it must observe; their static RX identity remains `desc`.
+// DMA owns one dedicated TX buffer and descriptor between net_transmit and
+// net_tx_complete. The static `desc` identity records which consumed RX owner
+// initiated the operation even though that RX descriptor is reposted as soon
+// as its reply has been copied.
 private linear struct NetTxInFlight[desc: usize] {
-    private index: {0..<ETH_RX_DESC_COUNT as usize} @ desc;
     private tx_index: isize;
 }
 
@@ -182,6 +182,7 @@ fn ETH_IRQHandler() !{interrupt} {
 let mut eth_rx_descs: [EthDmaDesc; ETH_RX_DESC_COUNT] align(32);
 let mut eth_tx_descs: [EthDmaDesc; ETH_TX_DESC_COUNT] align(32);
 let mut eth_rx_bufs:  [u8; ETH_RX_DESC_COUNT * ETH_BUF_SIZE_USIZE] align(32);
+let mut eth_tx_bufs:  [u8; 4 * ETH_BUF_SIZE_USIZE] align(32);
 
 let mut eth_rx_cur: isize = 0;
 let mut eth_tx_cur: isize = 0;
@@ -463,7 +464,7 @@ fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc {
 }
 
 
-fn net_rx_repost(index: {0..<ETH_RX_DESC_COUNT as usize} @ desc) -> NetRxCanAcquire {
+fn net_rx_repost_owned(index: {0..<ETH_RX_DESC_COUNT as usize} @ desc) {
     let desc_index: isize = index as isize;
     let desc: *EthDmaDesc = rx_desc_ptr(desc_index);
     dma_prepare_rx(eth_rx_bufs + desc_index * ETH_BUF_SIZE,
@@ -472,6 +473,10 @@ fn net_rx_repost(index: {0..<ETH_RX_DESC_COUNT as usize} @ desc) -> NetRxCanAcqu
     dma_prepare_tx(desc as *u8, sizeof(EthDmaDesc));
     eth_rx_resume(); // clear RBUS and resume RX DMA if it had suspended
     eth_rx_cur = (desc_index + 1) % (ETH_RX_DESC_COUNT as isize);
+}
+
+fn net_rx_repost(index: {0..<ETH_RX_DESC_COUNT as usize} @ desc) -> NetRxCanAcquire {
+    net_rx_repost_owned(index);
     return view NetRxCanAcquire;
 }
 
@@ -481,32 +486,45 @@ fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire {
     return net_rx_repost(frame.index);
 }
 
-// Starts transmitting len bytes from this owned RX descriptor. Deriving buf
-// here makes the in-place-reply requirement structural rather than a raw-
-// pointer calling convention. The returned linear owner represents the real
-// interval in which DMA may continue reading the buffer after this call.
+// Copies the completed in-place reply to the selected TX descriptor's private
+// buffer, then immediately reposts the consumed RX descriptor. The acquisition
+// permit remains represented by the returned in-flight owner until TX
+// completion, so callers retain the same one-frame-at-a-time API while RX DMA
+// can absorb new frames during a slow transmission.
 fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32)
         -> NetTxInFlight[desc] {
-    let buf: *u8 = net_rx_frame(frame) as *u8;
+    let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
+    let copy_len: usize = safe_len as usize;
     let tx_index: isize = eth_tx_cur;
+    let tx_slot: {0..<4 as usize} = max(min(tx_index, 3), 0) as usize;
+    let tx_offset: usize = tx_slot * ETH_BUF_SIZE_USIZE;
+    let rx_buf = net_rx_frame(frame);
+    let tx_buf = eth_tx_bufs[tx_offset..<tx_offset + 1514];
+    slice_copy(tx_buf[0..<copy_len], rx_buf[0..<copy_len]);
+
+    // No reference into rx_buf is used after this ownership transfer.
+    net_rx_repost_owned(frame.index);
+
+    let buf: *u8 = tx_buf as *u8;
     let desc: *align(32) EthDmaDesc = tx_desc_ptr(tx_index);
 
     desc.word2 = ptr_to_u32(buf);
-    desc.word1 = len as u32; // TBS1
+    desc.word1 = safe_len as u32; // TBS1
     desc.word0 = ETH_TDES0_OWN | ETH_TDES0_IC | ETH_TDES0_FS | ETH_TDES0_LS | ETH_TDES0_TCH;
 
-    dma_prepare_tx(buf, len as usize);
+    dma_prepare_tx(buf, copy_len);
     dma_prepare_tx(desc as *u8, sizeof(EthDmaDesc));
     eth_tx_irq_flag = 0;
     *ETH_DMATPDR = 1; // poll demand: prompt DMA to check for a ready descriptor now
 
-    let mut in_flight: NetTxInFlight[desc] = { frame.index, tx_index };
+    let mut in_flight: NetTxInFlight[desc] = { tx_index };
     return in_flight;
 }
 
 // Waits for the exact descriptor retained by the in-flight owner. Only after
-// OWN clears may the frame return to RX DMA and the acquisition permit be
-// restored.
+// OWN clears may the acquisition permit be restored. The RX descriptor was
+// already returned after copying, but the permit deliberately keeps normal
+// context from processing another frame while this TX operation is active.
 fn net_tx_complete(in_flight: sink NetTxInFlight[desc])
         -> NetRxCanAcquire !{may_block} {
     let desc: *align(32) EthDmaDesc = tx_desc_ptr(in_flight.tx_index);
@@ -526,7 +544,7 @@ fn net_tx_complete(in_flight: sink NetTxInFlight[desc])
     }
 
     eth_tx_cur = (in_flight.tx_index + 1) % ETH_TX_DESC_COUNT;
-    return net_rx_repost(in_flight.index);
+    return view NetRxCanAcquire;
 }
 
 // One-frame poll disposition, decided by the application after inspecting

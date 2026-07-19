@@ -345,9 +345,11 @@ Builds run in parallel across all cores by default.
 `stress-stm32-kvs-server-sdcard-rtos` is intentionally not part of
 `allcheck`: it is a sustained real-board load test rather than a deterministic
 integration test. The target loads the KVS+SD+RTOS firmware into RAM and runs
-`scripts/kvs_stress.py` with the practical issue #135 defaults, concurrency 4
-and a fixed key. The server has four TCP connection slots; values above 4 are
-useful overload experiments, not a supported-concurrency regression level.
+`scripts/kvs_stress.py` with the conservative issue #135 defaults, concurrency
+4 and a fixed key. The server has eight TCP connection slots; concurrency 8
+passed the measured 30-second load but is intentionally not the default until
+longer repeated runs justify making it a regression baseline. Values above 8
+are overload experiments, not a supported-concurrency regression level.
 Override with `TAKIBI_STRESS_CONCURRENCY`, `TAKIBI_STRESS_DURATION`, or
 `TAKIBI_STRESS_FIXED_KEY` for manual characterization.
 

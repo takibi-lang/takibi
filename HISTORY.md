@@ -15,6 +15,35 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-19: Eight TCP Slots and Separate STM32 TX Buffers (Issue #135)
+
+The next measured concurrency step increased `MAX_CONNS` from 4 to 8 and
+updated every per-connection array contract, refined callback index, ISN slot
+range, and concurrent QEMU test. `--forbid-trap` immediately found three stale
+minimum-capacity annotations (`remote_ip`, `remote_port`, and idle ages), which
+were corrected to the actual eight-slot capacities rather than bypassed.
+
+STM32 Ethernet transmission now copies the completed in-place response into
+one of four dedicated 1536-byte TX buffers and reposts the RX descriptor before
+publishing TX. `NetTxInFlight` retains the TX descriptor identity and withholds
+`NetRxCanAcquire` until completion, preserving the existing linear one-frame
+normal-context API while allowing RX DMA to refill the returned descriptor.
+The KVS RAM image grew by about 6.2 KiB to 72,738 bytes total.
+
+Ten-second fixed-key mixed measurements were: concurrency 4, 506/506 success
+with zero DMA misses; concurrency 8, 533/533 success with 7 DMA misses;
+concurrency 16, 353/381 success with 45 DMA misses; and concurrency 24,
+318/367 success with 91 DMA misses. A longer concurrency-8 run completed
+1872/1872 requests in 30.2 seconds (62.0 requests/s) with 13 DMA misses and no
+RBUS or CPU fault. Thus the extra TCP slots removed the connection-table limit
+at concurrency 8, but synchronous SD work can still transiently exhaust the RX
+ring and TCP retransmission is masking that loss. Values above 8 exceed the
+connection table and remain overload characterization.
+
+Verification: `make check` passed all 131 tests and
+`make hwcheck-stm32-net` passed all 10 real-Ethernet tests, including KVS
+persistence across reset.
+
 ### 2026-07-18: STM32 RX Burst Capacity and DMA Recovery (Issue #135)
 
 The KVS+SD+RTOS concurrency-4 stress failure was traced below the SD task and

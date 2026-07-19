@@ -2,8 +2,9 @@
 # Explicit STM32 KVS+SD+RTOS stress runner.
 #
 # This is intentionally NOT part of make allcheck: it is a sustained real-
-# board load test, not a deterministic integration test. Concurrency 4 matches
-# the server's TCP slot count; larger values deliberately test overload.
+# board load test, not a deterministic integration test. Its default remains
+# the established concurrency-4 baseline; values above 8 deliberately exceed
+# the server's TCP slot count and test overload.
 set -euo pipefail
 
 : "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run through make or set it explicitly}"

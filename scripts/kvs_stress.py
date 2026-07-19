@@ -12,9 +12,9 @@
 #
 # --concurrency N spawns N worker threads, each looping PUT/GET/DELETE/
 # LIST requests against the server for the configured duration. The
-# shared TCP core accepts MAX_CONNS=4 simultaneous connections. Higher
+# shared TCP core accepts MAX_CONNS=8 simultaneous connections. Higher
 # concurrency deliberately exercises overload behavior: excess SYNs may be
-# retried while all four slots are occupied.
+# retried while all eight slots are occupied.
 #
 # Works against any host:port (QEMU's qemu-kvs SLIRP hostfwd, or a real
 # board over Ethernet) -- defaults match the STM32 board's netconfig.tkb.
@@ -202,8 +202,8 @@ def main() -> int:
                               "KVS_HOST_PORT for QEMU")
     parser.add_argument("--port", type=int, default=80)
     parser.add_argument("--concurrency", type=int, default=4,
-                         help="worker threads; the server has four TCP slots, "
-                              "so values above four also exercise overload")
+                         help="worker threads; the server has eight TCP slots, "
+                              "so values above eight also exercise overload")
     parser.add_argument("--duration", type=float, default=30.0, help="seconds")
     parser.add_argument("--key-space", type=int, default=16,
                          help="distinct keys cycled through (default matches "

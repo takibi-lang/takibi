@@ -133,7 +133,7 @@ const TCP_INITIAL_SEQ: u32 = 0x00001000;
 // distinct per slot, so a fixed per-slot offset is enough (YAGNI).
 const TCP_ISN_SLOT_STRIDE: u32 = 0x01000000;
 
-fn tcp_initial_seq(idx: {0..<4 as usize}) -> u32 {
+fn tcp_initial_seq(idx: {0..<8 as usize}) -> u32 {
     return TCP_INITIAL_SEQ + (idx as u32) * TCP_ISN_SLOT_STRIDE;
 }
 
