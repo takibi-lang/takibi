@@ -166,6 +166,7 @@ make hwcheck-stm32        # like stm32build, but also loads into RAM + UART-diff
 make hwcheck-stm32-net    # real-Ethernet hardware tests (needs the board's Ethernet port wired to this host)
 make stress-stm32-kvs-server-sdcard-rtos  # opt-in STM32 KVS concurrency stress test (not in allcheck)
 make hwcheck-rpi3   # opt-in Raspberry Pi 3B JTAG hardware integration test (not in allcheck, see examples/common_rpi3/AGENTS.md)
+make hwcheck-rpi3-net     # RPi3 real-Ethernet hardware tests (needs the board's Ethernet port -- behind its USB host stack, see examples/common_rpi3/AGENTS.md -- wired to this host)
 make perfcheck      # real-hardware profiler smoke tests
 make allcheck       # clean + check + hwcheck-stm32 + perfcheck + hwcheck-stm32-net
 make clean          # remove generated artifacts
@@ -386,8 +387,10 @@ examples/
     semihosting_stub.S -- no-op stand-ins for examples/fatfs's semihosting extern fns on
                      this target (no ARM semihosting on real hardware)
   common_rpi3/    -- Raspberry Pi 3B (BCM2837) bare-metal HAL, JTAG-injection-only
-                     bring-up (issue #140), 37 examples ported (incl. rtc/timer and
-                     echo/irq on real interrupts) -- see examples/common_rpi3/AGENTS.md.
+                     bring-up (issue #140), 59 examples ported (incl. rtc/timer,
+                     echo/irq on real interrupts, the preemptive-scheduler group,
+                     and net_echo/arp_reply/icmp_echo over a from-scratch USB host
+                     stack) -- see examples/common_rpi3/AGENTS.md.
     startup.S     -- core-0-only gate, exception vector table + rpi3_irq_entry,
                      HCR_EL2.IMO routing, inherited-interrupt quiescing, stack/BSS
                      zeroing, calls mmu_init() then main(), halts on return
@@ -398,17 +401,44 @@ examples/
                      since-boot, not wall-clock; see AGENTS.md's "RTC" entry
     mmu.S         -- minimal EL2 identity-map MMU setup (2-level, 4KB granule):
                      fixes LLVM-synthesized unaligned-store faults that occur
-                     whenever the stage 1 MMU is off (Device memory semantics);
-                     deliberately leaves the D-/I-cache off (see its own header
-                     comment -- JTAG's load_image bypasses the cache, so caching
-                     would let a previous payload's dirty lines silently corrupt
-                     the next one)
+                     whenever the stage 1 MMU is off (Device memory semantics).
+                     Both D-/I-cache are ON (re-enabled for ldaxr/stlxr
+                     correctness, see AGENTS.md's "MMU and caches" entry) --
+                     JTAG's load_image and this board's own DWC2 controller both
+                     bypass the CPU cache, so anything DMA'd needs explicit
+                     maintenance instead (cache_asm.S below; startup.S's own
+                     dcache_invalidate_all handles the whole-cache case at boot)
+    cache_asm.S   -- dcache_clean_range/dcache_invalidate_range: VA-based `dc
+                     cvac`/`dc ivac` loops, the address-range-bounded counterpart
+                     to startup.S's whole-cache dcache_invalidate_all -- needed
+                     because dma_prepare_tx/dma_prepare_rx/dma_finish_rx lower to
+                     a bare `dsb sy` on AArch64 (see this file's own "Known
+                     Limitations" entry on that compiler-level gap)
     link.ld       -- load address 0x200000 (deliberately distinct from jtag_stub.ld's)
     uart.tkb      -- UART0 (PL011) driver, GPIO14/15 ALT0 pinmux + pull disable
     print.tkb     -- isize/usize uart_print/uart_println overloads (AArch64
                      64-bit, byte-for-byte copy of common_qemu/print.tkb)
     jtag_stub.S / jtag_stub.ld -- standalone spin-loop image flashed as the SD
                      card's kernel8.img, giving JTAG a clean non-Linux catch point
+    mailbox.tkb   -- VideoCore mailbox property interface (issue #144): must
+                     power on the USB power domain before any DWC2 register does
+                     anything; also the bus-address-translation reference point
+                     (0xC0000000 alias) DWC2's own DMA reuses
+    usb_dwc2.tkb  -- DesignWare Hi-Speed USB2 OTG host controller driver: core/
+                     host-port bring-up, control/bulk host-channel transfers,
+                     descriptor parsing, per-endpoint DATA0/DATA1 toggle tracking
+    usb_hub.tkb   -- minimal USB 2.0 chapter-11 hub-class driver (port power/
+                     reset/status only) to reach the LAN9514's internal ports
+    lan9514.tkb   -- SMSC LAN9514 vendor register protocol (no memory-mapped
+                     registers -- everything is a USB vendor control transfer),
+                     MAC assignment (no EEPROM on this board), PHY link bring-up
+    eth.tkb       -- net_init/net_rx_*/net_transmit HAL matching common_stm32/
+                     eth.tkb's and common_qemu/virtio_mmio.tkb's API exactly, so
+                     net_echo.tkb and siblings run unmodified against it; a single
+                     synchronous RX/TX buffer pair, not a real DMA descriptor ring
+                     (USB bulk transfers here are request/response, not async)
+    netconfig.tkb -- OUR_MAC (locally-administered)/OUR_IP (192.168.20.2, this
+                     board's own dedicated point-to-point NIC subnet)
   <name>/         -- each directory: see the leading comment in <name>.tkb for a description.
                      Every example is now a single file compiled for both targets -- no
                      `<name>_stm32.tkb` exists anywhere in this repo (see the STM32 section
@@ -430,6 +460,13 @@ scripts/
                      make stm32-http-server-sdcard, and
                      make stm32-http-server-sdcard-rtos
                      (issue #97, see HISTORY.md)
+  run_hwtest_rpi3.sh -- RPi3 hardware integration test script (make hwcheck-rpi3): JTAG
+                     injection, UART capture/diff -- see examples/common_rpi3/AGENTS.md.
+  run_hwtest_rpi3_net.sh -- RPi3 real-Ethernet hardware tests (make hwcheck-rpi3-net), over
+                     the USB host stack examples/common_rpi3/AGENTS.md's "USB host stack"
+                     section covers -- same eth_*_test.py raw-socket scripts STM32 already
+                     uses, parameterized by ETH_TEST_SUBNET/ETH_TEST_MAC for this board's
+                     own point-to-point NIC/address.
 test/
   test_takibi.ml  -- Alcotest unit tests for parser / type_inf
 ```
@@ -494,6 +531,19 @@ size.
   perfectly correct in QEMU and fail only on real silicon, so that kind of work should get real-hardware
   integration testing early, not just as a final check once "everything already works in QEMU."
 - **STM32 Ethernet driver details** (unified driver API, network config, the DMA-ordering hardware bug, TX interrupt completion) -- see `examples/common_stm32/AGENTS.md`.
+- **`dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` lower to a bare `dsb sy` on AArch64 targets -- no actual cache
+  clean/invalidate instruction is emitted**, unlike the real Cortex-M7 `DCCMVAC`/`DCIMVAC` the STM32 backend gets
+  (confirmed by reading `lib/llvm_gen.ml`). Invisible on QEMU (TCG has no cache model to go stale in the first
+  place) and invisible on RPi3 for as long as its D-cache stayed off, but a genuine correctness gap for any
+  AArch64 target that both enables D-cache AND has a real DMA-capable device -- found during the Raspberry Pi 3B
+  USB host stack bring-up (issue #140/#144), once its D-cache was turned back on for `ldaxr`/`stlxr` reasons (see
+  `examples/common_rpi3/AGENTS.md`'s "MMU and caches" section) and its DWC2 controller needed the RPi3 mailbox
+  buffer and USB transfer buffers to be coherently visible to bus masters that bypass this core's cache. Worked
+  around at the `.tkb` level only, not fixed in the compiler: `examples/common_rpi3/cache_asm.S`'s
+  `dcache_clean_range`/`dcache_invalidate_range` (explicit VA-based `dc cvac`/`dc ivac` loops, called directly by
+  `mailbox.tkb`/`usb_dwc2.tkb` instead of relying on the builtins). Any FUTURE AArch64 DMA-capable driver on a
+  cache-enabled target needs the same manual workaround, or the compiler's AArch64 lowering of these three
+  builtins needs extending to do real cache maintenance, before trusting them there.
 
 ## QEMU Bare-Metal (AArch64)
 
