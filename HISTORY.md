@@ -9581,3 +9581,24 @@ did not yet exist. Historical entries above deliberately retain their
 then-current failed-test counts and unresolved-STALL narrative; later entries
 record the resolution, so deleting those observations would lose useful
 diagnostic history rather than correct current documentation.
+
+RPi3 `--forbid-trap` hardening pass: after the already-committed working
+baselines for Ethernet and the three application ports, every RPi3 Makefile
+compile group now shares `RPI3_TAKIBI_FLAGS := --forbid-trap`. A forced build
+of the complete 63-example list found exactly six unique trap sites, all in
+`examples/common_rpi3/usb_dwc2.tkb`'s configuration-descriptor walker. Its
+array accesses were bounded only by the device-supplied `wTotalLength`, not
+the fixed 64-byte `ctrl_data_buf` capacity. A malformed descriptor could
+therefore make the old code read out of bounds; this was a real missing
+validation boundary, not merely an annotation gap.
+
+Fixed without raw pointers or `unsafe`: the loop explicitly guards the
+mutable cursor against the literal capacity, then uses `min(offset, 62)` to
+create an immutable range-carrying snapshot for `off` through `off + 5`.
+Every RPi3 kernel then rebuilt cleanly with zero remaining trap sites.
+`make check` passes all 132 tests, and the hardened USB/Ethernet path passes
+all six `make hwcheck-rpi3-net` hardware tests. The UART-diff suite could not
+start in this session because `stty -F /dev-host/ttyUSB1` returned EPERM
+despite the device ACL granting the current user read/write access; this is
+a host serial-device condition, not a firmware/test mismatch, and occurred
+before any example was injected.

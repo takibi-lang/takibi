@@ -1313,9 +1313,13 @@ RPI3_EXAMPLES := start hello print_int print_hex print_ptr mem array \
                  klock_guard percpu \
                  affine_escape_via_index align_ptr_proof linear_obligation tuple_pair field_lease
 RPI3_OBJS     := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
+# The working hardware baseline was committed before this flag was enabled.
+# Keep every RPi3 group on one hardening switch so a newly added example or
+# shared HAL cannot silently reintroduce a runtime bounds-check trap.
+RPI3_TAKIBI_FLAGS := --forbid-trap
 
 $(RPI3_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_TAKIBI_FLAGS) -o $@
 
 # inet_checksum.tkb/ip_parse.tkb/tcp_parse.tkb each `use` exactly the
 # subset of inet_checksum.tkb/netutil.tkb they actually need themselves
@@ -1326,7 +1330,7 @@ RPI3_CHECKSUM_EXAMPLES := inet_checksum ip_parse tcp_parse
 RPI3_CHECKSUM_OBJS     := $(foreach e,$(RPI3_CHECKSUM_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_CHECKSUM_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_TAKIBI_FLAGS) -o $@
 
 # examples/echo/echo.tkb and examples/irq/irq.tkb `use` COMMON_GIC_REGS
 # themselves (GicRegs type only, for their own dead-here GICv2-shaped
@@ -1338,7 +1342,7 @@ RPI3_IRQ_EXAMPLES := echo irq
 RPI3_IRQ_OBJS      := $(foreach e,$(RPI3_IRQ_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_IRQ_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_INTC) $(COMMON_GIC_REGS) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_INTC) $(COMMON_GIC_REGS) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_INTC) $(COMMON_GIC_REGS) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_TAKIBI_FLAGS) -o $@
 
 # rtc.tkb/timer.tkb need read_cntfrq()/read_cntpct() (COMMON_RPI3_TIMER_ASM_O,
 # an assembly stub -- mrs cannot be called directly from takibi), so they
@@ -1353,7 +1357,7 @@ RPI3_RTC_EXAMPLES := rtc timer
 RPI3_RTC_OBJS     := $(foreach e,$(RPI3_RTC_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_RTC_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_RTC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_RTC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_RTC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_TAKIBI_FLAGS) -o $@
 
 # Preemptive-scheduler group: examples/preempt/watchdog need no semaphore
 # (RPI3_SCHED_EXAMPLES); examples/semaphore/condvar/msgqueue/rtos_demo
@@ -1381,7 +1385,7 @@ RPI3_SCHED_SEM_EXAMPLES := semaphore condvar msgqueue rtos_demo chan_rendezvous
 RPI3_SCHED_OBJS         := $(foreach e,$(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_SCHED_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_TAKIBI_FLAGS) -o $@
 
 # USB bring-up group (GitHub issue #140's Ethernet milestone -- see
 # examples/usb_probe/usb_probe.tkb's own header comment and
@@ -1396,7 +1400,7 @@ RPI3_USB_EXAMPLES := usb_probe
 RPI3_USB_OBJS     := $(foreach e,$(RPI3_USB_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_USB_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_TAKIBI_FLAGS) -o $@
 
 # Ethernet group (milestone 6-7): examples/common_rpi3/eth.tkb wraps the
 # whole USB bring-up chain above behind the same net_init/net_rx_*/
@@ -1413,7 +1417,7 @@ RPI3_NET_EXAMPLES := net_echo arp_reply icmp_echo tcp_echo http_server kvs_serve
 RPI3_NET_OBJS     := $(foreach e,$(RPI3_NET_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_NET_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_HTTP_SERVER) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_TAKIBI_FLAGS) -o $@
 
 RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES)
 RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)

@@ -387,7 +387,7 @@ examples/
     semihosting_stub.S -- no-op stand-ins for examples/fatfs's semihosting extern fns on
                      this target (no ARM semihosting on real hardware)
   common_rpi3/    -- Raspberry Pi 3B (BCM2837) bare-metal HAL, JTAG-injection-only
-                     bring-up (issue #140), 62 top-level examples ported (all
+                     bring-up (issue #140), 63 top-level examples ported (all
                      except fatfs: rtc/timer, real interrupts, the preemptive
                      scheduler group, and net_echo through kvs_server over a
                      from-scratch USB host stack) -- see its AGENTS.md.

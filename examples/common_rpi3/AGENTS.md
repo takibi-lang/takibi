@@ -1,6 +1,6 @@
 # Raspberry Pi 3B (BCM2837) Bare-Metal Bring-Up
 
-GitHub issue #140. Status: 62 examples ported and passing `make
+GitHub issue #140. Status: 63 examples ported and passing `make
 hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level
 `EXAMPLES` list EXCEPT
 `fatfs` (needs SD-card-shaped
@@ -385,11 +385,24 @@ The unchanged shared `kvs_server.tkb` passes set/get/overwrite/delete,
 parser errors, full-table/list, and tombstone-reuse tests. The three
 requested application ports are therefore complete. Their shared
 application sources already build under `--forbid-trap` in the existing
-QEMU/STM32 rules; a future RPi3-driver hardening milestone must turn the
-flag on for the RPi3 HAL as a separate, explicit baseline-to-hardened
-pass. Update this section (and HISTORY.md, and issue #140) after each
+QEMU/STM32 rules. The separate RPi3 baseline-to-hardened pass is now
+complete too: every RPi3 compile group uses `RPI3_TAKIBI_FLAGS :=
+--forbid-trap`, covering all 63 examples and every `.tkb` HAL file pulled
+into them. Update this section (and HISTORY.md, and issue #140) after each
 further step, per this project's established cadence -- do not batch
 documentation to the end.
+
+The hardening pass found six bounds checks, all in
+`dwc2_find_bulk_endpoints()`'s walk over the fixed 64-byte
+`ctrl_data_buf`. The code checked offsets only against the USB device's
+runtime `wTotalLength`; that is not proof of the real destination
+capacity and a malformed descriptor could therefore drive an OOB read.
+The parser now separately requires the mutable cursor to be within the
+literal buffer capacity and snapshots it as `min(offset, 62)`, carrying
+the proven range through each `off + N` endpoint-field access. No raw
+pointer or `unsafe` bypass was introduced. A forced rebuild of every
+RPi3 kernel succeeds under `--forbid-trap`; the full six-example network
+hardware suite also passes unchanged.
 
 ## Hardware
 

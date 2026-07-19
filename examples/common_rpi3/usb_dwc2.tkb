@@ -590,32 +590,48 @@ fn dwc2_find_bulk_endpoints(total_len: u32) {
     let mut offset: usize = 0;
     let limit: usize = total_len as usize;
     for i: i32 in 0..<32 {
-        if (offset + 2 >= limit) {
-            break;
-        }
-        let blen: usize = ctrl_data_buf[offset] as usize;
-        if (blen == 0) {
-            break;
-        }
-        let btype: u8 = ctrl_data_buf[offset + 1];
-        if (btype == 5) {
-            if (offset + 5 < limit) {
-                let addr: u32 = ctrl_data_buf[offset + 2] as u32;
-                let attr: u32 = ctrl_data_buf[offset + 3] as u32;
-                let mp: u32 = (ctrl_data_buf[offset + 4] as u32)
-                            | ((ctrl_data_buf[offset + 5] as u32) << 8);
-                if ((attr & 3) == 2) {
-                    if ((addr & 0x80) != 0) {
-                        dwc2_bulk_in_ep = addr & 0x0F;
-                        dwc2_bulk_in_mp = mp;
-                    } else {
-                        dwc2_bulk_out_ep = addr & 0x0F;
-                        dwc2_bulk_out_mp = mp;
+        // ctrl_data_buf has a fixed 64-byte capacity. `limit` comes from
+        // the device's wTotalLength field and is therefore untrusted; keep
+        // the literal capacity guard adjacent to every indexed descriptor
+        // span so --forbid-trap can prove the access independently of that
+        // device-reported value.
+        if (offset >= 0 && offset < 63) {
+            // Snapshot and clamp the mutable cursor after the guard. The
+            // clamp is behaviorally a no-op here, but makes the {0..<63}
+            // range explicit and carries it through each off+N expression.
+            let off: usize = min(offset, 62);
+            if (off + 2 < limit) {
+                let blen: usize = ctrl_data_buf[off] as usize;
+                if (blen == 0) {
+                    break;
+                }
+                let btype: u8 = ctrl_data_buf[off + 1];
+                if (btype == 5) {
+                    if (off >= 0 && off < 59) {
+                        if (off + 5 < limit) {
+                            let addr: u32 = ctrl_data_buf[off + 2] as u32;
+                            let attr: u32 = ctrl_data_buf[off + 3] as u32;
+                            let mp: u32 = (ctrl_data_buf[off + 4] as u32)
+                                        | ((ctrl_data_buf[off + 5] as u32) << 8);
+                            if ((attr & 3) == 2) {
+                                if ((addr & 0x80) != 0) {
+                                    dwc2_bulk_in_ep = addr & 0x0F;
+                                    dwc2_bulk_in_mp = mp;
+                                } else {
+                                    dwc2_bulk_out_ep = addr & 0x0F;
+                                    dwc2_bulk_out_mp = mp;
+                                }
+                            }
+                        }
                     }
                 }
+                offset = off + blen;
+            } else {
+                break;
             }
+        } else {
+            break;
         }
-        offset = offset + blen;
     }
 }
 
