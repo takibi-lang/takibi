@@ -2,18 +2,19 @@
 # Raspberry Pi 3B hardware integration test runner -- called from repo
 # root via: make hwcheck-rpi3
 #
-# Unlike STM32's scripts/run_hwtest_ram.sh, this cannot reset the board
-# between examples -- the 6-pin GPIO JTAG header has no wired system
-# reset line (see examples/common_rpi3/AGENTS.md). What makes a
-# multi-example run possible anyway: scripts/rpi3_jtag_load.sh's safety
-# check gates on the halted core's MMU state, not a specific address, so
-# catching a PREVIOUS example's own injected payload (still parked in
-# its own halt loop, MMU off) is exactly as safe to overwrite as
-# catching examples/common_rpi3/jtag_stub.S's spin loop -- only ONE
-# power cycle is needed per Raspbian boot, not one per example. If the
-# board is still running Raspbian (never power-cycled to the stub this
-# session), the first example's injection fails fast with a clear
-# error, rather than silently producing a confusing UART mismatch.
+# The 6-pin GPIO JTAG header has no wired system reset line (see
+# examples/common_rpi3/AGENTS.md), so this cannot use STM32's
+# scripts/run_hwtest_ram.sh's own `reset halt` -- but
+# scripts/rpi3_jtag_reset.sh reaches the same end state a different way
+# (BCM2837's own watchdog-based software reset, poked via JTAG), and
+# every test below runs it first (see reset_before_test's own comment).
+# scripts/rpi3_jtag_load.sh's own EL2H safety check still matters
+# independently of that: if the board is still running Raspbian (never
+# power-cycled to the stub this session), injection fails fast with a
+# clear error, rather than silently producing a confusing UART mismatch
+# -- rpi3_jtag_reset.sh only recovers a board already parked in
+# examples/common_rpi3/jtag_stub.S's spin loop, it cannot get a live
+# Raspbian session there.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -93,6 +94,40 @@ read_until_quiet() {
     ACTIVE_READER_PID=""
 }
 
+# reset_before_test NAME
+#
+# Full BCM2837 chip reset (scripts/rpi3_jtag_reset.sh) run before EVERY
+# single hardware test in this suite, not just opportunistically when
+# something looks broken. This board's JTAG re-injection
+# (rpi3_jtag_load.sh) only replaces the running payload -- it does not
+# reset MMU/cache/peripheral/interrupt-controller/DWC2-USB state left
+# behind by whatever ran before it. Real-hardware experience (GitHub
+# issue #145's own investigation, and independently reproduced by the
+# project owner) repeatedly found tests that pass in isolation fail when
+# run back-to-back with no reset in between -- garbled UART output,
+# unreachable networking, even a USB drive sector-write failure -- all
+# traced to leftover state, not a real regression, and all resolved by
+# resetting first. A reset costs ~4.3s measured on this hardware
+# (rpi3_jtag_load.sh itself is ~0.4s), so decoupling every test this way
+# costs the whole suite a few extra minutes in exchange for eliminating
+# an entire recurring class of false alarms -- confirmed worth it on
+# real hardware rather than continuing to chase individual flaky
+# transitions one at a time.
+reset_before_test() {
+    local name="$1"
+    local reset_log
+    reset_log=$(mktemp)
+    if ! "$REPO_ROOT/scripts/rpi3_jtag_reset.sh" > "$reset_log" 2>&1; then
+        printf "${RED}FAIL${RST}  %s  (JTAG reset failed -- log follows)\n" "$name"
+        sed 's/^/       /' "$reset_log"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+        rm -f "$reset_log"
+        exit 1
+    fi
+    rm -f "$reset_log"
+}
+
 # run_hw_test_rpi3 NAME ELF EXPECTED [MAX_SECS] [STABLE_POLLS]
 #
 # Distinguishes two different failure modes rather than collapsing them
@@ -119,6 +154,7 @@ run_hw_test_rpi3() {
     load_log=$(mktemp)
     load_status_file=$(mktemp)
 
+    reset_before_test "$name"
     read_until_quiet "$tmp_drain" "$DRAIN_MAX_SECS" "$DRAIN_STABLE_POLLS" 0
     read_until_quiet "$tmp_out" "$max_secs" "$stable_polls" 1 \
         "if \"$REPO_ROOT/scripts/rpi3_jtag_load.sh\" \"$elf\" > \"$load_log\" 2>&1; then load_status=0; else load_status=\$?; fi; echo \"\$load_status\" > \"$load_status_file\""
@@ -160,6 +196,7 @@ run_hw_test_rpi3_stdin() {
     load_log=$(mktemp)
     load_status_file=$(mktemp)
 
+    reset_before_test "$name"
     read_until_quiet "$tmp_drain" "$DRAIN_MAX_SECS" "$DRAIN_STABLE_POLLS" 0
 
     : > "$tmp_out"
@@ -242,6 +279,7 @@ run_hw_test_rpi3_usb_msc() {
     load_log=$(mktemp)
     load_status_file=$(mktemp)
 
+    reset_before_test "$name"
     read_until_quiet "$tmp_drain" "$DRAIN_MAX_SECS" "$DRAIN_STABLE_POLLS" 0
     read_until_quiet "$tmp_out" 20 140 1 \
         "if \"$REPO_ROOT/scripts/rpi3_jtag_load.sh\" \"$elf\" > \"$load_log\" 2>&1; then load_status=0; else load_status=\$?; fi; echo \"\$load_status\" > \"$load_status_file\""

@@ -80,9 +80,30 @@ SETTLE_SECS=4
 # same board answered correctly moments later once given more time.
 SDCARD_RTOS_SETTLE_SECS=10
 
+# reset_before_test NAME
+#
+# Full BCM2837 chip reset before every single hardware test in this
+# suite -- see scripts/run_hwtest_rpi3.sh's own identical helper for the
+# full real-hardware rationale (GitHub issue #145: tests that pass in
+# isolation reproducibly failed when run back-to-back with no reset in
+# between, traced to leftover JTAG-re-injection state, not a real
+# regression). ~4.3s measured cost per reset; decoupling every test this
+# way costs the whole suite a few extra minutes in exchange for
+# eliminating a recurring class of false alarms.
+reset_before_test() {
+    local name="$1"
+    if ! bash "$REPO_ROOT/scripts/rpi3_jtag_reset.sh" > /dev/null; then
+        printf "${RED}FAIL${RST}  %s  (JTAG reset failed)\n" "$name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+        return 1
+    fi
+}
+
 run_rpi3_net_test() {
     local name="$1" elf="$2" test_script="$3"
 
+    reset_before_test "$name" || return
     if ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$elf" > /dev/null; then
         printf "${RED}FAIL${RST}  %s  (JTAG injection failed -- see\n" "$name"
         printf "       examples/common_rpi3/AGENTS.md; likely needs a power cycle to\n"
@@ -131,7 +152,9 @@ run_rpi3_net_test "kvs_server (rpi3)"  "$REPO_ROOT/examples/kvs_server/kernel_rp
 sdcard_name="http_server_sdcard (rpi3)"
 sdcard_content_dir="$REPO_ROOT/examples/sdcard_content"
 sdcard_provision_log=$(mktemp)
-if ! bash "$REPO_ROOT/scripts/rpi3_provision_http_server_sdcard.sh" \
+if ! reset_before_test "$sdcard_name"; then
+    :
+elif ! bash "$REPO_ROOT/scripts/rpi3_provision_http_server_sdcard.sh" \
         "$REPO_ROOT/examples/http_server_sdcard_install/kernel_rpi3.elf" \
         "$sdcard_content_dir" > "$sdcard_provision_log" 2>&1; then
     printf "${RED}FAIL${RST}  %s  (USB drive provisioning failed)\n" "$sdcard_name"
@@ -164,7 +187,9 @@ rm -f "$sdcard_provision_log"
 # http_server_sdcard test above just provisioned, no separate
 # provisioning step needed.
 sdcard_rtos_name="http_server_sdcard_rtos (rpi3)"
-if ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/http_server_sdcard_rtos/kernel_rpi3.elf" > /dev/null; then
+if ! reset_before_test "$sdcard_rtos_name"; then
+    :
+elif ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/http_server_sdcard_rtos/kernel_rpi3.elf" > /dev/null; then
     printf "${RED}FAIL${RST}  %s  (JTAG injection failed)\n" "$sdcard_rtos_name"
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("$sdcard_rtos_name")
@@ -189,29 +214,17 @@ fi
 # first boot if none exists, so whatever the http_server_sdcard(_rtos)
 # tests above left on the drive gives this test's first boot a genuine
 # "no saved table yet" start every run). Boot 1 (KVS_TEST_PHASE=full,
-# the script's own default) proves PUT/GET/DELETE/LIST end to end and
-# leaves one extra key durably written; a REAL chip reset
-# (scripts/rpi3_jtag_reset.sh -- this board has no `reset halt`, see
-# AGENTS.md) followed by boot 2 (KVS_TEST_PHASE=verify_persistence)
-# proves that key survived, not just RAM lifetime.
-#
-# An explicit reset ALSO precedes boot 1 here (unlike every other test in
-# this script, which just re-injects over whatever the previous example
-# left running) -- confirmed on real hardware that running this
-# particular example immediately after http_server_sdcard_rtos with no
-# reset in between reproducibly left the network stack unreachable
-# ("No route to host" on every request) even after this script's own
-# generous SDCARD_RTOS_SETTLE_SECS wait, while the identical firmware
-# booted from a genuine reset answered correctly every time. Root cause
-# not isolated (this board's own DWC2 soft-reset inside net_init() is
-# expected to already bring the USB core to a clean state regardless of
-# the previous payload) -- kept as a real-hardware-confirmed fix per this
-# project's established precedent for this class of finding (see
-# examples/common_rpi3/AGENTS.md's DWC2 XACT_ERROR investigation).
+# the script's own default, reached via the standard reset_before_test
+# every test in this suite gets) proves PUT/GET/DELETE/LIST end to end
+# and leaves one extra key durably written; a SECOND, deliberate reset
+# (this one is the actual point of the test, not just the suite's usual
+# decoupling) followed by boot 2 (KVS_TEST_PHASE=verify_persistence)
+# proves that key survived a real reset, not just RAM lifetime.
 kvs_rtos_name="kvs_server_sdcard_rtos (rpi3)"
-if ! bash "$REPO_ROOT/scripts/rpi3_jtag_reset.sh" > /dev/null || \
-   ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/kvs_server_sdcard_rtos/kernel_rpi3.elf" > /dev/null; then
-    printf "${RED}FAIL${RST}  %s  (reset/JTAG injection failed, boot 1)\n" "$kvs_rtos_name"
+if ! reset_before_test "$kvs_rtos_name"; then
+    :
+elif ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/kvs_server_sdcard_rtos/kernel_rpi3.elf" > /dev/null; then
+    printf "${RED}FAIL${RST}  %s  (JTAG injection failed, boot 1)\n" "$kvs_rtos_name"
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("$kvs_rtos_name")
 else
