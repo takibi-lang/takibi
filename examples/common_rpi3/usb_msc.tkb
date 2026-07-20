@@ -77,6 +77,10 @@ let mut msc_iface_num: u32 = 0;
 let mut msc_ready:     i32 = 0; // 0 = not initialized, 1 = ready (module state)
 let mut msc_tag:       u32 = 1;
 let mut msc_last_dcsw_status: u8 = 0xFF;
+// Last block-I/O failure, for the FAT adapter's hardware diagnostics.
+// 0 = none, 1 = CBW OUT, 2 = data stage, 3 = CSW IN/validation.
+let mut msc_io_error_stage: i32 = 0;
+let mut msc_io_error_lba: u32 = 0;
 // Last checkpoint disk_initialize() reached before returning -1 --
 // examples/usb_msc_probe/usb_msc_probe.tkb reads this after a failed
 // disk_initialize() to report WHICH stage broke, the same diagnostic
@@ -100,6 +104,9 @@ let mut msc_data_buf: [u8; 36] align(64);
 fn msc_last_status() -> u8 {
     return msc_last_dcsw_status;
 }
+
+fn msc_last_io_error_stage() -> i32 { return msc_io_error_stage; }
+fn msc_last_io_error_lba() -> u32 { return msc_io_error_lba; }
 
 fn msc_zero_cbw_cdb() {
     for i: usize in 15..<31 {
@@ -157,7 +164,24 @@ fn msc_send_cbw() -> bool {
 // the CBW just sent) before trusting dCSWStatus. Returns true only when
 // the transport itself succeeded AND the command passed (status 0).
 fn msc_read_csw() -> bool {
-    if (dwc2_bulk_in(msc_dev_addr, msc_csw_buf, MSC_CSW_LEN) == false) {
+    // A flash drive may NAK the CSW endpoint while committing WRITE(10) to
+    // media.  One dwc2_bulk_in call only covers eight channel re-arms, which
+    // proved too short during fat_format(): giving up there leaves the BOT
+    // command unfinished and makes every following CBW fail out of phase.
+    // Wait up to five seconds, but retry ONLY a NAK halt; STALL/transaction
+    // errors remain real transport failures and return immediately.
+    let mut received: bool = false;
+    for wait_ms: i32 in 0..<5000 {
+        if (dwc2_bulk_in(msc_dev_addr, msc_csw_buf, MSC_CSW_LEN)) {
+            received = true;
+            break;
+        }
+        if ((dwc2_debug_last_status() & 0x10) == 0) {
+            return false;
+        }
+        delay_ms(1);
+    }
+    if (received == false) {
         return false;
     }
     let sig: u32 = (msc_csw_buf[0] as u32) | ((msc_csw_buf[1] as u32) << 8)
@@ -357,18 +381,23 @@ fn disk_status() -> i32 {
 }
 
 fn disk_read(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
+    msc_io_error_stage = 0;
+    msc_io_error_lba = sector;
     if (disk_status() != 0) {
         return -1;
     }
     msc_cbw_header(512, MSC_DIR_IN, 10);
     msc_scsi_lba_cdb(SCSI_READ10, sector);
     if (msc_send_cbw() == false) {
+        msc_io_error_stage = 1;
         return -1;
     }
     if (dwc2_bulk_in(msc_dev_addr, buf, 512) == false) {
+        msc_io_error_stage = 2;
         return -1;
     }
     if (msc_read_csw() == false) {
+        msc_io_error_stage = 3;
         return -1;
     }
     return 0;
@@ -377,18 +406,23 @@ fn disk_read(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
 // buf is `*align(32) u8`, not plain `*u8` -- see this file's header
 // comment for why this differs from sdmmc.tkb's disk_write.
 fn disk_write(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
+    msc_io_error_stage = 0;
+    msc_io_error_lba = sector;
     if (disk_status() != 0) {
         return -1;
     }
     msc_cbw_header(512, MSC_DIR_OUT, 10);
     msc_scsi_lba_cdb(SCSI_WRITE10, sector);
     if (msc_send_cbw() == false) {
+        msc_io_error_stage = 1;
         return -1;
     }
     if (dwc2_bulk_out(msc_dev_addr, buf, 512) == false) {
+        msc_io_error_stage = 2;
         return -1;
     }
     if (msc_read_csw() == false) {
+        msc_io_error_stage = 3;
         return -1;
     }
     return 0;
