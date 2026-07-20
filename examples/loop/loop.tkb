@@ -8,7 +8,7 @@
 //
 // QEMU expected output: 3\r\n0\r\n2\r\n4\r\n6\r\n
 
-fn app_main() -> i32 {
+fn test_loop() -> i32 {
     // Part 1: find first multiple of 3 in 0..<10 using break.
     for i: i32 in 0..<10 {
         if (i % 3 == 0 && i != 0) {
@@ -27,4 +27,3 @@ fn app_main() -> i32 {
 
     return 0;
 }
-

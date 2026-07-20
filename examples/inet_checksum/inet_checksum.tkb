@@ -15,7 +15,7 @@
 
 use "examples/common/inet_checksum.tkb";
 
-fn app_main() {
+fn test_inet_checksum() {
     // version/IHL, DSCP/ECN, total length, id, flags/fragoffset, TTL,
     // protocol, checksum, src IP, dst IP.
     let mut hdr: [u8; 20];

@@ -79,10 +79,9 @@ fn print_buf() {
     uart_putc('\n');
 }
 
-fn app_main() -> i32 {
+fn test_refined() -> i32 {
     fill_pairs();   print_buf();   // approach 1
     fill_loop();    print_buf();   // approach 2
     fill_by_cond(); print_buf();   // approach 3
     return 0;
 }
-

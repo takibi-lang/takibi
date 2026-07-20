@@ -51,7 +51,7 @@ struct Slot {
 let mut slots: [Slot; SLOT_COUNT];
 
 // Returns -1 if the table is full, else an index in [0, SLOT_COUNT).
-fn slot_open(initial: i32) -> i32 {
+fn affine_slot_open(initial: i32) -> i32 {
     for i in 0..<SLOT_COUNT {
         if (slots[i].in_use == false) {
             slots[i].in_use = true;
@@ -62,15 +62,15 @@ fn slot_open(initial: i32) -> i32 {
     return -1;
 }
 
-fn slot_read(lease: borrow SlotLease[n]) -> i32 {
+fn affine_slot_read(lease: borrow SlotLease[n]) -> i32 {
     return slots[lease.idx].value;
 }
 
-fn slot_write(lease: borrow SlotLease[n], v: i32) {
+fn affine_slot_write(lease: borrow SlotLease[n], v: i32) {
     slots[lease.idx].value = v;
 }
 
-fn slot_close(lease: borrow SlotLease[n]) {
+fn affine_slot_close(lease: borrow SlotLease[n]) {
     slots[lease.idx].in_use = false;
 }
 
@@ -79,7 +79,7 @@ fn slot_close(lease: borrow SlotLease[n]) {
 // them -- exactly the process/fd-table shape a real kernel needs, and
 // exactly what a plain `affine opaque struct` handle cannot express.
 // `proc` is a GLOBAL, filled in place by open_two() and read/closed
-// later from app_main() -- the clearest possible demonstration that the
+// later from the suite entry -- the clearest possible demonstration that the
 // index has escaped the acquiring function's own stack frame entirely.
 struct Process {
     fd_a: i32;
@@ -89,11 +89,11 @@ struct Process {
 let mut proc: Process;
 
 fn open_two() {
-    proc.fd_a = slot_open(10);
-    proc.fd_b = slot_open(20);
+    proc.fd_a = affine_slot_open(10);
+    proc.fd_b = affine_slot_open(20);
 }
 
-fn app_main() {
+fn test_affine_escape_via_index() {
     open_two();
     uart_puts("opened: ");
     uart_print(proc.fd_a);
@@ -108,11 +108,11 @@ fn app_main() {
     if (a >= 0 && a < 4) {
         let idx = a as usize;
         let lease = slot_lease(idx);
-        slot_write(lease, 99);
+        affine_slot_write(lease, 99);
         uart_puts("fd_a value: ");
-        uart_print(slot_read(lease));
+        uart_print(affine_slot_read(lease));
         uart_puts("\r\n");
-        slot_close(lease);
+        affine_slot_close(lease);
         slot_unlease(lease);
     }
     let b: i32 = proc.fd_b;
@@ -120,15 +120,15 @@ fn app_main() {
         let idx = b as usize;
         let lease = slot_lease(idx);
         uart_puts("fd_b value: ");
-        uart_print(slot_read(lease));
+        uart_print(affine_slot_read(lease));
         uart_puts("\r\n");
-        slot_close(lease);
+        affine_slot_close(lease);
         slot_unlease(lease);
     }
 
     // A third acquisition after both closes should reuse a freed slot
     // (proves in_use is actually tracked, not just a decoration).
-    let c: i32 = slot_open(30);
+    let c: i32 = affine_slot_open(30);
     uart_puts("reused slot: ");
     uart_print(c);
     uart_puts("\r\n");

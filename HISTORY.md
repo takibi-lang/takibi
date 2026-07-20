@@ -9946,3 +9946,19 @@ fixture; interrupt, scheduler, SMP, USB, storage, and network cases remain out
 of this first pilot. All three suite images compile with `--forbid-trap`; QEMU
 passes all eight cases from the one image and the full 134-test host/QEMU suite
 remains green.
+
+Issue #93 batching then expanded from the eight-case pilot to two deliberately
+large suites: `type_system_suite` holds 18 refinement/layout/integer/ownership/
+view cases, while `algorithm_suite` holds 14 loop/collection/algorithm/packet-
+parser cases. Along with `basic_suite`, QEMU, STM32, and RPi3 now execute 40
+logical tests from three images instead of 40 images. On RPi3 this removes 37
+watchdog resets and JTAG loads from `make hwcheck-rpi3`; STM32 removes 37 RAM
+loads, while every case still reports independently through its existing
+fixture. Making formerly isolated programs share one address space required
+only descriptive renames for colliding globals/types/functions. It also found
+a genuine hidden assumption in `packed`: the example read a normal struct's
+uninitialized padding byte and expected a fresh stack to contain zero. A prior
+suite case left `0x2a` there, so `packed` now explicitly zeroes the padding
+through its byte view before checking the layout. The dedicated Fibonacci
+DWARF regression retains a tiny standalone wrapper while normal Fibonacci
+execution belongs to `algorithm_suite`.

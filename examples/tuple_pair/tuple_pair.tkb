@@ -10,13 +10,13 @@
 // `let (a, b) = e;` is the only elimination -- no .0/.1 projection, so
 // tracking stays variable-granular (no place tracking needed).
 
-linear opaque struct Obligation;
+linear opaque struct PairObligation;
 
-fn mint() -> *Obligation {
-    return 0 as usize as *Obligation;
+fn mint() -> *PairObligation {
+    return 0 as usize as *PairObligation;
 }
 
-fn fulfill(t: sink *Obligation) {
+fn fulfill(t: sink *PairObligation) {
     uart_puts("fulfilled\r\n");
 }
 
@@ -32,7 +32,7 @@ fn try_divide(a: i32, b: i32) -> (bool, i32) {
 // (data, obligation) pair: the shape this issue exists for. The caller
 // receives 42 and a linear witness together, in one value, and must
 // discharge the obligation.
-fn acquire_with_proof() -> (i32, *Obligation) {
+fn acquire_with_proof() -> (i32, *PairObligation) {
     return (42, mint());
 }
 
@@ -46,7 +46,7 @@ fn make_nested() -> (i32, (i32, i32)) {
     return (1, (2, 3));
 }
 
-fn app_main() {
+fn test_tuple_pair() {
     let (ok, q) = try_divide(10, 2);
     if (ok) {
         uart_puts("10 / 2 = ");

@@ -71,7 +71,7 @@ fn handle_match(c: Choice) {
     }
 }
 
-fn app_main() {
+fn test_linear_obligation() {
     handle_if(0);
     handle_if(1);
     handle_match(Choice::A);

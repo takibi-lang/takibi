@@ -23,26 +23,26 @@
 //
 // QEMU expected output: ABCDEFGH\r\n
 
-let mut buf: [u8; 8];
+let mut for_buf: [u8; 8];
 
 // Write 'A' to 'H' using a for loop. i: {0..<8}, so buf[i] has no bounds check.
-fn fill() {
+fn for_fill() {
     for i: usize in 0..<8 {
-        buf[i] = 'A' + i as u8;
+        for_buf[i] = 'A' + i as u8;
     }
 }
 
 // Read and send to UART using a for loop. Bounds check elided here too.
-fn print_buf() {
+fn for_print_buf() {
     for i: usize in 0..<8 {
-        uart_putc(buf[i]);
+        uart_putc(for_buf[i]);
     }
     uart_putc('\r');
     uart_putc('\n');
 }
 
-fn app_main() -> i32 {
-    fill();
-    print_buf();
+fn test_for() -> i32 {
+    for_fill();
+    for_print_buf();
     return 0;
 }

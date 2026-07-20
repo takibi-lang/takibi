@@ -56,7 +56,7 @@ fn checksum_slice(s: []u8) -> i32 {
     return (~sum) & 0xffff;
 }
 
-fn app_main() {
+fn test_foreach() {
     for i: usize in 0..<8 {
         a[i] = ('A' + i) as u8;
     }

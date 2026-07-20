@@ -30,7 +30,7 @@ fn bubble_sort(s: *IntSlice) {
     }
 }
 
-fn app_main() {
+fn test_bubblesort() {
     let mut buf: [i32; 8] = {5, 3, 8, 1, 9, 2, 7, 4};
 
     let mut s: IntSlice = {buf, 8};

@@ -16,13 +16,17 @@ struct packed Packed {
     b: u16;
 }
 
-fn app_main() {
+fn test_packed() {
     // --- normal struct ---
     let mut n: Normal;
     n.a = 0x11;
     n.b = 0x3344;
     // byte layout: [0x11] [pad] [0x44] [0x33]  (little-endian, 2-byte aligned)
     let pn: *u8 = &n as *u8;
+    // Padding has no field initializer and retained a previous suite case's
+    // stack byte once this example stopped receiving a fresh boot/stack.
+    // Initialize it explicitly before inspecting the object representation.
+    pn[1] = 0;
     uart_puts("normal: ");
     uart_print_hex(pn[0] as i32);  // 0x11
     uart_puts(" ");

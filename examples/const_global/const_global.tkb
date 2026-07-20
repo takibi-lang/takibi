@@ -22,21 +22,21 @@
 const QUEUE_SIZE: usize = 4;
 
 // [i32; QUEUE_SIZE] -- resolved to [i32; 4] at parse time.
-let mut ring: [i32; QUEUE_SIZE];
+let mut const_ring: [i32; QUEUE_SIZE];
 
 fn fill() {
     for i in 0..<QUEUE_SIZE {
-        ring[i] = i * 10;
+        const_ring[i] = i * 10;
     }
 }
 
-fn app_main() {
+fn test_const_global() {
     fill();
     uart_puts("QUEUE_SIZE = ");
     uart_print(QUEUE_SIZE);
     uart_puts("\r\n");
     for i in 0..<QUEUE_SIZE {
-        uart_print(ring[i]);
+        uart_print(const_ring[i]);
         uart_puts(" ");
     }
     uart_puts("\r\n");

@@ -103,6 +103,18 @@ runtime/init/shutdown integration fixture. Interrupt, scheduler, SMP, USB,
 storage, and network cases are not part of this first pilot because their
 state and control-flow boundaries need separate treatment.
 
+The next pass expanded the same mechanism substantially. An 18-case
+`type_system_suite` covers refinement/layout/integer/ownership/view examples,
+and a 14-case `algorithm_suite` covers loops, collections, small algorithms,
+and the three pure packet-parser examples. Together with `basic_suite`, 40
+logical PASS/FAIL cases now require only three resets and three JTAG loads
+instead of 40, saving 37 of each while retaining every original fixture.
+The combined address space exposed and fixed only ordinary global-name
+collisions plus one real isolation dependency: `packed` had assumed an
+uninitialized padding byte would be zero on a fresh stack. It now initializes
+that byte explicitly before inspecting the representation, so its result no
+longer depends on whether another test previously used the stack.
+
 **Ethernet and USB are required, not optional, for this board** (per
 the project owner, 2026-07-19) -- unlike STM32F746G-DISCOVERY's
 on-chip Ethernet MAC, BCM2837 has NO on-chip Ethernet at all; its

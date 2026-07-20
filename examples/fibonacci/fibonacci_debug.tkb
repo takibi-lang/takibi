@@ -1,0 +1,6 @@
+// Standalone entry retained only for the dedicated DWARF regression build.
+use "examples/fibonacci/fibonacci.tkb";
+
+fn app_main() {
+    test_fibonacci();
+}

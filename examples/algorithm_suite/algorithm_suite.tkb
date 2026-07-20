@@ -1,0 +1,53 @@
+// Coarse-grained issue #93 suite. One platform startup/load/reset runs all
+// cases; the host checks every original fixture between stable UART markers.
+use "examples/callstack/callstack.tkb";
+use "examples/ringbuf/ringbuf.tkb";
+use "examples/crc8/crc8.tkb";
+use "examples/djb2/djb2.tkb";
+use "examples/slice/slice.tkb";
+use "examples/foreach/foreach.tkb";
+use "examples/for/for.tkb";
+use "examples/loop/loop.tkb";
+use "examples/fizzbuzz/fizzbuzz.tkb";
+use "examples/fibonacci/fibonacci.tkb";
+use "examples/bubblesort/bubblesort.tkb";
+use "examples/inet_checksum/inet_checksum.tkb";
+use "examples/ip_parse/ip_parse.tkb";
+use "examples/tcp_parse/tcp_parse.tkb";
+
+fn suite_marker(name: *u8) {
+    uart_puts("@@TAKIBI_TEST:");
+    uart_puts(name);
+    uart_puts("@@\n");
+}
+
+fn app_main() {
+    suite_marker("callstack");
+    test_callstack();
+    suite_marker("ringbuf");
+    test_ringbuf();
+    suite_marker("crc8");
+    test_crc8();
+    suite_marker("djb2");
+    test_djb2();
+    suite_marker("slice");
+    test_slice();
+    suite_marker("foreach");
+    test_foreach();
+    suite_marker("for");
+    test_for();
+    suite_marker("loop");
+    test_loop();
+    suite_marker("fizzbuzz");
+    test_fizzbuzz();
+    suite_marker("fibonacci");
+    test_fibonacci();
+    suite_marker("bubblesort");
+    test_bubblesort();
+    suite_marker("inet_checksum");
+    test_inet_checksum();
+    suite_marker("ip_parse");
+    test_ip_parse();
+    suite_marker("tcp_parse");
+    test_tcp_parse();
+}

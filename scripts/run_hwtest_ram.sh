@@ -371,12 +371,13 @@ run_hw_test_ram() {
     rm -f "$tmp_out"
 }
 
-# run_hw_test_ram_basic_suite ELF
+# run_hw_test_ram_suite SUITE_NAME ELF MANIFEST
 #
 # Load once, then retain one PASS/FAIL result per original example by
 # splitting the marked UART stream with the shared suite-output checker.
-run_hw_test_ram_basic_suite() {
-    local elf="$1" tmp_out tmp_drain report status name expected actual
+run_hw_test_ram_suite() {
+    local suite_name="$1" elf="$2" manifest="$3"
+    local tmp_out tmp_drain report status name expected actual
     tmp_out=$(mktemp)
     tmp_drain=$(mktemp)
     report=$(mktemp)
@@ -388,17 +389,17 @@ run_hw_test_ram_basic_suite() {
         "ram_load_and_run '$elf'"
 
     if [ "$RAM_LOAD_OK" != "1" ]; then
-        printf "${RED}FAIL${RST}  basic_suite (stm32/ram)  (openocd RAM load failed)\n"
+        printf "${RED}FAIL${RST}  %s (stm32/ram)  (openocd RAM load failed)\n" "$suite_name"
         sed 's/^/       /' "$RAM_LOAD_LOG"
         FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("basic_suite (stm32/ram)")
+        FAILED_TESTS+=("$suite_name (stm32/ram)")
         rm -f "$tmp_out" "$report" "$RAM_LOAD_LOG"
         return
     fi
     rm -f "$RAM_LOAD_LOG"
 
     python3 "$(dirname "$0")/check_suite_output.py" "$tmp_out" \
-        examples/basic_suite/cases.txt > "$report" || true
+        "$manifest" > "$report" || true
     [ -s "$report" ] || printf 'ERROR\tsuite checker produced no result\n' > "$report"
 
     while IFS=$'\t' read -r status name expected actual; do
@@ -415,9 +416,9 @@ run_hw_test_ram_basic_suite() {
                 FAILED_TESTS+=("$name (stm32/ram)")
                 ;;
             ERROR)
-                printf "${RED}FAIL${RST}  basic_suite (stm32/ram)  (%s)\n" "$name"
+                printf "${RED}FAIL${RST}  %s (stm32/ram)  (%s)\n" "$suite_name" "$name"
                 FAIL=$((FAIL + 1))
-                FAILED_TESTS+=("basic_suite (stm32/ram)")
+                FAILED_TESTS+=("$suite_name (stm32/ram)")
                 ;;
         esac
     done < "$report"
@@ -556,28 +557,11 @@ echo ""
 # files (RAM execution changes nothing about what bytes the firmware
 # writes to UART).
 run_hw_test_ram "start (stm32/ram)"         examples/start/kernel_stm32_ram.elf         examples/start/start.expected
-run_hw_test_ram_basic_suite examples/basic_suite/kernel_stm32_ram.elf
-run_hw_test_ram "fizzbuzz (stm32/ram)"      examples/fizzbuzz/kernel_stm32_ram.elf      examples/fizzbuzz/fizzbuzz.expected
-run_hw_test_ram "fibonacci (stm32/ram)"     examples/fibonacci/kernel_stm32_ram.elf     examples/fibonacci/fibonacci.expected
-run_hw_test_ram "bubblesort (stm32/ram)"    examples/bubblesort/kernel_stm32_ram.elf    examples/bubblesort/bubblesort.expected
-run_hw_test_ram "ringbuf (stm32/ram)"       examples/ringbuf/kernel_stm32_ram.elf       examples/ringbuf/ringbuf.expected
-run_hw_test_ram "callstack (stm32/ram)"     examples/callstack/kernel_stm32_ram.elf     examples/callstack/callstack.expected
-run_hw_test_ram "crc8 (stm32/ram)"          examples/crc8/kernel_stm32_ram.elf          examples/crc8/crc8.expected
-run_hw_test_ram "djb2 (stm32/ram)"          examples/djb2/kernel_stm32_ram.elf          examples/djb2/djb2.expected
+run_hw_test_ram_suite basic_suite examples/basic_suite/kernel_stm32_ram.elf examples/basic_suite/cases.txt
+run_hw_test_ram_suite type_system_suite examples/type_system_suite/kernel_stm32_ram.elf examples/type_system_suite/cases.txt
+run_hw_test_ram_suite algorithm_suite examples/algorithm_suite/kernel_stm32_ram.elf examples/algorithm_suite/cases.txt
 run_hw_test_ram "bump (stm32/ram)"          examples/bump/kernel_stm32_ram.elf          examples/bump/bump.expected
 run_hw_test_ram "scheduler (stm32/ram)"     examples/scheduler/kernel_stm32_ram.elf     examples/scheduler/scheduler.expected
-run_hw_test_ram "refined (stm32/ram)"       examples/refined/kernel_stm32_ram.elf       examples/refined/refined.expected
-run_hw_test_ram "narrow (stm32/ram)"        examples/narrow/kernel_stm32_ram.elf        examples/narrow/narrow.expected
-run_hw_test_ram "for (stm32/ram)"           examples/for/kernel_stm32_ram.elf           examples/for/for.expected
-run_hw_test_ram "loop (stm32/ram)"          examples/loop/kernel_stm32_ram.elf          examples/loop/loop.expected
-run_hw_test_ram "enum (stm32/ram)"          examples/enum/kernel_stm32_ram.elf          examples/enum/enum.expected
-run_hw_test_ram "nonexhaustive (stm32/ram)" examples/nonexhaustive/kernel_stm32_ram.elf examples/nonexhaustive/nonexhaustive.expected
-run_hw_test_ram "bitops (stm32/ram)"        examples/bitops/kernel_stm32_ram.elf        examples/bitops/bitops.expected
-run_hw_test_ram "align (stm32/ram)"         examples/align/kernel_stm32_ram.elf         examples/align/align.expected
-run_hw_test_ram "packed (stm32/ram)"        examples/packed/kernel_stm32_ram.elf        examples/packed/packed.expected
-run_hw_test_ram "struct_align (stm32/ram)"  examples/struct_align/kernel_stm32_ram.elf  examples/struct_align/struct_align.expected
-run_hw_test_ram "const_global (stm32/ram)"  examples/const_global/kernel_stm32_ram.elf  examples/const_global/const_global.expected
-run_hw_test_ram "sizeof_offsetof (stm32/ram)" examples/sizeof_offsetof/kernel_stm32_ram.elf examples/sizeof_offsetof/sizeof_offsetof.expected
 
 # rtc/timer: same LSI-tick-pause reasoning as run_hwtest.sh -- needs a much
 # longer idle-quiet threshold than the ~200ms default.
@@ -600,11 +584,6 @@ run_hw_test_ram "condvar (stm32/ram)"   examples/condvar/kernel_stm32_ram.elf   
 run_hw_test_ram "msgqueue (stm32/ram)"  examples/msgqueue/kernel_stm32_ram.elf  examples/msgqueue/msgqueue.expected
 run_hw_test_ram "watchdog (stm32/ram)"  examples/watchdog/kernel_stm32_ram.elf  examples/watchdog/watchdog.expected
 run_hw_test_ram "rtos_demo (stm32/ram)" examples/rtos_demo/kernel_stm32_ram.elf examples/rtos_demo/rtos_demo.expected
-
-# inet_checksum/ip_parse/tcp_parse: pure compute, no MMIO beyond UART.
-run_hw_test_ram "inet_checksum (stm32/ram)" examples/inet_checksum/kernel_stm32_ram.elf examples/inet_checksum/inet_checksum.expected
-run_hw_test_ram "ip_parse (stm32/ram)"      examples/ip_parse/kernel_stm32_ram.elf      examples/ip_parse/ip_parse.expected
-run_hw_test_ram "tcp_parse (stm32/ram)"     examples/tcp_parse/kernel_stm32_ram.elf     examples/tcp_parse/tcp_parse.expected
 
 # sdcard: real SDMMC1 microSD driver (GitHub issue #62) -- see
 # run_hw_test_ram_sdcard's own comment above.

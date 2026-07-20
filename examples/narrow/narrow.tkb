@@ -25,16 +25,16 @@
 //
 // QEMU expected output: ABCDEFGH\r\n
 
-let mut buf: [u8; 8];
+let mut narrow_buf: [u8; 8];
 
 // Function requiring a refined-type argument. Without narrowing, i32 cannot be passed directly.
 fn write_entry(i: {0..<8 as usize}, c: u8) {
-    buf[i] = c;  // bounds check elided (TypeRefined proves safety)
+    narrow_buf[i] = c;  // bounds check elided (TypeRefined proves safety)
 }
 
-fn print_buf() {
+fn narrow_print_buf() {
     for i: usize in 0..<8 {
-        uart_putc(buf[i]);  // i: {0..<8} -> bounds check elided
+        uart_putc(narrow_buf[i]);  // i: {0..<8} -> bounds check elided
     }
     uart_putc('\r');
     uart_putc('\n');
@@ -47,12 +47,12 @@ fn fill_from_unknown(v: i32, c: u8) {
         // Inside here, v is typed as {0..<8}; `as usize` infers {0..<8 as
         // usize} automatically (issue #72) -- no explicit range to restate.
         write_entry(v as usize, c);   // pass to refined argument: compiles OK (already narrowed)
-        buf[v as usize] = c;          // direct array access: bounds check elided
+        narrow_buf[v as usize] = c;   // direct array access: bounds check elided
     }
     // Outside the if-block, v is i32 again (narrowing does not escape the block)
 }
 
-fn app_main() -> i32 {
+fn test_narrow() -> i32 {
     // Pass each index 0 to 7 as "external input" and write
     fill_from_unknown(0, 'A');
     fill_from_unknown(1, 'B');
@@ -65,7 +65,6 @@ fn app_main() -> i32 {
     // Out-of-range values are rejected by the if-check (buf remains unchanged)
     fill_from_unknown(-1, 'X');
     fill_from_unknown(8, 'X');
-    print_buf();
+    narrow_print_buf();
     return 0;
 }
-

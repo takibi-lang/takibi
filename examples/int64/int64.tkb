@@ -46,7 +46,7 @@ fn local_full_mask() -> u64 {
     return w;
 }
 
-fn app_main() {
+fn test_int64() {
     uart_puts("global   : ");
     print_u64_hex(FULL_MASK);
 

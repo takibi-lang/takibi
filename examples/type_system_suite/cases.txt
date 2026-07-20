@@ -1,0 +1,19 @@
+# UART marker name and unchanged per-example expected-output fixture.
+nonexhaustive examples/nonexhaustive/nonexhaustive.expected
+refined examples/refined/refined.expected
+narrow examples/narrow/narrow.expected
+enum examples/enum/enum.expected
+align examples/align/align.expected
+packed examples/packed/packed.expected
+struct_align examples/struct_align/struct_align.expected
+const_global examples/const_global/const_global.expected
+sizeof_offsetof examples/sizeof_offsetof/sizeof_offsetof.expected
+int64 examples/int64/int64.expected
+bitops examples/bitops/bitops.expected
+indexed_view examples/indexed_view/indexed_view.expected
+tcp_conn_view examples/tcp_conn_view/tcp_conn_view.expected
+affine_escape_via_index examples/affine_escape_via_index/affine_escape_via_index.expected
+align_ptr_proof examples/align_ptr_proof/align_ptr_proof.expected
+linear_obligation examples/linear_obligation/linear_obligation.expected
+tuple_pair examples/tuple_pair/tuple_pair.expected
+field_lease examples/field_lease/field_lease.expected

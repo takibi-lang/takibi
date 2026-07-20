@@ -15,8 +15,7 @@ fn print_a() {
     print_b();
 }
 
-fn app_main() {
+fn test_callstack() {
     print_a();
     uart_puts("done\r\n");
 }
-

@@ -68,16 +68,17 @@ run_test() {
     rm -f "$tmp_out"
 }
 
-# check_basic_suite_output OUTFILE [SUFFIX]
+# check_suite_output OUTFILE MANIFEST SUITE_NAME [SUFFIX]
 #
 # basic_suite emits stable case markers around the unchanged output of each
 # original example. Split once-captured UART output back into those logical
 # cases so batching QEMU/platform startup does not reduce failure granularity.
-check_basic_suite_output() {
-    local outfile="$1" suffix="${2:-}" report status name expected actual
+check_suite_output() {
+    local outfile="$1" manifest="$2" suite_name="$3" suffix="${4:-}"
+    local report status name expected actual
     report=$(mktemp)
     python3 "$(dirname "$0")/check_suite_output.py" "$outfile" \
-        examples/basic_suite/cases.txt > "$report" || true
+        "$manifest" > "$report" || true
     [ -s "$report" ] || printf 'ERROR\tsuite checker produced no result\n' > "$report"
 
     while IFS=$'\t' read -r status name expected actual; do
@@ -94,21 +95,21 @@ check_basic_suite_output() {
                 FAILED_TESTS+=("$name$suffix")
                 ;;
             ERROR)
-                printf "${RED}FAIL${RST}  basic_suite%s  (%s)\n" "$suffix" "$name"
+                printf "${RED}FAIL${RST}  %s%s  (%s)\n" "$suite_name" "$suffix" "$name"
                 FAIL=$((FAIL + 1))
-                FAILED_TESTS+=("basic_suite$suffix")
+                FAILED_TESTS+=("$suite_name$suffix")
                 ;;
         esac
     done < "$report"
     rm -f "$report"
 }
 
-run_basic_suite() {
-    local kernel="$1" tmp_out
+run_suite() {
+    local kernel="$1" manifest="$2" suite_name="$3" tmp_out
     tmp_out=$(mktemp)
     echo | timeout "$TIMEOUT" $QEMU $QEMU_COMMON -kernel "$kernel" \
         > "$tmp_out" 2>/dev/null
-    check_basic_suite_output "$tmp_out"
+    check_suite_output "$tmp_out" "$manifest" "$suite_name"
     rm -f "$tmp_out"
 }
 
@@ -958,16 +959,11 @@ echo "Running QEMU integration tests..."
 echo ""
 
 run_test "start"     examples/start/kernel.elf     examples/start/start.expected
-run_basic_suite examples/basic_suite/kernel.elf
+run_suite examples/basic_suite/kernel.elf examples/basic_suite/cases.txt basic_suite
+run_suite examples/type_system_suite/kernel.elf examples/type_system_suite/cases.txt type_system_suite
+run_suite examples/algorithm_suite/kernel.elf examples/algorithm_suite/cases.txt algorithm_suite
 run_test "echo"      examples/echo/kernel.elf      examples/echo/echo.expected \
                      examples/echo/echo.stdin
-run_test "fizzbuzz"  examples/fizzbuzz/kernel.elf  examples/fizzbuzz/fizzbuzz.expected
-run_test "fibonacci"  examples/fibonacci/kernel.elf  examples/fibonacci/fibonacci.expected
-run_test "bubblesort" examples/bubblesort/kernel.elf examples/bubblesort/bubblesort.expected
-run_test "ringbuf"    examples/ringbuf/kernel.elf    examples/ringbuf/ringbuf.expected
-run_test "callstack"  examples/callstack/kernel.elf  examples/callstack/callstack.expected
-run_test "crc8"       examples/crc8/kernel.elf       examples/crc8/crc8.expected
-run_test "djb2"       examples/djb2/kernel.elf       examples/djb2/djb2.expected
 run_test "bump"       examples/bump/kernel.elf       examples/bump/bump.expected
 run_test_timed "timer" examples/timer/kernel.elf examples/timer/timer.expected 1
 run_test_timed "rtc"   examples/rtc/kernel.elf   examples/rtc/rtc.expected     1
@@ -979,34 +975,10 @@ run_test "semaphore" examples/semaphore/kernel.elf examples/semaphore/semaphore.
 run_test "condvar"   examples/condvar/kernel.elf   examples/condvar/condvar.expected
 run_test "msgqueue"  examples/msgqueue/kernel.elf  examples/msgqueue/msgqueue.expected
 run_test "watchdog" examples/watchdog/kernel.elf examples/watchdog/watchdog.expected
-run_test "refined"  examples/refined/kernel.elf  examples/refined/refined.expected
-run_test "narrow"   examples/narrow/kernel.elf   examples/narrow/narrow.expected
-run_test "for"      examples/for/kernel.elf      examples/for/for.expected
-run_test "loop"     examples/loop/kernel.elf     examples/loop/loop.expected
-run_test "enum"          examples/enum/kernel.elf          examples/enum/enum.expected
-run_test "nonexhaustive" examples/nonexhaustive/kernel.elf examples/nonexhaustive/nonexhaustive.expected
-run_test "bitops"        examples/bitops/kernel.elf        examples/bitops/bitops.expected
-run_test "align"         examples/align/kernel.elf         examples/align/align.expected
-run_test "packed"        examples/packed/kernel.elf        examples/packed/packed.expected
-run_test "struct_align"  examples/struct_align/kernel.elf  examples/struct_align/struct_align.expected
-run_test "const_global"  examples/const_global/kernel.elf  examples/const_global/const_global.expected
-run_test "sizeof_offsetof" examples/sizeof_offsetof/kernel.elf examples/sizeof_offsetof/sizeof_offsetof.expected
-run_test "slice"         examples/slice/kernel.elf         examples/slice/slice.expected
-run_test "foreach"       examples/foreach/kernel.elf       examples/foreach/foreach.expected
-run_test "int64"         examples/int64/kernel.elf         examples/int64/int64.expected
-run_test "affine_escape_via_index" examples/affine_escape_via_index/kernel.elf examples/affine_escape_via_index/affine_escape_via_index.expected
-run_test "linear_obligation" examples/linear_obligation/kernel.elf examples/linear_obligation/linear_obligation.expected
-run_test "tuple_pair" examples/tuple_pair/kernel.elf examples/tuple_pair/tuple_pair.expected
-run_test "field_lease" examples/field_lease/kernel.elf examples/field_lease/field_lease.expected
-run_test "indexed_view" examples/indexed_view/kernel.elf examples/indexed_view/indexed_view.expected
-run_test "align_ptr_proof" examples/align_ptr_proof/kernel.elf examples/align_ptr_proof/align_ptr_proof.expected
 run_test "klock_guard" examples/klock_guard/kernel.elf examples/klock_guard/klock_guard.expected
 run_test "percpu" examples/percpu/kernel.elf examples/percpu/percpu.expected
 run_test "chan_rendezvous" examples/chan_rendezvous/kernel.elf examples/chan_rendezvous/chan_rendezvous.expected
 run_test "rtos_demo" examples/rtos_demo/kernel.elf examples/rtos_demo/rtos_demo.expected
-run_test "inet_checksum" examples/inet_checksum/kernel.elf examples/inet_checksum/inet_checksum.expected
-run_test "ip_parse"      examples/ip_parse/kernel.elf      examples/ip_parse/ip_parse.expected
-run_test "tcp_parse"     examples/tcp_parse/kernel.elf     examples/tcp_parse/tcp_parse.expected
 run_virtio_test "net_echo"   examples/net_echo/kernel.elf   virtio_net_test.py
 run_virtio_test "arp_reply"  examples/arp_reply/kernel.elf  arp_test.py
 run_virtio_test "icmp_echo"  examples/icmp_echo/kernel.elf  icmp_echo_test.py

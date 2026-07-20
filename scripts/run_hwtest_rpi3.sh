@@ -181,12 +181,13 @@ run_hw_test_rpi3() {
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
 }
 
-# run_hw_test_rpi3_basic_suite ELF
+# run_hw_test_rpi3_suite SUITE_NAME ELF MANIFEST
 #
 # Reset/load once, then retain one PASS/FAIL result per original example by
 # splitting the marked UART stream with the shared suite-output checker.
-run_hw_test_rpi3_basic_suite() {
-    local elf="$1" tmp_drain tmp_out load_log load_status_file load_status
+run_hw_test_rpi3_suite() {
+    local suite_name="$1" elf="$2" manifest="$3"
+    local tmp_drain tmp_out load_log load_status_file load_status
     local report status name expected actual
     tmp_drain=$(mktemp)
     tmp_out=$(mktemp)
@@ -194,23 +195,23 @@ run_hw_test_rpi3_basic_suite() {
     load_status_file=$(mktemp)
     report=$(mktemp)
 
-    reset_before_test "basic_suite (rpi3)"
+    reset_before_test "$suite_name (rpi3)"
     read_until_quiet "$tmp_drain" "$DRAIN_MAX_SECS" "$DRAIN_STABLE_POLLS" 0
     read_until_quiet "$tmp_out" "$CAPTURE_MAX_SECS" "$CAPTURE_STABLE_POLLS" 1 \
         "if \"$REPO_ROOT/scripts/rpi3_jtag_load.sh\" \"$elf\" > \"$load_log\" 2>&1; then load_status=0; else load_status=\$?; fi; echo \"\$load_status\" > \"$load_status_file\""
     load_status=$(cat "$load_status_file" 2>/dev/null || echo 1)
 
     if [ "$load_status" != "0" ]; then
-        printf "${RED}FAIL${RST}  basic_suite (rpi3)  (JTAG injection failed -- loader log follows)\n"
+        printf "${RED}FAIL${RST}  %s (rpi3)  (JTAG injection failed -- loader log follows)\n" "$suite_name"
         sed 's/^/       /' "$load_log"
         FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("basic_suite (rpi3)")
+        FAILED_TESTS+=("$suite_name (rpi3)")
         rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file" "$report"
         exit 1
     fi
 
     python3 "$(dirname "$0")/check_suite_output.py" "$tmp_out" \
-        "$REPO_ROOT/examples/basic_suite/cases.txt" > "$report" || true
+        "$manifest" > "$report" || true
     [ -s "$report" ] || printf 'ERROR\tsuite checker produced no result\n' > "$report"
 
     while IFS=$'\t' read -r status name expected actual; do
@@ -227,9 +228,9 @@ run_hw_test_rpi3_basic_suite() {
                 FAILED_TESTS+=("$name (rpi3)")
                 ;;
             ERROR)
-                printf "${RED}FAIL${RST}  basic_suite (rpi3)  (%s)\n" "$name"
+                printf "${RED}FAIL${RST}  %s (rpi3)  (%s)\n" "$suite_name" "$name"
                 FAIL=$((FAIL + 1))
-                FAILED_TESTS+=("basic_suite (rpi3)")
+                FAILED_TESTS+=("$suite_name (rpi3)")
                 ;;
         esac
     done < "$report"
@@ -359,8 +360,8 @@ run_hw_test_rpi3_usb_msc() {
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
 }
 
-# Mirrors RPI3_EXAMPLES + RPI3_CHECKSUM_EXAMPLES + RPI3_IRQ_EXAMPLES +
-# RPI3_RTC_EXAMPLES + RPI3_SCHED_EXAMPLES in the Makefile -- see
+# Mirrors RPI3_EXAMPLES + RPI3_IRQ_EXAMPLES + RPI3_RTC_EXAMPLES +
+# RPI3_SCHED_EXAMPLES in the Makefile -- see
 # examples/common_rpi3/AGENTS.md for what's still deliberately excluded
 # (semaphore/condvar/msgqueue/watchdog/rtos_demo, the rest of the
 # preemptive-scheduler group examples/preempt is the first of; SD-card-
@@ -371,44 +372,17 @@ run_hw_test_rpi3_usb_msc() {
 # free-running counter, not a real RTC peripheral) differs -- both
 # fixtures only ever check that time advances, never an absolute value.
 run_hw_test_rpi3 "start (rpi3)"          "$REPO_ROOT/examples/start/kernel_rpi3.elf"          "$REPO_ROOT/examples/start/start.expected"
-run_hw_test_rpi3_basic_suite "$REPO_ROOT/examples/basic_suite/kernel_rpi3.elf"
-run_hw_test_rpi3 "fizzbuzz (rpi3)"       "$REPO_ROOT/examples/fizzbuzz/kernel_rpi3.elf"       "$REPO_ROOT/examples/fizzbuzz/fizzbuzz.expected"
-run_hw_test_rpi3 "fibonacci (rpi3)"      "$REPO_ROOT/examples/fibonacci/kernel_rpi3.elf"      "$REPO_ROOT/examples/fibonacci/fibonacci.expected"
-run_hw_test_rpi3 "bubblesort (rpi3)"     "$REPO_ROOT/examples/bubblesort/kernel_rpi3.elf"     "$REPO_ROOT/examples/bubblesort/bubblesort.expected"
-run_hw_test_rpi3 "ringbuf (rpi3)"        "$REPO_ROOT/examples/ringbuf/kernel_rpi3.elf"        "$REPO_ROOT/examples/ringbuf/ringbuf.expected"
-run_hw_test_rpi3 "callstack (rpi3)"      "$REPO_ROOT/examples/callstack/kernel_rpi3.elf"      "$REPO_ROOT/examples/callstack/callstack.expected"
-run_hw_test_rpi3 "crc8 (rpi3)"           "$REPO_ROOT/examples/crc8/kernel_rpi3.elf"           "$REPO_ROOT/examples/crc8/crc8.expected"
-run_hw_test_rpi3 "djb2 (rpi3)"           "$REPO_ROOT/examples/djb2/kernel_rpi3.elf"           "$REPO_ROOT/examples/djb2/djb2.expected"
+run_hw_test_rpi3_suite basic_suite "$REPO_ROOT/examples/basic_suite/kernel_rpi3.elf" \
+    "$REPO_ROOT/examples/basic_suite/cases.txt"
+run_hw_test_rpi3_suite type_system_suite "$REPO_ROOT/examples/type_system_suite/kernel_rpi3.elf" \
+    "$REPO_ROOT/examples/type_system_suite/cases.txt"
+run_hw_test_rpi3_suite algorithm_suite "$REPO_ROOT/examples/algorithm_suite/kernel_rpi3.elf" \
+    "$REPO_ROOT/examples/algorithm_suite/cases.txt"
 run_hw_test_rpi3 "bump (rpi3)"           "$REPO_ROOT/examples/bump/kernel_rpi3.elf"           "$REPO_ROOT/examples/bump/bump.expected"
 run_hw_test_rpi3 "scheduler (rpi3)"      "$REPO_ROOT/examples/scheduler/kernel_rpi3.elf"      "$REPO_ROOT/examples/scheduler/scheduler.expected"
-run_hw_test_rpi3 "refined (rpi3)"        "$REPO_ROOT/examples/refined/kernel_rpi3.elf"        "$REPO_ROOT/examples/refined/refined.expected"
-run_hw_test_rpi3 "narrow (rpi3)"         "$REPO_ROOT/examples/narrow/kernel_rpi3.elf"         "$REPO_ROOT/examples/narrow/narrow.expected"
-run_hw_test_rpi3 "for (rpi3)"            "$REPO_ROOT/examples/for/kernel_rpi3.elf"            "$REPO_ROOT/examples/for/for.expected"
-run_hw_test_rpi3 "loop (rpi3)"           "$REPO_ROOT/examples/loop/kernel_rpi3.elf"           "$REPO_ROOT/examples/loop/loop.expected"
-run_hw_test_rpi3 "enum (rpi3)"           "$REPO_ROOT/examples/enum/kernel_rpi3.elf"           "$REPO_ROOT/examples/enum/enum.expected"
-run_hw_test_rpi3 "nonexhaustive (rpi3)"  "$REPO_ROOT/examples/nonexhaustive/kernel_rpi3.elf"  "$REPO_ROOT/examples/nonexhaustive/nonexhaustive.expected"
-run_hw_test_rpi3 "bitops (rpi3)"         "$REPO_ROOT/examples/bitops/kernel_rpi3.elf"         "$REPO_ROOT/examples/bitops/bitops.expected"
-run_hw_test_rpi3 "align (rpi3)"          "$REPO_ROOT/examples/align/kernel_rpi3.elf"          "$REPO_ROOT/examples/align/align.expected"
-run_hw_test_rpi3 "packed (rpi3)"         "$REPO_ROOT/examples/packed/kernel_rpi3.elf"         "$REPO_ROOT/examples/packed/packed.expected"
-run_hw_test_rpi3 "struct_align (rpi3)"   "$REPO_ROOT/examples/struct_align/kernel_rpi3.elf"   "$REPO_ROOT/examples/struct_align/struct_align.expected"
-run_hw_test_rpi3 "const_global (rpi3)"   "$REPO_ROOT/examples/const_global/kernel_rpi3.elf"   "$REPO_ROOT/examples/const_global/const_global.expected"
-run_hw_test_rpi3 "sizeof_offsetof (rpi3)" "$REPO_ROOT/examples/sizeof_offsetof/kernel_rpi3.elf" "$REPO_ROOT/examples/sizeof_offsetof/sizeof_offsetof.expected"
-run_hw_test_rpi3 "slice (rpi3)"          "$REPO_ROOT/examples/slice/kernel_rpi3.elf"          "$REPO_ROOT/examples/slice/slice.expected"
-run_hw_test_rpi3 "foreach (rpi3)"        "$REPO_ROOT/examples/foreach/kernel_rpi3.elf"        "$REPO_ROOT/examples/foreach/foreach.expected"
-run_hw_test_rpi3 "int64 (rpi3)"          "$REPO_ROOT/examples/int64/kernel_rpi3.elf"          "$REPO_ROOT/examples/int64/int64.expected"
-run_hw_test_rpi3 "indexed_view (rpi3)"   "$REPO_ROOT/examples/indexed_view/kernel_rpi3.elf"   "$REPO_ROOT/examples/indexed_view/indexed_view.expected"
-run_hw_test_rpi3 "tcp_conn_view (rpi3)"  "$REPO_ROOT/examples/tcp_conn_view/kernel_rpi3.elf"  "$REPO_ROOT/examples/tcp_conn_view/tcp_conn_view.expected"
 run_hw_test_rpi3 "klock_guard (rpi3)"    "$REPO_ROOT/examples/klock_guard/kernel_rpi3.elf"    "$REPO_ROOT/examples/klock_guard/klock_guard.expected"
 run_hw_test_rpi3 "percpu (rpi3)"         "$REPO_ROOT/examples/percpu/kernel_rpi3.elf"         "$REPO_ROOT/examples/percpu/percpu.expected"
-run_hw_test_rpi3 "affine_escape_via_index (rpi3)" "$REPO_ROOT/examples/affine_escape_via_index/kernel_rpi3.elf" "$REPO_ROOT/examples/affine_escape_via_index/affine_escape_via_index.expected"
-run_hw_test_rpi3 "align_ptr_proof (rpi3)" "$REPO_ROOT/examples/align_ptr_proof/kernel_rpi3.elf" "$REPO_ROOT/examples/align_ptr_proof/align_ptr_proof.expected"
-run_hw_test_rpi3 "linear_obligation (rpi3)" "$REPO_ROOT/examples/linear_obligation/kernel_rpi3.elf" "$REPO_ROOT/examples/linear_obligation/linear_obligation.expected"
-run_hw_test_rpi3 "tuple_pair (rpi3)"     "$REPO_ROOT/examples/tuple_pair/kernel_rpi3.elf"     "$REPO_ROOT/examples/tuple_pair/tuple_pair.expected"
-run_hw_test_rpi3 "field_lease (rpi3)"    "$REPO_ROOT/examples/field_lease/kernel_rpi3.elf"    "$REPO_ROOT/examples/field_lease/field_lease.expected"
 RPI3_SMP_CORES=2 run_hw_test_rpi3 "smp_handoff (rpi3)" "$REPO_ROOT/examples/smp_handoff/kernel_rpi3.elf" "$REPO_ROOT/examples/smp_handoff/smp_handoff.expected" 5 30
-run_hw_test_rpi3 "inet_checksum (rpi3)"  "$REPO_ROOT/examples/inet_checksum/kernel_rpi3.elf"  "$REPO_ROOT/examples/inet_checksum/inet_checksum.expected"
-run_hw_test_rpi3 "ip_parse (rpi3)"       "$REPO_ROOT/examples/ip_parse/kernel_rpi3.elf"       "$REPO_ROOT/examples/ip_parse/ip_parse.expected"
-run_hw_test_rpi3 "tcp_parse (rpi3)"      "$REPO_ROOT/examples/tcp_parse/kernel_rpi3.elf"      "$REPO_ROOT/examples/tcp_parse/tcp_parse.expected"
 run_hw_test_rpi3 "rtc (rpi3)"            "$REPO_ROOT/examples/rtc/kernel_rpi3.elf"            "$REPO_ROOT/examples/rtc/rtc.expected"       5 30
 run_hw_test_rpi3 "timer (rpi3)"          "$REPO_ROOT/examples/timer/kernel_rpi3.elf"          "$REPO_ROOT/examples/timer/timer.expected"   5 30
 run_hw_test_rpi3_stdin "echo (rpi3)" "$REPO_ROOT/examples/echo/kernel_rpi3.elf" \

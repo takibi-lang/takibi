@@ -100,7 +100,7 @@ LINUX_BINS             := $(foreach e,$(LINUX_EXAMPLES),examples/$(e)/$(e).exe)
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
 # Convention: examples/<name>/<name>.tkb -> examples/<name>/kernel.elf
-EXAMPLES     := start basic_suite echo fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof_offsetof slice foreach int64 net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server fatfs affine_escape_via_index align_ptr_proof klock_guard percpu chan_rendezvous rtos_demo linear_obligation tuple_pair field_lease indexed_view tcp_conn_view kvs_server
+EXAMPLES     := start basic_suite type_system_suite algorithm_suite echo bump timer rtc irq scheduler preempt semaphore condvar msgqueue watchdog net_echo arp_reply icmp_echo tcp_echo http_server fatfs klock_guard percpu chan_rendezvous rtos_demo kvs_server
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
@@ -117,28 +117,48 @@ BASIC_SUITE_SOURCES := examples/hello/hello.tkb \
                        examples/struct/struct.tkb \
                        examples/struct_refined/struct_refined.tkb
 
+TYPE_SYSTEM_SUITE_SOURCES := examples/nonexhaustive/nonexhaustive.tkb \
+                             examples/refined/refined.tkb \
+                             examples/narrow/narrow.tkb \
+                             examples/enum/enum.tkb \
+                             examples/align/align.tkb \
+                             examples/packed/packed.tkb \
+                             examples/struct_align/struct_align.tkb \
+                             examples/const_global/const_global.tkb \
+                             examples/sizeof_offsetof/sizeof_offsetof.tkb \
+                             examples/int64/int64.tkb \
+                             examples/bitops/bitops.tkb \
+                             examples/indexed_view/indexed_view.tkb \
+                             examples/tcp_conn_view/tcp_conn_view.tkb \
+                             examples/affine_escape_via_index/affine_escape_via_index.tkb \
+                             examples/align_ptr_proof/align_ptr_proof.tkb \
+                             examples/linear_obligation/linear_obligation.tkb \
+                             examples/tuple_pair/tuple_pair.tkb \
+                             examples/field_lease/field_lease.tkb
+
+ALGORITHM_SUITE_SOURCES := examples/callstack/callstack.tkb \
+                           examples/ringbuf/ringbuf.tkb \
+                           examples/crc8/crc8.tkb \
+                           examples/djb2/djb2.tkb \
+                           examples/slice/slice.tkb \
+                           examples/foreach/foreach.tkb \
+                           examples/for/for.tkb \
+                           examples/loop/loop.tkb \
+                           examples/fizzbuzz/fizzbuzz.tkb \
+                           examples/fibonacci/fibonacci.tkb \
+                           examples/bubblesort/bubblesort.tkb \
+                           examples/inet_checksum/inet_checksum.tkb \
+                           examples/ip_parse/ip_parse.tkb \
+                           examples/tcp_parse/tcp_parse.tkb
+
 # STM32F746G-DISCOVERY hardware port: the subset of EXAMPLES that's pure
 # compute + uart_puts/uart_print_* output with no interrupt/timer/hand-written
 # -assembly dependency (see the "STM32 hardware bring-up" section below for
 # the full rationale and what's deliberately excluded, e.g. rtc/echo).
 STM32_TARGET := thumbv7em-none-eabi
 STM32_CPU    := cortex-m7
-STM32_EXAMPLES := start basic_suite \
-                  fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump \
-                  scheduler refined narrow for loop enum nonexhaustive \
-                  bitops align packed struct_align const_global sizeof_offsetof slice foreach int64 \
-                  indexed_view tcp_conn_view
+STM32_EXAMPLES := start basic_suite type_system_suite algorithm_suite bump scheduler
 STM32_OBJS     := $(foreach e,$(STM32_EXAMPLES),examples/$(e)/$(e)_stm32.o)
-
-# inet_checksum/ip_parse/tcp_parse: same CHECKSUM_OBJS group as the AArch64
-# side, but examples/common/inet_checksum.tkb and examples/common/netutil.tkb
-# are pure compute with no MMIO addresses at all (unlike uart.tkb) -- so
-# unlike rtc/echo, no STM32-specific version of either is needed, both are
-# reused completely unchanged. Kept as their own small group (not folded
-# into STM32_EXAMPLES) since the recipe needs two extra common files that
-# the rest of STM32_EXAMPLES doesn't.
-STM32_CHECKSUM_EXAMPLES := inet_checksum ip_parse tcp_parse
-STM32_CHECKSUM_OBJS     := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/$(e)_stm32.o)
 
 # `stm32build` builds every STM32 example as a RAM-execution image (see
 # scripts/run_hwtest_ram.sh, scripts/run_hwtest_net_ram.sh, and
@@ -173,7 +193,6 @@ STM32_CHECKSUM_OBJS     := $(foreach e,$(STM32_CHECKSUM_EXAMPLES),examples/$(e)/
 # need sem_asm.o linked in too, so they get their own bespoke rules below
 # instead of the generic pattern rule.
 STM32_RAM_EXAMPLES := $(STM32_EXAMPLES) rtc echo timer irq preempt watchdog \
-                       $(STM32_CHECKSUM_EXAMPLES) \
                        net_echo arp_reply icmp_echo tcp_echo http_server sdcard fatfs_sdcard \
                        http_server_sdcard http_server_sdcard_install
 # Target list for the generic $(STM32_RAM_ELFS_GENERIC) pattern rule below --
@@ -400,7 +419,6 @@ examples/linux_hello/linux_hello.exe: $(COMMON_LINUX_STARTUP_O) $(COMMON_LINUX_S
 #   Timer group: + timer.tkb + stm32_stub.tkb                (preempt semaphore watchdog)
 #   Sync group : + timer.tkb + stm32_stub.tkb                (condvar msgqueue)
 #   Net group  : + virtio_mmio.tkb + netconfig.tkb           (net_echo, arp_reply)
-#   Checksum group: (nothing extra -- each file `use`s what it needs)
 #   App group  : + virtio_mmio.tkb + netconfig.tkb           (icmp_echo, tcp_echo, http_server)
 .SECONDEXPANSION:
 
@@ -412,8 +430,6 @@ TIMER_OBJS := examples/preempt/preempt.o examples/semaphore/semaphore.o \
 SYNC_OBJS  := examples/condvar/condvar.o examples/msgqueue/msgqueue.o examples/chan_rendezvous/chan_rendezvous.o
 RTOS_OBJS  := examples/rtos_demo/rtos_demo.o
 NET_OBJS   := examples/net_echo/net_echo.o examples/arp_reply/arp_reply.o
-CHECKSUM_OBJS := examples/inet_checksum/inet_checksum.o examples/ip_parse/ip_parse.o \
-                 examples/tcp_parse/tcp_parse.o
 APP_OBJS   := examples/icmp_echo/icmp_echo.o examples/tcp_echo/tcp_echo.o \
               examples/http_server/http_server.o examples/kvs_server/kvs_server.o
 # rtc needs one extra common file and echo needs GIC plus the UART IRQ stub,
@@ -424,7 +440,7 @@ APP_OBJS   := examples/icmp_echo/icmp_echo.o examples/tcp_echo/tcp_echo.o \
 RTC_OBJS   := examples/rtc/rtc.o examples/timer/timer.o
 GETC_OBJS  := examples/echo/echo.o
 FATFS_OBJS := examples/fatfs/fatfs.o
-SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS) $(RTOS_OBJS) $(NET_OBJS) $(CHECKSUM_OBJS) $(APP_OBJS) \
+SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS) $(RTOS_OBJS) $(NET_OBJS) $(APP_OBJS) \
                 $(RTC_OBJS) $(GETC_OBJS) $(FATFS_OBJS)
 STANDARD_OBJS := $(filter-out $(SPECIAL_OBJS), $(EXAMPLE_OBJS))
 
@@ -432,6 +448,8 @@ $(STANDARD_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
 examples/basic_suite/basic_suite.o: $(BASIC_SUITE_SOURCES)
+examples/type_system_suite/type_system_suite.o: $(TYPE_SYSTEM_SUITE_SOURCES)
+examples/algorithm_suite/algorithm_suite.o: $(ALGORITHM_SUITE_SOURCES) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL)
 
 # examples/irq/irq.tkb `use`s gic_regs.tkb (types only) itself now, but
 # needs gic.tkb's actual FUNCTIONS for the QEMU build (irq_uart_rx_setup/
@@ -493,15 +511,9 @@ $(RTOS_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMM
 $(NET_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_GIC) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $(COMMON_VIRTIO_MMIO) $(COMMON_NETCONFIG) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
-# inet_checksum.tkb/ip_parse.tkb/tcp_parse.tkb each `use` exactly the
-# subset of inet_checksum.tkb/netutil.tkb they actually need themselves
-# now, so neither is passed on the command line here anymore.
-$(CHECKSUM_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
-
 # fatfs.tkb `use`s netutil.tkb itself (bytes_copy for FAT12 field/name
 # writes), so only COMMON_NETUTIL as a staleness prerequisite is needed,
-# same reasoning as CHECKSUM_OBJS above.
+# same transitive-`use` staleness reasoning as the suite rules above.
 #
 # --forbid-trap: the fatfs+SD-card milestone (issues #61/#62/#98) is now
 # proven working end to end on real hardware (see HISTORY.md's issue #98
@@ -564,7 +576,7 @@ $(FATFS_KERNELS): examples/%/kernel.elf: \
 # with or affect normal kernels). Fibonacci gives run_dwarf_var_test a small
 # dwarfdump-level variable smoke test; dwarf_debug is the live QEMU/GDB
 # source-level fixture.
-examples/fibonacci/fibonacci.debug.o: examples/fibonacci/fibonacci.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
+examples/fibonacci/fibonacci.debug.o: examples/fibonacci/fibonacci_debug.tkb examples/fibonacci/fibonacci.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -g -o $@ --forbid-trap
 
 examples/fibonacci/kernel.debug.elf: $(COMMON_STARTUP_O) examples/fibonacci/fibonacci.debug.o $(COMMON_LINK_LD)
@@ -659,6 +671,8 @@ $(STM32_OBJS): examples/%_stm32.o: examples/%.tkb $(COMMON_STM32_UART) $(COMMON_
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 examples/basic_suite/basic_suite_stm32.o: $(BASIC_SUITE_SOURCES)
+examples/type_system_suite/type_system_suite_stm32.o: $(TYPE_SYSTEM_SUITE_SOURCES)
+examples/algorithm_suite/algorithm_suite_stm32.o: $(ALGORITHM_SUITE_SOURCES) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL)
 
 # RAM-execution link: reuses whichever examples/%/%_stm32.o rule already
 # exists (generic or bespoke, from any group above) -- only the startup
@@ -1012,13 +1026,6 @@ examples/http_server_sdcard_rtos/kernel_stm32.elf: $(COMMON_STM32_STARTUP_O) $(C
 examples/http_server_sdcard_rtos/kernel_stm32.bin: examples/http_server_sdcard_rtos/kernel_stm32.elf
 	llvm-objcopy-19 -O binary $< $@
 
-# inet_checksum.tkb/ip_parse.tkb/tcp_parse.tkb each `use` exactly the
-# subset of inet_checksum.tkb/netutil.tkb they actually need themselves
-# now (same as the QEMU-side CHECKSUM_OBJS rule above), so neither is
-# passed on the command line here anymore.
-$(STM32_CHECKSUM_OBJS): examples/%_stm32.o: examples/%.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
-
 # -- QEMU run targets ----------------------------------------------------------
 QEMU_FLAGS := -machine virt -cpu cortex-a53 -nographic \
               -semihosting-config enable=on,target=native
@@ -1283,8 +1290,7 @@ profile-stm32-kvs-server-sdcard-rtos: examples/kvs_server_sdcard_rtos/kernel_stm
 # preempt/semaphore/condvar/msgqueue/watchdog/rtos_demo need a real
 # BCM2837 interrupt-controller/timer driver -- a separate, substantially
 # larger piece of work -- ported one at a time, not speculatively ahead
-# of that; see examples/common_rpi3/AGENTS.md). RPI3_CHECKSUM_EXAMPLES
-# mirrors STM32_CHECKSUM_EXAMPLES the same way STM32's own group does.
+# of that; see examples/common_rpi3/AGENTS.md).
 RPI3_TARGET := aarch64-none-elf
 RPI3_CPU    := cortex-a53
 COMMON_RPI3_DIR          := examples/common_rpi3
@@ -1330,13 +1336,8 @@ examples/common_rpi3/jtag_stub.elf: $(COMMON_RPI3_JTAG_STUB_O) $(COMMON_RPI3_JTA
 examples/common_rpi3/jtag_stub.img: examples/common_rpi3/jtag_stub.elf
 	llvm-objcopy-19 -O binary $< $@
 
-RPI3_EXAMPLES := start basic_suite \
-                 fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump \
-                 scheduler refined narrow for loop enum nonexhaustive \
-                 bitops align packed struct_align const_global sizeof_offsetof \
-                 slice foreach int64 indexed_view tcp_conn_view \
-                 klock_guard percpu \
-                 affine_escape_via_index align_ptr_proof linear_obligation tuple_pair field_lease
+RPI3_EXAMPLES := start basic_suite type_system_suite algorithm_suite bump scheduler \
+                 klock_guard percpu
 RPI3_OBJS     := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 # The working hardware baseline was committed before this flag was enabled.
 # Keep every RPi3 group on one hardening switch so a newly added example or
@@ -1347,17 +1348,8 @@ $(RPI3_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_TAKIBI_FLAGS) -o $@
 
 examples/basic_suite/basic_suite_rpi3.o: $(BASIC_SUITE_SOURCES)
-
-# inet_checksum.tkb/ip_parse.tkb/tcp_parse.tkb each `use` exactly the
-# subset of inet_checksum.tkb/netutil.tkb they actually need themselves
-# (same reasoning as the AArch64/QEMU CHECKSUM_OBJS group above), so
-# neither is passed on the command line here, only listed as a
-# prerequisite for Make's own staleness tracking.
-RPI3_CHECKSUM_EXAMPLES := inet_checksum ip_parse tcp_parse
-RPI3_CHECKSUM_OBJS     := $(foreach e,$(RPI3_CHECKSUM_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
-
-$(RPI3_CHECKSUM_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_TAKIBI_FLAGS) -o $@
+examples/type_system_suite/type_system_suite_rpi3.o: $(TYPE_SYSTEM_SUITE_SOURCES)
+examples/algorithm_suite/algorithm_suite_rpi3.o: $(ALGORITHM_SUITE_SOURCES) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL)
 
 # examples/echo/echo.tkb and examples/irq/irq.tkb `use` COMMON_GIC_REGS
 # themselves (GicRegs type only, for their own dead-here GICv2-shaped
@@ -1537,7 +1529,7 @@ RPI3_HTTP_SDCARD_RTOS_OBJS     := $(foreach e,$(RPI3_HTTP_SDCARD_RTOS_EXAMPLES),
 $(RPI3_HTTP_SDCARD_RTOS_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_NETCONFIG) $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
 
-RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES) $(RPI3_HTTP_SDCARD_EXAMPLES) $(RPI3_HTTP_SDCARD_RTOS_EXAMPLES)
+RPI3_EXAMPLES += $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES) $(RPI3_HTTP_SDCARD_EXAMPLES) $(RPI3_HTTP_SDCARD_RTOS_EXAMPLES)
 RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 # rtc/timer/preempt/watchdog need COMMON_RPI3_TIMER_ASM_O linked in
 # (read_cntfrq() and friends -- mrs cannot be called directly from

@@ -34,7 +34,7 @@ struct Holder {
     t: *Lease;
 }
 
-fn app_main() {
+fn test_field_lease() {
     let mut h: Holder;
     h.t = acquire();
     inspect(h.t);

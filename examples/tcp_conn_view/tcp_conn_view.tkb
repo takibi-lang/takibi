@@ -88,7 +88,7 @@ fn tcp_conn_drop(value: TcpConnDispatch) {
     }
 }
 
-fn app_main() {
+fn test_tcp_conn_view() {
     let c0 = tcp_conn_new();
     let c1 = tcp_conn_step(c0);
     let c2 = tcp_conn_step(c1);

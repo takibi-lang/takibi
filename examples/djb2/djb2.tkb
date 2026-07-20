@@ -9,7 +9,7 @@ fn djb2(s: *u8) u32 {
     return hash;
 }
 
-fn app_main() {
+fn test_djb2() {
     uart_puts("djb2(\"hello\"): ");
     uart_print_hex(djb2("hello") as i32);
     uart_puts("\r\n");
@@ -17,4 +17,3 @@ fn app_main() {
     uart_print_hex(djb2("world") as i32);
     uart_puts("\r\n");
 }
-

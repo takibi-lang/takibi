@@ -211,6 +211,11 @@ fixture. This removes seven ST-LINK loads without merging or duplicating the
 actual example sources. `start` stays standalone as the minimal runtime and
 platform-hook integration test.
 
+The follow-up added `type_system_suite` (18 cases) and `algorithm_suite` (14
+cases) using the same manifest/marker protocol. Across all three suites, 40
+logical cases now use three RAM images and three ST-LINK loads rather than 40;
+the individual expected-output checks and displayed results remain intact.
+
 **Files that turned out to need zero STM32-specific changes**: `examples/common/
 print.tkb`, `examples/common/sync.tkb`, `examples/common/inet_checksum.tkb`,
 `examples/common/netutil.tkb` are all pure takibi logic with no MMIO addresses --

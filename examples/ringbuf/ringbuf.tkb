@@ -22,7 +22,7 @@ fn rb_pop(rb: *RingBuf) -> i32 {
     return val;
 }
 
-fn app_main() {
+fn test_ringbuf() {
     let mut data: [i32; 4];
     let mut rb: RingBuf = {data, 0, 0, 0, 4};
 

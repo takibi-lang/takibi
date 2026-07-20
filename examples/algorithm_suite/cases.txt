@@ -1,0 +1,15 @@
+# UART marker name and unchanged per-example expected-output fixture.
+callstack examples/callstack/callstack.expected
+ringbuf examples/ringbuf/ringbuf.expected
+crc8 examples/crc8/crc8.expected
+djb2 examples/djb2/djb2.expected
+slice examples/slice/slice.expected
+foreach examples/foreach/foreach.expected
+for examples/for/for.expected
+loop examples/loop/loop.expected
+fizzbuzz examples/fizzbuzz/fizzbuzz.expected
+fibonacci examples/fibonacci/fibonacci.expected
+bubblesort examples/bubblesort/bubblesort.expected
+inet_checksum examples/inet_checksum/inet_checksum.expected
+ip_parse examples/ip_parse/ip_parse.expected
+tcp_parse examples/tcp_parse/tcp_parse.expected

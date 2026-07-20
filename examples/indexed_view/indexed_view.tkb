@@ -28,7 +28,7 @@ fn slot_publish(permission: sink SlotWrite[slot, 1],
     return indexed_view_slots[index];
 }
 
-fn app_main() {
+fn test_indexed_view() {
     let slot0 = slot_begin(0);
     let slot1 = slot_begin(1);
 

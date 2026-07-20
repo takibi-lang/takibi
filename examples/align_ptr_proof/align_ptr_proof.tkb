@@ -19,8 +19,8 @@
 // sdmmc.tkb/eth.tkb: whether to retrofit either onto *align(N) T is a
 // separate, later decision (Stage 2, deliberately not part of this pass).
 
-const SLOT_SIZE:  isize = 32;
-const SLOT_COUNT: isize = 4;
+const ALIGN_SLOT_SIZE:  isize = 32;
+const ALIGN_SLOT_COUNT: isize = 4;
 
 let mut bufs: [u8; 128] align(32);  // SLOT_COUNT * SLOT_SIZE bytes
 
@@ -32,16 +32,16 @@ fn read_slot(p: *align(32) u8) -> u8 {
     return p[0];
 }
 
-fn app_main() {
+fn test_align_ptr_proof() {
     let mut i: isize = 0;
-    while (i < SLOT_COUNT) {
-        touch_slot(bufs + i * SLOT_SIZE, (i as u8) + 10);
+    while (i < ALIGN_SLOT_COUNT) {
+        touch_slot(bufs + i * ALIGN_SLOT_SIZE, (i as u8) + 10);
         i = i + 1;
     }
 
     i = 0;
-    while (i < SLOT_COUNT) {
-        uart_print(read_slot(bufs + i * SLOT_SIZE));
+    while (i < ALIGN_SLOT_COUNT) {
+        uart_print(read_slot(bufs + i * ALIGN_SLOT_SIZE));
         uart_puts(" ");
         i = i + 1;
     }

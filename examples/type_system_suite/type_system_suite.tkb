@@ -1,0 +1,65 @@
+// Coarse-grained issue #93 suite. One platform startup/load/reset runs all
+// cases; the host checks every original fixture between stable UART markers.
+use "examples/nonexhaustive/nonexhaustive.tkb";
+use "examples/refined/refined.tkb";
+use "examples/narrow/narrow.tkb";
+use "examples/enum/enum.tkb";
+use "examples/align/align.tkb";
+use "examples/packed/packed.tkb";
+use "examples/struct_align/struct_align.tkb";
+use "examples/const_global/const_global.tkb";
+use "examples/sizeof_offsetof/sizeof_offsetof.tkb";
+use "examples/int64/int64.tkb";
+use "examples/bitops/bitops.tkb";
+use "examples/indexed_view/indexed_view.tkb";
+use "examples/tcp_conn_view/tcp_conn_view.tkb";
+use "examples/affine_escape_via_index/affine_escape_via_index.tkb";
+use "examples/align_ptr_proof/align_ptr_proof.tkb";
+use "examples/linear_obligation/linear_obligation.tkb";
+use "examples/tuple_pair/tuple_pair.tkb";
+use "examples/field_lease/field_lease.tkb";
+
+fn suite_marker(name: *u8) {
+    uart_puts("@@TAKIBI_TEST:");
+    uart_puts(name);
+    uart_puts("@@\n");
+}
+
+fn app_main() {
+    suite_marker("nonexhaustive");
+    test_nonexhaustive();
+    suite_marker("refined");
+    test_refined();
+    suite_marker("narrow");
+    test_narrow();
+    suite_marker("enum");
+    test_enum();
+    suite_marker("align");
+    test_align();
+    suite_marker("packed");
+    test_packed();
+    suite_marker("struct_align");
+    test_struct_align();
+    suite_marker("const_global");
+    test_const_global();
+    suite_marker("sizeof_offsetof");
+    test_sizeof_offsetof();
+    suite_marker("int64");
+    test_int64();
+    suite_marker("bitops");
+    test_bitops();
+    suite_marker("indexed_view");
+    test_indexed_view();
+    suite_marker("tcp_conn_view");
+    test_tcp_conn_view();
+    suite_marker("affine_escape_via_index");
+    test_affine_escape_via_index();
+    suite_marker("align_ptr_proof");
+    test_align_ptr_proof();
+    suite_marker("linear_obligation");
+    test_linear_obligation();
+    suite_marker("tuple_pair");
+    test_tuple_pair();
+    suite_marker("field_lease");
+    test_field_lease();
+}

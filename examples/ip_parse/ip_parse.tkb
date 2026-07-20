@@ -65,7 +65,7 @@ fn parse_ipv4(pkt: borrow [u8; 20..], len: i32) {
     }
 }
 
-fn app_main() {
+fn test_ip_parse() {
     // version/IHL, DSCP/ECN, total length, id, flags/fragoffset, TTL,
     // protocol, checksum, src IP, dst IP. Same bytes as
     // examples/inet_checksum/inet_checksum.tkb (already verified valid).
