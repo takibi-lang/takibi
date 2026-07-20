@@ -9723,3 +9723,32 @@ debugging, not a regression in this milestone's own code. Final clean run:
 `fat12_sdmmc.tkb`) and porting the fatfs-family examples themselves onto
 this block device, each verified on real hardware individually, before this
 milestone's own `--forbid-trap` hardening pass.
+
+Follow-up: `fatfs_sdcard`, the first of the fatfs-family examples, ported to
+Raspberry Pi 3B. New `examples/common_rpi3/fat12_usbmsc.tkb` mirrors
+`fat12_sdmmc.tkb`'s thin `mem_block_read`/`mem_block_write` adapter over
+`usb_msc.tkb`'s `disk_read`/`disk_write` (both directions `*align(32) u8`
+here, unlike STM32's asymmetric requirement -- see `usb_msc.tkb`'s own
+header comment). `examples/fatfs_sdcard/fatfs_sdcard.tkb` had its hardcoded
+`use "examples/common_stm32/fat12_sdmmc.tkb";` line removed and is now
+genuinely shared between both targets, each target's own Makefile rule
+putting its own adapter on the compile command line instead -- the same
+command-line-composition pattern `net_echo.tkb` and siblings already use
+for their target-specific HAL, chosen over forking the file per target.
+Real-hardware result: format, create `HELLO.TXT`, read it back, 20
+overwrite rounds, read back the latest content -- all pass, UART output
+byte-identical to STM32's own existing `fatfs_sdcard.expected` fixture,
+reused unchanged. Wired into `make hwcheck-rpi3` via the plain
+`run_hw_test_rpi3` (static fixture diff, unlike `usb_msc_probe`'s dynamic
+hex dump). 61/61 `make hwcheck-rpi3`, `make check` 134/134 unaffected.
+Real-hardware iteration in this same session also hit a handful of
+unrelated test failures with garbled/truncated output (echo/irq, and
+separately a wider batch earlier) -- every time traced to and resolved by
+`scripts/rpi3_jtag_reset.sh`, consistent with examples/common_rpi3/
+AGENTS.md's own documented stale-inherited-JTAG-state failure mode from an
+unusually large number of ad-hoc manual loads during debugging, not a
+regression in this milestone's own code; a clean `make hwcheck-rpi3`
+immediately after a reset passed 100% every time this was retried.
+Remaining fatfs-family work: `http_server_sdcard`/`http_server_sdcard_rtos`/
+`kvs_server_sdcard_rtos`/`rtos_fatfs_sdcard`, each ported and verified
+individually before this whole milestone's `--forbid-trap` hardening pass.

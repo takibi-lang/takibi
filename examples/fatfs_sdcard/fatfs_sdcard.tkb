@@ -24,15 +24,29 @@
 // current caller needing it (YAGNI) -- revisit if a real I/O failure ever
 // needs to surface as something other than a silently wrong read/write.
 //
-// STM32-only: there is no virtual SD controller in this project's QEMU
-// setup (no QEMU build for this example), matching examples/sdcard's own
-// no-QEMU status.
+// No QEMU build: there is no virtual SD/USB controller in this project's
+// QEMU setup, matching examples/sdcard's own no-QEMU status.
+//
+// Shared across STM32 and Raspberry Pi 3B (GitHub issue #145): unlike its
+// original STM32-only version, this file no longer `use`s a target-
+// specific storage adapter itself -- the Makefile puts
+// examples/common_stm32/fat12_sdmmc.tkb (real SDMMC1) or
+// examples/common_rpi3/fat12_usbmsc.tkb (real USB Mass Storage) on the
+// compile command line per target instead, the same command-line-
+// composition pattern examples/net_echo.tkb and siblings already use for
+// their own target-specific network HAL. Both adapters expose the exact
+// same mem_block_read/mem_block_write this file's `use "fat12.tkb"`
+// (pulled in transitively by whichever adapter is on the command line)
+// needs, so this file itself needed no other change to become shared.
 //
 // --forbid-trap enabled: this file, fat12.tkb, and sdmmc.tkb were first
 // written without --forbid-trap/refinement types, matching this project's
 // process for new .tkb work (see CLAUDE.md's "Development Process"
 // section), then hardened together in one pass once the fatfs+SD-card
-// milestone worked end to end on real hardware -- not piecemeal.
+// milestone worked end to end on real hardware -- not piecemeal. The
+// RPi3 port of this file reuses that same hardened source unchanged; its
+// own USB-storage HAL underneath is hardened separately, following the
+// same baseline-then-hardened-pass process for that milestone.
 //
 // Overwrite verification (GitHub issue #135's Part A prerequisite): the
 // original version of this file only ever created HELLO.TXT once.
@@ -46,7 +60,6 @@
 // not fail with the fix, and the final read-back proves the LATEST
 // write's content is what comes back, not a stale earlier one.
 
-use "examples/common_stm32/fat12_sdmmc.tkb";
 use "examples/common/netutil.tkb";
 
 fn app_main() {

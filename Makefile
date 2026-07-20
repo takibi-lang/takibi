@@ -855,14 +855,18 @@ examples/sdcard/sdcard_stm32.o: examples/sdcard/sdcard.tkb $(COMMON_STM32_UART) 
 
 # fatfs_sdcard: GitHub issue #98, wires fat12.tkb's FAT12 logic (issue #61)
 # onto sdmmc.tkb's real SD card driver (issue #62) -- see fatfs_sdcard.tkb's
-# own header comment. `use`s the shared fat12_sdmmc.tkb adapter, so only
-# uart+print need to be on the command line; the storage/FAT files are listed
-# here purely for Make's own staleness tracking. STM32-only, same reasoning
-# as sdcard (no virtual SD controller in this project's QEMU setup).
+# own header comment. Shared with Raspberry Pi 3B as of GitHub issue #145:
+# fatfs_sdcard.tkb no longer `use`s a target-specific adapter itself, so
+# COMMON_STM32_FAT12_SDMMC is now on the actual compile command line (it
+# transitively `use`s fat12.tkb + sdmmc.tkb itself, same reasoning
+# examples/net_echo.tkb's own target HAL command-line composition already
+# established) -- the other storage/FAT files are listed here purely for
+# Make's own staleness tracking. No QEMU build (no virtual SD/USB
+# controller in this project's QEMU setup, same reasoning as sdcard).
 # --forbid-trap enabled, same milestone-wide reason as examples/fatfs and
 # examples/sdcard.
 examples/fatfs_sdcard/fatfs_sdcard_stm32.o: examples/fatfs_sdcard/fatfs_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SDMMC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_FAT12_SDMMC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # http_server_sdcard: GitHub issue #97, combines http_server.tkb's TCP/IP +
 # HTTP state machine with fatfs_sdcard.tkb's real SD card access -- see
@@ -1446,7 +1450,25 @@ RPI3_MSC_OBJS     := $(foreach e,$(RPI3_MSC_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 $(RPI3_MSC_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
 
-RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES)
+# fatfs-family group (GitHub issue #145's own follow-on): shared example
+# sources (fatfs_sdcard.tkb today, more to follow) that `use` fat12.tkb
+# transitively through whichever storage adapter is on the command line --
+# see fatfs_sdcard.tkb's own header comment. COMMON_RPI3_FAT12_USBMSC
+# itself only `use`s fat12.tkb + usb_msc.tkb; usb_msc.tkb's own further
+# dependencies (mailbox/usb_dwc2/usb_hub) still need to be listed
+# explicitly, same as the plain RPI3_MSC_OBJS rule above. Same
+# not-yet-`--forbid-trap` reasoning as that group -- this shared example
+# source is already hardened (proven on STM32), but usb_msc.tkb
+# underneath is not yet, so the flag stays off for the whole build
+# command until this milestone's own later hardening pass.
+COMMON_RPI3_FAT12_USBMSC := $(COMMON_RPI3_DIR)/fat12_usbmsc.tkb
+RPI3_FATFS_EXAMPLES := fatfs_sdcard
+RPI3_FATFS_OBJS     := $(foreach e,$(RPI3_FATFS_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
+
+$(RPI3_FATFS_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
+
+RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES)
 RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 # rtc/timer/preempt/watchdog need COMMON_RPI3_TIMER_ASM_O linked in
 # (read_cntfrq() and friends -- mrs cannot be called directly from
@@ -1464,7 +1486,7 @@ RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf
 # COMMON_RPI3_CACHE_ASM_O; retired once mailbox.tkb/usb_dwc2.tkb moved
 # to the compiler's own dma_prepare_tx/dma_finish_rx builtins, GitHub
 # issue #146). Everything else uses the plain startup.o+mmu.o link line.
-RPI3_TIMER_ASM_KERNELS := $(foreach e,$(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
+RPI3_TIMER_ASM_KERNELS := $(foreach e,$(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 RPI3_SEM_KERNELS       := $(foreach e,$(RPI3_SCHED_SEM_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 RPI3_GENERIC_KERNELS   := $(filter-out $(RPI3_TIMER_ASM_KERNELS) $(RPI3_SEM_KERNELS),$(RPI3_KERNELS))
 

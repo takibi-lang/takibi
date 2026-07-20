@@ -360,6 +360,15 @@ run_hw_test_rpi3 "net_echo (rpi3)"       "$REPO_ROOT/examples/net_echo/kernel_rp
 # destroys whatever was previously on the drive every run, confirmed
 # acceptable for this project's own dedicated test drive.
 run_hw_test_rpi3_usb_msc "usb_msc_probe (rpi3)" "$REPO_ROOT/examples/usb_msc_probe/kernel_rpi3.elf" usb_msc_test.py
+# fatfs_sdcard (rpi3): GitHub issue #145's own follow-on -- fat12.tkb's
+# FAT12 logic wired onto the real USB Mass Storage drive via
+# examples/common_rpi3/fat12_usbmsc.tkb, byte-for-byte the same shared
+# fatfs_sdcard.tkb source STM32 already runs against its own real SD
+# card. Reuses STM32's own fatfs_sdcard.expected fixture unchanged --
+# confirmed byte-identical on real hardware, same as every other shared
+# example's fixture in this file. Destructive (formats the attached
+# drive), same acceptance as usb_msc_probe above.
+run_hw_test_rpi3 "fatfs_sdcard (rpi3)" "$REPO_ROOT/examples/fatfs_sdcard/kernel_rpi3.elf" "$REPO_ROOT/examples/fatfs_sdcard/fatfs_sdcard.expected" 15 40
 
 echo ""
 echo "rpi3 hardware tests: $PASS passed, $FAIL failed"

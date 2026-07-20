@@ -583,12 +583,43 @@ whichever `fatfs`-family examples end up wired to it) once that is
 proven working end to end, same process the Ethernet milestone's own
 history followed.
 
-**Remaining work**: wiring a `fat12_usbmsc.tkb` adapter (mirroring
-`examples/common_stm32/fat12_sdmmc.tkb`'s thin `mem_block_read`/
-`mem_block_write` shim) and porting the `fatfs`-family examples
-themselves (`fatfs`/`http_server_sdcard`/`http_server_sdcard_rtos`/
+**`fatfs_sdcard` ported (first of the `fatfs`-family examples).** New
+`examples/common_rpi3/fat12_usbmsc.tkb`: the thin `mem_block_read`/
+`mem_block_write` adapter over `usb_msc.tkb`'s `disk_read`/`disk_write`,
+mirroring `examples/common_stm32/fat12_sdmmc.tkb` exactly (both
+directions are `*align(32) u8` here, since this board's own
+`disk_write` needs it too, unlike STM32's -- see `usb_msc.tkb`'s header
+comment). `examples/fatfs_sdcard/fatfs_sdcard.tkb` itself is now
+genuinely shared between STM32 and this board: its old hardcoded
+`use "examples/common_stm32/fat12_sdmmc.tkb";` line is gone, and each
+target's `Makefile` rule puts its own adapter
+(`fat12_sdmmc.tkb`/`fat12_usbmsc.tkb`) on the compile command line
+instead -- the same command-line-composition pattern
+`examples/net_echo.tkb` and siblings already use for their own
+target-specific HAL, chosen over duplicating this file per target.
+Real-hardware result: format, create `HELLO.TXT`, read it back, 20
+overwrite rounds, read back the latest content -- all pass, and the
+captured UART output is byte-identical to STM32's own existing
+`fatfs_sdcard.expected` fixture, reused unchanged (same "every fixture
+here is reused byte-for-byte across targets" convention every other
+shared RPi3 example already follows). Wired into `make hwcheck-rpi3`
+via the plain `run_hw_test_rpi3` (a static fixture diff is enough here,
+unlike `usb_msc_probe`'s dynamic hex dump). 61/61 `make hwcheck-rpi3`,
+`make check` (134/134) unaffected. A handful of unrelated tests
+(`echo`/`irq`, and separately a wider batch earlier in this same
+session) flaked with truncated/garbled output at various points during
+this session's heavy back-to-back real-hardware iteration, every time
+resolved cleanly by `scripts/rpi3_jtag_reset.sh` -- consistent with this
+file's own documented "stale inherited state across repeated ad-hoc
+JTAG re-injection" failure mode (see the MMU/caches section), not a
+regression in this milestone's code; a full clean `make hwcheck-rpi3`
+run immediately after a reset has passed 100% each time this was
+retried.
+
+**Remaining work**: porting the rest of the `fatfs`-family examples
+(`http_server_sdcard`/`http_server_sdcard_rtos`/
 `kvs_server_sdcard_rtos`/`rtos_fatfs_sdcard`, RPi3-appropriate subset)
-onto this block device, each verified on real hardware individually per
+onto `fat12_usbmsc.tkb`, each verified on real hardware individually per
 this project's established incremental process, before this whole
 milestone's `--forbid-trap` hardening pass.
 

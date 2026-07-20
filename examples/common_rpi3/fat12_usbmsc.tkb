@@ -1,0 +1,29 @@
+// Shared FAT12-on-real-USB-Mass-Storage adapter for Raspberry Pi 3B
+// examples -- GitHub issue #145, the RPi3 counterpart of
+// examples/common_stm32/fat12_sdmmc.tkb.
+//
+// examples/common/fat12.tkb is deliberately backend-agnostic and reaches
+// storage only through mem_block_read/mem_block_write. Every RPi3 example
+// that mounts FAT12 on the real USB flash drive needs the same thin
+// adapter below, forwarding those calls to examples/common_rpi3/
+// usb_msc.tkb -- this board has no SD-card-shaped storage available to
+// fatfs (the one SD slot is reserved for the JTAG boot path, see
+// AGENTS.md's "Out of scope: SD-card-storage examples"), so USB mass
+// storage is this board's only fatfs backend.
+
+use "examples/common/fat12.tkb";
+use "examples/common_rpi3/usb_msc.tkb";
+
+// buf: *align(32) u8 for both directions -- unlike fat12_sdmmc.tkb (whose
+// mem_block_write only needs align(32) because fat12.tkb's own ABI
+// already requires it, while STM32's own disk_write itself would have
+// tolerated plain *u8), this board's disk_write ALSO requires align(32)
+// on its own (it goes through dwc2_bulk_out, see usb_msc.tkb's header
+// comment) -- fat12.tkb's buffers already satisfy this either way.
+fn mem_block_read(sector: u32, buf: *align(32) u8) {
+    disk_read(sector, buf);
+}
+
+fn mem_block_write(sector: u32, buf: *align(32) u8) {
+    disk_write(sector, buf);
+}
