@@ -118,9 +118,25 @@ fn hub_port_reset(hub_addr: u32, max_pkt: u32, port: u32) -> bool {
 }
 
 // hub_power_on_all_ports: SET_PORT_FEATURE(PORT_POWER) on every port,
-// then one shared settle wait -- 100ms, matching U-Boot's own
+// then one shared settle wait. Originally 100ms, matching U-Boot's own
 // "max(100ms, 2*bPwrOn2PwrGood)" floor without bothering to read the
-// hub's advertised bPwrOn2PwrGood (the floor dominates for this chip).
+// hub's advertised bPwrOn2PwrGood -- correct for the LAN9514's own
+// internal Ethernet function (port 1, always present, part of the same
+// chip), which every milestone through examples/common_rpi3/eth.tkb
+// verified fine at 100ms. GitHub issue #145's real-hardware bring-up
+// found this floor is NOT enough for an actual external device plugged
+// into one of the board's USB-A jacks (ports 2-5): a real flash drive's
+// own VBUS inrush/decoupling-capacitor settle time left
+// wPortStatus.CONNECTION still clear at 100ms and reliably set by 500ms
+// (confirmed by polling every 500ms up to 5s on real hardware -- 500ms
+// was already enough at the very first check in that sweep). This path
+// was never exercised by any earlier milestone (see AGENTS.md's own
+// note that the external ports were "assumed empty" through the
+// Ethernet-only milestones), so the original 100ms constant was never
+// actually validated against a real downstream device. 500ms keeps
+// generous headroom above the observed threshold, same philosophy as
+// this file's own hub_port_reset settle time and dwc2_host_port_reset's
+// extra recovery delay elsewhere in this directory.
 fn hub_power_on_all_ports(hub_addr: u32, max_pkt: u32, nports: u32) -> bool {
     let mut ok: bool = true;
     for i: u32 in 0..<nports {
@@ -129,6 +145,6 @@ fn hub_power_on_all_ports(hub_addr: u32, max_pkt: u32, nports: u32) -> bool {
             ok = false;
         }
     }
-    delay_ms(100);
+    delay_ms(500);
     return ok;
 }

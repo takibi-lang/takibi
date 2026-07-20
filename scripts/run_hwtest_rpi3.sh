@@ -224,6 +224,48 @@ run_hw_test_rpi3_stdin() {
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
 }
 
+# run_hw_test_rpi3_usb_msc NAME ELF SCRIPT
+#
+# GitHub issue #145's real USB Mass Storage driver (examples/usb_msc_probe)
+# -- same "no filesystem at this layer, verify a deterministic byte round
+# trip independently" principle as scripts/run_hwtest_ram.sh's own
+# run_hw_test_ram_sdcard (SCRIPT is scripts/usb_msc_test.py, the USB
+# counterpart of scripts/sdcard_test.py), adapted to this board's JTAG
+# loader instead of STM32's OpenOCD RAM load. Destroys whatever was
+# previously on the attached USB drive every run (confirmed acceptable
+# for this project's own dedicated test drive, same as sdcard's).
+run_hw_test_rpi3_usb_msc() {
+    local name="$1" elf="$2" script="$3"
+    local tmp_drain tmp_out load_log load_status_file load_status
+    tmp_drain=$(mktemp)
+    tmp_out=$(mktemp)
+    load_log=$(mktemp)
+    load_status_file=$(mktemp)
+
+    read_until_quiet "$tmp_drain" "$DRAIN_MAX_SECS" "$DRAIN_STABLE_POLLS" 0
+    read_until_quiet "$tmp_out" 20 140 1 \
+        "if \"$REPO_ROOT/scripts/rpi3_jtag_load.sh\" \"$elf\" > \"$load_log\" 2>&1; then load_status=0; else load_status=\$?; fi; echo \"\$load_status\" > \"$load_status_file\""
+
+    load_status=$(cat "$load_status_file" 2>/dev/null || echo 1)
+
+    if [ "$load_status" != "0" ]; then
+        printf "${RED}FAIL${RST}  %s  (JTAG injection failed -- loader log follows)\n" "$name"
+        sed 's/^/       /' "$load_log"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+        rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
+        exit 1
+    elif python3 "$(dirname "$0")/$script" "$tmp_out"; then
+        printf "${GRN}PASS${RST}  %s\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        printf "${RED}FAIL${RST}  %s\n" "$name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+    fi
+    rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
+}
+
 # Mirrors RPI3_EXAMPLES + RPI3_CHECKSUM_EXAMPLES + RPI3_IRQ_EXAMPLES +
 # RPI3_RTC_EXAMPLES + RPI3_SCHED_EXAMPLES in the Makefile -- see
 # examples/common_rpi3/AGENTS.md for what's still deliberately excluded
@@ -311,6 +353,13 @@ run_hw_test_rpi3 "usb_probe (rpi3)"      "$REPO_ROOT/examples/usb_probe/kernel_r
 # CAP_NET_RAW and this devcontainer's dedicated enp5s0 interface, not
 # just JTAG+UART.
 run_hw_test_rpi3 "net_echo (rpi3)"       "$REPO_ROOT/examples/net_echo/kernel_rpi3.elf"       "$REPO_ROOT/examples/net_echo/net_echo.expected"     20 140
+# usb_msc_probe (rpi3): GitHub issue #145 -- real USB Mass Storage Bulk-Only
+# Transport + SCSI-10 round trip against whatever drive is attached to the
+# board's USB-A ports. Uses the sdcard-style Python-checked dump instead of
+# a static .expected fixture (see run_hw_test_rpi3_usb_msc's own comment) --
+# destroys whatever was previously on the drive every run, confirmed
+# acceptable for this project's own dedicated test drive.
+run_hw_test_rpi3_usb_msc "usb_msc_probe (rpi3)" "$REPO_ROOT/examples/usb_msc_probe/kernel_rpi3.elf" usb_msc_test.py
 
 echo ""
 echo "rpi3 hardware tests: $PASS passed, $FAIL failed"

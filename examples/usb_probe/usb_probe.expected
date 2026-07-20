@@ -15,6 +15,9 @@ hub ports: 5
 hub port 1: connected
 hub port speed: high
 hub dev 2 vid:pid: 0x00000424:0x0000ec00
+hub port 5: connected
+hub port speed: high
+hub dev 3 vid:pid: 0x00000781:0x00005597
 eth configured: ok
 eth reset: ok
 eth id: 0x0000ec00

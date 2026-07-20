@@ -1,0 +1,456 @@
+// USB Mass Storage Bulk-Only Transport (BOT, USB Mass Storage Class Bulk-Only
+// Transport spec) + minimal SCSI-10 command set for BCM2837's DWC2 host
+// stack -- GitHub issue #145, the storage half of examples/common_rpi3/
+// AGENTS.md's "USB host stack" plan ("the remaining work is USB Mass
+// Storage Bulk-Only Transport, the minimal SCSI command set, and a
+// 512-byte block-device adapter"). No QEMU/simulation model exists for
+// this either, same as every other USB milestone in this directory --
+// verified directly on real hardware via examples/usb_msc_probe/
+// usb_msc_probe.tkb before being trusted.
+//
+// Exposes the exact same disk_initialize/disk_status/disk_read/disk_write
+// Media Access Interface examples/common_stm32/sdmmc.tkb already exposes,
+// so examples/sdcard/sdcard.tkb and a future examples/common_rpi3/
+// fat12_usbmsc.tkb (mirroring fat12_sdmmc.tkb) can reuse it with no
+// target-specific fork. One deliberate signature difference from
+// sdmmc.tkb: disk_write's buf is `*align(32) u8`, not plain `*u8` --
+// unlike STM32's DMA-based disk_write (a clean/writeback, tolerant of any
+// alignment), this driver's disk_write goes through dwc2_bulk_out, which
+// itself requires align(32) (GitHub issue #146's dma_prepare_tx/
+// dma_finish_rx builtins). examples/sdcard/sdcard.tkb's own write buffer
+// was widened to align(32) to satisfy this -- harmless for STM32 too,
+// since a stricter-aligned pointer trivially satisfies a plain `*u8`
+// parameter.
+//
+// Enumeration reuses the exact root-hub-port-walk examples/common_rpi3/
+// eth.tkb's net_init() already proved (mailbox -> DWC2 -> hub, all via
+// usb_dwc2.tkb/usb_hub.tkb unmodified) -- the only difference is WHICH
+// device this file looks for: any connected port whose device is NOT the
+// LAN9514's own fixed 0424:ec00 internal Ethernet function (always
+// present, see AGENTS.md), rather than that function specifically. This
+// finds a plain USB flash drive plugged into any of the board's external
+// USB-A jacks regardless of its vendor/product ID, without needing to
+// parse interface class/subclass/protocol to identify it as Mass
+// Storage -- YAGNI, since this project's real hardware setup only ever
+// has the one drive attached alongside the hub's own permanent Ethernet
+// function.
+//
+// This file reuses the SAME bulk-transfer machinery (dwc2_bulk_in/
+// dwc2_bulk_out, BULK_IN_CHANNEL/BULK_OUT_CHANNEL, and the module-global
+// toggle/endpoint/device-address state in usb_dwc2.tkb) eth.tkb's
+// Ethernet path already uses. Safe because no example in this project
+// needs Ethernet and USB mass storage active at the same time; a future
+// example that did would need usb_dwc2.tkb's single-device bulk state
+// generalized to more than one concurrently-bound device first.
+//
+// New .tkb work process (root AGENTS.md): written and verified first
+// WITHOUT --forbid-trap, matching examples/usb_msc_probe/
+// usb_msc_probe.tkb's own Makefile group -- hardening is a later,
+// separate pass across this whole milestone once it works end to end,
+// same as the Ethernet milestone's own history.
+
+// -- USB Mass Storage class requests (interface recipient) ------------------
+const MSC_RT_RESET:   u8 = 0x21; // host-to-device | class | interface
+const MSC_RT_GET_LUN: u8 = 0xA1; // device-to-host | class | interface
+const MSC_REQ_RESET:   u8 = 0xFF; // Bulk-Only Mass Storage Reset
+const MSC_REQ_GET_LUN: u8 = 0xFE; // Get Max LUN
+
+// -- Bulk-Only Transport CBW/CSW ----------------------------------------------
+const MSC_CBW_SIG: u32 = 0x43425355; // "USBC"
+const MSC_CSW_SIG: u32 = 0x53425355; // "USBS"
+const MSC_CBW_LEN: u32 = 31;
+const MSC_CSW_LEN: u32 = 13;
+
+const MSC_DIR_IN:  u8 = 0x80;
+const MSC_DIR_OUT: u8 = 0x00;
+
+// -- SCSI-10 command opcodes this driver needs -------------------------------
+const SCSI_TEST_UNIT_READY: u8 = 0x00;
+const SCSI_INQUIRY:         u8 = 0x12;
+const SCSI_READ_CAPACITY10: u8 = 0x25;
+const SCSI_READ10:          u8 = 0x28;
+const SCSI_WRITE10:         u8 = 0x2A;
+
+let mut msc_dev_addr:  u32 = 0;
+let mut msc_max_pkt:   u32 = 64;
+let mut msc_iface_num: u32 = 0;
+let mut msc_ready:     i32 = 0; // 0 = not initialized, 1 = ready (module state)
+let mut msc_tag:       u32 = 1;
+let mut msc_last_dcsw_status: u8 = 0xFF;
+// Last checkpoint disk_initialize() reached before returning -1 --
+// examples/usb_msc_probe/usb_msc_probe.tkb reads this after a failed
+// disk_initialize() to report WHICH stage broke, the same diagnostic
+// need dwc2_debug_last_status() already serves for control transfers.
+// 0 = not started; see disk_initialize's own body for what each value
+// means.
+let mut msc_init_stage: i32 = 0;
+
+fn msc_debug_last_stage() -> i32 {
+    return msc_init_stage;
+}
+
+let mut msc_cbw_buf:  [u8; 31] align(64);
+let mut msc_csw_buf:  [u8; 13] align(64);
+// Scratch data-stage buffer for INQUIRY (36 bytes) / READ CAPACITY(10)
+// (8 bytes) responses -- kept separate from usb_dwc2.tkb's ctrl_data_buf
+// (control-transfer-only, used during enumeration) since these two
+// commands' data stage travels over the BULK endpoints, not ep0.
+let mut msc_data_buf: [u8; 36] align(64);
+
+fn msc_last_status() -> u8 {
+    return msc_last_dcsw_status;
+}
+
+fn msc_zero_cbw_cdb() {
+    for i: usize in 15..<31 {
+        msc_cbw_buf[i] = 0;
+    }
+}
+
+// Fills the fixed 15-byte CBW header (dCBWSignature/dCBWTag/
+// dCBWDataTransferLength/bmCBWFlags/bCBWLUN/bCBWCBLength) and zeroes the
+// 16-byte CDB region; callers fill in the CDB's own opcode/fields at
+// msc_cbw_buf[15..] afterward. bCBWLUN is always 0 -- this project's own
+// single-drive scope (see this file's header comment), matching how
+// examples/common_stm32/sdmmc.tkb's Media Access Interface has no `pdrv`
+// parameter either.
+fn msc_cbw_header(data_len: u32, flags: u8, cb_len: u8) {
+    msc_tag = msc_tag + 1;
+    let tag: u32 = msc_tag;
+    msc_cbw_buf[0] = (MSC_CBW_SIG & 0xFF) as u8;
+    msc_cbw_buf[1] = ((MSC_CBW_SIG >> 8) & 0xFF) as u8;
+    msc_cbw_buf[2] = ((MSC_CBW_SIG >> 16) & 0xFF) as u8;
+    msc_cbw_buf[3] = ((MSC_CBW_SIG >> 24) & 0xFF) as u8;
+    msc_cbw_buf[4] = (tag & 0xFF) as u8;
+    msc_cbw_buf[5] = ((tag >> 8) & 0xFF) as u8;
+    msc_cbw_buf[6] = ((tag >> 16) & 0xFF) as u8;
+    msc_cbw_buf[7] = ((tag >> 24) & 0xFF) as u8;
+    msc_cbw_buf[8]  = (data_len & 0xFF) as u8;
+    msc_cbw_buf[9]  = ((data_len >> 8) & 0xFF) as u8;
+    msc_cbw_buf[10] = ((data_len >> 16) & 0xFF) as u8;
+    msc_cbw_buf[11] = ((data_len >> 24) & 0xFF) as u8;
+    msc_cbw_buf[12] = flags;
+    msc_cbw_buf[13] = 0; // bCBWLUN
+    msc_cbw_buf[14] = cb_len;
+    msc_zero_cbw_cdb();
+}
+
+// READ(10)/WRITE(10) share the same CDB shape: opcode | flags(0) |
+// LBA(4, big-endian) | group number(0) | transfer length(2, big-endian) |
+// control(0). Transfer length is always 1 (block) -- this driver's own
+// single-512-byte-block-per-call contract, matching sdmmc.tkb's disk_read/
+// disk_write exactly.
+fn msc_scsi_lba_cdb(op: u8, lba: u32) {
+    msc_cbw_buf[15] = op;
+    msc_cbw_buf[17] = ((lba >> 24) & 0xFF) as u8;
+    msc_cbw_buf[18] = ((lba >> 16) & 0xFF) as u8;
+    msc_cbw_buf[19] = ((lba >> 8) & 0xFF) as u8;
+    msc_cbw_buf[20] = (lba & 0xFF) as u8;
+    msc_cbw_buf[23] = 1; // transfer length low byte = 1 block
+}
+
+fn msc_send_cbw() -> bool {
+    return dwc2_bulk_out(msc_dev_addr, msc_cbw_buf, MSC_CBW_LEN);
+}
+
+// Reads the 13-byte CSW and validates dCSWSignature + dCSWTag (must match
+// the CBW just sent) before trusting dCSWStatus. Returns true only when
+// the transport itself succeeded AND the command passed (status 0).
+fn msc_read_csw() -> bool {
+    if (dwc2_bulk_in(msc_dev_addr, msc_csw_buf, MSC_CSW_LEN) == false) {
+        return false;
+    }
+    let sig: u32 = (msc_csw_buf[0] as u32) | ((msc_csw_buf[1] as u32) << 8)
+                 | ((msc_csw_buf[2] as u32) << 16) | ((msc_csw_buf[3] as u32) << 24);
+    if (sig != MSC_CSW_SIG) {
+        return false;
+    }
+    let tag: u32 = (msc_csw_buf[4] as u32) | ((msc_csw_buf[5] as u32) << 8)
+                 | ((msc_csw_buf[6] as u32) << 16) | ((msc_csw_buf[7] as u32) << 24);
+    if (tag != msc_tag) {
+        return false;
+    }
+    msc_last_dcsw_status = msc_csw_buf[12];
+    return msc_last_dcsw_status == 0;
+}
+
+// Bulk-Only Mass Storage Reset (class request, interface recipient, no
+// data stage). Used once during disk_initialize as a JTAG-re-injection-
+// style "explicit override of inherited device state" (same reasoning
+// usb_dwc2.tkb/eth.tkb already apply throughout this directory) -- not
+// every device requires it, so a failure here is not fatal; SET_
+// CONFIGURATION already resets both endpoints' data toggles on the
+// device side per USB 2.0 spec 9.1.1.5, which is the part this driver's
+// own correctness actually depends on.
+fn msc_bulk_only_reset() -> bool {
+    return dwc2_control_transfer(msc_dev_addr, msc_max_pkt, MSC_RT_RESET,
+                                  MSC_REQ_RESET, 0, msc_iface_num as u16,
+                                  ctrl_data_buf, 0);
+}
+
+// Get Max LUN -- informational only, this driver always addresses LUN 0
+// regardless of the result (YAGNI: a single external USB flash drive
+// never exposes more than one LUN). Many single-LUN devices STALL this
+// request entirely rather than answering 0; a failure here is treated the
+// same as "0 LUNs beyond the first", matching how U-Boot/Linux both
+// fall back to LUN 0 on this exact STALL.
+fn msc_get_max_lun() -> u32 {
+    if (dwc2_control_transfer(msc_dev_addr, msc_max_pkt, MSC_RT_GET_LUN,
+                               MSC_REQ_GET_LUN, 0, msc_iface_num as u16,
+                               ctrl_data_buf, 1) == false) {
+        return 0;
+    }
+    return ctrl_data_buf[0] as u32;
+}
+
+fn msc_test_unit_ready() -> bool {
+    msc_cbw_header(0, MSC_DIR_IN, 6);
+    msc_cbw_buf[15] = SCSI_TEST_UNIT_READY;
+    if (msc_send_cbw() == false) {
+        return false;
+    }
+    return msc_read_csw();
+}
+
+// Real devices commonly report NOT READY / UNIT ATTENTION for a moment
+// right after being configured -- bounded retry with a short settle
+// delay, matching every reference driver's own TEST UNIT READY handling
+// (and this project's own bounded-poll convention, e.g. sdmmc.tkb's
+// sd_wait_not_busy).
+fn msc_wait_ready() -> bool {
+    for tries: i32 in 0..<10 {
+        if (msc_test_unit_ready()) {
+            return true;
+        }
+        delay_ms(100);
+    }
+    return false;
+}
+
+fn msc_inquiry() -> bool {
+    msc_cbw_header(36, MSC_DIR_IN, 6);
+    msc_cbw_buf[15] = SCSI_INQUIRY;
+    msc_cbw_buf[19] = 36; // allocation length
+    if (msc_send_cbw() == false) {
+        return false;
+    }
+    if (dwc2_bulk_in(msc_dev_addr, msc_data_buf, 36) == false) {
+        return false;
+    }
+    return msc_read_csw();
+}
+
+// Byte i of the last successful msc_inquiry() response -- bytes 8..15 are
+// the 8-byte ASCII Vendor ID, 16..31 the 16-byte ASCII Product ID (SPC
+// INQUIRY standard data layout).
+fn msc_inquiry_byte(i: usize) -> u8 {
+    if (i < 36) {
+        return msc_data_buf[i];
+    }
+    return 0;
+}
+
+fn msc_read_capacity10() -> bool {
+    msc_cbw_header(8, MSC_DIR_IN, 10);
+    msc_cbw_buf[15] = SCSI_READ_CAPACITY10;
+    if (msc_send_cbw() == false) {
+        return false;
+    }
+    if (dwc2_bulk_in(msc_dev_addr, msc_data_buf, 8) == false) {
+        return false;
+    }
+    return msc_read_csw();
+}
+
+// Last successful msc_read_capacity10()'s reported LAST addressable LBA
+// (total block count is this + 1) and block size in bytes, both
+// big-endian per SCSI.
+fn msc_capacity_last_lba() -> u32 {
+    return ((msc_data_buf[0] as u32) << 24) | ((msc_data_buf[1] as u32) << 16)
+         | ((msc_data_buf[2] as u32) << 8) | (msc_data_buf[3] as u32);
+}
+fn msc_capacity_block_size() -> u32 {
+    return ((msc_data_buf[4] as u32) << 24) | ((msc_data_buf[5] as u32) << 16)
+         | ((msc_data_buf[6] as u32) << 8) | (msc_data_buf[7] as u32);
+}
+
+// -- Media Access Interface (matches examples/common_stm32/sdmmc.tkb) -------
+
+// disk_initialize: mailbox power-on -> DWC2 core/port bring-up -> root hub
+// enumeration -> walk hub ports for the first non-Ethernet-function
+// device -> configure it -> Bulk-Only Transport bring-up -> confirm the
+// unit is ready and reports 512-byte blocks (this project's own fixed
+// block size, matching fat12.tkb's hardcoded sector size throughout).
+fn disk_initialize() -> i32 {
+    msc_init_stage = 0;
+    if (mbox_power_on_usb() == false) {
+        return -1;
+    }
+    msc_init_stage = 1; // mailbox power-on ok
+    if (dwc2_soft_reset() == false) {
+        return -1;
+    }
+    dwc2_core_init();
+    if (dwc2_flush_fifos() == false) {
+        return -1;
+    }
+    msc_init_stage = 2; // dwc2 core/reset/fifo ok
+    dwc2_host_port_power_on();
+
+    let mut connected: bool = false;
+    for i: i32 in 0..<1000000 {
+        if (dwc2_host_port_connected()) {
+            connected = true;
+            break;
+        }
+    }
+    if (connected == false) {
+        return -1;
+    }
+    msc_init_stage = 3; // root port connected
+    dwc2_host_port_reset();
+
+    if (dwc2_get_device_descriptor(0, 8, 8) == false) {
+        return -1;
+    }
+    let hub_mp0: u8 = dwc2_device_descriptor_max_packet0();
+    if (dwc2_set_address(1, 8) == false) {
+        return -1;
+    }
+    if (dwc2_get_device_descriptor(1, hub_mp0 as u32, 18) == false) {
+        return -1;
+    }
+    let hub_mp: u32 = hub_mp0 as u32;
+    if (dwc2_set_configuration(1, hub_mp, 1) == false) {
+        return -1;
+    }
+    msc_init_stage = 4; // hub (root device) enumerated + configured
+
+    let nports: u32 = hub_read_nports(1, hub_mp);
+    if (nports == 0) {
+        return -1;
+    }
+    hub_power_on_all_ports(1, hub_mp, nports);
+    msc_init_stage = 5; // hub ports read + powered
+
+    let mut found_addr: u32 = 0;
+    let mut found_mp: u32 = 64;
+    let mut next_addr: u32 = 2;
+    for i: u32 in 0..<nports {
+        let port: u32 = i + 1;
+        let status: u32 = hub_port_status(1, hub_mp, port);
+        if ((status & HUB_PORT_STAT_CONNECTION) != 0) {
+            if (hub_port_reset(1, hub_mp, port)) {
+                if (dwc2_get_device_descriptor(0, 8, 8)) {
+                    let dmp: u32 = dwc2_device_descriptor_max_packet0() as u32;
+                    if (dwc2_set_address(next_addr, 8)) {
+                        if (dwc2_get_device_descriptor(next_addr, dmp, 18)) {
+                            let is_eth: bool = dwc2_device_descriptor_vendor_id() == 0x0424
+                                            && dwc2_device_descriptor_product_id() == 0xEC00;
+                            if (is_eth == false) {
+                                if (found_addr == 0) {
+                                    found_addr = next_addr;
+                                    found_mp = dmp;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            next_addr = next_addr + 1;
+        }
+    }
+    if (found_addr == 0) {
+        return -1;
+    }
+    msc_init_stage = 6; // candidate (non-Ethernet) device found on some port
+
+    if (dwc2_set_configuration(found_addr, found_mp, 1) == false) {
+        return -1;
+    }
+    if (dwc2_get_config_descriptor(found_addr, found_mp, 9) == false) {
+        return -1;
+    }
+    let total_len: u32 = dwc2_config_descriptor_total_length();
+    let fetch_len: u32 = min(total_len as i32, 64) as u32;
+    if (dwc2_get_config_descriptor(found_addr, found_mp, fetch_len) == false) {
+        return -1;
+    }
+    dwc2_find_bulk_endpoints(fetch_len);
+    if (dwc2_bulk_in_ep == 0) {
+        return -1;
+    }
+    if (dwc2_bulk_out_ep == 0) {
+        return -1;
+    }
+    dwc2_bulk_reset_toggles(found_addr, found_mp);
+
+    msc_dev_addr = found_addr;
+    msc_max_pkt = found_mp;
+    msc_iface_num = dwc2_config_interface_number();
+    msc_init_stage = 7; // MSC device configured + bulk endpoints found
+
+    msc_bulk_only_reset(); // best-effort, see this function's own comment
+    msc_get_max_lun();     // informational only
+
+    if (msc_wait_ready() == false) {
+        return -1;
+    }
+    msc_init_stage = 8; // TEST UNIT READY ok
+    if (msc_read_capacity10() == false) {
+        return -1;
+    }
+    if (msc_capacity_block_size() != 512) {
+        return -1; // this project's whole storage stack assumes 512-byte blocks
+    }
+    msc_init_stage = 9; // READ CAPACITY ok, 512-byte blocks confirmed
+
+    msc_ready = 1;
+    msc_init_stage = 10; // fully ready
+    return 0;
+}
+
+fn disk_status() -> i32 {
+    if (msc_ready == 1) {
+        return 0;
+    }
+    return -1;
+}
+
+fn disk_read(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
+    if (disk_status() != 0) {
+        return -1;
+    }
+    msc_cbw_header(512, MSC_DIR_IN, 10);
+    msc_scsi_lba_cdb(SCSI_READ10, sector);
+    if (msc_send_cbw() == false) {
+        return -1;
+    }
+    if (dwc2_bulk_in(msc_dev_addr, buf, 512) == false) {
+        return -1;
+    }
+    if (msc_read_csw() == false) {
+        return -1;
+    }
+    return 0;
+}
+
+// buf is `*align(32) u8`, not plain `*u8` -- see this file's header
+// comment for why this differs from sdmmc.tkb's disk_write.
+fn disk_write(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
+    if (disk_status() != 0) {
+        return -1;
+    }
+    msc_cbw_header(512, MSC_DIR_OUT, 10);
+    msc_scsi_lba_cdb(SCSI_WRITE10, sector);
+    if (msc_send_cbw() == false) {
+        return -1;
+    }
+    if (dwc2_bulk_out(msc_dev_addr, buf, 512) == false) {
+        return -1;
+    }
+    if (msc_read_csw() == false) {
+        return -1;
+    }
+    return 0;
+}

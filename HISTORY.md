@@ -9647,3 +9647,79 @@ rather than left as duplicate rules). Real-hardware result: `make
 hwcheck-rpi3` (58/58) and `make hwcheck-rpi3-net` (6/6, including the maximum
 1486-byte payload and the full tcp_echo/http_server/kvs_server suite) both
 pass unchanged.
+
+GitHub issue #145: USB Mass Storage Bulk-Only Transport (BOT) + minimal
+SCSI-10 + a 512-byte block-device adapter for Raspberry Pi 3B, the
+deliberate follow-on the Ethernet milestone (issue #140) always pointed at
+(the board's one SD card slot stays reserved for boot, so `fatfs`-family
+testing on this board needs USB mass storage instead -- see
+examples/common_rpi3/AGENTS.md's "Out of scope: SD-card-storage examples").
+New `examples/common_rpi3/usb_msc.tkb` reuses the Ethernet milestone's
+root-hub-port-walk unmodified (`usb_dwc2.tkb`/`usb_hub.tkb`), looking for
+any connected port whose device is NOT the LAN9514's own fixed `0424:ec00`
+Ethernet function rather than parsing MSC interface class/subclass/protocol
+-- YAGNI, this project's real hardware setup only ever has one external
+drive attached. `usb_dwc2.tkb`'s existing `dwc2_find_bulk_endpoints()`
+descriptor walk gained one addition (capturing the first interface
+descriptor's `bInterfaceNumber`, needed for MSC's interface-addressed class
+requests) reusing the same already-`--forbid-trap`-proven capacity-clamped
+walk rather than a second one. Exposes the same `disk_initialize`/
+`disk_status`/`disk_read`/`disk_write` Media Access Interface
+examples/common_stm32/sdmmc.tkb already exposes, with `disk_write`'s `buf`
+widened to `*align(32) u8` (unlike STM32's DMA-based disk_write, this one
+goes through `dwc2_bulk_out`, which itself requires align(32) per issue
+#146) -- examples/sdcard/sdcard.tkb's own write buffer was widened to match
+when it was later wired up for this board too.
+
+Real-hardware bring-up found one genuine, previously-unexercised bug:
+`usb_hub.tkb`'s `hub_power_on_all_ports()` used a 100ms post-power-on
+settle delay, correct for the LAN9514's own internal Ethernet function
+(instantly "connected", part of the same chip) but not enough for a real
+external device's own VBUS inrush/decoupling-capacitor settle time --
+confirmed by polling every 500ms up to 5s on real hardware: 100ms
+consistently left the port's CONNECTION bit clear, 500ms consistently had
+it set already at the first check. This exact code path (a real device on
+one of the external USB-A ports) had never been exercised by any earlier
+milestone, so the original 100ms constant was never actually validated
+against one. Fixed by raising the delay to 500ms. This also updated
+examples/usb_probe/usb_probe.expected: with a real device now permanently
+attached, usb_probe's own hub-port-walk legitimately reports a second
+enumerated device (a SanDisk USB drive, `0781:5597`) alongside the LAN9514
+Ethernet function it always reported.
+
+New `examples/usb_msc_probe/usb_msc_probe.tkb` (RPi3-only, no QEMU/STM32
+equivalent) writes a fixed deterministic pattern into four sectors and
+reads it back, plus prints Get Max LUN/INQUIRY/READ CAPACITY diagnostics
+and a `disk_initialize()` failure-stage checkpoint for real-hardware
+debugging -- the whole enumeration+BOT+SCSI stack was unproven-on-hardware
+code as of this milestone. Real-hardware result against a real SanDisk USB
+drive: INQUIRY reports `USB`/`SanDisk 3.2Gen1`, READ CAPACITY reports a
+512-byte block size, and all four test sectors round-trip correctly.
+New `scripts/usb_msc_test.py` (mirroring `scripts/sdcard_test.py`) checks
+the dumped bytes independently; wired into `make hwcheck-rpi3` via new
+`run_hw_test_rpi3_usb_msc` (`scripts/run_hwtest_rpi3.sh`), the JTAG-load
+counterpart of `scripts/run_hwtest_ram.sh`'s `run_hw_test_ram_sdcard`.
+Destroys whatever was previously on the attached drive every run (confirmed
+acceptable for this project's own dedicated test drive, same acceptance
+already recorded for examples/sdcard/sdcard.tkb's STM32 SD card).
+
+New `.tkb` work process (root AGENTS.md): `usb_msc.tkb`/`usb_msc_probe.tkb`
+were written and verified first WITHOUT `--forbid-trap` (their own
+`Makefile` group, `RPI3_MSC_TAKIBI_FLAGS`, deliberately separate from the
+shared `RPI3_TAKIBI_FLAGS`) -- hardening is a later, separate pass across
+this whole milestone (this driver plus whichever fatfs-family examples end
+up wired to it) once that is proven working end to end, same process the
+Ethernet milestone followed. A handful of unrelated RPi3 hardware tests
+(klock_guard/percpu/affine_escape_via_index/condvar/msgqueue/watchdog/
+rtos_demo/chan_rendezvous) failed with garbage-looking values partway
+through this session's real-hardware iteration, then passed cleanly after
+`scripts/rpi3_jtag_reset.sh` -- consistent with this directory's own
+documented "stale inherited state across repeated ad-hoc JTAG re-injection"
+failure mode (see the MMU/caches section), triggered by an unusually large
+number of manual, out-of-harness JTAG loads during this milestone's
+debugging, not a regression in this milestone's own code. Final clean run:
+`make hwcheck-rpi3` 60/60, `make hwcheck-rpi3-net` unaffected, `make check`
+134/134. Remaining work: a `fat12_usbmsc.tkb` adapter (mirroring
+`fat12_sdmmc.tkb`) and porting the fatfs-family examples themselves onto
+this block device, each verified on real hardware individually, before this
+milestone's own `--forbid-trap` hardening pass.

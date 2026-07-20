@@ -102,8 +102,10 @@ slot is already committed to holding `config.txt`/`kernel8.img` for the
 JTAG-catch boot path (see "Out of scope: SD-card-storage examples"
 below), so `fatfs`-family testing on this board will need USB mass
 storage instead of SD. The Ethernet half of the shared USB-host
-foundation is now complete; USB mass storage is the deliberate next
-storage milestone -- see "USB host stack (Ethernet milestone)" below.
+foundation is complete; the USB Mass Storage block device itself
+(GitHub issue #145) is now also complete and proven on real hardware
+-- see "USB Mass Storage (issue #145)" below. Porting the `fatfs`-family
+examples themselves onto it is the remaining follow-on work.
 
 ## Out of scope: SD-card-storage examples
 
@@ -463,6 +465,132 @@ the proven range through each `off + N` endpoint-field access. No raw
 pointer or `unsafe` bypass was introduced. A forced rebuild of every
 RPi3 kernel succeeds under `--forbid-trap`; the full six-example network
 hardware suite also passes unchanged.
+
+## USB Mass Storage (issue #145)
+
+The deliberate follow-on the "USB host stack" section above always
+pointed at: USB Mass Storage Bulk-Only Transport (BOT) + the minimal
+SCSI-10 command set + a 512-byte block-device adapter, so `fatfs`-family
+examples can use a real USB flash drive as their block storage on this
+board (the SD card slot stays reserved for boot, see "Out of scope:
+SD-card-storage examples" above). New files: `examples/common_rpi3/
+usb_msc.tkb` (the driver) and `examples/usb_msc_probe/usb_msc_probe.tkb`
+(RPi3-only diagnostic, no QEMU/STM32 equivalent, same reasoning as
+`usb_probe`). No QEMU/simulation model exists for this either -- verified
+directly on real hardware, same as every other USB milestone in this
+directory.
+
+**Enumeration reuses the Ethernet milestone's root-hub-port-walk
+unmodified** (`usb_dwc2.tkb`/`usb_hub.tkb`, no changes needed beyond one
+addition below) -- the only difference is WHICH device `usb_msc.tkb`
+looks for: any connected port whose device is NOT the LAN9514's own
+fixed `0424:ec00` internal Ethernet function, rather than that function
+specifically. This finds a plain USB flash drive on any of the board's
+four external USB-A jacks regardless of its vendor/product ID, without
+needing to parse interface class/subclass/protocol -- YAGNI, since this
+project's real hardware setup only ever has the one drive attached
+alongside the hub's own permanent Ethernet function. `usb_dwc2.tkb`
+gained one small addition to its existing `dwc2_find_bulk_endpoints()`
+descriptor walk: capturing the first INTERFACE descriptor's
+`bInterfaceNumber` (`dwc2_config_interface_number()`), needed because
+Mass Storage's class requests (Get Max LUN, Bulk-Only Mass Storage
+Reset) are addressed to an interface, not the device -- reusing the same
+already-proven, capacity-clamped walk loop rather than adding a second
+one, so no new `--forbid-trap` exposure was introduced in that
+already-hardened shared file.
+
+**Bulk-Only Transport + SCSI.** `usb_msc.tkb` builds the 31-byte CBW /
+reads the 13-byte CSW by hand (byte-level, matching this project's
+existing register-poking style elsewhere) and implements just the
+commands this project needs: TEST UNIT READY (with a bounded ready-retry
+loop, real devices commonly report not-ready for a moment right after
+being configured), INQUIRY (36 bytes, vendor/product ASCII), READ
+CAPACITY(10), and READ(10)/WRITE(10) at a fixed 1-block transfer length
+(this driver's own single-512-byte-block-per-call contract, matching
+`examples/common_stm32/sdmmc.tkb`'s `disk_read`/`disk_write` exactly).
+Get Max LUN and Bulk-Only Mass Storage Reset are both best-effort --
+many single-LUN devices STALL Get Max LUN entirely rather than
+answering 0, matching how U-Boot/Linux both just fall back to LUN 0 on
+that STALL; this driver always addresses LUN 0 regardless (YAGNI, a
+single external flash drive never exposes more than one). Reuses the
+SAME bulk-transfer machinery (`dwc2_bulk_in`/`dwc2_bulk_out`, the
+module-global toggle/endpoint/device-address state in `usb_dwc2.tkb`)
+`eth.tkb`'s Ethernet path already uses -- safe because no example in
+this project needs Ethernet and USB mass storage active at the same
+time.
+
+Exposes the same `disk_initialize`/`disk_status`/`disk_read`/
+`disk_write` Media Access Interface `examples/common_stm32/sdmmc.tkb`
+already exposes, with one deliberate signature difference: `disk_write`'s
+`buf` is `*align(32) u8`, not plain `*u8` -- unlike STM32's DMA-based
+`disk_write` (a clean/writeback, tolerant of any alignment), this
+driver's `disk_write` goes through `dwc2_bulk_out`, which itself
+requires `align(32)` (issue #146's `dma_prepare_tx`/`dma_finish_rx`
+builtins). `examples/sdcard/sdcard.tkb`'s own write buffer was widened
+to `align(32)` to satisfy this when it was later wired up for this
+board too (harmless for STM32, a stricter-aligned pointer trivially
+satisfies a plain `*u8` parameter).
+
+**Real-hardware bring-up found one genuine, previously-unexercised bug**:
+`usb_hub.tkb`'s `hub_power_on_all_ports()` used a 100ms settle delay
+after `SET_PORT_FEATURE(PORT_POWER)`, correct for the LAN9514's own
+internal Ethernet function (part of the same chip, always instantly
+"connected") but not enough for a real external device's own VBUS
+inrush/decoupling-capacitor settle time -- confirmed by polling every
+500ms up to 5s on real hardware: 100ms consistently left
+`wPortStatus.CONNECTION` clear, 500ms consistently had it set already at
+the very first check. This path was never exercised by any earlier
+milestone (the external ports were "assumed empty" through the
+Ethernet-only milestones -- see that section above), so the original
+100ms constant was never actually validated against a real downstream
+device. Fixed by raising the delay to 500ms, generous headroom above the
+observed threshold, matching this file's own `hub_port_reset` settle
+time and `dwc2_host_port_reset`'s own extra recovery delay elsewhere in
+this directory. This also updated `examples/usb_probe/usb_probe.expected`
+-- with a real device now permanently attached for this milestone's own
+testing, `usb_probe`'s own hub-port-walk legitimately reports a second
+enumerated device (`hub port 5: connected`, `0781:5597`, a SanDisk USB
+drive) alongside the LAN9514's Ethernet function it always reported.
+
+`examples/usb_msc_probe/usb_msc_probe.tkb` writes a fixed, deterministic
+byte pattern into four sectors and reads it back (same "byte round trip
+through the real hardware, checked independently" principle as
+`examples/sdcard/sdcard.tkb`'s own STM32 test, `scripts/usb_msc_test.py`
+mirroring `scripts/sdcard_test.py`), plus prints Get Max LUN/INQUIRY/READ
+CAPACITY diagnostics and a `disk_initialize()` failure-stage checkpoint
+(`msc_debug_last_stage()`) for real-hardware debugging -- the whole
+enumeration+BOT+SCSI stack was unproven-on-hardware code as of this
+milestone, unlike the Ethernet path's own consolidation into `eth.tkb`
+which could lean on `usb_probe.tkb`'s already-separately-proven earlier
+milestones. Real-hardware result against a real SanDisk USB drive:
+INQUIRY reports `USB`/`SanDisk 3.2Gen1`, READ CAPACITY reports a
+512-byte block size, and all four test sectors round-trip correctly.
+Destroys whatever was previously on the attached drive every run
+(confirmed acceptable for this project's own dedicated test drive, same
+acceptance already recorded for `examples/sdcard/sdcard.tkb`'s STM32 SD
+card). Wired into `make hwcheck-rpi3` via
+`run_hw_test_rpi3_usb_msc` (`scripts/run_hwtest_rpi3.sh`), the JTAG-load
+counterpart of `scripts/run_hwtest_ram.sh`'s `run_hw_test_ram_sdcard`.
+59/59 (now 60/60 with `usb_msc_probe` itself) `make hwcheck-rpi3`, `make
+hwcheck-rpi3-net` unaffected, `make check` (134/134) unaffected.
+
+New `.tkb` work process (root `AGENTS.md`): `usb_msc.tkb` and
+`usb_msc_probe.tkb` were written and verified first WITHOUT
+`--forbid-trap` (their own `Makefile` group, `RPI3_MSC_TAKIBI_FLAGS`,
+deliberately not using the shared `RPI3_TAKIBI_FLAGS`) -- hardening is a
+later, separate pass across this whole milestone (this driver plus
+whichever `fatfs`-family examples end up wired to it) once that is
+proven working end to end, same process the Ethernet milestone's own
+history followed.
+
+**Remaining work**: wiring a `fat12_usbmsc.tkb` adapter (mirroring
+`examples/common_stm32/fat12_sdmmc.tkb`'s thin `mem_block_read`/
+`mem_block_write` shim) and porting the `fatfs`-family examples
+themselves (`fatfs`/`http_server_sdcard`/`http_server_sdcard_rtos`/
+`kvs_server_sdcard_rtos`/`rtos_fatfs_sdcard`, RPi3-appropriate subset)
+onto this block device, each verified on real hardware individually per
+this project's established incremental process, before this whole
+milestone's `--forbid-trap` hardening pass.
 
 ## Hardware
 

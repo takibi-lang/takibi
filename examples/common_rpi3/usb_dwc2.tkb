@@ -584,10 +584,21 @@ let mut dwc2_bulk_in_ep:  u32 = 0;
 let mut dwc2_bulk_out_ep: u32 = 0;
 let mut dwc2_bulk_in_mp:  u32 = 512;
 let mut dwc2_bulk_out_mp: u32 = 512;
+// First INTERFACE descriptor's bInterfaceNumber (type 4, byte 2) seen
+// during the same walk -- GitHub issue #145's USB Mass Storage class
+// requests (Get Max LUN / Bulk-Only Mass Storage Reset) are addressed to
+// an interface, not the device, so this is needed alongside the bulk
+// endpoints already parsed here. Only the FIRST interface descriptor is
+// captured (YAGNI: every device this project enumerates, Ethernet or
+// mass storage, exposes exactly one function/interface).
+let mut dwc2_iface0_num: u32 = 0;
+let mut dwc2_iface0_found: bool = false;
 
 fn dwc2_find_bulk_endpoints(total_len: u32) {
     dwc2_bulk_in_ep = 0;
     dwc2_bulk_out_ep = 0;
+    dwc2_iface0_num = 0;
+    dwc2_iface0_found = false;
     let mut offset: usize = 0;
     let limit: usize = total_len as usize;
     for i: i32 in 0..<32 {
@@ -625,6 +636,15 @@ fn dwc2_find_bulk_endpoints(total_len: u32) {
                             }
                         }
                     }
+                } else {
+                    if (btype == 4) {
+                        if (dwc2_iface0_found == false) {
+                            if (off >= 0 && off < 62) {
+                                dwc2_iface0_num = ctrl_data_buf[off + 2] as u32;
+                                dwc2_iface0_found = true;
+                            }
+                        }
+                    }
                 }
                 offset = off + blen;
             } else {
@@ -634,6 +654,10 @@ fn dwc2_find_bulk_endpoints(total_len: u32) {
             break;
         }
     }
+}
+
+fn dwc2_config_interface_number() -> u32 {
+    return dwc2_iface0_num;
 }
 
 fn dwc2_device_descriptor_max_packet0() -> u8 {

@@ -1,0 +1,150 @@
+// Raspberry Pi 3B USB Mass Storage bring-up checkpoint (GitHub issue #145,
+// the storage follow-on to issue #140's Ethernet milestone -- see
+// examples/common_rpi3/AGENTS.md's "USB host stack" section and
+// examples/common_rpi3/usb_msc.tkb's own header comment for the full
+// design). RPi3-only, no QEMU/STM32 equivalent -- same reasoning as
+// examples/usb_probe (no simulation model for any of this hardware).
+//
+// Unlike usb_probe.tkb's own incremental one-milestone-at-a-time growth,
+// this checkpoint calls the already-consolidated examples/common_rpi3/
+// usb_msc.tkb driver directly (enumeration + Bulk-Only Transport + SCSI
+// are all new, unproven-on-real-hardware code as of this checkpoint, so
+// disk_initialize() records a msc_debug_last_stage() checkpoint the whole
+// way through -- see usb_msc.tkb's own comment on that field -- giving
+// the same step-by-step visibility usb_probe.tkb got from printing after
+// every individual call, without duplicating the enumeration/BOT logic
+// here too).
+//
+// Destructive: writes a fixed, deterministic byte pattern into a few
+// sectors of whatever USB drive is attached, then reads it back --
+// confirmed acceptable for this project's own test drive (same
+// "destroys whatever was previously on the card" acceptance already
+// documented for examples/sdcard/sdcard.tkb's own STM32 SD card test).
+
+const TEST_SECTORS: u32 = 4;
+
+fn pattern_byte(sector: u32, i: u32) -> u8 {
+    return ((sector + i) & 0xFF) as u8;
+}
+
+fn uart_print_byte_hex(b: u8) {
+    uart_print_hex_digit(((b >> 4) & 0xF) as i32);
+    uart_print_hex_digit((b & 0xF) as i32);
+}
+
+fn app_main() {
+    let mut init_ok: bool = false;
+    if (disk_initialize() == 0) {
+        uart_puts("disk_initialize: OK\r\n");
+        init_ok = true;
+    } else {
+        uart_puts("disk_initialize: FAIL\r\n");
+        uart_puts("msc init stage: ");
+        uart_print(msc_debug_last_stage());
+        uart_puts("\r\n");
+        uart_puts("dwc2 last status: ");
+        uart_print_hex(dwc2_debug_last_status() as i32);
+        uart_puts("\r\n");
+        uart_puts("msc last dcsw status: ");
+        uart_print_hex(msc_last_status() as i32);
+        uart_puts("\r\n");
+    }
+
+    if (init_ok) {
+        if (disk_status() == 0) {
+            uart_puts("disk_status: OK\r\n");
+        } else {
+            uart_puts("disk_status: FAIL\r\n");
+        }
+
+        uart_puts("msc max lun: ");
+        uart_print(msc_get_max_lun() as i32);
+        uart_puts("\r\n");
+
+        if (msc_inquiry()) {
+            uart_puts("msc inquiry vendor: ");
+            for i: usize in 8..<16 {
+                uart_putc(msc_inquiry_byte(i));
+            }
+            uart_puts("\r\n");
+            uart_puts("msc inquiry product: ");
+            for i: usize in 16..<32 {
+                uart_putc(msc_inquiry_byte(i));
+            }
+            uart_puts("\r\n");
+        } else {
+            uart_puts("msc inquiry: FAIL\r\n");
+        }
+
+        if (msc_read_capacity10()) {
+            uart_puts("msc last lba: ");
+            uart_print_hex(msc_capacity_last_lba() as i32);
+            uart_puts("\r\n");
+            uart_puts("msc block size: ");
+            uart_print(msc_capacity_block_size() as i32);
+            uart_puts("\r\n");
+        } else {
+            uart_puts("msc read capacity: FAIL\r\n");
+        }
+
+        let mut all_ok: bool = true;
+
+        for s: u32 in 0..<TEST_SECTORS {
+            let mut wbuf: [u8; 512] align(32);
+            for i: usize in 0..<512 {
+                wbuf[i] = pattern_byte(s, i as u32);
+            }
+            if (disk_write(s, wbuf) != 0) {
+                uart_puts("write sector ");
+                uart_print(s);
+                uart_puts(": FAIL dwc2_last=");
+                uart_print_hex(dwc2_debug_last_status() as i32);
+                uart_puts(" dcsw=");
+                uart_print_hex(msc_last_status() as i32);
+                uart_puts("\r\n");
+                all_ok = false;
+            }
+        }
+
+        for s: u32 in 0..<TEST_SECTORS {
+            let mut rbuf: [u8; 512] align(32);
+            if (disk_read(s, rbuf) == 0) {
+                let mut sector_ok: bool = true;
+                for i: usize in 0..<512 {
+                    if (rbuf[i] != pattern_byte(s, i as u32)) {
+                        sector_ok = false;
+                    }
+                }
+                uart_puts("sector ");
+                uart_print(s);
+                if (sector_ok) {
+                    uart_puts(": PASS\r\n");
+                } else {
+                    uart_puts(": MISMATCH\r\n");
+                    all_ok = false;
+                }
+                uart_puts("MSCDUMP:");
+                for i: usize in 0..<512 {
+                    uart_print_byte_hex(rbuf[i]);
+                }
+                uart_puts("\r\n");
+            } else {
+                uart_puts("read sector ");
+                uart_print(s);
+                uart_puts(": FAIL dwc2_last=");
+                uart_print_hex(dwc2_debug_last_status() as i32);
+                uart_puts(" dcsw=");
+                uart_print_hex(msc_last_status() as i32);
+                uart_puts("\r\n");
+                all_ok = false;
+            }
+        }
+
+        if (all_ok) {
+            uart_puts("usb_msc: ALL PASS\r\n");
+        } else {
+            uart_puts("usb_msc: FAIL\r\n");
+        }
+    }
+    uart_puts("done\r\n");
+}
