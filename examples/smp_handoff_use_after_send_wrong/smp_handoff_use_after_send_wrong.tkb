@@ -1,0 +1,21 @@
+// The sending core no longer owns the buffer authority after handoff.
+private linear struct BufferOwner[id: usize] {
+    private id: usize @ id;
+}
+
+fn buffer_owner_new() -> BufferOwner[0] {
+    let mut owner: BufferOwner[0] = { 0 };
+    return owner;
+}
+
+fn send_to_other_core(owner: sink BufferOwner[id]) {}
+
+fn buffer_read(owner: borrow BufferOwner[id]) -> u8 {
+    return 0;
+}
+
+fn app_main() {
+    let owner = buffer_owner_new();
+    send_to_other_core(owner);
+    let stale: u8 = buffer_read(owner);
+}

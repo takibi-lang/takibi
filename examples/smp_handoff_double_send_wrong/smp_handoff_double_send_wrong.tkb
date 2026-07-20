@@ -1,0 +1,17 @@
+// One owner token cannot authorize two concurrent handoffs.
+private linear struct BufferOwner[id: usize] {
+    private id: usize @ id;
+}
+
+fn buffer_owner_new() -> BufferOwner[0] {
+    let mut owner: BufferOwner[0] = { 0 };
+    return owner;
+}
+
+fn send_to_other_core(owner: sink BufferOwner[id]) {}
+
+fn app_main() {
+    let owner = buffer_owner_new();
+    send_to_other_core(owner);
+    send_to_other_core(owner);
+}

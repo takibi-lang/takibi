@@ -18,14 +18,21 @@ payload happened to make the core-1-to-core-0 trip, but core 1 never observed
 core 0's final mailbox acknowledgement.  `mmu_init` and
 `mmu_init_secondary` now set SMPEN before setting `SCTLR_EL2.C`.
 
-This example is intentionally outside `RPI3_EXAMPLES` and its global
-`--forbid-trap` switch for the first, unrefined baseline commit, following the
-repository-wide baseline-then-hardening rule.  The baseline passed on real
+The first, unrefined baseline was deliberately committed before enabling
+`--forbid-trap`, following the repository-wide baseline-then-hardening rule.
+The baseline passed on real
 hardware: the complete UART fixture matched, core 1 returned to 0x7c with its
 MMU and both caches disabled, and an immediately following ordinary
 single-core `hello` injection also passed.  The desk-side build is `make
 examples/smp_handoff/kernel_rpi3.elf`.  Its hardware test is wired into `make
 hwcheck-rpi3`; the runner sets `RPI3_SMP_CORES=2` only for this fixture.
+The subsequent hardening step enables `--forbid-trap` on its dedicated build
+rule and records two protocol-specific negative fixtures: use after send and
+double send are both rejected because the sending call consumes the linear
+owner.  The buffer accessor's private raw-pointer field-decay remains a
+documented trusted implementation detail because Takibi does not yet parse
+assignment through an array-valued struct field (`s.field[i] = v`); callers
+cannot obtain that pointer and must present the owner token.
 
 The ordinary JTAG loader continues to touch core 0 only.  With
 `RPI3_SMP_CORES=2`, it starts core 0 first, waits 200ms for page-table and BSS
@@ -41,10 +48,10 @@ known VA range with `dc ivac` before disabling the cache instead.
 
 Current scope is exactly two cores, one fixed SPSC owner slot, and one fixed
 buffer.  There is no generic core launcher, IPI layer, scheduler integration,
-allocator, or load balancing.  The next separate change enables
-`--forbid-trap` for this example and adds
-compile-error fixtures for use-after-send/double-send before issue #67's
-fixed page pool begins.
+allocator, or load balancing.  Missing synchronization is still a runtime
+protocol property rather than something the current ownership checker can
+express; that gap is an input to the later memory-model work.  Issue #67's
+fixed page pool is the next concrete milestone.
 
 GitHub issue #140. Status: 63 examples ported and passing `make
 hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level

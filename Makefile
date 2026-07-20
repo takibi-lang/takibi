@@ -1387,13 +1387,13 @@ RPI3_SCHED_OBJS         := $(foreach e,$(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_E
 $(RPI3_SCHED_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_TAKIBI_FLAGS) -o $@
 
-# First real SMP milestone (GitHub issue #6): intentionally compiled without
-# --forbid-trap until the working baseline passes on the Raspberry Pi 3B, per
-# the repository's baseline-then-hardening process.  The assembly shim gives
+# First real SMP milestone (GitHub issue #6).  Its working unrefined baseline
+# was committed before this dedicated rule gained --forbid-trap, preserving
+# the repository's baseline-then-hardening history.  The assembly shim gives
 # core 1 a dedicated entry/stack; sem_asm supplies the cross-core atomic mutex.
 examples/smp_handoff/smp_handoff_rpi3.o: examples/smp_handoff/smp_handoff.tkb \
     $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_SYNC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 # USB bring-up group (GitHub issue #140's Ethernet milestone -- see
 # examples/usb_probe/usb_probe.tkb's own header comment and
