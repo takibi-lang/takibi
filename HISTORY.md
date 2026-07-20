@@ -9962,3 +9962,12 @@ suite case left `0x2a` there, so `packed` now explicitly zeroes the padding
 through its byte view before checking the layout. The dedicated Fibonacci
 DWARF regression retains a tiny standalone wrapper while normal Fibonacci
 execution belongs to `algorithm_suite`.
+
+RPi3's redundant UART-only `net_echo` invocation was removed from
+`scripts/run_hwtest_rpi3.sh`. The real frame round-trip test remains in
+`scripts/run_hwtest_rpi3_net.sh`, matching STM32's current network-example
+placement. The ordinary RPi3 suite already runs `usb_probe`, whose expected
+UART transcript proves the same mailbox -> DWC2 -> hub -> LAN9514 -> PHY
+bring-up path reaches link-up, so running `net_echo` there repeated a reset,
+JTAG load, and `net_init()` without adding coverage. Historical entries above
+still describe the earlier incremental Ethernet bring-up accurately.

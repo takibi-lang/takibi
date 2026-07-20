@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Raspberry Pi 3B Ethernet hardware integration tests -- the network-
-# functional counterpart to scripts/run_hwtest_rpi3.sh's UART-only
-# net_echo check (which only proves net_init() succeeds, not that
-# frames actually round-trip). Mirrors scripts/run_hwtest_net_ram.sh's
-# STM32 shape (same reused scripts/eth_*_test.py raw-socket scripts,
+# Raspberry Pi 3B Ethernet hardware integration tests. Network examples
+# run only here, matching STM32's split: unlike the UART/JTAG-only suite,
+# these tests prove that frames actually round-trip over the physical
+# link. Mirrors scripts/run_hwtest_net_ram.sh's STM32 shape (same reused
+# scripts/eth_*_test.py raw-socket scripts,
 # same PASS/FAIL-by-exit-code judging), with two RPi3-specific
 # differences: examples/common_rpi3/AGENTS.md's own JTAG-injection load
 # path (scripts/rpi3_jtag_load.sh) instead of OpenOCD's RAM-load-and-

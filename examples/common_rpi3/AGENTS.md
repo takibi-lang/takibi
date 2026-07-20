@@ -115,6 +115,13 @@ uninitialized padding byte would be zero on a fresh stack. It now initializes
 that byte explicitly before inspecting the representation, so its result no
 longer depends on whether another test previously used the stack.
 
+The redundant UART-only `net_echo` invocation was subsequently removed from
+`make hwcheck-rpi3`. The complete frame round-trip test remains in
+`make hwcheck-rpi3-net`, matching STM32's current placement; `usb_probe` still
+provides the ordinary suite's UART-visible end-to-end USB/LAN9514/PHY bring-up
+coverage, so a second reset, JTAG load, and `net_init()` adds no distinct
+coverage there.
+
 **Ethernet and USB are required, not optional, for this board** (per
 the project owner, 2026-07-19) -- unlike STM32F746G-DISCOVERY's
 on-chip Ethernet MAC, BCM2837 has NO on-chip Ethernet at all; its
@@ -416,10 +423,9 @@ Two real bugs found via `examples/net_echo/net_echo.tkb` +
   now echoes all 6 payload sizes, including 1000 and the maximum 1486
   bytes.
 
-New `make hwcheck-rpi3-net` (`scripts/run_hwtest_rpi3_net.sh`) -- the
-network-functional counterpart to `hwcheck-rpi3`'s UART-only net_echo
-check (which only proves `net_init()` succeeds, not that frames
-round-trip), split out exactly the way `hwcheck-stm32`/
+New `make hwcheck-rpi3-net` (`scripts/run_hwtest_rpi3_net.sh`) -- originally
+the network-functional counterpart to `hwcheck-rpi3`'s UART-only net_echo
+bring-up check, split out exactly the way `hwcheck-stm32`/
 `hwcheck-stm32-net` already are and for the same reason (network tests
 need CAP_NET_RAW + a physical cable, not just JTAG+UART, so they stay
 out of `make check`/`make allcheck`). Mirrors `run_hwtest_net_ram.sh`'s
