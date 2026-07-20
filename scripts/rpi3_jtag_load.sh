@@ -53,11 +53,11 @@ echo "entry PC:    $entry_pc"
 echo "initial SP:  $stack_top"
 
 SMP_CORES="${RPI3_SMP_CORES:-0}"
-if [ "$SMP_CORES" != "0" ] && [ "$SMP_CORES" != "2" ]; then
-    echo "error: RPI3_SMP_CORES must be 0 or 2" >&2
+if [ "$SMP_CORES" != "0" ] && [ "$SMP_CORES" != "2" ] && [ "$SMP_CORES" != "4" ]; then
+    echo "error: RPI3_SMP_CORES must be 0, 2, or 4" >&2
     exit 1
 fi
-if [ "$SMP_CORES" = "2" ] && { [ -z "${smp_core1_stack_top#0x}" ] || [ -z "${smp_secondary_entry#0x}" ]; }; then
+if [ "$SMP_CORES" != "0" ] && { [ -z "${smp_core1_stack_top#0x}" ] || [ -z "${smp_secondary_entry#0x}" ]; }; then
     echo "error: SMP load requested but its core-1 entry/stack symbols are absent from $ELF" >&2
     exit 1
 fi
@@ -138,6 +138,24 @@ if [ "$SMP_CORES" = "2" ]; then
         -c "reg pc $smp_secondary_entry"
         -c 'resume'
     )
+fi
+if [ "$SMP_CORES" = "4" ]; then
+    LOAD_COMMANDS+=(-c 'sleep 200')
+    for core_id in 1 2 3; do
+        core_stack_symbol="smp_core${core_id}_stack_top"
+        core_stack="0x$(llvm-nm-19 "$ELF" | awk -v symbol="$core_stack_symbol" '$3==symbol{print $1}')"
+        if [ -z "${core_stack#0x}" ]; then
+            echo "error: SMP load requested but $core_stack_symbol is absent from $ELF" >&2
+            exit 1
+        fi
+        LOAD_COMMANDS+=(
+            -c "targets bcm2837.cpu$core_id"
+            -c 'halt'
+            -c "reg sp $core_stack"
+            -c "reg pc $smp_secondary_entry"
+            -c 'resume'
+        )
+    done
 fi
 LOAD_COMMANDS+=(-c 'shutdown')
 

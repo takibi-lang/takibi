@@ -32,6 +32,10 @@ SECTIONS {
     .stack (NOLOAD) : ALIGN(16) {
         . += 0x4000;
         smp_core1_stack_top = .;
+        . += 0x4000;
+        smp_core2_stack_top = .;
+        . += 0x4000;
+        smp_core3_stack_top = .;
         . += 0x10000;
         stack_top = .;
     }

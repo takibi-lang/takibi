@@ -382,7 +382,7 @@ run_hw_test_rpi3 "bump (rpi3)"           "$REPO_ROOT/examples/bump/kernel_rpi3.e
 run_hw_test_rpi3 "scheduler (rpi3)"      "$REPO_ROOT/examples/scheduler/kernel_rpi3.elf"      "$REPO_ROOT/examples/scheduler/scheduler.expected"
 run_hw_test_rpi3 "klock_guard (rpi3)"    "$REPO_ROOT/examples/klock_guard/kernel_rpi3.elf"    "$REPO_ROOT/examples/klock_guard/klock_guard.expected"
 run_hw_test_rpi3 "percpu (rpi3)"         "$REPO_ROOT/examples/percpu/kernel_rpi3.elf"         "$REPO_ROOT/examples/percpu/percpu.expected"
-RPI3_SMP_CORES=2 run_hw_test_rpi3 "smp_handoff (rpi3)" "$REPO_ROOT/examples/smp_handoff/kernel_rpi3.elf" "$REPO_ROOT/examples/smp_handoff/smp_handoff.expected" 5 30
+RPI3_SMP_CORES=4 run_hw_test_rpi3 "smp_handoff (rpi3)" "$REPO_ROOT/examples/smp_handoff/kernel_rpi3.elf" "$REPO_ROOT/examples/smp_handoff/smp_handoff.expected" 5 30
 run_hw_test_rpi3 "rtc (rpi3)"            "$REPO_ROOT/examples/rtc/kernel_rpi3.elf"            "$REPO_ROOT/examples/rtc/rtc.expected"       5 30
 run_hw_test_rpi3 "timer (rpi3)"          "$REPO_ROOT/examples/timer/kernel_rpi3.elf"          "$REPO_ROOT/examples/timer/timer.expected"   5 30
 run_hw_test_rpi3_stdin "echo (rpi3)" "$REPO_ROOT/examples/echo/kernel_rpi3.elf" \

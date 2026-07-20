@@ -93,7 +93,7 @@ fn mailbox_take(expected: i32) -> OwnerSlot {
     return result;
 }
 
-fn smp_secondary_main() {
+fn core1_main() {
     let received: OwnerSlot = mailbox_take(1);
     match received {
         OwnerSlot::Empty => {}
@@ -106,11 +106,14 @@ fn smp_secondary_main() {
                 interrupt_wait();
             }
             dma_consume();
+            while (true) {
+                interrupt_wait();
+            }
         }
     }
 }
 
-fn app_main() {
+fn core0_main() {
     mailbox_init();
     let owner = buffer_owner_new();
     for i: usize in 0..<BUFFER_LEN {
@@ -147,4 +150,24 @@ fn app_main() {
         }
     }
     uart_puts("done\n");
+}
+
+// Every core reaches this same Takibi policy entry.  Assembly supplies only
+// privileged setup and a private stack for cores 1-3; role selection and
+// deliberate parking live here instead of growing another startup path.
+fn smp_core_main() {
+    let id: usize = rpi3_core_id();
+    if (id == 0) {
+        core0_main();
+    } else if (id == 1) {
+        core1_main();
+    } else {
+        while (true) {
+            interrupt_wait();
+        }
+    }
+}
+
+fn app_main() {
+    smp_core_main();
 }
