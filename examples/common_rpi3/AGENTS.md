@@ -122,22 +122,10 @@ Confirmed facts, load-bearing for every milestone below:
 
 **DMA/cache-coherency decision**: this project's `dma_prepare_tx`/
 `dma_prepare_rx`/`dma_finish_rx` compiler builtins (`examples/
-common_stm32/eth.tkb`'s existing mechanism) lower to a bare `dsb sy` on
-AArch64 targets, with no real cache clean/invalidate -- harmless on
-QEMU (no cache model) but a genuine gap now that this board's D-cache
-is on (see "MMU and caches" above). Rather than extend the compiler or
-add a dedicated non-cacheable MMU region, `examples/common_rpi3/
-cache_asm.S` (new) adds small, explicit per-range stubs --
-`dcache_clean_range`/`dcache_invalidate_range`, VA-based `dc cvac`/`dc
-ivac` loops sized via `CTR_EL0.DminLine` -- the address-range-bounded
-counterpart of `startup.S`'s existing `dcache_invalidate_all` set/way
-sweep. Every DMA hand-off in this section (mailbox buffer, later USB
-descriptor rings) calls these explicitly.
-
-**Update (issue #146, after milestone 7): the compiler gap above is
-fixed for real.** `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` now
+common_stm32/eth.tkb`'s existing mechanism) now
 lower to a genuine `dc cvac`/`dc ivac` VA-range loop on AArch64 (same
-algorithm `cache_asm.S` used by hand, now in `lib/llvm_gen.ml` itself).
+algorithm the retired `cache_asm.S` used by hand, now in
+`lib/llvm_gen.ml` itself; issue #146).
 `mailbox.tkb`'s `mbox_call`/`usb_dwc2.tkb`'s `dwc2_control_transfer`/
 `dwc2_bulk_out`/`dwc2_bulk_in` were migrated to call the standard
 builtins directly (their pointer parameters widened to `*align(32) T`,
