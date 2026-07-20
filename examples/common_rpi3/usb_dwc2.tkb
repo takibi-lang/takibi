@@ -25,8 +25,7 @@
 // applied relative to 0x400, land exactly on the well-known DWC_otg
 // HCFG (0x400) / HPRT (0x440) / HCCHAR(0) (0x500) register addresses).
 
-extern fn read_cntfrq() -> i64;
-extern fn read_cntpct() -> i64;
+use "examples/common_rpi3/timer_asm_extern.tkb";
 
 const DWC2_CORE_BASE: usize = 0x3F980000;
 const DWC2_HOST_BASE: usize = 0x3F980400;
@@ -497,6 +496,11 @@ fn dwc2_control_transfer(dev_addr: u32, max_pkt: u32,
         let data_addr: usize = data as usize;
         if (is_in == false) {
             dma_prepare_tx(data, len as usize);
+        } else {
+            // Invalidate BEFORE the IN transfer too, not just after --
+            // see dwc2_bulk_in's own comment for the dirty-line-eviction
+            // corruption this prevents (issue #145).
+            dma_prepare_rx(data, len as usize);
         }
         if (dwc2_channel_transfer(CTRL_CHANNEL, dev_addr, 0, EP_TYPE_CONTROL,
                                    is_in, max_pkt, PID_DATA1, data_addr, len) == false) {
@@ -759,9 +763,29 @@ fn dwc2_bulk_out(dev_addr: u32, buf: *align(32) u8, len: u32) -> bool {
 // exactly like any other empty poll.
 //
 // `buf` is `*align(32) u8` for the same reason as dwc2_bulk_out above --
-// this function's only caller (eth.tkb's net_rx_wait) passes
-// eth_rx_buf, declared align(64).
+// callers pass eth_rx_buf (eth.tkb, declared align(64)) or usb_msc.tkb's
+// own buffers/fat12.tkb's align(32) sector buffers.
+//
+// dma_prepare_rx BEFORE the transfer is load-bearing, not optional
+// (GitHub issue #145): the CPU may hold DIRTY cache lines covering `buf`
+// (e.g. fat12.tkb's stack-allocated sector_buf, freshly written by an
+// earlier call at the same stack address), and a dirty line evicted
+// while the DWC2's DMA write is in flight -- or after it completes,
+// before dma_finish_rx runs -- writes stale CPU data back OVER the
+// DMA'd bytes in RAM. Found the hard way as rtos_fatfs_sdcard's
+// read-corruption on this board: the identical FAT12 code path was
+// proven correct when called from a flat app_main (fatfs_sdcard),
+// because busy-waiting in dwc2_channel_transfer touches almost no
+// memory and the dirty lines were simply never evicted mid-transfer --
+// under the RTOS the scheduler tick's IRQ entry + task switching run
+// DURING that busy-wait, generating exactly the cache pressure that
+// evicts them (which is also why the corruption was timing-flaky and
+// why the Ethernet path never hit this: eth_rx_buf is a dedicated
+// global the CPU never writes, so no dirty lines exist for it).
+// examples/common_stm32/sdmmc.tkb's disk_read has always done this same
+// prepare+finish pair, with the same reasoning in its own comments.
 fn dwc2_bulk_in(dev_addr: u32, buf: *align(32) u8, len: u32) -> bool {
+    dma_prepare_rx(buf, len as usize);
     let addr: usize = buf as usize;
     let ok: bool = dwc2_channel_transfer(BULK_IN_CHANNEL, dev_addr, dwc2_bulk_in_ep,
                                           EP_TYPE_BULK, true, dwc2_bulk_in_mp,

@@ -616,9 +616,54 @@ regression in this milestone's code; a full clean `make hwcheck-rpi3`
 run immediately after a reset has passed 100% each time this was
 retried.
 
+**`rtos_fatfs_sdcard` ported -- and it found a real driver bug.** The
+shared `rtos_fatfs_sdcard.tkb` source got the same de-STM32-ing
+treatment as `fatfs_sdcard.tkb` (target adapter moved to the compile
+command line), plus its own Makefile group combining the scheduler HAL
+(`timer.tkb`) with the USB HAL on one command line for the first time --
+which surfaced two latent problems, both fixed:
+
+1. **Duplicate `extern fn read_cntfrq` declarations.** `timer.tkb`,
+   `rtc.tkb`, and `usb_dwc2.tkb` each declared it locally (and
+   `timer.tkb`'s even had the wrong width, i32 vs the real i64 ABI --
+   harmless in isolation, cntfrq values fit in 32 bits); takibi rejects
+   a second `extern fn` of the same name even with a matching signature.
+   Factored into `examples/common_rpi3/timer_asm_extern.tkb`, `use`d by
+   all three -- same fix shape as `gic_regs.tkb`'s own split (issue #79
+   follow-up).
+2. **`dwc2_bulk_in` was missing `dma_prepare_rx` BEFORE the transfer**
+   (it only invalidated after, via `dma_finish_rx`). Dirty CPU cache
+   lines covering the destination buffer -- guaranteed when the buffer
+   is `fat12.tkb`'s stack-allocated `sector_buf`, freshly written by an
+   earlier call at the same stack address -- get evicted during/after
+   the DMA write and clobber the DMA'd bytes in RAM. The failure
+   signature was distinctive: correct byte COUNT, corrupted CONTENT
+   (leading bytes replaced by recognizable stale stack data -- pointer
+   values into this payload's own address range). Only ever manifested
+   under the RTOS: the flat `fatfs_sdcard` busy-waits through the whole
+   transfer touching almost no memory (dirty lines never evicted), while
+   the scheduler tick's IRQ entry + task switching run DURING the
+   busy-wait and generate exactly the cache pressure that evicts them --
+   also why the Ethernet path never hit this (`eth_rx_buf` is a
+   dedicated global the CPU never writes, so it never has dirty lines).
+   Ruled out along the way: task stack size, `disable_irq` around
+   individual FAT calls, settle delays. Fixed by adding
+   `dma_prepare_rx` before the transfer in `dwc2_bulk_in` and the
+   control-transfer IN data stage -- the exact prepare+finish pair
+   `examples/common_stm32/sdmmc.tkb`'s `disk_read` has always used, with
+   this same reasoning in its comments. Verified: 5/5 consecutive
+   real-hardware runs clean (previously failed most runs), 62/62
+   `make hwcheck-rpi3`, and the full 6/6 `make hwcheck-rpi3-net` suite
+   re-run to confirm the shared bulk-IN change did not regress Ethernet.
+
+`rtos_fatfs_sdcard (rpi3)` is wired into `make hwcheck-rpi3` reusing
+STM32's own `.expected` fixture unchanged (byte-identical output), and
+serves as the standing regression test for the `dma_prepare_rx` fix.
+
 **Remaining work**: porting the rest of the `fatfs`-family examples
 (`http_server_sdcard`/`http_server_sdcard_rtos`/
-`kvs_server_sdcard_rtos`/`rtos_fatfs_sdcard`, RPi3-appropriate subset)
+`kvs_server_sdcard_rtos`, RPi3-appropriate subset -- these also need the
+`http_server_sdcard_install` provisioning flow adapted to this board)
 onto `fat12_usbmsc.tkb`, each verified on real hardware individually per
 this project's established incremental process, before this whole
 milestone's `--forbid-trap` hardening pass.

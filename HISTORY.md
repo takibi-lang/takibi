@@ -9752,3 +9752,57 @@ immediately after a reset passed 100% every time this was retried.
 Remaining fatfs-family work: `http_server_sdcard`/`http_server_sdcard_rtos`/
 `kvs_server_sdcard_rtos`/`rtos_fatfs_sdcard`, each ported and verified
 individually before this whole milestone's `--forbid-trap` hardening pass.
+
+`rtos_fatfs_sdcard` ported to Raspberry Pi 3B -- and porting it found a
+real cache-coherency bug in the shared USB driver. The example source got
+the same treatment as `fatfs_sdcard.tkb` (target storage adapter moved to
+per-target compile command lines); its RPi3 Makefile group combines the
+scheduler HAL (`timer.tkb`) with the USB HAL on one command line for the
+first time, which immediately surfaced a latent duplicate-extern conflict:
+`timer.tkb`, `rtc.tkb`, and `usb_dwc2.tkb` each declared
+`extern fn read_cntfrq` locally (timer.tkb's even with the wrong width,
+i32 vs timer_asm.S's real i64 ABI), and takibi rejects a second
+declaration of the same extern name even with a matching signature.
+Factored into a shared `examples/common_rpi3/timer_asm_extern.tkb`, `use`d
+by all three -- the same fix shape as `gic_regs.tkb`'s split (issue #79).
+
+The real find came from the example's first hardware runs: `fat_read`
+immediately after `fat_format`'s write burst reliably returned the correct
+byte COUNT but corrupted CONTENT -- leading bytes replaced by recognizable
+stale stack data (little-endian pointer values into the payload's own
+address range), tail correct -- and ONLY under the RTOS; the identical
+FAT12/USB code path called from a flat `app_main` (`fatfs_sdcard`) was
+already proven clean, including 20 overwrite rounds. Ruled out on real
+hardware: task stack size (4x change, no effect), `disable_irq` around
+individual FAT calls (no effect), settle delays (no effect). The stale-
+stack-data signature identified it: `dwc2_bulk_in` performed only
+`dma_finish_rx` (invalidate AFTER the transfer) with no `dma_prepare_rx`
+before it. Dirty CPU cache lines covering the DMA destination --
+guaranteed when the destination is `fat12.tkb`'s stack-allocated
+`sector_buf`, freshly written by an earlier call at the same stack
+address -- get evicted while the DWC2's DMA write is in flight (or after
+it, before the finish-invalidate) and write stale CPU data back over the
+DMA'd bytes in RAM. The flat path never hit it because
+`dwc2_channel_transfer`'s busy-wait touches almost no memory, so the dirty
+lines were simply never evicted mid-transfer; the RTOS tick's IRQ entry +
+task switching run DURING that busy-wait and generate exactly the cache
+pressure that evicts them (also why Ethernet never hit it: `eth_rx_buf` is
+a dedicated global the CPU never writes, so it never has dirty lines --
+and why the symptom was timing-flaky, including a throwaway "warmup read"
+appearing to fix it once before failing again). Fixed by adding
+`dma_prepare_rx` before the transfer in `dwc2_bulk_in` and the control-
+transfer IN data stage -- the exact prepare+finish invalidate pair
+`examples/common_stm32/sdmmc.tkb`'s `disk_read` has always used, with this
+same eviction mechanism already described in its comments (issues #101/
+#102's history repeating on a new bus).
+
+Verified on real hardware: 5/5 consecutive clean runs (previously most
+runs corrupted), `make hwcheck-rpi3` 62/62 with `rtos_fatfs_sdcard` wired
+in as the standing regression test (STM32's `.expected` fixture reused
+byte-identical), and the full `make hwcheck-rpi3-net` suite (6/6) re-run
+deliberately because the fixed `dwc2_bulk_in` is shared with the Ethernet
+path -- no regression. `make check` 134/134 unaffected. Remaining
+fatfs-family work: `http_server_sdcard`/`http_server_sdcard_rtos`/
+`kvs_server_sdcard_rtos` (these also need the `http_server_sdcard_install`
+provisioning flow adapted to this board), then the milestone-wide
+`--forbid-trap` hardening pass.

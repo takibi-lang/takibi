@@ -1,0 +1,17 @@
+// extern fn declarations for examples/common_rpi3/timer_asm.S's
+// read_cntfrq/read_cntpct free-running-counter stubs, split out into
+// their own file (GitHub issue #145) so examples/common_rpi3/rtc.tkb,
+// timer.tkb (the scheduler HAL), and usb_dwc2.tkb can all `use` this
+// instead of each declaring the same extern symbols locally -- takibi
+// rejects a second `extern fn` declaration of the same name even when
+// its signature is identical ("cannot be overloaded"), so combining any
+// two of those three files on one compile command line used to be a
+// hard conflict. Never triggered before this issue's RTOS+USB-storage
+// examples (rtos_fatfs_sdcard and siblings) needed both the scheduler
+// group's timer.tkb AND usb_dwc2.tkb's delay_ms on the same command
+// line for the first time. Same fix shape as gic_regs.tkb's own split
+// out of gic.tkb (GitHub issue #79 follow-up) for the identical class of
+// problem -- see that file's header comment.
+
+extern fn read_cntfrq() -> i64;
+extern fn read_cntpct() -> i64;

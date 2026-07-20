@@ -750,13 +750,17 @@ COMMON_STM32_SDMMC := $(COMMON_STM32_DIR)/sdmmc.tkb
 COMMON_STM32_ETH_SDMMC_REGS := $(COMMON_STM32_DIR)/eth_sdmmc_regs.tkb
 COMMON_STM32_FAT12_SDMMC := $(COMMON_STM32_DIR)/fat12_sdmmc.tkb
 
-# rtos_fatfs_sdcard: STM32-only SD/FAT worker task, combining common/rtos.tkb
-# with fat12.tkb and the real SDMMC1 driver. Like rtos_demo it needs the
-# target-specific scheduler.tkb on the command line; like fatfs_sdcard it
-# reaches sdmmc.tkb through the shared fat12_sdmmc.tkb adapter.
+# rtos_fatfs_sdcard: SD/FAT worker task combining common/rtos.tkb with
+# fat12.tkb and a real storage backend. Like rtos_demo it needs the
+# target-specific scheduler.tkb on the command line. Shared with
+# Raspberry Pi 3B (GitHub issue #145): rtos_fatfs_sdcard.tkb no longer
+# `use`s a target-specific adapter itself, so COMMON_STM32_FAT12_SDMMC is
+# now on the actual compile command line here (see fatfs_sdcard's own
+# comment for the full reasoning) -- the other storage/FAT files are
+# listed here purely for Make's own staleness tracking.
 # COMMON_RPI3_STUB: see rtos_demo_stm32.o's own comment above.
 examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard_stm32.o: examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SCHEDULER) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # fatfs: `use`s fat12.tkb (which itself `use`s netutil.tkb) directly, needs
 # no STM32-specific HAL beyond uart+print. --forbid-trap enabled, same
@@ -1468,7 +1472,25 @@ RPI3_FATFS_OBJS     := $(foreach e,$(RPI3_FATFS_EXAMPLES),examples/$(e)/$(e)_rpi
 $(RPI3_FATFS_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
 
-RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES)
+# rtos_fatfs_sdcard (RPi3): the fatfs-family adapter above PLUS the
+# scheduler group's timer.tkb/COMMON_STM32_STUB (same combination
+# RPI3_SCHED_OBJS uses) -- the first RPi3 build to ever combine the
+# scheduler HAL with the USB HAL on one command line. This surfaced a
+# real latent bug: examples/common_rpi3/timer.tkb and usb_dwc2.tkb (and
+# rtc.tkb) each used to declare their own `extern fn read_cntfrq`
+# locally; takibi rejects a second declaration of the same extern
+# symbol even with a matching signature, so combining any two used to be
+# a hard conflict. Fixed by factoring that declaration out into
+# examples/common_rpi3/timer_asm_extern.tkb, `use`d by all three now
+# (same fix shape as gic_regs.tkb's own split, GitHub issue #79
+# follow-up, for the identical class of problem).
+RPI3_FATFS_RTOS_EXAMPLES := rtos_fatfs_sdcard
+RPI3_FATFS_RTOS_OBJS     := $(foreach e,$(RPI3_FATFS_RTOS_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
+
+$(RPI3_FATFS_RTOS_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
+
+RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES)
 RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 # rtc/timer/preempt/watchdog need COMMON_RPI3_TIMER_ASM_O linked in
 # (read_cntfrq() and friends -- mrs cannot be called directly from
@@ -1487,7 +1509,7 @@ RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf
 # to the compiler's own dma_prepare_tx/dma_finish_rx builtins, GitHub
 # issue #146). Everything else uses the plain startup.o+mmu.o link line.
 RPI3_TIMER_ASM_KERNELS := $(foreach e,$(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
-RPI3_SEM_KERNELS       := $(foreach e,$(RPI3_SCHED_SEM_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
+RPI3_SEM_KERNELS       := $(foreach e,$(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 RPI3_GENERIC_KERNELS   := $(filter-out $(RPI3_TIMER_ASM_KERNELS) $(RPI3_SEM_KERNELS),$(RPI3_KERNELS))
 
 $(RPI3_GENERIC_KERNELS): examples/%/kernel_rpi3.elf: \

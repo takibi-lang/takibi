@@ -30,7 +30,19 @@
 // refactor, not a behavior change, for the existing QEMU path (verified
 // unchanged via `make qemutest` before this file existed).
 
-extern fn read_cntfrq() -> i32;
+// read_cntfrq comes from the shared examples/common_rpi3/
+// timer_asm_extern.tkb (GitHub issue #145) rather than its own local
+// `extern fn` declaration -- this file used to declare it locally as
+// i32 (harmless in isolation: cntfrq_el0's real value always fits well
+// within 32 bits, and the upper bits of x0 are architecturally RES0,
+// but the WRONG width relative to timer_asm.S's real i64 ABI), and
+// takibi rejects a second `extern fn read_cntfrq` declaration even with
+// the matching i64 signature ("cannot be overloaded") -- see
+// timer_asm_extern.tkb's own header comment for why this file now
+// shares that single declaration with examples/common_rpi3/rtc.tkb and
+// usb_dwc2.tkb instead of each declaring it separately.
+use "examples/common_rpi3/timer_asm_extern.tkb";
+
 extern fn set_cntp_tval(n: i32);
 extern fn enable_cntp();
 extern fn disable_cntp();
@@ -71,7 +83,7 @@ fn rpi3_timer_irq_pending() -> bool {
 fn timer_init() {
     let core0_timer_irq_control: *io u32 = 0x40000040;
     *core0_timer_irq_control = 1 << 1; // enable CNTPNSIRQ as an IRQ
-    set_cntp_tval(read_cntfrq() >> 6);
+    set_cntp_tval((read_cntfrq() >> 6) as i32);
     enable_cntp();
 }
 
@@ -84,5 +96,5 @@ fn scheduler_disable() {
 }
 
 fn scheduler_rearm_tick() {
-    set_cntp_tval(read_cntfrq() >> 6);
+    set_cntp_tval((read_cntfrq() >> 6) as i32);
 }

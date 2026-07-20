@@ -23,8 +23,7 @@
 // needs no setup either, for an unrelated reason: it's a real modeled
 // RTC that's simply always running).
 
-extern fn read_cntfrq() -> i64;
-extern fn read_cntpct() -> i64;
+use "examples/common_rpi3/timer_asm_extern.tkb";
 
 fn rtc_init() {
 }

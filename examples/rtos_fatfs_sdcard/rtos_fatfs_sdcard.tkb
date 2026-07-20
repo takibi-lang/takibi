@@ -9,10 +9,25 @@
 // task mostly unchanged and replace build_body_from_sdcard() with the same
 // "ask the SD worker and wait for the reply" shape proven here.
 //
-// STM32-only: there is no virtual SD controller in this project's QEMU setup.
+// No QEMU build: there is no virtual SD/USB controller in this project's
+// QEMU setup.
+//
+// Shared across STM32 and Raspberry Pi 3B (GitHub issue #145): like
+// examples/fatfs_sdcard/fatfs_sdcard.tkb, this file no longer `use`s a
+// target-specific storage adapter itself -- the Makefile puts
+// examples/common_stm32/fat12_sdmmc.tkb or examples/common_rpi3/
+// fat12_usbmsc.tkb on the compile command line per target instead. See
+// fatfs_sdcard.tkb's own header comment for the full reasoning.
+//
+// The RPi3 port of this example is what exposed usb_dwc2.tkb's missing
+// dma_prepare_rx-before-bulk-IN (read corruption that only ever appeared
+// with the RTOS scheduler tick running -- see dwc2_bulk_in's own comment
+// for the full dirty-cache-line-eviction mechanism, and HISTORY.md's
+// issue #145 entries for the investigation narrative). This file itself
+// needed no change for that fix; it is recorded here because this
+// example is the regression test that catches it.
 
 use "examples/common/rtos.tkb";
-use "examples/common_stm32/fat12_sdmmc.tkb";
 
 let mut done_ch: Chan;
 let mut rtos_done: io i32 = 0;

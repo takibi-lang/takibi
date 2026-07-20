@@ -369,6 +369,14 @@ run_hw_test_rpi3_usb_msc "usb_msc_probe (rpi3)" "$REPO_ROOT/examples/usb_msc_pro
 # example's fixture in this file. Destructive (formats the attached
 # drive), same acceptance as usb_msc_probe above.
 run_hw_test_rpi3 "fatfs_sdcard (rpi3)" "$REPO_ROOT/examples/fatfs_sdcard/kernel_rpi3.elf" "$REPO_ROOT/examples/fatfs_sdcard/fatfs_sdcard.expected" 15 40
+# rtos_fatfs_sdcard (rpi3): the same FAT12-on-USB-mass-storage work moved
+# behind the Simple RTOS task/channel boundary -- byte-for-byte the shared
+# rtos_fatfs_sdcard.tkb source and STM32's own .expected fixture. This is
+# the regression test for usb_dwc2.tkb's dma_prepare_rx-before-bulk-IN
+# (the read corruption it fixes only ever manifested with the RTOS
+# scheduler tick running -- see dwc2_bulk_in's own comment). Destructive
+# (formats the attached drive), same acceptance as the two tests above.
+run_hw_test_rpi3 "rtos_fatfs_sdcard (rpi3)" "$REPO_ROOT/examples/rtos_fatfs_sdcard/kernel_rpi3.elf" "$REPO_ROOT/examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard.expected" 15 40
 
 echo ""
 echo "rpi3 hardware tests: $PASS passed, $FAIL failed"
