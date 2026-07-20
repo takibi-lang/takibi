@@ -22,26 +22,26 @@
 // since a stricter-aligned pointer trivially satisfies a plain `*u8`
 // parameter.
 //
-// Enumeration reuses the exact root-hub-port-walk examples/common_rpi3/
-// eth.tkb's net_init() already proved (mailbox -> DWC2 -> hub, all via
-// usb_dwc2.tkb/usb_hub.tkb unmodified) -- the only difference is WHICH
-// device this file looks for: any connected port whose device is NOT the
-// LAN9514's own fixed 0424:ec00 internal Ethernet function (always
-// present, see AGENTS.md), rather than that function specifically. This
-// finds a plain USB flash drive plugged into any of the board's external
-// USB-A jacks regardless of its vendor/product ID, without needing to
-// parse interface class/subclass/protocol to identify it as Mass
-// Storage -- YAGNI, since this project's real hardware setup only ever
-// has the one drive attached alongside the hub's own permanent Ethernet
-// function.
+// Enumeration comes from examples/common_rpi3/usb_host.tkb's shared,
+// idempotent usb_host_init() (mailbox -> DWC2 -> hub -> per-port walk,
+// shared with eth.tkb's net_init so both can run in one program) -- the
+// only MSC-specific part is WHICH device this file picks from the
+// resulting table: the first whose VID:PID is NOT the LAN9514's own
+// fixed 0424:ec00 internal Ethernet function (always present, see
+// AGENTS.md). This finds a plain USB flash drive plugged into any of
+// the board's external USB-A jacks regardless of its vendor/product ID,
+// without needing to parse interface class/subclass/protocol to
+// identify it as Mass Storage -- YAGNI, since this project's real
+// hardware setup only ever has the one drive attached alongside the
+// hub's own permanent Ethernet function.
 //
 // This file reuses the SAME bulk-transfer machinery (dwc2_bulk_in/
-// dwc2_bulk_out, BULK_IN_CHANNEL/BULK_OUT_CHANNEL, and the module-global
-// toggle/endpoint/device-address state in usb_dwc2.tkb) eth.tkb's
-// Ethernet path already uses. Safe because no example in this project
-// needs Ethernet and USB mass storage active at the same time; a future
-// example that did would need usb_dwc2.tkb's single-device bulk state
-// generalized to more than one concurrently-bound device first.
+// dwc2_bulk_out) eth.tkb's Ethernet path uses. usb_dwc2.tkb's bulk
+// state is per-device-slot (two slots, each with its own channel pair
+// and toggle state, bound by dwc2_bulk_reset_toggles and looked up by
+// device address), so Ethernet and mass storage can be active in the
+// same program -- the SD-card-family HTTP/KVS examples need exactly
+// that.
 //
 // New .tkb work process (root AGENTS.md): written and verified first
 // WITHOUT --forbid-trap, matching examples/usb_msc_probe/
@@ -283,83 +283,22 @@ fn msc_capacity_block_size() -> u32 {
 // block size, matching fat12.tkb's hardcoded sector size throughout).
 fn disk_initialize() -> i32 {
     msc_init_stage = 0;
-    if (mbox_power_on_usb() == false) {
+    // Shared bring-up + per-port enumeration walk: usb_host.tkb's
+    // idempotent usb_host_init() (see its header comment) -- shared with
+    // eth.tkb's net_init() so both can run in one program. Stages 1-5 of
+    // this function's original inline bring-up now live there; the stage
+    // markers below resume at 6 (the first MSC-specific step) so their
+    // historical meanings stay stable for anyone comparing old UART
+    // captures.
+    if (usb_host_init() == false) {
         return -1;
     }
-    msc_init_stage = 1; // mailbox power-on ok
-    if (dwc2_soft_reset() == false) {
+    let idx: i32 = usb_host_find_not(0x0424, 0xEC00);
+    if (idx < 0) {
         return -1;
     }
-    dwc2_core_init();
-    if (dwc2_flush_fifos() == false) {
-        return -1;
-    }
-    msc_init_stage = 2; // dwc2 core/reset/fifo ok
-    dwc2_host_port_power_on();
-
-    let mut connected: bool = false;
-    for i: i32 in 0..<1000000 {
-        if (dwc2_host_port_connected()) {
-            connected = true;
-            break;
-        }
-    }
-    if (connected == false) {
-        return -1;
-    }
-    msc_init_stage = 3; // root port connected
-    dwc2_host_port_reset();
-
-    if (dwc2_get_device_descriptor(0, 8, 8) == false) {
-        return -1;
-    }
-    let hub_mp0: u8 = dwc2_device_descriptor_max_packet0();
-    if (dwc2_set_address(1, 8) == false) {
-        return -1;
-    }
-    if (dwc2_get_device_descriptor(1, hub_mp0 as u32, 18) == false) {
-        return -1;
-    }
-    let hub_mp: u32 = hub_mp0 as u32;
-    if (dwc2_set_configuration(1, hub_mp, 1) == false) {
-        return -1;
-    }
-    msc_init_stage = 4; // hub (root device) enumerated + configured
-
-    let nports: u32 = hub_read_nports(1, hub_mp);
-    if (nports == 0) {
-        return -1;
-    }
-    hub_power_on_all_ports(1, hub_mp, nports);
-    msc_init_stage = 5; // hub ports read + powered
-
-    let mut found_addr: u32 = 0;
-    let mut found_mp: u32 = 64;
-    let mut next_addr: u32 = 2;
-    for i: u32 in 0..<nports {
-        let port: u32 = i + 1;
-        let status: u32 = hub_port_status(1, hub_mp, port);
-        if ((status & HUB_PORT_STAT_CONNECTION) != 0) {
-            if (hub_port_reset(1, hub_mp, port)) {
-                if (dwc2_get_device_descriptor(0, 8, 8)) {
-                    let dmp: u32 = dwc2_device_descriptor_max_packet0() as u32;
-                    if (dwc2_set_address(next_addr, 8)) {
-                        if (dwc2_get_device_descriptor(next_addr, dmp, 18)) {
-                            let is_eth: bool = dwc2_device_descriptor_vendor_id() == 0x0424
-                                            && dwc2_device_descriptor_product_id() == 0xEC00;
-                            if (is_eth == false) {
-                                if (found_addr == 0) {
-                                    found_addr = next_addr;
-                                    found_mp = dmp;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            next_addr = next_addr + 1;
-        }
-    }
+    let found_addr: u32 = usb_host_dev_addr(idx as usize);
+    let found_mp: u32 = usb_host_dev_mp(idx as usize);
     if (found_addr == 0) {
         return -1;
     }

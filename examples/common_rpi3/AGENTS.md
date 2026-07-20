@@ -660,13 +660,47 @@ which surfaced two latent problems, both fixed:
 STM32's own `.expected` fixture unchanged (byte-identical output), and
 serves as the standing regression test for the `dma_prepare_rx` fix.
 
-**Remaining work**: porting the rest of the `fatfs`-family examples
+**Multi-device USB: Ethernet + mass storage concurrently (done).** The
+remaining `fatfs`-family examples (HTTP/KVS + SD-card) all need the
+LAN9514 Ethernet function AND the USB flash drive active in the same
+program -- previously impossible twice over: `usb_dwc2.tkb`'s bulk
+endpoint/toggle state was a single-device singleton, and `eth.tkb`'s
+`net_init()`/`usb_msc.tkb`'s `disk_initialize()` each ran the whole
+bring-up themselves (the second caller's `dwc2_soft_reset()` would
+unbind the first's device). Two changes, both shaped to keep every
+existing call site untouched:
+
+- `usb_dwc2.tkb`: bulk state generalized to two per-device slots, each
+  with its own dedicated channel pair (slot 0 = OUT ch 1 / IN ch 2,
+  exactly what the single-device driver always used; slot 1 = OUT ch 3 /
+  IN ch 4), bound by `dwc2_bulk_reset_toggles(dev_addr, ...)` and looked
+  up by device address inside `dwc2_bulk_in`/`dwc2_bulk_out` -- whose
+  signatures are unchanged. Slot indices are if-narrowed
+  `{0..<2 as usize}` so the net-examples build (which compiles this file
+  under `--forbid-trap`) still proves every access. Two slots, not a
+  general table -- YAGNI: one permanently-attached Ethernet function,
+  one test drive.
+- `examples/common_rpi3/usb_host.tkb` (new): the shared bring-up +
+  per-port enumeration walk (the exact code both callers had inline,
+  proven via usb_probe one milestone at a time) behind an idempotent
+  `usb_host_init()` recording every enumerated device (addr, VID:PID,
+  ep0 max packet) in a small table. `net_init()` finds `0424:ec00` in
+  the table; `disk_initialize()` finds the first entry that is NOT it.
+  First caller does the real work; the second gets the table for free.
+
+Verified on real hardware: a dedicated dual-device diagnostic
+(net_init -> disk_initialize -> storage write -> net RX poll -> storage
+read-back verify -> net RX poll, all passing in one program), plus the
+full regression: 62/62 `make hwcheck-rpi3`, 6/6 `make hwcheck-rpi3-net`,
+134/134 `make check`.
+
+**Remaining work**: porting the remaining `fatfs`-family examples
 (`http_server_sdcard`/`http_server_sdcard_rtos`/
 `kvs_server_sdcard_rtos`, RPi3-appropriate subset -- these also need the
 `http_server_sdcard_install` provisioning flow adapted to this board)
-onto `fat12_usbmsc.tkb`, each verified on real hardware individually per
-this project's established incremental process, before this whole
-milestone's `--forbid-trap` hardening pass.
+onto `fat12_usbmsc.tkb` + this multi-device foundation, each verified on
+real hardware individually per this project's established incremental
+process, before this whole milestone's `--forbid-trap` hardening pass.
 
 ## Hardware
 

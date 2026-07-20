@@ -9806,3 +9806,30 @@ fatfs-family work: `http_server_sdcard`/`http_server_sdcard_rtos`/
 `kvs_server_sdcard_rtos` (these also need the `http_server_sdcard_install`
 provisioning flow adapted to this board), then the milestone-wide
 `--forbid-trap` hardening pass.
+
+Multi-device USB on Raspberry Pi 3B: Ethernet + mass storage concurrently
+(issue #145's foundation step for the HTTP/KVS + storage examples, which
+need both in one program). Previously impossible twice over: usb_dwc2.tkb's
+bulk endpoint/toggle state was a single-device singleton, and eth.tkb's
+net_init()/usb_msc.tkb's disk_initialize() each ran the entire bring-up
+inline (the second caller's dwc2_soft_reset() would unbind the first's
+device). Fixed with two changes shaped to leave every existing call site
+untouched: (1) usb_dwc2.tkb's bulk state became two per-device slots, each
+with a dedicated channel pair (slot 0 = OUT ch1/IN ch2 -- exactly the
+single-device driver's old channels; slot 1 = OUT ch3/IN ch4), bound by
+dwc2_bulk_reset_toggles(dev_addr, ...) and looked up by device address in
+dwc2_bulk_in/dwc2_bulk_out, whose signatures are unchanged; slot indices
+are if-narrowed {0..<2 as usize} since the net-examples build compiles the
+file under --forbid-trap. (2) New examples/common_rpi3/usb_host.tkb
+extracts the shared bring-up + per-port enumeration walk behind an
+idempotent usb_host_init() that records every enumerated device (addr,
+VID:PID, ep0 max packet) in a small table; net_init() picks 0424:ec00 out
+of it, disk_initialize() picks the first entry that is NOT that, and the
+second caller reuses the first's work instead of re-resetting the core.
+
+Verified on real hardware with a dedicated dual-device diagnostic
+(net_init -> disk_initialize -> storage write -> net RX poll -> storage
+read-back verify -> net RX poll, all in one program, all passing) plus the
+full regression suites: 62/62 make hwcheck-rpi3, 6/6 make hwcheck-rpi3-net
+(the bulk path is shared with Ethernet, so the network suite was re-run
+deliberately), 134/134 make check.

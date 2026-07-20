@@ -1435,8 +1435,8 @@ COMMON_RPI3_NETCONFIG := $(COMMON_RPI3_DIR)/netconfig.tkb
 RPI3_NET_EXAMPLES := net_echo arp_reply icmp_echo tcp_echo http_server kvs_server
 RPI3_NET_OBJS     := $(foreach e,$(RPI3_NET_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
-$(RPI3_NET_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_HTTP_SERVER) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_TAKIBI_FLAGS) -o $@
+$(RPI3_NET_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_NETCONFIG) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_HTTP_SERVER) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_TAKIBI_FLAGS) -o $@
 
 # USB Mass Storage group (GitHub issue #145, the storage follow-on to the
 # Ethernet milestone above): examples/common_rpi3/usb_msc.tkb -- new,
@@ -1451,8 +1451,8 @@ RPI3_MSC_TAKIBI_FLAGS :=
 RPI3_MSC_EXAMPLES := usb_msc_probe
 RPI3_MSC_OBJS     := $(foreach e,$(RPI3_MSC_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
-$(RPI3_MSC_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
+$(RPI3_MSC_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
 
 # fatfs-family group (GitHub issue #145's own follow-on): shared example
 # sources (fatfs_sdcard.tkb today, more to follow) that `use` fat12.tkb
@@ -1469,8 +1469,8 @@ COMMON_RPI3_FAT12_USBMSC := $(COMMON_RPI3_DIR)/fat12_usbmsc.tkb
 RPI3_FATFS_EXAMPLES := fatfs_sdcard
 RPI3_FATFS_OBJS     := $(foreach e,$(RPI3_FATFS_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
-$(RPI3_FATFS_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
+$(RPI3_FATFS_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
 
 # rtos_fatfs_sdcard (RPi3): the fatfs-family adapter above PLUS the
 # scheduler group's timer.tkb/COMMON_STM32_STUB (same combination
@@ -1487,8 +1487,8 @@ $(RPI3_FATFS_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMM
 RPI3_FATFS_RTOS_EXAMPLES := rtos_fatfs_sdcard
 RPI3_FATFS_RTOS_OBJS     := $(foreach e,$(RPI3_FATFS_RTOS_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
-$(RPI3_FATFS_RTOS_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
+$(RPI3_FATFS_RTOS_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
 
 RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES)
 RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)

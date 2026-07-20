@@ -678,10 +678,10 @@ fn dwc2_device_descriptor_class() -> u8 {
 }
 
 // -- Bulk transfers (milestone 6) --------------------------------------------
-// Dedicated channels (1 = OUT, 2 = IN), separate from CTRL_CHANNEL, so
-// bulk traffic can never clobber in-flight control-transfer channel
-// state even though this driver's fully-synchronous design never
-// actually overlaps them today.
+// Dedicated per-slot channel pairs, separate from CTRL_CHANNEL, so bulk
+// traffic can never clobber in-flight control-transfer channel state
+// even though this driver's fully-synchronous design never actually
+// overlaps them today.
 //
 // A bulk endpoint's DATA0/DATA1 state persists for its lifetime. The
 // DWC2 core advances HCTSIZ.PID for every packet it actually transfers,
@@ -691,25 +691,70 @@ fn dwc2_device_descriptor_class() -> u8 {
 // dwc2_last_pid after every call. Both directions reset to DATA0 by
 // dwc2_bulk_reset_toggles(), called once after SET_CONFIGURATION resets
 // every endpoint's toggle on the device side too (USB 2.0 spec 9.1.1.5).
-const BULK_OUT_CHANNEL: usize = 1;
-const BULK_IN_CHANNEL:  usize = 2;
+// -- Per-device bulk binding slots (GitHub issue #145's multi-device
+// step). The original driver kept ONE set of bulk endpoint/toggle
+// state, fine while Ethernet and mass storage were never active in the
+// same program; the SD-card-family HTTP/KVS examples need both at once.
+// Two slots, each with its own dedicated channel pair (slot 0 = OUT
+// channel 1 / IN channel 2, exactly the channels the single-device
+// driver always used; slot 1 = OUT channel 3 / IN channel 4 -- this
+// core has 8+ host channels, so dedicating four costs nothing), bound
+// to a device address by dwc2_bulk_reset_toggles() and looked up by
+// that address in dwc2_bulk_in/dwc2_bulk_out -- whose signatures are
+// unchanged, so eth.tkb/usb_msc.tkb call sites needed no edits.
+// dwc2_find_bulk_endpoints() still parses into the singleton
+// dwc2_bulk_*_ep/mp variables (its callers read those for validation
+// right after parsing); dwc2_bulk_reset_toggles() then snapshots them
+// into the slot it binds. Two slots, not a general table -- YAGNI: this
+// board has exactly one permanently-attached Ethernet function and one
+// test drive.
+let mut bulk_slot_dev:        [u32; 2]; // dev_addr bound to each slot, 0 = free
+let mut bulk_slot_in_ep:      [u32; 2];
+let mut bulk_slot_out_ep:     [u32; 2];
+let mut bulk_slot_in_mp:      [u32; 2];
+let mut bulk_slot_out_mp:     [u32; 2];
+let mut bulk_slot_in_toggle:  [u32; 2];
+let mut bulk_slot_out_toggle: [u32; 2];
+let mut bulk_slot_ep0_mp:     [u32; 2];
 
-let mut dwc2_bulk_out_toggle: u32 = PID_DATA0;
-let mut dwc2_bulk_in_toggle:  u32 = PID_DATA0;
-
-// Device address + ep0 max packet, recorded once so a STALL recovery
-// (CLEAR_FEATURE(ENDPOINT_HALT), a control request against ep0) can be
-// issued without every bulk_in/bulk_out caller threading those two
-// values through -- set by dwc2_bulk_reset_toggles(), called once
-// after SET_CONFIGURATION alongside the toggle reset it already does.
-let mut dwc2_bulk_dev_addr: u32 = 0;
-let mut dwc2_bulk_ep0_mp:   u32 = 8;
+// Slot lookup by bound device address. Defaults to slot 0 when nothing
+// matches -- callers always bind (dwc2_bulk_reset_toggles) before any
+// bulk transfer, so the default is only ever taken for slot-0-bound
+// addresses. Returned as an if-narrowed {0..<2} so every slot-array
+// access below is a proven index (the net-examples build compiles this
+// file under --forbid-trap).
+fn bulk_slot_for(dev_addr: u32) -> {0..<2 as usize} {
+    let mut s: {0..<2 as usize} = 0;
+    if (bulk_slot_dev[1] == dev_addr) {
+        s = 1;
+    }
+    return s;
+}
 
 fn dwc2_bulk_reset_toggles(dev_addr: u32, ep0_mp: u32) {
-    dwc2_bulk_out_toggle = PID_DATA0;
-    dwc2_bulk_in_toggle = PID_DATA0;
-    dwc2_bulk_dev_addr = dev_addr;
-    dwc2_bulk_ep0_mp = ep0_mp;
+    // Reuse the existing binding for this address if present; otherwise
+    // take slot 0 if free, else slot 1. (Rebinding the same address
+    // refreshes its endpoint snapshot -- correct after a re-enumeration.)
+    let mut s: {0..<2 as usize} = 0;
+    if (bulk_slot_dev[0] == dev_addr) {
+        s = 0;
+    } else {
+        if (bulk_slot_dev[1] == dev_addr) {
+            s = 1;
+        } else {
+            if (bulk_slot_dev[0] != 0) {
+                s = 1;
+            }
+        }
+    }
+    bulk_slot_dev[s] = dev_addr;
+    bulk_slot_in_ep[s] = dwc2_bulk_in_ep;
+    bulk_slot_out_ep[s] = dwc2_bulk_out_ep;
+    bulk_slot_in_mp[s] = dwc2_bulk_in_mp;
+    bulk_slot_out_mp[s] = dwc2_bulk_out_mp;
+    bulk_slot_in_toggle[s] = PID_DATA0;
+    bulk_slot_out_toggle[s] = PID_DATA0;
+    bulk_slot_ep0_mp[s] = ep0_mp;
 }
 
 // dwc2_clear_endpoint_halt: CLEAR_FEATURE(ENDPOINT_HALT) -- bmRequestType
@@ -720,8 +765,9 @@ fn dwc2_bulk_reset_toggles(dev_addr: u32, ep0_mp: u32) {
 // resets the endpoint's data toggle to DATA0 on the DEVICE side, so the
 // caller must reset its own software-tracked toggle to match -- callers
 // here do so immediately after a successful clear.
-fn dwc2_clear_endpoint_halt(ep_addr: u32) -> bool {
-    return dwc2_control_transfer(dwc2_bulk_dev_addr, dwc2_bulk_ep0_mp,
+fn dwc2_clear_endpoint_halt(dev_addr: u32, ep_addr: u32) -> bool {
+    let s: {0..<2 as usize} = bulk_slot_for(dev_addr);
+    return dwc2_control_transfer(dev_addr, bulk_slot_ep0_mp[s],
                                   0x02, 0x01, 0, ep_addr as u16,
                                   ctrl_data_buf, 0);
 }
@@ -741,14 +787,16 @@ fn dwc2_clear_endpoint_halt(ep_addr: u32) -> bool {
 fn dwc2_bulk_out(dev_addr: u32, buf: *align(32) u8, len: u32) -> bool {
     dma_prepare_tx(buf, len as usize);
     let addr: usize = buf as usize;
-    let ok: bool = dwc2_channel_transfer(BULK_OUT_CHANNEL, dev_addr, dwc2_bulk_out_ep,
-                                          EP_TYPE_BULK, false, dwc2_bulk_out_mp,
-                                          dwc2_bulk_out_toggle, addr, len);
-    dwc2_bulk_out_toggle = dwc2_last_pid;
+    let s: {0..<2 as usize} = bulk_slot_for(dev_addr);
+    let out_chan: usize = 1 + (s as usize) * 2; // slot 0 -> ch 1, slot 1 -> ch 3
+    let ok: bool = dwc2_channel_transfer(out_chan, dev_addr, bulk_slot_out_ep[s],
+                                          EP_TYPE_BULK, false, bulk_slot_out_mp[s],
+                                          bulk_slot_out_toggle[s], addr, len);
+    bulk_slot_out_toggle[s] = dwc2_last_pid;
     if (ok == false) {
         if ((dwc2_last_status & HCINT_STALL) != 0) {
-            dwc2_clear_endpoint_halt(dwc2_bulk_out_ep);
-            dwc2_bulk_out_toggle = PID_DATA0;
+            dwc2_clear_endpoint_halt(dev_addr, bulk_slot_out_ep[s]);
+            bulk_slot_out_toggle[s] = PID_DATA0;
         }
     }
     return ok;
@@ -787,10 +835,12 @@ fn dwc2_bulk_out(dev_addr: u32, buf: *align(32) u8, len: u32) -> bool {
 fn dwc2_bulk_in(dev_addr: u32, buf: *align(32) u8, len: u32) -> bool {
     dma_prepare_rx(buf, len as usize);
     let addr: usize = buf as usize;
-    let ok: bool = dwc2_channel_transfer(BULK_IN_CHANNEL, dev_addr, dwc2_bulk_in_ep,
-                                          EP_TYPE_BULK, true, dwc2_bulk_in_mp,
-                                          dwc2_bulk_in_toggle, addr, len);
-    dwc2_bulk_in_toggle = dwc2_last_pid;
+    let s: {0..<2 as usize} = bulk_slot_for(dev_addr);
+    let in_chan: usize = 2 + (s as usize) * 2; // slot 0 -> ch 2, slot 1 -> ch 4
+    let ok: bool = dwc2_channel_transfer(in_chan, dev_addr, bulk_slot_in_ep[s],
+                                          EP_TYPE_BULK, true, bulk_slot_in_mp[s],
+                                          bulk_slot_in_toggle[s], addr, len);
+    bulk_slot_in_toggle[s] = dwc2_last_pid;
     if (ok) {
         dma_finish_rx(buf, len as usize);
     }

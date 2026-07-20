@@ -90,85 +90,30 @@ let mut eth_rx_flag: i32 = 0;
 let mut eth_dev_addr: u32 = 0;
 let mut eth_max_pkt: u32 = 64;
 
-// -- Root-hub + Ethernet-function bring-up, consolidating the exact
-// sequence examples/usb_probe/usb_probe.tkb already proved on real
-// hardware one milestone at a time -- see that file's own history in
-// HISTORY.md/AGENTS.md for how each individual step was verified.
+// -- Root-hub + Ethernet-function bring-up. The shared enumeration
+// (mailbox -> DWC2 -> hub -> per-port walk, the exact sequence
+// examples/usb_probe/usb_probe.tkb proved one milestone at a time) now
+// lives in examples/common_rpi3/usb_host.tkb's idempotent
+// usb_host_init(), shared with usb_msc.tkb's disk_initialize() so the
+// SD-card-family examples can bring up Ethernet AND mass storage in one
+// program without the second caller's soft reset unbinding the first's
+// device -- see that file's header comment. This function keeps only
+// the Ethernet-function-specific tail: find 0424:ec00 in the device
+// table, configure it, bind its bulk endpoints, LAN9514 class setup.
 fn net_init() -> NetInitResult {
     if (net_rx_initialized != 0) {
         return NetInitResult::Failed;
     }
 
-    if (mbox_power_on_usb() == false) {
+    if (usb_host_init() == false) {
         return NetInitResult::Failed;
     }
-    if (dwc2_soft_reset() == false) {
+    let idx: i32 = usb_host_find(0x0424, 0xEC00);
+    if (idx < 0) {
         return NetInitResult::Failed;
     }
-    dwc2_core_init();
-    if (dwc2_flush_fifos() == false) {
-        return NetInitResult::Failed;
-    }
-    dwc2_host_port_power_on();
-
-    let mut connected: bool = false;
-    for i: i32 in 0..<1000000 {
-        if (dwc2_host_port_connected()) {
-            connected = true;
-            break;
-        }
-    }
-    if (connected == false) {
-        return NetInitResult::Failed;
-    }
-    dwc2_host_port_reset();
-
-    if (dwc2_get_device_descriptor(0, 8, 8) == false) {
-        return NetInitResult::Failed;
-    }
-    let hub_mp0: u8 = dwc2_device_descriptor_max_packet0();
-    if (dwc2_set_address(1, 8) == false) {
-        return NetInitResult::Failed;
-    }
-    if (dwc2_get_device_descriptor(1, hub_mp0 as u32, 18) == false) {
-        return NetInitResult::Failed;
-    }
-    let hub_mp: u32 = hub_mp0 as u32;
-    if (dwc2_set_configuration(1, hub_mp, 1) == false) {
-        return NetInitResult::Failed;
-    }
-
-    let nports: u32 = hub_read_nports(1, hub_mp);
-    if (nports == 0) {
-        return NetInitResult::Failed;
-    }
-    hub_power_on_all_ports(1, hub_mp, nports);
-
-    let mut found_addr: u32 = 0;
-    let mut found_mp: u32 = 64;
-    let mut next_addr: u32 = 2;
-    for i: u32 in 0..<nports {
-        let port: u32 = i + 1;
-        let status: u32 = hub_port_status(1, hub_mp, port);
-        if ((status & HUB_PORT_STAT_CONNECTION) != 0) {
-            if (hub_port_reset(1, hub_mp, port)) {
-                if (dwc2_get_device_descriptor(0, 8, 8)) {
-                    let dmp: u32 = dwc2_device_descriptor_max_packet0() as u32;
-                    if (dwc2_set_address(next_addr, 8)) {
-                        if (dwc2_get_device_descriptor(next_addr, dmp, 18)) {
-                            if (dwc2_device_descriptor_vendor_id() == 0x0424) {
-                                if (dwc2_device_descriptor_product_id() == 0xEC00) {
-                                    found_addr = next_addr;
-                                    found_mp = dmp;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            next_addr = next_addr + 1;
-        }
-    }
+    let found_addr: u32 = usb_host_dev_addr(idx as usize);
+    let found_mp: u32 = usb_host_dev_mp(idx as usize);
     if (found_addr == 0) {
         return NetInitResult::Failed;
     }

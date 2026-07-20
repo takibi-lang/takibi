@@ -1,0 +1,165 @@
+// Shared one-shot USB host bring-up + root-hub device table for
+// BCM2837 (GitHub issue #145's multi-device step). eth.tkb's net_init()
+// and usb_msc.tkb's disk_initialize() used to each run the WHOLE
+// identical bring-up sequence themselves (mailbox power-on -> DWC2
+// core/port -> hub enumeration -> per-port walk), differing only in
+// WHICH device they picked out of the walk -- fine while no program ever
+// ran both, but the SD-card-family HTTP/KVS examples need Ethernet and
+// mass storage in the same program, and a second full bring-up would
+// soft-reset the DWC2 core out from under the first caller's bound
+// device. This file extracts that shared sequence verbatim (the exact
+// code both callers already proved on real hardware) behind an
+// idempotent usb_host_init(): the first caller does the real work and
+// records every enumerated device in a small table; later callers get
+// `true` immediately and just look their device up.
+//
+// The table records (address, VID:PID, ep0 max packet) for every device
+// found connected behind the root hub -- the LAN9514's own internal
+// Ethernet function (port 1, always present) plus whatever is plugged
+// into the external USB-A jacks. Capacity 4: the physical maximum here
+// is one device per external jack (4) and the walk also skips nothing,
+// but this board's real setup only ever has the Ethernet function + one
+// test drive; 4 gives headroom without pretending to be a general
+// dynamic topology (no hotplug -- the table is a boot-time snapshot,
+// same as every other enumeration decision in this stack).
+
+const USB_DEV_TABLE_CAP: usize = 4;
+
+let mut usb_host_ready: i32 = 0;
+let mut usb_dev_count: u32 = 0;
+let mut usb_dev_addr: [u32; USB_DEV_TABLE_CAP];
+let mut usb_dev_vid:  [u32; USB_DEV_TABLE_CAP];
+let mut usb_dev_pid:  [u32; USB_DEV_TABLE_CAP];
+let mut usb_dev_mp:   [u32; USB_DEV_TABLE_CAP];
+
+// usb_host_init: the full bring-up chain proven one milestone at a time
+// through examples/usb_probe/usb_probe.tkb (see AGENTS.md's "USB host
+// stack" section) -- mailbox USB power domain, DWC2 soft reset + core
+// init + FIFO flush, root port power/connect/reset, root-device (hub)
+// enumeration at address 1, hub port power-on, then a walk resetting and
+// enumerating every connected port device at addresses 2, 3, ...
+// Idempotent: subsequent calls return true immediately without touching
+// the hardware (a second soft reset would unbind every already-bound
+// device).
+fn usb_host_init() -> bool {
+    if (usb_host_ready != 0) {
+        return true;
+    }
+
+    if (mbox_power_on_usb() == false) {
+        return false;
+    }
+    if (dwc2_soft_reset() == false) {
+        return false;
+    }
+    dwc2_core_init();
+    if (dwc2_flush_fifos() == false) {
+        return false;
+    }
+    dwc2_host_port_power_on();
+
+    let mut connected: bool = false;
+    for i: i32 in 0..<1000000 {
+        if (dwc2_host_port_connected()) {
+            connected = true;
+            break;
+        }
+    }
+    if (connected == false) {
+        return false;
+    }
+    dwc2_host_port_reset();
+
+    if (dwc2_get_device_descriptor(0, 8, 8) == false) {
+        return false;
+    }
+    let hub_mp0: u8 = dwc2_device_descriptor_max_packet0();
+    if (dwc2_set_address(1, 8) == false) {
+        return false;
+    }
+    if (dwc2_get_device_descriptor(1, hub_mp0 as u32, 18) == false) {
+        return false;
+    }
+    let hub_mp: u32 = hub_mp0 as u32;
+    if (dwc2_set_configuration(1, hub_mp, 1) == false) {
+        return false;
+    }
+
+    let nports: u32 = hub_read_nports(1, hub_mp);
+    if (nports == 0) {
+        return false;
+    }
+    hub_power_on_all_ports(1, hub_mp, nports);
+
+    usb_dev_count = 0;
+    let mut next_addr: u32 = 2;
+    for i: u32 in 0..<nports {
+        let port: u32 = i + 1;
+        let status: u32 = hub_port_status(1, hub_mp, port);
+        if ((status & HUB_PORT_STAT_CONNECTION) != 0) {
+            if (hub_port_reset(1, hub_mp, port)) {
+                if (dwc2_get_device_descriptor(0, 8, 8)) {
+                    let dmp: u32 = dwc2_device_descriptor_max_packet0() as u32;
+                    if (dwc2_set_address(next_addr, 8)) {
+                        if (dwc2_get_device_descriptor(next_addr, dmp, 18)) {
+                            let n: usize = usb_dev_count as usize;
+                            if (n < USB_DEV_TABLE_CAP) {
+                                usb_dev_addr[n] = next_addr;
+                                usb_dev_vid[n] = dwc2_device_descriptor_vendor_id() as u32;
+                                usb_dev_pid[n] = dwc2_device_descriptor_product_id() as u32;
+                                usb_dev_mp[n] = dmp;
+                                usb_dev_count = usb_dev_count + 1;
+                            }
+                        }
+                    }
+                }
+            }
+            next_addr = next_addr + 1;
+        }
+    }
+
+    usb_host_ready = 1;
+    return true;
+}
+
+// usb_host_find: table lookup by exact VID:PID (the Ethernet function's
+// fixed 0424:ec00). Returns the table index, or -1.
+fn usb_host_find(vid: u32, pid: u32) -> i32 {
+    for i: usize in 0..<USB_DEV_TABLE_CAP {
+        if (i < usb_dev_count as usize) {
+            if (usb_dev_vid[i] == vid && usb_dev_pid[i] == pid) {
+                return i as i32;
+            }
+        }
+    }
+    return -1;
+}
+
+// usb_host_find_not: first table entry whose VID:PID is NOT the given
+// pair -- how usb_msc.tkb identifies "the external drive, whatever its
+// vendor" next to the board's one fixed known-VID:PID device (see its
+// header comment for why no MSC class-code parsing is needed).
+fn usb_host_find_not(vid: u32, pid: u32) -> i32 {
+    for i: usize in 0..<USB_DEV_TABLE_CAP {
+        if (i < usb_dev_count as usize) {
+            if (usb_dev_vid[i] != vid || usb_dev_pid[i] != pid) {
+                return i as i32;
+            }
+        }
+    }
+    return -1;
+}
+
+fn usb_host_dev_addr(idx: usize) -> u32 {
+    if (idx < USB_DEV_TABLE_CAP) {
+        return usb_dev_addr[idx];
+    }
+    return 0;
+}
+
+fn usb_host_dev_mp(idx: usize) -> u32 {
+    if (idx < USB_DEV_TABLE_CAP) {
+        return usb_dev_mp[idx];
+    }
+    return 8;
+}
