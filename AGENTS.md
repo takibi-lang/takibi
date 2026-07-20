@@ -53,6 +53,24 @@ level (`git push` is denied); the commit half is enforced by this convention,
 not a technical control, since agents legitimately need to run `git commit`
 for all kinds of work.
 
+### Commit Identity for Coding Agents
+
+Every coding agent must identify itself in both the author and committer fields
+of each commit it creates. Use these identities:
+
+- Codex: `OpenAI Codex <codex-agent@takibi.invalid>`
+- Claude Code: `Anthropic Claude Code <claude-code-agent@takibi.invalid>`
+
+Apply the identity only to the individual `git commit` invocation, for example
+by setting `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and
+`GIT_COMMITTER_EMAIL` in that command's environment. **Do not set or change
+repository-local or global `git config user.name` / `user.email`**, because the
+same working tree may also be used by the human maintainer or another agent.
+Human-authored commits continue to use the human's normal Git configuration.
+If an agent other than those listed above creates a commit, it must use a
+stable identity that clearly names the agent and must not impersonate either a
+human or another agent.
+
 ## Design Principle: Detect Errors at Compile Time
 
 **In embedded products, zero runtime exceptions and panics is a hard requirement.**
