@@ -1,6 +1,14 @@
 // This file is expected to produce a compile error.  The allocator scans
 // from page zero, so `new_page` may reuse the physical page just released.
-// Its fresh existential allocation identity must not revive `old_bytes`.
+// Real end-to-end coverage over the actual page_alloc/page_bytes/page_free
+// API: rejection here is fully explained by ordinary use-after-consume
+// tracking on `old_page` (the same rule examples/page_pool_use_after_free_wrong
+// exercises) -- the intervening reallocation is not itself required to
+// trigger it. examples/page_pool_stale_identity_wrong isolates the sharper
+// claim this scenario is named for -- that the checker treats two
+// allocations as distinct identities rather than comparing their runtime
+// page index -- with a minimal fixture that does not rely on either owner
+// being consumed first.
 use "examples/page_pool/page_pool_core.tkb";
 
 fn page_pool_reuse_old_view_bad() {

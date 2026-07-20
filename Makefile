@@ -100,7 +100,7 @@ LINUX_BINS             := $(foreach e,$(LINUX_EXAMPLES),examples/$(e)/$(e).exe)
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
 # Convention: examples/<name>/<name>.tkb -> examples/<name>/kernel.elf
-EXAMPLES     := start basic_suite type_system_suite algorithm_suite echo bump timer rtc irq scheduler preempt semaphore condvar msgqueue watchdog net_echo arp_reply icmp_echo tcp_echo http_server fatfs klock_guard percpu chan_rendezvous rtos_demo kvs_server
+EXAMPLES     := start basic_suite type_system_suite algorithm_suite echo bump timer rtc irq scheduler preempt semaphore condvar msgqueue watchdog net_echo arp_reply icmp_echo tcp_echo http_server fatfs klock_guard percpu chan_rendezvous rtos_demo kvs_server page_pool
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
@@ -456,11 +456,22 @@ APP_OBJS   := examples/icmp_echo/icmp_echo.o examples/tcp_echo/tcp_echo.o \
 RTC_OBJS   := examples/rtc/rtc.o examples/timer/timer.o
 GETC_OBJS  := examples/echo/echo.o
 FATFS_OBJS := examples/fatfs/fatfs.o
+# page_pool.tkb `use`s its own private page_pool_core.tkb (issue #67 Stage 1),
+# which Make cannot see through -- listed as an explicit prerequisite below
+# purely for staleness tracking, same reasoning as every other `use`-only
+# COMMON_* prerequisite in this file. --forbid-trap from the start: this is
+# the same already-hardened page_pool_core.tkb the RPi3 build already
+# compiles clean under --forbid-trap (see RPI3_PAGE_POOL_OBJS below), not new
+# unrefined .tkb code being proven for the first time here.
+PAGE_POOL_OBJS := examples/page_pool/page_pool.o
 SPECIAL_OBJS := $(IRQ_OBJS) $(TIMER_OBJS) $(SYNC_OBJS) $(RTOS_OBJS) $(NET_OBJS) $(APP_OBJS) \
-                $(RTC_OBJS) $(GETC_OBJS) $(FATFS_OBJS)
+                $(RTC_OBJS) $(GETC_OBJS) $(FATFS_OBJS) $(PAGE_POOL_OBJS)
 STANDARD_OBJS := $(filter-out $(SPECIAL_OBJS), $(EXAMPLE_OBJS))
 
 $(STANDARD_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
+	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
+
+$(PAGE_POOL_OBJS): examples/%.o: examples/%.tkb examples/page_pool/page_pool_core.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
 examples/basic_suite/basic_suite.o: $(BASIC_SUITE_SOURCES)

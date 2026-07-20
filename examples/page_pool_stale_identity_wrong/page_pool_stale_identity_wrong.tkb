@@ -1,0 +1,43 @@
+// This file is expected to produce a compile error.
+//
+// GitHub issue #67's page_pool motivating case: "a physical page number
+// alone is not enough to distinguish two different allocation lifetimes."
+// examples/page_pool_reuse_old_view_wrong demonstrates this through the real
+// page_alloc/page_bytes/page_free API, but that rejection is fully explained
+// by ordinary use-after-consume tracking on the freed owner -- it does not
+// by itself prove the checker treats two allocations as distinct identities
+// rather than comparing their runtime page index. This file isolates that
+// identity property directly, mirroring
+// examples/variant_existential_identity_wrong's construction: each match
+// independently opens `exists allocation` with a fresh rigid identity, so
+// two leases cannot be passed to a function that requires both arguments to
+// share one static allocation -- even if, as in page_pool's own reuse case,
+// both callers happened to observe the identical runtime page index.
+linear struct PageLease[allocation: usize] {
+    index: usize @ allocation;
+}
+
+variant PageLeaseResult {
+    Leased(exists allocation: usize. PageLease[allocation]);
+}
+
+fn require_same_page_lease(a: borrow PageLease[allocation],
+                            b: borrow PageLease[allocation]) {
+}
+
+fn drop_page_lease(lease: sink PageLease[allocation]) {
+}
+
+fn reuse_stale_identity_wrong(first: PageLeaseResult, second: PageLeaseResult) {
+    match first {
+        PageLeaseResult::Leased(old_lease) => {
+            match second {
+                PageLeaseResult::Leased(new_lease) => {
+                    require_same_page_lease(old_lease, new_lease);
+                    drop_page_lease(old_lease);
+                    drop_page_lease(new_lease);
+                }
+            }
+        }
+    }
+}

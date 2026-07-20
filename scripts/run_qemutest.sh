@@ -938,6 +938,7 @@ run_compile_error_test "region_authority_rebind_wrong" examples/region_authority
 run_compile_error_test "page_pool_double_free_wrong" examples/page_pool_double_free_wrong/page_pool_double_free_wrong.tkb examples/page_pool_double_free_wrong/page_pool_double_free_wrong.error
 run_compile_error_test "page_pool_use_after_free_wrong" examples/page_pool_use_after_free_wrong/page_pool_use_after_free_wrong.tkb examples/page_pool_use_after_free_wrong/page_pool_use_after_free_wrong.error
 run_compile_error_test "page_pool_reuse_old_view_wrong" examples/page_pool_reuse_old_view_wrong/page_pool_reuse_old_view_wrong.tkb examples/page_pool_reuse_old_view_wrong/page_pool_reuse_old_view_wrong.error
+run_compile_error_test "page_pool_stale_identity_wrong" examples/page_pool_stale_identity_wrong/page_pool_stale_identity_wrong.tkb examples/page_pool_stale_identity_wrong/page_pool_stale_identity_wrong.error
 run_compile_error_test "region_aggregate_launder_wrong" examples/region_aggregate_launder_wrong/region_aggregate_launder_wrong.tkb examples/region_aggregate_launder_wrong/region_aggregate_launder_wrong.error
 run_compile_error_test "region_raw_cast_wrong" examples/region_raw_cast_wrong/region_raw_cast_wrong.tkb examples/region_raw_cast_wrong/region_raw_cast_wrong.error
 run_compile_error_test "region_callee_retain_wrong" examples/region_callee_retain_wrong/region_callee_retain_wrong.tkb examples/region_callee_retain_wrong/region_callee_retain_wrong.error
@@ -982,6 +983,7 @@ run_test "klock_guard" examples/klock_guard/kernel.elf examples/klock_guard/kloc
 run_test "percpu" examples/percpu/kernel.elf examples/percpu/percpu.expected
 run_test "chan_rendezvous" examples/chan_rendezvous/kernel.elf examples/chan_rendezvous/chan_rendezvous.expected
 run_test "rtos_demo" examples/rtos_demo/kernel.elf examples/rtos_demo/rtos_demo.expected
+run_test "page_pool" examples/page_pool/kernel.elf examples/page_pool/page_pool.expected
 run_virtio_test "net_echo"   examples/net_echo/kernel.elf   virtio_net_test.py
 run_virtio_test "arp_reply"  examples/arp_reply/kernel.elf  arp_test.py
 run_virtio_test "icmp_echo"  examples/icmp_echo/kernel.elf  icmp_echo_test.py

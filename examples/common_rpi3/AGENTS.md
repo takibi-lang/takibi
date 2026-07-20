@@ -53,28 +53,45 @@ protocol property rather than something the current ownership checker can
 express; that gap is an input to the later memory-model work.  Issue #67's
 page mapping is the next concrete milestone.
 
-## Fixed page pool (issue #67 baseline)
+## Fixed page pool (issue #67 Stage 1)
 
-`examples/page_pool` is deliberately single-core and RPi3-only: 64 static,
-4096-byte pages consume 256 KiB, and forcing that VM-oriented geometry into
-the STM32's 240 KiB RAM would test the wrong constraint.  `page_alloc`
-returns `PageAllocResult::Allocated(exists allocation. PageOwner[allocation])`
-rather than a loose page index.  The owner carries both the physical pool
-index and a monotonically increasing runtime generation; the existential
-allocation identity is fresh at each API boundary even when first-fit
-allocation reuses the same physical index.
+`examples/page_pool` (issue #67's plain physical-page allocator, no MMU/VM
+mapping -- that is Stage 2, still future work) is single-core deliberately,
+but is shared by QEMU and RPi3 like any other `EXAMPLES` entry now; it is
+excluded only from `STM32_EXAMPLES`, since 64 static 4096-byte pages consume
+256 KiB and STM32's 240 KiB RAM cannot fit that VM-oriented geometry at all.
+`page_alloc` returns
+`PageAllocResult::Allocated(exists allocation. PageOwner[allocation])` rather
+than a loose page index -- an application of the existing "closed variant +
+existential indexed owner" idiom already used by `NetRxCpuOwned[desc]` and
+`FatFile[file]` (see `SPEC.md`'s "Closed Variants and Existential Owners"),
+not a new type-system feature. The owner carries both the physical pool index
+and a monotonically increasing runtime generation (the generation is
+informational/printed bookkeeping only -- see below, it is not what makes
+reuse rejection sound).
 
 `page_bytes(borrow PageOwner[allocation]) -> [u8; 4096..] @ allocation`
 returns an exact 4096-byte runtime slice tied to that owner, and `page_free`
-consumes it.  Compile-error fixtures cover double-free, use of a derived slice
-after free, and use of an old slice after a new allocation can reuse the same
-physical page.  The first unrefined implementation was committed after all
-62 RPi3 hardware tests passed; the separate hardening pass enabled
-`--forbid-trap`, refined the page index, and removed all eight reported bounds
-checks.  The only remaining implementation-shaped proof is a local
-`bytes.len >= 4096` narrowing: current interval inference proves the dynamic
-subslice bounds but does not directly retain its exact length as a capacity
-minimum.
+consumes it. Compile-error fixtures: `page_pool_double_free_wrong`,
+`page_pool_use_after_free_wrong`, `page_pool_reuse_old_view_wrong` (a slice
+derived from a freed owner used after a same-physical-page reallocation), and
+`page_pool_stale_identity_wrong`. The last one exists because the reuse
+fixture's own rejection turns out to be fully explained by ordinary
+use-after-consume tracking on the freed owner -- deleting `generation`'s
+`@ allocation` tie entirely still rejects all three original fixtures
+identically (confirmed experimentally). `page_pool_stale_identity_wrong`
+isolates the sharper claim issue #67 actually asked for -- that the checker
+treats two independently-opened allocations as distinct identities rather
+than comparing runtime page index -- using the same minimal construction as
+`examples/variant_existential_identity_wrong` (two opaque leases passed to a
+function requiring one shared static identity, rejected with "static value
+mismatch" regardless of whether their runtime index values agree). The first
+unrefined implementation was committed after all 62 RPi3 hardware tests
+passed; the separate hardening pass enabled `--forbid-trap`, refined the page
+index, and removed all eight reported bounds checks. The only remaining
+implementation-shaped proof is a local `bytes.len >= 4096` narrowing: current
+interval inference proves the dynamic subslice bounds but does not directly
+retain its exact length as a capacity minimum.
 
 GitHub issue #140. Status: 64 examples ported and passing `make
 hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level

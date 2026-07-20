@@ -15,6 +15,55 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-21: Fixed Page Pool -- QEMU/RPi3 Wiring and a Sharper Identity Fixture (Issue #67 Stage 1)
+
+`examples/page_pool` (issue #67's plain physical-page allocator, `page_alloc`/
+`page_bytes`/`page_free`, no MMU/VM mapping) had landed as an RPi3-only build:
+the RPi3 `--forbid-trap` object rule, `page_pool_double_free_wrong`,
+`page_pool_use_after_free_wrong`, and `page_pool_reuse_old_view_wrong` were all
+wired up and passing, but the example was never added to the top-level
+`EXAMPLES` list, so it never ran under `make qemutest`/`make check` -- a
+deviation from this project's usual QEMU-first verification order with no
+stated reason (the STM32 exclusion rationale, 64 static 4096-byte pages
+needing 256 KiB against STM32's 240 KiB RAM, does not apply to QEMU's
+emulated RAM). Added `page_pool` to `EXAMPLES` (`Makefile`), a dedicated
+`PAGE_POOL_OBJS` rule building `page_pool.tkb` + `page_pool_core.tkb` under
+`--forbid-trap` (already-hardened source, not new unrefined code -- same
+reasoning `FATFS_OBJS` used), the `GENERIC_KERNELS` link (automatic, no rule
+needed), and a `run_test "page_pool"` entry in `scripts/run_qemutest.sh`.
+`make check` now passes 140/140 including `page_pool` under QEMU, and
+`make hwcheck-rpi3`-style real-hardware injection (verified directly against
+the board) still passes.
+
+Separately, checked whether `PageOwner[allocation]`'s `generation: usize @
+allocation` field is load-bearing for the type-checker's rejection of
+`page_pool_reuse_old_view_wrong` (a slice derived from a freed owner, used
+after a same-physical-index reallocation) -- issue #67 specifically called
+out that "a physical page number alone is not enough to distinguish two
+different allocation lifetimes" as the important property here. Deleting the
+`@ allocation` tie from `generation` entirely (leaving `allocation`
+unwitnessed by any runtime field) and recompiling left all three original
+negative fixtures rejected with identical messages: the rejection is fully
+explained by ordinary use-after-consume tracking on the freed owner variable,
+the same rule `page_pool_use_after_free_wrong` exercises, and does not
+actually exercise identity freshness at all. Added
+`examples/page_pool_stale_identity_wrong`, mirroring
+`examples/variant_existential_identity_wrong`'s construction (two leases
+opened from independent `match`es, passed to a function requiring one shared
+static identity), to isolate the sharper claim directly: two
+independently-opened allocations are always distinct identities to the
+checker, never unified merely because their runtime page index agrees
+(rejected with "static value mismatch", per `SPEC.md`'s "Closed Variants and
+Existential Owners" section). `page_pool_reuse_old_view_wrong`'s header
+comment and `examples/common_rpi3/AGENTS.md`'s page pool section were updated
+to describe what each fixture actually proves rather than restating the
+issue's motivating narrative as if the reuse fixture alone demonstrated it.
+
+`PageOwner[allocation]` itself required no new type-system machinery -- it is
+the same "closed variant wrapping an existential indexed owner" idiom already
+used by `NetRxCpuOwned[desc]` and `FatFile[file]`, applied at page granularity
+rather than descriptor/file granularity, matching this project's YAGNI stance.
+
 ### 2026-07-19: STM32 Profiler Memory Headroom Restored
 
 The eventual-persistence KVS image still fits in the STM32F746's 240 KiB AXI
