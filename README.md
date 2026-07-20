@@ -325,6 +325,115 @@ log. The board itself keeps serving until it's powered off or reflashed.
   `ip addr show <your-interface>` and that the Ethernet cable is actually
   linked up (`ip link show <your-interface>` should say `state UP`).
 
+## Demo: Serving a Real Web Page from a Raspberry Pi 3B Board
+
+The same HTTP server also runs unmodified on a real Raspberry Pi 3B
+(BCM2837), reachable over its own point-to-point Ethernet link. Unlike the
+STM32 board, this target has no on-chip debug probe and no flash-and-run
+workflow: it is a JTAG-injection setup (payloads are loaded straight into
+RAM over JTAG, not written to the SD card as `kernel8.img`) -- see
+[`examples/common_rpi3/AGENTS.md`](examples/common_rpi3/AGENTS.md) for the
+full hardware bring-up story.
+
+### What you need
+
+- A Raspberry Pi 3B board, plus:
+  - A JTAG probe (this project uses an Olimex ARM-USB-TINY-H) wired to
+    GPIO22-27 (the standard 6-pin ARM JTAG GPIO header).
+  - A separate USB-serial dongle wired to GPIO14 (TXD0)/GPIO15 (RXD0)/GND
+    for the UART console -- this is independent of the JTAG probe's own
+    wiring.
+  - A microSD card, prepared once (see step 1 below).
+- An Ethernet cable, and a spare Ethernet NIC on your Linux host that you can
+  dedicate to a direct point-to-point link to the board (no router/switch,
+  no DHCP -- same idea as the STM32 demo, different subnet).
+- A Linux host with the toolchain in "Dependencies" below installed --
+  `openocd` in particular. The `.devcontainer/` in this repo already has
+  everything installed.
+
+### 1. Prepare the SD card (one-time)
+
+The SD card boots a tiny spin-loop stub instead of an OS, giving JTAG a
+clean, safe catch point on every run (see
+[`examples/common_rpi3/AGENTS.md`](examples/common_rpi3/AGENTS.md)'s "Why
+JTAG injection, not an SD card kernel"). With the card mounted wherever your
+host actually mounts it (this devcontainer has no raw SD card reader
+access, so this step runs outside the container):
+
+```bash
+make examples/common_rpi3/jtag_stub.img
+scripts/rpi3_prepare_sdcard.sh /path/to/mounted/boot/partition
+```
+
+This backs up the partition's existing `kernel8.img` (if any) to
+`kernel8.img.orig`, overwrites it with the built stub, and appends
+`enable_jtag_gpio=1` and `dtoverlay=disable-bt` to `config.txt` (both are
+required -- the second disables UART0's default routing to the on-board
+Bluetooth module). Safe to re-run.
+
+### 2. Connect the board
+
+Insert the prepared SD card, wire up the JTAG probe and the UART dongle as
+described above, connect an Ethernet cable between the board and the NIC
+you're dedicating to this demo, then power on the board.
+
+### 3. Give your host NIC a matching address
+
+The board always serves on a fixed address, `192.168.20.2/24`
+(configurable in `examples/common_rpi3/netconfig.tkb`). Put your host's NIC
+on the same `/24`:
+
+```bash
+sudo ip addr add 192.168.20.1/24 dev <your-interface>
+sudo ip link set <your-interface> up
+```
+
+Replace `<your-interface>` with whatever `ip link` shows for the NIC wired
+to the board (e.g. `enp5s0`).
+
+### 4. Build, inject, and run
+
+```bash
+make rpi3-http-server
+```
+
+This compiles `examples/http_server` for the Raspberry Pi 3B target (if not
+already built), resets the board over JTAG to a clean catch point, injects
+the payload, and streams the UART log to your terminal. It prints the URL
+to open, e.g.:
+
+```
+Open http://192.168.20.2/ in your browser (Ctrl-C to quit)
+```
+
+### 5. Open it in a browser
+
+Visit the printed URL, same as the STM32 demo.
+
+### 6. Stop
+
+Ctrl-C in the terminal running `make rpi3-http-server` stops streaming the
+log. The board keeps serving until reset or power-cycled.
+
+### Troubleshooting
+
+- `error: no non-JTAG ttyUSB device found` / `multiple candidate ttyUSB
+  devices found` -- `scripts/rpi_uart_dev.sh` couldn't uniquely identify the
+  UART dongle; override with `RPI3_SERIAL_DEV=/dev-host/ttyUSBn make
+  rpi3-http-server`.
+- `halted core is at EL1H, not EL2H` -- the board is still running a normal
+  OS (Linux always runs its kernel at EL1), not the JTAG stub. Either the SD
+  card wasn't prepared (step 1) or the board hasn't been power-cycled since
+  it last ran something else; power-cycle it and try again.
+- **Never run `openocd` (or anything touching the JTAG/UART USB devices)
+  with `sudo`** inside this project's devcontainer -- it degrades JTAG
+  reliability rather than helping. See
+  [`examples/common_rpi3/AGENTS.md`](examples/common_rpi3/AGENTS.md)'s
+  `sudo` warning for why.
+- Browser can't reach `192.168.20.2` -- confirm the NIC's address with
+  `ip addr show <your-interface>` and that the Ethernet cable is actually
+  linked up (`ip link show <your-interface>` should say `state UP`).
+
 ## Building and Testing
 
 ```bash
@@ -335,12 +444,17 @@ make stm32build      # cross-compile every ported example for STM32 (no hardware
 make check           # langcheck + test + stm32build + qemutest
 make hwcheck-stm32          # like stm32build, but also flashes + verifies against real STM32 hardware
 make hwcheck-stm32-net      # real-Ethernet hardware tests (needs the board wired to this host's NIC)
+make hwcheck-rpi3           # opt-in Raspberry Pi 3B JTAG hardware integration test (needs the board wired for JTAG+UART)
+make hwcheck-rpi3-net       # RPi3 real-Ethernet hardware tests (needs the board's Ethernet port wired to this host's NIC)
 make stress-stm32-kvs-server-sdcard-rtos  # opt-in STM32 KVS concurrency stress test
 make perfcheck        # real-hardware profiler smoke tests
-make allcheck         # clean + check + hwcheck-stm32 + perfcheck + hwcheck-stm32-net
+make allcheck         # clean + build once, then run the QEMU, STM32, and RPi3 lanes in parallel
 ```
 
-Builds run in parallel across all cores by default.
+Builds run in parallel across all cores by default. `hwcheck-rpi3-net` and
+`stress-stm32-kvs-server-sdcard-rtos` are opt-in and not part of `allcheck`
+(see `AGENTS.md`'s Build Commands section for the full reasoning behind
+each target).
 
 `stress-stm32-kvs-server-sdcard-rtos` is intentionally not part of
 `allcheck`: it is a sustained real-board load test rather than a deterministic
@@ -391,6 +505,9 @@ code is written once.
 - QEMU `virt` machine, `cortex-a53` CPU (AArch64 bare-metal).
 - STM32F746G-DISCOVERY (Cortex-M7 bare-metal), flashed and verified
   against real hardware.
+- Raspberry Pi 3B (BCM2837, AArch64 bare-metal), JTAG-injected and verified
+  against real hardware -- see
+  [`examples/common_rpi3/AGENTS.md`](examples/common_rpi3/AGENTS.md).
 
 ## Acknowledgements
 

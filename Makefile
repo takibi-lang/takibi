@@ -214,7 +214,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemubuild qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-rpi3 stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck allcheck-build clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
+.PHONY: build test qemubuild qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-rpi3 hwcheck-rpi3-net stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck allcheck-build clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos rpi3-http-server profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
 
 .DEFAULT_GOAL := build
 
@@ -1260,6 +1260,44 @@ stm32-http-server-sdcard-rtos: examples/http_server_sdcard_rtos/kernel_stm32.bin
 	catpid=$$!; \
 	sleep 0.2; \
 	st-flash --connect-under-reset reset > /dev/null 2>&1; \
+	wait $$catpid
+
+## rpi3-http-server: inject and run the HTTP server demo on the real
+## Raspberry Pi 3B board over JTAG (requires the board wired for JTAG+UART
+## and its Ethernet port wired to this host's dedicated NIC -- see
+## examples/common_rpi3/AGENTS.md for the physical setup and
+## examples/common_rpi3/netconfig.tkb's OUR_IP comment for the
+## point-to-point subnet this depends on).
+##
+## Same UX as stm32-http-server (announce the URL, then let the server's
+## own log lines scroll by, Ctrl-C to quit), but the load mechanism is
+## necessarily different: this board has no `reset halt` (see "Why JTAG
+## injection, not an SD card kernel" in examples/common_rpi3/AGENTS.md), so
+## this target first runs scripts/rpi3_jtag_reset.sh to reach a clean catch
+## point, then scripts/rpi3_jtag_load.sh to inject the payload -- the same
+## two-step sequence make hwcheck-rpi3 already uses for every example. The
+## UART reader is attached (backgrounded) before injection, not after, same
+## ordering reasoning as stm32-http-server's own comment. RPI3_SERIAL_DEV
+## overrides scripts/rpi_uart_dev.sh's auto-detected device if needed.
+RPI3_SERIAL_DEV ?=
+
+rpi3-http-server: examples/http_server/kernel_rpi3.elf
+	@dev="$(RPI3_SERIAL_DEV)"; \
+	if [ -z "$$dev" ]; then dev="$$(scripts/rpi_uart_dev.sh)" || exit 1; fi; \
+	rhs=$$(grep -m1 '^let HTTP_SERVER_IP:' examples/common_rpi3/netconfig.tkb | grep -oP '= \K.*(?=;)'); \
+	case "$$rhs" in \
+	  \{*) lit="$$rhs" ;; \
+	  *) lit=$$(grep -m1 "^let $$rhs:" examples/common_rpi3/netconfig.tkb | grep -oP '= \K.*(?=;)') ;; \
+	esac; \
+	ip=$$(echo "$$lit" | tr -d '{} ' | tr ',' '.'); \
+	echo "Resetting the board over JTAG..."; \
+	scripts/rpi3_jtag_reset.sh > /dev/null; \
+	stty -F "$$dev" 115200 raw -echo; \
+	echo "Open http://$$ip/ in your browser (Ctrl-C to quit)"; \
+	cat "$$dev" & \
+	catpid=$$!; \
+	sleep 0.2; \
+	scripts/rpi3_jtag_load.sh $< > /dev/null; \
 	wait $$catpid
 
 ## profile-http-server: rough execution profile of http_server.tkb under QEMU
