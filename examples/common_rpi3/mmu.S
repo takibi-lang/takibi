@@ -172,6 +172,17 @@ mmu_init:
     dsb     sy
     isb
 
+    /* Cortex-A53's implementation-defined CPUECTLR_EL1.SMPEN bit must be set
+       on EVERY participating core before its D-cache is enabled.  Inner-
+       Shareable page attributes alone do not make a core participate in the
+       coherency domain; the first smp_handoff hardware run proved this by
+       transferring the buffer successfully but leaving core 1 unable to
+       observe core 0's final mailbox ACK. */
+    mrs     x0, S3_1_C15_C2_1
+    orr     x0, x0, #0x40
+    msr     S3_1_C15_C2_1, x0
+    isb
+
     /* Enable the MMU (SCTLR_EL2.M) AND both caches (C, I) -- this is the
        steady state every subsequent instruction/load in this run
        executes under. Caches were left OFF up to this exact point
@@ -213,4 +224,40 @@ mmu_init:
     msr     sctlr_el2, x0
     isb
 
+    ret
+
+/* Install the already-built core-0 translation tables on a secondary core.
+   The smp_handoff loader starts core 1 only after core 0 has reached app_main,
+   so rebuilding the shared tables here would be both unnecessary and racy. */
+    .global mmu_init_secondary
+mmu_init_secondary:
+    movz    x0, #0xff00
+    msr     mair_el2, x0
+
+    movz    x0, #0x3519
+    movk    x0, #0x8080, lsl #16
+    msr     tcr_el2, x0
+
+    adrp    x0, l1_table
+    add     x0, x0, :lo12:l1_table
+    msr     ttbr0_el2, x0
+
+    isb
+    dsb     sy
+    tlbi    alle2
+    dsb     sy
+    isb
+
+    mrs     x0, S3_1_C15_C2_1
+    orr     x0, x0, #0x40
+    msr     S3_1_C15_C2_1, x0
+    isb
+
+    mrs     x0, sctlr_el2
+    bic     x0, x0, #(1 << 1)
+    orr     x0, x0, #(1 << 2)
+    orr     x0, x0, #(1 << 12)
+    orr     x0, x0, #1
+    msr     sctlr_el2, x0
+    isb
     ret

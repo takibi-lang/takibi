@@ -1274,6 +1274,8 @@ COMMON_RPI3_INTC         := $(COMMON_RPI3_DIR)/intc.tkb
 COMMON_RPI3_RTC          := $(COMMON_RPI3_DIR)/rtc.tkb
 COMMON_RPI3_TIMER_ASM_S  := $(COMMON_RPI3_DIR)/timer_asm.S
 COMMON_RPI3_TIMER_ASM_O  := $(COMMON_RPI3_DIR)/timer_asm.o
+COMMON_RPI3_SMP_S        := $(COMMON_RPI3_DIR)/smp.S
+COMMON_RPI3_SMP_O        := $(COMMON_RPI3_DIR)/smp.o
 COMMON_RPI3_MAILBOX      := $(COMMON_RPI3_DIR)/mailbox.tkb
 COMMON_RPI3_JTAG_STUB_S  := $(COMMON_RPI3_DIR)/jtag_stub.S
 COMMON_RPI3_JTAG_STUB_O  := $(COMMON_RPI3_DIR)/jtag_stub.o
@@ -1286,6 +1288,9 @@ $(COMMON_RPI3_MMU_O): $(COMMON_RPI3_MMU_S)
 	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI3_TIMER_ASM_O): $(COMMON_RPI3_TIMER_ASM_S)
+	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
+
+$(COMMON_RPI3_SMP_O): $(COMMON_RPI3_SMP_S)
 	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI3_JTAG_STUB_O): $(COMMON_RPI3_JTAG_STUB_S)
@@ -1382,6 +1387,14 @@ RPI3_SCHED_OBJS         := $(foreach e,$(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_E
 $(RPI3_SCHED_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_TAKIBI_FLAGS) -o $@
 
+# First real SMP milestone (GitHub issue #6).  Its working unrefined baseline
+# was committed before this dedicated rule gained --forbid-trap, preserving
+# the repository's baseline-then-hardening history.  The assembly shim gives
+# core 1 a dedicated entry/stack; sem_asm supplies the cross-core atomic mutex.
+examples/smp_handoff/smp_handoff_rpi3.o: examples/smp_handoff/smp_handoff.tkb \
+    $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_SYNC) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
+
 # USB bring-up group (GitHub issue #140's Ethernet milestone -- see
 # examples/usb_probe/usb_probe.tkb's own header comment and
 # examples/common_rpi3/AGENTS.md for the full plan). Grows one milestone
@@ -1451,6 +1464,11 @@ $(RPI3_SEM_KERNELS): examples/%/kernel_rpi3.elf: \
     $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_TIMER_ASM_O) $(COMMON_SEM_ASM_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
 	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_TIMER_ASM_O) $(COMMON_SEM_ASM_O) examples/$*/$*_rpi3.o -o $@
 
+examples/smp_handoff/kernel_rpi3.elf: $(COMMON_RPI3_STARTUP_O) \
+    $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_SMP_O) $(COMMON_SEM_ASM_O) \
+    examples/smp_handoff/smp_handoff_rpi3.o $(COMMON_RPI3_LINK_LD)
+	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_SMP_O) $(COMMON_SEM_ASM_O) examples/smp_handoff/smp_handoff_rpi3.o -o $@
+
 ## hwcheck-rpi3: run Raspberry Pi 3B (BCM2837) hardware integration tests
 ## (requires a real Raspberry Pi 3B connected via JTAG + UART -- see
 ## examples/common_rpi3/AGENTS.md). NOT part of `make check`/`make allcheck`:
@@ -1462,7 +1480,7 @@ $(RPI3_SEM_KERNELS): examples/%/kernel_rpi3.elf: \
 ## first run -- board-state-dependent hardware preconditions like this are
 ## why hwcheck-stm32 itself, and stress-stm32-kvs-server-sdcard-rtos, also
 ## stay out of check/allcheck.
-hwcheck-rpi3: $(RPI3_KERNELS) examples/common_rpi3/jtag_stub.img
+hwcheck-rpi3: $(RPI3_KERNELS) examples/smp_handoff/kernel_rpi3.elf examples/common_rpi3/jtag_stub.img
 	@bash scripts/run_hwtest_rpi3.sh
 
 ## hwcheck-rpi3-net: run all RPi3 real-Ethernet hardware tests (net_echo/

@@ -1,5 +1,58 @@
 # Raspberry Pi 3B (BCM2837) Bare-Metal Bring-Up
 
+## SMP ownership handoff (issue #6, working baseline)
+
+`examples/smp_handoff` is the first deliberately narrow SMP milestone.  It
+starts core 1 with its own 16KB stack and the translation tables core 0 has
+already built, then transfers one linear `BufferOwner` through a stable owner
+slot protected by the existing `ldaxr`/`stlxr` semaphore.  The corresponding
+64-byte, cache-line-aligned static buffer stays in place: core 0 initializes
+it, core 1 increments every byte, and core 0 verifies the result after the
+same owner returns.  Only the erased ownership authority crosses the mailbox;
+the payload is not copied.
+
+The hardware bring-up exposed an A53-specific prerequisite that the page
+table's Inner-Shareable attributes do not replace: every participating core
+must set `CPUECTLR_EL1.SMPEN` before enabling its D-cache.  Without it the
+payload happened to make the core-1-to-core-0 trip, but core 1 never observed
+core 0's final mailbox acknowledgement.  `mmu_init` and
+`mmu_init_secondary` now set SMPEN before setting `SCTLR_EL2.C`.
+
+The first, unrefined baseline was deliberately committed before enabling
+`--forbid-trap`, following the repository-wide baseline-then-hardening rule.
+The baseline passed on real
+hardware: the complete UART fixture matched, core 1 returned to 0x7c with its
+MMU and both caches disabled, and an immediately following ordinary
+single-core `hello` injection also passed.  The desk-side build is `make
+examples/smp_handoff/kernel_rpi3.elf`.  Its hardware test is wired into `make
+hwcheck-rpi3`; the runner sets `RPI3_SMP_CORES=2` only for this fixture.
+The subsequent hardening step enables `--forbid-trap` on its dedicated build
+rule and records two protocol-specific negative fixtures: use after send and
+double send are both rejected because the sending call consumes the linear
+owner.  The buffer accessor's private raw-pointer field-decay remains a
+documented trusted implementation detail because Takibi does not yet parse
+assignment through an array-valued struct field (`s.field[i] = v`); callers
+cannot obtain that pointer and must present the owner token.
+
+The ordinary JTAG loader continues to touch core 0 only.  With
+`RPI3_SMP_CORES=2`, it starts core 0 first, waits 200ms for page-table and BSS
+initialization, then redirects core 1 from the firmware spin loop to `smp.S`'s
+secondary entry.  `startup.S` also dispatches nonzero cores through the same
+weak hook for non-JTAG boot paths; only `smp.S` overrides it.  After the
+handoff, core 1 disables its MMU/caches and branches back to the firmware
+secondary-core spin loop at 0x7c (the address observed through OpenOCD before
+first launch), outside the injected image, so later single-core payloads can
+again replace 0x200000 safely.  A set/way D-cache invalidation faults on this
+secondary core; its shutdown path therefore invalidates the injected image's
+known VA range with `dc ivac` before disabling the cache instead.
+
+Current scope is exactly two cores, one fixed SPSC owner slot, and one fixed
+buffer.  There is no generic core launcher, IPI layer, scheduler integration,
+allocator, or load balancing.  Missing synchronization is still a runtime
+protocol property rather than something the current ownership checker can
+express; that gap is an input to the later memory-model work.  Issue #67's
+fixed page pool is the next concrete milestone.
+
 GitHub issue #140. Status: 63 examples ported and passing `make
 hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level
 `EXAMPLES` list EXCEPT

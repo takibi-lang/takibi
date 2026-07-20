@@ -277,6 +277,7 @@ run_hw_test_rpi3 "align_ptr_proof (rpi3)" "$REPO_ROOT/examples/align_ptr_proof/k
 run_hw_test_rpi3 "linear_obligation (rpi3)" "$REPO_ROOT/examples/linear_obligation/kernel_rpi3.elf" "$REPO_ROOT/examples/linear_obligation/linear_obligation.expected"
 run_hw_test_rpi3 "tuple_pair (rpi3)"     "$REPO_ROOT/examples/tuple_pair/kernel_rpi3.elf"     "$REPO_ROOT/examples/tuple_pair/tuple_pair.expected"
 run_hw_test_rpi3 "field_lease (rpi3)"    "$REPO_ROOT/examples/field_lease/kernel_rpi3.elf"    "$REPO_ROOT/examples/field_lease/field_lease.expected"
+RPI3_SMP_CORES=2 run_hw_test_rpi3 "smp_handoff (rpi3)" "$REPO_ROOT/examples/smp_handoff/kernel_rpi3.elf" "$REPO_ROOT/examples/smp_handoff/smp_handoff.expected" 5 30
 run_hw_test_rpi3 "inet_checksum (rpi3)"  "$REPO_ROOT/examples/inet_checksum/kernel_rpi3.elf"  "$REPO_ROOT/examples/inet_checksum/inet_checksum.expected"
 run_hw_test_rpi3 "ip_parse (rpi3)"       "$REPO_ROOT/examples/ip_parse/kernel_rpi3.elf"       "$REPO_ROOT/examples/ip_parse/ip_parse.expected"
 run_hw_test_rpi3 "tcp_parse (rpi3)"      "$REPO_ROOT/examples/tcp_parse/kernel_rpi3.elf"      "$REPO_ROOT/examples/tcp_parse/tcp_parse.expected"

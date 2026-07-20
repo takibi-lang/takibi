@@ -27,6 +27,7 @@
    field (bits[26:24]) is compared pre-doubled to match. Leaf routine: no
    nested calls, never touches SP, so it is safe to `bl` before SP is
    initialised. Clobbers x0-x12. */
+    .global dcache_invalidate_all
 dcache_invalidate_all:
     mrs     x0, clidr_el1
     and     x3, x0, #0x7000000      /* x3 = LoC field (bits 26:24) */
@@ -78,6 +79,13 @@ _start:
     mrs     x0, mpidr_el1
     and     x0, x0, #3
     cbz     x0, .Lcore0
+    b       rpi3_secondary_start
+
+/* Ordinary examples never start the secondary cores, and therefore keep the
+   old park behaviour through this weak default.  The smp_handoff example
+   links a strong implementation from smp.S. */
+    .weak   rpi3_secondary_start
+rpi3_secondary_start:
 .Lpark:
     wfe
     b       .Lpark
@@ -281,6 +289,15 @@ enable_irq:
     .global disable_irq
 disable_irq:
     msr     DAIFSet, #0x2
+    ret
+
+/* Read the affinity-0 field used as the BCM2837 core number.  Kept in the
+   common startup object so later SMP examples do not each grow their own
+   privileged-register shim. */
+    .global rpi3_core_id
+rpi3_core_id:
+    mrs     x0, mpidr_el1
+    and     x0, x0, #3
     ret
 
 /* -- Default (no-op) rpi3_irq_dispatch ----------------------------------------

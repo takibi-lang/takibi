@@ -40,6 +40,8 @@ fi
 
 entry_pc="0x$(llvm-readelf-19 -h "$ELF" | awk '/Entry point address/{sub(/^0x/,"",$NF); print $NF}')"
 stack_top="0x$(llvm-nm-19 "$ELF" | awk '$3=="stack_top"{print $1}')"
+smp_core1_stack_top="0x$(llvm-nm-19 "$ELF" | awk '$3=="smp_core1_stack_top"{print $1}')"
+smp_secondary_entry="0x$(llvm-nm-19 "$ELF" | awk '$3=="rpi3_secondary_start"{print $1}')"
 
 if [ -z "${entry_pc#0x}" ] || [ -z "${stack_top#0x}" ]; then
     echo "error: could not read entry point / stack_top from $ELF" >&2
@@ -49,6 +51,16 @@ fi
 echo "target ELF:  $ELF"
 echo "entry PC:    $entry_pc"
 echo "initial SP:  $stack_top"
+
+SMP_CORES="${RPI3_SMP_CORES:-0}"
+if [ "$SMP_CORES" != "0" ] && [ "$SMP_CORES" != "2" ]; then
+    echo "error: RPI3_SMP_CORES must be 0 or 2" >&2
+    exit 1
+fi
+if [ "$SMP_CORES" = "2" ] && { [ -z "${smp_core1_stack_top#0x}" ] || [ -z "${smp_secondary_entry#0x}" ]; }; then
+    echo "error: SMP load requested but its core-1 entry/stack symbols are absent from $ELF" >&2
+    exit 1
+fi
 
 OPENOCD_ARGS=(
     -f interface/ftdi/olimex-arm-usb-tiny-h.cfg
@@ -103,17 +115,33 @@ fi
 echo "halted core is at EL2H (PC=$halted_pc) -- safe to inject"
 
 # Pass 2: only reached once the check above confirms a clean catch. Halts
-# the (already resumed) core again, loads the real payload, points PC/SP
-# at its entry, and resumes into it for real.
+# core 0, loads the real payload, points PC/SP at its entry, and resumes it.
+# For the opt-in two-core fixture, core 0 gets 200ms to build the shared page
+# tables and reach its mailbox wait before core 1 is redirected from the
+# persistent JTAG stub to the same _start entry.
 LOG=$(mktemp)
-if ! openocd "${OPENOCD_ARGS[@]}" \
-    -c 'init' \
-    -c 'halt' \
-    -c "load_image $ELF 0 elf" \
-    -c "reg sp $stack_top" \
-    -c "reg pc $entry_pc" \
-    -c 'resume' \
-    -c 'shutdown' > "$LOG" 2>&1
+LOAD_COMMANDS=(
+    -c 'init'
+    -c 'targets bcm2837.cpu0'
+    -c 'halt'
+    -c "load_image $ELF 0 elf"
+    -c "reg sp $stack_top"
+    -c "reg pc $entry_pc"
+    -c 'resume'
+)
+if [ "$SMP_CORES" = "2" ]; then
+    LOAD_COMMANDS+=(
+        -c 'sleep 200'
+        -c 'targets bcm2837.cpu1'
+        -c 'halt'
+        -c "reg sp $smp_core1_stack_top"
+        -c "reg pc $smp_secondary_entry"
+        -c 'resume'
+    )
+fi
+LOAD_COMMANDS+=(-c 'shutdown')
+
+if ! openocd "${OPENOCD_ARGS[@]}" "${LOAD_COMMANDS[@]}" > "$LOG" 2>&1
 then
     echo "error: openocd failed during injection -- log follows" >&2
     cat "$LOG" >&2
