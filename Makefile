@@ -1468,6 +1468,15 @@ examples/smp_handoff/smp_handoff_rpi3.o: examples/smp_handoff/smp_handoff.tkb \
     $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_SYNC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
+# Single-core fixed-page allocator milestone.  Keep this separate from the
+# general RPI3_TAKIBI_FLAGS rule so its known-good baseline is first committed
+# without --forbid-trap; the hardening commit will enable it here.
+RPI3_PAGE_POOL_EXAMPLES := page_pool
+RPI3_PAGE_POOL_OBJS := $(foreach e,$(RPI3_PAGE_POOL_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
+
+$(RPI3_PAGE_POOL_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+
 # USB bring-up group (GitHub issue #140's Ethernet milestone -- see
 # examples/usb_probe/usb_probe.tkb's own header comment and
 # examples/common_rpi3/AGENTS.md for the full plan). Grows one milestone
@@ -1583,7 +1592,7 @@ RPI3_HTTP_SDCARD_RTOS_OBJS     := $(foreach e,$(RPI3_HTTP_SDCARD_RTOS_EXAMPLES),
 $(RPI3_HTTP_SDCARD_RTOS_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_NETCONFIG) $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
 
-RPI3_EXAMPLES += $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES) $(RPI3_HTTP_SDCARD_EXAMPLES) $(RPI3_HTTP_SDCARD_RTOS_EXAMPLES)
+RPI3_EXAMPLES += $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_PAGE_POOL_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES) $(RPI3_HTTP_SDCARD_EXAMPLES) $(RPI3_HTTP_SDCARD_RTOS_EXAMPLES)
 RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 # rtc/timer/preempt/watchdog need COMMON_RPI3_TIMER_ASM_O linked in
 # (read_cntfrq() and friends -- mrs cannot be called directly from

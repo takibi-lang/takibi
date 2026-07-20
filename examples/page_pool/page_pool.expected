@@ -1,0 +1,6 @@
+page_pool
+allocated: 0 1
+values: 17 18 34
+generations: 1 2
+reused: 0 generation 3
+done
