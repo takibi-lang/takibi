@@ -9982,3 +9982,17 @@ capture subsequently produced all 157 expected bytes and matched the fixture
 exactly, proving this was harness truncation rather than a FAT/USB/RTOS
 failure. The wider quiet window applies to both FAT-formatting examples that
 have the same exposure.
+
+`make allcheck` now builds every artifact once and then runs three independent
+runtime lanes concurrently: software/unit/QEMU, all STM32 checks, and all RPi3
+checks. Checks sharing one physical board remain serial within that board's
+lane, preserving the existing hardware ownership and test ordering. A naive
+parallel recursive-Make implementation was deliberately avoided because it
+would race multiple `dune build` processes and duplicate generation of shared
+artifacts; `allcheck-build` completes that shared phase first in one Make DAG.
+The runtime orchestrator stores complete raw logs under
+`_build/allcheck-logs`, emits lane-prefixed PASS/FAIL and stage progress live,
+and reprints a failed lane's raw log as one uninterrupted block so multiline
+expected/actual diagnostics remain readable. It waits for all three lanes and
+always prints a final per-lane PASS/FAIL summary, rather than losing the other
+boards' results when the first lane fails.

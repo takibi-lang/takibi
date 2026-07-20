@@ -203,7 +203,7 @@ make stress-stm32-kvs-server-sdcard-rtos  # opt-in STM32 KVS concurrency stress 
 make hwcheck-rpi3   # opt-in Raspberry Pi 3B JTAG hardware integration test (not in allcheck, see examples/common_rpi3/AGENTS.md)
 make hwcheck-rpi3-net     # RPi3 real-Ethernet hardware tests (needs the board's Ethernet port -- behind its USB host stack, see examples/common_rpi3/AGENTS.md -- wired to this host)
 make perfcheck      # real-hardware profiler smoke tests
-make allcheck       # clean + check + hwcheck-stm32 + perfcheck + hwcheck-stm32-net
+make allcheck       # clean/build, then QEMU + STM32 + RPi3 lanes in parallel
 make clean          # remove generated artifacts
 ```
 
