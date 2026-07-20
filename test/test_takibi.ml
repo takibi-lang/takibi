@@ -8238,6 +8238,77 @@ let codegen_tests = [
          "fn riscv_event_wait_is_rejected() { interrupt_wait(); }" ());
 
   Alcotest.test_case
+    "DMA cache builtins lower to real dc cvac/dc ivac range loops on \
+     AArch64 (issue #146: previously only a bare dsb was emitted here, \
+     silently reproducing the same stale-cache-line gap that bit \
+     Raspberry Pi 3B's mailbox and USB DMA once its D-cache was genuinely \
+     enabled)" `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
+       in
+       let _ = gen_codegen
+         "fn codegen_dma_cache_aarch64(p: *align(32) u8, n: usize) {
+            dma_prepare_tx(p, n);
+            dma_prepare_rx(p, n);
+            dma_finish_rx(p, n);
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_dma_cache_aarch64" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_dma_cache_aarch64 was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check int) "one clean (dma_prepare_tx)" 1
+         (count_substring ir "dc cvac, x13");
+       Alcotest.(check int) "two invalidates (dma_prepare_rx + dma_finish_rx)" 2
+         (count_substring ir "dc ivac, x13");
+       Alcotest.(check int) "line size read from CTR_EL0 each call" 3
+         (count_substring ir "mrs x9, ctr_el0");
+       Alcotest.(check int) "surrounding barriers" 4
+         (count_substring ir "llvm.aarch64.dsb"));
+
+  Alcotest.test_case
+    "DMA cache builtins are a verified no-op fence on x86-64, not a gap \
+     (issue #146: PC-class DMA is chipset/IOMMU-coherent by hardware, \
+     unlike the AArch64 case above)" `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"x86_64-none-elf" ()
+       in
+       let _ = gen_codegen
+         "fn codegen_dma_cache_x86(p: *align(32) u8, n: usize) {
+            dma_prepare_tx(p, n);
+            dma_prepare_rx(p, n);
+            dma_finish_rx(p, n);
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_dma_cache_x86" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_dma_cache_x86 was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check bool) "no dc cvac" false (contains_substring ir "dc cvac");
+       Alcotest.(check bool) "no dc ivac" false (contains_substring ir "dc ivac");
+       Alcotest.(check int) "three mfence calls" 3
+         (count_substring ir "llvm.x86.sse2.mfence"));
+
+  Alcotest.test_case
+    "DMA cache builtins reject RISC-V rather than silently falling back to \
+     a bare fence (issue #146: no Zicbom cbo.clean/cbo.flush/cbo.inval \
+     lowering exists yet, and no RISC-V target exists anywhere in this \
+     project to verify one against, so a silent barrier-only fallback \
+     would reproduce the same stale-cache-line hazard found on AArch64)"
+    `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"riscv64-none-elf" ()
+       in
+       expect_codegen_error
+         "need real cache maintenance on target 'riscv64-none-elf'"
+         "fn f(p: *align(32) u8, n: usize) { dma_prepare_tx(p, n); }" ());
+
+  Alcotest.test_case
     "GitHub issue #79: a refined `io` global (the common_stm32/uart.tkb \
      ring-buffer idiom, `let mut head: io {0..<128 as usize};`) keeps its \
      proven range across a read into a local, so `buf[head]` proves clean \

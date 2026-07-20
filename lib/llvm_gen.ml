@@ -1076,6 +1076,47 @@ let emit_cortex_m_cache_range op ptr len =
   add_incoming (next, body_bb) line;
   position_at_end done_bb builder
 
+(* AArch64 has no memory-mapped cache-maintenance registers (unlike
+   Cortex-M7's SCB above); `dc cvac`/`dc ivac` are real instructions, and
+   LLVM exposes no intrinsic for arbitrary `dc` sub-operations. Rather than
+   re-deriving a CFG loop by hand, this emits ONE self-contained inline-asm
+   blob (loop and all) that is bit-for-bit the same algorithm as
+   examples/common_rpi3/cache_asm.S's hand-written, hardware-verified
+   dcache_clean_range/dcache_invalidate_range: line size read at runtime
+   from CTR_EL0.DminLine (not hardcoded -- see that file's own comment for
+   why a fixed constant would be wrong), start rounded down to a line
+   boundary, end walked up to (not rounded). `${:uid}` makes the loop label
+   unique per call site so this stays correct even if the same call is
+   inlined more than once into one function (see issue #146). *)
+let emit_aarch64_cache_range op ptr len =
+  let ity = usize_lltype () in
+  let addr = build_ptrtoint ptr ity "dma.addr" builder in
+  let dc_insn, tail = match op with
+    | CacheClean      -> "dc cvac, x13", "dsb ish"
+    | CacheInvalidate -> "dc ivac, x13", "dsb ish\n\tisb"
+  in
+  let asm = Printf.sprintf
+    "mrs x9, ctr_el0\n\
+    \tubfx x9, x9, #16, #4\n\
+    \tmov x10, #4\n\
+    \tlsl x10, x10, x9\n\
+    \tadd x11, $0, $1\n\
+    \tsub x12, x10, #1\n\
+    \tbic x13, $0, x12\n\
+    .Ldmacache${:uid}:\n\
+    \t%s\n\
+    \tadd x13, x13, x10\n\
+    \tcmp x13, x11\n\
+    \tb.lo .Ldmacache${:uid}\n\
+    \t%s"
+    dc_insn tail
+  in
+  let fty = function_type (void_type context) [| ity; ity |] in
+  let constraints =
+    "r,r,~{x9},~{x10},~{x11},~{x12},~{x13},~{cc},~{memory}" in
+  let inline = const_inline_asm fty asm constraints true false in
+  ignore (build_call fty inline [| addr; len |] "" builder)
+
 (* Test-only introspection: usize's current bit-width (32 or 64) as a plain
    int, so test_takibi.ml can assert on it without needing the `llvm`
    ocamlfind package linked directly (this library already depends on it). *)
@@ -2993,10 +3034,45 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              emit_device_barrier DmaConsume;
              emit_cortex_m_cache_range CacheInvalidate ptr len;
              emit_device_barrier DmaConsume)
-      end else
+      end else if starts_with triple "aarch64" then begin
+        (match name with
+         | "dma_prepare_tx" ->
+             emit_aarch64_cache_range CacheClean ptr len;
+             emit_device_barrier DmaPublish
+         | "dma_prepare_rx" ->
+             emit_aarch64_cache_range CacheInvalidate ptr len;
+             emit_device_barrier DmaPublish
+         | _ ->
+             emit_device_barrier DmaConsume;
+             emit_aarch64_cache_range CacheInvalidate ptr len;
+             emit_device_barrier DmaConsume)
+      end else if starts_with triple "x86_64" || starts_with triple "i386"
+           || starts_with triple "i486" || starts_with triple "i586"
+           || starts_with triple "i686" then
+        (* Verified no-op, NOT a placeholder (see issue #146, unlike the
+           AArch64 gap that issue found): PC-class DMA is cache-coherent by
+           chipset/IOMMU snooping in essentially every real x86 deployment,
+           so a bare fence is the correct lowering here -- there is no
+           missing cache instruction to add. *)
         emit_device_barrier (match name with
           | "dma_prepare_tx" | "dma_prepare_rx" -> DmaPublish
-          | _ -> DmaConsume);
+          | _ -> DmaConsume)
+      else
+        (* Deliberately narrower than emit_device_barrier's own fallback:
+           a bare barrier here would silently reproduce the exact
+           stale-cache-line hazard issue #146 found on AArch64/RPi3, on
+           whatever target hits this next. RISC-V in particular needs the
+           Zicbom extension's cbo.clean/cbo.flush/cbo.inval to implement
+           this for real; that lowering is intentionally NOT written yet
+           because no RISC-V target/toolchain exists anywhere in this
+           project to verify it against (this codebase's own convention is
+           to prove code against a real target before shipping it, not
+           ship unverified speculative lowering) -- add it, with real
+           testing, once an actual RISC-V target exists here. *)
+        raise (Error (Printf.sprintf
+          "dma_prepare_tx/dma_prepare_rx/dma_finish_rx need real cache \
+           maintenance on target '%s' and no implementation exists for it \
+           yet (see issue #146)" triple));
       (TypeVoid, const_null (i1_type context))
 
   | Call ("slice_copy", [d_e; s_e]) ->
