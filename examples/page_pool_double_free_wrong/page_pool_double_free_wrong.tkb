@@ -1,0 +1,13 @@
+// This file is expected to produce a compile error.
+use "examples/page_pool/page_pool_core.tkb";
+
+fn page_pool_double_free_bad() {
+    page_pool_init();
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {}
+        PageAllocResult::Allocated(page) => {
+            page_free(page);
+            page_free(page);
+        }
+    }
+}

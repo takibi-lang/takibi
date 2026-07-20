@@ -10,65 +10,7 @@
 // and is compiled without --forbid-trap.  The follow-up hardening commit adds
 // only the refinements reported by the compiler.
 
-const PAGE_SIZE: usize = 4096;
-const PAGE_COUNT: usize = 64;
-
-private let mut page_pool: [u8; PAGE_SIZE * PAGE_COUNT] align(4096);
-private let mut page_used: [u8; PAGE_COUNT];
-private let mut next_generation: usize = 1;
-
-private linear struct PageOwner[allocation: usize] {
-    private index: usize;
-    private generation: usize @ allocation;
-}
-
-variant PageAllocResult {
-    OutOfMemory;
-    Allocated(exists allocation: usize. PageOwner[allocation]);
-}
-
-fn page_owner_new(index: usize, generation: usize @ allocation)
-        -> PageOwner[allocation] {
-    let mut owner: PageOwner[allocation] = { index, generation };
-    return owner;
-}
-
-fn page_pool_init() {
-    for i in 0..<PAGE_COUNT {
-        page_used[i] = 0;
-    }
-}
-
-fn page_alloc() -> PageAllocResult {
-    for i in 0..<PAGE_COUNT {
-        if (page_used[i] == 0) {
-            page_used[i] = 1;
-            let generation: usize = next_generation;
-            next_generation = next_generation + 1;
-            return PageAllocResult::Allocated(page_owner_new(i, generation));
-        }
-    }
-    return PageAllocResult::OutOfMemory;
-}
-
-fn page_index(owner: borrow PageOwner[allocation]) -> usize {
-    return owner.index;
-}
-
-fn page_generation(owner: borrow PageOwner[allocation]) -> usize {
-    return owner.generation;
-}
-
-fn page_bytes(owner: borrow PageOwner[allocation])
-        -> [u8; 0..] @ allocation {
-    let offset: usize = owner.index * PAGE_SIZE;
-    let pool: []u8 = page_pool as []u8;
-    return pool[offset..<offset + PAGE_SIZE];
-}
-
-fn page_free(owner: sink PageOwner[allocation]) {
-    page_used[owner.index] = 0;
-}
+use "examples/page_pool/page_pool_core.tkb";
 
 fn app_main() {
     page_pool_init();
@@ -88,7 +30,7 @@ fn app_main() {
                     let first_bytes = page_bytes(first);
                     let second_bytes = page_bytes(second);
                     first_bytes[0] = 17;
-                    first_bytes[PAGE_SIZE - 1] = 18;
+                    first_bytes[4095] = 18;
                     second_bytes[0] = 34;
 
                     uart_puts("allocated: ");
@@ -98,7 +40,7 @@ fn app_main() {
                     uart_puts("\nvalues: ");
                     uart_print(first_bytes[0]);
                     uart_puts(" ");
-                    uart_print(first_bytes[PAGE_SIZE - 1]);
+                    uart_print(first_bytes[4095]);
                     uart_puts(" ");
                     uart_print(second_bytes[0]);
                     uart_puts("\ngenerations: ");

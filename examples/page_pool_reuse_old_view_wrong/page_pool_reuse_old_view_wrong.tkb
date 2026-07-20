@@ -1,0 +1,22 @@
+// This file is expected to produce a compile error.  The allocator scans
+// from page zero, so `new_page` may reuse the physical page just released.
+// Its fresh existential allocation identity must not revive `old_bytes`.
+use "examples/page_pool/page_pool_core.tkb";
+
+fn page_pool_reuse_old_view_bad() {
+    page_pool_init();
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {}
+        PageAllocResult::Allocated(old_page) => {
+            let old_bytes = page_bytes(old_page);
+            page_free(old_page);
+            match page_alloc() {
+                PageAllocResult::OutOfMemory => {}
+                PageAllocResult::Allocated(new_page) => {
+                    old_bytes[0] = 1;
+                    page_free(new_page);
+                }
+            }
+        }
+    }
+}

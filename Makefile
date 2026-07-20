@@ -1474,8 +1474,8 @@ examples/smp_handoff/smp_handoff_rpi3.o: examples/smp_handoff/smp_handoff.tkb \
 RPI3_PAGE_POOL_EXAMPLES := page_pool
 RPI3_PAGE_POOL_OBJS := $(foreach e,$(RPI3_PAGE_POOL_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
-$(RPI3_PAGE_POOL_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+$(RPI3_PAGE_POOL_OBJS): examples/%_rpi3.o: examples/%.tkb examples/page_pool/page_pool_core.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 # USB bring-up group (GitHub issue #140's Ethernet milestone -- see
 # examples/usb_probe/usb_probe.tkb's own header comment and
