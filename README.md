@@ -511,6 +511,242 @@ code is written once.
   against real hardware -- see
   [`examples/common_rpi3/AGENTS.md`](examples/common_rpi3/AGENTS.md).
 
+## References and Prior Art
+
+takibi is a from-scratch design, not an implementation of any single paper or
+product, but nearly every non-obvious construct below has real prior art it
+converges toward. `TAKIBI_CORE.md` already names several of these lineages
+explicitly when explaining why one core judgement (`Gamma; Delta; Phi;
+epsilon`) subsumes "Rust mode", "ATS mode", "separation-logic mode", and "SMT
+mode" instead of bolting them on as separate checkers; this section spells
+out that mapping feature by feature, each with the current Takibi syntax
+alongside its closest ancestor.
+
+### Refinement types on integers: `{lo..<hi as base}`
+
+```takibi
+const MAX_CONNS: usize = 4;
+fn f(idx: {0..<MAX_CONNS as usize}) { ... }
+```
+
+The idea of an integer type carrying a provable interval, checked by the
+compiler instead of at runtime, traces to **Freeman and Pfenning, "Refinement
+Types for ML"** (PLDI 1991), and to index refinements for array-bound safety
+in **Xi and Pfenning, "Dependently Typed Array Bounds Checking"**/**"Dependent
+Types for Practical Programming"** work on **Dependent ML (DML)** (ICFP 1998,
+PhD thesis 1998). The SMT-backed descendant of that line,
+**Rondon, Kawaguchi, and Jhala, "Liquid Types"** (PLDI 2008) and its OSS
+implementation **LiquidHaskell**, is the modern popularization of "prove the
+range or fall back to a check." The closest *systems-language* sibling is
+**Lehmann et al., "Flux: Liquid Types for Rust"** (PLDI 2023), which refines
+Rust's own base types the same way `{lo..<hi as base}` refines takibi's --
+base explicit, refinement layered on top, not implicit. Takibi differs from
+all of the above by doing the proof through interval propagation and
+narrowing (`if (v >= lo && v < hi)`) rather than discharging a generated
+verification condition through an external SMT solver -- see the
+"Deferred solver and prover threshold" section of `TAKIBI_CORE.md` for why
+that stays a deliberate non-goal until a concrete example demands it.
+
+### Bounds-check elimination as a compiler bet: `--forbid-trap`
+
+```takibi
+for i: usize in 0..<n { arr[i] }   // no trap: the range is proven, not merely optimized away
+```
+
+Removing an array bounds check once its range is *provably* safe is the same
+goal as **Bodik, Gupta, and Sarkar, "ABCD: Eliminating Array Bounds Checks on
+Demand"** (PLDI 2000), but ABCD is a post-hoc optimizer pass, while
+`--forbid-trap` makes the proof a type-level, pre-optimizer obligation (the
+README's own "Design Principle" section states this distinction explicitly:
+"the judgment is deliberately type-level, not post-optimizer"). The
+"prototype permissively, then flip on full static rigor before shipping"
+workflow is closest to two safety-critical products: **SPARK Ada /
+GNATprove** (AdaCore), which proves the absence of runtime exceptions
+including array-bounds violations as a build gate, and **Dafny**
+(Leino, Microsoft Research), a verification-aware language where an unproven
+assertion is a compile error rather than a runtime trap. takibi's twist
+(both named explicitly in the README) is letting the *same* source compile in
+either a permissive, trap-emitting mode or a `--forbid-trap` mode that
+rejects any remaining unproven site -- SPARK and Dafny instead demand full
+rigor from the first line.
+
+### Affine and linear ownership: `affine struct`, `linear struct`, `sink`
+
+```takibi
+affine opaque struct Token;
+fn make() -> *Token { ... }
+fn inspect(t: borrow *Token) -> usize { ... }
+fn release(t: sink *Token) { ... }
+```
+
+"Contraction forbidden, weakening allowed" (affine) versus "used exactly once
+on every path" (linear) is the standard substructural-logic distinction from
+**Girard, "Linear Logic"** (1987), presented for programming languages in
+**Walker, "Substructural Type Systems"** (chapter in *Advanced Topics in
+Types and Programming Languages*, ed. Pierce, 2005) -- the chapter's own
+affine/linear terminology is exactly the vocabulary `SPEC.md` uses. The
+real-world OSS precedent for making this the default discipline of a systems
+language, rather than a research curiosity, is **Rust**'s ownership/move
+model; the formal semantics behind Rust's borrow checker were later given a
+separation-logic foundation in **Jung et al., "RustBelt: Securing the
+Foundations of the Rust Programming Language"** (POPL 2018), built on the
+**Iris** framework (Jung et al., POPL 2015/JFP 2018).
+
+### Erased views: `linear view Name;`, `view Name`
+
+```takibi
+private linear view PendingEvent;
+fn accept_event() -> PendingEvent { return view PendingEvent; }
+fn finish_event(p: sink PendingEvent) {}
+```
+
+This is the most direct one-to-one borrowing in the language: takibi's
+"a permission with no fields, size, address, or LLVM type" is the same
+representation choice as a **view** in **Xi's ATS ("Applied Type System")**
+-- see **Xi, "Applied Type System"** (TYPES 2004) and **Chen and Xi,
+"Combining Programming with Theorem Proving"** (ICFP 2005), where a `view`
+tracks a linear proof obligation entirely at the type level, separate from
+the runtime value it describes. `TAKIBI_CORE.md` names this lineage directly:
+"An ATS-style view keeps a runtime value in `Gamma` and its permission in
+`Delta` as separate source-level values."
+
+### Scoped, non-consuming access: `borrow`, `borrow mut`
+
+```takibi
+fn slot_read(lease: borrow SlotLease[n]) -> i32 { return slots[lease.idx].value; }
+```
+
+Temporarily granting access to an owned or linear value without transferring
+or discharging the underlying obligation is Rust's `&`/`&mut` borrowing, and
+(for the pointer/slice case) the region-scoped access pattern from
+**Grossman, Morrisett, Jim, Hicks, Wang, and Cheney, "Region-Based Memory
+Management in Cyclone"** (PLDI 2002) -- Cyclone is the closer ancestor for a
+*C-like, bare-metal* language, since it targets exactly takibi's problem
+(safe pointers with no garbage collector) rather than a managed runtime.
+
+### Region-tied slices and pointers: `-> [u8; 1514..] @ desc`, `-> *Shared @ lock`
+
+```takibi
+fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc;
+fn shared_access(g: borrow KGuard[lock]) -> *Shared @ lock { return &shared; }
+```
+
+Tying a returned pointer's or slice's validity to the lifetime of the
+authority (an owner or a lock guard) that produced it is again Cyclone's
+region system, where a pointer type carries the region variable it must not
+outlive. `TAKIBI_CORE.md`'s `Delta.Region_taint` plays the same role that
+Cyclone's region-variable substitution and region-outlives constraints play,
+implemented as a lighter, function-local dataflow check rather than a
+general region-polymorphic type system -- deliberately narrower, per the
+"Directed YAGNI" design principle above.
+
+### Typestate / protocol state: `TcpConn[conn, state]`
+
+```takibi
+fn tcp_accept_via_syn_ack(
+    pending: sink PendingTcpEvent[event],
+    conn: sink TcpConn[c, Listen],
+    eth: [u8; 54..]
+) -> TcpConn[c, SynRcvd];
+```
+
+Attaching a state to a value's *type* so that only the operations legal in
+that state typecheck is **typestate-oriented programming**, introduced by
+**Strom and Yemini, "Typestate: A Programming Language Concept for Enhancing
+Software Reliability"** (IEEE TSE 1986) and later given first-class language
+support in **Plaid** (Aldrich, Sunshine, Saini, Sparks, OOPSLA 2009). The
+`Listen -> SynRcvd` transition on a `TcpConn` value specifically mirrors
+**session types**, which describe a communication protocol as a sequence of
+typed states a channel moves through: **Honda, Vasconcelos, and Kubo,
+"Language Primitives and Type Discipline for Structured Communication-Based
+Programming"** (ESOP 1998).
+
+### Existential packaging: `exists n: usize. Owner[n]`
+
+```takibi
+variant NetRxAcquire {
+    None(NetRxCanAcquire);
+    Acquired(exists desc: usize. NetRxCpuOwned[desc]);
+}
+```
+
+Hiding a concrete static identity behind an interface so that only pattern
+matching can recover it is the classical **existential type as an abstract
+data type**: **Mitchell and Plotkin, "Abstract Types Have Existential Type"**
+(POPL 1985, *TOPLAS* 1988) is the foundational account, and DML/ATS (cited
+above) are the closest languages that pair such existentials with integer
+static indices the way `exists desc: usize. NetRxCpuOwned[desc]` does.
+
+### Opaque handles: `affine opaque struct Token;`
+
+```takibi
+affine opaque struct Token;   // no fields, no size, no address -- an abstract handle
+```
+
+A type with an interface but no revealed representation is the classic
+**abstract data type**, formalized in **Cardelli and Wegner, "On
+Understanding Types, Data Abstraction, and Polymorphism"** (ACM Computing
+Surveys 1985), and made a first-class module feature in Standard ML's
+opaque signature ascription (**MacQueen, "Modules for Standard ML"**, LFP
+1984). takibi's version additionally carries an affine/linear kind, so the
+handle is not just representation-hidden but consumption-tracked.
+
+### Effect annotations: `!{may_block}`, `!{interrupt}`, `!{mmio}`
+
+```takibi
+extern fn sem_wait(s: *i32) !{may_block};
+fn IRQ_Handler() !{interrupt} { acknowledge_irq(); }
+```
+
+Tracking "what a computation may do" as part of its type, separate from the
+value it returns, goes back to **Lucassen and Gifford, "Polymorphic Effect
+Systems"** (POPL 1988). The closest OSS implementation of effects as
+inferred, checked row/set annotations on ordinary functions -- rather than
+a monadic or handler-based encoding -- is **Koka** (Leijen, Microsoft
+Research); see **Leijen, "Koka: Programming with Row-Polymorphic Effect
+Types"** (MSFP 2014). The specific *use* of an effect system to reject
+blocking calls from an interrupt handler at compile time mirrors a rule
+safety-critical Ada systems already enforce at the process level: the
+**Ravenscar profile** (Burns, Dobbing, Vardanega; restricted-tasking Ada for
+hard real-time/interrupt contexts) forbids exactly the same category of
+call from an interrupt handler, though it does so by restricting the
+language subset rather than by inferring and checking an effect row.
+
+### One unified core judgement instead of separate "modes"
+
+`TAKIBI_CORE.md` section 1 deliberately rejects "Rust mode / ATS mode /
+separation-logic mode / SMT mode" as separate checkers layered on the same
+language, in favor of one judgement `Gamma; Delta; Phi | e : tau ! epsilon`
+combining runtime values, ownership, pure facts, and effects. The prior art
+for *that* architectural decision -- building one language whose single core
+type theory already contains refinement types, effects, and (in later
+versions) separation-logic-style ownership -- is **F\***: see
+**Swamy et al., "Dependent Types and Multi-Monadic Effects in F\*"**
+(POPL 2016) and **Swamy et al., "Verifying Higher-Order Programs with the
+Dijkstra Monad"** (PDLI 2013) for the effect/refinement unification, with
+**Fromherz et al., "Steel: Proof-Oriented Programming in a Dependently Typed
+Concurrent Separation Logic"** (ICFP 2021) as F*'s later extension into
+ownership/separation-logic territory. The heap-predicate framing `Delta` is
+meant to grow into (`Cell`, `Array`, disjoint composition, lock invariants)
+is standard **separation logic**: **Reynolds, "Separation Logic: A Logic for
+Shared Mutable Data Structures"** (LICS 2002); **O'Hearn, Reynolds, and Yang,
+"Local Reasoning about Programs that Alter Data Structures"** (CSL 2001).
+
+### The motivating goal: zero runtime panics in a monolithic kernel
+
+The project's north star -- pushing every category of C runtime failure into
+a compile-time error for a Linux/NetBSD-shaped monolithic kernel -- has one
+prominent existence proof that a *fully* verified OS kernel is possible:
+**Klein et al., "seL4: Formal Verification of an OS Kernel"** (SOSP 2009).
+seL4 proves full functional correctness in Isabelle/HOL for a microkernel;
+takibi deliberately does not aim for that (no external prover, no
+functional-correctness goal, and a monolithic rather than microkernel
+target -- see `TAKIBI_CORE.md` section 5's explicit stance against adding
+Z3/Lean4 integration before a real example demands it), but seL4 is the
+reference point for "eliminating an entire class of kernel bug via static
+proof" that motivates the weaker, incrementally-adoptable version of that bet
+takibi is making instead.
+
 ## Acknowledgements
 
 The most implementation were written with assistance from Claude Code and Codex.
