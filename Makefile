@@ -369,6 +369,8 @@ allcheck:
 	$(MAKE) hwcheck-stm32
 	$(MAKE) perfcheck
 	$(MAKE) hwcheck-stm32-net
+	$(MAKE) hwcheck-rpi3
+	$(MAKE) hwcheck-rpi3-net
 
 # -- Shared assembly objects ---------------------------------------------------
 $(COMMON_STARTUP_O): $(COMMON_STARTUP_S)
