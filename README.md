@@ -13,7 +13,9 @@ obligations).
 
 As a first waypoint toward that goal, takibi already implements a TCP/IP stack
 and runs an HTTP server and a network key-value store on bare-metal targets,
-on QEMU (AArch64), real Raspberry Pi 3B hardware, and real
+on QEMU (AArch64), real
+[Raspberry Pi 3B](https://www.raspberrypi.com/products/raspberry-pi-3-model-b/)
+hardware, and real
 [STM32F746G-DISCOVERY](https://www.st.com/en/evaluation-tools/32f746gdiscovery.html)
 (Cortex-M7) hardware.
 
