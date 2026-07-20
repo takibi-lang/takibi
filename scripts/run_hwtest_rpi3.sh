@@ -419,8 +419,13 @@ run_hw_test_rpi3_usb_msc "usb_msc_probe (rpi3)" "$REPO_ROOT/examples/usb_msc_pro
 # card. Reuses STM32's own fatfs_sdcard.expected fixture unchanged --
 # confirmed byte-identical on real hardware, same as every other shared
 # example's fixture in this file. Destructive (formats the attached
-# drive), same acceptance as usb_msc_probe above.
-run_hw_test_rpi3 "fatfs_sdcard (rpi3)" "$REPO_ROOT/examples/fatfs_sdcard/kernel_rpi3.elf" "$REPO_ROOT/examples/fatfs_sdcard/fatfs_sdcard.expected" 15 40
+# drive), same acceptance as usb_msc_probe above. fat_format() performs
+# about 128 USB writes without UART output; a real run has occasionally
+# paused for more than the old 2s quiet threshold inside that operation.
+# Keep the 15s overall ceiling, but require 7s of silence before treating
+# the capture as complete so USB-media erase/write latency cannot produce
+# a truncated false failure.
+run_hw_test_rpi3 "fatfs_sdcard (rpi3)" "$REPO_ROOT/examples/fatfs_sdcard/kernel_rpi3.elf" "$REPO_ROOT/examples/fatfs_sdcard/fatfs_sdcard.expected" 15 140
 # rtos_fatfs_sdcard (rpi3): the same FAT12-on-USB-mass-storage work moved
 # behind the Simple RTOS task/channel boundary -- byte-for-byte the shared
 # rtos_fatfs_sdcard.tkb source and STM32's own .expected fixture. This is
@@ -428,7 +433,8 @@ run_hw_test_rpi3 "fatfs_sdcard (rpi3)" "$REPO_ROOT/examples/fatfs_sdcard/kernel_
 # (the read corruption it fixes only ever manifested with the RTOS
 # scheduler tick running -- see dwc2_bulk_in's own comment). Destructive
 # (formats the attached drive), same acceptance as the two tests above.
-run_hw_test_rpi3 "rtos_fatfs_sdcard (rpi3)" "$REPO_ROOT/examples/rtos_fatfs_sdcard/kernel_rpi3.elf" "$REPO_ROOT/examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard.expected" 15 40
+# Same fat_format() quiet-window requirement as fatfs_sdcard above.
+run_hw_test_rpi3 "rtos_fatfs_sdcard (rpi3)" "$REPO_ROOT/examples/rtos_fatfs_sdcard/kernel_rpi3.elf" "$REPO_ROOT/examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard.expected" 15 140
 
 echo ""
 echo "rpi3 hardware tests: $PASS passed, $FAIL failed"

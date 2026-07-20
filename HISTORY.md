@@ -9971,3 +9971,14 @@ UART transcript proves the same mailbox -> DWC2 -> hub -> LAN9514 -> PHY
 bring-up path reaches link-up, so running `net_echo` there repeated a reset,
 JTAG load, and `net_init()` without adding coverage. Historical entries above
 still describe the earlier incremental Ethernet bring-up accurately.
+
+RPi3's `fatfs_sdcard`/`rtos_fatfs_sdcard` UART capture quiet window was
+increased from 2s to 7s while retaining the existing 15s overall ceiling.
+An integrated `make allcheck` run intermittently captured only through
+`disk_status: OK`: `fat_format()` then performs about 128 USB Mass Storage
+writes without UART output, and the test runner mistook a greater-than-2s
+media erase/write pause for program completion. A fixed 20s diagnostic
+capture subsequently produced all 157 expected bytes and matched the fixture
+exactly, proving this was harness truncation rather than a FAT/USB/RTOS
+failure. The wider quiet window applies to both FAT-formatting examples that
+have the same exposure.
