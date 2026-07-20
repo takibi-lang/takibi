@@ -534,18 +534,17 @@ compiler instead of at runtime, traces to **Freeman and Pfenning, "Refinement
 Types for ML"** (PLDI 1991), and to index refinements for array-bound safety
 in **Xi and Pfenning, "Dependently Typed Array Bounds Checking"**/**"Dependent
 Types for Practical Programming"** work on **Dependent ML (DML)** (ICFP 1998,
-PhD thesis 1998). The SMT-backed descendant of that line,
+PhD thesis 1998). A later, more expressive descendant of that line is
 **Rondon, Kawaguchi, and Jhala, "Liquid Types"** (PLDI 2008) and its OSS
-implementation **LiquidHaskell**, is the modern popularization of "prove the
-range or fall back to a check." The closest *systems-language* sibling is
+implementation **LiquidHaskell**; the closest *systems-language* sibling is
 **Lehmann et al., "Flux: Liquid Types for Rust"** (PLDI 2023), which refines
 Rust's own base types the same way `{lo..<hi as base}` refines takibi's --
-base explicit, refinement layered on top, not implicit. Takibi differs from
-all of the above by doing the proof through interval propagation and
-narrowing (`if (v >= lo && v < hi)`) rather than discharging a generated
-verification condition through an external SMT solver -- see the
-"Deferred solver and prover threshold" section of `TAKIBI_CORE.md` for why
-that stays a deliberate non-goal until a concrete example demands it.
+base explicit, refinement layered on top, not implicit. Takibi's own
+mechanism is plain interval propagation and narrowing
+(`if (v >= lo && v < hi)`), with no external solver involved anywhere in the
+current implementation -- that stays the actual, present-tense state of the
+compiler, not a placeholder for a solver integration that may or may not
+happen later.
 
 ### Bounds-check elimination as a compiler bet: `--forbid-trap`
 
@@ -739,13 +738,12 @@ a compile-time error for a Linux/NetBSD-shaped monolithic kernel -- has one
 prominent existence proof that a *fully* verified OS kernel is possible:
 **Klein et al., "seL4: Formal Verification of an OS Kernel"** (SOSP 2009).
 seL4 proves full functional correctness in Isabelle/HOL for a microkernel;
-takibi deliberately does not aim for that (no external prover, no
-functional-correctness goal, and a monolithic rather than microkernel
-target -- see `TAKIBI_CORE.md` section 5's explicit stance against adding
-Z3/Lean4 integration before a real example demands it), but seL4 is the
-reference point for "eliminating an entire class of kernel bug via static
-proof" that motivates the weaker, incrementally-adoptable version of that bet
-takibi is making instead.
+takibi deliberately does not aim for that -- no external prover, no
+functional-correctness goal, and a monolithic rather than microkernel target
+-- but seL4 is the reference point for "eliminating an entire class of kernel
+bug via static proof" that motivates the weaker, incrementally-adoptable
+version of that bet takibi is making instead, using only its own built-in
+checker.
 
 ## Acknowledgements
 
