@@ -181,6 +181,61 @@ run_hw_test_rpi3() {
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
 }
 
+# run_hw_test_rpi3_basic_suite ELF
+#
+# Reset/load once, then retain one PASS/FAIL result per original example by
+# splitting the marked UART stream with the shared suite-output checker.
+run_hw_test_rpi3_basic_suite() {
+    local elf="$1" tmp_drain tmp_out load_log load_status_file load_status
+    local report status name expected actual
+    tmp_drain=$(mktemp)
+    tmp_out=$(mktemp)
+    load_log=$(mktemp)
+    load_status_file=$(mktemp)
+    report=$(mktemp)
+
+    reset_before_test "basic_suite (rpi3)"
+    read_until_quiet "$tmp_drain" "$DRAIN_MAX_SECS" "$DRAIN_STABLE_POLLS" 0
+    read_until_quiet "$tmp_out" "$CAPTURE_MAX_SECS" "$CAPTURE_STABLE_POLLS" 1 \
+        "if \"$REPO_ROOT/scripts/rpi3_jtag_load.sh\" \"$elf\" > \"$load_log\" 2>&1; then load_status=0; else load_status=\$?; fi; echo \"\$load_status\" > \"$load_status_file\""
+    load_status=$(cat "$load_status_file" 2>/dev/null || echo 1)
+
+    if [ "$load_status" != "0" ]; then
+        printf "${RED}FAIL${RST}  basic_suite (rpi3)  (JTAG injection failed -- loader log follows)\n"
+        sed 's/^/       /' "$load_log"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("basic_suite (rpi3)")
+        rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file" "$report"
+        exit 1
+    fi
+
+    python3 "$(dirname "$0")/check_suite_output.py" "$tmp_out" \
+        "$REPO_ROOT/examples/basic_suite/cases.txt" > "$report" || true
+    [ -s "$report" ] || printf 'ERROR\tsuite checker produced no result\n' > "$report"
+
+    while IFS=$'\t' read -r status name expected actual; do
+        case "$status" in
+            PASS)
+                printf "${GRN}PASS${RST}  %s (rpi3)\n" "$name"
+                PASS=$((PASS + 1))
+                ;;
+            FAIL)
+                printf "${RED}FAIL${RST}  %s (rpi3)\n" "$name"
+                printf "       expected bytes: %s\n" "$expected"
+                printf "       got bytes:      %s\n" "$actual"
+                FAIL=$((FAIL + 1))
+                FAILED_TESTS+=("$name (rpi3)")
+                ;;
+            ERROR)
+                printf "${RED}FAIL${RST}  basic_suite (rpi3)  (%s)\n" "$name"
+                FAIL=$((FAIL + 1))
+                FAILED_TESTS+=("basic_suite (rpi3)")
+                ;;
+        esac
+    done < "$report"
+    rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file" "$report"
+}
+
 # run_hw_test_rpi3_stdin NAME ELF EXPECTED STDIN_FILE
 #
 # RPi3 counterpart of scripts/run_hwtest_ram.sh's run_hw_test_ram_stdin
@@ -316,12 +371,7 @@ run_hw_test_rpi3_usb_msc() {
 # free-running counter, not a real RTC peripheral) differs -- both
 # fixtures only ever check that time advances, never an absolute value.
 run_hw_test_rpi3 "start (rpi3)"          "$REPO_ROOT/examples/start/kernel_rpi3.elf"          "$REPO_ROOT/examples/start/start.expected"
-run_hw_test_rpi3 "hello (rpi3)"          "$REPO_ROOT/examples/hello/kernel_rpi3.elf"          "$REPO_ROOT/examples/hello/hello.expected"
-run_hw_test_rpi3 "print_int (rpi3)"      "$REPO_ROOT/examples/print_int/kernel_rpi3.elf"      "$REPO_ROOT/examples/print_int/print_int.expected"
-run_hw_test_rpi3 "print_hex (rpi3)"      "$REPO_ROOT/examples/print_hex/kernel_rpi3.elf"      "$REPO_ROOT/examples/print_hex/print_hex.expected"
-run_hw_test_rpi3 "print_ptr (rpi3)"      "$REPO_ROOT/examples/print_ptr/kernel_rpi3.elf"      "$REPO_ROOT/examples/print_ptr/print_ptr.expected"
-run_hw_test_rpi3 "mem (rpi3)"            "$REPO_ROOT/examples/mem/kernel_rpi3.elf"            "$REPO_ROOT/examples/mem/mem.expected"
-run_hw_test_rpi3 "array (rpi3)"          "$REPO_ROOT/examples/array/kernel_rpi3.elf"          "$REPO_ROOT/examples/array/array.expected"
+run_hw_test_rpi3_basic_suite "$REPO_ROOT/examples/basic_suite/kernel_rpi3.elf"
 run_hw_test_rpi3 "fizzbuzz (rpi3)"       "$REPO_ROOT/examples/fizzbuzz/kernel_rpi3.elf"       "$REPO_ROOT/examples/fizzbuzz/fizzbuzz.expected"
 run_hw_test_rpi3 "fibonacci (rpi3)"      "$REPO_ROOT/examples/fibonacci/kernel_rpi3.elf"      "$REPO_ROOT/examples/fibonacci/fibonacci.expected"
 run_hw_test_rpi3 "bubblesort (rpi3)"     "$REPO_ROOT/examples/bubblesort/kernel_rpi3.elf"     "$REPO_ROOT/examples/bubblesort/bubblesort.expected"
@@ -331,8 +381,6 @@ run_hw_test_rpi3 "crc8 (rpi3)"           "$REPO_ROOT/examples/crc8/kernel_rpi3.e
 run_hw_test_rpi3 "djb2 (rpi3)"           "$REPO_ROOT/examples/djb2/kernel_rpi3.elf"           "$REPO_ROOT/examples/djb2/djb2.expected"
 run_hw_test_rpi3 "bump (rpi3)"           "$REPO_ROOT/examples/bump/kernel_rpi3.elf"           "$REPO_ROOT/examples/bump/bump.expected"
 run_hw_test_rpi3 "scheduler (rpi3)"      "$REPO_ROOT/examples/scheduler/kernel_rpi3.elf"      "$REPO_ROOT/examples/scheduler/scheduler.expected"
-run_hw_test_rpi3 "struct (rpi3)"         "$REPO_ROOT/examples/struct/kernel_rpi3.elf"         "$REPO_ROOT/examples/struct/struct.expected"
-run_hw_test_rpi3 "struct_refined (rpi3)" "$REPO_ROOT/examples/struct_refined/kernel_rpi3.elf" "$REPO_ROOT/examples/struct_refined/struct_refined.expected"
 run_hw_test_rpi3 "refined (rpi3)"        "$REPO_ROOT/examples/refined/kernel_rpi3.elf"        "$REPO_ROOT/examples/refined/refined.expected"
 run_hw_test_rpi3 "narrow (rpi3)"         "$REPO_ROOT/examples/narrow/kernel_rpi3.elf"         "$REPO_ROOT/examples/narrow/narrow.expected"
 run_hw_test_rpi3 "for (rpi3)"            "$REPO_ROOT/examples/for/kernel_rpi3.elf"            "$REPO_ROOT/examples/for/for.expected"

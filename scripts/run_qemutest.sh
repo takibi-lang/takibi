@@ -68,6 +68,50 @@ run_test() {
     rm -f "$tmp_out"
 }
 
+# check_basic_suite_output OUTFILE [SUFFIX]
+#
+# basic_suite emits stable case markers around the unchanged output of each
+# original example. Split once-captured UART output back into those logical
+# cases so batching QEMU/platform startup does not reduce failure granularity.
+check_basic_suite_output() {
+    local outfile="$1" suffix="${2:-}" report status name expected actual
+    report=$(mktemp)
+    python3 "$(dirname "$0")/check_suite_output.py" "$outfile" \
+        examples/basic_suite/cases.txt > "$report" || true
+    [ -s "$report" ] || printf 'ERROR\tsuite checker produced no result\n' > "$report"
+
+    while IFS=$'\t' read -r status name expected actual; do
+        case "$status" in
+            PASS)
+                printf "${GRN}PASS${RST}  %s%s\n" "$name" "$suffix"
+                PASS=$((PASS + 1))
+                ;;
+            FAIL)
+                printf "${RED}FAIL${RST}  %s%s\n" "$name" "$suffix"
+                printf "       expected bytes: %s\n" "$expected"
+                printf "       got bytes:      %s\n" "$actual"
+                FAIL=$((FAIL + 1))
+                FAILED_TESTS+=("$name$suffix")
+                ;;
+            ERROR)
+                printf "${RED}FAIL${RST}  basic_suite%s  (%s)\n" "$suffix" "$name"
+                FAIL=$((FAIL + 1))
+                FAILED_TESTS+=("basic_suite$suffix")
+                ;;
+        esac
+    done < "$report"
+    rm -f "$report"
+}
+
+run_basic_suite() {
+    local kernel="$1" tmp_out
+    tmp_out=$(mktemp)
+    echo | timeout "$TIMEOUT" $QEMU $QEMU_COMMON -kernel "$kernel" \
+        > "$tmp_out" 2>/dev/null
+    check_basic_suite_output "$tmp_out"
+    rm -f "$tmp_out"
+}
+
 # run_test_timed NAME KERNEL EXPECTED MIN_SECS
 #
 # Like run_test, but also verifies that QEMU ran for at least MIN_SECS seconds.
@@ -914,14 +958,9 @@ echo "Running QEMU integration tests..."
 echo ""
 
 run_test "start"     examples/start/kernel.elf     examples/start/start.expected
-run_test "hello"     examples/hello/kernel.elf     examples/hello/hello.expected
-run_test "print_int" examples/print_int/kernel.elf examples/print_int/print_int.expected
+run_basic_suite examples/basic_suite/kernel.elf
 run_test "echo"      examples/echo/kernel.elf      examples/echo/echo.expected \
                      examples/echo/echo.stdin
-run_test "print_hex" examples/print_hex/kernel.elf examples/print_hex/print_hex.expected
-run_test "print_ptr" examples/print_ptr/kernel.elf examples/print_ptr/print_ptr.expected
-run_test "mem"       examples/mem/kernel.elf       examples/mem/mem.expected
-run_test "array"     examples/array/kernel.elf     examples/array/array.expected
 run_test "fizzbuzz"  examples/fizzbuzz/kernel.elf  examples/fizzbuzz/fizzbuzz.expected
 run_test "fibonacci"  examples/fibonacci/kernel.elf  examples/fibonacci/fibonacci.expected
 run_test "bubblesort" examples/bubblesort/kernel.elf examples/bubblesort/bubblesort.expected
@@ -938,8 +977,6 @@ run_test "scheduler" examples/scheduler/kernel.elf examples/scheduler/scheduler.
 run_test "preempt"   examples/preempt/kernel.elf   examples/preempt/preempt.expected
 run_test "semaphore" examples/semaphore/kernel.elf examples/semaphore/semaphore.expected
 run_test "condvar"   examples/condvar/kernel.elf   examples/condvar/condvar.expected
-run_test "struct"    examples/struct/kernel.elf    examples/struct/struct.expected
-run_test "struct_refined" examples/struct_refined/kernel.elf examples/struct_refined/struct_refined.expected
 run_test "msgqueue"  examples/msgqueue/kernel.elf  examples/msgqueue/msgqueue.expected
 run_test "watchdog" examples/watchdog/kernel.elf examples/watchdog/watchdog.expected
 run_test "refined"  examples/refined/kernel.elf  examples/refined/refined.expected

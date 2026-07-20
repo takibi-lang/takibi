@@ -31,7 +31,7 @@
 # per example) as many times in a row as needed afterward.
 set -euo pipefail
 
-ELF="${1:-examples/hello/kernel_rpi3.elf}"
+ELF="${1:-examples/start/kernel_rpi3.elf}"
 
 if [ ! -f "$ELF" ]; then
     echo "error: $ELF not found -- build it first (make $ELF)" >&2

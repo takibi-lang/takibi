@@ -9930,3 +9930,19 @@ warm reset retains the just-written USB-drive image while clearing the
 installer's CPU/cache/peripheral state. Reset failures report the saved
 OpenOCD reconnect log and stop or skip the affected fixture as appropriate,
 instead of surfacing later as an unrelated output mismatch.
+
+GitHub issue #93's cross-target test-batching work started with one deliberately
+narrow pilot. Eight side-effect-free examples (`hello`, `print_int`,
+`print_hex`, `print_ptr`, `mem`, `array`, `struct`, and `struct_refined`) now
+export uniquely named test functions and are pulled, without source
+duplication, into `examples/basic_suite/basic_suite.tkb`. Its single
+`app_main` emits a stable marker before each test and calls all eight in order.
+A shared host checker splits the captured byte stream at those markers and
+compares each segment with the original `.expected` file, so QEMU, STM32, and
+RPi3 runners retain the same eight visible PASS/FAIL results and failure
+localization while performing only one emulator start, ST-LINK load, or RPi3
+watchdog-reset/JTAG-load cycle. `start` remains a standalone minimal-runtime
+fixture; interrupt, scheduler, SMP, USB, storage, and network cases remain out
+of this first pilot. All three suite images compile with `--forbid-trap`; QEMU
+passes all eight cases from the one image and the full 134-test host/QEMU suite
+remains green.

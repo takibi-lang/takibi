@@ -7,7 +7,7 @@ fn fill(p: *u8, val: u8, n: isize) {
     }
 }
 
-fn app_main() {
+fn test_array() {
     uart_puts("=== array test ===\r\n");
 
     let mut buf: [u8; 8];

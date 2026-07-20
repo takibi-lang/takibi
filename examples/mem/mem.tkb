@@ -18,7 +18,7 @@ fn print_buf(p: *u8, n: isize) {
     }
 }
 
-fn app_main() {
+fn test_mem() {
     uart_puts("=== memset/memcpy test ===\r\n");
 
     let mut buf_a: [u8; 5];

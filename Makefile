@@ -100,9 +100,22 @@ LINUX_BINS             := $(foreach e,$(LINUX_EXAMPLES),examples/$(e)/$(e).exe)
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
 # Convention: examples/<name>/<name>.tkb -> examples/<name>/kernel.elf
-EXAMPLES     := start hello echo print_int print_hex print_ptr mem array fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar struct struct_refined msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof_offsetof slice foreach int64 net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server fatfs affine_escape_via_index align_ptr_proof klock_guard percpu chan_rendezvous rtos_demo linear_obligation tuple_pair field_lease indexed_view tcp_conn_view kvs_server
+EXAMPLES     := start basic_suite echo fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump timer rtc irq scheduler preempt semaphore condvar msgqueue watchdog refined narrow for loop enum nonexhaustive bitops align packed struct_align const_global sizeof_offsetof slice foreach int64 net_echo arp_reply inet_checksum ip_parse icmp_echo tcp_parse tcp_echo http_server fatfs affine_escape_via_index align_ptr_proof klock_guard percpu chan_rendezvous rtos_demo linear_obligation tuple_pair field_lease indexed_view tcp_conn_view kvs_server
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
+
+# Issue #93 pilot: these small examples are compiled into one image and run
+# behind one platform startup/load/reset. Their source files remain separate
+# and are `use`d by basic_suite.tkb; list them here so Make notices changes in
+# transitive Takibi inputs (the compiler resolves `use`, Make cannot).
+BASIC_SUITE_SOURCES := examples/hello/hello.tkb \
+                       examples/print_int/print_int.tkb \
+                       examples/print_hex/print_hex.tkb \
+                       examples/print_ptr/print_ptr.tkb \
+                       examples/mem/mem.tkb \
+                       examples/array/array.tkb \
+                       examples/struct/struct.tkb \
+                       examples/struct_refined/struct_refined.tkb
 
 # STM32F746G-DISCOVERY hardware port: the subset of EXAMPLES that's pure
 # compute + uart_puts/uart_print_* output with no interrupt/timer/hand-written
@@ -110,9 +123,9 @@ EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 # the full rationale and what's deliberately excluded, e.g. rtc/echo).
 STM32_TARGET := thumbv7em-none-eabi
 STM32_CPU    := cortex-m7
-STM32_EXAMPLES := start hello print_int print_hex print_ptr mem array \
+STM32_EXAMPLES := start basic_suite \
                   fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump \
-                  scheduler struct struct_refined refined narrow for loop enum nonexhaustive \
+                  scheduler refined narrow for loop enum nonexhaustive \
                   bitops align packed struct_align const_global sizeof_offsetof slice foreach int64 \
                   indexed_view tcp_conn_view
 STM32_OBJS     := $(foreach e,$(STM32_EXAMPLES),examples/$(e)/$(e)_stm32.o)
@@ -418,6 +431,8 @@ STANDARD_OBJS := $(filter-out $(SPECIAL_OBJS), $(EXAMPLE_OBJS))
 $(STANDARD_OBJS): examples/%.o: examples/%.tkb $(COMMON_UART) $(COMMON_PRINT) $(TAKIBI)
 	$(TAKIBI) $(COMMON_UART) $(COMMON_PRINT_QEMU) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
 
+examples/basic_suite/basic_suite.o: $(BASIC_SUITE_SOURCES)
+
 # examples/irq/irq.tkb `use`s gic_regs.tkb (types only) itself now, but
 # needs gic.tkb's actual FUNCTIONS for the QEMU build (irq_uart_rx_setup/
 # irq_uart_rx_unmask's real implementation) -- passed explicitly here
@@ -642,6 +657,8 @@ $(COMMON_STM32_STARTUP_RAM_O): $(COMMON_STM32_STARTUP_RAM_S)
 
 $(STM32_OBJS): examples/%_stm32.o: examples/%.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(TAKIBI)
 	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+
+examples/basic_suite/basic_suite_stm32.o: $(BASIC_SUITE_SOURCES)
 
 # RAM-execution link: reuses whichever examples/%/%_stm32.o rule already
 # exists (generic or bespoke, from any group above) -- only the startup
@@ -1313,9 +1330,9 @@ examples/common_rpi3/jtag_stub.elf: $(COMMON_RPI3_JTAG_STUB_O) $(COMMON_RPI3_JTA
 examples/common_rpi3/jtag_stub.img: examples/common_rpi3/jtag_stub.elf
 	llvm-objcopy-19 -O binary $< $@
 
-RPI3_EXAMPLES := start hello print_int print_hex print_ptr mem array \
+RPI3_EXAMPLES := start basic_suite \
                  fizzbuzz fibonacci bubblesort ringbuf callstack crc8 djb2 bump \
-                 scheduler struct struct_refined refined narrow for loop enum nonexhaustive \
+                 scheduler refined narrow for loop enum nonexhaustive \
                  bitops align packed struct_align const_global sizeof_offsetof \
                  slice foreach int64 indexed_view tcp_conn_view \
                  klock_guard percpu \
@@ -1328,6 +1345,8 @@ RPI3_TAKIBI_FLAGS := --forbid-trap
 
 $(RPI3_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_TAKIBI_FLAGS) -o $@
+
+examples/basic_suite/basic_suite_rpi3.o: $(BASIC_SUITE_SOURCES)
 
 # inet_checksum.tkb/ip_parse.tkb/tcp_parse.tkb each `use` exactly the
 # subset of inet_checksum.tkb/netutil.tkb they actually need themselves

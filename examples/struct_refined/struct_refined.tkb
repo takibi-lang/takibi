@@ -41,7 +41,7 @@ fn read_via_ptr(s: *Slot) -> u8 {
     return buf[s.idx];
 }
 
-fn app_main() {
+fn test_struct_refined() {
     let mut s: Slot;
     s.idx = 3;
     buf[s.idx] = 'D';       // direct field-as-index write

@@ -201,6 +201,16 @@ is the default for everything else, and why even this one Flash build's AXI SRAM
 region is genuinely cacheable now, not the non-cacheable window an earlier version of
 this project used.
 
+Issue #93's first batching pilot keeps that shared-source model but changes
+the execution granularity: `hello`/`print_int`/`print_hex`/`print_ptr`/
+`mem`/`array`/`struct`/`struct_refined` are `use`d by
+`examples/basic_suite/basic_suite.tkb` and run from one RAM image. The
+firmware emits a stable marker before each case; `scripts/run_hwtest_ram.sh`
+splits the single UART capture and still compares each case with its original
+fixture. This removes seven ST-LINK loads without merging or duplicating the
+actual example sources. `start` stays standalone as the minimal runtime and
+platform-hook integration test.
+
 **Files that turned out to need zero STM32-specific changes**: `examples/common/
 print.tkb`, `examples/common/sync.tkb`, `examples/common/inet_checksum.tkb`,
 `examples/common/netutil.tkb` are all pure takibi logic with no MMIO addresses --

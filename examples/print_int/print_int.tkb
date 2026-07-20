@@ -1,6 +1,6 @@
 // Demo of signed integer output to UART. Uses as cast and unary minus (-n).
 
-fn app_main() {
+fn test_print_int() {
     uart_puts("=== uart_print_int test ===\r\n");
     uart_print(0 as i32);
     uart_putc('\r');

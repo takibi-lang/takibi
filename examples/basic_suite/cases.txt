@@ -1,0 +1,9 @@
+# UART marker name and the unchanged per-example expected-output fixture.
+hello examples/hello/hello.expected
+print_int examples/print_int/print_int.expected
+print_hex examples/print_hex/print_hex.expected
+print_ptr examples/print_ptr/print_ptr.expected
+mem examples/mem/mem.expected
+array examples/array/array.expected
+struct examples/struct/struct.expected
+struct_refined examples/struct_refined/struct_refined.expected

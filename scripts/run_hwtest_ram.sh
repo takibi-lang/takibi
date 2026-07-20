@@ -371,6 +371,59 @@ run_hw_test_ram() {
     rm -f "$tmp_out"
 }
 
+# run_hw_test_ram_basic_suite ELF
+#
+# Load once, then retain one PASS/FAIL result per original example by
+# splitting the marked UART stream with the shared suite-output checker.
+run_hw_test_ram_basic_suite() {
+    local elf="$1" tmp_out tmp_drain report status name expected actual
+    tmp_out=$(mktemp)
+    tmp_drain=$(mktemp)
+    report=$(mktemp)
+
+    stty -F "$SERIAL_DEV" "$BAUD" raw -echo
+    read_until_quiet "$tmp_drain" "$DRAIN_MAX_SECS" "$DRAIN_STABLE_POLLS" 0
+    rm -f "$tmp_drain"
+    read_until_quiet "$tmp_out" "$CAPTURE_MAX_SECS" "$CAPTURE_STABLE_POLLS" 1 \
+        "ram_load_and_run '$elf'"
+
+    if [ "$RAM_LOAD_OK" != "1" ]; then
+        printf "${RED}FAIL${RST}  basic_suite (stm32/ram)  (openocd RAM load failed)\n"
+        sed 's/^/       /' "$RAM_LOAD_LOG"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("basic_suite (stm32/ram)")
+        rm -f "$tmp_out" "$report" "$RAM_LOAD_LOG"
+        return
+    fi
+    rm -f "$RAM_LOAD_LOG"
+
+    python3 "$(dirname "$0")/check_suite_output.py" "$tmp_out" \
+        examples/basic_suite/cases.txt > "$report" || true
+    [ -s "$report" ] || printf 'ERROR\tsuite checker produced no result\n' > "$report"
+
+    while IFS=$'\t' read -r status name expected actual; do
+        case "$status" in
+            PASS)
+                printf "${GRN}PASS${RST}  %s (stm32/ram)\n" "$name"
+                PASS=$((PASS + 1))
+                ;;
+            FAIL)
+                printf "${RED}FAIL${RST}  %s (stm32/ram)\n" "$name"
+                printf "       expected bytes: %s\n" "$expected"
+                printf "       got bytes:      %s\n" "$actual"
+                FAIL=$((FAIL + 1))
+                FAILED_TESTS+=("$name (stm32/ram)")
+                ;;
+            ERROR)
+                printf "${RED}FAIL${RST}  basic_suite (stm32/ram)  (%s)\n" "$name"
+                FAIL=$((FAIL + 1))
+                FAILED_TESTS+=("basic_suite (stm32/ram)")
+                ;;
+        esac
+    done < "$report"
+    rm -f "$tmp_out" "$report"
+}
+
 # run_hw_test_ram_stdin NAME ELF EXPECTED STDIN_FILE
 #
 # RAM-execution counterpart of run_hwtest.sh's run_hw_test_stdin (echo,
@@ -503,12 +556,7 @@ echo ""
 # files (RAM execution changes nothing about what bytes the firmware
 # writes to UART).
 run_hw_test_ram "start (stm32/ram)"         examples/start/kernel_stm32_ram.elf         examples/start/start.expected
-run_hw_test_ram "hello (stm32/ram)"         examples/hello/kernel_stm32_ram.elf         examples/hello/hello.expected
-run_hw_test_ram "print_int (stm32/ram)"     examples/print_int/kernel_stm32_ram.elf     examples/print_int/print_int.expected
-run_hw_test_ram "print_hex (stm32/ram)"     examples/print_hex/kernel_stm32_ram.elf     examples/print_hex/print_hex.expected
-run_hw_test_ram "print_ptr (stm32/ram)"     examples/print_ptr/kernel_stm32_ram.elf     examples/print_ptr/print_ptr.expected
-run_hw_test_ram "mem (stm32/ram)"           examples/mem/kernel_stm32_ram.elf           examples/mem/mem.expected
-run_hw_test_ram "array (stm32/ram)"         examples/array/kernel_stm32_ram.elf         examples/array/array.expected
+run_hw_test_ram_basic_suite examples/basic_suite/kernel_stm32_ram.elf
 run_hw_test_ram "fizzbuzz (stm32/ram)"      examples/fizzbuzz/kernel_stm32_ram.elf      examples/fizzbuzz/fizzbuzz.expected
 run_hw_test_ram "fibonacci (stm32/ram)"     examples/fibonacci/kernel_stm32_ram.elf     examples/fibonacci/fibonacci.expected
 run_hw_test_ram "bubblesort (stm32/ram)"    examples/bubblesort/kernel_stm32_ram.elf    examples/bubblesort/bubblesort.expected
@@ -518,8 +566,6 @@ run_hw_test_ram "crc8 (stm32/ram)"          examples/crc8/kernel_stm32_ram.elf  
 run_hw_test_ram "djb2 (stm32/ram)"          examples/djb2/kernel_stm32_ram.elf          examples/djb2/djb2.expected
 run_hw_test_ram "bump (stm32/ram)"          examples/bump/kernel_stm32_ram.elf          examples/bump/bump.expected
 run_hw_test_ram "scheduler (stm32/ram)"     examples/scheduler/kernel_stm32_ram.elf     examples/scheduler/scheduler.expected
-run_hw_test_ram "struct (stm32/ram)"        examples/struct/kernel_stm32_ram.elf        examples/struct/struct.expected
-run_hw_test_ram "struct_refined (stm32/ram)" examples/struct_refined/kernel_stm32_ram.elf examples/struct_refined/struct_refined.expected
 run_hw_test_ram "refined (stm32/ram)"       examples/refined/kernel_stm32_ram.elf       examples/refined/refined.expected
 run_hw_test_ram "narrow (stm32/ram)"        examples/narrow/kernel_stm32_ram.elf        examples/narrow/narrow.expected
 run_hw_test_ram "for (stm32/ram)"           examples/for/kernel_stm32_ram.elf           examples/for/for.expected

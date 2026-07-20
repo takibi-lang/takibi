@@ -91,6 +91,18 @@ covers in full. This is a JTAG-only bring-up: nothing
 here writes to the SD card as a real `kernel8.img`; see "Why JTAG
 injection, not an SD card kernel" below.
 
+**Issue #93 test-suite batching pilot.** The eight small, side-effect-free
+cases `hello`/`print_int`/`print_hex`/`print_ptr`/`mem`/`array`/`struct`/
+`struct_refined` now share `examples/basic_suite/kernel_rpi3.elf`.
+`scripts/run_hwtest_rpi3.sh` performs one watchdog reset and one JTAG load
+for the suite, then splits its marked UART stream and compares every case
+against its original `.expected` fixture. The visible per-case PASS/FAIL
+count and localization are unchanged; seven resets and seven loads are
+removed. `start` deliberately remains standalone as the minimal platform
+runtime/init/shutdown integration fixture. Interrupt, scheduler, SMP, USB,
+storage, and network cases are not part of this first pilot because their
+state and control-flow boundaries need separate treatment.
+
 **Ethernet and USB are required, not optional, for this board** (per
 the project owner, 2026-07-19) -- unlike STM32F746G-DISCOVERY's
 on-chip Ethernet MAC, BCM2837 has NO on-chip Ethernet at all; its
@@ -912,7 +924,7 @@ want to keep.
 
 ```
 make examples/common_rpi3/jtag_stub.img   # SD card kernel8.img (one-time flash)
-make examples/hello/kernel_rpi3.elf       # an injected payload (any RPI3_EXAMPLES name)
+make examples/start/kernel_rpi3.elf       # an injected payload (any RPI3_EXAMPLES name)
 ```
 
 `RPI3_TARGET := aarch64-none-elf`, `RPI3_CPU := cortex-a53`,
@@ -1049,7 +1061,7 @@ reachable from there (e.g. a shared devcontainer workspace bind mount).
 ## Load and run
 
 ```
-scripts/rpi3_jtag_load.sh examples/hello/kernel_rpi3.elf
+scripts/rpi3_jtag_load.sh examples/start/kernel_rpi3.elf
 ```
 
 Two-pass, both over the same `interface/ftdi/olimex-arm-usb-tiny-h.cfg`

@@ -1,0 +1,37 @@
+// Coarse-grained hardware/QEMU suite for small, side-effect-free examples.
+// One platform startup/load/reset runs all cases. The host runner splits the
+// UART stream at these stable markers and still checks each original fixture
+// independently, so batching does not reduce failure localization.
+use "examples/hello/hello.tkb";
+use "examples/print_int/print_int.tkb";
+use "examples/print_hex/print_hex.tkb";
+use "examples/print_ptr/print_ptr.tkb";
+use "examples/mem/mem.tkb";
+use "examples/array/array.tkb";
+use "examples/struct/struct.tkb";
+use "examples/struct_refined/struct_refined.tkb";
+
+fn suite_marker(name: *u8) {
+    uart_puts("@@TAKIBI_TEST:");
+    uart_puts(name);
+    uart_puts("@@\n");
+}
+
+fn app_main() {
+    suite_marker("hello");
+    test_hello();
+    suite_marker("print_int");
+    test_print_int();
+    suite_marker("print_hex");
+    test_print_hex();
+    suite_marker("print_ptr");
+    test_print_ptr();
+    suite_marker("mem");
+    test_mem();
+    suite_marker("array");
+    test_array();
+    suite_marker("struct");
+    test_struct();
+    suite_marker("struct_refined");
+    test_struct_refined();
+}
