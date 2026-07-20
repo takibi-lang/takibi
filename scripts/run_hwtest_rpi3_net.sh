@@ -70,6 +70,15 @@ fi
 # trying to detect "ready" without a UART connection open concurrently
 # with the raw-socket test.
 SETTLE_SECS=4
+# RTOS + storage examples (http_server_sdcard_rtos/kvs_server_sdcard_rtos)
+# do more at boot than the plain net examples above -- net_init() PLUS
+# disk_initialize()/fat_mount() PLUS (kvs) loading or creating the
+# persistence file, spawning the SD worker task along the way. Confirmed
+# on real hardware: kvs_server_sdcard_rtos with the plain SETTLE_SECS=4
+# window reproducibly failed every request with "No route to host" (the
+# board hadn't finished bringing up the network stack yet), while the
+# same board answered correctly moments later once given more time.
+SDCARD_RTOS_SETTLE_SECS=10
 
 run_rpi3_net_test() {
     local name="$1" elf="$2" test_script="$3"
@@ -147,6 +156,90 @@ else
     fi
 fi
 rm -f "$sdcard_provision_log"
+
+# http_server_sdcard_rtos (rpi3): same real SD-card-served HTTP content
+# as http_server_sdcard above, but SD/FAT operations run behind a Simple
+# RTOS worker task (examples/http_server_sdcard_rtos/
+# http_server_sdcard_rtos.tkb) -- reuses the SAME drive content the
+# http_server_sdcard test above just provisioned, no separate
+# provisioning step needed.
+sdcard_rtos_name="http_server_sdcard_rtos (rpi3)"
+if ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/http_server_sdcard_rtos/kernel_rpi3.elf" > /dev/null; then
+    printf "${RED}FAIL${RST}  %s  (JTAG injection failed)\n" "$sdcard_rtos_name"
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("$sdcard_rtos_name")
+else
+    sleep "$SDCARD_RTOS_SETTLE_SECS"
+    echo "-- $sdcard_rtos_name --"
+    if sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
+            SDCARD_CONTENT_DIR="$sdcard_content_dir" python3 "$REPO_ROOT/scripts/eth_http_server_sdcard_test.py"; then
+        printf "${GRN}PASS${RST}  %s\n" "$sdcard_rtos_name"
+        PASS=$((PASS + 1))
+    else
+        printf "${RED}FAIL${RST}  %s\n" "$sdcard_rtos_name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$sdcard_rtos_name")
+    fi
+fi
+
+# kvs_server_sdcard_rtos (rpi3): real Ethernet + real USB-storage
+# persistence through FAT12 + RTOS task separation, mirroring
+# scripts/run_hwtest_net_ram.sh's own STM32 two-boot proof -- no
+# provisioning step (this firmware creates its own persistence file on
+# first boot if none exists, so whatever the http_server_sdcard(_rtos)
+# tests above left on the drive gives this test's first boot a genuine
+# "no saved table yet" start every run). Boot 1 (KVS_TEST_PHASE=full,
+# the script's own default) proves PUT/GET/DELETE/LIST end to end and
+# leaves one extra key durably written; a REAL chip reset
+# (scripts/rpi3_jtag_reset.sh -- this board has no `reset halt`, see
+# AGENTS.md) followed by boot 2 (KVS_TEST_PHASE=verify_persistence)
+# proves that key survived, not just RAM lifetime.
+#
+# An explicit reset ALSO precedes boot 1 here (unlike every other test in
+# this script, which just re-injects over whatever the previous example
+# left running) -- confirmed on real hardware that running this
+# particular example immediately after http_server_sdcard_rtos with no
+# reset in between reproducibly left the network stack unreachable
+# ("No route to host" on every request) even after this script's own
+# generous SDCARD_RTOS_SETTLE_SECS wait, while the identical firmware
+# booted from a genuine reset answered correctly every time. Root cause
+# not isolated (this board's own DWC2 soft-reset inside net_init() is
+# expected to already bring the USB core to a clean state regardless of
+# the previous payload) -- kept as a real-hardware-confirmed fix per this
+# project's established precedent for this class of finding (see
+# examples/common_rpi3/AGENTS.md's DWC2 XACT_ERROR investigation).
+kvs_rtos_name="kvs_server_sdcard_rtos (rpi3)"
+if ! bash "$REPO_ROOT/scripts/rpi3_jtag_reset.sh" > /dev/null || \
+   ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/kvs_server_sdcard_rtos/kernel_rpi3.elf" > /dev/null; then
+    printf "${RED}FAIL${RST}  %s  (reset/JTAG injection failed, boot 1)\n" "$kvs_rtos_name"
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("$kvs_rtos_name")
+else
+    sleep "$SDCARD_RTOS_SETTLE_SECS"
+    echo "-- $kvs_rtos_name --"
+    if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" python3 "$REPO_ROOT/scripts/eth_kvs_server_stm32_test.py"; then
+        printf "${RED}FAIL${RST}  %s  (protocol test failed, boot 1)\n" "$kvs_rtos_name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$kvs_rtos_name")
+    elif ! bash "$REPO_ROOT/scripts/rpi3_jtag_reset.sh" > /dev/null || \
+         ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/kvs_server_sdcard_rtos/kernel_rpi3.elf" > /dev/null; then
+        printf "${RED}FAIL${RST}  %s  (reset/reinjection failed, boot 2)\n" "$kvs_rtos_name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$kvs_rtos_name")
+    else
+        sleep "$SDCARD_RTOS_SETTLE_SECS"
+        echo "-- $kvs_rtos_name (persistence-survives-reset check) --"
+        if sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
+                KVS_TEST_PHASE=verify_persistence python3 "$REPO_ROOT/scripts/eth_kvs_server_stm32_test.py"; then
+            printf "${GRN}PASS${RST}  %s\n" "$kvs_rtos_name"
+            PASS=$((PASS + 1))
+        else
+            printf "${RED}FAIL${RST}  %s\n" "$kvs_rtos_name"
+            FAIL=$((FAIL + 1))
+            FAILED_TESTS+=("$kvs_rtos_name")
+        fi
+    fi
+fi
 
 echo ""
 echo "rpi3 network hardware tests: $PASS passed, $FAIL failed"

@@ -898,13 +898,13 @@ examples/http_server_sdcard/http_server_sdcard_stm32.debug.o: examples/http_serv
 # line, and links with sem_asm.o via its explicit RAM target above.
 # COMMON_RPI3_STUB: see rtos_demo_stm32.o's own comment further up.
 examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.debug.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -g -o $@ --forbid-trap
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -g -o $@ --forbid-trap
 
 examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.prof.o: examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) --profile-functions -o $@ --forbid-trap
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) --profile-functions -o $@ --forbid-trap
 
 examples/http_server_sdcard_rtos/kernel_stm32_ram.prof.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.prof.o $(COMMON_STM32_LINK_RAM_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/http_server_sdcard_rtos/http_server_sdcard_rtos_stm32.prof.o -o $@
@@ -935,13 +935,13 @@ examples/http_server_sdcard_rtos/kernel_stm32_ram.prof.elf: $(COMMON_STM32_START
 # rare case where the whole milestone was already trap-clean the moment
 # the flag was flipped. See HISTORY.md's issue #135 entry.
 examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.o: examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 examples/kvs_server_sdcard_rtos/kernel_stm32_ram.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.o $(COMMON_STM32_LINK_RAM_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.o -o $@
 
 examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.prof.o: examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_STM32_SCHEDULER) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) --profile-functions -o $@ --forbid-trap
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_SCHEDULER) $(COMMON_STM32_FAT12_SDMMC) $(COMMON_RPI3_STUB) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) --profile-functions -o $@ --forbid-trap
 
 examples/kvs_server_sdcard_rtos/kernel_stm32_ram.prof.elf: $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.prof.o $(COMMON_STM32_LINK_RAM_LD)
 	$(LLD) -T $(COMMON_STM32_LINK_RAM_LD) $(COMMON_STM32_STARTUP_RAM_O) $(COMMON_STM32_SEM_ASM_O) examples/kvs_server_sdcard_rtos/kvs_server_sdcard_rtos_stm32.prof.o -o $@
@@ -1505,7 +1505,20 @@ examples/http_server_sdcard/http_server_sdcard_rpi3.o: examples/http_server_sdca
 examples/http_server_sdcard_install/http_server_sdcard_install_rpi3.o: examples/http_server_sdcard_install/http_server_sdcard_install.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_FAT12_GEOMETRY) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
 
-RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES) $(RPI3_HTTP_SDCARD_EXAMPLES)
+# http_server_sdcard_rtos / kvs_server_sdcard_rtos (RPi3): the union of
+# everything the milestone's earlier RPi3 steps proved separately --
+# rtos_fatfs_sdcard's scheduler HAL + USB HAL combination (and the
+# dma_prepare_rx/timer_asm_extern fixes that needed) plus
+# http_server_sdcard's concurrent Ethernet + USB storage. Same
+# scheduler-HAL/COMMON_STM32_STUB pair as RPI3_FATFS_RTOS_OBJS, same
+# net+storage HAL list as RPI3_HTTP_SDCARD_OBJS.
+RPI3_HTTP_SDCARD_RTOS_EXAMPLES := http_server_sdcard_rtos kvs_server_sdcard_rtos
+RPI3_HTTP_SDCARD_RTOS_OBJS     := $(foreach e,$(RPI3_HTTP_SDCARD_RTOS_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
+
+$(RPI3_HTTP_SDCARD_RTOS_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_NETCONFIG) $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
+
+RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES) $(RPI3_HTTP_SDCARD_EXAMPLES) $(RPI3_HTTP_SDCARD_RTOS_EXAMPLES)
 RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 # rtc/timer/preempt/watchdog need COMMON_RPI3_TIMER_ASM_O linked in
 # (read_cntfrq() and friends -- mrs cannot be called directly from
@@ -1524,7 +1537,7 @@ RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf
 # to the compiler's own dma_prepare_tx/dma_finish_rx builtins, GitHub
 # issue #146). Everything else uses the plain startup.o+mmu.o link line.
 RPI3_TIMER_ASM_KERNELS := $(foreach e,$(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_HTTP_SDCARD_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
-RPI3_SEM_KERNELS       := $(foreach e,$(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
+RPI3_SEM_KERNELS       := $(foreach e,$(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES) $(RPI3_HTTP_SDCARD_RTOS_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 RPI3_GENERIC_KERNELS   := $(filter-out $(RPI3_TIMER_ASM_KERNELS) $(RPI3_SEM_KERNELS),$(RPI3_KERNELS))
 
 $(RPI3_GENERIC_KERNELS): examples/%/kernel_rpi3.elf: \

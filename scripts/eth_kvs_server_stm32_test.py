@@ -37,8 +37,10 @@
 # wall-clock time to finish before the board answers ARP.
 #
 # Needs root (run via sudo, or `make hwcheck-net` which already does) for
-# the `ip neigh flush` step. ETH_TEST_IFACE / SERVER_IP must match
-# examples/common_stm32/netconfig.tkb.
+# the `ip neigh flush` step. ETH_TEST_IFACE / ETH_TEST_SUBNET must match
+# examples/common_stm32/netconfig.tkb (or examples/common_rpi3/
+# netconfig.tkb when run against that board -- see
+# eth_http_server_test.py's own ETH_TEST_SUBNET precedent).
 #
 # Exit code only (0 = pass, 1 = fail).
 
@@ -49,7 +51,7 @@ import sys
 import time
 
 IFACE = os.environ.get("ETH_TEST_IFACE", "enp4s0")
-SERVER_IP = "192.168.10.2"  # must match netconfig.tkb's OUR_IP
+SERVER_IP = os.environ.get("ETH_TEST_SUBNET", "192.168.10") + ".2"  # must match netconfig.tkb's OUR_IP
 SERVER_PORT = 80
 PHASE = os.environ.get("KVS_TEST_PHASE", "full")
 

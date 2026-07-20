@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
 # Triggers a full BCM2837 chip reset via JTAG, using the watchdog-reset
-# mechanism poked directly through OpenOCD memory writes -- equivalent
-# to a physical power cycle (the GPU firmware reruns from scratch,
-# re-reading config.txt and kernel8.img off the SD card) but achievable
-# entirely over JTAG, no physical access needed. Useful for recovering
-# from any uncertain/bad CPU state (see examples/common_rpi3/AGENTS.md)
-# without asking a human to unplug/replug power every time.
+# mechanism poked directly through OpenOCD memory writes. This is a warm
+# SoC reboot -- the same mechanism Linux's own `reboot` goes through on
+# this board (see below) -- NOT equivalent to a physical power cycle: the
+# GPU firmware does rerun from scratch (re-reading config.txt and
+# kernel8.img off the SD card) and every ARM core/peripheral register on
+# the SoC itself returns to its power-on-reset state, but board-level 5V
+# stays up throughout, so anything only reset by actually removing power
+# is NOT reset by this -- confirmed empirically: a USB Mass Storage
+# drive's own file content survives this reset untouched (issue #145's
+# fatfs-family hardware tests rely on exactly that -- provisioning it
+# once and reading it back after a deliberate reset is how
+# kvs_server_sdcard_rtos's persistence-survives-a-reset check works).
+# Still achievable entirely over JTAG, no physical access needed, and
+# still useful for recovering from any uncertain/bad SoC-side CPU/
+# peripheral state (see examples/common_rpi3/AGENTS.md) without asking a
+# human to unplug/replug power every time -- just don't reach for it
+# expecting attached USB devices to also come back to a truly cold state.
 #
 # This is the SAME mechanism Linux's own bcm2835_wdt driver and
 # U-Boot's bcm2835 reset driver use for `reboot`: arm PM_WDOG with a

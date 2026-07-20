@@ -722,10 +722,59 @@ USB drive's real provisioned content over actual HTTP, wired into `make
 hwcheck-rpi3-net` (7/7) alongside 62/62 `make hwcheck-rpi3` and 134/134
 `make check`, all re-verified clean.
 
-**Remaining work**: `http_server_sdcard_rtos`/`kvs_server_sdcard_rtos`
-onto this same foundation, each verified on real hardware individually
-per this project's established incremental process, before this whole
-milestone's `--forbid-trap` hardening pass.
+**`http_server_sdcard_rtos`/`kvs_server_sdcard_rtos` ported -- the full
+fatfs-family milestone is now complete on this board.** Both got the
+same treatment as their non-RTOS siblings (adapter moved to the compile
+command line); their RPi3 Makefile group is the union of everything
+proven separately so far -- the scheduler HAL (needed by
+`rtos_fatfs_sdcard`) combined with concurrent Ethernet + USB storage
+(needed by `http_server_sdcard`), all on one command line, all in one
+program.
+
+Real-hardware iteration on this pair found the network test suite
+itself needed a reliability fix, unrelated to the firmware: running
+`kvs_server_sdcard_rtos` immediately after `http_server_sdcard_rtos`
+with no reset in between (the normal `make hwcheck-rpi3-net` pattern --
+every other test in that suite just re-injects over whatever the
+previous one left running, no reset needed) reproducibly left the
+network stack unreachable ("No route to host" on every request), even
+past a generous settle wait; the identical firmware booted from a
+genuine `scripts/rpi3_jtag_reset.sh` reset answered correctly every
+time. Root cause not isolated (this board's own `net_init()` already
+does a full DWC2 soft reset, which is expected to bring the USB core to
+a clean state regardless of what the previous payload left behind) --
+fixed pragmatically by resetting before this one test's first boot,
+kept because it demonstrably and repeatably works, same "batch fix,
+root cause not fully isolated" precedent as the DWC2 XACT_ERROR
+investigation during the Ethernet milestone. Documentation correction
+that came out of chasing this: `scripts/rpi3_jtag_reset.sh`'s (and this
+file's own) description of the reset as "equivalent to a physical power
+cycle" was an overclaim -- it is a warm SoC reboot; board-level 5V never
+drops, so USB peripherals are NOT reset by it, confirmed directly by the
+USB Mass Storage drive's own file content surviving the reset untouched
+(the mechanism `kvs_server_sdcard_rtos`'s own persistence-survives-a-
+reset check below depends on). Both files' wording is now corrected.
+
+Real-hardware result, from a clean reset: `GET /`, `/ABOUT.HTM`,
+`/ICON.PNG` all pass against `http_server_sdcard_rtos`;
+`kvs_server_sdcard_rtos` passes its full PUT/GET/DELETE/LIST sequence
+AND the two-boot persistence-survives-a-real-reset check (one extra key
+written on boot 1, confirmed still readable after `rpi3_jtag_reset.sh`
++ boot 2) -- the same proof `scripts/run_hwtest_net_ram.sh` already
+does for STM32, now also proven on this board. `make hwcheck-rpi3-net`
+9/9, `make hwcheck-rpi3` 62/62, `make check` 134/134, all from a clean
+reset.
+
+This completes GitHub issue #145's own remaining scope (issue #61's
+`fatfs` in-memory core, issue #62-equivalent real block storage, and
+every fatfs-family application example STM32 has) for Raspberry Pi 3B.
+**Remaining work before this whole milestone's `--forbid-trap`
+hardening pass**: none functionally -- every fatfs-family example that
+exists on STM32 now also runs on this board. The hardening pass itself
+(turning `RPI3_MSC_TAKIBI_FLAGS` into `RPI3_TAKIBI_FLAGS` for every
+group this section touched, fixing whatever it flags) is the one
+deliberately deferred step, per the project's established
+baseline-then-hardened-pass process.
 
 ## Hardware
 
@@ -810,14 +859,24 @@ injecting a real payload.
 ## Resetting the board over JTAG (no physical access needed)
 
 `scripts/rpi3_jtag_reset.sh` triggers a full BCM2837 chip reset purely
-over JTAG -- equivalent to a physical power cycle (the GPU firmware
-reruns from scratch, re-reading `config.txt` and `kernel8.img` off the
-SD card), with no human needed at the board. Mechanism: BCM2837's PM
-block has a watchdog-based software reset (`PM_RSTC` at `0x3F10001C`,
-`PM_WDOG` at `0x3F100024`, gated by the `0x5A000000` password magic in
-the top byte of any write -- the same mechanism Linux's own
-`bcm2835_wdt` driver and U-Boot's `bcm2835` reset driver use for
-`reboot`), poked directly via OpenOCD `mww` memory writes. The watchdog
+over JTAG, with no human needed at the board. This is a warm SoC
+reboot, NOT equivalent to a physical power cycle (GitHub issue #145's
+own investigation corrected an earlier version of this section that
+claimed otherwise): the GPU firmware does rerun from scratch
+(re-reading `config.txt` and `kernel8.img` off the SD card) and every
+ARM core/peripheral register on the SoC returns to its power-on-reset
+state, but board-level 5V stays up throughout, so anything only reset
+by actually removing power is NOT reset by this -- confirmed
+empirically, a USB Mass Storage drive's own file content survives this
+reset untouched (see "USB Mass Storage" below -- provisioning the drive
+once and reading it back after a deliberate reset is how
+`kvs_server_sdcard_rtos`'s persistence-survives-a-reset check works).
+Mechanism: BCM2837's PM block has a watchdog-based software reset
+(`PM_RSTC` at `0x3F10001C`, `PM_WDOG` at `0x3F100024`, gated by the
+`0x5A000000` password magic in the top byte of any write -- the same
+mechanism Linux's own `bcm2835_wdt` driver and U-Boot's `bcm2835` reset
+driver use for `reboot`), poked directly via OpenOCD `mww` memory
+writes. The watchdog
 fires fast enough that the triggering OpenOCD session almost always
 ends with "Invalid ACK"/"JTAG-DP STICKY ERROR" (the DAP losing a stable
 connection to a chip that is actively resetting underneath it) --

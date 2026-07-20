@@ -46,15 +46,23 @@
 // milestone, for the one file that DID need a fix during the original
 // issue #97 work.
 //
-// STM32-only: there is no virtual SD controller in this project's QEMU
-// setup (matches examples/fatfs_sdcard and examples/sdcard's own
+// No QEMU build: there is no virtual SD/USB controller in this project's
+// QEMU setup (matches examples/fatfs_sdcard and examples/sdcard's own
 // no-QEMU status).
+//
+// Shared across STM32 and Raspberry Pi 3B (GitHub issue #145): like
+// http_server_sdcard.tkb, the target storage adapter comes from the
+// compile command line per target rather than a `use` here. On RPi3
+// this combines everything the milestone's earlier steps proved
+// separately: rtos_fatfs_sdcard's RTOS-task storage access (and the
+// dma_prepare_rx fix it found -- see usb_dwc2.tkb's dwc2_bulk_in
+// comment), http_server_sdcard's concurrent Ethernet + USB storage (see
+// usb_host.tkb/usb_dwc2.tkb's per-device bulk slots), all at once.
 
 use "examples/common/inet_checksum.tkb";
 use "examples/common/netutil.tkb";
 use "examples/common/http_sdcard_server.tkb";
 use "examples/common/rtos.tkb";
-use "examples/common_stm32/fat12_sdmmc.tkb";
 
 let mut our_mac: [u8; 6];
 let mut our_ip:  [u8; 4];

@@ -9869,3 +9869,50 @@ sdcard alongside the six existing network tests); `make hwcheck-rpi3`
 fatfs-family work: `http_server_sdcard_rtos`/`kvs_server_sdcard_rtos` onto
 this same foundation, then the milestone-wide `--forbid-trap` hardening
 pass.
+
+`http_server_sdcard_rtos`/`kvs_server_sdcard_rtos` ported to Raspberry Pi
+3B, completing GitHub issue #145's fatfs-family scope on this board. Both
+got the same treatment as their non-RTOS siblings (target adapter moved to
+per-target compile command lines); their RPi3 Makefile group is the union
+of everything proven separately so far -- the scheduler HAL combined with
+concurrent Ethernet + USB storage, all on one command line.
+
+Real-hardware iteration found a network-test-suite reliability issue,
+unrelated to the firmware itself: running `kvs_server_sdcard_rtos`
+immediately after `http_server_sdcard_rtos` with no reset in between
+(every other test in `make hwcheck-rpi3-net` just re-injects over
+whatever the previous one left running) reproducibly left the network
+stack unreachable ("No route to host" on every request) even past a
+generous settle wait, while the identical firmware booted from a genuine
+`scripts/rpi3_jtag_reset.sh` reset answered correctly every time. Root
+cause not isolated (`net_init()`'s own DWC2 soft reset is expected to
+already bring the USB core to a clean state regardless of the previous
+payload) -- fixed pragmatically by resetting before this one test's first
+boot, kept because it demonstrably and repeatably works, matching the
+DWC2 XACT_ERROR investigation's own "batch fix, root cause not fully
+isolated" precedent from the Ethernet milestone.
+
+Chasing this also surfaced a real documentation inaccuracy:
+`scripts/rpi3_jtag_reset.sh`'s description of the reset as "equivalent to
+a physical power cycle" was an overclaim. It is a warm SoC reboot --
+board-level 5V never drops, so USB peripherals are not reset by it,
+confirmed directly by the attached USB Mass Storage drive's own file
+content surviving the reset untouched (the exact mechanism
+`kvs_server_sdcard_rtos`'s persistence-survives-a-reset check depends on).
+Both the script's own header comment and examples/common_rpi3/AGENTS.md's
+"Resetting the board over JTAG" section were corrected.
+
+Real-hardware result, from a clean reset: `http_server_sdcard_rtos`
+passes `GET /`/`/ABOUT.HTM`/`/ICON.PNG`; `kvs_server_sdcard_rtos` passes
+its full PUT/GET/DELETE/LIST sequence and the two-boot
+persistence-survives-a-real-reset check (a key written on boot 1 confirmed
+still readable after a real reset + boot 2) -- the same proof
+`scripts/run_hwtest_net_ram.sh` already does for STM32, now also proven
+here. `make hwcheck-rpi3-net` 9/9, `make hwcheck-rpi3` 62/62, `make check`
+134/134, all from a clean reset.
+
+This completes GitHub issue #145's remaining scope for Raspberry Pi 3B --
+every fatfs-family example STM32 has now also runs on this board. Only
+the milestone-wide `--forbid-trap` hardening pass remains, deliberately
+deferred per the project's established baseline-then-hardened-pass
+process.

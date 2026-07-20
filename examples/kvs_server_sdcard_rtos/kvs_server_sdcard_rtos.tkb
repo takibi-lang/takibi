@@ -55,12 +55,17 @@
 // before hardening; --forbid-trap found six shadow-record slice sites, fixed
 // with a 256-byte destination contract and refined same-base subslices rather
 // than raw-pointer access. See HISTORY.md's issue #135 entries.
+//
+// Shared across STM32 and Raspberry Pi 3B (GitHub issue #145): like
+// http_server_sdcard_rtos.tkb, the target storage adapter comes from the
+// compile command line per target rather than a `use` here -- on RPi3
+// this is the same RTOS-task-storage + concurrent-Ethernet-and-USB-
+// storage foundation http_server_sdcard_rtos.tkb uses.
 
 use "examples/common/inet_checksum.tkb";
 use "examples/common/netutil.tkb";
 use "examples/common/http_server_common.tkb";
 use "examples/common/rtos.tkb";
-use "examples/common_stm32/fat12_sdmmc.tkb";
 
 let mut our_mac: [u8; 6];
 let mut our_ip:  [u8; 4];
