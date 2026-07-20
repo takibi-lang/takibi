@@ -423,14 +423,10 @@ examples/
                      correctness, see AGENTS.md's "MMU and caches" entry) --
                      JTAG's load_image and this board's own DWC2 controller both
                      bypass the CPU cache, so anything DMA'd needs explicit
-                     maintenance instead (cache_asm.S below; startup.S's own
-                     dcache_invalidate_all handles the whole-cache case at boot)
-    cache_asm.S   -- dcache_clean_range/dcache_invalidate_range: VA-based `dc
-                     cvac`/`dc ivac` loops, the address-range-bounded counterpart
-                     to startup.S's whole-cache dcache_invalidate_all -- needed
-                     because dma_prepare_tx/dma_prepare_rx/dma_finish_rx lower to
-                     a bare `dsb sy` on AArch64 (see this file's own "Known
-                     Limitations" entry on that compiler-level gap)
+                     maintenance instead (dma_prepare_tx/dma_prepare_rx/
+                     dma_finish_rx, real AArch64 lowering since issue #146;
+                     startup.S's own dcache_invalidate_all handles the
+                     whole-cache case at boot)
     link.ld       -- load address 0x200000 (deliberately distinct from jtag_stub.ld's)
     uart.tkb      -- UART0 (PL011) driver, GPIO14/15 ALT0 pinmux + pull disable
     print.tkb     -- isize/usize uart_print/uart_println overloads (AArch64
@@ -548,19 +544,16 @@ size.
   perfectly correct in QEMU and fail only on real silicon, so that kind of work should get real-hardware
   integration testing early, not just as a final check once "everything already works in QEMU."
 - **STM32 Ethernet driver details** (unified driver API, network config, the DMA-ordering hardware bug, TX interrupt completion) -- see `examples/common_stm32/AGENTS.md`.
-- **`dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` lower to a bare `dsb sy` on AArch64 targets -- no actual cache
-  clean/invalidate instruction is emitted**, unlike the real Cortex-M7 `DCCMVAC`/`DCIMVAC` the STM32 backend gets
-  (confirmed by reading `lib/llvm_gen.ml`). Invisible on QEMU (TCG has no cache model to go stale in the first
-  place) and invisible on RPi3 for as long as its D-cache stayed off, but a genuine correctness gap for any
-  AArch64 target that both enables D-cache AND has a real DMA-capable device -- found during the Raspberry Pi 3B
-  USB host stack bring-up (issue #140/#144), once its D-cache was turned back on for `ldaxr`/`stlxr` reasons (see
-  `examples/common_rpi3/AGENTS.md`'s "MMU and caches" section) and its DWC2 controller needed the RPi3 mailbox
-  buffer and USB transfer buffers to be coherently visible to bus masters that bypass this core's cache. Worked
-  around at the `.tkb` level only, not fixed in the compiler: `examples/common_rpi3/cache_asm.S`'s
-  `dcache_clean_range`/`dcache_invalidate_range` (explicit VA-based `dc cvac`/`dc ivac` loops, called directly by
-  `mailbox.tkb`/`usb_dwc2.tkb` instead of relying on the builtins). Any FUTURE AArch64 DMA-capable driver on a
-  cache-enabled target needs the same manual workaround, or the compiler's AArch64 lowering of these three
-  builtins needs extending to do real cache maintenance, before trusting them there.
+- **RISC-V has no `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` lowering yet** -- these now raise a compile
+  error on RISC-V targets rather than silently falling back to a bare barrier (issue #146). AArch64 previously
+  had the same silent-fallback gap (found during Raspberry Pi 3B USB host stack bring-up, issue #140/#144, once
+  its D-cache was turned back on for `ldaxr`/`stlxr` reasons and its DWC2 controller/VideoCore mailbox needed real
+  cache maintenance around DMA hand-offs) and now gets a real `dc cvac`/`dc civac`/`dc ivac` VA-range-loop
+  lowering in `lib/llvm_gen.ml`, matching the real Cortex-M7 `DCCMVAC`/`DCIMVAC` the STM32 backend already had --
+  `examples/common_rpi3/mailbox.tkb`/`usb_dwc2.tkb` call the standard builtins directly now, same as STM32's
+  `eth.tkb`, with no hand-written cache-range assembly stub needed on this target anymore. RISC-V's own real
+  lowering (gated on the Zicbom extension's `cbo.clean`/`cbo.flush`/`cbo.inval`) is deferred until an actual
+  RISC-V target exists in this project to verify it against, rather than shipping unverified speculative codegen.
 
 ## QEMU Bare-Metal (AArch64)
 

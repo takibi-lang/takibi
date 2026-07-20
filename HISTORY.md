@@ -9615,3 +9615,35 @@ example instead of repeating the same failure across the suite. Verified
 against the currently unavailable Olimex probe: `make hwcheck-rpi3` now
 identifies `LIBUSB_ERROR_TIMEOUT`, the FTDI VID/PID, and the failed PC/MMU
 check before returning nonzero.
+
+GitHub issue #146: `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` gained a
+real AArch64 lowering in `lib/llvm_gen.ml` -- a `dc cvac`/`dc ivac` VA-range
+loop sized via `CTR_EL0.DminLine`, emitted as a single self-contained
+inline-asm blob (`${:uid}` keeps the loop label unique per call site), byte-
+for-byte the same algorithm `examples/common_rpi3/cache_asm.S` used to
+implement by hand. x86-64 keeps its existing barrier-only lowering, now
+documented as a verified no-op (PC-class DMA is chipset/IOMMU-coherent by
+hardware) rather than a placeholder. RISC-V no longer silently falls back to
+a bare barrier for these three builtins -- it raises a compile error, since
+no Zicbom `cbo.clean`/`cbo.flush`/`cbo.inval` lowering exists yet and no
+RISC-V target exists anywhere in this project to verify one against.
+Verified with `make build`/`test` (three new codegen tests covering the
+AArch64/x86/RISC-V paths)/`qemutest`/`stm32build`, and a standalone AArch64
+object file disassembled directly to confirm the emitted instructions.
+
+Follow-up, once JTAG access came back: `examples/common_rpi3/mailbox.tkb`'s
+`mbox_call` and `usb_dwc2.tkb`'s `dwc2_control_transfer`/`dwc2_bulk_out`/
+`dwc2_bulk_in` were migrated off their hand-written `cache_asm.S` calls onto
+the now-real builtins directly, matching how `examples/common_stm32/eth.tkb`
+already used them. This needed widening each buffer parameter from a plain
+`usize`/`*u8` to `*align(32) T` (`dma_prepare_rx`/`dma_finish_rx`'s own proof
+requirement, issue #102 Stage 2) -- satisfiable everywhere without `unsafe`
+since every real buffer involved (`ctrl_data_buf`, `ctrl_setup_buf`,
+`eth_rx_buf`, `eth_tx_buf`, `power_msg`) was already declared `align(64)` or
+stricter. `cache_asm.S` is deleted, along with its `Makefile` link wiring
+(`RPI3_USB_KERNELS`'s link recipe became identical to `RPI3_TIMER_ASM_KERNELS`'s
+once the extra object file dropped out, so the two kernel groups were merged
+rather than left as duplicate rules). Real-hardware result: `make
+hwcheck-rpi3` (58/58) and `make hwcheck-rpi3-net` (6/6, including the maximum
+1486-byte payload and the full tcp_echo/http_server/kvs_server suite) both
+pass unchanged.

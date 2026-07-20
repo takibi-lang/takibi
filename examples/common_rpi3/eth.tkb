@@ -226,8 +226,7 @@ fn net_init() -> NetInitResult {
 fn net_rx_wait() !{may_block} {
     for i: i32 in 0..<20 {
         if (eth_rx_flag == 0) {
-            let buf_addr: usize = eth_rx_buf as usize;
-            if (dwc2_bulk_in(eth_dev_addr, buf_addr, ETH_RX_BUF_SIZE as u32)) {
+            if (dwc2_bulk_in(eth_dev_addr, eth_rx_buf, ETH_RX_BUF_SIZE as u32)) {
                 let got: u32 = dwc2_last_transfer_bytes();
                 if (got >= (ETH_RX_STAT_HDR as u32)) {
                     eth_rx_flag = 1;
@@ -301,12 +300,11 @@ fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32) -> NetTxInFlight[desc
     let tx_payload = eth_tx_buf[8..<1522];
     slice_copy(tx_payload[0..<copy_len], rx_buf[0..<copy_len]);
 
-    let buf_addr: usize = eth_tx_buf as usize;
     // One transfer carries the complete TX record, including a maximum
     // 1514-byte Ethernet frame. scripts/eth_net_echo_test.py verifies the
     // full 1486-byte payload case on real hardware; usb_dwc2.tkb preserves
     // the DWC2-reported next DATA PID across its three USB packets.
-    dwc2_bulk_out(eth_dev_addr, buf_addr, (ETH_TX_CMD_HDR + copy_len) as u32);
+    dwc2_bulk_out(eth_dev_addr, eth_tx_buf, (ETH_TX_CMD_HDR + copy_len) as u32);
 
     let slot: {0..<1 as usize} = 0;
     let mut in_flight: NetTxInFlight[desc] = { slot };

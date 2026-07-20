@@ -283,16 +283,15 @@ fn dwc2_host_port_status() -> u32 {
 // for the Ethernet function), which is why it takes the channel number
 // as a parameter rather than being hardwired to channel 0.
 
-// dcache_clean_range/dcache_invalidate_range are already declared by
-// examples/common_rpi3/mailbox.tkb, which this file is always compiled
-// alongside (see the Makefile's RPI3_USB_OBJS rule) -- takibi rejects a
-// second extern fn declaration of the same symbol as an overload
-// attempt, so this file just uses them without redeclaring.
-// bus_address() (mailbox.tkb) is reused the same way -- DWC2's own DMA
-// engine is a bus master exactly like the VideoCore GPU is, so its
-// CHAN_DMA_ADDR register needs the same ARM-physical-to-VC-bus-address
-// translation the mailbox buffer already needs, not a raw physical
-// address.
+// Cache maintenance around DMA hand-offs below uses the compiler's own
+// dma_prepare_tx/dma_finish_rx builtins directly (no declaration needed,
+// same as any other builtin) -- these used to be hand-written
+// cache_asm.S calls, back when the AArch64 backend only lowered them to
+// a bare dsb (GitHub issue #146). bus_address() (mailbox.tkb) is reused
+// as-is -- DWC2's own DMA engine is a bus master exactly like the
+// VideoCore GPU is, so its CHAN_DMA_ADDR register needs the same
+// ARM-physical-to-VC-bus-address translation the mailbox buffer already
+// needs, not a raw physical address.
 
 const CTRL_CHANNEL: usize = 0;
 
@@ -466,12 +465,14 @@ let mut ctrl_data_buf: [u8; 64] align(64);
 // data packet after SETUP is defined to be DATA1, never DATA0); the
 // status stage is the OPPOSITE direction of the data stage, or IN if
 // there is no data stage at all (e.g. SET_ADDRESS). `data`/`len`
-// describe the caller's own buffer (ctrl_data_buf here, always) --
-// cache maintenance direction depends on request_type's direction bit
-// (bit 7: device-to-host = 0x80).
+// describe the caller's own buffer (ctrl_data_buf here, always -- hence
+// the align(32) proof below, satisfied by ctrl_data_buf's own align(64)
+// declaration, a stricter multiple) -- cache maintenance direction
+// depends on request_type's direction bit (bit 7: device-to-host =
+// 0x80).
 fn dwc2_control_transfer(dev_addr: u32, max_pkt: u32,
                           request_type: u8, request: u8, value: u16, index: u16,
-                          data: *u8, len: u32) -> bool {
+                          data: *align(32) u8, len: u32) -> bool {
     ctrl_setup_buf[0] = request_type;
     ctrl_setup_buf[1] = request;
     ctrl_setup_buf[2] = (value & 0xFF) as u8;
@@ -482,7 +483,7 @@ fn dwc2_control_transfer(dev_addr: u32, max_pkt: u32,
     ctrl_setup_buf[7] = (((len >> 8) as u16) & 0xFF) as u8;
 
     let setup_addr: usize = ctrl_setup_buf as usize;
-    dcache_clean_range(setup_addr, 8);
+    dma_prepare_tx(ctrl_setup_buf, 8);
     if (dwc2_channel_transfer(CTRL_CHANNEL, dev_addr, 0, EP_TYPE_CONTROL,
                                false, max_pkt, PID_SETUP, setup_addr, 8) == false) {
         return false;
@@ -495,14 +496,14 @@ fn dwc2_control_transfer(dev_addr: u32, max_pkt: u32,
         had_data_stage = true;
         let data_addr: usize = data as usize;
         if (is_in == false) {
-            dcache_clean_range(data_addr, len as usize);
+            dma_prepare_tx(data, len as usize);
         }
         if (dwc2_channel_transfer(CTRL_CHANNEL, dev_addr, 0, EP_TYPE_CONTROL,
                                    is_in, max_pkt, PID_DATA1, data_addr, len) == false) {
             return false;
         }
         if (is_in) {
-            dcache_invalidate_range(data_addr, len as usize);
+            dma_finish_rx(data, len as usize);
         }
     }
 
@@ -703,11 +704,18 @@ fn dwc2_clear_endpoint_halt(ep_addr: u32) -> bool {
 // the device's own post-clear state. The original bulk-toggle bug made
 // this path fire reproducibly, which is why recovery remains even though
 // correctly preserving HCTSIZ.PID prevents that failure now.
-fn dwc2_bulk_out(dev_addr: u32, buf: usize, len: u32) -> bool {
-    dcache_clean_range(buf, len as usize);
+//
+// `buf` is `*align(32) u8`, not a plain `usize` address, so the call
+// below can pass it straight to dma_prepare_tx (GitHub issue #146's
+// real AArch64 lowering, replacing the old cache_asm.S extern fn) --
+// this function's only caller (eth.tkb's net_transmit) passes
+// eth_tx_buf, declared align(64), a stricter multiple.
+fn dwc2_bulk_out(dev_addr: u32, buf: *align(32) u8, len: u32) -> bool {
+    dma_prepare_tx(buf, len as usize);
+    let addr: usize = buf as usize;
     let ok: bool = dwc2_channel_transfer(BULK_OUT_CHANNEL, dev_addr, dwc2_bulk_out_ep,
                                           EP_TYPE_BULK, false, dwc2_bulk_out_mp,
-                                          dwc2_bulk_out_toggle, buf, len);
+                                          dwc2_bulk_out_toggle, addr, len);
     dwc2_bulk_out_toggle = dwc2_last_pid;
     if (ok == false) {
         if ((dwc2_last_status & HCINT_STALL) != 0) {
@@ -725,13 +733,18 @@ fn dwc2_bulk_out(dev_addr: u32, buf: usize, len: u32) -> bool {
 // comment), so a plain call here is correct; it simply returns false
 // once its bounded retry budget is exhausted with nothing received,
 // exactly like any other empty poll.
-fn dwc2_bulk_in(dev_addr: u32, buf: usize, len: u32) -> bool {
+//
+// `buf` is `*align(32) u8` for the same reason as dwc2_bulk_out above --
+// this function's only caller (eth.tkb's net_rx_wait) passes
+// eth_rx_buf, declared align(64).
+fn dwc2_bulk_in(dev_addr: u32, buf: *align(32) u8, len: u32) -> bool {
+    let addr: usize = buf as usize;
     let ok: bool = dwc2_channel_transfer(BULK_IN_CHANNEL, dev_addr, dwc2_bulk_in_ep,
                                           EP_TYPE_BULK, true, dwc2_bulk_in_mp,
-                                          dwc2_bulk_in_toggle, buf, len);
+                                          dwc2_bulk_in_toggle, addr, len);
     dwc2_bulk_in_toggle = dwc2_last_pid;
     if (ok) {
-        dcache_invalidate_range(buf, len as usize);
+        dma_finish_rx(buf, len as usize);
     }
     return ok;
 }

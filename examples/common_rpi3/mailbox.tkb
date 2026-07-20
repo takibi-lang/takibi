@@ -17,9 +17,6 @@
 // here; channels 0-7 are legacy single-value mailboxes this project has
 // no use for.
 
-extern fn dcache_clean_range(addr: usize, len: usize);
-extern fn dcache_invalidate_range(addr: usize, len: usize);
-
 let mbox_read:   *io u32 = 0x3F00B880;
 let mbox_status: *io u32 = 0x3F00B898;
 let mbox_write:  *io u32 = 0x3F00B8A0;
@@ -50,11 +47,11 @@ let mut power_msg: [u32; 8] align(4096);
 // ALTERNATIVE 0x40000000 alias goes through the VideoCore's own L2
 // cache, which this project has no way to flush/invalidate from the
 // ARM side, so 0xC0000000 is the only choice that composes safely with
-// this file's own explicit dcache_clean_range/dcache_invalidate_range
-// calls (those maintain the ARM core's cache; the GPU-side cache is a
-// second, independent hazard this alias sidesteps entirely rather than
-// needing a second cache-maintenance mechanism this project doesn't
-// have). RAM on this board is identity-mapped starting at physical 0
+// this file's own dma_prepare_tx/dma_finish_rx calls below (those
+// maintain the ARM core's cache; the GPU-side cache is a second,
+// independent hazard this alias sidesteps entirely rather than needing
+// a second cache-maintenance mechanism this project doesn't have). RAM
+// on this board is identity-mapped starting at physical 0
 // (examples/common_rpi3/mmu.S), so masking off any high bits before
 // OR-ing in the alias is defensive, not load-bearing today.
 fn bus_address(addr: usize) -> u32 {
@@ -62,15 +59,21 @@ fn bus_address(addr: usize) -> u32 {
 }
 
 // mbox_call: send the message already written into `buf` (a
-// bus-address-translatable, align(16)-or-better buffer) on `channel`,
-// block until the matching response arrives, and report whether the
-// firmware accepted it (buf[1] == MBOX_RESPONSE_OK). Cleans the buffer
-// before sending (CPU-writes must reach real RAM before the GPU reads
-// it) and invalidates it before the caller reads the response (the GPU
-// wrote real RAM directly; the ARM cache must not serve a stale copy).
-fn mbox_call(buf: *u32, len_bytes: usize, channel: u32) -> bool {
+// bus-address-translatable, align(32)-or-better buffer -- align(32) is
+// dma_finish_rx's own proof requirement, GitHub issue #102 Stage 2;
+// every caller here passes power_msg, declared align(4096), a stricter
+// multiple) on `channel`, block until the matching response arrives,
+// and report whether the firmware accepted it (buf[1] ==
+// MBOX_RESPONSE_OK). Cleans the buffer before sending (CPU-writes must
+// reach real RAM before the GPU reads it) and invalidates it before the
+// caller reads the response (the GPU wrote real RAM directly; the ARM
+// cache must not serve a stale copy) via the compiler's own
+// dma_prepare_tx/dma_finish_rx builtins -- these used to be hand-written
+// cache_asm.S calls, back when the AArch64 backend only lowered them to
+// a bare dsb (GitHub issue #146).
+fn mbox_call(buf: *align(32) u32, len_bytes: usize, channel: u32) -> bool {
     let addr: usize = buf as usize;
-    dcache_clean_range(addr, len_bytes);
+    dma_prepare_tx(buf, len_bytes);
 
     let msg: u32 = bus_address(addr) | (channel & 0xF);
 
@@ -81,7 +84,7 @@ fn mbox_call(buf: *u32, len_bytes: usize, channel: u32) -> bool {
         while ((*mbox_status & MBOX_STATUS_EMPTY) != 0) {}
         let resp: u32 = *mbox_read;
         if (resp == msg) {
-            dcache_invalidate_range(addr, len_bytes);
+            dma_finish_rx(buf, len_bytes);
             return buf[1] == MBOX_RESPONSE_OK;
         }
     }
@@ -102,5 +105,5 @@ fn mbox_power_on_usb() -> bool {
     power_msg[5] = 3;
     power_msg[6] = 3;
     power_msg[7] = 0;
-    return mbox_call(power_msg as *u32, 8 * 4, MBOX_CH_PROP);
+    return mbox_call(power_msg as *align(32) u32, 8 * 4, MBOX_CH_PROP);
 }

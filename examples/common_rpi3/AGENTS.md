@@ -134,6 +134,25 @@ counterpart of `startup.S`'s existing `dcache_invalidate_all` set/way
 sweep. Every DMA hand-off in this section (mailbox buffer, later USB
 descriptor rings) calls these explicitly.
 
+**Update (issue #146, after milestone 7): the compiler gap above is
+fixed for real.** `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` now
+lower to a genuine `dc cvac`/`dc ivac` VA-range loop on AArch64 (same
+algorithm `cache_asm.S` used by hand, now in `lib/llvm_gen.ml` itself).
+`mailbox.tkb`'s `mbox_call`/`usb_dwc2.tkb`'s `dwc2_control_transfer`/
+`dwc2_bulk_out`/`dwc2_bulk_in` were migrated to call the standard
+builtins directly (their pointer parameters widened to `*align(32) T`,
+the builtins' own proof requirement for the invalidate direction --
+satisfied trivially everywhere here since every real buffer involved
+`ctrl_data_buf`/`ctrl_setup_buf`/`eth_rx_buf`/`eth_tx_buf`/`power_msg`
+is already declared `align(64)` or stricter), matching how
+`examples/common_stm32/eth.tkb` already used these builtins directly.
+`cache_asm.S` and its `dcache_clean_range`/`dcache_invalidate_range`
+stubs are retired -- deleted, along with their `Makefile` link wiring --
+now that nothing calls them. Verified against the same 58/58
+`make hwcheck-rpi3` and 6/6 `make hwcheck-rpi3-net` (including the
+maximum 1486-byte payload and the full tcp_echo/http_server/kvs_server
+suite) this section's milestones already required.
+
 **Milestone 1 (done): VideoCore mailbox.** `examples/common_rpi3/
 mailbox.tkb` (new): MMIO base `0x3F00B880` (peripheral base + BCM2835's
 known `0xB880` offset), `mbox_call()`/`mbox_power_on_usb()` (property
