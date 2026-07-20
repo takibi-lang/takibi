@@ -92,12 +92,17 @@ SDCARD_RTOS_SETTLE_SECS=10
 # eliminating a recurring class of false alarms.
 reset_before_test() {
     local name="$1"
-    if ! bash "$REPO_ROOT/scripts/rpi3_jtag_reset.sh" > /dev/null; then
-        printf "${RED}FAIL${RST}  %s  (JTAG reset failed)\n" "$name"
+    local reset_log
+    reset_log=$(mktemp)
+    if ! "$REPO_ROOT/scripts/rpi3_jtag_reset.sh" > "$reset_log" 2>&1; then
+        printf "${RED}FAIL${RST}  %s  (JTAG reset failed -- log follows)\n" "$name"
+        sed 's/^/       /' "$reset_log"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        rm -f "$reset_log"
         return 1
     fi
+    rm -f "$reset_log"
 }
 
 run_rpi3_net_test() {
@@ -161,6 +166,13 @@ elif ! bash "$REPO_ROOT/scripts/rpi3_provision_http_server_sdcard.sh" \
     sed 's/^/       /' "$sdcard_provision_log"
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("$sdcard_name")
+elif ! reset_before_test "$sdcard_name"; then
+    # Provisioning ran its own firmware payload. Reset again so the
+    # server load below, like every other example load in this suite,
+    # starts from jtag_stub rather than inheriting the installer's CPU,
+    # cache, interrupt-controller, or DWC2 state. The warm SoC reset
+    # deliberately preserves the USB drive content just provisioned.
+    :
 elif ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/http_server_sdcard/kernel_rpi3.elf" > /dev/null; then
     printf "${RED}FAIL${RST}  %s  (JTAG injection failed)\n" "$sdcard_name"
     FAIL=$((FAIL + 1))

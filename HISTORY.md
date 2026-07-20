@@ -9916,3 +9916,17 @@ every fatfs-family example STM32 has now also runs on this board. Only
 the milestone-wide `--forbid-trap` hardening pass remains, deliberately
 deferred per the project's established baseline-then-hardened-pass
 process.
+
+RPi3 hardware-test isolation was then made systematic after further
+real-hardware runs showed that stale state was not specific to the KVS
+transition: examples that passed alone could fail back-to-back with
+garbled UART, unreachable networking, or a USB-sector write error.
+`scripts/run_hwtest_rpi3.sh` and `scripts/run_hwtest_rpi3_net.sh` now
+perform the watchdog-based SoC reset before every example load, accepting
+the measured few-second cost in exchange for each fixture starting from
+the known JTAG stub. The storage HTTP path resets both before its
+provisioning firmware and again before loading the server firmware; the
+warm reset retains the just-written USB-drive image while clearing the
+installer's CPU/cache/peripheral state. Reset failures report the saved
+OpenOCD reconnect log and stop or skip the affected fixture as appropriate,
+instead of surfacing later as an unrelated output mismatch.

@@ -734,9 +734,8 @@ program.
 Real-hardware iteration on this pair found the network test suite
 itself needed a reliability fix, unrelated to the firmware: running
 `kvs_server_sdcard_rtos` immediately after `http_server_sdcard_rtos`
-with no reset in between (the normal `make hwcheck-rpi3-net` pattern --
-every other test in that suite just re-injects over whatever the
-previous one left running, no reset needed) reproducibly left the
+with no reset in between (the test suite's pattern at the time)
+reproducibly left the
 network stack unreachable ("No route to host" on every request), even
 past a generous settle wait; the identical firmware booted from a
 genuine `scripts/rpi3_jtag_reset.sh` reset answered correctly every
@@ -754,6 +753,16 @@ drops, so USB peripherals are NOT reset by it, confirmed directly by the
 USB Mass Storage drive's own file content surviving the reset untouched
 (the mechanism `kvs_server_sdcard_rtos`'s own persistence-survives-a-
 reset check below depends on). Both files' wording is now corrected.
+
+The follow-up generalized that real-hardware finding instead of keeping
+it as a one-test exception: both `make hwcheck-rpi3` and
+`make hwcheck-rpi3-net` now run `scripts/rpi3_jtag_reset.sh` before
+every example load. This includes a second reset between
+`http_server_sdcard`'s provisioning firmware and its actual server
+firmware; the reset preserves the newly written USB-drive contents but
+clears the installer's SoC-side state. Reset failure is treated as JTAG
+infrastructure failure, with the reconnect log printed, rather than
+allowing a misleading UART or network mismatch.
 
 Real-hardware result, from a clean reset: `GET /`, `/ABOUT.HTM`,
 `/ICON.PNG` all pass against `http_server_sdcard_rtos`;
