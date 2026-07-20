@@ -22,10 +22,14 @@
 // failure or "no card inserted" apart from a successful provisioning run
 // -- see that variable's own comment.
 //
-// STM32-only (matches examples/fatfs_sdcard/fatfs_sdcard.tkb -- no virtual
-// SD controller under QEMU). Never run interactively; exists solely as
-// provisioning infrastructure for http_server_sdcard.tkb, part of the
-// same milestone.
+// No QEMU build (no virtual SD/USB controller). Never run interactively;
+// exists solely as provisioning infrastructure for http_server_sdcard.tkb,
+// part of the same milestone. Shared across STM32 and Raspberry Pi 3B
+// (GitHub issue #145): the storage driver (sdmmc.tkb's real SDMMC1, or
+// usb_msc.tkb's USB Mass Storage) comes from the compile command line
+// per target, same pattern as fatfs_sdcard.tkb -- on RPi3 the harness
+// side is scripts/rpi3_provision_http_server_sdcard.sh (JTAG-breakpoint
+// flavor of the same two-breakpoint sequence, see below).
 //
 // --forbid-trap clean: first written and verified against real hardware
 // without --forbid-trap, per CLAUDE.md's Development Process section,
@@ -47,7 +51,6 @@
 // identical "byte i of sector s in a flat buffer" proof.
 //
 use "examples/common/fat12_geometry.tkb";
-use "examples/common_stm32/sdmmc.tkb";
 
 // The test harness injects a real mtools-built FAT12 image here via
 // OpenOCD's load_image, timed at a breakpoint on app_main -- same
@@ -78,7 +81,11 @@ fn app_main() {
         // dma_finish_rx call).
         dma_finish_rx(staging, SECTOR_SIZE * TOTAL_SECTORS);
 
-        let mut sector_buf: [u8; SECTOR_SIZE];
+        // align(32): RPi3's disk_write (usb_msc.tkb) requires a proven
+        // *align(32) u8 (its dwc2_bulk_out path's own dma_prepare_tx
+        // contract); STM32's disk_write takes plain *u8, which a
+        // stricter-aligned pointer trivially satisfies.
+        let mut sector_buf: [u8; SECTOR_SIZE] align(32);
         let mut all_ok: bool = true;
         // Loop counter is usize, matching TOTAL_SECTORS's own declared
         // type (needed for `staging`'s array size above) -- takibi has no

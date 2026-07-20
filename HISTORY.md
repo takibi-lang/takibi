@@ -9833,3 +9833,39 @@ read-back verify -> net RX poll, all in one program, all passing) plus the
 full regression suites: 62/62 make hwcheck-rpi3, 6/6 make hwcheck-rpi3-net
 (the bulk path is shared with Ethernet, so the network suite was re-run
 deliberately), 134/134 make check.
+
+`http_server_sdcard` ported to Raspberry Pi 3B, the multi-device
+foundation's first real payoff. `http_server_sdcard.tkb`/
+`http_server_sdcard_install.tkb` got the same treatment as
+`fatfs_sdcard.tkb` (adapter moved to per-target compile command lines);
+`http_server_sdcard_install.tkb`'s `sector_buf` was widened to
+`align(32)` for the same reason `examples/sdcard/sdcard.tkb`'s write
+buffer was (RPi3's `disk_write` requires it, STM32's tolerates it).
+
+Provisioning needed a genuinely new script,
+`scripts/rpi3_provision_http_server_sdcard.sh`: this board has no
+`reset halt` (see AGENTS.md's "Why JTAG injection" section), so STM32's
+own `scripts/provision_http_server_sdcard.sh` two-hardware-breakpoint
+OpenOCD sequence (halt -> load the installer -> breakpoint at app_main ->
+resume -> wait -> inject the seed FAT12 image directly into the halted
+core's `staging` buffer -> breakpoint at install_done -> resume -> wait
+-> read install_result) had never been attempted here. Confirmed on real
+hardware that the sequence itself works completely unchanged in shape;
+the one real difference this board's OpenOCD/target config exposed: `mrw`
+(which STM32's script uses to read a value inline for `echo`) is not a
+valid command here ("invalid command name"), even though the identical
+memory read works fine via `mdw` -- fixed by parsing `mdw`'s printed
+`0xADDR: VALUE` line instead of using `mrw`'s inline return value.
+`scripts/eth_http_server_sdcard_test.py` (shared with STM32) gained an
+`ETH_TEST_SUBNET` override -- the same pattern its sibling
+`eth_http_server_test.py` already had -- since it previously hardcoded
+STM32's own `192.168.10.2`.
+
+Real-hardware result: `GET /`, `/ABOUT.HTM`, `/ICON.PNG` each return the
+USB drive's real provisioned content over actual HTTP from a real browser-
+equivalent client. Wired into `make hwcheck-rpi3-net` (7/7, http_server_
+sdcard alongside the six existing network tests); `make hwcheck-rpi3`
+(62/62) and `make check` (134/134) re-verified unaffected. Remaining
+fatfs-family work: `http_server_sdcard_rtos`/`kvs_server_sdcard_rtos` onto
+this same foundation, then the milestone-wide `--forbid-trap` hardening
+pass.

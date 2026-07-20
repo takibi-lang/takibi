@@ -887,10 +887,10 @@ examples/fatfs_sdcard/fatfs_sdcard_stm32.o: examples/fatfs_sdcard/fatfs_sdcard.t
 # http_server_sdcard.tkb's own header comment for what --forbid-trap did
 # and did not flag.
 examples/http_server_sdcard/http_server_sdcard_stm32.o: examples/http_server_sdcard/http_server_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_FAT12_SDMMC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 examples/http_server_sdcard/http_server_sdcard_stm32.debug.o: examples/http_server_sdcard/http_server_sdcard.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_STM32_NVIC) $(COMMON_STM32_ETH) $(COMMON_STM32_NETCONFIG) $(COMMON_STM32_SDMMC) $(COMMON_STM32_ETH_SDMMC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(COMMON_STM32_FAT12_SDMMC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -g -o $@ --forbid-trap
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_ETH) $(COMMON_STM32_FAT12_SDMMC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -g -o $@ --forbid-trap
 
 # http_server_sdcard_rtos: same HTTP+SD server as http_server_sdcard, but
 # SD/FAT operations run behind a Simple RTOS worker task. It needs both
@@ -955,7 +955,7 @@ examples/kvs_server_sdcard_rtos/kernel_stm32_ram.prof.elf: $(COMMON_STM32_STARTU
 # http_server_sdcard above -- see that file's own header comment for the
 # one site --forbid-trap flagged here and how it was fixed.
 examples/http_server_sdcard_install/http_server_sdcard_install_stm32.o: examples/http_server_sdcard_install/http_server_sdcard_install.tkb $(COMMON_STM32_UART) $(COMMON_STM32_PRINT) $(COMMON_FAT12_GEOMETRY) $(COMMON_STM32_SDMMC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
+	$(TAKIBI) $(COMMON_STM32_UART) $(COMMON_STM32_PRINT_ONLY) $(COMMON_STM32_SDMMC) $< --target $(STM32_TARGET) --cpu $(STM32_CPU) -o $@ --forbid-trap
 
 # examples/http_server is the one deliberate exception to "every STM32
 # example runs from RAM" (see STM32_RAM_EXAMPLES's comment above): flashing
@@ -1490,7 +1490,22 @@ RPI3_FATFS_RTOS_OBJS     := $(foreach e,$(RPI3_FATFS_RTOS_EXAMPLES),examples/$(e
 $(RPI3_FATFS_RTOS_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
 
-RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES)
+# http_server_sdcard (RPi3): the network HAL AND the storage backend on
+# one command line -- both go through the same DWC2 USB host stack, made
+# concurrent by usb_dwc2.tkb's per-device bulk slots + usb_host.tkb's
+# shared enumeration (see those files' own comments). The installer is
+# storage-only (no eth); its harness side is
+# scripts/rpi3_provision_http_server_sdcard.sh.
+RPI3_HTTP_SDCARD_EXAMPLES := http_server_sdcard http_server_sdcard_install
+RPI3_HTTP_SDCARD_OBJS     := $(foreach e,$(RPI3_HTTP_SDCARD_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
+
+examples/http_server_sdcard/http_server_sdcard_rpi3.o: examples/http_server_sdcard/http_server_sdcard.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_NETCONFIG) $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
+
+examples/http_server_sdcard_install/http_server_sdcard_install_rpi3.o: examples/http_server_sdcard_install/http_server_sdcard_install.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_FAT12_GEOMETRY) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
+
+RPI3_EXAMPLES += $(RPI3_CHECKSUM_EXAMPLES) $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES) $(RPI3_HTTP_SDCARD_EXAMPLES)
 RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 # rtc/timer/preempt/watchdog need COMMON_RPI3_TIMER_ASM_O linked in
 # (read_cntfrq() and friends -- mrs cannot be called directly from
@@ -1508,7 +1523,7 @@ RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf
 # COMMON_RPI3_CACHE_ASM_O; retired once mailbox.tkb/usb_dwc2.tkb moved
 # to the compiler's own dma_prepare_tx/dma_finish_rx builtins, GitHub
 # issue #146). Everything else uses the plain startup.o+mmu.o link line.
-RPI3_TIMER_ASM_KERNELS := $(foreach e,$(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
+RPI3_TIMER_ASM_KERNELS := $(foreach e,$(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_HTTP_SDCARD_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 RPI3_SEM_KERNELS       := $(foreach e,$(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 RPI3_GENERIC_KERNELS   := $(filter-out $(RPI3_TIMER_ASM_KERNELS) $(RPI3_SEM_KERNELS),$(RPI3_KERNELS))
 

@@ -47,14 +47,22 @@
 // part of the same milestone, for the one file that DID need a fix during
 // the original issue #97 work.
 //
-// STM32-only: there is no virtual SD controller in this project's QEMU
-// setup (matches examples/fatfs_sdcard and examples/sdcard's own
+// No QEMU build: there is no virtual SD/USB controller in this project's
+// QEMU setup (matches examples/fatfs_sdcard and examples/sdcard's own
 // no-QEMU status).
+//
+// Shared across STM32 and Raspberry Pi 3B (GitHub issue #145): like
+// fatfs_sdcard.tkb, the target storage adapter (fat12_sdmmc.tkb /
+// fat12_usbmsc.tkb) comes from the compile command line per target
+// rather than a `use` here -- see fatfs_sdcard.tkb's header comment.
+// On RPi3, BOTH the network HAL and the storage backend go through the
+// same DWC2 USB host stack (usb_dwc2.tkb's per-device bulk slots +
+// usb_host.tkb's shared enumeration make that concurrency work -- see
+// examples/common_rpi3/AGENTS.md's "Multi-device USB" section).
 
 use "examples/common/inet_checksum.tkb";
 use "examples/common/netutil.tkb";
 use "examples/common/http_sdcard_server.tkb";
-use "examples/common_stm32/fat12_sdmmc.tkb";
 
 let mut our_mac: [u8; 6];
 let mut our_ip:  [u8; 4];

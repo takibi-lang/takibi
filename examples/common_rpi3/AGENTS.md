@@ -694,13 +694,38 @@ read-back verify -> net RX poll, all passing in one program), plus the
 full regression: 62/62 `make hwcheck-rpi3`, 6/6 `make hwcheck-rpi3-net`,
 134/134 `make check`.
 
-**Remaining work**: porting the remaining `fatfs`-family examples
-(`http_server_sdcard`/`http_server_sdcard_rtos`/
-`kvs_server_sdcard_rtos`, RPi3-appropriate subset -- these also need the
-`http_server_sdcard_install` provisioning flow adapted to this board)
-onto `fat12_usbmsc.tkb` + this multi-device foundation, each verified on
-real hardware individually per this project's established incremental
-process, before this whole milestone's `--forbid-trap` hardening pass.
+**`http_server_sdcard` ported.** `http_server_sdcard.tkb`/
+`http_server_sdcard_install.tkb` got the same de-STM32-ing treatment as
+`fatfs_sdcard.tkb` (adapter moved to the compile command line;
+`http_server_sdcard_install.tkb`'s `sector_buf` widened to `align(32)`
+for the same reason `examples/sdcard/sdcard.tkb`'s write buffer was).
+Provisioning the drive (writing a real mtools-built FAT12 image with no
+human touching it) needed a genuinely new script,
+`scripts/rpi3_provision_http_server_sdcard.sh`, since this board has no
+`reset halt` (see "Why JTAG injection" above) and the STM32 script's own
+two-hardware-breakpoint OpenOCD sequence had never been attempted here --
+confirmed on real hardware that it works UNCHANGED in shape (halt, load
+the installer, breakpoint at `app_main`, resume, wait, `load_image` the
+seed FAT12 image directly into the halted core's `staging` buffer,
+breakpoint at `install_done`, resume, wait, read `install_result`), with
+one real difference this board's OpenOCD/target config exposed: `mrw`
+(which STM32's script uses to read a value inline for `echo`) is not a
+valid command here ("invalid command name") even though the identical
+read works fine via `mdw` -- the script parses `mdw`'s printed
+`0xADDR: VALUE` line instead.
+`scripts/eth_http_server_sdcard_test.py` (shared with STM32) gained an
+`ETH_TEST_SUBNET` override, the same pattern its sibling
+`eth_http_server_test.py` already had, so it can address either board's
+`OUR_IP` instead of only STM32's hardcoded `192.168.10.2`.
+Real-hardware result: `GET /`, `/ABOUT.HTM`, `/ICON.PNG` all return the
+USB drive's real provisioned content over actual HTTP, wired into `make
+hwcheck-rpi3-net` (7/7) alongside 62/62 `make hwcheck-rpi3` and 134/134
+`make check`, all re-verified clean.
+
+**Remaining work**: `http_server_sdcard_rtos`/`kvs_server_sdcard_rtos`
+onto this same foundation, each verified on real hardware individually
+per this project's established incremental process, before this whole
+milestone's `--forbid-trap` hardening pass.
 
 ## Hardware
 

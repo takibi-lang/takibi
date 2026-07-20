@@ -109,6 +109,45 @@ run_rpi3_net_test "tcp_echo (rpi3)"   "$REPO_ROOT/examples/tcp_echo/kernel_rpi3.
 run_rpi3_net_test "http_server (rpi3)" "$REPO_ROOT/examples/http_server/kernel_rpi3.elf" "$REPO_ROOT/scripts/eth_http_server_test.py"
 run_rpi3_net_test "kvs_server (rpi3)"  "$REPO_ROOT/examples/kvs_server/kernel_rpi3.elf"  "$REPO_ROOT/scripts/eth_kvs_server_test.py"
 
+# http_server_sdcard (rpi3, GitHub issue #145): the concurrent Ethernet +
+# USB-mass-storage foundation's first real payoff -- serves the genuine
+# content of examples/sdcard_content/ over HTTP from the attached USB
+# drive, exactly like http_server_sdcard already does against STM32's
+# real SD card. Provisioning (scripts/rpi3_provision_http_server_sdcard.sh,
+# the JTAG-breakpoint counterpart of scripts/provision_http_server_sdcard.sh)
+# formats the drive first -- confirmed acceptable, same as every other
+# destructive USB-storage test in this suite. SDCARD_CONTENT_DIR must be
+# passed on sudo's own command line, same reasoning as ETH_TEST_IFACE
+# above.
+sdcard_name="http_server_sdcard (rpi3)"
+sdcard_content_dir="$REPO_ROOT/examples/sdcard_content"
+sdcard_provision_log=$(mktemp)
+if ! bash "$REPO_ROOT/scripts/rpi3_provision_http_server_sdcard.sh" \
+        "$REPO_ROOT/examples/http_server_sdcard_install/kernel_rpi3.elf" \
+        "$sdcard_content_dir" > "$sdcard_provision_log" 2>&1; then
+    printf "${RED}FAIL${RST}  %s  (USB drive provisioning failed)\n" "$sdcard_name"
+    sed 's/^/       /' "$sdcard_provision_log"
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("$sdcard_name")
+elif ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/http_server_sdcard/kernel_rpi3.elf" > /dev/null; then
+    printf "${RED}FAIL${RST}  %s  (JTAG injection failed)\n" "$sdcard_name"
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("$sdcard_name")
+else
+    sleep "$SETTLE_SECS"
+    echo "-- $sdcard_name --"
+    if sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
+            SDCARD_CONTENT_DIR="$sdcard_content_dir" python3 "$REPO_ROOT/scripts/eth_http_server_sdcard_test.py"; then
+        printf "${GRN}PASS${RST}  %s\n" "$sdcard_name"
+        PASS=$((PASS + 1))
+    else
+        printf "${RED}FAIL${RST}  %s\n" "$sdcard_name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$sdcard_name")
+    fi
+fi
+rm -f "$sdcard_provision_log"
+
 echo ""
 echo "rpi3 network hardware tests: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then
