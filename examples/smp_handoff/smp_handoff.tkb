@@ -1,0 +1,150 @@
+// Raspberry Pi 3B SMP ownership handoff baseline (GitHub issue #6).
+//
+// Core 0 transfers the sole BufferOwner token to core 1 through a stable
+// owner slot protected by the existing AArch64 atomic semaphore.  Core 1
+// mutates the corresponding cache-line-aligned static buffer in place and
+// transfers the same token back.  The payload itself is never copied.
+//
+// This is deliberately the working, unrefined first half of the repository's
+// two-step process.  Once it passes on real hardware, a separate change will
+// enable --forbid-trap and add only the refinements that it actually reports.
+use "examples/common/sync.tkb";
+
+extern fn rpi3_core_id() -> usize;
+
+const BUFFER_LEN: usize = 64;
+
+struct HandoffBuffer align(64) {
+    bytes: [u8; BUFFER_LEN];
+}
+
+private let mut handoff_buffer: HandoffBuffer;
+
+private linear struct BufferOwner[id: usize] {
+    private id: usize @ id;
+}
+
+variant OwnerSlot {
+    Empty;
+    Full(exists id: usize. BufferOwner[id]);
+}
+
+struct HandoffMailbox align(64) {
+    private mutex: i32;
+    private state: io i32;
+    private owner: OwnerSlot;
+}
+
+private let mut mailbox: HandoffMailbox;
+
+fn buffer_owner_new() -> BufferOwner[0] {
+    let mut owner: BufferOwner[0] = { 0 };
+    return owner;
+}
+
+fn buffer_write(owner: borrow BufferOwner[id], index: usize, value: u8) {
+    // Takibi does not yet parse assignment through a struct's array field
+    // (s.field[i] = v).  Keep the unavoidable field-decay workaround inside
+    // this owner-gated accessor; callers never receive the raw pointer.
+    let bytes: *u8 = handoff_buffer.bytes;
+    bytes[index as isize] = value;
+}
+
+fn buffer_read(owner: borrow BufferOwner[id], index: usize) -> u8 {
+    let bytes: *u8 = handoff_buffer.bytes;
+    return bytes[index as isize];
+}
+
+fn mailbox_init() {
+    mailbox.mutex = 1;
+    mailbox.state = 0;
+}
+
+fn mailbox_put(owner: BufferOwner[id], state: i32) {
+    let g = mutex_lock(&mailbox.mutex);
+    let previous: OwnerSlot = stable_replace(
+        g, &mailbox.mutex, mailbox.owner, OwnerSlot::Full(owner));
+    match previous {
+        OwnerSlot::Empty => {}
+        OwnerSlot::Full(stale) => {
+            // The private state protocol makes this unreachable.  Preserve
+            // linearity even if that runtime invariant is violated.
+            mailbox_put_discard(stale);
+        }
+    }
+    dma_publish();
+    mailbox.state = state;
+    mutex_unlock(g, &mailbox.mutex);
+    interrupt_notify();
+}
+
+fn mailbox_put_discard(owner: sink BufferOwner[id]) {}
+
+fn mailbox_take(expected: i32) -> OwnerSlot {
+    while (mailbox.state != expected) {
+        interrupt_wait();
+    }
+    dma_consume();
+    let g = mutex_lock(&mailbox.mutex);
+    let result: OwnerSlot = stable_replace(
+        g, &mailbox.mutex, mailbox.owner, OwnerSlot::Empty);
+    mailbox.state = 0;
+    mutex_unlock(g, &mailbox.mutex);
+    return result;
+}
+
+fn smp_secondary_main() {
+    let received: OwnerSlot = mailbox_take(1);
+    match received {
+        OwnerSlot::Empty => {}
+        OwnerSlot::Full(owner) => {
+            for i: usize in 0..<BUFFER_LEN {
+                buffer_write(owner, i, buffer_read(owner, i) + 1);
+            }
+            mailbox_put(owner, 2);
+            while (mailbox.state != 3) {
+                interrupt_wait();
+            }
+            dma_consume();
+        }
+    }
+}
+
+fn app_main() {
+    mailbox_init();
+    let owner = buffer_owner_new();
+    for i: usize in 0..<BUFFER_LEN {
+        buffer_write(owner, i, i as u8);
+    }
+
+    uart_puts("smp core0: ");
+    uart_print(rpi3_core_id());
+    uart_puts("\n");
+    mailbox_put(owner, 1);
+
+    let returned: OwnerSlot = mailbox_take(2);
+    match returned {
+        OwnerSlot::Empty => {
+            uart_puts("handoff: missing\n");
+        }
+        OwnerSlot::Full(owner2) => {
+            let mut ok: bool = true;
+            for i: usize in 0..<BUFFER_LEN {
+                if (buffer_read(owner2, i) != ((i + 1) as u8)) {
+                    ok = false;
+                }
+            }
+            uart_puts("handoff: ");
+            if (ok) {
+                uart_puts("ok\n");
+            } else {
+                uart_puts("corrupt\n");
+            }
+            mailbox_put_discard(owner2);
+            mailbox.state = 3;
+            dma_publish();
+            interrupt_notify();
+        }
+    }
+    uart_puts("done\n");
+}

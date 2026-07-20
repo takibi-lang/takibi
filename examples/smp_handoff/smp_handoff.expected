@@ -1,0 +1,3 @@
+smp core0: 0
+handoff: ok
+done
