@@ -1519,7 +1519,7 @@ RPI3_SMP_PAGE_TRANSFER_EXAMPLES := smp_page_transfer
 RPI3_SMP_PAGE_TRANSFER_OBJS := $(foreach e,$(RPI3_SMP_PAGE_TRANSFER_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_SMP_PAGE_TRANSFER_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_SYNC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 # USB bring-up group (GitHub issue #140's Ethernet milestone -- see
 # examples/usb_probe/usb_probe.tkb's own header comment and

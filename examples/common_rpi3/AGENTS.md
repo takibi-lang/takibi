@@ -119,8 +119,9 @@ full suite, not just the one new example, before considering this
 milestone done). `mmu.S`'s `l3_dynamic_write(index, value)` is the
 one-instruction accessor `map_page`/`unmap_page` call instead of indexing
 that table directly; `examples/common_rpi3/tlb_asm.S`'s
-`tlb_invalidate_va(va)` does the real `dsb ishst; tlbi vae2, x0; dsb ish;
-isb` sequence.
+`tlb_invalidate_va(va)` now does the real `dsb ishst; tlbi vae2is, x0;
+dsb ish; isb` sequence. Stage 2 originally used the local `vae2` form;
+Stage 3's cross-core reuse requires the Inner-Shareable broadcast form.
 
 The API is `vm_page_map_core.tkb`'s own, self-contained module (its own
 small `PageOwner[p]`/physical pool, not a `use` of `examples/page_pool`'s
@@ -186,7 +187,34 @@ The first unrefined implementation (this milestone) was committed after
 hardening pass is deferred, matching this project's baseline-then-harden
 process.
 
-GitHub issue #140. Status: 65 examples ported and passing `make
+## SMP page transfer (issue #67 Stage 3)
+
+`examples/smp_page_transfer` composes the Stage 1 allocation identity,
+Stage 2 mapping state machine, and issue #6's stable SMP owner mailbox. Core 0
+allocates a page, maps it at `0x80000000`, writes through the mapped VA,
+unmaps it, and moves the existential `PageOwner[p]` to core 1. Core 1 maps the
+same owner at the same VA, increments the first and last bytes, unmaps, and
+moves it back. Core 0 remaps, verifies `42`/`99`, unmaps, frees the page, and
+consumes its empty address-space owner. No page payload is copied.
+
+`mapping_va_bytes(borrow MappingOwner[asid, va, p]) -> [u8; 4096..] @ p`
+confines the unavoidable raw-VA-to-slice construction to the reviewed MMU
+module. Application code gets a checked page-sized slice that becomes unusable
+when `unmap_page` consumes the mapping. The mailbox's mutex plus
+`dma_publish`/`dma_consume` provide release/acquire ordering; SMPEN and the
+Normal Inner-Shareable PTE attributes provide cache coherence; broadcast
+`vae2is` supplies the cross-core TLB shootdown.
+
+The hardware still has one shared EL2 translation regime and one L3 table.
+The two `AddressSpaceOwner[asid, ...]` values are per-core typed capabilities
+over that shared space, and the private mailbox protocol serializes reuse of
+one VA. Distinct per-core TTBRs, real hardware ASIDs, and concurrent address
+spaces are intentionally the next problem rather than being hidden inside
+this integration step. Compile-error fixtures add send-after-consume and
+wrong-address-space unmap coverage; the existing Stage 2 fixtures already
+cover use before TLBI and use after unmap.
+
+GitHub issue #140. Status: 66 examples ported and passing `make
 hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level
 `EXAMPLES` list EXCEPT
 `fatfs` (needs SD-card-shaped
@@ -204,7 +232,7 @@ status line here. Full list:
 `affine_escape_via_index`/`align_ptr_proof`/`linear_obligation`/
 `tuple_pair`/`field_lease`/`inet_checksum`/`ip_parse`/`tcp_parse`/
 `rtc`/`timer`/`echo`/`irq`/`preempt`/`semaphore`/`condvar`/`msgqueue`/
-`watchdog`/`rtos_demo`/`chan_rendezvous`/`page_pool`/`vm_page_map`/`net_echo`/`arp_reply`/
+`watchdog`/`rtos_demo`/`chan_rendezvous`/`page_pool`/`vm_page_map`/`smp_page_transfer`/`net_echo`/`arp_reply`/
 `icmp_echo`/`tcp_echo`/`http_server`/`kvs_server`. This covers `hwcheck-stm32`'s "plain compute" set
 (extended with plain-compute examples STM32 already had but this
 board's own list had not picked up yet: `slice`/`foreach`/`int64`/

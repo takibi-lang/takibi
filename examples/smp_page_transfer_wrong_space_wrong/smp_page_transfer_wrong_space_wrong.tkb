@@ -1,0 +1,39 @@
+// This file is expected to produce a compile error.  Both mappings are live,
+// but a MappingOwner must be returned to the AddressSpaceOwner with the same
+// static asid identity; runtime-compatible structs are not interchangeable.
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+fn smp_page_transfer_wrong_space_bad() {
+    page_pool_init();
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {}
+        PageAllocResult::Allocated(page0) => {
+            match page_alloc() {
+                PageAllocResult::OutOfMemory => {
+                    page_free(page0);
+                }
+                PageAllocResult::Allocated(page1) => {
+                    let asid0: usize = 0;
+                    let asid1: usize = 1;
+                    let space0 = address_space_new(asid0);
+                    let space1 = address_space_new(asid1);
+                    let va0: {0x80000000..<0x80200000 as usize} = 0x80000000;
+                    let va1: {0x80000000..<0x80200000 as usize} = 0x80001000;
+                    let (occupied0, pending0) = map_page(space0, page0, va0);
+                    let (occupied1, pending1) = map_page(space1, page1, va1);
+                    let mapping0 = tlb_invalidate(pending0);
+                    let mapping1 = tlb_invalidate(pending1);
+
+                    // WRONG: mapping0 belongs to occupied0, not occupied1.
+                    let (empty, returned) = unmap_page(occupied1, mapping0);
+                    page_free(returned);
+                    address_space_free(empty);
+
+                    let (empty0, returned1) = unmap_page(occupied0, mapping1);
+                    page_free(returned1);
+                    address_space_free(empty0);
+                }
+            }
+        }
+    }
+}

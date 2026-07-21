@@ -15,6 +15,43 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-21: Zero-Copy SMP Page Transfer (Issue #67 Stage 3)
+
+`examples/smp_page_transfer` composes the fixed page allocator identity,
+dynamic single-page mapping, and the existing stable SMP owner mailbox. Core 0
+allocates and maps a page, initializes it through virtual address
+`0x80000000`, unmaps it, and moves the existential `PageOwner[p]` to core 1.
+Core 1 maps the same physical page at that VA, increments its first and last
+bytes, unmaps, and moves the owner back. Core 0 remaps, verifies `42` and `99`,
+then unmaps, frees the page, and consumes its empty address-space owner. The
+page data is never copied.
+
+Stage 2's local `tlbi vae2` was insufficient once a PTE and VA could be reused
+across cores. `tlb_invalidate_va` now uses `vae2is`, bracketed by the existing
+`dsb ishst` / `dsb ish` / `isb`, so invalidation is broadcast across the
+Inner-Shareable domain. The MMU module also gained
+`mapping_va_bytes(borrow MappingOwner[asid, va, p]) -> [u8; 4096..] @ p`:
+the unavoidable unsafe raw-VA slice construction stays inside the reviewed
+mapping boundary, while callers receive a checked page-sized slice invalidated
+by consuming the mapping. The mailbox mutex and `dma_publish`/`dma_consume`
+provide release/acquire ordering; SMPEN, Inner-Shareable Normal mappings, and
+the A53 coherent interconnect provide cache visibility.
+
+This stage deliberately does not pretend the BCM2837 now has independent
+Takibi address spaces. All cores still share one EL2 translation regime and
+one L3 table. Per-core `AddressSpaceOwner` values are typed capabilities over
+that shared hardware space, with the mailbox serializing one dynamic VA.
+Separate page tables, TTBR switching, hardware ASIDs, and concurrent mappings
+remain a later concrete milestone.
+
+The unrefined baseline passed the complete RPi3 hardware suite before commit.
+The separate `--forbid-trap` pass required no new annotations: the Stage 2 API
+already refines the mapping window and returns a 4096-byte slice, while the
+integration accesses only indices 0 and 4095. New compile-error fixtures prove
+that a sender cannot use a page after moving it and that a live mapping cannot
+be unmapped with a different address-space identity. Existing Stage 2 fixtures
+continue to cover use before TLB invalidation and use after unmap.
+
 ### 2026-07-21: Dynamic Single-Page Mapping (Issue #67 Stage 2)
 
 `examples/vm_page_map` maps and unmaps one real, non-identity 4KB

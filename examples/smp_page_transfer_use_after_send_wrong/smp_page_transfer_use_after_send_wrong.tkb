@@ -1,0 +1,18 @@
+// This file is expected to produce a compile error.  A mailbox send consumes
+// the PageOwner; the sender cannot inspect or map it afterward.
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+fn send_page(page: sink PageOwner[p]) {
+    page_free(page);
+}
+
+fn smp_page_transfer_use_after_send_bad() {
+    page_pool_init();
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {}
+        PageAllocResult::Allocated(page) => {
+            send_page(page);
+            page_index(page);
+        }
+    }
+}
