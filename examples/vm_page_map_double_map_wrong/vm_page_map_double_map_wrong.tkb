@@ -1,0 +1,24 @@
+// This file is expected to produce a compile error. Reuses the fresh
+// AddressSpaceOwner handle map_page itself returns (not the original,
+// already-consumed binding) to try mapping a second page before the first
+// is unmapped -- the actual "occupied" bug, not a stale-variable reuse.
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+fn vm_page_map_double_map_bad() {
+    page_pool_init();
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {}
+        PageAllocResult::Allocated(page) => {
+            match page_alloc() {
+                PageAllocResult::OutOfMemory => {}
+                PageAllocResult::Allocated(another_page) => {
+                    let seed: usize = 0;
+                    let space = address_space_new(seed);
+                    let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+                    let (space2, pending) = map_page(space, page, va);
+                    let (space3, pending2) = map_page(space2, another_page, va);
+                }
+            }
+        }
+    }
+}

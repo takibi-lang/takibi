@@ -40,6 +40,28 @@
    are left at their BSS-cleared all-zero (invalid) state -- nothing
    else in that 1GB range is used.
 
+   L1 entry 2 (virtual 0x80000000-0xBFFFFFFF) is examples/vm_page_map's
+   dynamic single-page mapping window (GitHub issue #67 Stage 2): a spare
+   1GB region this identity map has never used for anything, reserved so
+   a real (non-identity) VA-to-PA translation can be built and torn down
+   at runtime without touching any range examples/page_pool or any other
+   RPi3 example already relies on. Only L2 entry 0 of the new
+   l2_dynamic_table is populated, as a table descriptor pointing at
+   l3_dynamic_table -- a 4KB-granule, 512-entry LEAF (L3) table covering
+   exactly 2MB (0x80000000-0x801FFFFF). l3_dynamic_table lives in THIS
+   file's own .bss, not as a `.tkb` global: mmu_init below runs
+   unconditionally for every RPi3 example (called from startup.S's
+   _start), so a symbol it references must be defined in every kernel's
+   link, not only examples/vm_page_map's own object file -- confirmed the
+   hard way, an earlier version declared it as a .tkb global instead and
+   broke every OTHER RPi3 example's link with "undefined symbol:
+   l3_dynamic_table" the moment `make hwcheck-rpi3` tried to build them.
+   l3_dynamic_write below is the accessor examples/vm_page_map/
+   vm_page_map_core.tkb's map_page/unmap_page call instead of indexing an
+   array directly. Every l3_dynamic_table entry starts BSS-cleared
+   (invalid, bit[0] = 0), so the whole 2MB window is unmapped until a real
+   map_page call populates one entry.
+
    Called from examples/common_rpi3/startup.S's _start, AFTER BSS has
    already been cleared (l1_table/l2_table below live in .bss, so they
    must be zeroed by that ordinary BSS-clear loop -- with MMU still off
@@ -55,6 +77,10 @@ l1_table:
 l2_table:
     .space  4096
 l2_table_local:
+    .space  4096
+l2_dynamic_table:
+    .space  4096
+l3_dynamic_table:
     .space  4096
 
     .section .text
@@ -76,6 +102,15 @@ mmu_init:
     add     x0, x0, :lo12:l2_table_local
     orr     x0, x0, #0x3
     str     x0, [x1, #8]
+
+    /* L1 entry 2: table descriptor pointing at l2_dynamic_table
+       (examples/vm_page_map's dynamic mapping window, see this file's
+       header comment). Entry 2 is at offset 2*8 = 16 bytes into
+       l1_table. */
+    adrp    x0, l2_dynamic_table
+    add     x0, x0, :lo12:l2_dynamic_table
+    orr     x0, x0, #0x3
+    str     x0, [x1, #16]
 
     /* l2_table_local entry 0: a single Device-nGnRnE 2MB block covering
        physical 0x40000000-0x401FFFFF. The descriptor's output-address
@@ -99,6 +134,16 @@ mmu_init:
     movz    x4, #0x401
     movk    x4, #0x4000, lsl #16
     str     x4, [x1]
+
+    /* l2_dynamic_table entry 0: table descriptor pointing at
+       l3_dynamic_table (this file's own .bss, 4KB-aligned same as every
+       other table here). */
+    adrp    x0, l3_dynamic_table
+    add     x0, x0, :lo12:l3_dynamic_table
+    orr     x0, x0, #0x3
+    adrp    x1, l2_dynamic_table
+    add     x1, x1, :lo12:l2_dynamic_table
+    str     x0, [x1]
 
     /* L2 table: 512 entries, each a 2MB block descriptor. Block
        descriptor format: bits[1:0] = 0b01 (valid, block -- not table,
@@ -260,4 +305,22 @@ mmu_init_secondary:
     orr     x0, x0, #1
     msr     sctlr_el2, x0
     isb
+    ret
+
+/* -- Dynamic mapping window accessor (examples/vm_page_map, issue #67 Stage 2) --
+   l3_dynamic_table lives in this file's own .bss (see the header comment's
+   L1 entry 2 paragraph for why it cannot be a `.tkb` global), so
+   examples/vm_page_map/vm_page_map_core.tkb writes its individual page
+   descriptors through this one-instruction accessor instead of indexing an
+   array directly. Does not itself invalidate the TLB -- that is
+   examples/common_rpi3/tlb_asm.S's tlb_invalidate_va, called separately so
+   the .tkb-level PTE-change -> TlbInvalidationPending -> TLBI -> usable-
+   mapping protocol stays visible at the type level instead of being
+   silently folded into this write. */
+    .global l3_dynamic_write
+    .type   l3_dynamic_write, %function
+l3_dynamic_write:        /* fn l3_dynamic_write(index: usize, value: usize) */
+    adrp    x2, l3_dynamic_table
+    add     x2, x2, :lo12:l3_dynamic_table
+    str     x1, [x2, x0, lsl #3]
     ret

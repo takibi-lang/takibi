@@ -51,7 +51,9 @@ Takibi.  There is no generic task launcher, IPI layer, scheduler integration,
 multicore allocator, or load balancing.  Missing synchronization is still a runtime
 protocol property rather than something the current ownership checker can
 express; that gap is an input to the later memory-model work.  Issue #67's
-page mapping is the next concrete milestone.
+Stage 1 (fixed page pool) and Stage 2 (dynamic single-page mapping) are both
+landed below; Stage 3 (multicore ownership transfer of a mapped page, combined
+with this section's own SMP handoff) is the next concrete milestone.
 
 ## Fixed page pool (issue #67 Stage 1)
 
@@ -93,7 +95,98 @@ implementation-shaped proof is a local `bytes.len >= 4096` narrowing: current
 interval inference proves the dynamic subslice bounds but does not directly
 retain its exact length as a capacity minimum.
 
-GitHub issue #140. Status: 64 examples ported and passing `make
+## Dynamic single-page mapping (issue #67 Stage 2)
+
+`examples/vm_page_map` maps and unmaps one real, non-identity 4KB
+translation at runtime -- the first takibi example to touch the MMU beyond
+the fixed boot-time identity map this file's own "MMU" section above
+describes. RPi3-only for a real reason, not a RAM-size one like
+`page_pool`'s own STM32 exclusion: QEMU's and STM32's shared HAL never
+build a dynamic L3 table or expose a `tlbi` instruction, so there is
+nothing to map into on those targets.
+
+`mmu.S`'s L1 entry 2 reserves a spare, never-otherwise-used 1GB virtual
+window (`0x80000000`-`0xBFFFFFFF`); only its first 2MB is actually
+populated, as a table descriptor chain down to `l3_dynamic_table`, a
+512-entry leaf table `mmu.S` itself owns in its own `.bss` (NOT a `.tkb`
+global -- `mmu_init` runs unconditionally for every RPi3 example via
+`startup.S`'s `_start`, so a symbol it references must be defined in
+every kernel's link. An earlier version declared it as a `.tkb` global
+inside `vm_page_map_core.tkb` instead, and broke every OTHER RPi3
+example's build with "undefined symbol: l3_dynamic_table" the moment
+`make hwcheck-rpi3` tried to link them -- caught by actually running the
+full suite, not just the one new example, before considering this
+milestone done). `mmu.S`'s `l3_dynamic_write(index, value)` is the
+one-instruction accessor `map_page`/`unmap_page` call instead of indexing
+that table directly; `examples/common_rpi3/tlb_asm.S`'s
+`tlb_invalidate_va(va)` does the real `dsb ishst; tlbi vae2, x0; dsb ish;
+isb` sequence.
+
+The API is `vm_page_map_core.tkb`'s own, self-contained module (its own
+small `PageOwner[p]`/physical pool, not a `use` of `examples/page_pool`'s
+-- that struct is `private` to its own file, and pulling MMU-specific
+map/unmap declarations into page_pool's deliberately QEMU/RPi3-shared
+core would break its own platform-agnostic split):
+
+```
+page_alloc() -> PageAllocResult::Allocated(exists p. PageOwner[p])
+address_space_new(seed) -> AddressSpaceOwner[asid, Empty]
+map_page(sink AddressSpaceOwner[asid, Empty], sink PageOwner[p], va)
+    -> (AddressSpaceOwner[asid, Occupied], TlbInvalidationPending[asid, va, p])
+tlb_invalidate(sink TlbInvalidationPending[asid, va, p]) -> MappingOwner[asid, va, p]
+mapping_bytes(borrow MappingOwner[asid, va, p]) -> [u8; 4096..] @ p
+unmap_page(sink AddressSpaceOwner[asid, Occupied], sink MappingOwner[asid, va, p])
+    -> (AddressSpaceOwner[asid, Empty], PageOwner[p])
+```
+
+`AddressSpaceOwner`'s `Empty`/`Occupied` state parameter is consumed and
+reissued by map/unmap -- the same idiom `SPEC.md`'s
+`SlotWrite[slot, 0] -> SlotWrite[slot, 1]` example uses -- so mapping a
+second page before unmapping the first is a genuine compile error
+(`static value mismatch: SpaceState::Occupied vs SpaceState::Empty`), not
+a runtime check. `map_page` never returns a usable `MappingOwner`
+directly: it returns `TlbInvalidationPending[asid, va, p]`, and only
+`tlb_invalidate` can turn that into a `MappingOwner` -- the literal
+PTE-change -> pending obligation -> TLBI/DSB/ISB -> usable-mapping
+protocol issue #67 asked for, expressed so that no takibi code can reach
+`mapping_bytes`/`unmap_page` without going through the real TLB
+maintenance call. None of this needed new type-system machinery: existing
+`borrow mut`/state-parameterized indexed owners (Slice 4) and
+existential-owner variants (Slice 3) already covered it.
+
+Compile-error fixtures: `vm_page_map_free_after_map_wrong` (the `PageOwner`
+was `sink`-consumed by `map_page`), `vm_page_map_bytes_after_unmap_wrong`
+(the `MappingOwner` was `sink`-consumed by `unmap_page`),
+`vm_page_map_use_before_invalidate_wrong` (`mapping_bytes` requires
+`MappingOwner`, not `TlbInvalidationPending` -- rejected as a struct type
+mismatch), and `vm_page_map_double_map_wrong` (reuses the FRESH
+`AddressSpaceOwner` handle `map_page` itself returns, not the original
+already-consumed binding, to attempt a second map before unmapping --
+the real "occupied" bug the `Empty`/`Occupied` state parameter exists to
+catch, distinct from and stronger than simply reusing the stale original
+variable, which ordinary linear-consumption tracking already rejects on
+its own).
+
+A real hardware bug was found and fixed getting this to work: the first
+version of `map_page`'s L3 page descriptor attribute word was `0x703`,
+missing the AttrIndx bit (bit 2) -- this silently mapped the page as
+`AttrIndx 0` (Device-nGnRnE) instead of `AttrIndx 1` (Normal Write-Back
+Cacheable). A value written through `mapping_bytes` (page_pool's own
+cacheable identity-mapped alias) was never visible reading back through
+the raw VA pointer at the new translation (read `0` instead of the value
+just written), because the Device-typed alias bypassed the cache entirely
+and read RAM directly, before the cacheable write had reached it. Fixed
+to `0x707`. Confirmed on real hardware, not just by the type checker:
+`examples/vm_page_map/vm_page_map.expected`'s "via VA: 42" line is a
+value read back through the newly created translation itself, not
+through the physical pool array.
+
+The first unrefined implementation (this milestone) was committed after
+`make hwcheck-rpi3` passed with it included; the `--forbid-trap`
+hardening pass is deferred, matching this project's baseline-then-harden
+process.
+
+GitHub issue #140. Status: 65 examples ported and passing `make
 hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level
 `EXAMPLES` list EXCEPT
 `fatfs` (needs SD-card-shaped
@@ -111,7 +204,7 @@ status line here. Full list:
 `affine_escape_via_index`/`align_ptr_proof`/`linear_obligation`/
 `tuple_pair`/`field_lease`/`inet_checksum`/`ip_parse`/`tcp_parse`/
 `rtc`/`timer`/`echo`/`irq`/`preempt`/`semaphore`/`condvar`/`msgqueue`/
-`watchdog`/`rtos_demo`/`chan_rendezvous`/`page_pool`/`net_echo`/`arp_reply`/
+`watchdog`/`rtos_demo`/`chan_rendezvous`/`page_pool`/`vm_page_map`/`net_echo`/`arp_reply`/
 `icmp_echo`/`tcp_echo`/`http_server`/`kvs_server`. This covers `hwcheck-stm32`'s "plain compute" set
 (extended with plain-compute examples STM32 already had but this
 board's own list had not picked up yet: `slice`/`foreach`/`int64`/

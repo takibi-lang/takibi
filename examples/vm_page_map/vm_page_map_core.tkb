@@ -1,0 +1,226 @@
+// Dynamic single 4KB page map/unmap over one spare 2MB virtual-address
+// window (GitHub issue #67 Stage 2). RPi3-only: a real dynamic mapping
+// needs a real page table entry and real TLB maintenance, neither of
+// which QEMU's or STM32's shared examples set up (see
+// examples/common_rpi3/mmu.S's header comment for the L1/L2/L3 table
+// layout this file writes into and examples/common_rpi3/tlb_asm.S for
+// the tlbi/dsb/isb sequence tlb_invalidate below drives).
+//
+// This is a fresh, self-contained module -- it does not `use`
+// examples/page_pool/page_pool_core.tkb. PageOwner there is `private` to
+// that file (file-granular privacy), so map_page/unmap_page (which need
+// real PTE writes and TLBI assembly meaningful only on this target)
+// could not be declared anywhere but that file's own source; keeping
+// this module independent instead avoids pulling MMU-specific concerns
+// into page_pool's deliberately QEMU/RPi3-shared core. The physical page
+// pool below is therefore its own small, separate allocator -- some
+// duplication with examples/page_pool's array-plus-used-flags shape, but
+// the two pools serve genuinely different purposes (page_pool is a
+// plain allocator runnable everywhere; this one only matters once a
+// page can actually be mapped).
+//
+// This first working milestone deliberately uses ordinary checked
+// indices and is compiled without --forbid-trap. The follow-up
+// hardening commit adds only the refinements reported by the compiler.
+
+use "examples/common_rpi3/tlb_asm_extern.tkb";
+
+const PAGE_SIZE: usize = 4096;
+const PAGE_COUNT: usize = 4;
+
+private let mut page_pool: [u8; PAGE_SIZE * PAGE_COUNT] align(4096);
+private let mut page_used: [u8; PAGE_COUNT];
+
+// index stays a plain refined field (no `@ p` tie) so arithmetic on it
+// (map_page's physical-address computation, mapping_bytes' offset) keeps
+// its provable {0..<PAGE_COUNT} range -- combining a refined range with a
+// singleton tie on the SAME field loses that arithmetic provability
+// (confirmed experimentally: `{0..<4 as usize} @ n` still indexes fine,
+// but `(v: {0..<4 as usize} @ n) * 4096` cannot be proven in range, even
+// though SPEC.md's own singleton section only documents the array-bounds
+// case). p_witness is the separate, untyped-arithmetic carrier for `p`'s
+// identity, mirroring examples/page_pool/page_pool_core.tkb's own
+// `generation: usize @ allocation` split from its own untied `index`.
+private linear struct PageOwner[p: usize] {
+    private index: {0..<PAGE_COUNT as usize};
+    private p_witness: usize @ p;
+}
+
+variant PageAllocResult {
+    OutOfMemory;
+    Allocated(exists p: usize. PageOwner[p]);
+}
+
+fn page_owner_new(index: {0..<PAGE_COUNT as usize}, p_witness: usize @ p)
+        -> PageOwner[p] {
+    let mut owner: PageOwner[p] = { index, p_witness };
+    return owner;
+}
+
+fn page_pool_init() {
+    for i: usize in 0..<PAGE_COUNT {
+        page_used[i] = 0;
+    }
+}
+
+fn page_alloc() -> PageAllocResult {
+    for i: usize in 0..<PAGE_COUNT {
+        if (page_used[i] == 0) {
+            page_used[i] = 1;
+            return PageAllocResult::Allocated(page_owner_new(i, i));
+        }
+    }
+    return PageAllocResult::OutOfMemory;
+}
+
+fn page_index(owner: borrow PageOwner[p]) -> {0..<PAGE_COUNT as usize} {
+    return owner.index;
+}
+
+fn page_free(owner: sink PageOwner[p]) {
+    page_used[owner.index] = 0;
+}
+
+// Address space: a state-parameterized owner (Empty/Occupied), consumed
+// and reissued by map_page/unmap_page -- the same idiom SPEC.md's
+// SlotWrite[slot, 0] -> SlotWrite[slot, 1] example uses for a protocol
+// with two states. This is what makes mapping a second page before
+// unmapping the first a genuine compile error (a "static value mismatch:
+// SpaceState::Occupied vs SpaceState::Empty" against map_page's own
+// Empty-only parameter type), not a runtime check -- see
+// examples/vm_page_map_double_map_wrong.
+//
+// Only one address space exists on this whole target (RPi3 boots into a
+// single shared EL2 translation regime -- examples/common_rpi3/mmu.S),
+// so asid is always witnessed by the same fixed value rather than a
+// fresh one per call; the vocabulary stays ready for multiple ASIDs
+// without this demo needing existential-freshness machinery it has no
+// present use for.
+enum SpaceState: u8 { Empty; Occupied; }
+
+private linear struct AddressSpaceOwner[asid: usize, state: SpaceState] {
+    private tag: usize @ asid;
+}
+
+fn address_space_new(seed: usize @ asid)
+        -> AddressSpaceOwner[asid, SpaceState::Empty] {
+    let mut space: AddressSpaceOwner[asid, SpaceState::Empty] = { seed };
+    return space;
+}
+
+fn address_space_free(space: sink AddressSpaceOwner[asid, SpaceState::Empty]) {
+}
+
+// PTE change -> TlbInvalidationPending -> tlbi+dsb+isb -> MappingOwner:
+// map_page writes the new L3 entry and hands back a pending obligation,
+// not a usable mapping. Only tlb_invalidate can turn that obligation
+// into a MappingOwner, and only a MappingOwner can be read via
+// mapping_bytes or consumed by unmap_page -- so no takibi code can
+// observe a freshly written (or freshly cleared) translation before the
+// required TLB maintenance has actually run.
+private linear struct TlbInvalidationPending[asid: usize, va: usize, p: usize] {
+    private asid_tag: usize @ asid;
+    private va_value: usize @ va;
+    private page_index: {0..<PAGE_COUNT as usize};
+    private p_witness: usize @ p;
+}
+
+private linear struct MappingOwner[asid: usize, va: usize, p: usize] {
+    private asid_tag: usize @ asid;
+    private va_value: usize @ va;
+    private page_index: {0..<PAGE_COUNT as usize};
+    private p_witness: usize @ p;
+}
+
+// examples/common_rpi3/mmu.S's dynamic single-page mapping window: L1
+// entry 2 -> l2_dynamic_table entry 0 -> l3_dynamic_table, covering
+// exactly 2MB (512 * 4KB) starting at DYN_VA_BASE. l3_dynamic_table lives
+// in mmu.S's own .bss (not a `.tkb` global -- mmu_init runs
+// unconditionally for every RPi3 example, so a symbol it references must
+// be defined in every kernel's link, not only this one; see mmu.S's own
+// header comment for the link failure this caused the first time around).
+// l3_dynamic_write is mmu.S's one-instruction accessor for the single
+// entry map_page/unmap_page write. Every entry starts invalid
+// (BSS-cleared); VA is refined to this window so an out-of-range VA is a
+// compile error, not a runtime check -- the same "Detect Errors at
+// Compile Time" approach examples/page_pool's own physical-index
+// refinement uses.
+const DYN_VA_BASE: usize = 0x80000000;
+const DYN_VA_LIMIT: usize = 0x80200000;
+
+extern fn l3_dynamic_write(index: usize, value: usize);
+
+fn map_page(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
+            page: sink PageOwner[p],
+            va: {DYN_VA_BASE..<DYN_VA_LIMIT as usize} @ va)
+        -> (AddressSpaceOwner[asid, SpaceState::Occupied],
+            TlbInvalidationPending[asid, va, p]) {
+    let l3_index: usize = (va - DYN_VA_BASE) / PAGE_SIZE;
+    let pool_base_ptr: *u8 = page_pool as *u8;
+    let pool_base: usize = pool_base_ptr as usize;
+    let phys_addr: usize = pool_base + page.index * PAGE_SIZE;
+    // L3 page descriptor: bits[1:0] = 0b11 (valid + page -- the L3-level
+    // reading of the same bit pattern L1/L2 table descriptors use, see
+    // examples/common_rpi3/mmu.S's header comment) | AttrIndx 1 (bits
+    // 4:2 = 001, Normal Write-Back Cacheable, MAIR_EL2 byte 1 -- same
+    // index mmu.S's own RAM L2 block entries use) | AF (bit 10) | SH=11
+    // Inner Shareable (bits 9:8) = 0x707. A first version of this line
+    // wrote 0x703 (bit 2, the low AttrIndx bit, dropped by mistake),
+    // which silently mapped this page as AttrIndx 0 (Device-nGnRnE)
+    // instead of Normal -- confirmed on real hardware: a value written
+    // through mapping_bytes (page_pool's own cacheable identity alias)
+    // was never visible reading back through the raw VA pointer (0
+    // instead of the value just written), because the Device-typed VA
+    // alias bypassed the cache entirely and read RAM directly, before
+    // the cacheable write had been written back. mmu.S's own l2_table
+    // Normal entries (0x705) additionally set bit 0 for a BLOCK
+    // descriptor's valid encoding (0b01); a PAGE descriptor's is 0b11
+    // (bit 1 too), which is the only difference from this line's 0x707.
+    l3_dynamic_write(l3_index, phys_addr | 0x707);
+
+    let mut occupied: AddressSpaceOwner[asid, SpaceState::Occupied] = { space.tag };
+    let mut pending: TlbInvalidationPending[asid, va, p] =
+        { space.tag, va, page.index, page.p_witness };
+    return (occupied, pending);
+}
+
+fn tlb_invalidate(pending: sink TlbInvalidationPending[asid, va, p])
+        -> MappingOwner[asid, va, p] {
+    tlb_invalidate_va(pending.va_value);
+    let mut mapping: MappingOwner[asid, va, p] =
+        { pending.asid_tag, pending.va_value, pending.page_index, pending.p_witness };
+    return mapping;
+}
+
+fn mapping_bytes(mapping: borrow MappingOwner[asid, va, p])
+        -> [u8; PAGE_SIZE..] @ p {
+    // PAGE_COUNT * PAGE_SIZE = 16384, so every page start is below 12289
+    // and every page end is at most 16384 (the pool's own size). Bare
+    // literals below (not the PAGE_SIZE const) match
+    // examples/page_pool/page_pool_core.tkb's own page_bytes -- a const
+    // name only reliably narrows in a type position, not in runtime
+    // slice-length arithmetic/comparison (confirmed experimentally).
+    let offset: {0..<12289 as usize} = mapping.page_index * PAGE_SIZE;
+    let pool = page_pool as [u8; PAGE_SIZE * PAGE_COUNT..];
+    let bytes: []u8 = pool[offset..<offset + 4096];
+    if (bytes.len >= 4096) {
+        return bytes;
+    }
+    // mapping.page_index's range proves this branch unreachable -- same
+    // interval-inference limitation examples/page_pool/page_pool_core.tkb's
+    // page_bytes documents (the checker does not yet carry the tail
+    // slice's minimum length directly from offset's upper bound).
+    return pool[0..<4096];
+}
+
+fn unmap_page(space: sink AddressSpaceOwner[asid, SpaceState::Occupied],
+              mapping: sink MappingOwner[asid, va, p])
+        -> (AddressSpaceOwner[asid, SpaceState::Empty], PageOwner[p]) {
+    let l3_index: usize = (mapping.va_value - DYN_VA_BASE) / PAGE_SIZE;
+    l3_dynamic_write(l3_index, 0);
+    tlb_invalidate_va(mapping.va_value);
+
+    let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] = { space.tag };
+    let mut page: PageOwner[p] = { mapping.page_index, mapping.p_witness };
+    return (empty, page);
+}

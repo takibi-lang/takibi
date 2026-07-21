@@ -1,0 +1,57 @@
+// Dynamic single 4KB page map/unmap demo (GitHub issue #67 Stage 2). See
+// examples/vm_page_map/vm_page_map_core.tkb for the type design.
+//
+// This first working milestone deliberately uses ordinary checked indices
+// and is compiled without --forbid-trap. The follow-up hardening commit
+// adds only the refinements reported by the compiler.
+
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+fn app_main() {
+    page_pool_init();
+    uart_puts("vm_page_map\n");
+
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {
+            uart_puts("allocation failed\n");
+        }
+        PageAllocResult::Allocated(page) => {
+            uart_puts("allocated page: ");
+            uart_print(page_index(page));
+            uart_puts("\n");
+
+            let seed: usize = 0;
+            let space = address_space_new(seed);
+            let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+            let (space2, pending) = map_page(space, page, va);
+            let mapping = tlb_invalidate(pending);
+
+            let bytes = mapping_bytes(mapping);
+            bytes[0] = 42;
+            bytes[4095] = 99;
+
+            // Read back through the raw virtual address itself, not
+            // through mapping_bytes' own page_pool-relative slice -- this
+            // is the actual hardware proof that map_page's L3 page
+            // descriptor write and tlb_invalidate's TLBI/DSB/ISB sequence
+            // produced a real, live translation, not just updated an
+            // in-memory data structure. If this printed a different value
+            // than the one just written, either the PTE was wrong or the
+            // stale TLB entry was never invalidated.
+            let va_ptr: *u8 = 0x80000000;
+            uart_puts("via VA: ");
+            uart_print(*va_ptr);
+            uart_puts("\nvia mapping_bytes: ");
+            uart_print(bytes[0]);
+            uart_puts(" ");
+            uart_print(bytes[4095]);
+            uart_puts("\n");
+
+            let (space3, freed) = unmap_page(space2, mapping);
+            uart_puts("unmapped\n");
+            page_free(freed);
+            address_space_free(space3);
+        }
+    }
+    uart_puts("done\n");
+}

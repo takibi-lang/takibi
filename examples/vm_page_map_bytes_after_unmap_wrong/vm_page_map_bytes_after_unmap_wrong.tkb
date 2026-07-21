@@ -1,0 +1,20 @@
+// This file is expected to produce a compile error.
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+fn vm_page_map_bytes_after_unmap_bad() {
+    page_pool_init();
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {}
+        PageAllocResult::Allocated(page) => {
+            let seed: usize = 0;
+            let space = address_space_new(seed);
+            let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+            let (space2, pending) = map_page(space, page, va);
+            let mapping = tlb_invalidate(pending);
+            let (space3, freed) = unmap_page(space2, mapping);
+            mapping_bytes(mapping);
+            page_free(freed);
+            address_space_free(space3);
+        }
+    }
+}

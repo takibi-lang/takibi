@@ -15,6 +15,89 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-21: Dynamic Single-Page Mapping (Issue #67 Stage 2)
+
+`examples/vm_page_map` maps and unmaps one real, non-identity 4KB
+translation at runtime -- the first takibi code to touch the MMU beyond the
+fixed boot-time identity map `examples/common_rpi3/mmu.S` builds. RPi3-only
+for a real reason (not a RAM-size one like `page_pool`'s STM32 exclusion):
+QEMU's and STM32's shared HAL never build a dynamic L3 table or expose a
+`tlbi` instruction.
+
+`mmu.S`'s L1 entry 2 reserves a spare, never-otherwise-used 1GB virtual
+window (`0x80000000`-`0xBFFFFFFF`); its first 2MB is populated down to
+`l3_dynamic_table`, a 512-entry leaf table. `mmu.S`'s new
+`l3_dynamic_write(index, value)` is the accessor `map_page`/`unmap_page`
+call instead of indexing that table directly; `examples/common_rpi3/
+tlb_asm.S`'s new `tlb_invalidate_va(va)` does the real
+`dsb ishst; tlbi vae2, x0; dsb ish; isb` sequence.
+
+**Real bug found and fixed via actual hardware verification, not just the
+type checker**: `map_page`'s first L3 page descriptor attribute word was
+`0x703`, missing the AttrIndx bit (bit 2) -- this silently mapped the page
+as `AttrIndx 0` (Device-nGnRnE) instead of `AttrIndx 1` (Normal Write-Back
+Cacheable). A value written through `mapping_bytes` (the page's existing
+cacheable identity-mapped alias) was never visible reading back through the
+raw VA pointer at the new translation (read back `0` instead of the value
+just written), because the Device-typed alias bypassed the cache entirely
+and read RAM directly, before the cacheable write had reached it. Fixed to
+`0x707`. This is why `examples/vm_page_map/vm_page_map.expected` includes a
+"via VA: 42" line read back through the newly created translation itself,
+separately from the "via mapping_bytes: 42 99" line read through the
+physical pool array -- a test that only exercised the latter would not have
+caught this.
+
+**Second bug found and fixed before any hardware testing, via a full
+`make hwcheck-rpi3` run**: the first version declared `l3_dynamic_table` as
+a `.tkb` global inside `vm_page_map_core.tkb` instead of in `mmu.S`'s own
+`.bss`. `mmu_init` (which references it to build the L2-dynamic-table entry)
+runs unconditionally for every RPi3 example via `startup.S`'s `_start`, so a
+symbol it references must be defined in every kernel's link -- not only
+`examples/vm_page_map`'s own object file. This broke every OTHER RPi3
+example's link with "undefined symbol: l3_dynamic_table" the moment the full
+suite (not just the one new example) was built. Moving the table itself into
+`mmu.S`'s `.bss` and exposing only the one-instruction `l3_dynamic_write`
+accessor to `.tkb` code fixed it. Worth remembering: a change to
+`examples/common_rpi3/mmu.S` (or any file every kernel links) needs the FULL
+`make hwcheck-rpi3`/`stm32build`/`qemutest` run before being considered safe,
+not just a build of the one example that motivated the change.
+
+The API design (`PageOwner[p]`, `AddressSpaceOwner[asid, Empty/Occupied]`,
+`TlbInvalidationPending[asid, va, p]` -> `tlb_invalidate` -> `MappingOwner`)
+needed no new type-system machinery -- existing `borrow mut`/state-
+parameterized indexed owners (Slice 4) and existential-owner variants
+(Slice 3) already covered it. `AddressSpaceOwner`'s `Empty`/`Occupied` state
+parameter is the same idiom `SPEC.md`'s `SlotWrite[slot, 0] ->
+SlotWrite[slot, 1]` example uses, and is what makes mapping a second page
+before unmapping the first a genuine compile error rather than a runtime
+check. Two combined-refinement-plus-singleton-tie compiler limitations were
+found and worked around during this design (documented in
+`vm_page_map_core.tkb`'s own comments): a field typed `{lo..<hi} @ n` loses
+arithmetic provability that the same range WITHOUT the `@ n` tie retains
+(worked around by splitting each such field into a plain-refined arithmetic
+field plus a separate untied `usize @ n` identity witness, mirroring
+`page_pool_core.tkb`'s own `index`/`generation` split); and a `const` name
+used as a directly-assigned value (not just within a `{lo..<hi}` bound
+declaration) does not reliably narrow, unlike a bare literal (worked around
+by using literals in arithmetic/comparison positions, matching
+`page_pool_core.tkb`'s own `page_bytes` precedent, which already did this
+without a comment explaining why).
+
+Four compile-error fixtures cover free-after-map, mapping-bytes-after-
+unmap, mapping-bytes-before-tlb_invalidate, and double-map. The last one
+(`vm_page_map_double_map_wrong`) deliberately reuses the FRESH
+`AddressSpaceOwner` handle `map_page` itself returns, not the original
+already-consumed binding -- reusing the original variable is already
+rejected by ordinary linear-consumption tracking and would not actually
+exercise the `Empty`/`Occupied` state machine, the same lesson this
+session's own page_pool stale-identity fixture (see above) already taught.
+
+Verification: `make check` (144/144, unaffected -- `vm_page_map` is
+RPi3-only) and a full `make hwcheck-rpi3` run (63/63, including
+`vm_page_map`) both pass. The unrefined baseline was committed after both;
+`--forbid-trap` hardening is deferred, matching this project's
+baseline-then-harden process.
+
 ### 2026-07-21: Fixed Page Pool -- QEMU/RPi3 Wiring and a Sharper Identity Fixture (Issue #67 Stage 1)
 
 `examples/page_pool` (issue #67's plain physical-page allocator, `page_alloc`/
