@@ -1,0 +1,173 @@
+// Zero-copy page ownership transfer across Raspberry Pi 3 cores
+// (GitHub issue #67 Stage 3 integration baseline).
+//
+// Core 0 allocates and maps a physical page, initializes it through the
+// dynamic VA, unmaps it, and moves the PageOwner through a stable mailbox.
+// Core 1 maps that same owner at the same VA, modifies it, unmaps it, and
+// moves the owner back. Core 0 remaps, verifies, unmaps, and frees it.
+//
+// The BCM2837 demo still has one shared EL2 translation regime and L3 table;
+// AddressSpaceOwner values are per-core typed capabilities over that shared
+// hardware space, not separate TTBRs yet. The mailbox serializes use of the
+// one dynamic VA, while tlb_invalidate_va broadcasts VAE2IS to every core.
+//
+// This first working milestone is intentionally compiled without
+// --forbid-trap. Refinements are added only after the real-hardware baseline.
+
+use "examples/common/sync.tkb";
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+extern fn rpi3_core_id() -> usize;
+
+variant TransferSlot {
+    Empty;
+    Full(exists p: usize. PageOwner[p]);
+}
+
+struct TransferMailbox align(64) {
+    private mutex: i32;
+    private state: io i32;
+    private page: TransferSlot;
+}
+
+private let mut transfer_mailbox: TransferMailbox;
+
+fn transfer_init() {
+    transfer_mailbox.mutex = 1;
+    transfer_mailbox.state = 0;
+}
+
+fn transfer_discard(page: sink PageOwner[p]) {
+    page_free(page);
+}
+
+fn transfer_send(page: PageOwner[p], state: i32) {
+    let g = mutex_lock(&transfer_mailbox.mutex);
+    let previous: TransferSlot = stable_replace(
+        g, &transfer_mailbox.mutex, transfer_mailbox.page,
+        TransferSlot::Full(page));
+    match previous {
+        TransferSlot::Empty => {}
+        TransferSlot::Full(stale) => {
+            // Unreachable under the private state protocol; preserve the
+            // cleanup obligation if the runtime protocol is ever broken.
+            transfer_discard(stale);
+        }
+    }
+    dma_publish();
+    transfer_mailbox.state = state;
+    mutex_unlock(g, &transfer_mailbox.mutex);
+    interrupt_notify();
+}
+
+fn transfer_receive(expected: i32) -> TransferSlot {
+    while (transfer_mailbox.state != expected) {
+        interrupt_wait();
+    }
+    dma_consume();
+    let g = mutex_lock(&transfer_mailbox.mutex);
+    let result: TransferSlot = stable_replace(
+        g, &transfer_mailbox.mutex, transfer_mailbox.page,
+        TransferSlot::Empty);
+    transfer_mailbox.state = 0;
+    mutex_unlock(g, &transfer_mailbox.mutex);
+    return result;
+}
+
+fn core1_main() {
+    let received = transfer_receive(1);
+    match received {
+        TransferSlot::Empty => {}
+        TransferSlot::Full(page) => {
+            let core1_seed: usize = 1;
+            let core1_space = address_space_new(core1_seed);
+            let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+            let (occupied, pending) = map_page(core1_space, page, va);
+            let mapping = tlb_invalidate(pending);
+            let bytes = mapping_va_bytes(mapping);
+            bytes[0] = bytes[0] + 1;
+            bytes[4095] = bytes[4095] + 1;
+            let (empty, returned) = unmap_page(occupied, mapping);
+            address_space_free(empty);
+            dma_publish();
+            transfer_send(returned, 2);
+            while (transfer_mailbox.state != 3) {
+                interrupt_wait();
+            }
+            dma_consume();
+            while (true) {
+                interrupt_wait();
+            }
+        }
+    }
+}
+
+fn core0_main() {
+    page_pool_init();
+    transfer_init();
+    uart_puts("smp_page_transfer\n");
+
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {
+            uart_puts("allocation failed\n");
+        }
+        PageAllocResult::Allocated(page) => {
+            let core0_seed: usize = 0;
+            let core0_space = address_space_new(core0_seed);
+            let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+            let (occupied, pending) = map_page(core0_space, page, va);
+            let mapping = tlb_invalidate(pending);
+            let bytes = mapping_va_bytes(mapping);
+            bytes[0] = 41;
+            bytes[4095] = 98;
+            let (empty, outbound) = unmap_page(occupied, mapping);
+
+            uart_puts("core0 -> core1\n");
+            dma_publish();
+            transfer_send(outbound, 1);
+
+            let returned = transfer_receive(2);
+            match returned {
+                TransferSlot::Empty => {
+                    uart_puts("missing page\n");
+                    address_space_free(empty);
+                }
+                TransferSlot::Full(page2) => {
+                    let (occupied2, pending2) = map_page(empty, page2, va);
+                    let mapping2 = tlb_invalidate(pending2);
+                    let result = mapping_va_bytes(mapping2);
+                    uart_puts("core1 -> core0: ");
+                    if (result[0] == 42 && result[4095] == 99) {
+                        uart_puts("ok\n");
+                    } else {
+                        uart_puts("corrupt\n");
+                    }
+                    let (empty2, freed) = unmap_page(occupied2, mapping2);
+                    page_free(freed);
+                    address_space_free(empty2);
+                    transfer_mailbox.state = 3;
+                    dma_publish();
+                    interrupt_notify();
+                }
+            }
+        }
+    }
+    uart_puts("done\n");
+}
+
+fn smp_core_main() {
+    let id: usize = rpi3_core_id();
+    if (id == 0) {
+        core0_main();
+    } else if (id == 1) {
+        core1_main();
+    } else {
+        while (true) {
+            interrupt_wait();
+        }
+    }
+}
+
+fn app_main() {
+    smp_core_main();
+}

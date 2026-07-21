@@ -213,6 +213,16 @@ fn mapping_bytes(mapping: borrow MappingOwner[asid, va, p])
     return pool[0..<4096];
 }
 
+// Turn the live virtual translation into a checked page slice.  Raw-pointer
+// slice construction is confined to this reviewed MMU boundary: callers must
+// hold the MappingOwner, receive exactly 4096 bytes tied to its page identity,
+// and lose access when unmap_page consumes the mapping.
+fn mapping_va_bytes(mapping: borrow MappingOwner[asid, va, p])
+        -> [u8; PAGE_SIZE..] @ p {
+    let va_ptr: *u8 = mapping.va_value as *u8;
+    return unsafe { va_ptr[0..<4096] };
+}
+
 fn unmap_page(space: sink AddressSpaceOwner[asid, SpaceState::Occupied],
               mapping: sink MappingOwner[asid, va, p])
         -> (AddressSpaceOwner[asid, SpaceState::Empty], PageOwner[p]) {

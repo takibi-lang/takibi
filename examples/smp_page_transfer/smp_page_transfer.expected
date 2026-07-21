@@ -1,0 +1,4 @@
+smp_page_transfer
+core0 -> core1
+core1 -> core0: ok
+done

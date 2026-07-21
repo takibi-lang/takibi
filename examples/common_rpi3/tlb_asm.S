@@ -15,11 +15,11 @@
    dsb ishst (Inner Shareable, Store) drains the PTE write itself before
    the TLB maintenance instruction runs -- required so `tlbi` cannot race
    a store to the very translation table entry it is about to invalidate.
-   `tlbi vae2, x0` invalidates this core's cached translation for one VA
-   at EL2 (single-core-only demo, so the non-shareable/local form is
-   correct -- see examples/vm_page_map/vm_page_map_core.tkb's own header
-   comment: a multi-core version would need the *is (Inner Shareable)
-   broadcast variant instead). TLBI VAE2's VA operand is bits[43:0] of
+   `tlbi vae2is, x0` invalidates the cached translation for one VA at EL2
+   on every PE in the Inner-Shareable domain.  The original Stage 2
+   single-core demo used local `vae2`; smp_page_transfer requires the
+   broadcast form because the L3 table and VA are shared across cores.
+   TLBI VAE2IS's VA operand is bits[43:0] of
    the input address shifted right 12 (page-aligned, top bits ignored by
    the instruction) -- the `lsr x0, x0, #12` below does that shift so the
    .tkb-facing API can pass a plain byte address. The trailing dsb ish +
@@ -36,7 +36,7 @@
 tlb_invalidate_va:       /* fn tlb_invalidate_va(va: usize) */
     dsb     ishst
     lsr     x0, x0, #12
-    tlbi    vae2, x0
+    tlbi    vae2is, x0
     dsb     ish
     isb
     ret
