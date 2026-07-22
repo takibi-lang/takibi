@@ -276,135 +276,15 @@ fn sd_send_cmd(cmd_index: u32, arg: u32, waitresp: u32) {
     *SDMMC_CMD = cmd_index | (waitresp << 6) | (1 << 10); // CMDINDEX | WAITRESP | CPSMEN
 }
 
-// Waits for a no-response command (CMD0) to finish. Returns 0 on success.
-fn sd_wait_no_resp() -> i32 {
-    while ((*SDMMC_STA & (STA_CMDSENT | STA_CTIMEOUT)) == 0) {}
-    if ((*SDMMC_STA & STA_CTIMEOUT) != 0) {
-        return -1;
-    }
-    return 0;
-}
-
-// Waits for a command expecting a response. CRC failures are tolerated here
-// (R3's OCR response has no valid CRC by design; this driver does not
-// distinguish R3 from other short/long responses at this layer) -- only a
-// timeout is treated as failure. Returns 0 on success.
-fn sd_wait_resp() -> i32 {
-    while ((*SDMMC_STA & (STA_CMDREND | STA_CCRCFAIL | STA_CTIMEOUT)) == 0) {}
-    if ((*SDMMC_STA & STA_CTIMEOUT) != 0) {
-        return -1;
-    }
-    return 0;
-}
-
-fn sd_cmd0() -> i32 {
-    sd_send_cmd(0, 0, WAITRESP_NONE);
-    return sd_wait_no_resp();
-}
-
-// CMD8 (SEND_IF_COND): arg = voltage window (2.7-3.6V) | check pattern 0xAA.
-// Confirms an SD v2+ card (SDv1/MMC cards do not respond; not handled here).
-fn sd_cmd8() -> i32 {
-    sd_send_cmd(8, 0x1AA, WAITRESP_SHORT);
-    if (sd_wait_resp() != 0) {
-        return -1;
-    }
-    if ((*SDMMC_RESP1 & 0xFF) != 0xAA) {
-        return -1;
-    }
-    return 0;
-}
-
-fn sd_cmd55() -> i32 {
-    sd_send_cmd(55, 0, WAITRESP_SHORT); // rca=0: only valid before CMD3 assigns one
-    return sd_wait_resp();
-}
-
-// ACMD41 (SD_SEND_OP_COND): polls until the card leaves the busy state
-// (OCR bit31), with HCS (bit30 of the argument) set to request high-capacity
-// support. OCR bit30 in the response then reports whether the card is
-// SDHC/SDXC (block-addressed) or SDSC (byte-addressed).
-fn sd_acmd41() -> i32 {
-    for tries: u32 in 0..<1000000 {
-        if (sd_cmd55() != 0) {
-            return -1;
-        }
-        sd_send_cmd(41, 0x40FF8000, WAITRESP_SHORT);
-        sd_wait_resp(); // CRC failure expected/ignored for R3
-        let ocr: u32 = *SDMMC_RESP1;
-        if ((ocr & 0x80000000) != 0) {
-            if ((ocr & 0x40000000) != 0) {
-                sd_hc = 1;
-            } else {
-                sd_hc = 0;
-            }
-            return 0;
-        }
-    }
-    return -1;
-}
-
-fn sd_cmd2() -> i32 {
-    sd_send_cmd(2, 0, WAITRESP_LONG); // R2 (CID); content unused by this driver
-    return sd_wait_resp();
-}
-
-fn sd_cmd3() -> i32 {
-    sd_send_cmd(3, 0, WAITRESP_SHORT); // R6
-    if (sd_wait_resp() != 0) {
-        return -1;
-    }
-    return (*SDMMC_RESP1 >> 16) as i32; // RCA in the upper 16 bits
-}
-
-// rca is the plain (already right-shifted by sd_cmd3) RCA value -- CMD7's
-// own argument format needs it back in the upper 16 bits (bits 31:16),
-// stuff bits 0 in the lower 16, same as CMD55's `rca << 16`.
-fn sd_cmd7(rca: u32) -> i32 {
-    sd_send_cmd(7, rca << 16, WAITRESP_SHORT);
-    return sd_wait_resp();
-}
-
-// SDSC only, strictly speaking (HC/XC cards are fixed at 512 already), but
-// harmless to send unconditionally -- simpler than branching on sd_hc here.
-fn sd_cmd16() -> i32 {
-    sd_send_cmd(16, 512, WAITRESP_SHORT);
-    return sd_wait_resp();
-}
-
-// CMD13 (SEND_STATUS): R1 response, card status in bit31:0 of RESP1.
-// READY_FOR_DATA is bit8 -- clear while the card is still busy
-// programming (writing) the previous block to flash. Native SD mode has
-// no automatic "wait for not-busy" in this driver's polling-only design
-// (unlike SPI mode, where the host can watch the data line go non-zero);
-// CMD13 polling is the standard alternative.
-fn sd_cmd13() -> i32 {
-    sd_send_cmd(13, card_rca << 16, WAITRESP_SHORT);
-    return sd_wait_resp();
-}
-
-fn sd_wait_not_busy() -> i32 {
-    for tries: u32 in 0..<1000000 {
-        if (sd_cmd13() == 0) {
-            if ((*SDMMC_RESP1 & 0x100) != 0) {
-                return 0;
-            }
-        }
-    }
-    return -1;
-}
-
 // Status of the Media Access Interface (disk_initialize/disk_status/
-// disk_read/disk_write) below. Replaces their old plain `i32` 0/-1
+// disk_read/disk_write) below, and of the internal sd_cmdN/sd_wait_*
+// command helpers those call in turn. Replaces the old plain `i32` 0/-1
 // sentinel with a type a caller must `match` on both arms of -- see
 // examples/common/fat12.tkb's FatIoResult, which this mirrors one layer
 // down, and examples/common_rpi3/usb_msc.tkb's own DiskIoResult (this
 // file's RPi3-target counterpart, no shared header between the two since
-// they're never linked together). The internal sd_cmdN/sd_wait_* helpers
-// below stay plain `i32`: they're private plumbing this file alone calls,
-// the same reasoning fat12.tkb's fat_get_entry/fat_set_entry were left
-// unconverted for. disk_io_ok is the same match-to-bool convenience
-// fat_io_ok provides.
+// they're never linked together). disk_io_ok is the same match-to-bool
+// convenience fat_io_ok provides.
 variant DiskIoResult {
     Ok;
     Err(i32);
@@ -415,6 +295,134 @@ fn disk_io_ok(r: DiskIoResult) -> bool {
         DiskIoResult::Ok => { return true; }
         DiskIoResult::Err(err) => { return false; }
     }
+}
+
+// sd_cmd3 (R6, SEND_RELATIVE_ADDR) is the one command whose success case
+// carries data (the card's assigned RCA) rather than being a bare status
+// -- DiskIoResult's payload-less Ok can't carry that, so it gets its own
+// value-or-error variant instead of overloading a negative i32 as both
+// "the RCA" and "an error code" the way the old plain-i32 version did.
+variant SdCmd3Result {
+    Rca(u32);
+    Err(i32);
+}
+
+// Waits for a no-response command (CMD0) to finish.
+fn sd_wait_no_resp() -> DiskIoResult {
+    while ((*SDMMC_STA & (STA_CMDSENT | STA_CTIMEOUT)) == 0) {}
+    if ((*SDMMC_STA & STA_CTIMEOUT) != 0) {
+        return DiskIoResult::Err(-1);
+    }
+    return DiskIoResult::Ok;
+}
+
+// Waits for a command expecting a response. CRC failures are tolerated here
+// (R3's OCR response has no valid CRC by design; this driver does not
+// distinguish R3 from other short/long responses at this layer) -- only a
+// timeout is treated as failure.
+fn sd_wait_resp() -> DiskIoResult {
+    while ((*SDMMC_STA & (STA_CMDREND | STA_CCRCFAIL | STA_CTIMEOUT)) == 0) {}
+    if ((*SDMMC_STA & STA_CTIMEOUT) != 0) {
+        return DiskIoResult::Err(-1);
+    }
+    return DiskIoResult::Ok;
+}
+
+fn sd_cmd0() -> DiskIoResult {
+    sd_send_cmd(0, 0, WAITRESP_NONE);
+    return sd_wait_no_resp();
+}
+
+// CMD8 (SEND_IF_COND): arg = voltage window (2.7-3.6V) | check pattern 0xAA.
+// Confirms an SD v2+ card (SDv1/MMC cards do not respond; not handled here).
+fn sd_cmd8() -> DiskIoResult {
+    sd_send_cmd(8, 0x1AA, WAITRESP_SHORT);
+    if (disk_io_ok(sd_wait_resp()) == false) {
+        return DiskIoResult::Err(-1);
+    }
+    if ((*SDMMC_RESP1 & 0xFF) != 0xAA) {
+        return DiskIoResult::Err(-1);
+    }
+    return DiskIoResult::Ok;
+}
+
+fn sd_cmd55() -> DiskIoResult {
+    sd_send_cmd(55, 0, WAITRESP_SHORT); // rca=0: only valid before CMD3 assigns one
+    return sd_wait_resp();
+}
+
+// ACMD41 (SD_SEND_OP_COND): polls until the card leaves the busy state
+// (OCR bit31), with HCS (bit30 of the argument) set to request high-capacity
+// support. OCR bit30 in the response then reports whether the card is
+// SDHC/SDXC (block-addressed) or SDSC (byte-addressed).
+fn sd_acmd41() -> DiskIoResult {
+    for tries: u32 in 0..<1000000 {
+        if (disk_io_ok(sd_cmd55()) == false) {
+            return DiskIoResult::Err(-1);
+        }
+        sd_send_cmd(41, 0x40FF8000, WAITRESP_SHORT);
+        sd_wait_resp(); // CRC failure expected/ignored for R3
+        let ocr: u32 = *SDMMC_RESP1;
+        if ((ocr & 0x80000000) != 0) {
+            if ((ocr & 0x40000000) != 0) {
+                sd_hc = 1;
+            } else {
+                sd_hc = 0;
+            }
+            return DiskIoResult::Ok;
+        }
+    }
+    return DiskIoResult::Err(-1);
+}
+
+fn sd_cmd2() -> DiskIoResult {
+    sd_send_cmd(2, 0, WAITRESP_LONG); // R2 (CID); content unused by this driver
+    return sd_wait_resp();
+}
+
+fn sd_cmd3() -> SdCmd3Result {
+    sd_send_cmd(3, 0, WAITRESP_SHORT); // R6
+    if (disk_io_ok(sd_wait_resp()) == false) {
+        return SdCmd3Result::Err(-1);
+    }
+    return SdCmd3Result::Rca((*SDMMC_RESP1 >> 16) as u32); // RCA in the upper 16 bits
+}
+
+// rca is the plain (already right-shifted by sd_cmd3) RCA value -- CMD7's
+// own argument format needs it back in the upper 16 bits (bits 31:16),
+// stuff bits 0 in the lower 16, same as CMD55's `rca << 16`.
+fn sd_cmd7(rca: u32) -> DiskIoResult {
+    sd_send_cmd(7, rca << 16, WAITRESP_SHORT);
+    return sd_wait_resp();
+}
+
+// SDSC only, strictly speaking (HC/XC cards are fixed at 512 already), but
+// harmless to send unconditionally -- simpler than branching on sd_hc here.
+fn sd_cmd16() -> DiskIoResult {
+    sd_send_cmd(16, 512, WAITRESP_SHORT);
+    return sd_wait_resp();
+}
+
+// CMD13 (SEND_STATUS): R1 response, card status in bit31:0 of RESP1.
+// READY_FOR_DATA is bit8 -- clear while the card is still busy
+// programming (writing) the previous block to flash. Native SD mode has
+// no automatic "wait for not-busy" in this driver's polling-only design
+// (unlike SPI mode, where the host can watch the data line go non-zero);
+// CMD13 polling is the standard alternative.
+fn sd_cmd13() -> DiskIoResult {
+    sd_send_cmd(13, card_rca << 16, WAITRESP_SHORT);
+    return sd_wait_resp();
+}
+
+fn sd_wait_not_busy() -> DiskIoResult {
+    for tries: u32 in 0..<1000000 {
+        if (disk_io_ok(sd_cmd13())) {
+            if ((*SDMMC_RESP1 & 0x100) != 0) {
+                return DiskIoResult::Ok;
+            }
+        }
+    }
+    return DiskIoResult::Err(-1);
 }
 
 fn disk_initialize() -> DiskIoResult {
@@ -428,28 +436,28 @@ fn disk_initialize() -> DiskIoResult {
     sd_set_clock(38); // ~400kHz identification clock
     for i: i32 in 0..<10000 {} // >= 74 SDMMC_CK cycles before the first command
 
-    if (sd_cmd0() != 0) {
+    if (disk_io_ok(sd_cmd0()) == false) {
         return DiskIoResult::Err(-1);
     }
-    let is_v2: i32 = sd_cmd8();
-    if (is_v2 != 0) {
+    if (disk_io_ok(sd_cmd8()) == false) {
         return DiskIoResult::Err(-1); // SDv1/MMC cards not supported by this driver yet
     }
-    if (sd_acmd41() != 0) {
+    if (disk_io_ok(sd_acmd41()) == false) {
         return DiskIoResult::Err(-1);
     }
-    if (sd_cmd2() != 0) {
+    if (disk_io_ok(sd_cmd2()) == false) {
         return DiskIoResult::Err(-1);
     }
-    let rca: i32 = sd_cmd3();
-    if (rca < 0) {
+    let mut rca: u32 = 0;
+    match sd_cmd3() {
+        SdCmd3Result::Err(err) => { return DiskIoResult::Err(-1); }
+        SdCmd3Result::Rca(v) => { rca = v; }
+    }
+    card_rca = rca;
+    if (disk_io_ok(sd_cmd7(rca)) == false) {
         return DiskIoResult::Err(-1);
     }
-    card_rca = rca as u32;
-    if (sd_cmd7(rca as u32) != 0) {
-        return DiskIoResult::Err(-1);
-    }
-    if (sd_cmd16() != 0) {
+    if (disk_io_ok(sd_cmd16()) == false) {
         return DiskIoResult::Err(-1);
     }
 
@@ -531,7 +539,7 @@ fn disk_read(sector: u32, buf: *align(32) u8) -> DiskIoResult !{may_block} {
     *SDMMC_MASK = STA_DATAEND | STA_DCRCFAIL | STA_DTIMEOUT | STA_RXOVERR | STA_STBITERR;
 
     sd_send_cmd(17, sd_block_arg(sector), WAITRESP_SHORT); // CMD17 READ_SINGLE_BLOCK
-    if (sd_wait_resp() != 0) {
+    if (disk_io_ok(sd_wait_resp()) == false) {
         *SDMMC_MASK = 0;
         return DiskIoResult::Err(-1);
     }
@@ -572,7 +580,7 @@ fn disk_write(sector: u32, buf: *u8) -> DiskIoResult !{may_block} {
     *SDMMC_MASK = STA_DATAEND | STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR | STA_STBITERR;
 
     sd_send_cmd(24, sd_block_arg(sector), WAITRESP_SHORT); // CMD24 WRITE_BLOCK
-    if (sd_wait_resp() != 0) {
+    if (disk_io_ok(sd_wait_resp()) == false) {
         *SDMMC_MASK = 0;
         return DiskIoResult::Err(-1);
     }
@@ -599,7 +607,7 @@ fn disk_write(sector: u32, buf: *u8) -> DiskIoResult !{may_block} {
     // waiting for a response while the card is still busy -- confirmed on
     // real hardware (a second consecutive disk_write failed with a command
     // timeout until this wait was added).
-    if (sd_wait_not_busy() != 0) {
+    if (disk_io_ok(sd_wait_not_busy()) == false) {
         return DiskIoResult::Err(-1);
     }
     return DiskIoResult::Ok;
