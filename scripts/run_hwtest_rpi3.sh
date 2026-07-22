@@ -480,6 +480,7 @@ run_hw_test_rpi3 "scheduler (rpi3)"      "$REPO_ROOT/examples/scheduler/kernel_r
 run_hw_test_rpi3 "klock_guard (rpi3)"    "$REPO_ROOT/examples/klock_guard/kernel_rpi3.elf"    "$REPO_ROOT/examples/klock_guard/klock_guard.expected"
 run_hw_test_rpi3 "percpu (rpi3)"         "$REPO_ROOT/examples/percpu/kernel_rpi3.elf"         "$REPO_ROOT/examples/percpu/percpu.expected"
 RPI3_SMP_CORES=4 run_hw_test_rpi3 "smp_handoff (rpi3)" "$REPO_ROOT/examples/smp_handoff/kernel_rpi3.elf" "$REPO_ROOT/examples/smp_handoff/smp_handoff.expected" 5 30
+RPI3_SMP_CORES=4 run_hw_test_rpi3 "smp_slab (rpi3)" "$REPO_ROOT/examples/smp_slab/kernel_rpi3.elf" "$REPO_ROOT/examples/smp_slab/smp_slab.expected" 5 30
 run_hw_test_rpi3 "page_pool (rpi3)"       "$REPO_ROOT/examples/page_pool/kernel_rpi3.elf"       "$REPO_ROOT/examples/page_pool/page_pool.expected"
 run_hw_test_rpi3 "vm_page_map (rpi3)"     "$REPO_ROOT/examples/vm_page_map/kernel_rpi3.elf"     "$REPO_ROOT/examples/vm_page_map/vm_page_map.expected" 5 6
 run_hw_test_rpi3 "vm_context_switch (rpi3)" "$REPO_ROOT/examples/vm_context_switch/kernel_rpi3.elf" "$REPO_ROOT/examples/vm_context_switch/vm_context_switch.expected" 5 6
