@@ -39,6 +39,7 @@
 # CLAUDE.md/HISTORY.md's RAM-execution section for both).
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run 'make hwcheck-stm32' or set it explicitly}"
 SERIAL_DEV="$STM32_SERIAL_DEV"
 BAUD=115200

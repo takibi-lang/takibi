@@ -54,6 +54,7 @@
 # sdcard` (see that script's own header comment), not duplicated here.
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run 'make hwcheck-stm32-net' or set it explicitly}"
 SERIAL_DEV="$STM32_SERIAL_DEV"
 OPENOCD_BOARD_CFG="board/stm32f746g-disco.cfg"
