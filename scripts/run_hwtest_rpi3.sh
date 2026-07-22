@@ -34,7 +34,11 @@ CAPTURE_STABLE_POLLS=6
 PASS=0
 FAIL=0
 FAILED_TESTS=()
+HWTEST_ARTIFACT_ROOT="${RPI3_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/hwtest-rpi3}"
 FAILURE_ARTIFACT_ROOT="${RPI3_FAILURE_ARTIFACT_DIR:-$REPO_ROOT/_build/hwtest-rpi3-failures}"
+
+# shellcheck source=scripts/test_artifacts.sh
+source "$REPO_ROOT/scripts/test_artifacts.sh"
 
 if [ -t 1 ]; then
     GRN='\033[32m' RED='\033[31m' RST='\033[0m'
@@ -228,10 +232,12 @@ run_hw_test_rpi3() {
         sed 's/^/       /' "$load_log"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         preserve_failure_artifacts "$name" "$tmp_out" "$load_log"
         rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
         exit 1
     elif cmp -s "$expected" "$tmp_out"; then
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else
@@ -240,6 +246,7 @@ run_hw_test_rpi3() {
         printf "       actual:   %s\n" "$(od -An -c "$tmp_out" | tr -s ' \n' ' ')"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         preserve_failure_artifacts "$name" "$tmp_out" "$load_log"
     fi
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
@@ -270,6 +277,7 @@ run_hw_test_rpi3_suite() {
         sed 's/^/       /' "$load_log"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$suite_name (rpi3)")
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$suite_name (rpi3)" "$tmp_out" uart.log
         preserve_failure_artifacts "$suite_name (rpi3)" "$tmp_out" "$load_log"
         rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file" "$report"
         exit 1
@@ -282,10 +290,12 @@ run_hw_test_rpi3_suite() {
     while IFS=$'\t' read -r status name expected actual; do
         case "$status" in
             PASS)
+                save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name (rpi3)" "$tmp_out" uart.log
                 printf "${GRN}PASS${RST}  %s (rpi3)\n" "$name"
                 PASS=$((PASS + 1))
                 ;;
             FAIL)
+                save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name (rpi3)" "$tmp_out" uart.log
                 printf "${RED}FAIL${RST}  %s (rpi3)\n" "$name"
                 printf "       expected bytes: %s\n" "$expected"
                 printf "       got bytes:      %s\n" "$actual"
@@ -294,6 +304,7 @@ run_hw_test_rpi3_suite() {
                 suite_failed=1
                 ;;
             ERROR)
+                save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$suite_name (rpi3)" "$tmp_out" uart.log
                 printf "${RED}FAIL${RST}  %s (rpi3)  (%s)\n" "$suite_name" "$name"
                 FAIL=$((FAIL + 1))
                 FAILED_TESTS+=("$suite_name (rpi3)")
@@ -372,10 +383,12 @@ run_hw_test_rpi3_stdin() {
         sed 's/^/       /' "$load_log"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         preserve_failure_artifacts "$name" "$tmp_out" "$load_log"
         rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
         exit 1
     elif cmp -s "$expected" "$tmp_out"; then
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else
@@ -384,6 +397,7 @@ run_hw_test_rpi3_stdin() {
         printf "       actual:   %s\n" "$(od -An -c "$tmp_out" | tr -s ' \n' ' ')"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         preserve_failure_artifacts "$name" "$tmp_out" "$load_log"
     fi
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
@@ -419,6 +433,7 @@ run_hw_test_rpi3_usb_msc() {
         sed 's/^/       /' "$load_log"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         preserve_failure_artifacts "$name" "$tmp_out" "$load_log"
         rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
         exit 1
@@ -426,14 +441,17 @@ run_hw_test_rpi3_usb_msc() {
         printf "${RED}FAIL${RST}  %s  (timed out after 30s waiting for UART marker 'done')\n" "$name"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         preserve_failure_artifacts "$name" "$tmp_out" "$load_log"
     elif python3 "$(dirname "$0")/$script" "$tmp_out"; then
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else
         printf "${RED}FAIL${RST}  %s\n" "$name"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         preserve_failure_artifacts "$name" "$tmp_out" "$load_log"
     fi
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"

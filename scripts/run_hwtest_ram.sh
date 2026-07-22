@@ -43,6 +43,10 @@ set -euo pipefail
 SERIAL_DEV="$STM32_SERIAL_DEV"
 BAUD=115200
 OPENOCD_BOARD_CFG="board/stm32f746g-disco.cfg"
+HWTEST_ARTIFACT_ROOT="${STM32_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/hwtest-stm32}"
+
+# shellcheck source=scripts/test_artifacts.sh
+source "$(dirname "$0")/test_artifacts.sh"
 ACTIVE_READER_PID=""
 
 cleanup_reader() {
@@ -289,6 +293,7 @@ run_hw_test_ram_fatfs() {
         sed 's/^/       /' "$RAM_LOAD_LOG"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         rm -f "$tmp_out" "$RAM_LOAD_LOG"
         rm -rf "$tmp_dir"
         return
@@ -304,6 +309,7 @@ run_hw_test_ram_fatfs() {
     fi
 
     if [ "$ok" -eq 1 ]; then
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         if ! dump_disk_image "$elf" "$dump_img"; then
             printf "${RED}FAIL${RST}  %s (openocd dump_image failed)\n" "$name"
             ok=0
@@ -317,6 +323,7 @@ run_hw_test_ram_fatfs() {
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
     fi
@@ -358,9 +365,11 @@ run_hw_test_ram() {
     rm -f "$RAM_LOAD_LOG"
 
     if capture_matches "$expected" "$tmp_out"; then
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         printf "${RED}FAIL${RST}  %s\n" "$name"
         printf "       expected bytes: %s\n" "$(od -An -c "$expected" | tr -s ' \n' ' ')"
         printf "       got bytes:      %s\n" "$(od -An -c "$tmp_out"  | tr -s ' \n' ' ')"
@@ -405,10 +414,12 @@ run_hw_test_ram_suite() {
     while IFS=$'\t' read -r status name expected actual; do
         case "$status" in
             PASS)
+                save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name (stm32/ram)" "$tmp_out" uart.log
                 printf "${GRN}PASS${RST}  %s (stm32/ram)\n" "$name"
                 PASS=$((PASS + 1))
                 ;;
             FAIL)
+                save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name (stm32/ram)" "$tmp_out" uart.log
                 printf "${RED}FAIL${RST}  %s (stm32/ram)\n" "$name"
                 printf "       expected bytes: %s\n" "$expected"
                 printf "       got bytes:      %s\n" "$actual"
@@ -416,6 +427,7 @@ run_hw_test_ram_suite() {
                 FAILED_TESTS+=("$name (stm32/ram)")
                 ;;
             ERROR)
+                save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$suite_name (stm32/ram)" "$tmp_out" uart.log
                 printf "${RED}FAIL${RST}  %s (stm32/ram)  (%s)\n" "$suite_name" "$name"
                 FAIL=$((FAIL + 1))
                 FAILED_TESTS+=("$suite_name (stm32/ram)")
@@ -533,15 +545,18 @@ run_hw_test_ram_sdcard() {
         sed 's/^/       /' "$RAM_LOAD_LOG"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         rm -f "$tmp_out" "$RAM_LOAD_LOG"
         return
     fi
     rm -f "$RAM_LOAD_LOG"
 
     if python3 "$(dirname "$0")/$script" "$tmp_out"; then
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         printf "${RED}FAIL${RST}  %s\n" "$name"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")

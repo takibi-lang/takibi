@@ -2,9 +2,14 @@
 # QEMU integration test runner -- called from repo root via: make qemutest
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 QEMU="qemu-system-aarch64"
 QEMU_COMMON="-machine virt -cpu cortex-a53 -nographic -semihosting-config enable=on,target=native"
 TIMEOUT=10
+CHECK_ARTIFACT_ROOT="${CHECK_ARTIFACT_DIR:-$REPO_ROOT/_build/check}"
+
+# shellcheck source=scripts/test_artifacts.sh
+source "$REPO_ROOT/scripts/test_artifacts.sh"
 
 # Invoke the built binary directly rather than "dune exec takibi --": under
 # `make -j`, this script's own recipe can run concurrently with other Make
@@ -55,9 +60,11 @@ run_test() {
     fi
 
     if diff -q "$expected" "$tmp_out" > /dev/null 2>&1; then
+        save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else
+        save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         printf "${RED}FAIL${RST}  %s\n" "$name"
         printf "       expected bytes: %s\n" "$(od -An -c "$expected" | tr -s ' \n' ' ')"
         printf "       got bytes:      %s\n" "$(od -An -c "$tmp_out"  | tr -s ' \n' ' ')"
@@ -84,10 +91,12 @@ check_suite_output() {
     while IFS=$'\t' read -r status name expected actual; do
         case "$status" in
             PASS)
+                save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name$suffix" "$outfile" uart.log
                 printf "${GRN}PASS${RST}  %s%s\n" "$name" "$suffix"
                 PASS=$((PASS + 1))
                 ;;
             FAIL)
+                save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name$suffix" "$outfile" uart.log
                 printf "${RED}FAIL${RST}  %s%s\n" "$name" "$suffix"
                 printf "       expected bytes: %s\n" "$expected"
                 printf "       got bytes:      %s\n" "$actual"
@@ -95,6 +104,7 @@ check_suite_output() {
                 FAILED_TESTS+=("$name$suffix")
                 ;;
             ERROR)
+                save_artifact_file "$CHECK_ARTIFACT_ROOT" "$suite_name$suffix" "$outfile" uart.log
                 printf "${RED}FAIL${RST}  %s%s  (%s)\n" "$suite_name" "$suffix" "$name"
                 FAIL=$((FAIL + 1))
                 FAILED_TESTS+=("$suite_name$suffix")
@@ -132,9 +142,11 @@ run_test_timed() {
     [ "$elapsed" -ge "$min_secs" ]               || timing_ok=0
 
     if [ "$output_ok" -eq 1 ] && [ "$timing_ok" -eq 1 ]; then
+        save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         printf "${GRN}PASS${RST}  %s  (${elapsed}s >= ${min_secs}s)\n" "$name"
         PASS=$((PASS + 1))
     else
+        save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         printf "${RED}FAIL${RST}  %s\n" "$name"
         [ "$output_ok" -eq 0 ] && {
             printf "       expected bytes: %s\n" "$(od -An -c "$expected" | tr -s ' \n' ' ')"
@@ -166,6 +178,7 @@ run_compile_error_test() {
     tmp_obj=$(mktemp --suffix=.o)
 
     if "$TAKIBI" "$tkb" --target aarch64-none-elf -o "$tmp_obj" "$@" >"$tmp_err" 2>&1; then
+        save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_err" stderr.log
         printf "${RED}FAIL${RST}  %s\n" "$name"
         printf "       expected compile error, but compilation succeeded\n"
         FAIL=$((FAIL + 1))
@@ -183,9 +196,11 @@ run_compile_error_test() {
         fi
 
         if [ "$msg_ok" -eq 1 ] && [ "$loc_ok" -eq 1 ]; then
+            save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_err" stderr.log
             printf "${GRN}PASS${RST}  %s\n" "$name"
             PASS=$((PASS + 1))
         else
+            save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_err" stderr.log
             printf "${RED}FAIL${RST}  %s\n" "$name"
             if [ "$msg_ok" -ne 1 ]; then
                 printf "       expected diagnostic substring: %s\n" "$expected_line"
@@ -217,9 +232,11 @@ run_forbid_trap_ok_test() {
     tmp_obj=$(mktemp --suffix=.o)
 
     if "$TAKIBI" "$@" --target aarch64-none-elf -o "$tmp_obj" --forbid-trap >"$tmp_err" 2>&1; then
+        save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_err" stderr.log
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else
+        save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_err" stderr.log
         printf "${RED}FAIL${RST}  %s\n" "$name"
         printf "       expected --forbid-trap compile to succeed, got:\n"
         sed 's/^/       /' "$tmp_err"
@@ -242,9 +259,11 @@ run_linux_binary_test() {
 
     if "$binary" > "$tmp_out"; then
         if diff -q "$expected" "$tmp_out" > /dev/null 2>&1; then
+            save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_out" stdout.log
             printf "${GRN}PASS${RST}  %s\n" "$name"
             PASS=$((PASS + 1))
         else
+            save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_out" stdout.log
             printf "${RED}FAIL${RST}  %s\n" "$name"
             printf "       expected bytes: %s\n" "$(od -An -c "$expected" | tr -s ' \n' ' ')"
             printf "       got bytes:      %s\n" "$(od -An -c "$tmp_out"  | tr -s ' \n' ' ')"
@@ -362,9 +381,11 @@ run_fatfs_test() {
     fi
 
     if [ "$ok" -eq 1 ]; then
+        save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else
+        save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
     fi
@@ -405,9 +426,11 @@ run_virtio_test() {
     wait "$qpid" 2>/dev/null || true
 
     if [ "$rc" -eq 0 ]; then
+        save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$qemu_log" qemu.log
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else
+        save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$qemu_log" qemu.log
         printf "${RED}FAIL${RST}  %s\n" "$name"
         printf "       qemu output:\n"
         sed 's/^/       /' "$qemu_log"
