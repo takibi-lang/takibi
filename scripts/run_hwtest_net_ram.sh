@@ -62,6 +62,27 @@ FLASH_ADDR=0x08000000
 HWTEST_ARTIFACT_ROOT="${STM32_NET_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/hwtest-stm32-net}"
 mkdir -p "$HWTEST_ARTIFACT_ROOT"
 exec > >(tee "$HWTEST_ARTIFACT_ROOT/run.log") 2>&1
+
+# shellcheck source=scripts/test_artifacts.sh
+source "$REPO_ROOT/scripts/test_artifacts.sh"
+
+stty -F "$SERIAL_DEV" 115200 raw -echo
+ACTIVE_UART_PID=""
+start_uart_capture() {
+    local artifact_dir="$1" filename="${2:-uart.log}"
+    timeout 0.25 cat "$SERIAL_DEV" > /dev/null 2>&1 || true
+    cat "$SERIAL_DEV" > "$artifact_dir/$filename" &
+    ACTIVE_UART_PID=$!
+}
+stop_uart_capture() {
+    if [ -n "$ACTIVE_UART_PID" ]; then
+        kill "$ACTIVE_UART_PID" 2>/dev/null || true
+        wait "$ACTIVE_UART_PID" 2>/dev/null || true
+        ACTIVE_UART_PID=""
+    fi
+}
+trap stop_uart_capture EXIT
+trap 'stop_uart_capture; exit 130' INT TERM HUP
 PASS=0
 FAIL=0
 FAILED_TESTS=()
@@ -89,8 +110,7 @@ fi
 # than sourced from a shared file, matching this test suite's existing
 # convention of each runner being self-contained.
 ram_load_and_run() {
-    local elf="$1" log
-    log=$(mktemp)
+    local elf="$1" log="$2"
     if openocd -f "$OPENOCD_BOARD_CFG" \
         -c "init" \
         -c "reset halt" \
@@ -103,12 +123,10 @@ ram_load_and_run() {
         -c "resume" \
         -c "shutdown" > "$log" 2>&1
     then
-        rm -f "$log"
         return 0
     else
         echo "openocd RAM load failed:" >&2
         sed 's/^/       /' "$log" >&2
-        rm -f "$log"
         return 1
     fi
 }
@@ -123,8 +141,13 @@ ram_load_and_run() {
 # latency without a hardcoded wait.
 run_net_hw_test() {
     local name="$1" elf="$2" test_script="$3"
+    local artifact_dir
 
-    if ! ram_load_and_run "$elf"; then
+    prepare_artifact_dir "$HWTEST_ARTIFACT_ROOT" "$name"
+    artifact_dir="$ARTIFACT_DIR"
+    start_uart_capture "$artifact_dir"
+    if ! ram_load_and_run "$elf" "$artifact_dir/loader.log"; then
+        stop_uart_capture
         printf "${RED}FAIL${RST}  %s  (openocd RAM load failed)\n" "$name"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
@@ -132,10 +155,12 @@ run_net_hw_test() {
     fi
 
     echo "-- $name --"
-    if sudo python3 "$test_script"; then
+    if sudo python3 "$test_script" > >(tee "$artifact_dir/host.log") 2>&1; then
+        stop_uart_capture
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else
+        stop_uart_capture
         printf "${RED}FAIL${RST}  %s\n" "$name"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
@@ -153,32 +178,35 @@ run_net_hw_test() {
 # the RAM-execution path every other test here uses.
 run_net_hw_test_flash() {
     local name="$1" bin="$2" test_script="$3"
-    local tmp_flash_log
-    tmp_flash_log=$(mktemp)
+    local artifact_dir tmp_flash_log
+    prepare_artifact_dir "$HWTEST_ARTIFACT_ROOT" "$name"
+    artifact_dir="$ARTIFACT_DIR"
+    tmp_flash_log="$artifact_dir/flash-write.log"
 
     if ! st-flash --connect-under-reset write "$bin" "$FLASH_ADDR" > "$tmp_flash_log" 2>&1; then
         printf "${RED}FAIL${RST}  %s  (st-flash write failed)\n" "$name"
         sed 's/^/       /' "$tmp_flash_log"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
-        rm -f "$tmp_flash_log"
         return
     fi
-    if ! st-flash --connect-under-reset reset > "$tmp_flash_log" 2>&1; then
+    start_uart_capture "$artifact_dir"
+    if ! st-flash --connect-under-reset reset > "$artifact_dir/flash-reset.log" 2>&1; then
+        stop_uart_capture
         printf "${RED}FAIL${RST}  %s  (st-flash reset failed)\n" "$name"
-        sed 's/^/       /' "$tmp_flash_log"
+        sed 's/^/       /' "$artifact_dir/flash-reset.log"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
-        rm -f "$tmp_flash_log"
         return
     fi
-    rm -f "$tmp_flash_log"
 
     echo "-- $name --"
-    if sudo python3 "$test_script"; then
+    if sudo python3 "$test_script" > >(tee "$artifact_dir/host.log") 2>&1; then
+        stop_uart_capture
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else
+        stop_uart_capture
         printf "${RED}FAIL${RST}  %s\n" "$name"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
@@ -207,7 +235,9 @@ run_net_hw_test_flash "http_server (stm32/flash)" examples/http_server/kernel_st
 # the milestone (--forbid-trap deliberately off for now).
 sdcard_content_dir="examples/sdcard_content"
 sdcard_name="http_server_sdcard (stm32/ram)"
-sdcard_provision_log=$(mktemp)
+prepare_artifact_dir "$HWTEST_ARTIFACT_ROOT" "$sdcard_name"
+sdcard_artifact_dir="$ARTIFACT_DIR"
+sdcard_provision_log="$sdcard_artifact_dir/provision.log"
 if ! bash scripts/provision_http_server_sdcard.sh \
         examples/http_server_sdcard_install/kernel_stm32_ram.elf \
         "$sdcard_content_dir" > "$sdcard_provision_log" 2>&1; then
@@ -215,39 +245,53 @@ if ! bash scripts/provision_http_server_sdcard.sh \
     sed 's/^/       /' "$sdcard_provision_log"
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("$sdcard_name")
-elif ! ram_load_and_run examples/http_server_sdcard/kernel_stm32_ram.elf; then
-    printf "${RED}FAIL${RST}  %s  (openocd RAM load failed)\n" "$sdcard_name"
-    FAIL=$((FAIL + 1))
-    FAILED_TESTS+=("$sdcard_name")
 else
-    # SDCARD_CONTENT_DIR must be passed on sudo's OWN command line (not
-    # just exported in this shell) -- sudo's default env_reset strips
-    # ordinary environment variables that aren't in env_keep, confirmed
-    # empirically before writing this.
-    echo "-- $sdcard_name --"
-    if sudo SDCARD_CONTENT_DIR="$sdcard_content_dir" \
-            python3 scripts/eth_http_server_sdcard_test.py; then
-        printf "${GRN}PASS${RST}  %s\n" "$sdcard_name"
-        PASS=$((PASS + 1))
-    else
-        printf "${RED}FAIL${RST}  %s\n" "$sdcard_name"
+    start_uart_capture "$sdcard_artifact_dir"
+    if ! ram_load_and_run examples/http_server_sdcard/kernel_stm32_ram.elf "$sdcard_artifact_dir/loader.log"; then
+        stop_uart_capture
+        printf "${RED}FAIL${RST}  %s  (openocd RAM load failed)\n" "$sdcard_name"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$sdcard_name")
+    else
+        # SDCARD_CONTENT_DIR must be passed on sudo's OWN command line (not
+        # just exported in this shell) -- sudo's default env_reset strips
+        # ordinary environment variables that aren't in env_keep, confirmed
+        # empirically before writing this.
+        echo "-- $sdcard_name --"
+        if sudo SDCARD_CONTENT_DIR="$sdcard_content_dir" \
+                python3 scripts/eth_http_server_sdcard_test.py \
+                > >(tee "$sdcard_artifact_dir/host.log") 2>&1; then
+            stop_uart_capture
+            printf "${GRN}PASS${RST}  %s\n" "$sdcard_name"
+            PASS=$((PASS + 1))
+        else
+            stop_uart_capture
+            printf "${RED}FAIL${RST}  %s\n" "$sdcard_name"
+            FAIL=$((FAIL + 1))
+            FAILED_TESTS+=("$sdcard_name")
+        fi
     fi
 fi
 
 sdcard_rtos_name="http_server_sdcard_rtos (stm32/ram)"
-if ! ram_load_and_run examples/http_server_sdcard_rtos/kernel_stm32_ram.elf; then
+prepare_artifact_dir "$HWTEST_ARTIFACT_ROOT" "$sdcard_rtos_name"
+sdcard_rtos_artifact_dir="$ARTIFACT_DIR"
+start_uart_capture "$sdcard_rtos_artifact_dir"
+if ! ram_load_and_run examples/http_server_sdcard_rtos/kernel_stm32_ram.elf "$sdcard_rtos_artifact_dir/loader.log"; then
+    stop_uart_capture
     printf "${RED}FAIL${RST}  %s  (openocd RAM load failed)\n" "$sdcard_rtos_name"
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("$sdcard_rtos_name")
 else
     echo "-- $sdcard_rtos_name --"
     if sudo SDCARD_CONTENT_DIR="$sdcard_content_dir" \
-            python3 scripts/eth_http_server_sdcard_test.py; then
+            python3 scripts/eth_http_server_sdcard_test.py \
+            > >(tee "$sdcard_rtos_artifact_dir/host.log") 2>&1; then
+        stop_uart_capture
         printf "${GRN}PASS${RST}  %s\n" "$sdcard_rtos_name"
         PASS=$((PASS + 1))
     else
+        stop_uart_capture
         printf "${RED}FAIL${RST}  %s\n" "$sdcard_rtos_name"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$sdcard_rtos_name")
@@ -265,30 +309,38 @@ fi
 # command line (see the comment above), which that shared helper's plain
 # `sudo python3` call does not do.
 sdcard_flash_name="http_server_sdcard (stm32/flash)"
-tmp_sdcard_flash_log=$(mktemp)
+prepare_artifact_dir "$HWTEST_ARTIFACT_ROOT" "$sdcard_flash_name"
+sdcard_flash_artifact_dir="$ARTIFACT_DIR"
+tmp_sdcard_flash_log="$sdcard_flash_artifact_dir/flash-write.log"
 if ! st-flash --connect-under-reset write examples/http_server_sdcard/kernel_stm32.bin "$FLASH_ADDR" > "$tmp_sdcard_flash_log" 2>&1; then
     printf "${RED}FAIL${RST}  %s  (st-flash write failed)\n" "$sdcard_flash_name"
     sed 's/^/       /' "$tmp_sdcard_flash_log"
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("$sdcard_flash_name")
-elif ! st-flash --connect-under-reset reset > "$tmp_sdcard_flash_log" 2>&1; then
-    printf "${RED}FAIL${RST}  %s  (st-flash reset failed)\n" "$sdcard_flash_name"
-    sed 's/^/       /' "$tmp_sdcard_flash_log"
-    FAIL=$((FAIL + 1))
-    FAILED_TESTS+=("$sdcard_flash_name")
 else
-    echo "-- $sdcard_flash_name --"
-    if sudo SDCARD_CONTENT_DIR="$sdcard_content_dir" \
-            python3 scripts/eth_http_server_sdcard_test.py; then
-        printf "${GRN}PASS${RST}  %s\n" "$sdcard_flash_name"
-        PASS=$((PASS + 1))
-    else
-        printf "${RED}FAIL${RST}  %s\n" "$sdcard_flash_name"
+    start_uart_capture "$sdcard_flash_artifact_dir"
+    if ! st-flash --connect-under-reset reset > "$sdcard_flash_artifact_dir/flash-reset.log" 2>&1; then
+        stop_uart_capture
+        printf "${RED}FAIL${RST}  %s  (st-flash reset failed)\n" "$sdcard_flash_name"
+        sed 's/^/       /' "$sdcard_flash_artifact_dir/flash-reset.log"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$sdcard_flash_name")
+    else
+        echo "-- $sdcard_flash_name --"
+        if sudo SDCARD_CONTENT_DIR="$sdcard_content_dir" \
+                python3 scripts/eth_http_server_sdcard_test.py \
+                > >(tee "$sdcard_flash_artifact_dir/host.log") 2>&1; then
+            stop_uart_capture
+            printf "${GRN}PASS${RST}  %s\n" "$sdcard_flash_name"
+            PASS=$((PASS + 1))
+        else
+            stop_uart_capture
+            printf "${RED}FAIL${RST}  %s\n" "$sdcard_flash_name"
+            FAIL=$((FAIL + 1))
+            FAILED_TESTS+=("$sdcard_flash_name")
+        fi
     fi
 fi
-rm -f "$tmp_sdcard_flash_log" "$sdcard_provision_log"
 
 # kvs_server_sdcard_rtos (GitHub issue #135 STM32 milestone): real Ethernet
 # + real SD-card persistence through FAT12 + RTOS task separation, landed
@@ -311,29 +363,43 @@ rm -f "$tmp_sdcard_flash_log" "$sdcard_provision_log"
 # SD card physically untouched) proves that key is still readable, i.e.
 # it survived a real reset, not just a RAM lifetime.
 kvs_rtos_name="kvs_server_sdcard_rtos (stm32/ram)"
-if ! ram_load_and_run examples/kvs_server_sdcard_rtos/kernel_stm32_ram.elf; then
+prepare_artifact_dir "$HWTEST_ARTIFACT_ROOT" "$kvs_rtos_name"
+kvs_rtos_artifact_dir="$ARTIFACT_DIR"
+start_uart_capture "$kvs_rtos_artifact_dir" uart-boot1.log
+if ! ram_load_and_run examples/kvs_server_sdcard_rtos/kernel_stm32_ram.elf "$kvs_rtos_artifact_dir/loader-boot1.log"; then
+    stop_uart_capture
     printf "${RED}FAIL${RST}  %s  (openocd RAM load failed, boot 1)\n" "$kvs_rtos_name"
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("$kvs_rtos_name")
 else
     echo "-- $kvs_rtos_name --"
-    if ! sudo python3 scripts/eth_kvs_server_stm32_test.py; then
+    if ! sudo python3 scripts/eth_kvs_server_stm32_test.py \
+            > >(tee "$kvs_rtos_artifact_dir/host-boot1.log") 2>&1; then
+        stop_uart_capture
         printf "${RED}FAIL${RST}  %s  (protocol test failed, boot 1)\n" "$kvs_rtos_name"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$kvs_rtos_name")
-    elif ! ram_load_and_run examples/kvs_server_sdcard_rtos/kernel_stm32_ram.elf; then
-        printf "${RED}FAIL${RST}  %s  (openocd RAM load failed, boot 2)\n" "$kvs_rtos_name"
-        FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("$kvs_rtos_name")
     else
-        echo "-- $kvs_rtos_name (persistence-survives-reset check) --"
-        if sudo KVS_TEST_PHASE=verify_persistence python3 scripts/eth_kvs_server_stm32_test.py; then
-            printf "${GRN}PASS${RST}  %s\n" "$kvs_rtos_name"
-            PASS=$((PASS + 1))
-        else
-            printf "${RED}FAIL${RST}  %s\n" "$kvs_rtos_name"
+        stop_uart_capture
+        start_uart_capture "$kvs_rtos_artifact_dir" uart-boot2.log
+        if ! ram_load_and_run examples/kvs_server_sdcard_rtos/kernel_stm32_ram.elf "$kvs_rtos_artifact_dir/loader-boot2.log"; then
+            stop_uart_capture
+            printf "${RED}FAIL${RST}  %s  (openocd RAM load failed, boot 2)\n" "$kvs_rtos_name"
             FAIL=$((FAIL + 1))
             FAILED_TESTS+=("$kvs_rtos_name")
+        else
+            echo "-- $kvs_rtos_name (persistence-survives-reset check) --"
+            if sudo KVS_TEST_PHASE=verify_persistence python3 scripts/eth_kvs_server_stm32_test.py \
+                    > >(tee "$kvs_rtos_artifact_dir/host-boot2.log") 2>&1; then
+                stop_uart_capture
+                printf "${GRN}PASS${RST}  %s\n" "$kvs_rtos_name"
+                PASS=$((PASS + 1))
+            else
+                stop_uart_capture
+                printf "${RED}FAIL${RST}  %s\n" "$kvs_rtos_name"
+                FAIL=$((FAIL + 1))
+                FAILED_TESTS+=("$kvs_rtos_name")
+            fi
         fi
     fi
 fi

@@ -27,6 +27,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SERIAL_DEV="${RPI3_SERIAL_DEV:-$("$REPO_ROOT/scripts/rpi_uart_dev.sh")}"
+BAUD=115200
 export ETH_TEST_IFACE="${ETH_TEST_IFACE:-enp5s0}"
 # scripts/eth_arp_reply_test.py and scripts/eth_icmp_echo_test.py default
 # to STM32's own subnet/MAC (examples/common_stm32/netconfig.tkb) --
@@ -40,6 +42,32 @@ export ETH_TEST_MAC="${ETH_TEST_MAC:-02:00:20:00:00:02}"
 HWTEST_ARTIFACT_ROOT="${RPI3_NET_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/hwtest-rpi3-net}"
 mkdir -p "$HWTEST_ARTIFACT_ROOT"
 exec > >(tee "$HWTEST_ARTIFACT_ROOT/run.log") 2>&1
+
+# shellcheck source=scripts/test_artifacts.sh
+source "$REPO_ROOT/scripts/test_artifacts.sh"
+
+if [ -z "$SERIAL_DEV" ] || [ ! -e "$SERIAL_DEV" ]; then
+    echo "error: could not resolve the Raspberry Pi UART device (found: '$SERIAL_DEV')" >&2
+    exit 1
+fi
+stty -F "$SERIAL_DEV" "$BAUD" raw -echo
+
+ACTIVE_UART_PID=""
+start_uart_capture() {
+    local artifact_dir="$1" filename="${2:-uart.log}"
+    timeout 0.25 cat "$SERIAL_DEV" > /dev/null 2>&1 || true
+    cat "$SERIAL_DEV" > "$artifact_dir/$filename" &
+    ACTIVE_UART_PID=$!
+}
+stop_uart_capture() {
+    if [ -n "$ACTIVE_UART_PID" ]; then
+        kill "$ACTIVE_UART_PID" 2>/dev/null || true
+        wait "$ACTIVE_UART_PID" 2>/dev/null || true
+        ACTIVE_UART_PID=""
+    fi
+}
+trap stop_uart_capture EXIT
+trap 'stop_uart_capture; exit 130' INT TERM HUP
 
 PASS=0
 FAIL=0
@@ -94,25 +122,28 @@ SDCARD_RTOS_SETTLE_SECS=10
 # way costs the whole suite a few extra minutes in exchange for
 # eliminating a recurring class of false alarms.
 reset_before_test() {
-    local name="$1"
-    local reset_log
-    reset_log=$(mktemp)
+    local name="$1" artifact_dir="$2" filename="${3:-reset.log}"
+    local reset_log="$artifact_dir/$filename"
     if ! "$REPO_ROOT/scripts/rpi3_jtag_reset.sh" > "$reset_log" 2>&1; then
         printf "${RED}FAIL${RST}  %s  (JTAG reset failed -- log follows)\n" "$name"
         sed 's/^/       /' "$reset_log"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
-        rm -f "$reset_log"
         return 1
     fi
-    rm -f "$reset_log"
 }
 
 run_rpi3_net_test() {
     local name="$1" elf="$2" test_script="$3"
+    local artifact_dir
 
-    reset_before_test "$name" || return
-    if ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$elf" > /dev/null; then
+    prepare_artifact_dir "$HWTEST_ARTIFACT_ROOT" "$name"
+    artifact_dir="$ARTIFACT_DIR"
+
+    reset_before_test "$name" "$artifact_dir" || return
+    start_uart_capture "$artifact_dir"
+    if ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$elf" > "$artifact_dir/loader.log" 2>&1; then
+        stop_uart_capture
         printf "${RED}FAIL${RST}  %s  (JTAG injection failed -- see\n" "$name"
         printf "       examples/common_rpi3/AGENTS.md; likely needs a power cycle to\n"
         printf "       examples/common_rpi3/jtag_stub.img)\n"
@@ -130,10 +161,13 @@ run_rpi3_net_test() {
     # frame times out against the wrong wire. Confirmed the hard way:
     # this exact omission produced a 100%-fail run indistinguishable at
     # first glance from a genuine board-side bug.
-    if sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" ETH_TEST_MAC="$ETH_TEST_MAC" python3 "$test_script"; then
+    if sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" ETH_TEST_MAC="$ETH_TEST_MAC" python3 "$test_script" \
+            > >(tee "$artifact_dir/host.log") 2>&1; then
+        stop_uart_capture
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
     else
+        stop_uart_capture
         printf "${RED}FAIL${RST}  %s\n" "$name"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
@@ -159,8 +193,10 @@ run_rpi3_net_test "kvs_server (rpi3)"  "$REPO_ROOT/examples/kvs_server/kernel_rp
 # above.
 sdcard_name="http_server_sdcard (rpi3)"
 sdcard_content_dir="$REPO_ROOT/examples/sdcard_content"
-sdcard_provision_log=$(mktemp)
-if ! reset_before_test "$sdcard_name"; then
+prepare_artifact_dir "$HWTEST_ARTIFACT_ROOT" "$sdcard_name"
+sdcard_artifact_dir="$ARTIFACT_DIR"
+sdcard_provision_log="$sdcard_artifact_dir/provision.log"
+if ! reset_before_test "$sdcard_name" "$sdcard_artifact_dir" reset-provision.log; then
     :
 elif ! bash "$REPO_ROOT/scripts/rpi3_provision_http_server_sdcard.sh" \
         "$REPO_ROOT/examples/http_server_sdcard_install/kernel_rpi3.elf" \
@@ -169,31 +205,38 @@ elif ! bash "$REPO_ROOT/scripts/rpi3_provision_http_server_sdcard.sh" \
     sed 's/^/       /' "$sdcard_provision_log"
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("$sdcard_name")
-elif ! reset_before_test "$sdcard_name"; then
+elif ! reset_before_test "$sdcard_name" "$sdcard_artifact_dir" reset.log; then
     # Provisioning ran its own firmware payload. Reset again so the
     # server load below, like every other example load in this suite,
     # starts from jtag_stub rather than inheriting the installer's CPU,
     # cache, interrupt-controller, or DWC2 state. The warm SoC reset
     # deliberately preserves the USB drive content just provisioned.
     :
-elif ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/http_server_sdcard/kernel_rpi3.elf" > /dev/null; then
+else
+    start_uart_capture "$sdcard_artifact_dir"
+    if ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/http_server_sdcard/kernel_rpi3.elf" \
+            > "$sdcard_artifact_dir/loader.log" 2>&1; then
+        stop_uart_capture
     printf "${RED}FAIL${RST}  %s  (JTAG injection failed)\n" "$sdcard_name"
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("$sdcard_name")
-else
-    sleep "$SETTLE_SECS"
-    echo "-- $sdcard_name --"
-    if sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
-            SDCARD_CONTENT_DIR="$sdcard_content_dir" python3 "$REPO_ROOT/scripts/eth_http_server_sdcard_test.py"; then
-        printf "${GRN}PASS${RST}  %s\n" "$sdcard_name"
-        PASS=$((PASS + 1))
     else
-        printf "${RED}FAIL${RST}  %s\n" "$sdcard_name"
-        FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("$sdcard_name")
+        sleep "$SETTLE_SECS"
+        echo "-- $sdcard_name --"
+        if sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
+                SDCARD_CONTENT_DIR="$sdcard_content_dir" python3 "$REPO_ROOT/scripts/eth_http_server_sdcard_test.py" \
+                > >(tee "$sdcard_artifact_dir/host.log") 2>&1; then
+            stop_uart_capture
+            printf "${GRN}PASS${RST}  %s\n" "$sdcard_name"
+            PASS=$((PASS + 1))
+        else
+            stop_uart_capture
+            printf "${RED}FAIL${RST}  %s\n" "$sdcard_name"
+            FAIL=$((FAIL + 1))
+            FAILED_TESTS+=("$sdcard_name")
+        fi
     fi
 fi
-rm -f "$sdcard_provision_log"
 
 # http_server_sdcard_rtos (rpi3): same real SD-card-served HTTP content
 # as http_server_sdcard above, but SD/FAT operations run behind a Simple
@@ -202,23 +245,33 @@ rm -f "$sdcard_provision_log"
 # http_server_sdcard test above just provisioned, no separate
 # provisioning step needed.
 sdcard_rtos_name="http_server_sdcard_rtos (rpi3)"
-if ! reset_before_test "$sdcard_rtos_name"; then
+prepare_artifact_dir "$HWTEST_ARTIFACT_ROOT" "$sdcard_rtos_name"
+sdcard_rtos_artifact_dir="$ARTIFACT_DIR"
+if ! reset_before_test "$sdcard_rtos_name" "$sdcard_rtos_artifact_dir"; then
     :
-elif ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/http_server_sdcard_rtos/kernel_rpi3.elf" > /dev/null; then
+else
+    start_uart_capture "$sdcard_rtos_artifact_dir"
+    if ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/http_server_sdcard_rtos/kernel_rpi3.elf" \
+            > "$sdcard_rtos_artifact_dir/loader.log" 2>&1; then
+        stop_uart_capture
     printf "${RED}FAIL${RST}  %s  (JTAG injection failed)\n" "$sdcard_rtos_name"
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("$sdcard_rtos_name")
-else
-    sleep "$SDCARD_RTOS_SETTLE_SECS"
-    echo "-- $sdcard_rtos_name --"
-    if sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
-            SDCARD_CONTENT_DIR="$sdcard_content_dir" python3 "$REPO_ROOT/scripts/eth_http_server_sdcard_test.py"; then
-        printf "${GRN}PASS${RST}  %s\n" "$sdcard_rtos_name"
-        PASS=$((PASS + 1))
     else
-        printf "${RED}FAIL${RST}  %s\n" "$sdcard_rtos_name"
-        FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("$sdcard_rtos_name")
+        sleep "$SDCARD_RTOS_SETTLE_SECS"
+        echo "-- $sdcard_rtos_name --"
+        if sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
+                SDCARD_CONTENT_DIR="$sdcard_content_dir" python3 "$REPO_ROOT/scripts/eth_http_server_sdcard_test.py" \
+                > >(tee "$sdcard_rtos_artifact_dir/host.log") 2>&1; then
+            stop_uart_capture
+            printf "${GRN}PASS${RST}  %s\n" "$sdcard_rtos_name"
+            PASS=$((PASS + 1))
+        else
+            stop_uart_capture
+            printf "${RED}FAIL${RST}  %s\n" "$sdcard_rtos_name"
+            FAIL=$((FAIL + 1))
+            FAILED_TESTS+=("$sdcard_rtos_name")
+        fi
     fi
 fi
 
@@ -236,35 +289,59 @@ fi
 # decoupling) followed by boot 2 (KVS_TEST_PHASE=verify_persistence)
 # proves that key survived a real reset, not just RAM lifetime.
 kvs_rtos_name="kvs_server_sdcard_rtos (rpi3)"
-if ! reset_before_test "$kvs_rtos_name"; then
+prepare_artifact_dir "$HWTEST_ARTIFACT_ROOT" "$kvs_rtos_name"
+kvs_rtos_artifact_dir="$ARTIFACT_DIR"
+if ! reset_before_test "$kvs_rtos_name" "$kvs_rtos_artifact_dir" reset-boot1.log; then
     :
-elif ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/kvs_server_sdcard_rtos/kernel_rpi3.elf" > /dev/null; then
+else
+    start_uart_capture "$kvs_rtos_artifact_dir" uart-boot1.log
+    if ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/kvs_server_sdcard_rtos/kernel_rpi3.elf" \
+            > "$kvs_rtos_artifact_dir/loader-boot1.log" 2>&1; then
+        stop_uart_capture
     printf "${RED}FAIL${RST}  %s  (JTAG injection failed, boot 1)\n" "$kvs_rtos_name"
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("$kvs_rtos_name")
-else
-    sleep "$SDCARD_RTOS_SETTLE_SECS"
-    echo "-- $kvs_rtos_name --"
-    if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" python3 "$REPO_ROOT/scripts/eth_kvs_server_stm32_test.py"; then
+    else
+        sleep "$SDCARD_RTOS_SETTLE_SECS"
+        echo "-- $kvs_rtos_name --"
+        if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
+                python3 "$REPO_ROOT/scripts/eth_kvs_server_stm32_test.py" \
+                > >(tee "$kvs_rtos_artifact_dir/host-boot1.log") 2>&1; then
+            stop_uart_capture
         printf "${RED}FAIL${RST}  %s  (protocol test failed, boot 1)\n" "$kvs_rtos_name"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$kvs_rtos_name")
-    elif ! bash "$REPO_ROOT/scripts/rpi3_jtag_reset.sh" > /dev/null || \
-         ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/kvs_server_sdcard_rtos/kernel_rpi3.elf" > /dev/null; then
+        else
+            stop_uart_capture
+            if ! reset_before_test "$kvs_rtos_name" "$kvs_rtos_artifact_dir" reset-boot2.log; then
         printf "${RED}FAIL${RST}  %s  (reset/reinjection failed, boot 2)\n" "$kvs_rtos_name"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$kvs_rtos_name")
-    else
-        sleep "$SDCARD_RTOS_SETTLE_SECS"
-        echo "-- $kvs_rtos_name (persistence-survives-reset check) --"
-        if sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
-                KVS_TEST_PHASE=verify_persistence python3 "$REPO_ROOT/scripts/eth_kvs_server_stm32_test.py"; then
+            else
+                start_uart_capture "$kvs_rtos_artifact_dir" uart-boot2.log
+                if ! bash "$REPO_ROOT/scripts/rpi3_jtag_load.sh" "$REPO_ROOT/examples/kvs_server_sdcard_rtos/kernel_rpi3.elf" \
+                        > "$kvs_rtos_artifact_dir/loader-boot2.log" 2>&1; then
+                    stop_uart_capture
+                    printf "${RED}FAIL${RST}  %s  (reset/reinjection failed, boot 2)\n" "$kvs_rtos_name"
+                    FAIL=$((FAIL + 1))
+                    FAILED_TESTS+=("$kvs_rtos_name")
+                else
+                    sleep "$SDCARD_RTOS_SETTLE_SECS"
+                    echo "-- $kvs_rtos_name (persistence-survives-reset check) --"
+                    if sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
+                            KVS_TEST_PHASE=verify_persistence python3 "$REPO_ROOT/scripts/eth_kvs_server_stm32_test.py" \
+                            > >(tee "$kvs_rtos_artifact_dir/host-boot2.log") 2>&1; then
+                        stop_uart_capture
             printf "${GRN}PASS${RST}  %s\n" "$kvs_rtos_name"
             PASS=$((PASS + 1))
-        else
+                    else
+                        stop_uart_capture
             printf "${RED}FAIL${RST}  %s\n" "$kvs_rtos_name"
             FAIL=$((FAIL + 1))
             FAILED_TESTS+=("$kvs_rtos_name")
+                    fi
+                fi
+            fi
         fi
     fi
 fi

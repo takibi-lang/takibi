@@ -5,6 +5,14 @@ sanitize_artifact_name() {
     printf '%s' "$1" | tr -cs 'A-Za-z0-9._-' '_'
 }
 
+prepare_artifact_dir() {
+    local root="$1" name="$2" safe_name
+
+    safe_name=$(sanitize_artifact_name "$name")
+    ARTIFACT_DIR="$root/$safe_name"
+    mkdir -p "$ARTIFACT_DIR"
+}
+
 save_artifact_file() {
     local root="$1" name="$2" src="$3" dest_name="${4:-uart.log}"
     local safe_name artifact_dir
