@@ -196,7 +196,8 @@ type func = {
   ret_type : type_expr option;
   effects : ident list option;
   (* Checker effect contract. None means inferred/unannotated; Some [] is
-     an explicit non-blocking contract; `interrupt` marks a checked root. *)
+     an explicit non-blocking contract; `interrupt` and `exception` mark
+     declaration roots whose contracts are checked separately. *)
   body : stmt list;
   is_inline : bool;
   def_loc : loc [@printer pp_loc];  (* location of the "fn" keyword -- used for DWARF DISubprogram *)

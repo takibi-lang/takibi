@@ -3630,13 +3630,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let validate_effects ~allow_interrupt loc kind name effects =
     let seen = ref StringSet.empty in
     List.iter (fun eff ->
-      if eff <> "may_block" && eff <> "interrupt" then
+      if eff <> "may_block" && eff <> "interrupt" && eff <> "exception" then
         raise (TypeError (loc, Printf.sprintf
-          "unknown effect '%s' on %s '%s'; supported effects are may_block and interrupt"
+          "unknown effect '%s' on %s '%s'; supported effects are may_block, interrupt, and exception"
           eff kind name));
-      if eff = "interrupt" && not allow_interrupt then
+      if (eff = "interrupt" || eff = "exception") && not allow_interrupt then
         raise (TypeError (loc,
-          "'interrupt' is a function declaration role, not a function-pointer call effect"));
+          Printf.sprintf "'%s' is a function declaration role, not a function-pointer call effect" eff));
       if StringSet.mem eff !seen then
         raise (TypeError (loc, Printf.sprintf
           "duplicate effect '%s' on %s '%s'" eff kind name));
@@ -3644,7 +3644,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     ) effects;
     if StringSet.mem "may_block" !seen && StringSet.mem "interrupt" !seen then
       raise (TypeError (loc, Printf.sprintf
-        "%s '%s' cannot be both interrupt and may_block" kind name))
+        "%s '%s' cannot be both interrupt and may_block" kind name));
+    if StringSet.mem "interrupt" !seen && StringSet.mem "exception" !seen then
+      raise (TypeError (loc, Printf.sprintf
+        "%s '%s' cannot be both interrupt and exception" kind name))
   in
   let validate_static_application loc kind name formals args =
     if List.length args <> List.length formals then
@@ -4132,9 +4135,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         Option.iter (fun effects ->
           validate_effects ~allow_interrupt:true Lexing.dummy_pos
             "extern function" name effects;
-          if List.mem "interrupt" effects then
+          if List.mem "interrupt" effects || List.mem "exception" effects then
             raise (TypeError (Lexing.dummy_pos, Printf.sprintf
-              "extern function '%s' cannot be an interrupt root because it has no body to check"
+              "extern function '%s' cannot be an interrupt or exception root because it has no body to check"
               name))
         ) effects;
         validation_static_scope := Some (Hashtbl.create 8);
@@ -5721,8 +5724,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   List.iter (function Ast.FuncDef f -> check_affine_func f | _ -> ()) prog;
   (* Effects are checker-only facts. `may_block` is a transitive property of
-     direct calls and effect-contracted indirect calls; `interrupt` is a root
-     assertion that the reachable graph is non-blocking. An unannotated
+     direct calls and effect-contracted indirect calls; `interrupt` and
+     `exception` are declaration roots. Their root contracts are checked
+     separately. An unannotated
      function-pointer type remains unknown and is rejected below a checked
      non-blocking root rather than guessed safe. *)
   let (declared_effects, effect_names, effect_locs) =
@@ -5918,6 +5922,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     in
     let effects =
       (if List.mem "interrupt" declared then ["interrupt"] else [])
+      @ (if List.mem "exception" declared then ["exception"] else [])
       @ (if StringSet.mem key may_block then ["may_block"] else [])
     in
     { info with effects }

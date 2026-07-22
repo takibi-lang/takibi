@@ -356,11 +356,13 @@ let parser_tests = [
       match parse
         "extern fn parsed_wait() !{may_block};
          fn parsed_irq() !{interrupt} {}
+         fn parsed_sync() !{exception} {}
          fn parsed_nonblocking() !{} {}" with
       | [Ast.ExternFuncDef ("parsed_wait", [], None, Some ["may_block"]);
          Ast.FuncDef { name = "parsed_irq"; effects = Some ["interrupt"]; _ };
+         Ast.FuncDef { name = "parsed_sync"; effects = Some ["exception"]; _ };
          Ast.FuncDef { name = "parsed_nonblocking"; effects = Some []; _ }] -> ()
-      | _ -> Alcotest.fail "expected may_block and interrupt effect annotations");
+      | _ -> Alcotest.fail "expected checker effect annotations");
 
 
   Alcotest.test_case "empty function body" `Quick (fun () ->
@@ -5523,6 +5525,25 @@ let infer_tests = [
   Alcotest.test_case "Slice 5: interrupt is not a function-pointer call effect" `Quick
     (expect_type_error "not a function-pointer call effect"
        "fn effect_bad29(callback: fn !{interrupt}() -> void) {}");
+
+  Alcotest.test_case "Exception: declaration role is accepted" `Quick
+    (fun () ->
+      let types = infer "fn sync_handler29a() !{exception} {}" in
+      let handler = Types.StringMap.find "sync_handler29a" types.functions in
+      Alcotest.(check (list string)) "handler effects"
+        ["exception"] handler.effects);
+
+  Alcotest.test_case "Exception: role is not a function-pointer call effect" `Quick
+    (expect_type_error "not a function-pointer call effect"
+       "fn effect_bad29b(callback: fn !{exception}() -> void) {}");
+
+  Alcotest.test_case "Exception: extern cannot claim a checked root" `Quick
+    (expect_type_error "cannot be an interrupt or exception root"
+       "extern fn effect_bad29c() !{exception};");
+
+  Alcotest.test_case "Exception: root roles are mutually exclusive" `Quick
+    (expect_type_error "cannot be both interrupt and exception"
+       "fn effect_bad29d() !{interrupt, exception} {}");
 
   Alcotest.test_case "Slice 5: a cast cannot invent a non-blocking contract" `Quick
     (expect_type_error "cannot cast through an explicit function-pointer effect contract"

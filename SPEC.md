@@ -1112,7 +1112,7 @@ This is intentionally not a general borrow checker: projections and
 temporaries cannot be mutably borrowed, borrows cannot escape a direct call,
 and indexed owners still cannot live in arbitrary storage.
 
-## Blocking and Interrupt Effects (Takibi Core Slices 4-5)
+## Blocking, Interrupt, and Exception Effects (Takibi Core Slices 4-5)
 
 Checker effects are written after the return type:
 
@@ -1120,6 +1120,7 @@ Checker effects are written after the return type:
 extern fn sem_wait(s: *i32) !{may_block};
 fn mutex_lock(m: *i32 @ lock) -> MutexGuard[lock] !{may_block} { ... }
 fn IRQ_Handler() !{interrupt} { acknowledge_irq(); }
+fn Sync_Handler() !{exception} { dispatch_sync_exception(); }
 fn poll_callback() !{} { acknowledge_irq(); }
 ```
 
@@ -1128,6 +1129,12 @@ explicit annotation is therefore an API contract and a seed, not a required
 annotation on every caller. `interrupt` marks a root whose complete reachable
 direct-call graph must not contain `may_block`; `interrupt_wait()` is
 intrinsically blocking. Diagnostics include one offending call path.
+
+`exception` marks a synchronous-exception handler root. Like `interrupt`, it
+is a declaration role rather than a callable function-pointer effect, and an
+extern function cannot claim it because there is no Takibi body to check.
+The handler-specific non-blocking and non-reentrancy contracts are described
+with the exception-handler facilities below.
 
 Slice 5 adds explicit call-effect contracts to first-class function types:
 
@@ -1146,8 +1153,8 @@ fn USART1_IRQHandler() !{interrupt} {
 The row follows `fn` in a function-pointer type so it cannot be confused
 with the enclosing function declaration's postfix row. No row means
 **unknown**, not non-blocking. `!{}` is a checked non-blocking contract;
-`!{may_block}` permits blocking. `interrupt` is a declaration role and is
-not legal in a function-pointer row.
+`!{may_block}` permits blocking. `interrupt` and `exception` are declaration
+roles and are not legal in a function-pointer row.
 
 A callback's actual effects must be a subset of the destination contract. A
 non-blocking callback may therefore enter a `may_block` slot, but the reverse
