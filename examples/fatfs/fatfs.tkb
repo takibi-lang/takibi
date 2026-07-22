@@ -147,14 +147,14 @@ fn app_main() {
     // valid FAT12 image containing SEED.TXT, regardless of how they got
     // there.
     load_seed_from_host();
-    let mount_status: i32 = fat_mount();
+    let mount_status: FatIoResult = fat_mount();
     match fat_open("SEED    TXT", FA_READ) {
         FatOpenResult::Opened(mut seed_fp) => {
             let mut seed_buf: [u8; 128];
             let mut seed_br: u32 = 0;
-            let read_status: i32 = fat_read(seed_fp, seed_buf, 128, &seed_br);
-            let close_status: i32 = fat_close(seed_fp);
-            if ((read_status == 0) && (close_status == 0)) {
+            let read_status: FatIoResult = fat_read(seed_fp, seed_buf, 128, &seed_br);
+            let close_status: FatIoResult = fat_close(seed_fp);
+            if (fat_io_ok(read_status) && fat_io_ok(close_status)) {
                 uart_puts("seed read: ");
                 uart_print_bytes(seed_buf, seed_br);
             } else {
@@ -168,12 +168,12 @@ fn app_main() {
 
     // Phase 2: format the in-memory disk and create two demo files via the
     // fat_open/fat_write/fat_close API.
-    let format_status: i32 = fat_format();
+    let format_status: FatIoResult = fat_format();
     uart_puts("format: OK\r\n");
 
     let hello_name: *u8 = "HELLO   TXT";
     let hello_content: *u8 = "Hello, takibi!\r\n";
-    if (create_demo_file(hello_name, hello_content) == 0) {
+    if (fat_io_ok(create_demo_file(hello_name, hello_content))) {
         uart_puts("create HELLO.TXT: OK\r\n");
     } else {
         uart_puts("create HELLO.TXT: FAIL\r\n");
@@ -181,7 +181,7 @@ fn app_main() {
 
     let readme_name: *u8 = "README  TXT";
     let readme_content: *u8 = "fatfs demo file.\r\n";
-    if (create_demo_file(readme_name, readme_content) == 0) {
+    if (fat_io_ok(create_demo_file(readme_name, readme_content))) {
         uart_puts("create README.TXT: OK\r\n");
     } else {
         uart_puts("create README.TXT: FAIL\r\n");
@@ -198,24 +198,24 @@ fn app_main() {
                 FatOpenResult::Opened(mut readme_fp) => {
                     let mut read_buf: [u8; 64];
                     let mut hello_first_br: u32 = 0;
-                    let hello_first_status: i32 =
+                    let hello_first_status: FatIoResult =
                         fat_read(hello_fp, read_buf, 5, &hello_first_br);
 
                     let mut readme_probe: [u8; 4];
                     let mut readme_br: u32 = 0;
-                    let readme_status: i32 =
+                    let readme_status: FatIoResult =
                         fat_read(readme_fp, readme_probe, 4, &readme_br);
 
                     let mut hello_rest_br: u32 = 0;
-                    let hello_rest_status: i32 = fat_read(
+                    let hello_rest_status: FatIoResult = fat_read(
                         hello_fp, read_buf + (hello_first_br as isize),
                         59, &hello_rest_br);
-                    let readme_close_status: i32 = fat_close(readme_fp);
-                    let hello_close_status: i32 = fat_close(hello_fp);
+                    let readme_close_status: FatIoResult = fat_close(readme_fp);
+                    let hello_close_status: FatIoResult = fat_close(hello_fp);
 
-                    if ((hello_first_status == 0) && (readme_status == 0) &&
-                        (hello_rest_status == 0) && (readme_close_status == 0) &&
-                        (hello_close_status == 0)) {
+                    if (fat_io_ok(hello_first_status) && fat_io_ok(readme_status) &&
+                        fat_io_ok(hello_rest_status) && fat_io_ok(readme_close_status) &&
+                        fat_io_ok(hello_close_status)) {
                         uart_puts("read-back HELLO.TXT: ");
                         uart_print_bytes(read_buf,
                                          hello_first_br + hello_rest_br);

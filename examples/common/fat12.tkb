@@ -145,13 +145,32 @@ let mut root_dir_buf: [DirEntry; ROOT_ENTRY_COUNT] align(32);
 let mut next_free_cluster: u32;
 let mut next_free_root_entry: u32;
 
-fn fat_flush() -> i32 {
+// Status of a FAT12 I/O operation. Replaces the plain `i32` 0/-1 sentinel
+// this file used to return: a `match` on this type must name both the
+// success and failure arm, so a call site can no longer confuse this
+// return value with an unrelated integer (a byte count, a directory index)
+// the way a bare `i32` could. `fat_io_ok` below is a convenience for
+// callers that just want to fold several of these into one boolean
+// condition, the same role `Result::is_ok()` plays in Rust.
+variant FatIoResult {
+    Ok;
+    Err(i32);
+}
+
+fn fat_io_ok(r: FatIoResult) -> bool {
+    match r {
+        FatIoResult::Ok => { return true; }
+        FatIoResult::Err(err) => { return false; }
+    }
+}
+
+fn fat_flush() -> FatIoResult {
     let ffs: usize = first_fat_sector();
-    if (mem_block_write(ffs as u32, fat_buf) != 0) { return -1; }
-    if (mem_block_write((ffs + FAT_SIZE_SECTORS) as u32, fat_buf) != 0) { return -1; }
+    if (mem_block_write(ffs as u32, fat_buf) != 0) { return FatIoResult::Err(-1); }
+    if (mem_block_write((ffs + FAT_SIZE_SECTORS) as u32, fat_buf) != 0) { return FatIoResult::Err(-1); }
     if (mem_block_write(first_root_dir_sector() as u32,
-                        root_dir_buf as *align(32) u8) != 0) { return -1; }
-    return 0;
+                        root_dir_buf as *align(32) u8) != 0) { return FatIoResult::Err(-1); }
+    return FatIoResult::Ok;
 }
 
 // Syncs the in-memory fat_buf/root_dir_buf mirrors FROM disk -- the
@@ -160,11 +179,11 @@ fn fat_flush() -> i32 {
 // needed whenever storage was populated some other way (e.g.
 // load_seed_from_host() loading a foreign image) before fat_open(FA_READ)
 // can see its directory.
-fn fat_mount() -> i32 {
-    if (mem_block_read(first_fat_sector() as u32, fat_buf) != 0) { return -1; }
+fn fat_mount() -> FatIoResult {
+    if (mem_block_read(first_fat_sector() as u32, fat_buf) != 0) { return FatIoResult::Err(-1); }
     if (mem_block_read(first_root_dir_sector() as u32,
-                       root_dir_buf as *align(32) u8) != 0) { return -1; }
-    return 0;
+                       root_dir_buf as *align(32) u8) != 0) { return FatIoResult::Err(-1); }
+    return FatIoResult::Ok;
 }
 
 // FAT12 packs two 12-bit entries into 3 bytes. For an even cluster N, its
@@ -209,7 +228,7 @@ fn fat_set_entry(cluster: u32, val: u16) {
     }
 }
 
-fn fat_format() -> i32 {
+fn fat_format() -> FatIoResult {
     let mut sector_buf: [u8; SECTOR_SIZE] align(32);
     for i: usize in 0..<SECTOR_SIZE {
         sector_buf[i] = 0;
@@ -256,24 +275,27 @@ fn fat_format() -> i32 {
     // to 0 (including name[0] == 0x00) is exactly FAT's own "never used"
     // marker for a free directory entry.
 
-    if (fat_flush() != 0) { return -1; }
+    match fat_flush() {
+        FatIoResult::Ok => {}
+        FatIoResult::Err(err) => { return FatIoResult::Err(err); }
+    }
 
     let mut zero_buf: [u8; SECTOR_SIZE] align(32);
     for i: usize in 0..<SECTOR_SIZE {
         zero_buf[i] = 0;
     }
     for s: usize in first_data_sector()..<TOTAL_SECTORS {
-        if (mem_block_write(s as u32, zero_buf) != 0) { return -1; }
+        if (mem_block_write(s as u32, zero_buf) != 0) { return FatIoResult::Err(-1); }
     }
 
     // Sector 0 carries fat_format_status()'s completion signature, so commit
     // it last.  If any earlier FAT/root/data write fails, the next boot must
     // not mistake a partially formatted volume for a complete one.
-    if (mem_block_write(0, sector_buf) != 0) { return -1; }
+    if (mem_block_write(0, sector_buf) != 0) { return FatIoResult::Err(-1); }
 
     next_free_cluster = 2;
     next_free_root_entry = 0;
-    return 0;
+    return FatIoResult::Ok;
 }
 
 // Allocates num_clusters clusters as one chain, terminated with the FAT12
@@ -331,15 +353,22 @@ fn fat_free_chain(start_cluster: u32) {
 // a blank/foreign card, without parsing the rest of the BPB. Not a general
 // "is this a valid FAT filesystem" check (see this file's header comment
 // on why dynamic BPB parsing/mounting a foreign image stays out of scope).
-// Returns 1 when the signature is present, 0 when it is absent, and -1 on
-// block I/O failure.  Keeping the error distinct is essential: treating a
-// transient read failure as an unformatted disk would make callers format
-// media that may contain valid data.
-fn fat_format_status() -> i32 {
+// Reports Formatted/NotFormatted/IoError as three distinct cases (rather
+// than folding them into 1/0/-1) so a caller's `match` cannot conflate a
+// transient read failure with a genuinely unformatted disk -- treating the
+// former as the latter would make callers format media that may contain
+// valid data.
+variant FatFormatStatus {
+    IoError(i32);
+    NotFormatted;
+    Formatted;
+}
+
+fn fat_format_status() -> FatFormatStatus {
     let mut sector_buf: [u8; SECTOR_SIZE] align(32);
-    if (mem_block_read(0, sector_buf) != 0) { return -1; }
-    if (sector_buf[510] == 0x55 && sector_buf[511] == 0xAA) { return 1; }
-    return 0;
+    if (mem_block_read(0, sector_buf) != 0) { return FatFormatStatus::IoError(-1); }
+    if (sector_buf[510] == 0x55 && sector_buf[511] == 0xAA) { return FatFormatStatus::Formatted; }
+    return FatFormatStatus::NotFormatted;
 }
 
 // -- File-handle API (fat_open/fat_read/fat_write/fat_close), FatFs-flavored ---
@@ -419,14 +448,14 @@ fn fat_file_size(name83: *u8) -> u32 {
 // "reopen and read-discard from byte 0" loop when a large response is sent
 // one TCP segment at a time.
 fn fat_read_at(name83: *u8, off: u32, buf: borrow *u8, btr: u32,
-        br: *u32) -> i32 {
+        br: *u32) -> FatIoResult {
     let found: i32 = fat_find_entry(name83);
     if ((found >= 0) && (found < 16)) {
         let idx: usize = found as usize;
         let fsize: u32 = root_dir_buf[idx].file_size;
         if (off >= fsize) {
             *br = 0;
-            return 0;
+            return FatIoResult::Ok;
         }
 
         let mut remaining: u32 = btr;
@@ -449,7 +478,7 @@ fn fat_read_at(name83: *u8, off: u32, buf: borrow *u8, btr: u32,
             let sector_num: u32 = (first_data_sector() as u32) + (cluster - 2);
             if (mem_block_read(sector_num, sector_buf) != 0) {
                 *br = total;
-                return -1;
+                return FatIoResult::Err(-1);
             }
 
             let space_in_cluster: u32 = (SECTOR_SIZE as u32) - pos_in_cluster;
@@ -470,10 +499,10 @@ fn fat_read_at(name83: *u8, off: u32, buf: borrow *u8, btr: u32,
             }
         }
         *br = total;
-        return 0;
+        return FatIoResult::Ok;
     }
     *br = 0;
-    return -1;
+    return FatIoResult::Err(-1);
 }
 
 // Existing-file, fixed-position overwrite helper. This deliberately does
@@ -481,14 +510,14 @@ fn fat_read_at(name83: *u8, off: u32, buf: borrow *u8, btr: u32,
 // create it with fat_open(FA_WRITE | FA_CREATE_ALWAYS) first, then use this
 // to replace bytes in place.
 fn fat_write_at(name83: *u8, off: u32, buf: borrow *u8, btw: u32,
-        bw: *u32) -> i32 {
+        bw: *u32) -> FatIoResult {
     let found: i32 = fat_find_entry(name83);
     if ((found >= 0) && (found < 16)) {
         let idx: usize = found as usize;
         let fsize: u32 = root_dir_buf[idx].file_size;
         if (off >= fsize) {
             *bw = 0;
-            return -1;
+            return FatIoResult::Err(-1);
         }
 
         let mut remaining: u32 = btw;
@@ -511,7 +540,7 @@ fn fat_write_at(name83: *u8, off: u32, buf: borrow *u8, btw: u32,
             let sector_num: u32 = (first_data_sector() as u32) + (cluster - 2);
             if (mem_block_read(sector_num, sector_buf) != 0) {
                 *bw = total;
-                return -1;
+                return FatIoResult::Err(-1);
             }
 
             let space_in_cluster: u32 = (SECTOR_SIZE as u32) - pos_in_cluster;
@@ -524,7 +553,7 @@ fn fat_write_at(name83: *u8, off: u32, buf: borrow *u8, btw: u32,
             bytes_copy(dst_p + (pos_in_cluster as isize), src, chunk as isize);
             if (mem_block_write(sector_num, sector_buf) != 0) {
                 *bw = total;
-                return -1;
+                return FatIoResult::Err(-1);
             }
             src = src + (chunk as isize);
             total = total + chunk;
@@ -537,12 +566,12 @@ fn fat_write_at(name83: *u8, off: u32, buf: borrow *u8, btw: u32,
         }
         *bw = total;
         if (total == btw) {
-            return 0;
+            return FatIoResult::Ok;
         }
-        return -1;
+        return FatIoResult::Err(-1);
     }
     *bw = 0;
-    return -1;
+    return FatIoResult::Err(-1);
 }
 
 // Resets directory slot idx to a fresh, empty entry for name83. Shared by
@@ -625,7 +654,7 @@ fn fat_open(name83: *u8, mode: i32) -> FatOpenResult {
 // Reads up to btr bytes into buf, following the cluster chain as needed.
 // *br is set to the actual number of bytes read (less than btr at EOF --
 // that is normal, not an error).
-fn fat_read(fp: borrow mut FatFile[file], buf: *u8, btr: u32, br: *u32) -> i32 {
+fn fat_read(fp: borrow mut FatFile[file], buf: *u8, btr: u32, br: *u32) -> FatIoResult {
     let avail: u32 = fp.fsize - fp.fptr;
     let mut remaining: u32 = btr;
     if (remaining > avail) {
@@ -638,7 +667,7 @@ fn fat_read(fp: borrow mut FatFile[file], buf: *u8, btr: u32, br: *u32) -> i32 {
         let sector_num: u32 = (first_data_sector() as u32) + (fp.cur_cluster - 2);
         if (mem_block_read(sector_num, sector_buf) != 0) {
             *br = total;
-            return -1;
+            return FatIoResult::Err(-1);
         }
         let space_in_cluster: u32 = (SECTOR_SIZE as u32) - fp.pos_in_cluster;
         let mut chunk: u32 = remaining;
@@ -658,7 +687,7 @@ fn fat_read(fp: borrow mut FatFile[file], buf: *u8, btr: u32, br: *u32) -> i32 {
         }
     }
     *br = total;
-    return 0;
+    return FatIoResult::Ok;
 }
 
 // Writes btw bytes from buf, growing the file (sequential append only, no
@@ -666,7 +695,7 @@ fn fat_read(fp: borrow mut FatFile[file], buf: *u8, btr: u32, br: *u32) -> i32 {
 // one whenever the current cluster fills and more data remains. Each
 // cluster's sector is read-modify-written so multiple fat_write calls into
 // the same (still-open) cluster don't clobber each other's bytes.
-fn fat_write(fp: borrow mut FatFile[file], buf: *u8, btw: u32, bw: *u32) -> i32 {
+fn fat_write(fp: borrow mut FatFile[file], buf: *u8, btw: u32, bw: *u32) -> FatIoResult {
     let mut remaining: u32 = btw;
     let mut src: *u8 = buf;
     while (remaining > 0) {
@@ -674,7 +703,7 @@ fn fat_write(fp: borrow mut FatFile[file], buf: *u8, btw: u32, bw: *u32) -> i32 
             let c: u32 = fat_alloc_chain(1);
             if (c == 0) {
                 *bw = btw - remaining;
-                return -1;
+                return FatIoResult::Err(-1);
             }
             fp.start_cluster = c;
             fp.cur_cluster = c;
@@ -686,7 +715,7 @@ fn fat_write(fp: borrow mut FatFile[file], buf: *u8, btw: u32, bw: *u32) -> i32 
             // Preserve earlier bytes in this cluster before modifying it.
             if (mem_block_read(sector_num, sector_buf) != 0) {
                 *bw = btw - remaining;
-                return -1;
+                return FatIoResult::Err(-1);
             }
         }
         let space_in_cluster: u32 = (SECTOR_SIZE as u32) - fp.pos_in_cluster;
@@ -698,7 +727,7 @@ fn fat_write(fp: borrow mut FatFile[file], buf: *u8, btw: u32, bw: *u32) -> i32 
         bytes_copy(dst_p + (fp.pos_in_cluster as isize), src, chunk as isize);
         if (mem_block_write(sector_num, sector_buf) != 0) {
             *bw = btw - remaining;
-            return -1;
+            return FatIoResult::Err(-1);
         }
         src = src + (chunk as isize);
         fp.pos_in_cluster = fp.pos_in_cluster + chunk;
@@ -711,7 +740,7 @@ fn fat_write(fp: borrow mut FatFile[file], buf: *u8, btw: u32, bw: *u32) -> i32 
             let next: u32 = fat_alloc_chain(1);
             if (next == 0) {
                 *bw = btw - remaining;
-                return -1;
+                return FatIoResult::Err(-1);
             }
             fat_set_entry(fp.cur_cluster, next as u16);
             fp.cur_cluster = next;
@@ -719,20 +748,21 @@ fn fat_write(fp: borrow mut FatFile[file], buf: *u8, btw: u32, bw: *u32) -> i32 
         }
     }
     *bw = btw;
-    return 0;
+    return FatIoResult::Ok;
 }
 
-fn fat_close(fp: sink FatFile[file]) -> i32 {
+fn fat_close(fp: sink FatFile[file]) -> FatIoResult {
     // dir_index retains the range proof established by fat_open, so closing
     // needs neither a repeated runtime range guard nor a global index copy.
     if (fp.writing) {
         root_dir_buf[fp.dir_index].first_cluster_lo = fp.start_cluster as u16;
         root_dir_buf[fp.dir_index].file_size = fp.fsize;
-        if (fat_flush() != 0) {
-            return -1;
+        match fat_flush() {
+            FatIoResult::Ok => {}
+            FatIoResult::Err(err) => { return FatIoResult::Err(err); }
         }
     }
-    return 0;
+    return FatIoResult::Ok;
 }
 
 fn cstr_len(s: *u8) -> u32 {
@@ -754,15 +784,18 @@ fn uart_print_bytes(buf: *u8, n: u32) {
 // Creates name83 with the NUL-terminated content string, via
 // fat_open(create)+fat_write+fat_close -- callers share this instead of
 // repeating the three-call sequence themselves.
-fn create_demo_file(name83: *u8, content: *u8) -> i32 {
+fn create_demo_file(name83: *u8, content: *u8) -> FatIoResult {
     match fat_open(name83, FA_WRITE | FA_CREATE_ALWAYS) {
-        FatOpenResult::Error(err) => { return err; }
+        FatOpenResult::Error(err) => { return FatIoResult::Err(err); }
         FatOpenResult::Opened(mut fp) => {
             let len: u32 = cstr_len(content);
             let mut bw: u32 = 0;
-            if (fat_write(fp, content, len, &bw) != 0) {
-                fat_close(fp);
-                return -1;
+            match fat_write(fp, content, len, &bw) {
+                FatIoResult::Ok => {}
+                FatIoResult::Err(err) => {
+                    fat_close(fp);
+                    return FatIoResult::Err(err);
+                }
             }
             return fat_close(fp);
         }

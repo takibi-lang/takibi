@@ -81,7 +81,7 @@ fn http_file_size(name83: *u8) -> i32 {
 fn http_read_chunk(name83: *u8, off: u32, dst: borrow *u8,
         want: u32) -> u32 {
     let mut got: u32 = 0;
-    if (fat_read_at(name83, off, dst, want, &got) != 0) {
+    if (fat_io_ok(fat_read_at(name83, off, dst, want, &got)) == false) {
         return 0;
     }
     return got;
@@ -99,7 +99,7 @@ fn app_main() {
             slice_copy(our_ip as []u8, HTTP_SERVER_IP as []u8);
 
             let mut storage_ok: bool = true;
-            if (disk_initialize() != 0) {
+            if (disk_io_ok(disk_initialize()) == false) {
                 uart_puts("http_server_sdcard: disk_initialize FAIL\r\n");
                 storage_ok = false;
             }
@@ -110,7 +110,7 @@ fn app_main() {
             // back to a short error message rather than the server refusing
             // to answer.
             if (storage_ok) {
-                if (fat_mount() != 0) {
+                if (fat_io_ok(fat_mount()) == false) {
                     uart_puts("http_server_sdcard: fat_mount FAIL\r\n");
                     storage_ok = false;
                 }

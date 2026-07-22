@@ -12,9 +12,15 @@ use "examples/common_stm32/sdmmc.tkb";
 // longer stage through a bounce buffer, so callers must pass a PROVEN
 // *align(32) pointer. fat12.tkb's own sector buffers satisfy that.
 fn mem_block_read(sector: u32, buf: *align(32) u8) -> i32 {
-    return disk_read(sector, buf);
+    match disk_read(sector, buf) {
+        DiskIoResult::Ok => { return 0; }
+        DiskIoResult::Err(err) => { return err; }
+    }
 }
 
 fn mem_block_write(sector: u32, buf: *align(32) u8) -> i32 {
-    return disk_write(sector, buf);
+    match disk_write(sector, buf) {
+        DiskIoResult::Ok => { return 0; }
+        DiskIoResult::Err(err) => { return err; }
+    }
 }

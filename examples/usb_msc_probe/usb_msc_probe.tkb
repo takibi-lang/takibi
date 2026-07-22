@@ -34,7 +34,7 @@ fn uart_print_byte_hex(b: u8) {
 
 fn app_main() {
     let mut init_ok: bool = false;
-    if (disk_initialize() == 0) {
+    if (disk_io_ok(disk_initialize())) {
         uart_puts("disk_initialize: OK\r\n");
         init_ok = true;
     } else {
@@ -51,7 +51,7 @@ fn app_main() {
     }
 
     if (init_ok) {
-        if (disk_status() == 0) {
+        if (disk_io_ok(disk_status())) {
             uart_puts("disk_status: OK\r\n");
         } else {
             uart_puts("disk_status: FAIL\r\n");
@@ -94,7 +94,7 @@ fn app_main() {
             for i: usize in 0..<512 {
                 wbuf[i] = pattern_byte(s, i as u32);
             }
-            if (disk_write(s, wbuf) != 0) {
+            if (disk_io_ok(disk_write(s, wbuf)) == false) {
                 uart_puts("write sector ");
                 uart_print(s);
                 uart_puts(": FAIL dwc2_last=");
@@ -108,7 +108,7 @@ fn app_main() {
 
         for s: u32 in 0..<TEST_SECTORS {
             let mut rbuf: [u8; 512] align(32);
-            if (disk_read(s, rbuf) == 0) {
+            if (disk_io_ok(disk_read(s, rbuf))) {
                 let mut sector_ok: bool = true;
                 for i: usize in 0..<512 {
                     if (rbuf[i] != pattern_byte(s, i as u32)) {

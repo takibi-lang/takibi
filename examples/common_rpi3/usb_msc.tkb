@@ -112,6 +112,25 @@ fn msc_debug_last_stage() -> i32 {
     return msc_init_stage;
 }
 
+// Status of the Media Access Interface (disk_initialize/disk_status/
+// disk_read/disk_write) below. Replaces their old plain `i32` 0/-1
+// sentinel with a type a caller must `match` on both arms of -- see
+// examples/common/fat12.tkb's FatIoResult, which this mirrors one layer
+// down (this file has no `use` of fat12.tkb, so it gets its own copy of
+// the same small idiom rather than a cross-layer dependency).
+// disk_io_ok is the same match-to-bool convenience fat_io_ok provides.
+variant DiskIoResult {
+    Ok;
+    Err(i32);
+}
+
+fn disk_io_ok(r: DiskIoResult) -> bool {
+    match r {
+        DiskIoResult::Ok => { return true; }
+        DiskIoResult::Err(err) => { return false; }
+    }
+}
+
 let mut msc_cbw_buf:  [u8; 31] align(64);
 let mut msc_csw_buf:  [u8; 13] align(64);
 // Scratch data-stage buffer for INQUIRY (36 bytes) / READ CAPACITY(10)
@@ -378,7 +397,7 @@ fn msc_capacity_block_size() -> u32 {
 // device -> configure it -> Bulk-Only Transport bring-up -> confirm the
 // unit is ready and reports 512-byte blocks (this project's own fixed
 // block size, matching fat12.tkb's hardcoded sector size throughout).
-fn disk_initialize() -> i32 {
+fn disk_initialize() -> DiskIoResult {
     msc_init_stage = 0;
     // Shared bring-up + per-port enumeration walk: usb_host.tkb's
     // idempotent usb_host_init() (see its header comment) -- shared with
@@ -388,36 +407,36 @@ fn disk_initialize() -> i32 {
     // historical meanings stay stable for anyone comparing old UART
     // captures.
     if (usb_host_init() == false) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     let idx: i32 = usb_host_find_not(0x0424, 0xEC00);
     if (idx < 0) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     let found_addr: u32 = usb_host_dev_addr(idx as usize);
     let found_mp: u32 = usb_host_dev_mp(idx as usize);
     if (found_addr == 0) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     msc_init_stage = 6; // candidate (non-Ethernet) device found on some port
 
     if (dwc2_set_configuration(found_addr, found_mp, 1) == false) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     if (dwc2_get_config_descriptor(found_addr, found_mp, 9) == false) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     let total_len: u32 = dwc2_config_descriptor_total_length();
     let fetch_len: u32 = min(total_len as i32, 64) as u32;
     if (dwc2_get_config_descriptor(found_addr, found_mp, fetch_len) == false) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     dwc2_find_bulk_endpoints(fetch_len);
     if (dwc2_bulk_in_ep == 0) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     if (dwc2_bulk_out_ep == 0) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     dwc2_bulk_reset_toggles(found_addr, found_mp);
 
@@ -430,66 +449,66 @@ fn disk_initialize() -> i32 {
     msc_get_max_lun();     // informational only
 
     if (msc_wait_ready() == false) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     msc_init_stage = 8; // TEST UNIT READY ok
     if (msc_read_capacity10() == false) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     if (msc_capacity_block_size() != 512) {
-        return -1; // this project's whole storage stack assumes 512-byte blocks
+        return DiskIoResult::Err(-1); // this project's whole storage stack assumes 512-byte blocks
     }
     msc_init_stage = 9; // READ CAPACITY ok, 512-byte blocks confirmed
 
     msc_ready = 1;
     msc_init_stage = 10; // fully ready
-    return 0;
+    return DiskIoResult::Ok;
 }
 
-fn disk_status() -> i32 {
+fn disk_status() -> DiskIoResult {
     if (msc_ready == 1) {
-        return 0;
+        return DiskIoResult::Ok;
     }
-    return -1;
+    return DiskIoResult::Err(-1);
 }
 
-fn msc_read10_once(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
+fn msc_read10_once(sector: u32, buf: *align(32) u8) -> DiskIoResult !{may_block} {
     msc_cbw_header(512, MSC_DIR_IN, 10);
     msc_scsi_lba_cdb(SCSI_READ10, sector);
     if (msc_send_cbw() == false) {
         msc_io_error_stage = 1;
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     if (dwc2_bulk_in(msc_dev_addr, buf, 512) == false) {
         msc_io_error_stage = 2;
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     if (msc_read_csw() == false) {
         msc_io_error_stage = 3;
-        return -1;
+        return DiskIoResult::Err(-1);
     }
-    return 0;
+    return DiskIoResult::Ok;
 }
 
-fn disk_read(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
+fn disk_read(sector: u32, buf: *align(32) u8) -> DiskIoResult !{may_block} {
     msc_io_error_stage = 0;
     msc_io_error_lba = sector;
     msc_io_error_attempt = 1;
     msc_recovery_stage = 0;
-    if (disk_status() != 0) {
-        return -1;
+    if (disk_io_ok(disk_status()) == false) {
+        return DiskIoResult::Err(-1);
     }
-    if (msc_read10_once(sector, buf) == 0) {
-        return 0;
+    if (disk_io_ok(msc_read10_once(sector, buf))) {
+        return DiskIoResult::Ok;
     }
     // A valid command-failed CSW means BOT is still synchronized.  All
     // other stage failures make the command boundary uncertain: recover
     // once and retry this side-effect-free READ(10) once.
     if ((msc_io_error_stage == 3) && (msc_csw_outcome == 1)) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     if (msc_recover_transport() == false) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     msc_io_error_stage = 0;
     msc_io_error_attempt = 2;
@@ -498,41 +517,41 @@ fn disk_read(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
 
 // buf is `*align(32) u8`, not plain `*u8` -- see this file's header
 // comment for why this differs from sdmmc.tkb's disk_write.
-fn msc_write10_once(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
+fn msc_write10_once(sector: u32, buf: *align(32) u8) -> DiskIoResult !{may_block} {
     msc_cbw_header(512, MSC_DIR_OUT, 10);
     msc_scsi_lba_cdb(SCSI_WRITE10, sector);
     if (msc_send_cbw() == false) {
         msc_io_error_stage = 1;
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     if (dwc2_bulk_out(msc_dev_addr, buf, 512) == false) {
         msc_io_error_stage = 2;
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     if (msc_read_csw() == false) {
         msc_io_error_stage = 3;
-        return -1;
+        return DiskIoResult::Err(-1);
     }
-    return 0;
+    return DiskIoResult::Ok;
 }
 
 
-fn disk_write(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
+fn disk_write(sector: u32, buf: *align(32) u8) -> DiskIoResult !{may_block} {
     msc_io_error_stage = 0;
     msc_io_error_lba = sector;
     msc_io_error_attempt = 1;
     msc_recovery_stage = 0;
-    if (disk_status() != 0) {
-        return -1;
+    if (disk_io_ok(disk_status()) == false) {
+        return DiskIoResult::Err(-1);
     }
-    if (msc_write10_once(sector, buf) == 0) {
-        return 0;
+    if (disk_io_ok(msc_write10_once(sector, buf))) {
+        return DiskIoResult::Ok;
     }
     if ((msc_io_error_stage == 3) && (msc_csw_outcome == 1)) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     if (msc_recover_transport() == false) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     // This is deliberately limited to one replay of the exact same
     // single-block WRITE(10).  If the first command reached media before

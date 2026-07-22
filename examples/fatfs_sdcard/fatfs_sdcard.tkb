@@ -57,7 +57,7 @@ use "examples/common/netutil.tkb";
 
 fn app_main() {
     let mut init_ok: bool = false;
-    if (disk_initialize() == 0) {
+    if (disk_io_ok(disk_initialize())) {
         uart_puts("disk_initialize: OK\r\n");
         init_ok = true;
     } else {
@@ -65,24 +65,24 @@ fn app_main() {
     }
 
     if (init_ok) {
-        if (disk_status() == 0) {
+        if (disk_io_ok(disk_status())) {
             uart_puts("disk_status: OK\r\n");
         } else {
             uart_puts("disk_status: FAIL\r\n");
         }
 
         let mut format_ok: bool = false;
-        if (fat_format() != 0) {
-            uart_puts("format: FAIL\r\n");
-        } else {
+        if (fat_io_ok(fat_format())) {
             uart_puts("format: OK\r\n");
             format_ok = true;
+        } else {
+            uart_puts("format: FAIL\r\n");
         }
 
         if (format_ok) {
         let hello_name: *u8 = "HELLO   TXT";
         let hello_content: *u8 = "Hello from a real SD card!\r\n";
-        if (create_demo_file(hello_name, hello_content) == 0) {
+        if (fat_io_ok(create_demo_file(hello_name, hello_content))) {
             uart_puts("create HELLO.TXT: OK\r\n");
         } else {
             uart_puts("create HELLO.TXT: FAIL\r\n");
@@ -97,9 +97,9 @@ fn app_main() {
             FatOpenResult::Opened(mut read_fp) => {
                 let mut read_buf: [u8; 64];
                 let mut read_br: u32 = 0;
-                let read_status: i32 = fat_read(read_fp, read_buf, 64, &read_br);
-                let close_status: i32 = fat_close(read_fp);
-                if ((read_status == 0) && (close_status == 0)) {
+                let read_status: FatIoResult = fat_read(read_fp, read_buf, 64, &read_br);
+                let close_status: FatIoResult = fat_close(read_fp);
+                if (fat_io_ok(read_status) && fat_io_ok(close_status)) {
                     uart_puts("read-back HELLO.TXT: ");
                     uart_print_bytes(read_buf, read_br);
                 } else {
@@ -120,8 +120,9 @@ fn app_main() {
             len = len + copy_str(content + len, "overwrite round #");
             len = len + write_udec(content + len, round);
             len = len + copy_str(content + len, "\r\n");
-            if (create_demo_file(hello_name, content) != 0) {
-                overwrite_ok = false;
+            match create_demo_file(hello_name, content) {
+                FatIoResult::Ok => {}
+                FatIoResult::Err(err) => { overwrite_ok = false; }
             }
             round = round + 1;
         }
@@ -135,9 +136,9 @@ fn app_main() {
             FatOpenResult::Opened(mut final_fp) => {
                 let mut final_buf: [u8; 32];
                 let mut final_br: u32 = 0;
-                let read_status: i32 = fat_read(final_fp, final_buf, 32, &final_br);
-                let close_status: i32 = fat_close(final_fp);
-                if ((read_status == 0) && (close_status == 0)) {
+                let read_status: FatIoResult = fat_read(final_fp, final_buf, 32, &final_br);
+                let close_status: FatIoResult = fat_close(final_fp);
+                if (fat_io_ok(read_status) && fat_io_ok(close_status)) {
                     uart_puts("read-back after overwrite: ");
                     uart_print_bytes(final_buf, final_br);
                 } else {

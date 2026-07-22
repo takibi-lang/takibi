@@ -74,7 +74,7 @@ fn install_done() {
 fn app_main() {
     uart_puts("install: start\r\n");
 
-    if (disk_initialize() == 0) {
+    if (disk_io_ok(disk_initialize())) {
         // The harness wrote `staging` directly over the debug port,
         // bypassing the D-cache -- invalidate before this CPU reads it
         // back (same reasoning as examples/fatfs/fatfs.tkb's Phase 1
@@ -101,7 +101,7 @@ fn app_main() {
             for i: usize in 0..<SECTOR_SIZE {
                 sector_buf[i] = staging[off + i];
             }
-            if (disk_write(s as u32, sector_buf) != 0) {
+            if (disk_io_ok(disk_write(s as u32, sector_buf)) == false) {
                 all_ok = false;
             }
         }

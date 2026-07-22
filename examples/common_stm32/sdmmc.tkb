@@ -394,7 +394,30 @@ fn sd_wait_not_busy() -> i32 {
     return -1;
 }
 
-fn disk_initialize() -> i32 {
+// Status of the Media Access Interface (disk_initialize/disk_status/
+// disk_read/disk_write) below. Replaces their old plain `i32` 0/-1
+// sentinel with a type a caller must `match` on both arms of -- see
+// examples/common/fat12.tkb's FatIoResult, which this mirrors one layer
+// down, and examples/common_rpi3/usb_msc.tkb's own DiskIoResult (this
+// file's RPi3-target counterpart, no shared header between the two since
+// they're never linked together). The internal sd_cmdN/sd_wait_* helpers
+// below stay plain `i32`: they're private plumbing this file alone calls,
+// the same reasoning fat12.tkb's fat_get_entry/fat_set_entry were left
+// unconverted for. disk_io_ok is the same match-to-bool convenience
+// fat_io_ok provides.
+variant DiskIoResult {
+    Ok;
+    Err(i32);
+}
+
+fn disk_io_ok(r: DiskIoResult) -> bool {
+    match r {
+        DiskIoResult::Ok => { return true; }
+        DiskIoResult::Err(err) => { return false; }
+    }
+}
+
+fn disk_initialize() -> DiskIoResult {
     sd_gpio_init();
     sd_clock_init();
     enable_sdmmc1_irq(); // MASK stays 0 until a transfer arms it
@@ -406,40 +429,40 @@ fn disk_initialize() -> i32 {
     for i: i32 in 0..<10000 {} // >= 74 SDMMC_CK cycles before the first command
 
     if (sd_cmd0() != 0) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     let is_v2: i32 = sd_cmd8();
     if (is_v2 != 0) {
-        return -1; // SDv1/MMC cards not supported by this driver yet
+        return DiskIoResult::Err(-1); // SDv1/MMC cards not supported by this driver yet
     }
     if (sd_acmd41() != 0) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     if (sd_cmd2() != 0) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     let rca: i32 = sd_cmd3();
     if (rca < 0) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     card_rca = rca as u32;
     if (sd_cmd7(rca as u32) != 0) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
     if (sd_cmd16() != 0) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
 
     sd_set_clock(0); // ~8MHz data-phase clock (fastest available without a PLL)
     sd_ready = 1;
-    return 0;
+    return DiskIoResult::Ok;
 }
 
-fn disk_status() -> i32 {
+fn disk_status() -> DiskIoResult {
     if (sd_ready == 1) {
-        return 0;
+        return DiskIoResult::Ok;
     }
-    return -1;
+    return DiskIoResult::Err(-1);
 }
 
 // sector is always a 0-based block number from this driver's callers'
@@ -491,9 +514,9 @@ fn sd_block_arg(sector: u32) -> u32 {
 // CLEAN (writeback), which cannot discard data even when its rounding
 // spills into an unrelated live cache line, so its own `buf` stays safe
 // to use directly regardless of alignment.
-fn disk_read(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
-    if (disk_status() != 0) {
-        return -1;
+fn disk_read(sector: u32, buf: *align(32) u8) -> DiskIoResult !{may_block} {
+    if (disk_io_ok(disk_status()) == false) {
+        return DiskIoResult::Err(-1);
     }
     dma_prepare_rx(buf, 512); // invalidate stale/dirty cache lines before DMA writes into buf
 
@@ -510,7 +533,7 @@ fn disk_read(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
     sd_send_cmd(17, sd_block_arg(sector), WAITRESP_SHORT); // CMD17 READ_SINGLE_BLOCK
     if (sd_wait_resp() != 0) {
         *SDMMC_MASK = 0;
-        return -1;
+        return DiskIoResult::Err(-1);
     }
 
     *SDMMC_DCTRL = (9 << 4) | (1 << 3) | (1 << 1) | 1; // DBLOCKSIZE=512 | DMAEN | DTDIR=card->host | DTEN
@@ -525,16 +548,16 @@ fn disk_read(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
     *SDMMC_DCTRL = 0;
     *SDMMC_ICR = ICR_CLEAR_ALL;
     if ((sta & STA_DATAEND) == 0) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
 
     dma_finish_rx(buf, 512); // invalidate again so the CPU sees DMA's fresh data, not a stale cached copy
-    return 0;
+    return DiskIoResult::Ok;
 }
 
-fn disk_write(sector: u32, buf: *u8) -> i32 !{may_block} {
-    if (disk_status() != 0) {
-        return -1;
+fn disk_write(sector: u32, buf: *u8) -> DiskIoResult !{may_block} {
+    if (disk_io_ok(disk_status()) == false) {
+        return DiskIoResult::Err(-1);
     }
     dma_prepare_tx(buf, 512); // flush so DMA reads the CPU's latest writes, not a stale RAM copy
 
@@ -551,7 +574,7 @@ fn disk_write(sector: u32, buf: *u8) -> i32 !{may_block} {
     sd_send_cmd(24, sd_block_arg(sector), WAITRESP_SHORT); // CMD24 WRITE_BLOCK
     if (sd_wait_resp() != 0) {
         *SDMMC_MASK = 0;
-        return -1;
+        return DiskIoResult::Err(-1);
     }
 
     *SDMMC_DCTRL = (9 << 4) | (1 << 3) | 1; // DBLOCKSIZE=512 | DTDIR=host->card | DMAEN | DTEN
@@ -568,7 +591,7 @@ fn disk_write(sector: u32, buf: *u8) -> i32 !{may_block} {
     *SDMMC_DCTRL = 0;
     *SDMMC_ICR = ICR_CLEAR_ALL;
     if ((sta & STA_DATAEND) == 0) {
-        return -1;
+        return DiskIoResult::Err(-1);
     }
 
     // The card enters a busy/programming state after this write; the next
@@ -576,5 +599,8 @@ fn disk_write(sector: u32, buf: *u8) -> i32 !{may_block} {
     // waiting for a response while the card is still busy -- confirmed on
     // real hardware (a second consecutive disk_write failed with a command
     // timeout until this wait was added).
-    return sd_wait_not_busy();
+    if (sd_wait_not_busy() != 0) {
+        return DiskIoResult::Err(-1);
+    }
+    return DiskIoResult::Ok;
 }
