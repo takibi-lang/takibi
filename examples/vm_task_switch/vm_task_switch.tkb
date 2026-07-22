@@ -7,6 +7,23 @@
 
 use "examples/vm_page_map/vm_page_map_core.tkb";
 
+// This guard authorizes a stable exchange without a blocking semaphore.
+// The store is touched only before timer enable, from the IRQ itself (where
+// same-core IRQ nesting is masked), and after timer disable.
+private linear view VmIrqOwnerGuard[lock: addr];
+
+fn vm_irq_owner_guard(lock: *i32 @ place) -> VmIrqOwnerGuard[place] {
+    return view VmIrqOwnerGuard[place];
+}
+
+fn vm_irq_owner_guard_done(guard: sink VmIrqOwnerGuard[place]) {
+}
+
+struct VmTaskOwnerStore {
+    private mutex: i32;
+    private state: VmTaskSwitchState;
+}
+
 struct VmSchedState {
     current_task: isize;
     total_ticks: i32;
@@ -19,6 +36,33 @@ private let mut vm_stack_a: [u8; 4096];
 private let mut vm_stack_b: [u8; 4096];
 private let mut task_a_seen: io u8 = 0;
 private let mut task_b_seen: io u8 = 0;
+private let mut vm_owner_store: VmTaskOwnerStore;
+
+fn vm_owner_put(state: VmTaskSwitchState) {
+    let guard = vm_irq_owner_guard(&vm_owner_store.mutex);
+    let previous: VmTaskSwitchState = stable_replace(
+        guard, &vm_owner_store.mutex, vm_owner_store.state,
+        state);
+    match previous {
+        VmTaskSwitchState::Empty => {}
+        VmTaskSwitchState::Space0(stale) => {
+            vm_task_switch_cleanup(VmTaskSwitchState::Space0(stale));
+        }
+        VmTaskSwitchState::Space1(stale) => {
+            vm_task_switch_cleanup(VmTaskSwitchState::Space1(stale));
+        }
+    }
+    vm_irq_owner_guard_done(guard);
+}
+
+fn vm_owner_take() -> VmTaskSwitchState {
+    let guard = vm_irq_owner_guard(&vm_owner_store.mutex);
+    let state: VmTaskSwitchState = stable_replace(
+        guard, &vm_owner_store.mutex, vm_owner_store.state,
+        VmTaskSwitchState::Empty);
+    vm_irq_owner_guard_done(guard);
+    return state;
+}
 
 fn vm_scheduler_tick(frame_sp: usize) -> usize {
     scheduler_rearm_tick();
@@ -31,17 +75,30 @@ fn vm_scheduler_tick(frame_sp: usize) -> usize {
     }
     vm_sched.current_task = (vm_sched.current_task + 1) % 3;
 
-    // Task 0 (app_main) and task 1 use address space 0. Task 2 uses space 1.
-    if (vm_sched.current_task == 2) {
-        mmu_address_space_activate(1);
-    } else {
-        mmu_address_space_activate(0);
+    let stored = vm_owner_take();
+    match stored {
+        VmTaskSwitchState::Empty => {}
+        VmTaskSwitchState::Space0(owner) => {
+            let state = VmTaskSwitchState::Space0(owner);
+            if (vm_sched.current_task == 2) {
+                vm_owner_put(vm_task_switch_select1(state));
+            } else {
+                vm_owner_put(vm_task_switch_select0(state));
+            }
+        }
+        VmTaskSwitchState::Space1(owner) => {
+            let state = VmTaskSwitchState::Space1(owner);
+            if (vm_sched.current_task == 2) {
+                vm_owner_put(vm_task_switch_select1(state));
+            } else {
+                vm_owner_put(vm_task_switch_select0(state));
+            }
+        }
     }
-    tlb_invalidate_all_el2();
     return sp[vm_sched.current_task];
 }
 
-fn rpi3_irq_dispatch(frame_sp: usize) -> usize {
+fn rpi3_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
     if (rpi3_timer_irq_pending()) {
         return vm_scheduler_tick(frame_sp);
     }
@@ -101,6 +158,10 @@ fn app_main() {
                     let active1_ready = mapping_va_release(lease1);
                     let active0_run = address_space_switch(active1_ready, occupied0);
 
+                    vm_owner_put(vm_task_switch_new(
+                        active0_run, occupied0, mapping0,
+                        occupied1, mapping1));
+
                     let sp: *usize = vm_sched.tcb_sp;
                     sp[1] = setup_task_stack(vm_stack_a + 4096, vm_task_a);
                     sp[2] = setup_task_stack(vm_stack_b + 4096, vm_task_b);
@@ -111,17 +172,15 @@ fn app_main() {
                     uart_puts("task A: "); uart_print(task_a_seen); uart_puts("\n");
                     uart_puts("task B: "); uart_print(task_b_seen); uart_puts("\n");
 
-                    let (empty1, page_b_back) = unmap_page(occupied1, mapping1);
-                    let active1_cleanup = address_space_switch(active0_run, empty1);
-                    let (inactive1_back, active0_cleanup) = address_space_deactivate_to(
-                        active1_cleanup, empty1, occupied0);
-                    address_space_free(inactive1_back);
-                    page_free(page_b_back);
-                    let (empty0, page_a_back) = unmap_page(occupied0, mapping0);
-                    let inactive0_back = address_space_deactivate(
-                        active0_cleanup, empty0);
-                    address_space_free(inactive0_back);
-                    page_free(page_a_back);
+                    match vm_owner_take() {
+                        VmTaskSwitchState::Empty => {}
+                        VmTaskSwitchState::Space0(owner) => {
+                            vm_task_switch_cleanup(VmTaskSwitchState::Space0(owner));
+                        }
+                        VmTaskSwitchState::Space1(owner) => {
+                            vm_task_switch_cleanup(VmTaskSwitchState::Space1(owner));
+                        }
+                    }
                 }
             }
         }

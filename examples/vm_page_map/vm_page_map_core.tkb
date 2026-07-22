@@ -218,6 +218,26 @@ private linear struct ActiveMappingView[core: usize, asid: usize,
     private p_witness: usize @ p;
 }
 
+// Scheduler-owned bundle for the concrete two-address-space preemption demo.
+// The active token and both live mappings move as one linear value through a
+// stable owner slot; an IRQ can therefore switch only by consuming the state
+// that proves both target address spaces still exist.
+variant VmTaskSwitchState {
+    Empty;
+    Space0(exists core: usize. exists a: usize. exists b: usize.
+           exists va0: usize. exists p0: usize.
+           exists va1: usize. exists p1: usize.
+           (ActiveAddressSpace[core, a],
+            AddressSpaceOwner[a, SpaceState::Occupied], MappingOwner[a, va0, p0],
+            AddressSpaceOwner[b, SpaceState::Occupied], MappingOwner[b, va1, p1]));
+    Space1(exists core: usize. exists a: usize. exists b: usize.
+           exists va0: usize. exists p0: usize.
+           exists va1: usize. exists p1: usize.
+           (ActiveAddressSpace[core, b],
+            AddressSpaceOwner[a, SpaceState::Occupied], MappingOwner[a, va0, p0],
+            AddressSpaceOwner[b, SpaceState::Occupied], MappingOwner[b, va1, p1]));
+}
+
 // examples/common_rpi3/mmu.S's per-address-space dynamic single-page mapping
 // window: each L1 entry 2 reaches that root's own L2/L3 chain, covering
 // exactly 2MB (512 * 4KB) starting at DYN_VA_BASE. The L3 tables live
@@ -341,4 +361,78 @@ fn unmap_page(space: sink AddressSpaceOwner[asid, SpaceState::Occupied],
         { space.tag, space.slot };
     let mut page: PageOwner[p] = { mapping.page_index, mapping.p_witness };
     return (empty, page);
+}
+
+fn vm_task_switch_new(
+        active: sink ActiveAddressSpace[core, a],
+        space0: sink AddressSpaceOwner[a, SpaceState::Occupied],
+        mapping0: sink MappingOwner[a, va0, p0],
+        space1: sink AddressSpaceOwner[b, SpaceState::Occupied],
+        mapping1: sink MappingOwner[b, va1, p1]) -> VmTaskSwitchState {
+    return VmTaskSwitchState::Space0(
+        (active, space0, mapping0, space1, mapping1));
+}
+
+fn vm_task_switch_select0(state: sink VmTaskSwitchState)
+        -> VmTaskSwitchState {
+    match state {
+        VmTaskSwitchState::Empty => {
+            return VmTaskSwitchState::Empty;
+        }
+        VmTaskSwitchState::Space0(owner) => {
+            return VmTaskSwitchState::Space0(owner);
+        }
+        VmTaskSwitchState::Space1(owner) => {
+            let (active, space0, mapping0, space1, mapping1) = owner;
+            let active0 = address_space_switch(active, space0);
+            return VmTaskSwitchState::Space0(
+                (active0, space0, mapping0, space1, mapping1));
+        }
+    }
+}
+
+fn vm_task_switch_select1(state: sink VmTaskSwitchState)
+        -> VmTaskSwitchState {
+    match state {
+        VmTaskSwitchState::Empty => {
+            return VmTaskSwitchState::Empty;
+        }
+        VmTaskSwitchState::Space0(owner) => {
+            let (active, space0, mapping0, space1, mapping1) = owner;
+            let active1 = address_space_switch(active, space1);
+            return VmTaskSwitchState::Space1(
+                (active1, space0, mapping0, space1, mapping1));
+        }
+        VmTaskSwitchState::Space1(owner) => {
+            return VmTaskSwitchState::Space1(owner);
+        }
+    }
+}
+
+fn vm_task_switch_cleanup(state: sink VmTaskSwitchState) {
+    let state0 = vm_task_switch_select0(state);
+    match state0 {
+        VmTaskSwitchState::Empty => {}
+        VmTaskSwitchState::Space0(owner) => {
+            let (active, space0, mapping0, space1, mapping1) = owner;
+            let (empty1, page1) = unmap_page(space1, mapping1);
+            let active1 = address_space_switch(active, empty1);
+            let (inactive1, active0) = address_space_deactivate_to(
+                active1, empty1, space0);
+            address_space_free(inactive1);
+            page_free(page1);
+            let (empty0, page0) = unmap_page(space0, mapping0);
+            let inactive0 = address_space_deactivate(active0, empty0);
+            address_space_free(inactive0);
+            page_free(page0);
+        }
+        VmTaskSwitchState::Space1(owner) => {
+            // vm_task_switch_select0 makes this variant unreachable, but the
+            // closed match still preserves every linear cleanup obligation.
+            let (active, space0, mapping0, space1, mapping1) = owner;
+            let active0 = address_space_switch(active, space0);
+            vm_task_switch_cleanup(VmTaskSwitchState::Space0(
+                (active0, space0, mapping0, space1, mapping1)));
+        }
+    }
 }

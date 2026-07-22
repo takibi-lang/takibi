@@ -4976,6 +4976,54 @@ let infer_tests = [
           }
         }");
 
+  Alcotest.test_case
+    "owner aggregate: a linear tuple with multiple existential owners packs and opens" `Quick
+    (expect_ok
+       "linear struct AggregateOwner1[n: usize] { id: usize @ n; }
+        variant AggregatePair1 {
+          Empty;
+          Both(exists a: usize. exists b: usize.
+               (AggregateOwner1[a], AggregateOwner1[b]));
+        }
+        fn aggregate_new1(id: usize @ n) -> AggregateOwner1[n] {
+          let mut owner: AggregateOwner1[n] = { id };
+          return owner;
+        }
+        fn aggregate_drop1(owner: sink AggregateOwner1[n]) {}
+        fn aggregate_pair1(a: usize, b: usize) -> AggregatePair1 {
+          return AggregatePair1::Both((aggregate_new1(a), aggregate_new1(b)));
+        }
+        fn aggregate_use1(pair: AggregatePair1) {
+          match pair {
+            AggregatePair1::Empty => {}
+            AggregatePair1::Both(owners) => {
+              let (left, right) = owners;
+              aggregate_drop1(left);
+              aggregate_drop1(right);
+            }
+          }
+        }");
+
+  Alcotest.test_case
+    "owner aggregate: every linear tuple component remains an obligation after match" `Quick
+    (expect_type_error "linear value 'right' is never consumed"
+       "linear struct AggregateOwner2[n: usize] { id: usize @ n; }
+        variant AggregatePair2 {
+          Empty;
+          Both(exists a: usize. exists b: usize.
+               (AggregateOwner2[a], AggregateOwner2[b]));
+        }
+        fn aggregate_drop2(owner: sink AggregateOwner2[n]) {}
+        fn aggregate_bad2(pair: AggregatePair2) {
+          match pair {
+            AggregatePair2::Empty => {}
+            AggregatePair2::Both(owners) => {
+              let (left, right) = owners;
+              aggregate_drop2(left);
+            }
+          }
+        }");
+
   Alcotest.test_case "Slice 3: a linear variant payload must be consumed" `Quick
     (expect_type_error "linear variant payload 'permit' is never consumed"
        "linear view VariantPermit2;

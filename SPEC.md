@@ -817,8 +817,10 @@ fn consume(result: FatOpenResult) -> i32 {
 ```
 
 A case has either no payload or exactly one directly supported payload.
-An unrestricted ordinary concrete struct may be copied as a payload; arrays,
-indexed owner structs, and structs containing affine/linear fields are still
+An unrestricted ordinary concrete struct may be copied as a payload. A tuple
+may be used as that one payload, including a linear tuple of indexed owners;
+this is the aggregate-owner-transfer form used by the VM scheduler. Arrays,
+direct nested variants, and structs containing affine/linear fields are still
 rejected. Construct a case with `Name::Case` or
 `Name::Case(expr)`. A payload-bearing arm must bind its
 payload, and a payload-less arm must not. A closed match without `_` must
@@ -859,6 +861,22 @@ variant NetRxAcquire {
 
 fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire;
 ```
+
+Several identities may be hidden by nested outer binders when one payload
+transfers a tuple of owners:
+
+```takibi
+variant SchedulerVmState {
+    Empty;
+    Running(exists core: usize. exists a: usize. exists b: usize.
+            (CpuLease[core], VmLease[a], VmLease[b]));
+}
+```
+
+All `exists` binders erase. Matching opens every binder as a distinct rigid
+identity, then binds the tuple as one linear value. Destructuring consumes the
+tuple and creates one obligation per linear component; every component must be
+consumed on every path. Existentials remain restricted to variant payloads.
 
 Constructing `Acquired(owner)` packages the owner's static index without
 adding runtime data. Matching `Acquired(frame)` opens the package with a

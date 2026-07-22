@@ -1945,13 +1945,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  "variant case '%s::%s' has no payload" vtype vname))
              | Some (Some ty) -> ty)
       in
-      let expected = match schema with
+      let scope = create_static_scope () in
+      let rec instantiate_exists = function
         | Ast.TypeExists (name, _, body) ->
-            let scope = create_static_scope () in
             bind_static scope name (fresh_static ());
-            of_ast_in_decl_scope scope body
-        | ty -> of_ast_in_decl_scope (create_static_scope ()) ty
+            instantiate_exists body
+        | ty -> of_ast_in_decl_scope scope ty
       in
+      let expected = instantiate_exists schema in
       let actual = infer_expr senv eenv tyenv fenv payload in
       let actual = adapt_actual_to_expected tyenv payload actual expected in
       unify_at payload.loc actual expected;
@@ -3110,12 +3111,15 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
            in
            let has_wild = ref false in
            let covered = Hashtbl.create 4 in
-           let open_payload = function
-             | Ast.TypeExists (name, _, body) ->
-                 let scope = create_static_scope () in
-                 bind_static scope name (rigid_static name);
-                 of_ast_in_decl_scope scope body
-             | ty -> of_ast_in_decl_scope (create_static_scope ()) ty
+           let open_payload schema =
+             let scope = create_static_scope () in
+             let rec open_exists = function
+               | Ast.TypeExists (name, _, body) ->
+                   bind_static scope name (rigid_static name);
+                   open_exists body
+               | ty -> of_ast_in_decl_scope scope ty
+             in
+             open_exists schema
            in
            let raw_locals' = List.fold_left (fun rl arm ->
              match arm with
@@ -4309,17 +4313,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               raise (TypeError (vloc, Printf.sprintf
                 "variant payload '%s::%s' cannot contain borrow/sink"
                 vname cname));
-            if type_mentions_tuple schema then
-              raise (TypeError (vloc, Printf.sprintf
-                "variant payload '%s::%s' cannot contain a tuple in Slice 3"
-                vname cname));
             if type_mentions_variant schema then
               raise (TypeError (vloc, Printf.sprintf
                 "variant payload '%s::%s' cannot nest another variant in Slice 3"
                 vname cname));
-            let runtime_schema = match schema with
-              | Ast.TypeExists (_, _, body) -> resolve_declared_type body
+            let rec strip_exists = function
+              | Ast.TypeExists (_, _, body) -> strip_exists body
               | body -> resolve_declared_type body
+            in
+            let runtime_schema = strip_exists schema
             in
             (match runtime_schema with
              | Ast.TypeNamed name
@@ -4340,15 +4342,25 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                    vname cname))
              | _ -> ());
             (match schema with
-             | Ast.TypeExists (name, sort, body) ->
-                 validate_static_sort vloc sort;
+             | Ast.TypeExists _ ->
+                 let scope = Hashtbl.create 8 in
+                 let rec bind_all = function
+                   | Ast.TypeExists (name, sort, body) ->
+                       validate_static_sort vloc sort;
+                       if Hashtbl.mem scope name then
+                         raise (TypeError (vloc, Printf.sprintf
+                           "duplicate existential '%s' in payload '%s::%s'"
+                           name vname cname));
+                       Hashtbl.add scope name sort;
+                       bind_all body
+                   | body -> body
+                 in
+                 let body = bind_all schema in
                  (match resolve_declared_type body with
-                  | Ast.TypeIndexed _ | Ast.TypeView _ -> ()
+                  | Ast.TypeIndexed _ | Ast.TypeView _ | Ast.TypeTuple _ -> ()
                   | _ -> raise (TypeError (vloc, Printf.sprintf
-                      "existential payload '%s::%s' must package an indexed runtime owner or erased view"
+                      "existential payload '%s::%s' must package an indexed runtime owner, erased view, or tuple containing owners"
                       vname cname)));
-                 let scope = Hashtbl.create 4 in
-                 Hashtbl.add scope name sort;
                  validation_static_scope := Some scope;
                  allow_implicit_static := false;
                  validate_static_type vloc body;
@@ -5588,9 +5600,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                           | Some cases -> Option.join (List.assoc_opt cname cases)
                           | None -> None
                         in
-                        Option.map (function
-                          | Ast.TypeExists (_, _, inner) -> inner
-                          | ty -> ty) schema
+                        let rec strip_exists = function
+                          | Ast.TypeExists (_, _, inner) -> strip_exists inner
+                          | ty -> ty
+                        in
+                        Option.map strip_exists schema
                   in
                   (binding, payload_ty, b)
               | Ast.ArmWild b -> (None, None, b)

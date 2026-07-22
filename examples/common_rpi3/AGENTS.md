@@ -277,7 +277,40 @@ or arbitrary CPU-token minting is solved. The first baseline and the later
 `--forbid-trap`/active-authority hardening are separate commits. The hardened
 version passed all 152 desk-side tests and all 66 RPi3 hardware fixtures.
 
-GitHub issue #140. Status: 68 examples ported and passing `make
+## Preemptive VM task switching (issue #67 Stage 6)
+
+`examples/vm_task_switch` extends Stage 5 from explicit calls to real timer
+preemption. Core 0 round-robins `app_main`, task A, and task B. Task A shares
+root 0 with the kernel while task B uses root 1; both read VA `0x80000000`,
+observing physical-page values 11 and 22 respectively. The IRQ return path
+selects the saved SP and address space as one scheduling decision. The
+unrefined baseline passed all 67 RPi3 fixtures and is preserved separately.
+
+Hardening exposed a real missing aggregate shape. The scheduler must retain
+the current `ActiveAddressSpace`, two occupied `AddressSpaceOwner`s, and two
+`MappingOwner`s across IRQ calls. Takibi now permits a variant's one payload
+to be a linear tuple and permits multiple nested outer `exists` binders for
+the identities of its components. Matching opens every identity, then tuple
+destructuring restores each linear obligation. Arrays, nested variants, and
+linear structs containing owner fields remain unsupported; the new surface is
+the narrow function-local tuple/variant transfer required by this scheduler.
+
+`VmTaskSwitchState` packages all five VM resources and moves through a stable
+owner slot. The IRQ consumes that state and returns `Space0` or `Space1`; only
+the corresponding transition function can call the typed TTBR/TLB switch.
+After the timer stops, `app_main` recovers the same state and its cleanup API
+unmaps both pages, deactivates both spaces, and frees every owner.
+
+An initial hardening attempt used `mutex_lock` around the stable slot. That was
+rejected during audit because `sem_wait` is `may_block` and must not run in an
+IRQ. The final version uses a private erased guard with a reviewed protocol:
+the slot is exchanged only before timer enable, inside the same-core IRQ where
+IRQ nesting is masked, and after timer disable. `rpi3_irq_dispatch` is now
+explicitly `!{interrupt}`, so a future blocking call is rejected transitively.
+The hardened example builds with `--forbid-trap`, all 801 compiler tests pass,
+`make check` passes all 152 integration tests, and all 67 RPi3 fixtures pass.
+
+GitHub issue #140. Status: 69 examples ported and passing `make
 hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level
 `EXAMPLES` list EXCEPT
 `fatfs` (needs SD-card-shaped
@@ -295,7 +328,7 @@ status line here. Full list:
 `affine_escape_via_index`/`align_ptr_proof`/`linear_obligation`/
 `tuple_pair`/`field_lease`/`inet_checksum`/`ip_parse`/`tcp_parse`/
 `rtc`/`timer`/`echo`/`irq`/`preempt`/`semaphore`/`condvar`/`msgqueue`/
-`watchdog`/`rtos_demo`/`chan_rendezvous`/`page_pool`/`vm_page_map`/`vm_context_switch`/`smp_page_transfer`/`multi_address_space`/`net_echo`/`arp_reply`/
+`watchdog`/`rtos_demo`/`chan_rendezvous`/`page_pool`/`vm_page_map`/`vm_context_switch`/`vm_task_switch`/`smp_page_transfer`/`multi_address_space`/`net_echo`/`arp_reply`/
 `icmp_echo`/`tcp_echo`/`http_server`/`kvs_server`. This covers `hwcheck-stm32`'s "plain compute" set
 (extended with plain-compute examples STM32 already had but this
 board's own list had not picked up yet: `slice`/`foreach`/`int64`/
