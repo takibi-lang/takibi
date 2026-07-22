@@ -49,8 +49,26 @@ rpi3_secondary_start:
     mov     sp, x0
 
     bl      mmu_init_secondary
+
+    /* Mint core 1's CpuOwner at the privileged boundary.  Takibi does not yet
+       promote a runtime `id == 1` branch into a static index equality, so the
+       one typed secondary needed today has a narrow hook.  Cores 2-3 retain
+       policy-free role selection in smp_core_main. */
+    mrs     x0, mpidr_el1
+    and     x0, x0, #3
+    cmp     x0, #1
+    b.ne    .Lsmp_untyped_entry
+    mov     x0, #1
+    bl      smp_core1_boot_main
+    b       .Lsmp_returned
+
+.Lsmp_untyped_entry:
     bl      smp_core_main
 
 .Lsmp_returned:
     wfe
     b       .Lsmp_returned
+
+    .weak   smp_core1_boot_main
+smp_core1_boot_main:
+    b       smp_core_main

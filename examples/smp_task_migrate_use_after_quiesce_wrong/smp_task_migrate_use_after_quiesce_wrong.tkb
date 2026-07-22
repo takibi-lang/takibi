@@ -1,0 +1,17 @@
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+fn misuse(slot: MigrationTaskSlot) {
+    match slot {
+        MigrationTaskSlot::Empty => {}
+        MigrationTaskSlot::RunningOn0(task) => {
+            let ready: {1..<2 as usize} = 1;
+            let saved = migration_task_quiesce_0_to_1(task, 4096, ready);
+            let stale = migration_task_quiesce_0_to_1(task, 4096, ready);
+        }
+        MigrationTaskSlot::SavedFrom0(task) => { migration_task_discard(task); }
+        MigrationTaskSlot::RunningOn1(task) => { migration_running_discard(task); }
+        MigrationTaskSlot::SavedFrom1(task) => { migration_task_discard(task); }
+    }
+}
+
+fn app_main() { misuse(migration_task_new_0_to_1(4096)); }

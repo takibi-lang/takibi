@@ -1,13 +1,34 @@
-// Real saved-frame migration from RPi3 core 0 to core 1 (issue #67 baseline).
-// Core 1 first caches the old translation (41). Core 0 preempts the task,
-// replaces that same VA with a new page (42), broadcasts TLBI, then publishes
-// the saved SP. Core 1 resumes the exact frame and must observe 42.
+// Typed saved-frame migration from RPi3 core 0 to core 1 (issue #67).
+// The task frame, address-space owner, and post-shootdown mapping owner move
+// together.  Each CPU retains its boot-minted CpuOwner while the address
+// space is in transit; only the destination can resume the saved frame.
 
 use "examples/vm_page_map/vm_page_map_core.tkb";
 
 extern fn rpi3_core_id() -> usize;
 extern fn enable_irq();
 
+private linear view MigrationGuard[lock: addr];
+
+fn migration_guard(lock: *i32 @ place) -> MigrationGuard[place] {
+    return view MigrationGuard[place];
+}
+
+fn migration_guard_done(guard: sink MigrationGuard[place]) {
+}
+
+struct TaskOwnerStore {
+    private mutex: i32;
+    private task: MigrationTaskSlot;
+}
+
+struct TransferOwnerStore {
+    private mutex: i32;
+    private transfer: MigrationTransfer;
+}
+
+private let mut task_store: TaskOwnerStore;
+private let mut transfer_store: TransferOwnerStore;
 private let mut migrate_stage: io i32 = 0;
 private let mut task_saved: io i32 = 0;
 private let mut task_migratable: io i32 = 0;
@@ -22,6 +43,56 @@ private let mut migrate_stack: [u8; 4096];
 private let mut seen_core0: io u8 = 0;
 private let mut seen_core1_before: io u8 = 0;
 private let mut seen_core1_after: io u8 = 0;
+
+fn task_put(next: MigrationTaskSlot) {
+    let guard = migration_guard(&task_store.mutex);
+    let previous: MigrationTaskSlot = stable_replace(
+        guard, &task_store.mutex, task_store.task, next);
+    match previous {
+        MigrationTaskSlot::Empty => {}
+        MigrationTaskSlot::RunningOn0(stale) => { migration_running_discard(stale); }
+        MigrationTaskSlot::SavedFrom0(stale) => {
+            migration_task_discard(stale);
+        }
+        MigrationTaskSlot::RunningOn1(stale) => { migration_running_discard(stale); }
+        MigrationTaskSlot::SavedFrom1(stale) => { migration_task_discard(stale); }
+    }
+    migration_guard_done(guard);
+}
+
+fn task_take() -> MigrationTaskSlot {
+    let guard = migration_guard(&task_store.mutex);
+    let result: MigrationTaskSlot = stable_replace(
+        guard, &task_store.mutex, task_store.task,
+        MigrationTaskSlot::Empty);
+    migration_guard_done(guard);
+    return result;
+}
+
+fn transfer_put(next: MigrationTransfer) {
+    let guard = migration_guard(&transfer_store.mutex);
+    let previous: MigrationTransfer = stable_replace(
+        guard, &transfer_store.mutex, transfer_store.transfer, next);
+    match previous {
+        MigrationTransfer::Empty => {}
+        MigrationTransfer::Outbound(stale) => {
+            transfer_put(MigrationTransfer::Outbound(stale));
+        }
+        MigrationTransfer::Returned(stale) => {
+            transfer_put(MigrationTransfer::Returned(stale));
+        }
+    }
+    migration_guard_done(guard);
+}
+
+fn transfer_take() -> MigrationTransfer {
+    let guard = migration_guard(&transfer_store.mutex);
+    let result: MigrationTransfer = stable_replace(
+        guard, &transfer_store.mutex, transfer_store.transfer,
+        MigrationTransfer::Empty);
+    migration_guard_done(guard);
+    return result;
+}
 
 fn migrating_task() {
     let shared_va: *io u8 = 0x80000000;
@@ -49,10 +120,24 @@ fn rpi3_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
                     core0_current = 1;
                     return initial_task_sp;
                 }
-                if (task_migratable == 0) {
-                    return frame_sp;
+                if (task_migratable == 0) { return frame_sp; }
+                match task_take() {
+                    MigrationTaskSlot::Empty => { return frame_sp; }
+                    MigrationTaskSlot::SavedFrom0(saved) => {
+                        task_put(MigrationTaskSlot::SavedFrom0(saved));
+                        return frame_sp;
+                    }
+                    MigrationTaskSlot::RunningOn0(running) => {
+                        let ready: {1..<2 as usize} = 1;
+                        task_put(migration_task_quiesce_0_to_1(running, frame_sp, ready));
+                    }
+                    MigrationTaskSlot::RunningOn1(other) => {
+                        task_put(MigrationTaskSlot::RunningOn1(other)); return frame_sp;
+                    }
+                    MigrationTaskSlot::SavedFrom1(other) => {
+                        task_put(MigrationTaskSlot::SavedFrom1(other)); return frame_sp;
+                    }
                 }
-                migrating_sp = frame_sp;
                 core0_current = 0;
                 scheduler_disable();
                 task_saved = 1;
@@ -63,6 +148,23 @@ fn rpi3_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
                     core1_current = 1;
                     return migrating_sp;
                 }
+                match task_take() {
+                    MigrationTaskSlot::Empty => { return frame_sp; }
+                    MigrationTaskSlot::SavedFrom1(saved) => {
+                        task_put(MigrationTaskSlot::SavedFrom1(saved));
+                        return frame_sp;
+                    }
+                    MigrationTaskSlot::RunningOn1(running) => {
+                        let ready: {1..<2 as usize} = 1;
+                        task_put(migration_task_quiesce_1_to_0(running, frame_sp, ready));
+                    }
+                    MigrationTaskSlot::RunningOn0(other) => {
+                        task_put(MigrationTaskSlot::RunningOn0(other)); return frame_sp;
+                    }
+                    MigrationTaskSlot::SavedFrom0(other) => {
+                        task_put(MigrationTaskSlot::SavedFrom0(other)); return frame_sp;
+                    }
+                }
                 core1_current = 0;
                 scheduler_disable();
                 return core1_main_sp;
@@ -72,7 +174,7 @@ fn rpi3_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
     return frame_sp;
 }
 
-fn core1_migrate_main() {
+fn core1_migrate_main(cpu: CpuOwner[1]) {
     while (migrate_stage != 1) { interrupt_wait(); }
     dma_consume();
     mmu_address_space_activate(0);
@@ -86,27 +188,80 @@ fn core1_migrate_main() {
     while (migrate_stage != 3) { interrupt_wait(); }
     dma_consume();
     uart_puts("core1 arming\n");
-    timer_init_core(1);
-    enable_irq();
-    uart_puts("core1 armed\n");
-    while (task_done == 0) {}
-    while (core1_current != 0) {}
-    dma_publish();
-    migrate_stage = 4;
-    interrupt_notify();
+    match transfer_take() {
+        MigrationTransfer::Empty => {
+            cpu_owner_halt(cpu);
+        }
+        MigrationTransfer::Returned(returned) => {
+            transfer_put(MigrationTransfer::Returned(returned));
+            cpu_owner_halt(cpu);
+        }
+        MigrationTransfer::Outbound(payload) => {
+            let (saved, space, mapping) = payload;
+            let active = address_space_resume_cpu(cpu, space);
+            let resume_sp = migration_saved_frame(saved);
+            task_put(migration_task_resume_on_1(saved, active, mapping));
+            migrating_sp = resume_sp;
+            timer_init_core(1);
+            enable_irq();
+            uart_puts("core1 armed\n");
+            while (task_done == 0) {}
+            while (core1_current != 0) {}
+            match task_take() {
+                MigrationTaskSlot::Empty => {
+                    let (empty, page) = unmap_page(space, mapping);
+                    page_free(page);
+                    let inactive = address_space_deactivate(active, empty);
+                    address_space_free(inactive);
+                }
+                MigrationTaskSlot::RunningOn1(running) => {
+                    migration_running_discard(running);
+                    let (empty, page) = unmap_page(space, mapping);
+                    page_free(page);
+                    let inactive = address_space_deactivate(active, empty);
+                    address_space_free(inactive);
+                }
+                MigrationTaskSlot::SavedFrom1(returned_task) => {
+                    let cpu1 = address_space_release_cpu(active, space);
+                    transfer_put(MigrationTransfer::Returned(
+                        (returned_task, space, mapping)));
+                    cpu_owner_halt(cpu1);
+                    dma_publish();
+                    migrate_stage = 4;
+                    interrupt_notify();
+                }
+                MigrationTaskSlot::RunningOn0(other) => {
+                    migration_running_discard(other);
+                    let (empty, page) = unmap_page(space, mapping);
+                    page_free(page);
+                    let inactive = address_space_deactivate(active, empty);
+                    address_space_free(inactive);
+                }
+                MigrationTaskSlot::SavedFrom0(other) => {
+                    migration_task_discard(other);
+                    let (empty, page) = unmap_page(space, mapping);
+                    page_free(page);
+                    let inactive = address_space_deactivate(active, empty);
+                    address_space_free(inactive);
+                }
+            }
+        }
+    }
     while (true) { interrupt_wait(); }
 }
 
-fn core0_migrate_main() {
+fn core0_migrate_main(cpu: CpuOwner[0]) {
     page_pool_init();
     uart_puts("smp_task_migrate\n");
     match page_alloc() {
-        PageAllocResult::OutOfMemory => { uart_puts("allocation old failed\n"); }
+        PageAllocResult::OutOfMemory => {
+            cpu_owner_halt(cpu);
+            uart_puts("allocation old failed\n");
+        }
         PageAllocResult::Allocated(old_page) => {
             let slot0: {0..<2 as usize} = 0;
-            let core0: usize = 0;
             let inactive = address_space_new(slot0);
-            let (space, active) = address_space_activate(inactive, core0);
+            let (space, active) = address_space_activate_cpu(cpu, inactive);
             let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
             let (occupied, pending) = map_page(space, old_page, va);
             let mapping = tlb_invalidate(occupied, pending);
@@ -115,52 +270,91 @@ fn core0_migrate_main() {
             bytes[0] = 41;
             let active_ready = mapping_va_release(lease);
 
-            dma_publish();
-            migrate_stage = 1;
-            interrupt_notify();
+            dma_publish(); migrate_stage = 1; interrupt_notify();
             uart_puts("prefetch requested\n");
             while (migrate_stage != 2) { interrupt_wait(); }
-            dma_consume();
-            uart_puts("prefetch complete\n");
+            dma_consume(); uart_puts("prefetch complete\n");
 
-            initial_task_sp = setup_task_stack(
-                migrate_stack + 4096, migrating_task);
+            initial_task_sp = setup_task_stack(migrate_stack + 4096, migrating_task);
+            task_put(migration_task_new_0_to_1(initial_task_sp));
             timer_init_core(0);
             while (task_saved == 0) {}
             uart_puts("task saved\n");
 
-            let (empty, old_back) = unmap_page(occupied, mapping);
-            page_free(old_back);
-            match page_alloc() {
-                PageAllocResult::OutOfMemory => {
+            match task_take() {
+                MigrationTaskSlot::Empty => {
+                    let (empty, old_back) = unmap_page(occupied, mapping);
+                    page_free(old_back);
                     let inactive_back = address_space_deactivate(active_ready, empty);
                     address_space_free(inactive_back);
-                    uart_puts("allocation new failed\n");
                 }
-                PageAllocResult::Allocated(new_page) => {
-                    let (occupied2, pending2) = map_page(empty, new_page, va);
-                    let mapping2 = tlb_invalidate(occupied2, pending2);
-                    let lease2 = mapping_va_acquire(
-                        active_ready, occupied2, mapping2);
-                    let bytes2 = mapping_va_bytes(lease2);
-                    bytes2[0] = 42;
-                    let active2 = mapping_va_release(lease2);
+                MigrationTaskSlot::RunningOn0(running) => {
+                    migration_running_discard(running);
+                    let (empty, page) = unmap_page(occupied, mapping);
+                    page_free(page);
+                    let inactive_back = address_space_deactivate(active_ready, empty);
+                    address_space_free(inactive_back);
+                }
+                MigrationTaskSlot::SavedFrom0(saved) => {
+                    let (empty, old_back) = unmap_page(occupied, mapping);
+                    page_free(old_back);
+                    match page_alloc() {
+                        PageAllocResult::OutOfMemory => {
+                            migration_task_discard(saved);
+                            let inactive_back = address_space_deactivate(active_ready, empty);
+                            address_space_free(inactive_back);
+                            uart_puts("allocation new failed\n");
+                        }
+                        PageAllocResult::Allocated(new_page) => {
+                            let (occupied2, pending2) = map_page(empty, new_page, va);
+                            let mapping2 = tlb_invalidate(occupied2, pending2);
+                            let lease2 = mapping_va_acquire(active_ready, occupied2, mapping2);
+                            let bytes2 = mapping_va_bytes(lease2);
+                            bytes2[0] = 42;
+                            let active2 = mapping_va_release(lease2);
+                            let cpu0 = address_space_release_cpu(active2, occupied2);
 
-                    dma_publish();
-                    migrate_stage = 3;
-                    interrupt_notify();
-                    while (migrate_stage != 4) { interrupt_wait(); }
-                    dma_consume();
-                    uart_puts("task resumed\n");
+                            transfer_put(MigrationTransfer::Outbound(
+                                (saved, occupied2, mapping2)));
+                            dma_publish(); migrate_stage = 3; interrupt_notify();
+                            while (migrate_stage != 4) { interrupt_wait(); }
+                            dma_consume(); uart_puts("task resumed\n");
 
-                    uart_puts("core0 before: "); uart_print(seen_core0); uart_puts("\n");
-                    uart_puts("core1 cached: "); uart_print(seen_core1_before); uart_puts("\n");
-                    uart_puts("core1 after:  "); uart_print(seen_core1_after); uart_puts("\n");
-
-                    let (empty2, new_back) = unmap_page(occupied2, mapping2);
-                    page_free(new_back);
-                    let inactive2 = address_space_deactivate(active2, empty2);
-                    address_space_free(inactive2);
+                            match transfer_take() {
+                                MigrationTransfer::Empty => { cpu_owner_halt(cpu0); }
+                                MigrationTransfer::Outbound(stale) => {
+                                    transfer_put(MigrationTransfer::Outbound(stale));
+                                    cpu_owner_halt(cpu0);
+                                }
+                                MigrationTransfer::Returned(payload) => {
+                                    let (returned_task, returned_space, returned_mapping) = payload;
+                                    let active0 = address_space_resume_cpu(cpu0, returned_space);
+                                    migration_task_discard(returned_task);
+                                    uart_puts("core0 before: "); uart_print(seen_core0); uart_puts("\n");
+                                    uart_puts("core1 cached: "); uart_print(seen_core1_before); uart_puts("\n");
+                                    uart_puts("core1 after:  "); uart_print(seen_core1_after); uart_puts("\n");
+                                    let (empty2, new_back) = unmap_page(returned_space, returned_mapping);
+                                    page_free(new_back);
+                                    let inactive2 = address_space_deactivate(active0, empty2);
+                                    address_space_free(inactive2);
+                                }
+                            }
+                        }
+                    }
+                }
+                MigrationTaskSlot::RunningOn1(other) => {
+                    migration_running_discard(other);
+                    let (empty, page) = unmap_page(occupied, mapping);
+                    page_free(page);
+                    let inactive_back = address_space_deactivate(active_ready, empty);
+                    address_space_free(inactive_back);
+                }
+                MigrationTaskSlot::SavedFrom1(other) => {
+                    migration_task_discard(other);
+                    let (empty, page) = unmap_page(occupied, mapping);
+                    page_free(page);
+                    let inactive_back = address_space_deactivate(active_ready, empty);
+                    address_space_free(inactive_back);
                 }
             }
         }
@@ -168,17 +362,15 @@ fn core0_migrate_main() {
     uart_puts("done\n");
 }
 
-fn smp_core_main() {
-    let id: usize = rpi3_core_id();
-    if (id == 0) {
-        core0_migrate_main();
-    } else if (id == 1) {
-        core1_migrate_main();
-    } else {
-        while (true) { interrupt_wait(); }
-    }
+fn smp_core1_boot_main(cpu: CpuOwner[1]) {
+    core1_migrate_main(cpu);
 }
 
-fn app_main() {
-    smp_core_main();
+fn rpi3_boot_main(cpu: CpuOwner[0]) {
+    platform_init();
+    core0_migrate_main(cpu);
+    platform_shutdown();
 }
+
+fn smp_core_main() { while (true) { interrupt_wait(); } }
+fn app_main() {}

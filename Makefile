@@ -1531,13 +1531,13 @@ RPI3_VM_TASK_SWITCH_OBJS := $(foreach e,$(RPI3_VM_TASK_SWITCH_EXAMPLES),examples
 $(RPI3_VM_TASK_SWITCH_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
-# Issue #67 Stage 7 baseline: a preempted saved frame migrates from core 0 to
+# Issue #67 Stage 7: a typed preempted-frame owner migrates from core 0 to
 # core 1 after a broadcast TLB shootdown replaces its same-VA page.
 RPI3_SMP_TASK_MIGRATE_EXAMPLES := smp_task_migrate
 RPI3_SMP_TASK_MIGRATE_OBJS := $(foreach e,$(RPI3_SMP_TASK_MIGRATE_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_SMP_TASK_MIGRATE_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 # Issue #67 Stage 3 integration baseline: zero-copy PageOwner transfer between
 # cores 0 and 1, with map/TLBI/use/unmap on each side.  This links the SMP

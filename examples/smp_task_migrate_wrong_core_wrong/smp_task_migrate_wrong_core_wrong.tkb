@@ -1,0 +1,27 @@
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+fn app_main() {
+    page_pool_init();
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {}
+        PageAllocResult::Allocated(page) => {
+            let slot: {0..<2 as usize} = 0;
+            let (space, active) = address_space_activate(address_space_new(slot), 0);
+            let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+            let (occupied, pending) = map_page(space, page, va);
+            let mapping = tlb_invalidate(occupied, pending);
+            match migration_task_new_0_to_1(4096) {
+                MigrationTaskSlot::RunningOn0(task) => {
+                    let ready: {1..<2 as usize} = 1;
+                    match migration_task_quiesce_0_to_1(task, 4096, ready) {
+                        MigrationTaskSlot::SavedFrom0(saved) => {
+                            let running = migration_task_resume_on_1(saved, active, mapping);
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
