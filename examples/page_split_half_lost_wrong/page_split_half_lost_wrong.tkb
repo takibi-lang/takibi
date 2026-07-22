@@ -1,0 +1,7 @@
+use "examples/page_split_join/page_split_join_core.tkb";
+
+fn misuse() {
+    let halves = page_range_split_8(page_range_whole());
+    let (left, right) = halves;
+    page_range_release_left(left);
+}

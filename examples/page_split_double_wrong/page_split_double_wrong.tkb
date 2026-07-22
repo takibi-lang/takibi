@@ -1,0 +1,7 @@
+use "examples/page_split_join/page_split_join_core.tkb";
+
+fn misuse() {
+    let whole = page_range_whole();
+    let first = page_range_split_8(whole);
+    let second = page_range_split_8(whole);
+}

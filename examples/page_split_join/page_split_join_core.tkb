@@ -1,0 +1,34 @@
+// Linear ownership protocol for the concrete 16-page split/join demo.
+
+private linear struct PageRangeOwner[base: usize, count: usize] {
+    private base_value: usize @ base;
+    private count_value: usize @ count;
+}
+
+variant RangeSlot {
+    Empty;
+    Right(PageRangeOwner[8, 8]);
+}
+
+fn page_range_whole() -> PageRangeOwner[0, 16] {
+    let mut whole: PageRangeOwner[0, 16] = {0, 16};
+    return whole;
+}
+
+fn page_range_split_8(range: sink PageRangeOwner[0, 16])
+        -> (PageRangeOwner[0, 8], PageRangeOwner[8, 8]) {
+    let mut left: PageRangeOwner[0, 8] = {range.base_value, 8};
+    let mut right: PageRangeOwner[8, 8] = {8, 8};
+    return (left, right);
+}
+
+fn page_range_join_8(left: sink PageRangeOwner[0, 8],
+                     right: sink PageRangeOwner[8, 8])
+        -> PageRangeOwner[0, 16] {
+    let mut whole: PageRangeOwner[0, 16] = {left.base_value, 16};
+    return whole;
+}
+
+fn page_range_release(whole: sink PageRangeOwner[0, 16]) {}
+fn page_range_release_left(left: sink PageRangeOwner[0, 8]) {}
+fn page_range_release_right(right: sink PageRangeOwner[8, 8]) {}

@@ -1539,13 +1539,12 @@ RPI3_SMP_TASK_MIGRATE_OBJS := $(foreach e,$(RPI3_SMP_TASK_MIGRATE_EXAMPLES),exam
 $(RPI3_SMP_TASK_MIGRATE_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
-# Contiguous range split/join baseline.  Keep this first working milestone
-# unrefined; the next commit replaces RawPageRange with linear indexed owners.
+# Typed contiguous range split/join milestone.
 RPI3_PAGE_SPLIT_JOIN_EXAMPLES := page_split_join
 RPI3_PAGE_SPLIT_JOIN_OBJS := $(foreach e,$(RPI3_PAGE_SPLIT_JOIN_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
-$(RPI3_PAGE_SPLIT_JOIN_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+$(RPI3_PAGE_SPLIT_JOIN_OBJS): examples/%_rpi3.o: examples/%.tkb examples/page_split_join/page_split_join_core.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 # Issue #67 Stage 3 integration baseline: zero-copy PageOwner transfer between
 # cores 0 and 1, with map/TLBI/use/unmap on each side.  This links the SMP

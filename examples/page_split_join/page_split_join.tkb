@@ -1,10 +1,11 @@
-// Contiguous page-range split/join baseline.
+// Typed contiguous page-range split/join demo.
 //
-// Core 0 splits one 16-page range at page 8.  It writes the left half while
-// core 1 writes the right half, then joins the adjacent ranges and verifies
-// the whole allocation.  This first milestone intentionally uses copyable
-// runtime range descriptors and ordinary checked indexing; the follow-up
-// replaces them with linear indexed owners under --forbid-trap.
+// The singleton 16-page owner is consumed into two statically non-overlapping
+// halves.  The right owner moves through a stable cross-core mailbox; only
+// after it returns can core 0 consume both adjacent halves to recover the
+// whole owner.
+
+use "examples/page_split_join/page_split_join_core.tkb";
 
 extern fn rpi3_core_id() -> usize;
 
@@ -12,76 +13,95 @@ const RANGE_PAGE_SIZE: usize = 4096;
 const RANGE_PAGE_COUNT: usize = 16;
 const RANGE_BYTE_COUNT: usize = 65536;
 
-linear struct RawPageRange[id: usize] {
-    private tag: usize @ id;
-    base: usize;
-    count: usize;
+private linear view RangeGuard[lock: addr];
+
+fn range_guard(lock: *i32 @ place) -> RangeGuard[place] {
+    return view RangeGuard[place];
+}
+
+fn range_guard_done(guard: sink RangeGuard[place]) {}
+
+struct RangeMailbox align(64) {
+    private mutex: i32;
+    private owner: RangeSlot;
 }
 
 private let mut range_bytes: [u8; RANGE_BYTE_COUNT] align(4096);
+private let mut range_mailbox: RangeMailbox;
 private let mut range_stage: io i32 = 0;
-private let mut remote_base: usize = 0;
-private let mut remote_count: usize = 0;
 
-fn range_split(range: sink RawPageRange[id], at: usize)
-        -> (RawPageRange[id], RawPageRange[id]) {
-    let mut left: RawPageRange[id] = { range.tag, range.base, at };
-    let mut right: RawPageRange[id] = { range.tag, range.base + at, range.count - at };
-    return (left, right);
-}
-
-fn range_fill(range: borrow RawPageRange[id], value: u8) {
-    for page: usize in 0..<range.count {
-        let index: usize = (range.base + page) * RANGE_PAGE_SIZE;
+fn range_fill_left(range: borrow PageRangeOwner[0, 8], value: u8) {
+    for page: usize in 0..<8 {
+        let index: {0..<28673 as usize} = page * RANGE_PAGE_SIZE;
         range_bytes[index] = value;
-        range_bytes[index + RANGE_PAGE_SIZE - 1] = value;
+        range_bytes[index + 4095] = value;
     }
 }
 
-fn range_join(left: sink RawPageRange[id], right: sink RawPageRange[id]) -> RawPageRange[id] {
-    if (left.base + left.count == right.base) {
-        let mut whole: RawPageRange[id] = { left.tag, left.base, left.count + right.count };
-        return whole;
+fn range_fill_right(range: borrow PageRangeOwner[8, 8], value: u8) {
+    for page: usize in 0..<8 {
+        let index: {32768..<61441 as usize} = (8 + page) * RANGE_PAGE_SIZE;
+        range_bytes[index] = value;
+        range_bytes[index + 4095] = value;
     }
-    let mut invalid: RawPageRange[id] = {left.tag, 0, 0};
-    return invalid;
 }
 
-fn range_discard(range: sink RawPageRange[id]) {}
+fn range_send(right: PageRangeOwner[8, 8], stage: i32) {
+    let guard = range_guard(&range_mailbox.mutex);
+    let previous: RangeSlot = stable_replace(
+        guard, &range_mailbox.mutex, range_mailbox.owner,
+        RangeSlot::Right(right));
+    match previous {
+        RangeSlot::Empty => {}
+        RangeSlot::Right(stale) => { page_range_release_right(stale); }
+    }
+    range_guard_done(guard);
+    dma_publish();
+    range_stage = stage;
+    interrupt_notify();
+}
+
+fn range_receive(stage: i32) -> RangeSlot {
+    while (range_stage != stage) { interrupt_wait(); }
+    dma_consume();
+    let guard = range_guard(&range_mailbox.mutex);
+    let result: RangeSlot = stable_replace(
+        guard, &range_mailbox.mutex, range_mailbox.owner,
+        RangeSlot::Empty);
+    range_guard_done(guard);
+    return result;
+}
 
 fn core1_main() {
-    while (range_stage != 1) { interrupt_wait(); }
-    dma_consume();
-    let mut right: RawPageRange[0] = { 0, remote_base, remote_count };
-    range_fill(right, 22);
-    range_discard(right);
-    dma_publish();
-    range_stage = 2;
-    interrupt_notify();
+    match range_receive(1) {
+        RangeSlot::Empty => {}
+        RangeSlot::Right(right) => {
+            range_fill_right(right, 22);
+            range_send(right, 2);
+        }
+    }
     while (true) { interrupt_wait(); }
 }
 
 fn core0_main() {
     uart_puts("page_split_join\n");
-    let mut whole: RawPageRange[0] = {0, 0, RANGE_PAGE_COUNT};
-    let halves = range_split(whole, 8);
+    let halves = page_range_split_8(page_range_whole());
     let (left, right) = halves;
-    range_fill(left, 11);
-    remote_base = right.base;
-    remote_count = right.count;
-    dma_publish();
-    range_stage = 1;
-    interrupt_notify();
-    while (range_stage != 2) { interrupt_wait(); }
-    dma_consume();
+    range_fill_left(left, 11);
+    range_send(right, 1);
 
-    let joined = range_join(left, right);
-    uart_puts("left first:  "); uart_print(range_bytes[0]); uart_puts("\n");
-    uart_puts("left last:   "); uart_print(range_bytes[8 * RANGE_PAGE_SIZE - 1]); uart_puts("\n");
-    uart_puts("right first: "); uart_print(range_bytes[8 * RANGE_PAGE_SIZE]); uart_puts("\n");
-    uart_puts("right last:  "); uart_print(range_bytes[RANGE_BYTE_COUNT - 1]); uart_puts("\n");
-    uart_puts("joined pages: "); uart_print(joined.count); uart_puts("\n");
-    range_discard(joined);
+    match range_receive(2) {
+        RangeSlot::Empty => { page_range_release_left(left); }
+        RangeSlot::Right(returned) => {
+            let joined = page_range_join_8(left, returned);
+            uart_puts("left first:  "); uart_print(range_bytes[0]); uart_puts("\n");
+            uart_puts("left last:   "); uart_print(range_bytes[32767]); uart_puts("\n");
+            uart_puts("right first: "); uart_print(range_bytes[32768]); uart_puts("\n");
+            uart_puts("right last:  "); uart_print(range_bytes[65535]); uart_puts("\n");
+            uart_puts("joined pages: 16\n");
+            page_range_release(joined);
+        }
+    }
     uart_puts("done\n");
 }
 
