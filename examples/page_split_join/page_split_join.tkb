@@ -1,0 +1,95 @@
+// Contiguous page-range split/join baseline.
+//
+// Core 0 splits one 16-page range at page 8.  It writes the left half while
+// core 1 writes the right half, then joins the adjacent ranges and verifies
+// the whole allocation.  This first milestone intentionally uses copyable
+// runtime range descriptors and ordinary checked indexing; the follow-up
+// replaces them with linear indexed owners under --forbid-trap.
+
+extern fn rpi3_core_id() -> usize;
+
+const RANGE_PAGE_SIZE: usize = 4096;
+const RANGE_PAGE_COUNT: usize = 16;
+const RANGE_BYTE_COUNT: usize = 65536;
+
+linear struct RawPageRange[id: usize] {
+    private tag: usize @ id;
+    base: usize;
+    count: usize;
+}
+
+private let mut range_bytes: [u8; RANGE_BYTE_COUNT] align(4096);
+private let mut range_stage: io i32 = 0;
+private let mut remote_base: usize = 0;
+private let mut remote_count: usize = 0;
+
+fn range_split(range: sink RawPageRange[id], at: usize)
+        -> (RawPageRange[id], RawPageRange[id]) {
+    let mut left: RawPageRange[id] = { range.tag, range.base, at };
+    let mut right: RawPageRange[id] = { range.tag, range.base + at, range.count - at };
+    return (left, right);
+}
+
+fn range_fill(range: borrow RawPageRange[id], value: u8) {
+    for page: usize in 0..<range.count {
+        let index: usize = (range.base + page) * RANGE_PAGE_SIZE;
+        range_bytes[index] = value;
+        range_bytes[index + RANGE_PAGE_SIZE - 1] = value;
+    }
+}
+
+fn range_join(left: sink RawPageRange[id], right: sink RawPageRange[id]) -> RawPageRange[id] {
+    if (left.base + left.count == right.base) {
+        let mut whole: RawPageRange[id] = { left.tag, left.base, left.count + right.count };
+        return whole;
+    }
+    let mut invalid: RawPageRange[id] = {left.tag, 0, 0};
+    return invalid;
+}
+
+fn range_discard(range: sink RawPageRange[id]) {}
+
+fn core1_main() {
+    while (range_stage != 1) { interrupt_wait(); }
+    dma_consume();
+    let mut right: RawPageRange[0] = { 0, remote_base, remote_count };
+    range_fill(right, 22);
+    range_discard(right);
+    dma_publish();
+    range_stage = 2;
+    interrupt_notify();
+    while (true) { interrupt_wait(); }
+}
+
+fn core0_main() {
+    uart_puts("page_split_join\n");
+    let mut whole: RawPageRange[0] = {0, 0, RANGE_PAGE_COUNT};
+    let halves = range_split(whole, 8);
+    let (left, right) = halves;
+    range_fill(left, 11);
+    remote_base = right.base;
+    remote_count = right.count;
+    dma_publish();
+    range_stage = 1;
+    interrupt_notify();
+    while (range_stage != 2) { interrupt_wait(); }
+    dma_consume();
+
+    let joined = range_join(left, right);
+    uart_puts("left first:  "); uart_print(range_bytes[0]); uart_puts("\n");
+    uart_puts("left last:   "); uart_print(range_bytes[8 * RANGE_PAGE_SIZE - 1]); uart_puts("\n");
+    uart_puts("right first: "); uart_print(range_bytes[8 * RANGE_PAGE_SIZE]); uart_puts("\n");
+    uart_puts("right last:  "); uart_print(range_bytes[RANGE_BYTE_COUNT - 1]); uart_puts("\n");
+    uart_puts("joined pages: "); uart_print(joined.count); uart_puts("\n");
+    range_discard(joined);
+    uart_puts("done\n");
+}
+
+fn smp_core_main() {
+    let id: usize = rpi3_core_id();
+    if (id == 0) { core0_main(); }
+    else if (id == 1) { core1_main(); }
+    else { while (true) { interrupt_wait(); } }
+}
+
+fn app_main() { smp_core_main(); }
