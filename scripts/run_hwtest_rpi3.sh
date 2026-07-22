@@ -34,6 +34,7 @@ CAPTURE_STABLE_POLLS=6
 PASS=0
 FAIL=0
 FAILED_TESTS=()
+FAILURE_ARTIFACT_ROOT="${RPI3_FAILURE_ARTIFACT_DIR:-$REPO_ROOT/_build/hwtest-rpi3-failures}"
 
 if [ -t 1 ]; then
     GRN='\033[32m' RED='\033[31m' RST='\033[0m'
@@ -58,6 +59,30 @@ cleanup_reader() {
 }
 trap cleanup_reader EXIT
 trap 'cleanup_reader; exit 130' INT TERM HUP
+
+# Preserve the evidence needed to diagnose a real-hardware failure.  Success
+# logs remain temporary so an ordinary 69-test run does not accumulate noise;
+# each failing fixture gets one stable, human-readable directory that a later
+# run of the same fixture replaces.  This helper is shared by every runner
+# shape below (plain, suite, stdin, and USB MSC), making RPi3 the reference
+# implementation before considering the same policy on other targets.
+preserve_failure_artifacts() {
+    local name="$1" uart_log="$2" loader_log="$3" reset_log="${4:-}"
+    local safe_name artifact_dir
+    safe_name=$(printf '%s' "$name" | tr -cs 'A-Za-z0-9._-' '_')
+    artifact_dir="$FAILURE_ARTIFACT_ROOT/$safe_name"
+    mkdir -p "$artifact_dir"
+    if [ -f "$uart_log" ]; then
+        cp "$uart_log" "$artifact_dir/uart.log"
+    fi
+    if [ -f "$loader_log" ]; then
+        cp "$loader_log" "$artifact_dir/loader.log"
+    fi
+    if [ -n "$reset_log" ] && [ -f "$reset_log" ]; then
+        cp "$reset_log" "$artifact_dir/reset.log"
+    fi
+    printf "       failure artifacts: %s\n" "$artifact_dir"
+}
 
 # read_until_quiet: same idle-detection technique as
 # scripts/run_hwtest_ram.sh (see that file for the full comment) --
@@ -94,6 +119,42 @@ read_until_quiet() {
     ACTIVE_READER_PID=""
 }
 
+# read_until_marker OUTFILE MAX_SECS MARKER POST_START_CMD
+#
+# Some storage tests legitimately stay silent longer than any useful generic
+# idle threshold.  Keep the UART reader attached until the firmware's explicit
+# terminal marker arrives, with MAX_SECS as a hard upper bound so a wedged
+# device cannot hang the test suite forever.  CAPTURE_MARKER_FOUND lets the
+# caller distinguish a completed failing test from a timeout/truncated run.
+CAPTURE_MARKER_FOUND=0
+read_until_marker() {
+    local outfile="$1" max_secs="$2" marker="$3" post_start_cmd="${4:-}"
+    : > "$outfile"
+    cat "$SERIAL_DEV" > "$outfile" 2>/dev/null 9>&- &
+    local catpid=$!
+    ACTIVE_READER_PID=$catpid
+    if [ -n "$post_start_cmd" ]; then
+        sleep 0.2
+        eval "$post_start_cmd"
+    fi
+    local max_polls poll=0
+    max_polls=$(awk -v m="$max_secs" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
+    CAPTURE_MARKER_FOUND=0
+    while [ "$poll" -lt "$max_polls" ]; do
+        sleep "$POLL_INTERVAL"
+        if grep -aFq "$marker" "$outfile" 2>/dev/null; then
+            CAPTURE_MARKER_FOUND=1
+            # Let the UART reader consume the marker's trailing CRLF.
+            sleep 0.1
+            break
+        fi
+        poll=$((poll + 1))
+    done
+    kill "$catpid" 2>/dev/null || true
+    wait "$catpid" 2>/dev/null || true
+    ACTIVE_READER_PID=""
+}
+
 # reset_before_test NAME
 #
 # Full BCM2837 chip reset (scripts/rpi3_jtag_reset.sh) run before EVERY
@@ -122,6 +183,7 @@ reset_before_test() {
         sed 's/^/       /' "$reset_log"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        preserve_failure_artifacts "$name" /dev/null /dev/null "$reset_log"
         rm -f "$reset_log"
         exit 1
     fi
@@ -166,6 +228,7 @@ run_hw_test_rpi3() {
         sed 's/^/       /' "$load_log"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        preserve_failure_artifacts "$name" "$tmp_out" "$load_log"
         rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
         exit 1
     elif cmp -s "$expected" "$tmp_out"; then
@@ -177,6 +240,7 @@ run_hw_test_rpi3() {
         printf "       actual:   %s\n" "$(od -An -c "$tmp_out" | tr -s ' \n' ' ')"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        preserve_failure_artifacts "$name" "$tmp_out" "$load_log"
     fi
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
 }
@@ -188,7 +252,7 @@ run_hw_test_rpi3() {
 run_hw_test_rpi3_suite() {
     local suite_name="$1" elf="$2" manifest="$3"
     local tmp_drain tmp_out load_log load_status_file load_status
-    local report status name expected actual
+    local report status name expected actual suite_failed=0
     tmp_drain=$(mktemp)
     tmp_out=$(mktemp)
     load_log=$(mktemp)
@@ -206,6 +270,7 @@ run_hw_test_rpi3_suite() {
         sed 's/^/       /' "$load_log"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$suite_name (rpi3)")
+        preserve_failure_artifacts "$suite_name (rpi3)" "$tmp_out" "$load_log"
         rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file" "$report"
         exit 1
     fi
@@ -226,14 +291,19 @@ run_hw_test_rpi3_suite() {
                 printf "       got bytes:      %s\n" "$actual"
                 FAIL=$((FAIL + 1))
                 FAILED_TESTS+=("$name (rpi3)")
+                suite_failed=1
                 ;;
             ERROR)
                 printf "${RED}FAIL${RST}  %s (rpi3)  (%s)\n" "$suite_name" "$name"
                 FAIL=$((FAIL + 1))
                 FAILED_TESTS+=("$suite_name (rpi3)")
+                suite_failed=1
                 ;;
         esac
     done < "$report"
+    if [ "$suite_failed" -ne 0 ]; then
+        preserve_failure_artifacts "$suite_name (rpi3)" "$tmp_out" "$load_log"
+    fi
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file" "$report"
 }
 
@@ -302,6 +372,7 @@ run_hw_test_rpi3_stdin() {
         sed 's/^/       /' "$load_log"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        preserve_failure_artifacts "$name" "$tmp_out" "$load_log"
         rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
         exit 1
     elif cmp -s "$expected" "$tmp_out"; then
@@ -313,6 +384,7 @@ run_hw_test_rpi3_stdin() {
         printf "       actual:   %s\n" "$(od -An -c "$tmp_out" | tr -s ' \n' ' ')"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        preserve_failure_artifacts "$name" "$tmp_out" "$load_log"
     fi
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
 }
@@ -337,7 +409,7 @@ run_hw_test_rpi3_usb_msc() {
 
     reset_before_test "$name"
     read_until_quiet "$tmp_drain" "$DRAIN_MAX_SECS" "$DRAIN_STABLE_POLLS" 0
-    read_until_quiet "$tmp_out" 20 140 1 \
+    read_until_marker "$tmp_out" 30 "done" \
         "if \"$REPO_ROOT/scripts/rpi3_jtag_load.sh\" \"$elf\" > \"$load_log\" 2>&1; then load_status=0; else load_status=\$?; fi; echo \"\$load_status\" > \"$load_status_file\""
 
     load_status=$(cat "$load_status_file" 2>/dev/null || echo 1)
@@ -347,8 +419,14 @@ run_hw_test_rpi3_usb_msc() {
         sed 's/^/       /' "$load_log"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        preserve_failure_artifacts "$name" "$tmp_out" "$load_log"
         rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
         exit 1
+    elif [ "$CAPTURE_MARKER_FOUND" -eq 0 ]; then
+        printf "${RED}FAIL${RST}  %s  (timed out after 30s waiting for UART marker 'done')\n" "$name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+        preserve_failure_artifacts "$name" "$tmp_out" "$load_log"
     elif python3 "$(dirname "$0")/$script" "$tmp_out"; then
         printf "${GRN}PASS${RST}  %s\n" "$name"
         PASS=$((PASS + 1))
@@ -356,6 +434,7 @@ run_hw_test_rpi3_usb_msc() {
         printf "${RED}FAIL${RST}  %s\n" "$name"
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$name")
+        preserve_failure_artifacts "$name" "$tmp_out" "$load_log"
     fi
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file"
 }
