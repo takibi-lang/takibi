@@ -2020,9 +2020,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       if List.exists contains_view_ty ts then
         raise (TypeError (e.loc,
           "an erased view cannot be stored in a runtime tuple in Slice 2"));
-      if List.exists contains_variant_ty ts then
+      if List.exists (fun t ->
+           contains_variant_ty t
+           && match repr t with TVariant _ -> false | _ -> true) ts then
         raise (TypeError (e.loc,
-          "a variant cannot be nested in a runtime tuple in Slice 3"));
+          "a variant cannot be nested below a direct runtime tuple component in Slice 3"));
       if List.exists contains_stable_owner_value_ty ts then
         raise (TypeError (e.loc,
           "a stable owner container cannot be nested in a runtime tuple"));
@@ -3822,6 +3824,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeVariant _ -> true
     | _ -> false
   in
+  let is_direct_variant_tuple = function
+    | Ast.TypeTuple elements ->
+        List.exists is_direct_variant_type elements
+        && List.for_all (fun element ->
+             not (type_mentions_variant element)
+             || is_direct_variant_type element) elements
+    | _ -> false
+  in
   let rec type_mentions_exists = function
     | Ast.TypeExists _ -> true
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
@@ -3972,7 +3982,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         if type_mentions_view ty && not (is_direct_view_type ty) then
           raise (TypeError (loc,
             "an erased view must be the entire function parameter type; it cannot live inside a runtime container or function pointer"));
-        if type_mentions_variant ty && not (is_direct_variant_type ty) then
+        if type_mentions_variant ty && not (is_direct_variant_type ty)
+           && not (is_direct_variant_tuple ty) then
           raise (TypeError (loc,
             "a variant must be the entire function parameter type in Slice 3"));
         if type_mentions_exists ty then
@@ -3997,7 +4008,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     if type_mentions_view ty && not (is_direct_view_type ty) then
       raise (TypeError (loc,
         "an erased view cannot live inside a runtime container or function pointer"));
-    if type_mentions_variant ty && not (is_direct_variant_type ty) then
+    if type_mentions_variant ty && not (is_direct_variant_type ty)
+       && not (is_direct_variant_tuple ty) then
       raise (TypeError (loc,
         "a variant cannot live inside another runtime container in Slice 3"));
     if type_mentions_exists ty then

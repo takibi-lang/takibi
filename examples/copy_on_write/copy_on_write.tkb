@@ -5,11 +5,15 @@
 use "examples/vm_page_map/vm_page_map_core.tkb";
 
 private linear view CowSlotGuard[core: usize, lock: addr];
+private linear struct CowCellVacant[core: usize] {
+    private core_tag: usize @ core;
+}
 fn cow_slot_guard(core_tag: usize @ core,
                   lock: *i32 @ place) -> CowSlotGuard[core, place] {
     return view CowSlotGuard[core, place];
 }
 fn cow_slot_guard_done(guard: sink CowSlotGuard[core, place]) {}
+fn cow_cell_vacant_done(vacant: sink CowCellVacant[core]) {}
 
 struct CowStateStore {
     private lock: i32;
@@ -17,48 +21,59 @@ struct CowStateStore {
 }
 private let mut cow_store: CowStateStore;
 
-fn cow_state_put(core_tag: usize @ core, next: CowFaultState) {
-    let guard = cow_slot_guard(core_tag, &cow_store.lock);
-    let previous: CowFaultState = stable_replace(
-        guard, &cow_store.lock, cow_store.state, next);
-    match previous {
-        CowFaultState::Empty => {}
-        CowFaultState::Shared(stale) => {
-            // Private protocol: the slot is empty at every put point.
-            cow_state_put(core_tag, CowFaultState::Shared(stale));
-        }
-        CowFaultState::Private(stale) => {
-            cow_state_put(core_tag, CowFaultState::Private(stale));
-        }
-    }
-    cow_slot_guard_done(guard);
+fn cow_cell_open(installed: borrow ExceptionHandlerInstalled[core],
+                 core_tag: usize @ core) -> CowCellVacant[core] {
+    // The boot-installed capability authorizes the initial Empty cell.  The
+    // returned view starts the same linear vacancy protocol as cow_state_take.
+    let mut vacant: CowCellVacant[core] = { core_tag };
+    return vacant;
 }
 
-fn cow_state_take(core_tag: usize @ core) -> CowFaultState {
+fn cow_state_put(vacant: sink CowCellVacant[core],
+                 next: CowFaultState) {
+    let guard = cow_slot_guard(vacant.core_tag, &cow_store.lock);
+    let previous: CowFaultState = stable_replace(
+        guard, &cow_store.lock, cow_store.state, next);
+    cow_slot_guard_done(guard);
+    match previous {
+        CowFaultState::Empty => { cow_cell_vacant_done(vacant); }
+        CowFaultState::Shared(stale) => {
+            // Private protocol: the slot is empty at every put point.
+            cow_state_put(vacant, CowFaultState::Shared(stale));
+        }
+        CowFaultState::Private(stale) => {
+            cow_state_put(vacant, CowFaultState::Private(stale));
+        }
+    }
+}
+
+fn cow_state_take(core_tag: usize @ core)
+        -> (CowFaultState, CowCellVacant[core]) {
     let guard = cow_slot_guard(core_tag, &cow_store.lock);
     let state: CowFaultState = stable_replace(
         guard, &cow_store.lock, cow_store.state, CowFaultState::Empty);
     cow_slot_guard_done(guard);
-    return state;
+    let mut vacant: CowCellVacant[core] = { core_tag };
+    return (state, vacant);
 }
 
 fn rpi3_sync_exception_dispatch(esr: usize, far: usize, elr: usize,
                                 core_tag: usize @ core) -> i32
         !{exception} {
-    let state = cow_state_take(core_tag);
+    let (state, vacant) = cow_state_take(core_tag);
     let next = cow_fault_transition(state, esr, far);
     let handled: i32 = cow_fault_was_handled();
-    cow_state_put(core_tag, next);
+    cow_state_put(vacant, next);
     return handled;
 }
 
 fn cow_app_main(installed: ExceptionHandlerInstalled[0]) {
     let core_tag = exception_handler_core(installed);
+    let initial_vacant = cow_cell_open(installed, core_tag);
     page_pool_init();
     cow_store.lock = 1;
     uart_puts("copy_on_write\n");
     match page_alloc() {
-        PageAllocResult::OutOfMemory => { uart_puts("allocation failed\n"); }
         PageAllocResult::Allocated(page) => {
             let initial = page_owner_bytes(page);
             initial[0] = 11;
@@ -77,7 +92,7 @@ fn cow_app_main(installed: ExceptionHandlerInstalled[0]) {
                 address_space_switch_activate(active0, inactive1);
             let (space1, pending1) = map_page_read_only(empty1, lease1, va);
             let mapping1 = tlb_invalidate_read_only(space1, pending1);
-            cow_state_put(core_tag,
+            cow_state_put(initial_vacant,
                           CowFaultState::Shared((active1, space0, mapping0,
                                                 space1, mapping1,
                                                 lease0, lease1)));
@@ -87,11 +102,14 @@ fn cow_app_main(installed: ExceptionHandlerInstalled[0]) {
             *ptr = 42;
             uart_puts("after write: "); uart_print(*ptr); uart_puts("\n");
 
-            let final = cow_state_take(core_tag);
+            let (final, final_vacant) = cow_state_take(core_tag);
             match final {
-                CowFaultState::Empty => { uart_puts("missing state\n"); }
+                CowFaultState::Empty => {
+                    cow_cell_vacant_done(final_vacant);
+                    uart_puts("missing state\n");
+                }
                 CowFaultState::Shared(stale) => {
-                    cow_state_put(core_tag, CowFaultState::Shared(stale));
+                    cow_state_put(final_vacant, CowFaultState::Shared(stale));
                     uart_puts("fault not handled\n");
                 }
                 CowFaultState::Private(owner) => {
@@ -113,9 +131,14 @@ fn cow_app_main(installed: ExceptionHandlerInstalled[0]) {
                     let source_inactive =
                         address_space_deactivate(active_source, source_empty);
                     address_space_free(source_inactive);
+                    cow_cell_vacant_done(final_vacant);
                     uart_puts("cleanup: ok\n");
                 }
             }
+        }
+        PageAllocResult::OutOfMemory => {
+            cow_state_put(initial_vacant, CowFaultState::Empty);
+            uart_puts("allocation failed\n");
         }
     }
     uart_puts("done\n");

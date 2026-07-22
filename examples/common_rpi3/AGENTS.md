@@ -371,6 +371,14 @@ stable address.  There is still one physical COW cell because the example runs
 on core 0; the indexed access protocol captures the concrete requirement
 without weakening stable-owner storage by placing it in an array.
 
+`cow_state_take` now moves the linear `CowFaultState` out together with a
+`CowCellVacant[core]` owner.  `cow_state_put` consumes that exact vacancy after
+installing the successor state.  Thus an exception path cannot return while
+the cell is empty: either the state or its vacancy remains as an unfulfilled
+linear obligation.  This concrete need also lifted the transient tuple rule
+just enough to return a direct linear variant beside a linear owner; nested or
+stored variants remain rejected.
+
 GitHub issue #140. Status: 69 examples ported and passing `make
 hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level
 `EXAMPLES` list EXCEPT

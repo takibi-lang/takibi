@@ -4580,7 +4580,26 @@ let infer_tests = [
         fn tmint2() -> *TupOb2 { return 0 as usize as *TupOb2; }
         fn leak() -> i32 {
           let p: (i32, *TupOb2) = (1, tmint2());
-          return 0;
+        return 0;
+        }");
+
+  Alcotest.test_case "tuple: direct linear variant and owner may return together" `Quick
+    (expect_ok
+       "linear struct TupleVacancy2a[n: usize] { value: usize @ n; }
+        variant TupleState2a { Empty; Full(i32); }
+        fn tuple_take2a(tag: usize @ n)
+            -> (TupleState2a, TupleVacancy2a[n]) {
+          let mut vacancy: TupleVacancy2a[n] = { tag };
+          return (TupleState2a::Empty, vacancy);
+        }
+        fn tuple_vacancy_done2a(v: sink TupleVacancy2a[n]) {}
+        fn tuple_use2a(tag: usize @ n) {
+          let (state, vacancy) = tuple_take2a(tag);
+          match state {
+            TupleState2a::Empty => {}
+            TupleState2a::Full(value) => {}
+          }
+          tuple_vacancy_done2a(vacancy);
         }");
 
   Alcotest.test_case "tuple join-kind: consuming the tuple on only ONE branch \
@@ -5570,6 +5589,13 @@ let infer_tests = [
     (expect_ok
        "fn sync_helper29i() { interrupt_notify(); }
         fn sync_handler29i() !{exception} { sync_helper29i(); }");
+
+  Alcotest.test_case "Exception: handler cannot abandon a linear cell vacancy" `Quick
+    (expect_type_error "linear parameter 'vacant' is not consumed"
+       "private linear struct HandlerVacancy29j[core: usize] {
+          private core_tag: usize @ core;
+        }
+        fn sync_handler29j(vacant: HandlerVacancy29j[core]) !{exception} {}");
 
   Alcotest.test_case "Slice 5: a cast cannot invent a non-blocking contract" `Quick
     (expect_type_error "cannot cast through an explicit function-pointer effect contract"

@@ -1156,6 +1156,15 @@ This keeps the current one-cell/core-0 implementation honest without putting
 linear owner variants in an array or pretending a multicore cell allocator is
 already needed.
 
+Taking a stable cell returns its direct linear variant state together with a
+CPU-indexed linear vacancy owner.  Returning the successor state requires
+consuming that vacancy; abandoning any handler path is therefore a compile
+error.  Takibi permits the required transient direct tuple of
+the form `(Variant, LinearOwner)` in function parameters, locals, and return
+values.  This does not permit variants behind pointers or inside arrays,
+slices, structs, function pointers, or nested tuples.  The tuple's joined
+linear kind makes both components ordinary all-path obligations.
+
 Slice 5 adds explicit call-effect contracts to first-class function types:
 
 ```takibi
