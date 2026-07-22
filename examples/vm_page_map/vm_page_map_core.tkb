@@ -145,6 +145,11 @@ fn exception_handler_install(
     return installed;
 }
 
+fn exception_handler_core(
+        installed: borrow ExceptionHandlerInstalled[core]) -> usize @ core {
+    return installed.core_id;
+}
+
 fn exception_handler_finish(
         installed: sink ExceptionHandlerInstalled[core]) {
 }

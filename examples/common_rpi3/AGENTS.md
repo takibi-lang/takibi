@@ -364,6 +364,13 @@ The handler remains a statically linked strong symbol, so this adds the
 boot-only capability boundary actually required by the COW example without
 introducing a speculative dynamic exception-vector registry.
 
+The synchronous entry also passes `MPIDR_EL1.Aff0` as a fourth argument.  The
+COW dispatch ties that singleton to `CowSlotGuard[core, lock]`, so every
+stable-state take/put is indexed by both the interrupted CPU and the cell's
+stable address.  There is still one physical COW cell because the example runs
+on core 0; the indexed access protocol captures the concrete requirement
+without weakening stable-owner storage by placing it in an array.
+
 GitHub issue #140. Status: 69 examples ported and passing `make
 hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level
 `EXAMPLES` list EXCEPT

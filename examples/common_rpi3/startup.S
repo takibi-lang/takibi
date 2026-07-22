@@ -489,6 +489,8 @@ rpi3_sync_exception_entry:
     mrs     x0, esr_el2
     mrs     x1, far_el2
     mov     x2, x3
+    mrs     x3, mpidr_el1
+    and     x3, x3, #3
     bl      rpi3_sync_exception_dispatch
     cbz     x0, .Lsync_unhandled
     ldp     x0, x1, [sp, #256]

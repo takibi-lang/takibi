@@ -1147,6 +1147,15 @@ Takibi application files can receive and move the capabilities but cannot mint
 one. This is a source-level capability protocol over the statically linked
 exception symbol; it adds no dynamic handler table.
 
+Its stable COW resource cell is CPU-indexed at the access boundary.  The
+erased `CowSlotGuard[core, lock]` carries both the CPU identity delivered by
+the exception-entry ABI and the stable cell's address identity.  Every take
+and put operation requires the same `core` singleton; `stable_replace` still
+uses the guard's one `addr` index to authorize the concrete slot exchange.
+This keeps the current one-cell/core-0 implementation honest without putting
+linear owner variants in an array or pretending a multicore cell allocator is
+already needed.
+
 Slice 5 adds explicit call-effect contracts to first-class function types:
 
 ```takibi
