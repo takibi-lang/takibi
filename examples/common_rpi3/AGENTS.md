@@ -238,14 +238,15 @@ private page, proves the source page stayed unchanged, consumes both leases in
 
 The first real-hardware baseline was committed without `--forbid-trap`; its
 fixture observed 11 before the faulting store, 42 after exception return, and
-11 through the source address space.  A full follow-up hardware run passed
-71/71 fixtures.  The separate hardening pass found no trap sites because the
+11 through the source address space. A full follow-up hardware run passed
+71/71 fixtures. The separate hardening pass found no trap sites because the
 existing page-index and dynamic-VA refinements already prove every copy and
-mapping bound.  The stable slot is intentionally the narrow trusted boundary
-for this experiment; the follow-up design audit will extract requirements for
-an exception effect, nonblocking/non-reentrant handler contracts, boot-minted
-handler authority, CPU/task-indexed resource cells, mandatory state return,
-and handled-resume versus unhandled-noreturn results.
+mapping bound. The later exception-context pass completed the requirements
+this baseline exposed: `!{exception}` rejects blocking and re-entry,
+boot-minted `ExceptionRegistration[0]` installs the handler once, CPU-indexed
+stable-cell access must return a successor state through `CowCellVacant[core]`,
+and `ExceptionResume[elr]` permits only same-ELR resume while unhandled paths
+enter the extern-only noreturn fail-stop.
 
 ## Multiple real address spaces (issue #67 Stage 4)
 
@@ -299,13 +300,14 @@ sequence before returning the new active token. A whole-EL2 invalidation is the
 deliberate minimal correct operation for the current API because the active
 token does not enumerate every VA mapped by its target table.
 
-The `core` singleton is presently supplied by the trusted per-core entry path;
-Takibi does not yet own a boot-minted, unique CPU capability, so the type system
-does not independently prove that a caller cannot lie about that integer. This
-is a narrow remaining trusted invariant, not a claim that scheduler migration
-or arbitrary CPU-token minting is solved. The first baseline and the later
-`--forbid-trap`/active-authority hardening are separate commits. The hardened
-version passed all 152 desk-side tests and all 66 RPi3 hardware fixtures.
+The `core` singleton is supplied by the trusted per-core entry path. The
+`vm_task_switch` boot hook now receives a one-shot `CpuOwner[0]`, so ordinary
+Takibi code cannot mint or reuse that CPU capability; negative fixtures cover
+both. The assembly-to-capability injection remains the reviewed trust root:
+the compiler does not prove that arbitrary external assembly passed the right
+runtime core value. This does not claim that arbitrary CPU-token minting or a
+general scheduler-migration API is solved. The first baseline and the later
+`--forbid-trap`/active-authority hardening are separate commits.
 
 ## Preemptive VM task switching (issue #67 Stage 6)
 

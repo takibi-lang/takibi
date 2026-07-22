@@ -15,6 +15,32 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-22: Typed EL2 COW Exception Context (Issues #67 and #6)
+
+The COW hardware baseline exposed a boundary that could not be modeled by
+moving a linear VM owner through the interrupted stack. The completed follow-up
+keeps those owners in a private stable `CowFaultState` cell and makes the
+exception protocol explicit in the checker. `!{exception}` is a declaration
+role whose reachable graph must be nonblocking, effect-known, and unable to
+re-enter any exception root. `ExceptionRegistration[0]` is supplied only by
+the reviewed RPi3 boot hook and consumed once to install the COW handler.
+
+The state take returns both the linear variant and `CowCellVacant[core]`.
+Restoring the successor consumes that vacancy, so every handler exit either
+returns the state to the cell or fails linear checking. This concrete protocol
+required a deliberately narrow tuple extension: a direct transient tuple may
+contain a direct variant and a linear owner, while variants remain prohibited
+under pointers and in all storage or nested containers.
+
+The handler now returns `ExceptionResume[elr]`, constructed only from the
+incoming saved ELR singleton. The EL2 assembly compares the returned word with
+the saved frame ELR before `eret`. Unhandled paths call the trusted extern-only
+`!{noreturn}` fail-stop; LLVM receives the noreturn attribute and codegen emits
+an unreachable terminator after that call. The final verification was `make
+test` (815 tests), `make check` (162 tests), and `make hwcheck-rpi3` (71
+passed, 0 failed), including a real COW write fault, private remap, same-ELR
+retry, source-page check, and cleanup.
+
 ### 2026-07-22: Two Real Concurrent Address Spaces (Issue #67 Stage 4)
 
 `examples/multi_address_space` closes the semantic gap left by Stage 3's typed

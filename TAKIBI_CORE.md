@@ -10,7 +10,7 @@ core, but the Core described here is not pure HM. It layers refinement facts,
 effects, affine/linear permissions, static identities, privacy boundaries, and
 authority-region constraints into one permission-aware judgement.
 
-Implementation status (2026-07-17): Slices 0 through 6 and the currently
+Implementation status (2026-07-22): Slices 0 through 6 and the currently
 selected post-Slice-6 Core increments are implemented. The
 `Takibi_core` module owns the four-layer vocabulary, the current checker uses
 `Delta.Legacy_flow`, and the indexed runtime-owner subset described in 3.1 is
@@ -43,6 +43,16 @@ direct/general quantifiers and propositions remain design targets. External
 solver/prover integration is not an active implementation target; Z3 and
 Lean4 are only possible future tools and must not be selected merely because
 they appear in this architecture document.
+
+The COW exception-context increment adds checked `!{exception}` roots,
+nonblocking and non-reentrant call-graph contracts, boot-injected linear
+registration owners, CPU-indexed stable-cell access, and a linear vacancy
+obligation that prevents a handler from returning with its cell empty. A
+direct transient tuple may now carry a variant beside a linear owner where a
+state transition must return both; variants remain excluded from all storage
+and nested containers. `ExceptionResume[elr]` plus a trusted extern-only
+`!{noreturn}` fail-stop express the EL2 same-ELR resume boundary. This is a
+concrete exception-entry slice, not a general FFI ownership system.
 
 The examples in this document are elaboration fixtures. Their contracts and
 runtime representations are decisions; punctuation may change when a fixture

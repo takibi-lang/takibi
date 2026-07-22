@@ -19,6 +19,13 @@ solver/prover integration remain outlook. As each surface slice lands,
 SPEC.md stays
 authoritative for the language that actually exists.
 
+The later COW exception-context slice also uses this checker infrastructure:
+`!{exception}` roots are nonblocking and non-reentrant, stable state is moved
+out only with a linear vacancy obligation to restore a successor, and the
+handled outcome carries the saved ELR identity. These are deliberately narrow
+reviewed exception-entry contracts, not a claim that general FFI ownership or
+arbitrary durable owner places are implemented.
+
 Sections 4 through 6 preserve the decision path that led here. Statements in
 those historical stage descriptions about affine requiring one-path
 consumption, affine null sentinels, cast escape hatches, or variants being
