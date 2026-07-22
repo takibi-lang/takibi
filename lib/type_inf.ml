@@ -3629,16 +3629,20 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   "static name '%s' is not bound by this function signature or struct"
                   name))))
   in
-  let validate_effects ~allow_interrupt loc kind name effects =
+  let validate_effects ~allow_interrupt ~allow_noreturn loc kind name effects =
     let seen = ref StringSet.empty in
     List.iter (fun eff ->
-      if eff <> "may_block" && eff <> "interrupt" && eff <> "exception" then
+      if eff <> "may_block" && eff <> "interrupt" && eff <> "exception"
+         && eff <> "noreturn" then
         raise (TypeError (loc, Printf.sprintf
-          "unknown effect '%s' on %s '%s'; supported effects are may_block, interrupt, and exception"
+          "unknown effect '%s' on %s '%s'; supported effects are may_block, interrupt, exception, and noreturn"
           eff kind name));
       if (eff = "interrupt" || eff = "exception") && not allow_interrupt then
         raise (TypeError (loc,
           Printf.sprintf "'%s' is a function declaration role, not a function-pointer call effect" eff));
+      if eff = "noreturn" && not allow_noreturn then
+        raise (TypeError (loc,
+          "'noreturn' is currently restricted to trusted extern function declarations"));
       if StringSet.mem eff !seen then
         raise (TypeError (loc, Printf.sprintf
           "duplicate effect '%s' on %s '%s'" eff kind name));
@@ -3708,7 +3712,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> validate_static_type loc t
     | Ast.TypeFn (args, ret, effects) ->
         Option.iter
-          (validate_effects ~allow_interrupt:false loc "function pointer type" "fn")
+          (validate_effects ~allow_interrupt:false ~allow_noreturn:false loc "function pointer type" "fn")
           effects;
         List.iter (validate_static_type loc) args;
         validate_static_type loc ret
@@ -4090,7 +4094,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   List.iter (function
     | Ast.FuncDef f ->
         Option.iter
-          (validate_effects ~allow_interrupt:true f.def_loc "function" f.name)
+          (validate_effects ~allow_interrupt:true ~allow_noreturn:false f.def_loc "function" f.name)
           f.effects;
         let scope = Hashtbl.create 8 in
         validation_static_scope := Some scope;
@@ -4148,7 +4152,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         List.iter validate_stmt_types f.body
     | Ast.ExternFuncDef (name, params, ret, effects) ->
         Option.iter (fun effects ->
-          validate_effects ~allow_interrupt:true Lexing.dummy_pos
+          validate_effects ~allow_interrupt:true ~allow_noreturn:true Lexing.dummy_pos
             "extern function" name effects;
           if List.mem "interrupt" effects || List.mem "exception" effects then
             raise (TypeError (Lexing.dummy_pos, Printf.sprintf
@@ -4812,6 +4816,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          | _ -> m)
     | _ -> m
   ) StringMap.empty prog in
+  let noreturn_functions = List.fold_left (fun names -> function
+    | Ast.ExternFuncDef (name, _, _, Some effects)
+      when List.mem "noreturn" effects -> StringSet.add name names
+    | _ -> names
+  ) StringSet.empty prog in
   let check_affine_func fdef =
     let finfo = StringMap.find (overload_key fdef.Ast.name fdef.params) functions in
     let var_types = ref finfo.local_types in
@@ -5393,6 +5402,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        terminators here. *)
     let rec stmt_always_terminates (s : Ast.stmt) = match s.desc with
       | Ast.Return _ -> true
+      | Ast.Expr { desc = Ast.Call (name, _); _ }
+        when StringSet.mem name noreturn_functions -> true
       | Ast.If (_, yes, no) -> always_terminates yes && always_terminates no
       | Ast.Match (_, arms) -> List.for_all (fun arm ->
           let body = match arm with

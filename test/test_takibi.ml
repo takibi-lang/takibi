@@ -5597,6 +5597,19 @@ let infer_tests = [
         }
         fn sync_handler29j(vacant: HandlerVacancy29j[core]) !{exception} {}");
 
+  Alcotest.test_case "Exception: trusted noreturn extern terminates a producing path" `Quick
+    (expect_ok
+       "linear struct Resume29k[elr: usize] { value: usize @ elr; }
+        extern fn fail_stop29k() !{noreturn};
+        fn sync_handler29k(elr: usize @ saved) -> Resume29k[saved]
+            !{exception} {
+          fail_stop29k();
+        }");
+
+  Alcotest.test_case "Exception: Takibi body cannot claim noreturn" `Quick
+    (expect_type_error "restricted to trusted extern function declarations"
+       "fn false_noreturn29l() !{noreturn} {}");
+
   Alcotest.test_case "Slice 5: a cast cannot invent a non-blocking contract" `Quick
     (expect_type_error "cannot cast through an explicit function-pointer effect contract"
        "fn effect_unknown30() {}
@@ -6134,6 +6147,15 @@ let codegen_tests = [
             (Llvm.classify_type (Llvm.type_of (Llvm.param f 0)) =
              Llvm.TypeKind.Pointer)
       | None -> Alcotest.fail "function 'cgeffect_indirect5' not found");
+
+  Alcotest.test_case "Exception ABI: extern noreturn reaches LLVM" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "extern fn cg_exception_stop5() !{noreturn};
+         fn cg_exception_call5() { cg_exception_stop5(); }");
+      let ir = Llvm.string_of_llmodule Llvm_gen.the_module in
+      Alcotest.(check bool) "noreturn attribute" true
+        (contains_substring ir "noreturn"));
 
   Alcotest.test_case
     "Slice 4 ABI: checker effects add no runtime parameters" `Quick

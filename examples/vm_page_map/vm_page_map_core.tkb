@@ -136,6 +136,10 @@ linear struct ExceptionHandlerInstalled[core: usize] {
     private core_id: usize @ core;
 }
 
+linear struct ExceptionResume[elr: usize] {
+    private resume_elr: usize @ elr;
+}
+
 fn exception_handler_install(
         registration: sink ExceptionRegistration[core])
         -> ExceptionHandlerInstalled[core] {
@@ -148,6 +152,12 @@ fn exception_handler_install(
 fn exception_handler_core(
         installed: borrow ExceptionHandlerInstalled[core]) -> usize @ core {
     return installed.core_id;
+}
+
+fn exception_resume(elr: usize @ resume_elr)
+        -> ExceptionResume[resume_elr] {
+    let mut resume: ExceptionResume[resume_elr] = { elr };
+    return resume;
 }
 
 fn exception_handler_finish(

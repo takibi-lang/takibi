@@ -1130,6 +1130,12 @@ annotation on every caller. `interrupt` marks a root whose complete reachable
 direct-call graph must not contain `may_block`; `interrupt_wait()` is
 intrinsically blocking. Diagnostics include one offending call path.
 
+`noreturn` is currently a trusted extern-only contract. A call to such an
+extern terminates control-flow analysis, and LLVM receives the corresponding
+function attribute. Takibi functions and function-pointer rows cannot claim
+it yet; this narrow surface models the reviewed assembly fail-stop without
+pretending arbitrary Takibi loops are proven not to return.
+
 `exception` marks a synchronous-exception handler root. Like `interrupt`, it
 is a declaration role rather than a callable function-pointer effect, and an
 extern function cannot claim it because there is no Takibi body to check.
@@ -1164,6 +1170,12 @@ the form `(Variant, LinearOwner)` in function parameters, locals, and return
 values.  This does not permit variants behind pointers or inside arrays,
 slices, structs, function pointers, or nested tuples.  The tuple's joined
 linear kind makes both components ordinary all-path obligations.
+
+The COW handler returns `ExceptionResume[elr]`, a linear one-word owner whose
+singleton payload is constructed only from its incoming saved ELR. Assembly
+compares that word with the frame's saved `ELR_EL2` before `eret`. An
+unhandled fault instead calls the trusted `!{noreturn}` assembly fail-stop, so
+it cannot manufacture a resume outcome or reach a normal Takibi return.
 
 Slice 5 adds explicit call-effect contracts to first-class function types:
 

@@ -19,6 +19,7 @@ let functions   : (string, lltype * llvalue) Hashtbl.t = Hashtbl.create 16
 let func_ret_ast_types : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 16
 (* Stores the parameter AST types for each function (needed for function-as-value) *)
 let func_param_ast_types : (string, Ast.type_expr list) Hashtbl.t = Hashtbl.create 16
+let noreturn_functions : (string, unit) Hashtbl.t = Hashtbl.create 8
 let current_program_types : Types.program_types option ref = ref None
 (* Struct type registry: name -> LLVM struct lltype *)
 let struct_lltypes : (string, lltype) Hashtbl.t = Hashtbl.create 8
@@ -3584,7 +3585,11 @@ let gen_func ?prog_types fdef =
           emit_profile_return key (fun () -> ignore (build_ret rv builder))
 
     | Expr e ->
-        ignore (gen_expr locals e)
+        ignore (gen_expr locals e);
+        (match e.desc with
+         | Call (name, _) when Hashtbl.mem noreturn_functions name ->
+             ignore (build_unreachable builder)
+         | _ -> ())
 
     | Assign (name, e) ->
         (* Look up the target's type first (a second, cheap lookup below
@@ -4368,9 +4373,13 @@ let gen_program ?prog_types prog =
   Hashtbl.reset variant_defs;
   Hashtbl.reset variant_lltypes;
   Hashtbl.reset variant_cases_tbl;
+  Hashtbl.reset noreturn_functions;
   List.iter (function
     | ViewDef (name, _, _, _, _) -> Hashtbl.replace erased_view_names name ()
     | VariantDef (name, cases, _) -> Hashtbl.replace variant_defs name cases
+    | ExternFuncDef (name, _, _, Some effects)
+      when List.mem "noreturn" effects ->
+        Hashtbl.replace noreturn_functions name ()
     | _ -> ()) prog;
   (* Pass 0a: enums and opaque structs do not depend on aggregate layout. *)
   List.iter (function
@@ -4476,7 +4485,7 @@ let gen_program ?prog_types prog =
         gen_global ?prog_types name (Some ty) (Some expr) None false loc
     | LetDef (name, ty_opt, expr_opt, align_opt, is_mutable, _, loc) ->
         gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable loc
-    | ExternFuncDef (name, params, ret_ty, _) ->
+    | ExternFuncDef (name, params, ret_ty, effects) ->
         if not (Hashtbl.mem functions name) then begin
           let param_ast = List.map (fun (_, t) ->
             resolve_special_type
@@ -4489,6 +4498,11 @@ let gen_program ?prog_types prog =
           let ret_ll    = ltype_of_ret_ast ret_ast in
           let ft        = function_type ret_ll param_lls in
           let f         = declare_function name ft the_module in
+          (match effects with
+           | Some effects when List.mem "noreturn" effects ->
+               add_function_attr f
+                 (create_enum_attr context "noreturn" 0L) AttrIndex.Function
+           | _ -> ());
           Hashtbl.add functions name (ft, f);
           Hashtbl.add func_ret_ast_types name ret_ast;
           Hashtbl.add func_param_ast_types name param_ast

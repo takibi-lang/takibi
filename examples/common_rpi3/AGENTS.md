@@ -379,6 +379,14 @@ linear obligation.  This concrete need also lifted the transient tuple rule
 just enough to return a direct linear variant beside a linear owner; nested or
 stored variants remain rejected.
 
+The final exception outcome is no longer an untyped boolean. The strong COW
+dispatch returns one-word `ExceptionResume[elr]`, constructed from the saved
+ELR singleton it received. Entry assembly compares that word with the saved
+frame ELR before restoring registers and executing `eret`. Every unhandled
+path calls the extern-only `!{noreturn}` `rpi3_exception_unhandled` fail-stop;
+LLVM receives the noreturn attribute, and Takibi control-flow analysis treats
+the call as terminal.
+
 GitHub issue #140. Status: 69 examples ported and passing `make
 hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level
 `EXAMPLES` list EXCEPT

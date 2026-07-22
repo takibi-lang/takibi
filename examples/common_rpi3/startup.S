@@ -333,7 +333,7 @@ rpi3_irq_dispatch:
 /* -- Default synchronous-exception dispatch ---------------------------------
    Ordinary kernels retain the historical fail-stop behavior.  The COW demo
    supplies a strong definition that recognizes only its own write-permission
-   abort and returns nonzero after repairing the mapping. */
+   abort and returns the exact saved ELR after repairing the mapping. */
     .weak   rpi3_sync_exception_dispatch
 rpi3_sync_exception_dispatch:
     mov     x0, #0
@@ -492,7 +492,9 @@ rpi3_sync_exception_entry:
     mrs     x3, mpidr_el1
     and     x3, x3, #3
     bl      rpi3_sync_exception_dispatch
-    cbz     x0, .Lsync_unhandled
+    ldr     x1, [sp, #256]
+    cmp     x0, x1
+    b.ne    rpi3_exception_unhandled
     ldp     x0, x1, [sp, #256]
     msr     elr_el2, x0
     msr     spsr_el2, x1
@@ -514,5 +516,8 @@ rpi3_sync_exception_entry:
     ldp     x30, xzr, [sp, #240]
     add     sp, sp, #272
     eret
-.Lsync_unhandled:
-    b       .Lsync_unhandled
+
+    .global rpi3_exception_unhandled
+    .type   rpi3_exception_unhandled, %function
+rpi3_exception_unhandled:
+    b       rpi3_exception_unhandled

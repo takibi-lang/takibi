@@ -4,6 +4,8 @@
 
 use "examples/vm_page_map/vm_page_map_core.tkb";
 
+extern fn rpi3_exception_unhandled() !{noreturn};
+
 private linear view CowSlotGuard[core: usize, lock: addr];
 private linear struct CowCellVacant[core: usize] {
     private core_tag: usize @ core;
@@ -57,14 +59,19 @@ fn cow_state_take(core_tag: usize @ core)
     return (state, vacant);
 }
 
-fn rpi3_sync_exception_dispatch(esr: usize, far: usize, elr: usize,
-                                core_tag: usize @ core) -> i32
+fn rpi3_sync_exception_dispatch(esr: usize, far: usize,
+                                elr: usize @ resume_elr,
+                                core_tag: usize @ core)
+        -> ExceptionResume[resume_elr]
         !{exception} {
     let (state, vacant) = cow_state_take(core_tag);
     let next = cow_fault_transition(state, esr, far);
     let handled: i32 = cow_fault_was_handled();
     cow_state_put(vacant, next);
-    return handled;
+    if (handled != 0) {
+        return exception_resume(elr);
+    }
+    rpi3_exception_unhandled();
 }
 
 fn cow_app_main(installed: ExceptionHandlerInstalled[0]) {
