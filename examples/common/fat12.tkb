@@ -1,7 +1,8 @@
 // FAT12 filesystem core (GitHub issue #61, extracted for issue #98's real-SD-card
 // combination). This is the backend-agnostic half of the driver originally written
 // in examples/fatfs/fatfs.tkb: every function below reaches storage only through
-// mem_block_read(sector: u32, buf: *u8) / mem_block_write(sector: u32, buf: *u8),
+// mem_block_read(sector: u32, buf: *u8) -> i32 /
+// mem_block_write(sector: u32, buf: *u8) -> i32,
 // which this file declares but never defines -- exactly the swappable interface
 // boundary issue #61's own header comment anticipated. Two different consumers
 // supply those two functions:
@@ -144,11 +145,13 @@ let mut root_dir_buf: [DirEntry; ROOT_ENTRY_COUNT] align(32);
 let mut next_free_cluster: u32;
 let mut next_free_root_entry: u32;
 
-fn fat_flush() {
+fn fat_flush() -> i32 {
     let ffs: usize = first_fat_sector();
-    mem_block_write(ffs as u32, fat_buf);
-    mem_block_write((ffs + FAT_SIZE_SECTORS) as u32, fat_buf);
-    mem_block_write(first_root_dir_sector() as u32, root_dir_buf as *align(32) u8);
+    if (mem_block_write(ffs as u32, fat_buf) != 0) { return -1; }
+    if (mem_block_write((ffs + FAT_SIZE_SECTORS) as u32, fat_buf) != 0) { return -1; }
+    if (mem_block_write(first_root_dir_sector() as u32,
+                        root_dir_buf as *align(32) u8) != 0) { return -1; }
+    return 0;
 }
 
 // Syncs the in-memory fat_buf/root_dir_buf mirrors FROM disk -- the
@@ -157,9 +160,11 @@ fn fat_flush() {
 // needed whenever storage was populated some other way (e.g.
 // load_seed_from_host() loading a foreign image) before fat_open(FA_READ)
 // can see its directory.
-fn fat_mount() {
-    mem_block_read(first_fat_sector() as u32, fat_buf);
-    mem_block_read(first_root_dir_sector() as u32, root_dir_buf as *align(32) u8);
+fn fat_mount() -> i32 {
+    if (mem_block_read(first_fat_sector() as u32, fat_buf) != 0) { return -1; }
+    if (mem_block_read(first_root_dir_sector() as u32,
+                       root_dir_buf as *align(32) u8) != 0) { return -1; }
+    return 0;
 }
 
 // FAT12 packs two 12-bit entries into 3 bytes. For an even cluster N, its
@@ -204,7 +209,7 @@ fn fat_set_entry(cluster: u32, val: u16) {
     }
 }
 
-fn fat_format() {
+fn fat_format() -> i32 {
     let mut sector_buf: [u8; SECTOR_SIZE] align(32);
     for i: usize in 0..<SECTOR_SIZE {
         sector_buf[i] = 0;
@@ -238,7 +243,6 @@ fn fat_format() {
     bytes_copy(bs.volume_label, "TAKIBIFAT12", 11);
     bytes_copy(bs.fs_type, "FAT12   ", 8);
     bs.signature = 0xAA55;
-    mem_block_write(0, sector_buf);
 
     for i: usize in 0..<SECTOR_SIZE {
         fat_buf[i] = 0;
@@ -252,18 +256,24 @@ fn fat_format() {
     // to 0 (including name[0] == 0x00) is exactly FAT's own "never used"
     // marker for a free directory entry.
 
-    fat_flush();
+    if (fat_flush() != 0) { return -1; }
 
     let mut zero_buf: [u8; SECTOR_SIZE] align(32);
     for i: usize in 0..<SECTOR_SIZE {
         zero_buf[i] = 0;
     }
     for s: usize in first_data_sector()..<TOTAL_SECTORS {
-        mem_block_write(s as u32, zero_buf);
+        if (mem_block_write(s as u32, zero_buf) != 0) { return -1; }
     }
+
+    // Sector 0 carries fat_format_status()'s completion signature, so commit
+    // it last.  If any earlier FAT/root/data write fails, the next boot must
+    // not mistake a partially formatted volume for a complete one.
+    if (mem_block_write(0, sector_buf) != 0) { return -1; }
 
     next_free_cluster = 2;
     next_free_root_entry = 0;
+    return 0;
 }
 
 // Allocates num_clusters clusters as one chain, terminated with the FAT12
@@ -321,10 +331,15 @@ fn fat_free_chain(start_cluster: u32) {
 // a blank/foreign card, without parsing the rest of the BPB. Not a general
 // "is this a valid FAT filesystem" check (see this file's header comment
 // on why dynamic BPB parsing/mounting a foreign image stays out of scope).
-fn fat_is_formatted() -> bool {
+// Returns 1 when the signature is present, 0 when it is absent, and -1 on
+// block I/O failure.  Keeping the error distinct is essential: treating a
+// transient read failure as an unformatted disk would make callers format
+// media that may contain valid data.
+fn fat_format_status() -> i32 {
     let mut sector_buf: [u8; SECTOR_SIZE] align(32);
-    mem_block_read(0, sector_buf);
-    return sector_buf[510] == 0x55 && sector_buf[511] == 0xAA;
+    if (mem_block_read(0, sector_buf) != 0) { return -1; }
+    if (sector_buf[510] == 0x55 && sector_buf[511] == 0xAA) { return 1; }
+    return 0;
 }
 
 // -- File-handle API (fat_open/fat_read/fat_write/fat_close), FatFs-flavored ---
@@ -432,7 +447,10 @@ fn fat_read_at(name83: *u8, off: u32, buf: borrow *u8, btr: u32,
         while (remaining > 0) {
             let mut sector_buf: [u8; SECTOR_SIZE] align(32);
             let sector_num: u32 = (first_data_sector() as u32) + (cluster - 2);
-            mem_block_read(sector_num, sector_buf);
+            if (mem_block_read(sector_num, sector_buf) != 0) {
+                *br = total;
+                return -1;
+            }
 
             let space_in_cluster: u32 = (SECTOR_SIZE as u32) - pos_in_cluster;
             let mut chunk: u32 = remaining;
@@ -491,7 +509,10 @@ fn fat_write_at(name83: *u8, off: u32, buf: borrow *u8, btw: u32,
         while (remaining > 0) {
             let mut sector_buf: [u8; SECTOR_SIZE] align(32);
             let sector_num: u32 = (first_data_sector() as u32) + (cluster - 2);
-            mem_block_read(sector_num, sector_buf);
+            if (mem_block_read(sector_num, sector_buf) != 0) {
+                *bw = total;
+                return -1;
+            }
 
             let space_in_cluster: u32 = (SECTOR_SIZE as u32) - pos_in_cluster;
             let mut chunk: u32 = remaining;
@@ -501,7 +522,10 @@ fn fat_write_at(name83: *u8, off: u32, buf: borrow *u8, btw: u32,
 
             let dst_p: *u8 = sector_buf;
             bytes_copy(dst_p + (pos_in_cluster as isize), src, chunk as isize);
-            mem_block_write(sector_num, sector_buf);
+            if (mem_block_write(sector_num, sector_buf) != 0) {
+                *bw = total;
+                return -1;
+            }
             src = src + (chunk as isize);
             total = total + chunk;
             remaining = remaining - chunk;
@@ -612,7 +636,10 @@ fn fat_read(fp: borrow mut FatFile[file], buf: *u8, btr: u32, br: *u32) -> i32 {
     while (remaining > 0) {
         let mut sector_buf: [u8; SECTOR_SIZE] align(32);
         let sector_num: u32 = (first_data_sector() as u32) + (fp.cur_cluster - 2);
-        mem_block_read(sector_num, sector_buf);
+        if (mem_block_read(sector_num, sector_buf) != 0) {
+            *br = total;
+            return -1;
+        }
         let space_in_cluster: u32 = (SECTOR_SIZE as u32) - fp.pos_in_cluster;
         let mut chunk: u32 = remaining;
         if (chunk > space_in_cluster) {
@@ -656,7 +683,11 @@ fn fat_write(fp: borrow mut FatFile[file], buf: *u8, btw: u32, bw: *u32) -> i32 
         let mut sector_buf: [u8; SECTOR_SIZE] align(32);
         let sector_num: u32 = (first_data_sector() as u32) + (fp.cur_cluster - 2);
         if (fp.pos_in_cluster > 0) {
-            mem_block_read(sector_num, sector_buf); // preserve earlier bytes in this cluster
+            // Preserve earlier bytes in this cluster before modifying it.
+            if (mem_block_read(sector_num, sector_buf) != 0) {
+                *bw = btw - remaining;
+                return -1;
+            }
         }
         let space_in_cluster: u32 = (SECTOR_SIZE as u32) - fp.pos_in_cluster;
         let mut chunk: u32 = remaining;
@@ -665,7 +696,10 @@ fn fat_write(fp: borrow mut FatFile[file], buf: *u8, btw: u32, bw: *u32) -> i32 
         }
         let dst_p: *u8 = sector_buf;
         bytes_copy(dst_p + (fp.pos_in_cluster as isize), src, chunk as isize);
-        mem_block_write(sector_num, sector_buf);
+        if (mem_block_write(sector_num, sector_buf) != 0) {
+            *bw = btw - remaining;
+            return -1;
+        }
         src = src + (chunk as isize);
         fp.pos_in_cluster = fp.pos_in_cluster + chunk;
         fp.fptr = fp.fptr + chunk;
@@ -694,7 +728,9 @@ fn fat_close(fp: sink FatFile[file]) -> i32 {
     if (fp.writing) {
         root_dir_buf[fp.dir_index].first_cluster_lo = fp.start_cluster as u16;
         root_dir_buf[fp.dir_index].file_size = fp.fsize;
-        fat_flush();
+        if (fat_flush() != 0) {
+            return -1;
+        }
     }
     return 0;
 }

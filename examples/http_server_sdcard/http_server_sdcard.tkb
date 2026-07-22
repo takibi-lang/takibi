@@ -81,7 +81,9 @@ fn http_file_size(name83: *u8) -> i32 {
 fn http_read_chunk(name83: *u8, off: u32, dst: borrow *u8,
         want: u32) -> u32 {
     let mut got: u32 = 0;
-    fat_read_at(name83, off, dst, want, &got);
+    if (fat_read_at(name83, off, dst, want, &got) != 0) {
+        return 0;
+    }
     return got;
 }
 
@@ -96,8 +98,10 @@ fn app_main() {
             net_read_mac(our_mac as *u8);
             slice_copy(our_ip as []u8, HTTP_SERVER_IP as []u8);
 
+            let mut storage_ok: bool = true;
             if (disk_initialize() != 0) {
                 uart_puts("http_server_sdcard: disk_initialize FAIL\r\n");
+                storage_ok = false;
             }
             // Mount only -- never format. This card's real, externally
             // provisioned content is the whole point (see this file's header
@@ -105,12 +109,19 @@ fn app_main() {
             // missing/blank/unmounted, and build_body_from_sdcard() falls
             // back to a short error message rather than the server refusing
             // to answer.
-            fat_mount();
+            if (storage_ok) {
+                if (fat_mount() != 0) {
+                    uart_puts("http_server_sdcard: fat_mount FAIL\r\n");
+                    storage_ok = false;
+                }
+            }
 
-            uart_puts("http_server_sdcard: ready\r\n");
+            if (storage_ok) {
+                uart_puts("http_server_sdcard: ready\r\n");
 
-            while (true) {
-                ready = http_server_poll_once(ready);
+                while (true) {
+                    ready = http_server_poll_once(ready);
+                }
             }
         }
     }

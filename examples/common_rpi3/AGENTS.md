@@ -929,6 +929,17 @@ lost-CSW replay content-idempotent. A valid command-failure status is returned
 without reset or retry. The full 69-test RPi3 hardware suite passed with this
 recovery path present.
 
+The same incident also removed the FAT layer's older void block-I/O boundary.
+All three backends (in-memory, STM32 SDMMC, and RPi3 USB MSC) now return an
+`i32` status from `mem_block_read`/`mem_block_write`; `fat_format`,
+`fat_mount`, `fat_read[_at]`, `fat_write[_at]`, and write-side `fat_close`
+propagate it. Consequently an exhausted BOT retry cannot be followed by a
+false `format: OK` or stale-data read-back. The format probe is deliberately
+three-valued (`formatted`, `unformatted`, `I/O error`) so the persistent KVS
+does not mistake a transient read failure for blank media and format it.
+Normal fixtures remained byte-identical; full `make allcheck` passed its QEMU,
+STM32 (57 ordinary + 10 Ethernet), and RPi3 (69 ordinary + 9 Ethernet) lanes.
+
 **`rtos_fatfs_sdcard` ported -- and it found a real driver bug.** The
 shared `rtos_fatfs_sdcard.tkb` source got the same de-STM32-ing
 treatment as `fatfs_sdcard.tkb` (target adapter moved to the compile

@@ -12,17 +12,10 @@
 // (sector: u32, buf: *u8), and examples/common_stm32/fat12_sdmmc.tkb supplies
 // those as a THIN adapter over sdmmc.tkb's disk_read/disk_write, nothing more.
 //
-// mem_block_read/mem_block_write are void (can't report failure), but
-// disk_read/disk_write return i32 and can genuinely fail on real hardware
-// (a bad card, a bus glitch, ...) -- this adapter silently ignores that
-// return value, exactly matching examples/fatfs.tkb's own existing
-// "assume success" scope (its in-memory mem_block_read/write can't fail at
-// all, so this was never a question there). This is a deliberate, named
-// scope limitation for this first working version, not an oversight:
-// threading a real error return up through fat_read/fat_write/fat_open/
-// fat_format's signatures is a genuine, separate design change with no
-// current caller needing it (YAGNI) -- revisit if a real I/O failure ever
-// needs to surface as something other than a silently wrong read/write.
+// mem_block_read/mem_block_write return i32 so real disk_read/disk_write
+// failures propagate through format, mount, read/write, and close. This was
+// added after an intermittent USB BOT error proved the old void adapter could
+// print an I/O error and then let this example falsely print operation OK.
 //
 // No QEMU build: there is no virtual SD/USB controller in this project's
 // QEMU setup, matching examples/sdcard's own no-QEMU status.
@@ -78,9 +71,15 @@ fn app_main() {
             uart_puts("disk_status: FAIL\r\n");
         }
 
-        fat_format();
-        uart_puts("format: OK\r\n");
+        let mut format_ok: bool = false;
+        if (fat_format() != 0) {
+            uart_puts("format: FAIL\r\n");
+        } else {
+            uart_puts("format: OK\r\n");
+            format_ok = true;
+        }
 
+        if (format_ok) {
         let hello_name: *u8 = "HELLO   TXT";
         let hello_content: *u8 = "Hello from a real SD card!\r\n";
         if (create_demo_file(hello_name, hello_content) == 0) {
@@ -98,10 +97,14 @@ fn app_main() {
             FatOpenResult::Opened(mut read_fp) => {
                 let mut read_buf: [u8; 64];
                 let mut read_br: u32 = 0;
-                fat_read(read_fp, read_buf, 64, &read_br);
-                fat_close(read_fp);
-                uart_puts("read-back HELLO.TXT: ");
-                uart_print_bytes(read_buf, read_br);
+                let read_status: i32 = fat_read(read_fp, read_buf, 64, &read_br);
+                let close_status: i32 = fat_close(read_fp);
+                if ((read_status == 0) && (close_status == 0)) {
+                    uart_puts("read-back HELLO.TXT: ");
+                    uart_print_bytes(read_buf, read_br);
+                } else {
+                    uart_puts("read-back HELLO.TXT: FAIL\r\n");
+                }
             }
             FatOpenResult::Error(err) => {
                 uart_puts("read-back HELLO.TXT: FAIL\r\n");
@@ -132,14 +135,19 @@ fn app_main() {
             FatOpenResult::Opened(mut final_fp) => {
                 let mut final_buf: [u8; 32];
                 let mut final_br: u32 = 0;
-                fat_read(final_fp, final_buf, 32, &final_br);
-                fat_close(final_fp);
-                uart_puts("read-back after overwrite: ");
-                uart_print_bytes(final_buf, final_br);
+                let read_status: i32 = fat_read(final_fp, final_buf, 32, &final_br);
+                let close_status: i32 = fat_close(final_fp);
+                if ((read_status == 0) && (close_status == 0)) {
+                    uart_puts("read-back after overwrite: ");
+                    uart_print_bytes(final_buf, final_br);
+                } else {
+                    uart_puts("read-back after overwrite: FAIL\r\n");
+                }
             }
             FatOpenResult::Error(err) => {
                 uart_puts("read-back after overwrite: FAIL\r\n");
             }
+        }
         }
     }
 

@@ -60,22 +60,26 @@ let mut disk: [u8; SECTOR_SIZE * TOTAL_SECTORS] align(32);
 // trap on the indexed access below. sector is u32, so a hi-only condition
 // is enough to narrow (GitHub issue #99 -- an unsigned value is trivially
 // >= 0).
-fn mem_block_read(sector: u32, buf: *u8) {
+fn mem_block_read(sector: u32, buf: *u8) -> i32 {
     if (sector < 128) {
         let off: usize = (sector as usize) * SECTOR_SIZE;
         for i in 0..<SECTOR_SIZE {
             buf[i as isize] = disk[off + i];
         }
+        return 0;
     }
+    return -1;
 }
 
-fn mem_block_write(sector: u32, buf: *u8) {
+fn mem_block_write(sector: u32, buf: *u8) -> i32 {
     if (sector < 128) {
         let off: usize = (sector as usize) * SECTOR_SIZE;
         for i in 0..<SECTOR_SIZE {
             disk[off + i] = buf[i as isize];
         }
+        return 0;
     }
+    return -1;
 }
 
 // Writes the whole in-memory disk out to a real host file via ARM
@@ -143,15 +147,19 @@ fn app_main() {
     // valid FAT12 image containing SEED.TXT, regardless of how they got
     // there.
     load_seed_from_host();
-    fat_mount();
+    let mount_status: i32 = fat_mount();
     match fat_open("SEED    TXT", FA_READ) {
         FatOpenResult::Opened(mut seed_fp) => {
             let mut seed_buf: [u8; 128];
             let mut seed_br: u32 = 0;
-            fat_read(seed_fp, seed_buf, 128, &seed_br);
-            fat_close(seed_fp);
-            uart_puts("seed read: ");
-            uart_print_bytes(seed_buf, seed_br);
+            let read_status: i32 = fat_read(seed_fp, seed_buf, 128, &seed_br);
+            let close_status: i32 = fat_close(seed_fp);
+            if ((read_status == 0) && (close_status == 0)) {
+                uart_puts("seed read: ");
+                uart_print_bytes(seed_buf, seed_br);
+            } else {
+                uart_puts("seed read: FAIL (I/O)\r\n");
+            }
         }
         FatOpenResult::Error(err) => {
             uart_puts("seed read: FAIL (open)\r\n");
@@ -160,7 +168,7 @@ fn app_main() {
 
     // Phase 2: format the in-memory disk and create two demo files via the
     // fat_open/fat_write/fat_close API.
-    fat_format();
+    let format_status: i32 = fat_format();
     uart_puts("format: OK\r\n");
 
     let hello_name: *u8 = "HELLO   TXT";
@@ -190,22 +198,30 @@ fn app_main() {
                 FatOpenResult::Opened(mut readme_fp) => {
                     let mut read_buf: [u8; 64];
                     let mut hello_first_br: u32 = 0;
-                    fat_read(hello_fp, read_buf, 5, &hello_first_br);
+                    let hello_first_status: i32 =
+                        fat_read(hello_fp, read_buf, 5, &hello_first_br);
 
                     let mut readme_probe: [u8; 4];
                     let mut readme_br: u32 = 0;
-                    fat_read(readme_fp, readme_probe, 4, &readme_br);
+                    let readme_status: i32 =
+                        fat_read(readme_fp, readme_probe, 4, &readme_br);
 
                     let mut hello_rest_br: u32 = 0;
-                    fat_read(hello_fp,
-                             read_buf + (hello_first_br as isize),
-                             59, &hello_rest_br);
-                    fat_close(readme_fp);
-                    fat_close(hello_fp);
+                    let hello_rest_status: i32 = fat_read(
+                        hello_fp, read_buf + (hello_first_br as isize),
+                        59, &hello_rest_br);
+                    let readme_close_status: i32 = fat_close(readme_fp);
+                    let hello_close_status: i32 = fat_close(hello_fp);
 
-                    uart_puts("read-back HELLO.TXT: ");
-                    uart_print_bytes(read_buf,
-                                     hello_first_br + hello_rest_br);
+                    if ((hello_first_status == 0) && (readme_status == 0) &&
+                        (hello_rest_status == 0) && (readme_close_status == 0) &&
+                        (hello_close_status == 0)) {
+                        uart_puts("read-back HELLO.TXT: ");
+                        uart_print_bytes(read_buf,
+                                         hello_first_br + hello_rest_br);
+                    } else {
+                        uart_puts("read-back HELLO.TXT: FAIL\r\n");
+                    }
                 }
                 FatOpenResult::Error(err) => {
                     fat_close(hello_fp);

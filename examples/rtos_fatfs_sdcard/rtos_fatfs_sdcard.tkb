@@ -53,30 +53,43 @@ fn sd_worker() {
             result = -1;
         }
 
-        fat_format();
-        uart_puts("format: OK\r\n");
-
-        let hello_name: *u8 = "HELLO   TXT";
-        let hello_content: *u8 = "Hello from a real SD card under RTOS!\r\n";
-        if (create_demo_file(hello_name, hello_content) == 0) {
-            uart_puts("create HELLO.TXT: OK\r\n");
+        let mut format_ok: bool = false;
+        if (fat_format() == 0) {
+            uart_puts("format: OK\r\n");
+            format_ok = true;
         } else {
-            uart_puts("create HELLO.TXT: FAIL\r\n");
+            uart_puts("format: FAIL\r\n");
             result = -1;
         }
 
-        match fat_open(hello_name, FA_READ) {
-            FatOpenResult::Opened(mut read_fp) => {
-                let mut read_buf: [u8; 80];
-                let mut read_br: u32 = 0;
-                fat_read(read_fp, read_buf, 80, &read_br);
-                fat_close(read_fp);
-                uart_puts("read-back HELLO.TXT: ");
-                uart_print_bytes(read_buf, read_br);
-            }
-            FatOpenResult::Error(err) => {
-                uart_puts("read-back HELLO.TXT: FAIL\r\n");
+        if (format_ok) {
+            let hello_name: *u8 = "HELLO   TXT";
+            let hello_content: *u8 = "Hello from a real SD card under RTOS!\r\n";
+            if (create_demo_file(hello_name, hello_content) == 0) {
+                uart_puts("create HELLO.TXT: OK\r\n");
+            } else {
+                uart_puts("create HELLO.TXT: FAIL\r\n");
                 result = -1;
+            }
+
+            match fat_open(hello_name, FA_READ) {
+                FatOpenResult::Opened(mut read_fp) => {
+                    let mut read_buf: [u8; 80];
+                    let mut read_br: u32 = 0;
+                    let read_status: i32 = fat_read(read_fp, read_buf, 80, &read_br);
+                    let close_status: i32 = fat_close(read_fp);
+                    if ((read_status == 0) && (close_status == 0)) {
+                        uart_puts("read-back HELLO.TXT: ");
+                        uart_print_bytes(read_buf, read_br);
+                    } else {
+                        uart_puts("read-back HELLO.TXT: FAIL\r\n");
+                        result = -1;
+                    }
+                }
+                FatOpenResult::Error(err) => {
+                    uart_puts("read-back HELLO.TXT: FAIL\r\n");
+                    result = -1;
+                }
             }
         }
     }

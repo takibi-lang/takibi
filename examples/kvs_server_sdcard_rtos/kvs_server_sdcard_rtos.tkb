@@ -434,7 +434,9 @@ fn kvs_sd_create_record_file() -> i32 {
                     return -1;
                 }
             }
-            fat_close(fp);
+            if (fat_close(fp) != 0) {
+                return -1;
+            }
             kvs_sd_file_ready = true;
             return 0;
         }
@@ -474,21 +476,31 @@ fn kvs_sd_load_records() -> i32 {
         FatOpenResult::Opened(mut fp) => {
             let mut br: u32 = 0;
             let mut total: u32 = 0;
+            let mut read_ok: bool = true;
             for slot: usize in 0..<16 {
                 for i: usize in 0..<KVS_RECORD_SIZE {
                     kvs_record_buf[i] = 0;
                 }
                 if (fsize == (16 * KVS_RECORD_SIZE_LEGACY) as u32) {
-                    fat_read(fp, kvs_record_buf, KVS_RECORD_SIZE_LEGACY as u32, &br);
+                    if (fat_read(fp, kvs_record_buf,
+                                 KVS_RECORD_SIZE_LEGACY as u32, &br) != 0) {
+                        read_ok = false;
+                    }
                 } else {
-                    fat_read(fp, kvs_record_buf, KVS_RECORD_SIZE as u32, &br);
+                    if (fat_read(fp, kvs_record_buf,
+                                 KVS_RECORD_SIZE as u32, &br) != 0) {
+                        read_ok = false;
+                    }
                 }
                 total = total + br;
                 if (br == KVS_RECORD_SIZE as u32 || br == KVS_RECORD_SIZE_LEGACY as u32) {
                     kvs_unpack_slot(slot);
                 }
             }
-            fat_close(fp);
+            let close_status: i32 = fat_close(fp);
+            if ((read_ok == false) || (close_status != 0)) {
+                return -1;
+            }
             if (total != fsize) {
                 uart_puts("kvs_server_sdcard_rtos: SD record short-read, starting empty\r\n");
                 kvs_reset_table();
@@ -515,12 +527,21 @@ fn kvs_sd_load_legacy() -> i32 {
         FatOpenResult::Opened(mut fp) => {
             let mut br: u32 = 0;
             let mut total: u32 = 0;
-            fat_read(fp, kv_state,   16,   &br); total = total + br;
-            fat_read(fp, kv_key_len, 16,   &br); total = total + br;
-            fat_read(fp, kv_val_len, 16,   &br); total = total + br;
-            fat_read(fp, kv_keys,    512,  &br); total = total + br;
-            fat_read(fp, kv_vals,    2048, &br); total = total + br;
-            fat_close(fp);
+            let mut read_ok: bool = true;
+            if (fat_read(fp, kv_state, 16, &br) != 0) { read_ok = false; }
+            total = total + br;
+            if (fat_read(fp, kv_key_len, 16, &br) != 0) { read_ok = false; }
+            total = total + br;
+            if (fat_read(fp, kv_val_len, 16, &br) != 0) { read_ok = false; }
+            total = total + br;
+            if (fat_read(fp, kv_keys, 512, &br) != 0) { read_ok = false; }
+            total = total + br;
+            if (fat_read(fp, kv_vals, 2048, &br) != 0) { read_ok = false; }
+            total = total + br;
+            let close_status: i32 = fat_close(fp);
+            if ((read_ok == false) || (close_status != 0)) {
+                return -1;
+            }
             if (total != 2608) {
                 uart_puts("kvs_server_sdcard_rtos: SD table short-read, starting empty\r\n");
                 kvs_reset_table();
@@ -641,21 +662,31 @@ fn sd_worker() {
             if (disk_initialize() != 0) {
                 uart_puts("kvs_server_sdcard_rtos: disk_initialize FAIL\r\n");
                 status = -1;
-            } else if (fat_is_formatted()) {
-                fat_mount();
-                status = kvs_sd_load_records();
-                if (status == 2) {
-                    kvs_sd_create_record_file();
-                    status = 0;
-                } else if (status != 0) {
-                    status = kvs_sd_load_legacy();
-                    if (status == 0) {
-                        kvs_sd_create_record_file();
-                    }
-                }
             } else {
-                fat_format();
-                status = 1;
+                let format_state: i32 = fat_format_status();
+                if (format_state == 1) {
+                    if (fat_mount() != 0) {
+                        status = -1;
+                    } else {
+                        status = kvs_sd_load_records();
+                    }
+                    if (status == 2) {
+                        status = kvs_sd_create_record_file();
+                    } else if (status == 1) {
+                        status = kvs_sd_load_legacy();
+                        if (status == 0) {
+                            status = kvs_sd_create_record_file();
+                        }
+                    }
+                } else if (format_state == 0) {
+                    if (fat_format() == 0) {
+                        status = 1;
+                    } else {
+                        status = -1;
+                    }
+                } else {
+                    status = -1;
+                }
             }
             chan_send(&kvs_sd_response_ch, status);
         }

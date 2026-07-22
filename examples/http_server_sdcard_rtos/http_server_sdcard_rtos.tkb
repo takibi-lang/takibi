@@ -141,7 +141,9 @@ fn sd_request_recv(ch: *SdRequestChan) -> SdRequest !{may_block} {
 
 fn sd_read_file_chunk(name83: *u8, off: u32, dst: *u8, want: u32) -> u32 {
     let mut got: u32 = 0;
-    fat_read_at(name83, off, dst, want, &got);
+    if (fat_read_at(name83, off, dst, want, &got) != 0) {
+        return 0;
+    }
     return got;
 }
 
@@ -155,7 +157,10 @@ fn sd_worker() {
                     uart_puts("http_server_sdcard_rtos: disk_initialize FAIL\r\n");
                     ok = -1;
                 } else {
-                    fat_mount();
+                    if (fat_mount() != 0) {
+                        uart_puts("http_server_sdcard_rtos: fat_mount FAIL\r\n");
+                        ok = -1;
+                    }
                 }
                 chan_send(&sd_response_ch, ok);
             }

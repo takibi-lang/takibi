@@ -20,7 +20,7 @@ use "examples/common_rpi3/usb_msc.tkb";
 // tolerated plain *u8), this board's disk_write ALSO requires align(32)
 // on its own (it goes through dwc2_bulk_out, see usb_msc.tkb's header
 // comment) -- fat12.tkb's buffers already satisfy this either way.
-fn mem_block_read(sector: u32, buf: *align(32) u8) {
+fn mem_block_read(sector: u32, buf: *align(32) u8) -> i32 {
     if (disk_read(sector, buf) != 0) {
         uart_puts("usb_msc io error: read lba=");
         uart_print(msc_last_io_error_lba());
@@ -29,10 +29,12 @@ fn mem_block_read(sector: u32, buf: *align(32) u8) {
         uart_puts(" csw=");
         uart_print(msc_last_status());
         uart_puts("\r\n");
+        return -1;
     }
+    return 0;
 }
 
-fn mem_block_write(sector: u32, buf: *align(32) u8) {
+fn mem_block_write(sector: u32, buf: *align(32) u8) -> i32 {
     if (disk_write(sector, buf) != 0) {
         uart_puts("usb_msc io error: write lba=");
         uart_print(msc_last_io_error_lba());
@@ -41,5 +43,7 @@ fn mem_block_write(sector: u32, buf: *align(32) u8) {
         uart_puts(" csw=");
         uart_print(msc_last_status());
         uart_puts("\r\n");
+        return -1;
     }
+    return 0;
 }
