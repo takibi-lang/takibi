@@ -72,6 +72,7 @@ trap 'stop_uart_capture; exit 130' INT TERM HUP
 PASS=0
 FAIL=0
 FAILED_TESTS=()
+NET_L2_ONLY="${NET_L2_ONLY:-0}"
 
 if [ -t 1 ]; then
     GRN='\033[32m' RED='\033[31m' RST='\033[0m'
@@ -174,9 +175,15 @@ run_rpi3_net_test() {
     fi
 }
 
-run_rpi3_net_test "net_echo (rpi3)"   "$REPO_ROOT/examples/net_echo/kernel_rpi3.elf"   "$REPO_ROOT/scripts/eth_net_echo_test.py"
-run_rpi3_net_test "arp_reply (rpi3)"  "$REPO_ROOT/examples/arp_reply/kernel_rpi3.elf"  "$REPO_ROOT/scripts/eth_arp_reply_test.py"
-run_rpi3_net_test "icmp_echo (rpi3)"  "$REPO_ROOT/examples/icmp_echo/kernel_rpi3.elf"  "$REPO_ROOT/scripts/eth_icmp_echo_test.py"
+if [ "$NET_L2_ONLY" = 1 ]; then
+    run_rpi3_net_test "net_echo (rpi3)" "$REPO_ROOT/examples/net_echo/kernel_rpi3.elf" "$REPO_ROOT/scripts/eth_net_echo_test.py"
+    run_rpi3_net_test "arp_reply (rpi3)" "$REPO_ROOT/examples/arp_reply/kernel_rpi3.elf" "$REPO_ROOT/scripts/eth_arp_reply_test.py"
+    run_rpi3_net_test "icmp_echo (rpi3)" "$REPO_ROOT/examples/icmp_echo/kernel_rpi3.elf" "$REPO_ROOT/scripts/eth_icmp_echo_test.py"
+    echo ""
+    echo "RPi3 Ethernet L2 hardware tests: $PASS passed, $FAIL failed"
+    [ "$FAIL" -eq 0 ] || exit 1
+    exit 0
+fi
 run_rpi3_net_test "tcp_echo (rpi3)"   "$REPO_ROOT/examples/tcp_echo/kernel_rpi3.elf"   "$REPO_ROOT/scripts/eth_tcp_echo_test.py"
 run_rpi3_net_test "http_server (rpi3)" "$REPO_ROOT/examples/http_server/kernel_rpi3.elf" "$REPO_ROOT/scripts/eth_http_server_test.py"
 run_rpi3_net_test "kvs_server (rpi3)"  "$REPO_ROOT/examples/kvs_server/kernel_rpi3.elf"  "$REPO_ROOT/scripts/eth_kvs_server_test.py"

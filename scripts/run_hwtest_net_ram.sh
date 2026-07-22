@@ -86,6 +86,7 @@ trap 'stop_uart_capture; exit 130' INT TERM HUP
 PASS=0
 FAIL=0
 FAILED_TESTS=()
+NET_L2_ONLY="${NET_L2_ONLY:-0}"
 
 # shellcheck source=scripts/stm32_hw_claim.sh
 source "$(dirname "$0")/stm32_hw_claim.sh"
@@ -216,9 +217,15 @@ run_net_hw_test_flash() {
 echo "Running STM32 Ethernet hardware integration tests (RAM execution)..."
 echo ""
 
-run_net_hw_test "net_echo (stm32/ram)" examples/net_echo/kernel_stm32_ram.elf scripts/eth_net_echo_test.py
-run_net_hw_test "arp_reply (stm32/ram)" examples/arp_reply/kernel_stm32_ram.elf scripts/eth_arp_reply_test.py
-run_net_hw_test "icmp_echo (stm32/ram)" examples/icmp_echo/kernel_stm32_ram.elf scripts/eth_icmp_echo_test.py
+if [ "$NET_L2_ONLY" = 1 ]; then
+    run_net_hw_test "net_echo (stm32/ram)" examples/net_echo/kernel_stm32_ram.elf scripts/eth_net_echo_test.py
+    run_net_hw_test "arp_reply (stm32/ram)" examples/arp_reply/kernel_stm32_ram.elf scripts/eth_arp_reply_test.py
+    run_net_hw_test "icmp_echo (stm32/ram)" examples/icmp_echo/kernel_stm32_ram.elf scripts/eth_icmp_echo_test.py
+    echo ""
+    echo "STM32 Ethernet L2 hardware tests: $PASS passed, $FAIL failed"
+    [ "$FAIL" -eq 0 ] || exit 1
+    exit 0
+fi
 run_net_hw_test "tcp_echo (stm32/ram)" examples/tcp_echo/kernel_stm32_ram.elf scripts/eth_tcp_echo_test.py
 run_net_hw_test "http_server (stm32/ram)" examples/http_server/kernel_stm32_ram.elf scripts/eth_http_server_test.py
 

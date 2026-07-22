@@ -214,7 +214,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemubuild qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-rpi3 hwcheck-rpi3-net stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck allcheck-build clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos rpi3-http-server profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
+.PHONY: build test qemubuild qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-stm32-net-l2 hwcheck-rpi3 hwcheck-rpi3-net hwcheck-rpi3-net-l2 stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck allcheck-build clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos rpi3-http-server profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
 
 .DEFAULT_GOAL := build
 
@@ -290,8 +290,7 @@ stm32build: $(STM32_RAM_ELFS) examples/http_server/kernel_stm32.bin examples/htt
 hwcheck-stm32: stm32build
 	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/run_hwtest_ram.sh
 
-## hwcheck-stm32-net: run all STM32 real-Ethernet hardware tests (net_echo today,
-## more as they're ported -- see scripts/run_hwtest_net_ram.sh) over a physical
+## hwcheck-stm32-net: run STM32 TCP-and-above real-Ethernet hardware tests over a physical
 ## point-to-point link to the STM32F746G-DISCOVERY board (requires the
 ## board's Ethernet port wired directly to this machine's NIC). NOT part of
 ## hwcheck-stm32's automated UART-diff suite, and NOT part of `make check`/
@@ -307,6 +306,9 @@ hwcheck-stm32: stm32build
 ## header comment.
 hwcheck-stm32-net: stm32build examples/http_server/kernel_stm32.bin examples/http_server_sdcard/kernel_stm32.bin
 	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/run_hwtest_net_ram.sh
+
+hwcheck-stm32-net-l2: stm32build
+	@STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" NET_L2_ONLY=1 bash scripts/run_hwtest_net_ram.sh
 
 ## stress-stm32-kvs-server-sdcard-rtos: opt-in real-board stress run for
 ## examples/kvs_server_sdcard_rtos. This deliberately stays OUT of allcheck:
@@ -1773,9 +1775,7 @@ allcheck-build: $(RPI3_KERNELS) examples/smp_handoff/kernel_rpi3.elf
 hwcheck-rpi3: $(RPI3_KERNELS) examples/smp_handoff/kernel_rpi3.elf examples/common_rpi3/jtag_stub.img
 	@bash scripts/run_hwtest_rpi3.sh
 
-## hwcheck-rpi3-net: run all RPi3 real-Ethernet hardware tests (net_echo/
-## arp_reply/icmp_echo/tcp_echo/http_server/kvs_server -- see
-## scripts/run_hwtest_rpi3_net.sh) over a physical point-to-point link to
+## hwcheck-rpi3-net: run RPi3 TCP-and-above real-Ethernet hardware tests over a physical point-to-point link to
 ## the Raspberry Pi 3B (requires the board's Ethernet port, behind the
 ## LAN9514 USB hub -- see examples/common_rpi3/AGENTS.md's "USB host
 ## stack" section -- wired directly to this machine's NIC). Same split
@@ -1790,6 +1790,9 @@ hwcheck-rpi3: $(RPI3_KERNELS) examples/smp_handoff/kernel_rpi3.elf examples/comm
 ## they differ from the defaults.
 hwcheck-rpi3-net: $(RPI3_KERNELS) examples/common_rpi3/jtag_stub.img
 	@bash scripts/run_hwtest_rpi3_net.sh
+
+hwcheck-rpi3-net-l2: $(RPI3_KERNELS) examples/common_rpi3/jtag_stub.img
+	@NET_L2_ONLY=1 bash scripts/run_hwtest_rpi3_net.sh
 
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts and linker outputs
