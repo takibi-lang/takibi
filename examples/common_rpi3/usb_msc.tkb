@@ -87,6 +87,19 @@ let mut msc_csw_outcome: i32 = 2;
 // 0 = none, 1 = CBW OUT, 2 = data stage, 3 = CSW IN/validation.
 let mut msc_io_error_stage: i32 = 0;
 let mut msc_io_error_lba: u32 = 0;
+// Detailed diagnostics retained only when block I/O ultimately fails.
+// attempt: 1 = original command, 2 = the single post-recovery replay.
+// CSW error: 0 = none, 1 = IN transport, 2 = short transfer,
+// 3 = bad signature, 4 = tag mismatch, 5 = command failed,
+// 6 = phase error/invalid status.
+// recovery: 0 = not attempted, 1 = Mass Storage Reset failed,
+// 2 = Bulk-IN clear-halt failed, 3 = Bulk-OUT clear-halt failed,
+// 4 = recovery completed.
+let mut msc_io_error_attempt: i32 = 0;
+let mut msc_csw_error: i32 = 0;
+let mut msc_csw_dwc_status: u32 = 0;
+let mut msc_csw_xfer_bytes: u32 = 0;
+let mut msc_recovery_stage: i32 = 0;
 // Last checkpoint disk_initialize() reached before returning -1 --
 // examples/usb_msc_probe/usb_msc_probe.tkb reads this after a failed
 // disk_initialize() to report WHICH stage broke, the same diagnostic
@@ -113,6 +126,11 @@ fn msc_last_status() -> u8 {
 
 fn msc_last_io_error_stage() -> i32 { return msc_io_error_stage; }
 fn msc_last_io_error_lba() -> u32 { return msc_io_error_lba; }
+fn msc_last_io_error_attempt() -> i32 { return msc_io_error_attempt; }
+fn msc_last_csw_error() -> i32 { return msc_csw_error; }
+fn msc_last_csw_dwc_status() -> u32 { return msc_csw_dwc_status; }
+fn msc_last_csw_xfer_bytes() -> u32 { return msc_csw_xfer_bytes; }
+fn msc_last_recovery_stage() -> i32 { return msc_recovery_stage; }
 
 fn msc_zero_cbw_cdb() {
     for i: usize in 15..<31 {
@@ -171,6 +189,10 @@ fn msc_send_cbw() -> bool {
 // the transport itself succeeded AND the command passed (status 0).
 fn msc_read_csw() -> bool {
     msc_csw_outcome = 2;
+    msc_last_dcsw_status = 0xFF;
+    msc_csw_error = 0;
+    msc_csw_dwc_status = 0;
+    msc_csw_xfer_bytes = 0;
     // A flash drive may NAK the CSW endpoint while committing WRITE(10) to
     // media.  One dwc2_bulk_in call only covers eight channel re-arms, which
     // proved too short during fat_format(): giving up there leaves the BOT
@@ -184,21 +206,35 @@ fn msc_read_csw() -> bool {
             break;
         }
         if ((dwc2_debug_last_status() & 0x10) == 0) {
+            msc_csw_error = 1;
+            msc_csw_dwc_status = dwc2_debug_last_status();
+            msc_csw_xfer_bytes = dwc2_last_transfer_bytes();
             return false;
         }
         delay_ms(1);
     }
     if (received == false) {
+        msc_csw_error = 1;
+        msc_csw_dwc_status = dwc2_debug_last_status();
+        msc_csw_xfer_bytes = dwc2_last_transfer_bytes();
+        return false;
+    }
+    msc_csw_dwc_status = dwc2_debug_last_status();
+    msc_csw_xfer_bytes = dwc2_last_transfer_bytes();
+    if (msc_csw_xfer_bytes != MSC_CSW_LEN) {
+        msc_csw_error = 2;
         return false;
     }
     let sig: u32 = (msc_csw_buf[0] as u32) | ((msc_csw_buf[1] as u32) << 8)
                  | ((msc_csw_buf[2] as u32) << 16) | ((msc_csw_buf[3] as u32) << 24);
     if (sig != MSC_CSW_SIG) {
+        msc_csw_error = 3;
         return false;
     }
     let tag: u32 = (msc_csw_buf[4] as u32) | ((msc_csw_buf[5] as u32) << 8)
                  | ((msc_csw_buf[6] as u32) << 16) | ((msc_csw_buf[7] as u32) << 24);
     if (tag != msc_tag) {
+        msc_csw_error = 4;
         return false;
     }
     msc_last_dcsw_status = msc_csw_buf[12];
@@ -208,6 +244,9 @@ fn msc_read_csw() -> bool {
     }
     if (msc_last_dcsw_status == 1) {
         msc_csw_outcome = 1;
+        msc_csw_error = 5;
+    } else {
+        msc_csw_error = 6;
     }
     return false;
 }
@@ -233,10 +272,17 @@ fn msc_bulk_only_reset() -> bool {
 // unusable; callers return the original I/O error rather than continuing out
 // of phase.
 fn msc_recover_transport() -> bool {
+    msc_recovery_stage = 0;
     if (msc_bulk_only_reset() == false) {
+        msc_recovery_stage = 1;
         return false;
     }
-    return dwc2_bulk_clear_halts_and_reset_toggles(msc_dev_addr);
+    if (dwc2_bulk_clear_halts_and_reset_toggles(msc_dev_addr) == false) {
+        msc_recovery_stage = 1 + dwc2_debug_bulk_recovery_stage();
+        return false;
+    }
+    msc_recovery_stage = 4;
+    return true;
 }
 
 // Get Max LUN -- informational only, this driver always addresses LUN 0
@@ -428,6 +474,8 @@ fn msc_read10_once(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
 fn disk_read(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
     msc_io_error_stage = 0;
     msc_io_error_lba = sector;
+    msc_io_error_attempt = 1;
+    msc_recovery_stage = 0;
     if (disk_status() != 0) {
         return -1;
     }
@@ -444,6 +492,7 @@ fn disk_read(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
         return -1;
     }
     msc_io_error_stage = 0;
+    msc_io_error_attempt = 2;
     return msc_read10_once(sector, buf);
 }
 
@@ -471,6 +520,8 @@ fn msc_write10_once(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
 fn disk_write(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
     msc_io_error_stage = 0;
     msc_io_error_lba = sector;
+    msc_io_error_attempt = 1;
+    msc_recovery_stage = 0;
     if (disk_status() != 0) {
         return -1;
     }
@@ -488,5 +539,6 @@ fn disk_write(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
     // its CSW was lost, repeating identical bytes to identical LBA is
     // content-idempotent; no general write-command retry policy is implied.
     msc_io_error_stage = 0;
+    msc_io_error_attempt = 2;
     return msc_write10_once(sector, buf);
 }

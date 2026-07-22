@@ -940,6 +940,19 @@ does not mistake a transient read failure for blank media and format it.
 Normal fixtures remained byte-identical; full `make allcheck` passed its QEMU,
 STM32 (57 ordinary + 10 Ethernet), and RPi3 (69 ordinary + 9 Ethernet) lanes.
 
+A later intermittent `fatfs_sdcard` failure reached WRITE(10)'s CSW stage even
+after the bounded recovery/replay above.  The old `csw=0` diagnostic was
+misleading in this case: it was merely the last valid command's retained CSW
+status, not evidence that the missing or malformed current CSW had status 0.
+The MSC driver now resets that status before every CSW and retains the final
+attempt number, a precise CSW failure category, DWC2 channel status, actual CSW
+byte count, and the recovery checkpoint (Mass Storage Reset, Bulk-IN clear,
+Bulk-OUT clear, or complete).  The FAT USB adapter prints these fields only on
+an ultimately failed block operation, so every successful UART fixture remains
+byte-identical.  CSWs shorter than the required 13 bytes are now rejected
+explicitly rather than parsing bytes left in the aligned receive buffer.  A
+full 69-test `make hwcheck-rpi3` run passed after adding the diagnostics.
+
 **`rtos_fatfs_sdcard` ported -- and it found a real driver bug.** The
 shared `rtos_fatfs_sdcard.tkb` source got the same de-STM32-ing
 treatment as `fatfs_sdcard.tkb` (target adapter moved to the compile

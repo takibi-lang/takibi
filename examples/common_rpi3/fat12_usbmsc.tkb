@@ -28,6 +28,16 @@ fn mem_block_read(sector: u32, buf: *align(32) u8) -> i32 {
         uart_print(msc_last_io_error_stage());
         uart_puts(" csw=");
         uart_print(msc_last_status());
+        uart_puts(" attempt=");
+        uart_print(msc_last_io_error_attempt());
+        uart_puts(" csw_error=");
+        uart_print(msc_last_csw_error());
+        uart_puts(" dwc_status=");
+        uart_print_hex(msc_last_csw_dwc_status() as i32);
+        uart_puts(" csw_bytes=");
+        uart_print(msc_last_csw_xfer_bytes());
+        uart_puts(" recovery=");
+        uart_print(msc_last_recovery_stage());
         uart_puts("\r\n");
         return -1;
     }
@@ -42,6 +52,16 @@ fn mem_block_write(sector: u32, buf: *align(32) u8) -> i32 {
         uart_print(msc_last_io_error_stage());
         uart_puts(" csw=");
         uart_print(msc_last_status());
+        uart_puts(" attempt=");
+        uart_print(msc_last_io_error_attempt());
+        uart_puts(" csw_error=");
+        uart_print(msc_last_csw_error());
+        uart_puts(" dwc_status=");
+        uart_print_hex(msc_last_csw_dwc_status() as i32);
+        uart_puts(" csw_bytes=");
+        uart_print(msc_last_csw_xfer_bytes());
+        uart_puts(" recovery=");
+        uart_print(msc_last_recovery_stage());
         uart_puts("\r\n");
         return -1;
     }

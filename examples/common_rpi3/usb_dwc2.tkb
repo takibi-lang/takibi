@@ -348,6 +348,10 @@ fn chan_split_reg(chan: usize) -> *io u32 {
 // makes cleaning vs invalidating correct.
 let mut dwc2_last_status: u32 = 0;
 let mut dwc2_last_xfer_bytes: u32 = 0;
+// Last dwc2_bulk_clear_halts_and_reset_toggles checkpoint.  This is only
+// diagnostic state for a failed BOT recovery: 0 = not started, 1 = Bulk-IN
+// clear failed, 2 = Bulk-OUT clear failed, 3 = both clears completed.
+let mut dwc2_bulk_recovery_stage: i32 = 0;
 // In buffer-DMA mode HCTSIZ.PID is updated by the core as packets are
 // ACKed and therefore contains the PID to start the NEXT transaction
 // with when the channel halts. This is the authoritative endpoint
@@ -453,6 +457,10 @@ fn dwc2_debug_last_status() -> u32 {
 }
 fn dwc2_last_transfer_bytes() -> u32 {
     return dwc2_last_xfer_bytes;
+}
+
+fn dwc2_debug_bulk_recovery_stage() -> i32 {
+    return dwc2_bulk_recovery_stage;
 }
 
 let mut ctrl_setup_buf: [u8; 8] align(64);
@@ -779,15 +787,19 @@ fn dwc2_clear_endpoint_halt(dev_addr: u32, ep_addr: u32) -> bool {
 // the device endpoint to DATA0, so update the matching host-side software
 // toggles only after both control requests have completed successfully.
 fn dwc2_bulk_clear_halts_and_reset_toggles(dev_addr: u32) -> bool {
+    dwc2_bulk_recovery_stage = 0;
     let s: {0..<2 as usize} = bulk_slot_for(dev_addr);
     if (dwc2_clear_endpoint_halt(dev_addr, bulk_slot_in_ep[s]) == false) {
+        dwc2_bulk_recovery_stage = 1;
         return false;
     }
     if (dwc2_clear_endpoint_halt(dev_addr, bulk_slot_out_ep[s]) == false) {
+        dwc2_bulk_recovery_stage = 2;
         return false;
     }
     bulk_slot_in_toggle[s] = PID_DATA0;
     bulk_slot_out_toggle[s] = PID_DATA0;
+    dwc2_bulk_recovery_stage = 3;
     return true;
 }
 
