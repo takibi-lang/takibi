@@ -353,6 +353,17 @@ both source-level minting and reuse after activation. This makes the reviewed
 assembly hook, called once on core 0's boot path, the explicit trust root for
 CPU authority instead of an arbitrary literal in application code.
 
+The copy-on-write exception follow-up uses the same once-only boot hook for a
+second concrete authority shape.  Its strong `rpi3_boot_main` receives
+`ExceptionRegistration[0]` in `x0`, consumes it through
+`exception_handler_install`, and retains the resulting
+`ExceptionHandlerInstalled[0]` until terminal cleanup.  Both owners have
+private fields in `vm_page_map_core.tkb`; compile-error fixtures reject both
+source-level minting from an application module and reuse after installation.
+The handler remains a statically linked strong symbol, so this adds the
+boot-only capability boundary actually required by the COW example without
+introducing a speculative dynamic exception-vector registry.
+
 GitHub issue #140. Status: 69 examples ported and passing `make
 hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level
 `EXAMPLES` list EXCEPT

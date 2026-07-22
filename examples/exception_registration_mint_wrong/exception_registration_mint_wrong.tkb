@@ -1,0 +1,9 @@
+// This file is expected to produce a compile error.  The one-shot exception
+// registration capability is supplied only by the reviewed RPi3 boot ABI.
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+fn exception_registration_mint_bad() {
+    let mut forged: ExceptionRegistration[0] = { 0 };
+    let installed = exception_handler_install(forged);
+    exception_handler_finish(installed);
+}

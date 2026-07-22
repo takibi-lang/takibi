@@ -124,6 +124,31 @@ linear struct CpuOwner[core: usize] {
     private core_id: usize @ core;
 }
 
+// One-shot authority injected by the privileged boot entry when an image
+// needs to install its synchronous-exception handler.  The private field
+// prevents application modules from constructing another registration
+// capability; installation consumes it permanently.
+linear struct ExceptionRegistration[core: usize] {
+    private core_id: usize @ core;
+}
+
+linear struct ExceptionHandlerInstalled[core: usize] {
+    private core_id: usize @ core;
+}
+
+fn exception_handler_install(
+        registration: sink ExceptionRegistration[core])
+        -> ExceptionHandlerInstalled[core] {
+    let mut installed: ExceptionHandlerInstalled[core] = {
+        registration.core_id
+    };
+    return installed;
+}
+
+fn exception_handler_finish(
+        installed: sink ExceptionHandlerInstalled[core]) {
+}
+
 fn cpu_owner_halt(cpu: sink CpuOwner[core]) {
 }
 

@@ -1139,6 +1139,14 @@ itself or any other `exception` root. This gives handlers a statically checked
 non-reentrant contract; ordinary helper recursion remains legal when it does
 not lead back to an exception root.
 
+The RPi3 COW example makes handler installation explicit with a linear
+`ExceptionRegistration[core]` supplied once by the privileged boot-entry ABI.
+`exception_handler_install` consumes it and returns the installed-handler
+lifetime owner. Both structs have private fields in the VM module, so ordinary
+Takibi application files can receive and move the capabilities but cannot mint
+one. This is a source-level capability protocol over the statically linked
+exception symbol; it adds no dynamic handler table.
+
 Slice 5 adds explicit call-effect contracts to first-class function types:
 
 ```takibi

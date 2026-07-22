@@ -267,8 +267,9 @@ rpi3_secondary_start:
     isb
 
     /* The default weak hook tail-calls the ordinary shared runtime `main`.
-       VM/scheduler examples that need a boot-minted linear CpuOwner override
-       it with a strong Takibi function taking core 0 in x0. */
+       VM/scheduler examples reinterpret core 0 in x0 as their boot-minted
+       linear CpuOwner.  The COW example instead receives its one-shot
+       ExceptionRegistration capability through the same once-only hook. */
     mov     x0, #0
     bl      rpi3_boot_main
 

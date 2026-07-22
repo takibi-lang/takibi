@@ -41,7 +41,8 @@ fn cow_state_take() -> CowFaultState {
     return state;
 }
 
-fn rpi3_sync_exception_dispatch(esr: usize, far: usize, elr: usize) -> i32 {
+fn rpi3_sync_exception_dispatch(esr: usize, far: usize, elr: usize) -> i32
+        !{exception} {
     let state = cow_state_take();
     let next = cow_fault_transition(state, esr, far);
     let handled: i32 = cow_fault_was_handled();
@@ -49,7 +50,7 @@ fn rpi3_sync_exception_dispatch(esr: usize, far: usize, elr: usize) -> i32 {
     return handled;
 }
 
-fn app_main() {
+fn cow_app_main(installed: ExceptionHandlerInstalled[0]) {
     page_pool_init();
     cow_store.lock = 1;
     uart_puts("copy_on_write\n");
@@ -114,4 +115,19 @@ fn app_main() {
         }
     }
     uart_puts("done\n");
+    exception_handler_finish(installed);
+}
+
+// startup.S invokes this strong hook exactly once and supplies the one-word
+// ExceptionRegistration[0] in x0.  Its weak default still tail-calls main for
+// every image that does not opt into synchronous exception handling.
+fn rpi3_boot_main(registration: ExceptionRegistration[0]) {
+    platform_init();
+    let installed = exception_handler_install(registration);
+    cow_app_main(installed);
+    platform_shutdown();
+}
+
+// Kept so common/runtime.tkb's unused default main remains link-complete.
+fn app_main() {
 }

@@ -1,0 +1,10 @@
+// This file is expected to produce a compile error.  Installing a handler
+// consumes the boot registration capability, so it cannot register twice.
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+fn exception_registration_reuse_bad(registration: ExceptionRegistration[0]) {
+    let installed = exception_handler_install(registration);
+    let duplicate = exception_handler_install(registration);
+    exception_handler_finish(installed);
+    exception_handler_finish(duplicate);
+}
