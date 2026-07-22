@@ -1481,13 +1481,13 @@ examples/smp_handoff/smp_handoff_rpi3.o: examples/smp_handoff/smp_handoff.tkb \
     $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_SYNC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
-# Per-core slab baseline: keep --forbid-trap off until the hardware behavior
-# is established, then harden it in a separate commit.
+# Per-core slab allocator: the working baseline passed hardware tests; its
+# dedicated --forbid-trap pass found no remaining unchecked array accesses.
 RPI3_SMP_SLAB_EXAMPLES := smp_slab
 RPI3_SMP_SLAB_OBJS := $(foreach e,$(RPI3_SMP_SLAB_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_SMP_SLAB_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_SYNC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 # Single-core fixed-page allocator milestone.  Keep this separate from the
 # general RPI3_TAKIBI_FLAGS rule so its known-good baseline is first committed
