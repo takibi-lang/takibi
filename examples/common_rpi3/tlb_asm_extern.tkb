@@ -5,3 +5,4 @@
 // needing it both declared it locally).
 
 extern fn tlb_invalidate_va(va: usize);
+extern fn tlb_invalidate_asid_va(asid: usize, va: usize);

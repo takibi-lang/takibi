@@ -22,6 +22,7 @@ fn app_main() {
 
             let seed: usize = 0;
             let space = address_space_new(seed);
+            address_space_activate(space);
             let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
             let (space2, pending) = map_page(space, page, va);
             let mapping = tlb_invalidate(pending);

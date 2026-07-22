@@ -82,6 +82,15 @@ l2_dynamic_table:
     .space  4096
 l3_dynamic_table:
     .space  4096
+/* A second root shares the identity-mapped RAM/MMIO L2 tables above but owns
+   an independent dynamic-window L2/L3 chain.  It is installed only by the
+   multi-address-space demo; ordinary examples continue to use l1_table. */
+l1_table_as1:
+    .space  4096
+l2_dynamic_table_as1:
+    .space  4096
+l3_dynamic_table_as1:
+    .space  4096
 
     .section .text
     .global mmu_init
@@ -96,12 +105,18 @@ mmu_init:
     add     x1, x1, :lo12:l1_table
     str     x0, [x1]
 
+    /* Address-space 1 shares the ordinary RAM identity map. */
+    adrp    x8, l1_table_as1
+    add     x8, x8, :lo12:l1_table_as1
+    str     x0, [x8]
+
     /* L1 entry 1: table descriptor pointing at l2_table_local (the ARM
        Local/QA7 block, see this file's header comment). */
     adrp    x0, l2_table_local
     add     x0, x0, :lo12:l2_table_local
     orr     x0, x0, #0x3
     str     x0, [x1, #8]
+    str     x0, [x8, #8]
 
     /* L1 entry 2: table descriptor pointing at l2_dynamic_table
        (examples/vm_page_map's dynamic mapping window, see this file's
@@ -111,6 +126,12 @@ mmu_init:
     add     x0, x0, :lo12:l2_dynamic_table
     orr     x0, x0, #0x3
     str     x0, [x1, #16]
+
+    /* Address-space 1 gets a distinct dynamic-window table chain. */
+    adrp    x0, l2_dynamic_table_as1
+    add     x0, x0, :lo12:l2_dynamic_table_as1
+    orr     x0, x0, #0x3
+    str     x0, [x8, #16]
 
     /* l2_table_local entry 0: a single Device-nGnRnE 2MB block covering
        physical 0x40000000-0x401FFFFF. The descriptor's output-address
@@ -143,6 +164,13 @@ mmu_init:
     orr     x0, x0, #0x3
     adrp    x1, l2_dynamic_table
     add     x1, x1, :lo12:l2_dynamic_table
+    str     x0, [x1]
+
+    adrp    x0, l3_dynamic_table_as1
+    add     x0, x0, :lo12:l3_dynamic_table_as1
+    orr     x0, x0, #0x3
+    adrp    x1, l2_dynamic_table_as1
+    add     x1, x1, :lo12:l2_dynamic_table_as1
     str     x0, [x1]
 
     /* L2 table: 512 entries, each a 2MB block descriptor. Block
@@ -323,4 +351,42 @@ l3_dynamic_write:        /* fn l3_dynamic_write(index: usize, value: usize) */
     adrp    x2, l3_dynamic_table
     add     x2, x2, :lo12:l3_dynamic_table
     str     x1, [x2, x0, lsl #3]
+    ret
+
+/* Select one of the two real translation roots.  slot 0 uses ASID 0 and the
+   original l1_table; slot 1 uses ASID 1 and l1_table_as1.  Both roots map the
+   executing image, stacks, and MMIO identically, so switching TTBR0_EL2 does
+   not disrupt the caller itself. */
+    .global mmu_address_space_activate
+    .type   mmu_address_space_activate, %function
+mmu_address_space_activate: /* fn mmu_address_space_activate(slot: usize) */
+    cbnz    x0, .Las_activate_1
+    adrp    x1, l1_table
+    add     x1, x1, :lo12:l1_table
+    b       .Las_activate_write
+.Las_activate_1:
+    adrp    x1, l1_table_as1
+    add     x1, x1, :lo12:l1_table_as1
+    mov     x2, #1
+    lsl     x2, x2, #48
+    orr     x1, x1, x2
+.Las_activate_write:
+    dsb     ish
+    msr     ttbr0_el2, x1
+    isb
+    ret
+
+/* Write one dynamic L3 entry in the table owned by slot x0. */
+    .global l3_address_space_write
+    .type   l3_address_space_write, %function
+l3_address_space_write: /* fn(slot: usize, index: usize, value: usize) */
+    cbnz    x0, .Las_l3_1
+    adrp    x3, l3_dynamic_table
+    add     x3, x3, :lo12:l3_dynamic_table
+    b       .Las_l3_store
+.Las_l3_1:
+    adrp    x3, l3_dynamic_table_as1
+    add     x3, x3, :lo12:l3_dynamic_table_as1
+.Las_l3_store:
+    str     x2, [x3, x1, lsl #3]
     ret

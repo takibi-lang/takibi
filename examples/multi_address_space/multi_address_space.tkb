@@ -1,0 +1,186 @@
+// Two real EL2 address spaces on Raspberry Pi 3B (issue #67 Stage 4 baseline).
+//
+// Core 0 and core 1 install different TTBR0_EL2 roots and hardware ASIDs.
+// Each root maps the same virtual address (0x80000000) to a different physical
+// page at the same time.  Both mappings remain live while each core reads its
+// own value, proving this is not serialized reuse of one shared L3 table.
+//
+// This first working milestone is intentionally compiled without
+// --forbid-trap.  The real-hardware baseline is committed before hardening.
+
+use "examples/common/sync.tkb";
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+extern fn rpi3_core_id() -> usize;
+
+variant AddressSpacePageSlot {
+    Empty;
+    Full(exists p: usize. PageOwner[p]);
+}
+
+struct AddressSpaceMailbox align(64) {
+    private mutex: i32;
+    private state: io i32;
+    private page: AddressSpacePageSlot;
+}
+
+private let mut as_mailbox: AddressSpaceMailbox;
+private let mut core0_seen: io u8 = 0;
+private let mut core1_seen: io u8 = 0;
+
+fn as_mailbox_init() {
+    as_mailbox.mutex = 1;
+    as_mailbox.state = 0;
+}
+
+fn as_discard(page: sink PageOwner[p]) {
+    page_free(page);
+}
+
+fn as_send(page: PageOwner[p], state: i32) {
+    let g = mutex_lock(&as_mailbox.mutex);
+    let previous: AddressSpacePageSlot = stable_replace(
+        g, &as_mailbox.mutex, as_mailbox.page,
+        AddressSpacePageSlot::Full(page));
+    match previous {
+        AddressSpacePageSlot::Empty => {}
+        AddressSpacePageSlot::Full(stale) => {
+            as_discard(stale);
+        }
+    }
+    dma_publish();
+    as_mailbox.state = state;
+    mutex_unlock(g, &as_mailbox.mutex);
+    interrupt_notify();
+}
+
+fn as_receive(expected: i32) -> AddressSpacePageSlot {
+    while (as_mailbox.state != expected) {
+        interrupt_wait();
+    }
+    dma_consume();
+    let g = mutex_lock(&as_mailbox.mutex);
+    let result: AddressSpacePageSlot = stable_replace(
+        g, &as_mailbox.mutex, as_mailbox.page,
+        AddressSpacePageSlot::Empty);
+    as_mailbox.state = 0;
+    mutex_unlock(g, &as_mailbox.mutex);
+    return result;
+}
+
+fn as_signal(state: i32) {
+    let g = mutex_lock(&as_mailbox.mutex);
+    dma_publish();
+    as_mailbox.state = state;
+    mutex_unlock(g, &as_mailbox.mutex);
+    interrupt_notify();
+}
+
+fn as_wait(expected: i32) {
+    while (as_mailbox.state != expected) {
+        interrupt_wait();
+    }
+    dma_consume();
+}
+
+fn core1_main() {
+    let received = as_receive(1);
+    match received {
+        AddressSpacePageSlot::Empty => {}
+        AddressSpacePageSlot::Full(page) => {
+            let asid1: usize = 1;
+            let space1 = address_space_new(asid1);
+            address_space_activate(space1);
+            let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+            let (occupied1, pending1) = map_page(space1, page, va);
+            let mapping1 = tlb_invalidate(pending1);
+            let bytes1 = mapping_va_bytes(mapping1);
+            bytes1[0] = 22;
+
+            // Tell core 0 that both translations are now live.  Keep mapping1
+            // and occupied1 on this core's stack until core 0 has read VA.
+            as_signal(2);
+            as_wait(3);
+            core1_seen = bytes1[0];
+
+            let (empty1, returned) = unmap_page(occupied1, mapping1);
+            address_space_free(empty1);
+            as_send(returned, 4);
+            while (true) {
+                interrupt_wait();
+            }
+        }
+    }
+}
+
+fn core0_main() {
+    page_pool_init();
+    as_mailbox_init();
+    uart_puts("multi_address_space\n");
+
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {
+            uart_puts("allocation 0 failed\n");
+        }
+        PageAllocResult::Allocated(page0) => {
+            match page_alloc() {
+                PageAllocResult::OutOfMemory => {
+                    page_free(page0);
+                    uart_puts("allocation 1 failed\n");
+                }
+                PageAllocResult::Allocated(page1) => {
+                    let asid0: usize = 0;
+                    let space0 = address_space_new(asid0);
+                    address_space_activate(space0);
+                    let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+                    let (occupied0, pending0) = map_page(space0, page0, va);
+                    let mapping0 = tlb_invalidate(pending0);
+                    let bytes0 = mapping_va_bytes(mapping0);
+                    bytes0[0] = 11;
+
+                    as_send(page1, 1);
+                    as_wait(2);
+                    core0_seen = bytes0[0];
+                    as_signal(3);
+
+                    let returned = as_receive(4);
+                    match returned {
+                        AddressSpacePageSlot::Empty => {
+                            uart_puts("missing page\n");
+                        }
+                        AddressSpacePageSlot::Full(page1_back) => {
+                            uart_puts("same VA: core0=");
+                            uart_print(core0_seen);
+                            uart_puts(" core1=");
+                            uart_print(core1_seen);
+                            uart_puts("\n");
+                            page_free(page1_back);
+                        }
+                    }
+
+                    let (empty0, page0_back) = unmap_page(occupied0, mapping0);
+                    page_free(page0_back);
+                    address_space_free(empty0);
+                }
+            }
+        }
+    }
+    uart_puts("done\n");
+}
+
+fn smp_core_main() {
+    let id: usize = rpi3_core_id();
+    if (id == 0) {
+        core0_main();
+    } else if (id == 1) {
+        core1_main();
+    } else {
+        while (true) {
+            interrupt_wait();
+        }
+    }
+}
+
+fn app_main() {
+    smp_core_main();
+}

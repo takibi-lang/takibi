@@ -40,3 +40,17 @@ tlb_invalidate_va:       /* fn tlb_invalidate_va(va: usize) */
     dsb     ish
     isb
     ret
+
+/* ASID-aware form for the real multi-address-space path.  TLBI VAE2IS takes
+   ASID in bits[63:48] and VA>>12 in bits[43:0] of its register operand. */
+    .global tlb_invalidate_asid_va
+    .type   tlb_invalidate_asid_va, %function
+tlb_invalidate_asid_va:  /* fn(asid: usize, va: usize) */
+    dsb     ishst
+    lsl     x0, x0, #48
+    lsr     x1, x1, #12
+    orr     x0, x0, x1
+    tlbi    vae2is, x0
+    dsb     ish
+    isb
+    ret

@@ -81,6 +81,7 @@ fn core1_main() {
         TransferSlot::Full(page) => {
             let core1_seed: usize = 1;
             let core1_space = address_space_new(core1_seed);
+            address_space_activate(core1_space);
             let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
             let (occupied, pending) = map_page(core1_space, page, va);
             let mapping = tlb_invalidate(pending);
@@ -114,6 +115,7 @@ fn core0_main() {
         PageAllocResult::Allocated(page) => {
             let core0_seed: usize = 0;
             let core0_space = address_space_new(core0_seed);
+            address_space_activate(core0_space);
             let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
             let (occupied, pending) = map_page(core0_space, page, va);
             let mapping = tlb_invalidate(pending);

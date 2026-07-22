@@ -1,0 +1,3 @@
+multi_address_space
+same VA: core0=11 core1=22
+done

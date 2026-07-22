@@ -101,12 +101,19 @@ enum SpaceState: u8 { Empty; Occupied; }
 
 private linear struct AddressSpaceOwner[asid: usize, state: SpaceState] {
     private tag: usize @ asid;
+    private slot: usize;
 }
 
 fn address_space_new(seed: usize @ asid)
         -> AddressSpaceOwner[asid, SpaceState::Empty] {
-    let mut space: AddressSpaceOwner[asid, SpaceState::Empty] = { seed };
+    let mut space: AddressSpaceOwner[asid, SpaceState::Empty] = { seed, seed };
     return space;
+}
+
+extern fn mmu_address_space_activate(slot: usize);
+
+fn address_space_activate(space: borrow AddressSpaceOwner[asid, state]) {
+    mmu_address_space_activate(space.slot);
 }
 
 fn address_space_free(space: sink AddressSpaceOwner[asid, SpaceState::Empty]) {
@@ -121,6 +128,7 @@ fn address_space_free(space: sink AddressSpaceOwner[asid, SpaceState::Empty]) {
 // required TLB maintenance has actually run.
 private linear struct TlbInvalidationPending[asid: usize, va: usize, p: usize] {
     private asid_tag: usize @ asid;
+    private space_slot: usize;
     private va_value: usize @ va;
     private page_index: {0..<PAGE_COUNT as usize};
     private p_witness: usize @ p;
@@ -128,6 +136,7 @@ private linear struct TlbInvalidationPending[asid: usize, va: usize, p: usize] {
 
 private linear struct MappingOwner[asid: usize, va: usize, p: usize] {
     private asid_tag: usize @ asid;
+    private space_slot: usize;
     private va_value: usize @ va;
     private page_index: {0..<PAGE_COUNT as usize};
     private p_witness: usize @ p;
@@ -149,7 +158,7 @@ private linear struct MappingOwner[asid: usize, va: usize, p: usize] {
 const DYN_VA_BASE: usize = 0x80000000;
 const DYN_VA_LIMIT: usize = 0x80200000;
 
-extern fn l3_dynamic_write(index: usize, value: usize);
+extern fn l3_address_space_write(slot: usize, index: usize, value: usize);
 
 fn map_page(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
             page: sink PageOwner[p],
@@ -177,19 +186,21 @@ fn map_page(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
     // Normal entries (0x705) additionally set bit 0 for a BLOCK
     // descriptor's valid encoding (0b01); a PAGE descriptor's is 0b11
     // (bit 1 too), which is the only difference from this line's 0x707.
-    l3_dynamic_write(l3_index, phys_addr | 0x707);
+    l3_address_space_write(space.slot, l3_index, phys_addr | 0x707);
 
-    let mut occupied: AddressSpaceOwner[asid, SpaceState::Occupied] = { space.tag };
+    let mut occupied: AddressSpaceOwner[asid, SpaceState::Occupied] =
+        { space.tag, space.slot };
     let mut pending: TlbInvalidationPending[asid, va, p] =
-        { space.tag, va, page.index, page.p_witness };
+        { space.tag, space.slot, va, page.index, page.p_witness };
     return (occupied, pending);
 }
 
 fn tlb_invalidate(pending: sink TlbInvalidationPending[asid, va, p])
         -> MappingOwner[asid, va, p] {
-    tlb_invalidate_va(pending.va_value);
+    tlb_invalidate_asid_va(pending.space_slot, pending.va_value);
     let mut mapping: MappingOwner[asid, va, p] =
-        { pending.asid_tag, pending.va_value, pending.page_index, pending.p_witness };
+        { pending.asid_tag, pending.space_slot, pending.va_value,
+          pending.page_index, pending.p_witness };
     return mapping;
 }
 
@@ -228,10 +239,11 @@ fn unmap_page(space: sink AddressSpaceOwner[asid, SpaceState::Occupied],
               mapping: sink MappingOwner[asid, va, p])
         -> (AddressSpaceOwner[asid, SpaceState::Empty], PageOwner[p]) {
     let l3_index: usize = (mapping.va_value - DYN_VA_BASE) / PAGE_SIZE;
-    l3_dynamic_write(l3_index, 0);
-    tlb_invalidate_va(mapping.va_value);
+    l3_address_space_write(mapping.space_slot, l3_index, 0);
+    tlb_invalidate_asid_va(mapping.space_slot, mapping.va_value);
 
-    let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] = { space.tag };
+    let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] =
+        { space.tag, space.slot };
     let mut page: PageOwner[p] = { mapping.page_index, mapping.p_witness };
     return (empty, page);
 }
