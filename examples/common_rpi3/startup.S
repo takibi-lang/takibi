@@ -266,7 +266,11 @@ rpi3_secondary_start:
     msr     DAIFClr, #0x3
     isb
 
-    bl      main
+    /* The default weak hook tail-calls the ordinary shared runtime `main`.
+       VM/scheduler examples that need a boot-minted linear CpuOwner override
+       it with a strong Takibi function taking core 0 in x0. */
+    mov     x0, #0
+    bl      rpi3_boot_main
 
     /* Real hardware, no semihosting exit available (unlike QEMU) and
        nothing to return to (unlike a flashed STM32 image, there is no
@@ -275,6 +279,11 @@ rpi3_secondary_start:
 .Lhalt:
     wfe
     b       .Lhalt
+
+    .weak   rpi3_boot_main
+    .type   rpi3_boot_main, %function
+rpi3_boot_main:
+    b       main
 
 /* enable_irq()/disable_irq(): same DAIF.I-only mask as
    examples/common_qemu/startup.S's own pair (#0x2, not the #0x3 startup

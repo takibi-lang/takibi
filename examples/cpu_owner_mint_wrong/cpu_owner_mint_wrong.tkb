@@ -1,0 +1,8 @@
+// This file is expected to produce a compile error. CpuOwner is minted only
+// by the reviewed RPi3 startup ABI; its runtime core-id field is private.
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+fn cpu_owner_mint_bad() {
+    let mut forged: CpuOwner[0] = { 0 };
+    cpu_owner_halt(forged);
+}

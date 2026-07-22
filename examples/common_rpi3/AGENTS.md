@@ -308,7 +308,20 @@ the slot is exchanged only before timer enable, inside the same-core IRQ where
 IRQ nesting is masked, and after timer disable. `rpi3_irq_dispatch` is now
 explicitly `!{interrupt}`, so a future blocking call is rejected transitively.
 The hardened example builds with `--forbid-trap`, all 801 compiler tests pass,
-`make check` passes all 152 integration tests, and all 67 RPi3 fixtures pass.
+`make check` passes all 154 integration tests, and all 67 RPi3 fixtures pass.
+
+Stage 6 also supplied the first concrete need for a boot-minted CPU capability.
+`startup.S` now calls a weak `rpi3_boot_main` hook with core 0 in `x0`; its
+default implementation branches to the unchanged shared `main`, so every
+ordinary image retains the old path. `vm_task_switch` provides the one strong
+override accepting `CpuOwner[0]`, a linear indexed struct whose runtime core-id
+field is private to the VM module and has no Takibi constructor. Activation
+consumes it into `ActiveAddressSpace[0, asid]`, which then stays inside the
+scheduler's linear state until terminal cleanup. Object-code inspection
+confirms the one-word owner is received from `x0`. Negative fixtures reject
+both source-level minting and reuse after activation. This makes the reviewed
+assembly hook, called once on core 0's boot path, the explicit trust root for
+CPU authority instead of an arbitrary literal in application code.
 
 GitHub issue #140. Status: 69 examples ported and passing `make
 hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level

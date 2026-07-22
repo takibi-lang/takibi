@@ -1,0 +1,10 @@
+// This file is expected to produce a compile error. Activating the first
+// address space consumes the unique boot CPU authority into the active token.
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+fn cpu_owner_reuse_bad(cpu: CpuOwner[0]) {
+    let slot0: {0..<2 as usize} = 0;
+    let inactive = address_space_new(slot0);
+    let (space, active) = address_space_activate_cpu(cpu, inactive);
+    cpu_owner_halt(cpu);
+}

@@ -110,6 +110,15 @@ private linear struct ActiveAddressSpace[core: usize, asid: usize] {
     private asid_tag: usize @ asid;
 }
 
+// Boot-minted CPU authority. RPi3 startup passes one runtime core id to the
+// selected entry hook; there is deliberately no Takibi constructor.
+linear struct CpuOwner[core: usize] {
+    private core_id: {0..<4 as usize} @ core;
+}
+
+fn cpu_owner_halt(cpu: sink CpuOwner[core]) {
+}
+
 fn address_space_new(seed: {0..<2 as usize} @ asid)
         -> AddressSpaceOwner[asid, SpaceState::Inactive] {
     let mut space: AddressSpaceOwner[asid, SpaceState::Inactive] = { seed, seed };
@@ -128,6 +137,20 @@ fn address_space_activate(space: sink AddressSpaceOwner[asid, SpaceState::Inacti
         { space.tag, space.slot };
     let mut active: ActiveAddressSpace[core, asid] =
         { core_tag, space.tag };
+    return (empty, active);
+}
+
+fn address_space_activate_cpu(
+        cpu: sink CpuOwner[core],
+        space: sink AddressSpaceOwner[asid, SpaceState::Inactive])
+        -> (AddressSpaceOwner[asid, SpaceState::Empty],
+            ActiveAddressSpace[core, asid]) {
+    mmu_address_space_activate(space.slot);
+    tlb_invalidate_all_el2();
+    let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] =
+        { space.tag, space.slot };
+    let mut active: ActiveAddressSpace[core, asid] =
+        { cpu.core_id, space.tag };
     return (empty, active);
 }
 

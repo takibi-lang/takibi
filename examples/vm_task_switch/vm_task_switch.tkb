@@ -121,25 +121,28 @@ fn vm_task_b() {
     }
 }
 
-fn app_main() {
+fn vm_app_main(cpu: CpuOwner[0]) {
     page_pool_init();
     uart_puts("vm_task_switch\n");
 
     match page_alloc() {
-        PageAllocResult::OutOfMemory => { uart_puts("allocation A failed\n"); }
+        PageAllocResult::OutOfMemory => {
+            cpu_owner_halt(cpu);
+            uart_puts("allocation A failed\n");
+        }
         PageAllocResult::Allocated(page_a) => {
             match page_alloc() {
                 PageAllocResult::OutOfMemory => {
                     page_free(page_a);
+                    cpu_owner_halt(cpu);
                     uart_puts("allocation B failed\n");
                 }
                 PageAllocResult::Allocated(page_b) => {
                     let slot0: {0..<2 as usize} = 0;
                     let slot1: {0..<2 as usize} = 1;
-                    let core0: usize = 0;
                     let inactive0 = address_space_new(slot0);
                     let inactive1 = address_space_new(slot1);
-                    let (space0, active0) = address_space_activate(inactive0, core0);
+                    let (space0, active0) = address_space_activate_cpu(cpu, inactive0);
                     let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
                     let (occupied0, pending0) = map_page(space0, page_a, va);
                     let mapping0 = tlb_invalidate(occupied0, pending0);
@@ -186,4 +189,18 @@ fn app_main() {
         }
     }
     uart_puts("done\n");
+}
+
+// Strong override of common_rpi3/startup.S's weak default hook. The one-word
+// CpuOwner[0] ABI arrives in x0; no Takibi code can mint another one because
+// its sole field is private and no constructor exists.
+fn rpi3_boot_main(cpu: CpuOwner[0]) {
+    platform_init();
+    vm_app_main(cpu);
+    platform_shutdown();
+}
+
+// Kept only so examples/common/runtime.tkb's unused default `main` remains
+// link-complete in this image. Startup dispatches to rpi3_boot_main above.
+fn app_main() {
 }
