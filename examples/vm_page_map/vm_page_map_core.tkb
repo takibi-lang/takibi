@@ -19,9 +19,10 @@
 // plain allocator runnable everywhere; this one only matters once a
 // page can actually be mapped).
 //
-// This first working milestone deliberately uses ordinary checked
-// indices and is compiled without --forbid-trap. The follow-up
-// hardening commit adds only the refinements reported by the compiler.
+// The first working milestone was deliberately committed before enabling
+// --forbid-trap.  The later hardening pass found zero remaining trap sites:
+// the mapping-window, page-index, and 4096-byte view contracts below were
+// already required to express the ownership API itself.
 
 use "examples/common_rpi3/tlb_asm_extern.tkb";
 

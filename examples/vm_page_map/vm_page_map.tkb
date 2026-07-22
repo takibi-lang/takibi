@@ -1,9 +1,9 @@
 // Dynamic single 4KB page map/unmap demo (GitHub issue #67 Stage 2). See
 // examples/vm_page_map/vm_page_map_core.tkb for the type design.
 //
-// This first working milestone deliberately uses ordinary checked indices
-// and is compiled without --forbid-trap. The follow-up hardening commit
-// adds only the refinements reported by the compiler.
+// Its known-good hardware baseline was committed before --forbid-trap was
+// enabled. The later hardening pass found no remaining trap sites because
+// the Stage 2 core API already carries every bound this app uses.
 
 use "examples/vm_page_map/vm_page_map_core.tkb";
 

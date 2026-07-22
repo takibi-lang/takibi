@@ -182,10 +182,12 @@ to `0x707`. Confirmed on real hardware, not just by the type checker:
 value read back through the newly created translation itself, not
 through the physical pool array.
 
-The first unrefined implementation (this milestone) was committed after
-`make hwcheck-rpi3` passed with it included; the `--forbid-trap`
-hardening pass is deferred, matching this project's baseline-then-harden
-process.
+The first unrefined implementation was committed after `make hwcheck-rpi3`
+passed with it included. The later dedicated `--forbid-trap` pass found zero
+remaining trap sites: the mapping-window, page-index, and 4096-byte capacity
+contracts needed by the ownership API had already supplied all required
+bounds. The standalone object rule now enforces the flag independently of
+Stage 3, which also compiles this shared core under `--forbid-trap`.
 
 ## SMP page transfer (issue #67 Stage 3)
 

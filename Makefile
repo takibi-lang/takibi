@@ -1495,8 +1495,9 @@ $(RPI3_PAGE_POOL_OBJS): examples/%_rpi3.o: examples/%.tkb examples/page_pool/pag
 # real reasons (not RAM-shaped like page_pool's own STM32 exclusion):
 # QEMU's and STM32's shared HAL never build a dynamic L3 table or expose
 # a tlbi instruction, so there is nothing to map into on those targets.
-# --forbid-trap deliberately off: this is a brand-new milestone's
-# unrefined baseline, not yet hardened.
+# The working unrefined baseline was committed before this dedicated rule
+# gained --forbid-trap. Stage 3 already proved the shared core under the flag;
+# this rule keeps the standalone Stage 2 app from regressing independently.
 COMMON_RPI3_TLB_ASM_S    := $(COMMON_RPI3_DIR)/tlb_asm.S
 COMMON_RPI3_TLB_ASM_O    := $(COMMON_RPI3_DIR)/tlb_asm.o
 COMMON_RPI3_TLB_ASM_EXTERN := $(COMMON_RPI3_DIR)/tlb_asm_extern.tkb
@@ -1508,7 +1509,7 @@ RPI3_VM_PAGE_MAP_EXAMPLES := vm_page_map
 RPI3_VM_PAGE_MAP_OBJS := $(foreach e,$(RPI3_VM_PAGE_MAP_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_VM_PAGE_MAP_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 # Issue #67 Stage 3 integration baseline: zero-copy PageOwner transfer between
 # cores 0 and 1, with map/TLBI/use/unmap on each side.  This links the SMP

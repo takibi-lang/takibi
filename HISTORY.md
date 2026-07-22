@@ -15,6 +15,17 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-22: Dynamic Page Mapping `--forbid-trap` Hardening (Issue #67 Stage 2)
+
+The standalone `vm_page_map` RPi3 object rule now enables `--forbid-trap`, in
+a separate commit from its previously hardware-proven baseline. The compiler
+reported zero remaining trap sites and required no source refinements: the
+mapping-window range, physical-page index, and 4096-byte capacity contracts
+were already necessary to express Stage 2's owner/state API. Stage 3 had also
+been compiling the same `vm_page_map_core.tkb` under `--forbid-trap`, but that
+transitive coverage did not protect the standalone Stage 2 build rule from a
+future regression. Both rules now enforce the guarantee directly.
+
 ### 2026-07-21: Zero-Copy SMP Page Transfer (Issue #67 Stage 3)
 
 `examples/smp_page_transfer` composes the fixed page allocator identity,
