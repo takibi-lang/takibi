@@ -1,0 +1,5 @@
+vm_context_switch
+A: 11
+B: 22
+A again: 11
+done

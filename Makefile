@@ -1511,6 +1511,15 @@ RPI3_VM_PAGE_MAP_OBJS := $(foreach e,$(RPI3_VM_PAGE_MAP_EXAMPLES),examples/$(e)/
 $(RPI3_VM_PAGE_MAP_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
+# Issue #67 Stage 5 baseline: one core switches between two live address
+# spaces whose distinct physical pages occupy the same VA.  Keep this rule
+# separate and unrefined until the real-hardware baseline is committed.
+RPI3_VM_CONTEXT_SWITCH_EXAMPLES := vm_context_switch
+RPI3_VM_CONTEXT_SWITCH_OBJS := $(foreach e,$(RPI3_VM_CONTEXT_SWITCH_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
+
+$(RPI3_VM_CONTEXT_SWITCH_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+
 # Issue #67 Stage 3 integration baseline: zero-copy PageOwner transfer between
 # cores 0 and 1, with map/TLBI/use/unmap on each side.  This links the SMP
 # trampoline + semaphore and the MMU TLBI stub, so it has a dedicated object
@@ -1647,7 +1656,7 @@ RPI3_HTTP_SDCARD_RTOS_OBJS     := $(foreach e,$(RPI3_HTTP_SDCARD_RTOS_EXAMPLES),
 $(RPI3_HTTP_SDCARD_RTOS_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_NETCONFIG) $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
 
-RPI3_EXAMPLES += $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_PAGE_POOL_EXAMPLES) $(RPI3_VM_PAGE_MAP_EXAMPLES) $(RPI3_SMP_PAGE_TRANSFER_EXAMPLES) $(RPI3_MULTI_ADDRESS_SPACE_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES) $(RPI3_HTTP_SDCARD_EXAMPLES) $(RPI3_HTTP_SDCARD_RTOS_EXAMPLES)
+RPI3_EXAMPLES += $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_PAGE_POOL_EXAMPLES) $(RPI3_VM_PAGE_MAP_EXAMPLES) $(RPI3_VM_CONTEXT_SWITCH_EXAMPLES) $(RPI3_SMP_PAGE_TRANSFER_EXAMPLES) $(RPI3_MULTI_ADDRESS_SPACE_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES) $(RPI3_HTTP_SDCARD_EXAMPLES) $(RPI3_HTTP_SDCARD_RTOS_EXAMPLES)
 RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 # rtc/timer/preempt/watchdog need COMMON_RPI3_TIMER_ASM_O linked in
 # (read_cntfrq() and friends -- mrs cannot be called directly from
@@ -1667,7 +1676,7 @@ RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf
 # issue #146). Everything else uses the plain startup.o+mmu.o link line.
 RPI3_TIMER_ASM_KERNELS := $(foreach e,$(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_HTTP_SDCARD_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 RPI3_SEM_KERNELS       := $(foreach e,$(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES) $(RPI3_HTTP_SDCARD_RTOS_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
-RPI3_VM_PAGE_MAP_KERNELS := $(foreach e,$(RPI3_VM_PAGE_MAP_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
+RPI3_VM_PAGE_MAP_KERNELS := $(foreach e,$(RPI3_VM_PAGE_MAP_EXAMPLES) $(RPI3_VM_CONTEXT_SWITCH_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 RPI3_SMP_PAGE_TRANSFER_KERNELS := $(foreach e,$(RPI3_SMP_PAGE_TRANSFER_EXAMPLES) $(RPI3_MULTI_ADDRESS_SPACE_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 RPI3_GENERIC_KERNELS   := $(filter-out $(RPI3_TIMER_ASM_KERNELS) $(RPI3_SEM_KERNELS) $(RPI3_VM_PAGE_MAP_KERNELS) $(RPI3_SMP_PAGE_TRANSFER_KERNELS),$(RPI3_KERNELS))
 
