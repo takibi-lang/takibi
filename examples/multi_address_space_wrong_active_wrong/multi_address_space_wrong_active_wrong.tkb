@@ -1,0 +1,33 @@
+// This file is expected to produce a compile error. The same VA is valid in
+// both spaces, but mapping0 may be dereferenced only while its own occupied
+// address-space authority is presented.
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+fn multi_address_space_wrong_active_bad() {
+    page_pool_init();
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {}
+        PageAllocResult::Allocated(page0) => {
+            match page_alloc() {
+                PageAllocResult::OutOfMemory => {
+                    page_free(page0);
+                }
+                PageAllocResult::Allocated(page1) => {
+                    let slot0: {0..<2 as usize} = 0;
+                    let slot1: {0..<2 as usize} = 1;
+                    let inactive0 = address_space_new(slot0);
+                    let inactive1 = address_space_new(slot1);
+                    let space0 = address_space_activate(inactive0);
+                    let space1 = address_space_activate(inactive1);
+                    let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+                    let (occupied0, pending0) = map_page(space0, page0, va);
+                    let (occupied1, pending1) = map_page(space1, page1, va);
+                    let mapping0 = tlb_invalidate(occupied0, pending0);
+                    let mapping1 = tlb_invalidate(occupied1, pending1);
+
+                    mapping_va_bytes(occupied1, mapping0);
+                }
+            }
+        }
+    }
+}

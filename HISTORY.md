@@ -15,6 +15,33 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-22: Two Real Concurrent Address Spaces (Issue #67 Stage 4)
+
+`examples/multi_address_space` closes the semantic gap left by Stage 3's typed
+address-space owners over one shared hardware page table. Core 0 and core 1
+now install distinct TTBR0_EL2 roots and hardware ASIDs. Both keep VA
+`0x80000000` mapped at the same time, to different physical pages; core 0 reads
+back `11` while core 1 reads `22`. The complete fixture and all 65 RPi3
+hardware tests passed, so the result is a real translation separation rather
+than serialized reuse of one PTE.
+
+The two roots share the existing identity-mapped RAM/kernel/MMIO L2 tables and
+own separate dynamic L2/L3 chains. This keeps code, stacks, globals, and device
+registers reachable during a local TTBR switch while isolating the dynamic VM
+window. `tlb_invalidate_asid_va` adds the selected ASID to the broadcast
+`vae2is` operand, so mapping maintenance targets the correct translation.
+
+The unrefined working version was committed first. Hardening then enabled
+`--forbid-trap` (zero reported sites) and strengthened `AddressSpaceOwner` to
+the linear protocol `Inactive -> Empty(active) -> Occupied -> Empty ->
+Inactive`. The hardware slot is refined to `{0..<2}`. `mapping_va_bytes`
+requires the matching occupied address-space owner as well as its
+`MappingOwner`, preventing a valid same-VA mapping from being dereferenced
+under the other TTBR authority. New negative fixtures reject map-before-
+activate, cross-address-space VA access, and construction of nonexistent slot
+2. Existing Stage 2/3 fixtures were migrated without weakening their original
+diagnostics.
+
 ### 2026-07-22: Dynamic Page Mapping `--forbid-trap` Hardening (Issue #67 Stage 2)
 
 The standalone `vm_page_map` RPi3 object rule now enables `--forbid-trap`, in

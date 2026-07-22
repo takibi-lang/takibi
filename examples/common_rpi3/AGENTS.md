@@ -131,17 +131,22 @@ core would break its own platform-agnostic split):
 
 ```
 page_alloc() -> PageAllocResult::Allocated(exists p. PageOwner[p])
-address_space_new(seed) -> AddressSpaceOwner[asid, Empty]
+address_space_new(slot) -> AddressSpaceOwner[asid, Inactive]
+address_space_activate(sink AddressSpaceOwner[asid, Inactive])
+    -> AddressSpaceOwner[asid, Empty]
 map_page(sink AddressSpaceOwner[asid, Empty], sink PageOwner[p], va)
     -> (AddressSpaceOwner[asid, Occupied], TlbInvalidationPending[asid, va, p])
-tlb_invalidate(sink TlbInvalidationPending[asid, va, p]) -> MappingOwner[asid, va, p]
+tlb_invalidate(borrow AddressSpaceOwner[asid, Occupied],
+               sink TlbInvalidationPending[asid, va, p]) -> MappingOwner[asid, va, p]
 mapping_bytes(borrow MappingOwner[asid, va, p]) -> [u8; 4096..] @ p
 unmap_page(sink AddressSpaceOwner[asid, Occupied], sink MappingOwner[asid, va, p])
     -> (AddressSpaceOwner[asid, Empty], PageOwner[p])
+address_space_deactivate(sink AddressSpaceOwner[asid, Empty])
+    -> AddressSpaceOwner[asid, Inactive]
 ```
 
-`AddressSpaceOwner`'s `Empty`/`Occupied` state parameter is consumed and
-reissued by map/unmap -- the same idiom `SPEC.md`'s
+`AddressSpaceOwner`'s `Inactive`/`Empty`/`Occupied` state parameter is consumed
+and reissued by activate/map/unmap/deactivate -- the same idiom `SPEC.md`'s
 `SlotWrite[slot, 0] -> SlotWrite[slot, 1]` example uses -- so mapping a
 second page before unmapping the first is a genuine compile error
 (`static value mismatch: SpaceState::Occupied vs SpaceState::Empty`), not
@@ -199,7 +204,8 @@ same owner at the same VA, increments the first and last bytes, unmaps, and
 moves it back. Core 0 remaps, verifies `42`/`99`, unmaps, frees the page, and
 consumes its empty address-space owner. No page payload is copied.
 
-`mapping_va_bytes(borrow MappingOwner[asid, va, p]) -> [u8; 4096..] @ p`
+`mapping_va_bytes(borrow AddressSpaceOwner[asid, Occupied],
+borrow MappingOwner[asid, va, p]) -> [u8; 4096..] @ p`
 confines the unavoidable raw-VA-to-slice construction to the reviewed MMU
 module. Application code gets a checked page-sized slice that becomes unusable
 when `unmap_page` consumes the mapping. The mailbox's mutex plus
@@ -207,16 +213,33 @@ when `unmap_page` consumes the mapping. The mailbox's mutex plus
 Normal Inner-Shareable PTE attributes provide cache coherence; broadcast
 `vae2is` supplies the cross-core TLB shootdown.
 
-The hardware still has one shared EL2 translation regime and one L3 table.
-The two `AddressSpaceOwner[asid, ...]` values are per-core typed capabilities
-over that shared space, and the private mailbox protocol serializes reuse of
-one VA. Distinct per-core TTBRs, real hardware ASIDs, and concurrent address
-spaces are intentionally the next problem rather than being hidden inside
-this integration step. Compile-error fixtures add send-after-consume and
-wrong-address-space unmap coverage; the existing Stage 2 fixtures already
-cover use before TLBI and use after unmap.
+Stage 4 subsequently replaced Stage 3's shared dynamic table with distinct
+TTBR roots and ASIDs. The transfer remains serialized because it moves one
+physical page; `multi_address_space` below is the simultaneous-mapping proof.
 
-GitHub issue #140. Status: 66 examples ported and passing `make
+## Multiple real address spaces (issue #67 Stage 4)
+
+`examples/multi_address_space` keeps two mappings live concurrently on two
+cores. Both use VA `0x80000000`, but core 0 installs root/ASID 0 mapping page A
+and reads `11`, while core 1 installs root/ASID 1 mapping page B and reads
+`22`. The complete UART fixture passed on real RPi3 hardware, proving the
+separation comes from TTBR translation rather than serialized software table
+updates.
+
+`mmu.S` now owns two L1 roots and two dynamic L2/L3 chains. Their RAM, kernel,
+stack, and MMIO entries point to shared identity-map tables, so Takibi and its
+HAL continue running across local TTBR0_EL2 switches. ASID-aware
+`tlb_invalidate_asid_va` packs the selected ASID and VA page number into the
+broadcast `vae2is` operand.
+
+Hardening adds the `Inactive -> Empty(active) -> Occupied -> Empty -> Inactive`
+protocol and refines the hardware slot to `{0..<2}`. A mapped-VA slice requires
+both `MappingOwner[asid, va, p]` and the matching occupied address-space owner.
+Negative fixtures reject mapping before activation, dereferencing a mapping
+under the other active address space, and constructing nonexistent slot 2.
+The compiler found no bounds traps when `--forbid-trap` was enabled.
+
+GitHub issue #140. Status: 67 examples ported and passing `make
 hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level
 `EXAMPLES` list EXCEPT
 `fatfs` (needs SD-card-shaped
@@ -234,7 +257,7 @@ status line here. Full list:
 `affine_escape_via_index`/`align_ptr_proof`/`linear_obligation`/
 `tuple_pair`/`field_lease`/`inet_checksum`/`ip_parse`/`tcp_parse`/
 `rtc`/`timer`/`echo`/`irq`/`preempt`/`semaphore`/`condvar`/`msgqueue`/
-`watchdog`/`rtos_demo`/`chan_rendezvous`/`page_pool`/`vm_page_map`/`smp_page_transfer`/`net_echo`/`arp_reply`/
+`watchdog`/`rtos_demo`/`chan_rendezvous`/`page_pool`/`vm_page_map`/`smp_page_transfer`/`multi_address_space`/`net_echo`/`arp_reply`/
 `icmp_echo`/`tcp_echo`/`http_server`/`kvs_server`. This covers `hwcheck-stm32`'s "plain compute" set
 (extended with plain-compute examples STM32 already had but this
 board's own list had not picked up yet: `slice`/`foreach`/`int64`/

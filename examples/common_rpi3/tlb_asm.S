@@ -4,11 +4,10 @@
 /* -- TLB invalidation-by-VA stub ------------------------------------------
    `tlbi` is a system instruction and cannot be issued directly from
    takibi (same reason examples/common_rpi3/timer_asm.S wraps mrs/msr),
-   so examples/vm_page_map calls this one-instruction-sequence wrapper
-   instead. Used only after map_page/unmap_page write or clear an
-   L3 page descriptor in examples/vm_page_map/vm_page_map_core.tkb's
-   l3_dynamic_table (see examples/common_rpi3/mmu.S's header comment for
-   that table's own layout) -- a PTE write alone does not make a mapping
+   so examples/vm_page_map calls these instruction-sequence wrappers
+   instead. Used only after map_page/unmap_page write or clear an L3 page
+   descriptor in the selected address space (see examples/common_rpi3/mmu.S's
+   header comment for the two-root layout) -- a PTE write alone does not make a mapping
    (or its absence) visible to translations already cached in the TLB;
    this sequence is what makes it so.
 

@@ -13,25 +13,29 @@ fn smp_page_transfer_wrong_space_bad() {
                     page_free(page0);
                 }
                 PageAllocResult::Allocated(page1) => {
-                    let asid0: usize = 0;
-                    let asid1: usize = 1;
-                    let space0 = address_space_new(asid0);
-                    let space1 = address_space_new(asid1);
+                    let asid0: {0..<2 as usize} = 0;
+                    let asid1: {0..<2 as usize} = 1;
+                    let inactive0 = address_space_new(asid0);
+                    let inactive1 = address_space_new(asid1);
+                    let space0 = address_space_activate(inactive0);
+                    let space1 = address_space_activate(inactive1);
                     let va0: {0x80000000..<0x80200000 as usize} = 0x80000000;
                     let va1: {0x80000000..<0x80200000 as usize} = 0x80001000;
                     let (occupied0, pending0) = map_page(space0, page0, va0);
                     let (occupied1, pending1) = map_page(space1, page1, va1);
-                    let mapping0 = tlb_invalidate(pending0);
-                    let mapping1 = tlb_invalidate(pending1);
+                    let mapping0 = tlb_invalidate(occupied0, pending0);
+                    let mapping1 = tlb_invalidate(occupied1, pending1);
 
                     // WRONG: mapping0 belongs to occupied0, not occupied1.
                     let (empty, returned) = unmap_page(occupied1, mapping0);
                     page_free(returned);
-                    address_space_free(empty);
+                    let inactive_empty = address_space_deactivate(empty);
+                    address_space_free(inactive_empty);
 
                     let (empty0, returned1) = unmap_page(occupied0, mapping1);
                     page_free(returned1);
-                    address_space_free(empty0);
+                    let inactive_empty0 = address_space_deactivate(empty0);
+                    address_space_free(inactive_empty0);
                 }
             }
         }

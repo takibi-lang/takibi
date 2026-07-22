@@ -62,6 +62,14 @@
    (invalid, bit[0] = 0), so the whole 2MB window is unmapped until a real
    map_page call populates one entry.
 
+   Issue #67 Stage 4 adds l1_table_as1 plus its own dynamic L2/L3 chain.
+   Both roots point to the shared identity-mapped RAM and MMIO L2 tables, so
+   kernel code, stacks, and peripherals remain reachable across a TTBR switch;
+   only the 0x80000000 dynamic window differs. mmu_address_space_activate
+   installs root/ASID 0 or 1 in TTBR0_EL2, while l3_address_space_write selects
+   the corresponding leaf table. examples/multi_address_space exercises both
+   roots concurrently.
+
    Called from examples/common_rpi3/startup.S's _start, AFTER BSS has
    already been cleared (l1_table/l2_table below live in .bss, so they
    must be zeroed by that ordinary BSS-clear loop -- with MMU still off

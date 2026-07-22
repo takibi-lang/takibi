@@ -91,32 +91,43 @@ fn page_free(owner: sink PageOwner[p]) {
 // Empty-only parameter type), not a runtime check -- see
 // examples/vm_page_map_double_map_wrong.
 //
-// Only one address space exists on this whole target (RPi3 boots into a
-// single shared EL2 translation regime -- examples/common_rpi3/mmu.S),
-// so asid is always witnessed by the same fixed value rather than a
-// fresh one per call; the vocabulary stays ready for multiple ASIDs
-// without this demo needing existential-freshness machinery it has no
-// present use for.
-enum SpaceState: u8 { Empty; Occupied; }
+// Two hardware address-space slots exist. Each has a distinct TTBR0_EL2 root,
+// dynamic L2/L3 chain, and ASID; both share the kernel/RAM/MMIO identity map.
+// The state machine makes activation and cleanup explicit:
+// Inactive -> Empty(active) -> Occupied -> Empty -> Inactive.
+enum SpaceState: u8 { Inactive; Empty; Occupied; }
 
 private linear struct AddressSpaceOwner[asid: usize, state: SpaceState] {
     private tag: usize @ asid;
-    private slot: usize;
+    private slot: {0..<2 as usize};
 }
 
-fn address_space_new(seed: usize @ asid)
-        -> AddressSpaceOwner[asid, SpaceState::Empty] {
-    let mut space: AddressSpaceOwner[asid, SpaceState::Empty] = { seed, seed };
+fn address_space_new(seed: {0..<2 as usize} @ asid)
+        -> AddressSpaceOwner[asid, SpaceState::Inactive] {
+    let mut space: AddressSpaceOwner[asid, SpaceState::Inactive] = { seed, seed };
     return space;
 }
 
 extern fn mmu_address_space_activate(slot: usize);
 
-fn address_space_activate(space: borrow AddressSpaceOwner[asid, state]) {
+fn address_space_activate(space: sink AddressSpaceOwner[asid, SpaceState::Inactive])
+        -> AddressSpaceOwner[asid, SpaceState::Empty] {
     mmu_address_space_activate(space.slot);
+    let mut active: AddressSpaceOwner[asid, SpaceState::Empty] =
+        { space.tag, space.slot };
+    return active;
 }
 
-fn address_space_free(space: sink AddressSpaceOwner[asid, SpaceState::Empty]) {
+fn address_space_deactivate(space: sink AddressSpaceOwner[asid, SpaceState::Empty])
+        -> AddressSpaceOwner[asid, SpaceState::Inactive] {
+    // Return this core to the always-present kernel/root address space.
+    mmu_address_space_activate(0);
+    let mut inactive: AddressSpaceOwner[asid, SpaceState::Inactive] =
+        { space.tag, space.slot };
+    return inactive;
+}
+
+fn address_space_free(space: sink AddressSpaceOwner[asid, SpaceState::Inactive]) {
 }
 
 // PTE change -> TlbInvalidationPending -> tlbi+dsb+isb -> MappingOwner:
@@ -142,15 +153,15 @@ private linear struct MappingOwner[asid: usize, va: usize, p: usize] {
     private p_witness: usize @ p;
 }
 
-// examples/common_rpi3/mmu.S's dynamic single-page mapping window: L1
-// entry 2 -> l2_dynamic_table entry 0 -> l3_dynamic_table, covering
-// exactly 2MB (512 * 4KB) starting at DYN_VA_BASE. l3_dynamic_table lives
+// examples/common_rpi3/mmu.S's per-address-space dynamic single-page mapping
+// window: each L1 entry 2 reaches that root's own L2/L3 chain, covering
+// exactly 2MB (512 * 4KB) starting at DYN_VA_BASE. The L3 tables live
 // in mmu.S's own .bss (not a `.tkb` global -- mmu_init runs
 // unconditionally for every RPi3 example, so a symbol it references must
 // be defined in every kernel's link, not only this one; see mmu.S's own
 // header comment for the link failure this caused the first time around).
-// l3_dynamic_write is mmu.S's one-instruction accessor for the single
-// entry map_page/unmap_page write. Every entry starts invalid
+// l3_address_space_write selects the owner slot's table for each
+// map_page/unmap_page write. Every entry starts invalid
 // (BSS-cleared); VA is refined to this window so an out-of-range VA is a
 // compile error, not a runtime check -- the same "Detect Errors at
 // Compile Time" approach examples/page_pool's own physical-index
@@ -195,7 +206,8 @@ fn map_page(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
     return (occupied, pending);
 }
 
-fn tlb_invalidate(pending: sink TlbInvalidationPending[asid, va, p])
+fn tlb_invalidate(space: borrow AddressSpaceOwner[asid, SpaceState::Occupied],
+                  pending: sink TlbInvalidationPending[asid, va, p])
         -> MappingOwner[asid, va, p] {
     tlb_invalidate_asid_va(pending.space_slot, pending.va_value);
     let mut mapping: MappingOwner[asid, va, p] =
@@ -229,7 +241,8 @@ fn mapping_bytes(mapping: borrow MappingOwner[asid, va, p])
 // slice construction is confined to this reviewed MMU boundary: callers must
 // hold the MappingOwner, receive exactly 4096 bytes tied to its page identity,
 // and lose access when unmap_page consumes the mapping.
-fn mapping_va_bytes(mapping: borrow MappingOwner[asid, va, p])
+fn mapping_va_bytes(space: borrow AddressSpaceOwner[asid, SpaceState::Occupied],
+                    mapping: borrow MappingOwner[asid, va, p])
         -> [u8; PAGE_SIZE..] @ p {
     let va_ptr: *u8 = mapping.va_value as *u8;
     return unsafe { va_ptr[0..<4096] };

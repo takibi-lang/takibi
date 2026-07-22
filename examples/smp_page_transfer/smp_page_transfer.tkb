@@ -6,10 +6,9 @@
 // Core 1 maps that same owner at the same VA, modifies it, unmaps it, and
 // moves the owner back. Core 0 remaps, verifies, unmaps, and frees it.
 //
-// The BCM2837 demo still has one shared EL2 translation regime and L3 table;
-// AddressSpaceOwner values are per-core typed capabilities over that shared
-// hardware space, not separate TTBRs yet. The mailbox serializes use of the
-// one dynamic VA, while tlb_invalidate_va broadcasts VAE2IS to every core.
+// Core 0 and core 1 use distinct TTBR0_EL2 roots and ASIDs. This transfer
+// remains serialized because it moves one physical PageOwner between them;
+// multi_address_space separately proves simultaneous same-VA mappings.
 //
 // This first working milestone is intentionally compiled without
 // --forbid-trap. Refinements are added only after the real-hardware baseline.
@@ -79,17 +78,18 @@ fn core1_main() {
     match received {
         TransferSlot::Empty => {}
         TransferSlot::Full(page) => {
-            let core1_seed: usize = 1;
-            let core1_space = address_space_new(core1_seed);
-            address_space_activate(core1_space);
+            let core1_seed: {0..<2 as usize} = 1;
+            let core1_inactive = address_space_new(core1_seed);
+            let core1_space = address_space_activate(core1_inactive);
             let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
             let (occupied, pending) = map_page(core1_space, page, va);
-            let mapping = tlb_invalidate(pending);
-            let bytes = mapping_va_bytes(mapping);
+            let mapping = tlb_invalidate(occupied, pending);
+            let bytes = mapping_va_bytes(occupied, mapping);
             bytes[0] = bytes[0] + 1;
             bytes[4095] = bytes[4095] + 1;
             let (empty, returned) = unmap_page(occupied, mapping);
-            address_space_free(empty);
+            let core1_inactive2 = address_space_deactivate(empty);
+            address_space_free(core1_inactive2);
             dma_publish();
             transfer_send(returned, 2);
             while (transfer_mailbox.state != 3) {
@@ -113,13 +113,13 @@ fn core0_main() {
             uart_puts("allocation failed\n");
         }
         PageAllocResult::Allocated(page) => {
-            let core0_seed: usize = 0;
-            let core0_space = address_space_new(core0_seed);
-            address_space_activate(core0_space);
+            let core0_seed: {0..<2 as usize} = 0;
+            let core0_inactive = address_space_new(core0_seed);
+            let core0_space = address_space_activate(core0_inactive);
             let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
             let (occupied, pending) = map_page(core0_space, page, va);
-            let mapping = tlb_invalidate(pending);
-            let bytes = mapping_va_bytes(mapping);
+            let mapping = tlb_invalidate(occupied, pending);
+            let bytes = mapping_va_bytes(occupied, mapping);
             bytes[0] = 41;
             bytes[4095] = 98;
             let (empty, outbound) = unmap_page(occupied, mapping);
@@ -132,12 +132,13 @@ fn core0_main() {
             match returned {
                 TransferSlot::Empty => {
                     uart_puts("missing page\n");
-                    address_space_free(empty);
+                    let inactive_empty = address_space_deactivate(empty);
+                    address_space_free(inactive_empty);
                 }
                 TransferSlot::Full(page2) => {
                     let (occupied2, pending2) = map_page(empty, page2, va);
-                    let mapping2 = tlb_invalidate(pending2);
-                    let result = mapping_va_bytes(mapping2);
+                    let mapping2 = tlb_invalidate(occupied2, pending2);
+                    let result = mapping_va_bytes(occupied2, mapping2);
                     uart_puts("core1 -> core0: ");
                     if (result[0] == 42 && result[4095] == 99) {
                         uart_puts("ok\n");
@@ -146,7 +147,8 @@ fn core0_main() {
                     }
                     let (empty2, freed) = unmap_page(occupied2, mapping2);
                     page_free(freed);
-                    address_space_free(empty2);
+                    let inactive2 = address_space_deactivate(empty2);
+                    address_space_free(inactive2);
                     transfer_mailbox.state = 3;
                     dma_publish();
                     interrupt_notify();

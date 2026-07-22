@@ -6,8 +6,9 @@ fn vm_page_map_use_before_invalidate_bad() {
     match page_alloc() {
         PageAllocResult::OutOfMemory => {}
         PageAllocResult::Allocated(page) => {
-            let seed: usize = 0;
-            let space = address_space_new(seed);
+            let seed: {0..<2 as usize} = 0;
+            let inactive = address_space_new(seed);
+            let space = address_space_activate(inactive);
             let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
             let (space2, pending) = map_page(space, page, va);
             mapping_bytes(pending);

@@ -1,0 +1,17 @@
+// This file is expected to produce a compile error. A newly-created address
+// space is Inactive and cannot map pages until address_space_activate consumes
+// it and returns the active Empty state.
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+fn multi_address_space_map_inactive_bad() {
+    page_pool_init();
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {}
+        PageAllocResult::Allocated(page) => {
+            let slot: {0..<2 as usize} = 0;
+            let inactive = address_space_new(slot);
+            let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+            let (occupied, pending) = map_page(inactive, page, va);
+        }
+    }
+}

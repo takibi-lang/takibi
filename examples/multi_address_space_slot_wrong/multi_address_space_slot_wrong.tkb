@@ -1,0 +1,7 @@
+// This file is expected to produce a compile error. Only the two translation
+// roots and hardware ASIDs installed by mmu.S can be represented.
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+fn multi_address_space_slot_bad() {
+    let space = address_space_new(2);
+}
