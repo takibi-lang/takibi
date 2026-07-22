@@ -772,6 +772,25 @@ fn dwc2_clear_endpoint_halt(dev_addr: u32, ep_addr: u32) -> bool {
                                   ctrl_data_buf, 0);
 }
 
+// Complete the host-controller half of USB MSC BOT reset recovery.  The
+// class-specific Mass Storage Reset itself belongs in usb_msc.tkb because
+// it needs the interface number; after that request succeeds, BOT requires
+// CLEAR_FEATURE(ENDPOINT_HALT) on both bulk endpoints.  Each clear resets
+// the device endpoint to DATA0, so update the matching host-side software
+// toggles only after both control requests have completed successfully.
+fn dwc2_bulk_clear_halts_and_reset_toggles(dev_addr: u32) -> bool {
+    let s: {0..<2 as usize} = bulk_slot_for(dev_addr);
+    if (dwc2_clear_endpoint_halt(dev_addr, bulk_slot_in_ep[s]) == false) {
+        return false;
+    }
+    if (dwc2_clear_endpoint_halt(dev_addr, bulk_slot_out_ep[s]) == false) {
+        return false;
+    }
+    bulk_slot_in_toggle[s] = PID_DATA0;
+    bulk_slot_out_toggle[s] = PID_DATA0;
+    return true;
+}
+
 // On any device-side STALL (the endpoint enters a halted state until
 // explicitly cleared, USB 2.0 spec 9.4.5), recover via
 // CLEAR_FEATURE(ENDPOINT_HALT) and reset the software toggle to match

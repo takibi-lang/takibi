@@ -916,6 +916,19 @@ regression in this milestone's code; a full clean `make hwcheck-rpi3`
 run immediately after a reset has passed 100% each time this was
 retried.
 
+An intermittent real `fatfs_sdcard` failure later exposed a distinct BOT
+recovery gap: WRITE(10)'s data stage completed, its CSW was not received or
+validated, and every later CBW failed because the host and device no longer
+agreed on a command boundary. `usb_msc.tkb` now distinguishes a valid SCSI
+command-failed CSW from an uncertain transport/phase result. Only the latter
+performs the BOT-specified recovery sequence (Mass Storage Reset, clear halt
+on Bulk-IN, clear halt on Bulk-OUT, synchronize both saved host toggles to
+DATA0), then retries once. READ(10) is side-effect-free; WRITE(10) retry is
+deliberately restricted to the exact same one-sector LBA and bytes, making a
+lost-CSW replay content-idempotent. A valid command-failure status is returned
+without reset or retry. The full 69-test RPi3 hardware suite passed with this
+recovery path present.
+
 **`rtos_fatfs_sdcard` ported -- and it found a real driver bug.** The
 shared `rtos_fatfs_sdcard.tkb` source got the same de-STM32-ing
 treatment as `fatfs_sdcard.tkb` (target adapter moved to the compile

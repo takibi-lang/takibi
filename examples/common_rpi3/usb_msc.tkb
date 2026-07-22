@@ -77,6 +77,12 @@ let mut msc_iface_num: u32 = 0;
 let mut msc_ready:     i32 = 0; // 0 = not initialized, 1 = ready (module state)
 let mut msc_tag:       u32 = 1;
 let mut msc_last_dcsw_status: u8 = 0xFF;
+// Outcome of the last msc_read_csw call.  A valid status=1 is a SCSI
+// command failure and must not trigger blind transport recovery; missing,
+// malformed, mismatched, or phase-error CSWs leave BOT synchronization
+// uncertain and require the full reset-recovery sequence.
+// 0 = command passed, 1 = valid command failure, 2 = transport uncertain.
+let mut msc_csw_outcome: i32 = 2;
 // Last block-I/O failure, for the FAT adapter's hardware diagnostics.
 // 0 = none, 1 = CBW OUT, 2 = data stage, 3 = CSW IN/validation.
 let mut msc_io_error_stage: i32 = 0;
@@ -164,6 +170,7 @@ fn msc_send_cbw() -> bool {
 // the CBW just sent) before trusting dCSWStatus. Returns true only when
 // the transport itself succeeded AND the command passed (status 0).
 fn msc_read_csw() -> bool {
+    msc_csw_outcome = 2;
     // A flash drive may NAK the CSW endpoint while committing WRITE(10) to
     // media.  One dwc2_bulk_in call only covers eight channel re-arms, which
     // proved too short during fat_format(): giving up there leaves the BOT
@@ -195,7 +202,14 @@ fn msc_read_csw() -> bool {
         return false;
     }
     msc_last_dcsw_status = msc_csw_buf[12];
-    return msc_last_dcsw_status == 0;
+    if (msc_last_dcsw_status == 0) {
+        msc_csw_outcome = 0;
+        return true;
+    }
+    if (msc_last_dcsw_status == 1) {
+        msc_csw_outcome = 1;
+    }
+    return false;
 }
 
 // Bulk-Only Mass Storage Reset (class request, interface recipient, no
@@ -210,6 +224,19 @@ fn msc_bulk_only_reset() -> bool {
     return dwc2_control_transfer(msc_dev_addr, msc_max_pkt, MSC_RT_RESET,
                                   MSC_REQ_RESET, 0, msc_iface_num as u16,
                                   ctrl_data_buf, 0);
+}
+
+// USB Mass Storage BOT reset recovery, in the order required by the BOT
+// specification: class-specific Mass Storage Reset, clear halt on Bulk-IN,
+// clear halt on Bulk-OUT, then synchronize the host's saved toggles with the
+// endpoints' post-clear DATA0 state.  A failed recovery leaves the transport
+// unusable; callers return the original I/O error rather than continuing out
+// of phase.
+fn msc_recover_transport() -> bool {
+    if (msc_bulk_only_reset() == false) {
+        return false;
+    }
+    return dwc2_bulk_clear_halts_and_reset_toggles(msc_dev_addr);
 }
 
 // Get Max LUN -- informational only, this driver always addresses LUN 0
@@ -380,12 +407,7 @@ fn disk_status() -> i32 {
     return -1;
 }
 
-fn disk_read(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
-    msc_io_error_stage = 0;
-    msc_io_error_lba = sector;
-    if (disk_status() != 0) {
-        return -1;
-    }
+fn msc_read10_once(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
     msc_cbw_header(512, MSC_DIR_IN, 10);
     msc_scsi_lba_cdb(SCSI_READ10, sector);
     if (msc_send_cbw() == false) {
@@ -403,14 +425,31 @@ fn disk_read(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
     return 0;
 }
 
-// buf is `*align(32) u8`, not plain `*u8` -- see this file's header
-// comment for why this differs from sdmmc.tkb's disk_write.
-fn disk_write(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
+fn disk_read(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
     msc_io_error_stage = 0;
     msc_io_error_lba = sector;
     if (disk_status() != 0) {
         return -1;
     }
+    if (msc_read10_once(sector, buf) == 0) {
+        return 0;
+    }
+    // A valid command-failed CSW means BOT is still synchronized.  All
+    // other stage failures make the command boundary uncertain: recover
+    // once and retry this side-effect-free READ(10) once.
+    if ((msc_io_error_stage == 3) && (msc_csw_outcome == 1)) {
+        return -1;
+    }
+    if (msc_recover_transport() == false) {
+        return -1;
+    }
+    msc_io_error_stage = 0;
+    return msc_read10_once(sector, buf);
+}
+
+// buf is `*align(32) u8`, not plain `*u8` -- see this file's header
+// comment for why this differs from sdmmc.tkb's disk_write.
+fn msc_write10_once(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
     msc_cbw_header(512, MSC_DIR_OUT, 10);
     msc_scsi_lba_cdb(SCSI_WRITE10, sector);
     if (msc_send_cbw() == false) {
@@ -426,4 +465,28 @@ fn disk_write(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
         return -1;
     }
     return 0;
+}
+
+
+fn disk_write(sector: u32, buf: *align(32) u8) -> i32 !{may_block} {
+    msc_io_error_stage = 0;
+    msc_io_error_lba = sector;
+    if (disk_status() != 0) {
+        return -1;
+    }
+    if (msc_write10_once(sector, buf) == 0) {
+        return 0;
+    }
+    if ((msc_io_error_stage == 3) && (msc_csw_outcome == 1)) {
+        return -1;
+    }
+    if (msc_recover_transport() == false) {
+        return -1;
+    }
+    // This is deliberately limited to one replay of the exact same
+    // single-block WRITE(10).  If the first command reached media before
+    // its CSW was lost, repeating identical bytes to identical LBA is
+    // content-idempotent; no general write-command retry policy is implied.
+    msc_io_error_stage = 0;
+    return msc_write10_once(sector, buf);
 }
