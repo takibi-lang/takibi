@@ -217,6 +217,36 @@ Stage 4 subsequently replaced Stage 3's shared dynamic table with distinct
 TTBR roots and ASIDs. The transfer remains serialized because it moves one
 physical page; `multi_address_space` below is the simultaneous-mapping proof.
 
+## Copy-on-write fault transition
+
+`examples/copy_on_write` splits one linear physical-page owner into exactly
+two read-only leases, maps the same backing page into the two hardware address
+spaces, and deliberately stores through the fault-side VA.  The EL2
+synchronous vector preserves the complete interrupted register frame and
+passes ESR_EL2/FAR_EL2/ELR_EL2 to a strong Takibi handler.  Only a same-EL
+level-3 write-permission fault for the registered COW VA is handled.
+
+The interrupted frame does not receive or duplicate VM owners.  Both address
+spaces, both read-only mappings, both leases, and the active fault-side token
+live in a private stable `CowFaultState` slot.  The handler takes that state,
+allocates and copies a new page, replaces only the fault-side PTE with a
+writable mapping, performs the ASID-aware TLBI sequence, and returns the full
+successor state before assembly retries the same ELR.  Unknown faults and OOM
+leave the shared state intact and return unhandled.  Cleanup unmaps/frees the
+private page, proves the source page stayed unchanged, consumes both leases in
+`shared_page_join`, and frees the original backing page.
+
+The first real-hardware baseline was committed without `--forbid-trap`; its
+fixture observed 11 before the faulting store, 42 after exception return, and
+11 through the source address space.  A full follow-up hardware run passed
+71/71 fixtures.  The separate hardening pass found no trap sites because the
+existing page-index and dynamic-VA refinements already prove every copy and
+mapping bound.  The stable slot is intentionally the narrow trusted boundary
+for this experiment; the follow-up design audit will extract requirements for
+an exception effect, nonblocking/non-reentrant handler contracts, boot-minted
+handler authority, CPU/task-indexed resource cells, mandatory state return,
+and handled-resume versus unhandled-noreturn results.
+
 ## Multiple real address spaces (issue #67 Stage 4)
 
 `examples/multi_address_space` keeps two mappings live concurrently on two

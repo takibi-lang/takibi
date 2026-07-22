@@ -1577,13 +1577,13 @@ RPI3_MULTI_ADDRESS_SPACE_OBJS := $(foreach e,$(RPI3_MULTI_ADDRESS_SPACE_EXAMPLES
 $(RPI3_MULTI_ADDRESS_SPACE_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_SYNC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
-# Copy-on-write baseline. Keep this first real exception-driven milestone
-# unrefined until its hardware fixture passes; hardening is a later commit.
+# Copy-on-write exception milestone. Its hardware baseline was committed
+# first; the dedicated hardening pass found no remaining trap sites.
 RPI3_COW_EXAMPLES := copy_on_write
 RPI3_COW_OBJS := $(foreach e,$(RPI3_COW_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_COW_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 # USB bring-up group (GitHub issue #140's Ethernet milestone -- see
 # examples/usb_probe/usb_probe.tkb's own header comment and
