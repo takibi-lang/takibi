@@ -1,0 +1,11 @@
+smp_task_migrate
+prefetch requested
+prefetch complete
+task saved
+core1 arming
+core1 armed
+task resumed
+core0 before: 41
+core1 cached: 41
+core1 after:  42
+done

@@ -1,6 +1,6 @@
 // Raspberry Pi 3B (BCM2837) preemptive-scheduler timer HAL: the ARM
 // Generic Timer's comparator (CNTP_TVAL_EL0/CNTP_CTL_EL0), routed to
-// core 0 via the QA7 "ARM Local" per-core Timer Interrupt Control
+// the selected core via the QA7 "ARM Local" per-core Timer Interrupt Control
 // register (0x40000040, bit 1 = CNTPNSIRQ) -- a DIRECT local interrupt,
 // unlike UART0's route through the VC controller cascade (see
 // examples/common_rpi3/intc.tkb). This file is deliberately
@@ -69,22 +69,32 @@ fn setup_task_stack(s: *u8, f: fn() -> void) -> usize {
     return base as usize;
 }
 
-// Bit 1 of Core0's IRQ source register is CNTPNSIRQ (the non-secure
+// Bit 1 of each core's IRQ source register is CNTPNSIRQ (the non-secure
 // physical timer this file's stubs control) -- confirmed against the
 // Raspberry Pi Foundation's own "Quad-A7 control" datasheet, rev 3.4,
 // section 4.10 (also used, for the same register, by
 // examples/common_rpi3/intc.tkb's UART dispatch, checking bit 8 there
 // instead).
+fn rpi3_timer_irq_pending_core(core: {0..<4 as usize}) -> bool {
+    let irq_source_base: *io u32 = 0x40000060;
+    let irq_source: *io u32 = irq_source_base + (core as isize);
+    return (*irq_source & (1 << 1)) != 0;
+}
+
 fn rpi3_timer_irq_pending() -> bool {
-    let core0_irq_source: *io u32 = 0x40000060;
-    return (*core0_irq_source & (1 << 1)) != 0;
+    return rpi3_timer_irq_pending_core(0);
+}
+
+fn timer_init_core(core: {0..<4 as usize}) {
+    let timer_irq_control_base: *io u32 = 0x40000040;
+    let timer_irq_control: *io u32 = timer_irq_control_base + (core as isize);
+    *timer_irq_control = 1 << 1; // enable CNTPNSIRQ as an IRQ
+    set_cntp_tval((read_cntfrq() >> 6) as i32);
+    enable_cntp();
 }
 
 fn timer_init() {
-    let core0_timer_irq_control: *io u32 = 0x40000040;
-    *core0_timer_irq_control = 1 << 1; // enable CNTPNSIRQ as an IRQ
-    set_cntp_tval((read_cntfrq() >> 6) as i32);
-    enable_cntp();
+    timer_init_core(0);
 }
 
 fn scheduler_init() {

@@ -18,6 +18,15 @@ rpi3_secondary_start:
     msr     sctlr_el2, x0
     isb
 
+    /* HCR_EL2 is per-core state.  Route physical IRQ/FIQ to EL2 on every
+       secondary just as startup.S does on core 0; otherwise a local timer
+       can become pending after DAIF.I is cleared but is still routed toward
+       EL1, so an EL2-resident secondary never takes the interrupt. */
+    mrs     x0, hcr_el2
+    orr     x0, x0, #0x18
+    msr     hcr_el2, x0
+    isb
+
     /* Secondary cores are launched from the firmware spin loop with caches
        and MMU disabled.  Core 0 already issued the shareable I-cache
        invalidation after loading this image. */

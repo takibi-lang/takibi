@@ -1,0 +1,184 @@
+// Real saved-frame migration from RPi3 core 0 to core 1 (issue #67 baseline).
+// Core 1 first caches the old translation (41). Core 0 preempts the task,
+// replaces that same VA with a new page (42), broadcasts TLBI, then publishes
+// the saved SP. Core 1 resumes the exact frame and must observe 42.
+
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+extern fn rpi3_core_id() -> usize;
+extern fn enable_irq();
+
+private let mut migrate_stage: io i32 = 0;
+private let mut task_saved: io i32 = 0;
+private let mut task_migratable: io i32 = 0;
+private let mut task_done: io i32 = 0;
+private let mut core0_current: io i32 = 0;
+private let mut core1_current: io i32 = 0;
+private let mut core0_main_sp: usize = 0;
+private let mut core1_main_sp: usize = 0;
+private let mut migrating_sp: usize = 0;
+private let mut initial_task_sp: usize = 0;
+private let mut migrate_stack: [u8; 4096];
+private let mut seen_core0: io u8 = 0;
+private let mut seen_core1_before: io u8 = 0;
+private let mut seen_core1_after: io u8 = 0;
+
+fn migrating_task() {
+    let shared_va: *io u8 = 0x80000000;
+    seen_core0 = *shared_va;
+    dma_publish();
+    task_migratable = 1;
+    while (true) {
+        let id: usize = rpi3_core_id();
+        if (id == 1) {
+            seen_core1_after = *shared_va;
+            task_done = 1;
+        }
+    }
+}
+
+fn rpi3_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
+    let raw_id: usize = rpi3_core_id();
+    if (raw_id < 4) {
+        let id: {0..<4 as usize} = raw_id;
+        if (rpi3_timer_irq_pending_core(id)) {
+            scheduler_rearm_tick();
+            if (id == 0) {
+                if (core0_current == 0) {
+                    core0_main_sp = frame_sp;
+                    core0_current = 1;
+                    return initial_task_sp;
+                }
+                if (task_migratable == 0) {
+                    return frame_sp;
+                }
+                migrating_sp = frame_sp;
+                core0_current = 0;
+                scheduler_disable();
+                task_saved = 1;
+                return core0_main_sp;
+            } else if (id == 1) {
+                if (core1_current == 0) {
+                    core1_main_sp = frame_sp;
+                    core1_current = 1;
+                    return migrating_sp;
+                }
+                core1_current = 0;
+                scheduler_disable();
+                return core1_main_sp;
+            }
+        }
+    }
+    return frame_sp;
+}
+
+fn core1_migrate_main() {
+    while (migrate_stage != 1) { interrupt_wait(); }
+    dma_consume();
+    mmu_address_space_activate(0);
+    tlb_invalidate_all_el2();
+    let shared_va: *io u8 = 0x80000000;
+    seen_core1_before = *shared_va;
+    dma_publish();
+    migrate_stage = 2;
+    interrupt_notify();
+
+    while (migrate_stage != 3) { interrupt_wait(); }
+    dma_consume();
+    uart_puts("core1 arming\n");
+    timer_init_core(1);
+    enable_irq();
+    uart_puts("core1 armed\n");
+    while (task_done == 0) {}
+    while (core1_current != 0) {}
+    dma_publish();
+    migrate_stage = 4;
+    interrupt_notify();
+    while (true) { interrupt_wait(); }
+}
+
+fn core0_migrate_main() {
+    page_pool_init();
+    uart_puts("smp_task_migrate\n");
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => { uart_puts("allocation old failed\n"); }
+        PageAllocResult::Allocated(old_page) => {
+            let slot0: {0..<2 as usize} = 0;
+            let core0: usize = 0;
+            let inactive = address_space_new(slot0);
+            let (space, active) = address_space_activate(inactive, core0);
+            let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+            let (occupied, pending) = map_page(space, old_page, va);
+            let mapping = tlb_invalidate(occupied, pending);
+            let lease = mapping_va_acquire(active, occupied, mapping);
+            let bytes = mapping_va_bytes(lease);
+            bytes[0] = 41;
+            let active_ready = mapping_va_release(lease);
+
+            dma_publish();
+            migrate_stage = 1;
+            interrupt_notify();
+            uart_puts("prefetch requested\n");
+            while (migrate_stage != 2) { interrupt_wait(); }
+            dma_consume();
+            uart_puts("prefetch complete\n");
+
+            initial_task_sp = setup_task_stack(
+                migrate_stack + 4096, migrating_task);
+            timer_init_core(0);
+            while (task_saved == 0) {}
+            uart_puts("task saved\n");
+
+            let (empty, old_back) = unmap_page(occupied, mapping);
+            page_free(old_back);
+            match page_alloc() {
+                PageAllocResult::OutOfMemory => {
+                    let inactive_back = address_space_deactivate(active_ready, empty);
+                    address_space_free(inactive_back);
+                    uart_puts("allocation new failed\n");
+                }
+                PageAllocResult::Allocated(new_page) => {
+                    let (occupied2, pending2) = map_page(empty, new_page, va);
+                    let mapping2 = tlb_invalidate(occupied2, pending2);
+                    let lease2 = mapping_va_acquire(
+                        active_ready, occupied2, mapping2);
+                    let bytes2 = mapping_va_bytes(lease2);
+                    bytes2[0] = 42;
+                    let active2 = mapping_va_release(lease2);
+
+                    dma_publish();
+                    migrate_stage = 3;
+                    interrupt_notify();
+                    while (migrate_stage != 4) { interrupt_wait(); }
+                    dma_consume();
+                    uart_puts("task resumed\n");
+
+                    uart_puts("core0 before: "); uart_print(seen_core0); uart_puts("\n");
+                    uart_puts("core1 cached: "); uart_print(seen_core1_before); uart_puts("\n");
+                    uart_puts("core1 after:  "); uart_print(seen_core1_after); uart_puts("\n");
+
+                    let (empty2, new_back) = unmap_page(occupied2, mapping2);
+                    page_free(new_back);
+                    let inactive2 = address_space_deactivate(active2, empty2);
+                    address_space_free(inactive2);
+                }
+            }
+        }
+    }
+    uart_puts("done\n");
+}
+
+fn smp_core_main() {
+    let id: usize = rpi3_core_id();
+    if (id == 0) {
+        core0_migrate_main();
+    } else if (id == 1) {
+        core1_migrate_main();
+    } else {
+        while (true) { interrupt_wait(); }
+    }
+}
+
+fn app_main() {
+    smp_core_main();
+}
