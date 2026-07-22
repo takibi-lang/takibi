@@ -82,6 +82,14 @@ fn page_free(owner: sink PageOwner[p]) {
     page_used[owner.index] = 0;
 }
 
+fn page_owner_bytes(owner: borrow PageOwner[p]) -> [u8; PAGE_SIZE..] @ p {
+    let offset: {0..<12289 as usize} = owner.index * PAGE_SIZE;
+    let pool = page_pool as [u8; PAGE_SIZE * PAGE_COUNT..];
+    let bytes: []u8 = pool[offset..<offset + 4096];
+    if (bytes.len >= 4096) { return bytes; }
+    return pool[0..<4096];
+}
+
 // Address space: a state-parameterized owner (Empty/Occupied), consumed
 // and reissued by map_page/unmap_page -- the same idiom SPEC.md's
 // SlotWrite[slot, 0] -> SlotWrite[slot, 1] example uses for a protocol
@@ -253,6 +261,16 @@ private linear struct MappingOwner[asid: usize, va: usize, p: usize] {
     private va_value: usize @ va;
     private page_index: {0..<PAGE_COUNT as usize};
     private p_witness: usize @ p;
+    private mapping_kind: usize;
+}
+
+fn mapping_owner_new(asid_tag: usize @ asid, space_slot: usize,
+                     va_value: usize @ va,
+                     page_index: {0..<PAGE_COUNT as usize},
+                     p_witness: usize @ p) -> MappingOwner[asid, va, p] {
+    let mut mapping: MappingOwner[asid, va, p] =
+        { asid_tag, space_slot, va_value, page_index, p_witness, 0 };
+    return mapping;
 }
 
 // A shared page is split into exactly two read-only leases.  This deliberately
@@ -300,6 +318,30 @@ private linear struct ReadOnlyTlbPending[asid: usize, va: usize, p: usize,
     private p_witness: usize @ p;
     private side_tag: usize @ side;
 }
+
+variant CowFaultState {
+    Empty;
+    Shared(exists source_asid: usize. exists fault_asid: usize.
+           exists va: usize. exists p: usize. exists core: usize.
+           (ActiveAddressSpace[core, fault_asid],
+            AddressSpaceOwner[source_asid, SpaceState::Occupied],
+            ReadOnlyMapping[source_asid, va, p, 0],
+            AddressSpaceOwner[fault_asid, SpaceState::Occupied],
+            ReadOnlyMapping[fault_asid, va, p, 1],
+            ReadOnlyLease[p, 0], ReadOnlyLease[p, 1]));
+    Private(exists source_asid: usize. exists fault_asid: usize.
+            exists va: usize. exists p: usize. exists q: usize.
+            exists core: usize.
+            (ActiveAddressSpace[core, fault_asid],
+             AddressSpaceOwner[source_asid, SpaceState::Occupied],
+             ReadOnlyMapping[source_asid, va, p, 0],
+             AddressSpaceOwner[fault_asid, SpaceState::Occupied],
+             MappingOwner[fault_asid, va, q], ReadOnlyLease[p, 0],
+             ReadOnlyLease[p, 1]));
+}
+private let mut cow_fault_handled: i32 = 0;
+
+fn cow_fault_was_handled() -> i32 { return cow_fault_handled; }
 
 // A checked VA view temporarily owns the active-context authority.  Code must
 // release it to recover ActiveAddressSpace before it can switch TTBR, and a
@@ -501,13 +543,90 @@ fn tlb_invalidate_read_only(
     return mapping;
 }
 
+fn unmap_page_read_only(
+        space: sink AddressSpaceOwner[asid, SpaceState::Occupied],
+        mapping: sink ReadOnlyMapping[asid, va, p, side])
+        -> AddressSpaceOwner[asid, SpaceState::Empty] {
+    let l3_index: usize = (mapping.va_value - DYN_VA_BASE) / PAGE_SIZE;
+    l3_address_space_write(mapping.space_slot, l3_index, 0);
+    tlb_invalidate_asid_va(mapping.space_slot, mapping.va_value);
+    let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] =
+        { space.tag, space.slot };
+    return empty;
+}
+
+fn cow_replace_read_only(
+        mapping: sink ReadOnlyMapping[asid, va, p, side],
+        page: sink PageOwner[q]) -> MappingOwner[asid, va, q] {
+    let l3_index: usize = (mapping.va_value - DYN_VA_BASE) / PAGE_SIZE;
+    let pool_base: usize = (page_pool as *u8) as usize;
+    let phys_addr: usize = pool_base + page.index * PAGE_SIZE;
+    l3_address_space_write(mapping.space_slot, l3_index, phys_addr | 0x707);
+    tlb_invalidate_asid_va(mapping.space_slot, mapping.va_value);
+    return mapping_owner_new(mapping.asid_tag, mapping.space_slot,
+                             mapping.va_value, page.index, page.p_witness);
+}
+
+// Trusted stable-slot transition used by the COW exception handler. The
+// interrupted frame retains only ActiveAddressSpace; every resource mutated
+// here is moved out of the private kernel slot and returned in its successor
+// state before exception return.
+fn cow_fault_transition(state: CowFaultState, esr: usize, far: usize)
+        -> CowFaultState {
+    cow_fault_handled = 0;
+    match state {
+        CowFaultState::Empty => { return CowFaultState::Empty; }
+        CowFaultState::Private(owner) => {
+            let (active, source_space, source_mapping, fault_space,
+                 fault_mapping, lease0, lease1) = owner;
+            return CowFaultState::Private((active, source_space, source_mapping,
+                                           fault_space, fault_mapping,
+                                           lease0, lease1));
+        }
+        CowFaultState::Shared(owner) => {
+            let (active, source_space, source_mapping, fault_space,
+                 mapping, lease0, lease1) = owner;
+            let ec: usize = (esr >> 26) & 0x3F;
+            let dfsc: usize = esr & 0x3F;
+            let write: usize = (esr >> 6) & 1;
+            let fault_page: usize = far & 0xFFFFFFFFFFFFF000;
+            if (ec != 0x25 || dfsc != 0x0F || write != 1 ||
+                fault_page != mapping.va_value) {
+                return CowFaultState::Shared((active, source_space, source_mapping,
+                                              fault_space, mapping, lease0, lease1));
+            }
+            match page_alloc() {
+                PageAllocResult::OutOfMemory => {
+                    return CowFaultState::Shared((active, source_space, source_mapping,
+                                                  fault_space, mapping, lease0, lease1));
+                }
+                PageAllocResult::Allocated(page) => {
+                    let src_offset: {0..<12289 as usize} =
+                        mapping.page_index * PAGE_SIZE;
+                    let dst_offset: {0..<12289 as usize} =
+                        page.index * PAGE_SIZE;
+                    let pool = page_pool as [u8; PAGE_SIZE * PAGE_COUNT..];
+                    for i: usize in 0..<PAGE_SIZE {
+                        pool[dst_offset + i] = pool[src_offset + i];
+                    }
+                    let writable = cow_replace_read_only(mapping, page);
+                    cow_fault_handled = 1;
+                    return CowFaultState::Private((active, source_space, source_mapping,
+                                                   fault_space, writable,
+                                                   lease0, lease1));
+                }
+            }
+        }
+    }
+}
+
 fn tlb_invalidate(space: borrow AddressSpaceOwner[asid, SpaceState::Occupied],
                   pending: sink TlbInvalidationPending[asid, va, p])
         -> MappingOwner[asid, va, p] {
     tlb_invalidate_asid_va(pending.space_slot, pending.va_value);
     let mut mapping: MappingOwner[asid, va, p] =
         { pending.asid_tag, pending.space_slot, pending.va_value,
-          pending.page_index, pending.p_witness };
+          pending.page_index, pending.p_witness, 0 };
     return mapping;
 }
 

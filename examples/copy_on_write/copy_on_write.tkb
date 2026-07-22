@@ -1,0 +1,117 @@
+// Two-address-space copy-on-write baseline for Raspberry Pi 3B.
+// The faultable VM resources live in a private stable kernel slot; the
+// interrupted frame retains only its ActiveAddressSpace authority.
+
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+private linear view CowSlotGuard[lock: addr];
+fn cow_slot_guard(lock: *i32 @ place) -> CowSlotGuard[place] {
+    return view CowSlotGuard[place];
+}
+fn cow_slot_guard_done(guard: sink CowSlotGuard[place]) {}
+
+struct CowStateStore {
+    private lock: i32;
+    private state: CowFaultState;
+}
+private let mut cow_store: CowStateStore;
+
+fn cow_state_put(next: CowFaultState) {
+    let guard = cow_slot_guard(&cow_store.lock);
+    let previous: CowFaultState = stable_replace(
+        guard, &cow_store.lock, cow_store.state, next);
+    match previous {
+        CowFaultState::Empty => {}
+        CowFaultState::Shared(stale) => {
+            // Private protocol: the slot is empty at every put point.
+            cow_state_put(CowFaultState::Shared(stale));
+        }
+        CowFaultState::Private(stale) => {
+            cow_state_put(CowFaultState::Private(stale));
+        }
+    }
+    cow_slot_guard_done(guard);
+}
+
+fn cow_state_take() -> CowFaultState {
+    let guard = cow_slot_guard(&cow_store.lock);
+    let state: CowFaultState = stable_replace(
+        guard, &cow_store.lock, cow_store.state, CowFaultState::Empty);
+    cow_slot_guard_done(guard);
+    return state;
+}
+
+fn rpi3_sync_exception_dispatch(esr: usize, far: usize, elr: usize) -> i32 {
+    let state = cow_state_take();
+    let next = cow_fault_transition(state, esr, far);
+    let handled: i32 = cow_fault_was_handled();
+    cow_state_put(next);
+    return handled;
+}
+
+fn app_main() {
+    page_pool_init();
+    cow_store.lock = 1;
+    uart_puts("copy_on_write\n");
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => { uart_puts("allocation failed\n"); }
+        PageAllocResult::Allocated(page) => {
+            let initial = page_owner_bytes(page);
+            initial[0] = 11;
+            initial[4095] = 99;
+            let (lease0, lease1) = shared_page_split(page);
+            let seed0: {0..<2 as usize} = 0;
+            let seed1: {0..<2 as usize} = 1;
+            let inactive0 = address_space_new(seed0);
+            let inactive1 = address_space_new(seed1);
+            let core: usize = 0;
+            let (empty0, active0) = address_space_activate(inactive0, core);
+            let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+            let (space0, pending0) = map_page_read_only(empty0, lease0, va);
+            let mapping0 = tlb_invalidate_read_only(space0, pending0);
+            let (empty1, active1) =
+                address_space_switch_activate(active0, inactive1);
+            let (space1, pending1) = map_page_read_only(empty1, lease1, va);
+            let mapping1 = tlb_invalidate_read_only(space1, pending1);
+            cow_state_put(CowFaultState::Shared((active1, space0, mapping0,
+                                                 space1, mapping1,
+                                                 lease0, lease1)));
+
+            let ptr: *io u8 = 0x80000000;
+            uart_puts("before write: "); uart_print(*ptr); uart_puts("\n");
+            *ptr = 42;
+            uart_puts("after write: "); uart_print(*ptr); uart_puts("\n");
+
+            let final = cow_state_take();
+            match final {
+                CowFaultState::Empty => { uart_puts("missing state\n"); }
+                CowFaultState::Shared(stale) => {
+                    cow_state_put(CowFaultState::Shared(stale));
+                    uart_puts("fault not handled\n");
+                }
+                CowFaultState::Private(owner) => {
+                    let (private_active, source_space, source_mapping,
+                         private_space, private_mapping,
+                         returned_lease0, returned_lease1) = owner;
+                    let (private_empty, private_page) =
+                        unmap_page(private_space, private_mapping);
+                    let (private_inactive, active_source) =
+                        address_space_deactivate_to(private_active, private_empty,
+                                                    source_space);
+                    address_space_free(private_inactive);
+                    page_free(private_page);
+                    uart_puts("source unchanged: "); uart_print(*ptr); uart_puts("\n");
+                    let source_empty = unmap_page_read_only(source_space,
+                                                            source_mapping);
+                    let source_page = shared_page_join(returned_lease0, returned_lease1);
+                    page_free(source_page);
+                    let source_inactive =
+                        address_space_deactivate(active_source, source_empty);
+                    address_space_free(source_inactive);
+                    uart_puts("cleanup: ok\n");
+                }
+            }
+        }
+    }
+    uart_puts("done\n");
+}
