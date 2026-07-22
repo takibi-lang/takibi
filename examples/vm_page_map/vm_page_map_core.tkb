@@ -291,6 +291,16 @@ private linear struct ReadOnlyMapping[asid: usize, va: usize, p: usize,
     private side_tag: usize @ side;
 }
 
+private linear struct ReadOnlyTlbPending[asid: usize, va: usize, p: usize,
+                                         side: usize] {
+    private asid_tag: usize @ asid;
+    private space_slot: usize;
+    private va_value: usize @ va;
+    private page_index: {0..<PAGE_COUNT as usize};
+    private p_witness: usize @ p;
+    private side_tag: usize @ side;
+}
+
 // A checked VA view temporarily owns the active-context authority.  Code must
 // release it to recover ActiveAddressSpace before it can switch TTBR, and a
 // slice borrowed from the view prevents that release while the slice is live.
@@ -467,16 +477,28 @@ fn map_page_read_only(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
                       lease: borrow ReadOnlyLease[p, side],
                       va: {DYN_VA_BASE..<DYN_VA_LIMIT as usize} @ va)
         -> (AddressSpaceOwner[asid, SpaceState::Occupied],
-            TlbInvalidationPending[asid, va, p]) {
+            ReadOnlyTlbPending[asid, va, p, side]) {
     let l3_index: usize = (va - DYN_VA_BASE) / PAGE_SIZE;
     let pool_base: usize = (page_pool as *u8) as usize;
     let phys_addr: usize = pool_base + lease.index * PAGE_SIZE;
     l3_address_space_write(space.slot, l3_index, phys_addr | 0x787);
     let mut occupied: AddressSpaceOwner[asid, SpaceState::Occupied] =
         { space.tag, space.slot };
-    let mut pending: TlbInvalidationPending[asid, va, p] =
-        { space.tag, space.slot, va, lease.index, lease.p_witness };
+    let mut pending: ReadOnlyTlbPending[asid, va, p, side] =
+        { space.tag, space.slot, va, lease.index, lease.p_witness,
+          lease.side_tag };
     return (occupied, pending);
+}
+
+fn tlb_invalidate_read_only(
+        space: borrow AddressSpaceOwner[asid, SpaceState::Occupied],
+        pending: sink ReadOnlyTlbPending[asid, va, p, side])
+        -> ReadOnlyMapping[asid, va, p, side] {
+    tlb_invalidate_asid_va(pending.space_slot, pending.va_value);
+    let mut mapping: ReadOnlyMapping[asid, va, p, side] =
+        { pending.asid_tag, pending.space_slot, pending.va_value,
+          pending.page_index, pending.p_witness, pending.side_tag };
+    return mapping;
 }
 
 fn tlb_invalidate(space: borrow AddressSpaceOwner[asid, SpaceState::Occupied],
