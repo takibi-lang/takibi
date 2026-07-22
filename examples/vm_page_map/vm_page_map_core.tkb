@@ -102,6 +102,14 @@ private linear struct AddressSpaceOwner[asid: usize, state: SpaceState] {
     private slot: {0..<2 as usize};
 }
 
+// Linear proof that address space `asid` is installed in core `core`'s
+// TTBR0_EL2.  Switching consumes the old token, so a VA view cannot be
+// obtained using authority for the context that was active before a switch.
+private linear struct ActiveAddressSpace[core: usize, asid: usize] {
+    private core_tag: usize @ core;
+    private asid_tag: usize @ asid;
+}
+
 fn address_space_new(seed: {0..<2 as usize} @ asid)
         -> AddressSpaceOwner[asid, SpaceState::Inactive] {
     let mut space: AddressSpaceOwner[asid, SpaceState::Inactive] = { seed, seed };
@@ -110,21 +118,67 @@ fn address_space_new(seed: {0..<2 as usize} @ asid)
 
 extern fn mmu_address_space_activate(slot: usize);
 
-fn address_space_activate(space: sink AddressSpaceOwner[asid, SpaceState::Inactive])
-        -> AddressSpaceOwner[asid, SpaceState::Empty] {
+fn address_space_activate(space: sink AddressSpaceOwner[asid, SpaceState::Inactive],
+                          core_tag: usize @ core)
+        -> (AddressSpaceOwner[asid, SpaceState::Empty],
+            ActiveAddressSpace[core, asid]) {
     mmu_address_space_activate(space.slot);
-    let mut active: AddressSpaceOwner[asid, SpaceState::Empty] =
+    tlb_invalidate_all_el2();
+    let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] =
         { space.tag, space.slot };
-    return active;
+    let mut active: ActiveAddressSpace[core, asid] =
+        { core_tag, space.tag };
+    return (empty, active);
 }
 
-fn address_space_deactivate(space: sink AddressSpaceOwner[asid, SpaceState::Empty])
+fn address_space_switch(active: sink ActiveAddressSpace[core, old_asid],
+                        space: borrow AddressSpaceOwner[asid, state])
+        -> ActiveAddressSpace[core, asid] {
+    mmu_address_space_activate(space.slot);
+    tlb_invalidate_all_el2();
+    let mut next: ActiveAddressSpace[core, asid] =
+        { active.core_tag, space.tag };
+    return next;
+}
+
+fn address_space_switch_activate(
+        active: sink ActiveAddressSpace[core, old_asid],
+        space: sink AddressSpaceOwner[asid, SpaceState::Inactive])
+        -> (AddressSpaceOwner[asid, SpaceState::Empty],
+            ActiveAddressSpace[core, asid]) {
+    mmu_address_space_activate(space.slot);
+    tlb_invalidate_all_el2();
+    let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] =
+        { space.tag, space.slot };
+    let mut next: ActiveAddressSpace[core, asid] =
+        { active.core_tag, space.tag };
+    return (empty, next);
+}
+
+fn address_space_deactivate(active: sink ActiveAddressSpace[core, asid],
+                            space: sink AddressSpaceOwner[asid, SpaceState::Empty])
         -> AddressSpaceOwner[asid, SpaceState::Inactive] {
     // Return this core to the always-present kernel/root address space.
     mmu_address_space_activate(0);
+    tlb_invalidate_all_el2();
     let mut inactive: AddressSpaceOwner[asid, SpaceState::Inactive] =
         { space.tag, space.slot };
     return inactive;
+}
+
+fn address_space_deactivate_to(
+        active: sink ActiveAddressSpace[core, asid],
+        space: sink AddressSpaceOwner[asid, SpaceState::Empty],
+        fallback: borrow AddressSpaceOwner[next_asid, next_state])
+        -> (AddressSpaceOwner[asid, SpaceState::Inactive],
+            ActiveAddressSpace[core, next_asid]) {
+    mmu_address_space_activate(fallback.slot);
+    tlb_invalidate_all_el2();
+    let mut inactive: AddressSpaceOwner[asid, SpaceState::Inactive] =
+        { space.tag, space.slot };
+    let mut next: ActiveAddressSpace[core, next_asid] =
+        { active.core_tag, fallback.tag };
+    return (inactive, next);
 }
 
 fn address_space_free(space: sink AddressSpaceOwner[asid, SpaceState::Inactive]) {
@@ -150,6 +204,17 @@ private linear struct MappingOwner[asid: usize, va: usize, p: usize] {
     private space_slot: usize;
     private va_value: usize @ va;
     private page_index: {0..<PAGE_COUNT as usize};
+    private p_witness: usize @ p;
+}
+
+// A checked VA view temporarily owns the active-context authority.  Code must
+// release it to recover ActiveAddressSpace before it can switch TTBR, and a
+// slice borrowed from the view prevents that release while the slice is live.
+private linear struct ActiveMappingView[core: usize, asid: usize,
+                                        va: usize, p: usize] {
+    private core_tag: usize @ core;
+    private asid_tag: usize @ asid;
+    private va_value: usize @ va;
     private p_witness: usize @ p;
 }
 
@@ -239,13 +304,30 @@ fn mapping_bytes(mapping: borrow MappingOwner[asid, va, p])
 
 // Turn the live virtual translation into a checked page slice.  Raw-pointer
 // slice construction is confined to this reviewed MMU boundary: callers must
-// hold the MappingOwner, receive exactly 4096 bytes tied to its page identity,
-// and lose access when unmap_page consumes the mapping.
-fn mapping_va_bytes(space: borrow AddressSpaceOwner[asid, SpaceState::Occupied],
-                    mapping: borrow MappingOwner[asid, va, p])
+// hold the MappingOwner and current active authority, receive exactly 4096
+// bytes tied to the linear ActiveMappingView, and release that view before
+// recovering the authority required for a context switch.
+fn mapping_va_acquire(active: sink ActiveAddressSpace[core, asid],
+                      space: borrow AddressSpaceOwner[asid, SpaceState::Occupied],
+                      mapping: borrow MappingOwner[asid, va, p])
+        -> ActiveMappingView[core, asid, va, p] {
+    let mut lease: ActiveMappingView[core, asid, va, p] =
+        { active.core_tag, active.asid_tag, mapping.va_value,
+          mapping.p_witness };
+    return lease;
+}
+
+fn mapping_va_bytes(lease: borrow ActiveMappingView[core, asid, va, p])
         -> [u8; PAGE_SIZE..] @ p {
-    let va_ptr: *u8 = mapping.va_value as *u8;
+    let va_ptr: *u8 = lease.va_value as *u8;
     return unsafe { va_ptr[0..<4096] };
+}
+
+fn mapping_va_release(lease: sink ActiveMappingView[core, asid, va, p])
+        -> ActiveAddressSpace[core, asid] {
+    let mut active: ActiveAddressSpace[core, asid] =
+        { lease.core_tag, lease.asid_tag };
+    return active;
 }
 
 fn unmap_page(space: sink AddressSpaceOwner[asid, SpaceState::Occupied],

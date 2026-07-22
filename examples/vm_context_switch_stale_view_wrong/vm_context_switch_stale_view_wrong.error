@@ -1,0 +1,1 @@
+slice 'stale' is derived from linear value 'view0' and cannot be used after 'view0' is consumed

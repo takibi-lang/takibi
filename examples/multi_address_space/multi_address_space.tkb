@@ -90,11 +90,13 @@ fn core1_main() {
         AddressSpacePageSlot::Full(page) => {
             let asid1: {0..<2 as usize} = 1;
             let inactive1 = address_space_new(asid1);
-            let space1 = address_space_activate(inactive1);
+            let core1: usize = 1;
+            let (space1, active1) = address_space_activate(inactive1, core1);
             let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
             let (occupied1, pending1) = map_page(space1, page, va);
             let mapping1 = tlb_invalidate(occupied1, pending1);
-            let bytes1 = mapping_va_bytes(occupied1, mapping1);
+            let view1 = mapping_va_acquire(active1, occupied1, mapping1);
+            let bytes1 = mapping_va_bytes(view1);
             bytes1[0] = 22;
 
             // Tell core 0 that both translations are now live.  Keep mapping1
@@ -103,8 +105,9 @@ fn core1_main() {
             as_wait(3);
             core1_seen = bytes1[0];
 
+            let active1_back = mapping_va_release(view1);
             let (empty1, returned) = unmap_page(occupied1, mapping1);
-            let inactive1_back = address_space_deactivate(empty1);
+            let inactive1_back = address_space_deactivate(active1_back, empty1);
             address_space_free(inactive1_back);
             as_send(returned, 4);
             while (true) {
@@ -132,11 +135,13 @@ fn core0_main() {
                 PageAllocResult::Allocated(page1) => {
                     let asid0: {0..<2 as usize} = 0;
                     let inactive0 = address_space_new(asid0);
-                    let space0 = address_space_activate(inactive0);
+                    let core0: usize = 0;
+                    let (space0, active0) = address_space_activate(inactive0, core0);
                     let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
                     let (occupied0, pending0) = map_page(space0, page0, va);
                     let mapping0 = tlb_invalidate(occupied0, pending0);
-                    let bytes0 = mapping_va_bytes(occupied0, mapping0);
+                    let view0 = mapping_va_acquire(active0, occupied0, mapping0);
+                    let bytes0 = mapping_va_bytes(view0);
                     bytes0[0] = 11;
 
                     as_send(page1, 1);
@@ -159,9 +164,10 @@ fn core0_main() {
                         }
                     }
 
+                    let active0_back = mapping_va_release(view0);
                     let (empty0, page0_back) = unmap_page(occupied0, mapping0);
                     page_free(page0_back);
-                    let inactive0_back = address_space_deactivate(empty0);
+                    let inactive0_back = address_space_deactivate(active0_back, empty0);
                     address_space_free(inactive0_back);
                 }
             }

@@ -80,15 +80,19 @@ fn core1_main() {
         TransferSlot::Full(page) => {
             let core1_seed: {0..<2 as usize} = 1;
             let core1_inactive = address_space_new(core1_seed);
-            let core1_space = address_space_activate(core1_inactive);
+            let core1: usize = 1;
+            let (core1_space, core1_active) =
+                address_space_activate(core1_inactive, core1);
             let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
             let (occupied, pending) = map_page(core1_space, page, va);
             let mapping = tlb_invalidate(occupied, pending);
-            let bytes = mapping_va_bytes(occupied, mapping);
+            let lease = mapping_va_acquire(core1_active, occupied, mapping);
+            let bytes = mapping_va_bytes(lease);
             bytes[0] = bytes[0] + 1;
             bytes[4095] = bytes[4095] + 1;
+            let core1_active2 = mapping_va_release(lease);
             let (empty, returned) = unmap_page(occupied, mapping);
-            let core1_inactive2 = address_space_deactivate(empty);
+            let core1_inactive2 = address_space_deactivate(core1_active2, empty);
             address_space_free(core1_inactive2);
             dma_publish();
             transfer_send(returned, 2);
@@ -115,13 +119,17 @@ fn core0_main() {
         PageAllocResult::Allocated(page) => {
             let core0_seed: {0..<2 as usize} = 0;
             let core0_inactive = address_space_new(core0_seed);
-            let core0_space = address_space_activate(core0_inactive);
+            let core0: usize = 0;
+            let (core0_space, core0_active) =
+                address_space_activate(core0_inactive, core0);
             let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
             let (occupied, pending) = map_page(core0_space, page, va);
             let mapping = tlb_invalidate(occupied, pending);
-            let bytes = mapping_va_bytes(occupied, mapping);
+            let lease = mapping_va_acquire(core0_active, occupied, mapping);
+            let bytes = mapping_va_bytes(lease);
             bytes[0] = 41;
             bytes[4095] = 98;
+            let core0_active2 = mapping_va_release(lease);
             let (empty, outbound) = unmap_page(occupied, mapping);
 
             uart_puts("core0 -> core1\n");
@@ -132,22 +140,24 @@ fn core0_main() {
             match returned {
                 TransferSlot::Empty => {
                     uart_puts("missing page\n");
-                    let inactive_empty = address_space_deactivate(empty);
+                    let inactive_empty = address_space_deactivate(core0_active2, empty);
                     address_space_free(inactive_empty);
                 }
                 TransferSlot::Full(page2) => {
                     let (occupied2, pending2) = map_page(empty, page2, va);
                     let mapping2 = tlb_invalidate(occupied2, pending2);
-                    let result = mapping_va_bytes(occupied2, mapping2);
+                    let view2 = mapping_va_acquire(core0_active2, occupied2, mapping2);
+                    let result = mapping_va_bytes(view2);
                     uart_puts("core1 -> core0: ");
                     if (result[0] == 42 && result[4095] == 99) {
                         uart_puts("ok\n");
                     } else {
                         uart_puts("corrupt\n");
                     }
+                    let core0_active3 = mapping_va_release(view2);
                     let (empty2, freed) = unmap_page(occupied2, mapping2);
                     page_free(freed);
-                    let inactive2 = address_space_deactivate(empty2);
+                    let inactive2 = address_space_deactivate(core0_active3, empty2);
                     address_space_free(inactive2);
                     transfer_mailbox.state = 3;
                     dma_publish();

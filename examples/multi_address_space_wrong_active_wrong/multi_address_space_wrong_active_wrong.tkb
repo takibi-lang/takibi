@@ -17,15 +17,17 @@ fn multi_address_space_wrong_active_bad() {
                     let slot1: {0..<2 as usize} = 1;
                     let inactive0 = address_space_new(slot0);
                     let inactive1 = address_space_new(slot1);
-                    let space0 = address_space_activate(inactive0);
-                    let space1 = address_space_activate(inactive1);
+                    let core0: usize = 0;
+                    let core1: usize = 1;
+                    let (space0, active0) = address_space_activate(inactive0, core0);
+                    let (space1, active1) = address_space_activate(inactive1, core1);
                     let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
                     let (occupied0, pending0) = map_page(space0, page0, va);
                     let (occupied1, pending1) = map_page(space1, page1, va);
                     let mapping0 = tlb_invalidate(occupied0, pending0);
                     let mapping1 = tlb_invalidate(occupied1, pending1);
 
-                    mapping_va_bytes(occupied1, mapping0);
+                    mapping_va_acquire(active1, occupied1, mapping0);
                 }
             }
         }

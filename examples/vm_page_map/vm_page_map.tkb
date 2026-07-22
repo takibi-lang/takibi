@@ -22,7 +22,8 @@ fn app_main() {
 
             let seed: {0..<2 as usize} = 0;
             let inactive = address_space_new(seed);
-            let space = address_space_activate(inactive);
+            let core: usize = 0;
+            let (space, active) = address_space_activate(inactive, core);
             let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
             let (space2, pending) = map_page(space, page, va);
             let mapping = tlb_invalidate(space2, pending);
@@ -51,7 +52,7 @@ fn app_main() {
             let (space3, freed) = unmap_page(space2, mapping);
             uart_puts("unmapped\n");
             page_free(freed);
-            let inactive2 = address_space_deactivate(space3);
+            let inactive2 = address_space_deactivate(active, space3);
             address_space_free(inactive2);
         }
     }

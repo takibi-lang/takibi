@@ -1513,12 +1513,13 @@ $(RPI3_VM_PAGE_MAP_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map
 
 # Issue #67 Stage 5 baseline: one core switches between two live address
 # spaces whose distinct physical pages occupy the same VA.  Keep this rule
-# separate and unrefined until the real-hardware baseline is committed.
+# separate; its real-hardware baseline was committed before the active-TTBR
+# ownership pass enabled --forbid-trap here.
 RPI3_VM_CONTEXT_SWITCH_EXAMPLES := vm_context_switch
 RPI3_VM_CONTEXT_SWITCH_OBJS := $(foreach e,$(RPI3_VM_CONTEXT_SWITCH_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_VM_CONTEXT_SWITCH_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 # Issue #67 Stage 3 integration baseline: zero-copy PageOwner transfer between
 # cores 0 and 1, with map/TLBI/use/unmap on each side.  This links the SMP

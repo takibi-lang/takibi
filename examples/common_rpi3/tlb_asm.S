@@ -53,3 +53,16 @@ tlb_invalidate_asid_va:  /* fn(asid: usize, va: usize) */
     dsb     ish
     isb
     ret
+
+/* A TTBR0_EL2 context switch changes the translation regime behind every
+   virtual address.  Cortex-A53 does not invalidate prior EL2 translations on
+   an MSR to TTBR0_EL2, so the switch API uses this whole-EL2 broadcast form
+   before it hands the new ActiveAddressSpace token to takibi code. */
+    .global tlb_invalidate_all_el2
+    .type   tlb_invalidate_all_el2, %function
+tlb_invalidate_all_el2:  /* fn tlb_invalidate_all_el2() */
+    dsb     ishst
+    tlbi    alle2is
+    dsb     ish
+    isb
+    ret

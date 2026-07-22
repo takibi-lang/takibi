@@ -239,7 +239,45 @@ Negative fixtures reject mapping before activation, dereferencing a mapping
 under the other active address space, and constructing nonexistent slot 2.
 The compiler found no bounds traps when `--forbid-trap` was enabled.
 
-GitHub issue #140. Status: 67 examples ported and passing `make
+## VM context switching (issue #67 Stage 5)
+
+`examples/vm_context_switch` keeps two mappings live on core 0, maps distinct
+physical pages at the same VA (`0x80000000`), and switches A -> B -> A without
+copying either page. The real-hardware fixture observes `11`, `22`, then `11`.
+This closes a hole left by Stage 4: a matching `AddressSpaceOwner` and
+`MappingOwner` proved which page table owned a mapping, but did not prove that
+the executing core currently had that table installed in `TTBR0_EL2`.
+
+The VM API now separates those facts. `AddressSpaceOwner[asid, state]` owns the
+table/mapping protocol, while linear `ActiveAddressSpace[core, asid]` is the
+authority to dereference that address space on one core. `address_space_switch`
+and `address_space_switch_activate` consume the old active token and return the
+new one; `mapping_va_acquire` requires that token's `asid` to match both the
+occupied space and mapping. It consumes the token into an
+`ActiveMappingView`; `mapping_va_bytes` borrows that view, and only
+`mapping_va_release` returns the active token needed to switch. This layer is
+essential: checking the token only while creating a plain slice still allowed
+that slice to survive a later switch. Compile-error fixtures reject reuse of
+the old token after a switch, use of space B's active token with space A's
+mapping, and use of a VA slice after releasing its view and switching contexts.
+
+Real hardware exposed a necessary part of that state transition. Merely writing
+`TTBR0_EL2` left the previous same-VA EL2 translation live on Cortex-A53: the
+first baseline read A=11 and B=22, but read B's 22 after switching back to A.
+Every typed switch therefore performs `TLBI ALLE2IS` with the required DSB/ISB
+sequence before returning the new active token. A whole-EL2 invalidation is the
+deliberate minimal correct operation for the current API because the active
+token does not enumerate every VA mapped by its target table.
+
+The `core` singleton is presently supplied by the trusted per-core entry path;
+Takibi does not yet own a boot-minted, unique CPU capability, so the type system
+does not independently prove that a caller cannot lie about that integer. This
+is a narrow remaining trusted invariant, not a claim that scheduler migration
+or arbitrary CPU-token minting is solved. The first baseline and the later
+`--forbid-trap`/active-authority hardening are separate commits. The hardened
+version passed all 152 desk-side tests and all 66 RPi3 hardware fixtures.
+
+GitHub issue #140. Status: 68 examples ported and passing `make
 hwcheck-rpi3`/`make hwcheck-rpi3-net` -- every example in the top-level
 `EXAMPLES` list EXCEPT
 `fatfs` (needs SD-card-shaped
@@ -257,7 +295,7 @@ status line here. Full list:
 `affine_escape_via_index`/`align_ptr_proof`/`linear_obligation`/
 `tuple_pair`/`field_lease`/`inet_checksum`/`ip_parse`/`tcp_parse`/
 `rtc`/`timer`/`echo`/`irq`/`preempt`/`semaphore`/`condvar`/`msgqueue`/
-`watchdog`/`rtos_demo`/`chan_rendezvous`/`page_pool`/`vm_page_map`/`smp_page_transfer`/`multi_address_space`/`net_echo`/`arp_reply`/
+`watchdog`/`rtos_demo`/`chan_rendezvous`/`page_pool`/`vm_page_map`/`vm_context_switch`/`smp_page_transfer`/`multi_address_space`/`net_echo`/`arp_reply`/
 `icmp_echo`/`tcp_echo`/`http_server`/`kvs_server`. This covers `hwcheck-stm32`'s "plain compute" set
 (extended with plain-compute examples STM32 already had but this
 board's own list had not picked up yet: `slice`/`foreach`/`int64`/

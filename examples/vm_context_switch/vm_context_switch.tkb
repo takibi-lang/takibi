@@ -3,9 +3,9 @@
 // Two live mappings use the same VA in distinct TTBR0_EL2 roots.  Switching
 // root/ASID on core 0 must expose the corresponding physical page without
 // copying either page.  This first working milestone deliberately uses the
-// low-level activation primitive directly and is built without --forbid-trap;
-// the follow-up hardening pass will make current-TTBR authority explicit in
-// the ownership API.
+// low-level activation primitive directly and was committed without
+// --forbid-trap.  The follow-up hardening pass below makes current-TTBR
+// authority explicit in the ownership API.
 
 use "examples/vm_page_map/vm_page_map_core.tkb";
 
@@ -28,46 +28,51 @@ fn app_main() {
                     let slot1: {0..<2 as usize} = 1;
                     let inactive_a = address_space_new(slot0);
                     let inactive_b = address_space_new(slot1);
-                    let space_a = address_space_activate(inactive_a);
+                    let core0: usize = 0;
+                    let (space_a, active_a) =
+                        address_space_activate(inactive_a, core0);
                     let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
                     let (occupied_a, pending_a) = map_page(space_a, page_a, va);
                     let mapping_a = tlb_invalidate(occupied_a, pending_a);
 
-                    let space_b = address_space_activate(inactive_b);
+                    let view_a = mapping_va_acquire(active_a, occupied_a, mapping_a);
+                    let bytes_a = mapping_va_bytes(view_a);
+                    bytes_a[0] = 11;
+                    uart_puts("A: ");
+                    uart_print(bytes_a[0]);
+                    uart_puts("\n");
+                    let active_a_ready = mapping_va_release(view_a);
+
+                    let (space_b, active_b) =
+                        address_space_switch_activate(active_a_ready, inactive_b);
                     let (occupied_b, pending_b) = map_page(space_b, page_b, va);
                     let mapping_b = tlb_invalidate(occupied_b, pending_b);
 
-                    // TTBR changes which physical byte this numeric VA names.
-                    // Use volatile accesses in this deliberately low-level
-                    // baseline so LLVM must observe every post-switch value.
-                    let active_va: *io u8 = 0x80000000;
-                    mmu_address_space_activate(0);
-                    tlb_invalidate_asid_va(0, va);
-                    *active_va = 11;
-                    uart_puts("A: ");
-                    uart_print(*active_va);
-                    uart_puts("\n");
-
-                    mmu_address_space_activate(1);
-                    tlb_invalidate_asid_va(1, va);
-                    *active_va = 22;
+                    let view_b = mapping_va_acquire(active_b, occupied_b, mapping_b);
+                    let bytes_b = mapping_va_bytes(view_b);
+                    bytes_b[0] = 22;
                     uart_puts("B: ");
-                    uart_print(*active_va);
+                    uart_print(bytes_b[0]);
                     uart_puts("\n");
+                    let active_b_ready = mapping_va_release(view_b);
 
-                    mmu_address_space_activate(0);
-                    tlb_invalidate_asid_va(0, va);
+                    let active_a2 = address_space_switch(active_b_ready, occupied_a);
+                    let view_a2 = mapping_va_acquire(active_a2, occupied_a, mapping_a);
+                    let bytes_a_again = mapping_va_bytes(view_a2);
                     uart_puts("A again: ");
-                    uart_print(*active_va);
+                    uart_print(bytes_a_again[0]);
                     uart_puts("\n");
+                    let active_a_ready2 = mapping_va_release(view_a2);
 
                     let (empty_b, page_b_back) = unmap_page(occupied_b, mapping_b);
-                    let inactive_b_back = address_space_deactivate(empty_b);
+                    let active_b2 = address_space_switch(active_a_ready2, empty_b);
+                    let (inactive_b_back, active_a3) = address_space_deactivate_to(
+                        active_b2, empty_b, occupied_a);
                     address_space_free(inactive_b_back);
                     page_free(page_b_back);
 
                     let (empty_a, page_a_back) = unmap_page(occupied_a, mapping_a);
-                    let inactive_a_back = address_space_deactivate(empty_a);
+                    let inactive_a_back = address_space_deactivate(active_a3, empty_a);
                     address_space_free(inactive_a_back);
                     page_free(page_a_back);
                 }

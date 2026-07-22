@@ -17,8 +17,10 @@ fn smp_page_transfer_wrong_space_bad() {
                     let asid1: {0..<2 as usize} = 1;
                     let inactive0 = address_space_new(asid0);
                     let inactive1 = address_space_new(asid1);
-                    let space0 = address_space_activate(inactive0);
-                    let space1 = address_space_activate(inactive1);
+                    let core0: usize = 0;
+                    let core1: usize = 1;
+                    let (space0, active0) = address_space_activate(inactive0, core0);
+                    let (space1, active1) = address_space_activate(inactive1, core1);
                     let va0: {0x80000000..<0x80200000 as usize} = 0x80000000;
                     let va1: {0x80000000..<0x80200000 as usize} = 0x80001000;
                     let (occupied0, pending0) = map_page(space0, page0, va0);
@@ -29,12 +31,12 @@ fn smp_page_transfer_wrong_space_bad() {
                     // WRONG: mapping0 belongs to occupied0, not occupied1.
                     let (empty, returned) = unmap_page(occupied1, mapping0);
                     page_free(returned);
-                    let inactive_empty = address_space_deactivate(empty);
+                    let inactive_empty = address_space_deactivate(active1, empty);
                     address_space_free(inactive_empty);
 
                     let (empty0, returned1) = unmap_page(occupied0, mapping1);
                     page_free(returned1);
-                    let inactive_empty0 = address_space_deactivate(empty0);
+                    let inactive_empty0 = address_space_deactivate(active0, empty0);
                     address_space_free(inactive_empty0);
                 }
             }
