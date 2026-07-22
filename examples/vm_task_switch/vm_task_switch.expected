@@ -1,0 +1,4 @@
+vm_task_switch
+task A: 11
+task B: 22
+done

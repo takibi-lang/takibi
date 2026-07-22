@@ -1,0 +1,130 @@
+// Preemptive single-core VM task switching baseline (issue #67).
+// Task A and task B execute the same code VA but observe different physical
+// pages at 0x80000000.  The timer IRQ selects both the next saved SP and its
+// TTBR0_EL2 root before exception return.  This first working version keeps
+// typed VM owners in app_main but deliberately performs the IRQ-side switch
+// through the low-level primitive; the follow-up milestone types that gap.
+
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+struct VmSchedState {
+    current_task: isize;
+    total_ticks: i32;
+    done: io i32;
+    tcb_sp: [usize; 3];
+}
+
+private let mut vm_sched: VmSchedState = {0, 0, 0, {0, 0, 0}};
+private let mut vm_stack_a: [u8; 4096];
+private let mut vm_stack_b: [u8; 4096];
+private let mut task_a_seen: io u8 = 0;
+private let mut task_b_seen: io u8 = 0;
+
+fn vm_scheduler_tick(frame_sp: usize) -> usize {
+    scheduler_rearm_tick();
+    let sp: *usize = vm_sched.tcb_sp;
+    sp[vm_sched.current_task] = frame_sp;
+    vm_sched.total_ticks = vm_sched.total_ticks + 1;
+    if (vm_sched.total_ticks >= 6) {
+        scheduler_disable();
+        vm_sched.done = 1;
+    }
+    vm_sched.current_task = (vm_sched.current_task + 1) % 3;
+
+    // Task 0 (app_main) and task 1 use address space 0. Task 2 uses space 1.
+    if (vm_sched.current_task == 2) {
+        mmu_address_space_activate(1);
+    } else {
+        mmu_address_space_activate(0);
+    }
+    tlb_invalidate_all_el2();
+    return sp[vm_sched.current_task];
+}
+
+fn rpi3_irq_dispatch(frame_sp: usize) -> usize {
+    if (rpi3_timer_irq_pending()) {
+        return vm_scheduler_tick(frame_sp);
+    }
+    return frame_sp;
+}
+
+fn vm_task_a() {
+    let shared_va: *io u8 = 0x80000000;
+    let done: *io i32 = &vm_sched.done;
+    while (*done == 0) {
+        task_a_seen = *shared_va;
+    }
+}
+
+fn vm_task_b() {
+    let shared_va: *io u8 = 0x80000000;
+    let done: *io i32 = &vm_sched.done;
+    while (*done == 0) {
+        task_b_seen = *shared_va;
+    }
+}
+
+fn app_main() {
+    page_pool_init();
+    uart_puts("vm_task_switch\n");
+
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => { uart_puts("allocation A failed\n"); }
+        PageAllocResult::Allocated(page_a) => {
+            match page_alloc() {
+                PageAllocResult::OutOfMemory => {
+                    page_free(page_a);
+                    uart_puts("allocation B failed\n");
+                }
+                PageAllocResult::Allocated(page_b) => {
+                    let slot0: {0..<2 as usize} = 0;
+                    let slot1: {0..<2 as usize} = 1;
+                    let core0: usize = 0;
+                    let inactive0 = address_space_new(slot0);
+                    let inactive1 = address_space_new(slot1);
+                    let (space0, active0) = address_space_activate(inactive0, core0);
+                    let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+                    let (occupied0, pending0) = map_page(space0, page_a, va);
+                    let mapping0 = tlb_invalidate(occupied0, pending0);
+                    let lease0 = mapping_va_acquire(active0, occupied0, mapping0);
+                    let bytes0 = mapping_va_bytes(lease0);
+                    bytes0[0] = 11;
+                    let active0_ready = mapping_va_release(lease0);
+
+                    let (space1, active1) = address_space_switch_activate(
+                        active0_ready, inactive1);
+                    let (occupied1, pending1) = map_page(space1, page_b, va);
+                    let mapping1 = tlb_invalidate(occupied1, pending1);
+                    let lease1 = mapping_va_acquire(active1, occupied1, mapping1);
+                    let bytes1 = mapping_va_bytes(lease1);
+                    bytes1[0] = 22;
+                    let active1_ready = mapping_va_release(lease1);
+                    let active0_run = address_space_switch(active1_ready, occupied0);
+
+                    let sp: *usize = vm_sched.tcb_sp;
+                    sp[1] = setup_task_stack(vm_stack_a + 4096, vm_task_a);
+                    sp[2] = setup_task_stack(vm_stack_b + 4096, vm_task_b);
+                    scheduler_init();
+                    let done: *io i32 = &vm_sched.done;
+                    while (*done == 0) {}
+
+                    uart_puts("task A: "); uart_print(task_a_seen); uart_puts("\n");
+                    uart_puts("task B: "); uart_print(task_b_seen); uart_puts("\n");
+
+                    let (empty1, page_b_back) = unmap_page(occupied1, mapping1);
+                    let active1_cleanup = address_space_switch(active0_run, empty1);
+                    let (inactive1_back, active0_cleanup) = address_space_deactivate_to(
+                        active1_cleanup, empty1, occupied0);
+                    address_space_free(inactive1_back);
+                    page_free(page_b_back);
+                    let (empty0, page_a_back) = unmap_page(occupied0, mapping0);
+                    let inactive0_back = address_space_deactivate(
+                        active0_cleanup, empty0);
+                    address_space_free(inactive0_back);
+                    page_free(page_a_back);
+                }
+            }
+        }
+    }
+    uart_puts("done\n");
+}
