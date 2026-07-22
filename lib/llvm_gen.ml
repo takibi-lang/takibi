@@ -202,7 +202,16 @@ let prof_path_overflow : llvalue option ref = ref None
 let prof_record_path_fn : llvalue option ref = ref None
 let prof_func_ids : (string, int) Hashtbl.t = Hashtbl.create 64
 let prof_task_capacity = 4
-let prof_stack_capacity = 256
+(* Per-task live call-nesting depth (emit_profile_enter/emit_profile_exit's
+   shadow stack of {id, entry-cycle} pairs, distinct from the call-PATH
+   table below). Bounded by __takibi_prof_overflow, which the profiling
+   scripts (scripts/profile_stm32_*.sh) now check and fail loudly on
+   nonzero -- so this only needs headroom above the deepest real call
+   nesting actually seen (prof_path_max_depth's own comment cites 10
+   frames as the deepest currently profiled STM32 path), not an arbitrary
+   large ceiling. Was 256 (12 KiB across prof_task_capacity tasks), which
+   left the KVS+SD+RTOS --profile-functions build almost no RAM margin. *)
+let prof_stack_capacity = 24
 let prof_path_capacity = 256
 (* Each packed call-path entry is 20 + (4 * depth) bytes. A depth of 12 covers
    the deepest currently profiled STM32 path (10 frames) while saving 4 KiB

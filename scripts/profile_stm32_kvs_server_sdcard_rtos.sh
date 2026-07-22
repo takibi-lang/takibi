@@ -92,7 +92,7 @@ dump_profile_table() {
 }
 
 clear_profile_counters_and_resume() {
-    local table_addr="$1" count="$2" path_addr="$3" path_size="$4" overflow_addr="$5" log
+    local table_addr="$1" count="$2" path_addr="$3" path_size="$4" overflow_addr="$5" stack_overflow_addr="$6" log
     log="$tmpdir/openocd-clear.log"
     openocd -f "$OPENOCD_BOARD_CFG" \
         -c "init" \
@@ -111,6 +111,7 @@ clear_profile_counters_and_resume() {
                 mww [expr {$path_base + ($i * 4)}] 0
             }' \
         -c "mww $overflow_addr 0" \
+        -c "mww $stack_overflow_addr 0" \
         -c "resume" \
         -c "shutdown" > "$log" 2>&1 || {
             echo "openocd profile clear failed:" >&2
@@ -175,6 +176,11 @@ if [ -z "$overflow_addr" ]; then
     echo "could not find __takibi_prof_path_overflow in $ELF" >&2
     exit 1
 fi
+stack_overflow_addr=$(llvm-nm-19 "$ELF" | awk '$3 == "__takibi_prof_overflow" { print "0x" $1; exit }')
+if [ -z "$stack_overflow_addr" ]; then
+    echo "could not find __takibi_prof_overflow in $ELF" >&2
+    exit 1
+fi
 
 profile_count=$(python3 - "$OBJ" <<'PY'
 import subprocess
@@ -198,6 +204,7 @@ path_size=$((PATH_ENTRY_COUNT * PATH_ENTRY_SIZE))
 dump="$tmpdir/takibi_prof_table.bin"
 path_dump="$tmpdir/takibi_prof_path_table.bin"
 overflow_dump="$tmpdir/takibi_prof_path_overflow.bin"
+stack_overflow_dump="$tmpdir/takibi_prof_overflow.bin"
 
 # Warm-up PUT creates the key (net_init/disk_initialize/ARP/PHY settling
 # all happen here, same reasoning as the http_server_sdcard_rtos script's
@@ -205,7 +212,7 @@ overflow_dump="$tmpdir/takibi_prof_path_overflow.bin"
 put_key "warm"
 
 echo "Clearing profile counters after warm-up..."
-clear_profile_counters_and_resume "$table_addr" "$profile_count" "$path_addr" "$path_size" "$overflow_addr"
+clear_profile_counters_and_resume "$table_addr" "$profile_count" "$path_addr" "$path_size" "$overflow_addr" "$stack_overflow_addr"
 
 case "$PROFILE_LOAD" in
     single)
@@ -232,6 +239,12 @@ dump_profile_table "$overflow_addr" 4 "$overflow_dump"
 overflow_count=$(od -An -tu4 "$overflow_dump" | tr -d ' ')
 if [ "$overflow_count" -ne 0 ]; then
     echo "call-path table overflowed $overflow_count times" >&2
+    exit 1
+fi
+dump_profile_table "$stack_overflow_addr" 4 "$stack_overflow_dump"
+stack_overflow_count=$(od -An -tu4 "$stack_overflow_dump" | tr -d ' ')
+if [ "$stack_overflow_count" -ne 0 ]; then
+    echo "call-stack depth overflowed $stack_overflow_count times (prof_stack_capacity in lib/llvm_gen.ml is too small for this run)" >&2
     exit 1
 fi
 
