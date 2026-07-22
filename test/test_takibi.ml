@@ -5545,6 +5545,32 @@ let infer_tests = [
     (expect_type_error "cannot be both interrupt and exception"
        "fn effect_bad29d() !{interrupt, exception} {}");
 
+  Alcotest.test_case "Exception: root rejects a transitive blocking call" `Quick
+    (expect_type_error "sync_handler29e -> sync_helper29e -> sync_wait29e"
+       "extern fn sync_wait29e() !{may_block};
+        fn sync_helper29e() { sync_wait29e(); }
+        fn sync_handler29e() !{exception} { sync_helper29e(); }");
+
+  Alcotest.test_case "Exception: root rejects unknown indirect effects" `Quick
+    (expect_type_error "exception function 'sync_handler29f' reaches a call with unknown effects"
+       "fn sync_handler29f(callback: fn() -> void) !{exception} {
+          callback();
+        }");
+
+  Alcotest.test_case "Exception: direct recursion is rejected as reentry" `Quick
+    (expect_type_error "sync_handler29g -> sync_handler29g"
+       "fn sync_handler29g() !{exception} { sync_handler29g(); }");
+
+  Alcotest.test_case "Exception: transitive reentry is rejected" `Quick
+    (expect_type_error "sync_handler29h -> sync_helper29h -> sync_handler29h"
+       "fn sync_helper29h() { sync_handler29h(); }
+        fn sync_handler29h() !{exception} { sync_helper29h(); }");
+
+  Alcotest.test_case "Exception: non-blocking non-reentrant graph is accepted" `Quick
+    (expect_ok
+       "fn sync_helper29i() { interrupt_notify(); }
+        fn sync_handler29i() !{exception} { sync_helper29i(); }");
+
   Alcotest.test_case "Slice 5: a cast cannot invent a non-blocking contract" `Quick
     (expect_type_error "cannot cast through an explicit function-pointer effect contract"
        "fn effect_unknown30() {}

@@ -3645,6 +3645,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     if StringSet.mem "may_block" !seen && StringSet.mem "interrupt" !seen then
       raise (TypeError (loc, Printf.sprintf
         "%s '%s' cannot be both interrupt and may_block" kind name));
+    if StringSet.mem "may_block" !seen && StringSet.mem "exception" !seen then
+      raise (TypeError (loc, Printf.sprintf
+        "%s '%s' cannot be both exception and may_block" kind name));
     if StringSet.mem "interrupt" !seen && StringSet.mem "exception" !seen then
       raise (TypeError (loc, Printf.sprintf
         "%s '%s' cannot be both interrupt and exception" kind name))
@@ -5835,6 +5838,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     (fun waits blocking_indirect _ -> waits || blocking_indirect) in
   let may_reach_unknown = close_property StringSet.empty
     (fun _ _ unknown_indirect -> unknown_indirect) in
+  let exception_roots = StringMap.fold (fun key effects roots ->
+    match effects with
+    | Some effects when List.mem "exception" effects -> StringSet.add key roots
+    | _ -> roots
+  ) declared_effects StringSet.empty in
   let display_effect_key key = Option.value
     (StringMap.find_opt key effect_names) ~default:key in
   let rec find_blocking_path visited key =
@@ -5881,6 +5889,28 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           search (StringSet.elements callees)
       | None -> None
   in
+  let find_exception_reentry_path root =
+    let rec search visited key =
+      if StringSet.mem key visited then None
+      else
+        let visited = StringSet.add key visited in
+        match StringMap.find_opt key effect_summaries with
+        | None -> None
+        | Some (callees, _, _, _) ->
+            let rec search_callees = function
+              | [] -> None
+              | callee :: rest ->
+                  if StringSet.mem callee exception_roots then
+                    Some [display_effect_key key; display_effect_key callee]
+                  else
+                    (match search visited callee with
+                     | Some path -> Some (display_effect_key key :: path)
+                     | None -> search_callees rest)
+            in
+            search_callees (StringSet.elements callees)
+    in
+    search StringSet.empty root
+  in
   StringMap.iter (fun key effects_opt ->
     let effects = Option.value effects_opt ~default:[] in
     if List.mem "interrupt" effects then begin
@@ -5898,6 +5928,27 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           "interrupt function '%s' reaches a call with unknown effects via %s"
           (display_effect_key key) (String.concat " -> " path)))
       end
+    end else if List.mem "exception" effects then begin
+      if StringSet.mem key may_block then begin
+        let path = Option.value (find_blocking_path StringSet.empty key)
+          ~default:[display_effect_key key] in
+        raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+          "exception function '%s' may block via %s"
+          (display_effect_key key) (String.concat " -> " path)))
+      end;
+      if StringSet.mem key may_reach_unknown then begin
+        let path = Option.value (find_unknown_path StringSet.empty key)
+          ~default:[display_effect_key key; "<indirect call>"] in
+        raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+          "exception function '%s' reaches a call with unknown effects via %s"
+          (display_effect_key key) (String.concat " -> " path)))
+      end;
+      (match find_exception_reentry_path key with
+       | Some path ->
+           raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+             "exception function '%s' may re-enter an exception root via %s"
+             (display_effect_key key) (String.concat " -> " path)))
+       | None -> ())
     end else if effects_opt = Some [] then begin
       if StringSet.mem key may_block then begin
         let path = Option.value (find_blocking_path StringSet.empty key)

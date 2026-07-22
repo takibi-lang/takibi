@@ -1133,8 +1133,11 @@ intrinsically blocking. Diagnostics include one offending call path.
 `exception` marks a synchronous-exception handler root. Like `interrupt`, it
 is a declaration role rather than a callable function-pointer effect, and an
 extern function cannot claim it because there is no Takibi body to check.
-The handler-specific non-blocking and non-reentrancy contracts are described
-with the exception-handler facilities below.
+Its complete reachable call graph must be non-blocking and must not contain an
+effect-unknown indirect call. It also must not call, directly or transitively,
+itself or any other `exception` root. This gives handlers a statically checked
+non-reentrant contract; ordinary helper recursion remains legal when it does
+not lead back to an exception root.
 
 Slice 5 adds explicit call-effect contracts to first-class function types:
 
