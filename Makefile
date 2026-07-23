@@ -1535,7 +1535,7 @@ RPI3_EL1_SMOKE_EXAMPLES := el1_smoke
 RPI3_EL1_SMOKE_OBJS := $(foreach e,$(RPI3_EL1_SMOKE_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_EL1_SMOKE_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_EL1_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 # examples/el0_smoke (GitHub issue #153): drops EL1 -> EL0 (on top of
 # el1_smoke's already-proven EL2->EL1 drop) and runs a tiny hand-written
@@ -1555,7 +1555,7 @@ RPI3_EL0_SMOKE_EXAMPLES := el0_smoke
 RPI3_EL0_SMOKE_OBJS := $(foreach e,$(RPI3_EL0_SMOKE_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_EL0_SMOKE_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_EL0_ASM_EXTERN) $(COMMON_RPI3_EL1_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 # examples/el0_elf_load (GitHub issue #153): a real ELF loader fed from a
 # real cpio (newc) initramfs image. Unlike el0_smoke's hardcoded
@@ -1598,7 +1598,7 @@ RPI3_EL0_ELF_LOAD_EXAMPLES := el0_elf_load
 RPI3_EL0_ELF_LOAD_OBJS := $(foreach e,$(RPI3_EL0_ELF_LOAD_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_EL0_ELF_LOAD_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_EL0_ASM_EXTERN) $(COMMON_RPI3_EL1_ASM_EXTERN) $(COMMON_RPI3_EL0_TEST_IMAGE_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 RPI3_VM_PAGE_MAP_EXAMPLES := vm_page_map two_page_map
 RPI3_VM_PAGE_MAP_OBJS := $(foreach e,$(RPI3_VM_PAGE_MAP_EXAMPLES),examples/$(e)/$(e)_rpi3.o)

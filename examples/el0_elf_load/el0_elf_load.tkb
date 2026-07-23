@@ -79,10 +79,8 @@ fn hex_digit(c: u8) -> usize {
 
 fn parse_hex8(base: *u8, offset: usize) -> usize {
     let mut v: usize = 0;
-    let mut i: usize = 0;
-    while (i < 8) {
+    for i: usize in 0..<8 {
         v = (v << 4) | hex_digit(base[(offset + i) as isize]);
-        i = i + 1;
     }
     return v;
 }
@@ -203,12 +201,10 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             return (elr, SYSCALL_ERROR);
         }
         let dst: *u8 = buf as *u8;
-        let mut i: usize = 0;
-        while (i < len) {
+        for i: usize in 0..<len {
             while (uart_rx_ready() == false) {
             }
             dst[i as isize] = uart_isr_getc();
-            i = i + 1;
         }
         return (elr, len);
     }
@@ -226,10 +222,8 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             return (elr, SYSCALL_ERROR);
         }
         let src: *u8 = buf as *u8;
-        let mut i: usize = 0;
-        while (i < len) {
+        for i: usize in 0..<len {
             uart_putc(src[i as isize]);
-            i = i + 1;
         }
         return (elr, len);
     }
@@ -314,8 +308,11 @@ fn app_main() {
             let dst = mapping_bytes(mapping);
 
             let mut ok: i32 = 1;
-            let mut i: usize = 0;
-            while (i < phnum && i < MAX_PHDRS) {
+            let mut phdr_cap: usize = MAX_PHDRS;
+            if (phnum < MAX_PHDRS) {
+                phdr_cap = phnum;
+            }
+            for i: usize in 0..<phdr_cap {
                 let ph_addr: usize = image_addr + phoff + i * phentsize;
                 let ph_ptr: *Elf64ProgramHeader = ph_addr as *Elf64ProgramHeader;
                 if (ph_ptr.p_type == PT_LOAD) {
@@ -329,16 +326,32 @@ fn app_main() {
                         uart_puts("segment out of range\n");
                         ok = 0;
                     } else {
+                        // dst_base + seg_filesz <= PAGE_SIZE is already
+                        // proven by the guard above, but as a relationship
+                        // between two runtime values (seg_vaddr/page_va
+                        // and seg_filesz), not a plain interval on one of
+                        // them alone -- exactly the "correlated bounds"
+                        // case SPEC.md's Known Limitations section
+                        // documents as unsafe's sanctioned escape (same
+                        // shape as examples/tcp_echo/tcp_echo.tkb's own
+                        // "sole executable unsafe site", `frame[data_off_idx
+                        // ..<data_off_idx+data_len_idx]`). Both subslices
+                        // stay unproven-length ([]u8, minimum 0) rather
+                        // than fighting for a stronger static minimum;
+                        // slice_copy's own runtime min(dst.len, src.len)
+                        // is what's actually safe here, matching that same
+                        // file's own `slice_copy(eth[...], data)` pattern
+                        // -- no per-element index to prove at all, so no
+                        // remaining --forbid-trap site either.
                         let src: *u8 = image_addr as *u8;
                         let dst_base: usize = seg_vaddr - page_va;
-                        let mut j: usize = 0;
-                        while (j < seg_filesz) {
-                            dst[dst_base + j] = src[(seg_offset + j) as isize];
-                            j = j + 1;
-                        }
+                        let seg_dst = unsafe { dst[dst_base..<dst_base + seg_filesz] };
+                        let seg_src = unsafe {
+                            src[seg_offset as isize..<(seg_offset + seg_filesz) as isize]
+                        };
+                        slice_copy(seg_dst, seg_src);
                     }
                 }
-                i = i + 1;
             }
 
             if (ok == 0 || entry < page_va || entry - page_va >= PAGE_SIZE) {

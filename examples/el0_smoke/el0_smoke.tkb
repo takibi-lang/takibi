@@ -121,20 +121,30 @@ fn app_main() {
             let src_addr: usize = el0_payload_addr();
             let src_len: usize = el0_payload_len();
             let src_ptr: *u8 = src_addr as *u8;
-            let mut i: usize = 0;
-            while (i < src_len) {
-                dst[i] = src_ptr[i as isize];
-                i = i + 1;
+            if (src_len <= PAGE_SIZE) {
+                // src_len is narrowed (<= PAGE_SIZE) but not a compile-time
+                // constant, so a for-loop counter bounded by it does not
+                // itself carry a provable range (same finding as
+                // examples/el0_elf_load's own segment-copy site) --
+                // slice_copy's runtime min(dst.len, src.len) sidesteps
+                // needing a per-element index proof at all.
+                let seg_src = unsafe { src_ptr[0..<src_len as isize] };
+                slice_copy(dst, seg_src);
+
+                el0_entry_va = va;
+                el0_mapping_abandon(mapping);
+                el0_space_abandon(space2);
+                el0_active_abandon(active);
+
+                let el1_sp_base: usize = (el1_stack as *u8) as usize;
+                let el1_sp: usize = el1_sp_base + 4096;
+                rpi3_el1_enter(el1_sp);
+            } else {
+                uart_puts("payload too large\n");
+                el0_mapping_abandon(mapping);
+                el0_space_abandon(space2);
+                el0_active_abandon(active);
             }
-
-            el0_entry_va = va;
-            el0_mapping_abandon(mapping);
-            el0_space_abandon(space2);
-            el0_active_abandon(active);
-
-            let el1_sp_base: usize = (el1_stack as *u8) as usize;
-            let el1_sp: usize = el1_sp_base + 4096;
-            rpi3_el1_enter(el1_sp);
         }
     }
 }
