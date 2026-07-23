@@ -103,7 +103,18 @@ fn page_owner_bytes(owner: borrow PageOwner[p]) -> [u8; PAGE_SIZE..] @ p {
 // dynamic L2/L3 chain, and ASID; both share the kernel/RAM/MMIO identity map.
 // The state machine makes activation and cleanup explicit:
 // Inactive -> Empty(active) -> Occupied -> Empty -> Inactive.
-enum SpaceState: u8 { Inactive; Empty; Occupied; }
+//
+// Occupied2 (GitHub issue #153 Stage 1 prerequisite) extends this chain by
+// one more state -- Occupied -> Occupied2 -> Occupied -- for the case where
+// a single address space needs two simultaneously-live mappings (e.g. a
+// code page and a stack page for one EL0 process image). The underlying
+// hardware has no such limit: each slot's l3_dynamic_table already covers
+// 512 independent 4KB entries (see examples/common_rpi3/mmu.S's header
+// comment), so map_page/unmap_page and their existing callers (COW,
+// multi_address_space, vm_page_map) are left completely unchanged --
+// map_second_page/unmap_second_page below are new, additive functions, not
+// a change to the one-page protocol's meaning.
+enum SpaceState: u8 { Inactive; Empty; Occupied; Occupied2; }
 
 private linear struct AddressSpaceOwner[asid: usize, state: SpaceState] {
     private tag: usize @ asid;
@@ -552,6 +563,30 @@ fn map_page(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
     return (occupied, pending);
 }
 
+// Map a second, independent page into a space that already has one live
+// mapping (GitHub issue #153 Stage 1 prerequisite). Same PTE write as
+// map_page above, at a caller-chosen distinct `va` -- the two mappings
+// occupy different l3_dynamic_table entries, so nothing here can alias.
+// Only reachable from SpaceState::Occupied, so this cannot be called before
+// map_page's own tlb_invalidate has produced that state.
+fn map_second_page(space: sink AddressSpaceOwner[asid, SpaceState::Occupied],
+                   page: sink PageOwner[p],
+                   va: {DYN_VA_BASE..<DYN_VA_LIMIT as usize} @ va)
+        -> (AddressSpaceOwner[asid, SpaceState::Occupied2],
+            TlbInvalidationPending[asid, va, p]) {
+    let l3_index: usize = (va - DYN_VA_BASE) / PAGE_SIZE;
+    let pool_base_ptr: *u8 = page_pool as *u8;
+    let pool_base: usize = pool_base_ptr as usize;
+    let phys_addr: usize = pool_base + page.index * PAGE_SIZE;
+    l3_address_space_write(space.slot, l3_index, phys_addr | 0x707);
+
+    let mut occupied2: AddressSpaceOwner[asid, SpaceState::Occupied2] =
+        { space.tag, space.slot };
+    let mut pending: TlbInvalidationPending[asid, va, p] =
+        { space.tag, space.slot, va, page.index, page.p_witness };
+    return (occupied2, pending);
+}
+
 // EL2 stage-1 AP[2:1] = 0b10 (bit 7 set) makes this mapping read-only at
 // EL2. A store through its VA therefore reaches the synchronous exception
 // hook instead of silently modifying the shared backing page.
@@ -670,6 +705,18 @@ fn tlb_invalidate(space: borrow AddressSpaceOwner[asid, SpaceState::Occupied],
     return mapping;
 }
 
+// Same TLB maintenance as tlb_invalidate above, gated on Occupied2 instead
+// of Occupied so it can only run after map_second_page, not map_page.
+fn tlb_invalidate_second(space: borrow AddressSpaceOwner[asid, SpaceState::Occupied2],
+                         pending: sink TlbInvalidationPending[asid, va, p])
+        -> MappingOwner[asid, va, p] {
+    tlb_invalidate_asid_va(pending.space_slot, pending.va_value);
+    let mut mapping: MappingOwner[asid, va, p] =
+        { pending.asid_tag, pending.space_slot, pending.va_value,
+          pending.page_index, pending.p_witness, 0 };
+    return mapping;
+}
+
 fn mapping_bytes(mapping: borrow MappingOwner[asid, va, p])
         -> [u8; PAGE_SIZE..] @ p {
     // PAGE_COUNT * PAGE_SIZE = 16384, so every page start is below 12289
@@ -730,6 +777,23 @@ fn unmap_page(space: sink AddressSpaceOwner[asid, SpaceState::Occupied],
         { space.tag, space.slot };
     let mut page: PageOwner[p] = { mapping.page_index, mapping.p_witness };
     return (empty, page);
+}
+
+// Tear down the second mapping first (Occupied2 -> Occupied), symmetric
+// with map_second_page. The first mapping is still reachable only through
+// unmap_page from the resulting Occupied state, so cleanup order is fixed
+// by the type system: second mapping down before the first.
+fn unmap_second_page(space: sink AddressSpaceOwner[asid, SpaceState::Occupied2],
+                     mapping: sink MappingOwner[asid, va, p])
+        -> (AddressSpaceOwner[asid, SpaceState::Occupied], PageOwner[p]) {
+    let l3_index: usize = (mapping.va_value - DYN_VA_BASE) / PAGE_SIZE;
+    l3_address_space_write(mapping.space_slot, l3_index, 0);
+    tlb_invalidate_asid_va(mapping.space_slot, mapping.va_value);
+
+    let mut occupied: AddressSpaceOwner[asid, SpaceState::Occupied] =
+        { space.tag, space.slot };
+    let mut page: PageOwner[p] = { mapping.page_index, mapping.p_witness };
+    return (occupied, page);
 }
 
 fn vm_task_switch_new(
