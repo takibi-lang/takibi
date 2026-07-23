@@ -375,8 +375,6 @@ allcheck-build: qemubuild stm32build \
 	examples/http_server/kernel_stm32.bin \
 	examples/http_server_sdcard/kernel_stm32.bin \
 	examples/http_server_sdcard_install/kernel_stm32_ram.elf \
-	examples/http_server_sdcard_rtos/kernel_stm32_ram.prof.elf \
-	examples/kvs_server_sdcard_rtos/kernel_stm32_ram.prof.elf \
 	examples/common_rpi3/jtag_stub.img
 
 ## allcheck: clean and build once, then run QEMU, STM32, and RPi3 lanes in

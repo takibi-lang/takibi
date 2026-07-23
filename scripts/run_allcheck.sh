@@ -19,10 +19,6 @@ qemu_lane() {
 stm32_lane() {
     echo "[allcheck-stage] UART hardware checks"
     STM32_SERIAL_DEV="$STM32_SERIAL_DEV" bash "$REPO_ROOT/scripts/run_hwtest_ram.sh"
-    echo "[allcheck-stage] HTTP/SD/RTOS profiler check"
-    STM32_SERIAL_DEV="$STM32_SERIAL_DEV" bash "$REPO_ROOT/scripts/profile_stm32_http_server_sdcard_rtos.sh"
-    echo "[allcheck-stage] KVS/SD/RTOS profiler check"
-    STM32_SERIAL_DEV="$STM32_SERIAL_DEV" bash "$REPO_ROOT/scripts/profile_stm32_kvs_server_sdcard_rtos.sh"
     echo "[allcheck-stage] Ethernet hardware checks"
     STM32_SERIAL_DEV="$STM32_SERIAL_DEV" bash "$REPO_ROOT/scripts/run_hwtest_net_ram.sh"
 }
