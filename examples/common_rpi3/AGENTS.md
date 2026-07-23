@@ -1180,13 +1180,18 @@ reset.
 This completes GitHub issue #145's own remaining scope (issue #61's
 `fatfs` in-memory core, issue #62-equivalent real block storage, and
 every fatfs-family application example STM32 has) for Raspberry Pi 3B.
-**Remaining work before this whole milestone's `--forbid-trap`
-hardening pass**: none functionally -- every fatfs-family example that
-exists on STM32 now also runs on this board. The hardening pass itself
-(turning `RPI3_MSC_TAKIBI_FLAGS` into `RPI3_TAKIBI_FLAGS` for every
-group this section touched, fixing whatever it flags) is the one
-deliberately deferred step, per the project's established
-baseline-then-hardened-pass process.
+
+**Update, 2026-07-23: the `--forbid-trap` hardening pass is done.**
+`RPI3_MSC_TAKIBI_FLAGS` went from empty to `--forbid-trap`, covering
+every group this section touched (`usb_msc_probe`, `fatfs_sdcard`,
+`rtos_fatfs_sdcard`, `http_server_sdcard`, `http_server_sdcard_install`,
+`http_server_sdcard_rtos`, `kvs_server_sdcard_rtos`). Unlike every
+earlier hardening pass recorded in this file, it flagged zero trap
+sites -- all seven objects compiled clean on the first try. Verified
+with `make allcheck-build`, `make qemutest` (164/164), `make
+hwcheck-rpi3` (72/72), and `make hwcheck-rpi3-net` (6/6), all on real
+hardware. See root `HISTORY.md`'s matching dated entry. No further work
+remains for this milestone.
 
 ## Hardware
 

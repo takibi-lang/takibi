@@ -10437,3 +10437,25 @@ A grep across the whole Makefile plus every `scripts/*.sh` that invokes
 `takibi` directly confirmed no other build path lacks `--forbid-trap`: every
 QEMU/Linux, STM32, and RPi3 target now compiles under it. This closes out
 GitHub issue #145's Raspberry Pi 3B scope in full.
+
+### 2026-07-23: Development Process Change -- `--forbid-trap` Now the Default From the Start
+
+After the RPi3 USB-Mass-Storage hardening pass above flagged zero trap sites -- following a
+visible trend of consecutive hardening passes (issues #135, #140, then #145's RPi3 group)
+each flagging fewer sites than the last -- the user proposed retiring the project's original
+"prove new `.tkb` code without `--forbid-trap` first, harden in one later pass" process
+(established during `fatfs`/issue #61 and its SD card integration/issue #62) as the default,
+since the before/after comparison it exists to produce had stopped being informative for code
+that follows the project's now-established refinement-type idioms.
+
+Agreed direction: **flip the default to writing refinement types and `--forbid-trap` on from
+the first commit**, while keeping the old two-phase process available as an explicit,
+consciously-chosen exception for milestones whose hardware/protocol behavior is not yet
+understood (a new peripheral never driven before, a first-of-its-kind DMA/cache interaction, a
+new board's earliest bring-up) -- situations where forcing proof-carrying types onto
+not-yet-understood data flow would tangle functional debugging with proof debugging, which is
+exactly what the original process was designed to avoid. `AGENTS.md`'s "Development Process"
+section and its "Instructions for Coding Agents" cross-reference were rewritten accordingly;
+the historical baseline-then-hardened-pass commits and HISTORY.md entries for issues #61, #62,
+#135, #140, and #145 are left as-is, since they document what was true when written and are
+themselves the evidence this decision rests on.

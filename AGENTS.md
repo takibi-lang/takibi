@@ -89,59 +89,52 @@ the system will silently break or run amok. Nothing is communicated to the user.
 The finished form of code is when index ranges are pinned at the type level using
 `for i: usize in 0..<n` or `{lo..<hi as usize}` annotations.
 
-## Development Process: Prove New `.tkb` Code Without `--forbid-trap` First, Then Turn It On
+## Development Process: Write `.tkb` Code Under `--forbid-trap` From the Start
 
-**New `.tkb` work is written and gets fully working WITHOUT refinement types and WITHOUT
-`--forbid-trap` first, gets committed as that known-good baseline, and only THEN has
-refinement types added and `--forbid-trap` turned on, as one later, separate step.** This is
-a durable process rule (not a one-off preference), agreed between the user and Claude Code
-while building the `fatfs` example (GitHub issue #61) and its follow-on SD card integration
-(issue #62).
+**New `.tkb` work is written and compiled with refinement types and `--forbid-trap` enabled
+from the first commit.** This is the current default, changed from this project's earlier
+default -- write it fully working WITHOUT refinement types and WITHOUT `--forbid-trap` first,
+commit that as a known-good baseline, and only THEN turn `--forbid-trap` on as one later,
+separate hardening pass -- which had been the rule since the `fatfs` example (GitHub issue
+#61) and its SD card integration (issue #62). Confirmed with the user 2026-07-23 after several
+consecutive hardening passes (issues #135, #140, and most recently #145's RPi3
+USB-Mass-Storage group) each flagged progressively fewer trap sites, with the RPi3 pass
+flagging zero: the project's refinement-type idioms are now established enough that the old
+two-phase separation no longer earns its cost for code that follows them. See `HISTORY.md`'s
+dated entries for issues #61, #62, #135, #140, and #145 for the historical evidence this
+decision rests on -- that record stays as-is; it documents what was true when it was written,
+not a claim about current process.
 
-**The unit this applies to is a whole working MILESTONE, not necessarily one file in
-isolation.** Concretely: `fatfs` (in-memory block device, issue #61) and the real SD/eMMC
-driver it plugs into (issue #62) are being built as one such milestone -- refinement types
-and `--forbid-trap` stay off across BOTH pieces, all the way through wiring the real SD card
-in underneath `fatfs`'s FAT12 logic, not just for `fatfs` alone. Verification during this
-whole span comes from integration tests actually exercising the code (QEMU + `mtools` for
-`fatfs` alone, then a real SD-card-backed integration test once #62 lands), not from the
-compiler. Only once the *whole* milestone (`fatfs` + real SD card, reading and writing an
-actual card) is demonstrated working end to end does refinement-typing/`--forbid-trap` get
-turned on, in one pass across everything the milestone touched -- not piecemeal after each
-intermediate piece. Ask before assuming a smaller or larger milestone boundary than this if
-it's ever unclear which pieces of a multi-issue effort are meant to land together before
-hardening.
-
-- **While `--forbid-trap` is deliberately off: write plain, idiomatic checked array/slice
-  indexing** (`buf[i]`, not raw-pointer arithmetic) and ordinary unrefined parameter types
-  (`u32`, `usize`, etc). A runtime trap check being silently inserted is fine and expected at
-  this stage -- the goal is purely "does the logic work," verified by actually running it,
-  not by making the compiler happy. **Do not reach for raw pointers/`unsafe` merely to route
-  around a bounds check that checked array/slice indexing would have needed instead** -- that
-  silently reintroduces exactly the unproven-access risk `--forbid-trap` exists to catch, and
-  produces a file that trivially "passes" `--forbid-trap` without any of its sites ever having
-  been examined. Raw pointers stay reserved for cases that need them regardless of this
-  process (a byte-oriented hardware/block-device boundary, a struct-overlay cast onto a raw
-  buffer, a NUL-terminated scan whose length isn't known up front) -- not as a shortcut
-  through this step.
-- **Each intermediate piece still gets committed as its own known-good baseline** once it
-  demonstrably works (e.g. `fatfs` alone, verified via QEMU + `mtools`, before #62 exists)--
-  this snapshot is the deliberate "before" side of a before/after comparison: it is expected
-  to compile cleanly without `--forbid-trap` and to be flagged by it once eventually enabled,
-  and that contrast is worth preserving in history, not squashed away -- it is the concrete
-  evidence for why `--forbid-trap` (and the refinement-type system behind it) earns its keep,
-  valuable for anyone auditing this project's approach later (including turning it into a
-  paper). It does NOT mean turning `--forbid-trap` on for that piece yet if the milestone it
-  belongs to isn't finished.
-- **When the milestone is finished, turn `--forbid-trap` on and fix only what it flags.** Add
-  `--forbid-trap` to each affected file's Makefile rule and recompile. Each flagged site gets
-  fixed at its root: a refined parameter/loop-bound type (`{lo..<hi as base}`,
-  `for i: usize in 0..<n`), or, when the bound genuinely depends on runtime state the type
-  system cannot see (e.g. an allocator's own bookkeeping invariant), explicit if-condition
-  narrowing (`if (v >= lo && v < hi) { ... }`) right at the point of use. Never "fix" a
-  flagged site by swapping the checked access back to a raw pointer -- that defeats the
-  entire point of running this step. This hardened version is committed separately from the
-  unrefined baseline(s), so the diff **is** the demonstration of what `--forbid-trap` found.
+- **Default: write refined parameter/loop-bound types and idiomatic checked array/slice
+  indexing from the start** (`{lo..<hi as base}`, `for i: usize in 0..<n`), the same "finished
+  form" described above ("Code with remaining bounds checks = code whose type annotations are
+  still insufficient"), and add `--forbid-trap` to the file's Makefile rule in the same commit
+  that introduces the code. When a bound genuinely depends on runtime state the type system
+  cannot see (e.g. an allocator's own bookkeeping invariant), use explicit if-condition
+  narrowing (`if (v >= lo && v < hi) { ... }`) right at the point of use instead of a raw
+  pointer. **Do not reach for raw pointers/`unsafe` merely to route around a bounds check that
+  checked/refined indexing would have needed instead** -- that silently reintroduces exactly
+  the unproven-access risk `--forbid-trap` exists to catch. Raw pointers stay reserved for
+  cases that need them regardless of this process (a byte-oriented hardware/block-device
+  boundary, a struct-overlay cast onto a raw buffer, a NUL-terminated scan whose length isn't
+  known up front) -- never as a shortcut around this default.
+- **Exception: a milestone whose hardware/protocol behavior is not yet understood may still
+  use the old prove-first-then-harden process, as a deliberate, explicitly-flagged judgment
+  call, not a silent default.** Forcing refined types onto code whose data flow or wire format
+  you don't yet know tangles "is the logic right" together with "is the proof right" while
+  both are still unknown -- exactly the situation the original two-phase process was designed
+  for. Concretely: a genuinely new peripheral this project has never driven before, a
+  first-of-its-kind DMA/cache interaction, or a new board port's earliest bring-up steps. Ask
+  before assuming this exception applies if it's unclear whether a task is "an established
+  pattern applied again" or "genuinely unknown hardware behavior."
+  - While deliberately using this exception: write plain, idiomatic checked indexing and
+    ordinary unrefined parameter types; commit the unrefined milestone as its own known-good
+    baseline once it demonstrably works (verified by integration tests actually exercising the
+    code, not by the compiler); then turn `--forbid-trap` on for the *whole* milestone in one
+    later pass and fix only what it flags, at its root (a refined type or if-narrowing, never
+    a raw-pointer swap) -- not piecemeal after each intermediate piece. This baseline-then-
+    hardened-pass diff is deliberately preserved in history, not squashed away: it is the
+    concrete evidence for why `--forbid-trap` earns its keep when it is used this way.
 - Refined-type bounds (`{lo..<hi as base}`) may use literal integers or earlier
   `const` names with bare integer literal initializers, e.g.
   `{0..<MAX_CONNS as usize}`. Ordinary global `let` declarations are deliberately
@@ -709,7 +702,7 @@ expected to include wait time.
 - **Do not save durable project guidance to tool-specific memory stores.** Consolidate project-specific information in `AGENTS.md` so it can be shared across agent environments.
 - **All text in this repository must be ASCII-only.** Never write Japanese or any other non-ASCII characters in source files, comments, documentation, or any other file. `make langcheck` enforces this and will fail if non-ASCII characters are found.
 - **Follow YAGNI (see "Design Principle: YAGNI" above).** Do not design or implement functionality beyond what the current, concrete task needs. If a request seems to call for more than that, flag the tradeoff and ask before building it.
-- **New `.tkb` code under `examples/`: get the whole milestone working without refinement types/`--forbid-trap` first, commit each working piece as a baseline, then turn `--forbid-trap` on once the milestone is done and fix only what it flags** (see "Development Process: Prove New `.tkb` Code Without `--forbid-trap` First, Then Turn It On" above -- e.g. `fatfs` + its real SD card integration are one milestone; don't harden `fatfs` alone partway through). Do not skip straight to a `--forbid-trap`-clean version, and do not "fix" a flagged site by switching it to a raw pointer.
+- **New `.tkb` code under `examples/`: write it with refinement types and `--forbid-trap` enabled from the start** (see "Development Process: Write `.tkb` Code Under `--forbid-trap` From the Start" above). Only fall back to the old prove-first-then-harden process for a milestone whose hardware/protocol behavior is not yet understood (a genuinely new peripheral, a first-of-its-kind DMA/cache interaction, a new board's earliest bring-up) -- ask if it's unclear which situation applies. Never "fix" a flagged `--forbid-trap` site by switching it to a raw pointer.
 - **Proactively write English summaries of chat decisions/design rationale to the relevant GitHub issue.** The chat itself is in Japanese, but this repository's issues must stay English-only -- `gh` now has write access (`gh issue comment` / `gh issue create`, see `.claude/settings.json` and `.codex/hooks.json`), and tool-specific hooks (`.claude/hooks/gh-issue-ascii-only.sh` and `.codex/hooks/gh-issue-ascii-only.sh`) guard those two commands against non-ASCII text, so the summary must already be in English before the command is run. This takes over a task the user previously did by hand (translating chat discussion and posting it to issues themselves) -- do it without being asked, once a decision, design tradeoff, or root-cause conclusion has actually been reached in the conversation, not after every message. Infer the target issue from context (a number mentioned in the recent chat, a commit message, `git log`); if none is evident, ask rather than guessing or opening a new issue unprompted.
 
 ## Dependencies
