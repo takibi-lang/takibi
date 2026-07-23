@@ -404,16 +404,21 @@ fn kvs_content_length(req: borrow *u8, hdr_end: isize) -> KvsUdecResult {
     return KvsUdecResult::None;
 }
 
-fn kvs_find_hdr_end(req: borrow *u8, len: isize) -> isize {
+variant KvsHdrEndResult {
+    Found(isize);
+    NotFound;
+}
+
+fn kvs_find_hdr_end(req: borrow *u8, len: isize) -> KvsHdrEndResult {
     let mut i: isize = 0;
     while (i + 3 < len) {
         if (req[i] == '\r' as u8 && req[i + 1] == '\n' as u8 &&
             req[i + 2] == '\r' as u8 && req[i + 3] == '\n' as u8) {
-            return i + 4;
+            return KvsHdrEndResult::Found(i + 4);
         }
         i = i + 1;
     }
-    return -1;
+    return KvsHdrEndResult::NotFound;
 }
 
 // -- Response generation ------------------------------------------------
@@ -465,9 +470,12 @@ fn kvs_build_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16}, idx: {0..
 fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
         req: borrow *u8, req_len: u16, idx: {0..<MAX_CONNS as usize}) -> i32 {
     let len: isize = req_len as isize;
-    let hdr_end: isize = kvs_find_hdr_end(req, len);
-    if (hdr_end < 0) {
-        return kvs_build_response(eth, ihl, idx, 400, "bad request\n", 12);
+    let mut hdr_end: isize = 0;
+    match kvs_find_hdr_end(req, len) {
+        KvsHdrEndResult::NotFound => {
+            return kvs_build_response(eth, ihl, idx, 400, "bad request\n", 12);
+        }
+        KvsHdrEndResult::Found(v) => { hdr_end = v; }
     }
 
     match kvs_classify_method(req, len) {
