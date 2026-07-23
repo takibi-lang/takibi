@@ -10412,3 +10412,28 @@ project has no first-class string type, and what a string *pattern* should
 even mean -- exact equality? prefix? a runtime length check?-- is
 undecided); deferred to a future issue if/when a concrete case needs it,
 rather than guessed at now.
+
+### 2026-07-23: RPi3 `--forbid-trap` Hardening Pass Completes (GitHub Issue #145)
+
+The one item the 2026-07-17 RPi3 fatfs-family entry deliberately left open --
+"only the milestone-wide `--forbid-trap` hardening pass remains" -- is now
+done. `RPI3_MSC_TAKIBI_FLAGS` (Makefile), the one remaining build-flag
+variable across the whole `examples/` tree that did not already include
+`--forbid-trap`, went from empty to `--forbid-trap`. It covers every RPi3
+build that touches USB Mass Storage: `usb_msc_probe`, `fatfs_sdcard`,
+`rtos_fatfs_sdcard`, `http_server_sdcard`, `http_server_sdcard_install`,
+`http_server_sdcard_rtos`, and `kvs_server_sdcard_rtos`.
+
+Unlike every earlier hardening pass in this project's history, this one
+flagged **zero** trap sites -- all seven objects compiled clean under
+`--forbid-trap` on the first try, no refinement-type fixes needed. Verified
+with `make allcheck-build` (build+link, all targets), `make qemutest` (164/
+164), `make hwcheck-rpi3` (72/72, real hardware), and `make hwcheck-rpi3-net`
+(6/6, real hardware, including `kvs_server_sdcard_rtos`'s
+persistence-survives-a-reset check) -- all from a clean state, zero
+regressions.
+
+A grep across the whole Makefile plus every `scripts/*.sh` that invokes
+`takibi` directly confirmed no other build path lacks `--forbid-trap`: every
+QEMU/Linux, STM32, and RPi3 target now compiles under it. This closes out
+GitHub issue #145's Raspberry Pi 3B scope in full.

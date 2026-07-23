@@ -1622,15 +1622,16 @@ $(RPI3_NET_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_TAKIBI_FLAGS) -o $@
 
 # USB Mass Storage group (GitHub issue #145, the storage follow-on to the
-# Ethernet milestone above): examples/common_rpi3/usb_msc.tkb -- new,
-# unproven-on-real-hardware code as of this milestone (Bulk-Only
-# Transport + SCSI-10 over this board's DWC2 host stack). Per root
+# Ethernet milestone above): examples/common_rpi3/usb_msc.tkb (Bulk-Only
+# Transport + SCSI-10 over this board's DWC2 host stack) and everything
+# built on top of it (fatfs/kvs/http sdcard variants below). Per root
 # AGENTS.md's "Development Process" (new .tkb work first WITHOUT
 # --forbid-trap, hardened in one later pass once the whole milestone
 # works end to end -- same as the Ethernet milestone's own history, see
-# HISTORY.md's "RPi3 --forbid-trap hardening pass" entry), this group
-# deliberately does NOT use $(RPI3_TAKIBI_FLAGS) yet.
-RPI3_MSC_TAKIBI_FLAGS :=
+# HISTORY.md's "RPi3 --forbid-trap hardening pass" entry), this group ran
+# without --forbid-trap through its own bring-up; the dedicated hardening
+# pass now enables it here, same as the STM32 side of this milestone.
+RPI3_MSC_TAKIBI_FLAGS := --forbid-trap
 RPI3_MSC_EXAMPLES := usb_msc_probe
 RPI3_MSC_OBJS     := $(foreach e,$(RPI3_MSC_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
@@ -1644,10 +1645,9 @@ $(RPI3_MSC_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON
 # itself only `use`s fat12.tkb + usb_msc.tkb; usb_msc.tkb's own further
 # dependencies (mailbox/usb_dwc2/usb_hub) still need to be listed
 # explicitly, same as the plain RPI3_MSC_OBJS rule above. Same
-# not-yet-`--forbid-trap` reasoning as that group -- this shared example
-# source is already hardened (proven on STM32), but usb_msc.tkb
-# underneath is not yet, so the flag stays off for the whole build
-# command until this milestone's own later hardening pass.
+# `--forbid-trap` group as that one -- this shared example source was
+# already hardened (proven on STM32) before usb_msc.tkb underneath was;
+# now both are, via the shared $(RPI3_MSC_TAKIBI_FLAGS).
 COMMON_RPI3_FAT12_USBMSC := $(COMMON_RPI3_DIR)/fat12_usbmsc.tkb
 RPI3_FATFS_EXAMPLES := fatfs_sdcard
 RPI3_FATFS_OBJS     := $(foreach e,$(RPI3_FATFS_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
