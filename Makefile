@@ -134,7 +134,8 @@ TYPE_SYSTEM_SUITE_SOURCES := examples/nonexhaustive/nonexhaustive.tkb \
                              examples/align_ptr_proof/align_ptr_proof.tkb \
                              examples/linear_obligation/linear_obligation.tkb \
                              examples/tuple_pair/tuple_pair.tkb \
-                             examples/field_lease/field_lease.tkb
+                             examples/field_lease/field_lease.tkb \
+                             examples/match_int_lit/match_int_lit.tkb
 
 ALGORITHM_SUITE_SOURCES := examples/callstack/callstack.tkb \
                            examples/ringbuf/ringbuf.tkb \

@@ -1338,6 +1338,55 @@ enum Name: u16 { V1 = n1; ...; _; }             // non-exhaustive (trailing `_;`
 - `EnumVariant as underlying_type` -- cast to the enum's declared
   underlying integer type.
 
+## Match on Primitive Types (GitHub issue #151)
+
+```
+fn classify(v: i32) -> i32 {
+    match v {
+        0 => { return 100; }
+        1 => { return 101; }
+        -1 => { return 102; }
+        _ => { return 999; }
+    }
+}
+```
+
+`match` also accepts a discriminant of a primitive integer type
+(`i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64`/`isize`/`usize`) or a
+`{lo..<hi as base}` refinement of one, with each arm naming a literal
+value (`N => { ... }` or `-N => { ... }`) instead of an enum/variant case.
+Lowers to the same LLVM `switch` instruction an enum/variant match already
+uses -- the literal arms become `switch` cases and, when present, the `_`
+arm becomes the default target.
+
+- **A `_` wildcard arm is always mandatory here**, unlike an
+  exhaustive enum/variant match: an integer's value space can never be
+  exhaustively listed the way a closed set of named cases can, so there
+  is no "every case covered, no wildcard needed" path. This holds even
+  when the discriminant is a `{lo..<hi as base}` refinement with a small,
+  fully enumerable proven range -- the refinement narrows what values can
+  actually reach the match, not what the match's own case-completeness
+  rule requires.
+- **Duplicate literals** (the same value named by two arms) are a compile
+  error.
+- **A literal is checked against the discriminant's own base type's
+  width** (its full `i8`/.../`usize` range, the same bound
+  `for i: base in lo..<hi`'s explicit annotation already enforces), not
+  against a `{lo..<hi as base}` discriminant's narrower proven range --
+  `200 => { ... }` type-checks against a `{0..<4 as u8}` discriminant
+  (200 fits `u8`) even though 200 is outside `{0..<4}`; the mandatory `_`
+  arm is what covers values outside the proven range, not a per-arm
+  literal-range restriction. A negative literal against an unsigned base
+  type is out of range and rejected (no wraparound-bit-pattern
+  reinterpretation).
+- Mixing a literal arm and an `enum`/`variant` case arm in the same
+  `match` is a compile error: the discriminant's type picks one arm
+  grammar, not both.
+- **No pattern beyond a single literal is supported yet** -- no ranges
+  (`0..<10 => { ... }`), and no string/byte-slice patterns (this project
+  has no first-class string type; what a string *pattern* should even
+  mean is an open question, not yet designed).
+
 ## Slices
 
 `[]T` (minimum length 0) and `[T; N..]` (minimum length N) are a fat

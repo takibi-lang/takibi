@@ -1,0 +1,45 @@
+// match on primitive types (GitHub issue #151): a `match` discriminant may
+// now be a plain integer type (i8/i16/i32/i64/u8/u16/u32/u64/isize/usize) or
+// a {lo..<hi as base} refinement of one, with each arm naming a literal
+// value instead of an enum/variant case. A `_` wildcard arm is always
+// mandatory here (unlike an exhaustive enum/variant match): an integer's
+// value space can never be exhaustively listed the way a closed set of
+// named cases can. Duplicate literals and a literal that does not fit the
+// discriminant's own type are both compile errors, not silently accepted.
+//
+// This exists so status-code-style functions (see AGENTS.md's "Return a
+// Variant, Not an Int Sentinel" principle -- this feature is for the
+// residual cases that still need to decode a raw wire/boundary int, e.g. a
+// value crossing a fixed-i32 RTOS channel) can use `match` instead of an
+// `if`/`else if` chain of equality comparisons.
+
+fn classify_i32(v: i32) -> *u8 {
+    match v {
+        0 => { return "zero\r\n"; }
+        1 => { return "one\r\n"; }
+        -1 => { return "minus-one\r\n"; }
+        _ => { return "other\r\n"; }
+    }
+}
+
+// A refined discriminant ({0..<4 as u8}) still requires the same mandatory
+// `_` -- the proven range is not treated as "every possible case listed".
+fn classify_quadrant(q: {0..<4 as u8}) -> *u8 {
+    match q {
+        0 => { return "north\r\n"; }
+        1 => { return "east\r\n"; }
+        2 => { return "south\r\n"; }
+        _ => { return "west\r\n"; }
+    }
+}
+
+fn test_match_int_lit() {
+    uart_puts(classify_i32(0));
+    uart_puts(classify_i32(1));
+    uart_puts(classify_i32(-1));
+    uart_puts(classify_i32(42));
+
+    for i: u8 in 0..<4 {
+        uart_puts(classify_quadrant(i));
+    }
+}

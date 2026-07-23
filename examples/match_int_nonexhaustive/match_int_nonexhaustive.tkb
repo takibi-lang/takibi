@@ -1,0 +1,13 @@
+// This file is expected to produce a compile error.
+// A match on a plain i32 discriminant (GitHub issue #151) always requires
+// a `_` wildcard arm -- an integer's value space can never be
+// exhaustively listed the way a closed enum/variant's cases can, unlike
+// examples/match_nonexhaustive's enum (where adding the missing case
+// would also fix it). Add a `_ => { ... }` arm to fix it.
+fn app_main() {
+    let v: i32 = 0;
+    match v {
+        0 => { let x: i32 = 0; }
+        1 => { let y: i32 = 1; }
+    }
+}

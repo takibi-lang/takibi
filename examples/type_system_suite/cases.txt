@@ -17,3 +17,4 @@ align_ptr_proof examples/align_ptr_proof/align_ptr_proof.expected
 linear_obligation examples/linear_obligation/linear_obligation.expected
 tuple_pair examples/tuple_pair/tuple_pair.expected
 field_lease examples/field_lease/field_lease.expected
+match_int_lit examples/match_int_lit/match_int_lit.expected

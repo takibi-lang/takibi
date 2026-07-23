@@ -1706,6 +1706,7 @@ let rec collect_lets stmts =
           match arm with
           | ArmVariant (_, _, _, body) -> collect_lets body
           | ArmWild body            -> collect_lets body
+          | ArmIntLit (_, body)     -> collect_lets body
         ) arms
     | _                           -> []
   ) stmts
@@ -1745,6 +1746,7 @@ let rec collect_mutable_pattern_binders stmts =
               in
               here @ collect_mutable_pattern_binders body
           | ArmWild body -> collect_mutable_pattern_binders body
+          | ArmIntLit (_, body) -> collect_mutable_pattern_binders body
         ) arms
     | Let _ | LetTuple _ | Return _ | Expr _ | Assign _ | AssignDeref _
     | AssignField _ | AssignIndex _ | Break | Continue -> []
@@ -1771,6 +1773,7 @@ let rec collect_immutable_lets stmts =
           match arm with
           | ArmVariant (_, _, _, body) -> collect_immutable_lets body
           | ArmWild body            -> collect_immutable_lets body
+          | ArmIntLit (_, body)     -> collect_immutable_lets body
         ) arms
     | _                           -> []
   ) stmts
@@ -4038,6 +4041,8 @@ let gen_func ?prog_types fdef =
               (arm, append_block context ("match_" ^ vname) f)
           | ArmWild _ ->
               (arm, append_block context "match_wild" f)
+          | ArmIntLit (lit, _) ->
+              (arm, append_block context (Printf.sprintf "match_lit_%d" lit) f)
         ) arms in
         (* Default target: wildcard arm if present, otherwise dead (unreachable) *)
         let default_bb = match List.find_opt (fun (a, _) ->
@@ -4046,7 +4051,7 @@ let gen_func ?prog_types fdef =
           | None         -> dead_bb
         in
         let n_variants = List.length (List.filter (fun (a, _) ->
-          match a with ArmVariant _ -> true | _ -> false) arm_bbs) in
+          match a with ArmVariant _ | ArmIntLit _ -> true | ArmWild _ -> false) arm_bbs) in
         let sw = build_switch switch_v default_bb n_variants builder in
         List.iter (fun (arm, bb) ->
           match arm with
@@ -4062,6 +4067,8 @@ let gen_func ?prog_types fdef =
                     List.assoc vname variants
               in
               add_case sw (const_int switch_ll_ty value) bb
+          | ArmIntLit (lit, _) ->
+              add_case sw (const_int switch_ll_ty lit) bb
           | ArmWild _ -> ()
         ) arm_bbs;
         List.iter (fun (arm, bb) ->
@@ -4104,7 +4111,8 @@ let gen_func ?prog_types fdef =
                 | None, None -> List.iter gen_stmt body
                 | None, Some _ -> raise (Error
                     "BUG: numeric enum match arm has a payload binder"))
-           | ArmWild body            -> List.iter gen_stmt body);
+           | ArmWild body            -> List.iter gen_stmt body
+           | ArmIntLit (_, body)     -> List.iter gen_stmt body);
           if block_terminator (insertion_block builder) = None then begin
             merge_reachable := true;
             ignore (build_br merge_bb builder)

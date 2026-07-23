@@ -188,6 +188,12 @@ and match_arm =
   | ArmVariant of string * string * (ident * bool) option * stmt list
       (* Name::Case[(payload_name)] => { stmts }; bool means `mut` binding. *)
   | ArmWild    of stmt list                    (* _ => { stmts } *)
+  | ArmIntLit  of int * stmt list
+      (* N => { stmts } -- literal-integer match arm (GitHub issue #151).
+         Only legal when the discriminant is a primitive integer type or a
+         {lo..<hi as base} refinement of one; a `_` wildcard arm is always
+         mandatory (an integer's value space is never exhaustively
+         listable the way a closed variant/enum's cases are). *)
 [@@deriving show]
 
 type func = {
@@ -359,6 +365,7 @@ let written_names (stmts : stmt list) : string list =
               Option.iter (fun (name, _) -> add name) binding;
               List.iter go_stmt b
           | ArmWild b -> List.iter go_stmt b
+          | ArmIntLit (_, b) -> List.iter go_stmt b
         ) arms
   in
   List.iter go_stmt stmts;

@@ -603,6 +603,19 @@ let check_for_annotation_range loc lo hi base =
       "for-loop bound {%d..<%d} does not fit the annotated type '%s'"
       lo hi (to_string base)))
 
+(* Same bound table as check_for_annotation_range, for a match arm's
+   literal-integer pattern (GitHub issue #151) against its discriminant's
+   base type instead of a for-loop's declared bound. A negative literal
+   against an unsigned base is rejected here (out of range) rather than
+   given wraparound-bit-pattern meaning; that is a deliberate v1
+   restriction, not an oversight -- see the issue for the open question. *)
+let check_match_int_literal_range loc lit base =
+  let (blo, bhi_opt) = for_annotation_bound_range base in
+  let out_of_range = lit < blo || (match bhi_opt with Some bhi -> lit >= bhi | None -> false) in
+  if out_of_range then
+    raise (TypeError (loc, Printf.sprintf
+      "match arm literal %d does not fit type '%s'" lit (to_string base)))
+
 (* Extract a small-number-scoped compile-time integer from an expression,
    iff it is exactly an integer literal that fits natively (see
    Ast.int_of_intlit's comment for why IntLit's Int64.t payload cannot
@@ -3093,6 +3106,10 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
              | Ast.ArmWild body ->
                  has_wild := true;
                  infer_arm_body tyenv rl body
+             | Ast.ArmIntLit (lit, _) ->
+                 raise (TypeError (s.loc, Printf.sprintf
+                   "match arm literal '%d' cannot be used against enum discriminant '%s'"
+                   lit ename))
            ) raw_locals arms in
            if is_ne then begin
              if not !has_wild then
@@ -3171,6 +3188,10 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                      "linear variant '%s' cannot use a wildcard arm because it could hide an unconsumed payload"
                      vtype));
                  infer_arm_body tyenv rl body
+             | Ast.ArmIntLit (lit, _) ->
+                 raise (TypeError (s.loc, Printf.sprintf
+                   "match arm literal '%d' cannot be used against variant discriminant '%s'"
+                   lit vtype))
            ) raw_locals arms in
            if not !has_wild then
              List.iter (fun (cname, _) ->
@@ -3179,8 +3200,46 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                    "non-exhaustive match: '%s::%s' not covered" vtype cname))
              ) cases;
            (tyenv, raw_locals')
+       | (TI8|TI16|TI32|TI64|TU8|TU16|TU32|TU64|TIsize|TUsize
+          | TRefinedInt (_, _, _)) as int_ty ->
+           (* Literal-integer match (GitHub issue #151). A `_` wildcard is
+              always mandatory here, unlike enum/variant above: an
+              integer's value space is never exhaustively listable, so
+              there is no "every case covered, no wildcard needed" path
+              analogous to a closed variant/exhaustive enum. *)
+           let base_ty = match int_ty with
+             | TRefinedInt (_, _, b) -> b
+             | b -> b
+           in
+           let has_wild = ref false in
+           let seen = Hashtbl.create 4 in
+           let raw_locals' = List.fold_left (fun rl arm ->
+             match arm with
+             | Ast.ArmIntLit (lit, body) ->
+                 if Hashtbl.mem seen lit then
+                   raise (TypeError (s.loc, Printf.sprintf
+                     "duplicate match arm literal '%d'" lit));
+                 Hashtbl.replace seen lit ();
+                 check_match_int_literal_range s.loc lit base_ty;
+                 infer_arm_body tyenv rl body
+             | Ast.ArmWild body ->
+                 if !has_wild then
+                   raise (TypeError (s.loc,
+                     "duplicate '_' wildcard match arm"));
+                 has_wild := true;
+                 infer_arm_body tyenv rl body
+             | Ast.ArmVariant (aname, _, _, _) ->
+                 raise (TypeError (s.loc, Printf.sprintf
+                   "match arm '%s::...' cannot be used against a primitive integer discriminant"
+                   aname))
+           ) raw_locals arms in
+           if not !has_wild then
+             raise (TypeError (s.loc,
+               "match on a primitive integer type requires a '_' wildcard arm \
+                (an integer's value space cannot be exhaustively listed)"));
+           (tyenv, raw_locals')
        | t -> raise (TypeError (disc.loc, Printf.sprintf
-           "match requires an enum or variant type, got '%s'" (to_string t))))
+           "match requires an enum, variant, or primitive integer type, got '%s'" (to_string t))))
 
 (* -- Function inference ---------------------------------------------------- *)
 
@@ -3220,6 +3279,7 @@ let check_const_shadowing (fdef : Ast.func) =
                 if Const_env.find name <> None then reject s.loc name) binding;
               List.iter go_stmt b
           | Ast.ArmWild b            -> List.iter go_stmt b
+          | Ast.ArmIntLit (_, b)     -> List.iter go_stmt b
         ) arms
     | _ -> ()
   in
@@ -3257,6 +3317,7 @@ let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
         List.iter (function
           | Ast.ArmVariant (_, _, _, b) -> List.iter go_stmt b
           | Ast.ArmWild b            -> List.iter go_stmt b
+          | Ast.ArmIntLit (_, b)     -> List.iter go_stmt b
         ) arms
     | _ -> ()
   in
@@ -4087,8 +4148,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          validate_expr_types e; List.iter validate_stmt_types body
      | Ast.Match (e, arms) ->
          validate_expr_types e;
-         List.iter (function Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b ->
-           List.iter validate_stmt_types b) arms
+         List.iter (function
+           | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) ->
+               List.iter validate_stmt_types b) arms
      | Ast.Break | Ast.Continue -> ())
   in
   List.iter (function
@@ -5407,7 +5469,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.If (_, yes, no) -> always_terminates yes && always_terminates no
       | Ast.Match (_, arms) -> List.for_all (fun arm ->
           let body = match arm with
-            | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b -> b in
+            | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) -> b in
           always_terminates body) arms
       | Ast.Block body -> always_terminates body
       | _ -> false
@@ -5637,6 +5699,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   in
                   (binding, payload_ty, b)
               | Ast.ArmWild b -> (None, None, b)
+              | Ast.ArmIntLit (_, b) -> (None, None, b)
             in
             let previous_binding_ty = match binding with
               | Some (name, _) -> StringMap.find_opt name !var_types
@@ -5825,7 +5888,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Match (subject, arms) ->
           visit_expr subject;
           List.iter (function
-            | Ast.ArmVariant (_, _, _, stmts) | Ast.ArmWild stmts ->
+            | Ast.ArmVariant (_, _, _, stmts) | Ast.ArmWild stmts
+            | Ast.ArmIntLit (_, stmts) ->
                 List.iter visit_stmt stmts) arms
       | Ast.Break | Ast.Continue -> ()
     in

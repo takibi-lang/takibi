@@ -1428,6 +1428,26 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  (* -- match on primitive types (GitHub issue #151) ----------------- *)
+
+  Alcotest.test_case "match with literal-integer arm parses to ArmIntLit" `Quick (fun () ->
+    match parse "fn f(v: i32) { match v { 0 => { let x = 0; } _ => { let y = 1; } } }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Match (_, [Ast.ArmIntLit (0, [_]); Ast.ArmWild [_]]) -> ()
+         | _ -> Alcotest.fail "expected Match(_, [ArmIntLit(0,_), ArmWild])")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "match with negative literal-integer arm parses to ArmIntLit" `Quick (fun () ->
+    match parse "fn f(v: i32) { match v { -1 => { let x = 0; } _ => { let y = 1; } } }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Match (_, [Ast.ArmIntLit (-1, [_]); Ast.ArmWild [_]]) -> ()
+         | _ -> Alcotest.fail "expected Match(_, [ArmIntLit(-1,_), ArmWild])")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
   (* -- extern fn --------------------------------------------------- *)
 
   Alcotest.test_case "extern fn without return type parses" `Quick (fun () ->
@@ -3767,6 +3787,72 @@ let infer_tests = [
 
   Alcotest.test_case "pointer as usize then i32 is ok" `Quick
     (expect_ok "let mut g: u8; fn f() { let p: *u8 = &g; let x: i32 = (p as usize) as i32; }");
+
+  (* -- match on primitive types (GitHub issue #151) ------------------- *)
+
+  Alcotest.test_case "int match with literals and wildcard type-checks" `Quick
+    (expect_ok
+      "fn f(v: i32) { match v {
+         0 => { let x: i32 = 0; }
+         1 => { let y: i32 = 1; }
+         -1 => { let z: i32 = 2; }
+         _ => { let w: i32 = 3; } } }");
+
+  Alcotest.test_case "int match without wildcard is a type error" `Quick
+    (expect_type_error "match on a primitive integer type requires a '_' wildcard arm"
+      "fn f(v: i32) { match v { 0 => { let x = 0; } } }");
+
+  Alcotest.test_case "int match with duplicate literal is a type error" `Quick
+    (expect_type_error "duplicate match arm literal '0'"
+      "fn f(v: i32) { match v {
+         0 => { let x = 0; }
+         0 => { let y = 1; }
+         _ => { let z = 2; } } }");
+
+  Alcotest.test_case "int match literal out of range for u8 is a type error" `Quick
+    (expect_type_error "match arm literal 300 does not fit type 'u8'"
+      "fn f(v: u8) { match v { 300 => { let x = 0; } _ => { let y = 1; } } }");
+
+  Alcotest.test_case "int match literal within refined base but outside proven range type-checks" `Quick
+    (expect_ok
+      (* {0..<4 as u8}'s base is u8 (0..255): a literal outside the proven
+         {0..<4} range but inside u8's own width is accepted -- the
+         mandatory `_` arm is exactly what covers it, not a narrower
+         per-refinement literal-range check. *)
+      "fn f(v: {0..<4 as u8}) { match v {
+         0 => { let x: i32 = 0; }
+         200 => { let y: i32 = 1; }
+         _ => { let z: i32 = 2; } } }");
+
+  Alcotest.test_case "int match literal out of range for refined u8 base is a type error" `Quick
+    (expect_type_error "match arm literal 300 does not fit type 'u8'"
+      "fn f(v: {0..<4 as u8}) { match v { 300 => { let x = 0; } _ => { let y = 1; } } }");
+
+  Alcotest.test_case "variant-arm syntax against a primitive int discriminant is a type error" `Quick
+    (expect_type_error "cannot be used against a primitive integer discriminant"
+      "variant Foo { Bar; }
+       fn f(v: i32) { match v { Foo::Bar => { let x = 0; } _ => { let y = 1; } } }");
+
+  Alcotest.test_case "literal arm against an enum discriminant is a type error" `Quick
+    (expect_type_error "cannot be used against enum discriminant"
+      "enum Color: u8 { Red = 0; }
+       fn f(c: Color) { match c { 0 => { let x = 0; } _ => { let y = 1; } } }");
+
+  Alcotest.test_case "literal arm against a variant discriminant is a type error" `Quick
+    (expect_type_error "cannot be used against variant discriminant"
+      "variant Foo { Bar; }
+       fn f() { match (Foo::Bar) { 0 => { let x = 0; } _ => { let y = 1; } } }");
+
+  Alcotest.test_case "int match codegen produces valid IR" `Quick
+    (expect_codegen_ok
+      "fn match_int_lit_codegen_test(v: i32) i32 {
+         match v {
+           0 => { return 100; }
+           1 => { return 101; }
+           -1 => { return 102; }
+           _ => { return 999; }
+         }
+       }");
 
   (* -- Global let/let mut mutability ------------------------------------- *)
 

@@ -18,6 +18,7 @@ use "examples/align_ptr_proof/align_ptr_proof.tkb";
 use "examples/linear_obligation/linear_obligation.tkb";
 use "examples/tuple_pair/tuple_pair.tkb";
 use "examples/field_lease/field_lease.tkb";
+use "examples/match_int_lit/match_int_lit.tkb";
 
 fn suite_marker(name: *u8) {
     uart_puts("@@TAKIBI_TEST:");
@@ -62,4 +63,6 @@ fn app_main() {
     test_tuple_pair();
     suite_marker("field_lease");
     test_field_lease();
+    suite_marker("match_int_lit");
+    test_match_int_lit();
 }

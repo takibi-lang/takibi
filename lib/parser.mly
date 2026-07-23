@@ -418,6 +418,19 @@ match_arm:
     { ArmVariant ($1, $3, Some (binding, mutable_), $10) }
   | UNDERSCORE DARROW LBRACE stmts RBRACE
     { ArmWild $4 }
+  | n = INT DARROW LBRACE body = stmts RBRACE
+    (* Literal-integer arm (GitHub issue #151): narrow_int64 gives the
+       same hard-overflow-is-an-error treatment as every other grammar
+       position that needs a realistic native int (array size, alignment,
+       enum discriminant, refined type bound). *)
+    { ArmIntLit (narrow_int64 $symbolstartpos "match arm literal" n, body) }
+  | MINUS n = INT DARROW LBRACE body = stmts RBRACE
+    (* -N => { ... } -- a negative literal pattern (e.g. matching a -1
+       sentinel), mirroring the desugared-unary-minus treatment `-expr`
+       gets in ordinary expression position, but resolved directly to a
+       negative native int here since a pattern is not a general
+       expression. *)
+    { ArmIntLit (- (narrow_int64 $symbolstartpos "match arm literal" n), body) }
 
 expr:
   | expr OR      expr  { { desc = BinOp (Or,   $1, $3); loc = $symbolstartpos } }
