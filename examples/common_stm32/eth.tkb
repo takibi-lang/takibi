@@ -290,17 +290,25 @@ fn eth_mac_dma_reset() {
     while ((*ETH_DMABMR & 1) != 0) {}
 }
 
+// Negotiated link (speed_is_100, full_duplex), or that no link could be
+// established -- replacing the old packed-int-or--1 sentinel
+// (speed*2+duplex bit-packed into an i32) with a type a caller's `match`
+// must name every arm of (AGENTS.md's "Return a Variant, Not an Int
+// Sentinel" principle). Err covers both PHY_LINK_RETRIES attempts
+// exhausted, and auto-neg reporting done with no common mode found
+// (should not happen: both link partners always support at least
+// 10BASE-T half duplex).
+variant PhyLinkResult {
+    Link((bool, bool));
+    Err;
+}
+
 // Resets the PHY, advertises every 10/100 mode, restarts auto-negotiation,
-// and waits for both auto-neg-complete and link-up. Returns the
-// negotiated (speed_is_100, full_duplex) pair packed as speed*2+duplex
-// (bit1=speed100, bit0=fullduplex), or -1 if no link could be established
-// after PHY_LINK_RETRIES full reset+auto-neg attempts, or if auto-neg
-// reported done with no common mode found (should not happen: both link
-// partners always support at least 10BASE-T half duplex). A cable that is
-// never plugged in, or a link partner that never powers on, are normal,
-// permanently possible operating conditions -- reported as -1 like any
+// and waits for both auto-neg-complete and link-up. A cable that is never
+// plugged in, or a link partner that never powers on, are normal,
+// permanently possible operating conditions -- reported as Err like any
 // other bring-up failure, not spun on forever.
-fn phy_init() -> i32 {
+fn phy_init() -> PhyLinkResult {
     for attempt: u32 in 0..<PHY_LINK_RETRIES {
         mdio_write(PHY_BCR, PHY_BCR_RESET);
         let mut reset_done: bool = false;
@@ -333,18 +341,18 @@ fn phy_init() -> i32 {
 
         let common: u32 = mdio_read(PHY_ANAR) & mdio_read(PHY_ANLPAR) & 0x01E0;
         if ((common & PHY_AN_100_FULL) != 0) {
-            return 3; // 100 Mbps, full duplex
+            return PhyLinkResult::Link((true, true));   // 100 Mbps, full duplex
         } else if ((common & PHY_AN_100_HALF) != 0) {
-            return 2; // 100 Mbps, half duplex
+            return PhyLinkResult::Link((true, false));  // 100 Mbps, half duplex
         } else if ((common & PHY_AN_10_FULL) != 0) {
-            return 1; // 10 Mbps, full duplex
+            return PhyLinkResult::Link((false, true));  // 10 Mbps, full duplex
         } else if ((common & PHY_AN_10_HALF) != 0) {
-            return 0; // 10 Mbps, half duplex
+            return PhyLinkResult::Link((false, false)); // 10 Mbps, half duplex
         } else {
-            return -1;
+            return PhyLinkResult::Err;
         }
     }
-    return -1; // no link established after PHY_LINK_RETRIES reset+auto-neg attempts
+    return PhyLinkResult::Err; // no link established after PHY_LINK_RETRIES reset+auto-neg attempts
 }
 
 fn eth_rx_ring_init() {
@@ -377,7 +385,7 @@ fn eth_tx_ring_init() {
 }
 
 // Brings up GPIO/clocks, resets the MAC/DMA, negotiates the PHY link, and
-// starts DMA RX/TX. Returns 1 on success, 0 if no PHY link could be
+// starts DMA RX/TX. Reports NetInitResult::Failed if no PHY link could be
 // established (see phy_init()'s comment -- practically should not happen on
 // a live point-to-point link).
 //
@@ -395,13 +403,17 @@ fn net_init() -> NetInitResult {
     eth_gpio_init();
     eth_mac_dma_reset();
 
-    let link: i32 = phy_init();
-    if (link < 0) {
-        return NetInitResult::Failed;
+    let mut speed100: i32 = 0;
+    let mut fullduplex: i32 = 0;
+    match phy_init() {
+        PhyLinkResult::Err => { return NetInitResult::Failed; }
+        PhyLinkResult::Link(pair) => {
+            let (is100, isfull) = pair;
+            if (is100) { speed100 = 1; }
+            if (isfull) { fullduplex = 1; }
+        }
     }
     net_rx_initialized = 1;
-    let speed100: i32 = link / 2;
-    let fullduplex: i32 = link % 2;
 
     // APCS (Automatic Pad/CRC Stripping): the MAC pads/appends CRC on
     // transmit and strips pad+CRC on receive, so RDES0's FL field already
