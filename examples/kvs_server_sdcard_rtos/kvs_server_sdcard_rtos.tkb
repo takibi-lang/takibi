@@ -430,12 +430,19 @@ fn kvs_unpack_slot(slot: {0..<16 as usize}) {
         kvs_record_buf + KVS_RECORD_VAL_OFF, VAL_MAX);
 }
 
-fn kvs_sd_create_record_file() -> i32 {
+// Plain success/failure of a write to the SD-backed KVS record file --
+// see AGENTS.md's "Return a Variant, Not an Int Sentinel" principle.
+variant KvsSdWriteResult {
+    Ok;
+    Err;
+}
+
+fn kvs_sd_create_record_file() -> KvsSdWriteResult {
     let name: *u8 = "KVSREC  DAT"; // 8.3: "KVSREC" + spaces + "DAT"
     match fat_open(name, FA_WRITE | FA_CREATE_ALWAYS) {
         FatOpenResult::Error(err) => {
             uart_puts("kvs_server_sdcard_rtos: SD record create FAILED\r\n");
-            return -1;
+            return KvsSdWriteResult::Err;
         }
         FatOpenResult::Opened(mut fp) => {
             let mut bw: u32 = 0;
@@ -444,19 +451,19 @@ fn kvs_sd_create_record_file() -> i32 {
                 if (fat_io_ok(fat_write(fp, kvs_record_buf, KVS_RECORD_SIZE as u32, &bw)) == false ||
                         bw != KVS_RECORD_SIZE as u32) {
                     fat_close(fp);
-                    return -1;
+                    return KvsSdWriteResult::Err;
                 }
             }
             if (fat_io_ok(fat_close(fp)) == false) {
-                return -1;
+                return KvsSdWriteResult::Err;
             }
             kvs_sd_file_ready = true;
-            return 0;
+            return KvsSdWriteResult::Ok;
         }
     }
 }
 
-fn kvs_sd_save_slot_snapshot(slot_i32: i32) -> i32 {
+fn kvs_sd_save_slot_snapshot(slot_i32: i32) -> KvsSdWriteResult {
     let name: *u8 = "KVSREC  DAT"; // 8.3: "KVSREC" + spaces + "DAT"
     if (slot_i32 >= 0 && slot_i32 < 16) {
         if (kvs_sd_file_ready == false || fat_file_size(name) != (16 * KVS_RECORD_SIZE) as u32) {
@@ -468,23 +475,34 @@ fn kvs_sd_save_slot_snapshot(slot_i32: i32) -> i32 {
         if (fat_io_ok(fat_write_at(name, off, kvs_record_buf, KVS_RECORD_SIZE as u32, &bw)) == false ||
                 bw != KVS_RECORD_SIZE as u32) {
             kvs_sd_file_ready = false;
-            return -1;
+            return KvsSdWriteResult::Err;
         }
-        return 0;
+        return KvsSdWriteResult::Ok;
     }
-    return -1;
+    return KvsSdWriteResult::Err;
 }
 
-fn kvs_sd_load_records() -> i32 {
+// Outcome of trying to load the new-format (slot-per-record) SD record
+// file -- see AGENTS.md's "Return a Variant, Not an Int Sentinel"
+// principle. NeedsMigration means a legacy whole-table file's size was
+// found instead; kvs_sd_load_legacy handles that case.
+variant KvsSdLoadResult {
+    Loaded;
+    Empty;
+    NeedsMigration;
+    IoError;
+}
+
+fn kvs_sd_load_records() -> KvsSdLoadResult {
     let name: *u8 = "KVSREC  DAT"; // 8.3: "KVSREC" + spaces + "DAT"
     let fsize: u32 = fat_file_size(name);
     if (fsize != (16 * KVS_RECORD_SIZE) as u32 &&
         fsize != (16 * KVS_RECORD_SIZE_LEGACY) as u32) {
-        return 1;
+        return KvsSdLoadResult::Empty;
     }
     match fat_open(name, FA_READ) {
         FatOpenResult::Error(err) => {
-            return 1;
+            return KvsSdLoadResult::Empty;
         }
         FatOpenResult::Opened(mut fp) => {
             let mut br: u32 = 0;
@@ -512,18 +530,18 @@ fn kvs_sd_load_records() -> i32 {
             }
             let close_status: FatIoResult = fat_close(fp);
             if ((read_ok == false) || (fat_io_ok(close_status) == false)) {
-                return -1;
+                return KvsSdLoadResult::IoError;
             }
             if (total != fsize) {
                 uart_puts("kvs_server_sdcard_rtos: SD record short-read, starting empty\r\n");
                 kvs_reset_table();
-                return 1;
+                return KvsSdLoadResult::Empty;
             }
             kvs_sd_file_ready = true;
             if (fsize == (16 * KVS_RECORD_SIZE_LEGACY) as u32) {
-                return 2;
+                return KvsSdLoadResult::NeedsMigration;
             }
-            return 0;
+            return KvsSdLoadResult::Loaded;
         }
     }
 }
@@ -531,11 +549,21 @@ fn kvs_sd_load_records() -> i32 {
 // Legacy loader for the original whole-table file used before slot-level
 // persistence. A successful legacy load is immediately migrated to the new
 // record file by sd_worker.
-fn kvs_sd_load_legacy() -> i32 {
+// Also this function's own outcome and the final SD-init status reported
+// back to app_main over the RTOS channel (see kvs_sd_status_to_i32/
+// kvs_sd_status_from_i32 below) -- both are the same three-way shape, so
+// they share this one variant rather than duplicating it.
+variant KvsSdStatus {
+    Loaded;
+    Empty;
+    IoError;
+}
+
+fn kvs_sd_load_legacy() -> KvsSdStatus {
     let name: *u8 = "KVSTABLEDAT"; // 8.3: "KVSTABLE" + "DAT", no dot
     match fat_open(name, FA_READ) {
         FatOpenResult::Error(err) => {
-            return 1;
+            return KvsSdStatus::Empty;
         }
         FatOpenResult::Opened(mut fp) => {
             let mut br: u32 = 0;
@@ -553,16 +581,38 @@ fn kvs_sd_load_legacy() -> i32 {
             total = total + br;
             let close_status: FatIoResult = fat_close(fp);
             if ((read_ok == false) || (fat_io_ok(close_status) == false)) {
-                return -1;
+                return KvsSdStatus::IoError;
             }
             if (total != 2608) {
                 uart_puts("kvs_server_sdcard_rtos: SD table short-read, starting empty\r\n");
                 kvs_reset_table();
-                return 1;
+                return KvsSdStatus::Empty;
             }
-            return 0;
+            return KvsSdStatus::Loaded;
         }
     }
+}
+
+fn kvs_sd_status_to_i32(s: KvsSdStatus) -> i32 {
+    match s {
+        KvsSdStatus::Loaded => { return 0; }
+        KvsSdStatus::Empty => { return 1; }
+        KvsSdStatus::IoError => { return -1; }
+    }
+}
+
+// The RTOS channel this crosses (rtos.tkb's Chan) only carries a plain
+// i32 -- this and kvs_sd_status_to_i32 translate at that fixed boundary,
+// the same role fat12_sdmmc.tkb's mem_block_read/write play for
+// FatIoResult/DiskIoResult.
+fn kvs_sd_status_from_i32(v: i32) -> KvsSdStatus {
+    if (v == 0) {
+        return KvsSdStatus::Loaded;
+    }
+    if (v == 1) {
+        return KvsSdStatus::Empty;
+    }
+    return KvsSdStatus::IoError;
 }
 
 // -- RTOS task split (NEW) -------------------------------------------------
@@ -671,40 +721,53 @@ fn sd_worker() {
     let request: KvsSdRequest = kvs_sd_request_recv(&kvs_sd_request_ch);
     match request {
         KvsSdRequest::Init => {
-            let mut status: i32 = 0;
+            let mut status: KvsSdStatus = KvsSdStatus::Loaded;
             if (disk_io_ok(disk_initialize()) == false) {
                 uart_puts("kvs_server_sdcard_rtos: disk_initialize FAIL\r\n");
-                status = -1;
+                status = KvsSdStatus::IoError;
             } else {
                 match fat_format_status() {
                     FatFormatStatus::Formatted => {
                         if (fat_io_ok(fat_mount()) == false) {
-                            status = -1;
+                            status = KvsSdStatus::IoError;
                         } else {
-                            status = kvs_sd_load_records();
-                        }
-                        if (status == 2) {
-                            status = kvs_sd_create_record_file();
-                        } else if (status == 1) {
-                            status = kvs_sd_load_legacy();
-                            if (status == 0) {
-                                status = kvs_sd_create_record_file();
+                            match kvs_sd_load_records() {
+                                KvsSdLoadResult::Loaded => { status = KvsSdStatus::Loaded; }
+                                KvsSdLoadResult::IoError => { status = KvsSdStatus::IoError; }
+                                KvsSdLoadResult::NeedsMigration => {
+                                    match kvs_sd_create_record_file() {
+                                        KvsSdWriteResult::Ok => { status = KvsSdStatus::Loaded; }
+                                        KvsSdWriteResult::Err => { status = KvsSdStatus::IoError; }
+                                    }
+                                }
+                                KvsSdLoadResult::Empty => {
+                                    match kvs_sd_load_legacy() {
+                                        KvsSdStatus::Loaded => {
+                                            match kvs_sd_create_record_file() {
+                                                KvsSdWriteResult::Ok => { status = KvsSdStatus::Loaded; }
+                                                KvsSdWriteResult::Err => { status = KvsSdStatus::IoError; }
+                                            }
+                                        }
+                                        KvsSdStatus::Empty => { status = KvsSdStatus::Empty; }
+                                        KvsSdStatus::IoError => { status = KvsSdStatus::IoError; }
+                                    }
+                                }
                             }
                         }
                     }
                     FatFormatStatus::NotFormatted => {
                         if (fat_io_ok(fat_format())) {
-                            status = 1;
+                            status = KvsSdStatus::Empty;
                         } else {
-                            status = -1;
+                            status = KvsSdStatus::IoError;
                         }
                     }
                     FatFormatStatus::IoError(err) => {
-                        status = -1;
+                        status = KvsSdStatus::IoError;
                     }
                 }
             }
-            chan_send(&kvs_sd_response_ch, status);
+            chan_send(&kvs_sd_response_ch, kvs_sd_status_to_i32(status));
         }
     }
 
@@ -725,22 +788,30 @@ fn sd_worker() {
         kvs_slot_dirty[slot] = 0;
         mutex_unlock(g, &kvs_persist_mutex);
 
-        let status: i32 = kvs_sd_save_slot_snapshot(slot_i32);
+        let status: KvsSdWriteResult = kvs_sd_save_slot_snapshot(slot_i32);
 
         g = mutex_lock(&kvs_persist_mutex);
-        if (status == 0 && kvs_slot_generation[slot] == generation) {
-            kvs_slot_persisted_generation[slot] = generation;
-        } else {
-            kvs_slot_dirty[slot] = 1;
-            cond_signal(&kvs_persist_changed);
+        match status {
+            KvsSdWriteResult::Ok => {
+                if (kvs_slot_generation[slot] == generation) {
+                    kvs_slot_persisted_generation[slot] = generation;
+                } else {
+                    kvs_slot_dirty[slot] = 1;
+                    cond_signal(&kvs_persist_changed);
+                }
+            }
+            KvsSdWriteResult::Err => {
+                kvs_slot_dirty[slot] = 1;
+                cond_signal(&kvs_persist_changed);
+            }
         }
         mutex_unlock(g, &kvs_persist_mutex);
     }
 }
 
-fn kvs_sd_init_rpc() -> i32 {
+fn kvs_sd_init_rpc() -> KvsSdStatus {
     kvs_sd_request_send(&kvs_sd_request_ch, KvsSdRequest::Init);
-    return chan_recv(&kvs_sd_response_ch);
+    return kvs_sd_status_from_i32(chan_recv(&kvs_sd_response_ch));
 }
 
 // -- Core callbacks -----------------------------------------------------
@@ -871,13 +942,16 @@ fn app_main() {
             rtos_task_add(1, setup_task_stack(sd_stack + 8192, sd_worker));
             rtos_start();
 
-            let sd_init_result: i32 = kvs_sd_init_rpc();
-            if (sd_init_result == 0) {
-                uart_puts("kvs_server_sdcard_rtos: loaded table from SD\r\n");
-            } else if (sd_init_result == 1) {
-                uart_puts("kvs_server_sdcard_rtos: starting empty\r\n");
-            } else {
-                uart_puts("kvs_server_sdcard_rtos: SD init FAILED, serving RAM-only\r\n");
+            match kvs_sd_init_rpc() {
+                KvsSdStatus::Loaded => {
+                    uart_puts("kvs_server_sdcard_rtos: loaded table from SD\r\n");
+                }
+                KvsSdStatus::Empty => {
+                    uart_puts("kvs_server_sdcard_rtos: starting empty\r\n");
+                }
+                KvsSdStatus::IoError => {
+                    uart_puts("kvs_server_sdcard_rtos: SD init FAILED, serving RAM-only\r\n");
+                }
             }
 
             uart_puts("kvs_server_sdcard_rtos: ready\r\n");
