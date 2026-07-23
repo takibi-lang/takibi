@@ -50,6 +50,12 @@ const SYSCALL_ERROR: usize = 0xFFFFFFFFFFFFFFFF;
 const MAX_PHDRS: usize = 4;
 const PT_LOAD: u32 = 1;
 
+// argv/envp/auxv initial stack layout (GitHub issue #156): reserved at
+// the top of the stack page, see its construction in app_main for the
+// exact byte-by-byte shape.
+const ARGV_LAYOUT_SIZE: usize = 128;
+const AT_PAGESZ: usize = 6;
+
 // cpio (newc) fixed field byte offsets within the 110-byte header --
 // verified against a real `cpio -o -H newc` archive's own raw bytes
 // (od -A x -t x1z) rather than assumed from documentation alone: c_magic
@@ -479,9 +485,54 @@ fn app_main() {
                         map_second_page_el0_exec(space2, stack_page, stack_va);
                     let stack_mapping = tlb_invalidate_second(space3, stack_pending);
 
+                    // Real argv/envp/auxv initial stack layout (GitHub
+                    // issue #156): every libc-linked binary's own startup
+                    // code reads this off SP unconditionally, so this is
+                    // a hard prerequisite for anything beyond a
+                    // hand-written, no-memory-access test payload.
+                    // Reserved in the TOP ARGV_LAYOUT_SIZE bytes of the
+                    // stack page; everything below el0_entry_sp remains
+                    // the process's own usable stack, growing down from
+                    // there exactly like a real kernel's layout.
+                    //
+                    // Layout (matches the Linux ELF ABI exactly, just
+                    // with the smallest legal argv/envp/auxv content):
+                    //   [argc=1][argv[0]=ptr]["prog\0" pointed to by
+                    //   argv[0]][argv NULL][envp NULL (0 entries)]
+                    //   [auxv: (AT_PAGESZ, PAGE_SIZE)][auxv: (AT_NULL, 0)]
+                    let layout_base: usize = stack_va + (PAGE_SIZE - ARGV_LAYOUT_SIZE);
+                    let string_addr: usize = layout_base + 64;
+
+                    let argc_ptr: *u64 = layout_base as *u64;
+                    *argc_ptr = 1;
+                    let argv0_ptr: *u64 = (layout_base + 8) as *u64;
+                    *argv0_ptr = string_addr as u64;
+                    let argv_null_ptr: *u64 = (layout_base + 16) as *u64;
+                    *argv_null_ptr = 0;
+                    let envp_null_ptr: *u64 = (layout_base + 24) as *u64;
+                    *envp_null_ptr = 0;
+                    let auxv_type_ptr: *u64 = (layout_base + 32) as *u64;
+                    *auxv_type_ptr = AT_PAGESZ as u64;
+                    let auxv_val_ptr: *u64 = (layout_base + 40) as *u64;
+                    *auxv_val_ptr = PAGE_SIZE as u64;
+                    let auxv_null_type_ptr: *u64 = (layout_base + 48) as *u64;
+                    *auxv_null_type_ptr = 0;
+                    let auxv_null_val_ptr: *u64 = (layout_base + 56) as *u64;
+                    *auxv_null_val_ptr = 0;
+
+                    // "prog\0" -- argv[0]'s own string data, placed above
+                    // the array (higher address), matching real kernel
+                    // layout convention.
+                    let string_ptr: *u8 = string_addr as *u8;
+                    string_ptr[0 as isize] = 0x70; // 'p'
+                    string_ptr[1 as isize] = 0x72; // 'r'
+                    string_ptr[2 as isize] = 0x6f; // 'o'
+                    string_ptr[3 as isize] = 0x67; // 'g'
+                    string_ptr[4 as isize] = 0x00; // NUL
+
                     el0_entry_va = entry;
                     el0_page_va = page_va;
-                    el0_stack_top_va = stack_va + PAGE_SIZE;
+                    el0_stack_top_va = layout_base;
                     // This bundle IS about to become a running process --
                     // stash it in the stable slot instead of abandoning it,
                     // so exit()'s hvc call can reclaim it for real later
