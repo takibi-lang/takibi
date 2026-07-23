@@ -1,0 +1,3 @@
+el0_elf_load
+hi from ELF
+syscall exit
