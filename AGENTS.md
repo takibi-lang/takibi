@@ -205,23 +205,39 @@ sentinel convention.
   A result whose success case carries data (e.g. `sd_cmd3`'s RCA) gets its own
   value-or-error variant (`SdCmd3Result`) rather than overloading a negative int as both "the
   value" and "an error code."
-- **A "found or not found" search/lookup result is a different shape, not this rule.**
-  Functions like `fat_find_entry`/`kvs_find` (return the found index, or a sentinel meaning
-  "absent") answer "does X exist and where," not "did the operation succeed" -- they were
-  deliberately left alone during the issue #150 conversion pass. Converting these to an
-  `Option`-shaped variant is a legitimate future step, but is a separate judgment call from
-  this rule, not automatically required by it.
+- **A "found or not found" search/lookup result is a different shape from a status code, but
+  is not automatically exempt from this rule either.** `fat_find_entry`/`kvs_find` (return the
+  found index, or a sentinel meaning "absent") answer "does X exist and where," not "did the
+  operation succeed" -- they were deliberately left alone during the first pass of issue #150's
+  conversion, on the theory that this was a separate judgment call. A later pass in the same
+  issue revisited that and converted them anyway (`FatFindResult`/`KvsFindResult`, each
+  `{ Found(<index type>); NotFound; }`), since the actual goal is driving this pattern to zero,
+  not stopping at status-shaped returns -- a search result being a different shape is a reason
+  to design its variant differently (an `Option`-like two-case shape instead of `Ok`/`Err`), not
+  a reason to leave it as a bare sentinel indefinitely.
 - **This does not by itself stop a caller from ignoring the result.** An ordinary
   (`unrestricted`-kind) variant can still be bound and never matched, or a call's result never
   bound at all -- only `linear` forces consumption on every path, and a `linear` "must-check"
   status with no backing resource to justify the linearity is open design work, not yet settled
   (see GitHub issue #150). This rule upgrades "handled the wrong arm" from silent to a compile
   error; it does not upgrade "ignored the result entirely" from silent to a compile error.
-- **Retrofitting an existing `i32`-returning function is a case-by-case call, not a mandated
-  sweep.** Converting a function already in the codebase touches every call site, which can
-  span several files -- weigh the blast radius against the benefit for that specific function
-  (as issue #150's own incremental, one-cluster-at-a-time approach did) rather than converting
-  everything in one pass.
+- **Retrofitting an existing `i32`-returning function is a case-by-case call, not an
+  automatic requirement -- but default to doing it when a concrete pass is already underway.**
+  Converting a function already in the codebase touches every call site, which can span several
+  files -- weigh the blast radius against the benefit for that specific function. In practice,
+  once this rule motivated an actual cleanup pass (issue #150), the right default turned out to
+  be converting every genuinely convertible case found along the way (including the "different
+  shape" search results above), not stopping at the first cluster and leaving the rest as an
+  unfinished carve-out -- reserve "leave it for now" for cases with a real reason (a shared
+  multi-file interface contract needing a coordinated change, code sitting next to this
+  project's one hand-justified `unsafe` site, a `!{interrupt}`-rooted handler, or a genuine HAL/
+  RTOS-channel boundary that would need a redesign of the boundary itself, not just the function).
+- **A raw wire/boundary int that still has to be decoded** (e.g. a value crossing an RTOS
+  channel hardcoded to `i32` payloads, like `kvs_server_sdcard_rtos.tkb`'s `KvsSdStatus`) can
+  use `match` directly against integer literals (see SPEC.md's "Match on Primitive Types",
+  GitHub issue #151) instead of an `if`/`else if` chain of equality comparisons -- prefer this
+  over hand-writing the comparisons, and reach for it before inventing a throwaway parallel
+  `enum` purely to get `match`'s exhaustiveness/duplicate-arm checking.
 
 ## Language Specification
 

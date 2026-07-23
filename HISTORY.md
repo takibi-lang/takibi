@@ -10229,3 +10229,186 @@ and reprints a failed lane's raw log as one uninterrupted block so multiline
 expected/actual diagnostics remain readable. It waits for all three lanes and
 always prints a final per-lane PASS/FAIL summary, rather than losing the other
 boards' results when the first lane fails.
+
+---
+
+### 2026-07-23: GitHub Issue #150 ("int sentinel returns are a bug breeding ground") -- FatIoResult/DiskIoResult, a New AGENTS.md Principle, and Pushing Every Convertible Case to Zero
+
+Prompted by a simple observation while auditing `examples/common/fat12.tkb`:
+a plain `i32` 0/-1 return puts all the burden of correct interpretation on
+the call site's own comparisons, with nothing stopping a wrong condition, a
+wrong sentinel, or a dropped result entirely. `fat12.tkb`'s status-returning
+functions (`fat_flush`, `fat_mount`, `fat_format`, `fat_read`/`fat_write`/
+`fat_read_at`/`fat_write_at`, `fat_close`, `create_demo_file`) became
+`variant FatIoResult { Ok; Err(i32); }` plus a `fat_io_ok(r) -> bool`
+convenience for callers folding several results into one boolean condition;
+`fat_format_status`'s three genuinely distinct outcomes became its own
+`FatFormatStatus { IoError(i32); NotFormatted; Formatted; }`.
+`mem_block_read`/`mem_block_write` were deliberately left `i32` -- the
+swappable HAL boundary fat12.tkb's own header comment calls out -- and so was
+`fat_find_entry` at the time, on the theory that a "found index or absent"
+search result is a different shape from a status code.
+
+The same conversion was mirrored one layer down at the actual HAL boundary:
+`examples/common_rpi3/usb_msc.tkb`'s and `examples/common_stm32/sdmmc.tkb`'s
+`disk_initialize`/`disk_status`/`disk_read`/`disk_write` each got their own
+`DiskIoResult`, with `fat12_usbmsc.tkb`/`fat12_sdmmc.tkb`'s adapters
+converting back to `i32` to keep fat12.tkb's own boundary unchanged.
+`sdmmc.tkb`'s internal `sd_cmd0`..`sd_cmd16`/`sd_wait_*` command helpers
+followed in a later pass; `sd_cmd3` (SEND_RELATIVE_ADDR) is the one command
+whose success case carries data (the assigned RCA) rather than being a bare
+status, so it got its own `SdCmd3Result { Rca(u32); Err(i32); }` instead of
+overloading a negative int as both "the RCA" and "an error code."
+
+**A real, unrelated bug surfaced while verifying this**: `make allcheck`'s
+STM32 lane intermittently hung after running many back-to-back RAM-loaded
+hardware tests -- the next Ethernet-dependent test never got a response, and
+the host's ARP entry for the board's static IP sat in `FAILED` state.
+Bisected to `phy_init()` in `examples/common_stm32/eth.tkb`: its PHY-reset-
+clear wait and its auto-neg-done wait were both unbounded `while` loops with
+no timeout, so once the PHY landed in a state neither loop's condition
+observed, the whole program -- not just networking -- never proceeded again.
+Confirmed unrelated to the FatIoResult/DiskIoResult work in flight by noting
+`fatfs_sdcard`/`rtos_fatfs_sdcard` (which exercise the very same `sdmmc.tkb`
+conversions) passed on the same hardware run moments before the hang. Every
+real Ethernet stack (ST's own HAL+lwIP reference port, FreeRTOS+TCP, Zephyr)
+bounds PHY bring-up and treats "no link yet" as a normal, indefinitely-
+retriable condition rather than a one-shot blocking gate -- partly because an
+unbounded wait anywhere in the boot path is incompatible with a running
+hardware watchdog. `phy_init()`'s two waits are now bounded by fixed
+iteration counts (no millisecond timer is available to every `net_init()`
+caller, so this reuses the same bounded-wait idiom `sdmmc.tkb`'s
+`sd_acmd41`/`sd_wait_not_busy` already established), retrying the whole
+reset+auto-neg sequence up to `PHY_LINK_RETRIES` times and re-issuing the PHY
+soft reset on each attempt. Verified by reproducing the exact previously-
+failing sequence (57 UART tests immediately followed by the profiler check)
+twice in a row after the fix, versus two consecutive failures before it.
+
+**A second, adjacent bug**: fixing the hang exposed that the KVS/SD/RTOS
+`--profile-functions` STM32 build had almost no RAM margin left, because
+`prof_stack_capacity` (256 per profiled task, `lib/llvm_gen.ml`) was ~25x
+larger than the deepest call nesting this project has ever actually
+profiled (10 frames, per `prof_path_max_depth`'s own long-standing comment).
+Shrunk to 24. Shrinking a fixed capacity is only trustworthy if exceeding it
+is detectable: `__takibi_prof_overflow` already existed in the firmware for
+exactly this (increments instead of corrupting the shadow stack on overflow)
+but no host-side script had ever read it -- wired into both
+`profile_stm32_*.sh` scripts the same way `__takibi_prof_path_overflow`
+already was, clearing it before the measured run and hard-failing with a
+clear message if it comes back nonzero.
+
+The int-sentinel cleanup then became its own durable rule, not a one-off:
+AGENTS.md gained a "Return a Variant, Not an Int Sentinel" design principle
+(new fallible functions return a closed variant; a "found or absent" search
+result is a different, separately-judged shape; a plain variant return does
+not by itself stop a caller from discarding the result -- only `linear`
+would, tracked as its own open design question). A subsequent, more
+aggressive pass then deliberately revisited the "search result, leave it
+alone" carve-out and converted those too, since the actual goal was driving
+`git grep "return -*1" examples` to its irreducible minimum, not stopping at
+status-shaped returns: `kvs_find`/`kvs_parse_path`/`kvs_parse_udec`/
+`kvs_content_length`/`kvs_find_hdr_end`/`kvs_find_dirty_slot` (independently
+duplicated across `kvs_server.tkb` and `kvs_server_sdcard_rtos.tkb`, no
+`use` relationship between them), `fat_find_entry` (whose `Found({0..<16 as
+usize})` payload now carries fat12.tkb's own for-loop proof across the call
+boundary for free, letting every one of its six call sites drop both a
+manual two-sided narrowing guard and the comment explaining why it was
+needed), `usb_host_find`/`usb_host_find_not`, `http_file_size` (a shared
+interface contract implemented independently by `http_server_sdcard.tkb`
+and `http_server_sdcard_rtos.tkb`), `phy_init` itself (a packed
+speed*2+duplex int became `PhyLinkResult { Link((bool, bool)); Err; }` --
+discovering along the way that a tuple-payload variant case needs the
+explicit `(T, T)` parenthesized tuple-type spelling, since `Case(bool,
+bool)` -- two separate comma-separated types -- is a syntax error), and
+`fatfs.tkb`'s semihosting helpers. `bytes_eq`/`virtio_net_find`/
+`build_data_echo` (tcp_echo.tkb) turned out to be plain booleans (exactly 0/1,
+no error code at all) once looked at directly, so those got `-> bool`
+instead of a variant.
+
+The largest remaining cluster was `http_start_response`/
+`http_continue_response`: a shared interface contract (documented at the top
+of `http_server_common.tkb`) independently implemented by `http_server.tkb`,
+`kvs_server.tkb`, `kvs_server_sdcard_rtos.tkb`, and
+`http_sdcard_server.tkb` (used by both `http_server_sdcard(_rtos).tkb`),
+each returning a byte-count-or--1-dropped `i32` that `http_conn_state.tkb`
+(the shared TCP state machine) unwrapped into its own already-existing
+`TcpSendOutcome` variant. New `TcpPayloadResult { Sent(i32); Dropped; }`
+(defined once in `http_server_common.tkb`) replaced the `i32` at every layer
+-- `http_conn_state.tkb`'s three call sites, `build_tcp_payload` (the leaf
+every implementation ultimately calls), and each implementer's own
+interface functions and private builders. Most of the chain was pure
+pass-through returns, so only signatures needed to change.
+
+What's left after all this (`git grep -c "return -*1;"` across `examples/`,
+down from 43 real occurrences to 9) is judged to be the irreducible minimum:
+`kvs_sd_status_to_i32` and `mem_block_read`/`mem_block_write` (x2, QEMU and
+RPi3) are deliberate boundary-crossing translation functions (a fixed-`i32`
+RTOS channel, and fat12.tkb's own swappable HAL contract) that would need a
+separate redesign of the boundary itself to eliminate; `start.tkb`'s
+`return 1;` and `netutil.tkb`'s `write_udec` are not error codes at all (a
+tutorial demo's return value, and a legitimate digit count); and
+`affine_escape_via_index.tkb` is a deliberately small, possibly-throwaway
+probe file. `examples/smp_task_migrate/smp_task_migrate.tkb`'s
+`!{interrupt}`-rooted `rpi3_irq_dispatch` and `examples/tcp_echo/
+tcp_echo.tkb`'s `ConnState` if/else-if dispatch (this repository's one
+hand-justified `unsafe` site lives in the same deeply-nested block, and its
+leading branch tests a TCP flag rather than the state itself) were both
+identified as further `if`-to-`match` candidates but deliberately deferred:
+higher review bar than a mechanical swap, left for dedicated attention
+rather than folded into this pass.
+
+Verified throughout with `make build`/`test`/`qemutest` (164/164 by the end),
+`make allcheck-build`, and repeated real-hardware runs on both boards --
+`make hwcheck-stm32`, `hwcheck-stm32-net`, `hwcheck-rpi3`, and
+`hwcheck-rpi3-net` all green, including a full `make allcheck` pass with
+both boards free.
+
+### 2026-07-23: GitHub Issue #151 -- `match` on Primitive Integer Types
+
+Filed mid-way through the issue #150 cleanup above: decoding a raw
+wire/boundary int that still has to cross a fixed-`i32` boundary (e.g. a
+`KvsSdStatus` crossing `kvs_server_sdcard_rtos.tkb`'s RTOS channel) needed
+either an `if`/`else if` chain or a throwaway parallel `enum` invented
+purely to get `match`'s exhaustiveness checking, since `match` only worked
+on `enum`/`variant` discriminants. Implemented and closed the same day:
+
+- `lib/ast.ml`: new `ArmIntLit(int, stmt list)` match_arm constructor.
+- `lib/parser.mly`: two new `match_arm` productions (a literal, and a
+  `MINUS`-prefixed negative literal), reusing `narrow_int64` for the same
+  overflow-is-a-hard-error treatment every other grammar position needing a
+  native int already gets.
+- `lib/type_inf.ml`: a match on a primitive-int (or `{lo..<hi as base}`
+  refined-int) discriminant always requires a `_` wildcard arm -- unlike an
+  exhaustive enum/variant match, an integer's value space is never
+  exhaustively listable, so there is no "every case covered" path that skips
+  the wildcard. Rejects duplicate literals and a literal that doesn't fit
+  the discriminant's base type's own width (checked against the full base
+  width, not a `{lo..<hi}` refinement's narrower proven range -- the
+  mandatory `_` arm is what covers values outside that range, not a
+  per-literal restriction). Mixing literal and enum/variant arm syntax in
+  one match is rejected with a dedicated error message. Every other generic
+  match_arm tree-walk (const-shadowing, undetermined-let, effect-summary,
+  ownership/move tracking, "always terminates") threads the new arm shape
+  through with no binding to track, the same as `ArmWild`.
+- `lib/llvm_gen.ml`: codegen reuses the exact same `build_switch`/`add_case`
+  machinery the existing enum/variant match already used -- a literal arm's
+  value becomes a case on the same LLVM `switch` instruction, no new codegen
+  path needed.
+- `SPEC.md` gained a "Match on Primitive Types" section; `test/
+  test_takibi.ml` gained 12 parser/type-check/codegen unit tests;
+  `examples/match_int_lit` (QEMU/STM32/RPi3-verified positive demo, wired
+  into `type_system_suite`) and `examples/match_int_nonexhaustive`
+  (compile-error fixture for the mandatory-wildcard rule) were added.
+
+No pre-existing bug in `examples/` was uncovered by this feature itself --
+every subsequent `if`-to-`match` conversion using it (see the issue #150
+entry above) was a careful, behavior-preserving rewrite of already-correct
+code, verified via the full test/hardware suite each time, not a case where
+the compiler's new duplicate/range/exhaustiveness checks caught a mistake in
+existing logic.
+
+String/byte-slice match patterns remain an explicitly open question (this
+project has no first-class string type, and what a string *pattern* should
+even mean -- exact equality? prefix? a runtime length check?-- is
+undecided); deferred to a future issue if/when a concrete case needs it,
+rather than guessed at now.

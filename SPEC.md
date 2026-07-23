@@ -5,7 +5,7 @@ syntax, and semantics as they exist today. It is a reference, not a
 tutorial or a history.
 
 For *why* the language looks this way -- design rationale, bugs found and
-fixed, the chronological engineering log -- see `CLAUDE.md`. That file is
+fixed, the chronological engineering log -- see `HISTORY.md`. That file is
 allowed to keep growing; this one is not: whenever a language feature
 changes, update the relevant section here directly rather than appending a
 new one.
@@ -1889,7 +1889,7 @@ limitations (function overloading, the flat top-level namespace,
 `isize`, and scoped refinement-type inference are documented in their
 own dedicated sections above instead of repeated here). For
 hardware/driver-specific known limitations (interrupt builtins,
-platform lifecycle, DMA barriers, etc.), see `CLAUDE.md`'s own "Known
+platform lifecycle, DMA barriers, etc.), see `AGENTS.md`'s own "Known
 Limitations / Deferred Design Decisions" section. For the design
 investigations behind any of these, see `HISTORY.md`.
 
@@ -1922,3 +1922,10 @@ investigations behind any of these, see `HISTORY.md`.
   independent ranges) is not supported -- see HISTORY.md's P4c section.
   `unsafe` is the current escape hatch for the rare case this actually
   blocks a proof.
+- **`match` on a primitive integer type supports only single-literal
+  patterns** (see "Match on Primitive Types," GitHub issue #151) -- no
+  range patterns (`0..<10 => {...}`) and no string/byte-slice patterns
+  (this project has no first-class string type, and what a string
+  *pattern* should even mean -- exact equality? prefix? a runtime length
+  check? -- is unresolved). Deferred until a concrete case needs one
+  rather than designed speculatively now.

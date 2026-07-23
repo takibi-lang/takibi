@@ -623,7 +623,7 @@ and the fork it forces is the actual content of this stage. The design space, la
   }`, fields readable only while the handle is live. This genuinely IS a slice of Rust's
   ownership model (an owned record with move semantics), and the slope behind it is real: field
   access invites wanting borrows of fields, which invites re-borrowing, which invites lifetimes
-  -- the Rust-shaped mirror of the ATS2 at-view slope the project already rejected once (CLAUDE.md
+  -- the Rust-shaped mirror of the ATS2 at-view slope the project already rejected once (AGENTS.md
   records Rust's ownership model as evaluated and judged unsuited to bare-metal kernel code for
   this project's purpose). **Not adopted.** No driver in this codebase has ever needed owned
   field access -- every existing affine handle (FatFile, NetRxCpuOwned, KGuard) is accessed
