@@ -218,19 +218,35 @@ fn msc_read_csw() -> bool {
     // command unfinished and makes every following CBW fail out of phase.
     // Wait up to five seconds, but retry ONLY a NAK halt; STALL/transaction
     // errors remain real transport failures and return immediately.
+    //
+    // A busy drive can also go fully silent instead of NAKing -- the host
+    // channel never sees HCINT.HALTED at all, which dwc2_channel_transfer
+    // reports as the 0xDEAD0000 timeout sentinel rather than a NAK bit.
+    // Retry that too, but only a handful of times: each such call already
+    // burns two full register-poll timeouts inside dwc2_channel_transfer on
+    // its own, so folding it into the same 5000x1ms NAK budget would turn a
+    // genuinely dead transport into a multi-minute hang instead of a
+    // bounded failure.
     let mut received: bool = false;
+    let mut silent_timeouts: i32 = 0;
     for wait_ms: i32 in 0..<5000 {
         if (dwc2_bulk_in(msc_dev_addr, msc_csw_buf, MSC_CSW_LEN)) {
             received = true;
             break;
         }
-        if ((dwc2_debug_last_status() & 0x10) == 0) {
-            msc_csw_error = 1;
-            msc_csw_dwc_status = dwc2_debug_last_status();
-            msc_csw_xfer_bytes = dwc2_last_transfer_bytes();
-            return false;
+        let status: u32 = dwc2_debug_last_status();
+        if ((status & 0x10) != 0) {
+            delay_ms(1);
+            continue;
         }
-        delay_ms(1);
+        if (status == 0xDEAD0000 && silent_timeouts < 5) {
+            silent_timeouts = silent_timeouts + 1;
+            continue;
+        }
+        msc_csw_error = 1;
+        msc_csw_dwc_status = status;
+        msc_csw_xfer_bytes = dwc2_last_transfer_bytes();
+        return false;
     }
     if (received == false) {
         msc_csw_error = 1;
