@@ -108,12 +108,13 @@ fn net_init() -> NetInitResult {
     if (usb_host_init() == false) {
         return NetInitResult::Failed;
     }
-    let idx: i32 = usb_host_find(0x0424, 0xEC00);
-    if (idx < 0) {
-        return NetInitResult::Failed;
+    let mut idx: usize = 0;
+    match usb_host_find(0x0424, 0xEC00) {
+        UsbDevFindResult::NotFound => { return NetInitResult::Failed; }
+        UsbDevFindResult::Found(v) => { idx = v; }
     }
-    let found_addr: u32 = usb_host_dev_addr(idx as usize);
-    let found_mp: u32 = usb_host_dev_mp(idx as usize);
+    let found_addr: u32 = usb_host_dev_addr(idx);
+    let found_mp: u32 = usb_host_dev_mp(idx);
     if (found_addr == 0) {
         return NetInitResult::Failed;
     }

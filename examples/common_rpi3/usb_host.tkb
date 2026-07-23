@@ -124,30 +124,40 @@ fn usb_host_init() -> bool {
 
 // usb_host_find: table lookup by exact VID:PID (the Ethernet function's
 // fixed 0424:ec00). Returns the table index, or -1.
-fn usb_host_find(vid: u32, pid: u32) -> i32 {
+// Reports the found table index, or that none matched -- replacing the
+// old plain-i32 index-or--1 sentinel with a type a caller's `match` must
+// name every arm of (AGENTS.md's "Return a Variant, Not an Int Sentinel"
+// principle). Shared by usb_host_find and usb_host_find_not below, since
+// both answer the same "index or absent" question.
+variant UsbDevFindResult {
+    Found(usize);
+    NotFound;
+}
+
+fn usb_host_find(vid: u32, pid: u32) -> UsbDevFindResult {
     for i: usize in 0..<USB_DEV_TABLE_CAP {
         if (i < usb_dev_count as usize) {
             if (usb_dev_vid[i] == vid && usb_dev_pid[i] == pid) {
-                return i as i32;
+                return UsbDevFindResult::Found(i);
             }
         }
     }
-    return -1;
+    return UsbDevFindResult::NotFound;
 }
 
 // usb_host_find_not: first table entry whose VID:PID is NOT the given
 // pair -- how usb_msc.tkb identifies "the external drive, whatever its
 // vendor" next to the board's one fixed known-VID:PID device (see its
 // header comment for why no MSC class-code parsing is needed).
-fn usb_host_find_not(vid: u32, pid: u32) -> i32 {
+fn usb_host_find_not(vid: u32, pid: u32) -> UsbDevFindResult {
     for i: usize in 0..<USB_DEV_TABLE_CAP {
         if (i < usb_dev_count as usize) {
             if (usb_dev_vid[i] != vid || usb_dev_pid[i] != pid) {
-                return i as i32;
+                return UsbDevFindResult::Found(i);
             }
         }
     }
-    return -1;
+    return UsbDevFindResult::NotFound;
 }
 
 fn usb_host_dev_addr(idx: usize) -> u32 {

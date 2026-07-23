@@ -140,7 +140,7 @@ fn kvs_find(key: borrow *u8, klen: isize) -> KvsFindResult {
         }
         if (kv_state[slot] == STATE_USED &&
             kv_key_len[slot] as isize == klen &&
-            bytes_eq((kv_keys as *u8) + (slot as isize) * KEY_MAX, key, klen) != 0) {
+            bytes_eq((kv_keys as *u8) + (slot as isize) * KEY_MAX, key, klen)) {
             return KvsFindResult::Found(slot);
         }
         probe = probe + 1;

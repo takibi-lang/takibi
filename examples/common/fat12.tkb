@@ -422,7 +422,7 @@ fn fat_find_entry(name83: *u8) -> i32 {
     for i: usize in 0..<ROOT_ENTRY_COUNT {
         let name_p: *u8 = root_dir_buf[i].name;
         if (name_p[0] != 0) {
-            if (bytes_eq(name_p, name83, 11) != 0) {
+            if (bytes_eq(name_p, name83, 11)) {
                 return i as i32;
             }
         }
