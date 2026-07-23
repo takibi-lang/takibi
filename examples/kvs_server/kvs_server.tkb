@@ -140,14 +140,20 @@ fn kvs_find(key: borrow *u8, klen: isize) -> i32 {
     return -1;
 }
 
-// Returns 0 = inserted into a previously empty/tombstone slot, 1 =
-// overwrote an existing entry with the same key, -1 = table full (no
-// empty/tombstone slot found within TABLE_SLOTS probes, and no existing
-// entry matched).
-fn kvs_put(key: borrow *u8, klen: isize, val: borrow *u8, vlen: isize) -> i32 {
+// Reports which of the three distinct outcomes happened -- replacing the
+// old plain-i32 0/1/-1 sentinel with a type a caller's `match` must name
+// every arm of, the same reasoning examples/common/fat12.tkb's
+// FatFormatStatus was given for its own three-way status.
+variant KvsPutResult {
+    Inserted;
+    Overwrote;
+    TableFull;
+}
+
+fn kvs_put(key: borrow *u8, klen: isize, val: borrow *u8, vlen: isize) -> KvsPutResult {
     let existing: i32 = kvs_find(key, klen);
     let mut slot: usize = 0;
-    let mut result: i32 = 1;
+    let mut inserted: bool = false;
 
     if (existing < 0) {
         let home: u32 = kvs_hash(key, klen) & 15;
@@ -171,10 +177,10 @@ fn kvs_put(key: borrow *u8, klen: isize, val: borrow *u8, vlen: isize) -> i32 {
             found = tomb;
         }
         if (found < 0) {
-            return -1;
+            return KvsPutResult::TableFull;
         }
         slot = found as usize;
-        result = 0;
+        inserted = true;
     } else {
         slot = existing as usize;
     }
@@ -191,9 +197,12 @@ fn kvs_put(key: borrow *u8, klen: isize, val: borrow *u8, vlen: isize) -> i32 {
         kv_val_len[slot] = vlen as u8;
         bytes_copy((kv_keys as *u8) + (slot as isize) * KEY_MAX, key, klen);
         bytes_copy((kv_vals as *u8) + (slot as isize) * VAL_MAX, val, vlen);
-        return result;
+        if (inserted) {
+            return KvsPutResult::Inserted;
+        }
+        return KvsPutResult::Overwrote;
     }
-    return -1;
+    return KvsPutResult::TableFull;
 }
 
 fn kvs_del(key: borrow *u8, klen: isize) -> bool {
@@ -494,14 +503,17 @@ fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
             }
 
             let klen: isize = r as isize;
-            let put_result: i32 = kvs_put(key_buf, klen, req + hdr_end, vlen);
-            if (put_result < 0) {
-                return kvs_build_response(eth, ihl, idx, 507, "table full\n", 11);
+            match kvs_put(key_buf, klen, req + hdr_end, vlen) {
+                KvsPutResult::TableFull => {
+                    return kvs_build_response(eth, ihl, idx, 507, "table full\n", 11);
+                }
+                KvsPutResult::Inserted => {
+                    return kvs_build_response(eth, ihl, idx, 201, "", 0);
+                }
+                KvsPutResult::Overwrote => {
+                    return kvs_build_response(eth, ihl, idx, 200, "", 0);
+                }
             }
-            if (put_result == 0) {
-                return kvs_build_response(eth, ihl, idx, 201, "", 0);
-            }
-            return kvs_build_response(eth, ihl, idx, 200, "", 0);
         }
         KvsMethod::Delete => {
             if (hdr_end < 7) {
