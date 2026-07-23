@@ -36,25 +36,56 @@ fn el0_mapping_abandon(mapping: sink MappingOwner[asid, va, p]) {}
 fn el0_space_abandon(space: sink AddressSpaceOwner[asid, state]) {}
 fn el0_active_abandon(active: sink ActiveAddressSpace[core, asid]) {}
 
+// -1 as usize -- a generic "this syscall failed" sentinel returned to EL0
+// in x0, mirroring the shape of a Linux negative-errno return without
+// modeling exact POSIX errno values (not needed for this milestone).
+const SYSCALL_ERROR: usize = 0xFFFFFFFFFFFFFFFF;
+
 // Syscall dispatch policy for this milestone (see el0_asm.S's own header
-// comment for the return-value convention: 0 = unhandled/fail-stop,
-// 1 = terminate, `elr` = resume EL0 at that address).
-fn el0_svc_dispatch(esr: usize, syscall_num: usize, arg0: usize, elr: usize) -> usize {
+// comment for the full signature and the (outcome, retval) return
+// convention). Real write() semantics: validates fd, validates that
+// [buf, buf+len) lies entirely within the one EL0 page this example ever
+// mapped (el0_entry_va, PAGE_SIZE bytes -- the only pointer this kernel
+// currently knows this process may legitimately read from), then copies
+// and prints exactly those bytes. A real multi-page process will need a
+// general "is this VA range covered by one of this process's mappings"
+// check in place of this single-page comparison -- deferred until the
+// ELF loader actually creates one.
+fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
+                    x2: usize, elr: usize) -> (usize, usize) {
     let ec: usize = (esr >> 26) & 0x3F;
     if (ec != 0x15) {
-        return 0;
+        return (0, 0);
     }
     if (syscall_num == 64) {
-        uart_puts("syscall write arg0=");
-        uart_print(arg0);
-        uart_puts("\n");
-        return elr;
+        let fd: usize = x0;
+        let buf: usize = x1;
+        let len: usize = x2;
+        if (fd != 1 && fd != 2) {
+            return (elr, SYSCALL_ERROR);
+        }
+        // buf - el0_entry_va and PAGE_SIZE - len are both computed only
+        // after the operands that could make them wrap are already ruled
+        // out, so this can never silently pass via usize underflow.
+        if (buf < el0_entry_va || len > PAGE_SIZE) {
+            return (elr, SYSCALL_ERROR);
+        }
+        if (buf - el0_entry_va > PAGE_SIZE - len) {
+            return (elr, SYSCALL_ERROR);
+        }
+        let src: *u8 = buf as *u8;
+        let mut i: usize = 0;
+        while (i < len) {
+            uart_putc(src[i as isize]);
+            i = i + 1;
+        }
+        return (elr, len);
     }
     if (syscall_num == 93 || syscall_num == 94) {
         uart_puts("syscall exit\n");
-        return 1;
+        return (1, 0);
     }
-    return 0;
+    return (0, 0);
 }
 
 // Entered once, at EL1, by el1_asm.S's rpi3_el1_enter via a plain `bl`.

@@ -9,19 +9,40 @@
    compiled code might carry.
 
    The payload issues two real AArch64 Linux syscall numbers in sequence
-   (write=64, then exit=93) via `svc #0`, proving both the trap-and-resume
-   path (write) and the trap-and-terminate path (exit) actually work on
-   real hardware, not just a single one-shot trap. */
+   via `svc #0`: write(1, el0_msg, 12), then exit(93). This proves real
+   write() semantics end to end -- the kernel must validate this pointer
+   (el0_msg lives inside the SAME copied page, addressed PC-relative via
+   `adr` so the offset survives the copy unchanged) and the returned byte
+   count actually reflects what the kernel read, not just that a trap
+   happened -- as well as both the trap-and-resume path (write) and the
+   trap-and-terminate path (exit) on real hardware. */
     .section .rodata
     .align  4
 el0_payload_start:
+    adr     x1, el0_msg
+    /* EL0_MSG_LEN below (12) must match el0_msg's own byte length --
+       llvm-mc does not accept a `(label - label)` byte-count as a movz
+       immediate operand (tried, rejected: "immediate must be an integer
+       in range [0, 65535]" even though the difference is a compile-time
+       constant), so this is a plain literal instead. */
+    movz    x2, #12            /* EL0_MSG_LEN */
+    movz    x0, #1             /* fd = 1 (stdout) */
     movz    x8, #64            /* __NR_write */
-    movz    x0, #99            /* arbitrary marker value, arg0 */
     svc     #0
+    /* x0 now holds write()'s return value (bytes written, kernel-set).
+       Confirm it matches the requested length before exiting -- a
+       mismatch here would mean el0_svc_dispatch validated/copied the
+       wrong thing, not just that SOME trap occurred. */
+    movz    x1, #12            /* EL0_MSG_LEN, same caveat as above */
+    cmp     x0, x1
+    b.ne    .Lel0_payload_hang
     movz    x8, #93            /* __NR_exit */
     svc     #0
 .Lel0_payload_hang:
-    b       .Lel0_payload_hang /* unreachable if exit is handled correctly */
+    b       .Lel0_payload_hang /* unreachable if write/exit behave correctly */
+    .align  4
+el0_msg:
+    .ascii  "hi from el0\n"    /* EL0_MSG_LEN (12) bytes -- keep in sync */
 el0_payload_end:
 
     .section .text
@@ -71,14 +92,26 @@ rpi3_el0_enter:
 /* -- Default (weak) EL0 syscall dispatch policy -----------------------------
    Every syscall number is unhandled until an example provides a strong
    Takibi-compiled override with the same name (same weak/strong pattern
-   as startup.S's rpi3_sync_exception_dispatch). Return value convention,
-   shared with el0_sync_entry below: 0 = unhandled (fail-stop), 1 =
-   terminate (do not resume EL0), any other value MUST equal the passed-in
-   `elr` argument (x3) to mean "resume EL0 at that address" -- anything
-   else is treated as unhandled too. */
+   as startup.S's rpi3_sync_exception_dispatch).
+
+   Signature: el0_svc_dispatch(esr, syscall_num, x0, x1, x2, elr) -> (outcome, retval)
+   -- x0/x1/x2 are the EL0 process's OWN saved x0/x1/x2 at trap time (a
+   syscall's first three argument registers per the AArch64 Linux ABI;
+   only write's fd/buf/len are meaningful yet, but every syscall's
+   dispatcher receives the same three so a future read()/other 3-arg
+   syscall needs no signature change).
+
+   `outcome` convention, shared with el0_sync_entry below: 0 = unhandled
+   (fail-stop), 1 = terminate (do not resume EL0), any other value MUST
+   equal the passed-in `elr` argument (x5) to mean "resume EL0 at that
+   address" -- anything else is treated as unhandled too. `retval` is
+   only consulted on the resume path: it becomes the resumed EL0's own
+   x0 (the syscall return value a real caller/libc would check), same
+   register Linux itself returns syscall results in. */
     .weak   el0_svc_dispatch
 el0_svc_dispatch:
     mov     x0, #0
+    mov     x1, #0
     ret
 
 /* -- Real EL0 synchronous exception entry -----------------------------------
@@ -107,28 +140,36 @@ el0_sync_entry:
     stp     x26, x27, [sp, #208]
     stp     x28, x29, [sp, #224]
     stp     x30, xzr, [sp, #240]
-    mrs     x3, elr_el1
-    mrs     x4, spsr_el1
-    stp     x3, x4, [sp, #256]
+    mrs     x9, elr_el1
+    mrs     x10, spsr_el1
+    stp     x9, x10, [sp, #256]
 
-    /* el0_svc_dispatch(esr, syscall_num, arg0, elr) -- x3 (elr) already
-       holds the right value from the mrs above and is untouched by the
-       loads below. */
+    /* el0_svc_dispatch(esr, syscall_num, x0, x1, x2, elr) -> (outcome, retval).
+       x9 (elr, from the mrs above) is copied into x5 last so none of the
+       loads below (which reuse x0-x4) can clobber it first. */
     mrs     x0, esr_el1
     ldr     x1, [sp, #64]       /* saved x8: syscall number */
-    ldr     x2, [sp, #0]        /* saved x0: syscall arg0 */
+    ldr     x2, [sp, #0]        /* saved x0 */
+    ldr     x3, [sp, #8]        /* saved x1 */
+    ldr     x4, [sp, #16]       /* saved x2 */
+    mov     x5, x9              /* elr */
     bl      el0_svc_dispatch
+    mov     x6, x0              /* outcome */
+    mov     x7, x1              /* retval */
 
     ldr     x1, [sp, #256]      /* saved elr */
-    cmp     x0, #0
+    cmp     x6, #0
     b.eq    rpi3_exception_unhandled
-    cmp     x0, #1
+    cmp     x6, #1
     b.eq    .Lel0_terminate
-    cmp     x0, x1
+    cmp     x6, x1
     b.ne    rpi3_exception_unhandled
 
     /* Resume EL0 at the same elr (the instruction right after `svc`,
-       per architecture -- ELR_EL1 was never modified). */
+       per architecture -- ELR_EL1 was never modified). Overwrite the
+       saved x0 slot with the syscall's return value before restoring, so
+       EL0 sees it in x0 exactly like a real syscall return. */
+    str     x7, [sp, #0]
     ldp     x0, x1, [sp, #256]
     msr     elr_el1, x0
     msr     spsr_el1, x1
