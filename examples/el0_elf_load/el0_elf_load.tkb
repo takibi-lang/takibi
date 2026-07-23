@@ -43,6 +43,7 @@
 use "examples/vm_page_map/vm_page_map_core.tkb";
 use "examples/common_rpi3/el0_asm_extern.tkb";
 use "examples/common_rpi3/el1_asm_extern.tkb";
+use "examples/common_rpi3/hvc_asm_extern.tkb";
 use "examples/common_rpi3/el0_test_image_extern.tkb";
 
 const SYSCALL_ERROR: usize = 0xFFFFFFFFFFFFFFFF;
@@ -150,9 +151,111 @@ fn process_outcome_report(outcome: ProcessOutcome) {
     }
 }
 
+// Still needed for the genuine load-FAILURE paths below (ELF/segment
+// parsing rejected, or the stack page allocation failed): no process will
+// ever run at EL0 in those cases, so there is nothing for a later hvc-
+// triggered teardown to reclaim -- immediate abandonment (the same
+// sink-and-discard idiom as vm_page_map_core.tkb's own cpu_owner_halt) is
+// still the correct, final disposition there, not a use of the new
+// process_vm_put/take slot below (which is reserved for the one bundle
+// that actually becomes a running process).
 fn el0_mapping_abandon(mapping: sink MappingOwner[asid, va, p]) {}
 fn el0_space_abandon(space: sink AddressSpaceOwner[asid, state]) {}
 fn el0_active_abandon(active: sink ActiveAddressSpace[core, asid]) {}
+
+// GitHub issue #154: a stable owner slot (same protocol as
+// examples/copy_on_write's own CowStateStore/stable_replace) holding this
+// process's VM resources across the EL2->EL1->EL0 drop, so exit() -- which
+// only ever runs at EL1/EL0 -- can trigger their REAL reclamation at EL2
+// via the new hvc call boundary (examples/common_rpi3/hvc_asm.S), instead
+// of just abandoning them the way this file used to. Unlike CowStateStore,
+// this deliberately skips COW's own vacancy-token/reentrancy protocol:
+// process_vm_put is called exactly once (at load time, EL2, before the
+// drop) and process_vm_take exactly once (at exit time, EL2, triggered by
+// the hvc call below) -- strictly sequential, single core, no interrupt
+// or concurrent access ever interleaves the two, so the extra ceremony
+// COW needs for its own genuinely re-entrant exception-handler access
+// would be unearned complexity here.
+private linear view ProcessVmGuard[lock: addr];
+fn process_vm_guard(lock: *i32 @ place) -> ProcessVmGuard[place] {
+    return view ProcessVmGuard[place];
+}
+fn process_vm_guard_done(guard: sink ProcessVmGuard[place]) {}
+
+// Discards a ProcessVmState wholesale, matching the same "sink parameter
+// itself is the discharge" idiom as the old el0_*_abandon functions this
+// replaces (see vm_page_map_core.tkb's own cpu_owner_halt for the
+// original precedent). Only ever reached if process_vm_put ran while the
+// slot was NOT already Empty, which the one-put-one-take sequencing above
+// should make unreachable in practice -- a real bug there would silently
+// leak the previous bundle rather than fail loudly, the same risk profile
+// the old abandon functions already had.
+fn process_vm_state_discard(state: sink ProcessVmState) {}
+
+variant ProcessVmState {
+    Empty;
+    Loaded(exists core: usize. exists asid: usize.
+           exists code_va: usize. exists code_p: usize.
+           exists stack_va: usize. exists stack_p: usize.
+           (ActiveAddressSpace[core, asid],
+            AddressSpaceOwner[asid, SpaceState::Occupied2],
+            MappingOwner[asid, code_va, code_p],
+            MappingOwner[asid, stack_va, stack_p]));
+}
+
+struct ProcessVmStateStore {
+    private lock: i32;
+    private state: ProcessVmState;
+}
+private let mut process_vm_store: ProcessVmStateStore;
+
+fn process_vm_put(next: ProcessVmState) {
+    let guard = process_vm_guard(&process_vm_store.lock);
+    let previous: ProcessVmState = stable_replace(
+        guard, &process_vm_store.lock, process_vm_store.state, next);
+    process_vm_guard_done(guard);
+    process_vm_state_discard(previous);
+}
+
+fn process_vm_take() -> ProcessVmState {
+    let guard = process_vm_guard(&process_vm_store.lock);
+    let state: ProcessVmState = stable_replace(
+        guard, &process_vm_store.lock, process_vm_store.state, ProcessVmState::Empty);
+    process_vm_guard_done(guard);
+    return state;
+}
+
+// Strong override of examples/common_rpi3/hvc_asm.S's weak hvc_dispatch
+// default. Runs AT EL2 (el1_hvc_entry calls this via `bl` before eret-ing
+// back to EL1, exactly like examples/hvc_smoke's own proof of that
+// mechanism) -- this is what finally lets exit() reach the TTBR0_EL2-only
+// operations (unmap_page/address_space_deactivate) that EL1 cannot
+// perform itself. `arg` is unused: with only ever one process, the act of
+// calling is itself the whole request, and adding a real argument-decoded
+// operation menu before a second real operation exists would be
+// speculative (see this repo's own YAGNI guidance).
+fn hvc_dispatch(arg: usize) -> usize {
+    let state = process_vm_take();
+    match state {
+        ProcessVmState::Empty => {
+            uart_puts("hvc: no process VM state to reclaim\n");
+        }
+        ProcessVmState::Loaded(bundle) => {
+            let (active, space, code_mapping, stack_mapping) = bundle;
+            // Unmap in reverse of map order (stack, then code), the same
+            // order examples/vm_page_map/vm_page_map_core.tkb's own
+            // vm_task_switch_cleanup already established.
+            let (space2, stack_page) = unmap_second_page(space, stack_mapping);
+            let (space3, code_page) = unmap_page(space2, code_mapping);
+            page_free(stack_page);
+            page_free(code_page);
+            let inactive = address_space_deactivate(active, space3);
+            address_space_free(inactive);
+            uart_puts("hvc: process VM reclaimed\n");
+        }
+    }
+    return 0;
+}
 
 // Same policy as examples/el0_smoke's own el0_svc_dispatch, validated
 // against el0_page_va (the one page this loader ever maps) instead of
@@ -160,20 +263,10 @@ fn el0_active_abandon(active: sink ActiveAddressSpace[core, asid]) {}
 // first segment, even though today's test program happens to make them
 // equal).
 //
-// exit()'s real status (x0) is now recorded and reported -- but the
-// mapped page, PageOwner, and address space it lives in are NOT reclaimed
-// here: they are EL2-level resources (TTBR0_EL2, only reachable by code
-// actually running at EL2), and nothing routes a request from EL1 back
-// up to EL2 yet. AArch64's `hvc` instruction is architecturally the right
-// tool (EL1 explicitly calling into EL2, the same way `svc` lets EL0
-// explicitly call into EL1) -- an EL1->EL2 call boundary, mirroring this
-// session's own EL0->EL1 SVC boundary, is the concrete next mechanism a
-// real process teardown needs. Deliberately not attempted in this
-// session: the EL2->EL1 drop alone surfaced one genuinely non-obvious
-// hardware bug (HCR_EL2.RW) that needed live JTAG register
-// inspection to diagnose; a new privilege-crossing mechanism deserves
-// the same unhurried real-hardware verification budget, not a rushed
-// attempt against a tight remaining time window.
+// exit()'s real status (x0) is now recorded and reported, AND its VM
+// resources are now really reclaimed -- rpi3_hvc_call below traps up to
+// EL2 and runs hvc_dispatch above, which is what el0_mapping_abandon and
+// friends used to just silently discard.
 fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
                     x2: usize, elr: usize) -> (usize, usize) {
     let ec: usize = (esr >> 26) & 0x3F;
@@ -230,6 +323,11 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
     if (syscall_num == 93 || syscall_num == 94) {
         let outcome = ProcessOutcome::Exited(x0);
         process_outcome_report(outcome);
+        // Issued FROM EL1 (this whole function runs inside el0_sync_entry's
+        // own EL1-side SVC handling): traps up to EL2 via el1_hvc_entry,
+        // runs hvc_dispatch there (real unmap_page/address_space_deactivate
+        // teardown), then resumes right here once EL2 erets back.
+        rpi3_hvc_call(0);
         return (1, 0);
     }
     return (0, 0);
@@ -384,10 +482,12 @@ fn app_main() {
                     el0_entry_va = entry;
                     el0_page_va = page_va;
                     el0_stack_top_va = stack_va + PAGE_SIZE;
-                    el0_mapping_abandon(mapping);
-                    el0_mapping_abandon(stack_mapping);
-                    el0_space_abandon(space3);
-                    el0_active_abandon(active);
+                    // This bundle IS about to become a running process --
+                    // stash it in the stable slot instead of abandoning it,
+                    // so exit()'s hvc call can reclaim it for real later
+                    // (see hvc_dispatch above).
+                    process_vm_put(ProcessVmState::Loaded(
+                        (active, space3, mapping, stack_mapping)));
 
                     let el1_sp_base: usize = (el1_stack as *u8) as usize;
                     let el1_sp: usize = el1_sp_base + 4096;

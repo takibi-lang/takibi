@@ -2,3 +2,4 @@ el0_elf_load
 hi from ELF
 AB
 process exited with status 0
+hvc: process VM reclaimed

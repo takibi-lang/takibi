@@ -1615,7 +1615,7 @@ $(COMMON_RPI3_EL0_TEST_IMAGE_O): $(COMMON_RPI3_EL0_TEST_IMAGE_S) $(COMMON_RPI3_I
 RPI3_EL0_ELF_LOAD_EXAMPLES := el0_elf_load
 RPI3_EL0_ELF_LOAD_OBJS := $(foreach e,$(RPI3_EL0_ELF_LOAD_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
-$(RPI3_EL0_ELF_LOAD_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_EL0_ASM_EXTERN) $(COMMON_RPI3_EL1_ASM_EXTERN) $(COMMON_RPI3_EL0_TEST_IMAGE_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
+$(RPI3_EL0_ELF_LOAD_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_EL0_ASM_EXTERN) $(COMMON_RPI3_EL1_ASM_EXTERN) $(COMMON_RPI3_HVC_ASM_EXTERN) $(COMMON_RPI3_EL0_TEST_IMAGE_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 RPI3_VM_PAGE_MAP_EXAMPLES := vm_page_map two_page_map
@@ -1860,10 +1860,12 @@ $(RPI3_EL0_SMOKE_KERNELS): examples/%/kernel_rpi3.elf: \
 	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) examples/$*/$*_rpi3.o -o $@
 
 # el0_elf_load additionally needs COMMON_RPI3_EL0_TEST_IMAGE_O linked in
-# for el0_test_image_addr/_len (the embedded real ELF file).
+# for el0_test_image_addr/_len (the embedded real ELF file), and
+# COMMON_RPI3_HVC_ASM_O for rpi3_hvc_call/el1_hvc_entry (issue #154's real
+# process-teardown call boundary).
 $(RPI3_EL0_ELF_LOAD_KERNELS): examples/%/kernel_rpi3.elf: \
-    $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) $(COMMON_RPI3_EL0_TEST_IMAGE_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
-	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) $(COMMON_RPI3_EL0_TEST_IMAGE_O) examples/$*/$*_rpi3.o -o $@
+    $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) $(COMMON_RPI3_HVC_ASM_O) $(COMMON_RPI3_EL0_TEST_IMAGE_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
+	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) $(COMMON_RPI3_HVC_ASM_O) $(COMMON_RPI3_EL0_TEST_IMAGE_O) examples/$*/$*_rpi3.o -o $@
 
 # vm_page_map additionally needs COMMON_RPI3_TLB_ASM_O linked in for
 # tlb_invalidate_va (tlbi cannot be called directly from takibi, same
