@@ -1,28 +1,39 @@
-// A real ELF loader (GitHub issue #153): parses a genuine Elf64_Ehdr/
-// Elf64_Phdr pair out of an embedded, real, standalone ELF file (built by
-// this repo's own toolchain -- see examples/common_rpi3/el0_test_prog.S/
-// .ld and el0_test_image.S), rather than el0_smoke's hardcoded
-// offset/length copy of raw instruction bytes. Builds directly on
-// el0_smoke's proven EL2->EL1->EL0 drop and real write()-with-pointer-
-// validation SVC dispatch (duplicated here rather than shared -- only two
-// consumers exist so far; extract a common module once a third needs the
-// same policy, per this repo's own stated practice of not extracting
-// shared modules speculatively).
+// A real ELF loader fed from a real cpio (newc) initramfs image (GitHub
+// issue #153): parses a genuine Elf64_Ehdr/Elf64_Phdr pair out of the
+// SINGLE file entry a real cpio archive contains, rather than el0_smoke's
+// hardcoded offset/length copy of raw instruction bytes or this file's
+// own earlier revision's direct embed of a bare ELF. The archive is
+// real, not a synthetic fixture: built by the actual `cpio` tool (newc
+// format, GNU cpio 2.15) from examples/common_rpi3/el0_test_prog.S/.ld's
+// output, embedded into the kernel image via el0_test_image.S's
+// `.incbin` -- see that Makefile rule's own comment for the exact
+// invocation. Builds directly on el0_smoke's proven EL2->EL1->EL0 drop
+// and real write()-with-pointer-validation SVC dispatch (duplicated here
+// rather than shared -- only two consumers exist so far; extract a
+// common module once a third needs the same policy, per this repo's own
+// stated practice of not extracting shared modules speculatively).
+//
+// cpio (newc) format: a 110-byte ASCII-hex-field header, then the
+// filename (c_namesize bytes, NUL-terminated), then file data -- both the
+// name and the data are individually padded so the NEXT field starts on
+// a 4-byte boundary. This loader reads exactly one entry (no TRAILER!!!
+// scan, no directory/multi-file support) -- matching this repo's own
+// "one static ELF binary" Stage 1 scope, not a general initramfs reader.
 //
 // Deliberately narrow, matching this repo's own single-EL0-page scope so
 // far: every PT_LOAD segment must fit within the one page this example
 // maps (multi-page process loading needs the already-proven
 // map_second_page family, deferred until a real multi-page test program
 // exists), and e_phnum is capped at MAX_PHDRS regardless of what the file
-// claims -- realistic loader hygiene even though this particular file is
-// an embedded, trusted blob today, not yet loaded from an untrusted
-// cpio/initramfs image.
+// claims -- realistic loader hygiene, matching the same defensive cap
+// already applied to the cpio header's own claimed sizes below, even
+// though this particular archive is an embedded, trusted blob today.
 //
 // RPi3-only, same reasons as examples/el0_smoke.
 //
 // This is the known-good unrefined baseline for a genuinely new mechanism
-// (real ELF parsing); --forbid-trap hardening is a separate later pass
-// per this repo's process.
+// (real ELF/cpio parsing); --forbid-trap hardening is a separate later
+// pass per this repo's process.
 
 use "examples/vm_page_map/vm_page_map_core.tkb";
 use "examples/common_rpi3/el0_asm_extern.tkb";
@@ -32,6 +43,44 @@ use "examples/common_rpi3/el0_test_image_extern.tkb";
 const SYSCALL_ERROR: usize = 0xFFFFFFFFFFFFFFFF;
 const MAX_PHDRS: usize = 4;
 const PT_LOAD: u32 = 1;
+
+// cpio (newc) fixed field byte offsets within the 110-byte header --
+// verified against a real `cpio -o -H newc` archive's own raw bytes
+// (od -A x -t x1z) rather than assumed from documentation alone: c_magic
+// "070701" at offset 0, c_filesize's 8 ASCII hex digits at offset 54
+// (confirmed reading back exactly the built ELF's real byte count,
+// 4744 = 0x1288), c_namesize's at offset 94 (confirmed reading back 18,
+// "el0_test_prog.elf\0"'s exact length).
+const CPIO_HEADER_SIZE: usize = 110;
+const CPIO_FILESIZE_OFFSET: usize = 54;
+const CPIO_NAMESIZE_OFFSET: usize = 94;
+
+fn hex_digit(c: u8) -> usize {
+    if (c >= 0x30 && c <= 0x39) {
+        return (c - 0x30) as usize;
+    }
+    if (c >= 0x41 && c <= 0x46) {
+        return (c - 0x41 + 10) as usize;
+    }
+    if (c >= 0x61 && c <= 0x66) {
+        return (c - 0x61 + 10) as usize;
+    }
+    // Not a hex digit -- GNU cpio always emits uppercase 0-9A-F, so this
+    // only fires on a genuinely malformed header; treated as 0 rather
+    // than threading a validity flag through every caller, acceptable
+    // for this milestone's trusted embedded archive.
+    return 0;
+}
+
+fn parse_hex8(base: *u8, offset: usize) -> usize {
+    let mut v: usize = 0;
+    let mut i: usize = 0;
+    while (i < 8) {
+        v = (v << 4) | hex_digit(base[(offset + i) as isize]);
+        i = i + 1;
+    }
+    return v;
+}
 
 struct packed Elf64Header {
     e_ident: [u8; 16];
@@ -117,8 +166,35 @@ fn app_main() {
     uart_puts("el0_elf_load\n");
     page_pool_init();
 
-    let image_addr: usize = el0_test_image_addr();
-    let image_len: usize = el0_test_image_len();
+    let archive_addr: usize = el0_test_image_addr();
+    let archive_len: usize = el0_test_image_len();
+
+    if (archive_len < CPIO_HEADER_SIZE) {
+        uart_puts("cpio image too small\n");
+        return;
+    }
+    let hdr_base: *u8 = archive_addr as *u8;
+    if (hdr_base[0] != 0x30 || hdr_base[1] != 0x37 || hdr_base[2] != 0x30
+            || hdr_base[3] != 0x37 || hdr_base[4] != 0x30 || hdr_base[5] != 0x31) {
+        uart_puts("bad cpio magic\n");
+        return;
+    }
+    let namesize: usize = parse_hex8(hdr_base, CPIO_NAMESIZE_OFFSET);
+    let filesize: usize = parse_hex8(hdr_base, CPIO_FILESIZE_OFFSET);
+    // Both the name and the header+name run are individually rounded up
+    // to a 4-byte boundary in the newc format; only the second rounding
+    // matters here since nothing after the header is read except via
+    // data_start below. 0xFFFFFFFFFFFFFFFC clears the low 2 bits (round
+    // DOWN after adding 3 -- the standard round-up-to-4 idiom).
+    let name_end: usize = CPIO_HEADER_SIZE + namesize;
+    let data_start: usize = (name_end + 3) & 0xFFFFFFFFFFFFFFFC;
+    if (data_start < name_end || data_start > archive_len
+            || filesize > archive_len - data_start) {
+        uart_puts("cpio entry out of range\n");
+        return;
+    }
+    let image_addr: usize = archive_addr + data_start;
+    let image_len: usize = filesize;
 
     if (image_len < 64) {
         uart_puts("image too small\n");

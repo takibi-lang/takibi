@@ -1557,18 +1557,21 @@ RPI3_EL0_SMOKE_OBJS := $(foreach e,$(RPI3_EL0_SMOKE_EXAMPLES),examples/$(e)/$(e)
 $(RPI3_EL0_SMOKE_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_EL0_ASM_EXTERN) $(COMMON_RPI3_EL1_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) -o $@
 
-# examples/el0_elf_load (GitHub issue #153): a real ELF loader. Unlike
-# el0_smoke's hardcoded offset/length copy, this parses a genuine
-# Elf64_Ehdr/Elf64_Phdr pair out of a real, standalone ELF file
-# (el0_test_prog.S/.ld) built by this repo's own toolchain and embedded
-# into the kernel image verbatim via el0_test_image.S's `.incbin`.
-# -z max-page-size=4096 keeps el0_test_prog.elf's own segment alignment
-# (and therefore its embedded size) matching this project's actual 4KB
-# page size instead of AArch64 ld.lld's 64KB default.
+# examples/el0_elf_load (GitHub issue #153): a real ELF loader fed from a
+# real cpio (newc) initramfs image. Unlike el0_smoke's hardcoded
+# offset/length copy, this parses a genuine Elf64_Ehdr/Elf64_Phdr pair out
+# of the one file entry a real cpio archive contains. el0_test_prog.S/.ld
+# is built by this repo's own toolchain into a real, standalone ELF file;
+# the real `cpio` tool (newc format) wraps it into an archive; the whole
+# archive is embedded into the kernel image verbatim via el0_test_image.S's
+# `.incbin`. -z max-page-size=4096 keeps el0_test_prog.elf's own segment
+# alignment (and therefore its embedded size) matching this project's
+# actual 4KB page size instead of AArch64 ld.lld's 64KB default.
 COMMON_RPI3_EL0_TEST_PROG_S     := $(COMMON_RPI3_DIR)/el0_test_prog.S
 COMMON_RPI3_EL0_TEST_PROG_O     := $(COMMON_RPI3_DIR)/el0_test_prog.o
 COMMON_RPI3_EL0_TEST_PROG_LD    := $(COMMON_RPI3_DIR)/el0_test_prog.ld
 COMMON_RPI3_EL0_TEST_PROG_ELF   := $(COMMON_RPI3_DIR)/el0_test_prog.elf
+COMMON_RPI3_INITRAMFS_CPIO      := $(COMMON_RPI3_DIR)/initramfs.cpio
 COMMON_RPI3_EL0_TEST_IMAGE_S    := $(COMMON_RPI3_DIR)/el0_test_image.S
 COMMON_RPI3_EL0_TEST_IMAGE_O    := $(COMMON_RPI3_DIR)/el0_test_image.o
 COMMON_RPI3_EL0_TEST_IMAGE_EXTERN := $(COMMON_RPI3_DIR)/el0_test_image_extern.tkb
@@ -1579,10 +1582,16 @@ $(COMMON_RPI3_EL0_TEST_PROG_O): $(COMMON_RPI3_EL0_TEST_PROG_S)
 $(COMMON_RPI3_EL0_TEST_PROG_ELF): $(COMMON_RPI3_EL0_TEST_PROG_O) $(COMMON_RPI3_EL0_TEST_PROG_LD)
 	$(LLD) -z max-page-size=4096 -T $(COMMON_RPI3_EL0_TEST_PROG_LD) $(COMMON_RPI3_EL0_TEST_PROG_O) -o $@
 
-# .incbin makes this .o's own freshness depend on the embedded ELF's
+# `cd` into the directory first so the archive's own stored entry name is
+# the bare "el0_test_prog.elf" (what examples/el0_elf_load.tkb's cpio
+# parser expects to skip past), not this file's full repo-relative path.
+$(COMMON_RPI3_INITRAMFS_CPIO): $(COMMON_RPI3_EL0_TEST_PROG_ELF)
+	cd $(COMMON_RPI3_DIR) && echo $(notdir $(COMMON_RPI3_EL0_TEST_PROG_ELF)) | cpio -o -H newc > $(notdir $@)
+
+# .incbin makes this .o's own freshness depend on the embedded archive's
 # bytes, not just el0_test_image.S's own text -- a normal file
 # prerequisite is enough for make to recompile when either changes.
-$(COMMON_RPI3_EL0_TEST_IMAGE_O): $(COMMON_RPI3_EL0_TEST_IMAGE_S) $(COMMON_RPI3_EL0_TEST_PROG_ELF)
+$(COMMON_RPI3_EL0_TEST_IMAGE_O): $(COMMON_RPI3_EL0_TEST_IMAGE_S) $(COMMON_RPI3_INITRAMFS_CPIO)
 	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
 
 RPI3_EL0_ELF_LOAD_EXAMPLES := el0_elf_load

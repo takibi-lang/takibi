@@ -1,15 +1,17 @@
-/* Embeds the real, standalone EL0 ELF file (el0_test_prog.S/.ld, built by
-   this repo's own toolchain) into the kernel image verbatim, so
-   examples/el0_elf_load's Takibi code can parse it as genuine ELF bytes
-   -- not a hardcoded offset/length like el0_smoke's raw payload copy.
-   `.incbin` requires el0_test_prog.elf to already exist at assemble time
-   (see the Makefile's ordering: el0_test_prog.elf is a prerequisite of
-   this file's own .o rule). */
+/* Embeds a real cpio (newc) initramfs image into the kernel image
+   verbatim, so examples/el0_elf_load's Takibi code can parse it as
+   genuine cpio + ELF bytes -- not a hardcoded offset/length like
+   el0_smoke's raw payload copy. The archive is built by the real `cpio`
+   tool (see the Makefile's own rule) from el0_test_prog.S/.ld's output
+   (the real, standalone EL0 ELF file), not hand-assembled. `.incbin`
+   requires initramfs.cpio to already exist at assemble time (see the
+   Makefile's ordering: initramfs.cpio is a prerequisite of this file's
+   own .o rule). */
     .section .rodata
     .align  4
     .global el0_test_image_start
 el0_test_image_start:
-    .incbin "examples/common_rpi3/el0_test_prog.elf"
+    .incbin "examples/common_rpi3/initramfs.cpio"
     .global el0_test_image_end
 el0_test_image_end:
 
