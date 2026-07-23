@@ -118,22 +118,32 @@ fn kvs_hash(key: borrow *u8, klen: isize) -> u32 {
     return h;
 }
 
-fn kvs_find(key: borrow *u8, klen: isize) -> i32 {
+// Reports the slot index of an exact (state==used, same key) entry, or
+// that none was found -- replacing the old plain-i32 slot-index-or--1
+// sentinel with a type a caller's `match` must name every arm of, the
+// same reasoning as AGENTS.md's "Return a Variant, Not an Int Sentinel"
+// principle.
+variant KvsFindResult {
+    Found({0..<16 as usize});
+    NotFound;
+}
+
+fn kvs_find(key: borrow *u8, klen: isize) -> KvsFindResult {
     let home: u32 = kvs_hash(key, klen) & 15;
     let mut probe: u32 = 0;
     while (probe < 16) {
         let slot: usize = ((home + probe) & 15) as usize;
         if (kv_state[slot] == STATE_EMPTY) {
-            return -1;
+            return KvsFindResult::NotFound;
         }
         if (kv_state[slot] == STATE_USED &&
             kv_key_len[slot] as isize == klen &&
             bytes_eq((kv_keys as *u8) + (slot as isize) * KEY_MAX, key, klen) != 0) {
-            return slot as i32;
+            return KvsFindResult::Found(slot);
         }
         probe = probe + 1;
     }
-    return -1;
+    return KvsFindResult::NotFound;
 }
 
 // Reports which of the three distinct outcomes happened -- replacing the
@@ -147,38 +157,40 @@ variant KvsPutResult {
 }
 
 fn kvs_put(key: borrow *u8, klen: isize, val: borrow *u8, vlen: isize) -> KvsPutResult {
-    let existing: i32 = kvs_find(key, klen);
     let mut slot: usize = 0;
     let mut inserted: bool = false;
 
-    if (existing < 0) {
-        let home: u32 = kvs_hash(key, klen) & 15;
-        let mut probe: u32 = 0;
-        let mut found: i32 = -1;
-        let mut tomb: i32 = -1;
-        while (probe < 16 && found < 0) {
-            let s: usize = ((home + probe) & 15) as usize;
-            if (kv_state[s] == STATE_EMPTY) {
-                if (tomb >= 0) {
-                    found = tomb;
-                } else {
-                    found = s as i32;
+    match kvs_find(key, klen) {
+        KvsFindResult::NotFound => {
+            let home: u32 = kvs_hash(key, klen) & 15;
+            let mut probe: u32 = 0;
+            let mut found: i32 = -1;
+            let mut tomb: i32 = -1;
+            while (probe < 16 && found < 0) {
+                let s: usize = ((home + probe) & 15) as usize;
+                if (kv_state[s] == STATE_EMPTY) {
+                    if (tomb >= 0) {
+                        found = tomb;
+                    } else {
+                        found = s as i32;
+                    }
+                } else if (kv_state[s] == STATE_TOMBSTONE && tomb < 0) {
+                    tomb = s as i32;
                 }
-            } else if (kv_state[s] == STATE_TOMBSTONE && tomb < 0) {
-                tomb = s as i32;
+                probe = probe + 1;
             }
-            probe = probe + 1;
+            if (found < 0) {
+                found = tomb;
+            }
+            if (found < 0) {
+                return KvsPutResult::TableFull;
+            }
+            slot = found as usize;
+            inserted = true;
         }
-        if (found < 0) {
-            found = tomb;
+        KvsFindResult::Found(existing_slot) => {
+            slot = existing_slot;
         }
-        if (found < 0) {
-            return KvsPutResult::TableFull;
-        }
-        slot = found as usize;
-        inserted = true;
-    } else {
-        slot = existing as usize;
     }
 
     if (slot < 16) {
@@ -197,17 +209,14 @@ fn kvs_put(key: borrow *u8, klen: isize, val: borrow *u8, vlen: isize) -> KvsPut
 }
 
 fn kvs_del(key: borrow *u8, klen: isize) -> bool {
-    let slot: i32 = kvs_find(key, klen);
-    if (slot < 0) {
-        return false;
+    match kvs_find(key, klen) {
+        KvsFindResult::NotFound => { return false; }
+        KvsFindResult::Found(slot) => {
+            kv_state[slot] = STATE_TOMBSTONE;
+            kvs_sd_pending_slot = slot as i32;
+            return true;
+        }
     }
-    let s: usize = slot as usize;
-    if (s < 16) {
-        kv_state[s] = STATE_TOMBSTONE;
-        kvs_sd_pending_slot = slot;
-        return true;
-    }
-    return false;
 }
 
 fn kvs_build_list_body() -> isize {
@@ -260,29 +269,39 @@ fn kvs_key_char_ok(c: u8) -> bool {
            c == '_' as u8 || c == '-' as u8;
 }
 
-fn kvs_parse_path(p: borrow *u8, avail: isize) -> i32 {
+// See kvs_server.tkb's own copy of this function for the case-by-case
+// rationale (this file has no `use` relationship to it -- independent
+// duplicate, same reasoning).
+variant KvsParsePathResult {
+    NotFound;
+    Malformed;
+    List;
+    Key(i32);
+}
+
+fn kvs_parse_path(p: borrow *u8, avail: isize) -> KvsParsePathResult {
     if (avail < 5 || p[0] != '/' as u8 || p[1] != 'k' as u8 ||
         p[2] != 'e' as u8 || p[3] != 'y' as u8 || p[4] != 's' as u8) {
-        return -3;
+        return KvsParsePathResult::NotFound;
     }
     if (avail == 5) {
-        return -2;
+        return KvsParsePathResult::Malformed;
     }
     if (p[5] == ' ' as u8) {
-        return -1;
+        return KvsParsePathResult::List;
     }
     if (p[5] != '/' as u8) {
-        return -3;
+        return KvsParsePathResult::NotFound;
     }
 
     let mut i: isize = 6;
     let mut klen: isize = 0;
     while (i < avail && p[i] != ' ' as u8) {
         if (klen >= KEY_MAX) {
-            return -2;
+            return KvsParsePathResult::Malformed;
         }
         if (kvs_key_char_ok(p[i]) == false) {
-            return -2;
+            return KvsParsePathResult::Malformed;
         }
         let n_idx: usize = klen as usize;
         if (n_idx < 32) {
@@ -292,9 +311,9 @@ fn kvs_parse_path(p: borrow *u8, avail: isize) -> i32 {
         i = i + 1;
     }
     if (klen == 0 || i >= avail) {
-        return -2;
+        return KvsParsePathResult::Malformed;
     }
-    return klen as i32;
+    return KvsParsePathResult::Key(klen as i32);
 }
 
 fn kvs_starts_with(p: borrow *u8, avail: isize, lit: borrow *u8) -> bool {
@@ -308,7 +327,14 @@ fn kvs_starts_with(p: borrow *u8, avail: isize, lit: borrow *u8) -> bool {
     return true;
 }
 
-fn kvs_parse_udec(p: borrow *u8, avail: isize) -> i32 {
+// See kvs_server.tkb's own copy of this pair for the case-by-case
+// rationale (independent duplicate, same reasoning).
+variant KvsUdecResult {
+    Value(i32);
+    None;
+}
+
+fn kvs_parse_udec(p: borrow *u8, avail: isize) -> KvsUdecResult {
     let mut i: isize = 0;
     let mut v: i32 = 0;
     while (i < avail && p[i] >= '0' as u8 && p[i] <= '9' as u8) {
@@ -316,12 +342,12 @@ fn kvs_parse_udec(p: borrow *u8, avail: isize) -> i32 {
         i = i + 1;
     }
     if (i == 0) {
-        return -1;
+        return KvsUdecResult::None;
     }
-    return v;
+    return KvsUdecResult::Value(v);
 }
 
-fn kvs_content_length(req: borrow *u8, hdr_end: isize) -> i32 {
+fn kvs_content_length(req: borrow *u8, hdr_end: isize) -> KvsUdecResult {
     let mut i: isize = 0;
     while (i < hdr_end) {
         // "Content-Length: " is 16 bytes; see kvs_server.tkb's copy of
@@ -333,7 +359,7 @@ fn kvs_content_length(req: borrow *u8, hdr_end: isize) -> i32 {
         }
         i = i + 1;
     }
-    return -1;
+    return KvsUdecResult::None;
 }
 
 fn kvs_find_hdr_end(req: borrow *u8, len: isize) -> isize {
@@ -830,82 +856,93 @@ fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
             if (hdr_end < 4) {
                 return kvs_build_response(eth, ihl, idx, 400, "bad request\n", 12);
             }
-            let r: i32 = kvs_parse_path(req + 4, hdr_end - 4);
-            if (r == -3) {
-                return kvs_build_response(eth, ihl, idx, 404, "not found\n", 10);
+            match kvs_parse_path(req + 4, hdr_end - 4) {
+                KvsParsePathResult::NotFound => {
+                    return kvs_build_response(eth, ihl, idx, 404, "not found\n", 10);
+                }
+                KvsParsePathResult::Malformed => {
+                    return kvs_build_response(eth, ihl, idx, 400, "bad request\n", 12);
+                }
+                KvsParsePathResult::List => {
+                    let blen: isize = kvs_build_list_body();
+                    return kvs_build_response(eth, ihl, idx, 200, list_body, blen);
+                }
+                KvsParsePathResult::Key(r) => {
+                    let klen: isize = r as isize;
+                    match kvs_find(key_buf, klen) {
+                        KvsFindResult::NotFound => {
+                            return kvs_build_response(eth, ihl, idx, 404, "not found\n", 10);
+                        }
+                        KvsFindResult::Found(s) => {
+                            let vlen: isize = kv_val_len[s] as isize;
+                            return kvs_build_response(eth, ihl, idx, 200,
+                                (kv_vals as *u8) + (s as isize) * VAL_MAX, vlen);
+                        }
+                    }
+                }
             }
-            if (r == -2) {
-                return kvs_build_response(eth, ihl, idx, 400, "bad request\n", 12);
-            }
-            if (r == -1) {
-                let blen: isize = kvs_build_list_body();
-                return kvs_build_response(eth, ihl, idx, 200, list_body, blen);
-            }
-            let klen: isize = r as isize;
-            let slot: i32 = kvs_find(key_buf, klen);
-            if (slot < 0) {
-                return kvs_build_response(eth, ihl, idx, 404, "not found\n", 10);
-            }
-            let s: usize = slot as usize;
-            if (s < 16) {
-                let vlen: isize = kv_val_len[s] as isize;
-                return kvs_build_response(eth, ihl, idx, 200,
-                    (kv_vals as *u8) + (slot as isize) * VAL_MAX, vlen);
-            }
-            return kvs_build_response(eth, ihl, idx, 404, "not found\n", 10);
         }
         KvsMethod::Put => {
             if (hdr_end < 4) {
                 return kvs_build_response(eth, ihl, idx, 400, "bad request\n", 12);
             }
-            let r: i32 = kvs_parse_path(req + 4, hdr_end - 4);
-            if (r == -3) {
-                return kvs_build_response(eth, ihl, idx, 404, "not found\n", 10);
-            }
-            if (r == -2) {
-                return kvs_build_response(eth, ihl, idx, 400, "bad request\n", 12);
-            }
-            if (r == -1) {
-                return kvs_build_response(eth, ihl, idx, 405, "method not allowed\n", 19);
-            }
-
-            let vlen: isize = len - hdr_end;
-            let cl: i32 = kvs_content_length(req, hdr_end);
-            if (vlen < 0 || vlen > VAL_MAX || (cl >= 0 && (cl as isize) != vlen)) {
-                return kvs_build_response(eth, ihl, idx, 400, "bad request\n", 12);
-            }
-
-            let klen: isize = r as isize;
-            match kvs_put(key_buf, klen, req + hdr_end, vlen) {
-                KvsPutResult::TableFull => {
-                    return kvs_build_response(eth, ihl, idx, 507, "table full\n", 11);
+            match kvs_parse_path(req + 4, hdr_end - 4) {
+                KvsParsePathResult::NotFound => {
+                    return kvs_build_response(eth, ihl, idx, 404, "not found\n", 10);
                 }
-                KvsPutResult::Inserted => {}
-                KvsPutResult::Overwrote => {}
+                KvsParsePathResult::Malformed => {
+                    return kvs_build_response(eth, ihl, idx, 400, "bad request\n", 12);
+                }
+                KvsParsePathResult::List => {
+                    return kvs_build_response(eth, ihl, idx, 405, "method not allowed\n", 19);
+                }
+                KvsParsePathResult::Key(r) => {
+                    let vlen: isize = len - hdr_end;
+                    let mut cl_mismatch: bool = false;
+                    match kvs_content_length(req, hdr_end) {
+                        KvsUdecResult::Value(cl) => { cl_mismatch = (cl as isize) != vlen; }
+                        KvsUdecResult::None => {}
+                    }
+                    if (vlen < 0 || vlen > VAL_MAX || cl_mismatch) {
+                        return kvs_build_response(eth, ihl, idx, 400, "bad request\n", 12);
+                    }
+
+                    let klen: isize = r as isize;
+                    match kvs_put(key_buf, klen, req + hdr_end, vlen) {
+                        KvsPutResult::TableFull => {
+                            return kvs_build_response(eth, ihl, idx, 507, "table full\n", 11);
+                        }
+                        KvsPutResult::Inserted => {}
+                        KvsPutResult::Overwrote => {}
+                    }
+                    kvs_mark_slot_dirty(kvs_sd_pending_slot);
+                    return kvs_build_response(eth, ihl, idx, 202, "", 0);
+                }
             }
-            kvs_mark_slot_dirty(kvs_sd_pending_slot);
-            return kvs_build_response(eth, ihl, idx, 202, "", 0);
         }
         KvsMethod::Delete => {
             if (hdr_end < 7) {
                 return kvs_build_response(eth, ihl, idx, 400, "bad request\n", 12);
             }
-            let r: i32 = kvs_parse_path(req + 7, hdr_end - 7);
-            if (r == -3) {
-                return kvs_build_response(eth, ihl, idx, 404, "not found\n", 10);
+            match kvs_parse_path(req + 7, hdr_end - 7) {
+                KvsParsePathResult::NotFound => {
+                    return kvs_build_response(eth, ihl, idx, 404, "not found\n", 10);
+                }
+                KvsParsePathResult::Malformed => {
+                    return kvs_build_response(eth, ihl, idx, 400, "bad request\n", 12);
+                }
+                KvsParsePathResult::List => {
+                    return kvs_build_response(eth, ihl, idx, 405, "method not allowed\n", 19);
+                }
+                KvsParsePathResult::Key(r) => {
+                    let klen: isize = r as isize;
+                    if (kvs_del(key_buf, klen)) {
+                        kvs_mark_slot_dirty(kvs_sd_pending_slot);
+                        return kvs_build_response(eth, ihl, idx, 202, "", 0);
+                    }
+                    return kvs_build_response(eth, ihl, idx, 404, "not found\n", 10);
+                }
             }
-            if (r == -2) {
-                return kvs_build_response(eth, ihl, idx, 400, "bad request\n", 12);
-            }
-            if (r == -1) {
-                return kvs_build_response(eth, ihl, idx, 405, "method not allowed\n", 19);
-            }
-            let klen: isize = r as isize;
-            if (kvs_del(key_buf, klen)) {
-                kvs_mark_slot_dirty(kvs_sd_pending_slot);
-                return kvs_build_response(eth, ihl, idx, 202, "", 0);
-            }
-            return kvs_build_response(eth, ihl, idx, 404, "not found\n", 10);
         }
         KvsMethod::Other => {
             return kvs_build_response(eth, ihl, idx, 400, "bad request\n", 12);
