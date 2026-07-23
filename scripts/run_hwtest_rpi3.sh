@@ -493,7 +493,8 @@ RPI3_SMP_CORES=4 run_hw_test_rpi3 "multi_address_space (rpi3)" "$REPO_ROOT/examp
 run_hw_test_rpi3 "copy_on_write (rpi3)" "$REPO_ROOT/examples/copy_on_write/kernel_rpi3.elf" "$REPO_ROOT/examples/copy_on_write/copy_on_write.expected" 5 6
 run_hw_test_rpi3 "el1_smoke (rpi3)" "$REPO_ROOT/examples/el1_smoke/kernel_rpi3.elf" "$REPO_ROOT/examples/el1_smoke/el1_smoke.expected" 5 6
 run_hw_test_rpi3 "el0_smoke (rpi3)" "$REPO_ROOT/examples/el0_smoke/kernel_rpi3.elf" "$REPO_ROOT/examples/el0_smoke/el0_smoke.expected" 5 6
-run_hw_test_rpi3 "el0_elf_load (rpi3)" "$REPO_ROOT/examples/el0_elf_load/kernel_rpi3.elf" "$REPO_ROOT/examples/el0_elf_load/el0_elf_load.expected" 5 6
+run_hw_test_rpi3_stdin "el0_elf_load (rpi3)" "$REPO_ROOT/examples/el0_elf_load/kernel_rpi3.elf" \
+    "$REPO_ROOT/examples/el0_elf_load/el0_elf_load.expected" "$REPO_ROOT/examples/el0_elf_load/el0_elf_load.stdin"
 run_hw_test_rpi3 "rtc (rpi3)"            "$REPO_ROOT/examples/rtc/kernel_rpi3.elf"            "$REPO_ROOT/examples/rtc/rtc.expected"       5 30
 run_hw_test_rpi3 "timer (rpi3)"          "$REPO_ROOT/examples/timer/kernel_rpi3.elf"          "$REPO_ROOT/examples/timer/timer.expected"   5 30
 run_hw_test_rpi3_stdin "echo (rpi3)" "$REPO_ROOT/examples/echo/kernel_rpi3.elf" \

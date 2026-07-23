@@ -11,7 +11,12 @@
 // and real write()-with-pointer-validation SVC dispatch (duplicated here
 // rather than shared -- only two consumers exist so far; extract a
 // common module once a third needs the same policy, per this repo's own
-// stated practice of not extracting shared modules speculatively).
+// stated practice of not extracting shared modules speculatively). Also
+// implements read() (blocking on real UART RX), completing issue #153's
+// full three-syscall Stage 1 set (read/write/exit) -- the embedded test
+// program reads 3 bytes from stdin and echoes them back via a second
+// write(), proving real bidirectional I/O through validated user
+// pointers, not just the write() direction alone.
 //
 // cpio (newc) format: a 110-byte ASCII-hex-field header, then the
 // filename (c_namesize bytes, NUL-terminated), then file data -- both the
@@ -113,6 +118,7 @@ struct packed Elf64ProgramHeader {
 private let mut el1_stack: [u8; 4096] align(16);
 private let mut el0_entry_va: usize;
 private let mut el0_page_va: usize;
+private let mut el0_stack_top_va: usize;
 
 // A first, minimal formalization of "process state" (GitHub issue #153):
 // previously the exit syscall just printed a fixed string and parked,
@@ -176,6 +182,36 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
     if (ec != 0x15) {
         return (0, 0);
     }
+    if (syscall_num == 63) {
+        // read(fd, buf, len) -- GitHub issue #153's third and last Stage 1
+        // syscall. Same buffer validation as write() below. Blocks (spins
+        // on uart_rx_ready(), the same busy-wait idiom uart_putc's own TX
+        // path already uses) until it has collected exactly `len` bytes --
+        // a real, deterministic behavior, though a simplification of real
+        // read()'s POSIX semantics (a real short read returns as soon as
+        // ANY data is ready, not only once the full request is filled).
+        let fd: usize = x0;
+        let buf: usize = x1;
+        let len: usize = x2;
+        if (fd != 0) {
+            return (elr, SYSCALL_ERROR);
+        }
+        if (buf < el0_page_va || len > PAGE_SIZE) {
+            return (elr, SYSCALL_ERROR);
+        }
+        if (buf - el0_page_va > PAGE_SIZE - len) {
+            return (elr, SYSCALL_ERROR);
+        }
+        let dst: *u8 = buf as *u8;
+        let mut i: usize = 0;
+        while (i < len) {
+            while (uart_rx_ready() == false) {
+            }
+            dst[i as isize] = uart_isr_getc();
+            i = i + 1;
+        }
+        return (elr, len);
+    }
     if (syscall_num == 64) {
         let fd: usize = x0;
         let buf: usize = x1;
@@ -206,8 +242,7 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
 }
 
 fn el1_main() {
-    let el0_sp: usize = 0;
-    rpi3_el0_enter(el0_entry_va, el0_sp);
+    rpi3_el0_enter(el0_entry_va, el0_stack_top_va);
 }
 
 fn app_main() {
@@ -314,15 +349,38 @@ fn app_main() {
                 return;
             }
 
-            el0_entry_va = entry;
-            el0_page_va = page_va;
-            el0_mapping_abandon(mapping);
-            el0_space_abandon(space2);
-            el0_active_abandon(active);
+            // A second EL0-accessible page, right after the code page in
+            // the same 2MB dynamic window, becomes this process's real
+            // stack -- GitHub issue #153's "enter that binary at EL0 with
+            // a minimal stack" was previously just SP_EL0 = 0, never
+            // dereferenced by a payload that touched no memory at all.
+            let stack_va: {0x80000000..<0x80200000 as usize} = 0x80001000;
+            match page_alloc() {
+                PageAllocResult::OutOfMemory => {
+                    uart_puts("stack allocation failed\n");
+                    el0_mapping_abandon(mapping);
+                    el0_space_abandon(space2);
+                    el0_active_abandon(active);
+                    return;
+                }
+                PageAllocResult::Allocated(stack_page) => {
+                    let (space3, stack_pending) =
+                        map_second_page_el0_exec(space2, stack_page, stack_va);
+                    let stack_mapping = tlb_invalidate_second(space3, stack_pending);
 
-            let el1_sp_base: usize = (el1_stack as *u8) as usize;
-            let el1_sp: usize = el1_sp_base + 4096;
-            rpi3_el1_enter(el1_sp);
+                    el0_entry_va = entry;
+                    el0_page_va = page_va;
+                    el0_stack_top_va = stack_va + PAGE_SIZE;
+                    el0_mapping_abandon(mapping);
+                    el0_mapping_abandon(stack_mapping);
+                    el0_space_abandon(space3);
+                    el0_active_abandon(active);
+
+                    let el1_sp_base: usize = (el1_stack as *u8) as usize;
+                    let el1_sp: usize = el1_sp_base + 4096;
+                    rpi3_el1_enter(el1_sp);
+                }
+            }
         }
     }
 }
