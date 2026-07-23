@@ -86,6 +86,22 @@ const PHY_AN_100_HALF: u32 = 0x0080;
 const PHY_AN_10_FULL:  u32 = 0x0040;
 const PHY_AN_10_HALF:  u32 = 0x0020;
 
+// phy_init()'s bring-up loops used to spin forever, with no way back if the
+// PHY never reports reset-done/auto-neg-done -- a permanently, legitimately
+// possible state (cable unplugged, link partner never powered on) that a
+// real driver must not block forever on. These bound each wait to a fixed
+// iteration count (no millisecond timer is available to every net_init()
+// caller -- some are plain bare-metal loops with no RTOS tick running --
+// so a large iteration count is this codebase's own established bounded-
+// wait idiom, matching sd_acmd41/sd_wait_not_busy's `0..<1000000` in
+// examples/common_stm32/sdmmc.tkb). Each MDIO register read/write is one
+// real MDIO bus transaction (mdio_wait()), not a single instruction, so
+// PHY_AUTONEG_WAIT_ITERS's 1000000 iterations is on the order of several
+// real seconds, not CPU cycles.
+const PHY_RESET_WAIT_ITERS: u32 = 100000;
+const PHY_AUTONEG_WAIT_ITERS: u32 = 1000000;
+const PHY_LINK_RETRIES: u32 = 5;
+
 // -- DMA descriptor ring geometry --------------------------------------------
 // Descriptor ownership transitions use the compiler's DMA builtins below.
 // They provide both a compiler memory boundary and the target-specific
@@ -275,39 +291,60 @@ fn eth_mac_dma_reset() {
 }
 
 // Resets the PHY, advertises every 10/100 mode, restarts auto-negotiation,
-// and busy-waits for both auto-neg-complete and link-up. Returns the
+// and waits for both auto-neg-complete and link-up. Returns the
 // negotiated (speed_is_100, full_duplex) pair packed as speed*2+duplex
-// (bit1=speed100, bit0=fullduplex), or -1 if no common mode was found
-// (should not happen once BSR reports auto-neg complete, since both link
-// partners always support at least 10BASE-T half duplex).
+// (bit1=speed100, bit0=fullduplex), or -1 if no link could be established
+// after PHY_LINK_RETRIES full reset+auto-neg attempts, or if auto-neg
+// reported done with no common mode found (should not happen: both link
+// partners always support at least 10BASE-T half duplex). A cable that is
+// never plugged in, or a link partner that never powers on, are normal,
+// permanently possible operating conditions -- reported as -1 like any
+// other bring-up failure, not spun on forever.
 fn phy_init() -> i32 {
-    mdio_write(PHY_BCR, PHY_BCR_RESET);
-    while ((mdio_read(PHY_BCR) & PHY_BCR_RESET) != 0) {}
-
-    mdio_write(PHY_ANAR, PHY_ANAR_ADVERTISE_ALL);
-    mdio_write(PHY_BCR, PHY_BCR_AUTONEG_EN | PHY_BCR_RESTART_AN);
-
-    while (true) {
-        let bsr: u32 = mdio_read(PHY_BSR);
-        if ((bsr & PHY_BSR_AUTONEG_DONE) != 0) {
-            if ((bsr & PHY_BSR_LINK_UP) != 0) {
+    for attempt: u32 in 0..<PHY_LINK_RETRIES {
+        mdio_write(PHY_BCR, PHY_BCR_RESET);
+        let mut reset_done: bool = false;
+        for tries: u32 in 0..<PHY_RESET_WAIT_ITERS {
+            if ((mdio_read(PHY_BCR) & PHY_BCR_RESET) == 0) {
+                reset_done = true;
                 break;
             }
         }
-    }
+        if (reset_done == false) {
+            continue;
+        }
 
-    let common: u32 = mdio_read(PHY_ANAR) & mdio_read(PHY_ANLPAR) & 0x01E0;
-    if ((common & PHY_AN_100_FULL) != 0) {
-        return 3; // 100 Mbps, full duplex
-    } else if ((common & PHY_AN_100_HALF) != 0) {
-        return 2; // 100 Mbps, half duplex
-    } else if ((common & PHY_AN_10_FULL) != 0) {
-        return 1; // 10 Mbps, full duplex
-    } else if ((common & PHY_AN_10_HALF) != 0) {
-        return 0; // 10 Mbps, half duplex
-    } else {
-        return -1;
+        mdio_write(PHY_ANAR, PHY_ANAR_ADVERTISE_ALL);
+        mdio_write(PHY_BCR, PHY_BCR_AUTONEG_EN | PHY_BCR_RESTART_AN);
+
+        let mut linked: bool = false;
+        for tries: u32 in 0..<PHY_AUTONEG_WAIT_ITERS {
+            let bsr: u32 = mdio_read(PHY_BSR);
+            if ((bsr & PHY_BSR_AUTONEG_DONE) != 0) {
+                if ((bsr & PHY_BSR_LINK_UP) != 0) {
+                    linked = true;
+                    break;
+                }
+            }
+        }
+        if (linked == false) {
+            continue;
+        }
+
+        let common: u32 = mdio_read(PHY_ANAR) & mdio_read(PHY_ANLPAR) & 0x01E0;
+        if ((common & PHY_AN_100_FULL) != 0) {
+            return 3; // 100 Mbps, full duplex
+        } else if ((common & PHY_AN_100_HALF) != 0) {
+            return 2; // 100 Mbps, half duplex
+        } else if ((common & PHY_AN_10_FULL) != 0) {
+            return 1; // 10 Mbps, full duplex
+        } else if ((common & PHY_AN_10_HALF) != 0) {
+            return 0; // 10 Mbps, half duplex
+        } else {
+            return -1;
+        }
     }
+    return -1; // no link established after PHY_LINK_RETRIES reset+auto-neg attempts
 }
 
 fn eth_rx_ring_init() {
