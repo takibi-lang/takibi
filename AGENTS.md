@@ -180,6 +180,49 @@ up.
   against their own occasional over-ambitious asks -- treat a request that smells speculative as
   a prompt to flag the tradeoff, not as an instruction to quietly build the maximal version.
 
+## Design Principle: Return a Variant, Not an Int Sentinel, for Fallible Operations
+
+New functions with more than one possible outcome (success/failure, or several distinct
+statuses) return a closed `variant` (see `SPEC.md`'s "Closed Variants and Existential Owners"),
+not a plain `i32`/`bool` sentinel. This is a durable rule for this project, not a one-off
+preference, adopted after GitHub issue #150's investigation of `fat12.tkb`'s pre-existing `-1`
+sentinel convention.
+
+- **Why**: a plain `i32` return (`0` on success, `-1` on failure, or several magic values
+  layered onto the same int) puts the burden of correct interpretation entirely on the call
+  site's own `if`/comparison code, with nothing stopping a caller from checking the wrong
+  condition, comparing against the wrong sentinel, or dropping the result on the floor
+  entirely. A `variant` return forces a `match` to name every outcome explicitly, so the
+  compiler rejects a call site that only handles one arm. Concrete precedent:
+  `examples/common/fat12.tkb`'s `FatIoResult`/`FatFormatStatus`,
+  `examples/common_rpi3/usb_msc.tkb` and `examples/common_stm32/sdmmc.tkb`'s `DiskIoResult`,
+  and `examples/kvs_server/kvs_server.tkb`'s `KvsPutResult` -- all replaced an existing
+  `i32` 0/1/-1-style sentinel with a named variant plus a `match` at every call site.
+- **A plain success/failure result gets `variant Foo { Ok; Err(i32); }`** (see `FatIoResult`);
+  a status with more than two meaningfully distinct outcomes gets one case per outcome (see
+  `FatFormatStatus`'s `IoError`/`NotFormatted`/`Formatted`, or `KvsPutResult`'s
+  `Inserted`/`Overwrote`/`TableFull`) rather than layering extra magic values onto one `i32`.
+  A result whose success case carries data (e.g. `sd_cmd3`'s RCA) gets its own
+  value-or-error variant (`SdCmd3Result`) rather than overloading a negative int as both "the
+  value" and "an error code."
+- **A "found or not found" search/lookup result is a different shape, not this rule.**
+  Functions like `fat_find_entry`/`kvs_find` (return the found index, or a sentinel meaning
+  "absent") answer "does X exist and where," not "did the operation succeed" -- they were
+  deliberately left alone during the issue #150 conversion pass. Converting these to an
+  `Option`-shaped variant is a legitimate future step, but is a separate judgment call from
+  this rule, not automatically required by it.
+- **This does not by itself stop a caller from ignoring the result.** An ordinary
+  (`unrestricted`-kind) variant can still be bound and never matched, or a call's result never
+  bound at all -- only `linear` forces consumption on every path, and a `linear` "must-check"
+  status with no backing resource to justify the linearity is open design work, not yet settled
+  (see GitHub issue #150). This rule upgrades "handled the wrong arm" from silent to a compile
+  error; it does not upgrade "ignored the result entirely" from silent to a compile error.
+- **Retrofitting an existing `i32`-returning function is a case-by-case call, not a mandated
+  sweep.** Converting a function already in the codebase touches every call site, which can
+  span several files -- weigh the blast radius against the benefit for that specific function
+  (as issue #150's own incremental, one-cluster-at-a-time approach did) rather than converting
+  everything in one pass.
+
 ## Language Specification
 
 **See `SPEC.md` for the current language specification** (types, syntax,
