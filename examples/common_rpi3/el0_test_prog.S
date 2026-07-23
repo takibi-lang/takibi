@@ -22,6 +22,10 @@ el0_prog_entry:
     movz    x1, #12
     cmp     x0, x1
     b.ne    .Lel0_prog_hang
+    movz    x0, #0              /* exit status 0 (success) -- a deliberate
+                                    value, not leftover from write()'s own
+                                    x0 return, so the kernel-reported exit
+                                    status is a real signal, not noise */
     movz    x8, #93            /* __NR_exit */
     svc     #0
 .Lel0_prog_hang:

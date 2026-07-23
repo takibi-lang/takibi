@@ -114,6 +114,38 @@ private let mut el1_stack: [u8; 4096] align(16);
 private let mut el0_entry_va: usize;
 private let mut el0_page_va: usize;
 
+// A first, minimal formalization of "process state" (GitHub issue #153):
+// previously the exit syscall just printed a fixed string and parked,
+// with the process's own real exit status (x0 at the exit() call, per
+// the same convention Linux itself uses) discarded. Recording it as a
+// typed outcome, instead of a bare printed string, is a first step
+// toward a real process control block -- there is still only ever one
+// process, no PID, no parent/child, and Exited is currently a dead end
+// (see the note on process_outcome_report below for why resource
+// reclamation cannot go further yet). Kept as a local value, not a
+// persistent global: a bare global cannot hold a variant in this
+// language's current Slice 3 (a real process TABLE queryable after the
+// fact -- e.g. by a future parent's wait() -- will need the same stable
+// owner slot protocol examples/copy_on_write's own CowStateStore already
+// established, not a plain global).
+variant ProcessOutcome {
+    Running;
+    Exited(usize);
+}
+
+fn process_outcome_report(outcome: ProcessOutcome) {
+    match outcome {
+        ProcessOutcome::Running => {
+            uart_puts("process still running\n");
+        }
+        ProcessOutcome::Exited(status) => {
+            uart_puts("process exited with status ");
+            uart_print(status);
+            uart_puts("\n");
+        }
+    }
+}
+
 fn el0_mapping_abandon(mapping: sink MappingOwner[asid, va, p]) {}
 fn el0_space_abandon(space: sink AddressSpaceOwner[asid, state]) {}
 fn el0_active_abandon(active: sink ActiveAddressSpace[core, asid]) {}
@@ -123,6 +155,21 @@ fn el0_active_abandon(active: sink ActiveAddressSpace[core, asid]) {}
 // el0_entry_va (this file's e_entry need not be the first byte of the
 // first segment, even though today's test program happens to make them
 // equal).
+//
+// exit()'s real status (x0) is now recorded and reported -- but the
+// mapped page, PageOwner, and address space it lives in are NOT reclaimed
+// here: they are EL2-level resources (TTBR0_EL2, only reachable by code
+// actually running at EL2), and nothing routes a request from EL1 back
+// up to EL2 yet. AArch64's `hvc` instruction is architecturally the right
+// tool (EL1 explicitly calling into EL2, the same way `svc` lets EL0
+// explicitly call into EL1) -- an EL1->EL2 call boundary, mirroring this
+// session's own EL0->EL1 SVC boundary, is the concrete next mechanism a
+// real process teardown needs. Deliberately not attempted in this
+// session: the EL2->EL1 drop alone surfaced one genuinely non-obvious
+// hardware bug (HCR_EL2.RW) that needed live JTAG register
+// inspection to diagnose; a new privilege-crossing mechanism deserves
+// the same unhurried real-hardware verification budget, not a rushed
+// attempt against a tight remaining time window.
 fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
                     x2: usize, elr: usize) -> (usize, usize) {
     let ec: usize = (esr >> 26) & 0x3F;
@@ -151,7 +198,8 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
         return (elr, len);
     }
     if (syscall_num == 93 || syscall_num == 94) {
-        uart_puts("syscall exit\n");
+        let outcome = ProcessOutcome::Exited(x0);
+        process_outcome_report(outcome);
         return (1, 0);
     }
     return (0, 0);
