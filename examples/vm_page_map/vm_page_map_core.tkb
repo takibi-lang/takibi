@@ -563,6 +563,38 @@ fn map_page(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
     return (occupied, pending);
 }
 
+// Same as map_page, but AP[1] (bit 6) is also set: under the EL1&0
+// translation regime this page is reinterpreted through once mapped via
+// TTBR0_EL1 (see examples/common_rpi3/el1_asm.S), AP[2:1] = 01 means "EL1
+// RW, EL0 RW" instead of map_page's own AP[2:1] = 00 ("EL1 RW, EL0 none")
+// -- see that file's header comment for the AP-encoding correspondence
+// this project relies on between the EL2 and EL1&0 regimes. Needed to let
+// EL0 code (GitHub issue #153) execute from this page at all -- the XN
+// bits (UXN/PXN, bits 54/53) are not touched here and stay 0 (executable)
+// on every page in this codebase, so AP[1] alone is what currently gates
+// EL0 execute access. Known simplification, not yet hardened: this page
+// is also EL0-*writable* (no W^X split yet -- would need a permission-
+// change operation this module doesn't have, deferred until a real
+// process loader needs it) and not marked PXN, so EL1 could technically
+// still execute EL0-owned/writable content too.
+fn map_page_el0_exec(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
+                     page: sink PageOwner[p],
+                     va: {DYN_VA_BASE..<DYN_VA_LIMIT as usize} @ va)
+        -> (AddressSpaceOwner[asid, SpaceState::Occupied],
+            TlbInvalidationPending[asid, va, p]) {
+    let l3_index: usize = (va - DYN_VA_BASE) / PAGE_SIZE;
+    let pool_base_ptr: *u8 = page_pool as *u8;
+    let pool_base: usize = pool_base_ptr as usize;
+    let phys_addr: usize = pool_base + page.index * PAGE_SIZE;
+    l3_address_space_write(space.slot, l3_index, phys_addr | 0x747);
+
+    let mut occupied: AddressSpaceOwner[asid, SpaceState::Occupied] =
+        { space.tag, space.slot };
+    let mut pending: TlbInvalidationPending[asid, va, p] =
+        { space.tag, space.slot, va, page.index, page.p_witness };
+    return (occupied, pending);
+}
+
 // Map a second, independent page into a space that already has one live
 // mapping (GitHub issue #153 Stage 1 prerequisite). Same PTE write as
 // map_page above, at a caller-chosen distinct `va` -- the two mappings

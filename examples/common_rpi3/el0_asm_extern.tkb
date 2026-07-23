@@ -1,0 +1,8 @@
+// extern fn declarations for examples/common_rpi3/el0_asm.S (GitHub issue
+// #153), split into its own file matching examples/common_rpi3/
+// tlb_asm_extern.tkb's own reasoning (a duplicate `extern fn` declaration
+// is a hard conflict if two files needing it both declared it locally).
+
+extern fn el0_payload_addr() -> usize;
+extern fn el0_payload_len() -> usize;
+extern fn rpi3_el0_enter(el0_pc: usize, el0_sp: usize) !{noreturn};

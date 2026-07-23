@@ -1,0 +1,3 @@
+el0_smoke
+syscall write arg0=99
+syscall exit

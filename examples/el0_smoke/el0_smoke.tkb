@@ -1,0 +1,109 @@
+// EL1 -> EL0 drop and the real SVC trap boundary (GitHub issue #153).
+// Builds on examples/el1_smoke's proven EL2->EL1 drop: this example maps
+// one EL0-executable page, copies a tiny hand-written payload
+// (examples/common_rpi3/el0_asm.S) into it, then lets EL0 issue two real
+// AArch64 Linux syscall numbers (write=64, exit=93) via `svc #0`, proving
+// both the trap-and-resume path and the trap-and-terminate path.
+//
+// This deliberately does NOT yet implement real write()/exit() semantics
+// (no fd/buffer dispatch, no process abstraction) -- see
+// el0_svc_dispatch below and examples/common_rpi3/el0_asm.S's header
+// comment. Proving the mechanism is this milestone's only goal; real
+// syscall semantics and the ELF/cpio loader are separate future work.
+//
+// RPi3-only, same reasons as examples/el1_smoke and examples/vm_page_map.
+//
+// This is the known-good unrefined baseline for a genuinely new mechanism
+// (EL0 entry, real SVC dispatch); --forbid-trap hardening is a separate
+// later pass per this repo's process.
+
+use "examples/vm_page_map/vm_page_map_core.tkb";
+use "examples/common_rpi3/el0_asm_extern.tkb";
+use "examples/common_rpi3/el1_asm_extern.tkb";
+
+private let mut el1_stack: [u8; 4096] align(16);
+private let mut el0_entry_va: usize;
+
+// app_main never returns (rpi3_el1_enter transitions permanently to
+// EL1/EL0): the mapping, occupied address space, and active-context
+// authority below must stay live going into that transition -- tearing
+// them down first would revert TTBR0_EL2 before el1_asm.S's
+// rpi3_el1_enter ever reads it. They are deliberately abandoned rather
+// than unmapped, the same "no real teardown, control never returns" idiom
+// examples/vm_page_map/vm_page_map_core.tkb's own cpu_owner_halt already
+// uses for CpuOwner.
+fn el0_mapping_abandon(mapping: sink MappingOwner[asid, va, p]) {}
+fn el0_space_abandon(space: sink AddressSpaceOwner[asid, state]) {}
+fn el0_active_abandon(active: sink ActiveAddressSpace[core, asid]) {}
+
+// Syscall dispatch policy for this milestone (see el0_asm.S's own header
+// comment for the return-value convention: 0 = unhandled/fail-stop,
+// 1 = terminate, `elr` = resume EL0 at that address).
+fn el0_svc_dispatch(esr: usize, syscall_num: usize, arg0: usize, elr: usize) -> usize {
+    let ec: usize = (esr >> 26) & 0x3F;
+    if (ec != 0x15) {
+        return 0;
+    }
+    if (syscall_num == 64) {
+        uart_puts("syscall write arg0=");
+        uart_print(arg0);
+        uart_puts("\n");
+        return elr;
+    }
+    if (syscall_num == 93 || syscall_num == 94) {
+        uart_puts("syscall exit\n");
+        return 1;
+    }
+    return 0;
+}
+
+// Entered once, at EL1, by el1_asm.S's rpi3_el1_enter via a plain `bl`.
+// Drops straight to EL0 using the global el0_entry_va app_main already
+// set up before the EL2->EL1 drop; never returns (only a subsequent SVC
+// trap, handled by el0_sync_entry/el0_svc_dispatch above, runs Takibi
+// code again).
+fn el1_main() {
+    // Never dereferenced by this hand-written payload (it does no memory
+    // access at all) -- see rpi3_el0_enter's own comment.
+    let el0_sp: usize = 0;
+    rpi3_el0_enter(el0_entry_va, el0_sp);
+}
+
+fn app_main() {
+    uart_puts("el0_smoke\n");
+    page_pool_init();
+
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {
+            uart_puts("allocation failed\n");
+        }
+        PageAllocResult::Allocated(page) => {
+            let seed: {0..<2 as usize} = 0;
+            let inactive = address_space_new(seed);
+            let core: usize = 0;
+            let (space, active) = address_space_activate(inactive, core);
+            let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+            let (space2, pending) = map_page_el0_exec(space, page, va);
+            let mapping = tlb_invalidate(space2, pending);
+
+            let dst = mapping_bytes(mapping);
+            let src_addr: usize = el0_payload_addr();
+            let src_len: usize = el0_payload_len();
+            let src_ptr: *u8 = src_addr as *u8;
+            let mut i: usize = 0;
+            while (i < src_len) {
+                dst[i] = src_ptr[i as isize];
+                i = i + 1;
+            }
+
+            el0_entry_va = va;
+            el0_mapping_abandon(mapping);
+            el0_space_abandon(space2);
+            el0_active_abandon(active);
+
+            let el1_sp_base: usize = (el1_stack as *u8) as usize;
+            let el1_sp: usize = el1_sp_base + 4096;
+            rpi3_el1_enter(el1_sp);
+        }
+    }
+}

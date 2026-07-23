@@ -54,7 +54,9 @@ el1_vectors:
     .align  7
     b       .                   /* 0x380: SError */
     .align  7
-    b       .                   /* 0x400: Synchronous (lower EL, AArch64) */
+    b       el0_sync_entry      /* 0x400: Synchronous (lower EL, AArch64) --
+                                    GitHub issue #153: real SVC entry once
+                                    an example drops further to EL0 */
     .align  7
     b       .                   /* 0x480: IRQ */
     .align  7
@@ -172,3 +174,15 @@ rpi3_el1_enter:
 .Lel1_park:
     wfe
     b       .Lel1_park
+
+/* -- Default (no-op) EL0 synchronous-exception entry -----------------------
+   el1_vectors' Lower-EL-AArch64-Synchronous entry branches here
+   unconditionally, same as startup.S's own weak rpi3_irq_dispatch/
+   rpi3_sync_exception_dispatch defaults -- an example that never drops to
+   EL0 (like el1_smoke) still needs this symbol to resolve at link time.
+   examples/common_rpi3/el0_asm.S provides the strong override (real SVC
+   register-frame save + el0_svc_dispatch call) for any example that
+   actually calls rpi3_el0_enter (GitHub issue #153). */
+    .weak   el0_sync_entry
+el0_sync_entry:
+    b       .
