@@ -484,6 +484,7 @@ RPI3_SMP_CORES=4 run_hw_test_rpi3 "smp_slab (rpi3)" "$REPO_ROOT/examples/smp_sla
 run_hw_test_rpi3 "page_pool (rpi3)"       "$REPO_ROOT/examples/page_pool/kernel_rpi3.elf"       "$REPO_ROOT/examples/page_pool/page_pool.expected"
 run_hw_test_rpi3 "vm_page_map (rpi3)"     "$REPO_ROOT/examples/vm_page_map/kernel_rpi3.elf"     "$REPO_ROOT/examples/vm_page_map/vm_page_map.expected" 5 6
 run_hw_test_rpi3 "two_page_map (rpi3)"    "$REPO_ROOT/examples/two_page_map/kernel_rpi3.elf"    "$REPO_ROOT/examples/two_page_map/two_page_map.expected" 5 6
+run_hw_test_rpi3 "process_vm_smoke (rpi3)" "$REPO_ROOT/examples/process_vm_smoke/kernel_rpi3.elf" "$REPO_ROOT/examples/process_vm_smoke/process_vm_smoke.expected" 5 6
 run_hw_test_rpi3 "vm_context_switch (rpi3)" "$REPO_ROOT/examples/vm_context_switch/kernel_rpi3.elf" "$REPO_ROOT/examples/vm_context_switch/vm_context_switch.expected" 5 6
 run_hw_test_rpi3 "vm_task_switch (rpi3)" "$REPO_ROOT/examples/vm_task_switch/kernel_rpi3.elf" "$REPO_ROOT/examples/vm_task_switch/vm_task_switch.expected" 5 30
 RPI3_SMP_CORES=4 run_hw_test_rpi3 "smp_task_migrate (rpi3)" "$REPO_ROOT/examples/smp_task_migrate/kernel_rpi3.elf" "$REPO_ROOT/examples/smp_task_migrate/smp_task_migrate.expected" 5 30

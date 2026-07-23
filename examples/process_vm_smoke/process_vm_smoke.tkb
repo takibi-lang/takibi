@@ -1,0 +1,60 @@
+// Coarse-grained multi-page address space smoke test (GitHub issue #156):
+// proves examples/vm_page_map/vm_page_map_core.tkb's new
+// ProcessAddressSpace/process_address_space_map/process_address_space_unmap
+// genuinely maps more than the old hand-written 2-page limit
+// (map_page/map_second_page), using ordinary array bookkeeping instead of
+// N individually-typed MappingOwners -- see that file's own header
+// comment on ProcessAddressSpace for the full design rationale (indexed
+// linear owners cannot be stored in an array in this language today).
+//
+// Maps 3 pages (page_pool has only PAGE_COUNT=4 slots total; 3 leaves
+// headroom without touching that shared constant), writes a distinct
+// marker byte through each page's own raw VA, reads all three back to
+// prove they are genuinely three separate live translations (not one
+// page being reused three times), then tears the whole thing down
+// through process_address_space_unmap.
+//
+// RPi3-only, same reasons as examples/vm_page_map.
+//
+// This is the known-good unrefined baseline for a genuinely new
+// mechanism (coarse-grained multi-page ownership); --forbid-trap
+// hardening is a separate later pass per this repo's process.
+
+use "examples/vm_page_map/vm_page_map_core.tkb";
+
+fn app_main() {
+    page_pool_init();
+    uart_puts("process_vm_smoke\n");
+
+    let seed: {0..<2 as usize} = 0;
+    let inactive = address_space_new(seed);
+    let core: usize = 0;
+    let (space, active) = address_space_activate(inactive, core);
+    let base_va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+
+    match process_address_space_map(space, active, base_va, 3) {
+        ProcessMapResult::Failed(failed_inactive) => {
+            uart_puts("allocation failed\n");
+            address_space_free(failed_inactive);
+        }
+        ProcessMapResult::Mapped(pair) => {
+            let (pas, active) = pair;
+            let ptr0: *u8 = base_va as *u8;
+            let ptr1: *u8 = (base_va + PAGE_SIZE) as *u8;
+            let ptr2: *u8 = (base_va + 2 * PAGE_SIZE) as *u8;
+            *ptr0 = 10;
+            *ptr1 = 20;
+            *ptr2 = 30;
+
+            uart_puts("page0: "); uart_print(*ptr0);
+            uart_puts(" page1: "); uart_print(*ptr1);
+            uart_puts(" page2: "); uart_print(*ptr2);
+            uart_puts("\n");
+
+            let empty = process_address_space_unmap(pas);
+            let inactive2 = address_space_deactivate(active, empty);
+            address_space_free(inactive2);
+        }
+    }
+    uart_puts("done\n");
+}
