@@ -82,38 +82,46 @@ fn mem_block_write(sector: u32, buf: *u8) -> i32 {
     return -1;
 }
 
+// Status of a host-semihosting-file operation -- see AGENTS.md's "Return
+// a Variant, Not an Int Sentinel" principle. Shared by dump_disk_to_host
+// and load_seed_from_host below, since both are plain Ok/Err.
+variant HostIoResult {
+    Ok;
+    Err;
+}
+
 // Writes the whole in-memory disk out to a real host file via ARM
 // semihosting so scripts/fatfs_mtools_test.py can verify it with mtools.
 // mode 5 = "wb" (create/truncate, write, binary).
-fn dump_disk_to_host() -> i32 {
+fn dump_disk_to_host() -> HostIoResult {
     let name: *u8 = "fatfs_disk.img";
     let handle: i32 = semihosting_open(name, cstr_len(name) as i32, 5);
     if (handle < 0) {
-        return -1;
+        return HostIoResult::Err;
     }
     let not_written: i32 = semihosting_write(handle, disk, (SECTOR_SIZE * TOTAL_SECTORS) as i32);
     semihosting_close(handle);
     if (not_written != 0) {
-        return -1;
+        return HostIoResult::Err;
     }
-    return 0;
+    return HostIoResult::Ok;
 }
 
 // Loads a host-created FAT image (built with real mformat/mcopy by the
 // test harness, not by fatfs.tkb) into `disk`, so fat_open/fat_read can be
 // exercised against an independently-written image. mode 1 = "rb".
-fn load_seed_from_host() -> i32 {
+fn load_seed_from_host() -> HostIoResult {
     let name: *u8 = "fatfs_seed.img";
     let handle: i32 = semihosting_open(name, cstr_len(name) as i32, 1);
     if (handle < 0) {
-        return -1;
+        return HostIoResult::Err;
     }
     let not_read: i32 = semihosting_read(handle, disk, (SECTOR_SIZE * TOTAL_SECTORS) as i32);
     semihosting_close(handle);
     if (not_read != 0) {
-        return -1;
+        return HostIoResult::Err;
     }
-    return 0;
+    return HostIoResult::Ok;
 }
 
 fn app_main() {
@@ -246,10 +254,9 @@ fn app_main() {
     // counterpart of dma_finish_rx above) does exactly that on ARM/Thumb;
     // a harmless barrier on QEMU/AArch64, same reasoning as above.
     dma_prepare_tx(disk, SECTOR_SIZE * TOTAL_SECTORS);
-    if (dump_disk_to_host() == 0) {
-        uart_puts("dump: OK\r\n");
-    } else {
-        uart_puts("dump: FAIL\r\n");
+    match dump_disk_to_host() {
+        HostIoResult::Ok => { uart_puts("dump: OK\r\n"); }
+        HostIoResult::Err => { uart_puts("dump: FAIL\r\n"); }
     }
 
     uart_puts("done\r\n");
