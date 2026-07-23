@@ -223,8 +223,8 @@ let parser_tests = [
          fn parsed_mint() -> ParsedPending { return view ParsedPending; }" with
       | [Ast.ViewDef ("ParsedPending", Ast.KindLinear, [], true, _);
          Ast.FuncDef { ret_type = Some (Ast.TypeNamed "ParsedPending");
-                       body = [{ desc = Ast.Return
-                         { desc = Ast.ViewLit ("ParsedPending", []); _ }; _ }]; _ }] -> ()
+                       body = [{ desc = Ast.Return (Some
+                         { desc = Ast.ViewLit ("ParsedPending", []); _ }); _ }]; _ }] -> ()
       | _ -> Alcotest.fail "expected a private linear ViewDef and ViewLit");
 
   Alcotest.test_case "Slice 6 indexed view declaration and mint expression parse" `Quick
@@ -243,9 +243,9 @@ let parser_tests = [
                  [Ast.StaticName "id"; Ast.StaticInt 0]))))];
              ret_type = Some (Ast.TypeIndexed
                ("ParsedPhase", [Ast.StaticName "id"; Ast.StaticInt 1]));
-             body = [{ desc = Ast.Return
+             body = [{ desc = Ast.Return (Some
                { desc = Ast.ViewLit
-                   ("ParsedPhase", [Ast.StaticName "id"; Ast.StaticInt 1]); _ };
+                   ("ParsedPhase", [Ast.StaticName "id"; Ast.StaticInt 1]); _ });
                _ }]; _ }] -> ()
       | _ -> Alcotest.fail "expected indexed ViewDef, type, and ViewLit nodes");
 
@@ -325,8 +325,8 @@ let parser_tests = [
              ("Some", Some (Ast.TypeExists
                ("n", Ast.TypeUsize,
                 Ast.TypeIndexed ("ParsedOwner", [Ast.StaticName "n"]))))], _);
-         Ast.FuncDef { body = [{ desc = Ast.Return
-           { desc = Ast.VariantCtor ("ParsedMaybe", "Some", _); _ }; _ }]; _ };
+         Ast.FuncDef { body = [{ desc = Ast.Return (Some
+           { desc = Ast.VariantCtor ("ParsedMaybe", "Some", _); _ }); _ }]; _ };
          Ast.FuncDef { body = [{ desc = Ast.Match (_,
            [Ast.ArmVariant ("ParsedMaybe", "None", None, []);
             Ast.ArmVariant ("ParsedMaybe", "Some", Some ("owner", false), [])]); _ }]; _ }] -> ()
@@ -665,7 +665,7 @@ let parser_tests = [
     match parse "fn f() i32 { return 42; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.IntLit 42L; _ } -> ()
+         | Ast.Return (Some { desc = Ast.IntLit 42L; _ }) -> ()
          | _ -> Alcotest.fail "expected Return(IntLit 42)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -737,7 +737,7 @@ let parser_tests = [
     match parse "fn f() i32 { return 1 + 2 * 3; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+         | Ast.Return (Some { desc = Ast.BinOp (op, _, _); _ }) ->
              Alcotest.check binop_t "outer op is Add" Ast.Add op
          | _ -> Alcotest.fail "expected Return(BinOp)")
     | _ -> Alcotest.fail "unexpected structure"
@@ -747,7 +747,7 @@ let parser_tests = [
     match parse "fn f() i32 { return 1 != 2; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+         | Ast.Return (Some { desc = Ast.BinOp (op, _, _); _ }) ->
              Alcotest.check binop_t "op is Ne" Ast.Ne op
          | _ -> Alcotest.fail "expected Return(BinOp)")
     | _ -> Alcotest.fail "unexpected structure"
@@ -757,7 +757,7 @@ let parser_tests = [
     match parse "fn f() i32 { return g(1, 2); }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.Call ("g", args); _ } ->
+         | Ast.Return (Some { desc = Ast.Call ("g", args); _ }) ->
              Alcotest.(check int) "arg count" 2 (List.length args)
          | _ -> Alcotest.fail "expected Return(Call)")
     | _ -> Alcotest.fail "unexpected structure"
@@ -817,7 +817,7 @@ let parser_tests = [
     match parse "fn f(p: *i32) i32 { return *p; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.Deref { desc = Ast.Var "p"; _ }; _ } -> ()
+         | Ast.Return (Some { desc = Ast.Deref { desc = Ast.Var "p"; _ }; _ }) -> ()
          | _ -> Alcotest.fail "expected Return(Deref(Var p))")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -845,7 +845,7 @@ let parser_tests = [
     match parse "fn f() i32 { return 0xff; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.IntLit 255L; _ } -> ()
+         | Ast.Return (Some { desc = Ast.IntLit 255L; _ }) -> ()
          | _ -> Alcotest.fail "expected Return(IntLit 255)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -857,7 +857,7 @@ let parser_tests = [
     match parse "fn f() u64 { return 0xFFFFFFFFFFFFFFFF; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.IntLit (-1L); _ } -> ()
+         | Ast.Return (Some { desc = Ast.IntLit (-1L); _ }) -> ()
              (* 0xFFFFFFFFFFFFFFFF as a signed Int64 bit pattern is -1L;
                 the important thing is EVERY bit survives parsing, not
                 which OCaml literal happens to print it. *)
@@ -872,7 +872,7 @@ let parser_tests = [
     match parse "fn f() u64 { return 18446744073709551615; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.IntLit (-1L); _ } -> ()  (* u64::MAX's bit pattern *)
+         | Ast.Return (Some { desc = Ast.IntLit (-1L); _ }) -> ()  (* u64::MAX's bit pattern *)
          | _ -> Alcotest.fail "expected Return(IntLit -1L)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -881,7 +881,7 @@ let parser_tests = [
     match parse "fn f() i32 { return 'A'; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.IntLit 65L; _ } -> ()
+         | Ast.Return (Some { desc = Ast.IntLit 65L; _ }) -> ()
          | _ -> Alcotest.fail "expected Return(IntLit 65)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -903,7 +903,7 @@ let parser_tests = [
     match parse "fn f(a: i32, b: i32) i32 { return a == 1 || b == 2; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+         | Ast.Return (Some { desc = Ast.BinOp (op, _, _); _ }) ->
              Alcotest.check binop_t "outer op is Or" Ast.Or op
          | _ -> Alcotest.fail "expected Return(BinOp Or)")
     | _ -> Alcotest.fail "unexpected structure"
@@ -913,7 +913,7 @@ let parser_tests = [
     match parse "fn f(a: i32, b: i32) i32 { return a >= 0 && b < 8; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+         | Ast.Return (Some { desc = Ast.BinOp (op, _, _); _ }) ->
              Alcotest.check binop_t "outer op is And" Ast.And op
          | _ -> Alcotest.fail "expected Return(BinOp And)")
     | _ -> Alcotest.fail "unexpected structure"
@@ -924,9 +924,9 @@ let parser_tests = [
     match parse "fn f(a: i32, b: i32) i32 { return a >= 0 && b < 8; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (Ast.And,
+         | Ast.Return (Some { desc = Ast.BinOp (Ast.And,
              { desc = Ast.BinOp (Ast.Ge, _, _); _ },
-             { desc = Ast.BinOp (Ast.Lt, _, _); _ }); _ } -> ()
+             { desc = Ast.BinOp (Ast.Lt, _, _); _ }); _ }) -> ()
          | _ -> Alcotest.fail "expected And(Ge, Lt)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -936,8 +936,8 @@ let parser_tests = [
     match parse "fn f(a: i32, b: i32, c: i32) i32 { return a || b && c; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (Ast.Or, _,
-             { desc = Ast.BinOp (Ast.And, _, _); _ }); _ } -> ()
+         | Ast.Return (Some { desc = Ast.BinOp (Ast.Or, _,
+             { desc = Ast.BinOp (Ast.And, _, _); _ }); _ }) -> ()
          | _ -> Alcotest.fail "expected Or(_, And(_, _))")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -973,9 +973,9 @@ let parser_tests = [
     match parse "fn f() i32 { return -42; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (Ast.Sub,
+         | Ast.Return (Some { desc = Ast.BinOp (Ast.Sub,
                                  { desc = Ast.IntLit 0L; _ },
-                                 { desc = Ast.IntLit 42L; _ }); _ } -> ()
+                                 { desc = Ast.IntLit 42L; _ }); _ }) -> ()
          | _ -> Alcotest.fail "expected Return(BinOp(Sub, IntLit 0, IntLit 42))")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -986,7 +986,7 @@ let parser_tests = [
     match parse "fn f() usize { return sizeof(i32); }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.SizeOf Ast.TypeI32; _ } -> ()
+         | Ast.Return (Some { desc = Ast.SizeOf Ast.TypeI32; _ }) -> ()
          | _ -> Alcotest.fail "expected Return(SizeOf TypeI32)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -995,7 +995,7 @@ let parser_tests = [
     match parse "struct P { x: i32; } fn f() usize { return sizeof(P); }" with
     | [Ast.StructDef _; Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.SizeOf (Ast.TypeNamed "P"); _ } -> ()
+         | Ast.Return (Some { desc = Ast.SizeOf (Ast.TypeNamed "P"); _ }) -> ()
          | _ -> Alcotest.fail "expected Return(SizeOf (TypeNamed P))")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1004,7 +1004,7 @@ let parser_tests = [
     match parse "struct P { x: u8; y: i32; } fn f() usize { return offsetof(P, y); }" with
     | [Ast.StructDef _; Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.OffsetOf (Ast.TypeNamed "P", "y"); _ } -> ()
+         | Ast.Return (Some { desc = Ast.OffsetOf (Ast.TypeNamed "P", "y"); _ }) -> ()
          | _ -> Alcotest.fail "expected Return(OffsetOf(TypeNamed P, y))")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1031,8 +1031,8 @@ let parser_tests = [
     match parse "fn f(n: i32) u8 { return n as u8; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.Cast (Ast.TypeU8,
-                                 { desc = Ast.Var "n"; _ }); _ } -> ()
+         | Ast.Return (Some { desc = Ast.Cast (Ast.TypeU8,
+                                 { desc = Ast.Var "n"; _ }); _ }) -> ()
          | _ -> Alcotest.fail "expected Return(Cast(TypeChar, Var n))")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1041,8 +1041,8 @@ let parser_tests = [
     match parse "fn f(c: u8) i32 { return c as i32; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.Cast (Ast.TypeI32,
-                                 { desc = Ast.Var "c"; _ }); _ } -> ()
+         | Ast.Return (Some { desc = Ast.Cast (Ast.TypeI32,
+                                 { desc = Ast.Var "c"; _ }); _ }) -> ()
          | _ -> Alcotest.fail "expected Return(Cast(TypeInt, Var c))")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1051,8 +1051,8 @@ let parser_tests = [
     match parse "fn f(a: i32, b: i32) u8 { return a + b as u8; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.Cast (Ast.TypeU8,
-                                 { desc = Ast.BinOp (Ast.Add, _, _); _ }); _ } -> ()
+         | Ast.Return (Some { desc = Ast.Cast (Ast.TypeU8,
+                                 { desc = Ast.BinOp (Ast.Add, _, _); _ }); _ }) -> ()
          | _ -> Alcotest.fail "expected Cast(TypeChar, BinOp(Add, ...)) -- as must bind looser than +")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1063,7 +1063,7 @@ let parser_tests = [
     match parse "fn f(n: i32) i32 { return n & 15; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+         | Ast.Return (Some { desc = Ast.BinOp (op, _, _); _ }) ->
              Alcotest.check binop_t "op is Band" Ast.Band op
          | _ -> Alcotest.fail "expected Return(BinOp Band)")
     | _ -> Alcotest.fail "unexpected structure"
@@ -1073,7 +1073,7 @@ let parser_tests = [
     match parse "fn f(n: i32) i32 { return n >> 4; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+         | Ast.Return (Some { desc = Ast.BinOp (op, _, _); _ }) ->
              Alcotest.check binop_t "op is Shr" Ast.Shr op
          | _ -> Alcotest.fail "expected Return(BinOp Shr)")
     | _ -> Alcotest.fail "unexpected structure"
@@ -1084,8 +1084,8 @@ let parser_tests = [
     match parse "fn f(n: i32) i32 { return n >> 4 & 15; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (Ast.Band,
-                                 { desc = Ast.BinOp (Ast.Shr, _, _); _ }, _); _ } -> ()
+         | Ast.Return (Some { desc = Ast.BinOp (Ast.Band,
+                                 { desc = Ast.BinOp (Ast.Shr, _, _); _ }, _); _ }) -> ()
          | _ -> Alcotest.fail "expected Band(Shr(...), 15) -- >> must bind tighter than &")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1095,8 +1095,8 @@ let parser_tests = [
     match parse "fn f(n: i32) i32 { return n & 15 == 0; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (Ast.Eq,
-                                 { desc = Ast.BinOp (Ast.Band, _, _); _ }, _); _ } -> ()
+         | Ast.Return (Some { desc = Ast.BinOp (Ast.Eq,
+                                 { desc = Ast.BinOp (Ast.Band, _, _); _ }, _); _ }) -> ()
          | _ -> Alcotest.fail "expected Eq(Band(...), 0) -- & must bind tighter than ==")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1105,7 +1105,7 @@ let parser_tests = [
     match parse "fn f(n: i32) i32 { return n % 3; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+         | Ast.Return (Some { desc = Ast.BinOp (op, _, _); _ }) ->
              Alcotest.check binop_t "op is Mod" Ast.Mod op
          | _ -> Alcotest.fail "expected Return(BinOp Mod)")
     | _ -> Alcotest.fail "unexpected structure"
@@ -1116,8 +1116,8 @@ let parser_tests = [
     match parse "fn f(a: i32, b: i32) i32 { return a + b % 3; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (Ast.Add, _,
-                                 { desc = Ast.BinOp (Ast.Mod, _, _); _ }); _ } -> ()
+         | Ast.Return (Some { desc = Ast.BinOp (Ast.Add, _,
+                                 { desc = Ast.BinOp (Ast.Mod, _, _); _ }); _ }) -> ()
          | _ -> Alcotest.fail "expected Add(a, Mod(b,3)) -- % must bind tighter than +")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1126,7 +1126,7 @@ let parser_tests = [
     match parse "fn f(a: i32, b: i32) i32 { return a | b; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+         | Ast.Return (Some { desc = Ast.BinOp (op, _, _); _ }) ->
              Alcotest.check binop_t "op is Bor" Ast.Bor op
          | _ -> Alcotest.fail "expected Return(BinOp Bor)")
     | _ -> Alcotest.fail "unexpected structure"
@@ -1137,9 +1137,9 @@ let parser_tests = [
     match parse "fn f(a: i32, b: i32) i32 { return a == 0 | b == 0; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (Ast.Bor,
+         | Ast.Return (Some { desc = Ast.BinOp (Ast.Bor,
                                  { desc = Ast.BinOp (Ast.Eq, _, _); _ },
-                                 { desc = Ast.BinOp (Ast.Eq, _, _); _ }); _ } -> ()
+                                 { desc = Ast.BinOp (Ast.Eq, _, _); _ }); _ }) -> ()
          | _ -> Alcotest.fail "expected Bor(Eq(...),Eq(...)) -- | must bind looser than ==")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1148,7 +1148,7 @@ let parser_tests = [
     match parse "fn f(n: i32) i32 { return n << 2; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+         | Ast.Return (Some { desc = Ast.BinOp (op, _, _); _ }) ->
              Alcotest.check binop_t "op is Shl" Ast.Shl op
          | _ -> Alcotest.fail "expected Return(BinOp Shl)")
     | _ -> Alcotest.fail "unexpected structure"
@@ -1158,7 +1158,7 @@ let parser_tests = [
     match parse "fn f(a: i32, b: i32) i32 { return a ^ b; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (op, _, _); _ } ->
+         | Ast.Return (Some { desc = Ast.BinOp (op, _, _); _ }) ->
              Alcotest.check binop_t "op is Bxor" Ast.Bxor op
          | _ -> Alcotest.fail "expected Return(BinOp Bxor)")
     | _ -> Alcotest.fail "unexpected structure"
@@ -1169,8 +1169,8 @@ let parser_tests = [
     match parse "fn f(a: i32, b: i32, c: i32) i32 { return a | b ^ c; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (Ast.Bor, _,
-                                 { desc = Ast.BinOp (Ast.Bxor, _, _); _ }); _ } -> ()
+         | Ast.Return (Some { desc = Ast.BinOp (Ast.Bor, _,
+                                 { desc = Ast.BinOp (Ast.Bxor, _, _); _ }); _ }) -> ()
          | _ -> Alcotest.fail "expected Bor(a, Bxor(b,c)) -- ^ must bind tighter than |")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1180,8 +1180,8 @@ let parser_tests = [
     match parse "fn f(a: i32, b: i32, c: i32) i32 { return a ^ b == c; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (Ast.Bxor, _,
-                                 { desc = Ast.BinOp (Ast.Eq, _, _); _ }); _ } -> ()
+         | Ast.Return (Some { desc = Ast.BinOp (Ast.Bxor, _,
+                                 { desc = Ast.BinOp (Ast.Eq, _, _); _ }); _ }) -> ()
          | _ -> Alcotest.fail "expected Bxor(a, Eq(b,c)) -- == must bind tighter than ^")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1212,7 +1212,7 @@ let parser_tests = [
     match parse "fn f(arr: *u8, i: i32) u8 { return arr[i]; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.Index ("arr", { desc = Ast.Var "i"; _ }); _ } -> ()
+         | Ast.Return (Some { desc = Ast.Index ("arr", { desc = Ast.Var "i"; _ }); _ }) -> ()
          | _ -> Alcotest.fail "expected Return(Index(arr, Var i))")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1222,8 +1222,8 @@ let parser_tests = [
     match parse "fn f(a: i32, arr: *u8, i: i32) i32 { return a + arr[i]; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (Ast.Add, { desc = Ast.Var "a"; _ },
-                                 { desc = Ast.Index ("arr", _); _ }); _ } -> ()
+         | Ast.Return (Some { desc = Ast.BinOp (Ast.Add, { desc = Ast.Var "a"; _ },
+                                 { desc = Ast.Index ("arr", _); _ }); _ }) -> ()
          | _ -> Alcotest.fail "expected Add(a, Index(arr,...)) -- [] must bind tighter than +")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1293,7 +1293,7 @@ let parser_tests = [
     match parse "struct P { x: i32; } fn f(p: *P) -> i32 { return p.x; }" with
     | [Ast.StructDef _; Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.FieldGet ({ desc = Ast.Var "p"; _ }, "x"); _ } -> ()
+         | Ast.Return (Some { desc = Ast.FieldGet ({ desc = Ast.Var "p"; _ }, "x"); _ }) -> ()
          | _ -> Alcotest.fail "expected Return(FieldGet(p, x))")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1338,9 +1338,9 @@ let parser_tests = [
     match parse "struct P { x: i32; } fn f(p: *P) -> i32 { return p.x + p.x; }" with
     | [Ast.StructDef _; Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.BinOp (Ast.Add,
+         | Ast.Return (Some { desc = Ast.BinOp (Ast.Add,
                { desc = Ast.FieldGet _; _ },
-               { desc = Ast.FieldGet _; _ }); _ } -> ()
+               { desc = Ast.FieldGet _; _ }); _ }) -> ()
          | _ -> Alcotest.fail "expected Add(FieldGet, FieldGet)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1575,7 +1575,7 @@ let parser_tests = [
     match parse "fn f() i32 { return 42; // answer\n}" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.IntLit 42L; _ } -> ()
+         | Ast.Return (Some { desc = Ast.IntLit 42L; _ }) -> ()
          | _ -> Alcotest.fail "expected Return(IntLit 42)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1584,7 +1584,7 @@ let parser_tests = [
     match parse "fn f() i32 { /* skip this */ return 0; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.IntLit 0L; _ } -> ()
+         | Ast.Return (Some { desc = Ast.IntLit 0L; _ }) -> ()
          | _ -> Alcotest.fail "expected Return(IntLit 0)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1593,7 +1593,7 @@ let parser_tests = [
     match parse "fn f() i32 {\n  /*\n   * multi\n   * line\n   */\n  return 7;\n}" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.IntLit 7L; _ } -> ()
+         | Ast.Return (Some { desc = Ast.IntLit 7L; _ }) -> ()
          | _ -> Alcotest.fail "expected Return(IntLit 7)")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1604,7 +1604,7 @@ let parser_tests = [
     match parse "fn f(x: i32) i32 { return ~x; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return { desc = Ast.Bnot { desc = Ast.Var "x"; _ }; _ } -> ()
+         | Ast.Return (Some { desc = Ast.Bnot { desc = Ast.Var "x"; _ }; _ }) -> ()
          | _ -> Alcotest.fail "expected Return(Bnot(Var x))")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -5970,6 +5970,46 @@ let infer_tests = [
     (expect_type_error "non-exhaustive enum 'TcpOpenState7' cannot be used"
        "enum TcpOpenState7: u8 { Known; _; }
         linear view TcpOpenView7[state: TcpOpenState7];");
+
+  (* Bare `return;` (GitHub issue #153-adjacent fix): early exit from a
+     void function without a value, previously a syntax error. *)
+  Alcotest.test_case
+    "bare return: early exit from a void function is accepted" `Quick
+    (expect_ok
+       "fn early_exit_void(bad: bool) {
+          if (bad) {
+            return;
+          }
+          return;
+        }");
+
+  Alcotest.test_case
+    "bare return: rejected inside a value-returning function" `Quick
+    (expect_type_error
+       "bare `return;` requires a void return type"
+       "fn early_exit_value(bad: bool) -> i32 {
+          if (bad) {
+            return;
+          }
+          return 1;
+        }");
+
+  Alcotest.test_case
+    "bare return: still requires every linear value consumed on that path" `Quick
+    (expect_type_error
+       "linear value 'token' is still pending at this return"
+       "linear struct EarlyExitToken[n: usize] { idx: usize @ n; }
+        fn early_exit_token_new(idx: usize @ n) -> EarlyExitToken[n] {
+          let mut t: EarlyExitToken[n] = { idx }; return t;
+        }
+        fn early_exit_token_drop(t: sink EarlyExitToken[n]) {}
+        fn early_exit_leaks_linear(bad: bool, idx: usize @ n) {
+          let token = early_exit_token_new(idx);
+          if (bad) {
+            return;
+          }
+          early_exit_token_drop(token);
+        }");
 
 ]
 

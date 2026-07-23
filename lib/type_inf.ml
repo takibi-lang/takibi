@@ -2597,7 +2597,13 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       if not in_loop then
         raise (TypeError (s.loc, "break/continue outside of a loop"));
       (tyenv, raw_locals)
-  | Return e ->
+  | Return None ->
+      (match ret_ty with
+       | TVoid -> ()
+       | _ -> raise (TypeError (s.loc,
+           "bare `return;` requires a void return type; this function returns a value -- use `return e;`")));
+      (tyenv, raw_locals)
+  | Return (Some e) ->
       let t = infer_expr senv eenv tyenv fenv e in
       let t = adapt_actual_to_expected tyenv e t ret_ty in
       unify_at e.loc t ret_ty;
@@ -4133,7 +4139,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          Option.iter (validate_nonparam_type s.loc) ty;
          validate_expr_types lo; validate_expr_types hi;
          List.iter validate_stmt_types body
-     | Ast.Return e | Ast.Expr e -> validate_expr_types e
+     | Ast.Return (Some e) | Ast.Expr e -> validate_expr_types e
+     | Ast.Return None -> ()
      | Ast.LetTuple (_, e) -> validate_expr_types e
      | Ast.Assign (_, e) -> validate_expr_types e
      | Ast.AssignDeref (a, b) | Ast.AssignField (a, _, b)
@@ -5499,7 +5506,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       (moved, declared, taints)
     and check_stmt moved declared taints (s : Ast.stmt) =
       match s.desc with
-      | Ast.Return e ->
+      | Ast.Return None ->
+          require_no_pending_linear s.loc "return" moved declared;
+          (moved, declared, taints)
+      | Ast.Return (Some e) ->
           require_no_taint_escape s.loc taints `Return e;
           let consumes = match fdef.ret_type with
             | Some ty -> is_tracked_type ty
@@ -5870,8 +5880,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.ViewLit _ | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.OffsetOf _ -> ()
     and visit_stmt (s : Ast.stmt) =
       match s.desc with
-      | Ast.Return e | Ast.Expr e | Ast.LetTuple (_, e)
+      | Ast.Return (Some e) | Ast.Expr e | Ast.LetTuple (_, e)
       | Ast.Assign (_, e) -> visit_expr e
+      | Ast.Return None -> ()
       | Ast.AssignDeref (left, right) | Ast.AssignField (left, _, right)
       | Ast.AssignIndex (_, left, right) ->
           visit_expr left; visit_expr right

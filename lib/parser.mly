@@ -292,7 +292,8 @@ stmts:
   | stmt stmts { $1 :: $2 }
 
 stmt:
-  | RETURN e = expr SEMI { { desc = Return e; loc = $symbolstartpos } }
+  | RETURN e = expr SEMI { { desc = Return (Some e); loc = $symbolstartpos } }
+  | RETURN SEMI { { desc = Return None; loc = $symbolstartpos } }
   | fname = IDENT LPAREN args = args RPAREN SEMI
     (* Only function calls are allowed as expression statements. IDENT LPAREN disambiguates, eliminating S/R conflicts with DOT *)
     { let loc = $symbolstartpos in

@@ -152,7 +152,10 @@ and expr_desc =
 
 type stmt = stmt_desc located
 and stmt_desc =
-  | Return of expr
+  | Return of expr option
+    (* `return e;` = Some e. `return;` (GitHub issue #153-adjacent fix) =
+       None -- only legal inside a function whose declared return type is
+       void; see type_inf.ml's own check. *)
   | Expr of expr
   | Assign of ident * expr
   | AssignDeref of expr * expr   (* *lhs = rhs -- write through pointer *)
@@ -349,7 +352,8 @@ let written_names (stmts : stmt list) : string list =
     | Let (_, n, _, init, _) -> add n; (match init with
                                         | Some e -> go_expr e | None -> ())
     | LetTuple (ns, e)       -> List.iter add ns; go_expr e
-    | Expr e | Return e      -> go_expr e
+    | Expr e | Return (Some e) -> go_expr e
+    | Return None            -> ()
     | Block ss               -> List.iter go_stmt ss
     | If (c, t, el)          -> go_expr c;
                                 List.iter go_stmt t; List.iter go_stmt el

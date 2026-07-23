@@ -3588,7 +3588,9 @@ let gen_func ?prog_types fdef =
     if block_terminator (insertion_block builder) <> None then ()
     else
     match s.desc with
-    | Return e ->
+    | Return None ->
+        emit_profile_return key (fun () -> ignore (build_ret_void builder))
+    | Return (Some e) ->
         let (_, v) = gen_expr ~expected_ty:ret_ast locals e in
         if is_erased_view_type ret_ast then
           emit_profile_return key (fun () -> ignore (build_ret_void builder))

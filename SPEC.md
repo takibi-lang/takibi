@@ -239,9 +239,14 @@ parameter value, or top-level declaration name.
   Loops" below.
 - `for x in slice_expr { ... }` -- element iteration over a slice; see
   "Slices" below.
-- `return e` -- always takes an expression. A bare `return;` inside a
-  `void` function is a syntax error; let the function fall through
-  instead.
+- `return e` -- returns a value from a non-void function.
+- `return;` (GitHub issue #153-adjacent fix) -- bare early return, legal
+  only inside a function with no declared return type (void). A bare
+  `return;` inside a value-returning function is a compile error ("bare
+  `return;` requires a void return type... use `return e;`"). Ordinary
+  linear/affine consumption rules still apply at a bare `return;` exactly
+  as at any other return: every linear value live at that point must
+  already be consumed on that path.
 - `break` / `continue` -- exit/continue the innermost `while`/`for(-in)`
   loop. Compile error outside a loop. For `for`, `continue` increments
   the counter first.
