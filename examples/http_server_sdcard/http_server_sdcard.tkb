@@ -71,11 +71,11 @@ let mut our_ip:  [u8; 4];
 // TCP_URGENT) come from examples/common/netutil.tkb's `use` above --
 // offsetof(ArpHdr/Ipv4Hdr/TcpHdr, field)-based, matching http_server.tkb.
 
-fn http_file_size(name83: *u8) -> i32 {
+fn http_file_size(name83: *u8) -> HttpFileSizeResult {
     if (fat_file_exists(name83)) {
-        return fat_file_size(name83) as i32;
+        return HttpFileSizeResult::Found(fat_file_size(name83));
     }
-    return -1;
+    return HttpFileSizeResult::NotFound;
 }
 
 fn http_read_chunk(name83: *u8, off: u32, dst: borrow *u8,

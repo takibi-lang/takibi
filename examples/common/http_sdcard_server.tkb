@@ -1,7 +1,7 @@
 // Shared SD-card-backed HTTP response generation.
 //
 // The including example owns the storage boundary and must provide:
-//   fn http_file_size(name83: *u8) -> i32
+//   fn http_file_size(name83: *u8) -> HttpFileSizeResult
 //   fn http_read_chunk(name83: *u8, off: u32, dst: *u8, want: u32) -> u32
 //
 // GitHub issue #135's N-way concurrent connection support: this file's own
@@ -95,6 +95,14 @@ fn build_response_segment(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
     return build_tcp_payload(eth, ihl, len, flags, idx);
 }
 
+// Result of looking up an SD-card file's size -- replaces the old plain
+// i32 size-or--1 sentinel with a type a caller's `match` must name every
+// arm of (AGENTS.md's "Return a Variant, Not an Int Sentinel" principle).
+variant HttpFileSizeResult {
+    Found(u32);
+    NotFound;
+}
+
 fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
                        req: borrow *u8, req_len: u16, idx: {0..<MAX_CONNS as usize}) -> i32 {
     let mut name83: [u8; 11];
@@ -104,16 +112,19 @@ fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
         resp_sent[idx] = 0;
         return build_error_response_fin(eth, ihl, msg, idx);
     }
-    let size: i32 = http_file_size(name83);
-    if (size < 0) {
-        let msg: *u8 = "404: file not found on SD card.\n";
-        resp_size[idx] = 0;
-        resp_sent[idx] = 0;
-        return build_error_response_fin(eth, ihl, msg, idx);
+    let mut size: u32 = 0;
+    match http_file_size(name83) {
+        HttpFileSizeResult::NotFound => {
+            let msg: *u8 = "404: file not found on SD card.\n";
+            resp_size[idx] = 0;
+            resp_sent[idx] = 0;
+            return build_error_response_fin(eth, ihl, msg, idx);
+        }
+        HttpFileSizeResult::Found(v) => { size = v; }
     }
 
     copy_response_name(name83, idx);
-    resp_size[idx] = size as u32;
+    resp_size[idx] = size;
     resp_sent[idx] = 0;
     resp_content_type[idx] = content_type_for_name83(name83);
     return build_response_segment(eth, ihl, true, idx);

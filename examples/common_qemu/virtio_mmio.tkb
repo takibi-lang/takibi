@@ -157,7 +157,7 @@ fn vreg(offset: i32) -> *io i32 {
     return (virtio_base + offset) as *io i32;
 }
 
-fn virtio_net_find() -> i32 {
+fn virtio_net_find() -> bool {
     for i in 0..<VIRTIO_MMIO_SLOT_COUNT {
         let base: i32 = VIRTIO_MMIO_FIRST_SLOT + i * VIRTIO_MMIO_SLOT_STRIDE;
         let magic_p: *io u32 = base as *io u32;
@@ -166,11 +166,11 @@ fn virtio_net_find() -> i32 {
             if (*devid_p == VIRTIO_DEVICE_ID_NET) {
                 virtio_base = base;
                 virtio_gic_irq = VIRTIO_MMIO_FIRST_SPI + i;
-                return 1;
+                return true;
             }
         }
     }
-    return 0;
+    return false;
 }
 
 fn gic_enable_virtio_irq() {
@@ -304,7 +304,7 @@ fn net_init() -> NetInitResult {
     if (net_rx_initialized != 0) {
         return NetInitResult::Failed;
     }
-    if (virtio_net_find() == 0) {
+    if (virtio_net_find() == false) {
         return NetInitResult::Failed;
     }
     net_rx_initialized = 1;

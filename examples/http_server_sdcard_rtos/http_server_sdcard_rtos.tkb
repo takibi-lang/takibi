@@ -182,9 +182,17 @@ fn sd_worker() {
     }
 }
 
-fn sd_file_size_rpc(name83: *u8) -> i32 {
+// The RTOS channel this crosses (rtos.tkb's Chan) only carries a plain
+// i32 -- this translates at that fixed boundary, the same role
+// kvs_server_sdcard_rtos.tkb's kvs_sd_status_from_i32 plays for
+// KvsSdStatus.
+fn sd_file_size_rpc(name83: *u8) -> HttpFileSizeResult {
     sd_request_send(&sd_request_ch, SdRequest::FileSize(name83));
-    return chan_recv(&sd_response_ch);
+    let v: i32 = chan_recv(&sd_response_ch);
+    if (v < 0) {
+        return HttpFileSizeResult::NotFound;
+    }
+    return HttpFileSizeResult::Found(v as u32);
 }
 
 fn sd_read_chunk_rpc(name83: *u8, off: u32, dst: borrow *u8,
@@ -196,7 +204,7 @@ fn sd_read_chunk_rpc(name83: *u8, off: u32, dst: borrow *u8,
     return got;
 }
 
-fn http_file_size(name83: *u8) -> i32 {
+fn http_file_size(name83: *u8) -> HttpFileSizeResult {
     return sd_file_size_rpc(name83);
 }
 
