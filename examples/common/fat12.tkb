@@ -417,30 +417,40 @@ fn fat_file_opened(dir_index: {0..<16 as usize} @ file,
 
 // Linear scan of root_dir_buf (checked array access) for a matching 8.3
 // name, skipping free slots (name[0] == 0, FAT's own "never used" marker).
-// Returns the slot index, or -1 if not found.
-fn fat_find_entry(name83: *u8) -> i32 {
+// Reports the found slot index, or that none matched -- the Found
+// payload's refined {0..<16} type carries this function's own for-loop
+// proof across the call boundary directly, unlike the old plain-i32
+// index-or--1 sentinel every caller used to have to re-narrow by hand
+// (AGENTS.md's "Return a Variant, Not an Int Sentinel" principle).
+variant FatFindResult {
+    Found({0..<16 as usize});
+    NotFound;
+}
+
+fn fat_find_entry(name83: *u8) -> FatFindResult {
     for i: usize in 0..<ROOT_ENTRY_COUNT {
         let name_p: *u8 = root_dir_buf[i].name;
         if (name_p[0] != 0) {
             if (bytes_eq(name_p, name83, 11)) {
-                return i as i32;
+                return FatFindResult::Found(i);
             }
         }
     }
-    return -1;
+    return FatFindResult::NotFound;
 }
 
 fn fat_file_exists(name83: *u8) -> bool {
-    return fat_find_entry(name83) >= 0;
+    match fat_find_entry(name83) {
+        FatFindResult::Found(idx) => { return true; }
+        FatFindResult::NotFound => { return false; }
+    }
 }
 
 fn fat_file_size(name83: *u8) -> u32 {
-    let found: i32 = fat_find_entry(name83);
-    if ((found >= 0) && (found < 16)) {
-        let idx: usize = found as usize;
-        return root_dir_buf[idx].file_size;
+    match fat_find_entry(name83) {
+        FatFindResult::Found(idx) => { return root_dir_buf[idx].file_size; }
+        FatFindResult::NotFound => { return 0; }
     }
-    return 0;
 }
 
 // Random-position read helper for HTTP multi-segment serving. This keeps
@@ -449,60 +459,62 @@ fn fat_file_size(name83: *u8) -> u32 {
 // one TCP segment at a time.
 fn fat_read_at(name83: *u8, off: u32, buf: borrow *u8, btr: u32,
         br: *u32) -> FatIoResult {
-    let found: i32 = fat_find_entry(name83);
-    if ((found >= 0) && (found < 16)) {
-        let idx: usize = found as usize;
-        let fsize: u32 = root_dir_buf[idx].file_size;
-        if (off >= fsize) {
-            *br = 0;
-            return FatIoResult::Ok;
-        }
-
-        let mut remaining: u32 = btr;
-        let avail: u32 = fsize - off;
-        if (remaining > avail) {
-            remaining = avail;
-        }
-
-        let mut cluster: u32 = root_dir_buf[idx].first_cluster_lo as u32;
-        let skip_clusters: u32 = off / (SECTOR_SIZE as u32);
-        for i: u32 in 0..<skip_clusters {
-            cluster = fat_get_entry(cluster) as u32;
-        }
-
-        let mut pos_in_cluster: u32 = off - skip_clusters * (SECTOR_SIZE as u32);
-        let mut total: u32 = 0;
-        let mut dst: *u8 = buf;
-        while (remaining > 0) {
-            let mut sector_buf: [u8; SECTOR_SIZE] align(32);
-            let sector_num: u32 = (first_data_sector() as u32) + (cluster - 2);
-            if (mem_block_read(sector_num, sector_buf) != 0) {
-                *br = total;
-                return FatIoResult::Err(-1);
+    match fat_find_entry(name83) {
+        FatFindResult::Found(idx) => {
+            let fsize: u32 = root_dir_buf[idx].file_size;
+            if (off >= fsize) {
+                *br = 0;
+                return FatIoResult::Ok;
             }
 
-            let space_in_cluster: u32 = (SECTOR_SIZE as u32) - pos_in_cluster;
-            let mut chunk: u32 = remaining;
-            if (chunk > space_in_cluster) {
-                chunk = space_in_cluster;
+            let mut remaining: u32 = btr;
+            let avail: u32 = fsize - off;
+            if (remaining > avail) {
+                remaining = avail;
             }
 
-            let src_p: *u8 = sector_buf;
-            bytes_copy(dst, src_p + (pos_in_cluster as isize), chunk as isize);
-            dst = dst + (chunk as isize);
-            total = total + chunk;
-            remaining = remaining - chunk;
-            pos_in_cluster = pos_in_cluster + chunk;
-            if (pos_in_cluster >= SECTOR_SIZE as u32) {
-                pos_in_cluster = 0;
+            let mut cluster: u32 = root_dir_buf[idx].first_cluster_lo as u32;
+            let skip_clusters: u32 = off / (SECTOR_SIZE as u32);
+            for i: u32 in 0..<skip_clusters {
                 cluster = fat_get_entry(cluster) as u32;
             }
+
+            let mut pos_in_cluster: u32 = off - skip_clusters * (SECTOR_SIZE as u32);
+            let mut total: u32 = 0;
+            let mut dst: *u8 = buf;
+            while (remaining > 0) {
+                let mut sector_buf: [u8; SECTOR_SIZE] align(32);
+                let sector_num: u32 = (first_data_sector() as u32) + (cluster - 2);
+                if (mem_block_read(sector_num, sector_buf) != 0) {
+                    *br = total;
+                    return FatIoResult::Err(-1);
+                }
+
+                let space_in_cluster: u32 = (SECTOR_SIZE as u32) - pos_in_cluster;
+                let mut chunk: u32 = remaining;
+                if (chunk > space_in_cluster) {
+                    chunk = space_in_cluster;
+                }
+
+                let src_p: *u8 = sector_buf;
+                bytes_copy(dst, src_p + (pos_in_cluster as isize), chunk as isize);
+                dst = dst + (chunk as isize);
+                total = total + chunk;
+                remaining = remaining - chunk;
+                pos_in_cluster = pos_in_cluster + chunk;
+                if (pos_in_cluster >= SECTOR_SIZE as u32) {
+                    pos_in_cluster = 0;
+                    cluster = fat_get_entry(cluster) as u32;
+                }
+            }
+            *br = total;
+            return FatIoResult::Ok;
         }
-        *br = total;
-        return FatIoResult::Ok;
+        FatFindResult::NotFound => {
+            *br = 0;
+            return FatIoResult::Err(-1);
+        }
     }
-    *br = 0;
-    return FatIoResult::Err(-1);
 }
 
 // Existing-file, fixed-position overwrite helper. This deliberately does
@@ -511,67 +523,69 @@ fn fat_read_at(name83: *u8, off: u32, buf: borrow *u8, btr: u32,
 // to replace bytes in place.
 fn fat_write_at(name83: *u8, off: u32, buf: borrow *u8, btw: u32,
         bw: *u32) -> FatIoResult {
-    let found: i32 = fat_find_entry(name83);
-    if ((found >= 0) && (found < 16)) {
-        let idx: usize = found as usize;
-        let fsize: u32 = root_dir_buf[idx].file_size;
-        if (off >= fsize) {
+    match fat_find_entry(name83) {
+        FatFindResult::Found(idx) => {
+            let fsize: u32 = root_dir_buf[idx].file_size;
+            if (off >= fsize) {
+                *bw = 0;
+                return FatIoResult::Err(-1);
+            }
+
+            let mut remaining: u32 = btw;
+            let avail: u32 = fsize - off;
+            if (remaining > avail) {
+                remaining = avail;
+            }
+
+            let mut cluster: u32 = root_dir_buf[idx].first_cluster_lo as u32;
+            let skip_clusters: u32 = off / (SECTOR_SIZE as u32);
+            for i: u32 in 0..<skip_clusters {
+                cluster = fat_get_entry(cluster) as u32;
+            }
+
+            let mut pos_in_cluster: u32 = off - skip_clusters * (SECTOR_SIZE as u32);
+            let mut total: u32 = 0;
+            let mut src: *u8 = buf;
+            while (remaining > 0) {
+                let mut sector_buf: [u8; SECTOR_SIZE] align(32);
+                let sector_num: u32 = (first_data_sector() as u32) + (cluster - 2);
+                if (mem_block_read(sector_num, sector_buf) != 0) {
+                    *bw = total;
+                    return FatIoResult::Err(-1);
+                }
+
+                let space_in_cluster: u32 = (SECTOR_SIZE as u32) - pos_in_cluster;
+                let mut chunk: u32 = remaining;
+                if (chunk > space_in_cluster) {
+                    chunk = space_in_cluster;
+                }
+
+                let dst_p: *u8 = sector_buf;
+                bytes_copy(dst_p + (pos_in_cluster as isize), src, chunk as isize);
+                if (mem_block_write(sector_num, sector_buf) != 0) {
+                    *bw = total;
+                    return FatIoResult::Err(-1);
+                }
+                src = src + (chunk as isize);
+                total = total + chunk;
+                remaining = remaining - chunk;
+                pos_in_cluster = pos_in_cluster + chunk;
+                if (pos_in_cluster >= SECTOR_SIZE as u32) {
+                    pos_in_cluster = 0;
+                    cluster = fat_get_entry(cluster) as u32;
+                }
+            }
+            *bw = total;
+            if (total == btw) {
+                return FatIoResult::Ok;
+            }
+            return FatIoResult::Err(-1);
+        }
+        FatFindResult::NotFound => {
             *bw = 0;
             return FatIoResult::Err(-1);
         }
-
-        let mut remaining: u32 = btw;
-        let avail: u32 = fsize - off;
-        if (remaining > avail) {
-            remaining = avail;
-        }
-
-        let mut cluster: u32 = root_dir_buf[idx].first_cluster_lo as u32;
-        let skip_clusters: u32 = off / (SECTOR_SIZE as u32);
-        for i: u32 in 0..<skip_clusters {
-            cluster = fat_get_entry(cluster) as u32;
-        }
-
-        let mut pos_in_cluster: u32 = off - skip_clusters * (SECTOR_SIZE as u32);
-        let mut total: u32 = 0;
-        let mut src: *u8 = buf;
-        while (remaining > 0) {
-            let mut sector_buf: [u8; SECTOR_SIZE] align(32);
-            let sector_num: u32 = (first_data_sector() as u32) + (cluster - 2);
-            if (mem_block_read(sector_num, sector_buf) != 0) {
-                *bw = total;
-                return FatIoResult::Err(-1);
-            }
-
-            let space_in_cluster: u32 = (SECTOR_SIZE as u32) - pos_in_cluster;
-            let mut chunk: u32 = remaining;
-            if (chunk > space_in_cluster) {
-                chunk = space_in_cluster;
-            }
-
-            let dst_p: *u8 = sector_buf;
-            bytes_copy(dst_p + (pos_in_cluster as isize), src, chunk as isize);
-            if (mem_block_write(sector_num, sector_buf) != 0) {
-                *bw = total;
-                return FatIoResult::Err(-1);
-            }
-            src = src + (chunk as isize);
-            total = total + chunk;
-            remaining = remaining - chunk;
-            pos_in_cluster = pos_in_cluster + chunk;
-            if (pos_in_cluster >= SECTOR_SIZE as u32) {
-                pos_in_cluster = 0;
-                cluster = fat_get_entry(cluster) as u32;
-            }
-        }
-        *bw = total;
-        if (total == btw) {
-            return FatIoResult::Ok;
-        }
-        return FatIoResult::Err(-1);
     }
-    *bw = 0;
-    return FatIoResult::Err(-1);
 }
 
 // Resets directory slot idx to a fresh, empty entry for name83. Shared by
@@ -605,48 +619,43 @@ fn fat_init_dir_entry(idx: {0..<16 as usize}, name83: *u8) {
 // triggers this reuse, and only for its own exact filename match.
 fn fat_open(name83: *u8, mode: i32) -> FatOpenResult {
     if ((mode & FA_CREATE_ALWAYS) != 0) {
-        let existing: i32 = fat_find_entry(name83);
-        // Two-sided narrow, same reasoning as the FA_READ
-        // branch below: fat_find_entry's own proof doesn't cross the
-        // function-call boundary through its unrefined `-> i32` return.
-        if ((existing >= 0) && (existing < 16)) {
-            let idx: {0..<ROOT_ENTRY_COUNT as usize} = existing as usize;
-            fat_free_chain(root_dir_buf[idx].first_cluster_lo as u32);
-            fat_init_dir_entry(idx, name83);
-            return FatOpenResult::Opened(fat_file_opened(idx, 0, 0, true));
-        }
-        // If-narrowing must wrap the actual use, not a negated early-return
-        // guard (SPEC.md "If-condition narrowing") -- and compared against
-        // literal 16, because next_free_root_entry is u32 and
-        // ROOT_ENTRY_COUNT is usize for array sizes.
-        // next_free_root_entry is u32, so a hi-only condition is enough to
-        // narrow (GitHub issue #99).
-        if (next_free_root_entry < 16) {
-            let idx: {0..<16 as usize} =
-                min(next_free_root_entry, 15) as usize;
-            fat_init_dir_entry(idx, name83);
-            next_free_root_entry = next_free_root_entry + 1;
+        match fat_find_entry(name83) {
+            FatFindResult::Found(idx) => {
+                fat_free_chain(root_dir_buf[idx].first_cluster_lo as u32);
+                fat_init_dir_entry(idx, name83);
+                return FatOpenResult::Opened(fat_file_opened(idx, 0, 0, true));
+            }
+            FatFindResult::NotFound => {
+                // If-narrowing must wrap the actual use, not a negated
+                // early-return guard (SPEC.md "If-condition narrowing") --
+                // and compared against literal 16, because
+                // next_free_root_entry is u32 and ROOT_ENTRY_COUNT is usize
+                // for array sizes. next_free_root_entry is u32, so a
+                // hi-only condition is enough to narrow (GitHub issue #99).
+                if (next_free_root_entry < 16) {
+                    let idx: {0..<16 as usize} =
+                        min(next_free_root_entry, 15) as usize;
+                    fat_init_dir_entry(idx, name83);
+                    next_free_root_entry = next_free_root_entry + 1;
 
-            return FatOpenResult::Opened(fat_file_opened(idx, 0, 0, true));
+                    return FatOpenResult::Opened(fat_file_opened(idx, 0, 0, true));
+                }
+                return FatOpenResult::Error(-1);
+            }
         }
-        return FatOpenResult::Error(-1);
     }
     if ((mode & FA_READ) != 0) {
-        let found: i32 = fat_find_entry(name83);
-        // fat_find_entry's own body proves its for-loop counter is
-        // {0..<ROOT_ENTRY_COUNT}, but that proof does not cross the function-call
-        // boundary through a plain (unrefined) `-> i32` return -- so
-        // narrow explicitly here (two-sided form, same
-        // reasoning as the FA_CREATE_ALWAYS branch above) rather than
-        // widen the return type.
-        if ((found >= 0) && (found < 16)) {
-            let idx: {0..<ROOT_ENTRY_COUNT as usize} = found as usize;
-            let start_cluster: u32 = root_dir_buf[idx].first_cluster_lo as u32;
-            let fsize: u32 = root_dir_buf[idx].file_size;
-            return FatOpenResult::Opened(
-                fat_file_opened(idx, start_cluster, fsize, false));
+        match fat_find_entry(name83) {
+            FatFindResult::Found(idx) => {
+                let start_cluster: u32 = root_dir_buf[idx].first_cluster_lo as u32;
+                let fsize: u32 = root_dir_buf[idx].file_size;
+                return FatOpenResult::Opened(
+                    fat_file_opened(idx, start_cluster, fsize, false));
+            }
+            FatFindResult::NotFound => {
+                return FatOpenResult::Error(-1);
+            }
         }
-        return FatOpenResult::Error(-1);
     }
     return FatOpenResult::Error(-1); // unsupported mode
 }
