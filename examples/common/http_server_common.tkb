@@ -2,9 +2,9 @@
 //
 // The including example owns HTTP response generation and must provide:
 //   fn http_start_response(eth: [u8; 1514..], ihl: {20..<21 as u16},
-//                          req: *u8, req_len: u16, idx: {0..<MAX_CONNS as usize}) -> i32
+//                          req: *u8, req_len: u16, idx: {0..<MAX_CONNS as usize}) -> TcpPayloadResult
 //   fn http_continue_response(eth: [u8; 1514..], ihl: {20..<21 as u16},
-//                             idx: {0..<MAX_CONNS as usize}) -> i32
+//                             idx: {0..<MAX_CONNS as usize}) -> TcpPayloadResult
 //   fn http_response_done(idx: {0..<MAX_CONNS as usize}) -> bool
 //
 // GitHub issue #135's N-way concurrent connection support added the
@@ -253,8 +253,23 @@ fn build_rst_from_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16},
     build_tcp_ctrl(eth, ihl, TCP_FLAG_RST, seq_out, 0, 0);
 }
 
+// Whether a TCP payload segment was built (with its byte length), or
+// dropped (the requested length didn't fit this segment's capacity) --
+// replaces the old plain i32 length-or--1 sentinel every http_start_
+// response/http_continue_response implementer (and everything each of
+// them calls in turn) used to return, per AGENTS.md's "Return a Variant,
+// Not an Int Sentinel" principle. http_conn_state.tkb's tcp_respond/
+// tcp_continue/tcp_close_via_final_ack upgrade a Sent(n) into
+// TcpSendOutcome::Sent(n) or ::SentFin(n) depending on whether the
+// response is now complete -- that decision needs http_response_done(idx)
+// too, which only the caller has, so it isn't folded into this type.
+variant TcpPayloadResult {
+    Sent(i32);
+    Dropped;
+}
+
 fn build_tcp_payload(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-                     len: isize, tcp_flags: u8, idx: {0..<MAX_CONNS as usize}) -> i32 {
+                     len: isize, tcp_flags: u8, idx: {0..<MAX_CONNS as usize}) -> TcpPayloadResult {
     let wire_len: i32 = len as i32;
     if (len >= 0 && len <= (HTTP_SEGMENT_PAYLOAD_MAX as isize)
         && wire_len >= 0 && wire_len <= HTTP_SEGMENT_PAYLOAD_MAX) {
@@ -286,9 +301,9 @@ fn build_tcp_payload(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
         write_u16be(tcp_seg[TCP_URGENT..<20], 0);
 
         fix_tcp_checksum(ip, tcp_seg);
-        return n;
+        return TcpPayloadResult::Sent(n);
     }
-    return -1;
+    return TcpPayloadResult::Dropped;
 }
 
 fn http_server_poll_once(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_block} {

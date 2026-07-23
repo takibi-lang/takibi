@@ -126,12 +126,12 @@ fn build_html_body() -> isize {
 
 // Builds "HTTP/1.1 200 OK ... <html>...</html>" into the payload area
 // (overwriting the request that was there), combined with our own FIN.
-// Returns the total payload length (headers + body) on success, or -1 if
-// it would have exceeded HTTP_MAX_PAYLOAD (never actually happens with
-// the current fixed page; the caller must check for this and drop the
-// reply rather than transmit, see app_main()'s use of the return value).
+// Reports the total payload length (headers + body) via Sent, or Dropped
+// if it would have exceeded HTTP_MAX_PAYLOAD (never actually happens with
+// the current fixed page; http_conn_state.tkb's tcp_respond is the
+// caller that turns Dropped into not transmitting a reply at all).
 fn build_http_response_fin(eth: borrow [u8; 1514..],
-        ihl: {20..<21 as u16}, idx: {0..<MAX_CONNS as usize}) -> i32 {
+        ihl: {20..<21 as u16}, idx: {0..<MAX_CONNS as usize}) -> TcpPayloadResult {
     let body_len: isize = build_html_body();
 
     let payload: *u8 = (eth as *u8) + 54;
@@ -189,20 +189,20 @@ fn build_http_response_fin(eth: borrow [u8; 1514..],
         write_u16be(tcp_seg[TCP_URGENT..<20], 0);
 
         fix_tcp_checksum(ip, tcp_seg);
-        return n;
+        return TcpPayloadResult::Sent(n);
     }
-    return -1;
+    return TcpPayloadResult::Dropped;
 }
 
 fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-                       req: borrow *u8, req_len: u16, idx: {0..<MAX_CONNS as usize}) -> i32 {
+                       req: borrow *u8, req_len: u16, idx: {0..<MAX_CONNS as usize}) -> TcpPayloadResult {
     request_count = request_count + 1;
     return build_http_response_fin(eth, ihl, idx);
 }
 
 fn http_continue_response(eth: borrow [u8; 1514..],
-        ihl: {20..<21 as u16}, idx: {0..<MAX_CONNS as usize}) -> i32 {
-    return -1;
+        ihl: {20..<21 as u16}, idx: {0..<MAX_CONNS as usize}) -> TcpPayloadResult {
+    return TcpPayloadResult::Dropped;
 }
 
 fn http_response_done(idx: {0..<MAX_CONNS as usize}) -> bool {

@@ -173,7 +173,7 @@ fn build_syn_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
 // for why this needs to be enforced, not assumed, to construct tcp_seg
 // with a proven minimum).
 fn build_data_echo(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-        data: borrow []u8, data_len: u16) -> i32 {
+        data: borrow []u8, data_len: u16) -> bool {
     // Snapshot into an immutable local after an explicit bound check: a
     // PLAIN u16 PARAMETER carries no range at all (unlike a refined local,
     // parameters can't cross a function boundary with a refined type
@@ -223,9 +223,9 @@ fn build_data_echo(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
         write_u16be(tcp_seg[TCP_URGENT..<20], 0);
 
         fix_tcp_checksum(ip, tcp_seg);
-        return 1;
+        return true;
     }
-    return 0;
+    return false;
 }
 
 // Rewrites a received FIN into a combined FIN|ACK reply: ACKs the
@@ -453,7 +453,7 @@ fn app_main() {
                                                                             let data = unsafe {
                                                                                 frame[data_off_idx..<data_off_idx + data_len_idx]
                                                                             };
-                                                                            if (build_data_echo(frame, ihl, data, data_len) == 1) {
+                                                                            if (build_data_echo(frame, ihl, data, data_len)) {
                                                                                 plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20 + (data_len as i32));
                                                                                 // conn_rcv_nxt/conn_snd_nxt are u32
                                                                                 // (sequence numbers), data_len is u16 --

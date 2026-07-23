@@ -446,7 +446,7 @@ fn kvs_write_status_line(payload: borrow *u8, status_id: i32) -> isize {
 // segment, closed with our own FIN -- see the file header. body/body_len
 // may describe zero bytes (pass "" for an empty body).
 fn kvs_build_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16}, idx: {0..<MAX_CONNS as usize},
-        status_id: i32, body: borrow *u8, body_len: isize) -> i32 {
+        status_id: i32, body: borrow *u8, body_len: isize) -> TcpPayloadResult {
     let payload: *u8 = (eth as *u8) + 54;
     let mut len: isize = 0;
     len = len + kvs_write_status_line(payload + len, status_id);
@@ -468,7 +468,7 @@ fn kvs_build_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16}, idx: {0..
 // comment. Every parse failure below therefore produces a real HTTP error
 // response (400/404/405/507) instead.
 fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-        req: borrow *u8, req_len: u16, idx: {0..<MAX_CONNS as usize}) -> i32 {
+        req: borrow *u8, req_len: u16, idx: {0..<MAX_CONNS as usize}) -> TcpPayloadResult {
     let len: isize = req_len as isize;
     let mut hdr_end: isize = 0;
     match kvs_find_hdr_end(req, len) {
@@ -579,8 +579,8 @@ fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
 }
 
 fn http_continue_response(eth: borrow [u8; 1514..],
-        ihl: {20..<21 as u16}, idx: {0..<MAX_CONNS as usize}) -> i32 {
-    return -1;
+        ihl: {20..<21 as u16}, idx: {0..<MAX_CONNS as usize}) -> TcpPayloadResult {
+    return TcpPayloadResult::Dropped;
 }
 
 fn http_response_done(idx: {0..<MAX_CONNS as usize}) -> bool {

@@ -330,16 +330,17 @@ fn tcp_respond(pending: sink PendingTcpEvent,
                eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
                req: borrow *u8, req_len: u16) -> TcpSendOutcome {
     let idx: {0..<MAX_CONNS as usize} = conn.idx;
-    let n: i32 = http_start_response(eth, ihl, req, req_len, idx);
-    if (n >= 0) {
-        if (http_response_done(idx)) {
-            conn_state[idx] = ConnState::LastAck;
-            return TcpSendOutcome::SentFin(n);
+    match http_start_response(eth, ihl, req, req_len, idx) {
+        TcpPayloadResult::Dropped => { return TcpSendOutcome::Dropped; }
+        TcpPayloadResult::Sent(n) => {
+            if (http_response_done(idx)) {
+                conn_state[idx] = ConnState::LastAck;
+                return TcpSendOutcome::SentFin(n);
+            }
+            conn_state[idx] = ConnState::Sending;
+            return TcpSendOutcome::Sent(n);
         }
-        conn_state[idx] = ConnState::Sending;
-        return TcpSendOutcome::Sent(n);
     }
-    return TcpSendOutcome::Dropped;
 }
 
 // Sending -> LastAck, or stay Sending: reachable only by building the
@@ -348,16 +349,17 @@ fn tcp_continue(pending: sink PendingTcpEvent,
                 conn: sink TcpConnSending[c],
                 eth: borrow [u8; 1514..], ihl: {20..<21 as u16}) -> TcpSendOutcome {
     let idx: {0..<MAX_CONNS as usize} = conn.idx;
-    let n: i32 = http_continue_response(eth, ihl, idx);
-    if (n >= 0) {
-        if (http_response_done(idx)) {
-            conn_state[idx] = ConnState::LastAck;
-            return TcpSendOutcome::SentFin(n);
+    match http_continue_response(eth, ihl, idx) {
+        TcpPayloadResult::Dropped => { return TcpSendOutcome::Dropped; }
+        TcpPayloadResult::Sent(n) => {
+            if (http_response_done(idx)) {
+                conn_state[idx] = ConnState::LastAck;
+                return TcpSendOutcome::SentFin(n);
+            }
+            // More segments queued: stay Sending.
+            return TcpSendOutcome::Sent(n);
         }
-        // More segments queued: stay Sending.
-        return TcpSendOutcome::Sent(n);
     }
-    return TcpSendOutcome::Dropped;
 }
 
 // LastAck -> Listen: reachable only by building the final ACK answering
@@ -366,12 +368,13 @@ fn tcp_close_via_final_ack(pending: sink PendingTcpEvent,
                            conn: sink TcpConnLastAck[c],
                            eth: borrow [u8; 1514..], ihl: {20..<21 as u16}) -> TcpSendOutcome {
     let idx: {0..<MAX_CONNS as usize} = conn.idx;
-    let n: i32 = build_tcp_payload(eth, ihl, 0, TCP_FLAG_ACK, idx);
-    if (n >= 0) {
-        conn_state[idx] = ConnState::Listen;
-        return TcpSendOutcome::Sent(n);
+    match build_tcp_payload(eth, ihl, 0, TCP_FLAG_ACK, idx) {
+        TcpPayloadResult::Dropped => { return TcpSendOutcome::Dropped; }
+        TcpPayloadResult::Sent(n) => {
+            conn_state[idx] = ConnState::Listen;
+            return TcpSendOutcome::Sent(n);
+        }
     }
-    return TcpSendOutcome::Dropped;
 }
 
 // -- Transitions with no send obligation ----------------------------------

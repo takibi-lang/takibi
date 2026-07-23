@@ -48,7 +48,7 @@ fn copy_response_name(name83: borrow *u8, idx: {0..<MAX_CONNS as usize}) {
 }
 
 fn build_error_response_fin(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-                            msg: *u8, idx: {0..<MAX_CONNS as usize}) -> i32 {
+                            msg: *u8, idx: {0..<MAX_CONNS as usize}) -> TcpPayloadResult {
     let body_len: isize = copy_str(html_body, msg);
     let payload: *u8 = (eth as *u8) + 54;
     let mut len: isize = 0;
@@ -62,7 +62,7 @@ fn build_error_response_fin(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
 }
 
 fn build_response_segment(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-                          first: bool, idx: {0..<MAX_CONNS as usize}) -> i32 {
+                          first: bool, idx: {0..<MAX_CONNS as usize}) -> TcpPayloadResult {
     let payload: *u8 = (eth as *u8) + 54;
     let mut len: isize = 0;
     if (first) {
@@ -104,7 +104,7 @@ variant HttpFileSizeResult {
 }
 
 fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
-                       req: borrow *u8, req_len: u16, idx: {0..<MAX_CONNS as usize}) -> i32 {
+                       req: borrow *u8, req_len: u16, idx: {0..<MAX_CONNS as usize}) -> TcpPayloadResult {
     let mut name83: [u8; 11];
     if (http_request_path_to_name83(req, req_len as isize, name83) == false) {
         let msg: *u8 = "400: unsupported path\n";
@@ -131,7 +131,7 @@ fn http_start_response(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
 }
 
 fn http_continue_response(eth: borrow [u8; 1514..],
-        ihl: {20..<21 as u16}, idx: {0..<MAX_CONNS as usize}) -> i32 {
+        ihl: {20..<21 as u16}, idx: {0..<MAX_CONNS as usize}) -> TcpPayloadResult {
     return build_response_segment(eth, ihl, false, idx);
 }
 
