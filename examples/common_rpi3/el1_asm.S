@@ -154,6 +154,14 @@ rpi3_el1_enter:
        M[3:0] still EL2h -- the level transition never took effect). */
     mrs     x2, hcr_el2
     orr     x2, x2, #(1 << 31)
+    /* HCR_EL2.HCD (bit 29, Hypervisor Call Disable): clear it explicitly
+       so `hvc` from EL1 (GitHub issue #154) is never accidentally
+       trapped as an undefined instruction because of whatever this bit's
+       inherited value happened to be -- same "don't trust inherited
+       system-register state" discipline as HCR_EL2.RW just above,
+       applied preemptively this time rather than after a live-hardware
+       surprise. */
+    bic     x2, x2, #(1 << 29)
     msr     hcr_el2, x2
 
     /* SPSR_EL2: target EL1h (M[3:0] = 0b0101), DAIF all masked -- this

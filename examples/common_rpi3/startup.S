@@ -378,7 +378,11 @@ exception_vectors:
     b       .                   /* 0x380: SError */
     /* Lower EL (AArch64) */
     .align  7
-    b       .                   /* 0x400: Synchronous */
+    b       el1_hvc_entry       /* 0x400: Synchronous -- GitHub issue #154:
+                                   EL1's `hvc` (an EL1->EL2 privileged
+                                   call, once anything drops to EL1) lands
+                                   here; a plain EL1 fault would too, but
+                                   nothing generates one yet */
     .align  7
     b       .                   /* 0x480: IRQ */
     .align  7
@@ -521,3 +525,14 @@ rpi3_sync_exception_entry:
     .type   rpi3_exception_unhandled, %function
 rpi3_exception_unhandled:
     b       rpi3_exception_unhandled
+
+/* -- Default (no-op) EL1->EL2 hvc entry -------------------------------------
+   exception_vectors' Lower-EL-AArch64-Synchronous slot branches here
+   unconditionally, same as rpi3_irq_dispatch/rpi3_sync_exception_dispatch's
+   own weak defaults above -- every RPi3 example still links even though
+   only examples that actually drop to EL1 and issue `hvc` (GitHub issue
+   #154) ever reach this. examples/common_rpi3/hvc_asm.S provides the
+   strong override. */
+    .weak   el1_hvc_entry
+el1_hvc_entry:
+    b       .

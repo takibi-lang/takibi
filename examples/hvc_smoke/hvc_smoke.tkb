@@ -1,0 +1,50 @@
+// EL1 -> EL2 hvc call boundary smoke test (GitHub issue #154). Builds
+// directly on examples/el1_smoke's proven EL2->EL1 drop: once at EL1,
+// this calls rpi3_hvc_call(41), which traps back up to EL2 via a real
+// vector handler (examples/common_rpi3/hvc_asm.S's el1_hvc_entry), runs
+// ordinary compiled Takibi code there (hvc_dispatch below, this file's
+// strong override of the weak default), and resumes EL1 with the
+// dispatch function's return value.
+//
+// This proves only the trap-and-resume mechanism itself -- the real
+// resource-teardown logic issue #154 exists for (unmapping a process's
+// page, deactivating its address space, both genuinely EL2-only
+// operations) is deliberately not attempted in this pass; see that
+// issue for why it deserves its own unhurried real-hardware session.
+//
+// RPi3-only, same reasons as examples/el1_smoke.
+//
+// This is the known-good unrefined baseline for a genuinely new
+// mechanism (EL1->EL2 privileged call); --forbid-trap hardening is a
+// separate later pass per this repo's process.
+
+use "examples/common_rpi3/el1_asm_extern.tkb";
+use "examples/common_rpi3/hvc_asm_extern.tkb";
+
+private let mut el1_stack: [u8; 4096] align(16);
+
+// Strong override of hvc_asm.S's weak default. Runs AT EL2 -- el1_hvc_entry
+// calls this via a plain `bl` before eret-ing back to EL1 -- proving
+// ordinary Takibi code (uart_puts/uart_print) still works at EL2 after a
+// core has already dropped to EL1 once, and that the argument crosses the
+// EL1->EL2 boundary correctly.
+fn hvc_dispatch(arg: usize) -> usize {
+    uart_puts("hvc received: ");
+    uart_print(arg);
+    uart_puts("\n");
+    return arg + 1;
+}
+
+fn el1_main() {
+    let result: usize = rpi3_hvc_call(41);
+    uart_puts("hvc returned: ");
+    uart_print(result);
+    uart_puts("\n");
+}
+
+fn app_main() {
+    uart_puts("hvc_smoke\n");
+    let el1_sp_base: usize = (el1_stack as *u8) as usize;
+    let el1_sp: usize = el1_sp_base + 4096;
+    rpi3_el1_enter(el1_sp);
+}
