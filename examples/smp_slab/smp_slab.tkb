@@ -148,9 +148,11 @@ fn core0_main() {
 
 fn smp_core_main() {
     let id: usize = rpi3_core_id();
-    if (id == 0) { core0_main(); }
-    else if (id == 1) { core1_main(); }
-    else { while (true) { interrupt_wait(); } }
+    match id {
+        0 => { core0_main(); }
+        1 => { core1_main(); }
+        _ => { while (true) { interrupt_wait(); } }
+    }
 }
 
 fn app_main() { smp_core_main(); }

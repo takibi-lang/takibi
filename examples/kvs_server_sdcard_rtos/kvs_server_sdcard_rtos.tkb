@@ -606,13 +606,11 @@ fn kvs_sd_status_to_i32(s: KvsSdStatus) -> i32 {
 // the same role fat12_sdmmc.tkb's mem_block_read/write play for
 // FatIoResult/DiskIoResult.
 fn kvs_sd_status_from_i32(v: i32) -> KvsSdStatus {
-    if (v == 0) {
-        return KvsSdStatus::Loaded;
+    match v {
+        0 => { return KvsSdStatus::Loaded; }
+        1 => { return KvsSdStatus::Empty; }
+        _ => { return KvsSdStatus::IoError; }
     }
-    if (v == 1) {
-        return KvsSdStatus::Empty;
-    }
-    return KvsSdStatus::IoError;
 }
 
 // -- RTOS task split (NEW) -------------------------------------------------

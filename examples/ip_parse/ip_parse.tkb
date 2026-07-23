@@ -11,14 +11,11 @@ use "examples/common/inet_checksum.tkb";
 use "examples/common/netutil.tkb";
 
 fn print_protocol_name(proto: u8) {
-    if (proto == 1) {
-        uart_puts("ICMP");
-    } else if (proto == 6) {
-        uart_puts("TCP");
-    } else if (proto == 17) {
-        uart_puts("UDP");
-    } else {
-        uart_puts("unknown");
+    match proto {
+        1  => { uart_puts("ICMP"); }
+        6  => { uart_puts("TCP"); }
+        17 => { uart_puts("UDP"); }
+        _  => { uart_puts("unknown"); }
     }
 }
 
