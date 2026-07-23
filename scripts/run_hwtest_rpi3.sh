@@ -491,6 +491,7 @@ RPI3_SMP_CORES=4 run_hw_test_rpi3 "page_split_join (rpi3)" "$REPO_ROOT/examples/
 RPI3_SMP_CORES=4 run_hw_test_rpi3 "smp_page_transfer (rpi3)" "$REPO_ROOT/examples/smp_page_transfer/kernel_rpi3.elf" "$REPO_ROOT/examples/smp_page_transfer/smp_page_transfer.expected" 5 30
 RPI3_SMP_CORES=4 run_hw_test_rpi3 "multi_address_space (rpi3)" "$REPO_ROOT/examples/multi_address_space/kernel_rpi3.elf" "$REPO_ROOT/examples/multi_address_space/multi_address_space.expected" 5 30
 run_hw_test_rpi3 "copy_on_write (rpi3)" "$REPO_ROOT/examples/copy_on_write/kernel_rpi3.elf" "$REPO_ROOT/examples/copy_on_write/copy_on_write.expected" 5 6
+run_hw_test_rpi3 "el1_smoke (rpi3)" "$REPO_ROOT/examples/el1_smoke/kernel_rpi3.elf" "$REPO_ROOT/examples/el1_smoke/el1_smoke.expected" 5 6
 run_hw_test_rpi3 "rtc (rpi3)"            "$REPO_ROOT/examples/rtc/kernel_rpi3.elf"            "$REPO_ROOT/examples/rtc/rtc.expected"       5 30
 run_hw_test_rpi3 "timer (rpi3)"          "$REPO_ROOT/examples/timer/kernel_rpi3.elf"          "$REPO_ROOT/examples/timer/timer.expected"   5 30
 run_hw_test_rpi3_stdin "echo (rpi3)" "$REPO_ROOT/examples/echo/kernel_rpi3.elf" \

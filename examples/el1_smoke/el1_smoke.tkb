@@ -1,0 +1,32 @@
+// EL2 -> EL1 drop smoke test (GitHub issue #153 Stage 1). Proves ordinary
+// compiled Takibi code (uart_puts, a real function call) runs correctly
+// from EL1 with EL1's own stage 1 translation regime enabled, reusing the
+// EL2 identity map mmu_init already built -- see
+// examples/common_rpi3/el1_asm.S's header comment for why the MMU
+// reconfiguration cannot be deferred to a later step.
+//
+// RPi3-only: el1_asm.S's TTBR0_EL2 reuse depends on mmu.S's identity map,
+// same reasoning as examples/vm_page_map's own RPi3-only exclusion.
+//
+// This is the known-good unrefined baseline for a genuinely new mechanism
+// (privilege-level transition); --forbid-trap hardening is a separate
+// later pass per this repo's process.
+
+use "examples/common_rpi3/el1_asm_extern.tkb";
+
+private let mut el1_stack: [u8; 4096] align(16);
+
+// Entered once, at EL1, by el1_asm.S's rpi3_el1_enter via a plain `bl`
+// (not a return from app_main -- there is no path back to EL2 in this
+// milestone). Never returns; el1_asm.S parks in a wfe loop after this.
+fn el1_main() {
+    uart_puts("hello from EL1\n");
+    uart_puts("done\n");
+}
+
+fn app_main() {
+    uart_puts("el1_smoke\n");
+    let stack_base: usize = (el1_stack as *u8) as usize;
+    let el1_sp: usize = stack_base + 4096;
+    rpi3_el1_enter(el1_sp);
+}

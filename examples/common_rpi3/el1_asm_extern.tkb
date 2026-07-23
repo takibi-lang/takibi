@@ -1,0 +1,7 @@
+// extern fn declaration for examples/common_rpi3/el1_asm.S's
+// rpi3_el1_enter (GitHub issue #153 Stage 1), split into its own file
+// matching examples/common_rpi3/tlb_asm_extern.tkb's own reasoning (a
+// duplicate `extern fn` declaration is a hard conflict if two files
+// needing it both declared it locally).
+
+extern fn rpi3_el1_enter(el1_sp: usize) !{noreturn};
