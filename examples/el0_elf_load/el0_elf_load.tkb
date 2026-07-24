@@ -51,6 +51,10 @@ const SYSCALL_ERROR: usize = 0xFFFFFFFFFFFFFFFF;
 // loader already follows for SYSCALL_ERROR (-1) above: a syscall's error
 // return is -errno reinterpreted as an unsigned 64-bit value.
 const ERR_ENOTTY: usize = 0xFFFFFFFFFFFFFFE7;
+// -ENOENT as usize (Linux errno 2), same convention -- this kernel has
+// no VFS at all, so any REAL (non-empty) pathname genuinely does not
+// exist.
+const ERR_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
 // This process's fixed, single-process/single-"user" identity (GitHub
 // issue #156's own suggested approach for a kernel with no real PID/UID
 // concept yet: "can all return fixed values"). PID/TID 0 is reserved
@@ -484,18 +488,40 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
         79 => {
             // newfstatat(dirfd, pathname, statbuf, flags) -- only
             // dirfd/pathname/statbuf are visible via el0_svc_dispatch's
-            // own x0/x1/x2. Writes a real Linux aarch64 `struct stat`
-            // (the fixed 128-byte layout, no 32/64 split on this ABI)
-            // describing a character device (S_IFCHR | 0620, the
-            // closest real analogue to this kernel's own UART-backed
-            // stdin/stdout) rather than a regular file -- empirically
-            // discovered necessary (GitHub issue #156's own strace
-            // research did predict newfstatat itself, but not that a
-            // plausible st_mode is what a caller actually needs back:
-            // an all-zero stub buffer left busybox's own `read` builtin
-            // retrying the identical call four times before giving up
-            // and mis-parsing later stdin content as a command).
+            // own x0/x1/x2. Two genuinely different call shapes share
+            // this one syscall number and need genuinely different
+            // answers, discovered the hard way:
+            //   - fstatat(fd, "", &buf, AT_EMPTY_PATH) -- pathname is an
+            //     empty string, the standard portable idiom for "stat
+            //     this fd itself" (confirmed empirically: busybox's own
+            //     `read` builtin uses exactly this to check whether
+            //     stdin is a regular file). Answered with a plausible
+            //     character-device stat (S_IFCHR | 0620, the closest
+            //     real analogue to this kernel's own UART-backed
+            //     stdin/stdout) -- an all-zero stub buffer left `read`
+            //     retrying the identical call four times before giving
+            //     up and mis-parsing later stdin content as a command.
+            //   - any REAL (non-empty) pathname (e.g. busybox's own
+            //     shell doing a $PATH search for an external command
+            //     that might exist) -- always -ENOENT, since this
+            //     kernel has no VFS at all (GitHub issue #156's own
+            //     explicit scope). Answering "yes, exists" here for
+            //     every path unconditionally was the first version of
+            //     this fix, and it was wrong: it made a genuinely absent
+            //     external command report the confusing "Permission
+            //     denied" instead of the correct "not found".
+            let pathname: usize = x1;
             let statbuf: usize = x2;
+            if (pathname < el0_page_va || 1 > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (pathname - el0_page_va > el0_region_size - 1) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let path_ptr: *u8 = pathname as *u8;
+            if (path_ptr[0 as isize] != 0) {
+                return (elr, ERR_ENOENT);
+            }
             if (statbuf < el0_page_va || 128 > el0_region_size) {
                 return (elr, SYSCALL_ERROR);
             }
