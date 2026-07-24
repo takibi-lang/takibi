@@ -174,14 +174,39 @@ el0_prog_entry:
     cmp     x0, x1
     b.ne    .Lel0_prog_hang
 
+    /* Loop reading until EL0_PROG_STDIN_LEN (3) bytes are accumulated --
+       a real short read is now expected (GitHub issue #156: this
+       kernel's read() returns as soon as ANY data is ready, not only
+       once the full request is filled, matching real POSIX semantics
+       instead of the earlier "always fills exactly len" simplification)
+       -- so a defensively-written client must retry rather than assume
+       one call fills the buffer, exactly like any real program reading
+       a fixed-size record over a byte stream. x21 (bytes accumulated
+       so far) and x22 (call count guard, so a 0-byte "success" can
+       never spin forever) are both callee-saved, surviving the SVC
+       round trip. */
+    movz    x21, #0
+    movz    x22, #0
+.Lel0_prog_read_loop:
     adr     x1, el0_prog_stdin_buf
-    movz    x2, #3             /* EL0_PROG_STDIN_LEN -- must match the buffer */
+    add     x1, x1, x21
+    movz    x2, #3
+    sub     x2, x2, x21
     movz    x0, #0             /* fd = 0 (stdin) */
     movz    x8, #63            /* __NR_read */
     svc     #0
-    movz    x1, #3
-    cmp     x0, x1
-    b.ne    .Lel0_prog_hang
+    cmp     x0, #0
+    b.le    .Lel0_prog_hang    /* error, or a 0-byte read: give up */
+    add     x21, x21, x0
+    add     x22, x22, #1
+    movz    x9, #64            /* generous retry cap -- 3 bytes should
+                                   never legitimately take this many
+                                   short reads; a real bug should hang
+                                   visibly here, not loop forever */
+    cmp     x22, x9
+    b.ge    .Lel0_prog_hang
+    cmp     x21, #3
+    b.lt    .Lel0_prog_read_loop
 
     adr     x1, el0_prog_stdin_buf
     movz    x2, #3

@@ -319,12 +319,19 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
     }
     if (syscall_num == 63) {
         // read(fd, buf, len) -- GitHub issue #153's third and last Stage 1
-        // syscall. Same buffer validation as write() below. Blocks (spins
-        // on uart_rx_ready(), the same busy-wait idiom uart_putc's own TX
-        // path already uses) until it has collected exactly `len` bytes --
-        // a real, deterministic behavior, though a simplification of real
-        // read()'s POSIX semantics (a real short read returns as soon as
-        // ANY data is ready, not only once the full request is filled).
+        // syscall. Same buffer validation as write() below. Real short-read
+        // semantics (GitHub issue #156): blocks (spins on uart_rx_ready(),
+        // the same busy-wait idiom uart_putc's own TX path already uses)
+        // until AT LEAST one byte is ready, then drains whatever is
+        // CURRENTLY available up to `len` and returns immediately --
+        // matching POSIX read()'s own "return as soon as any data is
+        // ready" behavior, not waiting for the full request to fill.
+        // Needed for a real interactive shell's own line-buffered read()
+        // (a large requested length that would otherwise never be
+        // satisfied by a short human-typed line) to ever return at all --
+        // confirmed empirically: busybox-static's own "sh" applet reaches
+        // exactly this call and blocks correctly waiting for real input
+        // (see this issue's own progress notes).
         let fd: usize = x0;
         let buf: usize = x1;
         let len: usize = x2;
@@ -338,12 +345,14 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             return (elr, SYSCALL_ERROR);
         }
         let dst: *u8 = buf as *u8;
-        for i: usize in 0..<len {
-            while (uart_rx_ready() == false) {
-            }
-            dst[i as isize] = uart_isr_getc();
+        while (uart_rx_ready() == false) {
         }
-        return (elr, len);
+        let mut n: usize = 0;
+        while (n < len && uart_rx_ready() == true) {
+            dst[n as isize] = uart_isr_getc();
+            n = n + 1;
+        }
+        return (elr, n);
     }
     if (syscall_num == 64 || syscall_num == 68) {
         // write(fd,buf,len) and pwrite64(fd,buf,len,offset) -- the same
