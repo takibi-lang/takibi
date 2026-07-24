@@ -10590,3 +10590,136 @@ where the new per-literal duplicate check caught a mistake in existing
 code. The real bugs found this session (FP/SIMD, `set_tid_address`, the
 UART FIFO race, `newfstatat`) were all found empirically, against a real
 third-party binary on real hardware -- not via any new compile-time check.
+
+### 2026-07-24: GitHub Issue #157 -- `openat`/`read`/`write`/`close`/`newfstatat` Bridged to the Real FAT12 Driver
+
+Issue #156 closed with `el0_shell`'s real busybox-static shell able to run
+builtins but unable to touch a real file: `newfstatat` unconditionally
+reported ENOENT for any non-empty pathname, and no `openat` existed at all.
+Issue #157's job was bridging that syscall layer to `examples/common/
+fat12.tkb`'s already-hardware-proven FAT12 driver -- reusing it as-is, not
+rebuilding it. Landed entirely inside `el0_shell.tkb` and its own Makefile
+rule, deliberately not a new example: a genuinely new `examples/*` target
+means a genuinely new JTAG reset+flash+capture cycle in `make hwcheck-rpi3`
+(now 79 entries), and this milestone's own real value is provable from
+inside the one shell process that already exists.
+
+**Storage wiring.** `el0_shell.tkb` now `use`s `examples/common_rpi3/
+fat12_usbmsc.tkb` (the same real-USB-Mass-Storage-backed adapter
+`examples/fatfs_sdcard`/`examples/rtos_fatfs_sdcard` already proved on this
+board, issue #145) and its Makefile rule picked up that whole dependency
+group (mailbox/usb_dwc2/usb_hub/usb_host/usb_msc/fat12_usbmsc/fat12) plus
+`COMMON_RPI3_TIMER_ASM_O` for the link -- the first kernel image to combine
+the EL0/EL1/HVC process-loader group with the USB HAL group. `app_main()`
+formats the drive and seeds one known file (`CAT.TXT`) via `fat_format()` +
+`create_demo_file()` before the ELF ever loads, matching the issue's own
+"prove it with one small, controlled file first" suggestion.
+
+**fd table.** A small, fixed-size per-process fd table (GitHub issue #157's
+own scope), fd `FIRST_FILE_FD..<FIRST_FILE_FD+4` mapping onto four
+separate top-level `FatFdSlot` globals -- NOT `[FatFdSlot; 4]`, an array of
+stable-owner slots: the compiler itself rejected that shape ("global
+'fat_fd_table' cannot contain stable owner storage inside another value"),
+so `fat_fd_put`/`fat_fd_take` dispatch to the right global via a plain
+`if`-chain on the slot index instead, the same lock+`stable_replace`
+protocol `process_vm_store` (issue #154) already established, just
+generalized from one slot to four. `fat_fd_store` claims a free slot by
+recursing forward one slot at a time (take/inspect/put-back-if-occupied),
+the same shape `copy_on_write`'s own `cow_state_put` retry recursion uses,
+chosen deliberately over a loop that conditionally consumes a linear value
+on only some iterations.
+
+**Three real compiler bugs found via this exact code**, none previously
+exercised by anything in this tree:
+
+- An `if`/`else if`/`else` chain whose EVERY branch ends in its own
+  `return`, with no code reachable after the whole chain, crashed LLVM
+  codegen (`internal compiler error: invalid LLVM IR generated`, a dead
+  merge block with literally zero predecessors reachable, materializing as
+  a stray `ret i45 0`). Fixed by using independent early-return `if`s
+  (`if (cond) { ...; return ...; }` falling through to the next one)
+  instead -- the same shape already used pervasively elsewhere in this
+  file, confirmed safe.
+- Calling a function that takes an exactly-8-byte 2-field struct
+  (`FatIoResult`, `{i32, i32}`) as a *parameter*, from four or more levels
+  of nesting inside one giant function (`el0_svc_dispatch`'s own `match
+  syscall_num` arm), produced an invalid `zext { i32, i32 } to i64` --
+  a real ABI-lowering gap for register-sized small structs at deep
+  nesting, not a documented language limitation. Confirmed the trigger
+  was nesting depth, not the specific function called (an identically-
+  shaped function defined locally in the same file hit the same crash).
+  Fixed by pulling the read/write/close bodies out into their own
+  top-level functions (`fat_fd_read`/`fat_fd_write`/`fat_fd_close`) --
+  each individually only 1-2 levels deep, confirmed working.
+- A `match` on a brand-new variant type, nested directly inside another
+  match arm that had already bound an existential payload
+  (`FatOpenResult::Opened(file) => { match fat_fd_store(...) {...} }`),
+  crashed with `Fatal error: exception Not_found` inside
+  `Llvm_gen.gen_func.gen_stmt`'s `enum_variants_tbl` lookup. Fixed the
+  same way `examples/fatfs_sdcard/fatfs_sdcard.tkb` already avoids this
+  shape (without knowing it at the time): a plain top-level function
+  (`fat_open_fd_result_value`) instead of a `match` inlined at that call
+  site.
+
+None of these three are language/type-system limitations in the sense
+`SPEC.md`'s "Known Limitations" documents -- they are LLVM-codegen-layer
+bugs in `lib/llvm_gen.ml`, found the same empirical way issue #156's own
+UART FIFO race and `newfstatat` bug were: by writing real code against
+real hardware, not by any static check. Worth a real compiler-side fix
+later (tracked nowhere yet -- this session worked around all three at the
+call-site level, following the same "coarsest fix that unblocks the actual
+milestone, harden the tooling separately" precedent this project already
+applies to hardware bugs).
+
+**`dup3`/`fcntl` -- discovered necessary, not designed in.** The issue's
+own scope never mentioned them. A real `strace` of this exact busybox
+binary (installed `qemu-user-static` in this same devcontainer to run it
+directly, the same "measure, don't guess" method issue #156's own
+`strace` research used) showed ash's `read var < file` builtin does NOT
+read the newly `openat()`ed fd directly -- it saves the real stdin via
+`fcntl(0, F_DUPFD_CLOEXEC, N)`, `dup3()`s the file onto fd 0, reads fd 0,
+then `dup3()`s the saved copy back. Without these two syscalls, that line
+hung forever: this kernel's own genuinely-unhandled-syscall path jumps to
+ELR 0, a silent fault with no further UART output. Implemented narrowly --
+`fcntl` just echoes back the requested fd number (nothing else in this
+kernel ever allocates one there) and no-ops `F_SETFD`; `dup3` only
+supports redirecting fd 0, via one more dedicated stable slot
+(`fat_fd_slot_stdin`) matching the same pattern as the four real fd slots.
+`close()` on a slot that's already `Empty` (the fd `dup3` just moved
+content away from, or a `fcntl`-only pseudo-fd) now returns success
+instead of `ERR_EBADF` -- confirmed via the same strace that ash's own
+redirection cleanup doesn't distinguish, and a spurious EBADF there was
+simply wrong on its own terms.
+
+**A fourth real bug, found only via full hardware trial, not qemu-user**:
+sending `el0_shell.stdin`'s whole ~230-byte script in one burst (this
+project's own `run_hw_test_rpi3_stdin` harness convention) while a file-
+redirect episode's ~16 EL0<->EL1 syscall round trips kept nothing polling
+the UART silently overran PL011's small (16-byte) hardware RX FIFO --
+observed as a chunk of the script vanishing with no error, surfacing far
+later as a dangling `do` with no matching `for`. `qemu-user-static`
+(installed for the `strace` research above) reproduced the *correct*
+`dup3`/`fcntl` sequence perfectly but could never have caught this: it has
+no serial-line timing to race against. Fixed with a 512-byte software RX
+ring buffer in `el0_shell.tkb` itself, drained opportunistically on every
+single `el0_svc_dispatch` entry (not just an actual UART `read()`) -- see
+`examples/common_rpi3/AGENTS.md`'s UART0 notes for why this is an
+application-layer workaround, not a `uart.tkb` driver fix, and a real gap
+any other syscall-heavy EL0 consumer of that driver should expect to hit.
+Also moved `el0_shell.tkb`'s own `"el0_shell\n"` boot banner to print
+*after* FAT12 setup instead of before it, since `run_hw_test_rpi3_stdin`
+sends stdin the moment it sees the first output byte -- printing it early
+(as issue #156 always had) now meant stdin arrived several real seconds
+before the shell was ready to consume any of it.
+
+Verified: `examples/el0_shell/el0_shell.stdin` gained `read fatline <
+CAT.TXT` + `echo $fatline` (right after `echo start`) -- input redirection
+through a real ash builtin, not `cat CAT.TXT` directly, since this
+busybox build has no standalone-applet dispatch (issue #156/#158's own
+finding: `cat` needs a real `$PATH` search + `execve`, issue #158, not
+implemented yet) -- full `make hwcheck-rpi3` run clean at 79/79 including
+`el0_shell` itself, no regressions. `newfstatat`'s non-empty-path case now
+does a real `fat_file_exists`/`fat_file_size` lookup instead of
+unconditional ENOENT. Issue #158 (fork/exec of an external command found
+via this VFS work) is next -- explicitly deferred until now since it
+depends on this issue's own file lookup to find anything to `execve`.

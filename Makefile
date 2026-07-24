@@ -1674,8 +1674,17 @@ $(COMMON_RPI3_EL0_SHELL_IMAGE_O): $(COMMON_RPI3_EL0_SHELL_IMAGE_S) $(COMMON_RPI3
 RPI3_EL0_SHELL_EXAMPLES := el0_shell
 RPI3_EL0_SHELL_OBJS := $(foreach e,$(RPI3_EL0_SHELL_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
-$(RPI3_EL0_SHELL_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_EL0_ASM_EXTERN) $(COMMON_RPI3_EL1_ASM_EXTERN) $(COMMON_RPI3_HVC_ASM_EXTERN) $(COMMON_RPI3_EL0_SHELL_IMAGE_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
+# GitHub issue #157: openat/read/write/close/newfstatat now bridge to
+# examples/common/fat12.tkb's real FAT12 driver over the same real USB
+# Mass Storage backend examples/fatfs_sdcard/fatfs_sdcard.tkb already
+# proved on this board (examples/common_rpi3/fat12_usbmsc.tkb) -- same
+# dependency list as $(RPI3_FATFS_OBJS) above, added on top of this
+# file's own existing EL0/EL1/HVC/TLB loader dependencies rather than as
+# a new example, to avoid doubling this file's already-long real-
+# hardware JTAG test cycle (busybox startup alone needs a 10s/20-poll
+# capture window -- see run_hwtest_rpi3.sh's own el0_shell comment).
+$(RPI3_EL0_SHELL_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_EL0_ASM_EXTERN) $(COMMON_RPI3_EL1_ASM_EXTERN) $(COMMON_RPI3_HVC_ASM_EXTERN) $(COMMON_RPI3_EL0_SHELL_IMAGE_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_DIR)/fat12_usbmsc.tkb $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_DIR)/fat12_usbmsc.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 RPI3_VM_PAGE_MAP_EXAMPLES := vm_page_map two_page_map process_vm_smoke
 RPI3_VM_PAGE_MAP_OBJS := $(foreach e,$(RPI3_VM_PAGE_MAP_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
@@ -1929,10 +1938,14 @@ $(RPI3_EL0_ELF_LOAD_KERNELS): examples/%/kernel_rpi3.elf: \
 
 # el0_shell: identical link recipe to el0_elf_load, just against
 # COMMON_RPI3_EL0_SHELL_IMAGE_O (the downloaded busybox-static image)
-# instead of COMMON_RPI3_EL0_TEST_IMAGE_O.
+# instead of COMMON_RPI3_EL0_TEST_IMAGE_O -- plus COMMON_RPI3_TIMER_ASM_O
+# (GitHub issue #157: usb_dwc2.tkb's own delay_ms/read_cntfrq needs it,
+# same object every other USB-host-stack kernel already links in, see
+# $(RPI3_TIMER_ASM_KERNELS) above), since this is the first kernel image
+# to combine the EL0/EL1/HVC loader group with the USB HAL group.
 $(RPI3_EL0_SHELL_KERNELS): examples/%/kernel_rpi3.elf: \
-    $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) $(COMMON_RPI3_HVC_ASM_O) $(COMMON_RPI3_EL0_SHELL_IMAGE_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
-	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) $(COMMON_RPI3_HVC_ASM_O) $(COMMON_RPI3_EL0_SHELL_IMAGE_O) examples/$*/$*_rpi3.o -o $@
+    $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) $(COMMON_RPI3_HVC_ASM_O) $(COMMON_RPI3_TIMER_ASM_O) $(COMMON_RPI3_EL0_SHELL_IMAGE_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
+	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) $(COMMON_RPI3_HVC_ASM_O) $(COMMON_RPI3_TIMER_ASM_O) $(COMMON_RPI3_EL0_SHELL_IMAGE_O) examples/$*/$*_rpi3.o -o $@
 
 # vm_page_map additionally needs COMMON_RPI3_TLB_ASM_O linked in for
 # tlb_invalidate_va (tlbi cannot be called directly from takibi, same

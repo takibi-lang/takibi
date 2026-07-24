@@ -512,8 +512,23 @@ run_hw_test_rpi3_stdin "el0_elf_load (rpi3)" "$REPO_ROOT/examples/el0_elf_load/k
 # session) -- three real syscalls this loader did not yet implement
 # (writev, ppoll, newfstatat) were discovered this way, beyond what
 # GitHub issue #156's own original strace research predicted.
+#
+# GitHub issue #157 widened the capture window from 10/20 to 15/140
+# (matching fatfs_sdcard/rtos_fatfs_sdcard below, not a new number):
+# this kernel now also brings up real USB Mass Storage and mounts/
+# formats a real FAT12 filesystem at boot, before ever loading the
+# shell ELF -- the same real hardware latency those two tests already
+# budget for, now paid here too. el0_shell.stdin's own
+# `read fatline < CAT.TXT` (right after `echo start`) exercises
+# openat/read/close against the CAT.TXT file app_main() seeds onto that
+# same filesystem at boot -- input redirection into a real ash builtin,
+# not `cat CAT.TXT` itself: confirmed empirically that this busybox
+# build's `cat` is a separate applet requiring a real $PATH search +
+# execve (GitHub issue #158, not yet implemented), the same
+# no-standalone-shell-applet-dispatch finding issue #156 already made
+# for `uname`, so `cat` alone just reports "not found" here.
 run_hw_test_rpi3_stdin "el0_shell (rpi3)" "$REPO_ROOT/examples/el0_shell/kernel_rpi3.elf" \
-    "$REPO_ROOT/examples/el0_shell/el0_shell.expected" "$REPO_ROOT/examples/el0_shell/el0_shell.stdin" 10 20
+    "$REPO_ROOT/examples/el0_shell/el0_shell.expected" "$REPO_ROOT/examples/el0_shell/el0_shell.stdin" 15 140
 run_hw_test_rpi3 "rtc (rpi3)"            "$REPO_ROOT/examples/rtc/kernel_rpi3.elf"            "$REPO_ROOT/examples/rtc/rtc.expected"       5 30
 run_hw_test_rpi3 "timer (rpi3)"          "$REPO_ROOT/examples/timer/kernel_rpi3.elf"          "$REPO_ROOT/examples/timer/timer.expected"   5 30
 run_hw_test_rpi3_stdin "echo (rpi3)" "$REPO_ROOT/examples/echo/kernel_rpi3.elf" \

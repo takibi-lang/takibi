@@ -1,4 +1,6 @@
 echo start
+read fatline < CAT.TXT
+echo $fatline
 x=5
 echo $x
 echo $((x + 1))

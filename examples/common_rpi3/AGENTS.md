@@ -1652,8 +1652,27 @@ diagnosis:
   interrupt storm. FIFO-disabled behavior is not merely slower -- it is
   a genuine intermittent hardware race, confirmed by statistical
   comparison across repeated trials, not a testing artifact.
+- The hardware FIFO above is still small (16 bytes) and this driver has
+  no background/interrupt-driven drain into a deeper software buffer of
+  its own -- `uart_rx_ready()`/`uart_isr_getc()` only ever reflect
+  what's in the FIFO *right now*. `el0_shell.tkb` (issue #157) hit this
+  the hard way: once a real syscall episode (a file-redirect through
+  `dup3`, see that file's own notes) kept the EL0 process from calling
+  `read()` on the UART for more than a handful of syscalls, whatever
+  stdin bytes the test harness had already sent silently overran the
+  FIFO -- observed as a chunk of a shell script vanishing with no error
+  at the point it was lost, surfacing far later as a dangling `do` with
+  no matching `for`. Fixed at the `el0_shell.tkb` application layer, not
+  here in the driver: a much larger (512-byte) software ring buffer,
+  opportunistically drained on *every* `el0_svc_dispatch` entry
+  (`uart_rx_ring_drain()`), not just on an actual `read()`/`ppoll()` of
+  fd 0. `uart.tkb` itself is unchanged -- this is a real gap any other
+  syscall-round-trip-heavy EL0 consumer of this driver should expect to
+  hit the same way, worth revisiting as a driver-level fix (real RX
+  interrupt-driven buffering, matching `examples/irq/irq.tkb`'s own
+  pattern) if a second consumer needs it.
 
-## EL2->EL1->EL0 user-mode bring-up (issues #153, #154, #156)
+## EL2->EL1->EL0 user-mode bring-up (issues #153, #154, #156, #157)
 
 `el1_asm.S`'s `rpi3_el1_enter` drops from the EL2H jtag-stub context to
 EL1 (issue #153 Stage 1: minimal smoke test only exercising the

@@ -33,6 +33,12 @@ use "examples/common_rpi3/el0_asm_extern.tkb";
 use "examples/common_rpi3/el1_asm_extern.tkb";
 use "examples/common_rpi3/hvc_asm_extern.tkb";
 use "examples/common_rpi3/el0_shell_image_extern.tkb";
+// GitHub issue #157: pulls in examples/common/fat12.tkb (transitively,
+// via this adapter's own `use`) and examples/common_rpi3/usb_msc.tkb --
+// the same real USB-Mass-Storage-backed FAT12 driver
+// examples/fatfs_sdcard/fatfs_sdcard.tkb already proved on this board
+// (GitHub issue #145), reused as-is rather than rebuilt.
+use "examples/common_rpi3/fat12_usbmsc.tkb";
 
 const SYSCALL_ERROR: usize = 0xFFFFFFFFFFFFFFFF;
 // -ENOTTY as usize (Linux errno 25), the real kernel ABI convention this
@@ -43,6 +49,12 @@ const ERR_ENOTTY: usize = 0xFFFFFFFFFFFFFFE7;
 // no VFS at all, so any REAL (non-empty) pathname genuinely does not
 // exist.
 const ERR_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
+// -EBADF (errno 9) and -ENFILE (errno 23), same -errno-as-usize
+// convention -- GitHub issue #157's own fd-table error paths (a real
+// close()/read()/write() on an fd this process never opened, and the
+// fd table's own fixed capacity being exhausted).
+const ERR_EBADF: usize = 0xFFFFFFFFFFFFFFF7;
+const ERR_ENFILE: usize = 0xFFFFFFFFFFFFFFE9;
 // This process's fixed, single-process/single-"user" identity (GitHub
 // issue #156's own suggested approach for a kernel with no real PID/UID
 // concept yet: "can all return fixed values"). PID/TID 0 is reserved
@@ -293,6 +305,452 @@ fn hvc_dispatch(arg: usize) -> usize {
     return 0;
 }
 
+// GitHub issue #157: a small, fixed-size per-process file descriptor
+// table -- a plain array of stable owner slots, the same shape
+// process_vm_store above already established (lock + stable_replace,
+// not a dynamic allocator), just generalized from one slot to
+// MAX_OPEN_FILES so more than one real file can be open at once. fd
+// numbers 0/1/2 stay the UART (unchanged, see el0_svc_dispatch below);
+// fd FIRST_FILE_FD.. map onto this table by simple subtraction, no
+// separate fd-to-slot indirection needed since this process never
+// dup()s or closes-then-reopens a lower fd.
+const MAX_OPEN_FILES: usize = 4;
+const FIRST_FILE_FD: usize = 3;
+
+variant FatFdState {
+    Empty;
+    Open(exists file: usize. FatFile[file]);
+}
+
+struct FatFdSlot {
+    private lock: i32;
+    private state: FatFdState;
+}
+// Four separate top-level globals, not [FatFdSlot; MAX_OPEN_FILES] --
+// a stable owner slot (the lock+stable_replace protocol process_vm_store
+// above already established) cannot live nested inside another value,
+// array elements included (confirmed by the compiler itself: "global
+// 'fat_fd_table' cannot contain stable owner storage inside another
+// value" when this was first tried as an array). fat_fd_put/fat_fd_take
+// below dispatch to the right global with a plain if-chain on `slot`
+// instead.
+private let mut fat_fd_slot0: FatFdSlot;
+private let mut fat_fd_slot1: FatFdSlot;
+private let mut fat_fd_slot2: FatFdSlot;
+private let mut fat_fd_slot3: FatFdSlot;
+
+private linear view FatFdGuard[lock: addr];
+fn fat_fd_guard(lock: *i32 @ place) -> FatFdGuard[place] {
+    return view FatFdGuard[place];
+}
+fn fat_fd_guard_done(guard: sink FatFdGuard[place]) {}
+
+// Only ever reached with a genuinely Empty previous state -- every call
+// site below only ever puts into a slot it (or fat_fd_take, right
+// before it) just observed empty, same reasoning as
+// process_vm_state_discard above.
+fn fat_fd_state_discard(state: sink FatFdState) {}
+
+fn fat_fd_put(slot: {0..<MAX_OPEN_FILES as usize}, next: FatFdState) {
+    if (slot == 0) {
+        let guard = fat_fd_guard(&fat_fd_slot0.lock);
+        let previous: FatFdState = stable_replace(
+            guard, &fat_fd_slot0.lock, fat_fd_slot0.state, next);
+        fat_fd_guard_done(guard);
+        fat_fd_state_discard(previous);
+    } else if (slot == 1) {
+        let guard = fat_fd_guard(&fat_fd_slot1.lock);
+        let previous: FatFdState = stable_replace(
+            guard, &fat_fd_slot1.lock, fat_fd_slot1.state, next);
+        fat_fd_guard_done(guard);
+        fat_fd_state_discard(previous);
+    } else if (slot == 2) {
+        let guard = fat_fd_guard(&fat_fd_slot2.lock);
+        let previous: FatFdState = stable_replace(
+            guard, &fat_fd_slot2.lock, fat_fd_slot2.state, next);
+        fat_fd_guard_done(guard);
+        fat_fd_state_discard(previous);
+    } else {
+        let guard = fat_fd_guard(&fat_fd_slot3.lock);
+        let previous: FatFdState = stable_replace(
+            guard, &fat_fd_slot3.lock, fat_fd_slot3.state, next);
+        fat_fd_guard_done(guard);
+        fat_fd_state_discard(previous);
+    }
+}
+
+// Four independent `if (cond) { ... return ...; }` guards, not one
+// if/else-if/else chain -- confirmed necessary the hard way: an
+// if/else-if/else chain whose EVERY branch ends in its own `return`
+// crashed this compiler's own LLVM codegen (an internal "invalid LLVM
+// IR generated" error, a dead merge block with literally zero
+// predecessors), a real compiler bug found via this exact code, not a
+// language limitation to design around speculatively elsewhere. This
+// shape -- an early-return guard falling through to the next one -- is
+// the same one already used pervasively throughout this file's own
+// el0_svc_dispatch arms, so it is known safe.
+fn fat_fd_take(slot: {0..<MAX_OPEN_FILES as usize}) -> FatFdState {
+    if (slot == 0) {
+        let guard = fat_fd_guard(&fat_fd_slot0.lock);
+        let state: FatFdState = stable_replace(
+            guard, &fat_fd_slot0.lock, fat_fd_slot0.state, FatFdState::Empty);
+        fat_fd_guard_done(guard);
+        return state;
+    }
+    if (slot == 1) {
+        let guard = fat_fd_guard(&fat_fd_slot1.lock);
+        let state: FatFdState = stable_replace(
+            guard, &fat_fd_slot1.lock, fat_fd_slot1.state, FatFdState::Empty);
+        fat_fd_guard_done(guard);
+        return state;
+    }
+    if (slot == 2) {
+        let guard = fat_fd_guard(&fat_fd_slot2.lock);
+        let state: FatFdState = stable_replace(
+            guard, &fat_fd_slot2.lock, fat_fd_slot2.state, FatFdState::Empty);
+        fat_fd_guard_done(guard);
+        return state;
+    }
+    // slot == 3 -- the only value {0..<MAX_OPEN_FILES} leaves once 0/1/2
+    // are ruled out above.
+    let guard = fat_fd_guard(&fat_fd_slot3.lock);
+    let state: FatFdState = stable_replace(
+        guard, &fat_fd_slot3.lock, fat_fd_slot3.state, FatFdState::Empty);
+    fat_fd_guard_done(guard);
+    return state;
+}
+
+variant FatOpenFdResult {
+    Fd(usize);
+    Error(usize);
+}
+
+// Collapses FatOpenFdResult to the one usize el0_svc_dispatch actually
+// returns either way (a real fd, or a real -errno -- Linux's own single-
+// register convention already treats those the same way). Written as
+// its own top-level function, NOT a `match` inlined directly inside
+// another match arm that already bound an existential FatFile[file] --
+// confirmed necessary the hard way: nesting a second `match` inside a
+// match arm that binds an existential payload crashed this compiler's
+// own codegen (an internal `Not_found` in its enum_variants_tbl lookup).
+// examples/fatfs_sdcard/fatfs_sdcard.tkb's own `FatOpenResult::Opened(fp)
+// => { ...fat_io_ok(fat_read(...))... }` already avoids this same shape
+// by calling a boolean helper instead of matching inline -- this is the
+// same fix, generalized to a value instead of a bool.
+fn fat_open_fd_result_value(r: FatOpenFdResult) -> usize {
+    match r {
+        FatOpenFdResult::Fd(fd) => { return fd; }
+        FatOpenFdResult::Error(err) => { return err; }
+    }
+}
+
+// A local restatement of fat12.tkb's own fat_io_ok. Confirmed via
+// real-hardware... rather, real-compiler trial: calling `fat_io_ok`
+// (or this identically-shaped local copy) from FOUR levels deep inside
+// el0_svc_dispatch's own `match syscall_num` arm (if fd >= .. { if slot
+// < .. { match state { Open(file) => { ... here ... } } } }) crashed
+// this compiler's own codegen either way (an invalid `zext { i32, i32 }
+// to i64` trying to coerce FatIoResult's own struct representation into
+// the callee's parameter type) -- so the actual trigger is nesting
+// depth inside one giant function, not which function gets called. The
+// real fix (see fat_fd_read/fat_fd_write/fat_fd_close below) is pulling
+// that whole body out into its own top-level function, the same
+// "coarsest thing that fixes it" response as this codebase's own
+// %zext/match-in-existential-arm bugs found earlier in this same
+// change. This helper stays -- it's genuinely useful once nesting is
+// shallow again -- but is no longer the fix by itself.
+fn fat_io_result_ok(r: FatIoResult) -> bool {
+    match r {
+        FatIoResult::Ok => { return true; }
+        FatIoResult::Err(err) => { return false; }
+    }
+}
+
+// GitHub issue #157: the actual fd>=3 read/write/close bodies, pulled
+// out of el0_svc_dispatch's own match arms into their own top-level
+// functions -- see fat_io_result_ok's comment above for why (a real
+// compiler codegen limit on how deeply nested one function's control
+// flow can get, discovered via this exact code). Each takes an already-
+// narrowed `slot` so fat_fd_take/fat_fd_put's own {0..<MAX_OPEN_FILES}
+// parameter stays satisfied without re-deriving the narrowing here.
+fn fat_fd_read(slot: {0..<MAX_OPEN_FILES as usize}, buf: *u8, len: u32) -> usize {
+    let state: FatFdState = fat_fd_take(slot);
+    match state {
+        FatFdState::Empty => {
+            return ERR_EBADF;
+        }
+        FatFdState::Open(mut file) => {
+            let mut br: u32 = 0;
+            let result: FatIoResult = fat_read(file, buf, len, &br);
+            fat_fd_put(slot, FatFdState::Open(file));
+            if (fat_io_result_ok(result) == true) {
+                return br as usize;
+            }
+            return SYSCALL_ERROR;
+        }
+    }
+}
+
+fn fat_fd_write(slot: {0..<MAX_OPEN_FILES as usize}, buf: *u8, len: u32) -> usize {
+    let state: FatFdState = fat_fd_take(slot);
+    match state {
+        FatFdState::Empty => {
+            return ERR_EBADF;
+        }
+        FatFdState::Open(mut file) => {
+            let mut bw: u32 = 0;
+            let result: FatIoResult = fat_write(file, buf, len, &bw);
+            fat_fd_put(slot, FatFdState::Open(file));
+            if (fat_io_result_ok(result) == true) {
+                return bw as usize;
+            }
+            return SYSCALL_ERROR;
+        }
+    }
+}
+
+// close() on a slot that is already Empty returns success (0), not
+// ERR_EBADF -- confirmed necessary via a real strace of this exact
+// busybox binary running `read var < file` (see fat_dup3_stdin below):
+// ash's own redirection machinery calls close() on an fd it just
+// dup3()ed AWAY from (the slot's content already moved elsewhere, so
+// the slot is legitimately, expectedly Empty at this point, not a
+// double-close bug) and does not appear to check close()'s return
+// value either way -- but reporting a spurious EBADF here for a
+// perfectly ordinary redirection cleanup step is still wrong on its own
+// terms, not just harmless.
+fn fat_fd_close(slot: {0..<MAX_OPEN_FILES as usize}) -> usize {
+    let state: FatFdState = fat_fd_take(slot);
+    match state {
+        FatFdState::Empty => {
+            return 0;
+        }
+        FatFdState::Open(file) => {
+            let close_result: FatIoResult = fat_close(file);
+            if (fat_io_result_ok(close_result) == true) {
+                return 0;
+            }
+            return SYSCALL_ERROR;
+        }
+    }
+}
+
+// GitHub issue #157's own follow-on, discovered necessary via a real
+// strace of this exact busybox binary (not predicted by issue #156's
+// own strace research, which never exercised file redirection): ash's
+// `read var < file` does NOT read the newly openat()ed fd directly --
+// it dup3()s it onto fd 0 first (after saving the real original stdin
+// via fcntl(0, F_DUPFD_CLOEXEC, N) to restore later), then reads fd 0
+// as usual. Without this, `read var < file` hung forever (this kernel's
+// own genuinely-unhandled-syscall path -- see el0_svc_dispatch's `_`
+// wildcard arm -- jumps to ELR 0, a silent fault with no further UART
+// output, exactly what real-hardware testing showed before this was
+// added). One dedicated stable slot (the same lock+stable_replace shape
+// as fat_fd_slot0..3 above), not a 5th numbered fd slot: fd 0 itself is
+// what gets redirected, not a new fd number.
+private let mut fat_fd_slot_stdin: FatFdSlot;
+
+fn fat_stdin_put(next: FatFdState) {
+    let guard = fat_fd_guard(&fat_fd_slot_stdin.lock);
+    let previous: FatFdState = stable_replace(
+        guard, &fat_fd_slot_stdin.lock, fat_fd_slot_stdin.state, next);
+    fat_fd_guard_done(guard);
+    fat_fd_state_discard(previous);
+}
+
+fn fat_stdin_take() -> FatFdState {
+    let guard = fat_fd_guard(&fat_fd_slot_stdin.lock);
+    let state: FatFdState = stable_replace(
+        guard, &fat_fd_slot_stdin.lock, fat_fd_slot_stdin.state, FatFdState::Empty);
+    fat_fd_guard_done(guard);
+    return state;
+}
+
+fn fat_stdin_is_open() -> bool {
+    let state: FatFdState = fat_stdin_take();
+    match state {
+        FatFdState::Empty => {
+            return false;
+        }
+        FatFdState::Open(file) => {
+            fat_stdin_put(FatFdState::Open(file));
+            return true;
+        }
+    }
+}
+
+// Returns >= 0 (the real byte count, matching read()'s own return
+// value) when fd 0 is currently redirected to a real file, or -1 when
+// it is not (the caller falls back to the ordinary UART path). -2 is a
+// genuine fat_read() I/O error.
+fn fat_stdin_read(buf: *u8, len: u32) -> i32 {
+    let state: FatFdState = fat_stdin_take();
+    match state {
+        FatFdState::Empty => {
+            return -1;
+        }
+        FatFdState::Open(mut file) => {
+            let mut br: u32 = 0;
+            let result: FatIoResult = fat_read(file, buf, len, &br);
+            fat_stdin_put(FatFdState::Open(file));
+            if (fat_io_result_ok(result) == true) {
+                return br as i32;
+            }
+            return -2;
+        }
+    }
+}
+
+// dup3(oldfd, 0, flags)'s two real dispositions, each its own top-level
+// function for the same reason fat_fd_read/write/close above are --
+// keeping fat_dup3_stdin itself shallow (see its own comment).
+fn fat_dup3_redirect_stdin(slot: {0..<MAX_OPEN_FILES as usize}) -> usize {
+    let state: FatFdState = fat_fd_take(slot);
+    match state {
+        FatFdState::Empty => {
+            return ERR_EBADF;
+        }
+        FatFdState::Open(file) => {
+            fat_stdin_put(FatFdState::Open(file));
+            return 0;
+        }
+    }
+}
+
+fn fat_dup3_restore_stdin() -> usize {
+    let state: FatFdState = fat_stdin_take();
+    match state {
+        FatFdState::Empty => {
+            return 0;
+        }
+        FatFdState::Open(file) => {
+            fat_close(file);
+            return 0;
+        }
+    }
+}
+
+// oldfd >= FIRST_FILE_FD and a live table slot: redirect stdin to that
+// real file. Anything else (this shell's own saved-original-stdin
+// pseudo-fd from fcntl(F_DUPFD_CLOEXEC) below, which this kernel never
+// actually allocates real storage for -- see that syscall arm's own
+// comment) restores stdin to the UART. Kept to two nested `if`s, not
+// three -- the same shallow-function split fat_fd_read/write/close
+// above already needed, confirmed necessary the same way (see
+// fat_io_result_ok's own comment on the codegen limit this works
+// around).
+fn fat_dup3_stdin(oldfd: usize) -> usize {
+    if (oldfd >= FIRST_FILE_FD) {
+        let slot: usize = oldfd - FIRST_FILE_FD;
+        if (slot < MAX_OPEN_FILES) {
+            let s: {0..<MAX_OPEN_FILES as usize} = slot;
+            return fat_dup3_redirect_stdin(s);
+        }
+    }
+    return fat_dup3_restore_stdin();
+}
+
+// Finds the first empty slot at or after `slot`, recursing forward one
+// slot at a time -- the same take/inspect/put-back-if-not-mine shape as
+// cow_state_put's own retry recursion above, generalized from "retry the
+// same cell" to "try the next cell", so `file`'s own linear ownership
+// always has exactly one clear disposition at every step (stored, handed
+// to the next call, or closed at the table-full base case) instead of a
+// loop where whether `file` gets touched varies by iteration.
+fn fat_fd_store(slot: usize, file: FatFile[file]) -> FatOpenFdResult {
+    // Positive-branch narrowing, not a negated `if (slot >= MAX) {
+    // return; }` early exit -- this codebase's own if-narrowing is
+    // strictly scoped to the then-branch (see e.g. this file's own
+    // total_pages/process_address_space_map comment above), so an
+    // early-return guard would NOT leave `slot` narrowed for
+    // fat_fd_take/fat_fd_put's own {0..<MAX_OPEN_FILES} parameter below.
+    if (slot < MAX_OPEN_FILES) {
+        let s: {0..<MAX_OPEN_FILES as usize} = slot;
+        let state: FatFdState = fat_fd_take(s);
+        match state {
+            FatFdState::Empty => {
+                fat_fd_put(s, FatFdState::Open(file));
+                return FatOpenFdResult::Fd(FIRST_FILE_FD + slot);
+            }
+            FatFdState::Open(existing) => {
+                fat_fd_put(s, FatFdState::Open(existing));
+                return fat_fd_store(slot + 1, file);
+            }
+        }
+    }
+    fat_close(file);
+    return FatOpenFdResult::Error(ERR_ENFILE);
+}
+
+fn to_upper_ascii(c: u8) -> u8 {
+    if (c >= 0x61 && c <= 0x7A) { // 'a'..'z'
+        return c - 0x20;
+    }
+    return c;
+}
+
+// Max pathname bytes el0_svc_dispatch will ever scan for openat/
+// newfstatat -- generous for this root-directory-only FAT12 driver's own
+// 8.3-name ceiling, and small enough to bound-check as one fixed window
+// the same way writev/ppoll's own arrays are bounded above.
+const PATH_MAX_CHECK: usize = 64;
+
+// Converts a NUL-terminated EL0 pathname into fat12.tkb's own 11-byte
+// 8.3 name83 form (space-padded, uppercased -- FAT is case-insensitive,
+// real Unix filenames usually are not, so folding case here is what
+// makes e.g. `cat cat.txt` actually find a name83 this driver stored as
+// upper case). A single leading '/' is stripped (this shell's cwd is
+// always '/', GitHub issue #156's own scope) but any FURTHER '/', a
+// name or extension component longer than 8/3 bytes, or a completely
+// empty name all report false rather than guessing -- fat12.tkb's own
+// root-directory-only scope (its header comment) never supported
+// subdirectories, so a path this driver cannot represent must be a
+// real ENOENT, not a best-effort truncation.
+fn path_to_name83(path: *u8, out: *u8) -> bool {
+    let mut p: usize = 0;
+    if (path[0] == 0x2F) { // '/'
+        p = 1;
+    }
+    for i: usize in 0..<11 {
+        out[i as isize] = 0x20; // ' '
+    }
+    let mut name_len: usize = 0;
+    let mut ext_len: usize = 0;
+    let mut in_ext: bool = false;
+    let mut ok: bool = true;
+    while (ok == true && p < PATH_MAX_CHECK && path[p as isize] != 0) {
+        let c: u8 = path[p as isize];
+        if (c == 0x2F) { // '/'
+            ok = false;
+        } else if (c == 0x2E) { // '.'
+            if (in_ext == true) {
+                ok = false;
+            } else {
+                in_ext = true;
+            }
+        } else if (in_ext == true) {
+            if (ext_len >= 3) {
+                ok = false;
+            } else {
+                out[(8 + ext_len) as isize] = to_upper_ascii(c);
+                ext_len = ext_len + 1;
+            }
+        } else {
+            if (name_len >= 8) {
+                ok = false;
+            } else {
+                out[name_len as isize] = to_upper_ascii(c);
+                name_len = name_len + 1;
+            }
+        }
+        p = p + 1;
+    }
+    if (ok == false || name_len == 0) {
+        return false;
+    }
+    return true;
+}
+
 // Same policy as examples/el0_smoke's own el0_svc_dispatch, validated
 // against el0_page_va (the one page this loader ever maps) instead of
 // el0_entry_va (this file's e_entry need not be the first byte of the
@@ -303,12 +761,67 @@ fn hvc_dispatch(arg: usize) -> usize {
 // resources are now really reclaimed -- rpi3_hvc_call below traps up to
 // EL2 and runs hvc_dispatch above, which is what el0_mapping_abandon and
 // friends used to just silently discard.
+// GitHub issue #157's own follow-on: a software RX ring, much deeper
+// than PL011's own small hardware FIFO, drained opportunistically on
+// EVERY syscall entry below (not just read()/ppoll() on fd 0).
+// Confirmed necessary via real hardware testing: once a real file-
+// redirect episode (openat/fcntl/dup3/read x11/dup3/close for
+// `read var < CAT.TXT`, see fat_dup3_stdin above) started taking enough
+// real EL0<->EL1 round trips, whatever stdin bytes had already arrived
+// over the wire (this test harness sends the whole stdin script in one
+// burst, see run_hw_test_rpi3_stdin) silently overran the hardware
+// FIFO while nothing was polling it during that episode -- observed as
+// a chunk of script bytes vanishing with no error at the point they
+// were lost, instead surfacing much later as a `for` loop's own `do`
+// token arriving with no matching `for` (GitHub issue #156's own
+// PL011-FIFO fix already covers the SMALL, momentary gaps an
+// interactive typist leaves; it was never sized for "a whole script's
+// worth of bytes may arrive while this kernel is legitimately busy
+// doing something else entirely"). uart_rx_ready()/uart_isr_getc()
+//(examples/common_rpi3/uart.tkb) stay the only real hardware access
+// point; everything else in this file goes through the ring below
+// instead from here on.
+const UART_RX_RING_SIZE: usize = 512;
+private let mut uart_rx_ring: [u8; UART_RX_RING_SIZE];
+private let mut uart_rx_ring_head: usize;
+private let mut uart_rx_ring_tail: usize;
+private let mut uart_rx_ring_count: usize;
+
+fn uart_rx_ring_drain() {
+    let ring: *u8 = uart_rx_ring as *u8;
+    while (uart_rx_ready() == true && uart_rx_ring_count < UART_RX_RING_SIZE) {
+        let c: u8 = uart_isr_getc();
+        ring[uart_rx_ring_head as isize] = c;
+        uart_rx_ring_head = uart_rx_ring_head + 1;
+        if (uart_rx_ring_head >= UART_RX_RING_SIZE) {
+            uart_rx_ring_head = 0;
+        }
+        uart_rx_ring_count = uart_rx_ring_count + 1;
+    }
+}
+
+fn uart_rx_ring_ready() -> bool {
+    return uart_rx_ring_count > 0;
+}
+
+fn uart_rx_ring_getc() -> u8 {
+    let ring: *u8 = uart_rx_ring as *u8;
+    let c: u8 = ring[uart_rx_ring_tail as isize];
+    uart_rx_ring_tail = uart_rx_ring_tail + 1;
+    if (uart_rx_ring_tail >= UART_RX_RING_SIZE) {
+        uart_rx_ring_tail = 0;
+    }
+    uart_rx_ring_count = uart_rx_ring_count - 1;
+    return c;
+}
+
 fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
                     x2: usize, elr: usize) -> (usize, usize) {
     let ec: usize = (esr >> 26) & 0x3F;
     if (ec != 0x15) {
         return (0, 0);
     }
+    uart_rx_ring_drain();
     // A single match over syscall_num (GitHub issue #156), not a chain of
     // `if (syscall_num == N || syscall_num == M) {...}` checks: several
     // syscalls sharing one handler are written as one `N | M => {...}`
@@ -341,21 +854,51 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             let fd: usize = x0;
             let buf: usize = x1;
             let len: usize = x2;
-            if (fd != 0) {
-                return (elr, SYSCALL_ERROR);
-            }
             if (buf < el0_page_va || len > el0_region_size) {
                 return (elr, SYSCALL_ERROR);
             }
             if (buf - el0_page_va > el0_region_size - len) {
                 return (elr, SYSCALL_ERROR);
             }
+            // GitHub issue #157: fd >= FIRST_FILE_FD is a real fat_open()ed
+            // file, dispatched through the fd table instead of the UART
+            // path below. fat_read only ever borrows its FatFile (see
+            // fat12.tkb's own signature), so `file` is still ours to put
+            // back afterward, same take/use/put shape as fat_fd_store's
+            // own slot lookups above.
+            if (fd >= FIRST_FILE_FD) {
+                let slot: usize = fd - FIRST_FILE_FD;
+                if (slot < MAX_OPEN_FILES) {
+                    let s: {0..<MAX_OPEN_FILES as usize} = slot;
+                    let dst2: *u8 = buf as *u8;
+                    return (elr, fat_fd_read(s, dst2, len as u32));
+                }
+                return (elr, SYSCALL_ERROR);
+            }
+            if (fd != 0) {
+                return (elr, SYSCALL_ERROR);
+            }
             let dst: *u8 = buf as *u8;
-            while (uart_rx_ready() == false) {
+            // fd 0 may be dup3()ed onto a real file (fat_dup3_stdin
+            // above) -- checked first, falling back to the ordinary UART
+            // path below only when it is not, matching the same "no
+            // real redirection state = UART" default this loader has
+            // always had.
+            let stdin_result: i32 = fat_stdin_read(dst, len as u32);
+            if (stdin_result >= 0) {
+                return (elr, stdin_result as usize);
+            }
+            // Through the software RX ring (see its own comment above),
+            // not uart_rx_ready()/uart_isr_getc() directly -- the ring
+            // is what actually survives a burst of stdin bytes arriving
+            // while this process was busy elsewhere (e.g. a file-
+            // redirect episode).
+            while (uart_rx_ring_ready() == false) {
+                uart_rx_ring_drain();
             }
             let mut n: usize = 0;
-            while (n < len && uart_rx_ready() == true) {
-                dst[n as isize] = uart_isr_getc();
+            while (n < len && uart_rx_ring_ready() == true) {
+                dst[n as isize] = uart_rx_ring_getc();
                 n = n + 1;
             }
             return (elr, n);
@@ -373,13 +916,30 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             let fd: usize = x0;
             let buf: usize = x1;
             let len: usize = x2;
-            if (fd != 1 && fd != 2) {
-                return (elr, SYSCALL_ERROR);
-            }
             if (buf < el0_page_va || len > el0_region_size) {
                 return (elr, SYSCALL_ERROR);
             }
             if (buf - el0_page_va > el0_region_size - len) {
+                return (elr, SYSCALL_ERROR);
+            }
+            // GitHub issue #157: same fd-table dispatch as read() above.
+            // pwrite64's own offset (x3, not even in this function's
+            // signature) is ignored here exactly like the UART path
+            // below already ignores it -- fat_write only ever appends at
+            // the FatFile's own sequential fptr (fat12.tkb's own scope,
+            // see its header comment), matching this loader's existing
+            // "no real seek support" stance rather than adding one just
+            // for this one call shape.
+            if (fd >= FIRST_FILE_FD) {
+                let slot: usize = fd - FIRST_FILE_FD;
+                if (slot < MAX_OPEN_FILES) {
+                    let s: {0..<MAX_OPEN_FILES as usize} = slot;
+                    let src2: *u8 = buf as *u8;
+                    return (elr, fat_fd_write(s, src2, len as u32));
+                }
+                return (elr, SYSCALL_ERROR);
+            }
+            if (fd != 1 && fd != 2) {
                 return (elr, SYSCALL_ERROR);
             }
             let src: *u8 = buf as *u8;
@@ -463,7 +1023,15 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             if (fds - el0_page_va > el0_region_size - nfds * 8) {
                 return (elr, SYSCALL_ERROR);
             }
-            while (uart_rx_ready() == false) {
+            // GitHub issue #157: when fd 0 is dup3()ed onto a real file
+            // (fat_dup3_stdin above), a fat12.tkb read is always
+            // synchronously ready -- skip the UART busy-wait below
+            // entirely in that case, matching real ppoll()'s own
+            // "regular files are always POLLIN-ready" behavior.
+            if (fat_stdin_is_open() == false) {
+                while (uart_rx_ring_ready() == false) {
+                    uart_rx_ring_drain();
+                }
             }
             let revents0: *u16 = (fds + 6) as *u16;
             *revents0 = 1; // POLLIN
@@ -490,26 +1058,29 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             //     retrying the identical call four times before giving
             //     up and mis-parsing later stdin content as a command.
             //   - any REAL (non-empty) pathname (e.g. busybox's own
-            //     shell doing a $PATH search for an external command
-            //     that might exist) -- always -ENOENT, since this
-            //     kernel has no VFS at all (GitHub issue #156's own
-            //     explicit scope). Answering "yes, exists" here for
-            //     every path unconditionally was the first version of
-            //     this fix, and it was wrong: it made a genuinely absent
-            //     external command report the confusing "Permission
-            //     denied" instead of the correct "not found".
+            //     shell doing a $PATH search for an external command,
+            //     or GitHub issue #157's own `cat somefile`) -- GitHub
+            //     issue #157 replaces the old unconditional -ENOENT with
+            //     a real fat_file_exists/fat_file_size lookup against
+            //     examples/common/fat12.tkb's own root directory (the
+            //     same driver openat() below now opens files through).
+            //     Still -ENOENT for anything path_to_name83 itself
+            //     cannot represent (a subdirectory path, an over-length
+            //     component) or that genuinely is not in the root
+            //     directory -- answering "yes, exists" unconditionally
+            //     was the first version of this fix (GitHub issue #156)
+            //     and was wrong for the same reason it would be wrong
+            //     here: a genuinely absent command/file must report
+            //     "not found", not a confusing later failure.
             let pathname: usize = x1;
             let statbuf: usize = x2;
-            if (pathname < el0_page_va || 1 > el0_region_size) {
+            if (pathname < el0_page_va || PATH_MAX_CHECK > el0_region_size) {
                 return (elr, SYSCALL_ERROR);
             }
-            if (pathname - el0_page_va > el0_region_size - 1) {
+            if (pathname - el0_page_va > el0_region_size - PATH_MAX_CHECK) {
                 return (elr, SYSCALL_ERROR);
             }
             let path_ptr: *u8 = pathname as *u8;
-            if (path_ptr[0 as isize] != 0) {
-                return (elr, ERR_ENOENT);
-            }
             if (statbuf < el0_page_va || 128 > el0_region_size) {
                 return (elr, SYSCALL_ERROR);
             }
@@ -520,10 +1091,124 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             for i: usize in 0..<128 {
                 dst[i as isize] = 0;
             }
-            let mode_ptr: *u32 = (statbuf + 16) as *u32;
-            *mode_ptr = 0x2190; // S_IFCHR (0o020000) | 0o620
-            let nlink_ptr: *u32 = (statbuf + 20) as *u32;
-            *nlink_ptr = 1;
+            if (path_ptr[0 as isize] == 0) {
+                let mode_ptr: *u32 = (statbuf + 16) as *u32;
+                *mode_ptr = 0x2190; // S_IFCHR (0o020000) | 0o620
+                let nlink_ptr: *u32 = (statbuf + 20) as *u32;
+                *nlink_ptr = 1;
+                return (elr, 0);
+            }
+            let mut name83_buf: [u8; 11];
+            if (path_to_name83(path_ptr, name83_buf as *u8) == false) {
+                return (elr, ERR_ENOENT);
+            }
+            if (fat_file_exists(name83_buf as *u8) == false) {
+                return (elr, ERR_ENOENT);
+            }
+            let mode_ptr2: *u32 = (statbuf + 16) as *u32;
+            *mode_ptr2 = 0x81A4; // S_IFREG (0o100000) | 0o644
+            let nlink_ptr2: *u32 = (statbuf + 20) as *u32;
+            *nlink_ptr2 = 1;
+            let size_ptr: *u64 = (statbuf + 48) as *u64;
+            *size_ptr = fat_file_size(name83_buf as *u8) as u64;
+            return (elr, 0);
+        }
+        56 => {
+            // openat(dirfd, pathname, flags, mode) -- GitHub issue #157.
+            // dirfd is ignored (this shell's cwd is always '/', GitHub
+            // issue #156's own scope -- path_to_name83 strips exactly
+            // one leading '/' and rejects anything with a further '/',
+            // so a relative-vs-absolute dirfd distinction never actually
+            // matters here). mode (x3, not visible via this function's
+            // own x0/x1/x2 signature) is ignored too -- fat12.tkb has no
+            // permission model (GitHub issue #157's own explicit scope).
+            // flags: only O_CREAT (0x40) is inspected, matching
+            // fat_open's own only two supported mode combinations --
+            // anything else defaults to FA_READ, so a plain O_RDONLY
+            // open (busybox's own `cat` call shape) is the common case.
+            let pathname: usize = x1;
+            let flags: usize = x2;
+            if (pathname < el0_page_va || PATH_MAX_CHECK > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (pathname - el0_page_va > el0_region_size - PATH_MAX_CHECK) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let path_ptr: *u8 = pathname as *u8;
+            let mut name83_buf: [u8; 11];
+            if (path_to_name83(path_ptr, name83_buf as *u8) == false) {
+                return (elr, ERR_ENOENT);
+            }
+            let mut mode: i32 = FA_READ;
+            if ((flags & 0x40) != 0) { // O_CREAT
+                mode = FA_WRITE | FA_CREATE_ALWAYS;
+            }
+            match fat_open(name83_buf as *u8, mode) {
+                FatOpenResult::Error(err) => {
+                    return (elr, ERR_ENOENT);
+                }
+                FatOpenResult::Opened(file) => {
+                    let store_result: FatOpenFdResult = fat_fd_store(0, file);
+                    return (elr, fat_open_fd_result_value(store_result));
+                }
+            }
+        }
+        57 => {
+            // close(fd) -- GitHub issue #157. fd < FIRST_FILE_FD (the
+            // UART-backed 0/1/2) has no real per-fd state to reclaim, so
+            // closing one of those trivially succeeds, matching a real
+            // kernel's own close() on those descriptors.
+            let fd: usize = x0;
+            if (fd < FIRST_FILE_FD) {
+                return (elr, 0);
+            }
+            let slot: usize = fd - FIRST_FILE_FD;
+            // Positive-branch narrowing (see fat_fd_store's own comment
+            // above) -- a negated `if (slot >= MAX_OPEN_FILES) { return;
+            // }` guard would not leave `slot` narrowed below.
+            if (slot < MAX_OPEN_FILES) {
+                let s: {0..<MAX_OPEN_FILES as usize} = slot;
+                return (elr, fat_fd_close(s));
+            }
+            // A real fd this kernel never tracks in the real file table
+            // (e.g. the saved-original-stdin pseudo-fd fcntl(F_DUPFD_
+            // CLOEXEC) below hands back) -- success, not ERR_EBADF, same
+            // reasoning as fat_fd_close's own Empty-slot case above.
+            return (elr, 0);
+        }
+        24 => {
+            // dup3(oldfd, newfd, flags) -- see fat_dup3_stdin's own
+            // comment for why this exists at all (GitHub issue #157).
+            // Only newfd == 0 is supported -- the only shape this
+            // shell's own redirection ever produces.
+            let oldfd: usize = x0;
+            let newfd: usize = x1;
+            if (newfd != 0) {
+                return (elr, SYSCALL_ERROR);
+            }
+            return (elr, fat_dup3_stdin(oldfd));
+        }
+        25 => {
+            // fcntl(fd, cmd, arg) -- GitHub issue #157's own follow-on,
+            // discovered via the same real strace as dup3 above: ash's
+            // `read var < file` saves the real original stdin via
+            // fcntl(0, F_DUPFD_CLOEXEC, N) before redirecting it, then
+            // marks that saved copy close-on-exec via
+            // fcntl(N, F_SETFD, FD_CLOEXEC). Neither needs real
+            // bookkeeping in this kernel: F_DUPFD/F_DUPFD_CLOEXEC just
+            // hands back the requested fd number itself -- nothing else
+            // in this kernel ever allocates an fd in that range, so it
+            // is trivially "free" -- and fat_dup3_stdin above already
+            // treats ANY fd outside the real file table as "restore the
+            // UART" when it is later dup3()ed back onto fd 0, which is
+            // this pseudo-fd's only real later use. F_SETFD is a
+            // genuine no-op here: nothing in this kernel ever execs, so
+            // close-on-exec has no real effect to honor.
+            let cmd: usize = x1;
+            let arg: usize = x2;
+            if (cmd == 0 || cmd == 1030) { // F_DUPFD, F_DUPFD_CLOEXEC
+                return (elr, arg);
+            }
             return (elr, 0);
         }
         // Trivial stub syscalls (GitHub issue #156's own effort-estimate
@@ -741,7 +1426,52 @@ fn el1_main() {
 }
 
 fn app_main() {
+    // GitHub issue #157: mounts a real FAT12 filesystem over the same
+    // real USB Mass Storage device examples/fatfs_sdcard/fatfs_sdcard.tkb
+    // already proves on this board, and seeds it with one small, known
+    // file -- the "prove the mechanism with a small, controlled real
+    // file first" staged approach the issue itself suggests, before
+    // el0_svc_dispatch's openat/read/close (below) ever try to open it
+    // from EL0. Formats unconditionally (fat_format(), not fat_mount())
+    // rather than trusting whatever was left on the media by a previous
+    // run or a different fatfs-family test sharing the same drive --
+    // this keeps CAT.TXT's own content deterministic regardless of test
+    // order or prior media state, matching fatfs_sdcard.tkb's own
+    // create-fresh-then-verify pattern. Deliberately silent on success
+    // (no new line in el0_shell.expected's own boot preamble) -- only a
+    // real failure here is worth a line, so a hardware run that DOES
+    // succeed produces byte-identical boot output to before this issue.
+    //
+    // "el0_shell\n" itself is deliberately printed AFTER this block, not
+    // before it as it used to be -- confirmed necessary via real
+    // hardware testing: scripts/run_hwtest_rpi3.sh's own
+    // run_hw_test_rpi3_stdin sends el0_shell.stdin the moment it sees
+    // the FIRST byte of UART output, on the (previously true) assumption
+    // that "kernel printed something" means "about to be ready to read
+    // stdin very soon". USB Mass Storage bring-up + a real FAT format
+    // now take several real seconds between boot and that readiness;
+    // sending the whole stdin script into the PL011's own small hardware
+    // RX FIFO that early, with nothing draining it while this block
+    // runs, silently dropped/corrupted its EARLIEST bytes by the time
+    // the shell actually started reading (observed on real hardware as
+    // later commands -- well past where the drop happened -- failing
+    // with "syntax error: unexpected \"do\"", not as any error near the
+    // actual dropped bytes) -- moving this print to AFTER the point
+    // where the real work is done keeps "first byte of output" true to
+    // "about to actually read stdin" again, the invariant this test
+    // harness's own timing already relies on for every other stdin-fed
+    // example.
+    if (disk_io_ok(disk_initialize()) == false || fat_io_ok(fat_format()) == false) {
+        uart_puts("fat12 setup failed\n");
+    } else {
+        let cat_name: *u8 = "CAT     TXT";
+        let cat_content: *u8 = "fat12 file\n";
+        if (fat_io_ok(create_demo_file(cat_name, cat_content)) == false) {
+            uart_puts("fat12 setup failed\n");
+        }
+    }
     uart_puts("el0_shell\n");
+
     page_pool_init();
 
     let archive_addr: usize = el0_shell_image_addr();
