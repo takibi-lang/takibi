@@ -5476,6 +5476,125 @@ let infer_tests = [
           if (*slot == *slot) {}
         }");
 
+  (* GitHub issue #158 (OWNERSHIP_KERNEL.md #131/#132: "indexed owners
+     stored in arbitrary fields, arrays, globals, or other stable
+     places"): a fixed-size array of a stable owner struct, as a
+     top-level private mutable global, each array element its own
+     independent stable_replace-able slot addressed by a runtime index.
+     Full LLVM codegen (expect_codegen_ok, not just expect_ok) since a
+     real bug was found this same session where array-indexed
+     stable_replace type-checked fine but crashed LLVM's own IR
+     verifier. *)
+  Alcotest.test_case "stable owner slot array: each element is independently stable_replace-able by runtime index" `Quick
+    (expect_codegen_ok
+       "linear view StableArrGuard158[lock: addr];
+        linear struct StableArrOwner158[n: usize] {
+          id: usize @ n;
+          value: i32;
+        }
+        variant StableArrValue158 {
+          Empty;
+          Full(exists n: usize. StableArrOwner158[n]);
+        }
+        struct StableArrSlot158 {
+          private mutex: i32;
+          private value: StableArrValue158;
+        }
+        private let mut stable_arr158: [StableArrSlot158; 4];
+        fn stable_arr_lock158(m: *i32 @ lock) -> StableArrGuard158[lock] {
+          return view StableArrGuard158[lock];
+        }
+        fn stable_arr_unlock158(g: sink StableArrGuard158[lock], m: *i32 @ lock) {}
+        fn stable_arr_new158(value: i32) -> StableArrOwner158[0] {
+          let mut owner: StableArrOwner158[0] = { 0, value };
+          return owner;
+        }
+        fn stable_arr_drop158(owner: sink StableArrOwner158[n]) {}
+        fn stable_arr_use158(slot: {0..<4 as usize}) {
+          let guard = stable_arr_lock158(&stable_arr158[slot].mutex);
+          let previous: StableArrValue158 = stable_replace(
+            guard, &stable_arr158[slot].mutex, stable_arr158[slot].value,
+            StableArrValue158::Full(stable_arr_new158(7)));
+          match previous {
+            StableArrValue158::Empty => {}
+            StableArrValue158::Full(stale) => { stable_arr_drop158(stale); }
+          }
+          let current: StableArrValue158 = stable_replace(
+            guard, &stable_arr158[slot].mutex, stable_arr158[slot].value,
+            StableArrValue158::Empty);
+          match current {
+            StableArrValue158::Empty => {}
+            StableArrValue158::Full(owner) => { stable_arr_drop158(owner); }
+          }
+          stable_arr_unlock158(guard, &stable_arr158[slot].mutex);
+        }");
+
+  Alcotest.test_case "stable owner slot array: mismatched runtime indices are not the same container" `Quick
+    (expect_type_error
+       "stable_replace mutex and owner field must belong to the same syntactic container"
+       "linear view StableArrGuard158b[lock: addr];
+        variant StableArrValue158b { Empty; Full(exists lock: addr. StableArrGuard158b[lock]); }
+        struct StableArrSlot158b {
+          private mutex: i32;
+          private value: StableArrValue158b;
+        }
+        private let mut stable_arr158b: [StableArrSlot158b; 4];
+        fn stable_arr_lock158b(m: *i32 @ lock) -> StableArrGuard158b[lock] {
+          return view StableArrGuard158b[lock];
+        }
+        fn stable_arr_wrong158b(a: {0..<4 as usize}, b: {0..<4 as usize}) {
+          let guard = stable_arr_lock158b(&stable_arr158b[a].mutex);
+          let previous: StableArrValue158b = stable_replace(
+            guard, &stable_arr158b[a].mutex, stable_arr158b[b].value,
+            StableArrValue158b::Empty);
+        }");
+
+  Alcotest.test_case "stable owner slot array: reassigning the index invalidates the cached place identity" `Quick
+    (expect_type_error
+       "stable_replace mutex does not match guard identity"
+       "linear view StableArrGuard158c[lock: addr];
+        variant StableArrValue158c { Empty; Full(exists lock: addr. StableArrGuard158c[lock]); }
+        struct StableArrSlot158c {
+          private mutex: i32;
+          private value: StableArrValue158c;
+        }
+        private let mut stable_arr158c: [StableArrSlot158c; 4];
+        fn stable_arr_lock158c(m: *i32 @ lock) -> StableArrGuard158c[lock] {
+          return view StableArrGuard158c[lock];
+        }
+        fn stable_arr_stale158c() {
+          let mut slot: {0..<4 as usize} = 1;
+          let guard = stable_arr_lock158c(&stable_arr158c[slot].mutex);
+          slot = 0;
+          let previous: StableArrValue158c = stable_replace(
+            guard, &stable_arr158c[slot].mutex, stable_arr158c[slot].value,
+            StableArrValue158c::Empty);
+        }");
+
+  Alcotest.test_case "stable owner slot array cannot be a local (not just a global)" `Quick
+    (expect_type_error "not a local value"
+       "linear view StableArrGuard158d[lock: addr];
+        variant StableArrValue158d { Empty; Full(exists lock: addr. StableArrGuard158d[lock]); }
+        struct StableArrSlot158d {
+          private mutex: i32;
+          private value: StableArrValue158d;
+        }
+        fn stable_arr_local158d() {
+          let mut slots: [StableArrSlot158d; 4];
+        }");
+
+  Alcotest.test_case "stable owner slot array cannot be nested in a struct field" `Quick
+    (expect_type_error "cannot contain stable owner storage"
+       "linear view StableArrGuard158e[lock: addr];
+        variant StableArrValue158e { Empty; Full(exists lock: addr. StableArrGuard158e[lock]); }
+        struct StableArrSlot158e {
+          private mutex: i32;
+          private value: StableArrValue158e;
+        }
+        struct StableArrWrapper158e {
+          slots: [StableArrSlot158e; 4];
+        }");
+
   Alcotest.test_case "Slice 3: a view payload affects kind but has no runtime data requirement" `Quick
     (expect_ok
        "linear view VariantPermit8;

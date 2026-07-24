@@ -1333,6 +1333,81 @@ negative contract, and unit coverage includes a lying borrow implementation,
 pointer-valued loaded aliases, scalar copies, nested aggregate-copy rejection,
 indexed handoff, and ABI erasure.
 
+#### 6.7.18 Arrayed stable owner slots (implemented 2026-07-24)
+
+The first slice of #131/#132 ("indexed owners stored in arbitrary fields,
+arrays, globals, or other stable places", left open at the Slice 5
+checkpoint in 6.7.6): a FIXED-SIZE ARRAY of a stable owner struct, as a
+top-level `private let mut`, is now permitted where a bare stable owner
+struct already was -- each array element is its own independent
+`stable_replace`-able slot, addressed by a runtime index. Driven by a real
+concrete need, per this document's own stated policy for selecting new
+Core work ("No broader ownership slice is selected without another
+concrete example and focused negative contract"): GitHub issue #158's real
+`fork()` needs a per-page copy-on-write table sized to a real process
+(`MAX_PROCESS_PAGES` = 512), for which the only previously-available
+workaround -- one separately hand-named global per slot, proven at a
+4-entry scale by issue #157's own `fat_fd_slot0..3` -- does not scale to
+by-hand authorship.
+
+This is deliberately narrower than "arbitrary stable places" in general:
+- **Declaration**: only a top-level `private let mut [T; N]` where `T` is
+  already a registered stable owner struct is newly permitted
+  (`ast_is_stable_owner_array` alongside the existing
+  `ast_is_stable_owner_struct`, `lib/type_inf.ml`). Every other nesting
+  shape `ast_contains_stable_owner_value` already rejected -- a struct
+  field, a tuple, a function parameter/return, a LOCAL array -- is
+  unchanged and still rejected; only the top-level-global case gained a
+  new exception.
+- **Same-container identity**: `stable_replace`'s own "mutex and owner
+  field share a container" check (`static_place_key`, previously handling
+  only `Var`/`FieldGet`) now also handles `Index(id, idx)`, combining the
+  base array name with the index sub-expression's OWN place key (itself
+  recursively required to be a plain place, not an arbitrary computed
+  expression) into one string key, e.g. `"fat_fd_table[slot]"`. This is a
+  purely STRUCTURAL proof -- both operands spell the identical index
+  expression at one call site, hence observe the identical runtime value,
+  because nothing mutates between the two syntactic occurrences -- not an
+  attempt to reason about which of the N array slots is meant, matching
+  how the bare (non-indexed) case never reasoned about a global's address
+  either.
+- **Reassignment invalidation**: `invalidate_place_binding`/
+  `invalidate_place_projections` (already called on any tracked
+  variable's reassignment) now also strip any cached place key containing
+  the reassigned name as an INDEX component (`key_has_index_ref`, matching
+  on `"[name]"`/`"[name."` substrings), not just keys equal to or prefixed
+  by the name itself -- the prior implementation would have missed
+  `"fat_fd_table[slot]"` entirely on a reassignment of `slot`, silently
+  letting a guard constructed for one array element continue to appear
+  valid for a different one after the index variable changed underneath
+  it. Verified as a dedicated negative test (see below), not merely
+  reasoned about: the fix is exercised, not just argued for.
+- **Codegen**: required NO `lib/llvm_gen.ml` changes. Indexing into an
+  array of a `TypeNamed` (struct) element type already produces a pointer
+  via `load_from_array`'s existing GEP path, not a loaded value -- the
+  exact ABI shape `stable_replace`'s own codegen already required
+  (`base_v` must be a pointer, checked by
+  `type_of base_v = llty` at that call site). This was verified, not
+  assumed: the positive test below runs the full pipeline through LLVM's
+  own IR verifier (`expect_codegen_ok`, `Llvm_analysis.verify_function`),
+  not just type inference, specifically because this same session
+  separately found real `lib/llvm_gen.ml` bugs (an invalid `zext` on a
+  register-sized struct parameter, a dead-merge-block crash on an
+  all-branches-return `if`/`else if` chain) that type-checking alone
+  would not have caught.
+
+Test coverage lives in `test/test_takibi.ml` rather than as separate
+`examples/` fixtures (matching this feature area's own existing inline
+convention, e.g. `stable_wrong_lock7ea`/`stable_wrong_container7ec`): one
+full-codegen positive case, plus four negatives -- mismatched runtime
+indices (`stable_replace mutex and owner field must belong to the same
+syntactic container`), a stale identity after reassigning the index
+between guard construction and use (`stable_replace mutex does not match
+guard identity`), a local (non-global) array of the same struct still
+rejected, and the struct still rejected when nested inside another
+struct's field. `examples/el0_shell/el0_shell.tkb`'s own real fd/COW-page
+table (GitHub issue #158) is the first real, non-test consumer.
+
 ## 7. Next outlook
 
 The post-Slice-6 sequence now includes owner-derived region slices,
@@ -1351,10 +1426,14 @@ a trusted module obligation. Section 6.7.14 also prevents authority-place
 reuse from reviving a stale derived value, and 6.7.15 blocks untracked
 aggregate storage. Section 6.7.16 also retains authority ties through raw
 casts and address transformations, while 6.7.17 verifies direct non-retaining
-calls. General heap predicates, arbitrary stable places, and general region
-polymorphism remain demand-led and are now tracked as #131/#132 rather than
-being left inside the closed #89/#128 umbrellas. No broader ownership slice is
-selected without another concrete example and focused negative contract.
+calls. Section 6.7.18 closes the FIRST, concrete slice of #131/#132 --
+a fixed-size array of a stable owner struct, as a top-level global --
+driven by GitHub issue #158's own real per-page copy-on-write table; general
+heap predicates, arbitrary (non-array) stable places -- a struct field, a
+dynamically-sized allocation -- and general region polymorphism remain
+demand-led and stay tracked as #131/#132 rather than being left inside the
+closed #89/#128 umbrellas. No broader ownership slice is selected without
+another concrete example and focused negative contract.
 
 ## 8. Prior art notes
 

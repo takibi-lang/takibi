@@ -1038,9 +1038,15 @@ private let mut owner_chan: OwnerChan;
 The first variant case must have no payload. Stable containers are
 zero-initialized globals without an explicit initializer, so declaration-order
 tag zero is the empty state. The container itself must be a `private let mut`
-global. It cannot be local, passed or returned by value, assigned as a whole,
-or contained in an array, slice, tuple, variant, or another struct. Passing a
-pointer to its stable global location is supported.
+global, OR a fixed-size array of one (`private let mut slots: [OwnerChan; N];`
+-- GitHub issue #158): each array element is then its own independently
+stable_replace-able slot, addressed by a runtime index (`&slots[i].mutex`,
+`slots[i].value`), with the same-container check below verified structurally
+(both operands must index the SAME variable, e.g. `i`, not merely the same
+array). A stable owner container -- bare or arrayed -- cannot be local,
+passed or returned by value, assigned as a whole, or contained in a slice,
+tuple, variant, or another struct (including as a struct field of array
+type). Passing a pointer to its stable global location is supported.
 
 The owner field cannot be read, assigned, or addressed directly. Its only
 operation is the reserved compiler builtin:
@@ -1054,7 +1060,16 @@ linear erased view carrying exactly one `addr` index. The second operand must
 be the address of an ordinary field, and its static place identity must equal
 that guard index. The mutex field and registered stable owner field must have
 the same syntactic container base; aliases and unrelated containers are
-conservatively rejected. `replacement` has the owner field's linear variant
+conservatively rejected. For an arrayed container this base identity check is
+purely structural: `slots[i].mutex` and `slots[i].value` are the same
+container exactly when both spell the same index expression (itself a bare
+variable, or a field/index chain rooted in one, e.g. `slots[i].mutex` and
+`slots[i].value` match but `slots[i].mutex` and `slots[j].value` do not) --
+this proves the two occurrences observe the same call-site value, not that
+any particular runtime index is involved, and it is re-checked (not cached
+past a reassignment) if the index variable is written between the guard's
+own construction and the `stable_replace` call. `replacement` has the owner
+field's linear variant
 type. It is moved into the slot and the previous value is returned. The
 returned linear variant cannot be discarded: it must be placed in an owning
 binding, returned, or matched, after which the usual all-path rules apply to
@@ -1075,7 +1090,13 @@ module obligations. `examples/rtos_demo` provides the positive
 ownership-bearing rendezvous; the focused failures are
 `examples/stable_owner_without_guard_wrong` and
 `examples/stable_owner_result_dropped_wrong`, plus
-`examples/stable_owner_wrong_lock_wrong` for cross-lock exchange.
+`examples/stable_owner_wrong_lock_wrong` for cross-lock exchange. The arrayed
+form's own positive/negative coverage (GitHub issue #158) lives inline in
+`test/test_takibi.ml` rather than as separate `examples/` fixtures (a full
+codegen-through-LLVM-IR-verification positive case, plus mismatched-index,
+stale-index-after-reassignment, local-array, and struct-nested-array
+negatives) -- `examples/el0_shell/el0_shell.tkb`'s own per-page
+copy-on-write fd/page table is the first real consumer.
 
 ## Scoped Mutable Owner Borrows (Takibi Core Slice 4)
 

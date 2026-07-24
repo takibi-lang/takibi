@@ -296,6 +296,21 @@ let rec static_place_key (e : Ast.expr) =
   | Ast.Var name -> Some name
   | Ast.FieldGet (base, field) ->
       Option.map (fun key -> key ^ "." ^ field) (static_place_key base)
+  (* GitHub issue #158: `arr[idx]` is a valid stable_replace container base
+     when `idx` is itself a valid place (a bare variable, or a field/index
+     chain rooted in one) -- e.g. `fat_fd_table[slot].lock` and
+     `fat_fd_table[slot].state` are "the same syntactic container" exactly
+     when both occurrences spell the same `slot`, proven here by string
+     equality of the combined key, the same structural-identity argument
+     the existing Var/FieldGet cases already rest on (not by resolving
+     `idx`'s actual runtime value, which this function never attempts).
+     An `idx` that is NOT itself a place (e.g. a computed expression like
+     `i + 1`) returns None here, same as any other unsupported place
+     shape -- stable_replace's own caller must bind it to a variable
+     first, matching how every other place in this function already
+     requires a syntactically simple base. *)
+  | Ast.Index (id, idx) ->
+      Option.map (fun idx_key -> id ^ "[" ^ idx_key ^ "]") (static_place_key idx)
   | _ -> None
 
 let static_identity_for_place place =
@@ -314,16 +329,37 @@ let key_has_prefix prefix key =
   String.length key > String.length prefix
   && String.sub key 0 (String.length prefix) = prefix
 
+let key_has_substring needle key =
+  let nl = String.length needle and kl = String.length key in
+  let rec go i = i + nl <= kl && (String.sub key i nl = needle || go (i + 1)) in
+  nl > 0 && go 0
+
+(* GitHub issue #158: an Index place key embeds its index sub-key inside
+   brackets (static_place_key's own `id ^ "[" ^ idx_key ^ "]"`), e.g.
+   "fat_fd_table[slot]" or "fat_fd_table[slot].sub". Reassigning `slot`
+   must invalidate every cached identity keyed on ANY array indexed by
+   it, not just a key literally equal to or prefixed by "slot" -- the
+   existing prefix-only check would miss "fat_fd_table[slot]" entirely
+   (it neither equals "slot" nor starts with "slot."), which would let a
+   stale rigid identity survive a reassignment between a guard's
+   construction and its use. Two markers cover both "slot is the whole
+   index" and "slot is the base of a longer index projection". *)
+let key_has_index_ref name key =
+  key_has_substring ("[" ^ name ^ "]") key
+  || key_has_substring ("[" ^ name ^ ".") key
+
 let invalidate_place_binding name =
   let prefix = name ^ "." in
   place_static_identities := StringMap.filter (fun key _ ->
     key <> name && not (key_has_prefix prefix key)
+    && not (key_has_index_ref name key)
   ) !place_static_identities
 
 let invalidate_place_projections name =
   let prefix = name ^ "." in
   place_static_identities := StringMap.filter (fun key _ ->
     not (key_has_prefix prefix key)
+    && not (key_has_index_ref name key)
   ) !place_static_identities
 
 (* A singleton parameter introduces a static name for the runtime argument.
@@ -3595,6 +3631,28 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeNamed name -> Hashtbl.mem stable_owner_structs name
     | _ -> false
   in
+  (* GitHub issue #158 (OWNERSHIP_KERNEL.md #131/#132, "indexed owners
+     stored in arbitrary fields, arrays, globals, or other stable
+     places"): a FIXED-SIZE ARRAY of a stable owner struct, as a
+     top-level global, is the one array shape allowed to "contain"
+     stable owner storage -- every array ELEMENT is its own independent
+     stable location (its own lock + its own linear slot), addressed by
+     a runtime index exactly the way stable_replace's own "same
+     syntactic container" check (static_place_key's new Index case
+     below) already requires: `&arr[i].lock` and `arr[i].state` must be
+     the SAME `i`, proven by structural identity within one call, not
+     by resolving `i`'s actual runtime value. This is narrower than
+     "arbitrary stable places" in general -- still only a private
+     mutable global with no initializer, still no nesting inside a
+     struct field/tuple/function signature (ast_contains_stable_owner_value
+     below keeps rejecting those, unchanged) -- but it is the concrete
+     minimal case a real per-page copy-on-write table (up to
+     MAX_PROCESS_PAGES entries) actually needs, and the one this feature
+     was implemented against. *)
+  let ast_is_stable_owner_array = function
+    | Ast.TypeArray (Ast.TypeNamed name, _) -> Hashtbl.mem stable_owner_structs name
+    | _ -> false
+  in
   let rec ast_contains_stable_owner_value ty =
     match resolve_declared_type ty with
     | Ast.TypeNamed name -> Hashtbl.mem stable_owner_structs name
@@ -4263,7 +4321,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         validation_static_scope := None;
         allow_implicit_static := false;
         (match ty with
-         | Some t when ast_is_stable_owner_struct t ->
+         | Some t when ast_is_stable_owner_struct t || ast_is_stable_owner_array t ->
              if not is_private then
                raise (TypeError (gloc, Printf.sprintf
                  "stable owner container global '%s' must be private" gname));
