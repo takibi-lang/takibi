@@ -326,18 +326,16 @@ struct FatFdSlot {
     private lock: i32;
     private state: FatFdState;
 }
-// Four separate top-level globals, not [FatFdSlot; MAX_OPEN_FILES] --
-// a stable owner slot (the lock+stable_replace protocol process_vm_store
-// above already established) cannot live nested inside another value,
-// array elements included (confirmed by the compiler itself: "global
-// 'fat_fd_table' cannot contain stable owner storage inside another
-// value" when this was first tried as an array). fat_fd_put/fat_fd_take
-// below dispatch to the right global with a plain if-chain on `slot`
-// instead.
-private let mut fat_fd_slot0: FatFdSlot;
-private let mut fat_fd_slot1: FatFdSlot;
-private let mut fat_fd_slot2: FatFdSlot;
-private let mut fat_fd_slot3: FatFdSlot;
+// A REAL array of stable owner slots (OWNERSHIP_KERNEL.md #131/#132,
+// implemented against this exact need): each element is its own
+// independently stable_replace-able slot, addressed by a runtime index.
+// This used to be four separate top-level globals (fat_fd_slot0..3) plus
+// a hand-written if-chain, because the compiler did not yet support a
+// stable owner slot living inside an array. Now that it does, this is
+// what MAX_PROCESS_PAGES-scale COW tracking further down this file also
+// relies on -- proven here first, at this file's own smaller, already-
+// working 4-entry scale.
+private let mut fat_fd_table: [FatFdSlot; MAX_OPEN_FILES];
 
 private linear view FatFdGuard[lock: addr];
 fn fat_fd_guard(lock: *i32 @ place) -> FatFdGuard[place] {
@@ -352,70 +350,17 @@ fn fat_fd_guard_done(guard: sink FatFdGuard[place]) {}
 fn fat_fd_state_discard(state: sink FatFdState) {}
 
 fn fat_fd_put(slot: {0..<MAX_OPEN_FILES as usize}, next: FatFdState) {
-    if (slot == 0) {
-        let guard = fat_fd_guard(&fat_fd_slot0.lock);
-        let previous: FatFdState = stable_replace(
-            guard, &fat_fd_slot0.lock, fat_fd_slot0.state, next);
-        fat_fd_guard_done(guard);
-        fat_fd_state_discard(previous);
-    } else if (slot == 1) {
-        let guard = fat_fd_guard(&fat_fd_slot1.lock);
-        let previous: FatFdState = stable_replace(
-            guard, &fat_fd_slot1.lock, fat_fd_slot1.state, next);
-        fat_fd_guard_done(guard);
-        fat_fd_state_discard(previous);
-    } else if (slot == 2) {
-        let guard = fat_fd_guard(&fat_fd_slot2.lock);
-        let previous: FatFdState = stable_replace(
-            guard, &fat_fd_slot2.lock, fat_fd_slot2.state, next);
-        fat_fd_guard_done(guard);
-        fat_fd_state_discard(previous);
-    } else {
-        let guard = fat_fd_guard(&fat_fd_slot3.lock);
-        let previous: FatFdState = stable_replace(
-            guard, &fat_fd_slot3.lock, fat_fd_slot3.state, next);
-        fat_fd_guard_done(guard);
-        fat_fd_state_discard(previous);
-    }
+    let guard = fat_fd_guard(&fat_fd_table[slot].lock);
+    let previous: FatFdState = stable_replace(
+        guard, &fat_fd_table[slot].lock, fat_fd_table[slot].state, next);
+    fat_fd_guard_done(guard);
+    fat_fd_state_discard(previous);
 }
 
-// Four independent `if (cond) { ... return ...; }` guards, not one
-// if/else-if/else chain -- confirmed necessary the hard way: an
-// if/else-if/else chain whose EVERY branch ends in its own `return`
-// crashed this compiler's own LLVM codegen (an internal "invalid LLVM
-// IR generated" error, a dead merge block with literally zero
-// predecessors), a real compiler bug found via this exact code, not a
-// language limitation to design around speculatively elsewhere. This
-// shape -- an early-return guard falling through to the next one -- is
-// the same one already used pervasively throughout this file's own
-// el0_svc_dispatch arms, so it is known safe.
 fn fat_fd_take(slot: {0..<MAX_OPEN_FILES as usize}) -> FatFdState {
-    if (slot == 0) {
-        let guard = fat_fd_guard(&fat_fd_slot0.lock);
-        let state: FatFdState = stable_replace(
-            guard, &fat_fd_slot0.lock, fat_fd_slot0.state, FatFdState::Empty);
-        fat_fd_guard_done(guard);
-        return state;
-    }
-    if (slot == 1) {
-        let guard = fat_fd_guard(&fat_fd_slot1.lock);
-        let state: FatFdState = stable_replace(
-            guard, &fat_fd_slot1.lock, fat_fd_slot1.state, FatFdState::Empty);
-        fat_fd_guard_done(guard);
-        return state;
-    }
-    if (slot == 2) {
-        let guard = fat_fd_guard(&fat_fd_slot2.lock);
-        let state: FatFdState = stable_replace(
-            guard, &fat_fd_slot2.lock, fat_fd_slot2.state, FatFdState::Empty);
-        fat_fd_guard_done(guard);
-        return state;
-    }
-    // slot == 3 -- the only value {0..<MAX_OPEN_FILES} leaves once 0/1/2
-    // are ruled out above.
-    let guard = fat_fd_guard(&fat_fd_slot3.lock);
+    let guard = fat_fd_guard(&fat_fd_table[slot].lock);
     let state: FatFdState = stable_replace(
-        guard, &fat_fd_slot3.lock, fat_fd_slot3.state, FatFdState::Empty);
+        guard, &fat_fd_table[slot].lock, fat_fd_table[slot].state, FatFdState::Empty);
     fat_fd_guard_done(guard);
     return state;
 }
@@ -546,8 +491,9 @@ fn fat_fd_close(slot: {0..<MAX_OPEN_FILES as usize}) -> usize {
 // wildcard arm -- jumps to ELR 0, a silent fault with no further UART
 // output, exactly what real-hardware testing showed before this was
 // added). One dedicated stable slot (the same lock+stable_replace shape
-// as fat_fd_slot0..3 above), not a 5th numbered fd slot: fd 0 itself is
-// what gets redirected, not a new fd number.
+// as fat_fd_table above, just a bare global instead of an array element
+// since there is only ever one), not a 5th numbered fd slot: fd 0 itself
+// is what gets redirected, not a new fd number.
 private let mut fat_fd_slot_stdin: FatFdSlot;
 
 fn fat_stdin_put(next: FatFdState) {
