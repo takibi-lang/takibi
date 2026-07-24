@@ -815,8 +815,13 @@ fn uart_rx_ring_getc() -> u8 {
     return c;
 }
 
+// frame_sp (GitHub issue #158): this trap's own 272-byte saved register
+// frame base address, now passed by examples/common_rpi3/el0_asm.S's
+// el0_sync_entry as a 7th argument (x6) -- see that file's own comment
+// on why fork() needs it. Unused by any syscall arm below except 220
+// (clone/fork).
 fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
-                    x2: usize, elr: usize) -> (usize, usize) {
+                    x2: usize, elr: usize, frame_sp: usize) -> (usize, usize) {
     let ec: usize = (esr >> 26) & 0x3F;
     if (ec != 0x15) {
         return (0, 0);

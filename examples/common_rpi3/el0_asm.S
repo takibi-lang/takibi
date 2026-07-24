@@ -89,17 +89,70 @@ rpi3_el0_enter:
     msr     elr_el1, x0
     eret
 
+/* void rpi3_el0_resume_frame(usize frame_ptr) -- never returns to its
+   caller, same one-way shape as rpi3_el0_enter above, but restores EVERY
+   register (x0-x30, ELR_EL1, SPSR_EL1) from an arbitrary caller-supplied
+   272-byte frame instead of only setting PC+SP. GitHub issue #158's real
+   fork(): a forked child reuses el0_sync_entry's own existing "resume
+   the SAME trap frame" path below (only x0/ELR ever change there,
+   exactly what fork() needs for the child -- same registers as the
+   parent except x0=0), but the SUSPENDED PARENT's own frame -- saved
+   elsewhere in memory at fork() time, since the live trap frame gets
+   reused by the child -- is a DIFFERENT, arbitrary frame, not "whatever
+   is on the stack right now". Neither existing entry point covers that:
+   rpi3_el0_enter only ever sets PC+SP (fine for a fresh process image,
+   wrong here -- it would lose the parent's real x1-x30), and
+   el0_sync_entry's own resume path only ever resumes the CURRENT frame.
+   This is purely additive -- el0_sync_entry's own logic below is
+   UNCHANGED -- so examples/el0_smoke and examples/el0_elf_load, which
+   never call this, are unaffected.
+
+   Same 272-byte layout as el0_sync_entry's own save area (x0/x1 at +0,
+   x2/x3 at +16, ... x30/xzr at +240, ELR_EL1/SPSR_EL1 at +256). x0
+   itself (the frame_ptr argument) is loaded dead LAST, since every
+   earlier load addresses the frame through it -- overwriting x0 any
+   sooner would lose the base address before this function is done
+   reading from it. */
+    .global rpi3_el0_resume_frame
+rpi3_el0_resume_frame:
+    ldp     x1, x2, [x0, #256]
+    msr     elr_el1, x1
+    msr     spsr_el1, x2
+    ldp     x2, x3, [x0, #16]
+    ldp     x4, x5, [x0, #32]
+    ldp     x6, x7, [x0, #48]
+    ldp     x8, x9, [x0, #64]
+    ldp     x10, x11, [x0, #80]
+    ldp     x12, x13, [x0, #96]
+    ldp     x14, x15, [x0, #112]
+    ldp     x16, x17, [x0, #128]
+    ldp     x18, x19, [x0, #144]
+    ldp     x20, x21, [x0, #160]
+    ldp     x22, x23, [x0, #176]
+    ldp     x24, x25, [x0, #192]
+    ldp     x26, x27, [x0, #208]
+    ldp     x28, x29, [x0, #224]
+    ldp     x30, xzr, [x0, #240]
+    ldp     x0, x1, [x0, #0]
+    eret
+
 /* -- Default (weak) EL0 syscall dispatch policy -----------------------------
    Every syscall number is unhandled until an example provides a strong
    Takibi-compiled override with the same name (same weak/strong pattern
    as startup.S's rpi3_sync_exception_dispatch).
 
-   Signature: el0_svc_dispatch(esr, syscall_num, x0, x1, x2, elr) -> (outcome, retval)
+   Signature: el0_svc_dispatch(esr, syscall_num, x0, x1, x2, elr, frame_sp) -> (outcome, retval)
    -- x0/x1/x2 are the EL0 process's OWN saved x0/x1/x2 at trap time (a
    syscall's first three argument registers per the AArch64 Linux ABI;
    only write's fd/buf/len are meaningful yet, but every syscall's
    dispatcher receives the same three so a future read()/other 3-arg
-   syscall needs no signature change).
+   syscall needs no signature change). `frame_sp` (GitHub issue #158,
+   passed in x6) is this trap's own 272-byte saved register frame's base
+   address -- see rpi3_el0_resume_frame's own comment above for why a
+   real fork() needs it (to copy the parent's full frame out before the
+   child reuses it). Purely additive: examples/el0_smoke and examples/
+   el0_elf_load's own 6-parameter el0_svc_dispatch overrides simply never
+   read x6, which AAPCS64 permits a caller to over-supply harmlessly.
 
    `outcome` convention, shared with el0_sync_entry below: 0 = unhandled
    (fail-stop), 1 = terminate (do not resume EL0), any other value MUST
@@ -153,6 +206,7 @@ el0_sync_entry:
     ldr     x3, [sp, #8]        /* saved x1 */
     ldr     x4, [sp, #16]       /* saved x2 */
     mov     x5, x9              /* elr */
+    mov     x6, sp              /* frame_sp -- this trap's own saved frame */
     bl      el0_svc_dispatch
     mov     x6, x0              /* outcome */
     mov     x7, x1              /* retval */
