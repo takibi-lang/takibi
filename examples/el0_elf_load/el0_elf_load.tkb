@@ -123,6 +123,7 @@ struct packed Elf64ProgramHeader {
 private let mut el1_stack: [u8; 4096] align(16);
 private let mut el0_entry_va: usize;
 private let mut el0_page_va: usize;
+private let mut el0_region_size: usize;
 private let mut el0_stack_top_va: usize;
 
 // A first, minimal formalization of "process state" (GitHub issue #153):
@@ -158,15 +159,14 @@ fn process_outcome_report(outcome: ProcessOutcome) {
 }
 
 // Still needed for the genuine load-FAILURE paths below (ELF/segment
-// parsing rejected, or the stack page allocation failed): no process will
-// ever run at EL0 in those cases, so there is nothing for a later hvc-
-// triggered teardown to reclaim -- immediate abandonment (the same
-// sink-and-discard idiom as vm_page_map_core.tkb's own cpu_owner_halt) is
-// still the correct, final disposition there, not a use of the new
-// process_vm_put/take slot below (which is reserved for the one bundle
-// that actually becomes a running process).
-fn el0_mapping_abandon(mapping: sink MappingOwner[asid, va, p]) {}
-fn el0_space_abandon(space: sink AddressSpaceOwner[asid, state]) {}
+// parsing rejected): no process will ever run at EL0 in those cases, so
+// there is nothing for a later hvc-triggered teardown to reclaim --
+// immediate abandonment (the same sink-and-discard idiom as
+// vm_page_map_core.tkb's own cpu_owner_halt) is still the correct, final
+// disposition there, not a use of the new process_vm_put/take slot below
+// (which is reserved for the one bundle that actually becomes a running
+// process).
+fn el0_pas_abandon(pas: sink ProcessAddressSpace[asid]) {}
 fn el0_active_abandon(active: sink ActiveAddressSpace[core, asid]) {}
 
 // GitHub issue #154: a stable owner slot (same protocol as
@@ -201,12 +201,7 @@ fn process_vm_state_discard(state: sink ProcessVmState) {}
 variant ProcessVmState {
     Empty;
     Loaded(exists core: usize. exists asid: usize.
-           exists code_va: usize. exists code_p: usize.
-           exists stack_va: usize. exists stack_p: usize.
-           (ActiveAddressSpace[core, asid],
-            AddressSpaceOwner[asid, SpaceState::Occupied2],
-            MappingOwner[asid, code_va, code_p],
-            MappingOwner[asid, stack_va, stack_p]));
+           (ProcessAddressSpace[asid], ActiveAddressSpace[core, asid]));
 }
 
 struct ProcessVmStateStore {
@@ -247,15 +242,9 @@ fn hvc_dispatch(arg: usize) -> usize {
             uart_puts("hvc: no process VM state to reclaim\n");
         }
         ProcessVmState::Loaded(bundle) => {
-            let (active, space, code_mapping, stack_mapping) = bundle;
-            // Unmap in reverse of map order (stack, then code), the same
-            // order examples/vm_page_map/vm_page_map_core.tkb's own
-            // vm_task_switch_cleanup already established.
-            let (space2, stack_page) = unmap_second_page(space, stack_mapping);
-            let (space3, code_page) = unmap_page(space2, code_mapping);
-            page_free(stack_page);
-            page_free(code_page);
-            let inactive = address_space_deactivate(active, space3);
+            let (pas, active) = bundle;
+            let empty = process_address_space_unmap(pas);
+            let inactive = address_space_deactivate(active, empty);
             address_space_free(inactive);
             uart_puts("hvc: process VM reclaimed\n");
         }
@@ -293,10 +282,10 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
         if (fd != 0) {
             return (elr, SYSCALL_ERROR);
         }
-        if (buf < el0_page_va || len > PAGE_SIZE) {
+        if (buf < el0_page_va || len > el0_region_size) {
             return (elr, SYSCALL_ERROR);
         }
-        if (buf - el0_page_va > PAGE_SIZE - len) {
+        if (buf - el0_page_va > el0_region_size - len) {
             return (elr, SYSCALL_ERROR);
         }
         let dst: *u8 = buf as *u8;
@@ -314,10 +303,10 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
         if (fd != 1 && fd != 2) {
             return (elr, SYSCALL_ERROR);
         }
-        if (buf < el0_page_va || len > PAGE_SIZE) {
+        if (buf < el0_page_va || len > el0_region_size) {
             return (elr, SYSCALL_ERROR);
         }
-        if (buf - el0_page_va > PAGE_SIZE - len) {
+        if (buf - el0_page_va > el0_region_size - len) {
             return (elr, SYSCALL_ERROR);
         }
         let src: *u8 = buf as *u8;
@@ -397,25 +386,75 @@ fn app_main() {
     let phentsize: usize = hdr_ptr.e_phentsize as usize;
     let phnum: usize = hdr_ptr.e_phnum as usize;
 
-    match page_alloc() {
-        PageAllocResult::OutOfMemory => {
-            uart_puts("allocation failed\n");
+    let page_va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+    let mut phdr_cap: usize = MAX_PHDRS;
+    if (phnum < MAX_PHDRS) {
+        phdr_cap = phnum;
+    }
+
+    // First pass (GitHub issue #156's multi-page loader generalization):
+    // scan every PT_LOAD segment's own extent to size the code region in
+    // whole pages BEFORE mapping anything, instead of the old fixed
+    // single-page assumption (examples/process_vm_smoke already proved
+    // the underlying ProcessAddressSpace primitive maps an arbitrary
+    // contiguous page_count; this is that primitive wired into the real
+    // ELF loader). One extra page is reserved for the stack, so
+    // code_pages is capped at MAX_PROCESS_PAGES - 1.
+    let mut max_extent: usize = 0;
+    for i: usize in 0..<phdr_cap {
+        let ph_addr: usize = image_addr + phoff + i * phentsize;
+        let ph_ptr: *Elf64ProgramHeader = ph_addr as *Elf64ProgramHeader;
+        if (ph_ptr.p_type == PT_LOAD) {
+            let seg_vaddr: usize = ph_ptr.p_vaddr as usize;
+            let seg_filesz: usize = ph_ptr.p_filesz as usize;
+            if (seg_vaddr >= page_va) {
+                let seg_end: usize = seg_vaddr - page_va + seg_filesz;
+                if (seg_end > max_extent) {
+                    max_extent = seg_end;
+                }
+            }
         }
-        PageAllocResult::Allocated(page) => {
-            let seed: {0..<2 as usize} = 0;
-            let inactive = address_space_new(seed);
-            let core: usize = 0;
-            let (space, active) = address_space_activate(inactive, core);
-            let page_va: {0x80000000..<0x80200000 as usize} = 0x80000000;
-            let (space2, pending) = map_page_el0_exec(space, page, page_va);
-            let mapping = tlb_invalidate(space2, pending);
-            let dst = mapping_bytes(mapping);
+    }
+    let mut code_pages: usize = (max_extent + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (code_pages < 1) {
+        code_pages = 1;
+    }
+    if (code_pages > MAX_PROCESS_PAGES - 1) {
+        uart_puts("elf too large\n");
+        return;
+    }
+    let code_region_size: usize = code_pages * PAGE_SIZE;
+    if (entry < page_va || entry - page_va >= code_region_size) {
+        uart_puts("load failed\n");
+        return;
+    }
+    let total_pages: usize = code_pages + 1;
+
+    // total_pages is already guaranteed in [2, MAX_PROCESS_PAGES] by the
+    // code_pages guard above, but that guard's narrowing does not survive
+    // past its own `if` (SPEC.md's flow-sensitive narrowing is strictly
+    // scoped to the then-branch, not anything after an early return) --
+    // so process_address_space_map's refined page_count parameter still
+    // needs its own explicit if-narrow here, matching
+    // examples/narrow/narrow.tkb's own established idiom. Nothing has
+    // been allocated yet at this point, so the (unreachable in practice)
+    // else arm has nothing to unwind.
+    if (total_pages < 5) {
+        let seed: {0..<2 as usize} = 0;
+        let inactive = address_space_new(seed);
+        let core: usize = 0;
+        let (space, active) = address_space_activate(inactive, core);
+
+        match process_address_space_map(space, active, page_va, total_pages) {
+        ProcessMapResult::Failed(inactive2) => {
+            uart_puts("allocation failed\n");
+            address_space_free(inactive2);
+        }
+        ProcessMapResult::Mapped(pair) => {
+            let (pas, active2) = pair;
+            let dst: *u8 = page_va as *u8;
 
             let mut ok: i32 = 1;
-            let mut phdr_cap: usize = MAX_PHDRS;
-            if (phnum < MAX_PHDRS) {
-                phdr_cap = phnum;
-            }
             for i: usize in 0..<phdr_cap {
                 let ph_addr: usize = image_addr + phoff + i * phentsize;
                 let ph_ptr: *Elf64ProgramHeader = ph_addr as *Elf64ProgramHeader;
@@ -423,22 +462,23 @@ fn app_main() {
                     let seg_vaddr: usize = ph_ptr.p_vaddr as usize;
                     let seg_offset: usize = ph_ptr.p_offset as usize;
                     let seg_filesz: usize = ph_ptr.p_filesz as usize;
-                    if (seg_vaddr < page_va || seg_filesz > PAGE_SIZE
-                            || seg_vaddr - page_va > PAGE_SIZE - seg_filesz
+                    if (seg_vaddr < page_va || seg_filesz > code_region_size
+                            || seg_vaddr - page_va > code_region_size - seg_filesz
                             || seg_offset > image_len
                             || seg_filesz > image_len - seg_offset) {
                         uart_puts("segment out of range\n");
                         ok = 0;
                     } else {
-                        // dst_base + seg_filesz <= PAGE_SIZE is already
-                        // proven by the guard above, but as a relationship
-                        // between two runtime values (seg_vaddr/page_va
-                        // and seg_filesz), not a plain interval on one of
-                        // them alone -- exactly the "correlated bounds"
-                        // case SPEC.md's Known Limitations section
-                        // documents as unsafe's sanctioned escape (same
-                        // shape as examples/tcp_echo/tcp_echo.tkb's own
-                        // "sole executable unsafe site", `frame[data_off_idx
+                        // dst_base + seg_filesz <= code_region_size is
+                        // already proven by the guard above, but as a
+                        // relationship between two runtime values
+                        // (seg_vaddr/page_va and seg_filesz), not a plain
+                        // interval on one of them alone -- exactly the
+                        // "correlated bounds" case SPEC.md's Known
+                        // Limitations section documents as unsafe's
+                        // sanctioned escape (same shape as
+                        // examples/tcp_echo/tcp_echo.tkb's own "sole
+                        // executable unsafe site", `frame[data_off_idx
                         // ..<data_off_idx+data_len_idx]`). Both subslices
                         // stay unproven-length ([]u8, minimum 0) rather
                         // than fighting for a stronger static minimum;
@@ -449,7 +489,9 @@ fn app_main() {
                         // remaining --forbid-trap site either.
                         let src: *u8 = image_addr as *u8;
                         let dst_base: usize = seg_vaddr - page_va;
-                        let seg_dst = unsafe { dst[dst_base..<dst_base + seg_filesz] };
+                        let seg_dst = unsafe {
+                            dst[dst_base as isize..<(dst_base + seg_filesz) as isize]
+                        };
                         let seg_src = unsafe {
                             src[seg_offset as isize..<(seg_offset + seg_filesz) as isize]
                         };
@@ -458,93 +500,79 @@ fn app_main() {
                 }
             }
 
-            if (ok == 0 || entry < page_va || entry - page_va >= PAGE_SIZE) {
+            if (ok == 0) {
                 uart_puts("load failed\n");
-                el0_mapping_abandon(mapping);
-                el0_space_abandon(space2);
-                el0_active_abandon(active);
+                el0_pas_abandon(pas);
+                el0_active_abandon(active2);
                 return;
             }
 
-            // A second EL0-accessible page, right after the code page in
-            // the same 2MB dynamic window, becomes this process's real
-            // stack -- GitHub issue #153's "enter that binary at EL0 with
-            // a minimal stack" was previously just SP_EL0 = 0, never
-            // dereferenced by a payload that touched no memory at all.
-            let stack_va: {0x80000000..<0x80200000 as usize} = 0x80001000;
-            match page_alloc() {
-                PageAllocResult::OutOfMemory => {
-                    uart_puts("stack allocation failed\n");
-                    el0_mapping_abandon(mapping);
-                    el0_space_abandon(space2);
-                    el0_active_abandon(active);
-                    return;
-                }
-                PageAllocResult::Allocated(stack_page) => {
-                    let (space3, stack_pending) =
-                        map_second_page_el0_exec(space2, stack_page, stack_va);
-                    let stack_mapping = tlb_invalidate_second(space3, stack_pending);
+            // The stack is simply the LAST page of the same contiguous
+            // ProcessAddressSpace region, right after the code pages --
+            // no longer a separately-mapped MappingOwner (GitHub issue
+            // #156's generalization folds it into the one coarse-grained
+            // owner alongside the code pages).
+            let stack_va: usize = page_va + code_region_size;
 
-                    // Real argv/envp/auxv initial stack layout (GitHub
-                    // issue #156): every libc-linked binary's own startup
-                    // code reads this off SP unconditionally, so this is
-                    // a hard prerequisite for anything beyond a
-                    // hand-written, no-memory-access test payload.
-                    // Reserved in the TOP ARGV_LAYOUT_SIZE bytes of the
-                    // stack page; everything below el0_entry_sp remains
-                    // the process's own usable stack, growing down from
-                    // there exactly like a real kernel's layout.
-                    //
-                    // Layout (matches the Linux ELF ABI exactly, just
-                    // with the smallest legal argv/envp/auxv content):
-                    //   [argc=1][argv[0]=ptr]["prog\0" pointed to by
-                    //   argv[0]][argv NULL][envp NULL (0 entries)]
-                    //   [auxv: (AT_PAGESZ, PAGE_SIZE)][auxv: (AT_NULL, 0)]
-                    let layout_base: usize = stack_va + (PAGE_SIZE - ARGV_LAYOUT_SIZE);
-                    let string_addr: usize = layout_base + 64;
+            // Real argv/envp/auxv initial stack layout (GitHub issue
+            // #156): every libc-linked binary's own startup code reads
+            // this off SP unconditionally, so this is a hard prerequisite
+            // for anything beyond a hand-written, no-memory-access test
+            // payload. Reserved in the TOP ARGV_LAYOUT_SIZE bytes of the
+            // stack page; everything below el0_entry_sp remains the
+            // process's own usable stack, growing down from there exactly
+            // like a real kernel's layout.
+            //
+            // Layout (matches the Linux ELF ABI exactly, just with the
+            // smallest legal argv/envp/auxv content):
+            //   [argc=1][argv[0]=ptr]["prog\0" pointed to by
+            //   argv[0]][argv NULL][envp NULL (0 entries)]
+            //   [auxv: (AT_PAGESZ, PAGE_SIZE)][auxv: (AT_NULL, 0)]
+            let layout_base: usize = stack_va + (PAGE_SIZE - ARGV_LAYOUT_SIZE);
+            let string_addr: usize = layout_base + 64;
 
-                    let argc_ptr: *u64 = layout_base as *u64;
-                    *argc_ptr = 1;
-                    let argv0_ptr: *u64 = (layout_base + 8) as *u64;
-                    *argv0_ptr = string_addr as u64;
-                    let argv_null_ptr: *u64 = (layout_base + 16) as *u64;
-                    *argv_null_ptr = 0;
-                    let envp_null_ptr: *u64 = (layout_base + 24) as *u64;
-                    *envp_null_ptr = 0;
-                    let auxv_type_ptr: *u64 = (layout_base + 32) as *u64;
-                    *auxv_type_ptr = AT_PAGESZ as u64;
-                    let auxv_val_ptr: *u64 = (layout_base + 40) as *u64;
-                    *auxv_val_ptr = PAGE_SIZE as u64;
-                    let auxv_null_type_ptr: *u64 = (layout_base + 48) as *u64;
-                    *auxv_null_type_ptr = 0;
-                    let auxv_null_val_ptr: *u64 = (layout_base + 56) as *u64;
-                    *auxv_null_val_ptr = 0;
+            let argc_ptr: *u64 = layout_base as *u64;
+            *argc_ptr = 1;
+            let argv0_ptr: *u64 = (layout_base + 8) as *u64;
+            *argv0_ptr = string_addr as u64;
+            let argv_null_ptr: *u64 = (layout_base + 16) as *u64;
+            *argv_null_ptr = 0;
+            let envp_null_ptr: *u64 = (layout_base + 24) as *u64;
+            *envp_null_ptr = 0;
+            let auxv_type_ptr: *u64 = (layout_base + 32) as *u64;
+            *auxv_type_ptr = AT_PAGESZ as u64;
+            let auxv_val_ptr: *u64 = (layout_base + 40) as *u64;
+            *auxv_val_ptr = PAGE_SIZE as u64;
+            let auxv_null_type_ptr: *u64 = (layout_base + 48) as *u64;
+            *auxv_null_type_ptr = 0;
+            let auxv_null_val_ptr: *u64 = (layout_base + 56) as *u64;
+            *auxv_null_val_ptr = 0;
 
-                    // "prog\0" -- argv[0]'s own string data, placed above
-                    // the array (higher address), matching real kernel
-                    // layout convention.
-                    let string_ptr: *u8 = string_addr as *u8;
-                    string_ptr[0 as isize] = 0x70; // 'p'
-                    string_ptr[1 as isize] = 0x72; // 'r'
-                    string_ptr[2 as isize] = 0x6f; // 'o'
-                    string_ptr[3 as isize] = 0x67; // 'g'
-                    string_ptr[4 as isize] = 0x00; // NUL
+            // "prog\0" -- argv[0]'s own string data, placed above the
+            // array (higher address), matching real kernel layout
+            // convention.
+            let string_ptr: *u8 = string_addr as *u8;
+            string_ptr[0 as isize] = 0x70; // 'p'
+            string_ptr[1 as isize] = 0x72; // 'r'
+            string_ptr[2 as isize] = 0x6f; // 'o'
+            string_ptr[3 as isize] = 0x67; // 'g'
+            string_ptr[4 as isize] = 0x00; // NUL
 
-                    el0_entry_va = entry;
-                    el0_page_va = page_va;
-                    el0_stack_top_va = layout_base;
-                    // This bundle IS about to become a running process --
-                    // stash it in the stable slot instead of abandoning it,
-                    // so exit()'s hvc call can reclaim it for real later
-                    // (see hvc_dispatch above).
-                    process_vm_put(ProcessVmState::Loaded(
-                        (active, space3, mapping, stack_mapping)));
+            el0_entry_va = entry;
+            el0_page_va = page_va;
+            el0_region_size = total_pages * PAGE_SIZE;
+            el0_stack_top_va = layout_base;
+            // This bundle IS about to become a running process -- stash it
+            // in the stable slot instead of abandoning it, so exit()'s hvc
+            // call can reclaim it for real later (see hvc_dispatch above).
+            process_vm_put(ProcessVmState::Loaded((pas, active2)));
 
-                    let el1_sp_base: usize = (el1_stack as *u8) as usize;
-                    let el1_sp: usize = el1_sp_base + 4096;
-                    rpi3_el1_enter(el1_sp);
-                }
-            }
+            let el1_sp_base: usize = (el1_stack as *u8) as usize;
+            let el1_sp: usize = el1_sp_base + 4096;
+            rpi3_el1_enter(el1_sp);
         }
+        }
+    } else {
+        uart_puts("elf too large\n");
     }
 }

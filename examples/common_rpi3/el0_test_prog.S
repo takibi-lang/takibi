@@ -126,6 +126,17 @@ el0_prog_entry:
 .Lel0_prog_hang:
     b       .Lel0_prog_hang
 
+    /* Dead padding (never executed) pushing this binary's .text PT_LOAD
+       segment past one PAGE_SIZE (4096 bytes) -- GitHub issue #156's
+       multi-page loader proof needs a real ELF that genuinely spans more
+       than one page, not just the primitive-level proof
+       examples/process_vm_smoke already gave the underlying
+       ProcessAddressSpace mechanism. 6000 bytes puts total .text size at
+       ~6288 bytes, comfortably past the 4096 boundary while still fitting
+       in 2 code pages (MAX_PROCESS_PAGES=4 in vm_page_map_core.tkb, one
+       page reserved for the stack). */
+    .space  6000
+
     .section .rodata
     .align  4
 el0_prog_argv_ok_msg:
