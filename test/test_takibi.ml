@@ -1434,8 +1434,8 @@ let parser_tests = [
     match parse "fn f(v: i32) { match v { 0 => { let x = 0; } _ => { let y = 1; } } }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Match (_, [Ast.ArmIntLit (0, [_]); Ast.ArmWild [_]]) -> ()
-         | _ -> Alcotest.fail "expected Match(_, [ArmIntLit(0,_), ArmWild])")
+         | Ast.Match (_, [Ast.ArmIntLit ([0], [_]); Ast.ArmWild [_]]) -> ()
+         | _ -> Alcotest.fail "expected Match(_, [ArmIntLit([0],_), ArmWild])")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -1443,8 +1443,21 @@ let parser_tests = [
     match parse "fn f(v: i32) { match v { -1 => { let x = 0; } _ => { let y = 1; } } }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Match (_, [Ast.ArmIntLit (-1, [_]); Ast.ArmWild [_]]) -> ()
-         | _ -> Alcotest.fail "expected Match(_, [ArmIntLit(-1,_), ArmWild])")
+         | Ast.Match (_, [Ast.ArmIntLit ([-1], [_]); Ast.ArmWild [_]]) -> ()
+         | _ -> Alcotest.fail "expected Match(_, [ArmIntLit([-1],_), ArmWild])")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
+  Alcotest.test_case "match with pipe-separated OR-pattern literal arm parses to one ArmIntLit" `Quick (fun () ->
+    (* GitHub issue #156: N1 | N2 | ... => { ... } shares one body across
+       several literals, mirroring OCaml's/Rust's own pattern
+       alternation -- one ArmIntLit with a multi-element literal list,
+       not several arms. *)
+    match parse "fn f(v: i32) { match v { 1 | 2 | -3 => { let x = 0; } _ => { let y = 1; } } }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Match (_, [Ast.ArmIntLit ([1; 2; -3], [_]); Ast.ArmWild [_]]) -> ()
+         | _ -> Alcotest.fail "expected Match(_, [ArmIntLit([1;2;-3],_), ArmWild])")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -3850,6 +3863,40 @@ let infer_tests = [
            0 => { return 100; }
            1 => { return 101; }
            -1 => { return 102; }
+           _ => { return 999; }
+         }
+       }");
+
+  (* -- OR-pattern match arms (GitHub issue #156) ---------------------- *)
+
+  Alcotest.test_case "int match OR-pattern arm type-checks, positive and negative mixed" `Quick
+    (expect_ok
+      "fn f(v: i32) { match v {
+         1 | 2 | 3 => { let x: i32 = 0; }
+         10 | -1 => { let y: i32 = 1; }
+         _ => { let z: i32 = 2; } } }");
+
+  Alcotest.test_case "int match OR-pattern arm with a literal repeated within itself is a type error" `Quick
+    (expect_type_error "duplicate match arm literal '2'"
+      "fn f(v: i32) { match v { 1 | 2 | 2 => { let x = 0; } _ => { let y = 1; } } }");
+
+  Alcotest.test_case "int match OR-pattern arm sharing a literal with a later arm is a type error" `Quick
+    (expect_type_error "duplicate match arm literal '3'"
+      "fn f(v: i32) { match v {
+         1 | 2 | 3 => { let x = 0; }
+         3 => { let y = 1; }
+         _ => { let z = 2; } } }");
+
+  Alcotest.test_case "int match OR-pattern literal out of range for u8 is a type error" `Quick
+    (expect_type_error "match arm literal 300 does not fit type 'u8'"
+      "fn f(v: u8) { match v { 1 | 300 => { let x = 0; } _ => { let y = 1; } } }");
+
+  Alcotest.test_case "int match OR-pattern codegen produces valid IR" `Quick
+    (expect_codegen_ok
+      "fn match_int_lit_or_codegen_test(v: i32) i32 {
+         match v {
+           1 | 2 | 3 => { return 100; }
+           10 | -1 => { return 200; }
            _ => { return 999; }
          }
        }");

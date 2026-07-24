@@ -191,9 +191,15 @@ and match_arm =
   | ArmVariant of string * string * (ident * bool) option * stmt list
       (* Name::Case[(payload_name)] => { stmts }; bool means `mut` binding. *)
   | ArmWild    of stmt list                    (* _ => { stmts } *)
-  | ArmIntLit  of int * stmt list
-      (* N => { stmts } -- literal-integer match arm (GitHub issue #151).
-         Only legal when the discriminant is a primitive integer type or a
+  | ArmIntLit  of int list * stmt list
+      (* N => { stmts }, or N1 | N2 | ... => { stmts } -- literal-integer
+         match arm (GitHub issue #151), extended with pipe-separated
+         alternation so several literals can share one body without
+         duplicating it (GitHub issue #156's own syscall-dispatch use
+         case, mirroring OCaml's/Rust's own `|` pattern alternation --
+         this compiler's own implementation language already uses
+         exactly this syntax). The list is never empty. Only legal when
+         the discriminant is a primitive integer type or a
          {lo..<hi as base} refinement of one; a `_` wildcard arm is always
          mandatory (an integer's value space is never exhaustively
          listable the way a closed variant/enum's cases are). *)

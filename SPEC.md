@@ -1364,6 +1364,28 @@ Lowers to the same LLVM `switch` instruction an enum/variant match already
 uses -- the literal arms become `switch` cases and, when present, the `_`
 arm becomes the default target.
 
+An arm may name several literals separated by `|`, sharing one body
+(GitHub issue #156 -- OCaml's/Rust's own pattern-alternation syntax,
+picked over a comma-separated or brace-set alternative specifically to
+avoid this project's own conventions elsewhere: `,` already reads as a
+plain list/tuple separator, and `{...}` immediately after `=>` would be
+visually confusable with the arm's own body block):
+
+```
+fn el0_dispatch(syscall_num: usize) -> i32 {
+    match syscall_num {
+        64 | 68 => { return 1; }             // write, pwrite64
+        99 | 134 | 135 | 167 | 293 => { return 0; } // accept-and-succeed group
+        _ => { return -1; }
+    }
+}
+```
+
+Positive and negative literals may mix freely within one arm's list
+(`10 | -1 => { ... }`). Lowers to one `switch` `add_case` per literal, all
+targeting the same arm block -- the body itself is still emitted once per
+arm, not once per literal.
+
 - **A `_` wildcard arm is always mandatory here**, unlike an
   exhaustive enum/variant match: an integer's value space can never be
   exhaustively listed the way a closed set of named cases can, so there
@@ -1372,8 +1394,9 @@ arm becomes the default target.
   fully enumerable proven range -- the refinement narrows what values can
   actually reach the match, not what the match's own case-completeness
   rule requires.
-- **Duplicate literals** (the same value named by two arms) are a compile
-  error.
+- **Duplicate literals** (the same value named twice, whether by two
+  separate arms or twice within one OR-pattern arm's own `|`-separated
+  list) are a compile error.
 - **A literal is checked against the discriminant's own base type's
   width** (its full `i8`/.../`usize` range, the same bound
   `for i: base in lo..<hi`'s explicit annotation already enforces), not
@@ -1387,10 +1410,10 @@ arm becomes the default target.
 - Mixing a literal arm and an `enum`/`variant` case arm in the same
   `match` is a compile error: the discriminant's type picks one arm
   grammar, not both.
-- **No pattern beyond a single literal is supported yet** -- no ranges
-  (`0..<10 => { ... }`), and no string/byte-slice patterns (this project
-  has no first-class string type; what a string *pattern* should even
-  mean is an open question, not yet designed).
+- **No pattern beyond a `|`-separated set of literals is supported yet**
+  -- no ranges (`0..<10 => { ... }`), and no string/byte-slice patterns
+  (this project has no first-class string type; what a string *pattern*
+  should even mean is an open question, not yet designed).
 
 ## Slices
 
@@ -1927,10 +1950,11 @@ investigations behind any of these, see `HISTORY.md`.
   independent ranges) is not supported -- see HISTORY.md's P4c section.
   `unsafe` is the current escape hatch for the rare case this actually
   blocks a proof.
-- **`match` on a primitive integer type supports only single-literal
-  patterns** (see "Match on Primitive Types," GitHub issue #151) -- no
-  range patterns (`0..<10 => {...}`) and no string/byte-slice patterns
-  (this project has no first-class string type, and what a string
-  *pattern* should even mean -- exact equality? prefix? a runtime length
-  check? -- is unresolved). Deferred until a concrete case needs one
-  rather than designed speculatively now.
+- **`match` on a primitive integer type supports only literal and
+  `|`-separated OR-pattern literal patterns** (see "Match on Primitive
+  Types," GitHub issue #151/#156) -- no range patterns (`0..<10 =>
+  {...}`) and no string/byte-slice patterns (this project has no
+  first-class string type, and what a string *pattern* should even mean
+  -- exact equality? prefix? a runtime length check? -- is unresolved).
+  Deferred until a concrete case needs one rather than designed
+  speculatively now.

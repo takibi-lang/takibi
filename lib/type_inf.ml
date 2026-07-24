@@ -3112,10 +3112,10 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
              | Ast.ArmWild body ->
                  has_wild := true;
                  infer_arm_body tyenv rl body
-             | Ast.ArmIntLit (lit, _) ->
+             | Ast.ArmIntLit (lits, _) ->
                  raise (TypeError (s.loc, Printf.sprintf
-                   "match arm literal '%d' cannot be used against enum discriminant '%s'"
-                   lit ename))
+                   "match arm literal '%s' cannot be used against enum discriminant '%s'"
+                   (String.concat " | " (List.map string_of_int lits)) ename))
            ) raw_locals arms in
            if is_ne then begin
              if not !has_wild then
@@ -3194,10 +3194,10 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                      "linear variant '%s' cannot use a wildcard arm because it could hide an unconsumed payload"
                      vtype));
                  infer_arm_body tyenv rl body
-             | Ast.ArmIntLit (lit, _) ->
+             | Ast.ArmIntLit (lits, _) ->
                  raise (TypeError (s.loc, Printf.sprintf
-                   "match arm literal '%d' cannot be used against variant discriminant '%s'"
-                   lit vtype))
+                   "match arm literal '%s' cannot be used against variant discriminant '%s'"
+                   (String.concat " | " (List.map string_of_int lits)) vtype))
            ) raw_locals arms in
            if not !has_wild then
              List.iter (fun (cname, _) ->
@@ -3221,12 +3221,14 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
            let seen = Hashtbl.create 4 in
            let raw_locals' = List.fold_left (fun rl arm ->
              match arm with
-             | Ast.ArmIntLit (lit, body) ->
-                 if Hashtbl.mem seen lit then
-                   raise (TypeError (s.loc, Printf.sprintf
-                     "duplicate match arm literal '%d'" lit));
-                 Hashtbl.replace seen lit ();
-                 check_match_int_literal_range s.loc lit base_ty;
+             | Ast.ArmIntLit (lits, body) ->
+                 List.iter (fun lit ->
+                   if Hashtbl.mem seen lit then
+                     raise (TypeError (s.loc, Printf.sprintf
+                       "duplicate match arm literal '%d'" lit));
+                   Hashtbl.replace seen lit ();
+                   check_match_int_literal_range s.loc lit base_ty
+                 ) lits;
                  infer_arm_body tyenv rl body
              | Ast.ArmWild body ->
                  if !has_wild then

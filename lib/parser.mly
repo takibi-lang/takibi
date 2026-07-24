@@ -419,19 +419,32 @@ match_arm:
     { ArmVariant ($1, $3, Some (binding, mutable_), $10) }
   | UNDERSCORE DARROW LBRACE stmts RBRACE
     { ArmWild $4 }
-  | n = INT DARROW LBRACE body = stmts RBRACE
-    (* Literal-integer arm (GitHub issue #151): narrow_int64 gives the
-       same hard-overflow-is-an-error treatment as every other grammar
-       position that needs a realistic native int (array size, alignment,
-       enum discriminant, refined type bound). *)
-    { ArmIntLit (narrow_int64 $symbolstartpos "match arm literal" n, body) }
-  | MINUS n = INT DARROW LBRACE body = stmts RBRACE
-    (* -N => { ... } -- a negative literal pattern (e.g. matching a -1
-       sentinel), mirroring the desugared-unary-minus treatment `-expr`
-       gets in ordinary expression position, but resolved directly to a
-       negative native int here since a pattern is not a general
-       expression. *)
-    { ArmIntLit (- (narrow_int64 $symbolstartpos "match arm literal" n), body) }
+  | ns = match_int_lits DARROW LBRACE body = stmts RBRACE
+    (* N => { ... }, or N1 | N2 | ... => { ... } -- one or more
+       pipe-separated literal-integer patterns sharing one body (GitHub
+       issue #156: OCaml-/Rust-style pattern alternation, so several
+       syscall numbers etc. can share a handler without duplicating its
+       body). This grammar position is a pattern, not `expr`, so `|`
+       here never contends with `expr`'s own PIPE-as-bitwise-or rule
+       below. *)
+    { ArmIntLit (ns, body) }
+
+match_int_lits:
+  | n = match_int_lit { [n] }
+  | n = match_int_lit PIPE rest = match_int_lits { n :: rest }
+
+match_int_lit:
+  | n = INT
+    (* narrow_int64 gives the same hard-overflow-is-an-error treatment as
+       every other grammar position that needs a realistic native int
+       (array size, alignment, enum discriminant, refined type bound). *)
+    { narrow_int64 $symbolstartpos "match arm literal" n }
+  | MINUS n = INT
+    (* -N -- a negative literal pattern (e.g. matching a -1 sentinel),
+       mirroring the desugared-unary-minus treatment `-expr` gets in
+       ordinary expression position, but resolved directly to a negative
+       native int here since a pattern is not a general expression. *)
+    { - (narrow_int64 $symbolstartpos "match arm literal" n) }
 
 expr:
   | expr OR      expr  { { desc = BinOp (Or,   $1, $3); loc = $symbolstartpos } }

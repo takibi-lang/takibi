@@ -33,6 +33,20 @@ fn classify_quadrant(q: {0..<4 as u8}) -> *u8 {
     }
 }
 
+// OR-pattern arms (GitHub issue #156): `N1 | N2 | ... =>` lets several
+// literals share one body without duplicating it -- OCaml's/Rust's own
+// pattern alternation, added for exactly this kind of syscall-dispatch-
+// shaped grouping (see examples/el0_elf_load/el0_elf_load.tkb's own
+// syscall dispatcher for the motivating real use). Positive and negative
+// literals may mix freely in one arm's list.
+fn classify_or(v: i32) -> *u8 {
+    match v {
+        1 | 2 | 3 => { return "low\r\n"; }
+        10 | 20 | -1 => { return "mid-or-neg\r\n"; }
+        _ => { return "other\r\n"; }
+    }
+}
+
 fn test_match_int_lit() {
     uart_puts(classify_i32(0));
     uart_puts(classify_i32(1));
@@ -42,4 +56,12 @@ fn test_match_int_lit() {
     for i: u8 in 0..<4 {
         uart_puts(classify_quadrant(i));
     }
+
+    uart_puts(classify_or(1));
+    uart_puts(classify_or(2));
+    uart_puts(classify_or(3));
+    uart_puts(classify_or(10));
+    uart_puts(classify_or(20));
+    uart_puts(classify_or(-1));
+    uart_puts(classify_or(99));
 }

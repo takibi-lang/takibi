@@ -4043,8 +4043,14 @@ let gen_func ?prog_types fdef =
               (arm, append_block context ("match_" ^ vname) f)
           | ArmWild _ ->
               (arm, append_block context "match_wild" f)
-          | ArmIntLit (lit, _) ->
-              (arm, append_block context (Printf.sprintf "match_lit_%d" lit) f)
+          | ArmIntLit (lits, _) ->
+              (* Named after the first literal only -- an OR-pattern arm's
+                 several literals (GitHub issue #156) all target this
+                 SAME block, so one representative name is enough; the
+                 full list is what matters for add_case below, not this
+                 cosmetic label. *)
+              (arm, append_block context
+                (Printf.sprintf "match_lit_%d" (List.hd lits)) f)
         ) arms in
         (* Default target: wildcard arm if present, otherwise dead (unreachable) *)
         let default_bb = match List.find_opt (fun (a, _) ->
@@ -4052,8 +4058,17 @@ let gen_func ?prog_types fdef =
           | Some (_, bb) -> bb
           | None         -> dead_bb
         in
-        let n_variants = List.length (List.filter (fun (a, _) ->
-          match a with ArmVariant _ | ArmIntLit _ -> true | ArmWild _ -> false) arm_bbs) in
+        (* An OR-pattern ArmIntLit contributes one add_case call per
+           literal in its list (all branching to the same block), not
+           one per arm -- n_variants is just build_switch's own capacity
+           hint, so an undercount would not be incorrect, but summing
+           list lengths here keeps it an accurate hint rather than a
+           stale one. *)
+        let n_variants = List.fold_left (fun n (a, _) ->
+          match a with
+          | ArmVariant _ -> n + 1
+          | ArmIntLit (lits, _) -> n + List.length lits
+          | ArmWild _ -> n) 0 arm_bbs in
         let sw = build_switch switch_v default_bb n_variants builder in
         List.iter (fun (arm, bb) ->
           match arm with
@@ -4069,8 +4084,12 @@ let gen_func ?prog_types fdef =
                     List.assoc vname variants
               in
               add_case sw (const_int switch_ll_ty value) bb
-          | ArmIntLit (lit, _) ->
-              add_case sw (const_int switch_ll_ty lit) bb
+          | ArmIntLit (lits, _) ->
+              (* One add_case per literal, all pointing at this arm's
+                 single shared block (GitHub issue #156's OR-pattern
+                 alternation) -- gen_stmt for the body itself still runs
+                 exactly once for this block below, not once per literal. *)
+              List.iter (fun lit -> add_case sw (const_int switch_ll_ty lit) bb) lits
           | ArmWild _ -> ()
         ) arm_bbs;
         List.iter (fun (arm, bb) ->
