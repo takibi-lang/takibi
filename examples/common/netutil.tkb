@@ -195,12 +195,11 @@ fn http_request_path_to_name83(req: borrow *u8, len: isize,
         name83[i] = ' ' as u8;
     }
 
-    let mut i: isize = 5;
     let mut base_len: isize = 0;
     let mut ext_len: isize = 0;
     let mut in_ext: bool = false;
     let mut saw_space: bool = false;
-    while (i < len) {
+    for i: isize in 5..<len {
         let c: u8 = req[i];
         if (c == ' ' as u8) {
             saw_space = true;
@@ -232,7 +231,6 @@ fn http_request_path_to_name83(req: borrow *u8, len: isize,
         } else {
             return false;
         }
-        i = i + 1;
     }
 
     return saw_space && base_len > 0 && (in_ext == false || ext_len > 0);

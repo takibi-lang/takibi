@@ -33,17 +33,13 @@ fn read_slot(p: *align(32) u8) -> u8 {
 }
 
 fn test_align_ptr_proof() {
-    let mut i: isize = 0;
-    while (i < ALIGN_SLOT_COUNT) {
+    for i: isize in 0..<ALIGN_SLOT_COUNT {
         touch_slot(bufs + i * ALIGN_SLOT_SIZE, (i as u8) + 10);
-        i = i + 1;
     }
 
-    i = 0;
-    while (i < ALIGN_SLOT_COUNT) {
+    for i: isize in 0..<ALIGN_SLOT_COUNT {
         uart_print(read_slot(bufs + i * ALIGN_SLOT_SIZE));
         uart_puts(" ");
-        i = i + 1;
     }
     uart_puts("\r\n");
     uart_puts("done\r\n");

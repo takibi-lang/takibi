@@ -314,8 +314,10 @@ fn fat_alloc_chain(num_clusters: u32) -> u32 {
     let mut first: u32 = 0;
     let mut prev: u32 = 0;
     let mut found: u32 = 0;
-    let mut c: u32 = 2;
-    while (c < 2 + data_clusters && found < num_clusters) {
+    for c: u32 in 2..<(2 + data_clusters) {
+        if (found >= num_clusters) {
+            break;
+        }
         if (fat_get_entry(c) == 0) {
             if (first == 0) {
                 first = c;
@@ -325,7 +327,6 @@ fn fat_alloc_chain(num_clusters: u32) -> u32 {
             prev = c;
             found = found + 1;
         }
-        c = c + 1;
     }
     if (found < num_clusters) {
         return 0;

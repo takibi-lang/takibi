@@ -383,8 +383,7 @@ fn kvs_parse_udec(p: borrow *u8, avail: isize) -> KvsUdecResult {
 // header is absent -- a PUT with no Content-Length is accepted; its value
 // is simply "the rest of this TCP segment" (see http_start_response).
 fn kvs_content_length(req: borrow *u8, hdr_end: isize) -> KvsUdecResult {
-    let mut i: isize = 0;
-    while (i < hdr_end) {
+    for i: isize in 0..<hdr_end {
         // "Content-Length: " is 16 bytes (C-o-n-t-e-n-t--L-e-n-g-t-h-:-
         // space); the value starts at +16, not +17. A stale +17 here
         // (found via real-hardware testing: a client that splits headers
@@ -399,7 +398,6 @@ fn kvs_content_length(req: borrow *u8, hdr_end: isize) -> KvsUdecResult {
         if (kvs_starts_with(req + i, hdr_end - i, "Content-Length: ")) {
             return kvs_parse_udec(req + i + 16, hdr_end - i - 16);
         }
-        i = i + 1;
     }
     return KvsUdecResult::None;
 }
@@ -410,13 +408,11 @@ variant KvsHdrEndResult {
 }
 
 fn kvs_find_hdr_end(req: borrow *u8, len: isize) -> KvsHdrEndResult {
-    let mut i: isize = 0;
-    while (i + 3 < len) {
+    for i: isize in 0..<(len - 3) {
         if (req[i] == '\r' as u8 && req[i + 1] == '\n' as u8 &&
             req[i + 2] == '\r' as u8 && req[i + 3] == '\n' as u8) {
             return KvsHdrEndResult::Found(i + 4);
         }
-        i = i + 1;
     }
     return KvsHdrEndResult::NotFound;
 }

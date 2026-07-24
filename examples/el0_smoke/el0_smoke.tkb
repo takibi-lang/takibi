@@ -74,10 +74,8 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             return (elr, SYSCALL_ERROR);
         }
         let src: *u8 = buf as *u8;
-        let mut i: usize = 0;
-        while (i < len) {
+        for i: usize in 0..<len {
             uart_putc(src[i as isize]);
-            i = i + 1;
         }
         return (elr, len);
     }

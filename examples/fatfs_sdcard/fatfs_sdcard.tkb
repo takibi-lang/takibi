@@ -112,9 +112,8 @@ fn app_main() {
         }
 
         let OVERWRITE_ROUNDS: i32 = 20;
-        let mut round: i32 = 0;
         let mut overwrite_ok: bool = true;
-        while (round < OVERWRITE_ROUNDS) {
+        for round: i32 in 0..<OVERWRITE_ROUNDS {
             let mut content: [u8; 32];
             let mut len: isize = 0;
             len = len + copy_str(content + len, "overwrite round #");
@@ -124,7 +123,6 @@ fn app_main() {
                 FatIoResult::Ok => {}
                 FatIoResult::Err(err) => { overwrite_ok = false; }
             }
-            round = round + 1;
         }
         if (overwrite_ok) {
             uart_puts("overwrite HELLO.TXT x20: OK\r\n");
