@@ -47,14 +47,34 @@ use "examples/common_rpi3/hvc_asm_extern.tkb";
 use "examples/common_rpi3/el0_test_image_extern.tkb";
 
 const SYSCALL_ERROR: usize = 0xFFFFFFFFFFFFFFFF;
-const MAX_PHDRS: usize = 4;
+// 8 covers today's el0_test_prog.elf (6 phdrs, static-pie) with headroom;
+// GitHub issue #156's real busybox-static target has 7 -- widened from
+// the old fixed cap of 4 (which happened to work only because that
+// binary's PT_LOAD entries were first) alongside the PIE loader rewrite,
+// since a real ET_DYN binary's phdr count is no longer something this
+// loader can assume much about.
+const MAX_PHDRS: usize = 8;
 const PT_LOAD: u32 = 1;
+const ET_EXEC: u16 = 2;
+const ET_DYN: u16 = 3;
 
 // argv/envp/auxv initial stack layout (GitHub issue #156): reserved at
 // the top of the stack page, see its construction in app_main for the
-// exact byte-by-byte shape.
-const ARGV_LAYOUT_SIZE: usize = 128;
+// exact byte-by-byte shape. Widened from the original 128 bytes to fit
+// the PIE-specific auxv entries below (AT_PHDR/PHENT/PHNUM/BASE/ENTRY/
+// RANDOM/SECURE) a real libc's own self-relocation and TLS setup needs,
+// on top of the original AT_PAGESZ/AT_NULL pair -- every real target
+// binary is PIE (see el0_test_prog.ld's own comment on why), so this is
+// no longer optional scaffolding.
+const ARGV_LAYOUT_SIZE: usize = 256;
 const AT_PAGESZ: usize = 6;
+const AT_PHDR: usize = 3;
+const AT_PHENT: usize = 4;
+const AT_PHNUM: usize = 5;
+const AT_BASE: usize = 7;
+const AT_ENTRY: usize = 9;
+const AT_SECURE: usize = 23;
+const AT_RANDOM: usize = 25;
 
 // cpio (newc) fixed field byte offsets within the 110-byte header --
 // verified against a real `cpio -o -H newc` archive's own raw bytes
@@ -380,8 +400,12 @@ fn app_main() {
         uart_puts("not ELF64 little-endian\n");
         return;
     }
+    if (hdr_ptr.e_type != ET_EXEC && hdr_ptr.e_type != ET_DYN) {
+        uart_puts("unsupported ELF type\n");
+        return;
+    }
 
-    let entry: usize = hdr_ptr.e_entry as usize;
+    let entry_link: usize = hdr_ptr.e_entry as usize;
     let phoff: usize = hdr_ptr.e_phoff as usize;
     let phentsize: usize = hdr_ptr.e_phentsize as usize;
     let phnum: usize = hdr_ptr.e_phnum as usize;
@@ -392,29 +416,52 @@ fn app_main() {
         phdr_cap = phnum;
     }
 
-    // First pass (GitHub issue #156's multi-page loader generalization):
-    // scan every PT_LOAD segment's own extent to size the code region in
-    // whole pages BEFORE mapping anything, instead of the old fixed
-    // single-page assumption (examples/process_vm_smoke already proved
-    // the underlying ProcessAddressSpace primitive maps an arbitrary
-    // contiguous page_count; this is that primitive wired into the real
-    // ELF loader). One extra page is reserved for the stack, so
-    // code_pages is capped at MAX_PROCESS_PAGES - 1.
-    let mut max_extent: usize = 0;
+    // First pass (GitHub issue #156's multi-page loader generalization,
+    // now also PIE-aware): scan every PT_LOAD segment to find the lowest
+    // p_vaddr among them and the overall extent, BEFORE mapping anything.
+    // load_bias = page_va - min_vaddr places that lowest segment exactly
+    // at page_va, and every other address (other segments, e_entry, the
+    // AT_PHDR auxv value) is offset by the same bias -- this is the same
+    // mechanism Linux's own kernel ELF loader uses (binfmt_elf.c), and it
+    // unifies both ELF kinds this loader accepts: a well-formed ET_EXEC
+    // binary already links its lowest PT_LOAD at page_va, so min_vaddr
+    // == page_va and load_bias comes out to 0 (a no-op) automatically; a
+    // static-pie ET_DYN binary (GitHub issue #156's own empirical
+    // finding: every real target shell binary is one) links its lowest
+    // PT_LOAD at 0, so load_bias becomes exactly page_va. Segment space
+    // is reserved by p_memsz, not p_filesz -- filesz-to-memsz bytes are
+    // BSS, correctly left zeroed by this loader's fresh page pool, not
+    // copied from the file (the segment-copy loop below still only
+    // copies p_filesz bytes, unchanged). One extra page is reserved for
+    // the stack, so code_pages is capped at MAX_PROCESS_PAGES - 1.
+    let mut min_vaddr: usize = 0xFFFFFFFFFFFFFFFF;
+    let mut max_vaddr_end: usize = 0;
+    let mut any_load: i32 = 0;
     for i: usize in 0..<phdr_cap {
         let ph_addr: usize = image_addr + phoff + i * phentsize;
         let ph_ptr: *Elf64ProgramHeader = ph_addr as *Elf64ProgramHeader;
         if (ph_ptr.p_type == PT_LOAD) {
+            any_load = 1;
             let seg_vaddr: usize = ph_ptr.p_vaddr as usize;
-            let seg_filesz: usize = ph_ptr.p_filesz as usize;
-            if (seg_vaddr >= page_va) {
-                let seg_end: usize = seg_vaddr - page_va + seg_filesz;
-                if (seg_end > max_extent) {
-                    max_extent = seg_end;
-                }
+            let seg_memsz: usize = ph_ptr.p_memsz as usize;
+            if (seg_vaddr < min_vaddr) {
+                min_vaddr = seg_vaddr;
+            }
+            let seg_end: usize = seg_vaddr + seg_memsz;
+            if (seg_end > max_vaddr_end) {
+                max_vaddr_end = seg_end;
             }
         }
     }
+    if (any_load == 0 || min_vaddr > page_va) {
+        uart_puts("load failed\n");
+        return;
+    }
+    let load_bias: usize = page_va - min_vaddr;
+    let entry: usize = entry_link + load_bias;
+    let at_phdr: usize = load_bias + phoff;
+    let max_extent: usize = max_vaddr_end - min_vaddr;
+
     let mut code_pages: usize = (max_extent + PAGE_SIZE - 1) / PAGE_SIZE;
     if (code_pages < 1) {
         code_pages = 1;
@@ -459,7 +506,7 @@ fn app_main() {
                 let ph_addr: usize = image_addr + phoff + i * phentsize;
                 let ph_ptr: *Elf64ProgramHeader = ph_addr as *Elf64ProgramHeader;
                 if (ph_ptr.p_type == PT_LOAD) {
-                    let seg_vaddr: usize = ph_ptr.p_vaddr as usize;
+                    let seg_vaddr: usize = (ph_ptr.p_vaddr as usize) + load_bias;
                     let seg_offset: usize = ph_ptr.p_offset as usize;
                     let seg_filesz: usize = ph_ptr.p_filesz as usize;
                     if (seg_vaddr < page_va || seg_filesz > code_region_size
@@ -523,13 +570,19 @@ fn app_main() {
             // process's own usable stack, growing down from there exactly
             // like a real kernel's layout.
             //
-            // Layout (matches the Linux ELF ABI exactly, just with the
-            // smallest legal argv/envp/auxv content):
+            // Layout (matches the Linux ELF ABI exactly, with the PIE
+            // auxv entries a real libc's own self-relocation/TLS setup
+            // needs -- see examples/common_rpi3/el0_test_prog.S's own
+            // matching validation for the exact byte offsets this must
+            // agree with):
             //   [argc=1][argv[0]=ptr]["prog\0" pointed to by
             //   argv[0]][argv NULL][envp NULL (0 entries)]
-            //   [auxv: (AT_PAGESZ, PAGE_SIZE)][auxv: (AT_NULL, 0)]
+            //   [auxv: AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_BASE,
+            //    AT_ENTRY, AT_RANDOM, AT_SECURE][auxv: AT_NULL, 0]
+            //   [AT_RANDOM's 16-byte pointee][argv[0]'s "prog\0" string]
             let layout_base: usize = stack_va + (PAGE_SIZE - ARGV_LAYOUT_SIZE);
-            let string_addr: usize = layout_base + 64;
+            let random_addr: usize = layout_base + 176;
+            let string_addr: usize = layout_base + 192;
 
             let argc_ptr: *u64 = layout_base as *u64;
             *argc_ptr = 1;
@@ -539,14 +592,61 @@ fn app_main() {
             *argv_null_ptr = 0;
             let envp_null_ptr: *u64 = (layout_base + 24) as *u64;
             *envp_null_ptr = 0;
-            let auxv_type_ptr: *u64 = (layout_base + 32) as *u64;
-            *auxv_type_ptr = AT_PAGESZ as u64;
-            let auxv_val_ptr: *u64 = (layout_base + 40) as *u64;
-            *auxv_val_ptr = PAGE_SIZE as u64;
-            let auxv_null_type_ptr: *u64 = (layout_base + 48) as *u64;
+
+            let auxv0_type_ptr: *u64 = (layout_base + 32) as *u64;
+            *auxv0_type_ptr = AT_PAGESZ as u64;
+            let auxv0_val_ptr: *u64 = (layout_base + 40) as *u64;
+            *auxv0_val_ptr = PAGE_SIZE as u64;
+
+            let auxv1_type_ptr: *u64 = (layout_base + 48) as *u64;
+            *auxv1_type_ptr = AT_PHDR as u64;
+            let auxv1_val_ptr: *u64 = (layout_base + 56) as *u64;
+            *auxv1_val_ptr = at_phdr as u64;
+
+            let auxv2_type_ptr: *u64 = (layout_base + 64) as *u64;
+            *auxv2_type_ptr = AT_PHENT as u64;
+            let auxv2_val_ptr: *u64 = (layout_base + 72) as *u64;
+            *auxv2_val_ptr = phentsize as u64;
+
+            let auxv3_type_ptr: *u64 = (layout_base + 80) as *u64;
+            *auxv3_type_ptr = AT_PHNUM as u64;
+            let auxv3_val_ptr: *u64 = (layout_base + 88) as *u64;
+            *auxv3_val_ptr = phnum as u64;
+
+            let auxv4_type_ptr: *u64 = (layout_base + 96) as *u64;
+            *auxv4_type_ptr = AT_BASE as u64;
+            let auxv4_val_ptr: *u64 = (layout_base + 104) as *u64;
+            *auxv4_val_ptr = 0;
+
+            let auxv5_type_ptr: *u64 = (layout_base + 112) as *u64;
+            *auxv5_type_ptr = AT_ENTRY as u64;
+            let auxv5_val_ptr: *u64 = (layout_base + 120) as *u64;
+            *auxv5_val_ptr = entry as u64;
+
+            let auxv6_type_ptr: *u64 = (layout_base + 128) as *u64;
+            *auxv6_type_ptr = AT_RANDOM as u64;
+            let auxv6_val_ptr: *u64 = (layout_base + 136) as *u64;
+            *auxv6_val_ptr = random_addr as u64;
+
+            let auxv7_type_ptr: *u64 = (layout_base + 144) as *u64;
+            *auxv7_type_ptr = AT_SECURE as u64;
+            let auxv7_val_ptr: *u64 = (layout_base + 152) as *u64;
+            *auxv7_val_ptr = 0;
+
+            let auxv_null_type_ptr: *u64 = (layout_base + 160) as *u64;
             *auxv_null_type_ptr = 0;
-            let auxv_null_val_ptr: *u64 = (layout_base + 56) as *u64;
+            let auxv_null_val_ptr: *u64 = (layout_base + 168) as *u64;
             *auxv_null_val_ptr = 0;
+
+            // AT_RANDOM's 16-byte pointee -- a deliberate low-quality
+            // fixed stub (GitHub issue #156's own hedge: real entropy
+            // quality is a separate, later concern), not all-zero so a
+            // real libc's stack-protector guard isn't a predictable
+            // constant either.
+            let random_ptr: *u8 = random_addr as *u8;
+            for i: usize in 0..<16 {
+                random_ptr[i as isize] = (0xA5 ^ i) as u8;
+            }
 
             // "prog\0" -- argv[0]'s own string data, placed above the
             // array (higher address), matching real kernel layout

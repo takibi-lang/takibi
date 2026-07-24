@@ -1,28 +1,35 @@
-/* A real, standalone, statically-linked EL0 ELF binary (GitHub issue #153:
-   the first target for a genuine ELF loader, as opposed to el0_smoke's
-   raw hand-copied instruction bytes). Built into its own ELF file (see
-   el0_test_prog.ld) by this repo's own toolchain (llvm-mc + ld.lld), then
-   embedded into the kernel image verbatim via el0_test_image.S's
-   `.incbin` -- the kernel-side loader (examples/el0_elf_load) parses this
-   file's real Elf64_Ehdr/Elf64_Phdr, not a hardcoded offset/length.
+/* A real, standalone EL0 ELF binary (GitHub issue #153: the first target
+   for a genuine ELF loader, as opposed to el0_smoke's raw hand-copied
+   instruction bytes). Built into its own ELF file (see el0_test_prog.ld)
+   by this repo's own toolchain (llvm-mc + ld.lld), then embedded into the
+   kernel image verbatim via el0_test_image.S's `.incbin` -- the
+   kernel-side loader (examples/el0_elf_load) parses this file's real
+   Elf64_Ehdr/Elf64_Phdr, not a hardcoded offset/length.
 
-   First validates the argv/envp/auxv initial stack layout (GitHub issue
-   #156's first concrete milestone -- every real libc's own startup code
-   reads this off SP unconditionally, so getting it right is a
-   prerequisite more fundamental than any individual syscall). Then the
-   same write(1, msg, 12) opener as el0_smoke's own payload, a real
-   read(0, buf, 3) (GitHub issue #153's third and last Stage 1 syscall)
-   that echoes back whatever three bytes arrive over UART RX via a second
-   write(), before exit(0). No memory access beyond the argv/auxv layout
-   and its own embedded message/buffer, EXCEPT for a real push/pop
-   through SP -- proving examples/el0_elf_load's real mapped stack page
-   actually works, not just that SP_EL0 holds a valid-looking value
-   nothing ever dereferences. (adr is PC-relative, so both the
-   message/buffer and the entry point itself work whether this segment
-   lands at its link-time address or not -- though el0_test_prog.ld pins
-   one anyway, see that file's own comment for why. SP is a real mapped
-   VA, not position-independent, but the loader always maps the stack
-   page at a fixed, known offset from the code page, so this is safe.) */
+   Linked as a static-pie (ET_DYN, base 0 -- see el0_test_prog.ld's own
+   comment on why every real target binary is PIE, GitHub issue #156).
+   First validates the argv/envp/auxv initial stack layout INCLUDING the
+   PIE-specific entries (AT_PHDR/AT_PHENT/AT_PHNUM/AT_BASE/AT_ENTRY/
+   AT_RANDOM/AT_SECURE) the loader's load-bias mechanism must get right
+   for a real libc's own self-relocation and TLS setup to work -- every
+   real libc's own startup code reads this off SP unconditionally, so
+   getting it right is a prerequisite more fundamental than any
+   individual syscall. Then the same write(1, msg, 12) opener as
+   el0_smoke's own payload, a real read(0, buf, 3) (GitHub issue #153's
+   third and last Stage 1 syscall) that echoes back whatever three bytes
+   arrive over UART RX via a second write(), before exit(0). No memory
+   access beyond the argv/auxv layout and its own embedded message/buffer,
+   EXCEPT for a real push/pop through SP -- proving
+   examples/el0_elf_load's real mapped stack page actually works, not
+   just that SP_EL0 holds a valid-looking value nothing ever
+   dereferences. (adr is PC-relative, so both the message/buffer and the
+   entry point itself work whether this segment lands at its link-time
+   address or not -- which for a PIE binary it never does; the loader
+   always chooses a real, non-zero load bias, so THIS running at all,
+   let alone validating AT_ENTRY, is itself already partial proof the
+   mechanism works. SP is a real mapped VA, not position-independent, but
+   the loader always maps the stack page at a fixed, known offset from
+   the code region, so this is safe.) */
     .section .text
     .global el0_prog_entry
 el0_prog_entry:
@@ -31,7 +38,13 @@ el0_prog_entry:
        moving it first would lose the only reference to this layout.
        Expected layout (examples/el0_elf_load's app_main constructs this
        exactly): argc=1, argv[0]="prog\0", argv NULL, envp NULL (zero
-       entries), auxv (AT_PAGESZ, 4096), (AT_NULL, 0). */
+       entries), auxv (AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_BASE,
+       AT_ENTRY, AT_RANDOM, AT_SECURE), (AT_NULL, 0). x19 holds this
+       binary's own runtime load bias for the rest of this function --
+       el0_prog_entry links at vaddr 0 (el0_test_prog.ld's `. = 0;`), so
+       `adr` (PC-relative, always correct regardless of where the loader
+       actually placed this binary) gives exactly the bias itself. */
+    adr     x19, el0_prog_entry
     ldr     x9, [sp]                   /* argc */
     movz    x10, #1
     cmp     x9, x10
@@ -46,6 +59,7 @@ el0_prog_entry:
     cbnz    x9, .Lel0_prog_hang
     ldr     x9, [sp, #24]              /* envp NULL terminator (0 entries) */
     cbnz    x9, .Lel0_prog_hang
+
     ldr     x9, [sp, #32]              /* auxv[0].a_type, expect AT_PAGESZ (6) */
     movz    x10, #6
     cmp     x9, x10
@@ -54,9 +68,83 @@ el0_prog_entry:
     movz    x10, #4096
     cmp     x9, x10
     b.ne    .Lel0_prog_hang
-    ldr     x9, [sp, #48]              /* auxv terminator: AT_NULL (0) */
+
+    /* auxv[1]: AT_PHDR (3) -- must equal this binary's own load bias
+       plus its link-time e_phoff (64, verified via `readelf -h` against
+       this exact linker script/source -- same empirical-constant idiom
+       as examples/el0_elf_load.tkb's own CPIO_FILESIZE_OFFSET). */
+    ldr     x9, [sp, #48]
+    movz    x10, #3
+    cmp     x9, x10
+    b.ne    .Lel0_prog_hang
+    ldr     x9, [sp, #56]
+    movz    x10, #64                  /* this binary's own e_phoff */
+    add     x10, x19, x10
+    cmp     x9, x10
+    b.ne    .Lel0_prog_hang
+
+    /* auxv[2]: AT_PHENT (4) = 56 (sizeof(Elf64_Phdr), architecture-fixed) */
+    ldr     x9, [sp, #64]
+    movz    x10, #4
+    cmp     x9, x10
+    b.ne    .Lel0_prog_hang
+    ldr     x9, [sp, #72]
+    movz    x10, #56
+    cmp     x9, x10
+    b.ne    .Lel0_prog_hang
+
+    /* auxv[3]: AT_PHNUM (5) = 6 (this exact linked binary's own program
+       header count, verified via `readelf -h`) */
+    ldr     x9, [sp, #80]
+    movz    x10, #5
+    cmp     x9, x10
+    b.ne    .Lel0_prog_hang
+    ldr     x9, [sp, #88]
+    movz    x10, #6
+    cmp     x9, x10
+    b.ne    .Lel0_prog_hang
+
+    /* auxv[4]: AT_BASE (7) = 0 (no separate interpreter is ever loaded) */
+    ldr     x9, [sp, #96]
+    movz    x10, #7
+    cmp     x9, x10
+    b.ne    .Lel0_prog_hang
+    ldr     x9, [sp, #104]
     cbnz    x9, .Lel0_prog_hang
-    ldr     x9, [sp, #56]              /* auxv terminator's value, also 0 */
+
+    /* auxv[5]: AT_ENTRY (9) -- must equal this binary's own real runtime
+       entry address, i.e. exactly the load bias (el0_prog_entry links at
+       vaddr 0, so bias + e_entry(0) == bias). */
+    ldr     x9, [sp, #112]
+    movz    x10, #9
+    cmp     x9, x10
+    b.ne    .Lel0_prog_hang
+    ldr     x9, [sp, #120]
+    cmp     x9, x19
+    b.ne    .Lel0_prog_hang
+
+    /* auxv[6]: AT_RANDOM (25) -- just a non-NULL pointer; the pointee's
+       content is a deliberate low-quality fixed stub (GitHub issue
+       #156's own hedge on real entropy quality being a later concern),
+       not checked here. */
+    ldr     x9, [sp, #128]
+    movz    x10, #25
+    cmp     x9, x10
+    b.ne    .Lel0_prog_hang
+    ldr     x9, [sp, #136]
+    cbz     x9, .Lel0_prog_hang
+
+    /* auxv[7]: AT_SECURE (23) = 0 (no privilege transition ever happens) */
+    ldr     x9, [sp, #144]
+    movz    x10, #23
+    cmp     x9, x10
+    b.ne    .Lel0_prog_hang
+    ldr     x9, [sp, #152]
+    cbnz    x9, .Lel0_prog_hang
+
+    ldr     x9, [sp, #160]             /* auxv terminator: AT_NULL (0) */
+    cbnz    x9, .Lel0_prog_hang
+    ldr     x9, [sp, #168]             /* auxv terminator's value, also 0 */
     cbnz    x9, .Lel0_prog_hang
 
     adr     x1, el0_prog_argv_ok_msg

@@ -1597,8 +1597,12 @@ COMMON_RPI3_EL0_TEST_IMAGE_EXTERN := $(COMMON_RPI3_DIR)/el0_test_image_extern.tk
 $(COMMON_RPI3_EL0_TEST_PROG_O): $(COMMON_RPI3_EL0_TEST_PROG_S)
 	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
 
+# -pie: static-pie output (ET_DYN, base 0 per el0_test_prog.ld) -- see
+# that file's own comment for why (GitHub issue #156: every real shell
+# binary worth targeting is PIE, so the loader's PIE path is what
+# actually needs proving now).
 $(COMMON_RPI3_EL0_TEST_PROG_ELF): $(COMMON_RPI3_EL0_TEST_PROG_O) $(COMMON_RPI3_EL0_TEST_PROG_LD)
-	$(LLD) -z max-page-size=4096 -T $(COMMON_RPI3_EL0_TEST_PROG_LD) $(COMMON_RPI3_EL0_TEST_PROG_O) -o $@
+	$(LLD) -z max-page-size=4096 -pie -T $(COMMON_RPI3_EL0_TEST_PROG_LD) $(COMMON_RPI3_EL0_TEST_PROG_O) -o $@
 
 # `cd` into the directory first so the archive's own stored entry name is
 # the bare "el0_test_prog.elf" (what examples/el0_elf_load.tkb's cpio
