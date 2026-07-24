@@ -1889,23 +1889,57 @@ fn app_main() {
     let image_addr: usize = archive_addr + data_start;
     let image_len: usize = filesize;
 
+    let sh_argv0: *u8 = "sh";
+    let parent_seed: {0..<2 as usize} = 0;
+    if (el0_load_elf_into(image_addr, image_len, parent_seed, sh_argv0) == true) {
+        let el1_sp_base: usize = (el1_stack as *u8) as usize;
+        let el1_sp: usize = el1_sp_base + 4096;
+        rpi3_el1_enter(el1_sp);
+    }
+}
+
+// GitHub issue #158: the same real ELF loader issue #156 built for the
+// INITIAL boot-time load (above), extracted into its own function so
+// execve() (hvc_dispatch_execve below) can reuse it for a real external
+// command found via issue #157's own VFS work, instead of a second,
+// diverging copy of this same ~250-line loader. Runs at EL2 either way
+// -- app_main() above calls it directly (app_main/rpi3_boot_main's own
+// chain runs entirely at EL2 until it deliberately drops further), and
+// hvc_dispatch_execve calls it from inside the SAME EL1->EL2 hvc
+// boundary fork()/exit() already use, since process_address_space_map's
+// own TTBR0_EL2/L3-table writes need EL2 either way -- never called
+// directly from el0_svc_dispatch's own EL1 context.
+//
+// Writes el0_entry_va/el0_page_va/el0_region_size/el0_stack_top_va/
+// el0_heap_* (this file's own "currently running EL0 process" globals)
+// on success and stashes the resulting VM resources in EITHER
+// process_vm_store (seed 0, the original process) or child_vm_store
+// (seed 1, GitHub issue #158's own one child) -- which store depends on
+// `seed` alone, matching the same fixed slot-0-is-parent/slot-1-is-child
+// convention hvc_dispatch_fork above already established. Does NOT
+// itself start the loaded process running (rpi3_el1_enter vs
+// rpi3_el0_enter is a different operation at a different privilege
+// level depending on which caller this is -- see each caller's own
+// comment); returns true/false and leaves that decision to the caller.
+fn el0_load_elf_into(image_addr: usize, image_len: usize,
+                     seed: {0..<2 as usize}, argv0: *u8) -> bool {
     if (image_len < 64) {
         uart_puts("image too small\n");
-        return;
+        return false;
     }
     let hdr_ptr: *Elf64Header = image_addr as *Elf64Header;
     let magic: *u8 = hdr_ptr.e_ident as *u8;
     if (magic[0] != 0x7F || magic[1] != 0x45 || magic[2] != 0x4C || magic[3] != 0x46) {
         uart_puts("bad ELF magic\n");
-        return;
+        return false;
     }
     if (magic[4] != 2 || magic[5] != 1) {
         uart_puts("not ELF64 little-endian\n");
-        return;
+        return false;
     }
     if (hdr_ptr.e_type != ET_EXEC && hdr_ptr.e_type != ET_DYN) {
         uart_puts("unsupported ELF type\n");
-        return;
+        return false;
     }
 
     let entry_link: usize = hdr_ptr.e_entry as usize;
@@ -1958,7 +1992,7 @@ fn app_main() {
     }
     if (any_load == 0 || min_vaddr > page_va) {
         uart_puts("load failed\n");
-        return;
+        return false;
     }
     let load_bias: usize = page_va - min_vaddr;
     let entry: usize = entry_link + load_bias;
@@ -1971,12 +2005,12 @@ fn app_main() {
     }
     if (code_pages > MAX_PROCESS_PAGES - 1 - HEAP_PAGES) {
         uart_puts("elf too large\n");
-        return;
+        return false;
     }
     let code_region_size: usize = code_pages * PAGE_SIZE;
     if (entry < page_va || entry - page_va >= code_region_size) {
         uart_puts("load failed\n");
-        return;
+        return false;
     }
     let total_pages: usize = code_pages + 1 + HEAP_PAGES;
 
@@ -1990,7 +2024,6 @@ fn app_main() {
     // been allocated yet at this point, so the (unreachable in practice)
     // else arm has nothing to unwind.
     if (total_pages < 513) {
-        let seed: {0..<2 as usize} = 0;
         let inactive = address_space_new(seed);
         let core: usize = 0;
         let (space, active) = address_space_activate(inactive, core);
@@ -1999,6 +2032,7 @@ fn app_main() {
         ProcessMapResult::Failed(inactive2) => {
             uart_puts("allocation failed\n");
             address_space_free(inactive2);
+            return false;
         }
         ProcessMapResult::Mapped(pair) => {
             let (pas, active2) = pair;
@@ -2054,7 +2088,7 @@ fn app_main() {
                 uart_puts("load failed\n");
                 el0_pas_abandon(pas);
                 el0_active_abandon(active2);
-                return;
+                return false;
             }
 
             // The stack is simply the LAST page of the same contiguous
@@ -2151,20 +2185,27 @@ fn app_main() {
                 random_ptr[i as isize] = (0xA5 ^ i) as u8;
             }
 
-            // "prog\0" -- argv[0]'s own string data, placed above the
-            // array (higher address), matching real kernel layout
-            // convention.
+            // argv[0]'s own string data, placed above the array (higher
+            // address), matching real kernel layout convention. GitHub
+            // issue #158: now the caller's own `argv0` parameter, not a
+            // hardcoded "sh\0" -- app_main() below still passes "sh" for
+            // the initial load (busybox dispatches to its own `sh`
+            // applet by argv[0]'s basename, GitHub issue #156's own
+            // finding), while execve() passes the real requested
+            // command's own basename. Capped well inside
+            // ARGV_LAYOUT_SIZE's own reserved space -- this loader has
+            // never needed a long argv[0], and this milestone's own
+            // scope (issue #158's own "one external command" note) does
+            // not add real multi-argv support here.
             let string_ptr: *u8 = string_addr as *u8;
-            // "sh\0" -- not "prog\0" (examples/el0_elf_load's own value):
-            // busybox is a multi-call binary that dispatches to an
-            // applet by argv[0]'s own basename, so this specific string
-            // is what makes it actually run its `sh` applet instead of
-            // printing "applet not found" (both were verified on real
-            // hardware while developing this, see this file's own header
-            // comment).
-            string_ptr[0 as isize] = 0x73; // 's'
-            string_ptr[1 as isize] = 0x68; // 'h'
-            string_ptr[2 as isize] = 0x00; // NUL
+            let mut argv0_len: usize = cstr_len(argv0) as usize;
+            if (argv0_len > 15) {
+                argv0_len = 15;
+            }
+            for i: usize in 0..<argv0_len {
+                string_ptr[i as isize] = argv0[i as isize];
+            }
+            string_ptr[argv0_len as isize] = 0;
 
             el0_entry_va = entry;
             el0_page_va = page_va;
@@ -2180,14 +2221,23 @@ fn app_main() {
             // This bundle IS about to become a running process -- stash it
             // in the stable slot instead of abandoning it, so exit()'s hvc
             // call can reclaim it for real later (see hvc_dispatch above).
-            process_vm_put(ProcessVmState::Loaded((pas, active2)));
-
-            let el1_sp_base: usize = (el1_stack as *u8) as usize;
-            let el1_sp: usize = el1_sp_base + 4096;
-            rpi3_el1_enter(el1_sp);
+            // GitHub issue #158: WHICH stable slot depends on `seed`
+            // alone (0 = process_vm_store, the original process; 1 =
+            // child_vm_store, matching hvc_dispatch_fork's own
+            // convention) -- starting it running (rpi3_el1_enter vs
+            // rpi3_el0_enter) is a different operation at a different
+            // privilege level depending on the caller, left entirely to
+            // it; this function's own job ends at "loaded and stashed".
+            if (seed == 0) {
+                process_vm_put(ProcessVmState::Loaded((pas, active2)));
+            } else {
+                child_vm_put(ProcessVmState::Loaded((pas, active2)));
+            }
+            return true;
         }
         }
     } else {
         uart_puts("elf too large\n");
     }
+    return false;
 }
