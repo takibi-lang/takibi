@@ -342,6 +342,11 @@ private let mut fork_child_running: bool = false;
 // always exactly PID 2 -- never allocated, since only one child ever
 // exists at a time.
 const FORK_CHILD_PID: usize = 2;
+// The child's own real exit() status (x0 at its own exit call, Linux's
+// own convention), recorded by exit()'s own child-branch below so
+// wait4() (once the parent resumes) can report the real $? instead of a
+// stub value.
+private let mut child_exit_status: usize = 0;
 
 // GitHub issue #158's real per-page copy-on-write table: exactly one
 // linear token per page currently shared between the parent and its one
@@ -1742,9 +1747,51 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             // domainname field [325..390) stays all-zero ("" / unset).
             return (elr, 0);
         }
+        220 => {
+            // clone(flags, child_stack, ...) -- GitHub issue #158's real
+            // fork(). A real strace of this exact busybox binary (the
+            // same "measure, don't guess" method issue #156's own
+            // research used) confirmed ash's own external-command
+            // execution uses plain clone(child_stack=NULL, flags=
+            // CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD) -- real
+            // fork() semantics (a genuinely separate address space, not
+            // vfork()'s shared one), not vfork(). Only x0 (flags) is
+            // meaningful to real fork()-shaped clone; child_stack (x1)
+            // is NULL for this call shape and unused. Delegates the
+            // actual page-table/TTBR0_EL2 work to hvc_dispatch_fork
+            // above (EL2-only operations, unreachable from here) via the
+            // same EL1->EL2 hvc boundary exit() already uses --
+            // pending_frame_sp carries this trap's own frame_sp across
+            // that boundary since the hvc ABI itself only ever carries
+            // one bare opcode (see pending_frame_sp's own comment).
+            // Resuming afterward reuses el0_sync_entry's own existing
+            // "same frame, patched x0" path: by the time this returns,
+            // hvc_dispatch_fork has already switched TTBR0_EL2 to the
+            // child, so THIS resume runs the child (x0=0) using the
+            // exact registers the parent had -- exactly fork()'s real
+            // semantics for the child, and the parent's own eventual
+            // resume (x0=FORK_CHILD_PID) happens later, via
+            // rpi3_el0_resume_frame, not through this return at all.
+            pending_frame_sp = frame_sp;
+            rpi3_hvc_call(1);
+            return (elr, 0);
+        }
         93 | 94 => {
             let outcome = ProcessOutcome::Exited(x0);
             process_outcome_report(outcome);
+            // GitHub issue #158: the CHILD's own exit() cannot use the
+            // same "terminate, park forever" disposition the original
+            // process's exit() below does -- there is a suspended PARENT
+            // waiting to resume. fork_child_running is only ever true
+            // while the child is the one actually running (the parent
+            // is suspended for as long as it is, see ProcessVmState's
+            // own comment), so it doubles as "am I the child" here.
+            if (fork_child_running == true) {
+                child_exit_status = x0;
+                rpi3_hvc_call(2);
+                let frame: *u8 = parent_saved_frame as *u8;
+                rpi3_el0_resume_frame(frame as usize);
+            }
             // Issued FROM EL1 (this whole function runs inside
             // el0_sync_entry's own EL1-side SVC handling): traps up to
             // EL2 via el1_hvc_entry, runs hvc_dispatch there (real

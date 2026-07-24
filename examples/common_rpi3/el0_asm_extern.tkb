@@ -6,3 +6,8 @@
 extern fn el0_payload_addr() -> usize;
 extern fn el0_payload_len() -> usize;
 extern fn rpi3_el0_enter(el0_pc: usize, el0_sp: usize) !{noreturn};
+// GitHub issue #158: resumes EL0 from an arbitrary saved 272-byte
+// register frame (x0-x30 + ELR_EL1 + SPSR_EL1), not just PC+SP -- see
+// el0_asm.S's own comment on why a real fork()'s suspended parent needs
+// this instead of rpi3_el0_enter above.
+extern fn rpi3_el0_resume_frame(frame_ptr: usize) !{noreturn};
