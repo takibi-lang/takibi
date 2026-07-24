@@ -47,6 +47,16 @@ use "examples/common_rpi3/hvc_asm_extern.tkb";
 use "examples/common_rpi3/el0_test_image_extern.tkb";
 
 const SYSCALL_ERROR: usize = 0xFFFFFFFFFFFFFFFF;
+// -ENOTTY as usize (Linux errno 25), the real kernel ABI convention this
+// loader already follows for SYSCALL_ERROR (-1) above: a syscall's error
+// return is -errno reinterpreted as an unsigned 64-bit value.
+const ERR_ENOTTY: usize = 0xFFFFFFFFFFFFFFE7;
+// This process's fixed, single-process/single-"user" identity (GitHub
+// issue #156's own suggested approach for a kernel with no real PID/UID
+// concept yet: "can all return fixed values"). PID/TID 0 is reserved
+// (kernel/swapper on a real Linux system), so 1 -- not 0 -- for anything
+// PID/TID-shaped; UID/GID 0 (root) is fine since there is no privilege
+// model to violate yet.
 // 8 covers today's el0_test_prog.elf (6 phdrs, static-pie) with headroom;
 // GitHub issue #156's real busybox-static target has 7 -- widened from
 // the old fixed cap of 4 (which happened to work only because that
@@ -332,6 +342,75 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
         let src: *u8 = buf as *u8;
         for i: usize in 0..<len {
             uart_putc(src[i as isize]);
+        }
+        return (elr, len);
+    }
+    // Trivial stub syscalls (GitHub issue #156's own effort-estimate
+    // list): libc thread-runtime init boilerplate and single-process/
+    // single-"user" identity queries that a non-interactive, single-
+    // threaded script never exercises meaningfully, so a fixed plausible
+    // value is the whole implementation. Discovered load-bearing via
+    // real hardware testing against Alpine's busybox-static aarch64
+    // binary (not from the strace research alone): returning 0 (this
+    // process's own real TID/PID being 0, an impossible value on a real
+    // kernel -- PID/TID 0 is reserved for kernel/swapper) instead of a
+    // sane positive TID from set_tid_address was traced to a later
+    // NULL-pointer write crash inside musl's own startup, confirmed via
+    // a live OpenOCD halt+register read (ESR_EL1 EC 0x07 permission
+    // fault at a `mov x0,#0; strb wzr,[x0]` instruction pair -- musl's
+    // own internal `a_crash()` abort primitive).
+    if (syscall_num == 96 || syscall_num == 178) {
+        // set_tid_address(tidptr), gettid() -- both return this
+        // process's own TID.
+        return (elr, 1);
+    }
+    if (syscall_num == 172) {
+        return (elr, 1); // getpid()
+    }
+    if (syscall_num == 173) {
+        return (elr, 0); // getppid() -- no parent process exists
+    }
+    if (syscall_num == 174 || syscall_num == 175
+            || syscall_num == 176 || syscall_num == 177) {
+        return (elr, 0); // getuid/geteuid/getgid/getegid() -- root
+    }
+    if (syscall_num == 99 || syscall_num == 134
+            || syscall_num == 167 || syscall_num == 293) {
+        // set_robust_list, rt_sigaction, prctl, rseq -- accept and
+        // remember nothing, always succeed (see this file's own header
+        // comment on why: none of these have observable effects for a
+        // single-threaded, non-interactive, single-process script that
+        // never receives a real signal or spawns a thread).
+        return (elr, 0);
+    }
+    if (syscall_num == 29) {
+        // ioctl(fd, request, arg) -- always -ENOTTY. Real shells handle
+        // this gracefully (confirmed by GitHub issue #156's own strace
+        // research: both traced shells fall back to script/pipe mode
+        // cleanly on ENOTTY), and this kernel has no real tty/ioctl
+        // model to implement yet.
+        return (elr, ERR_ENOTTY);
+    }
+    if (syscall_num == 278) {
+        // getrandom(buf, len, flags) -- a deliberate low-quality fixed
+        // stub (real entropy quality is a separate, later concern, same
+        // as every other Stage 1 syscall's own "prove the mechanism
+        // first" pattern), but a REAL implementation in the sense that
+        // it actually writes `len` validated bytes, unlike the
+        // no-op-and-succeed stubs above: whatever calls this expects to
+        // read the result (e.g. stack-protector canary seeding), not
+        // just check a return code.
+        let buf: usize = x0;
+        let len: usize = x1;
+        if (buf < el0_page_va || len > el0_region_size) {
+            return (elr, SYSCALL_ERROR);
+        }
+        if (buf - el0_page_va > el0_region_size - len) {
+            return (elr, SYSCALL_ERROR);
+        }
+        let dst: *u8 = buf as *u8;
+        for i: usize in 0..<len {
+            dst[i as isize] = (0x5A ^ i) as u8;
         }
         return (elr, len);
     }

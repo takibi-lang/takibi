@@ -164,6 +164,18 @@ rpi3_el1_enter:
     bic     x2, x2, #(1 << 29)
     msr     hcr_el2, x2
 
+    /* CPTR_EL2.TFP (bit 10, Trap Floating Point): clear preemptively so
+       EL2 never re-traps EL1/EL0 FP/SIMD access even if CPACR_EL1 grants
+       it below -- same "don't trust inherited register state" discipline
+       as HCR_EL2.HCD just above. Not empirically required (the FP trap
+       GitHub issue #156's real busybox-static target hit landed at EL1,
+       proving this bit was already clear on this hardware/firmware
+       combination), added anyway to not depend on that inherited value
+       staying that way. */
+    mrs     x2, cptr_el2
+    bic     x2, x2, #(1 << 10)
+    msr     cptr_el2, x2
+
     /* SPSR_EL2: target EL1h (M[3:0] = 0b0101), DAIF all masked -- this
        milestone does not yet handle interrupts or exceptions at EL1
        (see el1_vectors above; a real IRQ/exception design is future
@@ -175,6 +187,26 @@ rpi3_el1_enter:
     eret
 
 .Lel1_entry:
+    /* CPACR_EL1.FPEN (bits 21:20) = 0b11: EL0 and EL1 both get
+       unrestricted FP/SIMD access. Never needed before this (every
+       hand-written test payload in this repo deliberately avoided
+       FP/SIMD instructions), until GitHub issue #156's real
+       busybox-static target -- an ordinary compiler-generated binary
+       whose own crt/self-relocation code uses vectorized memcpy very
+       early. Confirmed the hard way via a live OpenOCD halt+register
+       read: without this, the first such instruction traps with
+       ESR_EL1 0x1fe00000 (EC bits [31:26] = 0x07, "Access to SVE,
+       Advanced SIMD, or floating-point functionality trapped"),
+       ELR_EL1 pointing partway into the loaded binary's own code --
+       caught by el0_svc_dispatch's EC!=0x15 fallthrough straight into
+       rpi3_exception_unhandled's silent spin, with no further UART
+       output at all (indistinguishable from a hang without this
+       register read). */
+    mrs     x0, cpacr_el1
+    orr     x0, x0, #(0x3 << 20)
+    msr     cpacr_el1, x0
+    isb
+
     /* Now executing at EL1h with SP = SP_EL1. Ordinary AAPCS64 call into
        Takibi code -- el1_main is defined in the example's own .tkb file,
        same pattern as startup.S's own `bl rpi3_boot_main`. */
