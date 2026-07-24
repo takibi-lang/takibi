@@ -156,6 +156,25 @@ private let mut el0_page_va: usize;
 private let mut el0_region_size: usize;
 private let mut el0_stack_top_va: usize;
 
+// A real process needs real heap growth for malloc to work at all (every
+// other builtin indirectly depends on it -- GitHub issue #156's own
+// "needs real (if simple) implementation" list). Rather than support
+// truly dynamic mapping (process_address_space_map only ever maps its
+// whole contiguous region once, up front -- extending an already-live
+// ProcessAddressSpace is not implemented), this loader reserves a fixed
+// HEAP_PAGES-sized region as part of that SAME up-front mapping, right
+// after the stack page, and serves both brk() and anonymous mmap()
+// (empirically discovered also needed: musl's mallocng allocator uses
+// mmap for some allocations, not just brk, a real hardware finding
+// beyond issue #156's own original strace research) by bump-allocating
+// within it. Never reclaimed (no munmap support) -- acceptable for this
+// milestone's single, short-lived process, the same "prove the
+// mechanism first" scope every other Stage 1/2 syscall here has had.
+const HEAP_PAGES: usize = 128;
+private let mut el0_heap_start: usize;
+private let mut el0_heap_limit: usize;
+private let mut el0_heap_break: usize;
+
 // A first, minimal formalization of "process state" (GitHub issue #153):
 // previously the exit syscall just printed a fixed string and parked,
 // with the process's own real exit status (x0 at the exit() call, per
@@ -326,7 +345,16 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
         }
         return (elr, len);
     }
-    if (syscall_num == 64) {
+    if (syscall_num == 64 || syscall_num == 68) {
+        // write(fd,buf,len) and pwrite64(fd,buf,len,offset) -- the same
+        // first three arguments, so the same handler; the offset (a 4th
+        // arg this loader's el0_svc_dispatch signature does not even
+        // receive) is simply ignored, matching this UART "file"'s own
+        // non-seekable reality. Empirically discovered necessary
+        // (GitHub issue #156's own strace research didn't predict this):
+        // once ioctl's TCGETS response (-ENOTTY) tells musl's stdio fd 1
+        // is not a tty, its buffered-write path uses pwrite64 instead of
+        // write.
         let fd: usize = x0;
         let buf: usize = x1;
         let len: usize = x2;
@@ -374,13 +402,13 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             || syscall_num == 176 || syscall_num == 177) {
         return (elr, 0); // getuid/geteuid/getgid/getegid() -- root
     }
-    if (syscall_num == 99 || syscall_num == 134
+    if (syscall_num == 99 || syscall_num == 134 || syscall_num == 135
             || syscall_num == 167 || syscall_num == 293) {
-        // set_robust_list, rt_sigaction, prctl, rseq -- accept and
-        // remember nothing, always succeed (see this file's own header
-        // comment on why: none of these have observable effects for a
-        // single-threaded, non-interactive, single-process script that
-        // never receives a real signal or spawns a thread).
+        // set_robust_list, rt_sigaction, rt_sigprocmask, prctl, rseq --
+        // accept and remember nothing, always succeed (see this file's
+        // own header comment on why: none of these have observable
+        // effects for a single-threaded, non-interactive, single-process
+        // script that never receives a real signal or spawns a thread).
         return (elr, 0);
     }
     if (syscall_num == 29) {
@@ -413,6 +441,114 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             dst[i as isize] = (0x5A ^ i) as u8;
         }
         return (elr, len);
+    }
+    if (syscall_num == 214) {
+        // brk(addr) -- real heap growth within the fixed HEAP_PAGES
+        // region reserved at load time (see that constant's own
+        // comment). addr==0 queries the current break (always
+        // succeeds); a valid in-range addr moves it; anything else
+        // fails by real brk() semantics -- returning the UNCHANGED
+        // break, not an error code (brk(2) has no error-signaling return
+        // value, unlike sbrk).
+        let addr: usize = x0;
+        if (addr == 0) {
+            return (elr, el0_heap_break);
+        }
+        if (addr >= el0_heap_start && addr <= el0_heap_limit) {
+            el0_heap_break = addr;
+        }
+        return (elr, el0_heap_break);
+    }
+    if (syscall_num == 222) {
+        // mmap(addr_hint, length, prot, flags, fd, offset) -- a
+        // deliberately narrow stub: every request is served as
+        // anonymous memory (prot/flags/fd/offset in x2 onward are not
+        // even read, since el0_svc_dispatch's own signature only carries
+        // x0/x1/x2 through from el0_asm.S -- this loader has no
+        // file-backed mapping support to offer regardless of what a
+        // real caller asked for), bump-allocated from the SAME heap
+        // headroom brk() above uses. Empirically discovered necessary
+        // (GitHub issue #156's own "New loader/process requirements"
+        // section didn't predict this): musl's mallocng allocator calls
+        // this directly for some allocations, not only brk. Rounds the
+        // request up to a whole page, matching real mmap's own page
+        // granularity. Never reclaimed (no munmap support) -- same
+        // "single short-lived process" scope as brk's own heap.
+        let length: usize = x1;
+        let rounded: usize = ((length + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+        if (rounded == 0 || el0_heap_limit - el0_heap_break < rounded) {
+            return (elr, SYSCALL_ERROR); // MAP_FAILED == (void *)-1
+        }
+        let result: usize = el0_heap_break;
+        el0_heap_break = el0_heap_break + rounded;
+        return (elr, result);
+    }
+    if (syscall_num == 226) {
+        // mprotect(addr, len, prot) -- a no-op-but-report-success stub:
+        // this kernel has no fine-grained EL0 page permission model yet
+        // (every mapped page gets the same uniform AP encoding, see
+        // examples/vm_page_map/vm_page_map_core.tkb's own
+        // process_address_space_map), so a real GNU_RELRO-style
+        // post-relocation hardening request cannot actually be enforced
+        // -- a real, documented weakening (GitHub issue #156's own
+        // explicit flag on this exact syscall), not silently done.
+        return (elr, 0);
+    }
+    if (syscall_num == 17) {
+        // getcwd(buf, size) -- always reports "/", the only filesystem
+        // concept this kernel has (GitHub issue #156's own "no real
+        // filesystem/VFS layer" scope). Real getcwd(2) returns the byte
+        // count written INCLUDING the NUL terminator on success, not a
+        // pointer.
+        let buf: usize = x0;
+        let size: usize = x1;
+        if (size < 2) {
+            return (elr, SYSCALL_ERROR); // ERANGE-shaped: buffer too small
+        }
+        if (buf < el0_page_va || 2 > el0_region_size) {
+            return (elr, SYSCALL_ERROR);
+        }
+        if (buf - el0_page_va > el0_region_size - 2) {
+            return (elr, SYSCALL_ERROR);
+        }
+        let dst: *u8 = buf as *u8;
+        dst[0 as isize] = 0x2f; // '/'
+        dst[1 as isize] = 0x00; // NUL
+        return (elr, 2);
+    }
+    if (syscall_num == 160) {
+        // uname(struct utsname *buf) -- writes the 6 fixed-size,
+        // NUL-padded 65-byte fields the real Linux ABI shape requires
+        // (sysname/nodename/release/version/machine/domainname).
+        // "Linux" as sysname is not a lie about what this kernel really
+        // is -- it is the smallest true statement a real libc/coreutils
+        // toolchain can actually consume: many real programs (including
+        // ones this milestone wants to eventually run) branch on this
+        // exact string, and there is no separate "syscall-ABI-compatible
+        // but not Linux" convention to report instead.
+        let buf: usize = x0;
+        if (buf < el0_page_va || 390 > el0_region_size) {
+            return (elr, SYSCALL_ERROR);
+        }
+        if (buf - el0_page_va > el0_region_size - 390) {
+            return (elr, SYSCALL_ERROR);
+        }
+        let dst: *u8 = buf as *u8;
+        for i: usize in 0..<390 {
+            dst[i as isize] = 0;
+        }
+        let sysname: []u8 = "Linux" as []u8;
+        let nodename: []u8 = "takibi" as []u8;
+        let release: []u8 = "6.1.0" as []u8;
+        let version: []u8 = "#1" as []u8;
+        let machine: []u8 = "aarch64" as []u8;
+        slice_copy(unsafe { dst[0 as isize..<65 as isize] }, sysname);
+        slice_copy(unsafe { dst[65 as isize..<130 as isize] }, nodename);
+        slice_copy(unsafe { dst[130 as isize..<195 as isize] }, release);
+        slice_copy(unsafe { dst[195 as isize..<260 as isize] }, version);
+        slice_copy(unsafe { dst[260 as isize..<325 as isize] }, machine);
+        // domainname field [325..390) stays all-zero ("" / unset).
+        return (elr, 0);
     }
     if (syscall_num == 93 || syscall_num == 94) {
         let outcome = ProcessOutcome::Exited(x0);
@@ -545,7 +681,7 @@ fn app_main() {
     if (code_pages < 1) {
         code_pages = 1;
     }
-    if (code_pages > MAX_PROCESS_PAGES - 1) {
+    if (code_pages > MAX_PROCESS_PAGES - 1 - HEAP_PAGES) {
         uart_puts("elf too large\n");
         return;
     }
@@ -554,7 +690,7 @@ fn app_main() {
         uart_puts("load failed\n");
         return;
     }
-    let total_pages: usize = code_pages + 1;
+    let total_pages: usize = code_pages + 1 + HEAP_PAGES;
 
     // total_pages is already guaranteed in [2, MAX_PROCESS_PAGES] by the
     // code_pages guard above, but that guard's narrowing does not survive
@@ -741,6 +877,13 @@ fn app_main() {
             el0_page_va = page_va;
             el0_region_size = total_pages * PAGE_SIZE;
             el0_stack_top_va = layout_base;
+            // Heap region: HEAP_PAGES right after the stack page (the
+            // last of the total_pages this ProcessAddressSpace call
+            // mapped) -- see HEAP_PAGES's own comment on why this is a
+            // fixed up-front reservation, not real dynamic mapping.
+            el0_heap_start = stack_va + PAGE_SIZE;
+            el0_heap_limit = el0_heap_start + HEAP_PAGES * PAGE_SIZE;
+            el0_heap_break = el0_heap_start;
             // This bundle IS about to become a running process -- stash it
             // in the stable slot instead of abandoning it, so exit()'s hvc
             // call can reclaim it for real later (see hvc_dispatch above).
