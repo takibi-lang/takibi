@@ -1622,6 +1622,61 @@ RPI3_EL0_ELF_LOAD_OBJS := $(foreach e,$(RPI3_EL0_ELF_LOAD_EXAMPLES),examples/$(e
 $(RPI3_EL0_ELF_LOAD_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_EL0_ASM_EXTERN) $(COMMON_RPI3_EL1_ASM_EXTERN) $(COMMON_RPI3_HVC_ASM_EXTERN) $(COMMON_RPI3_EL0_TEST_IMAGE_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
+# examples/el0_shell (GitHub issue #156): the same real ELF/cpio loader as
+# examples/el0_elf_load, pointed at a REAL, unmodified, third-party shell
+# binary instead of this repo's own hand-written test program --
+# Alpine Linux's busybox-static (aarch64, static-pie, GPL-2.0).
+# Downloaded from Alpine's own package CDN at build time, NOT vendored
+# into this repository: the binary itself is fetched fresh (and cached
+# under _build/, not committed), avoiding both a large GPL binary blob in
+# git history and any question of redistribution terms -- the same
+# "install the real tool at build/container-setup time rather than check
+# it in" choice this project already made for `cpio` itself (see
+# .devcontainer/devcontainer.json). Pinned to a specific Alpine release
+# (v3.24, not the floating "latest-stable" alias) so this build stays
+# reproducible even after Alpine's own latest-stable pointer moves on --
+# confirmed identical content to latest-stable at the time this was
+# written (same ETag).
+ALPINE_BUSYBOX_STATIC_URL := https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/busybox-static-1.37.0-r31.apk
+COMMON_RPI3_BUSYBOX_APK        := $(COMMON_RPI3_DIR)/busybox-static.apk
+COMMON_RPI3_BUSYBOX_STATIC     := $(COMMON_RPI3_DIR)/busybox-static
+COMMON_RPI3_SHELL_INITRAMFS_CPIO := $(COMMON_RPI3_DIR)/el0_shell_initramfs.cpio
+COMMON_RPI3_EL0_SHELL_IMAGE_S      := $(COMMON_RPI3_DIR)/el0_shell_image.S
+COMMON_RPI3_EL0_SHELL_IMAGE_O      := $(COMMON_RPI3_DIR)/el0_shell_image.o
+COMMON_RPI3_EL0_SHELL_IMAGE_EXTERN := $(COMMON_RPI3_DIR)/el0_shell_image_extern.tkb
+
+$(COMMON_RPI3_BUSYBOX_APK):
+	curl -sSLf $(ALPINE_BUSYBOX_STATIC_URL) -o $@
+
+# An .apk is a concatenated-gzip tar archive (real `tar` handles this
+# transparently); ".SIGN.RSA..." / ".PKGINFO" control-file members are
+# extracted alongside the payload but simply unused below -- this is
+# a raw member extraction, not an apk-tools install, so no signature
+# verification happens here (matches this project's own trust model for
+# every other build-time-fetched toolchain component, e.g. LLVM/cpio
+# themselves are trusted apt packages, not independently re-verified).
+$(COMMON_RPI3_BUSYBOX_STATIC): $(COMMON_RPI3_BUSYBOX_APK)
+	tar -xzf $< -C $(COMMON_RPI3_DIR) bin/busybox.static
+	mv $(COMMON_RPI3_DIR)/bin/busybox.static $@
+	rmdir $(COMMON_RPI3_DIR)/bin
+
+# `cd` into the directory first so the archive's own stored entry name is
+# the bare "busybox-static" (matching examples/el0_elf_load's own
+# initramfs.cpio convention -- the loader's cpio parser only ever skips
+# past the stored name, never matches on it, so the exact string doesn't
+# matter beyond being stable and descriptive).
+$(COMMON_RPI3_SHELL_INITRAMFS_CPIO): $(COMMON_RPI3_BUSYBOX_STATIC)
+	cd $(COMMON_RPI3_DIR) && echo $(notdir $(COMMON_RPI3_BUSYBOX_STATIC)) | cpio -o -H newc > $(notdir $@)
+
+$(COMMON_RPI3_EL0_SHELL_IMAGE_O): $(COMMON_RPI3_EL0_SHELL_IMAGE_S) $(COMMON_RPI3_SHELL_INITRAMFS_CPIO)
+	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
+
+RPI3_EL0_SHELL_EXAMPLES := el0_shell
+RPI3_EL0_SHELL_OBJS := $(foreach e,$(RPI3_EL0_SHELL_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
+
+$(RPI3_EL0_SHELL_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_EL0_ASM_EXTERN) $(COMMON_RPI3_EL1_ASM_EXTERN) $(COMMON_RPI3_HVC_ASM_EXTERN) $(COMMON_RPI3_EL0_SHELL_IMAGE_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
+
 RPI3_VM_PAGE_MAP_EXAMPLES := vm_page_map two_page_map process_vm_smoke
 RPI3_VM_PAGE_MAP_OBJS := $(foreach e,$(RPI3_VM_PAGE_MAP_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
@@ -1807,7 +1862,7 @@ RPI3_HTTP_SDCARD_RTOS_OBJS     := $(foreach e,$(RPI3_HTTP_SDCARD_RTOS_EXAMPLES),
 $(RPI3_HTTP_SDCARD_RTOS_OBJS): examples/%_rpi3.o: examples/%.tkb $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_NETCONFIG) $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_GIC_REGS) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_DIR)/timer.tkb $(COMMON_STM32_STUB) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/lan9514.tkb $(COMMON_RPI3_ETH) $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_FAT12_USBMSC) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) $(RPI3_MSC_TAKIBI_FLAGS) -o $@
 
-RPI3_EXAMPLES += $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_SMP_SLAB_EXAMPLES) $(RPI3_PAGE_POOL_EXAMPLES) $(RPI3_VM_PAGE_MAP_EXAMPLES) $(RPI3_VM_CONTEXT_SWITCH_EXAMPLES) $(RPI3_VM_TASK_SWITCH_EXAMPLES) $(RPI3_SMP_TASK_MIGRATE_EXAMPLES) $(RPI3_PAGE_SPLIT_JOIN_EXAMPLES) $(RPI3_SMP_PAGE_TRANSFER_EXAMPLES) $(RPI3_MULTI_ADDRESS_SPACE_EXAMPLES) $(RPI3_COW_EXAMPLES) $(RPI3_EL1_SMOKE_EXAMPLES) $(RPI3_HVC_SMOKE_EXAMPLES) $(RPI3_EL0_SMOKE_EXAMPLES) $(RPI3_EL0_ELF_LOAD_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES) $(RPI3_HTTP_SDCARD_EXAMPLES) $(RPI3_HTTP_SDCARD_RTOS_EXAMPLES)
+RPI3_EXAMPLES += $(RPI3_IRQ_EXAMPLES) $(RPI3_RTC_EXAMPLES) $(RPI3_SCHED_EXAMPLES) $(RPI3_SCHED_SEM_EXAMPLES) $(RPI3_SMP_SLAB_EXAMPLES) $(RPI3_PAGE_POOL_EXAMPLES) $(RPI3_VM_PAGE_MAP_EXAMPLES) $(RPI3_VM_CONTEXT_SWITCH_EXAMPLES) $(RPI3_VM_TASK_SWITCH_EXAMPLES) $(RPI3_SMP_TASK_MIGRATE_EXAMPLES) $(RPI3_PAGE_SPLIT_JOIN_EXAMPLES) $(RPI3_SMP_PAGE_TRANSFER_EXAMPLES) $(RPI3_MULTI_ADDRESS_SPACE_EXAMPLES) $(RPI3_COW_EXAMPLES) $(RPI3_EL1_SMOKE_EXAMPLES) $(RPI3_HVC_SMOKE_EXAMPLES) $(RPI3_EL0_SMOKE_EXAMPLES) $(RPI3_EL0_ELF_LOAD_EXAMPLES) $(RPI3_EL0_SHELL_EXAMPLES) $(RPI3_USB_EXAMPLES) $(RPI3_NET_EXAMPLES) $(RPI3_MSC_EXAMPLES) $(RPI3_FATFS_EXAMPLES) $(RPI3_FATFS_RTOS_EXAMPLES) $(RPI3_HTTP_SDCARD_EXAMPLES) $(RPI3_HTTP_SDCARD_RTOS_EXAMPLES)
 RPI3_KERNELS       := $(foreach e,$(RPI3_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 # rtc/timer/preempt/watchdog need COMMON_RPI3_TIMER_ASM_O linked in
 # (read_cntfrq() and friends -- mrs cannot be called directly from
@@ -1837,7 +1892,8 @@ RPI3_EL1_SMOKE_KERNELS := $(foreach e,$(RPI3_EL1_SMOKE_EXAMPLES),examples/$(e)/k
 RPI3_HVC_SMOKE_KERNELS := $(foreach e,$(RPI3_HVC_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 RPI3_EL0_SMOKE_KERNELS := $(foreach e,$(RPI3_EL0_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
 RPI3_EL0_ELF_LOAD_KERNELS := $(foreach e,$(RPI3_EL0_ELF_LOAD_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
-RPI3_GENERIC_KERNELS   := $(filter-out $(RPI3_TIMER_ASM_KERNELS) $(RPI3_SEM_KERNELS) $(RPI3_VM_PAGE_MAP_KERNELS) $(RPI3_VM_TASK_SWITCH_KERNELS) $(RPI3_SMP_TASK_MIGRATE_KERNELS) $(RPI3_PAGE_SPLIT_JOIN_KERNELS) $(RPI3_SMP_PAGE_TRANSFER_KERNELS) $(RPI3_SMP_SLAB_KERNELS) $(RPI3_EL1_SMOKE_KERNELS) $(RPI3_HVC_SMOKE_KERNELS) $(RPI3_EL0_SMOKE_KERNELS) $(RPI3_EL0_ELF_LOAD_KERNELS),$(RPI3_KERNELS))
+RPI3_EL0_SHELL_KERNELS := $(foreach e,$(RPI3_EL0_SHELL_EXAMPLES),examples/$(e)/kernel_rpi3.elf)
+RPI3_GENERIC_KERNELS   := $(filter-out $(RPI3_TIMER_ASM_KERNELS) $(RPI3_SEM_KERNELS) $(RPI3_VM_PAGE_MAP_KERNELS) $(RPI3_VM_TASK_SWITCH_KERNELS) $(RPI3_SMP_TASK_MIGRATE_KERNELS) $(RPI3_PAGE_SPLIT_JOIN_KERNELS) $(RPI3_SMP_PAGE_TRANSFER_KERNELS) $(RPI3_SMP_SLAB_KERNELS) $(RPI3_EL1_SMOKE_KERNELS) $(RPI3_HVC_SMOKE_KERNELS) $(RPI3_EL0_SMOKE_KERNELS) $(RPI3_EL0_ELF_LOAD_KERNELS) $(RPI3_EL0_SHELL_KERNELS),$(RPI3_KERNELS))
 
 $(RPI3_GENERIC_KERNELS): examples/%/kernel_rpi3.elf: \
     $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
@@ -1870,6 +1926,13 @@ $(RPI3_EL0_SMOKE_KERNELS): examples/%/kernel_rpi3.elf: \
 $(RPI3_EL0_ELF_LOAD_KERNELS): examples/%/kernel_rpi3.elf: \
     $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) $(COMMON_RPI3_HVC_ASM_O) $(COMMON_RPI3_EL0_TEST_IMAGE_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
 	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) $(COMMON_RPI3_HVC_ASM_O) $(COMMON_RPI3_EL0_TEST_IMAGE_O) examples/$*/$*_rpi3.o -o $@
+
+# el0_shell: identical link recipe to el0_elf_load, just against
+# COMMON_RPI3_EL0_SHELL_IMAGE_O (the downloaded busybox-static image)
+# instead of COMMON_RPI3_EL0_TEST_IMAGE_O.
+$(RPI3_EL0_SHELL_KERNELS): examples/%/kernel_rpi3.elf: \
+    $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) $(COMMON_RPI3_HVC_ASM_O) $(COMMON_RPI3_EL0_SHELL_IMAGE_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
+	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) $(COMMON_RPI3_HVC_ASM_O) $(COMMON_RPI3_EL0_SHELL_IMAGE_O) examples/$*/$*_rpi3.o -o $@
 
 # vm_page_map additionally needs COMMON_RPI3_TLB_ASM_O linked in for
 # tlb_invalidate_va (tlbi cannot be called directly from takibi, same

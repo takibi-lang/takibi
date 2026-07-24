@@ -12,6 +12,12 @@
 *.bin
 *.img
 *.cpio
+*.apk
+
+# Downloaded at build time (Makefile's COMMON_RPI3_BUSYBOX_APK rule,
+# GitHub issue #156) -- a real, GPL-2.0, third-party binary fetched
+# fresh, deliberately never vendored/committed.
+examples/common_rpi3/busybox-static
 
 # ocamlbuild working directory
 _build/

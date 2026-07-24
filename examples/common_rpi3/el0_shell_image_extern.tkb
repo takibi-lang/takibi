@@ -1,0 +1,6 @@
+// extern fn declarations for examples/common_rpi3/el0_shell_image.S
+// (GitHub issue #156), split into its own file matching examples/
+// common_rpi3/tlb_asm_extern.tkb's own reasoning.
+
+extern fn el0_shell_image_addr() -> usize;
+extern fn el0_shell_image_len() -> usize;

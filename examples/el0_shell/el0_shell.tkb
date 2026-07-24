@@ -1,0 +1,923 @@
+// GitHub issue #156's own culmination: examples/el0_elf_load's real ELF/
+// cpio loader (issue #153's original scope: a genuine Elf64_Ehdr/
+// Elf64_Phdr parse, not a hardcoded offset/length copy) pointed at a
+// REAL, unmodified, third-party binary instead of this repo's own
+// hand-written test program -- Alpine Linux's busybox-static (aarch64,
+// static-pie, GPL-2.0), downloaded fresh at build time (see the
+// Makefile's own COMMON_RPI3_BUSYBOX_APK rule for why it is fetched, not
+// vendored) and embedded via el0_shell_image.S's `.incbin`, the same
+// mechanism el0_test_image.S already established. Otherwise an exact
+// duplicate of examples/el0_elf_load/el0_elf_load.tkb -- the two files
+// differ only in which image-accessor extern they `use` and in the
+// literal argv[0] bytes app_main constructs ("sh\0" here, so busybox's
+// own argv[0]-basename applet dispatch resolves to its `sh` applet,
+// instead of "prog\0", which intentionally matches no real applet at
+// all in el0_elf_load's own echo-test binary). Kept as a duplicate
+// rather than a shared module for now, matching this repo's own stated
+// "extract once a third needs the same policy" practice -- worth
+// revisiting now that a third real consumer of this loader logic
+// exists, but not attempted here to avoid destabilizing
+// el0_elf_load.tkb's own already-verified echo-test regression coverage
+// while landing this file.
+//
+// Fed "echo hi\nexit 0\n" over stdin (this file's own .stdin), proving
+// GitHub issue #156's actual stated goal end to end on real hardware:
+// self-relocation, musl startup, real BUILTIN command execution
+// (echo), and a clean exit(0) reclaimed through this kernel's real
+// hvc-based process teardown -- not just "the loader doesn't crash."
+//
+// RPi3-only, same reasons as examples/el0_smoke.
+
+use "examples/vm_page_map/vm_page_map_core.tkb";
+use "examples/common_rpi3/el0_asm_extern.tkb";
+use "examples/common_rpi3/el1_asm_extern.tkb";
+use "examples/common_rpi3/hvc_asm_extern.tkb";
+use "examples/common_rpi3/el0_shell_image_extern.tkb";
+
+const SYSCALL_ERROR: usize = 0xFFFFFFFFFFFFFFFF;
+// -ENOTTY as usize (Linux errno 25), the real kernel ABI convention this
+// loader already follows for SYSCALL_ERROR (-1) above: a syscall's error
+// return is -errno reinterpreted as an unsigned 64-bit value.
+const ERR_ENOTTY: usize = 0xFFFFFFFFFFFFFFE7;
+// This process's fixed, single-process/single-"user" identity (GitHub
+// issue #156's own suggested approach for a kernel with no real PID/UID
+// concept yet: "can all return fixed values"). PID/TID 0 is reserved
+// (kernel/swapper on a real Linux system), so 1 -- not 0 -- for anything
+// PID/TID-shaped; UID/GID 0 (root) is fine since there is no privilege
+// model to violate yet.
+// 8 covers today's el0_test_prog.elf (6 phdrs, static-pie) with headroom;
+// GitHub issue #156's real busybox-static target has 7 -- widened from
+// the old fixed cap of 4 (which happened to work only because that
+// binary's PT_LOAD entries were first) alongside the PIE loader rewrite,
+// since a real ET_DYN binary's phdr count is no longer something this
+// loader can assume much about.
+const MAX_PHDRS: usize = 8;
+const PT_LOAD: u32 = 1;
+const ET_EXEC: u16 = 2;
+const ET_DYN: u16 = 3;
+
+// argv/envp/auxv initial stack layout (GitHub issue #156): reserved at
+// the top of the stack page, see its construction in app_main for the
+// exact byte-by-byte shape. Widened from the original 128 bytes to fit
+// the PIE-specific auxv entries below (AT_PHDR/PHENT/PHNUM/BASE/ENTRY/
+// RANDOM/SECURE) a real libc's own self-relocation and TLS setup needs,
+// on top of the original AT_PAGESZ/AT_NULL pair -- every real target
+// binary is PIE (see el0_test_prog.ld's own comment on why), so this is
+// no longer optional scaffolding.
+const ARGV_LAYOUT_SIZE: usize = 256;
+const AT_PAGESZ: usize = 6;
+const AT_PHDR: usize = 3;
+const AT_PHENT: usize = 4;
+const AT_PHNUM: usize = 5;
+const AT_BASE: usize = 7;
+const AT_ENTRY: usize = 9;
+const AT_SECURE: usize = 23;
+const AT_RANDOM: usize = 25;
+
+// cpio (newc) fixed field byte offsets within the 110-byte header --
+// verified against a real `cpio -o -H newc` archive's own raw bytes
+// (od -A x -t x1z) rather than assumed from documentation alone: c_magic
+// "070701" at offset 0, c_filesize's 8 ASCII hex digits at offset 54
+// (confirmed reading back exactly the built ELF's real byte count,
+// 4744 = 0x1288), c_namesize's at offset 94 (confirmed reading back 18,
+// "el0_test_prog.elf\0"'s exact length).
+const CPIO_HEADER_SIZE: usize = 110;
+const CPIO_FILESIZE_OFFSET: usize = 54;
+const CPIO_NAMESIZE_OFFSET: usize = 94;
+
+fn hex_digit(c: u8) -> usize {
+    if (c >= 0x30 && c <= 0x39) {
+        return (c - 0x30) as usize;
+    }
+    if (c >= 0x41 && c <= 0x46) {
+        return (c - 0x41 + 10) as usize;
+    }
+    if (c >= 0x61 && c <= 0x66) {
+        return (c - 0x61 + 10) as usize;
+    }
+    // Not a hex digit -- GNU cpio always emits uppercase 0-9A-F, so this
+    // only fires on a genuinely malformed header; treated as 0 rather
+    // than threading a validity flag through every caller, acceptable
+    // for this milestone's trusted embedded archive.
+    return 0;
+}
+
+fn parse_hex8(base: *u8, offset: usize) -> usize {
+    let mut v: usize = 0;
+    for i: usize in 0..<8 {
+        v = (v << 4) | hex_digit(base[(offset + i) as isize]);
+    }
+    return v;
+}
+
+struct packed Elf64Header {
+    e_ident: [u8; 16];
+    e_type: u16;
+    e_machine: u16;
+    e_version: u32;
+    e_entry: u64;
+    e_phoff: u64;
+    e_shoff: u64;
+    e_flags: u32;
+    e_ehsize: u16;
+    e_phentsize: u16;
+    e_phnum: u16;
+    e_shentsize: u16;
+    e_shnum: u16;
+    e_shstrndx: u16;
+}
+
+struct packed Elf64ProgramHeader {
+    p_type: u32;
+    p_flags: u32;
+    p_offset: u64;
+    p_vaddr: u64;
+    p_paddr: u64;
+    p_filesz: u64;
+    p_memsz: u64;
+    p_align: u64;
+}
+
+private let mut el1_stack: [u8; 4096] align(16);
+private let mut el0_entry_va: usize;
+private let mut el0_page_va: usize;
+private let mut el0_region_size: usize;
+private let mut el0_stack_top_va: usize;
+
+// A real process needs real heap growth for malloc to work at all (every
+// other builtin indirectly depends on it -- GitHub issue #156's own
+// "needs real (if simple) implementation" list). Rather than support
+// truly dynamic mapping (process_address_space_map only ever maps its
+// whole contiguous region once, up front -- extending an already-live
+// ProcessAddressSpace is not implemented), this loader reserves a fixed
+// HEAP_PAGES-sized region as part of that SAME up-front mapping, right
+// after the stack page, and serves both brk() and anonymous mmap()
+// (empirically discovered also needed: musl's mallocng allocator uses
+// mmap for some allocations, not just brk, a real hardware finding
+// beyond issue #156's own original strace research) by bump-allocating
+// within it. Never reclaimed (no munmap support) -- acceptable for this
+// milestone's single, short-lived process, the same "prove the
+// mechanism first" scope every other Stage 1/2 syscall here has had.
+const HEAP_PAGES: usize = 128;
+private let mut el0_heap_start: usize;
+private let mut el0_heap_limit: usize;
+private let mut el0_heap_break: usize;
+
+// A first, minimal formalization of "process state" (GitHub issue #153):
+// previously the exit syscall just printed a fixed string and parked,
+// with the process's own real exit status (x0 at the exit() call, per
+// the same convention Linux itself uses) discarded. Recording it as a
+// typed outcome, instead of a bare printed string, is a first step
+// toward a real process control block -- there is still only ever one
+// process, no PID, no parent/child, and Exited is currently a dead end
+// (see the note on process_outcome_report below for why resource
+// reclamation cannot go further yet). Kept as a local value, not a
+// persistent global: a bare global cannot hold a variant in this
+// language's current Slice 3 (a real process TABLE queryable after the
+// fact -- e.g. by a future parent's wait() -- will need the same stable
+// owner slot protocol examples/copy_on_write's own CowStateStore already
+// established, not a plain global).
+variant ProcessOutcome {
+    Running;
+    Exited(usize);
+}
+
+fn process_outcome_report(outcome: ProcessOutcome) {
+    match outcome {
+        ProcessOutcome::Running => {
+            uart_puts("process still running\n");
+        }
+        ProcessOutcome::Exited(status) => {
+            uart_puts("process exited with status ");
+            uart_print(status);
+            uart_puts("\n");
+        }
+    }
+}
+
+// Still needed for the genuine load-FAILURE paths below (ELF/segment
+// parsing rejected): no process will ever run at EL0 in those cases, so
+// there is nothing for a later hvc-triggered teardown to reclaim --
+// immediate abandonment (the same sink-and-discard idiom as
+// vm_page_map_core.tkb's own cpu_owner_halt) is still the correct, final
+// disposition there, not a use of the new process_vm_put/take slot below
+// (which is reserved for the one bundle that actually becomes a running
+// process).
+fn el0_pas_abandon(pas: sink ProcessAddressSpace[asid]) {}
+fn el0_active_abandon(active: sink ActiveAddressSpace[core, asid]) {}
+
+// GitHub issue #154: a stable owner slot (same protocol as
+// examples/copy_on_write's own CowStateStore/stable_replace) holding this
+// process's VM resources across the EL2->EL1->EL0 drop, so exit() -- which
+// only ever runs at EL1/EL0 -- can trigger their REAL reclamation at EL2
+// via the new hvc call boundary (examples/common_rpi3/hvc_asm.S), instead
+// of just abandoning them the way this file used to. Unlike CowStateStore,
+// this deliberately skips COW's own vacancy-token/reentrancy protocol:
+// process_vm_put is called exactly once (at load time, EL2, before the
+// drop) and process_vm_take exactly once (at exit time, EL2, triggered by
+// the hvc call below) -- strictly sequential, single core, no interrupt
+// or concurrent access ever interleaves the two, so the extra ceremony
+// COW needs for its own genuinely re-entrant exception-handler access
+// would be unearned complexity here.
+private linear view ProcessVmGuard[lock: addr];
+fn process_vm_guard(lock: *i32 @ place) -> ProcessVmGuard[place] {
+    return view ProcessVmGuard[place];
+}
+fn process_vm_guard_done(guard: sink ProcessVmGuard[place]) {}
+
+// Discards a ProcessVmState wholesale, matching the same "sink parameter
+// itself is the discharge" idiom as the old el0_*_abandon functions this
+// replaces (see vm_page_map_core.tkb's own cpu_owner_halt for the
+// original precedent). Only ever reached if process_vm_put ran while the
+// slot was NOT already Empty, which the one-put-one-take sequencing above
+// should make unreachable in practice -- a real bug there would silently
+// leak the previous bundle rather than fail loudly, the same risk profile
+// the old abandon functions already had.
+fn process_vm_state_discard(state: sink ProcessVmState) {}
+
+variant ProcessVmState {
+    Empty;
+    Loaded(exists core: usize. exists asid: usize.
+           (ProcessAddressSpace[asid], ActiveAddressSpace[core, asid]));
+}
+
+struct ProcessVmStateStore {
+    private lock: i32;
+    private state: ProcessVmState;
+}
+private let mut process_vm_store: ProcessVmStateStore;
+
+fn process_vm_put(next: ProcessVmState) {
+    let guard = process_vm_guard(&process_vm_store.lock);
+    let previous: ProcessVmState = stable_replace(
+        guard, &process_vm_store.lock, process_vm_store.state, next);
+    process_vm_guard_done(guard);
+    process_vm_state_discard(previous);
+}
+
+fn process_vm_take() -> ProcessVmState {
+    let guard = process_vm_guard(&process_vm_store.lock);
+    let state: ProcessVmState = stable_replace(
+        guard, &process_vm_store.lock, process_vm_store.state, ProcessVmState::Empty);
+    process_vm_guard_done(guard);
+    return state;
+}
+
+// Strong override of examples/common_rpi3/hvc_asm.S's weak hvc_dispatch
+// default. Runs AT EL2 (el1_hvc_entry calls this via `bl` before eret-ing
+// back to EL1, exactly like examples/hvc_smoke's own proof of that
+// mechanism) -- this is what finally lets exit() reach the TTBR0_EL2-only
+// operations (unmap_page/address_space_deactivate) that EL1 cannot
+// perform itself. `arg` is unused: with only ever one process, the act of
+// calling is itself the whole request, and adding a real argument-decoded
+// operation menu before a second real operation exists would be
+// speculative (see this repo's own YAGNI guidance).
+fn hvc_dispatch(arg: usize) -> usize {
+    let state = process_vm_take();
+    match state {
+        ProcessVmState::Empty => {
+            uart_puts("hvc: no process VM state to reclaim\n");
+        }
+        ProcessVmState::Loaded(bundle) => {
+            let (pas, active) = bundle;
+            let empty = process_address_space_unmap(pas);
+            let inactive = address_space_deactivate(active, empty);
+            address_space_free(inactive);
+            uart_puts("hvc: process VM reclaimed\n");
+        }
+    }
+    return 0;
+}
+
+// Same policy as examples/el0_smoke's own el0_svc_dispatch, validated
+// against el0_page_va (the one page this loader ever maps) instead of
+// el0_entry_va (this file's e_entry need not be the first byte of the
+// first segment, even though today's test program happens to make them
+// equal).
+//
+// exit()'s real status (x0) is now recorded and reported, AND its VM
+// resources are now really reclaimed -- rpi3_hvc_call below traps up to
+// EL2 and runs hvc_dispatch above, which is what el0_mapping_abandon and
+// friends used to just silently discard.
+fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
+                    x2: usize, elr: usize) -> (usize, usize) {
+    let ec: usize = (esr >> 26) & 0x3F;
+    if (ec != 0x15) {
+        return (0, 0);
+    }
+    // A single match over syscall_num (GitHub issue #156), not a chain of
+    // `if (syscall_num == N || syscall_num == M) {...}` checks: several
+    // syscalls sharing one handler are written as one `N | M => {...}`
+    // OR-pattern arm (this language's own newly-added match extension,
+    // mirroring OCaml's/Rust's pattern alternation) instead of factoring
+    // the shared body into a helper function -- deliberately, since a
+    // shared helper tends to accumulate divergent per-caller variants
+    // over time until it cannot really stay shared. The `_` wildcard
+    // arm's `return (0, 0)` is what a genuinely unimplemented syscall
+    // still falls into, matching a real kernel's own fatal-if-truly-
+    // unhandled behavior (see el0_asm.S's rpi3_exception_unhandled).
+    match syscall_num {
+        63 => {
+            // read(fd, buf, len) -- GitHub issue #153's third and last
+            // Stage 1 syscall. Same buffer validation as write() below.
+            // Real short-read semantics (GitHub issue #156): blocks
+            // (spins on uart_rx_ready(), the same busy-wait idiom
+            // uart_putc's own TX path already uses) until AT LEAST one
+            // byte is ready, then drains whatever is CURRENTLY available
+            // up to `len` and returns immediately -- matching POSIX
+            // read()'s own "return as soon as any data is ready"
+            // behavior, not waiting for the full request to fill. Needed
+            // for a real interactive shell's own line-buffered read() (a
+            // large requested length that would otherwise never be
+            // satisfied by a short human-typed line) to ever return at
+            // all -- confirmed empirically: busybox-static's own "sh"
+            // applet reaches exactly this call and blocks correctly
+            // waiting for real input (see this issue's own progress
+            // notes).
+            let fd: usize = x0;
+            let buf: usize = x1;
+            let len: usize = x2;
+            if (fd != 0) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (buf < el0_page_va || len > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (buf - el0_page_va > el0_region_size - len) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let dst: *u8 = buf as *u8;
+            while (uart_rx_ready() == false) {
+            }
+            let mut n: usize = 0;
+            while (n < len && uart_rx_ready() == true) {
+                dst[n as isize] = uart_isr_getc();
+                n = n + 1;
+            }
+            return (elr, n);
+        }
+        64 | 68 => {
+            // write(fd,buf,len) and pwrite64(fd,buf,len,offset) -- the
+            // same first three arguments, so the same handler; the
+            // offset (a 4th arg this loader's el0_svc_dispatch signature
+            // does not even receive) is simply ignored, matching this
+            // UART "file"'s own non-seekable reality. Empirically
+            // discovered necessary (GitHub issue #156's own strace
+            // research didn't predict this): once ioctl's TCGETS
+            // response (-ENOTTY) tells musl's stdio fd 1 is not a tty,
+            // its buffered-write path uses pwrite64 instead of write.
+            let fd: usize = x0;
+            let buf: usize = x1;
+            let len: usize = x2;
+            if (fd != 1 && fd != 2) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (buf < el0_page_va || len > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (buf - el0_page_va > el0_region_size - len) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let src: *u8 = buf as *u8;
+            for i: usize in 0..<len {
+                uart_putc(src[i as isize]);
+            }
+            return (elr, len);
+        }
+        // Trivial stub syscalls (GitHub issue #156's own effort-estimate
+        // list): libc thread-runtime init boilerplate and single-process/
+        // single-"user" identity queries that a non-interactive, single-
+        // threaded script never exercises meaningfully, so a fixed
+        // plausible value is the whole implementation. Discovered
+        // load-bearing via real hardware testing against Alpine's
+        // busybox-static aarch64 binary (not from the strace research
+        // alone): returning 0 (this process's own real TID/PID being 0,
+        // an impossible value on a real kernel -- PID/TID 0 is reserved
+        // for kernel/swapper) instead of a sane positive TID from
+        // set_tid_address was traced to a later NULL-pointer write crash
+        // inside musl's own startup, confirmed via a live OpenOCD
+        // halt+register read (ESR_EL1 EC 0x07 permission fault at a
+        // `mov x0,#0; strb wzr,[x0]` instruction pair -- musl's own
+        // internal `a_crash()` abort primitive).
+        96 | 178 => {
+            // set_tid_address(tidptr), gettid() -- both return this
+            // process's own TID.
+            return (elr, 1);
+        }
+        172 => {
+            return (elr, 1); // getpid()
+        }
+        173 => {
+            return (elr, 0); // getppid() -- no parent process exists
+        }
+        174 | 175 | 176 | 177 => {
+            return (elr, 0); // getuid/geteuid/getgid/getegid() -- root
+        }
+        99 | 134 | 135 | 167 | 293 => {
+            // set_robust_list, rt_sigaction, rt_sigprocmask, prctl, rseq
+            // -- accept and remember nothing, always succeed (see this
+            // file's own header comment on why: none of these have
+            // observable effects for a single-threaded, non-interactive,
+            // single-process script that never receives a real signal or
+            // spawns a thread).
+            return (elr, 0);
+        }
+        29 => {
+            // ioctl(fd, request, arg) -- always -ENOTTY. Real shells
+            // handle this gracefully (confirmed by GitHub issue #156's
+            // own strace research: both traced shells fall back to
+            // script/pipe mode cleanly on ENOTTY), and this kernel has
+            // no real tty/ioctl model to implement yet.
+            return (elr, ERR_ENOTTY);
+        }
+        278 => {
+            // getrandom(buf, len, flags) -- a deliberate low-quality
+            // fixed stub (real entropy quality is a separate, later
+            // concern, same as every other Stage 1 syscall's own "prove
+            // the mechanism first" pattern), but a REAL implementation
+            // in the sense that it actually writes `len` validated
+            // bytes, unlike the no-op-and-succeed stubs above: whatever
+            // calls this expects to read the result (e.g. stack-
+            // protector canary seeding), not just check a return code.
+            let buf: usize = x0;
+            let len: usize = x1;
+            if (buf < el0_page_va || len > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (buf - el0_page_va > el0_region_size - len) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let dst: *u8 = buf as *u8;
+            for i: usize in 0..<len {
+                dst[i as isize] = (0x5A ^ i) as u8;
+            }
+            return (elr, len);
+        }
+        214 => {
+            // brk(addr) -- real heap growth within the fixed HEAP_PAGES
+            // region reserved at load time (see that constant's own
+            // comment). addr==0 queries the current break (always
+            // succeeds); a valid in-range addr moves it; anything else
+            // fails by real brk() semantics -- returning the UNCHANGED
+            // break, not an error code (brk(2) has no error-signaling
+            // return value, unlike sbrk).
+            let addr: usize = x0;
+            if (addr == 0) {
+                return (elr, el0_heap_break);
+            }
+            if (addr >= el0_heap_start && addr <= el0_heap_limit) {
+                el0_heap_break = addr;
+            }
+            return (elr, el0_heap_break);
+        }
+        222 => {
+            // mmap(addr_hint, length, prot, flags, fd, offset) -- a
+            // deliberately narrow stub: every request is served as
+            // anonymous memory (prot/flags/fd/offset in x2 onward are
+            // not even read, since el0_svc_dispatch's own signature only
+            // carries x0/x1/x2 through from el0_asm.S -- this loader has
+            // no file-backed mapping support to offer regardless of what
+            // a real caller asked for), bump-allocated from the SAME
+            // heap headroom brk() above uses. Empirically discovered
+            // necessary (GitHub issue #156's own "New loader/process
+            // requirements" section didn't predict this): musl's
+            // mallocng allocator calls this directly for some
+            // allocations, not only brk. Rounds the request up to a
+            // whole page, matching real mmap's own page granularity.
+            // Never reclaimed (no munmap support) -- same "single
+            // short-lived process" scope as brk's own heap.
+            let length: usize = x1;
+            let rounded: usize = ((length + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+            if (rounded == 0 || el0_heap_limit - el0_heap_break < rounded) {
+                return (elr, SYSCALL_ERROR); // MAP_FAILED == (void *)-1
+            }
+            let result: usize = el0_heap_break;
+            el0_heap_break = el0_heap_break + rounded;
+            return (elr, result);
+        }
+        226 => {
+            // mprotect(addr, len, prot) -- a no-op-but-report-success
+            // stub: this kernel has no fine-grained EL0 page permission
+            // model yet (every mapped page gets the same uniform AP
+            // encoding, see examples/vm_page_map/vm_page_map_core.tkb's
+            // own process_address_space_map), so a real GNU_RELRO-style
+            // post-relocation hardening request cannot actually be
+            // enforced -- a real, documented weakening (GitHub issue
+            // #156's own explicit flag on this exact syscall), not
+            // silently done.
+            return (elr, 0);
+        }
+        17 => {
+            // getcwd(buf, size) -- always reports "/", the only
+            // filesystem concept this kernel has (GitHub issue #156's
+            // own "no real filesystem/VFS layer" scope). Real getcwd(2)
+            // returns the byte count written INCLUDING the NUL
+            // terminator on success, not a pointer.
+            let buf: usize = x0;
+            let size: usize = x1;
+            if (size < 2) {
+                return (elr, SYSCALL_ERROR); // ERANGE-shaped: buffer too small
+            }
+            if (buf < el0_page_va || 2 > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (buf - el0_page_va > el0_region_size - 2) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let dst: *u8 = buf as *u8;
+            dst[0 as isize] = 0x2f; // '/'
+            dst[1 as isize] = 0x00; // NUL
+            return (elr, 2);
+        }
+        160 => {
+            // uname(struct utsname *buf) -- writes the 6 fixed-size,
+            // NUL-padded 65-byte fields the real Linux ABI shape
+            // requires (sysname/nodename/release/version/machine/
+            // domainname). "Linux" as sysname is not a lie about what
+            // this kernel really is -- it is the smallest true statement
+            // a real libc/coreutils toolchain can actually consume: many
+            // real programs (including ones this milestone wants to
+            // eventually run) branch on this exact string, and there is
+            // no separate "syscall-ABI-compatible but not Linux"
+            // convention to report instead.
+            let buf: usize = x0;
+            if (buf < el0_page_va || 390 > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (buf - el0_page_va > el0_region_size - 390) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let dst: *u8 = buf as *u8;
+            for i: usize in 0..<390 {
+                dst[i as isize] = 0;
+            }
+            let sysname: []u8 = "Linux" as []u8;
+            let nodename: []u8 = "takibi" as []u8;
+            let release: []u8 = "6.1.0" as []u8;
+            let version: []u8 = "#1" as []u8;
+            let machine: []u8 = "aarch64" as []u8;
+            slice_copy(unsafe { dst[0 as isize..<65 as isize] }, sysname);
+            slice_copy(unsafe { dst[65 as isize..<130 as isize] }, nodename);
+            slice_copy(unsafe { dst[130 as isize..<195 as isize] }, release);
+            slice_copy(unsafe { dst[195 as isize..<260 as isize] }, version);
+            slice_copy(unsafe { dst[260 as isize..<325 as isize] }, machine);
+            // domainname field [325..390) stays all-zero ("" / unset).
+            return (elr, 0);
+        }
+        93 | 94 => {
+            let outcome = ProcessOutcome::Exited(x0);
+            process_outcome_report(outcome);
+            // Issued FROM EL1 (this whole function runs inside
+            // el0_sync_entry's own EL1-side SVC handling): traps up to
+            // EL2 via el1_hvc_entry, runs hvc_dispatch there (real
+            // unmap_page/address_space_deactivate teardown), then
+            // resumes right here once EL2 erets back.
+            rpi3_hvc_call(0);
+            return (1, 0);
+        }
+        _ => {
+            return (0, 0);
+        }
+    }
+}
+
+fn el1_main() {
+    rpi3_el0_enter(el0_entry_va, el0_stack_top_va);
+}
+
+fn app_main() {
+    uart_puts("el0_shell\n");
+    page_pool_init();
+
+    let archive_addr: usize = el0_shell_image_addr();
+    let archive_len: usize = el0_shell_image_len();
+
+    if (archive_len < CPIO_HEADER_SIZE) {
+        uart_puts("cpio image too small\n");
+        return;
+    }
+    let hdr_base: *u8 = archive_addr as *u8;
+    if (hdr_base[0] != 0x30 || hdr_base[1] != 0x37 || hdr_base[2] != 0x30
+            || hdr_base[3] != 0x37 || hdr_base[4] != 0x30 || hdr_base[5] != 0x31) {
+        uart_puts("bad cpio magic\n");
+        return;
+    }
+    let namesize: usize = parse_hex8(hdr_base, CPIO_NAMESIZE_OFFSET);
+    let filesize: usize = parse_hex8(hdr_base, CPIO_FILESIZE_OFFSET);
+    // Both the name and the header+name run are individually rounded up
+    // to a 4-byte boundary in the newc format; only the second rounding
+    // matters here since nothing after the header is read except via
+    // data_start below. 0xFFFFFFFFFFFFFFFC clears the low 2 bits (round
+    // DOWN after adding 3 -- the standard round-up-to-4 idiom).
+    let name_end: usize = CPIO_HEADER_SIZE + namesize;
+    let data_start: usize = (name_end + 3) & 0xFFFFFFFFFFFFFFFC;
+    if (data_start < name_end || data_start > archive_len
+            || filesize > archive_len - data_start) {
+        uart_puts("cpio entry out of range\n");
+        return;
+    }
+    let image_addr: usize = archive_addr + data_start;
+    let image_len: usize = filesize;
+
+    if (image_len < 64) {
+        uart_puts("image too small\n");
+        return;
+    }
+    let hdr_ptr: *Elf64Header = image_addr as *Elf64Header;
+    let magic: *u8 = hdr_ptr.e_ident as *u8;
+    if (magic[0] != 0x7F || magic[1] != 0x45 || magic[2] != 0x4C || magic[3] != 0x46) {
+        uart_puts("bad ELF magic\n");
+        return;
+    }
+    if (magic[4] != 2 || magic[5] != 1) {
+        uart_puts("not ELF64 little-endian\n");
+        return;
+    }
+    if (hdr_ptr.e_type != ET_EXEC && hdr_ptr.e_type != ET_DYN) {
+        uart_puts("unsupported ELF type\n");
+        return;
+    }
+
+    let entry_link: usize = hdr_ptr.e_entry as usize;
+    let phoff: usize = hdr_ptr.e_phoff as usize;
+    let phentsize: usize = hdr_ptr.e_phentsize as usize;
+    let phnum: usize = hdr_ptr.e_phnum as usize;
+
+    let page_va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+    let mut phdr_cap: usize = MAX_PHDRS;
+    if (phnum < MAX_PHDRS) {
+        phdr_cap = phnum;
+    }
+
+    // First pass (GitHub issue #156's multi-page loader generalization,
+    // now also PIE-aware): scan every PT_LOAD segment to find the lowest
+    // p_vaddr among them and the overall extent, BEFORE mapping anything.
+    // load_bias = page_va - min_vaddr places that lowest segment exactly
+    // at page_va, and every other address (other segments, e_entry, the
+    // AT_PHDR auxv value) is offset by the same bias -- this is the same
+    // mechanism Linux's own kernel ELF loader uses (binfmt_elf.c), and it
+    // unifies both ELF kinds this loader accepts: a well-formed ET_EXEC
+    // binary already links its lowest PT_LOAD at page_va, so min_vaddr
+    // == page_va and load_bias comes out to 0 (a no-op) automatically; a
+    // static-pie ET_DYN binary (GitHub issue #156's own empirical
+    // finding: every real target shell binary is one) links its lowest
+    // PT_LOAD at 0, so load_bias becomes exactly page_va. Segment space
+    // is reserved by p_memsz, not p_filesz -- filesz-to-memsz bytes are
+    // BSS, correctly left zeroed by this loader's fresh page pool, not
+    // copied from the file (the segment-copy loop below still only
+    // copies p_filesz bytes, unchanged). One extra page is reserved for
+    // the stack, so code_pages is capped at MAX_PROCESS_PAGES - 1.
+    let mut min_vaddr: usize = 0xFFFFFFFFFFFFFFFF;
+    let mut max_vaddr_end: usize = 0;
+    let mut any_load: i32 = 0;
+    for i: usize in 0..<phdr_cap {
+        let ph_addr: usize = image_addr + phoff + i * phentsize;
+        let ph_ptr: *Elf64ProgramHeader = ph_addr as *Elf64ProgramHeader;
+        if (ph_ptr.p_type == PT_LOAD) {
+            any_load = 1;
+            let seg_vaddr: usize = ph_ptr.p_vaddr as usize;
+            let seg_memsz: usize = ph_ptr.p_memsz as usize;
+            if (seg_vaddr < min_vaddr) {
+                min_vaddr = seg_vaddr;
+            }
+            let seg_end: usize = seg_vaddr + seg_memsz;
+            if (seg_end > max_vaddr_end) {
+                max_vaddr_end = seg_end;
+            }
+        }
+    }
+    if (any_load == 0 || min_vaddr > page_va) {
+        uart_puts("load failed\n");
+        return;
+    }
+    let load_bias: usize = page_va - min_vaddr;
+    let entry: usize = entry_link + load_bias;
+    let at_phdr: usize = load_bias + phoff;
+    let max_extent: usize = max_vaddr_end - min_vaddr;
+
+    let mut code_pages: usize = (max_extent + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (code_pages < 1) {
+        code_pages = 1;
+    }
+    if (code_pages > MAX_PROCESS_PAGES - 1 - HEAP_PAGES) {
+        uart_puts("elf too large\n");
+        return;
+    }
+    let code_region_size: usize = code_pages * PAGE_SIZE;
+    if (entry < page_va || entry - page_va >= code_region_size) {
+        uart_puts("load failed\n");
+        return;
+    }
+    let total_pages: usize = code_pages + 1 + HEAP_PAGES;
+
+    // total_pages is already guaranteed in [2, MAX_PROCESS_PAGES] by the
+    // code_pages guard above, but that guard's narrowing does not survive
+    // past its own `if` (SPEC.md's flow-sensitive narrowing is strictly
+    // scoped to the then-branch, not anything after an early return) --
+    // so process_address_space_map's refined page_count parameter still
+    // needs its own explicit if-narrow here, matching
+    // examples/narrow/narrow.tkb's own established idiom. Nothing has
+    // been allocated yet at this point, so the (unreachable in practice)
+    // else arm has nothing to unwind.
+    if (total_pages < 513) {
+        let seed: {0..<2 as usize} = 0;
+        let inactive = address_space_new(seed);
+        let core: usize = 0;
+        let (space, active) = address_space_activate(inactive, core);
+
+        match process_address_space_map(space, active, page_va, total_pages) {
+        ProcessMapResult::Failed(inactive2) => {
+            uart_puts("allocation failed\n");
+            address_space_free(inactive2);
+        }
+        ProcessMapResult::Mapped(pair) => {
+            let (pas, active2) = pair;
+            let dst: *u8 = page_va as *u8;
+
+            let mut ok: i32 = 1;
+            for i: usize in 0..<phdr_cap {
+                let ph_addr: usize = image_addr + phoff + i * phentsize;
+                let ph_ptr: *Elf64ProgramHeader = ph_addr as *Elf64ProgramHeader;
+                if (ph_ptr.p_type == PT_LOAD) {
+                    let seg_vaddr: usize = (ph_ptr.p_vaddr as usize) + load_bias;
+                    let seg_offset: usize = ph_ptr.p_offset as usize;
+                    let seg_filesz: usize = ph_ptr.p_filesz as usize;
+                    if (seg_vaddr < page_va || seg_filesz > code_region_size
+                            || seg_vaddr - page_va > code_region_size - seg_filesz
+                            || seg_offset > image_len
+                            || seg_filesz > image_len - seg_offset) {
+                        uart_puts("segment out of range\n");
+                        ok = 0;
+                    } else {
+                        // dst_base + seg_filesz <= code_region_size is
+                        // already proven by the guard above, but as a
+                        // relationship between two runtime values
+                        // (seg_vaddr/page_va and seg_filesz), not a plain
+                        // interval on one of them alone -- exactly the
+                        // "correlated bounds" case SPEC.md's Known
+                        // Limitations section documents as unsafe's
+                        // sanctioned escape (same shape as
+                        // examples/tcp_echo/tcp_echo.tkb's own "sole
+                        // executable unsafe site", `frame[data_off_idx
+                        // ..<data_off_idx+data_len_idx]`). Both subslices
+                        // stay unproven-length ([]u8, minimum 0) rather
+                        // than fighting for a stronger static minimum;
+                        // slice_copy's own runtime min(dst.len, src.len)
+                        // is what's actually safe here, matching that same
+                        // file's own `slice_copy(eth[...], data)` pattern
+                        // -- no per-element index to prove at all, so no
+                        // remaining --forbid-trap site either.
+                        let src: *u8 = image_addr as *u8;
+                        let dst_base: usize = seg_vaddr - page_va;
+                        let seg_dst = unsafe {
+                            dst[dst_base as isize..<(dst_base + seg_filesz) as isize]
+                        };
+                        let seg_src = unsafe {
+                            src[seg_offset as isize..<(seg_offset + seg_filesz) as isize]
+                        };
+                        slice_copy(seg_dst, seg_src);
+                    }
+                }
+            }
+
+            if (ok == 0) {
+                uart_puts("load failed\n");
+                el0_pas_abandon(pas);
+                el0_active_abandon(active2);
+                return;
+            }
+
+            // The stack is simply the LAST page of the same contiguous
+            // ProcessAddressSpace region, right after the code pages --
+            // no longer a separately-mapped MappingOwner (GitHub issue
+            // #156's generalization folds it into the one coarse-grained
+            // owner alongside the code pages).
+            let stack_va: usize = page_va + code_region_size;
+
+            // Real argv/envp/auxv initial stack layout (GitHub issue
+            // #156): every libc-linked binary's own startup code reads
+            // this off SP unconditionally, so this is a hard prerequisite
+            // for anything beyond a hand-written, no-memory-access test
+            // payload. Reserved in the TOP ARGV_LAYOUT_SIZE bytes of the
+            // stack page; everything below el0_entry_sp remains the
+            // process's own usable stack, growing down from there exactly
+            // like a real kernel's layout.
+            //
+            // Layout (matches the Linux ELF ABI exactly, with the PIE
+            // auxv entries a real libc's own self-relocation/TLS setup
+            // needs -- see examples/common_rpi3/el0_test_prog.S's own
+            // matching validation for the exact byte offsets this must
+            // agree with):
+            //   [argc=1][argv[0]=ptr]["prog\0" pointed to by
+            //   argv[0]][argv NULL][envp NULL (0 entries)]
+            //   [auxv: AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_BASE,
+            //    AT_ENTRY, AT_RANDOM, AT_SECURE][auxv: AT_NULL, 0]
+            //   [AT_RANDOM's 16-byte pointee][argv[0]'s "prog\0" string]
+            let layout_base: usize = stack_va + (PAGE_SIZE - ARGV_LAYOUT_SIZE);
+            let random_addr: usize = layout_base + 176;
+            let string_addr: usize = layout_base + 192;
+
+            let argc_ptr: *u64 = layout_base as *u64;
+            *argc_ptr = 1;
+            let argv0_ptr: *u64 = (layout_base + 8) as *u64;
+            *argv0_ptr = string_addr as u64;
+            let argv_null_ptr: *u64 = (layout_base + 16) as *u64;
+            *argv_null_ptr = 0;
+            let envp_null_ptr: *u64 = (layout_base + 24) as *u64;
+            *envp_null_ptr = 0;
+
+            let auxv0_type_ptr: *u64 = (layout_base + 32) as *u64;
+            *auxv0_type_ptr = AT_PAGESZ as u64;
+            let auxv0_val_ptr: *u64 = (layout_base + 40) as *u64;
+            *auxv0_val_ptr = PAGE_SIZE as u64;
+
+            let auxv1_type_ptr: *u64 = (layout_base + 48) as *u64;
+            *auxv1_type_ptr = AT_PHDR as u64;
+            let auxv1_val_ptr: *u64 = (layout_base + 56) as *u64;
+            *auxv1_val_ptr = at_phdr as u64;
+
+            let auxv2_type_ptr: *u64 = (layout_base + 64) as *u64;
+            *auxv2_type_ptr = AT_PHENT as u64;
+            let auxv2_val_ptr: *u64 = (layout_base + 72) as *u64;
+            *auxv2_val_ptr = phentsize as u64;
+
+            let auxv3_type_ptr: *u64 = (layout_base + 80) as *u64;
+            *auxv3_type_ptr = AT_PHNUM as u64;
+            let auxv3_val_ptr: *u64 = (layout_base + 88) as *u64;
+            *auxv3_val_ptr = phnum as u64;
+
+            let auxv4_type_ptr: *u64 = (layout_base + 96) as *u64;
+            *auxv4_type_ptr = AT_BASE as u64;
+            let auxv4_val_ptr: *u64 = (layout_base + 104) as *u64;
+            *auxv4_val_ptr = 0;
+
+            let auxv5_type_ptr: *u64 = (layout_base + 112) as *u64;
+            *auxv5_type_ptr = AT_ENTRY as u64;
+            let auxv5_val_ptr: *u64 = (layout_base + 120) as *u64;
+            *auxv5_val_ptr = entry as u64;
+
+            let auxv6_type_ptr: *u64 = (layout_base + 128) as *u64;
+            *auxv6_type_ptr = AT_RANDOM as u64;
+            let auxv6_val_ptr: *u64 = (layout_base + 136) as *u64;
+            *auxv6_val_ptr = random_addr as u64;
+
+            let auxv7_type_ptr: *u64 = (layout_base + 144) as *u64;
+            *auxv7_type_ptr = AT_SECURE as u64;
+            let auxv7_val_ptr: *u64 = (layout_base + 152) as *u64;
+            *auxv7_val_ptr = 0;
+
+            let auxv_null_type_ptr: *u64 = (layout_base + 160) as *u64;
+            *auxv_null_type_ptr = 0;
+            let auxv_null_val_ptr: *u64 = (layout_base + 168) as *u64;
+            *auxv_null_val_ptr = 0;
+
+            // AT_RANDOM's 16-byte pointee -- a deliberate low-quality
+            // fixed stub (GitHub issue #156's own hedge: real entropy
+            // quality is a separate, later concern), not all-zero so a
+            // real libc's stack-protector guard isn't a predictable
+            // constant either.
+            let random_ptr: *u8 = random_addr as *u8;
+            for i: usize in 0..<16 {
+                random_ptr[i as isize] = (0xA5 ^ i) as u8;
+            }
+
+            // "prog\0" -- argv[0]'s own string data, placed above the
+            // array (higher address), matching real kernel layout
+            // convention.
+            let string_ptr: *u8 = string_addr as *u8;
+            // "sh\0" -- not "prog\0" (examples/el0_elf_load's own value):
+            // busybox is a multi-call binary that dispatches to an
+            // applet by argv[0]'s own basename, so this specific string
+            // is what makes it actually run its `sh` applet instead of
+            // printing "applet not found" (both were verified on real
+            // hardware while developing this, see this file's own header
+            // comment).
+            string_ptr[0 as isize] = 0x73; // 's'
+            string_ptr[1 as isize] = 0x68; // 'h'
+            string_ptr[2 as isize] = 0x00; // NUL
+
+            el0_entry_va = entry;
+            el0_page_va = page_va;
+            el0_region_size = total_pages * PAGE_SIZE;
+            el0_stack_top_va = layout_base;
+            // Heap region: HEAP_PAGES right after the stack page (the
+            // last of the total_pages this ProcessAddressSpace call
+            // mapped) -- see HEAP_PAGES's own comment on why this is a
+            // fixed up-front reservation, not real dynamic mapping.
+            el0_heap_start = stack_va + PAGE_SIZE;
+            el0_heap_limit = el0_heap_start + HEAP_PAGES * PAGE_SIZE;
+            el0_heap_break = el0_heap_start;
+            // This bundle IS about to become a running process -- stash it
+            // in the stable slot instead of abandoning it, so exit()'s hvc
+            // call can reclaim it for real later (see hvc_dispatch above).
+            process_vm_put(ProcessVmState::Loaded((pas, active2)));
+
+            let el1_sp_base: usize = (el1_stack as *u8) as usize;
+            let el1_sp: usize = el1_sp_base + 4096;
+            rpi3_el1_enter(el1_sp);
+        }
+        }
+    } else {
+        uart_puts("elf too large\n");
+    }
+}

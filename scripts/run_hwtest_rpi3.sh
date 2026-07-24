@@ -326,7 +326,8 @@ run_hw_test_rpi3_suite() {
 # to the serial port. Same load-failure-vs-mismatch distinction as
 # run_hw_test_rpi3 above.
 run_hw_test_rpi3_stdin() {
-    local name="$1" elf="$2" expected="$3" stdin_file="$4"
+    local name="$1" elf="$2" expected="$3" stdin_file="$4" \
+          max_secs="${5:-$CAPTURE_MAX_SECS}" stable_polls="${6:-$CAPTURE_STABLE_POLLS}"
     local tmp_drain tmp_out load_log load_status_file load_status
     tmp_drain=$(mktemp)
     tmp_out=$(mktemp)
@@ -350,7 +351,7 @@ run_hw_test_rpi3_stdin() {
 
     if [ "$load_status" = "0" ]; then
         local max_wait_polls waited=0 size
-        max_wait_polls=$(awk -v m="$CAPTURE_MAX_SECS" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
+        max_wait_polls=$(awk -v m="$max_secs" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
         while [ "$waited" -lt "$max_wait_polls" ]; do
             sleep "$POLL_INTERVAL"
             size=$(stat -c%s "$tmp_out" 2>/dev/null || echo 0)
@@ -360,13 +361,13 @@ run_hw_test_rpi3_stdin() {
         cat "$stdin_file" > "$SERIAL_DEV"
 
         local max_polls last_size=-1 stable=0 poll=0
-        max_polls=$(awk -v m="$CAPTURE_MAX_SECS" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
+        max_polls=$(awk -v m="$max_secs" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
         while [ "$poll" -lt "$max_polls" ]; do
             sleep "$POLL_INTERVAL"
             size=$(stat -c%s "$tmp_out" 2>/dev/null || echo 0)
             if [ "$size" = "$last_size" ]; then
                 stable=$((stable + 1))
-                [ "$stable" -ge "$CAPTURE_STABLE_POLLS" ] && break
+                [ "$stable" -ge "$stable_polls" ] && break
             else
                 stable=0
             fi
@@ -497,6 +498,16 @@ run_hw_test_rpi3 "hvc_smoke (rpi3)" "$REPO_ROOT/examples/hvc_smoke/kernel_rpi3.e
 run_hw_test_rpi3 "el0_smoke (rpi3)" "$REPO_ROOT/examples/el0_smoke/kernel_rpi3.elf" "$REPO_ROOT/examples/el0_smoke/el0_smoke.expected" 5 6
 run_hw_test_rpi3_stdin "el0_elf_load (rpi3)" "$REPO_ROOT/examples/el0_elf_load/kernel_rpi3.elf" \
     "$REPO_ROOT/examples/el0_elf_load/el0_elf_load.expected" "$REPO_ROOT/examples/el0_elf_load/el0_elf_load.stdin"
+# el0_shell (GitHub issue #156): a real, unmodified, third-party shell
+# binary (Alpine's busybox-static) instead of this repo's own
+# hand-written test program -- self-relocation and musl startup take
+# noticeably longer than el0_elf_load's own tiny test binary, so this
+# needs a longer capture window before stdin is sent than the default
+# CAPTURE_MAX_SECS/CAPTURE_STABLE_POLLS (confirmed empirically: 10s/15
+# polls is comfortably reliable across repeated real-hardware trials,
+# 3s/6 is not).
+run_hw_test_rpi3_stdin "el0_shell (rpi3)" "$REPO_ROOT/examples/el0_shell/kernel_rpi3.elf" \
+    "$REPO_ROOT/examples/el0_shell/el0_shell.expected" "$REPO_ROOT/examples/el0_shell/el0_shell.stdin" 10 15
 run_hw_test_rpi3 "rtc (rpi3)"            "$REPO_ROOT/examples/rtc/kernel_rpi3.elf"            "$REPO_ROOT/examples/rtc/rtc.expected"       5 30
 run_hw_test_rpi3 "timer (rpi3)"          "$REPO_ROOT/examples/timer/kernel_rpi3.elf"          "$REPO_ROOT/examples/timer/timer.expected"   5 30
 run_hw_test_rpi3_stdin "echo (rpi3)" "$REPO_ROOT/examples/echo/kernel_rpi3.elf" \
