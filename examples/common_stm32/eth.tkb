@@ -72,6 +72,7 @@ const PHY_ANAR:   u32 = 4; // Auto-Negotiation Advertisement Register
 const PHY_ANLPAR: u32 = 5; // Auto-Negotiation Link Partner Ability Register
 
 const PHY_BCR_RESET:        u32 = 0x8000;
+const PHY_BCR_PDOWN:        u32 = 0x0800;
 const PHY_BCR_AUTONEG_EN:   u32 = 0x1000;
 const PHY_BCR_RESTART_AN:   u32 = 0x0200;
 
@@ -101,6 +102,10 @@ const PHY_AN_10_HALF:  u32 = 0x0020;
 const PHY_RESET_WAIT_ITERS: u32 = 100000;
 const PHY_AUTONEG_WAIT_ITERS: u32 = 1000000;
 const PHY_LINK_RETRIES: u32 = 5;
+// Brief settle delay around a PDOWN power-cycle (examples/common_stm32/
+// sdmmc.tkb's own `for i: i32 in 0..<10000 {}` "brief settle delay" idiom
+// -- no millisecond timer is available here either).
+const PHY_PDOWN_SETTLE_ITERS: i32 = 10000;
 
 // -- DMA descriptor ring geometry --------------------------------------------
 // Descriptor ownership transitions use the compiler's DMA builtins below.
@@ -308,8 +313,25 @@ variant PhyLinkResult {
 // plugged in, or a link partner that never powers on, are normal,
 // permanently possible operating conditions -- reported as Err like any
 // other bring-up failure, not spun on forever.
+//
+// make allcheck's STM32 lane has still occasionally failed to relink after
+// PHY_LINK_RETRIES's plain BCR.RESET soft resets (real hardware, after many
+// back-to-back RAM-loaded test reboots -- see HISTORY.md). BCR.RESET only
+// resets the PHY's digital register state, not necessarily every internal
+// analog/PLL block; a PDOWN power-down/power-up cycle ahead of each reset
+// attempt exercises a deeper reset path the LAN8742A datasheet documents
+// separately from the soft-reset bit, on the theory that whatever wedges
+// across repeated resets lives in that analog state. This board has no
+// software-controlled PHY hardware reset pin wired up (only the RMII data/
+// clock/MDIO pins are, see eth_gpio_init()), so PDOWN is the only
+// software-reachable lever besides BCR.RESET itself.
 fn phy_init() -> PhyLinkResult {
     for attempt: u32 in 0..<PHY_LINK_RETRIES {
+        mdio_write(PHY_BCR, PHY_BCR_PDOWN);
+        for i: i32 in 0..<PHY_PDOWN_SETTLE_ITERS {} // brief settle delay
+        mdio_write(PHY_BCR, 0);
+        for i: i32 in 0..<PHY_PDOWN_SETTLE_ITERS {} // brief settle delay
+
         mdio_write(PHY_BCR, PHY_BCR_RESET);
         let mut reset_done: bool = false;
         for tries: u32 in 0..<PHY_RESET_WAIT_ITERS {
