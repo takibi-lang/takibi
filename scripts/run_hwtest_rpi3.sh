@@ -503,11 +503,17 @@ run_hw_test_rpi3_stdin "el0_elf_load (rpi3)" "$REPO_ROOT/examples/el0_elf_load/k
 # hand-written test program -- self-relocation and musl startup take
 # noticeably longer than el0_elf_load's own tiny test binary, so this
 # needs a longer capture window before stdin is sent than the default
-# CAPTURE_MAX_SECS/CAPTURE_STABLE_POLLS (confirmed empirically: 10s/15
+# CAPTURE_MAX_SECS/CAPTURE_STABLE_POLLS (confirmed empirically: 10s/20
 # polls is comfortably reliable across repeated real-hardware trials,
-# 3s/6 is not).
+# 3s/6 is not). el0_shell.stdin itself is a small combined stress test
+# built up incrementally, one feature at a time, against a live board
+# (variables, arithmetic, a for loop, pwd/cd, $?, export, the `read`
+# builtin, and a non-zero exit status all in one script/process
+# session) -- three real syscalls this loader did not yet implement
+# (writev, ppoll, newfstatat) were discovered this way, beyond what
+# GitHub issue #156's own original strace research predicted.
 run_hw_test_rpi3_stdin "el0_shell (rpi3)" "$REPO_ROOT/examples/el0_shell/kernel_rpi3.elf" \
-    "$REPO_ROOT/examples/el0_shell/el0_shell.expected" "$REPO_ROOT/examples/el0_shell/el0_shell.stdin" 10 15
+    "$REPO_ROOT/examples/el0_shell/el0_shell.expected" "$REPO_ROOT/examples/el0_shell/el0_shell.stdin" 10 20
 run_hw_test_rpi3 "rtc (rpi3)"            "$REPO_ROOT/examples/rtc/kernel_rpi3.elf"            "$REPO_ROOT/examples/rtc/rtc.expected"       5 30
 run_hw_test_rpi3 "timer (rpi3)"          "$REPO_ROOT/examples/timer/kernel_rpi3.elf"          "$REPO_ROOT/examples/timer/timer.expected"   5 30
 run_hw_test_rpi3_stdin "echo (rpi3)" "$REPO_ROOT/examples/echo/kernel_rpi3.elf" \

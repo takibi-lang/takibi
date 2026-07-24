@@ -384,6 +384,122 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             }
             return (elr, len);
         }
+        66 => {
+            // writev(fd, iov, iovcnt) -- an array of `iovcnt` {base:
+            // *u8, len: usize} pairs (16 bytes each: an 8-byte pointer
+            // then an 8-byte length, the real Linux struct iovec ABI
+            // shape). Empirically discovered necessary (GitHub issue
+            // #156's own strace research didn't predict this): real
+            // shell builtins' own buffered stdio (busybox's `pwd`/`cd`
+            // among them) flush multiple pending buffer segments in one
+            // writev call rather than several separate write calls.
+            // iovcnt is capped defensively (matching this file's own
+            // MAX_PHDRS-style loader hygiene elsewhere), not because
+            // more would fail to compile -- for loops accept a runtime
+            // bound -- but to bound how much work one syscall can force.
+            let fd: usize = x0;
+            let iov: usize = x1;
+            let iovcnt: usize = x2;
+            if (fd != 1 && fd != 2) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (iov < el0_page_va || iovcnt > 64 || iovcnt * 16 > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (iov - el0_page_va > el0_region_size - iovcnt * 16) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let mut total: usize = 0;
+            let mut ok: i32 = 1;
+            for i: usize in 0..<iovcnt {
+                let entry_addr: usize = iov + i * 16;
+                let base_ptr: *u64 = entry_addr as *u64;
+                let len_ptr: *u64 = (entry_addr + 8) as *u64;
+                let base: usize = *base_ptr as usize;
+                let len: usize = *len_ptr as usize;
+                if (base < el0_page_va || len > el0_region_size) {
+                    ok = 0;
+                } else if (base - el0_page_va > el0_region_size - len) {
+                    ok = 0;
+                } else {
+                    let src: *u8 = base as *u8;
+                    for j: usize in 0..<len {
+                        uart_putc(src[j as isize]);
+                    }
+                    total = total + len;
+                }
+            }
+            if (ok == 0) {
+                return (elr, SYSCALL_ERROR);
+            }
+            return (elr, total);
+        }
+        73 => {
+            // ppoll(fds, nfds, timeout_ts, sigmask) -- only fds/nfds/
+            // timeout_ts are visible via el0_svc_dispatch's own x0/x1/x2.
+            // Empirically discovered necessary (GitHub issue #156's own
+            // strace research didn't predict this): busybox's own `read`
+            // builtin polls stdin before actually reading it. This
+            // kernel only ever has one real input stream (fd 0, the
+            // UART), so this blocks (matching read()'s own busy-wait)
+            // until it is ready, reports exactly that one fd as ready
+            // (POLLIN, struct pollfd's `revents` field at byte offset 6
+            // -- {fd: i32, events: i16, revents: i16}), and reports
+            // every OTHER fd in the array as not ready -- the same
+            // "deliberately narrow, single real stream" scope every
+            // other syscall here has.
+            let fds: usize = x0;
+            let nfds: usize = x1;
+            if (nfds == 0) {
+                return (elr, 0);
+            }
+            if (fds < el0_page_va || nfds > 64 || nfds * 8 > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (fds - el0_page_va > el0_region_size - nfds * 8) {
+                return (elr, SYSCALL_ERROR);
+            }
+            while (uart_rx_ready() == false) {
+            }
+            let revents0: *u16 = (fds + 6) as *u16;
+            *revents0 = 1; // POLLIN
+            for i: usize in 1..<nfds {
+                let revents_i: *u16 = (fds + i * 8 + 6) as *u16;
+                *revents_i = 0;
+            }
+            return (elr, 1);
+        }
+        79 => {
+            // newfstatat(dirfd, pathname, statbuf, flags) -- only
+            // dirfd/pathname/statbuf are visible via el0_svc_dispatch's
+            // own x0/x1/x2. Writes a real Linux aarch64 `struct stat`
+            // (the fixed 128-byte layout, no 32/64 split on this ABI)
+            // describing a character device (S_IFCHR | 0620, the
+            // closest real analogue to this kernel's own UART-backed
+            // stdin/stdout) rather than a regular file -- empirically
+            // discovered necessary (GitHub issue #156's own strace
+            // research did predict newfstatat itself, but not that a
+            // plausible st_mode is what a caller actually needs back:
+            // an all-zero stub buffer left busybox's own `read` builtin
+            // retrying the identical call four times before giving up
+            // and mis-parsing later stdin content as a command).
+            let statbuf: usize = x2;
+            if (statbuf < el0_page_va || 128 > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (statbuf - el0_page_va > el0_region_size - 128) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let dst: *u8 = statbuf as *u8;
+            for i: usize in 0..<128 {
+                dst[i as isize] = 0;
+            }
+            let mode_ptr: *u32 = (statbuf + 16) as *u32;
+            *mode_ptr = 0x2190; // S_IFCHR (0o020000) | 0o620
+            let nlink_ptr: *u32 = (statbuf + 20) as *u32;
+            *nlink_ptr = 1;
+            return (elr, 0);
+        }
         // Trivial stub syscalls (GitHub issue #156's own effort-estimate
         // list): libc thread-runtime init boilerplate and single-process/
         // single-"user" identity queries that a non-interactive, single-
@@ -420,6 +536,19 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             // observable effects for a single-threaded, non-interactive,
             // single-process script that never receives a real signal or
             // spawns a thread).
+            return (elr, 0);
+        }
+        49 => {
+            // chdir(path) -- always succeeds, but genuinely does nothing:
+            // this kernel has no real filesystem/VFS layer (GitHub issue
+            // #156's own explicit scope), so there is no real "current
+            // directory" concept to change. Not the same "no observable
+            // effects" story as the trivial-success group above --
+            // real shell builtins (busybox's `cd`) track their own
+            // $PWD purely in userspace once chdir() reports success,
+            // so a script's own `cd X; pwd` still shows X, even though
+            // this kernel's own getcwd() stub always answers "/"
+            // regardless (confirmed empirically: exactly this happens).
             return (elr, 0);
         }
         29 => {

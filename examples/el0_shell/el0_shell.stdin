@@ -1,2 +1,18 @@
-echo hi
-exit 0
+echo start
+x=5
+echo $x
+echo $((x + 1))
+for i in 1 2 3; do echo loop $i; done
+pwd
+cd /tmp
+pwd
+true
+echo status $?
+false
+echo status $?
+export FOO=bar
+echo $FOO
+read y
+fed-value
+echo got $y
+exit 7
