@@ -348,6 +348,24 @@ const FORK_CHILD_PID: usize = 2;
 // stub value.
 private let mut child_exit_status: usize = 0;
 
+// GitHub issue #158's real execve(): a fixed staging buffer the EL1-side
+// syscall handler reads a real file's bytes into (via fat_read, issue
+// #157's own VFS bridge) before crossing the EL1->EL2 hvc boundary --
+// el0_load_elf_into needs a contiguous in-memory image exactly like the
+// boot-time cpio-embedded one, and ordinary memory (unlike TTBR0_EL2)
+// crosses that boundary freely, same reasoning as pending_frame_sp.
+// 64KB is generous for a small, hand-written test ELF (this issue's own
+// suggested first target, matching examples/common_rpi3/
+// el0_test_prog.S's precedent) -- execve()ing a real ~1.1MB busybox-
+// static binary (GitHub issue #156's own measured size) needs a much
+// larger buffer, deliberately deferred to a later, separate increment
+// once this mechanism is proven end to end at small scale.
+const EXEC_STAGING_SIZE: usize = 65536;
+private let mut exec_staging: [u8; EXEC_STAGING_SIZE] align(16);
+// Set by el0_svc_dispatch's own execve(221) arm immediately before
+// issuing rpi3_hvc_call(3), same pattern as pending_frame_sp.
+private let mut pending_exec_len: usize;
+
 // GitHub issue #158's real per-page copy-on-write table: exactly one
 // linear token per page currently shared between the parent and its one
 // child, an array of stable owner slots (OWNERSHIP_KERNEL.md #131/#132,
@@ -513,6 +531,9 @@ fn hvc_dispatch(arg: usize) -> usize {
     }
     if (arg == 2) {
         return hvc_dispatch_child_teardown();
+    }
+    if (arg == 3) {
+        return hvc_dispatch_execve();
     }
     return hvc_dispatch_exit();
 }
@@ -695,6 +716,61 @@ fn hvc_dispatch_child_teardown() -> usize {
         }
     }
     return 0;
+}
+
+// GitHub issue #158's real execve(): discards the CHILD's own CURRENT
+// image (resolving every COW-shared page exactly like the child-exit
+// path above, then unmapping) and loads a brand new one from
+// exec_staging -- but, unlike hvc_dispatch_child_teardown, does NOT
+// resume the suspended parent: execve() success means the CHILD keeps
+// running, just with entirely different code. Reuses el0_load_elf_into
+// (the same real loader app_main() uses for the initial boot image) for
+// the actual mapping, matching this issue's own explicit instruction to
+// reuse the existing loader rather than build a second one.
+fn hvc_dispatch_execve() -> usize {
+    let child_state = child_vm_take();
+    match child_state {
+        ProcessVmState::Empty => {
+            uart_puts("hvc: execve with no child VM state\n");
+            return 0;
+        }
+        ProcessVmState::Suspended(pas) => {
+            // Unreachable: execve() is only ever issued by the
+            // currently-running child itself (see the syscall's own
+            // el0_svc_dispatch arm), and child_vm_store only holds
+            // Suspended for the PARENT's own slot (process_vm_store),
+            // never the child's.
+            el0_pas_abandon(pas);
+            uart_puts("hvc: unexpected suspended child at execve\n");
+            return 0;
+        }
+        ProcessVmState::Loaded(bundle) => {
+            let (child_pas, child_active) = bundle;
+            let page_count: usize = process_address_space_page_count(child_pas);
+            for i: usize in 0..<MAX_PROCESS_PAGES {
+                if (i < page_count) {
+                    cow_page_resolve_child_teardown(i, 0, DYN_VA_BASE);
+                }
+            }
+            let child_empty = process_address_space_unmap_shared(child_pas);
+            // Deactivate-then-free rather than leaving TTBR0_EL2 at the
+            // now-torn-down slot 1 -- el0_load_elf_into (below) installs
+            // a brand new slot-1 root of its own via its own
+            // address_space_new/address_space_activate, the same
+            // sequence app_main()'s own initial load already uses, so
+            // there is no real mapping to preserve across this gap.
+            let child_inactive = address_space_deactivate(child_active, child_empty);
+            address_space_free(child_inactive);
+
+            let staging_addr: usize = (exec_staging as *u8) as usize;
+            let seed: {0..<2 as usize} = 1;
+            let argv0: *u8 = "prog";
+            if (el0_load_elf_into(staging_addr, pending_exec_len, seed, argv0) == true) {
+                return 1;
+            }
+            return 0;
+        }
+    }
 }
 
 // GitHub issue #157: a small, fixed-size per-process file descriptor
@@ -1712,6 +1788,34 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             dst[1 as isize] = 0x00; // NUL
             return (elr, 2);
         }
+        260 => {
+            // wait4(pid, wstatus, options, rusage) -- GitHub issue #158.
+            // By the time this is ever called, the one child this
+            // milestone allows has ALREADY fully exited: fork()'s own
+            // hvc handling (see clone's own comment above) runs the
+            // child to completion before ever resuming the parent, this
+            // milestone's own single-core cooperative scope having no
+            // real concurrency to block on -- confirmed against a real
+            // strace of this exact busybox binary, which issues
+            // wait4(-1, ...) as literally the very next syscall after
+            // clone(), nothing in between. So there is no real blocking
+            // left to do here, just reporting the already-known status.
+            let wstatus_ptr: usize = x1;
+            if (wstatus_ptr != 0) {
+                if (wstatus_ptr < el0_page_va || 4 > el0_region_size) {
+                    return (elr, SYSCALL_ERROR);
+                }
+                if (wstatus_ptr - el0_page_va > el0_region_size - 4) {
+                    return (elr, SYSCALL_ERROR);
+                }
+                let status_out: *u32 = wstatus_ptr as *u32;
+                // WIFEXITED(status) && WEXITSTATUS(status) == N's own
+                // real Linux encoding: low byte 0 (exited normally, no
+                // signal), the real exit code in bits 8-15.
+                *status_out = ((child_exit_status & 0xFF) << 8) as u32;
+            }
+            return (elr, FORK_CHILD_PID);
+        }
         160 => {
             // uname(struct utsname *buf) -- writes the 6 fixed-size,
             // NUL-padded 65-byte fields the real Linux ABI shape
@@ -1775,6 +1879,74 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             pending_frame_sp = frame_sp;
             rpi3_hvc_call(1);
             return (elr, 0);
+        }
+        221 => {
+            // execve(pathname, argv, envp) -- GitHub issue #158. Only
+            // meaningful for the one child this milestone allows: a real
+            // interactive shell session never execve()s itself away in
+            // this milestone's own scope, so this is unsupported outside
+            // fork_child_running (matching the same "am I the child"
+            // check exit() above already uses). argv/envp (x1/x2) are
+            // not yet forwarded -- el0_load_elf_into's own argv0 stays a
+            // fixed "prog" for this first landed increment (see
+            // hvc_dispatch_execve's own comment); real argv forwarding
+            // is a real follow-up, not required to prove fork+execve+
+            // wait4 work end to end against a real external command.
+            if (fork_child_running == false) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let pathname: usize = x0;
+            if (pathname < el0_page_va || PATH_MAX_CHECK > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (pathname - el0_page_va > el0_region_size - PATH_MAX_CHECK) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let path_ptr: *u8 = pathname as *u8;
+            let mut name83_buf: [u8; 11];
+            if (path_to_name83(path_ptr, name83_buf as *u8) == false) {
+                return (elr, ERR_ENOENT);
+            }
+            if (fat_file_exists(name83_buf as *u8) == false) {
+                return (elr, ERR_ENOENT);
+            }
+            let file_size: u32 = fat_file_size(name83_buf as *u8);
+            if (file_size as usize > EXEC_STAGING_SIZE) {
+                return (elr, SYSCALL_ERROR);
+            }
+            match fat_open(name83_buf as *u8, FA_READ) {
+                FatOpenResult::Error(err) => {
+                    return (elr, ERR_ENOENT);
+                }
+                FatOpenResult::Opened(mut file) => {
+                    let staging: *u8 = exec_staging as *u8;
+                    let mut br: u32 = 0;
+                    let result: FatIoResult = fat_read(file, staging, file_size, &br);
+                    let close_result: FatIoResult = fat_close(file);
+                    if (fat_io_result_ok(result) == false
+                            || fat_io_result_ok(close_result) == false) {
+                        return (elr, SYSCALL_ERROR);
+                    }
+                    // Crosses the EL1->EL2 hvc boundary the same way
+                    // pending_frame_sp does (ordinary memory, no special
+                    // privilege needed) -- hvc_dispatch_execve reads it
+                    // to know how many real bytes exec_staging holds.
+                    pending_exec_len = br as usize;
+                    let ok: usize = rpi3_hvc_call(3);
+                    if (ok == 1) {
+                        // Never returns on success -- a real execve()
+                        // does not return to its caller either. Called
+                        // here at EL1 (not inside hvc_dispatch_execve
+                        // itself, which runs at EL2): rpi3_el0_enter's
+                        // own eret uses ELR_EL1/SPSR_EL1, which only EL1
+                        // code may legitimately set up for itself, same
+                        // reasoning as rpi3_el0_resume_frame in exit()'s
+                        // own arm above.
+                        rpi3_el0_enter(el0_entry_va, el0_stack_top_va);
+                    }
+                    return (elr, SYSCALL_ERROR);
+                }
+            }
         }
         93 | 94 => {
             let outcome = ProcessOutcome::Exited(x0);
