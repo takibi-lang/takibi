@@ -255,6 +255,16 @@ variant ProcessVmState {
     Empty;
     Loaded(exists core: usize. exists asid: usize.
            (ProcessAddressSpace[asid], ActiveAddressSpace[core, asid]));
+    // GitHub issue #158's real fork(): the PARENT's own state while its
+    // one child runs. fork()'s own hvc handling below switches TTBR0_EL2
+    // to the child, which consumes the parent's ActiveAddressSpace (that
+    // token specifically proves "this asid is the CURRENTLY installed
+    // one", which becomes false the instant the switch happens) --
+    // leaving only its ProcessAddressSpace, still fully valid and never
+    // torn down, just not the hardware's active root right now.
+    // process_address_space_switch (vm_page_map_core.tkb) re-activates
+    // it once the child exits.
+    Suspended(exists asid: usize. ProcessAddressSpace[asid]);
 }
 
 struct ProcessVmStateStore {
@@ -279,20 +289,244 @@ fn process_vm_take() -> ProcessVmState {
     return state;
 }
 
+// GitHub issue #158's real fork(): a SECOND ProcessVmStateStore, for the
+// one child this milestone's own scope ever allows at a time. Distinct
+// lifecycle from process_vm_store above (created at fork(), torn down at
+// the child's own exit()/execve(), not the shell's own) -- a separate
+// top-level global of the SAME type, the same "more than one instance of
+// a stable owner struct, each its own independent global" idiom
+// fat_fd_slot_stdin already uses alongside fat_fd_table.
+private let mut child_vm_store: ProcessVmStateStore;
+
+fn child_vm_put(next: ProcessVmState) {
+    let guard = process_vm_guard(&child_vm_store.lock);
+    let previous: ProcessVmState = stable_replace(
+        guard, &child_vm_store.lock, child_vm_store.state, next);
+    process_vm_guard_done(guard);
+    process_vm_state_discard(previous);
+}
+
+fn child_vm_take() -> ProcessVmState {
+    let guard = process_vm_guard(&child_vm_store.lock);
+    let state: ProcessVmState = stable_replace(
+        guard, &child_vm_store.lock, child_vm_store.state, ProcessVmState::Empty);
+    process_vm_guard_done(guard);
+    return state;
+}
+
+// The suspended parent's own full 272-byte register frame (x0-x30, ELR,
+// SPSR), saved by hvc_dispatch_fork below (EL2, the only level allowed to
+// touch TTBR0_EL2) at the moment of fork(), and restored via
+// rpi3_el0_resume_frame (examples/common_rpi3/el0_asm.S) once the child
+// exits. Plain bytes, not a stable owner slot -- nothing about this
+// buffer's own content is linearly tracked, and this milestone's own
+// single-child-at-a-time scope means at most one is ever live.
+private let mut parent_saved_frame: [u8; 272] align(16);
+// Set by el0_svc_dispatch's own clone(220) arm (EL1, which has the real
+// frame_sp value from its own 7th argument) immediately before issuing
+// rpi3_hvc_call, since ordinary global memory crosses the EL1->EL2 hvc
+// boundary freely (unlike TTBR0_EL2 itself, plain data access needs no
+// extra privilege) -- see hvc_asm.S's own comment for why the hvc ABI
+// itself only ever carries one bare opcode in `arg`, not a real payload.
+private let mut pending_frame_sp: usize;
+// Whether the one child this milestone allows currently exists (fork()
+// succeeded, its own exit()/execve()-teardown has not yet run). Checked
+// by el0_svc_dispatch's own exit()/execve() arms to decide "am I the
+// child (tear down + resume the suspended parent) or the original
+// process (park/load as before)" -- a smaller fact EL1-side Takibi code
+// needs directly, without re-deriving it from which asid TTBR0_EL2
+// happens to hold right now.
+private let mut fork_child_running: bool = false;
+// The shell itself is always "PID" 1 (GitHub issue #156's own fixed-
+// identity stance, no real allocation). This milestone's single child is
+// always exactly PID 2 -- never allocated, since only one child ever
+// exists at a time.
+const FORK_CHILD_PID: usize = 2;
+
+// GitHub issue #158's real per-page copy-on-write table: exactly one
+// linear token per page currently shared between the parent and its one
+// child, an array of stable owner slots (OWNERSHIP_KERNEL.md #131/#132,
+// implemented against this exact need -- fat_fd_table above is the
+// smaller-scale proof this same compiler feature already works).
+// Deliberately simpler than examples/copy_on_write's own
+// ReadOnlyLease[p,0]/[p,1] split/join pair: THIS kernel resolves EITHER
+// side's divergence -- a real write fault, or (far more commonly, per
+// issue #156's own strace research showing execve() follows fork() with
+// no intervening writes) the child's own teardown finding a page it
+// never touched -- by directly rewriting BOTH sides' page tables in the
+// SAME step, since this is kernel code with authority over both
+// mappings at once, not two independent unprivileged processes that
+// must each release their own half asynchronously. One linear token is
+// therefore enough to prove "this page is still genuinely double-
+// mapped"; ReadOnlyLease's own two-token split/join shape exists to
+// support the asymmetric release ordering this milestone's own scope (a
+// single child, always resolved by the SAME kernel operation) never
+// needs.
+private linear struct CowSharedPage[p: usize] {
+    private index: {0..<PAGE_COUNT as usize};
+    private p_witness: usize @ p;
+}
+fn cow_shared_page_new(index: {0..<PAGE_COUNT as usize}, p_witness: usize @ p)
+        -> CowSharedPage[p] {
+    let mut share: CowSharedPage[p] = { index, p_witness };
+    return share;
+}
+fn cow_shared_page_index(share: borrow CowSharedPage[p]) -> {0..<PAGE_COUNT as usize} {
+    return share.index;
+}
+fn cow_shared_page_discard(share: sink CowSharedPage[p]) {}
+
+variant CowPageState {
+    Private;
+    Shared(exists p: usize. CowSharedPage[p]);
+}
+struct CowPageSlot {
+    private lock: i32;
+    private state: CowPageState;
+}
+private let mut cow_page_table: [CowPageSlot; MAX_PROCESS_PAGES];
+
+private linear view CowPageGuard[lock: addr];
+fn cow_page_guard(lock: *i32 @ place) -> CowPageGuard[place] {
+    return view CowPageGuard[place];
+}
+fn cow_page_guard_done(guard: sink CowPageGuard[place]) {}
+fn cow_page_state_discard(state: sink CowPageState) {}
+
+fn cow_page_put(i: {0..<MAX_PROCESS_PAGES as usize}, next: CowPageState) {
+    let guard = cow_page_guard(&cow_page_table[i].lock);
+    let previous: CowPageState = stable_replace(
+        guard, &cow_page_table[i].lock, cow_page_table[i].state, next);
+    cow_page_guard_done(guard);
+    cow_page_state_discard(previous);
+}
+
+fn cow_page_take(i: {0..<MAX_PROCESS_PAGES as usize}) -> CowPageState {
+    let guard = cow_page_guard(&cow_page_table[i].lock);
+    let state: CowPageState = stable_replace(
+        guard, &cow_page_table[i].lock, cow_page_table[i].state, CowPageState::Private);
+    cow_page_guard_done(guard);
+    return state;
+}
+
+// Populates cow_page_table for every page process_address_space_cow_fork
+// (vm_page_map_core.tkb) just double-mapped read-only -- that function's
+// own job is the page-TABLE rewrite; tracking which pages are now shared
+// is this file's own bookkeeping, matching that function's own comment.
+fn cow_page_table_share_all(parent_slot: {0..<2 as usize}, page_count: usize) {
+    for i: usize in 0..<MAX_PROCESS_PAGES {
+        if (i >= page_count) { break; }
+        let idx_raw: usize = process_phys_index_get(parent_slot, i);
+        if (idx_raw < PAGE_COUNT) {
+            let idx: {0..<PAGE_COUNT as usize} = idx_raw;
+            let share = cow_shared_page_new(idx, idx);
+            cow_page_put(i, CowPageState::Shared(share));
+        }
+    }
+}
+
+// Resolves cow_page_table[i]'s Shared state at CHILD teardown time,
+// restoring the PARENT's own page back to normal read-write, since after
+// this call neither side (the child's own mapping was already unmapped
+// separately by the caller) still shares it. The common case -- per
+// issue #156's own strace research, execve() follows fork() with no
+// intervening writes -- needs no allocation or copy at all: the
+// parent's own physical page never actually needed duplicating, only
+// its permission bit flipped back.
+fn cow_page_resolve_child_teardown(i: {0..<MAX_PROCESS_PAGES as usize},
+                                   parent_slot: {0..<2 as usize},
+                                   parent_base_va: usize) {
+    let state: CowPageState = cow_page_take(i);
+    match state {
+        CowPageState::Private => {}
+        CowPageState::Shared(share) => {
+            let idx: {0..<PAGE_COUNT as usize} = cow_shared_page_index(share);
+            cow_shared_page_discard(share);
+            process_address_space_page_remap(parent_slot, parent_base_va, i, idx, true);
+        }
+    }
+}
+
+// Resolves a REAL write fault on a still-shared page: the faulting side
+// gets a freshly allocated, copied private page; the other side (in this
+// milestone's own single-child scope, always the suspended parent --
+// fork()'s own comment on why the parent never runs concurrently with
+// its child) keeps the ORIGINAL physical page, its own permission simply
+// flipped back to read-write since it is no longer actually shared
+// either. Returns false if `i` was not a currently-shared page at all (a
+// genuine, unrelated fault this kernel still does not handle) or if
+// allocation failed (put back unresolved for the caller to fail the
+// fault).
+fn cow_page_resolve_write_fault(i: {0..<MAX_PROCESS_PAGES as usize},
+                                fault_slot: {0..<2 as usize}, fault_base_va: usize,
+                                other_slot: {0..<2 as usize}, other_base_va: usize) -> bool {
+    let state: CowPageState = cow_page_take(i);
+    match state {
+        CowPageState::Private => {
+            return false;
+        }
+        CowPageState::Shared(share) => {
+            let idx: {0..<PAGE_COUNT as usize} = cow_shared_page_index(share);
+            cow_shared_page_discard(share);
+            match page_alloc() {
+                PageAllocResult::OutOfMemory => {
+                    let idx2: {0..<PAGE_COUNT as usize} = idx;
+                    let share2 = cow_shared_page_new(idx2, idx2);
+                    cow_page_put(i, CowPageState::Shared(share2));
+                    return false;
+                }
+                PageAllocResult::Allocated(page) => {
+                    let new_idx: {0..<PAGE_COUNT as usize} = page_owner_into_index(page);
+                    page_pool_copy(new_idx, idx);
+                    process_address_space_page_remap(fault_slot, fault_base_va, i, new_idx, true);
+                    process_address_space_page_remap(other_slot, other_base_va, i, idx, true);
+                    return true;
+                }
+            }
+        }
+    }
+}
+
 // Strong override of examples/common_rpi3/hvc_asm.S's weak hvc_dispatch
 // default. Runs AT EL2 (el1_hvc_entry calls this via `bl` before eret-ing
 // back to EL1, exactly like examples/hvc_smoke's own proof of that
-// mechanism) -- this is what finally lets exit() reach the TTBR0_EL2-only
-// operations (unmap_page/address_space_deactivate) that EL1 cannot
-// perform itself. `arg` is unused: with only ever one process, the act of
-// calling is itself the whole request, and adding a real argument-decoded
-// operation menu before a second real operation exists would be
-// speculative (see this repo's own YAGNI guidance).
+// mechanism) -- this is what finally lets exit()/fork() reach the
+// TTBR0_EL2-only operations (unmap_page/address_space_deactivate/COW
+// page-table rewrites) that EL1 cannot perform itself. `arg` now IS a
+// real argument-decoded operation menu (GitHub issue #158's own second
+// real operation, past the point issue #154's own comment here flagged
+// as the moment a menu would stop being speculative): 0 = exit/teardown
+// the currently running process (unchanged), 1 = fork, 2 = child
+// teardown (the child's own exit(), or execve() discarding its whole
+// image before loading a new one). Kept as three shallow top-level
+// functions, not one deep match, for the same codegen-depth reason
+// fat_fd_read/write/close above are their own functions instead of
+// inlined into el0_svc_dispatch's own match arms.
 fn hvc_dispatch(arg: usize) -> usize {
+    if (arg == 1) {
+        return hvc_dispatch_fork();
+    }
+    if (arg == 2) {
+        return hvc_dispatch_child_teardown();
+    }
+    return hvc_dispatch_exit();
+}
+
+fn hvc_dispatch_exit() -> usize {
     let state = process_vm_take();
     match state {
         ProcessVmState::Empty => {
             uart_puts("hvc: no process VM state to reclaim\n");
+        }
+        ProcessVmState::Suspended(pas) => {
+            // Unreachable in practice: opcode 0 (plain exit) is only ever
+            // issued by the CURRENTLY RUNNING process's own exit()
+            // syscall handler, and process_vm_store only holds Suspended
+            // while the child (not the parent) is the one running -- see
+            // ProcessVmState's own comment. Discharge rather than leak
+            // the linear obligation if this is ever reached anyway.
+            el0_pas_abandon(pas);
+            uart_puts("hvc: unexpected suspended parent at exit\n");
         }
         ProcessVmState::Loaded(bundle) => {
             let (pas, active) = bundle;
@@ -300,6 +534,159 @@ fn hvc_dispatch(arg: usize) -> usize {
             let inactive = address_space_deactivate(active, empty);
             address_space_free(inactive);
             uart_puts("hvc: process VM reclaimed\n");
+        }
+    }
+    return 0;
+}
+
+// GitHub issue #158's real fork(): creates the one child this milestone
+// ever allows, COW-sharing every one of the parent's own pages, and
+// suspends the parent (saving its full register frame from
+// pending_frame_sp, patching its own eventual x0 to FORK_CHILD_PID).
+// Reached only via el0_svc_dispatch's own clone(220) arm at EL1, which
+// sets pending_frame_sp and issues rpi3_hvc_call(1) before this runs.
+fn hvc_dispatch_fork() -> usize {
+    let state = process_vm_take();
+    match state {
+        ProcessVmState::Empty => {
+            uart_puts("hvc: fork with no parent VM state\n");
+            return 0;
+        }
+        ProcessVmState::Suspended(pas) => {
+            // Unreachable in this milestone's own single-child-at-a-time
+            // scope: fork() cannot be issued while a child already
+            // exists, since the PARENT (the only thing that could issue
+            // another fork()) is not running whenever this state is set.
+            process_vm_put(ProcessVmState::Suspended(pas));
+            uart_puts("hvc: fork while a child is already suspended\n");
+            return 0;
+        }
+        ProcessVmState::Loaded(bundle) => {
+            let (pas, active) = bundle;
+            // `active` (TTBR0_EL2 == parent) becomes false the instant
+            // address_space_activate below installs the child's own root
+            // -- discharge the now-stale token here rather than thread
+            // it through unused; the real resource it proved (`pas`) is
+            // preserved separately via ProcessVmState::Suspended below.
+            el0_active_abandon(active);
+            let seed: {0..<2 as usize} = 1;
+            let child_inactive = address_space_new(seed);
+            let core: usize = 0;
+            let (child_empty, child_active0) = address_space_activate(child_inactive, core);
+            let (child_pas, child_active) =
+                process_address_space_cow_fork(pas, child_empty, child_active0);
+            let page_count: usize = process_address_space_page_count(child_pas);
+            cow_page_table_share_all(0, page_count);
+
+            let frame_src: *u8 = pending_frame_sp as *u8;
+            let frame_dst: *u8 = parent_saved_frame as *u8;
+            for i: usize in 0..<272 {
+                frame_dst[i as isize] = frame_src[i as isize];
+            }
+            let x0_ptr: *u64 = frame_dst as *u64;
+            *x0_ptr = FORK_CHILD_PID as u64;
+
+            process_vm_put(ProcessVmState::Suspended(pas));
+            child_vm_put(ProcessVmState::Loaded((child_pas, child_active)));
+            fork_child_running = true;
+            uart_puts("hvc: fork ok\n");
+        }
+    }
+    return 0;
+}
+
+// GitHub issue #158's real fork(): tears down the CHILD's own address
+// space -- reached both by the child's own exit() and by execve()
+// discarding its whole image before loading a new one, since both need
+// the SAME "this address space's own mappings are done" disposition,
+// just with a different next step for the CPU itself afterward (resume
+// the parent for exit(); keep running as EL0 with a freshly loaded ELF
+// for execve() -- see el0_svc_dispatch's own callers of this opcode).
+// Resolves every one of the child's own COW-shared pages (restoring the
+// parent's copy to normal read-write) before unmapping the child's own
+// L3 entries, then switches TTBR0_EL2 straight back to the suspended
+// parent and resumes it via rpi3_el0_resume_frame -- one hardware
+// operation (process_address_space_deactivate_to), not deactivate-then-
+// separately-reactivate, since the parent's own address space was never
+// actually deactivated in the first place (see ProcessVmState::Suspended
+// above).
+fn hvc_dispatch_child_teardown() -> usize {
+    let child_state = child_vm_take();
+    match child_state {
+        ProcessVmState::Empty => {
+            uart_puts("hvc: child teardown with no child VM state\n");
+            return 0;
+        }
+        ProcessVmState::Suspended(pas) => {
+            // Unreachable: child_vm_store only ever holds Loaded (the
+            // child is the one running whenever this opcode fires) or
+            // Empty (already torn down).
+            el0_pas_abandon(pas);
+            uart_puts("hvc: unexpected suspended child\n");
+            return 0;
+        }
+        ProcessVmState::Loaded(bundle) => {
+            let (child_pas, child_active) = bundle;
+            let page_count: usize = process_address_space_page_count(child_pas);
+            // A guarding `if`, not `break` -- confirmed necessary the
+            // hard way: with child_active/child_pas still pending
+            // (consumed only after this loop, by
+            // process_address_space_deactivate_to/
+            // process_address_space_unmap_shared below), the compiler
+            // rejected `break` here ("linear value 'child_active' is
+            // still pending at this break") even though every actual
+            // path still consumes it exactly once. Looping the full
+            // MAX_PROCESS_PAGES regardless of page_count is a real but
+            // small inefficiency (cow_page_resolve_child_teardown itself
+            // is a cheap no-op for any slot never marked Shared), traded
+            // for staying inside a flow shape the checker accepts
+            // without dispute.
+            for i: usize in 0..<MAX_PROCESS_PAGES {
+                if (i < page_count) {
+                    cow_page_resolve_child_teardown(i, 0, DYN_VA_BASE);
+                }
+            }
+            let child_empty = process_address_space_unmap_shared(child_pas);
+
+            let parent_state = process_vm_take();
+            match parent_state {
+                ProcessVmState::Suspended(parent_pas) => {
+                    let (child_inactive, parent_active) =
+                        process_address_space_deactivate_to(
+                            child_active, child_empty, parent_pas);
+                    address_space_free(child_inactive);
+                    process_vm_put(ProcessVmState::Loaded((parent_pas, parent_active)));
+                    fork_child_running = false;
+                    uart_puts("hvc: child reclaimed\n");
+                }
+                ProcessVmState::Empty => {
+                    // Unreachable alongside child_state's own Loaded arm
+                    // above: process_vm_store only goes Empty at the
+                    // shell's own final exit(), which cannot happen
+                    // while a child is still running. Still a real,
+                    // valid disposition if ever reached -- deactivate to
+                    // the kernel root exactly like hvc_dispatch_exit's
+                    // own normal case does, just with no parent to
+                    // switch to instead.
+                    let child_inactive2 = address_space_deactivate(child_active, child_empty);
+                    address_space_free(child_inactive2);
+                    uart_puts("hvc: child teardown with no suspended parent\n");
+                }
+                ProcessVmState::Loaded(unexpected) => {
+                    // Unreachable alongside child_state's own Loaded arm:
+                    // process_vm_store cannot ALSO be Loaded (the parent
+                    // actively running) while child_vm_store is Loaded
+                    // too (the child actively running) -- this
+                    // milestone's own single-core cooperative scope never
+                    // runs both at once. Put the unexpected bundle back
+                    // untouched and dispose of the child's own resources
+                    // the same way the other unreachable arm above does.
+                    process_vm_put(ProcessVmState::Loaded(unexpected));
+                    let child_inactive3 = address_space_deactivate(child_active, child_empty);
+                    address_space_free(child_inactive3);
+                    uart_puts("hvc: unexpected loaded parent at child teardown\n");
+                }
+            }
         }
     }
     return 0;
