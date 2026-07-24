@@ -1638,6 +1638,75 @@ diagnosis:
 - RX interrupt support follows `examples/common_stm32/uart.tkb`'s
   stored-handler pattern (`uart_set_rx_handler` + `uart_irq_handler`),
   not QEMU's dispatch-by-GIC-ID -- see "Interrupts" above.
+- **RX FIFO must stay enabled** (`UART0_LCRH` bit 4), with `UART0_IFLS`
+  set to the finest RX trigger granularity and both RXIM and RTIM
+  (bits 4 and 6 of `UART0_IMSC`) unmasked -- found necessary during
+  issue #156's `el0_shell` work: with the FIFO disabled (single-byte
+  holding register), rapid consecutive `read()` calls separated by the
+  EL0<->EL1 syscall round trip lost bytes intermittently (~33% failure
+  rate over repeated hardware trials feeding a real busybox shell).
+  RTIM (receive-timeout interrupt) is required in addition to RXIM
+  because with the FIFO enabled a single byte below the trigger level
+  would otherwise never raise an interrupt on its own; `uart_irq_handler`
+  explicitly clears RTIC (`UART0_ICR` bit 6) after servicing to avoid an
+  interrupt storm. FIFO-disabled behavior is not merely slower -- it is
+  a genuine intermittent hardware race, confirmed by statistical
+  comparison across repeated trials, not a testing artifact.
+
+## EL2->EL1->EL0 user-mode bring-up (issues #153, #154, #156)
+
+`el1_asm.S`'s `rpi3_el1_enter` drops from the EL2H jtag-stub context to
+EL1 (issue #153 Stage 1: minimal smoke test only exercising the
+boundary itself). `hvc_dispatch` (`el0_elf_load.tkb`/`el0_shell.tkb`)
+is the EL1-side handler reached via `hvc #0` from EL0 on process exit;
+it owns real per-process teardown through `ProcessAddressSpace`
+(issue #154: `process_address_space_unmap` + `address_space_deactivate`
++ `address_space_free`), not just a smoke-test return.
+
+`ProcessAddressSpace[asid]` (`vm_page_map_core.tkb`) is a coarse-grained
+multi-page ownership abstraction: one owner covers a whole contiguous
+page run for a process, worked around from the language's current
+"indexed owners cannot live in arrays" limitation (see `OWNERSHIP_KERNEL.md`
+Slice 6, "indexed owners stored in arbitrary fields, arrays, globals, or
+other stable places" listed as still-future Core work) via a small,
+fixed linear array of slots indexed by ASID instead of by page. `PAGE_COUNT`/
+`MAX_PROCESS_PAGES` is 512 (2MB, the full `DYN_VA_BASE..DYN_VA_LIMIT`
+window) -- sized for `el0_shell`'s real ~1.1MB busybox-static binary
+(issue #156), not the earlier 4-page smoke-test sizing.
+
+`el0_elf_load.tkb`/`el0_shell.tkb` load a real ET_DYN (PIE) ELF: PT_LOAD
+segments are copied at a computed `load_bias` (same technique as Linux's
+own `binfmt_elf.c`), and argv/envp/auxv (AT_PHDR/AT_PHNUM/AT_PHENT/
+AT_BASE/AT_ENTRY/AT_RANDOM/AT_SECURE/AT_PAGESZ) are constructed on the
+new process's own stack; the kernel does not perform ELF relocation
+itself -- musl's own `_start` self-relocates from `PT_DYNAMIC`/RELR
+before calling `main`. `el0_svc_dispatch`'s `match` implements the
+Linux aarch64 syscall ABI subset a real, unmodified busybox-static
+`sh` needs: `read`/`write`/`writev`/`pwrite64` with real short-read
+semantics, `brk`/`mmap`/`mprotect` (bump allocator over a fixed heap
+region, no real paging), `chdir`/`getcwd` (no VFS -- `chdir` is a
+genuine no-op, `getcwd` always answers `/`), `ppoll`/`newfstatat`
+(the latter distinguishes the `fstatat(fd, "", ..., AT_EMPTY_PATH)`
+idiom -- empty pathname, used to stat the fd itself -- from a real
+non-empty pathname lookup, which correctly fails ENOENT since there is
+no VFS yet; see issues #157/#158), `uname`, `getrandom`, and the usual
+thread-identity/signal-mask/prctl/rseq stubs. `el0_test_prog.S` and
+`el0_shell.stdin`/`el0_shell.expected` are the permanent regression
+coverage (`el0_smoke`, `el0_elf_load`, `el0_shell` in `make hwcheck-rpi3`).
+
+`el0_elf_load.tkb` and `el0_shell.tkb` are near-complete duplicates
+(same loader and dispatch logic, differing only in which embedded
+image they load and cosmetic argv[0]/banner text) -- deliberately not
+yet extracted into a shared module, to avoid destabilizing either's own
+working regression coverage while both were still moving. Worth
+revisiting once a third loader needs the same policy.
+
+Real bugs found bringing up a real, unmodified third-party binary
+(rather than a hand-written test payload) this way: an EL0 FP/SIMD trap
+(`CPTR_EL2.TFP`/`CPACR_EL1.FPEN` were never configured before, since no
+prior payload used FP/SIMD instructions), musl's `a_crash()` abort
+triggering on `set_tid_address` returning an impossible TID of 0, and
+the UART FIFO race described above.
 
 ## Exception vector table (`startup.S`)
 

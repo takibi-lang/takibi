@@ -10459,3 +10459,134 @@ section and its "Instructions for Coding Agents" cross-reference were rewritten 
 the historical baseline-then-hardened-pass commits and HISTORY.md entries for issues #61, #62,
 #135, #140, and #145 are left as-is, since they document what was true when written and are
 themselves the evidence this decision rests on.
+
+### 2026-07-23 to 2026-07-24: GitHub Issues #153/#154/#156 -- a Real EL0 User-Mode Process, Up to an Unmodified `busybox-static` Shell
+
+Issue #153 ("Stage 1: RPi3, EL2->EL1, read/write/exit") through issue #156
+("what a real, unmodified shell binary needs from the kernel") form one
+continuous arc: from a two-page hand-written EL0 smoke test to a real,
+unmodified `sh` binary running a scripted stdin session end-to-end on real
+hardware.
+
+**Issue #153** dropped from EL2 to EL1 reusing the EL2 identity map, added
+the real SVC/EL0 trap boundary, a real ELF loader reading a cpio (newc)
+initramfs, real `write()` with user-pointer validation, `exit()` threaded
+through as a typed `ProcessOutcome`, and closed with `--forbid-trap` enabled
+for `el1_smoke`/`el0_smoke`/`el0_elf_load`.
+
+**Issue #154** added the EL1->EL2 `hvc` call boundary (a minimal smoke test
+first, then real process VM teardown through it) and, as its own prereq,
+two-simultaneous-page mapping on `AddressSpaceOwner` -- followed immediately
+by a coarse-grained `ProcessAddressSpace[asid]` abstraction covering a whole
+contiguous multi-page run per process. This is a deliberate workaround for
+the language's own still-open limitation (`OWNERSHIP_KERNEL.md` Slice 6:
+"indexed owners stored in arbitrary fields, arrays, globals, or other stable
+places" is listed as future Core work, not yet implemented) -- a small fixed
+array of ASID-indexed slots stands in for what would ideally be a
+first-class array of per-page owners.
+
+**Issue #156** wired `el0_elf_load`'s loader onto `ProcessAddressSpace`,
+then pushed it from a hand-written test payload to a real, unmodified
+`busybox-static` binary (`examples/el0_shell`), fixing everything that broke
+along the way:
+
+- Real argv/envp/auxv initial stack layout, then PIE (ET_DYN) load-bias
+  support (`load_bias = page_va - min_vaddr`, same technique as Linux's own
+  `binfmt_elf.c`) and the full PIE-relevant auxv set (AT_PHDR/AT_PHNUM/
+  AT_PHENT/AT_BASE/AT_ENTRY/AT_RANDOM/AT_SECURE) -- downloaded real
+  Alpine/Debian `.deb`/`.apk` shell packages to confirm empirically that
+  real shells are built PIE before implementing this.
+- `PAGE_COUNT`/`MAX_PROCESS_PAGES` scaled from 4 to 512 (the full 2MB
+  `DYN_VA_BASE..DYN_VA_LIMIT` window) to fit a real ~1.1MB, ~292-page binary.
+- EL0 FP/SIMD access enabled (`CPTR_EL2.TFP` cleared, `CPACR_EL1.FPEN` set)
+  -- no prior hand-written payload had ever used FP/SIMD instructions, so
+  this trap had never been configured.
+- Real `brk()`/`mmap()` (bump allocator over a fixed heap region) and a
+  documented-no-op `mprotect()`, plus trivial stub syscalls for the
+  thread-identity/signal-mask/prctl/rseq family -- `set_tid_address`
+  returning 0 was found to trigger musl's own `a_crash()` abort (a
+  deliberate NULL-pointer write used as an "unreachable" trap).
+- Real short-read `read()` semantics (blocks for the first byte, then
+  drains whatever is currently available, returns the actual count instead
+  of always blocking for a full buffer) -- this broke `el0_test_prog.S`'s
+  own single-call-assumes-full-buffer `read()`, fixed by looping over
+  possibly-short reads with a bounded retry cap, the way a real,
+  defensively-written program handles a byte stream. Chasing this down the
+  hard way also surfaced (and worked around manually, not yet fixed in the
+  script itself) a gap in `scripts/rpi3_jtag_reset.sh`: its watchdog-write
+  recovery mechanism aborts if the halted core is at EL0, since EL0's own
+  identity-map permissions don't cover the peripheral region; `mww phys`
+  (bypassing MMU translation) recovers it manually.
+- A real, reproducible PL011 UART FIFO race (documented in
+  `examples/common_rpi3/AGENTS.md`'s new UART0 notes): with the RX FIFO
+  disabled, rapid consecutive `read()`s separated by syscall round-trip
+  latency lost bytes roughly one trial in three across repeated hardware
+  runs. Fixed by enabling the real FIFO, setting the finest RX trigger
+  granularity, and unmasking + explicitly clearing the receive-timeout
+  interrupt (needed so a single sub-trigger-level byte still eventually
+  raises an interrupt) -- confirmed via repeated-trial statistics, not
+  merely inferred, and confirmed not to regress the existing
+  interrupt-driven `echo`/`irq` examples.
+- `writev`/`chdir`/`ppoll`/`newfstatat` added incrementally against a
+  growing `el0_shell.stdin` stress script (echo, arithmetic, a `for` loop,
+  `pwd`/`cd`, `$?`, `export`, a `read` builtin, `exit <n>`). `newfstatat`
+  went through a second-pass correctness fix: an initial blanket-success
+  stub (needed for the `read` builtin's own `fstatat(fd, "", ...)` check)
+  incorrectly made a genuinely-absent external command report "Permission
+  denied" instead of "not found"; fixed by checking for the `AT_EMPTY_PATH`
+  idiom (empty pathname stats the fd itself) versus a real non-empty
+  pathname lookup, which correctly fails ENOENT since there is no VFS yet.
+- Interactive shell mode and other busybox applets (`ls`, `cat`, etc.) were
+  investigated as a possible next sub-goal and found not to be a small
+  step from here: busybox-static has no standalone-applet dispatch without
+  either a VFS-backed symlink farm or an argv[0]-name trick this kernel
+  can't yet support cleanly -- this is what issues #157 (VFS/file-I/O
+  syscall bridge to the existing FAT12 driver) and #158 (fork/exec) exist
+  to unblock.
+
+`examples/el0_shell` (`el0_shell.tkb`/`.stdin`/`.expected`, its own
+build-time busybox-static download pinned to Alpine v3.24, and a permanent
+`make hwcheck-rpi3` entry) is the closing regression test; issue #156 was
+closed with all of the above verified end-to-end on real hardware.
+`el0_elf_load.tkb` and `el0_shell.tkb` remain near-complete duplicates
+(same loader/dispatch logic, different embedded image and cosmetic argv[0]/
+banner) -- deliberately not yet extracted into a shared module, to avoid
+destabilizing either's own working regression coverage while both were
+still moving; worth revisiting once a third loader needs the same policy.
+
+### 2026-07-24: OR-Pattern `match` Arms (`N1 | N2 | ... => {...}`)
+
+While rewriting `el0_svc_dispatch` (issue #156 above) as a single `match`
+over the syscall number, several syscalls share one handler (`write`/
+`pwrite64`; `set_tid_address`/`gettid`; the getuid family;
+`set_robust_list`/`rt_sigaction`/`rt_sigprocmask`/`prctl`/`rseq`), which
+issue #151's single-literal-per-arm `match` (see above) could not express
+without either an `if`/`else if` chain or a small helper function factoring
+out each shared body. A helper-function approach was proposed and
+explicitly rejected: helper functions accumulate divergent variants over
+time and tend to stop being truly shared, so this was treated as a case for
+extending the syntax instead, matching the same judgment call already made
+for issue #151 itself. Implemented the same day, following the OCaml/Rust
+convention (`ArmIntLit` grew from `int` to `int list`, never empty):
+
+- `lib/parser.mly`: `match_int_lits` accumulates one or more
+  `PIPE`-separated `match_int_lit`s into the arm.
+- `lib/type_inf.ml`: duplicate-literal checking now iterates the whole
+  list per arm, which naturally also catches literals repeated *within*
+  one arm (e.g. `64 | 64 => {...}`), not just across arms; mismatch error
+  messages format the full literal set (`" | "`-joined).
+- `lib/llvm_gen.ml`: unchanged `build_switch`/`add_case` machinery, just
+  one `add_case` per literal, all targeting the same arm block.
+- `SPEC.md`'s "Match on Primitive Types" section gained an OR-pattern
+  subsection; `test/test_takibi.ml` gained parser/type-check/codegen
+  coverage (836/836 passing); `examples/match_int_lit` gained an
+  OR-pattern demo function.
+
+As with issue #151 itself, no pre-existing bug in `examples/` was
+uncovered by this feature -- its one real use (`el0_svc_dispatch`) was a
+verified behavior-preserving rewrite of already-correct `if`/`else if`
+logic, checked via the full regression suite at every step, not a case
+where the new per-literal duplicate check caught a mistake in existing
+code. The real bugs found this session (FP/SIMD, `set_tid_address`, the
+UART FIFO race, `newfstatat`) were all found empirically, against a real
+third-party binary on real hardware -- not via any new compile-time check.
