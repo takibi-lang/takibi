@@ -747,6 +747,20 @@ fn page_owner_into_index(owner: sink PageOwner[p]) -> {0..<PAGE_COUNT as usize} 
     return owner.index;
 }
 
+// GitHub issue #158: releases a raw physical page index back to the pool
+// WITHOUT going through a PageOwner[p] value -- for a caller that already
+// tracks its own "is anyone still using this page" obligation through
+// other means (a real fork()'s own COW refcount table, see examples/
+// el0_shell/el0_shell.tkb) rather than a single linear PageOwner, and
+// only wants to mark the pool slot free once that external bookkeeping
+// says the refcount reached zero. process_address_space_unmap already
+// does exactly this write inline (`page_used[idx] = 0`) for its own
+// single-owner case; exposed here so a second, refcounted caller does
+// not need its own private duplicate of page_used.
+fn page_used_index_release(idx: {0..<PAGE_COUNT as usize}) {
+    page_used[idx] = 0;
+}
+
 // Matching a variant payload always opens a FRESH, opaque static identity
 // (SPEC.md "Closed Variants and Existential Owners": "opens a fresh
 // connection identity" / "a fresh rigid identity") -- it can never be

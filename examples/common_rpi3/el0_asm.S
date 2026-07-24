@@ -141,7 +141,7 @@ rpi3_el0_resume_frame:
    Takibi-compiled override with the same name (same weak/strong pattern
    as startup.S's rpi3_sync_exception_dispatch).
 
-   Signature: el0_svc_dispatch(esr, syscall_num, x0, x1, x2, elr, frame_sp) -> (outcome, retval)
+   Signature: el0_svc_dispatch(esr, syscall_num, x0, x1, x2, elr, frame_sp, far) -> (outcome, retval)
    -- x0/x1/x2 are the EL0 process's OWN saved x0/x1/x2 at trap time (a
    syscall's first three argument registers per the AArch64 Linux ABI;
    only write's fd/buf/len are meaningful yet, but every syscall's
@@ -150,9 +150,14 @@ rpi3_el0_resume_frame:
    passed in x6) is this trap's own 272-byte saved register frame's base
    address -- see rpi3_el0_resume_frame's own comment above for why a
    real fork() needs it (to copy the parent's full frame out before the
-   child reuses it). Purely additive: examples/el0_smoke and examples/
-   el0_elf_load's own 6-parameter el0_svc_dispatch overrides simply never
-   read x6, which AAPCS64 permits a caller to over-supply harmlessly.
+   child reuses it). `far` (GitHub issue #158, passed in x7, FAR_EL1)
+   is only meaningful when `esr`'s EC field is a data abort from a
+   lower EL (0x24), not an SVC (0x15) -- a real fork()'s copy-on-write
+   write fault lands on this SAME synchronous-exception vector, and
+   `far` is what identifies WHICH page faulted. Purely additive, same
+   reasoning as frame_sp: examples/el0_smoke and examples/el0_elf_load's
+   own 6-parameter el0_svc_dispatch overrides simply never read x6/x7,
+   which AAPCS64 permits a caller to over-supply harmlessly.
 
    `outcome` convention, shared with el0_sync_entry below: 0 = unhandled
    (fail-stop), 1 = terminate (do not resume EL0), any other value MUST
@@ -207,6 +212,7 @@ el0_sync_entry:
     ldr     x4, [sp, #16]       /* saved x2 */
     mov     x5, x9              /* elr */
     mov     x6, sp              /* frame_sp -- this trap's own saved frame */
+    mrs     x7, far_el1         /* far -- only meaningful for a data abort */
     bl      el0_svc_dispatch
     mov     x6, x0              /* outcome */
     mov     x7, x1              /* retval */
