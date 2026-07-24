@@ -51,7 +51,17 @@ fn irq_uart_rx_setup() {
 
 fn irq_uart_rx_unmask() {
     let uart0_imsc: *io u32 = 0x3F201038; // UART0_IMSC
-    *uart0_imsc = 1 << 4; // RXIM: unmask the RX interrupt
+    // RXIM (bit 4): fires once the RX FIFO trigger level is reached
+    // (examples/common_rpi3/uart.tkb's own UART0_IFLS write sets that to
+    // its finest granularity, 2 bytes). RTIM (bit 6, Receive Timeout
+    // Interrupt): fires when the FIFO holds fewer bytes than the trigger
+    // level but no new byte has arrived for ~32 bit periods (~278us at
+    // 115200 baud) -- without this, a single interactive keystroke below
+    // the trigger level would never generate an interrupt at all now
+    // that examples/common_rpi3/uart.tkb enables the real FIFO (GitHub
+    // issue #156) instead of the old single-byte-register behavior,
+    // where any one byte always fired RXIM immediately.
+    *uart0_imsc = (1 << 4) | (1 << 6);
 }
 
 // Reads Core0's IRQ source register (bit 8 = GPU IRQ, i.e. "check the VC

@@ -83,6 +83,18 @@ fn uart_irq_handler() !{interrupt} {
     if (uart_rx_ready()) {
         uart_rx_handler();
     }
+    // RTIC (Receive Timeout Interrupt Clear, bit 6): unlike RXIC, PL011's
+    // receive timeout condition is not reliably cleared just by draining
+    // the FIFO via DR reads above (real PL011 driver practice -- e.g.
+    // Linux's own amba-pl011 -- always writes UARTICR to clear this
+    // explicitly after servicing it); leaving it set risks the same
+    // interrupt refiring immediately, an infinite-IRQ-storm risk this
+    // ISR cannot afford. Only added once examples/common_rpi3/intc.tkb's
+    // irq_uart_rx_unmask() started unmasking RTIM too (GitHub issue
+    // #156's FIFO-enable fix) -- harmless to write even on a spurious
+    // call where RTI was never actually pending.
+    let uart_icr: *io u32 = 0x3F201044;
+    *uart_icr = 1 << 6;
 }
 
 fn uart_init() {
@@ -124,7 +136,30 @@ fn uart_init() {
     *uart_ibrd = 26;
     *uart_fbrd = 3;
 
-    *uart_lcrh = (3 << 5); // 8 bits, no parity, FIFOs disabled, 1 stop bit
+    // FIFOs ENABLED (bit 4, FEN): the 16-byte-deep RX FIFO, not just a
+    // single-byte holding register, is what actually stands between a
+    // burst of back-to-back input bytes and silent data loss/corruption.
+    // Confirmed the hard way (GitHub issue #156): a real interactive
+    // shell (busybox-static's own "sh" applet) issuing several short,
+    // separate read() syscalls in quick succession over a real UART line
+    // intermittently lost/corrupted bytes with FIFOs disabled (roughly
+    // 1 run in 3 across repeated real-hardware trials, always after a
+    // fresh reset -- not a one-off fluke), and was reliably clean across
+    // every trial once FIFOs were enabled instead.
+    *uart_lcrh = (3 << 5) | (1 << 4); // 8 bits, no parity, FIFOs enabled, 1 stop bit
+
+    // UART0_IFLS: explicit RX/TX FIFO trigger level, not left at whatever
+    // the reset/inherited value is (same "don't trust inherited register
+    // state" discipline as examples/common_rpi3/el1_asm.S's own HCR_EL2
+    // bits). 0b000 for both RXIFLSEL (bits 5:3) and TXIFLSEL (bits 2:0)
+    // is the finest granularity this SoC offers (1/8 full = 2 bytes for
+    // a 16-byte FIFO) -- the closest a FIFO can get to the old
+    // FIFOs-disabled behavior's "interrupt per byte", not the coarser
+    // 1/2-full reset default, which would otherwise make
+    // examples/echo/examples/irq's own interrupt-per-keystroke design
+    // wait for 8 bytes before ever firing.
+    let uart_ifls: *io u32 = 0x3F201034;
+    *uart_ifls = 0;
 
     // Clear any latched PL011 interrupt state and drain any unread RX
     // byte a previous occupant of this core left behind -- peripheral
