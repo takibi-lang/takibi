@@ -486,7 +486,7 @@ fn app_main() {
     // examples/narrow/narrow.tkb's own established idiom. Nothing has
     // been allocated yet at this point, so the (unreachable in practice)
     // else arm has nothing to unwind.
-    if (total_pages < 5) {
+    if (total_pages < 513) {
         let seed: {0..<2 as usize} = 0;
         let inactive = address_space_new(seed);
         let core: usize = 0;

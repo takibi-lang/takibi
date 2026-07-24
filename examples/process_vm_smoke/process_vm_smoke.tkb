@@ -7,8 +7,9 @@
 // comment on ProcessAddressSpace for the full design rationale (indexed
 // linear owners cannot be stored in an array in this language today).
 //
-// Maps 3 pages (page_pool has only PAGE_COUNT=4 slots total; 3 leaves
-// headroom without touching that shared constant), writes a distinct
+// Maps 3 pages (deliberately small and fixed, unlike page_pool's own
+// PAGE_COUNT=512 -- this smoke test only needs to prove more-than-2-pages
+// works, not exercise the pool's real capacity), writes a distinct
 // marker byte through each page's own raw VA, reads all three back to
 // prove they are genuinely three separate live translations (not one
 // page being reused three times), then tears the whole thing down

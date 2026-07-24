@@ -27,7 +27,18 @@
 use "examples/common_rpi3/tlb_asm_extern.tkb";
 
 const PAGE_SIZE: usize = 4096;
-const PAGE_COUNT: usize = 4;
+// 512 = exactly the 2MB DYN_VA_BASE..DYN_VA_LIMIT window's own capacity
+// (2MB / 4KB), not an arbitrary guess: GitHub issue #156's real target
+// (Alpine's busybox-static aarch64) needs ~292 pages by its own PT_LOAD
+// extents (readelf-verified), and no single process can ever usefully
+// need more than what the dynamic window itself can map at once, so this
+// is the natural ceiling rather than a number picked to fit one binary.
+// Every RPi3 example sharing this core module gets this same page_pool
+// size regardless of whether it needs anywhere near this many -- BSS is
+// free at rest (RPi3 has 1GB RAM, identity-mapped in full by
+// examples/common_rpi3/mmu.S), so this is a one-time, not per-example,
+// cost.
+const PAGE_COUNT: usize = 512;
 
 private let mut page_pool: [u8; PAGE_SIZE * PAGE_COUNT] align(4096);
 private let mut page_used: [u8; PAGE_COUNT];
@@ -83,7 +94,12 @@ fn page_free(owner: sink PageOwner[p]) {
 }
 
 fn page_owner_bytes(owner: borrow PageOwner[p]) -> [u8; PAGE_SIZE..] @ p {
-    let offset: {0..<12289 as usize} = owner.index * PAGE_SIZE;
+    // 2093057 = (PAGE_COUNT-1)*PAGE_SIZE + 1 = 511*4096 + 1 -- bare
+    // literal, not a PAGE_COUNT-derived expression, matching this whole
+    // file's own established constraint that refined bounds cannot
+    // combine a const name with arithmetic (see MAX_PROCESS_PAGES's own
+    // comment for the same limitation).
+    let offset: {0..<2093057 as usize} = owner.index * PAGE_SIZE;
     let pool = page_pool as [u8; PAGE_SIZE * PAGE_COUNT..];
     let bytes: []u8 = pool[offset..<offset + 4096];
     if (bytes.len >= 4096) { return bytes; }
@@ -670,7 +686,7 @@ fn map_second_page_el0_exec(space: sink AddressSpaceOwner[asid, SpaceState::Occu
 // system already proves elsewhere (for-loop counter ranges, same-base
 // subslice proofs), just not wired to gate calls to the raw
 // l3_address_space_write extern fn.
-const MAX_PROCESS_PAGES: usize = 4; // must equal PAGE_COUNT (const decls need a bare literal initializer, not a named const reference)
+const MAX_PROCESS_PAGES: usize = 512; // must equal PAGE_COUNT (const decls need a bare literal initializer, not a named const reference)
 
 // The physical page indices a live ProcessAddressSpace owns live in this
 // PLAIN (non-owner-typed) global array, not as a field of the owner
@@ -732,7 +748,7 @@ fn process_address_space_map(
         space: sink AddressSpaceOwner[asid, SpaceState::Empty],
         active: sink ActiveAddressSpace[core, asid],
         base_va: {DYN_VA_BASE..<DYN_VA_LIMIT as usize},
-        page_count: {0..<5 as usize}) -> ProcessMapResult { // upper bound = MAX_PROCESS_PAGES + 1 (must be a literal, see MAX_PROCESS_PAGES's own comment)
+        page_count: {0..<513 as usize}) -> ProcessMapResult { // upper bound = MAX_PROCESS_PAGES + 1 (must be a literal, see MAX_PROCESS_PAGES's own comment)
     let mut mapped: usize = 0;
     let mut ok: i32 = 1;
     let slot: {0..<2 as usize} = space.slot;
@@ -889,9 +905,9 @@ fn cow_fault_transition(state: CowFaultState, esr: usize, far: usize)
                                                   fault_space, mapping, lease0, lease1));
                 }
                 PageAllocResult::Allocated(page) => {
-                    let src_offset: {0..<12289 as usize} =
+                    let src_offset: {0..<2093057 as usize} =
                         mapping.page_index * PAGE_SIZE;
-                    let dst_offset: {0..<12289 as usize} =
+                    let dst_offset: {0..<2093057 as usize} =
                         page.index * PAGE_SIZE;
                     let pool = page_pool as [u8; PAGE_SIZE * PAGE_COUNT..];
                     for i: usize in 0..<PAGE_SIZE {
@@ -932,13 +948,13 @@ fn tlb_invalidate_second(space: borrow AddressSpaceOwner[asid, SpaceState::Occup
 
 fn mapping_bytes(mapping: borrow MappingOwner[asid, va, p])
         -> [u8; PAGE_SIZE..] @ p {
-    // PAGE_COUNT * PAGE_SIZE = 16384, so every page start is below 12289
-    // and every page end is at most 16384 (the pool's own size). Bare
-    // literals below (not the PAGE_SIZE const) match
+    // PAGE_COUNT * PAGE_SIZE = 2097152, so every page start is below
+    // 2093057 and every page end is at most 2097152 (the pool's own
+    // size). Bare literals below (not the PAGE_SIZE const) match
     // examples/page_pool/page_pool_core.tkb's own page_bytes -- a const
     // name only reliably narrows in a type position, not in runtime
     // slice-length arithmetic/comparison (confirmed experimentally).
-    let offset: {0..<12289 as usize} = mapping.page_index * PAGE_SIZE;
+    let offset: {0..<2093057 as usize} = mapping.page_index * PAGE_SIZE;
     let pool = page_pool as [u8; PAGE_SIZE * PAGE_COUNT..];
     let bytes: []u8 = pool[offset..<offset + 4096];
     if (bytes.len >= 4096) {
