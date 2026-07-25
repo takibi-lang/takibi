@@ -215,7 +215,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemubuild qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-stm32-net-l2 hwcheck-rpi3 hwcheck-rpi3-net hwcheck-rpi3-net-l2 hwcheck-rpi5 stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck allcheck-build clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos rpi3-http-server rpi5-start profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
+.PHONY: build test qemubuild qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-stm32-net-l2 hwcheck-rpi3 hwcheck-rpi3-net hwcheck-rpi3-net-l2 hwcheck-rpi5 stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck allcheck-build clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos rpi3-http-server profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
 
 .DEFAULT_GOAL := build
 
@@ -2089,13 +2089,34 @@ examples/common_rpi5/jtag_stub.elf: $(COMMON_RPI5_JTAG_STUB_O) $(COMMON_RPI5_JTA
 examples/common_rpi5/jtag_stub.img: examples/common_rpi5/jtag_stub.elf
 	llvm-objcopy-19 -O binary $< $@
 
-## examples/start ported first, same as it was the first RPI3_EXAMPLES
-## entry during RPi3's own bring-up (GitHub issue #140).
-examples/start/start_rpi5.o: examples/start/start.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
+## RPI5_EXAMPLES: the same "plain compute, no interrupt/timer dependency"
+## group RPi3 itself started from (GitHub issue #140) -- examples/start
+## was ported and hardware-proven first (issue #161's own UART finale),
+## the rest follow now that uart_puts()/RP1 PCIe bring-up are confirmed
+## working. Stage A (examples/common_rpi5/startup.S) still has no MMU and
+## no interrupt handling at all (see that directory's AGENTS.md "What's
+## deliberately NOT ported yet" section) -- anything needing rtc/timer/
+## irq/echo/USB/networking/EL0/EL1/SMP stays out of this group until
+## issues #163 (MPIDR_EL1 core numbering), #164 (RP1 UART0 RX interrupt),
+## and #165 (MMU + exception handling) land, the same staged order RPi3
+## itself followed rather than porting speculatively ahead of it.
+RPI5_EXAMPLES := start basic_suite type_system_suite algorithm_suite bump scheduler \
+                 klock_guard percpu
+RPI5_OBJS     := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/$(e)_rpi5.o)
+RPI5_KERNELS  := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
+# Same one-hardening-switch reasoning as RPI3_TAKIBI_FLAGS above.
+RPI5_TAKIBI_FLAGS := --forbid-trap
 
-examples/start/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) examples/start/start_rpi5.o $(COMMON_RPI5_LINK_LD)
-	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) examples/start/start_rpi5.o -o $@
+$(RPI5_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+examples/basic_suite/basic_suite_rpi5.o: $(BASIC_SUITE_SOURCES)
+examples/type_system_suite/type_system_suite_rpi5.o: $(TYPE_SYSTEM_SUITE_SOURCES)
+examples/algorithm_suite/algorithm_suite_rpi5.o: $(ALGORITHM_SUITE_SOURCES) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL)
+
+$(RPI5_KERNELS): examples/%/kernel_rpi5.elf: \
+    $(COMMON_RPI5_STARTUP_O) examples/%/$$*_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) examples/$*/$*_rpi5.o -o $@
 
 ## rp1_pcie_smoke: GitHub issue #161's own first real-hardware test --
 ## brings up RP1's PCIe link (examples/common_rpi5/pcie.tkb) and, if
@@ -2116,30 +2137,13 @@ examples/rp1_pcie_smoke/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) examples/rp1_p
 ## auto-detected device is wrong.
 RPI5_SERIAL_DEV ?=
 
-## hwcheck-rpi5: compile examples/start, inject it over SWD, and compare
-## its complete GPIO14/15 RP1-UART output on a real Raspberry Pi 5. The SD
-## card must already boot examples/common_rpi5/jtag_stub.img; this remains
-## opt-in and is not part of check/allcheck because it requires attached
-## hardware and cannot establish that boot prerequisite by itself.
-hwcheck-rpi5: examples/start/kernel_rpi5.elf
+## hwcheck-rpi5: compile every RPI5_EXAMPLES entry, inject each over SWD in
+## turn, and compare its complete RP1-UART output on a real Raspberry Pi 5.
+## The SD card must already boot examples/common_rpi5/jtag_stub.img; this
+## remains opt-in and is not part of check/allcheck because it requires
+## attached hardware and cannot establish that boot prerequisite by itself.
+hwcheck-rpi5: $(RPI5_KERNELS)
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_hwtest_rpi5.sh
-
-## rpi5-start: interactive convenience target -- attach a UART reader, then
-## inject examples/start over SWD. Deliberately does not reset first: PSCI
-## reset is only reliable for re-running the same resident SD-card image and
-## is unnecessary for ordinary injection. Flash
-## examples/common_rpi5/jtag_stub.img as kernel_2712.img and power-cycle
-## the board by hand first if it is not already sitting at the stub.
-rpi5-start: examples/start/kernel_rpi5.elf
-	@dev="$(RPI5_SERIAL_DEV)"; \
-	if [ -z "$$dev" ]; then dev="$$(scripts/rpi5_uart_dev.sh)" || exit 1; fi; \
-	stty -F "$$dev" 115200 raw -echo; \
-	echo "Reading $$dev (Ctrl-C to quit)..."; \
-	cat "$$dev" & \
-	catpid=$$!; \
-	sleep 0.2; \
-	scripts/rpi5_jtag_load.sh $< || { kill $$catpid 2>/dev/null; exit 1; }; \
-	wait $$catpid
 
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts and linker outputs

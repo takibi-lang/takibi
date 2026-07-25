@@ -20,6 +20,64 @@ injects `examples/start`, then byte-compares its complete GPIO14/15 UART
 output; it remains opt-in because it requires an attached board, SWD probe,
 and separately-wired GPIO14/15 UART path.
 
+## Status update (2026-07-25, same day): first example-port batch, build-
+## verified only -- NOT yet run on real hardware this session
+
+With `examples/start` proven above, this directory's scope widened from
+"prove the mechanism" to "port the rest of the RPi3 example tree", the
+same transition RPi3 itself made after its own first example (issue
+#140). Followed RPi3's own staged order exactly: the Makefile's new
+`RPI5_EXAMPLES` group (`start basic_suite type_system_suite
+algorithm_suite bump scheduler klock_guard percpu`) is a byte-for-byte
+copy of `RPI3_EXAMPLES`' own first, pre-interrupt group -- "plain
+compute, no interrupt/timer/RTC dependency" (see that variable's own
+Makefile comment). All eight build and link cleanly (`make
+examples/<name>/kernel_rpi5.elf` for each). `scripts/run_hwtest_rpi5.sh`
+was generalized from a single-example script into a full suite runner
+(reset-before-each-test via `scripts/rpi5_jtag_reset.sh`'s PSCI trick,
+plain-diff and `cases.txt`-manifest suite variants) mirroring
+`scripts/run_hwtest_rpi3.sh`'s own structure; `make hwcheck-rpi5` now
+depends on the whole `RPI5_EXAMPLES` kernel set instead of just
+`examples/start`. Every `.expected`/`cases.txt` fixture is reused as-is
+from the existing RPi3/QEMU/STM32 suites (target-independent: `uart_puts`/
+`uart_print_*` emit identical bytes on every HAL).
+
+One real gap found while porting, fixed the same way RPi3 originally
+added it: `examples/klock_guard/klock_guard.tkb` calls `extern fn
+enable_irq()`/`disable_irq()` (its giant-lock placeholder), which
+`startup.S` did not yet provide here. Added the same two-instruction
+`msr DAIFClr, #0x2` / `msr DAIFSet, #0x2` pair RPi3's own `startup.S`
+has -- pure CPU-local DAIF-bit state, no GIC-400 register access
+involved, so this does NOT pull interrupt handling into Stage A's scope;
+nothing here unmasks IRQ at the vector-table level or configures the GIC
+to ever raise one.
+
+**`make rpi5-start` was removed** (the interactive convenience target
+used for the very first real-hardware attempt) -- `make hwcheck-rpi5` is
+now the real, automatic, byte-compared test and fully supersedes it; see
+"Build and try" below for the updated workflow.
+
+**Not yet run on real hardware**: no Raspberry Pi 5 / Debug Probe was
+attached to this devcontainer during this session (checked: no
+`/dev-host/ttyACM*`, no `/dev-host/serial/by-id` entries at all) --
+build-verification only. The next session with hardware attached should
+run `make hwcheck-rpi5` and update this file + `HISTORY.md` + the
+`rpi5-bringup-status` memory with the real result, the same discipline
+`examples/start`'s own port already followed.
+
+**Deliberately not yet attempted**: `rtc`/`timer`/`irq`/`echo`/USB/
+networking/EL0/EL1/SMP examples and their RPi3 equivalents. All of them
+need pieces Stage A's `startup.S` still lacks (rtc/timer need
+`read_cntfrq`/`read_cntpct` asm stubs -- trivial to port, not yet done
+since nothing in this batch needed them; irq/echo need a working
+interrupt path, tracked by issue #164 for RP1 UART0 RX specifically and
+issue #165 for MMU + general exception handling; USB is explicitly out
+of scope per "What's deliberately NOT ported yet" below; networking
+needs RP1's Ethernet path, an unstarted future subject). Port these only
+once their concrete prerequisite issue lands, not speculatively ahead of
+it -- same reasoning RPi3's own historical Makefile comments already
+document for its own staged rollout.
+
 **The architectural constraint confirmed 2026-07-25 through extensive
 real-hardware debugging (see "A real bug this port found" and "UART
 investigation" below) is that this board's single 3-pin debug
@@ -313,9 +371,7 @@ ever needed.
 make examples/common_rpi5/jtag_stub.img
 # on the host, with the SD card's boot partition mounted:
 scripts/rpi5_prepare_sdcard.sh /path/to/mounted/boot/partition
-# power-cycle the board, then:
-make rpi5-start
-# or run the finite exact-output integration test:
+# power-cycle the board, then run the full suite:
 make hwcheck-rpi5
 ```
 
@@ -324,16 +380,17 @@ required even if this SD card was already run through the RPi3 version;
 see "Root cause" above for why overwriting only `kernel8.img` is not
 enough on RPi5.
 
-`make rpi5-start` builds `examples/start/kernel_rpi5.elf`, attaches a UART
-reader via `scripts/rpi5_uart_dev.sh`'s auto-detected device, then injects
-the payload via `scripts/rpi5_jtag_load.sh`. It deliberately does NOT call
-`scripts/rpi5_jtag_reset.sh` first (unlike RPi3's equivalent
-`rpi3-http-server` target) -- whether `reset halt` even works here is
-itself Unconfirmed item 3 above, and folding it into the very first load
-attempt would make it unclear which step actually failed. If the board is
-not already parked at the stub (e.g. it just booted Raspberry Pi OS
-instead), flash the stub and power-cycle by hand first, or try
-`scripts/rpi5_jtag_reset.sh` on its own.
+`make hwcheck-rpi5` builds every `RPI5_EXAMPLES` kernel, then, for each
+one, resets the board via `scripts/rpi5_jtag_reset.sh` (PSCI
+`SYSTEM_RESET`, confirmed working -- see that script's own header
+comment), injects the payload via `scripts/rpi5_jtag_load.sh`, and
+byte-compares the captured RP1 UART0 output against that example's
+`.expected`/`cases.txt` fixture. This supersedes the earlier `make
+rpi5-start` convenience target (removed 2026-07-25 once this real,
+automatic test existed) -- if the board is not already parked at the
+stub (e.g. it just booted Raspberry Pi OS instead), flash the stub and
+power-cycle by hand first, or try `scripts/rpi5_jtag_reset.sh` on its
+own.
 
 ## RP1 PCIe enumeration -- GitHub issue #161
 

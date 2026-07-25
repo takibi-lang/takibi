@@ -157,6 +157,22 @@ _start:
     wfe
     b       .Lhalt
 
+/* enable_irq()/disable_irq(): same DAIF.I-only mask as
+   examples/common_rpi3/startup.S's own pair -- pure CPU-local state, no
+   GIC-400 register access, so safe to provide even though Stage A never
+   unmasks IRQ at the vector-table level (see below) or configures the
+   GIC to raise one. Needed by examples/klock_guard/klock_guard.tkb's
+   giant-lock placeholder, the first RPi5 example group to pull it in. */
+    .global enable_irq
+enable_irq:
+    msr     DAIFClr, #0x2
+    ret
+
+    .global disable_irq
+disable_irq:
+    msr     DAIFSet, #0x2
+    ret
+
 /* -- Exception vector table (must be 2KB aligned) ---------------------------
    Every slot just spins, same rationale as examples/common_rpi3/startup.S's
    own table header comment: a spin at a known PC is inspectable over SWD;

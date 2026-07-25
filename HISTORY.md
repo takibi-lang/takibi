@@ -15,6 +15,54 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-25: RPi5 -- Ported the First RPi3-Style Example Batch, Retired `make rpi5-start`
+
+With `examples/start` proven end-to-end on hardware (see the entry
+directly below), this session widened scope to porting the rest of the
+RPi3 example tree, following the exact staged order RPi3 itself used
+after its own first example (issue #140): `RPI3_EXAMPLES`' first
+group -- `basic_suite type_system_suite algorithm_suite bump scheduler
+klock_guard percpu`, chosen there because it needs no interrupt/timer/RTC
+support -- is now also `RPI5_EXAMPLES` in the Makefile, unchanged in
+membership. All eight (including `start`) build and link cleanly against
+`examples/common_rpi5/startup.S`'s Stage-A boot (still no MMU, no
+interrupt handling). One real gap surfaced while porting:
+`examples/klock_guard/klock_guard.tkb`'s giant-lock placeholder calls
+`extern fn enable_irq()`/`disable_irq()`, which RPi5's `startup.S` did
+not yet provide -- added the same `msr DAIFClr/DAIFSet, #0x2` pair
+RPi3's `startup.S` already has. This is pure CPU-local DAIF-bit state,
+not a GIC-400 register access, so it does not pull real interrupt
+handling into Stage A's scope.
+
+`scripts/run_hwtest_rpi5.sh` was generalized from a single-example
+script into a full suite runner structurally mirroring
+`scripts/run_hwtest_rpi3.sh` (reset-before-every-test via
+`scripts/rpi5_jtag_reset.sh`'s now-confirmed-working PSCI
+`SYSTEM_RESET` trick, a plain expected-file diff runner, and a
+`cases.txt`-manifest suite runner reusing
+`scripts/check_suite_output.py` unmodified); `make hwcheck-rpi5` now
+depends on the whole `RPI5_EXAMPLES` kernel set rather than just
+`examples/start`. Every `.expected`/`cases.txt` fixture was reused
+byte-for-byte from the existing QEMU/STM32/RPi3 suites -- no new
+expected-output files were needed, since `uart_puts`/`uart_print_*`
+write identical bytes regardless of target.
+
+`make rpi5-start`, the interactive convenience target used only for the
+very first real-hardware injection attempt, was removed now that
+`make hwcheck-rpi5` is a real, automatic, byte-compared test covering
+the same ground and more; `examples/common_rpi5/AGENTS.md`'s "Build and
+try" section was updated to match.
+
+**Build-verified only, not yet run on real hardware this session** -- no
+RPi5/Debug Probe was attached to this devcontainer. The next session
+with hardware attached should run `make hwcheck-rpi5` for real and
+record the result here. Examples needing `rtc`/`timer`/`irq`/`echo`/USB/
+networking/EL0/EL1/SMP remain unported, gated on issues #163 (MPIDR_EL1
+core numbering), #164 (RP1 UART0 RX interrupt), and #165 (MMU + general
+exception handling) respectively -- the same "port only once its
+concrete prerequisite lands" discipline RPi3's own Makefile comments
+already document.
+
 ### 2026-07-25: RPi5 RP1 PCIe Enumeration and Simultaneous SWD + UART (Issue #161)
 
 Completed the first bare-metal BCM2712/RP1 proof of life on real RPi5
