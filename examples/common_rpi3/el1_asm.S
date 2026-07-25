@@ -74,9 +74,14 @@ el1_vectors:
 
 /* void rpi3_el1_enter(usize el1_sp) -- never returns to its caller (the
    caller is left behind at EL2 permanently; only a subsequent IRQ routed
-   to EL2 -- not yet exercised in this milestone, HCR_EL2.IMO is still set
-   from startup.S -- would ever run EL2 code again). x0 = stack pointer to
-   install as SP_EL1 before entry. */
+   to EL2 by HCR_EL2.IMO (startup.S) would ever run EL2 code again --
+   genuinely exercised since GitHub issue #158's own real UART0 RX
+   interrupt work, which is also what found the "Lower EL, AArch64, IRQ"
+   exception vector slot (startup.S's own exception_vectors, offset
+   0x480) had been left unwired to rpi3_irq_entry, since nothing before
+   el0_shell ever ran real code below EL2 for that slot to matter to; see
+   examples/common_rpi3/AGENTS.md's own "Exception vector table" section).
+   x0 = stack pointer to install as SP_EL1 before entry. */
     .global rpi3_el1_enter
 rpi3_el1_enter:
     /* TTBR0_EL1 := TTBR0_EL2 (reuse the live EL2 identity map -- see this
