@@ -20,8 +20,54 @@ injects `examples/start`, then byte-compares its complete GPIO14/15 UART
 output; it remains opt-in because it requires an attached board, SWD probe,
 and separately-wired GPIO14/15 UART path.
 
-## Status update (2026-07-25, same day): first example-port batch, build-
-## verified only -- NOT yet run on real hardware this session
+## Status update (2026-07-25, same day, later): first example-port batch
+## CONFIRMED on real hardware -- `make hwcheck-rpi5` 13/13, twice in a row
+
+Real hardware (RPi5 + Debug Probe) was attached later the same session.
+`make hwcheck-rpi5` initially included `type_system_suite` and
+`algorithm_suite` (10 examples total) and found two real bugs, not test-
+harness artifacts:
+
+- **A one-off garbled first run** (`start` itself, plus every other test,
+  came back with dropped/reordered bytes) that did NOT reproduce on a
+  second run or under isolated manual reproduction (reset, then a single
+  persistent UART reader, then inject) -- left unexplained; if it recurs,
+  suspect the RP1 PCIe link state after a PSCI reset rather than the test
+  harness's drain/capture windowing, which was independently verified
+  correct via manual replication.
+- **A real, reproducible hang**, confirmed via the same "read PC/ESR
+  over SWD after a hang" technique issue #161's own bring-up used:
+  `type_system_suite` stopped after its `packed` case, `algorithm_suite`
+  stopped after `inet_checksum`. In both cases the halted core sat at
+  `0x200a00` -- exactly `exception_vectors` + `0x200`, the "Current EL
+  SPx, Synchronous" slot, which Stage A's `startup.S` still just spins on
+  (`b .`). `ESR_EL2` read `0x96000061` both times: EC=`0x25` (Data Abort,
+  no EL change) with DFSC=`0x21` (Alignment fault). **Root cause: with
+  the stage-1 MMU disabled, AArch64 treats all memory as Device
+  (nGnRnE), where an unaligned access always faults regardless of
+  `SCTLR.A`** -- an architectural rule, not a compiler or harness bug.
+  `examples/packed/packed.tkb` (deliberately misaligned struct field
+  access) and `examples/common/inet_checksum.tkb` (unaligned 16-bit wire
+  reads, pulled in by `algorithm_suite`) both do this on purpose, safely
+  on every OTHER target because `--forbid-trap`-adjacent unaligned
+  access is only actually safe once a real MMU marks that memory Normal.
+  RPi3 never hit this in its own first example group because its generic
+  kernel link rule has included `COMMON_RPI3_MMU_O` since RPi3's very
+  first example -- RPi5 Stage A has no MMU at all yet (issue #165).
+  **Fix**: removed `type_system_suite`/`algorithm_suite` from
+  `RPI5_EXAMPLES` (Makefile) and the corresponding calls from
+  `scripts/run_hwtest_rpi5.sh` -- re-add both once issue #165 lands.
+
+With those two removed, **`make hwcheck-rpi5` passed 13/13 twice in a
+row** (`basic_suite`'s own `cases.txt` expands to `start`, `hello`,
+`print_int`, `print_hex`, `print_ptr`, `mem`, `array`, `struct`,
+`struct_refined`, plus `bump`/`scheduler`/`klock_guard`/`percpu` as
+individual tests) -- this batch is now genuinely hardware-proven, not
+just build-verified.
+
+## Status update (2026-07-25, same day, earlier): first example-port
+## batch added, build-verified only -- NOT yet run on real hardware this
+## session (superseded by the real-hardware update directly above)
 
 With `examples/start` proven above, this directory's scope widened from
 "prove the mechanism" to "port the rest of the RPi3 example tree", the
@@ -341,6 +387,16 @@ future subject if pursued, not a port of the existing driver.
    Revisit it before adding an RPi5 MMU initialization path. The RPi5 MMU,
    exception, and loader-safety milestone is issue #165 (related to the
    general MMU issue #67).
+4. **Any unaligned memory access faults, hardware-confirmed.** With the
+   stage-1 MMU disabled, AArch64 treats all memory as Device (nGnRnE),
+   where an unaligned load/store always raises a same-EL Data Abort
+   (confirmed via `ESR_EL2=0x96000061`, DFSC=Alignment fault) landing in
+   the still-unhandled "Current EL SPx, Synchronous" vector, i.e. a
+   permanent hang. Found via `examples/packed`'s deliberately-misaligned
+   struct field access and `examples/common/inet_checksum.tkb`'s
+   unaligned 16-bit wire reads -- see the status update above for the
+   full trace. Do not port any example doing unaligned access (packed
+   structs, wire-format parsing, checksums) until issue #165 lands.
 
 Interrupt-driven RP1 UART0 RX is separate from these startup constraints and
 is tracked by issue #164.

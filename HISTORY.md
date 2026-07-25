@@ -53,12 +53,33 @@ very first real-hardware injection attempt, was removed now that
 the same ground and more; `examples/common_rpi5/AGENTS.md`'s "Build and
 try" section was updated to match.
 
-**Build-verified only, not yet run on real hardware this session** -- no
-RPi5/Debug Probe was attached to this devcontainer. The next session
-with hardware attached should run `make hwcheck-rpi5` for real and
-record the result here. Examples needing `rtc`/`timer`/`irq`/`echo`/USB/
-networking/EL0/EL1/SMP remain unported, gated on issues #163 (MPIDR_EL1
-core numbering), #164 (RP1 UART0 RX interrupt), and #165 (MMU + general
+**Update, same session, hardware became available**: `make hwcheck-rpi5`
+was run for real. Initially included `type_system_suite`/
+`algorithm_suite` too (10 examples) and found a genuine, reproducible
+hang in both: reading PC/`ESR_EL2` over SWD after each hang (the same
+technique issue #161's own bring-up used) showed both parked at
+`exception_vectors+0x200` ("Current EL SPx, Synchronous", still an
+unconditional `b .`) with `ESR_EL2=0x96000061` -- a same-EL Data Abort,
+DFSC=Alignment fault. Root cause: with the stage-1 MMU disabled,
+AArch64 treats all memory as Device (nGnRnE), where an unaligned access
+always faults regardless of `SCTLR.A` -- an architectural consequence of
+Stage A having no MMU yet (issue #165), not a compiler or test-harness
+bug. `examples/packed` (deliberately misaligned struct field access) and
+`examples/common/inet_checksum.tkb` (unaligned 16-bit wire reads, pulled
+in via `algorithm_suite`) both do this by design, safely on every other
+target because those targets' generic kernel link rules already include
+a working MMU (RPi3's has since its own first example). Removed both
+suites from `RPI5_EXAMPLES` and `run_hwtest_rpi5.sh`; re-add once issue
+#165 lands. With those two removed, **`make hwcheck-rpi5` passed 13/13,
+twice in a row** (`basic_suite`'s `cases.txt` expands to 9 of the 13).
+One unreproduced anomaly: the very first hardware run (before this fix)
+also showed garbled/dropped bytes across every test including `start`
+itself; a second run and an isolated manual reproduction (reset, single
+persistent UART reader, inject) both came back clean, so this was left
+as an unexplained one-off rather than chased further -- flag it again if
+it recurs. Examples needing `rtc`/`timer`/`irq`/`echo`/USB/networking/
+EL0/EL1/SMP remain unported, gated on issues #163 (MPIDR_EL1 core
+numbering), #164 (RP1 UART0 RX interrupt), and #165 (MMU + general
 exception handling) respectively -- the same "port only once its
 concrete prerequisite lands" discipline RPi3's own Makefile comments
 already document.

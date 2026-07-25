@@ -2100,8 +2100,20 @@ examples/common_rpi5/jtag_stub.img: examples/common_rpi5/jtag_stub.elf
 ## issues #163 (MPIDR_EL1 core numbering), #164 (RP1 UART0 RX interrupt),
 ## and #165 (MMU + exception handling) land, the same staged order RPi3
 ## itself followed rather than porting speculatively ahead of it.
-RPI5_EXAMPLES := start basic_suite type_system_suite algorithm_suite bump scheduler \
-                 klock_guard percpu
+##
+## type_system_suite/algorithm_suite are DELIBERATELY excluded here,
+## unlike RPi3's own first group -- real hardware testing (2026-07-25)
+## found both hang for real: ESR_EL2=0x96000061 (same-EL Data Abort,
+## DFSC=Alignment fault) at the `packed` struct-field-access case and
+## inside examples/common/inet_checksum.tkb's own unaligned 16-bit reads
+## (hit via the algorithm_suite's ip_parse-adjacent inet_checksum case).
+## With stage-1 MMU disabled, AArch64 treats ALL memory as Device
+## (nGnRnE), where unaligned accesses always fault regardless of
+## SCTLR.A -- an architectural rule, not a compiler or test-harness bug.
+## RPi3's own first group never hit this because its generic kernel link
+## rule already includes COMMON_RPI3_MMU_O (MMU has been on since RPi3's
+## very first example). Re-add both suites here once issue #165 lands.
+RPI5_EXAMPLES := start basic_suite bump scheduler klock_guard percpu
 RPI5_OBJS     := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/$(e)_rpi5.o)
 RPI5_KERNELS  := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 # Same one-hardening-switch reasoning as RPI3_TAKIBI_FLAGS above.
@@ -2111,8 +2123,6 @@ $(RPI5_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $(COMMON_RPI
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
 
 examples/basic_suite/basic_suite_rpi5.o: $(BASIC_SUITE_SOURCES)
-examples/type_system_suite/type_system_suite_rpi5.o: $(TYPE_SYSTEM_SUITE_SOURCES)
-examples/algorithm_suite/algorithm_suite_rpi5.o: $(ALGORITHM_SUITE_SOURCES) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL)
 
 $(RPI5_KERNELS): examples/%/kernel_rpi5.elf: \
     $(COMMON_RPI5_STARTUP_O) examples/%/$$*_rpi5.o $(COMMON_RPI5_LINK_LD)
