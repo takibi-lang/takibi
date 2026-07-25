@@ -7,14 +7,31 @@
 # adapter, and (2) the target config (examples/common_rpi5/bcm2712.cfg) is
 # vendored in this repo, since upstream OpenOCD 0.12.0 does not ship one.
 #
-# Same safety check as RPi3: refuses to inject unless the halted core is at
-# EL2H (a live Raspbian boot always halts at EL1H, since Linux runs the
-# kernel at EL1 -- and Trusted Firmware-A's own rpi5 platform docs confirm
-# BL31 hands 64-bit payloads off at EL2, same as RPi3's GPU firmware, so
-# this check is expected to carry over unchanged). UNCONFIRMED as of this
-# writing: everything below has not yet been run against real RPi5
-# hardware -- this is Stage A's first real-hardware attempt, not a proven
-# script.
+# Safety check, CORRECTED from an initial RPi3-style "must be at EL2H"
+# check that turned out to be unsound here: a live, real-hardware
+# connectivity test (2026-07-25) halted this board and found it sitting at
+# EL2H with MMU/D-cache/I-cache all enabled and PC at a canonical
+# high-kernel-VA address (0xffffd0...) -- i.e. genuinely running
+# Raspberry Pi OS, not our stub. RPi3's own "EL2H means safe" assumption
+# relied on Linux always dropping to EL1 (true on BCM2837/Cortex-A53,
+# ARMv8.0), but BCM2712's Cortex-A76 is ARMv8.1+ and supports VHE
+# (Virtualization Host Extensions): a VHE-enabled Linux kernel runs its
+# WHOLE normal kernel at EL2H (HCR_EL2.E2H=1) rather than dropping to EL1
+# at all, which is the modern default on hardware that supports it. EL2H
+# alone therefore does NOT distinguish live Raspberry Pi OS from our own
+# code on this board.
+#
+# The real distinguishing signal is MMU state, not exception level: Stage A
+# never calls mmu_init (see examples/common_rpi5/startup.S's header
+# comment) for EITHER the jtag_stub or the real payload, so anything we
+# ever inject at this stage always runs with the EL2 stage 1 MMU off,
+# while genuine Raspberry Pi OS always runs with it on. OpenOCD's own halt
+# report already prints "MMU: enabled"/"MMU: disabled" for aarch64
+# targets, so this reuses that line rather than a separate register read.
+# NOTE: once a future milestone adds mmu_init here (mirroring RPi3's own
+# history), this check needs revisiting -- it will no longer distinguish
+# "ours" from "live OS" once our own code also runs with the MMU on.
+set -euo pipefail
 set -euo pipefail
 
 ELF="${1:-examples/start/kernel_rpi5.elf}"
@@ -61,26 +78,31 @@ fi
 
 halted_pc=$(awk '/^pc \(/{print $3}' "$CHECK_LOG" | head -1)
 current_mode=$(grep -oE 'current mode: EL[0-9][A-Za-z]' "$CHECK_LOG" | head -1 | awk '{print $3}')
-rm -f "$CHECK_LOG"
+mmu_state=$(grep -oE 'MMU: (enabled|disabled)' "$CHECK_LOG" | head -1 | awk '{print $2}')
 
-if [ -z "$current_mode" ]; then
-    echo "error: could not parse current exception level from openocd output -- log follows" >&2
+if [ -z "$current_mode" ] || [ -z "$mmu_state" ]; then
+    echo "error: could not parse current exception level / MMU state from openocd output -- log follows" >&2
     cat "$CHECK_LOG" >&2
+    rm -f "$CHECK_LOG"
     exit 1
 fi
+rm -f "$CHECK_LOG"
 
-if [ "$current_mode" != "EL2H" ]; then
-    echo "error: halted core is at $current_mode, not EL2H (PC=$halted_pc)" \
-         "-- this is almost certainly still-running Raspberry Pi OS (Linux" \
-         "always runs at EL1), not a bare-metal payload. Refusing to" \
-         "inject (would corrupt the running OS). If kernel_2712.img on the" \
-         "SD card is already examples/common_rpi5/jtag_stub.img, run" \
+if [ "$current_mode" != "EL2H" ] || [ "$mmu_state" != "disabled" ]; then
+    echo "error: halted core is at $current_mode with MMU $mmu_state (PC=$halted_pc)" \
+         "-- this looks like a genuinely running Raspberry Pi OS, not our" \
+         "own stub/payload (BCM2712's Cortex-A76 supports VHE, so a live" \
+         "kernel can itself be sitting at EL2H -- EL2H alone does not mean" \
+         "safe here, unlike on RPi3; MMU-disabled is the real signal, see" \
+         "this script's own header comment). Refusing to inject (would" \
+         "corrupt the running OS). If kernel_2712.img on the SD card is" \
+         "already examples/common_rpi5/jtag_stub.img, run" \
          "scripts/rpi5_jtag_reset.sh; otherwise flash it first and" \
          "power-cycle the board. (The board was left running exactly as" \
          "found -- this check only read/resumed, it never wrote anything.)" >&2
     exit 1
 fi
-echo "halted core is at EL2H (PC=$halted_pc) -- safe to inject"
+echo "halted core is at EL2H with MMU disabled (PC=$halted_pc) -- safe to inject"
 
 # Pass 2: only reached once the check above confirms a clean catch.
 LOG=$(mktemp)
