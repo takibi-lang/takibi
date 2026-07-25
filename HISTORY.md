@@ -46,6 +46,18 @@ The complete checkpoint-by-checkpoint failure history remains in
 `examples/common_rpi5/AGENTS.md` because the intermediate failures were
 what isolated each independently real bug.
 
+The follow-up moved RP1's fixed, board-specific endpoint BAR assignment
+out of the diagnostic smoke application and into the normal RPi5 platform
+initialization path. `examples/start/start.tkb` now builds with `pcie.tkb`,
+brings up pcie2 before its first UART access, and runs unchanged on the real
+board. The new opt-in `make hwcheck-rpi5` target builds that ELF, attaches
+the UART reader before SWD injection, and byte-compares the complete output
+(`foo(5)=1`, `bar(3,4)=0`, `bar(1,10)=1`, with CRLF). It passed twice in
+succession on hardware with `--forbid-trap` enabled. The loader writes shared
+RAM through cpu3's debug context before setting/resuming cpu0, avoiding a
+repeatable OpenOCD sticky-abort state left on cpu0 after a completed payload;
+execution remains exclusively on cpu0.
+
 ### 2026-07-25: Real UART0 RX Interrupt for `el0_shell` -- Retiring the FIFO-Drop Workaround (Issue #158 follow-up)
 
 Issue #158's own real fork()/execve() work (below) left a genuine

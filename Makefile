@@ -215,7 +215,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemubuild qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-stm32-net-l2 hwcheck-rpi3 hwcheck-rpi3-net hwcheck-rpi3-net-l2 stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck allcheck-build clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos rpi3-http-server rpi5-start profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
+.PHONY: build test qemubuild qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-stm32-net-l2 hwcheck-rpi3 hwcheck-rpi3-net hwcheck-rpi3-net-l2 hwcheck-rpi5 stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck allcheck-build clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos rpi3-http-server rpi5-start profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
 
 .DEFAULT_GOAL := build
 
@@ -2061,17 +2061,7 @@ hwcheck-rpi3-net: $(RPI3_KERNELS) examples/common_rpi3/jtag_stub.img
 hwcheck-rpi3-net-l2: $(RPI3_KERNELS) examples/common_rpi3/jtag_stub.img
 	@NET_L2_ONLY=1 bash scripts/run_hwtest_rpi3_net.sh
 
-# -- Raspberry Pi 5 (BCM2712) bring-up: Stage A (UART hello-world spike) ------
-# Not yet wired into hwcheck-rpi3/allcheck -- this is the FIRST attempt at
-# real RPi5 hardware, following this repo's own incremental-verification
-# convention (port one example -> verify -> real hardware -> document, see
-# examples/common_rpi5/AGENTS.md for the sourced facts this port rests on
-# and what remains UNCONFIRMED). Build with `make examples/start/kernel_rpi5.elf`
-# and `make examples/common_rpi5/jtag_stub.img`, flash the .img as the SD
-# card's kernel_2712.img (config.txt needs `kernel=kernel_2712.img` and
-# `os_check=0`), then try scripts/rpi5_jtag_load.sh by hand. Do not add a
-# `hwcheck-rpi5` target or fold this into `allcheck`/`check` until at least
-# one example has actually run successfully on real hardware.
+# -- Raspberry Pi 5 (BCM2712) -------------------------------------------------
 RPI5_TARGET := aarch64-none-elf
 RPI5_CPU    := cortex-a76
 COMMON_RPI5_DIR          := examples/common_rpi5
@@ -2080,6 +2070,7 @@ COMMON_RPI5_STARTUP_O    := $(COMMON_RPI5_DIR)/startup.o
 COMMON_RPI5_LINK_LD      := $(COMMON_RPI5_DIR)/link.ld
 COMMON_RPI5_UART         := $(COMMON_RPI5_DIR)/uart.tkb
 COMMON_RPI5_PRINT        := $(COMMON_RPI5_DIR)/print.tkb
+COMMON_RPI5_PCIE         := $(COMMON_RPI5_DIR)/pcie.tkb
 COMMON_RPI5_JTAG_STUB_S  := $(COMMON_RPI5_DIR)/jtag_stub.S
 COMMON_RPI5_JTAG_STUB_O  := $(COMMON_RPI5_DIR)/jtag_stub.o
 COMMON_RPI5_JTAG_STUB_LD := $(COMMON_RPI5_DIR)/jtag_stub.ld
@@ -2100,8 +2091,8 @@ examples/common_rpi5/jtag_stub.img: examples/common_rpi5/jtag_stub.elf
 
 ## examples/start ported first, same as it was the first RPI3_EXAMPLES
 ## entry during RPi3's own bring-up (GitHub issue #140).
-examples/start/start_rpi5.o: examples/start/start.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
+examples/start/start_rpi5.o: examples/start/start.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
 
 examples/start/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) examples/start/start_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) examples/start/start_rpi5.o -o $@
@@ -2110,8 +2101,6 @@ examples/start/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) examples/start/start_rp
 ## brings up RP1's PCIe link (examples/common_rpi5/pcie.tkb) and, if
 ## successful, re-runs uart_init() (now targeting real, PCIe-mapped
 ## hardware) to print a confirmation over rp1_uart0.
-COMMON_RPI5_PCIE := $(COMMON_RPI5_DIR)/pcie.tkb
-
 examples/rp1_pcie_smoke/rp1_pcie_smoke_rpi5.o: examples/rp1_pcie_smoke/rp1_pcie_smoke.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
 
@@ -2126,6 +2115,14 @@ examples/rp1_pcie_smoke/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) examples/rp1_p
 ## is not stable across replug/container-recreate). Override only if the
 ## auto-detected device is wrong.
 RPI5_SERIAL_DEV ?=
+
+## hwcheck-rpi5: compile examples/start, inject it over SWD, and compare
+## its complete GPIO14/15 RP1-UART output on a real Raspberry Pi 5. The SD
+## card must already boot examples/common_rpi5/jtag_stub.img; this remains
+## opt-in and is not part of check/allcheck because it requires attached
+## hardware and cannot establish that boot prerequisite by itself.
+hwcheck-rpi5: examples/start/kernel_rpi5.elf
+	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_hwtest_rpi5.sh
 
 ## rpi5-start: manual convenience target for Stage A's first real-hardware
 ## attempts -- attach a UART reader, then inject examples/start over SWD.

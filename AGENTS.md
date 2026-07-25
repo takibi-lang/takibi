@@ -254,6 +254,7 @@ make hwcheck-stm32-net    # real-Ethernet hardware tests (needs the board's Ethe
 make stress-stm32-kvs-server-sdcard-rtos  # opt-in STM32 KVS concurrency stress test (not in allcheck)
 make hwcheck-rpi3   # opt-in Raspberry Pi 3B JTAG hardware integration test (not in allcheck, see examples/common_rpi3/AGENTS.md)
 make hwcheck-rpi3-net     # RPi3 real-Ethernet hardware tests (needs the board's Ethernet port -- behind its USB host stack, see examples/common_rpi3/AGENTS.md -- wired to this host)
+make hwcheck-rpi5   # opt-in RPi5 SWD injection + examples/start RP1-UART exact-output test (not in allcheck)
 make perfcheck      # real-hardware profiler smoke tests (not in allcheck -- shares phy_init's occasional link-negotiation flakiness with hwcheck-stm32-net, but adds no functional coverage beyond it)
 make allcheck       # clean/build, then QEMU + STM32 + RPi3 lanes in parallel
 make clean          # remove generated artifacts
@@ -558,9 +559,9 @@ scripts/
                      own point-to-point NIC/address.
   rpi5_jtag_load.sh -- RPi5 Stage A: injects an ELF over SWD via the official
                      Debug Probe (CMSIS-DAP) and examples/common_rpi5/bcm2712.cfg
-                     (vendored, upstream OpenOCD ships no bcm2712.cfg). Not yet
-                     wired into any `make hwcheck-*` target -- see
-                     examples/common_rpi5/AGENTS.md's Status section.
+                     (vendored, upstream OpenOCD ships no bcm2712.cfg).
+  run_hwtest_rpi5.sh -- make hwcheck-rpi5's real-board runner: injects
+                     examples/start and byte-compares its complete RP1-UART output.
   rpi5_jtag_reset.sh -- RPi5 reboot via a PSCI SYSTEM_RESET SMC call injected
                      over SWD (no nSRST line on this connector, confirmed --
                      see examples/common_rpi5/AGENTS.md item 3).

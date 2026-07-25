@@ -308,6 +308,21 @@ fn pcie2_root_bridge_setup() {
     *command_status = (*command_status & 0xFFFF0000) | 0x0006;
 }
 
+// Assign RP1's three fixed BARs and enable memory transactions. This is
+// deliberately not a general PCI resource allocator: BCM2712 has exactly one
+// soldered-down RP1 at bus 1/devfn 0, and these are the assignments proven on
+// the real board during issue #161 (the same layout Linux selected there).
+// Disable endpoint decoding while changing the BARs so no partially-updated
+// address can be observed on the link.
+fn pcie2_rp1_endpoint_setup() {
+    let cmd_status: u32 = pcie2_config_read32(1, 0, 4);
+    pcie2_config_write32(1, 0, 4, cmd_status & 0xFFFF0000);
+    pcie2_config_write32(1, 0, 0x10, 0x00410000); // BAR0: 16KB MSI-X aperture
+    pcie2_config_write32(1, 0, 0x14, 0);          // BAR1: 4MB peripheral aperture
+    pcie2_config_write32(1, 0, 0x18, 0x00400000); // BAR2: 64KB aperture
+    pcie2_config_write32(1, 0, 4, (cmd_status & 0xFFFF0000) | 0x0006);
+}
+
 // pcie2_init(): full bring-up sequence for BCM2712's third PCIe RC
 // (pcie2), attached to RP1. Returns true once the link is confirmed up
 // (PCIE_MISC_PCIE_STATUS's DL_ACTIVE+PHYLINKUP bits) -- does NOT itself

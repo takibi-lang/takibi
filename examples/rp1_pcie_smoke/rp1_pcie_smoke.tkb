@@ -28,22 +28,14 @@ fn app_main() {
     pcie_smoke_bar1_before = pcie2_config_read32(1, 0, 0x14);
     pcie_smoke_checkpoint = 3;
 
-    // Stop memory decoding while changing BARs, then reproduce Linux's
-    // complete RP1 resource assignment: BAR1 maps the 4MB peripheral
-    // aperture at PCI address 0, BAR2 maps the following 64KB aperture,
-    // and BAR0 maps the 16KB MSI-X aperture immediately above them.
-    let cmd_status: u32 = pcie2_config_read32(1, 0, 4);
-    pcie2_config_write32(1, 0, 4, cmd_status & 0xFFFF0000);
-    pcie2_config_write32(1, 0, 0x10, 0x00410000);
-    pcie2_config_write32(1, 0, 0x14, 0);
-    pcie2_config_write32(1, 0, 0x18, 0x00400000);
+    // Use the same fixed endpoint assignment as the normal platform path.
+    pcie2_rp1_endpoint_setup();
     pcie_smoke_checkpoint = 4;
     pcie_smoke_bar0_after = pcie2_config_read32(1, 0, 0x10);
     pcie_smoke_bar1_after = pcie2_config_read32(1, 0, 0x14);
     pcie_smoke_bar2_after = pcie2_config_read32(1, 0, 0x18);
     pcie_smoke_checkpoint = 5;
 
-    pcie2_config_write32(1, 0, 4, (cmd_status & 0xFFFF0000) | 0x0006);
     pcie_smoke_checkpoint = 6;
     pcie_smoke_cmd_after = pcie2_config_read32(1, 0, 4);
     pcie_smoke_checkpoint = 7;

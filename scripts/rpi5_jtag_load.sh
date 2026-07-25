@@ -104,15 +104,25 @@ if [ "$current_mode" != "EL2H" ] || [ "$mmu_state" != "disabled" ]; then
 fi
 echo "halted core is at EL2H with MMU disabled (PC=$halted_pc) -- safe to inject"
 
-# Pass 2: only reached once the check above confirms a clean catch.
+# Pass 2: only reached once the check above confirms a clean catch. Load the
+# shared physical RAM through cpu3's debug context, then set/resume cpu0. A
+# completed payload leaves cpu0 parked at .Lhalt, where this OpenOCD/aarch64
+# combination can subsequently report a sticky debug abort when load_image
+# itself uses cpu0. The other core reaches the same RAM without that stale
+# cpu0 debug state; execution still starts exclusively on cpu0.
 LOG=$(mktemp)
 if ! openocd "${OPENOCD_ARGS[@]}" \
     -c 'init' \
     -c 'targets bcm2712.cpu0' \
     -c 'halt' \
+    -c 'targets bcm2712.cpu3' \
+    -c 'halt' \
     -c "load_image $ELF 0 elf" \
+    -c 'targets bcm2712.cpu0' \
     -c "reg sp $stack_top" \
     -c "reg pc $entry_pc" \
+    -c 'resume' \
+    -c 'targets bcm2712.cpu3' \
     -c 'resume' \
     -c 'shutdown' > "$LOG" 2>&1
 then

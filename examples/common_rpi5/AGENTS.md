@@ -15,9 +15,10 @@ while SWD remained active. This
 directory is a from-scratch port effort, not a copy of a proven mechanism
 the way most of this repo's other RPi3 examples are additions to an
 already-working target -- follow this repo's usual incremental-verification
-process (see the root `AGENTS.md`). No automated `hwcheck-rpi5` target is
-added by this milestone: the direct smoke test still requires an attached
-board, SWD probe, and separately-wired GPIO14/15 UART path.
+process (see the root `AGENTS.md`). `make hwcheck-rpi5` now builds and
+injects `examples/start`, then byte-compares its complete GPIO14/15 UART
+output; it remains opt-in because it requires an attached board, SWD probe,
+and separately-wired GPIO14/15 UART path.
 
 **The architectural constraint confirmed 2026-07-25 through extensive
 real-hardware debugging (see "A real bug this port found" and "UART
@@ -327,7 +328,7 @@ number. The Makefile's `RPI5_SERIAL_DEV` (same convention as
 `STM32_SERIAL_DEV`/`RPI3_SERIAL_DEV`) overrides the auto-detected device if
 ever needed.
 
-## Build and try (no `make hwcheck-rpi5` yet -- see Status above)
+## Build and try
 
 ```
 make examples/common_rpi5/jtag_stub.img
@@ -335,6 +336,8 @@ make examples/common_rpi5/jtag_stub.img
 scripts/rpi5_prepare_sdcard.sh /path/to/mounted/boot/partition
 # power-cycle the board, then:
 make rpi5-start
+# or run the finite exact-output integration test:
+make hwcheck-rpi5
 ```
 
 `scripts/rpi5_prepare_sdcard.sh` -- NOT `rpi3_prepare_sdcard.sh` -- is
@@ -364,8 +367,8 @@ RP1's PCIe link ourselves. Decided with the user 2026-07-25: pursue this
 as its own new milestone, tracked as
 https://github.com/takibi-lang/takibi/issues/161.
 
-### Status (2026-07-25 real-hardware session): PCIe link UP, RP1 identifies
-### itself; memory-mapped register access still not working
+### Status (2026-07-25 real-hardware session): enumeration, mapped access,
+### and normal examples/start platform initialization proven
 
 `examples/common_rpi5/pcie.tkb` ports the minimal `pcie-brcmstb.c`
 bring-up sequence for BCM2712's third PCIe RC (`pcie2`, attached to RP1).
