@@ -2067,6 +2067,8 @@ RPI5_CPU    := cortex-a76
 COMMON_RPI5_DIR          := examples/common_rpi5
 COMMON_RPI5_STARTUP_S    := $(COMMON_RPI5_DIR)/startup.S
 COMMON_RPI5_STARTUP_O    := $(COMMON_RPI5_DIR)/startup.o
+COMMON_RPI5_MMU_S        := $(COMMON_RPI5_DIR)/mmu.S
+COMMON_RPI5_MMU_O        := $(COMMON_RPI5_DIR)/mmu.o
 COMMON_RPI5_LINK_LD      := $(COMMON_RPI5_DIR)/link.ld
 COMMON_RPI5_UART         := $(COMMON_RPI5_DIR)/uart.tkb
 COMMON_RPI5_PRINT        := $(COMMON_RPI5_DIR)/print.tkb
@@ -2076,6 +2078,9 @@ COMMON_RPI5_JTAG_STUB_O  := $(COMMON_RPI5_DIR)/jtag_stub.o
 COMMON_RPI5_JTAG_STUB_LD := $(COMMON_RPI5_DIR)/jtag_stub.ld
 
 $(COMMON_RPI5_STARTUP_O): $(COMMON_RPI5_STARTUP_S)
+	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
+
+$(COMMON_RPI5_MMU_O): $(COMMON_RPI5_MMU_S)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI5_JTAG_STUB_O): $(COMMON_RPI5_JTAG_STUB_S)
@@ -2093,27 +2098,28 @@ examples/common_rpi5/jtag_stub.img: examples/common_rpi5/jtag_stub.elf
 ## group RPi3 itself started from (GitHub issue #140) -- examples/start
 ## was ported and hardware-proven first (issue #161's own UART finale),
 ## the rest follow now that uart_puts()/RP1 PCIe bring-up are confirmed
-## working. Stage A (examples/common_rpi5/startup.S) still has no MMU and
-## no interrupt handling at all (see that directory's AGENTS.md "What's
+## working. Stage A (examples/common_rpi5/startup.S) still has no
+## interrupt handling (see that directory's AGENTS.md "What's
 ## deliberately NOT ported yet" section) -- anything needing rtc/timer/
 ## irq/echo/USB/networking/EL0/EL1/SMP stays out of this group until
-## issues #163 (MPIDR_EL1 core numbering), #164 (RP1 UART0 RX interrupt),
-## and #165 (MMU + exception handling) land, the same staged order RPi3
-## itself followed rather than porting speculatively ahead of it.
+## issues #163 (MPIDR_EL1 core numbering) and #164 (RP1 UART0 RX
+## interrupt) land, the same staged order RPi3 itself followed rather
+## than porting speculatively ahead of it.
 ##
-## type_system_suite/algorithm_suite are DELIBERATELY excluded here,
-## unlike RPi3's own first group -- real hardware testing (2026-07-25)
-## found both hang for real: ESR_EL2=0x96000061 (same-EL Data Abort,
-## DFSC=Alignment fault) at the `packed` struct-field-access case and
-## inside examples/common/inet_checksum.tkb's own unaligned 16-bit reads
-## (hit via the algorithm_suite's ip_parse-adjacent inet_checksum case).
-## With stage-1 MMU disabled, AArch64 treats ALL memory as Device
-## (nGnRnE), where unaligned accesses always fault regardless of
-## SCTLR.A -- an architectural rule, not a compiler or test-harness bug.
-## RPi3's own first group never hit this because its generic kernel link
-## rule already includes COMMON_RPI3_MMU_O (MMU has been on since RPi3's
-## very first example). Re-add both suites here once issue #165 lands.
-RPI5_EXAMPLES := start basic_suite bump scheduler klock_guard percpu
+## type_system_suite/algorithm_suite are back in this group (issue #165,
+## examples/common_rpi5/mmu.S) after real hardware testing (2026-07-25)
+## found both hang without an MMU: ESR_EL2=0x96000061 (same-EL Data
+## Abort, DFSC=Alignment fault) at the `packed` struct-field-access case
+## and inside examples/common/inet_checksum.tkb's own unaligned 16-bit
+## reads. With the stage-1 MMU disabled, AArch64 treats ALL memory as
+## Device (nGnRnE), where unaligned accesses always fault regardless of
+## SCTLR.A -- an architectural rule, not a compiler or test-harness bug,
+## the exact ESR RPi3 itself hit early in its own MMU history. Every
+## RPI5_KERNELS link below now includes COMMON_RPI5_MMU_O, matching how
+## RPi3's own generic kernel link rule has included COMMON_RPI3_MMU_O
+## since its first example.
+RPI5_EXAMPLES := start basic_suite type_system_suite algorithm_suite bump scheduler \
+                 klock_guard percpu
 RPI5_OBJS     := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/$(e)_rpi5.o)
 RPI5_KERNELS  := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 # Same one-hardening-switch reasoning as RPI3_TAKIBI_FLAGS above.
@@ -2123,10 +2129,12 @@ $(RPI5_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $(COMMON_RPI
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
 
 examples/basic_suite/basic_suite_rpi5.o: $(BASIC_SUITE_SOURCES)
+examples/type_system_suite/type_system_suite_rpi5.o: $(TYPE_SYSTEM_SUITE_SOURCES)
+examples/algorithm_suite/algorithm_suite_rpi5.o: $(ALGORITHM_SUITE_SOURCES) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL)
 
 $(RPI5_KERNELS): examples/%/kernel_rpi5.elf: \
-    $(COMMON_RPI5_STARTUP_O) examples/%/$$*_rpi5.o $(COMMON_RPI5_LINK_LD)
-	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) examples/$*/$*_rpi5.o -o $@
+    $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) examples/%/$$*_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) examples/$*/$*_rpi5.o -o $@
 
 ## rp1_pcie_smoke: GitHub issue #161's own first real-hardware test --
 ## brings up RP1's PCIe link (examples/common_rpi5/pcie.tkb) and, if

@@ -59,15 +59,29 @@ OPENOCD_ARGS=(
 # argument directly; OpenOCD's own SWD session is expected to drop the
 # instant the SMC actually reboots the SoC, so its exit status is
 # deliberately ignored, same reasoning as RPi3's watchdog-reset script.
+#
+# The `mww` trampoline writes go through cpu3's debug context, and only
+# cpu0's own x0/pc/resume go through cpu0's -- found the hard way
+# (GitHub issue #165 real-hardware session, 2026-07-25): writing through
+# cpu0 directly repeatedly left this script unable to reconnect to a
+# real spin-loop stub after supposedly succeeding (kept reporting the
+# SAME pre-reset PC back, meaning the reset silently never ran). This is
+# the exact "cpu0 sticky debug abort after a completed payload" hazard
+# scripts/rpi5_jtag_load.sh's own load pass already works around by
+# writing through cpu3 instead -- this script needed the identical fix,
+# just never got it when first written, since it does its own separate
+# `mww` writes rather than reusing rpi5_jtag_load.sh's load_image path.
 RESET_ADDR=0x00100000
 PSCI_SYSTEM_RESET=0x84000009
 
 openocd "${OPENOCD_ARGS[@]}" \
     -c 'init' \
-    -c 'targets bcm2712.cpu0' \
+    -c 'targets bcm2712.cpu3' \
     -c 'halt' \
     -c "mww $RESET_ADDR 0xd4000003" \
     -c "mww $((RESET_ADDR + 4)) 0x14000000" \
+    -c 'targets bcm2712.cpu0' \
+    -c 'halt' \
     -c "reg x0 $PSCI_SYSTEM_RESET" \
     -c "reg pc $RESET_ADDR" \
     -c 'resume' \

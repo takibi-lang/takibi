@@ -247,16 +247,20 @@ run_hw_test_rpi5_suite() {
 # Mirrors RPI5_EXAMPLES in the Makefile -- see
 # examples/common_rpi5/AGENTS.md for what's still deliberately excluded
 # (anything needing rtc/timer/irq/USB/networking/EL0/EL1/SMP, until
-# issues #163/#164/#165 land; type_system_suite/algorithm_suite ALSO
-# excluded -- confirmed via real hardware to hang on an unaligned-access
-# Data Abort with the stage-1 MMU disabled, see the Makefile's own
-# RPI5_EXAMPLES comment). Every .expected/cases.txt fixture here is
-# reused byte-for-byte from the QEMU/STM32/RPi3 suites -- uart_puts/
-# uart_print_* write identical bytes on every HAL.
+# issues #163/#164 land). type_system_suite/algorithm_suite are back
+# (issue #165, examples/common_rpi5/mmu.S) after real hardware testing
+# confirmed both pass with the stage-1 MMU enabled. Every .expected/
+# cases.txt fixture here is reused byte-for-byte from the QEMU/STM32/
+# RPi3 suites -- uart_puts/uart_print_* write identical bytes on every
+# HAL.
 run_hw_test_rpi5 "start (rpi5)" "$REPO_ROOT/examples/start/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/start/start.expected"
 run_hw_test_rpi5_suite basic_suite "$REPO_ROOT/examples/basic_suite/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/basic_suite/cases.txt"
+run_hw_test_rpi5_suite type_system_suite "$REPO_ROOT/examples/type_system_suite/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/type_system_suite/cases.txt"
+run_hw_test_rpi5_suite algorithm_suite "$REPO_ROOT/examples/algorithm_suite/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/algorithm_suite/cases.txt"
 run_hw_test_rpi5 "bump (rpi5)" "$REPO_ROOT/examples/bump/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/bump/bump.expected"
 run_hw_test_rpi5 "scheduler (rpi5)" "$REPO_ROOT/examples/scheduler/kernel_rpi5.elf" \

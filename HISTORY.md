@@ -15,6 +15,63 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-25: RPi5 -- MMU + Exception Handling Without Weakening SWD Loader Safety (Issue #165)
+
+Ported RPi3's identity-map MMU idea to RPi5 as `examples/common_rpi5/
+mmu.S`, simplified to L1 BLOCK descriptors only (no L2/L3) since
+BCM2712's physical map puts RAM and every MMIO region this code touches
+on separate 1GB-aligned boundaries. A live-hardware register probe run
+first (a tiny standalone ELF reading `HCR_EL2` into memory and halting)
+confirmed TF-A hands off with VHE inactive (`HCR_EL2` bit 34 clear), so
+`TCR_EL2` could reuse RPi3's own "basic" (non-VHE) field layout --
+verified by recomputing RPi3's known-good `0x80803519` from the same
+formula before deriving RPi5's own value (T0SZ=27/PS=40-bit, covering
+the RP1 outbound window's full 37-bit range).
+
+Two real bugs, both found on real hardware: (1) enabling I-cache broke
+`examples/common_rpi5/pcie.tkb`'s own link-training/reset delays, which
+are plain iteration-count busy-loops calibrated for cache-off speed, not
+a real timer -- every RPi5 example went UART-silent with caches on
+(`pcie2_init()` returning false, FR reads back `0xDEADDEAD`), fixed by
+enabling `SCTLR_EL2.M` only and leaving `C`/`I` off (sufficient: the
+unaligned-access-always-faults rule is tied to Device-vs-Normal memory
+type, not caching); (2) `scripts/rpi5_jtag_reset.sh` had its own latent
+cpu0-sticky-debug-abort bug (its trampoline writes went through cpu0
+instead of cpu3, unlike `rpi5_jtag_load.sh`'s own already-fixed load
+path), uncovered by this session's unusually high rate of repeated
+reset/inject cycles, fixed the same way.
+
+The SWD loader's safety check (previously "EL2H + MMU disabled", invalid
+the moment takibi payloads enable their own MMU) was redesigned to
+"EL2H + halted PC below 32MB" -- every takibi RPi5 payload runs from a
+fixed low physical address, while a live Raspberry Pi OS kernel runs
+from a canonical high VA regardless of MMU state. **A real, dangerous
+bug was caught before this shipped**: the first implementation compared
+PC via bash arithmetic, which parses a 64-bit hex literal with the top
+bit set as a negative signed integer -- confirmed the exact real
+canonical Linux VA from issue #161's own history would have made the
+check wrongly ACCEPT an injection into a live kernel. Fixed via
+fixed-width hex string comparison instead, verified both accept/refuse
+paths in isolation before touching hardware, then against real hardware.
+
+The one exception vector takibi code can actually take ("Current EL
+SPx, Synchronous") now saves ESR_EL2/FAR_EL2/ELR_EL2 into registers
+readable after a hang -- discovered along the way that OpenOCD's `mdw`
+stops working entirely once the MMU is on for this hardware/tool
+combination (confirmed via `reg`-based reads still working fine), so the
+evidence is kept in `x1`/`x2`/`x3`, not only memory. Proven end-to-end
+with a real deliberately-caused exception (forced PC to an unmapped
+address, resumed, confirmed `ESR_EL2` decoded to exactly the expected
+Level 1 Translation fault with `FAR_EL2`/`ELR_EL2` both showing the
+faulting address).
+
+Result: `make hwcheck-rpi5` passes 46/46 (confirmed twice), including
+`type_system_suite`/`algorithm_suite` -- `packed` and `inet_checksum`/
+`ip_parse`/`tcp_parse` specifically, the cases that hung without an
+MMU -- re-added to `RPI5_EXAMPLES` now that they pass. Full trace,
+including the register-probe methodology and every hardware-confirmed
+constraint, in `examples/common_rpi5/AGENTS.md`. Issue #165 closed.
+
 ### 2026-07-25: RPi5 -- Ported the First RPi3-Style Example Batch, Retired `make rpi5-start`
 
 With `examples/start` proven end-to-end on hardware (see the entry

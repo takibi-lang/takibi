@@ -65,6 +65,122 @@ row** (`basic_suite`'s own `cases.txt` expands to `start`, `hello`,
 individual tests) -- this batch is now genuinely hardware-proven, not
 just build-verified.
 
+## Status update (2026-07-25, same day, later still): GitHub issue #165
+## (MMU + exception handling) landed, ALL 46 RPI5_EXAMPLES tests pass
+
+`examples/common_rpi5/mmu.S` ports RPi3's own identity-map MMU idea
+(`examples/common_rpi3/mmu.S`), simplified because BCM2712's physical
+map, unlike BCM2837's, puts RAM and every MMIO region this code touches
+on separate 1GB-aligned boundaries far apart -- L1 BLOCK descriptors
+only, no L2/L3 tables needed at all. T0SZ=27 (37-bit input address,
+exactly covers the RP1 outbound window's top byte, `0x1FFFFFFFFF`), PS=
+40-bit. **A live-hardware register probe was run FIRST, before writing
+any of this**: a tiny standalone ELF read `HCR_EL2`/`ID_AA64MMFR1_EL1`/
+`SCTLR_EL2` into a fixed memory word and halted, confirming
+`HCR_EL2=0x0000000080000000` -- bit 34 (E2H/VHE) clear -- so TF-A hands
+off to a takibi payload WITHOUT VHE active, meaning `TCR_EL2` uses the
+same "basic" (non-VHE) field layout RPi3's Cortex-A53 always used. This
+let `TCR_EL2`'s value be derived by recomputing RPi3's own known-good
+`0x80803519` from the same formula (confirmed to reproduce it exactly)
+before changing T0SZ/PS for RPi5's own address range, rather than
+guessing at a VHE-shaped alternate layout that turned out not to apply.
+
+**Two real bugs found on real hardware, not by inspection, both fixed**:
+
+1. **Enabling D-cache/I-cache broke `pcie.tkb`'s own PCIe bring-up.**
+   With MMU+both caches on, every RPi5 example went completely
+   UART-silent: `platform_init()`'s `pcie2_init()` started returning
+   `false` (so `uart_init()` never ran), and `uart_putc`'s FR-register
+   poll read back `0xDEADDEAD` forever -- the exact PCIe-poison pattern
+   from issue #161's own history. Root cause: `pcie.tkb`'s link-
+   training/PHY/reset delays are plain empty-loop iteration counts
+   calibrated for cache-off speed (its own comments already say "rough",
+   "~100-200us", "~5ms"), not a real timer read; I-cache makes the CPU
+   retire that fixed count far faster in wall-clock time, so real PCIe
+   hardware timing requirements silently stop being honored. Confirmed
+   by reading back `uart_putc`'s locally-cached FR value via `reg x9`
+   over SWD (`0xDEADDEAD`) and by rebuilding with only the two cache-
+   enable `orr` instructions removed, which reproduces the correct
+   `foo(5)=1\r\nbar(3,4)=0\r\nbar(1,10)=1\r\n` output every time. Fixed
+   by enabling `SCTLR_EL2.M` (MMU) only, leaving `C`/`I` off -- sufficient
+   for this issue's actual requirement, since the "unaligned access
+   always faults" rule is tied to Device-vs-Normal MEMORY TYPE under
+   stage-1 translation, not to whether caching is active; Normal memory
+   with caching off already exempts RAM from that rule. Revisiting
+   `pcie.tkb`'s delays against a real ARM Generic Timer read (same
+   source `examples/common_rpi3/rtc.tkb` already reads) is a separate,
+   later change, not this issue's scope.
+2. **`scripts/rpi5_jtag_reset.sh` had its own latent cpu0-sticky-abort
+   bug**, uncovered by this session's much higher rate of repeated
+   reset/inject cycles than typical usage: its trampoline `mww` writes
+   went through cpu0's own debug context, the exact "cpu0 sticky debug
+   abort after a completed payload" hazard `scripts/rpi5_jtag_load.sh`'s
+   own load pass already works around (by writing through cpu3 instead,
+   per its own header comment) -- this script just never got the same
+   treatment when first written. Symptom: the script kept reporting
+   PASS/"reset confirmed" logic aside, actual `reg pc` reads after a
+   "successful" reset kept returning the SAME pre-reset PC, meaning the
+   SMC never actually ran. Fixed identically: `mww` through
+   `bcm2712.cpu3`, only `reg x0`/`reg pc`/`resume` through `bcm2712.cpu0`.
+   Confirmed reliable across many consecutive resets afterward.
+
+**Loader safety check redesigned** (this issue's own core requirement --
+the previous "EL2H + MMU disabled" discriminator stopped being valid the
+moment takibi payloads started enabling the MMU themselves). Consulted
+with the user on the design tradeoff (a stronger canary-based check
+requiring a `jtag_stub.S` change and a host-side SD-card reflash this
+container cannot perform, vs. a simpler check needing no such reflash);
+chose the simpler option. New discriminator: `current mode == EL2H AND
+halted PC < 0x02000000` (32MB) -- every takibi RPi5 payload runs from a
+fixed low physical address (`jtag_stub.S` at `0x80000`, every
+`kernel_rpi5.elf` at `0x200000`, see `link.ld`) with over 100x headroom
+for growth, while a live, fully-booted Raspberry Pi OS kernel runs from
+a canonical HIGH virtual address (confirmed empirically in issue #161's
+own history: `0xffffd06fcf296448`) regardless of EL/MMU state. **A real,
+dangerous bug was caught and fixed before this ever shipped**: the first
+implementation compared PC via bash arithmetic (`$((halted_pc))`), and
+bash's `$(())` parses a 64-bit hex literal with the top bit set as a
+NEGATIVE signed integer -- confirmed directly that comparing the exact
+real canonical Linux VA above against the 32MB threshold this way
+evaluates FALSE (wraps negative, reads as "less than", so the check
+would have WRONGLY ACCEPTED an injection into a live kernel: precisely
+the failure this whole mechanism exists to prevent). Fixed by comparing
+as fixed-width (16-hex-digit, zero-padded) STRINGS instead of numbers --
+two equal-length hex strings sort in the same order as their numeric
+magnitude, sidestepping the overflow entirely. Verified both the accept
+and refuse paths, isolated from hardware first (a script-only unit test
+against captured log text, covering the real canonical-VA value, the
+exact 32MB boundary, and ordinary low addresses), then against real
+hardware (forced `reg pc` to an out-of-range value and confirmed the
+script refuses; confirmed low addresses inject normally).
+
+**Exception checkpoint proven on real hardware, not just written**: the
+"Current EL SPx, Synchronous" vector slot now saves `ESR_EL2`/
+`FAR_EL2`/`ELR_EL2` into `x1`/`x2`/`x3` (kept live at the final `wfe`
+halt, readable via `reg x1`/`reg x2`/`reg x3` -- NOT via `mdw`, see the
+"Remaining Stage A constraints" section below for why) plus a
+`sync_exception_evidence` memory copy for whichever debug path can
+actually read it. Deliberately triggered a real exception to prove
+it end-to-end: forced `reg pc 0x50000000` (an address with no `l1_table`
+entry at all) and resumed -- landed exactly at `.Lsync_spx_halt`,
+`ESR_EL2=0x86000005` (EC=0x21 "Instruction Abort, no EL change",
+IFSC=0b000101 "Translation fault, level 1" -- exactly right, since
+`0x50000000`'s L1 index, 1, was never populated), `FAR_EL2`=
+`ELR_EL2`=`0x50000000`, both exactly the faulting address. Not a
+theoretical claim -- a real fault was caused and correctly diagnosed.
+
+**Result**: `make hwcheck-rpi5` passes **46/46**, confirmed twice in a
+row, covering every `RPI5_EXAMPLES` entry including `type_system_suite`/
+`algorithm_suite` (re-added to the Makefile and
+`scripts/run_hwtest_rpi5.sh` now that they pass) -- `packed` and
+`inet_checksum`/`ip_parse`/`tcp_parse` specifically, the exact cases
+that originally hung without an MMU. All four of issue #165's acceptance
+criteria are met: a concrete example (in fact the whole existing RPi5
+example set) runs with the MMU enabled; the loader still refuses a
+simulated live-OS PC; the loader accepts real takibi payloads post-MMU;
+and a deliberately-caused exception reaches a diagnosable checkpoint,
+proven against real hardware, not asserted from code reading alone.
+
 ## Status update (2026-07-25, same day, earlier): first example-port
 ## batch added, build-verified only -- NOT yet run on real hardware this
 ## session (superseded by the real-hardware update directly above)
@@ -361,18 +477,19 @@ not publish a public BCM2712 datasheet the way it once did for BCM2835.
   Vendored into this repo because upstream OpenOCD 0.12.0 does not ship a
   `bcm2712.cfg` at all.
 
-## What's deliberately NOT ported yet (Stage A scope)
+## What's deliberately NOT ported yet (post-issue-#165 scope)
 
-Unlike `examples/common_rpi3/startup.S` (which accreted MMU setup, IRQ/HVC/
-EL0 vector handling, and HCR_EL2 routing over many later milestones), this
-directory's `startup.S` has none of that yet: no `mmu_init`, no interrupt
-unmasking, no HVC/lower-EL vectors -- every exception vector just spins.
-Add each piece back only once a concrete example actually needs it, the
-same order RPi3 itself was built in. Do not port RPi3's USB host stack
-(`usb_dwc2.tkb`/`usb_hub.tkb`/`usb_host.tkb`/`lan9514.tkb`) or its
-Ethernet driver at all -- RPi5's Ethernet path is PCIe-attached (via RP1),
-architecturally unrelated to RPi3's USB-attached LAN9514, and is its own
-future subject if pursued, not a port of the existing driver.
+`examples/common_rpi5/mmu.S` (GitHub issue #165) added the stage-1 MMU
+(identity map, EL2) and one real synchronous-exception checkpoint, but
+`startup.S` still has none of RPi3's IRQ/HVC/EL0 vector handling or
+HCR_EL2 IRQ/FIQ routing -- every vector slot except "Current EL SPx,
+Synchronous" still just spins. Add each remaining piece only once a
+concrete example actually needs it, the same order RPi3 itself was built
+in. Do not port RPi3's USB host stack (`usb_dwc2.tkb`/`usb_hub.tkb`/
+`usb_host.tkb`/`lan9514.tkb`) or its Ethernet driver at all -- RPi5's
+Ethernet path is PCIe-attached (via RP1), architecturally unrelated to
+RPi3's USB-attached LAN9514, and is its own future subject if pursued,
+not a port of the existing driver.
 
 ## Remaining Stage A constraints
 
@@ -383,20 +500,28 @@ future subject if pursued, not a port of the existing driver.
 2. **MPIDR_EL1 core-numbering.** Assumed `mpidr_el1 & 3` still yields the
    plain 0-3 core number, same as BCM2837, since BCM2712 is also a single
    quad-core cluster -- not independently verified. Tracked by issue #163.
-3. **The loader's MMU-disabled safety discriminator is Stage-A-specific.**
-   Revisit it before adding an RPi5 MMU initialization path. The RPi5 MMU,
-   exception, and loader-safety milestone is issue #165 (related to the
-   general MMU issue #67).
-4. **Any unaligned memory access faults, hardware-confirmed.** With the
-   stage-1 MMU disabled, AArch64 treats all memory as Device (nGnRnE),
-   where an unaligned load/store always raises a same-EL Data Abort
-   (confirmed via `ESR_EL2=0x96000061`, DFSC=Alignment fault) landing in
-   the still-unhandled "Current EL SPx, Synchronous" vector, i.e. a
-   permanent hang. Found via `examples/packed`'s deliberately-misaligned
-   struct field access and `examples/common/inet_checksum.tkb`'s
-   unaligned 16-bit wire reads -- see the status update above for the
-   full trace. Do not port any example doing unaligned access (packed
-   structs, wire-format parsing, checksums) until issue #165 lands.
+3. **D-cache/I-cache stay OFF, deliberately, even though the MMU is now
+   on (issue #165).** `examples/common_rpi5/pcie.tkb`'s own link-training/
+   PHY/reset delays are plain empty-loop iteration counts calibrated for
+   cache-off execution speed, not a real timer read -- enabling I-cache
+   made the same fixed instruction count complete far faster in
+   wall-clock time, silently breaking real PCIe hardware timing
+   requirements (confirmed on real hardware: `pcie2_init()` started
+   returning `false` and every RPi5 example went UART-silent with caches
+   on, byte-identical correct output with them off). See
+   `examples/common_rpi5/mmu.S`'s own header comment on the `SCTLR_EL2`
+   write for the full trace. Revisit together with rewriting those delays
+   against a real timer, not as an isolated cache flag flip.
+4. **`mdw` (OpenOCD's raw memory-read command) does not work once the
+   MMU is on.** Confirmed real and reproducible against this exact
+   CMSIS-DAP/BCM2712/OpenOCD-0.12.0 combination: `mdw` against ordinary,
+   definitely-mapped low RAM returns `Error: abort occurred` the moment
+   `SCTLR_EL2.M=1`, even though `reg`-based reads (general-purpose AND
+   system registers, e.g. `reg x9`, `reg esr_el2`) keep working
+   correctly. Read state after a hang via `reg`, not `mdw`, from this
+   point on -- see `sync_exception_evidence`'s own comment in
+   `startup.S` for where this was found and how the exception checkpoint
+   was redesigned around it.
 
 Interrupt-driven RP1 UART0 RX is separate from these startup constraints and
 is tracked by issue #164.

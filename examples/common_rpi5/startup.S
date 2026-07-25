@@ -138,11 +138,18 @@ _start:
     b.lt    .Lbss_loop
 .Lbss_done:
 
-    /* No mmu_init call yet (unlike RPi3): Stage A runs entirely with the
-       EL2 stage 1 MMU off, so every address examples/common_rpi5/uart.tkb
-       uses is a real physical address. Add a dynamic/identity MMU setup
-       (examples/common_rpi3/mmu.S's pattern) only once a concrete example
-       actually needs it, same incremental order RPi3 itself followed. */
+    /* MMU setup (examples/common_rpi5/mmu.S, GitHub issue #165) MUST run
+       AFTER BSS clear, not before: mmu_init's l1_table lives in .bss, so
+       the ordinary BSS-clear loop above is what zeroes it to "no entries
+       valid" before mmu_init populates the ones it actually uses --
+       reversing this order would zero out the live page table mmu_init
+       just built, out from under the MMU it just enabled. See mmu.S's
+       header comment for why this exists (unaligned-access faults from
+       LLVM's own store-merging optimization under Device-memory
+       semantics, not from anything a .tkb source does wrong -- the exact
+       ESR_EL2=0x96000061 signature RPi3 already hit for the same reason
+       early in its own MMU history). */
+    bl      mmu_init
 
     /* IRQ/FIQ left routed to EL1 (HCR_EL2.IMO/FMO untouched) and DAIF left
        masked -- Stage A has no interrupt source configured yet, unlike
@@ -173,10 +180,69 @@ disable_irq:
     msr     DAIFSet, #0x2
     ret
 
+/* sync_exception_evidence: ESR_EL2/FAR_EL2/ELR_EL2, written by the
+   "Current EL SPx, Synchronous" vector slot below before it parks --
+   GitHub issue #165's "add useful synchronous-exception evidence instead
+   of silent spin-only failure" requirement, applied to the one execution
+   level takibi code actually runs at (EL2h, using SP_EL2/SPx) and the one
+   already hit for real: both examples/packed and
+   examples/common/inet_checksum.tkb hung here with ESR_EL2=0x96000061
+   before examples/common_rpi5/mmu.S existed (see that file's header
+   comment).
+
+   Kept live in x1/x2/x3 at the final wfe/b halt below, NOT only in this
+   memory location -- found the hard way, same session: OpenOCD's `mdw`
+   against this exact address reliably returns "Error: abort occurred"
+   once the MMU is on (a real, reproducible tooling limitation of this
+   CMSIS-DAP/BCM2712/OpenOCD-0.12.0 combination, confirmed by also seeing
+   `mdw` fail against ordinary already-mapped low RAM, not anything
+   specific to this address), even though `reg`-based register reads
+   (general-purpose AND system registers, e.g. `reg x9`, `reg esr_el2`)
+   keep working fine with the MMU on. So the reliable read-after-a-hang
+   command is `reg x1` / `reg x2` / `reg x3` (ESR/FAR/ELR respectively),
+   not `mdw`; sync_exception_evidence itself is kept anyway as a second,
+   memory-resident copy for whichever debug path (a future OpenOCD fix,
+   a different tool) can actually read it.
+
+   Only this one vector slot gets real handling; every other slot still
+   just spins, same as RPi3's own early history (IRQ/HVC/EL0 vectors were
+   each added later, one concrete need at a time) -- Stage A still routes
+   no interrupt source and drops to no lower EL, so Synchronous at
+   Current-EL-SPx is the only exception this code can actually take. */
+    .section .bss
+    .align  4
+    .global sync_exception_evidence
+sync_exception_evidence:
+    .space  24
+
+/* Plain .text, not .text.vectors: only the table itself (below) needs
+   2KB alignment / the KEEP(*(.text.vectors)) placement link.ld reserves
+   right after .text.boot -- this handler is reached by an absolute
+   branch from the table, not by falling through, so it has no placement
+   constraint of its own and putting a second .text.vectors fragment
+   here would just make the table's own 2KB alignment depend on this
+   fragment's size threading correctly through the assembler/linker
+   merge, which is fragile to reason about for no benefit. */
+    .section .text
+.Lsync_spx_evidence:
+    adrp    x0, sync_exception_evidence
+    add     x0, x0, :lo12:sync_exception_evidence
+    mrs     x1, esr_el2
+    mrs     x2, far_el2
+    mrs     x3, elr_el2
+    str     x1, [x0]
+    str     x2, [x0, #8]
+    str     x3, [x0, #16]
+.Lsync_spx_halt:
+    wfe
+    b       .Lsync_spx_halt
+
 /* -- Exception vector table (must be 2KB aligned) ---------------------------
    Every slot just spins, same rationale as examples/common_rpi3/startup.S's
    own table header comment: a spin at a known PC is inspectable over SWD;
-   real dispatch is added only once something needs it. */
+   real dispatch is added only once something needs it. The one exception
+   is "Current EL SPx, Synchronous" (0x200), the slot takibi code actually
+   traps to -- see .Lsync_spx_evidence above. */
     .section .text.vectors
     .align  11
     .global exception_vectors
@@ -189,7 +255,7 @@ exception_vectors:
     .align  7
     b       .                   /* 0x180: Current EL SP0, SError */
     .align  7
-    b       .                   /* 0x200: Current EL SPx, Synchronous */
+    b       .Lsync_spx_evidence /* 0x200: Current EL SPx, Synchronous */
     .align  7
     b       .                   /* 0x280: Current EL SPx, IRQ */
     .align  7
