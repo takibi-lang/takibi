@@ -215,10 +215,16 @@ fn pcie2_serdes_enable() {
 }
 
 // MISC_CTRL: enable SCB access + UR-on-bad-config-read + the RCB
-// 64-byte/max-payload-size mode bits brcm_pcie_setup() always sets
-// (burst-size field left at its reset value -- UNCONFIRMED whether a
-// specific encoding is required here for RP1 specifically; revisit if
-// link training succeeds but real register reads still misbehave).
+// 64-byte/max-payload-size mode bits brcm_pcie_setup() always sets.
+// Burst-size field (bits 20-21, PCIE_MISC_MISC_CTRL_MAX_BURST_SIZE_MASK)
+// CORRECTED (2026-07-25): comparing live register state against a real
+// Linux boot found Linux's own value has bits 17/18/21 additionally set
+// (0x260000) beyond what this function was setting -- bit 21 is part of
+// the burst-size field, left at its (apparently zero) reset value by an
+// earlier version. Bits 17/18 are not otherwise documented in the
+// research this port did; included here since they matched Linux's own
+// live, working configuration exactly, even though their individual
+// purpose isn't independently confirmed.
 fn pcie2_misc_ctrl_setup() {
     let misc_ctrl: *io u32 = 0x1000124008; // PCIE_MISC_MISC_CTRL
     let mut mctrl: u32 = *misc_ctrl;
@@ -226,14 +232,30 @@ fn pcie2_misc_ctrl_setup() {
     mctrl = mctrl | (1 << 13); // CFG_READ_UR_MODE
     mctrl = mctrl | (1 << 10); // PCIE_RCB_MPS_MODE
     mctrl = mctrl | (1 << 7);  // PCIE_RCB_64B_MODE
+    mctrl = mctrl | (1 << 17) | (1 << 18) | (1 << 21); // matches Linux's own live value
+    mctrl = mctrl & ~(1 << 20); // burst-size field: force bits[21:20]=0b10 exactly, not whatever bit 20 pre-existed
     *misc_ctrl = mctrl;
 }
 
-// Outbound window 0: CPU physical 0x1F00000000, size 1MB (just enough
-// to cover rp1_uart0 at +0x30000 -- deliberately far smaller than the
-// devicetree's own full ~4GB `ranges` window, since Stage 1 only needs
-// one register block, not general RP1 access) -> PCI address 0
+// Outbound window 0: CPU physical 0x1F00000000 -> PCI address 0
 // (brcm_pcie_set_outbound_win, window 0).
+//
+// SIZE CORRECTED (2026-07-25) after comparing live register state with a
+// real, working Linux boot (read over SWD while Linux had RP1 genuinely
+// working, via `sudo python3` + `/dev/mem` since the register block
+// isn't reachable from this debug port any other way while Linux's MMU
+// is on): Linux's own live WIN0_BASE_LIMIT is `0xfff00000`
+// (base_mb=0, limit_mb=0xFFF -- the full ~4GB window the devicetree's
+// own `ranges` property describes), NOT the deliberately-scoped-down
+// 1MB window (base_mb=limit_mb=0) an earlier version of this function
+// used. Every other register this function/pcie2_init() touches matched
+// Linux's own live values (WIN0_LO/HI both 0, WIN0_BASE_HI=0x1f) --
+// this was the one real difference, and strongly suspected to be why a
+// direct memory-mapped read of rp1_uart0 kept returning 0xDEADDEAD
+// despite the link being up and RP1 correctly enumerated: base_mb ==
+// limit_mb most likely encodes a degenerate/zero-sized window on this
+// hardware, not an inclusive 1-MB range as originally assumed. Matching
+// Linux's own full-size window removes that guess entirely.
 fn pcie2_outbound_window_setup() {
     let win0_lo: *io u32 = 0x100012400c;         // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_LO
     let win0_hi: *io u32 = 0x1000124010;         // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_HI
@@ -243,17 +265,13 @@ fn pcie2_outbound_window_setup() {
     *win0_lo = 0;
     *win0_hi = 0;
     let cpu_addr: usize = 0x1F00000000;
-    let win_size: usize = 0x100000;
+    let win_size: usize = 0x100000000; // 4GB, matching Linux's own live window and the devicetree's `ranges`
 
-    // CORRECTED (2026-07-25): an earlier version computed base/limit MB
-    // values from the FULL 40-bit cpu_addr and OR'd them into
-    // WIN0_BASE_LIMIT alone, silently truncating to 32 bits (the
-    // register read back 0x0000f000 afterward, not the intended
-    // 0x0001f000 -- the top bit was simply gone). WIN0_BASE_HI is a
-    // SEPARATE register for address bits above 32 (mirroring WIN0_HI's
-    // own split for the PCI-side address); WIN0_BASE_LIMIT's own
-    // base/limit-in-MB fields only ever describe the LOW 32 bits.
-    // Without this, the outbound window's real decoded CPU address
+    // WIN0_BASE_HI is a SEPARATE register for address bits above 32
+    // (mirroring WIN0_HI's own split for the PCI-side address);
+    // WIN0_BASE_LIMIT's own base/limit-in-MB fields only ever describe
+    // the LOW 32 bits. Without WIN0_BASE_HI, the outbound window's real
+    // decoded CPU address
     // range never actually covered 0x1F00030000 at all -- discovered by
     // reading these registers back and finding a value inconsistent
     // with what should have been written.

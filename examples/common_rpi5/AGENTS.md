@@ -287,12 +287,19 @@ future subject if pursued, not a port of the existing driver.
    resuming -- BCM2712's device tree declares PSCI with method `smc`, and
    TF-A (already confirmed present) implements the standard ARM PSCI
    interface at EL3 regardless of caller EL, the same mechanism Linux's
-   own `reboot` uses. Confirmed working live: reconnects within
-   ~2-3 seconds, lands back in `jtag_stub.S`'s spin loop, a real full
-   firmware reboot (config.txt/kernel_2712.img both reread), not a
-   CPU-local restart. (Suggested by another AI the user consulted, given
-   full attribution here since the working mechanism came from that
+   own `reboot` uses. Confirmed working for CPU-local restarts:
+   reconnects within ~2-3 seconds, lands back in whatever `kernel_2712.img`
+   was already resident. (Suggested by another AI the user consulted,
+   given full attribution here since the working mechanism came from that
    advice, not this file's own prior research.)
+   **CORRECTED same day**: this does NOT reliably reload a DIFFERENT
+   `kernel_2712.img` after swapping the SD card's file the way a real
+   power cycle does -- confirmed the hard way: swapped from Linux back to
+   `jtag_stub.img` (verified 8 bytes on disk), ran this script, and it
+   booted Linux again anyway. Use it freely to re-run the SAME image
+   (e.g. between `rp1_pcie_smoke` iterations while it stays the stub);
+   after changing WHICH file is on the SD card, a real physical power
+   cycle is still required.
 4. **MPIDR_EL1 core-numbering.** Assumed `mpidr_el1 & 3` still yields the
    plain 0-3 core number, same as BCM2837, since BCM2712 is also a single
    quad-core cluster -- not independently verified.
@@ -476,10 +483,51 @@ chips work, which would make `enable_rp1_uart=1`'s documented "firmware
 initialises RP1 UART0" behavior an ACTIVE step (loading/kicking RP1's own
 firmware), not just leaving PCI state untouched.
 
-See GitHub issue #161 for tracking; the next concrete step is figuring
-out which of these two hypotheses (or something else) actually explains
-the remaining gap, ideally by comparing against what a real Linux boot's
-own `pcie2`/RP1 register state looks like once Linux itself has finished
-its own enumeration (read those same registers over SWD while Linux is
-up and RP1 is known-working, the same technique that found the
-`console=ttyAMA0` UART address earlier in this file's history).
+### Status (2026-07-25, continued further): Linux-comparison approach
+### found and fixed the outbound window size AND the real BAR bug
+
+The suggested next step above -- comparing against a real, working Linux
+boot -- is exactly what resolved the remaining gaps. The AP-based SWD
+memory read (used throughout this file for `.bss`/plain-RAM addresses)
+does NOT work for MMIO registers while Linux's own MMU is active (tried
+directly: reads back all-zero, not real values); core-context reads fail
+outright (`abort occurred`, physical addresses aren't valid VAs under
+Linux's own translation regime). The reliable path instead: SSH into the
+running Linux and read registers from userspace directly (`sudo python3`
++ `/dev/mem` for raw MMIO, `sudo lspci -vvv` for RP1's own PCI config
+state) -- Linux's own CPU-side access obviously works, sidestepping the
+debug-port limitation entirely.
+
+- **Outbound window size was wrong.** Linux's own live
+  `WIN0_BASE_LIMIT` is `0xfff00000` (base_mb=0, limit_mb=0xFFF -- the
+  full ~4GB window the devicetree's `ranges` property describes), not
+  the deliberately-scoped-down 1MB window (base_mb=limit_mb=0) this file
+  had been using. Every OTHER register matched Linux's live values
+  exactly (`WIN0_LO`/`WIN0_HI`=0, `WIN0_BASE_HI`=`0x1f`) -- strongly
+  suggesting `base_mb == limit_mb` encodes a degenerate/zero-sized
+  window on this hardware, not an inclusive 1MB range as originally
+  assumed. Fixed to match Linux's own full-size window exactly. Also
+  found and fixed a smaller `MISC_CTRL` discrepancy the same way: bits
+  17/18/21 (part of the burst-size field) were left at their un-set reset
+  value; matching Linux's own live `0x263480` fixed that too. **Neither
+  fix alone made the FR read succeed.**
+- **The real bug, found via `sudo lspci -vvv`**: RP1's Region 1 (BAR1,
+  config offset `0x14`) is base `0x1f00000000`, size 4M -- and
+  `rp1_uart0` (`0x1F00030000`) falls INSIDE that range. Region 0 (BAR0,
+  config offset `0x10`, base `0x1f00410000`, size 16K) is a completely
+  different, unrelated window -- `lspci`'s own MSI-X capability entry
+  confirms it's specifically the MSI-X vector table/PBA, not general
+  register space. **Every earlier attempt this session assigned BAR0**
+  (offset `0x10`) to PCI address 0 -- the wrong BAR entirely; BAR1 was
+  never touched, left at its own unconfigured/size-query reset state.
+  Fixed: `examples/rp1_pcie_smoke` now assigns BAR1 (offset `0x14`), not
+  BAR0. Testing this fix on real hardware is in progress as of this
+  writing.
+- **Also learned the hard way**: `scripts/rpi5_jtag_reset.sh`'s PSCI
+  reset does NOT reliably reload a DIFFERENT `kernel_2712.img` after the
+  SD card's file is swapped -- see that script's own corrected header
+  comment. A real physical power cycle is still required whenever the SD
+  card's file actually changes; the PSCI reset is only proven for
+  re-running the SAME resident image.
+
+See GitHub issue #161 for tracking.

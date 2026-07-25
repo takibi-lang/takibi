@@ -1,17 +1,16 @@
 // Step-by-step real-hardware bisection for GitHub issue #161 (see
-// examples/common_rpi5/AGENTS.md's PCIe bring-up section). Link up, RP1
-// identified (vendor 0x1de4/device 0x0001), but Command register showed
-// Memory Space Enable clear (0x0000) and BAR0 read back 0xFFFFC000 --
-// the classic PCI BAR-size-query pattern (implies a 16KB decode window),
-// not a real assigned address. This version assigns BAR0 to PCI address
-// 0 (matching pcie2_outbound_window_setup's own PCI-side target) and
-// sets the Command register's Memory Space Enable + Bus Master Enable
-// bits, then finally tries uart_init()/uart_puts() over rp1_uart0 for
-// real.
+// examples/common_rpi5/AGENTS.md's PCIe bring-up section). Root cause
+// found via `sudo lspci -vvv` on a real, working Linux boot: rp1_uart0
+// (0x1F00030000) falls inside RP1's Region 1 (BAR1, config offset 0x14,
+// base 0x1f00000000, size 4M) -- NOT Region 0 (BAR0, offset 0x10, base
+// 0x1f00410000, size 16K, which lspci's own MSI-X capability entry shows
+// is actually the MSI-X vector table/PBA, unrelated to general register
+// access). Every earlier attempt this session assigned BAR0, the wrong
+// BAR entirely. This version assigns BAR1 instead.
 let mut pcie_smoke_checkpoint: u32 = 0;
 let mut pcie_smoke_result: u32 = 0xAAAAAAAA;
-let mut pcie_smoke_bar0_before: u32 = 0xAAAAAAAA;
-let mut pcie_smoke_bar0_after: u32 = 0xAAAAAAAA;
+let mut pcie_smoke_bar1_before: u32 = 0xAAAAAAAA;
+let mut pcie_smoke_bar1_after: u32 = 0xAAAAAAAA;
 let mut pcie_smoke_cmd_after: u32 = 0xAAAAAAAA;
 let mut pcie_smoke_fr: u32 = 0xAAAAAAAA;
 
@@ -25,12 +24,12 @@ fn app_main() {
     }
     pcie_smoke_result = 1;
 
-    pcie_smoke_bar0_before = pcie2_config_read32(0, 0, 0x10);
+    pcie_smoke_bar1_before = pcie2_config_read32(0, 0, 0x14);
     pcie_smoke_checkpoint = 3;
 
-    pcie2_config_write32(0, 0, 0x10, 0);
+    pcie2_config_write32(0, 0, 0x14, 0);
     pcie_smoke_checkpoint = 4;
-    pcie_smoke_bar0_after = pcie2_config_read32(0, 0, 0x10);
+    pcie_smoke_bar1_after = pcie2_config_read32(0, 0, 0x14);
     pcie_smoke_checkpoint = 5;
 
     let cmd_status: u32 = pcie2_config_read32(0, 0, 4);

@@ -14,10 +14,26 @@
 # research) implements the standard ARM PSCI firmware interface at EL3
 # regardless of which lower EL issues the call, so an `smc` from our
 # EL2H stub/payload reaches it the same way Linux's own `reboot` does.
-# Confirmed working live (2026-07-25): reconnected within ~2-3 seconds,
-# landed back in the jtag_stub.S spin loop, a real full firmware reboot
-# (config.txt/kernel_2712.img both reread from the SD card), not merely
-# a CPU-local restart.
+# Confirmed working for CPU-local restarts (2026-07-25): reconnects
+# within ~2-3 seconds (sometimes briefly passing through a mid-boot state
+# around PC 0x9c before settling), landing back in whatever
+# kernel_2712.img was ALREADY resident. Genuinely reboots the CPU/core
+# complex, unlike a plain debug halt.
+#
+# CORRECTED, same day: an earlier version of this comment claimed this
+# also reliably reloads a DIFFERENT kernel_2712.img after swapping the
+# SD card's file -- that was WRONG. Confirmed the hard way: swapped
+# kernel_2712.img from Linux back to jtag_stub.img on the SD card (file
+# size on disk verified 8 bytes), ran this script, and it landed back in
+# Linux again (PC at a canonical high VA), not the stub -- meaning this
+# reset path does NOT reliably re-read the SD card's current file the way
+# a real power cycle does; it appears to replay whatever kernel image is
+# already resident (DRAM-cached, or the firmware/EEPROM's own boot
+# staging skips a fresh SD read on this kind of warm reset). Use this
+# script freely to re-run the SAME kernel_2712.img (e.g. between
+# `rp1_pcie_smoke` iterations while it stays the stub) -- but after
+# swapping the SD card's file to something DIFFERENT, a real physical
+# power cycle is still required.
 #
 # WARNING: like RPi3's watchdog-based reset, this really does reboot the
 # whole SoC -- do not run this against a board you intend to keep a live
