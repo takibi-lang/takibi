@@ -270,43 +270,17 @@ Ethernet driver at all -- RPi5's Ethernet path is PCIe-attached (via RP1),
 architecturally unrelated to RPi3's USB-attached LAN9514, and is its own
 future subject if pursued, not a port of the existing driver.
 
-## Explicitly UNCONFIRMED -- check these first if Stage A does not work
+## Remaining Stage A constraints
 
-1. **`jtag_stub.ld`'s 0x80000 load address.** Assumed by analogy with
-   RPi3's own kernel8.img convention; not verified against RPi5 firmware's
-   actual default load address for a non-Image-header raw kernel.
-2. ~~No GPIO/pinmux step needed for the debug UART.~~ **RESOLVED (was the
-   wrong question)** -- see "UART investigation" above: the real blocker
-   was a wrong UART address (RP1's `uart0`, not BCM2712's `uart10`), and
-   RP1's own uninitialized PCIe link, not a GPIO/pinmux step.
-3. ~~SRST over the Debug Probe's SWD connector.~~ **RESOLVED (2026-07-25),
-   but not via SRST.** Tried for real: OpenOCD's generic `reset halt`
-   fails with `bcm2712.cpu0: how to reset?` -- confirms the Debug Probe's
-   SWD wiring carries no nSRST line and `bcm2712.cfg` defines no
-   BCM2712-specific reset handler, matching community reports found
-   during this port's original research. `scripts/rpi5_jtag_reset.sh` now
-   reboots the board a different way instead: injects a 2-instruction
-   trampoline (`smc #0; b .`) at a fixed unused RAM address and sets
-   `x0` to PSCI's `SYSTEM_RESET` function ID (`0x84000009`) before
-   resuming -- BCM2712's device tree declares PSCI with method `smc`, and
-   TF-A (already confirmed present) implements the standard ARM PSCI
-   interface at EL3 regardless of caller EL, the same mechanism Linux's
-   own `reboot` uses. Confirmed working for CPU-local restarts:
-   reconnects within ~2-3 seconds, lands back in whatever `kernel_2712.img`
-   was already resident. (Suggested by another AI the user consulted,
-   given full attribution here since the working mechanism came from that
-   advice, not this file's own prior research.)
-   **CORRECTED same day**: this does NOT reliably reload a DIFFERENT
-   `kernel_2712.img` after swapping the SD card's file the way a real
-   power cycle does -- confirmed the hard way: swapped from Linux back to
-   `jtag_stub.img` (verified 8 bytes on disk), ran this script, and it
-   booted Linux again anyway. Use it freely to re-run the SAME image
-   (e.g. between `rp1_pcie_smoke` iterations while it stays the stub);
-   after changing WHICH file is on the SD card, a real physical power
-   cycle is still required.
-4. **MPIDR_EL1 core-numbering.** Assumed `mpidr_el1 & 3` still yields the
+1. **PSCI reset is not a substitute for a power cycle after changing the
+   SD-card payload.** It reliably reruns the same resident image, but a
+   changed `kernel_2712.img` may not be reloaded. Power-cycle after replacing
+   that file.
+2. **MPIDR_EL1 core-numbering.** Assumed `mpidr_el1 & 3` still yields the
    plain 0-3 core number, same as BCM2837, since BCM2712 is also a single
    quad-core cluster -- not independently verified.
+3. **The loader's MMU-disabled safety discriminator is Stage-A-specific.**
+   Revisit it before adding an RPi5 MMU initialization path.
 
 ## Identifying the UART device: RPi5's Debug Probe and the STM32 board's
 ## ST-Link both enumerate as ttyACM*
@@ -366,6 +340,11 @@ separate `rp1_uart0` (GPIO14/15), which in turn requires bringing up
 RP1's PCIe link ourselves. Decided with the user 2026-07-25: pursue this
 as its own new milestone, tracked as
 https://github.com/takibi-lang/takibi/issues/161.
+
+The following subsections are a chronological investigation log. Statements
+such as "remaining gap" describe the state at that checkpoint and are
+superseded by the final-status subsection; they are retained because the
+failed hypotheses and register evidence explain the fixes now in `pcie.tkb`.
 
 ### Status (2026-07-25 real-hardware session): enumeration, mapped access,
 ### and normal examples/start platform initialization proven

@@ -6,6 +6,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERIAL_DEV="${RPI5_SERIAL_DEV:-$("$REPO_ROOT/scripts/rpi5_uart_dev.sh")}"
 ELF="$REPO_ROOT/examples/start/kernel_rpi5.elf"
+EXPECTED="$REPO_ROOT/examples/start/start.expected"
 POLL_INTERVAL=0.05
 CAPTURE_MAX_SECS=5
 STABLE_POLLS_NEEDED=6
@@ -20,7 +21,6 @@ stty -F "$SERIAL_DEV" 115200 raw -echo
 work_dir=$(mktemp -d)
 uart_log="$work_dir/uart.log"
 loader_log="$work_dir/loader.log"
-expected="$work_dir/expected.log"
 reader_pid=""
 
 cleanup() {
@@ -33,7 +33,6 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
 
-printf 'foo(5)=1\r\nbar(3,4)=0\r\nbar(1,10)=1\r\n' > "$expected"
 : > "$uart_log"
 cat "$SERIAL_DEV" > "$uart_log" 2>/dev/null &
 reader_pid=$!
@@ -68,14 +67,14 @@ kill "$reader_pid" 2>/dev/null || true
 wait "$reader_pid" 2>/dev/null || true
 reader_pid=""
 
-if cmp -s "$expected" "$uart_log"; then
+if cmp -s "$EXPECTED" "$uart_log"; then
     echo "PASS: RPi5 start (SWD injection + RP1 UART exact output)"
     exit 0
 fi
 
 echo "FAIL: RPi5 start UART output mismatch" >&2
 echo "expected:" >&2
-od -An -tx1c "$expected" >&2
+od -An -tx1c "$EXPECTED" >&2
 echo "actual:" >&2
 od -An -tx1c "$uart_log" >&2
 echo "loader log:" >&2

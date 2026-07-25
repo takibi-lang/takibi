@@ -58,6 +58,12 @@ RAM through cpu3's debug context before setting/resuming cpu0, avoiding a
 repeatable OpenOCD sticky-abort state left on cpu0 after a completed payload;
 execution remains exclusively on cpu0.
 
+A closing documentation audit removed the remaining current-tense Stage-A
+claims that RPi5 had not run on hardware, replaced the resolved "unconfirmed"
+list with the actual reset/MMU/core-numbering constraints, and made the RPi5
+hardware runner reuse `examples/start/start.expected` rather than maintaining
+a second copy of the expected bytes.
+
 ### 2026-07-25: Real UART0 RX Interrupt for `el0_shell` -- Retiring the FIFO-Drop Workaround (Issue #158 follow-up)
 
 Issue #158's own real fork()/execve() work (below) left a genuine

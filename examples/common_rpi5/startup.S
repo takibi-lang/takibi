@@ -1,5 +1,5 @@
-/* Raspberry Pi 5 (BCM2712) bare-metal startup -- Stage A (UART hello-world
-   spike only, GitHub issue TBD). Deliberately much smaller than
+/* Raspberry Pi 5 (BCM2712) bare-metal startup -- Stage A (RP1 PCIe + UART
+   polling, GitHub issue #161). Deliberately much smaller than
    examples/common_rpi3/startup.S: no MMU, no HVC/EL1/EL0 vectors, no IRQ
    routing. Those were all added to the RPi3 file over many later hardening
    passes; porting all of them here before a single byte has ever reached
@@ -14,12 +14,10 @@
    loop the RPi5 boot chain (EEPROM -> TF-A BL31, which hands off 64-bit
    payloads at EL2 per Trusted Firmware-A's own rpi5 platform docs) reaches
    first; OpenOCD then halts core 0, `load_image`s this file's linked ELF,
-   pokes PC/SP, and resumes -- see scripts/rpi5_jtag_load.sh. UNLIKE RPi3's
-   6-pin GPIO JTAG header (no wired reset line, hence RPi3's own
-   watchdog-register reset trick), the official Debug Probe uses a real
-   dedicated SWD debug connector that may carry a genuine SRST line -- this
-   is UNCONFIRMED as of this writing and is exactly the first thing
-   scripts/rpi5_jtag_reset.sh's own header comment flags as untested. */
+   pokes PC/SP, and resumes -- see scripts/rpi5_jtag_load.sh. The official
+   Debug Probe's SWD connection has no usable nSRST line on this board;
+   scripts/rpi5_jtag_reset.sh uses PSCI SYSTEM_RESET and documents its
+   same-resident-image limitation. */
     .section .text.boot
 
 /* Same architecture-generic ARMv8-A CLIDR_EL1/CSSELR_EL1/CCSIDR_EL1
@@ -81,8 +79,8 @@ _start:
        (bits[1:0] here, same as RPi3) is assumed to still be the plain
        0-3 core number -- UNCONFIRMED, first thing to check via OpenOCD's
        per-core `bcm2712.cpu0`..`cpu3` targets if core selection ever looks
-       wrong. Cores 1-3 are never touched by Stage A's JTAG injection
-       (scripts/rpi5_jtag_load.sh only pokes bcm2712.cpu0), so this gate is
+       wrong. The loader may use cpu3's debug context to write shared RAM,
+       but only cpu0's PC/SP are redirected to this payload; this gate remains
        defensive/for-parity-with-RPi3 rather than load-bearing yet. */
     mrs     x0, mpidr_el1
     and     x0, x0, #3

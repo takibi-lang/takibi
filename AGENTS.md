@@ -523,11 +523,10 @@ examples/
                      (USB bulk transfers here are request/response, not async)
     netconfig.tkb -- OUR_MAC (locally-administered)/OUR_IP (192.168.20.2, this
                      board's own dedicated point-to-point NIC subnet)
-  common_rpi5/    -- Raspberry Pi 5 (BCM2712) bare-metal HAL, Stage A only
-                     (UART hello-world spike, not yet run on real hardware) --
-                     see its own AGENTS.md for sourced facts (debug UART
-                     address/clock, EL2 handoff, GIC-400) and everything still
-                     UNCONFIRMED. SWD via the official Debug Probe
+  common_rpi5/    -- Raspberry Pi 5 (BCM2712) bare-metal HAL: proven RP1 PCIe
+                     enumeration and polling UART0 output for examples/start;
+                     see its own AGENTS.md for the real-hardware evidence and
+                     remaining constraints. SWD via the official Debug Probe
                      (CMSIS-DAP), not RPi3's FTDI/JTAG 6-pin header.
   <name>/         -- each directory: see the leading comment in <name>.tkb for a description.
                      Every example is now a single file compiled for both targets -- no

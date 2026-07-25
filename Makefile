@@ -2124,13 +2124,10 @@ RPI5_SERIAL_DEV ?=
 hwcheck-rpi5: examples/start/kernel_rpi5.elf
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_hwtest_rpi5.sh
 
-## rpi5-start: manual convenience target for Stage A's first real-hardware
-## attempts -- attach a UART reader, then inject examples/start over SWD.
-## Deliberately does NOT call scripts/rpi5_jtag_reset.sh first (unlike
-## rpi3-http-server's unconditional reset): whether `reset halt` even works
-## on this board is itself unconfirmed (see examples/common_rpi5/AGENTS.md
-## item 3), and folding an unproven reset into the very first load attempt
-## would make it unclear which step actually failed. Flash
+## rpi5-start: interactive convenience target -- attach a UART reader, then
+## inject examples/start over SWD. Deliberately does not reset first: PSCI
+## reset is only reliable for re-running the same resident SD-card image and
+## is unnecessary for ordinary injection. Flash
 ## examples/common_rpi5/jtag_stub.img as kernel_2712.img and power-cycle
 ## the board by hand first if it is not already sitting at the stub.
 rpi5-start: examples/start/kernel_rpi5.elf
