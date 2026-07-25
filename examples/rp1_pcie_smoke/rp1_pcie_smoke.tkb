@@ -1,0 +1,32 @@
+// First real-hardware test for GitHub issue #161: bring up RP1's PCIe
+// link (examples/common_rpi5/pcie.tkb's pcie2_init()) and confirm
+// rp1_uart0 becomes real, reachable hardware -- i.e. that
+// examples/common_rpi5/uart.tkb's own uart_puts() (already targeting
+// 0x1F00030000, see that file's header comment) actually produces
+// output afterward, unlike every previous attempt this session (which
+// consistently read back 0xDEADDEAD, PCIe's "unmapped" poison pattern).
+//
+// platform_init() (this file's shared runtime, examples/common/
+// runtime.tkb) already calls uart_init() once before app_main() runs --
+// that first call is harmless but ineffective (the PCIe window isn't
+// mapped yet, so it writes into unmapped/poisoned address space, same
+// as every earlier attempt). Calling uart_init() again here, only after
+// pcie2_init() confirms the link is up, is what actually configures the
+// now-reachable real hardware.
+//
+// If pcie2_init() returns false, nothing can be printed (the only UART
+// this board's debug connector can reach right now is rp1_uart0, which
+// is exactly what failed to come up) -- read
+// examples/common_rpi5/pcie.tkb's own PCIE_MISC_PCIE_STATUS register
+// (0x1000124068) directly over SWD in that case, same as this session's
+// own earlier diagnostic approach.
+fn app_main() {
+    if (pcie2_init()) {
+        uart_init();
+        uart_puts("rp1 pcie link up\r\n");
+        let vendor_device: u32 = pcie2_config_read32(1, 0, 0);
+        uart_puts("rp1 cfg[0]=0x");
+        uart_print_hex(vendor_device as i32);
+        uart_puts("\r\n");
+    }
+}

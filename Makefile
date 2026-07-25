@@ -2106,6 +2106,18 @@ examples/start/start_rpi5.o: examples/start/start.tkb $(COMMON_RPI5_UART) $(COMM
 examples/start/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) examples/start/start_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) examples/start/start_rpi5.o -o $@
 
+## rp1_pcie_smoke: GitHub issue #161's own first real-hardware test --
+## brings up RP1's PCIe link (examples/common_rpi5/pcie.tkb) and, if
+## successful, re-runs uart_init() (now targeting real, PCIe-mapped
+## hardware) to print a confirmation over rp1_uart0.
+COMMON_RPI5_PCIE := $(COMMON_RPI5_DIR)/pcie.tkb
+
+examples/rp1_pcie_smoke/rp1_pcie_smoke_rpi5.o: examples/rp1_pcie_smoke/rp1_pcie_smoke.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
+
+examples/rp1_pcie_smoke/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) examples/rp1_pcie_smoke/rp1_pcie_smoke_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) examples/rp1_pcie_smoke/rp1_pcie_smoke_rpi5.o -o $@
+
 ## RPI5_SERIAL_DEV: same convention as STM32_SERIAL_DEV/RPI3_SERIAL_DEV --
 ## empty by default, resolved at runtime by scripts/rpi5_uart_dev.sh (which
 ## picks the ttyACM device out by its /dev/serial/by-id label, not by

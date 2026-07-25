@@ -1,0 +1,198 @@
+// Raspberry Pi 5 (BCM2712) minimal PCIe root-complex bring-up -- GitHub
+// issue #161. Goal: bring RP1's PCIe link up and map its register space
+// into a fixed CPU physical address, so examples/common_rpi5/uart.tkb's
+// rp1_uart0 access (0x1F00030000, currently reading back 0xDEADDEAD --
+// see that file's header comment) becomes real hardware instead of an
+// unmapped/poisoned PCIe read.
+//
+// RP1 is attached to BCM2712's THIRD PCIe root complex instance
+// (`pcie2` in raspberrypi/linux's bcm2712.dtsi, register base
+// 0x10_00120000) -- confirmed by cross-checking that instance's own
+// `ranges` property (`<0x02000000 0x00 0x00000000 0x1f 0x00000000 0x0
+// 0xfffffffc>`, i.e. CPU physical 0x1F00000000 upward maps to PCI
+// address 0) against the already-confirmed real CPU address of
+// rp1_uart0 (0x1F00030000 falls inside that window).
+//
+// This is a DELIBERATELY MINIMAL port of Linux's `pcie-brcmstb.c`
+// (`drivers/pci/controller/pcie-brcmstb.c`) bring-up sequence for the
+// BCM2712/"bcm7712" config -- enough to reach one already-known register
+// block (rp1_uart0), NOT general PCI enumeration (no MSI, no arbitrary
+// BAR sizing, no bus scanning beyond bus 1 device 0). Register offsets/
+// bit positions below are transcribed from that driver, not guessed;
+// see this file's own comments for exactly which function each block
+// corresponds to. Two things are DELIBERATELY SKIPPED, both flagged
+// UNCONFIRMED for later hardening once link-up itself is proven:
+//
+// 1. Inbound windows (`set_inbound_win_registers`/RC_BAR1_CONFIG) --
+//    these configure how the RC responds to PCIe-initiated (RP1 -> CPU
+//    memory) transactions, i.e. real DMA. Not needed for the CPU to read
+//    RP1's OWN registers (the only thing Stage 1 of issue #161 needs),
+//    and link training itself is a PHY/LTSSM-level negotiation that does
+//    not depend on these registers being configured first.
+// 2. `PCIE_MISC_HARD_DEBUG`'s exact SERDES_IDDQ bit position -- the
+//    driver source available for research did not show this constant's
+//    numeric value directly; bit 27 (0x08000000) is used below as the
+//    documented-elsewhere standard value across the Broadcom STB PCIe
+//    family, NOT independently confirmed for BCM2712 specifically.
+
+// pcie_rescal (examples/common_rpi5/AGENTS.md's own research: BCM2712's
+// shared SERDES calibration reset controller, compatible
+// "brcm,bcm7216-pcie-sata-rescal", base 0x10_00119500). Linux's
+// reset-brcmstb-rescal.c: set bit0 at +0x0 to start calibration, poll
+// bit0 at +0x8 until set (done), then clear bit0 at +0x0.
+fn pcie_rescal_reset() -> bool {
+    let start: *io u32 = 0x1000119500;
+    let status: *io u32 = 0x1000119508;
+
+    *start = (*start) | 1;
+
+    let mut done: bool = false;
+    for i: i32 in 0..<10000 {
+        if ((*status & 1) != 0) {
+            done = true;
+            break;
+        }
+    }
+    *start = (*start) & ~1;
+    return done;
+}
+
+// bcm_reset (compatible "brcm,brcmstb-reset", base 0x10_01504318):
+// Linux's reset-brcmstb.c banks resets in groups of 32, 0x18 bytes
+// apart, with paired SET (+0x00)/CLEAR (+0x04) registers per bank (write
+// 1 to SET to assert, write 1 to CLEAR to deassert -- not a
+// read-modify-write register). pcie2's own "swinit"/"bridge" reset
+// indices (32, 44 per bcm2712.dtsi's `resets = <&bcm_reset 5>, <&bcm_reset
+// 42>, <&pcie_rescal>` for pcie0, but pcie2 itself uses indices 32/44 --
+// see this file's own bcm2712.dtsi research) both fall in bank 1 (index
+// >> 5 == 1), at bits 0 and 12 respectively (index & 0x1f), so both can
+// be asserted/deasserted together with one write each.
+fn pcie2_bridge_reset(assert_reset: bool) {
+    let bank1_set: *io u32 = 0x1001504330;   // bank 1 = base(0x1001504318) + 0x18
+    let bank1_clear: *io u32 = 0x1001504334; // bank1_set + 0x04
+    let mask: u32 = (1 << 0) | (1 << 12);    // swinit (idx 32) | bridge (idx 44)
+
+    if (assert_reset) {
+        *bank1_set = mask;
+    } else {
+        *bank1_clear = mask;
+        for i: i32 in 0..<2000 { } // ~100-200us settle, same as Linux's usleep_range
+    }
+}
+
+// PCIE_MISC_PCIE_CTRL (pcie2 base 0x10_00120000 + 0x4064). Bit 2
+// (PCIE_PERSTB, 0x4): "Perst bit has moved and assert value is 0"
+// (brcm_pcie_perst_set_7278's own comment) -- write 0 to ASSERT PERST#,
+// write 1 to DEASSERT.
+fn pcie2_perst_set(assert_perst: bool) {
+    let ctrl: *io u32 = 0x1000124064;
+    let mut v: u32 = *ctrl;
+    if (assert_perst) {
+        v = v & ~(1 << 2);
+    } else {
+        v = v | (1 << 2);
+    }
+    *ctrl = v;
+}
+
+fn pcie2_link_up() -> bool {
+    let status: *io u32 = 0x1000124068; // PCIE_MISC_PCIE_STATUS
+    let v: u32 = *status;
+    let dl_active: u32 = v & 0x20;   // PCIE_MISC_PCIE_STATUS_PCIE_DL_ACTIVE_MASK
+    let phy_linkup: u32 = v & 0x10;  // PCIE_MISC_PCIE_STATUS_PCIE_PHYLINKUP_MASK
+    return (dl_active != 0) && (phy_linkup != 0);
+}
+
+// Reads a 32-bit value from PCIe config space for (bus, devfn) at byte
+// offset `where` (must be 4-byte aligned), via pcie2's indirect
+// EXT_CFG_INDEX/EXT_CFG_DATA registers (bcm7712 offsets 0x9000/0x8000 --
+// see brcm_pcie_map_bus's non-root-bus path). Standard PCI ECAM index:
+// (bus << 20) | (devfn << 12) | where.
+fn pcie2_config_read32(bus: u32, devfn: u32, reg_where: u32) -> u32 {
+    let idx_addr: *io u32 = 0x1000129000; // EXT_CFG_INDEX
+    let data_addr: *io u32 = 0x1000128000; // EXT_CFG_DATA
+
+    let idx: u32 = (bus << 20) | (devfn << 12) | (reg_where & ~3);
+    *idx_addr = idx;
+    let v: u32 = *data_addr;
+    return v;
+}
+
+// pcie2_init(): full bring-up sequence for BCM2712's third PCIe RC
+// (pcie2), attached to RP1. Returns true once the link is confirmed up
+// (PCIE_MISC_PCIE_STATUS's DL_ACTIVE+PHYLINKUP bits) -- does NOT itself
+// confirm RP1 responds in config space; call pcie2_config_read32(1, 0, 0)
+// afterward for that (a real vendor/device ID, not 0xFFFFFFFF, confirms
+// RP1 is actually enumerable before trusting the outbound-window-mapped
+// register reads in uart.tkb).
+fn pcie2_init() -> bool {
+    let hard_debug: *io u32 = 0x1000124304;   // PCIE_HARD_DEBUG (bcm7712 offset)
+    let misc_ctrl: *io u32 = 0x1000124008;    // PCIE_MISC_MISC_CTRL
+    let win0_lo: *io u32 = 0x100012400c;      // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_LO
+    let win0_hi: *io u32 = 0x1000124010;      // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_HI
+    let win0_base_limit: *io u32 = 0x1000124070; // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT
+
+    // 1. SERDES/PCIe/SATA shared calibration reset (must happen before
+    //    the bridge itself is taken out of reset, matching Linux's own
+    //    brcm_pcie_setup() ordering).
+    if (pcie_rescal_reset() == false) {
+        return false;
+    }
+
+    // 2. Assert bridge reset + PERST#, then deassert the bridge reset
+    //    (brcm_pcie_bridge_sw_init_set_generic's own sequence, using
+    //    bcm_reset since pcie2's devicetree node supplies a real
+    //    reset-controller phandle rather than relying on the
+    //    RGR1_SW_INIT_1 register fallback).
+    pcie2_bridge_reset(true);
+    pcie2_perst_set(true);
+    for i: i32 in 0..<400 { } // ~100-200us, matches Linux's usleep_range(100, 200)
+    pcie2_bridge_reset(false);
+
+    // 3. SerDes IDDQ (power-down) must be cleared before the PHY can
+    //    train -- UNCONFIRMED bit position, see this file's header
+    //    comment.
+    *hard_debug = (*hard_debug) & ~(1 << 27);
+    for i: i32 in 0..<400 { }
+
+    // 4. MISC_CTRL: enable SCB access + UR-on-bad-config-read + the RCB
+    //    64-byte/max-payload-size mode bits brcm_pcie_setup() always
+    //    sets (burst-size field left at its reset value -- UNCONFIRMED
+    //    whether a specific encoding is required here for RP1
+    //    specifically; revisit if link training succeeds but real
+    //    register reads still misbehave).
+    let mut mctrl: u32 = *misc_ctrl;
+    mctrl = mctrl | (1 << 12); // SCB_ACCESS_EN
+    mctrl = mctrl | (1 << 13); // CFG_READ_UR_MODE
+    mctrl = mctrl | (1 << 10); // PCIE_RCB_MPS_MODE
+    mctrl = mctrl | (1 << 7);  // PCIE_RCB_64B_MODE
+    *misc_ctrl = mctrl;
+
+    // 5. Outbound window 0: CPU physical 0x1F00000000, size 1MB (just
+    //    enough to cover rp1_uart0 at +0x30000 -- deliberately far
+    //    smaller than the devicetree's own full ~4GB `ranges` window,
+    //    since Stage 1 only needs one register block, not general RP1
+    //    access) -> PCI address 0 (brcm_pcie_set_outbound_win, window 0).
+    *win0_lo = 0;
+    *win0_hi = 0;
+    let cpu_addr: usize = 0x1F00000000;
+    let win_size: usize = 0x100000;
+    let cpu_addr_mb: u32 = (cpu_addr >> 20) as u32; // 0x1F000
+    let limit_mb: u32 = ((cpu_addr + win_size - 1) >> 20) as u32;
+    *win0_base_limit = (cpu_addr_mb) | (limit_mb << 20);
+
+    // 6. Deassert PERST#, then wait for link training to complete --
+    //    same 100ms budget (20 retries of ~5ms) as brcm_pcie_start_link().
+    pcie2_perst_set(false);
+    for i: i32 in 0..<2000000 { } // rough "config wait" delay before polling
+
+    let mut linked: bool = false;
+    for i: i32 in 0..<20 {
+        if (pcie2_link_up()) {
+            linked = true;
+            break;
+        }
+        for j: i32 in 0..<200000 { } // rough ~5ms
+    }
+    return linked;
+}
