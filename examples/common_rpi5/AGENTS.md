@@ -419,5 +419,67 @@ worth reusing for any future risky bring-up):
   needs an explicit `reset_config` line before SRST works over this
   adapter. Manual power-cycling is still required to recover from a hang.
 
-See GitHub issue #161 for the next concrete steps (RP1 BAR assignment/
-Command register enable, and the config-space `where`-offset mystery).
+### Status (2026-07-25, continued): outbound window BASE_HI bug fixed,
+### RP1 BAR/Command register properly configured, but memory access
+### STILL fails -- the config-space `where`-offset mystery WAS resolved
+
+Continuing the same real-hardware session (`scripts/rpi5_jtag_reset.sh`'s
+new PSCI-based reset made this MUCH faster to iterate -- see that
+script's own header comment, mechanism suggested by another AI the user
+separately consulted):
+
+- **The `where`-offset mystery is resolved.** Re-reading
+  `brcm_pcie_map_bus()` found the real bug: the INDEX register only ever
+  encodes bus/devfn (`where` forced to 0 there); `where` is instead added
+  directly to `EXT_CFG_DATA`'s own address (a real windowed region, not a
+  single register). An earlier version folded `where` into the index and
+  always read/wrote the same fixed `EXT_CFG_DATA` address regardless --
+  fixed via `pcie2_config_addr()`, now shared by both
+  `pcie2_config_read32`/`pcie2_config_write32`.
+- **RP1's Command register showed Memory Space Enable clear (0x0000),
+  and BAR0 read back `0xFFFFC000`** -- the classic PCI BAR-size-query
+  pattern (implies a 16KB decode window), not a real assigned address.
+  Assigned BAR0 to PCI address 0 (matching the outbound window's own
+  PCI-side target) and set Command register bits 1 (Memory Space Enable)
+  + 2 (Bus Master Enable) -- both writes stuck (BAR0 reads back 0,
+  Command reads back 0x0006). **Still no effect on the FR read.**
+- **A real, separate bug found and fixed in the outbound window setup
+  itself**: `pcie2_outbound_window_setup()` had been computing base/limit
+  MB values from the FULL 40-bit `cpu_addr` (`0x1F00000000`) and OR-ing
+  them directly into `WIN0_BASE_LIMIT` (a single 32-bit register) --
+  silently truncating the result (confirmed by reading the register back
+  afterward: `0x0000f000`, not the intended value). `WIN0_BASE_HI`
+  (offset `0x4080`) is a SEPARATE register for CPU address bits above 32
+  (mirroring `WIN0_HI`'s own split for the PCI-side address) that an
+  earlier version never touched at all. Fixed: `WIN0_BASE_HI` now gets
+  the real upper bits (`cpu_addr >> 32` = `0x1F`), and `WIN0_BASE_LIMIT`
+  is computed from `cpu_addr`'s low 32 bits only. Confirmed via readback
+  that all outbound-window registers now hold exactly the intended
+  values (`WIN0_LO`/`WIN0_HI`=0, `WIN0_BASE_LIMIT`=0, `WIN0_BASE_HI`=
+  `0x1f`) and the link is still up. **Still no effect on the FR read --
+  it remains `0xDEADDEAD`.**
+
+So: link up, RP1 correctly identified and its own Command/BAR registers
+properly configured, outbound window registers now provably holding the
+intended values -- and a direct memory-mapped read of `rp1_uart0`'s FR
+register still returns the same poison pattern as before any of this
+work started. This means the remaining gap is NOT in anything this file
+has touched so far. Leading open hypotheses for a future session (none
+yet confirmed): (a) BCM2712's own interconnect/bus-fabric may have a
+SEPARATE, chip-level address-routing decision (outside the PCIe RC's own
+registers entirely) governing which physical addresses even reach
+`pcie2`'s outbound-window logic at all, independent of anything
+configured so far; (b) RP1 itself may require more than generic PCI
+enumeration to actually respond on the wire -- e.g. a real firmware
+upload over the link, matching how some PCIe companion/IO-controller
+chips work, which would make `enable_rp1_uart=1`'s documented "firmware
+initialises RP1 UART0" behavior an ACTIVE step (loading/kicking RP1's own
+firmware), not just leaving PCI state untouched.
+
+See GitHub issue #161 for tracking; the next concrete step is figuring
+out which of these two hypotheses (or something else) actually explains
+the remaining gap, ideally by comparing against what a real Linux boot's
+own `pcie2`/RP1 register state looks like once Linux itself has finished
+its own enumeration (read those same registers over SWD while Linux is
+up and RP1 is known-working, the same technique that found the
+`console=ttyAMA0` UART address earlier in this file's history).

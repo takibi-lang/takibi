@@ -103,32 +103,42 @@ fn pcie2_link_up() -> bool {
     return (dl_active != 0) && (phy_linkup != 0);
 }
 
-// Reads a 32-bit value from PCIe config space for (bus, devfn) at byte
-// offset `where` (must be 4-byte aligned), via pcie2's indirect
-// EXT_CFG_INDEX/EXT_CFG_DATA registers (bcm7712 offsets 0x9000/0x8000 --
-// see brcm_pcie_map_bus's non-root-bus path). Standard PCI ECAM index:
-// (bus << 20) | (devfn << 12) | where.
+// Reads/writes a 32-bit value from/to PCIe config space for (bus, devfn)
+// at byte offset `where` (must be 4-byte aligned), via pcie2's indirect
+// EXT_CFG_INDEX/EXT_CFG_DATA registers (bcm7712 offsets 0x9000/0x8000).
 //
-// CONFIRMED on real hardware (2026-07-25, after link-up succeeded): RP1
-// itself answers at bus=0/devfn=0 in this simple single-RC/single-device
-// topology, NOT the bus=1 a standard PCI bus-numbering assumption would
-// suggest -- pcie2_config_read32(0, 0, 0) read back 0x00011de4 (vendor
-// 0x1de4 = Raspberry Pi Trading Ltd's own registered PCI vendor ID,
-// device 0x0001), a real, correct-looking identifier, while bus=1 only
-// ever returned 0xFFFFFFFF (no response). UNRESOLVED as of this writing:
-// reads at `where` offsets other than 0 (e.g. 4, 0x10) returned the
-// SAME 0x00011de4 value instead of the real Command/Status or BAR0
-// register content -- something about how `where` maps into this
-// indirect index/data mechanism is not yet correctly understood; do not
-// trust a non-zero `where` from this function until that's resolved.
-fn pcie2_config_read32(bus: u32, devfn: u32, reg_where: u32) -> u32 {
+// CORRECTED (2026-07-25): an earlier version folded `where` into the
+// INDEX register (`(bus<<20)|(devfn<<12)|where`) and always read/wrote
+// the same fixed EXT_CFG_DATA address, so every `where` read back
+// identically. Real cause, found by re-reading Linux's own
+// brcm_pcie_map_bus(): the index only ever encodes bus/devfn (`where`
+// forced to 0 there), and `where` is instead added directly to
+// EXT_CFG_DATA's own address -- EXT_CFG_DATA is a real windowed region
+// (spanning at least one function's 4KB ECAM space), not a single
+// register. CONFIRMED on real hardware: RP1 itself answers at
+// bus=0/devfn=0 in this simple single-RC/single-device topology, NOT the
+// bus=1 a standard PCI bus-numbering assumption would suggest --
+// pcie2_config_read32(0, 0, 0) read back 0x00011de4 (vendor 0x1de4 =
+// Raspberry Pi Trading Ltd's own registered PCI vendor ID, device
+// 0x0001), a real, correct-looking identifier, while bus=1 only ever
+// returned 0xFFFFFFFF (no response).
+fn pcie2_config_addr(bus: u32, devfn: u32, reg_where: u32) -> *io u32 {
     let idx_addr: *io u32 = 0x1000129000; // EXT_CFG_INDEX
-    let data_addr: *io u32 = 0x1000128000; // EXT_CFG_DATA
+    let data_base: usize = 0x1000128000;  // EXT_CFG_DATA
 
-    let idx: u32 = (bus << 20) | (devfn << 12) | (reg_where & ~3);
+    let idx: u32 = (bus << 20) | (devfn << 12);
     *idx_addr = idx;
-    let v: u32 = *data_addr;
-    return v;
+    return (data_base + ((reg_where & ~3) as usize)) as *io u32;
+}
+
+fn pcie2_config_read32(bus: u32, devfn: u32, reg_where: u32) -> u32 {
+    let addr: *io u32 = pcie2_config_addr(bus, devfn, reg_where);
+    return *addr;
+}
+
+fn pcie2_config_write32(bus: u32, devfn: u32, reg_where: u32, value: u32) {
+    let addr: *io u32 = pcie2_config_addr(bus, devfn, reg_where);
+    *addr = value;
 }
 
 // brcm_pcie_mdio_write, simplified for our ONLY use case (MDIO_PORT0=0,
@@ -228,13 +238,30 @@ fn pcie2_outbound_window_setup() {
     let win0_lo: *io u32 = 0x100012400c;         // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_LO
     let win0_hi: *io u32 = 0x1000124010;         // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_HI
     let win0_base_limit: *io u32 = 0x1000124070; // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT
+    let win0_base_hi: *io u32 = 0x1000124080;    // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI
 
     *win0_lo = 0;
     *win0_hi = 0;
     let cpu_addr: usize = 0x1F00000000;
     let win_size: usize = 0x100000;
-    let cpu_addr_mb: u32 = (cpu_addr >> 20) as u32; // 0x1F000
-    let limit_mb: u32 = ((cpu_addr + win_size - 1) >> 20) as u32;
+
+    // CORRECTED (2026-07-25): an earlier version computed base/limit MB
+    // values from the FULL 40-bit cpu_addr and OR'd them into
+    // WIN0_BASE_LIMIT alone, silently truncating to 32 bits (the
+    // register read back 0x0000f000 afterward, not the intended
+    // 0x0001f000 -- the top bit was simply gone). WIN0_BASE_HI is a
+    // SEPARATE register for address bits above 32 (mirroring WIN0_HI's
+    // own split for the PCI-side address); WIN0_BASE_LIMIT's own
+    // base/limit-in-MB fields only ever describe the LOW 32 bits.
+    // Without this, the outbound window's real decoded CPU address
+    // range never actually covered 0x1F00030000 at all -- discovered by
+    // reading these registers back and finding a value inconsistent
+    // with what should have been written.
+    *win0_base_hi = (cpu_addr >> 32) as u32;
+    let cpu_addr_low32: u32 = (cpu_addr & 0xFFFFFFFF) as u32;
+    let cpu_addr_mb: u32 = cpu_addr_low32 >> 20;
+    let limit_low32: u32 = ((cpu_addr_low32 as usize) + win_size - 1) as u32;
+    let limit_mb: u32 = limit_low32 >> 20;
     *win0_base_limit = (cpu_addr_mb) | (limit_mb << 20);
 }
 

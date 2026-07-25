@@ -1,66 +1,51 @@
 // Step-by-step real-hardware bisection for GitHub issue #161 (see
-// examples/common_rpi5/AGENTS.md's PCIe bring-up section). Confirmed
-// hang-free through outbound window setup + PERST deassert + link-up
-// poll (checkpoint 12, result 0 = link never came up). Root cause found
-// via Linux source: BCM2712 needs a real MDIO-based PHY tuning step
-// (pcie2_post_setup_bcm2712) as a PREREQUISITE for link training, not
-// optional post-link tuning -- this version adds it between outbound
-// window setup and PERST deassert, matching Linux's own call order.
+// examples/common_rpi5/AGENTS.md's PCIe bring-up section). Link up, RP1
+// identified (vendor 0x1de4/device 0x0001), but Command register showed
+// Memory Space Enable clear (0x0000) and BAR0 read back 0xFFFFC000 --
+// the classic PCI BAR-size-query pattern (implies a 16KB decode window),
+// not a real assigned address. This version assigns BAR0 to PCI address
+// 0 (matching pcie2_outbound_window_setup's own PCI-side target) and
+// sets the Command register's Memory Space Enable + Bus Master Enable
+// bits, then finally tries uart_init()/uart_puts() over rp1_uart0 for
+// real.
 let mut pcie_smoke_checkpoint: u32 = 0;
 let mut pcie_smoke_result: u32 = 0xAAAAAAAA;
-let mut pcie_smoke_cfg_id: u32 = 0xAAAAAAAA;
+let mut pcie_smoke_bar0_before: u32 = 0xAAAAAAAA;
+let mut pcie_smoke_bar0_after: u32 = 0xAAAAAAAA;
+let mut pcie_smoke_cmd_after: u32 = 0xAAAAAAAA;
+let mut pcie_smoke_fr: u32 = 0xAAAAAAAA;
 
 fn app_main() {
     pcie_smoke_checkpoint = 1;
-    let rescal_ok: bool = pcie_rescal_reset();
+    let linked: bool = pcie2_init();
     pcie_smoke_checkpoint = 2;
-    if (rescal_ok == false) {
+    if (linked == false) {
         pcie_smoke_result = 0;
         return;
     }
+    pcie_smoke_result = 1;
 
+    pcie_smoke_bar0_before = pcie2_config_read32(0, 0, 0x10);
     pcie_smoke_checkpoint = 3;
-    pcie2_bridge_reset(true);
-    for i: i32 in 0..<400 { }
-    pcie2_bridge_reset(false);
-    pcie_smoke_checkpoint = 4;
 
-    pcie2_serdes_enable();
+    pcie2_config_write32(0, 0, 0x10, 0);
+    pcie_smoke_checkpoint = 4;
+    pcie_smoke_bar0_after = pcie2_config_read32(0, 0, 0x10);
     pcie_smoke_checkpoint = 5;
 
-    pcie2_misc_ctrl_setup();
+    let cmd_status: u32 = pcie2_config_read32(0, 0, 4);
+    pcie2_config_write32(0, 0, 4, (cmd_status & 0xFFFF0000) | 0x0006);
     pcie_smoke_checkpoint = 6;
-
-    pcie2_outbound_window_setup();
+    pcie_smoke_cmd_after = pcie2_config_read32(0, 0, 4);
     pcie_smoke_checkpoint = 7;
 
-    let post_setup_ok: bool = pcie2_post_setup_bcm2712();
+    let fr: *io u32 = 0x1F00030018;
+    pcie_smoke_fr = *fr;
     pcie_smoke_checkpoint = 8;
-    if (post_setup_ok == false) {
-        pcie_smoke_result = 2; // distinct from "link never came up" (0)
-        return;
-    }
 
-    pcie2_perst_set(false);
-    pcie_smoke_checkpoint = 9;
-    for i: i32 in 0..<2000000 { }
-    pcie_smoke_checkpoint = 10;
-
-    let mut linked: bool = false;
-    for i: i32 in 0..<20 {
-        if (pcie2_link_up()) {
-            linked = true;
-            break;
-        }
-        for j: i32 in 0..<200000 { }
-    }
-    pcie_smoke_checkpoint = 11;
-
-    if (linked) {
-        pcie_smoke_result = 1;
-        pcie_smoke_cfg_id = pcie2_config_read32(0, 0, 0); // bus=0 -- see pcie.tkb's own note
-        pcie_smoke_checkpoint = 12;
-    } else {
-        pcie_smoke_result = 0;
+    if (pcie_smoke_fr != 0xDEADDEAD) {
+        uart_init();
+        uart_puts("rp1 uart0 alive!\r\n");
+        pcie_smoke_checkpoint = 9;
     }
 }
