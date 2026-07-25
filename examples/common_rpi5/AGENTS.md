@@ -275,12 +275,17 @@ future subject if pursued, not a port of the existing driver.
 1. **PSCI reset is not a substitute for a power cycle after changing the
    SD-card payload.** It reliably reruns the same resident image, but a
    changed `kernel_2712.img` may not be reloaded. Power-cycle after replacing
-   that file.
+   that file. Tracked by GitHub issue #162.
 2. **MPIDR_EL1 core-numbering.** Assumed `mpidr_el1 & 3` still yields the
    plain 0-3 core number, same as BCM2837, since BCM2712 is also a single
-   quad-core cluster -- not independently verified.
+   quad-core cluster -- not independently verified. Tracked by issue #163.
 3. **The loader's MMU-disabled safety discriminator is Stage-A-specific.**
-   Revisit it before adding an RPi5 MMU initialization path.
+   Revisit it before adding an RPi5 MMU initialization path. The RPi5 MMU,
+   exception, and loader-safety milestone is issue #165 (related to the
+   general MMU issue #67).
+
+Interrupt-driven RP1 UART0 RX is separate from these startup constraints and
+is tracked by issue #164.
 
 ## Identifying the UART device: RPi5's Debug Probe and the STM32 board's
 ## ST-Link both enumerate as ttyACM*

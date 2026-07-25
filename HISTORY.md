@@ -10863,10 +10863,13 @@ None of these three are language/type-system limitations in the sense
 bugs in `lib/llvm_gen.ml`, found the same empirical way issue #156's own
 UART FIFO race and `newfstatat` bug were: by writing real code against
 real hardware, not by any static check. Worth a real compiler-side fix
-later (tracked nowhere yet -- this session worked around all three at the
-call-site level, following the same "coarsest fix that unblocks the actual
-milestone, harden the tooling separately" precedent this project already
-applies to hardware bugs).
+later. They are now tracked separately because their reproductions and fixes
+are independent: issue #166 for the all-return unreachable merge block,
+issue #167 for the small-struct aggregate `zext`, and issue #168 for the
+nested existential/variant-match lookup failure. This session worked around
+all three at the call-site level, following the same "coarsest fix that
+unblocks the actual milestone, harden the tooling separately" precedent this
+project already applies to hardware bugs.
 
 **`dup3`/`fcntl` -- discovered necessary, not designed in.** The issue's
 own scope never mentioned them. A real `strace` of this exact busybox
