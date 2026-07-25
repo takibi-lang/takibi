@@ -337,7 +337,7 @@ not already parked at the stub (e.g. it just booted Raspberry Pi OS
 instead), flash the stub and power-cycle by hand first, or try
 `scripts/rpi5_jtag_reset.sh` on its own.
 
-## Next steps: RP1 PCIe enumeration -- GitHub issue #161
+## RP1 PCIe enumeration -- GitHub issue #161
 
 Confirmed via Raspberry Pi's own official "3-pin Debug Connector
 Specification" (RP-003139-SP) that this board's single debug connector is
@@ -346,8 +346,72 @@ SWD debugging and live UART output requires RP1's own, physically
 separate `rp1_uart0` (GPIO14/15), which in turn requires bringing up
 RP1's PCIe link ourselves. Decided with the user 2026-07-25: pursue this
 as its own new milestone, tracked as
-https://github.com/takibi-lang/takibi/issues/161 (host-bridge init, link
-training, BAR/ATU window setup -- likely comparable in scope to the RPi3
-USB host stack). See that issue for the full scope; update it and this
-file together as work proceeds, same as this repo's other multi-session
-milestones (issues #153/#154/#156/#157/#158).
+https://github.com/takibi-lang/takibi/issues/161.
+
+### Status (2026-07-25 real-hardware session): PCIe link UP, RP1 identifies
+### itself; memory-mapped register access still not working
+
+`examples/common_rpi5/pcie.tkb` ports the minimal `pcie-brcmstb.c`
+bring-up sequence for BCM2712's third PCIe RC (`pcie2`, attached to RP1).
+Progress, all via real-hardware, checkpoint-instrumented bisection
+(`examples/rp1_pcie_smoke`, writing a sentinel to a global before each
+step so a hang's last-reached step is readable over SWD after
+power-cycle recovery -- this technique itself proved essential and is
+worth reusing for any future risky bring-up):
+
+- **A real bug found and fixed**: an early version called
+  `pcie2_perst_set(true)` immediately after asserting the bridge reset
+  (mirroring Linux's own BCM2711-only branch, which does NOT apply to
+  BCM2712) -- this HUNG THE BOARD SOLID enough that SWD `halt` itself
+  started timing out, recovered only by power-cycling (happened twice
+  before being root-caused). `PCIE_MISC_PCIE_CTRL` lives in the same AXI
+  register block the bridge reset controls, and that block's own
+  register interface is apparently unresponsive while held in reset.
+  Fixed by removing that early access entirely (BCM2712 doesn't need it
+  -- PERST's hardware POR default already leaves it asserted).
+- **A second real gap found and fixed**: BCM2712 needs an MDIO-based PHY
+  tuning step (`pcie2_post_setup_bcm2712`, transcribed from Linux's own
+  `brcm_pcie_post_setup_bcm2712`) as a genuine PREREQUISITE for link
+  training, not optional post-link tuning (confirmed via Linux's own call
+  ordering: it runs during `brcm_pcie_setup()`, strictly before
+  `brcm_pcie_start_link()`). Without it, every earlier step completed
+  cleanly (no hang) but the link never came up. With it: **the link
+  reports up** (`PCIE_MISC_PCIE_STATUS`'s DL_ACTIVE+PHYLINKUP bits both
+  set) and `pcie2_config_read32(0, 0, 0)` reads back `0x00011de4` --
+  vendor `0x1de4` (Raspberry Pi Trading Ltd's own registered PCI vendor
+  ID) and device `0x0001` -- a real, correct-looking RP1 identifier, not
+  a poison pattern. Note this required bus=0 (RP1 answers there in this
+  simple single-device topology), not the bus=1 a standard PCI
+  bus-numbering assumption would suggest -- bus=1 only ever returned
+  `0xFFFFFFFF`.
+- `enable_rp1_uart=1` (an official config.txt setting, per Raspberry
+  Pi's own documentation: "firmware initialises RP1 UART0... and doesn't
+  reset RP1 before starting the OS") was added to this board's config.txt
+  but, tested alone (no PCIe driver code at all), did NOT make
+  `rp1_uart0` reachable -- still read `0xDEADDEAD`. Whatever this flag
+  does for RP1's own state, it does not appear to leave BCM2712's own
+  PCIe RC link trained/usable for a bare-metal payload that skips
+  firmware's normal Linux-boot path; left enabled anyway since it may
+  still help RP1's own readiness once our own link-up succeeds.
+- **Remaining real gap**: even with the link up and RP1 correctly
+  identified in config space, a direct memory-mapped read of
+  `rp1_uart0`'s FR register (`0x1F00030018`, through the outbound window)
+  still returns `0xDEADDEAD`. Most likely cause: RP1's own BAR has not
+  been assigned/enabled (real PCI devices don't decode ANY memory-space
+  address until the OS/enumerator assigns a BAR and sets the Command
+  register's Memory Space Enable bit -- something Linux's own PCI
+  subsystem does automatically that nothing does for a bare-metal
+  payload). Also unresolved: `pcie2_config_read32` reads at non-zero
+  `where` offsets (tried 4 and 0x10) returned the SAME vendor/device ID
+  value instead of Command/Status or BAR0 content -- something about how
+  `where` maps into the indirect index/data register pair is not yet
+  correctly understood. Both are the natural next things to investigate.
+- `scripts/rpi5_jtag_reset.sh` was tried for real for the first time
+  this session (previously never tested, per Unconfirmed item 3) --
+  failed with `bcm2712.cpu0: how to reset?`, confirming the community
+  reports found during this port's original research: `bcm2712.cfg`
+  needs an explicit `reset_config` line before SRST works over this
+  adapter. Manual power-cycling is still required to recover from a hang.
+
+See GitHub issue #161 for the next concrete steps (RP1 BAR assignment/
+Command register enable, and the config-space `where`-offset mystery).
