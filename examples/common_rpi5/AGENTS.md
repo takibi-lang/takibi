@@ -275,18 +275,24 @@ future subject if pursued, not a port of the existing driver.
    wrong question)** -- see "UART investigation" above: the real blocker
    was a wrong UART address (RP1's `uart0`, not BCM2712's `uart10`), and
    RP1's own uninitialized PCIe link, not a GPIO/pinmux step.
-3. **SRST over the Debug Probe's SWD connector.** `scripts/
-   rpi5_jtag_reset.sh` attempts a plain `reset halt`; whether the official
-   Debug Probe's dedicated connector actually wires a usable SRST line
-   (unlike RPi3's 6-pin GPIO header, which has none) is unconfirmed --
-   deliberately NOT tested yet against the live board (see "A real bug
-   this port found" above: this board can be running a real, in-use
-   Raspberry Pi OS session, and `reset halt` really does reboot the SoC,
-   unlike the read-only connectivity check). Community reports (Raspberry
-   Pi forums) mention needing an explicit `reset_config` line in some
-   setups -- do not paper over a failure here by inventing a BCM2712
-   watchdog-register address; no primary source for one was found during
-   this port's research.
+3. ~~SRST over the Debug Probe's SWD connector.~~ **RESOLVED (2026-07-25),
+   but not via SRST.** Tried for real: OpenOCD's generic `reset halt`
+   fails with `bcm2712.cpu0: how to reset?` -- confirms the Debug Probe's
+   SWD wiring carries no nSRST line and `bcm2712.cfg` defines no
+   BCM2712-specific reset handler, matching community reports found
+   during this port's original research. `scripts/rpi5_jtag_reset.sh` now
+   reboots the board a different way instead: injects a 2-instruction
+   trampoline (`smc #0; b .`) at a fixed unused RAM address and sets
+   `x0` to PSCI's `SYSTEM_RESET` function ID (`0x84000009`) before
+   resuming -- BCM2712's device tree declares PSCI with method `smc`, and
+   TF-A (already confirmed present) implements the standard ARM PSCI
+   interface at EL3 regardless of caller EL, the same mechanism Linux's
+   own `reboot` uses. Confirmed working live: reconnects within
+   ~2-3 seconds, lands back in `jtag_stub.S`'s spin loop, a real full
+   firmware reboot (config.txt/kernel_2712.img both reread), not a
+   CPU-local restart. (Suggested by another AI the user consulted, given
+   full attribution here since the working mechanism came from that
+   advice, not this file's own prior research.)
 4. **MPIDR_EL1 core-numbering.** Assumed `mpidr_el1 & 3` still yields the
    plain 0-3 core number, same as BCM2837, since BCM2712 is also a single
    quad-core cluster -- not independently verified.
