@@ -1,15 +1,32 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status: Stage A (UART hello-world spike), connectivity confirmed, no
-## example injected onto real hardware yet
+## Status (2026-07-25): injection mechanism fully proven on real hardware;
+## UART output blocked on a real, substantial new dependency (RP1 PCIe)
 
-This directory is a from-scratch port effort, not a copy of a proven
-mechanism the way most of this repo's other RPi3 examples are additions to
-an already-working target. Follow this repo's usual incremental-verification
-process (see the root `AGENTS.md`): get Stage A's one example (`start`)
-running and UART output visible before adding anything else, and do not
-wire a `hwcheck-rpi5` target into `allcheck`/`check` until that has
-actually happened.
+`examples/start`'s payload has been successfully injected and run to
+completion on real hardware multiple times (confirmed via post-run memory
+reads landing exactly on `.Lhalt`, matching `startup.S`'s own compiled
+tail sequence byte-for-byte) -- the SWD catch/inject/safety-check mechanism
+itself (`scripts/rpi5_jtag_load.sh`, `scripts/rpi5_prepare_sdcard.sh`) is
+proven and working. **What is NOT yet working is UART output.** This
+directory is a from-scratch port effort, not a copy of a proven mechanism
+the way most of this repo's other RPi3 examples are additions to an
+already-working target -- follow this repo's usual incremental-verification
+process (see the root `AGENTS.md`), and do not wire a `hwcheck-rpi5` target
+into `allcheck`/`check` until real UART output has actually been seen.
+
+**The real blocker, confirmed 2026-07-25 through extensive real-hardware
+debugging (see "A real bug this port found" and "UART investigation"
+below): this specific board's debug connector is wired to RP1's `uart0`
+(PCIe-attached), not BCM2712's on-die `uart10`/`_uart0` this file
+originally assumed.** Getting real bare-metal UART output therefore
+requires implementing RP1 PCIe enumeration (link training, BAR/ATU window
+setup) ourselves first -- Linux's own PCI subsystem is what sets this up
+during a normal OS boot; nothing does it for a bare-metal payload. This is
+a substantial separate undertaking, not a small fix, and is an open
+decision point for how this bring-up proceeds next -- see "UART
+investigation" below for the full evidence trail and "Next steps" for the
+options discussed with the user.
 
 **Real hardware connectivity confirmed 2026-07-25** (read-only
 `halt`/`reg pc`/`resume` via `scripts/rpi5_jtag_load.sh`'s own check
@@ -75,8 +92,88 @@ the RPi3 jtag_stub -- fully explaining the live-OS state the connectivity
 check found, not a fluke. `scripts/rpi5_prepare_sdcard.sh` (new) is the
 RPi5-correct equivalent: overwrites `kernel_2712.img` specifically (backed
 up to `kernel_2712.img.orig` first) and appends `os_check=0` (not RPi3's
-GPIO-JTAG-specific lines, irrelevant here). Not yet run against real
-hardware either.
+GPIO-JTAG-specific lines, irrelevant here).
+
+## UART investigation (2026-07-25): wrong address, then a real RP1/PCIe
+## dependency, all found via real hardware -- no output yet
+
+With the SD card correctly prepared, injection succeeded cleanly and
+repeatably (`scripts/rpi5_jtag_load.sh` catches the stub at `0x80004`,
+loads `examples/start/kernel_rpi5.elf`, resumes it) -- confirmed by
+reading memory back afterward and finding the core parked at an address
+whose surrounding instructions exactly match `startup.S`'s own compiled
+`mov x0,#0 / bl main / .Lhalt: wfe / b .Lhalt` tail sequence, i.e. the
+whole payload ran to completion. But the UART capture (`cat` on the
+Debug Probe's ttyACM device, from this same devcontainer, over
+`/dev-host/ttyACM*` -- bind-mounted read-only per `.devcontainer/
+devcontainer.json`, confirmed both read and write work over it despite
+the `ro` mount) was consistently empty.
+
+Diagnosis proceeded in stages, each ruling out a real candidate cause
+rather than guessing:
+
+1. **Capture pipeline itself confirmed working**: sending a real Raspberry
+   Pi OS a `\r\n` over this exact path produced a real, correctly-echoed
+   shell prompt (`kiwamu@rpi5:~$`). An earlier apparent "0 bytes" result
+   against a live, already-logged-in OS was a false alarm two levels deep:
+   first a picocom session on the user's own host was competing for the
+   same byte stream (serial data isn't broadcast to multiple readers), and
+   separately, an idle shell prompt simply has nothing new to send unless
+   something (a keypress) provokes a response.
+2. **Register readback initially looked consistent, but for the WRONG
+   UART**: `uart_init()`'s writes to `0x10_7D001000` (this file's original
+   `_uart0`/uart10 target) read back exactly as written (`CR=0x301`,
+   `LCRH=0x70`, `FBRD=0`, `FR=0x80` i.e. TXFE/empty) -- real, valid,
+   persisting hardware, just not the UART physically wired to the Debug
+   Probe's cable.
+3. **`dmesg` from a live, currently-running Raspberry Pi OS (reached over
+   this exact same cable) gave the decisive answer**: `console=ttyAMA0`,
+   and `1f00030000.serial: ttyAMA0 at MMIO 0x1f00030000 ... is a PL011
+   AXI` -- i.e. RP1's `rp1_uart0` (PCIe-attached; `raspberrypi/linux`'s
+   `rp1.dtsi`, `rp1_uart0: serial@30000`, `reg = <0xc0 0x40030000 0x0
+   0x100>`, PCIe-translated to this CPU-side address), NOT BCM2712's own
+   `_uart0`/uart10 at `0x10_7D001000` this file originally assumed from
+   general Raspberry Pi documentation. `tty` inside that live shell
+   confirmed `/dev/ttyAMA0` directly.
+4. **RP1's UART clock is PLL-derived, not a static devicetree
+   `fixed-clock`** (unlike BCM2712's own `_uart0`), so no frequency could
+   be read from a devicetree source directly. `vcgencmd measure_clock
+   uart` on the real board reported 44,000,244 Hz, within ~0.5% of
+   44,236,800 Hz (44.2368 MHz) -- a well-known standard UART reference
+   clock chosen historically because it divides evenly for common baud
+   rates. `uart.tkb` was updated to `0x1F00030000`/IBRD=24/FBRD=0
+   accordingly, and rebuilt/re-injected -- **still no output**.
+5. **Root cause of that remaining silence, confirmed conclusively**: a
+   direct real-hardware read of FR (`0x1F00030018`) from our bare-metal
+   payload (MMU off, no OS, right after injection) returned `0xDEADDEAD`
+   -- a classic PCIe "read failed / unmapped" poison pattern. Also
+   confirmed: OpenOCD's own SWD debug-port memory access CANNOT reach this
+   address at all (reads return all-zero even while Linux is actively and
+   correctly using it) -- a debug-tooling limitation of the AP's own bus
+   routing, not evidence about real hardware state; the poison-pattern
+   read from our OWN CPU-executed code is the reliable evidence here.
+   **RP1's PCIe link/BAR window is not established by firmware (TF-A/
+   EEPROM) before handing off to an EL2 payload -- it is Linux's own PCI
+   subsystem that enumerates and maps it during a normal OS boot**, which
+   our bare-metal code never runs.
+6. **Went back to check whether `_uart0`/uart10 (BCM2712-native, no PCIe
+   dependency) might still be reachable after all**: edited `cmdline.txt`
+   to `console=serial10,115200` (the devicetree alias for `_uart0`) and
+   rebooted real Raspberry Pi OS. SSH confirmed the board still booted
+   fully, but **no output at all appeared on the same physical Debug
+   Probe cable this time** -- conclusively showing this specific board's
+   debug connector is wired to RP1's `uart0`, not BCM2712's `uart10`,
+   contradicting this file's original assumption (based on general
+   Raspberry Pi documentation about why `uart10` exists at all).
+
+**Net result**: the injection mechanism is fully proven; UART output is
+blocked on a real, substantial new dependency (RP1 PCIe bring-up) that
+Stage A did not anticipate. See "Next steps" below for the options
+discussed with the user on 2026-07-25 (chose to keep investigating
+`uart10` further before committing to RP1 PCIe work, given the
+`cmdline.txt` test above -- that path is now closed on this board, so RP1
+PCIe enumeration is the only remaining route to real bare-metal UART
+output on this specific hardware).
 
 ## Why RPi5, given RPi3 bring-up (issues #140/#153/#154/#156/#157/#158) is
 ## already extensive and working
@@ -100,23 +197,23 @@ Gathered from primary sources (Linux kernel device tree, Trusted Firmware-A
 docs, OpenOCD community configs) rather than assumed, since Broadcom does
 not publish a public BCM2712 datasheet the way it once did for BCM2835.
 
-- **Debug UART (used by `uart.tkb`)**: BCM2712 has its own on-die PL011,
-  independent of RP1/PCIe, wired directly to the Raspberry Pi 5's dedicated
-  3-pin debug connector -- the same cable the Debug Probe's SWD connection
-  comes in on. Device tree label `_uart0` in
-  `raspberrypi/linux`'s `arch/arm64/boot/dts/broadcom/bcm2712.dtsi`
-  (`reg = <0x7d001000 0x200>`, translated through the `soc` node's
-  `ranges = <0x7c000000 0x10 0x7c000000 0x04000000>` to physical address
-  `0x10_7D001000`), aliased as `uart10`/`serial10` in
-  `bcm2712-rpi-5-b.dts` (`uart10: &_uart0 { status = "okay"; };`, comment
-  "The system UART"). This is NOT one of the four PL011 instances RP1
-  exposes on GPIO14/15 -- those need RP1's PCIe link up first, per
-  Raspberry Pi's own forum explanation of why the debug UART exists as a
-  separate thing at all. Fixed clock `clk_uart` = 9,216,000 Hz (also from
-  bcm2712.dtsi) -- NOT RPi3's 48 MHz. 9216000 / (16 * 115200) = 5.000
-  exactly, a suspiciously clean divisor that is itself corroborating
-  evidence for this number (Broadcom most likely picked 9.216 MHz
-  specifically so that 115200 baud needs no fractional divisor at all).
+- **Debug UART (used by `uart.tkb`) -- CORRECTED, see "UART investigation"
+  below**: general Raspberry Pi documentation and the device tree both
+  describe BCM2712's own on-die PL011 (`_uart0`/`uart10`/`serial10`,
+  physical `0x10_7D001000`, fixed `clk_uart`=9,216,000 Hz) as "The system
+  UART", independent of RP1/PCIe, and this file originally assumed it was
+  therefore what the physical debug connector carries. **On the real
+  board actually used for this port, that assumption was empirically
+  wrong**: `console=serial10` produced no output at all on the Debug
+  Probe's cable, while `console=serial0` (RP1's `rp1_uart0`, PCIe-attached,
+  physical `0x1F00030000`) does. `uart.tkb` now targets `0x1F00030000`
+  (IBRD=24/FBRD=0 for ~44.2368MHz uartclk, measured via `vcgencmd
+  measure_clock uart`) -- getting output through it requires RP1 PCIe
+  enumeration our bare-metal code does not yet do (see "UART
+  investigation"). Whether this BCM2712-uart10-vs-RP1-uart0 wiring is
+  board-revision-specific or affects every RPi5 is unknown; do not assume
+  the original documentation-based claim was entirely wrong, only that it
+  does not describe this specific board.
 - **EL2 handoff, and why EL2H alone is NOT a safety signal here**:
   Trusted Firmware-A's own RPi5 platform docs
   (`trustedfirmware-a.readthedocs.io/en/latest/plat/rpi5.html`) describe
@@ -173,11 +270,10 @@ future subject if pursued, not a port of the existing driver.
 1. **`jtag_stub.ld`'s 0x80000 load address.** Assumed by analogy with
    RPi3's own kernel8.img convention; not verified against RPi5 firmware's
    actual default load address for a non-Image-header raw kernel.
-2. **No GPIO/pinmux step needed for the debug UART.** Assumed because it's
-   wired to a dedicated connector rather than shared/multiplexed GPIO
-   pins the way RPi3's UART0/GPIO14-15 are -- unlike RPi3's `uart.tkb`,
-   this port's `uart_init()` does no GPIO alt-function configuration at
-   all. If no output appears, this is the first thing to question.
+2. ~~No GPIO/pinmux step needed for the debug UART.~~ **RESOLVED (was the
+   wrong question)** -- see "UART investigation" above: the real blocker
+   was a wrong UART address (RP1's `uart0`, not BCM2712's `uart10`), and
+   RP1's own uninitialized PCIe link, not a GPIO/pinmux step.
 3. **SRST over the Debug Probe's SWD connector.** `scripts/
    rpi5_jtag_reset.sh` attempts a plain `reset halt`; whether the official
    Debug Probe's dedicated connector actually wires a usable SRST line
@@ -239,3 +335,24 @@ attempt would make it unclear which step actually failed. If the board is
 not already parked at the stub (e.g. it just booted Raspberry Pi OS
 instead), flash the stub and power-cycle by hand first, or try
 `scripts/rpi5_jtag_reset.sh` on its own.
+
+## Next steps (open as of 2026-07-25)
+
+With RP1 PCIe confirmed as the only remaining route to bare-metal UART
+output on this board, the options are:
+
+1. **Implement minimal RP1 PCIe enumeration** (host bridge init, link
+   training, BAR/ATU window setup) as its own new milestone -- a
+   substantial undertaking, likely comparable in scope to the RPi3 USB
+   host stack (`usb_dwc2.tkb`/`usb_hub.tkb`/`usb_host.tkb`) rather than a
+   small addition to Stage A.
+2. **Find another way to get early bare-metal signal off this board**
+   without solving PCIe first -- e.g. re-examine whether some OTHER
+   always-available signal (GPIO blink via a scope/LED, or revisiting
+   whether a DIFFERENT config.txt/EEPROM combination could route the
+   console to `uart10` after all) could serve as Stage A's minimal
+   "did the injected code actually run" signal, deferring PCIe to a later,
+   deliberately-scoped milestone.
+3. Something else -- not yet decided; consult the user before committing
+   engineering effort to either path above, since both are real,
+   non-trivial scope decisions.
