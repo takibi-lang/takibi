@@ -522,6 +522,12 @@ examples/
                      (USB bulk transfers here are request/response, not async)
     netconfig.tkb -- OUR_MAC (locally-administered)/OUR_IP (192.168.20.2, this
                      board's own dedicated point-to-point NIC subnet)
+  common_rpi5/    -- Raspberry Pi 5 (BCM2712) bare-metal HAL, Stage A only
+                     (UART hello-world spike, not yet run on real hardware) --
+                     see its own AGENTS.md for sourced facts (debug UART
+                     address/clock, EL2 handoff, GIC-400) and everything still
+                     UNCONFIRMED. SWD via the official Debug Probe
+                     (CMSIS-DAP), not RPi3's FTDI/JTAG 6-pin header.
   <name>/         -- each directory: see the leading comment in <name>.tkb for a description.
                      Every example is now a single file compiled for both targets -- no
                      `<name>_stm32.tkb` exists anywhere in this repo (see the STM32 section
@@ -550,6 +556,14 @@ scripts/
                      section covers -- same eth_*_test.py raw-socket scripts STM32 already
                      uses, parameterized by ETH_TEST_SUBNET/ETH_TEST_MAC for this board's
                      own point-to-point NIC/address.
+  rpi5_jtag_load.sh -- RPi5 Stage A: injects an ELF over SWD via the official
+                     Debug Probe (CMSIS-DAP) and examples/common_rpi5/bcm2712.cfg
+                     (vendored, upstream OpenOCD ships no bcm2712.cfg). Not yet
+                     wired into any `make hwcheck-*` target -- see
+                     examples/common_rpi5/AGENTS.md's Status section.
+  rpi5_jtag_reset.sh -- RPi5 Stage A: attempts `reset halt` over SWD. UNCONFIRMED
+                     whether the Debug Probe's dedicated connector wires a usable
+                     SRST line -- see examples/common_rpi5/AGENTS.md item 3.
 test/
   test_takibi.ml  -- Alcotest unit tests for parser / type_inf
 ```

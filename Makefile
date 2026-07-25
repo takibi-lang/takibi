@@ -2061,6 +2061,51 @@ hwcheck-rpi3-net: $(RPI3_KERNELS) examples/common_rpi3/jtag_stub.img
 hwcheck-rpi3-net-l2: $(RPI3_KERNELS) examples/common_rpi3/jtag_stub.img
 	@NET_L2_ONLY=1 bash scripts/run_hwtest_rpi3_net.sh
 
+# -- Raspberry Pi 5 (BCM2712) bring-up: Stage A (UART hello-world spike) ------
+# Not yet wired into hwcheck-rpi3/allcheck -- this is the FIRST attempt at
+# real RPi5 hardware, following this repo's own incremental-verification
+# convention (port one example -> verify -> real hardware -> document, see
+# examples/common_rpi5/AGENTS.md for the sourced facts this port rests on
+# and what remains UNCONFIRMED). Build with `make examples/start/kernel_rpi5.elf`
+# and `make examples/common_rpi5/jtag_stub.img`, flash the .img as the SD
+# card's kernel_2712.img (config.txt needs `kernel=kernel_2712.img` and
+# `os_check=0`), then try scripts/rpi5_jtag_load.sh by hand. Do not add a
+# `hwcheck-rpi5` target or fold this into `allcheck`/`check` until at least
+# one example has actually run successfully on real hardware.
+RPI5_TARGET := aarch64-none-elf
+RPI5_CPU    := cortex-a76
+COMMON_RPI5_DIR          := examples/common_rpi5
+COMMON_RPI5_STARTUP_S    := $(COMMON_RPI5_DIR)/startup.S
+COMMON_RPI5_STARTUP_O    := $(COMMON_RPI5_DIR)/startup.o
+COMMON_RPI5_LINK_LD      := $(COMMON_RPI5_DIR)/link.ld
+COMMON_RPI5_UART         := $(COMMON_RPI5_DIR)/uart.tkb
+COMMON_RPI5_PRINT        := $(COMMON_RPI5_DIR)/print.tkb
+COMMON_RPI5_JTAG_STUB_S  := $(COMMON_RPI5_DIR)/jtag_stub.S
+COMMON_RPI5_JTAG_STUB_O  := $(COMMON_RPI5_DIR)/jtag_stub.o
+COMMON_RPI5_JTAG_STUB_LD := $(COMMON_RPI5_DIR)/jtag_stub.ld
+
+$(COMMON_RPI5_STARTUP_O): $(COMMON_RPI5_STARTUP_S)
+	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
+
+$(COMMON_RPI5_JTAG_STUB_O): $(COMMON_RPI5_JTAG_STUB_S)
+	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
+
+## examples/common_rpi5/jtag_stub.img: the SD card's kernel_2712.img. Raw
+## binary, not ELF -- same reasoning as examples/common_rpi3/jtag_stub.img.
+examples/common_rpi5/jtag_stub.elf: $(COMMON_RPI5_JTAG_STUB_O) $(COMMON_RPI5_JTAG_STUB_LD)
+	$(LLD) -T $(COMMON_RPI5_JTAG_STUB_LD) $(COMMON_RPI5_JTAG_STUB_O) -o $@
+
+examples/common_rpi5/jtag_stub.img: examples/common_rpi5/jtag_stub.elf
+	llvm-objcopy-19 -O binary $< $@
+
+## examples/start ported first, same as it was the first RPI3_EXAMPLES
+## entry during RPi3's own bring-up (GitHub issue #140).
+examples/start/start_rpi5.o: examples/start/start.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
+
+examples/start/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) examples/start/start_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) examples/start/start_rpi5.o -o $@
+
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts and linker outputs
 clean:
