@@ -32,6 +32,7 @@ use "examples/vm_page_map/vm_page_map_core.tkb";
 use "examples/common_rpi3/el0_asm_extern.tkb";
 use "examples/common_rpi3/el1_asm_extern.tkb";
 use "examples/common_rpi3/hvc_asm_extern.tkb";
+use "examples/common_rpi3/intc.tkb";
 use "examples/common_rpi3/el0_shell_image_extern.tkb";
 // GitHub issue #157: pulls in examples/common/fat12.tkb (transitively,
 // via this adapter's own `use`) and examples/common_rpi3/usb_msc.tkb --
@@ -986,7 +987,6 @@ fn fat_fd_read(slot: {0..<MAX_OPEN_FILES as usize}, buf: *u8, len: u32) -> usize
         FatFdState::Open(mut file) => {
             let mut br: u32 = 0;
             let result: FatIoResult = fat_read(file, buf, len, &br);
-            uart_rx_ring_drain();
             fat_fd_put(slot, FatFdState::Open(file));
             if (fat_io_result_ok(result) == true) {
                 return br as usize;
@@ -1277,35 +1277,56 @@ fn path_to_name83(path: *u8, out: *u8) -> bool {
 // EL2 and runs hvc_dispatch above, which is what el0_mapping_abandon and
 // friends used to just silently discard.
 // GitHub issue #157's own follow-on: a software RX ring, much deeper
-// than PL011's own small hardware FIFO, drained opportunistically on
-// EVERY syscall entry below (not just read()/ppoll() on fd 0).
-// Confirmed necessary via real hardware testing: once a real file-
-// redirect episode (openat/fcntl/dup3/read x11/dup3/close for
-// `read var < CAT.TXT`, see fat_dup3_stdin above) started taking enough
-// real EL0<->EL1 round trips, whatever stdin bytes had already arrived
-// over the wire (this test harness sends the whole stdin script in one
-// burst, see run_hw_test_rpi3_stdin) silently overran the hardware
-// FIFO while nothing was polling it during that episode -- observed as
-// a chunk of script bytes vanishing with no error at the point they
-// were lost, instead surfacing much later as a `for` loop's own `do`
-// token arriving with no matching `for` (GitHub issue #156's own
-// PL011-FIFO fix already covers the SMALL, momentary gaps an
-// interactive typist leaves; it was never sized for "a whole script's
-// worth of bytes may arrive while this kernel is legitimately busy
-// doing something else entirely"). uart_rx_ready()/uart_isr_getc()
-//(examples/common_rpi3/uart.tkb) stay the only real hardware access
-// point; everything else in this file goes through the ring below
-// instead from here on.
+// than PL011's own small hardware FIFO. GitHub issue #158's own real
+// fork()/execve() work made a growing script's worth of stdin bytes
+// silently overrun the 32-byte hardware FIFO badly enough (a `for`
+// loop's own `do` token arriving with no matching `for`, whole lines
+// missing near execve()'s multi-millisecond ELF-copy stretch) that this
+// file's own earlier fix -- calling uart_rx_ring_drain() by hand at
+// every syscall entry AND at every other point later found to stall
+// long enough to matter (the ELF segment-copy loop, every real FAT/USB
+// I/O call) -- kept needing ANOTHER call site added, an unbounded list
+// of "everywhere the kernel might be busy for a while". That was
+// treating the symptom: this hardware has real RX interrupt support
+// (examples/common_rpi3/intc.tkb, already proven by examples/echo and
+// examples/irq), and once it drains the hardware FIFO into this same
+// software ring on its own schedule, NO call site anywhere needs to
+// remember to poll -- the ring simply never falls behind regardless of
+// what EL0/EL1/EL2 code happens to be doing when a byte arrives.
+// uart_rx_ready()/uart_isr_getc() (examples/common_rpi3/uart.tkb) stay
+// the only real hardware access point, now called from
+// el0_shell_uart_rx_isr below instead of from a poll loop; everything
+// else in this file goes through the ring instead, exactly as before.
 const UART_RX_RING_SIZE: usize = 512;
 private let mut uart_rx_ring: [u8; UART_RX_RING_SIZE];
 private let mut uart_rx_ring_head: usize;
 private let mut uart_rx_ring_tail: usize;
 private let mut uart_rx_ring_count: usize;
 
-fn uart_rx_ring_drain() {
-    let ring: *u8 = uart_rx_ring as *u8;
-    while (uart_rx_ready() == true && uart_rx_ring_count < UART_RX_RING_SIZE) {
-        let c: u8 = uart_isr_getc();
+// Registered via uart_set_rx_handler below (app_main). Pushes exactly
+// ONE byte per call, matching examples/echo/echo.tkb's own
+// echo_uart_rx_isr -- not a drain loop -- because
+// examples/common_rpi3/uart.tkb's uart_irq_handler() already only calls
+// the registered handler once per interrupt itself. This still keeps up
+// with a burst: PL011's RX interrupt is LEVEL-triggered on FIFO fill
+// state (examples/common_rpi3/intc.tkb's own irq_uart_rx_unmask
+// comment), so if more bytes remain queued than this single read
+// drains, the interrupt condition stays asserted and fires again
+// immediately, byte by byte, rather than needing this handler to loop
+// itself. Runs with the kernel's own DAIF.I unmasked and HCR_EL2.IMO
+// routing physical IRQs to EL2 (examples/common_rpi3/startup.S) --
+// i.e. genuinely asynchronous with respect to whatever EL0/EL1/EL2 code
+// this interrupts, including mid-syscall-dispatch or mid-hvc_dispatch_*.
+// Safe regardless of interruption point: this touches only
+// uart_rx_ring_head/tail/count (nothing address-space- or COW-related),
+// and a single core with non-reentrant IRQ handling means the
+// interrupted code's own view of the ring is simply whatever this left
+// it as by the time it resumes -- the same guarantee true of any
+// single-producer append a synchronous reader polls afterward.
+fn el0_shell_uart_rx_isr() !{} {
+    let c: u8 = uart_isr_getc();
+    if (uart_rx_ring_count < UART_RX_RING_SIZE) {
+        let ring: *u8 = uart_rx_ring as *u8;
         ring[uart_rx_ring_head as isize] = c;
         uart_rx_ring_head = uart_rx_ring_head + 1;
         if (uart_rx_ring_head >= UART_RX_RING_SIZE) {
@@ -1380,7 +1401,6 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
     if (ec != 0x15) {
         return (0, 0);
     }
-    uart_rx_ring_drain();
     // A single match over syscall_num (GitHub issue #156), not a chain of
     // `if (syscall_num == N || syscall_num == M) {...}` checks: several
     // syscalls sharing one handler are written as one `N | M => {...}`
@@ -1451,10 +1471,10 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             // not uart_rx_ready()/uart_isr_getc() directly -- the ring
             // is what actually survives a burst of stdin bytes arriving
             // while this process was busy elsewhere (e.g. a file-
-            // redirect episode).
-            while (uart_rx_ring_ready() == false) {
-                uart_rx_ring_drain();
-            }
+            // redirect episode). Filled by el0_shell_uart_rx_isr on its
+            // own schedule, so this just waits for it -- nothing left
+            // to poll here.
+            while (uart_rx_ring_ready() == false) { }
             let mut n: usize = 0;
             while (n < len && uart_rx_ring_ready() == true) {
                 dst[n as isize] = uart_rx_ring_getc();
@@ -1588,9 +1608,7 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             // entirely in that case, matching real ppoll()'s own
             // "regular files are always POLLIN-ready" behavior.
             if (fat_stdin_is_open() == false) {
-                while (uart_rx_ring_ready() == false) {
-                    uart_rx_ring_drain();
-                }
+                while (uart_rx_ring_ready() == false) { }
             }
             let revents0: *u16 = (fds + 6) as *u16;
             *revents0 = 1; // POLLIN
@@ -1702,18 +1720,11 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             if ((flags & 0x40) != 0) { // O_CREAT
                 mode = FA_WRITE | FA_CREATE_ALWAYS;
             }
-            // fat_open scans the root directory over real USB Mass
-            // Storage -- several sector reads, all inside this ONE
-            // syscall, so drain again on the way out (see app_main's own
-            // comment on why an undrained multi-millisecond window costs
-            // real stdin bytes).
             match fat_open(name83_buf as *u8, mode) {
                 FatOpenResult::Error(err) => {
-                    uart_rx_ring_drain();
                     return (elr, ERR_ENOENT);
                 }
                 FatOpenResult::Opened(file) => {
-                    uart_rx_ring_drain();
                     let store_result: FatOpenFdResult = fat_fd_store(0, file);
                     return (elr, fat_open_fd_result_value(store_result));
                 }
@@ -2141,6 +2152,21 @@ fn el1_main() {
 }
 
 fn app_main() {
+    // GitHub issue #158: real UART0 RX interrupt support, wired up
+    // FIRST, before anything else in this function runs -- the whole
+    // point is that no later stall (FAT format, USB enumeration, an ELF
+    // copy, execve()) can ever again cost a dropped stdin byte, which
+    // requires the hardware FIFO to already be draining into
+    // uart_rx_ring on its own before any such stall has a chance to
+    // start. Same three calls examples/echo/echo.tkb and
+    // examples/irq/irq.tkb already prove on this exact PL011/VC-
+    // interrupt-controller pair; el0_shell_uart_rx_isr (see its own
+    // comment, near uart_rx_ring's declaration) is this file's own
+    // registered handler instead of theirs.
+    irq_uart_rx_setup();
+    uart_set_rx_handler(el0_shell_uart_rx_isr);
+    irq_uart_rx_unmask();
+
     // GitHub issue #157: mounts a real FAT12 filesystem over the same
     // real USB Mass Storage device examples/fatfs_sdcard/fatfs_sdcard.tkb
     // already proves on this board, and seeds it with one small, known
@@ -2457,14 +2483,6 @@ fn el0_load_elf_into(image_addr: usize, image_len: usize,
                             src[seg_offset as isize..<(seg_offset + seg_filesz) as isize]
                         };
                         slice_copy(seg_dst, seg_src);
-                        // Keep the PL011's own 32-byte hardware RX FIFO
-                        // from overflowing across this multi-millisecond,
-                        // syscall-free stretch -- see app_main's own
-                        // comment above for the full reasoning. A whole
-                        // ~1.1MB image is several segments, so draining
-                        // once per segment bounds the undrained gap to a
-                        // single memcpy.
-                        uart_rx_ring_drain();
                     }
                 }
             }
@@ -2486,7 +2504,6 @@ fn el0_load_elf_into(image_addr: usize, image_len: usize,
             // (tlb_asm.S) for why this was never needed before execve()
             // started reloading a process image on an already-warm cache.
             rpi3_code_range_sync(page_va, code_region_size);
-            uart_rx_ring_drain();
 
             // The stack is simply the LAST page of the same contiguous
             // ProcessAddressSpace region, right after the code pages --

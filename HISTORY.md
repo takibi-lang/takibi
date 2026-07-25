@@ -15,6 +15,67 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-25: Real UART0 RX Interrupt for `el0_shell` -- Retiring the FIFO-Drop Workaround (Issue #158 follow-up)
+
+Issue #158's own real fork()/execve() work (below) left a genuine
+workaround in place: `examples/el0_shell` was still draining its RX ring
+by polling from EL1/EL2 code, and once the script grew, manual
+`uart_rx_ring_drain()` calls kept needing to be added at every point later
+found to stall long enough to overrun the PL011's 32-byte hardware FIFO
+(the ELF segment-copy loop, every real FAT/USB I/O call, execve()'s own
+reload). The real fix was already proven elsewhere in this codebase:
+`examples/common_rpi3/intc.tkb`'s UART0 RX interrupt, already used by
+`examples/echo`/`examples/irq`, just never wired into el0_shell.
+
+Wiring it in (`irq_uart_rx_setup()`/`uart_set_rx_handler()`/
+`irq_uart_rx_unmask()` at the very top of `app_main`, an ISR that pushes
+one byte into `uart_rx_ring` per call, matching `echo_uart_rx_isr`'s own
+shape) surfaced one more real hardware defect, in the same family as
+issue #158's own five: **the EL2 exception vector table's "Lower EL,
+AArch64, IRQ" slot (offset 0x480) was still `b .`** -- a bare infinite
+spin, never wired to `rpi3_irq_entry`. Every RPi3 example before this one
+was EL2-only, so an IRQ arriving while the CPU was actually executing at
+EL0 or EL1 (a genuinely different vector slot than the 0x280 "Current EL"
+one `examples/echo`/`examples/irq` always take, since they never run
+below EL2) had literally never been exercised. The interrupt was
+delivered correctly -- HCR_EL2.IMO routing, DAIF unmasking, the VC
+controller and UART0_IMSC bits were all verified set via a live OpenOCD
+register read -- and then spun forever at that vector, never returning,
+which read as a silent total hang with no further output at all: PC
+pinned at 0x200c80 across repeated halts, confirmed by disassembly to be
+`b 0x200c80`, once a byte physically arrived while EL0 was running.
+Fixed by wiring 0x480 to `rpi3_irq_entry` too -- purely additive for
+every other example, since none of them ever reaches that vector slot at
+all.
+
+With the interrupt actually delivered, the whole `LINE_DELAY` pacing
+workaround `run_hw_test_rpi3_stdin` gained earlier the same day became
+unnecessary and was removed: `el0_shell`'s full script (fork/execve/wait4
+included) now passes reliably against a single-burst stdin write, the
+same way every other stdin-fed example always has.
+
+Two smaller items landed alongside, from the same round of questions:
+named `PTE_FLAGS_EL2_RW`/`PTE_FLAGS_EL0_RW`/`PTE_FLAGS_EL2_RO`/
+`PTE_FLAGS_EL0_RO` constants replaced the raw `0x707`/`0x747`/`0x787`/
+`0x7C7` page-descriptor literals in `vm_page_map_core.tkb` (three of
+which had independently disagreed on what `0x787` meant during the same
+day's earlier debugging) -- doesn't teach the type system ARM semantics,
+but turns a copy/paste mismatch into a one-word diff instead of a silent
+bit pattern. And issue #160 was filed to track folding the `el0_*`/
+`cow_page_table`/`fat_fd_table` globals into a real per-process struct
+behind `stable_replace`, the more structural fix for the SP_EL0/
+loader-globals class of bug issue #158 itself worked around with manual
+save/restore -- large enough (every syscall arm's own bounds-check idiom)
+to need its own session rather than being rushed in alongside this one.
+
+Verified with `make check` (164), `make allcheck-build`, and `make
+hwcheck-rpi3` (79/79 on real hardware, including a full echo/irq/
+preempt/semaphore/condvar/msgqueue/watchdog/rtos_demo regression pass
+since the shared exception-vector-table change touches every RPi3
+kernel).
+
+---
+
 ### 2026-07-25: Real `fork()`/`execve()`/`wait4()` -- an External Command from a Real Shell (Issue #158)
 
 `examples/el0_shell` now runs a genuine external program: busybox `ash`

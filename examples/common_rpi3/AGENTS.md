@@ -1759,9 +1759,14 @@ confirmed on real hardware, all documented at their fix sites:
   `tlbi vaae1is`. The **all-ASID** form specifically: every dynamic-window
   descriptor here leaves nG clear (global), and a global entry is matched
   regardless of ASID.
-- `0x787` is EL2-regime shorthand for "read-only" **only** because AP[1]
-  is RES1 there. In EL1&0 a clear AP[1] means *no EL0 access whatsoever*,
-  so anything a real EL0 process reads needs `0x7C7` (AP=0b11).
+- `PTE_FLAGS_EL2_RO` (`0x787`) is EL2-regime shorthand for "read-only"
+  **only** because AP[1] is RES1 there. In EL1&0 a clear AP[1] means *no
+  EL0 access whatsoever*, so anything a real EL0 process reads needs
+  `PTE_FLAGS_EL0_RO` (`0x7C7`, AP=0b11) instead -- `vm_page_map_core.tkb`
+  names all four AP-bit combinations it uses
+  (`PTE_FLAGS_EL2_RW`/`PTE_FLAGS_EL0_RW`/`PTE_FLAGS_EL2_RO`/
+  `PTE_FLAGS_EL0_RO`) after three raw `0x787` literals independently
+  disagreed on what they meant during this same investigation.
 
 All EL1&0 maintenance is gated on `rpi3_el1_regime_active`
 (`mmu.S` `.bss`, set by `rpi3_el1_enter`). That gate is a correctness
@@ -1797,3 +1802,23 @@ Firmware's own vector table is not guaranteed to still be valid/mapped
 once our own code has been running, and is not ours to depend on
 regardless), corrupting CPU state badly enough that even OpenOCD's
 halted-PC readout stopped being a real code address.
+
+The "Lower EL, AArch64, IRQ" entry (0x480) ALSO now vectors to
+`rpi3_irq_entry` (GitHub issue #158's own RX-interrupt work for
+`el0_shell`) -- a second, genuinely different vector slot from 0x280,
+taken specifically when an IRQ arrives while EL2 was NOT the currently
+executing level (i.e. EL0 or EL1 was). This was left as the default `b .`
+from every earlier example's own bring-up, because every RPi3 example
+before `el0_shell` was EL2-only -- nothing ever ran below EL2 to BE
+interrupted there, so this slot was legitimately dead code until a real
+EL0 process needed to keep working while an async UART byte arrived.
+Found via a live OpenOCD register read once `el0_shell`'s own RX
+interrupt was wired up and the whole shell silently stopped producing
+output: HCR_EL2.IMO routing, DAIF unmasking, and the interrupt-controller
+enable bits all read back correctly set, and PC was pinned at the exact
+same address (0x200c80, disassembling to `b 0x200c80`) across three
+repeated halts -- a real interrupt, correctly delivered, spinning forever
+at an unwired vector instead of ever reaching the handler. Routing 0x480
+to the same `rpi3_irq_entry`/`rpi3_irq_dispatch` pair 0x280 already uses
+is purely additive for every other example: none of them ever takes this
+vector slot at all.

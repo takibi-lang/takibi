@@ -384,7 +384,27 @@ exception_vectors:
                                    here; a plain EL1 fault would too, but
                                    nothing generates one yet */
     .align  7
-    b       .                   /* 0x480: IRQ */
+    /* 0x480: IRQ (GitHub issue #158) -- HCR_EL2.IMO routes every physical
+       IRQ to EL2 regardless of which EL was actually executing when it
+       fired (see this file's own HCR_EL2.IMO comment above), and THIS is
+       the vector slot the CPU actually uses when that interrupted EL was
+       EL0 or EL1 (AArch64), as opposed to 0x280 above for an IRQ that
+       arrives while EL2 itself is the one executing. Left as `b .` from
+       examples/echo/examples/irq's own original bring-up onward because
+       every RPi3 example before issue #158 was EL2-only (no code ever
+       ran below EL2 to BE interrupted there) -- confirmed the hard way
+       once el0_shell's own real fork()+execve() work finally unmasked a
+       real UART0 RX interrupt with an actual EL0 process running: the
+       core took the interrupt correctly, landed here, and spun forever,
+       silently discarding every future interrupt while everything else
+       (UART TX, the rest of the kernel) simply stopped making progress
+       -- indistinguishable from a hang from the outside. Routes to the
+       SAME rpi3_irq_entry/rpi3_irq_dispatch pair as 0x280 (itself a
+       `.weak` no-op default, see rpi3_irq_dispatch's own header comment
+       below): every OTHER example still never reaches this slot at all
+       (nothing below EL2 ever runs for them), so this is purely additive
+       for them, not a behavior change. */
+    b       rpi3_irq_entry      /* 0x480: IRQ */
     .align  7
     b       .                   /* 0x500: FIQ */
     .align  7

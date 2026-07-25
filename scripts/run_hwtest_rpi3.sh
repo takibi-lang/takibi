@@ -318,33 +318,27 @@ run_hw_test_rpi3_suite() {
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file" "$report"
 }
 
-# run_hw_test_rpi3_stdin NAME ELF EXPECTED STDIN_FILE [MAX_SECS] [STABLE_POLLS] [LINE_DELAY]
+# run_hw_test_rpi3_stdin NAME ELF EXPECTED STDIN_FILE [MAX_SECS] [STABLE_POLLS]
 #
 # RPi3 counterpart of scripts/run_hwtest_ram.sh's run_hw_test_ram_stdin
 # (echo, irq): waits for the first output byte (confirming the
-# firmware's read loop has actually started) before writing STDIN_FILE
-# to the serial port. Same load-failure-vs-mismatch distinction as
-# run_hw_test_rpi3 above.
+# firmware's read loop has actually started) before writing the whole
+# STDIN_FILE to the serial port in one burst. Same load-failure-vs-
+# mismatch distinction as run_hw_test_rpi3 above.
 #
-# LINE_DELAY (optional, GitHub issue #158) paces the input one line at a
-# time instead of writing the whole file in a single burst. Opt-in and
-# empty by default, so every existing caller keeps the exact
-# single-write behavior it was validated with. It exists because the
-# BCM2837's PL011 has only a 32-byte hardware RX FIFO and this project's
-# EL0 examples wire no UART RX interrupt: their software ring
-# (examples/el0_shell/el0_shell.tkb's own uart_rx_ring, 512 bytes) can
-# only be filled from that FIFO when the kernel happens to run, so ANY
-# CPU-bound stretch longer than 32 bytes of wire time (~2.7ms at 115200)
-# silently drops input no matter how large the software ring is. A real
-# kernel solves this with an RX interrupt; until this example has one,
-# the honest fix is for the harness not to blast a 250-byte script at a
-# 32-byte FIFO. Confirmed on real hardware: el0_shell's own script grew
-# past that threshold once issue #158 added fork/exec to it, and lost
-# whole lines in the middle and at the end.
+# GitHub issue #158's own real fork()/execve() work briefly needed this
+# to pace input line-by-line instead of bursting it, because
+# examples/el0_shell used to drain its RX FIFO only by polling from
+# EL1/EL2 code -- any CPU-bound stretch longer than the 32-byte hardware
+# FIFO's own wire time (~2.7ms at 115200) silently dropped input. The
+# real fix landed instead (a genuine UART0 RX interrupt,
+# examples/common_rpi3/intc.tkb, draining the software ring
+# asynchronously regardless of what the kernel is doing), which is why
+# this stayed a single-write burst rather than gaining a permanent
+# pacing knob.
 run_hw_test_rpi3_stdin() {
     local name="$1" elf="$2" expected="$3" stdin_file="$4" \
-          max_secs="${5:-$CAPTURE_MAX_SECS}" stable_polls="${6:-$CAPTURE_STABLE_POLLS}" \
-          line_delay="${7:-}"
+          max_secs="${5:-$CAPTURE_MAX_SECS}" stable_polls="${6:-$CAPTURE_STABLE_POLLS}"
     local tmp_drain tmp_out load_log load_status_file load_status
     tmp_drain=$(mktemp)
     tmp_out=$(mktemp)
@@ -375,14 +369,7 @@ run_hw_test_rpi3_stdin() {
             [ "$size" -gt 0 ] && break
             waited=$((waited + 1))
         done
-        if [ -n "$line_delay" ]; then
-            while IFS= read -r stdin_line || [ -n "$stdin_line" ]; do
-                printf '%s\n' "$stdin_line" > "$SERIAL_DEV"
-                sleep "$line_delay"
-            done < "$stdin_file"
-        else
-            cat "$stdin_file" > "$SERIAL_DEV"
-        fi
+        cat "$stdin_file" > "$SERIAL_DEV"
 
         local max_polls last_size=-1 stable=0 poll=0
         max_polls=$(awk -v m="$max_secs" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
@@ -552,7 +539,7 @@ run_hw_test_rpi3_stdin "el0_elf_load (rpi3)" "$REPO_ROOT/examples/el0_elf_load/k
 # no-standalone-shell-applet-dispatch finding issue #156 already made
 # for `uname`, so `cat` alone just reports "not found" here.
 run_hw_test_rpi3_stdin "el0_shell (rpi3)" "$REPO_ROOT/examples/el0_shell/kernel_rpi3.elf" \
-    "$REPO_ROOT/examples/el0_shell/el0_shell.expected" "$REPO_ROOT/examples/el0_shell/el0_shell.stdin" 25 140 0.05
+    "$REPO_ROOT/examples/el0_shell/el0_shell.expected" "$REPO_ROOT/examples/el0_shell/el0_shell.stdin" 25 140
 run_hw_test_rpi3 "rtc (rpi3)"            "$REPO_ROOT/examples/rtc/kernel_rpi3.elf"            "$REPO_ROOT/examples/rtc/rtc.expected"       5 30
 run_hw_test_rpi3 "timer (rpi3)"          "$REPO_ROOT/examples/timer/kernel_rpi3.elf"          "$REPO_ROOT/examples/timer/timer.expected"   5 30
 run_hw_test_rpi3_stdin "echo (rpi3)" "$REPO_ROOT/examples/echo/kernel_rpi3.elf" \

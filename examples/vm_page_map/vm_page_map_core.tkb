@@ -605,6 +605,28 @@ variant MigrationTransfer {
 const DYN_VA_BASE: usize = 0x80000000;
 const DYN_VA_LIMIT: usize = 0x80200000;
 
+// L3 page descriptor flag words (GitHub issue #158's own real hardware
+// lesson: three copies of 0x787 used to disagree on what it meant, and
+// the bug was a hex literal, not a logic error -- naming these does not
+// teach the type system ARM semantics, but it does make a copy/paste
+// mismatch a `grep`-visible one-word diff instead of a silent bit
+// pattern, and collapses "regime" text like map_page_el0_exec's own
+// comment above into one name read at every call site).
+//
+// AP[2:1] (bits 7:6) is what differs across all four: 00 = EL1 RW/EL0
+// none, 01 = EL1 RW/EL0 RW, 10 = EL1 RO/EL0 none (RES1 AP[1] in the pure
+// EL2 regime, where none of this project's non-EL0 demos care), 11 =
+// EL1 RO/EL0 RO. AP[1] specifically is why "read-only" is NOT one flag
+// word for every caller: it means "no access at all" to EL0 in the
+// EL1&0 regime a real process runs in, so map_page_read_only's own
+// EL2-only demo (copy_on_write) and process_address_space_cow_fork's
+// real EL0 share (el0_shell) need DIFFERENT read-only encodings, not
+// the same one two call sites apart.
+const PTE_FLAGS_EL2_RW: usize = 0x707;  // map_page, map_second_page: no EL0 access
+const PTE_FLAGS_EL0_RW: usize = 0x747;  // *_el0_exec, process_address_space_map/page_remap(writable)
+const PTE_FLAGS_EL2_RO: usize = 0x787;  // map_page_read_only: EL2-only demo, AP[1] don't-care there
+const PTE_FLAGS_EL0_RO: usize = 0x7C7;  // cow_fork/page_remap(read-only): a real EL0 process must still read it
+
 extern fn l3_address_space_write(slot: usize, index: usize, value: usize);
 
 fn map_page(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
@@ -633,7 +655,7 @@ fn map_page(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
     // Normal entries (0x705) additionally set bit 0 for a BLOCK
     // descriptor's valid encoding (0b01); a PAGE descriptor's is 0b11
     // (bit 1 too), which is the only difference from this line's 0x707.
-    l3_address_space_write(space.slot, l3_index, phys_addr | 0x707);
+    l3_address_space_write(space.slot, l3_index, phys_addr | PTE_FLAGS_EL2_RW);
 
     let mut occupied: AddressSpaceOwner[asid, SpaceState::Occupied] =
         { space.tag, space.slot };
@@ -665,7 +687,7 @@ fn map_page_el0_exec(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
     let pool_base_ptr: *u8 = page_pool as *u8;
     let pool_base: usize = pool_base_ptr as usize;
     let phys_addr: usize = pool_base + page.index * PAGE_SIZE;
-    l3_address_space_write(space.slot, l3_index, phys_addr | 0x747);
+    l3_address_space_write(space.slot, l3_index, phys_addr | PTE_FLAGS_EL0_RW);
 
     let mut occupied: AddressSpaceOwner[asid, SpaceState::Occupied] =
         { space.tag, space.slot };
@@ -689,7 +711,7 @@ fn map_second_page(space: sink AddressSpaceOwner[asid, SpaceState::Occupied],
     let pool_base_ptr: *u8 = page_pool as *u8;
     let pool_base: usize = pool_base_ptr as usize;
     let phys_addr: usize = pool_base + page.index * PAGE_SIZE;
-    l3_address_space_write(space.slot, l3_index, phys_addr | 0x707);
+    l3_address_space_write(space.slot, l3_index, phys_addr | PTE_FLAGS_EL2_RW);
 
     let mut occupied2: AddressSpaceOwner[asid, SpaceState::Occupied2] =
         { space.tag, space.slot };
@@ -712,7 +734,7 @@ fn map_second_page_el0_exec(space: sink AddressSpaceOwner[asid, SpaceState::Occu
     let pool_base_ptr: *u8 = page_pool as *u8;
     let pool_base: usize = pool_base_ptr as usize;
     let phys_addr: usize = pool_base + page.index * PAGE_SIZE;
-    l3_address_space_write(space.slot, l3_index, phys_addr | 0x747);
+    l3_address_space_write(space.slot, l3_index, phys_addr | PTE_FLAGS_EL0_RW);
 
     let mut occupied2: AddressSpaceOwner[asid, SpaceState::Occupied2] =
         { space.tag, space.slot };
@@ -897,7 +919,7 @@ fn process_address_space_map(
                 let va: usize = base_va + i * PAGE_SIZE;
                 let l3_index: usize = (va - DYN_VA_BASE) / PAGE_SIZE;
                 let phys_addr: usize = pool_base + idx * PAGE_SIZE;
-                l3_address_space_write(slot, l3_index, phys_addr | 0x747);
+                l3_address_space_write(slot, l3_index, phys_addr | PTE_FLAGS_EL0_RW);
                 tlb_invalidate_asid_va(slot, va);
                 process_phys_index_set(slot, i, idx);
                 mapped = mapped + 1;
@@ -986,9 +1008,9 @@ fn process_address_space_cow_fork(
         let va: usize = parent.base_va + i * PAGE_SIZE;
         let l3_index: usize = (va - DYN_VA_BASE) / PAGE_SIZE;
         let phys_addr: usize = pool_base + idx * PAGE_SIZE;
-        l3_address_space_write(parent.slot, l3_index, phys_addr | 0x7C7);
+        l3_address_space_write(parent.slot, l3_index, phys_addr | PTE_FLAGS_EL0_RO);
         tlb_invalidate_asid_va(parent.slot, va);
-        l3_address_space_write(child_slot, l3_index, phys_addr | 0x7C7);
+        l3_address_space_write(child_slot, l3_index, phys_addr | PTE_FLAGS_EL0_RO);
         tlb_invalidate_asid_va(child_slot, va);
         process_phys_index_set(child_slot, i, idx);
     }
@@ -1041,12 +1063,12 @@ fn process_address_space_page_remap(
     let l3_index: usize = (va - DYN_VA_BASE) / PAGE_SIZE;
     let pool_base: usize = (page_pool as *u8) as usize;
     let phys_addr: usize = pool_base + phys_index * PAGE_SIZE;
-    // 0x7C7 (EL0+EL1 read-only), not 0x787 -- see
+    // PTE_FLAGS_EL0_RO, not PTE_FLAGS_EL2_RO -- see
     // process_address_space_cow_fork's own comment above for why AP[1]
     // must be set for any descriptor a real EL0 process reads through.
-    let mut flags: usize = 0x7C7;
+    let mut flags: usize = PTE_FLAGS_EL0_RO;
     if (writable == true) {
-        flags = 0x747;
+        flags = PTE_FLAGS_EL0_RW;
     }
     l3_address_space_write(slot, l3_index, phys_addr | flags);
     tlb_invalidate_asid_va(slot, va);
@@ -1079,7 +1101,7 @@ fn map_page_read_only(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
     let l3_index: usize = (va - DYN_VA_BASE) / PAGE_SIZE;
     let pool_base: usize = (page_pool as *u8) as usize;
     let phys_addr: usize = pool_base + lease.index * PAGE_SIZE;
-    l3_address_space_write(space.slot, l3_index, phys_addr | 0x787);
+    l3_address_space_write(space.slot, l3_index, phys_addr | PTE_FLAGS_EL2_RO);
     let mut occupied: AddressSpaceOwner[asid, SpaceState::Occupied] =
         { space.tag, space.slot };
     let mut pending: ReadOnlyTlbPending[asid, va, p, side] =
@@ -1117,7 +1139,7 @@ fn cow_replace_read_only(
     let l3_index: usize = (mapping.va_value - DYN_VA_BASE) / PAGE_SIZE;
     let pool_base: usize = (page_pool as *u8) as usize;
     let phys_addr: usize = pool_base + page.index * PAGE_SIZE;
-    l3_address_space_write(mapping.space_slot, l3_index, phys_addr | 0x707);
+    l3_address_space_write(mapping.space_slot, l3_index, phys_addr | PTE_FLAGS_EL2_RW);
     tlb_invalidate_asid_va(mapping.space_slot, mapping.va_value);
     return mapping_owner_new(mapping.asid_tag, mapping.space_slot,
                              mapping.va_value, page.index, page.p_witness);
