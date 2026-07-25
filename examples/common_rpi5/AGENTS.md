@@ -62,6 +62,22 @@ see that script's own updated warning). Actually injecting `examples/start`
 still requires flashing `examples/common_rpi5/jtag_stub.img` as this SD
 card's `kernel_2712.img` first; that has not happened yet either.
 
+**Root cause, confirmed by reading `scripts/rpi3_prepare_sdcard.sh`**: this
+SD card was prepared by dd'ing a stock Raspberry Pi OS image and then
+running `rpi3_prepare_sdcard.sh` -- which only ever overwrites `kernel8.img`
+and appends RPi3-specific `config.txt` lines (`enable_jtag_gpio=1`,
+`dtoverlay=disable-bt`). A modern Raspberry Pi OS boot partition ships its
+own real `kernel_2712.img` alongside `kernel8.img` for RPi5 support, and
+RPi5's firmware **prefers `kernel_2712.img` over `kernel8.img` whenever
+both are present**. So this SD card's real, untouched `kernel_2712.img`
+is exactly what an RPi5 boots from it, regardless of `kernel8.img` being
+the RPi3 jtag_stub -- fully explaining the live-OS state the connectivity
+check found, not a fluke. `scripts/rpi5_prepare_sdcard.sh` (new) is the
+RPi5-correct equivalent: overwrites `kernel_2712.img` specifically (backed
+up to `kernel_2712.img.orig` first) and appends `os_check=0` (not RPi3's
+GPIO-JTAG-specific lines, irrelevant here). Not yet run against real
+hardware either.
+
 ## Why RPi5, given RPi3 bring-up (issues #140/#153/#154/#156/#157/#158) is
 ## already extensive and working
 
@@ -202,10 +218,16 @@ ever needed.
 
 ```
 make examples/common_rpi5/jtag_stub.img
-# flash examples/common_rpi5/jtag_stub.img as the SD card's kernel_2712.img,
-# with config.txt containing: kernel=kernel_2712.img / os_check=0
+# on the host, with the SD card's boot partition mounted:
+scripts/rpi5_prepare_sdcard.sh /path/to/mounted/boot/partition
+# power-cycle the board, then:
 make rpi5-start
 ```
+
+`scripts/rpi5_prepare_sdcard.sh` -- NOT `rpi3_prepare_sdcard.sh` -- is
+required even if this SD card was already run through the RPi3 version;
+see "Root cause" above for why overwriting only `kernel8.img` is not
+enough on RPi5.
 
 `make rpi5-start` builds `examples/start/kernel_rpi5.elf`, attaches a UART
 reader via `scripts/rpi5_uart_dev.sh`'s auto-detected device, then injects
