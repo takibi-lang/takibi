@@ -17,16 +17,17 @@ into `allcheck`/`check` until real UART output has actually been seen.
 
 **The real blocker, confirmed 2026-07-25 through extensive real-hardware
 debugging (see "A real bug this port found" and "UART investigation"
-below): this specific board's debug connector is wired to RP1's `uart0`
-(PCIe-attached), not BCM2712's on-die `uart10`/`_uart0` this file
-originally assumed.** Getting real bare-metal UART output therefore
-requires implementing RP1 PCIe enumeration (link training, BAR/ATU window
-setup) ourselves first -- Linux's own PCI subsystem is what sets this up
-during a normal OS boot; nothing does it for a bare-metal payload. This is
-a substantial separate undertaking, not a small fix, and is an open
-decision point for how this bring-up proceeds next -- see "UART
-investigation" below for the full evidence trail and "Next steps" for the
-options discussed with the user.
+below), is architectural, not a bug: this board's single 3-pin debug
+connector can carry EITHER UART OR SWD, never both at once** (Raspberry
+Pi's own official "3-pin Debug Connector Specification", RP-003139-SP --
+this is a hardware-level standard, not something software can route
+around). Getting simultaneous SWD debugging and live UART output
+therefore requires RP1's own, physically separate GPIO14/15-routed
+`rp1_uart0` -- which in turn requires bringing up RP1's PCIe link
+ourselves, since Linux's own PCI subsystem is what does this during a
+normal OS boot and nothing does it for a bare-metal payload. **Tracked as
+GitHub issue #161** -- see "UART investigation" below for the full
+evidence trail that led here.
 
 **Real hardware connectivity confirmed 2026-07-25** (read-only
 `halt`/`reg pc`/`resume` via `scripts/rpi5_jtag_load.sh`'s own check
@@ -336,23 +337,17 @@ not already parked at the stub (e.g. it just booted Raspberry Pi OS
 instead), flash the stub and power-cycle by hand first, or try
 `scripts/rpi5_jtag_reset.sh` on its own.
 
-## Next steps (open as of 2026-07-25)
+## Next steps: RP1 PCIe enumeration -- GitHub issue #161
 
-With RP1 PCIe confirmed as the only remaining route to bare-metal UART
-output on this board, the options are:
-
-1. **Implement minimal RP1 PCIe enumeration** (host bridge init, link
-   training, BAR/ATU window setup) as its own new milestone -- a
-   substantial undertaking, likely comparable in scope to the RPi3 USB
-   host stack (`usb_dwc2.tkb`/`usb_hub.tkb`/`usb_host.tkb`) rather than a
-   small addition to Stage A.
-2. **Find another way to get early bare-metal signal off this board**
-   without solving PCIe first -- e.g. re-examine whether some OTHER
-   always-available signal (GPIO blink via a scope/LED, or revisiting
-   whether a DIFFERENT config.txt/EEPROM combination could route the
-   console to `uart10` after all) could serve as Stage A's minimal
-   "did the injected code actually run" signal, deferring PCIe to a later,
-   deliberately-scoped milestone.
-3. Something else -- not yet decided; consult the user before committing
-   engineering effort to either path above, since both are real,
-   non-trivial scope decisions.
+Confirmed via Raspberry Pi's own official "3-pin Debug Connector
+Specification" (RP-003139-SP) that this board's single debug connector is
+standardized to carry EITHER UART OR SWD, never both -- so simultaneous
+SWD debugging and live UART output requires RP1's own, physically
+separate `rp1_uart0` (GPIO14/15), which in turn requires bringing up
+RP1's PCIe link ourselves. Decided with the user 2026-07-25: pursue this
+as its own new milestone, tracked as
+https://github.com/takibi-lang/takibi/issues/161 (host-bridge init, link
+training, BAR/ATU window setup -- likely comparable in scope to the RPi3
+USB host stack). See that issue for the full scope; update it and this
+file together as work proceeds, same as this repo's other multi-session
+milestones (issues #153/#154/#156/#157/#158).
