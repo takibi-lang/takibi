@@ -12,5 +12,10 @@ status 0
 status 1
 bar
 got fed-value
+hvc: fork ok
+child running
+process exited with status 42
+hvc: child reclaimed
+status 42
 process exited with status 7
 hvc: process VM reclaimed

@@ -100,6 +100,27 @@ l2_dynamic_table_as1:
 l3_dynamic_table_as1:
     .space  4096
 
+/* Nonzero once rpi3_el1_enter (el1_asm.S) has actually configured the EL1&0
+   translation regime -- TTBR0_EL1/TCR_EL1/MAIR_EL1/SCTLR_EL1.M (GitHub issue
+   #158). Everything in this file and tlb_asm.S that maintains the EL1&0
+   regime is gated on it, and it lives HERE rather than in el1_asm.S because
+   mmu.S is linked into every RPi3 kernel while el1_asm.S is only linked into
+   the ones that actually drop to EL1.
+
+   The gate is not a micro-optimization, it is a correctness requirement
+   measured on real hardware: examples that never leave EL2 (vm_page_map,
+   multi_address_space, copy_on_write, the smp_* family, ...) leave every
+   EL1 system register at its uninitialized reset value, and issuing EL1&0
+   TLB maintenance against that regime broke examples/smp_task_migrate
+   deterministically (it hung right after "task saved", with core 1 never
+   reaching "core1 arming"). Skipping it there restores those examples to
+   byte-identical behavior, while el0_shell -- the only example that both
+   enters EL1 and switches address spaces underneath a live EL0 process --
+   still gets the maintenance it genuinely needs. */
+    .global rpi3_el1_regime_active
+rpi3_el1_regime_active:
+    .space  8
+
     .section .text
     .global mmu_init
 mmu_init:
@@ -364,7 +385,47 @@ l3_dynamic_write:        /* fn l3_dynamic_write(index: usize, value: usize) */
 /* Select one of the two real translation roots.  slot 0 uses ASID 0 and the
    original l1_table; slot 1 uses ASID 1 and l1_table_as1.  Both roots map the
    executing image, stacks, and MMIO identically, so switching TTBR0_EL2 does
-   not disrupt the caller itself. */
+   not disrupt the caller itself.
+
+   Also writes TTBR0_EL1 (GitHub issue #158's real fork()+execve(), found the
+   hard way): EL0/EL1 execution uses the EL1&0 translation regime, which is
+   governed by TTBR0_EL1/SCTLR_EL1/TCR_EL1 -- EL2's OWN TTBR0_EL2 only ever
+   controls translations for code actually RUNNING at EL2 itself (this
+   function's own caller, when called from hvc_dispatch_fork/execve). Before
+   this fix, rpi3_el1_enter's own one-time `mrs ttbr0_el2 / msr ttbr0_el1`
+   copy (el1_asm.S, run exactly once at boot) meant TTBR0_EL1 stayed frozen
+   at whatever slot was active when the kernel first dropped to EL1 -- every
+   LATER call to this function (fork()'s and execve()'s own slot-1 switches)
+   changed what EL2's OWN code saw, but never what a REAL, subsequently
+   `rpi3_el0_enter`-resumed EL0 process actually executed through. Confirmed
+   on real hardware: execve()'s freshly loaded child ELF was mapped
+   correctly into slot 1's own L3 table, `entry`/`el0_entry_va` computed
+   correctly, cache-synced correctly (rpi3_code_range_sync), yet the very
+   first EL0 instruction fetch after resuming still faulted with ESR_EL1 EC
+   0x00 ("Unknown reason") -- because EL0 was still executing through slot
+   0's own (by-then-restored, ordinary busybox) mapping the whole time,
+   never slot 1's at all. No other example needs this: multi_address_space/
+   copy_on_write/vm_task_switch never run real EL0 code across more than one
+   TTBR0_EL2 switch (raw EL2-side pokes only), and el0_smoke/el0_elf_load/
+   el0_shell's own original boot load each call rpi3_el1_enter exactly once,
+   after which slot never changes again -- issue #158's fork()+execve() is
+   the first scenario where EL0 itself needs to keep tracking a LATER slot
+   switch.
+
+   `tlbi vmalle1is` is required alongside that TTBR0_EL1 write, and is NOT
+   redundant with the `tlbi alle2is` every caller already issues right after
+   this (vm_page_map_core.tkb's own tlb_invalidate_all_el2): those two
+   instructions invalidate DIFFERENT translation regimes -- alle2is only the
+   EL2 regime this function's own EL2 caller executes through, vmalle1is the
+   EL1&0 regime EL0/EL1 actually run in. Ordinarily an ASID change alone
+   would make stale entries harmless, but every dynamic-window L3 descriptor
+   this kernel writes (0x707/0x747/0x787, see map_page's own comment) leaves
+   nG (bit 11) CLEAR, i.e. GLOBAL -- and a global TLB entry is matched
+   regardless of ASID, so slot 0's own cached 0x80000000 translation would
+   otherwise keep satisfying EL0 fetches even after TTBR0_EL1 points at slot
+   1's table. Confirmed the hard way: adding the TTBR0_EL1 write WITHOUT
+   this moved the failure earlier (the EL2->EL1 return itself started
+   misbehaving) rather than fixing it. */
     .global mmu_address_space_activate
     .type   mmu_address_space_activate, %function
 mmu_address_space_activate: /* fn mmu_address_space_activate(slot: usize) */
@@ -382,6 +443,18 @@ mmu_address_space_activate: /* fn mmu_address_space_activate(slot: usize) */
     dsb     ish
     msr     ttbr0_el2, x1
     isb
+    /* EL1&0 half, only once that regime really exists -- see
+       rpi3_el1_regime_active's own comment above. */
+    adrp    x2, rpi3_el1_regime_active
+    add     x2, x2, :lo12:rpi3_el1_regime_active
+    ldr     x3, [x2]
+    cbz     x3, .Las_activate_done
+    msr     ttbr0_el1, x1
+    isb
+    tlbi    vmalle1is
+    dsb     ish
+    isb
+.Las_activate_done:
     ret
 
 /* Write one dynamic L3 entry in the table owned by slot x0. */

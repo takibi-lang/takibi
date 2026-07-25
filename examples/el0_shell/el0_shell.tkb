@@ -39,6 +39,13 @@ use "examples/common_rpi3/el0_shell_image_extern.tkb";
 // examples/fatfs_sdcard/fatfs_sdcard.tkb already proved on this board
 // (GitHub issue #145), reused as-is rather than rebuilt.
 use "examples/common_rpi3/fat12_usbmsc.tkb";
+// GitHub issue #158: a small, standalone EL0 test binary's own raw
+// bytes, embedded so app_main() can write them out to a real FAT12 file
+// at boot -- the small, controlled target execve() loads for its own
+// first end-to-end test (see el0_shell_child_test_image.S's own and
+// el0_shell_child_test.S's own comments for why this is a NEW binary,
+// not a reuse of el0_elf_load's own el0_test_prog.elf).
+use "examples/common_rpi3/el0_shell_child_test_image_extern.tkb";
 
 const SYSCALL_ERROR: usize = 0xFFFFFFFFFFFFFFFF;
 // -ENOTTY as usize (Linux errno 25), the real kernel ABI convention this
@@ -55,6 +62,10 @@ const ERR_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
 // fd table's own fixed capacity being exhausted).
 const ERR_EBADF: usize = 0xFFFFFFFFFFFFFFF7;
 const ERR_ENFILE: usize = 0xFFFFFFFFFFFFFFE9;
+// -ECHILD (errno 10), same convention -- GitHub issue #158's wait4():
+// what a real kernel reports once every child has already been reaped,
+// which is how a shell knows to stop waiting rather than loop forever.
+const ERR_ECHILD: usize = 0xFFFFFFFFFFFFFFF6;
 // This process's fixed, single-process/single-"user" identity (GitHub
 // issue #156's own suggested approach for a kernel with no real PID/UID
 // concept yet: "can all return fixed values"). PID/TID 0 is reserved
@@ -322,6 +333,26 @@ fn child_vm_take() -> ProcessVmState {
 // buffer's own content is linearly tracked, and this milestone's own
 // single-child-at-a-time scope means at most one is ever live.
 private let mut parent_saved_frame: [u8; 272] align(16);
+// The suspended parent's own copy of every "which EL0 image is currently
+// running" global el0_load_elf_into writes (GitHub issue #158). Saved at
+// fork() time and restored when the child is reclaimed, because the
+// child's own execve() reuses that SAME loader and therefore overwrites
+// all of them with the CHILD's geometry -- and unlike the register frame
+// (parent_saved_frame above), these are not part of any CPU context an
+// eret restores, so nothing would otherwise put them back. Found on real
+// hardware: without this the parent resumed correctly (right ELR, right
+// SPSR, right x0) and then crashed a while later, because every syscall's
+// own bounds check was measuring the parent's pointers against the
+// CHILD's much smaller el0_region_size, and brk() was handing the parent
+// the CHILD's heap window -- silent, gradual corruption rather than an
+// immediate fault, which is why it looked like a resume bug at first.
+private let mut parent_saved_entry_va: usize;
+private let mut parent_saved_page_va: usize;
+private let mut parent_saved_region_size: usize;
+private let mut parent_saved_stack_top_va: usize;
+private let mut parent_saved_heap_start: usize;
+private let mut parent_saved_heap_limit: usize;
+private let mut parent_saved_heap_break: usize;
 // Set by el0_svc_dispatch's own clone(220) arm (EL1, which has the real
 // frame_sp value from its own 7th argument) immediately before issuing
 // rpi3_hvc_call, since ordinary global memory crosses the EL1->EL2 hvc
@@ -347,6 +378,13 @@ const FORK_CHILD_PID: usize = 2;
 // wait4() (once the parent resumes) can report the real $? instead of a
 // stub value.
 private let mut child_exit_status: usize = 0;
+// Whether that status has yet to be collected by a wait4() call. A real
+// child is reapable exactly ONCE: the second wait4() must report -ECHILD
+// ("no children left") or a shell keeps waiting forever. Confirmed
+// necessary against the real strace of this exact busybox binary, which
+// issues a SECOND wait4(-1, ..., WNOHANG) right after the first and
+// relies on -ECHILD to stop.
+private let mut child_exit_pending: bool = false;
 
 // GitHub issue #158's real execve(): a fixed staging buffer the EL1-side
 // syscall handler reads a real file's bytes into (via fat_read, issue
@@ -365,6 +403,11 @@ private let mut exec_staging: [u8; EXEC_STAGING_SIZE] align(16);
 // Set by el0_svc_dispatch's own execve(221) arm immediately before
 // issuing rpi3_hvc_call(3), same pattern as pending_frame_sp.
 private let mut pending_exec_len: usize;
+// Set by el0_svc_dispatch's own EC==0x24 (data abort) arm immediately
+// before issuing rpi3_hvc_call(4) to resolve a real COW write fault --
+// same ordinary-memory boundary-crossing pattern as pending_frame_sp/
+// pending_exec_len.
+private let mut pending_cow_fault_index: usize;
 
 // GitHub issue #158's real per-page copy-on-write table: exactly one
 // linear token per page currently shared between the parent and its one
@@ -535,7 +578,33 @@ fn hvc_dispatch(arg: usize) -> usize {
     if (arg == 3) {
         return hvc_dispatch_execve();
     }
+    if (arg == 4) {
+        return hvc_dispatch_cow_fault();
+    }
     return hvc_dispatch_exit();
+}
+
+// Resolves a real COW write fault (opcode 4) -- el0_svc_dispatch's own
+// EC==0x24 arm below identifies WHICH page (pending_cow_fault_index,
+// crossed the same ordinary-memory way pending_frame_sp/pending_exec_len
+// already do) before trapping up here, since process_address_space_
+// page_remap's own l3_address_space_write is EL2-only, unreachable from
+// EL1. Fixed slot=1 (fault side) / slot=0 (other side): this milestone's
+// own single-child scope (fork()'s own comment) means the ONLY process
+// that can ever fault on a still-shared page is the running child, and
+// the ONLY other side is always the suspended parent. Both sides reuse
+// the SAME fixed base_va (DYN_VA_BASE, el0_page_va here since fork()
+// never changes it -- see el0_svc_dispatch's own comment).
+fn hvc_dispatch_cow_fault() -> usize {
+    let idx_raw: usize = pending_cow_fault_index;
+    if (idx_raw < MAX_PROCESS_PAGES) {
+        let i: {0..<MAX_PROCESS_PAGES as usize} = idx_raw;
+        let resolved: bool = cow_page_resolve_write_fault(i, 1, el0_page_va, 0, el0_page_va);
+        if (resolved == true) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 fn hvc_dispatch_exit() -> usize {
@@ -612,6 +681,17 @@ fn hvc_dispatch_fork() -> usize {
             let x0_ptr: *u64 = frame_dst as *u64;
             *x0_ptr = FORK_CHILD_PID as u64;
 
+            // The child's own execve() runs el0_load_elf_into, which
+            // overwrites every one of these -- see their own declaration
+            // comment for the real-hardware failure this prevents.
+            parent_saved_entry_va = el0_entry_va;
+            parent_saved_page_va = el0_page_va;
+            parent_saved_region_size = el0_region_size;
+            parent_saved_stack_top_va = el0_stack_top_va;
+            parent_saved_heap_start = el0_heap_start;
+            parent_saved_heap_limit = el0_heap_limit;
+            parent_saved_heap_break = el0_heap_break;
+
             process_vm_put(ProcessVmState::Suspended(pas));
             child_vm_put(ProcessVmState::Loaded((child_pas, child_active)));
             fork_child_running = true;
@@ -683,6 +763,17 @@ fn hvc_dispatch_child_teardown() -> usize {
                     address_space_free(child_inactive);
                     process_vm_put(ProcessVmState::Loaded((parent_pas, parent_active)));
                     fork_child_running = false;
+                    // Put back what the child's own execve() overwrote --
+                    // the parent is about to run again and every syscall
+                    // arm below measures its pointers against these. See
+                    // parent_saved_entry_va's own declaration comment.
+                    el0_entry_va = parent_saved_entry_va;
+                    el0_page_va = parent_saved_page_va;
+                    el0_region_size = parent_saved_region_size;
+                    el0_stack_top_va = parent_saved_stack_top_va;
+                    el0_heap_start = parent_saved_heap_start;
+                    el0_heap_limit = parent_saved_heap_limit;
+                    el0_heap_break = parent_saved_heap_break;
                     uart_puts("hvc: child reclaimed\n");
                 }
                 ProcessVmState::Empty => {
@@ -895,6 +986,7 @@ fn fat_fd_read(slot: {0..<MAX_OPEN_FILES as usize}, buf: *u8, len: u32) -> usize
         FatFdState::Open(mut file) => {
             let mut br: u32 = 0;
             let result: FatIoResult = fat_read(file, buf, len, &br);
+            uart_rx_ring_drain();
             fat_fd_put(slot, FatFdState::Open(file));
             if (fat_io_result_ok(result) == true) {
                 return br as usize;
@@ -1113,17 +1205,26 @@ const PATH_MAX_CHECK: usize = 64;
 // 8.3 name83 form (space-padded, uppercased -- FAT is case-insensitive,
 // real Unix filenames usually are not, so folding case here is what
 // makes e.g. `cat cat.txt` actually find a name83 this driver stored as
-// upper case). A single leading '/' is stripped (this shell's cwd is
-// always '/', GitHub issue #156's own scope) but any FURTHER '/', a
-// name or extension component longer than 8/3 bytes, or a completely
-// empty name all report false rather than guessing -- fat12.tkb's own
-// root-directory-only scope (its header comment) never supported
-// subdirectories, so a path this driver cannot represent must be a
-// real ENOENT, not a best-effort truncation.
+// upper case). ALL leading '/' are stripped, not just one: GitHub issue
+// #158's own real strace measurement (qemu-aarch64-static -strace
+// against the real busybox-static binary) found that ash's own $PATH
+// search builds `dir + "/" + name`, and this shell's execve() dispatch
+// needs `PATH=/` (its only representable search directory, this shell's
+// cwd being always '/', GitHub issue #156's own scope) to resolve a bare
+// external command like `prog` -- which makes ash construct `//prog`
+// (dir "/" already ends in '/', then ash's own separator adds a second
+// one), not `/prog`. Stripping only a single leading slash rejected that
+// as a subdirectory path and misreported a real, present file as
+// ENOENT. Any '/' AFTER the leading run, a name or extension component
+// longer than 8/3 bytes, or a completely empty name still all report
+// false rather than guessing -- fat12.tkb's own root-directory-only
+// scope (its header comment) never supported subdirectories, so a path
+// this driver cannot represent must be a real ENOENT, not a best-effort
+// truncation.
 fn path_to_name83(path: *u8, out: *u8) -> bool {
     let mut p: usize = 0;
-    if (path[0] == 0x2F) { // '/'
-        p = 1;
+    while (p < PATH_MAX_CHECK && path[p as isize] == 0x2F) { // '/'
+        p = p + 1;
     }
     for i: usize in 0..<11 {
         out[i as isize] = 0x20; // ' '
@@ -1233,10 +1334,49 @@ fn uart_rx_ring_getc() -> u8 {
 // frame base address, now passed by examples/common_rpi3/el0_asm.S's
 // el0_sync_entry as a 7th argument (x6) -- see that file's own comment
 // on why fork() needs it. Unused by any syscall arm below except 220
-// (clone/fork).
+// (clone/fork). `far` (x7, FAR_EL1) was wired through el0_asm.S at the
+// same time but left unconsumed until now -- see that file's own
+// comment on why a real fork()'s COW write fault needs it.
 fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
-                    x2: usize, elr: usize, frame_sp: usize) -> (usize, usize) {
+                    x2: usize, elr: usize, frame_sp: usize, far: usize) -> (usize, usize) {
     let ec: usize = (esr >> 26) & 0x3F;
+    if (ec == 0x24) {
+        // Data Abort from a lower EL (GitHub issue #158's real fork()):
+        // the ONLY way this milestone's own scope ever produces one is
+        // the running child writing to a page process_address_space_
+        // cow_fork above marked read-only and shared -- confirmed via
+        // real hardware measurement (the very first thing busybox ash's
+        // own forked child does after resuming is push registers onto
+        // its own, now-shared-read-only, stack). dfsc 0x0F ==
+        // "Permission fault, level 3" (same encoding vm_page_map_core.
+        // tkb's own cow_fault_transition already checks for its EL1-only
+        // demo scenario); bit 6 of ISS is the WnR (write-not-read) bit --
+        // this kernel never needs to resolve a READ fault on a shared
+        // page (both sides already have identical bytes visible
+        // read-only). Any other data abort (a genuine bug, not a COW
+        // fault) falls through to "unhandled" below, same fail-stop
+        // safety as before this arm existed.
+        let dfsc: usize = esr & 0x3F;
+        let write: usize = (esr >> 6) & 1;
+        if (dfsc == 0x0F && write == 1 && fork_child_running == true) {
+            let fault_page: usize = far & 0xFFFFFFFFFFFFF000;
+            if (fault_page >= el0_page_va && fault_page - el0_page_va < el0_region_size) {
+                pending_cow_fault_index = (fault_page - el0_page_va) / PAGE_SIZE;
+                let cow_ok: usize = rpi3_hvc_call(4);
+                if (cow_ok == 1) {
+                    // Retry the SAME faulting instruction (elr
+                    // unchanged): the permission fix just applied makes
+                    // it succeed this time. `retval` must be the
+                    // process's own ORIGINAL x0 unchanged, not a real
+                    // syscall return value -- el0_asm.S's own resume
+                    // path always overwrites the resumed x0 with
+                    // whatever this function returns, syscall or not.
+                    return (elr, x0);
+                }
+            }
+        }
+        return (0, 0);
+    }
     if (ec != 0x15) {
         return (0, 0);
     }
@@ -1562,11 +1702,18 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             if ((flags & 0x40) != 0) { // O_CREAT
                 mode = FA_WRITE | FA_CREATE_ALWAYS;
             }
+            // fat_open scans the root directory over real USB Mass
+            // Storage -- several sector reads, all inside this ONE
+            // syscall, so drain again on the way out (see app_main's own
+            // comment on why an undrained multi-millisecond window costs
+            // real stdin bytes).
             match fat_open(name83_buf as *u8, mode) {
                 FatOpenResult::Error(err) => {
+                    uart_rx_ring_drain();
                     return (elr, ERR_ENOENT);
                 }
                 FatOpenResult::Opened(file) => {
+                    uart_rx_ring_drain();
                     let store_result: FatOpenFdResult = fat_fd_store(0, file);
                     return (elr, fat_open_fd_result_value(store_result));
                 }
@@ -1800,6 +1947,15 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             // wait4(-1, ...) as literally the very next syscall after
             // clone(), nothing in between. So there is no real blocking
             // left to do here, just reporting the already-known status.
+            //
+            // A child is reapable exactly once (see child_exit_pending's
+            // own comment): the real strace issues a SECOND wait4 with
+            // WNOHANG immediately after the first and needs -ECHILD to
+            // stop, so reporting the same child forever would hang the
+            // shell just as surely as never reporting it at all.
+            if (child_exit_pending == false) {
+                return (elr, ERR_ECHILD);
+            }
             let wstatus_ptr: usize = x1;
             if (wstatus_ptr != 0) {
                 if (wstatus_ptr < el0_page_va || 4 > el0_region_size) {
@@ -1814,6 +1970,7 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
                 // signal), the real exit code in bits 8-15.
                 *status_out = ((child_exit_status & 0xFF) << 8) as u32;
             }
+            child_exit_pending = false;
             return (elr, FORK_CHILD_PID);
         }
         160 => {
@@ -1960,6 +2117,7 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             // own comment), so it doubles as "am I the child" here.
             if (fork_child_running == true) {
                 child_exit_status = x0;
+                child_exit_pending = true;
                 rpi3_hvc_call(2);
                 let frame: *u8 = parent_saved_frame as *u8;
                 rpi3_el0_resume_frame(frame as usize);
@@ -2018,6 +2176,22 @@ fn app_main() {
     // "about to actually read stdin" again, the invariant this test
     // harness's own timing already relies on for every other stdin-fed
     // example.
+    //
+    // GitHub issue #158 kept the print exactly here but closed the OTHER
+    // gap it exposed, inside el0_load_elf_into below: copying and
+    // cache-syncing a real ~1.1MB busybox image is several milliseconds
+    // of work containing no syscall, so nothing was draining the RX FIFO
+    // during it either (uart_rx_ring_drain otherwise runs only on syscall
+    // entry) -- same "unexpected \"do\"" symptom, a different multi-
+    // millisecond window. Moving the print LATER, past the load, was
+    // tried first and is actively worse: it merely delays the burst until
+    // stdin is still arriving while the shell runs its FIRST real
+    // command, and `read fatline < CAT.TXT` does real USB Mass Storage
+    // I/O inside a single read() syscall -- another undrained window,
+    // just later and harder to see. Draining DURING the load instead
+    // gets the whole script safely into the 512-byte software ring
+    // before busybox even starts, after which no byte is in flight during
+    // any later kernel-side stall at all.
     if (disk_io_ok(disk_initialize()) == false || fat_io_ok(fat_format()) == false) {
         uart_puts("fat12 setup failed\n");
     } else {
@@ -2025,6 +2199,37 @@ fn app_main() {
         let cat_content: *u8 = "fat12 file\n";
         if (fat_io_ok(create_demo_file(cat_name, cat_content)) == false) {
             uart_puts("fat12 setup failed\n");
+        }
+        // GitHub issue #158: seeds a real, raw ELF file (not a NUL-
+        // terminated string -- create_demo_file's own cstr_len would
+        // truncate at the first zero byte any real binary is full of,
+        // so this goes through fat_open/fat_write/fat_close directly
+        // with the image's own real byte length instead) for execve()
+        // to find via issue #157's own VFS bridge -- the small,
+        // controlled el0_shell_child_test.elf (see its own and
+        // el0_shell_child_test_image.S's own comments), not yet a real
+        // $PATH-searched external command.
+        let prog_name: *u8 = "PROG       ";
+        let prog_addr: usize = el0_shell_child_test_image_addr();
+        let prog_len: usize = el0_shell_child_test_image_len();
+        if (prog_len == 0 || prog_len > EXEC_STAGING_SIZE) {
+            uart_puts("fat12 setup failed\n");
+        } else {
+            match fat_open(prog_name, FA_WRITE | FA_CREATE_ALWAYS) {
+                FatOpenResult::Error(err) => {
+                    uart_puts("fat12 setup failed\n");
+                }
+                FatOpenResult::Opened(mut prog_fp) => {
+                    let mut prog_bw: u32 = 0;
+                    let prog_src: *u8 = prog_addr as *u8;
+                    let write_result: FatIoResult =
+                        fat_write(prog_fp, prog_src, prog_len as u32, &prog_bw);
+                    let close_result: FatIoResult = fat_close(prog_fp);
+                    if (fat_io_ok(write_result) == false || fat_io_ok(close_result) == false) {
+                        uart_puts("fat12 setup failed\n");
+                    }
+                }
+            }
         }
     }
     uart_puts("el0_shell\n");
@@ -2252,6 +2457,14 @@ fn el0_load_elf_into(image_addr: usize, image_len: usize,
                             src[seg_offset as isize..<(seg_offset + seg_filesz) as isize]
                         };
                         slice_copy(seg_dst, seg_src);
+                        // Keep the PL011's own 32-byte hardware RX FIFO
+                        // from overflowing across this multi-millisecond,
+                        // syscall-free stretch -- see app_main's own
+                        // comment above for the full reasoning. A whole
+                        // ~1.1MB image is several segments, so draining
+                        // once per segment bounds the undrained gap to a
+                        // single memcpy.
+                        uart_rx_ring_drain();
                     }
                 }
             }
@@ -2262,6 +2475,18 @@ fn el0_load_elf_into(image_addr: usize, image_len: usize,
                 el0_active_abandon(active2);
                 return false;
             }
+
+            // Real, measured requirement (GitHub issue #158): the segment
+            // copy above wrote fresh instruction bytes through the D-cache
+            // side of this Normal Write-Back Cacheable mapping; nothing
+            // makes them visible to a later I-fetch of the SAME address
+            // without explicit cache maintenance. Covers the whole
+            // code_region_size (every PT_LOAD segment just copied, not
+            // one at a time) -- see rpi3_code_range_sync's own comment
+            // (tlb_asm.S) for why this was never needed before execve()
+            // started reloading a process image on an already-warm cache.
+            rpi3_code_range_sync(page_va, code_region_size);
+            uart_rx_ring_drain();
 
             // The stack is simply the LAST page of the same contiguous
             // ProcessAddressSpace region, right after the code pages --

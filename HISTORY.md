@@ -15,6 +15,93 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-25: Real `fork()`/`execve()`/`wait4()` -- an External Command from a Real Shell (Issue #158)
+
+`examples/el0_shell` now runs a genuine external program: busybox `ash`
+issues a real `clone(220)`, the child `execve(221)`s an ELF found through
+issue #157's FAT12 bridge, runs, exits, and its real status reaches the
+parent's `$?` through `wait4(260)`. The fixture proves the whole chain end
+to end (`export PATH=/` then `prog`, giving `child running` and
+`status 42`).
+
+Following the issue's own instruction, `clone` was not guessed at: a real
+`strace` of this exact busybox binary under `qemu-aarch64-static` showed
+plain `clone(child_stack=NULL, ...SIGCHLD)` -- real `fork()` semantics,
+not `vfork()` -- and, decisively, that `wait4` is the very next syscall
+after `clone`. That evidence justified the single-core cooperative design:
+`hvc_dispatch_fork` runs the child's ENTIRE lifecycle before resuming the
+suspended parent, which made `wait4` a status report rather than a
+blocking primitive. The same strace also caught `//prog` (ash concatenates
+`dir + "/" + name`, and `PATH=/` already ends in one), so `path_to_name83`
+now strips a leading RUN of slashes rather than exactly one.
+
+COW is real, not eager copying: `process_address_space_cow_fork` shares
+every page read-only into a second address space, `CowSharedPage[p]`
+tracks each still-shared page as one linear token, and a genuine EL0 write
+fault (ESR EC 0x24, DFSC 0x0F, WnR=1) allocates and copies exactly the
+pages actually written -- five of them for busybox, out of 420.
+
+Most of the work was in five hardware-only defects that no amount of
+compile-time checking could have caught, each invisible until this
+milestone because each needed a scenario no earlier example produced:
+
+- **TTBR0_EL1 was never updated on an address-space switch.**
+  `mmu_address_space_activate` wrote only TTBR0_EL2, while `rpi3_el1_enter`
+  copied it to TTBR0_EL1 exactly once at boot -- so EL0, which runs in the
+  EL1&0 regime, kept executing through whichever slot was active when the
+  kernel first dropped to EL1. `execve` mapped the child correctly into
+  slot 1 and EL0 still ran slot 0. It surfaced as `EC 0x00` ("Unknown
+  reason") at the entry point, because slot 0 held busybox's own `\x7fELF`
+  header, which is not a valid instruction.
+- **TLB maintenance covered only the EL2 regime.** `tlbi vae2is`/`alle2is`
+  never touch EL1&0, and every dynamic-window descriptor here leaves nG
+  clear (global), so stale entries were matched regardless of ASID. The
+  COW handler corrected a descriptor and the identical fault repeated at
+  the identical FAR forever. Fixed with `vaae1is`/`vmalle1is` alongside.
+- **`0x787` denies EL0 all access.** AP[1] (bit 6) is RES1 and ignored in
+  the EL2 regime that `map_page_read_only`'s pure-EL2 demo runs in, but in
+  EL1&0 a clear AP[1] means "no EL0 access at all" -- so a COW share
+  refused the child even the reads that sharing is entirely about. The
+  EL0-visible paths now use `0x7C7` (AP=0b11). This one only became
+  reachable once the two fixes above let those descriptors reach EL0.
+- **`rpi3_el0_resume_frame` restored no SP_EL0.** It survives an ordinary
+  syscall round trip and is correctly inherited across `fork()`, but the
+  child's own `execve` repoints it -- so the parent resumed on the child's
+  abandoned stack. Thoroughly misleading in presentation: correct ELR,
+  SPSR and x0, one more successful syscall, and only then a jump to
+  `0xd503201f17ffffe1` -- a PC made of two literal instruction words.
+- **Loader globals were clobbered.** The child's `execve` reuses the same
+  `el0_load_elf_into`, overwriting `el0_page_va`/`el0_region_size`/
+  `el0_heap_*`; unlike registers, nothing puts those back, so the resumed
+  parent bounds-checked its pointers against the child's geometry.
+
+Two supporting fixes: `rpi3_code_range_sync` (D-cache clean + I-cache
+invalidate per 64-byte line) because `execve` is the first load onto a
+warm cache, and `PAGE_COUNT` 512 -> 1024, since a suspended parent (420
+pages) plus a running child no longer fit one window's worth of frames.
+That is a physical-pool limit, orthogonal to the per-process 2MB VA
+ceiling -- filed as issue #159 (real multi-level page tables), explicitly
+NOT the same problem.
+
+The EL1&0 maintenance is gated on a new `rpi3_el1_regime_active` flag,
+which is a correctness requirement rather than an optimization:
+`smp_task_migrate` hung deterministically after "task saved" because
+examples that never leave EL2 leave every EL1 system register at its reset
+value. Gating restores them byte-for-byte.
+
+Finally, `run_hw_test_rpi3_stdin` gained an opt-in `LINE_DELAY`. The PL011
+has a 32-byte RX FIFO and these examples wire no RX interrupt, so a
+software ring of any size can only be filled when the kernel happens to
+run: any CPU-bound stretch beyond ~2.7ms of wire time drops input. The
+script grew past that once fork/exec joined it. Until the example has a
+real RX interrupt, the honest fix is not to blast 250 bytes at a 32-byte
+FIFO.
+
+Verified with `make check` (164), `dune runtest`, `make allcheck-build`,
+and `make hwcheck-rpi3` (79/79 on real hardware).
+
+---
+
 ### 2026-07-22: Typed EL2 COW Exception Context (Issues #67 and #6)
 
 The COW hardware baseline exposed a boundary that could not be modeled by

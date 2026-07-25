@@ -108,11 +108,27 @@ rpi3_el0_enter:
    never call this, are unaffected.
 
    Same 272-byte layout as el0_sync_entry's own save area (x0/x1 at +0,
-   x2/x3 at +16, ... x30/xzr at +240, ELR_EL1/SPSR_EL1 at +256). x0
+   x2/x3 at +16, ... x30/SP_EL0 at +240, ELR_EL1/SPSR_EL1 at +256). x0
    itself (the frame_ptr argument) is loaded dead LAST, since every
    earlier load addresses the frame through it -- overwriting x0 any
    sooner would lose the base address before this function is done
-   reading from it. */
+   reading from it.
+
+   SP_EL0 (+248) must be restored here even though el0_sync_entry's own
+   same-frame resume path deliberately does not: SP_EL0 is a banked
+   register that survives an ordinary EL0->EL1->EL0 syscall round trip
+   untouched, and it also correctly survives fork() itself (a forked
+   child genuinely inherits its parent's stack pointer, which is exactly
+   what real fork() semantics require). What does NOT survive is the
+   child's own execve(): rpi3_el0_enter's `msr sp_el0, x1` above
+   repoints SP_EL0 at the newly loaded image's stack, and nothing would
+   otherwise put the PARENT's back when this function later resumes it.
+   Found on real hardware, and it presents in a thoroughly misleading
+   way: the parent resumed with a perfectly correct ELR, SPSR and x0,
+   ran one more syscall successfully, and only then jumped to a PC made
+   of literal instruction words (0xd503201f17ffffe1 -- `nop` and a
+   backward `b` side by side) because the shell had been reading its
+   return addresses off the CHILD's abandoned stack the whole time. */
     .global rpi3_el0_resume_frame
 rpi3_el0_resume_frame:
     ldp     x1, x2, [x0, #256]
@@ -132,7 +148,8 @@ rpi3_el0_resume_frame:
     ldp     x24, x25, [x0, #192]
     ldp     x26, x27, [x0, #208]
     ldp     x28, x29, [x0, #224]
-    ldp     x30, xzr, [x0, #240]
+    ldp     x30, x1, [x0, #240]
+    msr     sp_el0, x1
     ldp     x0, x1, [x0, #0]
     eret
 
@@ -197,7 +214,16 @@ el0_sync_entry:
     stp     x24, x25, [sp, #192]
     stp     x26, x27, [sp, #208]
     stp     x28, x29, [sp, #224]
-    stp     x30, xzr, [sp, #240]
+    /* +248 used to be a wasted xzr filler; it now carries SP_EL0, the one
+       piece of real EL0 context this frame was otherwise missing (GitHub
+       issue #158). Purely additive: the same-frame resume path below
+       still never reads it back (SP_EL0 cannot have changed while the
+       SAME process was trapped), and examples/el0_smoke/el0_elf_load are
+       unaffected. rpi3_el0_resume_frame above is what needs it -- see its
+       own comment for why a forked parent's stack pointer, unlike every
+       other register, does NOT survive on its own. */
+    mrs     x9, sp_el0
+    stp     x30, x9, [sp, #240]
     mrs     x9, elr_el1
     mrs     x10, spsr_el1
     stp     x9, x10, [sp, #256]

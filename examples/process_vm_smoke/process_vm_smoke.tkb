@@ -8,7 +8,7 @@
 // linear owners cannot be stored in an array in this language today).
 //
 // Maps 3 pages (deliberately small and fixed, unlike page_pool's own
-// PAGE_COUNT=512 -- this smoke test only needs to prove more-than-2-pages
+// PAGE_COUNT -- this smoke test only needs to prove more-than-2-pages
 // works, not exercise the pool's real capacity), writes a distinct
 // marker byte through each page's own raw VA, reads all three back to
 // prove they are genuinely three separate live translations (not one

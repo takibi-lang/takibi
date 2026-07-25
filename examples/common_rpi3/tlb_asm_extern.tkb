@@ -7,3 +7,8 @@
 extern fn tlb_invalidate_va(va: usize);
 extern fn tlb_invalidate_asid_va(asid: usize, va: usize);
 extern fn tlb_invalidate_all_el2();
+// GitHub issue #158: D-cache clean + I-cache invalidate for freshly
+// loaded EL0 code -- see tlb_asm.S's own rpi3_code_range_sync for why
+// this became necessary only once execve() started reloading a process
+// image on an already-warm cache.
+extern fn rpi3_code_range_sync(va: usize, len: usize);

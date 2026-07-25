@@ -17,4 +17,7 @@ echo $FOO
 read y
 fed-value
 echo got $y
+export PATH=/
+prog
+echo status $?
 exit 7

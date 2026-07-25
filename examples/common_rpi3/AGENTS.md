@@ -1688,10 +1688,17 @@ page run for a process, worked around from the language's current
 "indexed owners cannot live in arrays" limitation (see `OWNERSHIP_KERNEL.md`
 Slice 6, "indexed owners stored in arbitrary fields, arrays, globals, or
 other stable places" listed as still-future Core work) via a small,
-fixed linear array of slots indexed by ASID instead of by page. `PAGE_COUNT`/
+fixed linear array of slots indexed by ASID instead of by page.
 `MAX_PROCESS_PAGES` is 512 (2MB, the full `DYN_VA_BASE..DYN_VA_LIMIT`
-window) -- sized for `el0_shell`'s real ~1.1MB busybox-static binary
-(issue #156), not the earlier 4-page smoke-test sizing.
+window per hardware address-space slot) -- sized for `el0_shell`'s real
+~1.1MB busybox-static binary (issue #156), not the earlier 4-page
+smoke-test sizing. `PAGE_COUNT` (the physical frame pool, same file) is
+1024 -- one window's worth of frames for EACH of the two hardware slots,
+doubled from the original 512 once issue #158's real `fork()`+`execve()`
+measured the first scenario where both slots are genuinely live at once
+(a suspended parent shell plus its running child). See issue #159 for
+the follow-on question of real multi-level, dynamically-allocated page
+tables instead of one fixed-size L3 table per slot.
 
 `el0_elf_load.tkb`/`el0_shell.tkb` load a real ET_DYN (PIE) ELF: PT_LOAD
 segments are copied at a computed `load_bias` (same technique as Linux's
@@ -1726,6 +1733,51 @@ Real bugs found bringing up a real, unmodified third-party binary
 prior payload used FP/SIMD instructions), musl's `a_crash()` abort
 triggering on `set_tid_address` returning an impossible TID of 0, and
 the UART FIFO race described above.
+
+### Two translation regimes: EL2 vs EL1&0 (issue #158)
+
+The single most expensive class of bug in issue #158's real `fork()`/
+`execve()` was forgetting that this kernel drives **two** translation
+regimes, and that almost everything written before it only ever
+maintained one:
+
+- EL2 code (the `hvc_dispatch_*` handlers, `el0_load_elf_into`) translates
+  through **TTBR0_EL2**, maintained by `tlbi vae2is`/`alle2is`.
+- A real EL0 process -- and the EL1 syscall handlers -- translate through
+  **TTBR0_EL1**, an entirely separate regime that `vae2is`/`alle2is` do
+  not touch at all.
+
+Before issue #158 every EL0 example set its mappings up once *before*
+entering EL0 and never changed them again, so the gap was unobservable.
+`fork()`+`execve()` switch address spaces underneath a live EL0 process
+and are the first thing to expose it. Three separate consequences, all
+confirmed on real hardware, all documented at their fix sites:
+
+- `mmu_address_space_activate` must write TTBR0_EL1 as well as TTBR0_EL2
+  (`rpi3_el1_enter`'s one-time copy at boot is not enough).
+- `tlb_invalidate_va`/`tlb_invalidate_asid_va` must also issue
+  `tlbi vaae1is`. The **all-ASID** form specifically: every dynamic-window
+  descriptor here leaves nG clear (global), and a global entry is matched
+  regardless of ASID.
+- `0x787` is EL2-regime shorthand for "read-only" **only** because AP[1]
+  is RES1 there. In EL1&0 a clear AP[1] means *no EL0 access whatsoever*,
+  so anything a real EL0 process reads needs `0x7C7` (AP=0b11).
+
+All EL1&0 maintenance is gated on `rpi3_el1_regime_active`
+(`mmu.S` `.bss`, set by `rpi3_el1_enter`). That gate is a correctness
+requirement, not an optimization: examples that never leave EL2 leave
+every EL1 system register at its reset value, and maintaining that
+regime against them broke `smp_task_migrate` deterministically (hang
+right after `task saved`, core 1 never reaching `core1 arming`).
+
+Two more context pieces that do NOT restore themselves and must be saved
+and put back by hand across a `fork()`+`execve()`+child-exit cycle:
+**SP_EL0** (banked, survives a syscall round trip and is correctly
+inherited by `fork()`, but the child's own `execve` repoints it -- see
+`rpi3_el0_resume_frame`) and `el0_load_elf_into`'s own
+`el0_page_va`/`el0_region_size`/`el0_heap_*` globals (the child's
+`execve` reuses the same loader and overwrites them). Both present as
+delayed, misleading corruption rather than an immediate fault.
 
 ## Exception vector table (`startup.S`)
 

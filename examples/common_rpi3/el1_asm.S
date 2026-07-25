@@ -135,6 +135,16 @@ rpi3_el1_enter:
     msr     sctlr_el1, x2
     isb
 
+    /* From here on the EL1&0 translation regime genuinely exists, so
+       mmu_address_space_activate and tlb_asm.S's own wrappers may (and
+       must) maintain it alongside the EL2 regime -- see
+       rpi3_el1_regime_active's own comment in mmu.S for why they refuse to
+       touch it before this point. */
+    adrp    x2, rpi3_el1_regime_active
+    add     x2, x2, :lo12:rpi3_el1_regime_active
+    mov     x3, #1
+    str     x3, [x2]
+
     msr     sp_el1, x0
 
     /* HCR_EL2.RW (bit 31): "EL1 executes in AArch64 state". Left at

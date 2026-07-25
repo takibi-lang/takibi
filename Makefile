@@ -1616,6 +1616,36 @@ $(COMMON_RPI3_INITRAMFS_CPIO): $(COMMON_RPI3_EL0_TEST_PROG_ELF)
 $(COMMON_RPI3_EL0_TEST_IMAGE_O): $(COMMON_RPI3_EL0_TEST_IMAGE_S) $(COMMON_RPI3_INITRAMFS_CPIO)
 	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
 
+# GitHub issue #158: a second, deliberately simpler hand-written EL0 test
+# binary (NOT el0_test_prog.elf above -- see el0_shell_child_test.S's own
+# header comment for why: that one's own read(0, buf, 3) would make
+# correctness depend on exactly how much of el0_shell.stdin ash had
+# already buffered internally before forking, since a forked child's fd 0
+# is the SAME shared UART stream the parent shell reads from). Built the
+# same way as el0_test_prog.elf above (static-pie, ld.lld's own default
+# ELF output shape), then its own raw (not cpio-wrapped) bytes are
+# embedded into el0_shell's kernel image so app_main() can write them out
+# to a real FAT12 file at boot for execve() to find via issue #157's own
+# VFS bridge.
+COMMON_RPI3_EL0_SHELL_CHILD_TEST_S      := $(COMMON_RPI3_DIR)/el0_shell_child_test.S
+COMMON_RPI3_EL0_SHELL_CHILD_TEST_O      := $(COMMON_RPI3_DIR)/el0_shell_child_test.o
+COMMON_RPI3_EL0_SHELL_CHILD_TEST_LD     := $(COMMON_RPI3_DIR)/el0_shell_child_test.ld
+COMMON_RPI3_EL0_SHELL_CHILD_TEST_ELF    := $(COMMON_RPI3_DIR)/el0_shell_child_test.elf
+COMMON_RPI3_EL0_SHELL_CHILD_TEST_IMAGE_S      := $(COMMON_RPI3_DIR)/el0_shell_child_test_image.S
+COMMON_RPI3_EL0_SHELL_CHILD_TEST_IMAGE_O      := $(COMMON_RPI3_DIR)/el0_shell_child_test_image.o
+COMMON_RPI3_EL0_SHELL_CHILD_TEST_IMAGE_EXTERN := $(COMMON_RPI3_DIR)/el0_shell_child_test_image_extern.tkb
+
+$(COMMON_RPI3_EL0_SHELL_CHILD_TEST_O): $(COMMON_RPI3_EL0_SHELL_CHILD_TEST_S)
+	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
+
+# -pie: static-pie output (ET_DYN, base 0), same reasoning as
+# el0_test_prog.elf's own build rule above.
+$(COMMON_RPI3_EL0_SHELL_CHILD_TEST_ELF): $(COMMON_RPI3_EL0_SHELL_CHILD_TEST_O) $(COMMON_RPI3_EL0_SHELL_CHILD_TEST_LD)
+	$(LLD) -z max-page-size=4096 -pie -T $(COMMON_RPI3_EL0_SHELL_CHILD_TEST_LD) $(COMMON_RPI3_EL0_SHELL_CHILD_TEST_O) -o $@
+
+$(COMMON_RPI3_EL0_SHELL_CHILD_TEST_IMAGE_O): $(COMMON_RPI3_EL0_SHELL_CHILD_TEST_IMAGE_S) $(COMMON_RPI3_EL0_SHELL_CHILD_TEST_ELF)
+	$(LLVM_MC) --triple=$(RPI3_TARGET) --filetype=obj $< -o $@
+
 RPI3_EL0_ELF_LOAD_EXAMPLES := el0_elf_load
 RPI3_EL0_ELF_LOAD_OBJS := $(foreach e,$(RPI3_EL0_ELF_LOAD_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
@@ -1683,7 +1713,7 @@ RPI3_EL0_SHELL_OBJS := $(foreach e,$(RPI3_EL0_SHELL_EXAMPLES),examples/$(e)/$(e)
 # a new example, to avoid doubling this file's already-long real-
 # hardware JTAG test cycle (busybox startup alone needs a 10s/20-poll
 # capture window -- see run_hwtest_rpi3.sh's own el0_shell comment).
-$(RPI3_EL0_SHELL_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_EL0_ASM_EXTERN) $(COMMON_RPI3_EL1_ASM_EXTERN) $(COMMON_RPI3_HVC_ASM_EXTERN) $(COMMON_RPI3_EL0_SHELL_IMAGE_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_DIR)/fat12_usbmsc.tkb $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
+$(RPI3_EL0_SHELL_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_EL0_ASM_EXTERN) $(COMMON_RPI3_EL1_ASM_EXTERN) $(COMMON_RPI3_HVC_ASM_EXTERN) $(COMMON_RPI3_EL0_SHELL_IMAGE_EXTERN) $(COMMON_RPI3_EL0_SHELL_CHILD_TEST_IMAGE_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_DIR)/fat12_usbmsc.tkb $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_DIR)/fat12_usbmsc.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 RPI3_VM_PAGE_MAP_EXAMPLES := vm_page_map two_page_map process_vm_smoke
@@ -1944,8 +1974,8 @@ $(RPI3_EL0_ELF_LOAD_KERNELS): examples/%/kernel_rpi3.elf: \
 # $(RPI3_TIMER_ASM_KERNELS) above), since this is the first kernel image
 # to combine the EL0/EL1/HVC loader group with the USB HAL group.
 $(RPI3_EL0_SHELL_KERNELS): examples/%/kernel_rpi3.elf: \
-    $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) $(COMMON_RPI3_HVC_ASM_O) $(COMMON_RPI3_TIMER_ASM_O) $(COMMON_RPI3_EL0_SHELL_IMAGE_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
-	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) $(COMMON_RPI3_HVC_ASM_O) $(COMMON_RPI3_TIMER_ASM_O) $(COMMON_RPI3_EL0_SHELL_IMAGE_O) examples/$*/$*_rpi3.o -o $@
+    $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) $(COMMON_RPI3_HVC_ASM_O) $(COMMON_RPI3_TIMER_ASM_O) $(COMMON_RPI3_EL0_SHELL_IMAGE_O) $(COMMON_RPI3_EL0_SHELL_CHILD_TEST_IMAGE_O) examples/%/$$*_rpi3.o $(COMMON_RPI3_LINK_LD)
+	$(LLD) -T $(COMMON_RPI3_LINK_LD) $(COMMON_RPI3_STARTUP_O) $(COMMON_RPI3_MMU_O) $(COMMON_RPI3_EL1_ASM_O) $(COMMON_RPI3_EL0_ASM_O) $(COMMON_RPI3_TLB_ASM_O) $(COMMON_RPI3_HVC_ASM_O) $(COMMON_RPI3_TIMER_ASM_O) $(COMMON_RPI3_EL0_SHELL_IMAGE_O) $(COMMON_RPI3_EL0_SHELL_CHILD_TEST_IMAGE_O) examples/$*/$*_rpi3.o -o $@
 
 # vm_page_map additionally needs COMMON_RPI3_TLB_ASM_O linked in for
 # tlb_invalidate_va (tlbi cannot be called directly from takibi, same

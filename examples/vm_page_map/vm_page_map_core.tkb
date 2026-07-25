@@ -27,18 +27,34 @@
 use "examples/common_rpi3/tlb_asm_extern.tkb";
 
 const PAGE_SIZE: usize = 4096;
-// 512 = exactly the 2MB DYN_VA_BASE..DYN_VA_LIMIT window's own capacity
-// (2MB / 4KB), not an arbitrary guess: GitHub issue #156's real target
-// (Alpine's busybox-static aarch64) needs ~292 pages by its own PT_LOAD
-// extents (readelf-verified), and no single process can ever usefully
-// need more than what the dynamic window itself can map at once, so this
-// is the natural ceiling rather than a number picked to fit one binary.
+// 1024 = 2 * 512, i.e. 2 * the 2MB DYN_VA_BASE..DYN_VA_LIMIT window's own
+// per-slot capacity (2MB / 4KB) -- one full window's worth of physical
+// frames for EACH of the two hardware address-space slots
+// (mmu.S's own slot 0 / slot 1), not an arbitrary guess. This was
+// exactly 512 (one window's worth) until GitHub issue #158's real
+// fork()+execve() test measured the first scenario where BOTH slots are
+// genuinely live at once: a real busybox-static ash parent (~402 pages
+// by its own PT_LOAD extents) stays fully mapped and suspended (this
+// kernel's single-core cooperative process model never tears the parent
+// down while its child runs) while a second, independently-mapped child
+// process also needs its own pages -- 402 + 130 = 532 already exceeded
+// the old single-window ceiling even though EACH process individually
+// fits its own 2MB window with room to spare. Doubling to 1024 restores
+// "no single process can ever usefully need more than its own window"
+// as the real ceiling, now correctly counted per slot instead of
+// globally. See GitHub issue #159 for the follow-on architectural
+// question this raised (real multi-level, dynamically-allocated page
+// tables instead of one fixed-size L3 table per slot) -- orthogonal to
+// this physical-pool-size fix: enlarging PAGE_COUNT does not by itself
+// let any one process map more than 2MB, and moving to multi-level
+// tables would not by itself have fixed this pool exhaustion, since
+// neither process here exceeded its own window.
 // Every RPi3 example sharing this core module gets this same page_pool
 // size regardless of whether it needs anywhere near this many -- BSS is
 // free at rest (RPi3 has 1GB RAM, identity-mapped in full by
 // examples/common_rpi3/mmu.S), so this is a one-time, not per-example,
-// cost.
-const PAGE_COUNT: usize = 512;
+// cost (4MB static, well within budget).
+const PAGE_COUNT: usize = 1024;
 
 private let mut page_pool: [u8; PAGE_SIZE * PAGE_COUNT] align(4096);
 private let mut page_used: [u8; PAGE_COUNT];
@@ -94,12 +110,12 @@ fn page_free(owner: sink PageOwner[p]) {
 }
 
 fn page_owner_bytes(owner: borrow PageOwner[p]) -> [u8; PAGE_SIZE..] @ p {
-    // 2093057 = (PAGE_COUNT-1)*PAGE_SIZE + 1 = 511*4096 + 1 -- bare
+    // 4190209 = (PAGE_COUNT-1)*PAGE_SIZE + 1 = 1023*4096 + 1 -- bare
     // literal, not a PAGE_COUNT-derived expression, matching this whole
     // file's own established constraint that refined bounds cannot
     // combine a const name with arithmetic (see MAX_PROCESS_PAGES's own
     // comment for the same limitation).
-    let offset: {0..<2093057 as usize} = owner.index * PAGE_SIZE;
+    let offset: {0..<4190209 as usize} = owner.index * PAGE_SIZE;
     let pool = page_pool as [u8; PAGE_SIZE * PAGE_COUNT..];
     let bytes: []u8 = pool[offset..<offset + 4096];
     if (bytes.len >= 4096) { return bytes; }
@@ -733,7 +749,16 @@ fn map_second_page_el0_exec(space: sink AddressSpaceOwner[asid, SpaceState::Occu
 // system already proves elsewhere (for-loop counter ranges, same-base
 // subslice proofs), just not wired to gate calls to the raw
 // l3_address_space_write extern fn.
-const MAX_PROCESS_PAGES: usize = 512; // must equal PAGE_COUNT (const decls need a bare literal initializer, not a named const reference)
+// Ties to the fixed 2MB DYN_VA_BASE..DYN_VA_LIMIT window's own capacity
+// (2MB / 4KB, mmu.S's own one-fixed-L3-table-per-slot layout -- see
+// GitHub issue #159), NOT to PAGE_COUNT (the physical frame pool):
+// those two used to be numerically equal only because a single process
+// was the only scenario ever measured. GitHub issue #158 doubled
+// PAGE_COUNT to 1024 (one window's worth of frames per slot, two slots)
+// while this per-slot VA ceiling correctly stays at 512 -- const decls
+// need a bare literal initializer, not a named const reference, so this
+// cannot just read `PAGE_COUNT` even now that they happen to differ.
+const MAX_PROCESS_PAGES: usize = 512;
 
 // The physical page indices a live ProcessAddressSpace owns live in this
 // PLAIN (non-owner-typed) global array, not as a field of the owner
@@ -924,10 +949,22 @@ fn process_address_space_unmap(
 // GitHub issue #158's real fork(): shares every page of an already-live
 // ProcessAddressSpace into a second, freshly activated Empty one, both
 // re-pointed (or newly pointed) at the SAME physical pages, both flipped
-// (or set) read-only -- exactly the flags map_page_read_only's own single-
-// page COW baseline already uses (0x787: process_address_space_map's own
-// 0x747 EL0-RW pattern plus AP[2:1]=0b10, see that function's comment),
-// applied in bulk over a whole process instead of one demo page. Does NOT
+// (or set) read-only.
+//
+// 0x7C7, NOT map_page_read_only's own 0x787 -- the two differ in AP[1]
+// (bit 6) and that bit means genuinely different things in the two
+// translation regimes this file writes descriptors for. In the EL2 regime
+// (TTBR0_EL2, what map_page_read_only's own pure-EL2 copy_on_write demo
+// runs in) AP[1] is RES1 and ignored, so 0x787's AP[2:1]=0b10 reads simply
+// as "read-only" there. But a REAL EL0 process runs in the EL1&0 regime,
+// where AP[1]=0 means "EL0 has NO access at all" -- 0x787 would deny the
+// child even the READS that sharing a page is entirely about. AP=0b11
+// (both bits set, i.e. 0x7C7) is the EL1&0 encoding for "read-only at EL0
+// AND EL1", which is what a COW share actually needs. Confirmed on real
+// hardware once issue #158's own TTBR0_EL1/EL1&0-TLB fixes (mmu.S,
+// tlb_asm.S) finally made these descriptors reach EL0 at all: the child
+// took a Permission fault with WnR=0 (a READ) on a freshly shared page.
+// Applied in bulk over a whole process instead of one demo page. Does NOT
 // itself track which pages are now shared or how to reclaim them once
 // either side diverges -- that bookkeeping (a per-page "is this still
 // shared" table) belongs to the caller, the same way this function's own
@@ -949,9 +986,9 @@ fn process_address_space_cow_fork(
         let va: usize = parent.base_va + i * PAGE_SIZE;
         let l3_index: usize = (va - DYN_VA_BASE) / PAGE_SIZE;
         let phys_addr: usize = pool_base + idx * PAGE_SIZE;
-        l3_address_space_write(parent.slot, l3_index, phys_addr | 0x787);
+        l3_address_space_write(parent.slot, l3_index, phys_addr | 0x7C7);
         tlb_invalidate_asid_va(parent.slot, va);
-        l3_address_space_write(child_slot, l3_index, phys_addr | 0x787);
+        l3_address_space_write(child_slot, l3_index, phys_addr | 0x7C7);
         tlb_invalidate_asid_va(child_slot, va);
         process_phys_index_set(child_slot, i, idx);
     }
@@ -1004,7 +1041,10 @@ fn process_address_space_page_remap(
     let l3_index: usize = (va - DYN_VA_BASE) / PAGE_SIZE;
     let pool_base: usize = (page_pool as *u8) as usize;
     let phys_addr: usize = pool_base + phys_index * PAGE_SIZE;
-    let mut flags: usize = 0x787;
+    // 0x7C7 (EL0+EL1 read-only), not 0x787 -- see
+    // process_address_space_cow_fork's own comment above for why AP[1]
+    // must be set for any descriptor a real EL0 process reads through.
+    let mut flags: usize = 0x7C7;
     if (writable == true) {
         flags = 0x747;
     }
@@ -1117,9 +1157,9 @@ fn cow_fault_transition(state: CowFaultState, esr: usize, far: usize)
                                                   fault_space, mapping, lease0, lease1));
                 }
                 PageAllocResult::Allocated(page) => {
-                    let src_offset: {0..<2093057 as usize} =
+                    let src_offset: {0..<4190209 as usize} =
                         mapping.page_index * PAGE_SIZE;
-                    let dst_offset: {0..<2093057 as usize} =
+                    let dst_offset: {0..<4190209 as usize} =
                         page.index * PAGE_SIZE;
                     let pool = page_pool as [u8; PAGE_SIZE * PAGE_COUNT..];
                     for i: usize in 0..<PAGE_SIZE {
@@ -1160,13 +1200,13 @@ fn tlb_invalidate_second(space: borrow AddressSpaceOwner[asid, SpaceState::Occup
 
 fn mapping_bytes(mapping: borrow MappingOwner[asid, va, p])
         -> [u8; PAGE_SIZE..] @ p {
-    // PAGE_COUNT * PAGE_SIZE = 2097152, so every page start is below
-    // 2093057 and every page end is at most 2097152 (the pool's own
+    // PAGE_COUNT * PAGE_SIZE = 4194304, so every page start is below
+    // 4190209 and every page end is at most 4194304 (the pool's own
     // size). Bare literals below (not the PAGE_SIZE const) match
     // examples/page_pool/page_pool_core.tkb's own page_bytes -- a const
     // name only reliably narrows in a type position, not in runtime
     // slice-length arithmetic/comparison (confirmed experimentally).
-    let offset: {0..<2093057 as usize} = mapping.page_index * PAGE_SIZE;
+    let offset: {0..<4190209 as usize} = mapping.page_index * PAGE_SIZE;
     let pool = page_pool as [u8; PAGE_SIZE * PAGE_COUNT..];
     let bytes: []u8 = pool[offset..<offset + 4096];
     if (bytes.len >= 4096) {
