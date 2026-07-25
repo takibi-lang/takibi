@@ -115,13 +115,10 @@ fn pcie2_link_up() -> bool {
 // forced to 0 there), and `where` is instead added directly to
 // EXT_CFG_DATA's own address -- EXT_CFG_DATA is a real windowed region
 // (spanning at least one function's 4KB ECAM space), not a single
-// register. CONFIRMED on real hardware: RP1 itself answers at
-// bus=0/devfn=0 in this simple single-RC/single-device topology, NOT the
-// bus=1 a standard PCI bus-numbering assumption would suggest --
-// pcie2_config_read32(0, 0, 0) read back 0x00011de4 (vendor 0x1de4 =
-// Raspberry Pi Trading Ltd's own registered PCI vendor ID, device
-// 0x0001), a real, correct-looking identifier, while bus=1 only ever
-// returned 0xFFFFFFFF (no response).
+// register. CONFIRMED on real hardware: before the root bridge's bus
+// numbers are assigned, RP1 temporarily answers at bus 0. After
+// pcie2_root_bridge_setup() assigns secondary/subordinate bus 1, RP1
+// correctly moves to bus 1, matching Linux's normal topology.
 fn pcie2_config_addr(bus: u32, devfn: u32, reg_where: u32) -> *io u32 {
     let idx_addr: *io u32 = 0x1000129000; // EXT_CFG_INDEX
     let data_base: usize = 0x1000128000;  // EXT_CFG_DATA
@@ -261,26 +258,54 @@ fn pcie2_outbound_window_setup() {
     let win0_hi: *io u32 = 0x1000124010;         // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_HI
     let win0_base_limit: *io u32 = 0x1000124070; // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT
     let win0_base_hi: *io u32 = 0x1000124080;    // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI
+    let win0_limit_hi: *io u32 = 0x1000124084;   // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_LIMIT_HI
 
     *win0_lo = 0;
     *win0_hi = 0;
     let cpu_addr: usize = 0x1F00000000;
     let win_size: usize = 0x100000000; // 4GB, matching Linux's own live window and the devicetree's `ranges`
 
-    // WIN0_BASE_HI is a SEPARATE register for address bits above 32
-    // (mirroring WIN0_HI's own split for the PCI-side address);
-    // WIN0_BASE_LIMIT's own base/limit-in-MB fields only ever describe
-    // the LOW 32 bits. Without WIN0_BASE_HI, the outbound window's real
-    // decoded CPU address
-    // range never actually covered 0x1F00030000 at all -- discovered by
-    // reading these registers back and finding a value inconsistent
-    // with what should have been written.
+    // WIN0_BASE_HI and WIN0_LIMIT_HI are SEPARATE registers for the
+    // address bits above 32. WIN0_BASE_LIMIT's own base/limit-in-MB
+    // fields only describe the LOW 32 bits. Both upper registers are
+    // required: writing BASE_HI alone leaves the reset-value limit below
+    // the 0x1F... base, so the resulting outbound window is invalid and
+    // every CPU-side access returns PCIe poison (0xDEADDEAD).
+    let limit_addr: usize = cpu_addr + win_size - 1;
     *win0_base_hi = (cpu_addr >> 32) as u32;
+    *win0_limit_hi = (limit_addr >> 32) as u32;
     let cpu_addr_low32: u32 = (cpu_addr & 0xFFFFFFFF) as u32;
     let cpu_addr_mb: u32 = cpu_addr_low32 >> 20;
-    let limit_low32: u32 = ((cpu_addr_low32 as usize) + win_size - 1) as u32;
+    let limit_low32: u32 = (limit_addr & 0xFFFFFFFF) as u32;
     let limit_mb: u32 = limit_low32 >> 20;
     *win0_base_limit = (cpu_addr_mb) | (limit_mb << 20);
+}
+
+// Configure pcie2's own Type-1 root-port header. The outbound window
+// alone does not make memory TLPs reach RP1: the bridge also needs a
+// secondary bus number, a forwarding memory window, and Memory Space
+// Enable in its own Command register. Without these, RP1 config space is
+// visible but every BAR access returns 0xDEADDEAD.
+fn pcie2_root_bridge_setup() {
+    let root_base: usize = 0x1000120000;
+
+    // Linux brcm_pcie_setup(): identify the RC as a PCIe-to-PCIe bridge
+    // instead of retaining the endpoint-mode default class code.
+    let id_val3: *io u32 = 0x100012043C; // PCIE_RC_CFG_PRIV1_ID_VAL3
+    *id_val3 = (*id_val3 & 0xFF000000) | 0x00060400;
+
+    // Primary=0, Secondary=1, Subordinate=1, secondary latency=0.
+    let bus_numbers: *io u32 = (root_base + 0x18) as *io u32;
+    *bus_numbers = 0x00010100;
+
+    // Forward non-prefetchable PCI addresses 0x00000000..0x004FFFFF.
+    // The Type-1 fields have 1MB granularity, so this covers RP1 BAR1
+    // (4MB), BAR2 (64KB), and BAR0 (16KB) in one window.
+    let memory_base_limit: *io u32 = (root_base + 0x20) as *io u32;
+    *memory_base_limit = 0x00400000;
+
+    let command_status: *io u32 = (root_base + 0x04) as *io u32;
+    *command_status = (*command_status & 0xFFFF0000) | 0x0006;
 }
 
 // pcie2_init(): full bring-up sequence for BCM2712's third PCIe RC
@@ -344,6 +369,9 @@ fn pcie2_init() -> bool {
             break;
         }
         for j: i32 in 0..<200000 { } // rough ~5ms
+    }
+    if (linked) {
+        pcie2_root_bridge_setup();
     }
     return linked;
 }

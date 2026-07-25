@@ -15,6 +15,37 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-25: RPi5 RP1 PCIe Enumeration and Simultaneous SWD + UART (Issue #161)
+
+Completed the first bare-metal BCM2712/RP1 proof of life on real RPi5
+hardware. `examples/common_rpi5/pcie.tkb` now performs the minimal pcie2
+reset/calibration, BCM2712 MDIO PHY tuning, outbound-window programming,
+Type-1 root-port forwarding, and bus numbering needed to enumerate RP1;
+`examples/rp1_pcie_smoke` assigns all three endpoint BARs and enables
+memory decoding. The payload read `rp1_uart0` FR=`0x197`, reached its
+post-`uart_puts` checkpoint, and produced a clean `rp1 uart0 alive!` on
+GPIO14/15 at 115200 baud while the official Debug Probe remained active
+over SWD.
+
+The final blocker was not link training or the endpoint BAR alone. The
+root port still had Command=0, bus numbers=0, and Memory Base/Limit=0, so
+its Type-1 bridge header filtered every outbound memory transaction even
+though RP1 config space was visible. Assigning Primary/Secondary/
+Subordinate buses 0/1/1, forwarding PCI memory 0..0x4fffff, and enabling
+the root port's Memory Space + Bus Master bits removed the repeated
+`0xDEADDEAD` poison reads. Two additional omissions found along the way
+were the outbound window's `WIN0_LIMIT_HI` register and RP1 BAR2's 64KB
+aperture between the 4MB BAR1 peripheral window and 16KB BAR0 MSI-X
+window.
+
+The live-Linux `vcgencmd measure_clock uart` result (~44MHz) was also the
+wrong basis for bare-metal baud setup: Linux had already reprogrammed the
+RP1 clock tree. After the bare-metal PCIe reset, UART0 runs from RP1's
+50MHz XOSC; PL011 IBRD=27/FBRD=8 yielded the verified 115200-baud output.
+The complete checkpoint-by-checkpoint failure history remains in
+`examples/common_rpi5/AGENTS.md` because the intermediate failures were
+what isolated each independently real bug.
+
 ### 2026-07-25: Real UART0 RX Interrupt for `el0_shell` -- Retiring the FIFO-Drop Workaround (Issue #158 follow-up)
 
 Issue #158's own real fork()/execve() work (below) left a genuine

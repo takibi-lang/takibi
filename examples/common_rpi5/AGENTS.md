@@ -1,33 +1,35 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status (2026-07-25): injection mechanism fully proven on real hardware;
-## UART output blocked on a real, substantial new dependency (RP1 PCIe)
+## Status (2026-07-25): RP1 PCIe enumeration and simultaneous SWD +
+## GPIO14/15 UART output proven on real hardware (issue #161)
 
 `examples/start`'s payload has been successfully injected and run to
 completion on real hardware multiple times (confirmed via post-run memory
 reads landing exactly on `.Lhalt`, matching `startup.S`'s own compiled
 tail sequence byte-for-byte) -- the SWD catch/inject/safety-check mechanism
 itself (`scripts/rpi5_jtag_load.sh`, `scripts/rpi5_prepare_sdcard.sh`) is
-proven and working. **What is NOT yet working is UART output.** This
+proven and working. RP1's PCIe link, Type-1 root-bridge forwarding,
+endpoint BAR assignment, and `rp1_uart0` are now also proven: the smoke
+test read FR=`0x197` and emitted a clean `rp1 uart0 alive!` at 115200 baud
+while SWD remained active. This
 directory is a from-scratch port effort, not a copy of a proven mechanism
 the way most of this repo's other RPi3 examples are additions to an
 already-working target -- follow this repo's usual incremental-verification
-process (see the root `AGENTS.md`), and do not wire a `hwcheck-rpi5` target
-into `allcheck`/`check` until real UART output has actually been seen.
+process (see the root `AGENTS.md`). No automated `hwcheck-rpi5` target is
+added by this milestone: the direct smoke test still requires an attached
+board, SWD probe, and separately-wired GPIO14/15 UART path.
 
-**The real blocker, confirmed 2026-07-25 through extensive real-hardware
-debugging (see "A real bug this port found" and "UART investigation"
-below), is architectural, not a bug: this board's single 3-pin debug
+**The architectural constraint confirmed 2026-07-25 through extensive
+real-hardware debugging (see "A real bug this port found" and "UART
+investigation" below) is that this board's single 3-pin debug
 connector can carry EITHER UART OR SWD, never both at once** (Raspberry
 Pi's own official "3-pin Debug Connector Specification", RP-003139-SP --
 this is a hardware-level standard, not something software can route
 around). Getting simultaneous SWD debugging and live UART output
-therefore requires RP1's own, physically separate GPIO14/15-routed
-`rp1_uart0` -- which in turn requires bringing up RP1's PCIe link
-ourselves, since Linux's own PCI subsystem is what does this during a
-normal OS boot and nothing does it for a bare-metal payload. **Tracked as
-GitHub issue #161** -- see "UART investigation" below for the full
-evidence trail that led here.
+therefore uses RP1's own, physically separate GPIO14/15-routed
+`rp1_uart0`. `examples/common_rpi5/pcie.tkb` now brings that link up and
+enumerates RP1 without an OS. See GitHub issue #161 and the final status
+entry below for the evidence trail and resolved root cause.
 
 **Real hardware connectivity confirmed 2026-07-25** (read-only
 `halt`/`reg pc`/`resume` via `scripts/rpi5_jtag_load.sh`'s own check
@@ -207,11 +209,12 @@ not publish a public BCM2712 datasheet the way it once did for BCM2835.
   board actually used for this port, that assumption was empirically
   wrong**: `console=serial10` produced no output at all on the Debug
   Probe's cable, while `console=serial0` (RP1's `rp1_uart0`, PCIe-attached,
-  physical `0x1F00030000`) does. `uart.tkb` now targets `0x1F00030000`
-  (IBRD=24/FBRD=0 for ~44.2368MHz uartclk, measured via `vcgencmd
-  measure_clock uart`) -- getting output through it requires RP1 PCIe
-  enumeration our bare-metal code does not yet do (see "UART
-  investigation"). Whether this BCM2712-uart10-vs-RP1-uart0 wiring is
+  physical `0x1F00030000`) does. `uart.tkb` now targets `0x1F00030000`;
+  after bare-metal PCIe reset its clock is RP1's 50MHz XOSC, so
+  IBRD=27/FBRD=8 produces the real-hardware-confirmed 115200-baud output.
+  (The earlier ~44MHz `vcgencmd` measurement was Linux's already-
+  reprogrammed clock state, not the post-reset bare-metal state.) Whether
+  this BCM2712-uart10-vs-RP1-uart0 wiring is
   board-revision-specific or affects every RPi5 is unknown; do not assume
   the original documentation-based claim was entirely wrong, only that it
   does not describe this specific board.
@@ -531,3 +534,41 @@ debug-port limitation entirely.
   re-running the SAME resident image.
 
 See GitHub issue #161 for tracking.
+
+### Final status (2026-07-25): root-bridge forwarding was the missing
+### layer; FR read and simultaneous SWD + UART output now work
+
+The BAR1-only change above was necessary but still returned
+`0xDEADDEAD`. Continuing with exact Linux-driver comparison and targeted
+real-hardware reads found three more concrete omissions:
+
+- `brcm_pcie_set_outbound_win()` writes both `WIN0_BASE_HI` (`0x4080`)
+  and `WIN0_LIMIT_HI` (`0x4084`). The Takibi port wrote only BASE_HI,
+  leaving a 40-bit window whose limit was below its base. LIMIT_HI is now
+  set to `0x1f` as well; real-hardware readback confirmed both values.
+- RP1 exposes three memory BARs, not two: BAR1 is the 4MB peripheral
+  aperture at PCI address `0`, BAR2 is the following 64KB aperture at
+  `0x00400000`, and BAR0 is the 16KB MSI-X aperture at `0x00410000`.
+  The smoke test now disables endpoint decoding, assigns all three, then
+  enables Memory Space + Bus Master exactly once the layout is complete.
+- **The final blocker was pcie2's own Type-1 root-port header.** An
+  outbound ATU and enabled endpoint BAR do not bypass normal PCI bridge
+  forwarding. The root port still had Command=0, all bus numbers=0, and
+  Memory Base/Limit=0. `pcie2_root_bridge_setup()` now gives it bridge
+  class `0x060400`, Primary/Secondary/Subordinate buses `0/1/1`, a
+  non-prefetchable PCI memory window `0x00000000..0x004fffff`, and
+  Command Memory Space + Bus Master enable. RP1 consequently moves from
+  its temporary pre-numbering bus 0 response to the normal bus 1 used by
+  Linux.
+
+Real-hardware proof after rebuilding and injecting the Takibi payload
+(not manual register pokes): link result=1, BAR0=`0x00410000`,
+BAR1=`0x00000000`, BAR2=`0x00400000`, endpoint Command/Status=
+`0x00100006`, BAR0 data=`0x00000000`, BAR2 data=`0x100029d8`, and
+`rp1_uart0` FR=`0x00000197`; the checkpoint reached 9 after
+`uart_puts()`. The first transmitted string was garbled because the
+old divisor came from a live Linux `vcgencmd` clock measurement. After
+bare-metal PCIe reset, UART0 uses RP1's 50MHz XOSC; IBRD=27/FBRD=8 then
+produced a clean, directly captured `rp1 uart0 alive!` at 115200 baud
+while the SWD session remained active. This completes issue #161's
+Stage-1 proof of life.

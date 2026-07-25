@@ -1,17 +1,18 @@
 // Step-by-step real-hardware bisection for GitHub issue #161 (see
-// examples/common_rpi5/AGENTS.md's PCIe bring-up section). Root cause
-// found via `sudo lspci -vvv` on a real, working Linux boot: rp1_uart0
-// (0x1F00030000) falls inside RP1's Region 1 (BAR1, config offset 0x14,
-// base 0x1f00000000, size 4M) -- NOT Region 0 (BAR0, offset 0x10, base
-// 0x1f00410000, size 16K, which lspci's own MSI-X capability entry shows
-// is actually the MSI-X vector table/PBA, unrelated to general register
-// access). Every earlier attempt this session assigned BAR0, the wrong
-// BAR entirely. This version assigns BAR1 instead.
+// examples/common_rpi5/AGENTS.md's PCIe bring-up section). Final root
+// cause: the RC outbound window and endpoint BARs were not enough -- the
+// Type-1 root bridge itself also needed bus numbers, a forwarding memory
+// window, and Command.MSE/BME. This smoke test records all three RP1 BAR
+// assignments and proves BAR1-backed rp1_uart0 access before printing.
 let mut pcie_smoke_checkpoint: u32 = 0;
 let mut pcie_smoke_result: u32 = 0xAAAAAAAA;
+let mut pcie_smoke_bar0_after: u32 = 0xAAAAAAAA;
 let mut pcie_smoke_bar1_before: u32 = 0xAAAAAAAA;
 let mut pcie_smoke_bar1_after: u32 = 0xAAAAAAAA;
+let mut pcie_smoke_bar2_after: u32 = 0xAAAAAAAA;
 let mut pcie_smoke_cmd_after: u32 = 0xAAAAAAAA;
+let mut pcie_smoke_bar0_data: u32 = 0xAAAAAAAA;
+let mut pcie_smoke_bar2_data: u32 = 0xAAAAAAAA;
 let mut pcie_smoke_fr: u32 = 0xAAAAAAAA;
 
 fn app_main() {
@@ -24,20 +25,33 @@ fn app_main() {
     }
     pcie_smoke_result = 1;
 
-    pcie_smoke_bar1_before = pcie2_config_read32(0, 0, 0x14);
+    pcie_smoke_bar1_before = pcie2_config_read32(1, 0, 0x14);
     pcie_smoke_checkpoint = 3;
 
-    pcie2_config_write32(0, 0, 0x14, 0);
+    // Stop memory decoding while changing BARs, then reproduce Linux's
+    // complete RP1 resource assignment: BAR1 maps the 4MB peripheral
+    // aperture at PCI address 0, BAR2 maps the following 64KB aperture,
+    // and BAR0 maps the 16KB MSI-X aperture immediately above them.
+    let cmd_status: u32 = pcie2_config_read32(1, 0, 4);
+    pcie2_config_write32(1, 0, 4, cmd_status & 0xFFFF0000);
+    pcie2_config_write32(1, 0, 0x10, 0x00410000);
+    pcie2_config_write32(1, 0, 0x14, 0);
+    pcie2_config_write32(1, 0, 0x18, 0x00400000);
     pcie_smoke_checkpoint = 4;
-    pcie_smoke_bar1_after = pcie2_config_read32(0, 0, 0x14);
+    pcie_smoke_bar0_after = pcie2_config_read32(1, 0, 0x10);
+    pcie_smoke_bar1_after = pcie2_config_read32(1, 0, 0x14);
+    pcie_smoke_bar2_after = pcie2_config_read32(1, 0, 0x18);
     pcie_smoke_checkpoint = 5;
 
-    let cmd_status: u32 = pcie2_config_read32(0, 0, 4);
-    pcie2_config_write32(0, 0, 4, (cmd_status & 0xFFFF0000) | 0x0006);
+    pcie2_config_write32(1, 0, 4, (cmd_status & 0xFFFF0000) | 0x0006);
     pcie_smoke_checkpoint = 6;
-    pcie_smoke_cmd_after = pcie2_config_read32(0, 0, 4);
+    pcie_smoke_cmd_after = pcie2_config_read32(1, 0, 4);
     pcie_smoke_checkpoint = 7;
 
+    let bar0: *io u32 = 0x1F00410000;
+    let bar2: *io u32 = 0x1F00400000;
+    pcie_smoke_bar0_data = *bar0;
+    pcie_smoke_bar2_data = *bar2;
     let fr: *io u32 = 0x1F00030018;
     pcie_smoke_fr = *fr;
     pcie_smoke_checkpoint = 8;
