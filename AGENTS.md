@@ -564,6 +564,12 @@ scripts/
   rpi5_jtag_reset.sh -- RPi5 Stage A: attempts `reset halt` over SWD. UNCONFIRMED
                      whether the Debug Probe's dedicated connector wires a usable
                      SRST line -- see examples/common_rpi5/AGENTS.md item 3.
+  rpi5_uart_dev.sh -- resolves the Debug Probe's ttyACM device by its
+                     /dev/serial/by-id label (`*Raspberry_Pi_Debug_Probe*`), not
+                     by number -- the STM32 board's ST-Link VCP and the Debug
+                     Probe's UART both enumerate as ttyACM* on this host, and
+                     which number is which is not stable across replug. Same
+                     fix as rpi_uart_dev.sh's own RPi3-vs-JTAG-probe disambiguation.
 test/
   test_takibi.ml  -- Alcotest unit tests for parser / type_inf
 ```

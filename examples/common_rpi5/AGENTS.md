@@ -117,16 +117,42 @@ future subject if pursued, not a port of the existing driver.
    plain 0-3 core number, same as BCM2837, since BCM2712 is also a single
    quad-core cluster -- not independently verified.
 
+## Identifying the UART device: RPi5's Debug Probe and the STM32 board's
+## ST-Link both enumerate as ttyACM*
+
+Once both boards are plugged in for combined STM32+RPi5 testing (the
+user's stated plan, retiring RPi3B), `/dev-host/ttyACM0`/`ttyACM1` numbering
+is NOT stable across replug/container-recreate, and is shared between two
+completely different boards -- confirmed live in this devcontainer
+(`/dev-host/serial/by-id/usb-STMicroelectronics_STM32_STLink_...-if02` ->
+`ttyACM0`, `usb-Raspberry_Pi_Debug_Probe__CMSIS-DAP__...-if01` -> `ttyACM1`
+at the time of writing, but the numbers themselves are not to be relied
+upon). `st-info` cannot help distinguish them: it talks to ST-Link probes
+directly over USB (libusb), not through a ttyACM node, and does not
+recognize the Debug Probe (a different USB vendor ID) at all. Same fix as
+`scripts/rpi_uart_dev.sh` already applies to RPi3's own JTAG-probe-vs-console
+ambiguity: `scripts/rpi5_uart_dev.sh` resolves the right device by its
+`/dev/serial/by-id` label (matching `*Raspberry_Pi_Debug_Probe*`), not by
+number. The Makefile's `RPI5_SERIAL_DEV` (same convention as
+`STM32_SERIAL_DEV`/`RPI3_SERIAL_DEV`) overrides the auto-detected device if
+ever needed.
+
 ## Build and try (no `make hwcheck-rpi5` yet -- see Status above)
 
 ```
-make examples/start/kernel_rpi5.elf
 make examples/common_rpi5/jtag_stub.img
 # flash examples/common_rpi5/jtag_stub.img as the SD card's kernel_2712.img,
 # with config.txt containing: kernel=kernel_2712.img / os_check=0
-bash scripts/rpi5_jtag_load.sh examples/start/kernel_rpi5.elf
+make rpi5-start
 ```
 
-If the board is not already parked at the stub (e.g. it just booted
-Raspberry Pi OS instead), try `scripts/rpi5_jtag_reset.sh` first --
-Unconfirmed item 3 above applies.
+`make rpi5-start` builds `examples/start/kernel_rpi5.elf`, attaches a UART
+reader via `scripts/rpi5_uart_dev.sh`'s auto-detected device, then injects
+the payload via `scripts/rpi5_jtag_load.sh`. It deliberately does NOT call
+`scripts/rpi5_jtag_reset.sh` first (unlike RPi3's equivalent
+`rpi3-http-server` target) -- whether `reset halt` even works here is
+itself Unconfirmed item 3 above, and folding it into the very first load
+attempt would make it unclear which step actually failed. If the board is
+not already parked at the stub (e.g. it just booted Raspberry Pi OS
+instead), flash the stub and power-cycle by hand first, or try
+`scripts/rpi5_jtag_reset.sh` on its own.

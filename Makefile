@@ -215,7 +215,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemubuild qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-stm32-net-l2 hwcheck-rpi3 hwcheck-rpi3-net hwcheck-rpi3-net-l2 stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck allcheck-build clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos rpi3-http-server profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
+.PHONY: build test qemubuild qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-stm32-net-l2 hwcheck-rpi3 hwcheck-rpi3-net hwcheck-rpi3-net-l2 stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck allcheck-build clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos rpi3-http-server rpi5-start profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
 
 .DEFAULT_GOAL := build
 
@@ -2105,6 +2105,35 @@ examples/start/start_rpi5.o: examples/start/start.tkb $(COMMON_RPI5_UART) $(COMM
 
 examples/start/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) examples/start/start_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) examples/start/start_rpi5.o -o $@
+
+## RPI5_SERIAL_DEV: same convention as STM32_SERIAL_DEV/RPI3_SERIAL_DEV --
+## empty by default, resolved at runtime by scripts/rpi5_uart_dev.sh (which
+## picks the ttyACM device out by its /dev/serial/by-id label, not by
+## number -- both the STM32 board's ST-Link VCP and the RPi5 Debug Probe's
+## UART cable show up as ttyACM* on this host, and which number is which
+## is not stable across replug/container-recreate). Override only if the
+## auto-detected device is wrong.
+RPI5_SERIAL_DEV ?=
+
+## rpi5-start: manual convenience target for Stage A's first real-hardware
+## attempts -- attach a UART reader, then inject examples/start over SWD.
+## Deliberately does NOT call scripts/rpi5_jtag_reset.sh first (unlike
+## rpi3-http-server's unconditional reset): whether `reset halt` even works
+## on this board is itself unconfirmed (see examples/common_rpi5/AGENTS.md
+## item 3), and folding an unproven reset into the very first load attempt
+## would make it unclear which step actually failed. Flash
+## examples/common_rpi5/jtag_stub.img as kernel_2712.img and power-cycle
+## the board by hand first if it is not already sitting at the stub.
+rpi5-start: examples/start/kernel_rpi5.elf
+	@dev="$(RPI5_SERIAL_DEV)"; \
+	if [ -z "$$dev" ]; then dev="$$(scripts/rpi5_uart_dev.sh)" || exit 1; fi; \
+	stty -F "$$dev" 115200 raw -echo; \
+	echo "Reading $$dev (Ctrl-C to quit)..."; \
+	cat "$$dev" & \
+	catpid=$$!; \
+	sleep 0.2; \
+	scripts/rpi5_jtag_load.sh $< || { kill $$catpid 2>/dev/null; exit 1; }; \
+	wait $$catpid
 
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts and linker outputs
