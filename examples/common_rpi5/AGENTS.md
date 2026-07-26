@@ -1,6 +1,92 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): USB bring-up Step 6 SOLVED --
+## Status update (2026-07-26, latest): USB bring-up Step 7 DONE --
+## Address Device succeeds; the USB flash drive is now at USB address 1,
+## Slot State = Addressed
+
+Building directly on Step 6's `RP1_DMA_PCI_OFFSET` fix (below), the
+device slot returned by Enable Slot is now fully addressed. Three
+distinct bugs had to be fixed to get there, each found by consulting a
+real driver rather than reasoning from first principles.
+
+**Bug 1 -- Event Ring polling assumed a fixed index.** The code waited
+for Address Device's Command Completion Event at a hardcoded
+`evt_ring[1]`. But the Port Reset (bug 2's fix) asynchronously posts its
+own **Port Status Change Event** (TRB Type 34), which lands there first,
+so the poll read the wrong event and reported nonsense field values
+decoded at Command-Completion-Event offsets. Fixed by scanning forward
+from the last unconsumed index, checking each entry's TRB Type, logging
+and skipping anything that is not TRB Type 33, and advancing `ERDP` past
+**every** consumed entry -- which is what a real event-ring consumer
+loop does; no driver ever assumes a fixed slot-to-index mapping.
+
+**Bug 2 -- no Port Reset, and no reset recovery wait.** `USBCMD.HCRST`
+resets the *controller*, not the downstream *device*, and firmware has
+already fully enumerated the flash drive before handoff (Step 2 saw
+`PORTSC3` at `PLS=U0` on arrival). A device that is not in the USB
+Default state will not answer a fresh `SET_ADDRESS`. A real
+`PORTSC.PR` port reset is required, followed by the USB reset recovery
+time: Linux's `hub_port_reset()` waits `reset_recovery_time = 10 + 40`
+ms (`TRSTRCY` = 10 ms plus margin, `drivers/usb/core/hub.c`), matched
+here as a 50 ms delay.
+
+**Bug 3 (the real blocker) -- the PORTSC read-modify-write mask was
+wrong.** PORTSC is a minefield of RW1C/RW1CS bits, and in particular
+**bit 1 (PED) is RW1CS: reading 1 means "port enabled", but WRITING 1
+DISABLES the port.** The first attempt masked only the change bits
+(23:17) out of the write value and preserved everything else "from the
+read" -- including `PED=1`. So both the port reset write and the
+subsequent PRC clear were *switching the port off*, the latter
+immediately before Address Device. Result: Address Device consistently
+returned `completion_code=0x04` (USB Transaction Error) because the
+device was simply unreachable.
+
+The correct mask is Linux's own `xhci_port_state_to_neutral()`
+(`drivers/usb/host/xhci.h`), reproduced exactly:
+
+```c
+#define XHCI_PORT_RO   ((1<<0) | (1<<3) | (0xf<<10) | (1<<30) | (1<<31))
+#define XHCI_PORT_RWS  ((0xf<<5) | (1<<9) | (0x3<<14) | (0x7<<25))
+neutral = state & (XHCI_PORT_RO | XHCI_PORT_RWS);   /* = 0xCE00FFE9 */
+```
+
+Keep only the read-only and read-write-shared fields; write **zero** to
+everything else, then OR in exactly the bit being asked for. Any future
+PORTSC write on this platform must use `0xCE00FFE9`.
+
+**How bug 3 was isolated**: by temporarily setting **BSR=1** (Block Set
+Address Request, TRB DWORD3 bit 9) on the Address Device command. BSR=1
+makes the controller populate the Device Context from the Input Context
+*without* issuing any bus-level `SET_ADDRESS`. It returned
+`completion_code=0x01` where BSR=0 returned `0x04` -- proving the
+contexts, rings, doorbells and DMA addressing were all already correct,
+and localizing the failure precisely to the wire transaction. This is a
+generally useful bisection tool for Address Device problems.
+
+**Real-hardware result (reproducible across consecutive runs)**:
+
+```
+enable slot completion event: yes, polls=2 completion_code=0x01 slot_id=0x01 trb_type=0x21
+port reset (PRC) confirmed: yes, polls=74 PORTSC3=0x002a1203
+PORTSC3 before address device: 0x00001203
+  (skipped event trb_type=0x22 idx=1 while waiting for address device completion)
+address device completion event: yes, polls=1 completion_code=0x01 slot_id=0x01 trb_type=0x21
+device context slot: usb_address=0x01 slot_state=0x02
+```
+
+`PORTSC3=0x00001203` before the command is a clean port: `CCS=1`,
+`PED=1`, `PLS=0` (U0), `PP=1`, `Speed=4` (SuperSpeed), all change bits
+cleared. And the last line is independent confirmation from the
+controller's **own** OUTPUT Device Context: `usb_address=1` is only
+nonzero if a real `SET_ADDRESS` was accepted by the device, and
+`slot_state=2` is **Addressed** (0=Disabled/Enabled, 1=Default,
+2=Addressed, 3=Configured).
+
+Next: the first real control transfer -- a `GET_DESCRIPTOR` Setup/Data/
+Status Stage sequence over the EP0 Transfer Ring already programmed into
+the Endpoint 0 Context.
+
+## Status update (2026-07-26): USB bring-up Step 6 SOLVED --
 ## RP1 DMA needs PCI address 0x10_00000000 + cpu_phys, NOT raw cpu_phys;
 ## Enable Slot now succeeds (slot_id=1, completion_code=Success)
 

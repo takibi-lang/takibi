@@ -141,6 +141,30 @@ let mut usb_smoke_evt_ring: [u8; 16 * 16] align(64);
 // Event Ring Segment Table: one 16-byte entry (base address + size).
 let mut usb_smoke_erst: [u8; 16] align(64);
 
+// -- Step 7 buffers (Address Device, GitHub issue #67 follow-up) ------------
+// HCCPARAMS1 (0x0240fe6d, read in Step 1) has CSZ (bit2) = 1: this
+// controller uses 64-BYTE contexts, not the 32-byte default -- every
+// context below is 64-byte strided even though only the first 32 bytes
+// of each carry real fields (the rest is reserved/vendor padding per the
+// xHCI spec's own CSZ=1 shape).
+//
+// Input Context: Input Control Context (offset 0) + Slot Context (offset
+// 64) + Endpoint 0 Context (offset 128) = 192 bytes. Only these three
+// are needed for Address Device (Configure Endpoint, a later step, adds
+// more Endpoint Contexts after EP0's).
+let mut usb_smoke_input_ctx: [u8; 192] align(64);
+// Device Context: Slot Context (offset 0) + Endpoint 0 Context (offset
+// 64) = 128 bytes -- OUTPUT, written BY the controller once Address
+// Device completes. DCBAA[slot_id] must point here BEFORE issuing the
+// command (zeroed BSS is the correct "nothing written yet" initial
+// state).
+let mut usb_smoke_device_ctx: [u8; 128] align(64);
+// Endpoint 0's own Transfer Ring -- same 4-TRB-with-trailing-Link-TRB
+// shape as the Command Ring, but this ring carries Setup/Data/Status
+// Stage TRBs for control transfers, not commands, and its doorbell is
+// per-slot-per-endpoint (Doorbell Array index = slot ID), not doorbell 0.
+let mut usb_smoke_ep0_ring: [u8; 4 * 16] align(64);
+
 fn app_main() {
     uart_puts("rp1_usb_smoke\n");
 
@@ -776,6 +800,339 @@ fn app_main() {
                 uart_print_hex(((evt_dw3 >> 24) & 0xFF) as i32);
                 uart_puts(" trb_type=");
                 uart_print_hex(((evt_dw3 >> 10) & 0x3F) as i32);
+                uart_puts("\r\n");
+
+                // Step 7 (2026-07-26 follow-up): Address Device, now that
+                // Enable Slot has returned a real slot_id. Builds an
+                // Input Context (Input Control Context + Slot Context +
+                // Endpoint 0 Context, each 64-byte strided -- HCCPARAMS1
+                // CSZ=1, confirmed in Step 1's own read), points
+                // DCBAA[slot_id] at a fresh (zeroed) Device Context for
+                // the controller to write its own OUTPUT Slot/EP0
+                // Context into, and allocates Endpoint 0's own Transfer
+                // Ring. All DMA-target addresses get RP1_DMA_PCI_OFFSET,
+                // matching the Step 6 fix.
+                let slot_id: usize = ((evt_dw3 >> 24) & 0xFF) as usize;
+
+                usb_smoke_checkpoint = 70;
+                let dcbaa_slot_ptr: *u32 = (dcbaa_base + slot_id * 8) as *u32;
+                let device_ctx_base: usize = (usb_smoke_device_ctx as *u8) as usize;
+                let device_ctx_dma: usize = device_ctx_base + RP1_DMA_PCI_OFFSET;
+                *dcbaa_slot_ptr = (device_ctx_dma & 0xFFFFFFFF) as u32;
+                let dcbaa_slot_hi_ptr: *u32 = (dcbaa_base + slot_id * 8 + 4) as *u32;
+                *dcbaa_slot_hi_ptr = ((device_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
+                rpi5_dcache_clean_range(dcbaa_base + slot_id * 8, 8);
+
+                // Endpoint 0 Transfer Ring: same 4-TRB-plus-Link-TRB
+                // shape as the Command Ring. TRB[0..2] stay zeroed
+                // (Cycle=0, "not yet owned by hardware") until a real
+                // control transfer writes into them; TRB[3] is the Link
+                // TRB, Cycle=1 matching the ring's initial Producer/
+                // Consumer Cycle State of 1.
+                usb_smoke_checkpoint = 71;
+                let ep0_ring_base: usize = (usb_smoke_ep0_ring as *u8) as usize;
+                let ep0_ring_dma: usize = ep0_ring_base + RP1_DMA_PCI_OFFSET;
+                let ep0_link_dw0_ptr: *u32 = (ep0_ring_base + 48) as *u32;
+                *ep0_link_dw0_ptr = (ep0_ring_dma & 0xFFFFFFFF) as u32;
+                let ep0_link_dw1_ptr: *u32 = (ep0_ring_base + 52) as *u32;
+                *ep0_link_dw1_ptr = ((ep0_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+                let ep0_link_dw2_ptr: *u32 = (ep0_ring_base + 56) as *u32;
+                *ep0_link_dw2_ptr = 0;
+                let ep0_link_dw3_ptr: *u32 = (ep0_ring_base + 60) as *u32;
+                *ep0_link_dw3_ptr = 0x00001803; // Cycle=1 | TC=1<<1 | Link(6)<<10
+                rpi5_dcache_clean_range(ep0_ring_base, 64);
+
+                // Input Context: Input Control Context (offset 0).
+                // add_flags bit0 (A0, Slot) | bit1 (A1, EP0) = 3.
+                usb_smoke_checkpoint = 72;
+                let input_ctx_base: usize = (usb_smoke_input_ctx as *u8) as usize;
+                let input_ctx_dma: usize = input_ctx_base + RP1_DMA_PCI_OFFSET;
+                let drop_flags_ptr: *u32 = input_ctx_base as *u32;
+                *drop_flags_ptr = 0;
+                let add_flags_ptr: *u32 = (input_ctx_base + 4) as *u32;
+                *add_flags_ptr = 3;
+
+                // Slot Context (offset 64): Route String=0 (directly on
+                // the root port, no hub in between), Speed = the SAME
+                // value PORTSC3 already reported (bits[13:10]=4,
+                // SuperSpeed -- read directly off real hardware in Step
+                // 2, not assumed from a generic "USB3 = SS" mapping),
+                // Context Entries=1 (only EP0 configured so far), Root
+                // Hub Port Number=3 (usbhost0 port 3, where the flash
+                // drive is).
+                usb_smoke_checkpoint = 73;
+                let slot_speed: u32 = (usb_smoke_host0_portsc3 >> 10) & 0xF;
+                let slot_ctx_base: usize = input_ctx_base + 64;
+                let slot_dev_info_ptr: *u32 = slot_ctx_base as *u32;
+                *slot_dev_info_ptr = (slot_speed << 20) | (1 << 27);
+                let slot_dev_info2_ptr: *u32 = (slot_ctx_base + 4) as *u32;
+                *slot_dev_info2_ptr = 3 << 16; // ROOT_HUB_PORT(3)
+                let slot_tt_info_ptr: *u32 = (slot_ctx_base + 8) as *u32;
+                *slot_tt_info_ptr = 0;
+                let slot_dev_state_ptr: *u32 = (slot_ctx_base + 12) as *u32;
+                *slot_dev_state_ptr = 0;
+
+                // Endpoint 0 Context (offset 128): EP Type=4 (Control
+                // Bidirectional) | Error Count=3 | Max Packet Size=512
+                // (SuperSpeed control endpoint, USB 3.0 spec's own fixed
+                // value -- unlike HS/FS/LS, SuperSpeed does not negotiate
+                // this via the device descriptor's bMaxPacketSize0).
+                // Average TRB Length=8 (a Setup Stage TRB's own fixed
+                // size). TR Dequeue Pointer = EP0 ring's DMA address |
+                // Cycle State (1, matching the ring's initial PCS/DCS).
+                usb_smoke_checkpoint = 74;
+                let ep0_ctx_base: usize = input_ctx_base + 128;
+                let ep0_ep_info_ptr: *u32 = ep0_ctx_base as *u32;
+                *ep0_ep_info_ptr = 0;
+                let ep0_ep_info2_ptr: *u32 = (ep0_ctx_base + 4) as *u32;
+                *ep0_ep_info2_ptr = (4 << 3) | (3 << 1) | (512 << 16);
+                let ep0_deq_lo_ptr: *u32 = (ep0_ctx_base + 8) as *u32;
+                *ep0_deq_lo_ptr = ((ep0_ring_dma & 0xFFFFFFFF) | 1) as u32;
+                let ep0_deq_hi_ptr: *u32 = (ep0_ctx_base + 12) as *u32;
+                *ep0_deq_hi_ptr = ((ep0_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+                let ep0_tx_info_ptr: *u32 = (ep0_ctx_base + 16) as *u32;
+                *ep0_tx_info_ptr = 8; // EP_AVG_TRB_LENGTH(8)
+                rpi5_dcache_clean_range(input_ctx_base, 192);
+
+                // USB Port Reset (PORTSC.PR, bit4) -- REQUIRED before
+                // Address Device: the first real-hardware attempt at
+                // this step (without a reset) got a genuine Command
+                // Completion Event back (proving the DMA/command
+                // machinery all now works, per the Step 6 fix above) but
+                // with completion_code=4 (USB Transaction Error) --
+                // Address Device implicitly performs a real SET_ADDRESS
+                // transaction on the wire, and this device was already
+                // enumerated by FIRMWARE before this example ever ran
+                // (Step 2's own PORTSC3 finding: PLS=U0 at handoff).
+                // USBCMD.HCRST resets the CONTROLLER's own internal
+                // state but does NOT reset the downstream USB DEVICE
+                // itself -- only a real Port Reset does that, putting
+                // the device back in the USB "Default" state a fresh
+                // SET_ADDRESS actually expects.
+                //
+                // 0xCE00FFE9 is Linux's own xhci_port_state_to_neutral()
+                // mask, reproduced exactly (drivers/usb/host/xhci.h):
+                //   XHCI_PORT_RO  = (1<<0)|(1<<3)|(0xf<<10)|(1<<30)|(1<<31)
+                //   XHCI_PORT_RWS = (0xf<<5)|(1<<9)|(0x3<<14)|(0x7<<25)
+                //   neutral = state & (XHCI_PORT_RO | XHCI_PORT_RWS)
+                // i.e. keep ONLY the read-only and read-write-shared
+                // fields, and write ZERO to everything else.
+                //
+                // Getting this mask wrong is not cosmetic. PORTSC bit1
+                // (PED) is RW1CS: reading 1 means "enabled", but WRITING
+                // 1 DISABLES the port. An earlier version of this code
+                // used 0xFF01FFFF (masking only the change bits 23:17),
+                // which preserved the read-back PED=1 and therefore
+                // disabled the port on every read-modify-write -- once
+                // here and again in the PRC clear below, the latter
+                // landing immediately before Address Device. The result
+                // on real hardware was Address Device failing with
+                // completion_code=0x04 (USB Transaction Error) while the
+                // same command with BSR=1 (context-only, no bus traffic)
+                // succeeded -- the device was simply unreachable because
+                // we had just switched its port off. Bit4 (PR) is
+                // likewise write-only-meaningful and must come from the
+                // OR below, never from the read-back value.
+                usb_smoke_checkpoint = 79;
+                let portsc3_reset_ptr: *io u32 = 0x1F00200440 as *io u32;
+                let portsc3_before_reset: u32 = *portsc3_reset_ptr;
+                *portsc3_reset_ptr = (portsc3_before_reset & 0xCE00FFE9) | (1 << 4);
+
+                let mut reset_confirmed: bool = false;
+                let mut reset_polls: usize = 0;
+                for i: usize in 0..<500 {
+                    usb_smoke_checkpoint = 80;
+                    let portsc3_poll_ptr: *io u32 = 0x1F00200440 as *io u32;
+                    let portsc3_poll: u32 = *portsc3_poll_ptr;
+                    reset_polls = i + 1;
+                    if (((portsc3_poll >> 21) & 1) == 1) {
+                        reset_confirmed = true;
+                        break;
+                    }
+                    delay_us(1000);
+                }
+
+                let portsc3_after_reset_ptr: *io u32 = 0x1F00200440 as *io u32;
+                let portsc3_after_reset: u32 = *portsc3_after_reset_ptr;
+                uart_puts("port reset (PRC) confirmed: ");
+                if (reset_confirmed) {
+                    uart_puts("yes, polls=");
+                    uart_print(reset_polls);
+                } else {
+                    uart_puts("NO (timed out)");
+                }
+                uart_puts(" PORTSC3=");
+                uart_print_hex(portsc3_after_reset as i32);
+                uart_puts("\r\n");
+
+                // Clear the change bits the reset raised (RW1C: write 1
+                // to clear), over the same neutral mask as above. PRC
+                // plus CSC (bit17) and WRC (bit19), which a SuperSpeed
+                // port reset also sets -- leaving them latched would
+                // make every later PORTSC read look like a fresh event.
+                if (reset_confirmed) {
+                    let portsc3_clear_ptr: *io u32 = 0x1F00200440 as *io u32;
+                    let portsc3_before_clear: u32 = *portsc3_clear_ptr;
+                    *portsc3_clear_ptr = (portsc3_before_clear & 0xCE00FFE9)
+                        | (1 << 21) | (1 << 17) | (1 << 19);
+                }
+
+                // USB reset recovery time (TRSTRCY, USB2 spec 7.1.7.3,
+                // also observed by USB3 hubs): the device needs >=10ms
+                // after reset before it will reliably answer SET_ADDRESS.
+                // Linux's own hub_port_reset() waits 10ms + 40ms margin
+                // (see drivers/usb/core/hub.c reset_recovery_time) --
+                // matched here; without it Address Device on real
+                // hardware fails with completion_code=0x04 (USB
+                // Transaction Error).
+                delay_us(50000);
+
+                // Re-read PORTSC3 once the recovery wait is over: PED
+                // (bit1) must still read 1 and PLS (bits 8:5) must be 0
+                // (U0) here, or the port is not actually usable and
+                // Address Device cannot possibly reach the device.
+                let portsc3_ready_ptr: *io u32 = 0x1F00200440 as *io u32;
+                let portsc3_ready: u32 = *portsc3_ready_ptr;
+                uart_puts("PORTSC3 before address device: ");
+                uart_print_hex(portsc3_ready as i32);
+                uart_puts("\r\n");
+
+                // Address Device Command TRB, into Command Ring TRB[1]
+                // (TRB[0] already holds the consumed Enable Slot command
+                // -- this is the ring's own second entry, still within
+                // its un-wrapped Producer Cycle State of 1). Parameter =
+                // Input Context DMA address. DWORD3: Cycle=1 | BSR=0
+                // (bit9, Block Set Address Request -- 0 means actually
+                // issue SET_ADDRESS to the device, not just validate the
+                // context) | TRB Type=11 (Address Device)<<10 |
+                // Slot ID<<24.
+                usb_smoke_checkpoint = 75;
+                let trb1_dw0_ptr: *u32 = (cmd_ring_base + 16) as *u32;
+                *trb1_dw0_ptr = (input_ctx_dma & 0xFFFFFFFF) as u32;
+                let trb1_dw1_ptr: *u32 = (cmd_ring_base + 20) as *u32;
+                *trb1_dw1_ptr = ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
+                let trb1_dw2_ptr: *u32 = (cmd_ring_base + 24) as *u32;
+                *trb1_dw2_ptr = 0;
+                let trb1_dw3_ptr: *u32 = (cmd_ring_base + 28) as *u32;
+                *trb1_dw3_ptr = (1 | (11 << 10) | (slot_id << 24)) as u32;
+                rpi5_dcache_clean_range(cmd_ring_base + 16, 16);
+
+                // Advance ERDP past the Enable Slot completion event
+                // (evt_ring[0]) before waiting for the next one --
+                // proper spec practice (tells the controller this slot
+                // is free again), not just something that happens to
+                // work with an unwrapped 16-entry ring.
+                usb_smoke_checkpoint = 76;
+                let erdp_advance_lo_ptr: *io u32 = (ir0_base + 0x18) as *io u32;
+                *erdp_advance_lo_ptr = ((evt_ring_dma + 16) & 0xFFFFFFFF) as u32;
+                let erdp_advance_hi_ptr: *io u32 = (ir0_base + 0x1C) as *io u32;
+                *erdp_advance_hi_ptr = (((evt_ring_dma + 16) >> 32) & 0xFFFFFFFF) as u32;
+
+                // Ring the Command doorbell again -- the controller's own
+                // internal Command Ring dequeue pointer is already past
+                // TRB[0] (it just completed that command), so this makes
+                // it fetch and execute TRB[1] (Address Device).
+                usb_smoke_checkpoint = 77;
+                *doorbell0_ptr = 0;
+
+                // The Port Reset above queues its OWN async Port Status
+                // Change Event (TRB Type 34) into the ring, which lands
+                // BEFORE Address Device's real Command Completion Event
+                // (TRB Type 33) -- confirmed on real hardware: a fixed
+                // evt_ring[1] read picked up the Port Status Change
+                // Event instead. So scan forward, skipping (and logging)
+                // any non-Command-Completion event, advancing ERDP past
+                // each one, until the real completion event is found.
+                let mut addr_confirmed: bool = false;
+                let mut addr_polls: usize = 0;
+                let mut addr_dw2: u32 = 0;
+                let mut addr_dw3: u32 = 0;
+                let mut evt_scan_idx: usize = 1;
+                for scan: usize in 0..<4 {
+                    usb_smoke_checkpoint = 78;
+                    let evt_off: usize = evt_scan_idx * 16;
+                    let mut this_confirmed: bool = false;
+                    let mut this_dw3: u32 = 0;
+                    for i: usize in 0..<1000 {
+                        rpi5_dcache_invalidate_range(evt_ring_base + evt_off, 16);
+                        let dw3_ptr: *u32 = (evt_ring_base + evt_off + 12) as *u32;
+                        let dw3: u32 = *dw3_ptr;
+                        addr_polls = i + 1;
+                        if ((dw3 & 1) == 1) {
+                            this_confirmed = true;
+                            this_dw3 = dw3;
+                            break;
+                        }
+                        delay_us(1000);
+                    }
+
+                    if (this_confirmed == false) {
+                        break;
+                    }
+
+                    let dw2_ptr: *u32 = (evt_ring_base + evt_off + 8) as *u32;
+                    let this_dw2: u32 = *dw2_ptr;
+                    let this_trb_type: u32 = (this_dw3 >> 10) & 0x3F;
+
+                    // Advance ERDP past this event regardless of its
+                    // type -- the controller must always see forward
+                    // progress on the ring, or it will stop delivering
+                    // further events.
+                    let erdp_scan_lo_ptr: *io u32 = (ir0_base + 0x18) as *io u32;
+                    *erdp_scan_lo_ptr = ((evt_ring_dma + evt_off + 16) & 0xFFFFFFFF) as u32;
+                    let erdp_scan_hi_ptr: *io u32 = (ir0_base + 0x1C) as *io u32;
+                    *erdp_scan_hi_ptr = (((evt_ring_dma + evt_off + 16) >> 32) & 0xFFFFFFFF) as u32;
+
+                    if (this_trb_type == 33) {
+                        addr_confirmed = true;
+                        addr_dw2 = this_dw2;
+                        addr_dw3 = this_dw3;
+                        break;
+                    }
+
+                    uart_puts("  (skipped event trb_type=");
+                    uart_print_hex(this_trb_type as i32);
+                    uart_puts(" idx=");
+                    uart_print(evt_scan_idx);
+                    uart_puts(" while waiting for address device completion)\r\n");
+                    evt_scan_idx = evt_scan_idx + 1;
+                }
+
+                uart_puts("address device completion event: ");
+                if (addr_confirmed) {
+                    uart_puts("yes, polls=");
+                    uart_print(addr_polls);
+                    uart_puts(" completion_code=");
+                    uart_print_hex(((addr_dw2 >> 24) & 0xFF) as i32);
+                    uart_puts(" slot_id=");
+                    uart_print_hex(((addr_dw3 >> 24) & 0xFF) as i32);
+                    uart_puts(" trb_type=");
+                    uart_print_hex(((addr_dw3 >> 10) & 0x3F) as i32);
+                } else {
+                    uart_puts("NO (timed out)");
+                    let usbsts_addr_diag_ptr: *io u32 = 0x1F00200024 as *io u32;
+                    let usbsts_addr_diag: u32 = *usbsts_addr_diag_ptr;
+                    uart_puts(" USBSTS=");
+                    uart_print_hex(usbsts_addr_diag as i32);
+                }
+                uart_puts("\r\n");
+
+                // Independent proof that Address Device really did its
+                // bus-level work: the controller writes the OUTPUT
+                // Device Context itself. Its Slot Context DWORD3 carries
+                // USB Device Address (bits 7:0) -- nonzero only if a
+                // real SET_ADDRESS was accepted by the device -- and
+                // Slot State (bits 31:27), which must now read 2
+                // (Addressed; 0=Disabled/Enabled, 1=Default,
+                // 2=Addressed, 3=Configured).
+                usb_smoke_checkpoint = 81;
+                rpi5_dcache_invalidate_range(device_ctx_base, 128);
+                let dev_slot_dw3_ptr: *u32 = (device_ctx_base + 12) as *u32;
+                let dev_slot_dw3: u32 = *dev_slot_dw3_ptr;
+                uart_puts("device context slot: usb_address=");
+                uart_print_hex((dev_slot_dw3 & 0xFF) as i32);
+                uart_puts(" slot_state=");
+                uart_print_hex(((dev_slot_dw3 >> 27) & 0x1F) as i32);
                 uart_puts("\r\n");
             } else {
                 uart_puts("NO (timed out)\r\n");
