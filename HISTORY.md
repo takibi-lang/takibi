@@ -15,6 +15,48 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- Started USB Bring-Up, `rp1_usb_smoke` Proves Real XHCI Reachability
+
+User asked to start USB support (toward eventually unblocking
+`el0_shell`) and, after that, Ethernet, explicitly as small incremental
+real-hardware-verified steps rather than one large jump.
+
+Fetched the official Raspberry Pi RP1 Peripherals datasheet before
+writing any code, rather than guessing register layouts (`WebFetch`'s
+own PDF summarizer failed to extract readable text from it; fetched and
+read locally via `pdftotext` instead). Finding: RP1's USB Host subsystem
+is a REAL XHCI implementation (Synopsys `dwc_usb3` v3.30b, two identical
+controllers conforming to XHCI 1.2), not the simpler DWC2 OTG controller
+this repo's own earlier notes had implicitly assumed -- materially
+bigger driver scope (TRB rings, event rings, command rings, device
+context arrays, port/slot state machines). User was told explicitly and
+chose to proceed incrementally anyway.
+
+Derived RP1-internal-to-CPU-physical address translation empirically
+from an already-proven value (`uart0`'s RP1-internal `0x40030000` maps
+to `examples/common_rpi5/uart.tkb`'s own CPU physical `0x1F00030000`):
+`CPU_PHYS = RP1_INTERNAL + 0x1EC0000000`. `usbhost0`'s XHCI Capability
+registers (RP1-internal `0x40200000`) are therefore reachable at CPU
+physical `0x1F00200000`, `usbhost1` at `0x1F00300000` -- both already
+inside the existing 4GB RP1 outbound window, no new MMU/PCIe work
+needed.
+
+`examples/rp1_usb_smoke` (new, standalone diagnostic, not added to the
+automated `make hwcheck-rpi5` suite -- same precedent as
+`rp1_pcie_smoke`) reads the standard XHCI Capability register block from
+both controllers, read-only, with the same checkpoint-instrumentation
+safety technique `rp1_pcie_smoke` established. Passed on the first
+real-hardware attempt, no hang: `HCIVERSION=0x0110`, `HCSPARAMS1`
+reports MaxSlots=64 and MaxIntrs=4, exactly matching the datasheet's own
+claims -- strong confirmation of a real, correct register read, not a
+bus-timeout pattern. Both controllers report identical values, matching
+"two identical" per the datasheet. Confirmed reproducible across two
+consecutive real-hardware runs.
+
+Next step (not started): `usbhost0_cfg`/`usbhost1_cfg` (clock/power/
+reset control, addresses not yet looked up) before attempting any real
+controller reset or port access.
+
 ### 2026-07-26: RPi5 -- Grew `el0_elf_load` to the Full GitHub Issue #156 Scope (Multi-Page, hvc Teardown, Busybox Syscalls)
 
 Direct follow-on to the minimal single-page port below, evolved in place

@@ -1,9 +1,75 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): `el0_elf_load` grown to the full
-## GitHub issue #156-equivalent scope (multi-page loading, real hvc
-## teardown, ~20-syscall busybox-shell surface), evolved in place, no new
-## bug, `make hwcheck-rpi5` 55/55
+## Status update (2026-07-26, latest): USB bring-up STARTED --
+## `rp1_usb_smoke` proves real-hardware reachability of RP1's XHCI
+## controllers (GitHub issue #67 follow-up, `el0_shell`'s own USB
+## blocker)
+
+User asked to start USB support (RPi3 has it; RPi5 does not), to
+eventually unblock `el0_shell` (needs USB Mass Storage + FAT12 to fetch
+a real busybox-static binary) and, after that, Ethernet -- explicitly
+requested as small, incremental, real-hardware-verified steps, not a
+single large jump.
+
+**First finding, before writing any code**: fetched the official
+Raspberry Pi RP1 Peripherals datasheet
+(`https://datasheets.raspberrypi.com/rp1/rp1-peripherals.pdf`, saved and
+read locally via `pdftotext`, since `WebFetch`'s own PDF summarizer
+failed to extract readable text from it) rather than guessing register
+layouts. Chapter 5 (USB): "The USB Host subsystem is based on Synopsys
+IP dwc_usb3, v3.30b. There are two identical USB3.0 xHCI Host
+Controllers conforming to the Extensible Host Controller Interface
+Specification v1.2." This is a REAL XHCI controller -- materially
+bigger driver scope than the DWC2 OTG controller this file's own earlier
+"do not port RPi3's USB host stack" note had implicitly assumed a future
+RP1 USB port might need; TRB rings, event rings, command rings, device
+context arrays, and port/slot state machines are all real XHCI-spec
+requirements, not simplifications available here. User was informed of
+this scope jump explicitly and chose to proceed incrementally anyway.
+
+**Register addresses (datasheet Table 85, section 5.1)**: `usbhost0`
+(main XHCI MMIO, AXI3 bus, Atomic Access: N -- plain reads, no special
+aliasing) at RP1-internal `0x40200000`; `usbhost1` at `0x40300000`.
+Derived the RP1-internal-to-CPU-physical mapping empirically from a
+value already proven working: `uart0` is RP1-internal `0x40030000`
+(datasheet Table 22) and `examples/common_rpi5/uart.tkb` already uses
+CPU physical `0x1F00030000` for it, so `CPU_PHYS = RP1_INTERNAL +
+0x1EC0000000` -- giving `usbhost0` = CPU physical `0x1F00200000`,
+`usbhost1` = `0x1F00300000`. Both addresses already fall inside
+`examples/common_rpi5/mmu.S`'s existing L1[124..127] 4GB RP1 outbound
+window (no new MMU/PCIe work needed at all), and RP1 BAR/PCIe bring-up
+already runs unconditionally via `platform_init` for every RPi5 kernel
+-- the same reason `rp1_uart0` already works everywhere without an
+explicit init call.
+
+**`examples/rp1_usb_smoke`** (new, standalone diagnostic, NOT added to
+`make hwcheck-rpi5`'s automated suite -- same precedent as
+`rp1_pcie_smoke`, a bring-up tool, not a regression test): reads the
+standard XHCI Capability register block (CAPLENGTH/HCIVERSION/
+HCSPARAMS1-3/HCCPARAMS1) from both controllers, read-only, no resets or
+state changes, same checkpoint-instrumentation safety technique
+`rp1_pcie_smoke` established (a global written before each step, so a
+hang's last-reached step is SWD-readable). **Passed on the first
+real-hardware attempt, no hang, no bug**: `HCIVERSION=0x0110`,
+`usbhost0` `HCSPARAMS1=0x03000440` -- MaxSlots (bits 7:0) = `0x40` = 64,
+MaxIntrs (bits 18:8) = 4 -- both EXACTLY matching the datasheet's own
+claims ("support 64 device slots", "Four interrupt vectors are provided
+per controller"), strong confirmation this is reading real, correct
+silicon, not a bus-timeout poison pattern. `usbhost1` reports
+byte-identical CAPLENGTH/HCIVERSION/HCSPARAMS1, matching "two identical"
+controllers. Confirmed reproducible across two consecutive real-hardware
+runs (byte-identical output both times).
+
+**Next step (not yet started)**: read `usbhost0_cfg`/`usbhost1_cfg`
+(datasheet Table 85, APB bus, Atomic Access: Y -- addresses not yet
+looked up) to understand what clock/power/reset control they offer
+before attempting any real XHCI controller reset (`USBCMD.HCRST`) or
+port status register access -- the Capability registers answering
+correctly does not by itself prove the controller is fully clocked/
+out-of-reset for operational-register-level activity, only that ITS OWN
+register block is reachable. A real device enumeration (Enable Slot ->
+Address Device -> Get Descriptors) and a Mass Storage Bulk-Only
+Transport driver are both still far ahead of this first step.
 
 Direct follow-on to the minimal port below. User asked to pick whichever
 of "full `el0_elf_load`" or "`el0_shell`" was easier to start next;

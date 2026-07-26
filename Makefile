@@ -2358,6 +2358,16 @@ examples/rp1_pcie_smoke/rp1_pcie_smoke_rpi5.o: examples/rp1_pcie_smoke/rp1_pcie_
 examples/rp1_pcie_smoke/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) examples/rp1_pcie_smoke/rp1_pcie_smoke_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) examples/rp1_pcie_smoke/rp1_pcie_smoke_rpi5.o -o $@
 
+## rp1_usb_smoke: first real-hardware reachability check for RP1's USB
+## xHCI host controllers (RP1 Peripherals datasheet Chapter 5) -- read-
+## only, same "prove reachability first" step as rp1_pcie_smoke above.
+## Same MMU_O/TIMER_ASM_O link requirement, for the same reasons.
+examples/rp1_usb_smoke/rp1_usb_smoke_rpi5.o: examples/rp1_usb_smoke/rp1_usb_smoke.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
+
+examples/rp1_usb_smoke/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) examples/rp1_usb_smoke/rp1_usb_smoke_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) examples/rp1_usb_smoke/rp1_usb_smoke_rpi5.o -o $@
+
 ## RPI5_SERIAL_DEV: same convention as STM32_SERIAL_DEV/RPI3_SERIAL_DEV --
 ## empty by default, resolved at runtime by scripts/rpi5_uart_dev.sh (which
 ## picks the ttyACM device out by its /dev/serial/by-id label, not by
