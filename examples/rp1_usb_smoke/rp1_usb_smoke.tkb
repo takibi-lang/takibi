@@ -41,6 +41,53 @@
 // power/reset state this smoke test does not yet configure, so a hang or
 // bus-timeout-pattern (0xFFFFFFFF) read is a real, expected possible
 // outcome, not assumed impossible.
+//
+// Step 2 (2026-07-26 follow-up, after Capability-register reachability
+// was confirmed): reads USBSTS and every PORTSC the CONTROLLER ITSELF
+// reports existing (HCSPARAMS1 bits[31:24], MaxPorts -- read on real
+// hardware as 3 per controller here, not guessed), via the STANDARD XHCI
+// Operational register layout (Intel's public XHCI spec, not anything
+// RP1-specific or requiring the still-undocumented usbhost*_cfg block --
+// this datasheet's own USB chapter has no per-bit register list for
+// usbhost*_cfg at all, unlike its GPIO/PWM chapters, so this step
+// deliberately routes around that gap rather than guessing at it).
+// Operational registers start at Capability base + CAPLENGTH (0x20, read
+// in Step 1 above -- both controllers report the same value). USBSTS is
+// at Operational+0x04; PORTSC for 1-based port n is at
+// Operational+0x400+(n-1)*0x10. Still entirely read-only: USBSTS.CNR
+// (Controller Not Ready, bit 11) is checked and reported explicitly,
+// since per the XHCI spec every OTHER Operational register (except
+// PAGESIZE) is not guaranteed valid while it is set -- if CNR is set,
+// the PORTSC values read here would need to be treated as provisional,
+// not a real bring-up bug.
+//
+// Step 2 real-hardware results (both controllers, confirmed reproducible
+// across two runs): usbhost0 USBSTS=0x18 (CNR=0, HCH=0 -- the controller
+// is NOT halted, i.e. already running: firmware/TF-A left USBCMD.RS set
+// before handing off, this bare-metal payload never touched it). port 1
+// and 2 both read 0x2a0 (PP=1 powered, PLS=5 RxDetect, Speed=0 --
+// ordinary idle/nothing-connected state). Port 3 reads 0x21203 (CCS=1
+// CONNECTED, PED=1 ENABLED, PLS=0 U0 fully-operational link, PP=1,
+// Speed=4) -- something is live and already enumerated-by-firmware on
+// usbhost0 port 3. usbhost1 shows all three ports idle (0x2a0) and
+// USBSTS=0 (no EINT/PCD pending). Open question this raises, NOT yet
+// answered: the datasheet says each controller has only 2 PHYs (one
+// USB2, one USB3), so why does HCSPARAMS1 report 3 ports? Step 3 below
+// investigates via the standard xHCI Extended Capabilities list instead
+// of guessing.
+//
+// Step 3 (2026-07-26 follow-up): walks the xHCI Extended Capabilities
+// linked list (pointed to by HCCPARAMS1's xECP field, bits[31:16], a
+// DWORD offset from the Capability register base) looking for
+// Capability ID 2 ("Supported Protocol Capability" per the public xHCI
+// spec), which maps a compatible port RANGE to a USB protocol
+// major/minor revision -- the standard way a real driver resolves
+// "port 3 in HCSPARAMS1's flat MaxPorts count is actually protocol X"
+// without guessing. Still entirely read-only. Bounded to 8 entries
+// (this repo's own established defensive-loop-cap convention, e.g.
+// examples/el0_elf_load's own MAX_PHDRS) -- a real xHCI implementation
+// normally has only a handful of extended capabilities, so 8 is
+// generous headroom, not a tight guess.
 let mut usb_smoke_checkpoint: u32 = 0;
 let mut usb_smoke_host0_cap0: u32 = 0xAAAAAAAA;
 let mut usb_smoke_host0_hcsparams1: u32 = 0xAAAAAAAA;
@@ -49,6 +96,20 @@ let mut usb_smoke_host0_hcsparams3: u32 = 0xAAAAAAAA;
 let mut usb_smoke_host0_hccparams1: u32 = 0xAAAAAAAA;
 let mut usb_smoke_host1_cap0: u32 = 0xAAAAAAAA;
 let mut usb_smoke_host1_hcsparams1: u32 = 0xAAAAAAAA;
+let mut usb_smoke_host0_usbsts: u32 = 0xAAAAAAAA;
+let mut usb_smoke_host0_portsc1: u32 = 0xAAAAAAAA;
+let mut usb_smoke_host0_portsc2: u32 = 0xAAAAAAAA;
+let mut usb_smoke_host0_portsc3: u32 = 0xAAAAAAAA;
+let mut usb_smoke_host1_usbsts: u32 = 0xAAAAAAAA;
+let mut usb_smoke_host1_portsc1: u32 = 0xAAAAAAAA;
+let mut usb_smoke_host1_portsc2: u32 = 0xAAAAAAAA;
+let mut usb_smoke_host1_portsc3: u32 = 0xAAAAAAAA;
+// Byte offset (from the Capability register base) of the extended
+// capability entry about to be read -- doubles as the checkpoint value
+// for this loop, so a hang's exact failing address is SWD-readable
+// directly (not just "somewhere in iteration N").
+let mut usb_smoke_ecp_offset: u32 = 0xAAAAAAAA;
+let mut usb_smoke_ecp_dword: u32 = 0xAAAAAAAA;
 
 fn app_main() {
     uart_puts("rp1_usb_smoke\n");
@@ -105,6 +166,124 @@ fn app_main() {
     uart_print_hex(usb_smoke_host1_hcsparams1 as i32);
     uart_puts("\r\n");
 
+    // Step 2: standard XHCI Operational registers, Capability base +
+    // CAPLENGTH (0x20, confirmed identical for both controllers above).
     usb_smoke_checkpoint = 10;
+    let host0_usbsts_ptr: *io u32 = 0x1F00200024;
+    usb_smoke_host0_usbsts = *host0_usbsts_ptr;
+    usb_smoke_checkpoint = 11;
+
+    let host0_portsc1_ptr: *io u32 = 0x1F00200420;
+    usb_smoke_host0_portsc1 = *host0_portsc1_ptr;
+    usb_smoke_checkpoint = 12;
+
+    let host0_portsc2_ptr: *io u32 = 0x1F00200430;
+    usb_smoke_host0_portsc2 = *host0_portsc2_ptr;
+    usb_smoke_checkpoint = 13;
+
+    let host0_portsc3_ptr: *io u32 = 0x1F00200440;
+    usb_smoke_host0_portsc3 = *host0_portsc3_ptr;
+    usb_smoke_checkpoint = 14;
+
+    uart_puts("usbhost0 USBSTS: ");
+    uart_print_hex(usb_smoke_host0_usbsts as i32);
+    uart_puts(" CNR=");
+    uart_print(((usb_smoke_host0_usbsts >> 11) & 1) as usize);
+    uart_puts("\r\nusbhost0 PORTSC1: ");
+    uart_print_hex(usb_smoke_host0_portsc1 as i32);
+    uart_puts("\r\nusbhost0 PORTSC2: ");
+    uart_print_hex(usb_smoke_host0_portsc2 as i32);
+    uart_puts("\r\nusbhost0 PORTSC3: ");
+    uart_print_hex(usb_smoke_host0_portsc3 as i32);
+    uart_puts("\r\n");
+
+    usb_smoke_checkpoint = 15;
+    let host1_usbsts_ptr: *io u32 = 0x1F00300024;
+    usb_smoke_host1_usbsts = *host1_usbsts_ptr;
+    usb_smoke_checkpoint = 16;
+
+    let host1_portsc1_ptr: *io u32 = 0x1F00300420;
+    usb_smoke_host1_portsc1 = *host1_portsc1_ptr;
+    usb_smoke_checkpoint = 17;
+
+    let host1_portsc2_ptr: *io u32 = 0x1F00300430;
+    usb_smoke_host1_portsc2 = *host1_portsc2_ptr;
+    usb_smoke_checkpoint = 18;
+
+    let host1_portsc3_ptr: *io u32 = 0x1F00300440;
+    usb_smoke_host1_portsc3 = *host1_portsc3_ptr;
+    usb_smoke_checkpoint = 19;
+
+    uart_puts("usbhost1 USBSTS: ");
+    uart_print_hex(usb_smoke_host1_usbsts as i32);
+    uart_puts(" CNR=");
+    uart_print(((usb_smoke_host1_usbsts >> 11) & 1) as usize);
+    uart_puts("\r\nusbhost1 PORTSC1: ");
+    uart_print_hex(usb_smoke_host1_portsc1 as i32);
+    uart_puts("\r\nusbhost1 PORTSC2: ");
+    uart_print_hex(usb_smoke_host1_portsc2 as i32);
+    uart_puts("\r\nusbhost1 PORTSC3: ");
+    uart_print_hex(usb_smoke_host1_portsc3 as i32);
+    uart_puts("\r\n");
+
+    // Step 3: walk usbhost0's xHCI Extended Capabilities list. xECP
+    // (HCCPARAMS1 bits[31:16]) is a DWORD offset from the Capability
+    // base to the first entry; each entry's low byte is its Capability
+    // ID, the next byte is a DWORD offset to the NEXT entry (0 = end of
+    // list) -- both relative to the CURRENT entry's own address, per the
+    // xHCI spec (not relative to the Capability base again).
+    usb_smoke_checkpoint = 21;
+    let xecp_dwords: usize = ((usb_smoke_host0_hccparams1 >> 16) & 0xFFFF) as usize;
+    let mut ecp_addr: usize = 0x1F00200000 + xecp_dwords * 4;
+    uart_puts("usbhost0 first ext cap addr: ");
+    uart_print_hex((ecp_addr - 0x1F00200000) as i32);
+    uart_puts("\r\n");
+
+    if (xecp_dwords != 0) {
+        for i: usize in 0..<8 {
+            usb_smoke_ecp_offset = (ecp_addr - 0x1F00200000) as u32;
+            usb_smoke_checkpoint = 22;
+            let ecp_ptr: *io u32 = ecp_addr as *io u32;
+            usb_smoke_ecp_dword = *ecp_ptr;
+            usb_smoke_checkpoint = 23;
+
+            let cap_id: u32 = usb_smoke_ecp_dword & 0xFF;
+            let next_dwords: u32 = (usb_smoke_ecp_dword >> 8) & 0xFF;
+
+            uart_puts("ext cap @+");
+            uart_print_hex(usb_smoke_ecp_offset as i32);
+            uart_puts(" id=");
+            uart_print_hex(cap_id as i32);
+            uart_puts(" raw=");
+            uart_print_hex(usb_smoke_ecp_dword as i32);
+            uart_puts("\r\n");
+
+            if (cap_id == 2) {
+                // Supported Protocol Capability: DWORD1 = name string
+                // (ASCII "USB "), DWORD2 bits[7:0]=Compatible Port
+                // Offset (1-based), bits[15:8]=Compatible Port Count.
+                // Major revision is this entry's own DWORD0 bits[31:24].
+                let dw2_ptr: *io u32 = (ecp_addr + 8) as *io u32;
+                let dw2: u32 = *dw2_ptr;
+                let port_offset: u32 = dw2 & 0xFF;
+                let port_count: u32 = (dw2 >> 8) & 0xFF;
+                let major_rev: u32 = (usb_smoke_ecp_dword >> 24) & 0xFF;
+                uart_puts("  supported protocol: major_rev=");
+                uart_print_hex(major_rev as i32);
+                uart_puts(" port_offset=");
+                uart_print(port_offset as usize);
+                uart_puts(" port_count=");
+                uart_print(port_count as usize);
+                uart_puts("\r\n");
+            }
+
+            if (next_dwords == 0) {
+                break;
+            }
+            ecp_addr = ecp_addr + (next_dwords as usize) * 4;
+        }
+    }
+
+    usb_smoke_checkpoint = 30;
     uart_puts("done\n");
 }

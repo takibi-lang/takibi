@@ -15,6 +15,36 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- USB Bring-Up Steps 2-3: PORTSC Shows a Real Connected Device, Extended Capabilities Resolve the Port-Count Mystery
+
+Direct follow-on to Step 1 (Capability register reachability). Both
+steps read-only, no controller reset yet.
+
+Step 2 reads the standard XHCI Operational registers (Capability base +
+CAPLENGTH), deliberately not depending on `usbhost*_cfg` (undocumented
+in the datasheet's USB chapter). Real results: `usbhost0` `USBSTS=0x18`
+-- `HCH=0`, meaning the controller is NOT halted: firmware/TF-A already
+left it running before handoff. `PORTSC1`/`PORTSC2` read `0x2a0`
+(idle). `PORTSC3` reads `0x21203` -- `CCS=1` connected, `PED=1`
+enabled, `PLS=0` U0 (fully operational), `Speed=4` -- a real device is
+live on `usbhost0` port 3, already enumerated by firmware.
+
+Step 3 walks the xHCI Extended Capabilities list to resolve why
+`HCSPARAMS1` reports `MaxPorts=3` when the datasheet describes only 2
+PHYs per controller: found `[ID=1 Legacy Support, ID=2 major_rev=2
+port_offset=1 port_count=2, ID=2 major_rev=3 port_offset=3
+port_count=1]` -- ports 1-2 are USB2 logical ports, port 3 is the USB3
+logical port (standard XHCI dual-numbering for one physical
+USB2+USB3-combo connector, not an RP1 quirk). So the connected device
+found in Step 2 is specifically USB 3.0 SuperSpeed.
+
+Both steps confirmed reproducible across two consecutive real-hardware
+runs each, no hangs.
+
+Open question raised for the user: is a real USB device physically
+plugged into the Raspberry Pi 5 board's own USB-A ports right now (not
+the Debug Probe, which uses a separate cable to the host machine)?
+
 ### 2026-07-26: RPi5 -- Started USB Bring-Up, `rp1_usb_smoke` Proves Real XHCI Reachability
 
 User asked to start USB support (toward eventually unblocking

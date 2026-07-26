@@ -1,6 +1,65 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): USB bring-up STARTED --
+## Status update (2026-07-26, latest): USB bring-up, Steps 2-3 --
+## `rp1_usb_smoke` reads USBSTS/PORTSC and walks the xHCI Extended
+## Capabilities list; found a REAL device already connected on
+## `usbhost0` port 3
+
+Direct follow-on to Step 1 (Capability register reachability, below).
+Both steps read-only, no controller reset or state change yet, same
+checkpoint-instrumented safety discipline.
+
+**Step 2**: standard XHCI Operational registers (Capability base +
+CAPLENGTH), no `usbhost*_cfg` dependency needed -- that block's own
+register layout is NOT documented in the datasheet's USB chapter at
+all (unlike its GPIO/PWM chapters' own detailed "List of registers"
+subsections), so this step deliberately routes around that gap via
+registers the public XHCI spec itself defines, rather than guessing at
+RP1-specific "cfg" semantics. Real results (reproducible across two
+runs): `usbhost0` `USBSTS=0x18` -- `CNR=0` (controller ready) and
+`HCH=0` (**NOT halted** -- firmware/TF-A already left `USBCMD.RS` set
+before handoff; this bare-metal payload never started it itself).
+`PORTSC1`/`PORTSC2` both read `0x2a0` (`PP=1` powered, `PLS=5`
+RxDetect, `Speed=0` -- ordinary idle/nothing-connected). `PORTSC3`
+reads `0x21203`: `CCS=1` **connected**, `PED=1` **enabled**, `PLS=0`
+**U0 (fully operational link)**, `Speed=4` -- something is live and
+already enumerated by firmware on `usbhost0` port 3. `usbhost1` shows
+all three ports idle and `USBSTS=0`.
+
+**Step 3**: walked the xHCI Extended Capabilities list (pointed to by
+`HCCPARAMS1`'s `xECP` field) looking for Capability ID 2 ("Supported
+Protocol Capability", public xHCI spec) to resolve an open question
+Step 2 raised -- the datasheet says each controller has only 2 PHYs (one
+USB2, one USB3), so why does `HCSPARAMS1` report `MaxPorts=3`? Answer,
+read directly off real hardware rather than guessed: `usbhost0`'s
+extended capability list is `[ID=1 (Legacy Support), ID=2 major_rev=2
+port_offset=1 port_count=2, ID=2 major_rev=3 port_offset=3
+port_count=1]` -- ports 1-2 are the USB2 logical ports, port 3 is the
+USB3 logical port. This is standard XHCI modeling (a physical connector
+with combined USB2+USB3 signaling shows up as two SEPARATE logical
+port numbers, one per protocol), not an RP1 quirk. So the "device
+already connected" found in Step 2 is specifically a **SuperSpeed (USB
+3.0) device** on `usbhost0`'s USB3 logical port. Confirmed reproducible
+across two consecutive real-hardware runs, no hang either time.
+
+**Open question for the user**: is there a real USB device physically
+plugged into one of the Raspberry Pi 5 board's own USB-A ports right
+now (not the Debug Probe, which connects to the HOST machine over a
+separate cable, not RPi5's own ports)? If so, this is a strong, useful
+signal for the next real milestone (actual device enumeration) -- worth
+confirming before investing in reset/enumeration work against a port
+whose "device" might otherwise be a red herring.
+
+**Next step (not started)**: a real, careful `USBCMD.HCRST` (Host
+Controller Reset) is the natural next increment ONLY if reusing
+firmware's already-running state turns out to be undesirable; more
+likely, the next real step is setting up `DCBAAP` (Device Context Base
+Address Array Pointer) and the Command Ring (`CRCR`) so an `Enable
+Slot` command can be issued for the already-connected device on port 3
+-- real device enumeration is still several careful, individually-
+verified steps away.
+
+## Status update (2026-07-26, earlier): USB bring-up STARTED --
 ## `rp1_usb_smoke` proves real-hardware reachability of RP1's XHCI
 ## controllers (GitHub issue #67 follow-up, `el0_shell`'s own USB
 ## blocker)
