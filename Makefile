@@ -2071,6 +2071,9 @@ COMMON_RPI5_MMU_S        := $(COMMON_RPI5_DIR)/mmu.S
 COMMON_RPI5_MMU_O        := $(COMMON_RPI5_DIR)/mmu.o
 COMMON_RPI5_TIMER_ASM_S  := $(COMMON_RPI5_DIR)/timer_asm.S
 COMMON_RPI5_TIMER_ASM_O  := $(COMMON_RPI5_DIR)/timer_asm.o
+COMMON_RPI5_EL1_ASM_S    := $(COMMON_RPI5_DIR)/el1_asm.S
+COMMON_RPI5_EL1_ASM_O    := $(COMMON_RPI5_DIR)/el1_asm.o
+COMMON_RPI5_EL1_ASM_EXTERN := $(COMMON_RPI5_DIR)/el1_asm_extern.tkb
 COMMON_RPI5_LINK_LD      := $(COMMON_RPI5_DIR)/link.ld
 COMMON_RPI5_UART         := $(COMMON_RPI5_DIR)/uart.tkb
 COMMON_RPI5_PRINT        := $(COMMON_RPI5_DIR)/print.tkb
@@ -2088,6 +2091,9 @@ $(COMMON_RPI5_MMU_O): $(COMMON_RPI5_MMU_S)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI5_TIMER_ASM_O): $(COMMON_RPI5_TIMER_ASM_S)
+	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
+
+$(COMMON_RPI5_EL1_ASM_O): $(COMMON_RPI5_EL1_ASM_S)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI5_JTAG_STUB_O): $(COMMON_RPI5_JTAG_STUB_S)
@@ -2171,8 +2177,37 @@ RPI5_RTC_OBJS      := $(foreach e,$(RPI5_RTC_EXAMPLES),examples/$(e)/$(e)_rpi5.o
 $(RPI5_RTC_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_RTC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_RTC) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
 
-RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES)
+## GitHub issue #163's own follow-up: EL2 -> EL1 drop, reusing the EL2
+## identity map as EL1&0's own stage 1 regime (examples/common_rpi5/
+## el1_asm.S, a port of examples/common_rpi3/el1_asm.S's proven
+## mechanism). NOT built from examples/el1_smoke/el1_smoke.tkb (that
+## file hardcodes `use "examples/common_rpi3/el1_asm_extern.tkb"` and
+## calls RPi3's own rpi3_el1_enter -- a symbol five different RPi3 files
+## depend on, not a portable public HAL name, so generalizing it was
+## judged more invasive than a small RPi5-specific twin) -- instead from
+## examples/el1_smoke/el1_smoke_rpi5.tkb, a separate source with
+## byte-for-byte identical output, so examples/el1_smoke/
+## el1_smoke.expected is reused unchanged. Bespoke (non-pattern) rules,
+## since the source filename does not match the examples/%.tkb
+## convention $(RPI5_OBJS)'s pattern rule assumes.
+examples/el1_smoke/el1_smoke_rpi5.o: examples/el1_smoke/el1_smoke_rpi5.tkb \
+    $(COMMON_RPI5_EL1_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+examples/el1_smoke/kernel_rpi5.elf: \
+    $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_EL1_ASM_O) examples/el1_smoke/el1_smoke_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_EL1_ASM_O) examples/el1_smoke/el1_smoke_rpi5.o -o $@
+
+RPI5_EL1_SMOKE_EXAMPLES := el1_smoke
+RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES) $(RPI5_EL1_SMOKE_EXAMPLES)
 RPI5_KERNELS  := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
+RPI5_EL1_SMOKE_KERNELS := $(foreach e,$(RPI5_EL1_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
+# el1_smoke's kernel has its OWN explicit link rule above (extra
+## COMMON_RPI5_EL1_ASM_O input, and its object comes from a differently-
+## named source) -- filtered out here so the generic static pattern rule
+## below does not ALSO claim to define it, matching RPi3's own
+## RPI3_GENERIC_KERNELS filter-out convention for the identical reason.
+RPI5_GENERIC_KERNELS := $(filter-out $(RPI5_EL1_SMOKE_KERNELS),$(RPI5_KERNELS))
 
 ## Every RPi5 kernel links COMMON_RPI5_TIMER_ASM_O unconditionally --
 ## unlike RPi3, where only the RTC_EXAMPLES/timer-needing group needs
@@ -2181,7 +2216,7 @@ RPI5_KERNELS  := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 ## calls delay_us()/read_cntfrq()/read_cntpct() (GitHub issue #169) --
 ## so every RPi5 kernel needs this object regardless of whether its own
 ## application code touches the timer.
-$(RPI5_KERNELS): examples/%/kernel_rpi5.elf: \
+$(RPI5_GENERIC_KERNELS): examples/%/kernel_rpi5.elf: \
     $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) examples/%/$$*_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) examples/$*/$*_rpi5.o -o $@
 

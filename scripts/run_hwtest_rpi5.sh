@@ -364,6 +364,11 @@ run_hw_test_rpi5_stdin "echo (rpi5)" "$REPO_ROOT/examples/echo/kernel_rpi5.elf" 
     "$REPO_ROOT/examples/echo/echo.expected" "$REPO_ROOT/examples/echo/echo.stdin"
 run_hw_test_rpi5_stdin "irq (rpi5)" "$REPO_ROOT/examples/irq/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/irq/irq.expected" "$REPO_ROOT/examples/irq/irq.stdin"
+# el1_smoke (issue #163's own follow-up, EL2->EL1 drop): a separate
+# RPi5-specific source (examples/el1_smoke/el1_smoke_rpi5.tkb), but its
+# output is byte-for-byte identical to the RPi3 fixture, reused as-is.
+run_hw_test_rpi5 "el1_smoke (rpi5)" "$REPO_ROOT/examples/el1_smoke/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/el1_smoke/el1_smoke.expected"
 
 echo
 echo "RPi5 hardware tests: $PASS passed, $FAIL failed"

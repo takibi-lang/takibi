@@ -1,0 +1,40 @@
+// EL2 -> EL1 drop smoke test, RPi5 port of examples/el1_smoke/
+// el1_smoke.tkb's own proven mechanism (GitHub issue #163's follow-up).
+// Proves ordinary compiled Takibi code (uart_puts, a real function call)
+// runs correctly from EL1 with EL1's own stage 1 translation regime
+// enabled, reusing the EL2 identity map examples/common_rpi5/mmu.S's
+// mmu_init already built -- see examples/common_rpi5/el1_asm.S's header
+// comment for the full rationale.
+//
+// A separate file from examples/el1_smoke/el1_smoke.tkb, not a shared
+// one, because that file hardcodes `use
+// "examples/common_rpi3/el1_asm_extern.tkb"` and calls RPi3's own
+// rpi3_el1_enter -- a symbol used by five different RPi3 files
+// (el1_smoke/hvc_smoke/el0_smoke/el0_shell/el0_elf_load), not a
+// portable public HAL name the way uart_puts/rtc_init are, so
+// generalizing it was judged more invasive than writing this small
+// RPi5-specific twin. Output is byte-for-byte identical to the RPi3
+// version, so examples/el1_smoke/el1_smoke.expected is reused as-is.
+//
+// This is the known-good unrefined baseline for a genuinely new
+// RPi5 mechanism (privilege-level transition); --forbid-trap hardening
+// is a separate later pass per this repo's process.
+
+use "examples/common_rpi5/el1_asm_extern.tkb";
+
+private let mut el1_stack: [u8; 4096] align(16);
+
+// Entered once, at EL1, by el1_asm.S's rpi5_el1_enter via a plain `bl`
+// (not a return from app_main -- there is no path back to EL2 in this
+// milestone). Never returns; el1_asm.S parks in a wfe loop after this.
+fn el1_main() {
+    uart_puts("hello from EL1\n");
+    uart_puts("done\n");
+}
+
+fn app_main() {
+    uart_puts("el1_smoke\n");
+    let stack_base: usize = (el1_stack as *u8) as usize;
+    let el1_sp: usize = stack_base + 4096;
+    rpi5_el1_enter(el1_sp);
+}

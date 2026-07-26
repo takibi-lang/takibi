@@ -15,6 +15,40 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- Ported `el1_smoke` (EL2->EL1 Drop), a Second Real TCR Bug Found
+
+Natural follow-on to issue #163. `examples/common_rpi5/el1_asm.S` ports
+`examples/common_rpi3/el1_asm.S`'s proven EL2->EL1 drop mechanism
+(reuse `TTBR0_EL2` as EL1&0's own `TTBR0_EL1`, configure `TCR_EL1`/
+`MAIR_EL1`/`VBAR_EL1`, `eret` into ordinary Takibi code at EL1) --
+chosen as the next port specifically because it needed no new hardware
+bring-up (no GIC, no timer, no SMP), only a self-contained privilege-
+level transition RPi3 had already proven. `examples/el1_smoke/
+el1_smoke_rpi5.tkb` is a separate small source, not a reuse of
+`examples/el1_smoke/el1_smoke.tkb` (that file hardcodes RPi3's own
+`rpi3_el1_enter`, a symbol five different RPi3 files depend on) --
+output is byte-for-byte identical, so the RPi3 `.expected` fixture is
+reused unchanged.
+
+Real hardware found a second bug, same shape as issue #163's: the
+first attempt printed `el1_smoke\n` from EL2 then hung before `hello
+from EL1\n`. SWD showed the core genuinely reached `EL1H` with its MMU
+on (the drop itself worked), parked in the "Synchronous (EL1h)"
+vector's own spin. `ESR_EL1=0x96000001` (same-EL Data Abort, DFSC=
+"Address size fault, level 1"), `ELR_EL1` inside `uart_putc`. Root
+cause: `TCR_EL1` never set `IPS` (bits[34:32]), left at its default
+32-bit. RPi3's own `el1_asm.S` never needs this (BCM2837 only ever
+needs 32-bit PA), but BCM2712's identity-mapped `l1_table` (reused
+as-is via `TTBR0_EL1 := TTBR0_EL2`) has real L1 block descriptors above
+the 32-bit boundary (the PCIe2 register block and RP1 outbound window),
+so EL1's own translation regime rejected them as exceeding its
+configured PA size the instant `uart_putc`'s first RP1-UART write
+walked through that entry. Fixed: `TCR_EL1.IPS=0b010` (40-bit), matching
+`TCR_EL2`'s own `PS` field.
+
+`make hwcheck-rpi5` passes 51/51, confirmed across two consecutive
+real-hardware runs.
+
 ### 2026-07-26: RPi5 -- MPIDR_EL1 Core Numbering Was Wrong, Fixed (Issue #163)
 
 `examples/common_rpi5/startup.S` assumed, by analogy with RPi3

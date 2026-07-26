@@ -1,7 +1,50 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): MPIDR_EL1 core numbering -- GitHub
-## issue #163, a real bug found and fixed, `make hwcheck-rpi5` still 50/50
+## Status update (2026-07-26, latest): `el1_smoke` ported (EL2->EL1 drop),
+## a second real bug found, `make hwcheck-rpi5` 51/51
+
+Natural follow-on to issue #163: `examples/common_rpi5/el1_asm.S` ports
+`examples/common_rpi3/el1_asm.S`'s proven EL2->EL1 drop mechanism
+(reuse `TTBR0_EL2` as EL1&0's own `TTBR0_EL1`, configure `TCR_EL1`/
+`MAIR_EL1`/`VBAR_EL1`, `eret` into ordinary Takibi code at EL1). A
+separate small source file, `examples/el1_smoke/el1_smoke_rpi5.tkb`,
+not a reuse of `examples/el1_smoke/el1_smoke.tkb` -- that file hardcodes
+`use "examples/common_rpi3/el1_asm_extern.tkb"` and calls RPi3's own
+`rpi3_el1_enter`, a symbol five different RPi3 files depend on, not a
+portable public HAL name; output is byte-for-byte identical, so
+`el1_smoke.expected` is reused unchanged.
+
+**A second real hardware bug found and fixed, same shape as issue
+#163's**: the first real-hardware attempt printed `el1_smoke\n` (from
+EL2, before the drop) then hung -- `hello from EL1\n` never arrived.
+Halting over SWD found the core genuinely AT `EL1H` with its MMU
+enabled (the drop itself worked!), parked at
+`rpi5_el1_vectors+0x200` (the "Synchronous (EL1h)" vector's own
+unconditional spin). `ESR_EL1`/`ELR_EL1` (both directly readable by
+name via `reg`, unlike `ESR_EL2`/`HCR_EL2` which needed the register-
+probe workaround documented elsewhere in this file) showed
+`ESR_EL1=0x96000001` (EC=0x25, same-EL Data Abort; DFSC=`0b000001`,
+"Address size fault, level 1") with `ELR_EL1` pointing inside
+`uart_putc`. Root cause: `TCR_EL1` never set `IPS` (bits[34:32],
+Intermediate Physical Address Size) -- left at its default (0, 32-bit).
+RPi3's own `el1_asm.S` never needs this either, because BCM2837 only
+ever needs 32-bit PA (`TCR_EL2.PS=000` there too), but BCM2712's own
+`l1_table` (reused as-is via `TTBR0_EL1 := TTBR0_EL2`) has real L1
+block descriptors with output addresses at `0x10_xxxxxxxx` and
+`0x1F_xxxxxxxx` -- both well beyond a 32-bit/4GB boundary. Leaving
+`TCR_EL1.IPS` at 32-bit while reusing a table built for `TCR_EL2.PS=010`
+(40-bit) made EL1's own translation regime reject those same block
+descriptors as exceeding ITS configured PA size the moment
+`uart_putc`'s first RP1-UART MMIO write walked through `L1[124]`.
+Fixed: `TCR_EL1` now also sets `IPS=0b010` (a second `movk` into the
+`[47:32]` lane), matching `TCR_EL2`'s own `PS` field.
+
+`make hwcheck-rpi5` passes 51/51, confirmed across two consecutive
+real-hardware runs.
+
+## Status update (2026-07-26, earlier): MPIDR_EL1 core numbering --
+## GitHub issue #163, a real bug found and fixed, `make hwcheck-rpi5`
+## 50/50 at that point
 
 `examples/common_rpi5/startup.S`'s core-selection gate assumed, by
 analogy with RPi3, that MPIDR_EL1's Aff0 field (bits[7:0]) is BCM2712's
