@@ -1,5 +1,32 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
+## Status update (2026-07-26, latest): RP1 UART0 RX interrupt -- GitHub
+## issue #164, `make hwcheck-rpi5` 50/50
+
+The first RPi5 interrupt path is now implemented and hardware-proven,
+deliberately narrowed to the concrete source used by `examples/echo` and
+`examples/irq`:
+
+```
+RP1 UART0 local IRQ 25 -> RP1 MSI-X vector 25 -> PCIe2 RC_BAR1
+  -> BCM2712 MIP0 input 25 -> GIC SPI 153 / architectural INTID 185
+  -> CPU0 EL2 Current-EL-SPx IRQ
+```
+
+`intc.tkb` configures that one MSI-X/MIP0/GIC route and performs RP1's
+level-source IACK after `uart_irq_handler`; `pcie.tkb` adds only MIP0's
+4KB MSI inbound mapping, not a general DMA/MSI subsystem. `startup.S`
+sets `HCR_EL2.IMO` and gives only the Current-EL-SPx IRQ vector a full
+x0-x30/ELR/SPSR frame. HVC, lower-EL, FIQ, and unrelated interrupt-source
+support remain deliberately out of scope.
+
+Both kernels compile under `--forbid-trap`. **`make hwcheck-rpi5` passes
+50/50 on the real board**, including exact-output GPIO14/15 UART input
+tests for both `echo` and `irq`, with all 48 prior tests still green. The
+applications wait with `interrupt_wait()` and only the ISR reads PL011
+`DR`, so these tests exercise the real asynchronous IRQ path rather than
+a polling receive fallback.
+
 ## Status update (2026-07-26, later): `rtc`/`timer` ported -- GitHub
 ## issue #170, `make hwcheck-rpi5` 48/48
 
@@ -291,18 +318,12 @@ run `make hwcheck-rpi5` and update this file + `HISTORY.md` + the
 `rpi5-bringup-status` memory with the real result, the same discipline
 `examples/start`'s own port already followed.
 
-**Deliberately not yet attempted**: `rtc`/`timer`/`irq`/`echo`/USB/
-networking/EL0/EL1/SMP examples and their RPi3 equivalents. All of them
-need pieces Stage A's `startup.S` still lacks (rtc/timer need
-`read_cntfrq`/`read_cntpct` asm stubs -- trivial to port, not yet done
-since nothing in this batch needed them; irq/echo need a working
-interrupt path, tracked by issue #164 for RP1 UART0 RX specifically and
-issue #165 for MMU + general exception handling; USB is explicitly out
-of scope per "What's deliberately NOT ported yet" below; networking
-needs RP1's Ethernet path, an unstarted future subject). Port these only
-once their concrete prerequisite issue lands, not speculatively ahead of
-it -- same reasoning RPi3's own historical Makefile comments already
-document for its own staged rollout.
+**Deliberately not yet attempted at this historical checkpoint**:
+`rtc`/`timer`/`irq`/`echo`/USB/networking/EL0/EL1/SMP examples and their
+RPi3 equivalents. This paragraph records the earlier staged-port state;
+issues #165, #170, and #164 subsequently supplied the MMU, RTC/timer, and
+RP1 UART0 IRQ prerequisites respectively. USB, networking, EL0/EL1, and
+SMP remain out of scope until a concrete prerequisite task needs them.
 
 **The architectural constraint confirmed 2026-07-25 through extensive
 real-hardware debugging (see "A real bug this port found" and "UART
@@ -522,11 +543,10 @@ not publish a public BCM2712 datasheet the way it once did for BCM2835.
   bespoke non-GIC interrupt controller (`examples/common_rpi3/intc.tkb`).
   Distributor at physical `0x10_7FFF9000`, CPU interface at
   `0x10_7FFFA000` (from the same bcm2712.dtsi, `ranges`-translated the same
-  way as the UART above). Not used yet (Stage A is polling-only) --
-  flagged here because `examples/common_qemu/gic_regs.tkb`/`gic.tkb`
-  already implement generic GICv2 register access for QEMU's virt machine
-  and may be reusable here with just the base address swapped, once an
-  interrupt-driven RPi5 example is attempted.
+  way as the UART above). Issue #164 now uses those exact interfaces for
+  MIP0 vector 25's GIC SPI 153 / architectural INTID 185. The
+  implementation remains intentionally local to `intc.tkb`; it did not
+  generalize QEMU's GIC helper ahead of another real RPi5 consumer.
 - **Boot image**: RPi5 firmware defaults to loading `kernel_2712.img` (a
   16K-page-optimized image name introduced alongside BCM2711/BCM2712,
   falling back to `kernel8.img` if absent); `config.txt` needs
@@ -541,15 +561,16 @@ not publish a public BCM2712 datasheet the way it once did for BCM2835.
   Vendored into this repo because upstream OpenOCD 0.12.0 does not ship a
   `bcm2712.cfg` at all.
 
-## What's deliberately NOT ported yet (post-issue-#165 scope)
+## What's deliberately NOT ported yet (post-issue-#164 scope)
 
 `examples/common_rpi5/mmu.S` (GitHub issue #165) added the stage-1 MMU
-(identity map, EL2) and one real synchronous-exception checkpoint, but
-`startup.S` still has none of RPi3's IRQ/HVC/EL0 vector handling or
-HCR_EL2 IRQ/FIQ routing -- every vector slot except "Current EL SPx,
-Synchronous" still just spins. Add each remaining piece only once a
-concrete example actually needs it, the same order RPi3 itself was built
-in. Do not port RPi3's USB host stack (`usb_dwc2.tkb`/`usb_hub.tkb`/
+(identity map, EL2) and one real synchronous-exception checkpoint. Issue
+#164 then added only `HCR_EL2.IMO`, the Current-EL-SPx IRQ vector, and the
+RP1 UART0 dispatcher needed by `echo`/`irq`. HVC, lower-EL, FIQ, and all
+unrelated interrupt-source handling still spin or remain absent. Add each
+remaining piece only once a concrete example actually needs it, the same
+order RPi3 itself was built in. Do not port RPi3's USB host stack
+(`usb_dwc2.tkb`/`usb_hub.tkb`/
 `usb_host.tkb`/`lan9514.tkb`) or its Ethernet driver at all -- RPi5's
 Ethernet path is PCIe-attached (via RP1), architecturally unrelated to
 RPi3's USB-attached LAN9514, and is its own future subject if pursued,
@@ -585,9 +606,6 @@ not a port of the existing driver.
    point on -- see `sync_exception_evidence`'s own comment in
    `startup.S` for where this was found and how the exception checkpoint
    was redesigned around it.
-
-Interrupt-driven RP1 UART0 RX is separate from these startup constraints and
-is tracked by issue #164.
 
 ## Identifying the UART device: RPi5's Debug Probe and the STM32 board's
 ## ST-Link both enumerate as ttyACM*

@@ -1,13 +1,8 @@
-/* Raspberry Pi 5 (BCM2712) bare-metal startup -- Stage A (RP1 PCIe + UART
-   polling, GitHub issue #161). Deliberately much smaller than
-   examples/common_rpi3/startup.S: no MMU, no HVC/EL1/EL0 vectors, no IRQ
-   routing. Those were all added to the RPi3 file over many later hardening
-   passes; porting all of them here before a single byte has ever reached
-   real RPi5 hardware would mean debugging several unproven mechanisms at
-   once. Add each piece back only once a concrete example needs it, mirroring
-   how examples/common_rpi3/startup.S itself grew one milestone at a time --
-   see examples/common_rpi5/AGENTS.md for the sourced facts (UART address,
-   EL2 handoff, GIC-400 presence, etc.) this file's assumptions rest on.
+/* Raspberry Pi 5 (BCM2712) bare-metal startup. Issue #164 adds the one
+   exception path now required beyond issue #161's polling milestone: the
+   Current-EL-SPx IRQ slot saves a full interrupted frame and calls the weak
+   rpi5_irq_dispatch hook, overridden by common_rpi5/intc.tkb for RP1 UART0.
+   HVC/EL1/EL0 and unrelated exception paths remain deliberately absent.
 
    Like RPi3, this image is never booted from the SD card directly. The SD
    card carries jtag_stub.img (this directory's jtag_stub.S), a tiny spin
@@ -109,13 +104,22 @@ _start:
     /* Install the exception vector table before anything else can fault --
        same rationale as RPi3: VBAR_EL2 is whatever TF-A left it at, and
        that vector table is not guaranteed to still be valid/mapped once
-       our own code has been running. Every entry just spins (a debuggable,
-       known PC over SWD), not real dispatch -- add real handling only once
-       a concrete example needs it (RPi3's own history: IRQ/HVC/EL0 vectors
-       were each added in later, separate milestones, not all at once). */
+       our own code has been running. Issue #164 adds the one concrete IRQ
+       entry now needed; all unrelated entries retain their debuggable spin. */
     adrp    x0, exception_vectors
     add     x0, x0, :lo12:exception_vectors
     msr     vbar_el2, x0
+    isb
+
+    /* Route physical IRQs to EL2. TF-A leaves HCR_EL2.IMO clear for an OS
+       that normally receives its interrupts below EL2; this payload stays
+       at EL2, so an enabled GIC interrupt would otherwise be implicitly
+       masked regardless of PSTATE.I. DAIF.I itself remains masked here:
+       common_rpi5/intc.tkb unmasks it only after the concrete UART MSI-X,
+       MIP0, and GIC path is fully configured. */
+    mrs     x0, hcr_el2
+    orr     x0, x0, #0x10
+    msr     hcr_el2, x0
     isb
 
     adrp    x0, stack_top
@@ -151,11 +155,9 @@ _start:
        early in its own MMU history). */
     bl      mmu_init
 
-    /* IRQ/FIQ left routed to EL1 (HCR_EL2.IMO/FMO untouched) and DAIF left
-       masked -- Stage A has no interrupt source configured yet, unlike
-       RPi3's startup.S which unmasks unconditionally. Revisit together
-       with the first RPi5 interrupt-driven example (GIC-400 is a real
-       ARM GICv2 here, not BCM2837's bespoke controller -- see AGENTS.md). */
+    /* DAIF.I remains masked for ordinary examples. The RPi5 interrupt HAL
+       enables it from irq_uart_rx_setup() only after all controller state
+       is ready and before PL011 IMSC is unmasked. */
 
     mov     x0, #0
     bl      main
@@ -165,11 +167,9 @@ _start:
     b       .Lhalt
 
 /* enable_irq()/disable_irq(): same DAIF.I-only mask as
-   examples/common_rpi3/startup.S's own pair -- pure CPU-local state, no
-   GIC-400 register access, so safe to provide even though Stage A never
-   unmasks IRQ at the vector-table level (see below) or configures the
-   GIC to raise one. Needed by examples/klock_guard/klock_guard.tkb's
-   giant-lock placeholder, the first RPi5 example group to pull it in. */
+   examples/common_rpi3/startup.S's own pair. klock_guard uses these for
+   its giant-lock placeholder; issue #164's interrupt HAL now also calls
+   enable_irq after its complete controller path is ready. */
     .global enable_irq
 enable_irq:
     msr     DAIFClr, #0x2
@@ -178,6 +178,12 @@ enable_irq:
     .global disable_irq
 disable_irq:
     msr     DAIFSet, #0x2
+    ret
+
+/* Default same-frame IRQ dispatch for kernels that configure no source.
+   The UART interrupt builds link a strong Takibi definition from intc.tkb. */
+    .weak   rpi5_irq_dispatch
+rpi5_irq_dispatch:
     ret
 
 /* sync_exception_evidence: ESR_EL2/FAR_EL2/ELR_EL2, written by the
@@ -204,11 +210,9 @@ disable_irq:
    memory-resident copy for whichever debug path (a future OpenOCD fix,
    a different tool) can actually read it.
 
-   Only this one vector slot gets real handling; every other slot still
-   just spins, same as RPi3's own early history (IRQ/HVC/EL0 vectors were
-   each added later, one concrete need at a time) -- Stage A still routes
-   no interrupt source and drops to no lower EL, so Synchronous at
-   Current-EL-SPx is the only exception this code can actually take. */
+   This remains the only synchronous-exception slot with real handling.
+   Issue #164 separately adds the Current-EL-SPx IRQ slot; every unrelated
+   slot still spins, and takibi still drops to no lower EL. */
     .section .bss
     .align  4
     .global sync_exception_evidence
@@ -238,11 +242,9 @@ sync_exception_evidence:
     b       .Lsync_spx_halt
 
 /* -- Exception vector table (must be 2KB aligned) ---------------------------
-   Every slot just spins, same rationale as examples/common_rpi3/startup.S's
-   own table header comment: a spin at a known PC is inspectable over SWD;
-   real dispatch is added only once something needs it. The one exception
-   is "Current EL SPx, Synchronous" (0x200), the slot takibi code actually
-   traps to -- see .Lsync_spx_evidence above. */
+   A spin at a known PC is inspectable over SWD, so unrelated slots retain
+   that behavior. Current-EL-SPx Synchronous (0x200) records fault evidence;
+   Current-EL-SPx IRQ (0x280) runs issue #164's saved-frame dispatcher. */
     .section .text.vectors
     .align  11
     .global exception_vectors
@@ -257,7 +259,7 @@ exception_vectors:
     .align  7
     b       .Lsync_spx_evidence /* 0x200: Current EL SPx, Synchronous */
     .align  7
-    b       .                   /* 0x280: Current EL SPx, IRQ */
+    b       rpi5_irq_entry      /* 0x280: Current EL SPx, IRQ */
     .align  7
     b       .                   /* 0x300: Current EL SPx, FIQ */
     .align  7
@@ -278,3 +280,56 @@ exception_vectors:
     b       .                   /* 0x700: Lower EL AArch32, FIQ */
     .align  7
     b       .                   /* 0x780: Lower EL AArch32, SError */
+
+/* Full x0-x30 + ELR_EL2/SPSR_EL2 save/restore. rpi5_irq_dispatch receives
+   the current frame SP and returns the frame SP to resume, matching the
+   established QEMU/RPi3 convention even though UART RX always returns the
+   same frame today. */
+    .section .text
+rpi5_irq_entry:
+    sub     sp,  sp,  #272
+    stp     x0,  x1,  [sp, #0]
+    stp     x2,  x3,  [sp, #16]
+    stp     x4,  x5,  [sp, #32]
+    stp     x6,  x7,  [sp, #48]
+    stp     x8,  x9,  [sp, #64]
+    stp     x10, x11, [sp, #80]
+    stp     x12, x13, [sp, #96]
+    stp     x14, x15, [sp, #112]
+    stp     x16, x17, [sp, #128]
+    stp     x18, x19, [sp, #144]
+    stp     x20, x21, [sp, #160]
+    stp     x22, x23, [sp, #176]
+    stp     x24, x25, [sp, #192]
+    stp     x26, x27, [sp, #208]
+    stp     x28, x29, [sp, #224]
+    stp     x30, xzr, [sp, #240]
+    mrs     x0,  elr_el2
+    mrs     x1,  spsr_el2
+    stp     x0,  x1,  [sp, #256]
+
+    mov     x0, sp
+    bl      rpi5_irq_dispatch
+    mov     sp, x0
+
+    ldp     x0,  x1,  [sp, #256]
+    msr     elr_el2,  x0
+    msr     spsr_el2, x1
+    ldp     x0,  x1,  [sp, #0]
+    ldp     x2,  x3,  [sp, #16]
+    ldp     x4,  x5,  [sp, #32]
+    ldp     x6,  x7,  [sp, #48]
+    ldp     x8,  x9,  [sp, #64]
+    ldp     x10, x11, [sp, #80]
+    ldp     x12, x13, [sp, #96]
+    ldp     x14, x15, [sp, #112]
+    ldp     x16, x17, [sp, #128]
+    ldp     x18, x19, [sp, #144]
+    ldp     x20, x21, [sp, #160]
+    ldp     x22, x23, [sp, #176]
+    ldp     x24, x25, [sp, #192]
+    ldp     x26, x27, [sp, #208]
+    ldp     x28, x29, [sp, #224]
+    ldp     x30, xzr, [sp, #240]
+    add     sp,  sp,  #272
+    eret

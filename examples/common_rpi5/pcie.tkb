@@ -20,16 +20,11 @@
 // BAR sizing, no bus scanning beyond bus 1 device 0). Register offsets/
 // bit positions below are transcribed from that driver, not guessed;
 // see this file's own comments for exactly which function each block
-// corresponds to. Two things are DELIBERATELY SKIPPED, both flagged
-// UNCONFIRMED for later hardening once link-up itself is proven:
+// corresponds to. Issue #164 adds exactly one inbound window: RC_BAR1
+// maps RP1's MSI-X posted writes to BCM2712 MIP0. General DMA remains out
+// of scope. One item remains deliberately unconfirmed:
 //
-// 1. Inbound windows (`set_inbound_win_registers`/RC_BAR1_CONFIG) --
-//    these configure how the RC responds to PCIe-initiated (RP1 -> CPU
-//    memory) transactions, i.e. real DMA. Not needed for the CPU to read
-//    RP1's OWN registers (the only thing Stage 1 of issue #161 needs),
-//    and link training itself is a PHY/LTSSM-level negotiation that does
-//    not depend on these registers being configured first.
-// 2. `PCIE_MISC_HARD_DEBUG`'s exact SERDES_IDDQ bit position -- the
+// `PCIE_MISC_HARD_DEBUG`'s exact SERDES_IDDQ bit position -- the
 //    driver source available for research did not show this constant's
 //    numeric value directly; bit 27 (0x08000000) is used below as the
 //    documented-elsewhere standard value across the Broadcom STB PCIe
@@ -378,6 +373,25 @@ fn pcie2_rp1_endpoint_setup() {
     pcie2_config_write32(1, 0, 0x14, 0);          // BAR1: 4MB peripheral aperture
     pcie2_config_write32(1, 0, 0x18, 0x00400000); // BAR2: 64KB aperture
     pcie2_config_write32(1, 0, 4, (cmd_status & 0xFFFF0000) | 0x0006);
+}
+
+// Map the 4KB PCIe MSI target page at 0x000000ff_fffff000 onto BCM2712's
+// MIP0 registers at physical 0x00000010_00130000. This is Linux
+// pcie-brcmstb.c's external-MSI-parent RC_BAR1 setup applied to pcie2's
+// bcm2712.dtsi values (mip0 `brcm,msi-pci-addr` and `reg`). It is the one
+// PCIe-initiated path issue #164 needs; it does not expose ordinary RAM or
+// add a general DMA window.
+fn pcie2_mip0_inbound_setup() {
+    let rc_bar1_lo: *io u32 = 0x100012402C;
+    let rc_bar1_hi: *io u32 = 0x1000124030;
+    let ubus_bar1_remap_lo: *io u32 = 0x10001240AC;
+    let ubus_bar1_remap_hi: *io u32 = 0x10001240B0;
+
+    // brcm_pcie_encode_ibar_size(4KB) = 0x1c.
+    *rc_bar1_lo = 0xFFFFF000 | 0x1C;
+    *rc_bar1_hi = 0xFF;
+    *ubus_bar1_remap_lo = 0x00130000 | 1; // MIP0 low address | ACCESS_ENABLE
+    *ubus_bar1_remap_hi = 0x10;
 }
 
 // pcie2_init(): full bring-up sequence for BCM2712's third PCIe RC

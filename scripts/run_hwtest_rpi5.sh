@@ -112,12 +112,10 @@ read_until_quiet() {
 #
 # Full BCM2712 reboot (scripts/rpi5_jtag_reset.sh's PSCI SYSTEM_RESET
 # trampoline) run before EVERY test, same "eliminate leftover-state false
-# alarms" reasoning as run_hwtest_rpi3.sh's own reset_before_test -- this
-# board has no MMU/interrupt state to leak yet (Stage A), but RP1 PCIe
-# link/BAR state from a previous test's uart_init() persists across a
-# plain SWD re-injection (which only overwrites RAM and moves PC, it does
-# not touch RP1), so a full reboot before each test avoids depending on
-# every example's own PCIe bring-up being idempotent.
+# alarms" reasoning as run_hwtest_rpi3.sh's own reset_before_test. MMU,
+# GIC/MIP/MSI-X, and RP1 PCIe link/BAR state can persist across a plain SWD
+# re-injection (which only overwrites RAM and moves PC), so a full reboot
+# avoids depending on every example's bring-up being idempotent.
 reset_before_test() {
     local name="$1"
     local reset_log
@@ -244,16 +242,99 @@ run_hw_test_rpi5_suite() {
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file" "$report"
 }
 
+# run_hw_test_rpi5_stdin NAME ELF EXPECTED STDIN_FILE
+#
+# Bidirectional GPIO14/15 UART test for issue #164. Start capture before SWD
+# injection, wait until the kernel's ready banner is visible, then send the
+# fixture in one write. A passing exact-output diff proves the application
+# made progress only after asynchronous input; echo/irq contain no polling
+# receive path.
+run_hw_test_rpi5_stdin() {
+    local name="$1" elf="$2" expected="$3" stdin_file="$4"
+    local tmp_drain tmp_out load_log load_status size
+    tmp_drain=$(mktemp)
+    tmp_out=$(mktemp)
+    load_log=$(mktemp)
+
+    reset_before_test "$name"
+    read_until_quiet "$tmp_drain" "$DRAIN_MAX_SECS" "$DRAIN_STABLE_POLLS" 0
+
+    : > "$tmp_out"
+    cat "$SERIAL_DEV" > "$tmp_out" 2>/dev/null 9>&- &
+    local catpid=$!
+    ACTIVE_READER_PID=$catpid
+    sleep 0.2
+    if "$REPO_ROOT/scripts/rpi5_jtag_load.sh" "$elf" > "$load_log" 2>&1; then
+        load_status=0
+    else
+        load_status=$?
+    fi
+
+    if [ "$load_status" = "0" ]; then
+        local max_wait_polls waited=0
+        max_wait_polls=$(awk -v m="$CAPTURE_MAX_SECS" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
+        while [ "$waited" -lt "$max_wait_polls" ]; do
+            sleep "$POLL_INTERVAL"
+            size=$(stat -c%s "$tmp_out" 2>/dev/null || echo 0)
+            [ "$size" -gt 0 ] && break
+            waited=$((waited + 1))
+        done
+        cat "$stdin_file" > "$SERIAL_DEV"
+
+        local max_polls last_size=-1 stable=0 poll=0
+        max_polls=$(awk -v m="$CAPTURE_MAX_SECS" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
+        while [ "$poll" -lt "$max_polls" ]; do
+            sleep "$POLL_INTERVAL"
+            size=$(stat -c%s "$tmp_out" 2>/dev/null || echo 0)
+            if [ "$size" = "$last_size" ]; then
+                stable=$((stable + 1))
+                [ "$stable" -ge "$CAPTURE_STABLE_POLLS" ] && break
+            else
+                stable=0
+            fi
+            last_size="$size"
+            poll=$((poll + 1))
+        done
+    fi
+    kill "$catpid" 2>/dev/null || true
+    wait "$catpid" 2>/dev/null || true
+    ACTIVE_READER_PID=""
+
+    if [ "$load_status" != "0" ]; then
+        printf "${RED}FAIL${RST}  %s  (SWD injection failed -- loader log follows)\n" "$name"
+        sed 's/^/       /' "$load_log"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
+        preserve_failure_artifacts "$name" "$tmp_out" "$load_log"
+        rm -f "$tmp_drain" "$tmp_out" "$load_log"
+        exit 1
+    elif cmp -s "$expected" "$tmp_out"; then
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
+        printf "${GRN}PASS${RST}  %s\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        printf "${RED}FAIL${RST}  %s  (unexpected UART output)\n" "$name"
+        printf "       expected: %s\n" "$(od -An -c "$expected" | tr -s ' \n' ' ')"
+        printf "       actual:   %s\n" "$(od -An -c "$tmp_out" | tr -s ' \n' ' ')"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+        save_artifact_file "$HWTEST_ARTIFACT_ROOT" "$name" "$tmp_out" uart.log
+        preserve_failure_artifacts "$name" "$tmp_out" "$load_log"
+    fi
+    rm -f "$tmp_drain" "$tmp_out" "$load_log"
+}
+
 # Mirrors RPI5_EXAMPLES in the Makefile -- see
 # examples/common_rpi5/AGENTS.md for what's still deliberately excluded
-# (anything needing irq/USB/networking/EL0/EL1/SMP, until issues #163/
-# #164 land). type_system_suite/algorithm_suite are back (issue #165,
+# (USB/networking/EL0/EL1/SMP). type_system_suite/algorithm_suite are back
+# (issue #165,
 # examples/common_rpi5/mmu.S) after real hardware testing confirmed both
 # pass with the stage-1 MMU enabled. rtc/timer are back (issue #170,
 # examples/common_rpi5/rtc.tkb) -- pure CNTPCT_EL0/CNTFRQ_EL0 polling,
-# no interrupt/GIC dependency. Every .expected/cases.txt fixture here is
-# reused byte-for-byte from the QEMU/STM32/RPi3 suites -- uart_puts/
-# uart_print_* write identical bytes on every HAL.
+# no interrupt/GIC dependency. echo/irq use issue #164's real RP1 UART0
+# MSI-X/MIP0/GIC receive path. Every fixture here is reused byte-for-byte
+# from the QEMU/STM32/RPi3 suites.
 run_hw_test_rpi5 "start (rpi5)" "$REPO_ROOT/examples/start/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/start/start.expected"
 run_hw_test_rpi5_suite basic_suite "$REPO_ROOT/examples/basic_suite/kernel_rpi5.elf" \
@@ -279,6 +360,10 @@ run_hw_test_rpi5 "rtc (rpi5)" "$REPO_ROOT/examples/rtc/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/rtc/rtc.expected" 5 30
 run_hw_test_rpi5 "timer (rpi5)" "$REPO_ROOT/examples/timer/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/timer/timer.expected" 5 30
+run_hw_test_rpi5_stdin "echo (rpi5)" "$REPO_ROOT/examples/echo/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/echo/echo.expected" "$REPO_ROOT/examples/echo/echo.stdin"
+run_hw_test_rpi5_stdin "irq (rpi5)" "$REPO_ROOT/examples/irq/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/irq/irq.expected" "$REPO_ROOT/examples/irq/irq.stdin"
 
 echo
 echo "RPi5 hardware tests: $PASS passed, $FAIL failed"

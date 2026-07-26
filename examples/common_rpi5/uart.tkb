@@ -1,8 +1,8 @@
-// Raspberry Pi 5 (BCM2712/RP1) debug UART HAL -- Stage A (TX/polling only,
-// no RX/interrupt support yet, unlike examples/common_rpi3/uart.tkb). Same
-// public signatures as every other target's uart.tkb (uart_putc/uart_puts,
-// platform_init/platform_shutdown) so application .tkb files stay
-// unchanged.
+// Raspberry Pi 5 (BCM2712/RP1) UART HAL. TX is synchronous/polled; RX uses
+// RP1 UART0's PL011 interrupt through RP1 MSI-X vector 25, BCM2712 MIP0, and
+// GIC-400 (examples/common_rpi5/intc.tkb). The stored-handler interface is
+// the same one examples/common_rpi3/uart.tkb and common_stm32/uart.tkb use,
+// so shared interrupt examples do not need a target-specific ISR body.
 //
 // CORRECTED (2026-07-25) from an initial, wrong assumption: this is RP1's
 // own `rp1_uart0` (PCIe-attached companion chip), NOT BCM2712's on-die
@@ -61,6 +61,8 @@
 // enumeration (link training, root-bridge forwarding, BAR assignment),
 // now implemented in examples/common_rpi5/pcie.tkb.
 
+let mut uart_rx_handler: fn !{}() -> void;
+
 fn uart_putc(c: u8) {
     let fr: *io u32 = 0x1F00030018; // UART0_FR (RP1 rp1_uart0, base 0x1F00030000 + 0x018)
     while ((*fr & (1 << 5)) != 0) { } // wait while TXFF (TX FIFO full)
@@ -75,6 +77,44 @@ fn uart_puts(s: *u8) {
     }
 }
 
+fn uart_rx_discard() !{} {
+    let dr: *io u8 = 0x1F00030000;
+    let discarded: u8 = *dr;
+}
+
+// Direct, non-polling receive for an interrupt handler that already knows
+// RX data is present. Reading DR advances the PL011 FIFO and deasserts its
+// level condition once the FIFO drops below the configured threshold.
+fn uart_isr_getc() -> u8 {
+    let dr: *io u8 = 0x1F00030000;
+    return *dr;
+}
+
+fn uart_rx_ready() -> bool {
+    let fr: *io u32 = 0x1F00030018;
+    return (*fr & (1 << 4)) == 0; // RXFE clear = data available
+}
+
+fn uart_set_rx_handler(handler: fn !{}() -> void) !{} {
+    uart_rx_handler = handler;
+}
+
+fn uart_tx_isr() {
+}
+
+// Called by rpi5_irq_dispatch after GICC_IAR identifies the UART0 MSI-X
+// vector. The controller-level RP1 IACK and GICC EOIR happen in intc.tkb
+// after this source-level acknowledgement is complete.
+fn uart_irq_handler() !{interrupt} {
+    if (uart_rx_ready()) {
+        uart_rx_handler();
+    }
+    // Receive-timeout is latched separately from the FIFO level and must be
+    // cleared explicitly after servicing a short (e.g. one-byte) burst.
+    let uart_icr: *io u32 = 0x1F00030044;
+    *uart_icr = 1 << 6; // RTIC
+}
+
 fn uart_init() {
     let uart_cr: *io u32 = 0x1F00030030;
     let uart_ibrd: *io u32 = 0x1F00030024;
@@ -84,6 +124,7 @@ fn uart_init() {
     let uart_icr: *io u32 = 0x1F00030044;
     let uart_ifls: *io u32 = 0x1F00030034;
 
+    uart_rx_handler = uart_rx_discard;
     *uart_cr = 0; // disable UART before reconfiguring it
 
     // 115200 baud from the bare-metal 50MHz XOSC-backed uartclk:
@@ -93,8 +134,16 @@ fn uart_init() {
 
     *uart_lcrh = (3 << 5) | (1 << 4); // 8 bits, no parity, FIFOs enabled, 1 stop bit
     *uart_ifls = 0; // finest-grained FIFO trigger level (same as RPi3)
-    *uart_imsc = 0; // mask every interrupt source -- Stage A is polling-only
-    *uart_icr = 0x7FF; // clear any latched interrupt state left by TF-A/a previous run
+    *uart_imsc = 0; // keep RX masked until irq_uart_rx_unmask()
+    *uart_icr = 0x7FF; // clear any latched interrupt state left by a previous run
+
+    // Peripheral state survives SWD re-injection. Drain stale input before
+    // enabling RX so the first delivered byte always belongs to this run.
+    let fr_drain: *io u32 = 0x1F00030018;
+    let dr_drain: *io u8 = 0x1F00030000;
+    while ((*fr_drain & (1 << 4)) == 0) {
+        let discarded: u8 = *dr_drain;
+    }
 
     *uart_cr = (1 << 0) | (1 << 8) | (1 << 9); // UARTEN | TXE | RXE
 }

@@ -34,15 +34,12 @@
      L1[65]       (0x1040000000-0x107FFFFFFF): Device-nGnRnE -- covers
                   BCM2712's own on-die uart10 (0x107D001000) and GIC-400
                   (0x107FFF9000/0x107FFFA000) documented in AGENTS.md.
-                  Neither is read by any takibi code yet (uart.tkb targets
-                  RP1's PCIe-attached rp1_uart0 instead, and no GIC-driven
-                  example exists here yet) -- mapped now anyway, one L1
-                  entry, because RPi3's own history (examples/echo/irq
-                  faulting on the separate ARM-Local/QA7 block, see
-                  examples/common_rpi3/mmu.S) shows exactly this kind of
-                  "adjacent but distinct MMIO block, easy to miss" gap is
-                  worth closing while already here rather than revisiting
-                  this file again for the first RPi5 interrupt example.
+                  The on-die UART remains unused; issue #164 now uses both
+                  GIC ranges for RP1 UART0's MIP0 interrupt route. This L1
+                  entry was deliberately mapped with issue #165 because
+                  RPi3's own history (examples/echo/irq faulting on the
+                  separate ARM-Local/QA7 block, see common_rpi3/mmu.S)
+                  showed exactly this easy-to-miss adjacent-MMIO gap.
      L1[124..127] (0x1F00000000-0x1FFFFFFFFF): Device-nGnRnE -- the RP1
                   PCIe outbound window examples/common_rpi5/pcie.tkb's
                   pcie2_outbound_window_init programs (CPU physical

@@ -15,6 +15,30 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- RP1 UART0 RX Interrupt Through MSI-X/MIP0/GIC (Issue #164)
+
+Added the first real RPi5 IRQ path, deliberately limited to the concrete
+RP1 UART0 RX source required by `examples/echo` and `examples/irq`. The
+hardware route is RP1 local interrupt 25 -> RP1 MSI-X vector 25 -> PCIe2
+`RC_BAR1` -> BCM2712 MIP0 input 25 -> GIC SPI 153 / architectural INTID
+185. New `examples/common_rpi5/intc.tkb` configures exactly that route,
+including RP1's level-source `IACK_EN`/`IACK` handshake. `pcie.tkb` adds
+only the 4KB inbound mapping needed for MIP0 MSI writes; it does not grow
+into a general DMA or MSI framework.
+
+`startup.S` now routes physical IRQs to EL2 (`HCR_EL2.IMO`) and gives the
+Current-EL-SPx IRQ vector a full x0-x30/ELR/SPSR save-and-restore frame.
+All unrelated vectors remain unchanged. `uart.tkb` gained the same
+`uart_set_rx_handler`/`uart_isr_getc` public HAL shape used by the other
+targets, while ordinary application code continues to wait with
+`interrupt_wait()`; the UART data register is read only by the interrupt
+handler, so this is not a polling implementation.
+
+Both new RPi5 kernels compile with `--forbid-trap`. On the real board,
+`make hwcheck-rpi5` passed **50/50**, including exact-output GPIO14/15
+input/output tests for both `echo` and `irq`; all 48 previously ported
+tests remained green. Issue #164's acceptance criteria are met.
+
 ### 2026-07-26: RPi5 -- Ported `rtc`/`timer` (Issue #170)
 
 Straight port of `examples/common_rpi3/rtc.tkb`'s HAL to

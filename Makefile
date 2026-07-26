@@ -2075,6 +2075,7 @@ COMMON_RPI5_LINK_LD      := $(COMMON_RPI5_DIR)/link.ld
 COMMON_RPI5_UART         := $(COMMON_RPI5_DIR)/uart.tkb
 COMMON_RPI5_PRINT        := $(COMMON_RPI5_DIR)/print.tkb
 COMMON_RPI5_PCIE         := $(COMMON_RPI5_DIR)/pcie.tkb
+COMMON_RPI5_INTC         := $(COMMON_RPI5_DIR)/intc.tkb
 COMMON_RPI5_RTC          := $(COMMON_RPI5_DIR)/rtc.tkb
 COMMON_RPI5_JTAG_STUB_S  := $(COMMON_RPI5_DIR)/jtag_stub.S
 COMMON_RPI5_JTAG_STUB_O  := $(COMMON_RPI5_DIR)/jtag_stub.o
@@ -2104,13 +2105,9 @@ examples/common_rpi5/jtag_stub.img: examples/common_rpi5/jtag_stub.elf
 ## group RPi3 itself started from (GitHub issue #140) -- examples/start
 ## was ported and hardware-proven first (issue #161's own UART finale),
 ## the rest follow now that uart_puts()/RP1 PCIe bring-up are confirmed
-## working. Stage A (examples/common_rpi5/startup.S) still has no
-## interrupt handling (see that directory's AGENTS.md "What's
-## deliberately NOT ported yet" section) -- anything needing irq/echo/
-## USB/networking/EL0/EL1/SMP stays out of this group until issues #163
-## (MPIDR_EL1 core numbering) and #164 (RP1 UART0 RX interrupt) land,
-## the same staged order RPi3 itself followed rather than porting
-## speculatively ahead of it. rtc/timer (RPI5_RTC_EXAMPLES below) are
+## working. Interrupt examples stay in their own group below because they
+## additionally need common_rpi5/intc.tkb; USB/networking/EL0/EL1/SMP
+## remain separate future work. rtc/timer (RPI5_RTC_EXAMPLES below) are
 ## the exception -- they need ONLY CNTPCT_EL0/CNTFRQ_EL0 polling
 ## (examples/common_rpi5/rtc.tkb, GitHub issue #170), no interrupt/GIC
 ## work at all, so they were portable as soon as
@@ -2141,6 +2138,18 @@ examples/basic_suite/basic_suite_rpi5.o: $(BASIC_SUITE_SOURCES)
 examples/type_system_suite/type_system_suite_rpi5.o: $(TYPE_SYSTEM_SUITE_SOURCES)
 examples/algorithm_suite/algorithm_suite_rpi5.o: $(ALGORITHM_SUITE_SOURCES) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL)
 
+## GitHub issue #164: RP1 UART0's level interrupt is MSI-X vector 25,
+## delivered through BCM2712 MIP0 to GIC INTID 185. echo/irq retain their
+## shared application source and --forbid-trap fixture; COMMON_RPI5_INTC
+## supplies the target-specific setup and rpi5_irq_dispatch override.
+## COMMON_GIC_REGS remains a type-only input for those files' dead-on-RPi5
+## QEMU-shaped irq_dispatch function, matching the established RPi3 rule.
+RPI5_IRQ_EXAMPLES := echo irq
+RPI5_IRQ_OBJS      := $(foreach e,$(RPI5_IRQ_EXAMPLES),examples/$(e)/$(e)_rpi5.o)
+
+$(RPI5_IRQ_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_INTC) $(COMMON_GIC_REGS) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_INTC) $(COMMON_GIC_REGS) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
 ## RPI5_RTC_EXAMPLES: GitHub issue #170 -- rtc/timer need only
 ## rtc_init/rtc_is_running/rtc_read_seconds (examples/common_rpi5/
 ## rtc.tkb, pure CNTPCT_EL0/CNTFRQ_EL0 polling), no interrupt/GIC work
@@ -2162,7 +2171,7 @@ RPI5_RTC_OBJS      := $(foreach e,$(RPI5_RTC_EXAMPLES),examples/$(e)/$(e)_rpi5.o
 $(RPI5_RTC_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_RTC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_RTC) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
 
-RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES)
+RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES)
 RPI5_KERNELS  := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 
 ## Every RPi5 kernel links COMMON_RPI5_TIMER_ASM_O unconditionally --
