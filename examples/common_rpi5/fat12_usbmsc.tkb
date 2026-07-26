@@ -1,0 +1,39 @@
+// Shared FAT12-on-real-USB-Mass-Storage adapter for Raspberry Pi 5
+// examples -- port of examples/common_rpi3/fat12_usbmsc.tkb's own thin
+// adapter, now that examples/common_rpi5/usb_xhci.tkb exposes the same
+// disk_initialize/disk_read/disk_write Media Access Interface over RP1's
+// real XHCI controllers.
+//
+// examples/common/fat12.tkb is deliberately backend-agnostic and reaches
+// storage only through mem_block_read/mem_block_write. This board has no
+// SD-card-shaped storage available either (same reasoning as RPi3's own
+// AGENTS.md), so USB mass storage is this board's only fatfs backend too.
+//
+// buf: *u8 (not *align(32) u8, unlike RPi3's adapter) -- usb_xhci.tkb's
+// disk_read/disk_write have no alignment requirement of their own (the
+// DMA address is cpu_phys + RP1_DMA_PCI_OFFSET regardless of alignment,
+// and cache maintenance operates on whole-buffer ranges), so fat12.tkb's
+// own buffers satisfy this trivially either way.
+
+use "examples/common/fat12.tkb";
+use "examples/common_rpi5/usb_xhci.tkb";
+
+fn mem_block_read(sector: u32, buf: *u8) -> i32 {
+    if (disk_io_ok(disk_read(sector, buf)) == false) {
+        uart_puts("usb_xhci io error: read lba=");
+        uart_print(sector as usize);
+        uart_puts("\r\n");
+        return -1;
+    }
+    return 0;
+}
+
+fn mem_block_write(sector: u32, buf: *u8) -> i32 {
+    if (disk_io_ok(disk_write(sector, buf)) == false) {
+        uart_puts("usb_xhci io error: write lba=");
+        uart_print(sector as usize);
+        uart_puts("\r\n");
+        return -1;
+    }
+    return 0;
+}

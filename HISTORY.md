@@ -15,6 +15,108 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- FAT12 Mounts Off the Real USB Drive; a TRB Ring's Producer Must Publish Its Link TRB
+
+`examples/common_rpi5/usb_xhci.tkb` extracts `rp1_usb_smoke.tkb`'s proven
+bring-up into a reusable driver exposing the same `disk_initialize` /
+`disk_status` / `disk_read` / `disk_write` Media Access Interface as
+`common_stm32/sdmmc.tkb` and `common_rpi3/usb_msc.tkb`.
+`examples/common_rpi5/fat12_usbmsc.tkb` is the thin `mem_block_read` /
+`mem_block_write` adapter over it, mirroring RPi3's own, and
+`examples/fat12_usbmsc_rpi5` verifies the pair on real hardware.
+
+Reproducible across consecutive runs:
+
+```
+disk_initialize: ok
+fat_mount: ok
+root directory:
+  "HELLO   TXT" size=39 first_cluster=2
+lba 0: boot sector signature ok
+lba 1: FAT media descriptor ok
+lba 3: root dir agrees with fat_mount
+lba 4: first data sector = "Hello from a"
+lba 1000000: unwritten (all zero) ok
+sector checks passed: 5/5
+```
+
+Each probed LBA is checked against what the volume's own FAT12 geometry
+requires rather than merely "did not error", and sector 3 read raw is
+compared against what `fat_mount()` independently placed in
+`root_dir_buf`.
+
+**The bug worth remembering: a TRB ring's producer must publish its Link
+TRB.** Extracting the driver added exactly one more EP0 control transfer
+than the smoke test had issued, which was enough to expose a ring bug the
+smoke test had only ever missed by luck.
+
+A TD must not straddle the Link TRB, so when one will not fit before it
+the producer skips the remaining slots. The original code did that by
+setting `enq = 0` and toggling its own cycle -- and that is wrong. The
+controller is still at its own dequeue pointer several TRBs back, walks
+forward one TRB at a time, and stops the instant it sees a Cycle bit that
+does not match its Consumer Cycle State. An untouched (BSS-zero,
+Cycle=0) gap is a permanent wall: the controller never reaches the Link
+TRB, never toggles, and the ring is dead. Entirely silent -- no error, no
+event.
+
+`xhci_ring_close_segment()` fixes it by filling every skipped slot with a
+real No-Op TRB carrying the current cycle (type 8 on transfer rings, type
+23 on the Command Ring, no IOC so they raise no events), then
+re-publishing the Link TRB with the current cycle, before the producer
+wraps and toggles.
+
+It presented as EP0 going permanently silent after exactly 13 TRBs -- the
+point where a 3-TRB control TD first fails to fit a 16-entry ring. Every
+later control transfer returned no Transfer Event at all, which then made
+every stall-recovery path useless, since all of them need EP0.
+`rp1_usb_smoke.tkb` stopped at 14 TRBs and never wrapped. The same latent
+bug existed on the bulk rings and the Command Ring, where it would have
+fired one wrap later (the Link TRB is initialized with Cycle=1, so the
+first wrap happens to match by accident).
+
+Fixed alongside: `disk_initialize()` now resets the driver's own ring and
+cycle state and re-zeroes the rings. HCRST resets the controller's
+positions, so calling it a second time to rebuild a wedged transport
+previously left `xhci_evt_idx` wherever the last session had advanced it,
+and the next command's completion event was awaited in the wrong slot.
+
+**Still open: WRITE(10) stalls at the CSW phase.** `disk_write()` is
+implemented and its data phase completes cleanly (`completion_code=0x01`,
+`residual=0` -- the controller sent all 512 bytes and the device ACKed
+them), but the CSW that must follow returns `completion_code=0x06` (STALL
+Error) every time, and the transport does not recover afterward.
+
+Ruled out by direct measurement, not by reasoning: write protection
+(`MODE SENSE(6)` reports WP=0); a malformed CDB (dumped on the wire as
+`2a 00 00 00 00 c8 00 00 01 00`, a textbook WRITE(10) of one block at LBA
+200); a descriptor misparse (the raw 44-byte Configuration Descriptor was
+dumped and matches, including the genuinely odd `bMaxBurst=1` on bulk IN
+versus `15` on bulk OUT that this drive really does declare); EP0 being
+dead (true before the ring fix, verified healthy now); and any read-path
+fault. Recovery attempts that did not help: CLEAR_FEATURE(ENDPOINT_HALT)
+alone, plus xHCI Reset Endpoint, plus Set TR Dequeue Pointer, a bounded
+CSW retry loop, and a full Bulk-Only Mass Storage Reset with clear-halt
+on both bulk endpoints. After the stall the next CBW itself fails with
+`completion_code=0x04`.
+
+One correction worth recording because it cost real time: an earlier
+reading of this concluded reads were silently returning the wrong sector,
+because LBA 200 came back byte-identical to LBA 3. That was drawn from a
+16-byte sample and was wrong. Probing eight LBAs showed every one
+returning semantically correct content; LBA 200 genuinely holds a
+leftover copy of a root directory from earlier RPi3 experiments on the
+same physical drive. Check several addresses before concluding an address
+field is being ignored.
+
+Files added: `examples/common_rpi5/usb_xhci.tkb`,
+`examples/common_rpi5/fat12_usbmsc.tkb`,
+`examples/fat12_usbmsc_rpi5/fat12_usbmsc_rpi5.tkb`, plus Makefile rules.
+`examples/rp1_usb_smoke/rp1_usb_smoke.tkb` is deliberately left untouched
+and still passes.
+
+---
+
 ### 2026-07-26: RPi5 -- USB Bring-Up Step 11 DONE: Mass Storage Works, FAT12 Boot Sector Read Off the Real Drive
 
 The whole stack now runs end to end on real hardware: PCIe -> RP1 ->

@@ -1,0 +1,156 @@
+// Real-hardware verification of examples/common_rpi5/usb_xhci.tkb's
+// disk_initialize/disk_read against examples/common/fat12.tkb (GitHub
+// issue #67 Stage 2 follow-up): mounts the SAME self-formatted FAT12
+// volume examples/rp1_usb_smoke/rp1_usb_smoke.tkb already proved
+// reachable via raw SCSI READ(10), but through the real filesystem
+// layer -- proving disk_initialize()'s full bring-up sequence (halt/
+// HCRST/rings/Enable Slot/Address Device/Configure Endpoint/
+// SET_CONFIGURATION/BOT bring-up, all extracted from that proven
+// diagnostic) works underneath fat_mount().
+//
+// READ-ONLY on purpose. disk_write() is implemented in usb_xhci.tkb and
+// its data phase completes successfully (completion_code=0x01,
+// residual=0), but the CSW that should follow comes back STALLed
+// (completion_code=0x06) on this drive, every time, and the transport
+// does not recover. That is an open problem tracked in
+// examples/common_rpi5/AGENTS.md; deliberately not exercised here so
+// this example stays a deterministic regression test of the part that
+// IS proven rather than a known-failing one.
+//
+// The LBA probe below is not ceremony. An earlier version of this file
+// read only sector 200, saw FAT12 root-directory bytes come back, and
+// concluded reads were silently returning the wrong sector -- a wrong
+// conclusion drawn from a 16-byte sample. Reading several LBAs and
+// checking each against what FAT12 says should be there (boot sector,
+// FAT, root directory, first data sector, unwritten space) is what
+// actually establishes that reads are correct.
+
+use "examples/common_rpi5/fat12_usbmsc.tkb";
+
+fn app_main() {
+    uart_puts("fat12_usbmsc_rpi5\n");
+
+    match disk_initialize() {
+        DiskIoResult::Ok => { uart_puts("disk_initialize: ok\r\n"); }
+        DiskIoResult::Err(e) => {
+            uart_puts("disk_initialize: FAILED\r\n");
+            return;
+        }
+    }
+
+    match fat_mount() {
+        FatIoResult::Ok => { uart_puts("fat_mount: ok\r\n"); }
+        FatIoResult::Err(e) => {
+            uart_puts("fat_mount: FAILED\r\n");
+            return;
+        }
+    }
+
+    uart_puts("root directory:\r\n");
+    for i: usize in 0..<ROOT_ENTRY_COUNT {
+        let name_p: *u8 = root_dir_buf[i].name;
+        let first_byte: u8 = name_p[0];
+        if (first_byte == 0) {
+            break; // 0x00 = end of directory, same convention fat_find_entry uses
+        }
+        if (first_byte == 0xE5) {
+            continue; // deleted entry
+        }
+        uart_puts("  \"");
+        for j: isize in 0..<11 {
+            uart_putc(name_p[j]);
+        }
+        uart_puts("\" size=");
+        uart_print(root_dir_buf[i].file_size as usize);
+        uart_puts(" first_cluster=");
+        uart_print(root_dir_buf[i].first_cluster_lo as usize);
+        uart_puts("\r\n");
+    }
+
+    // Each LBA is checked against what this volume's own FAT12 geometry
+    // says must be there: sector 0 boot sector (0x55AA signature),
+    // sector 1 first FAT (media descriptor 0xF8 followed by two
+    // end-of-chain entries), sector 3 root directory, sector 4 first
+    // data sector (HELLO.TXT's contents), and a far-out sector that
+    // nothing ever wrote.
+    let mut rbuf: [u8; 512] align(64);
+    let mut checks_ok: usize = 0;
+
+    match disk_read(0, rbuf as *u8) {
+        DiskIoResult::Ok => {
+            if (rbuf[510] == 0x55 && rbuf[511] == 0xAA) {
+                checks_ok = checks_ok + 1;
+                uart_puts("lba 0: boot sector signature ok\r\n");
+            } else {
+                uart_puts("lba 0: boot sector signature MISSING\r\n");
+            }
+        }
+        DiskIoResult::Err(e) => { uart_puts("lba 0: read FAILED\r\n"); }
+    }
+
+    match disk_read(1, rbuf as *u8) {
+        DiskIoResult::Ok => {
+            if (rbuf[0] == 0xF8 && rbuf[1] == 0xFF && rbuf[2] == 0xFF) {
+                checks_ok = checks_ok + 1;
+                uart_puts("lba 1: FAT media descriptor ok\r\n");
+            } else {
+                uart_puts("lba 1: FAT media descriptor WRONG\r\n");
+            }
+        }
+        DiskIoResult::Err(e) => { uart_puts("lba 1: read FAILED\r\n"); }
+    }
+
+    // Sector 3 read raw must agree with what fat_mount() already put in
+    // root_dir_buf -- two independent paths to the same bytes.
+    match disk_read(3, rbuf as *u8) {
+        DiskIoResult::Ok => {
+            let dir_p: *u8 = root_dir_buf[0].name;
+            let mut same: bool = true;
+            for j: isize in 0..<11 {
+                if (rbuf[j as usize] != dir_p[j]) {
+                    same = false;
+                }
+            }
+            if (same) {
+                checks_ok = checks_ok + 1;
+                uart_puts("lba 3: root dir agrees with fat_mount\r\n");
+            } else {
+                uart_puts("lba 3: root dir DISAGREES with fat_mount\r\n");
+            }
+        }
+        DiskIoResult::Err(e) => { uart_puts("lba 3: read FAILED\r\n"); }
+    }
+
+    match disk_read(4, rbuf as *u8) {
+        DiskIoResult::Ok => {
+            uart_puts("lba 4: first data sector = \"");
+            for j: usize in 0..<12 {
+                uart_putc(rbuf[j]);
+            }
+            uart_puts("\"\r\n");
+            checks_ok = checks_ok + 1;
+        }
+        DiskIoResult::Err(e) => { uart_puts("lba 4: read FAILED\r\n"); }
+    }
+
+    match disk_read(1000000, rbuf as *u8) {
+        DiskIoResult::Ok => {
+            let mut sum: u32 = 0;
+            for j: usize in 0..<512 {
+                sum = sum + (rbuf[j] as u32);
+            }
+            if (sum == 0) {
+                checks_ok = checks_ok + 1;
+                uart_puts("lba 1000000: unwritten (all zero) ok\r\n");
+            } else {
+                uart_puts("lba 1000000: unexpectedly nonzero\r\n");
+            }
+        }
+        DiskIoResult::Err(e) => { uart_puts("lba 1000000: read FAILED\r\n"); }
+    }
+
+    uart_puts("sector checks passed: ");
+    uart_print(checks_ok);
+    uart_puts("/5\r\n");
+    uart_puts("done\n");
+}

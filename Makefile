@@ -2378,6 +2378,23 @@ examples/rp1_usb_smoke/rp1_usb_smoke_rpi5.o: examples/rp1_usb_smoke/rp1_usb_smok
 examples/rp1_usb_smoke/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/rp1_usb_smoke/rp1_usb_smoke_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/rp1_usb_smoke/rp1_usb_smoke_rpi5.o -o $@
 
+## fat12_usbmsc_rpi5: examples/common_rpi5/usb_xhci.tkb (the reusable
+## disk_initialize/disk_read/disk_write driver extracted from
+## rp1_usb_smoke.tkb's own proven bring-up) plus examples/common/fat12.tkb
+## over the real USB flash drive -- first real-hardware verification of
+## the pair together, before el0_shell_rpi5 is built on top. Same
+## dependency shape as RPI3_EL0_SHELL's own Makefile rule (fat12_usbmsc +
+## fat12_geometry + fat12 + netutil), swapping usb_xhci.tkb in for
+## usb_dwc2/usb_hub/usb_host/usb_msc.
+COMMON_RPI5_USB_XHCI := $(COMMON_RPI5_DIR)/usb_xhci.tkb
+COMMON_RPI5_FAT12_USBMSC := $(COMMON_RPI5_DIR)/fat12_usbmsc.tkb
+
+examples/fat12_usbmsc_rpi5/fat12_usbmsc_rpi5_rpi5.o: examples/fat12_usbmsc_rpi5/fat12_usbmsc_rpi5.tkb $(COMMON_RPI5_DMA_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
+
+examples/fat12_usbmsc_rpi5/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/fat12_usbmsc_rpi5/fat12_usbmsc_rpi5_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/fat12_usbmsc_rpi5/fat12_usbmsc_rpi5_rpi5.o -o $@
+
 ## RPI5_SERIAL_DEV: same convention as STM32_SERIAL_DEV/RPI3_SERIAL_DEV --
 ## empty by default, resolved at runtime by scripts/rpi5_uart_dev.sh (which
 ## picks the ttyACM device out by its /dev/serial/by-id label, not by
