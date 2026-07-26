@@ -1,8 +1,51 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): USB bring-up Step 4 -- USBLEGSUP
-## decoded (no BIOS/OS ownership claim), DBOFF/RTSOFF read; user
-## confirmed a real USB flash drive is the connected device
+## Status update (2026-07-26, latest): USB bring-up Step 5 -- the FIRST
+## real write against RP1's XHCI controller: a clean, confirmed halt,
+## no bug, no new bring-up trouble
+
+Direct follow-on to Step 4. This is the first genuinely state-changing
+action in the whole USB bring-up effort so far (Steps 1-4 were all
+read-only) -- per the XHCI spec, `DCBAAP`/`CRCR` (needed later for a
+real `Enable Slot` command) may only be written while the controller is
+halted, but Step 2 found it already running (firmware/TF-A left
+`USBCMD.RS` set at handoff, per Step 4's own `USBLEGSUP` finding that no
+ownership handoff was ever negotiated). So this step does ONLY a clean
+halt, nothing further yet.
+
+Sequence: read `USBCMD` (Operational base + 0x00) = `0x0000000d` (`RS`
+bit0=1 running, `INTE` bit2=1, `HSEE` bit3=1). Read-modify-write to
+clear only bit0 (`RS`) -> wrote `0x0000000c`, confirmed by reading
+`USBCMD` back afterward -- exactly the expected value, `INTE`/`HSEE`
+correctly preserved. Poll `USBSTS.HCH` (bit0) in a bounded loop (100
+iterations x 1ms `delay_us`, a real timed wait matching issue #169's own
+"iteration counts aren't real time" lesson, not a busy-spin count):
+**halted after only 2 polls** (~1-2ms, well within the xHCI spec's own
+expected halt latency). `USBSTS` read back afterward as `0x00000019` --
+`HCH` bit0=1 confirms the halt, `EINT`/`PCD` (bits3/4) still set from
+the earlier port-change event, harmless and expected (interrupt-status
+bits, not blocking).
+
+Confirmed reproducible across two consecutive real-hardware runs --
+byte-for-byte identical `USBCMD`/`USBSTS` values and poll count both
+times. **No hang, no bug, no surprise** -- a genuinely clean result for
+the first write against brand-new hardware.
+
+**Next step (not started)**: with the controller now confirmed halted,
+set up `DCBAAP` (Device Context Base Address Array Pointer,
+Operational+0x30, 64-bit -- needs a real, aligned physical buffer, not
+yet allocated anywhere in this example) and `CRCR` (Command Ring
+Control Register, Operational+0x18, 64-bit -- needs a real Command Ring
+buffer too, plus its own Cycle Bit convention). `CONFIG` (Operational
+register, `MaxSlotsEn` field) should also be set before re-enabling
+`USBCMD.RS`. Only once the controller is running again with a real
+Command Ring can an `Enable Slot` command actually be issued for the
+USB flash drive already sitting on port 3 -- and reading its own
+Command Completion Event back requires the Event Ring (ERST/interrupter
+registers at `RTSOFF`) to be set up too, which hasn't been touched at
+all yet. This is a bigger step than any so far (needs real memory
+buffers, not just register pokes) -- plan for its own dedicated,
+carefully-staged pass.
 
 User confirmed the device found live on `usbhost0` port 3 (Step 2) is a
 real USB flash drive plugged into the board's own USB-A port -- exactly

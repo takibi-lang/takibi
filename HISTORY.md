@@ -15,6 +15,31 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- USB Bring-Up Step 5: First Real Write, a Clean Confirmed XHCI Halt
+
+Direct follow-on to Step 4. The first genuinely state-changing action in
+the whole USB bring-up effort (Steps 1-4 were read-only). DCBAAP/CRCR
+may only be written while halted per the XHCI spec, but the controller
+was already running (firmware/TF-A left USBCMD.RS set at handoff, no
+ownership handoff negotiated per Step 4). This step does only a clean
+halt.
+
+Read USBCMD = 0x0000000d (RS=1 running). Read-modify-write cleared only
+bit0 -> 0x0000000c, confirmed on readback (INTE/HSEE correctly
+preserved). Polled USBSTS.HCH in a bounded loop (100 x 1ms delay_us, a
+real timed wait, not a busy-spin count): halted after only 2 polls.
+USBSTS read back as 0x00000019, HCH=1 confirms the halt.
+
+Confirmed reproducible across two consecutive real-hardware runs, byte-
+identical results both times. No hang, no bug -- a clean result for the
+first write against this hardware.
+
+Next step (not started, bigger than any so far): DCBAAP and CRCR both
+need real, allocated memory buffers (not just register pokes), plus
+CONFIG.MaxSlotsEn before re-enabling USBCMD.RS; an actual Enable Slot
+command and reading its Command Completion Event also needs the Event
+Ring (ERST/interrupter registers at RTSOFF) set up, untouched so far.
+
 ### 2026-07-26: RPi5 -- USB Bring-Up Step 4: USBLEGSUP Decoded, DBOFF/RTSOFF Read; Confirmed a Real USB Flash Drive Is Connected
 
 User confirmed the device found live on `usbhost0` port 3 (Step 2) is a

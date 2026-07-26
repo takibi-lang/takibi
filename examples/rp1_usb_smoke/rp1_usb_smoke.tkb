@@ -320,6 +320,70 @@ fn app_main() {
     uart_print_hex((host0_rtsoff & 0xFFFFFFE0) as i32);
     uart_puts("\r\n");
 
+    // Step 5 (2026-07-26 follow-up): the FIRST real WRITE against this
+    // hardware in the whole USB bring-up effort. Per the XHCI spec,
+    // DCBAAP/CRCR (needed for a real Enable Slot command) may only be
+    // written while the controller is HALTED (USBCMD.RS=0) -- but Step 2
+    // found it already RUNNING (USBSTS.HCH=0, left that way by
+    // firmware/TF-A at handoff, per USBLEGSUP's own bios_owned=0/
+    // os_owned=0 finding in Step 4: no ownership handoff was ever
+    // negotiated). So this step performs ONLY a clean halt: read
+    // USBCMD, clear bit 0 (RS) via read-modify-write, then POLL
+    // USBSTS.HCH (bit 0) until it reads 1 -- confirming the controller
+    // genuinely stopped, not just that the write was accepted. Bounded
+    // to 100 iterations x 1ms (100ms total, generous headroom over the
+    // xHCI spec's own expected halt latency) via delay_us
+    // (examples/common_rpi5/pcie.tkb, already linked into this kernel
+    // for platform_init's own PCIe bring-up) -- a real timed wait, not a
+    // busy-spin iteration count (the same lesson issue #169 already
+    // taught this codebase: an iteration-count loop's real duration
+    // depends on cache/clock state, a timed wait does not). Does NOT
+    // yet touch DCBAAP/CRCR/CONFIG -- those are still a separate, later
+    // step, only safe to attempt once this halt is confirmed.
+    usb_smoke_checkpoint = 40;
+    let host0_usbcmd_ptr: *io u32 = 0x1F00200020;
+    let usbcmd_before: u32 = *host0_usbcmd_ptr;
+    uart_puts("usbhost0 USBCMD before halt: ");
+    uart_print_hex(usbcmd_before as i32);
+    uart_puts("\r\n");
+
+    usb_smoke_checkpoint = 41;
+    let usbcmd_halted: u32 = usbcmd_before & 0xFFFFFFFE;
+    *host0_usbcmd_ptr = usbcmd_halted;
+    usb_smoke_checkpoint = 42;
+
+    let mut halt_confirmed: bool = false;
+    let mut halt_polls: usize = 0;
+    for i: usize in 0..<100 {
+        usb_smoke_checkpoint = 43;
+        let usbsts_poll_ptr: *io u32 = 0x1F00200024;
+        let usbsts_poll: u32 = *usbsts_poll_ptr;
+        halt_polls = i + 1;
+        if ((usbsts_poll & 1) == 1) {
+            halt_confirmed = true;
+            break;
+        }
+        delay_us(1000);
+    }
+    usb_smoke_checkpoint = 44;
+
+    let usbcmd_after_ptr: *io u32 = 0x1F00200020;
+    let usbcmd_after: u32 = *usbcmd_after_ptr;
+    let usbsts_after_ptr: *io u32 = 0x1F00200024;
+    let usbsts_after: u32 = *usbsts_after_ptr;
+    uart_puts("usbhost0 USBCMD after write: ");
+    uart_print_hex(usbcmd_after as i32);
+    uart_puts("\r\nusbhost0 USBSTS after halt attempt: ");
+    uart_print_hex(usbsts_after as i32);
+    uart_puts("\r\nhalt confirmed: ");
+    if (halt_confirmed) {
+        uart_puts("yes, polls=");
+        uart_print(halt_polls);
+    } else {
+        uart_puts("NO (timed out)");
+    }
+    uart_puts("\r\n");
+
     usb_smoke_checkpoint = 30;
     uart_puts("done\n");
 }
