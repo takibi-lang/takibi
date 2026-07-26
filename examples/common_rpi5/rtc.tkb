@@ -1,0 +1,37 @@
+// Raspberry Pi 5 (BCM2712) "RTC" HAL, over the ARM Generic Timer's
+// free-running physical counter (CNTPCT_EL0/CNTFRQ_EL0) rather than a
+// real RTC peripheral -- straight port of examples/common_rpi3/rtc.tkb
+// (GitHub issue #170): this board has no battery-backed real-time clock
+// either, and the same ARM Generic Timer registers are architecturally
+// identical across BCM2837/BCM2712. Same public signatures as
+// examples/common_qemu/rtc.tkb, examples/common_stm32/rtc.tkb, and
+// examples/common_rpi3/rtc.tkb so examples/rtc/rtc.tkb and
+// examples/timer/timer.tkb are portable unchanged, but
+// rtc_read_seconds() here means "seconds since this core started
+// counting" (effectively "seconds since boot"), not wall-clock time --
+// see examples/common_rpi3/rtc.tkb's own header comment for the full
+// tradeoff (GitHub issue #140); both examples this HAL serves only ever
+// check that time advances, never an absolute value.
+//
+// CNTPCT_EL0 is a 64-bit free-running counter with no separate enable
+// step of its own -- it is already counting by the time any bare-metal
+// code here gets control, so rtc_init() has nothing to do, matching
+// every other target's own no-op rtc_init().
+//
+// read_cntfrq/read_cntpct (examples/common_rpi5/timer_asm.S) already
+// exist and are already hardware-proven -- added for
+// examples/common_rpi5/pcie.tkb's own real-time delays (GitHub issue
+// #169), not new for this file.
+
+use "examples/common_rpi5/timer_asm_extern.tkb";
+
+fn rtc_init() {
+}
+
+fn rtc_is_running() -> bool {
+    return read_cntfrq() != 0;
+}
+
+fn rtc_read_seconds() -> i32 {
+    return (read_cntpct() / read_cntfrq()) as i32;
+}

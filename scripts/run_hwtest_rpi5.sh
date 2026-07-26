@@ -246,13 +246,14 @@ run_hw_test_rpi5_suite() {
 
 # Mirrors RPI5_EXAMPLES in the Makefile -- see
 # examples/common_rpi5/AGENTS.md for what's still deliberately excluded
-# (anything needing rtc/timer/irq/USB/networking/EL0/EL1/SMP, until
-# issues #163/#164 land). type_system_suite/algorithm_suite are back
-# (issue #165, examples/common_rpi5/mmu.S) after real hardware testing
-# confirmed both pass with the stage-1 MMU enabled. Every .expected/
-# cases.txt fixture here is reused byte-for-byte from the QEMU/STM32/
-# RPi3 suites -- uart_puts/uart_print_* write identical bytes on every
-# HAL.
+# (anything needing irq/USB/networking/EL0/EL1/SMP, until issues #163/
+# #164 land). type_system_suite/algorithm_suite are back (issue #165,
+# examples/common_rpi5/mmu.S) after real hardware testing confirmed both
+# pass with the stage-1 MMU enabled. rtc/timer are back (issue #170,
+# examples/common_rpi5/rtc.tkb) -- pure CNTPCT_EL0/CNTFRQ_EL0 polling,
+# no interrupt/GIC dependency. Every .expected/cases.txt fixture here is
+# reused byte-for-byte from the QEMU/STM32/RPi3 suites -- uart_puts/
+# uart_print_* write identical bytes on every HAL.
 run_hw_test_rpi5 "start (rpi5)" "$REPO_ROOT/examples/start/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/start/start.expected"
 run_hw_test_rpi5_suite basic_suite "$REPO_ROOT/examples/basic_suite/kernel_rpi5.elf" \
@@ -269,6 +270,15 @@ run_hw_test_rpi5 "klock_guard (rpi5)" "$REPO_ROOT/examples/klock_guard/kernel_rp
     "$REPO_ROOT/examples/klock_guard/klock_guard.expected"
 run_hw_test_rpi5 "percpu (rpi5)" "$REPO_ROOT/examples/percpu/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/percpu/percpu.expected"
+# MAX_SECS=5/STABLE_POLLS=30 override: rtc/timer wait up to a real
+# 1-second ARM Generic Timer tick between prints -- the default ~0.3s
+# idle-quiet threshold mistakes that in-test pause for completion and
+# truncates the capture, same gotcha run_hwtest_rpi3.sh's own comment
+# documents for these exact two examples.
+run_hw_test_rpi5 "rtc (rpi5)" "$REPO_ROOT/examples/rtc/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/rtc/rtc.expected" 5 30
+run_hw_test_rpi5 "timer (rpi5)" "$REPO_ROOT/examples/timer/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/timer/timer.expected" 5 30
 
 echo
 echo "RPi5 hardware tests: $PASS passed, $FAIL failed"

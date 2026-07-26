@@ -51,9 +51,11 @@
 // (e.g. "~100-200us", "~5ms") as the real microsecond target, not a
 // newly-guessed number -- this is a mechanical iteration-count-to-
 // real-time conversion of already-hardware-proven timing, not a
-// redesign of the timing itself.
-extern fn read_cntfrq() -> i64;
-extern fn read_cntpct() -> i64;
+// redesign of the timing itself. read_cntfrq/read_cntpct's own extern
+// declarations moved to examples/common_rpi5/timer_asm_extern.tkb
+// (GitHub issue #170) once examples/common_rpi5/rtc.tkb became a
+// second consumer needing the same externs on the same compile line.
+use "examples/common_rpi5/timer_asm_extern.tkb";
 
 // delay_us(us): busy-wait at least `us` microseconds, using CNTPCT_EL0's
 // free-running count and CNTFRQ_EL0's own frequency -- same technique

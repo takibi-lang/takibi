@@ -15,6 +15,30 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- Ported `rtc`/`timer` (Issue #170)
+
+Straight port of `examples/common_rpi3/rtc.tkb`'s HAL to
+`examples/common_rpi5/rtc.tkb`: `rtc_init`/`rtc_is_running`/
+`rtc_read_seconds` over `CNTPCT_EL0`/`CNTFRQ_EL0`, no new hardware
+bring-up, since `examples/common_rpi5/timer_asm.S`'s `read_cntfrq`/
+`read_cntpct` already existed and were already hardware-proven (issue
+#169, added for `pcie.tkb`'s own delays). `examples/rtc`/
+`examples/timer` need only pure polling, no interrupt/GIC dependency at
+all, so this was portable as soon as the timer stubs existed. The one
+real fix needed: `pcie.tkb` used to declare `read_cntfrq`/
+`read_cntpct` as its own `extern fn`s, and takibi rejects a second
+identical extern declaration on the same compile line, so both moved
+into a new shared `examples/common_rpi5/timer_asm_extern.tkb` (mirroring
+`examples/common_rpi3/timer_asm_extern.tkb`'s own split, done there for
+the same reason) that both `pcie.tkb` and `rtc.tkb` now `use`.
+
+`make hwcheck-rpi5` passes 48/48, confirmed across three consecutive
+real-hardware runs, including `rtc`/`timer`'s real 1-second wall-clock
+wait (added the same `MAX_SECS=5`/`STABLE_POLLS=30` capture-window
+override `run_hwtest_rpi3.sh` already uses for these two, needed since
+the default idle-quiet threshold is shorter than the real gap between
+their prints). Issue #170 closed.
+
 ### 2026-07-26: RPi5 -- Real Timer-Based PCIe Delays, Full D-cache/I-cache Enabled (Issue #169)
 
 Follow-up to issue #165: with the MMU on but caches deliberately off,

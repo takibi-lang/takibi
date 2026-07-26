@@ -2075,6 +2075,7 @@ COMMON_RPI5_LINK_LD      := $(COMMON_RPI5_DIR)/link.ld
 COMMON_RPI5_UART         := $(COMMON_RPI5_DIR)/uart.tkb
 COMMON_RPI5_PRINT        := $(COMMON_RPI5_DIR)/print.tkb
 COMMON_RPI5_PCIE         := $(COMMON_RPI5_DIR)/pcie.tkb
+COMMON_RPI5_RTC          := $(COMMON_RPI5_DIR)/rtc.tkb
 COMMON_RPI5_JTAG_STUB_S  := $(COMMON_RPI5_DIR)/jtag_stub.S
 COMMON_RPI5_JTAG_STUB_O  := $(COMMON_RPI5_DIR)/jtag_stub.o
 COMMON_RPI5_JTAG_STUB_LD := $(COMMON_RPI5_DIR)/jtag_stub.ld
@@ -2105,11 +2106,15 @@ examples/common_rpi5/jtag_stub.img: examples/common_rpi5/jtag_stub.elf
 ## the rest follow now that uart_puts()/RP1 PCIe bring-up are confirmed
 ## working. Stage A (examples/common_rpi5/startup.S) still has no
 ## interrupt handling (see that directory's AGENTS.md "What's
-## deliberately NOT ported yet" section) -- anything needing rtc/timer/
-## irq/echo/USB/networking/EL0/EL1/SMP stays out of this group until
-## issues #163 (MPIDR_EL1 core numbering) and #164 (RP1 UART0 RX
-## interrupt) land, the same staged order RPi3 itself followed rather
-## than porting speculatively ahead of it.
+## deliberately NOT ported yet" section) -- anything needing irq/echo/
+## USB/networking/EL0/EL1/SMP stays out of this group until issues #163
+## (MPIDR_EL1 core numbering) and #164 (RP1 UART0 RX interrupt) land,
+## the same staged order RPi3 itself followed rather than porting
+## speculatively ahead of it. rtc/timer (RPI5_RTC_EXAMPLES below) are
+## the exception -- they need ONLY CNTPCT_EL0/CNTFRQ_EL0 polling
+## (examples/common_rpi5/rtc.tkb, GitHub issue #170), no interrupt/GIC
+## work at all, so they were portable as soon as
+## COMMON_RPI5_TIMER_ASM_O existed (issue #169).
 ##
 ## type_system_suite/algorithm_suite are back in this group (issue #165,
 ## examples/common_rpi5/mmu.S) after real hardware testing (2026-07-25)
@@ -2126,7 +2131,6 @@ examples/common_rpi5/jtag_stub.img: examples/common_rpi5/jtag_stub.elf
 RPI5_EXAMPLES := start basic_suite type_system_suite algorithm_suite bump scheduler \
                  klock_guard percpu
 RPI5_OBJS     := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/$(e)_rpi5.o)
-RPI5_KERNELS  := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 # Same one-hardening-switch reasoning as RPI3_TAKIBI_FLAGS above.
 RPI5_TAKIBI_FLAGS := --forbid-trap
 
@@ -2136,6 +2140,30 @@ $(RPI5_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $(COMMON_RPI
 examples/basic_suite/basic_suite_rpi5.o: $(BASIC_SUITE_SOURCES)
 examples/type_system_suite/type_system_suite_rpi5.o: $(TYPE_SYSTEM_SUITE_SOURCES)
 examples/algorithm_suite/algorithm_suite_rpi5.o: $(ALGORITHM_SUITE_SOURCES) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL)
+
+## RPI5_RTC_EXAMPLES: GitHub issue #170 -- rtc/timer need only
+## rtc_init/rtc_is_running/rtc_read_seconds (examples/common_rpi5/
+## rtc.tkb, pure CNTPCT_EL0/CNTFRQ_EL0 polling), no interrupt/GIC work
+## at all, unlike RPi3's own RPI3_RTC_EXAMPLES grouping reasoning (that
+## group exists there purely for the extra COMMON_RPI3_TIMER_ASM_O link
+## input -- the read_cntfrq/read_cntpct stubs this file's own rtc.tkb
+## also needs already link into EVERY RPi5 kernel unconditionally, see
+## COMMON_RPI5_TIMER_ASM_O below, because examples/common_rpi5/pcie.tkb
+## needs them too (issue #169) -- so this group exists only for the
+## extra COMMON_RPI5_RTC *compile*-line input, not a link difference).
+## Kept as a separate variable, not simply appended to RPI5_EXAMPLES
+## before RPI5_OBJS is computed, for the same reason RPi3's own
+## Makefile keeps its RTC/IRQ/etc. groups separate: $(RPI5_OBJS)'s
+## pattern rule above does not pass COMMON_RPI5_RTC, so rtc/timer need
+## their own pattern rule below instead.
+RPI5_RTC_EXAMPLES := rtc timer
+RPI5_RTC_OBJS      := $(foreach e,$(RPI5_RTC_EXAMPLES),examples/$(e)/$(e)_rpi5.o)
+
+$(RPI5_RTC_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_RTC) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_RTC) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES)
+RPI5_KERNELS  := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 
 ## Every RPi5 kernel links COMMON_RPI5_TIMER_ASM_O unconditionally --
 ## unlike RPi3, where only the RTC_EXAMPLES/timer-needing group needs

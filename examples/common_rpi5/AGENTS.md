@@ -1,5 +1,31 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
+## Status update (2026-07-26, later): `rtc`/`timer` ported -- GitHub
+## issue #170, `make hwcheck-rpi5` 48/48
+
+`examples/common_rpi5/rtc.tkb` is a straight port of
+`examples/common_rpi3/rtc.tkb`'s HAL (`rtc_init`/`rtc_is_running`/
+`rtc_read_seconds` over `CNTPCT_EL0`/`CNTFRQ_EL0`) -- no new hardware
+bring-up at all, since `examples/common_rpi5/timer_asm.S`'s
+`read_cntfrq`/`read_cntpct` already existed and were already
+hardware-proven (issue #169, for `pcie.tkb`'s own real-time delays).
+The only real work was avoiding a duplicate-`extern`-declaration
+conflict: `pcie.tkb` used to declare `read_cntfrq`/`read_cntpct` itself,
+and takibi rejects a second `extern fn` of the same name even with an
+identical signature, so both externs moved into a new shared
+`examples/common_rpi5/timer_asm_extern.tkb` (mirroring
+`examples/common_rpi3/timer_asm_extern.tkb`'s own split, done there for
+the identical reason) that both `pcie.tkb` and `rtc.tkb` `use`.
+`examples/rtc`/`examples/timer` needed no interrupt/GIC work
+whatsoever -- pure polling, same as every other target's own RTC HAL.
+
+**`make hwcheck-rpi5` passes 48/48, confirmed across three consecutive
+real-hardware runs**, including `rtc`/`timer`'s real 1-second
+wall-clock wait (`scripts/run_hwtest_rpi5.sh`'s `MAX_SECS=5`/
+`STABLE_POLLS=30` override, same values `run_hwtest_rpi3.sh` already
+uses for these two, needed since the default ~0.3s idle-quiet threshold
+would truncate the capture mid-wait).
+
 ## Status update (2026-07-26): D-cache AND I-cache both enabled -- GitHub
 ## issue #169, `make hwcheck-rpi5` 46/46 with full caches on
 
