@@ -34,6 +34,51 @@
 //    numeric value directly; bit 27 (0x08000000) is used below as the
 //    documented-elsewhere standard value across the Broadcom STB PCIe
 //    family, NOT independently confirmed for BCM2712 specifically.
+//
+// GitHub issue #169: every delay below is now a real ARM-Generic-Timer
+// wait (delay_us, or a real-time-bounded poll for the two loops that
+// already poll a status bit), NOT an iteration count. The original
+// iteration-count loops were found, on real hardware, to only work with
+// the EL2 stage-1 D-cache/I-cache both off (examples/common_rpi5/
+// mmu.S, issue #165): the same fixed instruction count completes far
+// faster in wall-clock time once I-cache is on, silently no longer
+// honoring the real PCIe hardware timing this code depends on
+// (PERST-deassert-to-access delay, PHY lock time, link-training
+// completion window) -- confirmed the hard way, every RPi5 example went
+// UART-silent with caches on, byte-identical correct output with them
+// off, before this rewrite. Every target below reuses each loop's OWN
+// already-documented approximate duration from before this issue
+// (e.g. "~100-200us", "~5ms") as the real microsecond target, not a
+// newly-guessed number -- this is a mechanical iteration-count-to-
+// real-time conversion of already-hardware-proven timing, not a
+// redesign of the timing itself.
+extern fn read_cntfrq() -> i64;
+extern fn read_cntpct() -> i64;
+
+// delay_us(us): busy-wait at least `us` microseconds, using CNTPCT_EL0's
+// free-running count and CNTFRQ_EL0's own frequency -- same technique
+// examples/common_rpi3/rtc.tkb uses for rtc_read_seconds(), just at
+// microsecond instead of second granularity. CNTPCT_EL0 needs no enable
+// step (already counting by the time any code, ours or firmware's, gets
+// control), and neither register's value depends on cache state, so
+// this stays correct regardless of whether SCTLR_EL2.C/I end up on.
+fn delay_us(us: i64) {
+    let freq: i64 = read_cntfrq();
+    let target_ticks: i64 = (freq * us) / 1000000;
+    let start: i64 = read_cntpct();
+    while ((read_cntpct() - start) < target_ticks) {
+    }
+}
+
+// timed_out(t0, timeout_us): real-time-bounded-poll counterpart of
+// delay_us, for the two loops below that poll a status bit rather than
+// waiting a fixed duration -- t0 is a read_cntpct() timestamp taken
+// before the poll started.
+fn timed_out(t0: i64, timeout_us: i64) -> bool {
+    let freq: i64 = read_cntfrq();
+    let target_ticks: i64 = (freq * timeout_us) / 1000000;
+    return (read_cntpct() - t0) >= target_ticks;
+}
 
 // pcie_rescal (examples/common_rpi5/AGENTS.md's own research: BCM2712's
 // shared SERDES calibration reset controller, compatible
@@ -46,8 +91,14 @@ fn pcie_rescal_reset() -> bool {
 
     *start = (*start) | 1;
 
+    // 5ms timeout budget: generous compared to the original 10000-
+    // iteration poll (implied well under 1ms at the ~0.05-0.1us/
+    // iteration this file's other, explicitly-timed loops calibrate to)
+    // -- reset-controller calibration is normally fast, and a boot-time
+    // one-shot poll can afford slack a hot loop couldn't.
+    let t0: i64 = read_cntpct();
     let mut done: bool = false;
-    for i: i32 in 0..<10000 {
+    while (timed_out(t0, 5000) == false) {
         if ((*status & 1) != 0) {
             done = true;
             break;
@@ -76,7 +127,7 @@ fn pcie2_bridge_reset(assert_reset: bool) {
         *bank1_set = mask;
     } else {
         *bank1_clear = mask;
-        for i: i32 in 0..<2000 { } // ~100-200us settle, same as Linux's usleep_range
+        delay_us(150); // ~100-200us settle, same as Linux's usleep_range
     }
 }
 
@@ -162,8 +213,12 @@ fn pcie2_mdio_write(regad: u32, wrdata: u32) -> bool {
 
     *mdio_wr_data = 0x80000000 | wrdata;
 
+    // 1ms timeout: generous compared to the original 2000-iteration
+    // poll, the same count this file's own other ~100-200us-documented
+    // loops use.
+    let t0: i64 = read_cntpct();
     let mut done: bool = false;
-    for i: i32 in 0..<2000 {
+    while (timed_out(t0, 1000) == false) {
         let v: u32 = *mdio_wr_data;
         if ((v & 0x80000000) == 0) {
             done = true;
@@ -187,7 +242,7 @@ fn pcie2_post_setup_bcm2712() -> bool {
     if (pcie2_mdio_write(0x1c, 0x5030) == false) { return false; }
     if (pcie2_mdio_write(0x1e, 0x0007) == false) { return false; }
 
-    for i: i32 in 0..<400 { } // ~100-200us, matches Linux's usleep_range(100, 200)
+    delay_us(150); // ~100-200us, matches Linux's usleep_range(100, 200)
 
     let phy_ctl_15: *io u32 = 0x100012184c; // PCIE_RC_PL_PHY_CTL_15
     let mut tmp: u32 = *phy_ctl_15;
@@ -208,7 +263,7 @@ fn pcie2_post_setup_bcm2712() -> bool {
 fn pcie2_serdes_enable() {
     let hard_debug: *io u32 = 0x1000124304; // PCIE_HARD_DEBUG (bcm7712 offset)
     *hard_debug = (*hard_debug) & ~(1 << 27);
-    for i: i32 in 0..<400 { }
+    delay_us(150); // same ~100-200us settle as this file's other 400-iteration loops
 }
 
 // MISC_CTRL: enable SCB access + UR-on-bad-config-read + the RCB
@@ -353,7 +408,7 @@ fn pcie2_init() -> bool {
     //    already out of reset and every other PCIE_MISC_* write below
     //    has already succeeded.
     pcie2_bridge_reset(true);
-    for i: i32 in 0..<400 { } // ~100-200us, matches Linux's usleep_range(100, 200)
+    delay_us(150); // ~100-200us, matches Linux's usleep_range(100, 200)
     pcie2_bridge_reset(false);
 
     // 3. SerDes IDDQ clear.
@@ -375,7 +430,7 @@ fn pcie2_init() -> bool {
     // 6. Deassert PERST#, then wait for link training to complete --
     //    same 100ms budget (20 retries of ~5ms) as brcm_pcie_start_link().
     pcie2_perst_set(false);
-    for i: i32 in 0..<2000000 { } // rough "config wait" delay before polling
+    delay_us(100000); // 100ms config wait before polling, common PCIe-spec-derived figure
 
     let mut linked: bool = false;
     for i: i32 in 0..<20 {
@@ -383,7 +438,7 @@ fn pcie2_init() -> bool {
             linked = true;
             break;
         }
-        for j: i32 in 0..<200000 { } // rough ~5ms
+        delay_us(5000); // ~5ms per retry, 20 retries = same 100ms budget as brcm_pcie_start_link()
     }
     if (linked) {
         pcie2_root_bridge_setup();

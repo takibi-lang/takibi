@@ -148,44 +148,42 @@ mmu_init:
     dsb     sy
     isb
 
-    /* Enable the MMU (SCTLR_EL2.M) ONLY -- deliberately leave D-cache/
-       I-cache (SCTLR_EL2.C/I) OFF, unlike RPi3's mmu_init, which enables
-       both. Found the hard way, real hardware, this same session: with
-       C/I also enabled, examples/start (and everything else in
-       RPI5_EXAMPLES) went completely silent -- platform_init()'s
-       pcie2_init() (examples/common_rpi5/pcie.tkb) started returning
-       false, so uart_init() never ran, and the FR register read back
-       0xDEADDEAD (the same PCIe-link-not-actually-up poison pattern
-       documented at length in AGENTS.md) even though the exact same
-       code path with caches OFF works every time. Root cause: pcie.tkb's
-       own link-training/PHY/reset delays are plain empty-loop iteration
-       counts calibrated for cache-off execution speed (its own comments
-       say so explicitly -- "~100-200us settle", "~5ms", etc.), not a
-       real timer read. Enabling I-cache makes the CPU retire that same
-       fixed instruction count far faster in wall-clock time, so the
-       real PCIe hardware requirement (link settle time, PHY lock, PERST
-       deassert-to-access delay) stops actually being honored, and link
-       training silently fails. Confirmed directly: reading back x9
-       (uart_putc's locally-cached FR value) over SWD showed the classic
-       0xDEADDEAD PCIe-poison pattern with caches on, and the exact same
-       build with only the two `orr` lines below removed produces the
-       correct "foo(5)=1\r\nbar(3,4)=0\r\nbar(1,10)=1\r\n" output.
-       MMU-alone (M bit) is sufficient for this issue's actual
-       requirement -- the "unaligned access always faults" rule is tied
-       to Device vs Normal MEMORY TYPE under stage-1 translation, not to
-       whether caching is actually active, so Normal memory with caching
-       still off (this file's l1_table entry 0) already exempts RAM from
-       that rule. Revisit enabling C/I together as a SEPARATE, later
-       change once examples/common_rpi5/pcie.tkb's delays are rewritten
-       against a real timer (BCM2712's ARM Generic Timer, same source
-       examples/common_rpi3/rtc.tkb already reads) instead of iteration
-       counts -- not in this issue's scope, which is the MMU/exception
-       path only. No Cortex-A53-style CPUECTLR_EL1.SMPEN step either
-       (unlike RPi3's mmu_init): that bit is an A53/A57-generation detail
-       for joining the cluster's coherency domain before enabling
-       D-cache, moot here since D-cache stays off and only core 0 runs
-       today (no RPi5 SMP example exists yet, issue #163). */
+    /* Enable the MMU (SCTLR_EL2.M) and both caches (C, I) -- GitHub
+       issue #169. An EARLIER version of this function enabled M only,
+       leaving C/I off: real-hardware testing during issue #165 (the
+       original MMU milestone) found that enabling I-cache broke
+       examples/common_rpi5/pcie.tkb's own link-training/PHY/reset
+       delays, which used to be plain empty-loop iteration counts
+       calibrated for cache-off execution speed (not a real timer read)
+       -- with I-cache on, the CPU retires the same fixed instruction
+       count far faster in wall-clock time, so the real PCIe hardware
+       timing requirement (link settle time, PHY lock, PERST-deassert-
+       to-access delay) stopped being honored and link training silently
+       failed (confirmed directly: FR register reads back 0xDEADDEAD,
+       the classic PCIe-poison pattern, with caches on). Issue #169 fixed
+       the actual root cause instead of leaving caches off permanently:
+       pcie.tkb's delays are now real ARM-Generic-Timer waits
+       (delay_us()/timed_out(), examples/common_rpi5/timer_asm.S's
+       read_cntfrq/read_cntpct), immune to execution speed by
+       construction, so re-enabling C/I here no longer breaks PCIe
+       bring-up -- confirmed via a full real-hardware make hwcheck-rpi5
+       run, multiple times in a row, with both caches on.
+       No Cortex-A53-style CPUECTLR_EL1.SMPEN step here (unlike RPi3's
+       mmu_init): that bit is an A53/A57-generation implementation detail
+       for opting a core into the cluster's coherency domain before
+       enabling its D-cache, and RPi5's Cortex-A76 does not need it --
+       only core 0 runs today (no RPi5 SMP example exists yet, see issue
+       #163), so this has not been exercised against multi-core cache
+       coherence the way RPi3's own smp_handoff hardware run originally
+       motivated that step; revisit if a future RPi5 SMP example finds
+       otherwise. startup.S's _start already unconditionally invalidates
+       the entire D-cache (by set/way) and I-cache before this function
+       even runs, for the same stale-cache-line-from-a-previous-JTAG-
+       injection reason RPi3's own startup.S documents, so it is safe to
+       turn both on here as the new steady state. */
     mrs     x0, sctlr_el2
+    orr     x0, x0, #(1 << 2)        /* SCTLR_EL2.C: enable D-cache */
+    orr     x0, x0, #(1 << 12)       /* SCTLR_EL2.I: enable I-cache */
     orr     x0, x0, #1               /* SCTLR_EL2.M: enable MMU */
     msr     sctlr_el2, x0
     isb

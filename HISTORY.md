@@ -15,6 +15,34 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- Real Timer-Based PCIe Delays, Full D-cache/I-cache Enabled (Issue #169)
+
+Follow-up to issue #165: with the MMU on but caches deliberately off,
+this session rewrote `examples/common_rpi5/pcie.tkb`'s bring-up delays
+against a real clock so both caches could be enabled for upcoming RPi5
+multi-core work. Added `examples/common_rpi5/timer_asm.S` (a straight
+port of RPi3's architecture-generic `read_cntfrq`/`read_cntpct` pair)
+and `delay_us()`/`timed_out()` helpers in `pcie.tkb`, then replaced all
+eight iteration-count busy-loops (one calibration poll, five ~100-200us
+settles, one ~5ms-per-retry link-up poll, one ~100ms pre-poll wait) with
+real-time equivalents -- each one reusing its own already-documented
+approximate duration as the real microsecond target, a mechanical
+conversion of already-hardware-proven timing rather than a redesign.
+`examples/common_rpi5/mmu.S` now enables `SCTLR_EL2.C` and `SCTLR_EL2.I`
+alongside `M`. Also fixed a latent build break in `examples/
+rp1_pcie_smoke`'s own link rule (never updated to link
+`COMMON_RPI5_MMU_O`/the new `COMMON_RPI5_TIMER_ASM_O` after issue #165
+added an unconditional `bl mmu_init` to `startup.S`).
+
+`make hwcheck-rpi5` passes 46/46 with both caches on, confirmed across
+four consecutive real-hardware runs, and issue #165's exception
+checkpoint (deliberately forcing an unmapped PC and reading `ESR_EL2`/
+`FAR_EL2`/`ELR_EL2` back from `x1`/`x2`/`x3`) was re-verified with
+caches enabled too, identical correct result. Real cache-coherent
+multi-core access itself was not separately exercised -- only core 0
+runs today; that remains open pending issue #163 (MPIDR_EL1 core
+numbering) and an actual RPi5 SMP example. Issue #169 closed.
+
 ### 2026-07-25: RPi5 -- MMU + Exception Handling Without Weakening SWD Loader Safety (Issue #165)
 
 Ported RPi3's identity-map MMU idea to RPi5 as `examples/common_rpi5/

@@ -2069,6 +2069,8 @@ COMMON_RPI5_STARTUP_S    := $(COMMON_RPI5_DIR)/startup.S
 COMMON_RPI5_STARTUP_O    := $(COMMON_RPI5_DIR)/startup.o
 COMMON_RPI5_MMU_S        := $(COMMON_RPI5_DIR)/mmu.S
 COMMON_RPI5_MMU_O        := $(COMMON_RPI5_DIR)/mmu.o
+COMMON_RPI5_TIMER_ASM_S  := $(COMMON_RPI5_DIR)/timer_asm.S
+COMMON_RPI5_TIMER_ASM_O  := $(COMMON_RPI5_DIR)/timer_asm.o
 COMMON_RPI5_LINK_LD      := $(COMMON_RPI5_DIR)/link.ld
 COMMON_RPI5_UART         := $(COMMON_RPI5_DIR)/uart.tkb
 COMMON_RPI5_PRINT        := $(COMMON_RPI5_DIR)/print.tkb
@@ -2081,6 +2083,9 @@ $(COMMON_RPI5_STARTUP_O): $(COMMON_RPI5_STARTUP_S)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI5_MMU_O): $(COMMON_RPI5_MMU_S)
+	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
+
+$(COMMON_RPI5_TIMER_ASM_O): $(COMMON_RPI5_TIMER_ASM_S)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI5_JTAG_STUB_O): $(COMMON_RPI5_JTAG_STUB_S)
@@ -2132,19 +2137,29 @@ examples/basic_suite/basic_suite_rpi5.o: $(BASIC_SUITE_SOURCES)
 examples/type_system_suite/type_system_suite_rpi5.o: $(TYPE_SYSTEM_SUITE_SOURCES)
 examples/algorithm_suite/algorithm_suite_rpi5.o: $(ALGORITHM_SUITE_SOURCES) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL)
 
+## Every RPi5 kernel links COMMON_RPI5_TIMER_ASM_O unconditionally --
+## unlike RPi3, where only the RTC_EXAMPLES/timer-needing group needs
+## it, RPi5's COMMON_RPI5_PCIE (pcie.tkb) is passed to EVERY RPi5
+## compile (platform_init's own PCIe bring-up), and pcie.tkb itself now
+## calls delay_us()/read_cntfrq()/read_cntpct() (GitHub issue #169) --
+## so every RPi5 kernel needs this object regardless of whether its own
+## application code touches the timer.
 $(RPI5_KERNELS): examples/%/kernel_rpi5.elf: \
-    $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) examples/%/$$*_rpi5.o $(COMMON_RPI5_LINK_LD)
-	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) examples/$*/$*_rpi5.o -o $@
+    $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) examples/%/$$*_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) examples/$*/$*_rpi5.o -o $@
 
 ## rp1_pcie_smoke: GitHub issue #161's own first real-hardware test --
 ## brings up RP1's PCIe link (examples/common_rpi5/pcie.tkb) and, if
 ## successful, re-runs uart_init() (now targeting real, PCIe-mapped
-## hardware) to print a confirmation over rp1_uart0.
+## hardware) to print a confirmation over rp1_uart0. Same MMU_O/
+## TIMER_ASM_O link requirement as RPI5_KERNELS above, for the same
+## reasons (startup.S unconditionally calls mmu_init; pcie.tkb
+## unconditionally calls delay_us).
 examples/rp1_pcie_smoke/rp1_pcie_smoke_rpi5.o: examples/rp1_pcie_smoke/rp1_pcie_smoke.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
 
-examples/rp1_pcie_smoke/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) examples/rp1_pcie_smoke/rp1_pcie_smoke_rpi5.o $(COMMON_RPI5_LINK_LD)
-	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) examples/rp1_pcie_smoke/rp1_pcie_smoke_rpi5.o -o $@
+examples/rp1_pcie_smoke/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) examples/rp1_pcie_smoke/rp1_pcie_smoke_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) examples/rp1_pcie_smoke/rp1_pcie_smoke_rpi5.o -o $@
 
 ## RPI5_SERIAL_DEV: same convention as STM32_SERIAL_DEV/RPI3_SERIAL_DEV --
 ## empty by default, resolved at runtime by scripts/rpi5_uart_dev.sh (which

@@ -1,5 +1,43 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
+## Status update (2026-07-26): D-cache AND I-cache both enabled -- GitHub
+## issue #169, `make hwcheck-rpi5` 46/46 with full caches on
+
+Issue #165 (below) landed the MMU with D-cache/I-cache deliberately left
+OFF, because enabling them broke `examples/common_rpi5/pcie.tkb`'s own
+link-training/reset delays -- plain empty-loop iteration counts
+calibrated for cache-off execution speed, not a real timer read. Issue
+#169 fixed the actual root cause: `examples/common_rpi5/timer_asm.S`
+ports RPi3's `read_cntfrq`/`read_cntpct` ARM-Generic-Timer stubs
+(architecture-generic, not BCM2837-specific -- a straight copy), and
+`pcie.tkb` gained `delay_us()`/`timed_out()` helpers built on them.
+Every one of the eight iteration-count loops in `pcie.tkb` (one
+calibration-poll, five fixed ~100-200us settles, one ~5ms-per-retry
+poll, one ~100ms pre-poll wait) was replaced with a real-time
+equivalent, reusing each loop's OWN already-documented approximate
+duration as the real microsecond target -- a mechanical conversion of
+already-hardware-proven timing, not a redesign of the timing itself.
+
+With that done, `examples/common_rpi5/mmu.S`'s `SCTLR_EL2.C`/`I` are now
+BOTH enabled (unlike issue #165's original M-only state). **`make
+hwcheck-rpi5` passes 46/46 with full caches on, confirmed across four
+consecutive real-hardware runs**, and the issue #165 exception
+checkpoint (`ESR_EL2`/`FAR_EL2`/`ELR_EL2` in `x1`/`x2`/`x3` after a
+deliberately forced fault) was re-verified end-to-end with caches
+enabled too -- identical, correct result. `COMMON_RPI5_TIMER_ASM_O` is
+now linked into every `RPI5_KERNELS` entry AND `examples/rp1_pcie_smoke`
+(both need it unconditionally, since `pcie.tkb` -- used by every RPi5
+kernel via `COMMON_RPI5_PCIE` -- now calls `delay_us`/`read_cntfrq`/
+`read_cntpct`; this also fixed a pre-existing build break in
+`rp1_pcie_smoke`'s own link rule, which had never been updated to link
+`COMMON_RPI5_MMU_O` after issue #165 added an unconditional `bl
+mmu_init` to `startup.S`).
+
+Real, cache-coherent multi-core memory access (the reason this was
+prioritized -- upcoming RPi5 SMP work) has NOT been separately exercised
+yet: only core 0 runs today, same as every RPi5 example before this.
+Issue #163 (MPIDR_EL1 core numbering) is the next real test of that.
+
 ## Status (2026-07-25): RP1 PCIe enumeration and simultaneous SWD +
 ## GPIO14/15 UART output proven on real hardware (issue #161)
 
@@ -500,18 +538,17 @@ not a port of the existing driver.
 2. **MPIDR_EL1 core-numbering.** Assumed `mpidr_el1 & 3` still yields the
    plain 0-3 core number, same as BCM2837, since BCM2712 is also a single
    quad-core cluster -- not independently verified. Tracked by issue #163.
-3. **D-cache/I-cache stay OFF, deliberately, even though the MMU is now
-   on (issue #165).** `examples/common_rpi5/pcie.tkb`'s own link-training/
-   PHY/reset delays are plain empty-loop iteration counts calibrated for
-   cache-off execution speed, not a real timer read -- enabling I-cache
-   made the same fixed instruction count complete far faster in
-   wall-clock time, silently breaking real PCIe hardware timing
-   requirements (confirmed on real hardware: `pcie2_init()` started
-   returning `false` and every RPi5 example went UART-silent with caches
-   on, byte-identical correct output with them off). See
-   `examples/common_rpi5/mmu.S`'s own header comment on the `SCTLR_EL2`
-   write for the full trace. Revisit together with rewriting those delays
-   against a real timer, not as an isolated cache flag flip.
+3. **D-cache and I-cache are both ON now (issue #169).** `SCTLR_EL2.C`/
+   `I` were originally left off by issue #165 (see git history for the
+   original constraint text) because enabling them broke
+   `examples/common_rpi5/pcie.tkb`'s iteration-count delay loops --
+   fixed by rewriting those delays against a real ARM Generic Timer
+   read (`examples/common_rpi5/timer_asm.S`, `delay_us`/`timed_out` in
+   `pcie.tkb`), confirmed via `make hwcheck-rpi5` 46/46 across four
+   consecutive real-hardware runs with both caches on. Real
+   cache-coherent MULTI-core access has not been separately exercised --
+   only core 0 runs today; treat that as still open, not proven by this
+   entry, until an actual RPi5 SMP example exists (issue #163 first).
 4. **`mdw` (OpenOCD's raw memory-read command) does not work once the
    MMU is on.** Confirmed real and reproducible against this exact
    CMSIS-DAP/BCM2712/OpenOCD-0.12.0 combination: `mdw` against ordinary,
