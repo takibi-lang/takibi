@@ -1,6 +1,77 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): USB bring-up Steps 9-10 DONE --
+## Status update (2026-07-26, latest): USB bring-up Step 11 DONE --
+## Mass Storage works; the FAT12 boot sector is read off the real drive
+
+The whole stack now runs end to end on real hardware: PCIe -> RP1 ->
+XHCI -> USB enumeration -> Mass Storage Bulk-Only Transport -> SCSI ->
+a real sector off a real flash drive.
+
+**Bulk transfers.** `usb_bulk_xfer(dir_in, buf_dma, length)` queues one
+Normal TRB (Type 1) on that endpoint's own ring, rings that endpoint's
+doorbell (DB Target = its DCI), and waits for one Transfer Event. `ISP`
+(Interrupt on Short Packet, bit 2) is set so a device returning fewer
+bytes than offered still raises the event instead of leaving the
+transfer outstanding -- which also means **completion code 13 (Short
+Packet) is a success, not an error**, and every caller has to accept it
+alongside 1. Each bulk ring carries its own enqueue index and Cycle
+State, toggled on wrap exactly like EP0's.
+
+**Bulk-Only Transport.** `msc_cbw_header()` builds the 31-byte Command
+Block Wrapper (`dCBWSignature` = "USBC", incrementing `dCBWTag`,
+`dCBWDataTransferLength`, `bmCBWFlags` 0x80 for IN, `bCBWLUN` 0,
+`bCBWCBLength`) and zeroes the 16-byte CDB region for the caller to fill.
+`msc_run_command(data_len, dir_in)` then runs CBW out -> optional data
+phase -> CSW in, validating `dCSWSignature` ("USBS") **and** `dCSWTag`
+before trusting `dCSWStatus`; an out-of-phase transport can otherwise
+hand back a stale buffer that happens to read as success. It returns a
+small stage number rather than a bool, so a failure says exactly which
+phase stopped working.
+
+The structure deliberately mirrors `examples/common_rpi3/usb_msc.tkb`,
+which was confirmed to be entirely transport-agnostic above its
+`dwc2_bulk_in`/`dwc2_bulk_out` calls -- the RPi5 port swaps those for
+`usb_bulk_xfer` and everything above is the same shape.
+
+**Real-hardware result (reproducible across consecutive runs)**:
+
+```
+get max lun: completion_code=0x01 max_lun=0x00
+scsi inquiry: stage=0 vendor=" USB    " product=" SanDisk 3.2Gen1"
+scsi test unit ready: stage=0 tries=1
+scsi read capacity: stage=0 last_lba=120176639 block_size=512 size_mib=58680
+scsi read10 lba0: stage=0
+boot sector: signature=0x55,0xaa bytes_per_sector=512 sectors_per_cluster=1 num_fats=2
+boot sector: oem="TAKIBI  " fat_type="FAT12   "
+```
+
+`last_lba=120176639` at 512 bytes/block is 61.5 GB, matching the
+physical drive. The boot sector has the `0x55AA` signature and a
+coherent BPB -- and its OEM name reads **`TAKIBI`**, because this is the
+very drive `examples/common_rpi3`'s own FAT12 code formatted. The bytes
+crossing this brand-new RPi5 stack are the same bytes the RPi3 path
+wrote, which is about as strong an end-to-end check as this milestone
+could ask for.
+
+Notes for whoever continues:
+
+- Get Max LUN is a class request (`bmRequestType=0xA1`,
+  `bRequest=0xFE`, interface recipient). A single-LUN device is allowed
+  to STALL it rather than answer, so a failure there must not be fatal.
+- TEST UNIT READY is retried (50 x 100 ms): a flash drive routinely
+  reports Not Ready for a moment after configuration while its own
+  translation layer spins up. This drive answered on the first try, but
+  the retry is not optional in general.
+- Two `--forbid-trap`-adjacent type errors showed up while writing this:
+  `u32 >> (i * 8)` where `i` is `usize` does not unify, so shift amounts
+  need an explicit `as u32`. Worth knowing before writing the next
+  byte-packing loop.
+
+Next: `examples/common/fat12.tkb` is fully backend-agnostic and should
+drop straight on top of a `disk_read`/`disk_write` pair built from
+`msc_run_command`, then `el0_shell` on RPi5.
+
+## Status update (2026-07-26): USB bring-up Steps 9-10 DONE --
 ## device fully enumerated and CONFIGURED; bulk endpoints programmed
 
 The SanDisk flash drive is now in the xHCI Configured state with its

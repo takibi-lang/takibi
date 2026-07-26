@@ -15,6 +15,83 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- USB Bring-Up Step 11 DONE: Mass Storage Works, FAT12 Boot Sector Read Off the Real Drive
+
+The whole stack now runs end to end on real hardware: PCIe -> RP1 ->
+XHCI -> USB enumeration -> Mass Storage Bulk-Only Transport -> SCSI -> a
+real sector off a real flash drive.
+
+**Bulk transfers.** `usb_bulk_xfer(dir_in, buf_dma, length)` queues one
+Normal TRB (Type 1) on the endpoint's own ring, rings that endpoint's
+doorbell with DB Target = its DCI, and waits for one Transfer Event.
+`ISP` (Interrupt on Short Packet, bit 2) is set so a device that returns
+fewer bytes than offered still raises the event instead of leaving the
+transfer outstanding. That makes **completion code 13 (Short Packet) a
+success rather than an error**, and every caller has to accept it
+alongside 1 -- an easy thing to get wrong and then misdiagnose as a
+transport failure. Each bulk ring carries its own enqueue index and
+Cycle State, toggled on wrap exactly like EP0's.
+
+**Bulk-Only Transport.** `msc_cbw_header()` builds the 31-byte Command
+Block Wrapper (`dCBWSignature` = "USBC", incrementing `dCBWTag`,
+`dCBWDataTransferLength`, `bmCBWFlags` 0x80 for IN, `bCBWLUN` 0,
+`bCBWCBLength`) and zeroes the 16-byte CDB region for the caller to fill
+in. `msc_run_command(data_len, dir_in)` runs CBW out -> optional data
+phase -> CSW in, validating `dCSWSignature` ("USBS") *and* `dCSWTag`
+before trusting `dCSWStatus`: an out-of-phase transport can otherwise
+return a stale buffer that happens to read as success. It returns a
+small stage number instead of a bool so a failure reports exactly which
+phase stopped working.
+
+The structure deliberately mirrors `examples/common_rpi3/usb_msc.tkb`,
+which the earlier survey confirmed is entirely transport-agnostic above
+its `dwc2_bulk_in`/`dwc2_bulk_out` calls. The RPi5 port swaps those for
+`usb_bulk_xfer` and everything above keeps the same shape, which is what
+makes the eventual `disk_read`/`disk_write` + `fat12.tkb` reuse
+straightforward.
+
+Real-hardware result, reproducible across consecutive runs:
+
+```
+get max lun: completion_code=0x01 max_lun=0x00
+scsi inquiry: stage=0 vendor=" USB    " product=" SanDisk 3.2Gen1"
+scsi test unit ready: stage=0 tries=1
+scsi read capacity: stage=0 last_lba=120176639 block_size=512 size_mib=58680
+scsi read10 lba0: stage=0
+boot sector: signature=0x55,0xaa bytes_per_sector=512 sectors_per_cluster=1 num_fats=2
+boot sector: oem="TAKIBI  " fat_type="FAT12   "
+```
+
+`last_lba=120176639` at 512 bytes per block is 61.5 GB, matching the
+physical drive. The boot sector carries the `0x55AA` signature and a
+coherent BPB -- and its OEM name reads **`TAKIBI`**, because this is the
+very drive `examples/common_rpi3`'s own FAT12 code formatted. The bytes
+crossing this brand-new RPi5 stack are the same bytes the RPi3 path
+wrote, which is about as strong an end-to-end confirmation as this
+milestone could ask for.
+
+Two smaller things worth recording:
+
+- Get Max LUN is a class request (`bmRequestType=0xA1`, `bRequest=0xFE`,
+  interface recipient) and a single-LUN device is permitted to STALL it
+  rather than answer, so a failure there must not be treated as fatal.
+- TEST UNIT READY is retried (50 x 100 ms) because a flash drive
+  routinely reports Not Ready for a moment after configuration while its
+  translation layer spins up. This drive answered on the first try, but
+  the retry is not optional in general.
+
+Also, `u32 >> (i * 8)` with `i: usize` does not typecheck -- shift
+amounts need an explicit `as u32`. Worth knowing before writing the next
+byte-packing loop.
+
+Files touched: `examples/rp1_usb_smoke/rp1_usb_smoke.tkb` only.
+
+Next: `examples/common/fat12.tkb` is fully backend-agnostic and should
+drop straight on top of a `disk_read`/`disk_write` pair built from
+`msc_run_command`, then `el0_shell` on RPi5.
+
+---
+
 ### 2026-07-26: RPi5 -- USB Bring-Up Steps 9-10 DONE: Device Enumerated and CONFIGURED, Bulk Endpoints Programmed
 
 The SanDisk flash drive is now in the xHCI Configured state with its
