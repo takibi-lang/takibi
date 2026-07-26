@@ -1,0 +1,7 @@
+// extern fn declaration for examples/common_rpi5/hvc_asm.S's
+// rpi5_hvc_call, split into its own file matching
+// examples/common_rpi3/hvc_asm_extern.tkb's own reasoning (a duplicate
+// `extern fn` declaration is a hard conflict if two files needing it
+// both declared it locally).
+
+extern fn rpi5_hvc_call(arg: usize) -> usize;

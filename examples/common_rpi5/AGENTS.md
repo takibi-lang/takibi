@@ -1,7 +1,38 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): `el1_smoke` ported (EL2->EL1 drop),
-## a second real bug found, `make hwcheck-rpi5` 51/51
+## Status update (2026-07-26, latest): `hvc_smoke` ported (EL1->EL2 hvc
+## call), no new bug -- `el1_smoke`'s own TCR_EL1.IPS fix already covered
+## it, `make hwcheck-rpi5` 52/52
+
+Direct follow-on to `el1_smoke`: `examples/common_rpi5/hvc_asm.S` ports
+`examples/common_rpi3/hvc_asm.S`'s proven EL1->EL2 privileged
+call-and-return (`rpi5_hvc_call` issues `hvc #0` from EL1;
+`el1_hvc_entry`, reached via `startup.S`'s own "Lower EL AArch64
+Synchronous" vector slot at EL2, saves a full frame, calls the
+Takibi-compiled `hvc_dispatch` override, restores, and `eret`s back to
+EL1). `startup.S`'s exception vector table now wires that slot to
+`el1_hvc_entry`, with a weak spin-only default (matching
+`rpi5_irq_dispatch`'s own weak/strong pattern) so every OTHER RPi5
+kernel that never links `hvc_asm.o` still resolves the branch target at
+link time -- truly dead code for them, since nothing else issues `hvc`.
+`examples/hvc_smoke/hvc_smoke_rpi5.tkb` is a separate small source, same
+"not a portable public HAL name" reasoning as `el1_smoke_rpi5.tkb`;
+output byte-identical, RPi3's `.expected` fixture reused unchanged.
+
+**Passed on the FIRST real-hardware attempt, no new bug** -- unlike
+`el1_smoke`, which needed `TCR_EL1.IPS` fixed before `uart_putc`'s own
+MMIO write would work at EL1 at all. `hvc_smoke`'s `el1_main` prints
+both BEFORE and AFTER the `hvc` call at EL1 (`hvc_dispatch` itself
+prints at EL2, already correctly configured since `mmu.S`'s own issue
+#165 work); both EL1-side prints reuse the exact same `rpi5_el1_enter`
+translation-regime setup `el1_smoke` already exercises, so the earlier
+fix already covered this milestone's own needs -- nothing new to find.
+`make hwcheck-rpi5` passes 52/52, confirmed across two consecutive
+real-hardware runs.
+
+## Status update (2026-07-26, earlier): `el1_smoke` ported (EL2->EL1
+## drop), a second real bug found, `make hwcheck-rpi5` 51/51 at that
+## point
 
 Natural follow-on to issue #163: `examples/common_rpi5/el1_asm.S` ports
 `examples/common_rpi3/el1_asm.S`'s proven EL2->EL1 drop mechanism

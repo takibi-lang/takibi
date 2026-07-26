@@ -369,6 +369,12 @@ run_hw_test_rpi5_stdin "irq (rpi5)" "$REPO_ROOT/examples/irq/kernel_rpi5.elf" \
 # output is byte-for-byte identical to the RPi3 fixture, reused as-is.
 run_hw_test_rpi5 "el1_smoke (rpi5)" "$REPO_ROOT/examples/el1_smoke/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/el1_smoke/el1_smoke.expected"
+# hvc_smoke: builds directly on el1_smoke's own EL2->EL1 drop, adding
+# the EL1->EL2 hvc call boundary. Separate RPi5-specific source, same
+# reasoning as el1_smoke above; output byte-for-byte identical to the
+# RPi3 fixture.
+run_hw_test_rpi5 "hvc_smoke (rpi5)" "$REPO_ROOT/examples/hvc_smoke/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/hvc_smoke/hvc_smoke.expected"
 
 echo
 echo "RPi5 hardware tests: $PASS passed, $FAIL failed"

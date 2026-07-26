@@ -15,6 +15,28 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- Ported `hvc_smoke` (EL1->EL2 hvc Call), No New Bug
+
+Direct follow-on to `el1_smoke`. `examples/common_rpi5/hvc_asm.S` ports
+`examples/common_rpi3/hvc_asm.S`'s proven EL1->EL2 privileged
+call-and-return: `rpi5_hvc_call` issues `hvc #0` from EL1; `el1_hvc_entry`
+(reached via `startup.S`'s own "Lower EL AArch64 Synchronous" vector
+slot at EL2) saves a full frame, calls the Takibi-compiled
+`hvc_dispatch` override, restores, and `eret`s back to EL1. That vector
+slot gained a weak spin-only default (matching `rpi5_irq_dispatch`'s
+own weak/strong pattern) so every other RPi5 kernel that never links
+`hvc_asm.o` still resolves the branch target at link time.
+`examples/hvc_smoke/hvc_smoke_rpi5.tkb` is a separate small source, same
+"not a portable public HAL name" reasoning as `el1_smoke_rpi5.tkb`;
+output byte-identical, RPi3's `.expected` fixture reused unchanged.
+
+Passed on the first real-hardware attempt -- no new bug. `el1_main`
+prints both before and after the `hvc` call at EL1; both reuse the
+exact same `rpi5_el1_enter` translation-regime setup `el1_smoke` already
+exercises and already fixed (`TCR_EL1.IPS`), so nothing new to find this
+time. `make hwcheck-rpi5` passes 52/52, confirmed across two consecutive
+real-hardware runs.
+
 ### 2026-07-26: RPi5 -- Ported `el1_smoke` (EL2->EL1 Drop), a Second Real TCR Bug Found
 
 Natural follow-on to issue #163. `examples/common_rpi5/el1_asm.S` ports

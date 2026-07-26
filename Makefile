@@ -2074,6 +2074,9 @@ COMMON_RPI5_TIMER_ASM_O  := $(COMMON_RPI5_DIR)/timer_asm.o
 COMMON_RPI5_EL1_ASM_S    := $(COMMON_RPI5_DIR)/el1_asm.S
 COMMON_RPI5_EL1_ASM_O    := $(COMMON_RPI5_DIR)/el1_asm.o
 COMMON_RPI5_EL1_ASM_EXTERN := $(COMMON_RPI5_DIR)/el1_asm_extern.tkb
+COMMON_RPI5_HVC_ASM_S    := $(COMMON_RPI5_DIR)/hvc_asm.S
+COMMON_RPI5_HVC_ASM_O    := $(COMMON_RPI5_DIR)/hvc_asm.o
+COMMON_RPI5_HVC_ASM_EXTERN := $(COMMON_RPI5_DIR)/hvc_asm_extern.tkb
 COMMON_RPI5_LINK_LD      := $(COMMON_RPI5_DIR)/link.ld
 COMMON_RPI5_UART         := $(COMMON_RPI5_DIR)/uart.tkb
 COMMON_RPI5_PRINT        := $(COMMON_RPI5_DIR)/print.tkb
@@ -2094,6 +2097,9 @@ $(COMMON_RPI5_TIMER_ASM_O): $(COMMON_RPI5_TIMER_ASM_S)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI5_EL1_ASM_O): $(COMMON_RPI5_EL1_ASM_S)
+	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
+
+$(COMMON_RPI5_HVC_ASM_O): $(COMMON_RPI5_HVC_ASM_S)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI5_JTAG_STUB_O): $(COMMON_RPI5_JTAG_STUB_S)
@@ -2198,16 +2204,33 @@ examples/el1_smoke/kernel_rpi5.elf: \
     $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_EL1_ASM_O) examples/el1_smoke/el1_smoke_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_EL1_ASM_O) examples/el1_smoke/el1_smoke_rpi5.o -o $@
 
+## hvc_smoke: builds directly on el1_smoke's own EL2->EL1 drop, adding
+## examples/common_rpi5/hvc_asm.S's EL1->EL2 hvc call boundary (port of
+## examples/common_rpi3/hvc_asm.S). Same "separate RPi5-specific source,
+## byte-identical output, bespoke rules" reasoning as el1_smoke above --
+## examples/hvc_smoke/hvc_smoke.tkb hardcodes RPi3's own
+## rpi3_el1_enter/rpi3_hvc_call.
+examples/hvc_smoke/hvc_smoke_rpi5.o: examples/hvc_smoke/hvc_smoke_rpi5.tkb \
+    $(COMMON_RPI5_EL1_ASM_EXTERN) $(COMMON_RPI5_HVC_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+examples/hvc_smoke/kernel_rpi5.elf: \
+    $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_EL1_ASM_O) $(COMMON_RPI5_HVC_ASM_O) examples/hvc_smoke/hvc_smoke_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_EL1_ASM_O) $(COMMON_RPI5_HVC_ASM_O) examples/hvc_smoke/hvc_smoke_rpi5.o -o $@
+
 RPI5_EL1_SMOKE_EXAMPLES := el1_smoke
-RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES) $(RPI5_EL1_SMOKE_EXAMPLES)
+RPI5_HVC_SMOKE_EXAMPLES := hvc_smoke
+RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES) $(RPI5_EL1_SMOKE_EXAMPLES) $(RPI5_HVC_SMOKE_EXAMPLES)
 RPI5_KERNELS  := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_EL1_SMOKE_KERNELS := $(foreach e,$(RPI5_EL1_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
-# el1_smoke's kernel has its OWN explicit link rule above (extra
-## COMMON_RPI5_EL1_ASM_O input, and its object comes from a differently-
-## named source) -- filtered out here so the generic static pattern rule
-## below does not ALSO claim to define it, matching RPi3's own
+RPI5_HVC_SMOKE_KERNELS := $(foreach e,$(RPI5_HVC_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
+# el1_smoke/hvc_smoke's kernels have their OWN explicit link rules above
+## (extra COMMON_RPI5_EL1_ASM_O/HVC_ASM_O inputs, and their objects come
+## from differently-named sources) -- filtered out here so the generic
+## static pattern rule below does not ALSO claim to define them, matching
+## RPi3's own
 ## RPI3_GENERIC_KERNELS filter-out convention for the identical reason.
-RPI5_GENERIC_KERNELS := $(filter-out $(RPI5_EL1_SMOKE_KERNELS),$(RPI5_KERNELS))
+RPI5_GENERIC_KERNELS := $(filter-out $(RPI5_EL1_SMOKE_KERNELS) $(RPI5_HVC_SMOKE_KERNELS),$(RPI5_KERNELS))
 
 ## Every RPi5 kernel links COMMON_RPI5_TIMER_ASM_O unconditionally --
 ## unlike RPi3, where only the RTC_EXAMPLES/timer-needing group needs

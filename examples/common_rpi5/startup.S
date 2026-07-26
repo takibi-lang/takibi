@@ -261,10 +261,24 @@ sync_exception_evidence:
     wfe
     b       .Lsync_spx_halt
 
+/* Default (weak) EL1->EL2 hvc entry: a plain spin, same debuggable-at-a-
+   known-PC rationale as every other still-unused vector slot. Every
+   RPi5 kernel except examples/hvc_smoke links this weak definition;
+   hvc_smoke alone links examples/common_rpi5/hvc_asm.S's strong
+   override (the real 272-byte-frame save/dispatch/restore), the same
+   weak/strong pattern rpi5_irq_dispatch above already uses. Truly dead
+   code for every other example: nothing else ever issues `hvc`. */
+    .weak   el1_hvc_entry
+el1_hvc_entry:
+    b       .
+
 /* -- Exception vector table (must be 2KB aligned) ---------------------------
    A spin at a known PC is inspectable over SWD, so unrelated slots retain
    that behavior. Current-EL-SPx Synchronous (0x200) records fault evidence;
-   Current-EL-SPx IRQ (0x280) runs issue #164's saved-frame dispatcher. */
+   Current-EL-SPx IRQ (0x280) runs issue #164's saved-frame dispatcher;
+   Lower-EL-AArch64 Synchronous (0x400) runs el1_hvc_entry (weak default
+   above, or examples/common_rpi5/hvc_asm.S's real handler for
+   examples/hvc_smoke). */
     .section .text.vectors
     .align  11
     .global exception_vectors
@@ -285,7 +299,7 @@ exception_vectors:
     .align  7
     b       .                   /* 0x380: Current EL SPx, SError */
     .align  7
-    b       .                   /* 0x400: Lower EL AArch64, Synchronous */
+    b       el1_hvc_entry       /* 0x400: Lower EL AArch64, Synchronous */
     .align  7
     b       .                   /* 0x480: Lower EL AArch64, IRQ */
     .align  7
