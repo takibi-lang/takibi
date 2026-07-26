@@ -163,6 +163,14 @@ const DYN_VA_LIMIT: usize = 0x40200000;
 // access bit needed).
 const PTE_FLAGS_EL2_RW: usize = 0x707;
 
+// Same encoding as PTE_FLAGS_EL2_RW, plus AP[1] (bit 6) set: AP[2:1] = 01
+// means "EL1 RW/EL0 RW" under the EL1&0 translation regime a real EL0
+// process runs in (examples/el0_smoke, ported from
+// vm_page_map_core.tkb's own PTE_FLAGS_EL0_RW). No separate "exec" bit is
+// needed -- AArch64 pages are executable by default unless UXN/PXN is
+// explicitly set, and neither is set here.
+const PTE_FLAGS_EL0_RW: usize = 0x747;
+
 extern fn l3_dynamic_write(index: usize, value: usize);
 
 fn map_page(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
@@ -175,6 +183,29 @@ fn map_page(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
     let pool_base: usize = pool_base_ptr as usize;
     let phys_addr: usize = pool_base + page.index * PAGE_SIZE;
     l3_dynamic_write(l3_index, phys_addr | PTE_FLAGS_EL2_RW);
+
+    let mut occupied: AddressSpaceOwner[asid, SpaceState::Occupied] =
+        { space.tag };
+    let mut pending: TlbInvalidationPending[asid, va, p] =
+        { space.tag, va, page.index, page.p_witness };
+    return (occupied, pending);
+}
+
+// Same as map_page, but the L3 page descriptor grants EL0 access too
+// (PTE_FLAGS_EL0_RW instead of PTE_FLAGS_EL2_RW) -- for a page that will
+// be executed at EL0 after examples/el0_smoke's rpi5_el1_enter/
+// rpi5_el0_enter drop, ported from vm_page_map_core.tkb's own
+// map_page_el0_exec.
+fn map_page_el0_exec(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
+                     page: sink PageOwner[p],
+                     va: {DYN_VA_BASE..<DYN_VA_LIMIT as usize} @ va)
+        -> (AddressSpaceOwner[asid, SpaceState::Occupied],
+            TlbInvalidationPending[asid, va, p]) {
+    let l3_index: usize = (va - DYN_VA_BASE) / PAGE_SIZE;
+    let pool_base_ptr: *u8 = page_pool as *u8;
+    let pool_base: usize = pool_base_ptr as usize;
+    let phys_addr: usize = pool_base + page.index * PAGE_SIZE;
+    l3_dynamic_write(l3_index, phys_addr | PTE_FLAGS_EL0_RW);
 
     let mut occupied: AddressSpaceOwner[asid, SpaceState::Occupied] =
         { space.tag };

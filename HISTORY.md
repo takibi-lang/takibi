@@ -15,6 +15,47 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- Ported `el0_smoke` (EL1->EL0 Drop + Real SVC Trap), Found a Cache-Coherency Bug
+
+Direct follow-on to `el1_smoke`/`vm_page_map` (GitHub issue #67 Stage 2
+follow-up). `examples/common_rpi5/el0_asm.S` ports RPi3's proven EL1->EL0
+drop and real SVC trap mechanism (a tiny hand-written EL0 payload issues
+`write`/`exit` via `svc #0`), minus issue #158's later fork()-specific
+additions (`rpi3_el0_resume_frame`, `frame_sp`/`far` params, `SP_EL0`
+preservation) -- not needed for this milestone. `el1_asm.S`'s vector
+table gained a real wire-up: the Lower-EL-AArch64-Synchronous slot now
+branches to a weak `el0_sync_entry` default, strongly overridden by
+`el0_asm.S`. `vm_page_map_core_rpi5.tkb` gained `map_page_el0_exec`
+(`PTE_FLAGS_EL0_RW`/`0x747` instead of `0x707` -- AP[1] grants EL0
+access; pages are executable by default unless UXN/PXN is set, no
+separate exec bit needed). `el0_smoke_rpi5.tkb` is a separate small
+source; output byte-identical, RPi3's `.expected` fixture reused
+unchanged.
+
+Found and fixed a real, genuinely new bug: the first attempt printed
+only `el0_smoke\n`, then hung. SWD found the core parked in
+`el0_sync_entry`'s unhandled-park loop with `ESR_EL1=0x02000000` (EC=0,
+"Unknown reason") and `ELR_EL1=0x1018` -- EL0 had trapped from a bogus
+PC, not the real `0x40000000` payload. A temporary debug print in
+`el1_main` confirmed the root cause: `app_main` (EL2) printed the
+freshly assigned `el0_entry_va=0x40000000`, but `el1_main` (EL1, after
+`rpi5_el1_enter`'s drop) read the same global back as `0`. Root cause:
+`el1_asm.S`'s `SCTLR_EL1` setup left D-cache/I-cache OFF, with a comment
+claiming this matched `mmu.S`'s "current EL2 steady state" -- true when
+issue #163 first wrote this file, false by the time it shipped (issue
+#169 had already turned EL2's caches ON), and nobody re-checked the
+claim afterward. With EL2's D-cache on and EL1's off, EL2's store to
+`el0_entry_va` could sit dirty in cache, invisible to EL1's own uncached
+read of the same physical location -- the first RPi5 example whose EL1
+code reads data an EL2 phase wrote moments earlier, so `el1_smoke`/
+`hvc_smoke` never exercised this path. Fixed: `SCTLR_EL1` now also
+enables C/I, matching EL2's real current state and restoring ordinary
+same-core cache coherency across the transition.
+
+`make hwcheck-rpi5` passes 54/54, confirmed across two consecutive
+real-hardware runs. This was the last item RPi3's own staged bring-up
+order needed before EL0 process work can begin on RPi5.
+
 ### 2026-07-26: RPi5 -- Ported `vm_page_map` (Dynamic Single-Page Mapping), No New Bug
 
 Prerequisite for a future `el0_smoke` port (EL1->EL0 drop + real SVC trap

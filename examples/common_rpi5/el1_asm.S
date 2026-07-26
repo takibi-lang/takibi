@@ -27,10 +27,14 @@
    spins, same reasoning as examples/common_rpi5/startup.S's own EL2
    table (and RPi3's own EL1 table): a spin at a known PC, inspectable
    over SWD, beats an unhandled fault running off into whatever VBAR_EL1
-   held before this code ever set it. No real EL1 exception handling and
-   no EL0 vector wiring exist yet -- this milestone only proves the
-   EL2->EL1 drop itself, the same narrow scope RPi3's own el1_smoke
-   started from. */
+   held before this code ever set it. No real EL1 exception handling
+   exists yet (IRQ/FIQ/SError all still spin); only the Lower-EL-AArch64-
+   Synchronous slot is wired, to a weak el0_sync_entry default (spin) so
+   every RPi5 kernel that never links el0_asm.o still resolves the branch
+   target at link time -- examples/common_rpi5/el0_asm.S (GitHub issue
+   #67 Stage 2 follow-up) provides the strong override for any example
+   that actually calls rpi5_el0_enter (examples/el0_smoke), same
+   weak/strong pattern as startup.S's own rpi5_irq_dispatch. */
     .align  11
 rpi5_el1_vectors:
     b       .                   /* 0x000: Synchronous (EL1t) */
@@ -49,7 +53,10 @@ rpi5_el1_vectors:
     .align  7
     b       .                   /* 0x380: SError */
     .align  7
-    b       .                   /* 0x400: Synchronous (lower EL, AArch64) */
+    b       el0_sync_entry      /* 0x400: Synchronous (lower EL, AArch64) --
+                                    GitHub issue #67 Stage 2 follow-up: real
+                                    SVC entry once an example drops further
+                                    to EL0 (examples/el0_smoke) */
     .align  7
     b       .                   /* 0x480: IRQ */
     .align  7
@@ -138,18 +145,38 @@ rpi5_el1_enter:
 
     /* SCTLR_EL1: read-modify-write (like startup.S's own SCTLR_EL2
        setup) so any implementation-defined RES1 bits this SoC's reset
-       value already carries are preserved. Enable M (MMU); leave C
-       (D-cache) and I (I-cache) OFF, matching mmu.S's own current EL2
-       steady state for this exact same reason (issue #169: enabling
-       caches broke pcie.tkb's iteration-count delay loops -- irrelevant
-       to el1_main here, which touches no PCIe/RP1 registers at all, but
-       keeping EL1's cache policy consistent with EL2's avoids a subtle,
-       needless divergence for no benefit this milestone needs). Clear A
-       (alignment-fault checking) to match EL2's own setting. */
+       value already carries are preserved. Enable M (MMU), C (D-cache),
+       and I (I-cache), matching mmu.S's own CURRENT EL2 steady state
+       (issue #169 turned both on there). Clear A (alignment-fault
+       checking) to match EL2's own setting.
+
+       REAL BUG, found via examples/el0_smoke: an EARLIER version of this
+       function left C/I OFF, with a comment claiming that matched EL2's
+       "current steady state" -- true when issue #163 first wrote this
+       file, false by the time it shipped (issue #169 had already turned
+       EL2's caches on) and nobody re-checked the claim. This went
+       unnoticed by el1_smoke/hvc_smoke, neither of which reads any data
+       written by EL2 code after dropping to EL1 -- el0_smoke is the
+       first RPi5 example that does (app_main sets the global
+       el0_entry_va at EL2, then el1_main reads it at EL1 to know where
+       to drop EL0's PC). With EL2's D-cache on and EL1's off, EL2's
+       store to el0_entry_va could sit dirty in cache, invisible to
+       EL1's own uncached read of the same physical location. Confirmed
+       directly: adding a debug uart_print to el1_main showed
+       `entry_va=0` even though app_main had just printed the freshly
+       assigned `va=1073741824` moments earlier at EL2 -- and the
+       resulting el0 payload trap landed with ESR_EL1 EC=0 ("Unknown
+       reason") and ELR_EL1=0x1018, ie EL0 tried to execute garbage at
+       PC 0, not the intended 0x40000000 payload, because rpi5_el0_enter
+       was called with the stale el0_entry_va=0. Turning EL1's caches on
+       restores ordinary same-core cache coherency across the EL2->EL1
+       transition (both regimes now read/write the same physical memory
+       through the same cache hierarchy), matching what mmu.S's own
+       comment always intended. */
     mrs     x2, sctlr_el1
     orr     x2, x2, #1
-    bic     x2, x2, #(1 << 2)
-    bic     x2, x2, #(1 << 12)
+    orr     x2, x2, #(1 << 2)
+    orr     x2, x2, #(1 << 12)
     bic     x2, x2, #(1 << 1)
     msr     sctlr_el1, x2
     isb
@@ -200,3 +227,15 @@ rpi5_el1_enter:
 .Lel1_park:
     wfe
     b       .Lel1_park
+
+/* -- Default (no-op) EL0 synchronous-exception entry -----------------------
+   rpi5_el1_vectors' Lower-EL-AArch64-Synchronous entry branches here
+   unconditionally, same as startup.S's own weak rpi5_irq_dispatch default
+   -- an example that never drops to EL0 (like el1_smoke/hvc_smoke/
+   vm_page_map) still needs this symbol to resolve at link time.
+   examples/common_rpi5/el0_asm.S provides the strong override (real SVC
+   register-frame save + el0_svc_dispatch call) for any example that
+   actually calls rpi5_el0_enter. */
+    .weak   el0_sync_entry
+el0_sync_entry:
+    b       .

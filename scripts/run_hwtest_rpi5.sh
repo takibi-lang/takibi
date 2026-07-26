@@ -384,6 +384,15 @@ run_hw_test_rpi5 "hvc_smoke (rpi5)" "$REPO_ROOT/examples/hvc_smoke/kernel_rpi5.e
 # byte-for-byte identical to the RPi3 fixture.
 run_hw_test_rpi5 "vm_page_map (rpi5)" "$REPO_ROOT/examples/vm_page_map/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/vm_page_map/vm_page_map.expected"
+# el0_smoke (GitHub issue #67 Stage 2 follow-up): EL1->EL0 drop + real SVC
+# trap boundary, building on el1_smoke's EL2->EL1 drop and vm_page_map's
+# dynamic mapping. Separate RPi5-specific source and el0_asm.S (minus
+# issue #158's later fork()-specific additions -- not needed here), same
+# reasoning as vm_page_map above; the hand-written EL0 payload's own
+# printed text does not depend on the VA window's address, so output is
+# byte-for-byte identical to the RPi3 fixture.
+run_hw_test_rpi5 "el0_smoke (rpi5)" "$REPO_ROOT/examples/el0_smoke/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/el0_smoke/el0_smoke.expected"
 
 echo
 echo "RPi5 hardware tests: $PASS passed, $FAIL failed"
