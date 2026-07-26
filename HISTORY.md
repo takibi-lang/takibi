@@ -15,6 +15,48 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- Ported `el0_elf_load` (Real ELF+cpio Loader), Scoped to the Original Single-Page Milestone
+
+Direct follow-on to `el0_smoke` (GitHub issue #67 Stage 2 follow-up).
+RPi3's current `el0_elf_load.tkb` has grown, via issue #156, from its
+original single-page Stage 1 scope (ELF+cpio parsing, read/write/exit)
+into a ~1100-line loader with multi-page `ProcessAddressSpace` mapping,
+`hvc`-triggered teardown, and a ~20-syscall busybox-shell surface. User
+consulted on scope (a size jump unlike any prior RPi5 step) and chose
+the minimal, original-Stage-1-equivalent port: real cpio+ELF parsing
+into the same single page `el0_smoke_rpi5` already proved
+(`map_page_el0_exec`, no core changes needed), read/write/exit only, no
+multi-page generalization, no `hvc` teardown (abandon idiom instead).
+
+`examples/common_rpi5/el0_test_prog.S`/`.ld` are a trimmed copy of
+RPi3's own hand-written test ELF, with RPi3's 6000-byte dead-padding
+(added there to force a multi-page load for issue #156's own proof)
+removed. Confirmed via a real build + `readelf -l` that the trimmed
+binary still gets 6 program headers (`-pie` always emits
+`PT_DYNAMIC`/`PT_GNU_RELRO`/`PT_GNU_STACK` regardless of `.text` size),
+so only the padding differs from RPi3's copy. `el0_elf_load_rpi5.tkb`
+keeps the PIE load-bias computation (the test binary is PIE) but caps
+everything at one page. Own `.expected` fixture (no `"hvc: process VM
+reclaimed"` line), reusing RPi3's own target-independent
+`el0_elf_load.stdin` (`"AB\n"`).
+
+Two mechanical Takibi type-system findings while porting: a refined-type
+local variable initialized from a named `const` (not a literal) didn't
+type-check even though the identical range already worked as a function
+parameter type -- the checker only recognizes a literal RHS as range
+proof, not a `const` reference to the same value; and indexing
+`mapping_bytes`'s array-typed return needs a plain `usize` index, not an
+`isize`-cast one (that cast is only for raw pointer indexing, which
+RPi3's own multi-page loader uses instead of `mapping_bytes`).
+
+Passed on the first real-hardware attempt, no new bug -- once past an
+unrelated USB/CMSIS-DAP transient (the Debug Probe, an RP2040 running
+CMSIS-DAP firmware, dropped off the host USB bus entirely between the
+two confirmation runs; a `USBDEVFS_RESET` ioctl found it already gone,
+and a physical cable reconnect from the user was what brought it back).
+`make hwcheck-rpi5` passes 55/55, confirmed across two consecutive
+real-hardware runs.
+
 ### 2026-07-26: RPi5 -- Ported `el0_smoke` (EL1->EL0 Drop + Real SVC Trap), Found a Cache-Coherency Bug
 
 Direct follow-on to `el1_smoke`/`vm_page_map` (GitHub issue #67 Stage 2

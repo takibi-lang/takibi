@@ -1,0 +1,7 @@
+// extern fn declarations for examples/common_rpi5/el0_test_image.S
+// (GitHub issue #67 Stage 2 follow-up, ported from examples/common_rpi3/
+// el0_test_image_extern.tkb), split into its own file matching
+// examples/common_rpi5/tlb_asm_extern.tkb's own reasoning.
+
+extern fn el0_test_image_addr() -> usize;
+extern fn el0_test_image_len() -> usize;

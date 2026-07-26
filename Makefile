@@ -2083,6 +2083,14 @@ COMMON_RPI5_TLB_ASM_EXTERN := $(COMMON_RPI5_DIR)/tlb_asm_extern.tkb
 COMMON_RPI5_EL0_ASM_S    := $(COMMON_RPI5_DIR)/el0_asm.S
 COMMON_RPI5_EL0_ASM_O    := $(COMMON_RPI5_DIR)/el0_asm.o
 COMMON_RPI5_EL0_ASM_EXTERN := $(COMMON_RPI5_DIR)/el0_asm_extern.tkb
+COMMON_RPI5_EL0_TEST_PROG_S     := $(COMMON_RPI5_DIR)/el0_test_prog.S
+COMMON_RPI5_EL0_TEST_PROG_O     := $(COMMON_RPI5_DIR)/el0_test_prog.o
+COMMON_RPI5_EL0_TEST_PROG_LD    := $(COMMON_RPI5_DIR)/el0_test_prog.ld
+COMMON_RPI5_EL0_TEST_PROG_ELF   := $(COMMON_RPI5_DIR)/el0_test_prog.elf
+COMMON_RPI5_INITRAMFS_CPIO      := $(COMMON_RPI5_DIR)/initramfs.cpio
+COMMON_RPI5_EL0_TEST_IMAGE_S    := $(COMMON_RPI5_DIR)/el0_test_image.S
+COMMON_RPI5_EL0_TEST_IMAGE_O    := $(COMMON_RPI5_DIR)/el0_test_image.o
+COMMON_RPI5_EL0_TEST_IMAGE_EXTERN := $(COMMON_RPI5_DIR)/el0_test_image_extern.tkb
 COMMON_RPI5_LINK_LD      := $(COMMON_RPI5_DIR)/link.ld
 COMMON_RPI5_UART         := $(COMMON_RPI5_DIR)/uart.tkb
 COMMON_RPI5_PRINT        := $(COMMON_RPI5_DIR)/print.tkb
@@ -2112,6 +2120,32 @@ $(COMMON_RPI5_TLB_ASM_O): $(COMMON_RPI5_TLB_ASM_S)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI5_EL0_ASM_O): $(COMMON_RPI5_EL0_ASM_S)
+	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
+
+## examples/el0_elf_load (GitHub issue #67 Stage 2 follow-up): a real,
+## standalone EL0 ELF binary, wrapped in a real cpio (newc) archive and
+## embedded into the kernel image -- same build shape as RPi3's own
+## el0_test_prog.elf/initramfs.cpio, see examples/common_rpi5/
+## el0_test_prog.S's own header comment for why this is a separate,
+## trimmed (single-page) copy rather than a reuse of RPi3's file.
+$(COMMON_RPI5_EL0_TEST_PROG_O): $(COMMON_RPI5_EL0_TEST_PROG_S)
+	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
+
+# -pie: static-pie output (ET_DYN, base 0 per el0_test_prog.ld), same
+# reasoning as RPi3's own el0_test_prog.elf build rule.
+$(COMMON_RPI5_EL0_TEST_PROG_ELF): $(COMMON_RPI5_EL0_TEST_PROG_O) $(COMMON_RPI5_EL0_TEST_PROG_LD)
+	$(LLD) -z max-page-size=4096 -pie -T $(COMMON_RPI5_EL0_TEST_PROG_LD) $(COMMON_RPI5_EL0_TEST_PROG_O) -o $@
+
+# `cd` into the directory first so the archive's own stored entry name is
+# the bare "el0_test_prog.elf" (what examples/el0_elf_load/
+# el0_elf_load_rpi5.tkb's cpio parser expects to skip past), not this
+# file's full repo-relative path.
+$(COMMON_RPI5_INITRAMFS_CPIO): $(COMMON_RPI5_EL0_TEST_PROG_ELF)
+	cd $(COMMON_RPI5_DIR) && echo $(notdir $(COMMON_RPI5_EL0_TEST_PROG_ELF)) | cpio -o -H newc > $(notdir $@)
+
+# .incbin makes this .o's own freshness depend on the embedded archive's
+# bytes, not just el0_test_image.S's own text.
+$(COMMON_RPI5_EL0_TEST_IMAGE_O): $(COMMON_RPI5_EL0_TEST_IMAGE_S) $(COMMON_RPI5_INITRAMFS_CPIO)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI5_JTAG_STUB_O): $(COMMON_RPI5_JTAG_STUB_S)
@@ -2263,24 +2297,38 @@ examples/el0_smoke/kernel_rpi5.elf: \
     $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_EL1_ASM_O) $(COMMON_RPI5_EL0_ASM_O) examples/el0_smoke/el0_smoke_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_EL1_ASM_O) $(COMMON_RPI5_EL0_ASM_O) examples/el0_smoke/el0_smoke_rpi5.o -o $@
 
+## el0_elf_load: a real ELF loader fed from a real cpio archive (GitHub
+## issue #67 Stage 2 follow-up, minimal single-page port of RPi3's own
+## issue #153 milestone -- see examples/el0_elf_load/
+## el0_elf_load_rpi5.tkb's own header comment for the scope decision).
+examples/el0_elf_load/el0_elf_load_rpi5.o: examples/el0_elf_load/el0_elf_load_rpi5.tkb \
+    examples/vm_page_map/vm_page_map_core_rpi5.tkb $(COMMON_RPI5_TLB_ASM_EXTERN) $(COMMON_RPI5_EL0_ASM_EXTERN) $(COMMON_RPI5_EL1_ASM_EXTERN) $(COMMON_RPI5_EL0_TEST_IMAGE_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+examples/el0_elf_load/kernel_rpi5.elf: \
+    $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_EL1_ASM_O) $(COMMON_RPI5_EL0_ASM_O) $(COMMON_RPI5_EL0_TEST_IMAGE_O) examples/el0_elf_load/el0_elf_load_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_EL1_ASM_O) $(COMMON_RPI5_EL0_ASM_O) $(COMMON_RPI5_EL0_TEST_IMAGE_O) examples/el0_elf_load/el0_elf_load_rpi5.o -o $@
+
 RPI5_EL1_SMOKE_EXAMPLES := el1_smoke
 RPI5_HVC_SMOKE_EXAMPLES := hvc_smoke
 RPI5_VM_PAGE_MAP_EXAMPLES := vm_page_map
 RPI5_EL0_SMOKE_EXAMPLES := el0_smoke
-RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES) $(RPI5_EL1_SMOKE_EXAMPLES) $(RPI5_HVC_SMOKE_EXAMPLES) $(RPI5_VM_PAGE_MAP_EXAMPLES) $(RPI5_EL0_SMOKE_EXAMPLES)
+RPI5_EL0_ELF_LOAD_EXAMPLES := el0_elf_load
+RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES) $(RPI5_EL1_SMOKE_EXAMPLES) $(RPI5_HVC_SMOKE_EXAMPLES) $(RPI5_VM_PAGE_MAP_EXAMPLES) $(RPI5_EL0_SMOKE_EXAMPLES) $(RPI5_EL0_ELF_LOAD_EXAMPLES)
 RPI5_KERNELS  := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_EL1_SMOKE_KERNELS := $(foreach e,$(RPI5_EL1_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_HVC_SMOKE_KERNELS := $(foreach e,$(RPI5_HVC_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_VM_PAGE_MAP_KERNELS := $(foreach e,$(RPI5_VM_PAGE_MAP_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_EL0_SMOKE_KERNELS := $(foreach e,$(RPI5_EL0_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
-# el1_smoke/hvc_smoke/vm_page_map/el0_smoke's kernels have their OWN
-## explicit link rules above (extra COMMON_RPI5_EL1_ASM_O/HVC_ASM_O/
-## TLB_ASM_O/EL0_ASM_O inputs, and their objects come from
-## differently-named sources) -- filtered out here so the generic static
-## pattern rule below does not ALSO claim to define them, matching RPi3's
-## own RPI3_GENERIC_KERNELS filter-out convention for the identical
-## reason.
-RPI5_GENERIC_KERNELS := $(filter-out $(RPI5_EL1_SMOKE_KERNELS) $(RPI5_HVC_SMOKE_KERNELS) $(RPI5_VM_PAGE_MAP_KERNELS) $(RPI5_EL0_SMOKE_KERNELS),$(RPI5_KERNELS))
+RPI5_EL0_ELF_LOAD_KERNELS := $(foreach e,$(RPI5_EL0_ELF_LOAD_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
+# el1_smoke/hvc_smoke/vm_page_map/el0_smoke/el0_elf_load's kernels have
+## their OWN explicit link rules above (extra COMMON_RPI5_EL1_ASM_O/
+## HVC_ASM_O/TLB_ASM_O/EL0_ASM_O/EL0_TEST_IMAGE_O inputs, and their
+## objects come from differently-named sources) -- filtered out here so
+## the generic static pattern rule below does not ALSO claim to define
+## them, matching RPi3's own RPI3_GENERIC_KERNELS filter-out convention
+## for the identical reason.
+RPI5_GENERIC_KERNELS := $(filter-out $(RPI5_EL1_SMOKE_KERNELS) $(RPI5_HVC_SMOKE_KERNELS) $(RPI5_VM_PAGE_MAP_KERNELS) $(RPI5_EL0_SMOKE_KERNELS) $(RPI5_EL0_ELF_LOAD_KERNELS),$(RPI5_KERNELS))
 
 ## Every RPi5 kernel links COMMON_RPI5_TIMER_ASM_O unconditionally --
 ## unlike RPi3, where only the RTC_EXAMPLES/timer-needing group needs

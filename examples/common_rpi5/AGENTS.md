@@ -1,6 +1,74 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): `el0_smoke` ported (EL1->EL0 drop +
+## Status update (2026-07-26, latest): `el0_elf_load` ported (real
+## ELF+cpio loader, GitHub issue #67 Stage 2 follow-up), deliberately
+## scoped to RPi3's own original single-page issue #153 milestone, no new
+## bug, `make hwcheck-rpi5` 55/55
+
+Direct follow-on to `el0_smoke`. RPi3's own current `examples/
+el0_elf_load/el0_elf_load.tkb` has grown, via GitHub issue #156, from its
+original single-page Stage 1 scope (ELF+cpio parsing, read/write/exit)
+into a ~1100-line loader with multi-page `ProcessAddressSpace` mapping,
+`hvc`-triggered teardown, and a ~20-syscall busybox-shell-ready surface
+(`writev`/`ppoll`/`newfstatat`/`brk`/`mmap`/`mprotect`/`uname`/...). User
+consulted explicitly on scope (this jump in size, unlike every prior
+RPi5 step, was NOT comparable to el1_smoke/hvc_smoke/vm_page_map/
+el0_smoke) and chose the minimal, original-Stage-1-equivalent scope:
+real cpio+ELF parsing into the SAME single `DYN_VA_BASE..DYN_VA_LIMIT`
+page `examples/el0_smoke_rpi5` already proved (`map_page_el0_exec`,
+`vm_page_map_core_rpi5.tkb` needed zero changes), read/write/exit only,
+no `ProcessAddressSpace`/multi-page generalization, no `hvc` teardown
+(mapping/space/active tokens abandoned on exit, same idiom
+`el0_smoke_rpi5.tkb` already uses).
+
+`examples/common_rpi5/el0_test_prog.S`/`.ld` are a trimmed copy of
+RPi3's own hand-written test ELF (argv/auxv/PIE-auxv validation, `write`/
+`read`-loop/`exit`), with RPi3's own deliberate 6000-byte dead-padding
+(added there specifically to force a multi-page load, proving issue
+#156's own generalization) removed -- confirmed via a real build +
+`readelf -l` that the trimmed binary still gets 6 program headers (three
+`PT_LOAD` plus `PT_DYNAMIC`/`PT_GNU_RELRO`/`PT_GNU_STACK`, since `-pie`
+always emits those three regardless of `.text` size), so
+`el0_test_prog.S`'s own `AT_PHNUM` self-check needed no change from
+RPi3's value even after trimming -- only the padding differs.
+`el0_test_image.S`/`_extern.tkb` and the `cpio`-archive Makefile rule are
+straight, target-independent ports of RPi3's own build shape.
+`examples/el0_elf_load/el0_elf_load_rpi5.tkb` keeps the PIE load-bias
+computation (still needed, the test binary IS PIE) but caps everything
+at one page (`max_extent > PAGE_SIZE - ARGV_LAYOUT_SIZE` fails loudly
+instead of falling back to multi-page). Own `.expected` fixture (not
+byte-identical to RPi3's -- no `"hvc: process VM reclaimed"` line, since
+this port has no `hvc` teardown), but the SAME shared, target-independent
+`el0_elf_load.stdin` fixture (`"AB\n"`).
+
+Two Takibi type-system findings while porting (both mechanical, not
+design bugs): (1) `let page_va: {DYN_VA_BASE..<DYN_VA_LIMIT as usize} =
+DYN_VA_BASE;` did not type-check ("unproven usize") even though the
+SAME range as a function parameter type already worked fine -- the
+checker only recognizes a literal on the right-hand side as proof of
+membership in a refined range on the left, not a named `const` reference
+to the identical value; fixed by using the literal `0x40000000` directly,
+matching `el0_smoke_rpi5.tkb`'s own established convention. (2) indexing
+`mapping_bytes`'s own array-typed return (`[u8; PAGE_SIZE..] @ p`) with
+an `as isize`-cast index failed ("array/slice index must be usize") --
+RPi3's own loader indexes a raw `*u8` pointer there instead (needs
+`isize`), but this port's single-page design uses `mapping_bytes`
+directly (matching `el0_smoke_rpi5.tkb`), so the index needed to stay
+plain `usize`.
+
+**Passed on the FIRST real-hardware attempt, no new bug** (once past an
+unrelated USB/CMSIS-DAP transient: the Debug Probe -- itself an
+RP2040/Pico running CMSIS-DAP firmware -- dropped off the host's USB bus
+entirely between the first and second confirmation runs; `authorized`
+toggling was blocked by this container's read-only `/sys` mount, and a
+`USBDEVFS_RESET` ioctl via the raw `/dev/bus/usb/003/030` node --
+reachable without `sudo` via the `plugdev` group -- found the device
+already gone, "No such device"; a physical cable reconnect from the user
+was what actually brought it back). `make hwcheck-rpi5` passes 55/55,
+confirmed across two consecutive real-hardware runs (with that one
+non-hardware, non-test-related USB interruption in between).
+
+## Status update (2026-07-26, earlier): `el0_smoke` ported (EL1->EL0 drop +
 ## real SVC trap boundary, GitHub issue #67 Stage 2 follow-up), a real
 ## EL1/EL2 cache-coherency bug found and fixed, `make hwcheck-rpi5` 54/54
 

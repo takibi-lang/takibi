@@ -1,0 +1,468 @@
+// A real ELF loader fed from a real cpio (newc) initramfs image on RPi5
+// (GitHub issue #67 Stage 2 follow-up, ported from
+// examples/el0_elf_load/el0_elf_load.tkb): parses a genuine
+// Elf64_Ehdr/Elf64_Phdr pair out of the SINGLE file entry a real cpio
+// archive contains, rather than el0_smoke's hardcoded offset/length copy
+// of raw instruction bytes. The archive is real, not a synthetic
+// fixture: built by the actual `cpio` tool (newc format) from
+// examples/common_rpi5/el0_test_prog.S/.ld's output, embedded into the
+// kernel image via el0_test_image.S's `.incbin`. Builds directly on
+// el0_smoke's proven EL2->EL1->EL0 drop and real write()-with-pointer-
+// validation SVC dispatch. Also implements read() (blocking on real UART
+// RX), completing GitHub issue #153's full three-syscall Stage 1 set
+// (read/write/exit) -- the embedded test program reads 3 bytes from
+// stdin and echoes them back via a second write(), proving real
+// bidirectional I/O through validated user pointers.
+//
+// Deliberately scoped to RPi3's own ORIGINAL Stage 1 milestone (issue
+// #153), not the later GitHub issue #156 generalization
+// (examples/el0_elf_load/el0_elf_load.tkb's CURRENT, much larger RPi3
+// copy): no process_address_space_map/ProcessAddressSpace multi-page
+// loading (this loader maps exactly ONE page, the same
+// DYN_VA_BASE..DYN_VA_LIMIT window examples/el0_smoke_rpi5 already
+// proved, via map_page_el0_exec -- vm_page_map_core_rpi5.tkb needed no
+// changes at all for this file), no hvc-based exit() teardown (the
+// mapping/space/active tokens are abandoned on exit, same idiom
+// examples/el0_smoke_rpi5.tkb already uses), and only read/write/exit
+// are implemented (not issue #156's ~20-syscall busybox-shell surface:
+// writev/ppoll/newfstatat/set_tid_address/brk/mmap/mprotect/uname/...).
+// examples/common_rpi5/el0_test_prog.S is correspondingly a trimmed copy
+// of RPi3's own test binary, with the 6000-byte dead-padding (added
+// there specifically to prove issue #156's multi-page loader) removed,
+// so the whole ELF comfortably fits in one page.
+//
+// cpio (newc) format: a 110-byte ASCII-hex-field header, then the
+// filename (c_namesize bytes, NUL-terminated), then file data -- both
+// individually padded to a 4-byte boundary. This loader reads exactly
+// one entry (no TRAILER!!! scan, no directory/multi-file support).
+
+use "examples/vm_page_map/vm_page_map_core_rpi5.tkb";
+use "examples/common_rpi5/el0_asm_extern.tkb";
+use "examples/common_rpi5/el1_asm_extern.tkb";
+use "examples/common_rpi5/el0_test_image_extern.tkb";
+
+const SYSCALL_ERROR: usize = 0xFFFFFFFFFFFFFFFF;
+const MAX_PHDRS: usize = 8;
+const PT_LOAD: u32 = 1;
+const ET_EXEC: u16 = 2;
+const ET_DYN: u16 = 3;
+
+// argv/envp/auxv initial stack layout (see app_main's own construction
+// for the exact byte-by-byte shape) -- same layout and size as RPi3's
+// own el0_elf_load.tkb, reserved at the top of the SAME single mapped
+// page (not a separate stack page, unlike that file's multi-page
+// design): the whole ELF's own content (a few hundred bytes, see
+// el0_test_prog.S's header comment) leaves comfortable room below it in
+// one 4096-byte page.
+const ARGV_LAYOUT_SIZE: usize = 256;
+const AT_PAGESZ: usize = 6;
+const AT_PHDR: usize = 3;
+const AT_PHENT: usize = 4;
+const AT_PHNUM: usize = 5;
+const AT_BASE: usize = 7;
+const AT_ENTRY: usize = 9;
+const AT_SECURE: usize = 23;
+const AT_RANDOM: usize = 25;
+
+// cpio (newc) fixed field byte offsets within the 110-byte header --
+// verified against a real `cpio -o -H newc` archive's own raw bytes,
+// same values as RPi3's own el0_elf_load.tkb (the format itself is not
+// target-specific).
+const CPIO_HEADER_SIZE: usize = 110;
+const CPIO_FILESIZE_OFFSET: usize = 54;
+const CPIO_NAMESIZE_OFFSET: usize = 94;
+
+fn hex_digit(c: u8) -> usize {
+    if (c >= 0x30 && c <= 0x39) {
+        return (c - 0x30) as usize;
+    }
+    if (c >= 0x41 && c <= 0x46) {
+        return (c - 0x41 + 10) as usize;
+    }
+    if (c >= 0x61 && c <= 0x66) {
+        return (c - 0x61 + 10) as usize;
+    }
+    // Not a hex digit -- GNU cpio always emits uppercase 0-9A-F, so this
+    // only fires on a genuinely malformed header; treated as 0 rather
+    // than threading a validity flag through every caller, acceptable
+    // for this milestone's trusted embedded archive.
+    return 0;
+}
+
+fn parse_hex8(base: *u8, offset: usize) -> usize {
+    let mut v: usize = 0;
+    for i: usize in 0..<8 {
+        v = (v << 4) | hex_digit(base[(offset + i) as isize]);
+    }
+    return v;
+}
+
+struct packed Elf64Header {
+    e_ident: [u8; 16];
+    e_type: u16;
+    e_machine: u16;
+    e_version: u32;
+    e_entry: u64;
+    e_phoff: u64;
+    e_shoff: u64;
+    e_flags: u32;
+    e_ehsize: u16;
+    e_phentsize: u16;
+    e_phnum: u16;
+    e_shentsize: u16;
+    e_shnum: u16;
+    e_shstrndx: u16;
+}
+
+struct packed Elf64ProgramHeader {
+    p_type: u32;
+    p_flags: u32;
+    p_offset: u64;
+    p_vaddr: u64;
+    p_paddr: u64;
+    p_filesz: u64;
+    p_memsz: u64;
+    p_align: u64;
+}
+
+private let mut el1_stack: [u8; 4096] align(16);
+private let mut el0_entry_va: usize;
+private let mut el0_page_va: usize;
+private let mut el0_stack_top_va: usize;
+
+// Same abandon idiom as examples/el0_smoke_rpi5.tkb -- no hvc-based
+// teardown in this minimal port, see this file's own header comment.
+fn el0_mapping_abandon(mapping: sink MappingOwner[asid, va, p]) {}
+fn el0_space_abandon(space: sink AddressSpaceOwner[asid, state]) {}
+fn el0_active_abandon(active: sink ActiveAddressSpace[core, asid]) {}
+
+// Same policy shape as examples/el0_smoke_rpi5's own el0_svc_dispatch,
+// extended with read() (GitHub issue #153's third Stage 1 syscall) and
+// validated against el0_page_va/PAGE_SIZE (the one page this loader ever
+// maps) instead of el0_entry_va.
+fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
+                    x2: usize, elr: usize) -> (usize, usize) {
+    let ec: usize = (esr >> 26) & 0x3F;
+    if (ec != 0x15) {
+        return (0, 0);
+    }
+    if (syscall_num == 63) {
+        // read(fd, buf, len) -- blocks (spins on uart_rx_ready()) until
+        // at least one byte is ready, then drains whatever is currently
+        // available up to `len` and returns immediately, matching POSIX
+        // read()'s own "return as soon as any data is ready" behavior.
+        let fd: usize = x0;
+        let buf: usize = x1;
+        let len: usize = x2;
+        if (fd != 0) {
+            return (elr, SYSCALL_ERROR);
+        }
+        if (buf < el0_page_va || len > PAGE_SIZE) {
+            return (elr, SYSCALL_ERROR);
+        }
+        if (buf - el0_page_va > PAGE_SIZE - len) {
+            return (elr, SYSCALL_ERROR);
+        }
+        let dst: *u8 = buf as *u8;
+        while (uart_rx_ready() == false) {
+        }
+        let mut n: usize = 0;
+        while (n < len && uart_rx_ready() == true) {
+            dst[n as isize] = uart_isr_getc();
+            n = n + 1;
+        }
+        return (elr, n);
+    }
+    if (syscall_num == 64) {
+        let fd: usize = x0;
+        let buf: usize = x1;
+        let len: usize = x2;
+        if (fd != 1 && fd != 2) {
+            return (elr, SYSCALL_ERROR);
+        }
+        if (buf < el0_page_va || len > PAGE_SIZE) {
+            return (elr, SYSCALL_ERROR);
+        }
+        if (buf - el0_page_va > PAGE_SIZE - len) {
+            return (elr, SYSCALL_ERROR);
+        }
+        let src: *u8 = buf as *u8;
+        for i: usize in 0..<len {
+            uart_putc(src[i as isize]);
+        }
+        return (elr, len);
+    }
+    if (syscall_num == 93 || syscall_num == 94) {
+        uart_puts("process exited with status ");
+        uart_print(x0);
+        uart_puts("\n");
+        return (1, 0);
+    }
+    return (0, 0);
+}
+
+// Entered once, at EL1, by el1_asm.S's rpi5_el1_enter via a plain `bl`.
+fn el1_main() {
+    rpi5_el0_enter(el0_entry_va, el0_stack_top_va);
+}
+
+fn app_main() {
+    uart_puts("el0_elf_load\n");
+    page_pool_init();
+
+    let archive_addr: usize = el0_test_image_addr();
+    let archive_len: usize = el0_test_image_len();
+
+    if (archive_len < CPIO_HEADER_SIZE) {
+        uart_puts("cpio image too small\n");
+        return;
+    }
+    let hdr_base: *u8 = archive_addr as *u8;
+    if (hdr_base[0] != 0x30 || hdr_base[1] != 0x37 || hdr_base[2] != 0x30
+            || hdr_base[3] != 0x37 || hdr_base[4] != 0x30 || hdr_base[5] != 0x31) {
+        uart_puts("bad cpio magic\n");
+        return;
+    }
+    let namesize: usize = parse_hex8(hdr_base, CPIO_NAMESIZE_OFFSET);
+    let filesize: usize = parse_hex8(hdr_base, CPIO_FILESIZE_OFFSET);
+    let name_end: usize = CPIO_HEADER_SIZE + namesize;
+    let data_start: usize = (name_end + 3) & 0xFFFFFFFFFFFFFFFC;
+    if (data_start < name_end || data_start > archive_len
+            || filesize > archive_len - data_start) {
+        uart_puts("cpio entry out of range\n");
+        return;
+    }
+    let image_addr: usize = archive_addr + data_start;
+    let image_len: usize = filesize;
+
+    if (image_len < 64) {
+        uart_puts("image too small\n");
+        return;
+    }
+    let hdr_ptr: *Elf64Header = image_addr as *Elf64Header;
+    let magic: *u8 = hdr_ptr.e_ident as *u8;
+    if (magic[0] != 0x7F || magic[1] != 0x45 || magic[2] != 0x4C || magic[3] != 0x46) {
+        uart_puts("bad ELF magic\n");
+        return;
+    }
+    if (magic[4] != 2 || magic[5] != 1) {
+        uart_puts("not ELF64 little-endian\n");
+        return;
+    }
+    if (hdr_ptr.e_type != ET_EXEC && hdr_ptr.e_type != ET_DYN) {
+        uart_puts("unsupported ELF type\n");
+        return;
+    }
+
+    let entry_link: usize = hdr_ptr.e_entry as usize;
+    let phoff: usize = hdr_ptr.e_phoff as usize;
+    let phentsize: usize = hdr_ptr.e_phentsize as usize;
+    let phnum: usize = hdr_ptr.e_phnum as usize;
+
+    let page_va: {0x40000000..<0x40200000 as usize} = 0x40000000;
+    let mut phdr_cap: usize = MAX_PHDRS;
+    if (phnum < MAX_PHDRS) {
+        phdr_cap = phnum;
+    }
+
+    // PIE load-bias (same mechanism as RPi3's own loader, see that
+    // file's header comment): scan every PT_LOAD segment for the lowest
+    // p_vaddr and overall extent BEFORE mapping anything, then place
+    // that lowest segment exactly at page_va. Unlike RPi3's own
+    // multi-page generalization, everything here must fit within ONE
+    // page -- checked below via max_vaddr_end - min_vaddr <= PAGE_SIZE.
+    let mut min_vaddr: usize = 0xFFFFFFFFFFFFFFFF;
+    let mut max_vaddr_end: usize = 0;
+    let mut any_load: i32 = 0;
+    for i: usize in 0..<phdr_cap {
+        let ph_addr: usize = image_addr + phoff + i * phentsize;
+        let ph_ptr: *Elf64ProgramHeader = ph_addr as *Elf64ProgramHeader;
+        if (ph_ptr.p_type == PT_LOAD) {
+            any_load = 1;
+            let seg_vaddr: usize = ph_ptr.p_vaddr as usize;
+            let seg_memsz: usize = ph_ptr.p_memsz as usize;
+            if (seg_vaddr < min_vaddr) {
+                min_vaddr = seg_vaddr;
+            }
+            let seg_end: usize = seg_vaddr + seg_memsz;
+            if (seg_end > max_vaddr_end) {
+                max_vaddr_end = seg_end;
+            }
+        }
+    }
+    if (any_load == 0 || min_vaddr > page_va) {
+        uart_puts("load failed\n");
+        return;
+    }
+    let load_bias: usize = page_va - min_vaddr;
+    let entry: usize = entry_link + load_bias;
+    let at_phdr: usize = load_bias + phoff;
+    let max_extent: usize = max_vaddr_end - min_vaddr;
+
+    // Single-page cap: the whole ELF PLUS the ARGV_LAYOUT_SIZE reserved
+    // at the top of the same page must fit in PAGE_SIZE.
+    if (max_extent > PAGE_SIZE - ARGV_LAYOUT_SIZE) {
+        uart_puts("elf too large\n");
+        return;
+    }
+    if (entry < page_va || entry - page_va >= PAGE_SIZE) {
+        uart_puts("load failed\n");
+        return;
+    }
+
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {
+            uart_puts("allocation failed\n");
+        }
+        PageAllocResult::Allocated(page) => {
+            let seed: {0..<1 as usize} = 0;
+            let inactive = address_space_new(seed);
+            let core: usize = 0;
+            let (space, active) = address_space_activate(inactive, core);
+            let (space2, pending) = map_page_el0_exec(space, page, page_va);
+            let mapping = tlb_invalidate(space2, pending);
+
+            let dst = mapping_bytes(mapping);
+
+            let mut ok: i32 = 1;
+            for i: usize in 0..<phdr_cap {
+                let ph_addr: usize = image_addr + phoff + i * phentsize;
+                let ph_ptr: *Elf64ProgramHeader = ph_addr as *Elf64ProgramHeader;
+                if (ph_ptr.p_type == PT_LOAD) {
+                    let seg_vaddr: usize = (ph_ptr.p_vaddr as usize) + load_bias;
+                    let seg_offset: usize = ph_ptr.p_offset as usize;
+                    let seg_filesz: usize = ph_ptr.p_filesz as usize;
+                    if (seg_vaddr < page_va || seg_filesz > PAGE_SIZE
+                            || seg_vaddr - page_va > PAGE_SIZE - seg_filesz
+                            || seg_offset > image_len
+                            || seg_filesz > image_len - seg_offset) {
+                        uart_puts("segment out of range\n");
+                        ok = 0;
+                    } else {
+                        // Same unsafe rationale as RPi3's own loader:
+                        // dst_base + seg_filesz <= PAGE_SIZE is already
+                        // proven above, but as a relationship between two
+                        // runtime values, not a plain interval on one of
+                        // them alone -- slice_copy's own runtime
+                        // min(dst.len, src.len) is what's actually safe
+                        // here.
+                        let src: *u8 = image_addr as *u8;
+                        let dst_base: usize = seg_vaddr - page_va;
+                        let seg_dst = unsafe {
+                            dst[dst_base..<dst_base + seg_filesz]
+                        };
+                        let seg_src = unsafe {
+                            src[seg_offset as isize..<(seg_offset + seg_filesz) as isize]
+                        };
+                        slice_copy(seg_dst, seg_src);
+                    }
+                }
+            }
+
+            if (ok == 0) {
+                uart_puts("load failed\n");
+                el0_mapping_abandon(mapping);
+                el0_space_abandon(space2);
+                el0_active_abandon(active);
+                return;
+            }
+
+            // Real argv/envp/auxv initial stack layout (matches the
+            // Linux ELF ABI exactly, with the PIE auxv entries a real
+            // libc's own self-relocation/TLS setup needs -- see
+            // examples/common_rpi5/el0_test_prog.S's own matching
+            // validation for the exact byte offsets this must agree
+            // with), reserved in the TOP ARGV_LAYOUT_SIZE bytes of the
+            // SAME single mapped page (not a separate stack page):
+            //   [argc=1][argv[0]=ptr]["prog\0" pointed to by
+            //   argv[0]][argv NULL][envp NULL (0 entries)]
+            //   [auxv: AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_BASE,
+            //    AT_ENTRY, AT_RANDOM, AT_SECURE][auxv: AT_NULL, 0]
+            //   [AT_RANDOM's 16-byte pointee][argv[0]'s "prog\0" string]
+            let layout_base: usize = page_va + (PAGE_SIZE - ARGV_LAYOUT_SIZE);
+            let random_addr: usize = layout_base + 176;
+            let string_addr: usize = layout_base + 192;
+
+            let argc_ptr: *u64 = layout_base as *u64;
+            *argc_ptr = 1;
+            let argv0_ptr: *u64 = (layout_base + 8) as *u64;
+            *argv0_ptr = string_addr as u64;
+            let argv_null_ptr: *u64 = (layout_base + 16) as *u64;
+            *argv_null_ptr = 0;
+            let envp_null_ptr: *u64 = (layout_base + 24) as *u64;
+            *envp_null_ptr = 0;
+
+            let auxv0_type_ptr: *u64 = (layout_base + 32) as *u64;
+            *auxv0_type_ptr = AT_PAGESZ as u64;
+            let auxv0_val_ptr: *u64 = (layout_base + 40) as *u64;
+            *auxv0_val_ptr = PAGE_SIZE as u64;
+
+            let auxv1_type_ptr: *u64 = (layout_base + 48) as *u64;
+            *auxv1_type_ptr = AT_PHDR as u64;
+            let auxv1_val_ptr: *u64 = (layout_base + 56) as *u64;
+            *auxv1_val_ptr = at_phdr as u64;
+
+            let auxv2_type_ptr: *u64 = (layout_base + 64) as *u64;
+            *auxv2_type_ptr = AT_PHENT as u64;
+            let auxv2_val_ptr: *u64 = (layout_base + 72) as *u64;
+            *auxv2_val_ptr = phentsize as u64;
+
+            let auxv3_type_ptr: *u64 = (layout_base + 80) as *u64;
+            *auxv3_type_ptr = AT_PHNUM as u64;
+            let auxv3_val_ptr: *u64 = (layout_base + 88) as *u64;
+            *auxv3_val_ptr = phnum as u64;
+
+            let auxv4_type_ptr: *u64 = (layout_base + 96) as *u64;
+            *auxv4_type_ptr = AT_BASE as u64;
+            let auxv4_val_ptr: *u64 = (layout_base + 104) as *u64;
+            *auxv4_val_ptr = 0;
+
+            let auxv5_type_ptr: *u64 = (layout_base + 112) as *u64;
+            *auxv5_type_ptr = AT_ENTRY as u64;
+            let auxv5_val_ptr: *u64 = (layout_base + 120) as *u64;
+            *auxv5_val_ptr = entry as u64;
+
+            let auxv6_type_ptr: *u64 = (layout_base + 128) as *u64;
+            *auxv6_type_ptr = AT_RANDOM as u64;
+            let auxv6_val_ptr: *u64 = (layout_base + 136) as *u64;
+            *auxv6_val_ptr = random_addr as u64;
+
+            let auxv7_type_ptr: *u64 = (layout_base + 144) as *u64;
+            *auxv7_type_ptr = AT_SECURE as u64;
+            let auxv7_val_ptr: *u64 = (layout_base + 152) as *u64;
+            *auxv7_val_ptr = 0;
+
+            let auxv_null_type_ptr: *u64 = (layout_base + 160) as *u64;
+            *auxv_null_type_ptr = 0;
+            let auxv_null_val_ptr: *u64 = (layout_base + 168) as *u64;
+            *auxv_null_val_ptr = 0;
+
+            // AT_RANDOM's 16-byte pointee -- a deliberate low-quality
+            // fixed stub, not all-zero so a real libc's stack-protector
+            // guard isn't a predictable constant either.
+            let random_ptr: *u8 = random_addr as *u8;
+            for i: usize in 0..<16 {
+                random_ptr[i as isize] = (0xA5 ^ i) as u8;
+            }
+
+            // "prog\0" -- argv[0]'s own string data.
+            let string_ptr: *u8 = string_addr as *u8;
+            string_ptr[0 as isize] = 0x70; // 'p'
+            string_ptr[1 as isize] = 0x72; // 'r'
+            string_ptr[2 as isize] = 0x6f; // 'o'
+            string_ptr[3 as isize] = 0x67; // 'g'
+            string_ptr[4 as isize] = 0x00; // NUL
+
+            el0_entry_va = entry;
+            el0_page_va = page_va;
+            el0_stack_top_va = layout_base;
+            el0_mapping_abandon(mapping);
+            el0_space_abandon(space2);
+            el0_active_abandon(active);
+
+            let el1_sp_base: usize = (el1_stack as *u8) as usize;
+            let el1_sp: usize = el1_sp_base + 4096;
+            rpi5_el1_enter(el1_sp);
+        }
+    }
+}
