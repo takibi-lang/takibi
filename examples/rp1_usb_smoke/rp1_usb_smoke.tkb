@@ -258,6 +258,23 @@ fn app_main() {
             uart_print_hex(usb_smoke_ecp_dword as i32);
             uart_puts("\r\n");
 
+            if (cap_id == 1) {
+                // USB Legacy Support Capability (USBLEGSUP): bit16 = HC
+                // BIOS Owned Semaphore, bit24 = HC OS Owned Semaphore.
+                // Neither set means no firmware/BIOS-handoff ownership
+                // claim was ever made through this mechanism -- on a PC
+                // platform this register is how BIOS hands the
+                // controller to an OS driver; RP1/TF-A apparently just
+                // leaves the controller running without engaging it.
+                let bios_owned: u32 = (usb_smoke_ecp_dword >> 16) & 1;
+                let os_owned: u32 = (usb_smoke_ecp_dword >> 24) & 1;
+                uart_puts("  legacy support: bios_owned=");
+                uart_print(bios_owned as usize);
+                uart_puts(" os_owned=");
+                uart_print(os_owned as usize);
+                uart_puts("\r\n");
+            }
+
             if (cap_id == 2) {
                 // Supported Protocol Capability: DWORD1 = name string
                 // (ASCII "USB "), DWORD2 bits[7:0]=Compatible Port
@@ -283,6 +300,25 @@ fn app_main() {
             ecp_addr = ecp_addr + (next_dwords as usize) * 4;
         }
     }
+
+    // Step 4: DBOFF (Doorbell array offset, Capability+0x14) and RTSOFF
+    // (Runtime register space offset, Capability+0x18) -- both standard
+    // XHCI Capability registers, still read-only. Needed later to ring
+    // the Command doorbell and configure the Event Ring's interrupter
+    // registers, before any real Enable Slot command can be issued.
+    usb_smoke_checkpoint = 31;
+    let host0_dboff_ptr: *io u32 = 0x1F00200014;
+    let host0_dboff: u32 = *host0_dboff_ptr;
+    usb_smoke_checkpoint = 32;
+    let host0_rtsoff_ptr: *io u32 = 0x1F00200018;
+    let host0_rtsoff: u32 = *host0_rtsoff_ptr;
+    usb_smoke_checkpoint = 33;
+
+    uart_puts("usbhost0 DBOFF: ");
+    uart_print_hex((host0_dboff & 0xFFFFFFFC) as i32);
+    uart_puts("\r\nusbhost0 RTSOFF: ");
+    uart_print_hex((host0_rtsoff & 0xFFFFFFE0) as i32);
+    uart_puts("\r\n");
 
     usb_smoke_checkpoint = 30;
     uart_puts("done\n");

@@ -1,6 +1,42 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): USB bring-up, Steps 2-3 --
+## Status update (2026-07-26, latest): USB bring-up Step 4 -- USBLEGSUP
+## decoded (no BIOS/OS ownership claim), DBOFF/RTSOFF read; user
+## confirmed a real USB flash drive is the connected device
+
+User confirmed the device found live on `usbhost0` port 3 (Step 2) is a
+real USB flash drive plugged into the board's own USB-A port -- exactly
+the target device class needed for `el0_shell`'s eventual Mass Storage +
+FAT12 work, not a red herring.
+
+**Step 4** (still read-only): decoded `USBLEGSUP` (USB Legacy Support
+Capability, Capability ID 1 -- already read in Step 3 as
+`raw=0x00000401` at ext cap offset `0x900`, just not decoded yet):
+`bios_owned=0`, `os_owned=0`. Neither ownership semaphore is set --
+unlike a PC platform, where BIOS hands the controller to an OS driver
+through this exact mechanism, RP1/TF-A appears to just leave the
+controller running without ever engaging it, consistent with Step 2's
+own finding that `USBCMD.RS` was already set at handoff with no
+apparent ownership negotiation. Also read `DBOFF` (Doorbell array
+offset, Capability+0x14) = `0x500` and `RTSOFF` (Runtime register space
+offset, Capability+0x18) = `0x460` -- both standard XHCI Capability
+registers, needed later to ring the Command doorbell and configure the
+Event Ring's interrupter registers. Confirmed reproducible across two
+consecutive real-hardware runs, no hang.
+
+**Next step (not started, first real WRITE)**: per the XHCI spec,
+`DCBAAP`/`CRCR` may only be written while the controller is halted
+(`USBCMD.RS=0`), but Step 2 found it already running
+(`USBSTS.HCH=0`) -- so the next real increment is a clean halt
+(`USBCMD.RS=0`, then poll `USBSTS.HCH` until it reads 1) BEFORE any
+register programming, not skipping straight to `DCBAAP`/`CRCR`/`CONFIG`
+as if the controller were already idle. This is the first genuinely
+state-changing action against this hardware in the whole USB bring-up
+effort so far -- deserves its own careful, individually-verified,
+checkpoint-instrumented pass, not folded into a read-heavy step like the
+four before it.
+
+## Status update (2026-07-26, earlier): USB bring-up, Steps 2-3 --
 ## `rp1_usb_smoke` reads USBSTS/PORTSC and walks the xHCI Extended
 ## Capabilities list; found a REAL device already connected on
 ## `usbhost0` port 3

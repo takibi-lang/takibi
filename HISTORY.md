@@ -15,6 +15,26 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- USB Bring-Up Step 4: USBLEGSUP Decoded, DBOFF/RTSOFF Read; Confirmed a Real USB Flash Drive Is Connected
+
+User confirmed the device found live on `usbhost0` port 3 (Step 2) is a
+real USB flash drive in the board's own USB-A port -- the actual target
+device class for `el0_shell`'s eventual Mass Storage + FAT12 work.
+
+Still read-only. Decoded `USBLEGSUP` (already read in Step 3 as
+`raw=0x00000401`): `bios_owned=0`, `os_owned=0` -- RP1/TF-A leaves the
+controller running without engaging the PC-style BIOS/OS ownership
+handoff mechanism at all. Read `DBOFF=0x500` and `RTSOFF=0x460`
+(Doorbell array / Runtime register space offsets), needed later for the
+Command doorbell and Event Ring interrupter registers. Confirmed
+reproducible across two consecutive real-hardware runs.
+
+Next step (not started): the first real WRITE. Per the XHCI spec,
+`DCBAAP`/`CRCR` may only be written while halted (`USBCMD.RS=0`), but
+the controller is currently running (Step 2's `USBSTS.HCH=0`) -- so a
+clean halt (clear `USBCMD.RS`, poll `USBSTS.HCH` until 1) must come
+first, its own careful, individually-verified pass.
+
 ### 2026-07-26: RPi5 -- USB Bring-Up Steps 2-3: PORTSC Shows a Real Connected Device, Extended Capabilities Resolve the Port-Count Mystery
 
 Direct follow-on to Step 1 (Capability register reachability). Both
