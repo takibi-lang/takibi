@@ -567,6 +567,13 @@ fn app_main() {
         let trb0_dw2_ptr: *u32 = (cmd_ring_base + 8) as *u32;
         *trb0_dw2_ptr = 0;
         let trb0_dw3_ptr: *u32 = (cmd_ring_base + 12) as *u32;
+        // Isolation test (2026-07-26) confirmed the fault is NOT
+        // specific to Enable Slot: temporarily swapping this to a
+        // No-Op Command TRB (Type 23, Cycle=1 | 23<<10 = 0x00005C01)
+        // produced the IDENTICAL USBSTS.HSE/HCE fault. Restored to
+        // Enable Slot since that is what this milestone actually needs;
+        // the fault is in the Command Ring/doorbell mechanism itself,
+        // not any one command's own semantics.
         *trb0_dw3_ptr = 0x00002401;
 
         let link_dw0_ptr: *u32 = (cmd_ring_base + 48) as *u32;

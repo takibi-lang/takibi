@@ -15,6 +15,26 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- USB Bring-Up Step 6: No-Op Faults Identically to Enable Slot; Pausing Active Debugging
+
+Fourth isolation test: swapped the Command Ring's TRB[0] from Enable
+Slot to a No-Op Command (the simplest possible Command Ring TRB) --
+produced the identical `USBSTS=0x00001015` fault. Rules out Enable
+Slot's own command semantics: the fault happens for ANY Command Ring
+TRB, not something specific to slot allocation.
+
+Four hypotheses now ruled out via real-hardware isolation testing: the
+inbound DMA window, the Scratchpad Buffer Array, Enable Slot's own
+semantics, and a link-level PCIe failure. The fault's timing window is
+pinned precisely (clean before the doorbell, faulted after), every
+CPU-side register write reads back correctly.
+
+Pausing active guessing here after four methodical, ruled-out
+hypotheses. Remaining candidates need either the real xHCI specification
+PDF (blocked, 403 from every URL tried) or a different diagnostic
+technique (BCM2712's own PCIe AER/error-logging registers, not yet
+investigated) rather than more register-level guessing.
+
 ### 2026-07-26: RPi5 -- USB Bring-Up Step 6: Isolation Testing Narrows the HSE/HCE Fault, Root Cause Still Open
 
 Direct follow-on to the entry below. Three real-hardware isolation

@@ -1,9 +1,40 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): USB bring-up Step 6 -- systematic
-## isolation testing narrows the USBSTS.HSE/HCE fault to "somewhere
-## between ringing the Enable Slot doorbell and the controller's own
-## attempt to act on it"; root cause STILL not found after ruling out
+## Status update (2026-07-26, latest): USB bring-up Step 6 -- No-Op
+## Command faults identically to Enable Slot; the bug is in the Command
+## Ring/doorbell mechanism itself, not any one command's semantics --
+## PAUSING active guessing here, genuinely stuck after 4 ruled-out
+## hypotheses
+
+Fourth isolation test: temporarily swapped the Command Ring's TRB[0]
+from Enable Slot (TRB Type 9) to a No-Op Command (TRB Type 23, the
+simplest possible Command Ring TRB) -- produced the IDENTICAL
+`USBSTS=0x00001015` fault. This rules out Enable Slot's own semantics as
+the cause: **the fault happens for ANY Command Ring TRB the controller
+tries to process**, not something specific to slot allocation.
+
+**Four hypotheses now systematically ruled out via real-hardware
+isolation testing**: the inbound DMA window, the Scratchpad Buffer
+Array, Enable Slot's own command semantics (No-Op faults identically),
+and a link-level PCIe failure (`pcie2_link_up()` stays true throughout).
+The fault's timing window is pinned precisely: clean immediately after
+HCRST, clean immediately before ringing the doorbell, faulted after the
+doorbell + a 1-second wait. Every CPU-side register write (DCBAAP/CRCR/
+CONFIG/ERSTBA/ERDP/ERSTSZ) reads back exactly as written.
+
+**Pausing here.** This has gone from "a register-poking bug to find" to
+"a genuinely unexplained hardware/firmware interaction," after four
+real, methodical isolation tests failed to localize it further. The
+remaining candidates (Command/Link TRB construction beyond what's
+already been swap-tested, the completely untouched `usbhost0_cfg`/
+`usbhost1_cfg` register block, or a deeper BCM2712 PCIe-root-complex
+requirement) all need either new reference material this session
+couldn't reach (the real xHCI specification PDF, blocked by 403 from
+every URL tried) or a fundamentally different diagnostic technique
+(BCM2712's own PCIe AER/error-logging registers, not yet investigated
+at all) rather than more blind register-level guessing. See
+[[rpi5_usb_bringup]] (memory) for the full technical narrative if
+resuming this without the user's own input.
 ## the two leading candidates
 
 Direct follow-on to the previous entry below. Three isolation tests run
