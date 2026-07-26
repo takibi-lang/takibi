@@ -1,6 +1,70 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): USB bring-up Step 7 DONE --
+## Status update (2026-07-26, latest): USB bring-up Step 8 DONE --
+## first real control transfer; the SanDisk flash drive's Device
+## Descriptor is read over EP0
+
+`GET_DESCRIPTOR(Device)`, 18 bytes, over the EP0 Transfer Ring already
+programmed into the Endpoint 0 Context by Step 7. This is the first time
+this project has moved real data to and from a real USB device.
+
+Shape follows U-Boot's `xhci_ctrl_tx()`: three TRBs queued back to back,
+then **one** doorbell ring, then **one** Transfer Event.
+
+- **Setup Stage TRB** (Type 2): DWORD0 = `bmRequestType | bRequest<<8 |
+  wValue<<16`, DWORD1 = `wIndex | wLength<<16`, DWORD2 = transfer length
+  **always 8** (the size of a USB setup packet), DWORD3 = `Cycle |
+  IDT(bit6) | Type(2)<<10 | TRT(bits17:16)`. `IDT` says the 8 setup
+  bytes are immediate data living in DWORD0/1 rather than being fetched
+  from memory. `TRT` = 3 when an IN data stage follows, 2 for OUT, 0 for
+  no data.
+- **Data Stage TRB** (Type 3): DWORD0/1 = buffer **PCI** address,
+  DWORD2 = transfer length | TD Size, DWORD3 = `Cycle | Type(3)<<10 |
+  DIR(bit16)`, DIR=1 for IN.
+- **Status Stage TRB** (Type 4): no buffer, no length, DWORD3 = `Cycle |
+  IOC(bit5) | Type(4)<<10 | DIR(bit16)`. The status handshake runs
+  **opposite** to the data stage, so an IN data stage takes a DIR=0
+  status stage. `IOC` goes here -- this is the TRB that must raise the
+  Transfer Event.
+- **Doorbell**: doorbell array base + `4 * slot_id` (slot 0 is the
+  Command doorbell), value = DB Target = DCI 1 for EP0.
+- **Transfer Event** (Type 32): DWORD2 bits 23:0 are the *residual*
+  (untransferred) byte count, bits 31:24 the completion code; DWORD3
+  bits 20:16 are the Endpoint ID.
+
+The landing buffer is poisoned with `0xEE` before the transfer, so a
+printed descriptor can never be mistaken for leftover zeroes the
+controller never actually wrote. It needs the same cache discipline as
+the rings: clean before handing it over, invalidate before reading back.
+
+**Real-hardware result (reproducible)**:
+
+```
+control transfer (GET_DESCRIPTOR device): yes, polls=2 completion_code=0x01 residual=0 ep_id=0x01
+device descriptor: bLength=0x12 bDescriptorType=0x01 bDeviceClass=0x00 bMaxPacketSize0=0x09
+device descriptor: idVendor=0x0781 idProduct=0x5597
+```
+
+`residual=0` means all 18 bytes arrived. `bLength=0x12` (18) and
+`bDescriptorType=0x01` are exactly what a Device Descriptor must say.
+`idVendor=0x0781` is **SanDisk** -- the real flash drive in the board's
+USB-A port. `bDeviceClass=0` is normal for Mass Storage (the class is
+declared at the interface level instead).
+
+**`bMaxPacketSize0=9` is not a size, it is an exponent.** For SuperSpeed
+devices this field carries log2 of the EP0 max packet size, so 2^9 =
+512 -- which confirms the fixed 512 programmed into the EP0 Context in
+Step 7 was right. (For HS/FS/LS it *is* a plain byte count, which is why
+those speeds need the classic "read 8 bytes, learn the real
+`bMaxPacketSize0`, re-address" dance that SuperSpeed skips.)
+
+Next: Configuration Descriptor, the Mass Storage interface and its bulk
+endpoints, then Configure Endpoint + `SET_CONFIGURATION`. That needs a
+larger EP0 ring than the current 4 TRBs and a tracked enqueue index with
+proper producer-cycle handling across the Link TRB, plus a reusable
+control-transfer helper instead of the current inline block.
+
+## Status update (2026-07-26): USB bring-up Step 7 DONE --
 ## Address Device succeeds; the USB flash drive is now at USB address 1,
 ## Slot State = Addressed
 

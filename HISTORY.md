@@ -15,6 +15,73 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- USB Bring-Up Step 8 DONE: First Real Control Transfer, SanDisk Device Descriptor Read Over EP0
+
+`GET_DESCRIPTOR(Device)`, 18 bytes, over the EP0 Transfer Ring
+programmed in Step 7. First time this project has moved real data to and
+from a real USB device.
+
+The three-TRB shape follows U-Boot's `xhci_ctrl_tx()`: Setup Stage, Data
+Stage and Status Stage TRBs queued back to back, then **one** doorbell
+ring, then **one** Transfer Event.
+
+- Setup Stage TRB (Type 2): DWORD0 = `bmRequestType | bRequest<<8 |
+  wValue<<16`; DWORD1 = `wIndex | wLength<<16`; DWORD2 = transfer length
+  **always 8**, the size of a USB setup packet; DWORD3 = `Cycle |
+  IDT(bit6) | Type(2)<<10 | TRT(bits17:16)`. `IDT` marks the 8 setup
+  bytes as immediate data held in DWORD0/1 rather than fetched from
+  memory. `TRT` is 3 for an IN data stage, 2 for OUT, 0 for no data.
+- Data Stage TRB (Type 3): DWORD0/1 = buffer PCI address; DWORD2 =
+  transfer length | TD Size; DWORD3 = `Cycle | Type(3)<<10 |
+  DIR(bit16)`, DIR=1 for IN.
+- Status Stage TRB (Type 4): no buffer, no length; DWORD3 = `Cycle |
+  IOC(bit5) | Type(4)<<10 | DIR(bit16)`. The status handshake runs
+  opposite to the data stage, so an IN data stage takes a DIR=0 status
+  stage. `IOC` belongs here -- this is the TRB that raises the event.
+- Doorbell: doorbell array base + `4 * slot_id` (slot 0 being the
+  Command doorbell), value = DB Target = DCI 1 for EP0.
+- Transfer Event (Type 32): DWORD2 bits 23:0 are the residual
+  (untransferred) byte count, bits 31:24 the completion code; DWORD3
+  bits 20:16 the Endpoint ID.
+
+The landing buffer is poisoned with `0xEE` before the transfer so a
+printed descriptor can never be mistaken for leftover zeroes the
+controller never wrote, and gets the same cache discipline as the rings
+(clean before handing it over, invalidate before reading back).
+
+Real-hardware result, reproducible:
+
+```
+control transfer (GET_DESCRIPTOR device): yes, polls=2 completion_code=0x01 residual=0 ep_id=0x01
+device descriptor: bLength=0x12 bDescriptorType=0x01 bDeviceClass=0x00 bMaxPacketSize0=0x09
+device descriptor: idVendor=0x0781 idProduct=0x5597
+```
+
+`residual=0` means all 18 bytes arrived. `bLength=0x12` (18) and
+`bDescriptorType=0x01` are exactly what a Device Descriptor must report.
+`idVendor=0x0781` is SanDisk -- the real flash drive in the board's USB-A
+port. `bDeviceClass=0` is normal for Mass Storage, which declares its
+class at the interface level instead.
+
+One detail worth recording because it is easy to misread:
+**`bMaxPacketSize0=9` is not a size, it is an exponent.** For SuperSpeed
+devices this field carries log2 of the EP0 max packet size, so 2^9 = 512,
+confirming the fixed 512 programmed into the EP0 Context in Step 7. For
+HS/FS/LS it is a plain byte count instead, which is why those speeds
+need the classic "read 8 bytes, learn the real `bMaxPacketSize0`,
+re-address the device" dance that SuperSpeed skips entirely.
+
+Files touched: `examples/rp1_usb_smoke/rp1_usb_smoke.tkb` only (adds a
+256-byte `usb_smoke_ctrl_buf` landing buffer).
+
+Next: Configuration Descriptor, the Mass Storage interface and its bulk
+endpoints, then Configure Endpoint + `SET_CONFIGURATION`. That work
+needs a larger EP0 ring than the current 4 TRBs, a tracked enqueue index
+with proper producer-cycle handling across the Link TRB, and a reusable
+control-transfer helper in place of the current inline block.
+
+---
+
 ### 2026-07-26: RPi5 -- USB Bring-Up Step 7 DONE: Address Device Succeeds; PORTSC.PED Is RW1CS and Was Disabling the Port
 
 Building on Step 6's `RP1_DMA_PCI_OFFSET` fix (next entry below), the
