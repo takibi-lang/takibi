@@ -15,6 +15,45 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- USB Bring-Up Step 6 (in progress): Real HCRST Added, Enable Slot Now Faults with USBSTS.HSE/HCE Instead of Silently Doing Nothing
+
+Direct follow-on to Step 5, working toward `make hwcheck-rpi5` parity
+with `make hwcheck-rpi3` (as far as `el0_shell`), proceeding
+autonomously per the user's own request. Real progress plus a real,
+not-yet-resolved hardware blocker -- documented here rather than left
+mid-flight, matching this file's own established practice for hard
+bring-up problems (see the PCIe outbound-window history in this same
+file).
+
+New reusable infrastructure: `examples/common_rpi5/dma_asm.S`
+(`rpi5_dcache_clean_range`/`rpi5_dcache_invalidate_range`, needed
+because XHCI's Command Ring/Event Ring/DCBAA are real DMA-target
+cacheable RAM, unlike every RP1 register touched so far) and
+`pcie.tkb`'s new `pcie2_dma_inbound_setup()` (RC_BAR2 general inbound
+DMA window, PCI `[0,64MB)` -> CPU `[0,64MB)`, confirmed structurally
+correct against Linux's own `pcie-brcmstb.c` including the
+BCM7712-specific UBUS remap branch).
+
+Step 6 (DCBAA/Command Ring/Event Ring/Enable Slot) went through three
+attempts: (1) original ERSTSZ/ERDP/ERSTBA order, silent no-op, ERDP's
+own EHB bit read SET but turned out to be stale firmware-inherited
+state, not a real posted event; (2) reordered to ERSTSZ/ERSTBA/ERDP
+matching Linux's `xhci_add_interrupter()` exactly, no change; (3) added
+a real `USBCMD.HCRST` (not just RS=0/RS=1) before reprogramming, since
+firmware left the controller with a REAL device already fully
+addressed on port 3 (active internal state a soft cycle might not
+discard) -- this changed the symptom from silent nothing to an explicit
+`USBSTS.HSE=1`/`HCE=1` fault (Host System Error / Host Controller
+Error), with `CRCR.CRR=0` (auto-halted).
+
+This is real progress (a fresh, HCRST-reset controller now properly
+detects and reports something going wrong, rather than silently doing
+nothing) but the exact root cause remains open: candidates include the
+new inbound DMA window (right structure, possibly wrong parameter),
+the required Scratchpad Buffer Array (Max Scratchpad Buffers=2 per
+HCSPARAMS2), or the Command/Link TRB construction itself. Continuing to
+investigate.
+
 ### 2026-07-26: RPi5 -- USB Bring-Up Step 5: First Real Write, a Clean Confirmed XHCI Halt
 
 Direct follow-on to Step 4. The first genuinely state-changing action in

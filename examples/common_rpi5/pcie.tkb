@@ -394,6 +394,55 @@ fn pcie2_mip0_inbound_setup() {
     *ubus_bar1_remap_hi = 0x10;
 }
 
+// General inbound DMA window (GitHub issue #67 follow-up: RP1's XHCI USB
+// host controllers, examples/rp1_usb_smoke's own Command Ring/Event
+// Ring/DCBAA work) -- the "add a general DMA window" this file's own
+// pcie2_mip0_inbound_setup comment flagged as future work. Uses RC_BAR2
+// (RC_BAR1 stays MIP0/MSI-only, issue #164), a SEPARATE Broadcom
+// "brcmstb" PCIe inbound BAR slot from the same register block that
+// function already uses -- confirmed via Linux's own pcie-brcmstb.c
+// (drivers/pci/controller/pcie-brcmstb.c, brcm_bar_reg_offset()/
+// brcm_ubus_reg_offset()): RC_BARn_CONFIG_LO/HI live at
+// PCIE_MISC_RC_BAR1_CONFIG_LO (0x402c) + 8*(n-1) for n<=3, and
+// UBUS_BARn_CONFIG_REMAP_LO/HI at PCIE_MISC_UBUS_BAR1_CONFIG_REMAP
+// (0x40ac) + 8*(n-1) -- so RC_BAR2_CONFIG_LO/HI = 0x4034/0x4038 and
+// UBUS_BAR2_CONFIG_REMAP_LO/HI = 0x40b4/0x40b8, all relative to the same
+// PCIe2 register base (0x1000120000) every other function in this file
+// already uses.
+//
+// Unlike pcie2_mip0_inbound_setup's narrow 4KB MSI target, this maps PCI
+// address [0, 64MB) directly onto CPU/system address [0, 64MB) -- a
+// pass-through identity window, not a remap to one fixed peripheral.
+// Combined with RP1's own "PCIe Outbound direct mapped space" (RP1
+// Peripherals datasheet Table 1: RP1-internal 40-bit bus masters, i.e.
+// usbhost0/usbhost1 as DMA initiators, pass addresses 0x00.0000.0000-
+// 0x7F.FFFFFFFF straight through unmodified as the PCI address), this
+// means a genuine CPU physical RAM address examples/rp1_usb_smoke hands
+// the XHCI controller (its DCBAAP/CRCR/ERSTBA pointers) is usable
+// UNCHANGED as the DMA target -- no separate PCI-vs-CPU address
+// translation needed on the software side, only this ONE-TIME inbound
+// window setup. 64MB was chosen as comfortable headroom over every
+// buffer this milestone's own kernel image + globals need (all within a
+// few hundred KB of the kernel's own low load address), not a measured
+// minimum.
+//
+// Size encoding (brcm_pcie_encode_ibar_size(), same Linux source): sizes
+// 64KB-64GB use log2(size)-15; 64MB = 2^26, encoding = 26-15 = 11 (0xB).
+// ACCESS_ENABLE is UBUS_BARn_CONFIG_REMAP_LO bit 0 -- confirmed by this
+// file's OWN pcie2_mip0_inbound_setup precedent (`| 1`), not a fresh
+// guess.
+fn pcie2_dma_inbound_setup() {
+    let rc_bar2_lo: *io u32 = 0x1000124034;
+    let rc_bar2_hi: *io u32 = 0x1000124038;
+    let ubus_bar2_remap_lo: *io u32 = 0x10001240B4;
+    let ubus_bar2_remap_hi: *io u32 = 0x10001240B8;
+
+    *rc_bar2_lo = 0xB; // PCI base 0 | size encoding 0xB (64MB)
+    *rc_bar2_hi = 0;
+    *ubus_bar2_remap_lo = 0 | 1; // CPU base 0 | ACCESS_ENABLE
+    *ubus_bar2_remap_hi = 0;
+}
+
 // pcie2_init(): full bring-up sequence for BCM2712's third PCIe RC
 // (pcie2), attached to RP1. Returns true once the link is confirmed up
 // (PCIE_MISC_PCIE_STATUS's DL_ACTIVE+PHYLINKUP bits) -- does NOT itself

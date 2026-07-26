@@ -88,6 +88,8 @@
 // examples/el0_elf_load's own MAX_PHDRS) -- a real xHCI implementation
 // normally has only a handful of extended capabilities, so 8 is
 // generous headroom, not a tight guess.
+
+use "examples/common_rpi5/dma_asm_extern.tkb";
 let mut usb_smoke_checkpoint: u32 = 0;
 let mut usb_smoke_host0_cap0: u32 = 0xAAAAAAAA;
 let mut usb_smoke_host0_hcsparams1: u32 = 0xAAAAAAAA;
@@ -110,6 +112,34 @@ let mut usb_smoke_host1_portsc3: u32 = 0xAAAAAAAA;
 // directly (not just "somewhere in iteration N").
 let mut usb_smoke_ecp_offset: u32 = 0xAAAAAAAA;
 let mut usb_smoke_ecp_dword: u32 = 0xAAAAAAAA;
+
+// -- Step 6 real DMA buffers (GitHub issue #67 follow-up) -------------------
+// Device Context Base Address Array: 65 x 8-byte pointers -- entry 0 is
+// the Scratchpad Buffer Array pointer (required whenever HCSPARAMS2's
+// Max Scratchpad Buffers field is nonzero -- read on real hardware as 2
+// here, see this file's own header comment), entries 1..64 are per-slot
+// Device Context pointers (only slot 1 is ever populated by this
+// example, since only one Enable Slot is issued). 64-byte aligned per
+// the xHCI spec's own DCBAAP requirement.
+let mut usb_smoke_dcbaa: [u8; 65 * 8] align(64);
+// Scratchpad Buffer Array (2 pointers, per HCSPARAMS2) plus the two real
+// 4KB buffers it points to. Zero-filled (BSS) is a valid initial
+// scratchpad buffer content -- the controller treats these as opaque
+// save/restore space, never interpreted by software.
+let mut usb_smoke_scratchpad_array: [u8; 2 * 8] align(64);
+let mut usb_smoke_scratchpad_buf0: [u8; 4096] align(4096);
+let mut usb_smoke_scratchpad_buf1: [u8; 4096] align(4096);
+// Command Ring: 4 TRBs (16 bytes each) -- TRB[0] holds whatever command
+// is currently being issued (Enable Slot for this step), TRB[1..2] are
+// reserved for a future step, TRB[3] is the mandatory Link TRB (Toggle
+// Cycle set) wrapping back to TRB[0].
+let mut usb_smoke_cmd_ring: [u8; 4 * 16] align(64);
+// Event Ring: 16 TRBs -- one segment, no Link TRB (the Event Ring uses
+// the ERST to define segment boundaries; the controller wraps within a
+// segment on its own, toggling its Producer Cycle State).
+let mut usb_smoke_evt_ring: [u8; 16 * 16] align(64);
+// Event Ring Segment Table: one 16-byte entry (base address + size).
+let mut usb_smoke_erst: [u8; 16] align(64);
 
 fn app_main() {
     uart_puts("rp1_usb_smoke\n");
@@ -383,6 +413,363 @@ fn app_main() {
         uart_puts("NO (timed out)");
     }
     uart_puts("\r\n");
+
+    // Real Host Controller Reset (USBCMD.HCRST, bit1) -- a plain RS=0/
+    // RS=1 cycle (Step 5 above) stops the ring doorbell/scheduling but
+    // does NOT necessarily discard the controller's own INTERNAL working
+    // state. This matters here specifically because firmware left this
+    // controller not just running but with a REAL device already fully
+    // enumerated on port 3 (Step 2's own finding: PORTSC3 showed
+    // CCS=1/PED=1/PLS=0 U0, i.e. firmware's own xHCI driver already ran
+    // Enable Slot/Address Device for that port, meaning firmware's own
+    // DCBAA/device-context/event-ring state was ACTIVELY in use, not
+    // idle). A first attempt at Step 6 without HCRST wrote a fresh,
+    // otherwise-correct DCBAAP/CRCR/ERSTBA/ERDP sequence (byte-order
+    // matching Linux's own xhci-mem.c exactly) and rang the Enable Slot
+    // doorbell, but no Command Completion Event ever appeared -- HCRST
+    // is the architected way to force the controller to fully discard
+    // whatever internal state it already had (including firmware's own)
+    // and adopt a genuinely fresh configuration, which a soft RS-cycle
+    // does not guarantee.
+    let mut hcrst_confirmed: bool = false;
+    if (halt_confirmed) {
+        usb_smoke_checkpoint = 45;
+        let usbcmd_hcrst_ptr: *io u32 = 0x1F00200020 as *io u32;
+        let usbcmd_before_hcrst: u32 = *usbcmd_hcrst_ptr;
+        *usbcmd_hcrst_ptr = usbcmd_before_hcrst | 2;
+
+        let mut hcrst_polls: usize = 0;
+        for i: usize in 0..<1000 {
+            usb_smoke_checkpoint = 46;
+            let usbcmd_poll_ptr: *io u32 = 0x1F00200020 as *io u32;
+            let usbcmd_poll: u32 = *usbcmd_poll_ptr;
+            let usbsts_poll2_ptr: *io u32 = 0x1F00200024 as *io u32;
+            let usbsts_poll2: u32 = *usbsts_poll2_ptr;
+            hcrst_polls = i + 1;
+            // HCRST self-clears (bit1) AND CNR (USBSTS bit11) must also
+            // clear before the controller is genuinely ready again.
+            if (((usbcmd_poll >> 1) & 1) == 0 && ((usbsts_poll2 >> 11) & 1) == 0) {
+                hcrst_confirmed = true;
+                break;
+            }
+            delay_us(1000);
+        }
+        uart_puts("HCRST confirmed: ");
+        if (hcrst_confirmed) {
+            uart_puts("yes, polls=");
+            uart_print(hcrst_polls);
+        } else {
+            uart_puts("NO (timed out)");
+        }
+        uart_puts("\r\n");
+    }
+
+    // Step 6 (2026-07-26 follow-up): only proceeds if HCRST was
+    // confirmed -- DCBAAP/CRCR/CONFIG are only legal to write while
+    // halted, so a failed reset makes everything below meaningless.
+    if (hcrst_confirmed) {
+        // Real DMA needs RP1-as-bus-master to actually be able to reach
+        // CPU/system RAM over PCIe -- examples/common_rpi5/pcie.tkb's
+        // own pcie2_dma_inbound_setup (added alongside this step) sets
+        // up BCM2712's PCIe2 root complex RC_BAR2 inbound window for
+        // exactly this. A first attempt at this whole step, WITHOUT
+        // this call, found EHB (Event Ring's own "an event was posted"
+        // bit) getting set by hardware but every dumped Event Ring TRB
+        // reading back as zero -- the controller believed it wrote an
+        // event, but that write never reached anywhere the CPU could
+        // see, exactly the "inbound DMA window not configured" failure
+        // mode this call fixes.
+        pcie2_dma_inbound_setup();
+        let rc_bar2_lo_diag_ptr: *io u32 = 0x1000124034 as *io u32;
+        let rc_bar2_hi_diag_ptr: *io u32 = 0x1000124038 as *io u32;
+        let ubus_bar2_lo_diag_ptr: *io u32 = 0x10001240B4 as *io u32;
+        let ubus_bar2_hi_diag_ptr: *io u32 = 0x10001240B8 as *io u32;
+        uart_puts("RC_BAR2_LO: ");
+        uart_print_hex((*rc_bar2_lo_diag_ptr) as i32);
+        uart_puts(" RC_BAR2_HI: ");
+        uart_print_hex((*rc_bar2_hi_diag_ptr) as i32);
+        uart_puts("\r\nUBUS_BAR2_LO: ");
+        uart_print_hex((*ubus_bar2_lo_diag_ptr) as i32);
+        uart_puts(" UBUS_BAR2_HI: ");
+        uart_print_hex((*ubus_bar2_hi_diag_ptr) as i32);
+        uart_puts("\r\n");
+
+        // Scratchpad Buffer Array: HCSPARAMS2 (usb_smoke_host0_hcsparams2
+        // = 0x140000f1) reports Max Scratchpad Buffers = 2 (Hi bits[25:21]
+        // = 0, Lo bits[31:27] = 2) -- DCBAA[0] MUST point to a real
+        // Scratchpad Buffer Array when this is nonzero, or the controller
+        // may fault/misbehave whenever it actually needs scratchpad
+        // space (spec requirement, not optional for this board).
+        usb_smoke_checkpoint = 50;
+        let scratchpad_array_base: usize = (usb_smoke_scratchpad_array as *u8) as usize;
+        let scratchpad_buf0_base: usize = (usb_smoke_scratchpad_buf0 as *u8) as usize;
+        let scratchpad_buf1_base: usize = (usb_smoke_scratchpad_buf1 as *u8) as usize;
+        let sp0_ptr: *u32 = scratchpad_array_base as *u32;
+        *sp0_ptr = (scratchpad_buf0_base & 0xFFFFFFFF) as u32;
+        let sp0_hi_ptr: *u32 = (scratchpad_array_base + 4) as *u32;
+        *sp0_hi_ptr = ((scratchpad_buf0_base >> 32) & 0xFFFFFFFF) as u32;
+        let sp1_ptr: *u32 = (scratchpad_array_base + 8) as *u32;
+        *sp1_ptr = (scratchpad_buf1_base & 0xFFFFFFFF) as u32;
+        let sp1_hi_ptr: *u32 = (scratchpad_array_base + 12) as *u32;
+        *sp1_hi_ptr = ((scratchpad_buf1_base >> 32) & 0xFFFFFFFF) as u32;
+        rpi5_dcache_clean_range(scratchpad_array_base, 16);
+
+        // DCBAA[0] = Scratchpad Buffer Array pointer.
+        usb_smoke_checkpoint = 51;
+        let dcbaa_base: usize = (usb_smoke_dcbaa as *u8) as usize;
+        let dcbaa0_ptr: *u32 = dcbaa_base as *u32;
+        *dcbaa0_ptr = (scratchpad_array_base & 0xFFFFFFFF) as u32;
+        let dcbaa0_hi_ptr: *u32 = (dcbaa_base + 4) as *u32;
+        *dcbaa0_hi_ptr = ((scratchpad_array_base >> 32) & 0xFFFFFFFF) as u32;
+        rpi5_dcache_clean_range(dcbaa_base, 8);
+
+        // Command Ring: TRB[0] = Enable Slot Command (Parameter=0,
+        // Status=0, Cycle=1 | TRB Type=9<<10 = 0x2401). TRB[3] = Link TRB
+        // pointing back to TRB[0] (Cycle=1 | Toggle Cycle=1<<1 |
+        // TRB Type=6<<10 = 0x1803).
+        usb_smoke_checkpoint = 52;
+        let cmd_ring_base: usize = (usb_smoke_cmd_ring as *u8) as usize;
+        let trb0_dw0_ptr: *u32 = cmd_ring_base as *u32;
+        *trb0_dw0_ptr = 0;
+        let trb0_dw1_ptr: *u32 = (cmd_ring_base + 4) as *u32;
+        *trb0_dw1_ptr = 0;
+        let trb0_dw2_ptr: *u32 = (cmd_ring_base + 8) as *u32;
+        *trb0_dw2_ptr = 0;
+        let trb0_dw3_ptr: *u32 = (cmd_ring_base + 12) as *u32;
+        *trb0_dw3_ptr = 0x00002401;
+
+        let link_dw0_ptr: *u32 = (cmd_ring_base + 48) as *u32;
+        *link_dw0_ptr = (cmd_ring_base & 0xFFFFFFFF) as u32;
+        let link_dw1_ptr: *u32 = (cmd_ring_base + 52) as *u32;
+        *link_dw1_ptr = ((cmd_ring_base >> 32) & 0xFFFFFFFF) as u32;
+        let link_dw2_ptr: *u32 = (cmd_ring_base + 56) as *u32;
+        *link_dw2_ptr = 0;
+        let link_dw3_ptr: *u32 = (cmd_ring_base + 60) as *u32;
+        *link_dw3_ptr = 0x00001803;
+        usb_smoke_checkpoint = 53;
+        rpi5_dcache_clean_range(cmd_ring_base, 64);
+
+        // Event Ring Segment Table: one entry, base = event ring, size =
+        // 16 TRBs.
+        usb_smoke_checkpoint = 54;
+        let evt_ring_base: usize = (usb_smoke_evt_ring as *u8) as usize;
+        let erst_base: usize = (usb_smoke_erst as *u8) as usize;
+        let erst_dw0_ptr: *u32 = erst_base as *u32;
+        *erst_dw0_ptr = (evt_ring_base & 0xFFFFFFFF) as u32;
+        let erst_dw1_ptr: *u32 = (erst_base + 4) as *u32;
+        *erst_dw1_ptr = ((evt_ring_base >> 32) & 0xFFFFFFFF) as u32;
+        let erst_dw2_ptr: *u32 = (erst_base + 8) as *u32;
+        *erst_dw2_ptr = 16; // Ring Segment Size (bits[15:0]) = 16 TRBs
+        usb_smoke_checkpoint = 55;
+        rpi5_dcache_clean_range(erst_base, 16);
+
+        // Runtime registers: Interrupter 0 is at Capability base + RTSOFF
+        // + 0x20 (RTSOFF itself, read in Step 4 as 0x460, points to
+        // MFINDEX; interrupters start 0x20 further in). Programming
+        // order: ERSTSZ, then ERSTBA, then ERDP LAST -- matching Linux's
+        // own xhci_add_interrupter() exactly (drivers/usb/host/
+        // xhci-mem.c), fetched and cross-checked after this step's FIRST
+        // attempt (ERSTSZ/ERDP/ERSTBA-last, ERDP before ERSTBA) silently
+        // never produced a Command Completion Event: CRCR.CRR read back
+        // as 1 (Command Ring "running") but every Event Ring TRB stayed
+        // zero, and EHB going from 0 -> 1 -> back to 0 across the run
+        // turned out to be misleading (Linux's own xhci-mem.c comment:
+        // "Don't clear the EHB bit... because there might be more events
+        // to service" -- it is NOT meant to be explicitly cleared by
+        // software at init, contrary to an earlier version of this file
+        // that did so). Writing ERDP before ERSTBA plausibly let the
+        // controller latch an undefined/stale ERSTBA-relative dequeue
+        // interpretation that a later ERSTBA write never re-triggered.
+        usb_smoke_checkpoint = 56;
+        let ir0_base: usize = 0x1F00200000 + 0x460 + 0x20;
+        let erstsz_ptr: *io u32 = ir0_base as *io u32;
+        *erstsz_ptr = 1;
+        usb_smoke_checkpoint = 57;
+        let erstba_lo_ptr: *io u32 = (ir0_base + 0x10) as *io u32;
+        *erstba_lo_ptr = (erst_base & 0xFFFFFFFF) as u32;
+        let erstba_hi_ptr: *io u32 = (ir0_base + 0x14) as *io u32;
+        *erstba_hi_ptr = ((erst_base >> 32) & 0xFFFFFFFF) as u32;
+        usb_smoke_checkpoint = 58;
+        let erdp_lo_ptr: *io u32 = (ir0_base + 0x18) as *io u32;
+        *erdp_lo_ptr = (evt_ring_base & 0xFFFFFFFF) as u32;
+        let erdp_hi_ptr: *io u32 = (ir0_base + 0x1C) as *io u32;
+        *erdp_hi_ptr = ((evt_ring_base >> 32) & 0xFFFFFFFF) as u32;
+
+        // DCBAAP (Operational+0x30).
+        usb_smoke_checkpoint = 59;
+        let dcbaap_lo_ptr: *io u32 = 0x1F00200050 as *io u32;
+        *dcbaap_lo_ptr = (dcbaa_base & 0xFFFFFFFF) as u32;
+        let dcbaap_hi_ptr: *io u32 = 0x1F00200054 as *io u32;
+        *dcbaap_hi_ptr = ((dcbaa_base >> 32) & 0xFFFFFFFF) as u32;
+
+        // CRCR (Operational+0x18): pointer | RCS=1 (bit0). CS/CA (bits
+        // 2:1) left clear -- this is ring INITIALIZATION, not a stop/
+        // abort request.
+        usb_smoke_checkpoint = 60;
+        let crcr_lo_ptr: *io u32 = 0x1F00200038 as *io u32;
+        *crcr_lo_ptr = ((cmd_ring_base & 0xFFFFFFC0) | 1) as u32;
+        let crcr_hi_ptr: *io u32 = 0x1F0020003C as *io u32;
+        *crcr_hi_ptr = ((cmd_ring_base >> 32) & 0xFFFFFFFF) as u32;
+
+        // CONFIG (Operational+0x38): MaxSlotsEn=1 -- this example only
+        // ever enables one slot for the one flash drive on port 3.
+        usb_smoke_checkpoint = 61;
+        let config_ptr: *io u32 = 0x1F00200058 as *io u32;
+        *config_ptr = 1;
+
+        // Restart the controller (USBCMD.RS=1). Reads USBCMD fresh here
+        // (not the pre-HCRST usbcmd_after snapshot) -- HCRST resets
+        // USBCMD to its own architectural default, so preserving
+        // whatever bits happen to be there NOW is correct; the earlier
+        // (pre-reset) INTE/HSEE snapshot is stale after a real reset.
+        usb_smoke_checkpoint = 62;
+        let usbcmd_restart_ptr: *io u32 = 0x1F00200020 as *io u32;
+        let usbcmd_fresh: u32 = *usbcmd_restart_ptr;
+        let usbcmd_restart_val: u32 = usbcmd_fresh | 1;
+        *usbcmd_restart_ptr = usbcmd_restart_val;
+
+        let mut run_confirmed: bool = false;
+        let mut run_polls: usize = 0;
+        for i: usize in 0..<100 {
+            usb_smoke_checkpoint = 63;
+            let usbsts_run_ptr: *io u32 = 0x1F00200024 as *io u32;
+            let usbsts_run: u32 = *usbsts_run_ptr;
+            run_polls = i + 1;
+            if ((usbsts_run & 1) == 0) {
+                run_confirmed = true;
+                break;
+            }
+            delay_us(1000);
+        }
+        uart_puts("controller restarted: ");
+        if (run_confirmed) {
+            uart_puts("yes, polls=");
+            uart_print(run_polls);
+        } else {
+            uart_puts("NO (timed out)");
+        }
+        uart_puts("\r\n");
+
+        if (run_confirmed) {
+            // Ring the Command doorbell: Doorbell Array is at Capability
+            // base + DBOFF (Step 4: 0x500). Doorbell register 0 (the
+            // Host Controller's own doorbell, used for the Command Ring)
+            // -- writing 0 to its Target field enqueues/executes pending
+            // Command Ring TRBs.
+            usb_smoke_checkpoint = 64;
+            let doorbell0_ptr: *io u32 = 0x1F00200500 as *io u32;
+            *doorbell0_ptr = 0;
+
+            // Poll the Event Ring's first entry for a Command Completion
+            // Event: Cycle bit (DWORD3 bit0) must match our own tracked
+            // Consumer Cycle State, which starts at 1. Invalidate the
+            // cache line before EVERY check -- this is real DMA-written
+            // memory, a stale cached read would look identical to "no
+            // event yet".
+            let mut evt_confirmed: bool = false;
+            let mut evt_polls: usize = 0;
+            let mut evt_dw2: u32 = 0;
+            let mut evt_dw3: u32 = 0;
+            for i: usize in 0..<1000 {
+                usb_smoke_checkpoint = 65;
+                rpi5_dcache_invalidate_range(evt_ring_base, 16);
+                let evt_dw3_ptr: *u32 = (evt_ring_base + 12) as *u32;
+                let dw3: u32 = *evt_dw3_ptr;
+                evt_polls = i + 1;
+                if ((dw3 & 1) == 1) {
+                    evt_confirmed = true;
+                    let evt_dw2_ptr: *u32 = (evt_ring_base + 8) as *u32;
+                    evt_dw2 = *evt_dw2_ptr;
+                    evt_dw3 = dw3;
+                    break;
+                }
+                delay_us(1000);
+            }
+
+            uart_puts("enable slot completion event: ");
+            if (evt_confirmed) {
+                uart_puts("yes, polls=");
+                uart_print(evt_polls);
+                uart_puts(" completion_code=");
+                uart_print_hex(((evt_dw2 >> 24) & 0xFF) as i32);
+                uart_puts(" slot_id=");
+                uart_print_hex(((evt_dw3 >> 24) & 0xFF) as i32);
+                uart_puts(" trb_type=");
+                uart_print_hex(((evt_dw3 >> 10) & 0x3F) as i32);
+                uart_puts("\r\n");
+            } else {
+                uart_puts("NO (timed out)\r\n");
+                // Diagnostics: USBSTS.HSE (bit2, Host System Error) would
+                // indicate a fatal bus error on RP1's own DMA access to
+                // host RAM; CRCR.CRR (bit3, Command Ring Running)
+                // indicates whether the doorbell ring actually started
+                // command processing at all.
+                usb_smoke_checkpoint = 66;
+                let usbsts_diag_ptr: *io u32 = 0x1F00200024 as *io u32;
+                let usbsts_diag: u32 = *usbsts_diag_ptr;
+                let crcr_diag_lo_ptr: *io u32 = 0x1F00200038 as *io u32;
+                let crcr_diag_lo: u32 = *crcr_diag_lo_ptr;
+                let dcbaap_diag_lo_ptr: *io u32 = 0x1F00200050 as *io u32;
+                let dcbaap_diag_lo: u32 = *dcbaap_diag_lo_ptr;
+                let erdp_diag_lo_ptr: *io u32 = (ir0_base + 0x18) as *io u32;
+                let erdp_diag_lo: u32 = *erdp_diag_lo_ptr;
+                let erstba_diag_lo_ptr: *io u32 = (ir0_base + 0x10) as *io u32;
+                let erstba_diag_lo: u32 = *erstba_diag_lo_ptr;
+                uart_puts("diag USBSTS: ");
+                uart_print_hex(usbsts_diag as i32);
+                uart_puts(" HSE=");
+                uart_print(((usbsts_diag >> 2) & 1) as usize);
+                uart_puts("\r\ndiag CRCR_lo: ");
+                uart_print_hex(crcr_diag_lo as i32);
+                uart_puts(" CRR=");
+                uart_print(((crcr_diag_lo >> 3) & 1) as usize);
+                uart_puts("\r\ndiag DCBAAP_lo (expect ");
+                uart_print_hex((dcbaa_base & 0xFFFFFFFF) as i32);
+                uart_puts("): ");
+                uart_print_hex(dcbaap_diag_lo as i32);
+                uart_puts("\r\ndiag ERDP_lo (expect ");
+                uart_print_hex((evt_ring_base & 0xFFFFFFFF) as i32);
+                uart_puts("): ");
+                uart_print_hex(erdp_diag_lo as i32);
+                uart_puts("\r\ndiag ERSTBA_lo (expect ");
+                uart_print_hex((erst_base & 0xFFFFFFFF) as i32);
+                uart_puts("): ");
+                uart_print_hex(erstba_diag_lo as i32);
+                uart_puts("\r\n");
+
+                // ERDP's own EHB bit (readback above) came back SET even
+                // though software never sets it -- proof the controller
+                // DID write at least one event, just not necessarily at
+                // evt_ring[0]. Hypothesis: restarting the controller
+                // (USBCMD.RS=1) itself queued a Port Status Change Event
+                // FIRST (PORTSC's CSC/PEC bits were already pending from
+                // way back in Step 2/3, before this example ever armed
+                // the Event Ring), pre-empting index 0 before the real
+                // Enable Slot completion event could land there. Dump
+                // every DWORD of the first 4 event ring entries raw to
+                // check.
+                rpi5_dcache_invalidate_range(evt_ring_base, 4 * 16);
+                for slot: usize in 0..<4 {
+                    let base: usize = evt_ring_base + slot * 16;
+                    let d0_ptr: *u32 = base as *u32;
+                    let d1_ptr: *u32 = (base + 4) as *u32;
+                    let d2_ptr: *u32 = (base + 8) as *u32;
+                    let d3_ptr: *u32 = (base + 12) as *u32;
+                    uart_puts("evt[");
+                    uart_print(slot);
+                    uart_puts("] dw0=");
+                    uart_print_hex((*d0_ptr) as i32);
+                    uart_puts(" dw1=");
+                    uart_print_hex((*d1_ptr) as i32);
+                    uart_puts(" dw2=");
+                    uart_print_hex((*d2_ptr) as i32);
+                    uart_puts(" dw3=");
+                    uart_print_hex((*d3_ptr) as i32);
+                    uart_puts("\r\n");
+                }
+            }
+        }
+    }
 
     usb_smoke_checkpoint = 30;
     uart_puts("done\n");

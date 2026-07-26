@@ -1,8 +1,104 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): USB bring-up Step 5 -- the FIRST
-## real write against RP1's XHCI controller: a clean, confirmed halt,
-## no bug, no new bring-up trouble
+## Status update (2026-07-26, latest): USB bring-up Step 6 in progress --
+## real HCRST added, but Enable Slot now triggers USBSTS.HSE/HCE (a real
+## bus fault) instead of silently doing nothing; root cause NOT yet found
+
+User asked to proceed autonomously through USB bring-up toward
+`make hwcheck-rpi5` parity with `make hwcheck-rpi3` (i.e. as far as
+`el0_shell`), calling only for genuine design/implementation judgment
+calls. This status update documents real progress AND a real,
+not-yet-resolved hardware blocker -- matching this project's own
+established practice (see this file's own PCIe outbound-window bring-up
+history) of committing solid partial progress with the exact blocker
+characterized, rather than leaving debugging work undocumented mid-flight.
+
+**New shared infrastructure landed (both reusable well beyond USB)**:
+- `examples/common_rpi5/dma_asm.S` (`rpi5_dcache_clean_range`/
+  `rpi5_dcache_invalidate_range`): every RP1 peripheral touched before
+  this one was pure CPU-initiated MMIO (no caching involved). XHCI's own
+  Command Ring/Event Ring/DCBAA are ordinary cacheable RAM, read/written
+  by usbhost0/usbhost1 as a REAL DMA-capable PCIe bus master -- these
+  two helpers (`dc cvac`/`dc civac` loops + `dsb sy`, cache line
+  hardcoded to 64 bytes matching Cortex-A76/examples/common_rpi3/
+  tlb_asm.S's own precedent) make CPU writes visible to DMA and DMA
+  writes visible to the CPU. Needed by ANY future RP1 DMA peripheral,
+  not just USB.
+- `examples/common_rpi5/pcie.tkb`'s new `pcie2_dma_inbound_setup()`:
+  the "add a general DMA window" future-work note
+  `pcie2_mip0_inbound_setup`'s own comment had flagged. Uses RC_BAR2 (a
+  SEPARATE Broadcom "brcmstb" inbound BAR slot from RC_BAR1, which stays
+  MIP0/MSI-only per issue #164) to map PCI address `[0, 64MB)` directly
+  onto CPU/system address `[0, 64MB)` -- confirmed structurally correct
+  against Linux's own `pcie-brcmstb.c` (`set_inbound_win_registers()`/
+  `brcm_bar_reg_offset()`/`brcm_ubus_reg_offset()`/
+  `brcm_pcie_encode_ibar_size()`, fetched and cross-checked directly,
+  including the BCM7712-specific UBUS remap branch that specifically
+  applies to BCM2712). Register writes confirmed to stick via readback
+  (`RC_BAR2_LO`/`UBUS_BAR2_LO` both read back exactly as written).
+
+**Steps 1-5 (register reachability, USBSTS/PORTSC, extended
+capabilities, USBLEGSUP, clean halt) remain fully verified and
+unchanged** -- see the earlier status entries below for their own
+details; Step 6 builds on top of them.
+
+**Step 6 investigation so far** (`examples/rp1_usb_smoke/
+rp1_usb_smoke.tkb`): programs DCBAA (with a real Scratchpad Buffer Array
+-- HCSPARAMS2 reports Max Scratchpad Buffers=2, spec-required, not
+optional), Command Ring (Enable Slot TRB + Link TRB), Event Ring (ERST +
+interrupter registers), CONFIG.MaxSlotsEn, restarts the controller, and
+rings the Command doorbell for Enable Slot. Findings, in the order
+found:
+1. **First attempt** (ERSTSZ -> ERDP -> ERSTBA order, no HCRST): no
+   hang, but no Command Completion Event ever appeared. `ERDP`'s own EHB
+   bit read back SET after the attempt, which first looked like proof an
+   event WAS posted somewhere the dump missed -- but explicitly clearing
+   EHB before ringing the doorbell and re-checking afterward showed it
+   reads back UNSET, i.e. EHB going 0->1 earlier was most likely STALE
+   state inherited from firmware's own prior use of this controller
+   (this controller was found already running with a real device fully
+   enumerated on port 3 by firmware -- see Step 2's own PORTSC3 finding
+   below), not evidence of anything this example's own Enable Slot
+   command triggered.
+2. **Reordered to ERSTSZ -> ERSTBA -> ERDP** (matching Linux's own
+   `xhci_add_interrupter()` in `drivers/usb/host/xhci-mem.c`, fetched
+   and confirmed byte-for-byte) -- no change, same silent no-op.
+3. **Added a real `USBCMD.HCRST`** (Host Controller Reset, not just an
+   RS=0/RS=1 soft cycle) before reprogramming DCBAAP/CRCR/CONFIG:
+   reasoning being that firmware left this controller not merely
+   running but with a REAL device already fully addressed and
+   configured on port 3 (a working internal device-context/event-ring
+   state actively in use), which a soft RS-cycle does not guarantee
+   gets discarded. HCRST self-clears and CNR clears normally (confirmed
+   after only 2 polls). **This changed the symptom**: `USBSTS` after the
+   subsequent failed Enable Slot attempt now reads `0x00001015` --
+   `HCH=1` (halted), **`HSE=1` (Host System Error)**, **`HCE=1` (Host
+   Controller Error)**, `PCD=1` (stale). `CRCR` reads back `0x00000000`
+   (`CRR=0` -- the controller stopped itself, consistent with a fatal
+   error auto-halting it).
+
+**Where this stands**: HCRST turned a SILENT no-op into an EXPLICIT
+hardware fault signal -- real progress (a controller with fully-cleared
+internal state now properly detects and reports something going wrong,
+where the dirty/inherited-state controller apparently didn't), but the
+EXACT root cause of the fault is not yet identified. Leading candidates,
+not yet individually tested in isolation:
+- The new `pcie2_dma_inbound_setup()` inbound window, despite matching
+  the reference driver structurally, could still have a wrong parameter
+  (size encoding, alignment, or a BCM2712-specific quirk beyond what the
+  fetched driver excerpt covered).
+- The Scratchpad Buffer Array (Max Scratchpad Buffers=2, `SPR` bit also
+  set in HCSPARAMS2 -- meaning unclear, not yet researched) could have
+  a construction bug distinct from the main Command/Event Ring setup.
+- Something about the Command Ring TRB or Link TRB construction itself,
+  independent of the DMA-reachability question entirely.
+
+**Next step**: isolate which of the above is actually at fault --
+e.g. temporarily testing with Scratchpad Buffers omitted (spec
+violation, but diagnostically informative) to see whether HSE/HCE
+persists, or re-verifying the inbound window with a deliberately much
+larger or PCI-address-shifted test to rule out an alignment/off-by-one
+in `pcie2_dma_inbound_setup()`.
 
 Direct follow-on to Step 4. This is the first genuinely state-changing
 action in the whole USB bring-up effort so far (Steps 1-4 were all
