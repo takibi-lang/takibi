@@ -1,6 +1,65 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): USB bring-up Step 6 in progress --
+## Status update (2026-07-26, latest): USB bring-up Step 6 -- systematic
+## isolation testing narrows the USBSTS.HSE/HCE fault to "somewhere
+## between ringing the Enable Slot doorbell and the controller's own
+## attempt to act on it"; root cause STILL not found after ruling out
+## the two leading candidates
+
+Direct follow-on to the previous entry below. Three isolation tests run
+against the `USBSTS.HSE=1`/`HCE=1` fault (all real-hardware, all
+reproducible):
+
+1. **Inbound DMA window (`pcie2_dma_inbound_setup`) is NOT the
+   cause**: running the exact same sequence with that call commented
+   out (RC_BAR2/UBUS_BAR2 left at their reset/zero values) produced the
+   IDENTICAL fault (`USBSTS=0x00001015` both with and without it). This
+   rules out the RC_BAR2 inbound window as the culprit, despite it being
+   the leading suspect going in. The call was restored afterward (still
+   structurally correct per Linux's own `pcie-brcmstb.c`, and will be
+   needed once the real cause is found).
+2. **The Scratchpad Buffer Array is NOT the cause either**: leaving
+   `DCBAA[0]` at its BSS-zero default (no scratchpad pointer at all --
+   a real spec violation given `HCSPARAMS2`'s Max Scratchpad Buffers=2,
+   but diagnostically clean) produced the SAME fault. Restored
+   afterward for the same reason.
+3. **The fault's exact timing window is now pinned down precisely**:
+   added `USBSTS` reads at three checkpoints -- immediately after HCRST
+   completes (`HCE=0`/`HSE=0`, clean), immediately before ringing the
+   Enable Slot doorbell (`HCE=0`/`HSE=0`, still clean, meaning
+   DCBAAP/CRCR/CONFIG/the RS=1 restart are ALL fine on their own), and
+   after the 1-second Command Completion Event poll times out
+   (`HCE=1`/`HSE=1`). **The fault occurs specifically between ringing
+   the doorbell and the controller's own attempt to process what it
+   points to** -- consistent with a failed DMA READ of the Command Ring
+   TRB itself, but the earlier two isolation tests already ruled out
+   the two most obvious reasons a DMA access might fail this way.
+   `pcie2_link_up()` confirms the PCIe2 link itself stays up through
+   the fault -- this is a targeted access problem, not a link-level
+   failure.
+
+**Where this stands**: two of three leading hypotheses eliminated with
+real-hardware evidence, the fault's timing window is now known
+precisely, but the actual root cause remains open. Remaining
+candidates, roughly in order of how much investigation they'd need:
+Command Ring/Link TRB construction (Cycle bit, TRB Type, or something
+about the ring's own memory layout not yet suspected), the
+undocumented `usbhost0_cfg`/`usbhost1_cfg` register block (still never
+touched at all -- Step 4's own finding that this isn't documented in
+the datasheet's USB chapter means it's the one remaining untested
+"maybe RP1 needs something configured here before DMA works at all"
+lead), or a genuinely deeper BCM2712 PCIe-root-complex-side requirement
+neither `pcie-brcmstb.c`'s outbound-window code (already fully ported)
+nor its now-added inbound-window code (also ported, also ruled out as
+THIS fault's cause) fully covers. This is now a harder, more open-ended
+research problem than a quick register fix -- worth a dedicated future
+session with either new reference material (the actual xHCI
+specification PDF, blocked so far behind a 403 from every URL tried) or
+a different diagnostic technique (e.g. checking BCM2712's own PCIe
+AER/uncorrectable-error logging registers, not yet investigated at
+all) rather than further blind register-level guessing.
+
+## Status update (2026-07-26, earlier): USB bring-up Step 6 in progress --
 ## real HCRST added, but Enable Slot now triggers USBSTS.HSE/HCE (a real
 ## bus fault) instead of silently doing nothing; root cause NOT yet found
 

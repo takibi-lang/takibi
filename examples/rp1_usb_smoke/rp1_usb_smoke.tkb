@@ -462,6 +462,23 @@ fn app_main() {
             uart_puts("NO (timed out)");
         }
         uart_puts("\r\n");
+
+        // Isolation test (2026-07-26): check USBSTS.HCE (Host Controller
+        // Error, bit12) RIGHT HERE, before touching DCBAAP/CRCR/CONFIG/
+        // Enable Slot at all -- if HCE is already set immediately after
+        // HCRST itself, the later fault has nothing to do with this
+        // example's own Command/Event Ring setup at all.
+        if (hcrst_confirmed) {
+            let usbsts_post_hcrst_ptr: *io u32 = 0x1F00200024 as *io u32;
+            let usbsts_post_hcrst: u32 = *usbsts_post_hcrst_ptr;
+            uart_puts("USBSTS immediately after HCRST: ");
+            uart_print_hex(usbsts_post_hcrst as i32);
+            uart_puts(" HCE=");
+            uart_print(((usbsts_post_hcrst >> 12) & 1) as usize);
+            uart_puts(" HSE=");
+            uart_print(((usbsts_post_hcrst >> 2) & 1) as usize);
+            uart_puts("\r\n");
+        }
     }
 
     // Step 6 (2026-07-26 follow-up): only proceeds if HCRST was
@@ -479,6 +496,13 @@ fn app_main() {
         // event, but that write never reached anywhere the CPU could
         // see, exactly the "inbound DMA window not configured" failure
         // mode this call fixes.
+        // Isolation test (2026-07-26) confirmed this call is NOT the
+        // cause of the USBSTS.HSE/HCE fault seen after Enable Slot:
+        // running with this call commented out produced the IDENTICAL
+        // fault (same USBSTS=0x1015), ruling out the inbound DMA window
+        // as the culprit. Restored since it is still structurally
+        // correct infrastructure this milestone will need regardless
+        // once the real root cause is found.
         pcie2_dma_inbound_setup();
         let rc_bar2_lo_diag_ptr: *io u32 = 0x1000124034 as *io u32;
         let rc_bar2_hi_diag_ptr: *io u32 = 0x1000124038 as *io u32;
@@ -514,7 +538,14 @@ fn app_main() {
         *sp1_hi_ptr = ((scratchpad_buf1_base >> 32) & 0xFFFFFFFF) as u32;
         rpi5_dcache_clean_range(scratchpad_array_base, 16);
 
-        // DCBAA[0] = Scratchpad Buffer Array pointer.
+        // DCBAA[0] = Scratchpad Buffer Array pointer. Isolation test
+        // (2026-07-26) confirmed this is NOT the cause of the
+        // USBSTS.HSE/HCE fault seen after ringing the Enable Slot
+        // doorbell: leaving DCBAA[0]=0 (BSS default, no scratchpad
+        // pointer at all -- a real spec violation given HCSPARAMS2's
+        // Max Scratchpad Buffers=2, but diagnostically informative)
+        // produced the IDENTICAL fault. Restored since it is still
+        // spec-required and structurally correct regardless.
         usb_smoke_checkpoint = 51;
         let dcbaa_base: usize = (usb_smoke_dcbaa as *u8) as usize;
         let dcbaa0_ptr: *u32 = dcbaa_base as *u32;
@@ -650,6 +681,24 @@ fn app_main() {
         }
         uart_puts("\r\n");
 
+        // Isolation test (2026-07-26): check USBSTS.HCE/HSE HERE, after
+        // DCBAAP/CRCR/CONFIG/RS=1-restart but BEFORE ringing the Command
+        // doorbell at all -- if the fault is already present at this
+        // point, it comes from the register setup itself (Scratchpad/
+        // DCBAAP/CRCR/CONFIG/restart), not from the doorbell ring or any
+        // actual TRB fetch attempt.
+        if (run_confirmed) {
+            let usbsts_pre_doorbell_ptr: *io u32 = 0x1F00200024 as *io u32;
+            let usbsts_pre_doorbell: u32 = *usbsts_pre_doorbell_ptr;
+            uart_puts("USBSTS before ringing doorbell: ");
+            uart_print_hex(usbsts_pre_doorbell as i32);
+            uart_puts(" HCE=");
+            uart_print(((usbsts_pre_doorbell >> 12) & 1) as usize);
+            uart_puts(" HSE=");
+            uart_print(((usbsts_pre_doorbell >> 2) & 1) as usize);
+            uart_puts("\r\n");
+        }
+
         if (run_confirmed) {
             // Ring the Command doorbell: Doorbell Array is at Capability
             // base + DBOFF (Step 4: 0x500). Doorbell register 0 (the
@@ -735,6 +784,22 @@ fn app_main() {
                 uart_print_hex((erst_base & 0xFFFFFFFF) as i32);
                 uart_puts("): ");
                 uart_print_hex(erstba_diag_lo as i32);
+                uart_puts("\r\n");
+
+                // Isolation test (2026-07-26): the fault is now known to
+                // trigger specifically between ringing the doorbell and
+                // this point (confirmed clean immediately before the
+                // doorbell ring). Check whether BCM2712's own PCIe2 link
+                // itself is still up -- if the fault took the LINK down
+                // entirely (not just a targeted access rejection), that
+                // is a materially different, more severe problem.
+                let link_still_up: bool = pcie2_link_up();
+                uart_puts("PCIe2 link still up after fault: ");
+                if (link_still_up) {
+                    uart_puts("yes");
+                } else {
+                    uart_puts("NO");
+                }
                 uart_puts("\r\n");
 
                 // ERDP's own EHB bit (readback above) came back SET even

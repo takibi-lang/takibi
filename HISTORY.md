@@ -15,6 +15,39 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- USB Bring-Up Step 6: Isolation Testing Narrows the HSE/HCE Fault, Root Cause Still Open
+
+Direct follow-on to the entry below. Three real-hardware isolation
+tests against the `USBSTS.HSE=1`/`HCE=1` fault found after ringing the
+Enable Slot Command Ring doorbell:
+
+1. Commenting out `pcie2_dma_inbound_setup()` (the new RC_BAR2 inbound
+   DMA window) produced the IDENTICAL fault -- ruled out as the cause,
+   despite being the leading suspect.
+2. Leaving `DCBAA[0]` unset (no Scratchpad Buffer Array pointer, a real
+   spec violation given `HCSPARAMS2`'s Max Scratchpad Buffers=2)
+   produced the SAME fault -- also ruled out.
+3. Added `USBSTS` checks immediately after HCRST, immediately before
+   ringing the doorbell, and after the completion-event poll times out:
+   clean at the first two checkpoints, faulted only at the third. The
+   fault occurs specifically between ringing the doorbell and the
+   controller's own attempt to process the Command Ring -- consistent
+   with a failed DMA read of the TRB itself, though the two most likely
+   reasons for that are now ruled out. `pcie2_link_up()` confirms the
+   PCIe2 link stays up through the fault -- a targeted access problem,
+   not a link failure.
+
+Root cause still not found. Remaining candidates: Command/Link TRB
+construction, the still-undocumented `usbhost0_cfg`/`usbhost1_cfg`
+register block (never touched at all), or a deeper BCM2712 PCIe root
+complex requirement beyond both the outbound and inbound window code
+already ported from `pcie-brcmstb.c`. This has become an open-ended
+research problem rather than a quick fix -- the actual xHCI
+specification PDF was not reachable (403 from every URL tried), and a
+different diagnostic technique (BCM2712's own PCIe AER/error-logging
+registers, not yet investigated) is the likely next avenue rather than
+further register-level guessing.
+
 ### 2026-07-26: RPi5 -- USB Bring-Up Step 6 (in progress): Real HCRST Added, Enable Slot Now Faults with USBSTS.HSE/HCE Instead of Silently Doing Nothing
 
 Direct follow-on to Step 5, working toward `make hwcheck-rpi5` parity
