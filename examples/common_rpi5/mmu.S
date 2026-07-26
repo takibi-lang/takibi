@@ -45,6 +45,30 @@
                   pcie2_outbound_window_init programs (CPU physical
                   0x1F00000000, 4GB), which rp1_uart0 (0x1F00030000) and
                   every other RP1-mapped register live inside.
+     L1[1]        (0x40000000-0x7FFFFFFF): table descriptor pointing at
+                  l2_dynamic_table -- examples/vm_page_map's dynamic
+                  single-page mapping window, ported from RPi3 (GitHub
+                  issue #67 Stage 2). Only L2 entry 0 is populated, as a
+                  table descriptor pointing at l3_dynamic_table, a
+                  4KB-granule 512-entry LEAF (L3) table covering exactly
+                  2MB (0x40000000-0x401FFFFF). Mirrors
+                  examples/common_rpi3/mmu.S's own L1 entry 2 /
+                  l2_dynamic_table / l3_dynamic_table exactly; the index
+                  differs only because this file's L1 already claims 0,
+                  64, 65, and 124-127 above, and index 1 is free. Both
+                  l2_dynamic_table and l3_dynamic_table live in THIS
+                  file's own .bss, not as `.tkb` globals, for the same
+                  reason RPi3 keeps its copies there: mmu_init runs
+                  unconditionally for every RPi5 kernel via startup.S's
+                  _start, so a symbol it references must be defined in
+                  every kernel's link, not only
+                  examples/vm_page_map_rpi5's own object file.
+                  l3_dynamic_write below is the accessor
+                  examples/vm_page_map/vm_page_map_core_rpi5.tkb's
+                  map_page/unmap_page call instead of indexing an array
+                  directly. Both tables start BSS-cleared (invalid,
+                  bit[0] = 0), so the whole 2MB window is unmapped until
+                  a real map_page call populates one L3 entry.
 
    PS (bits[18:16], max physical address size) = 0b010 (40-bit) -- the
    smallest standard encoding that covers the 37-bit range above (36-bit
@@ -57,6 +81,10 @@
     .align  12              /* 4KB alignment, required for a translation
                                 table base address */
 l1_table:
+    .space  4096
+l2_dynamic_table:
+    .space  4096
+l3_dynamic_table:
     .space  4096
 
     .section .text
@@ -105,6 +133,22 @@ mmu_init:
     add     x2, x2, #1
     b       .Lrp1_loop
 .Lrp1_done:
+
+    /* L1 entry 1: table descriptor pointing at l2_dynamic_table (the
+       vm_page_map dynamic window, see this file's header comment). */
+    adrp    x0, l2_dynamic_table
+    add     x0, x0, :lo12:l2_dynamic_table
+    orr     x0, x0, #0x3
+    str     x0, [x1, #8]
+
+    /* l2_dynamic_table entry 0: table descriptor pointing at
+       l3_dynamic_table. */
+    adrp    x0, l3_dynamic_table
+    add     x0, x0, :lo12:l3_dynamic_table
+    orr     x0, x0, #0x3
+    adrp    x2, l2_dynamic_table
+    add     x2, x2, :lo12:l2_dynamic_table
+    str     x0, [x2]
 
     /* MAIR_EL2: byte 0 (AttrIndx 0) = 0x00 Device-nGnRnE; byte 1
        (AttrIndx 1) = 0xFF Normal, Inner/Outer Write-Back
@@ -185,4 +229,23 @@ mmu_init:
     msr     sctlr_el2, x0
     isb
 
+    ret
+
+/* -- Dynamic mapping window accessor (examples/vm_page_map, issue #67 Stage 2,
+   ported from examples/common_rpi3/mmu.S's own l3_dynamic_write) --
+   l3_dynamic_table lives in this file's own .bss (see the header comment's
+   L1 entry 1 paragraph for why it cannot be a `.tkb` global), so
+   examples/vm_page_map/vm_page_map_core_rpi5.tkb writes its individual page
+   descriptors through this one-instruction accessor instead of indexing an
+   array directly. Does not itself invalidate the TLB -- that is
+   examples/common_rpi5/tlb_asm.S's tlb_invalidate_va, called separately so
+   the .tkb-level PTE-change -> TlbInvalidationPending -> TLBI -> usable-
+   mapping protocol stays visible at the type level instead of being
+   silently folded into this write. */
+    .global l3_dynamic_write
+    .type   l3_dynamic_write, %function
+l3_dynamic_write:        /* fn l3_dynamic_write(index: usize, value: usize) */
+    adrp    x2, l3_dynamic_table
+    add     x2, x2, :lo12:l3_dynamic_table
+    str     x1, [x2, x0, lsl #3]
     ret

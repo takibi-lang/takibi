@@ -1,6 +1,54 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): `hvc_smoke` ported (EL1->EL2 hvc
+## Status update (2026-07-26, latest): `vm_page_map` ported (dynamic
+## single-page mapping, GitHub issue #67 Stage 2), no new bug, `make
+## hwcheck-rpi5` 53/53
+
+Prerequisite for a future `el0_smoke` port (EL1->EL0 drop + real SVC trap
+boundary needs a real, non-identity VA-to-PA translation to demonstrate
+against). `examples/vm_page_map/vm_page_map_core.tkb` has grown well
+beyond Stage 2's own original scope on RPi3 (process address spaces,
+copy-on-write, fork/exec, task migration -- issues #153/#156/#158/#159),
+so rather than port that whole file, this milestone writes a much smaller,
+purpose-built `examples/vm_page_map/vm_page_map_core_rpi5.tkb` containing
+only what `vm_page_map_rpi5.tkb` itself calls: the page-pool allocator and
+a single-slot `AddressSpaceOwner` state machine
+(`address_space_new`/`activate`/`deactivate`/`free`,
+`map_page`/`tlb_invalidate`/`mapping_bytes`/`unmap_page`). RPi3's version
+tracks two hardware address-space slots (`l1_table`/`l1_table_as1`, issue
+#67 Stage 4); RPi5's `mmu.S` has only one translation root, so the ported
+`AddressSpaceOwner` drops the `slot` field entirely and
+`address_space_activate`/`deactivate` become pure type-state bookkeeping
+with no `TTBR0_EL2` write and no TLB flush -- there is nothing to
+reprogram when the only root is already the one in use. The
+Inactive/Empty/Occupied state machine itself is unchanged: it still makes
+mapping a second page before unmapping the first a compile error.
+
+`examples/common_rpi5/mmu.S` gained a new L1[1] table-descriptor chain
+(0x40000000-0x7FFFFFFF, only L2[0]/2MB populated, same 2MB-window shape as
+RPi3's own L1 entry 2 at 0x80000000 -- index differs only because RPi5's
+L1 already claims 0, 64, 65, and 124-127) plus the `l3_dynamic_write`
+accessor, both direct ports of RPi3's own `l2_dynamic_table`/
+`l3_dynamic_table`/`l3_dynamic_write`. `examples/common_rpi5/tlb_asm.S` is
+new, but intentionally minimal: only `tlb_invalidate_va` is ported.
+RPi3's copy also carries `tlb_invalidate_asid_va`, `tlb_invalidate_all_el2`,
+and a conditional second `tlbi vaae1is` gated on an EL1&0-regime-active
+flag (issue #158's fork/exec work) -- none of that applies yet, since
+`vm_page_map_rpi5.tkb` is EL2-only and there is no second slot to flush,
+mirroring RPi3's OWN history where that machinery was added later, not
+present in the original Stage 2 work. `examples/vm_page_map/
+vm_page_map_rpi5.tkb` is a separate small source from RPi3's
+`vm_page_map.tkb` (same "not a portable literal" reasoning as
+`el1_smoke_rpi5.tkb`: the RPi3 file hardcodes `0x80000000`/`0x80200000`
+literals inline, not just a `use` of a differently-shaped core), but the
+printed output does not depend on the VA window's address, so RPi3's own
+`vm_page_map.expected` is reused unchanged.
+
+**Passed on the FIRST real-hardware attempt, no new bug.** `make
+hwcheck-rpi5` passes 53/53, confirmed across two consecutive real-hardware
+runs.
+
+## Status update (2026-07-26, earlier): `hvc_smoke` ported (EL1->EL2 hvc
 ## call), no new bug -- `el1_smoke`'s own TCR_EL1.IPS fix already covered
 ## it, `make hwcheck-rpi5` 52/52
 

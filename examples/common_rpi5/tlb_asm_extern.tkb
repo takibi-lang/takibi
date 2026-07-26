@@ -1,0 +1,12 @@
+// extern fn declaration for examples/common_rpi5/tlb_asm.S's
+// tlb_invalidate_va stub (GitHub issue #67 Stage 2, ported from
+// examples/common_rpi3/tlb_asm_extern.tkb), split into its own file
+// matching examples/common_rpi5/timer_asm_extern.tkb's own reasoning (a
+// duplicate `extern fn` declaration is a hard conflict if two files
+// needing it both declared it locally).
+//
+// Only tlb_invalidate_va is ported -- see tlb_asm.S's header comment for
+// why tlb_invalidate_asid_va/tlb_invalidate_all_el2/rpi3_code_range_sync
+// are not needed yet.
+
+extern fn tlb_invalidate_va(va: usize);

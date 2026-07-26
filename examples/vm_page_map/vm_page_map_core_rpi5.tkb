@@ -1,0 +1,224 @@
+// Dynamic single 4KB page map/unmap over one spare 2MB virtual-address
+// window on RPi5 (GitHub issue #67 Stage 2, ported from
+// examples/vm_page_map/vm_page_map_core.tkb). See
+// examples/common_rpi5/mmu.S's header comment for the L1[1]/L2/L3 table
+// layout map_page/unmap_page below write into, and
+// examples/common_rpi5/tlb_asm.S for the tlbi/dsb/isb sequence
+// tlb_invalidate drives.
+//
+// This is a deliberately smaller module than vm_page_map_core.tkb, which
+// has grown well beyond Stage 2's own scope (process address spaces,
+// copy-on-write, fork/exec, task migration -- GitHub issues #153/#156/
+// #158/#159) to support RPi3 examples that have no RPi5 port yet. Only
+// what examples/vm_page_map/vm_page_map_rpi5.tkb itself calls is here:
+// the page-pool allocator, and a single-slot AddressSpaceOwner state
+// machine covering map_page/tlb_invalidate/mapping_bytes/unmap_page.
+//
+// RPi3's version tracks TWO hardware address-space slots (mmu.S's
+// l1_table / l1_table_as1, GitHub issue #67 Stage 4), so its
+// AddressSpaceOwner carries a `slot` field and address_space_activate/
+// deactivate really do reprogram TTBR0_EL2 via mmu_address_space_activate
+// + tlb_invalidate_all_el2. RPi5's examples/common_rpi5/mmu.S has only
+// ONE translation root (l1_table, set once in mmu_init and never
+// switched) -- issue #165's RPi5 MMU milestone did not port RPi3's
+// second-slot machinery, and nothing on RPi5 needs it yet. So here
+// AddressSpaceOwner drops the `slot` field entirely, and
+// address_space_activate/deactivate are pure type-state bookkeeping (no
+// TTBR0_EL2 write, no TLB flush) -- there is nothing to reprogram when
+// the only root is already the one in use. The Inactive/Empty/Occupied
+// state machine itself is kept unchanged: it is what makes mapping a
+// second page before unmapping the first a compile error, independent of
+// whether "activation" does any real hardware work.
+//
+// PAGE_COUNT here is 512 (one 2MB window's worth), not
+// vm_page_map_core.tkb's 1024 -- that doubling was GitHub issue #158's
+// dual-slot fork/exec fix, which does not apply to a single-slot design.
+
+use "examples/common_rpi5/tlb_asm_extern.tkb";
+
+const PAGE_SIZE: usize = 4096;
+const PAGE_COUNT: usize = 512;
+
+private let mut page_pool: [u8; PAGE_SIZE * PAGE_COUNT] align(4096);
+private let mut page_used: [u8; PAGE_COUNT];
+
+// index stays a plain refined field (no `@ p` tie) so arithmetic on it
+// (map_page's physical-address computation, mapping_bytes' offset) keeps
+// its provable {0..<PAGE_COUNT} range -- see
+// vm_page_map_core.tkb's own PageOwner for the same reasoning.
+private linear struct PageOwner[p: usize] {
+    private index: {0..<PAGE_COUNT as usize};
+    private p_witness: usize @ p;
+}
+
+variant PageAllocResult {
+    OutOfMemory;
+    Allocated(exists p: usize. PageOwner[p]);
+}
+
+fn page_owner_new(index: {0..<PAGE_COUNT as usize}, p_witness: usize @ p)
+        -> PageOwner[p] {
+    let mut owner: PageOwner[p] = { index, p_witness };
+    return owner;
+}
+
+fn page_pool_init() {
+    for i: usize in 0..<PAGE_COUNT {
+        page_used[i] = 0;
+    }
+}
+
+fn page_alloc() -> PageAllocResult {
+    for i: usize in 0..<PAGE_COUNT {
+        if (page_used[i] == 0) {
+            page_used[i] = 1;
+            return PageAllocResult::Allocated(page_owner_new(i, i));
+        }
+    }
+    return PageAllocResult::OutOfMemory;
+}
+
+fn page_index(owner: borrow PageOwner[p]) -> {0..<PAGE_COUNT as usize} {
+    return owner.index;
+}
+
+fn page_free(owner: sink PageOwner[p]) {
+    page_used[owner.index] = 0;
+}
+
+// Address space: a state-parameterized owner (Empty/Occupied), consumed
+// and reissued by map_page/unmap_page -- makes mapping a second page
+// before unmapping the first a compile error, not a runtime check. See
+// this file's header comment for why there is no `slot` field: RPi5 has
+// only one translation root.
+enum SpaceState: u8 { Inactive; Empty; Occupied; }
+
+private linear struct AddressSpaceOwner[asid: usize, state: SpaceState] {
+    private tag: usize @ asid;
+}
+
+// Linear proof that address space `asid` is installed in core `core`.
+// RPi5 has only one real root, so this token is a pure type-level
+// bookkeeping device (see header comment) rather than proof of a real
+// TTBR0_EL2 switch -- but it still prevents obtaining VA authority for a
+// context that was never activated.
+private linear struct ActiveAddressSpace[core: usize, asid: usize] {
+    private core_tag: usize @ core;
+    private asid_tag: usize @ asid;
+}
+
+fn address_space_new(seed: {0..<1 as usize} @ asid)
+        -> AddressSpaceOwner[asid, SpaceState::Inactive] {
+    let mut space: AddressSpaceOwner[asid, SpaceState::Inactive] = { seed };
+    return space;
+}
+
+fn address_space_activate(space: sink AddressSpaceOwner[asid, SpaceState::Inactive],
+                          core_tag: usize @ core)
+        -> (AddressSpaceOwner[asid, SpaceState::Empty],
+            ActiveAddressSpace[core, asid]) {
+    let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] =
+        { space.tag };
+    let mut active: ActiveAddressSpace[core, asid] =
+        { core_tag, space.tag };
+    return (empty, active);
+}
+
+fn address_space_deactivate(active: sink ActiveAddressSpace[core, asid],
+                            space: sink AddressSpaceOwner[asid, SpaceState::Empty])
+        -> AddressSpaceOwner[asid, SpaceState::Inactive] {
+    let mut inactive: AddressSpaceOwner[asid, SpaceState::Inactive] =
+        { space.tag };
+    return inactive;
+}
+
+fn address_space_free(space: sink AddressSpaceOwner[asid, SpaceState::Inactive]) {
+}
+
+private linear struct TlbInvalidationPending[asid: usize, va: usize, p: usize] {
+    private asid_tag: usize @ asid;
+    private va_value: usize @ va;
+    private page_index: {0..<PAGE_COUNT as usize};
+    private p_witness: usize @ p;
+}
+
+private linear struct MappingOwner[asid: usize, va: usize, p: usize] {
+    private asid_tag: usize @ asid;
+    private va_value: usize @ va;
+    private page_index: {0..<PAGE_COUNT as usize};
+    private p_witness: usize @ p;
+}
+
+// examples/common_rpi5/mmu.S's L1[1] dynamic window: 0x40000000-0x401FFFFF
+// (2MB, matching RPi3's own 2MB dynamic window at a different, RPi5-free L1
+// index -- see mmu.S's header comment for why index 1 was chosen).
+const DYN_VA_BASE: usize = 0x40000000;
+const DYN_VA_LIMIT: usize = 0x40200000;
+
+// L3 page descriptor flags: bits[1:0] = 0b11 (valid + page) | AttrIndx 1
+// (bits 4:2 = 001, Normal Write-Back Cacheable, MAIR_EL2 byte 1 -- same
+// index examples/common_rpi5/mmu.S's own RAM L1[0] entry uses) | AF (bit
+// 10) | SH=11 Inner Shareable (bits 9:8) = 0x707. Matches
+// vm_page_map_core.tkb's PTE_FLAGS_EL2_RW exactly (EL2-only demo, no EL0
+// access bit needed).
+const PTE_FLAGS_EL2_RW: usize = 0x707;
+
+extern fn l3_dynamic_write(index: usize, value: usize);
+
+fn map_page(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
+            page: sink PageOwner[p],
+            va: {DYN_VA_BASE..<DYN_VA_LIMIT as usize} @ va)
+        -> (AddressSpaceOwner[asid, SpaceState::Occupied],
+            TlbInvalidationPending[asid, va, p]) {
+    let l3_index: usize = (va - DYN_VA_BASE) / PAGE_SIZE;
+    let pool_base_ptr: *u8 = page_pool as *u8;
+    let pool_base: usize = pool_base_ptr as usize;
+    let phys_addr: usize = pool_base + page.index * PAGE_SIZE;
+    l3_dynamic_write(l3_index, phys_addr | PTE_FLAGS_EL2_RW);
+
+    let mut occupied: AddressSpaceOwner[asid, SpaceState::Occupied] =
+        { space.tag };
+    let mut pending: TlbInvalidationPending[asid, va, p] =
+        { space.tag, va, page.index, page.p_witness };
+    return (occupied, pending);
+}
+
+fn tlb_invalidate(space: borrow AddressSpaceOwner[asid, SpaceState::Occupied],
+                  pending: sink TlbInvalidationPending[asid, va, p])
+        -> MappingOwner[asid, va, p] {
+    tlb_invalidate_va(pending.va_value);
+    let mut mapping: MappingOwner[asid, va, p] =
+        { pending.asid_tag, pending.va_value, pending.page_index,
+          pending.p_witness };
+    return mapping;
+}
+
+fn mapping_bytes(mapping: borrow MappingOwner[asid, va, p])
+        -> [u8; PAGE_SIZE..] @ p {
+    // PAGE_COUNT * PAGE_SIZE = 2097152, so every page start is below
+    // 2093057 and every page end is at most 2097152 (the pool's own
+    // size). Bare literals below (not the PAGE_SIZE/PAGE_COUNT consts)
+    // match vm_page_map_core.tkb's own mapping_bytes -- a const name only
+    // reliably narrows in a type position, not in runtime slice-length
+    // arithmetic/comparison.
+    let offset: {0..<2093057 as usize} = mapping.page_index * PAGE_SIZE;
+    let pool = page_pool as [u8; PAGE_SIZE * PAGE_COUNT..];
+    let bytes: []u8 = pool[offset..<offset + 4096];
+    if (bytes.len >= 4096) {
+        return bytes;
+    }
+    return pool[0..<4096];
+}
+
+fn unmap_page(space: sink AddressSpaceOwner[asid, SpaceState::Occupied],
+              mapping: sink MappingOwner[asid, va, p])
+        -> (AddressSpaceOwner[asid, SpaceState::Empty], PageOwner[p]) {
+    let l3_index: usize = (mapping.va_value - DYN_VA_BASE) / PAGE_SIZE;
+    l3_dynamic_write(l3_index, 0);
+    tlb_invalidate_va(mapping.va_value);
+
+    let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] =
+        { space.tag };
+    let mut page: PageOwner[p] = { mapping.page_index, mapping.p_witness };
+    return (empty, page);
+}

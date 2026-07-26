@@ -2077,6 +2077,9 @@ COMMON_RPI5_EL1_ASM_EXTERN := $(COMMON_RPI5_DIR)/el1_asm_extern.tkb
 COMMON_RPI5_HVC_ASM_S    := $(COMMON_RPI5_DIR)/hvc_asm.S
 COMMON_RPI5_HVC_ASM_O    := $(COMMON_RPI5_DIR)/hvc_asm.o
 COMMON_RPI5_HVC_ASM_EXTERN := $(COMMON_RPI5_DIR)/hvc_asm_extern.tkb
+COMMON_RPI5_TLB_ASM_S    := $(COMMON_RPI5_DIR)/tlb_asm.S
+COMMON_RPI5_TLB_ASM_O    := $(COMMON_RPI5_DIR)/tlb_asm.o
+COMMON_RPI5_TLB_ASM_EXTERN := $(COMMON_RPI5_DIR)/tlb_asm_extern.tkb
 COMMON_RPI5_LINK_LD      := $(COMMON_RPI5_DIR)/link.ld
 COMMON_RPI5_UART         := $(COMMON_RPI5_DIR)/uart.tkb
 COMMON_RPI5_PRINT        := $(COMMON_RPI5_DIR)/print.tkb
@@ -2100,6 +2103,9 @@ $(COMMON_RPI5_EL1_ASM_O): $(COMMON_RPI5_EL1_ASM_S)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI5_HVC_ASM_O): $(COMMON_RPI5_HVC_ASM_S)
+	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
+
+$(COMMON_RPI5_TLB_ASM_O): $(COMMON_RPI5_TLB_ASM_S)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI5_JTAG_STUB_O): $(COMMON_RPI5_JTAG_STUB_S)
@@ -2218,19 +2224,37 @@ examples/hvc_smoke/kernel_rpi5.elf: \
     $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_EL1_ASM_O) $(COMMON_RPI5_HVC_ASM_O) examples/hvc_smoke/hvc_smoke_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_EL1_ASM_O) $(COMMON_RPI5_HVC_ASM_O) examples/hvc_smoke/hvc_smoke_rpi5.o -o $@
 
+## vm_page_map: dynamic single-page mapping (GitHub issue #67 Stage 2),
+## ported from examples/vm_page_map/vm_page_map.tkb. NOT built from that
+## file (it hardcodes RPi3's own DYN_VA_BASE/DYN_VA_LIMIT literals and
+## `use`s vm_page_map_core.tkb, which needs examples/common_rpi3/mmu.S's
+## l3_address_space_write/two-slot machinery) -- instead from
+## examples/vm_page_map/vm_page_map_rpi5.tkb, a separate RPi5-specific
+## source and its own minimal vm_page_map_core_rpi5.tkb core. Bespoke
+## (non-pattern) rules, same reasoning as el1_smoke/hvc_smoke above.
+examples/vm_page_map/vm_page_map_rpi5.o: examples/vm_page_map/vm_page_map_rpi5.tkb \
+    examples/vm_page_map/vm_page_map_core_rpi5.tkb $(COMMON_RPI5_TLB_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+examples/vm_page_map/kernel_rpi5.elf: \
+    $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) examples/vm_page_map/vm_page_map_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) examples/vm_page_map/vm_page_map_rpi5.o -o $@
+
 RPI5_EL1_SMOKE_EXAMPLES := el1_smoke
 RPI5_HVC_SMOKE_EXAMPLES := hvc_smoke
-RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES) $(RPI5_EL1_SMOKE_EXAMPLES) $(RPI5_HVC_SMOKE_EXAMPLES)
+RPI5_VM_PAGE_MAP_EXAMPLES := vm_page_map
+RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES) $(RPI5_EL1_SMOKE_EXAMPLES) $(RPI5_HVC_SMOKE_EXAMPLES) $(RPI5_VM_PAGE_MAP_EXAMPLES)
 RPI5_KERNELS  := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_EL1_SMOKE_KERNELS := $(foreach e,$(RPI5_EL1_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_HVC_SMOKE_KERNELS := $(foreach e,$(RPI5_HVC_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
-# el1_smoke/hvc_smoke's kernels have their OWN explicit link rules above
-## (extra COMMON_RPI5_EL1_ASM_O/HVC_ASM_O inputs, and their objects come
-## from differently-named sources) -- filtered out here so the generic
-## static pattern rule below does not ALSO claim to define them, matching
-## RPi3's own
+RPI5_VM_PAGE_MAP_KERNELS := $(foreach e,$(RPI5_VM_PAGE_MAP_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
+# el1_smoke/hvc_smoke/vm_page_map's kernels have their OWN explicit link
+## rules above (extra COMMON_RPI5_EL1_ASM_O/HVC_ASM_O/TLB_ASM_O inputs, and
+## their objects come from differently-named sources) -- filtered out here
+## so the generic static pattern rule below does not ALSO claim to define
+## them, matching RPi3's own
 ## RPI3_GENERIC_KERNELS filter-out convention for the identical reason.
-RPI5_GENERIC_KERNELS := $(filter-out $(RPI5_EL1_SMOKE_KERNELS) $(RPI5_HVC_SMOKE_KERNELS),$(RPI5_KERNELS))
+RPI5_GENERIC_KERNELS := $(filter-out $(RPI5_EL1_SMOKE_KERNELS) $(RPI5_HVC_SMOKE_KERNELS) $(RPI5_VM_PAGE_MAP_KERNELS),$(RPI5_KERNELS))
 
 ## Every RPi5 kernel links COMMON_RPI5_TIMER_ASM_O unconditionally --
 ## unlike RPi3, where only the RTC_EXAMPLES/timer-needing group needs

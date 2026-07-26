@@ -375,6 +375,15 @@ run_hw_test_rpi5 "el1_smoke (rpi5)" "$REPO_ROOT/examples/el1_smoke/kernel_rpi5.e
 # RPi3 fixture.
 run_hw_test_rpi5 "hvc_smoke (rpi5)" "$REPO_ROOT/examples/hvc_smoke/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/hvc_smoke/hvc_smoke.expected"
+# vm_page_map (GitHub issue #67 Stage 2): dynamic single-page mapping over
+# examples/common_rpi5/mmu.S's own 2MB window (0x40000000, not RPi3's
+# 0x80000000 -- see that file's header comment). Separate RPi5-specific
+# source and minimal core (vm_page_map_rpi5.tkb / vm_page_map_core_rpi5.tkb),
+# same reasoning as el1_smoke/hvc_smoke above; the printed page index and
+# byte values do not depend on the VA window's address, so output is
+# byte-for-byte identical to the RPi3 fixture.
+run_hw_test_rpi5 "vm_page_map (rpi5)" "$REPO_ROOT/examples/vm_page_map/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/vm_page_map/vm_page_map.expected"
 
 echo
 echo "RPi5 hardware tests: $PASS passed, $FAIL failed"
