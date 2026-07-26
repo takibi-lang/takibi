@@ -69,15 +69,35 @@ dcache_invalidate_all:
 
     .global _start
 _start:
-    /* Only core 0 runs main(). BCM2712 is a single-cluster quad-A76 part
-       like BCM2837's single-cluster quad-A53, so MPIDR_EL1's Aff0 field
-       (bits[1:0] here, same as RPi3) is assumed to still be the plain
-       0-3 core number -- UNCONFIRMED, first thing to check via OpenOCD's
-       per-core `bcm2712.cpu0`..`cpu3` targets if core selection ever looks
-       wrong. The loader may use cpu3's debug context to write shared RAM,
-       but only cpu0's PC/SP are redirected to this payload; this gate remains
-       defensive/for-parity-with-RPi3 rather than load-bearing yet. */
+    /* Only core 0 runs main(). GitHub issue #163: the BCM2837-by-analogy
+       assumption this comment used to make -- that MPIDR_EL1's Aff0
+       field (bits[7:0]) is the plain 0-3 core number, same as RPi3 --
+       was WRONG and is now corrected, based on real hardware evidence
+       (read via OpenOCD's per-core `bcm2712.cpu0`..`cpu3` targets,
+       redirecting each core's PC to a tiny `mrs x0, mpidr_el1; wfe`
+       probe in scratch RAM and single-stepping it, then restoring the
+       original PC before resuming -- never touching TF-A's own EL3 code
+       or state, only reading a register). Real captured values:
+       cpu0=0x81000000, cpu1=0x81000100, cpu2=0x81000200,
+       cpu3=0x81000300 -- Aff0 (bits[7:0]) is 0 on EVERY core, and the
+       varying field is Aff1 (bits[15:8]). Bit 24 (MT, "Aff0 describes a
+       thread within a core") is set in all four reads, which is exactly
+       why: BCM2712 numbers its 4 physical cores in Aff1, treating Aff0
+       as a (here always-0, single-thread) thread ID under the MT
+       topology encoding, unlike BCM2837's plain flat Aff0 numbering
+       RPi3 correctly relies on. The OLD `and x0, x0, #3` therefore
+       computed 0 on EVERY core, not just core 0 -- currently
+       unobservable only because TF-A never hands off any core but 0 to
+       this code (cores 1-3 sit parked in TF-A's own EL3 idle loop,
+       confirmed via the same real-hardware read, PC=0x1adc/EL3H on all
+       three, never reaching this function at all) -- but it would have
+       been a real, serious bug (every core believing it is core 0,
+       running main() concurrently) the moment any future milestone
+       used PSCI CPU_ON to actually release a secondary core here. Fixed
+       to extract Aff1 instead: shift right 8, then mask to 2 bits (safe
+       since this SoC has exactly 4 cores, values 0-3 only). */
     mrs     x0, mpidr_el1
+    lsr     x0, x0, #8
     and     x0, x0, #3
     cbz     x0, .Lcore0
 .Lpark:

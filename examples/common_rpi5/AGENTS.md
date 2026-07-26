@@ -1,5 +1,60 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
+## Status update (2026-07-26, latest): MPIDR_EL1 core numbering -- GitHub
+## issue #163, a real bug found and fixed, `make hwcheck-rpi5` still 50/50
+
+`examples/common_rpi5/startup.S`'s core-selection gate assumed, by
+analogy with RPi3, that MPIDR_EL1's Aff0 field (bits[7:0]) is BCM2712's
+plain 0-3 core number. **That assumption was wrong**, confirmed by
+directly reading MPIDR_EL1 on all four `bcm2712.cpuN` OpenOCD targets:
+
+```
+cpu0: 0x81000000   cpu1: 0x81000100   cpu2: 0x81000200   cpu3: 0x81000300
+```
+
+Aff0 (bits[7:0]) is `0x00` on every core. The field that actually varies
+1:1 with the core number is Aff1 (bits[15:8]). Bit 24 (MT -- "Aff0
+describes a thread within a core, not the core itself") is set on every
+read, which is exactly why: BCM2712 numbers its 4 physical cores in
+Aff1, using the MT-style affinity encoding, unlike BCM2837's flat Aff0
+numbering RPi3's own `startup.S` correctly relies on. The old `and x0,
+x0, #3` therefore computed **0 on every core, not just core 0** -- never
+observable before now because TF-A hands off only core 0 to takibi code
+(cores 1-3 sit parked in TF-A's own EL3 idle loop at a low PC,
+confirmed directly, never reaching `_start` at all) -- but it would
+have been a real bug (every core believing itself to be core 0,
+concurrently running `main()`) the instant any future milestone used
+PSCI `CPU_ON` to actually release a secondary core here. Fixed: shift
+right 8 before masking, extracting Aff1 instead of Aff0.
+
+**Verification method, real hardware, zero risk to TF-A's own live
+state**: `scripts/rpi5_check_core_topology.sh` (new, reusable, opt-in --
+not part of `make hwcheck-rpi5`) redirects each HALTED core's own PC to
+a tiny scratch-RAM probe (`examples/common_rpi5/smp_probe.S`: `mrs x0,
+mpidr_el1` then `wfe`/spin), single-steps through it, reads `x0` back,
+then restores the core's ORIGINAL PC and resumes it -- never touching
+TF-A's own code, memory, or PSCI state, only reading a side-effect-free
+ID register. Confirmed by re-running immediately after: a completely
+normal `make hwcheck-rpi5`-style injection onto cpu0 still worked. Two
+PSCI calls were tried FIRST and found unreliable for this purpose before
+settling on the read-only redirect-and-step approach: `CPU_ON`
+(0xC4000003) returned `ALREADY_ON` (-4) for every `target_cpu` value
+tried, including obviously out-of-range ones (100), and
+`AFFINITY_INFO` (0xC4000004) returned `ON` (0) for every value too --
+this TF-A/BL31 build's minimal PSCI implementation does not appear to
+validate or usefully distinguish `target_affinity` inputs, so it could
+not be used as a topology oracle.
+
+**`make hwcheck-rpi5` still passes 50/50** after the fix, unchanged
+from before -- cpu0's own selection outcome is identical either way
+(Aff1=0 selects `.Lcore0` exactly as Aff0=0 used to), so this is a pure
+correctness fix for not-yet-exercised secondary-core behavior, not an
+observable behavior change for any existing test. Issue #163's
+acceptance criteria are met: MPIDR_EL1 recorded for all four cores, the
+`startup.S` mask corrected, and a repeatable, documented,
+non-destructive OpenOCD procedure verifies one running core and three
+parked ones.
+
 ## Status update (2026-07-26, latest): RP1 UART0 RX interrupt -- GitHub
 ## issue #164, `make hwcheck-rpi5` 50/50
 
@@ -582,9 +637,16 @@ not a port of the existing driver.
    SD-card payload.** It reliably reruns the same resident image, but a
    changed `kernel_2712.img` may not be reloaded. Power-cycle after replacing
    that file. Tracked by GitHub issue #162.
-2. **MPIDR_EL1 core-numbering.** Assumed `mpidr_el1 & 3` still yields the
-   plain 0-3 core number, same as BCM2837, since BCM2712 is also a single
-   quad-core cluster -- not independently verified. Tracked by issue #163.
+2. **MPIDR_EL1 core-numbering -- RESOLVED, issue #163.** The BCM2837-by-
+   analogy assumption (`mpidr_el1 & 3` = plain 0-3 core number) was
+   WRONG: BCM2712 sets the MT bit and numbers cores in Aff1 (bits
+   [15:8]), not Aff0 (bits[7:0], `0x00` on every core here). Confirmed
+   by directly reading MPIDR_EL1 on all four `bcm2712.cpuN` targets
+   (`scripts/rpi5_check_core_topology.sh`): `cpu0=0x81000000`,
+   `cpu1=0x81000100`, `cpu2=0x81000200`, `cpu3=0x81000300`. `startup.S`
+   now shifts right 8 before masking. See the status update at the top
+   of this file for the full trace, including why PSCI `CPU_ON`/
+   `AFFINITY_INFO` could not be used as a topology oracle here.
 3. **D-cache and I-cache are both ON now (issue #169).** `SCTLR_EL2.C`/
    `I` were originally left off by issue #165 (see git history for the
    original constraint text) because enabling them broke
@@ -594,8 +656,11 @@ not a port of the existing driver.
    `pcie.tkb`), confirmed via `make hwcheck-rpi5` 46/46 across four
    consecutive real-hardware runs with both caches on. Real
    cache-coherent MULTI-core access has not been separately exercised --
-   only core 0 runs today; treat that as still open, not proven by this
-   entry, until an actual RPi5 SMP example exists (issue #163 first).
+   only core 0 ever actually runs takibi code today (issue #163
+   confirmed cores 1-3 remain parked in TF-A's own EL3 idle loop,
+   never reaching `_start`); treat multi-core cache coherence as still
+   open until an actual RPi5 SMP example brings a second core into our
+   own code via PSCI `CPU_ON`.
 4. **`mdw` (OpenOCD's raw memory-read command) does not work once the
    MMU is on.** Confirmed real and reproducible against this exact
    CMSIS-DAP/BCM2712/OpenOCD-0.12.0 combination: `mdw` against ordinary,

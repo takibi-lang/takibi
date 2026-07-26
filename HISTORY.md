@@ -15,6 +15,42 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- MPIDR_EL1 Core Numbering Was Wrong, Fixed (Issue #163)
+
+`examples/common_rpi5/startup.S` assumed, by analogy with RPi3
+(BCM2837), that `mpidr_el1 & 3` yields the plain 0-3 core number. Real
+hardware evidence proved this wrong: reading MPIDR_EL1 directly on all
+four `bcm2712.cpuN` OpenOCD targets returned `cpu0=0x81000000`,
+`cpu1=0x81000100`, `cpu2=0x81000200`, `cpu3=0x81000300` -- Aff0
+(bits[7:0]) is `0x00` on every core; the field that actually
+distinguishes them is Aff1 (bits[15:8]). Bit 24 (MT) is set on every
+read, meaning BCM2712 uses the multithread-style affinity encoding
+(Aff0 = thread within a core, Aff1 = the core itself), unlike BCM2837's
+flat Aff0 numbering. The old mask therefore computed 0 on every core,
+not just core 0 -- invisible until now only because TF-A hands off
+just core 0 to takibi code (cores 1-3 sit parked in TF-A's own EL3 idle
+loop, confirmed never reaching `_start` at all), but it would have been
+a real concurrency bug (every core believing itself to be core 0) the
+moment a future milestone used PSCI `CPU_ON` to release a secondary
+core. Fixed: shift right 8 before masking, extracting Aff1.
+
+Verified with a new read-only, zero-risk-to-firmware technique:
+`scripts/rpi5_check_core_topology.sh` redirects each halted core's own
+PC to a tiny scratch-RAM probe (`examples/common_rpi5/smp_probe.S`:
+`mrs x0, mpidr_el1` then spin), single-steps through it, reads `x0`
+back, then restores the ORIGINAL PC and resumes -- never touching TF-A's
+own code or state, only reading a side-effect-free ID register. Two
+PSCI calls were tried first and found unusable for this purpose: `CPU_ON`
+returned `ALREADY_ON` and `AFFINITY_INFO` returned `ON` for every
+`target_cpu` value tried, including clearly out-of-range ones -- this
+board's minimal TF-A/BL31 PSCI implementation does not appear to
+validate `target_affinity` inputs at all.
+
+`make hwcheck-rpi5` still passes 50/50 after the fix (cpu0's own
+selection outcome is identical either way -- Aff1=0 selects the same
+path Aff0=0 used to), confirming this is a pure correctness fix for
+not-yet-exercised secondary-core behavior. Issue #163 closed.
+
 ### 2026-07-26: RPi5 -- RP1 UART0 RX Interrupt Through MSI-X/MIP0/GIC (Issue #164)
 
 Added the first real RPi5 IRQ path, deliberately limited to the concrete
