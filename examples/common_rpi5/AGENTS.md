@@ -99,10 +99,22 @@ evidence:
 
 Recovery approaches tried, none of which restore the transport:
 CLEAR_FEATURE(ENDPOINT_HALT) alone; CLEAR_FEATURE + xHCI Reset Endpoint
-(TRB type 14); adding Set TR Dequeue Pointer (type 18) after it; a
+(TRB type 14); adding Set TR Dequeue Pointer after it; a
 bounded retry loop on the CSW read; and full Bulk-Only Mass Storage
 Reset plus clear-halt on both bulk endpoints. After the stall the next
 CBW itself fails with `completion_code=0x04` (USB Transaction Error).
+
+Follow-up correction: Set TR Dequeue Pointer is TRB type **16**, not 18
+(type 18 is Force Event). Changing it to 16 removes the command's former
+`completion_code=0x05` TRB Error: CLEAR_FEATURE, Reset Endpoint, and Set
+TR Dequeue Pointer now all complete with code 1 on hardware. This is a
+real recovery-path fix, but it does not finish WRITE(10): the retried CSW
+gets no Transfer Event and times out. The bulk-IN Output Endpoint Context
+was measured as Stopped immediately after the successful Set TR Dequeue
+Pointer, with its dequeue address at the intended next producer slot, and
+as Running after ringing its doorbell for the retry. A 30-second wait also
+produced no CSW. The host ring is therefore no longer wedged; the device
+leaves the retried CSW pending indefinitely.
 
 One correction worth recording, because it cost time: an earlier reading
 of this concluded that reads were silently returning the wrong sector,

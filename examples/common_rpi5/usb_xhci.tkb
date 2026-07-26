@@ -423,7 +423,7 @@ fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 {
 // Transfer Event with a non-success completion code (STALL Error = 6,
 // among others): no further TRB on that ring is processed until
 // software issues a Reset Endpoint Command (TRB Type 14) targeting the
-// endpoint's own DCI. A Set TR Dequeue Pointer Command (Type 18)
+// endpoint's own DCI. A Set TR Dequeue Pointer Command (Type 16)
 // afterward repoints the controller's own dequeue pointer at the ring's
 // NEXT producer slot (this driver's own `enq`/`cycle` state, which
 // already advanced past the failed TRB when it was enqueued) so the
@@ -433,15 +433,6 @@ fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 {
 // bulk-IN read afterward came back with completion_code=0x06 (STALL)
 // every time, until this recovery was added.
 // Issues an xHCI Reset Endpoint Command (TRB Type 14) for the given DCI
-// and waits for its Command Completion Event. Real-hardware finding: a
-// Set TR Dequeue Pointer Command (Type 18) was tried immediately after
-// this, on the theory that Reset Endpoint alone might leave the
-// controller's own dequeue pointer sitting on the stalled TRB -- it
-// consistently returned completion_code=0x05 (TRB Error) on this
-// hardware and was dropped. Reset Endpoint alone was sufficient: this
-// controller evidently already advances its own dequeue pointer past
-// the failed TRB as part of Reset Endpoint, so the extra command was
-// both unneeded and the one actually causing trouble.
 // Issue one Command Ring command and wait for its Command Completion
 // Event. EVERY DWORD is written explicitly, including the ones that are
 // zero: the Command Ring is reused, so a slot revisited after a wrap
@@ -475,7 +466,7 @@ fn xhci_run_command(dw0: u32, dw1: u32, dw2: u32, trb_type: u32,
 // Reset Endpoint (TRB Type 14) clears the CONTROLLER-side Halted state
 // an Endpoint Context enters on any non-success Transfer Event.
 // CLEAR_FEATURE(ENDPOINT_HALT) alone only clears the DEVICE side; xHCI
-// requires both, and per the spec a Set TR Dequeue Pointer (Type 18)
+// requires both, and per the spec a Set TR Dequeue Pointer (Type 16)
 // must follow before the endpoint's doorbell is rung again, to tell the
 // controller where to resume -- the ring's next free producer slot,
 // since this driver has already advanced past the TRB that failed.
@@ -485,27 +476,16 @@ fn xhci_reset_endpoint(dci: usize, ring_dma: usize, next_off: usize,
     let deq: usize = (ring_dma + next_off) | (next_cycle as usize);
     xhci_run_command((deq & 0xFFFFFFFF) as u32,
                      ((deq >> 32) & 0xFFFFFFFF) as u32,
-                     0, 18, dci);
+                     0, 16, dci);
 }
 
-// Recover a STALLed bulk endpoint: clear the device-side STALL via
-// CLEAR_FEATURE(ENDPOINT_HALT), then clear the CONTROLLER-side Halted
-// Endpoint Context state via Reset Endpoint -- xHCI's own requirement on
-// top of the device-side clear, which RPi3's DWC2 driver never needed
-// (see msc_recover_transport's own comment for how this was found).
-// CLEAR_FEATURE(ENDPOINT_HALT) only -- no xHCI Reset Endpoint Command.
-// U-Boot's own usb_storage.c (usb_stor_BBB_clear_endpt_stall) does
-// exactly this and nothing more on a CSW stall, immediately retrying the
-// CSW read once; adding Reset Endpoint here was tried on real hardware
-// and made a recoverable single-endpoint stall into a totally broken
-// transport (the very next, completely unrelated CBW-out transfer then
-// stalled too) -- whatever this controller needs after a Transfer Error
-// completion code, CLEAR_FEATURE alone already provides it.
-// Device side first, then controller side -- the same order Linux's own
-// usb_clear_halt() uses (CLEAR_FEATURE via a control message, then
-// usb_reset_endpoint()).
+// Recover a STALLed bulk endpoint. Clear the xHC's Halted Endpoint Context
+// first (Reset Endpoint + Set TR Dequeue Pointer), then clear the device's
+// endpoint halt via CLEAR_FEATURE(ENDPOINT_HALT). This matches Linux xHCI's
+// split recovery: its Transfer Event handler resets the host endpoint as
+// soon as the STALL arrives; the class driver clears the device-side halt
+// afterward before retrying the transfer.
 fn xhci_recover_bulk_stall(dir_in: bool, ep_addr: u32, dci: usize) {
-    usb_ctrl_xfer(0x02, 1, 0, ep_addr, 0, 0, false); // CLEAR_FEATURE(ENDPOINT_HALT)
     if (dir_in) {
         let ring_base: usize = (xhci_bulk_in_ring as *u8) as usize;
         let ring_dma: usize = ring_base + RP1_DMA_PCI_OFFSET;
@@ -517,6 +497,7 @@ fn xhci_recover_bulk_stall(dir_in: bool, ep_addr: u32, dci: usize) {
         xhci_reset_endpoint(dci, ring_dma, xhci_bulk_out_enq * 16,
                             xhci_bulk_out_cycle);
     }
+    usb_ctrl_xfer(0x02, 1, 0, ep_addr, 0, 0, false);
 }
 
 // Bulk-Only Mass Storage Reset (class request, interface recipient, no

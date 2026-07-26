@@ -100,6 +100,17 @@ CSW retry loop, and a full Bulk-Only Mass Storage Reset with clear-halt
 on both bulk endpoints. After the stall the next CBW itself fails with
 `completion_code=0x04`.
 
+Follow-up found one definite error in that recovery experiment: Set TR
+Dequeue Pointer is xHCI TRB type 16, while the driver had used type 18
+(Force Event). Type 16 now completes successfully instead of returning
+`completion_code=0x05`; CLEAR_FEATURE and Reset Endpoint also complete
+with code 1. WRITE(10) remains open, however. The same-CSW retry receives
+no Transfer Event even after 30 seconds. Direct Output Endpoint Context
+measurements show bulk IN Stopped at the requested next dequeue slot
+after Set TR Dequeue Pointer, then Running after its retry doorbell, so
+the corrected host ring is no longer halted or blocked on an unpublished
+TRB. The device leaves that CSW request pending indefinitely.
+
 One correction worth recording because it cost real time: an earlier
 reading of this concluded reads were silently returning the wrong sector,
 because LBA 200 came back byte-identical to LBA 3. That was drawn from a
