@@ -1,10 +1,77 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): USB bring-up Step 6 -- No-Op
-## Command faults identically to Enable Slot; the bug is in the Command
-## Ring/doorbell mechanism itself, not any one command's semantics --
-## PAUSING active guessing here, genuinely stuck after 4 ruled-out
-## hypotheses
+## Status update (2026-07-26, latest): USB bring-up Step 6 SOLVED --
+## RP1 DMA needs PCI address 0x10_00000000 + cpu_phys, NOT raw cpu_phys;
+## Enable Slot now succeeds (slot_id=1, completion_code=Success)
+
+**ROOT CAUSE FOUND AND FIXED.** After four isolation tests each ruled
+out a plausible hypothesis (see the previous entry below), the user
+suggested consulting other OSS kernels' own source rather than chasing
+the (unreachable, 403-blocked) xHCI specification PDF. That was the
+decisive redirection: the answer turned out to be in **Raspberry Pi 5's
+own device tree**, not in any xHCI document at all.
+
+`bcm2712.dtsi`'s `pcie2` node states the real endpoint-initiated (DMA)
+address mapping directly:
+
+```
+dma-ranges = <0x02000000 0x00 0x00000000  0x1f 0x00000000  0x00 0x00400000>,
+             <0x43000000 0x10 0x00000000  0x00 0x00000000  0x10 0x00000000>;
+```
+
+i.e. **PCI address [0, 4MB) maps to CPU `0x1F_00000000`** -- RP1's OWN
+peripheral aperture, the very window `uart.tkb` reaches `rp1_uart0`
+through -- and **system RAM is reachable only at PCI `0x10_00000000` +
+cpu_phys**, for 64GB.
+
+Every earlier attempt handed the XHCI controller raw CPU physical
+addresses (`0x208040` etc.) as its DCBAAP/CRCR/ERSTBA/ERDP/Link-TRB/
+scratchpad pointers. Those are PCI addresses from the controller's point
+of view, and PCI `0x208040` is inside that first `dma-ranges` entry --
+so the controller was faithfully fetching its Command Ring **from RP1's
+own peripheral registers**, not from RAM. Hence `USBSTS.HSE` (Host
+System Error) for *any* command TRB type, with no Command Completion
+Event ever posted. This also explains why all four isolation tests
+looked identical: none of them changed the (wrong) address space being
+used.
+
+Fix, in two parts:
+- `pcie2_dma_inbound_setup()` now maps PCI `0x10_00000000` -> CPU `0`,
+  size 64GB (`brcm_pcie_encode_ibar_size(2^36)` = 0x15), matching the
+  device tree's own second `dma-ranges` entry exactly, instead of the
+  earlier PCI-`0`-identity window.
+- `examples/common_rpi5/pcie.tkb` exports `RP1_DMA_PCI_OFFSET`
+  (`0x1000000000`), and `rp1_usb_smoke` adds it to **every** address
+  handed to the controller. CPU-side addresses stay raw for this code's
+  own dereferences and for the cache-maintenance helpers -- the two
+  address spaces are now explicitly distinguished by a `_dma` vs
+  `_base` naming convention throughout.
+
+**Real-hardware result (reproducible across two consecutive runs)**:
+`enable slot completion event: yes, polls=2 completion_code=0x01
+slot_id=0x01 trb_type=0x21` -- `completion_code=1` is Success,
+`trb_type=33` is Command Completion Event, and the controller allocated
+**device slot 1** for the USB flash drive on port 3. The full XHCI
+initialization path (HCRST -> DCBAA+Scratchpad -> Command Ring ->
+Event Ring/ERST -> CONFIG.MaxSlotsEn -> RS=1 -> doorbell ->
+Command Completion Event) now works end to end.
+
+**Reusable lesson for ALL future RP1 DMA work (Ethernet included)**: any
+RP1 bus master handed a system-RAM address needs `+
+RP1_DMA_PCI_OFFSET`. This is a board-level fact about BCM2712's PCIe
+inbound windows, not an XHCI-specific quirk, and the device tree is the
+authoritative source for it.
+
+**Next step**: Address Device (build an Input Context with Slot Context
++ Endpoint 0 Context, issue the command, then a first Control Transfer
+to GET_DESCRIPTOR) -- proceeding toward USB Mass Storage and
+`el0_shell`.
+
+## Status update (2026-07-26, earlier -- SUPERSEDED by the fix above):
+## USB bring-up Step 6 -- No-Op Command faults identically to Enable
+## Slot; the bug is in the Command Ring/doorbell mechanism itself, not
+## any one command's semantics -- PAUSING active guessing here,
+## genuinely stuck after 4 ruled-out hypotheses
 
 Fourth isolation test: temporarily swapped the Command Ring's TRB[0]
 from Enable Slot (TRB Type 9) to a No-Op Command (TRB Type 23, the

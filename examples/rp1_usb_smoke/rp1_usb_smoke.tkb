@@ -496,13 +496,21 @@ fn app_main() {
         // event, but that write never reached anywhere the CPU could
         // see, exactly the "inbound DMA window not configured" failure
         // mode this call fixes.
-        // Isolation test (2026-07-26) confirmed this call is NOT the
-        // cause of the USBSTS.HSE/HCE fault seen after Enable Slot:
-        // running with this call commented out produced the IDENTICAL
-        // fault (same USBSTS=0x1015), ruling out the inbound DMA window
-        // as the culprit. Restored since it is still structurally
-        // correct infrastructure this milestone will need regardless
-        // once the real root cause is found.
+        //
+        // ROOT CAUSE FOUND (2026-07-26), after four isolation tests each
+        // ruled out a different hypothesis: the window itself was set up
+        // correctly, but it was pointed at the WRONG PCI address. RP1
+        // bus masters do NOT reach system RAM at PCI address ==
+        // cpu_phys; Raspberry Pi 5's own device tree (bcm2712.dtsi,
+        // pcie2's `dma-ranges`) says PCI [0, 4MB) maps to CPU
+        // 0x1F_00000000 (RP1's OWN peripheral aperture!) and system RAM
+        // is reachable only at PCI 0x10_00000000 + cpu_phys. Handing the
+        // XHCI controller raw CPU physical addresses therefore pointed
+        // it at RP1's own registers instead of at the Command Ring --
+        // hence USBSTS.HSE (Host System Error) for ANY command TRB.
+        // Every DMA address below now adds RP1_DMA_PCI_OFFSET
+        // (examples/common_rpi5/pcie.tkb), and the window itself maps
+        // PCI 0x10_00000000 -> CPU 0, matching the device tree exactly.
         pcie2_dma_inbound_setup();
         let rc_bar2_lo_diag_ptr: *io u32 = 0x1000124034 as *io u32;
         let rc_bar2_hi_diag_ptr: *io u32 = 0x1000124038 as *io u32;
@@ -524,18 +532,27 @@ fn app_main() {
         // Scratchpad Buffer Array when this is nonzero, or the controller
         // may fault/misbehave whenever it actually needs scratchpad
         // space (spec requirement, not optional for this board).
+        // Every *_dma value below is the CPU physical address PLUS
+        // RP1_DMA_PCI_OFFSET -- that sum is what the controller must be
+        // told, since it is a PCI address, not a CPU address (see the
+        // root-cause note above). The plain *_base values stay CPU
+        // addresses, since those are what THIS code dereferences and
+        // what the cache-maintenance helpers take.
         usb_smoke_checkpoint = 50;
         let scratchpad_array_base: usize = (usb_smoke_scratchpad_array as *u8) as usize;
         let scratchpad_buf0_base: usize = (usb_smoke_scratchpad_buf0 as *u8) as usize;
         let scratchpad_buf1_base: usize = (usb_smoke_scratchpad_buf1 as *u8) as usize;
+        let scratchpad_array_dma: usize = scratchpad_array_base + RP1_DMA_PCI_OFFSET;
+        let scratchpad_buf0_dma: usize = scratchpad_buf0_base + RP1_DMA_PCI_OFFSET;
+        let scratchpad_buf1_dma: usize = scratchpad_buf1_base + RP1_DMA_PCI_OFFSET;
         let sp0_ptr: *u32 = scratchpad_array_base as *u32;
-        *sp0_ptr = (scratchpad_buf0_base & 0xFFFFFFFF) as u32;
+        *sp0_ptr = (scratchpad_buf0_dma & 0xFFFFFFFF) as u32;
         let sp0_hi_ptr: *u32 = (scratchpad_array_base + 4) as *u32;
-        *sp0_hi_ptr = ((scratchpad_buf0_base >> 32) & 0xFFFFFFFF) as u32;
+        *sp0_hi_ptr = ((scratchpad_buf0_dma >> 32) & 0xFFFFFFFF) as u32;
         let sp1_ptr: *u32 = (scratchpad_array_base + 8) as *u32;
-        *sp1_ptr = (scratchpad_buf1_base & 0xFFFFFFFF) as u32;
+        *sp1_ptr = (scratchpad_buf1_dma & 0xFFFFFFFF) as u32;
         let sp1_hi_ptr: *u32 = (scratchpad_array_base + 12) as *u32;
-        *sp1_hi_ptr = ((scratchpad_buf1_base >> 32) & 0xFFFFFFFF) as u32;
+        *sp1_hi_ptr = ((scratchpad_buf1_dma >> 32) & 0xFFFFFFFF) as u32;
         rpi5_dcache_clean_range(scratchpad_array_base, 16);
 
         // DCBAA[0] = Scratchpad Buffer Array pointer. Isolation test
@@ -548,10 +565,11 @@ fn app_main() {
         // spec-required and structurally correct regardless.
         usb_smoke_checkpoint = 51;
         let dcbaa_base: usize = (usb_smoke_dcbaa as *u8) as usize;
+        let dcbaa_dma: usize = dcbaa_base + RP1_DMA_PCI_OFFSET;
         let dcbaa0_ptr: *u32 = dcbaa_base as *u32;
-        *dcbaa0_ptr = (scratchpad_array_base & 0xFFFFFFFF) as u32;
+        *dcbaa0_ptr = (scratchpad_array_dma & 0xFFFFFFFF) as u32;
         let dcbaa0_hi_ptr: *u32 = (dcbaa_base + 4) as *u32;
-        *dcbaa0_hi_ptr = ((scratchpad_array_base >> 32) & 0xFFFFFFFF) as u32;
+        *dcbaa0_hi_ptr = ((scratchpad_array_dma >> 32) & 0xFFFFFFFF) as u32;
         rpi5_dcache_clean_range(dcbaa_base, 8);
 
         // Command Ring: TRB[0] = Enable Slot Command (Parameter=0,
@@ -560,6 +578,7 @@ fn app_main() {
         // TRB Type=6<<10 = 0x1803).
         usb_smoke_checkpoint = 52;
         let cmd_ring_base: usize = (usb_smoke_cmd_ring as *u8) as usize;
+        let cmd_ring_dma: usize = cmd_ring_base + RP1_DMA_PCI_OFFSET;
         let trb0_dw0_ptr: *u32 = cmd_ring_base as *u32;
         *trb0_dw0_ptr = 0;
         let trb0_dw1_ptr: *u32 = (cmd_ring_base + 4) as *u32;
@@ -576,10 +595,13 @@ fn app_main() {
         // not any one command's own semantics.
         *trb0_dw3_ptr = 0x00002401;
 
+        // Link TRB's own pointer is a DMA address the CONTROLLER
+        // follows, so it needs the PCI offset too -- not the raw CPU
+        // address this code would use to dereference the same ring.
         let link_dw0_ptr: *u32 = (cmd_ring_base + 48) as *u32;
-        *link_dw0_ptr = (cmd_ring_base & 0xFFFFFFFF) as u32;
+        *link_dw0_ptr = (cmd_ring_dma & 0xFFFFFFFF) as u32;
         let link_dw1_ptr: *u32 = (cmd_ring_base + 52) as *u32;
-        *link_dw1_ptr = ((cmd_ring_base >> 32) & 0xFFFFFFFF) as u32;
+        *link_dw1_ptr = ((cmd_ring_dma >> 32) & 0xFFFFFFFF) as u32;
         let link_dw2_ptr: *u32 = (cmd_ring_base + 56) as *u32;
         *link_dw2_ptr = 0;
         let link_dw3_ptr: *u32 = (cmd_ring_base + 60) as *u32;
@@ -592,10 +614,12 @@ fn app_main() {
         usb_smoke_checkpoint = 54;
         let evt_ring_base: usize = (usb_smoke_evt_ring as *u8) as usize;
         let erst_base: usize = (usb_smoke_erst as *u8) as usize;
+        let evt_ring_dma: usize = evt_ring_base + RP1_DMA_PCI_OFFSET;
+        let erst_dma: usize = erst_base + RP1_DMA_PCI_OFFSET;
         let erst_dw0_ptr: *u32 = erst_base as *u32;
-        *erst_dw0_ptr = (evt_ring_base & 0xFFFFFFFF) as u32;
+        *erst_dw0_ptr = (evt_ring_dma & 0xFFFFFFFF) as u32;
         let erst_dw1_ptr: *u32 = (erst_base + 4) as *u32;
-        *erst_dw1_ptr = ((evt_ring_base >> 32) & 0xFFFFFFFF) as u32;
+        *erst_dw1_ptr = ((evt_ring_dma >> 32) & 0xFFFFFFFF) as u32;
         let erst_dw2_ptr: *u32 = (erst_base + 8) as *u32;
         *erst_dw2_ptr = 16; // Ring Segment Size (bits[15:0]) = 16 TRBs
         usb_smoke_checkpoint = 55;
@@ -624,30 +648,30 @@ fn app_main() {
         *erstsz_ptr = 1;
         usb_smoke_checkpoint = 57;
         let erstba_lo_ptr: *io u32 = (ir0_base + 0x10) as *io u32;
-        *erstba_lo_ptr = (erst_base & 0xFFFFFFFF) as u32;
+        *erstba_lo_ptr = (erst_dma & 0xFFFFFFFF) as u32;
         let erstba_hi_ptr: *io u32 = (ir0_base + 0x14) as *io u32;
-        *erstba_hi_ptr = ((erst_base >> 32) & 0xFFFFFFFF) as u32;
+        *erstba_hi_ptr = ((erst_dma >> 32) & 0xFFFFFFFF) as u32;
         usb_smoke_checkpoint = 58;
         let erdp_lo_ptr: *io u32 = (ir0_base + 0x18) as *io u32;
-        *erdp_lo_ptr = (evt_ring_base & 0xFFFFFFFF) as u32;
+        *erdp_lo_ptr = (evt_ring_dma & 0xFFFFFFFF) as u32;
         let erdp_hi_ptr: *io u32 = (ir0_base + 0x1C) as *io u32;
-        *erdp_hi_ptr = ((evt_ring_base >> 32) & 0xFFFFFFFF) as u32;
+        *erdp_hi_ptr = ((evt_ring_dma >> 32) & 0xFFFFFFFF) as u32;
 
         // DCBAAP (Operational+0x30).
         usb_smoke_checkpoint = 59;
         let dcbaap_lo_ptr: *io u32 = 0x1F00200050 as *io u32;
-        *dcbaap_lo_ptr = (dcbaa_base & 0xFFFFFFFF) as u32;
+        *dcbaap_lo_ptr = (dcbaa_dma & 0xFFFFFFFF) as u32;
         let dcbaap_hi_ptr: *io u32 = 0x1F00200054 as *io u32;
-        *dcbaap_hi_ptr = ((dcbaa_base >> 32) & 0xFFFFFFFF) as u32;
+        *dcbaap_hi_ptr = ((dcbaa_dma >> 32) & 0xFFFFFFFF) as u32;
 
         // CRCR (Operational+0x18): pointer | RCS=1 (bit0). CS/CA (bits
         // 2:1) left clear -- this is ring INITIALIZATION, not a stop/
         // abort request.
         usb_smoke_checkpoint = 60;
         let crcr_lo_ptr: *io u32 = 0x1F00200038 as *io u32;
-        *crcr_lo_ptr = ((cmd_ring_base & 0xFFFFFFC0) | 1) as u32;
+        *crcr_lo_ptr = ((cmd_ring_dma & 0xFFFFFFC0) | 1) as u32;
         let crcr_hi_ptr: *io u32 = 0x1F0020003C as *io u32;
-        *crcr_hi_ptr = ((cmd_ring_base >> 32) & 0xFFFFFFFF) as u32;
+        *crcr_hi_ptr = ((cmd_ring_dma >> 32) & 0xFFFFFFFF) as u32;
 
         // CONFIG (Operational+0x38): MaxSlotsEn=1 -- this example only
         // ever enables one slot for the one flash drive on port 3.
@@ -780,15 +804,15 @@ fn app_main() {
                 uart_puts(" CRR=");
                 uart_print(((crcr_diag_lo >> 3) & 1) as usize);
                 uart_puts("\r\ndiag DCBAAP_lo (expect ");
-                uart_print_hex((dcbaa_base & 0xFFFFFFFF) as i32);
+                uart_print_hex((dcbaa_dma & 0xFFFFFFFF) as i32);
                 uart_puts("): ");
                 uart_print_hex(dcbaap_diag_lo as i32);
                 uart_puts("\r\ndiag ERDP_lo (expect ");
-                uart_print_hex((evt_ring_base & 0xFFFFFFFF) as i32);
+                uart_print_hex((evt_ring_dma & 0xFFFFFFFF) as i32);
                 uart_puts("): ");
                 uart_print_hex(erdp_diag_lo as i32);
                 uart_puts("\r\ndiag ERSTBA_lo (expect ");
-                uart_print_hex((erst_base & 0xFFFFFFFF) as i32);
+                uart_print_hex((erst_dma & 0xFFFFFFFF) as i32);
                 uart_puts("): ");
                 uart_print_hex(erstba_diag_lo as i32);
                 uart_puts("\r\n");

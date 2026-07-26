@@ -15,6 +15,56 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- USB Bring-Up Step 6 SOLVED: RP1 DMA Needs PCI 0x10_00000000 + cpu_phys; Enable Slot Succeeds
+
+Root cause found and fixed. After four isolation tests each ruled out a
+plausible hypothesis, the user suggested consulting other OSS kernels'
+source rather than chasing the (403-blocked) xHCI specification PDF.
+That was the decisive redirection -- and the answer turned out to be in
+Raspberry Pi 5's own device tree, not any xHCI document.
+
+`bcm2712.dtsi`'s `pcie2` node states the endpoint-initiated (DMA)
+address mapping directly:
+
+```
+dma-ranges = <0x02000000 0x00 0x00000000  0x1f 0x00000000  0x00 0x00400000>,
+             <0x43000000 0x10 0x00000000  0x00 0x00000000  0x10 0x00000000>;
+```
+
+PCI address [0, 4MB) maps to CPU `0x1F_00000000` -- RP1's OWN peripheral
+aperture, the same window `uart.tkb` reaches `rp1_uart0` through -- and
+system RAM is reachable only at PCI `0x10_00000000` + cpu_phys, for
+64GB.
+
+Every earlier attempt handed the XHCI controller raw CPU physical
+addresses as its DCBAAP/CRCR/ERSTBA/ERDP/Link-TRB/scratchpad pointers.
+From the controller's point of view those are PCI addresses, and PCI
+`0x208040` falls inside that first `dma-ranges` entry -- so the
+controller was faithfully fetching its Command Ring from RP1's own
+peripheral registers instead of RAM, hence `USBSTS.HSE` for any command
+TRB. This also explains why all four isolation tests looked identical:
+none of them changed the wrong address space being used.
+
+Fixed in two parts: `pcie2_dma_inbound_setup()` now maps PCI
+`0x10_00000000` -> CPU `0` (64GB, encoding 0x15) matching the device
+tree exactly, and `pcie.tkb` exports `RP1_DMA_PCI_OFFSET` which
+`rp1_usb_smoke` adds to every address handed to the controller (CPU-side
+addresses stay raw for local dereferences and cache maintenance, with a
+`_dma` vs `_base` naming convention distinguishing the two address
+spaces).
+
+Real-hardware result, reproducible across two consecutive runs:
+`completion_code=0x01` (Success), `slot_id=0x01`, `trb_type=0x21`
+(Command Completion Event) -- the controller allocated device slot 1 for
+the USB flash drive on port 3. The full XHCI init path (HCRST ->
+DCBAA+Scratchpad -> Command Ring -> Event Ring/ERST -> CONFIG.MaxSlotsEn
+-> RS=1 -> doorbell -> Command Completion Event) now works end to end.
+
+Reusable lesson for all future RP1 DMA work (Ethernet included): any RP1
+bus master handed a system-RAM address needs `+ RP1_DMA_PCI_OFFSET`.
+This is a board-level fact about BCM2712's PCIe inbound windows, not an
+XHCI-specific quirk, and the device tree is the authoritative source.
+
 ### 2026-07-26: RPi5 -- USB Bring-Up Step 6: No-Op Faults Identically to Enable Slot; Pausing Active Debugging
 
 Fourth isolation test: swapped the Command Ring's TRB[0] from Enable
