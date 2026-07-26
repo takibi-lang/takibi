@@ -1,6 +1,103 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): USB bring-up Step 8 DONE --
+## Status update (2026-07-26, latest): USB bring-up Steps 9-10 DONE --
+## device fully enumerated and CONFIGURED; bulk endpoints programmed
+
+The SanDisk flash drive is now in the xHCI Configured state with its
+Mass Storage bulk endpoint pair live. Everything below Bulk-Only
+Transport is done.
+
+**Refactor first.** Multiple control transfers need more than the
+original 4-TRB EP0 ring and an inline TRB-building block, so the driver
+now has two reusable functions over shared globals:
+
+- `usb_await_event(want_type, timeout_ms)` -- consumes Event Ring
+  entries until one of the wanted TRB Type shows up, logging and
+  skipping anything else, advancing `ERDP` past **everything** consumed,
+  and tracking the Consumer Cycle State across wraps. All three event
+  waits (Enable Slot, Address Device, transfers) go through it now.
+- `usb_ctrl_xfer(bmRequestType, bRequest, wValue, wIndex, wLength,
+  buf_dma, dir_in)` -- one full control transfer, returning the
+  completion code with the residual in `usb_xhci_last_residual`.
+
+Rings grew to 16 TRBs each (Command, EP0, and the new bulk rings), with
+the Link TRB always at the last index and a producer-side wrap that
+toggles the Cycle State. Contexts are now allocated at full spec size
+(Input 33x64, Device 32x64) instead of being resized per milestone.
+
+**Step 9 -- Configuration Descriptor.** Read the 9-byte header first
+purely to learn `wTotalLength` (the configuration, interface, endpoint
+and companion descriptors come back as one contiguous blob whose size is
+only knowable from that field), then re-read the whole thing and walk
+it. The walk skips unknown descriptor types by their own `bLength`,
+which is the only reason such a parser survives vendor-specific
+descriptors it has never seen.
+
+**Step 10 -- Configure Endpoint, then SET_CONFIGURATION.** The order is
+not obvious and matters: both Linux (`usb_hcd_alloc_bandwidth` before
+the control request, in `usb_set_configuration`) and U-Boot
+(`xhci_submit_control_msg` intercepts SET_CONFIGURATION to run
+`xhci_set_configuration` first) program the controller's endpoint
+contexts **before** telling the device to switch configuration.
+
+Two details taken from U-Boot's `xhci_set_configuration` /
+`xhci_init_ep_contexts_if` rather than derived:
+
+- **Seed the Input Context from the controller's OUTPUT Device
+  Context** (`xhci_slot_copy` / `xhci_endpoint_copy`) before modifying
+  it. The Slot Context already holds the USB address assigned during
+  Address Device; rebuilding it from scratch throws that away. Only
+  Context Entries (bits 31:27) is then replaced with the highest DCI in
+  use.
+- **Endpoint index is not DCI.** `xhci_get_ep_index()` gives
+  `epnum*2 - (dir_in ? 0 : 1)`; DCI is that plus 1, the Input Control
+  Context add-flag bit is `1 << (index + 1)`, and the Endpoint Context
+  for DCI n lives at `(n+1)*64`. EP `0x81` -> index 2, DCI 3;
+  EP `0x02` -> index 3, DCI 4. EP0's `A1` flag is deliberately **not**
+  set: Configure Endpoint must not touch the control endpoint.
+
+Endpoint Context fields follow U-Boot's macros: `ep_info2 =
+EP_TYPE(t)<<3 | ERROR_COUNT(3)<<1 | MAX_BURST(b)<<8 | MAX_PACKET(m)<<16`
+with EP Type = `(bmAttributes & 3) | (dir << 2)`, so Bulk OUT = 2 and
+Bulk IN = 6. Average TRB Length is left at **0** for bulk: it derives
+from Max ESIT Payload, which xHCI defines as 0 for control and bulk
+endpoints, and both Linux and U-Boot only force 8 for control endpoints
+(xHCI 6.2.3).
+
+**Real-hardware result (reproducible)**:
+
+```
+config descriptor header: completion_code=0x01 wTotalLength=44
+config descriptor full: completion_code=0x01 residual=0
+  configuration: bNumInterfaces=1 bConfigurationValue=1
+  interface: num=0 bNumEndpoints=2 class=0x08 subclass=0x06 protocol=0x50
+  endpoint: addr=0x81 attr=0x02 wMaxPacketSize=1024
+  ss companion: bMaxBurst=1
+  endpoint: addr=0x02 attr=0x02 wMaxPacketSize=1024
+  ss companion: bMaxBurst=15
+msc endpoints: bulk_in=0x81 (mps=1024 burst=1) bulk_out=0x02 (mps=1024 burst=15)
+configure endpoint: completion_code=0x01
+set configuration: completion_code=0x01
+device context slot: usb_address=0x01 slot_state=0x03
+```
+
+`class=0x08 subclass=0x06 protocol=0x50` is exactly Mass Storage / SCSI
+transparent command set / Bulk-Only Transport -- the combination the
+RPi3 side's `usb_msc.tkb` already speaks. The 44 bytes account for
+themselves exactly (9 config + 9 interface + 7 endpoint + 6 companion +
+7 endpoint + 6 companion), which self-validates the parse.
+`slot_state=0x03` is **Configured**.
+
+One compiler note worth keeping: `--forbid-trap` rejected
+`out_num * 2 - 1` because `bEndpointAddress & 0x0F` can be 0 and the
+result would underflow. That is a real malformed-descriptor case, not a
+false positive, so the fix is a genuine `in_num > 0 && out_num > 0`
+guard rather than a cast.
+
+Next: USB Mass Storage Bulk-Only Transport (CBW/CSW) over the two bulk
+rings, then SCSI INQUIRY/READ CAPACITY/READ(10), then FAT12.
+
+## Status update (2026-07-26): USB bring-up Step 8 DONE --
 ## first real control transfer; the SanDisk flash drive's Device
 ## Descriptor is read over EP0
 
