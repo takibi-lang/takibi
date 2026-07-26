@@ -6,54 +6,61 @@
 // of raw instruction bytes. The archive is real, not a synthetic
 // fixture: built by the actual `cpio` tool (newc format) from
 // examples/common_rpi5/el0_test_prog.S/.ld's output, embedded into the
-// kernel image via el0_test_image.S's `.incbin`. Builds directly on
-// el0_smoke's proven EL2->EL1->EL0 drop and real write()-with-pointer-
-// validation SVC dispatch. Also implements read() (blocking on real UART
-// RX), completing GitHub issue #153's full three-syscall Stage 1 set
-// (read/write/exit) -- the embedded test program reads 3 bytes from
-// stdin and echoes them back via a second write(), proving real
-// bidirectional I/O through validated user pointers.
+// kernel image via el0_test_image.S's `.incbin`.
 //
-// Deliberately scoped to RPi3's own ORIGINAL Stage 1 milestone (issue
-// #153), not the later GitHub issue #156 generalization
-// (examples/el0_elf_load/el0_elf_load.tkb's CURRENT, much larger RPi3
-// copy): no process_address_space_map/ProcessAddressSpace multi-page
-// loading (this loader maps exactly ONE page, the same
-// DYN_VA_BASE..DYN_VA_LIMIT window examples/el0_smoke_rpi5 already
-// proved, via map_page_el0_exec -- vm_page_map_core_rpi5.tkb needed no
-// changes at all for this file), no hvc-based exit() teardown (the
-// mapping/space/active tokens are abandoned on exit, same idiom
-// examples/el0_smoke_rpi5.tkb already uses), and only read/write/exit
-// are implemented (not issue #156's ~20-syscall busybox-shell surface:
-// writev/ppoll/newfstatat/set_tid_address/brk/mmap/mprotect/uname/...).
-// examples/common_rpi5/el0_test_prog.S is correspondingly a trimmed copy
-// of RPi3's own test binary, with the 6000-byte dead-padding (added
-// there specifically to prove issue #156's multi-page loader) removed,
-// so the whole ELF comfortably fits in one page.
+// This is the FULL, GitHub issue #156-equivalent port: real multi-page
+// ELF loading via ProcessAddressSpace/process_address_space_map
+// (vm_page_map_core_rpi5.tkb), real hvc-triggered exit() teardown
+// (examples/common_rpi5/hvc_asm.S, proven by examples/hvc_smoke_rpi5),
+// and the same ~20-syscall busybox-shell-ready surface RPi3's own
+// current el0_elf_load.tkb implements (issue #156's own empirical
+// strace-driven research, not re-derived independently here -- see that
+// file's own per-syscall comments for the full "why", reproduced below
+// only where an RPi5-specific detail differs). This SUPERSEDES an
+// earlier, deliberately smaller single-page port of this same file
+// (RPi3's own original issue #153 Stage 1 scope: cpio+ELF parsing,
+// read/write/exit only, no ProcessAddressSpace/hvc) -- evolved in place
+// rather than kept as two separate files, the same way RPi3's own
+// el0_elf_load.tkb grew via issue #156 without ever being two files.
 //
-// cpio (newc) format: a 110-byte ASCII-hex-field header, then the
-// filename (c_namesize bytes, NUL-terminated), then file data -- both
-// individually padded to a 4-byte boundary. This loader reads exactly
-// one entry (no TRAILER!!! scan, no directory/multi-file support).
+// The only structural RPi5 difference from RPi3's copy: RPi5's
+// AddressSpaceOwner has no `slot` field (one translation root, not two
+// -- see vm_page_map_core_rpi5.tkb's own header comment), so every
+// `space.slot`/`pas.slot` reference and the `mmu_address_space_activate`
+// two-slot dance simply do not exist here; ProcessVmState's own asid
+// existential still does the same "one process's worth of VM resources
+// travels together" job.
 
 use "examples/vm_page_map/vm_page_map_core_rpi5.tkb";
 use "examples/common_rpi5/el0_asm_extern.tkb";
 use "examples/common_rpi5/el1_asm_extern.tkb";
+use "examples/common_rpi5/hvc_asm_extern.tkb";
 use "examples/common_rpi5/el0_test_image_extern.tkb";
 
 const SYSCALL_ERROR: usize = 0xFFFFFFFFFFFFFFFF;
+// -ENOTTY as usize (Linux errno 25) -- a syscall's error return is
+// -errno reinterpreted as an unsigned 64-bit value, same convention as
+// SYSCALL_ERROR above.
+const ERR_ENOTTY: usize = 0xFFFFFFFFFFFFFFE7;
+// -ENOENT as usize (Linux errno 2) -- this kernel has no VFS at all, so
+// any REAL (non-empty) pathname genuinely does not exist.
+const ERR_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
+// This process's fixed, single-process/single-"user" identity. PID/TID 0
+// is reserved (kernel/swapper on a real Linux system), so 1 -- not 0 --
+// for anything PID/TID-shaped; UID/GID 0 (root) is fine since there is
+// no privilege model to violate yet.
+// 8 covers today's el0_test_prog.elf (6 phdrs, static-pie) with headroom.
 const MAX_PHDRS: usize = 8;
 const PT_LOAD: u32 = 1;
 const ET_EXEC: u16 = 2;
 const ET_DYN: u16 = 3;
 
-// argv/envp/auxv initial stack layout (see app_main's own construction
-// for the exact byte-by-byte shape) -- same layout and size as RPi3's
-// own el0_elf_load.tkb, reserved at the top of the SAME single mapped
-// page (not a separate stack page, unlike that file's multi-page
-// design): the whole ELF's own content (a few hundred bytes, see
-// el0_test_prog.S's header comment) leaves comfortable room below it in
-// one 4096-byte page.
+// argv/envp/auxv initial stack layout: reserved at the top of the
+// stack page, see its construction in app_main for the exact byte-by-
+// byte shape. Wide enough for the PIE-specific auxv entries
+// (AT_PHDR/PHENT/PHNUM/BASE/ENTRY/RANDOM/SECURE) a real libc's own
+// self-relocation and TLS setup needs, on top of the original
+// AT_PAGESZ/AT_NULL pair -- every real target binary is PIE.
 const ARGV_LAYOUT_SIZE: usize = 256;
 const AT_PAGESZ: usize = 6;
 const AT_PHDR: usize = 3;
@@ -65,9 +72,9 @@ const AT_SECURE: usize = 23;
 const AT_RANDOM: usize = 25;
 
 // cpio (newc) fixed field byte offsets within the 110-byte header --
-// verified against a real `cpio -o -H newc` archive's own raw bytes,
-// same values as RPi3's own el0_elf_load.tkb (the format itself is not
-// target-specific).
+// verified against a real `cpio -o -H newc` archive's own raw bytes
+// (od -A x -t x1z), same values as RPi3's own copy (the format itself is
+// not target-specific).
 const CPIO_HEADER_SIZE: usize = 110;
 const CPIO_FILESIZE_OFFSET: usize = 54;
 const CPIO_NAMESIZE_OFFSET: usize = 94;
@@ -84,8 +91,7 @@ fn hex_digit(c: u8) -> usize {
     }
     // Not a hex digit -- GNU cpio always emits uppercase 0-9A-F, so this
     // only fires on a genuinely malformed header; treated as 0 rather
-    // than threading a validity flag through every caller, acceptable
-    // for this milestone's trusted embedded archive.
+    // than threading a validity flag through every caller.
     return 0;
 }
 
@@ -128,80 +134,446 @@ struct packed Elf64ProgramHeader {
 private let mut el1_stack: [u8; 4096] align(16);
 private let mut el0_entry_va: usize;
 private let mut el0_page_va: usize;
+private let mut el0_region_size: usize;
 private let mut el0_stack_top_va: usize;
 
-// Same abandon idiom as examples/el0_smoke_rpi5.tkb -- no hvc-based
-// teardown in this minimal port, see this file's own header comment.
-fn el0_mapping_abandon(mapping: sink MappingOwner[asid, va, p]) {}
-fn el0_space_abandon(space: sink AddressSpaceOwner[asid, state]) {}
-fn el0_active_abandon(active: sink ActiveAddressSpace[core, asid]) {}
+// A real process needs real heap growth for malloc to work at all. This
+// loader reserves a fixed HEAP_PAGES-sized region as part of the SAME
+// up-front process_address_space_map call, right after the stack page,
+// and serves both brk() and anonymous mmap() (musl's mallocng allocator
+// uses mmap for some allocations, not just brk) by bump-allocating
+// within it. Never reclaimed (no munmap support) -- acceptable for this
+// milestone's single, short-lived process.
+const HEAP_PAGES: usize = 128;
+private let mut el0_heap_start: usize;
+private let mut el0_heap_limit: usize;
+private let mut el0_heap_break: usize;
 
-// Same policy shape as examples/el0_smoke_rpi5's own el0_svc_dispatch,
-// extended with read() (GitHub issue #153's third Stage 1 syscall) and
-// validated against el0_page_va/PAGE_SIZE (the one page this loader ever
-// maps) instead of el0_entry_va.
+// A first, minimal formalization of "process state": exit()'s real exit
+// status (x0 at the exit() call, per the same convention Linux itself
+// uses) is recorded and reported instead of discarded. There is still
+// only ever one process, no PID, no parent/child.
+variant ProcessOutcome {
+    Running;
+    Exited(usize);
+}
+
+fn process_outcome_report(outcome: ProcessOutcome) {
+    match outcome {
+        ProcessOutcome::Running => {
+            uart_puts("process still running\n");
+        }
+        ProcessOutcome::Exited(status) => {
+            uart_puts("process exited with status ");
+            uart_print(status);
+            uart_puts("\n");
+        }
+    }
+}
+
+// A stable owner slot (same protocol as examples/copy_on_write's own
+// CowStateStore/stable_replace) holding this process's VM resources
+// across the EL2->EL1->EL0 drop, so exit() -- which only ever runs at
+// EL1/EL0 -- can trigger their REAL reclamation at EL2 via the hvc call
+// boundary (examples/common_rpi5/hvc_asm.S), instead of abandoning them.
+// Unlike CowStateStore, this deliberately skips COW's own
+// vacancy-token/reentrancy protocol: process_vm_put is called exactly
+// once (at load time, EL2, before the drop) and process_vm_take exactly
+// once (at exit time, EL2, triggered by the hvc call below) -- strictly
+// sequential, single core, no interrupt or concurrent access ever
+// interleaves the two.
+private linear view ProcessVmGuard[lock: addr];
+fn process_vm_guard(lock: *i32 @ place) -> ProcessVmGuard[place] {
+    return view ProcessVmGuard[place];
+}
+fn process_vm_guard_done(guard: sink ProcessVmGuard[place]) {}
+
+// Discards a ProcessVmState wholesale -- only ever reached if
+// process_vm_put ran while the slot was NOT already Empty, which the
+// one-put-one-take sequencing above should make unreachable in practice.
+fn process_vm_state_discard(state: sink ProcessVmState) {}
+
+variant ProcessVmState {
+    Empty;
+    Loaded(exists core: usize. exists asid: usize.
+           (ProcessAddressSpace[asid], ActiveAddressSpace[core, asid]));
+}
+
+struct ProcessVmStateStore {
+    private lock: i32;
+    private state: ProcessVmState;
+}
+private let mut process_vm_store: ProcessVmStateStore;
+
+fn process_vm_put(next: ProcessVmState) {
+    let guard = process_vm_guard(&process_vm_store.lock);
+    let previous: ProcessVmState = stable_replace(
+        guard, &process_vm_store.lock, process_vm_store.state, next);
+    process_vm_guard_done(guard);
+    process_vm_state_discard(previous);
+}
+
+fn process_vm_take() -> ProcessVmState {
+    let guard = process_vm_guard(&process_vm_store.lock);
+    let state: ProcessVmState = stable_replace(
+        guard, &process_vm_store.lock, process_vm_store.state, ProcessVmState::Empty);
+    process_vm_guard_done(guard);
+    return state;
+}
+
+// Strong override of examples/common_rpi5/hvc_asm.S's weak hvc_dispatch
+// default. Runs AT EL2 (el1_hvc_entry calls this via `bl` before eret-ing
+// back to EL1, exactly like examples/hvc_smoke_rpi5's own proof of that
+// mechanism) -- this is what finally lets exit() reach the TTBR0_EL2-only
+// teardown (process_address_space_unmap/address_space_deactivate) that
+// EL1 cannot perform itself. `arg` is unused: with only ever one process,
+// the act of calling is itself the whole request.
+fn hvc_dispatch(arg: usize) -> usize {
+    let state = process_vm_take();
+    match state {
+        ProcessVmState::Empty => {
+            uart_puts("hvc: no process VM state to reclaim\n");
+        }
+        ProcessVmState::Loaded(bundle) => {
+            let (pas, active) = bundle;
+            let empty = process_address_space_unmap(pas);
+            let inactive = address_space_deactivate(active, empty);
+            address_space_free(inactive);
+            uart_puts("hvc: process VM reclaimed\n");
+        }
+    }
+    return 0;
+}
+
+// Same policy as examples/el0_smoke_rpi5's own el0_svc_dispatch,
+// validated against el0_page_va/el0_region_size (this loader's whole
+// mapped region, now runtime-sized -- code pages + stack + heap, not one
+// fixed page). exit()'s real status (x0) is recorded and reported, AND
+// its VM resources are really reclaimed via rpi5_hvc_call below.
 fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
                     x2: usize, elr: usize) -> (usize, usize) {
     let ec: usize = (esr >> 26) & 0x3F;
     if (ec != 0x15) {
         return (0, 0);
     }
-    if (syscall_num == 63) {
-        // read(fd, buf, len) -- blocks (spins on uart_rx_ready()) until
-        // at least one byte is ready, then drains whatever is currently
-        // available up to `len` and returns immediately, matching POSIX
-        // read()'s own "return as soon as any data is ready" behavior.
-        let fd: usize = x0;
-        let buf: usize = x1;
-        let len: usize = x2;
-        if (fd != 0) {
-            return (elr, SYSCALL_ERROR);
+    match syscall_num {
+        63 => {
+            // read(fd, buf, len) -- blocks (spins on uart_rx_ready())
+            // until AT LEAST one byte is ready, then drains whatever is
+            // CURRENTLY available up to `len` and returns immediately,
+            // matching POSIX read()'s own "return as soon as any data is
+            // ready" behavior, not waiting for the full request to fill.
+            let fd: usize = x0;
+            let buf: usize = x1;
+            let len: usize = x2;
+            if (fd != 0) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (buf < el0_page_va || len > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (buf - el0_page_va > el0_region_size - len) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let dst: *u8 = buf as *u8;
+            while (uart_rx_ready() == false) {
+            }
+            let mut n: usize = 0;
+            while (n < len && uart_rx_ready() == true) {
+                dst[n as isize] = uart_isr_getc();
+                n = n + 1;
+            }
+            return (elr, n);
         }
-        if (buf < el0_page_va || len > PAGE_SIZE) {
-            return (elr, SYSCALL_ERROR);
+        64 | 68 => {
+            // write(fd,buf,len) and pwrite64(fd,buf,len,offset) -- the
+            // offset (a 4th arg this loader's el0_svc_dispatch signature
+            // does not even receive) is simply ignored, matching this
+            // UART "file"'s own non-seekable reality.
+            let fd: usize = x0;
+            let buf: usize = x1;
+            let len: usize = x2;
+            if (fd != 1 && fd != 2) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (buf < el0_page_va || len > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (buf - el0_page_va > el0_region_size - len) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let src: *u8 = buf as *u8;
+            for i: usize in 0..<len {
+                uart_putc(src[i as isize]);
+            }
+            return (elr, len);
         }
-        if (buf - el0_page_va > PAGE_SIZE - len) {
-            return (elr, SYSCALL_ERROR);
+        66 => {
+            // writev(fd, iov, iovcnt) -- an array of `iovcnt` {base:
+            // *u8, len: usize} pairs (16 bytes each: an 8-byte pointer
+            // then an 8-byte length, the real Linux struct iovec ABI
+            // shape).
+            let fd: usize = x0;
+            let iov: usize = x1;
+            let iovcnt: usize = x2;
+            if (fd != 1 && fd != 2) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (iov < el0_page_va || iovcnt > 64 || iovcnt * 16 > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (iov - el0_page_va > el0_region_size - iovcnt * 16) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let mut total: usize = 0;
+            let mut ok: i32 = 1;
+            for i: usize in 0..<iovcnt {
+                let entry_addr: usize = iov + i * 16;
+                let base_ptr: *u64 = entry_addr as *u64;
+                let len_ptr: *u64 = (entry_addr + 8) as *u64;
+                let base: usize = *base_ptr as usize;
+                let len: usize = *len_ptr as usize;
+                if (base < el0_page_va || len > el0_region_size) {
+                    ok = 0;
+                } else if (base - el0_page_va > el0_region_size - len) {
+                    ok = 0;
+                } else {
+                    let src: *u8 = base as *u8;
+                    for j: usize in 0..<len {
+                        uart_putc(src[j as isize]);
+                    }
+                    total = total + len;
+                }
+            }
+            if (ok == 0) {
+                return (elr, SYSCALL_ERROR);
+            }
+            return (elr, total);
         }
-        let dst: *u8 = buf as *u8;
-        while (uart_rx_ready() == false) {
+        73 => {
+            // ppoll(fds, nfds, timeout_ts, sigmask) -- only fds/nfds/
+            // timeout_ts are visible via el0_svc_dispatch's own x0/x1/x2.
+            // This kernel only ever has one real input stream (fd 0, the
+            // UART), so this blocks (matching read()'s own busy-wait)
+            // until it is ready, reports exactly that one fd as ready
+            // (POLLIN, struct pollfd's `revents` field at byte offset 6),
+            // and reports every OTHER fd in the array as not ready.
+            let fds: usize = x0;
+            let nfds: usize = x1;
+            if (nfds == 0) {
+                return (elr, 0);
+            }
+            if (fds < el0_page_va || nfds > 64 || nfds * 8 > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (fds - el0_page_va > el0_region_size - nfds * 8) {
+                return (elr, SYSCALL_ERROR);
+            }
+            while (uart_rx_ready() == false) {
+            }
+            let revents0: *u16 = (fds + 6) as *u16;
+            *revents0 = 1; // POLLIN
+            for i: usize in 1..<nfds {
+                let revents_i: *u16 = (fds + i * 8 + 6) as *u16;
+                *revents_i = 0;
+            }
+            return (elr, 1);
         }
-        let mut n: usize = 0;
-        while (n < len && uart_rx_ready() == true) {
-            dst[n as isize] = uart_isr_getc();
-            n = n + 1;
+        79 => {
+            // newfstatat(dirfd, pathname, statbuf, flags) -- two
+            // genuinely different call shapes share this one syscall
+            // number:
+            //   - fstatat(fd, "", &buf, AT_EMPTY_PATH) -- pathname is an
+            //     empty string, the standard portable idiom for "stat
+            //     this fd itself". Answered with a plausible
+            //     character-device stat (S_IFCHR | 0620).
+            //   - any REAL (non-empty) pathname -- always -ENOENT, since
+            //     this kernel has no VFS at all.
+            let pathname: usize = x1;
+            let statbuf: usize = x2;
+            if (pathname < el0_page_va || 1 > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (pathname - el0_page_va > el0_region_size - 1) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let path_ptr: *u8 = pathname as *u8;
+            if (path_ptr[0 as isize] != 0) {
+                return (elr, ERR_ENOENT);
+            }
+            if (statbuf < el0_page_va || 128 > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (statbuf - el0_page_va > el0_region_size - 128) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let dst: *u8 = statbuf as *u8;
+            for i: usize in 0..<128 {
+                dst[i as isize] = 0;
+            }
+            let mode_ptr: *u32 = (statbuf + 16) as *u32;
+            *mode_ptr = 0x2190; // S_IFCHR (0o020000) | 0o620
+            let nlink_ptr: *u32 = (statbuf + 20) as *u32;
+            *nlink_ptr = 1;
+            return (elr, 0);
         }
-        return (elr, n);
+        // Trivial stub syscalls: libc thread-runtime init boilerplate
+        // and single-process/single-"user" identity queries a
+        // non-interactive, single-threaded script never exercises
+        // meaningfully, so a fixed plausible value is the whole
+        // implementation.
+        96 | 178 => {
+            // set_tid_address(tidptr), gettid() -- both return this
+            // process's own TID.
+            return (elr, 1);
+        }
+        172 => {
+            return (elr, 1); // getpid()
+        }
+        173 => {
+            return (elr, 0); // getppid() -- no parent process exists
+        }
+        174 | 175 | 176 | 177 => {
+            return (elr, 0); // getuid/geteuid/getgid/getegid() -- root
+        }
+        99 | 134 | 135 | 167 | 293 => {
+            // set_robust_list, rt_sigaction, rt_sigprocmask, prctl, rseq
+            // -- accept and remember nothing, always succeed.
+            return (elr, 0);
+        }
+        49 => {
+            // chdir(path) -- always succeeds, but genuinely does nothing:
+            // this kernel has no real filesystem/VFS layer, so there is
+            // no real "current directory" concept to change.
+            return (elr, 0);
+        }
+        29 => {
+            // ioctl(fd, request, arg) -- always -ENOTTY. Real shells
+            // handle this gracefully, and this kernel has no real
+            // tty/ioctl model to implement yet.
+            return (elr, ERR_ENOTTY);
+        }
+        278 => {
+            // getrandom(buf, len, flags) -- a deliberate low-quality
+            // fixed stub, but a REAL implementation in the sense that it
+            // actually writes `len` validated bytes.
+            let buf: usize = x0;
+            let len: usize = x1;
+            if (buf < el0_page_va || len > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (buf - el0_page_va > el0_region_size - len) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let dst: *u8 = buf as *u8;
+            for i: usize in 0..<len {
+                dst[i as isize] = (0x5A ^ i) as u8;
+            }
+            return (elr, len);
+        }
+        214 => {
+            // brk(addr) -- real heap growth within the fixed HEAP_PAGES
+            // region reserved at load time. addr==0 queries the current
+            // break (always succeeds); a valid in-range addr moves it;
+            // anything else fails by real brk() semantics -- returning
+            // the UNCHANGED break, not an error code.
+            let addr: usize = x0;
+            if (addr == 0) {
+                return (elr, el0_heap_break);
+            }
+            if (addr >= el0_heap_start && addr <= el0_heap_limit) {
+                el0_heap_break = addr;
+            }
+            return (elr, el0_heap_break);
+        }
+        222 => {
+            // mmap(addr_hint, length, prot, flags, fd, offset) -- a
+            // deliberately narrow stub: every request is served as
+            // anonymous memory, bump-allocated from the SAME heap
+            // headroom brk() above uses. Rounds the request up to a
+            // whole page, matching real mmap's own page granularity.
+            // Never reclaimed (no munmap support).
+            let length: usize = x1;
+            let rounded: usize = ((length + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+            if (rounded == 0 || el0_heap_limit - el0_heap_break < rounded) {
+                return (elr, SYSCALL_ERROR); // MAP_FAILED == (void *)-1
+            }
+            let result: usize = el0_heap_break;
+            el0_heap_break = el0_heap_break + rounded;
+            return (elr, result);
+        }
+        226 => {
+            // mprotect(addr, len, prot) -- a no-op-but-report-success
+            // stub: this kernel has no fine-grained EL0 page permission
+            // model yet, so a real GNU_RELRO-style post-relocation
+            // hardening request cannot actually be enforced -- a real,
+            // documented weakening, not silently done.
+            return (elr, 0);
+        }
+        17 => {
+            // getcwd(buf, size) -- always reports "/", the only
+            // filesystem concept this kernel has.
+            let buf: usize = x0;
+            let size: usize = x1;
+            if (size < 2) {
+                return (elr, SYSCALL_ERROR); // ERANGE-shaped: buffer too small
+            }
+            if (buf < el0_page_va || 2 > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (buf - el0_page_va > el0_region_size - 2) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let dst: *u8 = buf as *u8;
+            dst[0 as isize] = 0x2f; // '/'
+            dst[1 as isize] = 0x00; // NUL
+            return (elr, 2);
+        }
+        160 => {
+            // uname(struct utsname *buf) -- writes the 6 fixed-size,
+            // NUL-padded 65-byte fields the real Linux ABI shape
+            // requires.
+            let buf: usize = x0;
+            if (buf < el0_page_va || 390 > el0_region_size) {
+                return (elr, SYSCALL_ERROR);
+            }
+            if (buf - el0_page_va > el0_region_size - 390) {
+                return (elr, SYSCALL_ERROR);
+            }
+            let dst: *u8 = buf as *u8;
+            for i: usize in 0..<390 {
+                dst[i as isize] = 0;
+            }
+            let sysname: []u8 = "Linux" as []u8;
+            let nodename: []u8 = "takibi" as []u8;
+            let release: []u8 = "6.1.0" as []u8;
+            let version: []u8 = "#1" as []u8;
+            let machine: []u8 = "aarch64" as []u8;
+            slice_copy(unsafe { dst[0 as isize..<65 as isize] }, sysname);
+            slice_copy(unsafe { dst[65 as isize..<130 as isize] }, nodename);
+            slice_copy(unsafe { dst[130 as isize..<195 as isize] }, release);
+            slice_copy(unsafe { dst[195 as isize..<260 as isize] }, version);
+            slice_copy(unsafe { dst[260 as isize..<325 as isize] }, machine);
+            // domainname field [325..390) stays all-zero ("" / unset).
+            return (elr, 0);
+        }
+        93 | 94 => {
+            let outcome = ProcessOutcome::Exited(x0);
+            process_outcome_report(outcome);
+            // Issued FROM EL1 (this whole function runs inside
+            // el0_sync_entry's own EL1-side SVC handling): traps up to
+            // EL2 via el1_hvc_entry, runs hvc_dispatch there (real
+            // process_address_space_unmap/address_space_deactivate
+            // teardown), then resumes right here once EL2 erets back.
+            rpi5_hvc_call(0);
+            return (1, 0);
+        }
+        _ => {
+            return (0, 0);
+        }
     }
-    if (syscall_num == 64) {
-        let fd: usize = x0;
-        let buf: usize = x1;
-        let len: usize = x2;
-        if (fd != 1 && fd != 2) {
-            return (elr, SYSCALL_ERROR);
-        }
-        if (buf < el0_page_va || len > PAGE_SIZE) {
-            return (elr, SYSCALL_ERROR);
-        }
-        if (buf - el0_page_va > PAGE_SIZE - len) {
-            return (elr, SYSCALL_ERROR);
-        }
-        let src: *u8 = buf as *u8;
-        for i: usize in 0..<len {
-            uart_putc(src[i as isize]);
-        }
-        return (elr, len);
-    }
-    if (syscall_num == 93 || syscall_num == 94) {
-        uart_puts("process exited with status ");
-        uart_print(x0);
-        uart_puts("\n");
-        return (1, 0);
-    }
-    return (0, 0);
 }
 
-// Entered once, at EL1, by el1_asm.S's rpi5_el1_enter via a plain `bl`.
 fn el1_main() {
     rpi5_el0_enter(el0_entry_va, el0_stack_top_va);
 }
@@ -225,6 +597,11 @@ fn app_main() {
     }
     let namesize: usize = parse_hex8(hdr_base, CPIO_NAMESIZE_OFFSET);
     let filesize: usize = parse_hex8(hdr_base, CPIO_FILESIZE_OFFSET);
+    // Both the name and the header+name run are individually rounded up
+    // to a 4-byte boundary in the newc format; only the second rounding
+    // matters here since nothing after the header is read except via
+    // data_start below. 0xFFFFFFFFFFFFFFFC clears the low 2 bits (round
+    // DOWN after adding 3 -- the standard round-up-to-4 idiom).
     let name_end: usize = CPIO_HEADER_SIZE + namesize;
     let data_start: usize = (name_end + 3) & 0xFFFFFFFFFFFFFFFC;
     if (data_start < name_end || data_start > archive_len
@@ -265,12 +642,20 @@ fn app_main() {
         phdr_cap = phnum;
     }
 
-    // PIE load-bias (same mechanism as RPi3's own loader, see that
-    // file's header comment): scan every PT_LOAD segment for the lowest
-    // p_vaddr and overall extent BEFORE mapping anything, then place
-    // that lowest segment exactly at page_va. Unlike RPi3's own
-    // multi-page generalization, everything here must fit within ONE
-    // page -- checked below via max_vaddr_end - min_vaddr <= PAGE_SIZE.
+    // First pass (PIE-aware, GitHub issue #156's multi-page loader
+    // generalization): scan every PT_LOAD segment to find the lowest
+    // p_vaddr among them and the overall extent, BEFORE mapping
+    // anything. load_bias = page_va - min_vaddr places that lowest
+    // segment exactly at page_va, and every other address (other
+    // segments, e_entry, the AT_PHDR auxv value) is offset by the same
+    // bias -- the same mechanism Linux's own kernel ELF loader uses. A
+    // well-formed ET_EXEC binary already links its lowest PT_LOAD at
+    // page_va (load_bias comes out to 0); a static-pie ET_DYN binary
+    // links its lowest PT_LOAD at 0 (load_bias becomes exactly page_va).
+    // Segment space is reserved by p_memsz, not p_filesz -- filesz-to-
+    // memsz bytes are BSS, correctly left zeroed by this loader's fresh
+    // page pool. One extra page is reserved for the stack, so code_pages
+    // is capped at MAX_PROCESS_PAGES - 1.
     let mut min_vaddr: usize = 0xFFFFFFFFFFFFFFFF;
     let mut max_vaddr_end: usize = 0;
     let mut any_load: i32 = 0;
@@ -299,30 +684,40 @@ fn app_main() {
     let at_phdr: usize = load_bias + phoff;
     let max_extent: usize = max_vaddr_end - min_vaddr;
 
-    // Single-page cap: the whole ELF PLUS the ARGV_LAYOUT_SIZE reserved
-    // at the top of the same page must fit in PAGE_SIZE.
-    if (max_extent > PAGE_SIZE - ARGV_LAYOUT_SIZE) {
+    let mut code_pages: usize = (max_extent + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (code_pages < 1) {
+        code_pages = 1;
+    }
+    if (code_pages > MAX_PROCESS_PAGES - 1 - HEAP_PAGES) {
         uart_puts("elf too large\n");
         return;
     }
-    if (entry < page_va || entry - page_va >= PAGE_SIZE) {
+    let code_region_size: usize = code_pages * PAGE_SIZE;
+    if (entry < page_va || entry - page_va >= code_region_size) {
         uart_puts("load failed\n");
         return;
     }
+    let total_pages: usize = code_pages + 1 + HEAP_PAGES;
 
-    match page_alloc() {
-        PageAllocResult::OutOfMemory => {
+    // total_pages is already guaranteed in [2, MAX_PROCESS_PAGES] by the
+    // code_pages guard above, but that guard's narrowing does not
+    // survive past its own `if` -- so process_address_space_map's
+    // refined page_count parameter still needs its own explicit
+    // if-narrow here.
+    if (total_pages < 513) {
+        let seed: {0..<1 as usize} = 0;
+        let inactive = address_space_new(seed);
+        let core: usize = 0;
+        let (space, active) = address_space_activate(inactive, core);
+
+        match process_address_space_map(space, active, page_va, total_pages) {
+        ProcessMapResult::Failed(inactive2) => {
             uart_puts("allocation failed\n");
+            address_space_free(inactive2);
         }
-        PageAllocResult::Allocated(page) => {
-            let seed: {0..<1 as usize} = 0;
-            let inactive = address_space_new(seed);
-            let core: usize = 0;
-            let (space, active) = address_space_activate(inactive, core);
-            let (space2, pending) = map_page_el0_exec(space, page, page_va);
-            let mapping = tlb_invalidate(space2, pending);
-
-            let dst = mapping_bytes(mapping);
+        ProcessMapResult::Mapped(pair) => {
+            let (pas, active2) = pair;
+            let dst: *u8 = page_va as *u8;
 
             let mut ok: i32 = 1;
             for i: usize in 0..<phdr_cap {
@@ -332,24 +727,23 @@ fn app_main() {
                     let seg_vaddr: usize = (ph_ptr.p_vaddr as usize) + load_bias;
                     let seg_offset: usize = ph_ptr.p_offset as usize;
                     let seg_filesz: usize = ph_ptr.p_filesz as usize;
-                    if (seg_vaddr < page_va || seg_filesz > PAGE_SIZE
-                            || seg_vaddr - page_va > PAGE_SIZE - seg_filesz
+                    if (seg_vaddr < page_va || seg_filesz > code_region_size
+                            || seg_vaddr - page_va > code_region_size - seg_filesz
                             || seg_offset > image_len
                             || seg_filesz > image_len - seg_offset) {
                         uart_puts("segment out of range\n");
                         ok = 0;
                     } else {
-                        // Same unsafe rationale as RPi3's own loader:
-                        // dst_base + seg_filesz <= PAGE_SIZE is already
-                        // proven above, but as a relationship between two
-                        // runtime values, not a plain interval on one of
-                        // them alone -- slice_copy's own runtime
-                        // min(dst.len, src.len) is what's actually safe
-                        // here.
+                        // dst_base + seg_filesz <= code_region_size is
+                        // already proven above, but as a relationship
+                        // between two runtime values, not a plain
+                        // interval on one of them alone -- slice_copy's
+                        // own runtime min(dst.len, src.len) is what's
+                        // actually safe here.
                         let src: *u8 = image_addr as *u8;
                         let dst_base: usize = seg_vaddr - page_va;
                         let seg_dst = unsafe {
-                            dst[dst_base..<dst_base + seg_filesz]
+                            dst[dst_base as isize..<(dst_base + seg_filesz) as isize]
                         };
                         let seg_src = unsafe {
                             src[seg_offset as isize..<(seg_offset + seg_filesz) as isize]
@@ -361,25 +755,34 @@ fn app_main() {
 
             if (ok == 0) {
                 uart_puts("load failed\n");
-                el0_mapping_abandon(mapping);
-                el0_space_abandon(space2);
-                el0_active_abandon(active);
+                let empty = process_address_space_unmap(pas);
+                let inactive3 = address_space_deactivate(active2, empty);
+                address_space_free(inactive3);
                 return;
             }
 
-            // Real argv/envp/auxv initial stack layout (matches the
-            // Linux ELF ABI exactly, with the PIE auxv entries a real
-            // libc's own self-relocation/TLS setup needs -- see
-            // examples/common_rpi5/el0_test_prog.S's own matching
-            // validation for the exact byte offsets this must agree
-            // with), reserved in the TOP ARGV_LAYOUT_SIZE bytes of the
-            // SAME single mapped page (not a separate stack page):
+            // The stack is simply the LAST page of the same contiguous
+            // ProcessAddressSpace region, right after the code pages.
+            let stack_va: usize = page_va + code_region_size;
+
+            // Real argv/envp/auxv initial stack layout: every
+            // libc-linked binary's own startup code reads this off SP
+            // unconditionally. Reserved in the TOP ARGV_LAYOUT_SIZE
+            // bytes of the stack page; everything below el0_entry_sp
+            // remains the process's own usable stack, growing down from
+            // there.
+            //
+            // Layout (matches the Linux ELF ABI exactly, with the PIE
+            // auxv entries a real libc's own self-relocation/TLS setup
+            // needs -- see examples/common_rpi5/el0_test_prog.S's own
+            // matching validation for the exact byte offsets this must
+            // agree with):
             //   [argc=1][argv[0]=ptr]["prog\0" pointed to by
             //   argv[0]][argv NULL][envp NULL (0 entries)]
             //   [auxv: AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_BASE,
             //    AT_ENTRY, AT_RANDOM, AT_SECURE][auxv: AT_NULL, 0]
             //   [AT_RANDOM's 16-byte pointee][argv[0]'s "prog\0" string]
-            let layout_base: usize = page_va + (PAGE_SIZE - ARGV_LAYOUT_SIZE);
+            let layout_base: usize = stack_va + (PAGE_SIZE - ARGV_LAYOUT_SIZE);
             let random_addr: usize = layout_base + 176;
             let string_addr: usize = layout_base + 192;
 
@@ -445,7 +848,9 @@ fn app_main() {
                 random_ptr[i as isize] = (0xA5 ^ i) as u8;
             }
 
-            // "prog\0" -- argv[0]'s own string data.
+            // "prog\0" -- argv[0]'s own string data, placed above the
+            // array (higher address), matching real kernel layout
+            // convention.
             let string_ptr: *u8 = string_addr as *u8;
             string_ptr[0 as isize] = 0x70; // 'p'
             string_ptr[1 as isize] = 0x72; // 'r'
@@ -455,14 +860,26 @@ fn app_main() {
 
             el0_entry_va = entry;
             el0_page_va = page_va;
+            el0_region_size = total_pages * PAGE_SIZE;
             el0_stack_top_va = layout_base;
-            el0_mapping_abandon(mapping);
-            el0_space_abandon(space2);
-            el0_active_abandon(active);
+            // Heap region: HEAP_PAGES right after the stack page (the
+            // last of the total_pages this ProcessAddressSpace call
+            // mapped).
+            el0_heap_start = stack_va + PAGE_SIZE;
+            el0_heap_limit = el0_heap_start + HEAP_PAGES * PAGE_SIZE;
+            el0_heap_break = el0_heap_start;
+            // This bundle IS about to become a running process -- stash
+            // it in the stable slot instead of abandoning it, so exit()'s
+            // hvc call can reclaim it for real later (see hvc_dispatch
+            // above).
+            process_vm_put(ProcessVmState::Loaded((pas, active2)));
 
             let el1_sp_base: usize = (el1_stack as *u8) as usize;
             let el1_sp: usize = el1_sp_base + 4096;
             rpi5_el1_enter(el1_sp);
         }
+        }
+    } else {
+        uart_puts("elf too large\n");
     }
 }

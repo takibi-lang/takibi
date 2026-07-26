@@ -16,15 +16,20 @@
    (GitHub issue #153) scope exactly: read/write/exit, the three
    syscalls, nothing from issue #156's later real-shell work.
 
-   UNLIKE RPi3's current copy, this one has NO trailing padding: RPi3's
-   own file adds 6000 dead bytes to deliberately push its own .text
-   PT_LOAD segment past one 4KB page, proving issue #156's later
-   multi-page loader generalization (ProcessAddressSpace/
-   process_address_space_map) -- examples/el0_elf_load_rpi5.tkb
-   deliberately does NOT port that generalization (single-page loading
-   only, matching el0_smoke's own DYN_VA_BASE..DYN_VA_LIMIT window and
-   this repo's own "port only what this milestone needs" practice), so
-   this binary stays within one page by construction instead. */
+   Trailing padding (6000 dead bytes, same size as RPi3's own copy)
+   deliberately pushes this binary's .text PT_LOAD segment past one 4KB
+   page -- GitHub issue #156's multi-page loader generalization
+   (ProcessAddressSpace/process_address_space_map,
+   examples/el0_elf_load_rpi5.tkb) needs a real ELF that genuinely spans
+   more than one page, not just the primitive-level proof
+   examples/el0_smoke_rpi5 already gave the single-page mapping
+   mechanism. An EARLIER version of this file omitted the padding, for
+   examples/el0_elf_load_rpi5.tkb's own earlier, deliberately smaller
+   single-page port (RPi3's own original issue #153 Stage 1 scope,
+   before issue #156's generalization) -- that scope has since been
+   superseded in place by the full port below, the same way RPi3's own
+   el0_elf_load.tkb grew via issue #156 without ever existing as two
+   separate files. */
     .section .text
     .global el0_prog_entry
 el0_prog_entry:
@@ -232,6 +237,9 @@ el0_prog_entry:
     svc     #0
 .Lel0_prog_hang:
     b       .Lel0_prog_hang
+
+    /* Dead padding (never executed) -- see this file's header comment. */
+    .space  6000
 
     .section .rodata
     .align  4

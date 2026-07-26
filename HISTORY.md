@@ -15,6 +15,46 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-26: RPi5 -- Grew `el0_elf_load` to the Full GitHub Issue #156 Scope (Multi-Page, hvc Teardown, Busybox Syscalls)
+
+Direct follow-on to the minimal single-page port below, evolved in place
+rather than kept as two files (the same way RPi3's own `el0_elf_load.tkb`
+grew via issue #156 without ever being two files). Asked to pick
+whichever of "full `el0_elf_load`" or "`el0_shell`" was easier to start
+next; `el0_shell` was ruled out immediately -- it needs real USB Mass
+Storage + FAT12 (`fat12_usbmsc.tkb`) to fetch the real busybox-static
+binary, and USB is explicitly out of scope for RPi5 (no host stack
+ported). The full `el0_elf_load` port, which `el0_shell` itself builds on
+top of, was the genuinely available next step.
+
+`vm_page_map_core_rpi5.tkb` gained `ProcessAddressSpace`/
+`process_address_space_map`/`process_address_space_unmap` (a
+coarse-grained, runtime-sized multi-page owner) -- not issue #158's
+`process_address_space_cow_fork`/`unmap_shared` (real fork()-specific
+COW, still out of scope), and `process_phys_indices` is one flat array
+matching RPi5's existing single-slot design, not RPi3's slot-0/slot-1
+pair. `el0_elf_load_rpi5.tkb` was rewritten in place to the full scope:
+real multi-page ELF loading, `hvc`-based `exit()` teardown
+(`hvc_dispatch`/`process_vm_put`/`process_vm_take`, now linking
+`hvc_asm.o`), and the same ~20-syscall table RPi3's own current file has
+(read/write/writev/ppoll/newfstatat/set_tid_address/gettid/getpid/
+getppid/getuid/geteuid/getgid/getegid/set_robust_list/rt_sigaction/
+rt_sigprocmask/prctl/rseq/chdir/ioctl/getrandom/brk/mmap/mprotect/
+getcwd/uname/exit) -- reproduced verbatim from RPi3's own issue #156
+empirical research, with every `rpi3_*`/`.slot` reference adapted to
+RPi5's own externs and slot-less `AddressSpaceOwner`.
+
+`examples/common_rpi5/el0_test_prog.S` had its earlier single-page
+trimming reverted: the same 6000-byte dead-padding RPi3's own copy uses
+(to genuinely force the ELF past one page) was added back. Output is now
+byte-for-byte identical to RPi3's own `el0_elf_load` fixture (including
+`"hvc: process VM reclaimed"`), so the RPi5-specific `.expected` file
+created for the minimal port was deleted in favor of reusing RPi3's own.
+
+Passed on the first real-hardware attempt, no new bug. `make
+hwcheck-rpi5` passes 55/55, confirmed across two consecutive
+real-hardware runs.
+
 ### 2026-07-26: RPi5 -- Ported `el0_elf_load` (Real ELF+cpio Loader), Scoped to the Original Single-Page Milestone
 
 Direct follow-on to `el0_smoke` (GitHub issue #67 Stage 2 follow-up).

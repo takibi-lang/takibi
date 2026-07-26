@@ -394,15 +394,15 @@ run_hw_test_rpi5 "vm_page_map (rpi5)" "$REPO_ROOT/examples/vm_page_map/kernel_rp
 run_hw_test_rpi5 "el0_smoke (rpi5)" "$REPO_ROOT/examples/el0_smoke/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/el0_smoke/el0_smoke.expected"
 # el0_elf_load (GitHub issue #67 Stage 2 follow-up): a real ELF loader fed
-# from a real cpio archive, minimal single-page port of RPi3's own issue
-# #153 milestone (no process_address_space_map/hvc teardown/busybox-shell
-# syscall surface -- see examples/el0_elf_load/el0_elf_load_rpi5.tkb's own
-# header comment). Own .expected fixture (not byte-identical to RPi3's:
-# no "hvc: process VM reclaimed" line, since this port has no hvc
-# teardown), but the SAME shared el0_elf_load.stdin fixture (its content,
-# "AB\n", is not target-specific).
+# from a real cpio archive. Full GitHub issue #156-equivalent port
+# (multi-page ProcessAddressSpace, hvc-based exit() teardown, the same
+# ~20-syscall busybox-shell-ready surface RPi3's own current file has --
+# see examples/el0_elf_load/el0_elf_load_rpi5.tkb's own header comment).
+# Output is now byte-for-byte identical to RPi3's own fixture (including
+# the "hvc: process VM reclaimed" line), so both el0_elf_load.expected
+# and el0_elf_load.stdin are the SAME shared, target-independent files.
 run_hw_test_rpi5_stdin "el0_elf_load (rpi5)" "$REPO_ROOT/examples/el0_elf_load/kernel_rpi5.elf" \
-    "$REPO_ROOT/examples/el0_elf_load/el0_elf_load_rpi5.expected" "$REPO_ROOT/examples/el0_elf_load/el0_elf_load.stdin"
+    "$REPO_ROOT/examples/el0_elf_load/el0_elf_load.expected" "$REPO_ROOT/examples/el0_elf_load/el0_elf_load.stdin"
 
 echo
 echo "RPi5 hardware tests: $PASS passed, $FAIL failed"

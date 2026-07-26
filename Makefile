@@ -2298,16 +2298,20 @@ examples/el0_smoke/kernel_rpi5.elf: \
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_EL1_ASM_O) $(COMMON_RPI5_EL0_ASM_O) examples/el0_smoke/el0_smoke_rpi5.o -o $@
 
 ## el0_elf_load: a real ELF loader fed from a real cpio archive (GitHub
-## issue #67 Stage 2 follow-up, minimal single-page port of RPi3's own
-## issue #153 milestone -- see examples/el0_elf_load/
-## el0_elf_load_rpi5.tkb's own header comment for the scope decision).
+## issue #67 Stage 2 follow-up). Full GitHub issue #156-equivalent port
+## (multi-page ProcessAddressSpace, hvc-based exit() teardown, the same
+## ~20-syscall busybox-shell-ready surface RPi3's own current file has)
+## -- see examples/el0_elf_load/el0_elf_load_rpi5.tkb's own header
+## comment for the scope decision and why COMMON_RPI5_HVC_ASM_O is now
+## also linked in (exit() traps up to EL2 via hvc to run the real
+## teardown, the same mechanism examples/hvc_smoke_rpi5 proved).
 examples/el0_elf_load/el0_elf_load_rpi5.o: examples/el0_elf_load/el0_elf_load_rpi5.tkb \
-    examples/vm_page_map/vm_page_map_core_rpi5.tkb $(COMMON_RPI5_TLB_ASM_EXTERN) $(COMMON_RPI5_EL0_ASM_EXTERN) $(COMMON_RPI5_EL1_ASM_EXTERN) $(COMMON_RPI5_EL0_TEST_IMAGE_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
+    examples/vm_page_map/vm_page_map_core_rpi5.tkb $(COMMON_RPI5_TLB_ASM_EXTERN) $(COMMON_RPI5_EL0_ASM_EXTERN) $(COMMON_RPI5_EL1_ASM_EXTERN) $(COMMON_RPI5_HVC_ASM_EXTERN) $(COMMON_RPI5_EL0_TEST_IMAGE_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
 
 examples/el0_elf_load/kernel_rpi5.elf: \
-    $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_EL1_ASM_O) $(COMMON_RPI5_EL0_ASM_O) $(COMMON_RPI5_EL0_TEST_IMAGE_O) examples/el0_elf_load/el0_elf_load_rpi5.o $(COMMON_RPI5_LINK_LD)
-	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_EL1_ASM_O) $(COMMON_RPI5_EL0_ASM_O) $(COMMON_RPI5_EL0_TEST_IMAGE_O) examples/el0_elf_load/el0_elf_load_rpi5.o -o $@
+    $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_EL1_ASM_O) $(COMMON_RPI5_EL0_ASM_O) $(COMMON_RPI5_HVC_ASM_O) $(COMMON_RPI5_EL0_TEST_IMAGE_O) examples/el0_elf_load/el0_elf_load_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_EL1_ASM_O) $(COMMON_RPI5_EL0_ASM_O) $(COMMON_RPI5_HVC_ASM_O) $(COMMON_RPI5_EL0_TEST_IMAGE_O) examples/el0_elf_load/el0_elf_load_rpi5.o -o $@
 
 RPI5_EL1_SMOKE_EXAMPLES := el1_smoke
 RPI5_HVC_SMOKE_EXAMPLES := hvc_smoke
