@@ -1,0 +1,5 @@
+// Private point-to-point Ethernet link used by the RPi5 hardware lane.
+// The host owns 192.168.20.1/24 and this target owns 192.168.20.2.
+let OUR_MAC: [u8; 6] = {0x02, 0x00, 0x20, 0x00, 0x00, 0x02};
+let OUR_IP: [u8; 4] = {192, 168, 20, 2};
+let HTTP_SERVER_IP: [u8; 4] = OUR_IP;

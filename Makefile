@@ -215,7 +215,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemubuild qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-stm32-net-l2 hwcheck-rpi3 hwcheck-rpi3-net hwcheck-rpi3-net-l2 hwcheck-rpi5 stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck allcheck-build clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos rpi3-http-server profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
+.PHONY: build test qemubuild qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-stm32-net-l2 hwcheck-rpi3 hwcheck-rpi3-net hwcheck-rpi3-net-l2 hwcheck-rpi5 hwcheck-rpi5-net-l2 stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck allcheck-build clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos rpi3-http-server profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
 
 .DEFAULT_GOAL := build
 
@@ -2102,6 +2102,8 @@ COMMON_RPI5_LINK_LD      := $(COMMON_RPI5_DIR)/link.ld
 COMMON_RPI5_UART         := $(COMMON_RPI5_DIR)/uart.tkb
 COMMON_RPI5_PRINT        := $(COMMON_RPI5_DIR)/print.tkb
 COMMON_RPI5_PCIE         := $(COMMON_RPI5_DIR)/pcie.tkb
+COMMON_RPI5_ETH          := $(COMMON_RPI5_DIR)/eth.tkb
+COMMON_RPI5_NETCONFIG    := $(COMMON_RPI5_DIR)/netconfig.tkb
 COMMON_RPI5_INTC         := $(COMMON_RPI5_DIR)/intc.tkb
 COMMON_RPI5_RTC          := $(COMMON_RPI5_DIR)/rtc.tkb
 COMMON_RPI5_TIMER        := $(COMMON_RPI5_DIR)/timer.tkb
@@ -2208,6 +2210,19 @@ RPI5_TAKIBI_FLAGS := --forbid-trap
 
 $(RPI5_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+# RP1 Ethernet is a new hardware path. Keep its initial L2 milestone outside
+# RPI5_EXAMPLES and outside --forbid-trap until the real PHY/MAC/DMA path is
+# proven; the follow-up hardening commit will enable the normal flag.
+RPI5_NET_L2_EXAMPLES := net_echo arp_reply icmp_echo
+RPI5_NET_L2_OBJS := $(foreach e,$(RPI5_NET_L2_EXAMPLES),examples/$(e)/$(e)_rpi5.o)
+RPI5_NET_L2_KERNELS := $(foreach e,$(RPI5_NET_L2_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
+
+$(RPI5_NET_L2_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_ETH) $(COMMON_RPI5_NETCONFIG) $(COMMON_NETUTIL) $(COMMON_INET_CKSUM) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_ETH) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) -o $@
+
+$(RPI5_NET_L2_KERNELS): examples/%/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/%/$$*_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/$*/$*_rpi5.o -o $@
 
 examples/basic_suite/basic_suite_rpi5.o: $(BASIC_SUITE_SOURCES)
 examples/type_system_suite/type_system_suite_rpi5.o: $(TYPE_SYSTEM_SUITE_SOURCES)
@@ -2555,6 +2570,9 @@ RPI5_SERIAL_DEV ?=
 ## sacrificial test drive, matching hwcheck-rpi3's storage-test contract.
 hwcheck-rpi5: $(RPI5_KERNELS)
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_hwtest_rpi5.sh
+
+hwcheck-rpi5-net-l2: $(RPI5_NET_L2_KERNELS)
+	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_hwtest_rpi5_net.sh --l2-only
 
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts and linker outputs
