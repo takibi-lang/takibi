@@ -1,5 +1,21 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
+## Status update (2026-07-27): two-core SMP handoff works via an EL3-to-EL2 debug trampoline
+
+BCM2712 secondary cores remain in TF-A's EL3H park loop, and this board's
+PSCI CPU_ON returns ALREADY_ON for them, so the RPi3 loader's EL2-to-EL2 PC
+redirect cannot be reused. `smp_el3_trampoline.S` is linked only into SMP
+kernels; the opt-in `RPI5_SMP_CORES=2` loader redirects core 1 there, sets
+SCR_EL3 for non-secure AArch64 EL2, installs SPSR_EL3/ELR_EL3, and erets to
+`rpi5_secondary_start`.
+
+The transition was proven directly before running an application: core 1
+halted afterward at EL2H with CurrentEL=0x8 and MPIDR_EL1=0x81000100. The
+full `smp_handoff` then passed on hardware: core 0 transferred its linear
+BufferOwner, core 1 incremented all 64 cache-line-aligned bytes, and core 0
+printed `handoff: ok`. `mmu_init_secondary` installs core 0's shared tables
+with caches enabled. Ordinary loads remain single-core by default.
+
 ## Status update (2026-07-27, latest): WRITE(10) fixed -- an incomplete,
 ## unnecessary BOT reset poisoned the device transport
 

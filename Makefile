@@ -2083,6 +2083,10 @@ COMMON_RPI5_TLB_ASM_EXTERN := $(COMMON_RPI5_DIR)/tlb_asm_extern.tkb
 COMMON_RPI5_DMA_ASM_S    := $(COMMON_RPI5_DIR)/dma_asm.S
 COMMON_RPI5_DMA_ASM_O    := $(COMMON_RPI5_DIR)/dma_asm.o
 COMMON_RPI5_DMA_ASM_EXTERN := $(COMMON_RPI5_DIR)/dma_asm_extern.tkb
+COMMON_RPI5_SMP_S          := $(COMMON_RPI5_DIR)/smp.S
+COMMON_RPI5_SMP_O          := $(COMMON_RPI5_DIR)/smp.o
+COMMON_RPI5_SMP_EL3_S      := $(COMMON_RPI5_DIR)/smp_el3_trampoline.S
+COMMON_RPI5_SMP_EL3_O      := $(COMMON_RPI5_DIR)/smp_el3_trampoline.o
 COMMON_RPI5_EL0_ASM_S    := $(COMMON_RPI5_DIR)/el0_asm.S
 COMMON_RPI5_EL0_ASM_O    := $(COMMON_RPI5_DIR)/el0_asm.o
 COMMON_RPI5_EL0_ASM_EXTERN := $(COMMON_RPI5_DIR)/el0_asm_extern.tkb
@@ -2124,6 +2128,12 @@ $(COMMON_RPI5_TLB_ASM_O): $(COMMON_RPI5_TLB_ASM_S)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI5_DMA_ASM_O): $(COMMON_RPI5_DMA_ASM_S)
+	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
+
+$(COMMON_RPI5_SMP_O): $(COMMON_RPI5_SMP_S)
+	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
+
+$(COMMON_RPI5_SMP_EL3_O): $(COMMON_RPI5_SMP_EL3_S)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI5_EL0_ASM_O): $(COMMON_RPI5_EL0_ASM_S)
@@ -2464,6 +2474,12 @@ examples/usb_msc_probe/usb_msc_probe_rpi5.o: examples/usb_msc_probe/usb_msc_prob
 
 examples/usb_msc_probe/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/usb_msc_probe/usb_msc_probe_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/usb_msc_probe/usb_msc_probe_rpi5.o -o $@
+
+examples/smp_handoff/smp_handoff_rpi5.o: examples/smp_handoff/smp_handoff.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_SYNC) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+examples/smp_handoff/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_SMP_O) $(COMMON_RPI5_SMP_EL3_O) $(COMMON_SEM_ASM_O) examples/smp_handoff/smp_handoff_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_SMP_O) $(COMMON_RPI5_SMP_EL3_O) $(COMMON_SEM_ASM_O) examples/smp_handoff/smp_handoff_rpi5.o -o $@
 
 ## RPI5_SERIAL_DEV: same convention as STM32_SERIAL_DEV/RPI3_SERIAL_DEV --
 ## empty by default, resolved at runtime by scripts/rpi5_uart_dev.sh (which

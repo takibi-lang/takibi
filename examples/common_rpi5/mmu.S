@@ -231,6 +231,31 @@ mmu_init:
 
     ret
 
+/* Install core 0's already-built tables on an EL2 secondary. */
+    .global mmu_init_secondary
+mmu_init_secondary:
+    movz    x0, #0xff00
+    msr     mair_el2, x0
+    movz    x0, #0x351b
+    movk    x0, #0x8082, lsl #16
+    msr     tcr_el2, x0
+    adrp    x0, l1_table
+    add     x0, x0, :lo12:l1_table
+    msr     ttbr0_el2, x0
+    isb
+    dsb     sy
+    tlbi    alle2
+    dsb     sy
+    isb
+    mrs     x0, sctlr_el2
+    bic     x0, x0, #(1 << 1)
+    orr     x0, x0, #(1 << 2)
+    orr     x0, x0, #(1 << 12)
+    orr     x0, x0, #1
+    msr     sctlr_el2, x0
+    isb
+    ret
+
 /* -- Dynamic mapping window accessor (examples/vm_page_map, issue #67 Stage 2,
    ported from examples/common_rpi3/mmu.S's own l3_dynamic_write) --
    l3_dynamic_table lives in this file's own .bss (see the header comment's

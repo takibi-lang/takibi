@@ -79,6 +79,19 @@ fi
 
 entry_pc="0x$(llvm-readelf-19 -h "$ELF" | awk '/Entry point address/{sub(/^0x/,"",$NF); print $NF}')"
 stack_top="0x$(llvm-nm-19 "$ELF" | awk '$3=="stack_top"{print $1}')"
+SMP_CORES="${RPI5_SMP_CORES:-0}"
+if [ "$SMP_CORES" != "0" ] && [ "$SMP_CORES" != "2" ]; then
+    echo "error: RPI5_SMP_CORES must be 0 or 2" >&2
+    exit 1
+fi
+smp_trampoline=""
+if [ "$SMP_CORES" = "2" ]; then
+    smp_trampoline="0x$(llvm-nm-19 "$ELF" | awk '$3=="rpi5_el3_secondary_trampoline"{print $1}')"
+    if [ -z "${smp_trampoline#0x}" ]; then
+        echo "error: two-core load requested but rpi5_el3_secondary_trampoline is absent" >&2
+        exit 1
+    fi
+fi
 
 if [ -z "${entry_pc#0x}" ] || [ -z "${stack_top#0x}" ]; then
     echo "error: could not read entry point / stack_top from $ELF" >&2
@@ -159,20 +172,33 @@ echo "halted core is at EL2H with PC=$halted_pc (< 0x$RPI5_SAFE_PC_MAX_HEX, MMU 
 # itself uses cpu0. The other core reaches the same RAM without that stale
 # cpu0 debug state; execution still starts exclusively on cpu0.
 LOG=$(mktemp)
-if ! openocd "${OPENOCD_ARGS[@]}" \
-    -c 'init' \
-    -c 'targets bcm2712.cpu0' \
-    -c 'halt' \
-    -c 'targets bcm2712.cpu3' \
-    -c 'halt' \
-    -c "load_image $ELF 0 elf" \
-    -c 'targets bcm2712.cpu0' \
-    -c "reg sp $stack_top" \
-    -c "reg pc $entry_pc" \
-    -c 'resume' \
-    -c 'targets bcm2712.cpu3' \
-    -c 'resume' \
-    -c 'shutdown' > "$LOG" 2>&1
+LOAD_COMMANDS=(
+    -c 'init'
+    -c 'targets bcm2712.cpu0'
+    -c 'halt'
+    -c 'targets bcm2712.cpu3'
+    -c 'halt'
+    -c "load_image $ELF 0 elf"
+    -c 'targets bcm2712.cpu0'
+    -c "reg sp $stack_top"
+    -c "reg pc $entry_pc"
+    -c 'resume'
+)
+if [ "$SMP_CORES" = "2" ]; then
+    LOAD_COMMANDS+=(
+        -c 'sleep 200'
+        -c 'targets bcm2712.cpu1'
+        -c 'halt'
+        -c "reg pc $smp_trampoline"
+        -c 'resume'
+    )
+fi
+LOAD_COMMANDS+=(
+    -c 'targets bcm2712.cpu3'
+    -c 'resume'
+    -c 'shutdown'
+)
+if ! openocd "${OPENOCD_ARGS[@]}" "${LOAD_COMMANDS[@]}" > "$LOG" 2>&1
 then
     echo "error: openocd failed during injection -- log follows" >&2
     cat "$LOG" >&2
