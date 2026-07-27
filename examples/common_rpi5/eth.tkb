@@ -112,7 +112,8 @@ fn gem_configure_link() {
     // BCM54xx Auxiliary Status Summary, bits 10:8: negotiated HCD.
     let aux: u32 = gem_mdio_read(0x19);
     let mode: u32 = (aux >> 8) & 7;
-    let mut ncfgr: u32 = (3 << 18) | (1 << 21) | (1 << 17); // MDC /64, 64-bit DBW, strip FCS
+    // RP1 GEM DCFG1 reports DBWDEF=4, which maps to the 128-bit DBW setting.
+    let mut ncfgr: u32 = (3 << 18) | (2 << 21) | (1 << 17); // MDC /64, DBW128, strip FCS
     if (mode == 2 || mode == 5 || mode == 7) { ncfgr = ncfgr | (1 << 1); }
     if (mode == 3 || mode == 5) { ncfgr = ncfgr | 1; }
     if (mode == 6 || mode == 7) { ncfgr = ncfgr | (1 << 10); }
@@ -140,7 +141,7 @@ fn net_init() -> NetInitResult {
     gem_write(0x00, 1 << 4);
     gem_write(0x0620, 0xFFFFFFFF);
     gem_write(0x0C, 1); // RGMII
-    gem_write(0x04, (3 << 18) | (1 << 21));
+    gem_write(0x04, (3 << 18) | (2 << 21));
     gem_phy_reset();
     let phy_id1: u32 = gem_mdio_read(2);
     let phy_id2: u32 = gem_mdio_read(3);
@@ -170,8 +171,7 @@ fn net_init() -> NetInitResult {
     gem_tx_desc[1] = (1 << 31) | (1 << 30); // USED | WRAP
     gem_tx_desc[2] = 0;
     gem_tx_desc[3] = 0;
-    rpi5_dcache_clean_range(rx_base, RX_BUF_SIZE);
-    rpi5_dcache_invalidate_only_range(rx_base, RX_BUF_SIZE);
+    dma_prepare_rx(gem_rx_buf as *align(64) u8, RX_BUF_SIZE);
     rpi5_dcache_clean_range(rxd_base, 64);
     rpi5_dcache_clean_range(txd_base, 64);
 
@@ -181,6 +181,7 @@ fn net_init() -> NetInitResult {
     gem_write(0x04C8, (txd_dma >> 32) as u32);
     // 64-bit addressing, 2048-byte RX buffers, full packet SRAMs.
     gem_write(0x10, (1 << 30) | (32 << 16) | (3 << 8) | (1 << 10) | 16);
+    gem_write(0x44, 0); // disable RX partial store-and-forward/cut-through
     gem_write(0x54, 0x10808); // RP1 DT: 8-deep AR/AW pipelines, AW-to-B fill
     gem_write(0x20, 0x0F);
     gem_write(0x14, 0xFFFFFFFF);
@@ -205,8 +206,7 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
         return NetRxAcquire::None(view NetRxCanAcquire);
     }
     let len: i32 = (gem_rx_desc[1] & 0x3FFF) as i32;
-    let rx_base: usize = (gem_rx_buf as *u8) as usize;
-    rpi5_dcache_invalidate_only_range(rx_base, RX_BUF_SIZE);
+    dma_finish_rx(gem_rx_buf as *align(64) u8, RX_BUF_SIZE);
     let slot: {0..<1 as usize} = 0;
     return NetRxAcquire::Acquired(net_rx_owned(slot, len));
 }
@@ -229,6 +229,7 @@ fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32) -> NetTxInFlight[desc
     let txd_base: usize = (gem_tx_desc as *u32) as usize;
     rpi5_dcache_clean_range(rx_base, safe_len as usize);
     gem_tx_desc[2] = (rx_dma >> 32) as u32;
+    gem_tx_desc[3] = 0;
     gem_tx_desc[0] = rx_dma as u32;
     gem_tx_desc[1] = (safe_len as u32) | (1 << 15) | (1 << 30);
     rpi5_dcache_clean_range(txd_base, 64);
@@ -240,10 +241,9 @@ fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32) -> NetTxInFlight[desc
 
 fn net_tx_complete(in_flight: sink NetTxInFlight[desc]) -> NetRxCanAcquire !{may_block} {
     let txd_base: usize = (gem_tx_desc as *u32) as usize;
-    let mut completed: bool = false;
     for i: i32 in 0..<1000000 {
         rpi5_dcache_invalidate_range(txd_base, 64);
-        if ((gem_tx_desc[1] & (1 << 31)) != 0) { completed = true; break; }
+        if ((gem_tx_desc[1] & (1 << 31)) != 0) { break; }
     }
     gem_rearm_rx();
     return view NetRxCanAcquire;

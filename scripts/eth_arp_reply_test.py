@@ -49,6 +49,7 @@ BROADCAST_MAC = bytes([0xff] * 6)
 RETRIES = 20
 RETRY_TIMEOUT_SECS = 0.5
 SILENCE_TIMEOUT_SECS = 1.0
+RX_DRAIN_QUIET_SECS = 0.05
 
 
 def read_iface_mac(iface: str) -> bytes:
@@ -112,10 +113,24 @@ def test_who_has_us(sock: socket.socket, requester_mac: bytes) -> bool:
     return False
 
 
+def drain_received_frames(sock: socket.socket) -> None:
+    # A reply to the final retry can already be queued when the positive test
+    # accepts an earlier copy.  Start a silence assertion from an empty queue
+    # so it only judges traffic caused by the request under test.
+    sock.settimeout(RX_DRAIN_QUIET_SECS)
+    while True:
+        try:
+            sock.recv(2000)
+        except socket.timeout:
+            break
+    sock.settimeout(RETRY_TIMEOUT_SECS)
+
+
 def test_who_has_other_stays_silent(sock: socket.socket, requester_mac: bytes) -> bool:
     # arp_reply_stm32 must not answer for an IP it doesn't own. There is no
     # "definitely never arrives" proof possible, so this just waits a bit
     # longer than a real reply would take and checks nothing showed up.
+    drain_received_frames(sock)
     frame = build_arp_request(requester_mac, OTHER_IP)
     sock.send(frame)
     deadline = time.monotonic() + SILENCE_TIMEOUT_SECS

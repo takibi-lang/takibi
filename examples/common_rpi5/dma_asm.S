@@ -74,19 +74,3 @@ rpi5_dcache_invalidate_range:
     b.lo    .Lrpi5_dcache_invalidate_loop
     dsb     sy
     ret
-
-/* void rpi5_dcache_invalidate_only_range(usize va, usize len)
-   -- invalidate clean, CPU-read-only DMA receive buffers without writing a
-   stale clean cache line back over the device's newly-written bytes. */
-    .global rpi5_dcache_invalidate_only_range
-    .type   rpi5_dcache_invalidate_only_range, %function
-rpi5_dcache_invalidate_only_range:
-    add     x1, x0, x1
-    bic     x2, x0, #63
-.Lrpi5_dcache_invalidate_only_loop:
-    dc      ivac, x2
-    add     x2, x2, #64
-    cmp     x2, x1
-    b.lo    .Lrpi5_dcache_invalidate_only_loop
-    dsb     sy
-    ret

@@ -41,6 +41,7 @@ OTHER_IP = bytes(_subnet_octets + [200])   # some IP icmp_echo does NOT own
 RETRIES = 20
 RETRY_TIMEOUT_SECS = 0.5
 SILENCE_TIMEOUT_SECS = 1.0
+RX_DRAIN_QUIET_SECS = 0.05
 
 
 def read_iface_mac(iface: str) -> bytes:
@@ -117,7 +118,20 @@ def test_ping_us(sock: socket.socket, requester_mac: bytes) -> bool:
     return False
 
 
+def drain_received_frames(sock: socket.socket) -> None:
+    # Do not let a duplicate response from a successful retry become the
+    # observed packet in the following, independent silence assertion.
+    sock.settimeout(RX_DRAIN_QUIET_SECS)
+    while True:
+        try:
+            sock.recv(2000)
+        except socket.timeout:
+            break
+    sock.settimeout(RETRY_TIMEOUT_SECS)
+
+
 def test_ping_other_stays_silent(sock: socket.socket, requester_mac: bytes) -> bool:
+    drain_received_frames(sock)
     frame = build_echo_request(requester_mac, OTHER_IP, b"nobody-home", 0x5678, 2)
     sock.send(frame)
     deadline = time.monotonic() + SILENCE_TIMEOUT_SECS
@@ -134,6 +148,7 @@ def test_ping_other_stays_silent(sock: socket.socket, requester_mac: bytes) -> b
 
 
 def test_corrupted_checksum_dropped(sock: socket.socket, requester_mac: bytes) -> bool:
+    drain_received_frames(sock)
     frame = build_echo_request(requester_mac, TARGET_IP, b"bad-checksum", 0x9abc, 3,
                                 corrupt_icmp_checksum=True)
     sock.send(frame)

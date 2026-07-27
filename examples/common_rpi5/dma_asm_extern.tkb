@@ -5,4 +5,3 @@
 
 extern fn rpi5_dcache_clean_range(va: usize, len: usize);
 extern fn rpi5_dcache_invalidate_range(va: usize, len: usize);
-extern fn rpi5_dcache_invalidate_only_range(va: usize, len: usize);
