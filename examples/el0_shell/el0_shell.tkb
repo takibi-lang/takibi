@@ -2171,8 +2171,8 @@ fn app_main() {
         // with the image's own real byte length instead) for execve()
         // to find via issue #157's own VFS bridge -- the small,
         // controlled el0_shell_child_test.elf (see its own and
-        // el0_shell_child_test_image.S's own comments), not yet a real
-        // $PATH-searched external command.
+        // el0_shell_child_test_image.S's own comments), which ash later
+        // finds through PATH=/ and executes as the external command `prog`.
         let prog_name: *u8 = "PROG       ";
         let prog_addr: usize = el0_shell_child_test_image_addr();
         let prog_len: usize = el0_shell_child_test_image_len();
