@@ -257,7 +257,7 @@ make hwcheck-rpi3-net     # RPi3 real-Ethernet hardware tests (needs the board's
 make hwcheck-rpi5   # opt-in RPi5 SWD + RP1-UART suite for all non-Ethernet RPi3 ports; reformats the attached USB drive (not in allcheck)
 make hwcheck-rpi5-net     # RPi5 real-Ethernet tests, including USB-backed HTTP/KVS persistence; reformats the attached USB drive
 make perfcheck      # real-hardware profiler smoke tests (not in allcheck -- shares phy_init's occasional link-negotiation flakiness with hwcheck-stm32-net, but adds no functional coverage beyond it)
-make allcheck       # clean/build, then QEMU + STM32 + RPi3 lanes in parallel
+make allcheck       # clean/build, then QEMU + STM32 + RPi5 lanes in parallel
 make clean          # remove generated artifacts
 ```
 

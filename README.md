@@ -452,7 +452,7 @@ make hwcheck-rpi5           # opt-in RPi5 SWD/RP1-UART tests for every non-Ether
 make hwcheck-rpi5-net       # opt-in RPi5 Ethernet + USB-backed HTTP/KVS hardware tests
 make stress-stm32-kvs-server-sdcard-rtos  # opt-in STM32 KVS concurrency stress test
 make perfcheck        # real-hardware profiler smoke tests
-make allcheck         # clean + build once, then run the QEMU, STM32, and RPi3 lanes in parallel
+make allcheck         # clean + build once, then run the QEMU, STM32, and RPi5 lanes in parallel
 ```
 
 Builds run in parallel across all cores by default. `hwcheck-rpi5` and

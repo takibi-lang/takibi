@@ -368,24 +368,14 @@ examples/inline_check/inline_check.o: examples/inline_check/inline_check.tkb $(T
 optimizercheck: examples/inline_check/inline_check.o
 	@bash scripts/run_qemutest.sh --host-only inline_check
 
-## allcheck-build: build every artifact needed by allcheck's three runtime
-## lanes in one Make graph. Keeping this separate prevents concurrent recursive
-## makes from racing over dune's workspace lock or the same generated object.
-allcheck-build: qemubuild stm32build \
-	examples/http_server/kernel_stm32.bin \
-	examples/http_server_sdcard/kernel_stm32.bin \
-	examples/http_server_sdcard_install/kernel_stm32_ram.elf \
-	examples/common_rpi3/jtag_stub.img
-
-## allcheck: clean and build once, then run QEMU, STM32, and RPi3 lanes in
+## allcheck: clean and build once, then run QEMU, STM32, and RPi5 lanes in
 ## parallel. Each physical board remains serial within its own lane. The
-## orchestrator emits prefixed PASS/FAIL progress live, preserves raw per-lane
-## logs, and prints an unmodified lane log on failure so expected/actual diffs
-## remain readable.
+## allcheck-build prerequisite is defined with the target-specific RPi5
+## variables below, after those variables have been expanded.
 allcheck:
 	$(MAKE) clean
 	$(MAKE) allcheck-build
-	+@ALLCHECK_MAKE="$(MAKE)" STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/run_allcheck.sh
+	+@ALLCHECK_MAKE="$(MAKE)" STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_allcheck.sh
 
 # -- Shared assembly objects ---------------------------------------------------
 $(COMMON_STARTUP_O): $(COMMON_STARTUP_S)
@@ -2033,12 +2023,6 @@ examples/smp_handoff/kernel_rpi3.elf: $(COMMON_RPI3_STARTUP_O) \
 ## first run -- board-state-dependent hardware preconditions like this are
 ## why hwcheck-stm32 itself, and stress-stm32-kvs-server-sdcard-rtos, also
 ## stay out of check/allcheck.
-# This declaration is intentionally down here, after RPI3_KERNELS is defined:
-# ordinary Make prerequisites are expanded while parsing, so placing it beside
-# allcheck-build's earlier cross-target prerequisites would silently expand the
-# not-yet-defined variable to an empty list after a clean.
-allcheck-build: $(RPI3_KERNELS) examples/smp_handoff/kernel_rpi3.elf
-
 hwcheck-rpi3: $(RPI3_KERNELS) examples/smp_handoff/kernel_rpi3.elf examples/common_rpi3/jtag_stub.img
 	@bash scripts/run_hwtest_rpi3.sh
 
@@ -2601,6 +2585,17 @@ hwcheck-rpi5-net-l2: $(RPI5_NET_L2_KERNELS)
 
 hwcheck-rpi5-net: $(RPI5_NET_KERNELS) $(RPI5_NET_STORAGE_KERNELS)
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_hwtest_rpi5_net.sh
+
+## allcheck-build: build every artifact needed by allcheck's QEMU, STM32,
+## and RPi5 runtime lanes in one Make graph. Keeping this separate prevents
+## concurrent recursive makes from racing over dune's workspace lock or the
+## same generated object.
+allcheck-build: qemubuild stm32build \
+	examples/http_server/kernel_stm32.bin \
+	examples/http_server_sdcard/kernel_stm32.bin \
+	examples/http_server_sdcard_install/kernel_stm32_ram.elf \
+	$(RPI5_KERNELS) $(RPI5_NET_KERNELS) $(RPI5_NET_STORAGE_KERNELS) \
+	examples/common_rpi5/jtag_stub.img
 
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts and linker outputs
