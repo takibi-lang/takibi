@@ -927,15 +927,6 @@ variant FatOpenFdResult {
     Error(usize);
 }
 
-// Kept out of FatOpenResult::Opened's existential-binding arm for the
-// nested-match codegen workaround tracked by GitHub issue #168.
-fn fat_open_fd_result_value(r: FatOpenFdResult) -> usize {
-    match r {
-        FatOpenFdResult::Fd(fd) => { return fd; }
-        FatOpenFdResult::Error(err) => { return err; }
-    }
-}
-
 fn fat_io_result_ok(r: FatIoResult) -> bool {
     match r {
         FatIoResult::Ok => { return true; }
@@ -1656,8 +1647,10 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
                     return (elr, ERR_ENOENT);
                 }
                 FatOpenResult::Opened(file) => {
-                    let store_result: FatOpenFdResult = fat_fd_store(0, file);
-                    return (elr, fat_open_fd_result_value(store_result));
+                    match fat_fd_store(0, file) {
+                        FatOpenFdResult::Fd(fd) => { return (elr, fd); }
+                        FatOpenFdResult::Error(err) => { return (elr, err); }
+                    }
                 }
             }
         }

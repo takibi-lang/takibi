@@ -4043,10 +4043,19 @@ let gen_func ?prog_types fdef =
 
     | Match (disc, arms) ->
         let (disc_ty, disc_v) = gen_expr locals disc in
+        let arm_variant_name = List.find_map (function
+          | ArmVariant (name, _, _, _) when Hashtbl.mem variant_defs name ->
+              Some name
+          | _ -> None
+        ) arms in
         let variant_name = match disc_ty with
           | TypeVariant name -> Some name
           | TypeNamed name when Hashtbl.mem variant_defs name -> Some name
-          | _ -> None
+          (* An existential binder can make the codegen-local expression type
+             less precise than the already-checked match arms.  Recover the
+             closed variant from those arms instead of misclassifying it as a
+             numeric enum and looking it up in enum_variants_tbl. *)
+          | _ -> arm_variant_name
         in
         let switch_v = match variant_name with
           | Some _ -> build_extractvalue disc_v 0 "variant.tag" builder
@@ -4100,7 +4109,12 @@ let gen_func ?prog_types fdef =
                     "BUG: match arm variant '%s' does not match '%s'"
                     ename actual))
                 | None ->
-                    let variants = Hashtbl.find enum_variants_tbl ename in
+                    let variants = match Hashtbl.find_opt enum_variants_tbl ename with
+                      | Some variants -> variants
+                      | None -> raise (Error (Printf.sprintf
+                          "BUG: match arm type '%s' is neither a registered closed variant nor a numeric enum"
+                          ename))
+                    in
                     List.assoc vname variants
               in
               add_case sw (const_int switch_ll_ty value) bb

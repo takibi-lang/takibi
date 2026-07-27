@@ -6228,6 +6228,33 @@ let codegen_tests = [
        }");
 
   Alcotest.test_case
+    "nested distinct-variant match after existential binding codegens" `Quick
+    (expect_codegen_ok
+      "linear struct CgNestedOwner[n: usize] { value: usize @ n; }
+       variant CgNestedOuter {
+         None;
+         Some(exists n: usize. CgNestedOwner[n]);
+       }
+       variant CgNestedInner { Value(usize); Error(usize); }
+       fn cg_nested_drop(owner: sink CgNestedOwner[n]) {}
+       fn cg_nested_store(owner: sink CgNestedOwner[n]) -> CgNestedInner {
+         let value: usize = owner.value;
+         cg_nested_drop(owner);
+         return CgNestedInner::Value(value);
+       }
+       fn cg_nested_match(value: CgNestedOuter) -> usize {
+         match value {
+           CgNestedOuter::None => { return 0; }
+           CgNestedOuter::Some(owner) => {
+             match cg_nested_store(owner) {
+               CgNestedInner::Value(v) => { return v; }
+               CgNestedInner::Error(e) => { return e; }
+             }
+           }
+         }
+       }");
+
+  Alcotest.test_case
     "authority pointer ABI erases the guard tie and returns a plain pointer" `Quick
     (fun () ->
       let src =

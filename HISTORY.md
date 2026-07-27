@@ -40,6 +40,19 @@ LLVM verification.  The `el0_shell` read/write/close bodies are again inline
 in their syscall arms, removing the top-level extraction used to avoid the
 old failure.
 
+### 2026-07-27: Nested Variant Match After Existential Bind (GitHub Issue #168)
+
+Match lowering no longer assumes that any discriminant whose codegen-local
+AST type is not already `TypeVariant`/a registered named variant must be a
+numeric enum.  After an existential payload bind it can recover the closed
+variant identity from the type-checked variant arms; genuinely unknown arm
+types now produce a normal `Llvm_gen.Error` instead of an uncaught
+`Hashtbl.Not_found`.  A regression opens an existential indexed owner and
+directly matches a distinct variant returned by the consuming call.  The
+`el0_shell` helper used only to keep that inner match top-level is removed,
+and the `FatOpenFdResult` match is again directly inside
+`FatOpenResult::Opened`.
+
 ### 2026-07-27: RPi5 USB WRITE(10) Fixed -- Remove the Incomplete Initialization-Time BOT Reset
 
 The WRITE(10) data phase completed with xHCI Success/residue zero, but the
