@@ -71,6 +71,12 @@ OPENOCD_ARGS=(
 # writing through cpu3 instead -- this script needed the identical fix,
 # just never got it when first written, since it does its own separate
 # `mww` writes rather than reusing rpi5_jtag_load.sh's load_image path.
+# Force cpu0's debug-restored PSTATE to masked EL2H before executing the
+# trampoline. Payloads such as el0_shell deliberately finish at EL1; simply
+# replacing their PC with an SMC instruction would issue that SMC from EL1
+# and did not reliably reach the resident TF-A reset service on this board.
+# The injected address is identity-mapped by every Takibi EL2 table, so this
+# is valid whether the interrupted payload had its EL2 MMU enabled or not.
 RESET_ADDR=0x00100000
 PSCI_SYSTEM_RESET=0x84000009
 
@@ -82,6 +88,7 @@ openocd "${OPENOCD_ARGS[@]}" \
     -c "mww $((RESET_ADDR + 4)) 0x14000000" \
     -c 'targets bcm2712.cpu0' \
     -c 'halt' \
+    -c 'reg cpsr 0x3c9' \
     -c "reg x0 $PSCI_SYSTEM_RESET" \
     -c "reg pc $RESET_ADDR" \
     -c 'resume' \

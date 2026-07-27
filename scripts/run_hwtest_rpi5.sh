@@ -12,6 +12,8 @@
 # needs: injection is over SWD directly into RAM, not by rewriting the SD
 # card's kernel_2712.img, so PSCI reset's own "does not reliably reload a
 # CHANGED file" limitation (GitHub issue #162) never applies to this loop.
+# WARNING: the USB MSC/FAT12/shell cases deliberately reformat the attached
+# USB mass-storage device. Use only the project's sacrificial test drive.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -242,7 +244,8 @@ run_hw_test_rpi5_suite() {
     rm -f "$tmp_drain" "$tmp_out" "$load_log" "$load_status_file" "$report"
 }
 
-# run_hw_test_rpi5_stdin NAME ELF EXPECTED STDIN_FILE
+# run_hw_test_rpi5_stdin NAME ELF EXPECTED STDIN_FILE [MAX_SECS]
+#                           [STABLE_POLLS] [LINE_PACE_SECS]
 #
 # Bidirectional GPIO14/15 UART test for issue #164. Start capture before SWD
 # injection, wait until the kernel's ready banner is visible, then send the
@@ -250,7 +253,10 @@ run_hw_test_rpi5_suite() {
 # made progress only after asynchronous input; echo/irq contain no polling
 # receive path.
 run_hw_test_rpi5_stdin() {
-    local name="$1" elf="$2" expected="$3" stdin_file="$4"
+    local name="$1" elf="$2" expected="$3" stdin_file="$4" \
+          max_secs="${5:-$CAPTURE_MAX_SECS}" \
+          stable_polls="${6:-$CAPTURE_STABLE_POLLS}" \
+          line_pace_secs="${7:-0}"
     local tmp_drain tmp_out load_log load_status size
     tmp_drain=$(mktemp)
     tmp_out=$(mktemp)
@@ -272,23 +278,30 @@ run_hw_test_rpi5_stdin() {
 
     if [ "$load_status" = "0" ]; then
         local max_wait_polls waited=0
-        max_wait_polls=$(awk -v m="$CAPTURE_MAX_SECS" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
+        max_wait_polls=$(awk -v m="$max_secs" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
         while [ "$waited" -lt "$max_wait_polls" ]; do
             sleep "$POLL_INTERVAL"
             size=$(stat -c%s "$tmp_out" 2>/dev/null || echo 0)
             [ "$size" -gt 0 ] && break
             waited=$((waited + 1))
         done
-        cat "$stdin_file" > "$SERIAL_DEV"
+        if [ "$line_pace_secs" = "0" ]; then
+            cat "$stdin_file" > "$SERIAL_DEV"
+        else
+            while IFS= read -r line || [ -n "$line" ]; do
+                printf '%s\n' "$line" > "$SERIAL_DEV"
+                sleep "$line_pace_secs"
+            done < "$stdin_file"
+        fi
 
         local max_polls last_size=-1 stable=0 poll=0
-        max_polls=$(awk -v m="$CAPTURE_MAX_SECS" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
+        max_polls=$(awk -v m="$max_secs" -v i="$POLL_INTERVAL" 'BEGIN{printf "%d", m/i}')
         while [ "$poll" -lt "$max_polls" ]; do
             sleep "$POLL_INTERVAL"
             size=$(stat -c%s "$tmp_out" 2>/dev/null || echo 0)
             if [ "$size" = "$last_size" ]; then
                 stable=$((stable + 1))
-                [ "$stable" -ge "$CAPTURE_STABLE_POLLS" ] && break
+                [ "$stable" -ge "$stable_polls" ] && break
             else
                 stable=0
             fi
@@ -327,7 +340,8 @@ run_hw_test_rpi5_stdin() {
 
 # Mirrors RPI5_EXAMPLES in the Makefile -- see
 # examples/common_rpi5/AGENTS.md for what's still deliberately excluded
-# (USB/networking/EL0/EL1/SMP). type_system_suite/algorithm_suite are back
+# (Ethernet and opt-in destructive storage probes). type_system_suite/
+# algorithm_suite are back
 # (issue #165,
 # examples/common_rpi5/mmu.S) after real hardware testing confirmed both
 # pass with the stage-1 MMU enabled. rtc/timer are back (issue #170,
@@ -351,6 +365,12 @@ run_hw_test_rpi5 "klock_guard (rpi5)" "$REPO_ROOT/examples/klock_guard/kernel_rp
     "$REPO_ROOT/examples/klock_guard/klock_guard.expected"
 run_hw_test_rpi5 "percpu (rpi5)" "$REPO_ROOT/examples/percpu/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/percpu/percpu.expected"
+RPI5_SMP_CORES=2 run_hw_test_rpi5 "smp_handoff (rpi5)" "$REPO_ROOT/examples/smp_handoff/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/smp_handoff/smp_handoff.expected" 5 30
+RPI5_SMP_CORES=2 run_hw_test_rpi5 "smp_slab (rpi5)" "$REPO_ROOT/examples/smp_slab/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/smp_slab/smp_slab.expected" 5 30
+run_hw_test_rpi5 "page_pool (rpi5)" "$REPO_ROOT/examples/page_pool/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/page_pool/page_pool.expected"
 # MAX_SECS=5/STABLE_POLLS=30 override: rtc/timer wait up to a real
 # 1-second ARM Generic Timer tick between prints -- the default ~0.3s
 # idle-quiet threshold mistakes that in-test pause for completion and
@@ -364,6 +384,20 @@ run_hw_test_rpi5_stdin "echo (rpi5)" "$REPO_ROOT/examples/echo/kernel_rpi5.elf" 
     "$REPO_ROOT/examples/echo/echo.expected" "$REPO_ROOT/examples/echo/echo.stdin"
 run_hw_test_rpi5_stdin "irq (rpi5)" "$REPO_ROOT/examples/irq/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/irq/irq.expected" "$REPO_ROOT/examples/irq/irq.stdin"
+run_hw_test_rpi5 "preempt (rpi5)" "$REPO_ROOT/examples/preempt/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/preempt/preempt.expected"
+run_hw_test_rpi5 "semaphore (rpi5)" "$REPO_ROOT/examples/semaphore/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/semaphore/semaphore.expected"
+run_hw_test_rpi5 "condvar (rpi5)" "$REPO_ROOT/examples/condvar/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/condvar/condvar.expected"
+run_hw_test_rpi5 "msgqueue (rpi5)" "$REPO_ROOT/examples/msgqueue/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/msgqueue/msgqueue.expected"
+run_hw_test_rpi5 "watchdog (rpi5)" "$REPO_ROOT/examples/watchdog/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/watchdog/watchdog.expected"
+run_hw_test_rpi5 "rtos_demo (rpi5)" "$REPO_ROOT/examples/rtos_demo/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/rtos_demo/rtos_demo.expected"
+run_hw_test_rpi5 "chan_rendezvous (rpi5)" "$REPO_ROOT/examples/chan_rendezvous/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/chan_rendezvous/chan_rendezvous.expected"
 # el1_smoke (issue #163's own follow-up, EL2->EL1 drop): a separate
 # RPi5-specific source (examples/el1_smoke/el1_smoke_rpi5.tkb), but its
 # output is byte-for-byte identical to the RPi3 fixture, reused as-is.
@@ -384,6 +418,24 @@ run_hw_test_rpi5 "hvc_smoke (rpi5)" "$REPO_ROOT/examples/hvc_smoke/kernel_rpi5.e
 # byte-for-byte identical to the RPi3 fixture.
 run_hw_test_rpi5 "vm_page_map (rpi5)" "$REPO_ROOT/examples/vm_page_map/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/vm_page_map/vm_page_map.expected"
+run_hw_test_rpi5 "two_page_map (rpi5)" "$REPO_ROOT/examples/two_page_map/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/two_page_map/two_page_map.expected"
+run_hw_test_rpi5 "process_vm_smoke (rpi5)" "$REPO_ROOT/examples/process_vm_smoke/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/process_vm_smoke/process_vm_smoke.expected"
+run_hw_test_rpi5 "vm_context_switch (rpi5)" "$REPO_ROOT/examples/vm_context_switch/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/vm_context_switch/vm_context_switch.expected"
+run_hw_test_rpi5 "vm_task_switch (rpi5)" "$REPO_ROOT/examples/vm_task_switch/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/vm_task_switch/vm_task_switch.expected" 5 30
+RPI5_SMP_CORES=2 run_hw_test_rpi5 "smp_task_migrate (rpi5)" "$REPO_ROOT/examples/smp_task_migrate/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/smp_task_migrate/smp_task_migrate.expected" 5 30
+RPI5_SMP_CORES=2 run_hw_test_rpi5 "page_split_join (rpi5)" "$REPO_ROOT/examples/page_split_join/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/page_split_join/page_split_join.expected" 5 30
+RPI5_SMP_CORES=2 run_hw_test_rpi5 "smp_page_transfer (rpi5)" "$REPO_ROOT/examples/smp_page_transfer/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/smp_page_transfer/smp_page_transfer.expected" 5 30
+RPI5_SMP_CORES=2 run_hw_test_rpi5 "multi_address_space (rpi5)" "$REPO_ROOT/examples/multi_address_space/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/multi_address_space/multi_address_space.expected" 5 30
+run_hw_test_rpi5 "copy_on_write (rpi5)" "$REPO_ROOT/examples/copy_on_write/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/copy_on_write/copy_on_write.expected"
 # el0_smoke (GitHub issue #67 Stage 2 follow-up): EL1->EL0 drop + real SVC
 # trap boundary, building on el1_smoke's EL2->EL1 drop and vm_page_map's
 # dynamic mapping. Separate RPi5-specific source and el0_asm.S (minus
@@ -403,6 +455,19 @@ run_hw_test_rpi5 "el0_smoke (rpi5)" "$REPO_ROOT/examples/el0_smoke/kernel_rpi5.e
 # and el0_elf_load.stdin are the SAME shared, target-independent files.
 run_hw_test_rpi5_stdin "el0_elf_load (rpi5)" "$REPO_ROOT/examples/el0_elf_load/kernel_rpi5.elf" \
     "$REPO_ROOT/examples/el0_elf_load/el0_elf_load.expected" "$REPO_ROOT/examples/el0_elf_load/el0_elf_load.stdin"
+# These three tests intentionally overwrite the attached USB medium. The
+# hwcheck-rpi5 contract now matches hwcheck-rpi3: use a sacrificial drive.
+run_hw_test_rpi5 "usb_msc_probe (rpi5)" "$REPO_ROOT/examples/usb_msc_probe/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/usb_msc_probe/usb_msc_probe_rpi5.expected" 15 140
+run_hw_test_rpi5 "fatfs_sdcard (rpi5)" "$REPO_ROOT/examples/fatfs_sdcard/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/fatfs_sdcard/fatfs_sdcard.expected" 15 140
+run_hw_test_rpi5 "rtos_fatfs_sdcard (rpi5)" "$REPO_ROOT/examples/rtos_fatfs_sdcard/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard.expected" 15 140
+# The shell formats and seeds the dedicated USB test medium, then runs a
+# syscall-heavy busybox script.  Pace complete input lines so RP1 UART0's
+# receive path cannot lose a burst while EL0/EL1/EL2 transitions are busy.
+run_hw_test_rpi5_stdin "el0_shell (rpi5)" "$REPO_ROOT/examples/el0_shell/kernel_rpi5.elf" \
+    "$REPO_ROOT/examples/el0_shell/el0_shell.expected" "$REPO_ROOT/examples/el0_shell/el0_shell.stdin" 25 140 0.15
 
 echo
 echo "RPi5 hardware tests: $PASS passed, $FAIL failed"

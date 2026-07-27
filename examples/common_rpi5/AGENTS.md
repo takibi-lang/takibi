@@ -2221,3 +2221,18 @@ the EL1 synchronous vector with ESR EC `0x07`. With those architectural
 controls, the complete destructive FAT12 shell fixture passes byte-for-
 byte on real RPi5 hardware, including file input, fork/COW, child teardown,
 external-image exec, exit status propagation, and final VM reclamation.
+
+## Completed non-Ethernet RPi3 example parity and hardware lane
+
+`RPI5_EXAMPLES` now contains every member of `RPI3_EXAMPLES` except the
+Ethernet-dependent set: `usb_probe` (the LAN9514 Ethernet bring-up), the
+direct network examples, and the HTTP/KVS server/storage variants. The
+USB mass-storage probe, plain and RTOS FAT12 examples, and `el0_shell` are
+included despite being destructive, so `make hwcheck-rpi5` has the same
+explicit sacrificial-USB-drive contract as the RPi3 hardware lane.
+
+The runner passes `RPI5_SMP_CORES=2` for the SMP/VM cases and paces the
+busybox shell fixture one complete line at a time. It also restores EL2H
+before issuing its PSCI reset trampoline, which is required after an EL1
+payload exits. A complete real-board run after integration passed 78/78
+exact UART comparisons, including the destructive USB/FAT12 cases.

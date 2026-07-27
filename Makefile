@@ -2370,7 +2370,12 @@ RPI5_TWO_PAGE_MAP_EXAMPLES := two_page_map
 RPI5_PROCESS_VM_EXAMPLES := process_vm_smoke
 RPI5_EL0_SMOKE_EXAMPLES := el0_smoke
 RPI5_EL0_ELF_LOAD_EXAMPLES := el0_elf_load
-RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES) $(RPI5_SCHED_EXAMPLES) $(RPI5_SCHED_SEM_EXAMPLES) $(RPI5_PAGE_POOL_EXAMPLES) $(RPI5_EL1_SMOKE_EXAMPLES) $(RPI5_HVC_SMOKE_EXAMPLES) $(RPI5_VM_PAGE_MAP_EXAMPLES) $(RPI5_TWO_PAGE_MAP_EXAMPLES) $(RPI5_PROCESS_VM_EXAMPLES) $(RPI5_EL0_SMOKE_EXAMPLES) $(RPI5_EL0_ELF_LOAD_EXAMPLES)
+RPI5_SMP_VM_EXAMPLES := smp_handoff smp_slab page_split_join smp_page_transfer \
+                         multi_address_space vm_context_switch vm_task_switch \
+                         smp_task_migrate copy_on_write
+RPI5_EL0_SHELL_EXAMPLES := el0_shell
+RPI5_STORAGE_EXAMPLES := usb_msc_probe fatfs_sdcard rtos_fatfs_sdcard
+RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES) $(RPI5_SCHED_EXAMPLES) $(RPI5_SCHED_SEM_EXAMPLES) $(RPI5_PAGE_POOL_EXAMPLES) $(RPI5_EL1_SMOKE_EXAMPLES) $(RPI5_HVC_SMOKE_EXAMPLES) $(RPI5_VM_PAGE_MAP_EXAMPLES) $(RPI5_TWO_PAGE_MAP_EXAMPLES) $(RPI5_PROCESS_VM_EXAMPLES) $(RPI5_SMP_VM_EXAMPLES) $(RPI5_EL0_SMOKE_EXAMPLES) $(RPI5_EL0_ELF_LOAD_EXAMPLES) $(RPI5_EL0_SHELL_EXAMPLES) $(RPI5_STORAGE_EXAMPLES)
 RPI5_KERNELS  := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_EL1_SMOKE_KERNELS := $(foreach e,$(RPI5_EL1_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_HVC_SMOKE_KERNELS := $(foreach e,$(RPI5_HVC_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
@@ -2379,6 +2384,9 @@ RPI5_TWO_PAGE_MAP_KERNELS := $(foreach e,$(RPI5_TWO_PAGE_MAP_EXAMPLES),examples/
 RPI5_PROCESS_VM_KERNELS := $(foreach e,$(RPI5_PROCESS_VM_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_EL0_SMOKE_KERNELS := $(foreach e,$(RPI5_EL0_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_EL0_ELF_LOAD_KERNELS := $(foreach e,$(RPI5_EL0_ELF_LOAD_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
+RPI5_SMP_VM_KERNELS := $(foreach e,$(RPI5_SMP_VM_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
+RPI5_EL0_SHELL_KERNELS := $(foreach e,$(RPI5_EL0_SHELL_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
+RPI5_STORAGE_KERNELS := $(foreach e,$(RPI5_STORAGE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_SEM_KERNELS := $(foreach e,$(RPI5_SCHED_SEM_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 # el1_smoke/hvc_smoke/vm_page_map/el0_smoke/el0_elf_load's kernels have
 ## their OWN explicit link rules above (extra COMMON_RPI5_EL1_ASM_O/
@@ -2387,7 +2395,7 @@ RPI5_SEM_KERNELS := $(foreach e,$(RPI5_SCHED_SEM_EXAMPLES),examples/$(e)/kernel_
 ## the generic static pattern rule below does not ALSO claim to define
 ## them, matching RPi3's own RPI3_GENERIC_KERNELS filter-out convention
 ## for the identical reason.
-RPI5_GENERIC_KERNELS := $(filter-out $(RPI5_EL1_SMOKE_KERNELS) $(RPI5_HVC_SMOKE_KERNELS) $(RPI5_VM_PAGE_MAP_KERNELS) $(RPI5_TWO_PAGE_MAP_KERNELS) $(RPI5_PROCESS_VM_KERNELS) $(RPI5_EL0_SMOKE_KERNELS) $(RPI5_EL0_ELF_LOAD_KERNELS) $(RPI5_SEM_KERNELS),$(RPI5_KERNELS))
+RPI5_GENERIC_KERNELS := $(filter-out $(RPI5_EL1_SMOKE_KERNELS) $(RPI5_HVC_SMOKE_KERNELS) $(RPI5_VM_PAGE_MAP_KERNELS) $(RPI5_TWO_PAGE_MAP_KERNELS) $(RPI5_PROCESS_VM_KERNELS) $(RPI5_EL0_SMOKE_KERNELS) $(RPI5_EL0_ELF_LOAD_KERNELS) $(RPI5_SMP_VM_KERNELS) $(RPI5_EL0_SHELL_KERNELS) $(RPI5_STORAGE_KERNELS) $(RPI5_SEM_KERNELS),$(RPI5_KERNELS))
 
 ## Every RPi5 kernel links COMMON_RPI5_TIMER_ASM_O unconditionally --
 ## unlike RPi3, where only the RTC_EXAMPLES/timer-needing group needs
@@ -2457,9 +2465,8 @@ examples/el0_shell/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O
 ## fatfs_sdcard on RPi5: despite the historical name, the application is
 ## storage-backend independent.  This rule gives it the RP1 xHCI/FAT12 USB
 ## Mass Storage adapter, exactly as RPi3 gives the same source its DWC2
-## adapter.  Keep it outside RPI5_EXAMPLES for now: unlike the ordinary
-## smoke suite, this example deliberately reformats the attached USB medium.
-## It is run explicitly after the operator has selected sacrificial media.
+## adapter. This deliberately reformats the attached USB medium; hwcheck-rpi5
+## consequently requires the same dedicated sacrificial drive as hwcheck-rpi3.
 examples/fatfs_sdcard/fatfs_sdcard_rpi5.o: examples/fatfs_sdcard/fatfs_sdcard.tkb $(COMMON_RPI5_DMA_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
 
@@ -2467,8 +2474,7 @@ examples/fatfs_sdcard/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MM
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/fatfs_sdcard/fatfs_sdcard_rpi5.o -o $@
 
 ## rtos_fatfs_sdcard uses the same deliberately destructive USB FAT12 test
-## medium, now behind the timer-driven Simple RTOS task boundary.  It stays
-## opt-in for the same reason as fatfs_sdcard above.
+## medium, now behind the timer-driven Simple RTOS task boundary.
 examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard_rpi5.o: examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard.tkb $(COMMON_RPI5_DMA_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_TIMER) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(COMMON_STM32_STUB) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_TIMER) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(COMMON_STM32_STUB) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
 
@@ -2545,6 +2551,8 @@ RPI5_SERIAL_DEV ?=
 ## The SD card must already boot examples/common_rpi5/jtag_stub.img; this
 ## remains opt-in and is not part of check/allcheck because it requires
 ## attached hardware and cannot establish that boot prerequisite by itself.
+## It also reformats the attached USB mass-storage device; use the dedicated
+## sacrificial test drive, matching hwcheck-rpi3's storage-test contract.
 hwcheck-rpi5: $(RPI5_KERNELS)
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_hwtest_rpi5.sh
 
