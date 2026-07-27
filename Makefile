@@ -1714,7 +1714,7 @@ RPI3_EL0_SHELL_OBJS := $(foreach e,$(RPI3_EL0_SHELL_EXAMPLES),examples/$(e)/$(e)
 # hardware JTAG test cycle (busybox startup alone needs a 10s/20-poll
 # capture window -- see run_hwtest_rpi3.sh's own el0_shell comment).
 $(RPI3_EL0_SHELL_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_EL0_ASM_EXTERN) $(COMMON_RPI3_EL1_ASM_EXTERN) $(COMMON_RPI3_HVC_ASM_EXTERN) $(COMMON_RPI3_EL0_SHELL_IMAGE_EXTERN) $(COMMON_RPI3_EL0_SHELL_CHILD_TEST_IMAGE_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_INTC) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_DIR)/fat12_usbmsc.tkb $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_INTC) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_DIR)/fat12_usbmsc.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_RPI3_MAILBOX) $(COMMON_RPI3_INTC) $(COMMON_RPI3_DIR)/usb_dwc2.tkb $(COMMON_RPI3_DIR)/usb_hub.tkb $(COMMON_RPI3_DIR)/usb_host.tkb $(COMMON_RPI3_DIR)/usb_msc.tkb $(COMMON_RPI3_DIR)/fat12_usbmsc.tkb examples/vm_page_map/vm_page_map_core.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 RPI3_VM_PAGE_MAP_EXAMPLES := vm_page_map two_page_map process_vm_smoke
 RPI3_VM_PAGE_MAP_OBJS := $(foreach e,$(RPI3_VM_PAGE_MAP_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
@@ -2447,6 +2447,12 @@ examples/fat12_usbmsc_rpi5/fat12_usbmsc_rpi5_rpi5.o: examples/fat12_usbmsc_rpi5/
 
 examples/fat12_usbmsc_rpi5/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/fat12_usbmsc_rpi5/fat12_usbmsc_rpi5_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/fat12_usbmsc_rpi5/fat12_usbmsc_rpi5_rpi5.o -o $@
+
+examples/el0_shell/el0_shell_rpi5.o: examples/el0_shell/el0_shell.tkb examples/vm_page_map/vm_page_map_core_rpi5.tkb $(COMMON_RPI5_TLB_ASM_EXTERN) $(COMMON_RPI5_EL0_ASM_EXTERN) $(COMMON_RPI5_EL1_ASM_EXTERN) $(COMMON_RPI5_HVC_ASM_EXTERN) $(COMMON_RPI3_EL0_SHELL_IMAGE_EXTERN) $(COMMON_RPI3_EL0_SHELL_CHILD_TEST_IMAGE_EXTERN) $(COMMON_RPI5_DMA_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_INTC) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_INTC) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) examples/vm_page_map/vm_page_map_core_rpi5.tkb $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+examples/el0_shell/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_EL1_ASM_O) $(COMMON_RPI5_EL0_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_HVC_ASM_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) $(COMMON_RPI3_EL0_SHELL_IMAGE_O) $(COMMON_RPI3_EL0_SHELL_CHILD_TEST_IMAGE_O) examples/el0_shell/el0_shell_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_EL1_ASM_O) $(COMMON_RPI5_EL0_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_HVC_ASM_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) $(COMMON_RPI3_EL0_SHELL_IMAGE_O) $(COMMON_RPI3_EL0_SHELL_CHILD_TEST_IMAGE_O) examples/el0_shell/el0_shell_rpi5.o -o $@
 
 ## fatfs_sdcard on RPi5: despite the historical name, the application is
 ## storage-backend independent.  This rule gives it the RP1 xHCI/FAT12 USB

@@ -84,6 +84,34 @@ rpi5_el0_enter:
     msr     elr_el1, x0
     eret
 
+    .global rpi3_el0_enter
+rpi3_el0_enter:
+    b       rpi5_el0_enter
+
+    .global rpi3_el0_resume_frame
+rpi3_el0_resume_frame:
+    ldp     x1, x2, [x0, #256]
+    msr     elr_el1, x1
+    msr     spsr_el1, x2
+    ldp     x2, x3, [x0, #16]
+    ldp     x4, x5, [x0, #32]
+    ldp     x6, x7, [x0, #48]
+    ldp     x8, x9, [x0, #64]
+    ldp     x10, x11, [x0, #80]
+    ldp     x12, x13, [x0, #96]
+    ldp     x14, x15, [x0, #112]
+    ldp     x16, x17, [x0, #128]
+    ldp     x18, x19, [x0, #144]
+    ldp     x20, x21, [x0, #160]
+    ldp     x22, x23, [x0, #176]
+    ldp     x24, x25, [x0, #192]
+    ldp     x26, x27, [x0, #208]
+    ldp     x28, x29, [x0, #224]
+    ldp     x30, x1, [x0, #240]
+    msr     sp_el0, x1
+    ldp     x0, x1, [x0, #0]
+    eret
+
 /* -- Default (weak) EL0 syscall dispatch policy -----------------------------
    Every syscall number is unhandled until an example provides a strong
    Takibi-compiled override with the same name (same weak/strong pattern
@@ -131,7 +159,8 @@ el0_sync_entry:
     stp     x24, x25, [sp, #192]
     stp     x26, x27, [sp, #208]
     stp     x28, x29, [sp, #224]
-    stp     x30, xzr, [sp, #240]
+    mrs     x9, sp_el0
+    stp     x30, x9, [sp, #240]
     mrs     x9, elr_el1
     mrs     x10, spsr_el1
     stp     x9, x10, [sp, #256]
@@ -145,6 +174,8 @@ el0_sync_entry:
     ldr     x3, [sp, #8]        /* saved x1 */
     ldr     x4, [sp, #16]       /* saved x2 */
     mov     x5, x9              /* elr */
+    mov     x6, sp
+    mrs     x7, far_el1
     bl      el0_svc_dispatch
     mov     x6, x0              /* outcome */
     mov     x7, x1              /* retval */
@@ -189,11 +220,9 @@ el0_sync_entry:
        milestone's whole point is proving the trap mechanism. Park; a real
        exit() will need real process cleanup once one exists. */
 .Lel0_unhandled:
-    /* Local spin, unlike RPi3's own rpi3_exception_unhandled (a shared,
-       global startup.S symbol) -- no RPi5 equivalent exists yet, and this
-       milestone does not need one; a local park keeps this file
-       self-contained without adding a new global spin target to
-       startup.S for a single caller. */
+    mrs     x1, esr_el1
+    mrs     x2, far_el1
+    mrs     x3, elr_el1
 .Lel0_park:
     wfe
     b       .Lel0_park

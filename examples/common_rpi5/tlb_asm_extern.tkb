@@ -10,3 +10,4 @@
 extern fn tlb_invalidate_va(va: usize);
 extern fn tlb_invalidate_asid_va(asid: usize, va: usize);
 extern fn tlb_invalidate_all_el2();
+extern fn rpi3_code_range_sync(va: usize, len: usize);

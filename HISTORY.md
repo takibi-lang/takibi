@@ -12147,3 +12147,21 @@ does a real `fat_file_exists`/`fat_file_size` lookup instead of
 unconditional ENOENT. Issue #158 (fork/exec of an external command found
 via this VFS work) is next -- explicitly deferred until now since it
 depends on this issue's own file lookup to find anything to `execve`.
+
+## 2026-07-27: RPi5 EL0 shell and USB-backed FAT12 process workload
+
+Ported `examples/el0_shell` to RPi5 without forking its application logic:
+the Makefile selects the RPi5 VM/xHCI/FAT12 implementation while retaining
+the platform-neutral embedded busybox and child-test images. The RPi5 VM
+core now supplies the two address spaces, COW/fork/remap/copy operations,
+EL1 translation-regime maintenance, and code-range synchronization needed
+by the existing shell. The port remains compiled under `--forbid-trap`.
+
+Real hardware found that BCM2712 TF-A does not grant EL1 physical-counter
+access. A trapped `read_cntpct` reached the same lower-EL synchronous
+vector as HVC and was initially misdecoded as repeated exit requests;
+OpenOCD showed the saved ELR at `read_cntpct`. The EL1 transition now sets
+`CNTHCTL_EL2.EL1PCTEN/EL1PCEN`, the HVC entry validates ESR EC `0x16`, and
+the EL1 entry enables SIMD for the embedded busybox. The full 238-byte
+expected UART transcript then matched exactly on RPi5, covering FAT input,
+fork/COW, exec, child status, and VM reclamation.

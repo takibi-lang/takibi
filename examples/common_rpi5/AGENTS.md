@@ -2199,3 +2199,25 @@ bare-metal PCIe reset, UART0 uses RP1's 50MHz XOSC; IBRD=27/FBRD=8 then
 produced a clean, directly captured `rp1 uart0 alive!` at 115200 baud
 while the SWD session remained active. This completes issue #161's
 Stage-1 proof of life.
+
+## EL0 shell port: EL1 timer access and synchronous-exception decoding
+
+The RPi5 `el0_shell` port reuses the established RPi3 shell and busybox
+images with the RP1 xHCI FAT12 adapter and the RPi5 VM implementation. It
+also exposed two BCM2712 handoff differences which the smaller EL1/HVC
+smokes did not exercise. TF-A leaves `CNTHCTL_EL2.EL1PCTEN/EL1PCEN`
+clear, so the shell's first EL1 `read_cntpct` trapped to EL2. Because the
+lower-EL synchronous vector previously entered `el1_hvc_entry`
+unconditionally, that non-HVC exception was decoded as opcode zero and
+looked like an endless series of process-exit HVC calls. OpenOCD proved
+the distinction directly: the saved ELR was `read_cntpct`, not either HVC
+wrapper. `rpi5_el1_enter` now grants EL1 physical-timer access, and the
+HVC entry accepts only ESR EC `0x16` (HVC64), parking every other cause in
+the ordinary evidence handler.
+
+Busybox also executes AArch64 SIMD instructions, so the EL1 landing path
+enables `CPACR_EL1.FPEN`; without it the first such instruction stopped in
+the EL1 synchronous vector with ESR EC `0x07`. With those architectural
+controls, the complete destructive FAT12 shell fixture passes byte-for-
+byte on real RPi5 hardware, including file input, fork/COW, child teardown,
+external-image exec, exit status propagation, and final VM reclamation.

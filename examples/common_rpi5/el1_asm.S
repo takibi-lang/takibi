@@ -45,7 +45,7 @@ rpi5_el1_vectors:
     .align  7
     b       .                   /* 0x180: SError */
     .align  7
-    b       .                   /* 0x200: Synchronous (EL1h) */
+    b       rpi5_el1_sync_evidence /* 0x200: Synchronous (EL1h) */
     .align  7
     b       .                   /* 0x280: IRQ */
     .align  7
@@ -72,6 +72,14 @@ rpi5_el1_vectors:
     .align  7
     b       .                   /* 0x780: SError */
 
+rpi5_el1_sync_evidence:
+    mrs     x1, esr_el1
+    mrs     x2, far_el1
+    mrs     x3, elr_el1
+.Lel1_sync_halt:
+    wfe
+    b       .Lel1_sync_halt
+
 /* void rpi5_el1_enter(usize el1_sp) -- never returns to its caller (the
    caller is left behind at EL2 permanently; only a subsequent IRQ routed
    to EL2 by HCR_EL2.IMO, already set unconditionally by startup.S for
@@ -80,6 +88,16 @@ rpi5_el1_vectors:
    x0 = stack pointer to install as SP_EL1 before entry. */
     .global rpi5_el1_enter
 rpi5_el1_enter:
+    /* Permit EL1 to read and program the physical timer.  TF-A leaves
+       CNTHCTL_EL2.EL1PCTEN/EL1PCEN clear on BCM2712, unlike the RPi3
+       firmware handoff.  Without this, read_cntpct traps synchronously
+       back to EL2 and can be mistaken for an HVC by the shared lower-EL
+       synchronous vector. */
+    mrs     x2, cnthctl_el2
+    orr     x2, x2, #3
+    msr     cnthctl_el2, x2
+    isb
+
     /* TTBR0_EL1 := TTBR0_EL2 (reuse the live EL2 identity map -- see
        this file's header comment for why reusing the raw table content
        is safe: every existing page's AP encoding carries over unchanged
@@ -181,6 +199,11 @@ rpi5_el1_enter:
     msr     sctlr_el1, x2
     isb
 
+    adrp    x2, rpi5_el1_regime_active
+    add     x2, x2, :lo12:rpi5_el1_regime_active
+    mov     x3, #1
+    str     x3, [x2]
+
     msr     sp_el1, x0
 
     /* HCR_EL2.RW (bit 31): "EL1 executes in AArch64 state". Read-modify-
@@ -218,7 +241,15 @@ rpi5_el1_enter:
     msr     elr_el2, x2
     eret
 
+    .global rpi3_el1_enter
+rpi3_el1_enter:
+    b       rpi5_el1_enter
+
 .Lel1_entry:
+    mrs     x0, cpacr_el1
+    orr     x0, x0, #(0x3 << 20)
+    msr     cpacr_el1, x0
+    isb
     /* Now executing at EL1h with SP = SP_EL1. Ordinary AAPCS64 call into
        Takibi code -- el1_main is defined in the example's own .tkb
        file, same pattern as startup.S's own `bl main` handoff to

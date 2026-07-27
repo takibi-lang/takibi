@@ -92,6 +92,9 @@ l2_dynamic_table_as1:
     .space  4096
 l3_dynamic_table_as1:
     .space  4096
+    .global rpi5_el1_regime_active
+rpi5_el1_regime_active:
+    .space  8
 
     .section .text
     .global mmu_init
@@ -320,6 +323,16 @@ mmu_address_space_activate: /* fn(slot: usize) */
     dsb     ish
     msr     ttbr0_el2, x1
     isb
+    adrp    x2, rpi5_el1_regime_active
+    add     x2, x2, :lo12:rpi5_el1_regime_active
+    ldr     x3, [x2]
+    cbz     x3, .Las_activate_done
+    msr     ttbr0_el1, x1
+    isb
+    tlbi    vmalle1is
+    dsb     ish
+    isb
+.Las_activate_done:
     ret
 
     .global l3_address_space_write

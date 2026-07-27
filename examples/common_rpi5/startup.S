@@ -327,7 +327,7 @@ exception_vectors:
     .align  7
     b       el1_hvc_entry       /* 0x400: Lower EL AArch64, Synchronous */
     .align  7
-    b       .                   /* 0x480: Lower EL AArch64, IRQ */
+    b       rpi5_irq_entry      /* 0x480: Lower EL AArch64, IRQ */
     .align  7
     b       .                   /* 0x500: Lower EL AArch64, FIQ */
     .align  7
@@ -451,12 +451,4 @@ rpi5_sync_exception_entry:
 
     .global rpi3_exception_unhandled
 rpi3_exception_unhandled:
-    adrp    x0, sync_exception_evidence
-    add     x0, x0, :lo12:sync_exception_evidence
-    mrs     x1, esr_el2
-    mrs     x2, far_el2
-    mrs     x3, elr_el2
-    str     x1, [x0]
-    str     x2, [x0, #8]
-    str     x3, [x0, #16]
     b       rpi3_exception_unhandled

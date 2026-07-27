@@ -20,7 +20,9 @@
 /* usize rpi5_hvc_call(usize arg) -- issued FROM EL1. Ordinary AAPCS64
    call/return; unlike rpi5_el1_enter, this DOES return to its caller. */
     .global rpi5_hvc_call
+    .global rpi3_hvc_call
 rpi5_hvc_call:
+rpi3_hvc_call:
     hvc     #0
     ret
 
@@ -42,6 +44,15 @@ hvc_dispatch:
     .global el1_hvc_entry
     .type   el1_hvc_entry, %function
 el1_hvc_entry:
+    /* This vector slot receives every synchronous exception from EL1,
+       not only HVC.  Accept EC=0x16 (HVC64) and park all other causes in
+       the ordinary evidence handler instead of decoding an arbitrary x0
+       value as a privileged request. */
+    mrs     x1, esr_el2
+    lsr     x2, x1, #26
+    cmp     x2, #0x16
+    b.ne    rpi3_exception_unhandled
+
     sub     sp, sp, #272
     stp     x0, x1, [sp, #0]
     stp     x2, x3, [sp, #16]

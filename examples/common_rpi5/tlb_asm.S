@@ -13,6 +13,12 @@ tlb_invalidate_va:        /* fn tlb_invalidate_va(va: usize) */
     dsb     ishst
     lsr     x0, x0, #12
     tlbi    vae2is, x0
+    adrp    x2, rpi5_el1_regime_active
+    add     x2, x2, :lo12:rpi5_el1_regime_active
+    ldr     x3, [x2]
+    cbz     x3, .Ltlb_va_done
+    tlbi    vaae1is, x0
+.Ltlb_va_done:
     dsb     ish
     isb
     ret
@@ -21,10 +27,16 @@ tlb_invalidate_va:        /* fn tlb_invalidate_va(va: usize) */
     .type   tlb_invalidate_asid_va, %function
 tlb_invalidate_asid_va:   /* fn tlb_invalidate_asid_va(asid: usize, va: usize) */
     dsb     ishst
-    lsl     x0, x0, #48
     lsr     x1, x1, #12
+    lsl     x0, x0, #48
     orr     x0, x0, x1
     tlbi    vae2is, x0
+    adrp    x2, rpi5_el1_regime_active
+    add     x2, x2, :lo12:rpi5_el1_regime_active
+    ldr     x3, [x2]
+    cbz     x3, .Ltlb_asid_done
+    tlbi    vaae1is, x1
+.Ltlb_asid_done:
     dsb     ish
     isb
     ret
@@ -34,6 +46,26 @@ tlb_invalidate_asid_va:   /* fn tlb_invalidate_asid_va(asid: usize, va: usize) *
 tlb_invalidate_all_el2:
     dsb     ishst
     tlbi    alle2is
+    dsb     ish
+    isb
+    ret
+
+    .global rpi3_code_range_sync
+rpi3_code_range_sync:
+    add     x1, x0, x1
+    bic     x2, x0, #63
+.Lcode_clean:
+    dc      cvau, x2
+    add     x2, x2, #64
+    cmp     x2, x1
+    b.lo    .Lcode_clean
+    dsb     ish
+    bic     x2, x0, #63
+.Lcode_invalidate:
+    ic      ivau, x2
+    add     x2, x2, #64
+    cmp     x2, x1
+    b.lo    .Lcode_invalidate
     dsb     ish
     isb
     ret
