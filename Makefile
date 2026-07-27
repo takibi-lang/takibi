@@ -2247,6 +2247,12 @@ RPI5_RTC_OBJS      := $(foreach e,$(RPI5_RTC_EXAMPLES),examples/$(e)/$(e)_rpi5.o
 $(RPI5_RTC_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_RTC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_RTC) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
 
+RPI5_PAGE_POOL_EXAMPLES := page_pool
+RPI5_PAGE_POOL_OBJS     := $(foreach e,$(RPI5_PAGE_POOL_EXAMPLES),examples/$(e)/$(e)_rpi5.o)
+
+$(RPI5_PAGE_POOL_OBJS): examples/%_rpi5.o: examples/%.tkb examples/page_pool/page_pool_core.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
 ## GitHub issue #163's own follow-up: EL2 -> EL1 drop, reusing the EL2
 ## identity map as EL1&0's own stage 1 regime (examples/common_rpi5/
 ## el1_asm.S, a port of examples/common_rpi3/el1_asm.S's proven
@@ -2336,7 +2342,7 @@ RPI5_HVC_SMOKE_EXAMPLES := hvc_smoke
 RPI5_VM_PAGE_MAP_EXAMPLES := vm_page_map
 RPI5_EL0_SMOKE_EXAMPLES := el0_smoke
 RPI5_EL0_ELF_LOAD_EXAMPLES := el0_elf_load
-RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES) $(RPI5_SCHED_EXAMPLES) $(RPI5_SCHED_SEM_EXAMPLES) $(RPI5_EL1_SMOKE_EXAMPLES) $(RPI5_HVC_SMOKE_EXAMPLES) $(RPI5_VM_PAGE_MAP_EXAMPLES) $(RPI5_EL0_SMOKE_EXAMPLES) $(RPI5_EL0_ELF_LOAD_EXAMPLES)
+RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES) $(RPI5_SCHED_EXAMPLES) $(RPI5_SCHED_SEM_EXAMPLES) $(RPI5_PAGE_POOL_EXAMPLES) $(RPI5_EL1_SMOKE_EXAMPLES) $(RPI5_HVC_SMOKE_EXAMPLES) $(RPI5_VM_PAGE_MAP_EXAMPLES) $(RPI5_EL0_SMOKE_EXAMPLES) $(RPI5_EL0_ELF_LOAD_EXAMPLES)
 RPI5_KERNELS  := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_EL1_SMOKE_KERNELS := $(foreach e,$(RPI5_EL1_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_HVC_SMOKE_KERNELS := $(foreach e,$(RPI5_HVC_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
