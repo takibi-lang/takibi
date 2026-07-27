@@ -2211,9 +2211,8 @@ RPI5_TAKIBI_FLAGS := --forbid-trap
 $(RPI5_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
 
-# RP1 Ethernet is a new hardware path. Keep its initial L2 milestone outside
-# RPI5_EXAMPLES and outside --forbid-trap until the real PHY/MAC/DMA path is
-# proven; the follow-up hardening commit will enable the normal flag.
+# RP1 Ethernet remains outside RPI5_EXAMPLES because its hardware suite is
+# opt-in, but the real PHY/MAC/DMA path is now proven and trap-forbidden.
 RPI5_NET_L2_EXAMPLES := net_echo arp_reply icmp_echo
 RPI5_NET_EXAMPLES := $(RPI5_NET_L2_EXAMPLES) tcp_echo http_server kvs_server
 RPI5_NET_OBJS := $(foreach e,$(RPI5_NET_EXAMPLES),examples/$(e)/$(e)_rpi5.o)
@@ -2221,7 +2220,7 @@ RPI5_NET_KERNELS := $(foreach e,$(RPI5_NET_EXAMPLES),examples/$(e)/kernel_rpi5.e
 RPI5_NET_L2_KERNELS := $(foreach e,$(RPI5_NET_L2_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 
 $(RPI5_NET_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_ETH) $(COMMON_RPI5_NETCONFIG) $(COMMON_NETUTIL) $(COMMON_INET_CKSUM) $(COMMON_HTTP_SERVER) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_ETH) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) -o $@
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_ETH) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
 
 $(RPI5_NET_KERNELS): examples/%/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/%/$$*_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/$*/$*_rpi5.o -o $@
