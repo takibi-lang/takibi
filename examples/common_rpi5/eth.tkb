@@ -16,7 +16,7 @@ private linear struct NetRxCpuOwned[desc: usize] {
     private len: i32;
 }
 private linear struct NetTxInFlight[desc: usize] {
-    private slot: {0..<1 as usize};
+    private slot: {0..<2 as usize};
 }
 private affine view NetRxCanAcquire;
 
@@ -35,7 +35,9 @@ fn net_rx_owned(slot: {0..<1 as usize} @ desc, len: i32) -> NetRxCpuOwned[desc] 
 let mut gem_rx_desc: [u32; 16] align(64);
 let mut gem_tx_desc: [u32; 16] align(64);
 let mut gem_rx_buf: [u8; 2048] align(64);
+let mut gem_tx_buf: [u8; 1536] align(64);
 let mut gem_initialized: i32 = 0;
+let mut gem_tx_next: i32 = 0;
 
 fn gem_read(off: usize) -> u32 {
     let reg: *io u32 = (GEM_BASE + off) as *io u32;
@@ -122,6 +124,7 @@ fn gem_configure_link() {
 
 fn gem_rearm_rx() {
     let desc_base: usize = (gem_rx_desc as *u32) as usize;
+    dma_prepare_rx(gem_rx_buf as *align(64) u8, RX_BUF_SIZE);
     gem_rx_desc[0] = gem_rx_desc[0] & 0xFFFFFFFE;
     rpi5_dcache_clean_range(desc_base, 64);
 }
@@ -168,9 +171,13 @@ fn net_init() -> NetInitResult {
     gem_rx_desc[1] = 0;
     gem_rx_desc[0] = (rx_dma as u32) | 2; // one-descriptor ring: WRAP
     gem_tx_desc[0] = 0;
-    gem_tx_desc[1] = (1 << 31) | (1 << 30); // USED | WRAP
+    gem_tx_desc[1] = 1 << 31; // USED
     gem_tx_desc[2] = 0;
     gem_tx_desc[3] = 0;
+    gem_tx_desc[4] = 0;
+    gem_tx_desc[5] = (1 << 31) | (1 << 30); // USED | WRAP
+    gem_tx_desc[6] = 0;
+    gem_tx_desc[7] = 0;
     dma_prepare_rx(gem_rx_buf as *align(64) u8, RX_BUF_SIZE);
     rpi5_dcache_clean_range(rxd_base, 64);
     rpi5_dcache_clean_range(txd_base, 64);
@@ -225,16 +232,32 @@ fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire {
 fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32) -> NetTxInFlight[desc] {
     let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
     let rx_base: usize = (gem_rx_buf as *u8) as usize;
-    let rx_dma: usize = rx_base + DMA_OFFSET;
+    let tx_base: usize = (gem_tx_buf as *u8) as usize;
+    let tx_dma: usize = tx_base + DMA_OFFSET;
     let txd_base: usize = (gem_tx_desc as *u32) as usize;
-    rpi5_dcache_clean_range(rx_base, safe_len as usize);
-    gem_tx_desc[2] = (rx_dma >> 32) as u32;
-    gem_tx_desc[3] = 0;
-    gem_tx_desc[0] = rx_dma as u32;
-    gem_tx_desc[1] = (safe_len as u32) | (1 << 15) | (1 << 30);
+    bytes_copy(tx_base as *u8, rx_base as *u8, safe_len as isize);
+    rpi5_dcache_clean_range(tx_base, safe_len as usize);
+    let mut slot: {0..<2 as usize} = 0;
+    if (gem_tx_next == 0) {
+        gem_tx_desc[2] = (tx_dma >> 32) as u32;
+        gem_tx_desc[3] = 0;
+        gem_tx_desc[0] = tx_dma as u32;
+        gem_tx_desc[1] = (safe_len as u32) | (1 << 15);
+        gem_tx_next = 1;
+    } else {
+        gem_tx_desc[6] = (tx_dma >> 32) as u32;
+        gem_tx_desc[7] = 0;
+        gem_tx_desc[4] = tx_dma as u32;
+        gem_tx_desc[5] = (safe_len as u32) | (1 << 15) | (1 << 30);
+        gem_tx_next = 0;
+        slot = 1;
+    }
     rpi5_dcache_clean_range(txd_base, 64);
+    // The peer can send its next packet immediately after seeing this reply.
+    // Return the independent RX buffer to GEM before starting TX so that an
+    // immediate TCP ACK is not lost while this descriptor completes.
+    gem_rearm_rx();
     gem_write(0x00, gem_read(0x00) | (1 << 9));
-    let slot: {0..<1 as usize} = 0;
     let mut in_flight: NetTxInFlight[desc] = { slot };
     return in_flight;
 }
@@ -243,9 +266,9 @@ fn net_tx_complete(in_flight: sink NetTxInFlight[desc]) -> NetRxCanAcquire !{may
     let txd_base: usize = (gem_tx_desc as *u32) as usize;
     for i: i32 in 0..<1000000 {
         rpi5_dcache_invalidate_range(txd_base, 64);
-        if ((gem_tx_desc[1] & (1 << 31)) != 0) { break; }
+        if (in_flight.slot == 0 && (gem_tx_desc[1] & (1 << 31)) != 0) { break; }
+        if (in_flight.slot == 1 && (gem_tx_desc[5] & (1 << 31)) != 0) { break; }
     }
-    gem_rearm_rx();
     return view NetRxCanAcquire;
 }
 

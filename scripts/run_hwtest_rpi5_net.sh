@@ -70,13 +70,15 @@ run_net_test() {
     fi
 }
 
-run_net_test "net_echo (rpi5)" "$REPO_ROOT/examples/net_echo/kernel_rpi5.elf" "$REPO_ROOT/scripts/eth_net_echo_test.py"
-run_net_test "arp_reply (rpi5)" "$REPO_ROOT/examples/arp_reply/kernel_rpi5.elf" "$REPO_ROOT/scripts/eth_arp_reply_test.py"
-run_net_test "icmp_echo (rpi5)" "$REPO_ROOT/examples/icmp_echo/kernel_rpi5.elf" "$REPO_ROOT/scripts/eth_icmp_echo_test.py"
-
-echo "RPi5 Ethernet L2 hardware tests: $PASS passed, $FAIL failed"
-if [ "$L2_ONLY" -ne 1 ]; then
-    echo "error: full RPi5 Ethernet suite is not implemented yet" >&2
-    exit 2
+if [ "$L2_ONLY" -eq 1 ]; then
+    run_net_test "net_echo (rpi5)" "$REPO_ROOT/examples/net_echo/kernel_rpi5.elf" "$REPO_ROOT/scripts/eth_net_echo_test.py"
+    run_net_test "arp_reply (rpi5)" "$REPO_ROOT/examples/arp_reply/kernel_rpi5.elf" "$REPO_ROOT/scripts/eth_arp_reply_test.py"
+    run_net_test "icmp_echo (rpi5)" "$REPO_ROOT/examples/icmp_echo/kernel_rpi5.elf" "$REPO_ROOT/scripts/eth_icmp_echo_test.py"
+    echo "RPi5 Ethernet L2 hardware tests: $PASS passed, $FAIL failed"
+else
+    run_net_test "tcp_echo (rpi5)" "$REPO_ROOT/examples/tcp_echo/kernel_rpi5.elf" "$REPO_ROOT/scripts/eth_tcp_echo_test.py"
+    run_net_test "http_server (rpi5)" "$REPO_ROOT/examples/http_server/kernel_rpi5.elf" "$REPO_ROOT/scripts/eth_http_server_test.py"
+    run_net_test "kvs_server (rpi5)" "$REPO_ROOT/examples/kvs_server/kernel_rpi5.elf" "$REPO_ROOT/scripts/eth_kvs_server_test.py"
+    echo "RPi5 network hardware tests: $PASS passed, $FAIL failed"
 fi
 [ "$FAIL" -eq 0 ] || exit 1
