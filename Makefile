@@ -2424,6 +2424,15 @@ examples/fatfs_sdcard/fatfs_sdcard_rpi5.o: examples/fatfs_sdcard/fatfs_sdcard.tk
 examples/fatfs_sdcard/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/fatfs_sdcard/fatfs_sdcard_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/fatfs_sdcard/fatfs_sdcard_rpi5.o -o $@
 
+## rtos_fatfs_sdcard uses the same deliberately destructive USB FAT12 test
+## medium, now behind the timer-driven Simple RTOS task boundary.  It stays
+## opt-in for the same reason as fatfs_sdcard above.
+examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard_rpi5.o: examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard.tkb $(COMMON_RPI5_DMA_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_TIMER) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(COMMON_STM32_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_TIMER) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(COMMON_STM32_STUB) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+examples/rtos_fatfs_sdcard/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) $(COMMON_SEM_ASM_O) examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) $(COMMON_SEM_ASM_O) examples/rtos_fatfs_sdcard/rtos_fatfs_sdcard_rpi5.o -o $@
+
 ## RPI5_SERIAL_DEV: same convention as STM32_SERIAL_DEV/RPI3_SERIAL_DEV --
 ## empty by default, resolved at runtime by scripts/rpi5_uart_dev.sh (which
 ## picks the ttyACM device out by its /dev/serial/by-id label, not by
