@@ -2,8 +2,6 @@
 // The faultable VM resources live in a private stable kernel slot; the
 // interrupted frame retains only its ActiveAddressSpace authority.
 
-use "examples/vm_page_map/vm_page_map_core.tkb";
-
 extern fn rpi3_exception_unhandled() !{noreturn};
 
 private linear view CowSlotGuard[core: usize, lock: addr];
@@ -92,7 +90,7 @@ fn cow_app_main(installed: ExceptionHandlerInstalled[0]) {
             let inactive1 = address_space_new(seed1);
             let core: usize = 0;
             let (empty0, active0) = address_space_activate(inactive0, core);
-            let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+            let va = dynamic_va_base();
             let (space0, pending0) = map_page_read_only(empty0, lease0, va);
             let mapping0 = tlb_invalidate_read_only(space0, pending0);
             let (empty1, active1) =
@@ -104,7 +102,7 @@ fn cow_app_main(installed: ExceptionHandlerInstalled[0]) {
                                                 space1, mapping1,
                                                 lease0, lease1)));
 
-            let ptr: *io u8 = 0x80000000;
+            let ptr: *io u8 = dynamic_va_base() as *io u8;
             uart_puts("before write: "); uart_print(*ptr); uart_puts("\n");
             *ptr = 42;
             uart_puts("after write: "); uart_print(*ptr); uart_puts("\n");

@@ -1784,7 +1784,7 @@ RPI3_COW_EXAMPLES := copy_on_write
 RPI3_COW_OBJS := $(foreach e,$(RPI3_COW_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_COW_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) examples/vm_page_map/vm_page_map_core.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 # USB bring-up group (GitHub issue #140's Ethernet milestone -- see
 # examples/usb_probe/usb_probe.tkb's own header comment and
@@ -2518,6 +2518,12 @@ examples/smp_task_migrate/smp_task_migrate_rpi5.o: examples/smp_task_migrate/smp
 
 examples/smp_task_migrate/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_SMP_O) $(COMMON_RPI5_SMP_EL3_O) examples/smp_task_migrate/smp_task_migrate_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_SMP_O) $(COMMON_RPI5_SMP_EL3_O) examples/smp_task_migrate/smp_task_migrate_rpi5.o -o $@
+
+examples/copy_on_write/copy_on_write_rpi5.o: examples/copy_on_write/copy_on_write.tkb examples/vm_page_map/vm_page_map_core_rpi5.tkb $(COMMON_RPI5_TLB_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) examples/vm_page_map/vm_page_map_core_rpi5.tkb $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+examples/copy_on_write/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) examples/copy_on_write/copy_on_write_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) examples/copy_on_write/copy_on_write_rpi5.o -o $@
 
 ## RPI5_SERIAL_DEV: same convention as STM32_SERIAL_DEV/RPI3_SERIAL_DEV --
 ## empty by default, resolved at runtime by scripts/rpi5_uart_dev.sh (which

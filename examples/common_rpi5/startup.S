@@ -227,6 +227,11 @@ rpi5_irq_dispatch:
 rpi3_irq_dispatch:
     ret
 
+    .weak   rpi3_sync_exception_dispatch
+rpi3_sync_exception_dispatch:
+    mov     x0, #0
+    ret
+
 /* sync_exception_evidence: ESR_EL2/FAR_EL2/ELR_EL2, written by the
    "Current EL SPx, Synchronous" vector slot below before it parks --
    GitHub issue #165's "add useful synchronous-exception evidence instead
@@ -312,7 +317,7 @@ exception_vectors:
     .align  7
     b       .                   /* 0x180: Current EL SP0, SError */
     .align  7
-    b       .Lsync_spx_evidence /* 0x200: Current EL SPx, Synchronous */
+    b       rpi5_sync_exception_entry /* 0x200: Current EL SPx, Synchronous */
     .align  7
     b       rpi5_irq_entry      /* 0x280: Current EL SPx, IRQ */
     .align  7
@@ -388,3 +393,70 @@ rpi5_irq_entry:
     ldp     x30, xzr, [sp, #240]
     add     sp,  sp,  #272
     eret
+
+/* Complete-frame synchronous exception entry.  A strong Takibi hook may
+   repair the fault and return the exact ELR to retry; all other faults keep
+   the fail-stop behavior, with ESR/FAR/ELR left in x1/x2/x3 for SWD. */
+rpi5_sync_exception_entry:
+    sub     sp, sp, #272
+    stp     x0, x1, [sp, #0]
+    stp     x2, x3, [sp, #16]
+    stp     x4, x5, [sp, #32]
+    stp     x6, x7, [sp, #48]
+    stp     x8, x9, [sp, #64]
+    stp     x10, x11, [sp, #80]
+    stp     x12, x13, [sp, #96]
+    stp     x14, x15, [sp, #112]
+    stp     x16, x17, [sp, #128]
+    stp     x18, x19, [sp, #144]
+    stp     x20, x21, [sp, #160]
+    stp     x22, x23, [sp, #176]
+    stp     x24, x25, [sp, #192]
+    stp     x26, x27, [sp, #208]
+    stp     x28, x29, [sp, #224]
+    stp     x30, xzr, [sp, #240]
+    mrs     x3, elr_el2
+    mrs     x4, spsr_el2
+    stp     x3, x4, [sp, #256]
+    mrs     x0, esr_el2
+    mrs     x1, far_el2
+    mov     x2, x3
+    mrs     x3, mpidr_el1
+    ubfx    x3, x3, #8, #2
+    bl      rpi3_sync_exception_dispatch
+    ldr     x1, [sp, #256]
+    cmp     x0, x1
+    b.ne    rpi3_exception_unhandled
+    ldp     x0, x1, [sp, #256]
+    msr     elr_el2, x0
+    msr     spsr_el2, x1
+    ldp     x0, x1, [sp, #0]
+    ldp     x2, x3, [sp, #16]
+    ldp     x4, x5, [sp, #32]
+    ldp     x6, x7, [sp, #48]
+    ldp     x8, x9, [sp, #64]
+    ldp     x10, x11, [sp, #80]
+    ldp     x12, x13, [sp, #96]
+    ldp     x14, x15, [sp, #112]
+    ldp     x16, x17, [sp, #128]
+    ldp     x18, x19, [sp, #144]
+    ldp     x20, x21, [sp, #160]
+    ldp     x22, x23, [sp, #176]
+    ldp     x24, x25, [sp, #192]
+    ldp     x26, x27, [sp, #208]
+    ldp     x28, x29, [sp, #224]
+    ldp     x30, xzr, [sp, #240]
+    add     sp, sp, #272
+    eret
+
+    .global rpi3_exception_unhandled
+rpi3_exception_unhandled:
+    adrp    x0, sync_exception_evidence
+    add     x0, x0, :lo12:sync_exception_evidence
+    mrs     x1, esr_el2
+    mrs     x2, far_el2
+    mrs     x3, elr_el2
+    str     x1, [x0]
+    str     x2, [x0, #8]
+    str     x3, [x0, #16]
+    b       rpi3_exception_unhandled
