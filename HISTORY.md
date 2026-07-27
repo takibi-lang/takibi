@@ -15,6 +15,50 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-27: RPi5 USB WRITE(10) Fixed -- Remove the Incomplete Initialization-Time BOT Reset
+
+The WRITE(10) data phase completed with xHCI Success/residue zero, but the
+following CSW always STALLed. A Linux usbmon/debugfs comparison ruled out
+the apparent xHCI differences: Linux submitted the CSW only 5us after the
+data event and received it about 0.934ms later; its bulk Normal TRBs matched
+the Takibi driver; and a content-preserving Linux WRITE still succeeded
+after both U1/U2 device features and PORTPMSC timeouts were disabled. Linux's
+2050us Slot Context MEL was therefore an LPM consequence, not the fix.
+
+The root cause preceded the SCSI command. After port reset, Address Device,
+and SET_CONFIGURATION had already established a fresh transport, Takibi sent
+a class-specific Bulk-Only Mass Storage Reset alone. BOT 1.0 section 5.3.4
+defines Reset Recovery as three ordered operations: Mass Storage Reset,
+Clear Feature HALT on Bulk-In, then Clear Feature HALT on Bulk-Out. This
+initialization-time request was unnecessary and only performed step one.
+The SanDisk tolerated reads and VERIFY(10) afterward but entered a persistent
+write failure: it ACKed all WRITE data, STALLed the CSW, and did not recover
+under ordinary USB resets.
+
+Linux usbfs reproduced that same persistent state with the equivalent raw
+reset/WRITE sequence; Linux's usb-storage probe then looped through device
+resets without recreating `/dev/sda`, just like the bare-metal recovery
+attempts. A real board/drive power cycle was required. That cross-host
+reproduction distinguishes a BOT sequencing fault from a Takibi xHCI ring,
+DMA, or event-consumption fault.
+
+The fix removes the gratuitous reset from `disk_initialize()`.
+`msc_recover_transport()` remains the place for the complete three-step
+recovery when a real transport error requires it. The real-hardware example
+now checks WRITE without changing disk contents: after proving unused LBA
+1000000 contains 512 zero bytes, it writes the same zeros, poisons its RAM
+buffer with 0xA5, and reads the sector back.
+
+Two consecutive SWD-injected runs completed. Direct post-run memory evidence
+was identical both times: cpu0 at `_start`'s post-main loop, `xhci_ready=1`,
+`msc_tag=11`, final CBW tag 11 = READ(10) LBA 1000000, and final CSW signature
+`USBS`, tag 11, residue 0, status 0. Thus tag 10 WRITE succeeded on its first
+attempt and the following readback also succeeded; a failed WRITE recovery
+and replay would have advanced the final tag to at least 12. The target
+compiles under `--forbid-trap`.
+
+---
+
 ### 2026-07-26: RPi5 -- FAT12 Mounts Off the Real USB Drive; a TRB Ring's Producer Must Publish Its Link TRB
 
 `examples/common_rpi5/usb_xhci.tkb` extracts `rp1_usb_smoke.tkb`'s proven

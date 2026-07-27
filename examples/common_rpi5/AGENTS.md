@@ -1,6 +1,46 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
-## Status update (2026-07-26, latest): FAT12 mounts off the real USB
+## Status update (2026-07-27, latest): WRITE(10) fixed -- an incomplete,
+## unnecessary BOT reset poisoned the device transport
+
+The WRITE data phase had always completed successfully, but its CSW
+STALLed. Linux-side comparison ruled out the xHCI details that initially
+looked suspicious: Linux's content-preserving WRITE(10) used the same
+CBW/CDB and Normal TRB shape; it still succeeded with U1/U2 device
+features and PORTPMSC timeouts all disabled, so Slot Context Max Exit
+Latency/LPM was not causal.
+
+The actual difference was earlier in initialization. Immediately after a
+real port reset, Address Device, and SET_CONFIGURATION, this driver sent a
+gratuitous class-specific Bulk-Only Mass Storage Reset by itself. BOT 1.0
+section 5.3.4 defines Reset Recovery as an ordered three-step sequence:
+Mass Storage Reset, Clear Feature HALT on Bulk-In, then Clear Feature HALT
+on Bulk-Out. Sending just the first step was both unnecessary (the new
+configuration was already a fresh transport) and incomplete. The SanDisk
+drive tolerated reads and VERIFY(10) afterward but poisoned its write path:
+WRITE data was ACKed, then the CSW endpoint STALLed and ordinary USB resets
+could not recover it.
+
+Linux usbfs provided the decisive cross-check. A normal Linux WRITE worked;
+after reproducing the bare-metal reset-then-raw-WRITE sequence, Linux's own
+usb-storage driver entered the same repeated-reset/no-disk state. Only a
+real board/drive power cycle restored it. This moved the fault out of the
+Takibi xHCI ring implementation and into the shared BOT command sequence.
+
+Fix: remove the initialization-time reset. `msc_recover_transport()` keeps
+the complete three-step Reset Recovery for an actual transport failure.
+`fat12_usbmsc_rpi5` now performs a content-preserving regression: it first
+proves LBA 1000000 is all zero, writes the same 512 zero bytes back, fills
+its RAM buffer with 0xA5, and reads the sector again.
+
+Verified twice consecutively on real hardware. In both runs cpu0 reached
+`_start`'s post-main loop, `msc_tag=11`, the final CBW was tag 11 READ(10)
+of LBA 1000000, and the final CSW was `USBS`, tag 11, residue 0, status 0.
+The immediately preceding tag 10 was therefore the first (non-retried)
+WRITE; any recovery/replay would have advanced the final tag past 11.
+The target builds with `--forbid-trap`.
+
+## Status update (2026-07-26, earlier -- WRITE blocker superseded above): FAT12 mounts off the real USB
 ## drive via a reusable driver -- reads PROVEN, writes still BLOCKED
 
 `examples/common_rpi5/usb_xhci.tkb` is the XHCI + USB Mass Storage

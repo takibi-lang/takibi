@@ -1257,10 +1257,15 @@ fn disk_initialize() -> DiskIoResult {
     rpi5_dcache_clean_range(scratch_base, 512);
     usb_ctrl_xfer(0xA1, 0xFE, 0, xhci_msc_interface_num, 1, scratch_dma, true);
 
-    // Bulk-Only Mass Storage Reset (class request, interface recipient,
-    // no data stage) -- best-effort override of any inherited device
-    // state, same reasoning as the RPi3 driver's own msc_bulk_only_reset.
-    usb_ctrl_xfer(0x21, 0xFF, 0, xhci_msc_interface_num, 0, 0, false);
+    // Do NOT send a gratuitous Bulk-Only Mass Storage Reset here. The
+    // port reset + SET_CONFIGURATION above already established a fresh
+    // transport, and the BOT specification defines its reset request as
+    // only the first step of Reset Recovery, followed by Clear Feature
+    // HALT on Bulk-In and then Bulk-Out (msc_recover_transport performs
+    // that complete sequence when an actual transport failure needs it).
+    // Sending only the reset request here left this SanDisk drive in a
+    // state where reads happened to work but WRITE(10) always STALLed its
+    // CSW; Linux usbfs reproduced the same persistent failure.
 
     // TEST UNIT READY, retried: a flash drive routinely reports Not
     // Ready for the first moment after configuration while it spins up
