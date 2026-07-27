@@ -7,8 +7,6 @@
 // --forbid-trap.  The follow-up hardening pass below makes current-TTBR
 // authority explicit in the ownership API.
 
-use "examples/vm_page_map/vm_page_map_core.tkb";
-
 fn app_main() {
     page_pool_init();
     uart_puts("vm_context_switch\n");
@@ -31,7 +29,7 @@ fn app_main() {
                     let core0: usize = 0;
                     let (space_a, active_a) =
                         address_space_activate(inactive_a, core0);
-                    let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+                    let va = dynamic_va_base();
                     let (occupied_a, pending_a) = map_page(space_a, page_a, va);
                     let mapping_a = tlb_invalidate(occupied_a, pending_a);
 

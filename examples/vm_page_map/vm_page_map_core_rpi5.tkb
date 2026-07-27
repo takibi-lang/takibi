@@ -140,6 +140,30 @@ fn address_space_activate(space: sink AddressSpaceOwner[asid, SpaceState::Inacti
     return (empty, active);
 }
 
+fn address_space_switch(active: sink ActiveAddressSpace[core, old_asid],
+                        space: borrow AddressSpaceOwner[asid, state])
+        -> ActiveAddressSpace[core, asid] {
+    mmu_address_space_activate(space.slot);
+    tlb_invalidate_all_el2();
+    let mut next: ActiveAddressSpace[core, asid] =
+        { active.core_tag, space.tag };
+    return next;
+}
+
+fn address_space_switch_activate(
+        active: sink ActiveAddressSpace[core, old_asid],
+        space: sink AddressSpaceOwner[asid, SpaceState::Inactive])
+        -> (AddressSpaceOwner[asid, SpaceState::Empty],
+            ActiveAddressSpace[core, asid]) {
+    mmu_address_space_activate(space.slot);
+    tlb_invalidate_all_el2();
+    let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] =
+        { space.tag, space.slot };
+    let mut next: ActiveAddressSpace[core, asid] =
+        { active.core_tag, space.tag };
+    return (empty, next);
+}
+
 fn address_space_deactivate(active: sink ActiveAddressSpace[core, asid],
                             space: sink AddressSpaceOwner[asid, SpaceState::Empty])
         -> AddressSpaceOwner[asid, SpaceState::Inactive] {
@@ -148,6 +172,21 @@ fn address_space_deactivate(active: sink ActiveAddressSpace[core, asid],
     let mut inactive: AddressSpaceOwner[asid, SpaceState::Inactive] =
         { space.tag, space.slot };
     return inactive;
+}
+
+fn address_space_deactivate_to(
+        active: sink ActiveAddressSpace[core, asid],
+        space: sink AddressSpaceOwner[asid, SpaceState::Empty],
+        fallback: borrow AddressSpaceOwner[next_asid, next_state])
+        -> (AddressSpaceOwner[asid, SpaceState::Inactive],
+            ActiveAddressSpace[core, next_asid]) {
+    mmu_address_space_activate(fallback.slot);
+    tlb_invalidate_all_el2();
+    let mut inactive: AddressSpaceOwner[asid, SpaceState::Inactive] =
+        { space.tag, space.slot };
+    let mut next: ActiveAddressSpace[core, next_asid] =
+        { active.core_tag, fallback.tag };
+    return (inactive, next);
 }
 
 fn address_space_free(space: sink AddressSpaceOwner[asid, SpaceState::Inactive]) {

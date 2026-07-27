@@ -1730,7 +1730,7 @@ RPI3_VM_CONTEXT_SWITCH_EXAMPLES := vm_context_switch
 RPI3_VM_CONTEXT_SWITCH_OBJS := $(foreach e,$(RPI3_VM_CONTEXT_SWITCH_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_VM_CONTEXT_SWITCH_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) examples/vm_page_map/vm_page_map_core.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 # Issue #67 Stage 6 baseline: timer-preempted tasks switch saved SP and
 # TTBR0_EL2 together. Keep --forbid-trap off until the hardware baseline is
@@ -2500,6 +2500,12 @@ $(RPI5_SMP_VM_OBJS): examples/%_rpi5.o: examples/%.tkb examples/vm_page_map/vm_p
 
 $(RPI5_SMP_VM_KERNELS): examples/%/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_SMP_O) $(COMMON_RPI5_SMP_EL3_O) $(COMMON_SEM_ASM_O) examples/%/$$*_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_SMP_O) $(COMMON_RPI5_SMP_EL3_O) $(COMMON_SEM_ASM_O) examples/$*/$*_rpi5.o -o $@
+
+examples/vm_context_switch/vm_context_switch_rpi5.o: examples/vm_context_switch/vm_context_switch.tkb examples/vm_page_map/vm_page_map_core_rpi5.tkb $(COMMON_RPI5_TLB_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) examples/vm_page_map/vm_page_map_core_rpi5.tkb $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+examples/vm_context_switch/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) examples/vm_context_switch/vm_context_switch_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) examples/vm_context_switch/vm_context_switch_rpi5.o -o $@
 
 ## RPI5_SERIAL_DEV: same convention as STM32_SERIAL_DEV/RPI3_SERIAL_DEV --
 ## empty by default, resolved at runtime by scripts/rpi5_uart_dev.sh (which
