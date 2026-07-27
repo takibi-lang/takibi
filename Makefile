@@ -2395,6 +2395,18 @@ examples/fat12_usbmsc_rpi5/fat12_usbmsc_rpi5_rpi5.o: examples/fat12_usbmsc_rpi5/
 examples/fat12_usbmsc_rpi5/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/fat12_usbmsc_rpi5/fat12_usbmsc_rpi5_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/fat12_usbmsc_rpi5/fat12_usbmsc_rpi5_rpi5.o -o $@
 
+## fatfs_sdcard on RPi5: despite the historical name, the application is
+## storage-backend independent.  This rule gives it the RP1 xHCI/FAT12 USB
+## Mass Storage adapter, exactly as RPi3 gives the same source its DWC2
+## adapter.  Keep it outside RPI5_EXAMPLES for now: unlike the ordinary
+## smoke suite, this example deliberately reformats the attached USB medium.
+## It is run explicitly after the operator has selected sacrificial media.
+examples/fatfs_sdcard/fatfs_sdcard_rpi5.o: examples/fatfs_sdcard/fatfs_sdcard.tkb $(COMMON_RPI5_DMA_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+examples/fatfs_sdcard/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/fatfs_sdcard/fatfs_sdcard_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/fatfs_sdcard/fatfs_sdcard_rpi5.o -o $@
+
 ## RPI5_SERIAL_DEV: same convention as STM32_SERIAL_DEV/RPI3_SERIAL_DEV --
 ## empty by default, resolved at runtime by scripts/rpi5_uart_dev.sh (which
 ## picks the ttyACM device out by its /dev/serial/by-id label, not by
