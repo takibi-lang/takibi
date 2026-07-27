@@ -41,16 +41,22 @@ fn timer_gic_init() {
     let gicd_ctlr: *io u32 = 0x107FFF9000;
     let gicd_isenabler0: *io u32 = 0x107FFF9100;
     let gicd_icpendr0: *io u32 = 0x107FFF9200;
+    let gicd_igroupr0: *io u32 = 0x107FFF9080;
     let gicc_ctlr: *io u32 = 0x107FFFA000;
     let gicc_pmr: *io u32 = 0x107FFFA004;
 
     // PPI state is banked per CPU; this enables CNTP only for the executing
     // core.  Clear a stale pending state left by an earlier SWD payload.
+    // TF-A parks secondary cores at EL3 and does not leave their banked PPI
+    // group state equal to core 0's.  Select Non-secure Group 1 explicitly;
+    // otherwise CNTP can expire (ISTATUS=1) without being delivered at EL2.
+    *gicd_igroupr0 = *gicd_igroupr0 | (1 << CNTP_PPI_INTID);
     *gicd_icpendr0 = 1 << CNTP_PPI_INTID;
     *gicd_isenabler0 = 1 << CNTP_PPI_INTID;
     *gicd_ctlr = *gicd_ctlr | 1;
-    *gicc_pmr = 0xFF;
     *gicc_ctlr = *gicc_ctlr | 1;
+    *gicc_pmr = 0xFF;
+    dma_publish();
 }
 
 fn timer_init() {
@@ -60,6 +66,10 @@ fn timer_init() {
     // Startup has already set HCR_EL2.IMO; unmask only after the GIC and
     // comparator are both configured.
     rpi5_timer_enable_irq();
+}
+
+fn timer_init_core(core: {0..<4 as usize}) {
+    timer_init();
 }
 
 fn scheduler_init() {
@@ -84,4 +94,9 @@ fn rpi3_timer_irq_pending() -> bool {
     }
     *gicc_eoir = id;
     return false;
+}
+
+
+fn rpi3_timer_irq_pending_core(core: {0..<4 as usize}) -> bool {
+    return rpi3_timer_irq_pending();
 }

@@ -3,8 +3,6 @@
 // together.  Each CPU retains its boot-minted CpuOwner while the address
 // space is in transit; only the destination can resume the saved frame.
 
-use "examples/vm_page_map/vm_page_map_core.tkb";
-
 extern fn rpi3_core_id() -> usize;
 extern fn enable_irq();
 
@@ -95,7 +93,7 @@ fn transfer_take() -> MigrationTransfer {
 }
 
 fn migrating_task() {
-    let shared_va: *io u8 = 0x80000000;
+    let shared_va: *io u8 = dynamic_va_base() as *io u8;
     seen_core0 = *shared_va;
     dma_publish();
     task_migratable = 1;
@@ -179,7 +177,7 @@ fn core1_migrate_main(cpu: CpuOwner[1]) {
     dma_consume();
     mmu_address_space_activate(0);
     tlb_invalidate_all_el2();
-    let shared_va: *io u8 = 0x80000000;
+    let shared_va: *io u8 = dynamic_va_base() as *io u8;
     seen_core1_before = *shared_va;
     dma_publish();
     migrate_stage = 2;
@@ -262,7 +260,7 @@ fn core0_migrate_main(cpu: CpuOwner[0]) {
             let slot0: {0..<2 as usize} = 0;
             let inactive = address_space_new(slot0);
             let (space, active) = address_space_activate_cpu(cpu, inactive);
-            let va: {0x80000000..<0x80200000 as usize} = 0x80000000;
+            let va = dynamic_va_base();
             let (occupied, pending) = map_page(space, old_page, va);
             let mapping = tlb_invalidate(occupied, pending);
             let lease = mapping_va_acquire(active, occupied, mapping);

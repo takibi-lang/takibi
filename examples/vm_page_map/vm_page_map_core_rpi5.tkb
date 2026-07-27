@@ -171,6 +171,27 @@ fn address_space_switch(active: sink ActiveAddressSpace[core, old_asid],
     return next;
 }
 
+fn address_space_resume_cpu(
+        cpu: sink CpuOwner[core],
+        space: borrow AddressSpaceOwner[asid, state])
+        -> ActiveAddressSpace[core, asid] {
+    mmu_address_space_activate(space.slot);
+    tlb_invalidate_all_el2();
+    let mut active: ActiveAddressSpace[core, asid] =
+        { cpu.core_id, space.tag };
+    return active;
+}
+
+fn address_space_release_cpu(
+        active: sink ActiveAddressSpace[core, asid],
+        space: borrow AddressSpaceOwner[asid, state])
+        -> CpuOwner[core] {
+    mmu_address_space_activate(0);
+    tlb_invalidate_all_el2();
+    let mut cpu: CpuOwner[core] = { active.core_tag };
+    return cpu;
+}
+
 fn address_space_switch_activate(
         active: sink ActiveAddressSpace[core, old_asid],
         space: sink AddressSpaceOwner[asid, SpaceState::Inactive])
@@ -251,6 +272,78 @@ variant VmTaskSwitchState {
            (ActiveAddressSpace[core, b],
             AddressSpaceOwner[a, SpaceState::Occupied], MappingOwner[a, va0, p0],
             AddressSpaceOwner[b, SpaceState::Occupied], MappingOwner[b, va1, p1]));
+}
+
+enum MigrationRunState: u8 { Saved; Running; }
+
+private linear struct MigratingTask[src: usize, dst: usize,
+                                    state: MigrationRunState] {
+    private frame_sp: usize;
+    private source_tag: usize @ src;
+    private destination_tag: usize @ dst;
+}
+
+variant MigrationTaskSlot {
+    Empty;
+    RunningOn0(MigratingTask[0, 1, MigrationRunState::Running]);
+    SavedFrom0(MigratingTask[0, 1, MigrationRunState::Saved]);
+    RunningOn1(MigratingTask[1, 0, MigrationRunState::Running]);
+    SavedFrom1(MigratingTask[1, 0, MigrationRunState::Saved]);
+}
+
+fn migration_task_new_0_to_1(frame_sp: usize) -> MigrationTaskSlot {
+    let mut task: MigratingTask[0, 1, MigrationRunState::Running] =
+        { frame_sp, 0, 1 };
+    return MigrationTaskSlot::RunningOn0(task);
+}
+
+fn migration_task_quiesce_0_to_1(
+        task: sink MigratingTask[0, 1, MigrationRunState::Running],
+        frame_sp: usize, ready: {1..<2 as usize}) -> MigrationTaskSlot {
+    let mut saved: MigratingTask[0, 1, MigrationRunState::Saved] =
+        { frame_sp, task.source_tag, task.destination_tag };
+    return MigrationTaskSlot::SavedFrom0(saved);
+}
+
+fn migration_task_resume_on_1(
+        task: sink MigratingTask[0, 1, MigrationRunState::Saved],
+        active: borrow ActiveAddressSpace[1, asid],
+        mapping: borrow MappingOwner[asid, va, p])
+        -> MigrationTaskSlot {
+    let sp: usize = task.frame_sp;
+    let mut running: MigratingTask[1, 0, MigrationRunState::Running] =
+        { sp, task.destination_tag, task.source_tag };
+    return MigrationTaskSlot::RunningOn1(running);
+}
+
+fn migration_task_quiesce_1_to_0(
+        task: sink MigratingTask[1, 0, MigrationRunState::Running],
+        frame_sp: usize, ready: {1..<2 as usize}) -> MigrationTaskSlot {
+    let mut saved: MigratingTask[1, 0, MigrationRunState::Saved] =
+        { frame_sp, task.source_tag, task.destination_tag };
+    return MigrationTaskSlot::SavedFrom1(saved);
+}
+
+fn migration_saved_frame(
+        task: borrow MigratingTask[src, dst, MigrationRunState::Saved])
+        -> usize { return task.frame_sp; }
+
+fn migration_task_discard(
+        task: sink MigratingTask[src, dst, MigrationRunState::Saved]) {}
+
+fn migration_running_discard(
+        task: sink MigratingTask[src, dst, MigrationRunState::Running]) {}
+
+variant MigrationTransfer {
+    Empty;
+    Outbound(exists asid: usize. exists va: usize. exists p: usize.
+             (MigratingTask[0, 1, MigrationRunState::Saved],
+              AddressSpaceOwner[asid, SpaceState::Occupied],
+              MappingOwner[asid, va, p]));
+    Returned(exists asid: usize. exists va: usize. exists p: usize.
+             (MigratingTask[1, 0, MigrationRunState::Saved],
+              AddressSpaceOwner[asid, SpaceState::Occupied],
+              MappingOwner[asid, va, p]));
 }
 
 // examples/common_rpi5/mmu.S's L1[1] dynamic window: 0x40000000-0x401FFFFF
