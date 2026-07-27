@@ -1,5 +1,13 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
+The newest status sections are authoritative. Older dated sections are kept
+as an engineering record of measured intermediate failures; statements such
+as "still open", "next", or "out of scope" inside a section explicitly
+marked earlier/superseded describe that checkpoint, not the current tree.
+Current status: every non-Ethernet member of `RPI3_EXAMPLES` is ported and
+`make hwcheck-rpi5` passes 78/78 on real hardware. The suite reformats its
+attached USB mass-storage device.
+
 ## Status update (2026-07-27): two-core SMP handoff works via an EL3-to-EL2 debug trampoline
 
 BCM2712 secondary cores remain in TF-A's EL3H park loop, and this board's
@@ -1633,8 +1641,9 @@ run `make hwcheck-rpi5` and update this file + `HISTORY.md` + the
 `rtc`/`timer`/`irq`/`echo`/USB/networking/EL0/EL1/SMP examples and their
 RPi3 equivalents. This paragraph records the earlier staged-port state;
 issues #165, #170, and #164 subsequently supplied the MMU, RTC/timer, and
-RP1 UART0 IRQ prerequisites respectively. USB, networking, EL0/EL1, and
-SMP remain out of scope until a concrete prerequisite task needs them.
+RP1 UART0 IRQ prerequisites respectively. USB Mass Storage, EL0/EL1, and
+two-core SMP were subsequently completed too; Ethernet remains the only
+intentionally unported RPi3 example family.
 
 **The architectural constraint confirmed 2026-07-25 through extensive
 real-hardware debugging (see "A real bug this port found" and "UART
@@ -1974,6 +1983,10 @@ automatic test existed) -- if the board is not already parked at the
 stub (e.g. it just booted Raspberry Pi OS instead), flash the stub and
 power-cycle by hand first, or try `scripts/rpi5_jtag_reset.sh` on its
 own.
+
+The target includes `usb_msc_probe`, `fatfs_sdcard`,
+`rtos_fatfs_sdcard`, and `el0_shell`; these deliberately overwrite or
+format the USB medium. Only attach the dedicated sacrificial test drive.
 
 ## RP1 PCIe enumeration -- GitHub issue #161
 
