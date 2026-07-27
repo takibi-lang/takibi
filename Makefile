@@ -2100,6 +2100,7 @@ COMMON_RPI5_PRINT        := $(COMMON_RPI5_DIR)/print.tkb
 COMMON_RPI5_PCIE         := $(COMMON_RPI5_DIR)/pcie.tkb
 COMMON_RPI5_INTC         := $(COMMON_RPI5_DIR)/intc.tkb
 COMMON_RPI5_RTC          := $(COMMON_RPI5_DIR)/rtc.tkb
+COMMON_RPI5_TIMER        := $(COMMON_RPI5_DIR)/timer.tkb
 COMMON_RPI5_JTAG_STUB_S  := $(COMMON_RPI5_DIR)/jtag_stub.S
 COMMON_RPI5_JTAG_STUB_O  := $(COMMON_RPI5_DIR)/jtag_stub.o
 COMMON_RPI5_JTAG_STUB_LD := $(COMMON_RPI5_DIR)/jtag_stub.ld
@@ -2214,6 +2215,17 @@ RPI5_IRQ_OBJS      := $(foreach e,$(RPI5_IRQ_EXAMPLES),examples/$(e)/$(e)_rpi5.o
 $(RPI5_IRQ_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_INTC) $(COMMON_GIC_REGS) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_INTC) $(COMMON_GIC_REGS) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
 
+## RPI5_SCHED_EXAMPLES: ARM Generic Timer PPI 30 through BCM2712's GIC.
+## common_rpi5/timer.tkb deliberately preserves the scheduler examples'
+## existing rpi3_irq_dispatch hook as a compatibility boundary, so their
+## target-independent scheduling logic remains one shared source file.
+RPI5_SCHED_EXAMPLES     := preempt watchdog
+RPI5_SCHED_SEM_EXAMPLES := semaphore condvar msgqueue rtos_demo chan_rendezvous
+RPI5_SCHED_OBJS         := $(foreach e,$(RPI5_SCHED_EXAMPLES) $(RPI5_SCHED_SEM_EXAMPLES),examples/$(e)/$(e)_rpi5.o)
+
+$(RPI5_SCHED_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_TIMER) $(COMMON_STM32_STUB) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_TIMER) $(COMMON_STM32_STUB) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
 ## RPI5_RTC_EXAMPLES: GitHub issue #170 -- rtc/timer need only
 ## rtc_init/rtc_is_running/rtc_read_seconds (examples/common_rpi5/
 ## rtc.tkb, pure CNTPCT_EL0/CNTFRQ_EL0 polling), no interrupt/GIC work
@@ -2324,13 +2336,14 @@ RPI5_HVC_SMOKE_EXAMPLES := hvc_smoke
 RPI5_VM_PAGE_MAP_EXAMPLES := vm_page_map
 RPI5_EL0_SMOKE_EXAMPLES := el0_smoke
 RPI5_EL0_ELF_LOAD_EXAMPLES := el0_elf_load
-RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES) $(RPI5_EL1_SMOKE_EXAMPLES) $(RPI5_HVC_SMOKE_EXAMPLES) $(RPI5_VM_PAGE_MAP_EXAMPLES) $(RPI5_EL0_SMOKE_EXAMPLES) $(RPI5_EL0_ELF_LOAD_EXAMPLES)
+RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES) $(RPI5_SCHED_EXAMPLES) $(RPI5_SCHED_SEM_EXAMPLES) $(RPI5_EL1_SMOKE_EXAMPLES) $(RPI5_HVC_SMOKE_EXAMPLES) $(RPI5_VM_PAGE_MAP_EXAMPLES) $(RPI5_EL0_SMOKE_EXAMPLES) $(RPI5_EL0_ELF_LOAD_EXAMPLES)
 RPI5_KERNELS  := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_EL1_SMOKE_KERNELS := $(foreach e,$(RPI5_EL1_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_HVC_SMOKE_KERNELS := $(foreach e,$(RPI5_HVC_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_VM_PAGE_MAP_KERNELS := $(foreach e,$(RPI5_VM_PAGE_MAP_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_EL0_SMOKE_KERNELS := $(foreach e,$(RPI5_EL0_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_EL0_ELF_LOAD_KERNELS := $(foreach e,$(RPI5_EL0_ELF_LOAD_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
+RPI5_SEM_KERNELS := $(foreach e,$(RPI5_SCHED_SEM_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 # el1_smoke/hvc_smoke/vm_page_map/el0_smoke/el0_elf_load's kernels have
 ## their OWN explicit link rules above (extra COMMON_RPI5_EL1_ASM_O/
 ## HVC_ASM_O/TLB_ASM_O/EL0_ASM_O/EL0_TEST_IMAGE_O inputs, and their
@@ -2338,7 +2351,7 @@ RPI5_EL0_ELF_LOAD_KERNELS := $(foreach e,$(RPI5_EL0_ELF_LOAD_EXAMPLES),examples/
 ## the generic static pattern rule below does not ALSO claim to define
 ## them, matching RPi3's own RPI3_GENERIC_KERNELS filter-out convention
 ## for the identical reason.
-RPI5_GENERIC_KERNELS := $(filter-out $(RPI5_EL1_SMOKE_KERNELS) $(RPI5_HVC_SMOKE_KERNELS) $(RPI5_VM_PAGE_MAP_KERNELS) $(RPI5_EL0_SMOKE_KERNELS) $(RPI5_EL0_ELF_LOAD_KERNELS),$(RPI5_KERNELS))
+RPI5_GENERIC_KERNELS := $(filter-out $(RPI5_EL1_SMOKE_KERNELS) $(RPI5_HVC_SMOKE_KERNELS) $(RPI5_VM_PAGE_MAP_KERNELS) $(RPI5_EL0_SMOKE_KERNELS) $(RPI5_EL0_ELF_LOAD_KERNELS) $(RPI5_SEM_KERNELS),$(RPI5_KERNELS))
 
 ## Every RPi5 kernel links COMMON_RPI5_TIMER_ASM_O unconditionally --
 ## unlike RPi3, where only the RTC_EXAMPLES/timer-needing group needs
@@ -2350,6 +2363,10 @@ RPI5_GENERIC_KERNELS := $(filter-out $(RPI5_EL1_SMOKE_KERNELS) $(RPI5_HVC_SMOKE_
 $(RPI5_GENERIC_KERNELS): examples/%/kernel_rpi5.elf: \
     $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) examples/%/$$*_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) examples/$*/$*_rpi5.o -o $@
+
+$(RPI5_SEM_KERNELS): examples/%/kernel_rpi5.elf: \
+    $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_SEM_ASM_O) examples/%/$$*_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_SEM_ASM_O) examples/$*/$*_rpi5.o -o $@
 
 ## rp1_pcie_smoke: GitHub issue #161's own first real-hardware test --
 ## brings up RP1's PCIe link (examples/common_rpi5/pcie.tkb) and, if

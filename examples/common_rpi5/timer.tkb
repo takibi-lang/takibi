@@ -1,0 +1,87 @@
+// Raspberry Pi 5 (BCM2712) preemptive-scheduler timer HAL.
+//
+// The ARM Generic Timer physical comparator raises PPI INTID 30 through the
+// BCM2712 GIC.  This mirrors common_qemu/timer.tkb's architectural timer
+// configuration, while using the already-proven BCM2712 GIC CPU/distributor
+// addresses from common_rpi5/intc.tkb.  It deliberately does not depend on
+// intc.tkb: that file owns RP1 UART MSI-X dispatch, whereas a scheduler must
+// return a different interrupted frame SP.
+//
+// Existing portable scheduler examples call rpi3_timer_irq_pending() from
+// their target hook.  Keep that public spelling as a compatibility shim: RPi5
+// startup forwards its default rpi5_irq_dispatch to that hook, so the shared
+// application sources need neither copies nor target conditionals.
+
+use "examples/common_rpi5/timer_asm_extern.tkb";
+
+extern fn set_cntp_tval(n: i32);
+extern fn enable_cntp();
+extern fn disable_cntp();
+extern fn task_exit_stub();
+extern fn rpi5_timer_enable_irq();
+
+const CNTP_PPI_INTID: u32 = 30;
+
+fn setup_task_stack(s: *u8, f: fn() -> void) -> usize {
+    let base: *u8 = s - 272;
+    for i: i32 in 0..<272 {
+        *(base + i) = 0 as u8;
+    }
+    let p_elr: *fn() -> void = (base + 256) as *fn() -> void;
+    *p_elr = f;
+    // Every RPi5 Takibi payload runs at EL2h.
+    let p_spsr: *i32 = (base + 264) as *i32;
+    *p_spsr = 0x09;
+    let p_x30: *fn() -> void = (base + 240) as *fn() -> void;
+    *p_x30 = task_exit_stub;
+    return base as usize;
+}
+
+fn timer_gic_init() {
+    let gicd_ctlr: *io u32 = 0x107FFF9000;
+    let gicd_isenabler0: *io u32 = 0x107FFF9100;
+    let gicd_icpendr0: *io u32 = 0x107FFF9200;
+    let gicc_ctlr: *io u32 = 0x107FFFA000;
+    let gicc_pmr: *io u32 = 0x107FFFA004;
+
+    // PPI state is banked per CPU; this enables CNTP only for the executing
+    // core.  Clear a stale pending state left by an earlier SWD payload.
+    *gicd_icpendr0 = 1 << CNTP_PPI_INTID;
+    *gicd_isenabler0 = 1 << CNTP_PPI_INTID;
+    *gicd_ctlr = *gicd_ctlr | 1;
+    *gicc_pmr = 0xFF;
+    *gicc_ctlr = *gicc_ctlr | 1;
+}
+
+fn timer_init() {
+    timer_gic_init();
+    set_cntp_tval((read_cntfrq() >> 6) as i32);
+    enable_cntp();
+    // Startup has already set HCR_EL2.IMO; unmask only after the GIC and
+    // comparator are both configured.
+    rpi5_timer_enable_irq();
+}
+
+fn scheduler_init() {
+    timer_init();
+}
+
+fn scheduler_disable() {
+    disable_cntp();
+}
+
+fn scheduler_rearm_tick() {
+    set_cntp_tval((read_cntfrq() >> 6) as i32);
+}
+
+fn rpi3_timer_irq_pending() -> bool {
+    let gicc_iar: *io u32 = 0x107FFFA00C;
+    let gicc_eoir: *io u32 = 0x107FFFA010;
+    let id: u32 = *gicc_iar;
+    if (id == CNTP_PPI_INTID) {
+        *gicc_eoir = id;
+        return true;
+    }
+    *gicc_eoir = id;
+    return false;
+}

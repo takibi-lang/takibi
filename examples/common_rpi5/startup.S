@@ -195,15 +195,31 @@ enable_irq:
     msr     DAIFClr, #0x2
     ret
 
+/* Timer HAL-private spelling.  common/rtos.tkb owns the public enable_irq
+   extern declaration, so the scheduler HAL uses this alias to remain
+   composable with that file without a duplicate extern declaration. */
+    .global rpi5_timer_enable_irq
+rpi5_timer_enable_irq:
+    msr     DAIFClr, #0x2
+    ret
+
     .global disable_irq
 disable_irq:
     msr     DAIFSet, #0x2
     ret
 
-/* Default same-frame IRQ dispatch for kernels that configure no source.
-   The UART interrupt builds link a strong Takibi definition from intc.tkb. */
+/* Default IRQ dispatch for kernels that configure no RPi5-native source.
+   The UART builds link a strong rpi5_irq_dispatch from intc.tkb.  The
+   scheduler examples already expose the long-established rpi3_irq_dispatch
+   hook: forward to it by default so their target-independent tick/switch
+   logic can be reused unchanged on RPi5.  A weak same-frame fallback keeps
+   ordinary non-interrupt kernels harmless. */
     .weak   rpi5_irq_dispatch
 rpi5_irq_dispatch:
+    b       rpi3_irq_dispatch
+
+    .weak   rpi3_irq_dispatch
+rpi3_irq_dispatch:
     ret
 
 /* sync_exception_evidence: ESR_EL2/FAR_EL2/ELR_EL2, written by the
