@@ -1,0 +1,8 @@
+disk_initialize: OK
+disk_status: OK
+sector 0: PASS
+sector 1: PASS
+sector 2: PASS
+sector 3: PASS
+usb_msc: ALL PASS
+done

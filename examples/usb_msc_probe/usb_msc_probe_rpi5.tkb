@@ -1,0 +1,49 @@
+// RP1 xHCI USB Mass Storage transport checkpoint for RPi5.
+// Writes four deterministic sectors in an explicitly disposable region and
+// reads them back through disk_write/disk_read, independently of FAT12.
+
+use "examples/common_rpi5/usb_xhci.tkb";
+
+const TEST_LBA: usize = 1000000;
+const TEST_SECTORS: usize = 4;
+
+fn probe_pattern(sector: usize, i: usize) -> u8 {
+    return ((sector + i) & 0xFF) as u8;
+}
+
+fn app_main() {
+    match disk_initialize() {
+        DiskIoResult::Err(e) => { uart_puts("disk_initialize: FAIL\r\n"); return; }
+        DiskIoResult::Ok => { uart_puts("disk_initialize: OK\r\n"); }
+    }
+    match disk_status() {
+        DiskIoResult::Err(e) => { uart_puts("disk_status: FAIL\r\n"); return; }
+        DiskIoResult::Ok => { uart_puts("disk_status: OK\r\n"); }
+    }
+    let mut all_ok: bool = true;
+    for s: usize in 0..<TEST_SECTORS {
+        let mut wbuf: [u8; 512] align(64);
+        for i: usize in 0..<512 { wbuf[i] = probe_pattern(s, i); }
+        match disk_write((TEST_LBA + s) as u32, wbuf as *u8) {
+            DiskIoResult::Ok => {}
+            DiskIoResult::Err(e) => { all_ok = false; }
+        }
+    }
+    for s: usize in 0..<TEST_SECTORS {
+        let mut rbuf: [u8; 512] align(64);
+        let mut matches: bool = true;
+        match disk_read((TEST_LBA + s) as u32, rbuf as *u8) {
+            DiskIoResult::Ok => {
+                for i: usize in 0..<512 {
+                    if (rbuf[i] != probe_pattern(s, i)) { matches = false; }
+                }
+            }
+            DiskIoResult::Err(e) => { matches = false; }
+        }
+        uart_puts("sector "); uart_print(s);
+        if (matches) { uart_puts(": PASS\r\n"); } else { uart_puts(": FAIL\r\n"); all_ok = false; }
+    }
+    if (all_ok) { uart_puts("usb_msc: ALL PASS\r\n"); }
+    else { uart_puts("usb_msc: FAIL\r\n"); }
+    uart_puts("done\r\n");
+}
