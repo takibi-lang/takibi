@@ -927,18 +927,8 @@ variant FatOpenFdResult {
     Error(usize);
 }
 
-// Collapses FatOpenFdResult to the one usize el0_svc_dispatch actually
-// returns either way (a real fd, or a real -errno -- Linux's own single-
-// register convention already treats those the same way). Written as
-// its own top-level function, NOT a `match` inlined directly inside
-// another match arm that already bound an existential FatFile[file] --
-// confirmed necessary the hard way: nesting a second `match` inside a
-// match arm that binds an existential payload crashed this compiler's
-// own codegen (an internal `Not_found` in its enum_variants_tbl lookup).
-// examples/fatfs_sdcard/fatfs_sdcard.tkb's own `FatOpenResult::Opened(fp)
-// => { ...fat_io_ok(fat_read(...))... }` already avoids this same shape
-// by calling a boolean helper instead of matching inline -- this is the
-// same fix, generalized to a value instead of a bool.
+// Kept out of FatOpenResult::Opened's existential-binding arm for the
+// nested-match codegen workaround tracked by GitHub issue #168.
 fn fat_open_fd_result_value(r: FatOpenFdResult) -> usize {
     match r {
         FatOpenFdResult::Fd(fd) => { return fd; }
@@ -946,94 +936,10 @@ fn fat_open_fd_result_value(r: FatOpenFdResult) -> usize {
     }
 }
 
-// A local restatement of fat12.tkb's own fat_io_ok. Confirmed via
-// real-hardware... rather, real-compiler trial: calling `fat_io_ok`
-// (or this identically-shaped local copy) from FOUR levels deep inside
-// el0_svc_dispatch's own `match syscall_num` arm (if fd >= .. { if slot
-// < .. { match state { Open(file) => { ... here ... } } } }) crashed
-// this compiler's own codegen either way (an invalid `zext { i32, i32 }
-// to i64` trying to coerce FatIoResult's own struct representation into
-// the callee's parameter type) -- so the actual trigger is nesting
-// depth inside one giant function, not which function gets called. The
-// real fix (see fat_fd_read/fat_fd_write/fat_fd_close below) is pulling
-// that whole body out into its own top-level function, the same
-// "coarsest thing that fixes it" response as this codebase's own
-// %zext/match-in-existential-arm bugs found earlier in this same
-// change. This helper stays -- it's genuinely useful once nesting is
-// shallow again -- but is no longer the fix by itself.
 fn fat_io_result_ok(r: FatIoResult) -> bool {
     match r {
         FatIoResult::Ok => { return true; }
         FatIoResult::Err(err) => { return false; }
-    }
-}
-
-// GitHub issue #157: the actual fd>=3 read/write/close bodies, pulled
-// out of el0_svc_dispatch's own match arms into their own top-level
-// functions -- see fat_io_result_ok's comment above for why (a real
-// compiler codegen limit on how deeply nested one function's control
-// flow can get, discovered via this exact code). Each takes an already-
-// narrowed `slot` so fat_fd_take/fat_fd_put's own {0..<MAX_OPEN_FILES}
-// parameter stays satisfied without re-deriving the narrowing here.
-fn fat_fd_read(slot: {0..<MAX_OPEN_FILES as usize}, buf: *u8, len: u32) -> usize {
-    let state: FatFdState = fat_fd_take(slot);
-    match state {
-        FatFdState::Empty => {
-            return ERR_EBADF;
-        }
-        FatFdState::Open(mut file) => {
-            let mut br: u32 = 0;
-            let result: FatIoResult = fat_read(file, buf, len, &br);
-            fat_fd_put(slot, FatFdState::Open(file));
-            if (fat_io_result_ok(result) == true) {
-                return br as usize;
-            }
-            return SYSCALL_ERROR;
-        }
-    }
-}
-
-fn fat_fd_write(slot: {0..<MAX_OPEN_FILES as usize}, buf: *u8, len: u32) -> usize {
-    let state: FatFdState = fat_fd_take(slot);
-    match state {
-        FatFdState::Empty => {
-            return ERR_EBADF;
-        }
-        FatFdState::Open(mut file) => {
-            let mut bw: u32 = 0;
-            let result: FatIoResult = fat_write(file, buf, len, &bw);
-            fat_fd_put(slot, FatFdState::Open(file));
-            if (fat_io_result_ok(result) == true) {
-                return bw as usize;
-            }
-            return SYSCALL_ERROR;
-        }
-    }
-}
-
-// close() on a slot that is already Empty returns success (0), not
-// ERR_EBADF -- confirmed necessary via a real strace of this exact
-// busybox binary running `read var < file` (see fat_dup3_stdin below):
-// ash's own redirection machinery calls close() on an fd it just
-// dup3()ed AWAY from (the slot's content already moved elsewhere, so
-// the slot is legitimately, expectedly Empty at this point, not a
-// double-close bug) and does not appear to check close()'s return
-// value either way -- but reporting a spurious EBADF here for a
-// perfectly ordinary redirection cleanup step is still wrong on its own
-// terms, not just harmless.
-fn fat_fd_close(slot: {0..<MAX_OPEN_FILES as usize}) -> usize {
-    let state: FatFdState = fat_fd_take(slot);
-    match state {
-        FatFdState::Empty => {
-            return 0;
-        }
-        FatFdState::Open(file) => {
-            let close_result: FatIoResult = fat_close(file);
-            if (fat_io_result_ok(close_result) == true) {
-                return 0;
-            }
-            return SYSCALL_ERROR;
-        }
     }
 }
 
@@ -1447,7 +1353,21 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
                 if (slot < MAX_OPEN_FILES) {
                     let s: {0..<MAX_OPEN_FILES as usize} = slot;
                     let dst2: *u8 = buf as *u8;
-                    return (elr, fat_fd_read(s, dst2, len as u32));
+                    let state: FatFdState = fat_fd_take(s);
+                    match state {
+                        FatFdState::Empty => {
+                            return (elr, ERR_EBADF);
+                        }
+                        FatFdState::Open(mut file) => {
+                            let mut br: u32 = 0;
+                            let result: FatIoResult = fat_read(file, dst2, len as u32, &br);
+                            fat_fd_put(s, FatFdState::Open(file));
+                            if (fat_io_result_ok(result) == true) {
+                                return (elr, br as usize);
+                            }
+                            return (elr, SYSCALL_ERROR);
+                        }
+                    }
                 }
                 return (elr, SYSCALL_ERROR);
             }
@@ -1511,7 +1431,21 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
                 if (slot < MAX_OPEN_FILES) {
                     let s: {0..<MAX_OPEN_FILES as usize} = slot;
                     let src2: *u8 = buf as *u8;
-                    return (elr, fat_fd_write(s, src2, len as u32));
+                    let state: FatFdState = fat_fd_take(s);
+                    match state {
+                        FatFdState::Empty => {
+                            return (elr, ERR_EBADF);
+                        }
+                        FatFdState::Open(mut file) => {
+                            let mut bw: u32 = 0;
+                            let result: FatIoResult = fat_write(file, src2, len as u32, &bw);
+                            fat_fd_put(s, FatFdState::Open(file));
+                            if (fat_io_result_ok(result) == true) {
+                                return (elr, bw as usize);
+                            }
+                            return (elr, SYSCALL_ERROR);
+                        }
+                    }
                 }
                 return (elr, SYSCALL_ERROR);
             }
@@ -1742,7 +1676,21 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             // }` guard would not leave `slot` narrowed below.
             if (slot < MAX_OPEN_FILES) {
                 let s: {0..<MAX_OPEN_FILES as usize} = slot;
-                return (elr, fat_fd_close(s));
+                let state: FatFdState = fat_fd_take(s);
+                match state {
+                    FatFdState::Empty => {
+                        // ash closes the fd it just dup3()ed away from while
+                        // restoring stdin; the slot is legitimately empty.
+                        return (elr, 0);
+                    }
+                    FatFdState::Open(file) => {
+                        let result: FatIoResult = fat_close(file);
+                        if (fat_io_result_ok(result) == true) {
+                            return (elr, 0);
+                        }
+                        return (elr, SYSCALL_ERROR);
+                    }
+                }
             }
             // A real fd this kernel never tracks in the real file table
             // (e.g. the saved-original-stdin pseudo-fd fcntl(F_DUPFD_

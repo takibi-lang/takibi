@@ -28,6 +28,18 @@ test.  The original `el0_shell` workaround disappeared independently when its
 four stable owner globals became an indexed stable-owner array, so there was
 no remaining example-side rewrite to revert for this issue.
 
+### 2026-07-27: Small Aggregate Call Arguments (GitHub Issue #167)
+
+Small by-value aggregates now have an explicit codegen invariant: a value
+whose LLVM type is an aggregate may never fall through a scalar integer
+coercion arm.  Correct calls already match the callee's aggregate parameter
+type exactly; a disagreement now produces a controlled compiler error instead
+of invalid LLVM such as `zext { i32, i32 } to i64`.  A deeply nested call with
+an exactly-eight-byte two-field struct covers the original ABI shape through
+LLVM verification.  The `el0_shell` read/write/close bodies are again inline
+in their syscall arms, removing the top-level extraction used to avoid the
+old failure.
+
 ### 2026-07-27: RPi5 USB WRITE(10) Fixed -- Remove the Incomplete Initialization-Time BOT Reset
 
 The WRITE(10) data phase completed with xHCI Success/residue zero, but the

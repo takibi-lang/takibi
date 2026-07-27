@@ -1535,6 +1535,16 @@ let rec coerce v (dst : Ast.type_expr) =
   let vty    = type_of v in
   let dst_ll = ltype_of_ast dst in
   if vty = dst_ll then v
+  else if classify_type vty = TypeKind.Struct
+          && classify_type dst_ll = TypeKind.Integer then
+    (* An aggregate-to-integer conversion is never a Takibi ABI coercion.
+       In particular, do not let the scalar arms below manufacture an LLVM
+       zext/trunc with a struct operand when call-site type metadata and the
+       generated value disagree.  Correct by-value small aggregates already
+       have exactly the callee parameter's LLVM struct type and return above. *)
+    raise (Error (Printf.sprintf
+      "BUG: cannot coerce aggregate LLVM value %s to integer destination %s"
+      (string_of_lltype vty) (string_of_lltype dst_ll)))
   else match dst with
   | TypeTuple ts ->
       (* Element-wise re-coercion: a tuple built from unhinted literals can

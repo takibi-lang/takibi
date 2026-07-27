@@ -6204,6 +6204,30 @@ let codegen_tests = [
        }");
 
   Alcotest.test_case
+    "small two-field aggregate stays by-value at a deeply nested call" `Quick
+    (expect_codegen_ok
+      "struct CgSmallArg { status: i32; detail: i32; }
+       variant CgSmallState { Empty; Open(i32); }
+       fn cg_small_arg_ok(r: CgSmallArg) -> bool { return r.status == 0; }
+       fn cg_small_arg_deep(fd: usize, value: i32) -> usize {
+         if (fd >= 3) {
+           let slot: usize = fd - 3;
+           if (slot < 4) {
+             let state: CgSmallState = CgSmallState::Open(value);
+             match state {
+               CgSmallState::Empty => { return 9; }
+               CgSmallState::Open(v) => {
+                 let mut result: CgSmallArg = {v, 0};
+                 if (cg_small_arg_ok(result) == true) { return 1; }
+                 return 2;
+               }
+             }
+           }
+         }
+         return 3;
+       }");
+
+  Alcotest.test_case
     "authority pointer ABI erases the guard tie and returns a plain pointer" `Quick
     (fun () ->
       let src =
