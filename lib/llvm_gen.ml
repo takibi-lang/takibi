@@ -3853,6 +3853,7 @@ let gen_func ?prog_types fdef =
         let then_bb  = append_block context "then"  f in
         let else_bb  = append_block context "else"  f in
         let merge_bb = append_block context "merge" f in
+        let merge_reachable = ref false in
         ignore (build_cond_br cond_v then_bb else_bb builder);
 
         position_at_end then_bb builder;
@@ -3862,15 +3863,24 @@ let gen_func ?prog_types fdef =
         List.iter gen_stmt then_stmts;
         restore_narrowing     locals saved;
         restore_narrowing_mut saved_mut;
-        if block_terminator (insertion_block builder) = None then
+        if block_terminator (insertion_block builder) = None then begin
+          merge_reachable := true;
           ignore (build_br merge_bb builder);
+        end;
 
         position_at_end else_bb builder;
         List.iter gen_stmt else_stmts;
-        if block_terminator (insertion_block builder) = None then
-          ignore (build_br merge_bb builder);
+        if block_terminator (insertion_block builder) = None then begin
+          merge_reachable := true;
+          ignore (build_br merge_bb builder)
+        end;
 
-        position_at_end merge_bb builder
+        position_at_end merge_bb builder;
+        (* Like Match below, an if whose two branches terminate leaves its
+           synthetic merge block without predecessors.  Terminate that block
+           explicitly so gen_func's generic fallthrough return cannot invent
+           a scalar return for an unreachable aggregate-returning path. *)
+        if not !merge_reachable then ignore (build_unreachable builder)
 
     | Break ->
         let (break_bb, _) = Stack.top loop_stack in

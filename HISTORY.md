@@ -15,6 +15,19 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-27: All-Return If/Else LLVM Merge Blocks (GitHub Issue #166)
+
+An `if`/`else` whose every branch returned still left codegen positioned at
+an unterminated synthetic merge block with no predecessors.  The generic
+function epilogue then tried to synthesize a return there; for aggregate
+return types this produced invalid LLVM IR.  `If` lowering now tracks whether
+either branch reaches the merge and emits `unreachable` when neither does,
+matching the existing fully-terminating `match` handling.  A nested
+all-return chain returning a payload variant is a full-pipeline regression
+test.  The original `el0_shell` workaround disappeared independently when its
+four stable owner globals became an indexed stable-owner array, so there was
+no remaining example-side rewrite to revert for this issue.
+
 ### 2026-07-27: RPi5 USB WRITE(10) Fixed -- Remove the Incomplete Initialization-Time BOT Reset
 
 The WRITE(10) data phase completed with xHCI Success/residue zero, but the

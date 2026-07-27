@@ -6190,6 +6190,20 @@ let infer_tests = [
 
 let codegen_tests = [
   Alcotest.test_case
+    "all-return nested if/else terminates its unreachable merge blocks" `Quick
+    (expect_codegen_ok
+      "variant CgAllReturnResult { First(i32); Second(i32); Third(i32); }
+       fn cg_all_return_nested(x: i32) -> CgAllReturnResult {
+         if (x == 0) {
+           return CgAllReturnResult::First(x);
+         } else if (x == 1) {
+           return CgAllReturnResult::Second(x);
+         } else {
+           return CgAllReturnResult::Third(x);
+         }
+       }");
+
+  Alcotest.test_case
     "authority pointer ABI erases the guard tie and returns a plain pointer" `Quick
     (fun () ->
       let src =
