@@ -255,6 +255,7 @@ make stress-stm32-kvs-server-sdcard-rtos  # opt-in STM32 KVS concurrency stress 
 make hwcheck-rpi3   # opt-in Raspberry Pi 3B JTAG hardware integration test (not in allcheck, see examples/common_rpi3/AGENTS.md)
 make hwcheck-rpi3-net     # RPi3 real-Ethernet hardware tests (needs the board's Ethernet port -- behind its USB host stack, see examples/common_rpi3/AGENTS.md -- wired to this host)
 make hwcheck-rpi5   # opt-in RPi5 SWD + RP1-UART suite for all non-Ethernet RPi3 ports; reformats the attached USB drive (not in allcheck)
+make hwcheck-rpi5-net     # RPi5 real-Ethernet tests, including USB-backed HTTP/KVS persistence; reformats the attached USB drive
 make perfcheck      # real-hardware profiler smoke tests (not in allcheck -- shares phy_init's occasional link-negotiation flakiness with hwcheck-stm32-net, but adds no functional coverage beyond it)
 make allcheck       # clean/build, then QEMU + STM32 + RPi3 lanes in parallel
 make clean          # remove generated artifacts
@@ -565,6 +566,10 @@ scripts/
                      RP1-UART output; also drives GPIO14/15 input, starts the
                      second core where needed, and runs destructive USB/FAT12
                      fixtures against the dedicated sacrificial drive.
+  run_hwtest_rpi5_net.sh -- RPi5 RP1-GEM Ethernet runner for L2, TCP/HTTP/KVS,
+                     USB-backed HTTP/RTOS, and two-boot KVS persistence.
+  rpi5_provision_http_server_sdcard.sh -- builds a FAT12 seed image and writes
+                     it to the RPi5 USB drive through SWD installer firmware.
   rpi5_jtag_reset.sh -- RPi5 reboot via a PSCI SYSTEM_RESET SMC call injected
                      over SWD (no nSRST line on this connector, confirmed --
                      see examples/common_rpi5/AGENTS.md item 3).

@@ -15,6 +15,24 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-27: RPi5 RP1 Ethernet Hardware Suite
+
+`make hwcheck-rpi5-net-l2` and `make hwcheck-rpi5-net` now cover the same
+protocol progression as the RPi3 hardware lane over the RPi5's integrated
+RP1 Cadence GEM: raw frame echo, ARP, ICMP, TCP echo, HTTP, KVS, USB-backed
+HTTP in polling and RTOS forms, and two-boot KVS persistence. The host uses
+the dedicated `192.168.20.0/24` link and the full suite provisions the
+attached USB Mass Storage drive through an RPi5 SWD installer.
+
+The two hardware-specific faults found during bring-up were both descriptor
+configuration issues. RP1 reports `DCFG1.DBWDEF=4`, requiring GEM's 128-bit
+DMA bus-width setting; selecting 64-bit completed RX descriptors but left the
+payload bytes zero. A one-entry TX ring also allowed descriptor prefetch to
+transmit a frame twice, which caused an immediate TCP ACK to be mistaken for
+a retransmitted SYN. The final driver uses a two-entry alternating TX ring,
+an independent TX buffer, and rearms the cache-prepared RX buffer before
+starting transmission. All network examples compile with `--forbid-trap`.
+
 ### 2026-07-27: All-Return If/Else LLVM Merge Blocks (GitHub Issue #166)
 
 An `if`/`else` whose every branch returned still left codegen positioned at

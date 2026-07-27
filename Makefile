@@ -2218,6 +2218,9 @@ RPI5_NET_EXAMPLES := $(RPI5_NET_L2_EXAMPLES) tcp_echo http_server kvs_server
 RPI5_NET_OBJS := $(foreach e,$(RPI5_NET_EXAMPLES),examples/$(e)/$(e)_rpi5.o)
 RPI5_NET_KERNELS := $(foreach e,$(RPI5_NET_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_NET_L2_KERNELS := $(foreach e,$(RPI5_NET_L2_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
+RPI5_NET_STORAGE_EXAMPLES := http_server_sdcard http_server_sdcard_install \
+                             http_server_sdcard_rtos kvs_server_sdcard_rtos
+RPI5_NET_STORAGE_KERNELS := $(foreach e,$(RPI5_NET_STORAGE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 
 $(RPI5_NET_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_ETH) $(COMMON_RPI5_NETCONFIG) $(COMMON_NETUTIL) $(COMMON_INET_CKSUM) $(COMMON_HTTP_SERVER) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_ETH) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
@@ -2503,6 +2506,27 @@ examples/usb_msc_probe/usb_msc_probe_rpi5.o: examples/usb_msc_probe/usb_msc_prob
 examples/usb_msc_probe/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/usb_msc_probe/usb_msc_probe_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/usb_msc_probe/usb_msc_probe_rpi5.o -o $@
 
+# Network + USB Mass Storage combinations used by hwcheck-rpi5-net.  The
+# application sources are shared with RPi3/STM32; RP1 GEM and RP1 xHCI are
+# supplied together here through their target-specific HALs.
+examples/http_server_sdcard/http_server_sdcard_rpi5.o: examples/http_server_sdcard/http_server_sdcard.tkb $(COMMON_RPI5_DMA_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_ETH) $(COMMON_RPI5_NETCONFIG) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(COMMON_HTTP_SDCARD) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_ETH) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+examples/http_server_sdcard_install/http_server_sdcard_install_rpi5.o: examples/http_server_sdcard_install/http_server_sdcard_install.tkb $(COMMON_RPI5_DMA_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_USB_XHCI) $(COMMON_FAT12_GEOMETRY) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_USB_XHCI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+RPI5_NET_STORAGE_RTOS_EXAMPLES := http_server_sdcard_rtos kvs_server_sdcard_rtos
+RPI5_NET_STORAGE_RTOS_OBJS := $(foreach e,$(RPI5_NET_STORAGE_RTOS_EXAMPLES),examples/$(e)/$(e)_rpi5.o)
+
+$(RPI5_NET_STORAGE_RTOS_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_DMA_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_TIMER) $(COMMON_RPI5_ETH) $(COMMON_RPI5_NETCONFIG) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_SYNC) $(COMMON_RTOS) $(COMMON_STM32_STUB) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_HTTP_SERVER) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_TIMER) $(COMMON_STM32_STUB) $(COMMON_RPI5_ETH) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+examples/http_server_sdcard/kernel_rpi5.elf examples/http_server_sdcard_install/kernel_rpi5.elf: examples/%/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/%/$$*_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/$*/$*_rpi5.o -o $@
+
+$(foreach e,$(RPI5_NET_STORAGE_RTOS_EXAMPLES),examples/$(e)/kernel_rpi5.elf): examples/%/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) $(COMMON_SEM_ASM_O) examples/%/$$*_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) $(COMMON_SEM_ASM_O) examples/$*/$*_rpi5.o -o $@
+
 examples/smp_handoff/smp_handoff_rpi5.o: examples/smp_handoff/smp_handoff.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_SYNC) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
 
@@ -2575,7 +2599,7 @@ hwcheck-rpi5: $(RPI5_KERNELS)
 hwcheck-rpi5-net-l2: $(RPI5_NET_L2_KERNELS)
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_hwtest_rpi5_net.sh --l2-only
 
-hwcheck-rpi5-net: $(RPI5_NET_KERNELS)
+hwcheck-rpi5-net: $(RPI5_NET_KERNELS) $(RPI5_NET_STORAGE_KERNELS)
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_hwtest_rpi5_net.sh
 
 # -- clean ---------------------------------------------------------------------

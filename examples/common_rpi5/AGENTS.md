@@ -6,7 +6,10 @@ as "still open", "next", or "out of scope" inside a section explicitly
 marked earlier/superseded describe that checkpoint, not the current tree.
 Current status: every non-Ethernet member of `RPI3_EXAMPLES` is ported and
 `make hwcheck-rpi5` passes 78/78 on real hardware. The suite reformats its
-attached USB mass-storage device.
+attached USB mass-storage device. RP1 Ethernet is also complete through the
+full `make hwcheck-rpi5-net` suite: TCP echo, HTTP, KVS, USB-backed HTTP/RTOS,
+and two-boot KVS persistence pass on real hardware (6/6). The network suite
+also reformats the attached USB mass-storage device.
 
 ## Status update (2026-07-27): two-core SMP handoff works via an EL3-to-EL2 debug trampoline
 

@@ -449,15 +449,17 @@ make hwcheck-stm32-net      # real-Ethernet hardware tests (needs the board wire
 make hwcheck-rpi3           # opt-in Raspberry Pi 3B JTAG hardware integration test (needs the board wired for JTAG+UART)
 make hwcheck-rpi3-net       # RPi3 real-Ethernet hardware tests (needs the board's Ethernet port wired to this host's NIC)
 make hwcheck-rpi5           # opt-in RPi5 SWD/RP1-UART tests for every non-Ethernet RPi3 example port
+make hwcheck-rpi5-net       # opt-in RPi5 Ethernet + USB-backed HTTP/KVS hardware tests
 make stress-stm32-kvs-server-sdcard-rtos  # opt-in STM32 KVS concurrency stress test
 make perfcheck        # real-hardware profiler smoke tests
 make allcheck         # clean + build once, then run the QEMU, STM32, and RPi3 lanes in parallel
 ```
 
-Builds run in parallel across all cores by default. `hwcheck-rpi5` requires
-the SD card to boot `examples/common_rpi5/jtag_stub.img` and deliberately
+Builds run in parallel across all cores by default. `hwcheck-rpi5` and
+`hwcheck-rpi5-net` require the SD card to boot
+`examples/common_rpi5/jtag_stub.img` and deliberately
 reformats the attached USB mass-storage device; use only the dedicated
-sacrificial test drive. `hwcheck-rpi3-net` and
+sacrificial test drive. `hwcheck-rpi3-net`, `hwcheck-rpi5-net`, and
 `stress-stm32-kvs-server-sdcard-rtos` are opt-in and not part of `allcheck`
 (see `AGENTS.md`'s Build Commands section for the full reasoning behind
 each target).
