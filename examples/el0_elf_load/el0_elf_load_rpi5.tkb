@@ -705,7 +705,7 @@ fn app_main() {
     // refined page_count parameter still needs its own explicit
     // if-narrow here.
     if (total_pages < 513) {
-        let seed: {0..<1 as usize} = 0;
+        let seed: {0..<2 as usize} = 0;
         let inactive = address_space_new(seed);
         let core: usize = 0;
         let (space, active) = address_space_activate(inactive, core);

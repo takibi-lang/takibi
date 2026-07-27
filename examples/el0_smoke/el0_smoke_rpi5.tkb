@@ -101,7 +101,7 @@ fn app_main() {
             uart_puts("allocation failed\n");
         }
         PageAllocResult::Allocated(page) => {
-            let seed: {0..<1 as usize} = 0;
+            let seed: {0..<2 as usize} = 0;
             let inactive = address_space_new(seed);
             let core: usize = 0;
             let (space, active) = address_space_activate(inactive, core);

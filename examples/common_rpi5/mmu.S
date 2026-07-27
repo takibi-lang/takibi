@@ -86,6 +86,12 @@ l2_dynamic_table:
     .space  4096
 l3_dynamic_table:
     .space  4096
+l1_table_as1:
+    .space  4096
+l2_dynamic_table_as1:
+    .space  4096
+l3_dynamic_table_as1:
+    .space  4096
 
     .section .text
     .global mmu_init
@@ -148,6 +154,28 @@ mmu_init:
     orr     x0, x0, #0x3
     adrp    x2, l2_dynamic_table
     add     x2, x2, :lo12:l2_dynamic_table
+    str     x0, [x2]
+
+    /* Slot 1 shares every identity/MMIO entry with slot 0, but owns an
+       independent dynamic-window L2/L3 chain. */
+    adrp    x2, l1_table_as1
+    add     x2, x2, :lo12:l1_table_as1
+    mov     x3, #0
+.Las1_copy_root:
+    ldr     x4, [x1, x3, lsl #3]
+    str     x4, [x2, x3, lsl #3]
+    add     x3, x3, #1
+    cmp     x3, #128
+    b.lt    .Las1_copy_root
+    adrp    x0, l2_dynamic_table_as1
+    add     x0, x0, :lo12:l2_dynamic_table_as1
+    orr     x0, x0, #0x3
+    str     x0, [x2, #8]
+    adrp    x0, l3_dynamic_table_as1
+    add     x0, x0, :lo12:l3_dynamic_table_as1
+    orr     x0, x0, #0x3
+    adrp    x2, l2_dynamic_table_as1
+    add     x2, x2, :lo12:l2_dynamic_table_as1
     str     x0, [x2]
 
     /* MAIR_EL2: byte 0 (AttrIndx 0) = 0x00 Device-nGnRnE; byte 1
@@ -273,4 +301,37 @@ l3_dynamic_write:        /* fn l3_dynamic_write(index: usize, value: usize) */
     adrp    x2, l3_dynamic_table
     add     x2, x2, :lo12:l3_dynamic_table
     str     x1, [x2, x0, lsl #3]
+    ret
+
+    .global mmu_address_space_activate
+    .type   mmu_address_space_activate, %function
+mmu_address_space_activate: /* fn(slot: usize) */
+    cbnz    x0, .Las_activate_1
+    adrp    x1, l1_table
+    add     x1, x1, :lo12:l1_table
+    b       .Las_activate_write
+.Las_activate_1:
+    adrp    x1, l1_table_as1
+    add     x1, x1, :lo12:l1_table_as1
+    mov     x2, #1
+    lsl     x2, x2, #48
+    orr     x1, x1, x2
+.Las_activate_write:
+    dsb     ish
+    msr     ttbr0_el2, x1
+    isb
+    ret
+
+    .global l3_address_space_write
+    .type   l3_address_space_write, %function
+l3_address_space_write: /* fn(slot: usize, index: usize, value: usize) */
+    cbnz    x0, .Las_l3_1
+    adrp    x3, l3_dynamic_table
+    add     x3, x3, :lo12:l3_dynamic_table
+    b       .Las_l3_store
+.Las_l3_1:
+    adrp    x3, l3_dynamic_table_as1
+    add     x3, x3, :lo12:l3_dynamic_table_as1
+.Las_l3_store:
+    str     x2, [x3, x1, lsl #3]
     ret

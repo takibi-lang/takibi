@@ -1766,7 +1766,7 @@ RPI3_SMP_PAGE_TRANSFER_EXAMPLES := smp_page_transfer
 RPI3_SMP_PAGE_TRANSFER_OBJS := $(foreach e,$(RPI3_SMP_PAGE_TRANSFER_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_SMP_PAGE_TRANSFER_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_SYNC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) examples/vm_page_map/vm_page_map_core.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 # Issue #67 Stage 4: two cores install distinct TTBR0_EL2 roots and
 # hardware ASIDs, then hold simultaneous mappings from the same VA to two
@@ -1776,7 +1776,7 @@ RPI3_MULTI_ADDRESS_SPACE_EXAMPLES := multi_address_space
 RPI3_MULTI_ADDRESS_SPACE_OBJS := $(foreach e,$(RPI3_MULTI_ADDRESS_SPACE_EXAMPLES),examples/$(e)/$(e)_rpi3.o)
 
 $(RPI3_MULTI_ADDRESS_SPACE_OBJS): examples/%_rpi3.o: examples/%.tkb examples/vm_page_map/vm_page_map_core.tkb $(COMMON_RPI3_TLB_ASM_EXTERN) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $(COMMON_SYNC) $(TAKIBI)
-	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
+	$(TAKIBI) $(COMMON_RPI3_UART) $(COMMON_RPI3_PRINT) examples/vm_page_map/vm_page_map_core.tkb $< --target $(RPI3_TARGET) --cpu $(RPI3_CPU) --forbid-trap -o $@
 
 # Copy-on-write exception milestone. Its hardware baseline was committed
 # first; the dedicated hardening pass found no remaining trap sites.
@@ -2490,6 +2490,16 @@ $(RPI5_SMP_SIMPLE_OBJS): examples/%_rpi5.o: examples/%.tkb $(COMMON_RPI5_UART) $
 
 $(RPI5_SMP_SIMPLE_KERNELS): examples/%/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_SMP_O) $(COMMON_RPI5_SMP_EL3_O) $(COMMON_SEM_ASM_O) examples/%/$$*_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_SMP_O) $(COMMON_RPI5_SMP_EL3_O) $(COMMON_SEM_ASM_O) examples/$*/$*_rpi5.o -o $@
+
+RPI5_SMP_VM_EXAMPLES := smp_page_transfer multi_address_space
+RPI5_SMP_VM_OBJS := $(foreach e,$(RPI5_SMP_VM_EXAMPLES),examples/$(e)/$(e)_rpi5.o)
+RPI5_SMP_VM_KERNELS := $(foreach e,$(RPI5_SMP_VM_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
+
+$(RPI5_SMP_VM_OBJS): examples/%_rpi5.o: examples/%.tkb examples/vm_page_map/vm_page_map_core_rpi5.tkb $(COMMON_RPI5_TLB_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_SYNC) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) examples/vm_page_map/vm_page_map_core_rpi5.tkb $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+$(RPI5_SMP_VM_KERNELS): examples/%/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_SMP_O) $(COMMON_RPI5_SMP_EL3_O) $(COMMON_SEM_ASM_O) examples/%/$$*_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_SMP_O) $(COMMON_RPI5_SMP_EL3_O) $(COMMON_SEM_ASM_O) examples/$*/$*_rpi5.o -o $@
 
 ## RPI5_SERIAL_DEV: same convention as STM32_SERIAL_DEV/RPI3_SERIAL_DEV --
 ## empty by default, resolved at runtime by scripts/rpi5_uart_dev.sh (which

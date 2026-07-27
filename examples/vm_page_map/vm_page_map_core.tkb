@@ -605,6 +605,10 @@ variant MigrationTransfer {
 const DYN_VA_BASE: usize = 0x80000000;
 const DYN_VA_LIMIT: usize = 0x80200000;
 
+fn dynamic_va_base() -> {DYN_VA_BASE..<DYN_VA_LIMIT as usize} {
+    return 0x80000000;
+}
+
 // L3 page descriptor flag words (GitHub issue #158's own real hardware
 // lesson: three copies of 0x787 used to disagree on what it meant, and
 // the bug was a hex literal, not a logic error -- naming these does not

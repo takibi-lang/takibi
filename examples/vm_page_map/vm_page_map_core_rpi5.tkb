@@ -14,21 +14,10 @@
 // the page-pool allocator, and a single-slot AddressSpaceOwner state
 // machine covering map_page/tlb_invalidate/mapping_bytes/unmap_page.
 //
-// RPi3's version tracks TWO hardware address-space slots (mmu.S's
-// l1_table / l1_table_as1, GitHub issue #67 Stage 4), so its
-// AddressSpaceOwner carries a `slot` field and address_space_activate/
-// deactivate really do reprogram TTBR0_EL2 via mmu_address_space_activate
-// + tlb_invalidate_all_el2. RPi5's examples/common_rpi5/mmu.S has only
-// ONE translation root (l1_table, set once in mmu_init and never
-// switched) -- issue #165's RPi5 MMU milestone did not port RPi3's
-// second-slot machinery, and nothing on RPi5 needs it yet. So here
-// AddressSpaceOwner drops the `slot` field entirely, and
-// address_space_activate/deactivate are pure type-state bookkeeping (no
-// TTBR0_EL2 write, no TLB flush) -- there is nothing to reprogram when
-// the only root is already the one in use. The Inactive/Empty/Occupied
-// state machine itself is kept unchanged: it is what makes mapping a
-// second page before unmapping the first a compile error, independent of
-// whether "activation" does any real hardware work.
+// The RPi5 port now also tracks two real hardware slots: each root shares
+// the identity/MMIO map but owns a separate dynamic L2/L3 chain.  The slot
+// field and active token therefore describe the TTBR0_EL2 root actually
+// installed on that core, as exercised concurrently by multi_address_space.
 //
 // PAGE_COUNT here is 512 (one 2MB window's worth), not
 // vm_page_map_core.tkb's 1024 -- that doubling was GitHub issue #158's
@@ -120,30 +109,32 @@ enum SpaceState: u8 { Inactive; Empty; Occupied; Occupied2; }
 
 private linear struct AddressSpaceOwner[asid: usize, state: SpaceState] {
     private tag: usize @ asid;
+    private slot: {0..<2 as usize};
 }
 
 // Linear proof that address space `asid` is installed in core `core`.
-// RPi5 has only one real root, so this token is a pure type-level
-// bookkeeping device (see header comment) rather than proof of a real
-// TTBR0_EL2 switch -- but it still prevents obtaining VA authority for a
-// context that was never activated.
+// Activation installs the matching TTBR0_EL2 root and hardware ASID.
 private linear struct ActiveAddressSpace[core: usize, asid: usize] {
     private core_tag: usize @ core;
     private asid_tag: usize @ asid;
 }
 
-fn address_space_new(seed: {0..<1 as usize} @ asid)
+fn address_space_new(seed: {0..<2 as usize} @ asid)
         -> AddressSpaceOwner[asid, SpaceState::Inactive] {
-    let mut space: AddressSpaceOwner[asid, SpaceState::Inactive] = { seed };
+    let mut space: AddressSpaceOwner[asid, SpaceState::Inactive] = { seed, seed };
     return space;
 }
+
+extern fn mmu_address_space_activate(slot: usize);
 
 fn address_space_activate(space: sink AddressSpaceOwner[asid, SpaceState::Inactive],
                           core_tag: usize @ core)
         -> (AddressSpaceOwner[asid, SpaceState::Empty],
             ActiveAddressSpace[core, asid]) {
+    mmu_address_space_activate(space.slot);
+    tlb_invalidate_all_el2();
     let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] =
-        { space.tag };
+        { space.tag, space.slot };
     let mut active: ActiveAddressSpace[core, asid] =
         { core_tag, space.tag };
     return (empty, active);
@@ -152,8 +143,10 @@ fn address_space_activate(space: sink AddressSpaceOwner[asid, SpaceState::Inacti
 fn address_space_deactivate(active: sink ActiveAddressSpace[core, asid],
                             space: sink AddressSpaceOwner[asid, SpaceState::Empty])
         -> AddressSpaceOwner[asid, SpaceState::Inactive] {
+    mmu_address_space_activate(0);
+    tlb_invalidate_all_el2();
     let mut inactive: AddressSpaceOwner[asid, SpaceState::Inactive] =
-        { space.tag };
+        { space.tag, space.slot };
     return inactive;
 }
 
@@ -165,12 +158,22 @@ private linear struct TlbInvalidationPending[asid: usize, va: usize, p: usize] {
     private va_value: usize @ va;
     private page_index: {0..<PAGE_COUNT as usize};
     private p_witness: usize @ p;
+    private space_slot: {0..<2 as usize};
 }
 
 private linear struct MappingOwner[asid: usize, va: usize, p: usize] {
     private asid_tag: usize @ asid;
     private va_value: usize @ va;
     private page_index: {0..<PAGE_COUNT as usize};
+    private p_witness: usize @ p;
+    private space_slot: {0..<2 as usize};
+}
+
+private linear struct ActiveMappingView[core: usize, asid: usize,
+                                        va: usize, p: usize] {
+    private core_tag: usize @ core;
+    private asid_tag: usize @ asid;
+    private va_value: usize @ va;
     private p_witness: usize @ p;
 }
 
@@ -179,6 +182,10 @@ private linear struct MappingOwner[asid: usize, va: usize, p: usize] {
 // index -- see mmu.S's header comment for why index 1 was chosen).
 const DYN_VA_BASE: usize = 0x40000000;
 const DYN_VA_LIMIT: usize = 0x40200000;
+
+fn dynamic_va_base() -> {DYN_VA_BASE..<DYN_VA_LIMIT as usize} {
+    return 0x40000000;
+}
 
 // L3 page descriptor flags: bits[1:0] = 0b11 (valid + page) | AttrIndx 1
 // (bits 4:2 = 001, Normal Write-Back Cacheable, MAIR_EL2 byte 1 -- same
@@ -197,6 +204,7 @@ const PTE_FLAGS_EL2_RW: usize = 0x707;
 const PTE_FLAGS_EL0_RW: usize = 0x747;
 
 extern fn l3_dynamic_write(index: usize, value: usize);
+extern fn l3_address_space_write(slot: usize, index: usize, value: usize);
 
 fn map_page(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
             page: sink PageOwner[p],
@@ -207,12 +215,12 @@ fn map_page(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
     let pool_base_ptr: *u8 = page_pool as *u8;
     let pool_base: usize = pool_base_ptr as usize;
     let phys_addr: usize = pool_base + page.index * PAGE_SIZE;
-    l3_dynamic_write(l3_index, phys_addr | PTE_FLAGS_EL2_RW);
+    l3_address_space_write(space.slot, l3_index, phys_addr | PTE_FLAGS_EL2_RW);
 
     let mut occupied: AddressSpaceOwner[asid, SpaceState::Occupied] =
-        { space.tag };
+        { space.tag, space.slot };
     let mut pending: TlbInvalidationPending[asid, va, p] =
-        { space.tag, va, page.index, page.p_witness };
+        { space.tag, va, page.index, page.p_witness, space.slot };
     return (occupied, pending);
 }
 
@@ -230,12 +238,12 @@ fn map_page_el0_exec(space: sink AddressSpaceOwner[asid, SpaceState::Empty],
     let pool_base_ptr: *u8 = page_pool as *u8;
     let pool_base: usize = pool_base_ptr as usize;
     let phys_addr: usize = pool_base + page.index * PAGE_SIZE;
-    l3_dynamic_write(l3_index, phys_addr | PTE_FLAGS_EL0_RW);
+    l3_address_space_write(space.slot, l3_index, phys_addr | PTE_FLAGS_EL0_RW);
 
     let mut occupied: AddressSpaceOwner[asid, SpaceState::Occupied] =
-        { space.tag };
+        { space.tag, space.slot };
     let mut pending: TlbInvalidationPending[asid, va, p] =
-        { space.tag, va, page.index, page.p_witness };
+        { space.tag, va, page.index, page.p_witness, space.slot };
     return (occupied, pending);
 }
 
@@ -247,31 +255,31 @@ fn map_second_page(space: sink AddressSpaceOwner[asid, SpaceState::Occupied],
     let l3_index: usize = (va - DYN_VA_BASE) / PAGE_SIZE;
     let pool_base: usize = (page_pool as *u8) as usize;
     let phys_addr: usize = pool_base + page.index * PAGE_SIZE;
-    l3_dynamic_write(l3_index, phys_addr | PTE_FLAGS_EL2_RW);
+    l3_address_space_write(space.slot, l3_index, phys_addr | PTE_FLAGS_EL2_RW);
     let mut occupied: AddressSpaceOwner[asid, SpaceState::Occupied2] =
-        { space.tag };
+        { space.tag, space.slot };
     let mut pending: TlbInvalidationPending[asid, va, p] =
-        { space.tag, va, page.index, page.p_witness };
+        { space.tag, va, page.index, page.p_witness, space.slot };
     return (occupied, pending);
 }
 
 fn tlb_invalidate(space: borrow AddressSpaceOwner[asid, SpaceState::Occupied],
                   pending: sink TlbInvalidationPending[asid, va, p])
         -> MappingOwner[asid, va, p] {
-    tlb_invalidate_va(pending.va_value);
+    tlb_invalidate_asid_va(pending.space_slot, pending.va_value);
     let mut mapping: MappingOwner[asid, va, p] =
         { pending.asid_tag, pending.va_value, pending.page_index,
-          pending.p_witness };
+          pending.p_witness, pending.space_slot };
     return mapping;
 }
 
 fn tlb_invalidate_second(space: borrow AddressSpaceOwner[asid, SpaceState::Occupied2],
                          pending: sink TlbInvalidationPending[asid, va, p])
         -> MappingOwner[asid, va, p] {
-    tlb_invalidate_va(pending.va_value);
+    tlb_invalidate_asid_va(pending.space_slot, pending.va_value);
     let mut mapping: MappingOwner[asid, va, p] =
         { pending.asid_tag, pending.va_value, pending.page_index,
-          pending.p_witness };
+          pending.p_witness, pending.space_slot };
     return mapping;
 }
 
@@ -279,10 +287,10 @@ fn unmap_second_page(space: sink AddressSpaceOwner[asid, SpaceState::Occupied2],
                      mapping: sink MappingOwner[asid, va, p])
         -> (AddressSpaceOwner[asid, SpaceState::Occupied], PageOwner[p]) {
     let l3_index: usize = (mapping.va_value - DYN_VA_BASE) / PAGE_SIZE;
-    l3_dynamic_write(l3_index, 0);
-    tlb_invalidate_va(mapping.va_value);
+    l3_address_space_write(mapping.space_slot, l3_index, 0);
+    tlb_invalidate_asid_va(mapping.space_slot, mapping.va_value);
     let mut occupied: AddressSpaceOwner[asid, SpaceState::Occupied] =
-        { space.tag };
+        { space.tag, space.slot };
     let mut page: PageOwner[p] = { mapping.page_index, mapping.p_witness };
     return (occupied, page);
 }
@@ -304,15 +312,38 @@ fn mapping_bytes(mapping: borrow MappingOwner[asid, va, p])
     return pool[0..<4096];
 }
 
+fn mapping_va_acquire(active: sink ActiveAddressSpace[core, asid],
+                      space: borrow AddressSpaceOwner[asid, SpaceState::Occupied],
+                      mapping: borrow MappingOwner[asid, va, p])
+        -> ActiveMappingView[core, asid, va, p] {
+    let mut lease: ActiveMappingView[core, asid, va, p] =
+        { active.core_tag, active.asid_tag, mapping.va_value,
+          mapping.p_witness };
+    return lease;
+}
+
+fn mapping_va_bytes(lease: borrow ActiveMappingView[core, asid, va, p])
+        -> [u8; PAGE_SIZE..] @ p {
+    let va_ptr: *u8 = lease.va_value as *u8;
+    return unsafe { va_ptr[0..<4096] };
+}
+
+fn mapping_va_release(lease: sink ActiveMappingView[core, asid, va, p])
+        -> ActiveAddressSpace[core, asid] {
+    let mut active: ActiveAddressSpace[core, asid] =
+        { lease.core_tag, lease.asid_tag };
+    return active;
+}
+
 fn unmap_page(space: sink AddressSpaceOwner[asid, SpaceState::Occupied],
               mapping: sink MappingOwner[asid, va, p])
         -> (AddressSpaceOwner[asid, SpaceState::Empty], PageOwner[p]) {
     let l3_index: usize = (mapping.va_value - DYN_VA_BASE) / PAGE_SIZE;
-    l3_dynamic_write(l3_index, 0);
-    tlb_invalidate_va(mapping.va_value);
+    l3_address_space_write(mapping.space_slot, l3_index, 0);
+    tlb_invalidate_asid_va(mapping.space_slot, mapping.va_value);
 
     let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] =
-        { space.tag };
+        { space.tag, space.slot };
     let mut page: PageOwner[p] = { mapping.page_index, mapping.p_witness };
     return (empty, page);
 }
@@ -326,6 +357,7 @@ fn unmap_page(space: sink AddressSpaceOwner[asid, SpaceState::Occupied],
 // to end -- forgetting to tear it down is still a compile error.
 private linear struct ProcessAddressSpace[asid: usize] {
     private tag: usize @ asid;
+    private slot: {0..<2 as usize};
     private page_count: usize;
     private base_va: usize;
 }
@@ -371,8 +403,8 @@ fn process_address_space_map(
                 let va: usize = base_va + i * PAGE_SIZE;
                 let l3_index: usize = (va - DYN_VA_BASE) / PAGE_SIZE;
                 let phys_addr: usize = pool_base + idx * PAGE_SIZE;
-                l3_dynamic_write(l3_index, phys_addr | PTE_FLAGS_EL0_RW);
-                tlb_invalidate_va(va);
+                l3_address_space_write(space.slot, l3_index, phys_addr | PTE_FLAGS_EL0_RW);
+                tlb_invalidate_asid_va(space.slot, va);
                 process_phys_index_set(i, idx);
                 mapped = mapped + 1;
             }
@@ -380,7 +412,7 @@ fn process_address_space_map(
     }
 
     if (ok != 0) {
-        let mut pas: ProcessAddressSpace[asid] = { tag, mapped, base_va };
+        let mut pas: ProcessAddressSpace[asid] = { tag, space.slot, mapped, base_va };
         return ProcessMapResult::Mapped((pas, active));
     }
 
@@ -388,14 +420,14 @@ fn process_address_space_map(
         if (i >= mapped) { break; }
         let va: usize = base_va + i * PAGE_SIZE;
         let l3_index: usize = (va - DYN_VA_BASE) / PAGE_SIZE;
-        l3_dynamic_write(l3_index, 0);
-        tlb_invalidate_va(va);
+        l3_address_space_write(space.slot, l3_index, 0);
+        tlb_invalidate_asid_va(space.slot, va);
         let idx: usize = process_phys_index_get(i);
         if (idx < PAGE_COUNT) {
             page_used[idx] = 0;
         }
     }
-    let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] = { tag };
+    let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] = { tag, space.slot };
     let inactive = address_space_deactivate(active, empty);
     return ProcessMapResult::Failed(inactive);
 }
@@ -409,13 +441,13 @@ fn process_address_space_unmap(
         if (i >= pas.page_count) { break; }
         let va: usize = pas.base_va + i * PAGE_SIZE;
         let l3_index: usize = (va - DYN_VA_BASE) / PAGE_SIZE;
-        l3_dynamic_write(l3_index, 0);
-        tlb_invalidate_va(va);
+        l3_address_space_write(pas.slot, l3_index, 0);
+        tlb_invalidate_asid_va(pas.slot, va);
         let idx: usize = process_phys_index_get(i);
         if (idx < PAGE_COUNT) {
             page_used[idx] = 0;
         }
     }
-    let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] = { pas.tag };
+    let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] = { pas.tag, pas.slot };
     return empty;
 }

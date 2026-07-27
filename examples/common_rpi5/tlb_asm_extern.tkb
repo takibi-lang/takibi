@@ -5,8 +5,8 @@
 // duplicate `extern fn` declaration is a hard conflict if two files
 // needing it both declared it locally).
 //
-// Only tlb_invalidate_va is ported -- see tlb_asm.S's header comment for
-// why tlb_invalidate_asid_va/tlb_invalidate_all_el2/rpi3_code_range_sync
-// are not needed yet.
+// ASID-qualified and whole-EL2 operations support the two-root VM examples.
 
 extern fn tlb_invalidate_va(va: usize);
+extern fn tlb_invalidate_asid_va(asid: usize, va: usize);
+extern fn tlb_invalidate_all_el2();
