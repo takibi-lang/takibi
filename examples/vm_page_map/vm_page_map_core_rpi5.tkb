@@ -119,6 +119,13 @@ private linear struct ActiveAddressSpace[core: usize, asid: usize] {
     private asid_tag: usize @ asid;
 }
 
+linear struct CpuOwner[core: usize] {
+    private core_id: usize @ core;
+}
+
+fn cpu_owner_halt(cpu: sink CpuOwner[core]) {
+}
+
 fn address_space_new(seed: {0..<2 as usize} @ asid)
         -> AddressSpaceOwner[asid, SpaceState::Inactive] {
     let mut space: AddressSpaceOwner[asid, SpaceState::Inactive] = { seed, seed };
@@ -137,6 +144,20 @@ fn address_space_activate(space: sink AddressSpaceOwner[asid, SpaceState::Inacti
         { space.tag, space.slot };
     let mut active: ActiveAddressSpace[core, asid] =
         { core_tag, space.tag };
+    return (empty, active);
+}
+
+fn address_space_activate_cpu(
+        cpu: sink CpuOwner[core],
+        space: sink AddressSpaceOwner[asid, SpaceState::Inactive])
+        -> (AddressSpaceOwner[asid, SpaceState::Empty],
+            ActiveAddressSpace[core, asid]) {
+    mmu_address_space_activate(space.slot);
+    tlb_invalidate_all_el2();
+    let mut empty: AddressSpaceOwner[asid, SpaceState::Empty] =
+        { space.tag, space.slot };
+    let mut active: ActiveAddressSpace[core, asid] =
+        { cpu.core_id, space.tag };
     return (empty, active);
 }
 
@@ -214,6 +235,22 @@ private linear struct ActiveMappingView[core: usize, asid: usize,
     private asid_tag: usize @ asid;
     private va_value: usize @ va;
     private p_witness: usize @ p;
+}
+
+variant VmTaskSwitchState {
+    Empty;
+    Space0(exists core: usize. exists a: usize. exists b: usize.
+           exists va0: usize. exists p0: usize.
+           exists va1: usize. exists p1: usize.
+           (ActiveAddressSpace[core, a],
+            AddressSpaceOwner[a, SpaceState::Occupied], MappingOwner[a, va0, p0],
+            AddressSpaceOwner[b, SpaceState::Occupied], MappingOwner[b, va1, p1]));
+    Space1(exists core: usize. exists a: usize. exists b: usize.
+           exists va0: usize. exists p0: usize.
+           exists va1: usize. exists p1: usize.
+           (ActiveAddressSpace[core, b],
+            AddressSpaceOwner[a, SpaceState::Occupied], MappingOwner[a, va0, p0],
+            AddressSpaceOwner[b, SpaceState::Occupied], MappingOwner[b, va1, p1]));
 }
 
 // examples/common_rpi5/mmu.S's L1[1] dynamic window: 0x40000000-0x401FFFFF
@@ -385,6 +422,74 @@ fn unmap_page(space: sink AddressSpaceOwner[asid, SpaceState::Occupied],
         { space.tag, space.slot };
     let mut page: PageOwner[p] = { mapping.page_index, mapping.p_witness };
     return (empty, page);
+}
+
+fn vm_task_switch_new(
+        active: sink ActiveAddressSpace[core, a],
+        space0: sink AddressSpaceOwner[a, SpaceState::Occupied],
+        mapping0: sink MappingOwner[a, va0, p0],
+        space1: sink AddressSpaceOwner[b, SpaceState::Occupied],
+        mapping1: sink MappingOwner[b, va1, p1]) -> VmTaskSwitchState {
+    return VmTaskSwitchState::Space0(
+        (active, space0, mapping0, space1, mapping1));
+}
+
+fn vm_task_switch_select0(state: sink VmTaskSwitchState)
+        -> VmTaskSwitchState {
+    match state {
+        VmTaskSwitchState::Empty => { return VmTaskSwitchState::Empty; }
+        VmTaskSwitchState::Space0(owner) => {
+            return VmTaskSwitchState::Space0(owner);
+        }
+        VmTaskSwitchState::Space1(owner) => {
+            let (active, space0, mapping0, space1, mapping1) = owner;
+            let active0 = address_space_switch(active, space0);
+            return VmTaskSwitchState::Space0(
+                (active0, space0, mapping0, space1, mapping1));
+        }
+    }
+}
+
+fn vm_task_switch_select1(state: sink VmTaskSwitchState)
+        -> VmTaskSwitchState {
+    match state {
+        VmTaskSwitchState::Empty => { return VmTaskSwitchState::Empty; }
+        VmTaskSwitchState::Space0(owner) => {
+            let (active, space0, mapping0, space1, mapping1) = owner;
+            let active1 = address_space_switch(active, space1);
+            return VmTaskSwitchState::Space1(
+                (active1, space0, mapping0, space1, mapping1));
+        }
+        VmTaskSwitchState::Space1(owner) => {
+            return VmTaskSwitchState::Space1(owner);
+        }
+    }
+}
+
+fn vm_task_switch_cleanup(state: sink VmTaskSwitchState) {
+    let state0 = vm_task_switch_select0(state);
+    match state0 {
+        VmTaskSwitchState::Empty => {}
+        VmTaskSwitchState::Space0(owner) => {
+            let (active, space0, mapping0, space1, mapping1) = owner;
+            let (empty1, page1) = unmap_page(space1, mapping1);
+            let active1 = address_space_switch(active, empty1);
+            let (inactive1, active0) = address_space_deactivate_to(
+                active1, empty1, space0);
+            address_space_free(inactive1);
+            page_free(page1);
+            let (empty0, page0) = unmap_page(space0, mapping0);
+            let inactive0 = address_space_deactivate(active0, empty0);
+            address_space_free(inactive0);
+            page_free(page0);
+        }
+        VmTaskSwitchState::Space1(owner) => {
+            let (active, space0, mapping0, space1, mapping1) = owner;
+            let active0 = address_space_switch(active, space0);
+            vm_task_switch_cleanup(VmTaskSwitchState::Space0(
+                (active0, space0, mapping0, space1, mapping1)));
+        }
+    }
 }
 
 // A coarse-grained process address space (GitHub issue #156, ported from

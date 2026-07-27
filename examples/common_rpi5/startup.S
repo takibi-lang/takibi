@@ -180,11 +180,16 @@ _start:
        is ready and before PL011 IMSC is unmasked. */
 
     mov     x0, #0
-    bl      main
+    bl      rpi3_boot_main
 
 .Lhalt:
     wfe
     b       .Lhalt
+
+    .weak   rpi3_boot_main
+    .type   rpi3_boot_main, %function
+rpi3_boot_main:
+    b       main
 
 /* enable_irq()/disable_irq(): same DAIF.I-only mask as
    examples/common_rpi3/startup.S's own pair. klock_guard uses these for
