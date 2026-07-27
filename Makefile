@@ -2312,6 +2312,14 @@ examples/two_page_map/kernel_rpi5.elf: \
     $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) examples/two_page_map/two_page_map_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) examples/two_page_map/two_page_map_rpi5.o -o $@
 
+examples/process_vm_smoke/process_vm_smoke_rpi5.o: examples/process_vm_smoke/process_vm_smoke_rpi5.tkb \
+    examples/vm_page_map/vm_page_map_core_rpi5.tkb $(COMMON_RPI5_TLB_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
+	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
+
+examples/process_vm_smoke/kernel_rpi5.elf: \
+    $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) examples/process_vm_smoke/process_vm_smoke_rpi5.o $(COMMON_RPI5_LINK_LD)
+	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_TLB_ASM_O) examples/process_vm_smoke/process_vm_smoke_rpi5.o -o $@
+
 ## el0_smoke: EL1->EL0 drop + real SVC trap boundary (GitHub issue #67
 ## Stage 2 follow-up), building on el1_smoke's EL2->EL1 drop and
 ## vm_page_map's dynamic mapping (needs a real EL0-executable page to
@@ -2349,14 +2357,16 @@ RPI5_EL1_SMOKE_EXAMPLES := el1_smoke
 RPI5_HVC_SMOKE_EXAMPLES := hvc_smoke
 RPI5_VM_PAGE_MAP_EXAMPLES := vm_page_map
 RPI5_TWO_PAGE_MAP_EXAMPLES := two_page_map
+RPI5_PROCESS_VM_EXAMPLES := process_vm_smoke
 RPI5_EL0_SMOKE_EXAMPLES := el0_smoke
 RPI5_EL0_ELF_LOAD_EXAMPLES := el0_elf_load
-RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES) $(RPI5_SCHED_EXAMPLES) $(RPI5_SCHED_SEM_EXAMPLES) $(RPI5_PAGE_POOL_EXAMPLES) $(RPI5_EL1_SMOKE_EXAMPLES) $(RPI5_HVC_SMOKE_EXAMPLES) $(RPI5_VM_PAGE_MAP_EXAMPLES) $(RPI5_TWO_PAGE_MAP_EXAMPLES) $(RPI5_EL0_SMOKE_EXAMPLES) $(RPI5_EL0_ELF_LOAD_EXAMPLES)
+RPI5_EXAMPLES += $(RPI5_RTC_EXAMPLES) $(RPI5_IRQ_EXAMPLES) $(RPI5_SCHED_EXAMPLES) $(RPI5_SCHED_SEM_EXAMPLES) $(RPI5_PAGE_POOL_EXAMPLES) $(RPI5_EL1_SMOKE_EXAMPLES) $(RPI5_HVC_SMOKE_EXAMPLES) $(RPI5_VM_PAGE_MAP_EXAMPLES) $(RPI5_TWO_PAGE_MAP_EXAMPLES) $(RPI5_PROCESS_VM_EXAMPLES) $(RPI5_EL0_SMOKE_EXAMPLES) $(RPI5_EL0_ELF_LOAD_EXAMPLES)
 RPI5_KERNELS  := $(foreach e,$(RPI5_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_EL1_SMOKE_KERNELS := $(foreach e,$(RPI5_EL1_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_HVC_SMOKE_KERNELS := $(foreach e,$(RPI5_HVC_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_VM_PAGE_MAP_KERNELS := $(foreach e,$(RPI5_VM_PAGE_MAP_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_TWO_PAGE_MAP_KERNELS := $(foreach e,$(RPI5_TWO_PAGE_MAP_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
+RPI5_PROCESS_VM_KERNELS := $(foreach e,$(RPI5_PROCESS_VM_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_EL0_SMOKE_KERNELS := $(foreach e,$(RPI5_EL0_SMOKE_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_EL0_ELF_LOAD_KERNELS := $(foreach e,$(RPI5_EL0_ELF_LOAD_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
 RPI5_SEM_KERNELS := $(foreach e,$(RPI5_SCHED_SEM_EXAMPLES),examples/$(e)/kernel_rpi5.elf)
@@ -2367,7 +2377,7 @@ RPI5_SEM_KERNELS := $(foreach e,$(RPI5_SCHED_SEM_EXAMPLES),examples/$(e)/kernel_
 ## the generic static pattern rule below does not ALSO claim to define
 ## them, matching RPi3's own RPI3_GENERIC_KERNELS filter-out convention
 ## for the identical reason.
-RPI5_GENERIC_KERNELS := $(filter-out $(RPI5_EL1_SMOKE_KERNELS) $(RPI5_HVC_SMOKE_KERNELS) $(RPI5_VM_PAGE_MAP_KERNELS) $(RPI5_TWO_PAGE_MAP_KERNELS) $(RPI5_EL0_SMOKE_KERNELS) $(RPI5_EL0_ELF_LOAD_KERNELS) $(RPI5_SEM_KERNELS),$(RPI5_KERNELS))
+RPI5_GENERIC_KERNELS := $(filter-out $(RPI5_EL1_SMOKE_KERNELS) $(RPI5_HVC_SMOKE_KERNELS) $(RPI5_VM_PAGE_MAP_KERNELS) $(RPI5_TWO_PAGE_MAP_KERNELS) $(RPI5_PROCESS_VM_KERNELS) $(RPI5_EL0_SMOKE_KERNELS) $(RPI5_EL0_ELF_LOAD_KERNELS) $(RPI5_SEM_KERNELS),$(RPI5_KERNELS))
 
 ## Every RPi5 kernel links COMMON_RPI5_TIMER_ASM_O unconditionally --
 ## unlike RPi3, where only the RTC_EXAMPLES/timer-needing group needs
