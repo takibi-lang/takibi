@@ -561,6 +561,8 @@ scripts/
   rpi5_jtag_load.sh -- RPi5 Stage A: injects an ELF over SWD via the official
                      Debug Probe (CMSIS-DAP) and examples/common_rpi5/bcm2712.cfg
                      (vendored, upstream OpenOCD ships no bcm2712.cfg).
+  stm32_uart_dev.sh -- resolves the STM32 ST-Link VCP by its stable USB
+                     `/dev-host/serial/by-id` identity, avoiding ttyACM swaps.
   run_hwtest_rpi5.sh -- make hwcheck-rpi5's real-board runner: injects every
                      non-Ethernet RPi3 example port and byte-compares complete
                      RP1-UART output; also drives GPIO14/15 input, starts the

@@ -1144,7 +1144,9 @@ qemu-kvs: examples/kvs_server/kernel.elf
 	$(QEMU) $(HTTP_SERVER_QEMU_FLAGS) $(KVS_FLAGS) -kernel $<
 
 # Same STM32_SERIAL_DEV convention as scripts/run_hwtest_ram.sh
-# (overridable the same way: STM32_SERIAL_DEV=/dev/ttyACM1 make ...). This
+# (overridable the same way: STM32_SERIAL_DEV=/dev/ttyACM1 make ...). The
+# default resolves the ST-Link VCP by USB identity, rather than assuming a
+# ttyACM number that can swap with the RPi5 Debug Probe after reconnect.
 # target still flashes over Flash/st-flash (a real device needs its
 # firmware in non-volatile storage) -- unlike make hwcheck-stm32/make hwcheck-stm32-net,
 # which both run entirely from RAM.
@@ -1155,7 +1157,7 @@ qemu-kvs: examples/kvs_server/kernel.elf
 # instead bind-mounts the host's entire /dev read-only at /dev-host, so a
 # board plugged in after the container is already running still shows up
 # here with no rebuild/restart needed.
-STM32_SERIAL_DEV ?= /dev-host/ttyACM0
+STM32_SERIAL_DEV ?= $(shell scripts/stm32_uart_dev.sh 2>/dev/null)
 STM32_FLASH_ADDR := 0x08000000
 
 ## stm32-http-server: flash and run the HTTP server demo on the real

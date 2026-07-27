@@ -160,7 +160,7 @@ addresses) got there too.
 `plugdev`/`dialout` groups (host GIDs 46/20) so neither needs `sudo`/`sg` after a fresh
 rebuild.
 
-**ST-LINK VCP serial (`/dev/ttyACM0`) is deliberately NOT bind-mounted directly** (no
+**ST-LINK VCP serial (`/dev/ttyACM*`) is deliberately NOT bind-mounted directly** (no
 `--device=/dev/ttyACM0`, unlike an earlier version of this file): that form requires the
 device to already exist on the host at container create time, so building/starting the
 devcontainer would fail outright whenever the ST-LINK wasn't plugged in yet -- a real
@@ -170,18 +170,21 @@ apply to `/dev/ttyACM0` (a flat file directly under `/dev`, with no similarly-st
 to mount instead). Fixed by bind-mounting the host's entire `/dev` tree read-only at
 `/dev-host` (`-v /dev:/dev-host:ro`) plus `--device-cgroup-rule=c 166:* rmw` (166 = ttyACM's
 major number) instead: the devcontainer builds/starts fine with no board attached, and a
-board plugged in afterward shows up live at `/dev-host/ttyACM0` with no rebuild/restart.
+board plugged in afterward shows up live under `/dev-host/ttyACM*` with no rebuild/restart.
 The container's own `/dev` (and its `/dev/shm`/`/dev/pts` isolation) is left untouched --
 only a read-only side path is added, not a replacement of `/dev` itself. The `ro` flag only
 blocks directory-level operations (create/delete/rename) on the mirrored tree; it does not
-block read/write I/O to a character device reached through it, so `/dev-host/ttyACM0` is
+block read/write I/O to a character device reached through it, so the resolved
+`/dev-host/ttyACM*` path is
 fully usable for serial communication. Path visibility through `/dev-host` is also not the
 same as access: the container's cgroup device policy still only allows major 166 (ttyACM)
 and 189 (USB) -- e.g. `/dev-host/sda` is visible by name but not actually readable, since
 block-device majors were never added to the allowlist. `scripts/run_hwtest_ram.sh`'s
-`STM32_SERIAL_DEV` env var and the Makefile's `STM32_SERIAL_DEV` variable both default to
-`/dev-host/ttyACM0` accordingly (override to plain `/dev/ttyACM0` only if running this
-Makefile outside this devcontainer, e.g. directly on a Linux host with the board attached).
+`STM32_SERIAL_DEV` env var and the Makefile's `STM32_SERIAL_DEV` variable resolve the
+ST-Link VCP by `/dev-host/serial/by-id` through `scripts/stm32_uart_dev.sh`, rather than
+assuming a ttyACM number that can swap with the RPi5 Debug Probe (override explicitly only
+if running this Makefile outside this devcontainer, e.g. directly on a Linux host with the
+board attached).
 
 **Build model**: `Makefile`'s `STM32_TARGET`/`STM32_CPU` (`thumbv7em-none-eabi` /
 `cortex-m7`) and `STM32_EXAMPLES` list mirror `AARCH64_TARGET`/`EXAMPLES`. Most examples
