@@ -1,0 +1,63 @@
+use "kernel/mm/page.tkb";
+
+enum ProcessState: u8 { Ready; Exited; }
+
+// Page owners travel beside this process token. Takibi intentionally forbids
+// nesting indexed owners in ordinary struct fields; the returned linear
+// variant package still forces all three page roles to be handled together.
+linear struct InitialProcess[state: ProcessState] {
+    private pid: usize;
+}
+
+must_use variant ProcessCreateResult {
+    OutOfMemory;
+    Created(exists text_page: usize. exists data_page: usize.
+            exists stack_page: usize.
+            (InitialProcess[ProcessState::Ready],
+             PageOwner[text_page], PageOwner[data_page],
+             PageOwner[stack_page]));
+}
+
+fn process_new() -> InitialProcess[ProcessState::Ready] {
+    let mut process: InitialProcess[ProcessState::Ready] = { 1 };
+    return process;
+}
+
+fn initial_process_create() -> ProcessCreateResult {
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {
+            return ProcessCreateResult::OutOfMemory;
+        }
+        PageAllocResult::Allocated(text) => {
+            match page_alloc() {
+                PageAllocResult::OutOfMemory => {
+                    page_free(text);
+                    return ProcessCreateResult::OutOfMemory;
+                }
+                PageAllocResult::Allocated(data) => {
+                    match page_alloc() {
+                        PageAllocResult::OutOfMemory => {
+                            page_free(data);
+                            page_free(text);
+                            return ProcessCreateResult::OutOfMemory;
+                        }
+                        PageAllocResult::Allocated(stack) => {
+                            return ProcessCreateResult::Created(
+                                (process_new(), text, data, stack));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn initial_process_destroy(
+        process: sink InitialProcess[ProcessState::Ready],
+        text: sink PageOwner[text_page],
+        data: sink PageOwner[data_page],
+        stack: sink PageOwner[stack_page]) {
+    page_free(stack);
+    page_free(data);
+    page_free(text);
+}

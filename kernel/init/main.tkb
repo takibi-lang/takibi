@@ -1,5 +1,21 @@
+use "kernel/kernel/process.tkb";
+
 fn main() {
     platform_init();
     uart_puts("takibi kernel: EL1\n");
+    page_allocator_init();
+    match initial_process_create() {
+        ProcessCreateResult::OutOfMemory => {
+            uart_puts("initial process: allocation failed\n");
+        }
+        ProcessCreateResult::Created(resources) => {
+            let (process, text, data, stack) = resources;
+            uart_puts("initial process: ready\n");
+            initial_process_destroy(process, text, data, stack);
+            if (page_allocator_live_count() == 0) {
+                uart_puts("resources: pages=0\n");
+            }
+        }
+    }
     while (true) { }
 }

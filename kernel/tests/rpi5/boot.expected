@@ -1,1 +1,3 @@
 takibi kernel: EL1
+initial process: ready
+resources: pages=0
