@@ -20,6 +20,17 @@ make kernelcheck       build and integration-test every maintained target
 cable, and the resident RPi5 JTAG stub, just like the examples hardware lane.
 A build-only result is never reported as an RPi5 integration pass.
 
+The RPi5 runner captures UART once per kernel boot, then projects that one
+transcript through every `kernel/tests/rpi5/views/*.filter`. Each projection
+is compared exactly with the same-named `.expected` file. This lets boot,
+process, VM, syscall, filesystem, and networking contracts grow independently
+without paying for a separate hardware reboot for every viewpoint.
+
+Kernel UART output is classified at its call site. `kernel_boot_log` is for
+stable operator-visible boot/status messages. `kernel_debug_log` is temporary
+bring-up instrumentation and is intended to disappear from the kernel tree
+after userspace `write` can carry integration evidence.
+
 All new Takibi sources in this tree are compiled with `--forbid-trap` from
 their first commit. Fallible internal operations return variants; conversion
 to Linux `-errno` values happens only at the syscall boundary. Process,

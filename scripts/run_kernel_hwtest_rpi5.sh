@@ -5,7 +5,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERIAL_DEV="${RPI5_SERIAL_DEV:-$($REPO_ROOT/scripts/rpi5_uart_dev.sh)}"
 ELF="$REPO_ROOT/kernel/build/rpi5/kernel.elf"
-EXPECTED="$REPO_ROOT/kernel/tests/rpi5/boot.expected"
+VIEW_DIR="$REPO_ROOT/kernel/tests/rpi5/views"
 ARTIFACT_DIR="${RPI5_KERNEL_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest-rpi5}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
 RESET_LOG="$ARTIFACT_DIR/reset.log"
@@ -51,11 +51,34 @@ sleep 3
 cleanup
 trap - EXIT INT TERM HUP
 tr -d '\r' <"$UART_LOG" >"$UART_LOG.normalized"
-if ! cmp -s "$EXPECTED" "$UART_LOG.normalized"; then
-    echo "FAIL kernel/rpi5: UART output mismatch" >&2
-    diff -u "$EXPECTED" "$UART_LOG.normalized" >&2 || true
-    echo "artifacts: $ARTIFACT_DIR" >&2
+
+# One boot, several independent views. Each filter projects the shared UART
+# transcript onto one contract, whose expected file is then compared exactly.
+# Adding a subsystem test does not require another reset/load cycle.
+view_count=0
+for filter in "$VIEW_DIR"/*.filter; do
+    [ -e "$filter" ] || continue
+    name="$(basename "$filter" .filter)"
+    expected="$VIEW_DIR/$name.expected"
+    actual="$ARTIFACT_DIR/$name.actual"
+    if [ ! -f "$expected" ]; then
+        echo "error: missing expected file for kernel view $name" >&2
+        exit 1
+    fi
+    LC_ALL=C grep -E -f "$filter" "$UART_LOG.normalized" >"$actual" || true
+    if ! cmp -s "$expected" "$actual"; then
+        echo "FAIL kernel/rpi5 view: $name" >&2
+        diff -u "$expected" "$actual" >&2 || true
+        echo "artifacts: $ARTIFACT_DIR" >&2
+        exit 1
+    fi
+    echo "PASS kernel/rpi5 view: $name"
+    view_count=$((view_count + 1))
+done
+
+if [ "$view_count" -eq 0 ]; then
+    echo "error: no kernel integration views found under $VIEW_DIR" >&2
     exit 1
 fi
 
-echo "PASS kernel/rpi5"
+echo "PASS kernel/rpi5 ($view_count views, one boot)"

@@ -1,0 +1,11 @@
+// Stable boot/status messages are deliberately separate from temporary
+// implementation diagnostics. The debug entry point exists while the kernel
+// has no user write syscall and is a deletion target once that boundary can
+// report failures without kernel-internal UART instrumentation.
+fn kernel_boot_log(message: *u8) {
+    uart_puts(message);
+}
+
+fn kernel_debug_log(message: *u8) {
+    uart_puts(message);
+}
