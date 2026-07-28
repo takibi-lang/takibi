@@ -80,6 +80,10 @@ const MAX_PHDRS: usize = 8;
 const PT_LOAD: u32 = 1;
 const ET_EXEC: u16 = 2;
 const ET_DYN: u16 = 3;
+const EM_AARCH64: u16 = 183;
+const ELF_HEADER_SIZE: usize = 64;
+const ELF_PROGRAM_HEADER_SIZE: usize = 56;
+const USIZE_MAX: usize = 0xFFFFFFFFFFFFFFFF;
 
 // argv/envp/auxv initial stack layout (GitHub issue #156): reserved at
 // the top of the stack page, see its construction in app_main for the
@@ -2267,8 +2271,12 @@ fn app_main() {
 // comment); returns true/false and leaves that decision to the caller.
 fn el0_load_elf_into(image_addr: usize, image_len: usize,
                      seed: {0..<2 as usize}, argv0: *u8) -> bool {
-    if (image_len < 64) {
+    if (image_len < ELF_HEADER_SIZE) {
         uart_puts("image too small\n");
+        return false;
+    }
+    if (image_addr > USIZE_MAX - image_len) {
+        uart_puts("image address overflow\n");
         return false;
     }
     let hdr_ptr: *Elf64Header = image_addr as *Elf64Header;
@@ -2277,12 +2285,17 @@ fn el0_load_elf_into(image_addr: usize, image_len: usize,
         uart_puts("bad ELF magic\n");
         return false;
     }
-    if (magic[4] != 2 || magic[5] != 1) {
+    if (magic[4] != 2 || magic[5] != 1 || magic[6] != 1) {
         uart_puts("not ELF64 little-endian\n");
         return false;
     }
     if (hdr_ptr.e_type != ET_EXEC && hdr_ptr.e_type != ET_DYN) {
         uart_puts("unsupported ELF type\n");
+        return false;
+    }
+    if (hdr_ptr.e_machine != EM_AARCH64 || hdr_ptr.e_version != 1
+            || hdr_ptr.e_ehsize as usize != ELF_HEADER_SIZE) {
+        uart_puts("unsupported ELF header\n");
         return false;
     }
 
@@ -2291,11 +2304,18 @@ fn el0_load_elf_into(image_addr: usize, image_len: usize,
     let phentsize: usize = hdr_ptr.e_phentsize as usize;
     let phnum: usize = hdr_ptr.e_phnum as usize;
 
-    let page_va = dynamic_va_base();
-    let mut phdr_cap: usize = MAX_PHDRS;
-    if (phnum < MAX_PHDRS) {
-        phdr_cap = phnum;
+    // Validate the complete program-header table before forming even one
+    // raw Elf64ProgramHeader pointer.  The fixed entry size also removes a
+    // malformed-file-controlled multiplier from every address calculation.
+    if (phentsize != ELF_PROGRAM_HEADER_SIZE || phnum > MAX_PHDRS
+            || phoff < ELF_HEADER_SIZE || phoff > image_len
+            || phnum > (image_len - phoff) / ELF_PROGRAM_HEADER_SIZE
+            || image_addr > USIZE_MAX - phoff) {
+        uart_puts("bad program headers\n");
+        return false;
     }
+    let phdr_base: usize = image_addr + phoff;
+    let page_va = dynamic_va_base();
 
     // First pass (GitHub issue #156's multi-page loader generalization,
     // now also PIE-aware): scan every PT_LOAD segment to find the lowest
@@ -2318,13 +2338,30 @@ fn el0_load_elf_into(image_addr: usize, image_len: usize,
     let mut min_vaddr: usize = 0xFFFFFFFFFFFFFFFF;
     let mut max_vaddr_end: usize = 0;
     let mut any_load: i32 = 0;
-    for i: usize in 0..<phdr_cap {
-        let ph_addr: usize = image_addr + phoff + i * phentsize;
+    for i: usize in 0..<phnum {
+        let ph_addr: usize = phdr_base + i * ELF_PROGRAM_HEADER_SIZE;
         let ph_ptr: *Elf64ProgramHeader = ph_addr as *Elf64ProgramHeader;
         if (ph_ptr.p_type == PT_LOAD) {
             any_load = 1;
             let seg_vaddr: usize = ph_ptr.p_vaddr as usize;
             let seg_memsz: usize = ph_ptr.p_memsz as usize;
+            let seg_offset: usize = ph_ptr.p_offset as usize;
+            let seg_filesz: usize = ph_ptr.p_filesz as usize;
+            let seg_align: usize = ph_ptr.p_align as usize;
+            if (seg_filesz > seg_memsz || seg_offset > image_len
+                    || seg_filesz > image_len - seg_offset
+                    || seg_vaddr > USIZE_MAX - seg_memsz) {
+                uart_puts("bad load segment\n");
+                return false;
+            }
+            if (seg_align > 1) {
+                let align_mask: usize = seg_align - 1;
+                if ((seg_align & align_mask) != 0
+                        || (seg_vaddr & align_mask) != (seg_offset & align_mask)) {
+                    uart_puts("bad segment alignment\n");
+                    return false;
+                }
+            }
             if (seg_vaddr < min_vaddr) {
                 min_vaddr = seg_vaddr;
             }
@@ -2339,10 +2376,18 @@ fn el0_load_elf_into(image_addr: usize, image_len: usize,
         return false;
     }
     let load_bias: usize = page_va - min_vaddr;
+    if (entry_link > USIZE_MAX - load_bias || phoff > USIZE_MAX - load_bias) {
+        uart_puts("load address overflow\n");
+        return false;
+    }
     let entry: usize = entry_link + load_bias;
     let at_phdr: usize = load_bias + phoff;
     let max_extent: usize = max_vaddr_end - min_vaddr;
 
+    if (max_extent > USIZE_MAX - (PAGE_SIZE - 1)) {
+        uart_puts("load extent overflow\n");
+        return false;
+    }
     let mut code_pages: usize = (max_extent + PAGE_SIZE - 1) / PAGE_SIZE;
     if (code_pages < 1) {
         code_pages = 1;
@@ -2383,20 +2428,25 @@ fn el0_load_elf_into(image_addr: usize, image_len: usize,
             let dst: *u8 = page_va as *u8;
 
             let mut ok: i32 = 1;
-            for i: usize in 0..<phdr_cap {
-                let ph_addr: usize = image_addr + phoff + i * phentsize;
+            for i: usize in 0..<phnum {
+                let ph_addr: usize = phdr_base + i * ELF_PROGRAM_HEADER_SIZE;
                 let ph_ptr: *Elf64ProgramHeader = ph_addr as *Elf64ProgramHeader;
                 if (ph_ptr.p_type == PT_LOAD) {
-                    let seg_vaddr: usize = (ph_ptr.p_vaddr as usize) + load_bias;
+                    let seg_link_vaddr: usize = ph_ptr.p_vaddr as usize;
                     let seg_offset: usize = ph_ptr.p_offset as usize;
                     let seg_filesz: usize = ph_ptr.p_filesz as usize;
-                    if (seg_vaddr < page_va || seg_filesz > code_region_size
-                            || seg_vaddr - page_va > code_region_size - seg_filesz
-                            || seg_offset > image_len
-                            || seg_filesz > image_len - seg_offset) {
-                        uart_puts("segment out of range\n");
+                    if (seg_link_vaddr > USIZE_MAX - load_bias) {
+                        uart_puts("segment address overflow\n");
                         ok = 0;
                     } else {
+                        let seg_vaddr: usize = seg_link_vaddr + load_bias;
+                        if (seg_vaddr < page_va || seg_filesz > code_region_size
+                                || seg_vaddr - page_va > code_region_size - seg_filesz
+                                || seg_offset > image_len
+                                || seg_filesz > image_len - seg_offset) {
+                            uart_puts("segment out of range\n");
+                            ok = 0;
+                        } else {
                         // dst_base + seg_filesz <= code_region_size is
                         // already proven by the guard above, but as a
                         // relationship between two runtime values
@@ -2423,7 +2473,8 @@ fn el0_load_elf_into(image_addr: usize, image_len: usize,
                         let seg_src = unsafe {
                             src[seg_offset as isize..<(seg_offset + seg_filesz) as isize]
                         };
-                        slice_copy(seg_dst, seg_src);
+                            slice_copy(seg_dst, seg_src);
+                        }
                     }
                 }
             }
