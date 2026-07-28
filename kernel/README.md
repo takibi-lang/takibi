@@ -53,3 +53,9 @@ Milestone 1 now runs on real RPi5 hardware: the typed initial process enters
 EL0 with RX text and RW+XN data/stack mappings, observes Linux AArch64
 `write(64)` success plus `-EBADF`/`-EFAULT` error returns, exits through
 `exit(93)`, and returns to the owning EL1 frame to unmap and free every page.
+
+The next compatibility fixture is generated under `kernel/build/user` from
+Alpine v3.24's pinned AArch64 `busybox-static` package. It is wrapped in a
+`newc` initramfs and embedded in the kernel without committing the GPL binary.
+The kernel validates the archive name/bounds and the real static-PIE ELF load
+plan before the larger owned process-image mapping is attempted.

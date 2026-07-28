@@ -33,7 +33,10 @@ fi
 timeout 1 cat "$SERIAL_DEV" >/dev/null 2>&1 || true
 
 : >"$UART_LOG"
-timeout 8 cat "$SERIAL_DEV" >"$UART_LOG" 2>/dev/null &
+# SWD load time grows with embedded initramfs images. Keep the reader alive
+# through the entire load instead of imposing a deadline that can expire
+# before the CPU is resumed; cleanup below bounds the post-load capture.
+cat "$SERIAL_DEV" >"$UART_LOG" 2>/dev/null &
 reader_pid=$!
 cleanup() {
     kill "$reader_pid" 2>/dev/null || true

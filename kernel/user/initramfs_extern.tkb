@@ -1,0 +1,2 @@
+extern fn kernel_initramfs_addr() -> usize;
+extern fn kernel_initramfs_len() -> usize;

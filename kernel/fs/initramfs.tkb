@@ -1,0 +1,70 @@
+use "kernel/user/initramfs_extern.tkb";
+
+const CPIO_NEWC_HEADER_SIZE: usize = 110;
+const CPIO_FILESIZE_OFFSET: usize = 54;
+const CPIO_NAMESIZE_OFFSET: usize = 94;
+
+must_use variant CpioNumberResult { Invalid; Value(usize); }
+
+must_use variant InitramfsFileResult {
+    Invalid;
+    File((usize, usize));
+}
+
+fn cpio_hex_digit(value: u8) -> usize {
+    if (value >= 0x30 && value <= 0x39) { return (value - 0x30) as usize; }
+    if (value >= 0x41 && value <= 0x46) { return (value - 0x41 + 10) as usize; }
+    return 16;
+}
+
+fn cpio_hex8(base: *u8, offset: usize) -> CpioNumberResult {
+    let mut result: usize = 0;
+    for i: usize in 0..<8 {
+        let digit: usize = cpio_hex_digit(base[(offset + i) as isize]);
+        if (digit >= 16) { return CpioNumberResult::Invalid; }
+        result = (result << 4) | digit;
+    }
+    return CpioNumberResult::Value(result);
+}
+
+fn initramfs_busybox() -> InitramfsFileResult {
+    let address: usize = kernel_initramfs_addr();
+    let length: usize = kernel_initramfs_len();
+    if (length < CPIO_NEWC_HEADER_SIZE) { return InitramfsFileResult::Invalid; }
+    let bytes: *u8 = address as *u8;
+    if (bytes[0] != 0x30 || bytes[1] != 0x37 || bytes[2] != 0x30 ||
+        bytes[3] != 0x37 || bytes[4] != 0x30 || bytes[5] != 0x31) {
+        return InitramfsFileResult::Invalid;
+    }
+
+    let mut file_size: usize = 0;
+    match cpio_hex8(bytes, CPIO_FILESIZE_OFFSET) {
+        CpioNumberResult::Invalid => { return InitramfsFileResult::Invalid; }
+        CpioNumberResult::Value(value) => { file_size = value; }
+    }
+    let mut name_size: usize = 0;
+    match cpio_hex8(bytes, CPIO_NAMESIZE_OFFSET) {
+        CpioNumberResult::Invalid => { return InitramfsFileResult::Invalid; }
+        CpioNumberResult::Value(value) => { name_size = value; }
+    }
+    if (name_size != 15 || name_size > length - CPIO_NEWC_HEADER_SIZE) {
+        return InitramfsFileResult::Invalid;
+    }
+
+    let name: *u8 = (address + CPIO_NEWC_HEADER_SIZE) as *u8;
+    if (name[0] != 0x62 || name[1] != 0x75 || name[2] != 0x73 ||
+        name[3] != 0x79 || name[4] != 0x62 || name[5] != 0x6F ||
+        name[6] != 0x78 || name[7] != 0x2D || name[8] != 0x73 ||
+        name[9] != 0x74 || name[10] != 0x61 || name[11] != 0x74 ||
+        name[12] != 0x69 || name[13] != 0x63 || name[14] != 0) {
+        return InitramfsFileResult::Invalid;
+    }
+
+    let name_end: usize = CPIO_NEWC_HEADER_SIZE + name_size;
+    if (name_end > 0xFFFFFFFFFFFFFFFC) { return InitramfsFileResult::Invalid; }
+    let file_offset: usize = (name_end + 3) & 0xFFFFFFFFFFFFFFFC;
+    if (file_offset > length || file_size > length - file_offset) {
+        return InitramfsFileResult::Invalid;
+    }
+    return InitramfsFileResult::File((address + file_offset, file_size));
+}

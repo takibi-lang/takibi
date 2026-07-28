@@ -1,11 +1,33 @@
 use "kernel/kernel/process.tkb";
 use "kernel/kernel/syscall.tkb";
+use "kernel/fs/initramfs.tkb";
+use "kernel/fs/elf64.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/printk/log.tkb";
 
 fn main() {
     platform_init();
     kernel_boot_log("takibi kernel: EL1\n");
+    match initramfs_busybox() {
+        InitramfsFileResult::Invalid => {
+            kernel_debug_log("distro image: invalid initramfs\n");
+        }
+        InitramfsFileResult::File(image) => {
+            let (image_address, image_length) = image;
+            match distro_elf_validate(image_address, image_length) {
+                DistroElfResult::Invalid => {
+                    kernel_debug_log("distro image: invalid elf\n");
+                }
+                DistroElfResult::Valid(plan) => {
+                    if (plan.entry == 0x4524 && plan.load_segments == 2 &&
+                        plan.extent == 0x122138) {
+                        kernel_debug_log("distro image: alpine busybox static-pie\n");
+                        kernel_debug_log("distro elf: aarch64 loads=2 extent=0x122138\n");
+                    }
+                }
+            }
+        }
+    }
     page_allocator_init();
     match initial_process_create() {
         ProcessCreateResult::OutOfMemory => {

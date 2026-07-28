@@ -1,0 +1,2 @@
+distro image: alpine busybox static-pie
+distro elf: aarch64 loads=2 extent=0x122138

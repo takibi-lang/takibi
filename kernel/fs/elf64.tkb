@@ -1,0 +1,91 @@
+const ELF_ET_DYN: u16 = 3;
+const ELF_EM_AARCH64: u16 = 183;
+const ELF_PT_LOAD: u32 = 1;
+const ELF_HEADER_SIZE: usize = 64;
+const ELF_PROGRAM_HEADER_SIZE: usize = 56;
+
+struct packed KernelElf64Header {
+    ident: [u8; 16];
+    object_type: u16;
+    machine: u16;
+    version: u32;
+    entry: u64;
+    program_offset: u64;
+    section_offset: u64;
+    flags: u32;
+    header_size: u16;
+    program_entry_size: u16;
+    program_count: u16;
+    section_entry_size: u16;
+    section_count: u16;
+    section_names: u16;
+}
+
+struct packed KernelElf64ProgramHeader {
+    segment_type: u32;
+    flags: u32;
+    offset: u64;
+    virtual_address: u64;
+    physical_address: u64;
+    file_size: u64;
+    memory_size: u64;
+    alignment: u64;
+}
+
+struct DistroElfLoadPlan {
+    entry: usize;
+    extent: usize;
+    load_segments: usize;
+}
+
+must_use variant DistroElfResult { Invalid; Valid(DistroElfLoadPlan); }
+
+fn distro_elf_validate(address: usize, length: usize) -> DistroElfResult {
+    if (length < ELF_HEADER_SIZE) { return DistroElfResult::Invalid; }
+    let header: *KernelElf64Header = address as *KernelElf64Header;
+    let ident: *u8 = header.ident as *u8;
+    if (ident[0] != 0x7F || ident[1] != 0x45 || ident[2] != 0x4C ||
+        ident[3] != 0x46 || ident[4] != 2 || ident[5] != 1 || ident[6] != 1) {
+        return DistroElfResult::Invalid;
+    }
+    if (header.object_type != ELF_ET_DYN || header.machine != ELF_EM_AARCH64 ||
+        header.version != 1 || header.header_size as usize != ELF_HEADER_SIZE ||
+        header.program_entry_size as usize != ELF_PROGRAM_HEADER_SIZE) {
+        return DistroElfResult::Invalid;
+    }
+
+    let program_offset: usize = header.program_offset as usize;
+    let program_count: usize = header.program_count as usize;
+    if (program_count == 0 || program_count > 8 || program_offset > length) {
+        return DistroElfResult::Invalid;
+    }
+    let table_size: usize = program_count * ELF_PROGRAM_HEADER_SIZE;
+    if (table_size > length - program_offset) { return DistroElfResult::Invalid; }
+
+    let mut maximum: usize = 0;
+    let mut load_count: usize = 0;
+    for i: usize in 0..<program_count {
+        let item_address: usize = address + program_offset + i * ELF_PROGRAM_HEADER_SIZE;
+        let item: *KernelElf64ProgramHeader = item_address as *KernelElf64ProgramHeader;
+        if (item.segment_type == ELF_PT_LOAD) {
+            let offset: usize = item.offset as usize;
+            let file_size: usize = item.file_size as usize;
+            let virtual_address: usize = item.virtual_address as usize;
+            let memory_size: usize = item.memory_size as usize;
+            if (file_size > memory_size || offset > length ||
+                file_size > length - offset ||
+                memory_size > 0xFFFFFFFFFFFFFFFF - virtual_address) {
+                return DistroElfResult::Invalid;
+            }
+            let end_address: usize = virtual_address + memory_size;
+            if (end_address > maximum) { maximum = end_address; }
+            load_count = load_count + 1;
+        }
+    }
+    let entry: usize = header.entry as usize;
+    if (load_count == 0 || entry >= maximum || maximum > 0x1FFFFF) {
+        return DistroElfResult::Invalid;
+    }
+    let mut plan: DistroElfLoadPlan = { entry, maximum, load_count };
+    return DistroElfResult::Valid(plan);
+}
