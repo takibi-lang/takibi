@@ -85,7 +85,9 @@ el1_vectors:
     VECTOR 5
     VECTOR 6
     VECTOR 7
-    VECTOR 8
+    mov     x16, #8
+    b       el0_sync_entry
+    .align  7
     VECTOR 9
     VECTOR 10
     VECTOR 11
@@ -95,6 +97,7 @@ el1_vectors:
     VECTOR 15
 
     .section .text, "ax"
+    .global el1_exception_evidence
 el1_exception_evidence:
     adrp    x17, exception_vector_slot
     add     x17, x17, :lo12:exception_vector_slot

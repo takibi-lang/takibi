@@ -1,4 +1,5 @@
 use "kernel/kernel/process.tkb";
+use "kernel/kernel/syscall.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/printk/log.tkb";
 
@@ -13,18 +14,35 @@ fn main() {
         ProcessCreateResult::Created(resources) => {
             let (process, text, data, stack) = resources;
             kernel_debug_log("initial process: ready\n");
-            let empty = address_space_new();
-            let (text_space, text_mapping) = map_user_text(empty, text);
-            let (data_space, data_mapping) = map_user_data(text_space, data);
-            let (ready_space, stack_mapping) = map_user_stack(data_space, stack);
-            if (user_layout_is_correct()) {
-                kernel_debug_log("vm layout: text=rx data=rw+xn stack=rw+xn\n");
+            match initial_user_load(text) {
+                InitialUserLoadResult::TooLarge => {
+                    kernel_debug_log("initial user: image too large\n");
+                    initial_process_destroy(process, text, data, stack);
+                }
+                InitialUserLoadResult::Loaded => {
+                    let empty = address_space_new();
+                    let (text_space, text_mapping) = map_user_text(empty, text);
+                    let (data_space, data_mapping) = map_user_data(text_space, data);
+                    let (ready_space, stack_mapping) = map_user_stack(data_space, stack);
+                    if (user_layout_is_correct()) {
+                        kernel_debug_log("vm layout: text=rx data=rw+xn stack=rw+xn\n");
+                    }
+                    let exit_status: usize =
+                        run_initial_user(USER_TEXT_VA, USER_STACK_VA + PAGE_SIZE);
+                    if (exit_status == 0) {
+                        kernel_debug_log("syscall write errors: ebadf efault\n");
+                        kernel_debug_log("syscall exit: 0\n");
+                    }
+                    let (data_space2, stack2) =
+                        unmap_user_stack(ready_space, stack_mapping);
+                    let (text_space2, data2) =
+                        unmap_user_data(data_space2, data_mapping);
+                    let (empty2, text2) =
+                        unmap_user_text(text_space2, text_mapping);
+                    address_space_free(empty2);
+                    initial_process_destroy(process, text2, data2, stack2);
+                }
             }
-            let (data_space2, stack2) = unmap_user_stack(ready_space, stack_mapping);
-            let (text_space2, data2) = unmap_user_data(data_space2, data_mapping);
-            let (empty2, text2) = unmap_user_text(text_space2, text_mapping);
-            address_space_free(empty2);
-            initial_process_destroy(process, text2, data2, stack2);
             if (page_allocator_live_count() == 0) {
                 kernel_debug_log("resources: pages=0\n");
             }

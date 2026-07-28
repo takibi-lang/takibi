@@ -48,3 +48,8 @@ affine/linear ownership.
 5. Run a distribution-provided static BusyBox from an initramfs.
 6. Mount and mutate a reproducible RAM-backed ext2 image before connecting
    the same block interface to RPi5 USB Mass Storage.
+
+Milestone 1 now runs on real RPi5 hardware: the typed initial process enters
+EL0 with RX text and RW+XN data/stack mappings, observes Linux AArch64
+`write(64)` success plus `-EBADF`/`-EFAULT` error returns, exits through
+`exit(93)`, and returns to the owning EL1 frame to unmap and free every page.

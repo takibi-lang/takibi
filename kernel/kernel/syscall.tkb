@@ -1,0 +1,60 @@
+use "kernel/mm/page.tkb";
+use "kernel/mm/address_space.tkb";
+use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
+
+const AARCH64_NR_WRITE: usize = 64;
+const AARCH64_NR_EXIT: usize = 93;
+const AARCH64_NR_EXIT_GROUP: usize = 94;
+const LINUX_EBADF: usize = 0xFFFFFFFFFFFFFFF7;
+const LINUX_EFAULT: usize = 0xFFFFFFFFFFFFFFF2;
+
+must_use variant InitialUserLoadResult { Loaded; TooLarge; }
+
+fn initial_user_load(text: borrow PageOwner[page])
+        -> InitialUserLoadResult !{unsafe} {
+    let length: usize = initial_user_payload_len();
+    if (length > PAGE_SIZE) {
+        return InitialUserLoadResult::TooLarge;
+    }
+    let source: *u8 = initial_user_payload_addr() as *u8;
+    let source_bytes = unsafe { source[0..<length as isize] };
+    let destination = page_bytes(text);
+    slice_copy(destination, source_bytes);
+    user_code_sync(page_physical_address(text), length);
+    return InitialUserLoadResult::Loaded;
+}
+
+// Returns (action, value): 0 = fail-stop, 1 = resume EL0 with value in x0,
+// 2 = terminate and return the exit status to run_initial_user's EL1 caller.
+// Linux -errno encoding exists only here at the ABI boundary.
+fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
+                           x2: usize, elr: usize) -> (usize, usize) {
+    let exception_class: usize = (esr >> 26) & 0x3F;
+    if (exception_class != 0x15) { return (0, 0); }
+
+    if (number == AARCH64_NR_WRITE) {
+        let fd: usize = x0;
+        let address: usize = x1;
+        let length: usize = x2;
+        if (fd != 1 && fd != 2) { return (1, LINUX_EBADF); }
+        if (address < USER_TEXT_VA || length > PAGE_SIZE) {
+            return (1, LINUX_EFAULT);
+        }
+        if (address - USER_TEXT_VA > PAGE_SIZE - length) {
+            return (1, LINUX_EFAULT);
+        }
+        let mut cursor: *u8 = address as *u8;
+        let mut remaining: usize = length;
+        while (remaining != 0) {
+            uart_putc(*cursor);
+            cursor = cursor + 1;
+            remaining = remaining - 1;
+        }
+        return (1, length);
+    }
+
+    if (number == AARCH64_NR_EXIT || number == AARCH64_NR_EXIT_GROUP) {
+        return (2, x0);
+    }
+    return (0, 0);
+}
