@@ -12244,3 +12244,19 @@ exhaustiveness-checked, but dropping the entire result is still permitted by
 the language, like other ordinary variants. Making status values genuinely
 must-check remains issue #150's kind-system design question; this change does
 not invent a linear resource solely to approximate that policy.
+
+## 2026-07-28: Unsafe memory reasoning becomes an auditable effect
+
+Issue #179 made `unsafe` part of the existing checker-only effect system.
+A function containing `unsafe { ... }` must now say `!{unsafe}` at its
+declaration, resolved direct callers inherit the effect, explicit effect rows
+that omit it reject such a call path, and function-pointer contracts can carry
+or reject it using the same subset rules as `may_block`. The effect remains
+fully erased from LLVM IR and the ABI.
+
+The new `--forbid-unsafe` compiler policy rejects any compiled function whose
+inferred call graph reaches unsafe code. Positive and negative full-CLI tests
+exercise the policy, while unit tests cover direct declarations, propagation,
+explicit safe contracts, and callback compatibility. Existing example unsafe
+sites were annotated in place, making the current trust boundary visible
+without enabling denial for examples that deliberately exercise raw memory.

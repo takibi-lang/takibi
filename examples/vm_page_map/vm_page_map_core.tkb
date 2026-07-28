@@ -1261,7 +1261,7 @@ fn mapping_va_acquire(active: sink ActiveAddressSpace[core, asid],
 }
 
 fn mapping_va_bytes(lease: borrow ActiveMappingView[core, asid, va, p])
-        -> [u8; PAGE_SIZE..] @ p {
+        -> [u8; PAGE_SIZE..] @ p !{unsafe} {
     let va_ptr: *u8 = lease.va_value as *u8;
     return unsafe { va_ptr[0..<4096] };
 }

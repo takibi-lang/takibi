@@ -219,7 +219,7 @@ fn hvc_dispatch(arg: usize) -> usize {
 // fixed page). exit()'s real status (x0) is recorded and reported, AND
 // its VM resources are really reclaimed via rpi5_hvc_call below.
 fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
-                    x2: usize, elr: usize) -> (usize, usize) {
+                    x2: usize, elr: usize) -> (usize, usize) !{unsafe} {
     let ec: usize = (esr >> 26) & 0x3F;
     if (ec != 0x15) {
         return (0, 0);
@@ -546,7 +546,7 @@ fn el1_main() {
     rpi5_el0_enter(el0_entry_va, el0_stack_top_va);
 }
 
-fn app_main() {
+fn app_main() !{unsafe} {
     uart_puts("el0_elf_load\n");
     page_pool_init();
 

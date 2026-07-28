@@ -1,0 +1,7 @@
+// Negative policy fixture: the boundary is explicitly declared, but a
+// deny-unsafe compilation must still reject its reachable effect.
+
+fn raw_byte(p: *u8) -> u8 !{unsafe} {
+    let bytes = unsafe { p[0..<1] };
+    return bytes[0];
+}

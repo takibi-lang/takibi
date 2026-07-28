@@ -2169,7 +2169,7 @@ let infer_tests = [
     (expect_type_error
       "value 'raw' is derived from linear value 'o' and cannot be used after 'o' is consumed"
       (region_fixture ^
-        "fn reg_ptr_integer_roundtrip_bad() -> i32 {
+        "fn reg_ptr_integer_roundtrip_bad() -> i32 !{unsafe} {
            let idx: {0..<4 as usize} = 0;
            let o = reg_make(idx);
            let raw: usize = (reg_frame(o) as *u8) as usize;
@@ -3128,7 +3128,7 @@ let infer_tests = [
   Alcotest.test_case "unsafe marks a computed cast to an affine handle" `Quick
     (expect_ok "affine opaque struct Token;
                 fn release(t: sink *Token) {}
-                fn f(idx: usize) {
+                fn f(idx: usize) !{unsafe} {
                     let t: *Token = unsafe { idx as *Token };
                     release(t);
                 }");
@@ -3195,7 +3195,7 @@ let infer_tests = [
        "fn f(p: *u8) { let q: *align(32) u8 = p; }");
 
   Alcotest.test_case "unsafe marks an unproven cast to *align(N) T" `Quick
-    (expect_ok "fn f(p: *u8) -> *align(32) u8 { return unsafe { p as *align(32) u8 }; }");
+    (expect_ok "fn f(p: *u8) -> *align(32) u8 !{unsafe} { return unsafe { p as *align(32) u8 }; }");
 
   (* Real end-to-end codegen: array decay + pointer arithmetic by a
      literal multiple of N (the examples/common_stm32/eth.tkb `eth_rx_bufs
@@ -3377,7 +3377,7 @@ let infer_tests = [
 
   Alcotest.test_case "raw-pointer slice bounds use isize offsets" `Quick
     (expect_ok
-       "fn f(p: *u8, lo: isize, hi: isize) -> []u8 {
+       "fn f(p: *u8, lo: isize, hi: isize) -> []u8 !{unsafe} {
           return unsafe { p[lo..<hi] };
         }");
 
@@ -5706,6 +5706,36 @@ let infer_tests = [
       Alcotest.(check (list string)) "leaf effects" ["may_block"] leaf.effects;
       Alcotest.(check (list string)) "caller effects" ["may_block"] top.effects);
 
+  Alcotest.test_case "unsafe effect requires a direct declaration and propagates" `Quick
+    (fun () ->
+      expect_type_error "does not declare !{unsafe}"
+        "fn unsafe_missing_decl(p: *u8) { let s = unsafe { p[0..<1] }; }" ();
+      let inferred = infer
+        "fn unsafe_leaf(p: *u8) !{unsafe} { let s = unsafe { p[0..<1] }; }
+         fn unsafe_caller(p: *u8) { unsafe_leaf(p); }" in
+      let leaf = Types.StringMap.find "unsafe_leaf" inferred.functions in
+      let caller = Types.StringMap.find "unsafe_caller" inferred.functions in
+      Alcotest.(check (list string)) "leaf effects" ["unsafe"] leaf.effects;
+      Alcotest.(check (list string)) "caller effects" ["unsafe"] caller.effects);
+
+  Alcotest.test_case "explicit safe effect contract rejects transitive unsafe" `Quick
+    (expect_type_error "unsafe effect is reachable"
+       "fn unsafe_leaf_contract(p: *u8) !{unsafe} {
+          let s = unsafe { p[0..<1] };
+        }
+        fn safe_caller_contract(p: *u8) !{} { unsafe_leaf_contract(p); }");
+
+  Alcotest.test_case "unsafe function-pointer effects are checked" `Quick
+    (fun () ->
+      expect_ok
+        "fn unsafe_callback(p: *u8) !{unsafe} { let s = unsafe { p[0..<1] }; }
+         fn install_unsafe(cb: fn !{unsafe}(*u8) -> void) {}
+         fn use_unsafe_callback() { install_unsafe(unsafe_callback); }" ();
+      expect_type_error "destination contract does not allow"
+        "fn unsafe_callback_bad(p: *u8) !{unsafe} { let s = unsafe { p[0..<1] }; }
+         fn install_safe(cb: fn !{}(*u8) -> void) {}
+         fn reject_unsafe_callback() { install_safe(unsafe_callback_bad); }" ());
+
   Alcotest.test_case "Slice 4: interrupt root rejects a transitive blocking call" `Quick
     (expect_type_error
        "effect_irq15 -> effect_helper15 -> effect_wait15"
@@ -7391,7 +7421,7 @@ let codegen_tests = [
      sites); without the marker it is a compile error" `Quick
     (fun () ->
        expect_trap_sites 0
-         "fn ftsl_from_ptr(p: *u8) -> u8 {
+         "fn ftsl_from_ptr(p: *u8) -> u8 !{unsafe} {
             let s = unsafe { p[0..<8] };
             return s[7];
           }" ();
@@ -7957,7 +7987,7 @@ let codegen_tests = [
           for b in s { sum = sum + (b as i32); }
           return sum;
         }
-        fn ftp4c1_unsafe_slice(pkt: [u8; 40..], raw_ihl: usize, tcp_len: usize) -> i32 {
+        fn ftp4c1_unsafe_slice(pkt: [u8; 40..], raw_ihl: usize, tcp_len: usize) -> i32 !{unsafe} {
           let ihl: usize = min(raw_ihl & 0x3f, 20);
           let room: usize = 40 - ihl;
           let tl: usize = max(tcp_len, 0);

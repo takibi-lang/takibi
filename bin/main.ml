@@ -37,6 +37,7 @@ let () =
   let target_features = ref "" in
   let debug_info = ref false in
   let forbid_trap = ref false in
+  let forbid_unsafe = ref false in
   let profile_functions = ref false in
   let show_version = ref false in
   let i = ref 1 in
@@ -72,6 +73,8 @@ let () =
          debug_info := true
      | "--forbid-trap" ->
          forbid_trap := true
+     | "--forbid-unsafe" ->
+         forbid_unsafe := true
      | "--profile-functions" ->
          profile_functions := true
      | arg ->
@@ -87,7 +90,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -129,6 +132,22 @@ let () =
 
     (* HM type inference -- catches type errors and produces resolved types *)
     let prog_types = Typechecker.infer_program prog in
+
+    if !forbid_unsafe then begin
+      let unsafe_functions = Types.StringMap.bindings prog_types.functions
+        |> List.filter_map (fun (name, info) ->
+          if List.mem "unsafe" info.Types.effects then Some name else None)
+      in
+      if unsafe_functions <> [] then begin
+        List.iter (fun name ->
+          let message = Printf.sprintf
+            "--forbid-unsafe: function '%s' has a reachable unsafe effect" name in
+          match Type_inf.inferred_effect_location name with
+          | Some loc -> report_error loc message
+          | None -> Printf.eprintf "Error: %s\n" message) unsafe_functions;
+        exit 1
+      end
+    end;
 
     Llvm_gen.gen_program ~prog_types prog;
 

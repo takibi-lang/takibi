@@ -261,7 +261,7 @@ fn build_fin_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     fix_tcp_checksum(ip, tcp);
 }
 
-fn app_main() {
+fn app_main() !{unsafe} {
     uart_puts("tcp_echo: init\r\n");
 
     match net_init() {

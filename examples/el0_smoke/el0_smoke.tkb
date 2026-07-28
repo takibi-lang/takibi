@@ -98,7 +98,7 @@ fn el1_main() {
     rpi3_el0_enter(el0_entry_va, el0_sp);
 }
 
-fn app_main() {
+fn app_main() !{unsafe} {
     uart_puts("el0_smoke\n");
     page_pool_init();
 

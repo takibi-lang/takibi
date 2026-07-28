@@ -1218,7 +1218,7 @@ fn uart_rx_ring_getc() -> u8 {
 // same time but left unconsumed until now -- see that file's own
 // comment on why a real fork()'s COW write fault needs it.
 fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
-                    x2: usize, elr: usize, frame_sp: usize, far: usize) -> (usize, usize) {
+                    x2: usize, elr: usize, frame_sp: usize, far: usize) -> (usize, usize) !{unsafe} {
     let ec: usize = (esr >> 26) & 0x3F;
     if (ec == 0x24) {
         // Data Abort from a lower EL (GitHub issue #158's real fork()):
@@ -2228,7 +2228,7 @@ fn app_main() {
 // level depending on which caller this is -- see each caller's own
 // comment); returns true/false and leaves that decision to the caller.
 fn el0_load_elf_into(image_addr: usize, image_len: usize,
-                     seed: {0..<2 as usize}, argv0: *u8) -> bool {
+                     seed: {0..<2 as usize}, argv0: *u8) -> bool !{unsafe} {
     let page_va = dynamic_va_base();
     let mut entry: usize = 0;
     let mut phdr_base: usize = 0;

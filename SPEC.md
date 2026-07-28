@@ -17,7 +17,7 @@ describes behavior in prose instead.
 
 File extension: `.tkb`. Compiler invocation: `takibi <file1.tkb>
 [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features
-<features>] [-g] [--forbid-trap] [--version]`. Multiple `.tkb` files are
+<features>] [-g] [--forbid-trap] [--forbid-unsafe] [--version]`. Multiple `.tkb` files are
 concatenated (flat global namespace) before compilation -- there is no
 module/import system beyond `use` (see "Known Limitations" below).
 
@@ -1149,13 +1149,14 @@ This is intentionally not a general borrow checker: projections and
 temporaries cannot be mutably borrowed, borrows cannot escape a direct call,
 and indexed owners still cannot live in arbitrary storage.
 
-## Blocking, Interrupt, and Exception Effects (Takibi Core Slices 4-5)
+## Blocking, Unsafe, Interrupt, and Exception Effects
 
 Checker effects are written after the return type:
 
 ```takibi
 extern fn sem_wait(s: *i32) !{may_block};
 fn mutex_lock(m: *i32 @ lock) -> MutexGuard[lock] !{may_block} { ... }
+fn raw_bytes(p: *u8) -> []u8 !{unsafe} { return unsafe { p[0..<16] }; }
 fn IRQ_Handler() !{interrupt} { acknowledge_irq(); }
 fn Sync_Handler() !{exception} { dispatch_sync_exception(); }
 fn poll_callback() !{} { acknowledge_irq(); }
@@ -1166,6 +1167,15 @@ explicit annotation is therefore an API contract and a seed, not a required
 annotation on every caller. `interrupt` marks a root whose complete reachable
 direct-call graph must not contain `may_block`; `interrupt_wait()` is
 intrinsically blocking. Diagnostics include one offending call path.
+
+`unsafe` records unchecked memory reasoning. Every function that directly
+contains an `unsafe { ... }` expression must declare `!{unsafe}`. The effect
+then propagates through resolved direct calls and through
+`fn !{unsafe}(...)` callback contracts. An explicit effect row that omits
+`unsafe` rejects a call path reaching it; an unannotated caller receives the
+inferred effect. `--forbid-unsafe` rejects a compilation containing any
+function with a reachable unsafe effect, allowing reviewed unsafe boundary
+files to be audited separately while ordinary code is compiled under denial.
 
 `noreturn` is currently a trusted extern-only contract. A call to such an
 extern terminates control-flow analysis, and LLVM receives the corresponding
@@ -1231,7 +1241,8 @@ fn USART1_IRQHandler() !{interrupt} {
 The row follows `fn` in a function-pointer type so it cannot be confused
 with the enclosing function declaration's postfix row. No row means
 **unknown**, not non-blocking. `!{}` is a checked non-blocking contract;
-`!{may_block}` permits blocking. `interrupt` and `exception` are declaration
+`!{may_block}` permits blocking and `!{unsafe}` permits unchecked memory
+reasoning. `interrupt` and `exception` are declaration
 roles and are not legal in a function-pointer row.
 
 A callback's actual effects must be a subset of the destination contract. A

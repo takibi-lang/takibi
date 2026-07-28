@@ -285,7 +285,11 @@ effects_opt:
   | BANG LBRACE effects RBRACE { Some $3 }
 
 effects:
-  | separated_list(COMMA, IDENT) { $1 }
+  | separated_list(COMMA, effect_name) { $1 }
+
+effect_name:
+  | IDENT { $1 }
+  | UNSAFE { "unsafe" }
 
 stmts:
   | /* empty */ { [] }

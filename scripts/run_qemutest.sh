@@ -186,7 +186,7 @@ run_compile_error_test() {
     else
         local msg_ok=1 loc_ok=1 expected_line
         while IFS= read -r expected_line || [ -n "$expected_line" ]; do
-            if [ -n "$expected_line" ] && ! grep -qF "$expected_line" "$tmp_err"; then
+            if [ -n "$expected_line" ] && ! grep -qF -- "$expected_line" "$tmp_err"; then
                 msg_ok=0
                 break
             fi
@@ -244,6 +244,29 @@ run_forbid_trap_ok_test() {
         FAILED_TESTS+=("$name")
     fi
 
+    rm -f "$tmp_err" "$tmp_obj"
+}
+
+# Positive compile-only counterpart for --forbid-unsafe.
+run_forbid_unsafe_ok_test() {
+    local name="$1"
+    shift
+    local tmp_err tmp_obj
+    tmp_err=$(mktemp)
+    tmp_obj=$(mktemp --suffix=.o)
+
+    if "$TAKIBI" "$@" --target aarch64-none-elf -o "$tmp_obj" --forbid-unsafe >"$tmp_err" 2>&1; then
+        save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_err" stderr.log
+        printf "${GRN}PASS${RST}  %s\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_err" stderr.log
+        printf "${RED}FAIL${RST}  %s\n" "$name"
+        printf "       expected --forbid-unsafe compilation to succeed\n"
+        sed 's/^/       /' "$tmp_err"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+    fi
     rm -f "$tmp_err" "$tmp_obj"
 }
 
@@ -919,6 +942,8 @@ run_compile_error_test "ptr_cast_wrong"      examples/ptr_cast_wrong/ptr_cast_wr
 run_compile_error_test "const_global_wrong"  examples/const_global_wrong/const_global_wrong.tkb   examples/const_global_wrong/const_global_wrong.error
 run_compile_error_test "forbid_trap_wrong"   examples/forbid_trap_wrong/forbid_trap_wrong.tkb     examples/forbid_trap_wrong/forbid_trap_wrong.error --forbid-trap
 run_forbid_trap_ok_test "forbid_trap_ok"     examples/forbid_trap_ok/forbid_trap_ok.tkb
+run_compile_error_test "forbid_unsafe_wrong" examples/forbid_unsafe_wrong/forbid_unsafe_wrong.tkb examples/forbid_unsafe_wrong/forbid_unsafe_wrong.error --forbid-unsafe
+run_forbid_unsafe_ok_test "forbid_unsafe_ok" examples/forbid_trap_ok/forbid_trap_ok.tkb
 run_compile_error_test "cond_not_bool"         examples/cond_not_bool/cond_not_bool.tkb                 examples/cond_not_bool/cond_not_bool.error
 run_compile_error_test "affine_double_consume" examples/affine_double_consume/affine_double_consume.tkb examples/affine_double_consume/affine_double_consume.error
 run_forbid_trap_ok_test "affine_never_consumed" examples/affine_never_consumed/affine_never_consumed.tkb

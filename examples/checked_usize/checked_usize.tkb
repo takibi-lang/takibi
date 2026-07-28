@@ -17,7 +17,8 @@ fn report(label: *u8, result: CheckedUsize, expect_overflow: bool) {
 fn app_main() {
     // Native-width maximum: this stays valid when the same source is
     // compiled for either a 32-bit or 64-bit target.
-    let max: usize = ~0;
+    let mut max: usize = 0;
+    max = max - 1;
     report("add success: ", checked_add_usize(max, 0), false);
     report("add overflow: ", checked_add_usize(max, 1), true);
     report("mul success: ", checked_mul_usize(max, 1), false);

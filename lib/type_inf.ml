@@ -833,6 +833,10 @@ let resolved_call_targets = ref StringMap.empty
 let resolved_indirect_call_effects : string list option StringMap.t ref =
   ref StringMap.empty
 
+let inferred_effect_locs : Lexing.position StringMap.t ref = ref StringMap.empty
+
+let inferred_effect_location key = StringMap.find_opt key !inferred_effect_locs
+
 (* GitHub issue #102: per-variable align(N) info, consulted by AddrOf/Var
    (array decay) in infer_expr to prove *align(N) T for `&x` / an aligned
    array's own name. Two-tier, mirroring how tyenv itself already models
@@ -3787,10 +3791,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let validate_effects ~allow_interrupt ~allow_noreturn loc kind name effects =
     let seen = ref StringSet.empty in
     List.iter (fun eff ->
-      if eff <> "may_block" && eff <> "interrupt" && eff <> "exception"
-         && eff <> "noreturn" then
+      if eff <> "may_block" && eff <> "unsafe" && eff <> "interrupt"
+         && eff <> "exception" && eff <> "noreturn" then
         raise (TypeError (loc, Printf.sprintf
-          "unknown effect '%s' on %s '%s'; supported effects are may_block, interrupt, exception, and noreturn"
+          "unknown effect '%s' on %s '%s'; supported effects are may_block, unsafe, interrupt, exception, and noreturn"
           eff kind name));
       if (eff = "interrupt" || eff = "exception") && not allow_interrupt then
         raise (TypeError (loc,
@@ -4694,7 +4698,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let old = Option.value (StringMap.find_opt fdef.name m) ~default:[] in
         let old = List.filter (fun (k, _) -> k <> key) old in
         let call_effects = Option.map (fun effects ->
-          if List.mem "may_block" effects then ["may_block"] else [])
+          List.filter (fun eff ->
+            eff = "may_block" || eff = "unsafe") effects)
           fdef.effects in
         StringMap.add fdef.name ((key, TFun (pts, rt, call_effects)) :: old) m
     | Ast.ExternFuncDef (name, params, ret_ty, effects_for_extern) ->
@@ -4712,7 +4717,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let call_effects = match effects_for_extern with
           | None -> Some []
           | Some effects ->
-              Some (if List.mem "may_block" effects then ["may_block"] else [])
+              Some (List.filter (fun eff ->
+                eff = "may_block" || eff = "unsafe") effects)
         in
         StringMap.add name ((key, TFun (pts, rt, call_effects)) :: old) m
     | Ast.ConstDef _ -> m
@@ -5910,7 +5916,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     ) fdef.params
   in
   List.iter (function Ast.FuncDef f -> check_affine_func f | _ -> ()) prog;
-  (* Effects are checker-only facts. `may_block` is a transitive property of
+  (* Effects are checker-only facts. `may_block` and `unsafe` are transitive properties of
      direct calls and effect-contracted indirect calls; `interrupt` and
      `exception` are declaration roots. Their root contracts are checked
      separately. An unannotated
@@ -5933,10 +5939,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   let callable_keys = StringMap.fold (fun key _ keys ->
     StringSet.add key keys) declared_effects StringSet.empty in
+  inferred_effect_locs := effect_locs;
   let summarize_effect_body body =
     let callees = ref StringSet.empty in
     let calls_interrupt_wait = ref false in
     let calls_blocking_indirect = ref false in
+    let contains_unsafe = ref false in
+    let calls_unsafe_indirect = ref false in
     let has_unknown_indirect_call = ref false in
     let rec visit_expr (e : Ast.expr) =
       match e.desc with
@@ -5955,12 +5964,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                        !resolved_indirect_call_effects with
                | Some (Some effects) ->
                    if List.mem "may_block" effects then
-                     calls_blocking_indirect := true
+                     calls_blocking_indirect := true;
+                   if List.mem "unsafe" effects then
+                     calls_unsafe_indirect := true
                | Some None | None -> has_unknown_indirect_call := true)
       | Ast.VariantCtor (_, _, payload) -> visit_expr payload
       | Ast.BinOp (_, left, right) -> visit_expr left; visit_expr right
       | Ast.Bnot x | Ast.Deref x | Ast.AddrOf x | Ast.Cast (_, x)
-      | Ast.FieldGet (x, _) | Ast.Unsafe x -> visit_expr x
+      | Ast.FieldGet (x, _) -> visit_expr x
+      | Ast.Unsafe x -> contains_unsafe := true; visit_expr x
       | Ast.StructLit xs | Ast.TupleLit xs -> List.iter visit_expr xs
       | Ast.Index (_, index) -> visit_expr index
       | Ast.SliceOf (_, lo, hi) -> visit_expr lo; visit_expr hi
@@ -5994,7 +6006,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     in
     List.iter visit_stmt body;
     (!callees, !calls_interrupt_wait, !calls_blocking_indirect,
-     !has_unknown_indirect_call)
+     !contains_unsafe, !calls_unsafe_indirect, !has_unknown_indirect_call)
   in
   let effect_summaries = List.fold_left (fun summaries -> function
     | Ast.FuncDef f ->
@@ -6007,11 +6019,18 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Some effects when List.mem "may_block" effects -> StringSet.add key blocked
     | _ -> blocked
   ) declared_effects StringSet.empty in
+  let explicit_unsafe = StringMap.fold (fun key effects unsafe ->
+    match effects with
+    | Some effects when List.mem "unsafe" effects -> StringSet.add key unsafe
+    | _ -> unsafe
+  ) declared_effects StringSet.empty in
   let close_property seed direct_property =
     let rec loop current =
       let next = StringMap.fold
-        (fun caller (callees, waits, blocking_indirect, unknown_indirect) acc ->
-        if direct_property waits blocking_indirect unknown_indirect
+        (fun caller (callees, waits, blocking_indirect, direct_unsafe,
+                     unsafe_indirect, unknown_indirect) acc ->
+        if direct_property waits blocking_indirect direct_unsafe unsafe_indirect
+             unknown_indirect
            || StringSet.exists (fun callee -> StringSet.mem callee acc) callees
         then StringSet.add caller acc
         else acc
@@ -6021,9 +6040,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     loop seed
   in
   let may_block = close_property explicit_may_block
-    (fun waits blocking_indirect _ -> waits || blocking_indirect) in
+    (fun waits blocking_indirect _ _ _ -> waits || blocking_indirect) in
+  let may_unsafe = close_property explicit_unsafe
+    (fun _ _ direct_unsafe unsafe_indirect _ ->
+      direct_unsafe || unsafe_indirect) in
   let may_reach_unknown = close_property StringSet.empty
-    (fun _ _ unknown_indirect -> unknown_indirect) in
+    (fun _ _ _ _ unknown_indirect -> unknown_indirect) in
   let exception_roots = StringMap.fold (fun key effects roots ->
     match effects with
     | Some effects when List.mem "exception" effects -> StringSet.add key roots
@@ -6038,11 +6060,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     else
       let visited = StringSet.add key visited in
       match StringMap.find_opt key effect_summaries with
-      | Some (_, true, _, _) ->
+      | Some (_, true, _, _, _, _) ->
           Some [display_effect_key key; "interrupt_wait"]
-      | Some (_, false, true, _) ->
+      | Some (_, false, true, _, _, _) ->
           Some [display_effect_key key; "<indirect call !{may_block}>"]
-      | Some (callees, false, false, _) ->
+      | Some (callees, false, false, _, _, _) ->
           let rec search = function
             | [] -> None
             | callee :: rest ->
@@ -6060,9 +6082,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     else
       let visited = StringSet.add key visited in
       match StringMap.find_opt key effect_summaries with
-      | Some (_, _, _, true) ->
+      | Some (_, _, _, _, _, true) ->
           Some [display_effect_key key; "<indirect call>"]
-      | Some (callees, _, _, false) ->
+      | Some (callees, _, _, _, _, false) ->
           let rec search = function
             | [] -> None
             | callee :: rest ->
@@ -6082,7 +6104,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let visited = StringSet.add key visited in
         match StringMap.find_opt key effect_summaries with
         | None -> None
-        | Some (callees, _, _, _) ->
+        | Some (callees, _, _, _, _, _) ->
             let rec search_callees = function
               | [] -> None
               | callee :: rest ->
@@ -6099,6 +6121,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   StringMap.iter (fun key effects_opt ->
     let effects = Option.value effects_opt ~default:[] in
+    (match StringMap.find_opt key effect_summaries with
+     | Some (_, _, _, true, _, _) when not (List.mem "unsafe" effects) ->
+         raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+           "function '%s' contains an unsafe expression but does not declare !{unsafe}"
+           (display_effect_key key)))
+     | _ -> ());
     if List.mem "interrupt" effects then begin
       if StringSet.mem key may_block then begin
         let path = Option.value (find_blocking_path StringSet.empty key)
@@ -6150,7 +6178,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           "function '%s' cannot verify its explicit !{} non-blocking contract: unknown effects via %s"
           (display_effect_key key) (String.concat " -> " path)))
       end
-    end
+    end;
+    if Option.is_some effects_opt && not (List.mem "unsafe" effects)
+       && StringSet.mem key may_unsafe then
+      raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+        "function '%s' violates its explicit effect contract: unsafe effect is reachable"
+        (display_effect_key key)))
   ) declared_effects;
   let functions = StringMap.mapi (fun key info ->
     let declared = match StringMap.find_opt key declared_effects with
@@ -6161,6 +6194,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       (if List.mem "interrupt" declared then ["interrupt"] else [])
       @ (if List.mem "exception" declared then ["exception"] else [])
       @ (if StringSet.mem key may_block then ["may_block"] else [])
+      @ (if StringSet.mem key may_unsafe then ["unsafe"] else [])
     in
     { info with effects }
   ) functions in
