@@ -33,6 +33,10 @@ struct packed KernelElf64ProgramHeader {
 }
 
 struct DistroElfLoadPlan {
+    image_address: usize;
+    image_length: usize;
+    program_offset: usize;
+    program_count: usize;
     entry: usize;
     extent: usize;
     load_segments: usize;
@@ -86,6 +90,9 @@ fn distro_elf_validate(address: usize, length: usize) -> DistroElfResult {
     if (load_count == 0 || entry >= maximum || maximum > 0x1FFFFF) {
         return DistroElfResult::Invalid;
     }
-    let mut plan: DistroElfLoadPlan = { entry, maximum, load_count };
+    let mut plan: DistroElfLoadPlan = {
+        address, length, program_offset, program_count,
+        entry, maximum, load_count
+    };
     return DistroElfResult::Valid(plan);
 }

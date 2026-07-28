@@ -1,2 +1,4 @@
 distro image: alpine busybox static-pie
 distro elf: aarch64 loads=2 extent=0x122138
+distro map: pages=272 rx+rw-xn
+distro unmap: clean

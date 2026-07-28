@@ -1,0 +1,107 @@
+use "kernel/mm/page.tkb";
+use "kernel/mm/address_space.tkb";
+use "kernel/fs/elf64.tkb";
+
+private let mut image_page_indices: [usize; BOOT_PAGE_COUNT];
+private let mut image_l3_indices: [usize; BOOT_PAGE_COUNT];
+
+linear struct ProcessImagePages[image: usize] {
+    private image: usize @ image;
+    private count: usize;
+}
+
+fn process_image_record(slot: usize,
+                        page_index: {0..<BOOT_PAGE_COUNT as usize},
+                        l3_index: usize) {
+    if (slot >= 0 && slot < 512) {
+        image_page_indices[slot] = page_index;
+        image_l3_indices[slot] = l3_index;
+    }
+}
+
+must_use variant ProcessImageMapResult {
+    OutOfMemory;
+    Mapped(exists image: usize. ProcessImagePages[image]);
+}
+
+fn process_image_cleanup(count: usize) {
+    for i: usize in 0..<count {
+        if (i < BOOT_PAGE_COUNT) {
+            let l3_index: usize = image_l3_indices[i];
+            let page_index: usize = image_page_indices[i];
+            if (l3_index < 512 && page_index < BOOT_PAGE_COUNT) {
+                user_pte_write(l3_index, 0);
+                user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
+                page_transferred_release(page_index);
+            }
+        }
+    }
+}
+
+fn process_image_unmap(pages: sink ProcessImagePages[image]) {
+    process_image_cleanup(pages.count);
+}
+
+fn process_image_map(plan: DistroElfLoadPlan) -> ProcessImageMapResult {
+    if (plan.extent > 0x200000) {
+        return ProcessImageMapResult::OutOfMemory;
+    }
+    let mut mapped: usize = 0;
+    for segment_index: usize in 0..<plan.program_count {
+        let header_address: usize = plan.image_address + plan.program_offset +
+                                    segment_index * ELF_PROGRAM_HEADER_SIZE;
+        let header: *KernelElf64ProgramHeader =
+            header_address as *KernelElf64ProgramHeader;
+        if (header.segment_type == ELF_PT_LOAD) {
+            let virtual_address: usize = header.virtual_address as usize;
+            let memory_size: usize = header.memory_size as usize;
+            let first_page: usize = virtual_address / PAGE_SIZE;
+            let last_byte: usize = virtual_address + memory_size;
+            let last_page: usize = (last_byte + 4095) / PAGE_SIZE;
+            if (last_page > 512) {
+                process_image_cleanup(mapped);
+                return ProcessImageMapResult::OutOfMemory;
+            }
+            for l3_index: usize in first_page..<last_page {
+                match page_alloc() {
+                    PageAllocResult::OutOfMemory => {
+                        process_image_cleanup(mapped);
+                        return ProcessImageMapResult::OutOfMemory;
+                    }
+                    PageAllocResult::Allocated(page) => {
+                        if (mapped >= 0 && mapped < 512) {
+                            let phys: usize = page_physical_address(page);
+                            let mut flags: usize = USER_RW_XN_FLAGS;
+                            if (header.flags == 5) {
+                                flags = USER_TEXT_RX_FLAGS;
+                            }
+                            user_pte_write(l3_index, phys | flags);
+                            user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
+                            let page_index = page_owner_transfer_index(page);
+                            process_image_record(mapped, page_index, l3_index);
+                            mapped = mapped + 1;
+                        } else {
+                            page_free(page);
+                            process_image_cleanup(mapped);
+                            return ProcessImageMapResult::OutOfMemory;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let image: usize @ 0 = 0;
+    let mut pages: ProcessImagePages[0] = { image, mapped };
+    return ProcessImageMapResult::Mapped(pages);
+}
+
+fn process_image_page_count(pages: borrow ProcessImagePages[image]) -> usize {
+    return pages.count;
+}
+
+fn process_image_window_is_clear() -> bool {
+    for i: usize in 0..<512 {
+        if (user_pte_read(i) != 0) { return false; }
+    }
+    return true;
+}

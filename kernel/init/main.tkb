@@ -3,11 +3,13 @@ use "kernel/kernel/syscall.tkb";
 use "kernel/fs/initramfs.tkb";
 use "kernel/fs/elf64.tkb";
 use "kernel/mm/address_space.tkb";
+use "kernel/mm/process_image.tkb";
 use "kernel/printk/log.tkb";
 
 fn main() {
     platform_init();
     kernel_boot_log("takibi kernel: EL1\n");
+    page_allocator_init();
     match initramfs_busybox() {
         InitramfsFileResult::Invalid => {
             kernel_debug_log("distro image: invalid initramfs\n");
@@ -23,12 +25,25 @@ fn main() {
                         plan.extent == 0x122138) {
                         kernel_debug_log("distro image: alpine busybox static-pie\n");
                         kernel_debug_log("distro elf: aarch64 loads=2 extent=0x122138\n");
+                        match process_image_map(plan) {
+                            ProcessImageMapResult::OutOfMemory => {
+                                kernel_debug_log("distro map: out of memory\n");
+                            }
+                            ProcessImageMapResult::Mapped(image_pages) => {
+                                if (process_image_page_count(image_pages) == 272) {
+                                    kernel_debug_log("distro map: pages=272 rx+rw-xn\n");
+                                }
+                                process_image_unmap(image_pages);
+                                if (process_image_window_is_clear()) {
+                                    kernel_debug_log("distro unmap: clean\n");
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
-    page_allocator_init();
     match initial_process_create() {
         ProcessCreateResult::OutOfMemory => {
             kernel_debug_log("initial process: allocation failed\n");
