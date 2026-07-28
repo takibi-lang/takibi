@@ -16,9 +16,9 @@ make kernelbuild       build every maintained kernel target
 make kernelcheck       build and integration-test every maintained target
 ```
 
-`kernelcheck-rpi5` intentionally fails until the first real-hardware test
-harness is connected. A build-only result must not be reported as an RPi5
-integration pass.
+`kernelcheck-rpi5` requires the Raspberry Pi Debug Probe, the project UART
+cable, and the resident RPi5 JTAG stub, just like the examples hardware lane.
+A build-only result is never reported as an RPi5 integration pass.
 
 All new Takibi sources in this tree are compiled with `--forbid-trap` from
 their first commit. Fallible internal operations return variants; conversion

@@ -1,0 +1,16 @@
+// extern fn declarations for examples/common_rpi5/timer_asm.S's
+// read_cntfrq/read_cntpct free-running-counter stubs, split into their
+// own file (GitHub issue #170) so examples/common_rpi5/pcie.tkb (its
+// delay_us/timed_out helpers, issue #169) and rtc.tkb (issue #170) can
+// both `use` this instead of each declaring the same extern symbols
+// locally -- takibi rejects a second `extern fn` declaration of the
+// same name even when its signature is identical ("cannot be
+// overloaded"), so passing both files on the same compile command line
+// (every RPi5 example already does, via COMMON_RPI5_PCIE) would
+// otherwise be a hard conflict the moment a second consumer needed
+// these externs. Same fix shape, same reason, as
+// examples/common_rpi3/timer_asm_extern.tkb's own split (see that
+// file's header comment).
+
+extern fn read_cntfrq() -> i64;
+extern fn read_cntpct() -> i64;

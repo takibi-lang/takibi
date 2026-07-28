@@ -5,6 +5,8 @@ SECTIONS {
 
     .text : {
         KEEP(*(.text.boot))
+        . = ALIGN(2048);
+        KEEP(*(.text.vectors))
         *(.text .text.*)
     }
 
@@ -26,5 +28,6 @@ SECTIONS {
     .stack (NOLOAD) : ALIGN(16) {
         . += 0x10000;
         boot_stack_top = .;
+        stack_top = boot_stack_top;
     }
 }

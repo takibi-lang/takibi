@@ -2062,8 +2062,13 @@ KERNEL_DIR              := kernel
 KERNEL_BUILD_DIR        := $(KERNEL_DIR)/build/rpi5
 KERNEL_RPI5_ENTRY_S     := $(KERNEL_DIR)/arch/arm64/boot/entry.S
 KERNEL_RPI5_ENTRY_O     := $(KERNEL_BUILD_DIR)/entry.o
+KERNEL_RPI5_TIMER_S     := $(KERNEL_DIR)/arch/arm64/kernel/timer.S
+KERNEL_RPI5_TIMER_O     := $(KERNEL_BUILD_DIR)/timer.o
 KERNEL_RPI5_LINK_LD     := $(KERNEL_DIR)/arch/arm64/boot/link.ld
 KERNEL_RPI5_MAIN_TKB    := $(KERNEL_DIR)/init/main.tkb
+KERNEL_RPI5_PCIE_TKB    := $(KERNEL_DIR)/platform/rpi5/pcie.tkb
+KERNEL_RPI5_UART_TKB    := $(KERNEL_DIR)/platform/rpi5/uart.tkb
+KERNEL_RPI5_TIMER_EXTERN := $(KERNEL_DIR)/arch/arm64/kernel/timer_asm_extern.tkb
 KERNEL_RPI5_MAIN_O      := $(KERNEL_BUILD_DIR)/main.o
 KERNEL_RPI5_ELF         := $(KERNEL_BUILD_DIR)/kernel.elf
 
@@ -2073,11 +2078,15 @@ $(KERNEL_BUILD_DIR):
 $(KERNEL_RPI5_ENTRY_O): $(KERNEL_RPI5_ENTRY_S) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
-$(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
+$(KERNEL_RPI5_TIMER_O): $(KERNEL_RPI5_TIMER_S) | $(KERNEL_BUILD_DIR)
+	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
-$(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_LINK_LD)
-	$(LLD) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_MAIN_O) -o $@
+$(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_RPI5_PCIE_TKB) \
+    $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_TIMER_EXTERN) $(TAKIBI) | $(KERNEL_BUILD_DIR)
+	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
+
+$(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_TIMER_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_LINK_LD)
+	$(LLD) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_TIMER_O) $(KERNEL_RPI5_MAIN_O) -o $@
 
 kernelbuild-rpi5: $(KERNEL_RPI5_ELF)
 
@@ -2086,8 +2095,7 @@ kernelbuild: kernelbuild-rpi5
 # A compile is not an integration pass. This deliberately fails until the
 # first observable RPi5 EL1 milestone connects its real-hardware harness.
 kernelcheck-rpi5: kernelbuild-rpi5
-	@echo "kernelcheck-rpi5: RPi5 integration harness not implemented yet" >&2
-	@false
+	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_kernel_hwtest_rpi5.sh
 
 kernelcheck: kernelcheck-rpi5
 COMMON_RPI5_DIR          := examples/common_rpi5

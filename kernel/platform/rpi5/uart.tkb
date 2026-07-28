@@ -1,0 +1,161 @@
+// Raspberry Pi 5 (BCM2712/RP1) UART HAL. TX is synchronous/polled; RX uses
+// RP1 UART0's PL011 interrupt through RP1 MSI-X vector 25, BCM2712 MIP0, and
+// GIC-400 (examples/common_rpi5/intc.tkb). The stored-handler interface is
+// the same one examples/common_rpi3/uart.tkb and common_stm32/uart.tkb use,
+// so shared interrupt examples do not need a target-specific ISR body.
+//
+// CORRECTED (2026-07-25) from an initial, wrong assumption: this is RP1's
+// own `rp1_uart0` (PCIe-attached companion chip), NOT BCM2712's on-die
+// `_uart0`/uart10 this file originally targeted. The device tree's own
+// comment on `_uart0` ("The system UART", aliased `uart10`/`serial10`) and
+// Raspberry Pi's own forum explanation (RP1's GPIO-routed UARTs "need
+// RP1's PCIe link up first, which is why RPi5 grew a separate always-
+// available debug UART") both pointed at 0x10_7D001000 as the right
+// address for the physical debug connector -- but on a real, actual
+// board, live `dmesg` told a different story: with this board's
+// config.txt (`enable_uart=1`/`dtparam=uart0=on`, added via raspi-config),
+// the kernel command line carries `console=ttyAMA0`, and `1f00030000.serial:
+// ttyAMA0 at MMIO 0x1f00030000 ... is a PL011 AXI` is what's ACTUALLY
+// wired to the Debug Probe's UART cable and driving the login shell
+// reached via it -- confirmed directly (`tty` inside that live shell
+// printed `/dev/ttyAMA0`). 0x1f00030000 is RP1's `rp1_uart0` (device tree
+// `raspberrypi/linux`'s `arch/arm64/boot/dts/broadcom/rp1.dtsi`,
+// `rp1_uart0: serial@30000`, `reg = <0xc0 0x40030000 0x0 0x100>`,
+// PCIe-translated to this CPU-side physical address). The on-die
+// `_uart0`/uart10 at 0x10_7D001000 is real, separately-addressable
+// hardware (confirmed: writes/reads to it succeed and persist) -- it's
+// just not what this board's config.txt routes the console to. Register
+// layout (DR/FR/IBRD/FBRD/LCRH/CR offsets) is the same standard PL011 as
+// examples/common_rpi3/uart.tkb's UART0 and the original `_uart0` guess --
+// only the base address and clock differ.
+//
+// UART clock, CORRECTED by the first successful bare-metal output:
+// `vcgencmd measure_clock uart` under a running Linux reported ~44MHz,
+// but Linux's RP1 clock driver has already reprogrammed the clock tree by
+// then. After this bare-metal PCIe sequence resets/restarts the link, UART0
+// runs from RP1's 50MHz XOSC (the fixed `clk_xosc` frequency in rp1.dtsi),
+// not that live-Linux rate. IBRD=27/FBRD=8 gives 115207 baud from 50MHz
+// and produced the first clean `rp1 uart0 alive!` output on real hardware;
+// the former IBRD=24/FBRD=0 produced repeatable garbage at the receiver.
+// NOTE: OpenOCD's own SWD debug-port memory access cannot read
+// RP1's registers directly to double check this empirically (confirmed:
+// reads via the raw MEM-AP to this address return all zeros even while
+// Linux is actively and correctly driving this exact UART -- RP1's
+// PCIe-translated address range is apparently not reachable through the
+// debug port's own physical bus-access path, a debug-tooling limitation,
+// not a sign the address or hardware state is wrong).
+//
+// RESOLVED (2026-07-25, issue #161): the initial bare-metal read returned
+// 0xDEADDEAD because the new PCIe code configured the RC outbound window
+// and RP1 BARs but omitted pcie2's own Type-1 root-bridge bus numbers,
+// forwarding memory window, and Command.MSE. With those configured by
+// pcie2_init(), FR reads 0x197 and this driver emits clean output while
+// SWD remains active. An earlier real-hardware test (routing
+// Linux's own console to `serial10`/BCM2712's on-die `_uart0` at
+// 0x10_7D001000 instead, via cmdline.txt) produced NO output at all on
+// the same physical cable, while SSH confirmed Linux still booted fully
+// -- meaning THIS BOARD'S debug connector is wired to RP1's uart0, not
+// BCM2712's uart10, contradicting this file's earlier assumption (and
+// Raspberry Pi's own general documentation about why uart10 exists).
+// Getting real bare-metal UART output therefore required RP1 PCIe
+// enumeration (link training, root-bridge forwarding, BAR assignment),
+// now implemented in examples/common_rpi5/pcie.tkb.
+
+let mut uart_rx_handler: fn !{}() -> void;
+
+fn uart_putc(c: u8) {
+    let fr: *io u32 = 0x1F00030018; // UART0_FR (RP1 rp1_uart0, base 0x1F00030000 + 0x018)
+    while ((*fr & (1 << 5)) != 0) { } // wait while TXFF (TX FIFO full)
+    let dr: *io u8 = 0x1F00030000; // UART0_DR
+    *dr = c;
+}
+
+fn uart_puts(s: *u8) {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
+fn uart_rx_discard() !{} {
+    let dr: *io u8 = 0x1F00030000;
+    let discarded: u8 = *dr;
+}
+
+// Direct, non-polling receive for an interrupt handler that already knows
+// RX data is present. Reading DR advances the PL011 FIFO and deasserts its
+// level condition once the FIFO drops below the configured threshold.
+fn uart_isr_getc() -> u8 {
+    let dr: *io u8 = 0x1F00030000;
+    return *dr;
+}
+
+fn uart_rx_ready() -> bool {
+    let fr: *io u32 = 0x1F00030018;
+    return (*fr & (1 << 4)) == 0; // RXFE clear = data available
+}
+
+fn uart_set_rx_handler(handler: fn !{}() -> void) !{} {
+    uart_rx_handler = handler;
+}
+
+fn uart_tx_isr() {
+}
+
+// Called by rpi5_irq_dispatch after GICC_IAR identifies the UART0 MSI-X
+// vector. The controller-level RP1 IACK and GICC EOIR happen in intc.tkb
+// after this source-level acknowledgement is complete.
+fn uart_irq_handler() !{interrupt} {
+    if (uart_rx_ready()) {
+        uart_rx_handler();
+    }
+    // Receive-timeout is latched separately from the FIFO level and must be
+    // cleared explicitly after servicing a short (e.g. one-byte) burst.
+    let uart_icr: *io u32 = 0x1F00030044;
+    *uart_icr = 1 << 6; // RTIC
+}
+
+fn uart_init() {
+    let uart_cr: *io u32 = 0x1F00030030;
+    let uart_ibrd: *io u32 = 0x1F00030024;
+    let uart_fbrd: *io u32 = 0x1F00030028;
+    let uart_lcrh: *io u32 = 0x1F0003002C;
+    let uart_imsc: *io u32 = 0x1F00030038;
+    let uart_icr: *io u32 = 0x1F00030044;
+    let uart_ifls: *io u32 = 0x1F00030034;
+
+    uart_rx_handler = uart_rx_discard;
+    *uart_cr = 0; // disable UART before reconfiguring it
+
+    // 115200 baud from the bare-metal 50MHz XOSC-backed uartclk:
+    // divisor = 50000000 / (16*115200) = 27.1267 (see header comment).
+    *uart_ibrd = 27;
+    *uart_fbrd = 8;
+
+    *uart_lcrh = (3 << 5) | (1 << 4); // 8 bits, no parity, FIFOs enabled, 1 stop bit
+    *uart_ifls = 0; // finest-grained FIFO trigger level (same as RPi3)
+    *uart_imsc = 0; // keep RX masked until irq_uart_rx_unmask()
+    *uart_icr = 0x7FF; // clear any latched interrupt state left by a previous run
+
+    // Peripheral state survives SWD re-injection. Drain stale input before
+    // enabling RX so the first delivered byte always belongs to this run.
+    let fr_drain: *io u32 = 0x1F00030018;
+    let dr_drain: *io u8 = 0x1F00030000;
+    while ((*fr_drain & (1 << 4)) == 0) {
+        let discarded: u8 = *dr_drain;
+    }
+
+    *uart_cr = (1 << 0) | (1 << 8) | (1 << 9); // UARTEN | TXE | RXE
+}
+
+fn platform_init() {
+    // GPIO14/15 expose RP1's UART0, so the PCIe link, root bridge, and
+    // endpoint BARs must exist before the first UART register access.
+    if (pcie2_init()) {
+        pcie2_rp1_endpoint_setup();
+        uart_init();
+    }
+}
+
+fn platform_shutdown() {
+}
