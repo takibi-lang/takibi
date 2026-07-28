@@ -59,7 +59,7 @@ for value in "$entry_pc" "$stack_top" "$staging_addr" "$app_main_addr" "$done_ad
 done
 
 # Establish the same known-safe stub state as every other RPi5 hardware test.
-"$REPO_ROOT/scripts/rpi5_jtag_reset.sh" >/dev/null
+"$REPO_ROOT/scripts/rpi5_jtag_reset.sh" --resident-image-unchanged >/dev/null
 
 log="$tmp_dir/openocd.log"
 if ! openocd -f interface/cmsis-dap.cfg -f "$BCM2712_CFG" \

@@ -1902,7 +1902,10 @@ not a port of the existing driver.
 1. **PSCI reset is not a substitute for a power cycle after changing the
    SD-card payload.** It reliably reruns the same resident image, but a
    changed `kernel_2712.img` may not be reloaded. Power-cycle after replacing
-   that file. Tracked by GitHub issue #162.
+   that file. `scripts/rpi5_jtag_reset.sh` enforces this boundary by refusing
+   to run unless its caller passes `--resident-image-unchanged`; the hardware
+   harnesses may assert that because they inject test payloads into RAM over
+   the unchanged SD-card spin stub.
 2. **MPIDR_EL1 core-numbering -- RESOLVED, issue #163.** The BCM2837-by-
    analogy assumption (`mpidr_el1 & 3` = plain 0-3 core number) was
    WRONG: BCM2712 sets the MT bit and numbers cores in Aff1 (bits
@@ -1983,7 +1986,8 @@ rpi5-start` convenience target (removed 2026-07-25 once this real,
 automatic test existed) -- if the board is not already parked at the
 stub (e.g. it just booted Raspberry Pi OS instead), flash the stub and
 power-cycle by hand first, or try `scripts/rpi5_jtag_reset.sh` on its
-own.
+own with `--resident-image-unchanged` only when the SD-card payload has not
+changed since that boot.
 
 The target includes `usb_msc_probe`, `fatfs_sdcard`,
 `rtos_fatfs_sdcard`, and `el0_shell`; these deliberately overwrite or

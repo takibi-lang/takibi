@@ -12260,3 +12260,15 @@ exercise the policy, while unit tests cover direct declarations, propagation,
 explicit safe contracts, and callback compatibility. Existing example unsafe
 sites were annotated in place, making the current trust boundary visible
 without enabling denial for examples that deliberately exercise raw memory.
+
+## 2026-07-28: RPi5 warm reset makes its SD-image limitation explicit
+
+Issue #162 could not make PSCI `SYSTEM_RESET` force the firmware to reread a
+changed `kernel_2712.img`; real hardware had already shown that it may restart
+the older resident image. `scripts/rpi5_jtag_reset.sh` now refuses to touch
+the board unless the caller explicitly supplies
+`--resident-image-unchanged`. Its diagnostic requires a physical power cycle
+after any SD payload replacement. The RPi5 hardware harnesses pass the flag
+because their test payloads are injected into RAM over one unchanged SD-card
+spin stub, so their reset-before-test behavior remains deterministic without
+claiming that a warm reset reloads SD storage.

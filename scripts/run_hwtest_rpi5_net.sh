@@ -44,7 +44,7 @@ run_net_test() {
     prepare_artifact_dir "$ARTIFACT_ROOT" "$name"
     artifact_dir="$ARTIFACT_DIR"
 
-    if ! "$REPO_ROOT/scripts/rpi5_jtag_reset.sh" > "$artifact_dir/reset.log" 2>&1; then
+    if ! "$REPO_ROOT/scripts/rpi5_jtag_reset.sh" --resident-image-unchanged > "$artifact_dir/reset.log" 2>&1; then
         echo "FAIL  $name (PSCI reset failed)"
         FAIL=$((FAIL + 1)); FAILED_TESTS+=("$name"); return
     fi
@@ -78,7 +78,7 @@ run_kvs_persistence_test() {
     prepare_artifact_dir "$ARTIFACT_ROOT" "$name"
     artifact_dir="$ARTIFACT_DIR"
 
-    if ! "$REPO_ROOT/scripts/rpi5_jtag_reset.sh" >"$artifact_dir/reset-boot1.log" 2>&1 ||
+    if ! "$REPO_ROOT/scripts/rpi5_jtag_reset.sh" --resident-image-unchanged >"$artifact_dir/reset-boot1.log" 2>&1 ||
        ! "$REPO_ROOT/scripts/rpi5_jtag_load.sh" "$elf" >"$artifact_dir/loader-boot1.log" 2>&1; then
         echo "FAIL  $name (boot 1 load failed)"
         FAIL=$((FAIL + 1)); FAILED_TESTS+=("$name"); return
@@ -90,7 +90,7 @@ run_kvs_persistence_test() {
         echo "FAIL  $name (protocol test failed, boot 1)"
         FAIL=$((FAIL + 1)); FAILED_TESTS+=("$name"); return
     fi
-    if ! "$REPO_ROOT/scripts/rpi5_jtag_reset.sh" >"$artifact_dir/reset-boot2.log" 2>&1 ||
+    if ! "$REPO_ROOT/scripts/rpi5_jtag_reset.sh" --resident-image-unchanged >"$artifact_dir/reset-boot2.log" 2>&1 ||
        ! "$REPO_ROOT/scripts/rpi5_jtag_load.sh" "$elf" >"$artifact_dir/loader-boot2.log" 2>&1; then
         echo "FAIL  $name (boot 2 load failed)"
         FAIL=$((FAIL + 1)); FAILED_TESTS+=("$name"); return

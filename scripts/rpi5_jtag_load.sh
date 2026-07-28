@@ -158,7 +158,7 @@ if [ "$current_mode" != "EL2H" ] || [[ "$halted_pc_hex" > "$RPI5_SAFE_PC_MAX_HEX
     printf 'comment). Refusing to inject (would corrupt the running OS). If\n' >&2
     printf 'kernel_2712.img on the SD card is already\n' >&2
     printf 'examples/common_rpi5/jtag_stub.img, run\n' >&2
-    printf 'scripts/rpi5_jtag_reset.sh; otherwise flash it first and\n' >&2
+    printf 'scripts/rpi5_jtag_reset.sh --resident-image-unchanged; otherwise flash it first and\n' >&2
     printf 'power-cycle the board. (The board was left running exactly as\n' >&2
     printf 'found -- this check only read/resumed, it never wrote anything.)\n' >&2
     exit 1

@@ -122,7 +122,7 @@ reset_before_test() {
     local name="$1"
     local reset_log
     reset_log=$(mktemp)
-    if ! "$REPO_ROOT/scripts/rpi5_jtag_reset.sh" > "$reset_log" 2>&1; then
+    if ! "$REPO_ROOT/scripts/rpi5_jtag_reset.sh" --resident-image-unchanged > "$reset_log" 2>&1; then
         printf "${RED}FAIL${RST}  %s  (PSCI reset failed -- log follows)\n" "$name"
         sed 's/^/       /' "$reset_log"
         FAIL=$((FAIL + 1))

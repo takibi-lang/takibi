@@ -35,12 +35,25 @@
 # swapping the SD card's file to something DIFFERENT, a real physical
 # power cycle is still required.
 #
+# The script therefore requires an explicit --resident-image-unchanged
+# assertion. SWD cannot observe whether the SD-card file changed while the
+# firmware keeps running an older resident image. Callers that just injected
+# a RAM payload over the known spin stub can make the assertion; after any SD
+# payload replacement, physically power-cycle first.
+#
 # WARNING: like RPi3's watchdog-based reset, this really does reboot the
 # whole SoC -- do not run this against a board you intend to keep a live
 # Raspberry Pi OS session on (see scripts/rpi5_jtag_load.sh's own header
 # comment on why "halted at EL2H" alone cannot rule that out on this
 # board, due to VHE).
 set -euo pipefail
+
+if [ "$#" -ne 1 ] || [ "$1" != "--resident-image-unchanged" ]; then
+    echo "error: warm reset cannot guarantee reload of a changed kernel_2712.img" >&2
+    echo "error: physically power-cycle after any SD payload change; otherwise rerun with" >&2
+    echo "       --resident-image-unchanged to assert that the resident SD image is unchanged" >&2
+    exit 2
+fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BCM2712_CFG="$REPO_ROOT/examples/common_rpi5/bcm2712.cfg"

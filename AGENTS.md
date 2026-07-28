@@ -574,7 +574,8 @@ scripts/
                      it to the RPi5 USB drive through SWD installer firmware.
   rpi5_jtag_reset.sh -- RPi5 reboot via a PSCI SYSTEM_RESET SMC call injected
                      over SWD (no nSRST line on this connector, confirmed --
-                     see examples/common_rpi5/AGENTS.md item 3).
+                     requires --resident-image-unchanged; see
+                     examples/common_rpi5/AGENTS.md item 3).
   rpi5_uart_dev.sh -- resolves the Debug Probe's ttyACM device by its
                      /dev/serial/by-id label (`*Raspberry_Pi_Debug_Probe*`), not
                      by number -- the STM32 board's ST-Link VCP and the Debug
