@@ -25,3 +25,7 @@ Production kernel direction is tracked by GitHub issue #177: begin with a
 standalone RPi5 EL1 kernel under top-level `kernel/`, then add QEMU/AArch64 and
 QEMU/RISC-V ports after the RPi5 design has settled. Do not create target
 abstractions before a second kernel target actually needs them.
+
+The current BusyBox syscall fixture is classified separately in
+[`el0_shell/README.md`](el0_shell/README.md). Its narrow and false-success
+compatibility behavior is explicitly not a production-kernel contract.
