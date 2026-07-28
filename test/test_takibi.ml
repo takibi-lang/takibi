@@ -6999,6 +6999,37 @@ let codegen_tests = [
        Alcotest.(check bool) "event notify" true (contains_substring ir "sev"));
 
   Alcotest.test_case
+    "checked usize arithmetic lowers to LLVM overflow intrinsics without traps"
+    `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "variant CheckedUsize { Value(usize); Overflow; }
+          fn checked_ops(a: usize, b: usize) -> usize {
+            let mut total: usize = 0;
+            match checked_add_usize(a, b) {
+              CheckedUsize::Value(value) => { total = value; }
+              CheckedUsize::Overflow => { total = 1; }
+            }
+            match checked_mul_usize(a, b) {
+              CheckedUsize::Value(value) => { total = value; }
+              CheckedUsize::Overflow => { total = 2; }
+            }
+            return total;
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "checked_ops" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "checked_ops was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check bool) "checked add" true
+         (contains_substring ir "llvm.uadd.with.overflow.i64");
+       Alcotest.(check bool) "checked multiply" true
+         (contains_substring ir "llvm.umul.with.overflow.i64");
+       Alcotest.(check bool) "no trap" false
+         (contains_substring ir "llvm.trap"));
+
+  Alcotest.test_case
     "indexed struct field assignment codegens through the element address"
     `Quick
     (expect_trap_sites 0
@@ -7849,6 +7880,45 @@ let codegen_tests = [
        expect_type_error "cannot pass unproven"
          "fn f(p: *u8) { dma_finish_rx(p, 512); }" ();
        expect_ok "fn f(p: *u8) { dma_prepare_tx(p, 512); }" ());
+
+  Alcotest.test_case
+    "checked usize builtins return an exhaustive closed variant" `Quick
+    (expect_ok
+       "variant CheckedUsize { Value(usize); Overflow; }
+        fn checked(a: usize, b: usize) -> usize {
+          match checked_add_usize(a, b) {
+            CheckedUsize::Value(value) => { return value; }
+            CheckedUsize::Overflow => { return 0; }
+          }
+        }");
+
+  Alcotest.test_case
+    "checked usize builtins require the standard result declaration" `Quick
+    (expect_type_error "require `variant CheckedUsize"
+       "fn checked(a: usize, b: usize) {
+          let result = checked_add_usize(a, b);
+        }");
+
+  Alcotest.test_case
+    "checked usize match must handle overflow" `Quick
+    (expect_type_error "non-exhaustive match: 'CheckedUsize::Overflow' not covered"
+       "variant CheckedUsize { Value(usize); Overflow; }
+        fn checked(a: usize, b: usize) -> usize {
+          match checked_mul_usize(a, b) {
+            CheckedUsize::Value(value) => { return value; }
+          }
+        }");
+
+  Alcotest.test_case
+    "checked usize builtin names are reserved and operands are usize" `Quick
+    (fun () ->
+       expect_type_error "compiler builtin"
+         "fn checked_add_usize(a: usize, b: usize) -> usize { return a + b; }" ();
+       expect_type_error "cannot unify"
+         "variant CheckedUsize { Value(usize); Overflow; }
+          fn bad(a: u32, b: usize) {
+            let result = checked_mul_usize(a, b);
+          }" ());
 
   Alcotest.test_case "signal_fence emits a compiler memory clobber only" `Quick
     (fun () ->

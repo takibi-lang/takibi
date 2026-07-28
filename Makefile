@@ -85,9 +85,10 @@ COMMON_NETCONFIG   := $(COMMON_QEMU_DIR)/netconfig.tkb
 COMMON_STM32_STUB  := $(COMMON_QEMU_DIR)/stm32_stub.tkb
 COMMON_RPI3_STUB   := $(COMMON_DIR)/rpi3_stub.tkb
 COMMON_FAT12_GEOMETRY := $(COMMON_DIR)/fat12_geometry.tkb
+COMMON_CHECKED_USIZE := $(COMMON_DIR)/checked_usize.tkb
 COMMON_AARCH64_DIR := examples/common_aarch64
 COMMON_AARCH64_EL0_SHELL_ASM_EXTERN := $(COMMON_AARCH64_DIR)/el0_shell_asm_extern.tkb
-COMMON_AARCH64_ELF64_VALIDATE := $(COMMON_AARCH64_DIR)/elf64_validate.tkb
+COMMON_AARCH64_ELF64_VALIDATE := $(COMMON_AARCH64_DIR)/elf64_validate.tkb $(COMMON_CHECKED_USIZE)
 
 # -- Linux/AMD64 user-space support files -------------------------------------
 COMMON_LINUX_DIR       := examples/common_linux
@@ -103,7 +104,7 @@ LINUX_BINS             := $(foreach e,$(LINUX_EXAMPLES),examples/$(e)/$(e).exe)
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
 # Convention: examples/<name>/<name>.tkb -> examples/<name>/kernel.elf
-EXAMPLES     := start basic_suite type_system_suite algorithm_suite elf64_validate echo bump timer rtc irq scheduler preempt semaphore condvar msgqueue watchdog net_echo arp_reply icmp_echo tcp_echo http_server fatfs klock_guard percpu chan_rendezvous rtos_demo kvs_server page_pool
+EXAMPLES     := start basic_suite type_system_suite algorithm_suite checked_usize elf64_validate echo bump timer rtc irq scheduler preempt semaphore condvar msgqueue watchdog net_echo arp_reply icmp_echo tcp_echo http_server fatfs klock_guard percpu chan_rendezvous rtos_demo kvs_server page_pool
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
@@ -471,7 +472,8 @@ $(PAGE_POOL_OBJS): examples/%.o: examples/%.tkb examples/page_pool/page_pool_cor
 examples/basic_suite/basic_suite.o: $(BASIC_SUITE_SOURCES)
 examples/type_system_suite/type_system_suite.o: $(TYPE_SYSTEM_SUITE_SOURCES)
 examples/algorithm_suite/algorithm_suite.o: $(ALGORITHM_SUITE_SOURCES) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL)
-examples/elf64_validate/elf64_validate.o: examples/common_aarch64/elf64_validate.tkb
+examples/checked_usize/checked_usize.o: $(COMMON_CHECKED_USIZE)
+examples/elf64_validate/elf64_validate.o: $(COMMON_AARCH64_ELF64_VALIDATE)
 
 # examples/irq/irq.tkb `use`s gic_regs.tkb (types only) itself now, but
 # needs gic.tkb's actual FUNCTIONS for the QEMU build (irq_uart_rx_setup/

@@ -324,6 +324,17 @@ parameter value, or top-level declaration name.
   lower bound, similarly. When both arguments have a known bound, the
   tighter combined range is proven; an unconstrained operand falls back
   to a wide (but not unsound) sentinel range.
+- `checked_add_usize(a, b)` / `checked_mul_usize(a, b)` -- reserved
+  compiler builtins for native-width unsigned arithmetic. Both operands
+  must be `usize`, and the program must declare the standard result shape
+  `variant CheckedUsize { Value(usize); Overflow; }` (the reusable
+  declaration is in `examples/common/checked_usize.tkb`). The operation
+  returns `Value(result)` when representable and `Overflow` otherwise;
+  it never wraps silently and never emits a trap. Matching the result is
+  exhaustiveness-checked like any other closed variant. `CheckedUsize`
+  is currently unrestricted, so the compiler does not yet reject an
+  entirely ignored result; mandatory result consumption is separate
+  must-check/linearity design work.
 - `unsafe { expr }` -- see "unsafe" below.
 
 ### Operator Precedence

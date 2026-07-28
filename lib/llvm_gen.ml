@@ -3048,6 +3048,44 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       ignore (build_store (coerce replacement_v value_ty) field_ptr builder);
       (value_ty, old_value)
 
+  | Call (("checked_add_usize" | "checked_mul_usize") as name,
+          [left_e; right_e]) ->
+      let (_, left) = gen_expr ~expected_ty:TypeUsize locals left_e in
+      let (_, right) = gen_expr ~expected_ty:TypeUsize locals right_e in
+      let ity = usize_lltype () in
+      let pair_ty = struct_type context [| ity; i1_type context |] in
+      let suffix = string_of_int (integer_bitwidth ity) in
+      let intrinsic_name =
+        (match name with
+         | "checked_add_usize" -> "llvm.uadd.with.overflow.i" ^ suffix
+         | _ -> "llvm.umul.with.overflow.i" ^ suffix)
+      in
+      let fty = function_type pair_ty [| ity; ity |] in
+      let intrinsic = get_or_declare_intrinsic intrinsic_name fty in
+      let pair = build_call fty intrinsic [| left; right |]
+        "checked.usize" builder in
+      let value = build_extractvalue pair 0 "checked.value" builder in
+      let overflow = build_extractvalue pair 1 "checked.overflow" builder in
+      let value_case = variant_case "CheckedUsize" "Value" in
+      let overflow_case = variant_case "CheckedUsize" "Overflow" in
+      let result_ty = TypeVariant "CheckedUsize" in
+      let llty = ltype_of_ast result_ty in
+      let value_result = build_insertvalue (undef llty)
+        (const_int (i32_type context) value_case.variant_tag) 0
+        "checked.value.tag" builder in
+      let value_result = match value_case.variant_payload_field with
+        | Some field -> build_insertvalue value_result value field
+            "checked.value.payload" builder
+        | None -> raise (Error
+            "BUG: CheckedUsize::Value has no runtime payload field")
+      in
+      let overflow_result = build_insertvalue (undef llty)
+        (const_int (i32_type context) overflow_case.variant_tag) 0
+        "checked.overflow.tag" builder in
+      (result_ty,
+       build_select overflow overflow_result value_result
+         "checked.usize.result" builder)
+
   | Call (("dma_prepare_tx" | "dma_prepare_rx" | "dma_finish_rx") as name,
           [ptr_e; len_e]) ->
       let (_, ptr) = gen_expr locals ptr_e in

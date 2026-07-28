@@ -1,6 +1,8 @@
 // Bounded ELF64/AArch64 load-plan validation shared by loader examples.
 // This module performs no allocation, mapping, copying, or UART output.
 
+use "examples/common/checked_usize.tkb";
+
 const ELF64_MAX_PHDRS: usize = 8;
 const ELF64_PT_LOAD: u32 = 1;
 const ELF64_ET_EXEC: u16 = 2;
@@ -40,11 +42,11 @@ struct packed Elf64ProgramHeader {
 
 struct Elf64LoadInfo {
     entry: usize;
+    at_phdr: usize;
     phdr_base: usize;
-    phoff: usize;
     phnum: usize;
     load_bias: usize;
-    max_extent: usize;
+    rounded_extent: usize;
 }
 
 variant Elf64Validation {
@@ -54,9 +56,13 @@ variant Elf64Validation {
 
 fn elf64_validate_load(image_addr: usize, image_len: usize,
                        page_va: usize) -> Elf64Validation {
-    if (image_len < ELF64_HEADER_SIZE
-            || image_addr > ELF64_USIZE_MAX - image_len) {
+    if (image_len < ELF64_HEADER_SIZE) {
         return Elf64Validation::Invalid;
+    }
+    let mut image_end: usize = 0;
+    match checked_add_usize(image_addr, image_len) {
+        CheckedUsize::Overflow => { return Elf64Validation::Invalid; }
+        CheckedUsize::Value(value) => { image_end = value; }
     }
 
     let hdr: *Elf64Header = image_addr as *Elf64Header;
@@ -78,12 +84,27 @@ fn elf64_validate_load(image_addr: usize, image_len: usize,
     let phnum: usize = hdr.e_phnum as usize;
     if (phentsize != ELF64_PROGRAM_HEADER_SIZE
             || phnum > ELF64_MAX_PHDRS
-            || phoff < ELF64_HEADER_SIZE || phoff > image_len
-            || phnum > (image_len - phoff) / ELF64_PROGRAM_HEADER_SIZE
-            || image_addr > ELF64_USIZE_MAX - phoff) {
+            || phoff < ELF64_HEADER_SIZE || phoff > image_len) {
         return Elf64Validation::Invalid;
     }
-    let phdr_base: usize = image_addr + phoff;
+    let mut phdr_base: usize = 0;
+    match checked_add_usize(image_addr, phoff) {
+        CheckedUsize::Overflow => { return Elf64Validation::Invalid; }
+        CheckedUsize::Value(value) => { phdr_base = value; }
+    }
+    let mut phdr_bytes: usize = 0;
+    match checked_mul_usize(phnum, ELF64_PROGRAM_HEADER_SIZE) {
+        CheckedUsize::Overflow => { return Elf64Validation::Invalid; }
+        CheckedUsize::Value(value) => { phdr_bytes = value; }
+    }
+    match checked_add_usize(phdr_base, phdr_bytes) {
+        CheckedUsize::Overflow => { return Elf64Validation::Invalid; }
+        CheckedUsize::Value(table_end) => {
+            if (table_end > image_end) {
+                return Elf64Validation::Invalid;
+            }
+        }
+    }
 
     let mut min_vaddr: usize = ELF64_USIZE_MAX;
     let mut max_vaddr_end: usize = 0;
@@ -98,10 +119,16 @@ fn elf64_validate_load(image_addr: usize, image_len: usize,
             let seg_offset: usize = ph.p_offset as usize;
             let seg_filesz: usize = ph.p_filesz as usize;
             let seg_align: usize = ph.p_align as usize;
-            if (seg_filesz > seg_memsz || seg_offset > image_len
-                    || seg_filesz > image_len - seg_offset
-                    || seg_vaddr > ELF64_USIZE_MAX - seg_memsz) {
+            if (seg_filesz > seg_memsz || seg_offset > image_len) {
                 return Elf64Validation::Invalid;
+            }
+            match checked_add_usize(seg_offset, seg_filesz) {
+                CheckedUsize::Overflow => { return Elf64Validation::Invalid; }
+                CheckedUsize::Value(file_end) => {
+                    if (file_end > image_len) {
+                        return Elf64Validation::Invalid;
+                    }
+                }
             }
             if (seg_align > 1) {
                 let mask: usize = seg_align - 1;
@@ -113,7 +140,11 @@ fn elf64_validate_load(image_addr: usize, image_len: usize,
             if (seg_vaddr < min_vaddr) {
                 min_vaddr = seg_vaddr;
             }
-            let seg_end: usize = seg_vaddr + seg_memsz;
+            let mut seg_end: usize = 0;
+            match checked_add_usize(seg_vaddr, seg_memsz) {
+                CheckedUsize::Overflow => { return Elf64Validation::Invalid; }
+                CheckedUsize::Value(value) => { seg_end = value; }
+            }
             if (seg_end > max_vaddr_end) {
                 max_vaddr_end = seg_end;
             }
@@ -124,21 +155,29 @@ fn elf64_validate_load(image_addr: usize, image_len: usize,
     }
 
     let load_bias: usize = page_va - min_vaddr;
-    if (entry_link > ELF64_USIZE_MAX - load_bias
-            || phoff > ELF64_USIZE_MAX - load_bias) {
-        return Elf64Validation::Invalid;
+    let mut entry: usize = 0;
+    match checked_add_usize(entry_link, load_bias) {
+        CheckedUsize::Overflow => { return Elf64Validation::Invalid; }
+        CheckedUsize::Value(value) => { entry = value; }
+    }
+    let mut at_phdr: usize = 0;
+    match checked_add_usize(phoff, load_bias) {
+        CheckedUsize::Overflow => { return Elf64Validation::Invalid; }
+        CheckedUsize::Value(value) => { at_phdr = value; }
     }
     let max_extent: usize = max_vaddr_end - min_vaddr;
-    if (max_extent > ELF64_USIZE_MAX - 4095) {
-        return Elf64Validation::Invalid;
+    let mut rounded_extent: usize = 0;
+    match checked_add_usize(max_extent, 4095) {
+        CheckedUsize::Overflow => { return Elf64Validation::Invalid; }
+        CheckedUsize::Value(value) => { rounded_extent = value; }
     }
     let mut info: Elf64LoadInfo = {
-        entry_link + load_bias,
+        entry,
+        at_phdr,
         phdr_base,
-        phoff,
         phnum,
         load_bias,
-        max_extent
+        rounded_extent
     };
     return Elf64Validation::Valid(info);
 }

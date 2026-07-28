@@ -2232,10 +2232,10 @@ fn el0_load_elf_into(image_addr: usize, image_len: usize,
     let page_va = dynamic_va_base();
     let mut entry: usize = 0;
     let mut phdr_base: usize = 0;
-    let mut phoff: usize = 0;
+    let mut at_phdr: usize = 0;
     let mut phnum: usize = 0;
     let mut load_bias: usize = 0;
-    let mut max_extent: usize = 0;
+    let mut rounded_extent: usize = 0;
     match elf64_validate_load(image_addr, image_len, page_va) {
         Elf64Validation::Invalid => {
             uart_puts("invalid ELF image\n");
@@ -2244,14 +2244,13 @@ fn el0_load_elf_into(image_addr: usize, image_len: usize,
         Elf64Validation::Valid(info) => {
             entry = info.entry;
             phdr_base = info.phdr_base;
-            phoff = info.phoff;
+            at_phdr = info.at_phdr;
             phnum = info.phnum;
             load_bias = info.load_bias;
-            max_extent = info.max_extent;
+            rounded_extent = info.rounded_extent;
         }
     }
-    let at_phdr: usize = load_bias + phoff;
-    let mut code_pages: usize = (max_extent + PAGE_SIZE - 1) / PAGE_SIZE;
+    let mut code_pages: usize = rounded_extent / PAGE_SIZE;
     if (code_pages < 1) {
         code_pages = 1;
     }

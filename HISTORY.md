@@ -12221,3 +12221,26 @@ OpenOCD showed the saved ELR at `read_cntpct`. The EL1 transition now sets
 the EL1 entry enables SIMD for the embedded busybox. The full 238-byte
 expected UART transcript then matched exactly on RPi5, covering FAT input,
 fork/COW, exec, child status, and VM reclamation.
+
+## 2026-07-28: Checked native-width arithmetic reaches the ELF boundary
+
+Issue #178's first compiler slice added the reserved
+`checked_add_usize` and `checked_mul_usize` builtins. Both require the
+standard closed `CheckedUsize { Value(usize); Overflow; }` variant and
+lower directly to LLVM's target-width unsigned overflow intrinsics, so an
+exhaustive match distinguishes a valid result from overflow without an
+`llvm.trap`. A QEMU regression covers native-width maximum-value success
+and overflow cases under `--forbid-trap`.
+
+The shared AArch64 ELF64 validator is the first security-boundary caller.
+Its image, program-header table, segment, relocation, and page-rounding
+arithmetic now uses the checked operations instead of repeated
+`USIZE_MAX - value` guards. It also returns the checked `AT_PHDR` value and
+already-rounded extent, avoiding an unchecked repetition of those additions
+in both RPi5 loader callers.
+
+`CheckedUsize` deliberately remains unrestricted. Matching it is
+exhaustiveness-checked, but dropping the entire result is still permitted by
+the language, like other ordinary variants. Making status values genuinely
+must-check remains issue #150's kind-system design question; this change does
+not invent a linear resource solely to approximate that policy.

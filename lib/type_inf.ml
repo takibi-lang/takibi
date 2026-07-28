@@ -7,6 +7,7 @@ let compiler_builtins = StringSet.of_list [
   "dma_publish"; "dma_consume"; "device_fence"; "signal_fence";
   "interrupt_wait"; "interrupt_notify";
   "dma_prepare_tx"; "dma_prepare_rx"; "dma_finish_rx";
+  "checked_add_usize"; "checked_mul_usize";
 ]
 
 let is_compiler_builtin name = StringSet.mem name compiler_builtins
@@ -2200,6 +2201,33 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            TVoid
        | _ -> raise (TypeError (e.loc, Printf.sprintf
            "%s expects two arguments: %s(ptr, len)" fname fname)))
+
+  | Call (("checked_add_usize" | "checked_mul_usize") as fname, args) ->
+      (match Hashtbl.find_opt variant_defs "CheckedUsize" with
+       | Some cases ->
+           let value_ok = match List.assoc_opt "Value" cases with
+             | Some (Some Ast.TypeUsize) -> true
+             | _ -> false
+           in
+           let overflow_ok = match List.assoc_opt "Overflow" cases with
+             | Some None -> true
+             | _ -> false
+           in
+           if List.length cases <> 2 || not value_ok || not overflow_ok then
+             raise (TypeError (e.loc,
+               "checked usize builtins require `variant CheckedUsize { Value(usize); Overflow; }`"))
+       | None ->
+           raise (TypeError (e.loc,
+             "checked usize builtins require `variant CheckedUsize { Value(usize); Overflow; }`")));
+      (match args with
+       | [left; right] ->
+           let lt = infer_expr senv eenv tyenv fenv left in
+           let rt = infer_expr senv eenv tyenv fenv right in
+           unify_at left.loc lt TUsize;
+           unify_at right.loc rt TUsize;
+           TVariant "CheckedUsize"
+       | _ -> raise (TypeError (e.loc, Printf.sprintf
+           "%s expects two usize arguments: %s(left, right)" fname fname)))
 
   | Call ("slice_copy", args) ->
       (* Builtin (reserved name, see check_reserved_fn): copies
