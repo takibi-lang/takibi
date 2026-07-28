@@ -7,14 +7,14 @@
    (GitHub issue #156). The archive is built by the real `cpio` tool
    (see the Makefile's own rule) from a binary downloaded fresh at build
    time, not vendored into this repository -- see the Makefile's own
-   COMMON_RPI3_BUSYBOX_APK rule for why. `.incbin` requires
+   COMMON_AARCH64_BUSYBOX_APK rule for why. `.incbin` requires
    el0_shell_initramfs.cpio to already exist at assemble time (see the
    Makefile's ordering). */
     .section .rodata
     .align  4
     .global el0_shell_image_start
 el0_shell_image_start:
-    .incbin "examples/common_rpi3/el0_shell_initramfs.cpio"
+    .incbin "examples/common_aarch64/el0_shell_initramfs.cpio"
     .global el0_shell_image_end
 el0_shell_image_end:
 

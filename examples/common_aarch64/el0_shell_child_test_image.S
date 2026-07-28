@@ -1,4 +1,4 @@
-/* Embeds examples/common_rpi3/el0_shell_child_test.elf's own raw ELF
+/* Embeds examples/common_aarch64/el0_shell_child_test.elf's own raw ELF
    bytes verbatim into el0_shell's kernel image (GitHub issue #158) --
    NOT cpio-wrapped, unlike examples/common_rpi3/el0_test_image.S's own
    copy of el0_test_prog.elf for examples/el0_elf_load: el0_shell.tkb's
@@ -11,7 +11,7 @@
     .align  4
     .global el0_shell_child_test_image_start
 el0_shell_child_test_image_start:
-    .incbin "examples/common_rpi3/el0_shell_child_test.elf"
+    .incbin "examples/common_aarch64/el0_shell_child_test.elf"
     .global el0_shell_child_test_image_end
 el0_shell_child_test_image_end:
 

@@ -6,32 +6,14 @@
 // examples/common_rpi5/tlb_asm.S for the tlbi/dsb/isb sequence
 // tlb_invalidate drives.
 //
-// This is a deliberately smaller module than vm_page_map_core.tkb, which
-// has grown well beyond Stage 2's own scope (process address spaces,
-// copy-on-write, fork/exec, task migration -- GitHub issues #153/#156/
-// #158/#159) to support RPi3 examples that have no RPi5 port yet. Only
-// what examples/vm_page_map/vm_page_map_rpi5.tkb itself calls is here:
-// the page-pool allocator, and a single-slot AddressSpaceOwner state
-// machine covering map_page/tlb_invalidate/mapping_bytes/unmap_page.
-//
-// The RPi5 port now also tracks two real hardware slots: each root shares
-// the identity/MMIO map but owns a separate dynamic L2/L3 chain.  The slot
-// field and active token therefore describe the TTBR0_EL2 root actually
-// installed on that core, as exercised concurrently by multi_address_space.
-//
-// PAGE_COUNT here is 512 (one 2MB window's worth), not
-// vm_page_map_core.tkb's 1024 -- that doubling was GitHub issue #158's
-// dual-slot fork/exec fix, which does not apply to a single-slot design.
-//
-// GitHub issue #156 follow-up (2026-07-26): added ProcessAddressSpace/
-// process_address_space_map/process_address_space_unmap, a coarse-grained
-// multi-page owner for examples/el0_elf_load_rpi5's own full port (real
-// ELF loading needs a runtime-determined page count, not one fixed page).
-// Still deliberately smaller than vm_page_map_core.tkb's own copy: no
-// process_address_space_cow_fork/unmap_shared (GitHub issue #158's real
-// fork()-specific COW sharing) and no per-slot indices array pair (RPi5
-// has one slot, so process_phys_indices is a single flat array, not the
-// slot-0/slot-1 pair RPi3's two-root design needs).
+// This RPi5 port now contains the two hardware address-space slots and
+// 1024-page pool needed by the process, fork/exec, and copy-on-write
+// examples (GitHub issues #153/#156/#158/#159). Each root shares the
+// identity/MMIO map but owns a separate dynamic L2/L3 chain. The slot field
+// and active token identify the TTBR0_EL2 root installed on the core, while
+// the two process_phys_indices arrays keep each slot's page ownership
+// separate. This remains example support code, not the production kernel VM
+// architecture; new kernel work belongs under top-level kernel/ (issue #177).
 
 use "examples/common_rpi5/tlb_asm_extern.tkb";
 

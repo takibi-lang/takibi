@@ -726,7 +726,7 @@ expected to include wait time.
 
 ## Instructions for Coding Agents
 
-- **Do not create git commits.** Only do so when the user explicitly requests it.
+- Follow the repository-wide "Agents Commit, Humans Push" workflow above.
 - Prefer idiomatic OCaml style. Use `Map.Make(String)` over `Hashtbl`.
 - Do not use the `base` package (it causes friction at the boundary with LLVM bindings).
 - The user is an OCaml beginner, so explain the reason for code changes from the perspective of "why write it this way."

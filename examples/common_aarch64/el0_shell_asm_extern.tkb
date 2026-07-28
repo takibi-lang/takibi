@@ -1,0 +1,10 @@
+// Compatibility ABI used by the shared legacy-RPi3/RPi5 el0_shell example.
+// RPi5 assembly exports these historical symbol names as aliases. Production
+// kernel code must define its own target-neutral interface under kernel/.
+
+extern fn el0_payload_addr() -> usize;
+extern fn el0_payload_len() -> usize;
+extern fn rpi3_el0_enter(el0_pc: usize, el0_sp: usize) !{noreturn};
+extern fn rpi3_el0_resume_frame(frame_ptr: usize) !{noreturn};
+extern fn rpi3_el1_enter(el1_sp: usize) !{noreturn};
+extern fn rpi3_hvc_call(arg: usize) -> usize;

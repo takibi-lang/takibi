@@ -13,11 +13,10 @@ obligations).
 
 As a first waypoint toward that goal, takibi already implements a TCP/IP stack
 and runs an HTTP server and a network key-value store on bare-metal targets,
-on QEMU (AArch64), real
-[Raspberry Pi 3B](https://www.raspberrypi.com/products/raspberry-pi-3-model-b/)
-hardware, and real
+on QEMU (AArch64), real Raspberry Pi 5 hardware, and real
 [STM32F746G-DISCOVERY](https://www.st.com/en/evaluation-tools/32f746gdiscovery.html)
-(Cortex-M7) hardware.
+(Cortex-M7) hardware. Raspberry Pi 3B remains as a legacy build target, but is
+not part of the current freshness policy.
 
 For the current language syntax and grammar (types, statements,
 expressions), see [`SPEC.md`](SPEC.md).
@@ -502,19 +501,21 @@ test/      -- unit tests (parser, type inference, LLVM code generation/layout)
 ```
 
 Each directory under `examples/` documents itself in its `.tkb` file's
-header comment. `examples/common/` holds platform-agnostic logic shared by
-both targets; `examples/common_qemu/` and `examples/common_stm32/` hold the
-QEMU and STM32 hardware-abstraction layers (UART, timers, interrupt
-controllers, Ethernet), sharing function names/signatures so application
-code is written once.
+header comment. See [`examples/README.md`](examples/README.md) for maintenance
+priority and the boundary between examples and the future production kernel.
+`examples/common/` holds platform-agnostic logic; target HALs live under the
+corresponding `common_*` directories.
 
 ## Targets
 
-- QEMU `virt` machine, `cortex-a53` CPU (AArch64 bare-metal).
-- STM32F746G-DISCOVERY (Cortex-M7 bare-metal), flashed and verified
-  against real hardware.
-- Raspberry Pi 3B (BCM2837, AArch64 bare-metal), JTAG-injected and verified
-  against real hardware -- see
+- Raspberry Pi 5 (Cortex-A76, AArch64 bare-metal): primary hardware target.
+- QEMU `virt` machine, `cortex-a53` CPU (AArch64 bare-metal): maintained
+  deterministic test target.
+- STM32F746G-DISCOVERY (Cortex-M7 bare-metal): compatibility maintenance only;
+  the existing examples must keep building and running, but no feature growth
+  is planned.
+- Raspberry Pi 3B (BCM2837, AArch64 bare-metal): legacy, outside the freshness
+  policy -- see
   [`examples/common_rpi3/AGENTS.md`](examples/common_rpi3/AGENTS.md).
 
 ## References and Prior Art

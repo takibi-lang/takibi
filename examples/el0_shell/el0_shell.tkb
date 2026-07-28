@@ -4,7 +4,7 @@
 // REAL, unmodified, third-party binary instead of this repo's own
 // hand-written test program -- Alpine Linux's busybox-static (aarch64,
 // static-pie, GPL-2.0), downloaded fresh at build time (see the
-// Makefile's own COMMON_RPI3_BUSYBOX_APK rule for why it is fetched, not
+// Makefile's own COMMON_AARCH64_BUSYBOX_APK rule for why it is fetched, not
 // vendored) and embedded via el0_shell_image.S's `.incbin`, the same
 // mechanism el0_test_image.S already established. Otherwise an exact
 // duplicate of examples/el0_elf_load/el0_elf_load.tkb -- the two files
@@ -26,12 +26,11 @@
 // (echo), and a clean exit(0) reclaimed through this kernel's real
 // hvc-based process teardown -- not just "the loader doesn't crash."
 //
-// RPi3-only, same reasons as examples/el0_smoke.
+// The example remains a compatibility fixture for legacy RPi3 and the
+// maintained RPi5 target. New kernel work belongs under top-level kernel/.
 
-use "examples/common_rpi3/el0_asm_extern.tkb";
-use "examples/common_rpi3/el1_asm_extern.tkb";
-use "examples/common_rpi3/hvc_asm_extern.tkb";
-use "examples/common_rpi3/el0_shell_image_extern.tkb";
+use "examples/common_aarch64/el0_shell_asm_extern.tkb";
+use "examples/common_aarch64/el0_shell_image_extern.tkb";
 // GitHub issue #157: pulls in examples/common/fat12.tkb (transitively,
 // via this adapter's own `use`) and examples/common_rpi3/usb_msc.tkb --
 // the same real USB-Mass-Storage-backed FAT12 driver
@@ -43,7 +42,7 @@ use "examples/common_rpi3/el0_shell_image_extern.tkb";
 // first end-to-end test (see el0_shell_child_test_image.S's own and
 // el0_shell_child_test.S's own comments for why this is a NEW binary,
 // not a reuse of el0_elf_load's own el0_test_prog.elf).
-use "examples/common_rpi3/el0_shell_child_test_image_extern.tkb";
+use "examples/common_aarch64/el0_shell_child_test_image_extern.tkb";
 
 const SYSCALL_ERROR: usize = 0xFFFFFFFFFFFFFFFF;
 // -ENOTTY as usize (Linux errno 25), the real kernel ABI convention this

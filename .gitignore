@@ -14,9 +14,11 @@
 *.cpio
 *.apk
 
-# Downloaded at build time (Makefile's COMMON_RPI3_BUSYBOX_APK rule,
+# Downloaded at build time (Makefile's COMMON_AARCH64_BUSYBOX_APK rule,
 # GitHub issue #156) -- a real, GPL-2.0, third-party binary fetched
 # fresh, deliberately never vendored/committed.
+examples/common_aarch64/busybox-static
+# A pre-move cached artifact may still exist in an existing worktree.
 examples/common_rpi3/busybox-static
 
 # ocamlbuild working directory

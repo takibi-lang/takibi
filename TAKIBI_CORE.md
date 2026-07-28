@@ -1243,9 +1243,8 @@ This closes the documented direct named-call region-v1 hole without changing
 
 ### Deferred solver and prover threshold (not an active slice)
 
-The current examples have exactly one executable `unsafe { ... }`, in
-`tcp_echo`'s payload subslice. Its missing fact is quantifier-free linear
-integer arithmetic:
+The `tcp_echo` payload subslice remains a compact example of a missing fact
+that is quantifier-free linear integer arithmetic:
 
 ```text
 data_off = 34 + tcp_hdr_len
@@ -1254,9 +1253,11 @@ data_off + data_len = 34 + tcp_len
 ```
 
 An SMT solver could discharge that bounds goal, but this does not justify
-adding Z3 or solver-oriented `Phi` infrastructure now. The explicit `unsafe`
-is a small, visible boundary and may remain until an independently required
-real API demonstrates broader need. **Do not implement immutable symbolic
+adding Z3 or solver-oriented `Phi` infrastructure now. Other examples now
+also contain explicit `unsafe` boundaries for ELF images, user virtual
+memory, and fixed ABI layouts; each must be reviewed on its own invariant.
+Their existence still does not establish a need for a general solver.
+**Do not implement immutable symbolic
 expression retention, verification-condition generation, or an external
 solver solely to remove this site.** Runtime validation of packet- and
 device-supplied lengths must remain in any future design; SMT is not
