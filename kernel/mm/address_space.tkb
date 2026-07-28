@@ -1,0 +1,112 @@
+use "kernel/mm/page.tkb";
+use "kernel/arch/arm64/mm/mmu_extern.tkb";
+
+const USER_TEXT_VA: usize = 0x40000000;
+const USER_DATA_VA: usize = 0x40001000;
+const USER_STACK_VA: usize = 0x40002000;
+
+const USER_TEXT_RX_FLAGS: usize = 0x00200000000007C7;
+const USER_RW_XN_FLAGS: usize = 0x0060000000000747;
+
+enum AddressSpaceState: u8 { Empty; Text; TextData; Ready; }
+enum MappingRole: u8 { TextRx; DataRwXn; StackRwXn; }
+
+linear struct AddressSpaceOwner[state: AddressSpaceState] {
+    private asid: usize;
+}
+
+linear struct MappingOwner[page: usize, role: MappingRole] {
+    private page_index: {0..<BOOT_PAGE_COUNT as usize};
+    private page_witness: usize @ page;
+    private va: usize;
+}
+
+fn address_space_new() -> AddressSpaceOwner[AddressSpaceState::Empty] {
+    let mut space: AddressSpaceOwner[AddressSpaceState::Empty] = { 0 };
+    return space;
+}
+
+fn map_user_text(space: sink AddressSpaceOwner[AddressSpaceState::Empty],
+                 page: sink PageOwner[page])
+        -> (AddressSpaceOwner[AddressSpaceState::Text],
+            MappingOwner[page, MappingRole::TextRx]) {
+    let phys: usize = page_physical_address(page);
+    let (index, witness) = page_owner_into_parts(page);
+    user_pte_write(0, phys | USER_TEXT_RX_FLAGS);
+    user_tlb_invalidate(USER_TEXT_VA);
+    let mut next: AddressSpaceOwner[AddressSpaceState::Text] = { space.asid };
+    let mut mapping: MappingOwner[page, MappingRole::TextRx] =
+        { index, witness, USER_TEXT_VA };
+    return (next, mapping);
+}
+
+fn map_user_data(space: sink AddressSpaceOwner[AddressSpaceState::Text],
+                 page: sink PageOwner[page])
+        -> (AddressSpaceOwner[AddressSpaceState::TextData],
+            MappingOwner[page, MappingRole::DataRwXn]) {
+    let phys: usize = page_physical_address(page);
+    let (index, witness) = page_owner_into_parts(page);
+    user_pte_write(1, phys | USER_RW_XN_FLAGS);
+    user_tlb_invalidate(USER_DATA_VA);
+    let mut next: AddressSpaceOwner[AddressSpaceState::TextData] = { space.asid };
+    let mut mapping: MappingOwner[page, MappingRole::DataRwXn] =
+        { index, witness, USER_DATA_VA };
+    return (next, mapping);
+}
+
+fn map_user_stack(space: sink AddressSpaceOwner[AddressSpaceState::TextData],
+                  page: sink PageOwner[page])
+        -> (AddressSpaceOwner[AddressSpaceState::Ready],
+            MappingOwner[page, MappingRole::StackRwXn]) {
+    let phys: usize = page_physical_address(page);
+    let (index, witness) = page_owner_into_parts(page);
+    user_pte_write(2, phys | USER_RW_XN_FLAGS);
+    user_tlb_invalidate(USER_STACK_VA);
+    let mut next: AddressSpaceOwner[AddressSpaceState::Ready] = { space.asid };
+    let mut mapping: MappingOwner[page, MappingRole::StackRwXn] =
+        { index, witness, USER_STACK_VA };
+    return (next, mapping);
+}
+
+fn unmap_user_stack(space: sink AddressSpaceOwner[AddressSpaceState::Ready],
+                    mapping: sink MappingOwner[page, MappingRole::StackRwXn])
+        -> (AddressSpaceOwner[AddressSpaceState::TextData], PageOwner[page]) {
+    user_pte_write(2, 0);
+    user_tlb_invalidate(mapping.va);
+    let mut next: AddressSpaceOwner[AddressSpaceState::TextData] = { space.asid };
+    let page = page_owner_from_parts(mapping.page_index, mapping.page_witness);
+    return (next, page);
+}
+
+fn unmap_user_data(space: sink AddressSpaceOwner[AddressSpaceState::TextData],
+                   mapping: sink MappingOwner[page, MappingRole::DataRwXn])
+        -> (AddressSpaceOwner[AddressSpaceState::Text], PageOwner[page]) {
+    user_pte_write(1, 0);
+    user_tlb_invalidate(mapping.va);
+    let mut next: AddressSpaceOwner[AddressSpaceState::Text] = { space.asid };
+    let page = page_owner_from_parts(mapping.page_index, mapping.page_witness);
+    return (next, page);
+}
+
+fn unmap_user_text(space: sink AddressSpaceOwner[AddressSpaceState::Text],
+                   mapping: sink MappingOwner[page, MappingRole::TextRx])
+        -> (AddressSpaceOwner[AddressSpaceState::Empty], PageOwner[page]) {
+    user_pte_write(0, 0);
+    user_tlb_invalidate(mapping.va);
+    let mut next: AddressSpaceOwner[AddressSpaceState::Empty] = { space.asid };
+    let page = page_owner_from_parts(mapping.page_index, mapping.page_witness);
+    return (next, page);
+}
+
+fn address_space_free(space: sink AddressSpaceOwner[AddressSpaceState::Empty]) {
+}
+
+fn user_layout_is_correct() -> bool {
+    let text: usize = user_pte_read(0);
+    let data: usize = user_pte_read(1);
+    let stack: usize = user_pte_read(2);
+    let permission_mask: usize = 0xFFE0000000000FFF;
+    return (text & permission_mask) == USER_TEXT_RX_FLAGS &&
+           (data & permission_mask) == USER_RW_XN_FLAGS &&
+           (stack & permission_mask) == USER_RW_XN_FLAGS;
+}

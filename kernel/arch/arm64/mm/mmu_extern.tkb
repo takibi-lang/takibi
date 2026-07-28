@@ -1,0 +1,3 @@
+extern fn user_pte_write(index: usize, value: usize);
+extern fn user_pte_read(index: usize) -> usize;
+extern fn user_tlb_invalidate(va: usize);

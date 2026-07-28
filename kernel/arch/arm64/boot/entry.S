@@ -57,6 +57,7 @@ _start:
     orr     x0, x0, #(3 << 20)
     msr     cpacr_el1, x0
     isb
+    bl      kernel_mmu_init
     bl      main
 
 .Lpark:
