@@ -1,0 +1,5 @@
+// AArch64 DMA receive cache maintenance requires a 64-byte-aligned pointer.
+// A proof sufficient for STM32F7 must not silently pass on this target.
+fn receive(p: *align(32) u8) {
+    dma_prepare_rx(p, 64);
+}

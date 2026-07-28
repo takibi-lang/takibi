@@ -173,8 +173,7 @@ parameter value, or top-level declaration name.
   DMA buffer that must never share a cache line with unrelated data (a
   cache-line invalidate on an unaligned buffer can silently discard
   adjacent live stack data -- see `examples/common_stm32/sdmmc.tkb`'s
-  `disk_read_bounce`, though that one is a global; `examples/align/
-  align.tkb` demonstrates the local form).
+  `disk_read` contract and `examples/align/align.tkb` for the local form).
 - **`*align(N) T`** -- a pointer PROVABLY a multiple of N bytes (GitHub
   issue #102), the pointer analogue of a refined integer's
   `{lo..<hi as base}`. `align(N)` sits between the pointer sigil and the

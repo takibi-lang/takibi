@@ -103,14 +103,17 @@ that applied here too: `disk_read` was rebuilt with `dma_prepare_rx`/
 `dma_finish_rx` cache maintenance around its DMA destination, verified
 clean against the exact historical reproduction (150 writes immediately
 followed by a read, well past the old 129 threshold, x5 rounds x4 runs
-with zero failures). That rebuild also surfaced a second, distinct bug --
-`dma_finish_rx` is a cache-line INVALIDATE, not a clean, and this
-language's local variables cannot be `align(32)`, so invalidating a
-caller-supplied stack buffer directly (as `examples/sdcard/sdcard.tkb`
-does) could silently discard unrelated live stack data. Fixed with an
-internal `align(32)` bounce buffer inside `disk_read`, copied out to the
-caller's buffer only after `dma_finish_rx` has run -- so the caller's
-`buf` can be any alignment, matching `disk_write`'s existing contract.
+with zero failures). That rebuild also surfaced a second, distinct bug:
+`dma_finish_rx` is a cache-line INVALIDATE, not a clean, so invalidating an
+unaligned caller buffer can silently discard unrelated live stack data.
+The first fix used an internal bounce buffer. Issue #102 subsequently added
+aligned local variables and provable `*align(N) T` pointers; `disk_read` now
+targets the caller buffer directly and requires `*align(32) u8`, eliminating
+the bounce copy while making every caller prove the safety condition. Issue
+#171 later made the DMA builtin contract itself target-aware through the
+compiler-supplied `DMA_CACHE_LINE` property (32 on STM32F7, 64 on AArch64).
+`disk_write` still accepts an ordinary pointer because its clean operation
+cannot discard adjacent dirty data.
 Separately, `fatfs_sdcard`'s real-hardware test used to occasionally show
 a single dropped UART byte (GitHub issue #101) -- confirmed unrelated to
 `--forbid-trap` itself (reproduced identically on the pre-`--forbid-trap`
