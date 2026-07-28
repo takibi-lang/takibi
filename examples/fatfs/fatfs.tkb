@@ -156,28 +156,37 @@ fn app_main() {
     // there.
     load_seed_from_host();
     let mount_status: FatIoResult = fat_mount();
-    match fat_open("SEED    TXT", FA_READ) {
-        FatOpenResult::Opened(mut seed_fp) => {
-            let mut seed_buf: [u8; 128];
-            let mut seed_br: u32 = 0;
-            let read_status: FatIoResult = fat_read(seed_fp, seed_buf, 128, &seed_br);
-            let close_status: FatIoResult = fat_close(seed_fp);
-            if (fat_io_ok(read_status) && fat_io_ok(close_status)) {
-                uart_puts("seed read: ");
-                uart_print_bytes(seed_buf, seed_br);
-            } else {
-                uart_puts("seed read: FAIL (I/O)\r\n");
+    if (fat_io_ok(mount_status)) {
+        match fat_open("SEED    TXT", FA_READ) {
+            FatOpenResult::Opened(mut seed_fp) => {
+                let mut seed_buf: [u8; 128];
+                let mut seed_br: u32 = 0;
+                let read_status: FatIoResult = fat_read(seed_fp, seed_buf, 128, &seed_br);
+                let close_status: FatIoResult = fat_close(seed_fp);
+                if (fat_io_ok(read_status) && fat_io_ok(close_status)) {
+                    uart_puts("seed read: ");
+                    uart_print_bytes(seed_buf, seed_br);
+                } else {
+                    uart_puts("seed read: FAIL (I/O)\r\n");
+                }
+            }
+            FatOpenResult::Error(err) => {
+                uart_puts("seed read: FAIL (open)\r\n");
             }
         }
-        FatOpenResult::Error(err) => {
-            uart_puts("seed read: FAIL (open)\r\n");
-        }
+    } else {
+        uart_puts("seed read: FAIL (mount)\r\n");
     }
 
     // Phase 2: format the in-memory disk and create two demo files via the
     // fat_open/fat_write/fat_close API.
     let format_status: FatIoResult = fat_format();
-    uart_puts("format: OK\r\n");
+    if (fat_io_ok(format_status)) {
+        uart_puts("format: OK\r\n");
+    } else {
+        uart_puts("format: FAIL\r\n");
+        return;
+    }
 
     let hello_name: *u8 = "HELLO   TXT";
     let hello_content: *u8 = "Hello, takibi!\r\n";
@@ -232,7 +241,7 @@ fn app_main() {
                     }
                 }
                 FatOpenResult::Error(err) => {
-                    fat_close(hello_fp);
+                    fat_io_ok(fat_close(hello_fp));
                     uart_puts("read-back HELLO.TXT: FAIL\r\n");
                 }
             }

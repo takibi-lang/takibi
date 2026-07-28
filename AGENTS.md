@@ -208,12 +208,11 @@ sentinel convention.
   not stopping at status-shaped returns -- a search result being a different shape is a reason
   to design its variant differently (an `Option`-like two-case shape instead of `Ok`/`Err`), not
   a reason to leave it as a bare sentinel indefinitely.
-- **This does not by itself stop a caller from ignoring the result.** An ordinary
-  (`unrestricted`-kind) variant can still be bound and never matched, or a call's result never
-  bound at all -- only `linear` forces consumption on every path, and a `linear` "must-check"
-  status with no backing resource to justify the linearity is open design work, not yet settled
-  (see GitHub issue #150). This rule upgrades "handled the wrong arm" from silent to a compile
-  error; it does not upgrade "ignored the result entirely" from silent to a compile error.
+- **Use `must_use variant` when ignoring the whole result must be a compile error.** This
+  checker-only policy, added by GitHub issue #150, requires the value to be matched, returned,
+  or transferred on every path without pretending a status owns a linear runtime resource.
+  `FatIoResult` and `CheckedUsize` use it. An ordinary unrestricted `variant` remains droppable
+  and is appropriate for state/data packages that do not represent a must-check operation.
 - **Retrofitting an existing `i32`-returning function is a case-by-case call, not an
   automatic requirement -- but default to doing it when a concrete pass is already underway.**
   Converting a function already in the codebase touches every call site, which can span several

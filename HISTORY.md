@@ -12239,11 +12239,42 @@ arithmetic now uses the checked operations instead of repeated
 already-rounded extent, avoiding an unchecked repetition of those additions
 in both RPi5 loader callers.
 
-`CheckedUsize` deliberately remains unrestricted. Matching it is
-exhaustiveness-checked, but dropping the entire result is still permitted by
-the language, like other ordinary variants. Making status values genuinely
-must-check remains issue #150's kind-system design question; this change does
-not invent a linear resource solely to approximate that policy.
+The first version left `CheckedUsize` unrestricted, so matching was
+exhaustiveness-checked but dropping the entire result was still permitted.
+The `must_use variant` work below closed that remaining issue #150 gap and
+made `CheckedUsize` must-check as well.
+
+## 2026-07-28: Must-use results are checked without fake linear resources
+
+Issue #150 introduced the explicit `must_use variant` declaration policy.
+It reuses the ownership checker's all-path flow lattice for direct local,
+parameter, and return obligations, but remains distinct from payload-derived
+affine/linear kind: it changes no ABI and does not pretend a plain status owns
+a runtime resource. Discarding a call result, leaving a binding untouched,
+handling it on only one branch, overwriting it while pending, or using it
+again after handling is now a compile error; matching, returning, or passing
+it to another obligation-bearing parameter transfers or discharges it.
+
+`FatIoResult` supplied the concrete bug that justified the feature. Enabling
+the policy found `fatfs.tkb`'s previously dead `mount_status` and
+`format_status`, plus several cleanup-path `fat_close` results. The mount and
+format outcomes now control their failure paths, while cleanup closes are
+explicitly decoded where the preceding error remains primary. `CheckedUsize`
+also became must-use, closing the checked-arithmetic result-dropping gap from
+issue #178. Parser and type-flow regressions cover discarded calls, ignored
+bindings, exhaustive handling, and one-branch-only handling; the full QEMU
+and STM32 `make check` suite passes with both real example policies enabled.
+
+The RPi5-wide build exposed one adjacent checker bug rather than an example
+bug: `el0_shell` legitimately reused the local name `result` as
+`FatIoResult` in some syscall arms and `usize` in the mmap arm, while the
+ownership pass's name-keyed inferred-local map let one arm's type leak into
+another. The flow walk now applies an explicit local annotation only within
+its lexical statement-list scope and restores the outer type environment on
+exit. A regression keeps same-named must-use and plain locals in disjoint
+match arms distinct. Final verification passed `make check` (858 unit tests
+and 168 QEMU/host integration checks), the complete RPi5 non-network suite
+(78/78), and the RPi5 network plus USB-persistent KVS suite (6/6).
 
 ## 2026-07-28: Unsafe memory reasoning becomes an auditable effect
 

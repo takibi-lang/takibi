@@ -272,9 +272,12 @@ type toplevel =
      the type stays legal everywhere. *)
   | EnumDef of string * type_expr option * (string * int option) list * bool
   (* enum Name: u16 { Variant = val; _; } -- last bool = is_nonexhaustive *)
-  | VariantDef of string * (string * type_expr option) list * loc
-  (* variant Name { None; Some(T); } -- closed tagged sum. Each case has at
-     most one directly supported payload in Slice 3. *)
+  | VariantDef of string * (string * type_expr option) list * bool * loc
+  (* [must_use] variant Name { None; Some(T); } -- closed tagged sum. Each
+     case has at most one directly supported payload in Slice 3. The bool is
+     true for `must_use variant`: a checker-only obligation requiring every
+     produced value to be handled or transferred on every path, without
+     pretending the status value owns a linear runtime resource. *)
   | UseDef of string
   (* use "path/to/file.tkb"; -- GitHub issue #55. Path is resolved relative
      to the compiler's own working directory (the same convention already

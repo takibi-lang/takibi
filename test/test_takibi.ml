@@ -269,8 +269,8 @@ let parser_tests = [
               ("conn", Ast.TypeUsize,
                Ast.TypeIndexed
                  ("ParsedTcpConn",
-                  [Ast.StaticName "conn";
-                   Ast.StaticEnum ("ParsedTcpState", "Listen")]))))], _)] -> ()
+                   [Ast.StaticName "conn";
+                    Ast.StaticEnum ("ParsedTcpState", "Listen")]))))], false, _)] -> ()
       | _ -> Alcotest.fail "expected finite enum static-state AST nodes");
 
   Alcotest.test_case "addr-indexed pointer keeps singleton outside pointer" `Quick
@@ -324,13 +324,21 @@ let parser_tests = [
             [("None", None);
              ("Some", Some (Ast.TypeExists
                ("n", Ast.TypeUsize,
-                Ast.TypeIndexed ("ParsedOwner", [Ast.StaticName "n"]))))], _);
+                Ast.TypeIndexed ("ParsedOwner", [Ast.StaticName "n"]))))], false, _);
          Ast.FuncDef { body = [{ desc = Ast.Return (Some
            { desc = Ast.VariantCtor ("ParsedMaybe", "Some", _); _ }); _ }]; _ };
          Ast.FuncDef { body = [{ desc = Ast.Match (_,
            [Ast.ArmVariant ("ParsedMaybe", "None", None, []);
             Ast.ArmVariant ("ParsedMaybe", "Some", Some ("owner", false), [])]); _ }]; _ }] -> ()
       | _ -> Alcotest.fail "expected Slice 3 variant AST nodes");
+
+  Alcotest.test_case "must_use variant declaration parses its checker policy" `Quick
+    (fun () ->
+      match parse "must_use variant ParsedStatus { Ok; Err(i32); }" with
+      | [Ast.VariantDef
+           ("ParsedStatus", [("Ok", None); ("Err", Some Ast.TypeI32)],
+            true, _)] -> ()
+      | _ -> Alcotest.fail "expected must_use VariantDef policy");
 
   Alcotest.test_case "Slice 4 mutable borrow and mutable payload binder parse" `Quick
     (fun () ->
@@ -5104,6 +5112,77 @@ let infer_tests = [
             (contains_substring msg "cannot mint private view 'PrivatePending11'"));
 
   (* -- Takibi Core Slice 3: closed variants and existential opening ------- *)
+
+  Alcotest.test_case "must_use variant: a discarded call result is rejected" `Quick
+    (expect_type_error "must-use result of 'must_use_make1' must be handled"
+       "must_use variant MustUseStatus1 { Ok; Err(i32); }
+        fn must_use_make1() -> MustUseStatus1 {
+          return MustUseStatus1::Ok;
+        }
+        fn must_use_bad1() { must_use_make1(); }");
+
+  Alcotest.test_case "must_use variant: an ignored binding is rejected" `Quick
+    (expect_type_error "must-use value 'status' is never handled"
+       "must_use variant MustUseStatus2 { Ok; Err(i32); }
+        fn must_use_make2() -> MustUseStatus2 {
+          return MustUseStatus2::Ok;
+        }
+        fn must_use_bad2() {
+          let status: MustUseStatus2 = must_use_make2();
+        }");
+
+  Alcotest.test_case "must_use variant: match handles every result path" `Quick
+    (expect_ok
+       "must_use variant MustUseStatus3 { Ok; Err(i32); }
+        fn must_use_make3() -> MustUseStatus3 {
+          return MustUseStatus3::Ok;
+        }
+        fn must_use_ok3() -> i32 {
+          match must_use_make3() {
+            MustUseStatus3::Ok => { return 0; }
+            MustUseStatus3::Err(err) => { return err; }
+          }
+        }");
+
+  Alcotest.test_case "must_use variant: handling on only one branch is rejected" `Quick
+    (expect_type_error
+       "must-use value 'status' is handled on some paths but not on every path"
+       "must_use variant MustUseStatus4 { Ok; Err(i32); }
+        fn must_use_make4() -> MustUseStatus4 {
+          return MustUseStatus4::Ok;
+        }
+        fn must_use_bad4(c: bool) {
+          let status: MustUseStatus4 = must_use_make4();
+          if (c) {
+            match status {
+              MustUseStatus4::Ok => {}
+              MustUseStatus4::Err(err) => {}
+            }
+          }
+        }");
+
+  Alcotest.test_case
+    "must_use variant: a same-named plain local in another lexical arm is not tracked" `Quick
+    (expect_ok
+       "must_use variant MustUseStatus5 { Ok; Err(i32); }
+        fn must_use_make5() -> MustUseStatus5 {
+          return MustUseStatus5::Ok;
+        }
+        fn must_use_scoped5(tag: i32) -> usize {
+          match tag {
+            0 => {
+              let result: MustUseStatus5 = must_use_make5();
+              match result {
+                MustUseStatus5::Ok => { return 0; }
+                MustUseStatus5::Err(err) => { return 1; }
+              }
+            }
+            _ => {
+              let result: usize = 2;
+              return result;
+            }
+          }
+        }");
 
   Alcotest.test_case "Slice 3: an existential indexed owner packs and opens through match" `Quick
     (expect_ok

@@ -58,6 +58,7 @@ let view_params : (string, Ast.static_param list) Hashtbl.t = Hashtbl.create 8
 let variant_defs : (string, (string * Ast.type_expr option) list) Hashtbl.t =
   Hashtbl.create 8
 let variant_kinds : (string, Ast.opaque_kind) Hashtbl.t = Hashtbl.create 8
+let must_use_variants : (string, unit) Hashtbl.t = Hashtbl.create 8
 
 let rec resolve_declared_type = function
   | Ast.TypeNamed name when Hashtbl.mem view_kinds name -> Ast.TypeView (name, [])
@@ -3492,7 +3493,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.OpaqueStructDef (n, _, _, _)  -> claim_toplevel_name n "struct"
     | Ast.ViewDef (n, _, _, _, _)       -> claim_toplevel_name n "view"
     | Ast.EnumDef (n, _, _, _)    -> claim_toplevel_name n "enum"
-    | Ast.VariantDef (n, _, _)     -> claim_toplevel_name n "variant"
+    | Ast.VariantDef (n, _, _, _)  -> claim_toplevel_name n "variant"
     | Ast.UseDef _              -> ()
   ) prog;
   (* Closed enums are finite static sorts. Keep their nominal case names,
@@ -3514,7 +3515,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> ()) prog;
   Hashtbl.reset variant_defs;
   List.iter (function
-    | Ast.VariantDef (name, cases, _) -> Hashtbl.replace variant_defs name cases
+    | Ast.VariantDef (name, cases, _, _) ->
+        Hashtbl.replace variant_defs name cases
+    | _ -> ()) prog;
+  Hashtbl.reset must_use_variants;
+  List.iter (function
+    | Ast.VariantDef (name, _, true, _) ->
+        Hashtbl.replace must_use_variants name ()
     | _ -> ()) prog;
   Hashtbl.reset indexed_struct_params;
   Hashtbl.reset indexed_struct_kinds;
@@ -3599,7 +3606,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> Ast.KindPlain
   in
   List.iter (function
-    | Ast.VariantDef (name, cases, _) ->
+    | Ast.VariantDef (name, cases, _, _) ->
         let kind = List.fold_left (fun kind (_, payload) ->
           match payload with
           | None -> kind
@@ -4477,7 +4484,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               "indexed owner field '%s.%s' cannot nest a singleton inside storage"
               sname fname));
           validate_nonparam_type sloc ty) fields
-    | Ast.VariantDef (vname, cases, vloc) ->
+    | Ast.VariantDef (vname, cases, _, vloc) ->
         if cases = [] then
           raise (TypeError (vloc, Printf.sprintf
             "variant '%s' must declare at least one case" vname));
@@ -4908,7 +4915,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      and the storage bans (fields/slots/globals) live in infer_expr/
      infer_stmt where full types are available, not in this walk.
 
-     Both kinds share one walk carrying a `consume_sets` value. Its
+     MUST_USE VARIANT (GitHub issue #150): the same exactly-once, all-path
+     flow obligation applies to handling or transferring the result, but it
+     is a checker policy rather than a claim that the value owns a linear
+     runtime resource. Its payload-derived kind and ABI remain unchanged.
+
+     All tracked policies share one walk carrying a `consume_sets` value. Its
      maybe-consumed component is unioned at merges (governing double-use
      for both kinds), while its must-be-consumed component is intersected
      (governing linear discharge on every path). *)
@@ -4934,7 +4946,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeTuple ts -> List.exists is_linear_type ts
     | _ -> false
   in
-  let is_tracked_type ty = is_affine_type ty || is_linear_type ty in
+  let rec is_must_use_type ty = match strip_borrow ty with
+    | Ast.TypeNamed name | Ast.TypeVariant name ->
+        Hashtbl.mem must_use_variants name
+    | Ast.TypeTuple ts -> List.exists is_must_use_type ts
+    | _ -> false
+  in
+  let is_tracked_type ty =
+    is_affine_type ty || is_linear_type ty || is_must_use_type ty in
   let call_params = List.fold_left (fun m -> function
     | Ast.FuncDef f ->
         StringMap.add (overload_key f.name f.params) (List.map snd f.params) m
@@ -4997,6 +5016,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     in
     let var_kind name = match StringMap.find_opt name !var_types with
       | Some ty when is_linear_type ty -> Some Ast.KindLinear
+      | Some ty when is_must_use_type ty -> Some Ast.KindLinear
       | Some ty when is_affine_type ty -> Some Ast.KindAffine
       | _ -> None
     in
@@ -5056,7 +5076,19 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           is_stack_local name && not (is_tracked_path (PVar name))
     in
     let is_linear_path p = path_kind p = Some Ast.KindLinear in
-    let kind_word p = if is_linear_path p then "linear" else "affine" in
+    let is_must_use_path = function
+      | PVar name ->
+          (match StringMap.find_opt name !var_types with
+           | Some ty -> is_must_use_type ty && not (is_linear_type ty)
+           | None -> false)
+      | PField _ -> false
+    in
+    let requires_all_paths p = is_linear_path p in
+    let kind_word p =
+      if is_must_use_path p then "must-use"
+      else if is_linear_path p then "linear"
+      else "affine"
+    in
     (* `sink`/`borrow` parameters carry no callee-side obligation: sink is
        the terminal consumer (nothing further to forward), borrow never
        owns. Everything else linear-typed in scope must be discharged on
@@ -5117,11 +5149,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        ban needs no change here. *)
     let require_no_pending_linear loc what moved declared =
       PathSet.iter (fun p ->
-        if is_linear_path p && not (PathSet.mem p exempt_params)
+        if requires_all_paths p && not (PathSet.mem p exempt_params)
            && not (ResourceFlow.is_consumed_on_all_paths p moved) then
-          raise (TypeError (loc, Printf.sprintf
-            "linear value '%s' is still pending at this %s (it must be \
-             consumed on every path)" (path_to_string p) what))
+          let msg =
+            if is_must_use_path p then Printf.sprintf
+              "must-use value '%s' is still pending at this %s (it must be \
+               handled on every path)" (path_to_string p) what
+            else Printf.sprintf
+              "linear value '%s' is still pending at this %s (it must be \
+               consumed on every path)" (path_to_string p) what
+          in
+          raise (TypeError (loc, msg))
       ) declared
     in
     (* Authority-derived region values (issues #106/#128). expr_taint
@@ -5492,22 +5530,39 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             check_args moved rest (match params with _ :: ps -> ps | [] -> [])
           in
           let moved = check_args moved args params in
-          let returns_linear = match StringMap.find_opt target call_returns with
-            | Some ty -> is_linear_type ty
+          let returns_obligation = match StringMap.find_opt target call_returns with
+            | Some ty -> is_linear_type ty || is_must_use_type ty
             | None -> false
           in
-          if returns_linear && not consume then
-            raise (TypeError (e.loc, Printf.sprintf
-              "linear result of '%s' must be moved into an owning binding or consumer"
-              name));
+          if returns_obligation && not consume then begin
+            let msg = match StringMap.find_opt target call_returns with
+              | Some ty when is_must_use_type ty && not (is_linear_type ty) ->
+                  Printf.sprintf
+                  "must-use result of '%s' must be handled, returned, or moved into a binding"
+                  name
+              | _ -> Printf.sprintf
+                  "linear result of '%s' must be moved into an owning binding or consumer"
+                  name
+            in
+            raise (TypeError (e.loc, msg))
+          end;
           moved
       | Ast.VariantCtor (vtype, _, payload) ->
           require_no_taint_aggregate e.loc taints "variant payload" [payload];
-          if Hashtbl.find_opt variant_kinds vtype = Some Ast.KindLinear
-             && not consume then
-            raise (TypeError (e.loc, Printf.sprintf
+          if (Hashtbl.find_opt variant_kinds vtype = Some Ast.KindLinear
+              || Hashtbl.mem must_use_variants vtype)
+             && not consume then begin
+            let msg = if Hashtbl.mem must_use_variants vtype
+                         && Hashtbl.find_opt variant_kinds vtype
+                            <> Some Ast.KindLinear then
+              Printf.sprintf
+                "must-use variant '%s' must be handled, returned, or moved into a binding"
+                vtype
+            else Printf.sprintf
               "linear variant '%s' must be moved into an owning binding or matched"
-              vtype));
+              vtype in
+            raise (TypeError (e.loc, msg))
+          end;
           check_expr taints moved consume payload
       | Ast.BinOp (_, a, b) ->
           check_expr taints (check_expr taints moved false a) false b
@@ -5543,15 +5598,25 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.SizeOf _ | Ast.OffsetOf _ | Ast.IntLit _ | Ast.BoolLit _
       | Ast.StringLit _ -> moved
       | Ast.EnumVariant (vtype, _) ->
-          if Hashtbl.find_opt variant_kinds vtype = Some Ast.KindLinear
-             && not consume then
-            raise (TypeError (e.loc, Printf.sprintf
+          if (Hashtbl.find_opt variant_kinds vtype = Some Ast.KindLinear
+              || Hashtbl.mem must_use_variants vtype)
+             && not consume then begin
+            let msg = if Hashtbl.mem must_use_variants vtype
+                         && Hashtbl.find_opt variant_kinds vtype
+                            <> Some Ast.KindLinear then
+              Printf.sprintf
+                "must-use variant '%s' must be handled, returned, or moved into a binding"
+                vtype
+            else Printf.sprintf
               "linear variant '%s' must be moved into an owning binding or matched"
-              vtype));
+              vtype in
+            raise (TypeError (e.loc, msg))
+          end;
           moved
     in
-    (* Scope-end checks apply only to LINEAR values. Affine permits
-       weakening by definition; maybe-consumed still rejects double use. *)
+    (* Scope-end checks apply to LINEAR and MUST_USE obligations. Affine
+       permits weakening by definition; maybe-consumed still rejects double
+       use. *)
     let decl_locs : (path, Ast.loc) Hashtbl.t = Hashtbl.create 16 in
     let set_decl_loc p l = Hashtbl.replace decl_locs p l in
     (* Purely syntactic "does this statement list always return" check
@@ -5577,6 +5642,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     and always_terminates stmts = List.exists stmt_always_terminates stmts in
     let rec check_stmts moved declared taints stmts =
       let initial_declared = declared in
+      let initial_var_types = !var_types in
       let (moved, declared, taints) =
         List.fold_left (fun (moved, declared, taints) s ->
             check_stmt moved declared taints s)
@@ -5589,14 +5655,28 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         | Some Ast.KindLinear when
             not (ResourceFlow.is_consumed_on_all_paths p moved) ->
             if ResourceFlow.may_be_consumed p moved then
-              raise (TypeError (loc (), Printf.sprintf
-                "linear value '%s' is consumed on some paths but not on \
-                 every path" (path_to_string p)))
+              let msg = if is_must_use_path p then Printf.sprintf
+                "must-use value '%s' is handled on some paths but not on every path"
+                (path_to_string p)
+              else Printf.sprintf
+                "linear value '%s' is consumed on some paths but not on every path"
+                (path_to_string p) in
+              raise (TypeError (loc (), msg))
             else
-              raise (TypeError (loc (), Printf.sprintf
-                "linear value '%s' is never consumed" (path_to_string p)))
+              let msg = if is_must_use_path p then Printf.sprintf
+                "must-use value '%s' is never handled" (path_to_string p)
+              else Printf.sprintf
+                "linear value '%s' is never consumed" (path_to_string p) in
+              raise (TypeError (loc (), msg))
         | _ -> ()
       ) newly_declared;
+      (* local_types is name-keyed for inference, but source bindings are
+         lexically scoped and disjoint match/if arms may legitimately reuse
+         one spelling with different types. Let annotations below refine the
+         active binding while its statement list is checked; restore the
+         outer map on scope exit so an arm-local status cannot make a later
+         same-named integer look like a must-use obligation. *)
+      var_types := initial_var_types;
       (moved, declared, taints)
     and check_stmt moved declared taints (s : Ast.stmt) =
       match s.desc with
@@ -5640,7 +5720,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              be weakened by overwrite; a live linear obligation may not. The
              RHS runs first, so `p = transform(p);` discharges the old linear
              value before this check and remains legal. *)
-          if is_linear_path p
+          if requires_all_paths p
              && PathSet.mem p declared
              && not (ResourceFlow.is_consumed_on_all_paths p moved) then
             raise (TypeError (s.loc, Printf.sprintf
@@ -5681,12 +5761,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           require_no_taint_escape s.loc taints `Store v;
           (check_expr taints (check_expr taints moved false i) false v,
            declared, taints)
-      | Ast.Let (_, name, _, init, _) ->
+      | Ast.Let (_, name, ty_opt, init, _) ->
+          Option.iter (fun ty ->
+            var_types := StringMap.add name (resolve_declared_type ty) !var_types)
+            ty_opt;
           let p = PVar name in
           require_no_authority_rebind s.loc declared taints name;
           set_decl_loc p s.loc;
           (match init with
-           | None when is_linear_path p ->
+           | None when requires_all_paths p ->
                raise (TypeError (s.loc, Printf.sprintf
                  "%s value '%s' must be initialized at its declaration"
                  (kind_word p) name))
@@ -5832,7 +5915,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             let (out, _, out_taints) =
               check_stmts arm_moved arm_declared arm_taints body in
             Option.iter (fun p ->
-              if is_linear_path p
+              if requires_all_paths p
                  && not (ResourceFlow.is_consumed_on_all_paths p out) then
                 if ResourceFlow.may_be_consumed p out then
                   raise (TypeError (s.loc, Printf.sprintf
@@ -5896,22 +5979,28 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       (List.fold_left (fun d (name, _) -> PathSet.add (PVar name) d)
          PathSet.empty fdef.params) initial_region_taints fdef.body
     in
-    (* A plain LINEAR parameter is an accepted all-path obligation. Affine
-       parameters may be dropped; borrow never owns and sink is terminal. *)
+    (* A plain LINEAR or MUST_USE parameter is an accepted all-path
+       obligation. Affine parameters may be dropped; borrow never owns and
+       sink is terminal. *)
     List.iter (fun (name, ty_opt) ->
       let owned_kind = match ty_opt with
         | Some (Ast.TypeBorrow _) | Some (Ast.TypeBorrowMut _)
         | Some (Ast.TypeSink _) -> None
-        | Some ty when is_linear_type ty -> Some Ast.KindLinear
+        | Some ty when is_linear_type ty || is_must_use_type ty ->
+            Some Ast.KindLinear
         | _ -> None
       in
       match owned_kind with
       | Some Ast.KindLinear when
           not (ResourceFlow.is_consumed_on_all_paths (PVar name) final_moved) ->
-          raise (TypeError (fdef.def_loc, Printf.sprintf
+          let msg = if is_must_use_path (PVar name) then Printf.sprintf
+            "must-use parameter '%s' is not handled on every path of this function"
+            name
+          else Printf.sprintf
             "linear parameter '%s' is not consumed on every path of this \
              function (forward it on every path, or take it as `sink` if \
-             this function is meant to be its terminal consumer)" name))
+             this function is meant to be its terminal consumer)" name in
+          raise (TypeError (fdef.def_loc, msg))
       | _ -> ()
     ) fdef.params
   in

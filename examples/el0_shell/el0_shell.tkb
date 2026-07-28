@@ -986,7 +986,7 @@ fn fat_dup3_restore_stdin() -> usize {
             return 0;
         }
         FatFdState::Open(file) => {
-            fat_close(file);
+            fat_io_result_ok(fat_close(file));
             return 0;
         }
     }
@@ -1040,7 +1040,7 @@ fn fat_fd_store(slot: usize, file: FatFile[file]) -> FatOpenFdResult {
             }
         }
     }
-    fat_close(file);
+    fat_io_result_ok(fat_close(file));
     return FatOpenFdResult::Error(ERR_ENFILE);
 }
 

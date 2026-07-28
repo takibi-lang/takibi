@@ -847,6 +847,27 @@ could hide a mandatory payload obligation.
 A function returning a variant must explicitly return one on every
 control-flow path; there is no implicit zero/default package.
 
+Prefix a declaration with `must_use` when dropping the whole outcome must be
+a compile error:
+
+```
+must_use variant FatIoResult {
+    Ok;
+    Err(i32);
+}
+```
+
+Every produced value of a `must_use variant` must be matched, returned, or
+moved into another directly tracked binding or parameter on every control-flow
+path. A discarded call result, an unmatched local at scope exit, handling on
+only one branch, overwriting a pending result, and reusing an already handled
+result are compile errors. A function parameter of this type carries the same
+all-path obligation. This policy is checker-only and does not change the
+variant's runtime representation or claim that the status owns a linear
+runtime resource; payload kind and ownership continue to follow the ordinary
+rules below. Matching (including a wildcard arm where otherwise permitted)
+counts as handling the outer result.
+
 The variant's kind is the strongest kind among its payloads. Matching a
 kinded variant consumes the package. The selected payload then becomes a new
 arm-local value with the same affine/linear rules as if it had been returned

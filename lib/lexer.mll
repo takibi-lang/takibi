@@ -52,6 +52,7 @@ rule read = parse
   | "linear"  { LINEAR }
   | "view"    { VIEW }
   | "variant" { VARIANT }
+  | "must_use" { MUST_USE }
   | "exists"  { EXISTS }
   | "borrow"  { BORROW }
   | "sink"    { SINK }

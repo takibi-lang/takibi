@@ -477,7 +477,7 @@ fn kvs_sd_create_record_file() -> KvsSdWriteResult {
                 kvs_pack_slot(slot);
                 if (fat_io_ok(fat_write(fp, kvs_record_buf, KVS_RECORD_SIZE as u32, &bw)) == false ||
                         bw != KVS_RECORD_SIZE as u32) {
-                    fat_close(fp);
+                    fat_io_ok(fat_close(fp));
                     return KvsSdWriteResult::Err;
                 }
             }

@@ -149,10 +149,11 @@ let mut next_free_root_entry: u32;
 // this file used to return: a `match` on this type must name both the
 // success and failure arm, so a call site can no longer confuse this
 // return value with an unrelated integer (a byte count, a directory index)
-// the way a bare `i32` could. `fat_io_ok` below is a convenience for
+// the way a bare `i32` could. `must_use` also rejects dropping the call or
+// leaving a bound result unhandled on any path. `fat_io_ok` below is a convenience for
 // callers that just want to fold several of these into one boolean
 // condition, the same role `Result::is_ok()` plays in Rust.
-variant FatIoResult {
+must_use variant FatIoResult {
     Ok;
     Err(i32);
 }
@@ -803,7 +804,13 @@ fn create_demo_file(name83: *u8, content: *u8) -> FatIoResult {
             match fat_write(fp, content, len, &bw) {
                 FatIoResult::Ok => {}
                 FatIoResult::Err(err) => {
-                    fat_close(fp);
+                    // Preserve the write error as the operation's primary
+                    // failure, but still explicitly discharge the close
+                    // result after releasing the linear file owner.
+                    match fat_close(fp) {
+                        FatIoResult::Ok => {}
+                        FatIoResult::Err(close_err) => {}
+                    }
                     return FatIoResult::Err(err);
                 }
             }

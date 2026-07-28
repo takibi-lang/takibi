@@ -4494,7 +4494,7 @@ let gen_program ?prog_types prog =
   Hashtbl.reset noreturn_functions;
   List.iter (function
     | ViewDef (name, _, _, _, _) -> Hashtbl.replace erased_view_names name ()
-    | VariantDef (name, cases, _) -> Hashtbl.replace variant_defs name cases
+    | VariantDef (name, cases, _, _) -> Hashtbl.replace variant_defs name cases
     | ExternFuncDef (name, _, _, Some effects)
       when List.mem "noreturn" effects ->
         Hashtbl.replace noreturn_functions name ()
@@ -4568,7 +4568,7 @@ let gen_program ?prog_types prog =
      union before Takibi has a settled ABI.  Erased view payloads and
      existential binders add no field; the existential body still does. *)
   List.iter (function
-    | VariantDef (name, cases, _) ->
+    | VariantDef (name, cases, _, _) ->
         let next_field = ref 1 in
         let runtime_fields = ref [] in
         let layouts = List.mapi (fun tag (cname, payload) ->

@@ -84,7 +84,7 @@ let check_const_type pos = function
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN INLINE RETURN CONST LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT EXISTS BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
+%token FN INLINE RETURN CONST LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
 %token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
 %token ASSIGN DOT
@@ -192,7 +192,10 @@ item:
       EnumDef ($2, None, vs, ne) }
   | VARIANT name = IDENT LBRACE cases = variant_cases RBRACE
     { Type_layout.register_variant name cases;
-      VariantDef (name, cases, $symbolstartpos) }
+      VariantDef (name, cases, false, $symbolstartpos) }
+  | MUST_USE VARIANT name = IDENT LBRACE cases = variant_cases RBRACE
+    { Type_layout.register_variant name cases;
+      VariantDef (name, cases, true, $symbolstartpos) }
   | USE STRING SEMI
     { UseDef $2 }
 
