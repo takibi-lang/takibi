@@ -2179,23 +2179,38 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            Printf.sprintf "%s expects no arguments: %s()" fname fname)))
 
   | Call (("dma_prepare_tx" | "dma_prepare_rx" | "dma_finish_rx") as fname, args) ->
+      let required_alignment =
+        match Target_info.dma_cache_contract () with
+        | Target_info.Cache_line n -> Some n
+        | Target_info.Coherent -> None
+        | Target_info.Unsupported ->
+            raise (TypeError (e.loc,
+              Printf.sprintf
+                "%s is unavailable because the selected target has no DMA cache-maintenance contract"
+                fname))
+      in
       (match args with
        | [ptr; len] ->
            let pt = infer_expr senv eenv tyenv fenv ptr in
            let lt = infer_expr senv eenv tyenv fenv len in
            (match fname, repr pt with
-            (* GitHub issue #102 Stage 2: dma_prepare_rx/dma_finish_rx are
+            (* GitHub issue #102 Stage 2 and #171 Stage 1:
+               dma_prepare_rx/dma_finish_rx are
                cache-line INVALIDATE operations -- an unaligned range can
                silently discard live neighboring data (the real HardFault
                examples/common_stm32/sdmmc.tkb's own comment documents),
-               so require a PROVEN *align(32) T pointer directly, closing
+               so require a pointer proven aligned to the selected target's
+               DMA cache line, closing
                the gap that file's disk_read_bounce bounce buffer used to
                work around. dma_prepare_tx is a CLEAN (writeback), which
                cannot lose data even when its rounding spills into an
                unrelated live cache line (same file's comment) -- stays
                accepting any raw pointer, unaffected. *)
-            | ("dma_prepare_rx" | "dma_finish_rx"), (TPtr elem | TAlignedPtr (_, elem)) ->
-                unify_at ptr.loc pt (TAlignedPtr (32, elem))
+            | ("dma_prepare_rx" | "dma_finish_rx"),
+              (TPtr elem | TAlignedPtr (_, elem)) ->
+                Option.iter (fun n ->
+                  unify_at ptr.loc pt (TAlignedPtr (n, elem)))
+                  required_alignment
             | ("dma_prepare_rx" | "dma_finish_rx"), _ ->
                 raise (TypeError (ptr.loc, Printf.sprintf
                   "%s expects a raw pointer as its first argument" fname))

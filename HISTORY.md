@@ -15,6 +15,24 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-28: Target-Aware DMA Cache-Line Alignment (GitHub Issue #171 Stage 1)
+
+The RX-side DMA builtins no longer hardcode a 32-byte pointer contract.
+Target setup now selects 32 bytes for ARM/Thumb STM32F7 builds and 64 bytes
+for AArch64 QEMU/RPi5 builds; `dma_prepare_rx` and `dma_finish_rx` reject a
+weaker pointer proof during type checking. Unsupported targets are rejected
+there as well, before code generation. Coherent x86 DMA retains no alignment
+requirement, and `dma_prepare_tx` continues to accept a plain pointer because
+cleaning rounded endpoint lines does not discard adjacent data.
+
+The reserved compiler constant `DMA_CACHE_LINE` exposes the selected value to
+source declarations and `*align(...)` pointer types without adding a CLI
+option. Alignment grammar now accepts compile-time integer constants generally,
+so shared source can declare one DMA buffer contract instead of spelling 32 or
+64. Existing QEMU/STM32 `fatfs` storage and the shared SD-card installer use
+the property. Length divisibility and the CPU-owned/DMA-owned transition remain
+the explicitly deferred Stages 2 and 3 of issue #171.
+
 ### 2026-07-27: RPi5 RP1 Ethernet Hardware Suite
 
 `make hwcheck-rpi5-net-l2` and `make hwcheck-rpi5-net` now cover the same

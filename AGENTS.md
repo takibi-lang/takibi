@@ -327,8 +327,9 @@ this same class of flake to come back.
 ```
 lib/
   ast.ml          -- AST definitions (includes TypePtr, TypeArray, TypeFn, Deref, AddrOf, AssignDeref, Cast)
+  target_info.ml  -- target-derived source/type contracts, including DMA cache-line alignment
   const_env.ml    -- parser-time table of explicit primitive-integer `const` declarations,
-                     used to resolve named array sizes/refined bounds like [T; QUEUE_SIZE]
+                     compiler target constants, and named array sizes/refined bounds
   lexer.mll       -- ocamllex (includes hex literals, & token, as keyword, ^ token, -> token, void keyword)
   parser.mly      -- Menhir (includes pointer types, array types, function pointer types, prefix * / & / unary -, as cast)
   types.ml        -- internal type (ty) + HM-style inference output types + StringMap

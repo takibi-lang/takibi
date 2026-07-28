@@ -13,7 +13,11 @@
 let table : (string, int) Hashtbl.t = Hashtbl.create 8
 
 let reset () =
-  Hashtbl.reset table
+  Hashtbl.reset table;
+  Option.iter (fun n -> Hashtbl.replace table "DMA_CACHE_LINE" n)
+    (Target_info.dma_cache_line ())
+
+let is_builtin name = name = "DMA_CACHE_LINE"
 
 let define name n = Hashtbl.replace table name n
 

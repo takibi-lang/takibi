@@ -48,10 +48,9 @@ extern fn semihosting_close(handle: i32) -> i32;
 extern fn semihosting_read(handle: i32, buf: *u8, len: i32) -> i32;
 
 // -- Block device: in-memory backing store ----------------------------------
-// align(32): dma_prepare_tx/dma_finish_rx (GitHub issue #102 Stage 2) now
-// require a PROVEN *align(32) pointer for the cache-maintenance-sensitive
-// calls below, same as every other DMA-touched buffer in this codebase.
-let mut disk: [u8; SECTOR_SIZE * TOTAL_SECTORS] align(32);
+// DMA_CACHE_LINE is 32 on STM32F7 and 64 on AArch64, matching
+// dma_finish_rx's target-selected pointer contract below.
+let mut disk: [u8; SECTOR_SIZE * TOTAL_SECTORS] align(DMA_CACHE_LINE);
 
 // sector's real invariant (a valid sector number on this small, fixed-size
 // disk) is bookkeeping fat12.tkb's own callers establish, not something
@@ -133,10 +132,9 @@ fn app_main() {
     // it below. dma_finish_rx (an existing builtin, already used by
     // examples/common_stm32/eth.tkb for the analogous "external DMA writer,
     // CPU reader" case) invalidates the D-cache over `disk`'s whole range
-    // on ARM/Thumb targets; on QEMU/AArch64 it lowers to a harmless barrier
-    // (no cache op implemented there, none needed -- semihosting_read is an
-    // ordinary CPU-issued write, already cache-coherent with this same
-    // core's later reads).
+    // on ARM/Thumb and AArch64 targets. QEMU does not model a separate cache,
+    // so its emitted AArch64 maintenance loop is harmless; the same lowering
+    // is load-bearing on real AArch64 hardware.
     dma_finish_rx(disk, SECTOR_SIZE * TOTAL_SECTORS);
 
     // Phase 1: read a file out of a FAT image built independently by real

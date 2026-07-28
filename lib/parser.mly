@@ -143,16 +143,21 @@ item:
   | func_def { FuncDef $1 }
   | CONST name = IDENT COLON ty = type_expr ASSIGN n = INT SEMI
     { let loc = $symbolstartpos in
+      if Const_env.is_builtin name then
+        raise (Types.TypeError (loc,
+          Printf.sprintf
+            "'%s' is a compiler-supplied target constant and cannot be redefined"
+            name));
       check_const_type loc ty;
       let e = { desc = IntLit n; loc } in
       Const_env.define_if_literal name (Some e);
       ConstDef (name, ty, e, loc) }
   | p = private_flag LET m = mut_flag IDENT let_rhs SEMI
     { LetDef ($4, fst $5, snd $5, None, m, p, $symbolstartpos) }
-  | p = private_flag LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN INT RPAREN SEMI
-    { LetDef ($4, Some $6, None, Some (narrow_int64 $symbolstartpos "alignment" $9), m, p, $symbolstartpos) }
-  | p = private_flag LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN INT RPAREN ASSIGN expr SEMI
-    { LetDef ($4, Some $6, Some $12, Some (narrow_int64 $symbolstartpos "alignment" $9), m, p, $symbolstartpos) }
+  | p = private_flag LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN alignment_value RPAREN SEMI
+    { LetDef ($4, Some $6, None, Some $9, m, p, $symbolstartpos) }
+  | p = private_flag LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN alignment_value RPAREN ASSIGN expr SEMI
+    { LetDef ($4, Some $6, Some $12, Some $9, m, p, $symbolstartpos) }
   | EXTERN FN IDENT LPAREN params RPAREN ret_type_opt effects_opt SEMI
     { ExternFuncDef ($3, $5, $7, $8) }
   | struct_intro LBRACE struct_fields RBRACE
@@ -206,14 +211,12 @@ struct_intro:
   | STRUCT PACKED IDENT
     { Type_layout.begin_struct $3;
       ($3, true, None) }
-  | STRUCT IDENT ALIGN LPAREN INT RPAREN
-    { let align = narrow_int64 $symbolstartpos "alignment" $5 in
-      Type_layout.begin_struct $2;
-      ($2, false, Some align) }
-  | STRUCT PACKED IDENT ALIGN LPAREN INT RPAREN
-    { let align = narrow_int64 $symbolstartpos "alignment" $6 in
-      Type_layout.begin_struct $3;
-      ($3, true, Some align) }
+  | STRUCT IDENT ALIGN LPAREN alignment_value RPAREN
+    { Type_layout.begin_struct $2;
+      ($2, false, Some $5) }
+  | STRUCT PACKED IDENT ALIGN LPAREN alignment_value RPAREN
+    { Type_layout.begin_struct $3;
+      ($3, true, Some $6) }
 
 owned_struct_intro:
   | p = private_flag k = owned_kind STRUCT name = IDENT ps = static_params
@@ -314,17 +317,15 @@ stmt:
     { { desc = LetTuple (id1 :: id2 :: ids, e); loc = $symbolstartpos } }
   | LET MUT id = IDENT rhs = let_rhs SEMI
     { { desc = Let (true, id, fst rhs, snd rhs, None); loc = $symbolstartpos } }
-  | LET MUT IDENT COLON type_expr ALIGN LPAREN INT RPAREN SEMI
+  | LET MUT IDENT COLON type_expr ALIGN LPAREN alignment_value RPAREN SEMI
     (* `align(N)` on a local requires `mut`: an immutable local is an SSA
        value with no alloca/memory location for LLVM's set_alignment to
        apply to (unlike a global, which is always memory-backed regardless
        of mutability) -- see SPEC.md's "Local-variable alignment" note. *)
-    { { desc = Let (true, $3, Some $5, None,
-                     Some (narrow_int64 $symbolstartpos "alignment" $8));
+    { { desc = Let (true, $3, Some $5, None, Some $8);
         loc = $symbolstartpos } }
-  | LET MUT IDENT COLON type_expr ALIGN LPAREN INT RPAREN ASSIGN expr SEMI
-    { { desc = Let (true, $3, Some $5, Some $11,
-                     Some (narrow_int64 $symbolstartpos "alignment" $8));
+  | LET MUT IDENT COLON type_expr ALIGN LPAREN alignment_value RPAREN ASSIGN expr SEMI
+    { { desc = Let (true, $3, Some $5, Some $11, Some $8);
         loc = $symbolstartpos } }
   | LBRACE s = stmts RBRACE { { desc = Block s; loc = $symbolstartpos } }
   | IF LPAREN c = expr RPAREN LBRACE t = stmts RBRACE p = else_part
@@ -549,9 +550,8 @@ base_type_expr:
   | USIZE_TYPE { TypeUsize }
   | IO         type_expr { lift_singleton (fun t -> TypeIo t) $2 }
   | TIMES      type_expr { lift_singleton (fun t -> TypePtr t) $2 }
-  | TIMES ALIGN LPAREN n = INT RPAREN t = type_expr
-    { let n = narrow_int64 $symbolstartpos "alignment" n in
-      lift_singleton (fun t -> TypeAlignedPtr (n, t)) t }
+  | TIMES ALIGN LPAREN n = alignment_value RPAREN t = type_expr
+    { lift_singleton (fun t -> TypeAlignedPtr (n, t)) t }
   | LBRACKET t = type_expr SEMI n = array_size RBRACKET { TypeArray (t, n) }
   | LBRACKET RBRACKET t = type_expr { TypeSlice (t, 0) }
     (* []T -- slice with no compile-time minimum length *)
@@ -619,6 +619,17 @@ array_size:
         raise (Types.TypeError ($symbolstartpos,
           "array size expression: division by zero"))
       else a / b }
+
+alignment_value:
+  | n = INT { narrow_int64 $symbolstartpos "alignment" n }
+  | name = IDENT
+    { match Const_env.find name with
+      | Some n -> n
+      | None ->
+          raise (Types.TypeError ($symbolstartpos,
+            Printf.sprintf
+              "alignment '%s' is not a known compile-time integer constant"
+              name)) }
 
 (* type_expr: base_type_expr + TypeRefined. Used in unambiguous positions such as after : or -> *)
 type_expr:

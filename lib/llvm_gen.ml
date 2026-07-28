@@ -978,6 +978,7 @@ let emit_interrupt_event notify =
 let setup_target ?(triple = "") ?(cpu = "") ?(features = "") () =
   let _ = Llvm_all_backends.initialize () in
   let triple = if triple = "" then Llvm_target.Target.default_triple () else triple in
+  Target_info.configure triple;
   set_target_triple triple the_module;
   let target  = Llvm_target.Target.by_triple triple in
   let machine = Llvm_target.TargetMachine.create ~triple ~cpu ~features target in

@@ -164,7 +164,11 @@ parameter value, or top-level declaration name.
   immutable local is an SSA value with no memory location for LLVM's
   alignment attribute to attach to, unlike a global (always memory-backed
   regardless of mutability). An explicit `align(N)` on a variable of a
-  struct type with its own `align(M)` (see "Structs" below) overrides that
+  type may use either an integer literal or an earlier compile-time integer
+  `const`. The compiler-supplied `DMA_CACHE_LINE` constant is also available:
+  32 on the STM32F7 profile and 64 on AArch64. It is reserved and cannot be
+  redefined by source code. An explicit `align(N)` on a variable of a struct
+  type with its own `align(M)` (see "Structs" below) overrides that
   struct's alignment for this one variable. Typical use: a stack-resident
   DMA buffer that must never share a cache line with unrelated data (a
   cache-line invalidate on an unaligned buffer can silently discard
@@ -1746,7 +1750,14 @@ needed): `dma_publish()`, `dma_consume()`, `device_fence()` (ARM/AArch64
 lower to `DSB SY`; AMD64 to `MFENCE`; RISC-V uses direction-preserving
 fences). Cache-aware: `dma_prepare_tx(ptr, len)`, `dma_prepare_rx(ptr,
 len)`, `dma_finish_rx(ptr, len)` (Cortex-M7 rounds to 32-byte cache
-lines and issues SCB DCCMVAC/DCIMVAC plus barriers). `signal_fence()` is
+lines and issues SCB DCCMVAC/DCIMVAC plus barriers). On cache-maintained
+targets, `dma_prepare_rx` and `dma_finish_rx` require a pointer proven as
+`*align(DMA_CACHE_LINE) T`; AArch64 therefore rejects a merely
+`*align(32) T` RX buffer while STM32F7 accepts it. `dma_prepare_tx` remains
+valid for a plain `*T`, because cleaning rounded endpoint lines does not
+discard adjacent dirty data. Targets without either a cache-maintenance
+contract or coherent DMA reject these builtins during type checking.
+`signal_fence()` is
 a compiler-only ISR/normal-context memory boundary (side-effecting empty
 inline asm with a memory clobber, no hardware barrier instruction).
 `interrupt_wait()` / `interrupt_notify()` are a race-free event-wait pair

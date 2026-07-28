@@ -7974,7 +7974,7 @@ let codegen_tests = [
           require one. See the dedicated test group below for the
           negative/positive alignment cases in isolation. *)
        expect_ok
-         "fn cache_ops(p: *align(32) u8, n: usize) {
+         "fn cache_ops(p: *align(DMA_CACHE_LINE) u8, n: usize) {
             dma_prepare_tx(p, n);
             dma_prepare_rx(p, n);
             dma_finish_rx(p, n);
@@ -7982,7 +7982,24 @@ let codegen_tests = [
        expect_type_error "raw pointer"
          "fn bad_cache_ptr(n: usize) { dma_prepare_tx(n, n); }" ();
        expect_type_error "cannot unify"
-         "fn bad_cache_len(p: *align(32) u8, n: i32) { dma_finish_rx(p, n); }" ());
+         "fn bad_cache_len(p: *align(DMA_CACHE_LINE) u8, n: i32) { dma_finish_rx(p, n); }" ());
+
+  Alcotest.test_case
+    "DMA RX alignment follows the target and exposes DMA_CACHE_LINE" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "*align(64)"
+         "fn f(p: *align(32) u8) { dma_prepare_rx(p, 64); }" ();
+       expect_ok
+         "let mut buf: [u8; 64] align(DMA_CACHE_LINE);
+          fn f(p: *align(DMA_CACHE_LINE) u8) {
+            dma_prepare_rx(p, 64);
+            dma_finish_rx(p, 64);
+          }
+          fn g() { f(buf); }" ();
+       expect_type_error "cannot be redefined"
+         "const DMA_CACHE_LINE: usize = 32; fn f() {}" ();
+       Target_info.configure "thumbv7em-none-eabi");
 
   Alcotest.test_case "dma_finish_rx rejects an unproven pointer, dma_prepare_tx accepts it" `Quick
     (fun () ->
@@ -8927,7 +8944,7 @@ let codegen_tests = [
          Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
        in
        let _ = gen_codegen
-         "fn codegen_dma_cache_aarch64(p: *align(32) u8, n: usize) {
+         "fn codegen_dma_cache_aarch64(p: *align(64) u8, n: usize) {
             dma_prepare_tx(p, n);
             dma_prepare_rx(p, n);
             dma_finish_rx(p, n);
@@ -8983,8 +9000,8 @@ let codegen_tests = [
        let (_ : Llvm_target.TargetMachine.t) =
          Llvm_gen.setup_target ~triple:"riscv64-none-elf" ()
        in
-       expect_codegen_error
-         "need real cache maintenance on target 'riscv64-none-elf'"
+       expect_type_error
+         "no DMA cache-maintenance contract"
          "fn f(p: *align(32) u8, n: usize) { dma_prepare_tx(p, n); }" ());
 
   Alcotest.test_case
