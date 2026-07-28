@@ -5,7 +5,6 @@
 
 use "examples/common/netutil.tkb";
 use "examples/common_rpi5/netconfig.tkb";
-use "examples/common_rpi5/dma_asm_extern.tkb";
 
 const GEM_BASE: usize = 0x1F00100000;
 const DMA_OFFSET: usize = 0x1000000000;
@@ -123,10 +122,9 @@ fn gem_configure_link() {
 }
 
 fn gem_rearm_rx() {
-    let desc_base: usize = (gem_rx_desc as *u32) as usize;
     dma_prepare_rx(gem_rx_buf as *align(64) u8, RX_BUF_SIZE);
     gem_rx_desc[0] = gem_rx_desc[0] & 0xFFFFFFFE;
-    rpi5_dcache_clean_range(desc_base, 64);
+    dma_prepare_tx(gem_rx_desc as *u8, 64);
 }
 
 fn net_init() -> NetInitResult {
@@ -179,8 +177,8 @@ fn net_init() -> NetInitResult {
     gem_tx_desc[6] = 0;
     gem_tx_desc[7] = 0;
     dma_prepare_rx(gem_rx_buf as *align(64) u8, RX_BUF_SIZE);
-    rpi5_dcache_clean_range(rxd_base, 64);
-    rpi5_dcache_clean_range(txd_base, 64);
+    dma_prepare_tx(gem_rx_desc as *u8, 64);
+    dma_prepare_tx(gem_tx_desc as *u8, 64);
 
     gem_write(0x18, rxd_dma as u32);
     gem_write(0x04D4, (rxd_dma >> 32) as u32);
@@ -199,16 +197,14 @@ fn net_init() -> NetInitResult {
 }
 
 fn net_rx_wait() !{may_block} {
-    let desc_base: usize = (gem_rx_desc as *u32) as usize;
     for i: i32 in 0..<10000 {
-        rpi5_dcache_invalidate_range(desc_base, 64);
+        dma_finish_rx(gem_rx_desc as *align(64) u8, 64);
         if ((gem_rx_desc[0] & 1) != 0) { return; }
     }
 }
 
 fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
-    let desc_base: usize = (gem_rx_desc as *u32) as usize;
-    rpi5_dcache_invalidate_range(desc_base, 64);
+    dma_finish_rx(gem_rx_desc as *align(64) u8, 64);
     if ((gem_rx_desc[0] & 1) == 0) {
         return NetRxAcquire::None(view NetRxCanAcquire);
     }
@@ -236,7 +232,7 @@ fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32) -> NetTxInFlight[desc
     let tx_dma: usize = tx_base + DMA_OFFSET;
     let txd_base: usize = (gem_tx_desc as *u32) as usize;
     bytes_copy(tx_base as *u8, rx_base as *u8, safe_len as isize);
-    rpi5_dcache_clean_range(tx_base, safe_len as usize);
+    dma_prepare_tx(gem_tx_buf as *u8, safe_len as usize);
     let mut slot: {0..<2 as usize} = 0;
     if (gem_tx_next == 0) {
         gem_tx_desc[2] = (tx_dma >> 32) as u32;
@@ -252,7 +248,7 @@ fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32) -> NetTxInFlight[desc
         gem_tx_next = 0;
         slot = 1;
     }
-    rpi5_dcache_clean_range(txd_base, 64);
+    dma_prepare_tx(gem_tx_desc as *u8, 64);
     // The peer can send its next packet immediately after seeing this reply.
     // Return the independent RX buffer to GEM before starting TX so that an
     // immediate TCP ACK is not lost while this descriptor completes.
@@ -263,9 +259,8 @@ fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32) -> NetTxInFlight[desc
 }
 
 fn net_tx_complete(in_flight: sink NetTxInFlight[desc]) -> NetRxCanAcquire !{may_block} {
-    let txd_base: usize = (gem_tx_desc as *u32) as usize;
     for i: i32 in 0..<1000000 {
-        rpi5_dcache_invalidate_range(txd_base, 64);
+        dma_finish_rx(gem_tx_desc as *align(64) u8, 64);
         if (in_flight.slot == 0 && (gem_tx_desc[1] & (1 << 31)) != 0) { break; }
         if (in_flight.slot == 1 && (gem_tx_desc[5] & (1 << 31)) != 0) { break; }
     }

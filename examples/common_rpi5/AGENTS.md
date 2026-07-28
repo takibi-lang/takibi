@@ -681,16 +681,14 @@ history) of committing solid partial progress with the exact blocker
 characterized, rather than leaving debugging work undocumented mid-flight.
 
 **New shared infrastructure landed (both reusable well beyond USB)**:
-- `examples/common_rpi5/dma_asm.S` (`rpi5_dcache_clean_range`/
-  `rpi5_dcache_invalidate_range`): every RP1 peripheral touched before
-  this one was pure CPU-initiated MMIO (no caching involved). XHCI's own
-  Command Ring/Event Ring/DCBAA are ordinary cacheable RAM, read/written
-  by usbhost0/usbhost1 as a REAL DMA-capable PCIe bus master -- these
-  two helpers (`dc cvac`/`dc civac` loops + `dsb sy`, cache line
-  hardcoded to 64 bytes matching Cortex-A76/examples/common_rpi3/
-  tlb_asm.S's own precedent) make CPU writes visible to DMA and DMA
-  writes visible to the CPU. Needed by ANY future RP1 DMA peripheral,
-  not just USB.
+- Takibi's `dma_prepare_tx`, `dma_prepare_rx`, and `dma_finish_rx`
+  primitives: every RP1 peripheral touched before this one was pure
+  CPU-initiated MMIO (no caching involved). XHCI's Command Ring/Event
+  Ring/DCBAA are ordinary cacheable RAM, read/written by usbhost0/usbhost1
+  as a REAL DMA-capable PCIe bus master. These primitives centralize the
+  target-specific cache maintenance and DMA ordering, rather than exposing
+  RPi5-only cache-assembly functions to drivers. Needed by ANY future RP1
+  DMA peripheral, not just USB.
 - `examples/common_rpi5/pcie.tkb`'s new `pcie2_dma_inbound_setup()`:
   the "add a general DMA window" future-work note
   `pcie2_mip0_inbound_setup`'s own comment had flagged. Uses RC_BAR2 (a

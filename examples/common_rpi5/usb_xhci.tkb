@@ -36,8 +36,6 @@
 // the Address Device port-reset requirement, U-Boot's endpoint-index/DCI
 // formulas) -- not re-derived here.
 
-use "examples/common_rpi5/dma_asm_extern.tkb";
-
 // RP1_USBHOST0_BASE is the CAPABILITY register base. Operational
 // registers (USBCMD/USBSTS/CRCR/DCBAAP/CONFIG/PORTSC) start at
 // Capability base + CAPLENGTH -- 0x20 on this hardware (confirmed by
@@ -172,7 +170,7 @@ fn xhci_cmd_advance() {
         let cmd_ring_base: usize = (xhci_cmd_ring as *u8) as usize;
         xhci_ring_close_segment(cmd_ring_base, link_idx, xhci_cmd_enq,
                                 xhci_cmd_cycle, 23);
-        rpi5_dcache_clean_range(cmd_ring_base, CMD_RING_TRBS * 16);
+        dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
         xhci_cmd_enq = 0;
         xhci_cmd_cycle = 1 - xhci_cmd_cycle;
     }
@@ -187,12 +185,9 @@ let mut msc_csw_buf: [u8; 64] align(64);
 let mut msc_scratch_buf: [u8; 512] align(64);
 // Every 512-byte disk_read/disk_write DMAs through this instead of the
 // caller's own buffer. Not an optimization -- a correctness requirement.
-// This CPU's cache line is 64 bytes and rpi5_dcache_invalidate_range
-// issues `dc civac` (clean AND invalidate). If a DMA buffer's first or
-// last cache line is only partially covered by the buffer, that line can
-// legitimately be dirty because of whatever else shares it, and the
-// "clean" half of `civac` then writes those stale cached bytes back
-// OVER the data DMA just delivered.
+// This CPU's cache line is 64 bytes. DMA receive buffers are whole,
+// cache-line-aligned allocations so dma_prepare_rx/dma_finish_rx can safely
+// invalidate them before device ownership and before CPU consumption.
 //
 // Found on real hardware, and it presented as silent data corruption
 // rather than an error: examples/common/fat12.tkb's buffers are
@@ -239,7 +234,7 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 {
         let mut seen: bool = false;
         let mut dw3: u32 = 0;
         for i: usize in 0..<timeout_ms {
-            rpi5_dcache_invalidate_range(evt_ring_base + off, 16);
+            dma_finish_rx(xhci_evt_ring as *align(64) u8, EVT_RING_TRBS * 16);
             let dw3_ptr: *u32 = (evt_ring_base + off + 12) as *u32;
             let d3: u32 = *dw3_ptr;
             if ((d3 & 1) == xhci_evt_cycle) {
@@ -346,7 +341,7 @@ fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
     *t_dw3_ptr = cyc | (1 << 5) | (4 << 10) | (st_dir << 16);
 
     xhci_ep0_enq = (off + 16) / 16;
-    rpi5_dcache_clean_range(ep0_ring_base, EP0_RING_TRBS * 16);
+    dma_prepare_tx(xhci_ep0_ring as *u8, EP0_RING_TRBS * 16);
 
     let db_ptr: *io u32 = (RP1_USBHOST0_DOORBELL + xhci_slot_id * 4) as *io u32;
     *db_ptr = 1;
@@ -399,7 +394,11 @@ fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 {
     if (dir_in) { isp_bit = 1 << 2; }
     let dw3_ptr: *u32 = (ring_base + off + 12) as *u32;
     *dw3_ptr = cyc | isp_bit | (1 << 5) | (1 << 10);
-    rpi5_dcache_clean_range(ring_base, BULK_RING_TRBS * 16);
+    if (dir_in) {
+        dma_prepare_tx(xhci_bulk_in_ring as *u8, BULK_RING_TRBS * 16);
+    } else {
+        dma_prepare_tx(xhci_bulk_out_ring as *u8, BULK_RING_TRBS * 16);
+    }
 
     enq = enq + 1;
     if (dir_in) {
@@ -455,7 +454,7 @@ fn xhci_run_command(dw0: u32, dw1: u32, dw2: u32, trb_type: u32,
     let d3_ptr: *u32 = (cmd_ring_base + cmd_off + 12) as *u32;
     *d3_ptr = xhci_cmd_cycle | (trb_type << 10) | (dci_u32 << 16)
             | (slot_u32 << 24);
-    rpi5_dcache_clean_range(cmd_ring_base, CMD_RING_TRBS * 16);
+    dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
     xhci_cmd_advance();
 
     let doorbell0_ptr: *io u32 = RP1_USBHOST0_DOORBELL as *io u32;
@@ -577,14 +576,15 @@ fn msc_cbw_header(data_len: u32, dir_in: bool, cb_len: u32) {
 // fixed internal buffer), CSW in. The CBW must already be built by
 // msc_cbw_header() plus the caller's CDB bytes. Returns 0 on success, or
 // a small nonzero code identifying which stage failed.
-fn msc_run_command(data_len: u32, dir_in: bool, data_base: usize) -> u32 {
+fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
+    let data_base: usize = data as usize;
     let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
     let cbw_dma: usize = cbw_base + RP1_DMA_PCI_OFFSET;
     let csw_base: usize = (msc_csw_buf as *u8) as usize;
     let csw_dma: usize = csw_base + RP1_DMA_PCI_OFFSET;
     let data_dma: usize = data_base + RP1_DMA_PCI_OFFSET;
 
-    rpi5_dcache_clean_range(cbw_base, 64);
+    dma_prepare_tx(msc_cbw_buf as *u8, 64);
     let cbw_cc: u32 = usb_bulk_xfer(false, cbw_dma, 31);
     if (cbw_cc != 1) {
         return 1;
@@ -592,9 +592,9 @@ fn msc_run_command(data_len: u32, dir_in: bool, data_base: usize) -> u32 {
 
     if (data_len > 0) {
         if (dir_in) {
-            rpi5_dcache_invalidate_range(data_base, 512);
+            dma_prepare_rx(data, 512);
         } else {
-            rpi5_dcache_clean_range(data_base, 512);
+            dma_prepare_tx(data as *u8, 512);
         }
         // Short Packet (13) is a normal, successful outcome for a
         // device that had less data than we offered to read. Any other
@@ -609,11 +609,11 @@ fn msc_run_command(data_len: u32, dir_in: bool, data_base: usize) -> u32 {
             return 2;
         }
         if (dir_in) {
-            rpi5_dcache_invalidate_range(data_base, 512);
+            dma_finish_rx(data, 512);
         }
     }
 
-    rpi5_dcache_invalidate_range(csw_base, 64);
+    dma_prepare_rx(msc_csw_buf as *align(64) u8, 64);
     let mut csw_cc: u32 = usb_bulk_xfer(true, csw_dma, 13);
     // Special-cased STALL handling on the CSW stage specifically, kept
     // to a bounded retry LOOP -- not a single retry, and deliberately
@@ -635,13 +635,13 @@ fn msc_run_command(data_len: u32, dir_in: bool, data_base: usize) -> u32 {
         }
         xhci_recover_bulk_stall(true, xhci_msc_bulk_in_ep, xhci_bulk_in_dci);
         delay_us(50000);
-        rpi5_dcache_invalidate_range(csw_base, 64);
+        dma_prepare_rx(msc_csw_buf as *align(64) u8, 64);
         csw_cc = usb_bulk_xfer(true, csw_dma, 13);
     }
     if (csw_cc != 1 && csw_cc != 13) {
         return 3;
     }
-    rpi5_dcache_invalidate_range(csw_base, 64);
+    dma_finish_rx(msc_csw_buf as *align(64) u8, 64);
 
     let mut csw_sig: u32 = 0;
     let mut csw_tag: u32 = 0;
@@ -747,7 +747,7 @@ fn xhci_setup_rings_and_start() -> bool {
         let p: *u32 = (evt_zero_base + i * 16 + 12) as *u32;
         *p = 0;
     }
-    rpi5_dcache_clean_range(evt_zero_base, EVT_RING_TRBS * 16);
+    dma_prepare_tx(xhci_evt_ring as *u8, EVT_RING_TRBS * 16);
     let cmd_zero_base: usize = (xhci_cmd_ring as *u8) as usize;
     for i: usize in 0..<CMD_RING_TRBS {
         let p: *u32 = (cmd_zero_base + i * 16 + 12) as *u32;
@@ -758,7 +758,7 @@ fn xhci_setup_rings_and_start() -> bool {
         let p: *u32 = (ep0_zero_base + i * 16 + 12) as *u32;
         *p = 0;
     }
-    rpi5_dcache_clean_range(ep0_zero_base, EP0_RING_TRBS * 16);
+    dma_prepare_tx(xhci_ep0_ring as *u8, EP0_RING_TRBS * 16);
     let bin_zero_base: usize = (xhci_bulk_in_ring as *u8) as usize;
     let bout_zero_base: usize = (xhci_bulk_out_ring as *u8) as usize;
     for i: usize in 0..<BULK_RING_TRBS {
@@ -767,8 +767,8 @@ fn xhci_setup_rings_and_start() -> bool {
         let po: *u32 = (bout_zero_base + i * 16 + 12) as *u32;
         *po = 0;
     }
-    rpi5_dcache_clean_range(bin_zero_base, BULK_RING_TRBS * 16);
-    rpi5_dcache_clean_range(bout_zero_base, BULK_RING_TRBS * 16);
+    dma_prepare_tx(xhci_bulk_in_ring as *u8, BULK_RING_TRBS * 16);
+    dma_prepare_tx(xhci_bulk_out_ring as *u8, BULK_RING_TRBS * 16);
 
     let scratchpad_array_base: usize = (xhci_scratchpad_array as *u8) as usize;
     let scratchpad_buf0_base: usize = (xhci_scratchpad_buf0 as *u8) as usize;
@@ -784,7 +784,7 @@ fn xhci_setup_rings_and_start() -> bool {
     *sp1_ptr = (scratchpad_buf1_dma & 0xFFFFFFFF) as u32;
     let sp1_hi_ptr: *u32 = (scratchpad_array_base + 12) as *u32;
     *sp1_hi_ptr = ((scratchpad_buf1_dma >> 32) & 0xFFFFFFFF) as u32;
-    rpi5_dcache_clean_range(scratchpad_array_base, 16);
+    dma_prepare_tx(xhci_scratchpad_array as *u8, 16);
 
     let dcbaa_base: usize = (xhci_dcbaa as *u8) as usize;
     let dcbaa_dma: usize = dcbaa_base + RP1_DMA_PCI_OFFSET;
@@ -792,7 +792,7 @@ fn xhci_setup_rings_and_start() -> bool {
     *dcbaa0_ptr = (scratchpad_array_dma & 0xFFFFFFFF) as u32;
     let dcbaa0_hi_ptr: *u32 = (dcbaa_base + 4) as *u32;
     *dcbaa0_hi_ptr = ((scratchpad_array_dma >> 32) & 0xFFFFFFFF) as u32;
-    rpi5_dcache_clean_range(dcbaa_base, 8);
+    dma_prepare_tx(xhci_dcbaa as *u8, 65 * 8);
 
     let cmd_ring_base: usize = (xhci_cmd_ring as *u8) as usize;
     let cmd_ring_dma: usize = cmd_ring_base + RP1_DMA_PCI_OFFSET;
@@ -806,7 +806,7 @@ fn xhci_setup_rings_and_start() -> bool {
     *clink_dw1_ptr = ((cmd_ring_dma >> 32) & 0xFFFFFFFF) as u32;
     let clink_dw3_ptr: *u32 = (cmd_ring_base + cmd_link_off + 12) as *u32;
     *clink_dw3_ptr = 0x00001803;
-    rpi5_dcache_clean_range(cmd_ring_base, CMD_RING_TRBS * 16);
+    dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
 
     let evt_ring_base: usize = (xhci_evt_ring as *u8) as usize;
     let erst_base: usize = (xhci_erst as *u8) as usize;
@@ -818,7 +818,7 @@ fn xhci_setup_rings_and_start() -> bool {
     *erst_dw1_ptr = ((evt_ring_dma >> 32) & 0xFFFFFFFF) as u32;
     let erst_dw2_ptr: *u32 = (erst_base + 8) as *u32;
     *erst_dw2_ptr = 16;
-    rpi5_dcache_clean_range(erst_base, 16);
+    dma_prepare_tx(xhci_erst as *u8, 16);
 
     // Programming order (ERSTSZ, then ERSTBA, then ERDP last) matches
     // Linux's own xhci_add_interrupter() exactly -- a different order
@@ -891,7 +891,7 @@ fn xhci_address_device() -> bool {
     *dcbaa_slot_ptr = (device_ctx_dma & 0xFFFFFFFF) as u32;
     let dcbaa_slot_hi_ptr: *u32 = (dcbaa_base + xhci_slot_id * 8 + 4) as *u32;
     *dcbaa_slot_hi_ptr = ((device_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
-    rpi5_dcache_clean_range(dcbaa_base + xhci_slot_id * 8, 8);
+    dma_prepare_tx(xhci_dcbaa as *u8, 65 * 8);
 
     let ep0_ring_base: usize = (xhci_ep0_ring as *u8) as usize;
     let ep0_ring_dma: usize = ep0_ring_base + RP1_DMA_PCI_OFFSET;
@@ -902,7 +902,7 @@ fn xhci_address_device() -> bool {
     *ep0_link_dw1_ptr = ((ep0_ring_dma >> 32) & 0xFFFFFFFF) as u32;
     let ep0_link_dw3_ptr: *u32 = (ep0_ring_base + ep0_link_off + 12) as *u32;
     *ep0_link_dw3_ptr = 0x00001803;
-    rpi5_dcache_clean_range(ep0_ring_base, EP0_RING_TRBS * 16);
+    dma_prepare_tx(xhci_ep0_ring as *u8, EP0_RING_TRBS * 16);
     xhci_ep0_enq = 0;
     xhci_ep0_cycle = 1;
 
@@ -953,7 +953,7 @@ fn xhci_address_device() -> bool {
     *ep0_deq_hi_ptr = ((ep0_ring_dma >> 32) & 0xFFFFFFFF) as u32;
     let ep0_tx_info_ptr: *u32 = (ep0_ctx_base + 16) as *u32;
     *ep0_tx_info_ptr = 8;
-    rpi5_dcache_clean_range(input_ctx_base, INPUT_CTX_SIZE);
+    dma_prepare_tx(xhci_input_ctx as *u8, INPUT_CTX_SIZE);
 
     // USB Port Reset. 0xCE00FFE9 is Linux's own
     // xhci_port_state_to_neutral() mask (drivers/usb/host/xhci.h) --
@@ -997,7 +997,7 @@ fn xhci_address_device() -> bool {
     *trb1_dw1_ptr = ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
     let trb1_dw3_ptr: *u32 = (cmd_ring_base + 28) as *u32;
     *trb1_dw3_ptr = (1 | (11 << 10) | (xhci_slot_id << 24)) as u32;
-    rpi5_dcache_clean_range(cmd_ring_base + 16, 16);
+    dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
 
     let doorbell0_ptr: *io u32 = RP1_USBHOST0_DOORBELL as *io u32;
     *doorbell0_ptr = 0;
@@ -1021,7 +1021,7 @@ fn xhci_configure() -> bool {
     if (cfg9_cc != 1) {
         return false;
     }
-    rpi5_dcache_invalidate_range(ctrl_buf_base, 256);
+    dma_finish_rx(xhci_ctrl_buf as *align(64) u8, 256);
     let tot_lo_ptr: *u8 = (ctrl_buf_base + 2) as *u8;
     let tot_hi_ptr: *u8 = (ctrl_buf_base + 3) as *u8;
     let mut total_len: usize = (*tot_lo_ptr as usize) | ((*tot_hi_ptr as usize) << 8);
@@ -1037,7 +1037,7 @@ fn xhci_configure() -> bool {
     if (cfg_cc != 1) {
         return false;
     }
-    rpi5_dcache_invalidate_range(ctrl_buf_base, 256);
+    dma_finish_rx(xhci_ctrl_buf as *align(64) u8, 256);
 
     let mut pos: usize = 0;
     let mut in_msc_iface: bool = false;
@@ -1129,7 +1129,7 @@ fn xhci_configure_endpoint(in_num: usize, out_num: usize) -> bool {
     let device_ctx_base: usize = (xhci_device_ctx as *u8) as usize;
     let input_ctx_base: usize = (xhci_input_ctx as *u8) as usize;
     let input_ctx_dma: usize = input_ctx_base + RP1_DMA_PCI_OFFSET;
-    rpi5_dcache_invalidate_range(device_ctx_base, DEVICE_CTX_SIZE);
+    dma_finish_rx(xhci_device_ctx as *align(64) u8, DEVICE_CTX_SIZE);
 
     // Seed the Input Context from the controller's OUTPUT Device
     // Context (U-Boot's xhci_slot_copy/xhci_endpoint_copy) -- the Slot
@@ -1161,7 +1161,7 @@ fn xhci_configure_endpoint(in_num: usize, out_num: usize) -> bool {
     *bin_link1_ptr = ((bulk_in_ring_dma >> 32) & 0xFFFFFFFF) as u32;
     let bin_link3_ptr: *u32 = (bulk_in_ring_base + bulk_link_off + 12) as *u32;
     *bin_link3_ptr = 0x00001803;
-    rpi5_dcache_clean_range(bulk_in_ring_base, BULK_RING_TRBS * 16);
+    dma_prepare_tx(xhci_bulk_in_ring as *u8, BULK_RING_TRBS * 16);
 
     let bout_link0_ptr: *u32 = (bulk_out_ring_base + bulk_link_off) as *u32;
     *bout_link0_ptr = (bulk_out_ring_dma & 0xFFFFFFFF) as u32;
@@ -1169,7 +1169,7 @@ fn xhci_configure_endpoint(in_num: usize, out_num: usize) -> bool {
     *bout_link1_ptr = ((bulk_out_ring_dma >> 32) & 0xFFFFFFFF) as u32;
     let bout_link3_ptr: *u32 = (bulk_out_ring_base + bulk_link_off + 12) as *u32;
     *bout_link3_ptr = 0x00001803;
-    rpi5_dcache_clean_range(bulk_out_ring_base, BULK_RING_TRBS * 16);
+    dma_prepare_tx(xhci_bulk_out_ring as *u8, BULK_RING_TRBS * 16);
 
     let in_ctx_off: usize = (in_idx + 2) * CTX_STRIDE;
     let in_ep_dw1_ptr: *u32 = (input_ctx_base + in_ctx_off + 4) as *u32;
@@ -1200,7 +1200,7 @@ fn xhci_configure_endpoint(in_num: usize, out_num: usize) -> bool {
     let in_add_bit: u32 = (1 << (in_idx + 1)) as u32;
     let out_add_bit: u32 = (1 << (out_idx + 1)) as u32;
     *icc_add_ptr = 1 | in_add_bit | out_add_bit;
-    rpi5_dcache_clean_range(input_ctx_base, INPUT_CTX_SIZE);
+    dma_prepare_tx(xhci_input_ctx as *u8, INPUT_CTX_SIZE);
 
     let cmd_ring_base: usize = (xhci_cmd_ring as *u8) as usize;
     let ce_dw0_ptr: *u32 = (cmd_ring_base + 32) as *u32;
@@ -1209,7 +1209,7 @@ fn xhci_configure_endpoint(in_num: usize, out_num: usize) -> bool {
     *ce_dw1_ptr = ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
     let ce_dw3_ptr: *u32 = (cmd_ring_base + 44) as *u32;
     *ce_dw3_ptr = (1 | (12 << 10) | (xhci_slot_id << 24)) as u32;
-    rpi5_dcache_clean_range(cmd_ring_base, CMD_RING_TRBS * 16);
+    dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
 
     let doorbell0_ptr: *io u32 = RP1_USBHOST0_DOORBELL as *io u32;
     *doorbell0_ptr = 0;
@@ -1254,7 +1254,7 @@ fn disk_initialize() -> DiskIoResult {
 
     // Get Max LUN -- a single-LUN device is allowed to STALL this rather
     // than answer, so its own outcome is not checked.
-    rpi5_dcache_clean_range(scratch_base, 512);
+    dma_prepare_tx(msc_scratch_buf as *u8, 512);
     usb_ctrl_xfer(0xA1, 0xFE, 0, xhci_msc_interface_num, 1, scratch_dma, true);
 
     // Do NOT send a gratuitous Bulk-Only Mass Storage Reset here. The
@@ -1276,7 +1276,7 @@ fn disk_initialize() -> DiskIoResult {
         let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
         let op_ptr: *u8 = (cbw_base + 15) as *u8;
         *op_ptr = 0x00;
-        if (msc_run_command(0, false, scratch_base) == 0) {
+        if (msc_run_command(0, false, msc_scratch_buf as *align(64) u8) == 0) {
             ready = true;
             break;
         }
@@ -1292,7 +1292,7 @@ fn disk_initialize() -> DiskIoResult {
     let cbw_base2: usize = (msc_cbw_buf as *u8) as usize;
     let cap_op_ptr: *u8 = (cbw_base2 + 15) as *u8;
     *cap_op_ptr = 0x25;
-    if (msc_run_command(8, true, scratch_base) != 0) {
+    if (msc_run_command(8, true, msc_scratch_buf as *align(64) u8) != 0) {
         return DiskIoResult::Err(-1);
     }
     let mut block_size: u32 = 0;
@@ -1348,12 +1348,12 @@ fn disk_read(sector: u32, buf: *u8) -> DiskIoResult {
     let bounce: usize = (msc_bounce_buf as *u8) as usize;
     msc_cbw_header(512, true, 10);
     msc_scsi_lba_cdb(0x28, sector);
-    let mut rc: u32 = msc_run_command(512, true, bounce);
+    let mut rc: u32 = msc_run_command(512, true, msc_bounce_buf as *align(64) u8);
     if (rc != 0) {
         msc_recover_transport();
         msc_cbw_header(512, true, 10);
         msc_scsi_lba_cdb(0x28, sector);
-        rc = msc_run_command(512, true, bounce);
+        rc = msc_run_command(512, true, msc_bounce_buf as *align(64) u8);
     }
     if (rc != 0) {
         return DiskIoResult::Err(-1);
@@ -1376,7 +1376,7 @@ fn disk_write(sector: u32, buf: *u8) -> DiskIoResult {
     }
     msc_cbw_header(512, false, 10);
     msc_scsi_lba_cdb(0x2A, sector);
-    let rc1: u32 = msc_run_command(512, false, bounce);
+    let rc1: u32 = msc_run_command(512, false, msc_bounce_buf as *align(64) u8);
     if (rc1 == 0) {
         return DiskIoResult::Ok;
     }
@@ -1388,7 +1388,7 @@ fn disk_write(sector: u32, buf: *u8) -> DiskIoResult {
     // implied.
     msc_cbw_header(512, false, 10);
     msc_scsi_lba_cdb(0x2A, sector);
-    let rc2: u32 = msc_run_command(512, false, bounce);
+    let rc2: u32 = msc_run_command(512, false, msc_bounce_buf as *align(64) u8);
     if (rc2 != 0) {
         return DiskIoResult::Err(-1);
     }

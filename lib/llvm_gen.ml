@@ -1095,12 +1095,20 @@ let emit_cortex_m_cache_range op ptr len =
    dcache_clean_range/dcache_invalidate_range: line size read at runtime
    from CTR_EL0.DminLine (not hardcoded -- see that file's own comment for
    why a fixed constant would be wrong), start rounded down to a line
-   boundary, end walked up to (not rounded). `${:uid}` makes the loop label
-   unique per call site so this stays correct even if the same call is
-   inlined more than once into one function (see issue #146). *)
+   boundary, end walked up to (not rounded). The assembler's numeric local
+   label is scoped to this one inline-asm blob, so repeated DMA operations in
+   one generated function cannot collide. *)
 let emit_aarch64_cache_range op ptr len =
   let ity = usize_lltype () in
   let addr = build_ptrtoint ptr ity "dma.addr" builder in
+  let len =
+    let src = type_of len in
+    if src = ity then len
+    else if integer_bitwidth src < integer_bitwidth ity then
+      build_zext len ity "dma.len" builder
+    else
+      build_trunc len ity "dma.len" builder
+  in
   let dc_insn, tail = match op with
     | CacheClean      -> "dc cvac, x13", "dsb ish"
     | CacheInvalidate -> "dc ivac, x13", "dsb ish\n\tisb"
@@ -1113,11 +1121,11 @@ let emit_aarch64_cache_range op ptr len =
     \tadd x11, $0, $1\n\
     \tsub x12, x10, #1\n\
     \tbic x13, $0, x12\n\
-    .Ldmacache${:uid}:\n\
+    1:\n\
     \t%s\n\
     \tadd x13, x13, x10\n\
     \tcmp x13, x11\n\
-    \tb.lo .Ldmacache${:uid}\n\
+    \tb.lo 1b\n\
     \t%s"
     dc_insn tail
   in

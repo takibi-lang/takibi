@@ -89,7 +89,6 @@
 // normally has only a handful of extended capabilities, so 8 is
 // generous headroom, not a tight guess.
 
-use "examples/common_rpi5/dma_asm_extern.tkb";
 let mut usb_smoke_checkpoint: u32 = 0;
 let mut usb_smoke_host0_cap0: u32 = 0xAAAAAAAA;
 let mut usb_smoke_host0_hcsparams1: u32 = 0xAAAAAAAA;
@@ -239,7 +238,7 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 {
         let mut seen: bool = false;
         let mut dw3: u32 = 0;
         for i: usize in 0..<timeout_ms {
-            rpi5_dcache_invalidate_range(evt_ring_base + off, 16);
+            dma_finish_rx(usb_smoke_evt_ring as *align(64) u8, EVT_RING_TRBS * 16);
             let dw3_ptr: *u32 = (evt_ring_base + off + 12) as *u32;
             let d3: u32 = *dw3_ptr;
             if ((d3 & 1) == usb_xhci_evt_cycle) {
@@ -358,7 +357,7 @@ fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
     *t_dw3_ptr = cyc | (1 << 5) | (4 << 10) | (st_dir << 16);
 
     usb_xhci_ep0_enq = (off + 16) / 16;
-    rpi5_dcache_clean_range(ep0_ring_base, EP0_RING_TRBS * 16);
+    dma_prepare_tx(usb_smoke_ep0_ring as *u8, EP0_RING_TRBS * 16);
 
     // Doorbell array is indexed by slot ID, 4 bytes per entry (slot 0
     // being the Command doorbell). DB Target = DCI 1 for EP0.
@@ -423,7 +422,11 @@ fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 {
     *dw2_ptr = length;
     let dw3_ptr: *u32 = (ring_base + off + 12) as *u32;
     *dw3_ptr = cyc | (1 << 2) | (1 << 5) | (1 << 10);
-    rpi5_dcache_clean_range(ring_base, BULK_RING_TRBS * 16);
+    if (dir_in) {
+        dma_prepare_tx(usb_smoke_bulk_in_ring as *u8, BULK_RING_TRBS * 16);
+    } else {
+        dma_prepare_tx(usb_smoke_bulk_out_ring as *u8, BULK_RING_TRBS * 16);
+    }
 
     enq = enq + 1;
     if (dir_in) {
@@ -485,7 +488,7 @@ fn msc_run_command(data_len: u32, dir_in: bool) -> u32 {
     let data_base: usize = (msc_data_buf as *u8) as usize;
     let data_dma: usize = data_base + RP1_DMA_PCI_OFFSET;
 
-    rpi5_dcache_clean_range(cbw_base, 64);
+    dma_prepare_tx(msc_cbw_buf as *u8, 64);
     let cbw_cc: u32 = usb_bulk_xfer(false, cbw_dma, 31);
     if (cbw_cc != 1) {
         return 1;
@@ -493,9 +496,9 @@ fn msc_run_command(data_len: u32, dir_in: bool) -> u32 {
 
     if (data_len > 0) {
         if (dir_in) {
-            rpi5_dcache_invalidate_range(data_base, 512);
+            dma_prepare_rx(msc_data_buf as *align(64) u8, 512);
         } else {
-            rpi5_dcache_clean_range(data_base, 512);
+            dma_prepare_tx(msc_data_buf as *u8, 512);
         }
         // Short Packet (13) is a normal, successful outcome for a
         // device that had less data than we offered to read.
@@ -504,16 +507,16 @@ fn msc_run_command(data_len: u32, dir_in: bool) -> u32 {
             return 2;
         }
         if (dir_in) {
-            rpi5_dcache_invalidate_range(data_base, 512);
+            dma_finish_rx(msc_data_buf as *align(64) u8, 512);
         }
     }
 
-    rpi5_dcache_invalidate_range(csw_base, 64);
+    dma_prepare_rx(msc_csw_buf as *align(64) u8, 64);
     let csw_cc: u32 = usb_bulk_xfer(true, csw_dma, 13);
     if (csw_cc != 1 && csw_cc != 13) {
         return 3;
     }
-    rpi5_dcache_invalidate_range(csw_base, 64);
+    dma_finish_rx(msc_csw_buf as *align(64) u8, 64);
 
     // Validate dCSWSignature ("USBS") and dCSWTag before trusting
     // dCSWStatus -- an out-of-phase transport can otherwise hand back a
@@ -952,7 +955,7 @@ fn app_main() {
         *sp1_ptr = (scratchpad_buf1_dma & 0xFFFFFFFF) as u32;
         let sp1_hi_ptr: *u32 = (scratchpad_array_base + 12) as *u32;
         *sp1_hi_ptr = ((scratchpad_buf1_dma >> 32) & 0xFFFFFFFF) as u32;
-        rpi5_dcache_clean_range(scratchpad_array_base, 16);
+        dma_prepare_tx(usb_smoke_scratchpad_array as *u8, 16);
 
         // DCBAA[0] = Scratchpad Buffer Array pointer. Isolation test
         // (2026-07-26) confirmed this is NOT the cause of the
@@ -969,7 +972,7 @@ fn app_main() {
         *dcbaa0_ptr = (scratchpad_array_dma & 0xFFFFFFFF) as u32;
         let dcbaa0_hi_ptr: *u32 = (dcbaa_base + 4) as *u32;
         *dcbaa0_hi_ptr = ((scratchpad_array_dma >> 32) & 0xFFFFFFFF) as u32;
-        rpi5_dcache_clean_range(dcbaa_base, 8);
+        dma_prepare_tx(usb_smoke_dcbaa as *u8, 65 * 8);
 
         // Command Ring: TRB[0] = Enable Slot Command (Parameter=0,
         // Status=0, Cycle=1 | TRB Type=9<<10 = 0x2401). TRB[3] = Link TRB
@@ -1007,7 +1010,7 @@ fn app_main() {
         let link_dw3_ptr: *u32 = (cmd_ring_base + cmd_link_off + 12) as *u32;
         *link_dw3_ptr = 0x00001803;
         usb_smoke_checkpoint = 53;
-        rpi5_dcache_clean_range(cmd_ring_base, CMD_RING_TRBS * 16);
+        dma_prepare_tx(usb_smoke_cmd_ring as *u8, CMD_RING_TRBS * 16);
 
         // Event Ring Segment Table: one entry, base = event ring, size =
         // 16 TRBs.
@@ -1023,7 +1026,7 @@ fn app_main() {
         let erst_dw2_ptr: *u32 = (erst_base + 8) as *u32;
         *erst_dw2_ptr = 16; // Ring Segment Size (bits[15:0]) = 16 TRBs
         usb_smoke_checkpoint = 55;
-        rpi5_dcache_clean_range(erst_base, 16);
+        dma_prepare_tx(usb_smoke_erst as *u8, 16);
 
         // Runtime registers: Interrupter 0 is at Capability base + RTSOFF
         // + 0x20 (RTSOFF itself, read in Step 4 as 0x460, points to
@@ -1180,7 +1183,7 @@ fn app_main() {
                 *dcbaa_slot_ptr = (device_ctx_dma & 0xFFFFFFFF) as u32;
                 let dcbaa_slot_hi_ptr: *u32 = (dcbaa_base + slot_id * 8 + 4) as *u32;
                 *dcbaa_slot_hi_ptr = ((device_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
-                rpi5_dcache_clean_range(dcbaa_base + slot_id * 8, 8);
+                dma_prepare_tx(usb_smoke_dcbaa as *u8, 65 * 8);
 
                 // Endpoint 0 Transfer Ring: EP0_RING_TRBS entries, the
                 // last of which is the Link TRB pointing back to the
@@ -1201,7 +1204,7 @@ fn app_main() {
                 *ep0_link_dw2_ptr = 0;
                 let ep0_link_dw3_ptr: *u32 = (ep0_ring_base + ep0_link_off + 12) as *u32;
                 *ep0_link_dw3_ptr = 0x00001803; // Cycle=1 | TC=1<<1 | Link(6)<<10
-                rpi5_dcache_clean_range(ep0_ring_base, EP0_RING_TRBS * 16);
+                dma_prepare_tx(usb_smoke_ep0_ring as *u8, EP0_RING_TRBS * 16);
                 usb_xhci_ep0_enq = 0;
                 usb_xhci_ep0_cycle = 1;
 
@@ -1255,7 +1258,7 @@ fn app_main() {
                 *ep0_deq_hi_ptr = ((ep0_ring_dma >> 32) & 0xFFFFFFFF) as u32;
                 let ep0_tx_info_ptr: *u32 = (ep0_ctx_base + 16) as *u32;
                 *ep0_tx_info_ptr = 8; // EP_AVG_TRB_LENGTH(8)
-                rpi5_dcache_clean_range(input_ctx_base, INPUT_CTX_SIZE);
+                dma_prepare_tx(usb_smoke_input_ctx as *u8, INPUT_CTX_SIZE);
 
                 // USB Port Reset (PORTSC.PR, bit4) -- REQUIRED before
                 // Address Device: the first real-hardware attempt at
@@ -1378,7 +1381,7 @@ fn app_main() {
                 *trb1_dw2_ptr = 0;
                 let trb1_dw3_ptr: *u32 = (cmd_ring_base + 28) as *u32;
                 *trb1_dw3_ptr = (1 | (11 << 10) | (slot_id << 24)) as u32;
-                rpi5_dcache_clean_range(cmd_ring_base + 16, 16);
+                dma_prepare_tx(usb_smoke_cmd_ring as *u8, CMD_RING_TRBS * 16);
 
                 // Ring the Command doorbell again -- the controller's own
                 // internal Command Ring dequeue pointer is already past
@@ -1425,7 +1428,7 @@ fn app_main() {
                 // (Addressed; 0=Disabled/Enabled, 1=Default,
                 // 2=Addressed, 3=Configured).
                 usb_smoke_checkpoint = 81;
-                rpi5_dcache_invalidate_range(device_ctx_base, DEVICE_CTX_SIZE);
+                dma_finish_rx(usb_smoke_device_ctx as *align(64) u8, DEVICE_CTX_SIZE);
                 let dev_slot_dw3_ptr: *u32 = (device_ctx_base + 12) as *u32;
                 let dev_slot_dw3: u32 = *dev_slot_dw3_ptr;
                 uart_puts("device context slot: usb_address=");
@@ -1454,7 +1457,7 @@ fn app_main() {
                         let poison_ptr: *u8 = (ctrl_buf_base + i) as *u8;
                         *poison_ptr = 0xEE;
                     }
-                    rpi5_dcache_clean_range(ctrl_buf_base, 256);
+                    dma_prepare_tx(usb_smoke_ctrl_buf as *u8, 256);
 
                     // GET_DESCRIPTOR(Device): bmRequestType=0x80
                     // (device-to-host, standard, recipient device),
@@ -1486,7 +1489,7 @@ fn app_main() {
                     // [7]=bMaxPacketSize0, [8..9]=idVendor,
                     // [10..11]=idProduct.
                     usb_smoke_checkpoint = 88;
-                    rpi5_dcache_invalidate_range(ctrl_buf_base, 256);
+                    dma_finish_rx(usb_smoke_ctrl_buf as *align(64) u8, 256);
                     let d_len_ptr: *u8 = ctrl_buf_base as *u8;
                     let d_type_ptr: *u8 = (ctrl_buf_base + 1) as *u8;
                     let d_class_ptr: *u8 = (ctrl_buf_base + 4) as *u8;
@@ -1523,7 +1526,7 @@ fn app_main() {
                     usb_smoke_checkpoint = 89;
                     let cfg9_cc: u32 = usb_ctrl_xfer(0x80, 6, 0x0200, 0, 9,
                                                      ctrl_buf_dma, true);
-                    rpi5_dcache_invalidate_range(ctrl_buf_base, 256);
+                    dma_finish_rx(usb_smoke_ctrl_buf as *align(64) u8, 256);
                     let tot_lo_ptr: *u8 = (ctrl_buf_base + 2) as *u8;
                     let tot_hi_ptr: *u8 = (ctrl_buf_base + 3) as *u8;
                     let mut total_len: usize =
@@ -1548,12 +1551,12 @@ fn app_main() {
                             let poison_ptr: *u8 = (ctrl_buf_base + i) as *u8;
                             *poison_ptr = 0xEE;
                         }
-                        rpi5_dcache_clean_range(ctrl_buf_base, 256);
+                        dma_prepare_tx(usb_smoke_ctrl_buf as *u8, 256);
 
                         let cfg_cc: u32 = usb_ctrl_xfer(0x80, 6, 0x0200, 0,
                                                         total_len as u32,
                                                         ctrl_buf_dma, true);
-                        rpi5_dcache_invalidate_range(ctrl_buf_base, 256);
+                        dma_finish_rx(usb_smoke_ctrl_buf as *align(64) u8, 256);
                         uart_puts("config descriptor full: completion_code=");
                         uart_print_hex(cfg_cc as i32);
                         uart_puts(" residual=");
@@ -1734,7 +1737,7 @@ fn app_main() {
                             }
 
                             usb_smoke_checkpoint = 92;
-                            rpi5_dcache_invalidate_range(device_ctx_base, DEVICE_CTX_SIZE);
+                            dma_finish_rx(usb_smoke_device_ctx as *align(64) u8, DEVICE_CTX_SIZE);
 
                             // Seed the Input Context from the
                             // controller's OUTPUT Device Context
@@ -1806,7 +1809,7 @@ fn app_main() {
                             let bin_link3_ptr: *u32 =
                                 (bulk_in_ring_base + bulk_link_off + 12) as *u32;
                             *bin_link3_ptr = 0x00001803;
-                            rpi5_dcache_clean_range(bulk_in_ring_base, BULK_RING_TRBS * 16);
+                            dma_prepare_tx(usb_smoke_bulk_in_ring as *u8, BULK_RING_TRBS * 16);
 
                             let bout_link0_ptr: *u32 =
                                 (bulk_out_ring_base + bulk_link_off) as *u32;
@@ -1817,7 +1820,7 @@ fn app_main() {
                             let bout_link3_ptr: *u32 =
                                 (bulk_out_ring_base + bulk_link_off + 12) as *u32;
                             *bout_link3_ptr = 0x00001803;
-                            rpi5_dcache_clean_range(bulk_out_ring_base, BULK_RING_TRBS * 16);
+                            dma_prepare_tx(usb_smoke_bulk_out_ring as *u8, BULK_RING_TRBS * 16);
 
                             let in_ctx_off: usize = (in_idx + 2) * CTX_STRIDE;
                             let in_ep_dw0_ptr: *u32 = (input_ctx_base + in_ctx_off) as *u32;
@@ -1859,7 +1862,7 @@ fn app_main() {
                             let in_add_bit: u32 = (1 << (in_idx + 1)) as u32;
                             let out_add_bit: u32 = (1 << (out_idx + 1)) as u32;
                             *icc_add_ptr = 1 | in_add_bit | out_add_bit;
-                            rpi5_dcache_clean_range(input_ctx_base, INPUT_CTX_SIZE);
+                            dma_prepare_tx(usb_smoke_input_ctx as *u8, INPUT_CTX_SIZE);
 
                             // Configure Endpoint command (TRB Type 12)
                             // into Command Ring TRB[2].
@@ -1872,7 +1875,7 @@ fn app_main() {
                             *ce_dw2_ptr = 0;
                             let ce_dw3_ptr: *u32 = (cmd_ring_base + 44) as *u32;
                             *ce_dw3_ptr = (1 | (12 << 10) | (slot_id << 24)) as u32;
-                            rpi5_dcache_clean_range(cmd_ring_base, CMD_RING_TRBS * 16);
+                            dma_prepare_tx(usb_smoke_cmd_ring as *u8, CMD_RING_TRBS * 16);
 
                             *doorbell0_ptr = 0;
                             let ce_cc: u32 = usb_await_event(33, 1000);
@@ -1897,7 +1900,7 @@ fn app_main() {
                                 // (Configured), read back from the
                                 // controller's own OUTPUT context.
                                 usb_smoke_checkpoint = 98;
-                                rpi5_dcache_invalidate_range(device_ctx_base, DEVICE_CTX_SIZE);
+                                dma_finish_rx(usb_smoke_device_ctx as *align(64) u8, DEVICE_CTX_SIZE);
                                 let cfg_slot_dw3_ptr: *u32 = (device_ctx_base + 12) as *u32;
                                 let cfg_slot_dw3: u32 = *cfg_slot_dw3_ptr;
                                 uart_puts("device context slot: usb_address=");
@@ -1920,11 +1923,11 @@ fn app_main() {
                                 usb_smoke_checkpoint = 99;
                                 let lun_base: usize = (msc_data_buf as *u8) as usize;
                                 let lun_dma: usize = lun_base + RP1_DMA_PCI_OFFSET;
-                                rpi5_dcache_clean_range(lun_base, 512);
+                                dma_prepare_tx(msc_data_buf as *u8, 512);
                                 let lun_cc: u32 = usb_ctrl_xfer(
                                     0xA1, 0xFE, 0, usb_msc_interface_num, 1,
                                     lun_dma, true);
-                                rpi5_dcache_invalidate_range(lun_base, 512);
+                                dma_finish_rx(msc_data_buf as *align(64) u8, 512);
                                 let lun_ptr: *u8 = lun_base as *u8;
                                 uart_puts("get max lun: completion_code=");
                                 uart_print_hex(lun_cc as i32);
@@ -2144,7 +2147,7 @@ fn app_main() {
                 // Enable Slot completion event could land there. Dump
                 // every DWORD of the first 4 event ring entries raw to
                 // check.
-                rpi5_dcache_invalidate_range(evt_ring_base, 4 * 16);
+                dma_finish_rx(usb_smoke_evt_ring as *align(64) u8, EVT_RING_TRBS * 16);
                 for slot: usize in 0..<4 {
                     let base: usize = evt_ring_base + slot * 16;
                     let d0_ptr: *u32 = base as *u32;

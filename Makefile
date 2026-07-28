@@ -2066,9 +2066,6 @@ COMMON_RPI5_HVC_ASM_EXTERN := $(COMMON_RPI5_DIR)/hvc_asm_extern.tkb
 COMMON_RPI5_TLB_ASM_S    := $(COMMON_RPI5_DIR)/tlb_asm.S
 COMMON_RPI5_TLB_ASM_O    := $(COMMON_RPI5_DIR)/tlb_asm.o
 COMMON_RPI5_TLB_ASM_EXTERN := $(COMMON_RPI5_DIR)/tlb_asm_extern.tkb
-COMMON_RPI5_DMA_ASM_S    := $(COMMON_RPI5_DIR)/dma_asm.S
-COMMON_RPI5_DMA_ASM_O    := $(COMMON_RPI5_DIR)/dma_asm.o
-COMMON_RPI5_DMA_ASM_EXTERN := $(COMMON_RPI5_DIR)/dma_asm_extern.tkb
 COMMON_RPI5_SMP_S          := $(COMMON_RPI5_DIR)/smp.S
 COMMON_RPI5_SMP_O          := $(COMMON_RPI5_DIR)/smp.o
 COMMON_RPI5_SMP_EL3_S      := $(COMMON_RPI5_DIR)/smp_el3_trampoline.S
@@ -2113,9 +2110,6 @@ $(COMMON_RPI5_HVC_ASM_O): $(COMMON_RPI5_HVC_ASM_S)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI5_TLB_ASM_O): $(COMMON_RPI5_TLB_ASM_S)
-	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
-
-$(COMMON_RPI5_DMA_ASM_O): $(COMMON_RPI5_DMA_ASM_S)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(COMMON_RPI5_SMP_O): $(COMMON_RPI5_SMP_S)
@@ -2433,12 +2427,10 @@ examples/rp1_pcie_smoke/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_
 ## rp1_usb_smoke: first real-hardware reachability check for RP1's USB
 ## xHCI host controllers (RP1 Peripherals datasheet Chapter 5) -- read-
 ## only, same "prove reachability first" step as rp1_pcie_smoke above.
-## Same MMU_O/TIMER_ASM_O link requirement, for the same reasons. Also
-## links COMMON_RPI5_DMA_ASM_O (GitHub issue #67 follow-up): once this
-## example starts handing the controller real DMA-target buffers
-## (Command Ring, Event Ring, DCBAA), their cache-coherency needs
-## rpi5_dcache_clean_range/rpi5_dcache_invalidate_range.
-examples/rp1_usb_smoke/rp1_usb_smoke_rpi5.o: examples/rp1_usb_smoke/rp1_usb_smoke.tkb $(COMMON_RPI5_DMA_ASM_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
+## Same MMU_O/TIMER_ASM_O link requirement, for the same reasons. DMA
+## cache maintenance is lowered by Takibi's dma_prepare_*/dma_finish_rx
+## primitives, so this target needs no cache-maintenance assembly object.
+examples/rp1_usb_smoke/rp1_usb_smoke_rpi5.o: examples/rp1_usb_smoke/rp1_usb_smoke.tkb $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
 
 examples/rp1_usb_smoke/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_RPI5_DMA_ASM_O) examples/rp1_usb_smoke/rp1_usb_smoke_rpi5.o $(COMMON_RPI5_LINK_LD)
