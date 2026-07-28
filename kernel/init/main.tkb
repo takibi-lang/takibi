@@ -1,0 +1,9 @@
+// Standalone kernel build sentinel. The next executable milestone enters this
+// function at EL1 and replaces the state write with evidence-bearing platform
+// initialization and typed process construction.
+private let mut boot_reached: usize;
+
+fn main() {
+    boot_reached = 1;
+    while (boot_reached == 1) { }
+}

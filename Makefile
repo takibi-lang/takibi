@@ -219,7 +219,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemubuild qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-stm32-net-l2 hwcheck-rpi3 hwcheck-rpi3-net hwcheck-rpi3-net-l2 hwcheck-rpi5 hwcheck-rpi5-net hwcheck-rpi5-net-l2 stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck allcheck-build clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos rpi3-http-server profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
+.PHONY: build test qemubuild qemutest stm32build linuxbuild linuxcheck kernelbuild kernelcheck kernelbuild-rpi5 kernelcheck-rpi5 optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-stm32-net-l2 hwcheck-rpi3 hwcheck-rpi3-net hwcheck-rpi3-net-l2 hwcheck-rpi5 hwcheck-rpi5-net hwcheck-rpi5-net-l2 stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck allcheck-build clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos rpi3-http-server profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
 
 .DEFAULT_GOAL := build
 
@@ -2056,6 +2056,40 @@ hwcheck-rpi3-net-l2: $(RPI3_KERNELS) examples/common_rpi3/jtag_stub.img
 # -- Raspberry Pi 5 (BCM2712) -------------------------------------------------
 RPI5_TARGET := aarch64-none-elf
 RPI5_CPU    := cortex-a76
+
+# -- Standalone kernel tree (GitHub issue #177) -------------------------------
+KERNEL_DIR              := kernel
+KERNEL_BUILD_DIR        := $(KERNEL_DIR)/build/rpi5
+KERNEL_RPI5_ENTRY_S     := $(KERNEL_DIR)/arch/arm64/boot/entry.S
+KERNEL_RPI5_ENTRY_O     := $(KERNEL_BUILD_DIR)/entry.o
+KERNEL_RPI5_LINK_LD     := $(KERNEL_DIR)/arch/arm64/boot/link.ld
+KERNEL_RPI5_MAIN_TKB    := $(KERNEL_DIR)/init/main.tkb
+KERNEL_RPI5_MAIN_O      := $(KERNEL_BUILD_DIR)/main.o
+KERNEL_RPI5_ELF         := $(KERNEL_BUILD_DIR)/kernel.elf
+
+$(KERNEL_BUILD_DIR):
+	mkdir -p $@
+
+$(KERNEL_RPI5_ENTRY_O): $(KERNEL_RPI5_ENTRY_S) | $(KERNEL_BUILD_DIR)
+	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
+
+$(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
+	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
+
+$(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_LINK_LD)
+	$(LLD) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_MAIN_O) -o $@
+
+kernelbuild-rpi5: $(KERNEL_RPI5_ELF)
+
+kernelbuild: kernelbuild-rpi5
+
+# A compile is not an integration pass. This deliberately fails until the
+# first observable RPi5 EL1 milestone connects its real-hardware harness.
+kernelcheck-rpi5: kernelbuild-rpi5
+	@echo "kernelcheck-rpi5: RPi5 integration harness not implemented yet" >&2
+	@false
+
+kernelcheck: kernelcheck-rpi5
 COMMON_RPI5_DIR          := examples/common_rpi5
 COMMON_RPI5_STARTUP_S    := $(COMMON_RPI5_DIR)/startup.S
 COMMON_RPI5_STARTUP_O    := $(COMMON_RPI5_DIR)/startup.o
@@ -2602,3 +2636,4 @@ allcheck-build: qemubuild stm32build \
 clean:
 	dune clean
 	find examples -type f \( -name '*.o' -o -name '*.elf' -o -name '*.bin' -o -name '*.exe' -o -name '*.img' \) -delete
+	find kernel/build -type f \( -name '*.o' -o -name '*.elf' -o -name '*.bin' -o -name '*.img' \) -delete 2>/dev/null || true

@@ -1,0 +1,39 @@
+# Takibi kernel
+
+This is the standalone Linux-compatible kernel tree from GitHub issue #177.
+It is not an example and must not depend on files below `examples/`.
+
+The first maintained platform is Raspberry Pi 5. TF-A hands control to a
+small AArch64 EL2 boot shim; the monolithic kernel then runs at EL1 and user
+processes run at EL0. Ordinary kernel services do not use EL2 HVC calls.
+
+Build targets:
+
+```text
+make kernelbuild-rpi5  build the RPi5 kernel
+make kernelcheck-rpi5  build and integration-test the RPi5 kernel
+make kernelbuild       build every maintained kernel target
+make kernelcheck       build and integration-test every maintained target
+```
+
+`kernelcheck-rpi5` intentionally fails until the first real-hardware test
+harness is connected. A build-only result must not be reported as an RPi5
+integration pass.
+
+All new Takibi sources in this tree are compiled with `--forbid-trap` from
+their first commit. Fallible internal operations return variants; conversion
+to Linux `-errno` values happens only at the syscall boundary. Process,
+address-space, page, mapping, file, and DMA lifetimes retain explicit
+affine/linear ownership.
+
+## Initial milestones
+
+1. Boot through a minimal EL2 shim and enter the kernel once at EL1.
+2. Install complete fail-stop exception vectors that retain fault evidence.
+3. Create one typed process and address space with separate RX text and
+   RW+XN data/stack pages.
+4. Run one EL0 program through correct AArch64 Linux `write` and `exit`
+   syscall boundaries, then reclaim every linear resource.
+5. Run a distribution-provided static BusyBox from an initramfs.
+6. Mount and mutate a reproducible RAM-backed ext2 image before connecting
+   the same block interface to RPi5 USB Mass Storage.
