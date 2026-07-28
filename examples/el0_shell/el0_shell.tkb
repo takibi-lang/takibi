@@ -1193,9 +1193,11 @@ fn path_to_name83(path: *u8, out: *u8) -> bool {
 // else in this file goes through the ring instead, exactly as before.
 const UART_RX_RING_SIZE: usize = 512;
 private let mut uart_rx_ring: [u8; UART_RX_RING_SIZE];
-private let mut uart_rx_ring_head: usize;
-private let mut uart_rx_ring_tail: usize;
-private let mut uart_rx_ring_count: usize;
+// Single-producer/single-consumer indices.  The IRQ producer is the only
+// writer of head; normal syscall context is the only writer of tail.  Both
+// are io because the other context can change them asynchronously.
+private let mut uart_rx_ring_head: io usize;
+private let mut uart_rx_ring_tail: io usize;
 
 // Registered via uart_set_rx_handler below (app_main). Pushes exactly
 // ONE byte per call, matching examples/echo/echo.tkb's own
@@ -1211,37 +1213,38 @@ private let mut uart_rx_ring_count: usize;
 // routing physical IRQs to EL2 (examples/common_rpi3/startup.S) --
 // i.e. genuinely asynchronous with respect to whatever EL0/EL1/EL2 code
 // this interrupts, including mid-syscall-dispatch or mid-hvc_dispatch_*.
-// Safe regardless of interruption point: this touches only
-// uart_rx_ring_head/tail/count (nothing address-space- or COW-related),
-// and a single core with non-reentrant IRQ handling means the
-// interrupted code's own view of the ring is simply whatever this left
-// it as by the time it resumes -- the same guarantee true of any
-// single-producer append a synchronous reader polls afterward.
+// The head/tail protocol is interrupt-safe because neither context performs
+// a read-modify-write on state the other context writes.  An earlier count-
+// based version let the IRQ increment count between the consumer's load and
+// store, after which the consumer overwrote that increment with a stale
+// count-1 result (GitHub issue #172).
 fn el0_shell_uart_rx_isr() !{} {
     let c: u8 = uart_isr_getc();
-    if (uart_rx_ring_count < UART_RX_RING_SIZE) {
+    let head: usize = uart_rx_ring_head;
+    let mut next: usize = head + 1;
+    if (next >= UART_RX_RING_SIZE) {
+        next = 0;
+    }
+    if (next != uart_rx_ring_tail) {
         let ring: *u8 = uart_rx_ring as *u8;
-        ring[uart_rx_ring_head as isize] = c;
-        uart_rx_ring_head = uart_rx_ring_head + 1;
-        if (uart_rx_ring_head >= UART_RX_RING_SIZE) {
-            uart_rx_ring_head = 0;
-        }
-        uart_rx_ring_count = uart_rx_ring_count + 1;
+        ring[head as isize] = c;
+        uart_rx_ring_head = next;
     }
 }
 
 fn uart_rx_ring_ready() -> bool {
-    return uart_rx_ring_count > 0;
+    return uart_rx_ring_tail != uart_rx_ring_head;
 }
 
 fn uart_rx_ring_getc() -> u8 {
     let ring: *u8 = uart_rx_ring as *u8;
-    let c: u8 = ring[uart_rx_ring_tail as isize];
-    uart_rx_ring_tail = uart_rx_ring_tail + 1;
-    if (uart_rx_ring_tail >= UART_RX_RING_SIZE) {
-        uart_rx_ring_tail = 0;
+    let tail: usize = uart_rx_ring_tail;
+    let c: u8 = ring[tail as isize];
+    let mut next: usize = tail + 1;
+    if (next >= UART_RX_RING_SIZE) {
+        next = 0;
     }
-    uart_rx_ring_count = uart_rx_ring_count - 1;
+    uart_rx_ring_tail = next;
     return c;
 }
 
