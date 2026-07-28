@@ -87,6 +87,7 @@ COMMON_RPI3_STUB   := $(COMMON_DIR)/rpi3_stub.tkb
 COMMON_FAT12_GEOMETRY := $(COMMON_DIR)/fat12_geometry.tkb
 COMMON_AARCH64_DIR := examples/common_aarch64
 COMMON_AARCH64_EL0_SHELL_ASM_EXTERN := $(COMMON_AARCH64_DIR)/el0_shell_asm_extern.tkb
+COMMON_AARCH64_ELF64_VALIDATE := $(COMMON_AARCH64_DIR)/elf64_validate.tkb
 
 # -- Linux/AMD64 user-space support files -------------------------------------
 COMMON_LINUX_DIR       := examples/common_linux
@@ -102,7 +103,7 @@ LINUX_BINS             := $(foreach e,$(LINUX_EXAMPLES),examples/$(e)/$(e).exe)
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
 # Convention: examples/<name>/<name>.tkb -> examples/<name>/kernel.elf
-EXAMPLES     := start basic_suite type_system_suite algorithm_suite echo bump timer rtc irq scheduler preempt semaphore condvar msgqueue watchdog net_echo arp_reply icmp_echo tcp_echo http_server fatfs klock_guard percpu chan_rendezvous rtos_demo kvs_server page_pool
+EXAMPLES     := start basic_suite type_system_suite algorithm_suite elf64_validate echo bump timer rtc irq scheduler preempt semaphore condvar msgqueue watchdog net_echo arp_reply icmp_echo tcp_echo http_server fatfs klock_guard percpu chan_rendezvous rtos_demo kvs_server page_pool
 ALL_KERNELS  := $(foreach e,$(EXAMPLES),examples/$(e)/kernel.elf)
 EXAMPLE_OBJS := $(foreach e,$(EXAMPLES),examples/$(e)/$(e).o)
 
@@ -470,6 +471,7 @@ $(PAGE_POOL_OBJS): examples/%.o: examples/%.tkb examples/page_pool/page_pool_cor
 examples/basic_suite/basic_suite.o: $(BASIC_SUITE_SOURCES)
 examples/type_system_suite/type_system_suite.o: $(TYPE_SYSTEM_SUITE_SOURCES)
 examples/algorithm_suite/algorithm_suite.o: $(ALGORITHM_SUITE_SOURCES) $(COMMON_INET_CKSUM) $(COMMON_NETUTIL)
+examples/elf64_validate/elf64_validate.o: examples/common_aarch64/elf64_validate.tkb
 
 # examples/irq/irq.tkb `use`s gic_regs.tkb (types only) itself now, but
 # needs gic.tkb's actual FUNCTIONS for the QEMU build (irq_uart_rx_setup/
@@ -2357,7 +2359,7 @@ examples/el0_smoke/kernel_rpi5.elf: \
 ## also linked in (exit() traps up to EL2 via hvc to run the real
 ## teardown, the same mechanism examples/hvc_smoke_rpi5 proved).
 examples/el0_elf_load/el0_elf_load_rpi5.o: examples/el0_elf_load/el0_elf_load_rpi5.tkb \
-    examples/vm_page_map/vm_page_map_core_rpi5.tkb $(COMMON_RPI5_TLB_ASM_EXTERN) $(COMMON_AARCH64_EL0_SHELL_ASM_EXTERN) $(COMMON_RPI5_EL0_TEST_IMAGE_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
+    examples/vm_page_map/vm_page_map_core_rpi5.tkb $(COMMON_RPI5_TLB_ASM_EXTERN) $(COMMON_RPI5_EL0_ASM_EXTERN) $(COMMON_RPI5_EL1_ASM_EXTERN) $(COMMON_RPI5_HVC_ASM_EXTERN) $(COMMON_RPI5_EL0_TEST_IMAGE_EXTERN) $(COMMON_AARCH64_ELF64_VALIDATE) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
 
 examples/el0_elf_load/kernel_rpi5.elf: \
@@ -2455,7 +2457,7 @@ examples/fat12_usbmsc_rpi5/fat12_usbmsc_rpi5_rpi5.o: examples/fat12_usbmsc_rpi5/
 examples/fat12_usbmsc_rpi5/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) examples/fat12_usbmsc_rpi5/fat12_usbmsc_rpi5_rpi5.o $(COMMON_RPI5_LINK_LD)
 	$(LLD) -T $(COMMON_RPI5_LINK_LD) $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_TIMER_ASM_O) examples/fat12_usbmsc_rpi5/fat12_usbmsc_rpi5_rpi5.o -o $@
 
-examples/el0_shell/el0_shell_rpi5.o: examples/el0_shell/el0_shell.tkb examples/vm_page_map/vm_page_map_core_rpi5.tkb $(COMMON_RPI5_TLB_ASM_EXTERN) $(COMMON_AARCH64_EL0_SHELL_ASM_EXTERN) $(COMMON_AARCH64_EL0_SHELL_IMAGE_EXTERN) $(COMMON_AARCH64_EL0_SHELL_CHILD_TEST_IMAGE_EXTERN) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_INTC) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
+examples/el0_shell/el0_shell_rpi5.o: examples/el0_shell/el0_shell.tkb examples/vm_page_map/vm_page_map_core_rpi5.tkb $(COMMON_RPI5_TLB_ASM_EXTERN) $(COMMON_AARCH64_EL0_SHELL_ASM_EXTERN) $(COMMON_AARCH64_EL0_SHELL_IMAGE_EXTERN) $(COMMON_AARCH64_EL0_SHELL_CHILD_TEST_IMAGE_EXTERN) $(COMMON_AARCH64_ELF64_VALIDATE) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_INTC) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) $(TAKIBI)
 	$(TAKIBI) $(COMMON_RPI5_UART) $(COMMON_RPI5_PRINT) $(COMMON_RPI5_PCIE) $(COMMON_RPI5_INTC) $(COMMON_RPI5_USB_XHCI) $(COMMON_RPI5_FAT12_USBMSC) $(COMMON_FAT12_GEOMETRY) $(COMMON_FAT12) $(COMMON_NETUTIL) examples/vm_page_map/vm_page_map_core_rpi5.tkb $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(RPI5_TAKIBI_FLAGS) -o $@
 
 examples/el0_shell/kernel_rpi5.elf: $(COMMON_RPI5_STARTUP_O) $(COMMON_RPI5_MMU_O) $(COMMON_RPI5_EL1_ASM_O) $(COMMON_RPI5_EL0_ASM_O) $(COMMON_RPI5_TLB_ASM_O) $(COMMON_RPI5_HVC_ASM_O) $(COMMON_RPI5_TIMER_ASM_O) $(COMMON_AARCH64_EL0_SHELL_IMAGE_O) $(COMMON_AARCH64_EL0_SHELL_CHILD_TEST_IMAGE_O) examples/el0_shell/el0_shell_rpi5.o $(COMMON_RPI5_LINK_LD)

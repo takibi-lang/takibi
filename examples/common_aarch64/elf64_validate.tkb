@@ -1,0 +1,144 @@
+// Bounded ELF64/AArch64 load-plan validation shared by loader examples.
+// This module performs no allocation, mapping, copying, or UART output.
+
+const ELF64_MAX_PHDRS: usize = 8;
+const ELF64_PT_LOAD: u32 = 1;
+const ELF64_ET_EXEC: u16 = 2;
+const ELF64_ET_DYN: u16 = 3;
+const ELF64_EM_AARCH64: u16 = 183;
+const ELF64_HEADER_SIZE: usize = 64;
+const ELF64_PROGRAM_HEADER_SIZE: usize = 56;
+const ELF64_USIZE_MAX: usize = 0xFFFFFFFFFFFFFFFF;
+
+struct packed Elf64Header {
+    e_ident: [u8; 16];
+    e_type: u16;
+    e_machine: u16;
+    e_version: u32;
+    e_entry: u64;
+    e_phoff: u64;
+    e_shoff: u64;
+    e_flags: u32;
+    e_ehsize: u16;
+    e_phentsize: u16;
+    e_phnum: u16;
+    e_shentsize: u16;
+    e_shnum: u16;
+    e_shstrndx: u16;
+}
+
+struct packed Elf64ProgramHeader {
+    p_type: u32;
+    p_flags: u32;
+    p_offset: u64;
+    p_vaddr: u64;
+    p_paddr: u64;
+    p_filesz: u64;
+    p_memsz: u64;
+    p_align: u64;
+}
+
+struct Elf64LoadInfo {
+    entry: usize;
+    phdr_base: usize;
+    phoff: usize;
+    phnum: usize;
+    load_bias: usize;
+    max_extent: usize;
+}
+
+variant Elf64Validation {
+    Invalid;
+    Valid(Elf64LoadInfo);
+}
+
+fn elf64_validate_load(image_addr: usize, image_len: usize,
+                       page_va: usize) -> Elf64Validation {
+    if (image_len < ELF64_HEADER_SIZE
+            || image_addr > ELF64_USIZE_MAX - image_len) {
+        return Elf64Validation::Invalid;
+    }
+
+    let hdr: *Elf64Header = image_addr as *Elf64Header;
+    let ident: *u8 = hdr.e_ident as *u8;
+    if (ident[0] != 0x7F || ident[1] != 0x45
+            || ident[2] != 0x4C || ident[3] != 0x46
+            || ident[4] != 2 || ident[5] != 1 || ident[6] != 1) {
+        return Elf64Validation::Invalid;
+    }
+    if ((hdr.e_type != ELF64_ET_EXEC && hdr.e_type != ELF64_ET_DYN)
+            || hdr.e_machine != ELF64_EM_AARCH64 || hdr.e_version != 1
+            || hdr.e_ehsize as usize != ELF64_HEADER_SIZE) {
+        return Elf64Validation::Invalid;
+    }
+
+    let entry_link: usize = hdr.e_entry as usize;
+    let phoff: usize = hdr.e_phoff as usize;
+    let phentsize: usize = hdr.e_phentsize as usize;
+    let phnum: usize = hdr.e_phnum as usize;
+    if (phentsize != ELF64_PROGRAM_HEADER_SIZE
+            || phnum > ELF64_MAX_PHDRS
+            || phoff < ELF64_HEADER_SIZE || phoff > image_len
+            || phnum > (image_len - phoff) / ELF64_PROGRAM_HEADER_SIZE
+            || image_addr > ELF64_USIZE_MAX - phoff) {
+        return Elf64Validation::Invalid;
+    }
+    let phdr_base: usize = image_addr + phoff;
+
+    let mut min_vaddr: usize = ELF64_USIZE_MAX;
+    let mut max_vaddr_end: usize = 0;
+    let mut any_load: bool = false;
+    for i: usize in 0..<phnum {
+        let ph_addr: usize = phdr_base + i * ELF64_PROGRAM_HEADER_SIZE;
+        let ph: *Elf64ProgramHeader = ph_addr as *Elf64ProgramHeader;
+        if (ph.p_type == ELF64_PT_LOAD) {
+            any_load = true;
+            let seg_vaddr: usize = ph.p_vaddr as usize;
+            let seg_memsz: usize = ph.p_memsz as usize;
+            let seg_offset: usize = ph.p_offset as usize;
+            let seg_filesz: usize = ph.p_filesz as usize;
+            let seg_align: usize = ph.p_align as usize;
+            if (seg_filesz > seg_memsz || seg_offset > image_len
+                    || seg_filesz > image_len - seg_offset
+                    || seg_vaddr > ELF64_USIZE_MAX - seg_memsz) {
+                return Elf64Validation::Invalid;
+            }
+            if (seg_align > 1) {
+                let mask: usize = seg_align - 1;
+                if ((seg_align & mask) != 0
+                        || (seg_vaddr & mask) != (seg_offset & mask)) {
+                    return Elf64Validation::Invalid;
+                }
+            }
+            if (seg_vaddr < min_vaddr) {
+                min_vaddr = seg_vaddr;
+            }
+            let seg_end: usize = seg_vaddr + seg_memsz;
+            if (seg_end > max_vaddr_end) {
+                max_vaddr_end = seg_end;
+            }
+        }
+    }
+    if (any_load == false || min_vaddr > page_va) {
+        return Elf64Validation::Invalid;
+    }
+
+    let load_bias: usize = page_va - min_vaddr;
+    if (entry_link > ELF64_USIZE_MAX - load_bias
+            || phoff > ELF64_USIZE_MAX - load_bias) {
+        return Elf64Validation::Invalid;
+    }
+    let max_extent: usize = max_vaddr_end - min_vaddr;
+    if (max_extent > ELF64_USIZE_MAX - 4095) {
+        return Elf64Validation::Invalid;
+    }
+    let mut info: Elf64LoadInfo = {
+        entry_link + load_bias,
+        phdr_base,
+        phoff,
+        phnum,
+        load_bias,
+        max_extent
+    };
+    return Elf64Validation::Valid(info);
+}

@@ -1012,6 +1012,7 @@ run_test "start"     examples/start/kernel.elf     examples/start/start.expected
 run_suite examples/basic_suite/kernel.elf examples/basic_suite/cases.txt basic_suite
 run_suite examples/type_system_suite/kernel.elf examples/type_system_suite/cases.txt type_system_suite
 run_suite examples/algorithm_suite/kernel.elf examples/algorithm_suite/cases.txt algorithm_suite
+run_test "elf64_validate" examples/elf64_validate/kernel.elf examples/elf64_validate/elf64_validate.expected
 run_test "echo"      examples/echo/kernel.elf      examples/echo/echo.expected \
                      examples/echo/echo.stdin
 run_test "bump"       examples/bump/kernel.elf       examples/bump/bump.expected
