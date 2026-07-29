@@ -717,9 +717,11 @@ fn kernel_tcp_receive_once(ready_in: sink NetRxCanAcquire,
                     TcpReceiveDisposition::Payload(payload_length) => {
                         conn_rcv_nxt = conn_rcv_nxt + (payload_length as u32);
                         tcp_received_length = payload_length;
-                        build_receive_ack(net_rx_frame(acquired), 20);
+                        // Delayed ACK: release RX immediately so another
+                        // in-order segment can reach the next read, then
+                        // piggyback the cumulative ACK on userspace output.
                         return KernelTcpReceiveResult::Received(net_rx_finish(
-                            acquired, NetRxDisposal::Reply(54)));
+                            acquired, NetRxDisposal::Release));
                     }
                 }
             }
