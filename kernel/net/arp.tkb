@@ -10,7 +10,10 @@ const ARP_SPA: usize = 14;
 const ARP_THA: usize = 18;
 const ARP_TPA: usize = 24;
 
-must_use variant KernelArpResult { LinkFailed; TimedOut; Replied; }
+must_use variant KernelArpResult {
+    TimedOut(NetRxCanAcquire);
+    Replied(NetRxCanAcquire);
+}
 
 fn arp_read_u16be(bytes: borrow [u8; 2..]) -> u16 {
     return ((bytes[0] as u16) << 8) | (bytes[1] as u16);
@@ -24,51 +27,47 @@ fn arp_write_u16be(bytes: borrow [u8; 2..], value: u16) {
 // Own the RX readiness capability until one valid request is replied to.
 // The bounded wait keeps a missing host-side integration peer from hanging
 // the remainder of the one-boot kernel test indefinitely.
-fn kernel_arp_reply_once() -> KernelArpResult !{may_block} {
-    match net_init() {
-        NetInitResult::Failed => { return KernelArpResult::LinkFailed; }
-        NetInitResult::Ready(mut ready) => {
-            let start: i64 = read_cntpct();
-            let deadline_ticks: i64 = read_cntfrq() * 15;
-            while ((read_cntpct() - start) < deadline_ticks) {
-                net_rx_wait();
-                match net_rx_acquire(ready) {
-                    NetRxAcquire::None(next) => { ready = next; }
-                    NetRxAcquire::Acquired(acquired) => {
-                        let len: i32 = net_rx_len(acquired);
-                        let mut reply: bool = false;
-                        if (len >= 42) {
-                            let frame = net_rx_frame(acquired);
-                            if (arp_read_u16be(frame[12..<14]) == 0x0806) {
-                                let arp = frame[14..<42];
-                                if (arp_read_u16be(arp[ARP_HTYPE..<ARP_PTYPE]) == 1 &&
-                                    arp_read_u16be(arp[ARP_PTYPE..<ARP_HLEN]) == 0x0800 &&
-                                    arp[ARP_HLEN] == 6 as u8 &&
-                                    arp[ARP_PLEN] == 4 as u8 &&
-                                    arp_read_u16be(arp[ARP_OPER..<ARP_SHA]) == 1 &&
-                                    slice_eq(arp[ARP_TPA..<28], OUR_IP as []u8)) {
-                                    slice_copy(frame[0..<6], frame[6..<12]);
-                                    slice_copy(frame[6..<12], OUR_MAC as []u8);
-                                    slice_copy(arp[ARP_THA..<ARP_TPA], arp[ARP_SHA..<ARP_SPA]);
-                                    slice_copy(arp[ARP_TPA..<28], arp[ARP_SPA..<ARP_THA]);
-                                    slice_copy(arp[ARP_SHA..<ARP_SPA], OUR_MAC as []u8);
-                                    slice_copy(arp[ARP_SPA..<ARP_THA], OUR_IP as []u8);
-                                    arp_write_u16be(arp[ARP_OPER..<ARP_SHA], 2);
-                                    reply = true;
-                                }
-                            }
+fn kernel_arp_reply_once(ready_in: sink NetRxCanAcquire)
+        -> KernelArpResult !{may_block} {
+    let mut ready = ready_in;
+    let start: i64 = read_cntpct();
+    let deadline_ticks: i64 = read_cntfrq() * 15;
+    while ((read_cntpct() - start) < deadline_ticks) {
+        net_rx_wait();
+        match net_rx_acquire(ready) {
+            NetRxAcquire::None(next) => { ready = next; }
+            NetRxAcquire::Acquired(acquired) => {
+                let len: i32 = net_rx_len(acquired);
+                let mut reply: bool = false;
+                if (len >= 42) {
+                    let frame = net_rx_frame(acquired);
+                    if (arp_read_u16be(frame[12..<14]) == 0x0806) {
+                        let arp = frame[14..<42];
+                        if (arp_read_u16be(arp[ARP_HTYPE..<ARP_PTYPE]) == 1 &&
+                            arp_read_u16be(arp[ARP_PTYPE..<ARP_HLEN]) == 0x0800 &&
+                            arp[ARP_HLEN] == 6 as u8 &&
+                            arp[ARP_PLEN] == 4 as u8 &&
+                            arp_read_u16be(arp[ARP_OPER..<ARP_SHA]) == 1 &&
+                            slice_eq(arp[ARP_TPA..<28], OUR_IP as []u8)) {
+                            slice_copy(frame[0..<6], frame[6..<12]);
+                            slice_copy(frame[6..<12], OUR_MAC as []u8);
+                            slice_copy(arp[ARP_THA..<ARP_TPA], arp[ARP_SHA..<ARP_SPA]);
+                            slice_copy(arp[ARP_TPA..<28], arp[ARP_SPA..<ARP_THA]);
+                            slice_copy(arp[ARP_SHA..<ARP_SPA], OUR_MAC as []u8);
+                            slice_copy(arp[ARP_SPA..<ARP_THA], OUR_IP as []u8);
+                            arp_write_u16be(arp[ARP_OPER..<ARP_SHA], 2);
+                            reply = true;
                         }
-                        if (reply) {
-                            let completed = net_rx_finish(
-                                acquired, NetRxDisposal::Reply(len));
-                            return KernelArpResult::Replied;
-                        }
-                        ready = net_rx_finish(
-                            acquired, NetRxDisposal::Release);
                     }
                 }
+                if (reply) {
+                    let completed = net_rx_finish(
+                        acquired, NetRxDisposal::Reply(len));
+                    return KernelArpResult::Replied(completed);
+                }
+                ready = net_rx_finish(acquired, NetRxDisposal::Release);
             }
-            return KernelArpResult::TimedOut;
         }
     }
+    return KernelArpResult::TimedOut(ready);
 }

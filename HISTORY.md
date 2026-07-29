@@ -15,6 +15,23 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: Standalone Kernel Answers ICMP Echo
+
+The network integration path now transfers the GEM RX readiness capability
+from link initialization through ARP and into IPv4/ICMP, rather than dropping
+and reconstructing device state between protocols. Both protocol result
+variants carry the capability on success and timeout, so every caller must
+explicitly consume the initialized receive right. The RFC 1071 checksum core
+is kernel-owned and index-free; IPv4 and variable ICMP spans remain proven
+under `--forbid-trap` through refined wire-length bounds.
+
+The raw-socket checker's kernel mode sends a request for a non-owned IP and a
+request with a deliberately corrupt ICMP checksum before the valid echo. Real
+RPi5 hardware stayed silent for both invalid inputs, then returned an exact
+reply with swapped MAC/IP addresses, preserved identifier/sequence/payload,
+and valid IPv4 and ICMP checksums. ARP, ICMP, all 11 UART views, USB ext2, and
+BusyBox passed in the same boot.
+
 ### 2026-07-29: Standalone Kernel Answers a Real ARP Request
 
 The RPi5 kernel now holds the GEM driver's affine RX readiness capability

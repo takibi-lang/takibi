@@ -32,7 +32,9 @@ BCM54213PE PHY, negotiates the link, initializes its typed RX/TX DMA rings,
 and uses the dedicated `02:00:20:00:00:02` test MAC. The host runner uses a
 privileged raw socket on `ETH_TEST_IFACE` (default `enp5s0`) to prove that a
 request for another address stays unanswered and that an ARP request for
-`192.168.20.2` receives the exact reply. Linux socket boundaries are a
+`192.168.20.2` receives the exact reply. The same owned RX path then rejects
+an ICMP request for another IP and one with a corrupt checksum before
+returning a checksum-correct echo reply. Linux socket boundaries are a
 subsequent milestone.
 
 The RPi5 runner captures UART once per kernel boot, then projects that one

@@ -178,14 +178,20 @@ def main() -> int:
     target_str = ".".join(str(b) for b in TARGET_IP)
     other_str = ".".join(str(b) for b in OTHER_IP)
 
-    ok1 = test_ping_us(sock, requester_mac)
-    print("  ping %s (ours):             %s" % (target_str, "PASS" if ok1 else "FAIL"))
-
-    ok2 = test_ping_other_stays_silent(sock, requester_mac)
-    print("  ping %s (silent):         %s" % (other_str, "PASS" if ok2 else "FAIL"))
-
-    ok3 = test_corrupted_checksum_dropped(sock, requester_mac)
-    print("  ping with bad ICMP checksum (silent): %s" % ("PASS" if ok3 else "FAIL"))
+    if os.environ.get("ICMP_TEST_NEGATIVE_FIRST") == "1":
+        ok2 = test_ping_other_stays_silent(sock, requester_mac)
+        print("  ping %s (silent):         %s" % (other_str, "PASS" if ok2 else "FAIL"))
+        ok3 = test_corrupted_checksum_dropped(sock, requester_mac)
+        print("  ping with bad ICMP checksum (silent): %s" % ("PASS" if ok3 else "FAIL"))
+        ok1 = test_ping_us(sock, requester_mac)
+        print("  ping %s (ours):             %s" % (target_str, "PASS" if ok1 else "FAIL"))
+    else:
+        ok1 = test_ping_us(sock, requester_mac)
+        print("  ping %s (ours):             %s" % (target_str, "PASS" if ok1 else "FAIL"))
+        ok2 = test_ping_other_stays_silent(sock, requester_mac)
+        print("  ping %s (silent):         %s" % (other_str, "PASS" if ok2 else "FAIL"))
+        ok3 = test_corrupted_checksum_dropped(sock, requester_mac)
+        print("  ping with bad ICMP checksum (silent): %s" % ("PASS" if ok3 else "FAIL"))
 
     return 0 if (ok1 and ok2 and ok3) else 1
 

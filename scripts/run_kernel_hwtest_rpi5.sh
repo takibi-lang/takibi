@@ -11,8 +11,10 @@ UART_LOG="$ARTIFACT_DIR/uart.log"
 RESET_LOG="$ARTIFACT_DIR/reset.log"
 LOADER_LOG="$ARTIFACT_DIR/loader.log"
 ARP_LOG="$ARTIFACT_DIR/arp.log"
+ICMP_LOG="$ARTIFACT_DIR/icmp.log"
 ETH_TEST_IFACE="${ETH_TEST_IFACE:-enp5s0}"
 ETH_TEST_SUBNET="${ETH_TEST_SUBNET:-192.168.20}"
+ETH_TEST_MAC="${ETH_TEST_MAC:-02:00:20:00:00:02}"
 
 mkdir -p "$ARTIFACT_DIR"
 if [ ! -e "$SERIAL_DEV" ]; then
@@ -69,6 +71,16 @@ if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
     exit 1
 fi
 echo "[kernel/rpi5] ARP integration passed"
+
+echo "[kernel/rpi5] checking ICMP echo reply on $ETH_TEST_IFACE"
+if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
+        ETH_TEST_MAC="$ETH_TEST_MAC" ICMP_TEST_NEGATIVE_FIRST=1 \
+        python3 "$REPO_ROOT/scripts/eth_icmp_echo_test.py" \
+        > >(tee "$ICMP_LOG") 2>&1; then
+    echo "FAIL kernel/rpi5: ICMP integration failed (see $ICMP_LOG)" >&2
+    exit 1
+fi
+echo "[kernel/rpi5] ICMP integration passed"
 
 # USB Mass Storage may briefly report Not Ready after enumeration. Keep the
 # single capture alive through its bounded readiness loop and ext2 checks.

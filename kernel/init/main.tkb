@@ -7,7 +7,7 @@ use "kernel/mm/process_image.tkb";
 use "kernel/printk/log.tkb";
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/platform/rpi5/usb_xhci.tkb";
-use "kernel/net/arp.tkb";
+use "kernel/net/icmp.tkb";
 
 private let mut ext2_read_fixture: [u8; 32];
 private let mut ext2_symlink_fixture: [u8; 64];
@@ -159,16 +159,28 @@ fn usb_ext2_create_check(mount: Ext2Mount) -> UsbExt2CreateCheckResult {
 fn main() {
     platform_init();
     kernel_boot_log("takibi kernel: EL1\n");
-    match kernel_arp_reply_once() {
-        KernelArpResult::LinkFailed => {
+    match net_init() {
+        NetInitResult::Failed => {
             kernel_boot_log("rp1 gem: link failed\n");
         }
-        KernelArpResult::TimedOut => {
-            kernel_boot_log("rp1 gem: arp timeout\n");
-        }
-        KernelArpResult::Replied => {
+        NetInitResult::Ready(link_ready) => {
             kernel_boot_log("rp1 gem: link ready mac=02:00:20:00:00:02\n");
-            kernel_boot_log("rp1 gem: arp reply ok ip=192.168.20.2\n");
+            match kernel_arp_reply_once(link_ready) {
+                KernelArpResult::TimedOut(arp_ready) => {
+                    kernel_boot_log("rp1 gem: arp timeout\n");
+                }
+                KernelArpResult::Replied(arp_ready) => {
+                    kernel_boot_log("rp1 gem: arp reply ok ip=192.168.20.2\n");
+                    match kernel_icmp_reply_once(arp_ready) {
+                        KernelIcmpResult::TimedOut(icmp_ready) => {
+                            kernel_boot_log("rp1 gem: icmp timeout\n");
+                        }
+                        KernelIcmpResult::Replied(icmp_ready) => {
+                            kernel_boot_log("rp1 gem: icmp echo reply ok ip=192.168.20.2\n");
+                        }
+                    }
+                }
+            }
         }
     }
     page_allocator_init();

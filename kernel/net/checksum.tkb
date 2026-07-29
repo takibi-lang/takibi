@@ -1,0 +1,26 @@
+// RFC 1071 one's-complement checksum shared by IPv4 and transport layers.
+fn checksum_add(data: borrow []u8, sum_in: i32) -> i32 {
+    let mut sum: i32 = sum_in;
+    let mut high_byte: bool = true;
+    for byte in data {
+        if (high_byte) {
+            sum = sum + ((byte as i32) << 8);
+        } else {
+            sum = sum + (byte as i32);
+        }
+        high_byte = high_byte == false;
+    }
+    return sum;
+}
+
+fn checksum_fold(sum_in: i32) -> i32 {
+    let mut sum: i32 = sum_in;
+    while ((sum >> 16) != 0) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return (~sum) & 0xFFFF;
+}
+
+fn inet_checksum(data: borrow []u8) -> i32 {
+    return checksum_fold(checksum_add(data, 0));
+}

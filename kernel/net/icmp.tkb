@@ -1,0 +1,97 @@
+use "kernel/net/arp.tkb";
+use "kernel/net/checksum.tkb";
+
+const IPV4_VERSION_IHL: usize = 0;
+const IPV4_TOTAL_LEN: usize = 2;
+const IPV4_TTL: usize = 8;
+const IPV4_PROTOCOL: usize = 9;
+const IPV4_CHECKSUM: usize = 10;
+const IPV4_SRC: usize = 12;
+const IPV4_DST: usize = 16;
+const ICMP_TYPE: usize = 0;
+const ICMP_CODE: usize = 1;
+const ICMP_CHECKSUM: usize = 2;
+
+must_use variant KernelIcmpResult {
+    TimedOut(NetRxCanAcquire);
+    Replied(NetRxCanAcquire);
+}
+
+fn icmp_build_echo_reply(ethernet: borrow [u8; 42..],
+                         ihl: {20..<21 as u16},
+                         icmp: borrow [u8; 8..]) {
+    slice_copy(ethernet[0..<6], ethernet[6..<12]);
+    slice_copy(ethernet[6..<12], OUR_MAC as []u8);
+
+    let ipv4 = ethernet[14..<34];
+    slice_copy(ipv4[IPV4_DST..<20], ipv4[IPV4_SRC..<IPV4_DST]);
+    slice_copy(ipv4[IPV4_SRC..<IPV4_DST], OUR_IP as []u8);
+    ipv4[IPV4_TTL] = 64 as u8;
+    arp_write_u16be(ipv4[IPV4_CHECKSUM..<IPV4_SRC], 0);
+    arp_write_u16be(ipv4[IPV4_CHECKSUM..<IPV4_SRC],
+                    inet_checksum(ipv4[0..<ihl as usize]) as u16);
+
+    icmp[ICMP_TYPE] = 0;
+    arp_write_u16be(icmp[ICMP_CHECKSUM..<4], 0);
+    arp_write_u16be(icmp[ICMP_CHECKSUM..<4],
+                    inet_checksum(icmp) as u16);
+}
+
+fn kernel_icmp_reply_once(ready_in: sink NetRxCanAcquire)
+        -> KernelIcmpResult !{may_block} {
+    let mut ready = ready_in;
+    let start: i64 = read_cntpct();
+    let deadline_ticks: i64 = read_cntfrq() * 15;
+    while ((read_cntpct() - start) < deadline_ticks) {
+        net_rx_wait();
+        match net_rx_acquire(ready) {
+            NetRxAcquire::None(next) => { ready = next; }
+            NetRxAcquire::Acquired(acquired) => {
+                let len: i32 = net_rx_len(acquired);
+                let mut reply_length: i32 = 0;
+                if (len >= 42 && len <= 1514) {
+                    let len_n: i32 = len;
+                    let frame = net_rx_frame(acquired);
+                    if (arp_read_u16be(frame[12..<14]) == 0x0800) {
+                        let ipv4 = frame[14..<34];
+                        let version: u8 = ipv4[IPV4_VERSION_IHL] >> 4;
+                        let ihl: u16 =
+                            (ipv4[IPV4_VERSION_IHL] & 0x0F) as u16 * 4;
+                        if (version == 4 && ihl == 20) {
+                            let len16: u16 = len_n as u16;
+                            let total_length: u16 =
+                                arp_read_u16be(ipv4[2..<4]);
+                            let ipv4_bytes_in_frame: u16 = len16 - 14;
+                            if (total_length <= ipv4_bytes_in_frame &&
+                                total_length >= ihl &&
+                                ipv4[IPV4_PROTOCOL] == 1 &&
+                                inet_checksum(ipv4[0..<ihl as usize]) == 0 &&
+                                slice_eq(ipv4[IPV4_DST..<20], OUR_IP as []u8)) {
+                                let icmp_length: u16 = total_length - ihl;
+                                if (icmp_length >= 8 && icmp_length <= 1480) {
+                                    let icmp_length_index: usize =
+                                        icmp_length as usize;
+                                    let icmp =
+                                        frame[34..<34 + icmp_length_index];
+                                    if (icmp[ICMP_TYPE] == 8 &&
+                                        icmp[ICMP_CODE] == 0 &&
+                                        inet_checksum(icmp) == 0) {
+                                        icmp_build_echo_reply(frame, ihl, icmp);
+                                        reply_length = 14 + total_length as i32;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (reply_length != 0) {
+                    let completed = net_rx_finish(
+                        acquired, NetRxDisposal::Reply(reply_length));
+                    return KernelIcmpResult::Replied(completed);
+                }
+                ready = net_rx_finish(acquired, NetRxDisposal::Release);
+            }
+        }
+    }
+    return KernelIcmpResult::TimedOut(ready);
+}
