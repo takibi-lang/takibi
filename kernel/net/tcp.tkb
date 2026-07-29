@@ -57,6 +57,10 @@ let mut tcp_completed_handshakes: usize = 0;
 let mut tcp_completed_echoes: usize = 0;
 let mut tcp_completed_closes: usize = 0;
 let mut tcp_received_length: usize = 0;
+let mut tcp_drop_next_syn_ack: bool = false;
+let mut tcp_injected_syn_pending: bool = false;
+let mut tcp_injected_syn_retransmitted: bool = false;
+let mut tcp_injected_syn_accepted: bool = false;
 
 must_use variant KernelTcpResult {
     TimedOut(NetRxCanAcquire);
@@ -89,6 +93,17 @@ must_use variant KernelTcpCloseResult {
 }
 
 let mut tcp_stream_tx_frame: [u8; 1514];
+
+fn kernel_tcp_inject_drop_next_syn_ack() {
+    tcp_drop_next_syn_ack = true;
+    tcp_injected_syn_pending = false;
+    tcp_injected_syn_retransmitted = false;
+    tcp_injected_syn_accepted = false;
+}
+
+fn kernel_tcp_injected_syn_ack_recovered() -> bool {
+    return tcp_injected_syn_accepted;
+}
 
 // Recomputes the TCP checksum over the pseudo-header implied by `ip` and
 // the full segment `tcp_seg` (header + data -- ITS OWN LENGTH, read back
@@ -480,7 +495,7 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
     let start: i64 = read_cntpct();
     let counter_frequency: i64 = read_cntfrq();
     let deadline_ticks: i64 = counter_frequency * 30;
-    let retry_ticks: i64 = counter_frequency;
+    let retry_ticks: i64 = counter_frequency / 4;
     let mut syn_ack_sent_at: i64 = start;
     let mut syn_ack_retries: usize = 0;
     while ((read_cntpct() - start) < deadline_ticks) {
@@ -563,8 +578,15 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
                                                     slice_copy(
                                                         tcp_stream_tx_frame[0..<54],
                                                         frame[0..<54]);
-                                                    plan = NetRxDisposal::Reply(
-                                                        14 + (ihl as i32) + 20);
+                                                    if (tcp_drop_next_syn_ack) {
+                                                        tcp_drop_next_syn_ack = false;
+                                                        tcp_injected_syn_pending = true;
+                                                        plan = NetRxDisposal::Release;
+                                                    } else {
+                                                        tcp_injected_syn_pending = false;
+                                                        plan = NetRxDisposal::Reply(
+                                                            14 + (ihl as i32) + 20);
+                                                    }
                                                     syn_ack_sent_at =
                                                         read_cntpct();
                                                     syn_ack_retries = 0;
@@ -577,6 +599,7 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
                                                              conn_remote_ip as []u8) &&
                                                     (flags & TCP_FLAG_RST) != 0) {
                                                     conn_state = ConnState::Listen;
+                                                    tcp_injected_syn_pending = false;
                                                 } else if (
                                                     conn_state == ConnState::SynRcvd &&
                                                     source_port == conn_remote_port &&
@@ -588,6 +611,10 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
                                                     sequence == conn_rcv_nxt) {
                                                     conn_state =
                                                         ConnState::Established;
+                                                    if (tcp_injected_syn_pending &&
+                                                        tcp_injected_syn_retransmitted) {
+                                                        tcp_injected_syn_accepted = true;
+                                                    }
                                                     accepted = true;
                                                 }
                                             }
@@ -612,6 +639,9 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
                 ready, tcp_stream_tx_frame as []u8, 54);
             syn_ack_sent_at = retry_now;
             syn_ack_retries = syn_ack_retries + 1;
+            if (tcp_injected_syn_pending) {
+                tcp_injected_syn_retransmitted = true;
+            }
         } else if (conn_state == ConnState::SynRcvd &&
                    syn_ack_retries == TCP_RETRY_LIMIT &&
                    retry_now - syn_ack_sent_at >= retry_ticks) {
@@ -619,6 +649,7 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
             // Release the tuple so a later connect() attempt, commonly with
             // a new ephemeral source port, can use the same listener.
             conn_state = ConnState::Listen;
+            tcp_injected_syn_pending = false;
         }
     }
     return KernelTcpAcceptResult::TimedOut(ready);

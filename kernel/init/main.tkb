@@ -515,12 +515,16 @@ fn main() {
                                                 kernel_syscall_process_configure(
                                                     dynamic_heap_start,
                                                     dynamic_heap_limit);
+                                                kernel_tcp_inject_drop_next_syn_ack();
                                                 match kernel_syscall_inetd_accept(8080) {
                                                     KernelInetdAcceptResult::TimedOut => {
                                                         process_image_unmap(dynamic_pages);
                                                         kernel_boot_log("httpd server: accept timed out\n");
                                                     }
                                                     KernelInetdAcceptResult::Accepted => {
+                                                        if (kernel_tcp_injected_syn_ack_recovered()) {
+                                                            kernel_boot_log("httpd server: syn-ack drop retransmit ok\n");
+                                                        }
                                                         let dynamic_status: usize =
                                                             run_initial_user(
                                                                 process_image_entry(
