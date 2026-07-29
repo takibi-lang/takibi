@@ -556,6 +556,23 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             if (syscall_connected_open == false) {
                 return (1, LINUX_EBADF);
             }
+            match network_capability_take() {
+                NetworkCapabilityTakeResult::Empty => {
+                    return (1, LINUX_EAGAIN);
+                }
+                NetworkCapabilityTakeResult::Ready(ready) => {
+                    match kernel_tcp_close_stream(ready) {
+                        KernelTcpCloseResult::Closed(after_close) => {
+                            match network_capability_put(after_close) {
+                                NetworkCapabilityPutResult::Conflict => {
+                                    return (1, LINUX_EINVAL);
+                                }
+                                NetworkCapabilityPutResult::Stored => { }
+                            }
+                        }
+                    }
+                }
+            }
             syscall_connected_open = false;
             syscall_connected_close_calls =
                 syscall_connected_close_calls + 1;
@@ -728,13 +745,17 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                         return (1, LINUX_EINVAL);
                     }
                     KernelTcpSendResult::Sent(after_send) => {
-                        match network_capability_put(after_send) {
-                            NetworkCapabilityPutResult::Conflict => {
-                                return (1, LINUX_EINVAL);
-                            }
-                            NetworkCapabilityPutResult::Stored => {
-                                syscall_connected_open = false;
-                                return (1, 0);
+                        match kernel_tcp_close_stream(after_send) {
+                            KernelTcpCloseResult::Closed(after_close) => {
+                                match network_capability_put(after_close) {
+                                    NetworkCapabilityPutResult::Conflict => {
+                                        return (1, LINUX_EINVAL);
+                                    }
+                                    NetworkCapabilityPutResult::Stored => {
+                                        syscall_connected_open = false;
+                                        return (1, 0);
+                                    }
+                                }
                             }
                         }
                     }

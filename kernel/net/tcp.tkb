@@ -89,6 +89,10 @@ must_use variant KernelTcpAckResult {
     Exhausted(NetRxCanAcquire);
 }
 
+must_use variant KernelTcpCloseResult {
+    Closed(NetRxCanAcquire);
+}
+
 let mut tcp_stream_tx_frame: [u8; 1514];
 
 // Recomputes the TCP checksum over the pseudo-header implied by `ip` and
@@ -868,4 +872,46 @@ fn kernel_tcp_send_received(ready: sink NetRxCanAcquire,
         }
     }
     return KernelTcpSendResult::Invalid(ready);
+}
+
+fn kernel_tcp_close_stream(ready: sink NetRxCanAcquire)
+        -> KernelTcpCloseResult !{may_block} {
+    let frame = tcp_stream_tx_frame as []u8;
+    slice_copy(frame[0..<6], conn_remote_mac as []u8);
+    slice_copy(frame[6..<12], our_mac as []u8);
+    write_u16be(frame[12..<14], 0x0800);
+    let ip = frame[14..<34];
+    ip[0] = 0x45;
+    ip[1] = 0;
+    write_u16be(ip[IP_TOTAL_LEN..<4], 40);
+    write_u16be(ip[4..<6], 0);
+    write_u16be(ip[6..<8], 0x4000);
+    ip[IP_TTL] = 64;
+    ip[IP_PROTOCOL] = PROTO_TCP;
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
+    slice_copy(ip[IP_SRC..<IP_DST], OUR_IP as []u8);
+    slice_copy(ip[IP_DST..<20], conn_remote_ip as []u8);
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip));
+    let tcp = frame[34..<54];
+    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], conn_local_port as i32);
+    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], conn_remote_port as i32);
+    write_u32be(tcp[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
+    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
+    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
+    tcp[TCP_FLAGS] = TCP_FLAG_FIN | TCP_FLAG_ACK;
+    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
+    write_u16be(tcp[TCP_CHECKSUM..<TCP_URGENT], 0);
+    write_u16be(tcp[TCP_URGENT..<20], 0);
+    fix_tcp_checksum(ip, tcp);
+    conn_snd_nxt = conn_snd_nxt + 1;
+    let after_initial = net_transmit_ready(
+        ready, tcp_stream_tx_frame as []u8, 54);
+    match kernel_tcp_wait_for_ack(after_initial, conn_snd_nxt, 54) {
+        KernelTcpAckResult::Acked(after_ack) => {
+            return KernelTcpCloseResult::Closed(after_ack);
+        }
+        KernelTcpAckResult::Exhausted(after_retries) => {
+            return KernelTcpCloseResult::Closed(after_retries);
+        }
+    }
 }
