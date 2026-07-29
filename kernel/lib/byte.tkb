@@ -1,0 +1,3 @@
+fn bytes_copy(dst: borrow *u8, src: borrow *u8, n: isize) {
+    for i in 0..<n { dst[i] = src[i]; }
+}

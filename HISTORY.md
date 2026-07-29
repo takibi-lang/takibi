@@ -15,6 +15,22 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: Standalone Kernel Owns the RPi5 Ethernet Driver
+
+The issue #177 kernel now owns its RP1 Cadence GEM_GXL driver, fixed test
+network identity, and byte-copy helper below `kernel/`; no source dependency
+on `examples/` was introduced. The already hardware-proven BCM54213PE reset,
+RGMII delay, autonegotiation, 128-bit DMA bus-width, and two-entry TX ring
+configuration moved intact, retaining its affine RX readiness view and linear
+RX/TX descriptor owners. `NetInitResult` is now `must_use` at the kernel
+boundary.
+
+The first concrete network milestone intentionally stops at an initialized
+MAC/PHY/DMA path. Real RPi5 `kernelcheck` established the physical link while
+the existing USB ext2 and BusyBox paths remained active, passing 11 exact
+views from one boot. Actual ARP traffic is the next milestone; Linux socket
+syscalls are not claimed by link initialization alone.
+
 ### 2026-07-29: RPi5 USB ext2 Mutation and Linux File Syscalls (GitHub Issue #177)
 
 The standalone kernel's 1 KiB ext2 core progressed from equal-size overwrite

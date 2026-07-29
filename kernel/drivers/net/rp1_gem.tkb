@@ -1,0 +1,279 @@
+// Raspberry Pi 5 RP1 Ethernet driver. RP1 contains a Cadence GEM_GXL
+// connected to the board PHY through RGMII. This first hardware milestone
+// deliberately uses one RX and one TX descriptor and polls both rings: it
+// proves PHY, MAC and DMA before adding interrupt/ring complexity.
+
+use "kernel/lib/byte.tkb";
+use "kernel/net/netconfig.tkb";
+
+const GEM_BASE: usize = 0x1F00100000;
+const DMA_OFFSET: usize = 0x1000000000;
+const RX_BUF_SIZE: usize = 2048;
+
+private linear struct NetRxCpuOwned[desc: usize] {
+    private slot: {0..<1 as usize} @ desc;
+    private len: i32;
+}
+private linear struct NetTxInFlight[desc: usize] {
+    private slot: {0..<2 as usize};
+}
+private affine view NetRxCanAcquire;
+
+must_use variant NetInitResult { Failed; Ready(NetRxCanAcquire); }
+variant NetRxAcquire {
+    None(NetRxCanAcquire);
+    Acquired(exists desc: usize. NetRxCpuOwned[desc]);
+}
+variant NetRxDisposal { Release; Reply(i32); }
+
+fn net_rx_owned(slot: {0..<1 as usize} @ desc, len: i32) -> NetRxCpuOwned[desc] {
+    let mut frame: NetRxCpuOwned[desc] = { slot, len };
+    return frame;
+}
+
+let mut gem_rx_desc: [u32; 16] align(64);
+let mut gem_tx_desc: [u32; 16] align(64);
+let mut gem_rx_buf: [u8; 2048] align(64);
+let mut gem_tx_buf: [u8; 1536] align(64);
+let mut gem_initialized: i32 = 0;
+let mut gem_tx_next: i32 = 0;
+
+fn gem_read(off: usize) -> u32 {
+    let reg: *io u32 = (GEM_BASE + off) as *io u32;
+    return *reg;
+}
+
+fn gem_write(off: usize, value: u32) {
+    let reg: *io u32 = (GEM_BASE + off) as *io u32;
+    *reg = value;
+}
+
+fn gem_mdio_wait() -> bool {
+    for i: i32 in 0..<100000 {
+        if ((gem_read(0x08) & (1 << 2)) != 0) { return true; }
+    }
+    return false;
+}
+
+fn gem_mdio_read(reg: u32) -> u32 {
+    gem_write(0x34, (1 << 30) | (2 << 28) | (1 << 23)
+                  | ((reg & 31) << 18) | (2 << 16));
+    if (gem_mdio_wait()) { return gem_read(0x34) & 0xFFFF; }
+    return 0xFFFF;
+}
+
+fn gem_mdio_write(reg: u32, value: u32) -> bool {
+    gem_write(0x34, (1 << 30) | (1 << 28) | (1 << 23)
+                  | ((reg & 31) << 18) | (2 << 16) | (value & 0xFFFF));
+    return gem_mdio_wait();
+}
+
+fn gem_phy_reset() {
+    // RPi5 board DTS: PHY reset is RP1 GPIO32, active low, 5 ms.
+    // GPIO32 is bank 1 bit 4. Put the pin in GPIO mode, drive low, then
+    // release it high before touching MDIO.
+    let ctrl: *io u32 = 0x1F000D4024 as *io u32;
+    let rio_out_clr: *io u32 = 0x1F000E7000 as *io u32;
+    let rio_out_set: *io u32 = 0x1F000E6000 as *io u32;
+    let rio_oe_set: *io u32 = 0x1F000E6004 as *io u32;
+    let pad: *io u32 = 0x1F000F4014 as *io u32;
+    *rio_out_clr = 1 << 4;
+    *rio_oe_set = 1 << 4;
+    *pad = (*pad | (1 << 6)) & 0xFFFFFF7F;
+    *ctrl = (*ctrl & 0xFFFFFFE0) | 5;
+    delay_us(5000);
+    *rio_out_set = 1 << 4;
+    delay_us(10000);
+}
+
+fn gem_wait_link() -> bool {
+    // Board DT uses rgmii-id. Mirror the BCM54210E/BCM54213PE Linux PHY
+    // setup: enable the PHY's internal RX and TX clock delays.
+    if (gem_mdio_write(0x18, 0x7007) == false) { return false; }
+    let aux_misc: u32 = gem_mdio_read(0x18);
+    if (gem_mdio_write(0x18, aux_misc | 0x8107) == false) { return false; }
+    if (gem_mdio_write(0x1C, 3 << 10) == false) { return false; }
+    let clk_ctl: u32 = gem_mdio_read(0x1C) & 0x3FF;
+    if (gem_mdio_write(0x1C, 0x8000 | (3 << 10) | clk_ctl | (1 << 9)) == false) {
+        return false;
+    }
+    // Restart Clause-22 autonegotiation on the BCM54213PE at address 1.
+    if (gem_mdio_write(0, 0x1200) == false) { return false; }
+    for i: i32 in 0..<2000000 {
+        let bmsr: u32 = gem_mdio_read(1);
+        if (bmsr != 0xFFFF && bmsr != 0
+                && (bmsr & (1 << 2)) != 0 && (bmsr & (1 << 5)) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn gem_configure_link() {
+    // BCM54xx Auxiliary Status Summary, bits 10:8: negotiated HCD.
+    let aux: u32 = gem_mdio_read(0x19);
+    let mode: u32 = (aux >> 8) & 7;
+    // RP1 GEM DCFG1 reports DBWDEF=4, which maps to the 128-bit DBW setting.
+    let mut ncfgr: u32 = (3 << 18) | (2 << 21) | (1 << 17); // MDC /64, DBW128, strip FCS
+    if (mode == 2 || mode == 5 || mode == 7) { ncfgr = ncfgr | (1 << 1); }
+    if (mode == 3 || mode == 5) { ncfgr = ncfgr | 1; }
+    if (mode == 6 || mode == 7) { ncfgr = ncfgr | (1 << 10); }
+    gem_write(0x04, ncfgr);
+}
+
+fn gem_rearm_rx() {
+    dma_prepare_rx(gem_rx_buf as *align(64) u8, RX_BUF_SIZE);
+    gem_rx_desc[0] = gem_rx_desc[0] & 0xFFFFFFFE;
+    dma_prepare_tx(gem_rx_desc as *u8, 64);
+}
+
+fn net_init() -> NetInitResult {
+    if (gem_initialized != 0) { return NetInitResult::Failed; }
+
+    // RP1 bus masters address RAM through PCI [0x10_00000000, ...).
+    pcie2_dma_inbound_setup();
+
+    // Keep the firmware-selected parent/divider but explicitly enable the
+    // RP1 Ethernet TX clock; unlike clk_sys this branch is not critical.
+    let eth_clk_ctrl: *io u32 = 0x1F00018064 as *io u32;
+    *eth_clk_ctrl = *eth_clk_ctrl | (1 << 11);
+
+    // Stop RX/TX, enable management port, mask all queue-0 interrupts.
+    gem_write(0x00, 1 << 4);
+    gem_write(0x0620, 0xFFFFFFFF);
+    gem_write(0x0C, 1); // RGMII
+    gem_write(0x04, (3 << 18) | (2 << 21));
+    gem_phy_reset();
+    let phy_id1: u32 = gem_mdio_read(2);
+    let phy_id2: u32 = gem_mdio_read(3);
+    if (phy_id1 == 0 || phy_id1 == 0xFFFF || phy_id2 == 0 || phy_id2 == 0xFFFF) {
+        return NetInitResult::Failed;
+    }
+    if (gem_wait_link() == false) { return NetInitResult::Failed; }
+    gem_configure_link();
+
+    // Program specific address 1.
+    gem_write(0x88, (OUR_MAC[0] as u32) | ((OUR_MAC[1] as u32) << 8)
+                  | ((OUR_MAC[2] as u32) << 16) | ((OUR_MAC[3] as u32) << 24));
+    gem_write(0x8C, (OUR_MAC[4] as u32) | ((OUR_MAC[5] as u32) << 8));
+
+    let rx_base: usize = (gem_rx_buf as *u8) as usize;
+    let rx_dma: usize = rx_base + DMA_OFFSET;
+    let rxd_base: usize = (gem_rx_desc as *u32) as usize;
+    let rxd_dma: usize = rxd_base + DMA_OFFSET;
+    let txd_base: usize = (gem_tx_desc as *u32) as usize;
+    let txd_dma: usize = txd_base + DMA_OFFSET;
+
+    gem_rx_desc[2] = (rx_dma >> 32) as u32;
+    gem_rx_desc[3] = 0;
+    gem_rx_desc[1] = 0;
+    gem_rx_desc[0] = (rx_dma as u32) | 2; // one-descriptor ring: WRAP
+    gem_tx_desc[0] = 0;
+    gem_tx_desc[1] = 1 << 31; // USED
+    gem_tx_desc[2] = 0;
+    gem_tx_desc[3] = 0;
+    gem_tx_desc[4] = 0;
+    gem_tx_desc[5] = (1 << 31) | (1 << 30); // USED | WRAP
+    gem_tx_desc[6] = 0;
+    gem_tx_desc[7] = 0;
+    dma_prepare_rx(gem_rx_buf as *align(64) u8, RX_BUF_SIZE);
+    dma_prepare_tx(gem_rx_desc as *u8, 64);
+    dma_prepare_tx(gem_tx_desc as *u8, 64);
+
+    gem_write(0x18, rxd_dma as u32);
+    gem_write(0x04D4, (rxd_dma >> 32) as u32);
+    gem_write(0x1C, txd_dma as u32);
+    gem_write(0x04C8, (txd_dma >> 32) as u32);
+    // 64-bit addressing, 2048-byte RX buffers, full packet SRAMs.
+    gem_write(0x10, (1 << 30) | (32 << 16) | (3 << 8) | (1 << 10) | 16);
+    gem_write(0x44, 0); // disable RX partial store-and-forward/cut-through
+    gem_write(0x54, 0x10808); // RP1 DT: 8-deep AR/AW pipelines, AW-to-B fill
+    gem_write(0x20, 0x0F);
+    gem_write(0x14, 0xFFFFFFFF);
+    gem_write(0x00, (1 << 4) | (1 << 3) | (1 << 2)); // MPE | TE | RE
+
+    gem_initialized = 1;
+    return NetInitResult::Ready(view NetRxCanAcquire);
+}
+
+fn net_rx_wait() !{may_block} {
+    for i: i32 in 0..<10000 {
+        dma_finish_rx(gem_rx_desc as *align(64) u8, 64);
+        if ((gem_rx_desc[0] & 1) != 0) { return; }
+    }
+}
+
+fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
+    dma_finish_rx(gem_rx_desc as *align(64) u8, 64);
+    if ((gem_rx_desc[0] & 1) == 0) {
+        return NetRxAcquire::None(view NetRxCanAcquire);
+    }
+    let len: i32 = (gem_rx_desc[1] & 0x3FFF) as i32;
+    dma_finish_rx(gem_rx_buf as *align(64) u8, RX_BUF_SIZE);
+    let slot: {0..<1 as usize} = 0;
+    return NetRxAcquire::Acquired(net_rx_owned(slot, len));
+}
+
+fn net_rx_len(frame: borrow NetRxCpuOwned[desc]) -> i32 { return frame.len; }
+
+fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc {
+    return gem_rx_buf[0..<1514];
+}
+
+fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire {
+    gem_rearm_rx();
+    return view NetRxCanAcquire;
+}
+
+fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32) -> NetTxInFlight[desc] {
+    let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
+    let rx_base: usize = (gem_rx_buf as *u8) as usize;
+    let tx_base: usize = (gem_tx_buf as *u8) as usize;
+    let tx_dma: usize = tx_base + DMA_OFFSET;
+    let txd_base: usize = (gem_tx_desc as *u32) as usize;
+    bytes_copy(tx_base as *u8, rx_base as *u8, safe_len as isize);
+    dma_prepare_tx(gem_tx_buf as *u8, safe_len as usize);
+    let mut slot: {0..<2 as usize} = 0;
+    if (gem_tx_next == 0) {
+        gem_tx_desc[2] = (tx_dma >> 32) as u32;
+        gem_tx_desc[3] = 0;
+        gem_tx_desc[0] = tx_dma as u32;
+        gem_tx_desc[1] = (safe_len as u32) | (1 << 15);
+        gem_tx_next = 1;
+    } else {
+        gem_tx_desc[6] = (tx_dma >> 32) as u32;
+        gem_tx_desc[7] = 0;
+        gem_tx_desc[4] = tx_dma as u32;
+        gem_tx_desc[5] = (safe_len as u32) | (1 << 15) | (1 << 30);
+        gem_tx_next = 0;
+        slot = 1;
+    }
+    dma_prepare_tx(gem_tx_desc as *u8, 64);
+    // The peer can send its next packet immediately after seeing this reply.
+    // Return the independent RX buffer to GEM before starting TX so that an
+    // immediate TCP ACK is not lost while this descriptor completes.
+    gem_rearm_rx();
+    gem_write(0x00, gem_read(0x00) | (1 << 9));
+    let mut in_flight: NetTxInFlight[desc] = { slot };
+    return in_flight;
+}
+
+fn net_tx_complete(in_flight: sink NetTxInFlight[desc]) -> NetRxCanAcquire !{may_block} {
+    for i: i32 in 0..<1000000 {
+        dma_finish_rx(gem_tx_desc as *align(64) u8, 64);
+        if (in_flight.slot == 0 && (gem_tx_desc[1] & (1 << 31)) != 0) { break; }
+        if (in_flight.slot == 1 && (gem_tx_desc[5] & (1 << 31)) != 0) { break; }
+    }
+    return view NetRxCanAcquire;
+}
+
+fn net_rx_finish(frame: sink NetRxCpuOwned[desc], disposal: NetRxDisposal)
+        -> NetRxCanAcquire !{may_block} {
+    match disposal {
+        NetRxDisposal::Reply(len) => { return net_tx_complete(net_transmit(frame, len)); }
+        NetRxDisposal::Release => { return net_rx_release(frame); }
+    }
+}
+
+fn net_read_mac(mac_out: *u8) { bytes_copy(mac_out, OUR_MAC as *u8, 6); }
+
