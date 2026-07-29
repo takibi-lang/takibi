@@ -524,7 +524,7 @@ fn main() {
                             kernel_boot_log("linux file syscalls: open read write close ok\n");
                         }
                         if (kernel_syscall_socket_evidence()) {
-                            kernel_boot_log("linux socket syscalls: socket bind listen accept-eagain close ok port=8080\n");
+                            kernel_boot_log("linux socket syscalls: socket bind listen accept close ok port=8080\n");
                         }
                         kernel_boot_log("syscall exit: 0\n");
                     }

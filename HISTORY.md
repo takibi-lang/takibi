@@ -15,6 +15,23 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: `accept4` Returns a Connected Userspace FD
+
+Blocking Linux AArch64 `accept4(242)` now takes the sole GEM RX capability
+from its stable owner slot and holds it while processing a three-way TCP
+handshake on the bound port. The reusable accept state validates Ethernet,
+IPv4, and TCP checksums, accepts SYN options, records the peer tuple and
+sequence state, sends SYN/ACK, and recognizes the final ACK. Both timeout and
+success return the same linear capability for restoration before the syscall
+returns.
+
+The EL0 fixture binds/listens on port 8080, blocks in `accept4`, receives
+connected fd 5, and closes the connected and listening fds independently.
+The hardware runner's handshake-only mode retries while USB ext2 and BusyBox
+finish, then verifies the actual SYN/SYN-ACK/ACK exchange. Real RPi5 passed
+that userspace-accept handshake, all earlier ARP/ICMP/TCP checks, and all 12
+UART views in one boot. Connected `read`/`write` are the next boundary.
+
 ### 2026-07-29: RX Capability Survives into Nonblocking `accept4`
 
 `NetRxCanAcquire` is now linear rather than affine. After the kernel's ARP,

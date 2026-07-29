@@ -46,9 +46,10 @@ through AArch64 syscalls 198/200/201/57. This milestone proves socket
 control-plane ABI and lifecycle only; a connected `accept` result and
 userspace-owned connected socket are not claimed yet.
 The RX readiness token is now linear and survives the intervening USB/ext2
-and BusyBox work in a guarded stable owner slot. Nonblocking `accept4(242)`
-takes and restores that token before returning `-EAGAIN` when no connection
-has been consumed. A successful handshake and connected fd remain next.
+and BusyBox work in a guarded stable owner slot. Blocking `accept4(242)`
+takes that token, processes a real three-way handshake on port 8080, restores
+the token, and returns connected fd 5. The EL0 fixture closes fd 5 and the
+listener separately. Connected `read`/`write` remain next.
 
 The RPi5 runner captures UART once per kernel boot, then projects that one
 transcript through every `kernel/tests/rpi5/views/*.filter`. Each projection

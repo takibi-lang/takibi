@@ -47,6 +47,7 @@ enum ConnState: u8 {
 let mut conn_state:       ConnState = ConnState::Listen;
 let mut conn_remote_ip:   [u8; 4];
 let mut conn_remote_port: u16 = 0;
+let mut conn_local_port: u16 = TCP_ECHO_PORT;
 let mut conn_snd_nxt:     u32 = 0; // our next unacknowledged sequence number
 let mut conn_rcv_nxt:     u32 = 0; // next sequence number we expect from remote
 let mut tcp_completed_handshakes: usize = 0;
@@ -56,6 +57,11 @@ let mut tcp_completed_closes: usize = 0;
 must_use variant KernelTcpResult {
     TimedOut(NetRxCanAcquire);
     Verified(NetRxCanAcquire);
+}
+
+must_use variant KernelTcpAcceptResult {
+    TimedOut(NetRxCanAcquire);
+    Accepted(NetRxCanAcquire);
 }
 
 // Recomputes the TCP checksum over the pseudo-header implied by `ip` and
@@ -95,7 +101,7 @@ fn build_syn_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
                 inet_checksum(ip[0..<ihl as usize]));
 
     let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
-    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], TCP_ECHO_PORT as i32);
+    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], conn_local_port as i32);
     write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
     write_u32be(tcp[TCP_SEQ..<TCP_ACK], TCP_INITIAL_SEQ as i32);
     write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
@@ -144,7 +150,7 @@ fn build_data_echo(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
                     inet_checksum(ip[0..<ihl as usize]));
 
         let client_port: u16 = read_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
-        write_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT], TCP_ECHO_PORT as i32);
+        write_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT], conn_local_port as i32);
         write_u16be(tcp_seg[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
         write_u32be(tcp_seg[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
         write_u32be(tcp_seg[TCP_ACK..<TCP_DATA_OFFSET], (conn_rcv_nxt as i32) + (n as i32));
@@ -180,7 +186,7 @@ fn build_fin_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
                 inet_checksum(ip[0..<ihl as usize]));
 
     let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
-    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], TCP_ECHO_PORT as i32);
+    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], conn_local_port as i32);
     write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
     write_u32be(tcp[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
     write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
@@ -197,6 +203,7 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
     let mut ready = ready_in;
     net_read_mac(our_mac as *u8);
     conn_state = ConnState::Listen;
+    conn_local_port = TCP_ECHO_PORT;
     tcp_completed_handshakes = 0;
     tcp_completed_echoes = 0;
     tcp_completed_closes = 0;
@@ -292,7 +299,7 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                                                     let seq:      u32 = read_u32be(tcp[TCP_SEQ..<TCP_ACK]) as u32;
                                                     let ack:      u32 = read_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET]) as u32;
 
-                                                    if (dst_port == TCP_ECHO_PORT) {
+                                                    if (dst_port == conn_local_port) {
                                                         if (conn_state == ConnState::Listen) {
                                                             if ((flags & TCP_FLAG_SYN) != 0) {
                                                                 slice_copy(conn_remote_ip as []u8, ip[IP_SRC..<IP_DST]);
@@ -400,4 +407,117 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                 }
     }
     return KernelTcpResult::TimedOut(ready);
+}
+
+// Blocks for one three-way handshake on the requested listening port. The
+// caller owns the returned RX capability in both outcomes; connected stream
+// I/O is added separately after accept establishes fd state.
+fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
+        -> KernelTcpAcceptResult !{may_block} {
+    let mut ready = ready_in;
+    conn_state = ConnState::Listen;
+    conn_local_port = port;
+    let start: i64 = read_cntpct();
+    let deadline_ticks: i64 = read_cntfrq() * 30;
+    while ((read_cntpct() - start) < deadline_ticks) {
+        net_rx_wait();
+        match net_rx_acquire(ready) {
+            NetRxAcquire::None(next) => { ready = next; }
+            NetRxAcquire::Acquired(acquired) => {
+                let len: i32 = net_rx_len(acquired);
+                let mut plan: NetRxDisposal = NetRxDisposal::Release;
+                let mut accepted: bool = false;
+                if (len >= 54 && len <= 1514) {
+                    let len_n: i32 = len;
+                    let frame = net_rx_frame(acquired);
+                    if (read_u16be(frame[12..<14]) == 0x0800) {
+                        let ip = frame[14..<34];
+                        let version: u8 = ip[0] >> 4;
+                        let ihl: u16 = (ip[0] & 0x0F) * 4;
+                        if (version == 4 && ihl == 20) {
+                            let len16: u16 = len_n as u16;
+                            let total_len: u16 =
+                                read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
+                            let ip_len_in_frame: u16 = len16 - 14;
+                            if (total_len <= ip_len_in_frame &&
+                                total_len >= ihl &&
+                                ip[IP_PROTOCOL] == PROTO_TCP &&
+                                inet_checksum(ip[0..<ihl as usize]) == 0 &&
+                                slice_eq(ip[IP_DST..<20], OUR_IP as []u8)) {
+                                let tcp = frame[34..<54];
+                                let tcp_len: u16 = total_len - ihl;
+                                let doff: u8 = tcp[TCP_DATA_OFFSET] >> 4;
+                                if (tcp_len >= 20 && doff >= 5 && doff <= 15) {
+                                    let tcp_header_len: u16 =
+                                        (doff * 4) as u16;
+                                    if (tcp_len >= tcp_header_len) {
+                                        let mut pseudo: [u8; 12];
+                                        slice_copy(pseudo[0..<4],
+                                                   ip[IP_SRC..<IP_DST]);
+                                        slice_copy(pseudo[4..<8],
+                                                   ip[IP_DST..<20]);
+                                        pseudo[8] = 0;
+                                        pseudo[9] = PROTO_TCP;
+                                        write_u16be(pseudo[10..<12], tcp_len);
+                                        let sum: i32 =
+                                            checksum_add(pseudo as []u8, 0);
+                                        let tcp_len_index: usize =
+                                            tcp_len as usize;
+                                        let tcp_segment =
+                                            frame[34..<34 + tcp_len_index];
+                                        if (checksum_fold(checksum_add(
+                                                tcp_segment, sum)) == 0) {
+                                            let destination_port: u16 =
+                                                read_u16be(tcp[2..<4]) as u16;
+                                            let source_port: u16 =
+                                                read_u16be(tcp[0..<2]) as u16;
+                                            let flags: u8 = tcp[TCP_FLAGS];
+                                            let sequence: u32 =
+                                                read_u32be(tcp[4..<8]) as u32;
+                                            let acknowledgment: u32 =
+                                                read_u32be(tcp[8..<12]) as u32;
+                                            if (destination_port == port) {
+                                                if (conn_state == ConnState::Listen &&
+                                                    (flags & TCP_FLAG_SYN) != 0) {
+                                                    slice_copy(
+                                                        conn_remote_ip as []u8,
+                                                        ip[IP_SRC..<IP_DST]);
+                                                    conn_remote_port = source_port;
+                                                    conn_rcv_nxt = sequence + 1;
+                                                    conn_snd_nxt =
+                                                        TCP_INITIAL_SEQ + 1;
+                                                    build_syn_ack(frame, ihl);
+                                                    plan = NetRxDisposal::Reply(
+                                                        14 + (ihl as i32) + 20);
+                                                    conn_state =
+                                                        ConnState::SynRcvd;
+                                                } else if (
+                                                    conn_state == ConnState::SynRcvd &&
+                                                    source_port == conn_remote_port &&
+                                                    slice_eq(ip[IP_SRC..<IP_DST],
+                                                             conn_remote_ip as []u8) &&
+                                                    (flags & TCP_FLAG_ACK) != 0 &&
+                                                    (flags & TCP_FLAG_SYN) == 0 &&
+                                                    acknowledgment == conn_snd_nxt &&
+                                                    sequence == conn_rcv_nxt) {
+                                                    conn_state =
+                                                        ConnState::Established;
+                                                    accepted = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                ready = net_rx_finish(acquired, plan);
+                if (accepted) {
+                    return KernelTcpAcceptResult::Accepted(ready);
+                }
+            }
+        }
+    }
+    return KernelTcpAcceptResult::TimedOut(ready);
 }

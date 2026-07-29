@@ -67,12 +67,15 @@ initial_user_payload:
     mov     x0, #4
     mov     x1, #0
     mov     x2, #0
-    mov     x3, #0x800
+    mov     x3, #0
     mov     x8, #242
     svc     #0
-    mov     x9, #-11
-    cmp     x0, x9
+    cmp     x0, #5
     b.ne    .Luser_fail
+    mov     x0, #5
+    mov     x8, #57
+    svc     #0
+    cbnz    x0, .Luser_fail
     mov     x0, #4
     mov     x8, #57
     svc     #0

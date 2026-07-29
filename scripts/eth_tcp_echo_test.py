@@ -38,7 +38,7 @@ SUBNET = [int(part) for part in os.environ.get("ETH_TEST_SUBNET", "192.168.10").
 SERVER_MAC = bytes.fromhex(os.environ.get("ETH_TEST_MAC", "00:80:e1:00:00:00").replace(":", ""))
 CLIENT_IP = bytes(SUBNET + [55])
 SERVER_IP = bytes(SUBNET + [2])
-SERVER_PORT = 7                                            # must match tcp_echo_stm32.tkb's TCP_ECHO_PORT
+SERVER_PORT = int(os.environ.get("TCP_TEST_PORT", "7"))
 
 RETRIES = 20
 RETRY_TIMEOUT_SECS = 0.5
@@ -369,6 +369,14 @@ def main() -> int:
         print(f"error: interface {IFACE!r} not found -- set ETH_TEST_IFACE?", file=sys.stderr)
         return 1
     client_mac = read_iface_mac(IFACE)
+
+    if os.environ.get("TCP_TEST_HANDSHAKE_ONLY") == "1":
+        ok = do_handshake(
+            new_sock(), client_mac, HANDSHAKE_CLIENT_PORT,
+            HANDSHAKE_CLIENT_ISN)
+        print("  userspace accept handshake port %d: %s" %
+              (SERVER_PORT, "PASS" if ok else "FAIL"))
+        return 0 if ok else 1
 
     ok1 = test_syn_wrong_port_silent(client_mac)
     print("  SYN to wrong port (silent):        %s" % ("PASS" if ok1 else "FAIL"))
