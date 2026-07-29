@@ -20,6 +20,7 @@ must_use variant Ext2InodeResult { Invalid; Inode(Ext2Inode); }
 must_use variant Ext2LookupResult { Invalid; NotFound; Found(usize); }
 must_use variant Ext2ReadResult { Invalid; Read(usize); }
 must_use variant Ext2WriteResult { Invalid; Written; }
+must_use variant Ext2ResizeResult { Invalid; Resized; }
 must_use variant Ext2SymlinkResult { Invalid; Read(usize); }
 
 struct Ext2Inode {
@@ -42,6 +43,15 @@ fn ext2_u32(bytes: borrow *u8, offset: usize) -> u32 {
            ((bytes[(offset + 1) as isize] as u32) << 8) |
            ((bytes[(offset + 2) as isize] as u32) << 16) |
            ((bytes[(offset + 3) as isize] as u32) << 24);
+}
+
+fn ext2_put_u32(bytes: borrow *u8, offset: usize, value: u32) -> bool {
+    if (offset > KERNEL_BLOCK_SIZE - 4) { return false; }
+    bytes[offset as isize] = (value & 0xFF) as u8;
+    bytes[(offset + 1) as isize] = ((value >> 8) & 0xFF) as u8;
+    bytes[(offset + 2) as isize] = ((value >> 16) & 0xFF) as u8;
+    bytes[(offset + 3) as isize] = ((value >> 24) & 0xFF) as u8;
+    return true;
 }
 
 fn ext2_mount(device: KernelBlockDevice) -> Ext2MountResult {
@@ -226,6 +236,50 @@ fn ext2_write_small_file(mount: Ext2Mount, inode_number: usize,
                               ext2_file_block as []u8) {
                 BlockIoResult::Invalid => { return Ext2WriteResult::Invalid; }
                 BlockIoResult::Ok => { return Ext2WriteResult::Written; }
+            }
+        }
+    }
+}
+
+fn ext2_resize_small_file(mount: Ext2Mount, inode_number: usize,
+                          source: []u8)
+        -> Ext2ResizeResult !{unsafe} {
+    if (source.len == 0 || source.len > KERNEL_BLOCK_SIZE) {
+        return Ext2ResizeResult::Invalid;
+    }
+    match ext2_read_inode(mount, inode_number) {
+        Ext2InodeResult::Invalid => { return Ext2ResizeResult::Invalid; }
+        Ext2InodeResult::Inode(inode) => {
+            if ((inode.mode & 0xF000) != 0x8000) {
+                return Ext2ResizeResult::Invalid;
+            }
+
+            // Publish data first. Until the inode table write succeeds, the
+            // old i_size remains the only visible extent.
+            for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_file_block[i] = 0; }
+            let file_bytes = ext2_file_block as []u8;
+            let target = unsafe { file_bytes[0..<source.len] };
+            slice_copy(target, source);
+            match block_write(mount.device, inode.direct_block0,
+                              ext2_file_block as []u8) {
+                BlockIoResult::Invalid => { return Ext2ResizeResult::Invalid; }
+                BlockIoResult::Ok => { }
+            }
+
+            match block_read(mount.device, inode.table_block,
+                             ext2_metadata_block as []u8) {
+                BlockIoResult::Invalid => { return Ext2ResizeResult::Invalid; }
+                BlockIoResult::Ok => { }
+            }
+            let inode_pointer: *u8 =
+                (ext2_metadata_block as *u8) + (inode.table_offset as isize);
+            if (ext2_put_u32(inode_pointer, 4, source.len as u32) == false) {
+                return Ext2ResizeResult::Invalid;
+            }
+            match block_write(mount.device, inode.table_block,
+                              ext2_metadata_block as []u8) {
+                BlockIoResult::Invalid => { return Ext2ResizeResult::Invalid; }
+                BlockIoResult::Ok => { return Ext2ResizeResult::Resized; }
             }
         }
     }

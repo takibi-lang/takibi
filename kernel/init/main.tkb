@@ -12,6 +12,7 @@ private let mut ext2_read_fixture: [u8; 32];
 private let mut ext2_symlink_fixture: [u8; 64];
 
 must_use variant UsbExt2WriteCheckResult { Invalid; Verified; }
+must_use variant UsbExt2ResizeCheckResult { Invalid; Verified; }
 
 fn usb_ext2_equal_size_write_check(mount: Ext2Mount)
         -> UsbExt2WriteCheckResult {
@@ -48,6 +49,60 @@ fn usb_ext2_equal_size_write_check(mount: Ext2Mount)
         }
     }
     return UsbExt2WriteCheckResult::Invalid;
+}
+
+fn usb_ext2_resize_check(mount: Ext2Mount) -> UsbExt2ResizeCheckResult {
+    match ext2_lookup_root(mount, "mutable.txt" as []u8) {
+        Ext2LookupResult::Invalid => {
+            return UsbExt2ResizeCheckResult::Invalid;
+        }
+        Ext2LookupResult::NotFound => {
+            return UsbExt2ResizeCheckResult::Invalid;
+        }
+        Ext2LookupResult::Found(inode_number) => {
+            match ext2_resize_small_file(
+                    mount, inode_number, "tiny\n" as []u8) {
+                Ext2ResizeResult::Invalid => {
+                    return UsbExt2ResizeCheckResult::Invalid;
+                }
+                Ext2ResizeResult::Resized => { }
+            }
+            match ext2_read_small_file(
+                    mount, inode_number, ext2_read_fixture as []u8) {
+                Ext2ReadResult::Invalid => {
+                    return UsbExt2ResizeCheckResult::Invalid;
+                }
+                Ext2ReadResult::Read(short_length) => {
+                    if (short_length != 5 ||
+                        slice_eq(ext2_read_fixture[0..<5],
+                                 "tiny\n" as []u8) == false) {
+                        return UsbExt2ResizeCheckResult::Invalid;
+                    }
+                }
+            }
+            match ext2_resize_small_file(
+                    mount, inode_number, "extended ext2\n" as []u8) {
+                Ext2ResizeResult::Invalid => {
+                    return UsbExt2ResizeCheckResult::Invalid;
+                }
+                Ext2ResizeResult::Resized => { }
+            }
+            match ext2_read_small_file(
+                    mount, inode_number, ext2_read_fixture as []u8) {
+                Ext2ReadResult::Invalid => {
+                    return UsbExt2ResizeCheckResult::Invalid;
+                }
+                Ext2ReadResult::Read(long_length) => {
+                    if (long_length == 14 &&
+                        slice_eq(ext2_read_fixture[0..<14],
+                                 "extended ext2\n" as []u8)) {
+                        return UsbExt2ResizeCheckResult::Verified;
+                    }
+                }
+            }
+        }
+    }
+    return UsbExt2ResizeCheckResult::Invalid;
 }
 
 fn main() {
@@ -88,6 +143,14 @@ fn main() {
                                                 }
                                                 UsbExt2WriteCheckResult::Verified => {
                                                     kernel_boot_log("usb ext2: write /mutable.txt ok\n");
+                                                }
+                                            }
+                                            match usb_ext2_resize_check(usb_mount) {
+                                                UsbExt2ResizeCheckResult::Invalid => {
+                                                    kernel_boot_log("usb ext2: resize failed\n");
+                                                }
+                                                UsbExt2ResizeCheckResult::Verified => {
+                                                    kernel_boot_log("usb ext2: resize truncate+extend ok\n");
                                                 }
                                             }
                                             match ext2_lookup_root(
