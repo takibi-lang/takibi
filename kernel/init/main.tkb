@@ -5,11 +5,29 @@ use "kernel/fs/elf64.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/mm/process_image.tkb";
 use "kernel/printk/log.tkb";
+use "kernel/fs/ext2/ext2.tkb";
 
 fn main() {
     platform_init();
     kernel_boot_log("takibi kernel: EL1\n");
     page_allocator_init();
+    match memory_block_device_ext2() {
+        MemoryBlockDeviceResult::Invalid => {
+            kernel_boot_log("ext2 image: invalid\n");
+        }
+        MemoryBlockDeviceResult::Ready(device) => {
+            match ext2_mount(device) {
+                Ext2MountResult::Invalid => {
+                    kernel_boot_log("ext2 mount: invalid\n");
+                }
+                Ext2MountResult::Mounted(mount) => {
+                    if (ext2_fixture_geometry_is_expected(mount)) {
+                        kernel_boot_log("ext2 mount: block=1024 inodes=128 blocks=1024\n");
+                    }
+                }
+            }
+        }
+    }
     match initramfs_busybox() {
         InitramfsFileResult::Invalid => {
             kernel_boot_log("distro image: invalid initramfs\n");

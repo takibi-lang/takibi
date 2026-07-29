@@ -1,0 +1,70 @@
+use "kernel/drivers/block/memory.tkb";
+
+const EXT2_SUPERBLOCK_BLOCK: usize = 1;
+const EXT2_MAGIC: u16 = 0xEF53;
+
+private let mut ext2_metadata_block: [u8; KERNEL_BLOCK_SIZE];
+
+struct Ext2Mount {
+    private device: MemoryBlockDevice;
+    private inode_count: usize;
+    private filesystem_blocks: usize;
+    private inodes_per_group: usize;
+    private inode_size: usize;
+}
+
+must_use variant Ext2MountResult { Invalid; Mounted(Ext2Mount); }
+
+fn ext2_u16(bytes: borrow *u8, offset: usize) -> u16 {
+    if (offset > KERNEL_BLOCK_SIZE - 2) { return 0; }
+    return (bytes[offset as isize] as u16) |
+           ((bytes[(offset + 1) as isize] as u16) << 8);
+}
+
+fn ext2_u32(bytes: borrow *u8, offset: usize) -> u32 {
+    if (offset > KERNEL_BLOCK_SIZE - 4) { return 0; }
+    return (bytes[offset as isize] as u32) |
+           ((bytes[(offset + 1) as isize] as u32) << 8) |
+           ((bytes[(offset + 2) as isize] as u32) << 16) |
+           ((bytes[(offset + 3) as isize] as u32) << 24);
+}
+
+fn ext2_mount(device: MemoryBlockDevice) -> Ext2MountResult {
+    match block_read(device, EXT2_SUPERBLOCK_BLOCK,
+                     ext2_metadata_block as []u8) {
+        BlockIoResult::Invalid => { return Ext2MountResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let superblock: *u8 = ext2_metadata_block as *u8;
+    let inode_count: usize = ext2_u32(superblock, 0) as usize;
+    let filesystem_blocks: usize = ext2_u32(superblock, 4) as usize;
+    let first_data_block: usize = ext2_u32(superblock, 20) as usize;
+    let log_block_size: usize = ext2_u32(superblock, 24) as usize;
+    let blocks_per_group: usize = ext2_u32(superblock, 32) as usize;
+    let inodes_per_group: usize = ext2_u32(superblock, 40) as usize;
+    let magic: u16 = ext2_u16(superblock, 56);
+    let revision: usize = ext2_u32(superblock, 76) as usize;
+    let inode_size: usize = ext2_u16(superblock, 88) as usize;
+    let feature_compat: usize = ext2_u32(superblock, 92) as usize;
+    let feature_incompat: usize = ext2_u32(superblock, 96) as usize;
+    let feature_ro_compat: usize = ext2_u32(superblock, 100) as usize;
+
+    if (magic != EXT2_MAGIC || inode_count == 0 ||
+        filesystem_blocks == 0 || filesystem_blocks > block_count(device) ||
+        first_data_block != 1 || log_block_size != 0 ||
+        blocks_per_group == 0 || inodes_per_group == 0 ||
+        revision != 1 || inode_size != 128 ||
+        feature_compat != 0 || feature_incompat != 0 ||
+        feature_ro_compat != 0) {
+        return Ext2MountResult::Invalid;
+    }
+    let mut mount: Ext2Mount = {
+        device, inode_count, filesystem_blocks, inodes_per_group, inode_size
+    };
+    return Ext2MountResult::Mounted(mount);
+}
+
+fn ext2_fixture_geometry_is_expected(mount: Ext2Mount) -> bool {
+    return mount.inode_count == 128 && mount.filesystem_blocks == 1024 &&
+           mount.inodes_per_group == 128 && mount.inode_size == 128;
+}

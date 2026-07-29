@@ -1,0 +1,57 @@
+use "kernel/user/ext2_image_extern.tkb";
+
+const KERNEL_BLOCK_SIZE: usize = 1024;
+
+struct MemoryBlockDevice {
+    private address: usize;
+    private length: usize;
+}
+
+must_use variant MemoryBlockDeviceResult {
+    Invalid;
+    Ready(MemoryBlockDevice);
+}
+
+must_use variant BlockIoResult { Invalid; Ok; }
+
+fn memory_block_device_ext2() -> MemoryBlockDeviceResult {
+    let address: usize = kernel_ext2_image_addr();
+    let length: usize = kernel_ext2_image_len();
+    if (address == 0 || length == 0 || length % KERNEL_BLOCK_SIZE != 0) {
+        return MemoryBlockDeviceResult::Invalid;
+    }
+    let mut device: MemoryBlockDevice = { address, length };
+    return MemoryBlockDeviceResult::Ready(device);
+}
+
+fn block_read(device: MemoryBlockDevice, block: usize,
+              destination: [u8; KERNEL_BLOCK_SIZE..])
+        -> BlockIoResult !{unsafe} {
+    if (block >= device.length / KERNEL_BLOCK_SIZE) {
+        return BlockIoResult::Invalid;
+    }
+    let offset: usize = block * KERNEL_BLOCK_SIZE;
+    let source: *u8 = (device.address + offset) as *u8;
+    let source_bytes = unsafe { source[0..<KERNEL_BLOCK_SIZE as isize] };
+    slice_copy(destination[0..<KERNEL_BLOCK_SIZE], source_bytes);
+    return BlockIoResult::Ok;
+}
+
+fn block_write(device: MemoryBlockDevice, block: usize,
+               source: [u8; KERNEL_BLOCK_SIZE..])
+        -> BlockIoResult !{unsafe} {
+    if (block >= device.length / KERNEL_BLOCK_SIZE) {
+        return BlockIoResult::Invalid;
+    }
+    let offset: usize = block * KERNEL_BLOCK_SIZE;
+    let destination: *u8 = (device.address + offset) as *u8;
+    let destination_bytes = unsafe {
+        destination[0..<KERNEL_BLOCK_SIZE as isize]
+    };
+    slice_copy(destination_bytes, source[0..<KERNEL_BLOCK_SIZE]);
+    return BlockIoResult::Ok;
+}
+
+fn block_count(device: MemoryBlockDevice) -> usize {
+    return device.length / KERNEL_BLOCK_SIZE;
+}
