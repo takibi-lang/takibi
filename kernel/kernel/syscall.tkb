@@ -8,6 +8,33 @@ const AARCH64_NR_EXIT_GROUP: usize = 94;
 const LINUX_EBADF: usize = 0xFFFFFFFFFFFFFFF7;
 const LINUX_EFAULT: usize = 0xFFFFFFFFFFFFFFF2;
 
+private let mut syscall_heap_start: usize;
+private let mut syscall_heap_limit: usize;
+private let mut syscall_heap_break: usize;
+
+fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
+    syscall_heap_start = heap_start;
+    syscall_heap_limit = heap_limit;
+    syscall_heap_break = heap_start;
+}
+
+fn kernel_user_range_is_mapped(address: usize, length: usize) -> bool {
+    if (length == 0) { return true; }
+    if (address < USER_TEXT_VA || address >= USER_TEXT_VA + 0x200000 ||
+        length > 0x200000 ||
+        address - USER_TEXT_VA > 0x200000 - length) {
+        return false;
+    }
+    let first: usize = (address - USER_TEXT_VA) / PAGE_SIZE;
+    let last: usize = (address - USER_TEXT_VA + length - 1) / PAGE_SIZE;
+    let mut index: usize = first;
+    while (index <= last) {
+        if (index >= 512 || user_pte_read(index) == 0) { return false; }
+        index = index + 1;
+    }
+    return true;
+}
+
 must_use variant InitialUserLoadResult { Loaded; TooLarge; }
 
 fn initial_user_load(text: borrow PageOwner[page])
@@ -30,17 +57,20 @@ fn initial_user_load(text: borrow PageOwner[page])
 fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, elr: usize) -> (usize, usize) {
     let exception_class: usize = (esr >> 26) & 0x3F;
-    if (exception_class != 0x15) { return (0, 0); }
+    if (exception_class != 0x15) {
+        kernel_debug_log("EL0 exception ESR:\n");
+        kernel_debug_hex(esr);
+        kernel_debug_log("EL0 exception ELR:\n");
+        kernel_debug_hex(elr);
+        return (0, 0);
+    }
 
     if (number == AARCH64_NR_WRITE) {
         let fd: usize = x0;
         let address: usize = x1;
         let length: usize = x2;
         if (fd != 1 && fd != 2) { return (1, LINUX_EBADF); }
-        if (address < USER_TEXT_VA || length > PAGE_SIZE) {
-            return (1, LINUX_EFAULT);
-        }
-        if (address - USER_TEXT_VA > PAGE_SIZE - length) {
+        if (kernel_user_range_is_mapped(address, length) == false) {
             return (1, LINUX_EFAULT);
         }
         let mut cursor: *u8 = address as *u8;
@@ -56,5 +86,41 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     if (number == AARCH64_NR_EXIT || number == AARCH64_NR_EXIT_GROUP) {
         return (2, x0);
     }
+    if (number == 96) {
+        // set_tid_address(): this single-process kernel has PID/TID 1.
+        return (1, 1);
+    }
+    if (number == 172 || number == 178) { return (1, 1); }
+    if (number == 173 || (number >= 174 && number <= 177)) {
+        return (1, 0);
+    }
+    if (number == 214) {
+        if (x0 == 0) { return (1, syscall_heap_break); }
+        if (x0 >= syscall_heap_start && x0 <= syscall_heap_limit) {
+            syscall_heap_break = x0;
+        }
+        return (1, syscall_heap_break);
+    }
+    if (number == 222) {
+        let length: usize = x1;
+        if (length == 0 || length > syscall_heap_limit - syscall_heap_break ||
+            length > 0xFFFFFFFFFFFFF000) {
+            return (1, 0xFFFFFFFFFFFFFFFF);
+        }
+        let rounded: usize = (length + PAGE_SIZE - 1) & 0xFFFFFFFFFFFFF000;
+        if (rounded > syscall_heap_limit - syscall_heap_break) {
+            return (1, 0xFFFFFFFFFFFFFFFF);
+        }
+        let result: usize = syscall_heap_break;
+        syscall_heap_break = syscall_heap_break + rounded;
+        return (1, result);
+    }
+    if (number == 215 || number == 226) {
+        // munmap/mprotect: the fixed short-lived process arena is reclaimed
+        // as a unit, and its load-time permissions are not relaxed here.
+        return (1, 0);
+    }
+    kernel_debug_log("unsupported syscall:\n");
+    kernel_debug_hex(number);
     return (0, 0);
 }

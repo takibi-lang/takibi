@@ -8,6 +8,7 @@ private let mut process_image_zero_page: [u8; PAGE_SIZE];
 
 const PROCESS_STACK_L3_INDEX: usize = 511;
 const PROCESS_STACK_LAYOUT_SIZE: usize = 512;
+const PROCESS_HEAP_PAGE_COUNT: usize = 128;
 const AT_PHDR: usize = 3;
 const AT_PHENT: usize = 4;
 const AT_PHNUM: usize = 5;
@@ -22,6 +23,8 @@ linear struct ProcessImagePages[image: usize] {
     private count: usize;
     private entry: usize;
     private stack_pointer: usize;
+    private heap_start: usize;
+    private heap_limit: usize;
 }
 
 fn process_image_record(slot: usize,
@@ -238,6 +241,7 @@ fn process_image_map(plan: DistroElfLoadPlan) -> ProcessImageMapResult {
                                     let mut flags: usize = USER_RW_XN_FLAGS;
                                     if (header.flags == 5) {
                                         flags = USER_TEXT_RX_FLAGS;
+                                        user_code_sync(phys, PAGE_SIZE);
                                     }
                                     user_pte_write(l3_index, phys | flags);
                                     user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
@@ -253,6 +257,34 @@ fn process_image_map(plan: DistroElfLoadPlan) -> ProcessImageMapResult {
                         }
                     }
                 }
+            }
+        }
+    }
+    let heap_first_page: usize = (plan.extent + PAGE_SIZE - 1) / PAGE_SIZE;
+    let heap_last_page: usize = heap_first_page + PROCESS_HEAP_PAGE_COUNT;
+    if (heap_last_page >= PROCESS_STACK_L3_INDEX) {
+        process_image_cleanup(mapped);
+        return ProcessImageMapResult::OutOfMemory;
+    }
+    for l3_index: usize in heap_first_page..<heap_last_page {
+        if (user_pte_read(l3_index) != 0) {
+            process_image_cleanup(mapped);
+            return ProcessImageMapResult::InvalidImage;
+        }
+        match page_alloc() {
+            PageAllocResult::OutOfMemory => {
+                process_image_cleanup(mapped);
+                return ProcessImageMapResult::OutOfMemory;
+            }
+            PageAllocResult::Allocated(heap_page) => {
+                let bytes = page_bytes(heap_page);
+                for i: usize in 0..<4096 { bytes[i] = 0; }
+                let phys: usize = page_physical_address(heap_page);
+                user_pte_write(l3_index, phys | USER_RW_XN_FLAGS);
+                user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
+                let page_index = page_owner_transfer_index(heap_page);
+                process_image_record(mapped, page_index, l3_index);
+                mapped = mapped + 1;
             }
         }
     }
@@ -291,8 +323,10 @@ fn process_image_map(plan: DistroElfLoadPlan) -> ProcessImageMapResult {
     let stack_pointer: usize = USER_TEXT_VA +
                                PROCESS_STACK_L3_INDEX * PAGE_SIZE +
                                PAGE_SIZE - PROCESS_STACK_LAYOUT_SIZE;
+    let heap_start: usize = USER_TEXT_VA + heap_first_page * PAGE_SIZE;
+    let heap_limit: usize = USER_TEXT_VA + heap_last_page * PAGE_SIZE;
     let mut pages: ProcessImagePages[0] = {
-        image, mapped, entry, stack_pointer
+        image, mapped, entry, stack_pointer, heap_start, heap_limit
     };
     return ProcessImageMapResult::Mapped(pages);
 }
@@ -307,6 +341,11 @@ fn process_image_entry(pages: borrow ProcessImagePages[image]) -> usize {
 
 fn process_image_stack_pointer(pages: borrow ProcessImagePages[image]) -> usize {
     return pages.stack_pointer;
+}
+
+fn process_image_heap_range(pages: borrow ProcessImagePages[image])
+        -> (usize, usize) {
+    return (pages.heap_start, pages.heap_limit);
 }
 
 fn process_image_window_is_clear() -> bool {

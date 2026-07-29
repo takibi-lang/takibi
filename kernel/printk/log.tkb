@@ -9,3 +9,14 @@ fn kernel_boot_log(message: *u8) {
 fn kernel_debug_log(message: *u8) {
     uart_puts(message);
 }
+
+fn kernel_debug_hex(value: usize) {
+    let digits: []u8 = "0123456789abcdef" as []u8;
+    uart_puts("0x");
+    for i: usize in 0..<16 {
+        let shift: usize = (15 - i) * 4;
+        let digit: {0..<16 as usize} = (value >> shift) & 0xF;
+        uart_putc(digits[digit]);
+    }
+    uart_putc(0x0A);
+}
