@@ -28,6 +28,26 @@ virtual memory, drivers, syscall boundaries) with the same discipline.
 See `SPEC.md`.** This file is the engineering log -- design rationale, bugs found
 and fixed, and the history behind each decision.
 
+## Maintenance Scope: `kernel/` Only
+
+**All new implementation and maintenance work is restricted to `kernel/`.**
+The standalone Unix-like kernel is the active product surface.  New features,
+bug fixes, tests, fixtures, and target-specific code belong under `kernel/`.
+
+The `examples/` tree is historical heritage.  It records the language and
+bare-metal milestones that led to the standalone kernel, but it is no longer a
+maintained product surface.  Do not add features to it, port new behavior into
+it, refactor it, or update it merely to keep parity with `kernel/`.  Existing
+example build or test failures caused by an intentional kernel-only change do
+not justify modifying `examples/`; report the historical incompatibility
+instead.  Modify an example only when the user explicitly asks for that exact
+historical artifact to be changed.
+
+Repository-level governance documents such as this file may still be updated
+when needed to describe or enforce the maintenance policy.  Do not expand a
+kernel task into compiler, root build-system, or other non-`kernel/` work
+without a separate concrete requirement and explicit user direction.
+
 ## GitHub Issue Policy
 
 GitHub issue titles, issue bodies, and issue comments must be written in English
