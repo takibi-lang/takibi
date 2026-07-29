@@ -78,6 +78,12 @@ must_use variant KernelTcpSendResult {
     Sent(NetRxCanAcquire);
 }
 
+variant TcpReceiveDisposition {
+    Ignore;
+    AckOnly;
+    Payload(usize);
+}
+
 let mut tcp_stream_tx_frame: [u8; 1514];
 
 // Recomputes the TCP checksum over the pseudo-header implied by `ip` and
@@ -612,7 +618,8 @@ fn kernel_tcp_receive_once(ready_in: sink NetRxCanAcquire,
             NetRxAcquire::None(next) => { ready = next; }
             NetRxAcquire::Acquired(acquired) => {
                 let len: i32 = net_rx_len(acquired);
-                let mut payload_length: usize = 0;
+                let mut disposition: TcpReceiveDisposition =
+                    TcpReceiveDisposition::Ignore;
                 if (len >= 55 && len <= 1514) {
                     let len_n: i32 = len;
                     let frame = net_rx_frame(acquired);
@@ -652,30 +659,40 @@ fn kernel_tcp_receive_once(ready_in: sink NetRxCanAcquire,
                                 if (source_port == conn_remote_port &&
                                     destination_port == conn_local_port &&
                                     (tcp[TCP_FLAGS] & TCP_FLAG_ACK) != 0 &&
-                                    sequence == conn_rcv_nxt &&
                                     checksum_fold(checksum_add(
                                         tcp_segment,
                                         checksum_add(pseudo as []u8, 0))) == 0) {
-                                    let data_length: u16 = tcp_len - 20;
-                                    if (data_length >= 1 &&
-                                        data_length <= TCP_MAX_PAYLOAD) {
-                                        let data_length_index: usize =
-                                            data_length as usize;
-                                        if (data_length_index <= 1460) {
-                                            let mut copy_index: usize = 0;
-                                            while (copy_index < data_length_index) {
-                                                let destination_index: usize =
-                                                    copy_index;
-                                                let source_index: usize =
-                                                    54 as usize + copy_index;
-                                                if (destination_index < 1460 &&
-                                                    source_index < 1514) {
-                                                    destination[destination_index] =
-                                                        frame[source_index];
+                                    if (sequence != conn_rcv_nxt) {
+                                        // Duplicate (sequence behind rcv_nxt) and
+                                        // out-of-order (ahead) data both elicit the
+                                        // same cumulative ACK. Neither advances the
+                                        // stream or reaches userspace.
+                                        disposition =
+                                            TcpReceiveDisposition::AckOnly;
+                                    } else {
+                                        let data_length: u16 = tcp_len - 20;
+                                        if (data_length >= 1 &&
+                                            data_length <= TCP_MAX_PAYLOAD) {
+                                            let data_length_index: usize =
+                                                data_length as usize;
+                                            if (data_length_index <= 1460) {
+                                                let mut copy_index: usize = 0;
+                                                while (copy_index < data_length_index) {
+                                                    let destination_index: usize =
+                                                        copy_index;
+                                                    let source_index: usize =
+                                                        54 as usize + copy_index;
+                                                    if (destination_index < 1460 &&
+                                                        source_index < 1514) {
+                                                        destination[destination_index] =
+                                                            frame[source_index];
+                                                    }
+                                                    copy_index = copy_index + 1;
                                                 }
-                                                copy_index = copy_index + 1;
+                                                disposition =
+                                                    TcpReceiveDisposition::Payload(
+                                                        data_length_index);
                                             }
-                                            payload_length = data_length_index;
                                         }
                                     }
                                 }
@@ -683,14 +700,23 @@ fn kernel_tcp_receive_once(ready_in: sink NetRxCanAcquire,
                         }
                     }
                 }
-                if (payload_length != 0) {
-                    conn_rcv_nxt = conn_rcv_nxt + (payload_length as u32);
-                    tcp_received_length = payload_length;
-                    build_receive_ack(net_rx_frame(acquired), 20);
-                    return KernelTcpReceiveResult::Received(net_rx_finish(
-                        acquired, NetRxDisposal::Reply(54)));
-                } else {
-                    ready = net_rx_finish(acquired, NetRxDisposal::Release);
+                match disposition {
+                    TcpReceiveDisposition::Ignore => {
+                        ready = net_rx_finish(
+                            acquired, NetRxDisposal::Release);
+                    }
+                    TcpReceiveDisposition::AckOnly => {
+                        build_receive_ack(net_rx_frame(acquired), 20);
+                        ready = net_rx_finish(
+                            acquired, NetRxDisposal::Reply(54));
+                    }
+                    TcpReceiveDisposition::Payload(payload_length) => {
+                        conn_rcv_nxt = conn_rcv_nxt + (payload_length as u32);
+                        tcp_received_length = payload_length;
+                        build_receive_ack(net_rx_frame(acquired), 20);
+                        return KernelTcpReceiveResult::Received(net_rx_finish(
+                            acquired, NetRxDisposal::Reply(54)));
+                    }
                 }
             }
         }
