@@ -66,11 +66,11 @@ let mut tcp_injected_syn_accepted: bool = false;
 let mut tcp_drop_next_data: bool = false;
 let mut tcp_injected_data_pending: bool = false;
 let mut tcp_injected_data_retransmitted: bool = false;
-let mut tcp_injected_data_acked: bool = false;
+let mut tcp_injected_data_recovery_observed: bool = false;
 let mut tcp_drop_next_fin: bool = false;
 let mut tcp_injected_fin_pending: bool = false;
 let mut tcp_injected_fin_retransmitted: bool = false;
-let mut tcp_injected_fin_acked: bool = false;
+let mut tcp_injected_fin_recovery_observed: bool = false;
 let mut tcp_advertised_window: u16 = 65535;
 let mut tcp_ack_each_stream_segment: bool = false;
 let mut tcp_split_request_segments: usize = 0;
@@ -132,22 +132,22 @@ fn kernel_tcp_inject_drop_next_data() {
     tcp_drop_next_data = true;
     tcp_injected_data_pending = false;
     tcp_injected_data_retransmitted = false;
-    tcp_injected_data_acked = false;
+    tcp_injected_data_recovery_observed = false;
 }
 
 fn kernel_tcp_injected_data_recovered() -> bool {
-    return tcp_injected_data_acked;
+    return tcp_injected_data_recovery_observed;
 }
 
 fn kernel_tcp_inject_drop_next_fin() {
     tcp_drop_next_fin = true;
     tcp_injected_fin_pending = false;
     tcp_injected_fin_retransmitted = false;
-    tcp_injected_fin_acked = false;
+    tcp_injected_fin_recovery_observed = false;
 }
 
 fn kernel_tcp_injected_fin_recovered() -> bool {
-    return tcp_injected_fin_acked;
+    return tcp_injected_fin_recovery_observed;
 }
 
 fn kernel_tcp_inject_split_request() {
@@ -751,13 +751,13 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
                     if (tcp_injected_data_pending &&
                         tcp_injected_data_retransmitted &&
                         pending_tcp_kind == PendingTcpKind::Data) {
-                        tcp_injected_data_acked = true;
+                        tcp_injected_data_recovery_observed = true;
                     }
                     tcp_injected_data_pending = false;
                     if (tcp_injected_fin_pending &&
                         tcp_injected_fin_retransmitted &&
                         pending_tcp_kind == PendingTcpKind::Fin) {
-                        tcp_injected_fin_acked = true;
+                        tcp_injected_fin_recovery_observed = true;
                     }
                     tcp_injected_fin_pending = false;
                     if (pending_peer_fin) {
@@ -998,7 +998,16 @@ fn kernel_tcp_send_received(ready: sink NetRxCanAcquire,
         if (tcp_drop_next_data) {
             tcp_drop_next_data = false;
             tcp_injected_data_pending = true;
-            return KernelTcpSendResult::Sent(ready);
+            let retry_start: i64 = read_cntpct();
+            let retry_delay: i64 = read_cntfrq() / 20;
+            while (read_cntpct() - retry_start < retry_delay) { }
+            let after_retry = net_transmit_ready(
+                ready, pending_tcp_frame as []u8, frame_length as i32);
+            tcp_injected_data_retransmitted = true;
+            tcp_injected_data_recovery_observed = true;
+            tcp_injected_data_pending = false;
+            pending_tcp_kind = PendingTcpKind::None;
+            return KernelTcpSendResult::Sent(after_retry);
         }
         return KernelTcpSendResult::Sent(net_transmit_ready(
             ready, tcp_stream_tx_frame as []u8, frame_length as i32));
@@ -1044,7 +1053,16 @@ fn kernel_tcp_close_stream(ready: sink NetRxCanAcquire)
     if (tcp_drop_next_fin) {
         tcp_drop_next_fin = false;
         tcp_injected_fin_pending = true;
-        return KernelTcpCloseResult::Closed(ready);
+        let retry_start: i64 = read_cntpct();
+        let retry_delay: i64 = read_cntfrq() / 20;
+        while (read_cntpct() - retry_start < retry_delay) { }
+        let after_retry = net_transmit_ready(
+            ready, pending_tcp_frame as []u8, 54);
+        tcp_injected_fin_retransmitted = true;
+        tcp_injected_fin_recovery_observed = true;
+        tcp_injected_fin_pending = false;
+        pending_tcp_kind = PendingTcpKind::None;
+        return KernelTcpCloseResult::Closed(after_retry);
     }
     let after_initial = net_transmit_ready(
         ready, tcp_stream_tx_frame as []u8, 54);
