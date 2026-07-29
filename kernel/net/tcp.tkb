@@ -906,12 +906,5 @@ fn kernel_tcp_close_stream(ready: sink NetRxCanAcquire)
     conn_snd_nxt = conn_snd_nxt + 1;
     let after_initial = net_transmit_ready(
         ready, tcp_stream_tx_frame as []u8, 54);
-    match kernel_tcp_wait_for_ack(after_initial, conn_snd_nxt, 54) {
-        KernelTcpAckResult::Acked(after_ack) => {
-            return KernelTcpCloseResult::Closed(after_ack);
-        }
-        KernelTcpAckResult::Exhausted(after_retries) => {
-            return KernelTcpCloseResult::Closed(after_retries);
-        }
-    }
+    return KernelTcpCloseResult::Closed(after_initial);
 }
