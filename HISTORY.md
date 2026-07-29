@@ -15,6 +15,24 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: Enter musl and Run the Distribution HTTPd Applet
+
+The combined 324-page process now transfers EL0 control to musl at its biased
+entry, dynamically links the pinned Alpine `busybox-httpd` PIE, dispatches its
+real `httpd` applet with `--help`, exits through Linux `exit_group(94)` with
+status zero, and returns every mapping to the page owner pool. Real RPi5 UART
+contains BusyBox's distribution usage text and the dedicated loader view
+requires a clean zero-status return.
+
+A host trace of one normal foreground HTTP request established that BusyBox
+calls `clone` after `accept` and handles the request in a child. That process
+model is intentionally not smuggled into this entry milestone. The next
+server fixture will use BusyBox's documented `-i` inetd mode with an already
+accepted socket, providing a real request/response path in one process before
+general process cloning is implemented. The full RPi5 run continued through
+all 13 UART views and every Ethernet/storage check; the initial reported
+loader-view failure was only its filter omitting the new `entry:` evidence.
+
 ### 2026-07-29: Build the Combined HTTPd Heap, Stack, and musl Auxv
 
 The co-located HTTPd and musl segment set now receives one shared 128-page

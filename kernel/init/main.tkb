@@ -506,8 +506,28 @@ fn main() {
                                             ProcessImagePairProbeResult::Invalid => {
                                                 kernel_boot_log("httpd map: combined invalid\n");
                                             }
-                                            ProcessImagePairProbeResult::Verified => {
+                                            ProcessImagePairProbeResult::Ready(dynamic_pages) => {
                                                 kernel_boot_log("httpd map: combined pages=324 musl-bias=0x40000 auxv ready clean\n");
+                                                let (dynamic_heap_start,
+                                                     dynamic_heap_limit) =
+                                                    process_image_heap_range(
+                                                        dynamic_pages);
+                                                kernel_syscall_process_configure(
+                                                    dynamic_heap_start,
+                                                    dynamic_heap_limit);
+                                                let dynamic_status: usize =
+                                                    run_initial_user(
+                                                        process_image_entry(
+                                                            dynamic_pages),
+                                                        process_image_stack_pointer(
+                                                            dynamic_pages));
+                                                process_image_unmap(dynamic_pages);
+                                                if (dynamic_status == 0 &&
+                                                    process_image_window_is_clear()) {
+                                                    kernel_boot_log("httpd entry: musl+busybox help exit=0 clean\n");
+                                                } else {
+                                                    kernel_boot_log("httpd entry: failed\n");
+                                                }
                                             }
                                         }
                                     }
