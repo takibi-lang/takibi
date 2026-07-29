@@ -1,1 +1,1 @@
-^ext2 (image:|mount:|lookup:|read:)
+^ext2 (image:|mount:|lookup:|read:|write:|symlink:)

@@ -19,11 +19,15 @@ must_use variant Ext2MountResult { Invalid; Mounted(Ext2Mount); }
 must_use variant Ext2InodeResult { Invalid; Inode(Ext2Inode); }
 must_use variant Ext2LookupResult { Invalid; NotFound; Found(usize); }
 must_use variant Ext2ReadResult { Invalid; Read(usize); }
+must_use variant Ext2WriteResult { Invalid; Written; }
+must_use variant Ext2SymlinkResult { Invalid; Read(usize); }
 
 struct Ext2Inode {
     private mode: usize;
     private size: usize;
     private direct_block0: usize;
+    private table_block: usize;
+    private table_offset: usize;
 }
 
 fn ext2_u16(bytes: borrow *u8, offset: usize) -> u16 {
@@ -115,11 +119,17 @@ fn ext2_read_inode(mount: Ext2Mount, inode_number: usize)
     let mode: usize = ext2_u16(inode_bytes, 0) as usize;
     let size: usize = ext2_u32(inode_bytes, 4) as usize;
     let direct_block0: usize = ext2_u32(inode_bytes, 40) as usize;
-    if (mode == 0 || size > KERNEL_BLOCK_SIZE || direct_block0 == 0 ||
-        direct_block0 >= mount.filesystem_blocks) {
+    let file_type: usize = mode & 0xF000;
+    if (mode == 0 || size > KERNEL_BLOCK_SIZE ||
+        (file_type != 0x8000 && file_type != 0x4000 && file_type != 0xA000) ||
+        ((file_type == 0x8000 || file_type == 0x4000) &&
+         (direct_block0 == 0 || direct_block0 >= mount.filesystem_blocks)) ||
+        (file_type == 0xA000 && size > 60)) {
         return Ext2InodeResult::Invalid;
     }
-    let mut inode: Ext2Inode = { mode, size, direct_block0 };
+    let mut inode: Ext2Inode = {
+        mode, size, direct_block0, table_block, offset
+    };
     return Ext2InodeResult::Inode(inode);
 }
 
@@ -191,6 +201,58 @@ fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
             let target = unsafe { destination[0..<inode.size] };
             slice_copy(target, source);
             return Ext2ReadResult::Read(inode.size);
+        }
+    }
+}
+
+fn ext2_write_small_file(mount: Ext2Mount, inode_number: usize,
+                         source: []u8)
+        -> Ext2WriteResult !{unsafe} {
+    match ext2_read_inode(mount, inode_number) {
+        Ext2InodeResult::Invalid => { return Ext2WriteResult::Invalid; }
+        Ext2InodeResult::Inode(inode) => {
+            // This first mutation contract overwrites one already allocated
+            // direct block without changing i_size. Allocation and truncate
+            // become necessary only when a real caller requests them.
+            if ((inode.mode & 0xF000) != 0x8000 ||
+                source.len != inode.size) {
+                return Ext2WriteResult::Invalid;
+            }
+            for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_file_block[i] = 0; }
+            let file_bytes = ext2_file_block as []u8;
+            let target = unsafe { file_bytes[0..<inode.size] };
+            slice_copy(target, source);
+            match block_write(mount.device, inode.direct_block0,
+                              ext2_file_block as []u8) {
+                BlockIoResult::Invalid => { return Ext2WriteResult::Invalid; }
+                BlockIoResult::Ok => { return Ext2WriteResult::Written; }
+            }
+        }
+    }
+}
+
+fn ext2_read_fast_symlink(mount: Ext2Mount, inode_number: usize,
+                          destination: []u8)
+        -> Ext2SymlinkResult !{unsafe} {
+    match ext2_read_inode(mount, inode_number) {
+        Ext2InodeResult::Invalid => { return Ext2SymlinkResult::Invalid; }
+        Ext2InodeResult::Inode(inode) => {
+            if ((inode.mode & 0xF000) != 0xA000 || inode.size > 60 ||
+                inode.size > destination.len) {
+                return Ext2SymlinkResult::Invalid;
+            }
+            match block_read(mount.device, inode.table_block,
+                             ext2_metadata_block as []u8) {
+                BlockIoResult::Invalid => { return Ext2SymlinkResult::Invalid; }
+                BlockIoResult::Ok => { }
+            }
+            let inode_pointer: *u8 =
+                (ext2_metadata_block as *u8) + (inode.table_offset as isize);
+            let inline_target: *u8 = inode_pointer + 40;
+            let source = unsafe { inline_target[0..<inode.size as isize] };
+            let target = unsafe { destination[0..<inode.size] };
+            slice_copy(target, source);
+            return Ext2SymlinkResult::Read(inode.size);
         }
     }
 }

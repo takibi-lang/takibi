@@ -66,3 +66,13 @@ initial stack and fixed short-lived heap. Alpine BusyBox runs
 through syscall 93 with status zero. All 401 image, heap, and stack pages sit
 under one linear `ProcessImagePages` teardown obligation and are returned
 before the smaller syscall fixture is created.
+
+The first ext2 slice is also active on RPi5. The build creates a checked 1 MiB
+RAM fixture with `mke2fs`, populates it with `e2mkdir`/`e2cp`, and embeds it as
+a writable image. The filesystem core reaches it only through the 1 KiB block
+interface in `kernel/drivers/block/`. It validates the superblock and group
+descriptor, decodes the inode table, walks the root directory, reads a regular
+file, overwrites an existing same-size single-block file, and resolves a fast
+symlink. Block allocation, truncation, indirect blocks, multi-group images,
+and a VFS/syscall binding remain deferred until a concrete caller requires
+each operation.
