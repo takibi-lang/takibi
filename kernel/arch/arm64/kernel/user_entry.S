@@ -94,6 +94,21 @@ initial_user_payload:
     svc     #0
     cmp     x0, #19
     b.ne    .Luser_fail
+    mov     x0, #5
+    adr     x1, .Llarge_socket_response
+    mov     x2, #1461
+    mov     x8, #64
+    svc     #0
+    cmp     x0, #1460
+    b.ne    .Luser_fail
+    mov     x0, #5
+    adr     x1, .Llarge_socket_response
+    add     x1, x1, #1460
+    mov     x2, #1
+    mov     x8, #64
+    svc     #0
+    cmp     x0, #1
+    b.ne    .Luser_fail
     add     sp, sp, #32
     mov     x0, #5
     mov     x8, #57
@@ -130,6 +145,8 @@ initial_user_payload:
     .quad   0
 .Lsocket_response:
     .ascii  "HTTP/1.0 200 OK\r\n\r\n"
+.Llarge_socket_response:
+    .fill   1461, 1, 0x5a
 initial_user_payload_end:
 
     .section .text, "ax"

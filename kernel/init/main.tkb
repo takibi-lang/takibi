@@ -661,6 +661,9 @@ fn main() {
                         if (kernel_syscall_socket_evidence()) {
                             kernel_boot_log("linux socket syscalls: socket bind listen accept read write close ok port=8080\n");
                         }
+                        if (kernel_syscall_partial_write_evidence()) {
+                            kernel_boot_log("linux socket partial write: 1460+1 ok\n");
+                        }
                         if (kernel_tcp_injected_data_recovered()) {
                             kernel_boot_log("httpd server: data drop retransmit ok\n");
                         }

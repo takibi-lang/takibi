@@ -1,1 +1,2 @@
 linux socket syscalls: socket bind listen accept read write close ok port=8080
+linux socket partial write: 1460+1 ok

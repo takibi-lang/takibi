@@ -42,6 +42,7 @@ private let mut syscall_connected_open: bool;
 private let mut syscall_connected_close_calls: usize;
 private let mut syscall_connected_read_calls: usize;
 private let mut syscall_connected_write_calls: usize;
+private let mut syscall_partial_write_observed: bool;
 private let mut syscall_socket_buffer: [u8; 1460];
 private let mut syscall_socket_buffer_length: usize;
 private let mut syscall_socket_buffer_offset: usize;
@@ -80,6 +81,7 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_connected_close_calls = 0;
     syscall_connected_read_calls = 0;
     syscall_connected_write_calls = 0;
+    syscall_partial_write_observed = false;
     syscall_socket_buffer_length = 0;
     syscall_socket_buffer_offset = 0;
     syscall_inetd_mode = false;
@@ -145,10 +147,14 @@ fn kernel_syscall_socket_evidence() -> bool {
            syscall_connected_open == false &&
            syscall_connected_close_calls == 1 &&
            syscall_connected_read_calls == 2 &&
-           syscall_connected_write_calls == 1 &&
+           syscall_connected_write_calls == 3 &&
            syscall_socket_close_calls == 1 &&
            syscall_socket_state == KernelSocketState::Closed &&
            syscall_socket_port == 8080;
+}
+
+fn kernel_syscall_partial_write_evidence() -> bool {
+    return syscall_partial_write_observed;
 }
 
 // Returns 1 for /hello.txt, 2 for /mutable.txt, 3 for index.html (absolute
@@ -252,6 +258,9 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             }
             let mut amount: usize = length;
             if (amount > 1460) { amount = 1460; }
+            if (amount < length) {
+                syscall_partial_write_observed = true;
+            }
             let received_length: usize = syscall_socket_buffer_length;
             match network_capability_take() {
                 NetworkCapabilityTakeResult::Empty => {
