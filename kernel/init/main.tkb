@@ -7,7 +7,7 @@ use "kernel/mm/process_image.tkb";
 use "kernel/printk/log.tkb";
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/platform/rpi5/usb_xhci.tkb";
-use "kernel/net/icmp.tkb";
+use "kernel/net/tcp.tkb";
 
 private let mut ext2_read_fixture: [u8; 32];
 private let mut ext2_symlink_fixture: [u8; 64];
@@ -177,6 +177,14 @@ fn main() {
                         }
                         KernelIcmpResult::Replied(icmp_ready) => {
                             kernel_boot_log("rp1 gem: icmp echo reply ok ip=192.168.20.2\n");
+                            match kernel_tcp_echo_check(icmp_ready) {
+                                KernelTcpResult::TimedOut(tcp_ready) => {
+                                    kernel_boot_log("rp1 gem: tcp timeout\n");
+                                }
+                                KernelTcpResult::Verified(tcp_ready) => {
+                                    kernel_boot_log("rp1 gem: tcp handshake echo close reconnect ok\n");
+                                }
+                            }
                         }
                     }
                 }

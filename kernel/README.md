@@ -34,8 +34,10 @@ privileged raw socket on `ETH_TEST_IFACE` (default `enp5s0`) to prove that a
 request for another address stays unanswered and that an ARP request for
 `192.168.20.2` receives the exact reply. The same owned RX path then rejects
 an ICMP request for another IP and one with a corrupt checksum before
-returning a checksum-correct echo reply. Linux socket boundaries are a
-subsequent milestone.
+returning a checksum-correct echo reply. The capability then enters a
+single-connection TCP state machine on port 7, covering checksum rejection,
+SYN options, handshake, data echo, FIN close, and reconnect. Linux socket
+boundaries are a subsequent milestone.
 
 The RPi5 runner captures UART once per kernel boot, then projects that one
 transcript through every `kernel/tests/rpi5/views/*.filter`. Each projection

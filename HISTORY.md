@@ -15,6 +15,27 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: Standalone Kernel Completes a TCP Echo Lifecycle
+
+The initialized GEM receive capability now continues from ARP and ICMP into
+a kernel-owned single-connection TCP state machine. It implements LISTEN,
+SYN_RCVD, ESTABLISHED, and LAST_ACK with remote tuple and sequence tracking,
+IPv4/TCP checksum validation, SYN options, one-segment PSH/ACK echo, combined
+FIN/ACK close, and slot reuse. Its `must_use` result returns the RX capability
+on either verified completion or timeout.
+
+The broader prototype's variable TCP-header data path needed an explicitly
+documented relational `unsafe` slice. This kernel milestone instead accepts
+data only with the presently required 20-byte TCP header; the payload remains
+in place while the proven full TCP segment is rewritten. No unsafe block was
+carried into `kernel/net/tcp.tkb`, and the complete kernel remains
+`--forbid-trap` clean.
+
+Real RPi5 hardware passed wrong-port silence, corrupt-checksum silence,
+options-bearing SYN, three-way handshake, data echo, close, and reconnect.
+ARP, ICMP, TCP, all 11 UART views, USB ext2, and BusyBox completed in one
+boot.
+
 ### 2026-07-29: Standalone Kernel Answers ICMP Echo
 
 The network integration path now transfers the GEM RX readiness capability

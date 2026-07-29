@@ -1,0 +1,45 @@
+const IP_TOTAL_LEN: usize = 2;
+const IP_TTL: usize = 8;
+const IP_PROTOCOL: usize = 9;
+const IP_CHECKSUM: usize = 10;
+const IP_SRC: usize = 12;
+const IP_DST: usize = 16;
+
+const TCP_SRC_PORT: usize = 0;
+const TCP_DST_PORT: usize = 2;
+const TCP_SEQ: usize = 4;
+const TCP_ACK: usize = 8;
+const TCP_DATA_OFFSET: usize = 12;
+const TCP_FLAGS: usize = 13;
+const TCP_WINDOW: usize = 14;
+const TCP_CHECKSUM: usize = 16;
+const TCP_URGENT: usize = 18;
+
+const TCP_FLAG_FIN: u8 = 0x01;
+const TCP_FLAG_SYN: u8 = 0x02;
+const TCP_FLAG_RST: u8 = 0x04;
+const TCP_FLAG_PSH: u8 = 0x08;
+const TCP_FLAG_ACK: u8 = 0x10;
+const PROTO_TCP: u8 = 6;
+const TCP_INITIAL_SEQ: u32 = 0x00001000;
+
+fn read_u16be(bytes: borrow [u8; 2..]) -> i32 {
+    return ((bytes[0] as i32) << 8) | (bytes[1] as i32);
+}
+
+fn write_u16be(bytes: borrow [u8; 2..], value: i32) {
+    bytes[0] = (value >> 8) as u8;
+    bytes[1] = value as u8;
+}
+
+fn read_u32be(bytes: borrow [u8; 4..]) -> i32 {
+    return ((bytes[0] as i32) << 24) | ((bytes[1] as i32) << 16) |
+           ((bytes[2] as i32) << 8) | (bytes[3] as i32);
+}
+
+fn write_u32be(bytes: borrow [u8; 4..], value: i32) {
+    bytes[0] = (value >> 24) as u8;
+    bytes[1] = (value >> 16) as u8;
+    bytes[2] = (value >> 8) as u8;
+    bytes[3] = value as u8;
+}
