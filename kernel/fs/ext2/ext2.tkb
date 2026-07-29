@@ -7,7 +7,7 @@ private let mut ext2_metadata_block: [u8; KERNEL_BLOCK_SIZE];
 private let mut ext2_file_block: [u8; KERNEL_BLOCK_SIZE];
 
 struct Ext2Mount {
-    private device: MemoryBlockDevice;
+    private device: KernelBlockDevice;
     private inode_count: usize;
     private filesystem_blocks: usize;
     private inodes_per_group: usize;
@@ -44,7 +44,7 @@ fn ext2_u32(bytes: borrow *u8, offset: usize) -> u32 {
            ((bytes[(offset + 3) as isize] as u32) << 24);
 }
 
-fn ext2_mount(device: MemoryBlockDevice) -> Ext2MountResult {
+fn ext2_mount(device: KernelBlockDevice) -> Ext2MountResult {
     match block_read(device, EXT2_SUPERBLOCK_BLOCK,
                      ext2_metadata_block as []u8) {
         BlockIoResult::Invalid => { return Ext2MountResult::Invalid; }

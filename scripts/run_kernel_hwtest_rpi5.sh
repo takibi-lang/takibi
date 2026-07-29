@@ -52,7 +52,7 @@ fi
 
 # USB Mass Storage may briefly report Not Ready after enumeration. Keep the
 # single capture alive through its bounded readiness loop and ext2 checks.
-sleep "${RPI5_KERNEL_CAPTURE_SECONDS:-10}"
+sleep "${RPI5_KERNEL_CAPTURE_SECONDS:-60}"
 cleanup
 trap - EXIT INT TERM HUP
 tr -d '\r' <"$UART_LOG" >"$UART_LOG.normalized"

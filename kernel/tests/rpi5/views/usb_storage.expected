@@ -1,1 +1,3 @@
 usb msc: ready sector=512
+usb ext2: provisioned blocks=1024
+usb ext2: mounted /hello.txt ok

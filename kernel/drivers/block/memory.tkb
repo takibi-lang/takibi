@@ -2,56 +2,128 @@ use "kernel/user/ext2_image_extern.tkb";
 
 const KERNEL_BLOCK_SIZE: usize = 1024;
 
-struct MemoryBlockDevice {
+struct KernelBlockDevice {
+    // 0 = embedded memory image, 1 = USB Mass Storage. Kept as a private
+    // representation byte because the current backend rejects matching an
+    // enum stored in a struct field when lowering LLVM IR.
+    private backend: u8;
     private address: usize;
     private length: usize;
 }
 
-must_use variant MemoryBlockDeviceResult {
+must_use variant KernelBlockDeviceResult {
     Invalid;
-    Ready(MemoryBlockDevice);
+    Ready(KernelBlockDevice);
 }
 
 must_use variant BlockIoResult { Invalid; Ok; }
+must_use variant BlockCopyResult { Invalid; Copied; }
 
-fn memory_block_device_ext2() -> MemoryBlockDeviceResult {
+private let mut block_copy_buffer: [u8; KERNEL_BLOCK_SIZE];
+
+fn memory_block_device_ext2() -> KernelBlockDeviceResult {
     let address: usize = kernel_ext2_image_addr();
     let length: usize = kernel_ext2_image_len();
     if (address == 0 || length == 0 || length % KERNEL_BLOCK_SIZE != 0) {
-        return MemoryBlockDeviceResult::Invalid;
+        return KernelBlockDeviceResult::Invalid;
     }
-    let mut device: MemoryBlockDevice = { address, length };
-    return MemoryBlockDeviceResult::Ready(device);
+    let mut device: KernelBlockDevice = {
+        0, address, length
+    };
+    return KernelBlockDeviceResult::Ready(device);
 }
 
-fn block_read(device: MemoryBlockDevice, block: usize,
+fn usb_mass_storage_block_device() -> KernelBlockDeviceResult {
+    match disk_status() {
+        DiskIoResult::Err(error) => {
+            return KernelBlockDeviceResult::Invalid;
+        }
+        DiskIoResult::Ok => { }
+    }
+    // Deliberately expose only the first 1 MiB. This is exactly the fixture
+    // extent and bounds every destructive write far below the real medium's
+    // capacity until partition/device ownership policy exists.
+    let mut device: KernelBlockDevice = {
+        1, 0, 1048576
+    };
+    return KernelBlockDeviceResult::Ready(device);
+}
+
+fn block_read(device: KernelBlockDevice, block: usize,
               destination: [u8; KERNEL_BLOCK_SIZE..])
         -> BlockIoResult !{unsafe} {
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }
-    let offset: usize = block * KERNEL_BLOCK_SIZE;
-    let source: *u8 = (device.address + offset) as *u8;
-    let source_bytes = unsafe { source[0..<KERNEL_BLOCK_SIZE as isize] };
-    slice_copy(destination[0..<KERNEL_BLOCK_SIZE], source_bytes);
-    return BlockIoResult::Ok;
+    if (device.backend == 0) {
+            let offset: usize = block * KERNEL_BLOCK_SIZE;
+            let source: *u8 = (device.address + offset) as *u8;
+            let source_bytes = unsafe {
+                source[0..<KERNEL_BLOCK_SIZE as isize]
+            };
+            slice_copy(destination[0..<KERNEL_BLOCK_SIZE], source_bytes);
+            return BlockIoResult::Ok;
+    } else {
+            let sector: u32 = (block * 2) as u32;
+            let target: *u8 = destination as *u8;
+            match disk_read(sector, target) {
+                DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
+                DiskIoResult::Ok => { }
+            }
+            match disk_read(sector + 1, target + 512) {
+                DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
+                DiskIoResult::Ok => { return BlockIoResult::Ok; }
+            }
+    }
 }
 
-fn block_write(device: MemoryBlockDevice, block: usize,
+fn block_write(device: KernelBlockDevice, block: usize,
                source: [u8; KERNEL_BLOCK_SIZE..])
         -> BlockIoResult !{unsafe} {
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }
-    let offset: usize = block * KERNEL_BLOCK_SIZE;
-    let destination: *u8 = (device.address + offset) as *u8;
-    let destination_bytes = unsafe {
-        destination[0..<KERNEL_BLOCK_SIZE as isize]
-    };
-    slice_copy(destination_bytes, source[0..<KERNEL_BLOCK_SIZE]);
-    return BlockIoResult::Ok;
+    if (device.backend == 0) {
+            let offset: usize = block * KERNEL_BLOCK_SIZE;
+            let destination: *u8 = (device.address + offset) as *u8;
+            let destination_bytes = unsafe {
+                destination[0..<KERNEL_BLOCK_SIZE as isize]
+            };
+            slice_copy(destination_bytes, source[0..<KERNEL_BLOCK_SIZE]);
+            return BlockIoResult::Ok;
+    } else {
+            let sector: u32 = (block * 2) as u32;
+            let bytes: *u8 = source as *u8;
+            match disk_write(sector, bytes) {
+                DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
+                DiskIoResult::Ok => { }
+            }
+            match disk_write(sector + 1, bytes + 512) {
+                DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
+                DiskIoResult::Ok => { return BlockIoResult::Ok; }
+            }
+    }
 }
 
-fn block_count(device: MemoryBlockDevice) -> usize {
+fn block_count(device: KernelBlockDevice) -> usize {
     return device.length / KERNEL_BLOCK_SIZE;
+}
+
+fn block_copy(source: KernelBlockDevice, destination: KernelBlockDevice,
+              count: usize) -> BlockCopyResult {
+    if (count == 0 || count > block_count(source) ||
+        count > block_count(destination)) {
+        return BlockCopyResult::Invalid;
+    }
+    for block: usize in 0..<count {
+        match block_read(source, block, block_copy_buffer as []u8) {
+            BlockIoResult::Invalid => { return BlockCopyResult::Invalid; }
+            BlockIoResult::Ok => { }
+        }
+        match block_write(destination, block, block_copy_buffer as []u8) {
+            BlockIoResult::Invalid => { return BlockCopyResult::Invalid; }
+            BlockIoResult::Ok => { }
+        }
+    }
+    return BlockCopyResult::Copied;
 }

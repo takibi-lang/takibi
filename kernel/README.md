@@ -20,6 +20,12 @@ make kernelcheck       build and integration-test every maintained target
 cable, and the resident RPi5 JTAG stub, just like the examples hardware lane.
 A build-only result is never reported as an RPi5 integration pass.
 
+WARNING: `kernelcheck-rpi5` overwrites the first 1 MiB of the USB Mass Storage
+device attached to the RPi5 with the generated ext2 fixture. Attach only the
+project's dedicated sacrificial test drive. The kernel block adapter exposes
+exactly those first 1024 1-KiB blocks, bounding this bring-up milestone's
+destructive scope independently of the physical device capacity.
+
 The RPi5 runner captures UART once per kernel boot, then projects that one
 transcript through every `kernel/tests/rpi5/views/*.filter`. Each projection
 is compared exactly with the same-named `.expected` file. This lets boot,
@@ -76,3 +82,11 @@ file, overwrites an existing same-size single-block file, and resolves a fast
 symlink. Block allocation, truncation, indirect blocks, multi-group images,
 and a VFS/syscall binding remain deferred until a concrete caller requires
 each operation.
+
+The same ext2 core now mounts the RPi5's real USB Mass Storage device. The
+standalone RP1 xHCI/Bulk-Only/SCSI driver reports 512-byte sectors; the USB
+block adapter combines each adjacent sector pair into the filesystem core's
+1 KiB block contract. During `kernelcheck-rpi5`, the checked embedded image
+is copied into the deliberately bounded first-1-MiB device view, then mounted
+and `/hello.txt` is looked up and read back from USB. The adapter intentionally
+does not expose the rest of the physical medium yet.

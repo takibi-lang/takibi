@@ -21,13 +21,68 @@ fn main() {
         }
         DiskIoResult::Ok => {
             kernel_boot_log("usb msc: ready sector=512\n");
+            match memory_block_device_ext2() {
+                KernelBlockDeviceResult::Invalid => {
+                    kernel_boot_log("usb ext2: source invalid\n");
+                }
+                KernelBlockDeviceResult::Ready(source_device) => {
+                    match usb_mass_storage_block_device() {
+                        KernelBlockDeviceResult::Invalid => {
+                            kernel_boot_log("usb ext2: device invalid\n");
+                        }
+                        KernelBlockDeviceResult::Ready(usb_device) => {
+                            match block_copy(source_device, usb_device, 1024) {
+                                BlockCopyResult::Invalid => {
+                                    kernel_boot_log("usb ext2: provision failed\n");
+                                }
+                                BlockCopyResult::Copied => {
+                                    kernel_boot_log("usb ext2: provisioned blocks=1024\n");
+                                    match ext2_mount(usb_device) {
+                                        Ext2MountResult::Invalid => {
+                                            kernel_boot_log("usb ext2: mount failed\n");
+                                        }
+                                        Ext2MountResult::Mounted(usb_mount) => {
+                                            match ext2_lookup_root(
+                                                    usb_mount,
+                                                    "hello.txt" as []u8) {
+                                                Ext2LookupResult::Invalid => {
+                                                    kernel_boot_log("usb ext2: lookup failed\n");
+                                                }
+                                                Ext2LookupResult::NotFound => {
+                                                    kernel_boot_log("usb ext2: hello not found\n");
+                                                }
+                                                Ext2LookupResult::Found(usb_inode) => {
+                                                    match ext2_read_small_file(
+                                                            usb_mount, usb_inode,
+                                                            ext2_read_fixture as []u8) {
+                                                        Ext2ReadResult::Invalid => {
+                                                            kernel_boot_log("usb ext2: read failed\n");
+                                                        }
+                                                        Ext2ReadResult::Read(usb_length) => {
+                                                            if (usb_length == 16 &&
+                                                                slice_eq(ext2_read_fixture[0..<16],
+                                                                         "hello from ext2\n" as []u8)) {
+                                                                kernel_boot_log("usb ext2: mounted /hello.txt ok\n");
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     match memory_block_device_ext2() {
-        MemoryBlockDeviceResult::Invalid => {
+        KernelBlockDeviceResult::Invalid => {
             kernel_boot_log("ext2 image: invalid\n");
         }
-        MemoryBlockDeviceResult::Ready(device) => {
+        KernelBlockDeviceResult::Ready(device) => {
             match ext2_mount(device) {
                 Ext2MountResult::Invalid => {
                     kernel_boot_log("ext2 mount: invalid\n");
