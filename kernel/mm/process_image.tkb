@@ -7,6 +7,7 @@ private let mut image_l3_indices: [usize; BOOT_PAGE_COUNT];
 private let mut process_image_zero_page: [u8; PAGE_SIZE];
 
 const PROCESS_STACK_L3_INDEX: usize = 511;
+const PROCESS_DYNAMIC_STACK_FIRST_L3_INDEX: usize = 504;
 const PROCESS_STACK_LAYOUT_SIZE: usize = 512;
 const PROCESS_HEAP_PAGE_COUNT: usize = 128;
 const AT_PHDR: usize = 3;
@@ -141,7 +142,7 @@ fn process_dynamic_prepare_stack(page: borrow PageOwner[page],
     let argv0_address: usize = virtual_base + 320;
     let words: *u64 = physical_base as *u64;
 
-    // First dynamic-entry probe: argv={"busybox-httpd","httpd","--help"}.
+    // Single-process server: argv={"busybox-httpd","httpd","-i"}.
     words[0] = 3;
     words[1] = argv0_address as u64;
     words[2] = (virtual_base + 336) as u64;
@@ -173,14 +174,14 @@ fn process_dynamic_prepare_stack(page: borrow PageOwner[page],
     slice_copy(unsafe { tail[16 as isize..<30 as isize] },
                "busybox-httpd\0" as []u8);
     slice_copy(unsafe { tail[32 as isize..<38 as isize] }, "httpd\0" as []u8);
-    slice_copy(unsafe { tail[40 as isize..<47 as isize] }, "--help\0" as []u8);
+    slice_copy(unsafe { tail[40 as isize..<43 as isize] }, "-i\0" as []u8);
 
     if (words[0] != 3 || words[4] != 0 || words[5] != 0 ||
         words[9] != (USER_TEXT_VA + application.program_offset) as u64 ||
         words[15] != (USER_TEXT_VA + interpreter_bias) as u64 ||
         words[17] != (USER_TEXT_VA + application.entry) as u64 ||
         words[31] != argv0_address as u64 || words[32] != 0 ||
-        tail[29] != 0 || tail[37] != 0 || tail[46] != 0) {
+        tail[29] != 0 || tail[37] != 0 || tail[42] != 0) {
         return ProcessImageStackResult::Invalid;
     }
     return ProcessImageStackResult::Ready;
@@ -377,7 +378,7 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                     let heap_last_page: usize =
                         heap_first_page + PROCESS_HEAP_PAGE_COUNT;
                     if (total != 195 ||
-                        heap_last_page >= PROCESS_STACK_L3_INDEX) {
+                        heap_last_page >= PROCESS_DYNAMIC_STACK_FIRST_L3_INDEX) {
                         process_image_cleanup(total);
                         return ProcessImagePairProbeResult::Invalid;
                     }
@@ -409,6 +410,36 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                                     page_owner_transfer_index(heap_page);
                                 process_image_record(
                                     mapped, page_index, l3_index);
+                                mapped = mapped + 1;
+                            }
+                        }
+                    }
+                    // musl and BusyBox httpd use more than one page while
+                    // parsing a request. Keep the argument/auxv layout in the
+                    // top page and map a small contiguous stack below it.
+                    for l3_index: usize in PROCESS_DYNAMIC_STACK_FIRST_L3_INDEX..<PROCESS_STACK_L3_INDEX {
+                        if (user_pte_read(l3_index) != 0) {
+                            process_image_cleanup(mapped);
+                            return ProcessImagePairProbeResult::Invalid;
+                        }
+                        match page_alloc() {
+                            PageAllocResult::OutOfMemory => {
+                                process_image_cleanup(mapped);
+                                return ProcessImagePairProbeResult::Invalid;
+                            }
+                            PageAllocResult::Allocated(stack_page) => {
+                                let bytes = page_bytes(stack_page);
+                                for i: usize in 0..<4096 { bytes[i] = 0; }
+                                let phys: usize = page_physical_address(stack_page);
+                                user_pte_write(l3_index, phys | USER_RW_XN_FLAGS);
+                                user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
+                                if (mapped >= 512) {
+                                    page_free(stack_page);
+                                    process_image_cleanup(mapped);
+                                    return ProcessImagePairProbeResult::Invalid;
+                                }
+                                let page_index = page_owner_transfer_index(stack_page);
+                                process_image_record(mapped, page_index, l3_index);
                                 mapped = mapped + 1;
                             }
                         }
@@ -450,7 +481,7 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                             }
                         }
                     }
-                    if (mapped == 324) {
+                    if (mapped == 331) {
                         let image: usize @ 1 = 1;
                         let entry: usize = USER_TEXT_VA + interpreter_bias +
                                            interpreter.entry;

@@ -43,6 +43,11 @@ private let mut syscall_connected_close_calls: usize;
 private let mut syscall_connected_read_calls: usize;
 private let mut syscall_connected_write_calls: usize;
 private let mut syscall_socket_buffer: [u8; 1460];
+private let mut syscall_inetd_mode: bool;
+private let mut syscall_inetd_response: [u8; 1460];
+private let mut syscall_inetd_response_length: usize;
+
+must_use variant KernelInetdAcceptResult { TimedOut; Accepted; }
 
 private let mut syscall_heap_start: usize;
 private let mut syscall_heap_limit: usize;
@@ -52,6 +57,15 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_heap_start = heap_start;
     syscall_heap_limit = heap_limit;
     syscall_heap_break = heap_start;
+    syscall_file_open = false;
+    syscall_file_readable = false;
+    syscall_file_writable = false;
+    syscall_file_inode = 0;
+    syscall_file_offset = 0;
+    syscall_open_calls = 0;
+    syscall_read_calls = 0;
+    syscall_file_write_calls = 0;
+    syscall_close_calls = 0;
     syscall_socket_state = KernelSocketState::Closed;
     syscall_socket_port = 0;
     syscall_socket_calls = 0;
@@ -64,6 +78,41 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_connected_close_calls = 0;
     syscall_connected_read_calls = 0;
     syscall_connected_write_calls = 0;
+    syscall_inetd_mode = false;
+    syscall_inetd_response_length = 0;
+}
+
+fn kernel_syscall_inetd_accept(port: u16)
+        -> KernelInetdAcceptResult !{may_block} {
+    match network_capability_take() {
+        NetworkCapabilityTakeResult::Empty => {
+            return KernelInetdAcceptResult::TimedOut;
+        }
+        NetworkCapabilityTakeResult::Ready(ready) => {
+            match kernel_tcp_accept_once(ready, port) {
+                KernelTcpAcceptResult::TimedOut(next) => {
+                    match network_capability_put(next) {
+                        NetworkCapabilityPutResult::Stored => { }
+                        NetworkCapabilityPutResult::Conflict => { }
+                    }
+                    return KernelInetdAcceptResult::TimedOut;
+                }
+                KernelTcpAcceptResult::Accepted(next) => {
+                    match network_capability_put(next) {
+                        NetworkCapabilityPutResult::Conflict => {
+                            return KernelInetdAcceptResult::TimedOut;
+                        }
+                        NetworkCapabilityPutResult::Stored => {
+                            syscall_inetd_mode = true;
+                            syscall_connected_open = true;
+                            syscall_inetd_response_length = 0;
+                            return KernelInetdAcceptResult::Accepted;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn kernel_syscall_ext2_configure(mount: Ext2Mount) {
@@ -177,7 +226,8 @@ fn initial_user_load(text: borrow PageOwner[page])
 // 2 = terminate and return the exit status to run_initial_user's EL1 caller.
 // Linux -errno encoding exists only here at the ABI boundary.
 fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
-                           x2: usize, x3: usize) -> (usize, usize) !{unsafe} {
+                           x2: usize, x3: usize)
+        -> (usize, usize) !{unsafe} {
     let exception_class: usize = (esr >> 26) & 0x3F;
     if (exception_class != 0x15) { return (0, 0); }
 
@@ -201,11 +251,19 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                     return (1, LINUX_EAGAIN);
                 }
                 NetworkFrameTakeResult::Frame(frame) => {
-                    let source: *u8 = address as *u8;
+                    // The complete userspace range and the kernel buffer
+                    // capacity were checked above. Use explicitly typed byte
+                    // pointers at this ABI boundary so each transfer is one
+                    // byte, independent of raw-pointer indexing semantics.
+                    let source_base: *u8 = address as *u8;
+                    let destination_base: *u8 =
+                        syscall_socket_buffer as *u8;
                     let mut index: usize = 0;
                     while (index < length) {
-                        let buffered: *u8 = syscall_socket_buffer as *u8;
-                        buffered[index as isize] = source[index as isize];
+                        let source_byte: *u8 = source_base + (index as isize);
+                        let destination_byte: *u8 =
+                            destination_base + (index as isize);
+                        *destination_byte = *source_byte;
                         index = index + 1;
                     }
                     match kernel_tcp_send_received(
@@ -235,6 +293,27 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 }
             }
         }
+        if (fd == 1 && syscall_inetd_mode) {
+            if (syscall_connected_open == false ||
+                length > 1460 - syscall_inetd_response_length) {
+                return (1, LINUX_EINVAL);
+            }
+            let source_base: *u8 = address as *u8;
+            let destination_base: *u8 = syscall_inetd_response as *u8;
+            let mut index: usize = 0;
+            while (index < length) {
+                let source_byte: *u8 = source_base + (index as isize);
+                let destination_offset: usize =
+                    syscall_inetd_response_length + index;
+                let destination_byte: *u8 =
+                    destination_base + (destination_offset as isize);
+                *destination_byte = *source_byte;
+                index = index + 1;
+            }
+            syscall_inetd_response_length =
+                syscall_inetd_response_length + length;
+            return (1, length);
+        }
         if (fd == 3) {
             syscall_file_write_calls = syscall_file_write_calls + 1;
             if (syscall_file_open == false || syscall_file_writable == false) {
@@ -244,14 +323,18 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 length > KERNEL_BLOCK_SIZE) {
                 return (1, LINUX_EINVAL);
             }
-            let source: *u8 = address as *u8;
-            let buffer: *u8 = syscall_file_buffer as *u8;
+            let source_base: *u8 = address as *u8;
+            let destination_base: *u8 = syscall_file_buffer as *u8;
             let mut copy_index: usize = 0;
             while (copy_index < length) {
-                buffer[copy_index as isize] = source[copy_index as isize];
+                let source_byte: *u8 =
+                    source_base + (copy_index as isize);
+                let destination_byte: *u8 =
+                    destination_base + (copy_index as isize);
+                *destination_byte = *source_byte;
                 copy_index = copy_index + 1;
             }
-            let content = unsafe { buffer[0..<length as isize] };
+            let content = unsafe { destination_base[0..<length as isize] };
             match ext2_resize_small_file(
                     syscall_ext2_mount, syscall_file_inode, content) {
                 Ext2ResizeResult::Invalid => { return (1, LINUX_EINVAL); }
@@ -320,8 +403,9 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                         syscall_file_buffer as []u8) {
                     Ext2ReadResult::Invalid => { return (1, LINUX_EINVAL); }
                     Ext2ReadResult::Read(file_length) => {
-                        let stat: *u8 = x2 as *u8;
-                        for i: usize in 0..<128 { stat[i as isize] = 0; }
+                        let stat_base: *u8 = x2 as *u8;
+                        let stat = unsafe { stat_base[0..<128] };
+                        for i: usize in 0..<128 { stat[i] = 0; }
                         let inode_field: *u64 = (x2 + 8) as *u64;
                         *inode_field = inode_number as u64;
                         let mode_field: *u32 = (x2 + 16) as *u32;
@@ -346,7 +430,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let fd: usize = x0;
         let address: usize = x1;
         let requested: usize = x2;
-        if (fd == 5) {
+        if (fd == 5 || (fd == 0 && syscall_inetd_mode)) {
             syscall_connected_read_calls = syscall_connected_read_calls + 1;
             if (syscall_connected_open == false || requested == 0) {
                 return (1, LINUX_EBADF);
@@ -376,12 +460,16 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                 kernel_tcp_received_length();
                             let mut amount: usize = received;
                             if (amount > requested) { amount = requested; }
-                            let destination: *u8 = address as *u8;
-                            let source: *u8 = syscall_socket_buffer as *u8;
+                            let destination_base: *u8 = address as *u8;
+                            let source_base: *u8 =
+                                syscall_socket_buffer as *u8;
                             let mut index: usize = 0;
                             while (index < amount) {
-                                destination[index as isize] =
-                                    source[index as isize];
+                                let destination_byte: *u8 =
+                                    destination_base + (index as isize);
+                                let source_byte: *u8 =
+                                    source_base + (index as isize);
+                                *destination_byte = *source_byte;
                                 index = index + 1;
                             }
                             match network_frame_install(frame, received) {
@@ -430,12 +518,17 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 let available: usize = file_length - syscall_file_offset;
                 let mut amount: usize = requested;
                 if (amount > available) { amount = available; }
-                let destination: *u8 = address as *u8;
-                let source: *u8 = syscall_file_buffer as *u8;
+                let destination_base: *u8 = address as *u8;
+                let source_base: *u8 = syscall_file_buffer as *u8;
                 let mut copy_index: usize = 0;
                 while (copy_index < amount) {
-                    destination[copy_index as isize] =
-                        source[(syscall_file_offset + copy_index) as isize];
+                    let destination_byte: *u8 =
+                        destination_base + (copy_index as isize);
+                    let source_offset: usize =
+                        syscall_file_offset + copy_index;
+                    let source_byte: *u8 =
+                        source_base + (source_offset as isize);
+                    *destination_byte = *source_byte;
                     copy_index = copy_index + 1;
                 }
                 syscall_file_offset = syscall_file_offset + amount;
@@ -595,9 +688,117 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         }
     }
 
+    if (number == 210) {
+        // shutdown(1, SHUT_WR) is BusyBox httpd's end-of-response boundary
+        // in inetd mode. Its header/body writes are coalesced into the held
+        // request frame so this single-segment TCP milestone can transmit
+        // one independently generated response before restoring RX ownership.
+        if (x0 != 1 || syscall_inetd_mode == false ||
+            syscall_connected_open == false ||
+            syscall_inetd_response_length == 0) {
+            return (1, LINUX_EINVAL);
+        }
+        let received_length: usize = network_frame_length();
+        match network_frame_take() {
+            NetworkFrameTakeResult::Empty => { return (1, LINUX_EAGAIN); }
+            NetworkFrameTakeResult::Frame(frame) => {
+                match kernel_tcp_send_received(
+                        frame, syscall_inetd_response as []u8,
+                        received_length, syscall_inetd_response_length) {
+                    KernelTcpSendResult::Invalid(ready) => {
+                        match network_capability_put(ready) {
+                            NetworkCapabilityPutResult::Stored => { }
+                            NetworkCapabilityPutResult::Conflict => { }
+                        }
+                        return (1, LINUX_EINVAL);
+                    }
+                    KernelTcpSendResult::Sent(ready) => {
+                        match network_capability_put(ready) {
+                            NetworkCapabilityPutResult::Conflict => {
+                                return (1, LINUX_EINVAL);
+                            }
+                            NetworkCapabilityPutResult::Stored => {
+                                syscall_connected_open = false;
+                                return (1, 0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if (number == AARCH64_NR_EXIT || number == AARCH64_NR_EXIT_GROUP) {
         return (2, x0);
     }
+    if (number == 17) {
+        // getcwd(): HTTPd immediately changes to its configured root; `/` is
+        // the only current working directory exposed by this kernel slice.
+        if (x1 < 2 || kernel_user_range_is_mapped(x0, 2) == false) {
+            return (1, LINUX_EFAULT);
+        }
+        let output_base: *u8 = x0 as *u8;
+        let output = unsafe { output_base[0..<2] };
+        output[0] = 0x2F;
+        output[1] = 0;
+        return (1, x0);
+    }
+    if (number == 49) {
+        if (kernel_user_range_is_mapped(x0, 2) == false) {
+            return (1, LINUX_EFAULT);
+        }
+        let path: *u8 = x0 as *u8;
+        if (path[0] == 0x2F && path[1] == 0) { return (1, 0); }
+        return (1, LINUX_ENOENT);
+    }
+    if (number == 103) {
+        // setitimer(): HTTPd's request timeout is unnecessary for the single
+        // bounded integration request. Return an all-zero previous timer.
+        if (x2 != 0) {
+            if (kernel_user_range_is_mapped(x2, 32) == false) {
+                return (1, LINUX_EFAULT);
+            }
+            let previous_base: *u8 = x2 as *u8;
+            let previous_timer = unsafe { previous_base[0..<32] };
+            for i: usize in 0..<32 { previous_timer[i] = 0; }
+        }
+        return (1, 0);
+    }
+    if (number == 113) {
+        if (kernel_user_range_is_mapped(x1, 16) == false) {
+            return (1, LINUX_EFAULT);
+        }
+        let seconds: *u64 = x1 as *u64;
+        *seconds = 1700000000 as u64;
+        let nanoseconds: *u64 = (x1 + 8) as *u64;
+        *nanoseconds = 0;
+        return (1, 0);
+    }
+    if (number == 134) { return (1, 0); }
+    if (number == 135) {
+        if (x2 != 0) {
+            if (kernel_user_range_is_mapped(x2, 8) == false) {
+                return (1, LINUX_EFAULT);
+            }
+            let previous_mask: *u64 = x2 as *u64;
+            *previous_mask = 0;
+        }
+        return (1, 0);
+    }
+    if (number == 205) {
+        if (x0 != 0 || kernel_user_range_is_mapped(x1, 16) == false ||
+            kernel_user_range_is_mapped(x2, 4) == false) {
+            return (1, LINUX_EFAULT);
+        }
+        let peer_base: *u8 = x1 as *u8;
+        let peer = unsafe { peer_base[0..<16] };
+        for i: usize in 0..<16 { peer[i] = 0; }
+        peer[0] = 2;
+        let peer_length: *u32 = x2 as *u32;
+        *peer_length = 16;
+        return (1, 0);
+    }
+    if (number == 208) { return (1, 0); }
     if (number == 96) {
         // set_tid_address(): this single-process kernel has PID/TID 1.
         return (1, 1);
@@ -615,11 +816,21 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     }
     if (number == 222) {
         let length: usize = x1;
-        if (length == 0 || length > syscall_heap_limit - syscall_heap_break ||
-            length > 0xFFFFFFFFFFFFF000) {
+        if (length == 0 || length > 0xFFFFFFFFFFFFF000) {
             return (1, 0xFFFFFFFFFFFFFFFF);
         }
         let rounded: usize = (length + PAGE_SIZE - 1) & 0xFFFFFFFFFFFFF000;
+        // musl uses MAP_FIXED to turn the first page of its brk arena into a
+        // guard page. The pages are already present in this prototype's
+        // eagerly mapped process arena, so preserve the requested address
+        // without consuming space from the independent anonymous-map cursor.
+        if (x0 != 0) {
+            if (x0 < syscall_heap_start || x0 > syscall_heap_limit ||
+                rounded > syscall_heap_limit - x0) {
+                return (1, 0xFFFFFFFFFFFFFFFF);
+            }
+            return (1, x0);
+        }
         if (rounded > syscall_heap_limit - syscall_heap_break) {
             return (1, 0xFFFFFFFFFFFFFFFF);
         }

@@ -148,18 +148,22 @@ pages to be reclaimed and the window to be empty. Heap, stack, and
 interpreter-aware auxv are deliberately the next layer on this proven segment
 layout.
 
-The combined layout now also owns one shared 128-page heap and one stack,
-bringing the complete process to 324 pages. Its initial entry probe uses
-`busybox-httpd httpd --help` and an interpreter-aware auxiliary
+The combined layout now owns one shared 128-page heap and an eight-page
+(32 KiB) contiguous stack, bringing the complete process to 331 pages. Its
+initial process arguments are `busybox-httpd httpd -i`, together with an
+interpreter-aware auxiliary
 vector: application `AT_PHDR`/`AT_PHNUM`/`AT_ENTRY`, musl `AT_BASE`, page
 size, random bytes, UID/EUID/GID/EGID, secure mode, and `AT_EXECFN`. Takibi's
-string-literal `\0` escape makes every argv terminator explicit. The probe
-still reclaims the full layout before static BusyBox runs; transferring
-control now enters biased musl code, dynamically links the distribution
-HTTPd PIE, dispatches the real applet, returns status zero through
-`exit_group`, and reclaims the complete address space. Serving begins next in
-BusyBox's single-process `-i` mode; ordinary foreground mode is deferred
-because the traced implementation clones a child after each `accept`.
+string-literal `\0` escape makes every argv terminator explicit. Transferring
+control enters biased musl code, dynamically links the distribution HTTPd
+PIE, and dispatches the real applet. The EL1 server boundary accepts one TCP
+connection on port 8080 before entry, presents it as inetd fd 0/fd 1, and
+implements the Linux calls used by the traced request path. BusyBox reads the
+request, obtains `/index.html` metadata, reads its contents from USB ext2,
+writes the HTTP response, calls `shutdown`, and exits through `exit_group`.
+The host runner uses real `curl` and requires an exact body match before the
+331-page layout is reclaimed. Ordinary foreground mode remains deferred
+because BusyBox clones a child after each `accept` in that mode.
 
 The first ext2 slice is also active on RPi5. The build creates a checked 1 MiB
 RAM fixture with `mke2fs`, populates it with `e2mkdir`/`e2cp`, and embeds it as
@@ -187,4 +191,12 @@ BusyBox HTTPd target. Linux `openat` accepts both `/index.html` and the
 relative `index.html` used after HTTPd changes its document root, and
 `newfstatat(79)` returns the AArch64 asm-generic regular-file metadata and
 exact ext2 length. Unsupported configuration paths continue to return
-`-ENOENT`.
+`-ENOENT`. Process setup resets per-process descriptor state, so HTTPd may
+leave its input file open at `exit_group` without leaking fd state into the
+following static BusyBox compatibility process.
+
+The EL0 exception frame preserves all general-purpose registers plus q0-q31,
+FPSR, and FPCR across every syscall. This is required by the Linux AArch64
+userspace contract: musl and the distribution BusyBox may keep live SIMD
+values across a call even when the small handwritten syscall fixture does
+not.

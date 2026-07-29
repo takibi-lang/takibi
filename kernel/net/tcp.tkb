@@ -9,6 +9,7 @@
 
 
 use "kernel/net/checksum.tkb";
+use "kernel/net/arp.tkb";
 use "kernel/net/wire.tkb";
 use "kernel/net/icmp.tkb";
 
@@ -441,6 +442,12 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
                 let len: i32 = net_rx_len(acquired);
                 let mut plan: NetRxDisposal = NetRxDisposal::Release;
                 let mut accepted: bool = false;
+                if (len >= 42) {
+                    let arp_frame = net_rx_frame(acquired);
+                    if (arp_prepare_reply(arp_frame)) {
+                        plan = NetRxDisposal::Reply(len);
+                    }
+                }
                 if (len >= 54 && len <= 1514) {
                     let len_n: i32 = len;
                     let frame = net_rx_frame(acquired);

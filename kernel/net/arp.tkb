@@ -24,6 +24,30 @@ fn arp_write_u16be(bytes: borrow [u8; 2..], value: u16) {
     bytes[1] = value as u8;
 }
 
+// Validate and rewrite one ARP request in place. The caller retains the RX
+// frame owner and chooses whether to transmit or release it, allowing TCP
+// listen loops to service neighbor discovery without a separate wait phase.
+fn arp_prepare_reply(frame: borrow [u8; 42..]) -> bool {
+    if (arp_read_u16be(frame[12..<14]) == 0x0806) {
+        let arp = frame[14..<42];
+        if (arp_read_u16be(arp[ARP_HTYPE..<ARP_PTYPE]) == 1 &&
+            arp_read_u16be(arp[ARP_PTYPE..<ARP_HLEN]) == 0x0800 &&
+            arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
+            arp_read_u16be(arp[ARP_OPER..<ARP_SHA]) == 1 &&
+            slice_eq(arp[ARP_TPA..<28], OUR_IP as []u8)) {
+            slice_copy(frame[0..<6], frame[6..<12]);
+            slice_copy(frame[6..<12], OUR_MAC as []u8);
+            slice_copy(arp[ARP_THA..<ARP_TPA], arp[ARP_SHA..<ARP_SPA]);
+            slice_copy(arp[ARP_TPA..<28], arp[ARP_SPA..<ARP_THA]);
+            slice_copy(arp[ARP_SHA..<ARP_SPA], OUR_MAC as []u8);
+            slice_copy(arp[ARP_SPA..<ARP_THA], OUR_IP as []u8);
+            arp_write_u16be(arp[ARP_OPER..<ARP_SHA], 2);
+            return true;
+        }
+    }
+    return false;
+}
+
 // Own the RX readiness capability until one valid request is replied to.
 // The bounded wait keeps a missing host-side integration peer from hanging
 // the remainder of the one-boot kernel test indefinitely.
@@ -41,24 +65,7 @@ fn kernel_arp_reply_once(ready_in: sink NetRxCanAcquire)
                 let mut reply: bool = false;
                 if (len >= 42) {
                     let frame = net_rx_frame(acquired);
-                    if (arp_read_u16be(frame[12..<14]) == 0x0806) {
-                        let arp = frame[14..<42];
-                        if (arp_read_u16be(arp[ARP_HTYPE..<ARP_PTYPE]) == 1 &&
-                            arp_read_u16be(arp[ARP_PTYPE..<ARP_HLEN]) == 0x0800 &&
-                            arp[ARP_HLEN] == 6 as u8 &&
-                            arp[ARP_PLEN] == 4 as u8 &&
-                            arp_read_u16be(arp[ARP_OPER..<ARP_SHA]) == 1 &&
-                            slice_eq(arp[ARP_TPA..<28], OUR_IP as []u8)) {
-                            slice_copy(frame[0..<6], frame[6..<12]);
-                            slice_copy(frame[6..<12], OUR_MAC as []u8);
-                            slice_copy(arp[ARP_THA..<ARP_TPA], arp[ARP_SHA..<ARP_SPA]);
-                            slice_copy(arp[ARP_TPA..<28], arp[ARP_SPA..<ARP_THA]);
-                            slice_copy(arp[ARP_SHA..<ARP_SPA], OUR_MAC as []u8);
-                            slice_copy(arp[ARP_SPA..<ARP_THA], OUR_IP as []u8);
-                            arp_write_u16be(arp[ARP_OPER..<ARP_SHA], 2);
-                            reply = true;
-                        }
-                    }
+                    reply = arp_prepare_reply(frame);
                 }
                 if (reply) {
                     let completed = net_rx_finish(

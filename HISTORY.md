@@ -15,6 +15,38 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: Serve USB ext2 Content with Alpine BusyBox HTTPd
+
+The pinned Alpine `busybox-extras` HTTPd now runs on the RPi5 as a real musl
+process in inetd mode. The kernel accepts one RP1 Ethernet connection on port
+8080, exposes the request and response as fd 0/fd 1, supplies the Linux
+signal, timer, time, peer-address, file metadata, file I/O, and shutdown calls
+used by the traced request path, and serves `/index.html` from the mounted USB
+ext2 filesystem. The hardware runner invokes the container's real `curl` and
+requires its body to match the ext2 fixture exactly. All 13 UART views and the
+existing ARP, ICMP, kernel TCP, and userspace connected-I/O tests then pass in
+the same boot.
+
+BusyBox source was the shortest route to the decisive fault. Its `get_line()`
+calls `alarm`, which led directly to `setitimer(103)`. A fixed-address SWD
+watchpoint proved that zeroing the 32-byte old-timer result was overwriting
+the caller's saved LR: two disjoint syscall branches had reused the local name
+`previous` for a byte slice and a `*u64`, and the name-keyed inferred local
+type selected the eight-byte form during code generation. The syscall
+bindings now have distinct names, and every dynamic userspace transfer uses
+an explicitly typed `*u8` dereference after validating the entire mapped
+range and kernel-buffer capacity. This keeps byte width explicit at the ABI
+boundary and builds under `--forbid-trap`.
+
+HTTPd also demonstrated that a one-page process stack was insufficient. The
+combined image now owns eight contiguous stack pages, increasing its total
+from 324 to 331 pages, and the syscall frame preserves q0-q31 plus FPSR/FPCR
+as required by Linux AArch64. Per-process file-descriptor state is reset at
+each image setup, so an fd left open by HTTPd cannot make the following
+static BusyBox `cat /hello.txt` fail with `-EBADF`. Temporary syscall UART
+tracing and the extended debug accept timeout were removed after the real
+curl proof.
+
 ### 2026-07-29: Add the ext2 HTTPd Document and Metadata Boundary
 
 The bounded one-MiB ext2 fixture now contains a concrete `/index.html` whose

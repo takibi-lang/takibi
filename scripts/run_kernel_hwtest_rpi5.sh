@@ -13,6 +13,8 @@ LOADER_LOG="$ARTIFACT_DIR/loader.log"
 ARP_LOG="$ARTIFACT_DIR/arp.log"
 ICMP_LOG="$ARTIFACT_DIR/icmp.log"
 TCP_LOG="$ARTIFACT_DIR/tcp.log"
+HTTPD_LOG="$ARTIFACT_DIR/httpd-curl.log"
+HTTPD_BODY="$ARTIFACT_DIR/httpd-body.actual"
 SOCKET_ACCEPT_LOG="$ARTIFACT_DIR/socket-accept.log"
 ETH_TEST_IFACE="${ETH_TEST_IFACE:-enp5s0}"
 ETH_TEST_SUBNET="${ETH_TEST_SUBNET:-192.168.20}"
@@ -94,12 +96,46 @@ if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
 fi
 echo "[kernel/rpi5] TCP integration passed"
 
+echo "[kernel/rpi5] curling BusyBox httpd index.html on port 8080"
+httpd_ok=0
+for _attempt in $(seq 1 20); do
+    if curl --silent --show-error --fail \
+            --interface "$ETH_TEST_IFACE" --noproxy '*' \
+            --connect-timeout 1 --max-time 5 \
+            --output "$HTTPD_BODY" \
+            "http://${ETH_TEST_SUBNET}.2:8080/" 2>"$HTTPD_LOG"; then
+        if cmp -s "$REPO_ROOT/kernel/tests/ext2/index.html" "$HTTPD_BODY"; then
+            httpd_ok=1
+            break
+        fi
+        echo 'unexpected response body (see httpd-body.actual)' >"$HTTPD_LOG"
+        break
+    fi
+    sleep 0.25
+done
+if [ "$httpd_ok" -ne 1 ]; then
+    echo "FAIL kernel/rpi5: BusyBox httpd curl failed (see $HTTPD_LOG)" >&2
+    exit 1
+fi
+echo "[kernel/rpi5] BusyBox httpd curl passed"
+
 echo "[kernel/rpi5] checking userspace connected I/O on port 8080"
-if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
-        ETH_TEST_MAC="$ETH_TEST_MAC" TCP_TEST_PORT=8080 \
-        TCP_TEST_CONNECTED_IO=1 \
-        python3 "$REPO_ROOT/scripts/eth_tcp_echo_test.py" \
-        > >(tee "$SOCKET_ACCEPT_LOG") 2>&1; then
+socket_accept_ok=0
+for _attempt in $(seq 1 20); do
+    if sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" \
+            ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
+            ETH_TEST_MAC="$ETH_TEST_MAC" TCP_TEST_PORT=8080 \
+            TCP_TEST_CONNECTED_IO=1 \
+            python3 "$REPO_ROOT/scripts/eth_tcp_echo_test.py" \
+            >"$SOCKET_ACCEPT_LOG" 2>&1; then
+        socket_accept_ok=1
+        cat "$SOCKET_ACCEPT_LOG"
+        break
+    fi
+    sleep 0.25
+done
+if [ "$socket_accept_ok" -ne 1 ]; then
+    cat "$SOCKET_ACCEPT_LOG" >&2
     echo "FAIL kernel/rpi5: userspace connected I/O failed (see $SOCKET_ACCEPT_LOG)" >&2
     exit 1
 fi

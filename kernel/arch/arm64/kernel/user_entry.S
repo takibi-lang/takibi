@@ -180,7 +180,7 @@ run_initial_user:
     .global el0_sync_entry
     .type el0_sync_entry, %function
 el0_sync_entry:
-    sub     sp, sp, #272
+    sub     sp, sp, #0x320
     stp     x0, x1, [sp, #0]
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]
@@ -201,6 +201,27 @@ el0_sync_entry:
     mrs     x9, elr_el1
     mrs     x10, spsr_el1
     stp     x9, x10, [sp, #256]
+    /* Linux preserves the complete user FP/SIMD state across syscalls. */
+    stp     q0, q1, [sp, #0x110]
+    stp     q2, q3, [sp, #0x130]
+    stp     q4, q5, [sp, #0x150]
+    stp     q6, q7, [sp, #0x170]
+    stp     q8, q9, [sp, #0x190]
+    stp     q10, q11, [sp, #0x1b0]
+    stp     q12, q13, [sp, #0x1d0]
+    stp     q14, q15, [sp, #0x1f0]
+    stp     q16, q17, [sp, #0x210]
+    stp     q18, q19, [sp, #0x230]
+    stp     q20, q21, [sp, #0x250]
+    stp     q22, q23, [sp, #0x270]
+    stp     q24, q25, [sp, #0x290]
+    stp     q26, q27, [sp, #0x2b0]
+    stp     q28, q29, [sp, #0x2d0]
+    stp     q30, q31, [sp, #0x2f0]
+    mrs     x9, fpsr
+    mrs     x10, fpcr
+    str     x9, [sp, #0x310]
+    str     x10, [sp, #0x318]
 
     mrs     x0, esr_el1
     ldr     x1, [sp, #64]
@@ -223,6 +244,26 @@ el0_sync_entry:
     ldp     x0, x1, [sp, #256]
     msr     elr_el1, x0
     msr     spsr_el1, x1
+    ldp     q0, q1, [sp, #0x110]
+    ldp     q2, q3, [sp, #0x130]
+    ldp     q4, q5, [sp, #0x150]
+    ldp     q6, q7, [sp, #0x170]
+    ldp     q8, q9, [sp, #0x190]
+    ldp     q10, q11, [sp, #0x1b0]
+    ldp     q12, q13, [sp, #0x1d0]
+    ldp     q14, q15, [sp, #0x1f0]
+    ldp     q16, q17, [sp, #0x210]
+    ldp     q18, q19, [sp, #0x230]
+    ldp     q20, q21, [sp, #0x250]
+    ldp     q22, q23, [sp, #0x270]
+    ldp     q24, q25, [sp, #0x290]
+    ldp     q26, q27, [sp, #0x2b0]
+    ldp     q28, q29, [sp, #0x2d0]
+    ldp     q30, q31, [sp, #0x2f0]
+    ldr     x9, [sp, #0x310]
+    ldr     x10, [sp, #0x318]
+    msr     fpsr, x9
+    msr     fpcr, x10
     ldp     x0, x1, [sp, #0]
     ldp     x2, x3, [sp, #16]
     ldp     x4, x5, [sp, #32]
@@ -239,12 +280,12 @@ el0_sync_entry:
     ldp     x26, x27, [sp, #208]
     ldp     x28, x29, [sp, #224]
     ldp     x30, xzr, [sp, #240]
-    add     sp, sp, #272
+    add     sp, sp, #0x320
     eret
 
 .Lsyscall_exit:
     mov     x0, x7
-    add     sp, sp, #272
+    add     sp, sp, #0x320
     ldp     x19, x20, [sp, #0]
     ldp     x21, x22, [sp, #16]
     ldp     x23, x24, [sp, #32]
