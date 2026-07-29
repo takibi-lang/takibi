@@ -159,11 +159,16 @@ def main() -> int:
     target_str = ".".join(str(b) for b in TARGET_IP)
     other_str = ".".join(str(b) for b in OTHER_IP)
 
-    ok1 = test_who_has_us(sock, requester_mac)
-    print("  who-has %s (ours):     %s" % (target_str, "PASS" if ok1 else "FAIL"))
-
-    ok2 = test_who_has_other_stays_silent(sock, requester_mac)
-    print("  who-has %s (silent): %s" % (other_str, "PASS" if ok2 else "FAIL"))
+    if os.environ.get("ARP_TEST_OTHER_FIRST") == "1":
+        ok2 = test_who_has_other_stays_silent(sock, requester_mac)
+        print("  who-has %s (silent): %s" % (other_str, "PASS" if ok2 else "FAIL"))
+        ok1 = test_who_has_us(sock, requester_mac)
+        print("  who-has %s (ours):     %s" % (target_str, "PASS" if ok1 else "FAIL"))
+    else:
+        ok1 = test_who_has_us(sock, requester_mac)
+        print("  who-has %s (ours):     %s" % (target_str, "PASS" if ok1 else "FAIL"))
+        ok2 = test_who_has_other_stays_silent(sock, requester_mac)
+        print("  who-has %s (silent): %s" % (other_str, "PASS" if ok2 else "FAIL"))
 
     return 0 if (ok1 and ok2) else 1
 

@@ -10,6 +10,9 @@ ARTIFACT_DIR="${RPI5_KERNEL_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest
 UART_LOG="$ARTIFACT_DIR/uart.log"
 RESET_LOG="$ARTIFACT_DIR/reset.log"
 LOADER_LOG="$ARTIFACT_DIR/loader.log"
+ARP_LOG="$ARTIFACT_DIR/arp.log"
+ETH_TEST_IFACE="${ETH_TEST_IFACE:-enp5s0}"
+ETH_TEST_SUBNET="${ETH_TEST_SUBNET:-192.168.20}"
 
 mkdir -p "$ARTIFACT_DIR"
 if [ ! -e "$SERIAL_DEV" ]; then
@@ -53,6 +56,19 @@ if ! "$REPO_ROOT/scripts/rpi5_jtag_load.sh" "$ELF" >"$LOADER_LOG" 2>&1; then
     exit 1
 fi
 echo "[kernel/rpi5] kernel loaded in $((SECONDS - load_started))s; waiting for integration completion"
+
+# The kernel holds its affine RX readiness capability while waiting for one
+# real ARP request. Exercise the wire path immediately after resume; keep the
+# raw-socket privilege confined to the existing protocol checker.
+echo "[kernel/rpi5] checking ARP reply on $ETH_TEST_IFACE"
+if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
+        ARP_TEST_OTHER_FIRST=1 \
+        python3 "$REPO_ROOT/scripts/eth_arp_reply_test.py" \
+        > >(tee "$ARP_LOG") 2>&1; then
+    echo "FAIL kernel/rpi5: ARP integration failed (see $ARP_LOG)" >&2
+    exit 1
+fi
+echo "[kernel/rpi5] ARP integration passed"
 
 # USB Mass Storage may briefly report Not Ready after enumeration. Keep the
 # single capture alive through its bounded readiness loop and ext2 checks.

@@ -15,6 +15,21 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: Standalone Kernel Answers a Real ARP Request
+
+The RPi5 kernel now holds the GEM driver's affine RX readiness capability
+while it filters incoming Ethernet frames and constructs one ARP reply in
+place. Constant-sized header subslices and minimum-length helper arguments
+keep every access proven under `--forbid-trap`; the received frame owner is
+consumed through either the release or reply disposition on every path.
+
+`kernelcheck-rpi5` now runs the existing raw-AF_PACKET checker immediately
+after SWD resume. Its kernel mode deliberately sends the non-owned-IP request
+first, proving it remains silent while the responder is still active, then
+checks the complete reply for `192.168.20.2`. The real hardware run passed
+both wire assertions plus all 11 UART views in one boot before continuing
+through USB ext2 and BusyBox.
+
 ### 2026-07-29: Standalone Kernel Owns the RPi5 Ethernet Driver
 
 The issue #177 kernel now owns its RP1 Cadence GEM_GXL driver, fixed test

@@ -29,8 +29,11 @@ destructive scope independently of the physical device capacity.
 `kernelcheck-rpi5` also requires the RPi5 Ethernet port to have an active
 link. The standalone RP1 Cadence GEM driver resets and configures the
 BCM54213PE PHY, negotiates the link, initializes its typed RX/TX DMA rings,
-and uses the dedicated `02:00:20:00:00:02` test MAC. Packet protocol and
-Linux socket boundaries are subsequent milestones.
+and uses the dedicated `02:00:20:00:00:02` test MAC. The host runner uses a
+privileged raw socket on `ETH_TEST_IFACE` (default `enp5s0`) to prove that a
+request for another address stays unanswered and that an ARP request for
+`192.168.20.2` receives the exact reply. Linux socket boundaries are a
+subsequent milestone.
 
 The RPi5 runner captures UART once per kernel boot, then projects that one
 transcript through every `kernel/tests/rpi5/views/*.filter`. Each projection
