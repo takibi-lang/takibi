@@ -148,6 +148,15 @@ pages to be reclaimed and the window to be empty. Heap, stack, and
 interpreter-aware auxv are deliberately the next layer on this proven segment
 layout.
 
+The combined layout now also owns one shared 128-page heap and one stack,
+bringing the complete probe to 324 pages. Its initial stack contains
+`busybox-httpd httpd -f -p 8080 -h /` and an interpreter-aware auxiliary
+vector: application `AT_PHDR`/`AT_PHNUM`/`AT_ENTRY`, musl `AT_BASE`, page
+size, random bytes, UID/EUID/GID/EGID, secure mode, and `AT_EXECFN`. Takibi's
+string-literal `\0` escape makes every argv terminator explicit. The probe
+still reclaims the full layout before static BusyBox runs; transferring
+control to the musl entry is the next milestone.
+
 The first ext2 slice is also active on RPi5. The build creates a checked 1 MiB
 RAM fixture with `mke2fs`, populates it with `e2mkdir`/`e2cp`, and embeds it as
 a writable image. The filesystem core reaches it only through the 1 KiB block

@@ -17,6 +17,11 @@ const AT_BASE: usize = 7;
 const AT_ENTRY: usize = 9;
 const AT_SECURE: usize = 23;
 const AT_RANDOM: usize = 25;
+const AT_UID: usize = 11;
+const AT_EUID: usize = 12;
+const AT_GID: usize = 13;
+const AT_EGID: usize = 14;
+const AT_EXECFN: usize = 31;
 
 linear struct ProcessImagePages[image: usize] {
     private image: usize @ image;
@@ -112,6 +117,75 @@ fn process_image_prepare_stack(page: borrow PageOwner[page],
         words[17] != (USER_TEXT_VA + plan.entry) as u64 ||
         words[23] != 0 || tail[23] != 0 || tail[27] != 0 ||
         tail[42] != 0) {
+        return ProcessImageStackResult::Invalid;
+    }
+    return ProcessImageStackResult::Ready;
+}
+
+fn process_dynamic_prepare_stack(page: borrow PageOwner[page],
+                                 application: DistroElfLoadPlan,
+                                 interpreter_bias: usize)
+        -> ProcessImageStackResult !{unsafe} {
+    let bytes = page_bytes(page);
+    for i: usize in 0..<4096 { bytes[i] = 0; }
+
+    let physical_base: usize = page_physical_address(page) +
+                               PAGE_SIZE - PROCESS_STACK_LAYOUT_SIZE;
+    let virtual_base: usize = USER_TEXT_VA +
+                              PROCESS_STACK_L3_INDEX * PAGE_SIZE +
+                              PAGE_SIZE - PROCESS_STACK_LAYOUT_SIZE;
+    let random_address: usize = virtual_base + 304;
+    let argv0_address: usize = virtual_base + 320;
+    let words: *u64 = physical_base as *u64;
+
+    // argv={"busybox-httpd","httpd","-f","-p","8080","-h","/"}
+    words[0] = 7;
+    words[1] = argv0_address as u64;
+    words[2] = (virtual_base + 336) as u64;
+    words[3] = (virtual_base + 344) as u64;
+    words[4] = (virtual_base + 352) as u64;
+    words[5] = (virtual_base + 360) as u64;
+    words[6] = (virtual_base + 368) as u64;
+    words[7] = (virtual_base + 376) as u64;
+    words[8] = 0;
+    words[9] = 0;
+
+    words[10] = AT_PAGESZ as u64; words[11] = PAGE_SIZE as u64;
+    words[12] = AT_PHDR as u64;
+    words[13] = (USER_TEXT_VA + application.program_offset) as u64;
+    words[14] = AT_PHENT as u64;
+    words[15] = ELF_PROGRAM_HEADER_SIZE as u64;
+    words[16] = AT_PHNUM as u64; words[17] = application.program_count as u64;
+    words[18] = AT_BASE as u64;
+    words[19] = (USER_TEXT_VA + interpreter_bias) as u64;
+    words[20] = AT_ENTRY as u64;
+    words[21] = (USER_TEXT_VA + application.entry) as u64;
+    words[22] = AT_RANDOM as u64; words[23] = random_address as u64;
+    words[24] = AT_SECURE as u64; words[25] = 0;
+    words[26] = AT_UID as u64; words[27] = 0;
+    words[28] = AT_EUID as u64; words[29] = 0;
+    words[30] = AT_GID as u64; words[31] = 0;
+    words[32] = AT_EGID as u64; words[33] = 0;
+    words[34] = AT_EXECFN as u64; words[35] = argv0_address as u64;
+    words[36] = 0; words[37] = 0;
+
+    let tail: *u8 = (physical_base + 304) as *u8;
+    for i: usize in 0..<16 { tail[i as isize] = (0x5A ^ i) as u8; }
+    slice_copy(unsafe { tail[16 as isize..<30 as isize] },
+               "busybox-httpd\0" as []u8);
+    slice_copy(unsafe { tail[32 as isize..<38 as isize] }, "httpd\0" as []u8);
+    slice_copy(unsafe { tail[40 as isize..<43 as isize] }, "-f\0" as []u8);
+    slice_copy(unsafe { tail[48 as isize..<51 as isize] }, "-p\0" as []u8);
+    slice_copy(unsafe { tail[56 as isize..<61 as isize] }, "8080\0" as []u8);
+    slice_copy(unsafe { tail[64 as isize..<67 as isize] }, "-h\0" as []u8);
+    slice_copy(unsafe { tail[72 as isize..<74 as isize] }, "/\0" as []u8);
+
+    if (words[0] != 7 || words[8] != 0 || words[9] != 0 ||
+        words[13] != (USER_TEXT_VA + application.program_offset) as u64 ||
+        words[19] != (USER_TEXT_VA + interpreter_bias) as u64 ||
+        words[21] != (USER_TEXT_VA + application.entry) as u64 ||
+        words[35] != argv0_address as u64 || words[36] != 0 ||
+        tail[29] != 0 || tail[37] != 0 || tail[73] != 0) {
         return ProcessImageStackResult::Invalid;
     }
     return ProcessImageStackResult::Ready;
@@ -301,8 +375,88 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                     return ProcessImagePairProbeResult::Invalid;
                 }
                 ProcessImageSegmentsResult::Mapped(total) => {
-                    process_image_cleanup(total);
-                    if (total == 195 && process_image_window_is_clear()) {
+                    let combined_extent: usize =
+                        interpreter_bias + interpreter.extent;
+                    let heap_first_page: usize =
+                        (combined_extent + PAGE_SIZE - 1) / PAGE_SIZE;
+                    let heap_last_page: usize =
+                        heap_first_page + PROCESS_HEAP_PAGE_COUNT;
+                    if (total != 195 ||
+                        heap_last_page >= PROCESS_STACK_L3_INDEX) {
+                        process_image_cleanup(total);
+                        return ProcessImagePairProbeResult::Invalid;
+                    }
+                    let mut mapped: usize = total;
+                    for l3_index: usize in heap_first_page..<heap_last_page {
+                        if (user_pte_read(l3_index) != 0) {
+                            process_image_cleanup(mapped);
+                            return ProcessImagePairProbeResult::Invalid;
+                        }
+                        match page_alloc() {
+                            PageAllocResult::OutOfMemory => {
+                                process_image_cleanup(mapped);
+                                return ProcessImagePairProbeResult::Invalid;
+                            }
+                            PageAllocResult::Allocated(heap_page) => {
+                                let bytes = page_bytes(heap_page);
+                                for i: usize in 0..<4096 { bytes[i] = 0; }
+                                let phys: usize = page_physical_address(heap_page);
+                                user_pte_write(
+                                    l3_index, phys | USER_RW_XN_FLAGS);
+                                user_tlb_invalidate(
+                                    USER_TEXT_VA + l3_index * PAGE_SIZE);
+                                if (mapped >= 512) {
+                                    page_free(heap_page);
+                                    process_image_cleanup(mapped);
+                                    return ProcessImagePairProbeResult::Invalid;
+                                }
+                                let page_index =
+                                    page_owner_transfer_index(heap_page);
+                                process_image_record(
+                                    mapped, page_index, l3_index);
+                                mapped = mapped + 1;
+                            }
+                        }
+                    }
+                    match page_alloc() {
+                        PageAllocResult::OutOfMemory => {
+                            process_image_cleanup(mapped);
+                            return ProcessImagePairProbeResult::Invalid;
+                        }
+                        PageAllocResult::Allocated(stack) => {
+                            match process_dynamic_prepare_stack(
+                                    stack, primary, interpreter_bias) {
+                                ProcessImageStackResult::Invalid => {
+                                    page_free(stack);
+                                    process_image_cleanup(mapped);
+                                    return ProcessImagePairProbeResult::Invalid;
+                                }
+                                ProcessImageStackResult::Ready => {
+                                    let phys: usize = page_physical_address(stack);
+                                    user_pte_write(
+                                        PROCESS_STACK_L3_INDEX,
+                                        phys | USER_RW_XN_FLAGS);
+                                    user_tlb_invalidate(
+                                        USER_TEXT_VA +
+                                        PROCESS_STACK_L3_INDEX * PAGE_SIZE);
+                                    if (mapped >= 512) {
+                                        user_pte_write(PROCESS_STACK_L3_INDEX, 0);
+                                        page_free(stack);
+                                        process_image_cleanup(mapped);
+                                        return ProcessImagePairProbeResult::Invalid;
+                                    }
+                                    let page_index =
+                                        page_owner_transfer_index(stack);
+                                    process_image_record(
+                                        mapped, page_index,
+                                        PROCESS_STACK_L3_INDEX);
+                                    mapped = mapped + 1;
+                                }
+                            }
+                        }
+                    }
+                    process_image_cleanup(mapped);
+                    if (mapped == 324 && process_image_window_is_clear()) {
                         return ProcessImagePairProbeResult::Verified;
                     }
                     return ProcessImagePairProbeResult::Invalid;

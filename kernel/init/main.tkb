@@ -507,7 +507,7 @@ fn main() {
                                                 kernel_boot_log("httpd map: combined invalid\n");
                                             }
                                             ProcessImagePairProbeResult::Verified => {
-                                                kernel_boot_log("httpd map: combined segments=195 musl-bias=0x40000 clean\n");
+                                                kernel_boot_log("httpd map: combined pages=324 musl-bias=0x40000 auxv ready clean\n");
                                             }
                                         }
                                     }

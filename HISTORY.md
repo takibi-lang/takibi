@@ -15,6 +15,23 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: Build the Combined HTTPd Heap, Stack, and musl Auxv
+
+The co-located HTTPd and musl segment set now receives one shared 128-page
+heap and one owned stack, producing a 324-page dynamic process layout. The
+stack carries seven real arguments (`busybox-httpd httpd -f -p 8080 -h /`)
+and the Linux auxiliary vector fields needed at interpreter entry: `AT_PHDR`,
+`AT_PHENT`, `AT_PHNUM`, application `AT_ENTRY`, musl `AT_BASE`, `AT_PAGESZ`,
+`AT_RANDOM`, `AT_SECURE`, UID/EUID/GID/EGID, and `AT_EXECFN`.
+
+This work exposed that Takibi string literals lacked the already-supported
+character-literal `\0` escape. The lexer, specification, and parser regression
+now define it as one embedded zero byte; HTTPd argv uses explicit terminators
+rather than depending on pre-zeroed slack. All 860 compiler tests pass. Real
+RPi5 `kernelcheck` validates the 324-page layout, auxv, and complete teardown,
+then passes all 13 UART views and every existing Ethernet/storage check in the
+same boot. Actual entry at musl's biased start remains the next milestone.
+
 ### 2026-07-29: Co-locate HTTPd and musl Segments
 
 The process-image mapper's `PT_LOAD` work is now one shared operation taking
