@@ -251,12 +251,12 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 length > 1460) {
                 return (1, LINUX_EINVAL);
             }
-            let received_length: usize = network_frame_length();
-            match network_frame_take() {
-                NetworkFrameTakeResult::Empty => {
+            let received_length: usize = syscall_socket_buffer_length;
+            match network_capability_take() {
+                NetworkCapabilityTakeResult::Empty => {
                     return (1, LINUX_EAGAIN);
                 }
-                NetworkFrameTakeResult::Frame(frame) => {
+                NetworkCapabilityTakeResult::Ready(ready) => {
                     // The complete userspace range and the kernel buffer
                     // capacity were checked above. Use explicitly typed byte
                     // pointers at this ABI boundary so each transfer is one
@@ -273,10 +273,10 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                         index = index + 1;
                     }
                     match kernel_tcp_send_received(
-                            frame, syscall_socket_buffer as []u8,
+                            ready, syscall_socket_buffer as []u8,
                             received_length, length) {
-                        KernelTcpSendResult::Invalid(ready) => {
-                            match network_capability_put(ready) {
+                        KernelTcpSendResult::Invalid(after_invalid) => {
+                            match network_capability_put(after_invalid) {
                                 NetworkCapabilityPutResult::Stored => {
                                     return (1, LINUX_EINVAL);
                                 }
@@ -285,8 +285,8 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                 }
                             }
                         }
-                        KernelTcpSendResult::Sent(ready) => {
-                            match network_capability_put(ready) {
+                        KernelTcpSendResult::Sent(after_send) => {
+                            match network_capability_put(after_send) {
                                 NetworkCapabilityPutResult::Conflict => {
                                     return (1, LINUX_EINVAL);
                                 }
@@ -483,7 +483,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                 }
                             }
                         }
-                        KernelTcpReceiveResult::Received(frame) => {
+                        KernelTcpReceiveResult::Received(next) => {
                             let received: usize =
                                 kernel_tcp_received_length();
                             syscall_socket_buffer_length = received;
@@ -502,29 +502,12 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                 index = index + 1;
                             }
                             syscall_socket_buffer_offset = amount;
-                            match network_frame_install(frame, received) {
-                                NetworkFrameInstallResult::Conflict(incoming) => {
-                                    match kernel_tcp_send_received(
-                                            incoming,
-                                            syscall_socket_buffer as []u8,
-                                            0, 0) {
-                                        KernelTcpSendResult::Invalid(next) => {
-                                            match network_capability_put(next) {
-                                                NetworkCapabilityPutResult::Stored => { }
-                                                NetworkCapabilityPutResult::Conflict => { }
-                                            }
-                                        }
-                                        KernelTcpSendResult::Sent(next) => {
-                                            match network_capability_put(next) {
-                                                NetworkCapabilityPutResult::Stored => { }
-                                                NetworkCapabilityPutResult::Conflict => { }
-                                            }
-                                        }
-                                    }
-                                    return (1, LINUX_EINVAL);
-                                }
-                                NetworkFrameInstallResult::Installed => {
+                            match network_capability_put(next) {
+                                NetworkCapabilityPutResult::Stored => {
                                     return (1, amount);
+                                }
+                                NetworkCapabilityPutResult::Conflict => {
+                                    return (1, LINUX_EINVAL);
                                 }
                             }
                         }
@@ -722,30 +705,29 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
 
     if (number == 210) {
         // shutdown(1, SHUT_WR) is BusyBox httpd's end-of-response boundary
-        // in inetd mode. Its header/body writes are coalesced into the held
-        // request frame so this single-segment TCP milestone can transmit
-        // one independently generated response before restoring RX ownership.
+        // in inetd mode. Its header/body writes are coalesced in the kernel
+        // response buffer and transmitted independently of RX ownership.
         if (x0 != 1 || syscall_inetd_mode == false ||
             syscall_connected_open == false ||
             syscall_inetd_response_length == 0) {
             return (1, LINUX_EINVAL);
         }
-        let received_length: usize = network_frame_length();
-        match network_frame_take() {
-            NetworkFrameTakeResult::Empty => { return (1, LINUX_EAGAIN); }
-            NetworkFrameTakeResult::Frame(frame) => {
+        let received_length: usize = syscall_socket_buffer_length;
+        match network_capability_take() {
+            NetworkCapabilityTakeResult::Empty => { return (1, LINUX_EAGAIN); }
+            NetworkCapabilityTakeResult::Ready(ready) => {
                 match kernel_tcp_send_received(
-                        frame, syscall_inetd_response as []u8,
+                        ready, syscall_inetd_response as []u8,
                         received_length, syscall_inetd_response_length) {
-                    KernelTcpSendResult::Invalid(ready) => {
-                        match network_capability_put(ready) {
+                    KernelTcpSendResult::Invalid(after_invalid) => {
+                        match network_capability_put(after_invalid) {
                             NetworkCapabilityPutResult::Stored => { }
                             NetworkCapabilityPutResult::Conflict => { }
                         }
                         return (1, LINUX_EINVAL);
                     }
-                    KernelTcpSendResult::Sent(ready) => {
-                        match network_capability_put(ready) {
+                    KernelTcpSendResult::Sent(after_send) => {
+                        match network_capability_put(after_send) {
                             NetworkCapabilityPutResult::Conflict => {
                                 return (1, LINUX_EINVAL);
                             }

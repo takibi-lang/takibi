@@ -10,19 +10,7 @@ struct NetworkCapabilityStore {
     private value: NetworkCapabilityValue;
 }
 
-variant NetworkFrameValue {
-    Empty;
-    Frame(exists descriptor: usize. NetRxCpuOwned[descriptor]);
-}
-
-struct NetworkFrameStore {
-    private mutex: i32;
-    private length: usize;
-    private value: NetworkFrameValue;
-}
-
 private let mut network_capability_store: NetworkCapabilityStore;
-private let mut network_frame_store: NetworkFrameStore;
 private linear view NetworkCapabilityGuard[lock: addr];
 
 must_use variant NetworkCapabilityInstallResult {
@@ -36,16 +24,6 @@ must_use variant NetworkCapabilityTakeResult {
 }
 
 must_use variant NetworkCapabilityPutResult { Stored; Conflict; }
-
-must_use variant NetworkFrameInstallResult {
-    Installed;
-    Conflict(exists descriptor: usize. NetRxCpuOwned[descriptor]);
-}
-
-must_use variant NetworkFrameTakeResult {
-    Empty;
-    Frame(exists descriptor: usize. NetRxCpuOwned[descriptor]);
-}
 
 fn network_capability_lock(lock: *i32 @ address)
         -> NetworkCapabilityGuard[address] {
@@ -116,48 +94,3 @@ fn network_capability_put(ready: sink NetRxCanAcquire)
         }
     }
 }
-
-fn network_frame_install(frame: sink NetRxCpuOwned[descriptor],
-                         length: usize) -> NetworkFrameInstallResult {
-    let guard = network_capability_lock(&network_frame_store.mutex);
-    let previous: NetworkFrameValue = stable_replace(
-        guard, &network_frame_store.mutex, network_frame_store.value,
-        NetworkFrameValue::Frame(frame));
-    match previous {
-        NetworkFrameValue::Empty => {
-            network_frame_store.length = length;
-            network_capability_unlock(guard, &network_frame_store.mutex);
-            return NetworkFrameInstallResult::Installed;
-        }
-        NetworkFrameValue::Frame(stale) => {
-            let displaced: NetworkFrameValue = stable_replace(
-                guard, &network_frame_store.mutex, network_frame_store.value,
-                NetworkFrameValue::Frame(stale));
-            network_capability_unlock(guard, &network_frame_store.mutex);
-            match displaced {
-                NetworkFrameValue::Empty => {
-                    return NetworkFrameInstallResult::Installed;
-                }
-                NetworkFrameValue::Frame(incoming) => {
-                    return NetworkFrameInstallResult::Conflict(incoming);
-                }
-            }
-        }
-    }
-}
-
-fn network_frame_take() -> NetworkFrameTakeResult {
-    let guard = network_capability_lock(&network_frame_store.mutex);
-    let previous: NetworkFrameValue = stable_replace(
-        guard, &network_frame_store.mutex, network_frame_store.value,
-        NetworkFrameValue::Empty);
-    network_capability_unlock(guard, &network_frame_store.mutex);
-    match previous {
-        NetworkFrameValue::Empty => { return NetworkFrameTakeResult::Empty; }
-        NetworkFrameValue::Frame(frame) => {
-            return NetworkFrameTakeResult::Frame(frame);
-        }
-    }
-}
-
-fn network_frame_length() -> usize { return network_frame_store.length; }

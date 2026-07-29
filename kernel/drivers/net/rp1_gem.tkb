@@ -275,6 +275,42 @@ fn net_rx_finish(frame: sink NetRxCpuOwned[desc], disposal: NetRxDisposal)
     }
 }
 
+// Transmits a kernel-built frame while preserving the sole armed RX
+// capability.  Unlike net_transmit(), no RX descriptor is consumed or
+// rearmed: the caller already owns proof that GEM may receive the next frame.
+fn net_transmit_ready(ready: sink NetRxCanAcquire,
+                      bytes: borrow [u8; 1514..], len: i32)
+        -> NetRxCanAcquire !{may_block} {
+    let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
+    let tx_base: usize = (gem_tx_buf as *u8) as usize;
+    let tx_dma: usize = tx_base + DMA_OFFSET;
+    bytes_copy(tx_base as *u8, bytes as *u8, safe_len as isize);
+    dma_prepare_tx(gem_tx_buf as *u8, safe_len as usize);
+    let mut slot: {0..<2 as usize} = 0;
+    if (gem_tx_next == 0) {
+        gem_tx_desc[2] = (tx_dma >> 32) as u32;
+        gem_tx_desc[3] = 0;
+        gem_tx_desc[0] = tx_dma as u32;
+        gem_tx_desc[1] = (safe_len as u32) | (1 << 15);
+        gem_tx_next = 1;
+    } else {
+        gem_tx_desc[6] = (tx_dma >> 32) as u32;
+        gem_tx_desc[7] = 0;
+        gem_tx_desc[4] = tx_dma as u32;
+        gem_tx_desc[5] = (safe_len as u32) | (1 << 15) | (1 << 30);
+        gem_tx_next = 0;
+        slot = 1;
+    }
+    dma_prepare_tx(gem_tx_desc as *u8, 64);
+    gem_write(0x00, gem_read(0x00) | (1 << 9));
+    for i: i32 in 0..<1000000 {
+        dma_finish_rx(gem_tx_desc as *align(64) u8, 64);
+        if (slot == 0 && (gem_tx_desc[1] & (1 << 31)) != 0) { break; }
+        if (slot == 1 && (gem_tx_desc[5] & (1 << 31)) != 0) { break; }
+    }
+    return view NetRxCanAcquire;
+}
+
 fn net_read_mac(mac_out: *u8) { bytes_copy(mac_out, OUR_MAC as *u8, 6); }
 
 fn net_shutdown(ready: sink NetRxCanAcquire) {}
