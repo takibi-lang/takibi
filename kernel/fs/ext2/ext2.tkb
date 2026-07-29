@@ -64,6 +64,22 @@ must_use variant Ext2InodeAllocResult {
 }
 
 must_use variant Ext2OwnerReleaseResult { Invalid; Released; }
+must_use variant Ext2DirectoryResult { Invalid; Updated; }
+
+linear struct Ext2LinkedFile[inode: usize, block: usize] {
+    private inode_bitmap_index: usize;
+    private block_bitmap_index: usize;
+    private inode_number: usize @ inode;
+    private block_number: usize @ block;
+}
+
+must_use variant Ext2CreateResult {
+    Invalid;
+    Created(exists inode: usize. exists block: usize.
+            Ext2LinkedFile[inode, block]);
+}
+
+must_use variant Ext2UnlinkResult { Invalid; Unlinked; }
 
 fn ext2_u16(bytes: borrow *u8, offset: usize) -> u16 {
     if (offset > KERNEL_BLOCK_SIZE - 2) { return 0; }
@@ -812,4 +828,276 @@ fn ext2_owner_roundtrip_check(mount: Ext2Mount) -> Ext2BitmapProbeResult {
             }
         }
     }
+}
+
+fn ext2_directory_add(mount: Ext2Mount, inode_number: usize,
+                      name: []u8) -> Ext2DirectoryResult !{unsafe} {
+    if (name.len == 0 || name.len > 255 || inode_number == 0) {
+        return Ext2DirectoryResult::Invalid;
+    }
+    match ext2_read_inode(mount, 2) {
+        Ext2InodeResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        Ext2InodeResult::Inode(root) => {
+            if ((root.mode & 0xF000) != 0x4000 || root.size < 8) {
+                return Ext2DirectoryResult::Invalid;
+            }
+            match block_read(mount.device, root.direct_block0,
+                             ext2_file_block as []u8) {
+                BlockIoResult::Invalid => {
+                    return Ext2DirectoryResult::Invalid;
+                }
+                BlockIoResult::Ok => { }
+            }
+            let needed: usize = (8 + name.len + 3) & 0xFFFFFFFFFFFFFFFC;
+            let base: *u8 = ext2_file_block as *u8;
+            let mut cursor: usize = 0;
+            while (cursor < root.size) {
+                if (cursor > root.size - 8) {
+                    return Ext2DirectoryResult::Invalid;
+                }
+                let entry: *u8 = base + (cursor as isize);
+                let record_length: usize = ext2_u16(entry, 4) as usize;
+                let name_length: usize = entry[6] as usize;
+                let actual: usize =
+                    (8 + name_length + 3) & 0xFFFFFFFFFFFFFFFC;
+                if (record_length < 8 || record_length > root.size - cursor ||
+                    name_length > record_length - 8 || actual > record_length) {
+                    return Ext2DirectoryResult::Invalid;
+                }
+                if (record_length - actual >= needed) {
+                    let new_offset: usize = cursor + actual;
+                    let new_length: usize = record_length - actual;
+                    let new_entry: *u8 = base + (new_offset as isize);
+                    if (ext2_put_u16(entry, 4, actual as u16) == false ||
+                        ext2_put_u32(new_entry, 0, inode_number as u32) == false ||
+                        ext2_put_u16(new_entry, 4, new_length as u16) == false) {
+                        return Ext2DirectoryResult::Invalid;
+                    }
+                    new_entry[6] = name.len as u8;
+                    new_entry[7] = 0;
+                    let name_pointer: *u8 = new_entry + 8;
+                    let name_target = unsafe {
+                        name_pointer[0..<name.len as isize]
+                    };
+                    slice_copy(name_target, name);
+                    match block_write(mount.device, root.direct_block0,
+                                      ext2_file_block as []u8) {
+                        BlockIoResult::Invalid => {
+                            return Ext2DirectoryResult::Invalid;
+                        }
+                        BlockIoResult::Ok => {
+                            return Ext2DirectoryResult::Updated;
+                        }
+                    }
+                }
+                cursor = cursor + record_length;
+            }
+        }
+    }
+    return Ext2DirectoryResult::Invalid;
+}
+
+fn ext2_directory_remove(mount: Ext2Mount, inode_number: usize,
+                         name: []u8) -> Ext2DirectoryResult !{unsafe} {
+    match ext2_read_inode(mount, 2) {
+        Ext2InodeResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        Ext2InodeResult::Inode(root) => {
+            if ((root.mode & 0xF000) != 0x4000 || root.size < 8) {
+                return Ext2DirectoryResult::Invalid;
+            }
+            match block_read(mount.device, root.direct_block0,
+                             ext2_file_block as []u8) {
+                BlockIoResult::Invalid => {
+                    return Ext2DirectoryResult::Invalid;
+                }
+                BlockIoResult::Ok => { }
+            }
+            let base: *u8 = ext2_file_block as *u8;
+            let mut cursor: usize = 0;
+            let mut previous: usize = 0;
+            let mut has_previous: bool = false;
+            while (cursor < root.size) {
+                if (cursor > root.size - 8) {
+                    return Ext2DirectoryResult::Invalid;
+                }
+                let entry: *u8 = base + (cursor as isize);
+                let entry_inode: usize = ext2_u32(entry, 0) as usize;
+                let record_length: usize = ext2_u16(entry, 4) as usize;
+                let name_length: usize = entry[6] as usize;
+                if (record_length < 8 || record_length > root.size - cursor ||
+                    name_length > record_length - 8) {
+                    return Ext2DirectoryResult::Invalid;
+                }
+                if (entry_inode == inode_number &&
+                    ext2_name_matches(entry + 8, name_length, name)) {
+                    if (has_previous == false) {
+                        return Ext2DirectoryResult::Invalid;
+                    }
+                    let previous_entry: *u8 = base + (previous as isize);
+                    let previous_length: usize =
+                        ext2_u16(previous_entry, 4) as usize;
+                    if (previous_length > 0xFFFF - record_length ||
+                        ext2_put_u16(previous_entry, 4,
+                                     (previous_length + record_length) as u16) == false) {
+                        return Ext2DirectoryResult::Invalid;
+                    }
+                    match block_write(mount.device, root.direct_block0,
+                                      ext2_file_block as []u8) {
+                        BlockIoResult::Invalid => {
+                            return Ext2DirectoryResult::Invalid;
+                        }
+                        BlockIoResult::Ok => {
+                            return Ext2DirectoryResult::Updated;
+                        }
+                    }
+                }
+                previous = cursor;
+                has_previous = true;
+                cursor = cursor + record_length;
+            }
+        }
+    }
+    return Ext2DirectoryResult::Invalid;
+}
+
+fn ext2_initialize_regular_inode(mount: Ext2Mount,
+                                 inode_owner: borrow Ext2InodeOwner[inode],
+                                 block_owner: borrow Ext2BlockOwner[block],
+                                 content: []u8)
+        -> Ext2DirectoryResult !{unsafe} {
+    if (content.len == 0 || content.len > KERNEL_BLOCK_SIZE) {
+        return Ext2DirectoryResult::Invalid;
+    }
+    for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_file_block[i] = 0; }
+    let data = ext2_file_block as []u8;
+    let target = unsafe { data[0..<content.len] };
+    slice_copy(target, content);
+    match block_write(mount.device, block_owner.block_number,
+                      ext2_file_block as []u8) {
+        BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+
+    let byte_offset: usize = inode_owner.bitmap_index * mount.inode_size;
+    let table_block: usize = mount.inode_table_block +
+                             byte_offset / KERNEL_BLOCK_SIZE;
+    let table_offset: usize = byte_offset % KERNEL_BLOCK_SIZE;
+    match block_read(mount.device, table_block,
+                     ext2_metadata_block as []u8) {
+        BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let inode_pointer: *u8 =
+        (ext2_metadata_block as *u8) + (table_offset as isize);
+    for i: isize in 0..<128 { inode_pointer[i] = 0; }
+    if (ext2_put_u16(inode_pointer, 0, 0x81A4) == false ||
+        ext2_put_u32(inode_pointer, 4, content.len as u32) == false ||
+        ext2_put_u16(inode_pointer, 26, 1) == false ||
+        ext2_put_u32(inode_pointer, 28, 2) == false ||
+        ext2_put_u32(inode_pointer, 40,
+                     block_owner.block_number as u32) == false) {
+        return Ext2DirectoryResult::Invalid;
+    }
+    match block_write(mount.device, table_block,
+                      ext2_metadata_block as []u8) {
+        BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        BlockIoResult::Ok => { return Ext2DirectoryResult::Updated; }
+    }
+}
+
+fn ext2_linked_file_new(block_owner: sink Ext2BlockOwner[block],
+                         inode_owner: sink Ext2InodeOwner[inode])
+        -> Ext2LinkedFile[inode, block] {
+    let mut linked: Ext2LinkedFile[inode, block] = {
+        inode_owner.bitmap_index, block_owner.bitmap_index,
+        inode_owner.witness, block_owner.witness
+    };
+    return linked;
+}
+
+fn ext2_create_root_file(mount: Ext2Mount, name: []u8, content: []u8)
+        -> Ext2CreateResult {
+    match ext2_lookup_root(mount, name) {
+        Ext2LookupResult::Invalid => { return Ext2CreateResult::Invalid; }
+        Ext2LookupResult::Found(existing) => { return Ext2CreateResult::Invalid; }
+        Ext2LookupResult::NotFound => { }
+    }
+    match ext2_allocate_block(mount) {
+        Ext2BlockAllocResult::Failed => { return Ext2CreateResult::Invalid; }
+        Ext2BlockAllocResult::Allocated(block_owner) => {
+            match ext2_allocate_inode(mount) {
+                Ext2InodeAllocResult::Failed => {
+                    match ext2_release_block(mount, block_owner) {
+                        Ext2OwnerReleaseResult::Invalid => { }
+                        Ext2OwnerReleaseResult::Released => { }
+                    }
+                    return Ext2CreateResult::Invalid;
+                }
+                Ext2InodeAllocResult::Allocated(inode_owner) => {
+                    match ext2_initialize_regular_inode(
+                            mount, inode_owner, block_owner, content) {
+                        Ext2DirectoryResult::Invalid => {
+                            match ext2_release_inode(mount, inode_owner) {
+                                Ext2OwnerReleaseResult::Invalid => { }
+                                Ext2OwnerReleaseResult::Released => { }
+                            }
+                            match ext2_release_block(mount, block_owner) {
+                                Ext2OwnerReleaseResult::Invalid => { }
+                                Ext2OwnerReleaseResult::Released => { }
+                            }
+                            return Ext2CreateResult::Invalid;
+                        }
+                        Ext2DirectoryResult::Updated => { }
+                    }
+                    match ext2_directory_add(
+                            mount, inode_owner.inode_number, name) {
+                        Ext2DirectoryResult::Invalid => {
+                            match ext2_release_inode(mount, inode_owner) {
+                                Ext2OwnerReleaseResult::Invalid => { }
+                                Ext2OwnerReleaseResult::Released => { }
+                            }
+                            match ext2_release_block(mount, block_owner) {
+                                Ext2OwnerReleaseResult::Invalid => { }
+                                Ext2OwnerReleaseResult::Released => { }
+                            }
+                            return Ext2CreateResult::Invalid;
+                        }
+                        Ext2DirectoryResult::Updated => {
+                            return Ext2CreateResult::Created(
+                                ext2_linked_file_new(block_owner, inode_owner));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn ext2_unlink_root_file(mount: Ext2Mount,
+                         linked: sink Ext2LinkedFile[inode, block],
+                         name: []u8) -> Ext2UnlinkResult {
+    let inode_number: usize = linked.inode_number;
+    let inode_owner = ext2_inode_owner_new(
+        linked.inode_bitmap_index, inode_number, linked.inode_number);
+    let block_owner = ext2_block_owner_new(
+        linked.block_bitmap_index, linked.block_number, linked.block_number);
+    let mut directory_ok: bool = false;
+    match ext2_directory_remove(mount, inode_number, name) {
+        Ext2DirectoryResult::Invalid => { }
+        Ext2DirectoryResult::Updated => { directory_ok = true; }
+    }
+    let mut inode_ok: bool = false;
+    match ext2_release_inode(mount, inode_owner) {
+        Ext2OwnerReleaseResult::Invalid => { }
+        Ext2OwnerReleaseResult::Released => { inode_ok = true; }
+    }
+    let mut block_ok: bool = false;
+    match ext2_release_block(mount, block_owner) {
+        Ext2OwnerReleaseResult::Invalid => { }
+        Ext2OwnerReleaseResult::Released => { block_ok = true; }
+    }
+    if (directory_ok && inode_ok && block_ok) {
+        return Ext2UnlinkResult::Unlinked;
+    }
+    return Ext2UnlinkResult::Invalid;
 }

@@ -13,6 +13,7 @@ private let mut ext2_symlink_fixture: [u8; 64];
 
 must_use variant UsbExt2WriteCheckResult { Invalid; Verified; }
 must_use variant UsbExt2ResizeCheckResult { Invalid; Verified; }
+must_use variant UsbExt2CreateCheckResult { Invalid; Verified; }
 
 fn usb_ext2_equal_size_write_check(mount: Ext2Mount)
         -> UsbExt2WriteCheckResult {
@@ -105,6 +106,55 @@ fn usb_ext2_resize_check(mount: Ext2Mount) -> UsbExt2ResizeCheckResult {
     return UsbExt2ResizeCheckResult::Invalid;
 }
 
+fn usb_ext2_create_check(mount: Ext2Mount) -> UsbExt2CreateCheckResult {
+    match ext2_create_root_file(
+            mount, "created.txt" as []u8, "created on ext2\n" as []u8) {
+        Ext2CreateResult::Invalid => {
+            return UsbExt2CreateCheckResult::Invalid;
+        }
+        Ext2CreateResult::Created(linked) => {
+            let mut content_ok: bool = false;
+            match ext2_lookup_root(mount, "created.txt" as []u8) {
+                Ext2LookupResult::Invalid => { }
+                Ext2LookupResult::NotFound => { }
+                Ext2LookupResult::Found(inode_number) => {
+                    match ext2_read_small_file(
+                            mount, inode_number,
+                            ext2_read_fixture as []u8) {
+                        Ext2ReadResult::Invalid => { }
+                        Ext2ReadResult::Read(length) => {
+                            if (length == 16 &&
+                                slice_eq(ext2_read_fixture[0..<16],
+                                         "created on ext2\n" as []u8)) {
+                                content_ok = true;
+                            }
+                        }
+                    }
+                }
+            }
+            match ext2_unlink_root_file(
+                    mount, linked, "created.txt" as []u8) {
+                Ext2UnlinkResult::Invalid => {
+                    return UsbExt2CreateCheckResult::Invalid;
+                }
+                Ext2UnlinkResult::Unlinked => {
+                    if (content_ok) {
+                        match ext2_lookup_root(
+                                mount, "created.txt" as []u8) {
+                            Ext2LookupResult::Invalid => { }
+                            Ext2LookupResult::Found(existing) => { }
+                            Ext2LookupResult::NotFound => {
+                                return UsbExt2CreateCheckResult::Verified;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return UsbExt2CreateCheckResult::Invalid;
+}
+
 fn main() {
     platform_init();
     kernel_boot_log("takibi kernel: EL1\n");
@@ -167,6 +217,14 @@ fn main() {
                                                 }
                                                 Ext2BitmapProbeResult::Verified => {
                                                     kernel_boot_log("usb ext2: block+inode owners ok\n");
+                                                }
+                                            }
+                                            match usb_ext2_create_check(usb_mount) {
+                                                UsbExt2CreateCheckResult::Invalid => {
+                                                    kernel_boot_log("usb ext2: create failed\n");
+                                                }
+                                                UsbExt2CreateCheckResult::Verified => {
+                                                    kernel_boot_log("usb ext2: create+lookup+unlink ok\n");
                                                 }
                                             }
                                             match ext2_lookup_root(

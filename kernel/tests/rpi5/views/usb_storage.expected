@@ -4,4 +4,5 @@ usb ext2: write /mutable.txt ok
 usb ext2: resize truncate+extend ok
 usb ext2: block+inode bitmap counts ok
 usb ext2: block+inode owners ok
+usb ext2: create+lookup+unlink ok
 usb ext2: mounted /hello.txt ok
