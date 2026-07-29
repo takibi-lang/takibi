@@ -1,1 +1,1 @@
-^linux socket syscalls:
+^linux socket (syscalls:|partial write:)
