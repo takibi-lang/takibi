@@ -63,6 +63,10 @@ let mut tcp_drop_next_syn_ack: bool = false;
 let mut tcp_injected_syn_pending: bool = false;
 let mut tcp_injected_syn_retransmitted: bool = false;
 let mut tcp_injected_syn_accepted: bool = false;
+let mut tcp_drop_next_data: bool = false;
+let mut tcp_injected_data_pending: bool = false;
+let mut tcp_injected_data_retransmitted: bool = false;
+let mut tcp_injected_data_acked: bool = false;
 let mut pending_tcp_kind: PendingTcpKind = PendingTcpKind::None;
 let mut pending_tcp_frame: [u8; 1514];
 let mut pending_tcp_frame_length: usize = 0;
@@ -115,6 +119,17 @@ fn kernel_tcp_inject_drop_next_syn_ack() {
 
 fn kernel_tcp_injected_syn_ack_recovered() -> bool {
     return tcp_injected_syn_accepted;
+}
+
+fn kernel_tcp_inject_drop_next_data() {
+    tcp_drop_next_data = true;
+    tcp_injected_data_pending = false;
+    tcp_injected_data_retransmitted = false;
+    tcp_injected_data_acked = false;
+}
+
+fn kernel_tcp_injected_data_recovered() -> bool {
+    return tcp_injected_data_acked;
 }
 
 fn pending_tcp_record(kind: PendingTcpKind, frame_length: usize) {
@@ -697,6 +712,12 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
                 }
                 ready = net_rx_finish(acquired, plan);
                 if (pending_ack) {
+                    if (tcp_injected_data_pending &&
+                        tcp_injected_data_retransmitted &&
+                        pending_tcp_kind == PendingTcpKind::Data) {
+                        tcp_injected_data_acked = true;
+                    }
+                    tcp_injected_data_pending = false;
                     if (pending_peer_fin) {
                         conn_rcv_nxt = conn_rcv_nxt + 1;
                     }
@@ -746,6 +767,10 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
                     pending_tcp_frame_length as i32);
                 pending_tcp_sent_at = pending_now;
                 pending_tcp_retries = pending_tcp_retries + 1;
+                if (tcp_injected_data_pending &&
+                    pending_tcp_kind == PendingTcpKind::Data) {
+                    tcp_injected_data_retransmitted = true;
+                }
             } else if (pending_tcp_retries == TCP_RETRY_LIMIT &&
                        pending_now - pending_tcp_sent_at >= retry_ticks) {
                 pending_tcp_kind = PendingTcpKind::None;
@@ -917,6 +942,11 @@ fn kernel_tcp_send_received(ready: sink NetRxCanAcquire,
         conn_snd_nxt = conn_snd_nxt + (length as u32);
         let frame_length: usize = 54 + length;
         pending_tcp_record(PendingTcpKind::Data, frame_length);
+        if (tcp_drop_next_data) {
+            tcp_drop_next_data = false;
+            tcp_injected_data_pending = true;
+            return KernelTcpSendResult::Sent(ready);
+        }
         return KernelTcpSendResult::Sent(net_transmit_ready(
             ready, tcp_stream_tx_frame as []u8, frame_length as i32));
     }

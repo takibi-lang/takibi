@@ -516,6 +516,7 @@ fn main() {
                                                     dynamic_heap_start,
                                                     dynamic_heap_limit);
                                                 kernel_tcp_inject_drop_next_syn_ack();
+                                                kernel_tcp_inject_drop_next_data();
                                                 match kernel_syscall_inetd_accept(8080) {
                                                     KernelInetdAcceptResult::TimedOut => {
                                                         process_image_unmap(dynamic_pages);
@@ -651,6 +652,9 @@ fn main() {
                         }
                         if (kernel_syscall_socket_evidence()) {
                             kernel_boot_log("linux socket syscalls: socket bind listen accept read write close ok port=8080\n");
+                        }
+                        if (kernel_tcp_injected_data_recovered()) {
+                            kernel_boot_log("httpd server: data drop retransmit ok\n");
                         }
                         kernel_boot_log("syscall exit: 0\n");
                     }
