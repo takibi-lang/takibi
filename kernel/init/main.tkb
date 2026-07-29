@@ -12,36 +12,36 @@ fn main() {
     page_allocator_init();
     match initramfs_busybox() {
         InitramfsFileResult::Invalid => {
-            kernel_debug_log("distro image: invalid initramfs\n");
+            kernel_boot_log("distro image: invalid initramfs\n");
         }
         InitramfsFileResult::File(image) => {
             let (image_address, image_length) = image;
             match distro_elf_validate(image_address, image_length) {
                 DistroElfResult::Invalid => {
-                    kernel_debug_log("distro image: invalid elf\n");
+                    kernel_boot_log("distro image: invalid elf\n");
                 }
                 DistroElfResult::Valid(plan) => {
                     if (plan.entry == 0x4524 && plan.load_segments == 2 &&
                         plan.extent == 0x122138) {
-                        kernel_debug_log("distro image: alpine busybox static-pie\n");
-                        kernel_debug_log("distro elf: aarch64 loads=2 extent=0x122138\n");
+                        kernel_boot_log("distro image: alpine busybox static-pie\n");
+                        kernel_boot_log("distro elf: aarch64 loads=2 extent=0x122138\n");
                         match process_image_map(plan) {
                             ProcessImageMapResult::InvalidImage => {
-                                kernel_debug_log("distro map: invalid image\n");
+                                kernel_boot_log("distro map: invalid image\n");
                             }
                             ProcessImageMapResult::OutOfMemory => {
-                                kernel_debug_log("distro map: out of memory\n");
+                                kernel_boot_log("distro map: out of memory\n");
                             }
                             ProcessImageMapResult::Mapped(image_pages) => {
                                 if (process_image_page_count(image_pages) == 401) {
-                                    kernel_debug_log("distro map: pages=401 rx+rw-xn heap+stack=rw+xn\n");
+                                    kernel_boot_log("distro map: pages=401 rx+rw-xn heap+stack=rw+xn\n");
                                 }
                                 if (process_image_gap_is_unmapped()) {
-                                    kernel_debug_log("distro load: file bytes match bss=zero gap=unmapped\n");
+                                    kernel_boot_log("distro load: file bytes match bss=zero gap=unmapped\n");
                                 }
                                 if (process_image_entry(image_pages) == 0x40004524 &&
                                     process_image_stack_pointer(image_pages) == 0x401FFE00) {
-                                    kernel_debug_log("distro stack: argc=3 argv auxv ready\n");
+                                    kernel_boot_log("distro stack: argc=3 argv auxv ready\n");
                                 }
                                 let (heap_start, heap_limit) =
                                     process_image_heap_range(image_pages);
@@ -50,14 +50,13 @@ fn main() {
                                     process_image_entry(image_pages),
                                     process_image_stack_pointer(image_pages));
                                 if (busybox_status == 0) {
-                                    kernel_debug_log("busybox exit: 0\n");
+                                    kernel_boot_log("busybox exit: 0\n");
                                 } else {
-                                    kernel_debug_log("busybox failed:\n");
-                                    kernel_debug_hex(busybox_status);
+                                    kernel_boot_log("busybox failed\n");
                                 }
                                 process_image_unmap(image_pages);
                                 if (process_image_window_is_clear()) {
-                                    kernel_debug_log("distro unmap: clean\n");
+                                    kernel_boot_log("distro unmap: clean\n");
                                 }
                             }
                         }
@@ -68,14 +67,14 @@ fn main() {
     }
     match initial_process_create() {
         ProcessCreateResult::OutOfMemory => {
-            kernel_debug_log("initial process: allocation failed\n");
+            kernel_boot_log("initial process: allocation failed\n");
         }
         ProcessCreateResult::Created(resources) => {
             let (process, text, data, stack) = resources;
-            kernel_debug_log("initial process: ready\n");
+            kernel_boot_log("initial process: ready\n");
             match initial_user_load(text) {
                 InitialUserLoadResult::TooLarge => {
-                    kernel_debug_log("initial user: image too large\n");
+                    kernel_boot_log("initial user: image too large\n");
                     initial_process_destroy(process, text, data, stack);
                 }
                 InitialUserLoadResult::Loaded => {
@@ -84,13 +83,13 @@ fn main() {
                     let (data_space, data_mapping) = map_user_data(text_space, data);
                     let (ready_space, stack_mapping) = map_user_stack(data_space, stack);
                     if (user_layout_is_correct()) {
-                        kernel_debug_log("vm layout: text=rx data=rw+xn stack=rw+xn\n");
+                        kernel_boot_log("vm layout: text=rx data=rw+xn stack=rw+xn\n");
                     }
                     let exit_status: usize =
                         run_initial_user(USER_TEXT_VA, USER_STACK_VA + PAGE_SIZE);
                     if (exit_status == 0) {
-                        kernel_debug_log("syscall write errors: ebadf efault\n");
-                        kernel_debug_log("syscall exit: 0\n");
+                        kernel_boot_log("syscall write errors: ebadf efault\n");
+                        kernel_boot_log("syscall exit: 0\n");
                     }
                     let (data_space2, stack2) =
                         unmap_user_stack(ready_space, stack_mapping);
@@ -103,7 +102,7 @@ fn main() {
                 }
             }
             if (page_allocator_live_count() == 0) {
-                kernel_debug_log("resources: pages=0\n");
+                kernel_boot_log("resources: pages=0\n");
             }
         }
     }

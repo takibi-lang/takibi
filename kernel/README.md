@@ -26,10 +26,10 @@ is compared exactly with the same-named `.expected` file. This lets boot,
 process, VM, syscall, filesystem, and networking contracts grow independently
 without paying for a separate hardware reboot for every viewpoint.
 
-Kernel UART output is classified at its call site. `kernel_boot_log` is for
-stable operator-visible boot/status messages. `kernel_debug_log` is temporary
-bring-up instrumentation and is intended to disappear from the kernel tree
-after userspace `write` can carry integration evidence.
+Kernel UART output is classified at its call site. `kernel_boot_log` is only
+for stable operator-visible boot/status messages. Temporary kernel debug UART
+logging was removed once a distribution BusyBox could report integration
+evidence through the userspace Linux `write` boundary.
 
 All new Takibi sources in this tree are compiled with `--forbid-trap` from
 their first commit. Fallible internal operations return variants; conversion
@@ -60,7 +60,9 @@ Alpine v3.24's pinned AArch64 `busybox-static` package. It is wrapped in a
 The kernel validates the archive name/bounds and the real static-PIE ELF load
 plan before the larger owned process-image mapping is attempted.
 
-That measured load plan now drives a 272-page mapping over the two real
-`PT_LOAD` ranges. Per-page ownership transfers into one linear
-`ProcessImagePages` teardown obligation; unmap clears every populated leaf and
-returns every physical page before the smaller syscall fixture is created.
+That measured load plan now drives the real `PT_LOAD` mappings plus an owned
+initial stack and fixed short-lived heap. Alpine BusyBox runs
+`echo "hello from busybox"` at EL0, writes through Linux syscall 64, and exits
+through syscall 93 with status zero. All 401 image, heap, and stack pages sit
+under one linear `ProcessImagePages` teardown obligation and are returned
+before the smaller syscall fixture is created.

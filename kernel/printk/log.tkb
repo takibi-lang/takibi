@@ -1,22 +1,6 @@
-// Stable boot/status messages are deliberately separate from temporary
-// implementation diagnostics. The debug entry point exists while the kernel
-// has no user write syscall and is a deletion target once that boundary can
-// report failures without kernel-internal UART instrumentation.
+// Stable operator-visible boot and status messages. Userspace test output uses
+// the Linux write syscall; temporary kernel UART diagnostics do not belong in
+// this interface.
 fn kernel_boot_log(message: *u8) {
     uart_puts(message);
-}
-
-fn kernel_debug_log(message: *u8) {
-    uart_puts(message);
-}
-
-fn kernel_debug_hex(value: usize) {
-    let digits: []u8 = "0123456789abcdef" as []u8;
-    uart_puts("0x");
-    for i: usize in 0..<16 {
-        let shift: usize = (15 - i) * 4;
-        let digit: {0..<16 as usize} = (value >> shift) & 0xF;
-        uart_putc(digits[digit]);
-    }
-    uart_putc(0x0A);
 }

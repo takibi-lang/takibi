@@ -7,6 +7,7 @@ const AARCH64_NR_EXIT: usize = 93;
 const AARCH64_NR_EXIT_GROUP: usize = 94;
 const LINUX_EBADF: usize = 0xFFFFFFFFFFFFFFF7;
 const LINUX_EFAULT: usize = 0xFFFFFFFFFFFFFFF2;
+const LINUX_ENOSYS: usize = 0xFFFFFFFFFFFFFFDA;
 
 private let mut syscall_heap_start: usize;
 private let mut syscall_heap_limit: usize;
@@ -57,13 +58,7 @@ fn initial_user_load(text: borrow PageOwner[page])
 fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, elr: usize) -> (usize, usize) {
     let exception_class: usize = (esr >> 26) & 0x3F;
-    if (exception_class != 0x15) {
-        kernel_debug_log("EL0 exception ESR:\n");
-        kernel_debug_hex(esr);
-        kernel_debug_log("EL0 exception ELR:\n");
-        kernel_debug_hex(elr);
-        return (0, 0);
-    }
+    if (exception_class != 0x15) { return (0, 0); }
 
     if (number == AARCH64_NR_WRITE) {
         let fd: usize = x0;
@@ -120,7 +115,5 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         // as a unit, and its load-time permissions are not relaxed here.
         return (1, 0);
     }
-    kernel_debug_log("unsupported syscall:\n");
-    kernel_debug_hex(number);
-    return (0, 0);
+    return (1, LINUX_ENOSYS);
 }
