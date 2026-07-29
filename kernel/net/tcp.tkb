@@ -37,6 +37,7 @@ const TCP_ECHO_PORT: u16 = 7;
 // explicitly in build_data_echo before constructing the reply segment --
 // see that function's comment.
 const TCP_MAX_PAYLOAD: u16 = 1460;
+const TCP_RETRY_LIMIT: usize = 3;
 
 enum ConnState: u8 {
     Listen;
@@ -467,7 +468,11 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
     conn_state = ConnState::Listen;
     conn_local_port = port;
     let start: i64 = read_cntpct();
-    let deadline_ticks: i64 = read_cntfrq() * 30;
+    let counter_frequency: i64 = read_cntfrq();
+    let deadline_ticks: i64 = counter_frequency * 30;
+    let retry_ticks: i64 = counter_frequency;
+    let mut syn_ack_sent_at: i64 = start;
+    let mut syn_ack_retries: usize = 0;
     while ((read_cntpct() - start) < deadline_ticks) {
         net_rx_wait();
         match net_rx_acquire(ready) {
@@ -545,8 +550,14 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
                                                     conn_snd_nxt =
                                                         TCP_INITIAL_SEQ + 1;
                                                     build_syn_ack(frame, ihl);
+                                                    slice_copy(
+                                                        tcp_stream_tx_frame[0..<54],
+                                                        frame[0..<54]);
                                                     plan = NetRxDisposal::Reply(
                                                         14 + (ihl as i32) + 20);
+                                                    syn_ack_sent_at =
+                                                        read_cntpct();
+                                                    syn_ack_retries = 0;
                                                     conn_state =
                                                         ConnState::SynRcvd;
                                                 } else if (
@@ -575,6 +586,15 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
                     return KernelTcpAcceptResult::Accepted(ready);
                 }
             }
+        }
+        let retry_now: i64 = read_cntpct();
+        if (conn_state == ConnState::SynRcvd &&
+            syn_ack_retries < TCP_RETRY_LIMIT &&
+            retry_now - syn_ack_sent_at >= retry_ticks) {
+            ready = net_transmit_ready(
+                ready, tcp_stream_tx_frame as []u8, 54);
+            syn_ack_sent_at = retry_now;
+            syn_ack_retries = syn_ack_retries + 1;
         }
     }
     return KernelTcpAcceptResult::TimedOut(ready);
