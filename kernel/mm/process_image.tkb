@@ -44,6 +44,12 @@ must_use variant ProcessImageMapResult {
 
 must_use variant ProcessImagePageLoadResult { Invalid; Loaded; }
 must_use variant ProcessImageStackResult { Invalid; Ready; }
+must_use variant ProcessImageSegmentsResult {
+    Invalid;
+    OutOfMemory;
+    Mapped(usize);
+}
+must_use variant ProcessImagePairProbeResult { Invalid; Verified; }
 
 fn process_image_prepare_stack(page: borrow PageOwner[page],
                                plan: DistroElfLoadPlan)
@@ -114,6 +120,7 @@ fn process_image_prepare_stack(page: borrow PageOwner[page],
 fn process_image_load_page(page: borrow PageOwner[page],
                            plan: DistroElfLoadPlan,
                            header: *KernelElf64ProgramHeader,
+                           load_bias: usize,
                            l3_index: usize)
         -> ProcessImagePageLoadResult !{unsafe} {
     let bytes = page_bytes(page);
@@ -121,7 +128,8 @@ fn process_image_load_page(page: borrow PageOwner[page],
 
     let page_start: usize = l3_index * PAGE_SIZE;
     let page_end: usize = page_start + PAGE_SIZE;
-    let segment_start: usize = header.virtual_address as usize;
+    let segment_start: usize =
+        (header.virtual_address as usize) + load_bias;
     let file_size: usize = header.file_size as usize;
     let file_end: usize = segment_start + file_size;
     let mut copy_start: usize = page_start;
@@ -194,11 +202,15 @@ fn process_image_unmap(pages: sink ProcessImagePages[image]) {
     process_image_cleanup(pages.count);
 }
 
-fn process_image_map(plan: DistroElfLoadPlan) -> ProcessImageMapResult {
-    if (plan.extent > 0x200000) {
-        return ProcessImageMapResult::OutOfMemory;
+fn process_image_map_segments(plan: DistroElfLoadPlan,
+                              load_bias: usize,
+                              already_mapped: usize)
+        -> ProcessImageSegmentsResult {
+    if (plan.extent > 0x200000 || load_bias > 0x200000 - plan.extent) {
+        process_image_cleanup(already_mapped);
+        return ProcessImageSegmentsResult::OutOfMemory;
     }
-    let mut mapped: usize = 0;
+    let mut mapped: usize = already_mapped;
     for segment_index: usize in 0..<plan.program_count {
         let header_address: usize = plan.image_address + plan.program_offset +
                                     segment_index * ELF_PROGRAM_HEADER_SIZE;
@@ -207,34 +219,36 @@ fn process_image_map(plan: DistroElfLoadPlan) -> ProcessImageMapResult {
         if (header.segment_type == ELF_PT_LOAD) {
             if (header.flags != 5 && header.flags != 6) {
                 process_image_cleanup(mapped);
-                return ProcessImageMapResult::InvalidImage;
+                return ProcessImageSegmentsResult::Invalid;
             }
-            let virtual_address: usize = header.virtual_address as usize;
+            let virtual_address: usize =
+                (header.virtual_address as usize) + load_bias;
             let memory_size: usize = header.memory_size as usize;
             let first_page: usize = virtual_address / PAGE_SIZE;
             let last_byte: usize = virtual_address + memory_size;
             let last_page: usize = (last_byte + 4095) / PAGE_SIZE;
             if (last_page > 512) {
                 process_image_cleanup(mapped);
-                return ProcessImageMapResult::OutOfMemory;
+                return ProcessImageSegmentsResult::OutOfMemory;
             }
             for l3_index: usize in first_page..<last_page {
                 if (user_pte_read(l3_index) != 0) {
                     process_image_cleanup(mapped);
-                    return ProcessImageMapResult::InvalidImage;
+                    return ProcessImageSegmentsResult::Invalid;
                 }
                 match page_alloc() {
                     PageAllocResult::OutOfMemory => {
                         process_image_cleanup(mapped);
-                        return ProcessImageMapResult::OutOfMemory;
+                        return ProcessImageSegmentsResult::OutOfMemory;
                     }
                     PageAllocResult::Allocated(page) => {
                         if (mapped >= 0 && mapped < 512) {
-                            match process_image_load_page(page, plan, header, l3_index) {
+                            match process_image_load_page(
+                                    page, plan, header, load_bias, l3_index) {
                                 ProcessImagePageLoadResult::Invalid => {
                                     page_free(page);
                                     process_image_cleanup(mapped);
-                                    return ProcessImageMapResult::InvalidImage;
+                                    return ProcessImageSegmentsResult::Invalid;
                                 }
                                 ProcessImagePageLoadResult::Loaded => {
                                     let phys: usize = page_physical_address(page);
@@ -244,21 +258,73 @@ fn process_image_map(plan: DistroElfLoadPlan) -> ProcessImageMapResult {
                                         user_code_sync(phys, PAGE_SIZE);
                                     }
                                     user_pte_write(l3_index, phys | flags);
-                                    user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
-                                    let page_index = page_owner_transfer_index(page);
-                                    process_image_record(mapped, page_index, l3_index);
+                                    user_tlb_invalidate(
+                                        USER_TEXT_VA + l3_index * PAGE_SIZE);
+                                    let page_index =
+                                        page_owner_transfer_index(page);
+                                    process_image_record(
+                                        mapped, page_index, l3_index);
                                     mapped = mapped + 1;
                                 }
                             }
                         } else {
                             page_free(page);
                             process_image_cleanup(mapped);
-                            return ProcessImageMapResult::OutOfMemory;
+                            return ProcessImageSegmentsResult::OutOfMemory;
                         }
                     }
                 }
             }
         }
+    }
+    return ProcessImageSegmentsResult::Mapped(mapped);
+}
+
+fn process_image_pair_probe(primary: DistroElfLoadPlan,
+                            interpreter: DistroElfLoadPlan,
+                            interpreter_bias: usize)
+        -> ProcessImagePairProbeResult {
+    match process_image_map_segments(primary, 0, 0) {
+        ProcessImageSegmentsResult::Invalid => {
+            return ProcessImagePairProbeResult::Invalid;
+        }
+        ProcessImageSegmentsResult::OutOfMemory => {
+            return ProcessImagePairProbeResult::Invalid;
+        }
+        ProcessImageSegmentsResult::Mapped(primary_count) => {
+            match process_image_map_segments(
+                    interpreter, interpreter_bias, primary_count) {
+                ProcessImageSegmentsResult::Invalid => {
+                    return ProcessImagePairProbeResult::Invalid;
+                }
+                ProcessImageSegmentsResult::OutOfMemory => {
+                    return ProcessImagePairProbeResult::Invalid;
+                }
+                ProcessImageSegmentsResult::Mapped(total) => {
+                    process_image_cleanup(total);
+                    if (total == 195 && process_image_window_is_clear()) {
+                        return ProcessImagePairProbeResult::Verified;
+                    }
+                    return ProcessImagePairProbeResult::Invalid;
+                }
+            }
+        }
+    }
+}
+
+fn process_image_map(plan: DistroElfLoadPlan) -> ProcessImageMapResult {
+    if (plan.extent > 0x200000) {
+        return ProcessImageMapResult::OutOfMemory;
+    }
+    let mut mapped: usize = 0;
+    match process_image_map_segments(plan, 0, 0) {
+        ProcessImageSegmentsResult::Invalid => {
+            return ProcessImageMapResult::InvalidImage;
+        }
+        ProcessImageSegmentsResult::OutOfMemory => {
+            return ProcessImageMapResult::OutOfMemory;
+        }
+        ProcessImageSegmentsResult::Mapped(count) => { mapped = count; }
     }
     let heap_first_page: usize = (plan.extent + PAGE_SIZE - 1) / PAGE_SIZE;
     let heap_last_page: usize = heap_first_page + PROCESS_HEAP_PAGE_COUNT;

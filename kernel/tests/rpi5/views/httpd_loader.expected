@@ -1,3 +1,4 @@
 httpd images: busybox-extras+musl valid
 httpd map: pie pages=157 clean
 httpd map: musl pages=296 clean
+httpd map: combined segments=195 musl-bias=0x40000 clean

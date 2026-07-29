@@ -500,6 +500,16 @@ fn main() {
                                             }
                                             HttpdImageMapCheckResult::Verified => { }
                                         }
+                                        match process_image_pair_probe(
+                                                httpd_plan, musl_plan,
+                                                0x40000) {
+                                            ProcessImagePairProbeResult::Invalid => {
+                                                kernel_boot_log("httpd map: combined invalid\n");
+                                            }
+                                            ProcessImagePairProbeResult::Verified => {
+                                                kernel_boot_log("httpd map: combined segments=195 musl-bias=0x40000 clean\n");
+                                            }
+                                        }
                                     }
                                 }
                             }

@@ -139,6 +139,15 @@ the combined layout: the remaining loader work is assigning non-overlapping
 load biases and constructing interpreter-aware auxv, not debugging either
 image's ordinary segment mapping at the same time.
 
+The segment mapper is now shared by single-image execution and a combined
+dynamic-image layout. HTTPd remains at load bias zero and musl uses bias
+`0x40000`; their 28 and 167 segment pages coexist without overlap in the
+same EL0 page table. Allocation failure, invalid permissions, and overlap all
+roll back the complete combined prefix. The RPi5 loader view requires all 195
+pages to be reclaimed and the window to be empty. Heap, stack, and
+interpreter-aware auxv are deliberately the next layer on this proven segment
+layout.
+
 The first ext2 slice is also active on RPi5. The build creates a checked 1 MiB
 RAM fixture with `mke2fs`, populates it with `e2mkdir`/`e2cp`, and embeds it as
 a writable image. The filesystem core reaches it only through the 1 KiB block

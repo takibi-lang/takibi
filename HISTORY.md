@@ -15,6 +15,22 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: Co-locate HTTPd and musl Segments
+
+The process-image mapper's `PT_LOAD` work is now one shared operation taking
+an explicit load bias and an already-owned page prefix. The original static
+BusyBox path uses bias zero through this same helper. The dynamic probe maps
+the HTTPd PIE at bias zero, then musl at `0x40000`, preserving one ownership
+record and one rollback boundary across both images. Invalid flags, address
+overflow, page exhaustion, or a PTE collision reclaim the entire prefix.
+
+On RPi5 the HTTPd image contributes 28 segment pages and musl contributes 167,
+for 195 simultaneously mapped pages. The dedicated loader view proves the
+combined mapping and complete teardown, while all 13 UART views and every
+Ethernet/storage check pass in the same boot. The remaining combined-image
+work is now limited to the single heap/stack owner set and the musl-aware auxv
+and entry point.
+
 ### 2026-07-29: Map and Reclaim Both Dynamic HTTPd Images
 
 The pinned `busybox-httpd` PIE and `ld-musl-aarch64.so.1` now each traverse
