@@ -247,10 +247,11 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         if (fd == 5) {
             syscall_connected_write_calls =
                 syscall_connected_write_calls + 1;
-            if (syscall_connected_open == false || length == 0 ||
-                length > 1460) {
+            if (syscall_connected_open == false || length == 0) {
                 return (1, LINUX_EINVAL);
             }
+            let mut amount: usize = length;
+            if (amount > 1460) { amount = 1460; }
             let received_length: usize = syscall_socket_buffer_length;
             match network_capability_take() {
                 NetworkCapabilityTakeResult::Empty => {
@@ -265,7 +266,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                     let destination_base: *u8 =
                         syscall_socket_buffer as *u8;
                     let mut index: usize = 0;
-                    while (index < length) {
+                    while (index < amount) {
                         let source_byte: *u8 = source_base + (index as isize);
                         let destination_byte: *u8 =
                             destination_base + (index as isize);
@@ -274,7 +275,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                     }
                     match kernel_tcp_send_received(
                             ready, syscall_socket_buffer as []u8,
-                            received_length, length) {
+                            received_length, amount) {
                         KernelTcpSendResult::Invalid(after_invalid) => {
                             match network_capability_put(after_invalid) {
                                 NetworkCapabilityPutResult::Stored => {
@@ -291,7 +292,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                     return (1, LINUX_EINVAL);
                                 }
                                 NetworkCapabilityPutResult::Stored => {
-                                    return (1, length);
+                                    return (1, amount);
                                 }
                             }
                         }
