@@ -1,764 +1,162 @@
 # takibi - Takibi Language
 
-**takibi** is a from-scratch programming language and compiler, implemented in
-OCaml, that generates native machine code through an LLVM backend.
+Takibi is a from-scratch systems programming language and compiler written in
+OCaml 5.4.0. It emits native machine code through LLVM 19.
 
-The language is designed for **bare-metal and kernel-space programming**, where
-a runtime panic, trap, or silent memory corruption is not an acceptable failure
-mode. The long-term goal of this project is to demonstrate that runtime errors
-in a monolithic, Unix-like kernel -- in the spirit of Linux or NetBSD -- can be
-lifted into compile-time errors, using type-system features C never had
-(refinement types, affine/linear ownership, and eventually SMT-backed proof
-obligations).
+The project is aimed at bare-metal and kernel-space software, where a runtime
+panic or silent memory corruption can stop an entire system. Its long-term
+goal is to demonstrate that failures in a monolithic Unix-like kernel can be
+moved from runtime to compile time with refinement types, affine and linear
+ownership, effects, and eventually SMT-backed proof obligations.
 
-As a first waypoint toward that goal, takibi already implements a TCP/IP stack
-and runs an HTTP server and a network key-value store on bare-metal targets,
-on QEMU (AArch64), real Raspberry Pi 5 hardware, and real
-[STM32F746G-DISCOVERY](https://www.st.com/en/evaluation-tools/32f746gdiscovery.html)
-(Cortex-M7) hardware. Raspberry Pi 3B remains as a legacy build target, but is
-not part of the current freshness policy.
+The current language syntax and semantics are specified in
+[`SPEC.md`](SPEC.md). This README introduces the project; it is not a second
+language specification.
 
-For the current language syntax and grammar (types, statements,
-expressions), see [`SPEC.md`](SPEC.md).
-For the long-term type-system architecture and its example-driven migration
-plan, see [`TAKIBI_CORE.md`](TAKIBI_CORE.md). The history and exact limitations
-of the current affine/linear checker remain in
-[`OWNERSHIP_KERNEL.md`](OWNERSHIP_KERNEL.md).
+## What is in this repository?
 
-## Design Principle: Detect Errors at Compile Time
+The repository has three related layers:
 
-In embedded products, zero runtime exceptions and panics is a hard
-requirement. If a runtime trap occurs in a bare-metal environment running
-timers, UART, and a TCP/IP stack, the system will silently break with nothing
-communicated to the user. takibi's type system is built around pushing as
-many of those failures as possible into compile-time errors instead:
+- The compiler in `lib/` and `bin/` parses Takibi, checks its types and
+  resource rules, generates LLVM IR, and writes native object files.
+- [`examples/`](examples/README.md) contains executable language, bare-metal,
+  driver, filesystem, scheduler, and networking proofs. It includes QEMU
+  integration tests and real STM32F746G-DISCOVERY and Raspberry Pi 5 suites.
+- [`kernel/`](kernel/README.md) is the standalone RPi5-first monolithic kernel.
+  It runs existing Alpine Linux AArch64 binaries through a growing
+  Linux-compatible syscall boundary and currently serves USB-ext2 content
+  with BusyBox HTTPd over RP1 Ethernet.
 
-- The compiler currently emits an `icmp uge` + `llvm.trap` bounds check on
-  array indexing when the index range cannot be proven safe. On AArch64 this
-  lowers to a `brk #0` (a real hardware trap) -- acceptable for development,
-  but a bug in shipped firmware.
-- The refinement type `{lo..<hi as base}` is how the type system removes the
-  trap entirely: if `hi <= N` and `lo >= 0` can be proven at compile time for
-  an array of size `N`, no bounds-check code is generated at all. The base is
-  explicit; refinements are not implicitly represented as `i32`.
-- Array/slice indices are `usize`; raw-pointer offsets are `isize`. Choosing
-  an unrefined integer (unknown range: MMIO, external input, ...) versus a
-  refined integer is a deliberate part of the API. An unproven `usize` array
-  index receives a checked access; an integer of the wrong base is rejected.
+The examples and kernel have separate purposes. Examples remain focused
+compiler and hardware regression programs. The production kernel direction is
+developed only under `kernel/` and does not depend on sources under
+`examples/`.
 
-"Code with remaining bounds checks = code whose type annotations are still
-insufficient." The finished form of a piece of code is one where every index
-range is pinned at the type level using `for i: usize in 0..<n` or
-`{lo..<hi as usize}`
-annotations.
+## Language direction
 
-## Development Workflow: Gradual Elimination of Runtime Traps
+Takibi treats a remaining runtime bounds trap as evidence that the program has
+not yet expressed enough information for a proof.
 
-takibi's central bet is a workflow, not just a type system. Languages like
-SPARK or Dafny demand full rigor from the first line; takibi instead
-supports **raising rigor as the development phase advances**, at the
-language level:
+- `{lo..<hi as base}` refines an integer range while retaining an explicit
+  representation type.
+- `affine` and `linear` values express resources that may be consumed at most
+  once or exactly once.
+- `borrow`, `borrow mut`, indexed owners, and region-tied pointers permit
+  temporary access without losing the underlying ownership obligation.
+- closed variants describe fallible operations without integer sentinels;
+  `must_use variant` makes ignoring an outcome a compile error.
+- effect rows such as `!{may_block}`, `!{interrupt}`, and `!{unsafe}` expose
+  operations that matter to low-level callers.
+- `unsafe { ... }` is an auditable boundary, not an implicit escape from
+  checked indexing.
 
-1. **Prototype freely.** By default, unproven array accesses and range
-   casts compile fine and get a runtime check (`llvm.trap` on violation).
-   A trap firing during driver bring-up is not treated as a shameful bug --
-   it is a *signal that type information is missing*, pointing at exactly
-   the access whose range the programmer has not yet expressed.
-2. **Strengthen incrementally.** Replace raw indices with `for i in 0..<n`
-   loops, `{lo..<hi as base}` refined types, slice types (`[u8; 54..]`) and
-   `if (v >= 0 && v < N)` / `if (s.len >= N)` narrowing. Each addition of
-   type information makes checks (and their traps) *provably unnecessary*,
-   and the compiler deletes them.
-3. **Ship with `--forbid-trap`.** The compiler then rejects the program if
-   ANY runtime trap check remains, listing every unproven site with its
-   source location. A binary that builds under this flag contains zero
-   trap instructions -- the "no runtime panics" requirement is a build
-   result, not a code-review hope.
+Ordinary compilation may insert a runtime check for an access whose bounds are
+not proven. `--forbid-trap` turns every remaining such site into a compile
+error. New kernel code and established-pattern example code are written under
+that policy from the start.
 
-Two design invariants keep this path monotonic: proofs are never lost
-silently (an immutable binding keeps what its initializer proved, even
-under a weaker type annotation), and unchecked assertions are never
-invisible (constructs that ask the compiler to *trust* rather than *check*
--- e.g. building a slice from a raw pointer at a driver boundary -- must
-be wrapped in `unsafe { ... }`, so they are seen when written and when
-read).
+For details, see:
 
-`--forbid-trap` is expected to grow into a family: per-category strictness
-options (array-bounds trap freedom, checked-cast freedom, safe-pointer
-enforcement outside `unsafe`, ...) with one umbrella flag enabling them
-all. Today's single flag is the first member. **The entire example suite
--- including the full TCP/IP stack, HTTP server, and the FAT12-on-real-SD-
-card milestone (`examples/fatfs`, `examples/common/fat12.tkb`,
-`examples/common_stm32/sdmmc.tkb`, `examples/sdcard`,
-`examples/fatfs_sdcard` -- issues #61/#62/#98) now compiles trap-free
-under it,** with no remaining exceptions. `examples/common_stm32/
-sdmmc.tkb`'s SDMMC1 driver (issue #62) is now symmetric: both
-`disk_write` and `disk_read` are DMA + interrupt driven, matching
-`eth.tkb`'s own DMA+interrupt shape and ChibiOS/RT's own convention of
-using DMA+interrupt for both directions. `disk_read` was DMA-driven for
-a long time (a first attempt reliably corrupted memory once issued after
-~129 prior writes, survived three ChibiOS-cross-checked fixes and stayed
-unresolved), but issue #101's investigation below found a general lesson
-that applied here too: `disk_read` was rebuilt with `dma_prepare_rx`/
-`dma_finish_rx` cache maintenance around its DMA destination, verified
-clean against the exact historical reproduction (150 writes immediately
-followed by a read, well past the old 129 threshold, x5 rounds x4 runs
-with zero failures). That rebuild also surfaced a second, distinct bug:
-`dma_finish_rx` is a cache-line INVALIDATE, not a clean, so invalidating an
-unaligned caller buffer can silently discard unrelated live stack data.
-The first fix used an internal bounce buffer. Issue #102 subsequently added
-aligned local variables and provable `*align(N) T` pointers; `disk_read` now
-targets the caller buffer directly and requires `*align(32) u8`, eliminating
-the bounce copy while making every caller prove the safety condition. Issue
-#171 later made the DMA builtin contract itself target-aware through the
-compiler-supplied `DMA_CACHE_LINE` property (32 on STM32F7, 64 on AArch64).
-`disk_write` still accepts an ordinary pointer because its clean operation
-cannot discard adjacent dirty data.
-Separately, `fatfs_sdcard`'s real-hardware test used to occasionally show
-a single dropped UART byte (GitHub issue #101) -- confirmed unrelated to
-`--forbid-trap` itself (reproduced identically on the pre-`--forbid-trap`
-version too). Root-caused to a UART TX architecture mismatch, not a
-single race condition: `uart.tkb`'s TX used to be per-byte-interrupt
-driven while `sdmmc.tkb`'s `disk_write` is DMA+interrupt driven, an
-asymmetric combination that let heavy SDMMC1 DMA activity intermittently
-starve/corrupt the UART's own interrupt-driven drain. Fixed by switching
-UART TX to DMA+interrupt too (DMA2 Stream7/Channel4) -- verified with 30
-consecutive clean runs of the exact reproduction pattern (previously
-~1-in-6-10 failure) plus the full `make hwcheck-stm32`/`make hwcheck-stm32-net`
-suites. See `uart.tkb`'s and `sdmmc.tkb`'s own header comments and
-HISTORY.md for the full bring-up stories, including a separate, resolved
-TXUNDERR bug in `disk_write`, root-caused by cross-checking the same
-ChibiOS driver. A few tools do almost all of the work: refined integer ranges
-that propagate through ordinary arithmetic and bitwise masking (so a
-value like a wire-derived header length carries a real bound with no
-extra code), `min`/`max` builtins that provably clamp a value against a
-compile-time buffer capacity regardless of its actual runtime value, and
-plain input validation (checking a wire-derived length against a buffer's
-real capacity before trusting it -- not a type-system trick, just what a
-correct parser needs to do anyway, and it happens to make the surrounding
-code provable too). Where a bound genuinely can't be proven this way --
-typically because two values are secretly correlated in a way plain
-interval reasoning can't see -- the code says so explicitly with
-`unsafe { ... }`, rather than silently falling back to an unexplained
-runtime check. As of this writing, exactly **one** `unsafe` use remains
-across the entire example suite -- everywhere else it was tried, removing
-it turned out to be possible (and worth doing: two of the removals closed
-real gaps, an unvalidated device-reported ring index and a lossy
-intermediate slice reconstruction, not just cosmetic --forbid-trap
-fixes). See HISTORY.md's P4c section for the full accounting, including
-two honest negative results (reformulations that don't close without a
-genuine relational domain) and the case that looked like it needed one
-but didn't: the fix turned out to be a missing validation check, not a
-type-system gap.
+- [`SPEC.md`](SPEC.md) - current syntax, types, statements, and semantics;
+- [`TAKIBI_CORE.md`](TAKIBI_CORE.md) - the long-term unified core model;
+- [`OWNERSHIP_KERNEL.md`](OWNERSHIP_KERNEL.md) - ownership checker design and
+  current limitations;
+- [`HISTORY.md`](HISTORY.md) - the engineering history and hardware debugging
+  record.
 
-## Design Principle: Directed YAGNI
+## Current status
 
-Examples still decide which compiler slice is implemented next: a feature
-needs a present driver, a positive program, and focused negative cases. What
-changed in July 2026 is that YAGNI no longer forbids choosing an architectural
-destination. Repeated ownership workarounds in `FatFile`, `NetRxCpuOwned`,
-guards, protocol obligations, and indexed slots showed that local checker
-increments without a shared model would create rework.
+The compiler has a lexer, Menhir parser, HM-style inference core, refinement,
+effect, ownership, static-index, privacy, and authority-region checks, and an
+LLVM 19 backend. The test suite covers both accepted programs and compile-time
+rejections.
 
-[`TAKIBI_CORE.md`](TAKIBI_CORE.md) therefore fixes the long-term direction:
-runtime values, linear permissions, pure propositions, and effects form one
-Core judgement. Implementations remain incremental and example-driven, but
-each slice must elaborate monotonically toward that Core. Speculative
-convenience remains out of scope; foundational representation work required
-by a current example does not.
+The example suite exercises the language from arithmetic and aggregates up to
+preemptive scheduling, FAT12, SD and USB storage, Ethernet DMA, TCP/IP, HTTP,
+and persistent key-value servers. See [`examples/README.md`](examples/README.md)
+for targets and reproduction instructions.
 
-## Current Status
+The standalone kernel boots at EL1 on RPi5, runs userspace at EL0, manages
+typed pages and mappings, mounts ext2 through USB Mass Storage, implements the
+Linux AArch64 syscall subset reached by the current workloads, dynamically
+loads Alpine BusyBox plus musl, and passes a real container-to-board `curl`
+test. See [`kernel/README.md`](kernel/README.md) for its architecture, current
+limitations, and hardware procedure.
 
-- A full pipeline exists: lexer -> Menhir parser -> an HM-style inference core
-  plus Takibi-specific refinement/effect/ownership/static-index/region checks
-  -> LLVM 19 IR generation -> native object code.
-- The example suite compiles and runs today (see `examples/`),
-  covering arithmetic, control flow, structs (packed / aligned, and now
-  with refined-type fields), enums with exhaustiveness checking, function
-  pointers, MMIO/volatile access, compile-time-checked array bounds via
-  refinement types, semaphores, mutexes, condition variables, a preemptive
-  round-robin scheduler, a hand-written TCP/IP stack, and a FAT12
-  filesystem driver both in-memory (`examples/fatfs`, verified against
-  real `mtools`-created images) and on a real SD card
-  (`examples/fatfs_sdcard`, real SDMMC1 DMA+interrupt driver), on both
-  QEMU and real STM32 hardware.
-- DMA/device ordering is expressed through compiler builtins rather than
-  handwritten assembly. The STM32 port also performs cache maintenance
-  (AXI SRAM1 is genuinely cacheable; `dma_prepare_tx`/`dma_prepare_rx`/
-  `dma_finish_rx` do real cache-line clean/invalidate, not an MPU-window
-  no-op). Network RX ownership is expressed with an erased affine
-  acquisition permission plus a linear indexed descriptor owner, rejecting
-  double acquisition, double release, and use-after-release patterns.
-- Ethernet and STM32 UART I/O are interrupt-driven. ARM/AArch64 retained
-  events (`wfe`/`sev`) avoid both idle busy-spins and check-then-sleep lost
-  wakeups.
-- **The TCP/IP stack goal has been reached**: `examples/http_server` serves a
-  live HTML page with a request counter over a real TCP connection, reachable
-  from an actual web browser, both under QEMU (via a virtio-net driver) and on
-  real STM32F746G-DISCOVERY hardware (via a from-scratch Ethernet MAC/PHY/DMA
-  driver in `examples/common_stm32/eth.tkb`).
-- **The TCP/IP stack and the FAT12 filesystem driver now meet**:
-  `examples/http_server_sdcard` serves the real content of a file stored on
-  a real SD card over HTTP, reachable from an actual web browser, on real
-  STM32F746G-DISCOVERY hardware. It serves multiple SD-card files
-  (`INDEX.HTM`, `ABOUT.HTM`, `ICON.PNG`) with multi-segment responses for
-  larger content. SD card provisioning is fully automated (`make
-  hwcheck-stm32-net` / `make stm32-http-server-sdcard`, no human ever touches
-  the card) via OpenOCD-injected mtools images relayed onto the card
-  through the real SDMMC1 driver. `examples/http_server_sdcard_rtos`
-  exercises the same HTTP+SD path with SD/FAT work behind an RTOS task
-  boundary and is also covered by `make hwcheck-stm32-net`.
-- **A bare-metal network key-value store**: `examples/kvs_server` serves a
-  fixed-size, statically allocated key-value table over HTTP (`PUT`/`GET`/
-  `DELETE /keys/<key>`, `GET /keys` to list), with deterministic host-side
-  tests for set/get/overwrite/delete, table-full, and parser-error cases,
-  `--forbid-trap` clean, on both QEMU and STM32.
-  `examples/kvs_server_sdcard_rtos` adds generation-tracked eventual
-  persistence to a real SD card via FAT12. PUT/DELETE return 202 after the
-  RAM update and dirty-record snapshot; a dedicated RTOS SD worker coalesces
-  and flushes records asynchronously. It is covered by `make hwcheck-stm32-net`,
-  including an explicit settle-then-reset persistence check. Both server
-  families share one TCP/HTTP core
-  (`examples/common/http_server_common.tkb` / `http_conn_state.tkb`)
-  supporting 24 simultaneous TCP connections per server, not just one at a
-  time.
-- Every ported example is a **single `.tkb` application source file** that
-  compiles unchanged for QEMU/AArch64 and STM32/Cortex-M7. Platform-specific
-  behavior is supplied by same-signature HAL files selected by the Makefile.
-- Applications expose `app_main()`. A shared high-level runtime `main()` calls
-  `platform_init()`, `app_main()`, and `platform_shutdown()`; startup assembly
-  remains independent of individual device drivers.
-- DWARF debug-info emission (`-g`) is covered by a live QEMU/GDB
-  regression fixture for globals, locals, aggregates, arguments,
-  stepping, and backtraces. Small profiling helpers are also implemented:
-  QEMU/gdbstub PC sampling for CPU-bound experiments, and STM32 DWT
-  cycle-count profilers for the HTTP+SD+RTOS and KVS+SD+RTOS demos.
+## Quick start
 
-See [`SPEC.md`](SPEC.md) for the current language syntax and grammar, and
-`HISTORY.md` for the detailed engineering log of design
-decisions, hardware bring-up bugs, and the reasoning behind them.
-
-## Demo: Serving a Real Web Page from an STM32F746G-DISCOVERY Board
-
-This walks through reproducing the project's headline result yourself: a
-takibi-compiled HTTP server, running with no operating system on a real
-STM32F746G-DISCOVERY board, answering requests from an ordinary web browser
-over a real Ethernet link.
-
-### What you need
-
-- An STM32F746G-DISCOVERY board (its on-board ST-LINK/V2-1 debug probe is
-  used for both flashing and the serial console -- no separate probe needed).
-- A micro-USB cable (ST-LINK: power, flashing, and the UART log all go over
-  this one cable).
-- An Ethernet cable, and a spare Ethernet NIC on your Linux host that you can
-  dedicate to a direct link to the board (no router or switch required --
-  a plain point-to-point cable is enough, since the demo uses a fixed IP
-  address with no DHCP).
-- A Linux host with the toolchain in "Dependencies" below installed --
-  `openocd`, `stlink-tools`, and the rest of the standard build. The
-  `.devcontainer/` in this repo already has everything installed; opening
-  the repo in that devcontainer (VS Code's "Dev Containers" extension, or
-  any OCI-compatible tool that reads `devcontainer.json`) is the easiest way
-  to get a working environment.
-
-### 1. Connect the board
-
-Plug the micro-USB cable into the board's ST-LINK USB port and into your
-host. Connect an Ethernet cable between the board's Ethernet jack and the
-NIC you're dedicating to this demo.
-
-### 2. Give your host NIC a matching address
-
-The board always serves on a fixed address, `192.168.10.2/24`
-(you can configure `examples/common_stm32/netconfig.tkb`).
-Put your host's NIC on the same `/24` so it can reach the board directly,
-with no routing needed:
+The provided devcontainer is the easiest way to obtain the exact compiler and
+hardware tooling. For compiler-only work:
 
 ```bash
-sudo ip addr add 192.168.10.1/24 dev <your-interface>
-sudo ip link set <your-interface> up
+make build       # build the Takibi compiler
+make test        # run compiler unit tests
+make check       # language, unit, STM32 build, and QEMU integration checks
 ```
 
-Replace `<your-interface>` with whatever `ip link` shows for the NIC wired
-to the board (e.g. `enp4s0`).
+`make check` does not require physical hardware. Real-board targets and their
+safety warnings are documented in the appropriate subtree README:
 
-### 3. Confirm the board is visible to the toolchain
+- [`examples/README.md`](examples/README.md) for STM32 and RPi5 examples;
+- [`kernel/README.md`](kernel/README.md) for the standalone RPi5 kernel.
 
-```bash
-st-info --probe
+Builds are parallel by default. Pass `-j1` when serial output is more useful
+for diagnosing a failure.
+
+## Compiler command line
+
+After `make build`, the compiler is available at
+`_build/default/bin/main.exe`:
+
+```text
+takibi <file1.tkb> [file2.tkb ...] -o output.o
+       [--target <triple>] [--cpu <cpu>] [--features <features>]
+       [-g] [--forbid-trap] [--forbid-unsafe] [--version]
 ```
 
-This should report the on-board ST-LINK. If it fails, check USB
-permissions (the devcontainer already adds its user to the `plugdev` and
-`dialout` groups for this).
+Multiple source files currently form one flat compilation unit. `use
+"path/file.tkb";` resolves source dependencies before compilation. See
+[`SPEC.md`](SPEC.md) for source syntax and [`examples/README.md`](examples/README.md)
+for working programs.
 
-### 4. Build, flash, and run
+## Repository layout
 
-```bash
-make stm32-http-server
+```text
+bin/       compiler CLI
+lib/       parser, type checking, ownership/refinement analysis, LLVM backend
+test/      compiler unit tests
+examples/  executable language and bare-metal proofs
+kernel/    standalone Linux-compatible monolithic kernel
+scripts/   integration, hardware, image, and profiling helpers
 ```
 
-This compiles `examples/http_server` for the STM32/Cortex-M7 target (if not
-already built), flashes it to the board via `st-flash`, and streams the
-board's UART log to your terminal. It prints the URL to open, e.g.:
+## Primary dependencies
 
-```
-Open http://192.168.10.2/ in your browser (Ctrl-C to quit)
-```
-
-### 5. Open it in a browser
-
-Visit the printed URL. You should see a small HTML page served directly by
-the board, with a live request counter that increments every time you
-reload.
-
-### 6. Stop
-
-Ctrl-C in the terminal running `make stm32-http-server` stops streaming the
-log. The board itself keeps serving until it's powered off or reflashed.
-
-### Troubleshooting
-
-- `error: ... not found -- is the STM32F746G-DISCOVERY board connected?` --
-  the board's USB serial device wasn't found at the expected path. Check
-  `dmesg` for where it enumerated and override with, e.g.,
-  `STM32_SERIAL_DEV=/dev/ttyACM1 make stm32-http-server`.
-- `st-info --probe` fails -- a USB permissions issue; see step 3 above.
-- Browser can't reach `192.168.10.2` -- confirm the NIC's address with
-  `ip addr show <your-interface>` and that the Ethernet cable is actually
-  linked up (`ip link show <your-interface>` should say `state UP`).
-
-## Demo: Serving a Real Web Page from a Raspberry Pi 3B Board
-
-The same HTTP server also runs unmodified on a real Raspberry Pi 3B
-(BCM2837), reachable over its own point-to-point Ethernet link. Unlike the
-STM32 board, this target has no on-chip debug probe and no flash-and-run
-workflow: it is a JTAG-injection setup (payloads are loaded straight into
-RAM over JTAG, not written to the SD card as `kernel8.img`) -- see
-[`examples/common_rpi3/AGENTS.md`](examples/common_rpi3/AGENTS.md) for the
-full hardware bring-up story.
-
-### What you need
-
-- A Raspberry Pi 3B board, plus:
-  - A JTAG probe (this project uses an Olimex ARM-USB-TINY-H) wired to
-    GPIO22-27 (the standard 6-pin ARM JTAG GPIO header).
-  - A separate USB-serial dongle wired to GPIO14 (TXD0)/GPIO15 (RXD0)/GND
-    for the UART console -- this is independent of the JTAG probe's own
-    wiring.
-  - A microSD card, prepared once (see step 1 below).
-- An Ethernet cable, and a spare Ethernet NIC on your Linux host that you can
-  dedicate to a direct point-to-point link to the board (no router/switch,
-  no DHCP -- same idea as the STM32 demo, different subnet).
-- A Linux host with the toolchain in "Dependencies" below installed --
-  `openocd` in particular. The `.devcontainer/` in this repo already has
-  everything installed.
-
-### 1. Prepare the SD card (one-time)
-
-The SD card boots a tiny spin-loop stub instead of an OS, giving JTAG a
-clean, safe catch point on every run (see
-[`examples/common_rpi3/AGENTS.md`](examples/common_rpi3/AGENTS.md)'s "Why
-JTAG injection, not an SD card kernel"). With the card mounted wherever your
-host actually mounts it (this devcontainer has no raw SD card reader
-access, so this step runs outside the container):
-
-```bash
-make examples/common_rpi3/jtag_stub.img
-scripts/rpi3_prepare_sdcard.sh /path/to/mounted/boot/partition
+```text
+OCaml 5.4.0, dune, menhir, ppx_deriving.show
+LLVM 19 libraries and command-line tools
 ```
 
-This backs up the partition's existing `kernel8.img` (if any) to
-`kernel8.img.orig`, overwrites it with the built stub, and appends
-`enable_jtag_gpio=1` and `dtoverlay=disable-bt` to `config.txt` (both are
-required -- the second disables UART0's default routing to the on-board
-Bluetooth module). Safe to re-run.
-
-### 2. Connect the board
-
-Insert the prepared SD card, wire up the JTAG probe and the UART dongle as
-described above, connect an Ethernet cable between the board and the NIC
-you're dedicating to this demo, then power on the board.
-
-### 3. Give your host NIC a matching address
-
-The board always serves on a fixed address, `192.168.20.2/24`
-(configurable in `examples/common_rpi3/netconfig.tkb`). Put your host's NIC
-on the same `/24`:
-
-```bash
-sudo ip addr add 192.168.20.1/24 dev <your-interface>
-sudo ip link set <your-interface> up
-```
-
-Replace `<your-interface>` with whatever `ip link` shows for the NIC wired
-to the board (e.g. `enp5s0`).
-
-### 4. Build, inject, and run
-
-```bash
-make rpi3-http-server
-```
-
-This compiles `examples/http_server` for the Raspberry Pi 3B target (if not
-already built), resets the board over JTAG to a clean catch point, injects
-the payload, and streams the UART log to your terminal. It prints the URL
-to open, e.g.:
-
-```
-Open http://192.168.20.2/ in your browser (Ctrl-C to quit)
-```
-
-### 5. Open it in a browser
-
-Visit the printed URL, same as the STM32 demo.
-
-### 6. Stop
-
-Ctrl-C in the terminal running `make rpi3-http-server` stops streaming the
-log. The board keeps serving until reset or power-cycled.
-
-### Troubleshooting
-
-- `error: no non-JTAG ttyUSB device found` / `multiple candidate ttyUSB
-  devices found` -- `scripts/rpi_uart_dev.sh` couldn't uniquely identify the
-  UART dongle; override with `RPI3_SERIAL_DEV=/dev-host/ttyUSBn make
-  rpi3-http-server`.
-- `halted core is at EL1H, not EL2H` -- the board is still running a normal
-  OS (Linux always runs its kernel at EL1), not the JTAG stub. Either the SD
-  card wasn't prepared (step 1) or the board hasn't been power-cycled since
-  it last ran something else; power-cycle it and try again.
-- **Never run `openocd` (or anything touching the JTAG/UART USB devices)
-  with `sudo`** inside this project's devcontainer -- it degrades JTAG
-  reliability rather than helping. See
-  [`examples/common_rpi3/AGENTS.md`](examples/common_rpi3/AGENTS.md)'s
-  `sudo` warning for why.
-- Browser can't reach `192.168.20.2` -- confirm the NIC's address with
-  `ip addr show <your-interface>` and that the Ethernet cable is actually
-  linked up (`ip link show <your-interface>` should say `state UP`).
-
-## Building and Testing
-
-```bash
-make build          # build the compiler (takibi) only
-make test           # run unit tests
-make qemutest        # build examples and run QEMU + host-side integration tests
-make stm32build      # cross-compile every ported example for STM32 (no hardware needed)
-make check           # langcheck + test + stm32build + qemutest
-make hwcheck-stm32          # like stm32build, but also flashes + verifies against real STM32 hardware
-make hwcheck-stm32-net      # real-Ethernet hardware tests (needs the board wired to this host's NIC)
-make hwcheck-rpi3           # opt-in Raspberry Pi 3B JTAG hardware integration test (needs the board wired for JTAG+UART)
-make hwcheck-rpi3-net       # RPi3 real-Ethernet hardware tests (needs the board's Ethernet port wired to this host's NIC)
-make hwcheck-rpi5           # opt-in RPi5 SWD/RP1-UART tests for every non-Ethernet RPi3 example port
-make hwcheck-rpi5-net       # opt-in RPi5 Ethernet + USB-backed HTTP/KVS hardware tests
-make stress-stm32-kvs-server-sdcard-rtos  # opt-in STM32 KVS concurrency stress test
-make perfcheck        # real-hardware profiler smoke tests
-make allcheck         # clean + build once, then run the QEMU, STM32, and RPi5 lanes in parallel
-```
-
-Builds run in parallel across all cores by default. `hwcheck-rpi5` and
-`hwcheck-rpi5-net` require the SD card to boot
-`examples/common_rpi5/jtag_stub.img` and deliberately
-reformats the attached USB mass-storage device; use only the dedicated
-sacrificial test drive. `hwcheck-rpi3-net`, `hwcheck-rpi5-net`, and
-`stress-stm32-kvs-server-sdcard-rtos` are opt-in and not part of `allcheck`
-(see `AGENTS.md`'s Build Commands section for the full reasoning behind
-each target).
-
-`stress-stm32-kvs-server-sdcard-rtos` is intentionally not part of
-`allcheck`: it is a sustained real-board load test rather than a deterministic
-integration test. The target loads the KVS+SD+RTOS firmware into RAM and runs
-`scripts/kvs_stress.py` with the measured issue #135 defaults, concurrency 24
-and a fixed key. The server has twenty-four TCP connection slots; concurrency
-24 passed the measured 30-second load with no DMA loss. Values above 24 are overload
-experiments, not a supported-concurrency regression level.
-Override with `TAKIBI_STRESS_CONCURRENCY`, `TAKIBI_STRESS_DURATION`, or
-`TAKIBI_STRESS_FIXED_KEY` for manual characterization.
-
-### Dependencies
-
-```
-ocaml 5.4.0, dune, menhir
-llvm-19 OCaml bindings (llvm, llvm.analysis, llvm.target, llvm.all_backends,
-                        llvm.passbuilder, llvm.debuginfo)
-ppx_deriving.show
-llvm-mc-19, ld.lld-19     (bare-metal assembling/linking)
-qemu-system-aarch64       (QEMU execution)
-mtools                    (FAT12 image creation/verification for examples/fatfs)
-gdb-multiarch             (AArch64-capable gdb, for DWARF regression tests, profiling, and hardware debugging)
-openocd, stlink-tools     (STM32F746G-DISCOVERY flashing/debugging)
-```
-
-A ready-to-use devcontainer configuration is provided in `.devcontainer/`.
-
-## Directory Layout
-
-```
-lib/       -- lexer, parser, type inference, LLVM code generation
-bin/       -- the takibi CLI
-examples/  -- example programs, each demonstrating one feature or
-              building toward the TCP/IP stack goal
-scripts/   -- QEMU/hardware integration test runners and profiling tools
-test/      -- unit tests (parser, type inference, LLVM code generation/layout)
-```
-
-Each directory under `examples/` documents itself in its `.tkb` file's
-header comment. See [`examples/README.md`](examples/README.md) for maintenance
-priority and the boundary between examples and the future production kernel.
-`examples/common/` holds platform-agnostic logic; target HALs live under the
-corresponding `common_*` directories.
-
-## Targets
-
-- Raspberry Pi 5 (Cortex-A76, AArch64 bare-metal): primary hardware target.
-- QEMU `virt` machine, `cortex-a53` CPU (AArch64 bare-metal): maintained
-  deterministic test target.
-- STM32F746G-DISCOVERY (Cortex-M7 bare-metal): compatibility maintenance only;
-  the existing examples must keep building and running, but no feature growth
-  is planned.
-- Raspberry Pi 3B (BCM2837, AArch64 bare-metal): legacy, outside the freshness
-  policy -- see
-  [`examples/common_rpi3/AGENTS.md`](examples/common_rpi3/AGENTS.md).
-
-## References and Prior Art
-
-takibi is a from-scratch design, not an implementation of any single paper or
-product, but nearly every non-obvious construct below has real prior art it
-converges toward. `TAKIBI_CORE.md` already names several of these lineages
-explicitly when explaining why one core judgement (`Gamma; Delta; Phi;
-epsilon`) subsumes "Rust mode", "ATS mode", "separation-logic mode", and "SMT
-mode" instead of bolting them on as separate checkers; this section spells
-out that mapping feature by feature, each with the current Takibi syntax
-alongside its closest ancestor.
-
-### Refinement types on integers: `{lo..<hi as base}`
-
-```takibi
-const MAX_CONNS: usize = 4;
-fn f(idx: {0..<MAX_CONNS as usize}) { ... }
-```
-
-The idea of an integer type carrying a provable interval, checked by the
-compiler instead of at runtime, traces to **Freeman and Pfenning, "Refinement
-Types for ML"** (PLDI 1991), and to index refinements for array-bound safety
-in **Xi and Pfenning, "Dependently Typed Array Bounds Checking"**/**"Dependent
-Types for Practical Programming"** work on **Dependent ML (DML)** (ICFP 1998,
-PhD thesis 1998). A later, more expressive descendant of that line is
-**Rondon, Kawaguchi, and Jhala, "Liquid Types"** (PLDI 2008) and its OSS
-implementation **LiquidHaskell**; the closest *systems-language* sibling is
-**Lehmann et al., "Flux: Liquid Types for Rust"** (PLDI 2023), which refines
-Rust's own base types the same way `{lo..<hi as base}` refines takibi's --
-base explicit, refinement layered on top, not implicit. Takibi's own
-mechanism is plain interval propagation and narrowing
-(`if (v >= lo && v < hi)`), with no external solver involved anywhere in the
-current implementation -- that stays the actual, present-tense state of the
-compiler, not a placeholder for a solver integration that may or may not
-happen later.
-
-### Bounds-check elimination as a compiler bet: `--forbid-trap`
-
-```takibi
-for i: usize in 0..<n { arr[i] }   // no trap: the range is proven, not merely optimized away
-```
-
-Removing an array bounds check once its range is *provably* safe is the same
-goal as **Bodik, Gupta, and Sarkar, "ABCD: Eliminating Array Bounds Checks on
-Demand"** (PLDI 2000), but ABCD is a post-hoc optimizer pass, while
-`--forbid-trap` makes the proof a type-level, pre-optimizer obligation (the
-README's own "Design Principle" section states this distinction explicitly:
-"the judgment is deliberately type-level, not post-optimizer"). The
-"prototype permissively, then flip on full static rigor before shipping"
-workflow is closest to two safety-critical products: **SPARK Ada /
-GNATprove** (AdaCore), which proves the absence of runtime exceptions
-including array-bounds violations as a build gate, and **Dafny**
-(Leino, Microsoft Research), a verification-aware language where an unproven
-assertion is a compile error rather than a runtime trap. takibi's twist
-(both named explicitly in the README) is letting the *same* source compile in
-either a permissive, trap-emitting mode or a `--forbid-trap` mode that
-rejects any remaining unproven site -- SPARK and Dafny instead demand full
-rigor from the first line.
-
-### Affine and linear ownership: `affine struct`, `linear struct`, `sink`
-
-```takibi
-affine opaque struct Token;
-fn make() -> *Token { ... }
-fn inspect(t: borrow *Token) -> usize { ... }
-fn release(t: sink *Token) { ... }
-```
-
-"Contraction forbidden, weakening allowed" (affine) versus "used exactly once
-on every path" (linear) is the standard substructural-logic distinction from
-**Girard, "Linear Logic"** (1987), presented for programming languages in
-**Walker, "Substructural Type Systems"** (chapter in *Advanced Topics in
-Types and Programming Languages*, ed. Pierce, 2005) -- the chapter's own
-affine/linear terminology is exactly the vocabulary `SPEC.md` uses. The
-real-world OSS precedent for making this the default discipline of a systems
-language, rather than a research curiosity, is **Rust**'s ownership/move
-model; the formal semantics behind Rust's borrow checker were later given a
-separation-logic foundation in **Jung et al., "RustBelt: Securing the
-Foundations of the Rust Programming Language"** (POPL 2018), built on the
-**Iris** framework (Jung et al., POPL 2015/JFP 2018).
-
-### Erased views: `linear view Name;`, `view Name`
-
-```takibi
-private linear view PendingEvent;
-fn accept_event() -> PendingEvent { return view PendingEvent; }
-fn finish_event(p: sink PendingEvent) {}
-```
-
-This is the most direct one-to-one borrowing in the language: takibi's
-"a permission with no fields, size, address, or LLVM type" is the same
-representation choice as a **view** in **Xi's ATS ("Applied Type System")**
--- see **Xi, "Applied Type System"** (TYPES 2004) and **Chen and Xi,
-"Combining Programming with Theorem Proving"** (ICFP 2005), where a `view`
-tracks a linear proof obligation entirely at the type level, separate from
-the runtime value it describes. `TAKIBI_CORE.md` names this lineage directly:
-"An ATS-style view keeps a runtime value in `Gamma` and its permission in
-`Delta` as separate source-level values."
-
-### Scoped, non-consuming access: `borrow`, `borrow mut`
-
-```takibi
-fn slot_read(lease: borrow SlotLease[n]) -> i32 { return slots[lease.idx].value; }
-```
-
-Temporarily granting access to an owned or linear value without transferring
-or discharging the underlying obligation is Rust's `&`/`&mut` borrowing, and
-(for the pointer/slice case) the region-scoped access pattern from
-**Grossman, Morrisett, Jim, Hicks, Wang, and Cheney, "Region-Based Memory
-Management in Cyclone"** (PLDI 2002) -- Cyclone is the closer ancestor for a
-*C-like, bare-metal* language, since it targets exactly takibi's problem
-(safe pointers with no garbage collector) rather than a managed runtime.
-
-### Region-tied slices and pointers: `-> [u8; 1514..] @ desc`, `-> *Shared @ lock`
-
-```takibi
-fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc;
-fn shared_access(g: borrow KGuard[lock]) -> *Shared @ lock { return &shared; }
-```
-
-Tying a returned pointer's or slice's validity to the lifetime of the
-authority (an owner or a lock guard) that produced it is again Cyclone's
-region system, where a pointer type carries the region variable it must not
-outlive. `TAKIBI_CORE.md`'s `Delta.Region_taint` plays the same role that
-Cyclone's region-variable substitution and region-outlives constraints play,
-implemented as a lighter, function-local dataflow check rather than a
-general region-polymorphic type system -- deliberately narrower, per the
-"Directed YAGNI" design principle above.
-
-### Typestate / protocol state: `TcpConn[conn, state]`
-
-```takibi
-fn tcp_accept_via_syn_ack(
-    pending: sink PendingTcpEvent[event],
-    conn: sink TcpConn[c, Listen],
-    eth: [u8; 54..]
-) -> TcpConn[c, SynRcvd];
-```
-
-Attaching a state to a value's *type* so that only the operations legal in
-that state typecheck is **typestate-oriented programming**, introduced by
-**Strom and Yemini, "Typestate: A Programming Language Concept for Enhancing
-Software Reliability"** (IEEE TSE 1986) and later given first-class language
-support in **Plaid** (Aldrich, Sunshine, Saini, Sparks, OOPSLA 2009). The
-`Listen -> SynRcvd` transition on a `TcpConn` value specifically mirrors
-**session types**, which describe a communication protocol as a sequence of
-typed states a channel moves through: **Honda, Vasconcelos, and Kubo,
-"Language Primitives and Type Discipline for Structured Communication-Based
-Programming"** (ESOP 1998).
-
-### Existential packaging: `exists n: usize. Owner[n]`
-
-```takibi
-variant NetRxAcquire {
-    None(NetRxCanAcquire);
-    Acquired(exists desc: usize. NetRxCpuOwned[desc]);
-}
-```
-
-Hiding a concrete static identity behind an interface so that only pattern
-matching can recover it is the classical **existential type as an abstract
-data type**: **Mitchell and Plotkin, "Abstract Types Have Existential Type"**
-(POPL 1985, *TOPLAS* 1988) is the foundational account, and DML/ATS (cited
-above) are the closest languages that pair such existentials with integer
-static indices the way `exists desc: usize. NetRxCpuOwned[desc]` does.
-
-### Opaque handles: `affine opaque struct Token;`
-
-```takibi
-affine opaque struct Token;   // no fields, no size, no address -- an abstract handle
-```
-
-A type with an interface but no revealed representation is the classic
-**abstract data type**, formalized in **Cardelli and Wegner, "On
-Understanding Types, Data Abstraction, and Polymorphism"** (ACM Computing
-Surveys 1985), and made a first-class module feature in Standard ML's
-opaque signature ascription (**MacQueen, "Modules for Standard ML"**, LFP
-1984). takibi's version additionally carries an affine/linear kind, so the
-handle is not just representation-hidden but consumption-tracked.
-
-### Effect annotations: `!{may_block}`, `!{interrupt}`, `!{mmio}`
-
-```takibi
-extern fn sem_wait(s: *i32) !{may_block};
-fn IRQ_Handler() !{interrupt} { acknowledge_irq(); }
-```
-
-Tracking "what a computation may do" as part of its type, separate from the
-value it returns, goes back to **Lucassen and Gifford, "Polymorphic Effect
-Systems"** (POPL 1988). The closest OSS implementation of effects as
-inferred, checked row/set annotations on ordinary functions -- rather than
-a monadic or handler-based encoding -- is **Koka** (Leijen, Microsoft
-Research); see **Leijen, "Koka: Programming with Row-Polymorphic Effect
-Types"** (MSFP 2014). The specific *use* of an effect system to reject
-blocking calls from an interrupt handler at compile time mirrors a rule
-safety-critical Ada systems already enforce at the process level: the
-**Ravenscar profile** (Burns, Dobbing, Vardanega; restricted-tasking Ada for
-hard real-time/interrupt contexts) forbids exactly the same category of
-call from an interrupt handler, though it does so by restricting the
-language subset rather than by inferring and checking an effect row.
-
-### One unified core judgement instead of separate "modes"
-
-`TAKIBI_CORE.md` section 1 deliberately rejects "Rust mode / ATS mode /
-separation-logic mode / SMT mode" as separate checkers layered on the same
-language, in favor of one judgement `Gamma; Delta; Phi | e : tau ! epsilon`
-combining runtime values, ownership, pure facts, and effects. The prior art
-for *that* architectural decision -- building one language whose single core
-type theory already contains refinement types, effects, and (in later
-versions) separation-logic-style ownership -- is **F\***: see
-**Swamy et al., "Dependent Types and Multi-Monadic Effects in F\*"**
-(POPL 2016) and **Swamy et al., "Verifying Higher-Order Programs with the
-Dijkstra Monad"** (PDLI 2013) for the effect/refinement unification, with
-**Fromherz et al., "Steel: Proof-Oriented Programming in a Dependently Typed
-Concurrent Separation Logic"** (ICFP 2021) as F*'s later extension into
-ownership/separation-logic territory. The heap-predicate framing `Delta` is
-meant to grow into (`Cell`, `Array`, disjoint composition, lock invariants)
-is standard **separation logic**: **Reynolds, "Separation Logic: A Logic for
-Shared Mutable Data Structures"** (LICS 2002); **O'Hearn, Reynolds, and Yang,
-"Local Reasoning about Programs that Alter Data Structures"** (CSL 2001).
-
-### The motivating goal: zero runtime panics in a monolithic kernel
-
-The project's north star -- pushing every category of C runtime failure into
-a compile-time error for a Linux/NetBSD-shaped monolithic kernel -- has one
-prominent existence proof that a *fully* verified OS kernel is possible:
-**Klein et al., "seL4: Formal Verification of an OS Kernel"** (SOSP 2009).
-seL4 proves full functional correctness in Isabelle/HOL for a microkernel;
-takibi deliberately does not aim for that -- no external prover, no
-functional-correctness goal, and a monolithic rather than microkernel target
--- but seL4 is the reference point for "eliminating an entire class of kernel
-bug via static proof" that motivates the weaker, incrementally-adoptable
-version of that bet takibi is making instead, using only its own built-in
-checker.
+QEMU and real-hardware workflows need additional tools listed in
+[`examples/README.md`](examples/README.md) and
+[`kernel/README.md`](kernel/README.md). The `.devcontainer/` configuration
+contains the maintained development environment.
+
+## Prior art
+
+Takibi is not an implementation of a single existing language. Its direction
+draws on refinement typing, linear logic, ATS-style proof-driven systems
+programming, separation logic, typestate, and effect systems. Rust's ownership
+model was evaluated but was not selected as the base for the kernel experiment;
+Takibi instead develops a smaller language whose resource and proof model can
+be extended together. [`TAKIBI_CORE.md`](TAKIBI_CORE.md) records the intended
+unification and references.
 
 ## Acknowledgements
 
-The most implementation were written with assistance from Claude Code and Codex.
+The project uses OCaml, Menhir, LLVM, QEMU, OpenOCD, and the hardware and
+filesystem tooling named in the subtree documentation.
 
 ## License
 
-GPLv3 -- see `LICENSE`.
+See [`LICENSE`](LICENSE).
