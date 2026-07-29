@@ -22,6 +22,7 @@ if [ ! -f "$ELF" ]; then
 fi
 
 stty -F "$SERIAL_DEV" 115200 raw -echo
+echo "[kernel/rpi5] resetting board"
 if ! "$REPO_ROOT/scripts/rpi5_jtag_reset.sh" --resident-image-unchanged >"$RESET_LOG" 2>&1; then
     echo "FAIL kernel/rpi5: reset failed (see $RESET_LOG)" >&2
     exit 1
@@ -45,14 +46,38 @@ cleanup() {
 trap cleanup EXIT INT TERM HUP
 
 sleep 0.2
+load_started=$SECONDS
+echo "[kernel/rpi5] loading kernel over SWD"
 if ! "$REPO_ROOT/scripts/rpi5_jtag_load.sh" "$ELF" >"$LOADER_LOG" 2>&1; then
     echo "FAIL kernel/rpi5: load failed (see $LOADER_LOG)" >&2
     exit 1
 fi
+echo "[kernel/rpi5] kernel loaded in $((SECONDS - load_started))s; waiting for integration completion"
 
 # USB Mass Storage may briefly report Not Ready after enumeration. Keep the
 # single capture alive through its bounded readiness loop and ext2 checks.
-sleep "${RPI5_KERNEL_CAPTURE_SECONDS:-60}"
+# This is host-side progress only: no temporary debug UART messages are added
+# to the kernel. Stop as soon as the stable final resource marker arrives,
+# while retaining a deadline for a hung kernel.
+capture_deadline="${RPI5_KERNEL_CAPTURE_SECONDS:-90}"
+capture_elapsed=0
+capture_complete=0
+while [ "$capture_elapsed" -lt "$capture_deadline" ]; do
+    sleep 1
+    capture_elapsed=$((capture_elapsed + 1))
+    if LC_ALL=C grep -aFq 'resources: pages=0' "$UART_LOG"; then
+        capture_complete=1
+        break
+    fi
+    if [ $((capture_elapsed % 5)) -eq 0 ]; then
+        echo "[kernel/rpi5] running integration checks: ${capture_elapsed}s elapsed"
+    fi
+done
+if [ "$capture_complete" -eq 1 ]; then
+    echo "[kernel/rpi5] integration completion observed after ${capture_elapsed}s"
+else
+    echo "[kernel/rpi5] completion marker not observed before ${capture_deadline}s deadline" >&2
+fi
 cleanup
 trap - EXIT INT TERM HUP
 tr -d '\r' <"$UART_LOG" >"$UART_LOG.normalized"

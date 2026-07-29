@@ -32,6 +32,11 @@ is compared exactly with the same-named `.expected` file. This lets boot,
 process, VM, syscall, filesystem, and networking contracts grow independently
 without paying for a separate hardware reboot for every viewpoint.
 
+The runner reports reset, SWD load, and execution phases from the host. During
+kernel execution it prints elapsed time every five seconds and stops capture
+as soon as the stable final resource marker arrives. These progress lines are
+not kernel UART diagnostics and are not part of any `.expected` contract.
+
 Kernel UART output is classified at its call site. `kernel_boot_log` is only
 for stable operator-visible boot/status messages. Temporary kernel debug UART
 logging was removed once a distribution BusyBox could report integration
