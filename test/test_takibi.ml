@@ -1494,6 +1494,19 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  Alcotest.test_case "string literal NUL escape is one zero byte" `Quick (fun () ->
+    match parse "fn f() { let s = \"a\\0b\"; }" with
+    | [Ast.FuncDef { body = [s]; _ }] ->
+        (match s.desc with
+         | Ast.Let (_, _, _, Some { desc = Ast.StringLit value; _ }, _) ->
+             Alcotest.(check int) "byte length" 3 (String.length value);
+             Alcotest.(check int) "prefix" 97 (Char.code value.[0]);
+             Alcotest.(check int) "embedded NUL" 0 (Char.code value.[1]);
+             Alcotest.(check int) "suffix" 98 (Char.code value.[2])
+         | _ -> Alcotest.fail "expected Let(_, StringLit with embedded NUL)")
+    | _ -> Alcotest.fail "unexpected structure"
+  );
+
   (* -- -> return type syntax ------------------------------------------- *)
 
   Alcotest.test_case "arrow return type syntax -> i32 parses" `Quick (fun () ->

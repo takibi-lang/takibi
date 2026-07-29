@@ -152,6 +152,7 @@ and read_string buf = parse
   | '\\' 'n'  { Buffer.add_char buf '\n'; read_string buf lexbuf }
   | '\\' 'r'  { Buffer.add_char buf '\r'; read_string buf lexbuf }
   | '\\' 't'  { Buffer.add_char buf '\t'; read_string buf lexbuf }
+  | '\\' '0'  { Buffer.add_char buf '\000'; read_string buf lexbuf }
   | '\\' '\\' { Buffer.add_char buf '\\'; read_string buf lexbuf }
   | '\\' '"'  { Buffer.add_char buf '"';  read_string buf lexbuf }
   | _ as c    { Buffer.add_char buf c;    read_string buf lexbuf }

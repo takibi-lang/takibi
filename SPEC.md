@@ -125,7 +125,7 @@ parameter value, or top-level declaration name.
   literals infer as `usize` in these positions. Raw-pointer indices and
   raw-pointer slice bounds use `isize` exclusively (signed pointer
   displacement); bare literals infer as `isize` there.
-- String literals: `"..."`, with `\n` `\r` `\t` `\\` `\"` escapes. Can be
+- String literals: `"..."`, with `\n` `\r` `\t` `\0` `\\` `\"` escapes. Can be
   cast directly to a slice (`"..." as []u8`): the compile-time byte
   length (NUL excluded) becomes the minimum.
 - Comments: `// line comment`, `/* block comment */`.
