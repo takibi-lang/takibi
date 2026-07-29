@@ -1,7 +1,7 @@
 # EL0 shell compatibility scope
 
 This example is a BusyBox bring-up and regression fixture. It is not the
-syscall contract for the production kernel planned in GitHub issue #177.
+syscall contract implemented by the standalone RPi5 kernel under `kernel/`.
 
 The table below classifies every syscall arm in `el0_shell.tkb`. "Narrow"
 means that the implementation is useful for the fixture but intentionally
@@ -42,7 +42,7 @@ be copied into `kernel/`.
 | 293 | rseq | False success | Registers no restartable sequence state. |
 | other | unsupported | Fail-stop | Falls into the exception-unhandled path. |
 
-The production kernel rules are stricter:
+The standalone kernel rules are stricter:
 
 - Implement a small syscall subset with correct observable semantics.
 - Decode unsupported syscall numbers to `-ENOSYS` rather than false success
