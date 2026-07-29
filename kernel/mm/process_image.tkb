@@ -4,6 +4,7 @@ use "kernel/fs/elf64.tkb";
 
 private let mut image_page_indices: [usize; BOOT_PAGE_COUNT];
 private let mut image_l3_indices: [usize; BOOT_PAGE_COUNT];
+private let mut process_image_zero_page: [u8; PAGE_SIZE];
 
 linear struct ProcessImagePages[image: usize] {
     private image: usize @ image;
@@ -20,8 +21,76 @@ fn process_image_record(slot: usize,
 }
 
 must_use variant ProcessImageMapResult {
+    InvalidImage;
     OutOfMemory;
     Mapped(exists image: usize. ProcessImagePages[image]);
+}
+
+must_use variant ProcessImagePageLoadResult { Invalid; Loaded; }
+
+fn process_image_load_page(page: borrow PageOwner[page],
+                           plan: DistroElfLoadPlan,
+                           header: *KernelElf64ProgramHeader,
+                           l3_index: usize)
+        -> ProcessImagePageLoadResult !{unsafe} {
+    let bytes = page_bytes(page);
+    for i: usize in 0..<4096 { bytes[i] = 0; }
+
+    let page_start: usize = l3_index * PAGE_SIZE;
+    let page_end: usize = page_start + PAGE_SIZE;
+    let segment_start: usize = header.virtual_address as usize;
+    let file_size: usize = header.file_size as usize;
+    let file_end: usize = segment_start + file_size;
+    let mut copy_start: usize = page_start;
+    if (copy_start < segment_start) { copy_start = segment_start; }
+    let mut copy_end: usize = page_end;
+    if (copy_end > file_end) { copy_end = file_end; }
+    if (copy_start >= copy_end) {
+        if (slice_eq(bytes, process_image_zero_page as []u8)) {
+            return ProcessImagePageLoadResult::Loaded;
+        }
+        return ProcessImagePageLoadResult::Invalid;
+    }
+
+    let destination_offset: usize = copy_start - page_start;
+    let source_offset: usize = (header.offset as usize) +
+                               (copy_start - segment_start);
+    let copy_length: usize = copy_end - copy_start;
+    if (destination_offset > PAGE_SIZE || copy_length > PAGE_SIZE - destination_offset ||
+        source_offset > plan.image_length ||
+        copy_length > plan.image_length - source_offset) {
+        return ProcessImagePageLoadResult::Invalid;
+    }
+
+    // Both ranges are explicitly bounded above. Their endpoints are related
+    // runtime values, which the current refinement checker cannot carry into
+    // slice syntax; unsafe is confined to constructing these checked views.
+    let source: *u8 = plan.image_address as *u8;
+    let destination = unsafe {
+        bytes[destination_offset..<destination_offset + copy_length]
+    };
+    let file_bytes = unsafe {
+        source[source_offset as isize..<(source_offset + copy_length) as isize]
+    };
+    slice_copy(destination, file_bytes);
+    if (slice_eq(destination, file_bytes) == false) {
+        return ProcessImagePageLoadResult::Invalid;
+    }
+
+    // Every byte outside the file-backed overlap must still be zero. Dynamic
+    // slice endpoints have the same explicit proof above and the same narrow
+    // checker limitation as the copy views.
+    let zeros = process_image_zero_page as []u8;
+    let prefix = unsafe { bytes[0..<destination_offset] };
+    let zero_prefix = unsafe { zeros[0..<destination_offset] };
+    let suffix_start: usize = destination_offset + copy_length;
+    let suffix = unsafe { bytes[suffix_start..<PAGE_SIZE] };
+    let zero_suffix = unsafe { zeros[suffix_start..<PAGE_SIZE] };
+    if (slice_eq(prefix, zero_prefix) == false ||
+        slice_eq(suffix, zero_suffix) == false) {
+        return ProcessImagePageLoadResult::Invalid;
+    }
+    return ProcessImagePageLoadResult::Loaded;
 }
 
 fn process_image_cleanup(count: usize) {
@@ -53,6 +122,10 @@ fn process_image_map(plan: DistroElfLoadPlan) -> ProcessImageMapResult {
         let header: *KernelElf64ProgramHeader =
             header_address as *KernelElf64ProgramHeader;
         if (header.segment_type == ELF_PT_LOAD) {
+            if (header.flags != 5 && header.flags != 6) {
+                process_image_cleanup(mapped);
+                return ProcessImageMapResult::InvalidImage;
+            }
             let virtual_address: usize = header.virtual_address as usize;
             let memory_size: usize = header.memory_size as usize;
             let first_page: usize = virtual_address / PAGE_SIZE;
@@ -63,6 +136,10 @@ fn process_image_map(plan: DistroElfLoadPlan) -> ProcessImageMapResult {
                 return ProcessImageMapResult::OutOfMemory;
             }
             for l3_index: usize in first_page..<last_page {
+                if (user_pte_read(l3_index) != 0) {
+                    process_image_cleanup(mapped);
+                    return ProcessImageMapResult::InvalidImage;
+                }
                 match page_alloc() {
                     PageAllocResult::OutOfMemory => {
                         process_image_cleanup(mapped);
@@ -70,16 +147,25 @@ fn process_image_map(plan: DistroElfLoadPlan) -> ProcessImageMapResult {
                     }
                     PageAllocResult::Allocated(page) => {
                         if (mapped >= 0 && mapped < 512) {
-                            let phys: usize = page_physical_address(page);
-                            let mut flags: usize = USER_RW_XN_FLAGS;
-                            if (header.flags == 5) {
-                                flags = USER_TEXT_RX_FLAGS;
+                            match process_image_load_page(page, plan, header, l3_index) {
+                                ProcessImagePageLoadResult::Invalid => {
+                                    page_free(page);
+                                    process_image_cleanup(mapped);
+                                    return ProcessImageMapResult::InvalidImage;
+                                }
+                                ProcessImagePageLoadResult::Loaded => {
+                                    let phys: usize = page_physical_address(page);
+                                    let mut flags: usize = USER_RW_XN_FLAGS;
+                                    if (header.flags == 5) {
+                                        flags = USER_TEXT_RX_FLAGS;
+                                    }
+                                    user_pte_write(l3_index, phys | flags);
+                                    user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
+                                    let page_index = page_owner_transfer_index(page);
+                                    process_image_record(mapped, page_index, l3_index);
+                                    mapped = mapped + 1;
+                                }
                             }
-                            user_pte_write(l3_index, phys | flags);
-                            user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
-                            let page_index = page_owner_transfer_index(page);
-                            process_image_record(mapped, page_index, l3_index);
-                            mapped = mapped + 1;
                         } else {
                             page_free(page);
                             process_image_cleanup(mapped);
@@ -101,6 +187,16 @@ fn process_image_page_count(pages: borrow ProcessImagePages[image]) -> usize {
 
 fn process_image_window_is_clear() -> bool {
     for i: usize in 0..<512 {
+        if (user_pte_read(i) != 0) { return false; }
+    }
+    return true;
+}
+
+fn process_image_gap_is_unmapped() -> bool {
+    // Alpine BusyBox's first PT_LOAD ends at page 266 and its second starts at
+    // page 285. Keeping this gap absent is part of the current fixture's VM
+    // contract; it must not become zero-filled executable memory by accident.
+    for i: usize in 266..<285 {
         if (user_pte_read(i) != 0) { return false; }
     }
     return true;

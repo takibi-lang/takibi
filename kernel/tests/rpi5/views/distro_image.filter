@@ -1,1 +1,1 @@
-^distro (image:|elf:|map:|unmap:)
+^distro (image:|elf:|map:|load:|unmap:)
